@@ -1,6 +1,8 @@
 // @vesper-std/sort::stable: a stable bottom-up merge sort.
 use self::unstable::{lt, insertion};
-use @vesper-std/sugar::{guard, when};
+use @vesper-std/core::anvil::test;
+use @vesper-std/core::iter::all;
+use @vesper-std/sugar::{guard, when, while};
 
 // The length of the runs `stable_sort` insertion sorts before merging.
 const RUN: u64 = 16;
@@ -21,26 +23,22 @@ fn merge[T: mod copy + Ord](in src: Slice[T], inout dst: Slice[T], lo: u64, mid:
         if left >= mid || right >= hi {
             break;
         }
-        match src.try_get(left) {
-            Option::Some(a) => match src.try_get(right) {
-                Option::Some(b) => {
-                    if lt(b, a) {
-                        dst.try_set(out, b);
-                        right = wrapping_add(right, 1);
-                    } else {
-                        dst.try_set(out, a);
-                        left = wrapping_add(left, 1);
-                    }
-                    out = wrapping_add(out, 1);
-                },
-                Option::None => {
-                    right = hi;
-                },
-            },
-            Option::None => {
-                left = mid;
-            },
+        guard let Option::Some(a) = src.try_get(left) else {
+            left = mid;
+            continue;
+        };
+        guard let Option::Some(b) = src.try_get(right) else {
+            right = hi;
+            continue;
+        };
+        if lt(b, a) {
+            dst.try_set(out, b);
+            right = wrapping_add(right, 1);
+        } else {
+            dst.try_set(out, a);
+            left = wrapping_add(left, 1);
         }
+        out = wrapping_add(out, 1);
     }
     if left < mid {
         dst.try_copy_from(out, in src[left..mid]);
@@ -53,10 +51,7 @@ fn merge[T: mod copy + Ord](in src: Slice[T], inout dst: Slice[T], lo: u64, mid:
 // `n`); a last run without a partner is copied.
 fn pass[T: mod copy + Ord](in src: Slice[T], inout dst: Slice[T], n: u64, width: u64) {
     let mut lo: u64 = 0;
-    loop {
-        if lo >= n {
-            break;
-        }
+    while lo < n {
         let mid = min_u64(wrapping_add(lo, width), n);
         // `hi` wraps past the end only when `width` is near `u64::MAX`.
         let hi_unclamped = wrapping_add(mid, width);
@@ -67,7 +62,7 @@ fn pass[T: mod copy + Ord](in src: Slice[T], inout dst: Slice[T], n: u64, width:
         };
         merge(in src, inout dst, lo, mid, hi);
         lo = hi;
-    }
+    };
 }
 
 // Sorts `s` in place, ascending, keeping equal elements in their order.
@@ -79,14 +74,11 @@ pub fn stable_sort[T: mod copy + Ord](inout s: Slice[T]) {
         return;
     }
     let mut lo: u64 = 0;
-    loop {
-        if lo >= n {
-            break;
-        }
+    while lo < n {
         let hi = min_u64(wrapping_add(lo, RUN), n);
         insertion(inout s, lo, hi);
         lo = hi;
-    }
+    };
     if n <= RUN {
         return;
     }
@@ -102,10 +94,7 @@ fn merge_runs[T: mod copy + Ord](inout s: Slice[T], n: u64, run: u64, first: T) 
     scratch.resize(n, first);
     let mut width = run;
     let mut in_scratch = false;
-    loop {
-        if width >= n {
-            break;
-        }
+    while width < n {
         if in_scratch {
             pass(in scratch.as_slice(), inout s, n, width);
         } else {
@@ -113,7 +102,7 @@ fn merge_runs[T: mod copy + Ord](inout s: Slice[T], n: u64, run: u64, first: T) 
         }
         in_scratch = !in_scratch;
         width = wrapping_mul(width, 2);
-    }
+    };
     if in_scratch {
         s.try_copy_from(0, in scratch.as_slice());
     }
@@ -163,19 +152,14 @@ test {
         }
         items.len() == count
     }
+}
 
-    fn test_stable_sort_descending_many_runs() -> bool {
-        let count: u64 = 512;
-        let mut items = ChunkSeq::new[u64]();
-        for i in 0..count {
-            items.push(wrapping_sub(count, i));
-        }
-        stable_sort(inout items.as_slice_mut());
-        for i in 0..count {
-            if items.try_get(i) != Option::Some(wrapping_add(i, 1)) {
-                return false;
-            }
-        }
-        true
+test test_stable_sort_descending_many_runs {
+    let count: u64 = 512;
+    let mut items = ChunkSeq::new[u64]();
+    for i in 0..count {
+        items.push(wrapping_sub(count, i));
     }
+    stable_sort(inout items.as_slice_mut());
+    all{ { items.try_get(i) == Option::Some(wrapping_add(i, 1)) } | i in 0..count }
 }

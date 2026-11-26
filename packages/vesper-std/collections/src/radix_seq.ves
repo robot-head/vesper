@@ -396,7 +396,8 @@ test {
         if seq.set(index, 9999) != written
             || seq.get(index) != changed
             || snapshot_len(before) != count
-            || seq.snapshot_get(before, index) != original {
+            || seq.snapshot_get(before, index) != original
+        {
             return false;
         }
         let after = seq.freeze();

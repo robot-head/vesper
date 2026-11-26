@@ -641,7 +641,8 @@ fn check_limits(in p: Prog, functions: u64, actions: u64, work: u64, depth: u64)
         || work == 0
         || work > MAX_WORK
         || depth == 0
-        || depth > MAX_CALL_DEPTH {
+        || depth > MAX_CALL_DEPTH
+    {
         fail(L_INVALID_LIMITS);
     }
     if p.fns.len() > functions {
@@ -654,7 +655,8 @@ fn check_limits(in p: Prog, functions: u64, actions: u64, work: u64, depth: u64)
         let row = row_at(in p, f.effects);
         if count > actions
             || list_len(in p, row.instances) > MAX_EFFECTS
-            || list_len(in p, f.facts) > MAX_PARAMS {
+            || list_len(in p, f.facts) > MAX_PARAMS
+        {
             fail(L_FACT_LIMIT);
         }
         if list_len(in p, f.params) > MAX_PARAMS || list_len(in p, f.generics) > MAX_GENERICS {
@@ -872,7 +874,8 @@ fn resolve(in p: Prog, row: u32, request: u32) -> u32 {
         let e = eff_at(in p, id);
         if e.name == q.name
             && types_eq(in p, e.args, q.args)
-            && (q.label == NONE || e.label == q.label) {
+            && (q.label == NONE || e.label == q.label)
+        {
             return id;
         }
     }
@@ -1335,7 +1338,8 @@ fn projection_findings(
         let q = param_at(in p, list_at(in p, f.facts, pi));
         if q.pass != PASS_INOUT
             || list_len(in p, q.projections) != 0
-            || list_len(in p, q.fields) == 0 {
+            || list_len(in p, q.fields) == 0
+        {
             continue;
         }
         writes.clear();
@@ -1349,7 +1353,8 @@ fn projection_findings(
             }
             if list_len(in p, a.b) == 0
                 || a.moves
-                || !list_has(in p, q.fields, list_at(in p, a.b, 0)) {
+                || !list_has(in p, q.fields, list_at(in p, a.b, 0))
+            {
                 blocked = true;
                 break;
             }
@@ -1643,7 +1648,8 @@ pub fn apply_edits(
             || e.end > s.len()
             || !char_boundary(in s, e.start)
             || !char_boundary(in s, e.end)
-            || wrapping_sub(e.end, e.start) != el {
+            || wrapping_sub(e.end, e.start) != el
+        {
             fail(E_STALE);
         }
         for i in 0..el {

@@ -2,6 +2,8 @@
 // that src/release.rs uses from the `semver` crate (1.0.28): `Version::parse`
 // with its error kinds and messages, `Version::cmp_precedence` and `Display`,
 // and release policy 1 itself (`check_release` after the comparison).
+use @vesper-std/core::config::update;
+use @vesper-std/core::iter::all;
 use self::{R, Ver};
 use self::util::{Class, div_rem, put, put_u64};
 
@@ -213,7 +215,8 @@ fn identifier(in t: ChunkSeq[u8], start: u64, pos: u64, inout v: Ver) -> u64 {
             if pos == Pos::Pre
                 && seg > 1
                 && !nondigit
-                && byte(in t, wrapping_add(start, acc)) == Ascii::Zero {
+                && byte(in t, wrapping_add(start, acc)) == Ascii::Zero
+            {
                 fail_at(inout v, ErrorKind::LeadingZero, pos, 0);
                 return start;
             }
@@ -258,9 +261,11 @@ pub fn parse(in t: ChunkSeq[u8]) -> Ver {
     if v.err != ErrorKind::None {
         return v;
     }
-    v.major = major;
-    v.minor = minor;
-    v.patch = patch;
+    v = update v {
+        major = major,
+        minor = minor,
+        patch = patch
+    };
     let mut i = i;
     let mut pos: u64 = Pos::Patch;
     if i == n {
@@ -447,12 +452,7 @@ fn segment_end(in t: ChunkSeq[u8], i: u64, end: u64) -> u64 {
 }
 
 fn all_digits(in t: ChunkSeq[u8], i: u64, end: u64) -> bool {
-    for k in i..end {
-        if !is_digit(byte(in t, k)) {
-            return false;
-        }
-    }
-    true
+    all{ { is_digit(byte(in t, k)) } | k in i..end }
 }
 
 // Byte-wise comparison of `a[ai..ae]` and `b[bi..be]` (`str` Ord).
@@ -609,7 +609,8 @@ pub fn release_q(in old_text: Slice[u8], in new_text: Slice[u8], classification:
         Bump::Minor
     } else if after.major == before.major
         && after.minor == before.minor
-        && after.patch > before.patch {
+        && after.patch > before.patch
+    {
         Bump::Patch
     } else {
         Bump::None
@@ -754,7 +755,8 @@ test {
             || r.words.try_get(1) != Option::Some(0)
             || r.words.try_get(2) != Option::Some(new_offset)
             || r.words.try_get(3) != Option::Some(new_offset)
-            || r.words.try_get(4) != Option::Some(new.len()) {
+            || r.words.try_get(4) != Option::Some(new.len())
+        {
             return false;
         }
         let mut prefix = ChunkSeq::new[u8]();

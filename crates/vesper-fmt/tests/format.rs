@@ -1107,3 +1107,112 @@ fn a_closure_or_block_after_a_calls_other_arguments_stays_on_its_line_like_rustf
 "
     );
 }
+#[test]
+fn a_long_control_flow_head_puts_its_brace_on_its_own_line_like_rustfmt() {
+    // An `if` or `match` head that breaks at its operators or dots
+    // puts its block's `{` on a line of its own; a short head keeps ` {`.
+    assert_eq!(
+        verify(
+            "fn f(){if first_long_condition_value||second_long_condition_value||third_long_condition_value_y{go();}match self.first_long_field_name.second_long_field_name.lookup_the_value(first_argument_value_abc){A=>1,_=>2};if a&&b{go();}}"
+        ),
+        "fn f() {
+    if first_long_condition_value || second_long_condition_value || third_long_condition_value_y {
+        go();
+    }
+    match self.first_long_field_name
+        .second_long_field_name
+        .lookup_the_value(first_argument_value_abc)
+    {
+        A => 1,
+        _ => 2
+    };
+    if a && b {
+        go();
+    }
+}
+"
+    );
+    // A head that fits with ` {` in exactly the width stays on its line, one
+    // past it breaks, and so does a `for` head at its dots; a call that
+    // breaks inside its parentheses keeps `) {`.
+    assert_eq!(
+        verify(
+            "fn f(){if first_long_condition_value&&second_long_condition_value&&cccccccccccccccccccccccccccccc{go();}if first_long_condition_value&&second_long_condition_value&&ccccccccccccccccccccccccccccccd{go();}match self.first_long_field_name.second_long_field_name.lookup_the_value(first_argument_x){A=>1,_=>2};for item in first_long_collection_name.iter_the_items(first_long_argument_value_here_abcdefgh).filter_them(x){go();}if call_the_function_with_a_long_name(first_long_argument_value,second_long_argument_value_xyz){go();}}"
+        ),
+        "fn f() {
+    if first_long_condition_value && second_long_condition_value && cccccccccccccccccccccccccccccc {
+        go();
+    }
+    if first_long_condition_value
+        && second_long_condition_value
+        && ccccccccccccccccccccccccccccccd
+    {
+        go();
+    }
+    match self.first_long_field_name.second_long_field_name.lookup_the_value(first_argument_x) {
+        A => 1,
+        _ => 2
+    };
+    for item in first_long_collection_name
+        .iter_the_items(first_long_argument_value_here_abcdefgh)
+        .filter_them(x)
+    {
+        go();
+    }
+    if call_the_function_with_a_long_name(
+        first_long_argument_value,
+        second_long_argument_value_xyz
+    ) {
+        go();
+    }
+}
+"
+    );
+}
+#[test]
+fn a_parenthesized_operand_hugs_its_parentheses_like_rustfmt() {
+    // A parenthesized operand that breaks keeps its first operand after the
+    // `(` and its `)` after its last, its operators nested one level; one
+    // that is a whole `if` head puts the `{` on a line of its own.
+    assert_eq!(
+        verify(
+            "fn f()->bool{let same=first_long_condition_value==second_value&&(!third_long_condition_value||(fourth_long_value==fifth_value&&sixth_long_value_name));if !(first_long_condition_value&&second_long_condition_value&&third_long_condition_value_x&&fourth_long_condition_value){go();}let short=a&&(b||c);same}"
+        ),
+        "fn f() -> bool {
+    let same = first_long_condition_value == second_value
+        && (!third_long_condition_value
+            || (fourth_long_value == fifth_value && sixth_long_value_name));
+    if !(first_long_condition_value
+        && second_long_condition_value
+        && third_long_condition_value_x
+        && fourth_long_condition_value)
+    {
+        go();
+    }
+    let short = a && (b || c);
+    same
+}
+"
+    );
+    // A tuple, and parentheses holding a comment, break as before.
+    assert_eq!(
+        verify(
+            "fn f()->u64{let pair=(first_long_tuple_element_value_here,second_long_tuple_element_value_here_abcdefghij);let c=a&&(b// keep\n\
+||c);pair}"
+        ),
+        "fn f() -> u64 {
+    let pair = (
+        first_long_tuple_element_value_here,
+        second_long_tuple_element_value_here_abcdefghij
+    );
+    let c = a
+        && (
+            b
+            // keep
+            || c
+        );
+    pair
+}
+"
+    );
+}

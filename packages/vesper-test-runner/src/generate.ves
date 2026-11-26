@@ -23,116 +23,123 @@ use self::util::{PAIR_WORDS, Reader, STATUS_OK, inc, is_text, push_range, put_bu
 
 // Whether the first non-trivia token of `raw` starts a declaration.
 fn declaration_token(in raw: Slice[u8]) -> bool {
-    let t = toks(in raw);
-    let n = t.kind.len();
+    let tokens = toks(in raw);
+    let n = tokens.kind.len();
     let mut i: u64 = 0;
     loop {
         if i >= n {
             return false;
         }
-        let k = u8_at(in t.kind, i);
-        if k != k_whitespace() && k != k_comment() && k != k_block_comment() && k != k_eof() {
+        let kind = u8_at(in tokens.kind, i);
+        if kind != k_whitespace()
+            && kind != k_comment()
+            && kind != k_block_comment()
+            && kind != k_eof()
+        {
             break;
         }
         i = inc(i);
     }
-    let k = u8_at(in t.kind, i);
-    if k == k_fn()
-        || k == k_copy()
-        || k == k_affine()
-        || k == k_linear()
-        || k == k_struct()
-        || k == k_enum()
-        || k == k_effect()
-        || k == k_impl() {
+    let kind = u8_at(in tokens.kind, i);
+    if kind == k_fn()
+        || kind == k_copy()
+        || kind == k_affine()
+        || kind == k_linear()
+        || kind == k_struct()
+        || kind == k_enum()
+        || kind == k_effect()
+        || kind == k_impl()
+    {
         return true;
     }
-    if k != k_lower() {
+    if kind != k_lower() {
         return false;
     }
-    let s = u64_at(in t.start, i);
-    let e = u64_at(in t.end, i);
-    is_text(in raw, s, e, in "trait")
-        || is_text(in raw, s, e, in "model")
-        || is_text(in raw, s, e, in "pub")
+    let tok_start = u64_at(in tokens.start, i);
+    let tok_end = u64_at(in tokens.end, i);
+    is_text(in raw, tok_start, tok_end, in "trait")
+        || is_text(in raw, tok_start, tok_end, in "model")
+        || is_text(in raw, tok_start, tok_end, in "pub")
 }
 
 // `doctest_generate::declaration`.
 fn declaration(in raw: ChunkSeq[u8]) -> bool {
     let text = match String::from_utf8(in raw.as_slice()) {
-        Option::Some(x) => x,
+        Option::Some(decoded) => decoded,
         Option::None => String::new(),
     };
-    let l = lower_source(in text.as_str());
-    if l.p.d.code.len() == 0 && (l.ast.m_items.len() != 0 || l.ast.m_model_uses.len() != 0) {
+    let lowered = lower_source(in text.as_str());
+    if lowered.p.d.code.len() == 0
+        && (lowered.ast.m_items.len() != 0 || lowered.ast.m_model_uses.len() != 0)
+    {
         return true;
     }
     declaration_token(in raw.as_slice())
 }
 
-fn push_str(inout out: ChunkSeq[u8], in s: Str) {
-    out.extend(in s.as_bytes());
+fn push_str(inout out: ChunkSeq[u8], in text: Str) {
+    out.extend(in text.as_bytes());
 }
 
 // `rust_generate` over the input words.
-pub fn generate(in b: Slice[u8]) -> ChunkSeq[u64] {
-    let mut r = Reader { pos: 0 };
-    let (bs, be) = r.text(in b);
-    let nlines = r.word(in b);
-    // The lines' ranges in `b`.
-    let mut ls: ChunkSeq[u64] = ChunkSeq::new[u64]();
+pub fn generate(in input: Slice[u8]) -> ChunkSeq[u64] {
+    let mut reader = Reader { pos: 0 };
+    let (base_start, base_end) = reader.text(in input);
+    let line_count = reader.word(in input);
+    // The lines' ranges in `input`.
+    let mut line_ranges: ChunkSeq[u64] = ChunkSeq::new[u64]();
     let mut raw: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    for i in 0..nlines {
-        let (s, e) = r.text(in b);
-        ls.push(s);
-        ls.push(e);
-        push_range(inout raw, in b, s, e);
+    for i in 0..line_count {
+        let (start, end) = reader.text(in input);
+        line_ranges.push(start);
+        line_ranges.push(end);
+        push_range(inout raw, in input, start, end);
         raw.push(NEWLINE);
     }
-    let (ws, we) = r.text(in b);
-    let has_entry = r.word(in b) != 0;
-    let mut es: u64 = 0;
-    let mut ee: u64 = 0;
+    let (wrapper_start, wrapper_end) = reader.text(in input);
+    let has_entry = reader.word(in input) != 0;
+    let mut entry_start: u64 = 0;
+    let mut entry_end: u64 = 0;
     if has_entry {
-        let (s, e) = r.text(in b);
-        es = s;
-        ee = e;
+        let (start, end) = reader.text(in input);
+        entry_start = start;
+        entry_end = end;
     }
-    let expected = r.word(in b) != 0;
-    let has_sim = r.word(in b) != 0;
-    // The sim effect names' ranges in `b`.
+    let expected = reader.word(in input) != 0;
+    let has_sim = reader.word(in input) != 0;
+    // The sim effect names' ranges in `input`.
     let mut sims: ChunkSeq[u64] = ChunkSeq::new[u64]();
     if has_sim {
-        let n = r.word(in b);
+        let n = reader.word(in input);
         for i in 0..n {
-            let (s, e) = r.text(in b);
-            sims.push(s);
-            sims.push(e);
+            let (start, end) = reader.text(in input);
+            sims.push(start);
+            sims.push(end);
         }
     }
     let mut src: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    push_range(inout src, in b, bs, be);
+    push_range(inout src, in input, base_start, base_end);
     src.push(NEWLINE);
     let snippet_start = src.len();
-    let decl = declaration(in raw);
-    // The entry: (present, from `b` or "main").
+    let declares = declaration(in raw);
+    // The entry: (present, from `input` or "main").
     let mut entry: ChunkSeq[u8] = ChunkSeq::new[u8]();
     let has_result_entry = !expected;
     if !expected {
         if has_entry {
-            push_range(inout entry, in b, es, ee);
-        } else if decl {
+            push_range(inout entry, in input, entry_start, entry_end);
+        } else if declares {
             push_str(inout entry, in "main");
         } else {
-            push_range(inout entry, in b, ws, we);
+            push_range(inout entry, in input, wrapper_start, wrapper_end);
         }
     }
-    if !decl {
+    if !declares {
         push_str(inout src, in "fn ");
         if has_result_entry {
             src.extend(in entry.as_slice());
         } else {
-            push_range(inout src, in b, ws, we);
+            push_range(inout src, in input, wrapper_start, wrapper_end);
         }
         push_str(inout src, in "()");
         if has_sim {
@@ -142,9 +149,9 @@ pub fn generate(in b: Slice[u8]) -> ChunkSeq[u64] {
                 if i != 0 {
                     push_str(inout src, in ", ");
                 }
-                let s = u64_at(in sims, wrapping_mul(i, PAIR_WORDS));
-                let e = u64_at(in sims, inc(wrapping_mul(i, PAIR_WORDS)));
-                push_range(inout src, in b, s, e);
+                let start = u64_at(in sims, wrapping_mul(i, PAIR_WORDS));
+                let end = u64_at(in sims, inc(wrapping_mul(i, PAIR_WORDS)));
+                push_range(inout src, in input, start, end);
             }
             push_str(inout src, in "]");
         }
@@ -152,15 +159,15 @@ pub fn generate(in b: Slice[u8]) -> ChunkSeq[u64] {
     }
     let code_start = src.len();
     let mut segs: ChunkSeq[u64] = ChunkSeq::new[u64]();
-    for i in 0..nlines {
-        let s = u64_at(in ls, wrapping_mul(i, PAIR_WORDS));
-        let e = u64_at(in ls, inc(wrapping_mul(i, PAIR_WORDS)));
+    for i in 0..line_count {
+        let start = u64_at(in line_ranges, wrapping_mul(i, PAIR_WORDS));
+        let end = u64_at(in line_ranges, inc(wrapping_mul(i, PAIR_WORDS)));
         segs.push(src.len());
-        push_range(inout src, in b, s, e);
+        push_range(inout src, in input, start, end);
         segs.push(src.len());
         src.push(NEWLINE);
     }
-    if !decl {
+    if !declares {
         push_str(inout src, in "}\n");
     }
     let mut out: ChunkSeq[u64] = ChunkSeq::new[u64]();
@@ -168,9 +175,9 @@ pub fn generate(in b: Slice[u8]) -> ChunkSeq[u64] {
     put_buf(inout out, in src);
     out.push(snippet_start);
     out.push(code_start);
-    out.push(nlines);
-    let m = segs.len();
-    for i in 0..m {
+    out.push(line_count);
+    let seg_words = segs.len();
+    for i in 0..seg_words {
         out.push(u64_at(in segs, i));
     }
     if has_result_entry {

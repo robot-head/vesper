@@ -532,11 +532,6 @@ pub(super) fn check_rows(world: &World) -> Result<(), FfiError> {
     Err(e)
 }
 
-/// Whether a world function is a generated drop function.
-pub fn is_drop_function(name: &str) -> bool {
-    name.starts_with(DROP_PREFIX)
-}
-
 /// The drop functions the graphs of world function `name` call: its own
 /// graph and the closures and handled bodies nested in its source span.
 /// Native instance discovery walks source bodies, which never name them.

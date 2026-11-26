@@ -604,7 +604,8 @@ fn document(
             || c == Ascii::LowerT
             || c == Ascii::LowerF
             || c == Ascii::Minus
-            || is_digit(c) {
+            || is_digit(c)
+        {
             i = scalar(in b, inout toks, in t, in s, in escapes, i, depth);
         } else {
             syntax(in b, in t, in s, in escapes, i);

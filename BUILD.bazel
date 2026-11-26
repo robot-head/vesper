@@ -39,6 +39,8 @@ vesper_crate(
     compile_data = [
         "assets/fonts/**",
         "examples/*.ves",
+        # The checker's preludes (src/strings.rs and the rest embed them).
+        "packages/vesper-preludes/preludes/*.ves",
         "src/**/*.ves",
         "tests/fixtures/source_macros/keep.ves",
         "lean/StylusAndLintSafety.lean",
@@ -399,6 +401,8 @@ vesper_crate(
             # @vesper/driver-commands formats through @vesper/fmt (#1996).
             "//crates/vesper-fmt:files",
             "//crates/vesper-lean-syntax:files",
+            # ... and graphs Loom.lock through @vesper/loom-calculus (#1996).
+            "//crates/vesper-loom-calculus:files",
             "//crates/vesper-pact:files",
             "//crates/vesper-resonance:files",
             "//crates/vesper-serde:files",
@@ -937,6 +941,9 @@ vesper_crate(
         "test/closure_modes_collections": [":files"],
         # Milestone 7: the verified backend over the self-hosted front end.
         "test/verified_codegen_fail_front_end": glob(["packages/**/*.ves"]),
+        "test/verified_codegen_front_end": glob(["packages/**"]) + [
+            "docs/parallel-results/verified-codegen-front-end-inventory.txt",
+        ],
         "test/self_host_front_end": glob([
             "packages/**/*.ves",
             "examples/**/*.ves",
@@ -1123,6 +1130,14 @@ vesper_crate(
         # about 5 GiB per shard locally (#1913).
         "test/self_host_swap_inputs": [
             "resources:memory:6144",
+        ],
+        # One thread, but it keeps every fixture world's check data and
+        # machine arenas: 12.3 GiB peak RSS locally (782 runs, Nov 2026).
+        # Unreserved, the kernel killed it in "Self-host differentials" on
+        # #2151 and #2190.
+        "test/self_host_run": [
+            "resources:memory:13312",
+            "resources:cpu:1",
         ],
         # Four actual corpus workers; memory is an estimate, not an RSS cap.
         "test/self_host_front_end": [
@@ -1597,6 +1612,32 @@ vesper_package(
     visibility = ["//visibility:public"],
 )
 
+# The checker's declaration collector, which the hybrid driver runs for
+# its checked-world declarations (#2024 slice 2c-2).
+vesper_package(
+    name = "check_collect_package",
+    srcs = glob(["packages/vesper-check-collect/src/**/*.ves"]),
+    manifest = "packages/vesper-check-collect/Loom.toml",
+    visibility = ["//visibility:public"],
+    deps = [
+        ":ast_package",
+        ":check_data_package",
+        ":preludes_package",
+        ":std_arena_package",
+        ":std_intern_package",
+    ],
+)
+
+# The checker's preludes as text. Its sources `include_str` the files
+# under preludes/, which ride along as `objects` (files under the package).
+vesper_package(
+    name = "preludes_package",
+    srcs = glob(["packages/vesper-preludes/src/**/*.ves"]),
+    manifest = "packages/vesper-preludes/Loom.toml",
+    objects = glob(["packages/vesper-preludes/preludes/*.ves"]),
+    visibility = ["//visibility:public"],
+)
+
 vesper_package(
     name = "check_layout_package",
     srcs = glob(["packages/vesper-check-layout/src/**/*.ves"]),
@@ -1662,6 +1703,7 @@ vesper_package(
     visibility = ["//visibility:public"],
     deps = [
         ":check_data_package",
+        ":std_bytes_package",
     ],
 )
 
@@ -2130,6 +2172,7 @@ vesper_package(
         ":std_fs_package",
         ":std_process_package",
         "//crates/vesper-fmt:port_package",
+        "//crates/vesper-loom-calculus:port_package",
     ],
 )
 
@@ -2140,7 +2183,10 @@ vesper_package(
     srcs = glob(["packages/vesper-codegen-export/src/**/*.ves"]),
     manifest = "packages/vesper-codegen-export/Loom.toml",
     visibility = ["//visibility:public"],
-    deps = [":check_data_package"],
+    deps = [
+        ":check_data_package",
+        ":std_bytes_package",
+    ],
 )
 
 vesper_package(
@@ -2151,6 +2197,7 @@ vesper_package(
     deps = [
         ":check_data_package",
         ":codegen_export_package",
+        ":std_bytes_package",
         "//packages/vesper-cranelift:cranelift_package",
     ],
 )

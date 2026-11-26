@@ -183,9 +183,10 @@ ebpf_check = port_checks(
             ("program", ["port_surface"], "map_definitions_are_validated_rule_by_rule", "helper_table_matches_the_kernel_protos", "2,5,8,10"),
             ("explore", ["verifier_rules"], "corpus_verdicts", "every_rule_is_covered", "2,5,8,10"),
             ("core", ["core_port"], "port_matches_rust_on_random_relocations", "port_matches_rust_on_patch", "2,5,8,10"),
-            ("verifier", ["scalar_soundness"], "branch_refinement_keeps_every_value_on_its_branch", "alu_transfer_functions_contain_concrete_results", "3,6,11"),
-            ("callgraph", ["port_surface"], "stack_bound_reports_every_outcome", "map_definitions_are_validated_rule_by_rule", "3,6,11"),
-            ("btf_ext", ["ext_port"], "port_matches_rust_on_objects_and_mutations", "port_matches_rust_on_local_types_of_host_btf", "3,6,11"),
+            ("verifier", ["scalar_soundness"], "branch_refinement_keeps_every_value_on_its_branch", "alu_transfer_functions_contain_concrete_results", "3,6,11,13"),
+            ("callgraph", ["port_surface"], "stack_bound_reports_every_outcome", "map_definitions_are_validated_rule_by_rule", "3,6,11,13"),
+            ("btf_ext", ["ext_port"], "port_matches_rust_on_objects_and_mutations", "port_matches_rust_on_local_types_of_host_btf", "3,6,11,13"),
+            ("mitigator", ["mitigator"], "random_packets_match_the_reference_decision", "wire_layouts_are_exact", "3,6,11,13"),
         ]
     ],
 )
@@ -788,6 +789,8 @@ loom_calculus_check = port_checks(
                 "unsafe_ffi_policy_relaxation_is_rejected_for_existing_and_new_packages",
                 "manifest_cases_match_the_toml_crate",
                 "semver_cases_match_the_semver_crate",
+                "edge_cases_match_serde_json",
+                "graphs_match_the_rust_graph_command",
             ],
             ["documented_manifest_is_declarative_and_secure_by_default"],
         ),

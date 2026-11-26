@@ -203,7 +203,11 @@ fn measure(root: &Path, work: &Path, target: &str, seed: &[u8]) -> Result<Stage1
                 verified::Target::from_triple(target).map_err(|e| e.to_string())?,
             )
         };
-        let verification = match verified::compile(&checked.world, entry, &options) {
+        #[cfg(vesper_stage1_verified_port)]
+        let artifact = vesper_stage1_verified_port::build(&checked.world, entry, &options);
+        #[cfg(not(vesper_stage1_verified_port))]
+        let artifact = verified::compile(&checked.world, entry, &options);
+        let verification = match artifact {
             Err(e @ verified::VerifiedError::Unsupported { .. }) => Err(e.to_string()),
             Err(e) => return Err(e.to_string()),
             Ok(artifact) => {

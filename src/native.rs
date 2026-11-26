@@ -799,6 +799,65 @@ fn trace_host_direct(world: &World, f: &Function) -> bool {
                 || (e.name == crate::trace_effects::TRACE && e.label.is_none() && e.args.is_empty())
         })
 }
+/// Moves out of `program` the graphs that `entry` and its `instances`
+/// never reach, so that optimizing and inlining see only the code this
+/// entry emits. A graph is reached through a call, a function value, a
+/// drop the backend emits, or a closure or handler graph nested in it.
+/// The caller puts them back afterwards.
+fn set_aside_unreached(
+    world: &World,
+    program: &mut crate::ir::Program,
+    entry: &str,
+    instances: &InstanceMap,
+) -> BTreeMap<String, crate::ir::FunctionIr> {
+    use crate::ir::Op;
+    let drops = crate::ffi_lowering::drops::DropCallees::new(program);
+    let mut reached = BTreeSet::new();
+    let mut todo: Vec<String> = std::iter::once(entry.to_string())
+        .chain(instances.values().map(|(name, _)| name.clone()))
+        .collect();
+    while let Some(name) = todo.pop() {
+        let Some(f) = program.functions.get(&name) else {
+            continue;
+        };
+        if !reached.insert(name.clone()) {
+            continue;
+        }
+        todo.extend(drops.of(world, &name));
+        for i in f.blocks.iter().flat_map(|b| &b.instructions) {
+            match &i.op {
+                Op::Call { callee, .. } => todo.push(callee.clone()),
+                Op::Read { root, .. } => todo.push(root.clone()),
+                Op::Exit { owner, .. } => todo.push(owner.clone()),
+                Op::Closure { expr, .. } => {
+                    if let ExprKind::Closure { body, .. } = &expr.kind {
+                        todo.push(crate::ir::nested_name("closure", &body.span));
+                    }
+                }
+                Op::Handle { expr, .. } => {
+                    if let ExprKind::Handle { body, ret, ops, .. } = &expr.kind {
+                        todo.push(crate::ir::nested_name("handler_body", &body.span));
+                        todo.push(crate::ir::nested_name("handler_clause", &ret.body.span));
+                        for op in ops {
+                            todo.push(crate::ir::nested_name("handler_clause", &op.body.span));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    let names: Vec<String> = program
+        .functions
+        .keys()
+        .filter(|n| !reached.contains(*n))
+        .cloned()
+        .collect();
+    names
+        .into_iter()
+        .filter_map(|n| program.functions.remove_entry(&n))
+        .collect()
+}
 fn instances_for_entry(
     world: &World,
     entry: &str,
@@ -1090,13 +1149,23 @@ fn compile_entry<M: Module>(
     wide_native::refine_wide_tuples(&mut program);
     let mut inlined_into = BTreeMap::new();
     if optimize {
-        crate::ir_swap::optimize(world, &mut program)?;
-        // Executable objects inline too (#959). The decision depends only on
-        // the world, never on the observer or instrument hooks, so a
-        // verified build stays byte-identical to the plain one and the
-        // verifiers check the code that ships.
-        let budget = crate::ir_inline::Budget::for_program(world, &program);
-        inlined_into = crate::ir_swap::inline(world, &mut program, &budget).inlined_into;
+        // Only the graphs this entry reaches are optimized and inlined
+        // into, and only they size the budget: the inliner's program and
+        // per-callee budgets are shared, and a dependency's unreached
+        // functions spent them first (an unused `@vesper/fmt` halved
+        // `@vesper/verify` discovery's speed, #2167).
+        let unreached = set_aside_unreached(world, &mut program, entry, &instances);
+        let optimized = crate::ir_swap::optimize(world, &mut program);
+        if optimized.is_ok() {
+            // Executable objects inline too (#959). The decision depends
+            // only on the world, never on the observer or instrument hooks,
+            // so a verified build stays byte-identical to the plain one and
+            // the verifiers check the code that ships.
+            let budget = crate::ir_inline::Budget::for_program(world, &program);
+            inlined_into = crate::ir_swap::inline(world, &mut program, &budget).inlined_into;
+        }
+        program.functions.extend(unreached);
+        optimized?;
     } else {
         crate::ir_opt::fip_reuse_pass(world, &mut program)?;
     }

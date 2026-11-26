@@ -22,7 +22,9 @@ mod port_binding;
 /// The Vesper TOML reader's canonical dump, for the differential tests.
 #[cfg(vesper_port)]
 #[doc(hidden)]
-pub use port::{manifest_toml, read_toml, semver_text, toml_accepts};
+pub use port::{
+    graph_focus_error, lock_graph, lock_json, manifest_toml, read_toml, semver_text, toml_accepts,
+};
 
 /// Which build this is: `"vesper"` for the port-backed package
 /// `vesper-loom-calculus`, `"rust"` for the seed copy

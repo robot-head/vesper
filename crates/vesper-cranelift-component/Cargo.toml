@@ -1,0 +1,32 @@
+[package]
+name = "vesper-cranelift-component"
+version = "0.1.0"
+edition = "2024"
+description = "vesper-cranelift-sys as a wasm component exporting vesper:cranelift/vcl, so Stage 2 can emit native code under Wasm (#2210)"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[lib]
+# Built for wasm32-wasip2 (`cargo build --target wasm32-wasip2 -p
+# vesper-cranelift-component`), the cdylib is the component; on other
+# targets the crate is only the generated interface text and its tests.
+crate-type = ["rlib", "cdylib"]
+
+# Only the wasm32-wasip2 build is the component; elsewhere the crate is the
+# generated interface text.
+[target.'cfg(target_family = "wasm")'.dependencies]
+vesper-cranelift-sys = { path = "../vesper-cranelift-sys" }
+# The component must offer every ISA the native shim does: native builds
+# get the host's through cranelift-codegen's default `host-arch`, which
+# selects nothing for a Wasm host.
+cranelift-codegen = { version = "0.125", features = ["x86", "arm64", "riscv64"] }
+
+[build-dependencies]
+wit-component = "=0.261.0"
+wit-parser = "=0.261.0"
+
+[dev-dependencies]
+vesper = { path = "../.." }
+vesper-cranelift-sys = { path = "../vesper-cranelift-sys" }
+wasmtime = { version = "50", default-features = false, features = ["cranelift", "component-model", "runtime", "std"] }
+wasmtime-wasi = { version = "50", default-features = false, features = ["p2"] }

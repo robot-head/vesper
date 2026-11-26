@@ -177,12 +177,6 @@ impl SignatureSnapshot {
             SignatureIdentity::Semantic(_) => None,
         }
     }
-    pub fn normalized_bytes(&self) -> Option<usize> {
-        match &self.identity {
-            SignatureIdentity::Semantic(bytes) => Some(bytes.len()),
-            SignatureIdentity::Source(_) => None,
-        }
-    }
 }
 
 /// Signature-dependent consumers get a real Salsa equality cutoff here. A body
@@ -520,9 +514,6 @@ impl SyntaxSnapshot {
         Self(syntax)
     }
     pub fn syntax(&self) -> &vesper_syntax::recovery::RecoverySyntax {
-        &self.0
-    }
-    pub fn syntax_arc(&self) -> &Arc<vesper_syntax::recovery::RecoverySyntax> {
         &self.0
     }
 }

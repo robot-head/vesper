@@ -765,7 +765,8 @@ fn emit(
                 || sort_in(in caps, cap, in "pats".as_bytes())
                 || sort_in(in caps, cap, in "items".as_bytes());
             if seq_sort && !sequence
-                || sequence && !seq_sort && !sort_in(in caps, cap, in "scope".as_bytes()) {
+                || sequence && !seq_sort && !sort_in(in caps, cap, in "scope".as_bytes())
+            {
                 let mut message = ChunkSeq::new[u8]();
                 hole_message(
                     inout message,
@@ -806,7 +807,8 @@ fn emit(
             let mut id = NONE;
             for hole in 0..(skeleton.holes.len() >> 2) {
                 if w64(in skeleton.holes, hole << 2) == cap
-                    && w64(in skeleton.holes, inc(hole << 2)) == value_index {
+                    && w64(in skeleton.holes, inc(hole << 2)) == value_index
+                {
                     id = hole;
                     break;
                 }

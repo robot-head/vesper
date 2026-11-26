@@ -96,7 +96,7 @@ mod x86_64;
 
 pub use aarch64::encoding_listing as a64_encoding_listing;
 pub use cli::build_command;
-pub use coverage::{Coverage, FunctionCoverage, coverage};
+pub use coverage::{Coverage, FunctionCoverage, coverage, install_coverage_listing};
 pub use machine::{
     ArithOp, Cond, FIRST_FREE_LABEL, FloatOp, Kind, Label, Lir, Loc, M, Reg, Sign, Slot, TrapKind,
     WrapOp, select, table_listing, table_rows,

@@ -12,16 +12,16 @@ use self::links::{
     lmeta, local_path, lpush, lwork, u64_at
 };
 
-fn line_len(in k: Link, i: u64) -> u64 {
-    u64_at(in k.l_len, i)
+fn line_len(in link: Link, i: u64) -> u64 {
+    u64_at(in link.line_len, i)
 }
 
 // Byte `at` of comment line `i` (0 past its end).
-fn lb(in k: Link, in b: Slice[u8], i: u64, at: u64) -> u8 {
-    if at >= line_len(in k, i) {
+fn lb(in link: Link, in bytes: Slice[u8], i: u64, at: u64) -> u8 {
+    if at >= line_len(in link, i) {
         return 0;
     }
-    byte(in b, wrapping_add(u64_at(in k.l_start, i), at))
+    byte(in bytes, wrapping_add(u64_at(in link.line_start, i), at))
 }
 
 fn ascii_space(c: u8) -> bool {
@@ -29,54 +29,61 @@ fn ascii_space(c: u8) -> bool {
 }
 
 // `run`: how many `c` bytes start at `at` of line `i`.
-fn run(inout k: Link, in b: Slice[u8], i: u64, at: u64, c: u8, inout n: u64) -> bool {
+fn run(inout link: Link, in bytes: Slice[u8], i: u64, at: u64, c: u8, inout n: u64) -> bool {
     n = 0;
     loop {
-        if wrapping_add(at, n) >= line_len(in k, i) || lb(in k, in b, i, wrapping_add(at, n)) != c {
+        if wrapping_add(at, n) >= line_len(in link, i)
+            || lb(in link, in bytes, i, wrapping_add(at, n)) != c
+        {
             return true;
         }
-        if !lwork(inout k, 1) {
+        if !lwork(inout link, 1) {
             return false;
         }
         n = wrapping_add(n, 1);
     }
 }
 
-// Whether `b[s..e]` is empty after `str::trim` (Unicode White_Space).
-fn blank(in b: Slice[u8], s: u64, e: u64) -> bool {
+// Whether `bytes[s..e]` is empty after `str::trim` (Unicode White_Space).
+fn blank(in bytes: Slice[u8], s: u64, e: u64) -> bool {
     let mut i = s;
     loop {
         if i >= e {
             return true;
         }
-        let c = byte(in b, i);
-        if c == 32 || (c >= 9 && c <= 13) {
+        let first = byte(in bytes, i);
+        if first == 32 || (first >= 9 && first <= 13) {
             i = wrapping_add(i, 1);
-        } else if c == 194 && wrapping_add(i, 1) < e {
-            let d = byte(in b, wrapping_add(i, 1));
-            if d == 133 || d == 160 {
+        } else if first == 194 && wrapping_add(i, 1) < e {
+            let second = byte(in bytes, wrapping_add(i, 1));
+            if second == 133 || second == 160 {
                 i = wrapping_add(i, 2);
             } else {
                 return false;
             }
-        } else if c == 225 && wrapping_add(i, 2) < e {
-            if byte(in b, wrapping_add(i, 1)) == 154 && byte(in b, wrapping_add(i, 2)) == 128 {
+        } else if first == 225 && wrapping_add(i, 2) < e {
+            if byte(in bytes, wrapping_add(i, 1)) == 154
+                && byte(in bytes, wrapping_add(i, 2)) == 128
+            {
                 i = wrapping_add(i, 3);
             } else {
                 return false;
             }
-        } else if c == 226 && wrapping_add(i, 2) < e {
-            let d = byte(in b, wrapping_add(i, 1));
-            let f = byte(in b, wrapping_add(i, 2));
-            let space = (d == 128 && ((f >= 128 && f <= 138) || f == 168 || f == 169 || f == 175))
-                || (d == 129 && f == 159);
+        } else if first == 226 && wrapping_add(i, 2) < e {
+            let second = byte(in bytes, wrapping_add(i, 1));
+            let third = byte(in bytes, wrapping_add(i, 2));
+            let space = (second == 128
+                && ((third >= 128 && third <= 138) || third == 168 || third == 169 || third == 175))
+                || (second == 129 && third == 159);
             if space {
                 i = wrapping_add(i, 3);
             } else {
                 return false;
             }
-        } else if c == 227 && wrapping_add(i, 2) < e {
-            if byte(in b, wrapping_add(i, 1)) == 128 && byte(in b, wrapping_add(i, 2)) == 128 {
+        } else if first == 227 && wrapping_add(i, 2) < e {
+            if byte(in bytes, wrapping_add(i, 1)) == 128
+                && byte(in bytes, wrapping_add(i, 2)) == 128
+            {
                 i = wrapping_add(i, 3);
             } else {
                 return false;
@@ -88,24 +95,24 @@ fn blank(in b: Slice[u8], s: u64, e: u64) -> bool {
 }
 
 // Line `i` from byte `at` to its end is blank.
-fn rest_blank(in k: Link, in b: Slice[u8], i: u64, at: u64) -> bool {
-    let s = u64_at(in k.l_start, i);
-    let l = line_len(in k, i);
-    if at >= l {
+fn rest_blank(in link: Link, in bytes: Slice[u8], i: u64, at: u64) -> bool {
+    let start = u64_at(in link.line_start, i);
+    let len = line_len(in link, i);
+    if at >= len {
         return true;
     }
-    blank(in b, wrapping_add(s, at), wrapping_add(s, l))
+    blank(in bytes, wrapping_add(start, at), wrapping_add(start, len))
 }
 
 // The ' '/'\t' indentation of line `i`.
-fn indent(in k: Link, in b: Slice[u8], i: u64) -> u64 {
+fn indent(in link: Link, in bytes: Slice[u8], i: u64) -> u64 {
     let mut n: u64 = 0;
     loop {
-        if n >= line_len(in k, i) {
+        if n >= line_len(in link, i) {
             return n;
         }
-        let c = lb(in k, in b, i, n);
-        if c != 32 && c != 9 {
+        let ch = lb(in link, in bytes, i, n);
+        if ch != 32 && ch != 9 {
             return n;
         }
         n = wrapping_add(n, 1);
@@ -116,28 +123,28 @@ fn pack2(line: u64, at: u64) -> u64 {
     wrapping_shl_u64(line, 32) | at
 }
 
-fn line_of(v: u64) -> u64 {
-    wrapping_shr_u64(v, 32)
+fn line_of(packed: u64) -> u64 {
+    wrapping_shr_u64(packed, 32)
 }
 
-fn at_of(v: u64) -> u64 {
-    v & 4294967295
+fn at_of(packed: u64) -> u64 {
+    packed & 4294967295
 }
 
 // `close_ticks`: the end of the run of `count` backticks closing the one
 // at line `line`, byte `at`; NOT_FOUND when unclosed.
 fn close_ticks(
-    inout k: Link,
-    in b: Slice[u8],
+    inout link: Link,
+    in bytes: Slice[u8],
     line: u64,
     at: u64,
     count: u64,
     inout out: u64
 ) -> bool {
     out = NOT_FOUND;
-    let n = k.l_start.len();
+    let n = link.line_start.len();
     for i in line..n {
-        let len = line_len(in k, i);
+        let len = line_len(in link, i);
         let mut pos = if i == line {
             wrapping_add(at, count)
         } else {
@@ -147,22 +154,22 @@ fn close_ticks(
             if pos >= len {
                 break;
             }
-            if !lwork(inout k, 1) {
+            if !lwork(inout link, 1) {
                 return false;
             }
-            if lb(in k, in b, i, pos) == 96 {
-                let mut r: u64 = 0;
-                if !run(inout k, in b, i, pos, 96, inout r) {
+            if lb(in link, in bytes, i, pos) == 96 {
+                let mut tick_count: u64 = 0;
+                if !run(inout link, in bytes, i, pos, 96, inout tick_count) {
                     return false;
                 }
-                if !lwork(inout k, r) {
+                if !lwork(inout link, tick_count) {
                     return false;
                 }
-                if r == count {
-                    out = pack2(i, wrapping_add(pos, r));
+                if tick_count == count {
+                    out = pack2(i, wrapping_add(pos, tick_count));
                     return true;
                 }
-                pos = wrapping_add(pos, r);
+                pos = wrapping_add(pos, tick_count);
             } else {
                 pos = wrapping_add(pos, 1);
             }
@@ -174,8 +181,8 @@ fn close_ticks(
 // `balanced_end`: the line and byte after the `close` matching the `open`
 // at line `line`, byte `start`; NOT_FOUND when unbalanced.
 fn balanced_end(
-    inout k: Link,
-    in b: Slice[u8],
+    inout link: Link,
+    in bytes: Slice[u8],
     line: u64,
     start: u64,
     open: u8,
@@ -190,12 +197,12 @@ fn balanced_end(
     let mut separated = false;
     let mut index = line;
     let mut at = wrapping_add(start, 1);
-    let n = k.l_start.len();
+    let n = link.line_start.len();
     loop {
         if index >= n {
             return true;
         }
-        let len = line_len(in k, index);
+        let len = line_len(in link, index);
         if at >= len {
             if open == 40 && started && depth == 1 && quoting == 0 && !angle {
                 separated = true;
@@ -204,75 +211,75 @@ fn balanced_end(
             at = 0;
             continue;
         }
-        if !lwork(inout k, 1) {
+        if !lwork(inout link, 1) {
             return false;
         }
-        let c = lb(in k, in b, index, at);
-        if c == 92 {
+        let ch = lb(in link, in bytes, index, at);
+        if ch == 92 {
             at = wrapping_add(at, 2);
             if at > len {
                 at = len;
             }
             continue;
         }
-        if open == 91 && c == 96 {
-            let mut r: u64 = 0;
-            if !run(inout k, in b, index, at, 96, inout r) {
+        if open == 91 && ch == 96 {
+            let mut tick_count: u64 = 0;
+            if !run(inout link, in bytes, index, at, 96, inout tick_count) {
                 return false;
             }
-            if !lwork(inout k, r) {
+            if !lwork(inout link, tick_count) {
                 return false;
             }
             let mut end: u64 = 0;
-            if !close_ticks(inout k, in b, index, at, r, inout end) {
+            if !close_ticks(inout link, in bytes, index, at, tick_count, inout end) {
                 return false;
             }
             if end != NOT_FOUND {
                 index = line_of(end);
                 at = at_of(end);
             } else {
-                at = wrapping_add(at, r);
+                at = wrapping_add(at, tick_count);
             }
             continue;
         }
         if open == 40 {
             if quoting != 0 {
-                if c == quoting {
+                if ch == quoting {
                     quoting = 0;
                 }
                 at = wrapping_add(at, 1);
                 continue;
             }
             if angle {
-                if c == 62 {
+                if ch == 62 {
                     angle = false;
                 }
                 at = wrapping_add(at, 1);
                 continue;
             }
-            if !started && ascii_space(c) {
+            if !started && ascii_space(ch) {
                 at = wrapping_add(at, 1);
                 continue;
             }
             if !started {
                 started = true;
-                if c == 60 {
+                if ch == 60 {
                     angle = true;
                     at = wrapping_add(at, 1);
                     continue;
                 }
-            } else if depth == 1 && ascii_space(c) {
+            } else if depth == 1 && ascii_space(ch) {
                 separated = true;
             }
-            if separated && depth == 1 && (c == 39 || c == 34) {
-                quoting = c;
+            if separated && depth == 1 && (ch == 39 || ch == 34) {
+                quoting = ch;
                 at = wrapping_add(at, 1);
                 continue;
             }
         }
-        if c == open {
+        if ch == open {
             depth = wrapping_add(depth, 1);
-        } else if c == close {
+        } else if ch == close {
             depth = wrapping_sub(depth, 1);
             if depth == 0 {
                 out = pack2(index, wrapping_add(at, 1));
@@ -285,25 +292,31 @@ fn balanced_end(
 
 // `next_markdown`: the first byte that is not ' ', '\t' or '\r' from
 // line `line`, byte `start`, on that line or the next; NOT_FOUND.
-fn next_markdown(inout k: Link, in b: Slice[u8], line: u64, start: u64, inout out: u64) -> bool {
+fn next_markdown(
+    inout link: Link,
+    in bytes: Slice[u8],
+    line: u64,
+    start: u64,
+    inout out: u64
+) -> bool {
     out = NOT_FOUND;
-    let n = k.l_start.len();
+    let n = link.line_start.len();
     let mut last = wrapping_add(line, 2);
     if last > n {
         last = n;
     }
     for i in line..last {
-        let len = line_len(in k, i);
+        let len = line_len(in link, i);
         let mut at = if i == line { start } else { 0 };
         loop {
             if at >= len {
                 break;
             }
-            let c = lb(in k, in b, i, at);
-            if c != 32 && c != 9 && c != 13 {
+            let ch = lb(in link, in bytes, i, at);
+            if ch != 32 && ch != 9 && ch != 13 {
                 break;
             }
-            if !lwork(inout k, 1) {
+            if !lwork(inout link, 1) {
                 return false;
             }
             at = wrapping_add(at, 1);
@@ -318,59 +331,59 @@ fn next_markdown(inout k: Link, in b: Slice[u8], line: u64, start: u64, inout ou
 
 // `continued_definition_title`: the line after a reference definition's
 // title that starts on line `line`, or NOT_FOUND.
-fn continued_title(inout k: Link, in b: Slice[u8], line: u64, inout out: u64) -> bool {
+fn continued_title(inout link: Link, in bytes: Slice[u8], line: u64, inout out: u64) -> bool {
     out = NOT_FOUND;
-    let n = k.l_start.len();
+    let n = link.line_start.len();
     if line >= n {
         return true;
     }
-    let ind = indent(in k, in b, line);
-    if !lwork(inout k, wrapping_add(ind, 1)) {
+    let indent_width = indent(in link, in bytes, line);
+    if !lwork(inout link, wrapping_add(indent_width, 1)) {
         return false;
     }
-    if ind >= line_len(in k, line) {
+    if indent_width >= line_len(in link, line) {
         return true;
     }
-    let open = lb(in k, in b, line, ind);
+    let open = lb(in link, in bytes, line, indent_width);
     if open != 39 && open != 34 && open != 40 {
         return true;
     }
     let close = if open == 40 { 41 } else { open };
-    let mut at = wrapping_add(ind, 1);
+    let mut at = wrapping_add(indent_width, 1);
     let mut depth: u64 = 1;
     for i in line..n {
         if i != line {
             at = 0;
         }
-        let len = line_len(in k, i);
-        if rest_blank(in k, in b, i, 0) {
+        let len = line_len(in link, i);
+        if rest_blank(in link, in bytes, i, 0) {
             return true;
         }
         loop {
             if at >= len {
                 break;
             }
-            if !lwork(inout k, 1) {
+            if !lwork(inout link, 1) {
                 return false;
             }
-            let c = lb(in k, in b, i, at);
-            if c == 92 {
+            let ch = lb(in link, in bytes, i, at);
+            if ch == 92 {
                 at = wrapping_add(at, 2);
                 if at > len {
                     at = len;
                 }
                 continue;
             }
-            if open == 40 && c == open {
+            if open == 40 && ch == open {
                 depth = wrapping_add(depth, 1);
             }
-            if c == close {
+            if ch == close {
                 depth = wrapping_sub(depth, 1);
                 if depth == 0 {
-                    if !lwork(inout k, wrapping_sub(len, at)) {
+                    if !lwork(inout link, wrapping_sub(len, at)) {
                         return false;
                     }
-                    if rest_blank(in k, in b, i, wrapping_add(at, 1)) {
+                    if rest_blank(in link, in bytes, i, wrapping_add(at, 1)) {
                         out = wrapping_add(i, 1);
                     }
                     return true;
@@ -382,36 +395,51 @@ fn continued_title(inout k: Link, in b: Slice[u8], line: u64, inout out: u64) ->
     true
 }
 
-// `occurrence` of the link text `b[s..e]` spanning source bytes
+// `occurrence` of the link text `bytes[s..e]` spanning source bytes
 // `span_s..span_e`.
-fn occurrence(inout k: Link, in b: Slice[u8], s: u64, e: u64, span_s: u64, span_e: u64) -> bool {
+fn occurrence(
+    inout link: Link,
+    in bytes: Slice[u8],
+    s: u64,
+    e: u64,
+    span_s: u64,
+    span_e: u64
+) -> bool {
     // `path`: strip one pair of backticks.
-    let mut ps = s;
-    let mut pe = e;
-    if wrapping_sub(e, s) >= 2 && byte(in b, s) == 96 && byte(in b, wrapping_sub(e, 1)) == 96 {
-        ps = wrapping_add(s, 1);
-        pe = wrapping_sub(e, 1);
-    } else if wrapping_sub(e, s) == 1 && byte(in b, s) == 96 {
+    let mut path_start = s;
+    let mut path_end = e;
+    if wrapping_sub(e, s) >= 2
+        && byte(in bytes, s) == 96
+        && byte(in bytes, wrapping_sub(e, 1)) == 96
+    {
+        path_start = wrapping_add(s, 1);
+        path_end = wrapping_sub(e, 1);
+    } else if wrapping_sub(e, s) == 1 && byte(in bytes, s) == 96 {
         // "`" strips to "" from the front and has no suffix left: as-is.
     }
     // 1 local, 2 unsupported.
     let mut kind: u64 = 0;
-    if local_path(in b, ps, pe) {
-        if !check_path(inout k, in b, ps, pe) {
+    if local_path(in bytes, path_start, path_end) {
+        if !check_path(inout link, in bytes, path_start, path_end) {
             return false;
         }
-        kind = if has_self_segment(in b, ps, pe) { 2 } else { 1 };
+        kind = if has_self_segment(in bytes, path_start, path_end) {
+            2
+        } else {
+            1
+        };
     } else {
         let mut bracket = NOT_FOUND;
-        for i in ps..pe {
-            if byte(in b, i) == 91 {
+        for i in path_start..path_end {
+            if byte(in bytes, i) == 91 {
                 bracket = i;
                 break;
             }
         }
-        if (pe > ps && byte(in b, ps) == 64)
-            || (bracket != NOT_FOUND && local_path(in b, ps, bracket)) {
-            if !check_path(inout k, in b, ps, pe) {
+        if (path_end > path_start && byte(in bytes, path_start) == 64)
+            || (bracket != NOT_FOUND && local_path(in bytes, path_start, bracket))
+        {
+            if !check_path(inout link, in bytes, path_start, path_end) {
                 return false;
             }
             kind = 2;
@@ -420,23 +448,25 @@ fn occurrence(inout k: Link, in b: Slice[u8], s: u64, e: u64, span_s: u64, span_
     if kind == 0 {
         return true;
     }
-    if wrapping_add(k.r_start.len(), k.diagnostics) >= L_MAX_REFERENCES {
-        return link_fail(inout k, 1);
+    if wrapping_add(link.ref_start.len(), link.diagnostics) >= L_MAX_REFERENCES {
+        return link_fail(inout link, 1);
     }
     let mut found = NOT_FOUND;
     let mut matches: u64 = 0;
     if kind == 1 {
-        let plen = wrapping_sub(pe, ps);
-        for i in 0..k.t_s.len() {
-            let tl = u64_at(in k.t_l, i);
-            if !lwork(inout k, wrapping_add(wrapping_add(plen, tl), 1)) {
+        let path_len = wrapping_sub(path_end, path_start);
+        for i in 0..link.path_at.len() {
+            let target_len = u64_at(in link.path_len, i);
+            if !lwork(inout link, wrapping_add(wrapping_add(path_len, target_len), 1)) {
                 return false;
             }
-            if tl == plen {
-                let ts = u64_at(in k.t_s, i);
+            if target_len == path_len {
+                let target_at = u64_at(in link.path_at, i);
                 let mut same = true;
-                for j in 0..plen {
-                    if u8_at(in k.paths, wrapping_add(ts, j)) != byte(in b, wrapping_add(ps, j)) {
+                for j in 0..path_len {
+                    if u8_at(in link.paths, wrapping_add(target_at, j))
+                        != byte(in bytes, wrapping_add(path_start, j))
+                    {
                         same = false;
                         break;
                     }
@@ -449,25 +479,25 @@ fn occurrence(inout k: Link, in b: Slice[u8], s: u64, e: u64, span_s: u64, span_
         }
     }
     if matches == 1 {
-        let tl = u64_at(in k.t_l, found);
+        let target_len = u64_at(in link.path_len, found);
         // `copy_target`, `anchor`, the display string, then the push.
-        if !lmeta(inout k, tl) {
+        if !lmeta(inout link, target_len) {
             return false;
         }
-        if !lmeta(inout k, wrapping_mul(wrapping_add(32, wrapping_mul(tl, 2)), 4)) {
+        if !lmeta(inout link, wrapping_mul(wrapping_add(32, wrapping_mul(target_len, 2)), 4)) {
             return false;
         }
-        if !lmeta(inout k, wrapping_sub(e, s)) {
+        if !lmeta(inout link, wrapping_sub(e, s)) {
             return false;
         }
-        let cap = lpush(inout k, k.r_start.len(), k.r_cap, SIZE_REFERENCE);
+        let cap = lpush(inout link, link.ref_start.len(), link.ref_cap, SIZE_REFERENCE);
         if cap == NOT_FOUND {
             return false;
         }
-        k.r_cap = cap;
-        k.r_start.push(span_s);
-        k.r_end.push(span_e);
-        k.r_target.push(found);
+        link.ref_cap = cap;
+        link.ref_start.push(span_s);
+        link.ref_end.push(span_e);
+        link.ref_target.push(found);
         return true;
     }
     let (code, message) = if kind == 2 {
@@ -477,21 +507,21 @@ fn occurrence(inout k: Link, in b: Slice[u8], s: u64, e: u64, span_s: u64, span_
     } else {
         (9, 35)
     };
-    if !lmeta(inout k, code) || !lmeta(inout k, message) {
+    if !lmeta(inout link, code) || !lmeta(inout link, message) {
         return false;
     }
-    let cap = lpush(inout k, k.diagnostics, k.d_cap, SIZE_DIAGNOSTIC);
+    let cap = lpush(inout link, link.diagnostics, link.diag_cap, SIZE_DIAGNOSTIC);
     if cap == NOT_FOUND {
         return false;
     }
-    k.d_cap = cap;
-    k.diagnostics = wrapping_add(k.diagnostics, 1);
+    link.diag_cap = cap;
+    link.diagnostics = wrapping_add(link.diagnostics, 1);
     true
 }
 
 // `group`: the links of one run of comment lines.
-fn group(inout k: Link, in b: Slice[u8]) -> bool {
-    let n = k.l_start.len();
+fn group(inout link: Link, in bytes: Slice[u8]) -> bool {
+    let n = link.line_start.len();
     let mut line: u64 = 0;
     let mut at: u64 = 0;
     let mut fence: u8 = 0;
@@ -500,44 +530,52 @@ fn group(inout k: Link, in b: Slice[u8]) -> bool {
         if line >= n {
             return true;
         }
-        let len = line_len(in k, line);
+        let len = line_len(in link, line);
         if at == 0 {
-            let ind = indent(in k, in b, line);
-            if !lwork(inout k, wrapping_add(ind, 1)) {
+            let indent_width = indent(in link, in bytes, line);
+            if !lwork(inout link, wrapping_add(indent_width, 1)) {
                 return false;
             }
-            let first: u8 = if ind < len {
-                lb(in k, in b, line, ind)
+            let first: u8 = if indent_width < len {
+                lb(in link, in bytes, line, indent_width)
             } else {
                 0
             };
             if fence != 0 {
-                if ind < len && first == fence {
-                    let mut r: u64 = 0;
-                    if !run(inout k, in b, line, ind, fence, inout r) {
+                if indent_width < len && first == fence {
+                    let mut run_len: u64 = 0;
+                    if !run(inout link, in bytes, line, indent_width, fence, inout run_len) {
                         return false;
                     }
-                    if !lwork(inout k, wrapping_add(r, wrapping_sub(wrapping_sub(len, ind), r))) {
+                    if !lwork(
+                        inout link,
+                        wrapping_add(
+                            run_len,
+                            wrapping_sub(wrapping_sub(len, indent_width), run_len)
+                        )
+                    ) {
                         return false;
                     }
-                    if r >= fence_count && rest_blank(in k, in b, line, wrapping_add(ind, r)) {
+                    if run_len >= fence_count
+                        && rest_blank(in link, in bytes, line, wrapping_add(indent_width, run_len))
+                    {
                         fence = 0;
                     }
                 }
                 line = wrapping_add(line, 1);
                 continue;
             }
-            if ind < len && (first == 96 || first == 126) {
-                let mut r: u64 = 0;
-                if !run(inout k, in b, line, ind, first, inout r) {
+            if indent_width < len && (first == 96 || first == 126) {
+                let mut run_len: u64 = 0;
+                if !run(inout link, in bytes, line, indent_width, first, inout run_len) {
                     return false;
                 }
-                if !lwork(inout k, r) {
+                if !lwork(inout link, run_len) {
                     return false;
                 }
-                if r >= 3 {
+                if run_len >= 3 {
                     fence = first;
-                    fence_count = r;
+                    fence_count = run_len;
                     line = wrapping_add(line, 1);
                     continue;
                 }
@@ -548,43 +586,42 @@ fn group(inout k: Link, in b: Slice[u8]) -> bool {
             at = 0;
             continue;
         }
-        if !lwork(inout k, 1) {
+        if !lwork(inout link, 1) {
             return false;
         }
-        let c = lb(in k, in b, line, at);
-        if c == 92 {
+        let ch = lb(in link, in bytes, line, at);
+        if ch == 92 {
             at = wrapping_add(at, 2);
             if at > len {
                 at = len;
             }
-        } else if c == 96 {
-            let mut r: u64 = 0;
-            if !run(inout k, in b, line, at, 96, inout r) {
+        } else if ch == 96 {
+            let mut run_len: u64 = 0;
+            if !run(inout link, in bytes, line, at, 96, inout run_len) {
                 return false;
             }
-            if !lwork(inout k, r) {
+            if !lwork(inout link, run_len) {
                 return false;
             }
             let mut end: u64 = 0;
-            if !close_ticks(inout k, in b, line, at, r, inout end) {
+            if !close_ticks(inout link, in bytes, line, at, run_len, inout end) {
                 return false;
             }
             if end != NOT_FOUND {
                 line = line_of(end);
                 at = at_of(end);
             } else {
-                at = wrapping_add(at, r);
+                at = wrapping_add(at, run_len);
             }
-        } else if c == 91
-            || (
-                c == 33
-                    && wrapping_add(at, 1) < len
-                    && lb(in k, in b, line, wrapping_add(at, 1)) == 91
-            ) {
-            let image = c == 33;
+        } else if ch == 91
+            || (ch == 33
+                && wrapping_add(at, 1) < len
+                && lb(in link, in bytes, line, wrapping_add(at, 1)) == 91)
+        {
+            let image = ch == 33;
             let start = if image { wrapping_add(at, 1) } else { at };
             let mut close: u64 = 0;
-            if !balanced_end(inout k, in b, line, start, 91, 93, inout close) {
+            if !balanced_end(inout link, in bytes, line, start, 91, 93, inout close) {
                 return false;
             }
             if close == NOT_FOUND {
@@ -594,45 +631,69 @@ fn group(inout k: Link, in b: Slice[u8]) -> bool {
             let end_line = line_of(close);
             let end = at_of(close);
             let mut next: u64 = 0;
-            if !next_markdown(inout k, in b, end_line, end, inout next) {
+            if !next_markdown(inout link, in bytes, end_line, end, inout next) {
                 return false;
             }
             let next_c = if next == NOT_FOUND {
                 0
             } else {
-                lb(in k, in b, line_of(next), at_of(next))
+                lb(in link, in bytes, line_of(next), at_of(next))
             };
             if next != NOT_FOUND && next_c == 40 {
-                let mut p: u64 = 0;
-                if !balanced_end(inout k, in b, line_of(next), at_of(next), 40, 41, inout p) {
+                let mut link_end: u64 = 0;
+                if !balanced_end(
+                    inout link,
+                    in bytes,
+                    line_of(next),
+                    at_of(next),
+                    40,
+                    41,
+                    inout link_end
+                ) {
                     return false;
                 }
-                if p != NOT_FOUND {
-                    line = line_of(p);
-                    at = at_of(p);
+                if link_end != NOT_FOUND {
+                    line = line_of(link_end);
+                    at = at_of(link_end);
                 } else {
                     line = n;
                 }
             } else if next != NOT_FOUND && next_c == 91 {
-                let mut p: u64 = 0;
-                if !balanced_end(inout k, in b, line_of(next), at_of(next), 91, 93, inout p) {
+                let mut link_end: u64 = 0;
+                if !balanced_end(
+                    inout link,
+                    in bytes,
+                    line_of(next),
+                    at_of(next),
+                    91,
+                    93,
+                    inout link_end
+                ) {
                     return false;
                 }
-                if p != NOT_FOUND {
-                    line = line_of(p);
-                    at = at_of(p);
+                if link_end != NOT_FOUND {
+                    line = line_of(link_end);
+                    at = at_of(link_end);
                     let mut url: u64 = 0;
-                    if !next_markdown(inout k, in b, line, at, inout url) {
+                    if !next_markdown(inout link, in bytes, line, at, inout url) {
                         return false;
                     }
-                    if url != NOT_FOUND && lb(in k, in b, line_of(url), at_of(url)) == 40 {
-                        let mut q: u64 = 0;
-                        if !balanced_end(inout k, in b, line_of(url), at_of(url), 40, 41, inout q) {
+                    if url != NOT_FOUND && lb(in link, in bytes, line_of(url), at_of(url)) == 40 {
+                        let mut url_end: u64 = 0;
+                        if !balanced_end(
+                            inout link,
+                            in bytes,
+                            line_of(url),
+                            at_of(url),
+                            40,
+                            41,
+                            inout url_end
+                        ) {
                             return false;
                         }
-                        if q != NOT_FOUND {
-                            line = line_of(q);
-                            at = at_of(q);
+                        if url_end != NOT_FOUND {
+                            line = line_of(url_end);
+                            at = at_of(url_end);
                         } else {
                             line = n;
                         }
@@ -642,7 +703,7 @@ fn group(inout k: Link, in b: Slice[u8]) -> bool {
                 }
             } else if next != NOT_FOUND && line_of(next) == end_line && next_c == 58 {
                 let mut title: u64 = 0;
-                if !continued_title(inout k, in b, wrapping_add(end_line, 1), inout title) {
+                if !continued_title(inout link, in bytes, wrapping_add(end_line, 1), inout title) {
                     return false;
                 }
                 line = if title == NOT_FOUND {
@@ -653,14 +714,14 @@ fn group(inout k: Link, in b: Slice[u8]) -> bool {
                 at = 0;
             } else {
                 if !image && end_line == line {
-                    let ls = u64_at(in k.l_start, line);
+                    let line_start = u64_at(in link.line_start, line);
                     if !occurrence(
-                        inout k,
-                        in b,
-                        wrapping_add(ls, wrapping_add(start, 1)),
-                        wrapping_add(ls, wrapping_sub(end, 1)),
-                        wrapping_add(ls, start),
-                        wrapping_add(ls, end)
+                        inout link,
+                        in bytes,
+                        wrapping_add(line_start, wrapping_add(start, 1)),
+                        wrapping_add(line_start, wrapping_sub(end, 1)),
+                        wrapping_add(line_start, start),
+                        wrapping_add(line_start, end)
                     ) {
                         return false;
                     }
@@ -674,23 +735,23 @@ fn group(inout k: Link, in b: Slice[u8]) -> bool {
     }
 }
 
-// `links::analyze` of the source of `x` with the inventory's targets.
+// `links::analyze` of the source of `index` with the inventory's targets.
 pub fn analyze(
-    inout k: Link,
-    in x: Ix,
-    in v_paths: ChunkSeq[u8],
-    in v_s: ChunkSeq[u64],
-    in v_l: ChunkSeq[u64],
-    in v_kind: ChunkSeq[u8]
+    inout link: Link,
+    in index: Ix,
+    in target_paths: ChunkSeq[u8],
+    in target_at: ChunkSeq[u64],
+    in target_len: ChunkSeq[u64],
+    in target_kinds: ChunkSeq[u8]
 ) -> bool {
-    let len = x.src.len();
+    let len = index.src.len();
     if len > MAX_SOURCE_BYTES {
-        return link_fail(inout k, 1);
+        return link_fail(inout link, 1);
     }
-    if !lwork(inout k, wrapping_mul(wrapping_add(len, 1), 8)) {
+    if !lwork(inout link, wrapping_mul(wrapping_add(len, 1), 8)) {
         return false;
     }
-    if !link_inventory(inout k, in v_paths, in v_s, in v_l, in v_kind) {
+    if !link_inventory(inout link, in target_paths, in target_at, in target_len, in target_kinds) {
         return false;
     }
     let mut max_tokens = L_MAX_METADATA / 4 / SIZE_TOKEN;
@@ -700,68 +761,67 @@ pub fn analyze(
     if max_tokens == 0 {
         max_tokens = 1;
     }
-    if !lmeta(inout k, wrapping_add(wrapping_mul(wrapping_add(max_tokens, 1), SIZE_TOKEN), 1024)) {
+    if !lmeta(
+        inout link,
+        wrapping_add(wrapping_mul(wrapping_add(max_tokens, 1), SIZE_TOKEN), 1024)
+    ) {
         return false;
     }
-    let mut d = diags_new();
-    let b = x.src.as_bytes();
-    let t = lex_with_limits(in b, inout d, MAX_SOURCE_BYTES, max_tokens, 1);
-    if t.rejected || t.limited {
-        return link_fail(inout k, 1);
+    let mut diags = diags_new();
+    let bytes = index.src.as_bytes();
+    let tokens = lex_with_limits(in bytes, inout diags, MAX_SOURCE_BYTES, max_tokens, 1);
+    if tokens.rejected || tokens.limited {
+        return link_fail(inout link, 1);
     }
-    if d.code.len() != 0 {
-        return link_fail(inout k, 3);
+    if diags.code.len() != 0 {
+        return link_fail(inout link, 3);
     }
-    for i in 0..t.kind.len() {
-        if !lwork(inout k, 1) {
+    for i in 0..tokens.kind.len() {
+        if !lwork(inout link, 1) {
             return false;
         }
-        let s = w(u32_at(in t.start, i));
-        let e = token_end(in t, i);
-        let kind = u8_at(in t.kind, i);
-        let l = wrapping_sub(e, s);
-        let doc = kind == TK_COMMENT
-            && l >= 3
-            && byte(in b, s) == 47
-            && byte(in b, wrapping_add(s, 1)) == 47
-            && (
-                byte(in b, wrapping_add(s, 2)) == 33
-                    || (
-                        byte(in b, wrapping_add(s, 2)) == 47
-                            && !(l >= 4 && byte(in b, wrapping_add(s, 3)) == 47)
-                    )
-            );
-        if doc {
-            let mut from = wrapping_add(s, 3);
-            if from < e && byte(in b, from) == 32 {
+        let start = w(u32_at(in tokens.start, i));
+        let end = token_end(in tokens, i);
+        let kind = u8_at(in tokens.kind, i);
+        let token_len = wrapping_sub(end, start);
+        let is_doc = kind == TK_COMMENT
+            && token_len >= 3
+            && byte(in bytes, start) == 47
+            && byte(in bytes, wrapping_add(start, 1)) == 47
+            && (byte(in bytes, wrapping_add(start, 2)) == 33
+                || (byte(in bytes, wrapping_add(start, 2)) == 47
+                    && !(token_len >= 4 && byte(in bytes, wrapping_add(start, 3)) == 47)));
+        if is_doc {
+            let mut from = wrapping_add(start, 3);
+            if from < end && byte(in bytes, from) == 32 {
                 from = wrapping_add(from, 1);
             }
-            let cap = lpush(inout k, k.l_start.len(), k.l_cap, SIZE_LINE);
+            let cap = lpush(inout link, link.line_start.len(), link.line_cap, SIZE_LINE);
             if cap == NOT_FOUND {
                 return false;
             }
-            k.l_cap = cap;
-            k.l_start.push(from);
-            k.l_len.push(wrapping_sub(e, from));
-        } else if kind == TK_WHITESPACE && newlines(in b, s, e) <= 1 {
-            if !lwork(inout k, l) {
+            link.line_cap = cap;
+            link.line_start.push(from);
+            link.line_len.push(wrapping_sub(end, from));
+        } else if kind == TK_WHITESPACE && newlines(in bytes, start, end) <= 1 {
+            if !lwork(inout link, token_len) {
                 return false;
             }
         } else {
-            if !group(inout k, in b) {
+            if !group(inout link, in bytes) {
                 return false;
             }
-            k.l_start.clear();
-            k.l_len.clear();
+            link.line_start.clear();
+            link.line_len.clear();
         }
     }
-    group(inout k, in b)
+    group(inout link, in bytes)
 }
 
-fn newlines(in b: Slice[u8], s: u64, e: u64) -> u64 {
+fn newlines(in bytes: Slice[u8], s: u64, e: u64) -> u64 {
     let mut n: u64 = 0;
     for i in s..e {
-        if byte(in b, i) == 10 {
+        if byte(in bytes, i) == 10 {
             n = wrapping_add(n, 1);
         }
     }

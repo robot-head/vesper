@@ -23,6 +23,7 @@ use self::proof::{proof_models};
 use self::ownership::{lens_facts, lens_requests, lens_view};
 use self::repair::{lens_repair};
 use self::proof_lenses::{proof_lenses};
+use self::lens_state::{lens_state};
 use self::hover::{Facts, facts_new, fact_function, fact_param, hover_answer};
 use self::nav::{
     Ix, MAX_DOCUMENTS, MAX_OUTPUT_BYTES, MAX_QUERY_BYTES, MAX_SYMBOLS, MAX_URI_BYTES, ERR_NONE,
@@ -36,42 +37,42 @@ copy struct Reader {
     pos: u64
 }
 
-fn word(in b: Slice[u8], inout r: Reader) -> u64 {
-    let x = b.try_read_u64_le(r.pos).unwrap_or(0);
-    r.pos = wrapping_add(r.pos, 8);
-    x
+fn word(in bytes: Slice[u8], inout reader: Reader) -> u64 {
+    let value = bytes.try_read_u64_le(reader.pos).unwrap_or(0);
+    reader.pos = wrapping_add(reader.pos, 8);
+    value
 }
 
 // The ten words of `vesper_span::Limits`, in field order.
-fn read_index(in b: Slice[u8], inout r: Reader) -> Limits {
+fn read_index(in bytes: Slice[u8], inout reader: Reader) -> Limits {
     Limits {
-        max_source_bytes: narrow_usize(word(in b, inout r)),
-        max_lines: narrow_usize(word(in b, inout r)),
-        max_metadata_bytes: narrow_usize(word(in b, inout r)),
-        max_work: narrow_usize(word(in b, inout r)),
-        max_edits: narrow_usize(word(in b, inout r)),
-        max_output_bytes: narrow_usize(word(in b, inout r)),
-        max_diagnostics: narrow_usize(word(in b, inout r)),
-        max_labels: narrow_usize(word(in b, inout r)),
-        max_fixes: narrow_usize(word(in b, inout r)),
-        max_text_bytes: narrow_usize(word(in b, inout r))
+        max_source_bytes: narrow_usize(word(in bytes, inout reader)),
+        max_lines: narrow_usize(word(in bytes, inout reader)),
+        max_metadata_bytes: narrow_usize(word(in bytes, inout reader)),
+        max_work: narrow_usize(word(in bytes, inout reader)),
+        max_edits: narrow_usize(word(in bytes, inout reader)),
+        max_output_bytes: narrow_usize(word(in bytes, inout reader)),
+        max_diagnostics: narrow_usize(word(in bytes, inout reader)),
+        max_labels: narrow_usize(word(in bytes, inout reader)),
+        max_fixes: narrow_usize(word(in bytes, inout reader)),
+        max_text_bytes: narrow_usize(word(in bytes, inout reader))
     }
 }
 
 // The input text `off .. off + len` as a `String` (the harness writes only
 // UTF-8 there).
-fn text_at(in b: Slice[u8], off: u64, len: u64) -> String {
-    match String::from_utf8(in b[off..wrapping_add(off, len)]) {
-        Option::Some(s) => s,
+fn text_at(in bytes: Slice[u8], off: u64, len: u64) -> String {
+    match String::from_utf8(in bytes[off..wrapping_add(off, len)]) {
+        Option::Some(text) => text,
         Option::None => String::new(),
     }
 }
 
 fn error(code: u64, e: SpanError) -> ChunkSeq[u64] {
-    let mut o = ChunkSeq::new[u8]();
-    o.push(69);
-    put_error(inout o, code, e);
-    pack(in o.as_slice())
+    let mut out = ChunkSeq::new[u8]();
+    out.push(69);
+    put_error(inout out, code, e);
+    pack(in out.as_slice())
 }
 
 fn plain_error(code: u64) -> ChunkSeq[u64] {
@@ -85,61 +86,61 @@ fn uri_ok(in uri: Str) -> bool {
 // One `document_symbols` value: `{"kind","name","range","selectionRange"}`,
 // or with `legacy` the session's `SymbolInformation` form
 // `{"kind","location":{"range","uri"},"name"}` (the full range).
-fn symbol(inout v: ChunkSeq[u8], inout x: Ix, i: u64, in uri: Str, legacy: bool) -> bool {
-    let (s, e) = decl_span(in x, i);
-    put(inout v, in "{\"kind\":");
-    put_u64(inout v, decl_kind(in x, i));
+fn symbol(inout out: ChunkSeq[u8], inout index: Ix, i: u64, in uri: Str, legacy: bool) -> bool {
+    let (start, end) = decl_span(in index, i);
+    put(inout out, in "{\"kind\":");
+    put_u64(inout out, decl_kind(in index, i));
     if legacy {
-        put(inout v, in ",\"location\":{\"range\":");
-        if !put_source_range(inout v, inout x, s, e) {
+        put(inout out, in ",\"location\":{\"range\":");
+        if !put_source_range(inout out, inout index, start, end) {
             return false;
         }
-        put(inout v, in ",\"uri\":");
-        put_string(inout v, in uri.as_bytes());
-        put(inout v, in "},\"name\":");
-        put_name_string(inout v, in x, decl_name(in x, i));
-        v.push(125);
+        put(inout out, in ",\"uri\":");
+        put_string(inout out, in uri.as_bytes());
+        put(inout out, in "},\"name\":");
+        put_name_string(inout out, in index, decl_name(in index, i));
+        out.push(125);
         return true;
     }
-    put(inout v, in ",\"name\":");
-    put_name_string(inout v, in x, decl_name(in x, i));
-    put(inout v, in ",\"range\":");
-    if !put_source_range(inout v, inout x, s, e) {
+    put(inout out, in ",\"name\":");
+    put_name_string(inout out, in index, decl_name(in index, i));
+    put(inout out, in ",\"range\":");
+    if !put_source_range(inout out, inout index, start, end) {
         return false;
     }
-    let (ss, se) = decl_selection(in x, i);
-    put(inout v, in ",\"selectionRange\":");
-    if !put_source_range(inout v, inout x, ss, se) {
+    let (sel_start, sel_end) = decl_selection(in index, i);
+    put(inout out, in ",\"selectionRange\":");
+    if !put_source_range(inout out, inout index, sel_start, sel_end) {
         return false;
     }
-    v.push(125);
+    out.push(125);
     true
 }
 
-// The answer to one `textDocument/documentSymbol` request on `x`, in the
+// The answer to one `textDocument/documentSymbol` request on `index`, in the
 // hierarchical shape or the session's legacy `SymbolInformation` shape,
 // appended to `out` as `R<json>` or `E<error>`.
-fn symbols_answer(inout out: ChunkSeq[u8], inout x: Ix, in uri: Str, hierarchical: bool) {
-    if ix_err(in x) != ERR_NONE {
-        put_error_answer(inout out, ix_err(in x), ix_span_err(in x));
+fn symbols_answer(inout out: ChunkSeq[u8], inout index: Ix, in uri: Str, hierarchical: bool) {
+    if ix_err(in index) != ERR_NONE {
+        put_error_answer(inout out, ix_err(in index), ix_span_err(in index));
         return;
     }
     let mut remaining = MAX_OUTPUT_BYTES;
     let mut total: u64 = 2;
     let mut body = ChunkSeq::new[u8]();
     body.push(91);
-    let mut v = ChunkSeq::new[u8]();
-    for i in 0..decl_count(in x) {
-        if decl_name_len(in x, i) > remaining {
+    let mut symbol_json = ChunkSeq::new[u8]();
+    for i in 0..decl_count(in index) {
+        if decl_name_len(in index, i) > remaining {
             put_error_answer(inout out, ERR_OUTPUT_BYTES, SpanError::InvalidLimits);
             return;
         }
-        v.clear();
-        if !symbol(inout v, inout x, i, in uri, false) {
-            put_error_answer(inout out, ix_err(in x), ix_span_err(in x));
+        symbol_json.clear();
+        if !symbol(inout symbol_json, inout index, i, in uri, false) {
+            put_error_answer(inout out, ix_err(in index), ix_span_err(in index));
             return;
         }
-        let n = v.len();
+        let n = symbol_json.len();
         if n >= remaining {
             put_error_answer(inout out, ERR_OUTPUT_BYTES, SpanError::InvalidLimits);
             return;
@@ -151,14 +152,14 @@ fn symbols_answer(inout out: ChunkSeq[u8], inout x: Ix, in uri: Str, hierarchica
         }
         total = wrapping_add(total, n);
         if hierarchical {
-            put_bytes(inout body, in v.as_slice());
+            put_bytes(inout body, in symbol_json.as_slice());
         } else {
-            v.clear();
-            if !symbol(inout v, inout x, i, in uri, true) {
-                put_error_answer(inout out, ix_err(in x), ix_span_err(in x));
+            symbol_json.clear();
+            if !symbol(inout symbol_json, inout index, i, in uri, true) {
+                put_error_answer(inout out, ix_err(in index), ix_span_err(in index));
                 return;
             }
-            put_bytes(inout body, in v.as_slice());
+            put_bytes(inout body, in symbol_json.as_slice());
         }
     }
     if total > MAX_OUTPUT_BYTES {
@@ -174,17 +175,17 @@ fn symbols_answer(inout out: ChunkSeq[u8], inout x: Ix, in uri: Str, hierarchica
 // the legacy `SymbolInformation`), the URI length and the source length,
 // then the URI and the source. `textDocument/documentSymbol`.
 pub fn lsp_document_symbols(in input: Str) -> ChunkSeq[u64] {
-    let b = input.as_bytes();
-    let mut r = Reader { pos: 0 };
-    let l = read_index(in b, inout r);
-    let hierarchical = word(in b, inout r) == 1;
-    let uri_len = word(in b, inout r);
-    let src_len = word(in b, inout r);
-    let uri = text_at(in b, r.pos, uri_len);
-    let src = text_at(in b, wrapping_add(r.pos, uri_len), src_len);
-    let mut x = index_new(src, in l);
+    let bytes = input.as_bytes();
+    let mut reader = Reader { pos: 0 };
+    let limits = read_index(in bytes, inout reader);
+    let hierarchical = word(in bytes, inout reader) == 1;
+    let uri_len = word(in bytes, inout reader);
+    let src_len = word(in bytes, inout reader);
+    let uri = text_at(in bytes, reader.pos, uri_len);
+    let src = text_at(in bytes, wrapping_add(reader.pos, uri_len), src_len);
+    let mut index = index_new(src, in limits);
     let mut out = ChunkSeq::new[u8]();
-    symbols_answer(inout out, inout x, in uri, hierarchical);
+    symbols_answer(inout out, inout index, in uri, hierarchical);
     pack(in out.as_slice())
 }
 
@@ -193,52 +194,52 @@ pub fn lsp_document_symbols(in input: Str) -> ChunkSeq[u64] {
 // for each (the server keeps the parse in its snapshot and builds the
 // index per request, as Rust does); the answers are joined by newlines.
 pub fn lsp_document_symbols_kept(in input: Str) -> ChunkSeq[u64] {
-    let b = input.as_bytes();
-    let mut r = Reader { pos: 0 };
-    let l = read_index(in b, inout r);
-    let hierarchical = word(in b, inout r) == 1;
-    let n = word(in b, inout r);
-    let uri_len = word(in b, inout r);
-    let src_len = word(in b, inout r);
-    let uri = text_at(in b, r.pos, uri_len);
-    let src = text_at(in b, wrapping_add(r.pos, uri_len), src_len);
-    let mut x = index_new(src, in l);
+    let bytes = input.as_bytes();
+    let mut reader = Reader { pos: 0 };
+    let limits = read_index(in bytes, inout reader);
+    let hierarchical = word(in bytes, inout reader) == 1;
+    let n = word(in bytes, inout reader);
+    let uri_len = word(in bytes, inout reader);
+    let src_len = word(in bytes, inout reader);
+    let uri = text_at(in bytes, reader.pos, uri_len);
+    let src = text_at(in bytes, wrapping_add(reader.pos, uri_len), src_len);
+    let mut index = index_new(src, in limits);
     let mut out = ChunkSeq::new[u8]();
     for i in 0..n {
         if i > 0 {
             out.push(10);
-            if ix_err(in x) == ERR_NONE || ix_err(in x) == ERR_INVALID_SPAN {
-                reindex(inout x);
+            if ix_err(in index) == ERR_NONE || ix_err(in index) == ERR_INVALID_SPAN {
+                reindex(inout index);
             }
         }
-        symbols_answer(inout out, inout x, in uri, hierarchical);
+        symbols_answer(inout out, inout index, in uri, hierarchical);
     }
     pack(in out.as_slice())
 }
 
-// The answer to one definition request on `x` (after the URI check),
+// The answer to one definition request on `index` (after the URI check),
 // appended to `out`.
 fn definition_answer(
     inout out: ChunkSeq[u8],
-    inout x: Ix,
+    inout index: Ix,
     in uri: Str,
     line: u32,
     character: u32,
     in facts: DocFacts,
     has_facts: bool
 ) {
-    if ix_err(in x) != ERR_NONE {
-        put_error_answer(inout out, ix_err(in x), ix_span_err(in x));
+    if ix_err(in index) != ERR_NONE {
+        put_error_answer(inout out, ix_err(in index), ix_span_err(in index));
         return;
     }
     let mut at: u64 = 0;
-    if !cursor(inout x, line, character, inout at) {
-        put_error_answer(inout out, ix_err(in x), ix_span_err(in x));
+    if !cursor(inout index, line, character, inout at) {
+        put_error_answer(inout out, ix_err(in index), ix_span_err(in index));
         return;
     }
-    let mut t = node_target(in x, at);
-    if t == 0 {
-        if !in_doc_comment(in x, at) {
+    let mut target = node_target(in index, at);
+    if target == 0 {
+        if !in_doc_comment(in index, at) {
             put(inout out, in "Rnull");
             return;
         }
@@ -247,32 +248,32 @@ fn definition_answer(
             return;
         }
         let mut err = ERR_NONE;
-        t = doc_target(in x, in facts, at, inout err);
-        if t == 18446744073709551615 {
-            put_error_answer(inout out, err, ix_span_err(in x));
+        target = doc_target(in index, in facts, at, inout err);
+        if target == 18446744073709551615 {
+            put_error_answer(inout out, err, ix_span_err(in index));
             return;
         }
-        if t == 0 {
+        if target == 0 {
             put(inout out, in "Rnull");
             return;
         }
     }
-    let span = wrapping_sub(t, 1);
-    let mut v = ChunkSeq::new[u8]();
-    put(inout v, in "{\"range\":");
-    if !put_source_range(inout v, inout x, span >> 32, span & 4294967295) {
-        put_error_answer(inout out, ix_err(in x), ix_span_err(in x));
+    let span = wrapping_sub(target, 1);
+    let mut location = ChunkSeq::new[u8]();
+    put(inout location, in "{\"range\":");
+    if !put_source_range(inout location, inout index, span >> 32, span & 4294967295) {
+        put_error_answer(inout out, ix_err(in index), ix_span_err(in index));
         return;
     }
-    put(inout v, in ",\"uri\":");
-    put_string(inout v, in uri.as_bytes());
-    v.push(125);
-    if v.len() > MAX_OUTPUT_BYTES {
+    put(inout location, in ",\"uri\":");
+    put_string(inout location, in uri.as_bytes());
+    location.push(125);
+    if location.len() > MAX_OUTPUT_BYTES {
         put_error_answer(inout out, ERR_OUTPUT_BYTES, SpanError::InvalidLimits);
         return;
     }
     out.push(82);
-    put_bytes(inout out, in v.as_slice());
+    put_bytes(inout out, in location.as_slice());
 }
 
 fn put_error_answer(inout out: ChunkSeq[u8], code: u64, e: SpanError) {
@@ -284,22 +285,22 @@ fn put_error_answer(inout out: ChunkSeq[u8], code: u64, e: SpanError) {
 // character of the cursor, the URI length and the source length, then the
 // URI and the source. `textDocument/definition`.
 pub fn lsp_definition(in input: Str) -> ChunkSeq[u64] {
-    let b = input.as_bytes();
-    let mut r = Reader { pos: 0 };
-    let l = read_index(in b, inout r);
-    let line = wrapping_u32(word(in b, inout r));
-    let character = wrapping_u32(word(in b, inout r));
-    let uri_len = word(in b, inout r);
-    let src_len = word(in b, inout r);
-    let uri = text_at(in b, r.pos, uri_len);
-    let src = text_at(in b, wrapping_add(r.pos, uri_len), src_len);
+    let bytes = input.as_bytes();
+    let mut reader = Reader { pos: 0 };
+    let limits = read_index(in bytes, inout reader);
+    let line = wrapping_u32(word(in bytes, inout reader));
+    let character = wrapping_u32(word(in bytes, inout reader));
+    let uri_len = word(in bytes, inout reader);
+    let src_len = word(in bytes, inout reader);
+    let uri = text_at(in bytes, reader.pos, uri_len);
+    let src = text_at(in bytes, wrapping_add(reader.pos, uri_len), src_len);
     if !uri_ok(in uri) {
         return plain_error(ERR_URI_BYTES);
     }
-    let mut x = index_new(src, in l);
+    let mut index = index_new(src, in limits);
     let mut out = ChunkSeq::new[u8]();
     let none = doc_facts_new();
-    definition_answer(inout out, inout x, in uri, line, character, in none, false);
+    definition_answer(inout out, inout index, in uri, line, character, in none, false);
     pack(in out.as_slice())
 }
 
@@ -313,36 +314,37 @@ pub fn lsp_definition(in input: Str) -> ChunkSeq[u64] {
 // documentation-link fallback answers `D`. The answers are joined by
 // newlines.
 pub fn lsp_definitions(in input: Str) -> ChunkSeq[u64] {
-    let b = input.as_bytes();
-    let mut r = Reader { pos: 0 };
-    let l = read_index(in b, inout r);
-    let uri_len = word(in b, inout r);
-    let src_len = word(in b, inout r);
-    let n = word(in b, inout r);
+    let bytes = input.as_bytes();
+    let mut reader = Reader { pos: 0 };
+    let limits = read_index(in bytes, inout reader);
+    let uri_len = word(in bytes, inout reader);
+    let src_len = word(in bytes, inout reader);
+    let n = word(in bytes, inout reader);
     let mut cursors = ChunkSeq::new[u64]();
     for i in 0..wrapping_add(n, n) {
-        cursors.push(word(in b, inout r));
+        cursors.push(word(in bytes, inout reader));
     }
     // 1 when the documentation-link facts follow (doc_links.ves).
-    let has_facts = word(in b, inout r) == 1;
-    let mut fr = WordReader { pos: r.pos };
+    let has_facts = word(in bytes, inout reader) == 1;
+    let mut facts_reader = WordReader { pos: reader.pos };
     let facts = if has_facts {
-        read_doc_facts(in b, inout fr)
+        read_doc_facts(in bytes, inout facts_reader)
     } else {
         doc_facts_new()
     };
-    r.pos = fr.pos;
-    let uri = text_at(in b, r.pos, uri_len);
-    let src = text_at(in b, wrapping_add(r.pos, uri_len), src_len);
+    reader.pos = facts_reader.pos;
+    let uri = text_at(in bytes, reader.pos, uri_len);
+    let src = text_at(in bytes, wrapping_add(reader.pos, uri_len), src_len);
     let mut out = ChunkSeq::new[u8]();
-    let mut x = index_new(src, in l);
+    let mut index = index_new(src, in limits);
     for i in 0..n {
         if i > 0 {
             out.push(10);
-            if ix_err(in x) == ERR_NONE
-                || ix_err(in x) == ERR_POSITION
-                || ix_err(in x) == ERR_INVALID_SPAN {
-                reindex(inout x);
+            if ix_err(in index) == ERR_NONE
+                || ix_err(in index) == ERR_POSITION
+                || ix_err(in index) == ERR_INVALID_SPAN
+            {
+                reindex(inout index);
             }
         }
         if !uri_ok(in uri) {
@@ -357,7 +359,7 @@ pub fn lsp_definitions(in input: Str) -> ChunkSeq[u64] {
             Option::Some(v) => wrapping_u32(v),
             Option::None => 0,
         };
-        definition_answer(inout out, inout x, in uri, line, character, in facts, has_facts);
+        definition_answer(inout out, inout index, in uri, line, character, in facts, has_facts);
     }
     pack(in out.as_slice())
 }
@@ -367,63 +369,64 @@ pub fn lsp_definitions(in input: Str) -> ChunkSeq[u64] {
 // then the query and each document's URI and source, in the store's
 // order. `workspace/symbol`.
 pub fn lsp_workspace_symbols(in input: Str) -> ChunkSeq[u64] {
-    let b = input.as_bytes();
-    let mut r = Reader { pos: 0 };
-    let l = read_index(in b, inout r);
-    let query_len = word(in b, inout r);
-    let docs = word(in b, inout r);
+    let bytes = input.as_bytes();
+    let mut reader = Reader { pos: 0 };
+    let limits = read_index(in bytes, inout reader);
+    let query_len = word(in bytes, inout reader);
+    let docs = word(in bytes, inout reader);
     let mut lens = ChunkSeq::new[u64]();
     for i in 0..wrapping_add(docs, docs) {
-        lens.push(word(in b, inout r));
+        lens.push(word(in bytes, inout reader));
     }
     if docs > MAX_DOCUMENTS || query_len > MAX_QUERY_BYTES {
         return plain_error(ERR_DOCUMENTS_QUERY);
     }
-    let q = b[r.pos..wrapping_add(r.pos, query_len)];
-    let mut at = wrapping_add(r.pos, query_len);
+    let query = bytes[reader.pos..wrapping_add(reader.pos, query_len)];
+    let mut at = wrapping_add(reader.pos, query_len);
     let mut remaining = MAX_OUTPUT_BYTES;
     let mut total: u64 = 2;
     let mut count: u64 = 0;
     let mut out = ChunkSeq::new[u8]();
     out.push(82);
     out.push(91);
-    for d in 0..docs {
-        let uri_len = lens.try_get(wrapping_add(d, d)).unwrap_or(0);
-        let src_len = lens.try_get(wrapping_add(wrapping_add(d, d), 1)).unwrap_or(0);
-        let uri = text_at(in b, at, uri_len);
-        let src = text_at(in b, wrapping_add(at, uri_len), src_len);
+    for doc_index in 0..docs {
+        let uri_len = lens.try_get(wrapping_add(doc_index, doc_index)).unwrap_or(0);
+        let src_len = lens.try_get(wrapping_add(wrapping_add(doc_index, doc_index), 1))
+            .unwrap_or(0);
+        let uri = text_at(in bytes, at, uri_len);
+        let src = text_at(in bytes, wrapping_add(at, uri_len), src_len);
         at = wrapping_add(wrapping_add(at, uri_len), src_len);
         if !uri_ok(in uri) {
             return plain_error(ERR_URI_BYTES);
         }
-        let mut x = index_new(src, in l);
-        if ix_err(in x) != ERR_NONE {
-            return error(ix_err(in x), ix_span_err(in x));
+        let mut index = index_new(src, in limits);
+        if ix_err(in index) != ERR_NONE {
+            return error(ix_err(in index), ix_span_err(in index));
         }
-        for i in 0..decl_count(in x) {
-            if !ix_contains(in x, i, in q) {
+        for i in 0..decl_count(in index) {
+            if !ix_contains(in index, i, in query) {
                 continue;
             }
             if count >= MAX_SYMBOLS {
                 return plain_error(ERR_SYMBOLS);
             }
-            if wrapping_add(decl_name_len(in x, i), uri.len()) > remaining {
+            if wrapping_add(decl_name_len(in index, i), uri.len()) > remaining {
                 return plain_error(ERR_OUTPUT_BYTES);
             }
-            let mut v = ChunkSeq::new[u8]();
-            let (ss, se) = decl_selection(in x, i);
-            put(inout v, in "{\"kind\":");
-            put_u64(inout v, decl_kind(in x, i));
-            put(inout v, in ",\"location\":{\"range\":");
-            if !put_source_range(inout v, inout x, ss, se) {
-                return error(ix_err(in x), ix_span_err(in x));
+            let mut symbol_json = ChunkSeq::new[u8]();
+            let (sel_start, sel_end) = decl_selection(in index, i);
+            put(inout symbol_json, in "{\"kind\":");
+            put_u64(inout symbol_json, decl_kind(in index, i));
+            put(inout symbol_json, in ",\"location\":{\"range\":");
+            if !put_source_range(inout symbol_json, inout index, sel_start, sel_end) {
+                return error(ix_err(in index), ix_span_err(in index));
             }
-            put(inout v, in ",\"uri\":");
-            put_string(inout v, in uri.as_bytes());
-            put(inout v, in "},\"name\":");
-            put_name_string(inout v, in x, decl_name(in x, i));
-            v.push(125);
-            let n = v.len();
+            put(inout symbol_json, in ",\"uri\":");
+            put_string(inout symbol_json, in uri.as_bytes());
+            put(inout symbol_json, in "},\"name\":");
+            put_name_string(inout symbol_json, in index, decl_name(in index, i));
+            symbol_json.push(125);
+            let n = symbol_json.len();
             if n >= remaining {
                 return plain_error(ERR_OUTPUT_BYTES);
             }
@@ -433,7 +436,7 @@ pub fn lsp_workspace_symbols(in input: Str) -> ChunkSeq[u64] {
                 total = wrapping_add(total, 1);
             }
             total = wrapping_add(total, n);
-            put_bytes(inout out, in v.as_slice());
+            put_bytes(inout out, in symbol_json.as_slice());
             count = wrapping_add(count, 1);
         }
     }
@@ -453,45 +456,52 @@ pub fn lsp_workspace_symbols(in input: Str) -> ChunkSeq[u64] {
 // the index is rebuilt per request, as the server's `Index::new` is. The
 // answers (`R<json>`, `Rnull` or `E<error>`) are joined by newlines.
 pub fn lsp_hovers(in input: Str) -> ChunkSeq[u64] {
-    let b = input.as_bytes();
-    let mut cr = CtxReader { pos: 0 };
-    let ctx = read_ctx(inout cr, in b);
-    let mut r = Reader { pos: cr.pos };
-    let l = read_index(in b, inout r);
-    let mut f = facts_new(ctx);
-    let nf = word(in b, inout r);
-    for i in 0..nf {
-        let name = map_name(in f, word(in b, inout r));
-        let start = word(in b, inout r);
-        let end = word(in b, inout r);
-        let has = word(in b, inout r);
-        let result = map_type(in f, word(in b, inout r));
-        fact_function(inout f, name, start, end, if has == 1 { result } else { 4294967295 });
-        let np = word(in b, inout r);
-        for j in 0..np {
-            let ps = word(in b, inout r);
-            let pe = word(in b, inout r);
-            let pn = map_name(in f, word(in b, inout r));
-            let pt = map_type(in f, word(in b, inout r));
-            fact_param(inout f, ps, pe, pn, pt);
+    let bytes = input.as_bytes();
+    let mut ctx_reader = CtxReader { pos: 0 };
+    let ctx = read_ctx(inout ctx_reader, in bytes);
+    let mut reader = Reader { pos: ctx_reader.pos };
+    let limits = read_index(in bytes, inout reader);
+    let mut facts = facts_new(ctx);
+    let fn_count = word(in bytes, inout reader);
+    for i in 0..fn_count {
+        let name = map_name(in facts, word(in bytes, inout reader));
+        let start = word(in bytes, inout reader);
+        let end = word(in bytes, inout reader);
+        let has_result = word(in bytes, inout reader);
+        let result = map_type(in facts, word(in bytes, inout reader));
+        fact_function(
+            inout facts,
+            name,
+            start,
+            end,
+            if has_result == 1 { result } else { 4294967295 }
+        );
+        let param_count = word(in bytes, inout reader);
+        for j in 0..param_count {
+            let param_start = word(in bytes, inout reader);
+            let param_end = word(in bytes, inout reader);
+            let param_name = map_name(in facts, word(in bytes, inout reader));
+            let param_ty = map_type(in facts, word(in bytes, inout reader));
+            fact_param(inout facts, param_start, param_end, param_name, param_ty);
         }
     }
-    let n = word(in b, inout r);
+    let n = word(in bytes, inout reader);
     let mut cursors = ChunkSeq::new[u64]();
     for i in 0..wrapping_add(n, n) {
-        cursors.push(word(in b, inout r));
+        cursors.push(word(in bytes, inout reader));
     }
-    let src_len = word(in b, inout r);
-    let src = text_at(in b, r.pos, src_len);
+    let src_len = word(in bytes, inout reader);
+    let src = text_at(in bytes, reader.pos, src_len);
     let mut out = ChunkSeq::new[u8]();
-    let mut x = index_new(src, in l);
+    let mut index = index_new(src, in limits);
     for i in 0..n {
         if i > 0 {
             out.push(10);
-            if ix_err(in x) == ERR_NONE
-                || ix_err(in x) == ERR_POSITION
-                || ix_err(in x) == ERR_INVALID_SPAN {
-                reindex(inout x);
+            if ix_err(in index) == ERR_NONE
+                || ix_err(in index) == ERR_POSITION
+                || ix_err(in index) == ERR_INVALID_SPAN
+            {
+                reindex(inout index);
             }
         }
         let line = match cursors.try_get(wrapping_add(i, i)) {
@@ -502,20 +512,20 @@ pub fn lsp_hovers(in input: Str) -> ChunkSeq[u64] {
             Option::Some(v) => wrapping_u32(v),
             Option::None => 0,
         };
-        let code = hover_answer(inout out, inout x, inout f, line, character);
+        let code = hover_answer(inout out, inout index, inout facts, line, character);
         if code != ERR_NONE {
-            put_error_answer(inout out, code, ix_span_err(in x));
+            put_error_answer(inout out, code, ix_span_err(in index));
         }
     }
     pack(in out.as_slice())
 }
 
-fn map_name(in f: Facts, i: u64) -> u32 {
-    f.c.nmap.try_get(i).unwrap_or(4294967295)
+fn map_name(in facts: Facts, i: u64) -> u32 {
+    facts.ctx.nmap.try_get(i).unwrap_or(4294967295)
 }
 
-fn map_type(in f: Facts, i: u64) -> u32 {
-    f.c.tmap.try_get(i).unwrap_or(4294967295)
+fn map_type(in facts: Facts, i: u64) -> u32 {
+    facts.ctx.tmap.try_get(i).unwrap_or(4294967295)
 }
 
 // `proof_model::all` (src/lsp/proof_model.rs): the proof-lens model of
@@ -560,4 +570,12 @@ pub fn lsp_lens_requests(in input: Str) -> ChunkSeq[u64] {
 // `proof_result_of`, `proof_status_of`; proof_lenses.ves).
 pub fn lsp_proof_lenses(in input: Str) -> ChunkSeq[u64] {
     proof_lenses(in input)
+}
+
+// The Lens session's request bookkeeping: the per-document debounce of
+// background proof runs, the pending-request table and their cancel tokens
+// (crates/vesper-lsp/src/lens.rs `Debouncer`, `PendingRequests`,
+// `CancelToken`; lens_state.ves).
+pub fn lsp_lens_state(in input: Str) -> ChunkSeq[u64] {
+    lens_state(in input)
 }

@@ -613,7 +613,8 @@ pub fn ndjson_frame(
     };
     let payload_end = if body_end < end
         && body_end > start
-        && at(in input, wrapping_sub(body_end, 1)) == Ascii::Cr {
+        && at(in input, wrapping_sub(body_end, 1)) == Ascii::Cr
+    {
         wrapping_sub(body_end, 1)
     } else {
         body_end
@@ -688,7 +689,8 @@ pub fn ndjson_account(
     }
     if tokens > wrapping_sub(max64(), c.tokens)
         || index > wrapping_sub(max64(), c.index_bytes)
-        || work > wrapping_sub(max64(), c.work) {
+        || work > wrapping_sub(max64(), c.work)
+    {
         here(in c, 9);
     }
     c.tokens = wrapping_add(c.tokens, tokens);

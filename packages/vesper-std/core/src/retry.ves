@@ -1,0 +1,203 @@
+// Bounded retry (manuscript §7.8). The first attempt always runs; the
+// limit is the number of extra attempts and is evaluated once. A failed
+// attempt runs the caller's backoff only if another attempt is available.
+// Bind that error inside backoff so linear payloads must be consumed there.
+// The last Result is returned unchanged. To wait on a clock, call the
+// clock operation in backoff: its effect remains visible to the caller.
+// An optional when clause runs only while a retry is available. A false
+// condition returns that same error without running backoff. The when and
+// backoff blocks share the error binding; a linear error must still be live
+// if the condition can reject it.
+pub sugar retry: tag {
+    rule (
+        retry{
+            $limit:expr retries;
+            attempt $attempt:block when($error:ident) $eligible:block backoff $pause:block
+        }
+    ) => {
+        {
+            let mut retries_left: u64 = $limit;
+            loop {
+                match $attempt {
+                    Result::Ok(value) => {
+                        break Result::Ok(value);
+                    },
+                    Result::Err(failure) => {
+                        if retries_left == 0 {
+                            break Result::Err(failure);
+                        }
+                        let $error = failure;
+                        let retryable: bool = $eligible;
+                        if !retryable {
+                            break Result::Err($error);
+                        }
+                        retries_left = wrapping_sub(retries_left, 1);
+                        let paused: () = $pause;
+                    },
+                }
+            }
+        }
+    }
+
+    rule (
+        retry{
+            $limit:expr retries;
+            attempt $attempt:block backoff($error:ident) $pause:block
+        }
+    ) => {
+        {
+            let mut retries_left: u64 = $limit;
+            loop {
+                match $attempt {
+                    Result::Ok(value) => {
+                        break Result::Ok(value);
+                    },
+                    Result::Err(failure) => {
+                        if retries_left == 0 {
+                            break Result::Err(failure);
+                        }
+                        retries_left = wrapping_sub(retries_left, 1);
+                        let $error = failure;
+                        let paused: () = $pause;
+                    },
+                }
+            }
+        }
+    }
+}
+
+// A private test clock, not a standard effect declaration.
+linear effect RetryTestClock {
+    fn pause_for_retry_test(ns: u64);
+}
+
+test {
+    linear struct Rejected {
+        attempt: u64,
+    }
+
+    fn reject(attempt: u64) -> Rejected {
+        Rejected { attempt }
+    }
+
+    fn consume(sink rejected: Rejected) -> u64 {
+        let Rejected { attempt } = rejected;
+        attempt
+    }
+
+    fn evaluate_limit(limit: u64, inout evaluations: u64) -> u64 {
+        evaluations = wrapping_add(evaluations, 1);
+        limit
+    }
+
+    // @case first_success(3, 1, 1, 0, 1)
+    // @case succeeds_after_waiting(4, 3, 3, 3, 3)
+    // @case exhausted(2, 0, 3, 3, 0)
+    // @case no_retries(0, 0, 1, 0, 0)
+    // @case maximum_limit_exits_on_success(18446744073709551615, 1, 1, 0, 1)
+    fn test_retry_budget(
+        limit: u64,
+        succeeds_at: u64,
+        expected_attempts: u64,
+        expected_wait_sum: u64,
+        expected_value: u64
+    ) -> bool {
+        let mut limit_evaluations: u64 = 0;
+        let mut attempts: u64 = 0;
+        let mut wait_sum: u64 = 0;
+        let result: Result[u64, Rejected] = retry{
+            evaluate_limit(limit, inout limit_evaluations) retries;
+            attempt {
+                attempts = wrapping_add(attempts, 1);
+                if attempts == succeeds_at {
+                    Result::Ok(attempts)
+                } else {
+                    Result::Err(reject(attempts))
+                }
+            }
+            backoff(rejected) {
+                wait_sum = wrapping_add(wait_sum, consume(sink rejected));
+            }
+        };
+        let correct_outcome = match result {
+            Result::Ok(value) => expected_value != 0 && value == expected_value,
+            Result::Err(rejected) => {
+                let attempt = consume(sink rejected);
+                expected_value == 0 && attempt == expected_attempts
+            },
+        };
+        correct_outcome
+            && limit_evaluations == 1
+            && attempts == expected_attempts
+            && wait_sum == expected_wait_sum
+            && rejects_without_backoff(1, 4, 1, 1, 0)
+            && rejects_without_backoff(1, 0, 1, 0, 0)
+            && rejects_without_backoff(3, 4, 3, 3, 3)
+            && rejects_without_backoff(0, 2, 3, 2, 3)
+    }
+
+    fn rejects_without_backoff(
+        stop_on: u64,
+        limit: u64,
+        expected: u64,
+        wanted_checks: u64,
+        wanted_pauses: u64
+    ) -> bool {
+        let mut attempts: u64 = 0;
+        let mut checks: u64 = 0;
+        let mut pauses: u64 = 0;
+        let result: Result[u64, Rejected] = retry{
+            limit retries;
+            attempt {
+                attempts = wrapping_add(attempts, 1);
+                Result::Err(reject(attempts))
+            }
+            when(err) {
+                checks = wrapping_add(checks, 1);
+                err.attempt != stop_on
+            }
+            backoff {
+                pauses = wrapping_add(pauses, consume(sink err));
+            }
+        };
+        match result {
+            Result::Ok(_) => false,
+            Result::Err(err) => consume(sink err) == expected
+                && attempts == expected
+                && checks == wanted_checks
+                && pauses == wanted_pauses,
+        }
+    }
+
+    fn test_backoff_passes_through_clock() -> bool {
+        let delay_ns: u64 = 10;
+        let (outcome, elapsed) = handle RetryTestClock in {
+            let mut attempts: u64 = 0;
+            let result: Result[u64, u64] = retry{
+                3 retries;
+                attempt {
+                    attempts = wrapping_add(attempts, 1);
+                    if attempts == 3 {
+                        Result::Ok(attempts)
+                    } else {
+                        Result::Err(attempts)
+                    }
+                }
+                backoff(failed_attempt) {
+                    RetryTestClock::pause_for_retry_test(delay_ns);
+                }
+            };
+            result
+        } with {
+            return result => (result, widen_u64(0)),
+            pause_for_retry_test(ns, resume) => {
+                let (result, elapsed) = resume(());
+                (result, wrapping_add(elapsed, ns))
+            },
+        };
+        match outcome {
+            Result::Ok(n) => n == 3 && elapsed == wrapping_add(delay_ns, delay_ns),
+            Result::Err(_) => false,
+        }
+    }
+}

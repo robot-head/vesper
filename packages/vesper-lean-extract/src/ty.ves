@@ -16,193 +16,218 @@ pub const E_ROW: u64 = 4;
 // A named type whose name is not a Lean name: `B::check` reports it.
 pub const E_NAME: u64 = 5;
 
-// Records error `code` (type `ty` for E_NAME) on `b`.
-pub fn report(inout b: B, code: u64, name: u32) {
+// Records error `code` (type `ty` for E_NAME) on `builder`.
+pub fn report(inout builder: B, code: u64, name: u32) {
     if code == E_I128 {
-        b.fail(in "Lean extraction does not model i128 yet");
+        builder.fail(in "Lean extraction does not model i128 yet");
     } else if code == E_U128 {
-        b.fail(in "Lean extraction does not model u128 yet");
+        builder.fail(in "Lean extraction does not model u128 yet");
     } else if code == E_MONAD {
-        b.fail(in "effectful function type needs an ambient Lean monad");
+        builder.fail(in "effectful function type needs an ambient Lean monad");
     } else if code == E_ROW {
-        b.fail(in "effect rows are not first-class Lean values");
+        builder.fail(in "effect rows are not first-class Lean values");
     } else if code == E_NAME {
-        b.check(name, in "name");
+        builder.check(name, in "name");
     }
 }
 
 // The Lean constructor of a primitive type name, or "" for a source name.
-fn primitive(in b: B, s: u32) -> Str {
-    if spells(in b, s, in "u8") {
+fn primitive(in builder: B, sym: u32) -> Str {
+    if spells(in builder, sym, in "u8") {
         "UInt8"
-    } else if spells(in b, s, in "u16") {
+    } else if spells(in builder, sym, in "u16") {
         "UInt16"
-    } else if spells(in b, s, in "u32") {
+    } else if spells(in builder, sym, in "u32") {
         "UInt32"
-    } else if spells(in b, s, in "u64") || spells(in b, s, in "usize") {
+    } else if spells(in builder, sym, in "u64") || spells(in builder, sym, in "usize") {
         "UInt64"
-    } else if spells(in b, s, in "i8") {
+    } else if spells(in builder, sym, in "i8") {
         "Int8"
-    } else if spells(in b, s, in "i16") {
+    } else if spells(in builder, sym, in "i16") {
         "Int16"
-    } else if spells(in b, s, in "i32") {
+    } else if spells(in builder, sym, in "i32") {
         "Int32"
-    } else if spells(in b, s, in "i64") || spells(in b, s, in "isize") {
+    } else if spells(in builder, sym, in "i64") || spells(in builder, sym, in "isize") {
         "Int64"
     } else {
-        primitive_rest(in b, s)
+        primitive_rest(in builder, sym)
     }
 }
 
-fn primitive_rest(in b: B, s: u32) -> Str {
-    if spells(in b, s, in "f64") {
+fn primitive_rest(in builder: B, sym: u32) -> Str {
+    if spells(in builder, sym, in "f64") {
         "Float"
-    } else if spells(in b, s, in "f32") {
+    } else if spells(in builder, sym, in "f32") {
         "Float32"
-    } else if spells(in b, s, in "bool") {
+    } else if spells(in builder, sym, in "bool") {
         "Bool"
-    } else if spells(in b, s, in "Unit") {
+    } else if spells(in builder, sym, in "Unit") {
         "Unit"
-    } else if spells(in b, s, in "Never") {
+    } else if spells(in builder, sym, in "Never") {
         "Empty"
-    } else if spells(in b, s, in "String") {
+    } else if spells(in builder, sym, in "String") {
         "String"
-    } else if spells(in b, s, in "Option") {
+    } else if spells(in builder, sym, in "Option") {
         "Option"
-    } else if spells(in b, s, in "Result") {
+    } else if spells(in builder, sym, in "Result") {
         "Except"
-    } else if spells(in b, s, in "TiledSeq")
-        || spells(in b, s, in "ChunkSeq")
-        || spells(in b, s, in "Slice") {
+    } else if spells(in builder, sym, in "TiledSeq")
+        || spells(in builder, sym, in "ChunkSeq")
+        || spells(in builder, sym, in "Slice")
+    {
         "Array"
     } else {
         ""
     }
 }
 
-pub fn spells(in b: B, s: u32, in text: Str) -> bool {
-    b.names.spells(s, in text.as_bytes())
+pub fn spells(in builder: B, sym: u32, in text: Str) -> bool {
+    builder.names.spells(sym, in text.as_bytes())
 }
 
 // Whether `Box[T]` erases to `T` (fip active, one argument).
-fn erased(in b: B, in t: Types, ty: u32, erase_box: bool) -> bool {
-    let n = t.node(ty);
-    erase_box && n.kind == TyKind::Named && w(n.n) == 1 && spells(in b, n.name, in "Box")
+fn erased(in builder: B, in types: Types, ty: u32, erase_box: bool) -> bool {
+    let node = types.node(ty);
+    erase_box
+        && node.kind == TyKind::Named
+        && w(node.n) == 1
+        && spells(in builder, node.name, in "Box")
 }
 
 // The argument order of a named type: `Result[T, E]` is `Except E T`, and a
 // `TiledSeq` keeps its element only.
-fn ordered_count(in b: B, in t: Types, ty: u32) -> u64 {
-    let n = t.node(ty);
-    if spells(in b, n.name, in "TiledSeq") && n.n > 0 {
+fn ordered_count(in builder: B, in types: Types, ty: u32) -> u64 {
+    let node = types.node(ty);
+    if spells(in builder, node.name, in "TiledSeq") && node.n > 0 {
         1
     } else {
-        w(n.n)
+        w(node.n)
     }
 }
 
-fn ordered_arg(in b: B, in t: Types, ty: u32, i: u64) -> u32 {
-    let n = t.node(ty);
-    if spells(in b, n.name, in "Result") && n.n == 2 {
-        t.arg(ty, wrapping_sub(1, i))
+fn ordered_arg(in builder: B, in types: Types, ty: u32, i: u64) -> u32 {
+    let node = types.node(ty);
+    if spells(in builder, node.name, in "Result") && node.n == 2 {
+        types.arg(ty, wrapping_sub(1, i))
     } else {
-        t.arg(ty, i)
+        types.arg(ty, i)
     }
 }
 
-fn has_effects(in t: Types, r: u32) -> bool {
-    let row = t.row(r);
+fn has_effects(in types: Types, row_ty: u32) -> bool {
+    let row = types.row(row_ty);
     row.n > 0 || row.tail != 0
 }
 
 // The first error of `typed(ty, None, erase_box)` and, for E_NAME, the
 // offending name.
-pub fn ty_error(in b: B, in t: Types, ty: u32, erase_box: bool, inout name: u32) -> u64 {
-    ty_error_m(in b, in t, ty, erase_box, false, inout name)
+pub fn ty_error(in builder: B, in types: Types, ty: u32, erase_box: bool, inout name: u32) -> u64 {
+    ty_error_m(in builder, in types, ty, erase_box, false, inout name)
 }
 
 // `ty_error` of `typed(ty, monad, erase_box)`: with an ambient monad an
 // effectful arrow is no error.
 pub fn ty_error_m(
-    in b: B,
-    in t: Types,
+    in builder: B,
+    in types: Types,
     ty: u32,
     erase_box: bool,
     monad: bool,
     inout name: u32
 ) -> u64 {
-    let n = t.node(ty);
-    if n.kind == TyKind::Lit || n.kind == T_INFER_KIND {
+    let node = types.node(ty);
+    if node.kind == TyKind::Lit || node.kind == T_INFER_KIND {
         return E_NONE;
     }
-    if n.kind == TyKind::Named {
-        if erased(in b, in t, ty, erase_box) {
-            return ty_error_m(in b, in t, t.arg(ty, 0), erase_box, monad, inout name);
+    if node.kind == TyKind::Named {
+        if erased(in builder, in types, ty, erase_box) {
+            return ty_error_m(in builder, in types, types.arg(ty, 0), erase_box, monad, inout name);
         }
-        if spells(in b, n.name, in "i128") {
+        if spells(in builder, node.name, in "i128") {
             return E_I128;
         }
-        if spells(in b, n.name, in "u128") {
+        if spells(in builder, node.name, in "u128") {
             return E_U128;
         }
-        if primitive(in b, n.name).len() == 0 && !b.valid(n.name) {
-            name = n.name;
+        if primitive(in builder, node.name).len() == 0 && !builder.valid(node.name) {
+            name = node.name;
             return E_NAME;
         }
-        for i in 0..ordered_count(in b, in t, ty) {
-            let e = ty_error_m(
-                in b,
-                in t,
-                ordered_arg(in b, in t, ty, i),
+        for i in 0..ordered_count(in builder, in types, ty) {
+            let code = ty_error_m(
+                in builder,
+                in types,
+                ordered_arg(in builder, in types, ty, i),
                 erase_box,
                 monad,
                 inout name
             );
-            if e != E_NONE {
-                return e;
+            if code != E_NONE {
+                return code;
             }
         }
         return E_NONE;
     }
-    if n.kind == TyKind::Tuple {
-        for i in 0..w(n.n) {
-            let e = ty_error_m(in b, in t, t.arg(ty, i), erase_box, monad, inout name);
-            if e != E_NONE {
-                return e;
+    if node.kind == TyKind::Tuple {
+        for i in 0..w(node.n) {
+            let code = ty_error_m(
+                in builder,
+                in types,
+                types.arg(ty, i),
+                erase_box,
+                monad,
+                inout name
+            );
+            if code != E_NONE {
+                return code;
             }
         }
         return E_NONE;
     }
-    if n.kind == TyKind::Fn {
-        let e = ty_error_m(in b, in t, n.r, erase_box, monad, inout name);
-        if e != E_NONE {
-            return e;
+    if node.kind == TyKind::Fn {
+        let code = ty_error_m(in builder, in types, node.r, erase_box, monad, inout name);
+        if code != E_NONE {
+            return code;
         }
-        for i in 0..w(n.n) {
-            if t.param_pass(ty, i) == TyPass::Inout {
-                let e = ty_error_m(in b, in t, t.arg(ty, i), erase_box, monad, inout name);
-                if e != E_NONE {
-                    return e;
+        for i in 0..w(node.n) {
+            if types.param_pass(ty, i) == TyPass::Inout {
+                let code = ty_error_m(
+                    in builder,
+                    in types,
+                    types.arg(ty, i),
+                    erase_box,
+                    monad,
+                    inout name
+                );
+                if code != E_NONE {
+                    return code;
                 }
             }
         }
-        if !monad && has_effects(in t, n.r2) {
+        if !monad && has_effects(in types, node.r2) {
             return E_MONAD;
         }
-        let mut i = w(n.n);
+        let mut i = w(node.n);
         loop {
             if i == 0 {
                 break;
             }
             i = wrapping_sub(i, 1);
-            let e = ty_error_m(in b, in t, t.arg(ty, i), erase_box, monad, inout name);
-            if e != E_NONE {
-                return e;
+            let code = ty_error_m(
+                in builder,
+                in types,
+                types.arg(ty, i),
+                erase_box,
+                monad,
+                inout name
+            );
+            if code != E_NONE {
+                return code;
             }
         }
         return E_NONE;
     }
-    if n.kind == TyKind::Row {
+    if node.kind == TyKind::Row {
         return E_ROW;
     }
     E_NONE
@@ -210,109 +235,116 @@ pub fn ty_error_m(
 
 const T_INFER_KIND: u8 = 5;
 
-// Checks `ty` and records its first error on `b`.
-pub fn ty_check(inout b: B, in t: Types, ty: u32, erase_box: bool) {
+// Checks `ty` and records its first error on `builder`.
+pub fn ty_check(inout builder: B, in types: Types, ty: u32, erase_box: bool) {
     let mut name: u32 = 0;
-    let e = ty_error(in b, in t, ty, erase_box, inout name);
-    if e != E_NONE {
-        report(inout b, e, name);
+    let code = ty_error(in builder, in types, ty, erase_box, inout name);
+    if code != E_NONE {
+        report(inout builder, code, name);
     }
 }
 
 // Writes `typed(ty, None, erase_box)`.
-pub fn emit_ty(inout b: B, in t: Types, ty: u32, erase_box: bool) {
+pub fn emit_ty(inout builder: B, in types: Types, ty: u32, erase_box: bool) {
     let none = T { a: 0, n: 0 };
-    emit_ty_m(inout b, in t, ty, erase_box, false, none);
+    emit_ty_m(inout builder, in types, ty, erase_box, false, none);
 }
 
-// Writes `typed(ty, Some(monad), erase_box)` when `has`, else with no
+// Writes `typed(ty, Some(monad), erase_box)` when `has_monad`, else with no
 // monad.
-pub fn emit_ty_m(inout b: B, in t: Types, ty: u32, erase_box: bool, has: bool, monad: T) {
-    let n = t.node(ty);
-    if n.kind == TyKind::Lit {
-        if n.mode == 0 && wrapping_u64(n.lit) > 9223372036854775807 {
-            b.global(in "UInt64");
+pub fn emit_ty_m(
+    inout builder: B,
+    in types: Types,
+    ty: u32,
+    erase_box: bool,
+    has_monad: bool,
+    monad: T
+) {
+    let node = types.node(ty);
+    if node.kind == TyKind::Lit {
+        if node.mode == 0 && wrapping_u64(node.lit) > 9223372036854775807 {
+            builder.global(in "UInt64");
         } else {
-            b.global(in "Int64");
+            builder.global(in "Int64");
         }
         return;
     }
-    if n.kind == TyKind::Named {
-        if erased(in b, in t, ty, erase_box) {
-            emit_ty_m(inout b, in t, t.arg(ty, 0), erase_box, has, monad);
+    if node.kind == TyKind::Named {
+        if erased(in builder, in types, ty, erase_box) {
+            emit_ty_m(inout builder, in types, types.arg(ty, 0), erase_box, has_monad, monad);
             return;
         }
-        let count = ordered_count(in b, in t, ty);
+        let count = ordered_count(in builder, in types, ty);
         let mut mark: u64 = 0;
         if count > 0 {
-            mark = b.app(count);
+            mark = builder.app(count);
         }
-        if primitive(in b, n.name).len() == 0 {
-            b.sref(n.name);
+        if primitive(in builder, node.name).len() == 0 {
+            builder.sref(node.name);
         } else {
-            let p = primitive(in b, n.name);
-            b.global(in p);
+            let lean_name = primitive(in builder, node.name);
+            builder.global(in lean_name);
         }
         if count > 0 {
-            b.args(mark);
+            builder.args(mark);
             for i in 0..count {
-                b.arg();
-                let a = ordered_arg(in b, in t, ty, i);
-                emit_ty_m(inout b, in t, a, erase_box, has, monad);
+                builder.arg();
+                let arg_ty = ordered_arg(in builder, in types, ty, i);
+                emit_ty_m(inout builder, in types, arg_ty, erase_box, has_monad, monad);
             }
         }
         return;
     }
-    if n.kind == TyKind::Tuple {
-        if n.n == 0 {
-            b.global(in "Unit");
-        } else if n.n == 1 {
-            emit_ty_m(inout b, in t, t.arg(ty, 0), erase_box, has, monad);
+    if node.kind == TyKind::Tuple {
+        if node.n == 0 {
+            builder.global(in "Unit");
+        } else if node.n == 1 {
+            emit_ty_m(inout builder, in types, types.arg(ty, 0), erase_box, has_monad, monad);
         } else {
-            b.w(T_PRODUCT);
-            b.w(w(n.n));
-            for i in 0..w(n.n) {
-                emit_ty_m(inout b, in t, t.arg(ty, i), erase_box, has, monad);
+            builder.w(T_PRODUCT);
+            builder.w(w(node.n));
+            for i in 0..w(node.n) {
+                emit_ty_m(inout builder, in types, types.arg(ty, i), erase_box, has_monad, monad);
             }
         }
         return;
     }
-    if n.kind == TyKind::Fn {
-        let params = w(n.n);
+    if node.kind == TyKind::Fn {
+        let params = w(node.n);
         for i in 0..params {
-            b.w(T_ARROW);
-            emit_ty_m(inout b, in t, t.arg(ty, i), erase_box, has, monad);
+            builder.w(T_ARROW);
+            emit_ty_m(inout builder, in types, types.arg(ty, i), erase_box, has_monad, monad);
         }
         if params == 0 {
-            b.w(T_ARROW);
-            b.global(in "Unit");
+            builder.w(T_ARROW);
+            builder.global(in "Unit");
         }
         // product([result, inout parameters...])
         let mut results: u64 = 1;
         for i in 0..params {
-            if t.param_pass(ty, i) == TyPass::Inout {
+            if types.param_pass(ty, i) == TyPass::Inout {
                 results = wrapping_add(results, 1);
             }
         }
-        let wrap = has && has_effects(in t, n.r2);
+        let wrap = has_monad && has_effects(in types, node.r2);
         let mut mark: u64 = 0;
         if wrap {
-            mark = b.app(1);
-            b.put(monad);
-            b.args(mark);
-            b.arg();
+            mark = builder.app(1);
+            builder.put(monad);
+            builder.args(mark);
+            builder.arg();
         }
         if results > 1 {
-            b.w(T_PRODUCT);
-            b.w(results);
+            builder.w(T_PRODUCT);
+            builder.w(results);
         }
-        emit_ty_m(inout b, in t, n.r, erase_box, has, monad);
+        emit_ty_m(inout builder, in types, node.r, erase_box, has_monad, monad);
         for i in 0..params {
-            if t.param_pass(ty, i) == TyPass::Inout {
-                emit_ty_m(inout b, in t, t.arg(ty, i), erase_box, has, monad);
+            if types.param_pass(ty, i) == TyPass::Inout {
+                emit_ty_m(inout builder, in types, types.arg(ty, i), erase_box, has_monad, monad);
             }
         }
         return;
     }
-    b.w(T_INFER);
+    builder.w(T_INFER);
 }

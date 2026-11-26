@@ -10,6 +10,8 @@
 use @vesper/check-data::util::{inc, inc32, n32, u32_at, u64_at, w};
 use @vesper/check-data::names::{Names, names_new};
 use @vesper/check-data::input::{Reader};
+use @vesper-std/bytes::ascii::{DIGIT_NINE, DIGIT_ZERO};
+use self::text::{WORD_BYTES, WORD_ROUND_UP};
 
 // `AbiType` kinds (words.rs `K_*`).
 pub const K_SCALAR: u8 = 0;
@@ -33,6 +35,28 @@ pub const P_OTHER: u8 = 4;
 pub const M_NONE: u8 = 0;
 pub const M_REPR_C: u8 = 1;
 pub const M_CONVERTED: u8 = 2;
+
+// None, in a u32 table or answer (`array_elem` of a type that is no array).
+pub const NONE32: u32 = 4294967295;
+
+// The words of a `Slice` or `Str` value (`abi_words`).
+pub const VIEW_WORDS: u64 = 3;
+
+// The type arguments of `Result[T, E]`.
+pub const RESULT_ARGS: u64 = 2;
+
+// A homogeneous tuple of more elements than this reads as an array
+// (binding.rs `array`).
+pub const MAX_TUPLE_FIELDS: u64 = 8;
+
+// The export ABI versions an `@export abi` directive names, and the ABI
+// tag of each version (`LibraryInterface::abi`).
+pub const ABI_V3: u64 = 3;
+pub const ABI_V4: u64 = 4;
+pub const ABI_V1_TAG: Str = "vesper.native.export-abi/1";
+pub const ABI_V2_TAG: Str = "vesper.native.export-abi/2";
+pub const ABI_V3_TAG: Str = "vesper.native.export-abi/3";
+pub const ABI_V4_TAG: Str = "vesper.native.export-abi/4";
 
 pub copy struct TyNode {
     kind: u8,
@@ -192,7 +216,10 @@ pub fn read_iface(in b: Slice[u8]) -> Iface {
         let start = r.pos;
         let s = names.intern(in b[start..wrapping_add(start, len)]);
         nmap.push(s);
-        r.pos = wrapping_add(start, wrapping_mul(wrapping_add(len, 7) / 8, 8));
+        r.pos = wrapping_add(
+            start,
+            wrapping_mul(wrapping_add(len, WORD_ROUND_UP) / WORD_BYTES, WORD_BYTES)
+        );
     }
     let known = Known {
         option: intern_str(inout names, "Option"),
@@ -506,15 +533,15 @@ impl Iface {
 
     // Whether the library uses export ABI v2 or later.
     pub fn is_v2(in self) -> bool {
-        self.names.spells(self.abi, in "vesper.native.export-abi/2".as_bytes()) || self.is_v3()
+        self.names.spells(self.abi, in ABI_V2_TAG.as_bytes()) || self.is_v3()
     }
 
     pub fn is_v3(in self) -> bool {
-        self.names.spells(self.abi, in "vesper.native.export-abi/3".as_bytes()) || self.is_v4()
+        self.names.spells(self.abi, in ABI_V3_TAG.as_bytes()) || self.is_v4()
     }
 
     pub fn is_v4(in self) -> bool {
-        self.names.spells(self.abi, in "vesper.native.export-abi/4".as_bytes())
+        self.names.spells(self.abi, in ABI_V4_TAG.as_bytes())
     }
 
     // Whether `t` names a handle type; its decl index + 1, else 0.
@@ -560,7 +587,7 @@ impl Iface {
         let n = self.node(t);
         let k = n.kind;
         if k == K_SLICE || k == K_STR {
-            return 3;
+            return VIEW_WORDS;
         }
         if k == K_TUPLE {
             let mut s: u64 = 0;
@@ -622,7 +649,7 @@ impl Iface {
             return !self.owning(t) && n.n == 1;
         }
         if n.name == self.known.result {
-            return !self.owning(t) && n.n == 2;
+            return !self.owning(t) && n.n == RESULT_ARGS;
         }
         false
     }
@@ -631,13 +658,13 @@ impl Iface {
     // `[T; N]` (binding.rs `array`): its element, else u32::MAX.
     pub fn array_elem(in self, t: u32) -> u32 {
         let n = self.node(t);
-        if n.kind != K_TUPLE || n.n <= 8 {
-            return 4294967295;
+        if n.kind != K_TUPLE || n.n <= MAX_TUPLE_FIELDS {
+            return NONE32;
         }
         let first = self.kid(t, 0);
         for i in 1..n.n {
             if self.kid(t, i) != first {
-                return 4294967295;
+                return NONE32;
             }
         }
         first
@@ -663,7 +690,7 @@ impl Iface {
         let e = self.names.end(s);
         for i in a..e {
             let c = self.names.byte(s, wrapping_sub(i, a));
-            if c < 48 || c > 57 {
+            if c < DIGIT_ZERO || c > DIGIT_NINE {
                 return false;
             }
         }

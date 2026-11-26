@@ -27,7 +27,7 @@ pub mod interp;
 #[cfg(target_os = "linux")]
 #[path = "../../src/kernel.rs"]
 pub mod kernel;
-#[path = "../../src/mitigator.rs"]
+#[path = "engine/mitigator.rs"]
 pub mod mitigator;
 #[path = "engine/program.rs"]
 pub mod program;

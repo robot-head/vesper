@@ -14,14 +14,19 @@
 // Slice 1 (machine.ves) is the core machine: integers of the 64-bit kinds
 // and narrower, `bool`, string literals, tuples, data, function values,
 // direct and indirect calls with `inout` places, patterns, `?` and the
-// primitive failures. A program reaching anything else (closures,
-// handlers, sequences, floats, 128-bit integers, vector, tiled and `Box`
-// operations) is declined before it runs (`scan`), and the caller runs
-// the Rust evaluator instead.
+// primitive failures. Slice 2 adds handlers: the handler frame, its return
+// clause, and `perform` of primitive failures, `?` and effect operation
+// calls into the operation clauses. Slice 3 resumes one-shot
+// continuations and runs state handlers. A program reaching anything else
+// (closures, sequences, floats, 128-bit integers, vector, tiled and `Box`
+// operations) is declined before it runs (`scan`), and a continuation
+// resumed outside its handler's activation is declined when it is; the
+// caller then runs the Rust evaluator instead.
 //
 // The input (tests/common/run_words.rs `run_input`): check-data's names,
 // types and world, the program section of `ir_words::program_input`, then
-// the fuel and the entry's name index. The output: a status word, then a
+// the fuel, the entry's name index and the effect table (handlers, effect
+// operation calls and `?` sites; `sites` in run_words.rs). The output: a status word, then a
 // text as `put_text_words` words:
 //
 // - 0: the result's `Display` text (what `vesper run` prints);
@@ -31,7 +36,7 @@
 use @vesper/check-data::util::{put_text_words};
 use @vesper/check-data::input::{Reader, read_ctx};
 use @vesper/place-ir::{read_program};
-use self::machine::{M, machine_new, load, scan, drive};
+use self::machine::{M, machine_new, load, read_sites, scan, drive};
 
 pub const RUN_OK: u64 = 0;
 pub const RUN_ERROR: u64 = 1;
@@ -39,7 +44,7 @@ pub const RUN_DECLINED: u64 = 2;
 
 // The layout version of `run_words`.
 pub fn format() -> u64 {
-    1
+    2
 }
 
 pub fn run_words(in bytes: Slice[u8]) -> ChunkSeq[u64] {
@@ -51,6 +56,7 @@ pub fn run_words(in bytes: Slice[u8]) -> ChunkSeq[u64] {
     let mut machine = machine_new(ctx, program, fuel);
     let mut out: ChunkSeq[u64] = ChunkSeq::new[u64]();
     load(inout machine, entry);
+    read_sites(inout machine, inout reader, in bytes);
     if !machine.declined {
         scan(inout machine);
     }
@@ -60,6 +66,11 @@ pub fn run_words(in bytes: Slice[u8]) -> ChunkSeq[u64] {
         return out;
     }
     drive(inout machine);
+    if machine.declined {
+        out.push(RUN_DECLINED);
+        put_text_words(inout out, in machine.message[0..machine.message.len()]);
+        return out;
+    }
     if machine.failed {
         out.push(RUN_ERROR);
     } else {

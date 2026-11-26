@@ -25,16 +25,18 @@ use @vesper/ast::{
 };
 use @vesper/ast::lower::{lower_source};
 use @vesper/check-data::{pack_text};
+use @vesper/preludes::{
+    atomics_source, option_source, regions_source, strings_source, workers_source
+};
 use @vesper-std/arena::{idx_from_raw};
 use @vesper-std/intern::{Interner, interner_new, symbol_from_id};
 use self::prelude::{
-    defined_methods, module_end, needs_option, needs_strings, option_source, replaced,
-    sorted_symbols, strings_source, used, uses_of, Uses, atomics_source, workers_source,
-    needs_workers
+    defined_methods, module_end, needs_option, needs_strings, needs_workers, replaced,
+    sorted_symbols, used, uses_of, Uses
 };
 use self::boxes::{box_dump, needs_atomics, needs_box};
 use self::floats::{float_source};
-use self::regions::{builtin_region, needs_region, region_source};
+use self::regions::{builtin_region, needs_region};
 use self::secret::{secret_source};
 use self::widths::{reserved_width_name, width_source};
 
@@ -309,7 +311,8 @@ fn collect_item(
         if name_is(in a, n.name, "Unit")
             || name_is(in a, n.name, "Never")
             || name_is(in a, n.name, "String")
-            || name_is(in a, n.name, "Str") {
+            || name_is(in a, n.name, "Str")
+        {
             let m = quoted(in a, n.name, " is a reserved builtin type");
             diag(
                 inout c,
@@ -375,7 +378,8 @@ fn collect_item(
         let n = fn_node(in a, it.node);
         let key = name_text(in a, n.name);
         if is_wrapping_intrinsic(in a, n.name)
-            || (src == 1 && reserved_width_name(in key.as_str())) {
+            || (src == 1 && reserved_width_name(in key.as_str()))
+        {
             let m = quoted(in a, n.name, " is a reserved arithmetic intrinsic");
             diag(
                 inout c,
@@ -1125,7 +1129,7 @@ fn collected(in source: Str) -> Collected {
     let uses = uses_of(in module);
     let with_region = needs_region(in module);
     let region = if with_region {
-        lower_source(in region_source()).ast
+        lower_source(in regions_source()).ast
     } else {
         lower_source(in "").ast
     };
@@ -1663,7 +1667,8 @@ fn mode_visit(in w: Collected, in a: Ast, t: u32, in b: Bounds, inout seen: Seen
     }
     if name_is(in a, n.a, "ChunkSeq")
         || name_is(in a, n.a, "Slice")
-        || name_is(in a, n.a, "TiledSeq") {
+        || name_is(in a, n.a, "TiledSeq")
+    {
         return join_mode(mode_visit(in w, in a, list_at(in a, n.b, 0), in b, inout seen), 1);
     }
     let mut args = ChunkSeq::new[u8]();
@@ -1850,11 +1855,9 @@ fn head_is(in a: Ast, sym: u32, in lit: Str) -> bool {
         }
     }
     n == t.len()
-        || (
-            n > wrapping_add(t.len(), 1)
-                && name_byte(in a, wrapping_add(s, t.len())) == 58
-                && name_byte(in a, wrapping_add(wrapping_add(s, t.len()), 1)) == 58
-        )
+        || (n > wrapping_add(t.len(), 1)
+            && name_byte(in a, wrapping_add(s, t.len())) == 58
+            && name_byte(in a, wrapping_add(wrapping_add(s, t.len()), 1)) == 58)
 }
 
 // A name that makes the checker elaborate the module before collecting
@@ -1941,7 +1944,8 @@ fn declined(in source: Str, in a: Ast) -> bool {
         if it.kind == 2 {
             let f = fn_node(in a, it.node);
             if head_const(in a, f.name)
-                && (f.result == none() || type_at(in a, f.result).kind == 5) {
+                && (f.result == none() || type_at(in a, f.result).kind == 5)
+            {
                 return true;
             }
         }
@@ -1950,11 +1954,10 @@ fn declined(in source: Str, in a: Ast) -> bool {
     for t in 0..a.types.len() {
         let n = type_at(in a, wrapping_u32(t));
         if n.kind == 1
-            && (
-                name_is(in a, n.a, "dyn")
-                    || name_is(in a, n.a, "$projection")
-                    || name_is(in a, n.a, "[]")
-            ) {
+            && (name_is(in a, n.a, "dyn")
+                || name_is(in a, n.a, "$projection")
+                || name_is(in a, n.a, "[]"))
+        {
             return true;
         }
     }
@@ -2203,7 +2206,21 @@ fn world_words(in w: Collected, inout o: ChunkSeq[u8]) {
     }
 }
 
-// The harness and driver entry: 1 then the `WorldDecls` stream of
+// The hybrid driver's entry (#2024 slice 2c-2): the `WorldDecls` stream of
+// `source`'s checked world, or None when the checker elaborates the module
+// first (the session encodes it).
+pub fn decls_bytes(in source: Str) -> Option[ChunkSeq[u8]] {
+    let probe = lower_source(in source).ast;
+    if declined(in source, in probe) {
+        return Option::None;
+    }
+    let mut o = ChunkSeq::new[u8]();
+    let w = collected(in source);
+    world_words(in w, inout o);
+    Option::Some(o)
+}
+
+// The harness entry: 1 then the `WorldDecls` stream of
 // `source`'s checked world, or 0 when the checker elaborates the module
 // first (Rust encodes it).
 pub fn decls_words(in source: Str) -> ChunkSeq[u64] {

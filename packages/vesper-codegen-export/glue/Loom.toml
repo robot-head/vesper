@@ -9,3 +9,4 @@ capability_ceiling = ["Fail", "Alloc", "Ffi"]
 "@vesper/check-data" = { version = "^0.1", path = "../../vesper-check-data" }
 "@vesper/codegen-export" = { version = "^0.1", path = ".." }
 "@vesper/cranelift" = { version = "^0.1", path = "../../vesper-cranelift" }
+"@vesper-std/bytes" = { version = "^0.1", path = "../../vesper-std/bytes" }

@@ -381,7 +381,8 @@ pub fn response_plan_header(
     }
     if (name.len() == 17 && eq_fold(in name, "transfer-encoding"))
         || (name.len() == 7 && eq_fold(in name, "trailer"))
-        || (name.len() == 2 && eq_fold(in name, "te")) {
+        || (name.len() == 2 && eq_fold(in name, "te"))
+    {
         return Option::Some(ResponseError::UnsupportedTransferCoding);
     }
     if name.len() == 7 && eq_fold(in name, "upgrade") {
@@ -390,7 +391,8 @@ pub fn response_plan_header(
     if (name.len() == 14 && eq_fold(in name, "content-length"))
         || (name.len() == 10 && eq_fold(in name, "connection"))
         || (name.len() == 10 && eq_fold(in name, "keep-alive"))
-        || (name.len() == 16 && eq_fold(in name, "proxy-connection")) {
+        || (name.len() == 16 && eq_fold(in name, "proxy-connection"))
+    {
         return Option::Some(ResponseError::ReservedHeader);
     }
     let field = match add(name.len(), value.len()) {

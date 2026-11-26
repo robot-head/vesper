@@ -433,18 +433,21 @@ fn drop_visit(inout c: Ctx, ty0: u32, inout seen: ChunkSeq[u32], unknown: bool) 
     let known = c.world.k;
     if node.kind == TyKind::Named {
         if (node.name == known.chunk_seq && node.n == 1)
-            || (node.name == known.string && node.n == 0) {
+            || (node.name == known.string && node.n == 0)
+        {
             return true;
         }
         if (node.name == known.dyn_ && node.n == 1)
-            || (node.n == 0 && dyn_generic_name(in c, node.name)) {
+            || (node.n == 0 && dyn_generic_name(in c, node.name))
+        {
             return true;
         }
         if is_box(in c, ty)
             || (node.name == known.slice && node.n == 1)
             || (node.name == known.tiled_seq && (node.n == 1 || node.n == 2))
             || node.name == known.region_box
-            || node.name == known.watermark {
+            || node.name == known.watermark
+        {
             return false;
         }
         let adt_index = c.world.lookup(node.name);
@@ -830,12 +833,10 @@ fn split_walk(inout e: Env, inout c: Ctx, layout: u32, base: i64, inout out: Lea
         let known = c.world.k;
         let word = ty_node.kind == TyKind::Named
             && ty_node.n == 0
-            && (
-                integer_name(in e, in c, ty_node.name)
-                    || ty_node.name == known.f32_
-                    || ty_node.name == known.f64_
-                    || ty_node.name == known.bool_
-            );
+            && (integer_name(in e, in c, ty_node.name)
+                || ty_node.name == known.f32_
+                || ty_node.name == known.f64_
+                || ty_node.name == known.bool_);
         if word {
             out.pa.push(out.syms.len());
             out.pn.push(out.stack.len());
@@ -1677,7 +1678,8 @@ fn pass_through(
         || u64_at(in g.mentions, li) != 2
         || u8_at(in g.split, li) != 0
         || syms.has(name, S_PARAM)
-        || syms.has(name, S_CAPTURE) {
+        || syms.has(name, S_CAPTURE)
+    {
         return NO_THROUGH;
     }
     let local_ty = default_type(inout c.types, u32_at(in g.lty, li));
@@ -1690,7 +1692,8 @@ fn pass_through(
         if inst.op == Op::Read
             && n32(p.op(inst.a)) == name
             && p.op(inc(inst.a)) == 0
-            && p.op(add(inst.a, 2)) == TyPass::Sink {
+            && p.op(add(inst.a, 2)) == TyPass::Sink
+        {
             return Through { found: true, k: k, read: inst.dest };
         }
     }
@@ -2104,10 +2107,8 @@ fn window_ok(
                 ok = u8_at(in members, p.op(operands)) != 0;
             } else if op == Op::Read {
                 ok = u8_at(in members, w(inst.dest)) != 0
-                    || (
-                        p.op(inc(operands)) == 0
-                            && scalar_local(inout e, inout c, in g, in syms, n32(p.op(operands)))
-                    );
+                    || (p.op(inc(operands)) == 0
+                        && scalar_local(inout e, inout c, in g, in syms, n32(p.op(operands))));
             } else if op == Op::Data {
                 ok = true;
                 for j in 0..p.op(inc(operands)) {
@@ -2204,7 +2205,8 @@ fn drop_unsafe_once(inout e: Env, inout c: Ctx, in p: Program, inout g: G, in sy
                 Option::Some(entry) => {
                     if entry.place == new_group.place
                         && entry.b == new_group.b
-                        && entry.i == new_group.i {
+                        && entry.i == new_group.i
+                    {
                         dup = true;
                     }
                 },
@@ -2232,10 +2234,7 @@ fn drop_unsafe_once(inout e: Env, inout c: Ctx, in p: Program, inout g: G, in sy
             if j <= at {
                 break;
             }
-            let prev = match groups.try_get(wrapping_sub(j, 1)) {
-                Option::Some(entry) => entry,
-                Option::None => new_group,
-            };
+            let prev = groups.try_get(wrapping_sub(j, 1)).unwrap_or(new_group);
             let ok = groups.try_set(j, prev);
             j = wrapping_sub(j, 1);
         }
@@ -2288,7 +2287,8 @@ fn drop_unsafe_once(inout e: Env, inout c: Ctx, in p: Program, inout g: G, in sy
         let call_home = g.home(call);
         if verdict == 2
             && call_home.kind != H_NONE
-            && !(call_home.kind == H_PLACE && call_home.b == group.b && call_home.c == group.i) {
+            && !(call_home.kind == H_PLACE && call_home.b == group.b && call_home.c == group.i)
+        {
             for v in 0..g.nv {
                 if same_home(g.home(n32(v)), call_home) {
                     g.set_home(n32(v), NO_HOME);
@@ -2421,7 +2421,8 @@ fn plan(inout e: Env, inout c: Ctx, in p: Program, inout g: G, in syms: Syms) {
             let own = default_type(inout c.types, inst.ty);
             if !candidate(in p, in e, ii)
                 || g.uses_of(inst.dest) != 1
-                || !aggregate(inout e, inout c, own) {
+                || !aggregate(inout e, inout c, own)
+            {
                 continue;
             }
             // A value passed to a block parameter gets the parameter's home.
@@ -2518,7 +2519,8 @@ fn plan(inout e: Env, inout c: Ctx, in p: Program, inout g: G, in syms: Syms) {
             let own = default_type(inout c.types, inst.ty);
             if !g.split_local(in syms, n32(p.op(inst.a)))
                 || g.uses_of(inst.dest) != 1
-                || !aggregate(inout e, inout c, own) {
+                || !aggregate(inout e, inout c, own)
+            {
                 continue;
             }
             let home = consumer_home(
@@ -2628,7 +2630,8 @@ fn live_words(in cs: Cands, in reads: Reads, li: u64) -> u64 {
             let ya = u64_at(in reads.ra, read);
             let yn = u64_at(in reads.rn, read);
             if starts_with(in cs.leaves.syms, xa, xn, in reads.rs, ya, yn)
-                || starts_with(in reads.rs, ya, yn, in cs.leaves.syms, xa, xn) {
+                || starts_with(in reads.rs, ya, yn, in cs.leaves.syms, xa, xn)
+            {
                 hit = true;
             }
             read = u64_at(in reads.next, read);
@@ -2775,7 +2778,8 @@ fn split_locals(inout e: Env, inout c: Ctx, in p: Program, inout g: G, in syms: 
         if u8_at(in memory, li) != 0
             || u8_at(in fields, li) == 0
             || syms.has(sym, S_PARAM)
-            || syms.has(sym, S_CAPTURE) {
+            || syms.has(sym, S_CAPTURE)
+        {
             continue;
         }
         let local_ty = default_type(inout c.types, u32_at(in g.lty, li));
@@ -2837,7 +2841,8 @@ fn split_locals(inout e: Env, inout c: Ctx, in p: Program, inout g: G, in syms: 
                         let consumer = p.inst(add(blk.i0, later));
                         if consumer.op == Op::Data
                             || consumer.op == Op::Tuple
-                            || consumer.op == Op::Exit {
+                            || consumer.op == Op::Exit
+                        {
                             placed = true;
                         } else if consumer.op == Op::Bind {
                             let pattern = inc(consumer.a);
@@ -3090,7 +3095,8 @@ fn borrowed_scrutinees(in e: Env, in p: Program, in g: G, in syms: Syms) -> Chun
                     && u8_at(in matched, dest) != 0
                     && li != NONE32_64
                     && u8_at(in names, li) != 0
-                    && u8_at(in out, dest) == 0 {
+                    && u8_at(in out, dest) == 0
+                {
                     set8(inout out, dest, 1);
                     grew = true;
                 }
@@ -3099,7 +3105,8 @@ fn borrowed_scrutinees(in e: Env, in p: Program, in g: G, in syms: Syms) -> Chun
                 if dest < g.nv
                     && u8_at(in matched, dest) != 0
                     && u8_at(in out, dest) == 0
-                    && (label == e.s_try_get || label == e.s_hoisted_try_get) {
+                    && (label == e.s_try_get || label == e.s_hoisted_try_get)
+                {
                     set8(inout out, dest, 1);
                     grew = true;
                 }
@@ -3171,7 +3178,8 @@ fn seq_drop_plan(
         } else if node.kind == TyKind::Named
             && c.world.lookup(node.name) != NO_ADT
             && !param
-            && (holds_sequence(inout c, ty) || needs_drop(inout c, ty)) {
+            && (holds_sequence(inout c, ty) || needs_drop(inout c, ty))
+        {
             kind = SD_FIELDS;
         }
         if kind == SD_NONE || syms.has(sym, S_CAPTURE) || (param && !syms.has(sym, S_SINK)) {
@@ -3197,7 +3205,8 @@ fn seq_drop_plan(
             let root_plan = plan_kind(in plan, in syms, root);
             let path_row = p.path(p.op(inc(operands)));
             if (path_row.n > 0 && may_need_drop(inout c, inst.ty) && !owned_or_fields(root_plan))
-                || root_plan == SD_STR {
+                || root_plan == SD_STR
+            {
                 mark_sym(in syms, inout refused, root);
             }
         } else if op == Op::Write {
@@ -3206,7 +3215,8 @@ fn seq_drop_plan(
             let root_plan = plan_kind(in plan, in syms, root);
             if (has_dot(in c.names, place) && !owned_or_fields(root_plan))
                 || n32(p.op(inc(operands))) != e.s_eq
-                || (root_plan == SD_STR && syms.has(root, S_PARAM)) {
+                || (root_plan == SD_STR && syms.has(root, S_PARAM))
+            {
                 mark_sym(in syms, inout refused, root);
             }
         } else if op == Op::Bind {
@@ -3217,9 +3227,8 @@ fn seq_drop_plan(
                 && read_pass(in p, p.inst(add(g.i0, u64_at(in defs, w(v)))).a) != TyPass::Sink;
             if borrow_read
                 || (w(v) < g.nv && u8_at(in borrowed, w(v)) != 0)
-                || (
-                    p.op(pattern) != Pat::Bind && pattern_has_box(inout e, inout c, in p, pattern)
-                ) {
+                || (p.op(pattern) != Pat::Bind && pattern_has_box(inout e, inout c, in p, pattern))
+            {
                 mark_bound(in p, in syms, inout refused, pattern);
             }
         } else if op == Op::Closure {
@@ -3337,7 +3346,8 @@ fn replace_moves(inout c: Ctx, in p: Program, ii: u64) -> bool {
     let inst = p.inst(ii);
     if inst.op == Op::Read
         && read_pass(in p, inst.a) == TyPass::Sink
-        && p.path(p.op(inc(inst.a))).n > 0 {
+        && p.path(p.op(inc(inst.a))).n > 0
+    {
         return may_need_drop(inout c, inst.ty);
     }
     true
@@ -3496,7 +3506,8 @@ fn replace_drops(
                 if li != NONE32_64 {
                     let ci = u64_at(in cidx, li);
                     if u8_at(in borrowed, li) != 0
-                        || (ci != NONE32_64 && u8_at(in state, ci) == 0) {
+                        || (ci != NONE32_64 && u8_at(in state, ci) == 0)
+                    {
                         set8(inout out, wrapping_sub(ii, g.i0), 1);
                     }
                 }
@@ -3645,7 +3656,8 @@ fn temporary_drops(
         let pattern = inc(inst.a);
         if p.op(pattern) == Pat::Bind
             && def_op(in p, in g, in defs, v) == Op::Read
-            && read_pass(in p, p.inst(add(g.i0, u64_at(in defs, w(v)))).a) != TyPass::Sink {
+            && read_pass(in p, p.inst(add(g.i0, u64_at(in defs, w(v)))).a) != TyPass::Sink
+        {
             mark_sym(in syms, inout borrow_bound, n32(p.op(add(pattern, 3))));
         }
         if w(v) < nv && u8_at(in borrowed, w(v)) != 0 {
@@ -3957,10 +3969,7 @@ fn shapes_new() -> Shapes {
 }
 
 fn i32_at(in seq: ChunkSeq[i32], i: u64) -> i32 {
-    match seq.try_get(i) {
-        Option::Some(value) => value,
-        Option::None => 0,
-    }
+    seq.try_get(i).unwrap_or(0)
 }
 
 impl Shapes {
@@ -4004,12 +4013,14 @@ impl Shapes {
     // Whether shapes `x` and `y` (the candidate, the last one) are equal.
     fn same(in self, x: u64, y: u64) -> bool {
         if u64_at(in self.wn, x) != u64_at(in self.wn, y)
-            || u64_at(in self.vn, x) != u64_at(in self.vn, y) {
+            || u64_at(in self.vn, x) != u64_at(in self.vn, y)
+        {
             return false;
         }
         for i in 0..u64_at(in self.wn, x) {
             if u32_at(in self.wt, add(u64_at(in self.wa, x), i))
-                != u32_at(in self.wt, add(u64_at(in self.wa, y), i)) {
+                != u32_at(in self.wt, add(u64_at(in self.wa, y), i))
+            {
                 return false;
             }
         }
@@ -4017,7 +4028,8 @@ impl Shapes {
             let vx = add(u64_at(in self.va, x), i);
             let vy = add(u64_at(in self.va, y), i);
             if u32_at(in self.vname, vx) != u32_at(in self.vname, vy)
-                || u64_at(in self.fnum, vx) != u64_at(in self.fnum, vy) {
+                || u64_at(in self.fnum, vx) != u64_at(in self.fnum, vy)
+            {
                 return false;
             }
             for j in 0..u64_at(in self.fnum, vx) {
@@ -4025,7 +4037,8 @@ impl Shapes {
                 let fy = add(u64_at(in self.fa, vy), j);
                 if u32_at(in self.fname, fx) != u32_at(in self.fname, fy)
                     || u64_at(in self.fword, fx) != u64_at(in self.fword, fy)
-                    || i32_at(in self.foff, fx) != i32_at(in self.foff, fy) {
+                    || i32_at(in self.foff, fx) != i32_at(in self.foff, fy)
+                {
                     return false;
                 }
             }
@@ -4179,10 +4192,7 @@ fn label_is(in p: Program, in names: Names, pool: u64, in text: Str, prefix: boo
 }
 
 fn u8_at_slice(in slice: Slice[u8], i: u64) -> u8 {
-    match slice.try_get(i) {
-        Option::Some(byte) => byte,
-        Option::None => 0,
-    }
+    slice.try_get(i).unwrap_or(0)
 }
 
 // Whether the label of pool row `pool` contains `text`.
@@ -4215,11 +4225,13 @@ fn seq_option_op(in p: Program, in names: Names, in sh: Shapes, shape: u64, pool
         return false;
     }
     if label_is(in p, in names, pool, "Pop", false)
-        || label_is(in p, in names, pool, "Last", false) {
+        || label_is(in p, in names, pool, "Last", false)
+    {
         return true;
     }
     if label_is(in p, in names, pool, "Wide(", true)
-        || label_is(in p, in names, pool, "Hoisted(Wide(", true) {
+        || label_is(in p, in names, pool, "Hoisted(Wide(", true)
+    {
         return label_has(in p, in names, pool, "write: false")
             && label_has(in p, in names, pool, "total: true");
     }
@@ -4336,7 +4348,8 @@ fn memory_locals(inout c: Ctx, in e: Env, in p: Program, in g: G, in syms: Syms)
             || op == Op::Indirect
             || op == Op::Seq
             || op == Op::Fip
-            || op == Op::Tiled {
+            || op == Op::Tiled
+        {
             ban_args(in p, in syms, inout banned, inc(operands));
         } else if op == Op::Closure || op == Op::Handle {
             let mut at = if op == Op::Handle {
@@ -4691,7 +4704,8 @@ fn scalar_plan(
                     let n = p.op(inc(data));
                     for j in 0..n {
                         if id == NONE32_64
-                            && n32(p.op(add(add(data, 2), wrapping_mul(j, 2)))) == name {
+                            && n32(p.op(add(add(data, 2), wrapping_mul(j, 2)))) == name
+                        {
                             id = p.op(add(add(data, 3), wrapping_mul(j, 2)));
                         }
                     }

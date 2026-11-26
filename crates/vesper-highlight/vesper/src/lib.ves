@@ -415,23 +415,19 @@ fn is_loop_keyword(w: u8, before: u8, after: u8) -> bool {
         statement_start && (after == K_LOWER || after == K_L_PAREN)
     } else if w == W_BREAK {
         statement_start
-            && !(
-                after == K_EQ
-                    || after == K_DOT
-                    || after == K_COLON
-                    || after == K_COLON_COLON
-                    || after == K_COMMA
-            )
+            && !(after == K_EQ
+                || after == K_DOT
+                || after == K_COLON
+                || after == K_COLON_COLON
+                || after == K_COMMA)
     } else if w == W_CONTINUE {
         statement_start
-            && (
-                after == K_EOF
-                    || after == K_SEMI
-                    || after == K_R_BRACE
-                    || after == K_R_PAREN
-                    || after == K_R_BRACKET
-                    || after == K_COMMA
-            )
+            && (after == K_EOF
+                || after == K_SEMI
+                || after == K_R_BRACE
+                || after == K_R_PAREN
+                || after == K_R_BRACKET
+                || after == K_COMMA)
     } else if w == W_MUT {
         before == K_LET
     } else {
@@ -698,11 +694,13 @@ fn classify(
             )
         } else if k == K_AT
             && after == K_LOWER
-            && next_is(in src, in t, in sig, p, in "proof".as_bytes()) {
+            && next_is(in src, in t, in sig, p, in "proof".as_bytes())
+        {
             C_DOC_PROOF_ANCHOR
         } else if k == K_AT
             && after == K_LOWER
-            && next_is(in src, in t, in sig, p, in "fip".as_bytes()) {
+            && next_is(in src, in t, in sig, p, in "fip".as_bytes())
+        {
             C_KEYWORD_CONTROL
         } else if k == K_ARROW
             || k == K_FAT_ARROW
@@ -712,7 +710,8 @@ fn classify(
             || k == K_LE
             || k == K_GE
             || k == K_AND
-            || k == K_OR {
+            || k == K_OR
+        {
             flags = flags | F_LIGATURE;
             C_PUNCT_LIGATURE
         } else {
@@ -881,34 +880,36 @@ fn classify_lower(
     } else if before == K_AT && w == W_FIP
         || is_tiled_decl
         || is_field_temp
-        || is_loop_keyword(w, before, after) {
+        || is_loop_keyword(w, before, after)
+    {
         C_KEYWORD_CONTROL
     } else if before == K_FN || after == K_L_PAREN {
         C_FUNCTION_IDENT
     } else if is_contextual_decl(w)
-        && (
-            after == K_UPPER
-                || after == K_LOWER
-                || after == K_FN
-                || after == K_STRUCT
-                || after == K_ENUM
-                || after == K_EFFECT
-                || after == K_IMPL
-                || after == K_LINEAR
-                || after == K_COPY
-                || after == K_AFFINE
-                || after == K_L_BRACE
-        )
+        && (after == K_UPPER
+            || after == K_LOWER
+            || after == K_FN
+            || after == K_STRUCT
+            || after == K_ENUM
+            || after == K_EFFECT
+            || after == K_IMPL
+            || after == K_LINEAR
+            || after == K_COPY
+            || after == K_AFFINE
+            || after == K_L_BRACE)
         || (w == W_AS || w == W_FOR)
             && (before == K_UPPER || before == K_R_BRACKET)
-            && after == K_UPPER {
+            && after == K_UPPER
+    {
         C_KEYWORD_CONTROL
     } else if in_type
         || token_mode
             && is_primitive(w)
-            && (
-                before == K_COLON || before == K_ARROW || before == K_L_BRACKET || before == K_COMMA
-            ) {
+            && (before == K_COLON
+                || before == K_ARROW
+                || before == K_L_BRACKET
+                || before == K_COMMA)
+    {
         C_TYPE_NOMINAL
     } else {
         C_PASS_MODE_IN

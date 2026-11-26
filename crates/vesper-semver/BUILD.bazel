@@ -10,6 +10,7 @@ vesper_package(
     name = "port_package",
     srcs = glob(["vesper/src/**/*.ves"]),
     manifest = "vesper/Loom.toml",
+    deps = ["//:std_core_package"],
 )
 
 vesper_port_object(

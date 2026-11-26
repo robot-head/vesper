@@ -226,13 +226,19 @@ include!(concat!(env!("OUT_DIR"), "/swap_registry.rs"));
 
 /// The Vesper driver's package assembly (#1986).
 pub(crate) use assemble::{
-    driver_assembled, driver_assembles, driver_assembly_input, driver_load_timer,
+    DriverGraph, driver_assembled, driver_assembles, driver_assembly_input, driver_graph,
+    driver_graph_assembled, driver_load_timer, driver_read_begin, driver_read_fallback,
+    driver_reads,
 };
 /// The Vesper driver's own parse (#1893) reads back through the parse swap.
 pub(crate) use parse::{driver_parse, driver_parse_begin};
 
 /// The Vesper driver's `run` (#2053) evaluates through the run swap.
 pub(crate) use run::driver_run;
+
+/// The Vesper driver's checked-world declarations (#2024) through the
+/// world swap.
+pub(crate) use world::{driver_world, driver_world_begin};
 
 // The Vesper driver's wasm and eBPF builds (#1895) take those swaps' input
 // words.

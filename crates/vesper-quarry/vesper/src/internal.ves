@@ -217,7 +217,8 @@ pub fn check(in b: Slice[u8]) -> u64 {
     if !all_zero(in b, wrapping_add(CHILD_OFF, wrapping_add(n, 1) << 2), KEY_OFF)
         || !all_zero(in b, wrapping_add(KEY_OFF, n << 4), PAGE_SIZE)
         || !all_zero(in b, 26, 32)
-        || rd16(in b, 22) != 0 {
+        || rd16(in b, 22) != 0
+    {
         return 4;
     }
     0

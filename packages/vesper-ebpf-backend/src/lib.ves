@@ -36,134 +36,136 @@ use self::extra::{read_extra};
 use self::backend::{G, analyze, g_new, lower};
 use self::object::{build_object, declined_compile};
 
-fn put_bytes(inout o: ChunkSeq[u64], in b: ChunkSeq[u8]) {
-    let n = b.len();
-    o.push(n);
+fn put_bytes(inout out: ChunkSeq[u64], in bytes: ChunkSeq[u8]) {
+    let n = bytes.len();
+    out.push(n);
     let mut word: u64 = 0;
-    let mut k: u32 = 0;
+    let mut packed: u32 = 0;
     for i in 0..n {
-        word = word | wrapping_shl_u64(widen_u64(u8_at(in b, i)), wrapping_mul(k, 8));
-        k = wrapping_add(k, 1);
-        if k == 8 {
-            o.push(word);
+        word = word | wrapping_shl_u64(widen_u64(u8_at(in bytes, i)), wrapping_mul(packed, 8));
+        packed = wrapping_add(packed, 1);
+        if packed == 8 {
+            out.push(word);
             word = 0;
-            k = 0;
+            packed = 0;
         }
     }
-    if k != 0 {
-        o.push(word);
+    if packed != 0 {
+        out.push(word);
     }
 }
 
-fn put_sym(inout o: ChunkSeq[u64], in names: Names, s: u32) {
-    let mut b: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    names.write(s, inout b);
-    put_bytes(inout o, in b);
+fn put_sym(inout out: ChunkSeq[u64], in names: Names, symbol: u32) {
+    let mut bytes: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    names.write(symbol, inout bytes);
+    put_bytes(inout out, in bytes);
 }
 
-fn put_range(inout o: ChunkSeq[u64], in src: ChunkSeq[u8], a: u64, z: u64) {
-    let mut b: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    for i in a..z {
-        b.push(u8_at(in src, i));
+fn put_range(inout out: ChunkSeq[u64], in source: ChunkSeq[u8], start: u64, end: u64) {
+    let mut bytes: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    for i in start..end {
+        bytes.push(u8_at(in source, i));
     }
-    put_bytes(inout o, in b);
+    put_bytes(inout out, in bytes);
 }
 
-fn pack(r: RawInsn) -> u64 {
-    let code = widen_u64(r.code);
-    let regs = wrapping_shl_u64(widen_u64(r.dst), 8) | wrapping_shl_u64(widen_u64(r.src), 12);
-    let off = wrapping_shl_u64(widen_u64(wrapping_u16(r.off)), 16);
-    let imm = wrapping_shl_u64(widen_u64(wrapping_u32(r.imm)), 32);
+fn pack(raw: RawInsn) -> u64 {
+    let code = widen_u64(raw.code);
+    let regs = wrapping_shl_u64(widen_u64(raw.dst), 8) | wrapping_shl_u64(widen_u64(raw.src), 12);
+    let off = wrapping_shl_u64(widen_u64(wrapping_u16(raw.off)), 16);
+    let imm = wrapping_shl_u64(widen_u64(wrapping_u32(raw.imm)), 32);
     code | regs | off | imm
 }
 
-fn put_ok(inout o: ChunkSeq[u64], in g: G, in names: Names, in source: ChunkSeq[u8]) {
-    o.push(0);
-    o.push(widen_u64(g.action));
-    put_bytes(inout o, in g.name);
+fn put_ok(inout out: ChunkSeq[u64], in backend: G, in names: Names, in source: ChunkSeq[u8]) {
+    out.push(0);
+    out.push(widen_u64(backend.action));
+    put_bytes(inout out, in backend.name);
 
-    o.push(g.asm.slots.len());
-    for i in 0..g.asm.slots.len() {
-        o.push(pack(slot_at(in g.asm.slots, i)));
+    out.push(backend.asm.slots.len());
+    for i in 0..backend.asm.slots.len() {
+        out.push(pack(slot_at(in backend.asm.slots, i)));
     }
-    o.push(g.asm.maps.len());
-    for i in 0..g.asm.maps.len() {
-        match g.asm.maps.try_get(i) {
-            Option::Some(m) => {
-                put_sym(inout o, in names, m.name);
-                o.push(widen_u64(m.kind));
-                o.push(w(m.key));
-                o.push(w(m.value));
-                o.push(w(m.max));
-                o.push(w(m.flags));
+    out.push(backend.asm.maps.len());
+    for i in 0..backend.asm.maps.len() {
+        match backend.asm.maps.try_get(i) {
+            Option::Some(map_row) => {
+                put_sym(inout out, in names, map_row.name);
+                out.push(widen_u64(map_row.kind));
+                out.push(w(map_row.key));
+                out.push(w(map_row.value));
+                out.push(w(map_row.max));
+                out.push(w(map_row.flags));
             },
             Option::None => (),
         }
     }
-    let nr = g.asm.relocs.len() / 2;
-    o.push(nr);
-    for i in 0..wrapping_mul(nr, 2) {
-        o.push(u64_at(in g.asm.relocs, i));
+    let reloc_count = backend.asm.relocs.len() / 2;
+    out.push(reloc_count);
+    for i in 0..wrapping_mul(reloc_count, 2) {
+        out.push(u64_at(in backend.asm.relocs, i));
     }
-    o.push(g.asm.fn_names.len());
-    for i in 0..g.asm.fn_names.len() {
-        put_sym(inout o, in names, u32_at(in g.asm.fn_names, i));
-        o.push(g.asm.resolve(u64_at(in g.asm.fn_labels, i)));
+    out.push(backend.asm.fn_names.len());
+    for i in 0..backend.asm.fn_names.len() {
+        put_sym(inout out, in names, u32_at(in backend.asm.fn_names, i));
+        out.push(backend.asm.resolve(u64_at(in backend.asm.fn_labels, i)));
     }
-    o.push(g.asm.lines.len());
-    for i in 0..g.asm.lines.len() {
-        match g.asm.lines.try_get(i) {
-            Option::Some(l) => {
-                o.push(l.slot);
-                put_range(inout o, in source, l.ta, l.tb);
-                o.push(w(l.line));
-                o.push(w(l.col));
+    out.push(backend.asm.lines.len());
+    for i in 0..backend.asm.lines.len() {
+        match backend.asm.lines.try_get(i) {
+            Option::Some(line_row) => {
+                out.push(line_row.slot);
+                put_range(inout out, in source, line_row.text_start, line_row.text_end);
+                out.push(w(line_row.line));
+                out.push(w(line_row.col));
             },
             Option::None => (),
         }
     }
-    o.push(g.functions.len());
-    for i in 0..g.functions.len() {
-        put_sym(inout o, in names, u32_at(in g.functions, i));
-        o.push(w(u32_at(in g.frames, i)));
+    out.push(backend.functions.len());
+    for i in 0..backend.functions.len() {
+        put_sym(inout out, in names, u32_at(in backend.functions, i));
+        out.push(w(u32_at(in backend.frames, i)));
     }
-    o.push(g.loops.len());
-    for i in 0..g.loops.len() {
-        put_sym(inout o, in names, u32_at(in g.loops, i));
+    out.push(backend.loops.len());
+    for i in 0..backend.loops.len() {
+        put_sym(inout out, in names, u32_at(in backend.loops, i));
     }
-    o.push(g.map_effects.len());
-    for i in 0..g.map_effects.len() {
-        put_sym(inout o, in names, u32_at(in g.map_effects, i));
-        o.push(i);
+    out.push(backend.map_effects.len());
+    for i in 0..backend.map_effects.len() {
+        put_sym(inout out, in names, u32_at(in backend.map_effects, i));
+        out.push(i);
     }
 }
 
-fn put_err(inout o: ChunkSeq[u64], in g: G, in names: Names) {
-    o.push(widen_u64(g.err));
-    if g.err == 1 {
-        o.push(widen_u64(g.err_rule));
-        put_sym(inout o, in names, g.err_fn);
-        o.push(if g.err_has_span { 1 } else { 0 });
-        o.push(g.err_s0);
-        o.push(g.err_s1);
+fn put_err(inout out: ChunkSeq[u64], in backend: G, in names: Names) {
+    out.push(widen_u64(backend.err));
+    if backend.err == 1 {
+        out.push(widen_u64(backend.err_rule));
+        put_sym(inout out, in names, backend.err_fn);
+        out.push(if backend.err_has_span { 1 } else { 0 });
+        out.push(backend.err_s0);
+        out.push(backend.err_s1);
     }
-    put_bytes(inout o, in g.msg);
+    put_bytes(inout out, in backend.message);
 }
 
 // The harness entry: input bytes to result words.
-pub fn ebpf_backend_bytes(in b: Slice[u8]) -> ChunkSeq[u64] {
-    let mut r = Reader { pos: 0 };
-    let mut c = read_ctx(inout r, in b);
-    let p = read_program(inout r, in b, in c);
-    let x = read_extra(inout r, in b, inout c.types, inout c.names);
-    let mut g = g_new();
-    let mut o: ChunkSeq[u64] = ChunkSeq::new[u64]();
-    if analyze(inout g, inout c, in p, in x) && lower(inout g, inout c, in p, in x) {
-        put_ok(inout o, in g, in c.names, in x.source);
+pub fn ebpf_backend_bytes(in bytes: Slice[u8]) -> ChunkSeq[u64] {
+    let mut reader = Reader { pos: 0 };
+    let mut ctx = read_ctx(inout reader, in bytes);
+    let program = read_program(inout reader, in bytes, in ctx);
+    let extra = read_extra(inout reader, in bytes, inout ctx.types, inout ctx.names);
+    let mut backend = g_new();
+    let mut out: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    if analyze(inout backend, inout ctx, in program, in extra)
+        && lower(inout backend, inout ctx, in program, in extra)
+    {
+        put_ok(inout out, in backend, in ctx.names, in extra.source);
     } else {
-        put_err(inout o, in g, in c.names);
+        put_err(inout out, in backend, in ctx.names);
     }
-    o
+    out
 }
 
 // The harness entry: input words to result words.
@@ -177,17 +179,19 @@ pub fn ebpf_backend_words(in input: Str) -> ChunkSeq[u64] {
 // or nonzero when Rust should build it (a compile error or anything the
 // Rust pass reports in its own words).
 pub fn ebpf_backend_build(
-    in b: Slice[u8],
+    in bytes: Slice[u8],
     inout object: ChunkSeq[u8],
     inout tail: ChunkSeq[u8]
 ) -> u64 {
-    let mut r = Reader { pos: 0 };
-    let mut c = read_ctx(inout r, in b);
-    let p = read_program(inout r, in b, in c);
-    let x = read_extra(inout r, in b, inout c.types, inout c.names);
-    let mut g = g_new();
-    if analyze(inout g, inout c, in p, in x) && lower(inout g, inout c, in p, in x) {
-        build_object(in g, in c.names, in x, inout object, inout tail)
+    let mut reader = Reader { pos: 0 };
+    let mut ctx = read_ctx(inout reader, in bytes);
+    let program = read_program(inout reader, in bytes, in ctx);
+    let extra = read_extra(inout reader, in bytes, inout ctx.types, inout ctx.names);
+    let mut backend = g_new();
+    if analyze(inout backend, inout ctx, in program, in extra)
+        && lower(inout backend, inout ctx, in program, in extra)
+    {
+        build_object(in backend, in ctx.names, in extra, inout object, inout tail)
     } else {
         declined_compile()
     }

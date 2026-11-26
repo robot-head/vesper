@@ -183,7 +183,8 @@ fn cell_kind(inout types: Types, in syms: Syms, ty: u32) -> u8 {
         return 1;
     }
     if node.kind == TyKind::Lit
-        || (node.kind == TyKind::Named && contains(in syms.int_kinds, node.name)) {
+        || (node.kind == TyKind::Named && contains(in syms.int_kinds, node.name))
+    {
         return 2;
     }
     0
@@ -288,11 +289,13 @@ fn check_expr(
     let mut rest: u64 = 1;
     if callee_row.kind == E_FIELD
         && cell_type(in types, in atomics.syms, ty_of(in world, in exprs, exprs.kid(callee, 0)))
-            != NONE32 {
+            != NONE32
+    {
         method = callee_row.name;
         receiver = ty_of(in world, in exprs, exprs.kid(callee, 0));
     } else if callee_row.kind == E_NAME
-        && names.has_prefix(callee_row.name, in "Atomic::".as_bytes()) {
+        && names.has_prefix(callee_row.name, in "Atomic::".as_bytes())
+    {
         method = strip(in names, callee_row.name, "Atomic::");
         if method == atomics.syms.new_ {
             receiver = ty_of(in world, in exprs, expr);
@@ -408,7 +411,8 @@ fn check_workers(
     let callee = exprs.row(exprs.kid(expr, 0));
     if callee.kind != E_NAME
         || callee.name != atomics.syms.parallel_for
-        || exprs.kid_count(expr) != 4 {
+        || exprs.kid_count(expr) != 4
+    {
         return;
     }
     let data = exprs.row(exprs.kid(expr, 1));
@@ -610,10 +614,9 @@ fn expr_mentions(
             }
         }
         if row.is_let
-            && (
-                type_mentions(in types, in syms, row.let_ty)
-                    || pattern_mentions(in names, in exprs, in syms, row.pat)
-            ) {
+            && (type_mentions(in types, in syms, row.let_ty)
+                || pattern_mentions(in names, in exprs, in syms, row.pat))
+        {
             return true;
         }
         if row.is_arm_body && pattern_mentions(in names, in exprs, in syms, row.pat) {

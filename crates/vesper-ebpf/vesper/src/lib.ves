@@ -36,8 +36,10 @@ use self::interp::{Mach, clone_mach, map_has, map_key_spans, map_value, new_env,
 use self::core::{combine, filter_candidates, local_value, patch_insn, target_value, values_over};
 use self::callgraph::{check_stack};
 use self::verifier::{new_pools, Outcome, Pools, verify_program};
+use self::mitigator::{Decision, reference_decision};
 use self::wire::{
-    EthIpv4TcpWire, SynDropAlertWire, WireError, alert_decode, alert_encode, eth_decode, eth_encode
+    EthIpv4TcpWire, SynDropAlertWire, WireError, alert_decode, alert_encode_into, eth_decode,
+    eth_encode_into
 };
 
 // insn.rs
@@ -339,22 +341,33 @@ pub fn verifier_verify(
     )
 }
 
-// wire.rs
+// wire.rs: the encoders write into a buffer the Rust caller lends (one
+// struct in, the bytes out in place; no sequence crosses the port).
 
-pub fn wire_eth_encode(w: EthIpv4TcpWire) -> ChunkSeq[u8] {
-    eth_encode(w)
+pub fn wire_eth_encode_into(w: EthIpv4TcpWire, inout out: Slice[u8]) {
+    eth_encode_into(w, inout out);
 }
 
 pub fn wire_eth_decode(in s: Slice[u8]) -> EthIpv4TcpWire eff [Fail[WireError]] {
     eth_decode(in s)
 }
 
-pub fn wire_alert_encode(w: SynDropAlertWire) -> ChunkSeq[u8] {
-    alert_encode(w)
+pub fn wire_alert_encode_into(w: SynDropAlertWire, inout out: Slice[u8]) {
+    alert_encode_into(w, inout out);
 }
 
 pub fn wire_alert_decode(in s: Slice[u8]) -> SynDropAlertWire eff [Fail[WireError]] {
     alert_decode(in s)
+}
+
+// mitigator.rs: the reference model, with the frame decoded in Vesper.
+
+pub fn mitigator_reference_decision(
+    in packet: Slice[u8],
+    prior_count: Option[u64],
+    threshold: u64
+) -> Decision {
+    reference_decision(in packet, prior_count, threshold)
 }
 
 // btf.rs

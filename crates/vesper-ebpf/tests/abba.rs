@@ -18,6 +18,12 @@
 //!   (part 3).
 //! - `ext`: `parse_ext` of an object with 256 line-info records and 64
 //!   CO-RE relocations (part 3).
+//! - `wire`: `encode` and `decode` of 256 `EthIpv4TcpWire` frames and 256
+//!   `SynDropAlertWire` alerts built from the input words (the wire
+//!   structs, over the bulk-bytes port interface of #2183).
+//! - `reference`: the mitigator's reference model over 512 frames (SYNs,
+//!   ACKs, other protocols, IPv4 options), the frame decoded on the Vesper
+//!   side (#2230).
 //! - `interp`: the SYN-flood mitigator run over 256 packets (SYNs from 64
 //!   sources, and ACKs) in a fresh environment, the ring drained after
 //!   each run: the interpreter, with its map and ring state (part 4).
@@ -42,6 +48,8 @@ fn ops(name: &str) -> u64 {
         "concrete" => 4096,
         "core" => 512,
         "interp" => 256,
+        "wire" => 512,
+        "reference" => 512,
         _ => 1,
     }
 }
@@ -418,6 +426,93 @@ macro_rules! workloads {
                 black_box(sum)
             }
 
+            pub fn wire(w: &[u64]) -> u64 {
+                use ::$krate::wire::{EthIpv4TcpWire, SynDropAlertWire, WireFrame};
+                let mut sum = 0u64;
+                for (i, c) in w.chunks_exact(4).take(256).enumerate() {
+                    let (a, b, c, d) = (c[0], c[1], c[2], c[3]);
+                    let mac = |x: u64| {
+                        let b = x.to_be_bytes();
+                        [b[0], b[1], b[2], b[3], b[4], b[5]]
+                    };
+                    let f = EthIpv4TcpWire {
+                        dst_mac: mac(a),
+                        src_mac: mac(b),
+                        ether_type: a as u16,
+                        ver_ihl: (b >> 48) as u8,
+                        tos: (b >> 56) as u8,
+                        total_len: (a >> 16) as u16,
+                        ident: (b >> 16) as u16,
+                        frag_off: c as u16,
+                        ttl: (c >> 16) as u8,
+                        proto: (c >> 24) as u8,
+                        ip_checksum: (c >> 32) as u16,
+                        src_ipv4: d as u32,
+                        dst_ipv4: (d >> 32) as u32,
+                        src_port: (c >> 48) as u16,
+                        dst_port: (a >> 32) as u16,
+                        seq_num: (a >> 24) as u32,
+                        ack_num: (b >> 24) as u32,
+                        data_offset_flags: (d >> 8) as u16,
+                        window_size: (d >> 40) as u16,
+                        tcp_checksum: (a >> 48) as u16,
+                        urgent_ptr: i as u16,
+                    };
+                    let bytes = f.encode();
+                    let back = EthIpv4TcpWire::decode(black_box(&bytes)).expect("frame decodes");
+                    sum = sum
+                        .wrapping_mul(31)
+                        .wrapping_add(u64::from(back.src_ipv4) ^ u64::from(back.urgent_ptr))
+                        .wrapping_add(u64::from(bytes[53]));
+                    let alert = SynDropAlertWire {
+                        src_ipv4: c as u32,
+                        dst_port: (d >> 16) as u16,
+                        tcp_flags: (b >> 8) as u16,
+                        observed_pps: a ^ d,
+                    };
+                    let bytes = alert.encode();
+                    let back = SynDropAlertWire::decode(black_box(&bytes)).expect("alert decodes");
+                    sum = sum
+                        .wrapping_mul(31)
+                        .wrapping_add(back.observed_pps ^ u64::from(back.dst_port))
+                        .wrapping_add(u64::from(bytes[15]));
+                }
+                black_box(sum)
+            }
+
+            pub fn reference(w: &[u64]) -> u64 {
+                use ::$krate::mitigator::reference_decision;
+                use ::$krate::wire::{EthIpv4TcpWire, WireFrame};
+                static PACKETS: std::sync::OnceLock<Vec<Vec<u8>>> = std::sync::OnceLock::new();
+                let packets = PACKETS.get_or_init(|| {
+                    (0..512u64)
+                        .map(|i| {
+                            let x = w[i as usize];
+                            let mut p = EthIpv4TcpWire {
+                                ether_type: if i % 7 == 6 { 0x86dd } else { 0x0800 },
+                                ver_ihl: if i % 5 == 4 { 0x46 } else { 0x45 },
+                                proto: if i % 11 == 10 { 17 } else { 6 },
+                                src_ipv4: x as u32,
+                                data_offset_flags: (5 << 12) | if i % 3 == 2 { 0x10 } else { 0x02 },
+                                ..Default::default()
+                            }
+                            .encode();
+                            p.extend([0u8; 8]);
+                            p
+                        })
+                        .collect()
+                });
+                let mut sum = 0u64;
+                for (i, pkt) in packets.iter().enumerate() {
+                    let prior = if i % 4 == 0 { None } else { Some(i as u64 % 9) };
+                    let (action, count) = reference_decision(black_box(pkt), prior, 5);
+                    sum = sum
+                        .wrapping_mul(31)
+                        .wrapping_add(action as u64 ^ count.unwrap_or(99));
+                }
+                black_box(sum)
+            }
+
             pub fn ext(_: &[u64]) -> u64 {
                 static OBJ: std::sync::OnceLock<(::$krate::btf::Btf, Vec<u8>)> =
                     std::sync::OnceLock::new();
@@ -457,12 +552,23 @@ fn workload(name: &str) -> (Workload, Workload) {
         "core" => (rust_build::core, port_build::core),
         "ext" => (rust_build::ext, port_build::ext),
         "interp" => (rust_build::interp, port_build::interp),
+        "wire" => (rust_build::wire, port_build::wire),
+        "reference" => (rust_build::reference, port_build::reference),
         _ => unreachable!(),
     }
 }
 
-const WORKLOADS: [&str; 8] = [
-    "decode", "scalar", "concrete", "verify", "btf", "core", "ext", "interp",
+const WORKLOADS: [&str; 10] = [
+    "decode",
+    "scalar",
+    "concrete",
+    "verify",
+    "btf",
+    "core",
+    "ext",
+    "interp",
+    "wire",
+    "reference",
 ];
 
 #[test]
@@ -626,4 +732,16 @@ fn abba_ext() {
 #[ignore = "benchmark; run in release with --ignored --nocapture"]
 fn abba_interp() {
     abba("interp");
+}
+
+#[test]
+#[ignore = "benchmark; run in release with --ignored --nocapture"]
+fn abba_wire() {
+    abba("wire");
+}
+
+#[test]
+#[ignore = "benchmark; run in release with --ignored --nocapture"]
+fn abba_reference() {
+    abba("reference");
 }

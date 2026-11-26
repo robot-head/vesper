@@ -33,27 +33,27 @@ fn none() -> Big {
 // `m`; `ok` is false past `i128::MAX`.
 fn mul_add(x: Big, m: u64, a: u64) -> Big {
     let mask: u64 = U32_MASK;
-    let p0 = wrapping_add(wrapping_mul(x.lo & mask, m), a);
-    let p1 = wrapping_add(wrapping_mul(x.lo >> LIMB_BITS, m), p0 >> LIMB_BITS);
-    let lo = (p0 & mask) | wrapping_shl_u64(p1, LIMB_BITS);
-    let carry = p1 >> LIMB_BITS;
+    let lo_low = wrapping_add(wrapping_mul(x.lo & mask, m), a);
+    let lo_high = wrapping_add(wrapping_mul(x.lo >> LIMB_BITS, m), lo_low >> LIMB_BITS);
+    let lo = (lo_low & mask) | wrapping_shl_u64(lo_high, LIMB_BITS);
+    let carry = lo_high >> LIMB_BITS;
     // x.hi < 2^63 and m <= 16, so the product stays below 2^67: check it
     // in halves.
-    let h0 = wrapping_add(wrapping_mul(x.hi & mask, m), carry);
-    let h1 = wrapping_add(wrapping_mul(x.hi >> LIMB_BITS, m), h0 >> LIMB_BITS);
-    if h1 >= HIGH_LIMB_SIGN {
+    let hi_low = wrapping_add(wrapping_mul(x.hi & mask, m), carry);
+    let hi_high = wrapping_add(wrapping_mul(x.hi >> LIMB_BITS, m), hi_low >> LIMB_BITS);
+    if hi_high >= HIGH_LIMB_SIGN {
         return none();
     }
-    Big { ok: true, neg: false, hi: (h0 & mask) | wrapping_shl_u64(h1, LIMB_BITS), lo: lo }
+    Big { ok: true, neg: false, hi: (hi_low & mask) | wrapping_shl_u64(hi_high, LIMB_BITS), lo: lo }
 }
 
-fn digit(c: u8, hex: bool) -> u64 {
-    if c >= DIGIT_ZERO && c <= DIGIT_NINE {
-        widen_u64(wrapping_sub(c, DIGIT_ZERO))
-    } else if hex && c >= LOWER_A && c <= LOWER_F {
-        widen_u64(wrapping_sub(c, HEX_LETTER_BASE))
-    } else if hex && c >= UPPER_A && c <= UPPER_F {
-        widen_u64(wrapping_sub(c, HEX_UPPER_LETTER_BASE))
+fn digit(ascii: u8, hex: bool) -> u64 {
+    if ascii >= DIGIT_ZERO && ascii <= DIGIT_NINE {
+        widen_u64(wrapping_sub(ascii, DIGIT_ZERO))
+    } else if hex && ascii >= LOWER_A && ascii <= LOWER_F {
+        widen_u64(wrapping_sub(ascii, HEX_LETTER_BASE))
+    } else if hex && ascii >= UPPER_A && ascii <= UPPER_F {
+        widen_u64(wrapping_sub(ascii, HEX_UPPER_LETTER_BASE))
     } else {
         NOT_A_DIGIT
     }
@@ -62,48 +62,48 @@ fn digit(c: u8, hex: bool) -> u64 {
 // `parse_int(raw, negative)`: underscores are dropped, `0x`/`0X` is hex;
 // `ok` is false for an empty or invalid spelling or a magnitude past
 // `i128::MAX`.
-pub fn parse_int(in b: Slice[u8], s: u64, e: u64, negative: bool) -> Big {
+pub fn parse_int(in bytes: Slice[u8], start: u64, end: u64, negative: bool) -> Big {
     // The first two non-underscore bytes decide the radix.
-    let mut i = s;
+    let mut i = start;
     let mut seen: u64 = 0;
-    let mut c0: u8 = 0;
+    let mut first_byte: u8 = 0;
     let mut hex = false;
-    let mut start = s;
+    let mut digits_start = start;
     loop {
-        if i >= e || seen >= HEX_PREFIX_BYTES {
+        if i >= end || seen >= HEX_PREFIX_BYTES {
             break;
         }
-        let c = byte(in b, i);
-        if c != UNDERSCORE {
+        let cur_byte = byte(in bytes, i);
+        if cur_byte != UNDERSCORE {
             if seen == 0 {
-                c0 = c;
-            } else if c0 == DIGIT_ZERO && (c == LOWER_X || c == UPPER_X) {
+                first_byte = cur_byte;
+            } else if first_byte == DIGIT_ZERO && (cur_byte == LOWER_X || cur_byte == UPPER_X) {
                 hex = true;
-                start = inc(i);
+                digits_start = inc(i);
             }
             seen = inc(seen);
         }
         i = inc(i);
     }
     let base: u64 = if hex { 16 } else { 10 };
-    let mut x = Big { ok: true, neg: false, hi: 0, lo: 0 };
+    let mut value = Big { ok: true, neg: false, hi: 0, lo: 0 };
     let mut digits: u64 = 0;
-    let mut j = start;
+    let mut j = digits_start;
     loop {
-        if j >= e {
+        if j >= end {
             break;
         }
-        let c = byte(in b, j);
+        let cur_byte = byte(in bytes, j);
         j = inc(j);
-        if c == UNDERSCORE {
+        if cur_byte == UNDERSCORE {
             continue;
         }
-        let d = digit(c, hex);
-        if d >= base {
+        let digit_value = digit(cur_byte, hex);
+        if digit_value >= base {
             return none();
         }
-        x = mul_add(x, base, d);
-        if !x.ok {
+        value = mul_add(value, base, digit_value);
+        if !value.ok {
             return none();
         }
         digits = inc(digits);
@@ -111,52 +111,52 @@ pub fn parse_int(in b: Slice[u8], s: u64, e: u64, negative: bool) -> Big {
     if digits == 0 {
         return none();
     }
-    let zero = x.hi == 0 && x.lo == 0;
-    Big { ok: true, neg: negative && !zero, hi: x.hi, lo: x.lo }
+    let zero = value.hi == 0 && value.lo == 0;
+    Big { ok: true, neg: negative && !zero, hi: value.hi, lo: value.lo }
 }
 
 // `u64::try_from(n)`.
-pub fn as_u64(x: Big) -> (bool, u64) {
-    if x.neg || x.hi != 0 {
+pub fn as_u64(value: Big) -> (bool, u64) {
+    if value.neg || value.hi != 0 {
         (false, 0)
     } else {
-        (true, x.lo)
+        (true, value.lo)
     }
 }
 
-// Appends the decimal spelling of `x` (`i128::to_string`).
-pub fn push_big(inout out: ChunkSeq[u8], x: Big) {
-    if x.neg {
+// Appends the decimal spelling of `value` (`i128::to_string`).
+pub fn push_big(inout out: ChunkSeq[u8], value: Big) {
+    if value.neg {
         out.push(HYPHEN);
     }
     let mask: u64 = U32_MASK;
     let mut limbs: ChunkSeq[u64] = ChunkSeq::new[u64]();
-    limbs.push(x.hi >> LIMB_BITS);
-    limbs.push(x.hi & mask);
-    limbs.push(x.lo >> LIMB_BITS);
-    limbs.push(x.lo & mask);
+    limbs.push(value.hi >> LIMB_BITS);
+    limbs.push(value.hi & mask);
+    limbs.push(value.lo >> LIMB_BITS);
+    limbs.push(value.lo & mask);
     let mut digits: ChunkSeq[u8] = ChunkSeq::new[u8]();
     loop {
-        let mut r: u64 = 0;
+        let mut rem: u64 = 0;
         let mut nonzero = false;
         for k in 0..LIMBS {
             let limb = limbs.try_get(k).unwrap_or(0);
-            let cur = wrapping_shl_u64(r, LIMB_BITS) | limb;
-            let q = cur / 10;
-            r = cur % 10;
-            let ok = limbs.try_set(k, q);
-            if q != 0 {
+            let cur = wrapping_shl_u64(rem, LIMB_BITS) | limb;
+            let quot = cur / 10;
+            rem = cur % 10;
+            let ok = limbs.try_set(k, quot);
+            if quot != 0 {
                 nonzero = true;
             }
         }
-        digits.push(wrapping_u8(add(r, widen_u64(DIGIT_ZERO))));
+        digits.push(wrapping_u8(add(rem, widen_u64(DIGIT_ZERO))));
         if !nonzero {
             break;
         }
     }
     let n = digits.len();
     for k in 0..n {
-        let c = digits.try_get(sub(sub(n, 1), k)).unwrap_or(DIGIT_ZERO);
-        out.push(c);
+        let digit_byte = digits.try_get(sub(sub(n, 1), k)).unwrap_or(DIGIT_ZERO);
+        out.push(digit_byte);
     }
 }

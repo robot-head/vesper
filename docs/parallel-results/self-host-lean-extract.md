@@ -565,10 +565,11 @@ the text line or the `vesper.format-proof/1` report (the audit object
 re-serialized with sorted keys, as `serde_json::Value` prints it), or the
 rejection document and the `formatter model verification failed:` error.
 
-The hybrid serves it from `modules/verify` (swap `verify`):
-`hc_verify_run` hands `--format` runs to the module and keeps `--extract`
-in Rust. It is its own module, like proof_audit, because it links
-hash-sys's BLAKE3 C.
+The hybrid serves it from `verify_run` of the driver module (swap
+`verify`): `hc_verify_run` hands `--format` runs to it and keeps
+`--extract` in Rust. It first had its own module, `modules/verify`; it
+joined the driver module after proof-audit did (#2091), so the driver
+links @vesper/verify and @vesper/lean-syntax.
 
 tests/self_host_verify_format.rs builds a driver from the package and runs
 each case beside `vesper verify`: missing, directory, oversized and

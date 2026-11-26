@@ -6,8 +6,8 @@
 // value, the depth-0 call Rust makes everywhere.
 
 use self::fun::{
-    Arg, Blk, Fun, Ins, add, has, hoistable, inc, insert, n32, set_u32, set_u8, u32_at, u64_at,
-    u8_at, w
+    Arg, Blk, Fun, Ins, add, counted_access, has, hoistable, inc, insert, n32, set_u32, set_u8,
+    u32_at, u64_at, u8_at, w
 };
 use self::graph::{Graph, graph, successors};
 use self::rules::{all_blocks, block_drop_overlaps, changes_len, single_bindings, stable_place};
@@ -43,6 +43,9 @@ const B_ADD: u64 = 5;
 const B_WADD: u64 = 6;
 
 // Term kinds.
+// Constants below this compare in `wide_fits` (Rust's `1 << 62`).
+const SMALL_CONST: u64 = 4611686018427387904;
+
 const K_CONST: u8 = 0;
 const K_LEN: u8 = 1;
 const K_FIXED: u8 = 2;
@@ -285,7 +288,8 @@ impl Facts {
                 && i.sub >= B_LT
                 && i.sub <= B_GE
                 && unsigned_word(in f, i.a)
-                && unsigned_word(in f, i.b) {
+                && unsigned_word(in f, i.b)
+            {
                 return (i.sub, i.a, i.b);
             }
             if i.op == OP_READ && f.depth(i.place) == 1 && self.once(f.root_of(i.place)) {
@@ -356,10 +360,9 @@ impl Facts {
         for p in 0..f.params.len() {
             let q = f.param(p);
             if q.name == root
-                && (
-                    q.pass == TyPass::In
-                        || (q.pass == TyPass::Inout && whole && (q.flags & TY_SLICE) != 0)
-                ) {
+                && (q.pass == TyPass::In
+                    || (q.pass == TyPass::Inout && whole && (q.flags & TY_SLICE) != 0))
+            {
                 borrowed = true;
             }
         }
@@ -630,7 +633,8 @@ impl Facts {
         for b in 0..n {
             if u8_at(in forward, b) != 0 && u8_at(in back, b) != 0 && n32(b) != qb {
                 if self.block_changes(in f, n32(b), mode, arg)
-                    || self.any_changes(in f, n32(b), 0, NONE64, mode, arg) {
+                    || self.any_changes(in f, n32(b), 0, NONE64, mode, arg)
+                {
                     return false;
                 }
             }
@@ -725,6 +729,46 @@ impl Facts {
         false
     }
 
+    // `wide_fits`: whether a fixed-width access of `bytes` bytes at the
+    // constant `t` fits in `place` (read at (tb, tk)) wherever block `at`
+    // runs: a comparison `k <= r` (or `k < r`) of a constant `k` with a
+    // value `r` at most the length, and `t + bytes <= k` (or `<= k + 1`).
+    pub fn wide_fits(
+        inout self,
+        in f: Fun,
+        t: u32,
+        bytes: u64,
+        place: u32,
+        tb: u32,
+        tk: u64,
+        at: u32
+    ) -> bool {
+        let x = self.node(t);
+        if x.kind != K_CONST || x.b != 0 || x.a >= SMALL_CONST {
+            return false;
+        }
+        let need = add(x.a, bytes);
+        for ei in 0..self.edges.len() {
+            let e = self.edge(ei);
+            if !self.holds(e, at) {
+                continue;
+            }
+            let lt = self.term(in f, e.lhs);
+            let l = self.node(lt);
+            if l.kind != K_CONST || l.b != 0 || l.a >= SMALL_CONST {
+                continue;
+            }
+            let room = if e.strict { inc(l.a) } else { l.a };
+            if need <= room {
+                let r = self.term(in f, e.rhs);
+                if self.at_most_len(in f, r, place, tb, tk, e.from, 1) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     // `at_most_len`: whether `t` is at most the length of `place`
     // wherever block `at` runs.
     pub fn at_most_len(
@@ -743,7 +787,8 @@ impl Facts {
         let x = self.node(t);
         if x.kind == K_LEN
             && n32(x.a) == place
-            && self.length_kept(in f, place, n32(x.b), x.c, tb, tk) {
+            && self.length_kept(in f, place, n32(x.b), x.c, tb, tk)
+        {
             return true;
         }
         // A join of values that are each at most the length (`min`).
@@ -781,7 +826,8 @@ impl Facts {
             let l = self.term(in f, e.lhs);
             let r = self.term(in f, e.rhs);
             if self.same(in f, l, t)
-                && self.at_most_len(in f, r, place, tb, tk, e.from, inc(depth)) {
+                && self.at_most_len(in f, r, place, tb, tk, e.from, inc(depth))
+            {
                 return true;
             }
         }
@@ -789,13 +835,18 @@ impl Facts {
     }
 
     // The element access at global instruction `x`, when its receiver is
-    // a read of its place (`accesses`): its access, else 4.
-    pub fn access_at(in self, in f: Fun, x: u64) -> u64 {
+    // a read of its place (`accesses`, or `accesses_of` with the
+    // fixed-width ones when `wide`): its access, else 4.
+    pub fn access_at(in self, in f: Fun, x: u64, wide: bool) -> u64 {
         let i = f.inst(x);
         if i.op != OP_SEQ {
             return 4;
         }
-        let a = hoistable(i.sub);
+        let a = if wide {
+            counted_access(i.sub)
+        } else {
+            hoistable(i.sub)
+        };
         if a == 4 || i.gn < 2 {
             return 4;
         }

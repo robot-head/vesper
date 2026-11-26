@@ -916,7 +916,8 @@ fn call_kfunc(inout i: I, pc: u64, code: u64) -> Val eff [Fail[IErr]] {
         if start > end {
             ret = neg(Errno::Inval);
         } else if wrapping_i64(sub(wrapping_u64(end), wrapping_u64(start)))
-            > wrapping_i64(BPF_MAX_LOOPS) {
+            > wrapping_i64(BPF_MAX_LOOPS)
+        {
             ret = neg(Errno::TooBig);
         } else {
             kst = pack(sub(wrapping_u64(start), 1), wrapping_u64(end));

@@ -78,17 +78,17 @@ enum Control: _ {
 }
 
 pub struct Store {
-    l: StoreLimits,
+    limits: StoreLimits,
     pool: String,
     uri_off: ChunkSeq[u64],
     uri_len: ChunkSeq[u64],
     text_off: ChunkSeq[u64],
     text_len: ChunkSeq[u64],
     versions: ChunkSeq[i64],
-    revs: ChunkSeq[u64],
+    revisions: ChunkSeq[u64],
     total: u64,
     revision: u64,
-    live: u64
+    live_bytes: u64
 }
 
 // One `ContentChange`: an optional range, an optional range length and the
@@ -101,8 +101,8 @@ pub struct Change {
     text: String
 }
 
-fn w(in s: ChunkSeq[u64], i: u64) -> u64 {
-    s.try_get(i).unwrap_or(0)
+fn w(in seq: ChunkSeq[u64], i: u64) -> u64 {
+    seq.try_get(i).unwrap_or(0)
 }
 
 fn hard_index() -> Limits {
@@ -120,51 +120,52 @@ fn hard_index() -> Limits {
     }
 }
 
-fn index_valid(in l: Limits) -> bool {
-    let h = hard_index();
-    l.max_source_bytes <= h.max_source_bytes
-        && l.max_lines <= h.max_lines
-        && l.max_metadata_bytes <= h.max_metadata_bytes
-        && l.max_work <= h.max_work
-        && l.max_edits <= h.max_edits
-        && l.max_output_bytes <= h.max_output_bytes
-        && l.max_diagnostics <= h.max_diagnostics
-        && l.max_labels <= h.max_labels
-        && l.max_fixes <= h.max_fixes
-        && l.max_text_bytes <= h.max_text_bytes
+fn index_valid(in index_limits: Limits) -> bool {
+    let hard = hard_index();
+    index_limits.max_source_bytes <= hard.max_source_bytes
+        && index_limits.max_lines <= hard.max_lines
+        && index_limits.max_metadata_bytes <= hard.max_metadata_bytes
+        && index_limits.max_work <= hard.max_work
+        && index_limits.max_edits <= hard.max_edits
+        && index_limits.max_output_bytes <= hard.max_output_bytes
+        && index_limits.max_diagnostics <= hard.max_diagnostics
+        && index_limits.max_labels <= hard.max_labels
+        && index_limits.max_fixes <= hard.max_fixes
+        && index_limits.max_text_bytes <= hard.max_text_bytes
 }
 
 // `StoreLimits::validate`.
-fn validate(l: StoreLimits) -> Unit eff [Fail[StoreError]] {
-    if !index_valid(in l.index) {
+fn validate(limits: StoreLimits) -> Unit eff [Fail[StoreError]] {
+    if !index_valid(in limits.index) {
         Fail::raise(StoreError::SIndex(SpanError::InvalidLimits));
     }
-    if l.max_document_bytes > Hard::DocumentBytes
-        || l.max_document_bytes > widen_u64(l.index.max_source_bytes)
-        || l.max_documents > Hard::Documents
-        || l.max_total_bytes > Hard::TotalBytes
-        || l.max_uri_bytes > Hard::UriBytes
-        || l.max_changes > Hard::Changes
-        || l.max_work > Hard::Work {
+    if limits.max_document_bytes > Hard::DocumentBytes
+        || limits.max_document_bytes > widen_u64(limits.index.max_source_bytes)
+        || limits.max_documents > Hard::Documents
+        || limits.max_total_bytes > Hard::TotalBytes
+        || limits.max_uri_bytes > Hard::UriBytes
+        || limits.max_changes > Hard::Changes
+        || limits.max_work > Hard::Work
+    {
         Fail::raise(StoreError::SInvalidLimits);
     }
 }
 
 // `DocumentStore::new`.
-pub fn store_new(l: StoreLimits) -> Store eff [Fail[StoreError]] {
-    validate(l);
+pub fn store_new(limits: StoreLimits) -> Store eff [Fail[StoreError]] {
+    validate(limits);
     Store {
-        l: l,
+        limits: limits,
         pool: String::new(),
         uri_off: ChunkSeq::new(),
         uri_len: ChunkSeq::new(),
         text_off: ChunkSeq::new(),
         text_len: ChunkSeq::new(),
         versions: ChunkSeq::new(),
-        revs: ChunkSeq::new(),
+        revisions: ChunkSeq::new(),
         total: 0,
         revision: 0,
-        live: 0
+        live_bytes: 0
     }
 }
 
@@ -173,11 +174,11 @@ copy struct Work {
     left: u64
 }
 
-fn spend(inout k: Work, n: u64) -> Unit eff [Fail[StoreError]] {
-    if n > k.left {
+fn spend(inout work: Work, n: u64) -> Unit eff [Fail[StoreError]] {
+    if n > work.left {
         Fail::raise(StoreError::SWorkLimit);
     }
-    k.left = wrapping_sub(k.left, n);
+    work.left = wrapping_sub(work.left, n);
 }
 
 fn mul(a: u64, b: u64) -> u64 eff [Fail[StoreError]] {
@@ -190,17 +191,17 @@ fn mul(a: u64, b: u64) -> u64 eff [Fail[StoreError]] {
 
 // `char::is_control` over UTF-8: C0 controls, DEL and the C1 controls
 // (U+0080 to U+009F, encoded `C2 80` to `C2 9F`).
-fn has_control(in u: Str) -> bool {
-    let b = u.as_bytes();
-    let n = b.len();
+fn has_control(in uri: Str) -> bool {
+    let bytes = uri.as_bytes();
+    let n = bytes.len();
     for i in 0..n {
-        let c = b.try_get(i).unwrap_or(0);
+        let c = bytes.try_get(i).unwrap_or(0);
         if c < Control::C0End || c == Control::Del {
             return true;
         }
         if c == Control::C1Lead {
-            let d = b.try_get(wrapping_add(i, 1)).unwrap_or(0);
-            if d >= Control::C1First && d < Control::C1End {
+            let second = bytes.try_get(wrapping_add(i, 1)).unwrap_or(0);
+            if second >= Control::C1First && second < Control::C1End {
                 return true;
             }
         }
@@ -209,83 +210,83 @@ fn has_control(in u: Str) -> bool {
 }
 
 // `valid_uri`.
-fn valid_uri(in s: Store, in uri: Str) -> bool {
-    !(uri.len() == 0 || uri.len() > s.l.max_uri_bytes || has_control(in uri))
+fn valid_uri(in store: Store, in uri: Str) -> bool {
+    !(uri.len() == 0 || uri.len() > store.limits.max_uri_bytes || has_control(in uri))
 }
 
 // `lookup_work`.
-fn lookup_work(in s: Store) -> u64 eff [Fail[StoreError]] {
-    if s.l.max_uri_bytes == U64_MAX {
+fn lookup_work(in store: Store) -> u64 eff [Fail[StoreError]] {
+    if store.limits.max_uri_bytes == U64_MAX {
         Fail::raise(StoreError::SWorkLimit);
     }
-    mul(s.uri_off.len(), wrapping_add(s.l.max_uri_bytes, 1))
+    mul(store.uri_off.len(), wrapping_add(store.limits.max_uri_bytes, 1))
 }
 
 // The row of `uri`, or the number of rows.
-fn find(in s: Store, in uri: Str) -> u64 {
-    let n = s.uri_off.len();
-    let p = s.pool.as_bytes();
-    for i in 0..n {
-        let a = w(in s.uri_off, i);
-        let b = wrapping_add(a, w(in s.uri_len, i));
-        if p[a..b].eq(in uri.as_bytes()) {
+fn find(in store: Store, in uri: Str) -> u64 {
+    let row_count = store.uri_off.len();
+    let pool_bytes = store.pool.as_bytes();
+    for i in 0..row_count {
+        let uri_start = w(in store.uri_off, i);
+        let uri_end = wrapping_add(uri_start, w(in store.uri_len, i));
+        if pool_bytes[uri_start..uri_end].eq(in uri.as_bytes()) {
             return i;
         }
     }
-    n
+    row_count
 }
 
 // `lookup`.
-fn lookup(in s: Store, in uri: Str) -> u64 eff [Fail[StoreError]] {
-    if !valid_uri(in s, in uri) {
+fn lookup(in store: Store, in uri: Str) -> u64 eff [Fail[StoreError]] {
+    if !valid_uri(in store, in uri) {
         Fail::raise(StoreError::SInvalidUri);
     }
-    let mut k = Work { left: s.l.max_work };
-    spend(inout k, uri.len());
-    spend(inout k, lookup_work(in s));
-    let at = find(in s, in uri);
-    if at == s.uri_off.len() {
+    let mut work = Work { left: store.limits.max_work };
+    spend(inout work, uri.len());
+    spend(inout work, lookup_work(in store));
+    let at = find(in store, in uri);
+    if at == store.uri_off.len() {
         Fail::raise(StoreError::SNotOpen);
     }
     at
 }
 
-fn next_revision(in s: Store) -> u64 eff [Fail[StoreError]] {
-    if s.revision == U64_MAX {
+fn next_revision(in store: Store) -> u64 eff [Fail[StoreError]] {
+    if store.revision == U64_MAX {
         Fail::raise(StoreError::SRevisionOverflow);
     }
-    wrapping_add(s.revision, 1)
+    wrapping_add(store.revision, 1)
 }
 
-// `text_size`: the store's total with a text of `n` bytes in place of one
-// of `old`.
-fn text_size(in s: Store, n: u64, old: u64) -> u64 eff [Fail[StoreError]] {
-    if n > s.l.max_document_bytes {
+// `text_size`: the store's total with a text of `new_len` bytes in place of
+// one of `old_len`.
+fn text_size(in store: Store, new_len: u64, old_len: u64) -> u64 eff [Fail[StoreError]] {
+    if new_len > store.limits.max_document_bytes {
         Fail::raise(StoreError::SDocumentLimit);
     }
-    if old > s.total {
+    if old_len > store.total {
         Fail::raise(StoreError::STotalLimit);
     }
-    let rest = wrapping_sub(s.total, old);
-    if n > wrapping_sub(U64_MAX, rest) {
+    let rest = wrapping_sub(store.total, old_len);
+    if new_len > wrapping_sub(U64_MAX, rest) {
         Fail::raise(StoreError::STotalLimit);
     }
-    let total = wrapping_add(rest, n);
-    if total > s.l.max_total_bytes {
+    let total = wrapping_add(rest, new_len);
+    if total > store.limits.max_total_bytes {
         Fail::raise(StoreError::STotalLimit);
     }
     total
 }
 
 // `LineIndex::new`, kept only for its refusals.
-fn index_lines(in text: Str, l: StoreLimits) -> ChunkSeq[u64] eff [Fail[StoreError]] {
-    let r: Result[ChunkSeq[u64], SpanError] = handle Fail[SpanError] in {
-        lines_ok(line_table(in text, in l.index, narrow_usize(LINE_SIZE)))
+fn index_lines(in text: Str, limits: StoreLimits) -> ChunkSeq[u64] eff [Fail[StoreError]] {
+    let table: Result[ChunkSeq[u64], SpanError] = handle Fail[SpanError] in {
+        lines_ok(line_table(in text, in limits.index, narrow_usize(LINE_SIZE)))
     } with {
         return v => v,
         raise(e, resume) => lines_err(e),
     };
-    match r {
+    match table {
         Result::Ok(t) => t,
         Result::Err(e) => Fail::raise(StoreError::SIndex(e)),
     }
@@ -294,12 +295,12 @@ fn index_lines(in text: Str, l: StoreLimits) -> ChunkSeq[u64] eff [Fail[StoreErr
 fn span_of(
     in text: Str,
     in lines: ChunkSeq[u64],
-    l: StoreLimits,
-    r: Range
+    limits: StoreLimits,
+    range: Range
 ) -> (u64, u64) eff [Fail[StoreError]] {
     let got: Result[(u64, u64), SpanError] = handle Fail[SpanError] in {
-        let b = span(in text, in lines[0..lines.len()], l.index.max_work, r);
-        span_ok(widen_u64(b.start), widen_u64(b.end))
+        let bounds = span(in text, in lines[0..lines.len()], limits.index.max_work, range);
+        span_ok(widen_u64(bounds.start), widen_u64(bounds.end))
     } with {
         return v => v,
         raise(e, resume) => span_err(e),
@@ -310,190 +311,195 @@ fn span_of(
     }
 }
 
-// The UTF-16 length of `t`.
-fn utf16_len(in t: Str) -> u64 {
-    let b = t.as_bytes();
-    let mut n: u64 = 0;
-    for i in 0..b.len() {
-        let c = b.try_get(i).unwrap_or(0);
+// The UTF-16 length of `text`.
+fn utf16_len(in text: Str) -> u64 {
+    let bytes = text.as_bytes();
+    let mut units: u64 = 0;
+    for i in 0..bytes.len() {
+        let c = bytes.try_get(i).unwrap_or(0);
         if c < 128 || c >= 192 {
-            n = if c >= 240 {
-                wrapping_add(n, 2)
+            units = if c >= 240 {
+                wrapping_add(units, 2)
             } else {
-                wrapping_add(n, 1)
+                wrapping_add(units, 1)
             };
         }
     }
-    n
+    units
 }
 
-fn append(inout s: Store, in t: Str) -> u64 {
-    let at = s.pool.len();
-    s.pool.push_str(in t);
+fn append(inout store: Store, in text: Str) -> u64 {
+    let at = store.pool.len();
+    store.pool.push_str(in text);
     at
 }
 
 // Rewrites the arena with only the live URIs and texts.
-fn compact(inout s: Store) {
+fn compact(inout store: Store) {
     let mut pool = String::new();
-    for i in 0..s.uri_off.len() {
-        let ua = w(in s.uri_off, i);
-        let ub = wrapping_add(ua, w(in s.uri_len, i));
-        let ta = w(in s.text_off, i);
-        let tb = wrapping_add(ta, w(in s.text_len, i));
-        let nu = pool.len();
-        pool.push_str(in s.pool[ua..ub]);
-        let nt = pool.len();
-        pool.push_str(in s.pool[ta..tb]);
-        let _ = s.uri_off.try_set(i, nu);
-        let _ = s.text_off.try_set(i, nt);
+    for i in 0..store.uri_off.len() {
+        let uri_start = w(in store.uri_off, i);
+        let uri_end = wrapping_add(uri_start, w(in store.uri_len, i));
+        let text_start = w(in store.text_off, i);
+        let text_end = wrapping_add(text_start, w(in store.text_len, i));
+        let new_uri_off = pool.len();
+        pool.push_str(in store.pool[uri_start..uri_end]);
+        let new_text_off = pool.len();
+        pool.push_str(in store.pool[text_start..text_end]);
+        let _ = store.uri_off.try_set(i, new_uri_off);
+        let _ = store.text_off.try_set(i, new_text_off);
     }
-    s.live = pool.len();
-    s.pool = pool;
+    store.live_bytes = pool.len();
+    store.pool = pool;
 }
 
-fn maybe_compact(inout s: Store) {
-    let dead = wrapping_sub(s.pool.len(), s.live);
-    if dead > COMPACT_SLACK && dead > s.live {
-        compact(inout s);
+fn maybe_compact(inout store: Store) {
+    let dead = wrapping_sub(store.pool.len(), store.live_bytes);
+    if dead > COMPACT_SLACK && dead > store.live_bytes {
+        compact(inout store);
     }
 }
 
 // `open`.
 pub fn store_open(
-    inout s: Store,
+    inout store: Store,
     in uri: Str,
     version: i64,
     in text: Str
 ) -> u64 eff [Fail[StoreError]] {
-    if !valid_uri(in s, in uri) {
+    if !valid_uri(in store, in uri) {
         Fail::raise(StoreError::SInvalidUri);
     }
-    let mut k = Work { left: s.l.max_work };
-    spend(inout k, uri.len());
-    spend(inout k, lookup_work(in s));
-    if find(in s, in uri) != s.uri_off.len() {
+    let mut work = Work { left: store.limits.max_work };
+    spend(inout work, uri.len());
+    spend(inout work, lookup_work(in store));
+    if find(in store, in uri) != store.uri_off.len() {
         Fail::raise(StoreError::SAlreadyOpen);
     }
-    if s.uri_off.len() >= s.l.max_documents {
+    if store.uri_off.len() >= store.limits.max_documents {
         Fail::raise(StoreError::SDocumentLimit);
     }
-    let total = text_size(in s, text.len(), 0);
-    let revision = next_revision(in s);
-    spend(inout k, mul(text.len(), Cost::Open));
-    let lines = index_lines(in text, s.l);
-    let ua = append(inout s, in uri);
-    let ta = append(inout s, in text);
-    s.uri_off.push(ua);
-    s.uri_len.push(uri.len());
-    s.text_off.push(ta);
-    s.text_len.push(text.len());
-    s.versions.push(version);
-    s.revs.push(revision);
-    s.live = wrapping_add(s.live, wrapping_add(uri.len(), text.len()));
-    s.total = total;
-    s.revision = revision;
-    wrapping_sub(s.uri_off.len(), 1)
+    let total = text_size(in store, text.len(), 0);
+    let revision = next_revision(in store);
+    spend(inout work, mul(text.len(), Cost::Open));
+    let lines = index_lines(in text, store.limits);
+    let uri_start = append(inout store, in uri);
+    let text_start = append(inout store, in text);
+    store.uri_off.push(uri_start);
+    store.uri_len.push(uri.len());
+    store.text_off.push(text_start);
+    store.text_len.push(text.len());
+    store.versions.push(version);
+    store.revisions.push(revision);
+    store.live_bytes = wrapping_add(store.live_bytes, wrapping_add(uri.len(), text.len()));
+    store.total = total;
+    store.revision = revision;
+    wrapping_sub(store.uri_off.len(), 1)
 }
 
 // A copy of the text of row `at`.
-fn text_copy(in s: Store, at: u64) -> String {
-    let a = w(in s.text_off, at);
-    let b = wrapping_add(a, w(in s.text_len, at));
-    let mut t = String::new();
-    t.push_str(in s.pool[a..b]);
-    t
+fn text_copy(in store: Store, at: u64) -> String {
+    let start = w(in store.text_off, at);
+    let end = wrapping_add(start, w(in store.text_len, at));
+    let mut copy = String::new();
+    copy.push_str(in store.pool[start..end]);
+    copy
 }
 
 // `change`: every change applies to the candidate before it; nothing is
 // committed until all succeed.
 pub fn store_change(
-    inout s: Store,
+    inout store: Store,
     in uri: Str,
     version: i64,
     in changes: ChunkSeq[Change]
 ) -> u64 eff [Fail[StoreError]] {
-    let at = lookup(in s, in uri);
-    let old_version = s.versions.try_get(at).unwrap_or(0);
-    let old_len = w(in s.text_len, at);
+    let at = lookup(in store, in uri);
+    let old_version = store.versions.try_get(at).unwrap_or(0);
+    let old_len = w(in store.text_len, at);
     if version <= old_version {
         Fail::raise(StoreError::SVersion);
     }
-    if changes.len() > s.l.max_changes {
+    if changes.len() > store.limits.max_changes {
         Fail::raise(StoreError::SChangeLimit);
     }
-    let revision = next_revision(in s);
-    let mut k = Work { left: s.l.max_work };
-    spend(inout k, uri.len());
-    spend(inout k, lookup_work(in s));
-    spend(inout k, mul(old_len, Cost::Copy));
-    let mut text = text_copy(in s, at);
-    let mut lines = index_lines(in text, s.l);
-    let mut total = s.total;
+    let revision = next_revision(in store);
+    let mut work = Work { left: store.limits.max_work };
+    spend(inout work, uri.len());
+    spend(inout work, lookup_work(in store));
+    spend(inout work, mul(old_len, Cost::Copy));
+    let mut text = text_copy(in store, at);
+    let mut lines = index_lines(in text, store.limits);
+    let mut total = store.total;
     for i in 0..changes.len() {
         match changes.try_get(i) {
-            Option::Some(c) => {
-                spend(inout k, 1);
+            Option::Some(change) => {
+                spend(inout work, 1);
                 let mut start: u64 = 0;
                 let mut end = text.len();
-                if c.has_range {
-                    spend(inout k, mul(text.len(), Cost::Range));
-                    let (a, b) = span_of(in text, in lines, s.l, c.range);
-                    if c.has_len {
-                        spend(inout k, wrapping_sub(b, a));
-                        if utf16_len(in text[a..b]) != c.len {
+                if change.has_range {
+                    spend(inout work, mul(text.len(), Cost::Range));
+                    let (range_start, range_end) = span_of(
+                        in text,
+                        in lines,
+                        store.limits,
+                        change.range
+                    );
+                    if change.has_len {
+                        spend(inout work, wrapping_sub(range_end, range_start));
+                        if utf16_len(in text[range_start..range_end]) != change.len {
                             Fail::raise(StoreError::SRangeLength);
                         }
                     }
-                    start = a;
-                    end = b;
-                } else if c.has_len {
+                    start = range_start;
+                    end = range_end;
+                } else if change.has_len {
                     Fail::raise(StoreError::SRangeLength);
                 }
                 let keep = wrapping_sub(text.len(), wrapping_sub(end, start));
-                if c.text.len() > wrapping_sub(U64_MAX, keep) {
+                if change.text.len() > wrapping_sub(U64_MAX, keep) {
                     Fail::raise(StoreError::SDocumentLimit);
                 }
-                let n = wrapping_add(keep, c.text.len());
-                total = text_size(in s, n, old_len);
-                spend(inout k, mul(n, Cost::Candidate));
-                let mut next = String::new();
-                next.push_str(in text[0..start]);
-                next.push_str(in c.text);
-                next.push_str(in text[end..text.len()]);
-                lines = index_lines(in next, s.l);
-                text = next;
+                let new_len = wrapping_add(keep, change.text.len());
+                total = text_size(in store, new_len, old_len);
+                spend(inout work, mul(new_len, Cost::Candidate));
+                let mut candidate = String::new();
+                candidate.push_str(in text[0..start]);
+                candidate.push_str(in change.text);
+                candidate.push_str(in text[end..text.len()]);
+                lines = index_lines(in candidate, store.limits);
+                text = candidate;
             }
             Option::None => {}
         }
     }
-    let ta = append(inout s, in text);
-    let _ = s.text_off.try_set(at, ta);
-    let _ = s.text_len.try_set(at, text.len());
-    let _ = s.versions.try_set(at, version);
-    let _ = s.revs.try_set(at, revision);
-    s.live = wrapping_add(wrapping_sub(s.live, old_len), text.len());
-    s.total = total;
-    s.revision = revision;
-    maybe_compact(inout s);
+    let text_start = append(inout store, in text);
+    let _ = store.text_off.try_set(at, text_start);
+    let _ = store.text_len.try_set(at, text.len());
+    let _ = store.versions.try_set(at, version);
+    let _ = store.revisions.try_set(at, revision);
+    store.live_bytes = wrapping_add(wrapping_sub(store.live_bytes, old_len), text.len());
+    store.total = total;
+    store.revision = revision;
+    maybe_compact(inout store);
     at
 }
 
-fn remove_u64(inout v: ChunkSeq[u64], at: u64) {
-    let n = v.len();
-    for i in at..wrapping_sub(n, 1) {
-        let _ = v.try_set(i, w(in v, wrapping_add(i, 1)));
+fn remove_u64(inout column: ChunkSeq[u64], at: u64) {
+    let len = column.len();
+    for i in at..wrapping_sub(len, 1) {
+        let _ = column.try_set(i, w(in column, wrapping_add(i, 1)));
     }
-    v.truncate(wrapping_sub(n, 1));
+    column.truncate(wrapping_sub(len, 1));
 }
 
-fn remove_i64(inout v: ChunkSeq[i64], at: u64) {
-    let n = v.len();
-    for i in at..wrapping_sub(n, 1) {
-        let x = v.try_get(wrapping_add(i, 1)).unwrap_or(0);
-        let _ = v.try_set(i, x);
+fn remove_i64(inout column: ChunkSeq[i64], at: u64) {
+    let len = column.len();
+    for i in at..wrapping_sub(len, 1) {
+        let next_value = column.try_get(wrapping_add(i, 1)).unwrap_or(0);
+        let _ = column.try_set(i, next_value);
     }
-    v.truncate(wrapping_sub(n, 1));
+    column.truncate(wrapping_sub(len, 1));
 }
 
 // The closed document `close` returns: its version, revision and text.
@@ -504,73 +510,73 @@ pub struct Closed {
 }
 
 // `close`.
-pub fn store_close(inout s: Store, in uri: Str) -> Closed eff [Fail[StoreError]] {
-    let at = lookup(in s, in uri);
-    let revision = next_revision(in s);
+pub fn store_close(inout store: Store, in uri: Str) -> Closed eff [Fail[StoreError]] {
+    let at = lookup(in store, in uri);
+    let revision = next_revision(in store);
     let closed = Closed {
-        version: s.versions.try_get(at).unwrap_or(0),
-        revision: w(in s.revs, at),
-        text: text_copy(in s, at)
+        version: store.versions.try_get(at).unwrap_or(0),
+        revision: w(in store.revisions, at),
+        text: text_copy(in store, at)
     };
-    let len = w(in s.text_len, at);
-    s.live = wrapping_sub(s.live, wrapping_add(len, w(in s.uri_len, at)));
-    remove_u64(inout s.uri_off, at);
-    remove_u64(inout s.uri_len, at);
-    remove_u64(inout s.text_off, at);
-    remove_u64(inout s.text_len, at);
-    remove_i64(inout s.versions, at);
-    remove_u64(inout s.revs, at);
-    s.total = wrapping_sub(s.total, len);
-    s.revision = revision;
-    maybe_compact(inout s);
+    let len = w(in store.text_len, at);
+    store.live_bytes = wrapping_sub(store.live_bytes, wrapping_add(len, w(in store.uri_len, at)));
+    remove_u64(inout store.uri_off, at);
+    remove_u64(inout store.uri_len, at);
+    remove_u64(inout store.text_off, at);
+    remove_u64(inout store.text_len, at);
+    remove_i64(inout store.versions, at);
+    remove_u64(inout store.revisions, at);
+    store.total = wrapping_sub(store.total, len);
+    store.revision = revision;
+    maybe_compact(inout store);
     closed
 }
 
 // `get`: the row of `uri`, or `None`.
-pub fn store_get(in s: Store, in uri: Str) -> Option[u64] {
-    if !valid_uri(in s, in uri) {
+pub fn store_get(in store: Store, in uri: Str) -> Option[u64] {
+    if !valid_uri(in store, in uri) {
         return Option::None;
     }
-    let at = find(in s, in uri);
-    if at == s.uri_off.len() {
+    let at = find(in store, in uri);
+    if at == store.uri_off.len() {
         Option::None
     } else {
         Option::Some(at)
     }
 }
 
-pub fn doc_version(in s: Store, at: u64) -> i64 {
-    s.versions.try_get(at).unwrap_or(0)
+pub fn doc_version(in store: Store, at: u64) -> i64 {
+    store.versions.try_get(at).unwrap_or(0)
 }
 
-pub fn doc_revision(in s: Store, at: u64) -> u64 {
-    w(in s.revs, at)
+pub fn doc_revision(in store: Store, at: u64) -> u64 {
+    w(in store.revisions, at)
 }
 
 // The text of row `at`, appended to `out`.
-pub fn doc_text(in s: Store, at: u64, inout out: ChunkSeq[u8]) {
-    let a = w(in s.text_off, at);
-    let b = wrapping_add(a, w(in s.text_len, at));
-    let p = s.pool.as_bytes();
-    out.extend(in p[a..b]);
+pub fn doc_text(in store: Store, at: u64, inout out: ChunkSeq[u8]) {
+    let start = w(in store.text_off, at);
+    let end = wrapping_add(start, w(in store.text_len, at));
+    let pool_bytes = store.pool.as_bytes();
+    out.extend(in pool_bytes[start..end]);
 }
 
-pub fn store_len(in s: Store) -> u64 {
-    s.uri_off.len()
+pub fn store_len(in store: Store) -> u64 {
+    store.uri_off.len()
 }
 
-pub fn store_total(in s: Store) -> u64 {
-    s.total
+pub fn store_total(in store: Store) -> u64 {
+    store.total
 }
 
-pub fn store_revision(in s: Store) -> u64 {
-    s.revision
+pub fn store_revision(in store: Store) -> u64 {
+    store.revision
 }
 
 // Forces the store revision, as the Rust unit test does to reach
 // `RevisionOverflow`.
-pub fn store_set_revision(inout s: Store, r: u64) {
-    s.revision = r;
+pub fn store_set_revision(inout store: Store, revision: u64) {
+    store.revision = revision;
 }
 
 // Typed constructors: a handle body or clause that builds a Result or

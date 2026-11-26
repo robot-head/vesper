@@ -34,6 +34,7 @@
 //              [6, function], Unsupported [7, description]; a subtree
 //              cut by the encoder past 256 levels is [7, description, k]
 // Maps and sets are in Rust iteration order (sorted).
+use @vesper-std/core::iter::{all, any};
 use self::Q;
 use self::util::{Class, none, put, put_i64, put_text, put_u64};
 
@@ -444,7 +445,8 @@ fn gen_starts_with(in w: ChunkSeq[u64], a: u64, b: u64) -> bool {
     }
     for k in 0..n {
         if gen_kind(in w, a, k) != gen_kind(in w, b, k)
-            || gen_value(in w, a, k) != gen_value(in w, b, k) {
+            || gen_value(in w, a, k) != gen_value(in w, b, k)
+        {
             return false;
         }
     }
@@ -536,19 +538,15 @@ fn cap_arg(in w: ChunkSeq[u64], c: u64, k: u64) -> u64 {
 // The same identity, effect and type arguments.
 fn same_capability(in w: ChunkSeq[u64], a: u64, b: u64) -> bool {
     if cap_identity(in w, a) != cap_identity(in w, b)
-        || cap_effect(in w, a) != cap_effect(in w, b) {
+        || cap_effect(in w, a) != cap_effect(in w, b)
+    {
         return false;
     }
     let n = cap_arg_count(in w, a);
     if cap_arg_count(in w, b) != n {
         return false;
     }
-    for k in 0..n {
-        if cap_arg(in w, a, k) != cap_arg(in w, b, k) {
-            return false;
-        }
-    }
-    true
+    all{ { cap_arg(in w, a, k) == cap_arg(in w, b, k) } | k in 0..n }
 }
 
 // Projections.
@@ -561,12 +559,7 @@ fn proj_full(in w: ChunkSeq[u64], p: u64) -> bool {
     if n == 0 {
         return true;
     }
-    for k in 0..n {
-        if word(in w, at(in w, p, wrapping_add(Proj::First, k))) == 0 {
-            return true;
-        }
-    }
-    false
+    any{ { word(in w, at(in w, p, wrapping_add(Proj::First, k))) == 0 } | k in 0..n }
 }
 
 // `path a` starts with `path b`.
@@ -575,12 +568,9 @@ fn path_starts_with(in w: ChunkSeq[u64], a: u64, b: u64) -> bool {
     if word(in w, a) < n {
         return false;
     }
-    for k in 0..n {
-        if at(in w, a, wrapping_add(List::First, k)) != at(in w, b, wrapping_add(List::First, k)) {
-            return false;
-        }
-    }
-    true
+    all{ {
+        at(in w, a, wrapping_add(List::First, k)) == at(in w, b, wrapping_add(List::First, k))
+    } | k in 0..n }
 }
 
 // The exported `is_subset_of`.
@@ -1085,7 +1075,8 @@ fn validate_function(
         let d = find_export(in w, i, cap_effect(in w, c));
         if d != none() && at(in w, d, Decl::Tag) == DeclTag::Effect {
             if cap_resumption(in w, c) != at(in w, d, Decl::Resumption)
-                || cap_arg_count(in w, c) != gen_count(in w, at(in w, d, Decl::Generics)) {
+                || cap_arg_count(in w, c) != gen_count(in w, at(in w, d, Decl::Generics))
+            {
                 unsupported(
                     inout q,
                     path,
@@ -1536,7 +1527,8 @@ fn function(
                 );
             } else if cap_grade(in w, o) == Grade::Exact {
                 if cap_has_ceiling(in w, o) != cap_has_ceiling(in w, n)
-                    || cap_ceiling(in w, o) != cap_ceiling(in w, n) {
+                    || cap_ceiling(in w, o) != cap_ceiling(in w, n)
+                {
                     breaking(
                         inout q,
                         path,
@@ -1895,7 +1887,8 @@ pub fn compare_q(in ws: Slice[u64], in t: Slice[u8]) -> Q {
         let e = find_ext(in w, new, name);
         if e != none() {
             if ext_field(in w, new, e, Ext::Arity) != ext_field(in w, old, k, Ext::Arity)
-                || ext_field(in w, new, e, Ext::Mode) > ext_field(in w, old, k, Ext::Mode) {
+                || ext_field(in w, new, e, Ext::Mode) > ext_field(in w, old, k, Ext::Mode)
+            {
                 let path = path_node(inout q, none(), PathKind::Root, name);
                 breaking(
                     inout q,

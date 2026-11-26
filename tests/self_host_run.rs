@@ -111,6 +111,87 @@ const PROGRAMS: &[(&str, &str)] = &[
          s = wrapping_add(s, j); } s }",
     ),
     (
+        "handlers",
+        "fn d(a: u64, b: u64) -> u64 { handle Fail[RuntimeError] in { a / b } with { \
+         return v => wrapping_add(v, 1), raise(e, k) => 0 } } \
+         fn o(a: u8) -> u8 { handle Fail[ArithOverflow] in { a + 200 } with { \
+         return v => v, raise(e, k) => 7 } } \
+         fn main() -> (u64, u64, u8, u8) { (d(7, 2), d(7, 0), o(3), o(100)) }",
+    ),
+    (
+        "nested_handlers",
+        "fn inner(a: u64, b: u64) -> u64 eff [Fail[RuntimeError]] { a % b } \
+         fn mid(a: u64, b: u64) -> u64 eff [Fail[RuntimeError]] { \
+         handle Fail[ArithOverflow] in { let x: u8 = 255; let y = x + 1; wrapping_add(inner(a, b), widen_u64(y)) } \
+         with { return v => v, raise(e, k) => 5 } } \
+         fn main() -> (u64, u64) { (handle Fail[RuntimeError] in { mid(9, 0) } with { return v => v, raise(e, k) => 3 }, \
+         handle Fail[RuntimeError] in { mid(9, 4) } with { return v => v, raise(e, k) => 3 }) }",
+    ),
+    (
+        "try_raise",
+        "fn f(x: i64) -> Result[i64, String] { if x > 0 { Result::Ok(x) } else { Result::Err(\"neg\") } } \
+         fn g(x: i64) -> i64 eff [Fail[String]] { let v = f(x)?; wrapping_mul(v, 2) } \
+         fn h() -> i64 eff [Fail[String]] { Fail::raise(\"boom\") } \
+         fn main() -> (i64, i64, i64) { \
+         (handle Fail[String] in { g(4) } with { return v => v, raise(e, k) => 99 }, \
+         handle Fail[String] in { g(-1) } with { return v => v, raise(e, k) => 99 }, \
+         handle Fail[String] in { h() } with { return v => v, raise(e, k) => 98 }) }",
+    ),
+    (
+        // An effectful function value binds the incoming capability
+        // (`bind_callable_evidence`): the outer handler answers.
+        "bound_evidence",
+        "effect Ask { fn ask() -> i64; } fn ask() -> i64 eff [Ask] { Ask::ask() } \
+         fn apply(sink f: fn() -> i64 eff [Ask]) -> i64 eff [Ask] { handle inner: Ask in { f() } \
+         with { return x => x, ask(k) => 2, } } \
+         fn main() -> i64 { let f = ask; handle outer: Ask in { apply(sink f) } \
+         with { return x => x, ask(k) => 1, } }",
+    ),
+    (
+        // A clause writes an `inout` operation argument before aborting.
+        "inout_operation",
+        "effect Stop { fn stop(inout x: i64) -> i64; } fn main() -> i64 { let mut x = 0; \
+         let r = handle Stop in { x += 5; Stop::stop(inout x); x = wrapping_add(x, 100); 1 } \
+         with { return v => v, stop(x, k) => { x = wrapping_add(x, 30); 7 }, }; \
+         wrapping_add(wrapping_mul(r, 1000), x) }",
+    ),
+    (
+        "aborting_operation",
+        "effect Stop { fn stop() -> i64; } fn main() -> i64 { let mut x = 0; \
+         let r = handle Stop in { x += 5; Stop::stop(); x += 100; 1 } \
+         with { return v => v, stop(k) => 7, }; wrapping_add(wrapping_mul(r, 1000), x) }",
+    ),
+    (
+        "resumed_continuations",
+        "effect Ask { fn ask(x: i64) -> i64; } \
+         fn f(n: i64) -> i64 eff [Ask] { let mut s = 0; for i in 0..n { s = wrapping_add(s, Ask::ask(i)); } s } \
+         fn main() -> (i64, i64) { (handle Ask in { f(10) } with { return v => wrapping_mul(v, 2), \
+         ask(x, k) => k(wrapping_mul(x, x)) }, handle Ask in { wrapping_add(Ask::ask(1), 100) } \
+         with { return v => v, ask(x, k) => wrapping_add(k(x), 1000) }) }",
+    ),
+    (
+        "aborting_loop",
+        "effect Stop { fn stop() -> i64; } fn main() -> i64 { let mut s = 0; for i in 0..2000 { \
+         s = wrapping_add(s, handle Stop in { wrapping_add(Stop::stop(), i) } \
+         with { return v => v, stop(k) => 2, }); } s }",
+    ),
+    (
+        "state_handlers",
+        "linear effect Counter { fn next() -> i64; } \
+         fn main() -> (i64, (i64, i64)) { (handle Counter state c = 0 in { \
+         wrapping_add(Counter::next(), Counter::next()) } with { \
+         return (v, c) => wrapping_add(wrapping_mul(v, 10), c), next(c, k) => k(c, wrapping_add(c, 1)), }, \
+         handle Counter state c = 5 in { Counter::next() } with { \
+         return p => p, next(c, k) => k(c, wrapping_mul(c, 2)), }) }",
+    ),
+    (
+        "unhandled_in_clause",
+        "fn d(a: u64, b: u64) -> u64 eff [Fail[RuntimeError]] { a / b } \
+         fn main() -> u64 { handle Fail[RuntimeError] in { \
+         handle Fail[RuntimeError] in { d(1, 0) } with { return v => v, raise(e, k) => d(2, 0) } \
+         } with { return v => v, raise(e, k) => 11 } }",
+    ),
+    (
         "recursion",
         "fn fib(n: i64) -> i64 { if n < 2 { n } else { wrapping_add(fib(wrapping_sub(n, 1)), \
          fib(wrapping_sub(n, 2))) } } fn main() -> i64 { fib(20) }",
@@ -226,6 +307,8 @@ fn vesper_answer(world: &World, optimize: bool, fuel: u64) -> Answer {
 fn run_matches_rust() {
     let mut ran = 0usize;
     let mut declined: BTreeMap<String, usize> = BTreeMap::new();
+    // One full reason per kind, so the report names an example.
+    let mut example: BTreeMap<String, String> = BTreeMap::new();
     let mut programs_ran = 0usize;
     let mut diffs = vec![];
     for case in cases() {
@@ -246,6 +329,9 @@ fn run_matches_rust() {
                         let kind = why.split(" in ").next().unwrap_or(&why);
                         let kind = kind.split(" of ").next().unwrap_or(kind);
                         *declined.entry(kind.to_string()).or_default() += 1;
+                        example
+                            .entry(kind.to_string())
+                            .or_insert_with(|| format!("{}: {why}", case.name));
                     }
                 }
                 ours => {
@@ -272,7 +358,7 @@ fn run_matches_rust() {
     let mut reasons: Vec<_> = declined.into_iter().collect();
     reasons.sort_by_key(|r| std::cmp::Reverse(r.1));
     for (why, n) in reasons {
-        eprintln!("  declined {n}: {why}");
+        eprintln!("  declined {n}: {why} (e.g. {})", example[&why]);
     }
     for d in diffs.iter().take(20) {
         eprintln!("{d}");

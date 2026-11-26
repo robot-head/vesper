@@ -1619,3 +1619,87 @@ fn compile_flip_gate() {
         v.as_nanos()
     );
 }
+
+// Part 4d-4: `coverage` (every refusal of every function) against Rust's.
+
+/// The coverage differential covers every function of a world, which
+/// `ir_opt` and the encoding make slow (about 2 s a world), so it keeps
+/// every 16th corpus world by default (`VERIFIED_COVERAGE_STRIDE=n`), on
+/// top of `VERIFIED_CODEGEN_STRIDE`.
+fn coverage_stride() -> usize {
+    stride()
+        * std::env::var("VERIFIED_COVERAGE_STRIDE")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .filter(|&n| n > 0)
+            .unwrap_or(16)
+}
+
+/// `coverage`'s listing, or the error, as `coverage_text` prints it.
+fn rust_coverage(
+    world: &vesper::check::World,
+    roots: Option<&std::collections::BTreeSet<String>>,
+    optimize: bool,
+) -> String {
+    match verified::coverage(world, roots, optimize) {
+        Ok(c) => c.listing(),
+        Err(e) => format!("error: {e}\n"),
+    }
+}
+
+#[test]
+fn coverage_matches_rust_on_the_corpus() {
+    if verified::Target::host().is_none() {
+        eprintln!("verified coverage: no verified target for this host");
+        return;
+    }
+    let cover = entry("coverage_text");
+    let mut bad = 0;
+    let mut compared = 0;
+    let mut refused = 0;
+    let mut rust_time = std::time::Duration::ZERO;
+    let mut vesper_time = std::time::Duration::ZERO;
+    let mut encode_time = std::time::Duration::ZERO;
+    for optimize in [true, false] {
+        for case in corpus().iter().step_by(coverage_stride()) {
+            let te = std::time::Instant::now();
+            let Some(input) = coverage_input(&case.world, None, optimize) else {
+                continue;
+            };
+            encode_time += te.elapsed();
+            let t0 = std::time::Instant::now();
+            let rust = rust_coverage(&case.world, None, optimize);
+            let t1 = std::time::Instant::now();
+            let vesper = cover.text(&input);
+            rust_time += t1 - t0;
+            vesper_time += t1.elapsed();
+            compared += 1;
+            if !rust.contains("\nrefusals: 0\n") {
+                refused += 1;
+            }
+            if vesper != rust {
+                bad += 1;
+                if bad <= 5 {
+                    let d = first_difference(&rust, &vesper);
+                    eprintln!(
+                        "verified coverage ({}, optimize {optimize}): first difference {d:?}",
+                        case.name
+                    );
+                }
+            }
+        }
+    }
+    eprintln!(
+        "verified coverage corpus: {bad} of {compared} programs differ ({refused} with refusals); \
+         Rust {:.2} s, Vesper {:.2} s (encoding {:.2} s)",
+        rust_time.as_secs_f64(),
+        vesper_time.as_secs_f64(),
+        encode_time.as_secs_f64()
+    );
+    println!("flip-gate differential differences={bad} cases={compared}");
+    assert!(
+        refused * coverage_stride() > 160,
+        "only {refused} corpus programs have a refusal"
+    );
+    assert_eq!(bad, 0);
+}

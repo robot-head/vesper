@@ -620,7 +620,8 @@ fn json_string(in p: P, i: u64) -> bool {
                 || d == 102
                 || d == 110
                 || d == 114
-                || d == 116 {
+                || d == 116
+            {
                 j = add(j, 2);
             } else if d == 117 {
                 let v = hex4(in src, add(j, 2), end);
@@ -878,7 +879,8 @@ fn at_path_root(in p: P) -> bool {
     loop {
         let kn = nth(in p, n);
         if !(kn == k_lower() || kn == k_minus() || kn == k_slash() || kn == k_int())
-            || tstart(in p, idx(in p, n)) != end {
+            || tstart(in p, idx(in p, n)) != end
+        {
             break;
         }
         end = tend(in p, idx(in p, n));
@@ -899,7 +901,8 @@ fn qualified_path(inout p: P) -> bool {
     loop {
         let n1 = nth(in p, 1);
         if !at(in p, k_colon_colon())
-            || !(n1 == k_lower() || n1 == k_upper() || contextual_name(n1)) {
+            || !(n1 == k_lower() || n1 == k_upper() || contextual_name(n1))
+        {
             return upper_last;
         }
         bump(inout p);
@@ -1017,14 +1020,11 @@ fn fields(inout p: P) {
             break;
         }
         if at_word(in p, 0, w_pub())
-            && (
-                (nth(in p, 1) == k_lower() && nth(in p, 2) == k_colon())
-                    || (
-                        (at_word(in p, 1, w_hot()) || at_word(in p, 1, w_cold()))
-                            && nth(in p, 2) == k_lower()
-                            && nth(in p, 3) == k_colon()
-                    )
-            ) {
+            && ((nth(in p, 1) == k_lower() && nth(in p, 2) == k_colon())
+                || ((at_word(in p, 1, w_hot()) || at_word(in p, 1, w_cold()))
+                    && nth(in p, 2) == k_lower()
+                    && nth(in p, 3) == k_colon()))
+        {
             bump(inout p);
         }
         if at_word(in p, 0, w_hot()) && nth(in p, 1) == k_lower() {
@@ -1125,14 +1125,10 @@ fn pub_item_follows(in p: P) -> bool {
         || nth(in p, 1) == k_fn()
         || is_type_decl_kind(nth(in p, 1))
         || (is_mode_kind(nth(in p, 1)) && is_type_decl_kind(nth(in p, 2)))
-        || (
-            nth(in p, 1) == k_at()
-                && (
-                    at_word(in p, 2, w_fip())
-                        || at_word(in p, 2, w_test())
-                        || at_word(in p, 2, w_test_case())
-                )
-        )
+        || (nth(in p, 1) == k_at()
+            && (at_word(in p, 2, w_fip())
+                || at_word(in p, 2, w_test())
+                || at_word(in p, 2, w_test_case())))
 }
 
 // Keep inactive test declarations as lossless tokens in the ordinary CST.
@@ -1421,19 +1417,16 @@ fn function_header(inout p: P) -> bool {
 
 fn at_method(in p: P) -> bool {
     at(in p, k_fn())
-        || (
-            at_word(in p, 0, w_pub())
-                && (nth(in p, 1) == k_fn() || (nth(in p, 1) == k_at() && at_word(in p, 2, w_fip())))
-        )
+        || (at_word(in p, 0, w_pub())
+            && (nth(in p, 1) == k_fn() || (nth(in p, 1) == k_at() && at_word(in p, 2, w_fip()))))
         || (at(in p, k_at()) && at_word(in p, 1, w_fip()))
 }
 
 fn method(inout p: P) {
     let mut fip = fip_attr(inout p);
     let public = at_word(in p, 0, w_pub())
-        && (
-            nth(in p, 1) == k_fn() || (!fip && nth(in p, 1) == k_at() && at_word(in p, 2, w_fip()))
-        );
+        && (nth(in p, 1) == k_fn()
+            || (!fip && nth(in p, 1) == k_at() && at_word(in p, 2, w_fip())));
     if public {
         bump(inout p);
     }
@@ -1777,7 +1770,8 @@ fn package_name(inout p: P) {
     loop {
         let k = kind(in p);
         if !(k == k_lower() || k == k_minus() || k == k_slash() || k == k_int())
-            || cur_start(in p) != last_end(in p) {
+            || cur_start(in p) != last_end(in p)
+        {
             return;
         }
         bump(inout p);
@@ -2004,7 +1998,8 @@ fn type_args_inner(inout p: P) {
         if tk(in p, cur) == k_lower()
             && !is_primitive_word(tword(in p, cur))
             && !at_path_root(in p)
-            && !(tword(in p, cur) == w_dyn() && nth(in p, 1) == k_upper()) {
+            && !(tword(in p, cur) == w_dyn() && nth(in p, 1) == k_upper())
+        {
             bump(inout p);
             if eat(inout p, k_colon()) {
                 upper(inout p);
@@ -2144,12 +2139,14 @@ fn block_inner(inout p: P) -> Ex {
             } else if block_like(e.k)
                 && ends_with_brace(in p, e.end)
                 && !at(in p, k_r_brace())
-                && !at(in p, k_eof()) {
+                && !at(in p, k_eof())
+            {
                 // A block-like statement needs no `;`.
             } else if p.editor
                 && !at(in p, k_r_brace())
                 && !at(in p, k_eof())
-                && (p.d.code.len() > diags || statement_anchor(in p)) {
+                && (p.d.code.len() > diags || statement_anchor(in p))
+            {
                 // Editor mode: the statement ends here.
                 if p.d.code.len() == diags {
                     err(inout p, in "expected ';' before following statement");
@@ -2271,7 +2268,8 @@ fn expr_inner(inout p: P) -> Ex {
         handle_expr(inout p)
     } else if w == w_region()
         && nth(in p, 1) == k_lower()
-        && (nth(in p, 2) == k_l_brace() || nth(in p, 2) == k_l_paren()) {
+        && (nth(in p, 2) == k_l_brace() || nth(in p, 2) == k_l_paren())
+    {
         region(inout p)
     } else if k == k_match() {
         match_expr(inout p)
@@ -2310,15 +2308,13 @@ fn loop_expr(inout p: P) -> Ex {
 fn for_header(in p: P, cur: u64) -> bool {
     let n = nth(in p, 1);
     !bound(in p, tsym(in p, cur))
-        && (
-            n == k_lower()
-                || n == k_upper()
-                || n == k_l_paren()
-                || n == k_int()
-                || n == k_true()
-                || n == k_false()
-                || contextual_name(n)
-        )
+        && (n == k_lower()
+            || n == k_upper()
+            || n == k_l_paren()
+            || n == k_int()
+            || n == k_true()
+            || n == k_false()
+            || contextual_name(n))
 }
 
 fn for_expr(inout p: P) -> Ex {
@@ -2812,10 +2808,8 @@ fn generic_call(in p: P, e: Ex) -> bool {
         return true;
     }
     n1 == k_lower()
-        && (
-            (tword(in p, t1) == w_dyn() && nth(in p, 2) == k_upper())
-                || is_primitive_word(tword(in p, t1))
-        )
+        && ((tword(in p, t1) == w_dyn() && nth(in p, 2) == k_upper())
+            || is_primitive_word(tword(in p, t1)))
 }
 
 fn postfix_inner(inout p: P, pipe: bool) -> Ex {
@@ -2964,7 +2958,8 @@ fn args(inout p: P, pipe: bool) -> u32 {
         let a = if pipe
             && !explicit
             && at_word(in p, 0, w_underscore())
-            && (nth(in p, 1) == k_comma() || nth(in p, 1) == k_r_paren()) {
+            && (nth(in p, 1) == k_comma() || nth(in p, 1) == k_r_paren())
+        {
             pipeline_placeholder(inout p)
         } else {
             dexpr(inout p)
@@ -3119,15 +3114,14 @@ fn primary_inner(inout p: P) -> Ex {
     err(inout p, in "expected expression");
     let k = kind(in p);
     if p.editor
-        && (
-            k == k_semi()
-                || k == k_r_brace()
-                || k == k_r_paren()
-                || k == k_r_bracket()
-                || k == k_comma()
-                || k == k_eof()
-                || k == k_let()
-        ) {
+        && (k == k_semi()
+            || k == k_r_brace()
+            || k == k_r_paren()
+            || k == k_r_bracket()
+            || k == k_comma()
+            || k == k_eof()
+            || k == k_let())
+    {
         site(inout p, start, start, 2, 0);
         return ex(x_tuple(), start, start, 0);
     }
@@ -3448,7 +3442,8 @@ fn item_names(inout p: P, include_tests: bool) {
             && k == k_lower()
             && tword(in p, i) == w_test()
             && inc(j) < p.sig.len()
-            && tk(in p, w32(in p.sig, inc(j))) == k_l_brace() {
+            && tk(in p, w32(in p.sig, inc(j))) == k_l_brace()
+        {
             skipping_test = true;
         }
         if !skipping_test && previous == k_fn() && k == k_lower() {
@@ -3726,7 +3721,8 @@ pub fn sugar_operator_at(in p: P, start: u64) -> (u64, u64) {
             let last = add(start, 2);
             if last < p.ntok
                 && tk(in p, last) == k_gt()
-                && tend(in p, inc(start)) == tstart(in p, last) {
+                && tend(in p, inc(start)) == tstart(in p, last)
+            {
                 return (PIPELINE, add(start, 3));
             }
         }
@@ -3742,7 +3738,8 @@ pub fn sugar_operator_at(in p: P, start: u64) -> (u64, u64) {
         || next == k_shl()
         || next == k_gt()
         || next == k_ge()
-        || next == k_shr() {
+        || next == k_shr()
+    {
         10
     } else if next == k_pipe() || next == k_pipe_eq() || next == k_or() {
         12
@@ -3754,14 +3751,16 @@ pub fn sugar_operator_at(in p: P, start: u64) -> (u64, u64) {
         || next == k_minus()
         || next == k_plus_eq()
         || next == k_minus_eq()
-        || next == k_arrow() {
+        || next == k_arrow()
+    {
         20
     } else if next == k_star()
         || next == k_slash()
         || next == k_percent()
         || next == k_star_eq()
         || next == k_slash_eq()
-        || next == k_percent_eq() {
+        || next == k_percent_eq()
+    {
         22
     } else {
         return (0, 0);
@@ -3945,7 +3944,8 @@ fn surface_declaration(inout p: P) -> bool {
     }
     if at_lower(in p, 0, in "sugar")
         || (at_lower(in p, 0, in "pub") && at_lower(in p, 1, in "sugar"))
-        || (at(in p, k_at()) && at_lower(in p, 1, in "lean_notation")) {
+        || (at(in p, k_at()) && at_lower(in p, 1, in "lean_notation"))
+    {
         sugar_decl(inout p);
         return true;
     }
@@ -3981,17 +3981,14 @@ fn phrase_entry(in p: P, continuation: bool) -> bool {
     let cur = idx(in p, 0);
     if (at_word(in p, 0, w_for()) && for_header(in p, cur))
         || (at_word(in p, 0, w_loop()) && nth(in p, 1) == k_l_brace())
-        || (
-            at_word(in p, 0, w_region())
-                && nth(in p, 1) == k_lower()
-                && (nth(in p, 2) == k_l_paren() || nth(in p, 2) == k_l_brace())
-        )
+        || (at_word(in p, 0, w_region())
+            && nth(in p, 1) == k_lower()
+            && (nth(in p, 2) == k_l_paren() || nth(in p, 2) == k_l_brace()))
         || (at_word(in p, 0, w_break()) && !bound(in p, tsym(in p, cur)))
-        || (
-            at_word(in p, 0, w_continue())
-                && !bound(in p, tsym(in p, cur))
-                && jump_end(nth(in p, 1))
-        ) {
+        || (at_word(in p, 0, w_continue())
+            && !bound(in p, tsym(in p, cur))
+            && jump_end(nth(in p, 1)))
+    {
         return false;
     }
     let ghost: u64 = if at_lower(in p, 0, in "ghost") && head_word(nth(in p, 1)) {
@@ -4081,7 +4078,8 @@ fn pattern_phrase(inout p: P) {
             || k == k_string()
             || k == k_true()
             || k == k_false()
-            || k == k_minus() {
+            || k == k_minus()
+        {
             let outer = p.no_struct;
             p.no_struct = true;
             pattern(inout p);
@@ -4160,7 +4158,8 @@ fn sugar_phrase(inout p: P, slot: u32) -> Ex {
         loop {
             if slot == NodeKind::SugarItem
                 || !same_line(in p)
-                || !(at(in p, k_else()) || phrase_entry(in p, true)) {
+                || !(at(in p, k_else()) || phrase_entry(in p, true))
+            {
                 break;
             }
             trivia(inout p);
@@ -4231,7 +4230,8 @@ fn sugar_heads(inout p: P) -> u32 {
             || k == k_r_brace()
             || k == k_r_paren()
             || k == k_r_bracket()
-            || k == k_comma() {
+            || k == k_comma()
+        {
             return h;
         }
         let before = p.pos;
@@ -4297,13 +4297,12 @@ fn sugar_decl(inout p: P) {
     if at_lower(in p, 0, in "infix") {
         sugar_infix_sort(inout p);
     } else {
-        if !(
-            at_text(in p, 0, in "stmt")
-                || at_text(in p, 0, in "expr")
-                || at_text(in p, 0, in "pat")
-                || at_text(in p, 0, in "tag")
-                || at_text(in p, 0, in "item")
-        ) {
+        if !(at_text(in p, 0, in "stmt")
+            || at_text(in p, 0, in "expr")
+            || at_text(in p, 0, in "pat")
+            || at_text(in p, 0, in "tag")
+            || at_text(in p, 0, in "item"))
+        {
             err(inout p, in "expected sugar sort (stmt, expr, pat, tag, item)");
         }
         if at(in p, k_lower()) {
@@ -4357,13 +4356,12 @@ fn sugar_infix_sort(inout p: P) {
     }
     expect(inout p, k_backtick());
     expect(inout p, k_comma());
-    if !(
-        at_text(in p, 0, in "pipeline")
-            || at_text(in p, 0, in "logical")
-            || at_text(in p, 0, in "compare")
-            || at_text(in p, 0, in "additive")
-            || at_text(in p, 0, in "multiplicative")
-    ) {
+    if !(at_text(in p, 0, in "pipeline")
+        || at_text(in p, 0, in "logical")
+        || at_text(in p, 0, in "compare")
+        || at_text(in p, 0, in "additive")
+        || at_text(in p, 0, in "multiplicative"))
+    {
         err(
             inout p,
             in "expected precedence band (pipeline, logical, compare, additive, multiplicative)"
@@ -4373,9 +4371,8 @@ fn sugar_infix_sort(inout p: P) {
         bump(inout p);
     }
     expect(inout p, k_comma());
-    if !(
-        at_text(in p, 0, in "left") || at_text(in p, 0, in "right") || at_text(in p, 0, in "none")
-    ) {
+    if !(at_text(in p, 0, in "left") || at_text(in p, 0, in "right") || at_text(in p, 0, in "none"))
+    {
         err(inout p, in "expected associativity (left, right, none)");
     }
     if at(in p, k_lower()) {
@@ -4410,7 +4407,8 @@ fn sugar_decl_group(inout p: P, open: u8, pattern: bool, nonempty: bool) {
             sugar_hole(inout p, false);
         } else if pattern
             && (k == k_in() || k == k_inout() || k == k_sink() || at_lower(in p, 0, in "out"))
-            && nth(in p, 1) == k_dollar() {
+            && nth(in p, 1) == k_dollar()
+        {
             sugar_hole(inout p, true);
         } else {
             bump(inout p);
@@ -4439,7 +4437,8 @@ fn at_separator_text(in p: P) -> bool {
             || c == 123
             || c == 125
             || c == 34
-            || c == 96 {
+            || c == 96
+        {
             return false;
         }
     }
@@ -4465,7 +4464,8 @@ fn sugar_hole(inout p: P, pass: bool) {
         if !(k == k_plus() || k == k_star())
             && (k1 == k_plus() || k1 == k_star())
             && !at(in p, k_eof())
-            && at_separator_text(in p) {
+            && at_separator_text(in p)
+        {
             bump(inout p);
         }
         if !(eat(inout p, k_star()) || eat(inout p, k_plus())) {
@@ -4483,24 +4483,22 @@ fn sugar_hole(inout p: P, pass: bool) {
         }
         expect(inout p, k_colon());
         if sequence {
-            if !(
-                at_text(in p, 0, in "stmts")
-                    || at_text(in p, 0, in "scope")
-                    || at_text(in p, 0, in "args")
-                    || at_text(in p, 0, in "items")
-                    || at_text(in p, 0, in "pats")
-            ) {
+            if !(at_text(in p, 0, in "stmts")
+                || at_text(in p, 0, in "scope")
+                || at_text(in p, 0, in "args")
+                || at_text(in p, 0, in "items")
+                || at_text(in p, 0, in "pats"))
+            {
                 err(inout p, in "expected sequence hole sort (stmts, scope, args, items, pats)");
             }
-        } else if !(
-            at_text(in p, 0, in "ident")
-                || at_text(in p, 0, in "pat")
-                || at_text(in p, 0, in "ty")
-                || at_text(in p, 0, in "expr")
-                || at_text(in p, 0, in "place")
-                || at_text(in p, 0, in "block")
-                || at_text(in p, 0, in "scope")
-        ) {
+        } else if !(at_text(in p, 0, in "ident")
+            || at_text(in p, 0, in "pat")
+            || at_text(in p, 0, in "ty")
+            || at_text(in p, 0, in "expr")
+            || at_text(in p, 0, in "place")
+            || at_text(in p, 0, in "block")
+            || at_text(in p, 0, in "scope"))
+        {
             err(inout p, in "expected hole sort (ident, pat, ty, expr, place, block, scope)");
         }
         if at(in p, k_lower()) {

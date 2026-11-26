@@ -73,52 +73,52 @@ const S_EXPORT: u8 = 7;
 const S_ELEMENT: u8 = 9;
 const S_CODE: u8 = 10;
 
-fn byte(in b: Slice[u8], i: u64) -> u8 {
-    match b.try_get(i) {
+fn byte(in bytes: Slice[u8], i: u64) -> u8 {
+    match bytes.try_get(i) {
         Option::Some(x) => x,
         Option::None => 0,
     }
 }
 
 pub fn put_uleb(inout out: ChunkSeq[u8], v: u64) {
-    let mut x = v;
+    let mut rest = v;
     loop {
-        let b = wrapping_u8(x & 127);
-        x = x >> 7;
-        if x == 0 {
-            out.push(b);
+        let group = wrapping_u8(rest & 127);
+        rest = rest >> 7;
+        if rest == 0 {
+            out.push(group);
             break;
         }
-        out.push(b | 128);
+        out.push(group | 128);
     }
 }
 
 fn put_sleb(inout out: ChunkSeq[u8], v: u64) {
-    let mut x = v;
+    let mut rest = v;
     loop {
-        let b = wrapping_u8(x & 127);
-        x = x >> 7;
-        if x == 0 && (b & 64) == 0 {
-            out.push(b);
+        let group = wrapping_u8(rest & 127);
+        rest = rest >> 7;
+        if rest == 0 && (group & 64) == 0 {
+            out.push(group);
             break;
         }
-        out.push(b | 128);
+        out.push(group | 128);
     }
 }
 
-fn put_bytes(inout out: ChunkSeq[u8], in s: Slice[u8]) {
-    put_uleb(inout out, s.len());
-    out.extend(in s);
+fn put_bytes(inout out: ChunkSeq[u8], in bytes: Slice[u8]) {
+    put_uleb(inout out, bytes.len());
+    out.extend(in bytes);
 }
 
 // `n` in decimal (the shim's export names).
 pub fn put_decimal(inout out: ChunkSeq[u8], n: u64) {
     let mut digits = ChunkSeq::new[u8]();
-    let mut x = n;
+    let mut rest = n;
     loop {
-        digits.push(wrapping_add(48, wrapping_u8(x % 10)));
-        x = x / 10;
-        if x == 0 {
+        digits.push(wrapping_add(48, wrapping_u8(rest % 10)));
+        rest = rest / 10;
+        if rest == 0 {
             break;
         }
     }
@@ -159,15 +159,15 @@ fn hex_digit(c: u8) -> u8 {
     }
 }
 
-// The bytes of hex text `h`.
-fn unhex(inout out: ChunkSeq[u8], in h: Slice[u8]) {
+// The bytes of hex text `hex`.
+fn unhex(inout out: ChunkSeq[u8], in hex: Slice[u8]) {
     let mut i: u64 = 0;
     loop {
-        if inc(i) >= h.len() {
+        if inc(i) >= hex.len() {
             break;
         }
-        let hi = hex_digit(byte(in h, i));
-        let lo = hex_digit(byte(in h, inc(i)));
+        let hi = hex_digit(byte(in hex, i));
+        let lo = hex_digit(byte(in hex, inc(i)));
         out.push(wrapping_add(wrapping_mul(hi, 16), lo));
         i = add(i, 2);
     }
@@ -182,13 +182,13 @@ fn at32(in s: Slice[u32], i: u64) -> u32 {
 
 fn spliced_instance_type(
     inout out: ChunkSeq[u8],
-    in pref: Slice[u8],
-    dep_idx: u32,
-    in suff: Slice[u8]
+    in prefix: Slice[u8],
+    dep_alias: u32,
+    in suffix: Slice[u8]
 ) {
-    unhex(inout out, in pref);
-    put_uleb(inout out, widen_u64(dep_idx));
-    unhex(inout out, in suff);
+    unhex(inout out, in prefix);
+    put_uleb(inout out, widen_u64(dep_alias));
+    unhex(inout out, in suffix);
 }
 
 // ------------------------------------------------------- host interfaces
@@ -197,42 +197,45 @@ pub fn if_count() -> u64 {
     IF_COUNT
 }
 
-pub fn needs_descriptor_alias(h: u8) -> bool {
-    h == H_FS_PREOPENS
+pub fn needs_descriptor_alias(host: u8) -> bool {
+    host == H_FS_PREOPENS
 }
 
-pub fn lower_ok(l: u8) -> bool {
-    l != L_NONE
+pub fn lower_ok(kind: u8) -> bool {
+    kind != L_NONE
 }
 
-pub fn lower_is_drop(l: u8) -> bool {
-    l == L_DROP
+pub fn lower_is_drop(kind: u8) -> bool {
+    kind == L_DROP
 }
 
-pub fn lower_is_indirect(l: u8) -> bool {
-    l == L_MEMORY || l == L_MEMORY_UTF8 || l == L_MEMORY_REALLOC || l == L_MEMORY_REALLOC_UTF8
+pub fn lower_is_indirect(kind: u8) -> bool {
+    kind == L_MEMORY
+        || kind == L_MEMORY_UTF8
+        || kind == L_MEMORY_REALLOC
+        || kind == L_MEMORY_REALLOC_UTF8
 }
 
-pub fn lower_uses_realloc(l: u8) -> bool {
-    l == L_MEMORY_REALLOC || l == L_MEMORY_REALLOC_UTF8
+pub fn lower_uses_realloc(kind: u8) -> bool {
+    kind == L_MEMORY_REALLOC || kind == L_MEMORY_REALLOC_UTF8
 }
 
-pub fn lower_uses_utf8(l: u8) -> bool {
-    l == L_MEMORY_UTF8 || l == L_MEMORY_REALLOC_UTF8
+pub fn lower_uses_utf8(kind: u8) -> bool {
+    kind == L_MEMORY_UTF8 || kind == L_MEMORY_REALLOC_UTF8
 }
 
-// The interfaces a world import of host capability `h` brings, in
+// The interfaces a world import of host capability `host` brings, in
 // topological order (`n` of them from `first`).
-pub fn import_ifaces(h: u8) -> (u8, u64) {
-    if h == H_STDOUT {
+pub fn import_ifaces(host: u8) -> (u8, u64) {
+    if host == H_STDOUT {
         (IF_ERROR, 3)
-    } else if h == H_CLOCK {
+    } else if host == H_CLOCK {
         (IF_CLOCK, 1)
-    } else if h == H_TRACE {
+    } else if host == H_TRACE {
         (IF_TRACE, 1)
-    } else if h == H_ENV {
+    } else if host == H_ENV {
         (IF_ENV, 1)
-    } else if h == H_FS_TYPES {
+    } else if host == H_FS_TYPES {
         (IF_WALL_CLOCK, 2)
     } else {
         (IF_WALL_CLOCK, 3)
@@ -258,22 +261,22 @@ pub fn host_import(in name: Slice[u8]) -> u8 {
     }
 }
 
-pub fn host_name(i: u8, inout out: ChunkSeq[u8]) {
-    if i == IF_ERROR {
+pub fn host_name(iface: u8, inout out: ChunkSeq[u8]) {
+    if iface == IF_ERROR {
         out.extend(in "wasi:io/error@0.2.0".as_bytes());
-    } else if i == IF_STREAMS {
+    } else if iface == IF_STREAMS {
         out.extend(in "wasi:io/streams@0.2.0".as_bytes());
-    } else if i == IF_STDOUT {
+    } else if iface == IF_STDOUT {
         out.extend(in "wasi:cli/stdout@0.2.0".as_bytes());
-    } else if i == IF_CLOCK {
+    } else if iface == IF_CLOCK {
         out.extend(in "wasi:clocks/monotonic-clock@0.2.0".as_bytes());
-    } else if i == IF_TRACE {
+    } else if iface == IF_TRACE {
         out.extend(in "vesper:beacon/trace@0.1.0".as_bytes());
-    } else if i == IF_ENV {
+    } else if iface == IF_ENV {
         out.extend(in "wasi:cli/environment@0.2.0".as_bytes());
-    } else if i == IF_WALL_CLOCK {
+    } else if iface == IF_WALL_CLOCK {
         out.extend(in "wasi:clocks/wall-clock@0.2.0".as_bytes());
-    } else if i == IF_FS_TYPES {
+    } else if iface == IF_FS_TYPES {
         out.extend(in "wasi:filesystem/types@0.2.0".as_bytes());
     } else {
         out.extend(in "wasi:filesystem/preopens@0.2.0".as_bytes());
@@ -283,73 +286,73 @@ pub fn host_name(i: u8, inout out: ChunkSeq[u8]) {
 // The interface named `name`; 255 if it is not a host interface.
 pub fn iface_of(in name: Slice[u8]) -> u8 {
     for i in 0..IF_COUNT {
-        let mut n = ChunkSeq::new[u8]();
-        host_name(wrapping_u8(i), inout n);
-        if eq(in n.as_slice(), in name) {
+        let mut candidate = ChunkSeq::new[u8]();
+        host_name(wrapping_u8(i), inout candidate);
+        if eq(in candidate.as_slice(), in name) {
             return wrapping_u8(i);
         }
     }
     255
 }
 
-// The instance type of interface `i` (one type-section item).
-pub fn instance_type(i: u8, in halias: Slice[u32], inout out: ChunkSeq[u8]) {
-    if i == IF_ERROR {
+// The instance type of interface `iface` (one type-section item).
+pub fn instance_type(iface: u8, in alias_types: Slice[u32], inout out: ChunkSeq[u8]) {
+    if iface == IF_ERROR {
         // (instance (export "error" (type (sub resource))))
         unhex(inout out, in "42010400056572726f720301".as_bytes());
-    } else if i == IF_STREAMS {
+    } else if iface == IF_STREAMS {
         // output-stream, error (outer), stream-error and
         // [method]output-stream.blocking-write-and-flush
         spliced_instance_type(
             inout out,
             in "420b04000d6f75747075742d73747265616d030102030201".as_bytes(),
-            at32(in halias, widen_u64(IF_ERROR)),
+            at32(in alias_types, widen_u64(IF_ERROR)),
             in "0400056572726f72030001016902017102156c6173742d6f7065726174696f6e2d6661696c656401030006636c6f736564000004000c73747265616d2d6572726f7203000401680001707d016a0001050140020473656c660608636f6e74656e747307000804002e5b6d6574686f645d6f75747075742d73747265616d2e626c6f636b696e672d77726974652d616e642d666c7573680109"
                 .as_bytes()
         );
-    } else if i == IF_STDOUT {
+    } else if iface == IF_STDOUT {
         // output-stream (outer) and get-stdout
         spliced_instance_type(
             inout out,
             in "420502030201".as_bytes(),
-            at32(in halias, widen_u64(IF_STREAMS)),
+            at32(in alias_types, widen_u64(IF_STREAMS)),
             in "04000d6f75747075742d73747265616d030000016901014000000204000a6765742d7374646f75740103"
                 .as_bytes()
         );
-    } else if i == IF_CLOCK {
+    } else if iface == IF_CLOCK {
         // instant and now
         unhex(
             inout out,
             in "42040177040007696e7374616e7403000001400000010400036e6f770102".as_bytes()
         );
-    } else if i == IF_TRACE {
+    } else if iface == IF_TRACE {
         // span-context, active-span, telemetry-attr and the six functions
         unhex(
             inout out,
             in "42120172040b74726163652d69642d6869770b74726163652d69642d6c6f77077370616e2d69647705666c6167737d04000c7370616e2d636f6e7465787403000001720403637478010e706172656e742d7370616e2d6964770d73746172742d6d6f6e6f2d6e737709736368656d612d69647904000b6163746976652d7370616e030002017104076e6f2d61747472000005636f756e74017700056279746573017700087265646163746564000004000e74656c656d657472792d61747472030004014000000104000b63757272656e742d637478010601400209736368656d612d696479046e616d6573000304000a73746172742d7370616e010701400306706172656e740109736368656d612d696479046e616d6573000304000b73746172742d6368696c640108014002047370616e0308617474722d753634770100040007656d69742d6f6b0109014003047370616e03086572722d636f646579036d7367730100040008656d69742d657272010a014002047370616e030461747472050100040009656d69742d61747472010b"
                 .as_bytes()
         );
-    } else if i == IF_ENV {
+    } else if iface == IF_ENV {
         // get-environment, get-arguments, initial-cwd
         unhex(
             inout out,
             in "420a016f027373017000014000000104000f6765742d656e7669726f6e6d656e740102017073014000000304000d6765742d617267756d656e74730104016b73014000000504000b696e697469616c2d6377640106"
                 .as_bytes()
         );
-    } else if i == IF_WALL_CLOCK {
+    } else if iface == IF_WALL_CLOCK {
         // datetime
         unhex(
             inout out,
             in "4202017202077365636f6e6473770b6e616e6f7365636f6e6473790400086461746574696d65030000"
                 .as_bytes()
         );
-    } else if i == IF_FS_TYPES {
+    } else if iface == IF_FS_TYPES {
         // descriptor, directory-entry-stream, datetime (outer), stats and methods
         spliced_instance_type(
             inout out,
             in "423b04000a64657363726970746f720301016e010e73796d6c696e6b2d666f6c6c6f7704000a706174682d666c616773030001016e0406637265617465096469726563746f7279096578636c7573697665087472756e6361746504000a6f70656e2d666c616773030003016e0604726561640577726974651366696c652d696e746567726974792d73796e6313646174612d696e746567726974792d73796e63147265717565737465642d77726974652d73796e63106d75746174652d6469726563746f727904001064657363726970746f722d666c616773030005016d25066163636573730b776f756c642d626c6f636b07616c72656164790e6261642d64657363726970746f72046275737908646561646c6f636b0571756f74610565786973740e66696c652d746f6f2d6c6172676515696c6c6567616c2d627974652d73657175656e63650b696e2d70726f67726573730b696e74657272757074656407696e76616c696402696f0c69732d6469726563746f7279046c6f6f700e746f6f2d6d616e792d6c696e6b730c6d6573736167652d73697a650d6e616d652d746f6f2d6c6f6e67096e6f2d646576696365086e6f2d656e747279076e6f2d6c6f636b13696e73756666696369656e742d6d656d6f727912696e73756666696369656e742d73706163650d6e6f742d6469726563746f7279096e6f742d656d7074790f6e6f742d7265636f76657261626c650b756e737570706f72746564066e6f2d7474790e6e6f2d737563682d646576696365086f766572666c6f770d6e6f742d7065726d6974746564047069706509726561642d6f6e6c790c696e76616c69642d7365656b0e746578742d66696c652d627573790c63726f73732d64657669636504000a6572726f722d636f6465030007017704000866696c6573697a65030009016d0807756e6b6e6f776e0c626c6f636b2d646576696365106368617261637465722d646576696365096469726563746f7279046669666f0d73796d626f6c69632d6c696e6b0c726567756c61722d66696c6506736f636b657404000f64657363726970746f722d7479706503000b017704000a6c696e6b2d636f756e7403000d02030201"
                 .as_bytes(),
-            at32(in halias, widen_u64(IF_WALL_CLOCK)),
+            at32(in alias_types, widen_u64(IF_WALL_CLOCK)),
             in "0400086461746574696d6503000f016b1001720604747970650c0a6c696e6b2d636f756e740e0473697a650a15646174612d6163636573732d74696d657374616d70111b646174612d6d6f64696669636174696f6e2d74696d657374616d7011177374617475732d6368616e67652d74696d657374616d701104000f64657363726970746f722d737461740300120400166469726563746f72792d656e7472792d73747265616d030101720204747970650c046e616d657304000f6469726563746f72792d656e74727903001501680001707d016f02187f016a011901080140030473656c6617066c656e6774680a066f66667365740a001a0400175b6d6574686f645d64657363726970746f722e72656164011b016a010a01080140030473656c66170662756666657218066f66667365740a001c0400185b6d6574686f645d64657363726970746f722e7772697465011d016914016a011e01080140010473656c6617001f0400215b6d6574686f645d64657363726970746f722e726561642d6469726563746f72790120016a0001080140010473656c661700210400175b6d6574686f645d64657363726970746f722e73796e6301220140020473656c661704706174687300210400265b6d6574686f645d64657363726970746f722e6372656174652d6469726563746f72792d61740123016a011301080140010473656c661700240400175b6d6574686f645d64657363726970746f722e7374617401250140030473656c66170a706174682d666c61677302047061746873002404001a5b6d6574686f645d64657363726970746f722e737461742d61740126016900016a012701080140050473656c66170a706174682d666c616773020470617468730a6f70656e2d666c6167730405666c61677306002804001a5b6d6574686f645d64657363726970746f722e6f70656e2d617401290400265b6d6574686f645d64657363726970746f722e72656d6f76652d6469726563746f72792d617401230140040473656c6617086f6c642d70617468730e6e65772d64657363726970746f7217086e65772d7061746873002104001c5b6d6574686f645d64657363726970746f722e72656e616d652d6174012a0400215b6d6574686f645d64657363726970746f722e756e6c696e6b2d66696c652d61740123016814016b16016a012c01080140010473656c662b002d0400335b6d6574686f645d6469726563746f72792d656e7472792d73747265616d2e726561642d6469726563746f72792d656e747279012e"
                 .as_bytes()
         );
@@ -358,90 +361,95 @@ pub fn instance_type(i: u8, in halias: Slice[u32], inout out: ChunkSeq[u8]) {
         spliced_instance_type(
             inout out,
             in "420702030201".as_bytes(),
-            at32(in halias, widen_u64(IF_FS_TYPES)),
+            at32(in alias_types, widen_u64(IF_FS_TYPES)),
             in "04000a64657363726970746f72030000016901016f020273017003014000000404000f6765742d6469726563746f726965730105"
                 .as_bytes()
         );
     }
 }
 
-// The type interface `i` exports that later interfaces alias (`error`,
+// The type interface `iface` exports that later interfaces alias (`error`,
 // `output-stream`, `datetime`, `descriptor`); empty for none.
-pub fn aliased_type(i: u8, need_desc: bool, inout out: ChunkSeq[u8]) {
-    if i == IF_ERROR {
+pub fn aliased_type(iface: u8, need_descriptor: bool, inout out: ChunkSeq[u8]) {
+    if iface == IF_ERROR {
         out.extend(in "error".as_bytes());
-    } else if i == IF_STREAMS {
+    } else if iface == IF_STREAMS {
         out.extend(in "output-stream".as_bytes());
-    } else if i == IF_WALL_CLOCK {
+    } else if iface == IF_WALL_CLOCK {
         out.extend(in "datetime".as_bytes());
-    } else if i == IF_FS_TYPES && need_desc {
+    } else if iface == IF_FS_TYPES && need_descriptor {
         out.extend(in "descriptor".as_bytes());
     }
 }
 
-// How function `f` of interface `i` lowers: whether it needs the memory,
+// How function `func` of interface `iface` lowers: whether it needs the memory,
 // cabi_realloc, and/or UTF-8 (`LoweringInfo` of wit-component's `encoding`).
-pub fn lower_kind(i: u8, in f: Slice[u8]) -> u8 {
-    if i == IF_STDOUT {
-        if eq(in f, in "get-stdout".as_bytes()) {
+pub fn lower_kind(iface: u8, in func: Slice[u8]) -> u8 {
+    if iface == IF_STDOUT {
+        if eq(in func, in "get-stdout".as_bytes()) {
             return L_DIRECT;
         }
-    } else if i == IF_STREAMS {
-        if eq(in f, in "[method]output-stream.blocking-write-and-flush".as_bytes()) {
+    } else if iface == IF_STREAMS {
+        if eq(in func, in "[method]output-stream.blocking-write-and-flush".as_bytes()) {
             return L_MEMORY;
         }
-        if eq(in f, in "[resource-drop]output-stream".as_bytes()) {
+        if eq(in func, in "[resource-drop]output-stream".as_bytes()) {
             return L_DROP;
         }
-    } else if i == IF_CLOCK {
-        if eq(in f, in "now".as_bytes()) {
+    } else if iface == IF_CLOCK {
+        if eq(in func, in "now".as_bytes()) {
             return L_DIRECT;
         }
-    } else if i == IF_TRACE {
-        if eq(in f, in "current-ctx".as_bytes()) {
+    } else if iface == IF_TRACE {
+        if eq(in func, in "current-ctx".as_bytes()) {
             return L_MEMORY;
         }
-        if eq(in f, in "start-span".as_bytes())
-            || eq(in f, in "start-child".as_bytes())
-            || eq(in f, in "emit-err".as_bytes()) {
+        if eq(in func, in "start-span".as_bytes())
+            || eq(in func, in "start-child".as_bytes())
+            || eq(in func, in "emit-err".as_bytes())
+        {
             return L_MEMORY_UTF8;
         }
-        if eq(in f, in "emit-ok".as_bytes()) || eq(in f, in "emit-attr".as_bytes()) {
+        if eq(in func, in "emit-ok".as_bytes()) || eq(in func, in "emit-attr".as_bytes()) {
             return L_DIRECT;
         }
-    } else if i == IF_ENV {
-        if eq(in f, in "get-arguments".as_bytes())
-            || eq(in f, in "get-environment".as_bytes())
-            || eq(in f, in "initial-cwd".as_bytes()) {
+    } else if iface == IF_ENV {
+        if eq(in func, in "get-arguments".as_bytes())
+            || eq(in func, in "get-environment".as_bytes())
+            || eq(in func, in "initial-cwd".as_bytes())
+        {
             return L_MEMORY_REALLOC_UTF8;
         }
-    } else if i == IF_FS_PREOPENS {
-        if eq(in f, in "get-directories".as_bytes()) {
+    } else if iface == IF_FS_PREOPENS {
+        if eq(in func, in "get-directories".as_bytes()) {
             return L_MEMORY_REALLOC_UTF8;
         }
-    } else if i == IF_FS_TYPES {
-        if eq(in f, in "[method]descriptor.read".as_bytes()) {
+    } else if iface == IF_FS_TYPES {
+        if eq(in func, in "[method]descriptor.read".as_bytes()) {
             return L_MEMORY_REALLOC;
         }
-        if eq(in f, in "[method]directory-entry-stream.read-directory-entry".as_bytes()) {
+        if eq(in func, in "[method]directory-entry-stream.read-directory-entry".as_bytes()) {
             return L_MEMORY_REALLOC_UTF8;
         }
-        if eq(in f, in "[method]descriptor.open-at".as_bytes())
-            || eq(in f, in "[method]descriptor.stat-at".as_bytes())
-            || eq(in f, in "[method]descriptor.create-directory-at".as_bytes())
-            || eq(in f, in "[method]descriptor.remove-directory-at".as_bytes())
-            || eq(in f, in "[method]descriptor.unlink-file-at".as_bytes())
-            || eq(in f, in "[method]descriptor.rename-at".as_bytes()) {
+        if eq(in func, in "[method]descriptor.open-at".as_bytes())
+            || eq(in func, in "[method]descriptor.stat-at".as_bytes())
+            || eq(in func, in "[method]descriptor.create-directory-at".as_bytes())
+            || eq(in func, in "[method]descriptor.remove-directory-at".as_bytes())
+            || eq(in func, in "[method]descriptor.unlink-file-at".as_bytes())
+            || eq(in func, in "[method]descriptor.rename-at".as_bytes())
+        {
             return L_MEMORY_UTF8;
         }
-        if eq(in f, in "[method]descriptor.write".as_bytes())
-            || eq(in f, in "[method]descriptor.stat".as_bytes())
-            || eq(in f, in "[method]descriptor.sync".as_bytes())
-            || eq(in f, in "[method]descriptor.read-directory".as_bytes()) {
+        if eq(in func, in "[method]descriptor.write".as_bytes())
+            || eq(in func, in "[method]descriptor.stat".as_bytes())
+            || eq(in func, in "[method]descriptor.sync".as_bytes())
+            || eq(in func, in "[method]descriptor.read-directory".as_bytes())
+        {
             return L_MEMORY;
         }
-        if eq(in f, in "[resource-drop]descriptor".as_bytes())
-            || eq(in f, in "[resource-drop]directory-entry-stream".as_bytes()) {
+        if eq(in func, in "[resource-drop]descriptor".as_bytes())
+            || eq(in func, in "[resource-drop]directory-entry-stream".as_bytes())
+        {
             return L_DROP;
         }
     }
@@ -451,23 +459,23 @@ pub fn lower_kind(i: u8, in f: Slice[u8]) -> u8 {
 // ------------------------------------------------- the core module's imports
 
 // A core function type: its parameter and result value types
-// (`types.bytes[p0..p0+pn]`, `pc` of them; likewise the results).
+// (`bytes[param_start..param_start+param_len]`, `param_count` of them; likewise the results).
 pub copy struct Sig {
-    p0: u64,
-    pn: u64,
-    pc: u64,
-    r0: u64,
-    rn: u64,
-    rc: u64,
+    param_start: u64,
+    param_len: u64,
+    param_count: u64,
+    result_start: u64,
+    result_len: u64,
+    result_count: u64,
 }
 
-// A function import: module `text[m0..m0+mn]`, field `text[f0..f0+fl]`,
-// type `ty`.
+// A function import: module `text[module_start..module_start+module_len]`, field
+// `text[field_start..field_start+field_len]`, type `ty`.
 pub copy struct Imp {
-    m0: u64,
-    mn: u64,
-    f0: u64,
-    fl: u64,
+    module_start: u64,
+    module_len: u64,
+    field_start: u64,
+    field_len: u64,
     ty: u64,
 }
 
@@ -477,20 +485,27 @@ pub struct Core {
     bytes: ChunkSeq[u8],
     sigs: ChunkSeq[Sig],
     text: ChunkSeq[u8],
-    imps: ChunkSeq[Imp],
+    imports: ChunkSeq[Imp],
 }
 
-pub fn imp_at(in c: Core, i: u64) -> Imp {
-    match c.imps.try_get(i) {
+pub fn imp_at(in core: Core, i: u64) -> Imp {
+    match core.imports.try_get(i) {
         Option::Some(x) => x,
-        Option::None => Imp { m0: 0, mn: 0, f0: 0, fl: 0, ty: 0 },
+        Option::None => Imp { module_start: 0, module_len: 0, field_start: 0, field_len: 0, ty: 0 },
     }
 }
 
-pub fn sig_at(in c: Core, i: u64) -> Sig {
-    match c.sigs.try_get(i) {
+pub fn sig_at(in core: Core, i: u64) -> Sig {
+    match core.sigs.try_get(i) {
         Option::Some(x) => x,
-        Option::None => Sig { p0: 0, pn: 0, pc: 0, r0: 0, rn: 0, rc: 0 },
+        Option::None => Sig {
+            param_start: 0,
+            param_len: 0,
+            param_count: 0,
+            result_start: 0,
+            result_len: 0,
+            result_count: 0
+        },
     }
 }
 
@@ -499,123 +514,151 @@ copy struct Rd {
     ok: bool,
 }
 
-fn rd_byte(inout r: Rd, in b: Slice[u8]) -> u8 {
-    if r.pos >= b.len() {
-        r.ok = false;
+fn rd_byte(inout reader: Rd, in wasm: Slice[u8]) -> u8 {
+    if reader.pos >= wasm.len() {
+        reader.ok = false;
         return 0;
     }
-    let x = byte(in b, r.pos);
-    r.pos = inc(r.pos);
-    x
+    let value = byte(in wasm, reader.pos);
+    reader.pos = inc(reader.pos);
+    value
 }
 
-fn rd_leb(inout r: Rd, in b: Slice[u8]) -> u64 {
-    let mut v: u64 = 0;
+fn rd_leb(inout reader: Rd, in wasm: Slice[u8]) -> u64 {
+    let mut value: u64 = 0;
     let mut shift: u64 = 0;
     loop {
-        let x = rd_byte(inout r, in b);
-        if !r.ok || shift > 56 {
-            r.ok = false;
+        let group = rd_byte(inout reader, in wasm);
+        if !reader.ok || shift > 56 {
+            reader.ok = false;
             return 0;
         }
-        v = v | wrapping_shl_u64(widen_u64(x & 127), wrapping_u32(shift));
+        value = value | wrapping_shl_u64(widen_u64(group & 127), wrapping_u32(shift));
         shift = add(shift, 7);
-        if (x & 128) == 0 {
-            return v;
+        if (group & 128) == 0 {
+            return value;
         }
     }
 }
 
-// A value-type vector into `c.bytes`: its start, byte length and count.
-fn valtypes(inout r: Rd, in b: Slice[u8], inout c: Core) -> (u64, u64, u64) {
-    let n = rd_leb(inout r, in b);
-    let start = c.bytes.len();
-    for k in 0..n {
-        if !r.ok {
+// A value-type vector into `core.bytes`: its start, byte length and count.
+fn valtypes(inout reader: Rd, in wasm: Slice[u8], inout core: Core) -> (u64, u64, u64) {
+    let count = rd_leb(inout reader, in wasm);
+    let start = core.bytes.len();
+    for k in 0..count {
+        if !reader.ok {
             break;
         }
-        let x = rd_byte(inout r, in b);
-        c.bytes.push(x);
-        if x == VT_REF || x == VT_REF_NULL {
+        let valtype = rd_byte(inout reader, in wasm);
+        core.bytes.push(valtype);
+        if valtype == VT_REF || valtype == VT_REF_NULL {
             // the heap type (s33)
             loop {
-                let y = rd_byte(inout r, in b);
-                c.bytes.push(y);
-                if !r.ok || (y & 128) == 0 {
+                let heap_byte = rd_byte(inout reader, in wasm);
+                core.bytes.push(heap_byte);
+                if !reader.ok || (heap_byte & 128) == 0 {
                     break;
                 }
             }
         }
     }
-    (start, wrapping_sub(c.bytes.len(), start), n)
+    (start, wrapping_sub(core.bytes.len(), start), count)
 }
 
-// The function types and function imports of core module `b`.
-pub fn read_core(in b: Slice[u8]) -> Core {
-    let mut c = Core {
+// The function types and function imports of core module `wasm`.
+pub fn read_core(in wasm: Slice[u8]) -> Core {
+    let mut core = Core {
         ok: true,
         bytes: ChunkSeq::new[u8](),
         sigs: ChunkSeq::new[Sig](),
         text: ChunkSeq::new[u8](),
-        imps: ChunkSeq::new[Imp](),
+        imports: ChunkSeq::new[Imp](),
     };
-    let mut r = Rd { pos: CORE_HEADER_BYTES, ok: b.len() >= CORE_HEADER_BYTES };
+    let mut reader = Rd { pos: CORE_HEADER_BYTES, ok: wasm.len() >= CORE_HEADER_BYTES };
     loop {
-        if !r.ok || r.pos >= b.len() {
+        if !reader.ok || reader.pos >= wasm.len() {
             break;
         }
-        let id = rd_byte(inout r, in b);
-        let size = rd_leb(inout r, in b);
-        let end = add(r.pos, size);
-        if !r.ok || end > b.len() {
-            c.ok = false;
-            return c;
+        let id = rd_byte(inout reader, in wasm);
+        let size = rd_leb(inout reader, in wasm);
+        let end = add(reader.pos, size);
+        if !reader.ok || end > wasm.len() {
+            core.ok = false;
+            return core;
         }
         if id == S_TYPE {
-            let n = rd_leb(inout r, in b);
-            for k in 0..n {
-                let form = rd_byte(inout r, in b);
+            let count = rd_leb(inout reader, in wasm);
+            for k in 0..count {
+                let form = rd_byte(inout reader, in wasm);
                 if form == FORM_CONT {
-                    rd_leb(inout r, in b);
-                    c.sigs.push(Sig { p0: 0, pn: 0, pc: 0, r0: 0, rn: 0, rc: 0 });
+                    rd_leb(inout reader, in wasm);
+                    core.sigs.push(Sig {
+                        param_start: 0,
+                        param_len: 0,
+                        param_count: 0,
+                        result_start: 0,
+                        result_len: 0,
+                        result_count: 0
+                    });
                 } else if form == FORM_FUNC {
-                    let (p0, pn, pc) = valtypes(inout r, in b, inout c);
-                    let (r0, rn, rc) = valtypes(inout r, in b, inout c);
-                    c.sigs.push(Sig { p0: p0, pn: pn, pc: pc, r0: r0, rn: rn, rc: rc });
+                    let (param_start, param_len, param_count) = valtypes(
+                        inout reader,
+                        in wasm,
+                        inout core
+                    );
+                    let (result_start, result_len, result_count) = valtypes(
+                        inout reader,
+                        in wasm,
+                        inout core
+                    );
+                    core.sigs.push(Sig {
+                        param_start: param_start,
+                        param_len: param_len,
+                        param_count: param_count,
+                        result_start: result_start,
+                        result_len: result_len,
+                        result_count: result_count
+                    });
                 } else {
-                    c.ok = false;
-                    return c;
+                    core.ok = false;
+                    return core;
                 }
             }
         } else if id == S_IMPORT {
-            let n = rd_leb(inout r, in b);
-            for k in 0..n {
-                let ml = rd_leb(inout r, in b);
-                let m0 = c.text.len();
-                for j in 0..ml {
-                    c.text.push(rd_byte(inout r, in b));
+            let count = rd_leb(inout reader, in wasm);
+            for k in 0..count {
+                let module_len = rd_leb(inout reader, in wasm);
+                let module_start = core.text.len();
+                for j in 0..module_len {
+                    core.text.push(rd_byte(inout reader, in wasm));
                 }
-                let fl = rd_leb(inout r, in b);
-                let f0 = c.text.len();
-                for j in 0..fl {
-                    c.text.push(rd_byte(inout r, in b));
+                let field_len = rd_leb(inout reader, in wasm);
+                let field_start = core.text.len();
+                for j in 0..field_len {
+                    core.text.push(rd_byte(inout reader, in wasm));
                 }
-                if rd_byte(inout r, in b) != EXTERN_FUNC {
-                    c.ok = false;
-                    return c;
+                if rd_byte(inout reader, in wasm) != EXTERN_FUNC {
+                    core.ok = false;
+                    return core;
                 }
-                let ty = rd_leb(inout r, in b);
-                c.imps.push(Imp { m0: m0, mn: ml, f0: f0, fl: fl, ty: ty });
+                let sig_index = rd_leb(inout reader, in wasm);
+                core.imports.push(Imp {
+                    module_start: module_start,
+                    module_len: module_len,
+                    field_start: field_start,
+                    field_len: field_len,
+                    ty: sig_index
+                });
             }
         }
-        if !r.ok || r.pos > end {
-            c.ok = false;
-            return c;
+        if !reader.ok || reader.pos > end {
+            core.ok = false;
+            return core;
         }
-        r.pos = end;
+        reader.pos = end;
     }
-    c.ok = r.ok;
-    c
+    core.ok = reader.ok;
+    core
 }
 
 // ------------------------------------------- the shim and fixup modules
@@ -637,69 +680,79 @@ fn module_head(inout out: ChunkSeq[u8]) {
     out.push(0);
 }
 
-fn same_core_sig(in c: Core, a: u64, b: u64) -> bool {
-    let sa = sig_at(in c, a);
-    let sb = sig_at(in c, b);
-    sa.pc == sb.pc
-        && sa.rc == sb.rc
-        && eq(in c.bytes[sa.p0..add(sa.p0, sa.pn)], in c.bytes[sb.p0..add(sb.p0, sb.pn)])
-        && eq(in c.bytes[sa.r0..add(sa.r0, sa.rn)], in c.bytes[sb.r0..add(sb.r0, sb.rn)])
+fn same_core_sig(in core: Core, first: u64, second: u64) -> bool {
+    let first_sig = sig_at(in core, first);
+    let second_sig = sig_at(in core, second);
+    first_sig.param_count == second_sig.param_count
+        && first_sig.result_count == second_sig.result_count
+        && eq(
+            in core.bytes[first_sig.param_start..add(first_sig.param_start, first_sig.param_len)],
+            in core.bytes[second_sig.param_start..add(second_sig.param_start, second_sig.param_len)]
+        )
+        && eq(
+            in core.bytes[
+                first_sig.result_start..add(first_sig.result_start, first_sig.result_len)
+            ],
+            in core.bytes[
+                second_sig.result_start..add(second_sig.result_start, second_sig.result_len)
+            ]
+        )
 }
 
-fn dedup_sigs(in c: Core, in sigs: Slice[u64]) -> (ChunkSeq[u64], ChunkSeq[u64]) {
-    let mut uniq = ChunkSeq::new[u64]();
+fn dedup_sigs(in core: Core, in sigs: Slice[u64]) -> (ChunkSeq[u64], ChunkSeq[u64]) {
+    let mut unique = ChunkSeq::new[u64]();
     let mut type_of = ChunkSeq::new[u64]();
     for k in 0..sigs.len() {
-        let s = at64(in sigs, k);
-        let mut found = uniq.len();
-        for u in 0..uniq.len() {
-            if same_core_sig(in c, at64(in uniq.as_slice(), u), s) {
+        let sig = at64(in sigs, k);
+        let mut found = unique.len();
+        for u in 0..unique.len() {
+            if same_core_sig(in core, at64(in unique.as_slice(), u), sig) {
                 found = u;
                 break;
             }
         }
-        if found == uniq.len() {
-            uniq.push(s);
+        if found == unique.len() {
+            unique.push(sig);
         }
         type_of.push(found);
     }
-    (uniq, type_of)
+    (unique, type_of)
 }
 
-fn func_types(in c: Core, in sigs: Slice[u64], inout out: ChunkSeq[u8]) {
+fn func_types(in core: Core, in sigs: Slice[u64], inout out: ChunkSeq[u8]) {
     put_uleb(inout out, sigs.len());
     for k in 0..sigs.len() {
-        let s = sig_at(in c, at64(in sigs, k));
+        let sig = sig_at(in core, at64(in sigs, k));
         out.push(FORM_FUNC);
-        put_uleb(inout out, s.pc);
-        out.extend(in c.bytes[s.p0..add(s.p0, s.pn)]);
-        put_uleb(inout out, s.rc);
-        out.extend(in c.bytes[s.r0..add(s.r0, s.rn)]);
+        put_uleb(inout out, sig.param_count);
+        out.extend(in core.bytes[sig.param_start..add(sig.param_start, sig.param_len)]);
+        put_uleb(inout out, sig.result_count);
+        out.extend(in core.bytes[sig.result_start..add(sig.result_start, sig.result_len)]);
     }
 }
 
-fn table_type(n: u64, inout out: ChunkSeq[u8]) {
+fn table_type(size: u64, inout out: ChunkSeq[u8]) {
     // funcref, limits n..n
     out.push(TYPE_FUNCREF);
     out.push(LIMITS_WITH_MAX);
-    put_uleb(inout out, n);
-    put_uleb(inout out, n);
+    put_uleb(inout out, size);
+    put_uleb(inout out, size);
 }
 
 // `wit-component-shim-module`: function k (type_of[k], the core signature
 // of the k-th indirectly lowered import) calls table slot k, which the
 // fixup module fills with the real lowering.
 pub fn shim_module(
-    in c: Core,
+    in core: Core,
     in sigs: Slice[u64],
     in producers: Slice[u8],
     inout out: ChunkSeq[u8]
 ) {
     let n = sigs.len();
-    let (uniq, type_of) = dedup_sigs(in c, in sigs);
+    let (unique, type_of) = dedup_sigs(in core, in sigs);
     module_head(inout out);
     let mut body = ChunkSeq::new[u8]();
-    func_types(in c, in uniq.as_slice(), inout body);
+    func_types(in core, in unique.as_slice(), inout body);
     section(inout out, S_TYPE, in body.as_slice());
     body.clear();
     put_uleb(inout body, n);
@@ -728,13 +781,13 @@ pub fn shim_module(
     body.clear();
     put_uleb(inout body, n);
     for k in 0..n {
-        let s = sig_at(in c, at64(in sigs, k));
+        let sig = sig_at(in core, at64(in sigs, k));
         let mut code = ChunkSeq::new[u8]();
         // no locals
         code.push(0);
-        for p in 0..s.pc {
+        for param in 0..sig.param_count {
             code.push(OP_LOCAL_GET);
-            put_uleb(inout code, p);
+            put_uleb(inout code, param);
         }
         // i32.const k; call_indirect (type type_of[k]) (table 0); end
         code.push(OP_I32_CONST);
@@ -752,16 +805,16 @@ pub fn shim_module(
 // `wit-component-fixup`: imports the lowerings ("actual" "k") and the
 // shim's table, and fills the table with them.
 pub fn fixup_module(
-    in c: Core,
+    in core: Core,
     in sigs: Slice[u64],
     in producers: Slice[u8],
     inout out: ChunkSeq[u8]
 ) {
     let n = sigs.len();
-    let (uniq, type_of) = dedup_sigs(in c, in sigs);
+    let (unique, type_of) = dedup_sigs(in core, in sigs);
     module_head(inout out);
     let mut body = ChunkSeq::new[u8]();
-    func_types(in c, in uniq.as_slice(), inout body);
+    func_types(in core, in unique.as_slice(), inout body);
     section(inout out, S_TYPE, in body.as_slice());
     body.clear();
     put_uleb(inout body, inc(n));

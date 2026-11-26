@@ -1,6 +1,7 @@
 // @vesper-std/graph::reach: reachability and depth-first orders.
 use self::{Graph, GraphIndex};
 use self::util::{get32, get64, get_bool, filled_bool};
+use @vesper-std/sugar::guard;
 
 // Which nodes are reachable from `root` (including `root`); all `false`
 // when `root` is not a node.
@@ -21,9 +22,8 @@ pub fn reachable_from_all(in g: Graph, in roots: Slice[u32]) -> ChunkSeq[bool] {
         }
     }
     loop {
-        let v = match work.pop() {
-            Option::Some(x) => x,
-            Option::None => break,
+        guard let Option::Some(v) = work.pop() else {
+            break;
         };
         let (lo, hi) = g.succ_range(v);
         for e in lo..hi {
@@ -54,9 +54,8 @@ pub fn reaches(in g: Graph, a: u32, b: u32) -> bool {
         let mut work: ChunkSeq[u32] = ChunkSeq::new[u32]();
         mark(inout seen, inout work, a);
         loop {
-            let v = match work.pop() {
-                Option::Some(x) => x,
-                Option::None => break false,
+            guard let Option::Some(v) = work.pop() else {
+                break false;
             };
             let (lo, hi) = g.succ_range(v);
             for e in lo..hi {
@@ -222,7 +221,8 @@ test {
             let byte = wrapping_add(wrapping_u8(digit), 48);
             let reverse_index = wrapping_sub(wrapping_sub(count, 1), i);
             if expected.try_byte_at(i) != Option::Some(byte)
-                || reverse.try_get(reverse_index) != Option::Some(digit) {
+                || reverse.try_get(reverse_index) != Option::Some(digit)
+            {
                 return false;
             }
         }

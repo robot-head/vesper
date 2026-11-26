@@ -410,9 +410,64 @@ where the pass runs on the program the lowering reads.
 **Rust lines deleted:** 0. Rust's `VerifiedBuild` pass stays as the
 fallback until the retirement.
 
+## Part 4d-4a: coverage inventory rendering
+
+The Vesper renderer takes sorted function coverage records and a dictionary
+of refusal details. It counts and sorts the refusals, renders the summary,
+and writes each function's own refusals and refused callees. Rust still
+collects those records. `VESPER_HYBRID_VERIFIED_COVERAGE=1` opts into the
+renderer with the hybrid's `all` swap set.
+
+| Check | Result |
+|---|---|
+| Complete listings for the Stage 1, parser and checker units, an empty report, and a mixed report with repeated UTF-8 details | **0 of 5 differ** |
+| Release ABBA, input encoding through decoded text, 30 rounds, `RUSTFLAGS="-C target-cpu=native"` | **0.347x median**, 95% CI **0.338x–0.356x** |
+
+**Rust lines deleted:** 0.
+
+## Part 4d-4b: coverage refusal collection
+
+### What changed
+
+- `coverage` (every refusal of every function, which the front-end
+  inventory `tests/verified_codegen_front_end.rs` lists) is now in the
+  package as `coverage_text` (`mono.ves` `coverage_input`, the new
+  `cover.ves`; `coverage.ves` keeps part 4d-4a's renderer).
+- The plan and the lowering have a coverage mode (`Lw::tolerant`,
+  `Fl::tolerant`). Like Rust's, it records a refusal and keeps going:
+  - The plan starts from every root, skips the entry-only checks, and leaves
+    out a function it cannot plan, after that function's effect-row refusals.
+  - The lowering records the refusals of block parameters, parameters and
+    instructions.
+  - An `Invalid` error after a recorded refusal is dropped.
+- Monomorphization runs from every plannable root (`mono_roots`). When that
+  fails, each root runs alone, and a root that fails alone is refused and is
+  no entry.
+- Evidence passing takes several entries and a set of sites to skip
+  (`evidence_from`). A site it cannot rewrite is refused under its function,
+  and the pass runs again without that site. This gives the same program as
+  Rust's rewrite of a copy.
+- `tests/common/verified_words.rs` `coverage_input` writes the input. It
+  holds `mono_input`'s sections with the roots, classified as `coverage.rs`
+  classifies them, between the mono extras and the lowering's.
+
+### Evidence (Linux x86_64, release, `-C target-cpu=native`)
+
+| Check | Result |
+|---|---|
+| Corpus worlds, every function a root, `optimize` on and off (every 8th world) | **0 of 94 differ** (62 with refusals) |
+| Front-end inventory units (`stage1`, `parser`, `checker`) | **listings equal** |
+| Front-end units, Rust `coverage` vs encoding + Vesper | stage1 1.13 s vs 0.89 s (**0.79x**), parser 2.07 s vs 1.65 s (0.80x), checker 2.71 s vs 2.55 s (0.94x) |
+
+Rust's time includes `lower_world` and `ir_opt`, which the encoding also
+runs. The Vesper call itself takes 4-25 ms. The corpus test keeps every 16th
+world by default (`VERIFIED_COVERAGE_STRIDE`), because `ir_opt` over every
+function takes about 2 s per world.
+
+**Rust lines deleted:** 0. `coverage.rs` goes at the retirement.
+
 ## Left
 
 - Optional: compare the per-arch `encoding_listing` text.
-- Part 4d-4: `coverage`, then the swap into `bootstrap/stage1.rs` with
-  `bootstrap/stage1.lock` reproduced, and the Rust deleted at the
-  retirement.
+- The Rust deleted at the retirement. Stage 1 can already run the native
+  Vesper backend (`bootstrap/verified_port.rs`, #2191).
