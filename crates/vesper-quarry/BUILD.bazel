@@ -73,6 +73,9 @@ PORT_DIVERGENT = {
     "leaf": ("vesper/src/leaf.ves", {
         "        if x < 128 {": "        if x < 32 {",
     }),
+    "vector": ("vesper/src/vector.ves", {
+        "if x == T_FALSE || y == T_FALSE {": "if x == T_FALSE && y == T_FALSE {",
+    }),
 }
 
 [
@@ -145,6 +148,7 @@ PORT_TEST_DATA = glob(["tests/fixtures/planner/**"])
             ("internal", "store_ssi"),
             ("store_log", "store"),
             ("leaf", "store_ssi"),
+            ("vector", "vector"),
         ]
     ]
 ]

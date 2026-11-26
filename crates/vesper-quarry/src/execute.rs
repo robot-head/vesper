@@ -1,5 +1,5 @@
 use crate::{
-    add, Error, ErrorKind, HermeticCatalog, Limits, PreparedQuery, RelPlan, Result, Value,
+    add, Error, ErrorKind, HermeticCatalog, Limits, PreparedQuery, Result, Value,
 };
 use std::collections::BTreeMap;
 use std::mem::size_of;
@@ -70,26 +70,6 @@ pub(crate) fn rows_bytes(rows: &[Vec<Value>]) -> Result<usize> {
     rows.iter().try_fold(0, |n, r| {
         add(n, add(size_of::<Vec<Value>>(), row_bytes(r)?)?)
     })
-}
-
-pub(crate) fn check_inputs(plan: &RelPlan, data: &DataSet) -> Result<()> {
-    match plan {
-        RelPlan::Scan { table, .. } => {
-            if data.tables.contains_key(table) {
-                Ok(())
-            } else {
-                Err(Error::new(
-                    ErrorKind::Data,
-                    format!("missing data for {table}"),
-                ))
-            }
-        }
-        RelPlan::Filter { input, .. } => check_inputs(input, data),
-        RelPlan::Join { lhs, rhs, .. } => {
-            check_inputs(lhs, data)?;
-            check_inputs(rhs, data)
-        }
-    }
 }
 
 #[derive(Clone, Debug, PartialEq)]

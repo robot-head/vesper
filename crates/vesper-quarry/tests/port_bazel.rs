@@ -138,3 +138,12 @@ fn committed_binding_is_current() {
         "port/binding.rs is stale: rebuild with VESPER_PORT_BLESS=1"
     );
 }
+
+#[test]
+fn divergent_vectorized_and_fails_the_vectorized_differential() {
+    run(
+        "VESPER_QUARRY_DIVERGENT_VECTOR",
+        &["vectorized_equals_row_executor_for_every_predicate_projection_and_batch"],
+        "simd_mask_count_matches_portable_count",
+    );
+}

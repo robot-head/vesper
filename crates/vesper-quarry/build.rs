@@ -52,6 +52,14 @@ const DIVERGENT: &[(&str, &str)] = &[
     // wal.rs (vesper/src/wal.ves): valid WAL headers are rejected;
     // durable committed_changes_survive_reopen_and_aborts_roll_back fails.
     ("if seq == 0 || base == 0 {", "if true {"),
+    // vector.rs, the vectorized executor (vesper/src/vector.ves): a
+    // three-valued AND is FALSE only when both sides are; vector
+    // vectorized_equals_row_executor_for_every_predicate_projection_and_batch
+    // fails.
+    (
+        "if x == T_FALSE || y == T_FALSE {",
+        "if x == T_FALSE && y == T_FALSE {",
+    ),
     // store/pages.rs leaf validation (vesper/src/leaf.ves: printable ASCII
     // in leaf text is rejected as invalid UTF-8) is likewise only in
     // BUILD.bazel's PORT_DIVERGENT; store_ssi
