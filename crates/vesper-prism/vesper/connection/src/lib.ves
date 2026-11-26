@@ -397,18 +397,10 @@ pub fn connection_core_submit(
     let index = wrapping_sub(sequence, c.base_sequence);
     let slot = slot_at(in c, index);
     c.retained = wrapping_add(c.retained, len);
-    c
-        .slots
-        .try_set(
-            index,
-            Slot {
-                id: slot.id,
-                head: slot.head,
-                request_close: slot.request_close,
-                phase: 1,
-                len: len
-            }
-        );
+    c.slots.try_set(
+        index,
+        Slot { id: slot.id, head: slot.head, request_close: slot.request_close, phase: 1, len: len }
+    );
     if close {
         close_at(inout c, sequence, inout plan);
     }

@@ -309,19 +309,17 @@ fn rebuild(
             }
             p.insts.push(i);
         }
-        p
-            .blocks
-            .push(
-                BlockRow {
-                    ha: blk.ha,
-                    hn: blk.hn,
-                    i0: i0,
-                    ic: wrapping_sub(p.insts.len(), i0),
-                    term: blk.term,
-                    ta: blk.ta,
-                    tn: blk.tn
-                }
-            );
+        p.blocks.push(
+            BlockRow {
+                ha: blk.ha,
+                hn: blk.hn,
+                i0: i0,
+                ic: wrapping_sub(p.insts.len(), i0),
+                term: blk.term,
+                ta: blk.ta,
+                tn: blk.tn
+            }
+        );
     }
     FnRow { name: name, ha: ha, hn: hn, b0: b0, bc: f.bc, ta: f.ta, tn: f.tn }
 }
@@ -447,19 +445,17 @@ fn substitute_tree(
             }
             p.insts.push(i);
         }
-        p
-            .blocks
-            .push(
-                BlockRow {
-                    ha: blk.ha,
-                    hn: blk.hn,
-                    i0: i0,
-                    ic: wrapping_sub(p.insts.len(), i0),
-                    term: blk.term,
-                    ta: blk.ta,
-                    tn: blk.tn
-                }
-            );
+        p.blocks.push(
+            BlockRow {
+                ha: blk.ha,
+                hn: blk.hn,
+                i0: i0,
+                ic: wrapping_sub(p.insts.len(), i0),
+                term: blk.term,
+                ta: blk.ta,
+                tn: blk.tn
+            }
+        );
     }
     made.push(FnRow { name: new, ha: ha, hn: hn, b0: b0, bc: f.bc, ta: f.ta, tn: f.tn });
     for q in 0..nested.len() {
@@ -931,19 +927,17 @@ fn load(in p: Program, f: FnRow) -> EF {
         for k in 0..blk.ic {
             ef.ins.push(p.inst(add(blk.i0, k)));
         }
-        ef
-            .blocks
-            .push(
-                BlockRow {
-                    ha: blk.ha,
-                    hn: blk.hn,
-                    i0: i0,
-                    ic: blk.ic,
-                    term: blk.term,
-                    ta: blk.ta,
-                    tn: blk.tn
-                }
-            );
+        ef.blocks.push(
+            BlockRow {
+                ha: blk.ha,
+                hn: blk.hn,
+                i0: i0,
+                ic: blk.ic,
+                term: blk.term,
+                ta: blk.ta,
+                tn: blk.tn
+            }
+        );
     }
     ef
 }
@@ -980,19 +974,17 @@ fn emit(inout p: Program, in ef: EF) -> FnRow {
         for k in 0..blk.ic {
             p.insts.push(ins_at(in ef.ins, add(blk.i0, k)));
         }
-        p
-            .blocks
-            .push(
-                BlockRow {
-                    ha: blk.ha,
-                    hn: blk.hn,
-                    i0: i0,
-                    ic: blk.ic,
-                    term: blk.term,
-                    ta: blk.ta,
-                    tn: blk.tn
-                }
-            );
+        p.blocks.push(
+            BlockRow {
+                ha: blk.ha,
+                hn: blk.hn,
+                i0: i0,
+                ic: blk.ic,
+                term: blk.term,
+                ta: blk.ta,
+                tn: blk.tn
+            }
+        );
     }
     FnRow { name: ef.name, ha: ha, hn: hn, b0: b0, bc: ef.blocks.len(), ta: ef.ta, tn: ef.tn }
 }
@@ -1253,22 +1245,21 @@ fn read_argument(
     p.put(empty, Tag::Path);
     p.put(pass, Tag::Raw);
     p.put(0, Tag::Raw);
-    out
-        .push(
-            InstRow {
-                dest: dest,
-                ty: ty,
-                s0: i.s0,
-                s1: i.s1,
-                has_token: 0,
-                tin: 0,
-                tout: 0,
-                fallible: 0,
-                op: Op::Read,
-                a: a,
-                n: 4
-            }
-        );
+    out.push(
+        InstRow {
+            dest: dest,
+            ty: ty,
+            s0: i.s0,
+            s1: i.s1,
+            has_token: 0,
+            tin: 0,
+            tout: 0,
+            fallible: 0,
+            op: Op::Read,
+            a: a,
+            n: 4
+        }
+    );
     ef_set_value(inout ef, dest, ty);
     let at = p.ops.len();
     p.put(pass, Tag::Raw);

@@ -3,7 +3,7 @@
 use @vesper/cranelift::{
     Value, append_block_param, block_param, call_arg, call_result_value, cc_eq, cc_ugt, cc_uge,
     cc_ule, cc_ult, create_block, ins_band, ins_bor, ins_brif, ins_iadd, ins_iadd_imm, ins_icmp,
-    ins_icmp_imm, ins_iconst, ins_imul, ins_isub, ins_jump, ins_overflow, ins_uextend, inst_result,
+    ins_icmp_imm, ins_iconst, ins_isub, ins_jump, ins_overflow, ins_uextend, inst_result,
     switch_to_block, ty_i64, ty_i8, vals1, value_of_word
 };
 use self::common::{
@@ -13,7 +13,6 @@ use self::common::{
 
 const MIN_GUARDED_SPAN: i64 = 4;
 const UADD_OVERFLOW: u32 = 1;
-const UMUL_OVERFLOW: u32 = 5;
 
 pub const HOIST_GET: u64 = 0;
 pub const HOIST_SET: u64 = 1;
@@ -50,56 +49,6 @@ fn checked_sum(
     }
 }
 
-// The sum of `terms` (`None` for none), each add checked into `overflow`.
-fn outer_sum(
-    inout b: Builder,
-    in terms: Slice[Value],
-    inout overflow: Value
-) -> Option[Value] eff [Ffi[Cranelift]] {
-    if terms.len() == 0 {
-        return None;
-    }
-    Some(checked_sum(inout b, None, in terms, inout overflow))
-}
-
-// `x + t` when there is a `t`, checked into `overflow` when `check`.
-fn add_term(
-    inout b: Builder,
-    x: Value,
-    t: Option[Value],
-    check: bool,
-    inout overflow: Value
-) -> Value eff [Ffi[Cranelift]] {
-    match t {
-        None => x,
-        Some(v) => if check {
-            let s = ins_overflow(inout b, UADD_OVERFLOW, x, v);
-            let o = inst_result(inout b, 1);
-            overflow = ins_bor(inout b, overflow, o);
-            s
-        } else {
-            ins_iadd(inout b, x, v)
-        },
-    }
-}
-
-// `x * c`, checked into `overflow`.
-fn checked_mul(
-    inout b: Builder,
-    x: Value,
-    c: Value,
-    inout overflow: Value
-) -> Value eff [Ffi[Cranelift]] {
-    let p = ins_overflow(inout b, UMUL_OVERFLOW, x, c);
-    let o = inst_result(inout b, 1);
-    overflow = ins_bor(inout b, overflow, o);
-    p
-}
-
-// `guard_range_fits` (src/bounds_hoist/native.rs): whether the index `c *
-// (±i + Σplus - Σminus) + Σouter_plus - Σouter_minus` is in `0..=len -
-// width` at both ends of `lo..=last` (`scaled` false: `c` 1, no outer
-// terms).
 fn guard_range_fits(
     inout b: Builder,
     lo: Value,
@@ -107,23 +56,18 @@ fn guard_range_fits(
     negated: bool,
     in plus: Slice[Value],
     in minus: Slice[Value],
-    scaled: bool,
-    scale: Value,
-    in outer_plus: Slice[Value],
-    in outer_minus: Slice[Value],
-    width: u64,
     len: Value,
 ) -> Value eff [Ffi[Cranelift]] {
-    if !negated && plus.len() == 0 && minus.len() == 0 && !scaled && width <= 1 {
+    if !negated && plus.len() == 0 && minus.len() == 0 {
         return ins_icmp(inout b, cc_ult(), last, len);
     }
     let mut overflow = ins_iconst(inout b, ty_i8(), 0);
-    let mut at_last = if negated {
+    let at_last = if negated {
         checked_sum(inout b, Some(last), in minus, inout overflow)
     } else {
         checked_sum(inout b, Some(last), in plus, inout overflow)
     };
-    let mut constant = if negated {
+    let constant = if negated {
         checked_sum(inout b, None, in plus, inout overflow)
     } else {
         checked_sum(inout b, None, in minus, inout overflow)
@@ -147,34 +91,13 @@ fn guard_range_fits(
         at_lo = ins_iadd(inout b, at_lo, term);
         i = wrapping_add(i, 1);
     }
-    let mut outer_add: Option[Value] = None;
-    let mut outer_sub: Option[Value] = None;
-    if scaled {
-        at_last = checked_mul(inout b, at_last, scale, inout overflow);
-        constant = checked_mul(inout b, constant, scale, inout overflow);
-        at_lo = ins_imul(inout b, at_lo, scale);
-        outer_add = outer_sum(inout b, in outer_plus, inout overflow);
-        outer_sub = outer_sum(inout b, in outer_minus, inout overflow);
-    }
     let (low_p, low_n, high_p, high_n) = if negated {
-        let p = add_term(inout b, constant, outer_add, true, inout overflow);
-        let n_last = add_term(inout b, at_last, outer_sub, true, inout overflow);
-        let n_lo = add_term(inout b, at_lo, outer_sub, false, inout overflow);
-        (p, n_last, p, n_lo)
+        (constant, at_last, constant, at_lo)
     } else {
-        let p_last = add_term(inout b, at_last, outer_add, true, inout overflow);
-        let p_lo = add_term(inout b, at_lo, outer_add, false, inout overflow);
-        let n = add_term(inout b, constant, outer_sub, true, inout overflow);
-        (p_lo, n, p_last, n)
+        (at_lo, constant, at_last, constant)
     };
     let below = ins_icmp(inout b, cc_ule(), low_n, low_p);
-    let mut d = ins_isub(inout b, high_p, high_n);
-    if width > 1 {
-        let extra = ins_iconst(inout b, ty_i64(), wrapping_i64(wrapping_sub(width, 1)));
-        d = ins_overflow(inout b, UADD_OVERFLOW, d, extra);
-        let o = inst_result(inout b, 1);
-        overflow = ins_bor(inout b, overflow, o);
-    }
+    let d = ins_isub(inout b, high_p, high_n);
     let inside = ins_icmp(inout b, cc_ult(), d, len);
     let ok = ins_band(inout b, below, inside);
     let ok_flag = ins_icmp_imm(inout b, cc_eq(), overflow, 0);
@@ -183,8 +106,7 @@ fn guard_range_fits(
 
 pub fn emit_bounds_guard(call: u64, inout b: Builder) eff [Ffi[Cranelift]] {
     // Args: [inclusive, is_seq, invariant, negated, has_ok, lo, hi, receiver, ok,
-    //        c0, c1, c2, np, nm, plus..., minus..., scaled, width, nop, nom,
-    //        (scale, outer_plus..., outer_minus...)?]
+    //        c0, c1, c2, np, nm, plus..., minus...]
     let inclusive = call_arg(call, 0) != 0;
     let is_seq = call_arg(call, 1) != 0;
     let invariant = call_arg(call, 2) != 0;
@@ -217,29 +139,6 @@ pub fn emit_bounds_guard(call: u64, inout b: Builder) eff [Ffi[Cranelift]] {
         }
         minus.push(value_of_word(call_arg(call, wrapping_add(14, wrapping_add(np, j)))));
         j = wrapping_add(j, 1);
-    }
-    // The scaled form's scale and outer terms (#2022).
-    let at = wrapping_add(14, wrapping_add(np, nm));
-    let scaled = call_arg(call, at) != 0;
-    let width = call_arg(call, wrapping_add(at, 1));
-    let nop = call_arg(call, wrapping_add(at, 2));
-    let nom = call_arg(call, wrapping_add(at, 3));
-    let mut scale = lo;
-    let mut outer_plus = ChunkSeq::with_capacity[Value](nop);
-    let mut outer_minus = ChunkSeq::with_capacity[Value](nom);
-    if scaled {
-        scale = value_of_word(call_arg(call, wrapping_add(at, 4)));
-        for q in 0..nop {
-            outer_plus.push(value_of_word(call_arg(call, wrapping_add(wrapping_add(at, 5), q))));
-        }
-        for q in 0..nom {
-            outer_minus
-                .push(
-                    value_of_word(
-                        call_arg(call, wrapping_add(wrapping_add(at, 5), wrapping_add(nop, q)))
-                    )
-                );
-        }
     }
 
     let (_, _, len) = seq_view_cached(inout b, receiver, is_seq, invariant, c0, c1, c2);
@@ -275,11 +174,6 @@ pub fn emit_bounds_guard(call: u64, inout b: Builder) eff [Ffi[Cranelift]] {
         negated,
         in plus.as_slice(),
         in minus.as_slice(),
-        scaled,
-        scale,
-        in outer_plus.as_slice(),
-        in outer_minus.as_slice(),
-        width,
         len
     );
     let inside = ins_bor(inout b, empty, fits);

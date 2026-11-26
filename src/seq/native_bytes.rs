@@ -118,12 +118,6 @@ impl<M: Module> Codegen<'_, '_, M> {
         if op.byte_scan() {
             return self.byte_scan_op(op, args, arg_types, receiver).map(Some);
         }
-        // A fixed-width access a loop guard proved in bounds (#2022): the
-        // access without its check.
-        let (op, unchecked) = match op {
-            SeqOp::Hoisted(crate::seq::Access::Wide(wide)) => (SeqOp::Wide(wide), true),
-            op => (op, false),
-        };
         if !matches!(
             op,
             SeqOp::CopyFrom { .. }
@@ -296,7 +290,7 @@ impl<M: Module> Codegen<'_, '_, M> {
                 SeqOp::Wide(wide) => {
                     let at = arg(1)?;
                     let mut cached: Option<[u64; 4]> = None;
-                    if !wide.total && !unchecked {
+                    if !wide.total {
                         let mut ck = head(sops::BYTE_CHECK_WIDE);
                         ck.extend_from_slice(&[word(at), u64::from(wide.bytes)]);
                         if let Some(res) = self.seq_swap_req(sops::BYTE_OP, &ck)? {
@@ -332,9 +326,6 @@ impl<M: Module> Codegen<'_, '_, M> {
                     } else {
                         req.push(0);
                     }
-                    // Whether a total access skips its check (an unchecked
-                    // checked access sends no check request).
-                    req.push(u64::from(unchecked && wide.total));
                     if let Some(res) = self.seq_swap_req(sops::BYTE_OP, &req)? {
                         return if let Some(m) = opt_meta {
                             self.seq_option_finish_swap(&res, m).map(Some)
@@ -397,49 +388,6 @@ impl<M: Module> Codegen<'_, '_, M> {
                     let n = this.b.ins().isub(hi, lo);
                     this.seq_fill_elems(h, from, n, value, &elem, stride)
                 })?
-            }
-            SeqOp::Wide(wide) if unchecked => {
-                let at = arg(1)?;
-                let addr = self.seq_elem_addr(h, start, at, 1);
-                let int = match wide.bytes {
-                    2 => types::I16,
-                    4 => types::I32,
-                    _ => types::I64,
-                };
-                if wide.write {
-                    let mut v = arg(2)?;
-                    if int != types::I64 {
-                        v = self.b.ins().ireduce(int, v);
-                    }
-                    if wide.big {
-                        v = self.b.ins().bswap(v);
-                    }
-                    self.b.ins().store(MemFlags::new(), v, addr, 0);
-                    if wide.total {
-                        self.b.ins().iconst(types::I64, 1)
-                    } else {
-                        self.zero()
-                    }
-                } else {
-                    let load = move |this: &mut Self| {
-                        let mut v = this.b.ins().load(int, MemFlags::new(), addr, 0);
-                        if wide.big {
-                            v = this.b.ins().bswap(v);
-                        }
-                        if int != types::I64 {
-                            v = this.b.ins().uextend(types::I64, v);
-                        }
-                        Ok(v)
-                    };
-                    if wide.total {
-                        let int_ty = Type::named(wide.int_type());
-                        let option = Type::Named("Option".into(), vec![int_ty.clone()]);
-                        let present = self.b.ins().iconst(types::I8, 1);
-                        self.seq_option(&option, &int_ty, present, load)?
-                    } else {
-                        load(self)?
-                    }
-                }
             }
             SeqOp::Wide(wide) => {
                 let at = arg(1)?;

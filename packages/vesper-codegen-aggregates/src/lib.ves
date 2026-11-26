@@ -4182,8 +4182,7 @@ fn seq_option_op(in p: Program, in names: Names, in sh: Shapes, k: u64, pool: u6
         || label_is(in p, in names, pool, "Last", false) {
         return true;
     }
-    if label_is(in p, in names, pool, "Wide(", true)
-        || label_is(in p, in names, pool, "Hoisted(Wide(", true) {
+    if label_is(in p, in names, pool, "Wide(", true) {
         return label_has(in p, in names, pool, "write: false")
             && label_has(in p, in names, pool, "total: true");
     }
@@ -5462,10 +5461,9 @@ fn rewrite_scalar_enums(
             }
             tn = wrapping_sub(p.ops.len(), ta);
         }
-        blocks
-            .push(
-                BlockRow { ha: ha, hn: hn, i0: i0, ic: rows.len(), term: bk.term, ta: ta, tn: tn }
-            );
+        blocks.push(
+            BlockRow { ha: ha, hn: hn, i0: i0, ic: rows.len(), term: bk.term, ta: ta, tn: tn }
+        );
     }
     let b0 = p.blocks.len();
     for i in 0..blocks.len() {
@@ -5545,12 +5543,10 @@ fn rewrite_scalar_enums(
     }
     let ok = p.ops.try_set(nl_at, count);
     let hn = wrapping_sub(p.ops.len(), ha);
-    let ok2 = p
-        .fns
-        .try_set(
-            g.fi,
-            FnRow { name: fr.name, ha: ha, hn: hn, b0: b0, bc: fr.bc, ta: fr.ta, tn: fr.tn }
-        );
+    let ok2 = p.fns.try_set(
+        g.fi,
+        FnRow { name: fr.name, ha: ha, hn: hn, b0: b0, bc: fr.bc, ta: fr.ta, tn: fr.tn }
+    );
 }
 
 // The harness entry of the rewrite (tests/self_host_codegen_aggregates.rs):
