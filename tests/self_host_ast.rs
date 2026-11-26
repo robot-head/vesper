@@ -635,6 +635,7 @@ struct Ast {
     dump: native::WordFunction,
     count: native::WordFunction,
     template: native::WordFunction,
+    surface: native::WordFunction,
 }
 
 fn load_checked(dir: &Path) -> check::Checked {
@@ -667,6 +668,7 @@ fn ast() -> &'static Ast {
             dump: compile("ast_dump"),
             count: compile("ast_count"),
             template: compile("ast_template_dump"),
+            surface: compile("ast_surface_dump"),
         }
     })
 }
@@ -1706,24 +1708,42 @@ fn backends_agree_on_small_sources() {
 
 /// The template-scopes AST (`parser::parse_template_cst`, which sugar
 /// expansion's template flow analysis reads) against `ast_template_dump`,
+/// and the surface profile's (`parser::parse_surface_cst`, which scope
+/// capture reads) against `ast_surface_dump`,
 /// for the source and for it inside `flow::render`'s wrapper function.
 fn compare_template(source: &str) -> Option<String> {
     for text in [
         source.to_owned(),
         format!("fn template_body() {{{source}\n}}"),
     ] {
-        let Ok(parse) = parser::parse_template_cst(&text) else {
-            continue;
-        };
-        let rust = dump_module(&parse.module);
-        let (vesper, desync) = unpack(&take_words(call(&ast().template, &text)));
-        if rust != vesper {
-            return Some(format!("{text:?}: {}", first_difference(&rust, &vesper)));
-        }
-        if desync != 0 {
-            return Some(format!(
-                "{text:?}: the lowering left the CST's token order {desync} times"
-            ));
+        for surface in [false, true] {
+            let parse = if surface {
+                parser::parse_surface_cst(&text, Default::default(), true)
+            } else {
+                parser::parse_template_cst(&text)
+            };
+            let Ok(parse) = parse else {
+                continue;
+            };
+            let rust = dump_module(&parse.module);
+            let f = if surface {
+                &ast().surface
+            } else {
+                &ast().template
+            };
+            let (vesper, desync) = unpack(&take_words(call(f, &text)));
+            let profile = if surface { "surface" } else { "template" };
+            if rust != vesper {
+                return Some(format!(
+                    "{profile} {text:?}: {}",
+                    first_difference(&rust, &vesper)
+                ));
+            }
+            if desync != 0 {
+                return Some(format!(
+                    "{profile} {text:?}: the lowering left the CST's token order {desync} times"
+                ));
+            }
         }
     }
     None
