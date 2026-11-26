@@ -471,12 +471,23 @@ fn driver_matches_the_default_compiler() {
 #[test]
 fn session_steps_match_the_default_compiler() {
     let root = repository();
-    let default = default_compiler();
-    let hybrid = hybrid();
     let scratch =
         std::env::temp_dir().join(format!("vesper-hybrid-session-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&scratch);
     std::fs::create_dir_all(scratch.join("plain-dir")).unwrap();
+    // Each compiler runs from a copy in its own directory, so `--tee` looks
+    // for `vesper-tee` in the same places for both: Bazel builds the tools
+    // beside `//:bin/vesper` (at `../crates/vesper-tools/bin`) but not beside
+    // the hybrid.
+    let alone = |exe: PathBuf, tag: &str| -> PathBuf {
+        let dir = scratch.join(format!("bin-{tag}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let copy = dir.join(exe.file_name().unwrap());
+        std::fs::copy(&exe, &copy).unwrap_or_else(|e| panic!("copy {}: {e}", exe.display()));
+        copy
+    };
+    let default = alone(default_compiler(), "default");
+    let hybrid = alone(hybrid(), "hybrid");
     let program = scratch.join("ok.ves");
     std::fs::write(&program, "fn main() -> i64 {\n    40 + 2\n}\n").unwrap();
     let inputs = [
