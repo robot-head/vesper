@@ -1,7 +1,7 @@
 //! Self-hosting SH1 lane 14 (#1157): the sugar expansion swap. The
 //! module's `expand_words` (modules/sugar, linked by build.rs), with its
 //! input written by `sugar_words::input` and its words read back by
-//! `sugar_words::decode`, must return exactly what
+//! `sugar_words::decode` (tests/common/sugar_words.rs), must return exactly what
 //! `vesper_syntax::sugar_expand::rust_expand_sugar` returns: the expanded
 //! source, its effect regions with their import origins, the source map,
 //! or the same diagnostic.
@@ -11,15 +11,14 @@
 //! with sugar declarations again with them moved into imports: visible
 //! under their names, under aliases, and behind one definition scope that
 //! every import shares (the same slice, as src/packages/sugar.rs passes
-//! them). Sources with surface macros stay on Rust in the swap (part 6), so
-//! they are left out here. Under the `divergent-sugar` feature every source
+//! them). Under the `divergent-sugar` feature every source
 //! reads back as having no sugar, and the test must see differences.
 #[rustfmt::skip]
 #[allow(clippy::all, dead_code)]
 #[path = "../port/sugar.rs"]
 mod binding;
 
-#[path = "../src/sugar_words.rs"]
+#[path = "../../../tests/common/sugar_words.rs"]
 mod sugar_words;
 
 #[path = "../../../tests/common/rust_literals.rs"]
@@ -204,7 +203,6 @@ fn imported(source: &str, out: &mut Vec<Program>) {
 fn corpus() -> Vec<Program> {
     let mut sources = repository_sources();
     sources.extend(suite_sources());
-    sources.retain(|s| !s.contains("macro"));
     let mut out: Vec<Program> = sources.iter().map(|s| Program::plain(s)).collect();
     for s in &sources {
         imported(s, &mut out);

@@ -16,9 +16,9 @@ pub fn run_forge(in args: Args) -> i64 eff [Ffi[StdFs], Ffi[HybridCommands], Fai
         if i >= n {
             break;
         }
-        let a_buf = arg(in args, i);
-        let a = a_buf.as_slice();
-        if eq(in a, in "--help") || eq(in a, in "-h") {
+        let arg_buf = arg(in args, i);
+        let arg_text = arg_buf.as_slice();
+        if eq(in arg_text, in "--help") || eq(in arg_text, in "-h") {
             print(
                 stdout_stream(),
                 in "Usage: vesper forge <check|expand|lean> SOURCE [--package @local/source] [--policy FILE] [--json] [--provenance FILE]\n\nCheck declarative Expr macros using whole-body hygiene, the ordinary checker and actual compiler-derived authority.\ncheck returns bounded JSON with the source map and per-function macro provenance; expand writes exactly the fully checked expanded source.\nlean writes the Lean extraction of the expanded program with `$macro_provenance` marker constants; --provenance FILE (lean only) writes the provenance manifest that `vesper proof-audit --macro-provenance` requires for theorems about expanded code.\nMacro-bearing functions must be top-level and nongeneric, with at most eight plain named parameters.\nProjected parameters, source Tier2, attributes, derives, recursive/nested macros and other categories are unsupported.\nNo native code or WASI component is executed. Existing check/LSP behavior is unchanged.\n"
@@ -45,8 +45,8 @@ pub fn run_forge(in args: Args) -> i64 eff [Ffi[StdFs], Ffi[HybridCommands], Fai
         if i >= n {
             break;
         }
-        let a_buf = arg(in args, i);
-        let len = a_buf.len();
+        let arg_buf = arg(in args, i);
+        let len = arg_buf.len();
         if total_bytes > wrapping_sub(16384, len) {
             return reject_config(check, in "source macro argument budget exceeded".as_bytes());
         }
@@ -56,14 +56,14 @@ pub fn run_forge(in args: Args) -> i64 eff [Ffi[StdFs], Ffi[HybridCommands], Fai
     if n <= 1 {
         return reject_config(check, in "missing forge action; see forge --help".as_bytes());
     }
-    let act_buf = arg(in args, 1);
-    let act_s = act_buf.as_slice();
+    let action_buf = arg(in args, 1);
+    let action_text = action_buf.as_slice();
     let mut action: u32 = ACTION_CHECK;
-    if eq(in act_s, in "check") {
+    if eq(in action_text, in "check") {
         action = ACTION_CHECK;
-    } else if eq(in act_s, in "expand") {
+    } else if eq(in action_text, in "expand") {
         action = ACTION_EXPAND;
-    } else if eq(in act_s, in "lean") {
+    } else if eq(in action_text, in "lean") {
         action = ACTION_LEAN;
     } else {
         return reject_config(check, in "expected forge check, expand or lean".as_bytes());
@@ -82,24 +82,24 @@ pub fn run_forge(in args: Args) -> i64 eff [Ffi[StdFs], Ffi[HybridCommands], Fai
         if i >= n {
             break;
         }
-        let a_buf = arg(in args, i);
-        let a = a_buf.as_slice();
-        if eq(in a, in "--package") {
+        let arg_buf = arg(in args, i);
+        let arg_text = arg_buf.as_slice();
+        if eq(in arg_text, in "--package") {
             i = wrapping_add(i, 1);
             if i >= n {
                 return reject_config(check, in "--package requires a namespace".as_bytes());
             }
-            let v_buf = arg(in args, i);
-            let v = v_buf.as_slice();
-            if v.len() > 256 || has_package {
+            let value_buf = arg(in args, i);
+            let value = value_buf.as_slice();
+            if value.len() > 256 || has_package {
                 return reject_config(
                     check,
                     in "duplicate or oversized package namespace".as_bytes()
                 );
             }
             has_package = true;
-            package.extend(in v);
-        } else if eq(in a, in "--policy") {
+            package.extend(in value);
+        } else if eq(in arg_text, in "--policy") {
             i = wrapping_add(i, 1);
             if i >= n {
                 return reject_config(check, in "--policy requires a file".as_bytes());
@@ -107,12 +107,12 @@ pub fn run_forge(in args: Args) -> i64 eff [Ffi[StdFs], Ffi[HybridCommands], Fai
             if has_policy {
                 return reject_config(check, in "duplicate --policy".as_bytes());
             }
-            let v_buf = arg(in args, i);
+            let value_buf = arg(in args, i);
             has_policy = true;
-            policy.extend(in v_buf.as_slice());
-        } else if eq(in a, in "--json") && check && !json {
+            policy.extend(in value_buf.as_slice());
+        } else if eq(in arg_text, in "--json") && check && !json {
             json = true;
-        } else if eq(in a, in "--provenance") && action == ACTION_LEAN {
+        } else if eq(in arg_text, in "--provenance") && action == ACTION_LEAN {
             i = wrapping_add(i, 1);
             if i >= n {
                 return reject_config(check, in "--provenance requires a file".as_bytes());
@@ -120,13 +120,13 @@ pub fn run_forge(in args: Args) -> i64 eff [Ffi[StdFs], Ffi[HybridCommands], Fai
             if has_provenance {
                 return reject_config(check, in "duplicate --provenance".as_bytes());
             }
-            let v_buf = arg(in args, i);
+            let value_buf = arg(in args, i);
             has_provenance = true;
-            provenance.extend(in v_buf.as_slice());
-        } else if a.len() != 0 && byte_at(in a, 0) == 45 {
+            provenance.extend(in value_buf.as_slice());
+        } else if arg_text.len() != 0 && byte_at(in arg_text, 0) == 45 {
             let mut err: ChunkSeq[u8] = ChunkSeq::new[u8]();
             err.extend(in "unsupported source macro option '".as_bytes());
-            err.extend(in a);
+            err.extend(in arg_text);
             err.push(39);
             return reject_config(check, in err.as_slice());
         } else {
@@ -134,7 +134,7 @@ pub fn run_forge(in args: Args) -> i64 eff [Ffi[StdFs], Ffi[HybridCommands], Fai
                 return reject_config(check, in "only one source file is supported".as_bytes());
             }
             has_input = true;
-            input.extend(in a);
+            input.extend(in arg_text);
         }
         i = wrapping_add(i, 1);
     }
@@ -185,41 +185,41 @@ fn reject_config(check: bool, in message: Slice[u8]) -> i64 eff [Ffi[StdFs], Fai
     fail(in message)
 }
 
-fn push_json_str(inout out: ChunkSeq[u8], in s: Slice[u8]) {
+fn push_json_str(inout out: ChunkSeq[u8], in text: Slice[u8]) {
     out.push(34);
-    for i in 0..s.len() {
-        let b = byte_at(in s, i);
-        if b == 34 {
+    for i in 0..text.len() {
+        let byte = byte_at(in text, i);
+        if byte == 34 {
             out.extend(in "\\\"".as_bytes());
-        } else if b == 92 {
+        } else if byte == 92 {
             out.extend(in "\\\\".as_bytes());
-        } else if b == 8 {
+        } else if byte == 8 {
             out.extend(in "\\b".as_bytes());
-        } else if b == 12 {
+        } else if byte == 12 {
             out.extend(in "\\f".as_bytes());
-        } else if b == 10 {
+        } else if byte == 10 {
             out.extend(in "\\n".as_bytes());
-        } else if b == 13 {
+        } else if byte == 13 {
             out.extend(in "\\r".as_bytes());
-        } else if b == 9 {
+        } else if byte == 9 {
             out.extend(in "\\t".as_bytes());
-        } else if b < 32 {
+        } else if byte < 32 {
             out.extend(in "\\u00".as_bytes());
-            let hi = b >> 4;
-            let lo = b & 15;
-            out.push(hex_digit(hi));
-            out.push(hex_digit(lo));
+            let high_nibble = byte >> 4;
+            let low_nibble = byte & 15;
+            out.push(hex_digit(high_nibble));
+            out.push(hex_digit(low_nibble));
         } else {
-            out.push(b);
+            out.push(byte);
         }
     }
     out.push(34);
 }
 
-fn hex_digit(d: u8) -> u8 {
-    if d < 10 {
-        wrapping_add(48, d)
+fn hex_digit(nibble: u8) -> u8 {
+    if nibble < 10 {
+        wrapping_add(48, nibble)
     } else {
-        wrapping_add(97, wrapping_sub(d, 10))
+        wrapping_add(97, wrapping_sub(nibble, 10))
     }
 }

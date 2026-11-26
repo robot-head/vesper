@@ -77,83 +77,83 @@ pub copy struct Known {
     data: u32,
 }
 
-pub fn known_new(inout n: Names) -> Known {
+pub fn known_new(inout names: Names) -> Known {
     Known {
-        string: n.intern(in "String".as_bytes()),
-        str_: n.intern(in "Str".as_bytes()),
-        dyn_: n.intern(in "dyn".as_bytes()),
-        region_box: n.intern(in "RegionBox".as_bytes()),
-        watermark: n.intern(in "Watermark".as_bytes()),
-        chunk_seq: n.intern(in "ChunkSeq".as_bytes()),
-        slice: n.intern(in "Slice".as_bytes()),
-        tiled_seq: n.intern(in "TiledSeq".as_bytes()),
-        box_: n.intern(in "Box".as_bytes()),
-        vec: n.intern(in "Vec".as_bytes()),
-        mask: n.intern(in "Mask".as_bytes()),
-        u8_: n.intern(in "u8".as_bytes()),
-        u16_: n.intern(in "u16".as_bytes()),
-        u32_: n.intern(in "u32".as_bytes()),
-        u64_: n.intern(in "u64".as_bytes()),
-        usize_: n.intern(in "usize".as_bytes()),
-        i8_: n.intern(in "i8".as_bytes()),
-        i16_: n.intern(in "i16".as_bytes()),
-        i32_: n.intern(in "i32".as_bytes()),
-        i64_: n.intern(in "i64".as_bytes()),
-        isize_: n.intern(in "isize".as_bytes()),
-        i128_: n.intern(in "i128".as_bytes()),
-        u128_: n.intern(in "u128".as_bytes()),
-        f32_: n.intern(in "f32".as_bytes()),
-        f64_: n.intern(in "f64".as_bytes()),
-        bool_: n.intern(in "bool".as_bytes()),
-        unit: n.intern(in "Unit".as_bytes()),
-        never: n.intern(in "Never".as_bytes()),
-        region: n.intern(in "Region".as_bytes()),
-        len: n.intern(in "len".as_bytes()),
-        cap: n.intern(in "cap".as_bytes()),
-        data: n.intern(in "data".as_bytes()),
+        string: names.intern(in "String".as_bytes()),
+        str_: names.intern(in "Str".as_bytes()),
+        dyn_: names.intern(in "dyn".as_bytes()),
+        region_box: names.intern(in "RegionBox".as_bytes()),
+        watermark: names.intern(in "Watermark".as_bytes()),
+        chunk_seq: names.intern(in "ChunkSeq".as_bytes()),
+        slice: names.intern(in "Slice".as_bytes()),
+        tiled_seq: names.intern(in "TiledSeq".as_bytes()),
+        box_: names.intern(in "Box".as_bytes()),
+        vec: names.intern(in "Vec".as_bytes()),
+        mask: names.intern(in "Mask".as_bytes()),
+        u8_: names.intern(in "u8".as_bytes()),
+        u16_: names.intern(in "u16".as_bytes()),
+        u32_: names.intern(in "u32".as_bytes()),
+        u64_: names.intern(in "u64".as_bytes()),
+        usize_: names.intern(in "usize".as_bytes()),
+        i8_: names.intern(in "i8".as_bytes()),
+        i16_: names.intern(in "i16".as_bytes()),
+        i32_: names.intern(in "i32".as_bytes()),
+        i64_: names.intern(in "i64".as_bytes()),
+        isize_: names.intern(in "isize".as_bytes()),
+        i128_: names.intern(in "i128".as_bytes()),
+        u128_: names.intern(in "u128".as_bytes()),
+        f32_: names.intern(in "f32".as_bytes()),
+        f64_: names.intern(in "f64".as_bytes()),
+        bool_: names.intern(in "bool".as_bytes()),
+        unit: names.intern(in "Unit".as_bytes()),
+        never: names.intern(in "Never".as_bytes()),
+        region: names.intern(in "Region".as_bytes()),
+        len: names.intern(in "len".as_bytes()),
+        cap: names.intern(in "cap".as_bytes()),
+        data: names.intern(in "data".as_bytes()),
     }
 }
 
 impl Known {
-    pub fn is_integer(self, s: u32) -> bool {
-        s == self.u8_
-            || s == self.u16_
-            || s == self.u32_
-            || s == self.u64_
-            || s == self.usize_
-            || s == self.i8_
-            || s == self.i16_
-            || s == self.i32_
-            || s == self.i64_
-            || s == self.isize_
-            || s == self.i128_
-            || s == self.u128_
+    pub fn is_integer(self, sym: u32) -> bool {
+        sym == self.u8_
+            || sym == self.u16_
+            || sym == self.u32_
+            || sym == self.u64_
+            || sym == self.usize_
+            || sym == self.i8_
+            || sym == self.i16_
+            || sym == self.i32_
+            || sym == self.i64_
+            || sym == self.isize_
+            || sym == self.i128_
+            || sym == self.u128_
     }
 
     // `numeric::is_wide_name`: the two-word integers (#1174), which
     // `is_integer` also includes.
-    pub fn is_wide(self, s: u32) -> bool {
-        s == self.i128_ || s == self.u128_
+    pub fn is_wide(self, sym: u32) -> bool {
+        sym == self.i128_ || sym == self.u128_
     }
 
     // `numeric::is_scalar_name`.
-    pub fn is_scalar(self, s: u32) -> bool {
-        self.is_integer(s)
-            || self.is_wide(s)
-            || s == self.f32_
-            || s == self.f64_
-            || s == self.bool_
-            || s == self.unit
-            || s == self.never
+    pub fn is_scalar(self, sym: u32) -> bool {
+        self.is_integer(sym)
+            || self.is_wide(sym)
+            || sym == self.f32_
+            || sym == self.f64_
+            || sym == self.bool_
+            || sym == self.unit
+            || sym == self.never
     }
 
     // Bits of a vector element (`vector::Elem::from_name`), or 0.
-    pub fn elem_bits(self, s: u32) -> u32 {
-        if s == self.u8_ {
+    pub fn elem_bits(self, sym: u32) -> u32 {
+        if sym == self.u8_ {
             8
-        } else if s == self.u32_ || s == self.f32_ {
+        } else if sym == self.u32_ || sym == self.f32_ {
             32
-        } else if s == self.u64_ || s == self.i64_ || s == self.f64_ {
+        } else if sym == self.u64_ || sym == self.i64_ || sym == self.f64_ {
             64
         } else {
             0
@@ -215,20 +215,20 @@ pub fn world_new(k: Known) -> World {
     }
 }
 
-// Grows a symbol-indexed table to cover `name` and sets it to `v`.
-pub fn set_by_symbol(inout table: ChunkSeq[u32], name: u32, v: u32) {
+// Grows a symbol-indexed table to cover `name` and sets it to `value`.
+pub fn set_by_symbol(inout table: ChunkSeq[u32], name: u32, value: u32) {
     loop {
         if table.len() > w(name) {
             break;
         }
         table.push(0);
     }
-    let ok = table.try_set(w(name), v);
+    let ok = table.try_set(w(name), value);
 }
 
 fn span_row(in rows: ChunkSeq[SpanRow], i: u64) -> SpanRow {
     match rows.try_get(i) {
-        Option::Some(r) => r,
+        Option::Some(row) => row,
         Option::None => SpanRow { start: 0, end: 0, ty: NONE32 },
     }
 }
@@ -243,15 +243,15 @@ pub fn find_span(in rows: ChunkSeq[SpanRow], start: u64, end: u64) -> u64 {
             break;
         }
         let mid = wrapping_add(lo, wrapping_sub(hi, lo) / 2);
-        let r = span_row(in rows, mid);
-        if r.start < start || (r.start == start && r.end < end) {
+        let row = span_row(in rows, mid);
+        if row.start < start || (row.start == start && row.end < end) {
             lo = inc(mid);
         } else {
             hi = mid;
         }
     }
-    let r = span_row(in rows, lo);
-    if lo < rows.len() && r.start == start && r.end == end {
+    let row = span_row(in rows, lo);
+    if lo < rows.len() && row.start == start && row.end == end {
         lo
     } else {
         rows.len()
@@ -268,10 +268,10 @@ fn copy_span_rows(in rows: ChunkSeq[SpanRow]) -> ChunkSeq[SpanRow] {
     let mut out = ChunkSeq::with_capacity[SpanRow](n);
     for i in 0..n {
         match rows.try_get(i) {
-            Option::Some(r) => out.push(SpanRow {
-                start: r.start,
-                end: r.end,
-                ty: r.ty,
+            Option::Some(row) => out.push(SpanRow {
+                start: row.start,
+                end: row.end,
+                ty: row.ty,
             }),
             Option::None => {},
         }
@@ -284,16 +284,16 @@ impl World {
         let mut adts = ChunkSeq::with_capacity[Adt](self.adts.len());
         for i in 0..self.adts.len() {
             match self.adts.try_get(i) {
-                Option::Some(v) => adts.push(Adt {
-                    name: v.name,
-                    mode: v.mode,
-                    ga: v.ga,
-                    gn: v.gn,
-                    va: v.va,
-                    vn: v.vn,
-                    is_enum: v.is_enum,
-                    tile: v.tile,
-                    span_zero: v.span_zero,
+                Option::Some(adt) => adts.push(Adt {
+                    name: adt.name,
+                    mode: adt.mode,
+                    ga: adt.ga,
+                    gn: adt.gn,
+                    va: adt.va,
+                    vn: adt.vn,
+                    is_enum: adt.is_enum,
+                    tile: adt.tile,
+                    span_zero: adt.span_zero,
                 }),
                 Option::None => {},
             }
@@ -301,10 +301,10 @@ impl World {
         let mut generics = ChunkSeq::with_capacity[Generic](self.generics.len());
         for i in 0..self.generics.len() {
             match self.generics.try_get(i) {
-                Option::Some(v) => generics.push(Generic {
-                    name: v.name,
-                    bound: v.bound,
-                    row: v.row,
+                Option::Some(generic) => generics.push(Generic {
+                    name: generic.name,
+                    bound: generic.bound,
+                    row: generic.row,
                 }),
                 Option::None => {},
             }
@@ -312,11 +312,11 @@ impl World {
         let mut variants = ChunkSeq::with_capacity[Variant](self.variants.len());
         for i in 0..self.variants.len() {
             match self.variants.try_get(i) {
-                Option::Some(v) => variants.push(Variant {
-                    name: v.name,
-                    fa: v.fa,
-                    fc: v.fc,
-                    named: v.named,
+                Option::Some(variant) => variants.push(Variant {
+                    name: variant.name,
+                    fa: variant.fa,
+                    fc: variant.fc,
+                    named: variant.named,
                 }),
                 Option::None => {},
             }
@@ -324,10 +324,10 @@ impl World {
         let mut fields = ChunkSeq::with_capacity[Field](self.fields.len());
         for i in 0..self.fields.len() {
             match self.fields.try_get(i) {
-                Option::Some(v) => fields.push(Field {
-                    name: v.name,
-                    ty: v.ty,
-                    modality: v.modality,
+                Option::Some(field) => fields.push(Field {
+                    name: field.name,
+                    ty: field.ty,
+                    modality: field.modality,
                 }),
                 Option::None => {},
             }
@@ -335,14 +335,14 @@ impl World {
         let mut effects = ChunkSeq::with_capacity[EffectRow](self.effects.len());
         for i in 0..self.effects.len() {
             match self.effects.try_get(i) {
-                Option::Some(v) => effects.push(EffectRow {
-                    name: v.name,
-                    linear: v.linear,
+                Option::Some(effect) => effects.push(EffectRow {
+                    name: effect.name,
+                    linear: effect.linear,
                 }),
                 Option::None => {},
             }
         }
-        let k_copy = Known {
+        let known = Known {
             string: self.k.string,
             str_: self.k.str_,
             dyn_: self.k.dyn_,
@@ -383,7 +383,7 @@ impl World {
             fields: fields,
             by_name: copy_seq[u32](in self.by_name),
             box_active: self.box_active,
-            k: k_copy,
+            k: known,
             effects: effects,
             effect_by_name: copy_seq[u32](in self.effect_by_name),
             expr_types: copy_span_rows(in self.expr_types),
@@ -394,7 +394,7 @@ impl World {
 
     pub fn adt(in self, i: u32) -> Adt {
         match self.adts.try_get(w(i)) {
-            Option::Some(a) => a,
+            Option::Some(adt) => adt,
             Option::None => Adt {
                 name: 0,
                 mode: 0,
@@ -411,29 +411,33 @@ impl World {
 
     pub fn generic(in self, i: u64) -> Generic {
         match self.generics.try_get(i) {
-            Option::Some(g) => g,
+            Option::Some(generic) => generic,
             Option::None => Generic { name: 0, bound: 0, row: false },
         }
     }
 
     pub fn variant(in self, i: u64) -> Variant {
         match self.variants.try_get(i) {
-            Option::Some(v) => v,
+            Option::Some(variant) => variant,
             Option::None => Variant { name: 0, fa: 0, fc: 0, named: false },
         }
     }
 
     pub fn field(in self, i: u64) -> Field {
         match self.fields.try_get(i) {
-            Option::Some(f) => f,
+            Option::Some(field) => field,
             Option::None => Field { name: 0, ty: 0, modality: 0 },
         }
     }
 
     // `world.adts.get(name)`.
     pub fn lookup(in self, name: u32) -> u32 {
-        let x = u32_at(in self.by_name, w(name));
-        if x == 0 { NO_ADT } else { wrapping_sub(x, 1) }
+        let entry = u32_at(in self.by_name, w(name));
+        if entry == 0 {
+            NO_ADT
+        } else {
+            wrapping_sub(entry, 1)
+        }
     }
 
     pub fn index(inout self, name: u32, adt: u32) {
@@ -442,13 +446,17 @@ impl World {
 
     // `world.effects.get(name)`, as an effect index, or NONE32.
     pub fn effect_index(in self, name: u32) -> u32 {
-        let x = u32_at(in self.effect_by_name, w(name));
-        if x == 0 { NONE32 } else { wrapping_sub(x, 1) }
+        let entry = u32_at(in self.effect_by_name, w(name));
+        if entry == 0 {
+            NONE32
+        } else {
+            wrapping_sub(entry, 1)
+        }
     }
 
     pub fn effect_row(in self, i: u32) -> EffectRow {
         match self.effects.try_get(w(i)) {
-            Option::Some(e) => e,
+            Option::Some(effect) => effect,
             Option::None => EffectRow { name: 0, linear: false },
         }
     }
@@ -473,25 +481,25 @@ impl World {
 
     // The substitution of an ADT's generics by the arguments of `ty`
     // (Rust: `a.generics.iter().zip(args).collect::<BTreeMap<_, _>>()`).
-    pub fn vars_of(in self, in t: Types, a: Adt, ty: u32) -> Vars {
-        let mut v = vars_new();
-        let n = t.arity(ty);
-        for i in 0..w(a.gn) {
-            if i >= n {
+    pub fn vars_of(in self, in types: Types, adt: Adt, ty: u32) -> Vars {
+        let mut vars = vars_new();
+        let arity = types.arity(ty);
+        for i in 0..w(adt.gn) {
+            if i >= arity {
                 break;
             }
-            let g = self.generic(add(w(a.ga), i));
-            v.set(g.name, t.arg(ty, i));
+            let generic = self.generic(add(w(adt.ga), i));
+            vars.set(generic.name, types.arg(ty, i));
         }
-        v
+        vars
     }
 
-    // The field `name` of variant `v`, as a field index, or NONE32.
-    pub fn find_field(in self, v: Variant, name: u32) -> u32 {
-        for i in 0..w(v.fc) {
-            let f = self.field(add(w(v.fa), i));
-            if f.name == name {
-                return n32(add(w(v.fa), i));
+    // The field `name` of `variant`, as a field index, or NONE32.
+    pub fn find_field(in self, variant: Variant, name: u32) -> u32 {
+        for i in 0..w(variant.fc) {
+            let field = self.field(add(w(variant.fa), i));
+            if field.name == name {
+                return n32(add(w(variant.fa), i));
             }
         }
         NONE32
@@ -499,37 +507,39 @@ impl World {
 }
 
 // `vector::layout_words`: words of a valid `Vec[e, N]` / `Mask[e, N]`, or 0.
-pub fn vector_words(in t: Types, in names: Names, k: Known, ty: u32) -> u32 {
-    let n = t.node(ty);
-    if n.kind != TyKind::Named || (n.name != k.vec && n.name != k.mask) || n.n != 2 {
+pub fn vector_words(in types: Types, in names: Names, known: Known, ty: u32) -> u32 {
+    let node = types.node(ty);
+    if node.kind != TyKind::Named
+        || (node.name != known.vec && node.name != known.mask)
+        || node.n != 2 {
         return 0;
     }
-    let elem = t.arg(ty, 0);
-    let count = t.arg(ty, 1);
-    let c = t.node(count);
-    if c.kind != TyKind::Named || c.n != 0 {
+    let elem = types.arg(ty, 0);
+    let count = types.arg(ty, 1);
+    let count_node = types.node(count);
+    if count_node.kind != TyKind::Named || count_node.n != 0 {
         return 0;
     }
-    let size = names.size(c.name);
+    let size = names.size(count_node.name);
     if size == 0 {
         return 0;
     }
     let mut lanes: u64 = 0;
     for i in 0..size {
-        let b = names.byte(c.name, i);
-        if b < 48 || b > 57 {
+        let digit = names.byte(count_node.name, i);
+        if digit < 48 || digit > 57 {
             return 0;
         }
-        lanes = wrapping_add(wrapping_mul(lanes, 10), widen_u64(wrapping_sub(b, 48)));
+        lanes = wrapping_add(wrapping_mul(lanes, 10), widen_u64(wrapping_sub(digit, 48)));
         if lanes > 65535 {
             return 0;
         }
     }
-    let e = t.node(elem);
-    if e.kind != TyKind::Named || e.n != 0 {
+    let elem_node = types.node(elem);
+    if elem_node.kind != TyKind::Named || elem_node.n != 0 {
         return 0;
     }
-    let bits = wrapping_mul(w(k.elem_bits(e.name)), lanes);
+    let bits = wrapping_mul(w(known.elem_bits(elem_node.name)), lanes);
     if bits == 128 || bits == 256 || bits == 512 {
         n32(bits / 64)
     } else {
@@ -541,14 +551,14 @@ pub fn vector_words(in t: Types, in names: Names, k: Known, ty: u32) -> u32 {
 // a qualified `T::V` must name that ADT. `qual` is the qualifier symbol or
 // NONE32. Returns (adt, variant index) packed as adt * 2^32 + variant, or
 // NONE (all ones).
-pub fn constructor(in wd: World, qual: u32, short: u32) -> u64 {
-    for i in 0..wd.adts.len() {
-        let a = wd.adt(n32(i));
-        if qual == NONE32 || qual == a.name {
-            for j in 0..w(a.vn) {
-                let v = wd.variant(add(w(a.va), j));
-                if v.name == short {
-                    return wrapping_add(wrapping_mul(i, 4294967296), add(w(a.va), j));
+pub fn constructor(in world: World, qual: u32, short: u32) -> u64 {
+    for i in 0..world.adts.len() {
+        let adt = world.adt(n32(i));
+        if qual == NONE32 || qual == adt.name {
+            for j in 0..w(adt.vn) {
+                let variant = world.variant(add(w(adt.va), j));
+                if variant.name == short {
+                    return wrapping_add(wrapping_mul(i, 4294967296), add(w(adt.va), j));
                 }
             }
         }
@@ -567,24 +577,24 @@ pub fn bounds_new() -> Bounds {
 }
 
 impl Bounds {
-    pub fn get(in self, k: u32) -> u8 {
+    pub fn get(in self, key: u32) -> u8 {
         for i in 0..self.keys.len() {
-            if u32_at(in self.keys, i) == k {
+            if u32_at(in self.keys, i) == key {
                 return u8_at(in self.modes, i);
             }
         }
         255
     }
 
-    pub fn set(inout self, k: u32, m: u8) {
+    pub fn set(inout self, key: u32, mode: u8) {
         for i in 0..self.keys.len() {
-            if u32_at(in self.keys, i) == k {
-                let ok = self.modes.try_set(i, m);
+            if u32_at(in self.keys, i) == key {
+                let ok = self.modes.try_set(i, mode);
                 return;
             }
         }
-        self.keys.push(k);
-        self.modes.push(m);
+        self.keys.push(key);
+        self.modes.push(mode);
     }
 }
 
@@ -593,247 +603,253 @@ fn join(a: u8, b: u8) -> u8 {
 }
 
 // `World::mode`.
-pub fn mode_of(inout t: Types, in names: Names, in wd: World, ty: u32, in bounds: Bounds) -> u8 {
+pub fn mode_of(
+    inout types: Types,
+    in names: Names,
+    in world: World,
+    ty: u32,
+    in bounds: Bounds
+) -> u8 {
     let mut seen_names: ChunkSeq[u32] = ChunkSeq::new[u32]();
     let mut seen_modes: ChunkSeq[u64] = ChunkSeq::new[u64]();
-    mode_visit(inout t, in names, in wd, ty, in bounds, inout seen_names, inout seen_modes)
+    mode_visit(inout types, in names, in world, ty, in bounds, inout seen_names, inout seen_modes)
 }
 
 fn mode_visit(
-    inout t: Types,
+    inout types: Types,
     in names: Names,
-    in wd: World,
+    in world: World,
     ty: u32,
     in bounds: Bounds,
     inout seen_names: ChunkSeq[u32],
     inout seen_modes: ChunkSeq[u64]
 ) -> u8 {
-    let n = t.node(ty);
-    let k = wd.k;
-    if n.kind == TyKind::Infer || n.kind == TyKind::Lit || n.kind == TyKind::Row {
+    let node = types.node(ty);
+    let known = world.k;
+    if node.kind == TyKind::Infer || node.kind == TyKind::Lit || node.kind == TyKind::Row {
         return TyMode::Copy;
     }
-    if n.kind == TyKind::Tuple {
-        let mut m = TyMode::Copy;
-        for i in 0..w(n.n) {
-            let x = mode_visit(
-                inout t,
+    if node.kind == TyKind::Tuple {
+        let mut mode = TyMode::Copy;
+        for i in 0..w(node.n) {
+            let part_mode = mode_visit(
+                inout types,
                 in names,
-                in wd,
-                u32_at(in t.items, add(w(n.a), i)),
+                in world,
+                u32_at(in types.items, add(w(node.a), i)),
                 in bounds,
                 inout seen_names,
                 inout seen_modes
             );
-            m = join(m, x);
+            mode = join(mode, part_mode);
         }
-        return m;
+        return mode;
     }
-    if n.kind == TyKind::Fn {
-        return n.mode;
+    if node.kind == TyKind::Fn {
+        return node.mode;
     }
-    let b = bounds.get(n.name);
-    if b != 255 {
-        return b;
+    let bound_mode = bounds.get(node.name);
+    if bound_mode != 255 {
+        return bound_mode;
     }
-    if vector_words(in t, in names, k, ty) != 0 {
+    if vector_words(in types, in names, known, ty) != 0 {
         return TyMode::Copy;
     }
-    if k.is_scalar(n.name) {
+    if known.is_scalar(node.name) {
         return TyMode::Copy;
     }
-    if n.name == k.string || n.name == k.str_ || n.name == k.dyn_ {
+    if node.name == known.string || node.name == known.str_ || node.name == known.dyn_ {
         return TyMode::Affine;
     }
-    if n.name == k.region_box {
-        if n.n < 2 {
+    if node.name == known.region_box {
+        if node.n < 2 {
             return TyMode::Linear;
         }
         return mode_visit(
-            inout t,
+            inout types,
             in names,
-            in wd,
-            t.arg(ty, 1),
+            in world,
+            types.arg(ty, 1),
             in bounds,
             inout seen_names,
             inout seen_modes
         );
     }
-    if n.name == k.chunk_seq || n.name == k.slice || n.name == k.tiled_seq {
-        if n.n == 0 {
+    if node.name == known.chunk_seq || node.name == known.slice || node.name == known.tiled_seq {
+        if node.n == 0 {
             return TyMode::Affine;
         }
-        let x = mode_visit(
-            inout t,
+        let part_mode = mode_visit(
+            inout types,
             in names,
-            in wd,
-            t.arg(ty, 0),
+            in world,
+            types.arg(ty, 0),
             in bounds,
             inout seen_names,
             inout seen_modes
         );
-        return join(x, TyMode::Affine);
+        return join(part_mode, TyMode::Affine);
     }
-    let ai = wd.lookup(n.name);
-    if ai == NO_ADT {
+    let adt_index = world.lookup(node.name);
+    if adt_index == NO_ADT {
         return TyMode::Linear;
     }
-    let a = wd.adt(ai);
+    let adt = world.adt(adt_index);
     let mut arg_modes: ChunkSeq[u8] = ChunkSeq::new[u8]();
     // The `seen` key `"{n}:{argument_modes:?}"`: the name and the modes.
-    let mut key: u64 = fold(14695981039346656037, w(n.n));
-    for i in 0..w(n.n) {
-        let x = mode_visit(
-            inout t,
+    let mut key: u64 = fold(14695981039346656037, w(node.n));
+    for i in 0..w(node.n) {
+        let part_mode = mode_visit(
+            inout types,
             in names,
-            in wd,
-            u32_at(in t.items, add(w(n.a), i)),
+            in world,
+            u32_at(in types.items, add(w(node.a), i)),
             in bounds,
             inout seen_names,
             inout seen_modes
         );
-        arg_modes.push(x);
-        key = fold(key, widen_u64(x));
+        arg_modes.push(part_mode);
+        key = fold(key, widen_u64(part_mode));
     }
     for i in 0..seen_names.len() {
-        if u32_at(in seen_names, i) == n.name && u64_at(in seen_modes, i) == key {
-            return a.mode;
+        if u32_at(in seen_names, i) == node.name && u64_at(in seen_modes, i) == key {
+            return adt.mode;
         }
     }
-    seen_names.push(n.name);
+    seen_names.push(node.name);
     seen_modes.push(key);
     let mut component = bounds_new();
-    for i in 0..w(a.gn) {
+    for i in 0..w(adt.gn) {
         if i >= arg_modes.len() {
             break;
         }
-        component.set(wd.generic(add(w(a.ga), i)).name, u8_at(in arg_modes, i));
+        component.set(world.generic(add(w(adt.ga), i)).name, u8_at(in arg_modes, i));
     }
-    let mut m = a.mode;
-    for vi in 0..w(a.vn) {
-        let v = wd.variant(add(w(a.va), vi));
-        for fi in 0..w(v.fc) {
-            let f = wd.field(add(w(v.fa), fi));
+    let mut mode = adt.mode;
+    for vi in 0..w(adt.vn) {
+        let variant = world.variant(add(w(adt.va), vi));
+        for fi in 0..w(variant.fc) {
+            let field = world.field(add(w(variant.fa), fi));
             let intrinsic = mode_visit(
-                inout t,
+                inout types,
                 in names,
-                in wd,
-                f.ty,
+                in world,
+                field.ty,
                 in component,
                 inout seen_names,
                 inout seen_modes
             );
-            if f.modality == 0 {
-                m = join(m, intrinsic);
+            if field.modality == 0 {
+                mode = join(mode, intrinsic);
             } else {
-                m = join(m, wrapping_sub(f.modality, 1));
+                mode = join(mode, wrapping_sub(field.modality, 1));
             }
         }
     }
     let last = wrapping_sub(seen_names.len(), 1);
     seen_names.truncate(last);
     seen_modes.truncate(last);
-    m
+    mode
 }
 
 // `World::field(ty, path)` for one path step `name` (a field name, a tuple
-// index, or a `[..]` segment, which `seg` marks). Returns NONE32 for None.
+// index, or a `[..]` segment, which `is_segment` marks). Returns NONE32 for None.
 pub fn field_step(
-    inout t: Types,
+    inout types: Types,
     inout names: Names,
-    in wd: World,
+    in world: World,
     ty: u32,
     name: u32,
-    seg: bool
+    is_segment: bool
 ) -> u32 {
-    let n = t.node(ty);
-    let k = wd.k;
-    if n.kind == TyKind::Named {
-        if seg && (n.name == k.chunk_seq || n.name == k.slice) {
-            if n.n == 0 {
+    let node = types.node(ty);
+    let known = world.k;
+    if node.kind == TyKind::Named {
+        if is_segment && (node.name == known.chunk_seq || node.name == known.slice) {
+            if node.n == 0 {
                 return NONE32;
             }
             let mut args: ChunkSeq[u32] = ChunkSeq::new[u32]();
-            args.push(t.arg(ty, 0));
-            return t.named(k.slice, in args);
+            args.push(types.arg(ty, 0));
+            return types.named(known.slice, in args);
         }
-        if seg && n.n == 0 && (n.name == k.string || n.name == k.str_) {
-            return t.named0(k.str_);
+        if is_segment && node.n == 0 && (node.name == known.string || node.name == known.str_) {
+            return types.named0(known.str_);
         }
-        if n.name == k.tiled_seq {
-            if n.n == 0 {
+        if node.name == known.tiled_seq {
+            if node.n == 0 {
                 return NONE32;
             }
-            let elem = t.arg(ty, 0);
-            let e = t.node(elem);
-            if e.kind != TyKind::Named {
+            let elem = types.arg(ty, 0);
+            let elem_node = types.node(elem);
+            if elem_node.kind != TyKind::Named {
                 return NONE32;
             }
-            let ai = wd.lookup(e.name);
-            if ai == NO_ADT {
+            let adt_index = world.lookup(elem_node.name);
+            if adt_index == NO_ADT {
                 return NONE32;
             }
-            let a = wd.adt(ai);
-            if a.is_enum || a.tile == 0 || a.vn == 0 {
+            let adt = world.adt(adt_index);
+            if adt.is_enum || adt.tile == 0 || adt.vn == 0 {
                 return NONE32;
             }
-            let fi = wd.find_field(wd.variant(w(a.va)), name);
-            if fi == NONE32 {
+            let field_index = world.find_field(world.variant(w(adt.va)), name);
+            if field_index == NONE32 {
                 return NONE32;
             }
-            let vars = wd.vars_of(in t, a, elem);
-            return substitute(inout t, wd.field(w(fi)).ty, in vars);
+            let vars = world.vars_of(in types, adt, elem);
+            return substitute(inout types, world.field(w(field_index)).ty, in vars);
         }
-        let ai = wd.lookup(n.name);
-        if ai == NO_ADT {
+        let adt_index = world.lookup(node.name);
+        if adt_index == NO_ADT {
             return NONE32;
         }
-        let a = wd.adt(ai);
-        if a.is_enum || a.vn == 0 {
+        let adt = world.adt(adt_index);
+        if adt.is_enum || adt.vn == 0 {
             return NONE32;
         }
-        let fi = wd.find_field(wd.variant(w(a.va)), name);
-        if fi == NONE32 {
+        let field_index = world.find_field(world.variant(w(adt.va)), name);
+        if field_index == NONE32 {
             return NONE32;
         }
-        let vars = wd.vars_of(in t, a, ty);
-        return substitute(inout t, wd.field(w(fi)).ty, in vars);
+        let vars = world.vars_of(in types, adt, ty);
+        return substitute(inout types, world.field(w(field_index)).ty, in vars);
     }
-    if n.kind == TyKind::Tuple {
+    if node.kind == TyKind::Tuple {
         // `name.parse::<usize>()`: decimal digits only.
         let size = names.size(name);
         if size == 0 {
             return NONE32;
         }
-        let mut idx: u64 = 0;
+        let mut index: u64 = 0;
         for i in 0..size {
-            let b = names.byte(name, i);
-            if b < 48 || b > 57 {
+            let digit = names.byte(name, i);
+            if digit < 48 || digit > 57 {
                 return NONE32;
             }
-            idx = wrapping_add(wrapping_mul(idx, 10), widen_u64(wrapping_sub(b, 48)));
+            index = wrapping_add(wrapping_mul(index, 10), widen_u64(wrapping_sub(digit, 48)));
         }
-        if idx >= w(n.n) {
+        if index >= w(node.n) {
             return NONE32;
         }
-        return t.arg(ty, idx);
+        return types.arg(ty, index);
     }
     NONE32
 }
 
-// Whether a call with effect row `r` is effectful: an open row, or an
+// Whether a call with effect row `row_id` is effectful: an open row, or an
 // instance of an effect declared non-linear (what the census harness
 // precomputed in Rust: `row.tail.is_some() || row.instances.iter()
 // .any(|e| world.effects.get(&e.name).is_some_and(|d| !d.linear))`).
-pub fn effectful_row(in t: Types, in wd: World, r: u32) -> bool {
-    let row = t.row(r);
+pub fn effectful_row(in types: Types, in world: World, row_id: u32) -> bool {
+    let row = types.row(row_id);
     if row.tail != 0 {
         return true;
     }
     for i in 0..w(row.n) {
-        let e = t.effect_at(add(w(row.a), i));
-        let d = wd.effect_index(e.name);
-        if d != NONE32 && !wd.effect_row(d).linear {
+        let eff = types.effect_at(add(w(row.a), i));
+        let decl = world.effect_index(eff.name);
+        if decl != NONE32 && !world.effect_row(decl).linear {
             return true;
         }
     }

@@ -1,0 +1,587 @@
+// The body plan of the native walk's whole-function hook (#2094, part 6a
+// of #1509): for each scalar function, every Cranelift builder call
+// `Codegen::ir_graph_at` (src/native.rs) makes for its body, in order, so
+// that @vesper/codegen-scalar-emit's `body_hook` can emit the whole body
+// on the lent builder.
+//
+// Part 6a covers functions whose values and locals are integers of one
+// word, `bool`, `f32` and `f64` (and `Unit` or `Never` values), whose
+// instructions are constants, plain local reads, binds and `=` writes,
+// and the operators this package plans (`plan_function`), and whose
+// blocks end in `return`, `jump`, `branch` or `unreachable`. Any other
+// function is left out of the plan, and the Rust walk emits it.
+//
+// The Rust side asks only for a function whose frame is plain (no trace,
+// Fail record, caller slot or result buffer, no `inout` or function
+// parameters, the optimize path, not `@fip`), so
+// such a function's locals are all kept in registers
+// (`native::register_locals`: with no calls, every scalar local is) and
+// nothing but the walk itself emits code.
+
+use @vesper/check-data::util::{add, inc, n32, u64_at};
+use @vesper/check-data::types::{TyKind, default_type};
+use @vesper/place-ir::{FnRow, InstRow};
+use @vesper/place-ir::codes::{Op, Pat, Term};
+use super::{Gen};
+use super::blocks::{layout};
+
+// The plan's lane codes (`native::scalar` of a value's type).
+pub const LANE_I64: u64 = 1;
+pub const LANE_F32: u64 = 2;
+pub const LANE_F64: u64 = 3;
+
+// A local's entry: a lane code for a local the body declares, or
+// `LOCAL_PARAM` plus the parameter's index for one of the parameters.
+pub const LOCAL_PARAM: u64 = 16;
+
+// The instruction kinds of the plan.
+pub const INST_PLANNED: u64 = 1;
+pub const INST_READ: u64 = 2;
+pub const INST_BIND: u64 = 3;
+pub const INST_WRITE: u64 = 4;
+
+// A `Bind` of the wildcard pattern binds no local.
+pub const NO_LOCAL: u64 = 18446744073709551615;
+
+const NONE32: u32 = 4294967295;
+const NONE64: u64 = 18446744073709551615;
+
+// The terminator codes (`Term`) the plan writes.
+const TERM_RETURN: u64 = 0;
+const TERM_JUMP: u64 = 1;
+const TERM_BRANCH: u64 = 2;
+const TERM_UNREACHABLE: u64 = 4;
+
+// `IntegerKind::wide`: `i128` (11) and `u128` (12).
+fn kind_wide(k: u32) -> bool {
+    k == 11 || k == 12
+}
+
+// The kinds below 64 bits that `coerce` reduces: u8, u16, u32, i8, i16,
+// i32.
+fn kind_narrow(k: u32) -> bool {
+    (k >= 1 && k <= 3) || (k >= 6 && k <= 8)
+}
+
+fn grow(inout s: ChunkSeq[u64], n: u64) {
+    loop {
+        if s.len() >= n {
+            break;
+        }
+        s.push(0);
+    }
+}
+
+fn set(inout s: ChunkSeq[u64], i: u64, x: u64) {
+    grow(inout s, inc(i));
+    let ok = s.try_set(i, x);
+}
+
+fn at(in s: ChunkSeq[u64], i: u64) -> u64 {
+    if i < s.len() { u64_at(in s, i) } else { 0 }
+}
+
+// One function's header, as the body plan reads it.
+struct Header {
+    // parameter names, in order
+    params: ChunkSeq[u64],
+    result: u32,
+    // value id -> its index + 1 (0: not a value of the graph)
+    index: ChunkSeq[u64],
+    // value index -> its type
+    vty: ChunkSeq[u64],
+    // local index -> its name and type
+    lname: ChunkSeq[u64],
+    lty: ChunkSeq[u64],
+    // parameter types, in order
+    pty: ChunkSeq[u64],
+    // the header names no bounds, captures or effects
+    plain: bool,
+}
+
+impl Gen {
+    // The lane code of a value of type `t`, or 0 for a type part 6a does
+    // not emit.
+    fn body_lane(inout self, t: u32) -> u64 {
+        if t == NONE32 {
+            return 0;
+        }
+        let d = default_type(inout self.ctx.types, t);
+        let n = self.ctx.types.node(d);
+        if n.kind == TyKind::Lit {
+            return LANE_I64;
+        }
+        if n.kind == TyKind::Tuple && n.n == 0 {
+            return LANE_I64;
+        }
+        if n.kind != TyKind::Named || n.n != 0 {
+            return 0;
+        }
+        let k = self.ctx.world.k;
+        if n.name == k.f32_ {
+            LANE_F32
+        } else if n.name == k.f64_ {
+            LANE_F64
+        } else if n.name == k.bool_ || n.name == k.unit || n.name == k.never {
+            LANE_I64
+        } else if k.is_integer(n.name) && !kind_wide(self.kind_of(d)) {
+            LANE_I64
+        } else {
+            0
+        }
+    }
+
+    // `Gen::is_register_scalar` of @vesper/native-walk: an integer, float
+    // or `bool` local stays a frontend variable.
+    fn body_register(inout self, t: u32) -> bool {
+        let d = default_type(inout self.ctx.types, t);
+        let n = self.ctx.types.node(d);
+        if n.kind != TyKind::Named || n.n != 0 {
+            return false;
+        }
+        let k = self.ctx.world.k;
+        k.is_integer(n.name) || n.name == k.f32_ || n.name == k.f64_ || n.name == k.bool_
+    }
+
+    // The narrow kind `Codegen::coerce` reduces a value of type `t` to (0:
+    // none), or NONE64 for a two-word kind, which it widens instead.
+    fn body_kind(in self, t: u32) -> u64 {
+        if t == NONE32 {
+            return 0;
+        }
+        let k = self.kind_of(t);
+        if kind_wide(k) {
+            NONE64
+        } else if kind_narrow(k) {
+            widen_u64(k)
+        } else {
+            0
+        }
+    }
+
+    fn body_never(in self, t: u32) -> bool {
+        t != NONE32 && self.ctx.types.name(t) == self.ctx.world.k.never
+    }
+
+    // The header words of `f` (place-ir `header`).
+    fn body_header(inout self, f: FnRow) -> Header {
+        let mut h = Header {
+            params: ChunkSeq::new[u64](),
+            result: NONE32,
+            index: ChunkSeq::new[u64](),
+            vty: ChunkSeq::new[u64](),
+            lname: ChunkSeq::new[u64](),
+            lty: ChunkSeq::new[u64](),
+            pty: ChunkSeq::new[u64](),
+            plain: true
+        };
+        let mut i = f.ha;
+        let np = self.program.op(i);
+        i = inc(i);
+        for k in 0..np {
+            h.params.push(self.program.op(i));
+            let nproj = self.program.op(add(i, 2));
+            i = add(add(i, 3), nproj);
+            h.pty.push(self.program.op(i));
+            // type, span start, span end
+            i = add(i, 3);
+        }
+        h.result = n32(self.program.op(i));
+        let effects = n32(self.program.op(inc(i)));
+        let row = self.ctx.types.row(self.ctx.types.node(effects).r2);
+        if row.n != 0 || row.tail != 0 {
+            h.plain = false;
+        }
+        i = add(i, 2);
+        let nb = self.program.op(i);
+        i = add(inc(i), wrapping_mul(nb, 2));
+        let nc = self.program.op(i);
+        i = add(inc(i), nc);
+        if nb != 0 || nc != 0 {
+            h.plain = false;
+        }
+        let nv = self.program.op(i);
+        i = inc(i);
+        for k in 0..nv {
+            set(inout h.index, self.program.op(i), inc(k));
+            h.vty.push(self.program.op(inc(i)));
+            i = add(i, 2);
+        }
+        let nl = self.program.op(i);
+        i = inc(i);
+        for k in 0..nl {
+            h.lname.push(self.program.op(i));
+            h.lty.push(self.program.op(inc(i)));
+            i = add(i, 2);
+        }
+        h
+    }
+
+    // The index of value `v`, or NONE64.
+    fn body_value(in self, in h: Header, v: u64) -> u64 {
+        let x = at(in h.index, v);
+        if x == 0 { NONE64 } else { wrapping_sub(x, 1) }
+    }
+
+    // The index of local `name`, or NONE64.
+    fn body_local(in self, in h: Header, name: u64) -> u64 {
+        for k in 0..h.lname.len() {
+            if u64_at(in h.lname, k) == name {
+                return k;
+            }
+        }
+        NONE64
+    }
+
+    // The type a read of local `k` is coerced to: a parameter's declared
+    // type, a declared local's type (`Codegen::local_types`).
+    fn body_local_type(in self, in h: Header, k: u64) -> u32 {
+        let name = u64_at(in h.lname, k);
+        for j in 0..h.params.len() {
+            if u64_at(in h.params, j) == name {
+                return n32(u64_at(in h.pty, j));
+            }
+        }
+        n32(u64_at(in h.lty, k))
+    }
+
+    // The value index of an operand word at `i`, pushed to `ops`; false
+    // when the graph does not type it.
+    fn body_operand(in self, in h: Header, i: u64, inout ops: ChunkSeq[u64]) -> bool {
+        let v = self.body_value(in h, self.program.op(i));
+        ops.push(v);
+        v != NONE64
+    }
+
+    // One instruction's plan words, or false to leave the function to the
+    // Rust walk. `planned` is the plan's record of it (NONE64: none).
+    fn body_inst(
+        inout self,
+        in h: Header,
+        i: InstRow,
+        planned: u64,
+        inout o: ChunkSeq[u64]
+    ) -> bool {
+        let dest = self.body_value(in h, widen_u64(i.dest));
+        if dest == NONE64 {
+            return false;
+        }
+        let ty = default_type(inout self.ctx.types, i.ty);
+        let post = self.body_kind(ty);
+        if post == NONE64 || self.body_lane(i.ty) == 0 {
+            return false;
+        }
+        // `ir_inline::operands`, which the walk reads before the arm.
+        let mut ops: ChunkSeq[u64] = ChunkSeq::new[u64]();
+        let mut kind = INST_PLANNED;
+        let mut extra: ChunkSeq[u64] = ChunkSeq::new[u64]();
+        if i.op == Op::Const || i.op == Op::Unit || i.op == Op::Loop {
+            if planned == NONE64 {
+                return false;
+            }
+        } else if i.op == Op::Unary || i.op == Op::Binary {
+            if planned == NONE64 {
+                return false;
+            }
+            if !self.body_operand(in h, inc(i.a), inout ops) {
+                return false;
+            }
+            if i.op == Op::Binary && !self.body_operand(in h, add(i.a, 2), inout ops) {
+                return false;
+            }
+            // `scalar_hook` emits on one-word integer lanes only.
+            for k in 0..ops.len() {
+                let t = n32(u64_at(in h.vty, u64_at(in ops, k)));
+                if self.body_lane(t) != LANE_I64 {
+                    return false;
+                }
+            }
+        } else if i.op == Op::Read {
+            kind = INST_READ;
+            let root = self.program.op(i.a);
+            let path = self.program.path(self.program.op(inc(i.a)));
+            let nproj = self.program.op(add(i.a, 3));
+            let k = self.body_local(in h, root);
+            if k == NONE64 || path.n != 0 || nproj != 0 {
+                return false;
+            }
+            let read = self.body_kind(self.body_local_type(in h, k));
+            if read == NONE64 {
+                return false;
+            }
+            extra.push(k);
+            extra.push(read);
+        } else if i.op == Op::Bind {
+            kind = INST_BIND;
+            if !self.body_operand(in h, i.a, inout ops) {
+                return false;
+            }
+            // pattern: kind, span start, span end, then a Bind's name
+            let pat = self.program.op(inc(i.a));
+            if pat == Pat::Wild {
+                extra.push(NO_LOCAL);
+            } else if pat == Pat::Bind {
+                let k = self.body_local(in h, self.program.op(add(i.a, 4)));
+                if k == NONE64 {
+                    return false;
+                }
+                extra.push(k);
+            } else {
+                return false;
+            }
+        } else if i.op == Op::Write {
+            kind = INST_WRITE;
+            let place = self.program.op(i.a);
+            let assign = n32(self.program.op(inc(i.a)));
+            let k = self.body_local(in h, place);
+            if k == NONE64 || assign != self.ops.assign {
+                return false;
+            }
+            if !self.body_operand(in h, add(i.a, 2), inout ops) {
+                return false;
+            }
+            // `ir_temp`'s read back coerces to the value's own type, and
+            // the assignment's `zero` to the statement's.
+            let temp = self.body_kind(n32(u64_at(in h.vty, u64_at(in ops, 0))));
+            let statement = self.ctx.world.expr_type(i.s0, i.s1);
+            let stated = if statement == NONE32 {
+                0
+            } else {
+                let d = default_type(inout self.ctx.types, statement);
+                self.body_kind(d)
+            };
+            if temp == NONE64 || stated == NONE64 {
+                return false;
+            }
+            extra.push(k);
+            extra.push(temp);
+            extra.push(stated);
+        } else {
+            return false;
+        }
+        o.push(kind);
+        o.push(dest);
+        o.push(post);
+        // `set_location`'s offset (`native::source_loc`), or NONE64 for an
+        // instruction with no span.
+        o.push(
+            if i.s1 == 0 {
+                NONE64
+            } else if i.s0 > 4294967294 {
+                4294967294
+            } else {
+                i.s0
+            }
+        );
+        o.push(ops.len());
+        for k in 0..ops.len() {
+            o.push(u64_at(in ops, k));
+        }
+        if kind == INST_PLANNED {
+            for k in 3..6 {
+                o.push(u64_at(in self.plan, add(planned, k)));
+            }
+        }
+        for k in 0..extra.len() {
+            o.push(u64_at(in extra, k));
+        }
+        true
+    }
+
+    // The default a `Never` value of type `t` stands for (`default_value`
+    // of the type it flows to): 0 when the value is not `Never`.
+    fn body_default(inout self, value_type: u32, target: u32) -> u64 {
+        if self.body_never(value_type) {
+            self.body_lane(target)
+        } else {
+            0
+        }
+    }
+
+    // A block's terminator, or false to leave the function to Rust.
+    fn body_terminator(
+        inout self,
+        in h: Header,
+        f: FnRow,
+        bi: u64,
+        inout o: ChunkSeq[u64]
+    ) -> bool {
+        let row = self.program.block(add(f.b0, bi));
+        let ta = row.ta;
+        if row.term == Term::Return {
+            let v = self.body_value(in h, self.program.op(ta));
+            if v == NONE64 {
+                return false;
+            }
+            let d = self.body_default(n32(u64_at(in h.vty, v)), h.result);
+            o.push(TERM_RETURN);
+            o.push(v);
+            o.push(d);
+            return true;
+        }
+        if row.term == Term::Jump {
+            let target = self.program.op(ta);
+            let n = self.program.op(inc(ta));
+            let trow = self.program.block(add(f.b0, target));
+            o.push(TERM_JUMP);
+            o.push(target);
+            o.push(n);
+            for k in 0..n {
+                let v = self.body_value(in h, self.program.op(add(add(ta, 2), k)));
+                let param = self.body_block_param(in h, trow.ha, k);
+                if v == NONE64 || param == NONE64 {
+                    return false;
+                }
+                o.push(v);
+                o.push(self.body_default(n32(u64_at(in h.vty, v)), n32(u64_at(in h.vty, param))));
+            }
+            return true;
+        }
+        if row.term == Term::Branch {
+            let c = self.body_value(in h, self.program.op(ta));
+            if c == NONE64 {
+                return false;
+            }
+            o.push(TERM_BRANCH);
+            o.push(c);
+            o.push(self.program.op(inc(ta)));
+            o.push(self.program.op(add(ta, 2)));
+            return true;
+        }
+        if row.term == Term::Unreachable {
+            o.push(TERM_UNREACHABLE);
+            return true;
+        }
+        false
+    }
+
+    // The start of a block's parameter words (place-ir `read_block`:
+    // entry, the token pairs, out, then the parameter values).
+    fn body_params_at(in self, ha: u64) -> u64 {
+        let ni = self.program.op(inc(ha));
+        add(add(ha, 3), wrapping_mul(ni, 2))
+    }
+
+    // The value index of a block's parameter `k`, or NONE64.
+    fn body_block_param(in self, in h: Header, ha: u64, k: u64) -> u64 {
+        let pa = self.body_params_at(ha);
+        if k >= self.program.op(pa) {
+            return NONE64;
+        }
+        self.body_value(in h, self.program.op(add(inc(pa), k)))
+    }
+
+    // Whether `f`'s fip side tables (its trailer) are all empty.
+    fn body_no_trailer(in self, f: FnRow) -> bool {
+        for i in f.ta..add(f.ta, f.tn) {
+            if self.program.op(i) != 0 {
+                return false;
+            }
+        }
+        true
+    }
+
+    // The body plan of function `fi`, whose instruction plan records start
+    // at `from` in `self.plan`, appended to `out` as `[fi, n, n words]`.
+    pub fn body(inout self, fi: u64, from: u64, inout out: ChunkSeq[u64]) {
+        let f = self.program.function(fi);
+        let h = self.body_header(f);
+        if !h.plain || f.bc == 0 || !self.body_no_trailer(f) || self.body_lane(h.result) == 0 {
+            return;
+        }
+        let mut o: ChunkSeq[u64] = ChunkSeq::new[u64]();
+        o.push(f.bc);
+        o.push(h.params.len());
+        // `ir_graph_at`'s locals, in name order: a parameter has its
+        // variable; every other local gets a zeroed one.
+        o.push(h.lname.len());
+        for k in 0..h.lname.len() {
+            let t = n32(u64_at(in h.lty, k));
+            if !self.body_register(t) {
+                return;
+            }
+            let name = u64_at(in h.lname, k);
+            let mut entry = self.body_lane(t);
+            for j in 0..h.params.len() {
+                if u64_at(in h.params, j) == name {
+                    entry = add(LOCAL_PARAM, j);
+                }
+            }
+            if entry == 0 {
+                return;
+            }
+            o.push(entry);
+        }
+        // Each value's register.
+        o.push(h.vty.len());
+        for k in 0..h.vty.len() {
+            let lane = self.body_lane(n32(u64_at(in h.vty, k)));
+            if lane == 0 {
+                return;
+            }
+            o.push(lane);
+        }
+        // Each block's parameters.
+        for bi in 0..f.bc {
+            let row = self.program.block(add(f.b0, bi));
+            let pa = self.body_params_at(row.ha);
+            let np = self.program.op(pa);
+            o.push(np);
+            for k in 0..np {
+                let v = self.body_value(in h, self.program.op(add(inc(pa), k)));
+                if v == NONE64 {
+                    return;
+                }
+                o.push(v);
+            }
+        }
+        // The lowering order and the blocks sealed on the way.
+        let l = layout(in self.program, f);
+        let mut sealed: ChunkSeq[u64] = ChunkSeq::new[u64]();
+        for k in 0..l.sealed.len() {
+            set(inout sealed, u64_at(in l.sealed, k), 1);
+        }
+        for k in 0..l.order.len() {
+            let b = u64_at(in l.order, k);
+            o.push(b);
+            o.push(at(in sealed, b));
+        }
+        // The plan's record of each instruction, by its index in `f`.
+        let first = self.program.block(f.b0).i0;
+        let mut record: ChunkSeq[u64] = ChunkSeq::new[u64]();
+        let mut r = from;
+        loop {
+            if r >= self.plan.len() {
+                break;
+            }
+            let bi = u64_at(in self.plan, inc(r));
+            let ii = u64_at(in self.plan, add(r, 2));
+            let row = self.program.block(add(f.b0, bi));
+            set(inout record, wrapping_sub(add(row.i0, ii), first), inc(r));
+            r = add(r, 6);
+        }
+        for k in 0..l.order.len() {
+            let bi = u64_at(in l.order, k);
+            let row = self.program.block(add(f.b0, bi));
+            o.push(row.ic);
+            for ii in 0..row.ic {
+                let x = add(row.i0, ii);
+                let rec = at(in record, wrapping_sub(x, first));
+                let planned = if rec == 0 {
+                    NONE64
+                } else {
+                    wrapping_sub(rec, 1)
+                };
+                if !self.body_inst(in h, self.program.inst(x), planned, inout o) {
+                    return;
+                }
+            }
+            if !self.body_terminator(in h, f, bi, inout o) {
+                return;
+            }
+        }
+        out.push(fi);
+        out.push(o.len());
+        out.extend(in o.as_slice());
+    }
+}

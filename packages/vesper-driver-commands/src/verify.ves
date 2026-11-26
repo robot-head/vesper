@@ -20,12 +20,12 @@ fn has_flag_before_sep(in args: Args, n: u64, in flag: Str) -> bool {
         if i >= n {
             return false;
         }
-        let a_buf = arg(in args, i);
-        let a = a_buf.as_slice();
-        if eq(in a, in "--") {
+        let arg_buf = arg(in args, i);
+        let arg_text = arg_buf.as_slice();
+        if eq(in arg_text, in "--") {
             return false;
         }
-        if eq(in a, in flag) {
+        if eq(in arg_text, in flag) {
             return true;
         }
         i = wrapping_add(i, 1);
@@ -39,12 +39,12 @@ fn has_help_before_sep(in args: Args, n: u64) -> bool {
         if i >= n {
             return false;
         }
-        let a_buf = arg(in args, i);
-        let a = a_buf.as_slice();
-        if eq(in a, in "--") {
+        let arg_buf = arg(in args, i);
+        let arg_text = arg_buf.as_slice();
+        if eq(in arg_text, in "--") {
             return false;
         }
-        if eq(in a, in "--help") || eq(in a, in "-h") {
+        if eq(in arg_text, in "--help") || eq(in arg_text, in "-h") {
             return true;
         }
         i = wrapping_add(i, 1);
@@ -74,23 +74,23 @@ fn parse_timeout_1_to_300(in text: Slice[u8]) -> bool {
     if text.len() == 0 {
         return false;
     }
-    let mut val: u64 = 0;
+    let mut seconds: u64 = 0;
     for i in 0..text.len() {
-        let b = byte_at(in text, i);
-        if b < 48 || b > 57 {
+        let byte = byte_at(in text, i);
+        if byte < 48 || byte > 57 {
             return false;
         }
-        if val > 300 {
+        if seconds > 300 {
             return false;
         }
-        val = wrapping_add(wrapping_mul(val, 10), widen_u64(wrapping_sub(b, 48)));
+        seconds = wrapping_add(wrapping_mul(seconds, 10), widen_u64(wrapping_sub(byte, 48)));
     }
-    val >= 1 && val <= 300
+    seconds >= 1 && seconds <= 300
 }
 
-fn contains_dot(in s: Slice[u8]) -> bool {
-    for i in 0..s.len() {
-        if byte_at(in s, i) == 46 {
+fn contains_dot(in text: Slice[u8]) -> bool {
+    for i in 0..text.len() {
+        if byte_at(in text, i) == 46 {
             return true;
         }
     }
@@ -108,8 +108,8 @@ fn pack_args(in args: Args, n: u64) -> ChunkSeq[u8] {
         if i >= n {
             break;
         }
-        let a_buf = arg(in args, i);
-        packed.extend(in a_buf.as_slice());
+        let arg_buf = arg(in args, i);
+        packed.extend(in arg_buf.as_slice());
         packed.push(0);
         i = wrapping_add(i, 1);
     }
@@ -148,8 +148,8 @@ pub fn run_verify(in args: Args) -> i64 eff [Ffi[StdFs], Ffi[HybridCommands], Fa
     let arg_count = wrapping_sub(n, 1);
     let mut total_bytes: u64 = 0;
     for k in 1..n {
-        let a_buf = arg(in args, k);
-        total_bytes = wrapping_add(total_bytes, a_buf.as_slice().len());
+        let arg_buf = arg(in args, k);
+        total_bytes = wrapping_add(total_bytes, arg_buf.as_slice().len());
     }
     if arg_count > 300 || total_bytes > 32768 {
         return fail_verify(
@@ -177,10 +177,10 @@ pub fn run_verify(in args: Args) -> i64 eff [Ffi[StdFs], Ffi[HybridCommands], Fa
         if i >= n {
             break;
         }
-        let a_buf = arg(in args, i);
-        let a = a_buf.as_slice();
+        let arg_buf = arg(in args, i);
+        let arg_text = arg_buf.as_slice();
         if !positional {
-            if eq(in a, in "--format") {
+            if eq(in arg_text, in "--format") {
                 if format {
                     return fail_verify(has_json, has_extract, in "duplicate --format".as_bytes());
                 }
@@ -188,7 +188,7 @@ pub fn run_verify(in args: Args) -> i64 eff [Ffi[StdFs], Ffi[HybridCommands], Fa
                 i = wrapping_add(i, 1);
                 continue;
             }
-            if eq(in a, in "--extract") {
+            if eq(in arg_text, in "--extract") {
                 if extract {
                     return fail_verify(has_json, has_extract, in "duplicate --extract".as_bytes());
                 }
@@ -196,7 +196,7 @@ pub fn run_verify(in args: Args) -> i64 eff [Ffi[StdFs], Ffi[HybridCommands], Fa
                 i = wrapping_add(i, 1);
                 continue;
             }
-            if eq(in a, in "--proofs") {
+            if eq(in arg_text, in "--proofs") {
                 if has_proofs {
                     return fail_verify(has_json, has_extract, in "duplicate --proofs".as_bytes());
                 }
@@ -208,8 +208,8 @@ pub fn run_verify(in args: Args) -> i64 eff [Ffi[StdFs], Ffi[HybridCommands], Fa
                         in "--proofs requires a path".as_bytes()
                     );
                 }
-                let p_buf = arg(in args, i);
-                if p_buf.as_slice().len() > 4096 {
+                let proofs_buf = arg(in args, i);
+                if proofs_buf.as_slice().len() > 4096 {
                     return fail_verify(
                         has_json,
                         has_extract,
@@ -220,7 +220,7 @@ pub fn run_verify(in args: Args) -> i64 eff [Ffi[StdFs], Ffi[HybridCommands], Fa
                 i = wrapping_add(i, 1);
                 continue;
             }
-            if eq(in a, in "--theorem") {
+            if eq(in arg_text, in "--theorem") {
                 i = wrapping_add(i, 1);
                 if i >= n {
                     return fail_verify(
@@ -229,12 +229,12 @@ pub fn run_verify(in args: Args) -> i64 eff [Ffi[StdFs], Ffi[HybridCommands], Fa
                         in "--theorem requires a name".as_bytes()
                     );
                 }
-                let v_buf = arg(in args, i);
-                let v = v_buf.as_slice();
-                if !name_valid(in v) {
+                let name_buf = arg(in args, i);
+                let lean_name = name_buf.as_slice();
+                if !name_valid(in lean_name) {
                     let mut err: ChunkSeq[u8] = ChunkSeq::new[u8]();
                     err.extend(in "invalid theorem name '".as_bytes());
-                    err.extend(in v);
+                    err.extend(in lean_name);
                     err.push(39);
                     return fail_verify(has_json, has_extract, in err.as_slice());
                 }
@@ -242,32 +242,32 @@ pub fn run_verify(in args: Args) -> i64 eff [Ffi[StdFs], Ffi[HybridCommands], Fa
                 i = wrapping_add(i, 1);
                 continue;
             }
-            if eq(in a, in "--contract-proof") || eq(in a, in "--contract-witness") {
+            if eq(in arg_text, in "--contract-proof") || eq(in arg_text, in "--contract-witness") {
                 i = wrapping_add(i, 1);
                 if i >= n {
                     let mut err: ChunkSeq[u8] = ChunkSeq::new[u8]();
-                    err.extend(in a);
+                    err.extend(in arg_text);
                     err.extend(in " requires Function=Theorem".as_bytes());
                     return fail_verify(has_json, has_extract, in err.as_slice());
                 }
-                let b_buf = arg(in args, i);
-                let b = b_buf.as_slice();
-                let mut eq_idx: u64 = b.len();
-                for j in 0..b.len() {
-                    if byte_at(in b, j) == 61 {
+                let binding_buf = arg(in args, i);
+                let binding = binding_buf.as_slice();
+                let mut eq_idx: u64 = binding.len();
+                for j in 0..binding.len() {
+                    if byte_at(in binding, j) == 61 {
                         eq_idx = j;
                         break;
                     }
                 }
-                if eq_idx == b.len() {
+                if eq_idx == binding.len() {
                     let mut err: ChunkSeq[u8] = ChunkSeq::new[u8]();
-                    err.extend(in a);
+                    err.extend(in arg_text);
                     err.extend(in " requires Function=Theorem".as_bytes());
                     return fail_verify(has_json, has_extract, in err.as_slice());
                 }
-                let func = b[0..eq_idx];
-                let thm = b[wrapping_add(eq_idx, 1)..b.len()];
-                if !name_valid(in func) || contains_dot(in func) || !name_valid(in thm) {
+                let func = binding[0..eq_idx];
+                let theorem_name = binding[wrapping_add(eq_idx, 1)..binding.len()];
+                if !name_valid(in func) || contains_dot(in func) || !name_valid(in theorem_name) {
                     return fail_verify(
                         has_json,
                         has_extract,
@@ -278,7 +278,7 @@ pub fn run_verify(in args: Args) -> i64 eff [Ffi[StdFs], Ffi[HybridCommands], Fa
                 i = wrapping_add(i, 1);
                 continue;
             }
-            if eq(in a, in "--allow-axiom") {
+            if eq(in arg_text, in "--allow-axiom") {
                 i = wrapping_add(i, 1);
                 if i >= n {
                     return fail_verify(
@@ -287,29 +287,29 @@ pub fn run_verify(in args: Args) -> i64 eff [Ffi[StdFs], Ffi[HybridCommands], Fa
                         in "--allow-axiom requires a name".as_bytes()
                     );
                 }
-                let v_buf = arg(in args, i);
-                let v = v_buf.as_slice();
-                if !name_valid(in v) {
+                let name_buf = arg(in args, i);
+                let lean_name = name_buf.as_slice();
+                if !name_valid(in lean_name) {
                     let mut err: ChunkSeq[u8] = ChunkSeq::new[u8]();
                     err.extend(in "invalid axiom name '".as_bytes());
-                    err.extend(in v);
+                    err.extend(in lean_name);
                     err.push(39);
                     return fail_verify(has_json, has_extract, in err.as_slice());
                 }
-                if forbidden_axiom(in v) {
+                if forbidden_axiom(in lean_name) {
                     let mut err: ChunkSeq[u8] = ChunkSeq::new[u8]();
-                    err.extend(in v);
+                    err.extend(in lean_name);
                     err.extend(in " cannot be allowed by the audit policy".as_bytes());
                     return fail_verify(has_json, has_extract, in err.as_slice());
                 }
-                if !allowed_contract_axiom(in v) {
+                if !allowed_contract_axiom(in lean_name) {
                     has_disallowed_contract_axiom = true;
                 }
                 has_allowed_axiom = true;
                 i = wrapping_add(i, 1);
                 continue;
             }
-            if eq(in a, in "--olean-store") {
+            if eq(in arg_text, in "--olean-store") {
                 if has_olean_store {
                     return fail_verify(
                         has_json,
@@ -325,9 +325,9 @@ pub fn run_verify(in args: Args) -> i64 eff [Ffi[StdFs], Ffi[HybridCommands], Fa
                         in "--olean-store requires a path".as_bytes()
                     );
                 }
-                let d_buf = arg(in args, i);
-                let d = d_buf.as_slice();
-                if d.len() == 0 || d.len() > 4096 {
+                let store_buf = arg(in args, i);
+                let store_path = store_buf.as_slice();
+                if store_path.len() == 0 || store_path.len() > 4096 {
                     return fail_verify(
                         has_json,
                         has_extract,
@@ -338,17 +338,17 @@ pub fn run_verify(in args: Args) -> i64 eff [Ffi[StdFs], Ffi[HybridCommands], Fa
                 i = wrapping_add(i, 1);
                 continue;
             }
-            if eq(in a, in "--json") {
+            if eq(in arg_text, in "--json") {
                 json = true;
                 i = wrapping_add(i, 1);
                 continue;
             }
-            if eq(in a, in "--emit-lean") {
+            if eq(in arg_text, in "--emit-lean") {
                 emit_lean = true;
                 i = wrapping_add(i, 1);
                 continue;
             }
-            if eq(in a, in "--lean") {
+            if eq(in arg_text, in "--lean") {
                 if has_lean {
                     return fail_verify(has_json, has_extract, in "duplicate --lean".as_bytes());
                 }
@@ -360,9 +360,9 @@ pub fn run_verify(in args: Args) -> i64 eff [Ffi[StdFs], Ffi[HybridCommands], Fa
                         in "--lean requires a path".as_bytes()
                     );
                 }
-                let l_buf = arg(in args, i);
-                let l = l_buf.as_slice();
-                if l.len() == 0 || l.len() > 4096 {
+                let lean_buf = arg(in args, i);
+                let lean_path = lean_buf.as_slice();
+                if lean_path.len() == 0 || lean_path.len() > 4096 {
                     return fail_verify(
                         has_json,
                         has_extract,
@@ -373,7 +373,7 @@ pub fn run_verify(in args: Args) -> i64 eff [Ffi[StdFs], Ffi[HybridCommands], Fa
                 i = wrapping_add(i, 1);
                 continue;
             }
-            if eq(in a, in "--timeout") {
+            if eq(in arg_text, in "--timeout") {
                 if has_timeout {
                     return fail_verify(has_json, has_extract, in "duplicate --timeout".as_bytes());
                 }
@@ -385,8 +385,8 @@ pub fn run_verify(in args: Args) -> i64 eff [Ffi[StdFs], Ffi[HybridCommands], Fa
                         in "--timeout requires seconds".as_bytes()
                     );
                 }
-                let t_buf = arg(in args, i);
-                if !parse_timeout_1_to_300(in t_buf.as_slice()) {
+                let timeout_buf = arg(in args, i);
+                if !parse_timeout_1_to_300(in timeout_buf.as_slice()) {
                     return fail_verify(
                         has_json,
                         has_extract,
@@ -397,12 +397,12 @@ pub fn run_verify(in args: Args) -> i64 eff [Ffi[StdFs], Ffi[HybridCommands], Fa
                 i = wrapping_add(i, 1);
                 continue;
             }
-            if eq(in a, in "--") {
+            if eq(in arg_text, in "--") {
                 positional = true;
                 i = wrapping_add(i, 1);
                 continue;
             }
-            if a.len() != 0 && byte_at(in a, 0) == 45 {
+            if arg_text.len() != 0 && byte_at(in arg_text, 0) == 45 {
                 return fail_verify(
                     has_json,
                     has_extract,
@@ -410,7 +410,7 @@ pub fn run_verify(in args: Args) -> i64 eff [Ffi[StdFs], Ffi[HybridCommands], Fa
                 );
             }
         }
-        if a.len() > 4096 || has_source {
+        if arg_text.len() > 4096 || has_source {
             return fail_verify(
                 has_json,
                 has_extract,

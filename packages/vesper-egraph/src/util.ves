@@ -3,31 +3,19 @@
 // effect). Each `<type>_at` read gives 0 past the end.
 
 pub fn u32_at(in seq: ChunkSeq[u32], i: u64) -> u32 {
-    match seq.try_get(i) {
-        Option::Some(value) => value,
-        Option::None => 0,
-    }
+    seq.try_get(i).unwrap_or(0)
 }
 
 pub fn u64_at(in seq: ChunkSeq[u64], i: u64) -> u64 {
-    match seq.try_get(i) {
-        Option::Some(value) => value,
-        Option::None => 0,
-    }
+    seq.try_get(i).unwrap_or(0)
 }
 
 pub fn i64_at(in seq: ChunkSeq[i64], i: u64) -> i64 {
-    match seq.try_get(i) {
-        Option::Some(value) => value,
-        Option::None => 0,
-    }
+    seq.try_get(i).unwrap_or(0)
 }
 
 pub fn u8_at(in seq: ChunkSeq[u8], i: u64) -> u8 {
-    match seq.try_get(i) {
-        Option::Some(value) => value,
-        Option::None => 0,
-    }
+    seq.try_get(i).unwrap_or(0)
 }
 
 pub fn filled_u32(len: u64, fill: u32) -> ChunkSeq[u32] {

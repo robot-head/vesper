@@ -966,6 +966,10 @@ fn io_error(word: u64) -> std::io::Error {
     if os != 0 {
         return std::io::Error::from_raw_os_error(os as i32);
     }
+    // `program_not_found()`: Rust's Windows `resolve_exe` error (#2147).
+    if word & 0xff == 15 {
+        return std::io::Error::new(K::NotFound, "program not found");
+    }
     let kind = match word & 0xff {
         1 => K::NotFound,
         2 => K::PermissionDenied,

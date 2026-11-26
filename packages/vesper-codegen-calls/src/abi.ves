@@ -63,133 +63,151 @@ pub copy struct LayoutFacts {
 }
 
 pub fn layout_facts(
-    inout ls: Layouts,
-    inout t: Types,
+    inout layouts: Layouts,
+    inout types: Types,
     inout names: Names,
-    in wd: World,
+    in world: World,
     ty: u32,
     inout err: Errs
 ) -> LayoutFacts {
-    let m = ls.mark();
-    let l = layout_of(inout ls, inout t, inout names, in wd, ty);
-    if l == NONE32 {
+    let mark = layouts.mark();
+    let layout = layout_of(inout layouts, inout types, inout names, in world, ty);
+    if layout == NONE32 {
         err.text.clear();
-        err.text.extend(in ls.err.as_slice());
-        ls.reset(m);
+        err.text.extend(in layouts.err.as_slice());
+        layouts.reset(mark);
         return LayoutFacts { ok: false, aggregate: false, size: 0 };
     }
-    let facts = LayoutFacts { ok: true, aggregate: ls.aggregate(l), size: ls.node(l).size };
-    ls.reset(m);
+    let facts = LayoutFacts {
+        ok: true,
+        aggregate: layouts.aggregate(layout),
+        size: layouts.node(layout).size
+    };
+    layouts.reset(mark);
     facts
 }
 
 // `scalar(t, generics)`.
 pub fn scalar(
-    in t: Types,
+    in types: Types,
     in names: Names,
-    in d: Calls,
-    k: Syms,
-    f: FnInfo,
+    in calls: Calls,
+    syms: Syms,
+    info: FnInfo,
     ty: u32,
     inout err: Errs
 ) -> u8 {
-    let n = t.node(ty);
-    if n.kind == TyKind::Lit {
+    let node = types.node(ty);
+    if node.kind == TyKind::Lit {
         return V_I64;
     }
-    if n.kind == TyKind::Named {
-        if k.is_wide(n.name) {
+    if node.kind == TyKind::Named {
+        if syms.is_wide(node.name) {
             return V_I128;
         }
-        if n.name == k.f64_ {
+        if node.name == syms.f64_ {
             return V_F64;
         }
-        if n.name == k.f32_ {
+        if node.name == syms.f32_ {
             return V_F32;
         }
-        if k.is_scalar(n.name) && !k.is_float(n.name) {
+        if syms.is_scalar(node.name) && !syms.is_float(node.name) {
             return V_I64;
         }
-        for i in 0..w(f.gn) {
-            if d.generic(add(w(f.ga), i)) == n.name {
+        for i in 0..w(info.generic_count) {
+            if calls.generic(add(w(info.generic_start), i)) == node.name {
                 return V_I64;
             }
         }
         // Region box, watermark, TiledSeq, Box[T] and sequence handles are
         // one word.
-        if n.name == k.region_box || n.name == k.watermark {
+        if node.name == syms.region_box || node.name == syms.watermark {
             return V_I64;
         }
-        if n.name == k.box_ && n.n == 1 {
+        if node.name == syms.box_ && node.n == 1 {
             return V_I64;
         }
-        if n.name == k.tiled_seq && (n.n == 1 || n.n == 2) {
+        if node.name == syms.tiled_seq && (node.n == 1 || node.n == 2) {
             return V_I64;
         }
-        if n.name == k.chunk_seq && n.n == 1 {
+        if node.name == syms.chunk_seq && node.n == 1 {
             return V_I64;
         }
     }
-    if n.kind == TyKind::Tuple && n.n == 0 {
+    if node.kind == TyKind::Tuple && node.n == 0 {
         return V_I64;
     }
-    if n.kind == TyKind::Infer || n.kind == TyKind::Fn {
+    if node.kind == TyKind::Infer || node.kind == TyKind::Fn {
         return V_I64;
     }
     err.text.clear();
     err.text.extend(in "native backend does not yet lower aggregate type ".as_bytes());
-    display(in t, in names, ty, inout err.text);
+    display(in types, in names, ty, inout err.text);
     V_NONE
 }
 
-pub fn uses_caller_slot(in d: Calls, f: FnInfo) -> bool {
-    f.fip && d.uses_caller_slot_name(f.name)
+pub fn uses_caller_slot(in calls: Calls, info: FnInfo) -> bool {
+    info.fip && calls.uses_caller_slot_name(info.name)
 }
 
 // `signature_with_abi(m, world, f, false, abi)`; false with the message in
 // `err` when a layout or `scalar` refuses.
 pub fn signature(
-    inout ls: Layouts,
-    inout t: Types,
+    inout layouts: Layouts,
+    inout types: Types,
     inout names: Names,
-    in wd: World,
-    in d: Calls,
-    k: Syms,
-    in f: Conc,
+    in world: World,
+    in calls: Calls,
+    syms: Syms,
+    in func: Conc,
     abi: FnAbi,
     inout sig: Sig,
     inout err: Errs
 ) -> bool {
     sig.params.clear();
     sig.returns.clear();
-    let info = d.fn_info(f.f);
-    let result = layout_facts(inout ls, inout t, inout names, in wd, f.result, inout err);
+    let info = calls.fn_info(func.func_index);
+    let result = layout_facts(
+        inout layouts,
+        inout types,
+        inout names,
+        in world,
+        func.result,
+        inout err
+    );
     if !result.ok {
         return false;
     }
     if result.aggregate && abi.result_words == 0 {
         sig.params.push(V_I64);
     }
-    for i in 0..f.params.len() {
-        let p = f.param(i);
-        let l = layout_facts(inout ls, inout t, inout names, in wd, p.ty, inout err);
-        if !l.ok {
+    for i in 0..func.params.len() {
+        let param = func.param(i);
+        let param_layout = layout_facts(
+            inout layouts,
+            inout types,
+            inout names,
+            in world,
+            param.ty,
+            inout err
+        );
+        if !param_layout.ok {
             return false;
         }
-        if l.aggregate || p.pass == TyPass::Inout {
+        if param_layout.aggregate || param.pass == TyPass::Inout {
             sig.params.push(V_I64);
         } else {
-            let v = scalar(in t, in names, in d, k, info, p.ty, inout err);
-            if v == V_NONE {
+            let code = scalar(in types, in names, in calls, syms, info, param.ty, inout err);
+            if code == V_NONE {
                 return false;
             }
-            sig.params.push(v);
+            sig.params.push(code);
         }
     }
-    if uses_caller_slot(in d, info) {
+    if uses_caller_slot(in calls, info) {
         sig.params.push(V_I64);
     }
-    if fail_only(inout t, in names, in wd, k, in f) {
+    if fail_only(inout types, in names, in world, syms, in func) {
         sig.params.push(V_I64);
     }
     if abi.result_words != 0 {
@@ -199,11 +217,11 @@ pub fn signature(
     } else if result.aggregate {
         sig.returns.push(V_I64);
     } else {
-        let v = scalar(in t, in names, in d, k, info, f.result, inout err);
-        if v == V_NONE {
+        let code = scalar(in types, in names, in calls, syms, info, func.result, inout err);
+        if code == V_NONE {
             return false;
         }
-        sig.returns.push(v);
+        sig.returns.push(code);
     }
     if abi.status {
         sig.returns.push(V_I64);
@@ -213,57 +231,64 @@ pub fn signature(
 
 // `register_result_words`: 0 for none.
 fn register_result_words(
-    inout ls: Layouts,
-    inout t: Types,
+    inout layouts: Layouts,
+    inout types: Types,
     inout names: Names,
-    in wd: World,
-    in d: Calls,
-    in f: Conc,
+    in world: World,
+    in calls: Calls,
+    in func: Conc,
     inout err: Errs
 ) -> u32 {
-    let l = layout_facts(inout ls, inout t, inout names, in wd, f.result, inout err);
-    if !l.ok {
+    let layout = layout_facts(
+        inout layouts,
+        inout types,
+        inout names,
+        in world,
+        func.result,
+        inout err
+    );
+    if !layout.ok {
         return NONE32;
     }
-    let info = d.fn_info(f.f);
-    if !l.aggregate
-        || l.size == 0
-        || l.size > 16
-        || contains_function(inout t, in wd, f.result)
-        || uses_caller_slot(in d, info)
+    let info = calls.fn_info(func.func_index);
+    if !layout.aggregate
+        || layout.size == 0
+        || layout.size > 16
+        || contains_function(inout types, in world, func.result)
+        || uses_caller_slot(in calls, info)
         || info.fip {
         return 0;
     }
-    wrapping_add(l.size, 7) / 8
+    wrapping_add(layout.size, 7) / 8
 }
 
 // `NativeAbi::internal`: the convention of a non-boundary function; false
 // with the message in `err` when its result layout refuses.
 pub fn internal(
-    inout ls: Layouts,
-    inout t: Types,
+    inout layouts: Layouts,
+    inout types: Types,
     inout names: Names,
-    in wd: World,
-    in d: Calls,
-    k: Syms,
-    in f: Conc,
+    in world: World,
+    in calls: Calls,
+    syms: Syms,
+    in func: Conc,
     inout abi: FnAbi,
     inout err: Errs
 ) -> bool {
     abi.status = false;
     abi.result_words = 0;
-    let r = t.row(f.row);
-    if fail_only(inout t, in names, in wd, k, in f)
-        && !capability_abi(inout t, in names, in wd, k, in f) {
+    let row = types.row(func.row);
+    if fail_only(inout types, in names, in world, syms, in func)
+        && !capability_abi(inout types, in names, in world, syms, in func) {
         abi.status = true;
-    } else if r.n == 0 && r.tail == 0 {
+    } else if row.n == 0 && row.tail == 0 {
         let words = register_result_words(
-            inout ls,
-            inout t,
+            inout layouts,
+            inout types,
             inout names,
-            in wd,
-            in d,
-            in f,
+            in world,
+            in calls,
+            in func,
             inout err
         );
         if words == NONE32 {
@@ -277,34 +302,40 @@ pub fn internal(
 // The entry checks of `compile_entry` for `EntryEffects::Handled`; false
 // with the message in `err`.
 pub fn check_entry(
-    inout t: Types,
+    inout types: Types,
     in names: Names,
-    in wd: World,
-    in d: Calls,
+    in world: World,
+    in calls: Calls,
     entry: u32,
     inout err: Errs
 ) -> bool {
-    check_entry_traced(inout t, in names, in wd, in d, entry, false, inout err)
+    check_entry_traced(inout types, in names, in world, in calls, entry, false, inout err)
 }
 
 // `trace_ok` of `compile_entry`: a trace-host task whose entry, with Beacon
 // active, has a closed row holding the bare `Trace` and otherwise only
 // foreign capabilities.
-pub fn trace_entry_ok(in t: Types, in names: Names, in d: Calls, k: Syms, entry: u32) -> bool {
-    let fi = d.function(entry);
-    if fi == NONE32 || !d.trace_active {
+pub fn trace_entry_ok(
+    in types: Types,
+    in names: Names,
+    in calls: Calls,
+    syms: Syms,
+    entry: u32
+) -> bool {
+    let func_index = calls.function(entry);
+    if func_index == NONE32 || !calls.trace_active {
         return false;
     }
-    let r = t.row(d.fn_info(fi).row);
-    if r.tail != 0 {
+    let row = types.row(calls.fn_info(func_index).row);
+    if row.tail != 0 {
         return false;
     }
     let mut any = false;
-    for i in 0..w(r.n) {
-        let e = t.effect_at(add(w(r.a), i));
-        if bare_trace(k, e) {
+    for i in 0..w(row.n) {
+        let effect = types.effect_at(add(w(row.a), i));
+        if bare_trace(syms, effect) {
             any = true;
-        } else if !is_foreign(in names, e.name) {
+        } else if !is_foreign(in names, effect.name) {
             return false;
         }
     }
@@ -314,25 +345,25 @@ pub fn trace_entry_ok(in t: Types, in names: Names, in d: Calls, k: Syms, entry:
 // [`check_entry`] of a task; `trace_ok` ([`trace_entry_ok`]) lets the
 // entry leave the bare `Trace` unhandled.
 pub fn check_entry_traced(
-    inout t: Types,
+    inout types: Types,
     in names: Names,
-    in wd: World,
-    in d: Calls,
+    in world: World,
+    in calls: Calls,
     entry: u32,
     trace_ok: bool,
     inout err: Errs
 ) -> bool {
-    let fi = d.function(entry);
-    if fi == NONE32 {
+    let func_index = calls.function(entry);
+    if func_index == NONE32 {
         err.text.clear();
         err.text.extend(in "unknown entry".as_bytes());
         return false;
     }
-    let f = d.fn_info(fi);
-    let r = t.row(f.row);
-    let mut handled = r.tail == 0;
-    for i in 0..w(r.n) {
-        if !is_foreign(in names, t.effect_at(add(w(r.a), i)).name) {
+    let info = calls.fn_info(func_index);
+    let row = types.row(info.row);
+    let mut handled = row.tail == 0;
+    for i in 0..w(row.n) {
+        if !is_foreign(in names, types.effect_at(add(w(row.a), i)).name) {
             handled = false;
         }
     }
@@ -341,9 +372,9 @@ pub fn check_entry_traced(
         err.text.extend(in "native entry must handle all effects".as_bytes());
         return false;
     }
-    let mut exposes = contains_function(inout t, in wd, f.result);
-    for i in 0..w(f.pn) {
-        if contains_function(inout t, in wd, d.param(add(w(f.pa), i)).ty) {
+    let mut exposes = contains_function(inout types, in world, info.result);
+    for i in 0..w(info.param_count) {
+        if contains_function(inout types, in world, calls.param(add(w(info.param_start), i)).ty) {
             exposes = true;
         }
     }
@@ -358,44 +389,44 @@ pub fn check_entry_traced(
     true
 }
 
-fn put_code(v: u8, inout o: ChunkSeq[u8]) {
-    if v == V_I128 {
-        o.extend(in "i128".as_bytes());
-    } else if v == V_F64 {
-        o.extend(in "f64".as_bytes());
-    } else if v == V_F32 {
-        o.extend(in "f32".as_bytes());
+fn put_code(code: u8, inout out: ChunkSeq[u8]) {
+    if code == V_I128 {
+        out.extend(in "i128".as_bytes());
+    } else if code == V_F64 {
+        out.extend(in "f64".as_bytes());
+    } else if code == V_F32 {
+        out.extend(in "f32".as_bytes());
     } else {
-        o.extend(in "i64".as_bytes());
+        out.extend(in "i64".as_bytes());
     }
 }
 
 // `(p, ...) -> r, ...`
-pub fn put_sig(in sig: Sig, inout o: ChunkSeq[u8]) {
-    o.push(40);
+pub fn put_sig(in sig: Sig, inout out: ChunkSeq[u8]) {
+    out.push(40);
     for i in 0..sig.params.len() {
         if i > 0 {
-            o.extend(in ", ".as_bytes());
+            out.extend(in ", ".as_bytes());
         }
         put_code(
             match sig.params.try_get(i) {
-                Option::Some(v) => v,
+                Option::Some(code) => code,
                 Option::None => V_I64,
             },
-            inout o
+            inout out
         );
     }
-    o.extend(in ") -> ".as_bytes());
+    out.extend(in ") -> ".as_bytes());
     for i in 0..sig.returns.len() {
         if i > 0 {
-            o.extend(in ", ".as_bytes());
+            out.extend(in ", ".as_bytes());
         }
         put_code(
             match sig.returns.try_get(i) {
-                Option::Some(v) => v,
+                Option::Some(code) => code,
                 Option::None => V_I64,
             },
-            inout o
+            inout out
         );
     }
 }
@@ -405,31 +436,31 @@ pub fn put_sig(in sig: Sig, inout o: ChunkSeq[u8]) {
 // signature, one line each: `I <index> <key> = <source> @ <symbol> : <sig>`.
 // False with the message in `err` when a decision refuses.
 pub fn declare(
-    inout ls: Layouts,
-    inout t: Types,
+    inout layouts: Layouts,
+    inout types: Types,
     inout names: Names,
-    in wd: World,
-    in d: Calls,
-    k: Syms,
+    in world: World,
+    in calls: Calls,
+    syms: Syms,
     in found: Found,
     entry: u32,
     optimize: bool,
-    inout o: ChunkSeq[u8],
+    inout out: ChunkSeq[u8],
     inout err: Errs
 ) -> bool {
     let mut roots: ChunkSeq[u32] = ChunkSeq::new[u32]();
     roots.push(entry);
     declare_roots(
-        inout ls,
-        inout t,
+        inout layouts,
+        inout types,
         inout names,
-        in wd,
-        in d,
-        k,
+        in world,
+        in calls,
+        syms,
         in found,
         in roots,
         optimize,
-        inout o,
+        inout out,
         inout err
     )
 }
@@ -438,34 +469,34 @@ pub fn declare(
 // failure-record ABI, `native_export::compile_exports`); a root's line
 // names its source symbol.
 pub fn declare_roots(
-    inout ls: Layouts,
-    inout t: Types,
+    inout layouts: Layouts,
+    inout types: Types,
     inout names: Names,
-    in wd: World,
-    in d: Calls,
-    k: Syms,
+    in world: World,
+    in calls: Calls,
+    syms: Syms,
     in found: Found,
     in roots: ChunkSeq[u32],
     optimize: bool,
-    inout o: ChunkSeq[u8],
+    inout out: ChunkSeq[u8],
     inout err: Errs
 ) -> bool {
     let n = found.insts.len();
     let mut abis: ChunkSeq[FnAbi] = ChunkSeq::with_capacity[FnAbi](n);
     for i in 0..n {
-        let x = found.inst(i);
+        let inst = found.inst(i);
         let mut abi = default_abi();
-        if optimize && !is_root(in roots, x.key) {
-            let vars = found.vars_of(x);
-            let f = concrete(inout t, inout names, in d, x.name, in vars);
+        if optimize && !is_root(in roots, inst.key) {
+            let vars = found.vars_of(inst);
+            let func = concrete(inout types, inout names, in calls, inst.name, in vars);
             if !internal(
-                inout ls,
-                inout t,
+                inout layouts,
+                inout types,
                 inout names,
-                in wd,
-                in d,
-                k,
-                in f,
+                in world,
+                in calls,
+                syms,
+                in func,
                 inout abi,
                 inout err
             ) {
@@ -480,21 +511,21 @@ pub fn declare_roots(
     };
     let mut lines: ChunkSeq[u8] = ChunkSeq::new[u8]();
     for i in 0..n {
-        let x = found.inst(i);
-        let vars = found.vars_of(x);
-        let f = concrete(inout t, inout names, in d, x.name, in vars);
+        let inst = found.inst(i);
+        let vars = found.vars_of(inst);
+        let func = concrete(inout types, inout names, in calls, inst.name, in vars);
         let abi = match abis.try_get(i) {
-            Option::Some(a) => a,
+            Option::Some(planned) => planned,
             Option::None => default_abi(),
         };
         if !signature(
-            inout ls,
-            inout t,
+            inout layouts,
+            inout types,
             inout names,
-            in wd,
-            in d,
-            k,
-            in f,
+            in world,
+            in calls,
+            syms,
+            in func,
             abi,
             inout sig,
             inout err
@@ -504,23 +535,23 @@ pub fn declare_roots(
         lines.extend(in "I ".as_bytes());
         push_decimal(inout lines, i);
         lines.push(32);
-        names.write(x.key, inout lines);
+        names.write(inst.key, inout lines);
         lines.extend(in " = ".as_bytes());
-        names.write(x.name, inout lines);
+        names.write(inst.name, inout lines);
         lines.extend(in " @ ".as_bytes());
-        if is_root(in roots, x.key) {
-            names.write(x.key, inout lines);
+        if is_root(in roots, inst.key) {
+            names.write(inst.key, inout lines);
         } else {
             lines.extend(in "vesper_function_".as_bytes());
             push_decimal(inout lines, i);
             lines.push(95);
-            push_symbol_key(in names, x.key, inout lines);
+            push_symbol_key(in names, inst.key, inout lines);
         }
         lines.extend(in " : ".as_bytes());
         put_sig(in sig, inout lines);
         lines.push(10);
     }
-    o.extend(in lines.as_slice());
+    out.extend(in lines.as_slice());
     true
 }
 
@@ -536,18 +567,21 @@ fn push_symbol_key(in names: Names, key: u32, inout out: ChunkSeq[u8]) {
         if i >= n {
             break;
         }
-        let c = names.byte(key, i);
+        let byte = names.byte(key, i);
         i = add(i, 1);
-        if c >= 128 && c < 192 {
+        if byte >= 128 && byte < 192 {
             continue;
         }
         if chars >= 96 {
             break;
         }
         chars = add(chars, 1);
-        let keep = (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c == 95;
+        let keep = (byte >= 48 && byte <= 57)
+            || (byte >= 65 && byte <= 90)
+            || (byte >= 97 && byte <= 122)
+            || byte == 95;
         if keep {
-            out.push(c);
+            out.push(byte);
         } else {
             out.push(95);
         }

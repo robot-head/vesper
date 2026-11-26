@@ -369,10 +369,7 @@ pub struct Roots {
 
 impl Roots {
     fn lookup_root(in self, name: u32) -> u32 {
-        match self.roots.try_get(w(name)) {
-            Option::Some(x) => x,
-            Option::None => NONE32,
-        }
+        self.roots.try_get(w(name)).unwrap_or(NONE32)
     }
 }
 

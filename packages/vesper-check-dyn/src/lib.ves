@@ -30,166 +30,182 @@ use self::dyntrait::{uses_dyn, lower_dyn};
 
 const NONE: u32 = 4294967295;
 
-fn put_bool(inout o: ChunkSeq[u8], b: bool) {
-    if b {
-        o.push(49);
+fn put_bool(inout out: ChunkSeq[u8], value: bool) {
+    if value {
+        out.push(49);
     } else {
-        o.push(48);
+        out.push(48);
     }
 }
 
-fn put_diags(inout o: ChunkSeq[u8], in d: D, from: u64) {
-    for i in from..d.diags.len() {
-        let r = d.diags.row(i);
-        put(inout o, in "D ");
-        for j in r.code_a..r.msg_a {
-            o.push(u8_at(in d.diags.text, j));
+fn put_diags(inout out: ChunkSeq[u8], in ctx: D, from: u64) {
+    for i in from..ctx.diags.len() {
+        let diag = ctx.diags.row(i);
+        put(inout out, in "D ");
+        for j in diag.code_a..diag.msg_a {
+            out.push(u8_at(in ctx.diags.text, j));
         }
-        o.push(32);
-        put_u64(inout o, r.start);
-        o.push(32);
-        put_u64(inout o, r.stop);
-        o.push(32);
-        for j in r.msg_a..r.msg_b {
-            o.push(u8_at(in d.diags.text, j));
+        out.push(32);
+        put_u64(inout out, diag.start);
+        out.push(32);
+        put_u64(inout out, diag.stop);
+        out.push(32);
+        for j in diag.msg_a..diag.msg_b {
+            out.push(u8_at(in ctx.diags.text, j));
         }
-        o.push(10);
+        out.push(10);
     }
 }
 
-fn put_span_line(inout o: ChunkSeq[u8], in tag: Str, a: u64, b: u64, c: u64) {
-    put(inout o, in tag);
-    o.push(32);
-    put_u64(inout o, a);
-    o.push(32);
-    put_u64(inout o, b);
-    o.push(32);
-    put_u64(inout o, c);
-    o.push(10);
+fn put_span_line(inout out: ChunkSeq[u8], in tag: Str, key: u64, start: u64, end: u64) {
+    put(inout out, in tag);
+    out.push(32);
+    put_u64(inout out, key);
+    out.push(32);
+    put_u64(inout out, start);
+    out.push(32);
+    put_u64(inout out, end);
+    out.push(10);
 }
 
 // The origins table, then `relocate` at probe spans: just below the
 // synthetic range, each origin's first span and the one after it, and the
 // end of the range.
-fn put_origins(inout o: ChunkSeq[u8], in d: D) {
-    let n = d.origins.len() / 3;
-    put(inout o, in "origins ");
-    put_u64(inout o, d.base);
-    o.push(32);
-    put_u64(inout o, d.next_span);
-    o.push(32);
-    put_u64(inout o, n);
-    o.push(10);
+fn put_origins(inout out: ChunkSeq[u8], in ctx: D) {
+    let n = ctx.origins.len() / 3;
+    put(inout out, in "origins ");
+    put_u64(inout out, ctx.base);
+    out.push(32);
+    put_u64(inout out, ctx.next_span);
+    out.push(32);
+    put_u64(inout out, n);
+    out.push(10);
     for i in 0..n {
         let at = wrapping_mul(i, 3);
         put_span_line(
-            inout o,
+            inout out,
             in "O",
-            u64_at(in d.origins, at),
-            u64_at(in d.origins, inc(at)),
-            u64_at(in d.origins, wrapping_add(at, 2))
+            u64_at(in ctx.origins, at),
+            u64_at(in ctx.origins, inc(at)),
+            u64_at(in ctx.origins, wrapping_add(at, 2))
         );
     }
     let mut probes = ChunkSeq::new[u64]();
-    if d.base > 0 {
-        probes.push(wrapping_sub(d.base, 1));
+    if ctx.base > 0 {
+        probes.push(wrapping_sub(ctx.base, 1));
     }
-    probes.push(d.base);
+    probes.push(ctx.base);
     for i in 0..n {
-        let s = u64_at(in d.origins, wrapping_mul(i, 3));
-        probes.push(s);
-        probes.push(inc(s));
+        let synth_start = u64_at(in ctx.origins, wrapping_mul(i, 3));
+        probes.push(synth_start);
+        probes.push(inc(synth_start));
     }
-    probes.push(d.next_span);
+    probes.push(ctx.next_span);
     for i in 0..probes.len() {
-        let p = u64_at(in probes, i);
-        let (a, b) = relocate(in d, p, inc(p));
-        put_span_line(inout o, in "R", p, a, b);
+        let probe = u64_at(in probes, i);
+        let (start, end) = relocate(in ctx, probe, inc(probe));
+        put_span_line(inout out, in "R", probe, start, end);
     }
 }
 
 // The `params` rows in (owner, generic) text order.
-fn put_params(inout o: ChunkSeq[u8], inout d: D) {
+fn put_params(inout out: ChunkSeq[u8], inout ctx: D) {
     let mut rows = ChunkSeq::new[u64]();
-    for i in 0..d.p_owner.len() {
-        if u8_at(in d.p_live, i) == 1 {
+    for i in 0..ctx.param_owner.len() {
+        if u8_at(in ctx.param_live, i) == 1 {
             rows.push(i);
         }
     }
     let n = rows.len();
     for i in 1..n {
-        let x = u64_at(in rows, i);
+        let row = u64_at(in rows, i);
         let mut j = i;
         loop {
             if j == 0 {
                 break;
             }
-            let y = u64_at(in rows, wrapping_sub(j, 1));
-            let c = sym_cmp(in d.ast, u32_at(in d.p_owner, y), u32_at(in d.p_owner, x));
-            let c2 = if c != 0 {
-                c
+            let prev_row = u64_at(in rows, wrapping_sub(j, 1));
+            let owner_order = sym_cmp(
+                in ctx.ast,
+                u32_at(in ctx.param_owner, prev_row),
+                u32_at(in ctx.param_owner, row)
+            );
+            let order = if owner_order != 0 {
+                owner_order
             } else {
-                sym_cmp(in d.ast, u32_at(in d.p_g, y), u32_at(in d.p_g, x))
+                sym_cmp(
+                    in ctx.ast,
+                    u32_at(in ctx.param_generic, prev_row),
+                    u32_at(in ctx.param_generic, row)
+                )
             };
-            if c2 <= 0 {
+            if order <= 0 {
                 break;
             }
-            let ok = rows.try_set(j, y);
+            let ok = rows.try_set(j, prev_row);
             j = wrapping_sub(j, 1);
         }
-        let ok = rows.try_set(j, x);
+        let ok = rows.try_set(j, row);
     }
     for i in 0..n {
-        let r = u64_at(in rows, i);
-        put(inout o, in "P ");
-        put_sym(in d.ast, inout o, u32_at(in d.p_owner, r));
-        o.push(32);
-        put_sym(in d.ast, inout o, u32_at(in d.p_g, r));
-        o.push(32);
-        display_into(inout d, u32_at(in d.p_tr, r), inout o);
-        o.push(10);
+        let row = u64_at(in rows, i);
+        put(inout out, in "P ");
+        put_sym(in ctx.ast, inout out, u32_at(in ctx.param_owner, row));
+        out.push(32);
+        put_sym(in ctx.ast, inout out, u32_at(in ctx.param_generic, row));
+        out.push(32);
+        display_into(inout ctx, u32_at(in ctx.param_trait, row), inout out);
+        out.push(10);
     }
 }
 
-fn put_forwards(inout o: ChunkSeq[u8], in d: D) {
-    let n = d.fwd.len() / 10;
+fn put_forwards(inout out: ChunkSeq[u8], in ctx: D) {
+    let n = ctx.forwards.len() / 10;
     for i in 0..n {
         let at = wrapping_mul(i, 10);
-        put(inout o, in "F ");
-        put_sym(in d.ast, inout o, wrapping_u32(u64_at(in d.fwd, at)));
+        put(inout out, in "F ");
+        put_sym(in ctx.ast, inout out, wrapping_u32(u64_at(in ctx.forwards, at)));
         for k in 1..3 {
-            o.push(32);
-            put_u64(inout o, u64_at(in d.fwd, wrapping_add(at, k)));
+            out.push(32);
+            put_u64(inout out, u64_at(in ctx.forwards, wrapping_add(at, k)));
         }
-        if u64_at(in d.fwd, wrapping_add(at, 3)) == 1 {
-            put(inout o, in " N ");
-            put_sym(in d.ast, inout o, wrapping_u32(u64_at(in d.fwd, wrapping_add(at, 4))));
+        if u64_at(in ctx.forwards, wrapping_add(at, 3)) == 1 {
+            put(inout out, in " N ");
+            put_sym(
+                in ctx.ast,
+                inout out,
+                wrapping_u32(u64_at(in ctx.forwards, wrapping_add(at, 4)))
+            );
         } else {
-            put(inout o, in " M ");
-            put_u64(inout o, u64_at(in d.fwd, wrapping_add(at, 5)));
-            o.push(32);
-            put_u64(inout o, u64_at(in d.fwd, wrapping_add(at, 6)));
-            o.push(32);
-            put_sym(in d.ast, inout o, wrapping_u32(u64_at(in d.fwd, wrapping_add(at, 4))));
+            put(inout out, in " M ");
+            put_u64(inout out, u64_at(in ctx.forwards, wrapping_add(at, 5)));
+            out.push(32);
+            put_u64(inout out, u64_at(in ctx.forwards, wrapping_add(at, 6)));
+            out.push(32);
+            put_sym(
+                in ctx.ast,
+                inout out,
+                wrapping_u32(u64_at(in ctx.forwards, wrapping_add(at, 4)))
+            );
         }
         for k in 7..10 {
-            o.push(32);
-            put_u64(inout o, u64_at(in d.fwd, wrapping_add(at, k)));
+            out.push(32);
+            put_u64(inout out, u64_at(in ctx.forwards, wrapping_add(at, k)));
         }
-        o.push(10);
+        out.push(10);
     }
 }
 
-fn put_boxed(inout o: ChunkSeq[u8], inout d: D) {
-    let mut b = ChunkSeq::with_capacity[u32](d.boxed.len());
-    for i in 0..d.boxed.len() {
-        b.push(u32_at(in d.boxed, i));
+fn put_boxed(inout out: ChunkSeq[u8], inout ctx: D) {
+    let mut sorted = ChunkSeq::with_capacity[u32](ctx.boxed.len());
+    for i in 0..ctx.boxed.len() {
+        sorted.push(u32_at(in ctx.boxed, i));
     }
-    sort_syms(in d.ast, inout b);
-    for i in 0..b.len() {
-        put(inout o, in "B ");
-        put_sym(in d.ast, inout o, u32_at(in b, i));
-        o.push(10);
+    sort_syms(in ctx.ast, inout sorted);
+    for i in 0..sorted.len() {
+        put(inout out, in "B ");
+        put_sym(in ctx.ast, inout out, u32_at(in sorted, i));
+        out.push(10);
     }
 }
 
@@ -199,71 +215,71 @@ fn put_boxed(inout o: ChunkSeq[u8], inout d: D) {
 // `boxed`, then the canonical dump of the lowered module. With `force`,
 // each pass runs even when its `uses_*` gate says the module needs none
 // (more coverage; the passes do not change such a module).
-fn run(in source: Str, base: u64, force: bool, inout o: ChunkSeq[u8]) {
-    let l = lower_source(in source);
-    let mut d = d_new(l.ast, base);
-    let uses_fn = uses_fn_objects(in d);
-    put(inout o, in "fn uses=");
-    put_bool(inout o, uses_fn);
+fn run(in source: Str, base: u64, force: bool, inout out: ChunkSeq[u8]) {
+    let lowered = lower_source(in source);
+    let mut ctx = d_new(lowered.ast, base);
+    let uses_fn = uses_fn_objects(in ctx);
+    put(inout out, in "fn uses=");
+    put_bool(inout out, uses_fn);
     if uses_fn || force {
-        let ok = lower_fn_objects(inout d);
-        put(inout o, in " ok=");
-        put_bool(inout o, ok);
-        o.push(10);
-        put_diags(inout o, in d, 0);
+        let ok = lower_fn_objects(inout ctx);
+        put(inout out, in " ok=");
+        put_bool(inout out, ok);
+        out.push(10);
+        put_diags(inout out, in ctx, 0);
         if !ok {
             return;
         }
-        put_origins(inout o, in d);
+        put_origins(inout out, in ctx);
     } else {
-        o.push(10);
+        out.push(10);
     }
-    let first = d.diags.len();
-    let uses = uses_dyn(inout d);
-    put(inout o, in "dyn uses=");
-    put_bool(inout o, uses);
+    let first_diag = ctx.diags.len();
+    let uses = uses_dyn(inout ctx);
+    put(inout out, in "dyn uses=");
+    put_bool(inout out, uses);
     if uses || force {
-        let ok = lower_dyn(inout d);
-        put(inout o, in " ok=");
-        put_bool(inout o, ok);
-        o.push(10);
-        put_diags(inout o, in d, first);
+        let ok = lower_dyn(inout ctx);
+        put(inout out, in " ok=");
+        put_bool(inout out, ok);
+        out.push(10);
+        put_diags(inout out, in ctx, first_diag);
         if !ok {
             return;
         }
-        put_params(inout o, inout d);
-        put_forwards(inout o, in d);
-        put_boxed(inout o, inout d);
+        put_params(inout out, inout ctx);
+        put_forwards(inout out, in ctx);
+        put_boxed(inout out, inout ctx);
     } else {
-        o.push(10);
+        out.push(10);
     }
-    dump_ast(in d.ast, inout o);
+    dump_ast(in ctx.ast, inout out);
 }
 
 // The harness entry: `source` with the dyn_fn span base (`serde_json`'s
 // length of the parsed module plus 1,000,000, computed by the caller) and
 // flags (bit 0: force both passes). Returns `pack_text` of the outcome.
 pub fn check_dyn(in source: Str, base: u64, flags: u64) -> ChunkSeq[u64] {
-    let mut o = ChunkSeq::new[u8]();
-    run(in source, base, (flags & 1) == 1, inout o);
-    pack_text(in o)
+    let mut out = ChunkSeq::new[u8]();
+    run(in source, base, (flags & 1) == 1, inout out);
+    pack_text(in out)
 }
 
 // Runs both passes and returns a digest of the outcome's length, for
 // benchmarks (no dump, no text).
 pub fn check_dyn_count(in source: Str, base: u64, flags: u64) -> u64 {
-    let l = lower_source(in source);
-    let mut d = d_new(l.ast, base);
+    let lowered = lower_source(in source);
+    let mut ctx = d_new(lowered.ast, base);
     let force = (flags & 1) == 1;
-    if uses_fn_objects(in d) || force {
-        if !lower_fn_objects(inout d) {
-            return d.diags.len();
+    if uses_fn_objects(in ctx) || force {
+        if !lower_fn_objects(inout ctx) {
+            return ctx.diags.len();
         }
     }
-    if uses_dyn(inout d) || force {
-        let ok = lower_dyn(inout d);
+    if uses_dyn(inout ctx) || force {
+        let ok = lower_dyn(inout ctx);
     }
-    wrapping_add(wrapping_add(d.diags.len(), d.ast.exprs.len()), d.origins.len())
+    wrapping_add(wrapping_add(ctx.diags.len(), ctx.ast.exprs.len()), ctx.origins.len())
 }
 
 // ------------------------------------------------- the hybrid swap (#1976)
@@ -290,27 +306,27 @@ pub fn check_dyn_count(in source: Str, base: u64, flags: u64) -> u64 {
 //
 // Symbols index the names of the lowered `ast` section.
 
-fn put_diag_words(inout o: ChunkSeq[u64], in d: D, from: u64) {
-    o.push(wrapping_sub(d.diags.len(), from));
-    for i in from..d.diags.len() {
-        let r = d.diags.row(i);
-        put_text_words(inout o, in d.diags.text[r.code_a..r.msg_a]);
-        put_text_words(inout o, in d.diags.text[r.msg_a..r.msg_b]);
-        o.push(r.start);
-        o.push(r.stop);
-        put_text_words(inout o, in d.diags.text[r.help_a..r.end]);
-        o.push(widen_u64(r.rn));
-        for k in 0..widen_u64(r.rn) {
-            match d.diags.rel.try_get(wrapping_add(widen_u64(r.ra), k)) {
-                Option::Some(l) => {
-                    o.push(l.start);
-                    o.push(l.stop);
-                    put_text_words(inout o, in d.diags.text[l.a..l.b]);
+fn put_diag_words(inout out: ChunkSeq[u64], in ctx: D, from: u64) {
+    out.push(wrapping_sub(ctx.diags.len(), from));
+    for i in from..ctx.diags.len() {
+        let diag = ctx.diags.row(i);
+        put_text_words(inout out, in ctx.diags.text[diag.code_a..diag.msg_a]);
+        put_text_words(inout out, in ctx.diags.text[diag.msg_a..diag.msg_b]);
+        out.push(diag.start);
+        out.push(diag.stop);
+        put_text_words(inout out, in ctx.diags.text[diag.help_a..diag.end]);
+        out.push(widen_u64(diag.rn));
+        for k in 0..widen_u64(diag.rn) {
+            match ctx.diags.rel.try_get(wrapping_add(widen_u64(diag.ra), k)) {
+                Option::Some(label) => {
+                    out.push(label.start);
+                    out.push(label.stop);
+                    put_text_words(inout out, in ctx.diags.text[label.a..label.b]);
                 },
                 Option::None => {
-                    o.push(0);
-                    o.push(0);
-                    o.push(0);
+                    out.push(0);
+                    out.push(0);
+                    out.push(0);
                 },
             }
         }
@@ -318,72 +334,72 @@ fn put_diag_words(inout o: ChunkSeq[u64], in d: D, from: u64) {
 }
 
 fn read_input(in input: Slice[u8], base: u64) -> D {
-    let mut r = word_reader();
-    let a = read_ast_words(inout r, in input);
-    d_new(a, base)
+    let mut reader = word_reader();
+    let ast = read_ast_words(inout reader, in input);
+    d_new(ast, base)
 }
 
 // `dyn_fn::lower` of the module in `input` with span base `base`.
 pub fn dyn_fn_bytes(in input: Slice[u8], base: u64) -> ChunkSeq[u64] {
-    let mut d = read_input(in input, base);
-    let ok = lower_fn_objects(inout d);
-    let mut o = ChunkSeq::new[u64]();
-    o.push(if ok { 1 } else { 0 });
-    put_diag_words(inout o, in d, 0);
+    let mut ctx = read_input(in input, base);
+    let ok = lower_fn_objects(inout ctx);
+    let mut out = ChunkSeq::new[u64]();
+    out.push(if ok { 1 } else { 0 });
+    put_diag_words(inout out, in ctx, 0);
     if !ok {
-        return o;
+        return out;
     }
-    o.reserve(wrapping_add(wrapping_mul(d.ast.exprs.len(), 8), 1024));
-    put_ast_words(inout o, in d.ast);
-    o.push(d.next_span);
-    let n = d.origins.len() / 3;
-    o.push(n);
-    for i in 0..d.origins.len() {
-        o.push(u64_at(in d.origins, i));
+    out.reserve(wrapping_add(wrapping_mul(ctx.ast.exprs.len(), 8), 1024));
+    put_ast_words(inout out, in ctx.ast);
+    out.push(ctx.next_span);
+    let n = ctx.origins.len() / 3;
+    out.push(n);
+    for i in 0..ctx.origins.len() {
+        out.push(u64_at(in ctx.origins, i));
     }
-    o
+    out
 }
 
 // `dyn_trait::lower` of the module in `input`.
 pub fn dyn_trait_bytes(in input: Slice[u8]) -> ChunkSeq[u64] {
-    let mut d = read_input(in input, 0);
-    let ok = lower_dyn(inout d);
-    let mut o = ChunkSeq::new[u64]();
-    o.push(if ok { 1 } else { 0 });
-    put_diag_words(inout o, in d, 0);
+    let mut ctx = read_input(in input, 0);
+    let ok = lower_dyn(inout ctx);
+    let mut out = ChunkSeq::new[u64]();
+    out.push(if ok { 1 } else { 0 });
+    put_diag_words(inout out, in ctx, 0);
     if !ok {
-        return o;
+        return out;
     }
-    o.reserve(wrapping_add(wrapping_mul(d.ast.exprs.len(), 8), 1024));
-    put_ast_words(inout o, in d.ast);
+    out.reserve(wrapping_add(wrapping_mul(ctx.ast.exprs.len(), 8), 1024));
+    put_ast_words(inout out, in ctx.ast);
     let mut live: u64 = 0;
-    for i in 0..d.p_owner.len() {
-        if u8_at(in d.p_live, i) == 1 {
+    for i in 0..ctx.param_owner.len() {
+        if u8_at(in ctx.param_live, i) == 1 {
             live = inc(live);
         }
     }
-    o.push(live);
-    for i in 0..d.p_owner.len() {
-        if u8_at(in d.p_live, i) == 1 {
-            o.push(w(u32_at(in d.p_owner, i)));
-            o.push(w(u32_at(in d.p_g, i)));
+    out.push(live);
+    for i in 0..ctx.param_owner.len() {
+        if u8_at(in ctx.param_live, i) == 1 {
+            out.push(w(u32_at(in ctx.param_owner, i)));
+            out.push(w(u32_at(in ctx.param_generic, i)));
         }
     }
-    o.push(d.fwd.len() / 10);
-    for i in 0..d.fwd.len() {
-        o.push(u64_at(in d.fwd, i));
+    out.push(ctx.forwards.len() / 10);
+    for i in 0..ctx.forwards.len() {
+        out.push(u64_at(in ctx.forwards, i));
     }
-    let mut b = ChunkSeq::with_capacity[u32](d.boxed.len());
-    for i in 0..d.boxed.len() {
-        b.push(u32_at(in d.boxed, i));
+    let mut sorted = ChunkSeq::with_capacity[u32](ctx.boxed.len());
+    for i in 0..ctx.boxed.len() {
+        sorted.push(u32_at(in ctx.boxed, i));
     }
     // `sort_syms` also drops repeats.
-    sort_syms(in d.ast, inout b);
-    o.push(b.len());
-    for i in 0..b.len() {
-        o.push(w(u32_at(in b, i)));
+    sort_syms(in ctx.ast, inout sorted);
+    out.push(sorted.len());
+    for i in 0..sorted.len() {
+        out.push(w(u32_at(in sorted, i)));
     }
-    o
+    out
 }
 
 // The harness entries: the same, with the words as a string's bytes.

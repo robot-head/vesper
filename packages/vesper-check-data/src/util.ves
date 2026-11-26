@@ -1,52 +1,52 @@
 // Helpers every table uses. Arithmetic on table indices stays far below
 // 2^32 and uses wrapping_* (checked `+` is a Fail effect).
 
-pub fn inc(x: u64) -> u64 {
-    wrapping_add(x, 1)
+pub fn inc(value: u64) -> u64 {
+    wrapping_add(value, 1)
 }
 
 pub fn add(a: u64, b: u64) -> u64 {
     wrapping_add(a, b)
 }
 
-pub fn w(x: u32) -> u64 {
-    widen_u64(x)
+pub fn w(value: u32) -> u64 {
+    widen_u64(value)
 }
 
-pub fn n32(x: u64) -> u32 {
-    wrapping_u32(x)
+pub fn n32(value: u64) -> u32 {
+    wrapping_u32(value)
 }
 
-pub fn u32_at(in s: ChunkSeq[u32], i: u64) -> u32 {
-    match s.try_get(i) {
-        Option::Some(v) => v,
+pub fn u32_at(in seq: ChunkSeq[u32], i: u64) -> u32 {
+    match seq.try_get(i) {
+        Option::Some(value) => value,
         Option::None => 0,
     }
 }
 
-pub fn u64_at(in s: ChunkSeq[u64], i: u64) -> u64 {
-    match s.try_get(i) {
-        Option::Some(v) => v,
+pub fn u64_at(in seq: ChunkSeq[u64], i: u64) -> u64 {
+    match seq.try_get(i) {
+        Option::Some(value) => value,
         Option::None => 0,
     }
 }
 
-pub fn u8_at(in s: ChunkSeq[u8], i: u64) -> u8 {
-    match s.try_get(i) {
-        Option::Some(v) => v,
+pub fn u8_at(in seq: ChunkSeq[u8], i: u64) -> u8 {
+    match seq.try_get(i) {
+        Option::Some(value) => value,
         Option::None => 0,
     }
 }
 
-pub fn copy_seq[T: mod copy](in s: ChunkSeq[T]) -> ChunkSeq[T] {
-    let n = s.len();
+pub fn copy_seq[T: mod copy](in seq: ChunkSeq[T]) -> ChunkSeq[T] {
+    let n = seq.len();
     if n == 0 {
         return ChunkSeq::new[T]();
     }
     let mut out = ChunkSeq::with_capacity[T](n);
     for i in 0..n {
-        match s.try_get(i) {
-            Option::Some(v) => out.push(v),
+        match seq.try_get(i) {
+            Option::Some(value) => out.push(value),
             Option::None => {},
         }
     }
@@ -55,40 +55,40 @@ pub fn copy_seq[T: mod copy](in s: ChunkSeq[T]) -> ChunkSeq[T] {
 
 // FNV-1a over a 64-bit word: the digest every census task folds its
 // results into, matched bit for bit by the Rust harness.
-pub fn fold(h: u64, x: u64) -> u64 {
-    wrapping_mul(h ^ x, 1099511628211)
+pub fn fold(hash: u64, word: u64) -> u64 {
+    wrapping_mul(hash ^ word, 1099511628211)
 }
 
-pub fn fold_bytes(h: u64, in b: Slice[u8]) -> u64 {
-    let mut x = h;
-    for i in 0..b.len() {
-        let c = match b.try_get(i) {
-            Option::Some(c) => c,
+pub fn fold_bytes(seed: u64, in bytes: Slice[u8]) -> u64 {
+    let mut hash = seed;
+    for i in 0..bytes.len() {
+        let byte = match bytes.try_get(i) {
+            Option::Some(byte) => byte,
             Option::None => 0,
         };
-        x = fold(x, widen_u64(c));
+        hash = fold(hash, widen_u64(byte));
     }
-    fold(x, 255)
+    fold(hash, 255)
 }
 
-pub fn push_decimal(inout out: ChunkSeq[u8], v: u64) {
-    if v >= 10 {
-        push_decimal(inout out, v / 10);
+pub fn push_decimal(inout out: ChunkSeq[u8], value: u64) {
+    if value >= 10 {
+        push_decimal(inout out, value / 10);
     }
-    out.push(wrapping_u8(wrapping_add(v % 10, 48)));
+    out.push(wrapping_u8(wrapping_add(value % 10, 48)));
 }
 
-pub fn push_signed(inout out: ChunkSeq[u8], v: i64) {
-    if v < 0 {
+pub fn push_signed(inout out: ChunkSeq[u8], value: i64) {
+    if value < 0 {
         out.push(45);
-        push_decimal(inout out, wrapping_u64(wrapping_neg_i64(v)));
+        push_decimal(inout out, wrapping_u64(wrapping_neg_i64(value)));
     } else {
-        push_decimal(inout out, wrapping_u64(v));
+        push_decimal(inout out, wrapping_u64(value));
     }
 }
 
-pub fn inc32(x: u32) -> u32 {
-    wrapping_add(x, 1)
+pub fn inc32(value: u32) -> u32 {
+    wrapping_add(value, 1)
 }
 
 // `u32::MAX`: an absent index or symbol in every table.
@@ -98,40 +98,40 @@ pub fn stage2_heap_mark() -> u64 {
     0
 }
 
-pub fn stage2_heap_reset(m: u64) {
-    let _ = m;
+pub fn stage2_heap_reset(mark: u64) {
+    let _ = mark;
 }
 
-pub fn stage2_heap_swap(m: u64) -> u64 {
-    let _ = m;
+pub fn stage2_heap_swap(mark: u64) -> u64 {
+    let _ = mark;
     0
 }
 
-// `b` as words: its byte length, then its bytes eight per word,
+// `bytes` as words: its byte length, then its bytes eight per word,
 // little-endian, the last word zero-padded (`pack_text`'s layout).
-pub fn put_text_words(inout out: ChunkSeq[u64], in b: Slice[u8]) {
-    let n = b.len();
+pub fn put_text_words(inout out: ChunkSeq[u64], in bytes: Slice[u8]) {
+    let n = bytes.len();
     out.push(n);
-    let full = n >> 3;
-    for j in 0..full {
-        let x = match b.try_read_u64_le(j << 3) {
-            Option::Some(x) => x,
+    let full_words = n >> 3;
+    for j in 0..full_words {
+        let word = match bytes.try_read_u64_le(j << 3) {
+            Option::Some(word) => word,
             Option::None => 0,
         };
-        out.push(x);
+        out.push(word);
     }
-    let at = full << 3;
-    if at < n {
-        let mut x: u64 = 0;
-        let mut k: u64 = 0;
-        for i in at..n {
-            let c = match b.try_get(i) {
-                Option::Some(c) => widen_u64(c),
+    let tail_start = full_words << 3;
+    if tail_start < n {
+        let mut word: u64 = 0;
+        let mut byte_index: u64 = 0;
+        for i in tail_start..n {
+            let byte = match bytes.try_get(i) {
+                Option::Some(byte) => widen_u64(byte),
                 Option::None => 0,
             };
-            x = x | wrapping_shl_u64(c, wrapping_u32(k << 3));
-            k = wrapping_add(k, 1);
+            word = word | wrapping_shl_u64(byte, wrapping_u32(byte_index << 3));
+            byte_index = wrapping_add(byte_index, 1);
         }
-        out.push(x);
+        out.push(word);
     }
 }

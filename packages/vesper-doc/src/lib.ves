@@ -40,10 +40,7 @@ pub struct Reader {
 }
 
 pub fn read_word(inout r: Reader, in b: Slice[u8]) -> u64 {
-    let v = match b.try_read_u64_le(r.pos) {
-        Option::Some(v) => v,
-        Option::None => 0,
-    };
+    let v = b.try_read_u64_le(r.pos).unwrap_or(0);
     r.pos = wrapping_add(r.pos, 8);
     v
 }

@@ -13,86 +13,88 @@ pub fn new_encoder(limit: u64) -> Encoder {
     }
 }
 
-pub fn put_bytes(inout e: Encoder, in data: Slice[u8]) eff [Fail[VsysError]] {
+pub fn put_bytes(inout encoder: Encoder, in data: Slice[u8]) eff [Fail[VsysError]] {
     let n = data.len();
     let max_u32: u64 = 4294967295;
     if n > max_u32 {
         return fail_vsys(err_limit(), 0, 0, 200);
     }
-    let cur = e.out.len();
+    let out_len = encoder.out.len();
     let needed = wrapping_add(4, n);
-    if wrapping_add(cur, needed) > e.limit {
+    if wrapping_add(out_len, needed) > encoder.limit {
         return fail_vsys(err_limit(), 0, 0, 201);
     }
     let len32 = wrapping_u32(n);
-    e.out.push(wrapping_u8(len32 & 255));
-    e.out.push(wrapping_u8(wrapping_shr_u32(len32, 8) & 255));
-    e.out.push(wrapping_u8(wrapping_shr_u32(len32, 16) & 255));
-    e.out.push(wrapping_u8(wrapping_shr_u32(len32, 24) & 255));
-    e.out.extend(in data);
+    encoder.out.push(wrapping_u8(len32 & 255));
+    encoder.out.push(wrapping_u8(wrapping_shr_u32(len32, 8) & 255));
+    encoder.out.push(wrapping_u8(wrapping_shr_u32(len32, 16) & 255));
+    encoder.out.push(wrapping_u8(wrapping_shr_u32(len32, 24) & 255));
+    encoder.out.extend(in data);
 }
 
-pub fn put_str(inout e: Encoder, in s: Str) eff [Fail[VsysError]] {
-    put_bytes(inout e, in s.as_bytes());
+pub fn put_str(inout encoder: Encoder, in text: Str) eff [Fail[VsysError]] {
+    put_bytes(inout encoder, in text.as_bytes());
 }
 
-pub fn put_u16(inout e: Encoder, v: u16) eff [Fail[VsysError]] {
+pub fn put_u16(inout encoder: Encoder, value: u16) eff [Fail[VsysError]] {
     let mut buf: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](2);
-    buf.push(wrapping_u8(v & 255));
-    buf.push(wrapping_u8(wrapping_shr_u16(v, 8) & 255));
-    put_bytes(inout e, in buf.as_slice());
+    buf.push(wrapping_u8(value & 255));
+    buf.push(wrapping_u8(wrapping_shr_u16(value, 8) & 255));
+    put_bytes(inout encoder, in buf.as_slice());
 }
 
-pub fn put_count(inout e: Encoder, v: u64) eff [Fail[VsysError]] {
+pub fn put_count(inout encoder: Encoder, count: u64) eff [Fail[VsysError]] {
     let mut buf: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](8);
-    let mut x = v;
+    let mut rest = count;
     for i in 0..8 {
-        buf.push(wrapping_u8(x & 255));
-        x = wrapping_shr_u64(x, 8);
+        buf.push(wrapping_u8(rest & 255));
+        rest = wrapping_shr_u64(rest, 8);
     }
-    put_bytes(inout e, in buf.as_slice());
+    put_bytes(inout encoder, in buf.as_slice());
 }
 
-pub fn put_u128_u64(inout e: Encoder, v: u64) eff [Fail[VsysError]] {
+pub fn put_u128_u64(inout encoder: Encoder, value: u64) eff [Fail[VsysError]] {
     let mut buf: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](16);
-    let mut x = v;
+    let mut rest = value;
     for i in 0..8 {
-        buf.push(wrapping_u8(x & 255));
-        x = wrapping_shr_u64(x, 8);
+        buf.push(wrapping_u8(rest & 255));
+        rest = wrapping_shr_u64(rest, 8);
     }
     for i in 0..8 {
         buf.push(0);
     }
-    put_bytes(inout e, in buf.as_slice());
+    put_bytes(inout encoder, in buf.as_slice());
 }
 
-pub fn put_decimal_const(inout e: Encoder, neg: bool, mag: u64) eff [Fail[VsysError]] {
-    let mut tmp: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    if mag == 0 {
-        tmp.push(48);
-        return put_bytes(inout e, in tmp.as_slice());
+pub fn put_decimal_const(inout encoder: Encoder, negative: bool, magnitude: u64) eff [
+    Fail[VsysError]
+] {
+    let mut text: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    if magnitude == 0 {
+        text.push(48);
+        return put_bytes(inout encoder, in text.as_slice());
     }
-    let mut x = mag;
-    let mut rev: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut rest = magnitude;
+    let mut reversed: ChunkSeq[u8] = ChunkSeq::new[u8]();
     loop {
-        if x == 0 {
+        if rest == 0 {
             break;
         }
-        let d = x % 10;
-        rev.push(wrapping_add(wrapping_u8(d), 48));
-        x = x / 10;
+        let digit = rest % 10;
+        reversed.push(wrapping_add(wrapping_u8(digit), 48));
+        rest = rest / 10;
     }
-    if neg {
-        tmp.push(45);
+    if negative {
+        text.push(45);
     }
-    let mut k = rev.len();
+    let mut pos = reversed.len();
     loop {
-        if k == 0 {
+        if pos == 0 {
             break;
         }
-        k = wrapping_sub(k, 1);
-        let ch = rev.try_get(k).unwrap_or(48);
-        tmp.push(ch);
+        pos = wrapping_sub(pos, 1);
+        let digit_char = reversed.try_get(pos).unwrap_or(48);
+        text.push(digit_char);
     }
-    put_bytes(inout e, in tmp.as_slice());
+    put_bytes(inout encoder, in text.as_slice());
 }

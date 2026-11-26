@@ -10,7 +10,7 @@ use vesper_silicon::atomic::{AtomicPolicy, check_atomic};
 
 use vesper_silicon::stack::{Program, StackPolicy, StackRoot};
 
-use super::runtime::Runtime;
+use super::runtime::{BACKEND_NAMESPACE, Runtime};
 use super::{FreestandingError, FreestandingTarget, StackRootSummary};
 use crate::native::EmittedFunction;
 
@@ -104,11 +104,11 @@ pub fn analyse(
     let mut symbol_of: BTreeMap<String, String> = BTreeMap::new();
     let mut functions = Vec::new();
     for f in emitted {
-        let name = format!("u0:{}", f.func_id);
+        let name = format!("u{BACKEND_NAMESPACE}:{}", f.func_id);
         symbol_of.insert(name, f.symbol.clone());
         for (id, callee) in &f.callees {
             symbol_of
-                .entry(format!("u0:{id}"))
+                .entry(format!("u{BACKEND_NAMESPACE}:{id}"))
                 .or_insert_with(|| callee.clone());
         }
         functions.push(f.function.clone());

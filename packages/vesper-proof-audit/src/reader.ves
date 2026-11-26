@@ -10,10 +10,8 @@
 // The error texts name the field but not serde_json's line and column.
 use @vesper/serde::{Doc, Error, Kind, Limits, Token, doc_new, doc_parse};
 use @vesper/serde::index::{next_decoded, tok};
-use self::strs::{
-    DIGIT_NINE, DIGIT_ZERO, LOWER_T, Strs, count, end, push, put_str, same, same_str, start,
-    strs_new
-};
+use @vesper-std/bytes::ascii::{DIGIT_NINE, DIGIT_ZERO, LOWER_T};
+use self::strs::{Strs, count, end, push, put_str, same, same_str, start, strs_new};
 
 // serde_json's recursion limit of 128: the tape refuses a container that
 // opens at depth 127, as serde_json refuses the 128th.
