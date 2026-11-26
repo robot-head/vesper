@@ -3288,8 +3288,9 @@ fn capture(
     if src.len() > lim.max_input_bytes {
         fail(E_INPUT);
     }
-    let t = gate(in src, in lim, inout w);
-    let first = once_tokens(in src, t, in lim, inout w);
+    let g = gate_once(in src, in lim, inout w);
+    let first = once_tokens(in src, g.t, in lim, inout w, g.opaque);
+    let opaque = first.opaque;
     let mut m = model_new();
     let f = project(in first.doc, first.root, in src, in pl, inout m);
     if f.code != P_NONE {
@@ -3297,15 +3298,17 @@ fn capture(
     }
     let first_nodes = first.nodes;
     let output = first.out;
-    let ts = gate(in src, in lim, inout w);
-    let to = gate(in output.as_slice(), in lim, inout w);
+    let ts = gate(in src, in lim, inout w, opaque);
+    let to = gate(in output.as_slice(), in lim, inout w, opaque);
     if !same_pieces(in src, in ts, in output.as_slice(), in to) {
         fail(E_CONSERVATION);
     }
-    let to2 = gate(in output.as_slice(), in lim, inout w);
-    let again = once_tokens(in output.as_slice(), to2, in lim, inout w);
+    let g2 = gate_once(in output.as_slice(), in lim, inout w);
+    let again = once_tokens(in output.as_slice(), g2.t, in lim, inout w, g2.opaque);
     let second = again.out;
-    if second.len() != output.len() || !same_words(in first_nodes, in again.nodes) {
+    if second.len() != output.len()
+        || !same_words(in first_nodes, in again.nodes)
+        || again.opaque != opaque {
         fail(E_IDEMPOTENT);
     }
     for i in 0..output.len() {
