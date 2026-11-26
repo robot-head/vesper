@@ -1,9 +1,5 @@
 // The WASI environment and filesystem interfaces supply these operations.
-use @vesper-std/fs::{
-    IoError,
-    raise_io,
-    raise_kind
-};
+use @vesper-std/fs::{IoError, raise_io, raise_kind};
 
 // The host's copy-out protocol: a call returns the length `n` (negative
 // for none) and copies only when `buf` is big enough. Whether `buf` had to

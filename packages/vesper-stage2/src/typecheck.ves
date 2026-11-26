@@ -2,56 +2,15 @@
 // `(start, end)`) for `@vesper/place-ir-lower::ast::Ast` using
 // `@vesper/check-data` and `@vesper/check-core-typing`.
 
-use @vesper/wasm-backend::tables::{
-    stage2_heap_mark,
-    stage2_heap_reset,
-    stage2_heap_swap
-};
-use @vesper/check-core-typing::relations::{
-    infer
-};
-use @vesper/check-data::names::{
-    Names,
-    names_new
-};
-use @vesper/check-data::types::{
-    TyKind,
-    Types,
-    Vars,
-    types_new,
-    default_type,
-    substitute,
-    vars_new
-};
-use @vesper/check-data::util::{
-    n32,
-    u32_at,
-    u64_at,
-    w
-};
-use @vesper/check-data::world::{
-    Known,
-    SpanRow,
-    World,
-    constructor,
-    field_step,
-    world_new
-};
-use @vesper/place-ir::codes::{
-    Lit,
-    Pat
-};
-use @vesper/wasm-backend::ir::{
-    CallRow,
-    Pair
-};
-use @vesper/place-ir-lower::ast::{
-    Ast,
-    Ex,
-    FnR,
-    Pm,
-    Pt
-};
+use @vesper/wasm-backend::tables::{stage2_heap_mark, stage2_heap_reset, stage2_heap_swap};
+use @vesper/check-core-typing::relations::{infer};
+use @vesper/check-data::names::{Names, names_new};
+use @vesper/check-data::types::{TyKind, Types, Vars, types_new, default_type, substitute, vars_new};
+use @vesper/check-data::util::{n32, u32_at, u64_at, w};
+use @vesper/check-data::world::{Known, SpanRow, World, constructor, field_step, world_new};
+use @vesper/place-ir::codes::{Lit, Pat};
+use @vesper/wasm-backend::ir::{CallRow, Pair};
+use @vesper/place-ir-lower::ast::{Ast, Ex, FnR, Pm, Pt};
 
 const NONE32: u32 = 4294967295;
 const NONE64: u64 = 18446744073709551615;

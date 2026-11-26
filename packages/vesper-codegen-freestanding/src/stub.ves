@@ -8,23 +8,9 @@
 // DAIFSet bit 1. tests/self_host_freestanding.rs checks both against the
 // Rust functions.
 
-use self::codes::{
-    Absent,
-    Em,
-    RelType,
-    RvOpcode
-};
-use self::util::{
-    add,
-    grow,
-    push32,
-    push64,
-    get32,
-    put32
-};
-use self::obj::{
-    write_stub_object
-};
+use self::codes::{Absent, Em, RelType, RvOpcode};
+use self::util::{add, grow, push32, push64, get32, put32};
+use self::obj::{write_stub_object};
 
 enum Target: _ {
     Riscv64 = 0,

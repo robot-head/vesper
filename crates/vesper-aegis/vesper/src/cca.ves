@@ -33,15 +33,8 @@ use self::cbor::{
     str_len,
     text_eq_s
 };
-use self::cose::{
-    R_MALFORMED_COSE_SIGN1,
-    parse_sign1_node
-};
-use self::reader::{
-    k_over_budget,
-    put,
-    raise
-};
+use self::cose::{R_MALFORMED_COSE_SIGN1, parse_sign1_node};
+use self::reader::{k_over_budget, put, raise};
 
 // CBOR_FIELDS of src/port.rs.
 const F_REALM_CLAIMS: u64 = 0;

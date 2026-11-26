@@ -15,16 +15,8 @@
 //
 // - graph.ves: successors, predecessors, dominators and loops.
 
-use self::graph::{
-    Graph,
-    graph
-};
-use @vesper/clif::{
-    Func,
-    read_func,
-    u32_at,
-    w
-};
+use self::graph::{Graph, graph};
+use @vesper/clif::{Func, read_func, u32_at, w};
 use @vesper/clif::codes::{
     E_END,
     E_OUTLINE,

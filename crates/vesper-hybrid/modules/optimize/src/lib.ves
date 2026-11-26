@@ -12,11 +12,7 @@
 
 // @export abi 4
 
-use @vesper/optimize::{
-    optimize_propose_split,
-    optimize_verify_split,
-    pack_text
-};
+use @vesper/optimize::{optimize_propose_split, optimize_verify_split, pack_text};
 
 // The layout version of both entries.
 pub fn format() -> u64 {

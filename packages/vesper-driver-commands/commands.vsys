@@ -1,5 +1,7 @@
 // @vesper/driver-commands's import (self-hosting SH5 lane 13, #1336): the
-// hybrid compiler's Rust, crates/vesper-hybrid/src/commands.rs (`host`).
+// hybrid compiler's Rust, crates/vesper-hybrid/src/commands.rs (`host`):
+// the command engines the Vesper layers call (the routing in front of them
+// is over @vesper-std since #1996).
 // Text comes back with the copy-out protocol of @vesper-std: a call
 // returns the length `n` (negative for none) and copies only when `buf`
 // is big enough.
@@ -8,10 +10,6 @@ sys library HybridCommands (
     link = "static", name = "vesper_hybrid",
     artifact = "blake3:0000000000000000000000000000000000000000000000000000000000000000"
 ) {
-    fn hc_print(stream: u32, nocapture in text: CSlice[u8]) -> ForeignVal[Unit];
-    fn hc_help() -> ForeignVal[Unit];
-    fn hc_text(which: u32, index: u64, nocapture inout buf: CSlice[u8]) -> ForeignVal[i64];
-    fn hc_executable(nocapture in path: CSlice[u8]) -> ForeignVal[u32];
     fn hc_fmt_file(nocapture in path: CSlice[u8], flags: u32, nocapture inout stats: CSlice[u64]) -> ForeignVal[u32];
     fn hc_fmt_error(nocapture inout buf: CSlice[u8]) -> ForeignVal[i64];
     fn hc_graph_run(

@@ -1,21 +1,6 @@
 // Sequence, sort, search and text helpers.
-use self::codes::{
-    Event,
-    Prop,
-    ValueTag,
-    WidgetKind,
-    NONE_ID
-};
-use self::{
-    Lim,
-    MNode,
-    MProp,
-    MSub,
-    Op,
-    TNode,
-    TProp,
-    TSub
-};
+use self::codes::{Event, Prop, ValueTag, WidgetKind, NONE_ID};
+use self::{Lim, MNode, MProp, MSub, Op, TNode, TProp, TSub};
 
 // The White_Space code points (Unicode PropList.txt, as Rust's
 // char::is_whitespace): TAB through CARRIAGE_RETURN and EN_QUAD through

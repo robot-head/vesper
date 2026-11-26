@@ -8,12 +8,7 @@
 
 // @export abi 4
 
-use @vesper/doc::{
-    format,
-    linked_page,
-    pretty_json,
-    static_page
-};
+use @vesper/doc::{format, linked_page, pretty_json, static_page};
 
 // The request and result layout version; `vesper_doc::swap::FORMAT`.
 pub fn doc_format() -> u64 {

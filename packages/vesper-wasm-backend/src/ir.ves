@@ -5,28 +5,11 @@
 // the facts the backend reads from closure and handler expressions (the
 // pool keeps those expressions on the Rust side).
 
-use @vesper/place-ir::codes::{
-    Lit,
-    Pat
-};
-use @vesper/check-data::util::{
-    add,
-    inc,
-    n32,
-    u32_at,
-    u64_at,
-    w
-};
-use @vesper/check-data::world::{
-    set_by_symbol
-};
-use @vesper/check-data::input::{
-    Ctx,
-    Reader
-};
-use @vesper/place-ir::{
-    Program
-};
+use @vesper/place-ir::codes::{Lit, Pat};
+use @vesper/check-data::util::{add, inc, n32, u32_at, u64_at, w};
+use @vesper/check-data::world::{set_by_symbol};
+use @vesper/check-data::input::{Ctx, Reader};
+use @vesper/place-ir::{Program};
 
 const NONE32: u32 = 4294967295;
 

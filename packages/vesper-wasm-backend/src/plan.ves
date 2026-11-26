@@ -8,14 +8,8 @@
 // few maps the Rust code iterates in key order are sorted by the names'
 // bytes (`cmp_syms`), as `String`'s `Ord` is.
 
-use @vesper/place-ir::{
-    program_new
-};
-use @vesper/place-ir::codes::{
-    Op,
-    Pat,
-    Term
-};
+use @vesper/place-ir::{program_new};
+use @vesper/place-ir::codes::{Op, Pat, Term};
 use @vesper/check-data::util::{
     add,
     inc,
@@ -27,10 +21,7 @@ use @vesper/check-data::util::{
     u64_at,
     w
 };
-use @vesper/check-data::names::{
-    Names,
-    names_new
-};
+use @vesper/check-data::names::{Names, names_new};
 use @vesper/check-data::types::{
     TyKind,
     TyPass,
@@ -42,33 +33,10 @@ use @vesper/check-data::types::{
     types_new,
     vars_new
 };
-use @vesper/check-data::world::{
-    Adt,
-    Known,
-    Variant,
-    World,
-    set_by_symbol,
-    world_new
-};
-use @vesper/check-data::input::{
-    Ctx
-};
-use self::err::{
-    WErr,
-    werr,
-    werr_syms
-};
-use self::ir::{
-    EffInst,
-    ExprFactKind,
-    Facts,
-    FnInfo,
-    Ir,
-    Sig,
-    empty_facts,
-    ir_new,
-    pattern_end
-};
+use @vesper/check-data::world::{Adt, Known, Variant, World, set_by_symbol, world_new};
+use @vesper/check-data::input::{Ctx};
+use self::err::{WErr, werr, werr_syms};
+use self::ir::{EffInst, ExprFactKind, Facts, FnInfo, Ir, Sig, empty_facts, ir_new, pattern_end};
 
 const NONE32: u32 = 4294967295;
 const NONE64: u64 = 18446744073709551615;

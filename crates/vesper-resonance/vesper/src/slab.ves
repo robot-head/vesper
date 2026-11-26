@@ -6,12 +6,8 @@
 // property of its address) and lends it as bits with its base offset. A
 // delay line's metadata is `SlabWords::Line` words (`Slot`): offset, delay,
 // capacity, stride and head.
-use self::{
-    SlabFault
-};
-use self::seqs::{
-    at
-};
+use self::{SlabFault};
+use self::seqs::{at};
 
 const ISIZE_MAX: u64 = 9223372036854775807;
 const U64_MAX: u64 = 18446744073709551615;

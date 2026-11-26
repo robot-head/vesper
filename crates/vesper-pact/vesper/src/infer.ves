@@ -7,9 +7,7 @@
 // Unification results: 0 success, 1 mismatch, 2 ambiguous (rigid
 // projections with inference variables), 3 duplicate label (key in
 // s.dkey).
-use self::{
-    S
-};
+use self::{S};
 use self::term::{
     add,
     dec,
@@ -42,11 +40,7 @@ use self::term::{
     vinf,
     word_at
 };
-use self::fold::{
-    cx_val,
-    occurs,
-    resolve
-};
+use self::fold::{cx_val, occurs, resolve};
 
 pub fn new_var(inout cx: ChunkSeq[u64], kind: u64) -> u64 {
     let i = cx.len();

@@ -8,9 +8,7 @@
 // inference), whether it contains a projection, and whether it contains a
 // row whose labels are not strictly sorted by key; folds skip subterms
 // without the forms they rewrite.
-use self::{
-    S
-};
+use self::{S};
 
 // 64-bit FNV-1a offset basis and prime (node hashes).
 const FNV_OFFSET: u64 = 14695981039346656037;

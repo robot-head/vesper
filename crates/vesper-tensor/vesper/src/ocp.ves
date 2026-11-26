@@ -1,10 +1,6 @@
 // Module ocp of @vesper/tensor (see lib.ves): OCP FP8 E4M3FN / E5M2 element
 // codes, the MXFP4 E8M0 scale and GGML's `nearest_int` (src/formats.rs).
-use self::num::{
-    clz32,
-    is_finite,
-    is_nan
-};
+use self::num::{clz32, is_finite, is_nan};
 
 // Binary64 exponent bias and trailing significand width (IEEE 754-2019).
 const F64_BIAS: i64 = 1023;

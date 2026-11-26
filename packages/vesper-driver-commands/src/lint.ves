@@ -2,20 +2,10 @@
 // in Vesper, delegating package discovery, policy loading, checked lint
 // analysis, and bounded atomic fix replacement (`src/lint_commands.rs`) to
 // `HybridCommands::hc_lint_run`.
-use @vesper/driver::{
-    Args,
-    args_count,
-    eq
-};
-use super::{
-    arg,
-    byte_at,
-    print,
-    fail,
-    stdout_stream
-};
+use @vesper/driver::{Args, args_count, eq};
+use super::{PrintFailed, arg, byte_at, print, fail, stdout_stream};
 
-pub fn run_lint(in args: Args) -> i64 eff [Ffi[HybridCommands]] {
+pub fn run_lint(in args: Args) -> i64 eff [Ffi[StdFs], Ffi[HybridCommands], Fail[PrintFailed]] {
     let n = args_count(in args);
     let mut json = false;
     let mut i: u64 = 1;
@@ -137,7 +127,7 @@ pub fn run_lint(in args: Args) -> i64 eff [Ffi[HybridCommands]] {
 }
 
 fn emit_invalid(json: bool, in error: Slice[u8], has_config: bool, in config: Slice[u8])
-    -> i64 eff [Ffi[HybridCommands]] {
+    -> i64 eff [Ffi[StdFs], Fail[PrintFailed]] {
     if json {
         let mut line: ChunkSeq[u8] = ChunkSeq::new[u8]();
         line.extend(in "{\"config\":".as_bytes());

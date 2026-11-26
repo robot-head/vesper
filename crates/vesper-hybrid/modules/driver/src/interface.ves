@@ -7,9 +7,7 @@
 // Builtins export under `std/core`; traits, conformances, named enum
 // payloads, effectful arrows and the like export as `unsupported`, as the
 // Rust exporter does.
-use @vesper-std/fmt::{
-    write_u64
-};
+use @vesper-std/fmt::{write_u64};
 // The world's declaration stream and its readers (world.ves, #2024).
 use self::world::{
     byte_at,

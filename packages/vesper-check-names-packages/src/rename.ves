@@ -38,12 +38,8 @@ use @vesper/ast::{
     pat_at,
     type_at
 };
-use @vesper-std/collections::flat_table::{
-    FlatTable
-};
-use @vesper-std/arena::{
-    idx_from_raw
-};
+use @vesper-std/collections::flat_table::{FlatTable};
+use @vesper-std/arena::{idx_from_raw};
 use self::state::{
     St,
     at32,
@@ -68,17 +64,8 @@ use self::state::{
     sym_starts,
     w
 };
-use self::load::{
-    adt_at,
-    back,
-    effect_decl_at,
-    fn_at,
-    tr
-};
-use self::resolve::{
-    qualified,
-    unknown_import
-};
+use self::load::{adt_at, back, effect_decl_at, fn_at, tr};
+use self::resolve::{qualified, unknown_import};
 
 fn file(in s: St) -> u32 {
     at32(in s.mod_file, w(s.cur))
@@ -129,9 +116,11 @@ fn resolve(inout s: St, n: u32, start: u32, end: u32, ns: u8) -> u32 {
         },
         Option::None => {},
     }
+    // Variants are values: a type such as `String` is never one, even when
+    // some package's enum has a variant of that spelling.
     match s.var_owner.get(n) {
         Option::Some(owner) => {
-            if !s.targets.contains_key(owner) {
+            if ns != kind_type() && !s.targets.contains_key(owner) {
                 err(inout s, unknown_import(), start, end);
                 let shown = match s.var_shown.get(n) {
                     Option::Some(x) => x,

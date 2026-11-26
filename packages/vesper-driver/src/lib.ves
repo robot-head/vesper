@@ -8,12 +8,8 @@
 // Arguments are one byte arena (`Args`): every argument after the program
 // name, end to end, and the end offset of each. Option values live in the
 // `Options` text arena as spans.
-use self::triple::{
-    parse as parse_triple
-};
-use @vesper-std/fmt::{
-    parse_u64
-};
+use self::triple::{parse as parse_triple};
+use @vesper-std/fmt::{parse_u64};
 
 enum Ascii: _ {
     Plus = 43,

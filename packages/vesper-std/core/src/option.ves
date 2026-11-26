@@ -1,5 +1,30 @@
 // @vesper-std/core::option: combinators over the builtin `Option[T]`.
 
+// The combinators below as methods, so a read can chain:
+//
+//     let x = s.try_get(i).unwrap_or(0);
+impl [T: mod copy] Option[T] {
+    // Whether there is a value.
+    pub fn is_some(self) -> bool {
+        is_some(self)
+    }
+
+    // Whether there is no value.
+    pub fn is_none(self) -> bool {
+        is_none(self)
+    }
+
+    // The value, or `fallback` when there is none.
+    pub fn unwrap_or(self, fallback: T) -> T {
+        unwrap_or(self, fallback)
+    }
+
+    // This option when it has a value, otherwise `other`.
+    pub fn or(self, other: Option[T]) -> Option[T] {
+        or(self, other)
+    }
+}
+
 pub fn is_some[T: mod copy](o: Option[T]) -> bool {
     match o {
         Option::Some(_) => true,
@@ -112,6 +137,17 @@ test {
     // @case absent(Option::None, 7, 7)
     fn test_unwrap_or_u64(input: Option[u64], fallback: u64, expected: u64) -> bool {
         unwrap_or(input, fallback) == expected
+    }
+
+    // @case present(Option::Some(4), Option::Some(9), 4, 4)
+    // @case absent(Option::None, Option::Some(9), 7, 9)
+    // @case both_absent(Option::None, Option::None, 7, 7)
+    fn test_methods_u64(input: Option[u64], other: Option[u64], fallback: u64, expected: u64)
+        -> bool {
+        input.unwrap_or(fallback) == unwrap_or(input, fallback)
+            && input.or(other).unwrap_or(fallback) == expected
+            && input.is_some() == is_some(input)
+            && input.is_none() == is_none(input)
     }
 
     // @case both_present(Option::Some(4), Option::Some(9), true)

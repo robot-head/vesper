@@ -5,9 +5,7 @@
 // shared pool, and types as ids of the check-data arena, so a walk is a
 // loop over indices instead of a `Box` tree.
 
-use @vesper/check-data::input::{
-    Reader
-};
+use @vesper/check-data::input::{Reader};
 
 const NONE32: u32 = 4294967295;
 

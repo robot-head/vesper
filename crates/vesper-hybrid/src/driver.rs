@@ -537,6 +537,13 @@ pub mod host {
         };
     }
 
+    /// One command answered by the Vesper command layers
+    /// (`crate::commands::ANSWERS`).
+    #[unsafe(no_mangle)]
+    pub extern "C" fn hd_commands_answered() {
+        crate::commands::ANSWERS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
     /// The CLI's help (`--help` among a compile command's options).
     #[unsafe(no_mangle)]
     pub extern "C" fn hd_help() {

@@ -40,20 +40,7 @@
 //   [4, open, close, nargs, callee, args..] Call,
 //   [5, keyword, epath path, handler path, body] Handle,
 //   [6, n, items..] Block.
-use self::util::{
-    Code,
-    Node,
-    Out,
-    Tk,
-    Token,
-    W,
-    byte,
-    same_set,
-    set_insert,
-    sq,
-    subset,
-    wd
-};
+use self::util::{Code, Node, Out, Tk, Token, W, byte, same_set, set_insert, sq, subset, wd};
 
 // The rows of `w` and `g` (see above).
 enum Origin: _ {

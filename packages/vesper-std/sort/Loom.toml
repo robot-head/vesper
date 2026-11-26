@@ -6,3 +6,4 @@ capability_ceiling = ["Fail", "Alloc"]
 
 [dependencies]
 "@vesper-std/sugar" = { version = "^0.1", path = "../sugar" }
+"@vesper-std/core" = { version = "^0.1", path = "../core" }

@@ -49,8 +49,7 @@ pub fn stages() -> &'static [Stage] {
     static S: OnceLock<Vec<Stage>> = OnceLock::new();
     S.get_or_init(|| {
         let mut out = vec![];
-        let quiet = std::panic::take_hook();
-        std::panic::set_hook(Box::new(|_| {}));
+        let quiet = quiet_panics();
         for c in corpus().iter().step_by(step()) {
             let w = &c.world;
             let r = std::panic::catch_unwind(|| {
@@ -84,7 +83,7 @@ pub fn stages() -> &'static [Stage] {
                 }
             }
         }
-        std::panic::set_hook(quiet);
+        drop(quiet);
         out
     })
 }
@@ -239,8 +238,7 @@ fn place_ir_callgrind() {
     let write = package().entry("place_ir_words", true);
     // Lowering only (not `stages()`, whose later passes would cost hours
     // under callgrind).
-    let quiet = std::panic::take_hook();
-    std::panic::set_hook(Box::new(|_| {}));
+    let quiet = quiet_panics();
     let owned: Vec<Stage> = corpus()
         .iter()
         .step_by(step())
@@ -255,7 +253,7 @@ fn place_ir_callgrind() {
                 })
         })
         .collect();
-    std::panic::set_hook(quiet);
+    drop(quiet);
     let lowered: Vec<&Stage> = owned.iter().collect();
     let inputs: Vec<(Vec<u8>, ir_words::Pool)> = lowered
         .iter()

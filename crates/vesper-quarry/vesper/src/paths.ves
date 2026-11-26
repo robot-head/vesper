@@ -1,35 +1,10 @@
 // Module paths of @vesper/quarry (see lib.ves).
-use self::{
-    CCol,
-    D,
-    Q
-};
-use self::util::{
-    ceil_div,
-    cw,
-    ex,
-    fail_name,
-    new_d,
-    new_q,
-    node,
-    none
-};
-use self::check::{
-    ex_end
-};
-use self::plan::{
-    decode_plan,
-    has_binding
-};
-use self::values::{
-    dtab,
-    find_data,
-    val_at
-};
-use self::rows::{
-    load_catalog_ex,
-    load_data
-};
+use self::{CCol, D, Q};
+use self::util::{ceil_div, cw, ex, fail_name, new_d, new_q, node, none};
+use self::check::{ex_end};
+use self::plan::{decode_plan, has_binding};
+use self::values::{dtab, find_data, val_at};
+use self::rows::{load_catalog_ex, load_data};
 use self::stats::{
     analyze,
     bound_kind,

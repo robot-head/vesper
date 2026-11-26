@@ -8,24 +8,9 @@
 // object ISA (the shim's job once SH4 lane 1 lends a module), and this
 // module decodes its prologue.
 
-use self::input::{
-    Cx,
-    fw,
-    iw,
-    pw
-};
-use self::stack_bound::{
-    StackGraph,
-    graph_new
-};
-use self::util::{
-    filled,
-    g,
-    put,
-    putn,
-    puts,
-    st
-};
+use self::input::{Cx, fw, iw, pw};
+use self::stack_bound::{StackGraph, graph_new};
+use self::util::{filled, g, put, putn, puts, st};
 
 const EXT_KNOWN: u64 = 3;
 const EXT_LIBCALL: u64 = 2;

@@ -2,27 +2,9 @@
 // field sections are four parallel sequences (stream, Required Insert Count,
 // and the span of their references in `sec_refs`).
 
-use self::{
-    EncoderCore,
-    QpackError,
-    Reason,
-    PrefixError,
-    Huff
-};
-use self::int::{
-    inc,
-    word,
-    byte,
-    max64,
-    max_u64,
-    remove_word,
-    drain_front
-};
-use self::prefix::{
-    decode_int,
-    encode_int,
-    encode_string
-};
+use self::{EncoderCore, QpackError, Reason, PrefixError, Huff};
+use self::int::{inc, word, byte, max64, max_u64, remove_word, drain_front};
+use self::prefix::{decode_int, encode_int, encode_string};
 use self::table::{
     static_exact,
     static_name,
@@ -35,9 +17,7 @@ use self::table::{
     slot_name_is,
     slot_is
 };
-use self::reason::{
-    reason_of
-};
+use self::reason::{reason_of};
 use self::wire::{
     Indexed,
     IndexedPostBase,

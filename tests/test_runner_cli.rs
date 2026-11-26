@@ -757,7 +757,7 @@ fn standard_library_core_and_byte_source_unit_tests_pass() {
         ("packages/vesper-std/bytes/src/lib.ves", 53),
         ("packages/vesper-std/bytes/src/views.ves", 24),
         ("packages/vesper-std/core/src/lib.ves", 23),
-        ("packages/vesper-std/core/src/option.ves", 27),
+        ("packages/vesper-std/core/src/option.ves", 30),
         ("packages/vesper-std/core/src/result.ves", 13),
         ("packages/vesper-std/core/src/saturating.ves", 130),
         ("packages/vesper-std/fmt/src/lib.ves", 62),

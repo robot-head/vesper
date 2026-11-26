@@ -4,13 +4,7 @@
 // `BTreeMap::insert` replaces it, and a failed probe is undone by
 // truncating (`mark`/`undo`) where Rust clones and discards.
 
-use @vesper/check-data::util::{
-    push_decimal,
-    add,
-    inc,
-    u32_at,
-    w
-};
+use @vesper/check-data::util::{push_decimal, add, inc, u32_at, w};
 use self::state::{
     St,
     put,

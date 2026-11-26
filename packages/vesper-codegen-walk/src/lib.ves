@@ -19,62 +19,16 @@
 // by `native_walk_frames`.
 
 use @vesper/check-data::pack_text;
-use @vesper/check-data::util::{
-    add,
-    inc,
-    n32,
-    push_decimal,
-    u32_at,
-    u64_at,
-    u8_at,
-    w
-};
-use @vesper/check-data::names::{
-    Names
-};
-use @vesper/check-data::types::{
-    Types,
-    Vars,
-    default_type,
-    substitute,
-    vars_new,
-    TyKind,
-    TyPass
-};
-use @vesper/check-data::input::{
-    Ctx,
-    Reader,
-    read_ctx
-};
-use @vesper/check-layout::{
-    Layouts,
-    layout_of,
-    layouts_new
-};
-use @vesper/codegen-calls::data::{
-    ParamInfo
-};
-use @vesper/codegen-calls::instances::{
-    Conc,
-    Syms,
-    specialized,
-    syms_new
-};
-use @vesper/place-ir::{
-    FnRow,
-    InstRow,
-    Program,
-    read_program
-};
-use self::frame::{
-    frames_bytes,
-    frames_text
-};
-use @vesper/place-ir::codes::{
-    Op,
-    Pat,
-    Tag
-};
+use @vesper/check-data::util::{add, inc, n32, push_decimal, u32_at, u64_at, u8_at, w};
+use @vesper/check-data::names::{Names};
+use @vesper/check-data::types::{Types, Vars, default_type, substitute, vars_new, TyKind, TyPass};
+use @vesper/check-data::input::{Ctx, Reader, read_ctx};
+use @vesper/check-layout::{Layouts, layout_of, layouts_new};
+use @vesper/codegen-calls::data::{ParamInfo};
+use @vesper/codegen-calls::instances::{Conc, Syms, specialized, syms_new};
+use @vesper/place-ir::{FnRow, InstRow, Program, read_program};
+use self::frame::{frames_bytes, frames_text};
+use @vesper/place-ir::codes::{Op, Pat, Tag};
 
 const NONE32: u32 = 4294967295;
 const NONE64: u64 = 18446744073709551615;

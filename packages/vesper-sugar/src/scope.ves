@@ -1,0 +1,1562 @@
+// `sugar_expand::scope`: exit-aware scope captures, a transliteration of
+// crates/vesper-syntax/src/sugar_expand/scope.rs.
+//
+// A rule that captures the rest of a block as a `scope` binds it with
+// `let exit = $..r;`, runs its cleanup and resumes `exit.resume()` as the
+// block's tail. `lower` reifies the scope's exits (return, break,
+// continue, `?` under an Option result, and the caller's Fail rows) as
+// values of a wrapper loop and handlers, then dispatches them at the
+// resume. The scope body is parsed by the core parser (@vesper/ast
+// `lower_source`); the ambient effect rows and result type come from the
+// surface profile of the whole source (`lower_surface_source`, which does
+// not run the expression macro validation of `parse_expansion_scopes`).
+//
+// Spans are (start, end) pairs in `ChunkSeq[u64]` rows; edits are rows of
+// (start, end, text first, text length, forwarded) over one text pool.
+
+use @vesper/ast::{
+    Ast,
+    ConfNode,
+    EffectDeclNode,
+    EffectNode,
+    EffectsNode,
+    ImplNode,
+    ItemNode,
+    expr_at,
+    list_at,
+    list_len,
+    none,
+    type_at
+};
+use @vesper/ast::lower::{lower_source, lower_surface_source};
+use @vesper-std/arena::{idx_from_raw};
+use @vesper/front::lex::{
+    lex_sugar_raw_with_limits,
+    max_diagnostics,
+    max_source_bytes,
+    max_tokens,
+    token_end,
+    trivia_kind
+};
+use @vesper/front::diag::{diags_new};
+use @vesper/front::kinds::{k_eof};
+use self::flow::{Rd, arg_of, clause_of, fn_of, name_byte, name_is, name_len, stmt_of};
+use self::template::{Caps, add, b8, cap_at, cap_count, inc, sort_in, sub, value_at, w32, w64};
+
+const NONE: u64 = 18446744073709551615;
+const PROBE: Str = "fn __scope_probe() ";
+const PROBE_LEN: u64 = 19;
+
+// `Exit`, in Rust's order.
+const X_NORMAL: u64 = 0;
+const X_RETURN: u64 = 1;
+const X_BREAK: u64 = 2;
+const X_CONTINUE: u64 = 3;
+
+// The outcome of `lower`: a refusal, or the items the expansion adds.
+pub struct Sc {
+    failed: bool,
+    msg: ChunkSeq[u8],
+    items: ChunkSeq[u8]
+}
+
+pub fn sc_ok() -> Sc {
+    Sc {
+        failed: false,
+        msg: ChunkSeq::new[u8](),
+        items: ChunkSeq::new[u8]()
+    }
+}
+
+pub fn sc_err(in m: Slice[u8]) -> Sc {
+    let mut s = sc_ok();
+    s.failed = true;
+    s.msg.extend(in m);
+    s
+}
+
+pub fn sc_err_seq(in m: ChunkSeq[u8]) -> Sc {
+    sc_err(in m.as_slice())
+}
+
+// A lexer refusal: its E0003 message (`LexLimit`'s text).
+pub fn refusal(in d: @vesper/front::Diags) -> Sc {
+    let end = if d.at.len() > 1 {
+        w32(in d.at, 1)
+    } else {
+        d.text.len()
+    };
+    let mut m = ChunkSeq::new[u8]();
+    for j in w32(in d.at, 0)..end {
+        m.push(b8(in d.text, j));
+    }
+    sc_err_seq(in m)
+}
+
+// ---------------------------------------------------------------- spans
+
+fn covers(os: u64, oe: u64, is: u64, ie: u64) -> bool {
+    os <= is && oe >= ie
+}
+
+fn sp_s(in v: ChunkSeq[u64], i: u64) -> u64 {
+    w64(in v, i << 1)
+}
+
+fn sp_e(in v: ChunkSeq[u64], i: u64) -> u64 {
+    w64(in v, inc(i << 1))
+}
+
+fn sp_n(in v: ChunkSeq[u64]) -> u64 {
+    v.len() >> 1
+}
+
+fn sp_push(inout v: ChunkSeq[u64], s: u64, e: u64) {
+    v.push(s);
+    v.push(e);
+}
+
+// `outermost`: sorted by (start, Reverse(end)), the spans no earlier kept
+// span covers.
+fn outermost(in spans: ChunkSeq[u64]) -> ChunkSeq[u64] {
+    let n = sp_n(in spans);
+    let mut order = ChunkSeq::new[u64]();
+    for i in 0..n {
+        // Insertion keeps the sort stable.
+        let s = sp_s(in spans, i);
+        let e = sp_e(in spans, i);
+        let mut at = order.len();
+        loop {
+            if at == 0 {
+                break;
+            }
+            let j = w64(in order, sub(at, 1));
+            let js = sp_s(in spans, j);
+            let je = sp_e(in spans, j);
+            if js < s || js == s && je >= e {
+                break;
+            }
+            at = sub(at, 1);
+        }
+        order.push(0);
+        let mut k = sub(order.len(), 1);
+        loop {
+            if k <= at {
+                break;
+            }
+            order.try_set(k, w64(in order, sub(k, 1)));
+            k = sub(k, 1);
+        }
+        order.try_set(at, i);
+    }
+    let mut out = ChunkSeq::new[u64]();
+    for k in 0..n {
+        let i = w64(in order, k);
+        let s = sp_s(in spans, i);
+        let e = sp_e(in spans, i);
+        let m = sp_n(in out);
+        if m == 0 || !covers(sp_s(in out, sub(m, 1)), sp_e(in out, sub(m, 1)), s, e) {
+            sp_push(inout out, s, e);
+        }
+    }
+    out
+}
+
+// `enclosed`: whether the last span starting at or before `s` covers it.
+fn enclosed(in spans: ChunkSeq[u64], s: u64, e: u64) -> bool {
+    let mut end: u64 = 0;
+    for i in 0..sp_n(in spans) {
+        if sp_s(in spans, i) <= s {
+            end = inc(i);
+        } else {
+            break;
+        }
+    }
+    end > 0 && covers(sp_s(in spans, sub(end, 1)), sp_e(in spans, sub(end, 1)), s, e)
+}
+
+// ---------------------------------------------------------------- tokens
+
+// `significant`: the non-trivia tokens of `text` as (start, end) rows,
+// or the refusal.
+fn significant(in text: ChunkSeq[u8], inout ts: ChunkSeq[u64]) -> Sc {
+    let mut d = diags_new();
+    let t = lex_sugar_raw_with_limits(
+        in text.as_slice(),
+        inout d,
+        max_source_bytes(),
+        max_tokens(),
+        max_diagnostics()
+    );
+    if t.rejected {
+        return refusal(in d);
+    }
+    if d.code.len() != 0 {
+        return sc_err(in "invalid tokens in scope capture".as_bytes());
+    }
+    for i in 0..t.kind.len() {
+        let k = b8(in t.kind, i);
+        if !trivia_kind(k) && k != k_eof() {
+            sp_push(inout ts, w32(in t.start, i), token_end(in t, i));
+        }
+    }
+    sc_ok()
+}
+
+fn word_is(in text: ChunkSeq[u8], in ts: ChunkSeq[u64], i: u64, in w: Slice[u8]) -> bool {
+    let (s, e) = if i < sp_n(in ts) {
+        (sp_s(in ts, i), sp_e(in ts, i))
+    } else {
+        (0, 0)
+    };
+    if sub(e, s) != w.len() {
+        return false;
+    }
+    for j in 0..w.len() {
+        let c = match w.try_get(j) {
+            Option::Some(c) => c,
+            Option::None => 0,
+        };
+        if b8(in text, add(s, j)) != c {
+            return false;
+        }
+    }
+    true
+}
+
+fn words_eq(in text: ChunkSeq[u8], in ts: ChunkSeq[u64], i: u64, k: u64) -> bool {
+    let n = sp_n(in ts);
+    let (s, e) = if i < n {
+        (sp_s(in ts, i), sp_e(in ts, i))
+    } else {
+        (0, 0)
+    };
+    let (s2, e2) = if k < n {
+        (sp_s(in ts, k), sp_e(in ts, k))
+    } else {
+        (0, 0)
+    };
+    if sub(e, s) != sub(e2, s2) {
+        return false;
+    }
+    for j in 0..sub(e, s) {
+        if b8(in text, add(s, j)) != b8(in text, add(s2, j)) {
+            return false;
+        }
+    }
+    true
+}
+
+// ---------------------------------------------------------------- AST
+
+fn effect_of(in a: Ast, i: u32) -> EffectNode {
+    a
+        .effect_nodes
+        .get_or(
+            idx_from_raw[EffectNode](i),
+            EffectNode {
+                label: none(),
+                name: none(),
+                args: 0
+            }
+        )
+}
+
+fn effects_of(in a: Ast, i: u32) -> EffectsNode {
+    a
+        .effects
+        .get_or(
+            idx_from_raw[EffectsNode](i),
+            EffectsNode {
+                instances: 0,
+                tail: none()
+            }
+        )
+}
+
+fn item_of(in a: Ast, k: u64) -> ItemNode {
+    let raw = match a.m_items.try_get(k) {
+        Option::Some(v) => v,
+        Option::None => none(),
+    };
+    a
+        .items
+        .get_or(
+            idx_from_raw[ItemNode](raw),
+            ItemNode {
+                kind: 0,
+                node: 0
+            }
+        )
+}
+
+fn rel_s(in a: Ast, e: u32) -> u64 {
+    sub(widen_u64(expr_at(in a, e).start), PROBE_LEN)
+}
+
+fn rel_e(in a: Ast, e: u32) -> u64 {
+    sub(widen_u64(expr_at(in a, e).end), PROBE_LEN)
+}
+
+// The children of `e` in `parser::walk_exprs` order.
+fn kids(in a: Ast, e: u32) -> ChunkSeq[u32] {
+    let n = expr_at(in a, e);
+    let mut out = ChunkSeq::new[u32]();
+    let k = n.kind;
+    if k == 3 {
+        for i in 0..list_len(in a, n.a) {
+            out.push(list_at(in a, n.a, i));
+        }
+    } else if k == 4 {
+        for i in 0..(list_len(in a, n.b) >> 1) {
+            out.push(list_at(in a, n.b, inc(i << 1)));
+        }
+    } else if k == 5 {
+        for i in 0..list_len(in a, n.a) {
+            let s = stmt_of(in a, list_at(in a, n.a, i));
+            if s.value != none() {
+                out.push(s.value);
+            }
+        }
+        if n.b != none() {
+            out.push(n.b);
+        }
+    } else if k == 6 {
+        out.push(n.a);
+        for i in 0..list_len(in a, n.c) {
+            out.push(arg_of(in a, list_at(in a, n.c, i)).expr);
+        }
+    } else if k == 7 || k == 9 || k == 17 {
+        out.push(n.a);
+    } else if k == 10 {
+        out.push(n.b);
+    } else if k == 8 || k == 19 {
+        out.push(n.a);
+        out.push(n.b);
+    } else if k == 11 || k == 12 {
+        out.push(n.b);
+        out.push(n.c);
+    } else if k == 13 {
+        out.push(n.a);
+        out.push(n.b);
+        if n.c != none() {
+            out.push(n.c);
+        }
+    } else if k == 14 {
+        out.push(n.a);
+        for i in 0..(list_len(in a, n.b) >> 1) {
+            out.push(list_at(in a, n.b, inc(i << 1)));
+        }
+    } else if k == 15 {
+        out.push(n.e);
+    } else if k == 16 {
+        if n.b != none() && n.c != none() {
+            out.push(n.c);
+        }
+        out.push(n.d);
+        for i in 0..list_len(in a, n.e) {
+            out.push(clause_of(in a, list_at(in a, n.e, i)).body);
+        }
+    } else if k == 18 {
+        out.push(n.b);
+        out.push(n.c);
+    } else if k == 20 || k == 21 {
+        if n.a != none() {
+            out.push(n.a);
+        }
+    }
+    out
+}
+
+// The expressions under `root` in `walk_exprs` order (children first).
+fn post_order(in a: Ast, root: u32) -> ChunkSeq[u32] {
+    let mut out = ChunkSeq::new[u32]();
+    // A stack of (expression, next child) rows.
+    let mut stack = ChunkSeq::new[u64]();
+    let mut kid_lists = ChunkSeq::new[u32]();
+    let mut kid_at = ChunkSeq::new[u64]();
+    stack.push(widen_u64(root));
+    stack.push(0);
+    kid_at.push(0);
+    let first = kids(in a, root);
+    kid_at.push(first.len());
+    kid_lists.extend(in first.as_slice());
+    loop {
+        let depth = stack.len() >> 1;
+        if depth == 0 {
+            break;
+        }
+        let top = sub(depth, 1);
+        let e = wrapping_u32(w64(in stack, top << 1));
+        let next = w64(in stack, inc(top << 1));
+        let base = w64(in kid_at, top << 1);
+        let count = w64(in kid_at, inc(top << 1));
+        if next < count {
+            stack.try_set(inc(top << 1), inc(next));
+            let child = match kid_lists.try_get(add(base, next)) {
+                Option::Some(c) => c,
+                Option::None => none(),
+            };
+            if child == none() {
+                continue;
+            }
+            let ks = kids(in a, child);
+            stack.push(widen_u64(child));
+            stack.push(0);
+            kid_at.push(kid_lists.len());
+            kid_at.push(ks.len());
+            kid_lists.extend(in ks.as_slice());
+        } else {
+            out.push(e);
+            stack.truncate(top << 1);
+            kid_at.truncate(top << 1);
+            kid_lists.truncate(base);
+        }
+    }
+    out
+}
+
+// ---------------------------------------------------------------- jumps
+
+// `Control`: jumps as rows (exit, start, end, value start or NONE, value
+// end), `?` as rows (whole start, end, operand start, end).
+struct Ctl {
+    jumps: ChunkSeq[u64],
+    questions: ChunkSeq[u64],
+    crosses_loop: bool,
+    question_in_handler: bool
+}
+
+fn j_n(in c: Ctl) -> u64 {
+    c.jumps.len() / 5
+}
+
+fn j_at(in c: Ctl, i: u64, k: u64) -> u64 {
+    w64(in c.jumps, add(wrapping_mul(i, 5), k))
+}
+
+fn jumps(in body: ChunkSeq[u8], inout ctl: Ctl) -> Sc {
+    let mut sb = ChunkSeq::new[u8]();
+    sb.extend(in PROBE.as_bytes());
+    sb.extend(in body.as_slice());
+    let source = match String::from_utf8(in sb.as_slice()) {
+        Option::Some(t) => t,
+        Option::None => String::new(),
+    };
+    let l = lower_source(in source.as_str());
+    if l.p.d.code.len() != 0 {
+        return sc_err(in "expand nested surface forms before capturing a scope".as_bytes());
+    }
+    let a = l.ast;
+    let it = item_of(in a, 0);
+    if a.m_items.len() == 0 || it.kind != 2 {
+        return sc_err(in "invalid scope body".as_bytes());
+    }
+    let f = fn_of(in a, it.node);
+    if f.body == none() {
+        return sc_err(in "invalid scope body".as_bytes());
+    }
+    let mut closures = ChunkSeq::new[u64]();
+    let mut loops = ChunkSeq::new[u64]();
+    let mut handlers = ChunkSeq::new[u64]();
+    let mut forbidden = ChunkSeq::new[u64]();
+    let mut js = ChunkSeq::new[u64]();
+    let mut tries = ChunkSeq::new[u64]();
+    let order = post_order(in a, f.body);
+    for oi in 0..order.len() {
+        let e = match order.try_get(oi) {
+            Option::Some(e) => e,
+            Option::None => none(),
+        };
+        let n = expr_at(in a, e);
+        let k = n.kind;
+        if k == 15 {
+            sp_push(inout closures, rel_s(in a, n.e), rel_e(in a, n.e));
+        } else if k == 17 {
+            sp_push(inout loops, rel_s(in a, n.a), rel_e(in a, n.a));
+        } else if k == 18 {
+            sp_push(inout loops, rel_s(in a, n.c), rel_e(in a, n.c));
+        } else if k == 16 {
+            sp_push(inout handlers, rel_s(in a, e), rel_e(in a, e));
+            for i in 0..list_len(in a, n.e) {
+                let b = clause_of(in a, list_at(in a, n.e, i)).body;
+                sp_push(inout forbidden, rel_s(in a, b), rel_e(in a, b));
+            }
+            if name_is(in a, effect_of(in a, n.a).name, in "Region".as_bytes()) {
+                sp_push(inout forbidden, rel_s(in a, e), rel_e(in a, e));
+            }
+        } else if k == 9 {
+            tries.push(rel_s(in a, e));
+            tries.push(rel_e(in a, e));
+            tries.push(rel_s(in a, n.a));
+            tries.push(rel_e(in a, n.a));
+        } else if k == 20 || k == 21 || k == 22 {
+            js
+                .push(
+                    if k == 20 {
+                        X_BREAK
+                    } else if k == 21 {
+                        X_RETURN
+                    } else {
+                        X_CONTINUE
+                    }
+                );
+            js.push(rel_s(in a, e));
+            js.push(rel_e(in a, e));
+            if k != 22 && n.a != none() {
+                js.push(rel_s(in a, n.a));
+                js.push(rel_e(in a, n.a));
+            } else {
+                js.push(NONE);
+                js.push(NONE);
+            }
+        }
+    }
+    let closures = outermost(in closures);
+    let loops = outermost(in loops);
+    let handlers = outermost(in handlers);
+    let forbidden = outermost(in forbidden);
+    let mut i: u64 = 0;
+    loop {
+        if i >= js.len() {
+            break;
+        }
+        let exit = w64(in js, i);
+        let s = w64(in js, inc(i));
+        let e = w64(in js, add(i, 2));
+        let keep = !enclosed(in closures, s, e) && (exit == X_RETURN || !enclosed(in loops, s, e));
+        if keep {
+            for k in 0..5 {
+                ctl.jumps.push(w64(in js, add(i, k)));
+            }
+        }
+        i = add(i, 5);
+    }
+    for j in 0..j_n(in ctl) {
+        let s = j_at(in ctl, j, 1);
+        let e = j_at(in ctl, j, 2);
+        if enclosed(in forbidden, s, e)
+            || j_at(in ctl, j, 0) != X_RETURN && enclosed(in handlers, s, e) {
+            return sc_err(
+                in "invalid control transfer across a handler or region boundary".as_bytes()
+            );
+        }
+    }
+    let mut q: u64 = 0;
+    loop {
+        if q >= tries.len() {
+            break;
+        }
+        let s = w64(in tries, q);
+        let e = w64(in tries, inc(q));
+        if !enclosed(in closures, s, e) {
+            for k in 0..4 {
+                ctl.questions.push(w64(in tries, add(q, k)));
+            }
+            if enclosed(in handlers, s, e) {
+                ctl.question_in_handler = true;
+            }
+        }
+        q = add(q, 4);
+    }
+    for j in 0..j_n(in ctl) {
+        let s = j_at(in ctl, j, 1);
+        let e = j_at(in ctl, j, 2);
+        if j_at(in ctl, j, 0) == X_RETURN
+            && (enclosed(in handlers, s, e) || enclosed(in loops, s, e)) {
+            ctl.crosses_loop = true;
+        }
+    }
+    sc_ok()
+}
+
+// ---------------------------------------------------------------- types
+
+// `source_type(t)`: whether `t` is built of named and tuple types only.
+fn source_ok(in a: Ast, t: u32) -> bool {
+    if t == none() {
+        return true;
+    }
+    let n = type_at(in a, t);
+    let list = if n.kind == 1 {
+        n.b
+    } else if n.kind == 2 {
+        n.a
+    } else {
+        return false;
+    };
+    for i in 0..list_len(in a, list) {
+        if !source_ok(in a, list_at(in a, list, i)) {
+            return false;
+        }
+    }
+    true
+}
+
+pub fn push_name(inout out: ChunkSeq[u8], in a: Ast, sym: u32) {
+    for j in 0..name_len(in a, sym) {
+        out.push(name_byte(in a, sym, j));
+    }
+}
+
+// `Type`'s Display for named and tuple types (an absent type is the unit
+// tuple).
+fn type_text(inout out: ChunkSeq[u8], in a: Ast, t: u32) {
+    if t == none() {
+        out.extend(in "()".as_bytes());
+        return;
+    }
+    let n = type_at(in a, t);
+    if n.kind == 1 {
+        let count = list_len(in a, n.b);
+        if count == 1 && name_is(in a, n.a, in "dyn".as_bytes()) {
+            out.extend(in "dyn ".as_bytes());
+            type_text(inout out, in a, list_at(in a, n.b, 0));
+            return;
+        }
+        push_name(inout out, in a, n.a);
+        if count != 0 {
+            out.push(91);
+            for i in 0..count {
+                if i != 0 {
+                    out.extend(in ", ".as_bytes());
+                }
+                type_text(inout out, in a, list_at(in a, n.b, i));
+            }
+            out.push(93);
+        }
+    } else if n.kind == 2 {
+        out.push(40);
+        for i in 0..list_len(in a, n.a) {
+            if i != 0 {
+                out.extend(in ", ".as_bytes());
+            }
+            type_text(inout out, in a, list_at(in a, n.a, i));
+        }
+        out.push(41);
+    }
+}
+
+// ---------------------------------------------------------------- ambient
+
+// `ambient(source, call)`: the caller's Fail rows (texts, each closed by
+// a 0 byte in `rows`) and its result type (text, whether it is a source
+// type, whether it is named Option).
+struct Amb {
+    rows: ChunkSeq[u8],
+    nrows: u64,
+    result: ChunkSeq[u8],
+    result_ok: bool,
+    option: bool
+}
+
+fn has_row(in rows: ChunkSeq[u8], in row: ChunkSeq[u8]) -> bool {
+    let mut at: u64 = 0;
+    loop {
+        if at >= rows.len() {
+            return false;
+        }
+        let mut end = at;
+        loop {
+            if end >= rows.len() || b8(in rows, end) == 0 {
+                break;
+            }
+            end = inc(end);
+        }
+        if sub(end, at) == row.len() {
+            let mut same = true;
+            for j in 0..row.len() {
+                if b8(in rows, add(at, j)) != b8(in row, j) {
+                    same = false;
+                    break;
+                }
+            }
+            if same {
+                return true;
+            }
+        }
+        at = inc(end);
+    }
+}
+
+fn ambient(in source: ChunkSeq[u8], call_s: u64, call_e: u64, inout amb: Amb) -> Sc {
+    let text = match String::from_utf8(in source.as_slice()) {
+        Option::Some(t) => t,
+        Option::None => String::new(),
+    };
+    let l = lower_surface_source(in text.as_str());
+    if l.p.t.rejected {
+        return refusal(in l.p.d);
+    }
+    if l.p.d.code.len() != 0 {
+        return sc_err(in "could not determine effects at scope capture".as_bytes());
+    }
+    let a = l.ast;
+    // The linear effects, by name.
+    let mut linear = ChunkSeq::new[u32]();
+    for k in 0..a.m_items.len() {
+        let it = item_of(in a, k);
+        if it.kind == 3 {
+            let d = a
+                .effect_decls
+                .get_or(
+                    idx_from_raw[EffectDeclNode](it.node),
+                    EffectDeclNode {
+                        name: none(),
+                        linear: false,
+                        generics: 0,
+                        ops: 0,
+                        start: 0,
+                        end: 0
+                    }
+                );
+            if d.linear {
+                linear.push(d.name);
+            }
+        }
+    }
+    // The first function, method or conformance method whose body covers
+    // the call.
+    let mut found = none();
+    for k in 0..a.m_items.len() {
+        if found != none() {
+            break;
+        }
+        let it = item_of(in a, k);
+        let mut fns = ChunkSeq::new[u32]();
+        if it.kind == 2 {
+            fns.push(it.node);
+        } else if it.kind == 4 {
+            let n = a
+                .impls
+                .get_or(
+                    idx_from_raw[ImplNode](it.node),
+                    ImplNode {
+                        ty: none(),
+                        generics: 0,
+                        methods: 0
+                    }
+                );
+            for m in 0..list_len(in a, n.methods) {
+                fns.push(list_at(in a, n.methods, m));
+            }
+        } else if it.kind == 6 {
+            let n = a
+                .confs
+                .get_or(
+                    idx_from_raw[ConfNode](it.node),
+                    ConfNode {
+                        model: none(),
+                        public: false,
+                        generics: 0,
+                        trait_ref: none(),
+                        self_ty: none(),
+                        wheres: 0,
+                        assoc: 0,
+                        methods: 0,
+                        start: 0,
+                        end: 0
+                    }
+                );
+            for m in 0..list_len(in a, n.methods) {
+                fns.push(list_at(in a, n.methods, m));
+            }
+        }
+        for m in 0..fns.len() {
+            let fi = match fns.try_get(m) {
+                Option::Some(v) => v,
+                Option::None => none(),
+            };
+            let f = fn_of(in a, fi);
+            if f.body != none() {
+                let b = expr_at(in a, f.body);
+                if covers(widen_u64(b.start), widen_u64(b.end), call_s, call_e) {
+                    found = fi;
+                    break;
+                }
+            }
+        }
+    }
+    if found == none() {
+        return sc_err(in "scope capture requires a function body".as_bytes());
+    }
+    let f = fn_of(in a, found);
+    let mut result = f.result;
+    let fx = effects_of(in a, f.effects);
+    let mut instances = ChunkSeq::new[u32]();
+    for i in 0..list_len(in a, fx.instances) {
+        instances.push(list_at(in a, fx.instances, i));
+    }
+    let mut tail = if f.effects == none() {
+        none()
+    } else {
+        fx.tail
+    };
+    // Frames as rows (body length, expression), longest first, stable.
+    let mut frames = ChunkSeq::new[u64]();
+    let order = post_order(in a, f.body);
+    for oi in 0..order.len() {
+        let e = match order.try_get(oi) {
+            Option::Some(e) => e,
+            Option::None => none(),
+        };
+        let n = expr_at(in a, e);
+        let body = if n.kind == 16 {
+            n.d
+        } else if n.kind == 15 {
+            n.e
+        } else {
+            none()
+        };
+        if body == none() {
+            continue;
+        }
+        let b = expr_at(in a, body);
+        let bs = widen_u64(b.start);
+        let be = widen_u64(b.end);
+        if !covers(bs, be, call_s, call_e) {
+            continue;
+        }
+        let len = sub(be, bs);
+        let mut at = frames.len() >> 1;
+        loop {
+            if at == 0 || w64(in frames, sub(at, 1) << 1) >= len {
+                break;
+            }
+            at = sub(at, 1);
+        }
+        frames.push(0);
+        frames.push(0);
+        let mut k = sub(frames.len() >> 1, 1);
+        loop {
+            if k <= at {
+                break;
+            }
+            frames.try_set(k << 1, w64(in frames, sub(k, 1) << 1));
+            frames.try_set(inc(k << 1), w64(in frames, inc(sub(k, 1) << 1)));
+            k = sub(k, 1);
+        }
+        frames.try_set(at << 1, len);
+        frames.try_set(inc(at << 1), widen_u64(e));
+    }
+    for k in 0..(frames.len() >> 1) {
+        let e = wrapping_u32(w64(in frames, inc(k << 1)));
+        let n = expr_at(in a, e);
+        if n.kind == 15 {
+            if (n.b >> 8) != 0 {
+                return sc_err(
+                    in "exit-aware scope inside a closure requires an explicit effect row"
+                        .as_bytes()
+                );
+            }
+            result = n.c;
+            let cx = effects_of(in a, n.d);
+            instances.clear();
+            for i in 0..list_len(in a, cx.instances) {
+                instances.push(list_at(in a, cx.instances, i));
+            }
+            tail = if n.d == none() {
+                none()
+            } else {
+                cx.tail
+            };
+        } else {
+            instances.push(n.a);
+        }
+    }
+    if tail != none() {
+        return sc_err(in "an exit-aware scope requires concrete effect rows".as_bytes());
+    }
+    for i in 0..instances.len() {
+        let ei = match instances.try_get(i) {
+            Option::Some(v) => v,
+            Option::None => none(),
+        };
+        let e = effect_of(in a, ei);
+        if name_is(in a, e.name, in "Fail".as_bytes()) {
+            if e.label != none() {
+                return sc_err(
+                    in "exit-aware scope cannot intercept a labelled Fail capability".as_bytes()
+                );
+            }
+            if list_len(in a, e.args) != 1 {
+                return sc_err(in "expected Fail with one error type".as_bytes());
+            }
+            let arg = list_at(in a, e.args, 0);
+            if !source_ok(in a, arg) {
+                return sc_err(
+                    in "scope exit requires an explicit named or tuple payload type".as_bytes()
+                );
+            }
+            let mut row = ChunkSeq::new[u8]();
+            row.extend(in "Fail[".as_bytes());
+            type_text(inout row, in a, arg);
+            row.push(93);
+            if !has_row(in amb.rows, in row) {
+                amb.rows.extend(in row.as_slice());
+                amb.rows.push(0);
+                amb.nrows = inc(amb.nrows);
+            }
+        } else if name_is(in a, e.name, in "ConstTime".as_bytes())
+            || name_is(in a, e.name, in "Realtime".as_bytes())
+            || name_is(in a, e.name, in "ConstDenorm".as_bytes())
+            || name_is(in a, e.name, in "DetFloat".as_bytes())
+            || name_is(in a, e.name, in "Region".as_bytes()) {} else {
+            let mut is_linear = false;
+            for j in 0.. linear.len() {
+                if match linear.try_get(j) {
+                    Option::Some(v) => v == e.name,
+                    Option::None => false,
+                }
+                {
+                    is_linear = true;
+                    break;
+                }
+            }
+            if !is_linear {
+                let mut m = ChunkSeq::new[u8]();
+                m
+                    .extend(
+                        in "exit-aware scope cannot relay potentially abortive effect `".as_bytes()
+                    );
+                push_name(inout m, in a, e.name);
+                m.push(96);
+                return sc_err_seq(in m);
+            }
+        }
+    }
+    amb.result_ok = source_ok(in a, result);
+    type_text(inout amb.result, in a, result);
+    amb.option = result != none()
+        && type_at(in a, result).kind == 1
+        && name_is(in a, type_at(in a, result).a, in "Option".as_bytes());
+    sc_ok()
+}
+
+// ---------------------------------------------------------------- edits
+
+// Edits as rows (start, end, pool first, pool length, forwarded).
+fn push_change(
+    inout eds: ChunkSeq[u64],
+    inout pool: ChunkSeq[u8],
+    s: u64,
+    e: u64,
+    in text: ChunkSeq[u8],
+    forwarded: bool
+) {
+    eds.push(s);
+    eds.push(e);
+    eds.push(pool.len());
+    eds.push(text.len());
+    eds
+        .push(
+            if forwarded {
+                1
+            } else {
+                0
+            }
+        );
+    pool.extend(in text.as_slice());
+}
+
+fn cat(inout out: ChunkSeq[u8], in s: Str) {
+    out.extend(in s.as_bytes());
+}
+
+fn cat_seq(inout out: ChunkSeq[u8], in s: ChunkSeq[u8]) {
+    out.extend(in s.as_slice());
+}
+
+// `encode(i, total, leaf)`.
+fn encode(i: u64, total: u64, in leaf: ChunkSeq[u8]) -> ChunkSeq[u8] {
+    let mut text = ChunkSeq::new[u8]();
+    if inc(i) == total {
+        cat_seq(inout text, in leaf);
+    } else {
+        cat(inout text, in "Result::Ok(");
+        cat_seq(inout text, in leaf);
+        cat(inout text, in ")");
+    }
+    for k in 0..i {
+        let mut t = ChunkSeq::new[u8]();
+        cat(inout t, in "Result::Err(");
+        cat_seq(inout t, in text);
+        cat(inout t, in ")");
+        text = t;
+    }
+    text
+}
+
+// `rewrite(r, edits, max)`.
+fn rewrite(inout r: Rd, in edits: ChunkSeq[u64], in pool: ChunkSeq[u8], max: u64) -> Sc {
+    let n = edits.len() / 5;
+    // A stable sort of the edits by (start, end).
+    let mut order = ChunkSeq::new[u64]();
+    for i in 0..n {
+        let s = w64(in edits, wrapping_mul(i, 5));
+        let e = w64(in edits, inc(wrapping_mul(i, 5)));
+        let mut at = order.len();
+        loop {
+            if at == 0 {
+                break;
+            }
+            let j = w64(in order, sub(at, 1));
+            let js = w64(in edits, wrapping_mul(j, 5));
+            let je = w64(in edits, inc(wrapping_mul(j, 5)));
+            if js < s || js == s && je <= e {
+                break;
+            }
+            at = sub(at, 1);
+        }
+        order.push(0);
+        let mut k = sub(order.len(), 1);
+        loop {
+            if k <= at {
+                break;
+            }
+            order.try_set(k, w64(in order, sub(k, 1)));
+            k = sub(k, 1);
+        }
+        order.try_set(at, i);
+    }
+    let mut text = ChunkSeq::new[u8]();
+    let mut pos: u64 = 0;
+    // Map rows (source start, source end, offset).
+    let mut map = ChunkSeq::new[u64]();
+    let mut forwarding = ChunkSeq::new[u64]();
+    for k in 0..n {
+        let row = wrapping_mul(w64(in order, k), 5);
+        let s = w64(in edits, row);
+        let e = w64(in edits, inc(row));
+        let first = w64(in edits, add(row, 2));
+        let len = w64(in edits, add(row, 3));
+        let fwd = w64(in edits, add(row, 4)) != 0;
+        if s < pos {
+            return sc_err(in "overlapping scope exits".as_bytes());
+        }
+        if add(add(text.len(), sub(s, pos)), len) > max {
+            return sc_err(in "scope expansion exceeds output budget".as_bytes());
+        }
+        let offset = text.len();
+        for j in pos..s {
+            text.push(b8(in r.text, j));
+        }
+        map.push(pos);
+        map.push(s);
+        map.push(offset);
+        let start = text.len();
+        for j in 0..len {
+            text.push(b8(in pool, add(first, j)));
+        }
+        if fwd {
+            forwarding.push(start);
+            forwarding.push(text.len());
+        }
+        pos = e;
+    }
+    if add(text.len(), sub(r.text.len(), pos)) > max {
+        return sc_err(in "scope expansion exceeds output budget".as_bytes());
+    }
+    map.push(pos);
+    map.push(r.text.len());
+    map.push(text.len());
+    for j in pos..r.text.len() {
+        text.push(b8(in r.text, j));
+    }
+    let mut holes = ChunkSeq::new[u64]();
+    for h in 0..(r.holes.len() >> 1) {
+        let parts = parts_of(in map, w64(in r.holes, h << 1), w64(in r.holes, inc(h << 1)));
+        for p in 0..(parts.len() >> 2) {
+            holes.push(w64(in parts, add(p << 2, 2)));
+            holes.push(w64(in parts, add(p << 2, 3)));
+        }
+    }
+    holes.extend(in forwarding.as_slice());
+    let mut origins = ChunkSeq::new[u64]();
+    let no = r.origins.len() / 5;
+    for o in 0..no {
+        let row = wrapping_mul(o, 5);
+        let rs = w64(in r.origins, row);
+        let re = w64(in r.origins, inc(row));
+        let os = w64(in r.origins, add(row, 2));
+        let tail = w64(in r.origins, add(row, 4));
+        let parts = parts_of(in map, rs, re);
+        for p in 0..(parts.len() >> 2) {
+            let a_s = w64(in parts, p << 2);
+            let a_e = w64(in parts, inc(p << 2));
+            origins.push(w64(in parts, add(p << 2, 2)));
+            origins.push(w64(in parts, add(p << 2, 3)));
+            origins.push(add(os, sub(a_s, rs)));
+            origins.push(add(os, sub(a_e, rs)));
+            origins.push(tail);
+        }
+    }
+    let mut places = ChunkSeq::new[u64]();
+    let np = r.places.len() / 3;
+    for q in 0..np {
+        let row = wrapping_mul(q, 3);
+        let parts = parts_of(in map, w64(in r.places, row), w64(in r.places, inc(row)));
+        for p in 0..(parts.len() >> 2) {
+            places.push(w64(in parts, add(p << 2, 2)));
+            places.push(w64(in parts, add(p << 2, 3)));
+            places.push(w64(in r.places, add(row, 2)));
+        }
+    }
+    r.holes = holes;
+    r.origins = origins;
+    r.places = places;
+    r.text = text;
+    sc_ok()
+}
+
+// `parts(old)`: rows (old start, old end, new start, new end).
+fn parts_of(in map: ChunkSeq[u64], s: u64, e: u64) -> ChunkSeq[u64] {
+    let mut out = ChunkSeq::new[u64]();
+    let n = map.len() / 3;
+    for i in 0..n {
+        let ss = w64(in map, wrapping_mul(i, 3));
+        let se = w64(in map, inc(wrapping_mul(i, 3)));
+        let at = w64(in map, add(wrapping_mul(i, 3), 2));
+        if se <= s {
+            continue;
+        }
+        if ss >= e {
+            break;
+        }
+        let a = if ss > s {
+            ss
+        } else {
+            s
+        };
+        let b = if se < e {
+            se
+        } else {
+            e
+        };
+        if a < b {
+            out.push(a);
+            out.push(b);
+            out.push(add(at, sub(a, ss)));
+            out.push(add(at, sub(b, ss)));
+        }
+    }
+    out
+}
+
+// ---------------------------------------------------------------- lower
+
+fn exit_known(in kinds: ChunkSeq[u64], x: u64) -> u64 {
+    for i in 0..kinds.len() {
+        if w64(in kinds, i) == x {
+            return i;
+        }
+    }
+    NONE
+}
+
+// `lower(r, captures, source, call, mark, max)`.
+pub fn lower(
+    inout r: Rd,
+    in c: Caps,
+    in source: ChunkSeq[u8],
+    call_s: u64,
+    call_e: u64,
+    in mark: ChunkSeq[u8],
+    max: u64
+) -> Sc {
+    // The scope captures' values.
+    let mut scope = NONE;
+    let mut nscopes: u64 = 0;
+    for cap in 0..cap_count(in c) {
+        if sort_in(in c, cap, in "scope".as_bytes()) {
+            for v in 0..cap_at(in c, cap, 4) {
+                if nscopes == 0 {
+                    scope = value_at(in c, cap, v);
+                }
+                nscopes = inc(nscopes);
+            }
+        }
+    }
+    if nscopes == 0 {
+        return sc_ok();
+    }
+    if nscopes > 1 {
+        return sc_err(in "a rule can resume only one captured scope".as_bytes());
+    }
+    let vs = w64(in c.w, scope);
+    let ve = w64(in c.w, inc(scope));
+    let from_tail = w64(in c.w, add(scope, 2)) != 0;
+    let mut matches: u64 = 0;
+    let mut bs: u64 = 0;
+    let mut be: u64 = 0;
+    for o in 0..(r.origins.len() / 5) {
+        let row = wrapping_mul(o, 5);
+        let tail = w64(in r.origins, add(row, 4)) != 0;
+        if w64(in r.origins, add(row, 2)) == vs
+            && w64(in r.origins, add(row, 3)) == ve
+            && tail == from_tail {
+            matches = inc(matches);
+            bs = w64(in r.origins, row);
+            be = w64(in r.origins, inc(row));
+        }
+    }
+    if matches != 1 {
+        return sc_err(in "a captured scope must be evaluated exactly once".as_bytes());
+    }
+    if from_tail {
+        bs = sub(bs, 1);
+        be = inc(be);
+    }
+    let mut ts = ChunkSeq::new[u64]();
+    let lexed = significant(in r.text, inout ts);
+    if lexed.failed {
+        return lexed;
+    }
+    let nts = sp_n(in ts);
+    let mut first: u64 = 0;
+    let mut after: u64 = 0;
+    for i in 0..nts {
+        if sp_s(in ts, i) < bs {
+            first = inc(i);
+        }
+        if sp_s(in ts, i) < be {
+            after = inc(i);
+        }
+    }
+    if first < 3
+        || !word_is(in r.text, in ts, sub(first, 3), in "let".as_bytes())
+        || !word_is(in r.text, in ts, sub(first, 1), in "=".as_bytes())
+        || !word_is(in r.text, in ts, after, in ";".as_bytes()) {
+        return sc_err(
+            in "bind the scope exit with `let exit = ...;` before resuming it".as_bytes()
+        );
+    }
+    let binder = sub(first, 2);
+    let mut resume = NONE;
+    let mut nuses: u64 = 0;
+    for i in inc(after)..nts {
+        if words_eq(in r.text, in ts, i, binder) {
+            resume = i;
+            nuses = inc(nuses);
+        }
+    }
+    if nuses != 1 {
+        return sc_err(in "a captured exit must be resumed exactly once".as_bytes());
+    }
+    let mut tail_ok = word_is(in r.text, in ts, inc(resume), in ".".as_bytes())
+        && word_is(in r.text, in ts, add(resume, 2), in "resume".as_bytes())
+        && word_is(in r.text, in ts, add(resume, 3), in "(".as_bytes())
+        && word_is(in r.text, in ts, add(resume, 4), in ")".as_bytes());
+    for i in add(resume, 5)..nts {
+        if !word_is(in r.text, in ts, i, in "}".as_bytes()) {
+            tail_ok = false;
+        }
+    }
+    if !tail_ok {
+        return sc_err(
+            in "a scope exit must be resumed as the tail of its cleanup block".as_bytes()
+        );
+    }
+    let mut body = ChunkSeq::new[u8]();
+    for j in bs..be {
+        body.push(b8(in r.text, j));
+    }
+    let mut ctl = Ctl {
+        jumps: ChunkSeq::new[u64](),
+        questions: ChunkSeq::new[u64](),
+        crosses_loop: false,
+        question_in_handler: false
+    };
+    let jumped = jumps(in body, inout ctl);
+    if jumped.failed {
+        return jumped;
+    }
+    let mut amb = Amb {
+        rows: ChunkSeq::new[u8](),
+        nrows: 0,
+        result: ChunkSeq::new[u8](),
+        result_ok: false,
+        option: false
+    };
+    let ambient_sc = ambient(in source, call_s, call_e, inout amb);
+    if ambient_sc.failed {
+        return ambient_sc;
+    }
+    let option_try = ctl.questions.len() != 0 && amb.option;
+    if option_try && (amb.nrows != 0 || ctl.question_in_handler) {
+        return sc_err(
+            in "use an explicit match for `?` when both Option and Fail exits are active in a scope"
+                .as_bytes()
+        );
+    }
+    let relay_return = ctl.crosses_loop || option_try;
+    let mut effect = ChunkSeq::new[u8]();
+    cat(inout effect, in "VesperScope");
+    cat_seq(inout effect, in mark);
+    let mut label = ChunkSeq::new[u8]();
+    cat_seq(inout label, in mark);
+    cat(inout label, in "leave");
+    let mut kinds = ChunkSeq::new[u64]();
+    kinds.push(X_NORMAL);
+    for j in 0..j_n(in ctl) {
+        let x = j_at(in ctl, j, 0);
+        if !(relay_return && x == X_RETURN) && exit_known(in kinds, x) == NONE {
+            kinds.push(x);
+        }
+    }
+    let nk = kinds.len();
+    let mut value = ChunkSeq::new[u8]();
+    cat_seq(inout value, in mark);
+    cat(inout value, in "value");
+    let mut err = ChunkSeq::new[u8]();
+    cat_seq(inout err, in mark);
+    cat(inout err, in "error");
+    let mut head = ChunkSeq::new[u8]();
+    let mut foot = ChunkSeq::new[u8]();
+    if relay_return {
+        if !amb.result_ok {
+            return sc_err(
+                in "scope exit requires an explicit named or tuple payload type".as_bytes()
+            );
+        }
+        cat(inout head, in "handle ");
+        cat_seq(inout head, in label);
+        cat(inout head, in ": ");
+        cat_seq(inout head, in effect);
+        cat(inout head, in "[");
+        cat_seq(inout head, in amb.result);
+        cat(inout head, in "] in { ");
+    }
+    // The Fail rows, each closed by a 0 byte.
+    let mut at: u64 = 0;
+    for k in 0..amb.nrows {
+        cat(inout head, in "handle ");
+        loop {
+            let ch = b8(in amb.rows, at);
+            at = inc(at);
+            if ch == 0 {
+                break;
+            }
+            head.push(ch);
+        }
+        cat(inout head, in " in { ");
+    }
+    if nk > 1 {
+        cat(inout head, in "loop { let ");
+        cat_seq(inout head, in value);
+        cat(inout head, in " = ");
+        cat(inout foot, in "; break ");
+        let enc = encode(0, nk, in value);
+        cat_seq(inout foot, in enc);
+        cat(inout foot, in "; }");
+    }
+    for k in 0..amb.nrows {
+        cat(inout foot, in " } with { return ");
+        cat_seq(inout foot, in value);
+        cat(inout foot, in " => Result::Ok(");
+        cat_seq(inout foot, in value);
+        cat(inout foot, in "), raise(");
+        cat_seq(inout foot, in err);
+        cat(inout foot, in ", _) => Result::Err(");
+        cat_seq(inout foot, in err);
+        cat(inout foot, in "), }");
+    }
+    if relay_return {
+        cat(inout foot, in " } with { return ");
+        cat_seq(inout foot, in value);
+        cat(inout foot, in " => Result::Ok(");
+        cat_seq(inout foot, in value);
+        cat(inout foot, in "), leave(");
+        cat_seq(inout foot, in err);
+        cat(inout foot, in ", _) => Result::Err(");
+        cat_seq(inout foot, in err);
+        cat(inout foot, in "), }");
+    }
+    let mut edits = ChunkSeq::new[u64]();
+    let mut pool = ChunkSeq::new[u8]();
+    push_change(inout edits, inout pool, bs, bs, in head, false);
+    let mut hash = ChunkSeq::new[u8]();
+    hash.push(35);
+    for j in 0..j_n(in ctl) {
+        let x = j_at(in ctl, j, 0);
+        let mut left = ChunkSeq::new[u8]();
+        let mut right = ChunkSeq::new[u8]();
+        if relay_return && x == X_RETURN {
+            cat_seq(inout left, in label);
+            cat(inout left, in ".leave(");
+            cat(inout right, in ")");
+        } else {
+            let index = exit_known(in kinds, x);
+            let enc = encode(index, nk, in hash);
+            cat(inout left, in "break ");
+            // Split at the first '#'.
+            let mut seen = false;
+            for q in 0..enc.len() {
+                let ch = b8(in enc, q);
+                if !seen && ch == 35 {
+                    seen = true;
+                } else if seen {
+                    right.push(ch);
+                } else {
+                    left.push(ch);
+                }
+            }
+        }
+        let ja = add(bs, j_at(in ctl, j, 1));
+        let jb = add(bs, j_at(in ctl, j, 2));
+        let v_s = j_at(in ctl, j, 3);
+        if v_s != NONE {
+            push_change(inout edits, inout pool, ja, add(bs, v_s), in left, false);
+            push_change(inout edits, inout pool, jb, jb, in right, false);
+        } else {
+            let mut t = ChunkSeq::new[u8]();
+            cat_seq(inout t, in left);
+            cat(inout t, in "()");
+            cat_seq(inout t, in right);
+            push_change(inout edits, inout pool, ja, jb, in t, false);
+        }
+    }
+    if option_try {
+        let mut q: u64 = 0;
+        loop {
+            if q >= ctl.questions.len() {
+                break;
+            }
+            let whole_e = w64(in ctl.questions, inc(q));
+            let operand_s = w64(in ctl.questions, add(q, 2));
+            let start = add(bs, operand_s);
+            let mut open = ChunkSeq::new[u8]();
+            cat(inout open, in "(match (");
+            push_change(inout edits, inout pool, start, start, in open, false);
+            let qa = sub(add(bs, whole_e), 1);
+            let mut close = ChunkSeq::new[u8]();
+            cat(inout close, in ") { Option::Some(");
+            cat_seq(inout close, in value);
+            cat(inout close, in ") => ");
+            cat_seq(inout close, in value);
+            cat(inout close, in ", Option::None => ");
+            cat_seq(inout close, in label);
+            cat(inout close, in ".leave(Option::None), })");
+            push_change(inout edits, inout pool, qa, inc(qa), in close, true);
+            q = add(q, 4);
+        }
+    }
+    push_change(inout edits, inout pool, be, be, in foot, false);
+    let mut valued_break = false;
+    for j in 0..j_n(in ctl) {
+        if j_at(in ctl, j, 0) == X_BREAK && j_at(in ctl, j, 3) != NONE {
+            valued_break = true;
+        }
+    }
+    let mut result = dispatch(w64(in kinds, sub(nk, 1)), in value, valued_break);
+    let mut k = sub(nk, 1);
+    loop {
+        if k == 0 {
+            break;
+        }
+        k = sub(k, 1);
+        let mut t = ChunkSeq::new[u8]();
+        cat(inout t, in "match ");
+        cat_seq(inout t, in value);
+        cat(inout t, in " { Result::Ok(");
+        cat_seq(inout t, in value);
+        cat(inout t, in ") => ");
+        let d = dispatch(w64(in kinds, k), in value, valued_break);
+        cat_seq(inout t, in d);
+        cat(inout t, in ", Result::Err(");
+        cat_seq(inout t, in value);
+        cat(inout t, in ") => ");
+        cat_seq(inout t, in result);
+        cat(inout t, in ", }");
+        result = t;
+    }
+    for f in 0..amb.nrows {
+        let mut t = ChunkSeq::new[u8]();
+        cat(inout t, in "match ");
+        cat_seq(inout t, in value);
+        cat(inout t, in " { Result::Ok(");
+        cat_seq(inout t, in value);
+        cat(inout t, in ") => ");
+        cat_seq(inout t, in result);
+        cat(inout t, in ", Result::Err(");
+        cat_seq(inout t, in err);
+        cat(inout t, in ") => Fail::raise(");
+        cat_seq(inout t, in err);
+        cat(inout t, in "), }");
+        result = t;
+    }
+    if relay_return {
+        let mut t = ChunkSeq::new[u8]();
+        cat(inout t, in "match ");
+        cat_seq(inout t, in value);
+        cat(inout t, in " { Result::Ok(");
+        cat_seq(inout t, in value);
+        cat(inout t, in ") => ");
+        cat_seq(inout t, in result);
+        cat(inout t, in ", Result::Err(");
+        cat_seq(inout t, in err);
+        cat(inout t, in ") => return ");
+        cat_seq(inout t, in err);
+        cat(inout t, in ", }");
+        result = t;
+    }
+    let mut resumed = ChunkSeq::new[u8]();
+    cat(inout resumed, in "{ let ");
+    cat_seq(inout resumed, in value);
+    cat(inout resumed, in " = ");
+    for j in sp_s(in ts, binder)..sp_e(in ts, binder) {
+        resumed.push(b8(in r.text, j));
+    }
+    cat(inout resumed, in "; ");
+    cat_seq(inout resumed, in result);
+    cat(inout resumed, in " }");
+    push_change(
+        inout edits,
+        inout pool,
+        sp_s(in ts, resume),
+        sp_e(in ts, add(resume, 4)),
+        in resumed,
+        true
+    );
+    // The forwarded body: the body's span after its own edits.
+    let mut size = sub(be, bs);
+    for i in 0..(edits.len() / 5) {
+        let row = wrapping_mul(i, 5);
+        let s = w64(in edits, row);
+        let e = w64(in edits, inc(row));
+        if covers(bs, be, s, e) {
+            size = sub(add(size, w64(in edits, add(row, 3))), sub(e, s));
+        }
+    }
+    let rewritten = rewrite(inout r, in edits, in pool, max);
+    if rewritten.failed {
+        return rewritten;
+    }
+    r.holes.push(bs);
+    r.holes.push(add(bs, size));
+    let mut out = sc_ok();
+    if relay_return {
+        cat(inout out.items, in "\neffect ");
+        cat_seq(inout out.items, in effect);
+        cat(inout out.items, in "[T] { fn leave(sink value:T) -> Never; }\n");
+    }
+    out
+}
+
+fn dispatch(x: u64, in value: ChunkSeq[u8], valued_break: bool) -> ChunkSeq[u8] {
+    let mut t = ChunkSeq::new[u8]();
+    if x == X_NORMAL {
+        cat_seq(inout t, in value);
+    } else if x == X_RETURN {
+        cat(inout t, in "return ");
+        cat_seq(inout t, in value);
+    } else if x == X_CONTINUE {
+        cat(inout t, in "continue");
+    } else if valued_break {
+        cat(inout t, in "break ");
+        cat_seq(inout t, in value);
+    } else {
+        cat(inout t, in "break");
+    }
+    t
+}

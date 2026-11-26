@@ -1,9 +1,6 @@
 // @vesper-std/env (Windows): arguments, environment variables and current
 // directory directly over Win32 `kernel32` (`env-windows.vsys`).
-use @vesper-std/fs::{
-    IoError,
-    raise_kind
-};
+use @vesper-std/fs::{IoError, raise_kind};
 
 fn u8_at(in s: Slice[u8], i: u64) -> u8 {
     match s.try_get(i) {
@@ -38,6 +35,13 @@ fn push_utf8_cp(inout out: ChunkSeq[u8], cp: u32) {
 }
 
 fn utf16_to_utf8(in src: Slice[u16]) -> ChunkSeq[u8] {
+    utf16_to_bytes(in src, false)
+}
+
+// UTF-16 as UTF-8; an unpaired surrogate becomes U+FFFD, or with `wtf8`
+// its own three-byte form (WTF-8, `OsStr::as_encoded_bytes` on Windows),
+// which the path conversions of @vesper-std read back unchanged.
+fn utf16_to_bytes(in src: Slice[u16], wtf8: bool) -> ChunkSeq[u8] {
     let n = src.len();
     let mut out: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](n);
     let mut i: u64 = 0;
@@ -57,7 +61,7 @@ fn utf16_to_utf8(in src: Slice[u16]) -> ChunkSeq[u8] {
                 continue;
             }
         }
-        if w1 >= 55296 && w1 <= 57343 {
+        if w1 >= 55296 && w1 <= 57343 && !wtf8 {
             push_utf8_cp(inout out, 65533);
         } else {
             push_utf8_cp(inout out, w1);
@@ -278,6 +282,10 @@ pub fn arg(i: u64) -> Option[String] eff [Ffi[StdEnv]] {
 }
 
 fn utf16_u32_to_utf8(in src: Slice[u32], len_u16: u64) -> ChunkSeq[u8] {
+    utf16_u32_to_bytes(in src, len_u16, false)
+}
+
+fn utf16_u32_to_bytes(in src: Slice[u32], len_u16: u64, wtf8: bool) -> ChunkSeq[u8] {
     let mut u16s: ChunkSeq[u16] = ChunkSeq::with_capacity[u16](len_u16);
     for i in 0..len_u16 {
         let w = match src.try_get(wrapping_shr_u64(i, 1)) {
@@ -291,7 +299,7 @@ fn utf16_u32_to_utf8(in src: Slice[u32], len_u16: u64) -> ChunkSeq[u8] {
         };
         u16s.push(cu);
     }
-    utf16_to_utf8(in u16s.as_slice())
+    utf16_to_bytes(in u16s.as_slice(), wtf8)
 }
 
 pub fn var_bytes(in key: Str) -> Option[ChunkSeq[u8]] eff [Ffi[StdEnv]] {
@@ -454,7 +462,8 @@ fn errno_kind(e: u32) -> u32 {
 
 // The path of the running executable (`std::env::current_exe`):
 // `GetModuleFileNameW` of the process's own module, in a buffer that grows
-// until the name fits.
+// until the name fits. The bytes are WTF-8, as `as_encoded_bytes`: a name
+// with an unpaired surrogate keeps it, so the path still opens.
 pub fn current_exe_bytes() -> ChunkSeq[u8] eff [Ffi[StdEnv], Fail[IoError]] {
     let mut buf: ChunkSeq[u32] = ChunkSeq::new[u32]();
     buf.resize(260, 0);
@@ -472,7 +481,7 @@ pub fn current_exe_bytes() -> ChunkSeq[u8] eff [Ffi[StdEnv], Fail[IoError]] {
         // does); a name of that length or more was cut short.
         let nu = widen_u64(n);
         if nu < buf.len() {
-            return utf16_u32_to_utf8(in buf.as_slice(), nu);
+            return utf16_u32_to_bytes(in buf.as_slice(), nu, true);
         }
         let cap = buf.len();
         buf.resize(wrapping_mul(cap, 2), 0);

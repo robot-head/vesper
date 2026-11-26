@@ -17,34 +17,12 @@
 // against the same dump of the Rust AST on every `.ves` file of the
 // repository, the parser test corpus and a fuzzed corpus.
 
-use @vesper/check-data::util::{
-    copy_seq
-};
-use @vesper-std/arena::{
-    Arena,
-    Idx,
-    arena_new,
-    arena_with_capacity,
-    idx_from_raw
-};
-use @vesper-std/intern::{
-    Interner,
-    interner_new,
-    interner_with_capacity,
-    symbol_from_id
-};
-use self::lower::{
-    L,
-    lower_source,
-    lower_template_source
-};
-use self::dump::{
-    dump_ast
-};
-use self::words::{
-    words_count,
-    words_dump
-};
+use @vesper/check-data::util::{copy_seq};
+use @vesper-std/arena::{Arena, Idx, arena_new, arena_with_capacity, idx_from_raw};
+use @vesper-std/intern::{Interner, interner_new, interner_with_capacity, symbol_from_id};
+use self::lower::{L, lower_source, lower_surface_source, lower_template_source};
+use self::dump::{dump_ast};
+use self::words::{words_count, words_dump};
 
 // An absent child, name or optional value.
 pub fn none() -> u32 {
@@ -1230,6 +1208,12 @@ pub fn ast_dump(in source: Str) -> ChunkSeq[u64] {
 // flow analysis reads.
 pub fn ast_template_dump(in source: Str) -> ChunkSeq[u64] {
     let l = lower_template_source(in source);
+    dump_words(in l)
+}
+
+// `ast_template_dump` for the surface profile (`lower_surface_source`).
+pub fn ast_surface_dump(in source: Str) -> ChunkSeq[u64] {
+    let l = lower_surface_source(in source);
     dump_words(in l)
 }
 

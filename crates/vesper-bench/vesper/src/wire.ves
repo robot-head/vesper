@@ -2,25 +2,9 @@
 // `PmuSampleWire` record (seven u64le then two u32le), its range checks,
 // the per-field availability checks of `PmuSample`, and
 // `backend_bound_bp`. Field indices are `PmuField::ALL` order.
-use self::{
-    PmuSampleWire,
-    WireErr
-};
-use self::util::{
-    BP_SCALE,
-    add,
-    gb,
-    gu,
-    inc,
-    mul,
-    pow2,
-    rem
-};
-use self::wide::{
-    w_mul_u64,
-    w_u64,
-    w_udivrem
-};
+use self::{PmuSampleWire, WireErr};
+use self::util::{BP_SCALE, add, gb, gu, inc, mul, pow2, rem};
+use self::wide::{w_mul_u64, w_u64, w_udivrem};
 
 // PmuField::ALL order.
 enum Field: _ {

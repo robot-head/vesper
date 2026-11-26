@@ -10,9 +10,7 @@
 // Rust build clones it), so the arena is a DAG; `gsz[n]` is the node
 // count of the expanded tree (saturating), which `GlobalChor::node_count`
 // returns.
-use self::{
-    C
-};
+use self::{C};
 use self::util::{
     add,
     inc,

@@ -2,12 +2,7 @@
 // Vesper (#1886, part 2). The static Linux ELF executable, the Mach-O
 // AArch64 object and the x86-64 COFF object with its unwind tables.
 
-use self::asm::{
-    EXT_EXIT_PROCESS,
-    EXT_GET_STD_HANDLE,
-    External,
-    Prologue
-};
+use self::asm::{EXT_EXIT_PROCESS, EXT_GET_STD_HANDLE, External, Prologue};
 
 pub const ELF_BASE: u64 = 4194304;
 // The code's file offset with one program header, and with the heap's.

@@ -1,0 +1,2124 @@
+// `sugar_expand::template::flow`: scope and control-flow analysis of a
+// template skeleton, a transliteration of
+// crates/vesper-syntax/src/sugar_expand/template/flow.rs and of
+// `Rendered::hole` and `permission` in template.rs.
+//
+// The skeleton is parsed as the body of `fn template_body() {..}` by the
+// core parser, else by the template-scopes profile (@vesper/ast
+// `lower_source`, `lower_template_source`). The walk renames the
+// template's own binders to fresh names and plans single evaluation of
+// captured expressions; `emit` then applies those edits and substitutes
+// the captured text.
+//
+// Rust's maps and vectors become tables: nodes (`nd_*`), usages, edits
+// and declarations are rows, renaming texts live in one byte pool, and an
+// environment entry names its fresh name by purpose and number.
+
+use @vesper/ast::{
+    Ast,
+    ArgNode,
+    ClauseNode,
+    ConfNode,
+    ExprNode,
+    FnNode,
+    ImplNode,
+    ItemNode,
+    ParamNode,
+    PatNode,
+    StmtNode,
+    TraitNode,
+    expr_at,
+    list_at,
+    list_len,
+    none,
+    pat_at
+};
+use @vesper/ast::lower::{lower_source, lower_template_source};
+use @vesper-std/arena::{idx_from_raw};
+use @vesper-std/intern::{symbol_from_id};
+use @vesper/front::lex::{lex_raw, token_end, trivia_kind};
+use @vesper/front::diag::{diags_new};
+use @vesper/front::kinds::{
+    k_colon,
+    k_comma,
+    k_eof,
+    k_fat_arrow,
+    k_inout,
+    k_let,
+    k_l_paren,
+    k_r_paren,
+    k_semi,
+    k_sink
+};
+use self::template::{
+    Caps,
+    Sk,
+    add,
+    b8,
+    cap_at,
+    inc,
+    push_decimal,
+    push_range,
+    sort_in,
+    sub,
+    text_is,
+    value_at,
+    w32,
+    w64
+};
+
+const NONE: u64 = 18446744073709551615;
+const PREFIX: Str = "fn template_body() {";
+const PREFIX_LEN: u64 = 20;
+
+// Edges.
+const E_ALWAYS: u64 = 0;
+const E_BRANCH: u64 = 1;
+const E_CONDITIONAL: u64 = 2;
+const E_REPEATED: u64 = 3;
+
+// Fresh-name purposes.
+const F_LOCAL: u64 = 0;
+const F_PARAM: u64 = 1;
+const F_ONCE: u64 = 2;
+
+// Passes (`SugarPass`), 0 for none.
+const S_IN: u64 = 1;
+const S_INOUT: u64 = 2;
+const S_OUT: u64 = 3;
+const S_SINK: u64 = 4;
+
+// Node rows: parent (or NONE), edge, start, end, statement start (or
+// NONE), earlier effect.
+const NW: u64 = 6;
+
+pub struct Fx {
+    failed: bool,
+    msg: ChunkSeq[u8],
+    // The parsed text (`source`) and its core tokens: rows of kind,
+    // start, end.
+    src: ChunkSeq[u8],
+    tk: ChunkSeq[u64],
+    // Spans of the CST's nested sugar and macro calls: start, end pairs.
+    nested: ChunkSeq[u64],
+    nodes: ChunkSeq[u64],
+    // Usages of the walked function: rows of hole, slot, node.
+    us: ChunkSeq[u64],
+    // Per slot: written (1), and its memo (0 none, else the number of its
+    // `once` name) and laziness.
+    writes: ChunkSeq[u8],
+    memo: ChunkSeq[u64],
+    lazy: ChunkSeq[u8],
+    // Renamings (`literals`): rows of start, end, text first, text length
+    // in `pool`, in key order.
+    lits: ChunkSeq[u64],
+    pool: ChunkSeq[u8],
+    // Declarations: rows of start, end (or NONE), hole, number, lazy.
+    decls: ChunkSeq[u64],
+    fresh: u64,
+    mark: ChunkSeq[u8]
+}
+
+fn fail(inout f: Fx, in text: Slice[u8]) {
+    if !f.failed {
+        f.failed = true;
+        f.msg.clear();
+        f.msg.extend(in text);
+    }
+}
+
+// ---------------------------------------------------------------- tokens
+
+fn ntok(in f: Fx) -> u64 {
+    f.tk.len() / 3
+}
+
+fn tok_k(in f: Fx, i: u64) -> u8 {
+    wrapping_u8(w64(in f.tk, wrapping_mul(i, 3)))
+}
+
+fn tok_s(in f: Fx, i: u64) -> u64 {
+    w64(in f.tk, inc(wrapping_mul(i, 3)))
+}
+
+fn tok_e(in f: Fx, i: u64) -> u64 {
+    w64(in f.tk, add(wrapping_mul(i, 3), 2))
+}
+
+fn lex_rows(in text: ChunkSeq[u8]) -> ChunkSeq[u64] {
+    let mut d = diags_new();
+    let raw = lex_raw(in text.as_slice(), inout d);
+    let mut out = ChunkSeq::new[u64]();
+    for i in 0..raw.kind.len() {
+        out.push(widen_u64(b8(in raw.kind, i)));
+        out.push(w32(in raw.start, i));
+        out.push(token_end(in raw, i));
+    }
+    out
+}
+
+// `tokens.partition_point(|t| t.span.end <= at)`.
+fn tokens_before(in f: Fx, at: u64) -> u64 {
+    let mut lo: u64 = 0;
+    let mut hi = ntok(in f);
+    loop {
+        if lo >= hi {
+            break;
+        }
+        let mid = add(lo, (sub(hi, lo)) >> 1);
+        if tok_e(in f, mid) <= at {
+            lo = inc(mid);
+        } else {
+            hi = mid;
+        }
+    }
+    lo
+}
+
+// ---------------------------------------------------------------- names
+
+pub fn name_len(in a: Ast, sym: u32) -> u64 {
+    let (s, e) = a.names.span(symbol_from_id(sym));
+    sub(e, s)
+}
+
+pub fn name_byte(in a: Ast, sym: u32, j: u64) -> u8 {
+    let (s, _) = a.names.span(symbol_from_id(sym));
+    match a.names.text_byte(add(s, j)) {
+        Option::Some(c) => c,
+        Option::None => 0,
+    }
+}
+
+fn starts_with_mark(in f: Fx, in a: Ast, sym: u32) -> bool {
+    if name_len(in a, sym) < f.mark.len() {
+        return false;
+    }
+    for j in 0..f.mark.len() {
+        if name_byte(in a, sym, j) != b8(in f.mark, j) {
+            return false;
+        }
+    }
+    true
+}
+
+pub fn name_is(in a: Ast, sym: u32, in text: Slice[u8]) -> bool {
+    if name_len(in a, sym) != text.len() {
+        return false;
+    }
+    for j in 0..text.len() {
+        let c = match text.try_get(j) {
+            Option::Some(c) => c,
+            Option::None => 0,
+        };
+        if name_byte(in a, sym, j) != c {
+            return false;
+        }
+    }
+    true
+}
+
+// `self.slice(r) == name`: the skeleton text at the source range `s..e`.
+fn slice_is(in f: Fx, in sk: Sk, s: u64, e: u64, in a: Ast, sym: u32) -> bool {
+    if s < PREFIX_LEN || e < PREFIX_LEN || e < s {
+        return name_len(in a, sym) == 0;
+    }
+    let os = sub(s, PREFIX_LEN);
+    let oe = sub(e, PREFIX_LEN);
+    if oe > sk.src.len() {
+        return name_len(in a, sym) == 0;
+    }
+    if sub(oe, os) != name_len(in a, sym) {
+        return false;
+    }
+    for j in 0..sub(oe, os) {
+        if b8(in sk.src, add(os, j)) != name_byte(in a, sym, j) {
+            return false;
+        }
+    }
+    true
+}
+
+// The text of a fresh name: mark, purpose, number.
+fn push_fresh(inout out: ChunkSeq[u8], in mark: ChunkSeq[u8], purpose: u64, n: u64) {
+    out.extend(in mark.as_slice());
+    if purpose == F_LOCAL {
+        out.extend(in "local".as_bytes());
+    } else if purpose == F_PARAM {
+        out.extend(in "param".as_bytes());
+    } else {
+        out.extend(in "once".as_bytes());
+    }
+    push_decimal(inout out, n);
+}
+
+fn fresh(inout f: Fx) -> u64 {
+    f.fresh = inc(f.fresh);
+    f.fresh
+}
+
+fn push_name(inout out: ChunkSeq[u8], in a: Ast, sym: u32) {
+    for j in 0..name_len(in a, sym) {
+        out.push(name_byte(in a, sym, j));
+    }
+}
+
+// `self.rename(r, text)`: a renaming of the skeleton's `s..e` (source
+// offsets), replacing any earlier one of the same range.
+fn rename(inout f: Fx, in sk: Sk, s: u64, e: u64, in text: ChunkSeq[u8]) {
+    if s < PREFIX_LEN || e > add(PREFIX_LEN, sk.src.len()) {
+        return;
+    }
+    let os = sub(s, PREFIX_LEN);
+    let oe = sub(e, PREFIX_LEN);
+    let first = f.pool.len();
+    f.pool.extend(in text.as_slice());
+    let n = f.lits.len() >> 2;
+    let mut at = n;
+    for i in 0..n {
+        let ks = w64(in f.lits, i << 2);
+        let ke = w64(in f.lits, inc(i << 2));
+        if ks == os && ke == oe {
+            f.lits.try_set(add(i << 2, 2), first);
+            f.lits.try_set(add(i << 2, 3), text.len());
+            return;
+        }
+        if ks > os || ks == os && ke > oe {
+            at = i;
+            break;
+        }
+    }
+    for k in 0..4 {
+        f.lits.push(0);
+    }
+    let mut i = n;
+    loop {
+        if i <= at {
+            break;
+        }
+        for k in 0..4 {
+            f.lits.try_set(add(i << 2, k), w64(in f.lits, add(sub(i, 1) << 2, k)));
+        }
+        i = sub(i, 1);
+    }
+    f.lits.try_set(at << 2, os);
+    f.lits.try_set(inc(at << 2), oe);
+    f.lits.try_set(add(at << 2, 2), first);
+    f.lits.try_set(add(at << 2, 3), text.len());
+}
+
+// `self.slot(start)`: the slot whose marker starts at source offset
+// `start`, or NONE.
+fn slot_at(in f: Fx, in sk: Sk, start: u64) -> u64 {
+    if start < PREFIX_LEN {
+        return NONE;
+    }
+    let off = sub(start, PREFIX_LEN);
+    let n = sk.slots.len() / 3;
+    let mut lo: u64 = 0;
+    let mut hi = n;
+    loop {
+        if lo >= hi {
+            return NONE;
+        }
+        let mid = add(lo, sub(hi, lo) >> 1);
+        let s = w64(in sk.slots, inc(wrapping_mul(mid, 3)));
+        if s == off {
+            return mid;
+        }
+        if s < off {
+            lo = inc(mid);
+        } else {
+            hi = mid;
+        }
+    }
+}
+
+fn slot_hole(in sk: Sk, k: u64) -> u64 {
+    w64(in sk.slots, wrapping_mul(k, 3))
+}
+
+fn hole_cap(in sk: Sk, h: u64) -> u64 {
+    w64(in sk.holes, h << 2)
+}
+
+fn cap_pass(in c: Caps, cap: u64) -> u64 {
+    cap_at(in c, cap, 2)
+}
+
+// `permission(hole)`: 0 for none, else the pass; `invalid` for a place
+// whose pass does not parse.
+fn permission(in c: Caps, in sk: Sk, h: u64) -> u64 {
+    let cap = hole_cap(in sk, h);
+    if sort_in(in c, cap, in "expr".as_bytes()) {
+        return S_IN;
+    }
+    if sort_in(in c, cap, in "place".as_bytes()) {
+        let p = cap_pass(in c, cap);
+        return if p == 0 {
+            S_IN
+        } else {
+            p
+        };
+    }
+    0
+}
+
+fn permits(floor: u64, requested: u64) -> bool {
+    floor == requested
+        || floor == S_INOUT && requested == S_IN
+        || floor == S_SINK && (requested == S_IN || requested == S_INOUT)
+}
+
+fn pass_name(inout m: ChunkSeq[u8], p: u64) {
+    if p == S_IN {
+        m.extend(in "In".as_bytes());
+    } else if p == S_INOUT {
+        m.extend(in "Inout".as_bytes());
+    } else if p == S_OUT {
+        m.extend(in "Out".as_bytes());
+    } else {
+        m.extend(in "Sink".as_bytes());
+    }
+}
+
+// ---------------------------------------------------------------- nodes
+
+fn nd(in f: Fx, n: u64, k: u64) -> u64 {
+    w64(in f.nodes, add(wrapping_mul(n, NW), k))
+}
+
+fn nd_set(inout f: Fx, n: u64, k: u64, v: u64) {
+    f.nodes.try_set(add(wrapping_mul(n, NW), k), v);
+}
+
+fn push_node(inout f: Fx, parent: u64, edge: u64, s: u64, e: u64) -> u64 {
+    let id = f.nodes.len() / NW;
+    f.nodes.push(parent);
+    f.nodes.push(edge);
+    f.nodes.push(s);
+    f.nodes.push(e);
+    f.nodes.push(NONE);
+    f.nodes.push(0);
+    id
+}
+
+fn node_count(in f: Fx) -> u64 {
+    f.nodes.len() / NW
+}
+
+fn is_nested(in f: Fx, s: u64, e: u64) -> bool {
+    for i in 0..(f.nested.len() >> 1) {
+        if w64(in f.nested, i << 1) == s && w64(in f.nested, inc(i << 1)) == e {
+            return true;
+        }
+    }
+    false
+}
+
+// ---------------------------------------------------------------- AST
+
+pub fn stmt_of(in a: Ast, i: u32) -> StmtNode {
+    a
+        .stmts
+        .get_or(
+            idx_from_raw[StmtNode](i),
+            StmtNode {
+                kind: 0,
+                pat: none(),
+                ty: none(),
+                value: none(),
+                mutable: false
+            }
+        )
+}
+
+pub fn arg_of(in a: Ast, i: u32) -> ArgNode {
+    a
+        .args
+        .get_or(
+            idx_from_raw[ArgNode](i),
+            ArgNode {
+                pass: 0,
+                explicit: false,
+                expr: none()
+            }
+        )
+}
+
+pub fn clause_of(in a: Ast, i: u32) -> ClauseNode {
+    a
+        .clauses
+        .get_or(
+            idx_from_raw[ClauseNode](i),
+            ClauseNode {
+                name: none(),
+                pats: 0,
+                body: none()
+            }
+        )
+}
+
+pub fn param_of(in a: Ast, i: u32) -> ParamNode {
+    a
+        .params
+        .get_or(
+            idx_from_raw[ParamNode](i),
+            ParamNode {
+                name: none(),
+                pass: 0,
+                projections: 0,
+                ty: none(),
+                start: 0,
+                end: 0
+            }
+        )
+}
+
+pub fn fn_of(in a: Ast, i: u32) -> FnNode {
+    a
+        .fns
+        .get_or(
+            idx_from_raw[FnNode](i),
+            FnNode {
+                name: none(),
+                fip: false,
+                generics: 0,
+                params: 0,
+                result: none(),
+                effects: none(),
+                body: none(),
+                start: 0,
+                end: 0
+            }
+        )
+}
+
+pub fn es(in a: Ast, e: u32) -> u64 {
+    widen_u64(expr_at(in a, e).start)
+}
+
+pub fn ee(in a: Ast, e: u32) -> u64 {
+    widen_u64(expr_at(in a, e).end)
+}
+
+// `self.inert(e)`.
+fn inert(in f: Fx, in a: Ast, e: u32) -> bool {
+    let n = expr_at(in a, e);
+    if n.kind == 1 {
+        return true;
+    }
+    n.kind == 2 && !starts_with_mark(in f, in a, n.a)
+}
+
+// ---------------------------------------------------------------- environment
+
+// Environment rows: old name (symbol), purpose, number.
+fn env_push(inout env: ChunkSeq[u64], sym: u32, purpose: u64, n: u64) {
+    env.push(widen_u64(sym));
+    env.push(purpose);
+    env.push(n);
+}
+
+fn env_len(in env: ChunkSeq[u64]) -> u64 {
+    env.len() / 3
+}
+
+fn env_truncate(inout env: ChunkSeq[u64], n: u64) {
+    env.truncate(wrapping_mul(n, 3));
+}
+
+// The newest entry of `sym`, or NONE.
+fn env_find(in env: ChunkSeq[u64], sym: u32) -> u64 {
+    let mut i = env_len(in env);
+    loop {
+        if i == 0 {
+            return NONE;
+        }
+        i = sub(i, 1);
+        if w64(in env, wrapping_mul(i, 3)) == widen_u64(sym) {
+            return i;
+        }
+    }
+}
+
+// ---------------------------------------------------------------- patterns
+
+// `self.shorthand(name, r)`.
+fn shorthand(in f: Fx, in sk: Sk, in a: Ast, sym: u32, s: u64, e: u64) -> bool {
+    if !slice_is(in f, in sk, s, e, in a, sym) {
+        return false;
+    }
+    let mut i = tokens_before(in f, s);
+    loop {
+        if i == 0 {
+            return true;
+        }
+        i = sub(i, 1);
+        if !trivia_kind(tok_k(in f, i)) {
+            return tok_k(in f, i) != k_colon();
+        }
+    }
+}
+
+// `self.pattern_using(p, env, shorthand, alternatives)`.
+fn pattern_using(
+    inout f: Fx,
+    in sk: Sk,
+    in a: Ast,
+    p: u32,
+    inout env: ChunkSeq[u64],
+    short: bool,
+    in alts: ChunkSeq[u64]
+) {
+    let n = pat_at(in a, p);
+    let s = widen_u64(n.start);
+    let e = widen_u64(n.end);
+    if n.kind == 2 {
+        if starts_with_mark(in f, in a, n.a) || !slice_is(in f, in sk, s, e, in a, n.a) {
+            return;
+        }
+        let found = env_find(in alts, n.a);
+        let (purpose, num) = if found != NONE {
+            (
+                w64(in alts, inc(wrapping_mul(found, 3))),
+                w64(in alts, add(wrapping_mul(found, 3), 2))
+            )
+        } else {
+            (F_LOCAL, fresh(inout f))
+        };
+        let mut text = ChunkSeq::new[u8]();
+        if short {
+            push_name(inout text, in a, n.a);
+            text.extend(in ": ".as_bytes());
+        }
+        push_fresh(inout text, in f.mark, purpose, num);
+        rename(inout f, in sk, s, e, in text);
+        env_push(inout env, n.a, purpose, num);
+    } else if n.kind == 4 {
+        for i in 0..list_len(in a, n.a) {
+            pattern_using(inout f, in sk, in a, list_at(in a, n.a, i), inout env, false, in alts);
+        }
+    } else if n.kind == 5 {
+        let named = n.c == 1;
+        for i in 0..(list_len(in a, n.b) >> 1) {
+            let fname = list_at(in a, n.b, i << 1);
+            let fp = list_at(in a, n.b, inc(i << 1));
+            let fpn = pat_at(in a, fp);
+            let sh = named
+                && shorthand(in f, in sk, in a, fname, widen_u64(fpn.start), widen_u64(fpn.end));
+            pattern_using(inout f, in sk, in a, fp, inout env, sh, in alts);
+        }
+    }
+}
+
+fn pattern(inout f: Fx, in sk: Sk, in a: Ast, p: u32, inout env: ChunkSeq[u64]) {
+    let none_alts = ChunkSeq::new[u64]();
+    pattern_using(inout f, in sk, in a, p, inout env, false, in none_alts);
+}
+
+// ---------------------------------------------------------------- places
+
+// `self.place(e, use_mode)`.
+fn place(inout f: Fx, in sk: Sk, in c: Caps, in a: Ast, e: u32, mode: u64) {
+    let mut b = e;
+    loop {
+        let n = expr_at(in a, b);
+        if n.kind != 7 && n.kind != 8 {
+            break;
+        }
+        b = n.a;
+    }
+    let k = slot_at(in f, in sk, es(in a, b));
+    if k == NONE {
+        return;
+    }
+    let h = slot_hole(in sk, k);
+    let floor = permission(in c, in sk, h);
+    if floor == 0 {
+        return;
+    }
+    if !permits(floor, mode) {
+        let mut m = ChunkSeq::new[u8]();
+        m.extend(in "sugar template upgrades a ".as_bytes());
+        pass_name(inout m, floor);
+        m.extend(in " capture to ".as_bytes());
+        pass_name(inout m, mode);
+        fail(inout f, in m.as_slice());
+        return;
+    }
+    if mode != S_IN {
+        f.writes.try_set(k, 1);
+    }
+}
+
+// `self.nested_place(operand)`.
+fn nested_place(inout f: Fx, in sk: Sk, in c: Caps, in a: Ast, e: u32) {
+    let mut i = tokens_before(in f, es(in a, e));
+    loop {
+        if i == 0 {
+            return;
+        }
+        i = sub(i, 1);
+        let k = tok_k(in f, i);
+        if !trivia_kind(k) && k != k_l_paren() {
+            break;
+        }
+    }
+    let s = tok_s(in f, i);
+    let t = tok_e(in f, i);
+    let mode = pass_of_slice(in f, in sk, s, t);
+    if mode != 0 {
+        place(inout f, in sk, in c, in a, e, mode);
+    }
+}
+
+// `self.slice(r).parse::<SugarPass>()`: the pass, or 0.
+fn pass_of_slice(in f: Fx, in sk: Sk, s: u64, e: u64) -> u64 {
+    if s < PREFIX_LEN || e < s || sub(e, PREFIX_LEN) > sk.src.len() {
+        return 0;
+    }
+    let mut t = ChunkSeq::new[u8]();
+    push_range(inout t, in sk.src, sub(s, PREFIX_LEN), sub(e, PREFIX_LEN));
+    if bytes_eq(in t, in "in".as_bytes()) {
+        S_IN
+    } else if bytes_eq(in t, in "inout".as_bytes()) {
+        S_INOUT
+    } else if bytes_eq(in t, in "out".as_bytes()) {
+        S_OUT
+    } else if bytes_eq(in t, in "sink".as_bytes()) {
+        S_SINK
+    } else {
+        0
+    }
+}
+
+fn bytes_eq(in a: ChunkSeq[u8], in b: Slice[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    for j in 0..a.len() {
+        let c = match b.try_get(j) {
+            Option::Some(c) => c,
+            Option::None => 0,
+        };
+        if b8(in a, j) != c {
+            return false;
+        }
+    }
+    true
+}
+
+// ---------------------------------------------------------------- walk
+
+fn walk_kids_tuple(
+    inout f: Fx,
+    in sk: Sk,
+    in c: Caps,
+    in a: Ast,
+    list: u32,
+    parent: u64,
+    nested: bool,
+    operand_edge: u64,
+    inout env: ChunkSeq[u64]
+) {
+    let mut earlier = false;
+    for i in 0..list_len(in a, list) {
+        let x = list_at(in a, list, i);
+        let child = node_count(in f);
+        let edge = if nested && expr_at(in a, x).kind == 5 {
+            E_REPEATED
+        } else {
+            operand_edge
+        };
+        walk(inout f, in sk, in c, in a, x, parent, edge, inout env);
+        if f.failed {
+            return;
+        }
+        nd_set(
+            inout f,
+            child,
+            5,
+            if earlier {
+                1
+            } else {
+                0
+            }
+        );
+        earlier = earlier || !inert(in f, in a, x);
+    }
+}
+
+fn set_earlier(inout f: Fx, child: u64, v: bool) {
+    nd_set(
+        inout f,
+        child,
+        5,
+        if v {
+            1
+        } else {
+            0
+        }
+    );
+}
+
+// `self.walk(e, parent, edge, env)`.
+fn walk(
+    inout f: Fx,
+    in sk: Sk,
+    in c: Caps,
+    in a: Ast,
+    e: u32,
+    parent_in: u64,
+    edge: u64,
+    inout env: ChunkSeq[u64]
+) {
+    if f.failed {
+        return;
+    }
+    let n = expr_at(in a, e);
+    let s = widen_u64(n.start);
+    let t = widen_u64(n.end);
+    let node = push_node(inout f, parent_in, edge, s, t);
+    let parent = node;
+    let nested = is_nested(in f, s, t);
+    let operand_edge = if nested {
+        E_CONDITIONAL
+    } else {
+        E_ALWAYS
+    };
+    let outer = env_len(in env);
+    let k = n.kind;
+    if k == 2 {
+        let slot = slot_at(in f, in sk, s);
+        if slot != NONE {
+            let h = slot_hole(in sk, slot);
+            // `marker == n`: the mark, then the hole number.
+            let mut marker = ChunkSeq::new[u8]();
+            marker.extend(in f.mark.as_slice());
+            push_decimal(inout marker, h);
+            if name_is(in a, n.a, in marker.as_slice()) {
+                f.us.push(h);
+                f.us.push(slot);
+                f.us.push(node);
+            }
+        } else {
+            let found = env_find(in env, n.a);
+            if found != NONE && slice_is(in f, in sk, s, t, in a, n.a) {
+                let mut text = ChunkSeq::new[u8]();
+                push_fresh(
+                    inout text,
+                    in f.mark,
+                    w64(in env, inc(wrapping_mul(found, 3))),
+                    w64(in env, add(wrapping_mul(found, 3), 2))
+                );
+                rename(inout f, in sk, s, t, in text);
+            }
+        }
+    } else if k == 1 || k == 22 {
+        // Literal, Continue.
+    } else if k == 3 {
+        walk_kids_tuple(inout f, in sk, in c, in a, n.a, parent, nested, operand_edge, inout env);
+    } else if k == 4 {
+        let mut earlier = false;
+        for i in 0..(list_len(in a, n.b) >> 1) {
+            let fname = list_at(in a, n.b, i << 1);
+            let x = list_at(in a, n.b, inc(i << 1));
+            let child = node_count(in f);
+            walk(inout f, in sk, in c, in a, x, parent, E_ALWAYS, inout env);
+            if f.failed {
+                return;
+            }
+            set_earlier(inout f, child, earlier);
+            earlier = earlier || !inert(in f, in a, x);
+            let xs = es(in a, x);
+            if shorthand(in f, in sk, in a, fname, xs, ee(in a, x)) && xs >= PREFIX_LEN {
+                let r = sub(xs, PREFIX_LEN);
+                let re = add(r, name_len(in a, fname));
+                for q in 0..(f.lits.len() >> 2) {
+                    if w64(in f.lits, q << 2) == r && w64(in f.lits, inc(q << 2)) == re {
+                        let first = w64(in f.lits, add(q << 2, 2));
+                        let len = w64(in f.lits, add(q << 2, 3));
+                        let mut text = ChunkSeq::new[u8]();
+                        push_name(inout text, in a, fname);
+                        text.extend(in ": ".as_bytes());
+                        push_range(inout text, in f.pool, first, add(first, len));
+                        let nf = f.pool.len();
+                        f.pool.extend(in text.as_slice());
+                        f.lits.try_set(add(q << 2, 2), nf);
+                        f.lits.try_set(add(q << 2, 3), text.len());
+                        break;
+                    }
+                }
+            }
+        }
+    } else if k == 5 {
+        let block_start = inc(s);
+        let mut after = block_start;
+        for i in 0..list_len(in a, n.a) {
+            let st = stmt_of(in a, list_at(in a, n.a, i));
+            let first = node_count(in f);
+            if st.kind == 1 {
+                walk(inout f, in sk, in c, in a, st.value, parent, operand_edge, inout env);
+                if f.failed {
+                    return;
+                }
+                pattern(inout f, in sk, in a, st.pat, inout env);
+            } else {
+                if nested {
+                    nested_place(inout f, in sk, in c, in a, st.value);
+                    if f.failed {
+                        return;
+                    }
+                }
+                let edge2 = if nested && expr_at(in a, st.value).kind == 5 {
+                    E_REPEATED
+                } else {
+                    operand_edge
+                };
+                walk(inout f, in sk, in c, in a, st.value, parent, edge2, inout env);
+                if f.failed {
+                    return;
+                }
+            }
+            set_earlier(inout f, first, after != block_start);
+            if !nested {
+                after = statement(inout f, first, after);
+            }
+        }
+        if n.b != none() {
+            let first = node_count(in f);
+            walk(inout f, in sk, in c, in a, n.b, parent, E_ALWAYS, inout env);
+            if f.failed {
+                return;
+            }
+            set_earlier(inout f, first, after != block_start);
+            statement(inout f, first, after);
+        }
+    } else if k == 6 {
+        walk(inout f, in sk, in c, in a, n.a, parent, E_ALWAYS, inout env);
+        if f.failed {
+            return;
+        }
+        let mut earlier = !inert(in f, in a, n.a);
+        for i in 0..list_len(in a, n.c) {
+            let arg = arg_of(in a, list_at(in a, n.c, i));
+            if arg.explicit {
+                let mode = if arg.pass == 0 {
+                    S_IN
+                } else if arg.pass == 1 {
+                    S_INOUT
+                } else {
+                    S_SINK
+                };
+                place(inout f, in sk, in c, in a, arg.expr, mode);
+                if f.failed {
+                    return;
+                }
+            }
+            let child = node_count(in f);
+            walk(inout f, in sk, in c, in a, arg.expr, parent, E_ALWAYS, inout env);
+            if f.failed {
+                return;
+            }
+            set_earlier(inout f, child, earlier);
+            earlier = earlier || !inert(in f, in a, arg.expr);
+        }
+    } else if k == 7 || k == 9 {
+        walk(inout f, in sk, in c, in a, n.a, parent, E_ALWAYS, inout env);
+    } else if k == 10 {
+        walk(inout f, in sk, in c, in a, n.b, parent, E_ALWAYS, inout env);
+    } else if k == 8 || k == 19 {
+        walk(inout f, in sk, in c, in a, n.a, parent, E_ALWAYS, inout env);
+        if f.failed {
+            return;
+        }
+        let child = node_count(in f);
+        walk(inout f, in sk, in c, in a, n.b, parent, E_ALWAYS, inout env);
+        set_earlier(inout f, child, !inert(in f, in a, n.a));
+    } else if k == 11 {
+        walk(inout f, in sk, in c, in a, n.b, parent, operand_edge, inout env);
+        if f.failed {
+            return;
+        }
+        let child = node_count(in f);
+        let lazy_op = name_is(in a, n.a, in "&&".as_bytes())
+            || name_is(in a, n.a, in "||".as_bytes());
+        let edge2 = if nested || lazy_op {
+            E_CONDITIONAL
+        } else {
+            E_ALWAYS
+        };
+        walk(inout f, in sk, in c, in a, n.c, parent, edge2, inout env);
+        set_earlier(inout f, child, !inert(in f, in a, n.b));
+    } else if k == 12 {
+        let mut base = n.b;
+        loop {
+            let bn = expr_at(in a, base);
+            if bn.kind != 7 && bn.kind != 8 {
+                break;
+            }
+            base = bn.a;
+        }
+        let mut init_out = false;
+        if name_is(in a, n.a, in "=".as_bytes()) {
+            let slot = slot_at(in f, in sk, es(in a, base));
+            if slot != NONE {
+                init_out = cap_pass(in c, hole_cap(in sk, slot_hole(in sk, slot))) == S_OUT;
+            }
+        }
+        place(
+            inout f,
+            in sk,
+            in c,
+            in a,
+            n.b,
+            if init_out {
+                S_OUT
+            } else {
+                S_INOUT
+            }
+        );
+        if f.failed {
+            return;
+        }
+        walk(inout f, in sk, in c, in a, n.b, parent, E_ALWAYS, inout env);
+        if f.failed {
+            return;
+        }
+        walk(inout f, in sk, in c, in a, n.c, parent, E_ALWAYS, inout env);
+    } else if k == 13 {
+        walk(inout f, in sk, in c, in a, n.a, parent, E_ALWAYS, inout env);
+        if f.failed {
+            return;
+        }
+        walk(inout f, in sk, in c, in a, n.b, parent, E_BRANCH, inout env);
+        if f.failed {
+            return;
+        }
+        if n.c != none() {
+            walk(inout f, in sk, in c, in a, n.c, parent, E_BRANCH, inout env);
+        }
+    } else if k == 14 {
+        walk(inout f, in sk, in c, in a, n.a, parent, E_ALWAYS, inout env);
+        if f.failed {
+            return;
+        }
+        let arms = list_len(in a, n.b) >> 1;
+        let mut i: u64 = 0;
+        loop {
+            if i >= arms {
+                break;
+            }
+            let p = list_at(in a, n.b, i << 1);
+            let x = list_at(in a, n.b, inc(i << 1));
+            // The alternatives of an or-pattern share the body's span.
+            let mut j = inc(i);
+            loop {
+                if j >= arms {
+                    break;
+                }
+                let y = list_at(in a, n.b, inc(j << 1));
+                if es(in a, y) != es(in a, x) || ee(in a, y) != ee(in a, x) {
+                    break;
+                }
+                j = inc(j);
+            }
+            pattern(inout f, in sk, in a, p, inout env);
+            walk(inout f, in sk, in c, in a, x, parent, E_BRANCH, inout env);
+            if f.failed {
+                return;
+            }
+            let mut bindings = ChunkSeq::new[u64]();
+            for q in wrapping_mul(outer, 3)..env.len() {
+                bindings.push(w64(in env, q));
+            }
+            env_truncate(inout env, outer);
+            for q in inc(i)..j {
+                let other = list_at(in a, n.b, q << 1);
+                pattern_using(inout f, in sk, in a, other, inout env, false, in bindings);
+                env_truncate(inout env, outer);
+            }
+            i = j;
+        }
+    } else if k == 15 {
+        for i in 0..list_len(in a, n.a) {
+            let pr = param_of(in a, list_at(in a, n.a, i));
+            if starts_with_mark(in f, in a, pr.name) {
+                continue;
+            }
+            let ps = widen_u64(pr.start);
+            let pe = widen_u64(pr.end);
+            if ps < PREFIX_LEN || pe < ps || sub(pe, PREFIX_LEN) > sk.src.len() {
+                // `slice` is empty: no token matches a nonempty name.
+                if name_len(in a, pr.name) != 0 {
+                    continue;
+                }
+            }
+            let mut fragment = ChunkSeq::new[u8]();
+            if ps >= PREFIX_LEN && pe >= ps && sub(pe, PREFIX_LEN) <= sk.src.len() {
+                push_range(inout fragment, in sk.src, sub(ps, PREFIX_LEN), sub(pe, PREFIX_LEN));
+            }
+            let ft = lex_rows(in fragment);
+            let mut hit = NONE;
+            for q in 0..(ft.len() / 3) {
+                let ts = w64(in ft, inc(wrapping_mul(q, 3)));
+                let te = w64(in ft, add(wrapping_mul(q, 3), 2));
+                if sub(te, ts) == name_len(in a, pr.name) {
+                    let mut same = true;
+                    for z in 0..sub(te, ts) {
+                        if b8(in fragment, add(ts, z)) != name_byte(in a, pr.name, z) {
+                            same = false;
+                            break;
+                        }
+                    }
+                    if same {
+                        hit = ts;
+                        break;
+                    }
+                }
+            }
+            if hit != NONE {
+                let st = add(ps, hit);
+                let num = fresh(inout f);
+                let mut text = ChunkSeq::new[u8]();
+                push_fresh(inout text, in f.mark, F_PARAM, num);
+                rename(inout f, in sk, st, add(st, name_len(in a, pr.name)), in text);
+                env_push(inout env, pr.name, F_PARAM, num);
+            }
+        }
+        walk(inout f, in sk, in c, in a, n.e, parent, E_REPEATED, inout env);
+    } else if k == 16 {
+        if n.b != none() {
+            walk(inout f, in sk, in c, in a, n.c, parent, E_ALWAYS, inout env);
+            if f.failed {
+                return;
+            }
+            pattern(inout f, in sk, in a, n.b, inout env);
+        }
+        walk(inout f, in sk, in c, in a, n.d, parent, E_ALWAYS, inout env);
+        if f.failed {
+            return;
+        }
+        let base = env_len(in env);
+        for i in 0..list_len(in a, n.e) {
+            let cl = clause_of(in a, list_at(in a, n.e, i));
+            for q in 0..list_len(in a, cl.pats) {
+                pattern(inout f, in sk, in a, list_at(in a, cl.pats, q), inout env);
+            }
+            let edge2 = if i == 0 {
+                E_CONDITIONAL
+            } else {
+                E_REPEATED
+            };
+            walk(inout f, in sk, in c, in a, cl.body, parent, edge2, inout env);
+            if f.failed {
+                return;
+            }
+            env_truncate(inout env, base);
+        }
+    } else if k == 17 {
+        walk(inout f, in sk, in c, in a, n.a, parent, E_REPEATED, inout env);
+    } else if k == 18 {
+        walk(inout f, in sk, in c, in a, n.b, parent, E_ALWAYS, inout env);
+        if f.failed {
+            return;
+        }
+        pattern(inout f, in sk, in a, n.a, inout env);
+        walk(inout f, in sk, in c, in a, n.c, parent, E_REPEATED, inout env);
+    } else if k == 20 || k == 21 {
+        if n.a != none() {
+            walk(inout f, in sk, in c, in a, n.a, parent, E_ALWAYS, inout env);
+        }
+    }
+    env_truncate(inout env, outer);
+}
+
+// `self.statement(child, after)`.
+fn statement(inout f: Fx, child: u64, after: u64) -> u64 {
+    let at = tokens_before(in f, after);
+    let p = nd(in f, child, 0);
+    if p != NONE && nd(in f, p, 2) < PREFIX_LEN {
+        return nd(in f, child, 3);
+    }
+    let mut start = NONE;
+    for i in at..ntok(in f) {
+        let k = tok_k(in f, i);
+        if !trivia_kind(k) && k != k_r_paren() && k != k_semi() {
+            start = tok_s(in f, i);
+            break;
+        }
+    }
+    nd_set(inout f, child, 4, start);
+    nd(in f, child, 3)
+}
+
+// `self.function(f, wrapped)`.
+fn function(inout f: Fx, in sk: Sk, in c: Caps, in a: Ast, fi: u32, wrapped: bool) {
+    let fnode = fn_of(in a, fi);
+    if fnode.body == none() {
+        return;
+    }
+    let mut names = ChunkSeq::new[u64]();
+    if !wrapped {
+        for i in 0..list_len(in a, fnode.params) {
+            let pr = param_of(in a, list_at(in a, fnode.params, i));
+            if starts_with_mark(in f, in a, pr.name)
+                || name_is(in a, pr.name, in "self".as_bytes()) {
+                continue;
+            }
+            let ps = widen_u64(pr.start);
+            let pe = widen_u64(pr.end);
+            let mut q = tokens_before(in f, ps);
+            loop {
+                if q >= ntok(in f) || tok_s(in f, q) >= pe {
+                    break;
+                }
+                if slice_is(in f, in sk, tok_s(in f, q), tok_e(in f, q), in a, pr.name) {
+                    let num = fresh(inout f);
+                    let mut text = ChunkSeq::new[u8]();
+                    push_fresh(inout text, in f.mark, F_PARAM, num);
+                    rename(inout f, in sk, tok_s(in f, q), tok_e(in f, q), in text);
+                    env_push(inout names, pr.name, F_PARAM, num);
+                    break;
+                }
+                q = inc(q);
+            }
+        }
+    }
+    walk(inout f, in sk, in c, in a, fnode.body, NONE, E_ALWAYS, inout names);
+    if f.failed {
+        return;
+    }
+    let nholes = sk.holes.len() >> 2;
+    let mut uses = ChunkSeq::new[u64]();
+    swap(inout uses, inout f.us);
+    for id in 0..nholes {
+        // This hole's usages, as (slot, path) rows over a path pool.
+        let mut rows = ChunkSeq::new[u64]();
+        let mut paths = ChunkSeq::new[u64]();
+        let mut written = false;
+        for u in 0..(uses.len() / 3) {
+            if w64(in uses, wrapping_mul(u, 3)) == id {
+                let slot = w64(in uses, inc(wrapping_mul(u, 3)));
+                if b8(in f.writes, slot) == 1 {
+                    written = true;
+                }
+            }
+        }
+        let cap = hole_cap(in sk, id);
+        if !sort_in(in c, cap, in "expr".as_bytes()) && !written {
+            continue;
+        }
+        for u in 0..(uses.len() / 3) {
+            if w64(in uses, wrapping_mul(u, 3)) == id {
+                let slot = w64(in uses, inc(wrapping_mul(u, 3)));
+                let node = w64(in uses, add(wrapping_mul(u, 3), 2));
+                let mut chain = ChunkSeq::new[u64]();
+                let mut x = node;
+                chain.push(x);
+                loop {
+                    let p = nd(in f, x, 0);
+                    if p == NONE {
+                        break;
+                    }
+                    x = p;
+                    chain.push(x);
+                }
+                rows.push(slot);
+                rows.push(paths.len());
+                rows.push(chain.len());
+                let mut j = chain.len();
+                loop {
+                    if j == 0 {
+                        break;
+                    }
+                    j = sub(j, 1);
+                    paths.push(w64(in chain, j));
+                }
+            }
+        }
+        plan(inout f, in sk, in c, id, in rows, in paths, 0, rows.len() / 3, 0);
+        if f.failed {
+            return;
+        }
+    }
+}
+
+// Node `i` of use `u`'s path, or NONE.
+fn path_at(in rows: ChunkSeq[u64], in paths: ChunkSeq[u64], u: u64, i: u64) -> u64 {
+    if i >= w64(in rows, add(wrapping_mul(u, 3), 2)) {
+        return NONE;
+    }
+    w64(in paths, add(w64(in rows, inc(wrapping_mul(u, 3))), i))
+}
+
+fn path_len(in rows: ChunkSeq[u64], u: u64) -> u64 {
+    w64(in rows, add(wrapping_mul(u, 3), 2))
+}
+
+// `self.plan(id, uses[from..from + count], depth)`.
+fn plan(
+    inout f: Fx,
+    in sk: Sk,
+    in c: Caps,
+    id: u64,
+    in rows: ChunkSeq[u64],
+    in paths: ChunkSeq[u64],
+    from: u64,
+    count: u64,
+    depth: u64
+) {
+    if count == 0 {
+        return;
+    }
+    let mut repeatable = false;
+    for u in from..add(from, count) {
+        for i in 0..path_len(in rows, u) {
+            if nd(in f, path_at(in rows, in paths, u, i), 1) == E_REPEATED {
+                repeatable = true;
+            }
+        }
+    }
+    if count < 2 && !repeatable {
+        return;
+    }
+    let mut common = depth;
+    loop {
+        let n = path_at(in rows, in paths, from, inc(common));
+        if n == NONE {
+            break;
+        }
+        let mut all = true;
+        for u in from..add(from, count) {
+            if path_at(in rows, in paths, u, inc(common)) != n {
+                all = false;
+                break;
+            }
+        }
+        if !all {
+            break;
+        }
+        common = inc(common);
+    }
+    if !repeatable {
+        let mut branches = true;
+        for u in from..add(from, count) {
+            let n = path_at(in rows, in paths, u, inc(common));
+            if n == NONE || nd(in f, n, 1) != E_BRANCH {
+                branches = false;
+                break;
+            }
+        }
+        if branches {
+            let mut start = from;
+            loop {
+                if start >= add(from, count) {
+                    break;
+                }
+                let branch = path_at(in rows, in paths, start, inc(common));
+                let mut n: u64 = 0;
+                loop {
+                    let u = add(start, n);
+                    if u >= add(from, count)
+                        || path_at(in rows, in paths, u, inc(common)) != branch {
+                        break;
+                    }
+                    n = inc(n);
+                }
+                plan(inout f, in sk, in c, id, in rows, in paths, start, n, inc(common));
+                if f.failed {
+                    return;
+                }
+                start = add(start, n);
+            }
+            return;
+        }
+    }
+    if sort_in(in c, hole_cap(in sk, id), in "place".as_bytes()) {
+        fail(
+            inout f,
+            in "a modifying sugar place is used more than once on a control-flow path".as_bytes()
+        );
+        return;
+    }
+    if repeatable {
+        for i in 0..inc(common) {
+            let n = path_at(in rows, in paths, from, i);
+            if n != NONE && nd(in f, n, 1) == E_REPEATED {
+                common = if i == 0 {
+                    0
+                } else {
+                    sub(i, 1)
+                };
+                break;
+            }
+        }
+    }
+    let mut lazy = repeatable;
+    if !lazy {
+        let len = path_len(in rows, from);
+        for i in inc(common)..len {
+            let n = path_at(in rows, in paths, from, i);
+            let earlier = nd(in f, n, 5) == 1;
+            if nd(in f, n, 1) != E_ALWAYS
+                || earlier && (i != inc(common) || nd(in f, n, 4) == NONE) {
+                lazy = true;
+                break;
+            }
+        }
+    }
+    let top = path_at(in rows, in paths, from, common);
+    let span_s = nd(in f, top, 2);
+    let span_e = nd(in f, top, 3);
+    let next = path_at(in rows, in paths, from, inc(common));
+    let mut statement = NONE;
+    if next != NONE {
+        statement = nd(in f, next, 4);
+    }
+    if statement == NONE {
+        statement = nd(in f, top, 4);
+    }
+    let base = if statement == NONE {
+        span_s
+    } else {
+        statement
+    };
+    let start = if base < PREFIX_LEN {
+        0
+    } else {
+        sub(base, PREFIX_LEN)
+    };
+    let end = if statement == NONE {
+        let e = if span_e < PREFIX_LEN {
+            0
+        } else {
+            sub(span_e, PREFIX_LEN)
+        };
+        if e > sk.src.len() {
+            sk.src.len()
+        } else {
+            e
+        }
+    } else {
+        NONE
+    };
+    let num = fresh(inout f);
+    f.decls.push(start);
+    f.decls.push(end);
+    f.decls.push(id);
+    f.decls.push(num);
+    f
+        .decls
+        .push(
+            if lazy {
+                1
+            } else {
+                0
+            }
+        );
+    for u in from..add(from, count) {
+        let slot = w64(in rows, wrapping_mul(u, 3));
+        f.memo.try_set(slot, num);
+        f
+            .lazy
+            .try_set(
+                slot,
+                if lazy {
+                    1
+                } else {
+                    0
+                }
+            );
+    }
+}
+
+// ---------------------------------------------------------------- render
+
+// The rendered text and its maps: hole spans (start, end), origins
+// (start, end, value start, value end, from tail) and places (start, end,
+// pass).
+pub struct Rd {
+    failed: bool,
+    msg: ChunkSeq[u8],
+    text: ChunkSeq[u8],
+    holes: ChunkSeq[u64],
+    origins: ChunkSeq[u64],
+    places: ChunkSeq[u64]
+}
+
+fn rd_fail(inout r: Rd, in text: Slice[u8]) {
+    if !r.failed {
+        r.failed = true;
+        r.msg.clear();
+        r.msg.extend(in text);
+    }
+}
+
+// `bounded(out, s, max)`'s check.
+pub fn rd_room(inout r: Rd, n: u64, max: u64) -> bool {
+    let left = if r.text.len() > max {
+        0
+    } else {
+        sub(max, r.text.len())
+    };
+    if n > left {
+        rd_fail(inout r, in "sugar expansion byte limit exceeded".as_bytes());
+        return false;
+    }
+    true
+}
+
+fn rd_push(inout r: Rd, in s: Slice[u8], max: u64) -> bool {
+    if !rd_room(inout r, s.len(), max) {
+        return false;
+    }
+    r.text.extend(in s);
+    true
+}
+
+fn rd_push_seq(inout r: Rd, in s: ChunkSeq[u8], max: u64) -> bool {
+    rd_push(inout r, in s.as_slice(), max)
+}
+
+// `Rendered::hole(h, max)`.
+fn rd_hole(
+    inout r: Rd,
+    in sk: Sk,
+    in c: Caps,
+    in ib: ChunkSeq[u8],
+    in tb: ChunkSeq[u8],
+    h: u64,
+    max: u64
+) -> bool {
+    let cap = hole_cap(in sk, h);
+    let vi = w64(in sk.holes, inc(h << 2));
+    let at = value_at(in c, cap, vi);
+    let vs = w64(in c.w, at);
+    let ve = w64(in c.w, inc(at));
+    let from_tail = w64(in c.w, add(at, 2)) == 1;
+    let expr = sort_in(in c, cap, in "expr".as_bytes());
+    let scope = sort_in(in c, cap, in "scope".as_bytes()) && from_tail;
+    let outer_start = r.text.len();
+    if expr && !rd_push(inout r, in "(".as_bytes(), max) {
+        return false;
+    }
+    if scope && !rd_push(inout r, in "{".as_bytes(), max) {
+        return false;
+    }
+    let start = r.text.len();
+    let mut value = ChunkSeq::new[u8]();
+    if from_tail {
+        push_range(inout value, in tb, vs, ve);
+    } else {
+        push_range(inout value, in ib, vs, ve);
+    }
+    if !rd_push_seq(inout r, in value, max) {
+        return false;
+    }
+    r.origins.push(start);
+    r.origins.push(r.text.len());
+    r.origins.push(vs);
+    r.origins.push(ve);
+    r
+        .origins
+        .push(
+            if from_tail {
+                1
+            } else {
+                0
+            }
+        );
+    let p = permission(in c, in sk, h);
+    if p != 0 {
+        r.places.push(add(start, w64(in sk.holes, add(h << 2, 2))));
+        r.places.push(add(start, w64(in sk.holes, add(h << 2, 3))));
+        r.places.push(p);
+    }
+    if expr && !rd_push(inout r, in ")".as_bytes(), max) {
+        return false;
+    }
+    if scope && !rd_push(inout r, in "}".as_bytes(), max) {
+        return false;
+    }
+    r.holes.push(outer_start);
+    r.holes.push(r.text.len());
+    true
+}
+
+// Edit kinds and rows: start, end, kind, a, b, c, d.
+const ED_LITERAL: u64 = 0;
+const ED_LAZY_USE: u64 = 1;
+const ED_HOLE: u64 = 2;
+const ED_BINDING: u64 = 3;
+const EW: u64 = 7;
+
+fn push_edit(inout eds: ChunkSeq[u64], s: u64, e: u64, kind: u64, a: u64, b: u64, c: u64, d: u64) {
+    eds.push(s);
+    eds.push(e);
+    eds.push(kind);
+    eds.push(a);
+    eds.push(b);
+    eds.push(c);
+    eds.push(d);
+}
+
+// `emit(sk, edits)`: literal texts of `edits` live in `pool`.
+fn emit(
+    in sk: Sk,
+    in c: Caps,
+    in ib: ChunkSeq[u8],
+    in tb: ChunkSeq[u8],
+    in mark: ChunkSeq[u8],
+    in edits: ChunkSeq[u64],
+    in pool: ChunkSeq[u8],
+    in memo: ChunkSeq[u64],
+    in lazy: ChunkSeq[u8]
+) -> Rd {
+    let mut eds = ChunkSeq::new[u64]();
+    eds.extend(in edits.as_slice());
+    let toks = lex_rows(in sk.src);
+    let nt = toks.len() / 3;
+    let mut commas = ChunkSeq::new[u64]();
+    for k in 0..(sk.slots.len() / 3) {
+        let h = slot_hole(in sk, k);
+        let ss = w64(in sk.slots, inc(wrapping_mul(k, 3)));
+        let se = w64(in sk.slots, add(wrapping_mul(k, 3), 2));
+        let cap = hole_cap(in sk, h);
+        if sort_in(in c, cap, in "args".as_bytes()) || sort_in(in c, cap, in "pats".as_bytes()) {
+            let at = value_at(in c, cap, w64(in sk.holes, inc(h << 2)));
+            let vs = w64(in c.w, at);
+            let ve = w64(in c.w, inc(at));
+            let from_tail = w64(in c.w, add(at, 2)) == 1;
+            let mut blank = true;
+            for j in vs..ve {
+                let ch = if from_tail {
+                    b8(in tb, j)
+                } else {
+                    b8(in ib, j)
+                };
+                // `str::trim`: Unicode whitespace; the captured text is a
+                // token span, so only ASCII whitespace occurs at its ends.
+                if !(ch == 32 || ch == 9 || ch == 10 || ch == 13 || ch == 11 || ch == 12) {
+                    blank = false;
+                    break;
+                }
+            }
+            if blank {
+                // `tokens.partition_point(|t| t.span.end <= slot.span.end)`.
+                let mut q: u64 = 0;
+                loop {
+                    if q >= nt || w64(in toks, add(wrapping_mul(q, 3), 2)) > se {
+                        break;
+                    }
+                    q = inc(q);
+                }
+                loop {
+                    if q >= nt || !trivia_kind(wrapping_u8(w64(in toks, wrapping_mul(q, 3)))) {
+                        break;
+                    }
+                    q = inc(q);
+                }
+                if q < nt && wrapping_u8(w64(in toks, wrapping_mul(q, 3))) == k_comma() {
+                    let cs = w64(in toks, inc(wrapping_mul(q, 3)));
+                    let ce = w64(in toks, add(wrapping_mul(q, 3), 2));
+                    let mut seen = false;
+                    for z in 0..commas.len() {
+                        if w64(in commas, z) == cs {
+                            seen = true;
+                        }
+                    }
+                    if !seen {
+                        commas.push(cs);
+                        push_edit(inout eds, cs, ce, ED_LITERAL, 0, 0, 0, 0);
+                    }
+                }
+            }
+        }
+        let m = w64(in memo, k);
+        if m != 0 && b8(in lazy, k) == 1 {
+            push_edit(inout eds, ss, se, ED_LAZY_USE, h, m, 0, 0);
+        } else if m != 0 {
+            push_edit(inout eds, ss, se, ED_LITERAL, NONE, m, 0, 0);
+        } else {
+            push_edit(inout eds, ss, se, ED_HOLE, h, 0, 0, 0);
+        }
+    }
+    // A stable sort by (start, end).
+    let ne = eds.len() / EW;
+    let mut order = ChunkSeq::new[u64]();
+    for i in 0..ne {
+        let mut at = order.len();
+        order.push(i);
+        loop {
+            if at == 0 {
+                break;
+            }
+            let prev = w64(in order, sub(at, 1));
+            let ps = w64(in eds, wrapping_mul(prev, EW));
+            let pe = w64(in eds, inc(wrapping_mul(prev, EW)));
+            let is = w64(in eds, wrapping_mul(i, EW));
+            let ie = w64(in eds, inc(wrapping_mul(i, EW)));
+            if !(is < ps || is == ps && ie < pe) {
+                break;
+            }
+            order.try_set(at, prev);
+            at = sub(at, 1);
+        }
+        order.try_set(at, i);
+    }
+    let max = sk.max;
+    let mut r = Rd {
+        failed: false,
+        msg: ChunkSeq::new[u8](),
+        text: ChunkSeq::new[u8](),
+        holes: ChunkSeq::new[u64](),
+        origins: ChunkSeq::new[u64](),
+        places: ChunkSeq::new[u64]()
+    };
+    let mut pos: u64 = 0;
+    for o in 0..ne {
+        let i = w64(in order, o);
+        let row = wrapping_mul(i, EW);
+        let s = w64(in eds, row);
+        let e = w64(in eds, inc(row));
+        if s < pos {
+            rd_fail(inout r, in "overlapping sugar template edits".as_bytes());
+            return r;
+        }
+        let mut gap = ChunkSeq::new[u8]();
+        push_range(inout gap, in sk.src, pos, s);
+        if !rd_push_seq(inout r, in gap, max) {
+            return r;
+        }
+        let kind = w64(in eds, add(row, 2));
+        let a = w64(in eds, add(row, 3));
+        let b = w64(in eds, add(row, 4));
+        if kind == ED_LITERAL {
+            let mut t = ChunkSeq::new[u8]();
+            if a == NONE {
+                push_fresh(inout t, in mark, F_ONCE, b);
+            } else {
+                push_range(inout t, in pool, a, add(a, b));
+            }
+            if !rd_push_seq(inout r, in t, max) {
+                return r;
+            }
+        } else if kind == ED_HOLE {
+            if !rd_hole(inout r, in sk, in c, in ib, in tb, a, max) {
+                return r;
+            }
+        } else if kind == ED_LAZY_USE {
+            let mut name = ChunkSeq::new[u8]();
+            push_fresh(inout name, in mark, F_ONCE, b);
+            let mut t = ChunkSeq::new[u8]();
+            t.extend(in "({ match ".as_bytes());
+            t.extend(in name.as_slice());
+            t.extend(in " { Option::Some(".as_bytes());
+            t.extend(in name.as_slice());
+            t.extend(in "_v) => ".as_bytes());
+            t.extend(in name.as_slice());
+            t.extend(in "_v, Option::None => { let ".as_bytes());
+            t.extend(in name.as_slice());
+            t.extend(in "_v = ".as_bytes());
+            if !rd_push_seq(inout r, in t, max) {
+                return r;
+            }
+            if !rd_hole(inout r, in sk, in c, in ib, in tb, a, max) {
+                return r;
+            }
+            let mut u = ChunkSeq::new[u8]();
+            u.extend(in "; ".as_bytes());
+            u.extend(in name.as_slice());
+            u.extend(in " = Option::Some(".as_bytes());
+            u.extend(in name.as_slice());
+            u.extend(in "_v); ".as_bytes());
+            u.extend(in name.as_slice());
+            u.extend(in "_v } } })".as_bytes());
+            if !rd_push_seq(inout r, in u, max) {
+                return r;
+            }
+        } else {
+            let block = w64(in eds, add(row, 5)) == 1;
+            let lz = w64(in eds, add(row, 6)) == 1;
+            let mut name = ChunkSeq::new[u8]();
+            push_fresh(inout name, in mark, F_ONCE, b);
+            if block && !rd_push(inout r, in "{ ".as_bytes(), max) {
+                return r;
+            }
+            let mut t = ChunkSeq::new[u8]();
+            if lz {
+                t.extend(in "let mut ".as_bytes());
+                t.extend(in name.as_slice());
+                t.extend(in " = if false { Option::Some(".as_bytes());
+            } else {
+                t.extend(in "let ".as_bytes());
+                t.extend(in name.as_slice());
+                t.extend(in " = ".as_bytes());
+            }
+            if !rd_push_seq(inout r, in t, max) {
+                return r;
+            }
+            if !rd_hole(inout r, in sk, in c, in ib, in tb, a, max) {
+                return r;
+            }
+            let tail = if lz {
+                ") } else { Option::None }; "
+            } else {
+                "; "
+            };
+            if !rd_push(inout r, in tail.as_bytes(), max) {
+                return r;
+            }
+        }
+        pos = e;
+    }
+    let mut rest = ChunkSeq::new[u8]();
+    push_range(inout rest, in sk.src, pos, sk.src.len());
+    rd_push_seq(inout r, in rest, max);
+    r
+}
+
+// The spans of the CST's sugar call and expression macro nodes (kinds
+// 208-210, 218, 221-223, 225) of the parse in `l`.
+fn nested_spans(in ev: ChunkSeq[u32], in t: @vesper/front::Tokens) -> ChunkSeq[u64] {
+    let mut out = ChunkSeq::new[u64]();
+    let mut open = ChunkSeq::new[u64]();
+    let mut offset: u64 = 0;
+    for i in 0..ev.len() {
+        let v = match ev.try_get(i) {
+            Option::Some(v) => widen_u64(v),
+            Option::None => 0,
+        };
+        if v == 4294967295 {
+            let last = sub(open.len(), 2);
+            let kind = w64(in open, last);
+            let start = w64(in open, inc(last));
+            open.truncate(last);
+            if kind == 208
+                || kind == 209
+                || kind == 210
+                || kind == 218
+                || kind == 221
+                || kind == 222
+                || kind == 223
+                || kind == 225 {
+                out.push(start);
+                out.push(offset);
+            }
+        } else if v >= 2147483648 {
+            open.push(sub(v, 2147483648));
+            open.push(offset);
+        } else {
+            offset = token_end(in t, v);
+        }
+    }
+    out
+}
+
+// `flow::render(sk)` then `emit`: the rendered template, or the refusal.
+pub fn render(
+    in sk: Sk,
+    in c: Caps,
+    in ib: ChunkSeq[u8],
+    in tb: ChunkSeq[u8],
+    in mark: ChunkSeq[u8]
+) -> Rd {
+    let nslots = sk.slots.len() / 3;
+    let mut f = Fx {
+        failed: false,
+        msg: ChunkSeq::new[u8](),
+        src: ChunkSeq::new[u8](),
+        tk: ChunkSeq::new[u64](),
+        nested: ChunkSeq::new[u64](),
+        nodes: ChunkSeq::new[u64](),
+        us: ChunkSeq::new[u64](),
+        writes: ChunkSeq::new[u8](),
+        memo: ChunkSeq::new[u64](),
+        lazy: ChunkSeq::new[u8](),
+        lits: ChunkSeq::new[u64](),
+        pool: ChunkSeq::new[u8](),
+        decls: ChunkSeq::new[u64](),
+        fresh: 0,
+        mark: ChunkSeq::new[u8]()
+    };
+    f.mark.extend(in mark.as_slice());
+    f.writes.resize(nslots, 0);
+    f.memo.resize(nslots, 0);
+    f.lazy.resize(nslots, 0);
+    let mut sb = ChunkSeq::new[u8]();
+    sb.extend(in PREFIX.as_bytes());
+    sb.extend(in sk.src.as_slice());
+    sb.extend(in "\n}".as_bytes());
+    let mut source = match String::from_utf8(in sb.as_slice()) {
+        Option::Some(t) => t,
+        Option::None => String::new(),
+    };
+    let mut wrapped = true;
+    let mut l = lower_source(in source.as_str());
+    if l.p.d.code.len() != 0 {
+        l = lower_template_source(in source.as_str());
+        if l.p.t.rejected {
+            return refused_rd(in l.p.d);
+        }
+    }
+    if l.p.d.code.len() != 0 {
+        // The prefix's width keeps every offset the same.
+        let mut pb = ChunkSeq::new[u8]();
+        for i in 0..PREFIX_LEN {
+            pb.push(32);
+        }
+        pb.extend(in sk.src.as_slice());
+        source = match String::from_utf8(in pb.as_slice()) {
+            Option::Some(t) => t,
+            Option::None => String::new(),
+        };
+        l = lower_template_source(in source.as_str());
+        if l.p.t.rejected {
+            return refused_rd(in l.p.d);
+        }
+        wrapped = false;
+    }
+    f.src.extend(in source.as_bytes());
+    f.nested = nested_spans(in l.p.ev, in l.p.t);
+    f.tk = lex_rows(in f.src);
+    let a = l.ast;
+    if l.p.d.code.len() == 0 && a.m_items.len() != 0 {
+        for i in 0..a.m_items.len() {
+            let it = a
+                .items
+                .get_or(
+                    idx_from_raw[ItemNode](
+                        match a.m_items.try_get(i) {
+                            Option::Some(v) => v,
+                            Option::None => 0,
+                        }
+                    ),
+                    ItemNode {
+                        kind: 0,
+                        node: 0
+                    }
+                );
+            if it.kind == 2 {
+                function(inout f, in sk, in c, in a, it.node, wrapped);
+            } else if it.kind == 4 {
+                let n = a
+                    .impls
+                    .get_or(
+                        idx_from_raw[ImplNode](it.node),
+                        ImplNode {
+                            ty: none(),
+                            generics: 0,
+                            methods: 0
+                        }
+                    );
+                for m in 0..list_len(in a, n.methods) {
+                    function(inout f, in sk, in c, in a, list_at(in a, n.methods, m), wrapped);
+                    if f.failed {
+                        break;
+                    }
+                }
+            } else if it.kind == 5 {
+                let n = a
+                    .traits
+                    .get_or(
+                        idx_from_raw[TraitNode](it.node),
+                        TraitNode {
+                            name: none(),
+                            public: false,
+                            generics: 0,
+                            assoc: 0,
+                            methods: 0,
+                            start: 0,
+                            end: 0
+                        }
+                    );
+                for m in 0..list_len(in a, n.methods) {
+                    function(inout f, in sk, in c, in a, list_at(in a, n.methods, m), wrapped);
+                    if f.failed {
+                        break;
+                    }
+                }
+            } else if it.kind == 6 {
+                let n = a
+                    .confs
+                    .get_or(
+                        idx_from_raw[ConfNode](it.node),
+                        ConfNode {
+                            model: none(),
+                            public: false,
+                            generics: 0,
+                            trait_ref: none(),
+                            self_ty: none(),
+                            wheres: 0,
+                            assoc: 0,
+                            methods: 0,
+                            start: 0,
+                            end: 0
+                        }
+                    );
+                for m in 0..list_len(in a, n.methods) {
+                    function(inout f, in sk, in c, in a, list_at(in a, n.methods, m), wrapped);
+                    if f.failed {
+                        break;
+                    }
+                }
+            }
+            if f.failed {
+                return refused_text(in f.msg);
+            }
+        }
+    } else {
+        // Item-producing and nested-sugar templates need no core
+        // expression AST when they contain no local binders or repeated
+        // or privileged expressions.
+        let toks = lex_rows(in sk.src);
+        let mut binders = false;
+        for q in 0..(toks.len() / 3) {
+            let k = wrapping_u8(w64(in toks, wrapping_mul(q, 3)));
+            if k == k_let() || k == k_fat_arrow() || k == k_inout() || k == k_sink() {
+                binders = true;
+            }
+        }
+        let mut ids = ChunkSeq::new[u64]();
+        let mut count: u64 = 0;
+        for k in 0..nslots {
+            let h = slot_hole(in sk, k);
+            if sort_in(in c, hole_cap(in sk, h), in "expr".as_bytes()) {
+                count = inc(count);
+                let mut seen = false;
+                for z in 0..ids.len() {
+                    if w64(in ids, z) == h {
+                        seen = true;
+                    }
+                }
+                if !seen {
+                    ids.push(h);
+                }
+            }
+        }
+        if binders || ids.len() != count {
+            return refused_str(
+                in "cannot prove hygiene and single evaluation for this non-core sugar template"
+            );
+        }
+        let none_edits = ChunkSeq::new[u64]();
+        return emit(
+            in sk,
+            in c,
+            in ib,
+            in tb,
+            in mark,
+            in none_edits,
+            in f.pool,
+            in f.memo,
+            in f.lazy
+        );
+    }
+    let mut edits = ChunkSeq::new[u64]();
+    for q in 0..(f.lits.len() >> 2) {
+        push_edit(
+            inout edits,
+            w64(in f.lits, q << 2),
+            w64(in f.lits, inc(q << 2)),
+            ED_LITERAL,
+            w64(in f.lits, add(q << 2, 2)),
+            w64(in f.lits, add(q << 2, 3)),
+            0,
+            0
+        );
+    }
+    // Declarations by (start, Reverse(end)), stable; the first insertion
+    // at a common start opens the widest wrapper first.
+    let nd5 = f.decls.len() / 5;
+    let mut order = ChunkSeq::new[u64]();
+    for i in 0..nd5 {
+        let mut at = order.len();
+        order.push(i);
+        loop {
+            if at == 0 {
+                break;
+            }
+            let prev = w64(in order, sub(at, 1));
+            let ps = w64(in f.decls, wrapping_mul(prev, 5));
+            let pe = w64(in f.decls, inc(wrapping_mul(prev, 5)));
+            let is = w64(in f.decls, wrapping_mul(i, 5));
+            let ie = w64(in f.decls, inc(wrapping_mul(i, 5)));
+            // `Reverse(end)` with `None < Some`: NONE (None) sorts last.
+            let later = if ie == NONE {
+                false
+            } else if pe == NONE {
+                true
+            } else {
+                ie > pe
+            };
+            if !(is < ps || is == ps && later) {
+                break;
+            }
+            order.try_set(at, prev);
+            at = sub(at, 1);
+        }
+        order.try_set(at, i);
+    }
+    for o in 0..nd5 {
+        let i = w64(in order, o);
+        let s = w64(in f.decls, wrapping_mul(i, 5));
+        let e = w64(in f.decls, inc(wrapping_mul(i, 5)));
+        let id = w64(in f.decls, add(wrapping_mul(i, 5), 2));
+        let num = w64(in f.decls, add(wrapping_mul(i, 5), 3));
+        let lz = w64(in f.decls, add(wrapping_mul(i, 5), 4));
+        push_edit(
+            inout edits,
+            s,
+            s,
+            ED_BINDING,
+            id,
+            num,
+            if e == NONE {
+                0
+            } else {
+                1
+            },
+            lz
+        );
+        if e != NONE {
+            let first = f.pool.len();
+            f.pool.extend(in " }".as_bytes());
+            push_edit(inout edits, e, e, ED_LITERAL, first, 2, 0, 0);
+        }
+    }
+    emit(in sk, in c, in ib, in tb, in mark, in edits, in f.pool, in f.memo, in f.lazy)
+}
+
+pub fn refused_text(in m: ChunkSeq[u8]) -> Rd {
+    let mut r = Rd {
+        failed: true,
+        msg: ChunkSeq::new[u8](),
+        text: ChunkSeq::new[u8](),
+        holes: ChunkSeq::new[u64](),
+        origins: ChunkSeq::new[u64](),
+        places: ChunkSeq::new[u64]()
+    };
+    r.msg.extend(in m.as_slice());
+    r
+}
+
+pub fn refused_str(in m: Str) -> Rd {
+    let mut b = ChunkSeq::new[u8]();
+    b.extend(in m.as_bytes());
+    refused_text(in b)
+}
+
+// A lexer refusal of the template-scopes parse: its E0003 message.
+pub fn refused_rd(in d: @vesper/front::Diags) -> Rd {
+    let end = if d.at.len() > 1 {
+        w32(in d.at, 1)
+    } else {
+        d.text.len()
+    };
+    let mut m = ChunkSeq::new[u8]();
+    for j in w32(in d.at, 0)..end {
+        m.push(b8(in d.text, j));
+    }
+    refused_text(in m)
+}
