@@ -55,15 +55,8 @@ use @vesper-std/process::{
     process_group,
     capture_limit
 };
-use @vesper-std/env::{
-    var_bytes,
-    os,
-    os_windows
-};
-use @vesper-std/hash::blake3::{
-    blake3,
-    digest_bytes
-};
+use @vesper-std/env::{var_bytes, os, os_windows};
+use @vesper-std/hash::blake3::{blake3, digest_bytes};
 use self::json::{
     Doc,
     parse,

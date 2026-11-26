@@ -13,23 +13,9 @@
 //   a generated report of its `--theorem` arguments with the axioms of
 //   TC/axioms (`theorem json`) or `[]`.
 
-use @vesper-std/env::{
-    arg_count,
-    arg_bytes,
-    var_bytes,
-    current_dir_bytes
-};
-use @vesper-std/fs::{
-    IoError,
-    read,
-    append,
-    copy
-};
-use @vesper-std/process::{
-    command,
-    arg,
-    output
-};
+use @vesper-std/env::{arg_count, arg_bytes, var_bytes, current_dir_bytes};
+use @vesper-std/fs::{IoError, read, append, copy};
+use @vesper-std/process::{command, arg, output};
 
 const NONE: u64 = 18446744073709551615;
 

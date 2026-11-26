@@ -5,10 +5,7 @@
 
 use @vesper-std/fs::IoError;
 use @vesper-std/process::ExitStatus;
-use self::json::{
-    put,
-    put_u64
-};
+use self::json::{put, put_u64};
 
 pub fn byte(in b: Slice[u8], i: u64) -> u8 {
     match b.try_get(i) {
