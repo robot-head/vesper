@@ -472,14 +472,17 @@ def _hybrid_and_ports_skip_pull_requests(h):
     for event in ["push", "schedule", "workflow_dispatch"]:
         _contains(event, hybrid["on"])
     include = hybrid["jobs"]["hybrid"]["strategy"]["matrix"]["include"]
-    _equal([row["os"] for row in include], ["ubuntu-latest", "ubuntu-latest", "macos-latest", "windows-latest"])
-    # The divergent rebuilds run in a Linux job of their own (#2147).
-    _equal([row["os"] for row in include if row.get("divergent")], ["ubuntu-latest"])
+    # The divergent rebuilds run in four Linux jobs of their own, three
+    # rebuilds each (#2147, #2174).
+    _equal([row["os"] for row in include if not row.get("divergent")], ["ubuntu-latest", "macos-latest", "windows-latest"])
+    groups = [row["divergent"] for row in include if row.get("divergent")]
+    _equal(groups, [1, 2, 3, 4])
+    _equal([row["os"] for row in include if row.get("divergent")], ["ubuntu-latest"] * len(groups))
     hybrid_steps = hybrid["jobs"]["hybrid"]["steps"]
     divergent = [step for step in hybrid_steps if " catches a divergent " in step.get("name", "")]
     _equal(len(divergent), 12)
-    for step in divergent:
-        _equal(step.get("if"), "${{ matrix.divergent }}")
+    for index, step in enumerate(divergent):
+        _equal(step.get("if"), "${{ matrix.divergent == %d }}" % (index // 3 + 1))
     _equal(_first([step for step in hybrid_steps if step.get("name") == "Build and test the hybrid compiler"])["if"],
            "${{ !matrix.divergent }}")
     step = _ids(h.platforms["jobs"]["plan"]["steps"])["ports"]
