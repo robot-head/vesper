@@ -3,7 +3,7 @@
 
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 
-use super::{Registry, Swap, must, on, open};
+use super::{Registry, Swap, must, on, pass};
 
 /// Audits run by the Vesper proof-audit module.
 static PROOF_AUDIT_CALLS: AtomicU64 = AtomicU64::new(0);
@@ -14,10 +14,7 @@ fn run(packed: &[u8]) -> Vec<u8> {
 }
 
 /// The flip-gate rows of this file's swaps (`swaps::on`).
-pub(super) const SWAPS: &[Swap] = &[open(
-    "proof_audit",
-    "0 of 76 cases differ (tests/self_host_proof_audit.rs), 0.97x; no flip-gate configuration",
-)];
+pub(super) const SWAPS: &[Swap] = &[pass("proof_audit", "proof-audit", "#2207")];
 
 pub(super) fn register(_r: &mut Registry) {
     if on("proof_audit") {

@@ -494,6 +494,23 @@ fn doctest_verdict_speed() {
             );
         })
     };
+    // The flip gate (scripts/ci/flip-gate/doctest-verdict.json, #2207):
+    // `FLIP_GATE_EPOCHS` (default 12) ABBA rounds after one warm-up each.
+    if std::env::var_os("FLIP_GATE").is_some() {
+        let epochs: usize = std::env::var("FLIP_GATE_EPOCHS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(12);
+        run(false);
+        run(true);
+        let mut pairs = String::new();
+        for _ in 0..epochs {
+            let (r1, v1, v2, r2) = (run(false), run(true), run(true), run(false));
+            pairs += &format!(" {}:{}", (r1 + r2).as_nanos(), (v1 + v2).as_nanos());
+        }
+        println!("flip-gate pairs verdict{pairs}");
+        return;
+    }
     let mut rs: Vec<Duration> = vec![];
     let mut vs: Vec<Duration> = vec![];
     for _ in 0..3 {

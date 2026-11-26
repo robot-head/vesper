@@ -3,7 +3,7 @@
 
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 
-use super::{Registry, Swap, must, on, open};
+use super::{Registry, Swap, must, on, pass};
 
 /// `--format` runs answered by the Vesper verify module.
 static VERIFY_CALLS: AtomicU64 = AtomicU64::new(0);
@@ -14,10 +14,7 @@ fn run(packed: &[u8]) -> Vec<u8> {
 }
 
 /// The flip-gate rows of this file's swaps (`swaps::on`).
-pub(super) const SWAPS: &[Swap] = &[open(
-    "verify",
-    "0 of 29 cases differ (tests/self_host_verify_format.rs, 9 with real Lean), 0.28x; no flip-gate configuration",
-)];
+pub(super) const SWAPS: &[Swap] = &[pass("verify", "verify", "#2207")];
 
 pub(super) fn register(_r: &mut Registry) {
     if on("verify") {

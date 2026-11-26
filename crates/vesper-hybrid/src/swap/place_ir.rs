@@ -26,8 +26,26 @@ pub(super) fn round_trip(world: Option<&vesper::check::World>, program: &mut ves
     }
 }
 
-/// The flip-gate rows of this file's swaps (`swaps::on`).
-pub(super) const SWAPS: &[Swap] = &[open("ir_lower", "0.40x; no flip-gate configuration")];
+/// The identity round trip after a Vesper IR pass (`ir_opt`, `inline`),
+/// part of the `ir_lower` row: with that row off (the `gated` set), the
+/// passes hand their program on as they decoded it (#2207).
+pub(super) fn round_trip_after_pass(
+    world: Option<&vesper::check::World>,
+    program: &mut vesper::ir::Program,
+) {
+    if on("ir_lower") {
+        round_trip(world, program);
+    }
+}
+
+/// The flip-gate rows of this file's swaps (`swaps::on`). `ir_lower` is
+/// Rust's lowering followed by the identity round trip, so it replaces no
+/// Rust and only adds the crossing; it is not gated (#2207). The 0.40x is
+/// the Vesper lowering of tests/self_host_ir_lower.rs, which no swap runs.
+pub(super) const SWAPS: &[Swap] = &[open(
+    "ir_lower",
+    "identity round trip after Rust's lowering, replaces no Rust; not a gate candidate",
+)];
 
 pub(super) fn register(r: &mut Registry) {
     if on("ir_lower") {

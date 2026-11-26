@@ -834,11 +834,21 @@ pub fn ir_cases_where(mutants: usize, keep: impl Fn(usize) -> bool) -> Vec<IrCas
 
 /// ABBA timing, best of six runs per side; returns (rust, vesper). Wall
 /// clock on the cloud hosts moves by up to 30% between runs.
+///
+/// With `FLIP_GATE` set, it is the flip gate's harness instead (#2207):
+/// one warm-up of each side, then `FLIP_GATE_EPOCHS` (default 12) rounds
+/// of rust, vesper, vesper, rust, printed as
+/// `flip-gate pairs <workload> <rust_ns>:<vesper_ns> ...` for
+/// `aspect ci flip-gate`. The workload is [`gate_workload`] of `label`.
+/// It returns the median round's two sides.
 pub fn abba(
     label: &str,
     rust: &mut dyn FnMut() -> Duration,
     vesper: &mut dyn FnMut() -> Duration,
 ) -> (Duration, Duration) {
+    if std::env::var_os("FLIP_GATE").is_some() {
+        return gate_pairs(&gate_workload(label), rust, vesper);
+    }
     let mut rs = vec![];
     let mut vs = vec![];
     for _ in 0..3 {
@@ -854,6 +864,55 @@ pub fn abba(
         v.as_secs_f64() / r.as_secs_f64()
     );
     (r, v)
+}
+
+/// The flip-gate workload name of an [`abba`] label: lower case, every run
+/// of other characters than letters and digits one `-`, e.g.
+/// `"fip check (corpus)"` is `fip-check-corpus`.
+pub fn gate_workload(label: &str) -> String {
+    let mut out = String::new();
+    for c in label.chars() {
+        if c.is_ascii_alphanumeric() {
+            out.push(c.to_ascii_lowercase());
+        } else if !out.is_empty() && !out.ends_with('-') {
+            out.push('-');
+        }
+    }
+    out.trim_end_matches('-').to_owned()
+}
+
+/// The flip gate's ABBA rounds of [`abba`] under `FLIP_GATE`.
+fn gate_pairs(
+    workload: &str,
+    rust: &mut dyn FnMut() -> Duration,
+    vesper: &mut dyn FnMut() -> Duration,
+) -> (Duration, Duration) {
+    let epochs: usize = std::env::var("FLIP_GATE_EPOCHS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(12);
+    rust();
+    vesper();
+    let mut rounds = vec![];
+    for _ in 0..epochs {
+        let (r1, v1, v2, r2) = (rust(), vesper(), vesper(), rust());
+        rounds.push((r1 + r2, v1 + v2));
+    }
+    let pairs: String = rounds
+        .iter()
+        .map(|(r, v)| format!(" {}:{}", r.as_nanos().max(1), v.as_nanos().max(1)))
+        .collect();
+    println!("flip-gate pairs {workload}{pairs}");
+    let mut sorted = rounds.clone();
+    sorted.sort_by(|a, b| {
+        (a.1.as_secs_f64() / a.0.as_secs_f64()).total_cmp(&(b.1.as_secs_f64() / b.0.as_secs_f64()))
+    });
+    let (r, v) = sorted[sorted.len() / 2];
+    eprintln!(
+        "flip gate {workload}: {epochs} rounds, median round rust {r:?} vesper {v:?} ratio {:.2}",
+        v.as_secs_f64() / r.as_secs_f64()
+    );
+    (r / 2, v / 2)
 }
 
 /// ABBA timing for the flip gate: `rounds` paired rounds (rust, vesper,
