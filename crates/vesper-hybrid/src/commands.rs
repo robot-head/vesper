@@ -19,7 +19,7 @@ thread_local! {
     static LAST_LSP_ERR: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
 }
 
-/// `vesper proof-audit` from `modules/proof_audit` (#1341): it takes the
+/// `vesper proof-audit` from the driver module (#1341, #2091): it takes the
 /// packed arguments and returns the module's result bytes.
 pub(crate) type ProofAuditRun = fn(&[u8]) -> Vec<u8>;
 
@@ -27,7 +27,7 @@ pub(crate) type ProofAuditRun = fn(&[u8]) -> Vec<u8>;
 /// (src/swap/proof_audit.rs).
 static PROOF_AUDIT: std::sync::OnceLock<ProofAuditRun> = std::sync::OnceLock::new();
 
-/// Serve `hc_proof_audit_run` from `run` (`modules/proof_audit`).
+/// Serve `hc_proof_audit_run` from `run` (`proof_audit_run`, modules/driver).
 pub(crate) fn install_proof_audit(run: ProofAuditRun) -> Result<(), ProofAuditRun> {
     PROOF_AUDIT.set(run)
 }
@@ -73,9 +73,10 @@ fn verify_format(packed: &[u8]) -> bool {
     false
 }
 
-/// Print what a Vesper command module (`modules/proof_audit`,
-/// `modules/verify`) printed and return its error: a status byte, the
-/// stdout length (8 bytes, little-endian), stdout, then the error text.
+/// Print what a Vesper command module (`proof_audit_run` of
+/// `modules/driver`, `modules/verify`) printed and return its error: a
+/// status byte, the stdout length (8 bytes, little-endian), stdout, then
+/// the error text.
 fn module_result(result: &[u8]) -> Result<(), String> {
     use std::io::Write;
     let (Some(&status), Some(len)) = (result.first(), result.get(1..9)) else {

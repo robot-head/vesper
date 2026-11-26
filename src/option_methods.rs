@@ -18,7 +18,7 @@ use crate::ast::*;
 use std::collections::BTreeSet;
 
 /// The option prelude.
-pub const PRELUDE: &str = include_str!("preludes/option.ves");
+pub const PRELUDE: &str = include_str!("../packages/vesper-preludes/preludes/option.ves");
 
 /// The method names that bring in the prelude when a module mentions them.
 pub const PRELUDE_NAMES: &[&str] = &["is_some", "is_none", "unwrap_or", "or"];

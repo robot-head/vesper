@@ -1711,7 +1711,7 @@ fn proof_audit_matches_the_default_compiler() {
         &["proof-audit", "Lean.Init", "--root", "r", "--theorem", "t"],
         &["proof-audit", "ModA", "--root", "r"],
         &["proof-audit", "ModA", "--theorem", "t"],
-        // Past the command layer, in modules/proof_audit (#1341): a missing
+        // Past the command layer, in the driver module (#1341): a missing
         // root, in text and JSON, and a Lean that is not there.
         &["proof-audit", "ModA", "--root", "missing", "--theorem", "t"],
         &[
@@ -1797,7 +1797,7 @@ fn proof_audit_runs_in_vesper() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// An audit past the command layer runs in `modules/proof_audit` (#1341).
+/// An audit past the command layer runs in the driver module (#1341).
 #[test]
 fn proof_audit_audits_in_vesper() {
     let hybrid = hybrid();
