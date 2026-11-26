@@ -936,7 +936,15 @@ fn collect_pattern_floats(pat: &Pattern, seen: &mut BTreeSet<u64>, bits_out: &mu
 /// and `place_ir_json_bytes` in `packages/vesper-place-ir/src/json.ves`):
 /// pre-serialized JSON for `Payload::Expr` entries and canonical `serde_json`
 /// float representations for distinct `Literal::Float` bit patterns.
-pub fn program_json_input(program: &Program) -> Option<Vec<u8>> {
+///
+/// The serializers are passed in (`expr_json` for an expression, `float_json`
+/// for an `f64`) so this module keeps no `serde_json` dependency: crates that
+/// include it by path (`vesper-codegen-swap-test`) do not declare one.
+pub fn program_json_input(
+    program: &Program,
+    expr_json: impl Fn(&Expr) -> Option<String>,
+    float_json: impl Fn(f64) -> Option<String>,
+) -> Option<Vec<u8>> {
     if !program.functions.values().all(function_fits) {
         return None;
     }
@@ -946,7 +954,7 @@ pub fn program_json_input(program: &Program) -> Option<Vec<u8>> {
     let mut expr_entries = Vec::new();
     for (pool_idx, item) in t.pool.items.iter().enumerate() {
         if let Payload::Expr(expr) = item {
-            let json = serde_json::to_string_pretty(expr).ok()?;
+            let json = expr_json(expr)?;
             let sym = t.enc.name(&json);
             expr_entries.push((pool_idx as u64, sym));
         }
@@ -980,7 +988,7 @@ pub fn program_json_input(program: &Program) -> Option<Vec<u8>> {
 
     let mut float_entries = Vec::with_capacity(float_bits.len());
     for bits in float_bits {
-        let json = serde_json::to_string(&f64::from_bits(bits)).ok()?;
+        let json = float_json(f64::from_bits(bits))?;
         let sym = t.enc.name(&json);
         float_entries.push((bits, sym));
     }

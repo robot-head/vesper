@@ -166,12 +166,22 @@ fn vesper_writer_round_trip_is_debug_equal() {
     assert_eq!(bad, 0);
 }
 
+/// ir_words::program_json_input with serde_json as the serializer (the
+/// expression and float forms the Vesper printer does not model).
+fn json_input(program: &Program) -> Option<Vec<u8>> {
+    ir_words::program_json_input(
+        program,
+        |e| serde_json::to_string_pretty(e).ok(),
+        |x| serde_json::to_string(&x).ok(),
+    )
+}
+
 #[test]
 fn vesper_json_matches_rust() {
     let json = package().entry("place_ir_json", true);
     let (mut bad, mut skipped, mut bytes) = (0, 0, 0usize);
     for s in stages() {
-        let Some(input) = ir_words::program_json_input(&s.program) else {
+        let Some(input) = json_input(&s.program) else {
             skipped += 1;
             continue;
         };
@@ -210,7 +220,7 @@ fn vesper_json_covers_edge_cases() {
 
     // Empty program `{ "functions": {} }`.
     let empty = Program::default();
-    let empty_in = ir_words::program_json_input(&empty).expect("empty program encodes");
+    let empty_in = json_input(&empty).expect("empty program encodes");
     assert_eq!(
         json.text(&empty_in),
         serde_json::to_string_pretty(&empty).unwrap()
@@ -583,7 +593,7 @@ fn vesper_json_covers_edge_cases() {
 
     let mut prog = Program::default();
     prog.functions.insert("f".into(), func);
-    let input = ir_words::program_json_input(&prog).expect("synthetic program encodes");
+    let input = json_input(&prog).expect("synthetic program encodes");
     let expected = serde_json::to_string_pretty(&prog).unwrap();
     let actual = json.text(&input);
     if let Some(d) = first_difference(&expected, &actual) {
