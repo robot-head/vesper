@@ -31,15 +31,15 @@ use self::out::{put};
 // Task "control": the world's functions (n function records). Returns the
 // E0213 and E0200 diagnostics of the control rules, in walk order.
 pub fn check_loops_control(in input: Str) -> ChunkSeq[u64] {
-    let b = input.as_bytes();
-    let mut r = Reader { pos: 0 };
-    let mut c = read_ctx(inout r, in b);
-    let mut x = exprs_new();
-    read_fns(inout r, in b, inout x, in c.nmap, in c.tmap);
-    let mut ctl = control_new(inout c.names);
-    let mut o = ChunkSeq::new[u8]();
-    check_bodies(inout o, inout ctl, in x, in c.types, in c.world);
-    pack_text(in o)
+    let bytes = input.as_bytes();
+    let mut reader = Reader { pos: 0 };
+    let mut ctx = read_ctx(inout reader, in bytes);
+    let mut exprs = exprs_new();
+    read_fns(inout reader, in bytes, inout exprs, in ctx.nmap, in ctx.tmap);
+    let mut control = control_new(inout ctx.names);
+    let mut output = ChunkSeq::new[u8]();
+    check_bodies(inout output, inout control, in exprs, in ctx.types, in ctx.world);
+    pack_text(in output)
 }
 
 // Task "atomics": the two prelude flags of the world, its functions, the
@@ -47,57 +47,57 @@ pub fn check_loops_control(in input: Str) -> ChunkSeq[u64] {
 // `needs_workers` of the module, then the diagnostics of `check_world`
 // and `check_program`.
 pub fn check_atomics(in input: Str) -> ChunkSeq[u64] {
-    let b = input.as_bytes();
-    let mut r = Reader { pos: 0 };
-    let mut c = read_ctx(inout r, in b);
-    let atomic = r.word(in b) != 0;
-    let workers = r.word(in b) != 0;
-    let mut x = exprs_new();
-    read_fns(inout r, in b, inout x, in c.nmap, in c.tmap);
-    let items = read_items(inout r, in b, in c.nmap, in c.tmap, exprs_new());
-    let ir = read_ir(inout r, in b, in c.nmap, in c.tmap);
-    let sy = syms_new(inout c.names);
-    let mut o = ChunkSeq::new[u8]();
-    put(inout o, "prelude ");
-    if needs_prelude(in c.names, in c.types, in items, in sy) {
-        o.push(49);
+    let bytes = input.as_bytes();
+    let mut reader = Reader { pos: 0 };
+    let mut ctx = read_ctx(inout reader, in bytes);
+    let atomic = reader.word(in bytes) != 0;
+    let workers = reader.word(in bytes) != 0;
+    let mut exprs = exprs_new();
+    read_fns(inout reader, in bytes, inout exprs, in ctx.nmap, in ctx.tmap);
+    let items = read_items(inout reader, in bytes, in ctx.nmap, in ctx.tmap, exprs_new());
+    let ir = read_ir(inout reader, in bytes, in ctx.nmap, in ctx.tmap);
+    let syms = syms_new(inout ctx.names);
+    let mut output = ChunkSeq::new[u8]();
+    put(inout output, "prelude ");
+    if needs_prelude(in ctx.names, in ctx.types, in items, in syms) {
+        output.push(49);
     } else {
-        o.push(48);
+        output.push(48);
     }
-    put(inout o, " workers ");
-    if needs_workers(in items, in sy) {
-        o.push(49);
+    put(inout output, " workers ");
+    if needs_workers(in items, in syms) {
+        output.push(49);
     } else {
-        o.push(48);
+        output.push(48);
     }
-    o.push(10);
-    let a = atomics_new(sy, atomic, workers);
-    check_world(inout o, inout c.types, in c.names, in c.world, in x, in a);
-    check_program(inout o, in c.names, in c.types, in ir, in a);
-    pack_text(in o)
+    output.push(10);
+    let atomics = atomics_new(syms, atomic, workers);
+    check_world(inout output, inout ctx.types, in ctx.names, in ctx.world, in exprs, in atomics);
+    check_program(inout output, in ctx.names, in ctx.types, in ir, in atomics);
+    pack_text(in output)
 }
 
 // Task "stack": one call graph and its policy. Returns the report's roots
 // and findings, then `render`, then whether it is accepted.
 pub fn check_stack_bound(in input: Str) -> ChunkSeq[u64] {
-    let b = input.as_bytes();
-    let mut r = Reader { pos: 0 };
-    let c = stack_ctx(inout r, in b);
-    let g = read_graph(inout r, in b, in c.nmap);
-    let mut o = ChunkSeq::new[u8]();
-    write_report(inout o, in c.names, in g);
-    pack_text(in o)
+    let bytes = input.as_bytes();
+    let mut reader = Reader { pos: 0 };
+    let ctx = stack_ctx(inout reader, in bytes);
+    let graph = read_graph(inout reader, in bytes, in ctx.nmap);
+    let mut output = ChunkSeq::new[u8]();
+    write_report(inout output, in ctx.names, in graph);
+    pack_text(in output)
 }
 
 // The names of a stack-bound input. Its types and world are empty, so
 // only the names are read, into a table sized for them; another input
 // goes through `read_ctx`.
-fn stack_ctx(inout r: Reader, in b: Slice[u8]) -> NamesCtx {
-    let c = read_names_ctx(inout r, in b);
-    if c.ok {
-        return c;
+fn stack_ctx(inout reader: Reader, in bytes: Slice[u8]) -> NamesCtx {
+    let ctx = read_names_ctx(inout reader, in bytes);
+    if ctx.ok {
+        return ctx;
     }
-    let full = read_ctx(inout r, in b);
+    let full = read_ctx(inout reader, in bytes);
     NamesCtx { names: full.names, nmap: full.nmap, ok: true }
 }
 
@@ -105,12 +105,12 @@ fn stack_ctx(inout r: Reader, in b: Slice[u8]) -> NamesCtx {
 // types and world of the harness input (an empty world) and one call
 // graph with its policy; the report as words (`report_words`).
 pub fn stack_bound_words(in input: Slice[u8]) -> ChunkSeq[u64] {
-    let mut r = Reader { pos: 0 };
-    let c = stack_ctx(inout r, in input);
-    let g = read_graph(inout r, in input, in c.nmap);
-    let mut o: ChunkSeq[u64] = ChunkSeq::new[u64]();
-    report_words(inout o, in c.names, in g);
-    o
+    let mut reader = Reader { pos: 0 };
+    let ctx = stack_ctx(inout reader, in input);
+    let graph = read_graph(inout reader, in input, in ctx.nmap);
+    let mut output: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    report_words(inout output, in ctx.names, in graph);
+    output
 }
 
 // `stack_bound_words` from the harness's `Str` input.
