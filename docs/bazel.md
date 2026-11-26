@@ -127,7 +127,7 @@ GitHub Actions disk cache otherwise, for example on pull requests from forks.
 | `buildbuddy` | BuildBuddy remote cache and build event upload |
 | `rbe` | also execute every action on BuildBuddy's Linux executors |
 | `rbe_build` | remote builds and audited tests, other Rust tests local |
-| `ci_tests` | resource-based local test scheduling for the 8 CPU / 22GB workflow; `Self-host codegen differentials` raises its memory budget to 20,480 MiB on its 25GB VM |
+| `ci_tests` | resource-based local test scheduling for the 8 CPU / 22GB workflow |
 | `ci_opt` | optimized Rust builds with debug assertions and overflow checks on, for `Test all targets` and the three `Self-host ...` checks |
 
 The `buildbuddy` config also writes remote RPC diagnostics to
