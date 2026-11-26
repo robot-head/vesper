@@ -953,6 +953,13 @@ vesper_crate(
             "resources:memory:9216",
             "resources:cpu:8",
         ],
+        # Compares its corpus worlds on 4 threads. Locally (port-compiler
+        # profile) it peaked at 3.0 GiB on 1 thread and 4.4 GiB on 4, past the
+        # 4 GiB default, while reserving 1 CPU.
+        "test/optimizer_build_time": [
+            "resources:memory:5120",
+            "resources:cpu:4",
+        ],
         # At most two stage2 compiler builds at once (STAGE2_SLOTS in the test),
         # each under Wasmtime with up to 4 GiB of linear memory, plus the
         # in-process compile. Unreserved, it ran the 22GB VM out of memory.
