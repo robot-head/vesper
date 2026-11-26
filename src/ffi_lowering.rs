@@ -730,7 +730,7 @@ impl ForeignChecked {
         };
         f.is_indirect()
             || symbols.iter().any(|(n, _)| *n == f.link_symbol())
-            || cpu::function(&call.symbol).is_some()
+            || cpu::function(f.link_symbol()).is_some()
     }
     /// [`Self::jit`] with the native `optimize` pipeline on or off, so
     /// differential tests can run both (#1125).

@@ -3,8 +3,9 @@
 # packed chain walks of src/devices/queue.rs are Vesper-only
 # (vesper/src/vq.ves); their Rust is kept only as the unit tests' reference
 # (src/devices/queue/reference.rs). The hot-set codec, the packed-ring
-# capture of src/virtio.rs, the seccomp evaluator and the whole vsock device
-# (src/devices/vsock.rs on vesper/src/vsock.ves) flipped the same way
+# capture of src/virtio.rs, the seccomp evaluator, the whole vsock, net and
+# block devices (src/devices/{vsock,net,block}.rs) and the MMIO register file
+# (src/devices/mmio.rs) flipped the same way
 # (src/port_reference_tests). The crate's other ported modules are still
 # Rust by default and are not part of this gate.
 name = "vesper-aether"
@@ -20,10 +21,13 @@ run = "cargo test --locked --release -p vesper-aether --features vesper-port"
 # 8,000 random split and packed queues: captures (with hints), completions,
 # flushes and driver writes, against the Rust walks; chains, errors, stats
 # and ring bytes must all match. Then the hot-set decoder and run builder,
-# the packed-ring capture, the seccomp evaluator and the vsock device
-# (vesper/src/{hotset,packed,seccomp,vsock}.ves), also Vesper-only, against
-# their Rust references (src/port_reference_tests; vsock: 300 random runs of
-# 400 guest packets, host socket calls, receive steps and resets).
+# the packed-ring capture, the seccomp evaluator, the vsock, net and block
+# devices and the MMIO register file
+# (vesper/src/{hotset,packed,seccomp,vsock,net,block,mmio}.ves), also
+# Vesper-only, against their Rust references (src/port_reference_tests;
+# vsock: 300 random runs of 400 guest packets, host socket calls, receive
+# steps and resets; net, block and mmio: 200 random runs each of guest
+# traffic, malformed requests, feature sets and register accesses).
 [differential]
 run = "cargo test --locked --release -p vesper-aether --lib -- devices::queue::reference::differential port_reference_tests"
 
@@ -55,3 +59,21 @@ run = "cargo test --locked --release -p vesper-aether --lib port_reference_tests
 [[abba]]
 workload = "vsock_device"
 run = "cargo test --locked --release -p vesper-aether --lib port_reference_tests::vsock::abba_vsock_device -- --ignored --nocapture"
+
+# A net device with 4 queue pairs: rounds of 12 received 1514-byte frames
+# into 2048-byte buffers and 12 transmitted frames.
+[[abba]]
+workload = "net_device"
+run = "cargo test --locked --release -p vesper-aether --lib port_reference_tests::net::abba_net_device -- --ignored --nocapture"
+
+# 4 KiB reads and writes at spread-out sectors of a 2048-sector disk.
+[[abba]]
+workload = "block_device"
+run = "cargo test --locked --release -p vesper-aether --lib port_reference_tests::block::abba_block_device -- --ignored --nocapture"
+
+# A driver session over the Vesper block device: initialization, then 32
+# rounds of four 512-byte reads, a notification, the interrupt
+# acknowledge and the used-ring drain.
+[[abba]]
+workload = "mmio_transport"
+run = "cargo test --locked --release -p vesper-aether --lib port_reference_tests::mmio::abba_mmio_transport -- --ignored --nocapture"

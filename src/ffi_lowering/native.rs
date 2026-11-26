@@ -474,11 +474,13 @@ impl<M: Module> Codegen<'_, '_, M> {
             sig.returns.push(abi_param(t, pointer));
         }
         // A callback type's call goes through the pointer in its first
-        // argument (the handle word); a `@vesper-std/cpu` instruction is a
-        // local leaf function of machine code for this target (`ffi::cpu`);
+        // argument (the handle word); a `@vesper-std/cpu` instruction (by
+        // link symbol, so a `.vsys` may bind its own name to one with
+        // `#[link_name]`) is a local leaf function of machine code for this
+        // target (`ffi::cpu`);
         // every other call imports its symbol.
         let architecture = self.m.isa().triple().architecture;
-        let cpu = ffi::cpu::code_for(plan.function.symbol(), architecture)?;
+        let cpu = ffi::cpu::code_for(plan.function.link_symbol(), architecture)?;
         let callee = if plan.function.is_indirect() {
             let pointer = c_args.remove(0);
             Callee::Indirect(self.b.import_signature(sig), pointer)
@@ -486,7 +488,7 @@ impl<M: Module> Codegen<'_, '_, M> {
             if arch == ffi::cpu::Arch::X86_64 {
                 sig.call_conv = cranelift_codegen::isa::CallConv::SystemV;
             }
-            Callee::Direct(self.foreign_code(plan.function.symbol(), &sig, &code)?)
+            Callee::Direct(self.foreign_code(plan.function.link_symbol(), &sig, &code)?)
         } else {
             self.foreign_import(plan.function.link_symbol(), sig)?
         };
@@ -2485,7 +2487,7 @@ impl<M: Module> Codegen<'_, '_, M> {
             }
         }
         let architecture = self.m.isa().triple().architecture;
-        let cpu = ffi::cpu::code_for(plan.function.symbol(), architecture)?;
+        let cpu = ffi::cpu::code_for(plan.function.link_symbol(), architecture)?;
         let (call_op, mut words) = if plan.function.is_indirect() {
             let pointer = c_args.remove(0);
             let sig_ref = self.b.import_signature(sig);
@@ -2497,7 +2499,7 @@ impl<M: Module> Codegen<'_, '_, M> {
             if arch == ffi::cpu::Arch::X86_64 {
                 sig.call_conv = cranelift_codegen::isa::CallConv::SystemV;
             }
-            let callee = self.foreign_code(plan.function.symbol(), &sig, &code)?;
+            let callee = self.foreign_code(plan.function.link_symbol(), &sig, &code)?;
             (swap::CALL, vec![u64::from(callee.as_u32())])
         } else {
             match self.foreign_import(plan.function.link_symbol(), sig)? {

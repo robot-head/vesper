@@ -517,6 +517,56 @@ The header codec (`VsockHeader::encode`/`decode`) is still Rust by default.
 It is now only a host convenience: the device itself decodes and encodes in
 Vesper.
 
+## Part 2h: the net and block devices and the MMIO register file flip to Vesper
+
+Part 2f measured the net and block helpers at 2.4x and 3.0x and the MMIO
+status machine at 2.6x: each was one crossing for a few comparisons. Ported
+the vsock way (part 2g), each is now one Vesper value that owns the
+decisions, state and counters, and one crossing pays for a whole request,
+frame or register access.
+
+- `vesper/src/net.ves` (`NetState`): MAC, MTU, link state, negotiated
+  features, queue pairs, per-pair receive backlog counts, the control queue
+  (`VIRTIO_NET_CTRL_MQ`), transmit validation, the receive plan (single or
+  merged buffers) and the stats. `src/devices/net.rs` keeps the frame bytes,
+  the backlog frames and the queue loops.
+- `vesper/src/block.ves` (`BlkState`): every request type (IN, OUT, FLUSH,
+  GET_ID, DISCARD, WRITE_ZEROES and unsupported ones) runs in Vesper over
+  the disk and durable bytes, which Rust lends as slices; read-only, MQ and
+  the per-queue counters too. `src/devices/block.rs` keeps the disk buffers
+  and the queue loop.
+- `vesper/src/mmio.ves` (`MmioState`): the whole register file (every
+  register's decode, selectors, feature negotiation, the status machine,
+  per-queue registers, interrupt status, configuration generation and the
+  transport counters). `src/devices/mmio.rs` keeps the device model, the
+  live rings and guest memory, and acts on what the register file answers
+  (run a queue, build a ring, reset or activate the device).
+
+The Rust devices and transport moved to `src/devices/{net,block,mmio}/reference.rs`
+and exist only under `#[cfg(test)]`.
+
+One deliberate difference: the net device counts a received frame as
+delivered when Vesper plans it, not after the ring write succeeds. The two
+differ only on a failed completion, where the device then needs a reset
+anyway.
+
+| Check | Result |
+|---|---|
+| Differential `port_reference_tests::net`: 200 seeds x 300 events (frame injection, receive posts, transmits, control commands, link changes, polls; random pairs, MRG_RXBUF/MQ/CTRL_VQ, split and packed) | 0 diffs in used entries, bytes, stats, backlog and config |
+| Differential `port_reference_tests::block`: 200 seeds x 200 requests of every type, valid and malformed, read-only and MQ, split and packed | 0 diffs in statuses, data, disk and durable bytes, stats |
+| Differential `port_reference_tests::mmio`: 200 seeds x 300 steps of driver sessions (random features, queue sizes, block traffic, `NOTIFICATION_DATA`, malformed chains) mixed with register reads and writes at any offset and width, plus 50 runs of net link changes and config-space accesses | 0 diffs in results, values, status, counters, queue stats, disk and RAM |
+| Device tests (`tests/*`) | pass, with and without `vesper-port` |
+| ABBA `net_device`: 4 pairs, rounds of 12 received 1514-byte frames and 12 transmits | 0.90x, 95% CI [0.875, 0.924] |
+| ABBA `block_device`: 4 KiB reads and writes on a 2048-sector disk | 0.93x, 95% CI [0.893, 0.973] |
+| ABBA `mmio_transport`: driver session over the block device, 32 rounds of four reads, notify, ISR acknowledge, drain | 0.99x, 95% CI [0.972, 1.004] |
+
+The net and block ABBAs go through the real MMIO transport, identical in
+both arms; the mmio ABBA uses the same Vesper block device in both arms.
+
+Port ABI gap found on the way: a `Slice[u16]` passed from Rust reads 0 past
+its first element in Vesper, so the register file takes the queue sizes as
+little-endian bytes.
+
 ## Compiler gaps (for the coordinator)
 
 | Gap | Blocks | Owner of the fix |
@@ -535,6 +585,7 @@ Vesper.
 `vesper-aether` stays "c-api" (KVM ioctls and userfaultfd are its Rust
 wrappers over the OS). Its virtqueue walks are Vesper-only since part 2d,
 hot sets, the packed capture and the seccomp evaluator since part 2f, and
-the vsock device since part 2g;
+the vsock device since part 2g, and the net and block devices and the MMIO
+register file since part 2h;
 slot plans and PVH parsing wait on G10, and the small device codecs on
 porting their callers.

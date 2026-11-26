@@ -5,6 +5,30 @@
 
 use vesper_port_abi::Abi;
 
+impl Abi for crate::port_types::BlkStats {
+    const WORDS: usize = 15;
+    fn put(&self, out: &mut [u64]) {
+        Abi::put(&self.reads, &mut out[0..]);
+        Abi::put(&self.writes, &mut out[1..]);
+        Abi::put(&self.flushes, &mut out[2..]);
+        Abi::put(&self.io_errors, &mut out[3..]);
+        Abi::put(&self.unsupported, &mut out[4..]);
+        Abi::put(&self.discards, &mut out[5..]);
+        Abi::put(&self.write_zeroes, &mut out[6..]);
+        Abi::put(&self.q0, &mut out[7..]);
+        Abi::put(&self.q1, &mut out[8..]);
+        Abi::put(&self.q2, &mut out[9..]);
+        Abi::put(&self.q3, &mut out[10..]);
+        Abi::put(&self.q4, &mut out[11..]);
+        Abi::put(&self.q5, &mut out[12..]);
+        Abi::put(&self.q6, &mut out[13..]);
+        Abi::put(&self.q7, &mut out[14..]);
+    }
+    fn get(words: &[u64]) -> Self {
+        crate::port_types::BlkStats { reads: Abi::get(&words[0..]), writes: Abi::get(&words[1..]), flushes: Abi::get(&words[2..]), io_errors: Abi::get(&words[3..]), unsupported: Abi::get(&words[4..]), discards: Abi::get(&words[5..]), write_zeroes: Abi::get(&words[6..]), q0: Abi::get(&words[7..]), q1: Abi::get(&words[8..]), q2: Abi::get(&words[9..]), q3: Abi::get(&words[10..]), q4: Abi::get(&words[11..]), q5: Abi::get(&words[12..]), q6: Abi::get(&words[13..]), q7: Abi::get(&words[14..]) }
+    }
+}
+
 impl Abi for crate::port_types::HotFault {
     const WORDS: usize = 2;
     fn put(&self, out: &mut [u64]) {
@@ -106,45 +130,52 @@ impl Abi for crate::port_types::MemFault {
     }
 }
 
-impl Abi for crate::port_types::MmioStatusFault {
-    const WORDS: usize = 3;
+impl Abi for crate::port_types::MmioQueue {
+    const WORDS: usize = 6;
     fn put(&self, out: &mut [u64]) {
-        match self {
-            crate::port_types::MmioStatusFault::DriverSetNeedsReset => {
-                out[0] = 0;
-            }
-            crate::port_types::MmioStatusFault::StatusRegression { from: f0, to: f1 } => {
-                out[0] = 1;
-                Abi::put(f0, &mut out[1..]);
-                Abi::put(f1, &mut out[2..]);
-            }
-            crate::port_types::MmioStatusFault::DriverOkWithoutFeaturesOk { rejected_features: f0 } => {
-                out[0] = 2;
-                Abi::put(f0, &mut out[1..]);
-            }
-        }
+        Abi::put(&self.max, &mut out[0..]);
+        Abi::put(&self.num, &mut out[1..]);
+        Abi::put(&self.ready, &mut out[2..]);
+        Abi::put(&self.desc, &mut out[3..]);
+        Abi::put(&self.driver, &mut out[4..]);
+        Abi::put(&self.device, &mut out[5..]);
     }
     fn get(words: &[u64]) -> Self {
-        match words[0] {
-            0 => crate::port_types::MmioStatusFault::DriverSetNeedsReset,
-            1 => crate::port_types::MmioStatusFault::StatusRegression { from: Abi::get(&words[1..]), to: Abi::get(&words[2..]) },
-            2 => crate::port_types::MmioStatusFault::DriverOkWithoutFeaturesOk { rejected_features: Abi::get(&words[1..]) },
-            tag => panic!("invalid MmioStatusFault tag {tag} from Vesper"),
-        }
+        crate::port_types::MmioQueue { max: Abi::get(&words[0..]), num: Abi::get(&words[1..]), ready: Abi::get(&words[2..]), desc: Abi::get(&words[3..]), driver: Abi::get(&words[4..]), device: Abi::get(&words[5..]) }
     }
 }
 
-impl Abi for crate::port_types::MmioStatusOutcome {
-    const WORDS: usize = 5;
+impl Abi for crate::port_types::MmioStats {
+    const WORDS: usize = 6;
     fn put(&self, out: &mut [u64]) {
-        Abi::put(&self.reset, &mut out[0..]);
-        Abi::put(&self.next_status, &mut out[1..]);
-        Abi::put(&self.accepted_features, &mut out[2..]);
-        Abi::put(&self.rejected_features, &mut out[3..]);
-        Abi::put(&self.activate, &mut out[4..]);
+        Abi::put(&self.notifications, &mut out[0..]);
+        Abi::put(&self.chains_captured, &mut out[1..]);
+        Abi::put(&self.chains_completed, &mut out[2..]);
+        Abi::put(&self.interrupts, &mut out[3..]);
+        Abi::put(&self.rejected_feature_sets, &mut out[4..]);
+        Abi::put(&self.interrupts_suppressed, &mut out[5..]);
     }
     fn get(words: &[u64]) -> Self {
-        crate::port_types::MmioStatusOutcome { reset: Abi::get(&words[0..]), next_status: Abi::get(&words[1..]), accepted_features: Abi::get(&words[2..]), rejected_features: Abi::get(&words[3..]), activate: Abi::get(&words[4..]) }
+        crate::port_types::MmioStats { notifications: Abi::get(&words[0..]), chains_captured: Abi::get(&words[1..]), chains_completed: Abi::get(&words[2..]), interrupts: Abi::get(&words[3..]), rejected_feature_sets: Abi::get(&words[4..]), interrupts_suppressed: Abi::get(&words[5..]) }
+    }
+}
+
+impl Abi for crate::port_types::NetStats {
+    const WORDS: usize = 10;
+    fn put(&self, out: &mut [u64]) {
+        Abi::put(&self.tx_frames, &mut out[0..]);
+        Abi::put(&self.tx_dropped, &mut out[1..]);
+        Abi::put(&self.tx_dropped_backlog, &mut out[2..]);
+        Abi::put(&self.rx_frames, &mut out[3..]);
+        Abi::put(&self.rx_dropped_backlog, &mut out[4..]);
+        Abi::put(&self.rx_dropped_small_buffer, &mut out[5..]);
+        Abi::put(&self.rx_dropped_inactive, &mut out[6..]);
+        Abi::put(&self.rx_merged, &mut out[7..]);
+        Abi::put(&self.ctrl_ok, &mut out[8..]);
+        Abi::put(&self.ctrl_err, &mut out[9..]);
+    }
+    fn get(words: &[u64]) -> Self {
+        crate::port_types::NetStats { tx_frames: Abi::get(&words[0..]), tx_dropped: Abi::get(&words[1..]), tx_dropped_backlog: Abi::get(&words[2..]), rx_frames: Abi::get(&words[3..]), rx_dropped_backlog: Abi::get(&words[4..]), rx_dropped_small_buffer: Abi::get(&words[5..]), rx_dropped_inactive: Abi::get(&words[6..]), rx_merged: Abi::get(&words[7..]), ctrl_ok: Abi::get(&words[8..]), ctrl_err: Abi::get(&words[9..]) }
     }
 }
 
@@ -594,6 +625,261 @@ impl Abi for crate::port_types::VsockStats {
     }
 }
 
+/// Owned handle of a Vesper `BlkState` value: its words, which own the Vesper
+/// allocations they point to. Dropping it calls `vesper_aether_BlkState_drop`.
+pub struct BlkState {
+    words: [u64; 20],
+}
+
+impl BlkState {
+    /// # Safety
+    /// `words` must hold a `BlkState` value of this library that the caller owns.
+    unsafe fn from_words(words: &[u64]) -> Self {
+        let mut owned = [0u64; 20];
+        owned.copy_from_slice(&words[..20]);
+        Self { words: owned }
+    }
+
+    /// A borrowed view of the value.
+    pub fn as_ref(&self) -> BlkStateRef<'_> {
+        BlkStateRef { words: &self.words }
+    }
+}
+
+impl Drop for BlkState {
+    fn drop(&mut self) {
+        // SAFETY: the handle owns its words and is dropped once.
+        unsafe { vesper_aether_BlkState_drop(self.words.as_mut_ptr()) };
+    }
+}
+
+impl core::fmt::Debug for BlkState {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("BlkState { .. }")
+    }
+}
+
+// SAFETY: the handle owns its Vesper allocations exclusively (no Vesper
+// code keeps a reference to them), and they are plain heap memory.
+unsafe impl Send for BlkState {}
+// SAFETY: shared access only reads the words and the memory they own.
+unsafe impl Sync for BlkState {}
+
+/// A borrowed view of a Vesper `BlkState` value, read in place.
+#[derive(Clone, Copy)]
+pub struct BlkStateRef<'a> {
+    words: &'a [u64],
+}
+
+impl<'a> BlkStateRef<'a> {
+    pub fn read_only(&self) -> bool {
+        let w: &'a [u64] = self.words;
+        <bool as Abi>::get(&w[0..])
+    }
+    pub fn queues(&self) -> u16 {
+        let w: &'a [u64] = self.words;
+        <u16 as Abi>::get(&w[1..])
+    }
+    pub fn features(&self) -> u64 {
+        let w: &'a [u64] = self.words;
+        <u64 as Abi>::get(&w[2..])
+    }
+    pub fn id(&self) -> vesper_port_abi::SeqRef<'a, u8> {
+        let w: &'a [u64] = self.words;
+        unsafe { vesper_port_abi::SeqRef::from_handle(w[3]) }
+    }
+    pub fn zeros(&self) -> vesper_port_abi::SeqRef<'a, u8> {
+        let w: &'a [u64] = self.words;
+        unsafe { vesper_port_abi::SeqRef::from_handle(w[4]) }
+    }
+    pub fn stats(&self) -> crate::port_types::BlkStats {
+        let w: &'a [u64] = self.words;
+        <crate::port_types::BlkStats as Abi>::get(&w[5..])
+    }
+}
+
+/// Owned handle of a Vesper `MmioState` value: its words, which own the Vesper
+/// allocations they point to. Dropping it calls `vesper_aether_MmioState_drop`.
+pub struct MmioState {
+    words: [u64; 17],
+}
+
+impl MmioState {
+    /// # Safety
+    /// `words` must hold a `MmioState` value of this library that the caller owns.
+    unsafe fn from_words(words: &[u64]) -> Self {
+        let mut owned = [0u64; 17];
+        owned.copy_from_slice(&words[..17]);
+        Self { words: owned }
+    }
+
+    /// A borrowed view of the value.
+    pub fn as_ref(&self) -> MmioStateRef<'_> {
+        MmioStateRef { words: &self.words }
+    }
+}
+
+impl Drop for MmioState {
+    fn drop(&mut self) {
+        // SAFETY: the handle owns its words and is dropped once.
+        unsafe { vesper_aether_MmioState_drop(self.words.as_mut_ptr()) };
+    }
+}
+
+impl core::fmt::Debug for MmioState {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("MmioState { .. }")
+    }
+}
+
+// SAFETY: the handle owns its Vesper allocations exclusively (no Vesper
+// code keeps a reference to them), and they are plain heap memory.
+unsafe impl Send for MmioState {}
+// SAFETY: shared access only reads the words and the memory they own.
+unsafe impl Sync for MmioState {}
+
+/// A borrowed view of a Vesper `MmioState` value, read in place.
+#[derive(Clone, Copy)]
+pub struct MmioStateRef<'a> {
+    words: &'a [u64],
+}
+
+impl<'a> MmioStateRef<'a> {
+    pub fn device_type(&self) -> u32 {
+        let w: &'a [u64] = self.words;
+        <u32 as Abi>::get(&w[0..])
+    }
+    pub fn status(&self) -> u32 {
+        let w: &'a [u64] = self.words;
+        <u32 as Abi>::get(&w[1..])
+    }
+    pub fn device_features_sel(&self) -> u32 {
+        let w: &'a [u64] = self.words;
+        <u32 as Abi>::get(&w[2..])
+    }
+    pub fn driver_features_sel(&self) -> u32 {
+        let w: &'a [u64] = self.words;
+        <u32 as Abi>::get(&w[3..])
+    }
+    pub fn driver_features(&self) -> u64 {
+        let w: &'a [u64] = self.words;
+        <u64 as Abi>::get(&w[4..])
+    }
+    pub fn driver_accepted_unknown(&self) -> bool {
+        let w: &'a [u64] = self.words;
+        <bool as Abi>::get(&w[5..])
+    }
+    pub fn negotiated(&self) -> u64 {
+        let w: &'a [u64] = self.words;
+        <u64 as Abi>::get(&w[6..])
+    }
+    pub fn queue_sel(&self) -> u32 {
+        let w: &'a [u64] = self.words;
+        <u32 as Abi>::get(&w[7..])
+    }
+    pub fn queues(&self) -> vesper_port_abi::SeqRef<'a, crate::port_types::MmioQueue> {
+        let w: &'a [u64] = self.words;
+        unsafe { vesper_port_abi::SeqRef::from_handle(w[8]) }
+    }
+    pub fn interrupt_status(&self) -> u32 {
+        let w: &'a [u64] = self.words;
+        <u32 as Abi>::get(&w[9..])
+    }
+    pub fn config_generation(&self) -> u32 {
+        let w: &'a [u64] = self.words;
+        <u32 as Abi>::get(&w[10..])
+    }
+    pub fn stats(&self) -> crate::port_types::MmioStats {
+        let w: &'a [u64] = self.words;
+        <crate::port_types::MmioStats as Abi>::get(&w[11..])
+    }
+}
+
+/// Owned handle of a Vesper `NetState` value: its words, which own the Vesper
+/// allocations they point to. Dropping it calls `vesper_aether_NetState_drop`.
+pub struct NetState {
+    words: [u64; 18],
+}
+
+impl NetState {
+    /// # Safety
+    /// `words` must hold a `NetState` value of this library that the caller owns.
+    unsafe fn from_words(words: &[u64]) -> Self {
+        let mut owned = [0u64; 18];
+        owned.copy_from_slice(&words[..18]);
+        Self { words: owned }
+    }
+
+    /// A borrowed view of the value.
+    pub fn as_ref(&self) -> NetStateRef<'_> {
+        NetStateRef { words: &self.words }
+    }
+}
+
+impl Drop for NetState {
+    fn drop(&mut self) {
+        // SAFETY: the handle owns its words and is dropped once.
+        unsafe { vesper_aether_NetState_drop(self.words.as_mut_ptr()) };
+    }
+}
+
+impl core::fmt::Debug for NetState {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("NetState { .. }")
+    }
+}
+
+// SAFETY: the handle owns its Vesper allocations exclusively (no Vesper
+// code keeps a reference to them), and they are plain heap memory.
+unsafe impl Send for NetState {}
+// SAFETY: shared access only reads the words and the memory they own.
+unsafe impl Sync for NetState {}
+
+/// A borrowed view of a Vesper `NetState` value, read in place.
+#[derive(Clone, Copy)]
+pub struct NetStateRef<'a> {
+    words: &'a [u64],
+}
+
+impl<'a> NetStateRef<'a> {
+    pub fn mac(&self) -> u64 {
+        let w: &'a [u64] = self.words;
+        <u64 as Abi>::get(&w[0..])
+    }
+    pub fn mtu(&self) -> u16 {
+        let w: &'a [u64] = self.words;
+        <u16 as Abi>::get(&w[1..])
+    }
+    pub fn link_up(&self) -> bool {
+        let w: &'a [u64] = self.words;
+        <bool as Abi>::get(&w[2..])
+    }
+    pub fn config_changed(&self) -> bool {
+        let w: &'a [u64] = self.words;
+        <bool as Abi>::get(&w[3..])
+    }
+    pub fn features(&self) -> u64 {
+        let w: &'a [u64] = self.words;
+        <u64 as Abi>::get(&w[4..])
+    }
+    pub fn max_pairs(&self) -> u16 {
+        let w: &'a [u64] = self.words;
+        <u16 as Abi>::get(&w[5..])
+    }
+    pub fn active_pairs(&self) -> u16 {
+        let w: &'a [u64] = self.words;
+        <u16 as Abi>::get(&w[6..])
+    }
+    pub fn backlog(&self) -> vesper_port_abi::SeqRef<'a, u64> {
+        let w: &'a [u64] = self.words;
+        unsafe { vesper_port_abi::SeqRef::from_handle(w[7]) }
+    }
+    pub fn stats(&self) -> crate::port_types::NetStats {
+        let w: &'a [u64] = self.words;
+        <crate::port_types::NetStats as Abi>::get(&w[8..])
+    }
+}
+
 /// Owned handle of a Vesper `VsockState` value: its words, which own the Vesper
 /// allocations they point to. Dropping it calls `vesper_aether_VsockState_drop`.
 pub struct VsockState {
@@ -704,7 +990,6 @@ const _: () = assert!(<Option<crate::port_types::VsockHeader> as Abi>::WORDS == 
 const _: () = assert!(<Option<u16> as Abi>::WORDS == 2);
 const _: () = assert!(<Result<(), crate::port_types::SeccompFault> as Abi>::WORDS == 4);
 const _: () = assert!(<Result<(u32, u64), crate::port_types::PvhFault> as Abi>::WORDS == 4);
-const _: () = assert!(<Result<crate::port_types::MmioStatusOutcome, crate::port_types::MmioStatusFault> as Abi>::WORDS == 6);
 const _: () = assert!(<Result<u32, crate::port_types::SeccompFault> as Abi>::WORDS == 4);
 const _: () = assert!(<Result<u64, crate::port_types::HotFault> as Abi>::WORDS == 3);
 const _: () = assert!(<Result<u64, crate::port_types::MemFault> as Abi>::WORDS == 4);
@@ -712,11 +997,13 @@ const _: () = assert!(<Result<u64, crate::port_types::PackedFault> as Abi>::WORD
 const _: () = assert!(<Result<u64, crate::port_types::SeccompFault> as Abi>::WORDS == 4);
 const _: () = assert!(<Result<u64, crate::port_types::VqFault> as Abi>::WORDS == 2);
 const _: () = assert!(<bool as Abi>::WORDS == 1);
+const _: () = assert!(<crate::port_types::BlkStats as Abi>::WORDS == 15);
 const _: () = assert!(<crate::port_types::HotFault as Abi>::WORDS == 2);
 const _: () = assert!(<crate::port_types::KvmHostLimits as Abi>::WORDS == 3);
 const _: () = assert!(<crate::port_types::MemFault as Abi>::WORDS == 3);
-const _: () = assert!(<crate::port_types::MmioStatusFault as Abi>::WORDS == 3);
-const _: () = assert!(<crate::port_types::MmioStatusOutcome as Abi>::WORDS == 5);
+const _: () = assert!(<crate::port_types::MmioQueue as Abi>::WORDS == 6);
+const _: () = assert!(<crate::port_types::MmioStats as Abi>::WORDS == 6);
+const _: () = assert!(<crate::port_types::NetStats as Abi>::WORDS == 10);
 const _: () = assert!(<crate::port_types::PackedFault as Abi>::WORDS == 1);
 const _: () = assert!(<crate::port_types::PlannedRegion as Abi>::WORDS == 5);
 const _: () = assert!(<crate::port_types::PvhFault as Abi>::WORDS == 3);
@@ -727,6 +1014,7 @@ const _: () = assert!(<crate::port_types::VqFault as Abi>::WORDS == 1);
 const _: () = assert!(<crate::port_types::VsockConn as Abi>::WORDS == 9);
 const _: () = assert!(<crate::port_types::VsockHeader as Abi>::WORDS == 10);
 const _: () = assert!(<crate::port_types::VsockStats as Abi>::WORDS == 9);
+const _: () = assert!(<u16 as Abi>::WORDS == 1);
 const _: () = assert!(<u32 as Abi>::WORDS == 1);
 const _: () = assert!(<u64 as Abi>::WORDS == 1);
 const _: () = assert!(<u8 as Abi>::WORDS == 1);
@@ -735,9 +1023,18 @@ unsafe extern "C" {
     fn vesper_aether_seq_new(capacity: i64, stride: i64) -> i64;
     fn vesper_aether_seq_free(seq: i64) -> i64;
     fn vesper_aether_live_allocations() -> i64;
+    fn vesper_aether_BlkState_drop(value: *mut u64) -> i64;
+    fn vesper_aether_MmioState_drop(value: *mut u64) -> i64;
+    fn vesper_aether_NetState_drop(value: *mut u64) -> i64;
     fn vesper_aether_VsockState_drop(value: *mut u64) -> i64;
+    fn vesper_aether_blk_activate(st: *mut u64, features: i64) -> i64;
     fn vesper_aether_blk_config_space(disk_bytes: i64, read_only: i64, queues: i64, out: *mut u64) -> i64;
+    fn vesper_aether_blk_device_features(st: *mut u64) -> i64;
+    fn vesper_aether_blk_request(st: *mut u64, disk: *mut u64, flushed: *mut u64, queue: i64, readable: *mut u64, writable: i64, out: *mut u64) -> i64;
+    fn vesper_aether_blk_set_queues(st: *mut u64, queues: i64) -> i64;
     fn vesper_aether_blk_span(result: *mut u64, disk_bytes: i64, sector: i64, len: i64) -> i64;
+    fn vesper_aether_blk_state_new(result: *mut u64, read_only: i64, id: *mut u64, queues: i64) -> i64;
+    fn vesper_aether_blk_stats(result: *mut u64, st: *mut u64) -> i64;
     fn vesper_aether_blk_validate_discard_or_zero(result: *mut u64, disk_bytes: i64, read_only: i64, payload: *mut u64, data_in: i64, discard: i64, out_spans: *mut u64) -> i64;
     fn vesper_aether_fork_decode_vmgenid_wire(result: *mut u64, bytes: *mut u64) -> i64;
     fn vesper_aether_fork_encode_vmgenid_wire(w: *mut u64, out: *mut u64) -> i64;
@@ -745,9 +1042,37 @@ unsafe extern "C" {
     fn vesper_aether_guest_mem_plan(result: *mut u64, layout: *mut u64, out_table: *mut u64) -> i64;
     fn vesper_aether_hotset_decode(result: *mut u64, bytes: *mut u64, expected: i64, pages: *mut u64) -> i64;
     fn vesper_aether_hotset_runs(result: *mut u64, pages: *mut u64, batch: i64, out: *mut u64) -> i64;
-    fn vesper_aether_mmio_write_status(result: *mut u64, old: i64, new_val: i64, driver_accepted_unknown: i64, driver_features: i64, offered: i64) -> i64;
+    fn vesper_aether_mmio_config_change(st: *mut u64) -> i64;
+    fn vesper_aether_mmio_interrupt_status(st: *mut u64) -> i64;
+    fn vesper_aether_mmio_negotiated(st: *mut u64) -> i64;
+    fn vesper_aether_mmio_queue(result: *mut u64, st: *mut u64, index: i64) -> i64;
+    fn vesper_aether_mmio_queue_set_ready(st: *mut u64, index: i64) -> i64;
+    fn vesper_aether_mmio_read(st: *mut u64, offset: i64, len: i64, offered: i64, config_len: i64) -> i64;
+    fn vesper_aether_mmio_run_check(st: *mut u64, index: i64) -> i64;
+    fn vesper_aether_mmio_run_done(st: *mut u64, captured: i64, capture_failed: i64, completed: i64, flushed: i64, config_changed: i64, process_failed: i64) -> i64;
+    fn vesper_aether_mmio_state_new(result: *mut u64, device_type: i64, maxes: *mut u64) -> i64;
+    fn vesper_aether_mmio_stats(result: *mut u64, st: *mut u64) -> i64;
+    fn vesper_aether_mmio_status(st: *mut u64) -> i64;
+    fn vesper_aether_mmio_write(st: *mut u64, offset: i64, len: i64, value: i64, offered: i64, config_len: i64) -> i64;
+    fn vesper_aether_net_activate(st: *mut u64, features: i64) -> i64;
+    fn vesper_aether_net_active_pairs(st: *mut u64) -> i64;
+    fn vesper_aether_net_config(st: *mut u64, out: *mut u64) -> i64;
     fn vesper_aether_net_config_space(mac: *mut u64, link_up: i64, max_pairs: i64, mtu: i64, out: *mut u64) -> i64;
+    fn vesper_aether_net_control(st: *mut u64, readable: *mut u64) -> i64;
+    fn vesper_aether_net_ctrl_queue(st: *mut u64) -> i64;
+    fn vesper_aether_net_device_features(st: *mut u64) -> i64;
+    fn vesper_aether_net_inject(st: *mut u64, pair: i64, len: i64) -> i64;
     fn vesper_aether_net_parse_ctrl(result: *mut u64, readable: *mut u64, features: i64, max_pairs: i64) -> i64;
+    fn vesper_aether_net_queue(st: *mut u64, queue: i64) -> i64;
+    fn vesper_aether_net_reset(st: *mut u64) -> i64;
+    fn vesper_aether_net_rx_backlog(st: *mut u64) -> i64;
+    fn vesper_aether_net_rx_first(st: *mut u64, pair: i64, frame_len: i64, readable_empty: i64, writable: i64) -> i64;
+    fn vesper_aether_net_rx_merged(st: *mut u64, pair: i64, chains: i64) -> i64;
+    fn vesper_aether_net_set_link(st: *mut u64, up: i64) -> i64;
+    fn vesper_aether_net_state_new(result: *mut u64, mac: *mut u64, mtu: i64, pairs: i64) -> i64;
+    fn vesper_aether_net_stats(result: *mut u64, st: *mut u64) -> i64;
+    fn vesper_aether_net_take_config_change(st: *mut u64) -> i64;
+    fn vesper_aether_net_tx(st: *mut u64, readable: *mut u64, queued: i64) -> i64;
     fn vesper_aether_net_validate_tx(readable: *mut u64, max_frame: i64, link_up: i64) -> i64;
     fn vesper_aether_packed_capture(result: *mut u64, ring: *mut u64, regions: *mut u64, size: i64, free: i64, index: i64, wrap: i64, max_desc: i64, max_bytes: i64, max_work: i64, out: *mut u64) -> i64;
     fn vesper_aether_pvh_parse(result: *mut u64, elf: *mut u64, ram: *mut u64, out: *mut u64) -> i64;
@@ -797,6 +1122,15 @@ pub fn live_allocations() -> i64 {
     unsafe { vesper_aether_live_allocations() }
 }
 
+/// Calls `blk_activate` of the Vesper library `aether` (`vesper_aether_blk_activate`).
+pub fn blk_activate(st: &mut BlkState, features: u64) -> () {
+    // SAFETY: `vesper_aether_blk_activate` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_aether_blk_activate(st.words.as_mut_ptr(), features as i64) };
+    { let _ = raw; }
+}
+
 /// Calls `blk_config_space` of the Vesper library `aether` (`vesper_aether_blk_config_space`).
 pub fn blk_config_space(disk_bytes: u64, read_only: bool, queues: u16, out: &mut [u8]) -> u64 {
     // SAFETY: `vesper_aether_blk_config_space` has exactly this signature in the export ABI; every
@@ -804,6 +1138,34 @@ pub fn blk_config_space(disk_bytes: u64, read_only: bool, queues: u16, out: &mut
     // every handle passed is owned or borrowed as its mode requires.
     let raw = vesper_port_abi::with_slice_mut(out, |view_out| unsafe { vesper_aether_blk_config_space(disk_bytes as i64, read_only as i64, queues as i64, view_out) });
     raw as u64
+}
+
+/// Calls `blk_device_features` of the Vesper library `aether` (`vesper_aether_blk_device_features`).
+pub fn blk_device_features(st: &BlkState) -> u64 {
+    let mut arg_st = st.words;
+    // SAFETY: `vesper_aether_blk_device_features` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_aether_blk_device_features(arg_st.as_mut_ptr()) };
+    raw as u64
+}
+
+/// Calls `blk_request` of the Vesper library `aether` (`vesper_aether_blk_request`).
+pub fn blk_request(st: &mut BlkState, disk: &mut [u8], flushed: &mut [u8], queue: u16, readable: &[u8], writable: u64, out: &mut [u8]) -> u64 {
+    // SAFETY: `vesper_aether_blk_request` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice_mut(disk, |view_disk| vesper_port_abi::with_slice_mut(flushed, |view_flushed| vesper_port_abi::with_slice(readable, |view_readable| vesper_port_abi::with_slice_mut(out, |view_out| unsafe { vesper_aether_blk_request(st.words.as_mut_ptr(), view_disk, view_flushed, queue as i64, view_readable, writable as i64, view_out) }))));
+    raw as u64
+}
+
+/// Calls `blk_set_queues` of the Vesper library `aether` (`vesper_aether_blk_set_queues`).
+pub fn blk_set_queues(st: &mut BlkState, queues: u16) -> () {
+    // SAFETY: `vesper_aether_blk_set_queues` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_aether_blk_set_queues(st.words.as_mut_ptr(), queues as i64) };
+    { let _ = raw; }
 }
 
 /// Calls `blk_span` of the Vesper library `aether` (`vesper_aether_blk_span`).
@@ -814,6 +1176,27 @@ pub fn blk_span(disk_bytes: u64, sector: u64, len: u64) -> Option<(u64, u64)> {
     // every handle passed is owned or borrowed as its mode requires.
     let raw = unsafe { vesper_aether_blk_span(result.as_mut_ptr(), disk_bytes as i64, sector as i64, len as i64) };
     <Option<(u64, u64)> as Abi>::get(&result[0..])
+}
+
+/// Calls `blk_state_new` of the Vesper library `aether` (`vesper_aether_blk_state_new`).
+pub fn blk_state_new(read_only: bool, id: &[u8], queues: u16) -> BlkState {
+    let mut result = [0u64; 20];
+    // SAFETY: `vesper_aether_blk_state_new` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(id, |view_id| unsafe { vesper_aether_blk_state_new(result.as_mut_ptr(), read_only as i64, view_id, queues as i64) });
+    unsafe { BlkState::from_words(&result[0..]) }
+}
+
+/// Calls `blk_stats` of the Vesper library `aether` (`vesper_aether_blk_stats`).
+pub fn blk_stats(st: &BlkState) -> crate::port_types::BlkStats {
+    let mut result = [0u64; 15];
+    let mut arg_st = st.words;
+    // SAFETY: `vesper_aether_blk_stats` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_aether_blk_stats(result.as_mut_ptr(), arg_st.as_mut_ptr()) };
+    <crate::port_types::BlkStats as Abi>::get(&result[0..])
 }
 
 /// Calls `blk_validate_discard_or_zero` of the Vesper library `aether` (`vesper_aether_blk_validate_discard_or_zero`).
@@ -887,14 +1270,151 @@ pub fn hotset_runs(pages: &[u64], batch: u64, out: &mut [u64]) -> Result<u64, cr
     <Result<u64, crate::port_types::HotFault> as Abi>::get(&result[0..])
 }
 
-/// Calls `mmio_write_status` of the Vesper library `aether` (`vesper_aether_mmio_write_status`).
-pub fn mmio_write_status(old: u32, new_val: u32, driver_accepted_unknown: bool, driver_features: u64, offered: u64) -> Result<crate::port_types::MmioStatusOutcome, crate::port_types::MmioStatusFault> {
-    let mut result = [0u64; 6];
-    // SAFETY: `vesper_aether_mmio_write_status` has exactly this signature in the export ABI; every
+/// Calls `mmio_config_change` of the Vesper library `aether` (`vesper_aether_mmio_config_change`).
+pub fn mmio_config_change(st: &mut MmioState) -> () {
+    // SAFETY: `vesper_aether_mmio_config_change` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
-    let raw = unsafe { vesper_aether_mmio_write_status(result.as_mut_ptr(), old as i64, new_val as i64, driver_accepted_unknown as i64, driver_features as i64, offered as i64) };
-    <Result<crate::port_types::MmioStatusOutcome, crate::port_types::MmioStatusFault> as Abi>::get(&result[0..])
+    let raw = unsafe { vesper_aether_mmio_config_change(st.words.as_mut_ptr()) };
+    { let _ = raw; }
+}
+
+/// Calls `mmio_interrupt_status` of the Vesper library `aether` (`vesper_aether_mmio_interrupt_status`).
+pub fn mmio_interrupt_status(st: &MmioState) -> u32 {
+    let mut arg_st = st.words;
+    // SAFETY: `vesper_aether_mmio_interrupt_status` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_aether_mmio_interrupt_status(arg_st.as_mut_ptr()) };
+    raw as u32
+}
+
+/// Calls `mmio_negotiated` of the Vesper library `aether` (`vesper_aether_mmio_negotiated`).
+pub fn mmio_negotiated(st: &MmioState) -> u64 {
+    let mut arg_st = st.words;
+    // SAFETY: `vesper_aether_mmio_negotiated` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_aether_mmio_negotiated(arg_st.as_mut_ptr()) };
+    raw as u64
+}
+
+/// Calls `mmio_queue` of the Vesper library `aether` (`vesper_aether_mmio_queue`).
+pub fn mmio_queue(st: &MmioState, index: u32) -> crate::port_types::MmioQueue {
+    let mut result = [0u64; 6];
+    let mut arg_st = st.words;
+    // SAFETY: `vesper_aether_mmio_queue` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_aether_mmio_queue(result.as_mut_ptr(), arg_st.as_mut_ptr(), index as i64) };
+    <crate::port_types::MmioQueue as Abi>::get(&result[0..])
+}
+
+/// Calls `mmio_queue_set_ready` of the Vesper library `aether` (`vesper_aether_mmio_queue_set_ready`).
+pub fn mmio_queue_set_ready(st: &mut MmioState, index: u32) -> () {
+    // SAFETY: `vesper_aether_mmio_queue_set_ready` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_aether_mmio_queue_set_ready(st.words.as_mut_ptr(), index as i64) };
+    { let _ = raw; }
+}
+
+/// Calls `mmio_read` of the Vesper library `aether` (`vesper_aether_mmio_read`).
+pub fn mmio_read(st: &MmioState, offset: u64, len: u64, offered: u64, config_len: u64) -> u64 {
+    let mut arg_st = st.words;
+    // SAFETY: `vesper_aether_mmio_read` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_aether_mmio_read(arg_st.as_mut_ptr(), offset as i64, len as i64, offered as i64, config_len as i64) };
+    raw as u64
+}
+
+/// Calls `mmio_run_check` of the Vesper library `aether` (`vesper_aether_mmio_run_check`).
+pub fn mmio_run_check(st: &MmioState, index: u32) -> u64 {
+    let mut arg_st = st.words;
+    // SAFETY: `vesper_aether_mmio_run_check` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_aether_mmio_run_check(arg_st.as_mut_ptr(), index as i64) };
+    raw as u64
+}
+
+/// Calls `mmio_run_done` of the Vesper library `aether` (`vesper_aether_mmio_run_done`).
+pub fn mmio_run_done(st: &mut MmioState, captured: u64, capture_failed: bool, completed: u64, flushed: u64, config_changed: bool, process_failed: bool) -> () {
+    // SAFETY: `vesper_aether_mmio_run_done` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_aether_mmio_run_done(st.words.as_mut_ptr(), captured as i64, capture_failed as i64, completed as i64, flushed as i64, config_changed as i64, process_failed as i64) };
+    { let _ = raw; }
+}
+
+/// Calls `mmio_state_new` of the Vesper library `aether` (`vesper_aether_mmio_state_new`).
+pub fn mmio_state_new(device_type: u32, maxes: &[u8]) -> MmioState {
+    let mut result = [0u64; 17];
+    // SAFETY: `vesper_aether_mmio_state_new` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(maxes, |view_maxes| unsafe { vesper_aether_mmio_state_new(result.as_mut_ptr(), device_type as i64, view_maxes) });
+    unsafe { MmioState::from_words(&result[0..]) }
+}
+
+/// Calls `mmio_stats` of the Vesper library `aether` (`vesper_aether_mmio_stats`).
+pub fn mmio_stats(st: &MmioState) -> crate::port_types::MmioStats {
+    let mut result = [0u64; 6];
+    let mut arg_st = st.words;
+    // SAFETY: `vesper_aether_mmio_stats` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_aether_mmio_stats(result.as_mut_ptr(), arg_st.as_mut_ptr()) };
+    <crate::port_types::MmioStats as Abi>::get(&result[0..])
+}
+
+/// Calls `mmio_status` of the Vesper library `aether` (`vesper_aether_mmio_status`).
+pub fn mmio_status(st: &MmioState) -> u32 {
+    let mut arg_st = st.words;
+    // SAFETY: `vesper_aether_mmio_status` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_aether_mmio_status(arg_st.as_mut_ptr()) };
+    raw as u32
+}
+
+/// Calls `mmio_write` of the Vesper library `aether` (`vesper_aether_mmio_write`).
+pub fn mmio_write(st: &mut MmioState, offset: u64, len: u64, value: u32, offered: u64, config_len: u64) -> u64 {
+    // SAFETY: `vesper_aether_mmio_write` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_aether_mmio_write(st.words.as_mut_ptr(), offset as i64, len as i64, value as i64, offered as i64, config_len as i64) };
+    raw as u64
+}
+
+/// Calls `net_activate` of the Vesper library `aether` (`vesper_aether_net_activate`).
+pub fn net_activate(st: &mut NetState, features: u64) -> () {
+    // SAFETY: `vesper_aether_net_activate` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_aether_net_activate(st.words.as_mut_ptr(), features as i64) };
+    { let _ = raw; }
+}
+
+/// Calls `net_active_pairs` of the Vesper library `aether` (`vesper_aether_net_active_pairs`).
+pub fn net_active_pairs(st: &NetState) -> u16 {
+    let mut arg_st = st.words;
+    // SAFETY: `vesper_aether_net_active_pairs` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_aether_net_active_pairs(arg_st.as_mut_ptr()) };
+    raw as u16
+}
+
+/// Calls `net_config` of the Vesper library `aether` (`vesper_aether_net_config`).
+pub fn net_config(st: &NetState, out: &mut [u8]) -> u64 {
+    let mut arg_st = st.words;
+    // SAFETY: `vesper_aether_net_config` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice_mut(out, |view_out| unsafe { vesper_aether_net_config(arg_st.as_mut_ptr(), view_out) });
+    raw as u64
 }
 
 /// Calls `net_config_space` of the Vesper library `aether` (`vesper_aether_net_config_space`).
@@ -906,6 +1426,44 @@ pub fn net_config_space(mac: &[u8], link_up: bool, max_pairs: u16, mtu: u16, out
     raw as u64
 }
 
+/// Calls `net_control` of the Vesper library `aether` (`vesper_aether_net_control`).
+pub fn net_control(st: &mut NetState, readable: &[u8]) -> u64 {
+    // SAFETY: `vesper_aether_net_control` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(readable, |view_readable| unsafe { vesper_aether_net_control(st.words.as_mut_ptr(), view_readable) });
+    raw as u64
+}
+
+/// Calls `net_ctrl_queue` of the Vesper library `aether` (`vesper_aether_net_ctrl_queue`).
+pub fn net_ctrl_queue(st: &NetState) -> u64 {
+    let mut arg_st = st.words;
+    // SAFETY: `vesper_aether_net_ctrl_queue` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_aether_net_ctrl_queue(arg_st.as_mut_ptr()) };
+    raw as u64
+}
+
+/// Calls `net_device_features` of the Vesper library `aether` (`vesper_aether_net_device_features`).
+pub fn net_device_features(st: &NetState) -> u64 {
+    let mut arg_st = st.words;
+    // SAFETY: `vesper_aether_net_device_features` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_aether_net_device_features(arg_st.as_mut_ptr()) };
+    raw as u64
+}
+
+/// Calls `net_inject` of the Vesper library `aether` (`vesper_aether_net_inject`).
+pub fn net_inject(st: &mut NetState, pair: u16, len: u64) -> bool {
+    // SAFETY: `vesper_aether_net_inject` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_aether_net_inject(st.words.as_mut_ptr(), pair as i64, len as i64) };
+    raw != 0
+}
+
 /// Calls `net_parse_ctrl` of the Vesper library `aether` (`vesper_aether_net_parse_ctrl`).
 pub fn net_parse_ctrl(readable: &[u8], features: u64, max_pairs: u16) -> Option<u16> {
     let mut result = [0u64; 2];
@@ -914,6 +1472,101 @@ pub fn net_parse_ctrl(readable: &[u8], features: u64, max_pairs: u16) -> Option<
     // every handle passed is owned or borrowed as its mode requires.
     let raw = vesper_port_abi::with_slice(readable, |view_readable| unsafe { vesper_aether_net_parse_ctrl(result.as_mut_ptr(), view_readable, features as i64, max_pairs as i64) });
     <Option<u16> as Abi>::get(&result[0..])
+}
+
+/// Calls `net_queue` of the Vesper library `aether` (`vesper_aether_net_queue`).
+pub fn net_queue(st: &NetState, queue: u16) -> u64 {
+    let mut arg_st = st.words;
+    // SAFETY: `vesper_aether_net_queue` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_aether_net_queue(arg_st.as_mut_ptr(), queue as i64) };
+    raw as u64
+}
+
+/// Calls `net_reset` of the Vesper library `aether` (`vesper_aether_net_reset`).
+pub fn net_reset(st: &mut NetState) -> () {
+    // SAFETY: `vesper_aether_net_reset` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_aether_net_reset(st.words.as_mut_ptr()) };
+    { let _ = raw; }
+}
+
+/// Calls `net_rx_backlog` of the Vesper library `aether` (`vesper_aether_net_rx_backlog`).
+pub fn net_rx_backlog(st: &NetState) -> u64 {
+    let mut arg_st = st.words;
+    // SAFETY: `vesper_aether_net_rx_backlog` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_aether_net_rx_backlog(arg_st.as_mut_ptr()) };
+    raw as u64
+}
+
+/// Calls `net_rx_first` of the Vesper library `aether` (`vesper_aether_net_rx_first`).
+pub fn net_rx_first(st: &mut NetState, pair: u16, frame_len: u64, readable_empty: bool, writable: u64) -> u8 {
+    // SAFETY: `vesper_aether_net_rx_first` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_aether_net_rx_first(st.words.as_mut_ptr(), pair as i64, frame_len as i64, readable_empty as i64, writable as i64) };
+    raw as u8
+}
+
+/// Calls `net_rx_merged` of the Vesper library `aether` (`vesper_aether_net_rx_merged`).
+pub fn net_rx_merged(st: &mut NetState, pair: u16, chains: u64) -> () {
+    // SAFETY: `vesper_aether_net_rx_merged` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_aether_net_rx_merged(st.words.as_mut_ptr(), pair as i64, chains as i64) };
+    { let _ = raw; }
+}
+
+/// Calls `net_set_link` of the Vesper library `aether` (`vesper_aether_net_set_link`).
+pub fn net_set_link(st: &mut NetState, up: bool) -> () {
+    // SAFETY: `vesper_aether_net_set_link` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_aether_net_set_link(st.words.as_mut_ptr(), up as i64) };
+    { let _ = raw; }
+}
+
+/// Calls `net_state_new` of the Vesper library `aether` (`vesper_aether_net_state_new`).
+pub fn net_state_new(mac: &[u8], mtu: u16, pairs: u16) -> NetState {
+    let mut result = [0u64; 18];
+    // SAFETY: `vesper_aether_net_state_new` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(mac, |view_mac| unsafe { vesper_aether_net_state_new(result.as_mut_ptr(), view_mac, mtu as i64, pairs as i64) });
+    unsafe { NetState::from_words(&result[0..]) }
+}
+
+/// Calls `net_stats` of the Vesper library `aether` (`vesper_aether_net_stats`).
+pub fn net_stats(st: &NetState) -> crate::port_types::NetStats {
+    let mut result = [0u64; 10];
+    let mut arg_st = st.words;
+    // SAFETY: `vesper_aether_net_stats` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_aether_net_stats(result.as_mut_ptr(), arg_st.as_mut_ptr()) };
+    <crate::port_types::NetStats as Abi>::get(&result[0..])
+}
+
+/// Calls `net_take_config_change` of the Vesper library `aether` (`vesper_aether_net_take_config_change`).
+pub fn net_take_config_change(st: &mut NetState) -> bool {
+    // SAFETY: `vesper_aether_net_take_config_change` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_aether_net_take_config_change(st.words.as_mut_ptr()) };
+    raw != 0
+}
+
+/// Calls `net_tx` of the Vesper library `aether` (`vesper_aether_net_tx`).
+pub fn net_tx(st: &mut NetState, readable: &[u8], queued: u64) -> u8 {
+    // SAFETY: `vesper_aether_net_tx` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(readable, |view_readable| unsafe { vesper_aether_net_tx(st.words.as_mut_ptr(), view_readable, queued as i64) });
+    raw as u8
 }
 
 /// Calls `net_validate_tx` of the Vesper library `aether` (`vesper_aether_net_validate_tx`).
@@ -1254,6 +1907,27 @@ pub fn vsock_validate_packet(h: crate::port_types::VsockHeader, payload_len: u64
     // every handle passed is owned or borrowed as its mode requires.
     let raw = unsafe { vesper_aether_vsock_validate_packet(arg_h.as_mut_ptr(), payload_len as i64, guest_cid as i64) };
     raw != 0
+}
+
+impl BlkState {
+    /// `blk_state_new` (`vesper_aether_blk_state_new`).
+    pub fn new(read_only: bool, id: &[u8], queues: u16) -> BlkState {
+        blk_state_new(read_only, id, queues)
+    }
+}
+
+impl MmioState {
+    /// `mmio_state_new` (`vesper_aether_mmio_state_new`).
+    pub fn new(device_type: u32, maxes: &[u8]) -> MmioState {
+        mmio_state_new(device_type, maxes)
+    }
+}
+
+impl NetState {
+    /// `net_state_new` (`vesper_aether_net_state_new`).
+    pub fn new(mac: &[u8], mtu: u16, pairs: u16) -> NetState {
+        net_state_new(mac, mtu, pairs)
+    }
 }
 
 impl VsockState {
