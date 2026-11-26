@@ -237,10 +237,7 @@ fn recursive(in adt_graph: Graph, in tarjan: Tarjan, in world: World) -> ChunkSe
 }
 
 fn is_rec(in rec: ChunkSeq[bool], node: u32) -> bool {
-    match rec.try_get(w(node)) {
-        Option::Some(flag) => flag,
-        Option::None => false,
-    }
+    rec.try_get(w(node)).unwrap_or(false)
 }
 
 // The non-row generics of `adt`, as `(name : Type)` binders of `kind`.

@@ -387,10 +387,7 @@ impl G {
     }
 
     fn ix(in self, i: u64) -> u64 {
-        match self.index_pool.try_get(i) {
-            Option::Some(value) => value,
-            Option::None => 0,
-        }
+        self.index_pool.try_get(i).unwrap_or(0)
     }
 
     fn layer(in self, i: u64) -> Layer {
@@ -801,10 +798,7 @@ fn guard_abort(inout builder: B, in gen: G, may_abort: bool) {
 // `sync(out)`: reports each enclosing body layer's frame.
 fn sync(inout builder: B, in gen: G, inout out: ChunkSeq[T]) {
     for k in gen.bl_start..gen.body_layers.len() {
-        let index = match gen.body_layers.try_get(k) {
-            Option::Some(layer_index) => layer_index,
-            Option::None => 0,
-        };
+        let index = gen.body_layers.try_get(k).unwrap_or(0);
         let layer = gen.layer(index);
         if layer.fz == 0 {
             continue;
@@ -1083,10 +1077,7 @@ fn is_tuple(in types: Types, ty: u32) -> bool {
 }
 
 fn rec_struct(in ctx: Y, adt_index: u32) -> bool {
-    match ctx.env.recursive_structs.try_get(w(adt_index)) {
-        Option::Some(x) => x,
-        Option::None => false,
-    }
+    ctx.env.recursive_structs.try_get(w(adt_index)).unwrap_or(false)
 }
 
 // `fip::box_inner`, or NONE32.
@@ -1990,10 +1981,7 @@ fn operands(
     let mut terms = empty();
     let mut lits: ChunkSeq[bool] = ChunkSeq::new[bool]();
     for i in 0..exprs.len() {
-        let expr_id = match exprs.try_get(i) {
-            Option::Some(x) => x,
-            Option::None => 0,
-        };
+        let expr_id = exprs.try_get(i).unwrap_or(0);
         let mut buffer = empty();
         let term = expr(inout builder, inout types, in ctx, inout gen, expr_id, inout buffer);
         buffers.push(buffer);
@@ -2914,10 +2902,7 @@ fn seq_op(
     inout out: ChunkSeq[T]
 ) -> T {
     let terms = operands(inout builder, inout types, in ctx, inout gen, in es, inout out);
-    let recv_id = match es.try_get(0) {
-        Option::Some(x) => x,
-        Option::None => 0,
-    };
+    let recv_id = es.try_get(0).unwrap_or(0);
     let a0 = get(in terms, 0);
     let a1 = get(in terms, 1);
     let a2 = get(in terms, 2);
@@ -3062,10 +3047,7 @@ fn starts_with(in builder: B, sym: u32, in prefix: Str) -> bool {
         return false;
     }
     for i in 0..prefix_bytes.len() {
-        let expected = match prefix_bytes.try_get(i) {
-            Option::Some(x) => x,
-            Option::None => 0,
-        };
+        let expected = prefix_bytes.try_get(i).unwrap_or(0);
         if builder.names.byte(sym, i) != expected {
             return false;
         }
@@ -3242,10 +3224,7 @@ fn call(
             }
             for i in 0..args.len() {
                 if !(skip_first && i == 0) {
-                    exprs.push(match args.try_get(i) {
-                        Option::Some(x) => x,
-                        Option::None => 0,
-                    });
+                    exprs.push(args.try_get(i).unwrap_or(0));
                 }
             }
             let terms = operands(
@@ -3263,10 +3242,7 @@ fn call(
                 if place == 1 {
                     place_id = ctx.ast.x(callee, 0);
                 } else if place == 2 {
-                    place_id = match args.try_get(0) {
-                        Option::Some(x) => x,
-                        Option::None => NONE,
-                    };
+                    place_id = args.try_get(0).unwrap_or(NONE);
                 }
                 let mut path: ChunkSeq[u32] = ChunkSeq::new[u32]();
                 let root = if place_id == NONE {
@@ -3485,10 +3461,7 @@ fn call(
             builder.fail(in "Box::new expects one argument");
             return unit(inout builder);
         }
-        let x = match args.try_get(0) {
-            Option::Some(x) => x,
-            Option::None => 0,
-        };
+        let x = args.try_get(0).unwrap_or(0);
         return expr(inout builder, inout types, in ctx, inout gen, x, inout out);
     }
     if lookup_constructor(inout builder, in ctx.env.world, callee_name) != NONE64 && !local {
@@ -3561,10 +3534,7 @@ fn call(
                 src: 0,
                 proj_start: param.proj_start,
                 proj_count: param.proj_count,
-                arg: match args.try_get(i) {
-                    Option::Some(x) => x,
-                    Option::None => 0,
-                }
+                arg: args.try_get(i).unwrap_or(0)
             });
         }
     }
@@ -3722,10 +3692,7 @@ fn local_call(
                 src: 2,
                 proj_start: 0,
                 proj_count: 0,
-                arg: match args.try_get(i) {
-                    Option::Some(x) => x,
-                    Option::None => 0,
-                }
+                arg: args.try_get(i).unwrap_or(0)
             });
         }
     }
@@ -4015,10 +3982,7 @@ fn callee_sync(
     has = false;
     let mut frames = false;
     for k in gen.bl_start..gen.body_layers.len() {
-        let index = match gen.body_layers.try_get(k) {
-            Option::Some(x) => x,
-            Option::None => 0,
-        };
+        let index = gen.body_layers.try_get(k).unwrap_or(0);
         if gen.layer(index).fz > 0 {
             frames = true;
         }
@@ -4192,10 +4156,7 @@ fn perform_op(
         let mut lenses = empty();
         for k in 0..info.aliased_count {
             let i = gen.ix(add(info.aliased_start, k));
-            let arg = match args.try_get(i) {
-                Option::Some(x) => x,
-                Option::None => 0,
-            };
+            let arg = args.try_get(i).unwrap_or(0);
             let mut path: ChunkSeq[u32] = ChunkSeq::new[u32]();
             let root = place_of(in ctx, arg, inout path);
             let local_index = if root == NONE32 {
@@ -4369,10 +4330,7 @@ fn perform_op(
                 src: 1,
                 proj_start: inout_param.proj_start,
                 proj_count: inout_param.proj_count,
-                arg: match args.try_get(i) {
-                    Option::Some(x) => x,
-                    Option::None => 0,
-                }
+                arg: args.try_get(i).unwrap_or(0)
             });
         }
     }
@@ -5670,13 +5628,7 @@ fn closure(
         let snapshot_ref = lref(inout builder, sym_at(in snapshot, i));
         let none = unit(inout builder);
         let_local(inout builder, inout stmts, lean, snapshot_ref, false, none, true);
-        gen.set_cur(
-            match ids.try_get(i) {
-                Option::Some(x) => x,
-                Option::None => 0,
-            },
-            lean
-        );
+        gen.set_cur(ids.try_get(i).unwrap_or(0), lean);
     }
     for i in 0..pcount {
         let pname = ctx.ast.xs(expr_id, add(2, i));

@@ -152,10 +152,7 @@ fn signature_error(
                 break;
             }
             digit_index = wrapping_sub(digit_index, 1);
-            err.push(match digits.try_get(digit_index) {
-                Option::Some(digit) => digit,
-                Option::None => 48,
-            });
+            err.push(digits.try_get(digit_index).unwrap_or(48));
         }
         put(inout err, in " parameter(s) of the function's types");
         put(inout err, in tail);
@@ -495,10 +492,7 @@ pub fn contracts(
             unsupported_prefix(inout builder, inout err, contract.func);
             put(inout err, in "it has no total form: ");
             for q in u64_at(in reason_starts, func_index)..u64_at(in reason_ends, func_index) {
-                err.push(match reasons.try_get(q) {
-                    Option::Some(ch) => ch,
-                    Option::None => 0,
-                });
+                err.push(reasons.try_get(q).unwrap_or(0));
             }
             return false;
         }

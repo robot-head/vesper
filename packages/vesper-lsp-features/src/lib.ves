@@ -389,7 +389,8 @@ pub fn lsp_workspace_symbols(in input: Str) -> ChunkSeq[u64] {
     out.push(91);
     for doc_index in 0..docs {
         let uri_len = lens.try_get(wrapping_add(doc_index, doc_index)).unwrap_or(0);
-        let src_len = lens.try_get(wrapping_add(wrapping_add(doc_index, doc_index), 1)).unwrap_or(0);
+        let src_len = lens.try_get(wrapping_add(wrapping_add(doc_index, doc_index), 1))
+            .unwrap_or(0);
         let uri = text_at(in bytes, at, uri_len);
         let src = text_at(in bytes, wrapping_add(at, uri_len), src_len);
         at = wrapping_add(wrapping_add(at, uri_len), src_len);

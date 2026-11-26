@@ -631,10 +631,7 @@ fn update(
     }
     let mut is_rec = false;
     if adt_index != NONE32 {
-        is_rec = match env.recursive_structs.try_get(w(adt_index)) {
-            Option::Some(r) => r,
-            Option::None => false,
-        };
+        is_rec = env.recursive_structs.try_get(w(adt_index)).unwrap_or(false);
     }
     if is_rec {
         let adt = env.world.adt(adt_index);
@@ -1084,15 +1081,9 @@ fn spells_after(in builder: B, name: u32, in prefix: Str, in rest: Str) -> bool 
     let rest_bytes = rest.as_bytes();
     for i in 0..len {
         let want = if i < prefix_len {
-            match prefix_bytes.try_get(i) {
-                Option::Some(byte) => byte,
-                Option::None => 0,
-            }
+            prefix_bytes.try_get(i).unwrap_or(0)
         } else {
-            match rest_bytes.try_get(wrapping_sub(i, prefix_len)) {
-                Option::Some(byte) => byte,
-                Option::None => 0,
-            }
+            rest_bytes.try_get(wrapping_sub(i, prefix_len)).unwrap_or(0)
         };
         if builder.names.byte(name, i) != want {
             return false;

@@ -312,7 +312,9 @@ pub fn name_contains(in ast: Ast, sym: u32, in needle: Slice[u8]) -> bool {
     for start in 0..wrapping_add(wrapping_sub(haystack_len, needle_len), 1) {
         let mut hit = true;
         for j in 0..needle_len {
-            let c = ast.names.text_byte(wrapping_add(wrapping_add(name_start, start), j)).unwrap_or(0);
+            let c = ast.names
+                .text_byte(wrapping_add(wrapping_add(name_start, start), j))
+                .unwrap_or(0);
             if c != byte(in needle, j) {
                 hit = false;
                 break;

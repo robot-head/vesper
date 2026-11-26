@@ -525,10 +525,7 @@ impl B {
     // Writes a copy of `term`.
     pub fn put(inout self, term: T) {
         for i in 0..term.n {
-            let word = match self.words.try_get(wrapping_add(term.a, i)) {
-                Option::Some(word) => word,
-                Option::None => 0,
-            };
+            let word = self.words.try_get(wrapping_add(term.a, i)).unwrap_or(0);
             self.words.push(word);
         }
     }

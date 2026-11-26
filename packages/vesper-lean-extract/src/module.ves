@@ -47,10 +47,7 @@ pub fn defs_new() -> Defs {
 }
 
 fn wd_at(in words: Slice[u64], i: u64) -> u64 {
-    match words.try_get(i) {
-        Option::Some(x) => x,
-        Option::None => 0,
-    }
+    words.try_get(i).unwrap_or(0)
 }
 
 fn def_at(in defs: Defs, i: u64) -> Def {
@@ -81,14 +78,8 @@ fn starts_with(in builder: B, off: u64, len: u64, in prefix: Str) -> bool {
         return false;
     }
     for i in 0..prefix_bytes.len() {
-        let byte = match builder.names.text.try_get(add(off, i)) {
-            Option::Some(c) => c,
-            Option::None => 0,
-        };
-        let prefix_byte = match prefix_bytes.try_get(i) {
-            Option::Some(c) => c,
-            Option::None => 0,
-        };
+        let byte = builder.names.text.try_get(add(off, i)).unwrap_or(0);
+        let prefix_byte = prefix_bytes.try_get(i).unwrap_or(0);
         if byte != prefix_byte {
             return false;
         }
@@ -351,10 +342,7 @@ pub fn emit_ordered(
                 continue;
             }
         }
-        let cyclic = match ordered.cyclic.try_get(k) {
-            Option::Some(flag) => flag,
-            Option::None => false,
-        };
+        let cyclic = ordered.cyclic.try_get(k).unwrap_or(false);
         if cyclic {
             builder.w(D_MUTUAL_DEFS);
             builder.w(member_count);
