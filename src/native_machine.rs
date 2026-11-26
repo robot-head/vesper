@@ -41,6 +41,8 @@ enum IntegerOp {
     StoreWord = 25,
     StoreDword = 26,
     StoreQword = 27,
+    BranchZero = 28,
+    EarlyReturn = 29,
 }
 
 type Encoder = fn(&[u64]) -> Option<Vec<u8>>;
@@ -110,17 +112,8 @@ fn integer_bits(bits: i64, ty: Type) -> u64 {
 
 type Values = SecondaryMap<Value, Option<u64>>;
 
-#[derive(Clone, Copy)]
-enum PathKind {
-    Executed,
-    Speculated,
-}
-
-fn supports_memory(path: PathKind, flags: MemFlags) -> bool {
-    matches!(path, PathKind::Executed)
-        && flags.notrap()
-        && !flags.checked()
-        && flags.endianness(Endianness::Little) == Endianness::Little
+fn supports_memory(flags: MemFlags) -> bool {
+    flags.notrap() && !flags.checked() && flags.endianness(Endianness::Little) == Endianness::Little
 }
 
 fn store_op(opcode: Opcode, ty: Type) -> Option<IntegerOp> {
@@ -183,8 +176,7 @@ impl IntegerBlocks<'_> {
     }
 
     // A block's arguments are already mapped by its incoming edge.
-    // Speculated paths admit only pure operations.
-    fn emit_block(&mut self, block: Block, values: &mut Values, path: PathKind) -> Option<Inst> {
+    fn emit_block(&mut self, block: Block, values: &mut Values) -> Option<Inst> {
         let function = self.function;
         let mut instructions = function.layout.block_insts(block);
         let terminator = instructions.next_back()?;
@@ -198,7 +190,7 @@ impl IntegerBlocks<'_> {
                 offset,
             } = function.dfg.insts[inst]
             {
-                if !supports_memory(path, flags) || ty(base) != types::I64 {
+                if !supports_memory(flags) || ty(base) != types::I64 {
                     return None;
                 }
                 let op = store_op(opcode, ty(source))?;
@@ -242,7 +234,7 @@ impl IntegerBlocks<'_> {
                     flags,
                     arg,
                     offset,
-                } if supports_memory(path, flags) && ty(arg) == types::I64 => {
+                } if supports_memory(flags) && ty(arg) == types::I64 => {
                     let (access_width, signed) = match opcode {
                         Opcode::Load => (width, false),
                         Opcode::Uload8 => (u64::from(types::I8.bits()), false),
@@ -340,14 +332,13 @@ impl IntegerBlocks<'_> {
         mut block: Block,
         values: &mut Values,
         visited: &mut SecondaryMap<Block, bool>,
-        path: PathKind,
     ) -> Option<Inst> {
         loop {
             if visited[block] || !self.function.layout.is_block_inserted(block) {
                 return None;
             }
             visited[block] = true;
-            let terminator = self.emit_block(block, values, path)?;
+            let terminator = self.emit_block(block, values)?;
             match self.function.dfg.insts[terminator] {
                 InstructionData::Jump {
                     opcode: Opcode::Jump,
@@ -373,8 +364,8 @@ impl IntegerBlocks<'_> {
         values[value]
     }
 
-    // Both arms must be disjoint pure paths to returns. The caller's
-    // existing CLIF optimizer handles conversion of diamonds with joins.
+    // Both arms must be disjoint paths to returns. The true arm falls through
+    // to its return, and the false arm begins immediately after that return.
     fn returned_from_branch(
         &mut self,
         condition: Value,
@@ -384,19 +375,18 @@ impl IntegerBlocks<'_> {
     ) -> Option<u64> {
         integer_width(self.value_type(condition))?;
         let condition = values[self.function.dfg.resolve_aliases(condition)]?;
+        self.append(IntegerOp::BranchZero, [condition, 0, 0]);
         let [yes_edge, no_edge] = arms;
         let mut yes_values = values.clone();
         let yes_block = self.edge(yes_edge, &mut yes_values)?;
-        let yes_return =
-            self.follow_jumps(yes_block, &mut yes_values, visited, PathKind::Speculated)?;
+        let yes_return = self.follow_jumps(yes_block, &mut yes_values, visited)?;
         let yes = self.returned(yes_return, &yes_values)?;
+        self.append(IntegerOp::EarlyReturn, [yes, 0, 0]);
 
         let mut no_values = values;
         let no_block = self.edge(no_edge, &mut no_values)?;
-        let no_return =
-            self.follow_jumps(no_block, &mut no_values, visited, PathKind::Speculated)?;
-        let no = self.returned(no_return, &no_values)?;
-        Some(self.append(IntegerOp::Select, [condition, yes, no]))
+        let no_return = self.follow_jumps(no_block, &mut no_values, visited)?;
+        self.returned(no_return, &no_values)
     }
 }
 
@@ -409,6 +399,9 @@ impl IntegerBlocks<'_> {
 /// followed by one slot per instruction. A store uses its extra word for
 /// displacement and leaves an unreferenced slot. Operand IDs refer to prior
 /// value-producing instructions or arguments.
+/// A single BranchZero may skip to the instruction after EarlyReturn. These
+/// records also leave unreferenced slots, and the false arm uses the header's
+/// return value. Neither arm may read values defined in the other.
 pub fn integer_block_words(function: &Function) -> Option<Vec<u64>> {
     let signature = &function.signature;
     let arity = signature.params.len();
@@ -446,7 +439,7 @@ pub fn integer_block_words(function: &Function) -> Option<Vec<u64>> {
         words: vec![0; HEADER_WORDS],
     };
     let mut visited = SecondaryMap::new();
-    let terminator = blocks.follow_jumps(block, &mut values, &mut visited, PathKind::Executed)?;
+    let terminator = blocks.follow_jumps(block, &mut values, &mut visited)?;
     let result = match function.dfg.insts[terminator] {
         InstructionData::Brif {
             opcode: Opcode::Brif,

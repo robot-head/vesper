@@ -2,7 +2,7 @@ use self::x86_64::{
     ADD_RM_R64, AND_RM_R64, ARGUMENTS, BYTE_BITS, DWORD_BITS, QWORD_BITS, WORD_BITS, CC_A, CC_AE,
     CC_B, CC_BE, CC_E, CC_G, CC_GE, CC_L, CC_LE, CC_NE, Instruction, NEG_EXTENSION, NOT_EXTENSION,
     OR_RM_R64, RAX, SAR_EXTENSION, SHL_EXTENSION, SHR_EXTENSION, SUB_RM_R64, UNASSIGNED, XOR_RM_R64,
-    arg_register, emit, find_register, register_bit
+    arg_register, emit, find_register, patch_forward_branch, register_bit
 };
 
 // Integer block opcodes shared with src/native_machine.rs.
@@ -34,6 +34,8 @@ const STORE_BYTE: u64 = 24;
 const STORE_WORD: u64 = 25;
 const STORE_DWORD: u64 = 26;
 const STORE_QWORD: u64 = 27;
+const BRANCH_ZERO: u64 = 28;
+const EARLY_RETURN: u64 = 29;
 
 const EQUAL: u64 = 0;
 const NOT_EQUAL: u64 = 1;
@@ -119,6 +121,10 @@ fn is_store(op: u64) -> bool {
     op >= STORE_BYTE && op <= STORE_QWORD
 }
 
+fn has_no_result(op: u64) -> bool {
+    op >= STORE_BYTE && op <= EARLY_RETURN
+}
+
 fn store_width(op: u64) -> u64 {
     match op {
         STORE_BYTE => BYTE_BITS,
@@ -170,11 +176,13 @@ fn find_last_reads(
         reads.push(NEVER_READ);
     }
     let _ = reads.try_set(result, values);
+    let mut early_return_at = NEVER_READ;
+    let mut has_branch = false;
     for reverse_index in 0..count {
         let index = wrapping_sub(wrapping_sub(count, 1), reverse_index);
         let value = wrapping_add(arguments, index);
         let record = read_record(in words, index);
-        if record.op > STORE_QWORD {
+        if record.op > EARLY_RETURN {
             return Option::None;
         }
         if record.op >= ADD && record.op <= SAR && !valid_width(record.extra) {
@@ -199,9 +207,25 @@ fn find_last_reads(
         if record.op == LOAD && (!valid_width(record.extra) || record.right > DISP32_MASK) {
             return Option::None;
         }
-        let stores = is_store(record.op);
-        let result_live = last_read(in reads, value) != NEVER_READ;
-        if stores && (result_live || record.extra > DISP32_MASK) {
+        let last = last_read(in reads, value);
+        let no_result = has_no_result(record.op);
+        if (no_result && last != NEVER_READ)
+            || (is_store(record.op) && record.extra > DISP32_MASK)
+        {
+            return Option::None;
+        }
+        if record.op == EARLY_RETURN {
+            if early_return_at != NEVER_READ {
+                return Option::None;
+            }
+            early_return_at = value;
+        } else if record.op == BRANCH_ZERO {
+            if early_return_at == NEVER_READ || has_branch {
+                return Option::None;
+            }
+            has_branch = true;
+        } else if early_return_at != NEVER_READ && !has_branch && last > early_return_at {
+            // The false arm cannot use a value created in the true arm.
             return Option::None;
         }
         let has_left = record.op != CONSTANT;
@@ -214,7 +238,7 @@ fn find_last_reads(
         {
             return Option::None;
         }
-        if result_live || record.op == LOAD || stores {
+        if last != NEVER_READ || record.op == LOAD || no_result {
             if has_left {
                 first_read_backwards(inout reads, record.left, value);
             }
@@ -225,6 +249,9 @@ fn find_last_reads(
                 first_read_backwards(inout reads, record.extra, value);
             }
         }
+    }
+    if early_return_at != NEVER_READ && !has_branch {
+        return Option::None;
     }
     Option::Some(reads)
 }
@@ -283,6 +310,7 @@ pub fn encode_block(in words: Slice[u64]) -> ChunkSeq[u8] {
     let mut output = ChunkSeq::new[u8]();
     let mut registers = ChunkSeq::with_capacity[u8](wrapping_add(arguments, count));
     let mut used: u32 = 0;
+    let mut branch_end: u64 = 0;
     for argument in 0..arguments {
         let reg = arg_register(argument);
         registers.push(reg);
@@ -295,8 +323,8 @@ pub fn encode_block(in words: Slice[u64]) -> ChunkSeq[u8] {
         let value = wrapping_add(arguments, index);
         let record = read_record(in words, index);
         let result_live = last_read(in reads, value) != NEVER_READ;
-        let stores = is_store(record.op);
-        if !result_live && record.op != LOAD && !stores {
+        let no_result = has_no_result(record.op);
+        if !result_live && record.op != LOAD && !no_result {
             registers.push(UNASSIGNED);
             continue;
         }
@@ -318,7 +346,7 @@ pub fn encode_block(in words: Slice[u64]) -> ChunkSeq[u8] {
 
         // For select, use a dying arm as the default. For comparisons,
         // the operands are read before the result overwrites either one.
-        let destination = if stores {
+        let destination = if no_result {
             UNASSIGNED
         } else if conditional && right_dies {
             right
@@ -331,7 +359,18 @@ pub fn encode_block(in words: Slice[u64]) -> ChunkSeq[u8] {
         } else {
             find_register(used)
         };
-        if stores {
+        if record.op == BRANCH_ZERO {
+            emit(inout output, in Instruction::BranchZero(left));
+            branch_end = output.len();
+        } else if record.op == EARLY_RETURN {
+            // Values live in the false arm kept their registers throughout
+            // the true arm. This return only runs on the true path.
+            emit(inout output, in Instruction::Move(RAX, left));
+            emit(inout output, in Instruction::Return);
+            if !patch_forward_branch(inout output, branch_end) {
+                return ChunkSeq::new[u8]();
+            }
+        } else if is_store(record.op) {
             emit(
                 inout output,
                 in Instruction::Store(

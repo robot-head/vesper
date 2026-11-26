@@ -46,6 +46,7 @@ const CMP_RM_R8: u8 = 0x38;
 const CMP_RM_R64: u8 = 0x39;
 const SETCC: u8 = 0x90;
 const CMOVCC: u8 = 0x40;
+const JCC_NEAR: u8 = 0x80;
 const TEST_RM_R64: u8 = 0x85;
 const MOVZX_R32_RM8: u8 = 0xb6;
 const MOVSX_R64_RM8: u8 = 0xbe;
@@ -57,6 +58,7 @@ const U32_MAX_BITS: u64 = 0xffffffff;
 const I32_MIN_BITS: u64 = 0xffffffff80000000;
 const DISP8_MAX: u32 = 0x7f;
 const DISP8_MIN_AS_DISP32: u32 = 0xffffff80;
+const DISP32_MAX: u64 = 0x7fffffff;
 const IMM32_BYTES: u64 = 4;
 const IMM64_BYTES: u64 = 8;
 
@@ -96,6 +98,7 @@ pub copy enum Instruction {
     Select(u8, u8, u8, u8, u8),
     Truncate(u8, u8, u64),
     SignExtend(u8, u8, u64, u64),
+    BranchZero(u8),
     Return,
 }
 
@@ -160,6 +163,21 @@ fn immediate(inout out: ChunkSeq[u8], bits: u64, size: u64) {
         let shift = wrapping_mul(wrapping_u32(i), wrapping_u32(BYTE_BITS));
         out.push(wrapping_u8(wrapping_shr_u64(bits, shift)));
     }
+}
+
+// The forward target is the next instruction, at the current end of output.
+pub fn patch_forward_branch(inout out: ChunkSeq[u8], branch_end: u64) -> bool {
+    let distance = wrapping_sub(out.len(), branch_end);
+    if distance > DISP32_MAX {
+        return false;
+    }
+    let start = wrapping_sub(branch_end, IMM32_BYTES);
+    for i in 0..IMM32_BYTES {
+        let shift = wrapping_mul(wrapping_u32(i), wrapping_u32(BYTE_BITS));
+        let byte = wrapping_u8(wrapping_shr_u64(distance, shift));
+        let _ = out.try_set(wrapping_add(start, i), byte);
+    }
+    true
 }
 
 fn load_memory(inout out: ChunkSeq[u8], destination: u8, base: u8, displacement: u32, width: u64) {
@@ -410,6 +428,12 @@ pub fn emit(inout out: ChunkSeq[u8], in instruction: Instruction) {
             from,
             width
         ),
+        Instruction::BranchZero(condition) => {
+            binary(inout out, TEST_RM_R64, condition, condition, true);
+            out.push(TWO_BYTE_OPCODE);
+            out.push(JCC_NEAR | CC_E);
+            immediate(inout out, 0, IMM32_BYTES);
+        },
         Instruction::Return => out.push(RET_NEAR),
     };
 }

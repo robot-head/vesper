@@ -33,6 +33,7 @@ enum Case {
     WideningLoads,
     RetainedLoad,
     MemoryStores,
+    GuardedMemory,
     CompareImmediate,
     Select,
     SelectKeepingArms,
@@ -59,6 +60,13 @@ fn integer_backend_matches_cranelift_results() {
     assert!(binding::x86_64_integer_block(&[1, 1, 1, 1, 0, 0]).is_empty());
     // A store's slot cannot be returned as a value.
     assert!(binding::x86_64_integer_block(&[1, 1, 27, 0, 0, 0]).is_empty());
+    // A conditional jump and early return must both be present.
+    assert!(binding::x86_64_integer_block(&[1, 0, 28, 0, 0, 0]).is_empty());
+    assert!(binding::x86_64_integer_block(&[1, 0, 29, 0, 0, 0]).is_empty());
+    // The false arm cannot return a value defined in the true arm.
+    assert!(
+        binding::x86_64_integer_block(&[1, 2, 28, 0, 0, 0, 0, 9, 0, 0, 29, 2, 0, 0]).is_empty()
+    );
 
     let isa = cranelift_native::builder()
         .unwrap()
@@ -109,6 +117,7 @@ fn integer_backend_matches_cranelift_results() {
         Case::WideningLoads,
         Case::RetainedLoad,
         Case::MemoryStores,
+        Case::GuardedMemory,
     ];
     let cases: Vec<_> = cases
         .into_iter()
@@ -331,6 +340,22 @@ fn integer_backend_matches_cranelift_results() {
                 let diff = builder.ins().bxor(new, old);
                 builder.ins().bxor(diff, overlapping)
             }
+            Case::GuardedMemory => {
+                let flags = MemFlags::new().with_notrap();
+                let yes = builder.create_block();
+                let no = builder.create_block();
+                let shared = builder.ins().iadd(d, f);
+                let predicate = builder.ins().ireduce(types::I8, b);
+                builder.ins().brif(predicate, yes, &[], no, &[]);
+                builder.switch_to_block(yes);
+                let old = builder.ins().load(types::I64, flags, a, -13);
+                let updated = builder.ins().bxor(old, shared);
+                builder.ins().store(flags, updated, a, -13);
+                builder.ins().return_(&[updated]);
+                builder.switch_to_block(no);
+                let original = builder.ins().bxor(d, f);
+                builder.ins().isub(shared, original)
+            }
             Case::CompareImmediate => {
                 let byte = builder.ins().ireduce(types::I8, a);
                 let zero = builder.ins().icmp_imm(IntCC::Equal, byte, 0);
@@ -387,6 +412,30 @@ fn integer_backend_matches_cranelift_results() {
         let candidate: Fn6 =
             unsafe { std::mem::transmute(module.get_finalized_function(candidate)) };
         let memory: [u8; 512] = std::array::from_fn(|i| i.wrapping_mul(97) as u8);
+        if matches!(case, Case::GuardedMemory) {
+            for condition in [0, 0x100, 0x101, u64::MAX] {
+                let mut reference_memory = memory;
+                let mut generated_memory = memory;
+                let executes_memory = condition as u8 != 0;
+                let run = |function: Fn6, memory: &mut [u8; 512]| {
+                    let address = if executes_memory {
+                        memory[256..].as_mut_ptr() as u64
+                    } else {
+                        0
+                    };
+                    // The dereference is in the taken arm only. Its offset
+                    // covers bytes within the live buffer on that path.
+                    unsafe { function(address, condition, 3, 5, 7, 11) }
+                };
+                assert_eq!(
+                    run(candidate, &mut generated_memory),
+                    run(baseline, &mut reference_memory),
+                );
+                assert_eq!(generated_memory, reference_memory);
+                assert_eq!(generated_memory != memory, executes_memory);
+            }
+            continue;
+        }
         if matches!(case, Case::MemoryStores) {
             for (first, second) in [(256, 257), (257, 256)] {
                 let mut reference_memory = memory;
@@ -503,7 +552,7 @@ fn integer_backend_declines_register_pressure_and_unsupported_operations() {
 }
 
 #[test]
-fn integer_backend_declines_cycles_and_effectful_branch_arms() {
+fn integer_backend_declines_cycles_and_potential_traps_in_branch_arms() {
     let mut context = cranelift_codegen::Context::new();
     let mut builder_context = FunctionBuilderContext::new();
     for branch_op in [Opcode::Jump, Opcode::Sdiv, Opcode::Load, Opcode::Store] {
@@ -538,15 +587,11 @@ fn integer_backend_declines_cycles_and_effectful_branch_arms() {
                 builder.ins().return_(&[division]);
             }
             Opcode::Load => {
-                let load = builder
-                    .ins()
-                    .load(types::I64, MemFlags::trusted(), argument, 0);
+                let load = builder.ins().load(types::I64, MemFlags::new(), argument, 0);
                 builder.ins().return_(&[load]);
             }
             Opcode::Store => {
-                builder
-                    .ins()
-                    .store(MemFlags::trusted(), argument, argument, 0);
+                builder.ins().store(MemFlags::new(), argument, argument, 0);
                 builder.ins().return_(&[argument]);
             }
             _ => unreachable!(),
