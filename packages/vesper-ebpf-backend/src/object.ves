@@ -284,7 +284,7 @@ fn map_kind(k: u8) -> MapKind {
     if k == 0 {
         MapKind::Hash
     } else if k == 1 {
-        MapKind::Array
+        MapKind::ArrayMap
     } else if k == 2 {
         MapKind::PerCpuHash
     } else if k == 3 {

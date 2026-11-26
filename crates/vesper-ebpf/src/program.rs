@@ -42,15 +42,15 @@ pub enum MapKind {
 
 impl MapKind {
     pub fn kernel_type(self) -> u32 {
-        crate::port::ffi::program_map_kernel_type(self)
+        crate::port::ffi::program_map_kernel_type(self.into())
     }
 
     pub fn from_kernel_type(t: u32) -> Option<MapKind> {
-        crate::port::ffi::program_map_from_kernel_type(t)
+        crate::port::ffi::program_map_from_kernel_type(t).map(MapKind::from)
     }
 
     pub fn is_array(self) -> bool {
-        crate::port::ffi::program_map_is_array(self)
+        crate::port::ffi::program_map_is_array(self.into())
     }
 }
 
