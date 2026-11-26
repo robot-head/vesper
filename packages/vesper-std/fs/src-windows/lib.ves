@@ -102,11 +102,14 @@ pub fn raise_kind[T](kind: u32) -> T eff [Fail[IoError]] {
     )
 }
 
+// `mode` mirrors the Unix permission bits as far as Windows has them:
+// 0o444 for a read-only entry, 0o666 otherwise.
 pub copy struct Metadata {
     pub size: u64,
     pub mtime_s: i64,
     pub mtime_ns: u32,
     pub kind: u32,
+    pub mode: u32,
 }
 
 pub fn kind_file() -> u32 {
@@ -605,6 +608,50 @@ pub fn create_dir(in path: Str) eff [Ffi[StdFs], Fail[IoError]] {
     check_win32(StdFs::CreateDirectoryW(in wp.as_slice(), 0));
 }
 
+// Windows has no directory mode: a plain directory, as `std`'s
+// `DirBuilder` makes one there.
+pub fn create_dir_mode(in path: Str, mode: u32) eff [Ffi[StdFs], Fail[IoError]] {
+    let _ = mode;
+    create_dir(in path);
+}
+
+// The read-only attribute from the owner write bit (0o200), as
+// `std::fs::set_permissions` sets it on Windows; the other bits have no
+// meaning here.
+pub fn set_permissions(in path: Str, mode: u32) eff [Ffi[StdFs], Fail[IoError]] {
+    let wp = utf8_to_utf16(in path.as_bytes());
+    let attrs = match StdFs::GetFileAttributesW(in wp.as_slice()) {
+        Result::Ok((a, err)) => {
+            if a == 4294967295 {
+                return raise_io(widen_u64(err));
+            }
+            a
+        },
+        Result::Err(_) => return raise_kind(invalid_input()),
+    };
+    let ro = StdFs::FILE_ATTRIBUTE_READONLY;
+    let want = if (mode & 128) == 0 {
+        attrs | ro
+    } else {
+        attrs & (4294967295 ^ ro)
+    };
+    check_win32(StdFs::SetFileAttributesW(in wp.as_slice(), want));
+}
+
+// Copy the file `from` to `to` (`CopyFileW`, replacing `to`), as
+// `std::fs::copy`: the number of bytes copied. A source that is not a
+// regular file is an `invalid_input()` error.
+pub fn copy(in from: Str, in to: Str) -> u64 eff [Ffi[StdFs], Fail[IoError]] {
+    let m = metadata(in from);
+    if m.kind != kind_file() {
+        return raise_kind(invalid_input());
+    }
+    let wf = utf8_to_utf16(in from.as_bytes());
+    let wt = utf8_to_utf16(in to.as_bytes());
+    check_win32(StdFs::CopyFileW(in wf.as_slice(), in wt.as_slice(), 0));
+    m.size
+}
+
 pub fn create_dir_all(in path: Str) eff [Ffi[StdFs], Fail[IoError]] {
     create_dir_all_path(in path.as_bytes());
 }
@@ -744,11 +791,17 @@ fn meta_path(in path: Slice[u8], follow: bool) -> Metadata eff [Ffi[StdFs], Fail
             } else {
                 kind_file()
             };
+            let mode: u32 = if (info.dwFileAttributes & StdFs::FILE_ATTRIBUTE_READONLY) != 0 {
+                292
+            } else {
+                438
+            };
             Metadata {
                 size: size,
                 mtime_s: ms,
                 mtime_ns: mns,
                 kind: kind,
+                mode: mode,
             }
         }
         Result::Err(_) => raise_kind(invalid_input()),

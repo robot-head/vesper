@@ -50,6 +50,9 @@ sys library StdFs (
     fn unlink(nocapture in path: CStr) -> ForeignVal[i32] errno;
     fn rmdir(nocapture in path: CStr) -> ForeignVal[i32] errno;
     fn mkdir(nocapture in path: CStr, mode: u32) -> ForeignVal[i32] errno;
+    // `set_permissions` and `copy` (`mode_t` is 16 bits on Apple; the
+    // argument travels in a full register either way).
+    fn chmod(nocapture in path: CStr, mode: u32) -> ForeignVal[i32] errno;
     fn getpid() -> ForeignVal[i32];
     fn opendir(nocapture in path: CStr) -> ForeignVal[Option[Dir]] errno;
     fn readdir(inout d: Dir) -> ForeignVal[u64] errno;

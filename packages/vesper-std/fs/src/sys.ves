@@ -305,6 +305,7 @@ fn metadata_of(in st: Stat) -> Metadata {
         mtime_s: wrapping_i64(stat_word(in st, StdFs::STAT_MTIME_WORD)),
         mtime_ns: wrapping_u32(stat_word(in st, wrapping_add(StdFs::STAT_MTIME_WORD, 1))),
         kind: mode_kind(mode),
+        mode: wrapping_u32(mode & 4095),
     }
 }
 
@@ -314,6 +315,7 @@ fn empty_metadata() -> Metadata {
         mtime_s: 0,
         mtime_ns: 0,
         kind: 0,
+        mode: 0,
     }
 }
 
@@ -384,6 +386,17 @@ fn rmdir(in path: Slice[u8], inout err: u64) -> u32 eff [Ffi[StdFs]] {
 
 fn mkdir(in path: Slice[u8], inout err: u64) -> u32 eff [Ffi[StdFs]] {
     path_status(StdFs::mkdir(in path, 511), inout err)
+}
+
+// Create one directory with permission bits `mode` (less the umask), as
+// `DirBuilder::mode`.
+pub fn os_create_dir_mode(in path: Slice[u8], mode: u32, inout err: u64) -> u32 eff [Ffi[StdFs]] {
+    path_status(StdFs::mkdir(in path, mode & 4095), inout err)
+}
+
+// Set the permission bits of `path` (`chmod`, following a symbolic link).
+pub fn os_set_permissions(in path: Slice[u8], mode: u32, inout err: u64) -> u32 eff [Ffi[StdFs]] {
+    path_status(StdFs::chmod(in path, mode & 4095), inout err)
 }
 
 fn is_separator(b: u8) -> bool {
