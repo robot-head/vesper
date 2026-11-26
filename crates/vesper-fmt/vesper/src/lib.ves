@@ -1603,7 +1603,7 @@ fn short_if_else(in at: Atoms, start: u64, end: u8, in src: Slice[u8]) -> u64 {
 }
 
 // Whether a space separates two tokens on one line, for the width estimates
-// of `short_if_else` and `sole_argument`.
+// of `short_if_else` and `overflow_argument`.
 fn spaced(prev: u8, kind: u8, unary: bool) -> bool {
     if prev == K_L_PAREN
         || prev == K_L_BRACKET
@@ -1626,20 +1626,106 @@ fn sugar_at(in at: Atoms, i: u64) -> bool {
     }
 }
 
-// A call's one argument that, like rustfmt, stays on the call's line and
-// breaks inside instead (`push(Row {`, `wrap(inner(`, `n32(match x {`): a
-// struct literal, a call or a `match`, with nothing after its last delimiter.
-// `open` is the call's `(`. Returns the argument's width up to and including
-// the delimiter that breaks, or NONE.
-fn sole_argument(in at: Atoms, open: u64, in src: Slice[u8]) -> u64 {
+// A call's last argument that is a block or a closure with a block body,
+// after arguments with no braces, comments or other closures in them. Returns
+// the block's `{`, or NONE, and sets `width` to the width of the arguments up
+// to and including it.
+fn block_argument(in at: Atoms, open: u64, in src: Slice[u8], inout width: u64) -> u64 {
+    let n = at.kind.len();
+    let mut i = wrapping_add(open, 1);
+    let mut depth: u64 = 0;
+    let mut has_prev = false;
+    let mut prev: u8 = 0;
+    let mut unary = false;
+    // Outside a closure's parameters, inside them, or after them.
+    let mut params: u8 = 0;
+    loop {
+        if i >= n {
+            return NONE;
+        }
+        let kind = akind(in at, i);
+        if kind == K_COMMENT
+            || kind == K_BLOCK_COMMENT
+            || kind == K_SEMI
+            || kind == K_R_BRACE
+            || sugar_at(in at, i) {
+            return NONE;
+        }
+        // The first token of an argument.
+        let starts = depth == 0 && (!has_prev || prev == K_COMMA);
+        if kind == K_L_BRACE {
+            if depth != 0 || aflags(in at, i) & 8 != 0 || !(params == 2 || starts && params == 0) {
+                return NONE;
+            }
+            width = wrapping_add(width, 1);
+            if has_prev {
+                width = wrapping_add(width, 1);
+            }
+            return i;
+        }
+        if params == 2 && depth == 0 && kind == K_COMMA {
+            return NONE;
+        }
+        // Spaced as `sequence` spaces a closure's parameters: they hug their
+        // pipes.
+        let space = if !has_prev {
+            false
+        } else if params == 1 && prev == K_PIPE {
+            kind == K_PIPE
+        } else if params == 1 && prev == K_COMMA {
+            true
+        } else if params == 1 && kind == K_PIPE {
+            false
+        } else {
+            spaced(prev, kind, unary)
+        };
+        if kind == K_PIPE {
+            if params == 0 && starts {
+                params = 1;
+            } else if params == 1 {
+                params = 2;
+            } else {
+                return NONE;
+            }
+        }
+        if space {
+            width = wrapping_add(width, 1);
+        }
+        width = wrapping_add(width, chars(in src, w32(in at.start, i), w32(in at.end, i)));
+        unary = (kind == K_MINUS || kind == K_BANG || kind == K_TILDE)
+            && !(has_prev && ends_operand(prev));
+        has_prev = true;
+        prev = kind;
+        if kind == K_L_PAREN || kind == K_L_BRACKET {
+            depth = wrapping_add(depth, 1);
+        } else if kind == K_R_PAREN || kind == K_R_BRACKET {
+            if depth == 0 {
+                return NONE;
+            }
+            depth = wrapping_sub(depth, 1);
+        }
+        i = wrapping_add(i, 1);
+    }
+}
+
+// A call's argument that, like rustfmt, stays on the call's line and breaks
+// inside instead, with nothing after its last delimiter: a one argument that
+// is a struct literal, a call or a `match` (`push(Row {`, `wrap(inner(`,
+// `n32(match x {`), or a last argument that is a block or a closure with a
+// block body, after arguments that stay on that line too
+// (`fold(xs, 0, |a, x| {`). `open` is the call's `(`. Returns the width of
+// the arguments up to and including the delimiter that breaks, or NONE.
+fn overflow_argument(in at: Atoms, open: u64, in src: Slice[u8]) -> u64 {
     let n = at.kind.len();
     let mut i = wrapping_add(open, 1);
     if i >= n {
         return NONE;
     }
     let mut width: u64 = 0;
-    let mut delimiter = NONE;
-    if akind(in at, i) == K_MATCH {
+    // The `{` of a block or closure after the arguments before it.
+    let mut delimiter = block_argument(in at, open, in src, inout width);
+    if delimiter == NONE && akind(in at, i) == K_MATCH {
+        width = 0;
         // `match` and its scrutinee, up to the `{` of its arms.
         let mut depth: u64 = 0;
         let mut has_prev = false;
@@ -1685,8 +1771,9 @@ fn sole_argument(in at: Atoms, open: u64, in src: Slice[u8]) -> u64 {
             }
             i = wrapping_add(i, 1);
         }
-    } else {
+    } else if delimiter == NONE {
         // A path: `Row`, `ast::Node`, `wrap`, `Option::Some`.
+        width = 0;
         let mut name = true;
         loop {
             if i >= n {
@@ -1804,6 +1891,9 @@ fn sequence(
     let mut short_breaks: u64 = 0;
     // The column `line` starts at.
     let mut line_start = column;
+    // A call's arguments kept on its line (`fold(xs, 0, |a, x| {`), which
+    // start past `indent`: their commas never break.
+    let inline = list && column != indent;
     loop {
         if pos >= n {
             break;
@@ -1960,7 +2050,7 @@ fn sequence(
                 output.push(wrapping_u32(push_leaf(inout d, D_NEWLINE)));
             }
             output.push(wrapping_u32(push_leaf(inout d, D_HARD)));
-        } else if spacing == G_SOFT && list && after_comma {
+        } else if spacing == G_SOFT && list && after_comma && !inline {
             concat_group(inout line, inout breaks, inout d, inout output);
             line_start = indent;
             separators.push(wrapping_u32(output.len()));
@@ -2023,9 +2113,10 @@ fn sequence(
             let empty = pos < n && akind(in at, pos) == close;
             let start = push_text(inout d, in src, cs, ce, false);
             let fill = c == K_L_BRACE && has_prev && prev == K_COLON_COLON;
-            // A call's one argument stays on the call's line when its first
-            // line fits there, as in rustfmt (`push(Row {`), and breaks
-            // inside instead: the column the argument would start at.
+            // A call's one argument, or a closure after its others, stays on
+            // the call's line when its first line fits there, as in rustfmt
+            // (`push(Row {`, `fold(xs, 0, |a, x| {`), and breaks inside
+            // instead: the column the arguments would start at.
             let mut overflow = NONE;
             if c == K_L_PAREN && in_expr && has_prev && (prev == K_LOWER || prev == K_UPPER) {
                 let mut at_column = line_start;
@@ -2039,7 +2130,7 @@ fn sequence(
                 }
                 if at_column != NONE {
                     at_column = wrapping_add(at_column, 1);
-                    let head = sole_argument(in at, wrapping_sub(pos, 1), in src);
+                    let head = overflow_argument(in at, wrapping_sub(pos, 1), in src);
                     if head != NONE && wrapping_add(at_column, head) <= LINE_WIDTH {
                         overflow = at_column;
                     }
