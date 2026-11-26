@@ -14,6 +14,7 @@ unsafe extern "C" {
     fn vesper_hybrid_driver_live_allocations() -> i64;
     fn vesper_hybrid_driver_delegate() -> i64;
     fn vesper_hybrid_driver_main_code() -> i64;
+    fn vesper_hybrid_driver_proof_audit_run(packed: *mut u64) -> i64;
     fn vesper_hybrid_driver_record_format() -> i64;
 }
 
@@ -43,12 +44,21 @@ pub fn main_code() -> i64 {
     // Keep the crate's `HybridDriver` symbols linked: the Vesper object calls them.
     let _ = core::hint::black_box([crate::driver::host::hd_assembled as *const (), crate::driver::host::hd_commands_answered as *const (), crate::driver::host::hd_free as *const (), crate::driver::host::hd_front_begin as *const (), crate::driver::host::hd_help as *const (), crate::driver::host::hd_parsed as *const (), crate::driver::host::hd_print as *const (), crate::driver::host::hd_session as *const (), crate::driver::host::hd_step as *const (), crate::driver::host::hd_text as *const (), crate::driver::host::hd_write as *const ()]);
     // Keep the crate's `HybridCommands` symbols linked: the Vesper object calls them.
-    let _ = core::hint::black_box([crate::commands::host::hc_doc_err as *const (), crate::commands::host::hc_doc_json_err as *const (), crate::commands::host::hc_doc_run as *const (), crate::commands::host::hc_ebpf_check as *const (), crate::commands::host::hc_ebpf_err as *const (), crate::commands::host::hc_fmt_error as *const (), crate::commands::host::hc_fmt_output as *const (), crate::commands::host::hc_fmt_source as *const (), crate::commands::host::hc_forge_err as *const (), crate::commands::host::hc_forge_run as *const (), crate::commands::host::hc_graph_err as *const (), crate::commands::host::hc_graph_run as *const (), crate::commands::host::hc_lint_err as *const (), crate::commands::host::hc_lint_run as *const (), crate::commands::host::hc_lsp_err as *const (), crate::commands::host::hc_lsp_serve as *const (), crate::commands::host::hc_proof_audit_err as *const (), crate::commands::host::hc_proof_audit_run as *const (), crate::commands::host::hc_test_err as *const (), crate::commands::host::hc_test_json_err as *const (), crate::commands::host::hc_test_run as *const (), crate::commands::host::hc_verify_err as *const (), crate::commands::host::hc_verify_json_err as *const (), crate::commands::host::hc_verify_run as *const ()]);
+    let _ = core::hint::black_box([crate::commands::host::hc_doc_err as *const (), crate::commands::host::hc_doc_json_err as *const (), crate::commands::host::hc_doc_run as *const (), crate::commands::host::hc_ebpf_check as *const (), crate::commands::host::hc_ebpf_err as *const (), crate::commands::host::hc_forge_err as *const (), crate::commands::host::hc_forge_run as *const (), crate::commands::host::hc_graph_err as *const (), crate::commands::host::hc_graph_run as *const (), crate::commands::host::hc_lint_err as *const (), crate::commands::host::hc_lint_run as *const (), crate::commands::host::hc_lsp_err as *const (), crate::commands::host::hc_lsp_serve as *const (), crate::commands::host::hc_proof_audit_err as *const (), crate::commands::host::hc_proof_audit_run as *const (), crate::commands::host::hc_test_err as *const (), crate::commands::host::hc_test_json_err as *const (), crate::commands::host::hc_test_run as *const (), crate::commands::host::hc_verify_err as *const (), crate::commands::host::hc_verify_json_err as *const (), crate::commands::host::hc_verify_run as *const ()]);
     // SAFETY: `vesper_hybrid_driver_main_code` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
     let raw = unsafe { vesper_hybrid_driver_main_code() };
     raw
+}
+
+/// Calls `proof_audit_run` of the Vesper library `hybrid_driver` (`vesper_hybrid_driver_proof_audit_run`).
+pub fn proof_audit_run(packed: &[u8]) -> Vec<u8> {
+    // SAFETY: `vesper_hybrid_driver_proof_audit_run` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(packed, |view_packed| unsafe { vesper_hybrid_driver_proof_audit_run(view_packed) });
+    unsafe { vesper_port_abi::seq_take::<u8>(RUNTIME, raw as u64) }
 }
 
 /// Calls `record_format` of the Vesper library `hybrid_driver` (`vesper_hybrid_driver_record_format`).

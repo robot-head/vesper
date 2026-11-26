@@ -77,24 +77,15 @@ pub fn n32(x: u64) -> u32 {
 }
 
 pub fn u32_at(in s: ChunkSeq[u32], i: u64) -> u32 {
-    match s.try_get(i) {
-        Option::Some(v) => v,
-        Option::None => 0,
-    }
+    s.try_get(i).unwrap_or(0)
 }
 
 pub fn u64_at(in s: ChunkSeq[u64], i: u64) -> u64 {
-    match s.try_get(i) {
-        Option::Some(v) => v,
-        Option::None => 0,
-    }
+    s.try_get(i).unwrap_or(0)
 }
 
 pub fn u8_at(in s: ChunkSeq[u8], i: u64) -> u8 {
-    match s.try_get(i) {
-        Option::Some(v) => v,
-        Option::None => 0,
-    }
+    s.try_get(i).unwrap_or(0)
 }
 
 pub fn set_u32(inout s: ChunkSeq[u32], i: u64, x: u32) {
@@ -486,10 +477,7 @@ impl Fun {
             return false;
         }
         for i in 0..n {
-            let c = match b.try_get(i) {
-                Option::Some(c) => c,
-                Option::None => 0,
-            };
+            let c = b.try_get(i).unwrap_or(0);
             if u8_at(in self.text, add(a, i)) != c {
                 return false;
             }
@@ -655,10 +643,7 @@ pub struct Reader {
 
 impl Reader {
     pub fn word(inout self, in b: Slice[u8]) -> u64 {
-        let x = match b.try_read_u64_le(self.pos) {
-            Option::Some(x) => x,
-            Option::None => 0,
-        };
+        let x = b.try_read_u64_le(self.pos).unwrap_or(0);
         self.pos = wrapping_add(self.pos, 8);
         x
     }
@@ -671,10 +656,7 @@ fn ends_with(in t: ChunkSeq[u8], a: u64, n: u64, in suffix: Str) -> bool {
     }
     let base = wrapping_sub(add(a, n), s.len());
     for i in 0..s.len() {
-        let c = match s.try_get(i) {
-            Option::Some(c) => c,
-            Option::None => 0,
-        };
+        let c = s.try_get(i).unwrap_or(0);
         if u8_at(in t, add(base, i)) != c {
             return false;
         }
@@ -691,10 +673,7 @@ fn name_class(in t: ChunkSeq[u8], a: u64, n: u64) -> u8 {
         return 0;
     }
     for i in 0..pre.len() {
-        let c = match pre.try_get(i) {
-            Option::Some(c) => c,
-            Option::None => 0,
-        };
+        let c = pre.try_get(i).unwrap_or(0);
         if u8_at(in t, add(a, i)) != c {
             return 0;
         }

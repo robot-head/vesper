@@ -22,6 +22,10 @@ use @vesper-std/fs::{
     rename_path, process_id
 };
 use @vesper-std/fs::walk::{Entries, entry_count, entry_start, entry_end, entry_kind, list_dir_path};
+use @vesper/fmt::{
+    FmtFail, format, format_recovery, recovery_ok, recovery_error, recovery_output,
+    recovery_changed, recovery_edits, fail_code, fail_offset
+};
 use self::graph::{run_graph};
 use self::forge::{run_forge};
 use self::ebpf::{run_ebpf};
@@ -921,8 +925,8 @@ fn spawn_failed(in binary: Slice[u8], e: IoError) -> i64 eff [Ffi[StdFs], Fail[P
 // `vesper fmt` (src/fmt_commands.rs, part 2 of #1336, part 3b of #1996):
 // the options, the single-file and workspace runs, the directory walk, one
 // file's bounded no-follow read, the checked atomic replace, the status
-// lines and the JSON reports are here. The formatter itself is still the
-// host's (`hc_fmt_source`: `fmt_commands::format_text`).
+// lines and the JSON reports are here. The formatter is @vesper/fmt
+// (`fmt_commands::format_text` with `Limits::default()`).
 
 const FMT_MAX_WALK_ENTRIES: u64 = 200000;
 const FMT_STATS: u64 = 5;
@@ -1191,20 +1195,6 @@ fn file_report(
     json_key(inout out, in "width", false);
     out.extend(in "100".as_bytes());
     out.push(125);
-}
-
-// The last `hc_fmt_source` error.
-fn fmt_error_text() -> ChunkSeq[u8] eff [Ffi[HybridCommands]] {
-    let mut buf: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    buf.resize(ERROR_TEXT_INITIAL_BYTES, 0);
-    let mut none = false;
-    loop {
-        let host_len = HybridCommands::hc_fmt_error(inout buf.as_slice_mut());
-        if !grown(host_len, inout buf, inout none) {
-            break;
-        }
-    }
-    buf
 }
 
 // `fs::symlink_metadata(path).is_ok_and(|m| m.is_dir())`; `path` is UTF-8.
@@ -1493,6 +1483,11 @@ fn walk_delegate() -> u32 {
 copy struct FmtStop {
     code: u32,
     io_error: IoError,
+    // Code `FMT_FORMATTER`: the formatter's error (`fail_code`), its
+    // syntax offset, and whether it formatted in recovery mode.
+    fmt: u64,
+    offset: u64,
+    recovery: bool,
 }
 
 const FMT_IO: u32 = 0;
@@ -1516,11 +1511,11 @@ copy struct FmtDone {
 }
 
 fn fmt_stop(code: u32) -> FmtStop {
-    FmtStop { code: code, io_error: IoError { kind: 0, os: 0 } }
+    FmtStop { code: code, io_error: IoError { kind: 0, os: 0 }, fmt: 0, offset: 0, recovery: false }
 }
 
 fn fmt_io(e: IoError) -> FmtStop {
-    FmtStop { code: FMT_IO, io_error: e }
+    FmtStop { code: FMT_IO, io_error: e, fmt: 0, offset: 0, recovery: false }
 }
 
 // `fmt_commands::open_input`: the regular UTF-8 file at `path`, read
@@ -1554,18 +1549,128 @@ fn fmt_open(in path: Slice[u8]) -> Opened eff [Ffi[StdFs], Fail[FmtStop]] {
     opened
 }
 
-// The output of the last successful `hc_fmt_source`.
-fn fmt_output() -> ChunkSeq[u8] eff [Ffi[HybridCommands]] {
-    let mut buf: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    buf.resize(ERROR_TEXT_INITIAL_BYTES, 0);
-    let mut none = false;
-    loop {
-        let host_len = HybridCommands::hc_fmt_output(inout buf.as_slice_mut());
-        if !grown(host_len, inout buf, inout none) {
-            break;
+// `Limits::default()` of vesper_fmt.
+const FMT_LIMIT_INPUT: u64 = 1048576;
+const FMT_LIMIT_OUTPUT: u64 = 4194304;
+const FMT_LIMIT_TOKENS: u64 = 131072;
+const FMT_LIMIT_NODES: u64 = 1000000;
+const FMT_LIMIT_DEPTH: u64 = 24;
+const FMT_LIMIT_WORK: u64 = 536870912;
+
+// `recovery_edits`' words per edit: start, end and replacement length.
+const RECOVERY_EDIT_WORDS: u64 = 3;
+
+// One formatter run (`fmt_commands::format_text`): the output, whether it
+// changed and recovery mode's edit count, or the error (`ok` false).
+struct FmtRun {
+    ok: bool,
+    fail: FmtFail,
+    output: ChunkSeq[u8],
+    changed: bool,
+    edits: u64,
+}
+
+fn fmt_run_failed(f: FmtFail) -> FmtRun {
+    FmtRun { ok: false, fail: f, output: ChunkSeq::new[u8](), changed: false, edits: 0 }
+}
+
+fn fmt_run(in text: Str, recovery: bool) -> FmtRun {
+    if recovery {
+        let r = format_recovery(
+            in text,
+            FMT_LIMIT_INPUT,
+            FMT_LIMIT_OUTPUT,
+            FMT_LIMIT_TOKENS,
+            FMT_LIMIT_NODES,
+            FMT_LIMIT_DEPTH,
+            FMT_LIMIT_WORK
+        );
+        if !recovery_ok(in r) {
+            return fmt_run_failed(recovery_error(in r));
         }
+        let edits = recovery_edits(in r);
+        return FmtRun {
+            ok: true,
+            fail: FmtFail { code: 0, offset: 0 },
+            output: recovery_output(in r),
+            changed: recovery_changed(in r),
+            edits: edits.len() / RECOVERY_EDIT_WORDS,
+        };
     }
-    buf
+    handle Fail[FmtFail] in {
+        let output = format(
+            in text,
+            FMT_LIMIT_INPUT,
+            FMT_LIMIT_OUTPUT,
+            FMT_LIMIT_TOKENS,
+            FMT_LIMIT_NODES,
+            FMT_LIMIT_DEPTH,
+            FMT_LIMIT_WORK
+        );
+        let changed = !eq(in output.as_slice(), in text);
+        FmtRun {
+            ok: true,
+            fail: FmtFail { code: 0, offset: 0 },
+            output: output,
+            changed: changed,
+            edits: 0
+        }
+    } with {
+        return v => v,
+        raise(e, _) => fmt_run_failed(e),
+    }
+}
+
+// `FmtFail::code`: the index of the vesper_fmt `Error` variant
+// (crates/vesper-fmt/vesper/src/lib.ves `E_*`).
+const FMT_E_INPUT: u64 = 0;
+const FMT_E_OUTPUT: u64 = 1;
+const FMT_E_TOKEN: u64 = 2;
+const FMT_E_NODE: u64 = 3;
+const FMT_E_DEPTH: u64 = 4;
+const FMT_E_WORK: u64 = 5;
+const FMT_E_OVERFLOW: u64 = 6;
+const FMT_E_ALLOCATION: u64 = 7;
+const FMT_E_INVALID_DOC: u64 = 8;
+const FMT_E_SYNTAX: u64 = 9;
+const FMT_E_MACRO: u64 = 10;
+const FMT_E_CONSERVATION: u64 = 11;
+const FMT_E_IDEMPOTENT: u64 = 12;
+
+// The `Debug` text of a vesper_fmt `Error`.
+fn fmt_error_name(inout out: ChunkSeq[u8], code: u64, offset: u64) {
+    let name = if code == FMT_E_INPUT {
+        "InputLimit"
+    } else if code == FMT_E_OUTPUT {
+        "OutputLimit"
+    } else if code == FMT_E_TOKEN {
+        "TokenLimit"
+    } else if code == FMT_E_NODE {
+        "NodeLimit"
+    } else if code == FMT_E_DEPTH {
+        "DepthLimit"
+    } else if code == FMT_E_WORK {
+        "WorkLimit"
+    } else if code == FMT_E_OVERFLOW {
+        "Overflow"
+    } else if code == FMT_E_ALLOCATION {
+        "Allocation"
+    } else if code == FMT_E_INVALID_DOC {
+        "InvalidDoc"
+    } else if code == FMT_E_SYNTAX {
+        "Syntax { offset: "
+    } else if code == FMT_E_MACRO {
+        "OpaqueMacro"
+    } else if code == FMT_E_CONSERVATION {
+        "Conservation"
+    } else {
+        "NotIdempotent"
+    };
+    out.extend(in name.as_bytes());
+    if code == FMT_E_SYNTAX {
+        push_decimal(inout out, offset);
+        out.extend(in " }".as_bytes());
+    }
 }
 
 // `fmt_commands::replace`'s staging path: `.vesper-fmt-<pid>-<next>` in
@@ -1652,21 +1757,21 @@ fn fmt_steps(
     next: u64
 ) -> FmtDone eff [Ffi[StdFs], Ffi[StdEnv], Ffi[HybridCommands], Fail[FmtStop]] {
     let input = fmt_open(in path);
-    let mut stats: ChunkSeq[u64] = ChunkSeq::new[u64]();
-    stats.resize(4, 0);
-    let mut flags: u32 = 0;
-    if recovery {
-        flags = 2;
+    let text = match String::from_utf8(in input.bytes.as_slice()) {
+        Option::Some(t) => t,
+        Option::None => return Fail::raise(fmt_stop(FMT_NOT_UTF8)),
+    };
+    let run = fmt_run(in text.as_str(), recovery);
+    if !run.ok {
+        return Fail::raise(FmtStop {
+            code: FMT_FORMATTER,
+            io_error: IoError { kind: 0, os: 0 },
+            fmt: fail_code(run.fail),
+            offset: fail_offset(run.fail),
+            recovery: recovery,
+        });
     }
-    let formatted = HybridCommands::hc_fmt_source(
-        in input.bytes.as_slice(),
-        flags,
-        inout stats.as_slice_mut()
-    );
-    if formatted != 0 {
-        return Fail::raise(fmt_stop(FMT_FORMATTER));
-    }
-    let changed = span_at(in stats.as_slice(), 0) != 0;
+    let changed = run.changed;
     let status = if check && changed {
         fmt_needs_format()
     } else if changed {
@@ -1674,8 +1779,8 @@ fn fmt_steps(
     } else {
         fmt_unchanged()
     };
+    let output = run.output;
     if changed && !check {
-        let output = fmt_output();
         fmt_replace(in path, in input, in output.as_slice(), next);
     }
     FmtDone {
@@ -1683,9 +1788,9 @@ fn fmt_steps(
         stop: fmt_stop(FMT_OK),
         changed: changed,
         input_bytes: input.bytes.len(),
-        output_bytes: span_at(in stats.as_slice(), 1),
-        has_edits: span_at(in stats.as_slice(), 2) != 0,
-        edits: span_at(in stats.as_slice(), 3),
+        output_bytes: output.len(),
+        has_edits: recovery,
+        edits: run.edits,
     }
 }
 
@@ -1705,9 +1810,12 @@ fn fmt_message(inout out: ChunkSeq[u8], stop: FmtStop) eff [Ffi[StdFs], Ffi[Hybr
         out.extend(in "fmt input must be UTF-8".as_bytes());
     } else if code == FMT_CHANGED {
         out.extend(in "fmt input changed during formatting; retry".as_bytes());
+    } else if stop.recovery {
+        out.extend(in "cannot format recovery source: ".as_bytes());
+        fmt_error_name(inout out, stop.fmt, stop.offset);
     } else {
-        let detail = fmt_error_text();
-        out.extend(in detail.as_slice());
+        out.extend(in "cannot format source: ".as_bytes());
+        fmt_error_name(inout out, stop.fmt, stop.offset);
     }
 }
 

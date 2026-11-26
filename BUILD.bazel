@@ -39,6 +39,8 @@ vesper_crate(
     compile_data = [
         "assets/fonts/**",
         "examples/*.ves",
+        # The checker's preludes (src/strings.rs and the rest embed them).
+        "packages/vesper-preludes/preludes/*.ves",
         "src/**/*.ves",
         "tests/fixtures/source_macros/keep.ves",
         "lean/StylusAndLintSafety.lean",
@@ -396,6 +398,8 @@ vesper_crate(
             "//packages/vesper-crypto:files",
             "//bootstrap:files",
             "//crates/vesper-ebpf:files",
+            # @vesper/driver-commands formats through @vesper/fmt (#1996).
+            "//crates/vesper-fmt:files",
             "//crates/vesper-lean-syntax:files",
             "//crates/vesper-pact:files",
             "//crates/vesper-resonance:files",
@@ -1505,6 +1509,15 @@ vesper_package(
     visibility = ["//visibility:public"],
 )
 
+# @vesper-std/bytes, for its `ascii` byte names in the test-runner and
+# proof-audit ports.
+vesper_package(
+    name = "std_bytes_package",
+    srcs = glob(["packages/vesper-std/bytes/src/**/*.ves"]),
+    manifest = "packages/vesper-std/bytes/Loom.toml",
+    visibility = ["//visibility:public"],
+)
+
 # @vesper-std/toml, the TOML reader of @vesper/loom-calculus (Rust exit SH6
 # lane 12, #1407; #965).
 vesper_package(
@@ -1542,6 +1555,7 @@ vesper_package(
         ":ast_package",
         ":front_package",
         ":std_arena_package",
+        ":std_bytes_package",
         ":std_hash_package",
         ":std_intern_package",
     ],
@@ -1700,6 +1714,7 @@ vesper_package(
     manifest = "packages/vesper-proof-audit/Loom.toml",
     visibility = ["//visibility:public"],
     deps = [
+        ":std_bytes_package",
         ":std_env_package",
         ":std_fs_package",
         ":std_hash_package",
@@ -2116,6 +2131,7 @@ vesper_package(
         ":std_env_package",
         ":std_fs_package",
         ":std_process_package",
+        "//crates/vesper-fmt:port_package",
     ],
 )
 

@@ -1649,10 +1649,7 @@ fn loop_candidate(
             }
             let mut dup = false;
             for q in 0..gplace.len() {
-                let gb = match gbound.try_get(q) {
-                    Option::Some(x) => x,
-                    Option::None => bound,
-                };
+                let gb = gbound.try_get(q).unwrap_or(bound);
                 if u32_at(in gplace, q) == len
                     && gb.kind == bound.kind
                     && gb.a == bound.a

@@ -50,7 +50,7 @@ use @vesper/wit-component::{wit_component_command};
 use @vesper/ebpf-backend::{ebpf_backend_build};
 // `vesper build --codegen verified` in Vesper (#1886).
 use @vesper/verified-codegen::{compile_bytes};
-use @vesper-std/fmt::{write_u64};
+use @vesper-std/fmt::{fmt, write_bytes, write_str, write_u64};
 // SH5 lane 13 (#1336): the layers of the commands off the compile path.
 use @vesper/driver-commands::{
     run as run_command, io_error_text as commands_io_error_text, join, measure_tee
@@ -59,6 +59,10 @@ use @vesper/driver-commands::{
 use @vesper/driver::triple::{is_windows as triple_is_windows};
 // The package assembly of the package load (#1986).
 use self::assemble::{assembled_words};
+// `vesper proof-audit` (SH5 lane 18, #1341; moved here from its own
+// module by #2091).
+use @vesper/proof-audit::{run as proof_audit_command};
+use @vesper/proof-audit::strs::{byte as audit_byte, push as audit_push, strs_new as audit_strs_new};
 // hd_step group 2 (#1893): the front-end passes in Vesper.
 use self::front::{parse_clean, cst_text};
 use self::interface::{interface_json};
@@ -750,10 +754,12 @@ fn wasm_build(inout s: Session, in o: Options) -> i64 eff [Ffi[StdFs], Ffi[Hybri
         return pass(inout s, step_wasm_build());
     }
     let mut line: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    line.extend(in "built ".as_bytes());
-    line.extend(in path.as_slice());
-    line.extend(in " (wasm32-wasip2 component)".as_bytes());
-    line.push(10);
+    fmt{
+        inout line;
+        write_str(in "built "),
+        write_bytes(in path.as_slice()),
+        write_str(in " (wasm32-wasip2 component)\n")
+    };
     print(stdout_stream(), in line.as_slice());
     0
 }
@@ -855,14 +861,16 @@ fn verified_build(inout s: Session, in o: Options) -> i64 eff [Ffi[StdFs], Ffi[H
         return pass(inout s, step_verified_build());
     }
     let mut line: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    line.extend(in "built ".as_bytes());
-    line.extend(in path.as_slice());
-    line.extend(in " (verified codegen, ".as_bytes());
-    line.extend(in b[8..wrapping_add(8, ll)]);
-    line.extend(in ", ".as_bytes());
-    line.extend(in code.as_slice());
-    line.extend(in " bytes of code)".as_bytes());
-    line.push(10);
+    fmt{
+        inout line;
+        write_str(in "built "),
+        write_bytes(in path.as_slice()),
+        write_str(in " (verified codegen, "),
+        write_bytes(in b[8..wrapping_add(8, ll)]),
+        write_str(in ", "),
+        write_bytes(in code.as_slice()),
+        write_str(in " bytes of code)\n")
+    };
     print(stdout_stream(), in line.as_slice());
     0
 }
@@ -1102,11 +1110,14 @@ fn native_code(
         return count_error(wrapping_i64(findings), in "native verifier finding(s)");
     }
     let mut line: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    line.extend(in "verified ".as_bytes());
-    write_u64(inout line, functions);
-    line.extend(in " emitted function(s): ".as_bytes());
-    line.extend(in b[names_start..names_end]);
-    line.push(10);
+    fmt{
+        inout line;
+        write_str(in "verified "),
+        write_u64(functions),
+        write_str(in " emitted function(s): "),
+        write_bytes(in b[names_start..names_end]),
+        write_str(in "\n")
+    };
     print(stderr_stream(), in line.as_slice());
     out.extend(in b[code_start..b.len()]);
     0
@@ -1230,6 +1241,45 @@ fn windows_link_request(in object: Slice[u8], in path: Slice[u8], in o: Options)
         request.extend(in linker.as_slice());
     }
     request
+}
+
+// The bytes of the stdout length in `proof_audit_run`'s result, and the
+// radix of one byte.
+const AUDIT_LEN_BYTES: u64 = 8;
+const BYTE_RADIX: u64 = 256;
+
+// `proof_commands::run` (the `proof_audit` swap, src/swap/proof_audit.rs).
+// `hc_proof_audit_run` (src/commands.rs) hands over the arguments after
+// the command name, each followed by a NUL byte, and reads back the
+// result: one status byte (0 when the command succeeded, 1 when it
+// failed), the length of what it prints on stdout as 8 little-endian
+// bytes, those bytes, then the error text.
+pub fn proof_audit_run(
+    in packed: Slice[u8]
+) -> ChunkSeq[u8] eff [Ffi[StdFs], Ffi[StdEnv], Ffi[StdProcess], Ffi[Blake3]] {
+    let mut args = audit_strs_new();
+    let mut from: u64 = 0;
+    for i in 0..packed.len() {
+        if audit_byte(in packed, i) == 0 {
+            audit_push(inout args, in packed[from..i]);
+            from = wrapping_add(i, 1);
+        }
+    }
+    let o = proof_audit_command(in args);
+    let mut result: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    if o.failed {
+        result.push(1);
+    } else {
+        result.push(0);
+    }
+    let mut n = o.out.len();
+    for _k in 0..AUDIT_LEN_BYTES {
+        result.push(wrapping_u8(n % BYTE_RADIX));
+        n = n / BYTE_RADIX;
+    }
+    result.extend(in o.out.as_slice());
+    result.extend(in o.err.as_slice());
+    result
 }
 
 // The version of the options record (`record_format` of @vesper/driver);

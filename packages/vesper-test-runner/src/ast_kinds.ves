@@ -1,0 +1,73 @@
+// The node kind numbers of @vesper/ast (packages/vesper-ast/src/lib.ves),
+// which mutants.ves, graph.ves and guard.ves compare.
+
+// `Item` kinds.
+pub const ITEM_ADT: u8 = 1;
+pub const ITEM_FUNCTION: u8 = 2;
+pub const ITEM_EFFECT: u8 = 3;
+pub const ITEM_IMPL: u8 = 4;
+pub const ITEM_TRAIT: u8 = 5;
+pub const ITEM_CONFORMANCE: u8 = 6;
+
+// `ExprKind` numbers.
+pub const EXPR_LITERAL: u8 = 1;
+pub const EXPR_NAME: u8 = 2;
+pub const EXPR_TUPLE: u8 = 3;
+pub const EXPR_STRUCT: u8 = 4;
+pub const EXPR_BLOCK: u8 = 5;
+pub const EXPR_CALL: u8 = 6;
+pub const EXPR_FIELD: u8 = 7;
+pub const EXPR_INDEX: u8 = 8;
+pub const EXPR_TRY: u8 = 9;
+pub const EXPR_UNARY: u8 = 10;
+pub const EXPR_BINARY: u8 = 11;
+pub const EXPR_ASSIGN: u8 = 12;
+pub const EXPR_IF: u8 = 13;
+pub const EXPR_MATCH: u8 = 14;
+pub const EXPR_CLOSURE: u8 = 15;
+pub const EXPR_HANDLE: u8 = 16;
+pub const EXPR_LOOP: u8 = 17;
+pub const EXPR_FOR: u8 = 18;
+pub const EXPR_RANGE: u8 = 19;
+pub const EXPR_BREAK: u8 = 20;
+pub const EXPR_RETURN: u8 = 21;
+pub const EXPR_CONTINUE: u8 = 22;
+
+// `Pattern` kinds.
+pub const PAT_WILD: u8 = 1;
+pub const PAT_BIND: u8 = 2;
+pub const PAT_LITERAL: u8 = 3;
+pub const PAT_TUPLE: u8 = 4;
+pub const PAT_CONSTRUCTOR: u8 = 5;
+
+// `Type` kinds.
+pub const TYPE_NAMED: u8 = 1;
+pub const TYPE_TUPLE: u8 = 2;
+pub const TYPE_FUNCTION: u8 = 3;
+pub const TYPE_ROW: u8 = 4;
+pub const TYPE_INFER: u8 = 5;
+
+// `Statement` kinds.
+pub const STMT_LET: u8 = 1;
+pub const STMT_EXPR: u8 = 2;
+
+// `Literal` kinds.
+pub const LIT_INT: u8 = 1;
+pub const LIT_FLOAT: u8 = 2;
+pub const LIT_BOOL: u8 = 3;
+pub const LIT_STRING: u8 = 4;
+pub const LIT_WIDE_INT: u8 = 5;
+
+// Modes (`MODE_NONE` for an absent `Option[Mode]`) and passes.
+pub const MODE_COPY: u32 = 0;
+pub const MODE_AFFINE: u32 = 1;
+pub const MODE_LINEAR: u32 = 2;
+pub const MODE_NONE: u32 = 3;
+pub const PASS_IN: u32 = 0;
+pub const PASS_INOUT: u32 = 1;
+pub const PASS_SINK: u32 = 2;
+
+// A closure's `b`: its mode in the low byte, plus `infer_effects` at this
+// bit.
+pub const CLOSURE_MODE_MASK: u64 = 255;
+pub const CLOSURE_INFER_SHIFT: u32 = 8;

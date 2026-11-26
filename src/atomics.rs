@@ -353,14 +353,14 @@ pub fn needs_workers(module: &Module) -> bool {
 /// The scoped-worker prelude: the sequential schedule of the fork-join
 /// loop. It takes a function value, so native code specializes it into its
 /// callers, and the JIT intercepts the call before that ([`workers`]).
-pub const WORKERS_PRELUDE: &str = include_str!("preludes/workers.ves");
+pub const WORKERS_PRELUDE: &str = include_str!("../packages/vesper-preludes/preludes/workers.ves");
 
 /// The prelude source: the cell type, the orders and the operations. A
 /// method body only types the call. Every operation that updates the cell
 /// recurses instead, so no inliner copies a body in place of the
 /// intercepted call, and a backend that does not intercept it overflows its
 /// stack rather than silently dropping the update.
-pub const PRELUDE: &str = include_str!("preludes/atomics.ves");
+pub const PRELUDE: &str = include_str!("../packages/vesper-preludes/preludes/atomics.ves");
 
 /// The atomic and worker preludes for `module` (empty unless
 /// [`needs_prelude`] or [`needs_workers`]), with
