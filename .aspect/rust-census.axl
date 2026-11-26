@@ -93,7 +93,7 @@ CRATES = {
     "vesper-nexus": ("c-api", "", "", "wasmtime C API; wit-parser ports (SH5-11 has a WIT reader)", "16"),
     "vesper-forge-runner": ("c-api", "", "", "wasmtime C API", "16"),
     "vesper-loom-tuf": ("rust-lib", "", "", "tough/tokio: TUF metadata on the Vesper JSON port + crypto shim", "16"),
-    "vesper-fusion": ("rust-lib", "", "", "egglog: move rule sets onto @vesper/egraph", "18"),
+    "vesper-fusion": ("partial", "in crate (engine, witness)", "witness_check 0.49x, witness_parse 0.85x (flipped)", "saturation engine and independent witness checker in Vesper (#1413, #2239); tensor/dsp graph builders and evaluators stay Rust", "18"),
     "vesper-beacon-arrow": ("rust-lib", "", "", "arrow-rs, tonic, prost: Arrow IPC and gRPC on Prism", "18"),
     "vesper-migrate": ("rust-lib", "", "", "out of the compiler's closure (#1398); lang-c, syn: C and Rust readers in Vesper", "18"),
     "vesper-loom-trust": ("gone", "in crate (+ seed)", "0.70-1.23x", "NOT deleted: frozen Rust engine (src/reference, 639) stays as the seed vesper-tools links (Bazel run-time data of //:bin/vesper) until the Stage 2 wasm seed (lane 2); API, serde, JSON and conversion 470 and generated binding 1,253 go when callers are Vesper; Ed25519 via the crypto shim", "17"),

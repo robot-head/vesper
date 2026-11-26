@@ -14,14 +14,9 @@
 //! as a rewrite chain (egg-style explanations over a proof forest) instead of
 //! asking egglog for a proof. `tests/egglog_differential.rs` compares its
 //! extractions with egglog's.
+use crate::binding;
 use crate::witness::{self, Direction, RuleSet, Step, Summary, Witness};
 use crate::{Error, MAX_EXTRACTED};
-
-// Generated and committed, outside src/ (see the porting recipe).
-#[rustfmt::skip]
-#[allow(unsafe_code)]
-#[path = "../port/binding.rs"]
-mod binding;
 
 /// Saturation iterations; every shipped rule set reaches a fixpoint sooner on
 /// the graphs the tests use, and this caps work on adversarial graphs.
