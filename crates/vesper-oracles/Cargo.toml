@@ -16,3 +16,6 @@ description = "The diverse `*42` test oracles (arithmetic, resource model, Logos
 blake3 = "1.8"
 serde = { workspace = true }
 serde_json = { workspace = true }
+
+[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
+rustix = { version = "1.1", features = ["fs"] }

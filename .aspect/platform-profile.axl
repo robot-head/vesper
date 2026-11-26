@@ -1,0 +1,602 @@
+"""Build once and run the native test profile with exact policy exclusions."""
+
+load("@std//hash.axl", "sha256")
+load("@std//time.axl", "monotonic_ns", "sleep_iter")
+load("./lib/flip-statistics.axl", "natural")
+load("./lib/process.axl", "command", "exit_code", "root_path")
+load("./platform-plan.axl", "load_policy")
+
+_USAGE = """aspect ci test-platform-profile -- --backend {cargo|bazel} --profile {pr|full} --summary FILE
+    [--groups '[]'] [--jobs 2] [--test-threads 2]"""
+_FIELDS = ["--backend", "--profile", "--summary", "--groups", "--jobs", "--test-threads"]
+_NATIVE_PATH_KINDS = ["native", "dependency", "crate", "all", "framework"]
+
+def _parse(ctx, argv):
+    values = {}
+    pending = None
+    for arg in argv:
+        if pending:
+            if arg.startswith("--"):
+                ctx.std.process.exit(2, "Missing value for " + pending)
+            values[pending] = arg
+            pending = None
+        elif arg in ["--help", "-h"]:
+            ctx.std.io.stdout.write(_USAGE + "\n")
+            return None
+        else:
+            flag, equals, value = arg.partition("=")
+            if flag not in _FIELDS:
+                ctx.std.process.exit(2, "Unknown option: " + arg)
+            if equals:
+                values[flag] = value
+            else:
+                pending = flag
+    jobs = natural(values.get("--jobs", "2").removeprefix("+"))
+    threads = natural(values.get("--test-threads", "2").removeprefix("+"))
+    backend, profile = values.get("--backend"), values.get("--profile")
+    if pending or backend not in ["cargo", "bazel"] or profile not in ["pr", "full"] or not values.get("--summary"):
+        ctx.std.process.exit(2, _USAGE)
+    if not jobs or not threads:
+        ctx.std.process.exit(2, "jobs and test-threads must be positive")
+    return struct(backend = backend, profile = profile, jobs = jobs, threads = threads,
+                  groups = values.get("--groups", "[]"), summary = root_path(ctx.std.env.current_dir(), values["--summary"]))
+
+def _parent(path):
+    return path.rsplit("/", 1)[0] or "/"
+
+def _seconds(start):
+    return float((monotonic_ns() - start + 500000) // 1000000) / 1000.0
+
+def _output(ctx, cwd, argv, env = {}):
+    child = command(ctx, argv[0], argv[1:], cwd, env).stdout("piped").stderr("piped").spawn().wait_with_output()
+    return struct(code = exit_code(child.status), stdout = child.stdout, stderr = child.stderr)
+
+def _print_output(ctx, result):
+    ctx.std.io.stdout.write(result.stdout)
+    ctx.std.io.stderr.write(result.stderr)
+
+def _checked(ctx, result, name, show = False):
+    if show or result.code:
+        _print_output(ctx, result)
+    if result.code:
+        fail("%s exited %d" % (name, result.code))
+
+def _select(profile, groups, policy):
+    if type(groups) != "list" or any([type(group) != "string" for group in groups]):
+        fail("groups must be a JSON array of strings")
+    unknown = sorted({group: True for group in groups if group not in policy["groups"]})
+    if unknown:
+        fail("unknown escalation groups: %r" % unknown)
+    if profile == "full":
+        return []
+    return [item for item in policy["deferred_targets"] if item["group"] not in groups]
+
+def _validate_cases(output, names, label):
+    actual = {line[:-6]: True for line in output.splitlines() if line.endswith(": test")}
+    missing = sorted([name for name in names if name not in actual])
+    if missing:
+        fail("%s: policy names tests absent from executable: %r" % (label, missing))
+    if len(actual) == len(names):
+        fail(label + ": partial policy would execute zero test cases")
+
+def _run_bazel(ctx, root, deferred, options, summary, run = _output):
+    def bazel(argv, capture = False):
+        result = run(ctx, root, ["bazel"] + argv)
+        _checked(ctx, result, "bazel " + " ".join(argv[:2]), show = not capture)
+        return result.stdout
+
+    if not deferred:
+        bazel(["test", "--test_summary=short", "//..."])
+        summary["batches"] = [{"kind": "full", "target": "//..."}]
+        return
+    bazel(["build", "//..."])
+    partial = [item for item in deferred if item["skip_tests"] != None]
+    for record in partial:
+        label = record["bazel"]
+        listing = bazel(["run", label, "--", "--list", "--format", "terse"], capture = True)
+        _validate_cases(listing, record["skip_tests"], label)
+    excluded = [item["bazel"] for item in deferred]
+    bazel(["test", "--test_summary=short", "--", "//..."] + ["-" + label for label in excluded])
+    batches = [{"kind": "ordinary", "excluded": excluded}]
+    if partial:
+        names = sorted({name: True for item in partial for name in item["skip_tests"]})
+        flags = ["--test_arg=--exact", "--test_arg=--test-threads=%d" % options.threads]
+        for name in names:
+            flags.extend(["--test_arg=--skip", "--test_arg=" + name])
+        labels = [item["bazel"] for item in partial]
+        bazel(["test", "--test_summary=short"] + flags + labels)
+        batches.append({"kind": "partial-libtest", "targets": labels, "skipped_tests": names})
+    summary["batches"] = batches
+
+def _cargo_target_tables(text):
+    # Cargo metadata identifies targets but omits the libtest harness flag.
+    # Read that boolean and the name from Cargo's explicit target tables.
+    tables = []
+    row = None
+    for raw in text.splitlines():
+        line = raw.strip()
+        if line.startswith("["):
+            title = line.split("#", 1)[0].strip()
+            kind = title.strip("[]").strip()
+            row = None
+            if title == "[lib]" or (title.startswith("[[") and kind in ["test", "bin", "example", "bench"]):
+                row = {"kind": kind, "harness": True}
+                tables.append(row)
+        elif row != None:
+            key, equals, value = line.partition("=")
+            key = key.strip().strip("\"'")
+            if equals and key == "harness":
+                row["harness"] = value.split("#", 1)[0].strip() != "false"
+            elif equals and key == "name":
+                value = value.strip()
+                if value.startswith("'"):
+                    row["name"] = value[1:].split("'", 1)[0]
+                else:
+                    row["name"] = json.try_decode(value.split("#", 1)[0].strip())
+    return tables
+
+def _harness(tables, target):
+    kind = "lib"
+    for candidate in ["test", "bin", "example", "bench"]:
+        if candidate in target["kind"]:
+            kind = candidate
+            break
+    for row in tables:
+        if row["kind"] == kind and (kind == "lib" or row.get("name") == target["name"]):
+            return row["harness"]
+    return True
+
+def _discover(ctx, root, run = _output, env = {}):
+    metadata = run(ctx, root, ["cargo", "metadata", "--locked", "--no-deps", "--format-version", "1"], env)
+    _checked(ctx, metadata, "cargo metadata")
+    info = json.decode(metadata.stdout)
+    members = {id: True for id in info["workspace_members"]}
+    by_id = {item["id"]: item for item in info["packages"] if item["id"] in members}
+    packages = {pkg["name"]: pkg for pkg in by_id.values()}
+    if len(packages) != len(by_id):
+        fail("workspace package names must be unique")
+    built = run(ctx, root, ["cargo", "test", "--workspace", "--locked", "--no-run", "--message-format=json"], env)
+    ctx.std.io.stderr.write(built.stderr)
+    binaries, manifests = {}, {}
+    paths = [info["target_directory"] + "/debug/deps", info["target_directory"] + "/debug"]
+    finished = False
+    for line in built.stdout.splitlines():
+        record = json.try_decode(line)
+        if type(record) != "dict":
+            ctx.std.io.stdout.write(line + "\n")
+            continue
+        reason = record.get("reason")
+        if reason == "compiler-message":
+            ctx.std.io.stderr.write(record.get("message", {}).get("rendered") or "")
+        elif reason == "build-finished":
+            finished = record.get("success", False)
+        elif reason == "build-script-executed":
+            for path in record.get("linked_paths", []):
+                kind, separator, directory = path.partition("=")
+                paths.append(directory if separator and kind in _NATIVE_PATH_KINDS else path)
+        elif reason == "compiler-artifact":
+            for path in record.get("filenames", []):
+                if any([path.lower().endswith(suffix) for suffix in [".dll", ".so", ".dylib"]]):
+                    paths.append(_parent(path))
+            target = record["target"]
+            integration = "test" in target["kind"] and target.get("test", True)
+            if not record.get("executable") or (not record.get("profile", {}).get("test") and not integration):
+                continue
+            pkg = by_id.get(record["package_id"])
+            if pkg == None:
+                fail("test artifact is not a workspace member: " + record["package_id"])
+            manifest = pkg["manifest_path"]
+            if manifest not in manifests:
+                manifests[manifest] = _cargo_target_tables(ctx.std.fs.read_to_string(manifest))
+            kind = target["kind"]
+            identity = "%s:%s:%s" % (pkg["name"], ",".join(kind), target["name"])
+            binary = struct(identity = identity, package = pkg["name"], target = target["name"], kind = kind,
+                            executable = record["executable"], cwd = _parent(manifest), manifest = manifest,
+                            harness = _harness(manifests[manifest], target))
+            if identity in binaries and binaries[identity] != binary:
+                fail("ambiguous Cargo artifact: " + identity)
+            binaries[identity] = binary
+    if built.code or not finished:
+        fail("cargo test --no-run failed (%d)" % built.code)
+    if not binaries:
+        fail("Cargo produced zero workspace test executables")
+    argv = [ctx.std.env.var("RUSTC") or "rustc", "--print", "target-libdir"]
+    target = ctx.std.env.var("CARGO_BUILD_TARGET")
+    if target:
+        argv.extend(["--target", target])
+    rustc = run(ctx, root, argv, env)
+    _checked(ctx, rustc, "rustc target library directory")
+    paths.append(rustc.stdout.strip())
+    return binaries.values(), packages, paths
+
+def _plan(binaries, deferred):
+    records = {(item["package"], item["target"]): item for item in deferred}
+    actual = {(binary.package, binary.target): True for binary in binaries if "test" in binary.kind}
+    missing = sorted([item for item in records if item not in actual])
+    if missing:
+        fail("policy targets absent from Cargo test artifacts: %r" % missing)
+    plan = []
+    for binary in binaries:
+        record = records.get((binary.package, binary.target)) if "test" in binary.kind else None
+        if record != None and record["skip_tests"] == None:
+            continue
+        skips = record["skip_tests"] if record else []
+        if skips and not binary.harness:
+            fail("cannot filter custom test harness " + binary.identity)
+        plan.append((binary, skips))
+    if not plan:
+        fail("profile selected zero executable test targets")
+    return plan
+
+def _cargo_env(ctx, binary, pkg, paths):
+    version = pkg["version"]
+    numeric, _, pre = version.partition("-")
+    major, minor, patch = numeric.split(".")
+    env = {
+        "CARGO_MANIFEST_DIR": binary.cwd,
+        "CARGO_MANIFEST_PATH": binary.manifest,
+        "CARGO_PKG_NAME": binary.package,
+        "CARGO_PKG_VERSION": version,
+        "CARGO_PKG_VERSION_MAJOR": major,
+        "CARGO_PKG_VERSION_MINOR": minor,
+        "CARGO_PKG_VERSION_PATCH": patch,
+        "CARGO_PKG_VERSION_PRE": pre,
+        "CARGO_PKG_AUTHORS": ":".join(pkg.get("authors", [])),
+        "CARGO_CRATE_NAME": binary.target.replace("-", "_"),
+        "CARGO_BIN_NAME": binary.target if "bin" in binary.kind else None,
+    }
+    for key in ["description", "homepage", "repository", "license", "license_file", "rust_version", "readme"]:
+        env["CARGO_PKG_" + key.upper()] = pkg.get(key) or ""
+    directories = list({path: True for path in [_parent(binary.executable)] + paths})
+    loader = "DYLD_FALLBACK_LIBRARY_PATH" if ctx.std.env.os() in ["macos", "darwin"] else "LD_LIBRARY_PATH"
+    for key in ["PATH", loader]:
+        prior = ctx.std.env.var(key)
+        env[key] = ":".join(directories + ([prior] if prior else []))
+    return env
+
+def _log_name(binary):
+    id = binary.identity
+    readable = "".join([char if char in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-" else "_" for char in id.elems()])
+    hash = sha256()
+    hash.update(bytes(id))
+    return readable + "-" + hash.hexdigest()[:10] + ".log"
+
+def _spawn(ctx, binary, argv, env, stdout, stderr):
+    child = ctx.std.process.command(binary.executable).args(argv).current_dir(binary.cwd).process_group(0)
+    for name, value in env.items():
+        child.env(name, value)
+    return child.stdout(ctx.std.fs.create(stdout)).stderr(ctx.std.fs.create(stderr)).spawn()
+
+def _start(ctx, binary, skips, threads, paths, pkg, logs, scratch):
+    name = _log_name(binary)
+    env = _cargo_env(ctx, binary, pkg, paths)
+    argv = []
+    if binary.harness:
+        argv.extend(["--test-threads", str(threads), "--exact"])
+        for entry in skips:
+            argv.extend(["--skip", entry])
+    stdout, stderr = scratch + "/" + name + ".out", scratch + "/" + name + ".err"
+    child = _spawn(ctx, binary, ["--list", "--format", "terse"] if skips else argv, env, stdout, stderr)
+    return struct(binary = binary, skips = skips, argv = argv, env = env, stdout = stdout, stderr = stderr,
+                  log = logs + "/" + name, child = child, listing = bool(skips), started = monotonic_ns())
+
+def _finish(ctx, run, status, cancelled = False):
+    stdout = str(ctx.std.fs.open(run.stdout).read())
+    stderr = str(ctx.std.fs.open(run.stderr).read())
+    code = exit_code(status)
+    if run.listing and not cancelled:
+        _checked(ctx, struct(code = code, stdout = stdout, stderr = stderr), "list " + run.binary.identity)
+        _validate_cases(stdout, run.skips, run.binary.identity)
+        child = _spawn(ctx, run.binary, run.argv, run.env, run.stdout, run.stderr)
+        return None, struct(binary = run.binary, skips = run.skips, argv = run.argv, env = run.env,
+                            stdout = run.stdout, stderr = run.stderr, log = run.log, child = child,
+                            listing = False, started = run.started)
+    if cancelled:
+        stderr += "\ncancelled after another test binary failed\n"
+    ctx.std.fs.write(run.log, stdout + stderr)
+    status = "cancelled" if cancelled else ("failed" if code else "passed")
+    seconds = _seconds(run.started)
+    ctx.std.io.stdout.write("%s: %s (%ss), log=%s\n" % (status, run.binary.identity, seconds, run.log))
+    if status == "failed":
+        ctx.std.io.stdout.write(stdout)
+        ctx.std.io.stderr.write(stderr)
+    return {"target": run.binary.identity, "status": status, "exit_code": code, "seconds": seconds,
+            "skipped_tests": run.skips, "cwd": run.binary.cwd, "log": run.log}, None
+
+def _weight(binary, jobs):
+    return jobs if binary.package == "vesper" or "lean" in binary.target else 1
+
+def _schedule(ctx, plan, jobs, start):
+    pending = list(plan)
+    running, results = {}, []
+    failed = False
+    for _ in sleep_iter(20):
+        pending_next = []
+        packages = {state.binary.package: True for state in running.values()}
+        used = 0
+        for state in running.values():
+            used += _weight(state.binary, jobs)
+        for binary, skips in pending:
+            weight = _weight(binary, jobs)
+            if failed or binary.package in packages or used + weight > jobs:
+                pending_next.append((binary, skips))
+                continue
+            error, state = catch(start, binary, skips)
+            if error != None:
+                failed = True
+                results.append({"target": binary.identity, "status": "failed", "error": str(error)})
+                continue
+            running[binary.identity] = state
+            packages[binary.package] = True
+            used += weight
+        pending = pending_next
+        for identity, state in list(running.items()):
+            if failed:
+                break
+            status = state.child.try_wait()
+            if status == None:
+                continue
+            running.pop(identity)
+            error, completed = catch(_finish, ctx, state, status)
+            if error:
+                results.append({"target": identity, "status": "failed", "error": str(error)})
+                failed = True
+                break
+            result, next_state = completed
+            if next_state != None:
+                running[identity] = next_state
+            else:
+                results.append(result)
+                failed = result["status"] != "passed"
+        if failed:
+            for state in running.values():
+                state.child.cancellation.cancel()
+            for identity, state in running.items():
+                status = state.child.wait()
+                result, _ = _finish(ctx, state, status, cancelled = True)
+                results.append(result)
+            break
+        if not pending and not running:
+            break
+    return results, [binary.identity for binary, _ in pending]
+
+def _run_cargo(ctx, root, deferred, options, summary, env = {}):
+    binaries, packages, paths = _discover(ctx, root, env = env)
+    plan = _plan(binaries, deferred)
+    summary["built_test_binaries"] = len(binaries)
+    stem = options.summary.rsplit("/", 1)[-1].rsplit(".", 1)[0]
+    logs = _parent(options.summary) + "/" + stem + "-logs"
+    ctx.std.fs.create_dir_all(logs)
+    scratch = ctx.std.fs.mkdtemp(prefix = "vesper-profile-")
+    ctx.defer(lambda: ctx.std.fs.remove_dir_all(scratch))
+
+    def start(binary, skips):
+        return _start(ctx, binary, skips, options.threads, paths, packages[binary.package], logs, scratch)
+
+    results, queued = _schedule(ctx, plan, options.jobs, start)
+    summary["results"] = results
+    summary["unexecuted_after_failure"] = queued
+    if queued or any([record["status"] != "passed" for record in results]):
+        fail("one or more Cargo test binaries failed; queued binaries were not started")
+    docs = _output(ctx, root, ["cargo", "test", "--workspace", "--locked", "--doc"], env)
+    summary["doctests_exit_code"] = docs.code
+    _checked(ctx, docs, "workspace doctests", show = True)
+
+def _write_job_summary(ctx, destination, summary):
+    lines = [
+        "### Native tests: %s / %s" % (summary["backend"], summary["profile"]), "",
+        "Status: **%s**; commit: `%s`." % (summary["status"], summary.get("sha", "unavailable")), "",
+        "Full groups: %s." % (", ".join(summary.get("full_groups", [])) or "none"), "",
+        "Deferred coverage:", "",
+    ]
+    for record in summary.get("deferred", []):
+        cases = record["skip_tests"]
+        scope = "whole test target" if cases == None else ", ".join(cases)
+        lines.append("- `%s:%s`: %s" % (record["package"], record["target"], scope))
+    if not summary.get("deferred"):
+        lines.append("None selected for deferral; see status above for completion.")
+    lines.extend(["", "Execution details and errors are in the uploaded JSON summary.", ""])
+    prior = ctx.std.fs.read_to_string(destination) if ctx.std.fs.exists(destination) else ""
+    ctx.std.fs.write(destination, prior + "\n".join(lines))
+
+def _execute(ctx, root, options, summary):
+    revision = _output(ctx, root, ["git", "rev-parse", "HEAD"])
+    _checked(ctx, revision, "resolve checked-out commit")
+    sha = revision.stdout.strip()
+    if len(sha) != 40 or any([char not in "0123456789abcdef" for char in sha.elems()]):
+        fail("checked-out commit must be a full SHA")
+    summary["sha"] = sha
+    expected = ctx.std.env.var("EXPECTED_SHA")
+    if expected and sha != expected:
+        fail("checked-out commit does not match EXPECTED_SHA")
+    groups = json.try_decode(options.groups)
+    policies = load_policy(ctx, root, on_error = lambda _, message: fail(message))
+    deferred = _select(options.profile, groups, policies)
+    summary.update(full_groups = groups, deferred = deferred)
+    if options.backend == "cargo":
+        _run_cargo(ctx, root, deferred, options, summary)
+    else:
+        _run_bazel(ctx, root, deferred, options, summary)
+    summary["status"] = "passed"
+
+def _run(ctx):
+    options = _parse(ctx, ctx.args.tool_args)
+    if options == None:
+        return 0
+    root = ctx.std.env.aspect_root_dir()
+    summary = {"schema_version": 1, "backend": options.backend, "profile": options.profile, "status": "failed"}
+    ctx.std.fs.create_dir_all(_parent(options.summary))
+    started = monotonic_ns()
+
+    def publish():
+        summary["seconds"] = _seconds(started)
+        ctx.std.fs.write(options.summary, json.encode(summary) + "\n")
+        destination = ctx.std.env.var("GITHUB_STEP_SUMMARY")
+        if destination:
+            _write_job_summary(ctx, destination, summary)
+
+    ctx.defer(publish)
+    error, _ = catch(_execute, ctx, root, options, summary)
+    if error != None:
+        summary["error"] = str(error)
+        ctx.std.io.stderr.write("platform profile failed: %s\n" % str(error))
+    return 0 if summary["status"] == "passed" else 1
+
+test_platform_profile = task(
+    kind = "test-platform-profile",
+    group = ["ci"],
+    summary = "Build and execute declared Cargo or Bazel platform coverage",
+    implementation = _run,
+    args = {"tool_args": args.trailing_var_args(description = _USAGE)},
+)
+
+def _equal(actual, expected, label):
+    if actual != expected:
+        fail("%s: expected %r, got %r" % (label, expected, actual))
+
+def _fails(call, fragment, *argv):
+    error, _ = catch(call, *argv)
+    if error == None or fragment not in str(error):
+        fail("Expected error containing %r, got %r" % (fragment, error))
+
+def _test_bazel(ctx, root, options):
+    deferred = [
+        {"bazel": "//:test/full", "skip_tests": None},
+        {"bazel": "//crates/fixture:test/partial", "skip_tests": ["sweep"]},
+    ]
+    calls = []
+
+    def run(_ctx, cwd, argv):
+        _equal(cwd, root, "Bazel runs from the repository root")
+        calls.append(argv)
+        output = "sweep: test\nsweep_extra: test\n" if argv[1] == "run" else ""
+        return struct(code = 0, stdout = output, stderr = "")
+
+    summary = {}
+    _run_bazel(ctx, root, deferred, options, summary, run = run)
+    _equal(calls, [
+        ["bazel", "build", "//..."],
+        ["bazel", "run", deferred[1]["bazel"], "--", "--list", "--format", "terse"],
+        ["bazel", "test", "--test_summary=short", "--", "//...", "-" + deferred[0]["bazel"], "-" + deferred[1]["bazel"]],
+        ["bazel", "test", "--test_summary=short", "--test_arg=--exact", "--test_arg=--test-threads=2",
+         "--test_arg=--skip", "--test_arg=sweep", deferred[1]["bazel"]],
+    ], "Bazel build, listing, ordinary and exact partial coverage")
+    _equal([batch["kind"] for batch in summary["batches"]], ["ordinary", "partial-libtest"], "Coverage receipt")
+    calls.clear()
+    _run_bazel(ctx, root, [], options, summary, run = run)
+    _equal(calls, [["bazel", "test", "--test_summary=short", "//..."]], "Full profile remains unfiltered")
+    _fails(_validate_cases, "absent from executable", "sweep_extra: test\n", ["sweep"], "fixture")
+    _fails(_validate_cases, "zero test cases", "sweep: test\n", ["sweep"], "fixture")
+
+def _test_binary(executable, root, package, target):
+    return struct(package = package, target = target, kind = ["test"], identity = package + ":test:" + target,
+                  cwd = root, executable = executable, manifest = root + "/Cargo.toml", harness = False)
+
+def _test_cancellation(ctx, root, work):
+    bad = _test_binary(ctx.std.process.which("false"), root, "failure", "suite")
+    pending = _test_binary(ctx.std.process.which("true"), root, "pending", "suite")
+    blocked = _test_binary(ctx.std.process.which("sleep"), root, "running", "suite")
+    started = []
+    pkg = {"version": "1.0.0"}
+
+    def start(binary, skips):
+        started.append(binary.package)
+        if binary != blocked:
+            return _start(ctx, binary, skips, 2, [], pkg, work, work)
+        log = work + "/" + _log_name(binary)
+        stdout, stderr = log + ".out", log + ".err"
+        child = _spawn(ctx, binary, ["90"], {}, stdout, stderr)
+        return struct(binary = binary, skips = skips, stdout = stdout, stderr = stderr,
+                      log = log, child = child, listing = False, started = monotonic_ns())
+
+    # Use real processes and the scheduler's own group-cancellation path.
+    results, queued = _schedule(ctx, [(bad, []), (blocked, []), (pending, [])], 2, start)
+    _equal(started, ["failure", "running"], "Failure stops queued launches")
+    _equal([item["status"] for item in results], ["failed", "cancelled"], "Owned running process is cancelled")
+    _equal(queued, [pending.identity], "Unexecuted targets are reported")
+
+def _test_cargo(ctx, work):
+    root = work + "/cargo-fixture"
+    ctx.std.fs.create_dir_all(root + "/src")
+    ctx.std.fs.create_dir_all(root + "/tests")
+    ctx.std.fs.write(root + "/Cargo.toml", """[package]
+name = "ci-profile-fixture"
+version = "1.2.3-rc.1"
+edition = "2024"
+authors = ["One", "Two"]
+
+[[test]]
+name = 'custom'
+harness = false # this test does not accept libtest arguments
+""")
+    ctx.std.fs.write(root + "/src/lib.rs", """/// ```
+/// assert_eq!(2+2, 4);
+/// ```
+pub fn value() {}
+#[test]
+fn unit() {}
+""")
+    ctx.std.fs.write(root + "/tests/ordinary.rs", """#[test] fn sweep() {}
+#[test] fn sweep_extra() {}
+#[test] fn ordinary() {}
+""")
+    ctx.std.fs.write(root + "/tests/custom.rs", """fn main() {
+    assert_eq!(std::env::args().count(), 1);
+    assert_eq!(std::env::var("CARGO_MANIFEST_DIR").unwrap(), env!("CARGO_MANIFEST_DIR"));
+    assert_eq!(std::env::var("CARGO_PKG_VERSION_PRE").unwrap(), "rc.1");
+    assert_eq!(std::env::var("CARGO_PKG_AUTHORS").unwrap(), "One:Two");
+}
+""")
+    env = {"CARGO_TARGET_DIR": root + "/target", "CARGO_NET_OFFLINE": "true"}
+    _checked(ctx, _output(ctx, root, ["cargo", "generate-lockfile", "--offline"], env), "fixture lock")
+    record = {"package": "ci-profile-fixture", "target": "ordinary", "skip_tests": ["sweep"]}
+    for profile, exclusions, expected in [("pr", [record], 2), ("full", [], 3)]:
+        options = struct(summary = work + "/" + profile + ".json", threads = 2, jobs = 2)
+        summary = {}
+        _run_cargo(ctx, root, exclusions, options, summary, env = env)
+        _equal(summary["doctests_exit_code"], 0, "Doctests run separately")
+        _equal(len(summary["results"]), 3, "Custom, unit and integration binaries")
+        _equal([item["status"] for item in summary["results"]], ["passed"] * 3, "Real Cargo test results")
+        ordinary = [item for item in summary["results"] if item["target"].endswith(":ordinary")][0]
+        log = ctx.std.fs.read_to_string(ordinary["log"])
+        if ("%d passed; 0 failed; 0 ignored" % expected) not in log:
+            fail("Exact test filter produced unexpected output: " + log)
+
+def _test(ctx):
+    root = ctx.std.env.aspect_root_dir()
+    policy = load_policy(ctx, root)
+    _equal(_select("full", [], policy), [], "Full profile has no exclusions")
+    _equal(_select("pr", list(policy["groups"]), policy), [], "All groups restored")
+    selected = _select("pr", ["flux_faults"], policy)
+    if any([item["group"] == "flux_faults" for item in selected]) or not any([item["group"] == "proof" for item in selected]):
+        fail("Changing one escalation group changed unrelated coverage")
+    _fails(_select, "unknown escalation groups", "full", ["no_group"], policy)
+    _fails(_select, "JSON array of strings", "pr", "proof", policy)
+    tables = _cargo_target_tables("[lib]\nharness=false\n[[test]]\nname=\"other\"\nharness=false\n")
+    for kind in ["lib", "rlib", "proc-macro", "cdylib", "staticlib", "dylib"]:
+        _equal(_harness(tables, {"kind": [kind], "name": "fixture"}), False, "Library harness " + kind)
+    _equal(_harness(tables, {"kind": ["test"], "name": "fixture"}), True, "Ordinary libtest")
+    _test_bazel(ctx, root, struct(threads = 2))
+
+    work = ctx.std.fs.mkdtemp(prefix = "vesper-profile-tests-")
+    ctx.defer(lambda: ctx.std.fs.remove_dir_all(work))
+    _test_cargo(ctx, work)
+    _test_cancellation(ctx, root, work)
+    summary, job = work + "/wrong.json", work + "/job.md"
+    argv = ["ci", "test-platform-profile", "--", "--backend", "cargo", "--profile", "full", "--summary", summary]
+    env = {"CI": "false", "EXPECTED_SHA": "wrong", "GITHUB_STEP_SUMMARY": job}
+    result = _output(ctx, root, [ctx.std.env.current_exe()] + argv, env)
+    _equal(result.code, 1, "Wrong checkout fails")
+    receipt = json.decode(ctx.std.fs.read_to_string(summary))
+    _equal(receipt["status"], "failed", "Failed checkout receipt")
+    if "EXPECTED_SHA" not in receipt["error"] or len(receipt["sha"]) != 40 or "Status: **failed**" not in ctx.std.fs.read_to_string(job):
+        fail("Wrong checkout report missing measured SHA or failure")
+    ctx.std.io.stdout.write("Passed platform policy, Bazel batches, real Cargo, cancellation and receipt tests\n")
+    return 0
+
+tests_profile_runner = task(
+    kind = "profile-runner",
+    group = ["ci", "tests"],
+    summary = "Test platform profile selection, command handling and failure receipts",
+    implementation = _test,
+)

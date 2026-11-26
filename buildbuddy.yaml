@@ -39,8 +39,11 @@ actions:
       - &build_tools
         run: sudo apt-get install -y build-essential
       # Core builds, tests, Clippy and rustfmt. The explicit build filter
-      # keeps replay test binaries and their runfiles off this runner.
-      - run: ./.git/vesper-aspect/aspect ci bazel-tests -- --config=ci --config=rbe_build --config=ci_tests --remote_download_outputs=minimal --build_tag_filters=-lean_replay,-self_host --test_tag_filters=-lean_replay,-self_host //...
+      # keeps replay test binaries and their runfiles off this runner. Test
+      # binaries are optimized, with debug assertions and overflow checks on
+      # (`--config=ci_opt`), as in the self-host checks below, which then share
+      # its compiler builds in the remote cache.
+      - run: ./.git/vesper-aspect/aspect ci bazel-tests -- --config=ci --config=rbe_build --config=ci_tests --config=ci_opt --remote_download_outputs=minimal --build_tag_filters=-lean_replay,-self_host --test_tag_filters=-lean_replay,-self_host //...
 
   # The corpus differentials (test/self_host_*, tagged `self_host` by
   # tools/bazel/defs.bzl) on their own runners: on one runner with the rest of
@@ -50,9 +53,9 @@ actions:
   # The rest neared the hour on one runner too (#1882), so the ones tagged
   # `self_host_part2` (_SELF_HOST_PART2 in tools/bazel/defs.bzl) run in
   # "Self-host differentials 2". `--test_summary=short` prints each target's
-  # time, which is what the split is balanced on. All three build optimized
-  # test binaries (`--config=ci_opt` in .bazelrc), with debug assertions and
-  # overflow checks still on.
+  # time, which is what the split is balanced on. All three, like "Test all
+  # targets", build optimized test binaries (`--config=ci_opt` in .bazelrc),
+  # with debug assertions and overflow checks still on.
   - name: "Self-host differentials"
     container_image: "ubuntu-24.04"
     resource_requests:
@@ -158,9 +161,9 @@ actions:
       - *aspect_executable
       - run: ./.git/vesper-aspect/aspect ci reclaim-disk
       - *apt_update
-      - run: sudo apt-get install -y build-essential python-is-python3 qemu-user binutils-aarch64-linux-gnu
+      - run: sudo apt-get install -y build-essential qemu-user binutils-aarch64-linux-gnu
       - run: ./.git/vesper-aspect/aspect ci install-lean
-      # One Bazel build for every executable the scripts run, instead of a
+      # One Bazel build for every executable the tasks run, instead of a
       # build and a cquery per executable.
       - run: ./.git/vesper-aspect/aspect ci prebuild-acceptance -- .ci-bazel-executables
       - run: ./.git/vesper-aspect/aspect acceptance test-aarch64

@@ -1,0 +1,240 @@
+"""Check actual checked-source intra-doc links and offline HTML fragments."""
+
+load("./bounded-stdio.axl", "bounded_run", "utf8")
+load("./lib/bazel_exec.axl", "executable")
+load("./lib/html-fixture.axl", "fragment_attribute", "tags")
+load("./lib/process.axl", "root_path", "scratch_dir")
+load("./lib/strict-json.axl", "decode_object")
+
+_LIMIT = 2 * 1024 * 1024
+_HEX = "0123456789abcdef"
+_ANCHOR = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"
+
+def _require(condition, message):
+    if not condition:
+        fail(message)
+
+def _equal(actual, expected, message):
+    if actual != expected:
+        fail("%s: expected %r, got %r" % (message, expected, actual))
+
+def _fixture(ctx, root, name):
+    return ctx.std.fs.read_to_string(root + "/tests/fixtures/doc_links/" + name + ".ves")
+
+def _span(source, span):
+    data = bytes(source)
+    start, end = span["start"], span["end"]
+    _require(type(start) == "int" and type(end) == "int" and 0 <= start and start < end and end <= len(data), "Invalid documentation byte span")
+    utf8(data[:start])
+    utf8(data[:end])
+    return utf8(data[start:end])
+
+def _hex(text):
+    data = bytes(text)
+    return "".join([_HEX[data[index] >> 4] + _HEX[data[index] & 15] for index in range(len(data))])
+
+def _validate_links(report, source, expected):
+    _equal(report["status"], "valid", "Documentation status")
+    document = report["document"]
+    size = len(bytes(source))
+    _equal(document["source_bytes"], size, "Document source byte count")
+    links = document["intra_doc_links"]
+    _require(links["status"] == "resolved" and links["diagnostics"] == [], "Intra-doc links are unresolved")
+    _equal(links["source_bytes"], size, "Link source byte count")
+    targets = [(value["path"], value["kind"]) for value in links["targets"]]
+    _equal(targets, sorted({key: True for key in targets}), "Sorted unique link targets")
+    _require(not any([name in ["Option", "Result", "Fail", "RuntimeError"] for name, _ in targets]), "Unexpected built-in target")
+    refs = links["references"]
+    _equal([value["target"]["path"] for value in refs], expected, "Reference order")
+    previous = -1
+    anchors = {}
+    for ref in refs:
+        _require(ref["span"]["start"] > previous, "Reference spans are out of order")
+        previous = ref["span"]["start"]
+        _equal(_span(source, ref["span"]), "[" + ref["display"] + "]", "Reference source spelling")
+        key = (ref["target"]["path"], ref["target"]["kind"])
+        _require(key in targets, "Reference has no matching target")
+        _equal(ref["display"].strip("`"), key[0], "Displayed reference")
+        anchor = ref["anchor"]
+        _require(bool(anchor) and all([char in _ANCHOR for char in anchor.elems()]) and anchor.endswith(_hex(key[0])), "Invalid target anchor")
+        _equal(anchors.get(key, anchor), anchor, "Stable anchor for repeated references")
+        anchors[key] = anchor
+    _require(any(["unverified" in value.lower() for value in document["limitations"]]), "Missing documentation verification limitation")
+    return links
+
+def _increment(counts, item):
+    counts[item] = counts.get(item, 0) + 1
+
+def _validate_html(text, links):
+    ids = {}
+    hrefs = {}
+    for tag, attrs in tags(text):
+        _require(tag not in ["script", "iframe"], "Unexpected active HTML tag: " + tag)
+        for key, value in attrs:
+            if key == "id":
+                _increment(ids, fragment_attribute(value))
+            elif key == "href":
+                _increment(hrefs, fragment_attribute(value))
+    _require("unverified" in text.lower(), "HTML omitted the verification limitation")
+    expected = {}
+    for ref in links["references"]:
+        _increment(expected, "#" + ref["anchor"])
+    _equal(hrefs, expected, "HTML fragment links")
+    for href in hrefs:
+        _require(href.startswith("#") and ids.get(href[1:]) == 1, "Missing or ambiguous HTML fragment target: " + href)
+    _require(all([count == 1 for count in ids.values()]), "Duplicate HTML ID")
+
+def _execute(ctx, h, argv, expected = 0):
+    output = bounded_run(
+        ctx, h.root, h.work, h.binary, argv, timeout = 45,
+        stdout_limit = _LIMIT, stderr_limit = _LIMIT, label = "Documentation check",
+    )
+    if output.code != expected:
+        ctx.std.io.stderr.write(output.stdout)
+        ctx.std.io.stderr.write(output.stderr)
+        fail("Expected exit %d, got %d: %r" % (expected, output.code, argv))
+    h.counts["commands"] += 1
+    return output
+
+def _source(ctx, h, name, text):
+    path = h.work + "/" + name + ".ves"
+    ctx.std.fs.write(path, text)
+    return path
+
+def _accepted(ctx, h, name, source, expected):
+    path = _source(ctx, h, name, source)
+    first = _execute(ctx, h, ["doc", path, "--json"]).stdout
+    _equal(_execute(ctx, h, ["doc", path, "--json"]).stdout, first, "Deterministic documentation JSON")
+    links = _validate_links(decode_object(utf8(first)), source, expected)
+    html = _execute(ctx, h, ["doc", path]).stdout
+    _equal(_execute(ctx, h, ["doc", path]).stdout, html, "Deterministic HTML")
+    _validate_html(utf8(html), links)
+    _equal(ctx.std.fs.open(path).read(), bytes(source), "Documentation must preserve source")
+    return path, links, html
+
+def _rejected(ctx, h, name, source, code, raw = ""):
+    path = _source(ctx, h, name, source)
+    report = decode_object(utf8(_execute(ctx, h, ["doc", path, "--json"], expected = 1).stdout))
+    _require(report["status"] == "invalid" and "document" not in report and code in report["error"], "Expected documentation refusal: " + name)
+    if raw:
+        start = len(bytes(source[:source.index(raw)]))
+        _require("%d..%d" % (start, start + len(bytes(raw))) in report["error"], "Refusal omitted the original byte span")
+    output = h.work + "/" + name + ".html"
+    failed = _execute(ctx, h, ["doc", path, "-o", output], expected = 1)
+    _require(not len(failed.stdout) and not ctx.std.fs.exists(output), "Refusal published a partial document")
+    _equal(ctx.std.fs.open(path).read(), bytes(source), "Refusal must preserve source")
+
+def _file(ctx, path):
+    return ctx.std.fs.exists(path) and ctx.std.fs.metadata(path).is_file
+
+def _run(ctx, root, binary):
+    binary = root_path(root, binary)
+    if not _file(ctx, binary):
+        binary += ".exe"
+    _require(_file(ctx, binary), "Compiler not found: " + binary)
+    h = struct(root = root, binary = binary, work = scratch_dir(ctx, "vesper-doc-links-"), counts = {"commands": 0})
+    expected = ["Tx", "close", "Tx::commit", "Ask", "Ask::ask", "Score", "Tx", "Tx::commit", "Tx"]
+    local = _fixture(ctx, root, "local")
+    path, links, html = _accepted(ctx, h, "local", local, expected)
+    targets = sorted([(value["path"], value["kind"]) for value in links["targets"]])
+    _equal(targets, [
+        ("Ask", "effect"), ("Ask::ask", "effect_operation"), ("Score", "trait"),
+        ("Tx", "type"), ("Tx::commit", "inherent_method"), ("close", "function"), ("main", "function"),
+    ], "Local link targets")
+    _equal(links["references"][0]["span"]["start"], len(bytes(local[:local.index("[Tx]")])), "First reference byte offset")
+    _accepted(ctx, h, "crlf", local.replace("\n", "\r\n"), expected)
+    _, _, escaped = _accepted(ctx, h, "exclusions", _fixture(ctx, root, "exclusions"), ["present"])
+    text = utf8(escaped)
+    _require("<script>" not in text and "&lt;script&gt;" in text and "example.invalid" in text, "Unsafe or missing escaped source")
+
+    for name, code, raw in [
+        ("unknown", "unknown", "[missing]"),
+        ("ambiguous", "ambiguous", "[Channel]"),
+        ("unsupported_self", "unsupported", "[Self::commit]"),
+        ("unsupported_package", "unsupported", "[@local/tx::commit]"),
+        ("unsupported_generic", "unsupported", "[Box[u64]]"),
+    ]:
+        _rejected(ctx, h, name, _fixture(ctx, root, name), code, raw)
+    for prefix in ["//! ```\n//! [Hidden]\n\n", "//! ` [present]\n// ordinary boundary\n", "//! ~~~\n//! [Hidden]\nfn boundary() {}\n"]:
+        _rejected(ctx, h, "group-reset-%d" % h.counts["commands"], prefix + "/// [missing]\n/// `\nfn main() {} fn present() {}\n", "unknown", "[missing]")
+    edited = local.replace("fn close(sink", "fn finish(sink")
+    _rejected(ctx, h, "changed-declaration", edited, "unknown", "[close]")
+    _accepted(ctx, h, "repaired", edited.replace("[close]", "[finish]"), ["finish" if name == "close" else name for name in expected])
+    for name, source, code in [
+        ("invalid-syntax", "/// [missing]\nfn {\n", "source parse failed"),
+        ("invalid-type", "/// [missing]\nfn main() -> bool { 42 }\n", "source check failed"),
+        ("linear-leak", "/// [missing]\nlinear struct Ticket {} fn main() { let ticket = Ticket {}; }\n", "source check failed"),
+        ("reference-limit", "//! " + "[present]; " * 1025 + "\nfn present() {}\n", "resource"),
+        ("path-limit", "//! [" + "a" * 1025 + "]\nfn main() {}\n", "resource"),
+        ("source-limit", "//" + "x" * (128 * 1024) + "\nfn main() {}\n", "limit"),
+    ]:
+        _rejected(ctx, h, name, source, code)
+    output = h.work + "/existing.html"
+    saved = _execute(ctx, h, ["doc", path, "-o", output])
+    _require(not len(saved.stdout), "Saving HTML unexpectedly printed output")
+    _equal(ctx.std.fs.open(output).read(), html, "Saved documentation")
+    _execute(ctx, h, ["doc", path, "-o", output, "--json"], expected = 1)
+    _equal(ctx.std.fs.open(output).read(), html, "Rejected output flags must preserve existing documentation")
+    _execute(ctx, h, ["doc", path, "--approved"], expected = 1)
+    _equal(ctx.std.fs.open(path).read(), bytes(local), "Final source snapshot")
+    ctx.std.io.stdout.write(json.encode({
+        "status": "passed",
+        "commands": h.counts["commands"],
+        "scope": "actual checked local intra-doc references and escaped offline HTML; no proof certificate",
+    }) + "\n")
+    return 0
+
+def _check(ctx: TaskContext) -> int:
+    values = ctx.args.tool_args
+    if len(values) == 2 and values[0] == "--binary":
+        binary = values[1]
+    elif len(values) == 1 and values[0].startswith("--binary="):
+        binary = values[0].removeprefix("--binary=")
+    elif values == ["--help"] or values == ["-h"]:
+        ctx.std.io.stdout.write("Pass -- --binary <vesper>.\n")
+        return 0
+    else:
+        ctx.std.process.exit(2, "Expected --binary <vesper>")
+    return _run(ctx, ctx.std.env.aspect_root_dir(), binary)
+
+check_doc_links = task(
+    kind = "check-doc-links",
+    group = ["acceptance"],
+    summary = "Check real checked-source doc links and generated HTML fragments",
+    implementation = _check,
+    args = {"tool_args": args.trailing_var_args(description = "Pass -- --binary <vesper>.")},
+)
+
+def _suite(ctx: TaskContext) -> int:
+    root = ctx.std.env.aspect_root_dir()
+    binary = ctx.std.env.var("VESPER_DOC_LINKS_BINARY") or executable(ctx, root, "//:bin/vesper")
+    candidate = root_path(root, binary + ".exe")
+    return _run(ctx, root, candidate if _file(ctx, candidate) else binary)
+
+test_doc_links = task(
+    kind = "test-doc-links",
+    group = ["acceptance"],
+    summary = "Check checked-source documentation links with the workspace compiler",
+    implementation = _suite,
+)
+
+def _test(ctx: TaskContext) -> int:
+    _equal(_span("🦀[Tx]", {"start": 4, "end": 8}), "[Tx]", "UTF-8 reference span")
+    _equal(_hex("é🦀"), "c3a9f09fa680", "UTF-8 anchor suffix")
+    text = """&lt;script&gt;<!-- <iframe> --><style> a > b { content: '<img>'; } </style><A HREF='&#x23;target' data-text="a>b">Unverified</A><DIV ID=target>"""
+    _equal(tags(text), [
+        ("style", []),
+        ("a", [("href", "&#x23;target"), ("data-text", "a>b")]),
+        ("div", [("id", "target")]),
+    ], "Generated HTML start tags")
+    _equal(fragment_attribute("a&amp;b&#35;c&quot;"), "a&b#c\"", "Fragment entity decoding")
+    _validate_html(text, {"references": [{"anchor": "target"}]})
+    ctx.std.io.stdout.write("Passed doc link spans, HTML tags and fragment cases\n")
+    return 0
+
+test_doc_link_helpers = task(
+    kind = "doc-links",
+    group = ["ci", "tests"],
+    summary = "Test source byte spans, escaped tags and fragment resolution",
+    implementation = _test,
+)

@@ -1,8 +1,11 @@
 """Prepare the sealed Logos checker and independently replay Lean modules."""
 
 load("./lib/bazel_exec.axl", "executable")
-load("./lib/process.axl", "capture", "check", "command", "exit_code", "root_path")
+load("./lib/flip-statistics.axl", "natural")
+load("./lib/process.axl", "capture", "check", "command", "root_path")
 load("./disk-ci.axl", "start_disk_watcher")
+load("./logos-setup.axl", "setup")
+load("./logos-sweep.axl", "sweep")
 
 _LOGOS_DRIVER = "//crates/vesper-oracles:bin/logos42"
 
@@ -25,15 +28,7 @@ def _setup(ctx: TaskContext, root: str, directory: str, driver: str, lean: str, 
     if not cargo or not git:
         ctx.std.process.exit(1, "The Logos checker setup requires Cargo and Git")
     lake = (lean.rpartition("/")[0] or ("/" if lean.startswith("/") else ".")) + "/lake"
-    check(ctx, "python3", [
-        "tools/logos42/setup.py",
-        "--directory", directory,
-        "--driver", driver,
-        "--lean", lean,
-        "--lake", lake,
-        "--git", git,
-        "--cargo", cargo,
-    ], root)
+    setup(ctx, root, root, directory, driver, lean, lake, git, cargo)
 
 prepare_logos42 = task(
     kind = "prepare-logos42",
@@ -49,18 +44,18 @@ prepare_lean4lean42 = prepare_logos42.alias(
     summary = "Prepare the Logos checker under the former Lean4Lean task name",
 )
 
-def _summarize(ctx: TaskContext, report: dict):
+def _summary(report: dict) -> str:
     batches = report["batches"]
     checked = 0
     for batch in batches:
         checked += batch["logos_checked"]
-    ctx.std.io.stdout.write("logos-sweep: %s: %d modules, %d declarations checked by Logos in %d batches, %s s\n" %
-                            (report["status"], report["modules"], checked, len(batches), report["total_seconds"]))
+    lines = ["logos-sweep: %s: %d modules, %d declarations checked by Logos in %d batches, %s s" %
+             (report["status"], report["modules"], checked, len(batches), report["total_seconds"])]
     for item in report["declined"]:
-        ctx.std.io.stdout.write("  declined (Lean kernel only): %s: %s\n" %
-                                (item["declaration"], item["reason"] or item["detail"]))
+        lines.append("  declined (Lean kernel only): %s: %s" % (item["declaration"], item["reason"] or item["detail"]))
     for problem in report["problems"]:
-        ctx.std.io.stdout.write("  PROBLEM: %s\n" % problem)
+        lines.append("  PROBLEM: %s" % problem)
+    return "\n".join(lines) + "\n"
 
 def _sweep(ctx: TaskContext) -> int:
     root = ctx.std.env.aspect_root_dir()
@@ -74,19 +69,15 @@ def _sweep(ctx: TaskContext) -> int:
     return _run_sweep(ctx, root, args[0], args[1], driver, vesper, lean, batch_jobs)
 
 def _run_sweep(ctx: TaskContext, root: str, checker: str, report_path: str, driver: str, vesper: str, lean: str, batch_jobs: str) -> int:
-    result = command(ctx, "python3", [
-        "tools/logos-sweep/sweep.py",
-        "--root", checker,
-        "--driver", driver,
-        "--vesper", vesper,
-        "--lean", lean,
-        "--batch-jobs", batch_jobs,
-        "--report", report_path,
-    ], root).status()
-    report = root_path(root, report_path)
-    if ctx.std.fs.exists(report) and ctx.std.fs.metadata(report).is_file:
-        _summarize(ctx, json.decode(ctx.std.fs.read_to_string(report)))
-    return exit_code(result)
+    jobs = natural(batch_jobs)
+    if not jobs:
+        ctx.std.process.exit(2, "LOGOS_SWEEP_BATCH_JOBS must be positive")
+    report = sweep(
+        ctx, root, root_path(root, checker), root_path(root, driver), root_path(root, lean),
+        root_path(root, report_path), vesper = root_path(root, vesper), batch_jobs = jobs,
+    )
+    ctx.std.io.stdout.write(_summary(report))
+    return 0 if report["status"] == "complete" else 1
 
 logos_sweep = task(
     kind = "logos-sweep",
@@ -94,6 +85,26 @@ logos_sweep = task(
     summary = "Replay the Lean modules with the Logos checker and summarize the report",
     implementation = _sweep,
     args = {"tool_args": args.trailing_var_args(description = "Provide the sealed checker directory and report path.")},
+)
+
+def _test_sweep_summary(ctx):
+    summary = _summary({
+        "status": "failed", "modules": 3, "batches": [{"logos_checked": 2}, {"logos_checked": 5}],
+        "total_seconds": 1.25, "declined": [
+            {"declaration": "A", "reason": "unsupported", "detail": "ignored"},
+            {"declaration": "B", "reason": None, "detail": "detail fallback"},
+        ],
+        "problems": ["fixture problem"],
+    })
+    for fragment in ["3 modules, 7 declarations checked by Logos in 2 batches, 1.25 s", "A: unsupported", "B: detail fallback", "PROBLEM: fixture problem"]:
+        if fragment not in summary:
+            fail("Logos workflow summary is missing " + fragment)
+    ctx.std.io.stdout.write("Passed Logos workflow receipt summary cases\n")
+    return 0
+
+test_logos_sweep_summary = task(
+    kind = "logos-sweep-summary", group = ["ci", "tests"], summary = "Test the Logos workflow receipt summary",
+    implementation = _test_sweep_summary,
 )
 
 def _replay_models(ctx: TaskContext) -> int:

@@ -38,7 +38,7 @@
 //! reports the median regression of B over A with
 //! `vesper_bench::analyze_pairs`. `flip-gate <workload> <rust-abba>` runs
 //! 30 such epochs and prints them in the flip gate's pairs protocol
-//! (scripts/ci/flip_gate.py, crates/vesper-aegis/flip-gate.toml).
+//! (aspect ci flip-gate --, crates/vesper-aegis/flip-gate.json).
 use std::hint::black_box;
 use std::path::PathBuf;
 use std::process::Command;

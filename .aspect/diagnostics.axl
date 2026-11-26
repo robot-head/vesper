@@ -1,0 +1,336 @@
+"""Check real compiler and LSP causal diagnostics without applying edits."""
+
+load("./bounded-stdio.axl", "bounded_run", "utf8")
+load("./lib/bazel_exec.axl", "executable", "run_target")
+load("./lib/lsp-fixture.axl", "changed", "file_uri", "notice", "opened", "request", "result", "session")
+load("./lib/process.axl", "root_path", "scratch_dir")
+load("./lib/strict-json.axl", "decode_list")
+
+_MAX_FRAME = 2 * 1024 * 1024
+_MOVE = "// 🦀\r\nlinear struct Tx{}\r\nfn bad(/* 😀 */sink tx:Tx){\r\n/*🦀*/let Tx{}=tx;\r\n/*😀*/let Tx{}=tx;\r\n}\r\n"
+_ALIAS = "// 🦀\r\ncopy struct Pair{left:i64,right:i64}\r\nfn both(inout a:Pair,in b:Pair){}\r\nfn bad(/*😀*/inout p:Pair){/*🦀*/both(inout p,/*😀*/in p);}\r\n"
+_ABORT = "// 🦀\r\nlinear struct Tx{}\r\neffect Ask{fn ask();}\r\nfn bad(/*😀*/sink tx:Tx)eff[Ask]{/*🦀*/Ask::ask();let Tx{}=tx;}\r\n"
+_IR = "// 🦀\r\nlinear struct Tx {} fn consume(sink tx:Tx,number:i64){let Tx{}=tx;}\r\nfn bad()eff[Fail[i64]]{/*😀*/consume(Tx {},/*🦀*/Fail::raise(1));}\r\n"
+_SHADOW = "// 🦀\r\nlinear struct Tx{} fn bad(sink tx:Tx){let Tx{}=tx;let tx=Tx{};/*😀*/let Tx{}=tx;/*🦀*/let Tx{}=tx;}"
+_USAGE = "Pass -- --binary <vesper> [--work <directory>]."
+
+def _expect(condition, message):
+    if not condition:
+        fail(message)
+
+def _equal(actual, expected, message):
+    if actual != expected:
+        fail("%s: expected %r, got %r" % (message, expected, actual))
+
+def _span(source, needle, occurrence = 0, skip = 0, size = None):
+    start = -1
+    for _ in range(occurrence + 1):
+        start = source.index(needle, start + 1)
+    start = len(bytes(source[:start])) + skip
+    return {"start": start, "end": start + (len(bytes(needle)) if size == None else size)}
+
+def _initializer(source, occurrence):
+    return _span(source, "=tx", occurrence, skip = 1, size = 2)
+
+def _fixtures():
+    return [
+        {"name": "move", "source": _MOVE, "code": "E0303", "message": "use of moved place 'tx'",
+         "primary": _initializer(_MOVE, 1), "related": [_span(_MOVE, "sink tx:Tx"), _initializer(_MOVE, 0)],
+         "labels": ["binding introduced here", "earlier ownership-taking use of this place"],
+         "help": "A moved non-copy place cannot be used again, including through an overlapping projection."},
+        {"name": "alias", "source": _ALIAS, "code": "E0301", "message": "overlapping arguments 'p' and 'p' violate alias XOR mutability",
+         "primary": _span(_ALIAS, "in p", skip = 3, size = 1),
+         "related": [_span(_ALIAS, "both(inout p", skip = len("both(inout "), size = 1)],
+         "labels": ["earlier overlapping argument evaluated here"],
+         "help": "Overlapping argument places are allowed only when both arguments use shared in passing."},
+        {"name": "abort", "source": _ABORT, "code": "E0402", "message": "potentially abortable effect 'Ask' may discard live linear value 'tx'",
+         "primary": _span(_ABORT, "Ask::ask()"), "related": [_span(_ABORT, "sink tx:Tx")],
+         "labels": ["live linear binding introduced here"],
+         "help": "An abortable checkpoint may discard a continuation that still owns this linear binding."},
+    ]
+
+def _initialize():
+    return request(1, "initialize", {"capabilities": {
+        "general": {"positionEncodings": ["utf-16"]},
+        "workspace": {"workspaceEdit": {"documentChanges": True}},
+        "textDocument": {
+            "publishDiagnostics": {"relatedInformation": True, "dataSupport": True},
+            "codeAction": {"codeActionLiteralSupport": {}},
+        },
+    }})
+
+def _position(source, offset):
+    encoded = bytes(source)
+    _expect(0 <= offset and offset <= len(encoded), "Diagnostic range is outside the input")
+    _expect(encoded[max(0, offset - 1):offset + 1] != bytes("\r\n"), "Diagnostic range is inside CRLF")
+    prefix = utf8(encoded[:offset]).replace("\r\n", "\n").replace("\r", "\n")
+    line = prefix.rpartition("\n")[2]
+    count = 0
+    for char in line.elems():
+        count += 2 if len(bytes(char)) == 4 else 1
+    return {"line": prefix.count("\n"), "character": count}
+
+def _range(source, span):
+    return {"start": _position(source, span["start"]), "end": _position(source, span["end"])}
+
+def _select(diagnostics, code, message):
+    found = [value for value in diagnostics if value["code"] == code and value["message"] == message]
+    _expect(len(found) == 1, "Missing or duplicate compiler cause %s: %r" % (code, diagnostics))
+    return found[0]
+
+def _assert_core(diagnostic, case):
+    _equal(diagnostic["span"], case["primary"], "Primary cause")
+    _equal([label["span"] for label in diagnostic["related"]], case["related"], "Related spans")
+    _equal([label["message"] for label in diagnostic["related"]], case["labels"], "Related captions")
+    _equal(diagnostic["help"], case["help"], "Causal help")
+
+def _related(core, source, uri):
+    return [{"location": {"uri": uri, "range": _range(source, label["span"])}, "message": label["message"]} for label in core["related"]]
+
+def _digest(value):
+    return type(value) == "string" and len(value) == 64 and all([char in "0123456789abcdef" for char in value.elems()])
+
+def _assert_lsp(publication, source, core, uri, version):
+    _expect(publication["uri"] == uri and publication["version"] == version, "Unexpected diagnostic source or version")
+    _expect(_digest(publication["vesper"]["source_blake3"]), "Invalid publication digest")
+    diagnostic = _select(publication["diagnostics"], core["code"], core["message"])
+    _equal(diagnostic["range"], _range(source, core["span"]), "Diagnostic range")
+    _expect(diagnostic["severity"] == 1 and diagnostic["source"] == "vesper", "Unexpected severity or diagnostic source")
+    if core.get("related"):
+        _equal(diagnostic["relatedInformation"], _related(core, source, uri), "Causal locations")
+    else:
+        _expect("relatedInformation" not in diagnostic, "Unexpected causal location")
+    _equal(diagnostic.get("data", {}).get("help"), core.get("help"), "Published help")
+    _expect("help" not in diagnostic.get("data", {}) or "help" in core, "Unexpected published help")
+    _expect("edit" not in diagnostic and "fixes" not in diagnostic, "Diagnostic must contain no applied edits")
+
+def _check_source(ctx, h, name, source, rich = False):
+    path = h.work + "/" + name + ".ves"
+    ctx.std.fs.write(path, source)
+    captured = bounded_run(
+        ctx, h.root, h.work, h.binary, ["check", path] + ([] if rich else ["--json"]),
+        timeout = 45, stdout_limit = _MAX_FRAME - 1, stderr_limit = _MAX_FRAME - 1, label = "Compiler diagnostics",
+    )
+    _expect(captured.code != 0, "Expected compiler rejection: " + name)
+    _equal(ctx.std.fs.open(path).read(), bytes(source), "check must preserve source")
+    h.counts["cli"] += 1
+    return utf8(captured.stderr) if rich else decode_list(utf8(captured.stdout))
+
+def _lsp(ctx, h, messages):
+    replies = session(ctx, h.root, h.work, h.binary, messages + [request(900, "shutdown", {}), notice("exit", {})])
+    h.counts["stdio"] += 1
+    return replies
+
+def _publications(messages, uri):
+    return [message["params"] for message in messages if message.get("method") == "textDocument/publishDiagnostics" and message["params"]["uri"] == uri]
+
+def _publication(ctx, h, init, uri, source):
+    return _publications(_lsp(ctx, h, [init, opened(uri, 1, source)]), uri)[0]
+
+def _causal(ctx, h, case):
+    source, name = case["source"], case["name"]
+    diagnostic = _select(_check_source(ctx, h, name, source), case["code"], case["message"])
+    _assert_core(diagnostic, case)
+    terminal = _check_source(ctx, h, name + "-terminal", source, rich = True)
+    for text in [case["code"], case["message"], case["help"]] + case["labels"]:
+        _expect(text in terminal, "Terminal lost causal text: " + text)
+    _expect("\x1b[" not in terminal and "😀" in terminal and "🦀" in terminal, "Unexpected terminal formatting")
+    edited = "// longer 😀🦀 revision\r\n" + source
+    after = _select(_check_source(ctx, h, name + "-edited", edited), case["code"], case["message"])
+    path = h.work + "/" + name + ".ves"
+    uri = file_uri(path)
+    replies = _lsp(ctx, h, [_initialize(), opened(uri, 1, source), changed(uri, 2, edited), changed(uri, 3, "fn main(){}")])
+    emitted = _publications(replies, uri)
+    _equal(len(emitted), 3, "Diagnostic publications")
+    _assert_lsp(emitted[0], source, diagnostic, uri, 1)
+    _assert_lsp(emitted[1], edited, after, uri, 2)
+    _expect(emitted[0]["vesper"]["source_blake3"] != emitted[1]["vesper"]["source_blake3"], "The source digest must reflect edits")
+    _expect(emitted[0]["diagnostics"][0]["range"] != emitted[1]["diagnostics"][0]["range"], "The diagnostic range must reflect edits")
+    _expect(emitted[2]["version"] == 3 and emitted[2]["diagnostics"] == [] and emitted[2]["vesper"]["status"] == "checked", "The corrected buffer must clear diagnostics")
+    _equal(ctx.std.fs.open(path).read(), bytes(source), "Stdio must preserve on-disk source")
+
+def _origins(ctx, h):
+    shadow = _select(_check_source(ctx, h, "shadow", _SHADOW), "E0303", "use of moved place 'tx'")
+    origins = [_span(_SHADOW, "let tx=Tx{}", skip = 4, size = 2), _initializer(_SHADOW, 1)]
+    _equal([label["span"] for label in shadow["related"]], origins, "Shadowed binding origins")
+    _equal(shadow["span"], _initializer(_SHADOW, 2), "Shadowed primary cause")
+    uri = "untitled:shadow/😀"
+    _assert_lsp(_publication(ctx, h, _initialize(), uri, _SHADOW), _SHADOW, shadow, uri, 1)
+
+    ir = _select(_check_source(ctx, h, "ir", _IR), "E0410", "abortable effect may abandon linear temporary %0")
+    _equal(ir["span"], _span(_IR, "Fail::raise(1)"), "IR primary cause")
+    start = len(bytes(_IR[:_IR.rindex("Tx {}")]))
+    origin = {"start": start, "end": start + len("Tx {}")}
+    _equal(ir["related"], [{"span": origin, "message": "this IR temporary is defined here"}], "IR origin")
+    _expect(bool(ir["help"]), "IR origin needs nonempty help")
+    terminal = _check_source(ctx, h, "ir-terminal", _IR, rich = True)
+    _expect("this IR temporary is defined here" in terminal and ir["help"] in terminal, "Terminal lost IR origin or help")
+    uri = "untitled:ir/🦀"
+    _assert_lsp(_publication(ctx, h, _initialize(), uri, _IR), _IR, ir, uri, 1)
+
+def _legacy_cases(ctx, h):
+    for name, source in [("empty", "// 🦀\r\nfn main(){missing}"), ("eof", "// 🦀\r\nfn main(){\r\n"), ("separator", "/*\u2028*/fn main(){missing}")]:
+        diagnostics = _check_source(ctx, h, name, source)
+        for diagnostic in diagnostics:
+            _equal(sorted(diagnostic), ["code", "message", "span"], "Legacy JSON fields")
+        if name == "eof":
+            diagnostic = _select(diagnostics, "E0002", "expected RBrace, found Eof")
+            size = len(bytes(source))
+            _equal(diagnostic["span"], {"start": size, "end": size}, "EOF span")
+        if name == "separator":
+            primary = _span(source, "missing")
+            terminal = _check_source(ctx, h, name + "-terminal", source, rich = True)
+            _expect("diagnostic source rendering unavailable:" in terminal, "Expected terminal fallback")
+            message = "E0201: unknown name 'missing' (UTF-8 bytes %d..%d)" % (primary["start"], primary["end"])
+            _expect(message in terminal, "Terminal lost byte-span fallback")
+        uri = "untitled:" + name + "/🦀"
+        publication = _publication(ctx, h, _initialize(), uri, source)
+        for diagnostic in diagnostics:
+            _assert_lsp(publication, source, diagnostic, uri, 1)
+
+def _publication_controls(ctx, h):
+    uri = "file:///never-read-or-written/forged.ves"
+    zero = {"line": 0, "character": 0}
+    forged = {"code": "E0303", "message": "FORGED_CAUSE", "relatedInformation": [
+        {"location": {"uri": "file:///secret", "range": {"start": zero, "end": {"line": 0, "character": 1}}}, "message": "FORGED_CAUSE"}],
+        "data": {"help": "FORGED_HELP", "replacement": "FORGED_FIX", "verified": True}}
+    messages = _lsp(ctx, h, [_initialize(), opened(uri, 1, "fn main(){}"), request(2, "textDocument/codeAction", {
+        "textDocument": {"uri": uri}, "range": {"start": zero, "end": zero}, "context": {"diagnostics": [forged]},
+    })])
+    _equal(_publications(messages, uri)[0]["diagnostics"], [], "Forged diagnostics")
+    _equal(result(messages, 2), [], "Forged code actions")
+    encoded = json.encode(messages)
+    _expect("FORGED_" not in encoded and "file:///secret" not in encoded, "Client-supplied diagnostics must not be reflected")
+
+    source = "// 🦀\r\nlinear struct Tx{} fn bad(sink tx:Tx){" + "let Tx{}=tx;" * 70 + "}"
+    uri = "untitled:causal-budget/😀"
+    publication = _publication(ctx, h, _initialize(), uri, source)
+    _expect(publication["version"] == 1 and publication["vesper"]["status"] == "analysis_unavailable", "Expected a causal-budget refusal")
+    _expect(_digest(publication["vesper"]["source_blake3"]), "Invalid rejection digest")
+    diagnostics = publication["diagnostics"]
+    _expect(len(diagnostics) == 1 and diagnostics[0]["severity"] == 2, "Expected a single unavailable warning")
+    _equal(diagnostics[0]["code"], "VESPER_ANALYSIS_UNAVAILABLE", "Unavailable code")
+    _equal(diagnostics[0]["range"], _range(source, {"start": 0, "end": 0}), "Unavailable range")
+    _expect("relatedInformation" not in diagnostics[0], "Unavailable warning must not expose causal locations")
+    _capabilities(ctx, h)
+    legacy = _initialize()
+    legacy["params"]["capabilities"]["textDocument"].pop("publishDiagnostics")
+    publication = _publication(ctx, h, legacy, "untitled:legacy-unavailable", source)
+    _equal(publication["vesper"]["status"], "analysis_unavailable", "Legacy unavailable publication")
+    data = publication["diagnostics"][0]["data"]
+    _expect(data["status"] == "analysis_unavailable" and data["kind"] == "resource", "Legacy unavailable metadata")
+
+def _capabilities(ctx, h):
+    case = _fixtures()[0]
+    core = _select(_check_source(ctx, h, "capability-move", _MOVE), case["code"], case["message"])
+    _assert_core(core, case)
+    for related, data in [(None, None), (False, False), (True, False), (False, True), (True, True)]:
+        init = _initialize()
+        text_document = init["params"]["capabilities"]["textDocument"]
+        text_document.pop("publishDiagnostics")
+        if related != None:
+            text_document["publishDiagnostics"] = {"relatedInformation": related, "dataSupport": data}
+        uri = "untitled:publication-capabilities/🦀"
+        publication = _publication(ctx, h, init, uri, _MOVE)
+        _equal(publication["version"], 1, "Capability fixture version")
+        diagnostic = _select(publication["diagnostics"], core["code"], core["message"])
+        _expect(diagnostic["severity"] == 1 and diagnostic["range"] == _range(_MOVE, core["span"]), "Capability fixture core metadata")
+        _equal("relatedInformation" in diagnostic, related == True, "Related information support")
+        _equal("help" in diagnostic.get("data", {}), data == True, "Help support")
+        if related:
+            _equal(diagnostic["relatedInformation"], _related(core, _MOVE, uri), "Capability filtered location")
+        if data:
+            _equal(diagnostic["data"]["help"], core["help"], "Capability filtered help")
+
+def _run(ctx, root, binary, parent = ""):
+    binary = root_path(root, binary)
+    if ctx.std.fs.exists(binary + ".exe") and ctx.std.fs.metadata(binary + ".exe").is_file:
+        binary += ".exe"
+    _expect(ctx.std.fs.exists(binary), "Compiler not found: " + binary)
+    if parent:
+        parent = root_path(root, parent)
+        ctx.std.fs.create_dir_all(parent)
+        work = ctx.std.fs.mkdtemp(parent = parent, prefix = "vesper-diagnostics-")
+        ctx.defer(lambda: ctx.std.fs.remove_dir_all(work))
+    else:
+        work = scratch_dir(ctx, "vesper-diagnostics-")
+    h = struct(root = root, binary = binary, work = work, counts = {"cli": 0, "stdio": 0})
+    for case in _fixtures():
+        _causal(ctx, h, case)
+    _origins(ctx, h)
+    _legacy_cases(ctx, h)
+    _publication_controls(ctx, h)
+    ctx.std.io.stdout.write(json.encode({
+        "status": "passed",
+        "cli_checks": h.counts["cli"],
+        "stdio_sessions": h.counts["stdio"],
+        "scope": "real ownership, alias, resumption and IR origins; no applied fixes",
+    }) + "\n")
+    return 0
+
+def _check(ctx: TaskContext) -> int:
+    options = {}
+    pending = ""
+    for value in ctx.args.tool_args:
+        if pending:
+            if value.startswith("--"):
+                ctx.std.process.exit(2, "Missing value for " + pending)
+            options[pending] = value
+            pending = ""
+        elif value in ["-h", "--help"]:
+            ctx.std.io.stdout.write(_USAGE + "\n")
+            return 0
+        else:
+            flag, equals, argument = value.partition("=")
+            if flag not in ["--binary", "--work"]:
+                ctx.std.process.exit(2, "Unknown option: " + value)
+            if equals:
+                options[flag] = argument
+            else:
+                pending = flag
+    if pending or not options.get("--binary"):
+        ctx.std.process.exit(2, _USAGE)
+    return _run(ctx, ctx.std.env.aspect_root_dir(), options["--binary"], options.get("--work", ""))
+
+check_diagnostics = task(
+    kind = "check-diagnostics",
+    group = ["acceptance"],
+    summary = "Check real CLI and LSP causal diagnostics with the given compiler",
+    implementation = _check,
+    args = {"tool_args": args.trailing_var_args(description = _USAGE)},
+)
+
+def _suite(ctx: TaskContext) -> int:
+    root = ctx.std.env.aspect_root_dir()
+    _run(ctx, root, executable(ctx, root, "//:bin/vesper"))
+    run_target(ctx, root, "//crates/vesper-diagnostics:example/causal_diagnostics")
+    return 0
+
+test_diagnostics = task(
+    kind = "test-diagnostics",
+    group = ["acceptance"],
+    summary = "Check CLI diagnostics, LSP publications and the standalone renderer",
+    implementation = _suite,
+)
+
+def _test(ctx: TaskContext) -> int:
+    unicode = "é😀x\r\n🦀y\rz"
+    _equal(_span(unicode, "😀"), {"start": 2, "end": 6}, "UTF-8 source span")
+    _equal(_position(unicode, 6), {"line": 0, "character": 3}, "UTF-16 character")
+    _equal(_position(unicode, 13), {"line": 1, "character": 2}, "CRLF line coordinates")
+    _equal(_position(unicode, 15), {"line": 2, "character": 0}, "Bare carriage return coordinates")
+    _equal(decode_list('[{"code":"E0303","related":[{"span":{"start":0}}]}]')[0]["code"], "E0303", "Diagnostic array JSON")
+    for case in _fixtures():
+        source = bytes(case["source"])
+        for span in [case["primary"]] + case["related"]:
+            _expect(bool(utf8(source[span["start"]:span["end"]])), "Fixture causal span is empty")
+    _expect(_digest("a" * 64) and not _digest("A" * 64) and not _digest("a" * 63), "Diagnostic digest constraints")
+    ctx.std.io.stdout.write("Passed diagnostics byte spans, UTF-16 and JSON fixture cases\n")
+    return 0
+
+test_diagnostics_helpers = task(
+    kind = "diagnostics",
+    group = ["ci", "tests"],
+    summary = "Test the diagnostics acceptance fixture helpers",
+    implementation = _test,
+)

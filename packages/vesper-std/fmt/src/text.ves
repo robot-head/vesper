@@ -6,7 +6,6 @@ use self::{
     write_u64,
     write_i64,
     write_hex_u64,
-    write_bool,
     parse_u64_radix,
     parse_u64,
     parse_i64
@@ -14,13 +13,9 @@ use self::{
 
 // Appends the ASCII bytes of `buf` to `s`.
 fn push_ascii(inout s: String, in buf: Slice[u8]) {
-    for i in 0..buf.len() {
-        match buf.try_get(i) {
-            Option::Some(b) => {
-                let pushed = s.push_char(widen_u32(b));
-            }
-            Option::None => {}
-        }
+    for b in buf {
+        // An ASCII byte is a whole char, so the push always succeeds.
+        let pushed = s.push_char(widen_u32(b));
     }
 }
 
@@ -55,9 +50,11 @@ pub fn push_hex_u64(inout s: String, x: u64, min_digits: u64) {
 
 // Appends `true` or `false`.
 pub fn push_bool(inout s: String, b: bool) {
-    let mut buf: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    write_bool(inout buf, b);
-    push_ascii(inout s, in buf.as_slice());
+    if b {
+        s.push_str(in "true");
+    } else {
+        s.push_str(in "false");
+    }
 }
 
 // `x` in decimal as a new `String`.

@@ -1,0 +1,233 @@
+"""Exercise the formatter-proof harness with native deterministic fixtures."""
+
+load("./format-proof.axl", "check_with", "suite_with")
+load("./lib/process.axl", "command", "exit_code", "scratch_dir")
+
+_COMMENTS = "Vesper.StylusGenerated.comments_preserved"
+_PROJECTION = "Vesper.StylusSafety.projection_narrowing_preserves_disjointness"
+_WITNESS = "namespace «Vesper».«StylusGenerated»\ntheorem comments_preserved := True.intro\n"
+_FAILURES = {
+    "timeout": "Timed out after 45 seconds",
+    "lean-version": "Expected Lean version 4.35.0",
+    "duplicate": "Duplicate JSON key: kernel_replayed",
+    "extra-claim": "Unexpected proof claim: program_verified",
+    "byte-count": "Invalid proof byte or document node counts",
+    "bad-digest": "Invalid output_blake3",
+    "not-replayed": "Expected an accepted, independently replayed proof",
+    "theorem-axiom": "Theorem uses axioms",
+    "same-digest": "Changed comment must change both proof digests",
+    "oversize": "Output exceeds 4 MiB",
+    "replay-axiom": "Independent witness replay did not verify two axiom-free theorems",
+    "injection": "Expected exit 1, got 0",
+    "source-changed": "verify changed its source",
+    "rejection-claim": "Unexpected proof field in rejection report: audit",
+    "failed-witness": "Failed witness emission wrote output",
+    "scratch-leak": "Unexpected proof scratch file",
+}
+
+def _equal(actual, expected):
+    if actual != expected:
+        fail("Fixture expected %r, got %r" % (expected, actual))
+
+def _read(ctx, path):
+    return ctx.std.fs.open(path).read()
+
+def _replay(ctx, argv, cwd, env, lean, model, fault):
+    _equal(argv[:7], ["env", "-u", "LEAN_SRC_PATH", "-u", "LEAN_PLUGIN_PATH", lean, "--trust=0"])
+    _equal(cwd.rpartition("/")[2], "independent-kernel")
+    _equal(env, {"LEAN_PATH": cwd})
+    file = argv[-1]
+    if file == "StylusAndLintSafety.lean" or file == "Witness.lean":
+        output = file.removesuffix(".lean") + ".olean"
+        _equal(argv[7:], ["-o", output, file])
+        if file == "Witness.lean":
+            _equal(ctx.std.fs.exists(cwd + "/StylusAndLintSafety.olean"), True)
+        _equal(ctx.std.fs.read_to_string(cwd + "/" + file), model if file == "StylusAndLintSafety.lean" else _WITNESS)
+        ctx.std.fs.write(cwd + "/" + output, "")
+        return 0, ""
+    _equal(ctx.std.fs.exists(cwd + "/Witness.olean"), True)
+    _equal(argv[7:], [file])
+    if file == "Inspect.lean":
+        _equal(ctx.std.fs.read_to_string(cwd + "/" + file), "import Witness\n#check %s\n#print axioms %s\n#print axioms %s\n" % (_COMMENTS, _COMMENTS, _PROJECTION))
+        return 0, "does not depend on any axioms\n" + ("sorryAx\n" if fault == "replay-axiom" else "does not depend on any axioms\n")
+    _equal(file, "NoInjection.lean")
+    _equal(ctx.std.fs.read_to_string(cwd + "/" + file), "import Witness\n#check injected\n")
+    return (0 if fault == "injection" else 1), ""
+
+def _compiler(ctx, argv, stdout, stderr, h):
+    path, flags = argv[2], argv[3:]
+    _equal(argv[0], h.root + "/bin/compiler.exe")
+    if ctx.std.fs.metadata(path).is_dir:
+        _equal(argv[1:], ["verify", path, "--format", "--json"])
+        return 1
+    data = _read(ctx, path)
+    fault = h.fault
+    if argv[1] == "fmt":
+        _equal(data, h.commented)
+        _equal(flags, ["--json"])
+        ctx.std.fs.write(path, str(data) + "\n")
+        return 0
+    _equal(argv[1], "verify")
+    if "--lean" in flags and not flags[flags.index("--lean") + 1].endswith("/nonexistent-real-lean"):
+        _equal(flags[2:], ["--lean", h.lean, "--timeout", "300"])
+        if flags[:2] == ["--format", "--emit-lean"]:
+            _equal(data, h.hostile)
+            ctx.std.fs.write(stdout, _WITNESS)
+            return 0
+        _equal(flags[:2], ["--format", "--json"])
+        _equal(data in [h.commented, h.changed, h.macro], True)
+        digest = ("a" if fault == "same-digest" or data == h.commented else "b") * 64
+        report = {
+            "additional_text": "☃ 'quoted' { [ }",
+            "schema": "vesper.format-proof/1", "status": "kernel_checked", "scope": "formatter_document_model",
+            "input_bytes": len(data) - (1 if fault == "byte-count" else 0),
+            "output_bytes": len(data) + 1, "document_nodes": 9, "lean_version": "4.35.0",
+            "source_blake3": digest, "output_blake3": digest.upper() if fault == "bad-digest" else digest,
+            "comment_tokens": 2 if data == h.macro else 3,
+            "audit": {
+                "accepted": True, "kernel_replayed": fault != "not-replayed", "cache_eligible": False, "forbidden_axioms": [],
+                "theorems": [
+                    {"name": _COMMENTS, "axioms": ["sorryAx"] if fault == "theorem-axiom" else []},
+                    {"name": _PROJECTION, "axioms": []},
+                ],
+            },
+        }
+        if fault == "extra-claim":
+            report["program_verified"] = False
+        text = json.encode(report)
+        if fault == "duplicate":
+            text = text.replace('"kernel_replayed":true', '"kernel_replayed":false,"kernel_\\u0072eplayed":true')
+        ctx.std.fs.write(stdout, text)
+        if fault == "oversize":
+            ctx.std.fs.write(stderr, "x" * (4 * 1024 * 1024 + 1))
+        return 0
+    if data != h.commented:
+        _equal(data in [
+            bytes("fn main(){let x=;"), bytes("fn main(){/* unclosed"), bytes("fn main(){unknown!{raw}}"),
+            bytes("fn main(){") + bytes([255]) + bytes("}"), bytes(" " * (128 * 1024 + 1)),
+        ], True)
+        _equal(flags in [["--format", "--json"], ["--format", "--emit-lean"]], True)
+    if fault == "source-changed":
+        ctx.std.fs.write(path, str(data) + " ")
+    if "--json" in flags:
+        report = {"status": "rejected", "stage": "fixture", "message": "bad input"}
+        if fault == "rejection-claim":
+            report["audit"] = {}
+        ctx.std.fs.write(stdout, json.encode(report))
+    elif fault == "failed-witness":
+        ctx.std.fs.write(stdout, "unexpected witness")
+    if fault == "scratch-leak":
+        ctx.std.fs.write(path.rpartition("/")[0] + "/.vesper-leftover", "")
+    return 1
+
+def _scenario(ctx: TaskContext) -> int:
+    root, kind, fault = ctx.args.tool_args
+    fixture = root + "/tests/fixtures/format_proof/"
+    commented = ctx.std.fs.read_to_string(fixture + "commented.ves")
+    lean = root + "/installed lean/bin/lean"
+    selected = {"suite-default": "lean", "suite-ci": "bin/ci launcher"}.get(kind, "bin/explicit launcher")
+    model = "custom model" if kind in ["direct", "suite-explicit"] else "default model"
+    h = struct(
+        root = root, lean = lean, fault = fault, commented = bytes(commented),
+        changed = bytes(commented.replace("final 🦀", "current 🦀")),
+        macro = _read(ctx, fixture + "macro.ves"), hostile = _read(ctx, fixture + "hostile.ves"),
+    )
+
+    def run_process(ctx, argv, cwd, env, timeout, stdout, stderr):
+        ctx.std.fs.write(stdout, "")
+        ctx.std.fs.write(stderr, "")
+        if argv[1:] == ["--print-prefix"]:
+            _equal((argv[0], cwd, env, timeout), (selected, root, {}, 45))
+            ctx.std.fs.write(stdout, root + "/installed lean\n")
+            return None if fault == "timeout" else 0
+        _equal(timeout, 360)
+        if argv[0] == "env":
+            code, output = _replay(ctx, argv, cwd, env, lean, model, fault)
+            ctx.std.fs.write(stdout, output)
+            return code
+        _equal((cwd, env), (root, {}))
+        if argv[0] == lean:
+            _equal(argv, [lean, "--version"])
+            ctx.std.fs.write(stdout, "Lean (version 4.35.1, stale)\n" if fault == "lean-version" else "Lean (version 4.35.0, pinned)\n")
+            return 0
+        return _compiler(ctx, argv, stdout, stderr, h)
+
+    if kind != "direct":
+        return suite_with(ctx, root, run_process)
+    return check_with(ctx, root, [
+        "--binary=bin/compiler", "--work", "work with spaces",
+        "--lean", "bin/explicit launcher", "--model=models/custom model.lean",
+    ], run_process)
+
+format_proof_fixture = task(
+    kind = "format-proof-fixture",
+    group = ["ci", "tests", "internal"],
+    summary = "Run a native formatter proof fixture scenario",
+    implementation = _scenario,
+    args = {"tool_args": args.trailing_var_args(description = "Fixture workspace, entry point and fault.")},
+)
+
+def _test(ctx: TaskContext) -> int:
+    root = scratch_dir(ctx, "vesper-format-proof-fixture-")
+    workspace = root + "/workspace"
+    for path, contents in {
+        "lean/StylusAndLintSafety.lean": "default model",
+        "models/custom model.lean": "custom model",
+        "installed lean/bin/lean": "",
+        "bin/compiler": "",
+        "bin/compiler.exe": "",
+        "compiler manifest": "//:bin/vesper bin/compiler\n",
+    }.items():
+        absolute = workspace + "/" + path
+        ctx.std.fs.create_dir_all(absolute.rpartition("/")[0])
+        ctx.std.fs.write(absolute, contents)
+    fixtures = "/tests/fixtures/format_proof/"
+    ctx.std.fs.create_dir_all(workspace + fixtures)
+    cwd = ctx.std.env.aspect_root_dir()
+    for name in ["commented.ves", "macro.ves", "hostile.ves"]:
+        ctx.std.fs.copy(cwd + fixtures + name, workspace + fixtures + name)
+    env = {"CI": "false", "VESPER_FORMAT_PROOF_BINARY": "bin/compiler", "VESPER_FORMAT_PROOF_MODEL": "", "VESPER_LEAN": ""}
+    wanted = {
+        "status": "passed", "commands": 28, "kernel_reports": 3,
+        "independent_witness_replay": True, "scope": "formatter_document_model; no semantic or Rust-refinement proof",
+    }
+
+    def subprocess(argv, variables):
+        return command(ctx, ctx.std.env.current_exe(), argv, cwd, variables).stdout("piped").stderr("piped").spawn().wait_with_output()
+
+    def scenario(mode, fault = "", variables = env):
+        return subprocess(["ci", "tests", "internal", "format-proof-fixture", "--", workspace, mode, fault], variables)
+
+    for mode in ["suite-default", "suite-ci", "suite-explicit", "direct"]:
+        if mode == "suite-ci":
+            ctx.std.fs.write(workspace + "/.ci-lean-path", "bin/ci launcher\r\n")
+        variables = dict(env)
+        if mode == "suite-explicit":
+            variables.update({
+                "VESPER_LEAN": "bin/explicit launcher", "VESPER_FORMAT_PROOF_BINARY": "",
+                "VESPER_BAZEL_EXECUTABLES": "compiler manifest", "VESPER_FORMAT_PROOF_MODEL": "models/custom model.lean",
+            })
+        if mode == "direct":
+            variables["VESPER_LEAN"] = "bin/ci launcher"
+        result = scenario(mode, variables = variables)
+        if not result.status.success:
+            fail(mode + ": " + result.stderr)
+        _equal(json.decode(result.stdout), wanted)
+    _equal(ctx.std.fs.read_dir(workspace + "/work with spaces"), [])
+    for fault, diagnostic in _FAILURES.items():
+        result = scenario("direct", fault)
+        if exit_code(result.status) != 1 or diagnostic not in result.stderr:
+            fail("Wrong result for " + fault + ": " + result.stdout + result.stderr)
+        _equal(ctx.std.fs.read_dir(workspace + "/work with spaces"), [])
+    for values in [[], ["--binary"], ["--binary", "--model=x"], ["--unexpected"]]:
+        result = subprocess(["acceptance", "check-format-proof", "--"] + values, env)
+        _equal(exit_code(result.status), 2)
+    ctx.std.io.stdout.write("Passed formatter proof fixtures and %d rejection cases\n" % len(_FAILURES))
+    return 0
+
+test_format_proof = task(
+    kind = "format-proof",
+    group = ["ci", "tests"],
+    summary = "Test formatter proof command plans, reports and cleanup with native fixtures",
+    implementation = _test,
+)
