@@ -131,10 +131,7 @@ fn effect_node(in a: Ast, i: u32) -> EffectNode {
 // ---------------------------------------------------------------- names
 
 fn name_byte(in a: Ast, i: u64) -> u8 {
-    match a.names.text_byte(i) {
-        Option::Some(c) => c,
-        Option::None => 0,
-    }
+    a.names.text_byte(i).unwrap_or(0)
 }
 
 fn put_name(inout o: ChunkSeq[u8], in a: Ast, sym: u32) {
@@ -158,10 +155,7 @@ fn name_is(in a: Ast, sym: u32, in lit: Str) -> bool {
         return false;
     }
     for i in 0..t.len() {
-        let c = match t.try_get(i) {
-            Option::Some(c) => c,
-            Option::None => 0,
-        };
+        let c = t.try_get(i).unwrap_or(0);
         if name_byte(in a, wrapping_add(s, i)) != c {
             return false;
         }
@@ -204,10 +198,7 @@ fn insert(inout t: Table, in key: String, e: Entry) -> bool {
         t.entries.push(Entry { src: 0, node: none(), imp: none() });
         t.present.push(false);
     }
-    let was = match t.present.try_get(id) {
-        Option::Some(p) => p,
-        Option::None => false,
-    };
+    let was = t.present.try_get(id).unwrap_or(false);
     let ok = t.entries.try_set(id, e);
     let ok2 = t.present.try_set(id, true);
     was
@@ -855,10 +846,7 @@ fn entry_at(in t: Table, id: u32) -> Entry {
 fn put_key(inout o: ChunkSeq[u8], in t: Table, id: u32) {
     let (s, e) = t.keys.span(symbol_from_id(id));
     for i in s..e {
-        let c = match t.keys.text_byte(i) {
-            Option::Some(c) => c,
-            Option::None => 0,
-        };
+        let c = t.keys.text_byte(i).unwrap_or(0);
         o.push(c);
     }
 }
@@ -1077,10 +1065,7 @@ fn dump(in c: Collect, in s: Srcs, inout o: ChunkSeq[u8]) {
 }
 
 fn word32(in s: ChunkSeq[u32], i: u64) -> u32 {
-    match s.try_get(i) {
-        Option::Some(v) => v,
-        Option::None => 0,
-    }
+    s.try_get(i).unwrap_or(0)
 }
 
 // ---------------------------------------------------------------- entries

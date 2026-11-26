@@ -118,24 +118,15 @@ const NO_FN: FnRow = FnRow {
 
 impl Ast {
     pub fn expr(in self, e: u32) -> ExprRow {
-        match self.exprs.try_get(w(e)) {
-            Option::Some(x) => x,
-            Option::None => NO_EXPR,
-        }
+        self.exprs.try_get(w(e)).unwrap_or(NO_EXPR)
     }
 
     pub fn pat(in self, p: u32) -> PatRow {
-        match self.pats.try_get(w(p)) {
-            Option::Some(x) => x,
-            Option::None => NO_PAT,
-        }
+        self.pats.try_get(w(p)).unwrap_or(NO_PAT)
     }
 
     pub fn func(in self, f: u32) -> FnRow {
-        match self.fns.try_get(w(f)) {
-            Option::Some(x) => x,
-            Option::None => NO_FN,
-        }
+        self.fns.try_get(w(f)).unwrap_or(NO_FN)
     }
 
     pub fn generic(in self, i: u64) -> GenRow {

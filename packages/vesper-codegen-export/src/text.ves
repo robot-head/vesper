@@ -73,10 +73,7 @@ pub fn same_str(in a: ChunkSeq[u8], in b: Str) -> bool {
         return false;
     }
     for i in 0..a.len() {
-        let c = match s.try_get(i) {
-            Option::Some(c) => c,
-            Option::None => 0,
-        };
+        let c = s.try_get(i).unwrap_or(0);
         if u8_at(in a, i) != c {
             return false;
         }

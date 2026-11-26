@@ -364,10 +364,7 @@ pub fn used(in u: Uses, in name: Str) -> bool {
 }
 
 fn word(in s: ChunkSeq[u32], i: u64) -> u32 {
-    match s.try_get(i) {
-        Option::Some(v) => v,
-        Option::None => 0,
-    }
+    s.try_get(i).unwrap_or(0)
 }
 
 // ---------------------------------------------------------------- preludes
@@ -490,10 +487,7 @@ pub fn sorted_symbols(in k: Interner) -> ChunkSeq[u32] {
             if j == 0 {
                 break;
             }
-            let prev = match out.try_get(wrapping_sub(j, 1)) {
-                Option::Some(v) => v,
-                Option::None => 0,
-            };
+            let prev = out.try_get(wrapping_sub(j, 1)).unwrap_or(0);
             if cmp_keys(in k, prev, id) <= 0 {
                 break;
             }
@@ -512,14 +506,8 @@ fn cmp_keys(in k: Interner, x: u32, y: u32) -> i64 {
     let yl = wrapping_sub(ye, ys);
     let n = if xl < yl { xl } else { yl };
     for i in 0..n {
-        let a = match k.text_byte(wrapping_add(xs, i)) {
-            Option::Some(c) => c,
-            Option::None => 0,
-        };
-        let b = match k.text_byte(wrapping_add(ys, i)) {
-            Option::Some(c) => c,
-            Option::None => 0,
-        };
+        let a = k.text_byte(wrapping_add(xs, i)).unwrap_or(0);
+        let b = k.text_byte(wrapping_add(ys, i)).unwrap_or(0);
         if a != b {
             return if a < b { -1 } else { 1 };
         }
