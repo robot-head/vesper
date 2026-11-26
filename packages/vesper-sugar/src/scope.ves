@@ -90,7 +90,7 @@ pub struct Sc {
     items: ChunkSeq[u8]
 }
 
-fn sc_ok() -> Sc {
+pub fn sc_ok() -> Sc {
     Sc {
         failed: false,
         msg: ChunkSeq::new[u8](),
@@ -98,19 +98,19 @@ fn sc_ok() -> Sc {
     }
 }
 
-fn sc_err(in m: Slice[u8]) -> Sc {
+pub fn sc_err(in m: Slice[u8]) -> Sc {
     let mut s = sc_ok();
     s.failed = true;
     s.msg.extend(in m);
     s
 }
 
-fn sc_err_seq(in m: ChunkSeq[u8]) -> Sc {
+pub fn sc_err_seq(in m: ChunkSeq[u8]) -> Sc {
     sc_err(in m.as_slice())
 }
 
 // A lexer refusal: its E0003 message (`LexLimit`'s text).
-fn refusal(in d: @vesper/front::Diags) -> Sc {
+pub fn refusal(in d: @vesper/front::Diags) -> Sc {
     let end = if d.at.len() > 1 {
         w32(in d.at, 1)
     } else {
@@ -623,7 +623,7 @@ fn source_ok(in a: Ast, t: u32) -> bool {
     true
 }
 
-fn push_name(inout out: ChunkSeq[u8], in a: Ast, sym: u32) {
+pub fn push_name(inout out: ChunkSeq[u8], in a: Ast, sym: u32) {
     for j in 0..name_len(in a, sym) {
         out.push(name_byte(in a, sym, j));
     }

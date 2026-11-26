@@ -1162,3 +1162,34 @@ pub fn template_scope_words(
         }
     }
 }
+
+/// `template::render` then `hygiene::pattern` of the rule's match as words
+/// (see `template::render_words`), or `[0]` when the rule refuses or does
+/// not match. Test hook for tests/self_host_sugar.rs.
+#[doc(hidden)]
+pub fn template_pattern_words(
+    pattern: &str,
+    invocation: &str,
+    tail: Option<&str>,
+    template: &str,
+    mark: &str,
+    max_bytes: usize,
+    work: usize,
+) -> Vec<u64> {
+    let mut left = work;
+    let Ok(Some(captures)) = matcher::match_rule(pattern, invocation, tail, &mut left) else {
+        return vec![0];
+    };
+    let mut r = match template::render(template, &captures, mark, max_bytes) {
+        Ok(r) => r,
+        Err(m) => return template::refusal_words(&m),
+    };
+    match hygiene::pattern(&mut r, mark) {
+        Err(m) => template::refusal_words(&m),
+        Ok(()) => {
+            let mut out = vec![1];
+            template::push_rendered(&mut out, &r);
+            out
+        }
+    }
+}
