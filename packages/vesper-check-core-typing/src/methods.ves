@@ -15,8 +15,8 @@ use self::exprs::{
     Arg, Ck, Ex, actual_arg, mode, note, binding, error, expect_type, expr, expr_expected,
     field_path, fn_index, fn_generics, is_named, lookup, named, place_of, record, constrain_literals
 };
-use self::relations::{infer, mk_lit};
-use self::ints::{Lit};
+use self::relations::{infer, lit_of, mk_lit};
+use self::ints::{Lit, default_of, fits, int_bits, int_unsigned};
 
 const NONE32: u32 = 4294967295;
 
@@ -1084,4 +1084,143 @@ pub fn is_qualified(in ck: Ck, name: u32, in text: Str) -> bool {
 pub fn view_place(in ck: Ck, e: u32) -> bool {
     let base = view_base(in ck, e);
     base != NONE32 && is_place(in ck, base)
+}
+
+// ----- integer conversions ---------------------------------------------------
+
+// `numeric::Conversion`.
+const CONV_NONE: u8 = 0;
+const CONV_WIDEN: u8 = 1;
+const CONV_NARROW: u8 = 2;
+const CONV_WRAPPING: u8 = 3;
+
+// A conversion intrinsic: its family (CONV_NONE for none) and target kind symbol.
+pub copy struct Conv {
+    family: u8,
+    to: u32,
+}
+
+fn conv_prefix(family: u8) -> Str {
+    if family == CONV_WIDEN {
+        "widen_"
+    } else if family == CONV_NARROW {
+        "narrow_"
+    } else {
+        "wrapping_"
+    }
+}
+
+// `numeric::conversion`: `widen_k`, `narrow_k` or `wrapping_k` for an
+// integer kind `k`, found by building each name.
+pub fn conversion_of(in ck: Ck, name: u32) -> Conv {
+    let known = ck.ctx.world.k;
+    let mut kinds: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    kinds.push(known.u8_);
+    kinds.push(known.u16_);
+    kinds.push(known.u32_);
+    kinds.push(known.u64_);
+    kinds.push(known.usize_);
+    kinds.push(known.i8_);
+    kinds.push(known.i16_);
+    kinds.push(known.i32_);
+    kinds.push(known.i64_);
+    kinds.push(known.isize_);
+    kinds.push(known.i128_);
+    kinds.push(known.u128_);
+    let widen = conv_in(in ck, name, CONV_WIDEN, in kinds);
+    if widen.family != CONV_NONE {
+        return widen;
+    }
+    let narrow = conv_in(in ck, name, CONV_NARROW, in kinds);
+    if narrow.family != CONV_NONE {
+        return narrow;
+    }
+    conv_in(in ck, name, CONV_WRAPPING, in kinds)
+}
+
+fn conv_in(in ck: Ck, name: u32, family: u8, in kinds: ChunkSeq[u32]) -> Conv {
+    for i in 0..kinds.len() {
+        let kind = u32_at(in kinds, i);
+        let mut text = ChunkSeq::new[u8]();
+        text.extend(in conv_prefix(family).as_bytes());
+        ck.ctx.names.write(kind, inout text);
+        if ck.ctx.names.lookup(in text.as_slice()) == name {
+            return Conv { family: family, to: kind };
+        }
+    }
+    Conv { family: CONV_NONE, to: NONE32 }
+}
+
+// `IntegerKind::widens_to`: every `from` value is a `to` value.
+pub fn is_conversion(conv: Conv) -> bool {
+    conv.family != CONV_NONE
+}
+
+fn widens_to(in ck: Ck, from: u32, to: u32) -> bool {
+    let known = ck.ctx.world.k;
+    let from_bits = int_bits(known, from);
+    let to_bits = int_bits(known, to);
+    let from_unsigned = int_unsigned(known, from);
+    let to_unsigned = int_unsigned(known, to);
+    if from_unsigned == to_unsigned {
+        return from_bits <= to_bits;
+    }
+    from_unsigned && from_bits < to_bits
+}
+
+// `Checker::conversion_call`: one integer operand converted to `conv.to`.
+// A float operand (`float_to_integer`) skips the function.
+pub fn conversion_call(inout ck: Ck, ex: Ex, conv: Conv) -> u32 {
+    let hole = ck.ctx.types.infer;
+    let known = ck.ctx.world.k;
+    let to_ty = named(inout ck, conv.to);
+    // `by_value_operands`.
+    if ex.m != 0 || ex.n != 1 {
+        error(inout ck, "E0207", ex.start, ex.end);
+    }
+    for i in 0..w(ex.n) {
+        let arg = actual_arg(in ck, ex, i);
+        if arg.pass != P_IN || arg.explicit {
+            let arg_ex = ck.ex(arg.expr);
+            error(inout ck, "E0308", arg_ex.start, arg_ex.end);
+        }
+    }
+    if ex.n == 0 {
+        return to_ty;
+    }
+    let arg = actual_arg(in ck, ex, 0);
+    let arg_ex = ck.ex(arg.expr);
+    let raw = expr(inout ck, arg.expr);
+    if ck.skip {
+        return hole;
+    }
+    let ty = if ck.ctx.types.kind(raw) == TyKind::Lit {
+        let value = lit_of(ck.ctx.types.node(raw));
+        let settled = if conv.family == CONV_WIDEN && fits(known, conv.to, value) {
+            conv.to
+        } else {
+            default_of(known, value)
+        };
+        let settled_ty = named(inout ck, settled);
+        record(inout ck, arg.expr, settled_ty);
+        settled_ty
+    } else {
+        raw
+    };
+    let node = ck.ctx.types.node(ty);
+    if node.kind == TyKind::Named && (node.name == known.f64_ || node.name == known.f32_) {
+        ck.skip = true;
+        return hole;
+    }
+    if node.kind != TyKind::Named || !known.is_integer(node.name) {
+        if ty != hole {
+            error(inout ck, "E0200", arg_ex.start, arg_ex.end);
+        }
+        return to_ty;
+    }
+    // A failing `narrow_k` raises `Fail[ArithOverflow]` (lane 8's effects).
+    if conv.family == CONV_WIDEN && !widens_to(in ck, node.name, conv.to) {
+        error(inout ck, "E0200", arg_ex.start, arg_ex.end);
+    }
+    to_ty
 }

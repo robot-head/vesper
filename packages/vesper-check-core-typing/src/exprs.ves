@@ -30,7 +30,8 @@ use self::relations::{
 use self::patterns::{Pats, arms_cover, irrefutable, pats_new};
 use self::methods::{
     inherent_index, is_qualified, is_str, is_string, peek_type, receiver_type, seq_method, seq_new,
-    view_place, index_expr, string_comparison, string_literal, string_method, text_operand
+    view_place, index_expr, string_comparison, string_literal, string_method, text_operand,
+    conversion_call, conversion_of, is_conversion
 };
 
 const NONE32: u32 = 4294967295;
@@ -203,6 +204,11 @@ pub struct Ck {
     // The function being checked returns `Str`: string literals are static
     // text (`Checker::static_text`).
     static_text: bool,
+    // The function has an unannotated `let` of an integer literal and
+    // reported a diagnostic: Rust reruns it with literal typing
+    // (`function_with_literal_typing`, part 4), so it is skipped.
+    open_literals: bool,
+    diagnostics: u64,
 }
 
 fn put(inout out: ChunkSeq[u8], in text: Str) {
@@ -261,6 +267,8 @@ pub fn ck_new(sink ctx: Ctx) -> Ck {
         out: ChunkSeq::new[u8](),
         atomic_sym: 0,
         static_text: false,
+        open_literals: false,
+        diagnostics: 0,
     };
     let pats = pats_new(inout ck.ctx.names);
     ck.pats = pats;
@@ -646,6 +654,7 @@ pub fn fn_index(in ck: Ck, name: u32) -> u32 {
 // ----- checker state ---------------------------------------------------------
 
 pub fn error(inout ck: Ck, in code: Str, start: u64, end: u64) {
+    ck.diagnostics = inc(ck.diagnostics);
     put(inout ck.out, "D ");
     put(inout ck.out, code);
     ck.out.push(32);
@@ -1192,6 +1201,9 @@ fn block_expr(inout ck: Ck, ex: Ex, expected: u32) -> u32 {
             }
             let value_ex = ck.ex(stmt.value);
             expect_type(inout ck, stmt.ty, actual, value_ex.start, value_ex.end);
+            if stmt.ty == hole && mentions_literal(in ck, actual) {
+                ck.open_literals = true;
+            }
             let let_ty = if stmt.ty == hole {
                 default_type(inout ck.ctx.types, actual)
             } else {
@@ -1683,7 +1695,12 @@ fn call_expr(inout ck: Ck, ex: Ex, expected: u32) -> u32 {
         return seq_new(inout ck, ex, true, expected);
     }
     if callee_index == NONE32 {
-        // Intrinsics, effect operations and trait calls: not ported yet.
+        let conv = conversion_of(in ck, callee.x);
+        if is_conversion(conv) {
+            return conversion_call(inout ck, ex, conv);
+        }
+        // Other intrinsics, effect operations and trait calls: not ported
+        // yet.
         ck.skip = true;
         return hole;
     }
@@ -1922,6 +1939,8 @@ fn apply_args(inout ck: Ck, sig: FnSig, ex: Ex, receiver: u32, inout vars: Vars)
 // `T start end type` row per recorded expression, or `S start end`.
 pub fn check_function(inout ck: Ck, fname: u32, start: u64, end: u64, body: u32, first: u32) {
     ck.skip = false;
+    ck.open_literals = false;
+    ck.diagnostics = 0;
     ck.env.truncate(0);
     let sig_index = fn_index(in ck, fname);
     if sig_index == NONE32 {
@@ -1950,6 +1969,9 @@ pub fn check_function(inout ck: Ck, fname: u32, start: u64, end: u64, body: u32,
             let body_ex = ck.ex(body);
             expect_type(inout ck, sig.result, actual, body_ex.start, body_ex.end);
         }
+    }
+    if ck.open_literals && ck.diagnostics != 0 {
+        ck.skip = true;
     }
     if ck.skip {
         ck.out.truncate(mark);
@@ -1988,4 +2010,21 @@ pub fn check_exprs(inout reader: Reader, in bytes: Slice[u8], inout ck: Ck) {
         let body = read_expr(inout reader, in bytes, inout ck);
         check_function(inout ck, name, start, end, body, first);
     }
+}
+
+// Whether `ty` is or holds an integer literal type (an open literal
+// binding's, `open_literal_bindings`).
+fn mentions_literal(in ck: Ck, ty: u32) -> bool {
+    let node = ck.ctx.types.node(ty);
+    if node.kind == TyKind::Lit {
+        return true;
+    }
+    if node.kind == TyKind::Tuple || node.kind == TyKind::Named {
+        for i in 0..w(node.n) {
+            if mentions_literal(in ck, item(in ck.ctx.types, add(w(node.a), i))) {
+                return true;
+            }
+        }
+    }
+    false
 }
