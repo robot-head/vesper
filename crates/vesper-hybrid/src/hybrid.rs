@@ -236,6 +236,10 @@ pub(crate) use parse::{driver_parse, driver_parse_begin};
 /// The Vesper driver's `run` (#2053) evaluates through the run swap.
 pub(crate) use run::driver_run;
 
+/// The Vesper driver's checked-world declarations (#2024) through the
+/// world swap.
+pub(crate) use world::{driver_world, driver_world_begin};
+
 // The Vesper driver's wasm and eBPF builds (#1895) take those swaps' input
 // words.
 pub(crate) use ebpf_backend::{DRIVER_EBPF_FALLBACKS, DRIVER_EBPF_INPUTS, ebpf_build_input};
