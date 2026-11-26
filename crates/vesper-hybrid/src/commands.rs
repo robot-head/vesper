@@ -27,32 +27,6 @@ thread_local! {
 /// CLI makes none.
 pub static PRINTS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-/// The `io::Error` with @vesper-std's error word (the kind in the low 8
-/// bits, the raw OS error in the high 32), as the driver's host builds it.
-fn io_error(word: u64) -> io::Error {
-    use io::ErrorKind as K;
-    let os = (word >> 32) as u32;
-    if os != 0 {
-        return io::Error::from_raw_os_error(os as i32);
-    }
-    let kind = match word & 0xff {
-        1 => K::NotFound,
-        2 => K::PermissionDenied,
-        3 => K::AlreadyExists,
-        4 => K::NotADirectory,
-        5 => K::IsADirectory,
-        6 => K::DirectoryNotEmpty,
-        7 => K::InvalidInput,
-        8 => K::Interrupted,
-        9 => K::UnexpectedEof,
-        10 => K::WriteZero,
-        11 => K::Unsupported,
-        12 => K::OutOfMemory,
-        _ => K::Other,
-    };
-    io::Error::from(kind)
-}
-
 /// Print as the Rust commands do (`print!`, `println!`, `eprintln!`): a
 /// failed write panics with std's own message, and the CLI exits 101 as the
 /// Rust CLI does when its thread panics. The panic must not unwind into
@@ -139,17 +113,6 @@ pub mod host {
         };
         // SAFETY: lent for the call.
         unsafe { copy_out(text, buf, len) }
-    }
-
-    /// Rust's `Display` of the `io::Error` with this error word.
-    ///
-    /// # Safety
-    /// `buf` is a lent writable slice.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn hc_io_error(word: u64, buf: *mut u8, len: usize) -> i64 {
-        let text = io_error(word).to_string();
-        // SAFETY: lent for the call.
-        unsafe { copy_out(Some(text.as_bytes()), buf, len) }
     }
 
     /// 1 when `path` is a regular file the host would run (on Unix, with an

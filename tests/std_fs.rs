@@ -13,7 +13,8 @@ const DRIVER: &str = r#"use @vesper-std/fs::{
     IoError, Metadata, read, read_path, read_string, write, append, create_new, replace, rename,
     remove_file, remove_dir, remove_dir_all, create_dir, create_dir_all, metadata,
     symlink_metadata, exists, kind_file, kind_dir, is_executable, canonicalize, write_stdout,
-    write_stderr
+    write_stderr,
+    symlink_metadata, exists, kind_file, kind_dir, error_text, is_dir_path, is_file_path
 };
 use @vesper-std/fs::walk::{
     Entries, walk, list_dir, entry_count, entry_start, entry_end, entry_kind, entry_join
@@ -399,6 +400,39 @@ pub fn bench_read() -> u64 eff [Ffi[StdFs]] {
 
 pub fn bench_none() -> u64 eff [Ffi[StdFs]] {
     bench(0)
+}
+
+// `error_text` of every kind alone, then of OS errors 1-199 and an
+// NTSTATUS-style code, hashed in turn (#1896).
+pub fn error_texts() -> u64 eff [Ffi[StdFs]] {
+    let mut h: u64 = 0;
+    for k in 0..16 {
+        let t = error_text(IoError { kind: wrapping_u32(k), os: 0 });
+        h = mix(h, hash(in t.as_slice()));
+    }
+    for e in 1..200 {
+        let t = error_text(IoError { kind: 13, os: wrapping_u32(e) });
+        h = mix(h, hash(in t.as_slice()));
+    }
+    let t = error_text(IoError { kind: 13, os: 3489660980 });
+    mix(h, hash(in t.as_slice()))
+}
+
+// `is_dir_path` and `is_file_path` of a directory, a file and a missing
+// path: one bit each.
+fn kind_bits(in p: Str, shift: u32) -> u64 eff [Ffi[StdFs]] {
+    let mut bits: u64 = 0;
+    if is_dir_path(in p.as_bytes()) {
+        bits = bits | 1;
+    }
+    if is_file_path(in p.as_bytes()) {
+        bits = bits | 2;
+    }
+    wrapping_shl_u64(bits, shift)
+}
+
+pub fn path_kinds() -> u64 eff [Ffi[StdFs]] {
+    kind_bits(in "@DIR@", 0) | kind_bits(in "@DIR@/kinds.txt", 2) | kind_bits(in "@DIR@/missing", 4)
 }
 "#;
 
@@ -866,4 +900,66 @@ fn canonicalize_matches_std() {
     }
     let checked = check_driver(&source(&dir));
     assert_eq!(agree(&checked, "canonical_paths", &MODES), want);
+}
+
+/// The `io::Error` of a `@vesper-std` error word, as the hybrid's driver
+/// host decoded it before `error_text` (#1896).
+fn io_error(word: u64) -> std::io::Error {
+    use std::io::ErrorKind as K;
+    let os = (word >> 32) as u32;
+    if os != 0 {
+        return std::io::Error::from_raw_os_error(os as i32);
+    }
+    let kind = match word & 0xff {
+        1 => K::NotFound,
+        2 => K::PermissionDenied,
+        3 => K::AlreadyExists,
+        4 => K::NotADirectory,
+        5 => K::IsADirectory,
+        6 => K::DirectoryNotEmpty,
+        7 => K::InvalidInput,
+        8 => K::Interrupted,
+        9 => K::UnexpectedEof,
+        10 => K::WriteZero,
+        11 => K::Unsupported,
+        12 => K::OutOfMemory,
+        _ => K::Other,
+    };
+    std::io::Error::from(kind)
+}
+
+#[test]
+fn error_text_is_rusts_display() {
+    let dir = Temp::new("std-fs");
+    let checked = check_driver(&source(&dir));
+    let mut want = 0;
+    for k in 0..16u64 {
+        want = mix(want, hash(io_error(k).to_string().as_bytes()));
+    }
+    for e in 1..200u64 {
+        want = mix(want, hash(io_error(13 | (e << 32)).to_string().as_bytes()));
+    }
+    want = mix(
+        want,
+        hash(io_error(13 | (0xD000_0034 << 32)).to_string().as_bytes()),
+    );
+    for mode in MODES {
+        assert_eq!(agree(&checked, "error_texts", &[mode]), want, "{mode:?}");
+    }
+}
+
+#[test]
+fn path_kinds_follow_std() {
+    let dir = Temp::new("std-fs");
+    fs::write(dir.path().join("kinds.txt"), b"x").unwrap();
+    let checked = check_driver(&source(&dir));
+    let mut want = 0;
+    for (i, p) in ["", "kinds.txt", "missing"].iter().enumerate() {
+        let p = dir.path().join(p);
+        want |= u64::from(p.is_dir()) << (2 * i);
+        want |= u64::from(p.is_file()) << (2 * i + 1);
+    }
+    for mode in MODES {
+        assert_eq!(agree(&checked, "path_kinds", &[mode]), want, "{mode:?}");
+    }
 }

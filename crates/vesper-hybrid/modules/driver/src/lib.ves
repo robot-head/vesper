@@ -80,6 +80,8 @@ use @vesper-std/process::{
 };
 use @vesper-std/fs::{
     IoError,
+    is_dir_path,
+    is_file_path,
     read_path,
     write_path,
     replace_path,
@@ -101,7 +103,14 @@ use @vesper-std/fmt::{
 };
 // SH5 lane 13 (#1336): the layers of the commands off the compile path.
 use @vesper/driver-commands::{
-    run as run_command
+    run as run_command,
+    io_error_text as commands_io_error_text,
+    join,
+    measure_tee
+};
+// Target triples (#1896).
+use @vesper/driver::triple::{
+    is_windows as triple_is_windows
 };
 // hd_step group 2 (#1893): the front-end passes in Vesper.
 use self::front::{
@@ -126,10 +135,6 @@ fn panicked() -> i64 {
 // The passes (`Step` in crates/vesper-hybrid/src/driver.rs). A pass
 // returns a count or 0, `fail_code()` when its error message is the
 // session's text, or `panic_code()`.
-fn step_is_package() -> u32 {
-    1
-}
-
 fn step_load() -> u32 {
     2
 }
@@ -202,16 +207,8 @@ fn step_native_object() -> u32 {
     18
 }
 
-fn step_is_windows_target() -> u32 {
-    19
-}
-
 fn step_windows_link() -> u32 {
     20
-}
-
-fn step_tee() -> u32 {
-    21
 }
 
 fn step_emit_hir() -> u32 {
@@ -230,16 +227,17 @@ fn step_emit_clif() -> u32 {
     26
 }
 
-fn step_io_error() -> u32 {
-    27
-}
-
 fn step_wasm_input() -> u32 {
     60
 }
 
 fn step_ebpf_input() -> u32 {
     61
+}
+
+// Group 1's range (70-79, #1896).
+fn step_load_package() -> u32 {
+    70
 }
 
 fn fail_code() -> i64 {
@@ -397,23 +395,19 @@ pub fn main_code()
 // A package is assembled by the package loader. For a standalone file, pass
 // the source bytes to the Rust session that still holds the parse and world.
 // `source` receives a standalone file's bytes; `package` is set for a
-// package.
+// package: a directory holding a `Loom.toml` (`packages::is_package`).
 fn load_input(inout s: Session, in o: Options, inout source: ChunkSeq[u8], inout package: bool)
     -> i64 eff [Ffi[StdFs], Ffi[HybridDriver]] {
-    let r = step(inout s, step_is_package());
-    if is_failure(r) {
-        return pass_failed(in s, r);
-    }
-    package = r == 1;
-    let r = if r == 1 {
+    let input = value(in o, slot_input());
+    package = is_package(in input.as_slice());
+    let r = if package {
         let mut err: ChunkSeq[u8] = ChunkSeq::new[u8]();
         package_checks(in o, inout err);
         if err.len() != 0 {
             return error(in err.as_slice());
         }
-        step(inout s, step_load())
+        step(inout s, step_load_package())
     } else {
-        let input = value(in o, slot_input());
         let failed = handle Fail[IoError] in {
             source = read_path(in input.as_slice());
             0
@@ -424,7 +418,7 @@ fn load_input(inout s: Session, in o: Options, inout source: ChunkSeq[u8], inout
         if failed != 0 {
             let mut message = input;
             message.extend(in ": ".as_bytes());
-            let detail = io_error_text(inout s, wrapping_sub(failed, 2));
+            let detail = io_error_text(wrapping_sub(failed, 2));
             message.extend(in detail.as_slice());
             return error(in message.as_slice());
         }
@@ -439,9 +433,18 @@ fn load_input(inout s: Session, in o: Options, inout source: ChunkSeq[u8], inout
     0
 }
 
+// `packages::is_package`: `path.is_dir() && path.join("Loom.toml").is_file()`.
+fn is_package(in path: Slice[u8]) -> bool eff [Ffi[StdFs]] {
+    if !is_dir_path(in path) {
+        return false;
+    }
+    let manifest = join(in path, in "Loom.toml".as_bytes(), os() == os_windows());
+    is_file_path(in manifest.as_slice())
+}
+
 // `cli()` of src/main.rs from loading the input on, pass by pass.
 fn drive(inout s: Session, in o: Options)
-    -> i64 eff [Ffi[StdFs], Ffi[StdProcess], Ffi[StdEnv], Ffi[HybridDriver]] {
+    -> i64 eff [Ffi[StdFs], Ffi[StdProcess], Ffi[StdEnv], Ffi[HybridDriver], Ffi[HybridCommands]] {
     let c = o.command;
     let mut source: ChunkSeq[u8] = ChunkSeq::new[u8]();
     let mut package = false;
@@ -583,7 +586,7 @@ fn write_output(inout s: Session, in o: Options, in bytes: Slice[u8])
     if failed == 0 {
         return 0;
     }
-    let m = io_error_text(inout s, wrapping_sub(failed, 2));
+    let m = io_error_text(wrapping_sub(failed, 2));
     error(in m.as_slice())
 }
 
@@ -605,7 +608,7 @@ fn pass_with(inout s: Session, which: u32, in a: Slice[u8]) -> i64 eff [Ffi[Hybr
 }
 
 fn build(inout s: Session, in o: Options)
-    -> i64 eff [Ffi[StdFs], Ffi[StdProcess], Ffi[StdEnv], Ffi[HybridDriver]] {
+    -> i64 eff [Ffi[StdFs], Ffi[StdProcess], Ffi[StdEnv], Ffi[HybridDriver], Ffi[HybridCommands]] {
     // Wave-eight lane 2: the direct verified code generator (§42).
     if has(in o, slot_codegen()) {
         if !is(in o, slot_codegen(), in "verified") {
@@ -642,12 +645,8 @@ fn build(inout s: Session, in o: Options)
     }
     // Windows targets link with link.exe/lld-link (lane 24, #347); the
     // default `cc` there means "find the MSVC linker".
-    let r = step(inout s, step_is_windows_target());
-    if is_failure(r) {
-        return pass_failed(in s, r);
-    }
     let mut built = path;
-    if r == 1 {
+    if is_windows_target(in o) {
         let request = windows_link_request(in object.as_slice(), in built.as_slice(), in o);
         let q = step_with(inout s, step_windows_link(), in request.as_slice());
         if is_failure(q) {
@@ -658,7 +657,7 @@ fn build(inout s: Session, in o: Options)
         let linker = value(in o, slot_linker());
         let failed = link(in linker.as_slice(), in object.as_slice(), in built.as_slice());
         if failed != 0 {
-            return link_failed(inout s, in linker.as_slice(), failed);
+            return link_failed(in linker.as_slice(), failed);
         }
     }
     let r = remove(inout s, in object.as_slice());
@@ -671,7 +670,7 @@ fn build(inout s: Session, in o: Options)
     line.push(10);
     print(stdout_stream(), in line.as_slice());
     if o.tee {
-        return pass_with(inout s, step_tee(), in built.as_slice());
+        return measure_tee(in built.as_slice());
     }
     0
 }
@@ -804,7 +803,7 @@ fn error_word(e: IoError) -> u64 {
     wrapping_add(2, widen_u64(e.kind) | wrapping_shl_u64(widen_u64(e.os), 32))
 }
 
-fn link_failed(inout s: Session, in linker: Slice[u8], failed: u64) -> i64 eff [Ffi[HybridDriver]] {
+fn link_failed(in linker: Slice[u8], failed: u64) -> i64 eff [Ffi[StdFs], Ffi[HybridDriver]] {
     if failed == 1 {
         return error(in "native linker failed".as_bytes());
     }
@@ -812,21 +811,24 @@ fn link_failed(inout s: Session, in linker: Slice[u8], failed: u64) -> i64 eff [
     m.extend(in "could not invoke native linker '".as_bytes());
     m.extend(in linker);
     m.extend(in "': ".as_bytes());
-    let t = io_error_text(inout s, wrapping_sub(failed, 2));
+    let t = io_error_text(wrapping_sub(failed, 2));
     m.extend(in t.as_slice());
     error(in m.as_slice())
 }
 
-// Rust's `Display` of an `io::Error` with this word.
-fn io_error_text(inout s: Session, word: u64) -> ChunkSeq[u8] eff [Ffi[HybridDriver]] {
-    let mut w: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    let mut x = word;
-    for _ in 0..8 {
-        w.push(wrapping_u8(x & 255));
-        x = wrapping_shr_u64(x, 8);
+// Rust's `Display` of an `io::Error` with this word (@vesper-std/fs).
+fn io_error_text(word: u64) -> ChunkSeq[u8] eff [Ffi[StdFs]] {
+    commands_io_error_text(word)
+}
+
+// `native::windows::is_windows_target`: `--target` names Windows
+// (@vesper/driver::triple), or, with no `--target`, the host is Windows.
+fn is_windows_target(in o: Options) -> bool {
+    if has(in o, slot_target()) {
+        let t = value(in o, slot_target());
+        return triple_is_windows(in t.as_slice());
     }
-    let r = step_with(inout s, step_io_error(), in w.as_slice());
-    text(in s)
+    os() == os_windows()
 }
 
 // Remove the object file: 0, or the exit code of the error.
@@ -845,7 +847,7 @@ fn remove(inout s: Session, in object: Slice[u8]) -> i64 eff [Ffi[StdFs], Ffi[Hy
     if failed == 0 {
         return 0;
     }
-    let m = io_error_text(inout s, wrapping_sub(failed, 2));
+    let m = io_error_text(wrapping_sub(failed, 2));
     error(in m.as_slice())
 }
 
@@ -938,7 +940,7 @@ fn native_code(inout s: Session, in o: Options, which: u32, inout out: ChunkSeq[
         if failed != 0 {
             let mut m = path;
             m.extend(in ": ".as_bytes());
-            let detail = io_error_text(inout s, wrapping_sub(failed, 2));
+            let detail = io_error_text(wrapping_sub(failed, 2));
             m.extend(in detail.as_slice());
             return error(in m.as_slice());
         }
@@ -1059,7 +1061,7 @@ fn write_file(inout s: Session, in path: Slice[u8], in data: Slice[u8])
     if failed == 0 {
         return 0;
     }
-    let message = io_error_text(inout s, wrapping_sub(failed, 2));
+    let message = io_error_text(wrapping_sub(failed, 2));
     error(in message.as_slice())
 }
 
