@@ -788,6 +788,8 @@ loom_calculus_check = port_checks(
                 "unsafe_ffi_policy_relaxation_is_rejected_for_existing_and_new_packages",
                 "manifest_cases_match_the_toml_crate",
                 "semver_cases_match_the_semver_crate",
+                "edge_cases_match_serde_json",
+                "graphs_match_the_rust_graph_command",
             ],
             ["documented_manifest_is_declarative_and_secure_by_default"],
         ),

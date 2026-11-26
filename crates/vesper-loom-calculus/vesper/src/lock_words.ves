@@ -6,14 +6,17 @@
 // parses and every set is ascending; only native requirements can still be
 // malformed.
 //
-// Strings are appended to `text` as they are decoded and every occurrence
-// is a fresh entry: the table goes without the order flag, so Vesper sorts
-// and merges the occurrences itself.
+// `text` is `c` followed by the decoded strings that had escapes and the
+// requirements' display texts. Occurrences are interned, as `Enc` does;
+// the table goes without the order flag, so Vesper sorts it.
 use self::semver_text::{SCmp, parse_version, parse_req};
 use self::lock_json::{req_display};
 use @vesper-std/toml::debug::{utf8_at};
 
 const NO_NODE: u64 = 18446744073709551615;
+const FNV_OFFSET: u64 = 14695981039346656037;
+const FNV_PRIME: u64 = 1099511628211;
+const INTERN_MIN_SLOTS: u64 = 256;
 
 enum Kind: u64 {
     Object = 0,
@@ -105,6 +108,10 @@ struct Dom {
 // The word stream under construction (src/port.rs, "Input words").
 struct W {
     occ: ChunkSeq[u64],
+    // Interned occurrences: (hash, occurrence + 1) slots, open addressing;
+    // `used` slots are taken.
+    slots: ChunkSeq[u64],
+    used: u64,
     vers: ChunkSeq[u64],
     nver: u64,
     reqs: ChunkSeq[u64],
@@ -164,6 +171,21 @@ fn put_scalar(inout t: ChunkSeq[u8], cp: u64) {
 // A string at d.i (its opening quote), decoded onto d.text.
 fn read_text(inout d: Dom, in c: Slice[u8]) -> (u64, u64) {
     d.i = wrapping_add(d.i, 1);
+    // Without an escape, the string is its own bytes in the copy of `c`
+    // at the front of the text.
+    let start = d.i;
+    let mut j = start;
+    loop {
+        let ch = at(in c, j);
+        if j >= c.len() || ch == Ch::Quote {
+            d.i = wrapping_add(j, 1);
+            return (start, j);
+        }
+        if ch == Ch::Backslash {
+            break;
+        }
+        j = wrapping_add(j, 1);
+    }
     let a = d.text.len();
     loop {
         let ch = at(in c, d.i);
@@ -190,7 +212,10 @@ fn read_text(inout d: Dom, in c: Slice[u8]) -> (u64, u64) {
         } else if e == Ch::LowerU {
             let mut cp: u64 = 0;
             for k in 0..HEX_DIGITS {
-                cp = wrapping_add(wrapping_mul(cp, HEX_BASE), hex_value(at(in c, wrapping_add(d.i, k))));
+                cp = wrapping_add(
+                    wrapping_mul(cp, HEX_BASE),
+                    hex_value(at(in c, wrapping_add(d.i, k)))
+                );
             }
             d.i = wrapping_add(d.i, HEX_DIGITS);
             put_scalar(inout d.text, cp);
@@ -338,16 +363,121 @@ fn count(in d: Dom, n: u64) -> u64 {
     }
 }
 
-fn occ(inout w: W, a: u64, b: u64) -> u64 {
-    let i = wrapping_shr_u64(w.occ.len(), 1);
+// FNV-1a over t[a..b].
+fn fnv(in t: Slice[u8], a: u64, b: u64) -> u64 {
+    let mut h = FNV_OFFSET;
+    for i in a..b {
+        h = wrapping_mul(h ^ at(in t, i), FNV_PRIME);
+    }
+    h
+}
+
+fn same_range(in t: Slice[u8], a: u64, n: u64, x: u64, m: u64) -> bool {
+    if n != m {
+        return false;
+    }
+    for i in 0..n {
+        if at(in t, wrapping_add(a, i)) != at(in t, wrapping_add(x, i)) {
+            return false;
+        }
+    }
+    true
+}
+
+fn place(inout slots: ChunkSeq[u64], h: u64, entry: u64) {
+    let mask = wrapping_sub(wrapping_shr_u64(slots.len(), 1), 1);
+    let mut i = h & mask;
+    loop {
+        let at_slot = wrapping_add(wrapping_mul(i, 2), 1);
+        let e = match slots.try_get(at_slot) {
+            Option::Some(v) => v,
+            Option::None => 0,
+        };
+        if e == 0 {
+            let _ = slots.try_set(wrapping_mul(i, 2), h);
+            let _ = slots.try_set(at_slot, entry);
+            return;
+        }
+        i = wrapping_add(i, 1) & mask;
+    }
+}
+
+// Doubles the table (at least INTERN_MIN_SLOTS slots) and re-places its
+// entries.
+fn grow(inout w: W) {
+    let old_n = wrapping_shr_u64(w.slots.len(), 1);
+    let n = if old_n == 0 {
+        INTERN_MIN_SLOTS
+    } else {
+        wrapping_mul(old_n, 2)
+    };
+    let mut next: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    next.resize(wrapping_mul(n, 2), 0);
+    for i in 0..old_n {
+        let e = match w.slots.try_get(wrapping_add(wrapping_mul(i, 2), 1)) {
+            Option::Some(v) => v,
+            Option::None => 0,
+        };
+        if e != 0 {
+            let h = match w.slots.try_get(wrapping_mul(i, 2)) {
+                Option::Some(v) => v,
+                Option::None => 0,
+            };
+            place(inout next, h, e);
+        }
+    }
+    w.slots = next;
+}
+
+// The occurrence of t[a..b]: an earlier one with the same bytes, or a new
+// one. Interning keeps the table Vesper sorts small (`Enc::intern`).
+fn occ(inout w: W, in t: Slice[u8], a: u64, b: u64) -> u64 {
+    let n = wrapping_sub(b, a);
+    if wrapping_mul(wrapping_add(w.used, 1), 2) > wrapping_shr_u64(w.slots.len(), 1) {
+        grow(inout w);
+    }
+    let h = fnv(in t, a, b);
+    let mask = wrapping_sub(wrapping_shr_u64(w.slots.len(), 1), 1);
+    let mut i = h & mask;
+    loop {
+        let e = match w.slots.try_get(wrapping_add(wrapping_mul(i, 2), 1)) {
+            Option::Some(v) => v,
+            Option::None => 0,
+        };
+        if e == 0 {
+            break;
+        }
+        let eh = match w.slots.try_get(wrapping_mul(i, 2)) {
+            Option::Some(v) => v,
+            Option::None => 0,
+        };
+        if eh == h {
+            let o = wrapping_sub(e, 1);
+            let x = match w.occ.try_get(wrapping_mul(o, 2)) {
+                Option::Some(v) => v,
+                Option::None => 0,
+            };
+            let m = match w.occ.try_get(wrapping_add(wrapping_mul(o, 2), 1)) {
+                Option::Some(v) => v,
+                Option::None => 0,
+            };
+            if same_range(in t, a, n, x, m) {
+                return o;
+            }
+        }
+        i = wrapping_add(i, 1) & mask;
+    }
+    let o = wrapping_shr_u64(w.occ.len(), 1);
     w.occ.push(a);
-    w.occ.push(wrapping_sub(b, a));
-    i
+    w.occ.push(n);
+    place(inout w.slots, h, wrapping_add(o, 1));
+    w.used = wrapping_add(w.used, 1);
+    o
 }
 
 fn s(inout w: W, in d: Dom, n: u64) {
     let x = node(in d, n);
-    let i = occ(inout w, x.a, x.b);
+    let i = occ(inout w, in d.text.as_slice(), x.a, x.b);
     w.body.push(i);
 }
 
@@ -377,9 +507,9 @@ fn version(inout w: W, in d: Dom, n: u64) -> u64 {
     let x = node(in d, n);
     let (_ok, v) = parse_version(inout w.msg, in d.text.as_slice(), x.a, x.b);
     w.msg.clear();
-    let pre = occ(inout w, v.pre_a, v.pre_b);
-    let build = occ(inout w, v.build_a, v.build_b);
-    let text = occ(inout w, 0, 0);
+    let pre = occ(inout w, in d.text.as_slice(), v.pre_a, v.pre_b);
+    let build = occ(inout w, in d.text.as_slice(), v.build_a, v.build_b);
+    let text = occ(inout w, in d.text.as_slice(), 0, 0);
     w.vers.push(v.major);
     w.vers.push(v.minor);
     w.vers.push(v.patch);
@@ -402,13 +532,13 @@ fn req(inout w: W, inout d: Dom, a: u64, b: u64) -> (bool, u64) {
     let display = req_display(in d.text.as_slice(), in cs);
     let t0 = d.text.len();
     d.text.extend(in display.as_slice());
-    let text = occ(inout w, t0, d.text.len());
+    let text = occ(inout w, in d.text.as_slice(), t0, d.text.len());
     w.reqs.push(text);
     w.reqs.push(cs.len());
     for i in 0..cs.len() {
         match cs.try_get(i) {
             Option::Some(c) => {
-                let pre = occ(inout w, c.pre_a, c.pre_b);
+                let pre = occ(inout w, in d.text.as_slice(), c.pre_a, c.pre_b);
                 w.reqs.push(c.op);
                 w.reqs.push(c.major);
                 w.reqs.push(if c.has_minor { c.minor } else { 0 });
@@ -491,14 +621,14 @@ fn sys_dep(inout w: W, inout d: Dom, n: u64) {
         let (ok, r) = req(inout w, inout d, ra, rb);
         if ok {
             b(inout w, true);
-            let name = occ(inout w, x.a, split);
+            let name = occ(inout w, in d.text.as_slice(), x.a, split);
             w.body.push(name);
             w.body.push(r);
             return;
         }
     }
     b(inout w, false);
-    let empty = occ(inout w, 0, 0);
+    let empty = occ(inout w, in d.text.as_slice(), 0, 0);
     w.body.push(empty);
     w.body.push(0);
 }
@@ -578,8 +708,11 @@ fn manifest(inout w: W, inout d: Dom, m: u64) {
 // `c`, and the number of roots.
 pub fn solution_words(in c: Slice[u8]) -> (ChunkSeq[u64], ChunkSeq[u8], u64) {
     let mut d = Dom { nodes: ChunkSeq::new[Node](), text: ChunkSeq::new[u8](), i: 0 };
+    d.text.extend(in c);
     let mut w = W {
         occ: ChunkSeq::new[u64](),
+        slots: ChunkSeq::new[u64](),
+        used: 0,
         vers: ChunkSeq::new[u64](),
         nver: 0,
         reqs: ChunkSeq::new[u64](),
@@ -612,9 +745,7 @@ pub fn solution_words(in c: Slice[u8]) -> (ChunkSeq[u64], ChunkSeq[u8], u64) {
         }
         // The occurrence of the selection's own canonical JSON.
         let x = node(in d, p);
-        let t0 = d.text.len();
-        d.text.extend(in c[x.s0..x.s1]);
-        let json = occ(inout w, t0, d.text.len());
+        let json = occ(inout w, in d.text.as_slice(), x.s0, x.s1);
         w.body.push(json);
         set(inout w, in d, field(in d, p, "features"));
         manifest(inout w, inout d, field(in d, p, "manifest"));

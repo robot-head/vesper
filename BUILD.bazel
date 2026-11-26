@@ -399,6 +399,8 @@ vesper_crate(
             # @vesper/driver-commands formats through @vesper/fmt (#1996).
             "//crates/vesper-fmt:files",
             "//crates/vesper-lean-syntax:files",
+            # ... and graphs Loom.lock through @vesper/loom-calculus (#1996).
+            "//crates/vesper-loom-calculus:files",
             "//crates/vesper-pact:files",
             "//crates/vesper-resonance:files",
             "//crates/vesper-serde:files",
@@ -2130,6 +2132,7 @@ vesper_package(
         ":std_fs_package",
         ":std_process_package",
         "//crates/vesper-fmt:port_package",
+        "//crates/vesper-loom-calculus:port_package",
     ],
 )
 

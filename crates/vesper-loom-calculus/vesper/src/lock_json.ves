@@ -439,6 +439,18 @@ fn utf8_valid_up_to(in s: Slice[u8], a: u64, b: u64) -> u64 {
 fn parse_str(inout j: J, in t: Slice[u8]) -> (bool, u64, u64) {
     let a = j.st.len();
     loop {
+        // A run of plain bytes goes over at once.
+        let run = j.i;
+        loop {
+            let p = at(in t, j.i);
+            if p < Ch::Space || p == Ch::Quote || p == Ch::Backslash || p == EOF {
+                break;
+            }
+            j.i = wrapping_add(j.i, 1);
+        }
+        if j.i > run {
+            j.st.extend(in t[run..j.i]);
+        }
         let c = at(in t, j.i);
         if c == EOF {
             err(inout j, E_EOF_STRING);
@@ -693,7 +705,13 @@ fn parse_exponent(inout j: J, in t: Slice[u8], positive: bool, significand: u64,
     from_parts(inout j, positive, significand, final_exp)
 }
 
-fn parse_decimal_overflow(inout j: J, in t: Slice[u8], positive: bool, significand: u64, exponent: i64) -> N {
+fn parse_decimal_overflow(
+    inout j: J,
+    in t: Slice[u8],
+    positive: bool,
+    significand: u64,
+    exponent: i64
+) -> N {
     loop {
         if !is_digit(at(in t, j.i)) {
             break;
@@ -718,7 +736,13 @@ fn parse_decimal(inout j: J, in t: Slice[u8], positive: bool, significand0: u64,
         }
         let d = wrapping_sub(c, Ch::Zero);
         if overflows_u64(significand, d) {
-            return parse_decimal_overflow(inout j, in t, positive, significand, wrapping_add(before, after));
+            return parse_decimal_overflow(
+                inout j,
+                in t,
+                positive,
+                significand,
+                wrapping_add(before, after)
+            );
         }
         eat(inout j);
         significand = wrapping_add(wrapping_mul(significand, DECIMAL_BASE), d);
@@ -1146,10 +1170,12 @@ fn component(in s: Slice[u8], from: u64, to: u64) -> bool {
     }
     for i in from..to {
         let c = at(in s, i);
-        if !((c >= Ch::LowerA && c <= Ch::LowerZ)
-            || is_digit(c)
-            || c == Ch::Minus
-            || c == Ch::Underscore) {
+        if !(
+            (c >= Ch::LowerA && c <= Ch::LowerZ)
+                || is_digit(c)
+                || c == Ch::Minus
+                || c == Ch::Underscore
+        ) {
             return false;
         }
     }
@@ -1598,7 +1624,11 @@ fn strings_value(inout j: J, in t: Slice[u8], ty: u64) -> bool {
     if !open(inout j, in t, Ch::LBracket, "a sequence") {
         return false;
     }
-    let kind = if ty == T_NAME_SET { StrKind::Name } else { StrKind::Plain };
+    let kind = if ty == T_NAME_SET {
+        StrKind::Name
+    } else {
+        StrKind::Plain
+    };
     let mut q: ChunkSeq[u64] = ChunkSeq::new[u64]();
     let mut first = true;
     loop {
@@ -1733,7 +1763,13 @@ fn map_value(inout j: J, in t: Slice[u8], deps: bool) -> bool {
         let len = qw(in q, wrapping_add(base, 1));
         let next = wrapping_add(base, 4);
         if wrapping_add(i, 1) < count
-            && same_text(in j.st.as_slice(), a, len, qw(in q, next), qw(in q, wrapping_add(next, 1))) {
+            && same_text(
+                in j.st.as_slice(),
+                a,
+                len,
+                qw(in q, next),
+                qw(in q, wrapping_add(next, 1))
+            ) {
             continue;
         }
         if written > 0 {
@@ -1799,9 +1835,13 @@ fn unknown_field(inout j: J, a: u64, b: u64, k: u64) -> bool {
     custom(inout j)
 }
 
-fn field_index(in j: J, a: u64, b: u64, k: u64) -> u64 {
+// The field named j.st[a..b], or the field count. The search starts at
+// `hint`, the field after the previous one, where in-order input has it.
+fn field_index(in j: J, a: u64, b: u64, k: u64, hint: u64) -> u64 {
     let n = kcount(k);
-    for i in 0..n {
+    for step in 0..n {
+        let h = wrapping_add(hint, step);
+        let i = if h >= n { wrapping_sub(h, n) } else { h };
         let name = kfield(k, i).as_bytes();
         if wrapping_sub(b, a) == name.len() {
             let mut same = true;
@@ -1832,7 +1872,14 @@ fn struct_from_map(inout j: J, in t: Slice[u8], k: u64) -> bool {
         spans.push(MISSING);
         spans.push(0);
     }
+    // Each field goes out as `"name":value` as it is read, after a `{`, so
+    // fields that come in declaration order with nothing to add or drop
+    // are already the output (the common case); otherwise the spans
+    // rebuild it.
     let mark = j.out.len();
+    j.out.push(wrapping_u8(Ch::LBrace));
+    let mut in_order = true;
+    let mut last = MISSING;
     let mut first = true;
     loop {
         let r = next_key(inout j, in t, inout first);
@@ -1847,7 +1894,12 @@ fn struct_from_map(inout j: J, in t: Slice[u8], k: u64) -> bool {
         if !ok {
             return map_failed(inout j, in t);
         }
-        let f = field_index(in j, a, b, k);
+        let hint = if last == MISSING || wrapping_add(last, 1) >= count {
+            0
+        } else {
+            wrapping_add(last, 1)
+        };
+        let f = field_index(in j, a, b, k, hint);
         if f == count {
             unknown_field(inout j, a, b, k);
             return map_failed(inout j, in t);
@@ -1863,6 +1915,18 @@ fn struct_from_map(inout j: J, in t: Slice[u8], k: u64) -> bool {
         if !colon(inout j, in t) {
             return map_failed(inout j, in t);
         }
+        if last != MISSING {
+            j.out.push(wrapping_u8(Ch::Comma));
+            if f < last {
+                in_order = false;
+            }
+        }
+        last = f;
+        // Field names need no escapes.
+        j.out.push(wrapping_u8(Ch::Quote));
+        j.out.extend(in kfield(k, f).as_bytes());
+        j.out.push(wrapping_u8(Ch::Quote));
+        j.out.push(wrapping_u8(Ch::Colon));
         let start = j.out.len();
         if !value(inout j, in t, ktype(k, f)) {
             return map_failed(inout j, in t);
@@ -1882,6 +1946,20 @@ fn struct_from_map(inout j: J, in t: Slice[u8], k: u64) -> bool {
         }
     }
     eat(inout j);
+    let mut fast = in_order;
+    for i in 0..count {
+        let s = qw(in spans, wrapping_mul(i, 2));
+        let e = qw(in spans, wrapping_add(wrapping_mul(i, 2), 1));
+        if s == MISSING {
+            fast = fast && kskippable(k, i);
+        } else {
+            fast = fast && !kskipped(k, i, in j.out[s..e]);
+        }
+    }
+    if fast {
+        j.out.push(wrapping_u8(Ch::RBrace));
+        return true;
+    }
     let mut json: ChunkSeq[u8] = ChunkSeq::new[u8]();
     json.push(wrapping_u8(Ch::LBrace));
     let mut written = false;
@@ -1993,7 +2071,11 @@ fn render(in j: J, in t: Slice[u8]) -> ChunkSeq[u8] {
         }
     }
     let col0 = wrapping_sub(p, line_start);
-    let col = if j.col_sub > col0 { 0 } else { wrapping_sub(col0, j.col_sub) };
+    let col = if j.col_sub > col0 {
+        0
+    } else {
+        wrapping_sub(col0, j.col_sub)
+    };
     put(inout out, " at line ");
     put_dec(inout out, line);
     put(inout out, " column ");

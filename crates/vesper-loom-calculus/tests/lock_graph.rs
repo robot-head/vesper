@@ -393,7 +393,6 @@ fn render_dot(report: &GraphReport) -> String {
     out
 }
 
-
 struct Rng(u64);
 impl Rng {
     fn next(&mut self) -> u64 {
@@ -420,7 +419,13 @@ impl Rng {
 }
 
 const NAMES: &[&str] = &[
-    "@org/app", "@org/core", "@org/net", "std/bytes", "@b/x", "@b/y", "@org/q-9",
+    "@org/app",
+    "@org/core",
+    "@org/net",
+    "std/bytes",
+    "@b/x",
+    "@b/y",
+    "@org/q-9",
 ];
 const CAPS: &[&str] = &["Net", "Fail", "Io", "Map[K,V]"];
 const FEATURES: &[&str] = &["default", "tls", "x_y", "fast"];
@@ -578,7 +583,11 @@ fn lockfiles(n: usize) -> Vec<Vec<u8>> {
 fn options(lock: &[u8]) -> Vec<(Option<String>, bool, bool, bool)> {
     let mut focus = vec![None, Some("@none/missing".to_owned())];
     if let Ok(s) = serde_json::from_slice::<Solution>(lock) {
-        focus.extend(s.packages.iter().map(|p| Some(p.manifest.package.name.as_str().to_owned())));
+        focus.extend(
+            s.packages
+                .iter()
+                .map(|p| Some(p.manifest.package.name.as_str().to_owned())),
+        );
     }
     let mut out = vec![];
     for f in focus {
@@ -617,16 +626,31 @@ fn graphs_match_the_rust_graph_command() {
         diffs.is_empty(),
         "{} of {runs} differ:\n{}",
         diffs.len(),
-        diffs.iter().take(10).cloned().collect::<Vec<_>>().join("\n")
+        diffs
+            .iter()
+            .take(10)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n")
     );
-    assert!(graphs * 4 > runs, "too few valid graphs: {graphs} of {runs}");
+    assert!(
+        graphs * 4 > runs,
+        "too few valid graphs: {graphs} of {runs}"
+    );
 }
 
 #[test]
 fn focus_names_are_checked_like_package_name_parse() {
-    for f in ["@org/app", "std/bytes", "org/app", "@org", "", "@Org/app", "@org/app/x"] {
+    for f in [
+        "@org/app",
+        "std/bytes",
+        "org/app",
+        "@org",
+        "",
+        "@Org/app",
+        "@org/app/x",
+    ] {
         let want = PackageName::parse(f).err().unwrap_or_default();
         assert_eq!(graph_focus_error(f), want, "{f:?}");
     }
 }
-

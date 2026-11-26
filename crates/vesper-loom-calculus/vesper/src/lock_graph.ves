@@ -225,7 +225,15 @@ fn code_name(c: u64) -> Str {
 
 // `semantic_error`: with --json, the error report (a `json!` map, so its
 // keys are sorted) on stdout; the message is the error.
-fn semantic(inout run: GraphRun, in l: L, json: bool, in kind: Str, in message: ChunkSeq[u8], at: u64, n: u64) {
+fn semantic(
+    inout run: GraphRun,
+    in l: L,
+    json: bool,
+    in kind: Str,
+    in message: ChunkSeq[u8],
+    at: u64,
+    n: u64
+) {
     run.status = GRAPH_SEMANTIC;
     run.err.extend(in message.as_slice());
     if !json {
@@ -396,7 +404,11 @@ fn is_vis(in vis: ChunkSeq[bool], id: u64) -> bool {
 }
 
 fn direction(in g: G) -> Str {
-    if g.invert { "dependents" } else { "dependencies" }
+    if g.invert {
+        "dependents"
+    } else {
+        "dependencies"
+    }
 }
 
 fn node_ver(in l: L, n: GNode) -> u64 {
@@ -442,7 +454,10 @@ fn render_text(inout out: ChunkSeq[u8], in l: L, in g: G) {
         put_id(inout out, in l, g.focus);
         put(inout out, "\n");
     }
-    put(inout out, "Capability requirements describe the full validated snapshot, including when filtered.\n");
+    put(
+        inout out,
+        "Capability requirements describe the full validated snapshot, including when filtered.\n"
+    );
     for i in 0..g.nodes.len() {
         let n = gnode(in l, sw(in g.nodes, i));
         put_id(inout out, in l, n.name);
@@ -513,7 +528,16 @@ fn dot_id(inout out: ChunkSeq[u8], in l: L, in prefix: Str, id: u64) {
     json_text(inout out, in t);
 }
 
-fn dot_edge(inout out: ChunkSeq[u8], in l: L, in g: G, in pa: Str, a: u64, in pb: Str, b: u64, in label: ChunkSeq[u8]) {
+fn dot_edge(
+    inout out: ChunkSeq[u8],
+    in l: L,
+    in g: G,
+    in pa: Str,
+    a: u64,
+    in pb: Str,
+    b: u64,
+    in label: ChunkSeq[u8]
+) {
     put(inout out, "  ");
     if g.invert {
         dot_id(inout out, in l, pb, b);
@@ -556,7 +580,14 @@ fn render_dot(inout out: ChunkSeq[u8], in l: L, in g: G) {
         dot_id(inout out, in l, "pkg:", n.name);
         put(inout out, " [shape=box, label=");
         json_text(inout out, in label);
-        put(inout out, if root { ", peripheries=2];\n" } else { ", peripheries=1];\n" });
+        put(
+            inout out,
+            if root {
+                ", peripheries=2];\n"
+            } else {
+                ", peripheries=1];\n"
+            }
+        );
     }
     for i in 0..g.systems.len() {
         let id = sw(in g.systems, i);
@@ -749,7 +780,14 @@ pub fn graph_focus_error(in name: Slice[u8]) -> ChunkSeq[u8] {
 
 // `vesper graph` on the bytes of a Loom.lock, after the option checks
 // (`graph_focus_error`, --json with --dot) and the file read.
-pub fn graph_run(in lock: Slice[u8], has_focus: bool, in focus: Slice[u8], invert: bool, json: bool, dot: bool) -> GraphRun {
+pub fn graph_run(
+    in lock: Slice[u8],
+    has_focus: bool,
+    in focus: Slice[u8],
+    invert: bool,
+    json: bool,
+    dot: bool
+) -> GraphRun {
     let mut run = GraphRun { status: GRAPH_OK, out: ChunkSeq::new[u8](), err: ChunkSeq::new[u8]() };
     let (ok, canonical) = solution_from_json(in lock);
     if !ok {

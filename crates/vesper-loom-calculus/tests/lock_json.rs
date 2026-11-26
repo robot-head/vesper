@@ -71,11 +71,35 @@ impl Rng {
 }
 
 const NAMES: &[&str] = &["@org/app", "@org/core", "@org/net", "std/bytes", "@b/x"];
-const CAPS: &[&str] = &["Net", "Fail", "Ffi[LibA]", "Map[K,V]", "q\"uote", "tab\there", "é", "\u{1F600}"];
+const CAPS: &[&str] = &[
+    "Net",
+    "Fail",
+    "Ffi[LibA]",
+    "Map[K,V]",
+    "q\"uote",
+    "tab\there",
+    "é",
+    "\u{1F600}",
+];
 const FEATURES: &[&str] = &["default", "tls", "x_y", "", "back\\slash"];
 const VERSIONS: &[&str] = &["1.0.0", "1.2.3-alpha.1", "0.9.2", "2.0.0+build.01"];
-const REQS: &[&str] = &["^1", "~1.2", ">=1.2.3-alpha.1", "*", "0.9", ">1.0, <1.5", "1.*", "=1.2.3"];
-const SYS: &[&str] = &["liburing ^2.6.0", "zlib >=1.2, <2", "bad", "zlib\u{3000}1.2", "libc nope"];
+const REQS: &[&str] = &[
+    "^1",
+    "~1.2",
+    ">=1.2.3-alpha.1",
+    "*",
+    "0.9",
+    ">1.0, <1.5",
+    "1.*",
+    "=1.2.3",
+];
+const SYS: &[&str] = &[
+    "liburing ^2.6.0",
+    "zlib >=1.2, <2",
+    "bad",
+    "zlib\u{3000}1.2",
+    "libc nope",
+];
 const PATHS: &[&str] = &["build.vsp", "proto/", "a\\b", ""];
 
 fn name(s: &str) -> PackageName {
@@ -116,8 +140,16 @@ fn manifest(rng: &mut Rng, own: &str) -> Manifest {
             license: rng.chance(30).then(|| "MIT".to_owned()),
             capability_ceiling: rng.some(CAPS, 3),
             forbid_unsafe_ffi: rng.chance(70),
-            vsys: if rng.chance(20) { vec!["b.vsys".into(), "a.vsys".into()] } else { vec![] },
-            objects: if rng.chance(10) { vec!["x.o".into()] } else { vec![] },
+            vsys: if rng.chance(20) {
+                vec!["b.vsys".into(), "a.vsys".into()]
+            } else {
+                vec![]
+            },
+            objects: if rng.chance(10) {
+                vec!["x.o".into()]
+            } else {
+                vec![]
+            },
         },
         features,
         dependencies,
@@ -143,7 +175,10 @@ fn manifest(rng: &mut Rng, own: &str) -> Manifest {
 fn solution(rng: &mut Rng) -> Solution {
     let packages = (0..rng.below(4))
         .map(|_| Selection {
-            manifest: { let name = rng.pick(NAMES); manifest(rng, name) },
+            manifest: {
+                let name = rng.pick(NAMES);
+                manifest(rng, name)
+            },
             features: rng.some(FEATURES, 2),
         })
         .collect();
@@ -307,7 +342,18 @@ fn edge_cases() -> Vec<Vec<u8>> {
         "{\n  \"schema_version\": 1,\n  \"roots\": [\"@acme/app\"],\n  \"packages\": []\n}".into(),
         "{not-json".into(),
     ];
-    for big in [1.5, 100.0, 1e16, 1e15, 0.0001, 0.00001, 1e-7, 123.456, 5e-324, 1.7976931348623157e308] {
+    for big in [
+        1.5,
+        100.0,
+        1e16,
+        1e15,
+        0.0001,
+        0.00001,
+        1e-7,
+        123.456,
+        5e-324,
+        1.7976931348623157e308,
+    ] {
         cases.push(format!("{{\"schema_version\":{big:e}}}"));
         cases.push(format!("{{\"schema_version\":-{big}}}"));
     }

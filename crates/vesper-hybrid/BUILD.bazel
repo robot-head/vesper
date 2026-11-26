@@ -219,6 +219,9 @@ vesper_hybrid(
             "//:wit_component_package",
             # `vesper fmt`'s formatter (#1996 part 3d).
             "//crates/vesper-fmt:port_package",
+            # `vesper graph`'s lockfile reader and report (#1996).
+            "//crates/vesper-loom-calculus:port_package",
+            "//crates/vesper-serde:port_package",
         ],
         # The eBPF backend swap (#1290) builds on @vesper/ebpf-backend.
         "hybrid_ebpf_backend": [
