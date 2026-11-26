@@ -45,6 +45,10 @@ under the 1.5x bar, and part 2 adds hover and the documentation links:
   `Debouncer`, `PendingRequests` and `CancelToken` of
   `crates/vesper-lsp/src/lens.rs`, part 10a (#1828).
 
+The session's parameter checks (`validate_input`, `cancel_params` and the
+`vesper.proofAudit` arguments, part 10b of #1828) read the JSON-RPC token
+tape, so they live in `@vesper/lsp` (`packages/vesper-lsp/src/commands.ves`).
+
 The source is parsed with `@vesper/front` and `@vesper/ast`, positions use
 `@vesper/span`, and the JSON is written byte for byte as serde_json writes
 it. The package does not depend on `@vesper/serde` (see the lane 16 report,
