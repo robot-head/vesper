@@ -40,6 +40,11 @@ fn pack_filter(code: u16, jt: u8, jf: u8, k: u32) -> u64 {
     c | t | f | kv
 }
 
+// A JEQ_K word with jump-if-true `jt` (at most 255) and constant `k`.
+fn pack_jeq(jt: u64, k: u64) -> u64 {
+    widen_u64(widen_u32(BPF_JMP_JEQ_K)) | (jt << 16) | (k << 32)
+}
+
 fn insn_code(w: u64) -> u16 {
     wrapping_u16(w)
 }
@@ -56,13 +61,6 @@ fn insn_k(w: u64) -> u32 {
     wrapping_u32(w >> 32)
 }
 
-fn u32_at(in s: ChunkSeq[u32], i: u64) -> u32 {
-    match s.try_get(i) {
-        Option::Some(v) => v,
-        Option::None => 0,
-    }
-}
-
 fn u64_slice_at(in s: Slice[u64], i: u64) -> u64 {
     match s.try_get(i) {
         Option::Some(v) => v,
@@ -70,113 +68,88 @@ fn u64_slice_at(in s: Slice[u64], i: u64) -> u64 {
     }
 }
 
-fn sort_dedup_u32(in src: Slice[u32]) -> ChunkSeq[u32] {
-    let mut tmp = ChunkSeq::new[u32]();
-    let n = src.len();
-    for i in 0..n {
-        let v = match src.try_get(i) {
-            Option::Some(x) => x,
-            Option::None => 0,
-        };
-        tmp.push(v);
-    }
-    let mut i: u64 = 1;
-    loop {
-        if i >= n {
-            break;
-        }
-        let key = u32_at(in tmp, i);
-        let mut j = i;
-        loop {
-            if j == 0 {
-                break;
-            }
-            let prev_idx = wrapping_sub(j, 1);
-            let prev = u32_at(in tmp, prev_idx);
-            if prev <= key {
-                break;
-            }
-            tmp.try_set(j, prev);
-            j = prev_idx;
-        }
-        tmp.try_set(j, key);
-        i = wrapping_add(i, 1);
-    }
-    // Compact runs of equal values in place, then drop the tail.
-    let mut kept: u64 = 0;
-    for k in 0..n {
-        let v = u32_at(in tmp, k);
-        if kept == 0 || v != u32_at(in tmp, wrapping_sub(kept, 1)) {
-            tmp.try_set(kept, v);
-            kept = wrapping_add(kept, 1);
-        }
-    }
-    tmp.truncate(kept);
-    tmp
-}
+// The kernel's check of one instruction: 0 when it is fine, else
+// VALIDATE_BAD_LOAD, VALIDATE_JUMP or VALIDATE_UNSUPPORTED (scalar, so the
+// per-instruction loop keeps it in a register).
+const VALIDATE_BAD_LOAD: u64 = 1;
+const VALIDATE_JUMP: u64 = 2;
+const VALIDATE_UNSUPPORTED: u64 = 3;
 
-fn validate_insn(at: u64, w: u64, len: u64) -> Option[SeccompFault] {
+fn validate_code(at: u64, w: u64, len: u64) -> u64 {
     let code = insn_code(w);
     let k = insn_k(w);
-    if code == BPF_LD_W_ABS {
-        if k % 4 != 0 || k >= SECCOMP_DATA_BYTES {
-            return Option::Some(
-                SeccompFault::BadLoad {
-                    at: at
-                }
-            );
-        }
-        return Option::None;
-    }
     if code == BPF_JMP_JEQ_K {
-        let jt = widen_u64(widen_u32(insn_jt(w)));
-        let jf = widen_u64(widen_u32(insn_jf(w)));
+        let jt = (w >> 16) & 255;
+        let jf = (w >> 24) & 255;
         let max_j = if jt > jf {
             jt
         } else {
             jf
         };
-        let far = wrapping_add(wrapping_add(at, 1), max_j);
-        if far >= len {
-            return Option::Some(
-                SeccompFault::JumpOutOfRange {
-                    at: at
-                }
-            );
+        if wrapping_add(wrapping_add(at, 1), max_j) >= len {
+            return VALIDATE_JUMP;
         }
-        return Option::None;
+        return 0;
     }
-    if code == BPF_JMP_JA {
-        let far = wrapping_add(wrapping_add(at, 1), widen_u64(k));
-        if far >= len {
-            return Option::Some(
-                SeccompFault::JumpOutOfRange {
-                    at: at
-                }
-            );
+    if code == BPF_LD_W_ABS {
+        if (k & 3) != 0 || k >= SECCOMP_DATA_BYTES {
+            return VALIDATE_BAD_LOAD;
         }
-        return Option::None;
+        return 0;
     }
     if code == BPF_RET_K {
-        return Option::None;
+        return 0;
     }
-    Option::Some(
-        SeccompFault::UnsupportedInstruction {
-            at: at,
-            code: code
+    if code == BPF_JMP_JA {
+        if wrapping_add(wrapping_add(at, 1), widen_u64(k)) >= len {
+            return VALIDATE_JUMP;
         }
-    )
+        return 0;
+    }
+    VALIDATE_UNSUPPORTED
 }
 
-fn jump_offset(from: u64, to: u64) -> Result[u8, SeccompFault] {
+// The first validation failure so far (`prev`, 0 for none), else this
+// instruction's: the code in the low byte, the opcode above it and the
+// index from bit 32.
+fn check_insn(prev: u64, at: u64, w: u64, len: u64) -> u64 {
+    if prev != 0 {
+        return prev;
+    }
+    let c = validate_code(at, w, len);
+    if c == 0 {
+        return 0;
+    }
+    c | wrapping_shl_u64(widen_u64(widen_u32(insn_code(w))), 8) | wrapping_shl_u64(at, 32)
+}
+
+fn validate_fault(c: u64, at: u64, w: u64) -> SeccompFault {
+    if c == VALIDATE_BAD_LOAD {
+        SeccompFault::BadLoad {
+            at: at
+        }
+    } else if c == VALIDATE_JUMP {
+        SeccompFault::JumpOutOfRange {
+            at: at
+        }
+    } else {
+        SeccompFault::UnsupportedInstruction {
+            at: at,
+            code: insn_code(w)
+        }
+    }
+}
+
+// The jump field from `from` to `to`, or 256 when it does not fit.
+fn jump_dist(from: u64, to: u64) -> u64 {
     if to <= from {
-        return Result::Err(SeccompFault::TooLong);
+        return 256;
     }
     let diff = wrapping_sub(wrapping_sub(to, from), 1);
     if diff > 255 {
-        return Result::Err(SeccompFault::TooLong);
+        return 256;
     }
-    Result::Ok(wrapping_u8(diff))
+    diff
 }
 
 pub fn seccomp_validate(in program: Slice[u64]) -> Result[(), SeccompFault] {
@@ -189,9 +162,9 @@ pub fn seccomp_validate(in program: Slice[u64]) -> Result[(), SeccompFault] {
     }
     for i in 0..len {
         let w = u64_slice_at(in program, i);
-        match validate_insn(i, w, len) {
-            Option::Some(e) => return Result::Err(e),
-            Option::None => {}
+        let c = validate_code(i, w, len);
+        if c != 0 {
+            return Result::Err(validate_fault(c, i, w));
         }
     }
     let last = u64_slice_at(in program, wrapping_sub(len, 1));
@@ -272,6 +245,47 @@ pub fn seccomp_evaluate(
     }
 }
 
+// Sorts `src` into `out[start..]` (one value a slot) and drops repeats;
+// returns how many distinct values it kept. `out` must have room for all of
+// `src` from `start`.
+fn sort_dedup_into(inout out: Slice[u64], start: u64, in src: Slice[u32]) -> u64 {
+    let n = src.len();
+    for i in 0..n {
+        let key = match src.try_get(i) {
+            Option::Some(x) => widen_u64(x),
+            Option::None => 0,
+        };
+        let mut j = wrapping_add(start, i);
+        loop {
+            if j == start {
+                break;
+            }
+            let prev = u64_slice_at(in out, wrapping_sub(j, 1));
+            if prev <= key {
+                break;
+            }
+            out.try_set(j, prev);
+            j = wrapping_sub(j, 1);
+        }
+        out.try_set(j, key);
+    }
+    let mut kept: u64 = 0;
+    let mut last: u64 = 0;
+    for k in 0..n {
+        let v = u64_slice_at(in out, wrapping_add(start, k));
+        if kept == 0 || v != last {
+            out.try_set(wrapping_add(start, kept), v);
+            kept = wrapping_add(kept, 1);
+            last = v;
+        }
+    }
+    kept
+}
+
+// The program is laid out in `out`, which needs room for every input value
+// plus nine instructions: the syscall numbers are sorted straight into
+// their jump slots, the ioctl requests into theirs, and each slot is then
+// rewritten as its jump.
 pub fn seccomp_compile(
     audit_arch: u32,
     ioctl_nr: u32,
@@ -280,85 +294,104 @@ pub fn seccomp_compile(
     in reqs_in: Slice[u32],
     inout out: Slice[u64]
 ) -> Result[u64, SeccompFault] {
-    let nrs = sort_dedup_u32(in nrs_in);
-    let reqs = sort_dedup_u32(in reqs_in);
-    let n = nrs.len();
-    let m = reqs.len();
-    let has_ioctl = m > 0;
+    let room = wrapping_add(wrapping_add(nrs_in.len(), reqs_in.len()), 9);
+    if room > out.len() {
+        return Result::Err(SeccompFault::TooLong);
+    }
+    let n = sort_dedup_into(inout out, 4, in nrs_in);
+    let has_ioctl = reqs_in.len() > 0;
     let ioctl_slot: u64 = if has_ioctl {
         1
     } else {
         0
     };
     let ioctl_block = wrapping_add(wrapping_add(4, n), wrapping_add(ioctl_slot, 1));
+    let reqs_at = wrapping_add(ioctl_block, 1);
+    let m = if has_ioctl {
+        sort_dedup_into(inout out, reqs_at, in reqs_in)
+    } else {
+        0
+    };
     let allow = if has_ioctl {
         wrapping_add(wrapping_add(ioctl_block, 1), wrapping_add(m, 1))
     } else {
         ioctl_block
     };
     let total = wrapping_add(allow, 1);
-    if total > SECCOMP_BPF_MAXINSNS || total > out.len() {
+    if total > SECCOMP_BPF_MAXINSNS {
         return Result::Err(SeccompFault::TooLong);
     }
 
-    let mut at_idx: u64 = 0;
-    out.try_set(at_idx, pack_filter(BPF_LD_W_ABS, 0, 0, OFF_ARCH));
-    at_idx = wrapping_add(at_idx, 1);
-    out.try_set(at_idx, pack_filter(BPF_JMP_JEQ_K, 1, 0, audit_arch));
-    at_idx = wrapping_add(at_idx, 1);
-    out.try_set(at_idx, pack_filter(BPF_RET_K, 0, 0, SECCOMP_RET_KILL_PROCESS));
-    at_idx = wrapping_add(at_idx, 1);
-    out.try_set(at_idx, pack_filter(BPF_LD_W_ABS, 0, 0, OFF_NR));
-    at_idx = wrapping_add(at_idx, 1);
+    // Each instruction is checked as it is written, against the program's
+    // final length; the first failure is reported after the layout, as a
+    // validation pass over the finished program would.
+    let w0 = pack_filter(BPF_LD_W_ABS, 0, 0, OFF_ARCH);
+    let w1 = pack_filter(BPF_JMP_JEQ_K, 1, 0, audit_arch);
+    let w2 = pack_filter(BPF_RET_K, 0, 0, SECCOMP_RET_KILL_PROCESS);
+    let w3 = pack_filter(BPF_LD_W_ABS, 0, 0, OFF_NR);
+    out.try_set(0, w0);
+    out.try_set(1, w1);
+    out.try_set(2, w2);
+    out.try_set(3, w3);
+    let mut bad = check_insn(0, 0, w0, total);
+    bad = check_insn(bad, 1, w1, total);
+    bad = check_insn(bad, 2, w2, total);
+    bad = check_insn(bad, 3, w3, total);
 
-    for i in 0..n {
-        let jt = match jump_offset(at_idx, allow) {
-            Result::Ok(v) => v,
-            Result::Err(e) => return Result::Err(e),
-        };
-        out.try_set(at_idx, pack_filter(BPF_JMP_JEQ_K, jt, 0, u32_at(in nrs, i)));
+    let mut at_idx: u64 = 4;
+    for _i in 0..n {
+        let jt = jump_dist(at_idx, allow);
+        if jt > 255 {
+            return Result::Err(SeccompFault::TooLong);
+        }
+        let w = pack_jeq(jt, u64_slice_at(in out, at_idx));
+        out.try_set(at_idx, w);
+        bad = check_insn(bad, at_idx, w, total);
         at_idx = wrapping_add(at_idx, 1);
     }
     if has_ioctl {
-        let jt = match jump_offset(at_idx, ioctl_block) {
-            Result::Ok(v) => v,
-            Result::Err(e) => return Result::Err(e),
-        };
-        out.try_set(at_idx, pack_filter(BPF_JMP_JEQ_K, jt, 0, ioctl_nr));
+        let jt = jump_dist(at_idx, ioctl_block);
+        if jt > 255 {
+            return Result::Err(SeccompFault::TooLong);
+        }
+        let w = pack_jeq(jt, widen_u64(ioctl_nr));
+        out.try_set(at_idx, w);
+        bad = check_insn(bad, at_idx, w, total);
         at_idx = wrapping_add(at_idx, 1);
     }
-    out.try_set(at_idx, pack_filter(BPF_RET_K, 0, 0, default_ret));
+    let ret_default = pack_filter(BPF_RET_K, 0, 0, default_ret);
+    out.try_set(at_idx, ret_default);
     at_idx = wrapping_add(at_idx, 1);
 
     if has_ioctl {
-        out.try_set(at_idx, pack_filter(BPF_LD_W_ABS, 0, 0, OFF_ARGS_1_LO));
+        let ld = pack_filter(BPF_LD_W_ABS, 0, 0, OFF_ARGS_1_LO);
+        out.try_set(at_idx, ld);
+        bad = check_insn(bad, at_idx, ld, total);
         at_idx = wrapping_add(at_idx, 1);
-        for j in 0..m {
-            let jt = match jump_offset(at_idx, allow) {
-                Result::Ok(v) => v,
-                Result::Err(e) => return Result::Err(e),
-            };
-            out.try_set(at_idx, pack_filter(BPF_JMP_JEQ_K, jt, 0, u32_at(in reqs, j)));
+        for _j in 0..m {
+            let jt = jump_dist(at_idx, allow);
+            if jt > 255 {
+                return Result::Err(SeccompFault::TooLong);
+            }
+            let w = pack_jeq(jt, u64_slice_at(in out, at_idx));
+            out.try_set(at_idx, w);
+            bad = check_insn(bad, at_idx, w, total);
             at_idx = wrapping_add(at_idx, 1);
         }
-        out.try_set(at_idx, pack_filter(BPF_RET_K, 0, 0, default_ret));
+        out.try_set(at_idx, ret_default);
         at_idx = wrapping_add(at_idx, 1);
     }
     out.try_set(at_idx, pack_filter(BPF_RET_K, 0, 0, SECCOMP_RET_ALLOW));
     at_idx = wrapping_add(at_idx, 1);
 
     let plen = at_idx;
-    for i in 0..plen {
-        match validate_insn(i, u64_slice_at(in out, i), plen) {
-            Option::Some(e) => return Result::Err(e),
-            Option::None => {}
-        }
+    if bad != 0 {
+        let at = wrapping_shr_u64(bad, 32);
+        let w = widen_u64(widen_u32(wrapping_u16(wrapping_shr_u64(bad, 8))));
+        return Result::Err(validate_fault(bad & 255, at, w));
     }
     if plen == 0 {
         return Result::Err(SeccompFault::EmptyProgram);
-    }
-    if insn_code(u64_slice_at(in out, wrapping_sub(plen, 1))) != BPF_RET_K {
-        return Result::Err(SeccompFault::NoTerminatingReturn);
     }
     Result::Ok(plen)
 }
