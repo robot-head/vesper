@@ -29,15 +29,15 @@ pub copy struct LineRow {
     slot: u64,
     line: u32,
     col: u32,
-    // the line's text: source[ta..tb]
-    ta: u64,
-    tb: u64,
+    // the line's text: source[text_start..text_end]
+    text_start: u64,
+    text_end: u64,
 }
 
 pub copy struct Fix {
-    at: u64,
+    slot: u64,
     label: u64,
-    call: bool,
+    is_call: bool,
 }
 
 pub struct Asm {
@@ -65,17 +65,17 @@ pub fn asm_new() -> Asm {
     }
 }
 
-fn reg(r: u8) -> Operand {
-    Operand::Reg(r)
+fn reg(register: u8) -> Operand {
+    Operand::Reg(register)
 }
 
-fn imm(v: i32) -> Operand {
-    Operand::Imm(v)
+fn imm(value: i32) -> Operand {
+    Operand::Imm(value)
 }
 
-pub fn slot_at(in s: ChunkSeq[RawInsn], i: u64) -> RawInsn {
-    match s.try_get(i) {
-        Option::Some(r) => r,
+pub fn slot_at(in slots: ChunkSeq[RawInsn], i: u64) -> RawInsn {
+    match slots.try_get(i) {
+        Option::Some(raw) => raw,
         Option::None => RawInsn { code: 0, dst: 0, src: 0, off: 0, imm: 0 },
     }
 }
@@ -90,24 +90,24 @@ impl Asm {
         wrapping_sub(self.labels.len(), 1)
     }
 
-    // `Asm::bind`; false when `l` is already bound.
-    pub fn bind(inout self, l: u64) -> bool {
-        let at = match self.labels.try_get(l) {
-            Option::Some(x) => x,
+    // `Asm::bind`; false when `label` is already bound.
+    pub fn bind(inout self, label: u64) -> bool {
+        let bound_slot = match self.labels.try_get(label) {
+            Option::Some(slot) => slot,
             Option::None => 0,
         };
-        if at != UNBOUND {
+        if bound_slot != UNBOUND {
             return false;
         }
-        let ok = self.labels.try_set(l, self.slots.len());
+        let ok = self.labels.try_set(label, self.slots.len());
         true
     }
 
-    pub fn insn(inout self, i: Insn) {
-        let e = encode(i);
-        self.slots.push(e.lo);
-        if e.n == 2 {
-            self.slots.push(e.hi);
+    pub fn insn(inout self, instr: Insn) {
+        let encoded = encode(instr);
+        self.slots.push(encoded.lo);
+        if encoded.n == 2 {
+            self.slots.push(encoded.hi);
         }
     }
 
@@ -123,24 +123,24 @@ impl Asm {
         self.alu64(AluOp::Mov, dst, reg(src));
     }
 
-    pub fn mov_i(inout self, dst: u8, v: i32) {
-        self.alu64(AluOp::Mov, dst, imm(v));
+    pub fn mov_i(inout self, dst: u8, value: i32) {
+        self.alu64(AluOp::Mov, dst, imm(value));
     }
 
     pub fn add_reg(inout self, dst: u8, src: u8) {
         self.alu64(AluOp::Add, dst, reg(src));
     }
 
-    pub fn add_i(inout self, dst: u8, v: i32) {
-        self.alu64(AluOp::Add, dst, imm(v));
+    pub fn add_i(inout self, dst: u8, value: i32) {
+        self.alu64(AluOp::Add, dst, imm(value));
     }
 
     pub fn endian(inout self, kind: Endian, bits: u8, dst: u8) {
         self.insn(Insn::Endian { kind: kind, bits: bits, dst: dst });
     }
 
-    pub fn ld_imm64(inout self, dst: u8, v: u64) {
-        self.insn(Insn::LdImm64 { dst: dst, imm: Imm64::Value(v) });
+    pub fn ld_imm64(inout self, dst: u8, value: u64) {
+        self.insn(Insn::LdImm64 { dst: dst, imm: Imm64::Value(value) });
     }
 
     pub fn ld_map(inout self, dst: u8, map: u64) {
@@ -157,8 +157,8 @@ impl Asm {
         self.insn(Insn::Stx { size: size, dst: dst, src: src, off: off });
     }
 
-    pub fn st(inout self, size: Size, dst: u8, off: i16, v: i32) {
-        self.insn(Insn::St { size: size, dst: dst, off: off, imm: v });
+    pub fn st(inout self, size: Size, dst: u8, off: i16, value: i32) {
+        self.insn(Insn::St { size: size, dst: dst, off: off, imm: value });
     }
 
     pub fn atomic_add(inout self, size: Size, dst: u8, off: i16, src: u8) {
@@ -176,26 +176,28 @@ impl Asm {
     }
 
     pub fn call_local(inout self, target: u64) {
-        self.fixes.push(Fix { at: self.slots.len(), label: target, call: true });
+        self.fixes.push(Fix { slot: self.slots.len(), label: target, is_call: true });
         self.insn(Insn::Call(CallTarget::Local(0)));
     }
 
     // `Asm::line`: the source position of the next instruction; a second
     // record for the same slot replaces the first (slots only grow, so
     // only the last record can share it).
-    pub fn line(inout self, line: u32, col: u32, ta: u64, tb: u64) {
+    pub fn line(inout self, line: u32, col: u32, text_start: u64, text_end: u64) {
         let slot = self.slots.len();
         let n = self.lines.len();
         if n > 0 {
             let last = match self.lines.try_get(wrapping_sub(n, 1)) {
-                Option::Some(l) => l.slot,
+                Option::Some(row) => row.slot,
                 Option::None => UNBOUND,
             };
             if last == slot {
                 self.lines.truncate(wrapping_sub(n, 1));
             }
         }
-        self.lines.push(LineRow { slot: slot, line: line, col: col, ta: ta, tb: tb });
+        self.lines.push(
+            LineRow { slot: slot, line: line, col: col, text_start: text_start, text_end: text_end }
+        );
     }
 
     pub fn function(inout self, name: u32, entry: u64) {
@@ -208,26 +210,26 @@ impl Asm {
     }
 
     pub fn ja(inout self, target: u64) {
-        self.fixes.push(Fix { at: self.slots.len(), label: target, call: false });
+        self.fixes.push(Fix { slot: self.slots.len(), label: target, is_call: false });
         self.insn(Insn::Ja { off: 0 });
     }
 
     pub fn jmp(inout self, op: JmpOp, dst: u8, src: Operand, target: u64) {
-        self.fixes.push(Fix { at: self.slots.len(), label: target, call: false });
+        self.fixes.push(Fix { slot: self.slots.len(), label: target, is_call: false });
         self.insn(Insn::Jcond { wide: true, op: op, dst: dst, src: src, off: 0 });
     }
 
-    pub fn jmp_i(inout self, op: JmpOp, dst: u8, v: i32, target: u64) {
-        self.jmp(op, dst, imm(v), target);
+    pub fn jmp_i(inout self, op: JmpOp, dst: u8, value: i32, target: u64) {
+        self.jmp(op, dst, imm(value), target);
     }
 
     pub fn jmp_reg(inout self, op: JmpOp, dst: u8, src: u8, target: u64) {
         self.jmp(op, dst, reg(src), target);
     }
 
-    pub fn resolve(in self, l: u64) -> u64 {
-        match self.labels.try_get(l) {
-            Option::Some(x) => x,
+    pub fn resolve(in self, label: u64) -> u64 {
+        match self.labels.try_get(label) {
+            Option::Some(slot) => slot,
             Option::None => UNBOUND,
         }
     }
@@ -237,46 +239,49 @@ impl Asm {
     // (`bad` is the slot).
     pub fn fix_up(inout self, inout bad: u64) -> u8 {
         for k in 0..self.fixes.len() {
-            let f = match self.fixes.try_get(k) {
-                Option::Some(x) => x,
-                Option::None => Fix { at: 0, label: 0, call: false },
+            let fix = match self.fixes.try_get(k) {
+                Option::Some(row) => row,
+                Option::None => Fix { slot: 0, label: 0, is_call: false },
             };
-            let target = self.resolve(f.label);
+            let target = self.resolve(fix.label);
             if target == UNBOUND {
-                bad = f.label;
+                bad = fix.label;
                 return 1;
             }
-            let rel = wrapping_sub(wrapping_i64(target), wrapping_add(wrapping_i64(f.at), 1));
-            let s = slot_at(in self.slots, f.at);
-            let wide_imm = f.call || s.code == CLASS_JMP32;
+            let offset = wrapping_sub(
+                wrapping_i64(target),
+                wrapping_add(wrapping_i64(fix.slot), 1)
+            );
+            let insn = slot_at(in self.slots, fix.slot);
+            let wide_imm = fix.is_call || insn.code == CLASS_JMP32;
             if wide_imm {
-                if rel < -2147483648 || rel > 2147483647 {
-                    bad = f.at;
+                if offset < -2147483648 || offset > 2147483647 {
+                    bad = fix.slot;
                     return 2;
                 }
                 let ok = self.slots.try_set(
-                    f.at,
+                    fix.slot,
                     RawInsn {
-                        code: s.code,
-                        dst: s.dst,
-                        src: s.src,
-                        off: s.off,
-                        imm: wrapping_i32(rel)
+                        code: insn.code,
+                        dst: insn.dst,
+                        src: insn.src,
+                        off: insn.off,
+                        imm: wrapping_i32(offset)
                     }
                 );
             } else {
-                if rel < -32768 || rel > 32767 {
-                    bad = f.at;
+                if offset < -32768 || offset > 32767 {
+                    bad = fix.slot;
                     return 2;
                 }
                 let ok = self.slots.try_set(
-                    f.at,
+                    fix.slot,
                     RawInsn {
-                        code: s.code,
-                        dst: s.dst,
-                        src: s.src,
-                        off: wrapping_i16(rel),
-                        imm: s.imm
+                        code: insn.code,
+                        dst: insn.dst,
+                        src: insn.src,
+                        off: wrapping_i16(offset),
+                        imm: insn.imm
                     }
                 );
             }
@@ -288,9 +293,9 @@ impl Asm {
 // `slot_off`: the frame offset of 8-byte slot `slot` below r10, with the
 // Rust `i16` arithmetic (wrapping, as a release build does).
 pub fn slot_off(slot: u32) -> i16 {
-    let s = wrapping_add(wrapping_i16(slot), 1);
-    let z: i16 = 0;
-    wrapping_sub(z, wrapping_mul(8, s))
+    let depth = wrapping_add(wrapping_i16(slot), 1);
+    let zero: i16 = 0;
+    wrapping_sub(zero, wrapping_mul(8, depth))
 }
 
 pub fn fp() -> u8 {
