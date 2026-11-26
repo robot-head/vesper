@@ -1,0 +1,22 @@
+// @vesper/hybrid-run: the `vesper run` evaluator (src/runtime.rs) served
+// from Vesper in the hybrid Stage 2 build (#2053), behind the Vesper
+// driver's `Run` step (crates/vesper-hybrid/src/swap/run.rs).
+//
+// `eval_words` takes the program as little-endian words (names, types, the
+// world, the program section, the fuel and the entry; written by
+// `run_input` in tests/common/run_words.rs) and returns the status and the
+// text `decode` reads back: the value's `Display` text, the error, or why
+// the machine declined the program (the driver then runs Rust's).
+
+// @export abi 4
+
+use @vesper/run::{run_words};
+
+// The layout version of `eval_words`.
+pub fn format() -> u64 {
+    1
+}
+
+pub fn eval_words(in input: Slice[u8]) -> ChunkSeq[u64] {
+    run_words(in input)
+}
