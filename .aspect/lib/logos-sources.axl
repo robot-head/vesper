@@ -1,0 +1,69 @@
+"""Immutable input records shared by the Logos checker and pin refresh."""
+
+PROFILE = "vesper.logos42/2"
+UPSTREAM = "8ce95bd31f92a75670cc6e003c48a664b795e433"
+EXPORTER = "df81913eee5519d5a88ae5b0fd701b5298cc29ab"
+LEAN_COMMIT = "eb6cafb7290e8bd5f2937522d8d804f58f02bafc"
+RELEASE = "leanprover/lean4:v4.35.0"
+PATCHES = ["tools/logos42/patches/lean435-primitives.patch"]
+ADAPTERS = ["Cargo.toml", "Cargo.lock", "bridge/Cargo.toml", "bridge/src/main.rs", "Main.lean", "lakefile.toml",
+            "lake-manifest.json", "lean-toolchain", "LogosControls.lean", "controls/cases.json"]
+CARGO_RECIPE = ["{cargo}", "build", "-p", "vesper-logos-kernel", "--locked", "--release", "--bin", "logos-kernel",
+                "--target-dir", ".lake/build/rust", "--offline"]
+KERNEL = ".lake/build/rust/release/logos-kernel"
+CHECKER = ".lake/build/bin/logos42"
+RECEIPT_BYTES = 4 * 1024 * 1024
+SOURCE_FILES = 8192
+SOURCE_BYTES = 256 * 1024 * 1024
+_ROOT_EXCLUSIONS = ["setup-inputs.json", "build.stdout", "build.stderr", "setup-receipt.json"]
+
+def regular(ctx, path):
+    info = ctx.std.fs.try_metadata(path)
+    if info == None or not info.is_file or info.is_symlink:
+        fail("Expected regular file: " + path)
+    return info
+
+def real_directory(ctx, path):
+    info = ctx.std.fs.try_metadata(path)
+    if info == None or not info.is_dir or info.is_symlink:
+        fail("Expected real directory: " + path)
+
+def read_bounded(ctx, path, limit):
+    if regular(ctx, path).size > limit:
+        fail("Input exceeds byte cap: " + path)
+    data = ctx.std.fs.open(path).read(limit + 1)
+    if len(data) > limit:
+        fail("Input grew beyond byte cap: " + path)
+    return data
+
+def source_paths(ctx, stage):
+    real_directory(ctx, stage)
+    paths = []
+    pending = [""]
+    entries, total = 0, 0
+    for _ in range(SOURCE_FILES * 4 + 1):
+        if not pending:
+            break
+        prefix = pending.pop()
+        for entry in ctx.std.fs.read_dir(stage + "/" + prefix):
+            entries += 1
+            if entries > SOURCE_FILES * 4:
+                fail("Source walk entry cap exceeded")
+            name = entry.path
+            if name == ".git" or (not prefix and name in _ROOT_EXCLUSIONS):
+                continue
+            relative = prefix + name
+            if relative == ".lake/build":
+                continue
+            if len(bytes(relative)) > 4096:
+                fail("Source path cap exceeded")
+            if entry.is_dir and not entry.is_symlink:
+                pending.append(relative + "/")
+            elif entry.is_file and not entry.is_symlink:
+                total += regular(ctx, stage + "/" + relative).size
+                if len(paths) >= SOURCE_FILES or total > SOURCE_BYTES:
+                    fail("Source inventory cap exceeded")
+                paths.append(relative)
+            else:
+                fail("Symlink or nonregular source entry: " + relative)
+    return sorted(paths)

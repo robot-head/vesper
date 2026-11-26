@@ -1,6 +1,6 @@
 //! Differential checks of the Vesper port against the frozen Rust seed copy
 //! (`vesper-kinetic-seed`, here `vesper_kinetic_rust`) that the flip gate
-//! runs (crates/vesper-kinetic/flip-gate.toml, SH6 lane 9, #1404). Only the
+//! runs (crates/vesper-kinetic/flip-gate.json, SH6 lane 9, #1404). Only the
 //! port-backed package runs this file; the seed has no Rust build to compare.
 
 use vesper_kinetic::gjk::{GjkError, Shape, separation};

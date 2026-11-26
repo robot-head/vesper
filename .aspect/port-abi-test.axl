@@ -1,0 +1,71 @@
+"""Compare the Aspect and PowerShell export ABI tier invocations."""
+
+load("./lib/task-fixture.axl", "contains", "equal", "fixture_launcher", "fixture_workspace", "invoke_fixture", "write_fixture")
+
+_PLAN = "/scripts/port-abi-plan.json"
+
+def mock_port_abi(ctx, cwd, argv):
+    equal(ctx.std.env.var("VESPER_PORT_COMPILER"), "fixture-compiler")
+    equal(argv[:2], ["test", "--locked"])
+    equal(ctx.std.fs.try_append(cwd + "/invocations", json.encode(argv[2:]) + "\n"), True)
+    plan = cwd + _PLAN
+    if not ctx.std.fs.exists(plan):
+        plan = ctx.std.env.var("VESPER_FIXTURE_SOURCE") + _PLAN
+    for group in json.decode(ctx.std.fs.read_to_string(plan)):
+        for case in group["checks"]:
+            if case["args"] != argv[2:]:
+                continue
+            if "description" not in case:
+                return 0
+            if ctx.std.env.var("VESPER_ABI_TEST_BAD_DIAGNOSTIC"):
+                return 2
+            for name in case.get("failed", []):
+                ctx.std.io.stdout.write("test " + name + " ... FAILED\n")
+            for name in case.get("passed", []):
+                ctx.std.io.stdout.write("test " + name + " ... ok\n")
+            if "diagnostic" in case:
+                ctx.std.io.stderr.write(case["diagnostic"] + "\n")
+            return 1
+    fail("Unknown ABI plan invocation: %r" % argv)
+
+def _test(ctx):
+    workspace = fixture_workspace(ctx, "vesper-port-abi-test-")
+    root, cwd = workspace.root, workspace.cwd
+    script = "/scripts/windows/test-port-abi.ps1"
+    for path in [script, _PLAN, "/scripts/port-harness-plan.json"]:
+        write_fixture(ctx, root + path, ctx.std.fs.read_to_string(workspace.source + path))
+    env = dict(fixture_launcher(ctx, workspace, "port-abi", ["cargo"]), VESPER_PORT_COMPILER = "fixture-compiler",
+               VESPER_PORT_HARNESS_CRATES = "all", VESPER_PORT_HARNESS_SHARD = "", VESPER_ABI_TEST_BAD_DIAGNOSTIC = "")
+
+    commands = root + "/invocations"
+    aspect = ["ci", "test-port-abi"]
+    ctx.std.fs.write(commands, "")
+    invoke_fixture(ctx, aspect, cwd, env = env)
+    expected = ctx.std.fs.read_to_string(commands)
+    equal(len(expected.splitlines()), 9)
+
+    ctx.std.fs.write(commands, "")
+    invoke_fixture(ctx, ["acceptance", "test-port-harness"], cwd, env = dict(env, VESPER_PORT_HARNESS_SCOPE = "abi"))
+    equal(ctx.std.fs.read_to_string(commands), expected)
+    bad = dict(env, VESPER_ABI_TEST_BAD_DIAGNOSTIC = "1")
+    contains("Divergence check", invoke_fixture(ctx, aspect, cwd, 1, bad).stderr)
+    pwsh = ctx.std.process.which("pwsh")
+    if pwsh:
+        windows = ["-NoProfile", "-File", root + script]
+        ctx.std.fs.write(commands, "")
+        invoke_fixture(ctx, windows, cwd, env = env, tool = pwsh)
+        equal(ctx.std.fs.read_to_string(commands), expected)
+        contains("Divergence check", invoke_fixture(ctx, windows, cwd, 1, bad, pwsh).stderr)
+
+    historical = root + "/historical checkout"
+    ctx.std.fs.create_dir_all(historical)
+    ctx.std.fs.write(historical + "/invocations", "")
+    invoke_fixture(ctx, aspect, workspace.source, env = dict(env, PLATFORM_WORKSPACE = historical))
+    equal(ctx.std.fs.read_to_string(historical + "/invocations"), expected)
+    return 0
+
+test_port_abi_fixture = task(
+    kind = "port-abi-parity", group = ["ci", "tests"],
+    summary = "Compare the Aspect and Windows PowerShell ABI check invocations",
+    implementation = _test,
+)

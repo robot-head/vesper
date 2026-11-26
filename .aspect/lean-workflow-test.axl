@@ -1,0 +1,240 @@
+"""Test Logos replay orchestration and Lean model invocation."""
+
+load("./lib/process.axl", "check", "exit_code")
+load("./lib/task-fixture.axl", "contains", "equal", "fixture_launcher", "fixture_workspace", "invoke_fixture", "write_fixture")
+
+_SETUP = """
+def setup(ctx, root, cwd, directory, driver, lean, lake, git, cargo):
+    if root != cwd:
+        fail("Setup did not receive the repository root")
+    if ctx.std.env.var("VESPER_TEST_REPLAY_MODE"):
+        if directory != ctx.std.env.var("VESPER_LOGOS42_ROOT") or lean != "mock-lean" or cargo != "mock-cargo":
+            fail("Setup did not receive the pinned tools and checker directory")
+        ctx.std.fs.write(root + "/checker-path", directory)
+        ctx.std.fs.create_dir(directory)
+        if ctx.std.env.var("VESPER_TEST_REPLAY_MODE") == "prepare-fail":
+            ctx.std.process.exit(17, "fixture setup failure")
+    else:
+        ctx.std.fs.write(root + "/setup.json", json.encode({
+            "--directory": directory, "--driver": driver, "--lean": lean,
+            "--lake": lake, "--git": git, "--cargo": cargo,
+        }))
+        if ctx.std.env.var("SETUP_FAILURE"):
+            ctx.std.process.exit(17, "fixture setup failure")
+        ctx.std.fs.create_dir(directory)
+"""
+_REPLAY_TASKS = """
+def _scope(ctx):
+    if ctx.std.env.var("VESPER_TEST_REPLAY_MODE") == "skip":
+        ctx.std.io.stdout.write("--skip-lean\\n")
+    return 0
+
+def _install(ctx):
+    root = ctx.std.env.aspect_root_dir()
+    ctx.std.fs.write(root + "/.ci-lean-path", "mock-lean\\n")
+    ctx.std.fs.write(root + "/.ci-logos-cargo-path", "mock-cargo\\n")
+    return 0
+
+def _reclaim(ctx):
+    root = ctx.std.env.aspect_root_dir()
+    if ctx.args.tool_args == ["watch"]:
+        return ctx.std.process.command("sleep").args(["30"]).status().code or 0
+    checker = ctx.std.fs.read_to_string(root + "/checker-path")
+    ctx.std.fs.write(root + "/report-clean", str(not ctx.std.fs.exists(checker)))
+    return 0
+
+scope = task(kind = "lean-replay-scope", group = ["ci"], summary = "Mock replay scope", implementation = _scope)
+install = task(kind = "install-logos-rust", group = ["ci"], summary = "Mock replay installer", implementation = _install)
+reclaim = task(kind = "reclaim-disk", group = ["ci"], summary = "Mock disk watcher", implementation = _reclaim,
+               args = {"tool_args": args.trailing_var_args(description = "watch or report")})
+"""
+
+def mock_lean_workflow(ctx, cwd, variant, tool, argv):
+    if variant == "lean-scope":
+        equal(tool, "git")
+        failure = ctx.std.env.var("FIXTURE_GIT_FAILURE")
+        if argv[:2] in [[failure, "--name-only"], [failure, "--format=%B"]]:
+            return 45
+        return exit_code(ctx.std.process.command(ctx.std.env.var("FIXTURE_REAL_GIT")).args(argv).current_dir(cwd).status())
+    if variant == "lean-model":
+        equal(tool, "lean")
+        equal(ctx.std.fs.try_append(cwd + "/lean.log", json.encode([argv, ctx.std.env.var("LEAN_PATH")]) + "\n"), True)
+        if argv == ["--version"]:
+            ctx.std.io.stdout.write("Lean (version " + ctx.std.env.var("VESPER_TEST_LEAN_VERSION") + ", fixture)\n")
+            return 0
+        if argv[0] == "-o":
+            equal(ctx.std.fs.metadata(argv[1].rpartition("/")[0]).is_dir, True)
+            ctx.std.fs.write(argv[1], "")
+        return 23 if argv[-1] == ctx.std.env.var("VESPER_TEST_LEAN_FAIL") else 0
+
+    equal(tool, "bazel")
+    mode = ctx.std.env.var("VESPER_TEST_REPLAY_MODE")
+    if argv[0] == "query":
+        equal(argv[1], "--config=ci")
+        contains("lean_replay", argv[2])
+        ctx.std.fs.write(cwd + "/queried", "")
+        if mode != "empty":
+            ctx.std.io.stdout.write("//:first\n//:second\n")
+        return 0
+    equal(argv, ["test", "--config=ci", "--config=rbe_build", "--config=ci_tests", "//:first", "//:second"])
+    equal(ctx.std.env.var("VESPER_LEAN"), "mock-lean")
+    equal(ctx.std.env.var("VESPER_CARGO"), "mock-cargo")
+    equal(ctx.std.fs.metadata(ctx.std.env.var("VESPER_LOGOS42_ROOT")).is_dir, True)
+    ctx.std.fs.write(cwd + "/tested", "")
+    return 23 if mode == "test-fail" else 0
+
+def _scope(ctx, workspace, launcher):
+    root, cwd = workspace.root, workspace.cwd
+    env = {"GIT_BRANCH": ""}
+    argv = ["ci", "lean-replay-scope"]
+    skip = "--test_tag_filters=-lean_replay\n"
+
+    def git(argv):
+        check(ctx, "git", argv, root)
+
+    def run(flags = [], status = 0, variables = env):
+        return invoke_fixture(ctx, argv + flags, cwd, status, variables)
+
+    git(["init", "-q", "-b", "main"])
+    for key, value in {"user.name": "Fixture", "user.email": "fixture@example.invalid", "commit.gpgsign": "false"}.items():
+        git(["config", key, value])
+    git(["commit", "--allow-empty", "-qm", "Base"])
+    git(["update-ref", "refs/remotes/origin/main", "HEAD"])
+    equal(run().stdout, "")
+    git(["switch", "-qc", "feature"])
+    write_fixture(ctx, root + "/docs/file with spaces.md", "Unrelated")
+    git(["add", "docs"])
+    git(["commit", "-qm", "Documentation"])
+    for flags in [[], ["--", "--base", "main"], ["--", "--base=main"]]:
+        equal(run(flags).stdout, skip)
+    equal(run(variables = {"GIT_BRANCH": "main"}).stdout, "")
+    equal(run(["--", "--base", "missing"]).stdout, "")
+    run(["--", "--unknown"], 2)
+    for failure in ["diff", "log"]:
+        env = dict(launcher, GIT_BRANCH = "", FIXTURE_REAL_GIT = ctx.std.process.which("git"),
+                   FIXTURE_GIT_FAILURE = failure, VESPER_FIXTURE_CASE = "lean-scope")
+        result = run(variables = env)
+        equal(result.stdout, "")
+        contains("git " + failure + " failed; running the full suite", result.stderr)
+    git(["commit", "--allow-empty", "-qm", "Run CI [ci full]"])
+    equal(run().stdout, "")
+    git(["update-ref", "refs/remotes/origin/main", "HEAD"])
+    equal(run().stdout, skip)
+    write_fixture(ctx, root + "/lean/Model with spaces λ.lean", "import Lean")
+    git(["add", "lean"])
+    git(["commit", "-qm", "Update Lean"])
+    result = run()
+    equal(result.stdout, "")
+    contains("Model with spaces λ.lean", result.stderr)
+    git(["switch", "--detach"])
+    equal(run().stdout, "")
+
+def _models(ctx, workspace, launcher):
+    root, cwd = workspace.root, workspace.cwd
+    plan_file = "/scripts/lean-model-plan.json"
+    for path in ["/lean-toolchain", plan_file]:
+        write_fixture(ctx, root + path, ctx.std.fs.read_to_string(workspace.source + path))
+    home = root + "/elan home"
+    ctx.std.fs.create_dir_all(home + "/bin")
+    check(ctx, "ln", ["-s", launcher["VESPER_FIXTURE_LAUNCHER"], home + "/bin/lean"], root)
+    env = dict(launcher, ELAN_HOME = home, LEAN_PATH = "/inherited/path", VESPER_FIXTURE_CASE = "lean-model",
+               VESPER_TEST_LEAN_VERSION = "4.35.0", VESPER_TEST_LEAN_FAIL = "")
+    log = root + "/lean.log"
+    argv = ["ci", "check-lean-models"]
+    ctx.std.fs.write(log, "")
+    invoke_fixture(ctx, argv, cwd, 1, dict(env, VESPER_TEST_LEAN_VERSION = "4.35.01"))
+    equal(len(ctx.std.fs.read_to_string(log).splitlines()), 1)
+    ctx.std.fs.write(log, "")
+    invoke_fixture(ctx, argv, cwd, env = env)
+    calls = [json.decode(line) for line in ctx.std.fs.read_to_string(log).splitlines()]
+    plan = json.decode(ctx.std.fs.read_to_string(root + plan_file))
+    models = [["lean/" + model + ".lean"] for model in plan["standalone"]]
+    equal(calls[:1 + len(models)], [[argv, "/inherited/path"] for argv in [["--version"]] + models])
+    dependencies = calls[1 + len(models):]
+    equal(len(dependencies), len(plan["dependencies"]))
+    equal(dependencies[0][0][0], "-o")
+    scratch = dependencies[0][0][1].rpartition("/")[0]
+    equal(ctx.std.fs.exists(scratch), False)
+    ordered = []
+    for index, row in enumerate(plan["dependencies"]):
+        model = row["model"]
+        expected = ["-o", scratch + "/" + model + ".olean"] if row.get("compile") else []
+        equal(dependencies[index], [expected + ["lean/" + model + ".lean"], scratch if row.get("imports") else "/inherited/path"])
+        ordered.append(model)
+    equal(ordered.index("CodegenRv64Encoding") < ordered.index("CodegenRv64Semantics"), True)
+    ctx.std.fs.write(log, "")
+    invoke_fixture(ctx, argv, cwd, 23, dict(env, VESPER_TEST_LEAN_FAIL = "lean/ArithmeticOracle.lean"))
+    last = json.decode(ctx.std.fs.read_to_string(log).splitlines()[-1])
+    equal(last[0][-1], "lean/ArithmeticOracle.lean")
+    equal(ctx.std.fs.exists(last[1]), False)
+
+def _replay(ctx, workspace, launcher):
+    root, cwd = workspace.root, workspace.cwd
+    canonical = invoke_fixture(ctx, ["maintenance", "logos42", "setup", "--", "--help"], cwd)
+    alias = invoke_fixture(ctx, ["maintenance", "lean4lean42", "setup", "--", "--help"], cwd)
+    equal(alias.stdout, canonical.stdout)
+    contains("--directory DIRECTORY", alias.stdout)
+
+    task = root + "/.aspect/logos-ci.axl"
+    content = ctx.std.fs.read_to_string(task).replace('load("./logos-setup.axl", "setup")', 'load("./logos-setup-fixture.axl", "setup")')
+    write_fixture(ctx, task, content)
+    write_fixture(ctx, root + "/.aspect/logos-setup-fixture.axl", _SETUP)
+    write_fixture(ctx, root + "/.ci-lean-path", "/installed lean/bin/lean\r\n")
+    write_fixture(ctx, root + "/.ci-logos-cargo-path", "/pinned cargo/bin/cargo\n")
+    command = ["ci", "replay-logos-models"]
+    env = {"RUNNER_TEMP": "", "SETUP_FAILURE": "", "VESPER_TEST_REPLAY_MODE": "", "LOGOS_SWEEP_BATCH_JOBS": "99"}
+    contains("RUNNER_TEMP is required", invoke_fixture(ctx, command, cwd, 2, env).stderr)
+    env["RUNNER_TEMP"] = "runner scratch"
+    invoke_fixture(ctx, command, cwd, 17, dict(env, SETUP_FAILURE = "1"))
+    scratch = root + "/runner scratch"
+    checker = scratch + "/logos42/checker"
+    equal(ctx.std.fs.exists(checker), False)
+    output = invoke_fixture(ctx, command, cwd, 1, env)
+    equal(json.decode(ctx.std.fs.read_to_string(root + "/setup.json")), {
+        "--directory": checker, "--driver": root + "/target/debug/logos42",
+        "--lean": "/installed lean/bin/lean", "--lake": "/installed lean/bin/lake",
+        "--cargo": "/pinned cargo/bin/cargo", "--git": ctx.std.process.which("git"),
+    })
+    contains("setup-receipt.json", output.stderr)
+    equal(ctx.std.fs.exists(scratch + "/logos-sweep-report.json"), False)
+    write_fixture(ctx, root + "/.ci-logos-cargo-path", "\n")
+    contains("The CI Lean and Cargo executable paths are required", invoke_fixture(ctx, command, cwd, 1, env).stderr)
+
+    for name in ["lean-toolchain-test.axl", "lean-ci.axl", "lean-replay-scope.axl"]:
+        ctx.std.fs.remove_file(root + "/.aspect/" + name)
+    disk = root + "/.aspect/disk-ci.axl"
+    ctx.std.fs.write(disk, ctx.std.fs.read_to_string(disk).replace('kind = "reclaim-disk"', 'kind = "unused-reclaim-disk"'))
+    write_fixture(ctx, root + "/.aspect/replay-fixture.axl", _REPLAY_TASKS)
+    write_fixture(ctx, root + "/manifest", "//crates/vesper-oracles:bin/logos42 bin/checker\n")
+    write_fixture(ctx, root + "/bin/checker", "")
+    launcher = dict(launcher, VESPER_BAZEL_EXECUTABLES = "manifest", VESPER_FIXTURE_CASE = "lean-replay")
+    for mode, status, queried, tested, cleaned in [
+        ("skip", 0, False, False, False), ("empty", 1, True, False, False), ("prepare-fail", 17, True, False, True),
+        ("test-fail", 23, True, True, True), ("normal", 0, True, True, True),
+    ]:
+        for path in ["queried", "tested", "report-clean", "checker-path"]:
+            absolute = root + "/" + path
+            if ctx.std.fs.exists(absolute):
+                ctx.std.fs.remove_file(absolute)
+        result = invoke_fixture(ctx, ["ci", "test-lean-replay"], cwd, status, dict(launcher, VESPER_TEST_REPLAY_MODE = mode))
+        if mode == "empty":
+            contains("No Lean replay test targets found", result.stderr)
+        equal([ctx.std.fs.exists(root + "/" + path) for path in ["queried", "tested", "report-clean"]], [queried, tested, cleaned])
+        if cleaned:
+            equal(ctx.std.fs.read_to_string(root + "/report-clean"), "True")
+            checker = ctx.std.fs.read_to_string(root + "/checker-path")
+            equal(ctx.std.fs.exists(checker), False)
+
+def _test(ctx):
+    workspace = fixture_workspace(ctx, "vesper-lean-workflow-test-")
+    launcher = fixture_launcher(ctx, workspace, "", ["git", "bazel"])
+    _scope(ctx, workspace, launcher)
+    _models(ctx, workspace, dict(launcher, PATH = ctx.std.env.var("PATH")))
+    _replay(ctx, workspace, launcher)
+    return 0
+
+test_lean_workflow = task(
+    kind = "lean-workflow", group = ["ci", "tests"],
+    summary = "Check Lean selection, model order and Logos replay tool paths and cleanup",
+    implementation = _test,
+)

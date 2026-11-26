@@ -1,0 +1,320 @@
+"""Verify port checks, expected divergences, artifact discovery and shard routing."""
+
+load("./lib/process.axl", "check")
+load("./lib/task-fixture.axl", "contains", "equal", "fixture_launcher", "fixture_workspace", "invoke_fixture", "write_fixture")
+
+_LINT = {
+    "effects": ("fuzzed_facts_lint_identically", "fuzzed_documents_parse_identically"),
+    "projections": ("fuzzed_facts_lint_identically", "fuzzed_documents_parse_identically"),
+    "toml": ("fuzzed_documents_parse_identically", "fuzzed_facts_lint_identically"),
+    "edits": ("fuzzed_edits_apply_identically", "fuzzed_facts_lint_identically"),
+    "modes": ("repository_sources_match_the_definition", "fuzzed_documents_parse_identically"),
+}
+_SILICON = [
+    ("parity", "imsic_files_match", "every_fixture_parses_identically"),
+    ("parity", "aplic_domains_match", "imsic_files_match"),
+    ("parity", "interrupt_fabrics_match", "imsic_files_match"),
+    ("dtb", "qemu_riscv_virt_memory_harts_and_plic", "malformed_headers_are_typed_errors"),
+]
+_RESONANCE = [
+    ("bank_render_matches_reference_with_events", "host_reports_its_paths"),
+    ("malformed_event_streams_are_typed_errors", "emergency_silence_zeroes_the_rest_and_drops_are_counted"),
+    ("lease_must_be_fully_written_to_commit", "emergency_silence_zeroes_the_rest_and_drops_are_counted"),
+    ("parallel_branches_get_compensation_delays", "buffer_liveness_reuses_buffers"),
+    ("graph_outputs_match_the_rust_build", "events_and_ramps_match_the_rust_build"),
+    ("delay_slab_read_write_wraps_and_clones_cleanly", "clones_are_realigned_and_hold_the_same_samples"),
+    ("tick_is_bit_identical_over_filter_range", "host_reports_its_paths"),
+    ("allocation_two_calls_deep_is_rejected_with_its_path", "loops_follow_the_policy"),
+]
+_SUITE_STUB = """
+def fixture(crate, kind):
+    def run(ctx):
+        env = ctx.std.env
+        ctx.std.io.stdout.write(crate + " " + kind + "|" + env.var("VESPER_PORT_COMPILER") + "\\n")
+        return 27 if env.var("VESPER_TEST_FAIL_PORT") == crate else 0
+    return task(kind = kind, group = ["crate", crate], implementation = run)
+"""
+
+def _append(ctx, cwd, file, data):
+    equal(ctx.std.fs.try_append(cwd + "/" + file, data + "\n"), True)
+
+def _tests(ctx, failed, passed):
+    for name in failed:
+        ctx.std.io.stdout.write("test " + name + " ... FAILED\n")
+    for name in passed:
+        ctx.std.io.stdout.write("test " + name + " ... ok\n")
+
+def _mock_lint(ctx, cwd, argv):
+    area = ctx.std.env.var("VESPER_LINT_DIVERGE")
+    equal(argv[:4], ["test", "--locked", "-p", "vesper-lint"])
+    if not area:
+        if argv[4:6] == ["-p", "vesper-lint-seed"]:
+            equal(argv[6:], ["--", "--skip", "port_frees_its_allocations"])
+        return 0
+    equal(argv[4:], ["--features", "vesper-port,vesper-port-divergent", "--no-fail-fast",
+                     "--test", "differential", "--test", "typed", "--test", "policy", "--test", "modes",
+                     "--", "--skip", "port_frees_its_allocations"])
+    failed, passed = _LINT[area]
+    _append(ctx, cwd, "lint.log", area)
+    _tests(ctx, [failed], [] if area == "modes" and ctx.std.env.var("DROP_MODES_CONTROL") else [passed])
+    return 101
+
+def _mock_simpulse(ctx, cwd, argv):
+    mode = ctx.std.env.var("VESPER_TEST_PORT_MODE")
+    equal(argv[:2], ["test", "--locked"])
+    _append(ctx, cwd, "port.log", "|".join(argv))
+    if argv == ["test", "--locked", "-p", "vesper-simpulse", "-p", "vesper-simpulse-seed"]:
+        return 37 if mode == "stable-failed" else 0
+    equal(argv, ["test", "--locked", "-p", "vesper-simpulse", "--features",
+                 "vesper-port-divergent", "--test", "kernel", "--", "--test-threads=1"])
+    if mode != "missing-failure":
+        _tests(ctx, ["each_fixed_runnable_task_runs_once_per_round"], [])
+    if mode != "missing-control":
+        ctx.std.io.stderr.write("test virtual_clock_only_jumps_when_nothing_can_run ... ok\n")
+    return 0 if mode == "divergent-passed" else 101
+
+def _mock_silicon(ctx, cwd, argv):
+    index = ctx.std.env.var("VESPER_SILICON_DIVERGENT")
+    if argv == ["test", "--locked", "-p", "vesper-silicon", "-p", "vesper-silicon-seed"]:
+        equal(index, None)
+        return 0
+    suite, failed, passed = _SILICON[int(index)]
+    equal(argv, ["test", "--locked", "-p", "vesper-silicon", "--features", "vesper-port-divergent",
+                 "--test", suite, "--", "--test-threads=1"])
+    check(ctx, "test", ["-c", "/dev/stdin"], cwd)
+    _append(ctx, cwd, "port.log", index)
+    _tests(ctx, [failed], [passed])
+    return 101
+
+def _mock_ignis(ctx, cwd, argv):
+    suites = ["planner", "multi_backend", "lifecycle"]
+    if "--no-run" in argv:
+        suite = argv[argv.index("--test") + 1]
+        contains(suite, suites)
+        contains("--message-format=json-render-diagnostics", argv)
+        contains("vesper-port-divergent", argv)
+        mode = ctx.std.env.var("VESPER_TEST_ARTIFACT_MODE")
+        ctx.std.io.stdout.write("null\n")
+        topics = [(["bin"], suite), (["test"], "unrelated")]
+        if mode != "missing":
+            topics.append((["test"], suite))
+        if mode == "duplicate":
+            topics.append((["test"], suite))
+        for kind, name in topics:
+            ctx.std.io.stdout.write(json.encode({
+                "reason": "compiler-artifact", "executable": "/path with spaces/" + suite,
+                "target": {"kind": kind, "name": name},
+            }) + "\n")
+    elif "--test" in argv:
+        equal(argv[-4:], ["--test", "divergence", "--", "--nocapture"])
+        for suite in suites:
+            equal(ctx.std.env.var("VESPER_IGNIS_DIVERGENT_" + suite.upper()), "/path with spaces/" + suite)
+        ctx.std.fs.write(cwd + "/checked", "")
+    return 0
+
+def _mock_resonance(ctx, cwd, tool, argv):
+    if tool == "cargo":
+        if "vesper-port-divergent" not in argv:
+            return 0
+        _tests(ctx, [failed for failed, _ in _RESONANCE], [passed for _, passed in _RESONANCE])
+        return 101
+    equal(tool, "vesper")
+    mode = ctx.std.env.var("VESPER_TEST_REALTIME_MODE")
+    entry = argv[argv.index("--entry") + 1]
+    policy = argv[argv.index("--verify-policy") + 1]
+    contains("--verify-realtime", argv)
+    if entry != "rt_audio":
+        equal(entry, "compile_schedule")
+        equal(policy.endswith("/realtime-control.json"), True)
+        _append(ctx, cwd, "audio.log", "control")
+        if mode != "missing-control":
+            ctx.std.io.stderr.write("error[realtime/rt-unknown-callee]\n")
+        return 1
+    equal(policy.endswith("/realtime-policy.json"), True)
+    _append(ctx, cwd, "audio.log", argv[argv.index("--target") + 1])
+    if mode == "unexpected":
+        ctx.std.io.stderr.write("error[realtime/rt-unknown-callee]\n")
+        return 1
+    if mode in ["crash", "no-findings"]:
+        return 99 if mode == "crash" else 0
+    messages = {"panic": "thread panicked", "bare-error": "error: could not verify", "no-artifact": "object was not emitted"}
+    if mode in messages:
+        ctx.std.io.stderr.write(messages[mode] + "\n")
+    ctx.std.io.stderr.write("error[realtime/rt-unbounded-loop]\n1 native verifier finding(s)\n")
+    return 1
+
+def _mock_harness(ctx, cwd, argv):
+    if argv == ["build", "--locked", "--bin", "vesper"]:
+        ctx.std.fs.write(cwd + "/compiler-built", "")
+        return 0
+    plan = json.decode(ctx.std.fs.read_to_string(cwd + "/scripts/port-abi-plan.json"))
+    for group in plan:
+        for case in group["checks"]:
+            if argv != ["test", "--locked"] + case["args"]:
+                continue
+            ctx.std.io.stdout.write("abi|" + " ".join(argv) + "\n")
+            if "description" not in case:
+                return 0
+            _tests(ctx, case.get("failed", []), case.get("passed", []))
+            if "diagnostic" in case:
+                ctx.std.io.stdout.write(case["diagnostic"] + "\n")
+            return 101
+    fail("Unexpected ABI invocation: %r" % argv)
+
+def mock_port_regression(ctx, cwd, variant, tool, argv):
+    if variant == "resonance":
+        return _mock_resonance(ctx, cwd, tool, argv)
+    equal(tool, "cargo")
+    if variant == "line-prefix":
+        if "vesper-port-divergent" not in argv:
+            return 0
+        if "--lib" in argv:
+            _tests(ctx, ["model::link::tests::micro_burst_builds_queue_delay_then_tail_drops"], [])
+        else:
+            ctx.std.io.stdout.write("unexpected prefix before warp_wan: transcript differs\n")
+        return 101
+    return {
+        "lint": _mock_lint, "simpulse": _mock_simpulse, "silicon": _mock_silicon, "ignis": _mock_ignis, "harness": _mock_harness,
+    }[variant](ctx, cwd, argv)
+
+def _ports(ctx, workspace, launcher):
+    root, cwd = workspace.root, workspace.cwd
+
+    def run(variant, argv, status = 0, env = {}):
+        variables = dict(launcher, VESPER_FIXTURE_CASE = "port-regression-" + variant, **env)
+        return invoke_fixture(ctx, argv, cwd, status, variables)
+
+    for file in ["lint.log", "port.log", "audio.log"]:
+        ctx.std.fs.write(root + "/" + file, "")
+    lint = ["crate", "lint", "test-port"]
+    contains("Detected divergent lint port (modes)", run("lint", lint, env = {"DROP_MODES_CONTROL": ""}).stdout)
+    equal(ctx.std.fs.read_to_string(root + "/lint.log").splitlines(), list(_LINT))
+    contains("Divergence check did not fail as expected: lint port (modes)",
+             run("lint", lint, 1, {"DROP_MODES_CONTROL": "1"}).stderr)
+
+    log = root + "/port.log"
+    simpulse = ["crate", "simpulse", "check"]
+    for mode, code, calls in [("normal", 0, 2), ("stable-failed", 37, 1), ("missing-failure", 1, 2),
+                              ("missing-control", 1, 2), ("divergent-passed", 1, 2)]:
+        ctx.std.fs.write(log, "")
+        result = run("simpulse", simpulse, code, {"VESPER_TEST_PORT_MODE": mode})
+        equal(len(ctx.std.fs.read_to_string(log).splitlines()), calls)
+        if code == 0:
+            contains("Detected divergent simpulse port (lib.rs)", result.stdout)
+        elif code == 1:
+            contains("Divergence check did not fail as expected: simpulse port (lib.rs)", result.stderr)
+
+    plan_path = "/scripts/port-harness-plan.json"
+    write_fixture(ctx, root + plan_path, ctx.std.fs.read_to_string(workspace.source + plan_path))
+    ctx.std.fs.write(log, "")
+    result = run("simpulse", ["acceptance", "test-port-harness"], env = {
+        "VESPER_TEST_PORT_MODE": "normal", "VESPER_PORT_COMPILER": "fixture-compiler",
+        "VESPER_PORT_HARNESS_SCOPE": "all", "VESPER_PORT_HARNESS_SHARD": "3", "VESPER_PORT_HARNESS_CRATES": "vesper-simpulse",
+    })
+    equal(len(ctx.std.fs.read_to_string(log).splitlines()), 2)
+    contains("Detected divergent simpulse port (lib.rs)", result.stdout)
+
+    ctx.std.fs.write(log, "")
+    result = run("silicon", ["crate", "silicon", "check"])
+    equal(ctx.std.fs.read_to_string(log).splitlines(), ["0", "1", "2", "3"])
+    for area in ["imsic", "aplic", "plic", "dtb"]:
+        contains("Detected divergent silicon port (" + area + ")", result.stdout)
+
+    result = run("line-prefix", ["crate", "sim-session", "test-port"], 1)
+    equal(result.stdout, "Detected divergent sim-session port (link)\n")
+    contains("unexpected prefix before warp_wan:", result.stderr)
+
+    ignis = ["crate", "ignis", "check"]
+    marker = root + "/checked"
+    run("ignis", ignis, env = {"VESPER_TEST_ARTIFACT_MODE": ""})
+    equal(ctx.std.fs.exists(marker), True)
+    ctx.std.fs.remove_file(marker)
+    for mode, message in [("duplicate", "multiple executables"), ("missing", "every selected test suite")]:
+        contains(message, run("ignis", ignis, 1, {"VESPER_TEST_ARTIFACT_MODE": mode}).stderr)
+        equal(ctx.std.fs.exists(marker), False)
+
+    audio = root + "/audio.log"
+    for mode, status, calls in [("normal", 0, 3), ("no-findings", 0, 3), ("unexpected", 1, 1),
+                                ("crash", 1, 1), ("panic", 1, 1), ("bare-error", 1, 1),
+                                ("no-artifact", 1, 1), ("missing-control", 1, 3)]:
+        ctx.std.fs.write(audio, "")
+        result = run("resonance", ["crate", "resonance", "test-port"], status, {
+            "VESPER_TEST_REALTIME_MODE": mode, "VESPER_PORT_COMPILER": root + "/bin/vesper",
+        })
+        equal(ctx.std.fs.read_to_string(audio).splitlines(), ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu", "control"][:calls])
+        if status == 0:
+            contains("accepted both audio targets", result.stdout)
+        else:
+            contains("verifier", result.stderr)
+
+def _harness(ctx, workspace, launcher):
+    root, cwd = workspace.root, workspace.cwd
+    for path in ["/scripts/port-harness-plan.json", "/scripts/port-abi-plan.json"]:
+        write_fixture(ctx, root + path, ctx.std.fs.read_to_string(workspace.source + path))
+    plan = json.decode(ctx.std.fs.read_to_string(root + "/scripts/port-harness-plan.json"))
+    for module in ["port-checks.axl", "port-special-checks.axl"]:
+        ctx.std.fs.remove_file(root + "/.aspect/" + module)
+    stubs = [_SUITE_STUB]
+    for shard in plan:
+        for suite in shard:
+            _, crate, kind = suite["task"]
+            name = (crate + "_" + kind).replace("-", "_")
+            stubs.append(name + " = fixture(" + json.encode(crate) + ", " + json.encode(kind) + ")")
+    write_fixture(ctx, root + "/.aspect/dispatch-fixture.axl", "\n".join(stubs) + "\n")
+    env = dict(launcher, VESPER_FIXTURE_CASE = "port-regression-harness", VESPER_PORT_COMPILER = "explicit compiler",
+               VESPER_PORT_HARNESS_SCOPE = "all", VESPER_PORT_HARNESS_SHARD = "", VESPER_PORT_HARNESS_CRATES = "all",
+               VESPER_TEST_FAIL_PORT = "")
+
+    def run(variables = {}, status = 0):
+        return invoke_fixture(ctx, ["acceptance", "test-port-harness"], cwd, status, dict(env, **variables))
+
+    def ports(output):
+        return [line.partition("|")[0] for line in output.splitlines() if "|explicit compiler" in line]
+
+    def selected(shard):
+        return [" ".join(suite["task"][1:]) for suite in shard]
+
+    output = run().stdout
+    equal(ports(output), [item for shard in plan for item in selected(shard)])
+    equal(output.index("abi|test --locked") < output.index("beacon check|"), True)
+    marker = root + "/compiler-built"
+    equal(ctx.std.fs.exists(marker), False)
+    for index, shard in enumerate(plan, start = 1):
+        output = run({"VESPER_PORT_HARNESS_SHARD": str(index)}).stdout
+        equal(ports(output), selected(shard))
+        equal("abi|test --locked" in output, index == 1)
+    equal(ports(run({"VESPER_PORT_HARNESS_CRATES": "vesper-beacon-arrow vesper-vault"}).stdout),
+          ["beacon check", "beacon-arrow test-port", "vault check"])
+    equal(ports(run({"VESPER_PORT_HARNESS_CRATES": "all vesper-vault"}).stdout), ["vault check"])
+    abi = run({"VESPER_PORT_HARNESS_SCOPE": "abi"}).stdout
+    contains("export ABI tier done", abi)
+    equal(ports(abi), [])
+    equal(ports(run({"VESPER_TEST_FAIL_PORT": "prism"}, 27).stdout), ["beacon check", "prism test-port"])
+    invalid = "must be 1 to " + str(len(plan))
+    for variables, error in [
+        ({"VESPER_PORT_HARNESS_SHARD": "01"}, invalid),
+        ({"VESPER_PORT_HARNESS_SHARD": str(len(plan) + 1)}, invalid),
+        ({"VESPER_PORT_HARNESS_SCOPE": "abi", "VESPER_PORT_HARNESS_SHARD": "1"}, "abi takes no shard"),
+    ]:
+        result = run(variables, 1)
+        contains(error, result.stderr)
+        equal(ports(result.stdout), [])
+        equal("abi|test --locked" in result.stdout, False)
+    built = run({
+        "VESPER_PORT_COMPILER": "", "CARGO_TARGET_DIR": "build directory", "VESPER_PORT_HARNESS_CRATES": "vesper-vault",
+    }).stdout
+    equal(ctx.std.fs.exists(marker), True)
+    contains("vault check|" + root + "/build directory/debug/vesper", built)
+
+def _test(ctx):
+    workspace = fixture_workspace(ctx, "vesper-port-regression-test-")
+    launcher = fixture_launcher(ctx, workspace, "", ["cargo", "vesper"])
+    _ports(ctx, workspace, launcher)
+    _harness(ctx, workspace, launcher)
+    return 0
+
+test_port_regression = task(
+    kind = "port-regression", group = ["ci", "tests"],
+    summary = "Verify native divergence controls, artifact selection and port shard dispatch",
+    implementation = _test,
+)

@@ -20,8 +20,9 @@ on:
       - 'tests/lsp_cli.rs'
       - 'tests/recovery_cli.rs'
       - 'tests/fixtures/stylus/**'
-      - 'scripts/check-stylus.py'
-      - '.aspect/acceptance-suites.axl'
+      - '.aspect/stylus.axl'
+      - '.aspect/lib/lsp-fixture.axl'
+      - '.aspect/bounded-stdio.axl'
       - '.github/workflows/stylus.yml'
       - 'Cargo.toml'
       - 'Cargo.lock'
@@ -43,8 +44,9 @@ on:
       - 'tests/lsp_cli.rs'
       - 'tests/recovery_cli.rs'
       - 'tests/fixtures/stylus/**'
-      - 'scripts/check-stylus.py'
-      - '.aspect/acceptance-suites.axl'
+      - '.aspect/stylus.axl'
+      - '.aspect/lib/lsp-fixture.axl'
+      - '.aspect/bounded-stdio.axl'
       - '.github/workflows/stylus.yml'
       - 'Cargo.toml'
       - 'Cargo.lock'
@@ -71,7 +73,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Native workspace tests/lints and check-stylus.py are owned by
+        # Native workspace tests/lints and the Stylus acceptance task are owned by
         # Platforms on Windows/macOS. Keep this extra Linux integration lane.
         os: [ubuntu-latest]
     runs-on: ${{ matrix.os }}
@@ -90,7 +92,15 @@ jobs:
           fetch-depth: 0
           sparse-checkout: |
             .github/actions
-            scripts/ci
+            .aspect
+      - name: Set up Aspect for the merge gate
+        if: github.event_name == 'pull_request'
+        uses: aspect-build/setup-aspect@ccc445383a7d4cea499744d823a7698ae077a407 # v2026.45.0
+        with:
+          launcher-version: '2026.47.12'
+          bazelrc-generate: 'false'
+          bazelisk-cache: 'false'
+          disk-cache: 'false'
       - name: Merge gate
         if: github.event_name == 'pull_request'
         uses: ./.gate/.github/actions/merge-gate
@@ -116,9 +126,7 @@ jobs:
       - name: Test actual formatter with macro and complete-function recovery sources
         run: cargo test --locked -p vesper-fmt --all-targets
       - name: Test actual CLI, current editor actions and original-buffer recovery
-        run: >-
-          cargo test --locked -p vesper --lib --test stylus_cli --test fmt_cli
-          --test lsp_actions --test lsp_cli --test recovery_cli --test forge_cli
+        run: cargo test --locked -p vesper --lib --test stylus_cli --test fmt_cli --test lsp_actions --test lsp_cli --test recovery_cli --test forge_cli
       - name: Check strict formatter and source integration Clippy
         run: cargo clippy --locked -p vesper -p vesper-fmt --all-targets -- -D warnings
       - name: Execute actual formatting and stdio acceptance

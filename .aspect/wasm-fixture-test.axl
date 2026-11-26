@@ -1,0 +1,83 @@
+"""Exercise Wasm fixture rebuilds through the native Cargo launcher."""
+
+load("@std//hash.axl", "sha256")
+load("./lib/binary-fixture.axl", "write_bytes")
+load("./lib/task-fixture.axl", "contains", "equal", "fixture_launcher", "fixture_workspace", "invoke_fixture")
+
+def _payload(target):
+    return bytes([0, 128, 255]) + bytes(target)
+
+def mock_wasm_cargo(ctx, cwd, argv):
+    equal(argv[:4], ["build", "--locked", "--release", "--manifest-path"])
+    equal(argv[5], "--target")
+    guest = argv[4].rpartition("/")[0]
+    target = argv[6]
+    keys = ["CARGO_TARGET_DIR", "CARGO_BUILD_JOBS", "CARGO_INCREMENTAL", "RUSTFLAGS"]
+    variables = {key: ctx.std.env.var(key) for key in keys}
+    calls = cwd + "/fixtures.log"
+    prior = ctx.std.fs.read_to_string(calls) if ctx.std.fs.exists(calls) else ""
+    ctx.std.fs.write(calls, prior + json.encode([guest, target, variables]) + "\n")
+    if target == ctx.std.env.var("VESPER_FIXTURE_FAIL_TARGET"):
+        return 12
+    name = "vesper_forge_runner_fixture"
+    if "loom-sandbox" in guest:
+        name = "vesper_quotation_fixture" if "quotation" in guest else "vesper_sandbox_fixture"
+    path = variables["CARGO_TARGET_DIR"] + "/" + target + "/release"
+    ctx.std.fs.create_dir_all(path)
+    write_bytes(ctx, path + "/" + name + ".wasm", _payload(target))
+    return 0
+
+def _test(ctx):
+    workspace = fixture_workspace(ctx, "vesper-wasm-fixture-test-")
+    root, cwd = workspace.root, workspace.cwd
+    env = dict(fixture_launcher(ctx, workspace, "wasm-fixtures", ["cargo"]), **{
+        "CARGO_HOME": root + "/cargo home",
+        "CARGO_TARGET_DIR": "shared out",
+        "CARGO_BUILD_JOBS": "9",
+        "CARGO_INCREMENTAL": "1",
+        "VESPER_FIXTURE_FAIL_TARGET": "",
+    })
+    calls = cwd + "/fixtures.log"
+    cases = [
+        ("forge-runner", "build", "", [("wasm32-wasip2", "macro.component.wasm")]),
+        ("loom-sandbox", "build", "", [("wasm32-wasip2", "step.component.wasm"), ("wasm32-wasip1", "step.preview1.wasm")]),
+        ("loom-sandbox", "build-quotation", "/quotation", [("wasm32-wasip2", "quotation.component.wasm")]),
+    ]
+    for crate, action, qualifier, outputs in cases:
+        ctx.std.fs.write(calls, "")
+        result = invoke_fixture(ctx, ["crate", crate, action], cwd, env = env)
+        fixture = root + "/crates/vesper-" + crate + "/fixtures" + qualifier
+        builds = [json.decode(line) for line in ctx.std.fs.read_to_string(calls).splitlines()]
+        equal([(guest, target) for guest, target, _ in builds], [(fixture + "/guest", target) for target, _ in outputs])
+        for guest, _, variables in builds:
+            equal(variables["CARGO_TARGET_DIR"], cwd + "/shared out" if qualifier else guest + "/target")
+            equal(variables["CARGO_BUILD_JOBS"], "1" if qualifier else "9")
+            equal(variables["CARGO_INCREMENTAL"], "0" if qualifier else "1")
+            remap = "/quotation-fixture" if qualifier else "/fixture"
+            equal(variables["RUSTFLAGS"], "--remap-path-prefix=%s=%s --remap-path-prefix=%s=/cargo" % (guest, remap, env["CARGO_HOME"]))
+        entries = []
+        for target, name in outputs:
+            actual = ctx.std.fs.open(fixture + "/bin/" + name).read()
+            equal(actual, _payload(target))
+            digest = sha256()
+            digest.update(actual)
+            entries.append(digest.hexdigest() + "  " + name)
+        equal(result.stdout, "\n".join(entries) + "\n")
+        equal(result.stdout, ctx.std.fs.read_to_string(fixture + "/bin/SHA256SUMS"))
+
+    ctx.std.fs.write(calls, "")
+    invoke_fixture(ctx, ["crate", "loom-sandbox", "build-quotation"], cwd, env = dict(env, CARGO_HOME = "", CARGO_TARGET_DIR = ""))
+    guest, _, defaults = json.decode(ctx.std.fs.read_to_string(calls))
+    equal(defaults["CARGO_TARGET_DIR"], guest + "/target")
+    contains("--remap-path-prefix=" + ctx.std.env.home_dir() + "/.cargo=/cargo", defaults["RUSTFLAGS"])
+    manifest = root + "/crates/vesper-loom-sandbox/fixtures/bin/SHA256SUMS"
+    before = ctx.std.fs.open(manifest).read()
+    invoke_fixture(ctx, ["crate", "loom-sandbox", "build"], cwd, 12, dict(env, VESPER_FIXTURE_FAIL_TARGET = "wasm32-wasip1"))
+    equal(ctx.std.fs.open(manifest).read(), before)
+    return 0
+
+test_wasm_build = task(
+    kind = "wasm-fixture-build", group = ["ci", "tests"],
+    summary = "Check Wasm fixture build arguments, artifact bytes and atomic publication",
+    implementation = _test,
+)

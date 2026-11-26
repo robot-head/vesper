@@ -1,7 +1,7 @@
 name: Native platform checks
 # Starts the required `macOS (AArch64)` and `Windows (x86_64 MSVC)` checks for
 # a pull request once it can merge (#1479): the merge gate passes
-# (scripts/ci/merge_gate.py, #1321), `Native and acceptance scripts` is green
+# (aspect ci merge-gate, #1321), `Native and acceptance scripts` is green
 # on its head commit, and none of the BuildBuddy checks (`Test all targets`,
 # `Self-host differentials`, `Self-host differentials 2` (#1882), `Self-host
 # codegen differentials` (#1519) and that one) has failed. Waiting for all of
@@ -44,47 +44,23 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: .native-checks-tools
+          persist-credentials: false
+          sparse-checkout: |
+            .aspect
+            .github/actions/aspect
+      - uses: ./.native-checks-tools/.github/actions/aspect
       - name: Find a pull request whose head is green on BuildBuddy
         id: pr
+        working-directory: .native-checks-tools
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           SHA: ${{ github.event.sha }}
-        run: |
-          set -euo pipefail
-          # Start alongside the slower BuildBuddy checks: once `Native and
-          # acceptance scripts` (about 7 minutes) is green and no BuildBuddy
-          # check has failed. A later BuildBuddy failure leaves the run going;
-          # the pull request's next push cancels it.
-          statuses=$(gh api "repos/$REPO/commits/$SHA/status" \
-            --jq '[.statuses[] | select(.context == "Test all targets" or .context == "Self-host differentials" or .context == "Self-host differentials 2" or .context == "Self-host codegen differentials" or .context == "Native and acceptance scripts")]')
-          acceptance=$(jq -r '[.[] | select(.context == "Native and acceptance scripts") | .state] | first // "absent"' <<<"$statuses")
-          if [ "$acceptance" != success ]; then
-            echo "Native and acceptance scripts is $acceptance"
-            exit 0
-          fi
-          failed=$(jq -r '[.[] | select(.state == "failure" or .state == "error") | .context] | join(", ")' <<<"$statuses")
-          if [ -n "$failed" ]; then
-            echo "BuildBuddy failed: $failed"
-            exit 0
-          fi
-          pr=$(gh api "repos/$REPO/commits/$SHA/pulls" --jq "[.[] | select(.state == \"open\" and .head.sha == \"$SHA\" and .head.repo.full_name == \"$REPO\")] | first // empty")
-          if [ -z "$pr" ]; then
-            echo "no open pull request has $SHA as its head"
-            exit 0
-          fi
-          number=$(jq -r .number <<<"$pr")
-          started=$(gh api "repos/$REPO/actions/workflows/platforms.yml/runs?event=workflow_dispatch&head_sha=$SHA&per_page=100" \
-            --jq '[.workflow_runs[] | select(.conclusion != "cancelled")] | length')
-          if [ "$started" != 0 ]; then
-            echo "Platforms already started for PR #$number at $SHA"
-            exit 0
-          fi
-          {
-            echo "number=$number"
-            echo "base=$(jq -r .base.ref <<<"$pr")"
-            echo "branch=$(jq -r .head.ref <<<"$pr")"
-          } >> "$GITHUB_OUTPUT"
+        run: aspect ci find-native-dispatch
       - name: Check out the pull request head for the merge gate
         if: steps.pr.outputs.number != ''
         uses: actions/checkout@v4
@@ -94,7 +70,15 @@ jobs:
           fetch-depth: 0
           sparse-checkout: |
             .github/actions
-            scripts/ci
+            .aspect
+      - name: Set up Aspect for the merge gate
+        if: steps.pr.outputs.number != ''
+        uses: aspect-build/setup-aspect@ccc445383a7d4cea499744d823a7698ae077a407 # v2026.45.0
+        with:
+          launcher-version: '2026.47.12'
+          bazelrc-generate: 'false'
+          bazelisk-cache: 'false'
+          disk-cache: 'false'
       - name: Merge gate
         if: steps.pr.outputs.number != ''
         uses: ./.gate/.github/actions/merge-gate
@@ -104,25 +88,11 @@ jobs:
           head-sha: ${{ github.event.sha }}
       - name: Start Platforms on the pull request branch
         if: steps.pr.outputs.number != ''
+        working-directory: .native-checks-tools
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           SHA: ${{ github.event.sha }}
           NUMBER: ${{ steps.pr.outputs.number }}
           BRANCH: ${{ steps.pr.outputs.branch }}
-        run: |
-          set -euo pipefail
-          # The run reports on the branch head, so it must still be this commit.
-          head=$(gh api "repos/$REPO/pulls/$NUMBER" --jq .head.sha)
-          if [ "$head" != "$SHA" ]; then
-            echo "PR #$NUMBER moved on to $head; its own BuildBuddy results start it"
-            exit 0
-          fi
-          if ! gh workflow run platforms.yml --repo "$REPO" --ref "$BRANCH" \
-              -f profile=pr -f checkout_ref="refs/pull/$NUMBER/merge" -f pull_request="$NUMBER"; then
-            # A branch from before #1479 has no `pull_request` input; its own
-            # pull request runs of Platforms already include macOS and Windows.
-            echo "::warning::could not dispatch Platforms on $BRANCH; merge main into it"
-            exit 0
-          fi
-          echo "started macOS and Windows for PR #$NUMBER at $SHA" >> "$GITHUB_STEP_SUMMARY"
+        run: aspect ci dispatch-native-checks

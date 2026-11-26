@@ -1,0 +1,35 @@
+"""Render committed JSON fixtures with stable indentation."""
+
+def pretty_json(value, width = 2):
+    text = json.encode(value)
+    output, depth = [], 0
+    quoted, escaped = False, False
+    for index, char in enumerate(text.elems()):
+        if quoted:
+            output.append(char)
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                quoted = False
+        elif char == '"':
+            output.append(char)
+            quoted = True
+        elif char in "[{":
+            output.append(char)
+            depth += 1
+            if text[index + 1] not in "]}":
+                output.append("\n" + " " * (width * depth))
+        elif char in "]}":
+            depth -= 1
+            if text[index - 1] not in "[{":
+                output.append("\n" + " " * (width * depth))
+            output.append(char)
+        elif char == ",":
+            output.append(",\n" + " " * (width * depth))
+        elif char == ":":
+            output.append(": ")
+        else:
+            output.append(char)
+    return "".join(output) + "\n"

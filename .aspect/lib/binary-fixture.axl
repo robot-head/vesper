@@ -1,0 +1,26 @@
+"""Little-endian encoding and byte output for independent fixture generators."""
+
+def le(value, width):
+    return bytes([(value >> (index * 8)) & 255 for index in range(width)])
+
+def read_le(data, start, width):
+    value = 0
+    for index in range(width):
+        value += data[start + index] * (1 << (8 * index))
+    return value
+
+def write_bytes(ctx, path, data):
+    stream = ctx.std.fs.create(path)
+    written = stream.write(data)
+    stream.close()
+    if written != len(data):
+        fail("Short write: " + path)
+
+def unicode_scalar(n):
+    if n < 128:
+        return str(bytes([n]))
+    if n < 2048:
+        return str(bytes([192 + n // 64, 128 + n % 64]))
+    if n < 65536:
+        return str(bytes([224 + n // 4096, 128 + (n // 64) % 64, 128 + n % 64]))
+    return str(bytes([240 + n // 262144, 128 + (n // 4096) % 64, 128 + (n // 64) % 64, 128 + n % 64]))
