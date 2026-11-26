@@ -2673,8 +2673,147 @@ fn name_lt(in a: Ast, x: u64, y: u64) -> bool {
     nx < ny
 }
 
+// Symbols are interned, so equal spellings are equal ids.
 fn same_name(in a: Ast, x: u64, y: u64) -> bool {
-    !name_lt(in a, x, y) && !name_lt(in a, y, x)
+    x == y
+}
+
+fn max_u64(x: u64, y: u64) -> u64 {
+    if x > y {
+        x
+    } else {
+        y
+    }
+}
+
+fn zeros(n: u64) -> ChunkSeq[u8] {
+    let mut out = ChunkSeq::new[u8]();
+    for i in 0..n {
+        out.push(0);
+    }
+    out
+}
+
+// The first index of sorted `v` whose value is at least `x`.
+fn lower_bound(in v: ChunkSeq[u64], x: u64) -> u64 {
+    let mut lo: u64 = 0;
+    let mut hi = v.len();
+    loop {
+        if lo >= hi {
+            break;
+        }
+        let mid = add(lo, (sub(hi, lo)) >> 1);
+        if w64(in v, mid) < x {
+            lo = inc(mid);
+        } else {
+            hi = mid;
+        }
+    }
+    lo
+}
+
+// Bottom-up merge sort of `v` by the spelling of each symbol.
+fn sort_by_name(in a: Ast, inout v: ChunkSeq[u64]) {
+    let n = v.len();
+    let mut width: u64 = 1;
+    loop {
+        if width >= n {
+            break;
+        }
+        let mut out = ChunkSeq::new[u64]();
+        let mut lo: u64 = 0;
+        loop {
+            if lo >= n {
+                break;
+            }
+            let mid = if add(lo, width) < n {
+                add(lo, width)
+            } else {
+                n
+            };
+            let hi = if add(mid, width) < n {
+                add(mid, width)
+            } else {
+                n
+            };
+            let mut i = lo;
+            let mut j = mid;
+            loop {
+                if i >= mid && j >= hi {
+                    break;
+                }
+                let take_right = if i >= mid {
+                    true
+                } else if j >= hi {
+                    false
+                } else {
+                    name_lt(in a, w64(in v, j), w64(in v, i))
+                };
+                if take_right {
+                    out.push(w64(in v, j));
+                    j = inc(j);
+                } else {
+                    out.push(w64(in v, i));
+                    i = inc(i);
+                }
+            }
+            lo = hi;
+        }
+        v = out;
+        width = width << 1;
+    }
+}
+
+// Bottom-up merge sort of `v` by value.
+fn sort_u64(inout v: ChunkSeq[u64]) {
+    let n = v.len();
+    let mut width: u64 = 1;
+    loop {
+        if width >= n {
+            break;
+        }
+        let mut out = ChunkSeq::new[u64]();
+        let mut lo: u64 = 0;
+        loop {
+            if lo >= n {
+                break;
+            }
+            let mid = if add(lo, width) < n {
+                add(lo, width)
+            } else {
+                n
+            };
+            let hi = if add(mid, width) < n {
+                add(mid, width)
+            } else {
+                n
+            };
+            let mut i = lo;
+            let mut j = mid;
+            loop {
+                if i >= mid && j >= hi {
+                    break;
+                }
+                let take_right = if i >= mid {
+                    true
+                } else if j >= hi {
+                    false
+                } else {
+                    w64(in v, j) < w64(in v, i)
+                };
+                if take_right {
+                    out.push(w64(in v, j));
+                    j = inc(j);
+                } else {
+                    out.push(w64(in v, i));
+                    i = inc(i);
+                }
+            }
+            lo = hi;
+        }
+        v = out;
+        width = width << 1;
+    }
 }
 
 fn starts_with_mark(in st: St, in a: Ast, sym: u64) -> bool {
@@ -2695,115 +2834,79 @@ fn starts_with_mark(in st: St, in a: Ast, sym: u64) -> bool {
 fn names_edits(inout nm: Names, in st: St, in a: Ast, inout out: Eds) {
     let nb = nm.bindings.len() / 5;
     let nr = nm.refs.len() >> 2;
-    // Distinct ref names in name order, with their non-copied starts.
+    // Symbols are interned: one id per spelling. Flags by id replace the
+    // name maps of Rust (`BTreeMap`/`BTreeSet`), so the grouping stays
+    // O(n log n) in the references.
+    let mut top: u64 = 0;
+    for i in 0..nr {
+        top = max_u64(top, inc(w64(in nm.refs, i << 2)));
+    }
+    for bi in 0..nb {
+        top = max_u64(top, inc(w64(in nm.bindings, wrapping_mul(bi, 5))));
+    }
+    let mut seen = zeros(top);
+    let mut uncopied = zeros(top);
+    // Distinct ref names in name order.
     let mut names = ChunkSeq::new[u64]();
     for i in 0..nr {
         let sym = w64(in nm.refs, i << 2);
-        let mut seen = false;
-        for q in 0..names.len() {
-            if same_name(in a, w64(in names, q), sym) {
-                seen = true;
-            }
+        if b8(in seen, sym) == 0 {
+            seen.try_set(sym, 1);
+            names.push(sym);
         }
-        if !seen {
-            let mut at = names.len();
-            loop {
-                if at == 0 || !name_lt(in a, sym, w64(in names, sub(at, 1))) {
-                    break;
-                }
-                at = sub(at, 1);
-            }
-            names.push(0);
-            let mut k = sub(names.len(), 1);
-            loop {
-                if k <= at {
-                    break;
-                }
-                names.try_set(k, w64(in names, sub(k, 1)));
-                k = sub(k, 1);
-            }
-            names.try_set(at, sym);
+        if w64(in nm.refs, add(i << 2, 3)) == 0 {
+            uncopied.try_set(sym, 1);
         }
     }
-    // `generated`: a name's uncopied ref starts, when it has any and is not
-    // the mark's.
-    let mut gen_names = ChunkSeq::new[u64]();
+    sort_by_name(in a, inout names);
+    // `generated`: a name with an uncopied ref that is not the mark's.
+    let mut generated = zeros(top);
+    let mut any_generated = false;
     for q in 0..names.len() {
         let sym = w64(in names, q);
-        if starts_with_mark(in st, in a, sym) {
-            continue;
+        if b8(in uncopied, sym) == 1 && !starts_with_mark(in st, in a, sym) {
+            generated.try_set(sym, 1);
+            any_generated = true;
         }
-        let mut any = false;
+    }
+    // Uncopied ref starts as (symbol, start) keys in order, and each
+    // symbol's first key.
+    let mut keys = ChunkSeq::new[u64]();
+    if any_generated {
         for i in 0..nr {
-            if same_name(in a, w64(in nm.refs, i << 2), sym)
-                && w64(in nm.refs, add(i << 2, 3)) == 0 {
-                any = true;
+            let sym = w64(in nm.refs, i << 2);
+            if w64(in nm.refs, add(i << 2, 3)) == 0 && b8(in generated, sym) == 1 {
+                keys.push(add(sym << 32, w64(in nm.refs, inc(i << 2))));
             }
         }
-        if any {
-            gen_names.push(sym);
-        }
+        sort_u64(inout keys);
     }
     // `conflicts`: binding names, in name order, with a generated use in
     // the scope of a copied binder.
     let mut conflicts = ChunkSeq::new[u64]();
-    for b in 0..nb {
-        let row = wrapping_mul(b, 5);
+    let mut listed = zeros(top);
+    for bi in 0..nb {
+        let row = wrapping_mul(bi, 5);
         let sym = w64(in nm.bindings, row);
-        if !copied(in st, w64(in nm.bindings, inc(row))) {
+        if b8(in generated, sym) == 0 || b8(in listed, sym) == 1 {
             continue;
         }
-        let mut generated = false;
-        for q in 0..gen_names.len() {
-            if same_name(in a, w64(in gen_names, q), sym) {
-                generated = true;
-            }
-        }
-        if !generated {
+        if !copied(in st, w64(in nm.bindings, inc(row))) {
             continue;
         }
         let ss = w64(in nm.bindings, add(row, 3));
         let se = w64(in nm.bindings, add(row, 4));
         // The first generated use at or after the scope start.
-        let mut first = NONE;
-        for i in 0..nr {
-            if same_name(in a, w64(in nm.refs, i << 2), sym)
-                && w64(in nm.refs, add(i << 2, 3)) == 0 {
-                let p = w64(in nm.refs, inc(i << 2));
-                if p >= ss && (first == NONE || p < first) {
-                    first = p;
-                }
+        let at = lower_bound(in keys, add(sym << 32, ss));
+        if at < keys.len() {
+            let k = w64(in keys, at);
+            if k >> 32 == sym && (k & 4294967295) < se {
+                listed.try_set(sym, 1);
+                conflicts.push(sym);
             }
-        }
-        if first == NONE || first >= se {
-            continue;
-        }
-        let mut seen = false;
-        for q in 0..conflicts.len() {
-            if same_name(in a, w64(in conflicts, q), sym) {
-                seen = true;
-            }
-        }
-        if !seen {
-            let mut at = conflicts.len();
-            loop {
-                if at == 0 || !name_lt(in a, sym, w64(in conflicts, sub(at, 1))) {
-                    break;
-                }
-                at = sub(at, 1);
-            }
-            conflicts.push(0);
-            let mut k = sub(conflicts.len(), 1);
-            loop {
-                if k <= at {
-                    break;
-                }
-                conflicts.try_set(k, w64(in conflicts, sub(k, 1)));
-                k = sub(k, 1);
-            }
-            conflicts.try_set(at, sym);
         }
     }
+    sort_by_name(in a, inout conflicts);
     // Edits keyed by start: rows (start, end, text first, len) over `tx`.
     let mut rows = ChunkSeq::new[u64]();
     let mut tx = ChunkSeq::new[u8]();

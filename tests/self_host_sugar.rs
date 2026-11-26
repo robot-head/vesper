@@ -1732,3 +1732,26 @@ fn driver_speed() {
         vesper.as_secs_f64() / rust.as_secs_f64()
     );
 }
+
+/// Caller hygiene on a source with one expansion and many distinct names:
+/// the name grouping stays near linear in the references.
+#[test]
+fn driver_matches_with_many_names() {
+    let mut program =
+        String::from("sugar twice:stmt { rule (twice $b:block) => {{ $b; $b; }} }\nfn f() {\n");
+    for i in 0..20_000 {
+        program.push_str(&format!(" let name{i} = {i};\n"));
+    }
+    program.push_str(" twice { name0; }\n}\n");
+    let _ = vesper_expand("", true);
+    let start = std::time::Instant::now();
+    let rust = rust_expand(&program, true);
+    let rust_time = start.elapsed();
+    let start = std::time::Instant::now();
+    let vesper = vesper_expand(&program, true);
+    let vesper_time = start.elapsed();
+    eprintln!("rust {rust_time:?}, vesper {vesper_time:?}");
+    assert!(matches!(rust, Expansion::Expanded { .. }), "{rust:?}");
+    assert_eq!(rust, vesper);
+    assert!(vesper_time.as_secs() < 60, "{vesper_time:?}");
+}
