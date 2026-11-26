@@ -33,6 +33,7 @@ pub use crate::wire::{
     SynDropAlertWire as vesper__ebpf__wire__SynDropAlertWire,
     WireError as vesper__ebpf__wire__WireError,
 };
+pub use PortDecision as vesper__ebpf__mitigator__Decision;
 pub use PortDecodeError as vesper__ebpf__insn__DecodeError;
 pub use PortEncoded as vesper__ebpf__insn__Encoded;
 pub use PortEthWire as vesper__ebpf__wire__EthIpv4TcpWire;
@@ -183,6 +184,15 @@ pub struct PortEncoded {
     pub n: u64,
     pub lo: RawInsn,
     pub hi: RawInsn,
+}
+
+/// The reference model's decision (`mitigator::reference_decision`): the
+/// `XdpAction` code, and the source's new counter when the packet counts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PortDecision {
+    pub action: u64,
+    pub counted: bool,
+    pub count: u64,
 }
 
 /// `wire::EthIpv4TcpWire` with each MAC address in the low 48 bits of a

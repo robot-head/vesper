@@ -15,8 +15,11 @@ vesper_package(
         "//crates/vesper-serde:port_package",
     ],
     # @vesper/loom-solver (port wave P1 lane 17, #914) and @vesper/loom-audit
-    # (port wave P3a lane 4, #1039) import this package.
+    # (port wave P3a lane 4, #1039) import this package, and so does
+    # @vesper/driver-commands for `vesper graph` (#1996).
     visibility = [
+        "//:__pkg__",
+        "//crates/vesper-hybrid:__pkg__",
         "//crates/vesper-loom-audit:__pkg__",
         "//crates/vesper-loom-solver:__pkg__",
     ],
@@ -56,6 +59,9 @@ filegroup(
         ("upgrade", "let relaxed = !new_forbid;", "let relaxed = false;"),
         ("manifest_toml", "put(inout d.msg, \"missing field `\");", "put(inout d.msg, \"missing key `\");"),
         ("semver_text", "put(inout m, \"build metadata\");", "put(inout m, \"build\");"),
+        ("lock_json", "const E_EOF_VALUE: Str = \"EOF while parsing a value\";", "const E_EOF_VALUE: Str = \"EOF while parsing value\";"),
+        ("lock_words", "|| cp == Space::Ideographic", "|| false"),
+        ("lock_graph", "put(inout out, \"Unreachable packages excluded: \");", "put(inout out, \"Unreachable packages: \");"),
     ]
 ]
 

@@ -192,32 +192,15 @@ pub fn build(cfg: &MitigatorConfig) -> Result<Program, BuildError> {
 /// source *before* the packet, returning the action, the new counter value
 /// (if the packet is counted) and whether an alert is due. Used by the
 /// fixture tests; the Lean model in `lean/EbpfFirewall.lean` states the
-/// same decision.
+/// same decision. It runs the Vesper port (`vesper/src/mitigator.ves`,
+/// #2230); the Rust model is in the seed copy
+/// (`seed/src/engine/mitigator.rs`).
 pub fn reference_decision(
     packet: &[u8],
     prior_count: Option<u64>,
     threshold: u64,
 ) -> (XdpAction, Option<u64>) {
-    let Ok(hdr) = EthIpv4TcpWire::decode(packet) else {
-        return (XdpAction::Pass, None);
-    };
-    if hdr.ether_type != ETH_P_IPV4 || hdr.proto != IPPROTO_TCP {
-        return (XdpAction::Pass, None);
-    }
-    let ihl = usize::from(hdr.ver_ihl & 0x0f);
-    let tcp = o::VER_IHL + ihl * 4;
-    if ihl < 5 || packet.len() < tcp + TCP_HDR_MIN {
-        return (XdpAction::Pass, None);
-    }
-    let flags =
-        u16::from_be_bytes([packet[tcp + TCP_FLAGS_OFF], packet[tcp + TCP_FLAGS_OFF + 1]]) & 0x3f;
-    if flags & TCP_FLAG_SYN == 0 || flags & TCP_FLAG_ACK != 0 {
-        return (XdpAction::Pass, None);
-    }
-    let count = prior_count.map_or(1, |c| c.wrapping_add(1));
-    if count <= threshold {
-        (XdpAction::Pass, Some(count))
-    } else {
-        (XdpAction::Drop, Some(count))
-    }
+    let d = crate::port::ffi::mitigator_reference_decision(packet, prior_count, threshold);
+    let action = XdpAction::from_u64(d.action).expect("the model answers pass or drop");
+    (action, d.counted.then_some(d.count))
 }

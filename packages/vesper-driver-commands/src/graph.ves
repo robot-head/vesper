@@ -1,10 +1,29 @@
-// `vesper graph`: CLI option parsing and `--help` in Vesper, delegating
-// `Loom.lock` snapshot validation, projection, and text/JSON/DOT rendering
-// (`src/package_graph.rs`) to `HybridCommands::hc_graph_run`.
+// `vesper graph` (`src/package_graph.rs`): CLI option parsing and `--help`
+// here, then the Loom.lock read; @vesper/loom-calculus reads the JSON,
+// validates the snapshot, projects it and renders the text, JSON or DOT
+// report (`graph_run`, #1996).
 use @vesper/driver::{Args, args_count, eq};
+use @vesper-std/fs::{IoError, error_text, read_path};
+use @vesper/loom-calculus::lock_graph::{GRAPH_OK, GRAPH_BAD_LOCKFILE, graph_focus_error, graph_run};
 use super::{PrintFailed, arg, byte_at, print, fail, stdout_stream};
 
-pub fn run_graph(in args: Args) -> i64 eff [Ffi[StdFs], Ffi[HybridCommands], Fail[PrintFailed]] {
+// The Loom.lock bytes, or `io::Error`'s text.
+struct LockRead {
+    ok: bool,
+    bytes: ChunkSeq[u8],
+    error: ChunkSeq[u8]
+}
+
+fn read_lock(in path: Slice[u8]) -> LockRead eff [Ffi[StdFs]] {
+    handle Fail[IoError] in {
+        read_path(in path)
+    } with {
+        return v => LockRead { ok: true, bytes: v, error: ChunkSeq::new[u8]() },
+        raise(e, _) => LockRead { ok: false, bytes: ChunkSeq::new[u8](), error: error_text(e) },
+    }
+}
+
+pub fn run_graph(in args: Args) -> i64 eff [Ffi[StdFs], Fail[PrintFailed]] {
     let n = args_count(in args);
     let mut has_input = false;
     let mut input: ChunkSeq[u8] = ChunkSeq::new[u8]();
@@ -62,25 +81,42 @@ pub fn run_graph(in args: Args) -> i64 eff [Ffi[StdFs], Ffi[HybridCommands], Fai
     if !has_input {
         input.extend(in "Loom.lock".as_bytes());
     }
-    let err_len = HybridCommands::hc_graph_run(
-        in input.as_slice(),
+    if has_focus {
+        let bad = graph_focus_error(in focus.as_slice());
+        if bad.len() != 0 {
+            return fail(in bad.as_slice());
+        }
+    }
+    if json && dot {
+        return fail(in "--json and --dot cannot be combined".as_bytes());
+    }
+    let lock = read_lock(in input.as_slice());
+    if !lock.ok {
+        let mut err: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        err.extend(in input.as_slice());
+        err.extend(in ": ".as_bytes());
+        err.extend(in lock.error.as_slice());
+        return fail(in err.as_slice());
+    }
+    let run = graph_run(
+        in lock.bytes.as_slice(),
         has_focus,
         in focus.as_slice(),
         invert,
         json,
         dot
     );
-    if err_len == 0 {
+    if run.out.len() != 0 {
+        print(stdout_stream(), in run.out.as_slice());
+    }
+    if run.status == GRAPH_OK {
         return 0;
     }
     let mut err: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    err.resize(err_len, 0);
-    let actual = HybridCommands::hc_graph_err(inout err.as_slice_mut());
-    if actual > err.len() {
-        err.resize(actual, 0);
-        let _got = HybridCommands::hc_graph_err(inout err.as_slice_mut());
-    } else {
-        err.truncate(actual);
+    if run.status == GRAPH_BAD_LOCKFILE {
+        err.extend(in input.as_slice());
+        err.extend(in ": invalid lockfile: ".as_bytes());
     }
+    err.extend(in run.err.as_slice());
     fail(in err.as_slice())
 }

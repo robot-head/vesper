@@ -199,6 +199,7 @@ vesper_hybrid(
         "hybrid_driver": [
             ":hybrid_parse_package",
             "//:ast_package",
+            "//:check_collect_package",
             "//:check_data_package",
             "//:check_layout_package",
             "//:check_names_packages_package",
@@ -224,6 +225,8 @@ vesper_hybrid(
             # `vesper fmt`'s formatter (#1996 part 3d).
             "//crates/vesper-fmt:port_package",
             "//crates/vesper-lean-syntax:port_package",
+            # `vesper graph`'s lockfile reader and report (#1996).
+            "//crates/vesper-loom-calculus:port_package",
             "//crates/vesper-serde:port_package",
         ],
         # The eBPF backend swap (#1290) builds on @vesper/ebpf-backend.

@@ -21,6 +21,9 @@
 //! - `wire`: `encode` and `decode` of 256 `EthIpv4TcpWire` frames and 256
 //!   `SynDropAlertWire` alerts built from the input words (the wire
 //!   structs, over the bulk-bytes port interface of #2183).
+//! - `reference`: the mitigator's reference model over 512 frames (SYNs,
+//!   ACKs, other protocols, IPv4 options), the frame decoded on the Vesper
+//!   side (#2230).
 //! - `interp`: the SYN-flood mitigator run over 256 packets (SYNs from 64
 //!   sources, and ACKs) in a fresh environment, the ring drained after
 //!   each run: the interpreter, with its map and ring state (part 4).
@@ -46,6 +49,7 @@ fn ops(name: &str) -> u64 {
         "core" => 512,
         "interp" => 256,
         "wire" => 512,
+        "reference" => 512,
         _ => 1,
     }
 }
@@ -476,6 +480,39 @@ macro_rules! workloads {
                 black_box(sum)
             }
 
+            pub fn reference(w: &[u64]) -> u64 {
+                use ::$krate::mitigator::reference_decision;
+                use ::$krate::wire::{EthIpv4TcpWire, WireFrame};
+                static PACKETS: std::sync::OnceLock<Vec<Vec<u8>>> = std::sync::OnceLock::new();
+                let packets = PACKETS.get_or_init(|| {
+                    (0..512u64)
+                        .map(|i| {
+                            let x = w[i as usize];
+                            let mut p = EthIpv4TcpWire {
+                                ether_type: if i % 7 == 6 { 0x86dd } else { 0x0800 },
+                                ver_ihl: if i % 5 == 4 { 0x46 } else { 0x45 },
+                                proto: if i % 11 == 10 { 17 } else { 6 },
+                                src_ipv4: x as u32,
+                                data_offset_flags: (5 << 12) | if i % 3 == 2 { 0x10 } else { 0x02 },
+                                ..Default::default()
+                            }
+                            .encode();
+                            p.extend([0u8; 8]);
+                            p
+                        })
+                        .collect()
+                });
+                let mut sum = 0u64;
+                for (i, pkt) in packets.iter().enumerate() {
+                    let prior = if i % 4 == 0 { None } else { Some(i as u64 % 9) };
+                    let (action, count) = reference_decision(black_box(pkt), prior, 5);
+                    sum = sum
+                        .wrapping_mul(31)
+                        .wrapping_add(action as u64 ^ count.unwrap_or(99));
+                }
+                black_box(sum)
+            }
+
             pub fn ext(_: &[u64]) -> u64 {
                 static OBJ: std::sync::OnceLock<(::$krate::btf::Btf, Vec<u8>)> =
                     std::sync::OnceLock::new();
@@ -516,12 +553,22 @@ fn workload(name: &str) -> (Workload, Workload) {
         "ext" => (rust_build::ext, port_build::ext),
         "interp" => (rust_build::interp, port_build::interp),
         "wire" => (rust_build::wire, port_build::wire),
+        "reference" => (rust_build::reference, port_build::reference),
         _ => unreachable!(),
     }
 }
 
-const WORKLOADS: [&str; 9] = [
-    "decode", "scalar", "concrete", "verify", "btf", "core", "ext", "interp", "wire",
+const WORKLOADS: [&str; 10] = [
+    "decode",
+    "scalar",
+    "concrete",
+    "verify",
+    "btf",
+    "core",
+    "ext",
+    "interp",
+    "wire",
+    "reference",
 ];
 
 #[test]
@@ -691,4 +738,10 @@ fn abba_interp() {
 #[ignore = "benchmark; run in release with --ignored --nocapture"]
 fn abba_wire() {
     abba("wire");
+}
+
+#[test]
+#[ignore = "benchmark; run in release with --ignored --nocapture"]
+fn abba_reference() {
+    abba("reference");
 }

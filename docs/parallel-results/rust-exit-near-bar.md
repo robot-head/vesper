@@ -135,3 +135,33 @@ The `decode` workload (the instruction codec, already the only build) is
 `Vec`, about 100 instructions per `encode` call against Rust's 43, and
 `decode_all` returns its instructions through a converted
 `ChunkSeq[Insn]`.
+
+Follow-up (#2226): with the bounds facts of #2220, the decoders' word reads
+and, after one length guard added to each encoder, the encoders' word stores
+compile without per-access checks (straight loads and stores). Re-timed with
+a compiler built from #2220: `wire` 2.28..2.55 (median interval), `decode`
+1.76..1.77. Both are still above the bar, so wire stays behind `vesper-port`. The
+Vesper bodies are now tight; the remaining time is the Rust side of each
+crossing (the 21-word struct conversion, the MAC conversion and the result
+`Vec`).
+
+## eBPF mitigator reference model: the frame stays in Vesper (#2230)
+
+The wire codec's only non-test caller is `mitigator::reference_decision`. It
+is now ported (`vesper/src/mitigator.ves`): the packet bytes cross the port
+in place, Vesper reads the three header fields the decision uses after the
+same 54-byte length check, and the decision comes back as three words. No
+frame struct crosses. The Rust model moved to the seed copy
+(`seed/src/engine/mitigator.rs`), and `src/mitigator.rs` forwards to the port.
+
+New ABBA workload `reference` (512 frames per call: SYNs, ACKs, IPv6, UDP,
+IPv4 options), compiler built from #2220, `-C target-cpu=native`, 30 epochs:
+1.12x [1.04, 1.19], then 1.22x [1.19, 1.25] on a second run: **pass**. A first
+version that called `eth_decode` for the whole struct measured 2.6x, because
+building the 21-field result costs more than the rest of the decision.
+
+0 diffs: `tests/wire_port.rs::reference_decisions_match_rust` (50,000 random
+frames, IHLs, flags, ether types, protocols, prior counters, truncations),
+and `tests/mitigator.rs` checks the model against the interpreter. The
+divergence edit 13 (drop at the threshold itself) is caught by
+`random_packets_match_the_reference_decision`.
