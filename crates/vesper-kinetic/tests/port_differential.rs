@@ -1584,3 +1584,283 @@ fn soft_substeps_match_the_rust_build() {
     assert!(cases > 8000);
     assert_eq!(differences, 0);
 }
+
+const COUPLE_DIFF_ROUNDS: u64 = 64;
+const COUPLE_DIFF_STEPS: usize = 40;
+const COUPLE_SEED_BASE: u64 = 0x636f_7570_0000;
+const COUPLE_MIN_CASES: usize = 2000;
+const COUPLE_MIN_CONTACTS: usize = 5000;
+const COUPLE_SHAPE_COUNT: u32 = 5;
+const COUPLE_BASE_DT_HZ: f32 = 120.0;
+const COUPLE_DT_STEP_HZ: f32 = 60.0;
+
+macro_rules! couple_scene {
+    ($k:ident, $seed:expr) => {{
+        use $k::rigid::{
+            ColliderShape, RigidBody, RigidCollider, RigidConfig, RigidMaterial, RigidWorld,
+            box_inv_inertia,
+        };
+        use $k::soft::{SoftConfig, SoftWorld};
+        use $k::{CoupledWorld, CouplingConfig};
+
+        let mut rng = Lcg($seed);
+        let dt = 1.0 / (COUPLE_BASE_DT_HZ + (rng.next() % 2) as f32 * COUPLE_DT_STEP_HZ);
+        let gravity = [
+            rng.range(-0.5, 0.5) as f32,
+            -9.81 + rng.range(-1.0, 1.0) as f32,
+            rng.range(-0.5, 0.5) as f32,
+        ];
+
+        let colliders = vec![
+            RigidCollider {
+                shape: ColliderShape::Box {
+                    half_extents: [0.8, 0.15, 0.8],
+                },
+                material: RigidMaterial::default(),
+            },
+            RigidCollider {
+                shape: ColliderShape::Sphere { radius: 0.18 },
+                material: RigidMaterial::default(),
+            },
+            RigidCollider {
+                shape: ColliderShape::Capsule {
+                    half_height: 0.14,
+                    radius: 0.1,
+                },
+                material: RigidMaterial::default(),
+            },
+            RigidCollider {
+                shape: ColliderShape::ConvexHull {
+                    vertices: vec![
+                        [-0.18, -0.12, -0.18],
+                        [0.18, -0.12, -0.18],
+                        [0.0, -0.12, 0.2],
+                        [0.0, 0.18, 0.0],
+                    ],
+                },
+                material: RigidMaterial::default(),
+            },
+            RigidCollider {
+                shape: ColliderShape::Segment {
+                    a: [-0.15, -0.05, 0.0],
+                    b: [0.15, 0.05, 0.0],
+                    radius: 0.09,
+                },
+                material: RigidMaterial::default(),
+            },
+        ];
+
+        let mut bodies = Vec::new();
+        // Static platform underneath the soft jelly.
+        bodies.push(RigidBody::new([0.0, 0.15, 0.0], 0.0, [0.0; 3], 0));
+        let dyn_count = 1 + (rng.next() % 4) as usize;
+        for b_idx in 0..dyn_count {
+            let col = 1 + (rng.next() % (COUPLE_SHAPE_COUNT - 1));
+            let pos = [
+                rng.range(-0.18, 0.18) as f32,
+                0.38 + (b_idx as f32) * 0.24,
+                rng.range(-0.18, 0.18) as f32,
+            ];
+            let inv_m = rng.range(0.5, 3.0) as f32;
+            let mut body = RigidBody::new(
+                pos,
+                inv_m,
+                box_inv_inertia(1.0 / inv_m, [0.15, 0.15, 0.15]),
+                col,
+            );
+            body.vel = [
+                rng.range(-0.8, 0.8) as f32,
+                rng.range(-1.5, 0.2) as f32,
+                rng.range(-0.8, 0.8) as f32,
+            ];
+            body.ang_vel = [
+                rng.range(-2.0, 2.0) as f32,
+                rng.range(-2.0, 2.0) as f32,
+                rng.range(-2.0, 2.0) as f32,
+            ];
+            if rng.next() % 2 == 0 {
+                let (s, c) = (rng.range(-0.6, 0.6) as f32).sin_cos();
+                body.orientation = [0.0, s, 0.0, c];
+            }
+            if rng.next() % 2 == 0 {
+                let (s, c) = (rng.range(-0.5, 0.5) as f32).sin_cos();
+                body.inertia_frame = [s, 0.0, 0.0, c];
+            }
+            bodies.push(body);
+        }
+
+        let rigid = RigidWorld::new(
+            RigidConfig {
+                dt,
+                substeps: 1 + rng.next() % 4,
+                gravity,
+                ..RigidConfig::default()
+            },
+            &bodies,
+            &colliders,
+        )
+        .unwrap();
+
+        let cells = [2 + rng.next() % 2, 2, 2 + rng.next() % 2];
+        let (mut particles, constraints) =
+            SoftWorld::tetrahedral_box([-0.15, 0.31, -0.15], 0.12, cells, 1.5, 1e-5, 1e-6).unwrap();
+        for p in &mut particles {
+            p.vel = [
+                rng.range(-0.3, 0.3) as f32,
+                rng.range(-0.8, 0.1) as f32,
+                rng.range(-0.3, 0.3) as f32,
+            ];
+            if rng.next() % 11 == 0 {
+                p.inv_mass = 0.0;
+            }
+        }
+        let soft = SoftWorld::new(
+            SoftConfig {
+                dt,
+                substeps: 4 + rng.next() % 8,
+                gravity,
+                ground: Some(0.0),
+                ground_friction: 0.4,
+            },
+            &particles,
+            &constraints,
+        )
+        .unwrap();
+
+        let friction = if rng.next() % 4 == 0 {
+            0.0
+        } else {
+            rng.range(0.1, 0.8) as f32
+        };
+        CoupledWorld::new(
+            rigid,
+            soft,
+            CouplingConfig {
+                particle_radius: 0.025,
+                friction,
+            },
+        )
+        .unwrap()
+    }};
+}
+
+/// The port's soft-rigid coupling substep (`CoupledWorld::step`,
+/// vesper/src/couple.ves) against the frozen Rust build: the coupled SHA-256
+/// digest and contact count after every tick across static and dynamic boxes,
+/// spheres, capsules, convex hulls and segments (SH6 lane 9, #2243).
+#[test]
+fn couple_matches_the_rust_build() {
+    let mut differences = 0usize;
+    let mut cases = 0usize;
+    let mut total_contacts = 0usize;
+    let mut errors = 0usize;
+    for round in 0..COUPLE_DIFF_ROUNDS {
+        let seed = COUPLE_SEED_BASE + round;
+        let mut pw = couple_scene!(vesper_kinetic, seed);
+        let mut rw = couple_scene!(vesper_kinetic_rust, seed);
+        for step in 0..COUPLE_DIFF_STEPS {
+            match (pw.step(), rw.step()) {
+                (Ok(ph), Ok(rh)) => {
+                    cases += 1;
+                    total_contacts += pw.last_contacts();
+                    if ph != rh || pw.last_contacts() != rw.last_contacts() {
+                        differences += 1;
+                    }
+                }
+                (p, r) => {
+                    assert_eq!(
+                        format!("{p:?}"),
+                        format!("{r:?}"),
+                        "round {round} step {step}"
+                    );
+                    errors += 1;
+                    break;
+                }
+            }
+        }
+    }
+    println!(
+        "couple differential differences={differences} cases={cases} contacts={total_contacts} errors={errors}"
+    );
+    assert!(cases >= COUPLE_MIN_CASES && total_contacts >= COUPLE_MIN_CONTACTS);
+    assert_eq!(differences, 0);
+}
+
+#[test]
+#[ignore = "ABBA benchmark; run in release with --ignored --nocapture"]
+fn abba_couple() {
+    use std::hint::black_box;
+    use vesper_bench::{BenchCase, Invocation, RunConfig, run_abba};
+
+    const ABBA_SEED: u64 = 0x636f_7570_abba;
+    const ABBA_EPOCHS: usize = 30;
+    const ABBA_WARMUP: usize = 2;
+    const ABBA_OPS_PER_WINDOW: usize = 4;
+    const ABBA_MAX_CALLS: usize = 100_000;
+    const ABBA_MAX_NANOS: u64 = 600_000_000_000;
+    const ABBA_LAYOUT_SEED: u64 = 1;
+    const SIGN_TEST_ALPHA_HALF: f64 = 0.025;
+    const FLIP_UPPER_BOUND_LIMIT: f64 = 1.50;
+
+    let mut pw = couple_scene!(vesper_kinetic, ABBA_SEED);
+    let mut rw = couple_scene!(vesper_kinetic_rust, ABBA_SEED);
+
+    struct CoupleCase<F>(F);
+    impl<F: FnMut() -> usize> BenchCase for CoupleCase<F> {
+        type Input = ();
+        type Output = usize;
+        type Error = std::convert::Infallible;
+        fn setup(&mut self, _: Invocation) -> Result<Self::Input, Self::Error> {
+            Ok(())
+        }
+        fn run(&mut self, _: Self::Input) -> Result<Self::Output, Self::Error> {
+            Ok(black_box((self.0)()))
+        }
+    }
+
+    let cfg = RunConfig {
+        epochs: ABBA_EPOCHS,
+        warmup_epochs: ABBA_WARMUP,
+        operations_per_window: ABBA_OPS_PER_WINDOW,
+        max_total_calls: ABBA_MAX_CALLS,
+        max_elapsed_nanos: ABBA_MAX_NANOS,
+        layout_seed: ABBA_LAYOUT_SEED,
+    };
+    let mut r_case = CoupleCase(|| {
+        rw.step().unwrap();
+        rw.last_contacts()
+    });
+    let mut p_case = CoupleCase(|| {
+        pw.step().unwrap();
+        pw.last_contacts()
+    });
+    let report = run_abba(cfg, &mut r_case, &mut p_case).unwrap();
+    let pairs = report.pairs();
+    let mut ratios: Vec<f64> = pairs
+        .iter()
+        .map(|p| p.candidate_total() as f64 / p.baseline_total() as f64)
+        .collect();
+    ratios.sort_by(f64::total_cmp);
+    let mid = ratios.len() / 2;
+    let mut cdf = 0.0;
+    let mut choose = 1.0;
+    let mut k = 0usize;
+    for j in 0..ratios.len() {
+        cdf += choose * 0.5f64.powi(ratios.len() as i32);
+        if cdf > SIGN_TEST_ALPHA_HALF {
+            break;
+        }
+        k = j + 1;
+        choose = choose * (ratios.len() - j) as f64 / (j + 1) as f64;
+    }
+    let i = k.saturating_sub(1).min(mid);
+    let (ci_lo, ci_hi) = (ratios[i], ratios[ratios.len() - 1 - i]);
+    println!(
+        "ABBA couple: median {:.3}x [{ci_lo:.3}x, {ci_hi:.3}x]",
+        ratios[mid]
+    );
+    assert!(
+        ci_hi <= FLIP_UPPER_BOUND_LIMIT,
+        "ABBA 95% upper bound {ci_hi:.3}x exceeds {FLIP_UPPER_BOUND_LIMIT:.2}x"
+    );
+}
