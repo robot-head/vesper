@@ -424,8 +424,7 @@ fn release(inout e: EncoderCore, i: u64) {
     for k in 0..n {
         let abs = word(in e.sec_refs.as_slice(), wrapping_add(lo, k));
         let slot = slot_of(in e, abs);
-        let _set = e
-            .table
+        let _set = e.table
             .refs
             .try_set(slot, wrapping_sub(word(in e.table.refs.as_slice(), slot), 1));
     }

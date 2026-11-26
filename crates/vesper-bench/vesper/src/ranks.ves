@@ -357,20 +357,19 @@ fn append(inout result: ChunkSeq[Segment], next: Segment) {
                     || (last.upper_hi == next.lower_hi && last.upper_lo == next.lower_lo)
             );
         if same && (last.upper_inclusive || next.lower_inclusive) {
-            result
-                .try_set(
-                    dec(n),
-                    Segment {
-                        lower_bounded: last.lower_bounded,
-                        lower_hi: last.lower_hi,
-                        lower_lo: last.lower_lo,
-                        lower_inclusive: last.lower_inclusive,
-                        upper_bounded: next.upper_bounded,
-                        upper_hi: next.upper_hi,
-                        upper_lo: next.upper_lo,
-                        upper_inclusive: next.upper_inclusive
-                    }
-                );
+            result.try_set(
+                dec(n),
+                Segment {
+                    lower_bounded: last.lower_bounded,
+                    lower_hi: last.lower_hi,
+                    lower_lo: last.lower_lo,
+                    lower_inclusive: last.lower_inclusive,
+                    upper_bounded: next.upper_bounded,
+                    upper_hi: next.upper_hi,
+                    upper_lo: next.upper_lo,
+                    upper_inclusive: next.upper_inclusive
+                }
+            );
             return;
         }
     }

@@ -192,17 +192,15 @@ pub fn recorder_submit(
                         Option::None => (),
                     }
                 }
-                r
-                    .streams
-                    .push(
-                        ActiveStream {
-                            runtime: s.runtime,
-                            index: s.index,
-                            first: first,
-                            count: s.count,
-                            cursor: 0
-                        }
-                    );
+                r.streams.push(
+                    ActiveStream {
+                        runtime: s.runtime,
+                        index: s.index,
+                        first: first,
+                        count: s.count,
+                        cursor: 0
+                    }
+                );
             },
             Option::None => (),
         }
@@ -357,10 +355,9 @@ pub fn recorder_poll(inout r: Recorder, max_events: u64) -> ChunkSeq[Point] {
                         moved.first = first;
                         streams.push(moved);
                     }
-                    active
-                        .push(
-                            ActiveSub { first_stream: first_stream, stream_count: a.stream_count }
-                        );
+                    active.push(
+                        ActiveSub { first_stream: first_stream, stream_count: a.stream_count }
+                    );
                 }
             },
             Option::None => (),

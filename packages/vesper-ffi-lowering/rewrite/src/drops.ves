@@ -215,8 +215,7 @@ fn copy_type(inout dst: Ast, in src: Ast, id: u32) -> u32 {
 }
 
 fn copy_effect(inout dst: Ast, in src: Ast, id: u32) -> u32 {
-    let e = src
-        .effect_nodes
+    let e = src.effect_nodes
         .get_or(idx_from_raw[EffectNode](id), EffectNode { label: NONE, name: NONE, args: 0 });
     let n = list_len(in src, e.args);
     let mut args = ChunkSeq::new[u32]();
@@ -230,8 +229,7 @@ fn copy_effect(inout dst: Ast, in src: Ast, id: u32) -> u32 {
 }
 
 fn copy_effects(inout dst: Ast, in src: Ast, id: u32) -> u32 {
-    let e = src
-        .effects
+    let e = src.effects
         .get_or(idx_from_raw[EffectsNode](id), EffectsNode { instances: 0, tail: NONE });
     let n = list_len(in src, e.instances);
     let mut insts = ChunkSeq::new[u32]();
@@ -244,16 +242,13 @@ fn copy_effects(inout dst: Ast, in src: Ast, id: u32) -> u32 {
 }
 
 fn copy_param(inout dst: Ast, in src: Ast, id: u32, base: u32) -> u32 {
-    let p = src
-        .params
-        .get_or(
-            idx_from_raw[ParamNode](id),
-            ParamNode { name: NONE, pass: 0, projections: 0, ty: NONE, start: 0, end: 0 }
-        );
+    let p = src.params.get_or(
+        idx_from_raw[ParamNode](id),
+        ParamNode { name: NONE, pass: 0, projections: 0, ty: NONE, start: 0, end: 0 }
+    );
     let name = copy_sym(inout dst, in src, p.name);
     let ty = copy_type(inout dst, in src, p.ty);
-    dst
-        .params
+    dst.params
         .alloc(
             ParamNode {
                 name: name,
@@ -292,8 +287,7 @@ fn copy_pat(inout dst: Ast, in src: Ast, id: u32, base: u32) -> u32 {
         }
         b = alloc_list(inout dst, in fields);
     }
-    dst
-        .pats
+    dst.pats
         .alloc(
             PatNode {
                 kind: p.kind,
@@ -308,8 +302,7 @@ fn copy_pat(inout dst: Ast, in src: Ast, id: u32, base: u32) -> u32 {
 }
 
 fn copy_arg(inout dst: Ast, in src: Ast, id: u32, base: u32) -> u32 {
-    let a = src
-        .args
+    let a = src.args
         .get_or(idx_from_raw[ArgNode](id), ArgNode { pass: 0, explicit: false, expr: NONE });
     let expr = copy_expr(inout dst, in src, a.expr, base);
     dst.args.alloc(ArgNode { pass: a.pass, explicit: a.explicit, expr: expr }).raw
@@ -363,8 +356,7 @@ fn copy_expr(inout dst: Ast, in src: Ast, id: u32, base: u32) -> u32 {
         }
         b = alloc_list(inout dst, in arms);
     }
-    dst
-        .exprs
+    dst.exprs
         .alloc(
             ExprNode {
                 kind: e.kind,
@@ -381,22 +373,20 @@ fn copy_expr(inout dst: Ast, in src: Ast, id: u32, base: u32) -> u32 {
 }
 
 fn copy_fn(inout dst: Ast, in src: Ast, id: u32, base: u32, new_name: u32) -> u32 {
-    let f = src
-        .fns
-        .get_or(
-            idx_from_raw[FnNode](id),
-            FnNode {
-                name: NONE,
-                fip: false,
-                generics: 0,
-                params: 0,
-                result: NONE,
-                effects: 0,
-                body: NONE,
-                start: 0,
-                end: 0
-            }
-        );
+    let f = src.fns.get_or(
+        idx_from_raw[FnNode](id),
+        FnNode {
+            name: NONE,
+            fip: false,
+            generics: 0,
+            params: 0,
+            result: NONE,
+            effects: 0,
+            body: NONE,
+            start: 0,
+            end: 0
+        }
+    );
     let np = list_len(in src, f.params);
     let mut params = ChunkSeq::new[u32]();
     for i in 0..np {
@@ -406,8 +396,7 @@ fn copy_fn(inout dst: Ast, in src: Ast, id: u32, base: u32, new_name: u32) -> u3
     let result = copy_type(inout dst, in src, f.result);
     let effects = copy_effects(inout dst, in src, f.effects);
     let body = copy_expr(inout dst, in src, f.body, base);
-    dst
-        .fns
+    dst.fns
         .alloc(
             FnNode {
                 name: new_name,

@@ -451,24 +451,20 @@ fn bind(
     o.b_os.push(os);
     o.b_oe.push(oe);
     o.b_ty.push(ty);
-    o
-        .b_lin
-        .push(
-            if linear {
-                1
-            } else {
-                0
-            }
-        );
-    o
-        .b_own
-        .push(
-            if owned {
-                1
-            } else {
-                0
-            }
-        );
+    o.b_lin.push(
+        if linear {
+            1
+        } else {
+            0
+        }
+    );
+    o.b_own.push(
+        if owned {
+            1
+        } else {
+            0
+        }
+    );
     o.b_ss.push(ss);
     o.b_se.push(se);
     o.b_head.push(0);
@@ -2179,15 +2175,13 @@ fn rank_members(
         rk.l_len.push(wrapping_sub(len, pl));
         rk.t_at.push(start);
         rk.d_len.push(dl);
-        rk
-            .g_len
-            .push(
-                if badged {
-                    wrapping_sub(wrapping_sub(rk.pool.len(), start), dl)
-                } else {
-                    NONE64
-                }
-            );
+        rk.g_len.push(
+            if badged {
+                wrapping_sub(wrapping_sub(rk.pool.len(), start), dl)
+            } else {
+                NONE64
+            }
+        );
     }
     // Stable order by tier, then label.
     for i in 0..rk.tier.len() {

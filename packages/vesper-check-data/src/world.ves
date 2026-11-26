@@ -268,14 +268,13 @@ fn copy_span_rows(in rows: ChunkSeq[SpanRow]) -> ChunkSeq[SpanRow] {
     let mut out = ChunkSeq::with_capacity[SpanRow](n);
     for i in 0..n {
         match rows.try_get(i) {
-            Option::Some(r) => out
-                .push(
-                    SpanRow {
-                        start: r.start,
-                        end: r.end,
-                        ty: r.ty,
-                    }
-                ),
+            Option::Some(r) => out.push(
+                SpanRow {
+                    start: r.start,
+                    end: r.end,
+                    ty: r.ty,
+                }
+            ),
             Option::None => {},
         }
     }
@@ -287,76 +286,71 @@ impl World {
         let mut adts = ChunkSeq::with_capacity[Adt](self.adts.len());
         for i in 0..self.adts.len() {
             match self.adts.try_get(i) {
-                Option::Some(v) => adts
-                    .push(
-                        Adt {
-                            name: v.name,
-                            mode: v.mode,
-                            ga: v.ga,
-                            gn: v.gn,
-                            va: v.va,
-                            vn: v.vn,
-                            is_enum: v.is_enum,
-                            tile: v.tile,
-                            span_zero: v.span_zero,
-                        }
-                    ),
+                Option::Some(v) => adts.push(
+                    Adt {
+                        name: v.name,
+                        mode: v.mode,
+                        ga: v.ga,
+                        gn: v.gn,
+                        va: v.va,
+                        vn: v.vn,
+                        is_enum: v.is_enum,
+                        tile: v.tile,
+                        span_zero: v.span_zero,
+                    }
+                ),
                 Option::None => {},
             }
         }
         let mut generics = ChunkSeq::with_capacity[Generic](self.generics.len());
         for i in 0..self.generics.len() {
             match self.generics.try_get(i) {
-                Option::Some(v) => generics
-                    .push(
-                        Generic {
-                            name: v.name,
-                            bound: v.bound,
-                            row: v.row,
-                        }
-                    ),
+                Option::Some(v) => generics.push(
+                    Generic {
+                        name: v.name,
+                        bound: v.bound,
+                        row: v.row,
+                    }
+                ),
                 Option::None => {},
             }
         }
         let mut variants = ChunkSeq::with_capacity[Variant](self.variants.len());
         for i in 0..self.variants.len() {
             match self.variants.try_get(i) {
-                Option::Some(v) => variants
-                    .push(
-                        Variant {
-                            name: v.name,
-                            fa: v.fa,
-                            fc: v.fc,
-                            named: v.named,
-                        }
-                    ),
+                Option::Some(v) => variants.push(
+                    Variant {
+                        name: v.name,
+                        fa: v.fa,
+                        fc: v.fc,
+                        named: v.named,
+                    }
+                ),
                 Option::None => {},
             }
         }
         let mut fields = ChunkSeq::with_capacity[Field](self.fields.len());
         for i in 0..self.fields.len() {
             match self.fields.try_get(i) {
-                Option::Some(v) => fields
-                    .push(
-                        Field {
-                            name: v.name,
-                            ty: v.ty,
-                            modality: v.modality,
-                        }
-                    ),
+                Option::Some(v) => fields.push(
+                    Field {
+                        name: v.name,
+                        ty: v.ty,
+                        modality: v.modality,
+                    }
+                ),
                 Option::None => {},
             }
         }
         let mut effects = ChunkSeq::with_capacity[EffectRow](self.effects.len());
         for i in 0..self.effects.len() {
             match self.effects.try_get(i) {
-                Option::Some(v) => effects
-                    .push(
-                        EffectRow {
-                            name: v.name,
-                            linear: v.linear,
-                        }
-                    ),
+                Option::Some(v) => effects.push(
+                    EffectRow {
+                        name: v.name,
+                        linear: v.linear,
+                    }
+                ),
                 Option::None => {},
             }
         }

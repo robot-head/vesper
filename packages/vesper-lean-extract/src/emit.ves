@@ -122,14 +122,13 @@ fn typ(inout b: B, in t: Types, in x: X, ty: u32) {
 // `Name::qualified([ident(a), ident(b)])` written quietly; `name2_check`
 // makes its checks.
 fn name2_quiet(inout b: B, rooted: bool, a: u32, c: u32) {
-    b
-        .w(
-            if rooted {
-                1
-            } else {
-                0
-            }
-        );
+    b.w(
+        if rooted {
+            1
+        } else {
+            0
+        }
+    );
     b.w(2);
     b.sym(a);
     b.sym(c);
@@ -1254,14 +1253,13 @@ fn instruction(inout b: B, inout t: Types, in x: X, in s: S, ins: InstRow) -> u6
         let o = n32(x.p.op(a));
         if spells(in b, o, in "-") || spells(in b, o, in "!") {
             b.w(T_UNARY);
-            b
-                .w(
-                    if spells(in b, o, in "-") {
-                        U_NEG
-                    } else {
-                        U_BOOL_NOT
-                    }
-                );
+            b.w(
+                if spells(in b, o, in "-") {
+                    U_NEG
+                } else {
+                    U_BOOL_NOT
+                }
+            );
             value(inout b, x.p.op(inc(a)));
         } else {
             let mut m: ChunkSeq[u8] = ChunkSeq::new[u8]();
@@ -1454,14 +1452,13 @@ fn indirect(inout b: B, inout t: Types, in x: X, in s: S, ins: InstRow) -> u64 {
     } else {
         let_states(inout b, w(ins.dest), states);
     }
-    let m = b
-        .app(
-            if n == 0 {
-                1
-            } else {
-                n
-            }
-        );
+    let m = b.app(
+        if n == 0 {
+            1
+        } else {
+            n
+        }
+    );
     value(inout b, x.p.op(a));
     b.args(m);
     if n == 0 {

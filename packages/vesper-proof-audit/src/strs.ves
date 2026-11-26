@@ -170,14 +170,13 @@ pub fn slashes(in s: Slice[u8]) -> ChunkSeq[u8] {
     let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
     for i in 0..s.len() {
         let b = byte(in s, i);
-        out
-            .push(
-                if b == 92 {
-                    47
-                } else {
-                    b
-                }
-            );
+        out.push(
+            if b == 92 {
+                47
+            } else {
+                b
+            }
+        );
     }
     out
 }

@@ -285,10 +285,9 @@ fn opts_parse_at(in bytes: Slice[u8], from: u64, to: u64) -> Result[Opts, WireEr
                     Option::None => widen_u64(rd32(in bytes, body))
                         << 32 | widen_u64(rd32(in bytes, wrapping_add(body, 4))),
                 };
-                opts
-                    .timestamps = Option::Some(
-                        Timestamps { val: wrapping_u32(w >> 32), ecr: wrapping_u32(w) }
-                    );
+                opts.timestamps = Option::Some(
+                    Timestamps { val: wrapping_u32(w >> 32), ecr: wrapping_u32(w) }
+                );
             }
             // Unknown options with a valid length are skipped.
             i = wrapping_add(i, len);

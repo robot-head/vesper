@@ -519,8 +519,10 @@ fn apply_mask(inout buf: Slice[u8], pn_offset: u64, pn_len: u64, mask: u64) {
     // word of `mask`).
     match buf.try_read_u32_be(pn_offset) {
         Option::Some(field) => {
-            let _w = buf
-                .try_write_u32_be(pn_offset, field ^ (wrapping_u32(mask) & field_keep(pn_len)));
+            let _w = buf.try_write_u32_be(
+                pn_offset,
+                field ^ (wrapping_u32(mask) & field_keep(pn_len))
+            );
         },
         Option::None => {
             let mut i: u64 = 0;
