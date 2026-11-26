@@ -506,7 +506,9 @@ fn mac_bytes(w: u64) -> [u8; 6] {
 
 #[cfg(feature = "vesper-port")]
 pub(crate) fn eth_encode(w: &EthIpv4TcpWire) -> Vec<u8> {
-    ffi::wire_eth_encode(PortEthWire {
+    use crate::wire::WireFrame;
+    let mut out = [0; EthIpv4TcpWire::SIZE];
+    let w = PortEthWire {
         dst_mac: mac_word(w.dst_mac),
         src_mac: mac_word(w.src_mac),
         ether_type: w.ether_type,
@@ -528,7 +530,9 @@ pub(crate) fn eth_encode(w: &EthIpv4TcpWire) -> Vec<u8> {
         window_size: w.window_size,
         tcp_checksum: w.tcp_checksum,
         urgent_ptr: w.urgent_ptr,
-    })
+    };
+    ffi::wire_eth_encode_into(w, &mut out);
+    out.to_vec()
 }
 
 #[cfg(feature = "vesper-port")]
