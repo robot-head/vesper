@@ -10,6 +10,7 @@ const ENTRY: &[u8] = b"sh7_entry";
 const EXTERNAL: &[u8] = b"sh7_plus";
 const LOCAL: &[u8] = b"sh7_local";
 const ADDRESS: &[u8] = b"sh7_addr";
+const GOT_CALL: &[u8] = b"sh7_via_got";
 const TEXT_ALIGNMENT: u64 = 16;
 const TEXT: &[u8] = &[
     0x48, 0x83, 0xec, 0x08, // sub rsp, 8
@@ -24,21 +25,30 @@ const TEXT: &[u8] = &[
     0, 0, // pad to the address helper
     0x48, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0,    // movabs rax, sh7_entry + 3
     0xc3, // ret
+    0, 0, 0, 0, 0, // pad to the GOT call helper
+    0x48, 0x83, 0xec, 0x08, // sub rsp, 8
+    0xbf, 17, 0, 0, 0, // mov edi, 17
+    0xff, 0x15, 0, 0, 0, 0, // call [rip + sh7_plus@GOTPCREL]
+    0x48, 0x83, 0xc4, 0x08, // add rsp, 8
+    0xc3, // ret
 ];
 const ENTRY_SIZE: u64 = 21;
 const LOCAL_START: u64 = 24;
 const LOCAL_SIZE: u64 = 6;
 const ADDRESS_START: u64 = 32;
 const ADDRESS_SIZE: u64 = 11;
+const GOT_START: u64 = 48;
+const GOT_SIZE: u64 = 20;
 
 fn request() -> (Vec<u64>, Vec<u8>) {
-    let mut words = vec![TEXT.len() as u64, TEXT_ALIGNMENT, 4];
+    let mut words = vec![TEXT.len() as u64, TEXT_ALIGNMENT, 5];
     let mut bytes = TEXT.to_vec();
     for (name, value, size, kind) in [
         (ENTRY, 0, ENTRY_SIZE, 1),
         (EXTERNAL, 0, 0, 2),
         (LOCAL, LOCAL_START, LOCAL_SIZE, 0),
         (ADDRESS, ADDRESS_START, ADDRESS_SIZE, 3),
+        (GOT_CALL, GOT_START, GOT_SIZE, 1),
     ] {
         words.extend([bytes.len() as u64, name.len() as u64, value, size, kind]);
         bytes.extend(name);
@@ -46,6 +56,7 @@ fn request() -> (Vec<u64>, Vec<u8>) {
     words.extend([5, 2, 2, (-4i64) as u64]);
     words.extend([12, 1, 3, (-4i64) as u64]);
     words.extend([34, 0, 1, 3]);
+    words.extend([59, 1, 4, (-4i64) as u64]);
     (words, bytes)
 }
 
@@ -98,10 +109,18 @@ fn reference() -> Vec<u8> {
         SymbolScope::Linkage,
         SymbolSection::Section(text),
     );
+    add(
+        GOT_CALL,
+        GOT_START,
+        GOT_SIZE,
+        SymbolScope::Dynamic,
+        SymbolSection::Section(text),
+    );
     for (offset, symbol, r_type, addend) in [
         (5, local, elf::R_X86_64_PC32, -4),
         (12, imported, elf::R_X86_64_PLT32, -4),
         (34, entry, elf::R_X86_64_64, 3),
+        (59, imported, elf::R_X86_64_GOTPCREL, -4),
     ] {
         object
             .add_relocation(
@@ -194,9 +213,11 @@ fn elf_writer_links_an_import_and_local_call() {
         "#include <stdint.h>\n\
          extern int sh7_entry(void);\n\
          extern uintptr_t sh7_addr(void);\n\
+         extern int sh7_via_got(void);\n\
          int sh7_plus(int n) { return n + 5; }\n\
          int main(void) {\n\
-             return sh7_entry() == 22 && sh7_addr() == (uintptr_t)sh7_entry + 3 ? 0 : 1;\n\
+             return sh7_entry() == 22 && sh7_via_got() == 22\n\
+                 && sh7_addr() == (uintptr_t)sh7_entry + 3 ? 0 : 1;\n\
          }\n",
     )
     .unwrap();

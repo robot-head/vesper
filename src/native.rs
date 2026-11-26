@@ -33,6 +33,9 @@ mod native_arrays;
 
 #[path = "dyn_trait/native.rs"]
 mod dyn_native;
+/// Experimental ELF serialization downstream of machine-code emission.
+#[path = "native_elf.rs"]
+pub mod elf;
 #[path = "native_export.rs"]
 pub mod export;
 /// Foreign calls of imported `.vsys` libraries (§13, `crate::ffi_lowering`).
@@ -2681,13 +2684,18 @@ pub fn object_with_codegen_options(
     if windows::is_windows(isa.triple()) {
         return windows::object(world, entry, isa, optimize, observer, instrument, options);
     }
-    let builder = ObjectBuilder::new(isa, "vesper", cranelift_module::default_libcall_names())
-        .map_err(|e| e.to_string())?;
-    let mut m = ObjectModule::new(builder);
+    let capture_elf = observer.is_none() && instrument.is_none() && elf::enabled(isa.triple());
+    let builder = ObjectBuilder::new(
+        isa,
+        elf::MODULE_NAME,
+        cranelift_module::default_libcall_names(),
+    )
+    .map_err(|e| e.to_string())?;
+    let mut m = elf::ObjectModule::new(builder, capture_elf);
     let (_, clif) = compile(
         &mut m, world, entry, optimize, observer, instrument, options,
     )?;
-    let bytes = m.finish().emit().map_err(|e| e.to_string())?;
+    let bytes = m.emit().map_err(|e| e.to_string())?;
     Ok((bytes, clif))
 }
 /// A JIT module compiled once with the lane-23 [`Instrument`] hook, whose

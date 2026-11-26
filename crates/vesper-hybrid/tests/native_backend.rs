@@ -8,6 +8,8 @@
 mod binding;
 #[path = "native_backend/elf.rs"]
 mod elf;
+#[path = "native_backend/elf_host.rs"]
+mod elf_host;
 
 use cranelift_codegen::ir::{
     AbiParam, BlockArg, Endianness, InstBuilder, MemFlags, Opcode, StackSlotData, StackSlotKind,

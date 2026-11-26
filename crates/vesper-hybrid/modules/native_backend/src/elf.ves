@@ -22,6 +22,7 @@ const LOCAL: u64 = 0;
 const EXPORTED: u64 = 1;
 const UNDEFINED: u64 = 2;
 const HIDDEN: u64 = 3;
+const FILE: u64 = 4;
 const RELOC_WORDS: u64 = 4;
 const RELOC_OFFSET: u64 = 0;
 const RELOC_SYMBOL: u64 = 1;
@@ -30,11 +31,13 @@ const RELOC_ADDEND: u64 = 3;
 const ABS64: u64 = 1;
 const PC32: u64 = 2;
 const PLT32: u64 = 3;
+const GOTPCREL: u64 = 4;
 
 const EM_X86_64: u16 = 62;
 const R_X86_64_64: u64 = 1;
 const R_X86_64_PC32: u64 = 2;
 const R_X86_64_PLT32: u64 = 4;
+const R_X86_64_GOTPCREL: u64 = 9;
 const ABS64_FIELD_BYTES: u64 = 8;
 const PC32_FIELD_BYTES: u64 = 4;
 const REL_SYMBOL_SHIFT: u32 = 32;
@@ -88,7 +91,8 @@ fn make_symbols(
         for index in 0..count {
             let at = wrapping_add(HEADER_WORDS, wrapping_mul(index, SYMBOL_WORDS));
             let kind = word(in words, wrapping_add(at, SYM_KIND));
-            let local = kind == LOCAL;
+            let file = kind == FILE;
+            let local = kind == LOCAL || file;
             if local != (pass == local_pass) {
                 continue;
             }
@@ -103,8 +107,8 @@ fn make_symbols(
                 || name_at < text_size
                 || !fits(name_at, name_size, bytes.len())
                 || !fits(names.len(), name_size, MAX_STRING_OFFSET)
-                || (undefined && (value != 0 || size != 0))
-                || (!undefined && !fits(value, size, text_size))
+                || ((undefined || file) && (value != 0 || size != 0))
+                || (!undefined && !file && !fits(value, size, text_size))
             {
                 return Option::None;
             }
@@ -116,16 +120,30 @@ fn make_symbols(
             }
             let string_offset = append_name(inout names, in name);
             let binding = if local { Stb::Local } else { Stb::Global };
-            let symbol_type = if undefined { Stt::Notype } else { Stt::Func };
+            let symbol_type = if file {
+                Stt::File
+            } else if undefined {
+                Stt::Notype
+            } else {
+                Stt::Func
+            };
             let visibility = if kind == HIDDEN { Stv::Hidden } else { 0 };
-            let section = if undefined { Shn::Undef } else { TEXT_SECTION };
+            let section = if file {
+                Shn::Abs
+            } else if undefined {
+                Shn::Undef
+            } else {
+                TEXT_SECTION
+            };
             push32(inout table, wrapping_u32(string_offset));
             table.push((binding << Stb::Shift) | symbol_type);
             table.push(visibility);
             push16(inout table, wrapping_u16(section));
             push64(inout table, value);
             push64(inout table, size);
-            let _ = indices.try_set(index, elf_index);
+            if !file {
+                let _ = indices.try_set(index, elf_index);
+            }
             elf_index = wrapping_add(elf_index, 1);
         }
         if pass == local_pass {
@@ -156,6 +174,7 @@ fn append_relocations(
             ABS64 => R_X86_64_64,
             PC32 => R_X86_64_PC32,
             PLT32 => R_X86_64_PLT32,
+            GOTPCREL => R_X86_64_GOTPCREL,
             _ => return false,
         };
         let field_size = if kind == ABS64 {
@@ -172,6 +191,9 @@ fn append_relocations(
             Option::Some(index) => index,
             Option::None => return false,
         };
+        if elf_index == 0 {
+            return false;
+        }
         push64(inout out, offset);
         push64(inout out, wrapping_shl_u64(elf_index, REL_SYMBOL_SHIFT) | relocation);
         push64(inout out, word(in words, wrapping_add(at, RELOC_ADDEND)));

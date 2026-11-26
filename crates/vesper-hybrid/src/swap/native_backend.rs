@@ -8,14 +8,21 @@ use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 mod binding;
 
 use super::{Registry, Swap, must, on, open};
-use vesper::native::machine;
+use vesper::native::{elf, machine};
 
 static ENCODED: AtomicU64 = AtomicU64::new(0);
+static ELF_OBJECTS: AtomicU64 = AtomicU64::new(0);
 
-pub(super) const SWAPS: &[Swap] = &[open(
-    "native_backend",
-    "experimental x86-64 integer blocks, requires VESPER_HYBRID_NATIVE_BACKEND=1",
-)];
+pub(super) const SWAPS: &[Swap] = &[
+    open(
+        "native_backend",
+        "experimental x86-64 integer blocks, requires VESPER_HYBRID_NATIVE_BACKEND=1",
+    ),
+    open(
+        "native_elf",
+        "experimental x86-64 ELF writer, requires VESPER_HYBRID_NATIVE_ELF=1",
+    ),
+];
 
 pub(super) fn register(_r: &mut Registry) {
     if on("native_backend")
@@ -30,11 +37,27 @@ pub(super) fn register(_r: &mut Registry) {
             Some(bytes)
         }));
     }
+    if on("native_elf")
+        && std::env::var_os("VESPER_HYBRID_NATIVE_ELF").is_some_and(|value| value == "1")
+    {
+        must(elf::install_object_encoder(|words, data| {
+            let bytes = binding::x86_64_elf_object(words, data);
+            if bytes.is_empty() {
+                return None;
+            }
+            ELF_OBJECTS.fetch_add(1, Relaxed);
+            Some(bytes)
+        }));
+    }
 }
 
 pub(super) fn report() {
     eprintln!(
         "vesper-hybrid: native_backend emitted {} x86-64 integer blocks",
         ENCODED.load(Relaxed),
+    );
+    eprintln!(
+        "vesper-hybrid: native_elf wrote {} x86-64 ELF objects",
+        ELF_OBJECTS.load(Relaxed),
     );
 }
