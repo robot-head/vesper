@@ -10,7 +10,7 @@ use std::path::Path;
 use std_io_support::{MODES, Temp, agree, check_driver, lit};
 
 const DRIVER: &str = r#"use @vesper-std/fs::{
-    IoError, Metadata, read, read_path, read_string, write, append, create_new, replace, rename,
+    IoError, Metadata, read, read_path, read_path_limit, read_string, write, append, create_new, replace, rename,
     remove_file, remove_dir, remove_dir_all, create_dir, create_dir_all, metadata,
     symlink_metadata, exists, kind_file, kind_dir, is_executable, canonicalize, write_stdout,
     write_stderr, create_dir_mode, set_permissions, copy
@@ -116,6 +116,25 @@ pub fn read_back() -> u64 eff [Ffi[StdFs]] {
         write(in "@DIR@/empty.bin", in empty.as_slice());
         let none = read(in "@DIR@/empty.bin");
         mix(hash(in got.as_slice()), none.len())
+    } with {
+        return v => v,
+        raise(e, _) => code(e),
+    }
+}
+
+// The first `limit` bytes for limits around the 4096-byte read steps and
+// the file's own length (10000).
+pub fn read_limited() -> u64 eff [Ffi[StdFs]] {
+    handle Fail[IoError] in {
+        let data = pattern(10000);
+        write(in "@DIR@/l.bin", in data.as_slice());
+        let mut h: u64 = 0;
+        let limits: [u64; 9] = [0, 1, 4095, 4096, 4097, 9999, 10000, 10001, 20000];
+        for i in 0..9 {
+            let got = read_path_limit(in "@DIR@/l.bin".as_bytes(), limits[i]);
+            h = mix(h, hash(in got.as_slice()));
+        }
+        h
     } with {
         return v => v,
         raise(e, _) => code(e),
@@ -630,6 +649,11 @@ fn whole_files_round_trip_in_every_mode() {
     let want = mix(hash(&pattern(3000)), 0);
     assert_eq!(agree(&checked, "read_back", &MODES), want);
     assert_eq!(fs::read(dir.path().join("a.bin")).unwrap(), pattern(3000));
+    let file = pattern(10000);
+    let limited = [0, 1, 4095, 4096, 4097, 9999, 10000, 10001, 20000]
+        .iter()
+        .fold(0, |h, &n| mix(h, hash(&file[..n.min(file.len())])));
+    assert_eq!(agree(&checked, "read_limited", &MODES), limited);
 
     let s = "héllo, wörld\n";
     let both = format!("{s}{s}");

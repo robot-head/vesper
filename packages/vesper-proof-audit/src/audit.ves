@@ -14,7 +14,7 @@ use @vesper-std/fs::{
     kind_file,
     kind_symlink,
     metadata_path,
-    read_path,
+    read_path_limit,
     remove_dir_all,
     write_path
 };
@@ -314,9 +314,11 @@ fn canonical(in p: Slice[u8], inout e: IoError) -> ChunkSeq[u8] eff [Ffi[StdFs]]
     out
 }
 
-fn try_read(in p: Slice[u8]) -> (ChunkSeq[u8], IoError) eff [Ffi[StdFs]] {
+// At most `limit` bytes of `p` (`take(limit)`), so an oversized file is
+// never read whole.
+fn try_read(in p: Slice[u8], limit: u64) -> (ChunkSeq[u8], IoError) eff [Ffi[StdFs]] {
     handle Fail[IoError] in {
-        let d = read_path(in p);
+        let d = read_path_limit(in p, limit);
         (d, no_error())
     } with {
         return v => v,
@@ -720,7 +722,10 @@ pub fn copy_artifacts(inout a: Au, in root: Slice[u8], in output: Slice[u8])
                     refuse(inout a, in "too many artifact files");
                     return files;
                 }
-                let (data, fe) = try_read(in path.as_slice());
+                let (data, fe) = try_read(
+                    in path.as_slice(),
+                    wrapping_add(wrapping_sub(MAX_INPUT_BYTES, total), 1)
+                );
                 if fe.kind != 0 {
                     refuse_io(inout a, in "", fe);
                     return files;
@@ -769,7 +774,7 @@ fn digest_file(inout a: Au, in path: Slice[u8], in relative: Slice[u8], inout f:
         refuse(inout a, in "an imported artifact exceeds the fingerprinting size limit");
         return 0;
     } else {
-        try_read(in path)
+        try_read(in path, wrapping_add(MAX_PART, 1))
     };
     if e.kind != 0 {
         let mut why = lossy(in path);
@@ -869,7 +874,7 @@ fn request(in o: Options, in snapshot: Slice[u8], in prefix: Slice[u8]) -> Chunk
 
 // `read_manifest`.
 fn read_manifest(inout a: Au, in path: Slice[u8]) -> Table eff [Ffi[StdFs], Ffi[Blake3]] {
-    let (data, e) = try_read(in path);
+    let (data, e) = try_read(in path, wrapping_add(MAX_MANIFEST, 1));
     let mut empty = rd_parse(in "{}".as_bytes());
     empty.failed = true;
     if e.kind != 0 {
