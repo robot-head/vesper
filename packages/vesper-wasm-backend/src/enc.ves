@@ -118,12 +118,12 @@ pub const FC_MEMORY_COPY: u64 = 10;
 pub const BT_EMPTY: u8 = 64;
 
 // `x` as unsigned LEB128.
-pub fn uleb(inout out: ChunkSeq[u8], v: u64) {
-    let mut x = v;
+pub fn uleb(inout out: ChunkSeq[u8], value: u64) {
+    let mut rest = value;
     loop {
-        let byte = wrapping_u8(x & 127);
-        x = x >> 7;
-        if x == 0 {
+        let byte = wrapping_u8(rest & 127);
+        rest = rest >> 7;
+        if rest == 0 {
             out.push(byte);
             break;
         }
@@ -133,13 +133,13 @@ pub fn uleb(inout out: ChunkSeq[u8], v: u64) {
 
 // `x` as signed LEB128 (`i64` and the 33-bit heap and block type
 // indices, which take the same bytes for the values they hold).
-pub fn sleb(inout out: ChunkSeq[u8], v: i64) {
-    let mut x = v;
+pub fn sleb(inout out: ChunkSeq[u8], value: i64) {
+    let mut rest = value;
     loop {
-        let byte = wrapping_u8(wrapping_u64(x) & 127);
-        x = x >> 7;
+        let byte = wrapping_u8(wrapping_u64(rest) & 127);
+        rest = rest >> 7;
         let sign = (byte & 64) != 0;
-        if (x == 0 && !sign) || (x == -1 && sign) {
+        if (rest == 0 && !sign) || (rest == -1 && sign) {
             out.push(byte);
             break;
         }
@@ -147,16 +147,16 @@ pub fn sleb(inout out: ChunkSeq[u8], v: i64) {
     }
 }
 
-// The LEB128 size of `v`, for section and body lengths.
-pub fn uleb_size(v: u64) -> u64 {
+// The LEB128 size of `value`, for section and body lengths.
+pub fn uleb_size(value: u64) -> u64 {
     let mut n: u64 = 1;
-    let mut x = v >> 7;
+    let mut rest = value >> 7;
     loop {
-        if x == 0 {
+        if rest == 0 {
             break;
         }
         n = wrapping_add(n, 1);
-        x = x >> 7;
+        rest = rest >> 7;
     }
     n
 }
@@ -176,32 +176,32 @@ pub fn vt_ref(nullable: bool, index: u32) -> ValTy {
     ValTy { kind: if nullable { VT_REF_NULL } else { VT_REF }, index: index }
 }
 
-pub fn put_valtype(inout out: ChunkSeq[u8], t: ValTy) {
-    out.push(t.kind);
-    if t.kind == VT_REF_NULL || t.kind == VT_REF {
-        sleb(inout out, wrapping_i64(w64(t.index)));
+pub fn put_valtype(inout out: ChunkSeq[u8], ty: ValTy) {
+    out.push(ty.kind);
+    if ty.kind == VT_REF_NULL || ty.kind == VT_REF {
+        sleb(inout out, wrapping_i64(w64(ty.index)));
     }
 }
 
-fn w64(x: u32) -> u64 {
-    widen_u64(x)
+fn w64(value: u32) -> u64 {
+    widen_u64(value)
 }
 
 // A name or byte string: its length, then its bytes.
-pub fn put_bytes(inout out: ChunkSeq[u8], in b: Slice[u8]) {
-    uleb(inout out, b.len());
-    for i in 0..b.len() {
-        match b.try_get(i) {
-            Option::Some(x) => out.push(x),
+pub fn put_bytes(inout out: ChunkSeq[u8], in bytes: Slice[u8]) {
+    uleb(inout out, bytes.len());
+    for i in 0..bytes.len() {
+        match bytes.try_get(i) {
+            Option::Some(byte_val) => out.push(byte_val),
             Option::None => {},
         }
     }
 }
 
-pub fn append(inout out: ChunkSeq[u8], in b: ChunkSeq[u8]) {
-    for i in 0..b.len() {
-        match b.try_get(i) {
-            Option::Some(x) => out.push(x),
+pub fn append(inout out: ChunkSeq[u8], in bytes: ChunkSeq[u8]) {
+    for i in 0..bytes.len() {
+        match bytes.try_get(i) {
+            Option::Some(byte_val) => out.push(byte_val),
             Option::None => {},
         }
     }
@@ -231,78 +231,79 @@ impl Code {
 
     // An instruction with one unsigned immediate (locals, globals,
     // functions, branch depths).
-    pub fn op_u(inout self, op: u8, x: u64) {
+    pub fn op_u(inout self, op: u8, imm: u64) {
         self.bytes.push(op);
-        uleb(inout self.bytes, x);
+        uleb(inout self.bytes, imm);
         self.count = wrapping_add(self.count, 1);
     }
 
-    pub fn get(inout self, x: u32) {
-        self.op_u(OP_LOCAL_GET, widen_u64(x));
+    pub fn get(inout self, local_index: u32) {
+        self.op_u(OP_LOCAL_GET, widen_u64(local_index));
     }
 
-    pub fn set(inout self, x: u32) {
-        self.op_u(OP_LOCAL_SET, widen_u64(x));
+    pub fn set(inout self, local_index: u32) {
+        self.op_u(OP_LOCAL_SET, widen_u64(local_index));
     }
 
-    pub fn tee(inout self, x: u32) {
-        self.op_u(OP_LOCAL_TEE, widen_u64(x));
+    pub fn tee(inout self, local_index: u32) {
+        self.op_u(OP_LOCAL_TEE, widen_u64(local_index));
     }
 
-    pub fn global_get(inout self, x: u32) {
-        self.op_u(OP_GLOBAL_GET, widen_u64(x));
+    pub fn global_get(inout self, global_index: u32) {
+        self.op_u(OP_GLOBAL_GET, widen_u64(global_index));
     }
 
-    pub fn global_set(inout self, x: u32) {
-        self.op_u(OP_GLOBAL_SET, widen_u64(x));
+    pub fn global_set(inout self, global_index: u32) {
+        self.op_u(OP_GLOBAL_SET, widen_u64(global_index));
     }
 
-    pub fn call(inout self, f: u32) {
-        self.op_u(OP_CALL, widen_u64(f));
+    pub fn call(inout self, func: u32) {
+        self.op_u(OP_CALL, widen_u64(func));
     }
 
-    pub fn return_call(inout self, f: u32) {
-        self.op_u(OP_RETURN_CALL, widen_u64(f));
+    pub fn return_call(inout self, func: u32) {
+        self.op_u(OP_RETURN_CALL, widen_u64(func));
     }
 
-    pub fn br(inout self, d: u32) {
-        self.op_u(OP_BR, widen_u64(d));
+    pub fn br(inout self, depth: u32) {
+        self.op_u(OP_BR, widen_u64(depth));
     }
 
-    pub fn br_if(inout self, d: u32) {
-        self.op_u(OP_BR_IF, widen_u64(d));
+    pub fn br_if(inout self, depth: u32) {
+        self.op_u(OP_BR_IF, widen_u64(depth));
     }
 
-    pub fn ref_func(inout self, f: u32) {
-        self.op_u(OP_REF_FUNC, widen_u64(f));
+    pub fn ref_func(inout self, func: u32) {
+        self.op_u(OP_REF_FUNC, widen_u64(func));
     }
 
-    pub fn cont_new(inout self, ct: u32) {
-        self.op_u(OP_CONT_NEW, widen_u64(ct));
+    pub fn cont_new(inout self, cont_ty: u32) {
+        self.op_u(OP_CONT_NEW, widen_u64(cont_ty));
     }
 
-    pub fn i64_const(inout self, v: i64) {
+    pub fn i64_const(inout self, value: i64) {
         self.bytes.push(OP_I64_CONST);
-        sleb(inout self.bytes, v);
+        sleb(inout self.bytes, value);
         self.count = wrapping_add(self.count, 1);
     }
 
-    pub fn u64_const(inout self, v: u64) {
-        self.i64_const(wrapping_i64(v));
+    pub fn u64_const(inout self, value: u64) {
+        self.i64_const(wrapping_i64(value));
     }
 
-    pub fn i32_const(inout self, v: i64) {
+    pub fn i32_const(inout self, value: i64) {
         self.bytes.push(OP_I32_CONST);
-        sleb(inout self.bytes, v);
+        sleb(inout self.bytes, value);
         self.count = wrapping_add(self.count, 1);
     }
 
     // `f64.const` with the IEEE bits `bits`.
     pub fn f64_const(inout self, bits: u64) {
         self.bytes.push(OP_F64_CONST);
-        for k in 0..8 {
-            self.bytes
-                .push(wrapping_u8(wrapping_shr_u64(bits, wrapping_u32(wrapping_mul(k, 8))) & 255));
+        for byte_index in 0..8 {
+            self.bytes.push(
+                wrapping_u8(wrapping_shr_u64(bits, wrapping_u32(wrapping_mul(byte_index, 8))) & 255)
+            );
         }
         self.count = wrapping_add(self.count, 1);
     }
@@ -332,16 +333,16 @@ impl Code {
         self.count = wrapping_add(self.count, 1);
     }
 
-    // `block`, `loop` or `if` with one result of value type `t`.
-    pub fn open_result(inout self, op: u8, t: ValTy) {
+    // `block`, `loop` or `if` with one result of value type `result_ty`.
+    pub fn open_result(inout self, op: u8, result_ty: ValTy) {
         self.bytes.push(op);
-        put_valtype(inout self.bytes, t);
+        put_valtype(inout self.bytes, result_ty);
         self.count = wrapping_add(self.count, 1);
     }
 
-    pub fn call_indirect(inout self, ty: u32) {
+    pub fn call_indirect(inout self, type_index: u32) {
         self.bytes.push(OP_CALL_INDIRECT);
-        uleb(inout self.bytes, widen_u64(ty));
+        uleb(inout self.bytes, widen_u64(type_index));
         uleb(inout self.bytes, 0);
         self.count = wrapping_add(self.count, 1);
     }
@@ -385,11 +386,11 @@ pub fn function_bytes(
     uleb(inout out, locals.len());
     for i in 0..locals.len() {
         match locals.try_get(i) {
-            Option::Some(n) => uleb(inout out, widen_u64(n)),
+            Option::Some(count) => uleb(inout out, widen_u64(count)),
             Option::None => {},
         }
         match types.try_get(i) {
-            Option::Some(t) => put_valtype(inout out, t),
+            Option::Some(ty) => put_valtype(inout out, ty),
             Option::None => {},
         }
     }

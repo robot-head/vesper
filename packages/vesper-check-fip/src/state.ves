@@ -59,23 +59,23 @@ pub fn state_new(diverged: bool) -> FipState {
     }
 }
 
-pub fn copy_binds(in b: Binds) -> Binds {
-    let mut rows: ChunkSeq[BindRow] = ChunkSeq::with_capacity[BindRow](b.rows.len());
-    rows.extend(in b.rows.as_slice());
-    let mut moves: ChunkSeq[MoveRow] = ChunkSeq::with_capacity[MoveRow](b.moves.len());
-    moves.extend(in b.moves.as_slice());
+pub fn copy_binds(in binds: Binds) -> Binds {
+    let mut rows: ChunkSeq[BindRow] = ChunkSeq::with_capacity[BindRow](binds.rows.len());
+    rows.extend(in binds.rows.as_slice());
+    let mut moves: ChunkSeq[MoveRow] = ChunkSeq::with_capacity[MoveRow](binds.moves.len());
+    moves.extend(in binds.moves.as_slice());
     Binds { rows: rows, moves: moves }
 }
 
 // `state.clone()`.
-pub fn copy_state(in s: FipState) -> FipState {
-    let mut slots: ChunkSeq[SlotRow] = ChunkSeq::with_capacity[SlotRow](s.slots.len());
-    slots.extend(in s.slots.as_slice());
+pub fn copy_state(in fip_state: FipState) -> FipState {
+    let mut slots: ChunkSeq[SlotRow] = ChunkSeq::with_capacity[SlotRow](fip_state.slots.len());
+    slots.extend(in fip_state.slots.as_slice());
     FipState {
         slots: slots,
-        caller_used: s.caller_used,
-        binds: copy_binds(in s.binds),
-        diverged: s.diverged
+        caller_used: fip_state.caller_used,
+        binds: copy_binds(in fip_state.binds),
+        diverged: fip_state.diverged
     }
 }
 
@@ -84,26 +84,26 @@ pub fn name_cmp(in names: Names, a: u32, b: u32) -> i32 {
     if a == b {
         return 0;
     }
-    let na = names.size(a);
-    let nb = names.size(b);
+    let a_len = names.size(a);
+    let b_len = names.size(b);
     let mut i: u64 = 0;
     loop {
-        if i >= na || i >= nb {
+        if i >= a_len || i >= b_len {
             break;
         }
-        let x = names.byte(a, i);
-        let y = names.byte(b, i);
-        if x < y {
+        let a_byte = names.byte(a, i);
+        let b_byte = names.byte(b, i);
+        if a_byte < b_byte {
             return -1;
         }
-        if x > y {
+        if a_byte > b_byte {
             return 1;
         }
         i = inc(i);
     }
-    if na < nb {
+    if a_len < b_len {
         -1
-    } else if na > nb {
+    } else if a_len > b_len {
         1
     } else {
         0
@@ -139,8 +139,8 @@ impl Binds {
 
     pub fn has_move(in self, name: u32, path: u32) -> bool {
         for i in 0..self.moves.len() {
-            let m = self.mv(i);
-            if m.name == name && m.path == path {
+            let moved = self.mv(i);
+            if moved.name == name && moved.path == path {
                 return true;
             }
         }
@@ -158,14 +158,14 @@ impl Binds {
     }
 
     fn drop_moves(inout self, name: u32) {
-        let mut keep: ChunkSeq[MoveRow] = ChunkSeq::with_capacity[MoveRow](self.moves.len());
+        let mut kept: ChunkSeq[MoveRow] = ChunkSeq::with_capacity[MoveRow](self.moves.len());
         for i in 0..self.moves.len() {
-            let m = self.mv(i);
-            if m.name != name {
-                keep.push(m);
+            let moved = self.mv(i);
+            if moved.name != name {
+                kept.push(moved);
             }
         }
-        self.moves = keep;
+        self.moves = kept;
     }
 
     // `bindings.remove(name)`.
@@ -174,13 +174,13 @@ impl Binds {
         if at == NONE64 {
             return;
         }
-        let mut keep: ChunkSeq[BindRow] = ChunkSeq::with_capacity[BindRow](self.rows.len());
+        let mut kept: ChunkSeq[BindRow] = ChunkSeq::with_capacity[BindRow](self.rows.len());
         for i in 0..self.rows.len() {
             if i != at {
-                keep.push(self.row(i));
+                kept.push(self.row(i));
             }
         }
-        self.rows = keep;
+        self.rows = kept;
         self.drop_moves(name);
     }
 
@@ -221,9 +221,9 @@ impl Binds {
         }
         self.insert(in names, from.row(at));
         for i in 0..from.moves.len() {
-            let m = from.mv(i);
-            if m.name == name {
-                self.moves.push(m);
+            let moved = from.mv(i);
+            if moved.name == name {
+                self.moves.push(moved);
             }
         }
     }
@@ -233,14 +233,14 @@ impl Binds {
     pub fn locals(in self, in outer: Binds) -> ChunkSeq[u32] {
         let mut out: ChunkSeq[u32] = ChunkSeq::new[u32]();
         for i in 0..self.rows.len() {
-            let r = self.row(i);
-            let o = outer.find(r.name);
-            if o == NONE64 {
-                out.push(r.name);
+            let row = self.row(i);
+            let outer_at = outer.find(row.name);
+            if outer_at == NONE64 {
+                out.push(row.name);
             } else {
-                let x = outer.row(o);
-                if x.start != r.start || x.end != r.end {
-                    out.push(r.name);
+                let outer_row = outer.row(outer_at);
+                if outer_row.start != row.start || outer_row.end != row.end {
+                    out.push(row.name);
                 }
             }
         }
@@ -251,9 +251,9 @@ impl Binds {
     pub fn moved_of(in self, name: u32) -> ChunkSeq[u32] {
         let mut out: ChunkSeq[u32] = ChunkSeq::new[u32]();
         for i in 0..self.moves.len() {
-            let m = self.mv(i);
-            if m.name == name {
-                out.push(m.path);
+            let moved = self.mv(i);
+            if moved.name == name {
+                out.push(moved.path);
             }
         }
         out
@@ -262,14 +262,14 @@ impl Binds {
     // `merged.bindings[name].moved_paths.retain(|p| other has p)` for every
     // binding `other` also has.
     pub fn intersect(inout self, in other: Binds) {
-        let mut keep: ChunkSeq[MoveRow] = ChunkSeq::with_capacity[MoveRow](self.moves.len());
+        let mut kept: ChunkSeq[MoveRow] = ChunkSeq::with_capacity[MoveRow](self.moves.len());
         for i in 0..self.moves.len() {
-            let m = self.mv(i);
-            if !other.has(m.name) || other.has_move(m.name, m.path) {
-                keep.push(m);
+            let moved = self.mv(i);
+            if !other.has(moved.name) || other.has_move(moved.name, moved.path) {
+                kept.push(moved);
             }
         }
-        self.moves = keep;
+        self.moves = kept;
     }
 }
 
@@ -279,13 +279,13 @@ impl FipState {
     }
 
     pub fn remove_slot(inout self, at: u64) {
-        let mut keep: ChunkSeq[SlotRow] = ChunkSeq::with_capacity[SlotRow](self.slots.len());
+        let mut kept: ChunkSeq[SlotRow] = ChunkSeq::with_capacity[SlotRow](self.slots.len());
         for i in 0..self.slots.len() {
             if i != at {
-                keep.push(self.slot(i));
+                kept.push(self.slot(i));
             }
         }
-        self.slots = keep;
+        self.slots = kept;
     }
 }
 
@@ -298,13 +298,13 @@ pub struct Paths {
 }
 
 pub fn paths_new() -> Paths {
-    let mut p = Paths {
+    let mut paths = Paths {
         items: ChunkSeq::new[u32](),
         starts: ChunkSeq::new[u32](),
         lens: ChunkSeq::new[u32]()
     };
-    p.reset();
-    p
+    paths.reset();
+    paths
 }
 
 impl Paths {
@@ -316,18 +316,18 @@ impl Paths {
         self.lens.push(0);
     }
 
-    pub fn len_of(in self, p: u32) -> u64 {
-        w(u32_at(in self.lens, w(p)))
+    pub fn len_of(in self, path: u32) -> u64 {
+        w(u32_at(in self.lens, w(path)))
     }
 
-    pub fn item(in self, p: u32, i: u64) -> u32 {
-        u32_at(in self.items, add(w(u32_at(in self.starts, w(p))), i))
+    pub fn item(in self, path: u32, i: u64) -> u32 {
+        u32_at(in self.items, add(w(u32_at(in self.starts, w(path))), i))
     }
 
     pub fn intern(inout self, in syms: ChunkSeq[u32]) -> u32 {
         let n = syms.len();
-        for p in 0..self.lens.len() {
-            let id = n32(p);
+        for path_index in 0..self.lens.len() {
+            let id = n32(path_index);
             if self.len_of(id) == n {
                 let mut same = true;
                 for i in 0..n {
@@ -348,14 +348,14 @@ impl Paths {
         id
     }
 
-    // Whether `path` (a symbol stack) starts with path `p`.
-    pub fn is_prefix(in self, p: u32, in path: ChunkSeq[u32]) -> bool {
-        let n = self.len_of(p);
+    // Whether `path` (a symbol stack) starts with path `prefix`.
+    pub fn is_prefix(in self, prefix: u32, in path: ChunkSeq[u32]) -> bool {
+        let n = self.len_of(prefix);
         if n > path.len() {
             return false;
         }
         for i in 0..n {
-            if self.item(p, i) != u32_at(in path, i) {
+            if self.item(prefix, i) != u32_at(in path, i) {
                 return false;
             }
         }

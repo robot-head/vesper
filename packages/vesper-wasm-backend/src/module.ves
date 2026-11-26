@@ -53,35 +53,35 @@ pub const EXPORT_FUNC: u8 = 0;
 pub const EXPORT_MEMORY: u8 = 2;
 
 // A type definition: a function type (`vals[p0..p0+pn]` params, then
-// `rn` results) or a continuation type over function type `func`.
+// `result_count` results) or a continuation type over function type `func`.
 pub copy struct TypeDef {
     kind: u8,
     p0: u64,
     pn: u64,
-    rn: u64,
+    result_count: u64,
     func: u32,
 }
 
 pub copy struct ImportRow {
     // module and name: text[m0..m0+mn], text[n0..n0+nn]
-    m0: u64,
-    mn: u64,
-    n0: u64,
-    nn: u64,
+    module_start: u64,
+    module_len: u64,
+    name_start: u64,
+    name_len: u64,
     ty: u32,
 }
 
 pub copy struct FuncRow {
     ty: u32,
     // body bytes: bodies[b0..b0+bn]; `defined` once given
-    b0: u64,
-    bn: u64,
+    body_start: u64,
+    body_len: u64,
     defined: bool,
 }
 
 pub copy struct ExportRow {
-    n0: u64,
-    nn: u64,
+    name_start: u64,
+    name_len: u64,
     kind: u8,
     index: u32,
 }
@@ -121,27 +121,27 @@ pub fn builder_new() -> Builder {
     }
 }
 
-fn val_at(in s: ChunkSeq[ValTy], i: u64) -> ValTy {
-    match s.try_get(i) {
-        Option::Some(v) => v,
+fn val_at(in vals: ChunkSeq[ValTy], i: u64) -> ValTy {
+    match vals.try_get(i) {
+        Option::Some(val) => val,
         Option::None => vt(0),
     }
 }
 
-fn same_val(a: ValTy, b: ValTy) -> bool {
-    a.kind == b.kind && a.index == b.index
+fn same_val(lhs: ValTy, rhs: ValTy) -> bool {
+    lhs.kind == rhs.kind && lhs.index == rhs.index
 }
 
-fn byte_at(in s: ChunkSeq[u8], i: u64) -> u8 {
-    match s.try_get(i) {
-        Option::Some(v) => v,
+fn byte_at(in bytes: ChunkSeq[u8], i: u64) -> u8 {
+    match bytes.try_get(i) {
+        Option::Some(byte_val) => byte_val,
         Option::None => 0,
     }
 }
 
-fn copy_range(inout out: ChunkSeq[u8], in s: ChunkSeq[u8], a: u64, n: u64) {
+fn copy_range(inout out: ChunkSeq[u8], in src: ChunkSeq[u8], start: u64, n: u64) {
     for i in 0..n {
-        out.push(byte_at(in s, wrapping_add(a, i)));
+        out.push(byte_at(in src, wrapping_add(start, i)));
     }
 }
 
@@ -155,35 +155,35 @@ fn section(inout out: ChunkSeq[u8], id: u8, in body: ChunkSeq[u8]) {
 impl Builder {
     fn type_def(in self, i: u64) -> TypeDef {
         match self.types.try_get(i) {
-            Option::Some(t) => t,
-            Option::None => TypeDef { kind: TD_FUNC, p0: 0, pn: 0, rn: 0, func: 0 },
+            Option::Some(def) => def,
+            Option::None => TypeDef { kind: TD_FUNC, p0: 0, pn: 0, result_count: 0, func: 0 },
         }
     }
 
     fn func_row(in self, i: u64) -> FuncRow {
         match self.funcs.try_get(i) {
-            Option::Some(f) => f,
-            Option::None => FuncRow { ty: 0, b0: 0, bn: 0, defined: false },
+            Option::Some(row) => row,
+            Option::None => FuncRow { ty: 0, body_start: 0, body_len: 0, defined: false },
         }
     }
 
     // The index of function type (params, results), interned.
     pub fn func_type(inout self, in params: ChunkSeq[ValTy], in results: ChunkSeq[ValTy]) -> u32 {
         for i in 0..self.types.len() {
-            let t = self.type_def(i);
-            if t.kind == TD_FUNC && t.pn == params.len() && t.rn == results.len() {
+            let def = self.type_def(i);
+            if def.kind == TD_FUNC && def.pn == params.len() && def.result_count == results.len() {
                 let mut same = true;
-                for k in 0..t.pn {
+                for j in 0..def.pn {
                     if !same_val(
-                        val_at(in self.vals, wrapping_add(t.p0, k)),
-                        val_at(in params, k)
+                        val_at(in self.vals, wrapping_add(def.p0, j)),
+                        val_at(in params, j)
                     ) {
                         same = false;
                     }
                 }
-                for k in 0..t.rn {
-                    let at = wrapping_add(wrapping_add(t.p0, t.pn), k);
-                    if !same_val(val_at(in self.vals, at), val_at(in results, k)) {
+                for j in 0..def.result_count {
+                    let val_index = wrapping_add(wrapping_add(def.p0, def.pn), j);
+                    if !same_val(val_at(in self.vals, val_index), val_at(in results, j)) {
                         same = false;
                     }
                 }
@@ -192,46 +192,59 @@ impl Builder {
                 }
             }
         }
-        let p0 = self.vals.len();
-        for k in 0..params.len() {
-            self.vals.push(val_at(in params, k));
+        let first_val = self.vals.len();
+        for j in 0..params.len() {
+            self.vals.push(val_at(in params, j));
         }
-        for k in 0..results.len() {
-            self.vals.push(val_at(in results, k));
+        for j in 0..results.len() {
+            self.vals.push(val_at(in results, j));
         }
         let i = self.types.len();
-        self.types
-            .push(TypeDef { kind: TD_FUNC, p0: p0, pn: params.len(), rn: results.len(), func: 0 });
+        self.types.push(
+            TypeDef {
+                kind: TD_FUNC,
+                p0: first_val,
+                pn: params.len(),
+                result_count: results.len(),
+                func: 0
+            }
+        );
         wrapping_u32(i)
     }
 
-    // `n` parameters of type `p` and `m` results of type `r`.
-    pub fn func_type_n(inout self, n: u64, p: u8, m: u64, r: u8) -> u32 {
-        let mut ps = ChunkSeq::new[ValTy]();
-        for i in 0..n {
-            ps.push(vt(p));
+    // `n_params` parameters of type `param_kind` and `n_results` results of type `result_kind`.
+    pub fn func_type_n(
+        inout self,
+        n_params: u64,
+        param_kind: u8,
+        n_results: u64,
+        result_kind: u8
+    ) -> u32 {
+        let mut param_tys = ChunkSeq::new[ValTy]();
+        for i in 0..n_params {
+            param_tys.push(vt(param_kind));
         }
-        let mut rs = ChunkSeq::new[ValTy]();
-        for i in 0..m {
-            rs.push(vt(r));
+        let mut result_tys = ChunkSeq::new[ValTy]();
+        for i in 0..n_results {
+            result_tys.push(vt(result_kind));
         }
-        self.func_type(in ps, in rs)
+        self.func_type(in param_tys, in result_tys)
     }
 
     pub fn cont_type(inout self, func: u32) -> u32 {
         for i in 0..self.types.len() {
-            let t = self.type_def(i);
-            if t.kind == TD_CONT && t.func == func {
+            let def = self.type_def(i);
+            if def.kind == TD_CONT && def.func == func {
                 return wrapping_u32(i);
             }
         }
         let i = self.types.len();
-        self.types.push(TypeDef { kind: TD_CONT, p0: 0, pn: 0, rn: 0, func: func });
+        self.types.push(TypeDef { kind: TD_CONT, p0: 0, pn: 0, result_count: 0, func: func });
         wrapping_u32(i)
     }
 
     pub fn declare_typed(inout self, ty: u32) -> u32 {
-        self.funcs.push(FuncRow { ty: ty, b0: 0, bn: 0, defined: false });
+        self.funcs.push(FuncRow { ty: ty, body_start: 0, body_len: 0, defined: false });
         wrapping_u32(wrapping_sub(wrapping_add(self.imports.len(), self.funcs.len()), 1))
     }
 
@@ -246,15 +259,15 @@ impl Builder {
         self.declare_typed(ty)
     }
 
-    fn put_text(inout self, in s: Slice[u8]) -> u64 {
-        let a = self.text.len();
-        for i in 0..s.len() {
-            match s.try_get(i) {
-                Option::Some(x) => self.text.push(x),
+    fn put_text(inout self, in bytes: Slice[u8]) -> u64 {
+        let start = self.text.len();
+        for i in 0..bytes.len() {
+            match bytes.try_get(i) {
+                Option::Some(byte_val) => self.text.push(byte_val),
                 Option::None => {},
             }
         }
-        a
+        start
     }
 
     // Import a function; all imports precede every declared function.
@@ -269,9 +282,17 @@ impl Builder {
             Fail::raise(werr(K_INVALID, 0, 1));
         }
         let ty = self.func_type(in params, in results);
-        let m0 = self.put_text(in module);
-        let n0 = self.put_text(in name);
-        self.imports.push(ImportRow { m0: m0, mn: module.len(), n0: n0, nn: name.len(), ty: ty });
+        let module_at = self.put_text(in module);
+        let name_at = self.put_text(in name);
+        self.imports.push(
+            ImportRow {
+                module_start: module_at,
+                module_len: module.len(),
+                name_start: name_at,
+                name_len: name.len(),
+                ty: ty
+            }
+        );
         wrapping_u32(wrapping_sub(self.imports.len(), 1))
     }
 
@@ -281,10 +302,15 @@ impl Builder {
 
     pub fn define(inout self, index: u32, in body: ChunkSeq[u8]) {
         let i = wrapping_sub(widen_u64(index), self.imports.len());
-        let f = self.func_row(i);
-        let b0 = self.bodies.len();
+        let old_row = self.func_row(i);
+        let body_at = self.bodies.len();
         append(inout self.bodies, in body);
-        let row = FuncRow { ty: f.ty, b0: b0, bn: body.len(), defined: true };
+        let row = FuncRow {
+            ty: old_row.ty,
+            body_start: body_at,
+            body_len: body.len(),
+            defined: true
+        };
         let ok = self.funcs.try_set(i, row);
     }
 
@@ -294,7 +320,7 @@ impl Builder {
 
     // Append 8-byte-aligned static bytes; returns their address.
     pub fn data(inout self, in bytes: ChunkSeq[u8]) -> u64 {
-        let at = wrapping_add(DATA_START, self.data.len());
+        let addr = wrapping_add(DATA_START, self.data.len());
         append(inout self.data, in bytes);
         loop {
             if (self.data.len() & 7) == 0 {
@@ -302,11 +328,11 @@ impl Builder {
             }
             self.data.push(0);
         }
-        at
+        addr
     }
 
-    pub fn set_heap_global(inout self, g: u32) {
-        self.heap_global = g;
+    pub fn set_heap_global(inout self, heap_global: u32) {
+        self.heap_global = heap_global;
     }
 
     pub fn heap_start(in self) -> u64 {
@@ -329,8 +355,8 @@ impl Builder {
     pub fn declare_ref(inout self, func: u32) {
         for i in 0..self.declared.len() {
             match self.declared.try_get(i) {
-                Option::Some(x) => {
-                    if x == func {
+                Option::Some(entry) => {
+                    if entry == func {
                         return;
                     }
                 },
@@ -346,8 +372,10 @@ impl Builder {
     }
 
     pub fn export_func(inout self, in name: Slice[u8], func: u32) {
-        let n0 = self.put_text(in name);
-        self.exports.push(ExportRow { n0: n0, nn: name.len(), kind: EXPORT_FUNC, index: func });
+        let name_at = self.put_text(in name);
+        self.exports.push(
+            ExportRow { name_start: name_at, name_len: name.len(), kind: EXPORT_FUNC, index: func }
+        );
     }
 
     // The module's bytes (`Builder::finish`).
@@ -362,62 +390,72 @@ impl Builder {
         out.push(0);
         out.push(0);
         out.push(0);
-        let mut s = ChunkSeq::new[u8]();
-        uleb(inout s, self.types.len());
+        let mut body = ChunkSeq::new[u8]();
+        uleb(inout body, self.types.len());
         for i in 0..self.types.len() {
-            let t = self.type_def(i);
-            if t.kind == TD_FUNC {
-                s.push(TYPE_FUNC);
-                uleb(inout s, t.pn);
-                for k in 0..t.pn {
-                    put_valtype(inout s, val_at(in self.vals, wrapping_add(t.p0, k)));
+            let def = self.type_def(i);
+            if def.kind == TD_FUNC {
+                body.push(TYPE_FUNC);
+                uleb(inout body, def.pn);
+                for j in 0..def.pn {
+                    put_valtype(inout body, val_at(in self.vals, wrapping_add(def.p0, j)));
                 }
-                uleb(inout s, t.rn);
-                for k in 0..t.rn {
+                uleb(inout body, def.result_count);
+                for j in 0..def.result_count {
                     put_valtype(
-                        inout s,
-                        val_at(in self.vals, wrapping_add(wrapping_add(t.p0, t.pn), k))
+                        inout body,
+                        val_at(in self.vals, wrapping_add(wrapping_add(def.p0, def.pn), j))
                     );
                 }
             } else {
                 // A continuation type carries its function type index.
-                s.push(TYPE_CONT);
-                sleb(inout s, wrapping_i64(widen_u64(t.func)));
+                body.push(TYPE_CONT);
+                sleb(inout body, wrapping_i64(widen_u64(def.func)));
             }
         }
-        section(inout out, S_TYPE, in s);
+        section(inout out, S_TYPE, in body);
         if self.imports.len() != 0 {
-            s.clear();
-            uleb(inout s, self.imports.len());
+            body.clear();
+            uleb(inout body, self.imports.len());
             for i in 0..self.imports.len() {
                 match self.imports.try_get(i) {
-                    Option::Some(m) => {
-                        uleb(inout s, m.mn);
-                        copy_range(inout s, in self.text, m.m0, m.mn);
-                        uleb(inout s, m.nn);
-                        copy_range(inout s, in self.text, m.n0, m.nn);
-                        s.push(IMPORT_FUNC);
-                        uleb(inout s, widen_u64(m.ty));
+                    Option::Some(import_row) => {
+                        uleb(inout body, import_row.module_len);
+                        copy_range(
+                            inout body,
+                            in self.text,
+                            import_row.module_start,
+                            import_row.module_len
+                        );
+                        uleb(inout body, import_row.name_len);
+                        copy_range(
+                            inout body,
+                            in self.text,
+                            import_row.name_start,
+                            import_row.name_len
+                        );
+                        body.push(IMPORT_FUNC);
+                        uleb(inout body, widen_u64(import_row.ty));
                     },
                     Option::None => {},
                 }
             }
-            section(inout out, S_IMPORT, in s);
+            section(inout out, S_IMPORT, in body);
         }
-        s.clear();
-        uleb(inout s, self.funcs.len());
+        body.clear();
+        uleb(inout body, self.funcs.len());
         for i in 0..self.funcs.len() {
-            uleb(inout s, widen_u64(self.func_row(i).ty));
+            uleb(inout body, widen_u64(self.func_row(i).ty));
         }
-        section(inout out, S_FUNCTION, in s);
-        s.clear();
+        section(inout out, S_FUNCTION, in body);
+        body.clear();
         // one funcref table, min = max = the slot count
-        uleb(inout s, 1);
-        s.push(TYPE_FUNCREF);
-        s.push(LIMITS_WITH_MAX);
-        uleb(inout s, self.table.len());
-        uleb(inout s, self.table.len());
-        section(inout out, S_TABLE, in s);
+        uleb(inout body, 1);
+        body.push(TYPE_FUNCREF);
+        body.push(LIMITS_WITH_MAX);
+        uleb(inout body, self.table.len());
+        uleb(inout body, self.table.len());
+        section(inout out, S_TABLE, in body);
         let heap_start = self.heap_start();
         let mut min_pages = wrapping_add(heap_start, wrapping_sub(PAGE_BYTES, 1)) / PAGE_BYTES;
         if min_pages == 0 {
@@ -426,117 +464,122 @@ impl Builder {
         if min_pages > widen_u64(max_pages) {
             Fail::raise(werr(K_INVALID, 0, 2));
         }
-        s.clear();
-        uleb(inout s, 1);
-        s.push(LIMITS_WITH_MAX);
-        uleb(inout s, min_pages);
-        uleb(inout s, widen_u64(max_pages));
-        section(inout out, S_MEMORY, in s);
+        body.clear();
+        uleb(inout body, 1);
+        body.push(LIMITS_WITH_MAX);
+        uleb(inout body, min_pages);
+        uleb(inout body, widen_u64(max_pages));
+        section(inout out, S_MEMORY, in body);
         if self.tags.len() != 0 {
-            s.clear();
-            uleb(inout s, self.tags.len());
+            body.clear();
+            uleb(inout body, self.tags.len());
             for i in 0..self.tags.len() {
-                s.push(TAG_EXCEPTION);
+                body.push(TAG_EXCEPTION);
                 match self.tags.try_get(i) {
-                    Option::Some(t) => uleb(inout s, widen_u64(t)),
+                    Option::Some(tag_ty) => uleb(inout body, widen_u64(tag_ty)),
                     Option::None => {},
                 }
             }
-            section(inout out, S_TAG, in s);
+            section(inout out, S_TAG, in body);
         }
-        s.clear();
-        uleb(inout s, self.globals.len());
+        body.clear();
+        uleb(inout body, self.globals.len());
         for i in 0..self.globals.len() {
             let init = if wrapping_u32(i) == self.heap_global {
                 wrapping_i64(heap_start)
             } else {
                 match self.globals.try_get(i) {
-                    Option::Some(v) => v,
+                    Option::Some(value) => value,
                     Option::None => 0,
                 }
             };
-            s.push(VT_I64);
-            s.push(GLOBAL_MUTABLE);
-            s.push(OP_I64_CONST);
-            sleb(inout s, init);
-            s.push(OP_END);
+            body.push(VT_I64);
+            body.push(GLOBAL_MUTABLE);
+            body.push(OP_I64_CONST);
+            sleb(inout body, init);
+            body.push(OP_END);
         }
-        section(inout out, S_GLOBAL, in s);
-        s.clear();
-        uleb(inout s, wrapping_add(self.exports.len(), 1));
-        put_bytes(inout s, in "memory".as_bytes());
-        s.push(EXPORT_MEMORY);
-        uleb(inout s, 0);
+        section(inout out, S_GLOBAL, in body);
+        body.clear();
+        uleb(inout body, wrapping_add(self.exports.len(), 1));
+        put_bytes(inout body, in "memory".as_bytes());
+        body.push(EXPORT_MEMORY);
+        uleb(inout body, 0);
         for i in 0..self.exports.len() {
             match self.exports.try_get(i) {
-                Option::Some(e) => {
-                    uleb(inout s, e.nn);
-                    copy_range(inout s, in self.text, e.n0, e.nn);
-                    s.push(e.kind);
-                    uleb(inout s, widen_u64(e.index));
+                Option::Some(export_row) => {
+                    uleb(inout body, export_row.name_len);
+                    copy_range(
+                        inout body,
+                        in self.text,
+                        export_row.name_start,
+                        export_row.name_len
+                    );
+                    body.push(export_row.kind);
+                    uleb(inout body, widen_u64(export_row.index));
                 },
                 Option::None => {},
             }
         }
-        section(inout out, S_EXPORT, in s);
+        section(inout out, S_EXPORT, in body);
         let mut segments: u64 = 0;
-        s.clear();
+        body.clear();
         if self.table.len() != 0 {
             segments = wrapping_add(segments, 1);
             // Active segment with table index, offset expression and element kind.
-            s.push(ELEM_ACTIVE_EXPLICIT_TABLE);
-            uleb(inout s, 0);
-            s.push(OP_I32_CONST);
-            sleb(inout s, 0);
-            s.push(OP_END);
-            s.push(ELEM_KIND_FUNCREF);
-            uleb(inout s, self.table.len());
+            body.push(ELEM_ACTIVE_EXPLICIT_TABLE);
+            uleb(inout body, 0);
+            body.push(OP_I32_CONST);
+            sleb(inout body, 0);
+            body.push(OP_END);
+            body.push(ELEM_KIND_FUNCREF);
+            uleb(inout body, self.table.len());
             for i in 0..self.table.len() {
                 match self.table.try_get(i) {
-                    Option::Some(f) => uleb(inout s, widen_u64(f)),
+                    Option::Some(func) => uleb(inout body, widen_u64(func)),
                     Option::None => {},
                 }
             }
         }
         if self.declared.len() != 0 {
             segments = wrapping_add(segments, 1);
-            s.push(ELEM_DECLARATIVE);
-            s.push(ELEM_KIND_FUNCREF);
-            uleb(inout s, self.declared.len());
+            body.push(ELEM_DECLARATIVE);
+            body.push(ELEM_KIND_FUNCREF);
+            uleb(inout body, self.declared.len());
             for i in 0..self.declared.len() {
                 match self.declared.try_get(i) {
-                    Option::Some(f) => uleb(inout s, widen_u64(f)),
+                    Option::Some(func) => uleb(inout body, widen_u64(func)),
                     Option::None => {},
                 }
             }
         }
         if segments != 0 {
-            let mut e = ChunkSeq::new[u8]();
-            uleb(inout e, segments);
-            append(inout e, in s);
-            section(inout out, S_ELEMENT, in e);
+            let mut elem_body = ChunkSeq::new[u8]();
+            uleb(inout elem_body, segments);
+            append(inout elem_body, in body);
+            section(inout out, S_ELEMENT, in elem_body);
         }
-        s.clear();
-        uleb(inout s, self.funcs.len());
+        body.clear();
+        uleb(inout body, self.funcs.len());
         for i in 0..self.funcs.len() {
-            let f = self.func_row(i);
-            if !f.defined {
+            let row = self.func_row(i);
+            if !row.defined {
                 Fail::raise(werr(K_INVALID, 0, 3));
             }
-            uleb(inout s, f.bn);
-            copy_range(inout s, in self.bodies, f.b0, f.bn);
+            uleb(inout body, row.body_len);
+            copy_range(inout body, in self.bodies, row.body_start, row.body_len);
         }
-        section(inout out, S_CODE, in s);
+        section(inout out, S_CODE, in body);
         if self.data.len() != 0 {
-            s.clear();
-            uleb(inout s, 1);
-            s.push(DATA_ACTIVE_DEFAULT_MEMORY);
-            s.push(OP_I32_CONST);
-            sleb(inout s, wrapping_i64(DATA_START));
-            s.push(OP_END);
-            uleb(inout s, self.data.len());
-            append(inout s, in self.data);
-            section(inout out, S_DATA, in s);
+            body.clear();
+            uleb(inout body, 1);
+            body.push(DATA_ACTIVE_DEFAULT_MEMORY);
+            body.push(OP_I32_CONST);
+            sleb(inout body, wrapping_i64(DATA_START));
+            body.push(OP_END);
+            uleb(inout body, self.data.len());
+            append(inout body, in self.data);
+            section(inout out, S_DATA, in body);
         }
         out
     }
