@@ -85,6 +85,16 @@ pub fn at8(in seq: ChunkSeq[u8], i: u64) -> u8 {
     }
 }
 
+// Optional generated-to-original ranges in the package graph.
+pub copy struct SourceSegment {
+    file: u32,
+    generated_start: u64,
+    generated_end: u64,
+    source_start: u64,
+    source_end: u64,
+    copied: bool,
+}
+
 pub struct St {
     interner: Interner,
     buf: String,
@@ -101,6 +111,7 @@ pub struct St {
     // Files: display path and base offset in the virtual concatenation.
     file_display: ChunkSeq[u32],
     file_base: ChunkSeq[u64],
+    source_segments: ChunkSeq[SourceSegment],
     // Modules, in load order: package, module path (segments in `segments`),
     // file, and the source's byte range in the input.
     mod_pkg: ChunkSeq[u32],
@@ -278,6 +289,7 @@ pub fn st_new() -> St {
         opt_name: ChunkSeq::new[u32](),
         file_display: ChunkSeq::new[u32](),
         file_base: ChunkSeq::new[u64](),
+        source_segments: ChunkSeq::new[SourceSegment](),
         mod_pkg: ChunkSeq::new[u32](),
         mod_file: ChunkSeq::new[u32](),
         mod_seg_first: ChunkSeq::new[u32](),
@@ -712,13 +724,61 @@ pub fn err(inout loader: St, code: u32, start: u32, end: u32) {
     loader.err_end = end;
 }
 
+fn original_position(in loader: St, file: u32, position: u64, at_end: bool) -> u64 {
+    let probe = if at_end && position != 0 {
+        wrapping_sub(position, 1)
+    } else {
+        position
+    };
+    for i in 0..loader.source_segments.len() {
+        match loader.source_segments.try_get(i) {
+            Option::Some(segment) => {
+                if segment.file == file
+                    && segment.generated_start <= probe
+                    && probe < segment.generated_end
+                {
+                    if segment.copied {
+                        let mapped = wrapping_add(
+                            segment.source_start,
+                            wrapping_sub(position, segment.generated_start)
+                        );
+                        return if mapped > segment.source_end {
+                            segment.source_end
+                        } else {
+                            mapped
+                        };
+                    }
+                    return if at_end {
+                        segment.source_end
+                    } else {
+                        segment.source_start
+                    };
+                }
+            },
+            Option::None => {},
+        }
+    }
+    position
+}
+
 // Writes the pending error as a diagnostic of `file`, one line:
 // `diag <file> E0<code> <start>..<end> <message>[ help: <help>]`.
 pub fn emit(inout loader: St, file: u32) {
+    let start = original_position(in loader, file, w(loader.err_start), false);
+    let mapped_end = if loader.err_start == loader.err_end {
+        start
+    } else {
+        original_position(in loader, file, w(loader.err_end), true)
+    };
+    let end = if mapped_end < start {
+        start
+    } else {
+        mapped_end
+    };
     loader.diag_rows.push(w(file));
     loader.diag_rows.push(w(loader.err_code));
-    loader.diag_rows.push(w(loader.err_start));
-    loader.diag_rows.push(w(loader.err_end));
+    loader.diag_rows.push(start);
+    loader.diag_rows.push(end);
     loader.diag_rows.push(loader.err_msg.len());
     loader.diag_text.extend(in loader.err_msg.as_bytes());
     if loader.err_has_help {
@@ -732,9 +792,9 @@ pub fn emit(inout loader: St, file: u32) {
     loader.diags.extend(in " E0".as_bytes());
     put_decimal(inout loader.diags, w(loader.err_code));
     loader.diags.push(32);
-    put_decimal(inout loader.diags, w(loader.err_start));
+    put_decimal(inout loader.diags, start);
     loader.diags.extend(in "..".as_bytes());
-    put_decimal(inout loader.diags, w(loader.err_end));
+    put_decimal(inout loader.diags, end);
     loader.diags.push(32);
     loader.diags.extend(in loader.err_msg.as_bytes());
     if loader.err_has_help {
@@ -743,4 +803,30 @@ pub fn emit(inout loader: St, file: u32) {
     }
     loader.diags.push(10);
     loader.err_code = 0;
+}
+
+test {
+    fn test_diagnostics_project_bootstrap_source_ranges() -> bool {
+        let mut loader = st_new();
+        loader.source_segments.push(SourceSegment {
+            file: 0,
+            generated_start: 20,
+            generated_end: 40,
+            source_start: 12,
+            source_end: 15,
+            copied: false
+        });
+        loader.source_segments.push(SourceSegment {
+            file: 0,
+            generated_start: 40,
+            generated_end: 50,
+            source_start: 15,
+            source_end: 25,
+            copied: true
+        });
+        original_position(in loader, 0, 25, false) == 12
+            && original_position(in loader, 0, 40, true) == 15
+            && original_position(in loader, 0, 43, false) == 18
+            && original_position(in loader, 1, 43, false) == 43
+    }
 }

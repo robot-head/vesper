@@ -20,7 +20,7 @@
 use @vesper/ast::{Ast, ConfNode, ImplNode, ItemNode, expr_at, list_at, list_len, none, pat_at};
 use @vesper/ast::lower::{lower_source, lower_surface_parsed};
 use @vesper-std/arena::{idx_from_raw};
-use @vesper/front::{P};
+use @vesper/front::{Diags, P};
 use @vesper/front::lex::{
     lex_sugar_raw_with_limits, lex_sugar_with_limits, max_diagnostics, max_source_bytes, max_tokens,
     token_end, trivia_kind
@@ -28,15 +28,16 @@ use @vesper/front::lex::{
 use @vesper/front::diag::{diags_new};
 use @vesper/front::parse::{hard_depth, parse_surface_tokens};
 use @vesper/front::source_macro::{macro_limits_default, parse_macro_surface_tokens};
+use @vesper/front::tree::{NodeKind};
 use @vesper/front::kinds::{
     k_amp, k_amp_eq, k_and, k_arrow, k_caret, k_colon, k_dot, k_eff, k_eq_eq, k_ge, k_gt, k_l_brace,
-    k_le, k_linear, k_lower, k_lt, k_minus, k_minus_eq, k_ne, k_or, k_percent, k_percent_eq, k_pipe,
-    k_pipe_eq, k_plus, k_plus_eq, k_question, k_r_brace, k_shl, k_shr, k_slash, k_slash_eq, k_star,
-    k_star_eq, k_state, k_with
+    k_l_paren, k_le, k_linear, k_lower, k_lt, k_minus, k_minus_eq, k_ne, k_or, k_percent,
+    k_percent_eq, k_pipe, k_pipe_eq, k_plus, k_plus_eq, k_question, k_r_brace, k_shl, k_shr,
+    k_slash, k_slash_eq, k_star, k_star_eq, k_state, k_upper, k_with
 };
 use self::flow::{Rd, arg_of, clause_of, fn_of, name_byte, name_len, param_of, render, stmt_of};
 use self::hygiene::{pattern_hygiene};
-use self::matcher::{captures_tail, match_rule_encoded};
+use self::matcher::{captures_tail, match_bootstrap_scalar_encoded, match_rule_encoded};
 use self::scope::{lower};
 use self::template::{
     Caps, add, b8, cap_at, cap_count, caps_read, inc, push_decimal, skeleton_run, sort_in, sub,
@@ -494,25 +495,7 @@ fn parse(in src: ChunkSeq[u8], include_tests: bool) -> Parsed {
         max_diagnostics()
     );
     if lexed.rejected {
-        let end = if diags.at.len() > 1 {
-            w32(in diags.at, 1)
-        } else {
-            diags.text.len()
-        };
-        let message = range_of(in diags.text, w32(in diags.at, 0), end);
-        return Parsed {
-            cst: Cst {
-                nodes: ChunkSeq::new[Node](),
-                leaves: ChunkSeq::new[u32](),
-                token_kinds: ChunkSeq::new[u8](),
-                token_starts: ChunkSeq::new[u64](),
-                token_ends: ChunkSeq::new[u64]()
-            },
-            diags: ChunkSeq::new[u64](),
-            diag_text: ChunkSeq::new[u8](),
-            refused: dg_new(in "E0003", in message, 0, 0),
-            surface: empty_surface()
-        };
+        return parse_refused(in diags);
     }
     // `parse_expansion_scopes`: the surface profile, then the expression
     // macro check under `surface_macro_limits` of sugar's limits.
@@ -528,6 +511,61 @@ fn parse(in src: ChunkSeq[u8], include_tests: bool) -> Parsed {
         include_tests,
         lim
     );
+    parsed_surface(surface)
+}
+
+// The bootstrap only needs the surface CST. Its loader reports a
+// refused source before assembling the name graph; it does not consume
+// the host expander's diagnostic rows or terminal whole AST.
+fn parse_bootstrap(in src: ChunkSeq[u8], include_tests: bool) -> Option[Cst] {
+    let mut diags = diags_new();
+    let lexed = lex_sugar_with_limits(
+        in src.as_slice(),
+        inout diags,
+        MAX_BYTES,
+        HARD_TOKENS,
+        max_diagnostics()
+    );
+    if lexed.rejected || diags.code.len() != 0 {
+        return Option::None;
+    }
+    let parsed = parse_surface_tokens(
+        in src.as_slice(),
+        lexed,
+        diags,
+        max_diagnostics(),
+        hard_depth(),
+        include_tests
+    );
+    if parsed.d.code.len() != 0 {
+        return Option::None;
+    }
+    Option::Some(build_cst(in parsed))
+}
+
+fn parse_refused(in diags: Diags) -> Parsed {
+    let end = if diags.at.len() > 1 {
+        w32(in diags.at, 1)
+    } else {
+        diags.text.len()
+    };
+    let message = range_of(in diags.text, w32(in diags.at, 0), end);
+    return Parsed {
+        cst: Cst {
+            nodes: ChunkSeq::new[Node](),
+            leaves: ChunkSeq::new[u32](),
+            token_kinds: ChunkSeq::new[u8](),
+            token_starts: ChunkSeq::new[u64](),
+            token_ends: ChunkSeq::new[u64]()
+        },
+        diags: ChunkSeq::new[u64](),
+        diag_text: ChunkSeq::new[u8](),
+        refused: dg_new(in "E0003", in message, 0, 0),
+        surface: empty_surface()
+    };
+}
+
+fn parsed_surface(sink surface: P) -> Parsed {
     let mut rows = ChunkSeq::new[u64]();
     let mut text = ChunkSeq::new[u8]();
     let n = surface.d.code.len();
@@ -547,6 +585,175 @@ fn parse(in src: ChunkSeq[u8], include_tests: bool) -> Parsed {
     }
     let cst = build_cst(in surface);
     Parsed { cst: cst, diags: rows, diag_text: text, refused: dg_ok(), surface: surface }
+}
+
+// Spans into the original module, before rule expansion changes byte offsets.
+// The loader can resolve imports and retain definition provenance without
+// scanning comments, string contents, or bodies for keyword spellings.
+pub copy struct SugarDeclarationSpan {
+    pub name_start: u64,
+    pub name_end: u64,
+    pub declaration_start: u64,
+    pub declaration_end: u64,
+    pub public: bool,
+}
+
+pub copy struct SugarImportSpan {
+    pub start: u64,
+    pub end: u64,
+}
+
+pub struct SugarModuleSurface {
+    pub has_sugar: bool,
+    pub shadows_bootstrap_prelude: bool,
+    pub declarations: ChunkSeq[SugarDeclarationSpan],
+    pub imports: ChunkSeq[SugarImportSpan],
+}
+
+fn next_surface_leaf(in cst: Cst, first: u64, end: u64) -> u64 {
+    for leaf in first..end {
+        if !trivia(in cst, leaf) {
+            return leaf;
+        }
+    }
+    end
+}
+
+fn bootstrap_reserved_name(in source: ChunkSeq[u8], start: u64, end: u64) -> bool {
+    range_is(in source, start, end, in "Option".as_bytes())
+        || range_is(in source, start, end, in "None".as_bytes())
+        || range_is(in source, start, end, in "Some".as_bytes())
+        || range_is(in source, start, end, in "wrapping_u32".as_bytes())
+        || range_is(in source, start, end, in "wrapping_sub".as_bytes())
+        || range_is(in source, start, end, in "wrapping_shl_u64".as_bytes())
+        || range_is(in source, start, end, in "wrapping_shr_u64".as_bytes())
+}
+
+pub fn inspect_module_sugars(
+    in source: ChunkSeq[u8],
+    include_tests: bool
+) -> Option[SugarModuleSurface] {
+    let cst = match parse_bootstrap(in source, include_tests) {
+        Option::Some(cst) => cst,
+        Option::None => return Option::None,
+    };
+    let mut surface = SugarModuleSurface {
+        has_sugar: false,
+        shadows_bootstrap_prelude: false,
+        declarations: ChunkSeq::new[SugarDeclarationSpan](),
+        imports: ChunkSeq::new[SugarImportSpan](),
+    };
+    for node_index in 0..cst.nodes.len() {
+        let node = node_at(in cst, node_index);
+        if node.kind == NodeKind::SugarDecl || call_node(node.kind) {
+            surface.has_sugar = true;
+        }
+        if node.kind != NodeKind::Item
+            || node_at(in cst, widen_u64(node.parent)).kind != NodeKind::Module
+        {
+            continue;
+        }
+        let declaration = child_of(in cst, node_index, NodeKind::SugarDecl);
+        if declaration != NONE {
+            let decl = node_at(in cst, declaration);
+            let end_leaf = widen_u64(decl.hi);
+            let mut leaf = next_surface_leaf(in cst, widen_u64(decl.lo), end_leaf);
+            let mut public = false;
+            loop {
+                if leaf >= end_leaf {
+                    break;
+                }
+                if leaf_is(in cst, in source, leaf, in "sugar") {
+                    let name = next_surface_leaf(in cst, inc(leaf), end_leaf);
+                    if name < end_leaf {
+                        surface.declarations.push(SugarDeclarationSpan {
+                            name_start: leaf_s(in cst, name),
+                            name_end: leaf_e(in cst, name),
+                            declaration_start: n_start(in cst, declaration),
+                            declaration_end: n_end(in cst, declaration),
+                            public: public
+                        });
+                    }
+                    break;
+                }
+                if leaf_is(in cst, in source, leaf, in "pub") {
+                    public = true;
+                }
+                leaf = next_surface_leaf(in cst, inc(leaf), end_leaf);
+            }
+            continue;
+        }
+        let end_leaf = widen_u64(node.hi);
+        let first = next_surface_leaf(in cst, widen_u64(node.lo), end_leaf);
+        let head = if first < end_leaf && leaf_is(in cst, in source, first, in "pub") {
+            next_surface_leaf(in cst, inc(first), end_leaf)
+        } else {
+            first
+        };
+        if head >= end_leaf {
+            continue;
+        }
+        if leaf_is(in cst, in source, head, in "use") {
+            let target = next_surface_leaf(in cst, inc(head), end_leaf);
+            if target < end_leaf && !leaf_is(in cst, in source, target, in "model") {
+                surface.imports.push(SugarImportSpan {
+                    start: leaf_s(in cst, first),
+                    end: n_end(in cst, node_index)
+                });
+                // The bootstrap subset has no def-site path sidecar. A
+                // protected name in any import might be a local alias.
+                let mut leaf = target;
+                loop {
+                    if leaf >= end_leaf {
+                        break;
+                    }
+                    if bootstrap_reserved_name(
+                        in source,
+                        leaf_s(in cst, leaf),
+                        leaf_e(in cst, leaf)
+                    ) {
+                        surface.shadows_bootstrap_prelude = true;
+                        break;
+                    }
+                    leaf = next_surface_leaf(in cst, inc(leaf), end_leaf);
+                }
+            }
+        } else {
+            let mut keyword = head;
+            loop {
+                if keyword >= end_leaf {
+                    break;
+                }
+                if !leaf_is(in cst, in source, keyword, in "copy")
+                    && !leaf_is(in cst, in source, keyword, in "linear")
+                    && !leaf_is(in cst, in source, keyword, in "affine")
+                    && !leaf_is(in cst, in source, keyword, in "opaque")
+                {
+                    break;
+                }
+                keyword = next_surface_leaf(in cst, inc(keyword), end_leaf);
+            }
+            if keyword < end_leaf
+                && (leaf_is(in cst, in source, keyword, in "struct")
+                    || leaf_is(in cst, in source, keyword, in "enum")
+                    || leaf_is(in cst, in source, keyword, in "type")
+                    || leaf_is(in cst, in source, keyword, in "fn")
+                    || leaf_is(in cst, in source, keyword, in "const"))
+            {
+                let name = next_surface_leaf(in cst, inc(keyword), end_leaf);
+                if name < end_leaf
+                    && bootstrap_reserved_name(
+                        in source,
+                        leaf_s(in cst, name),
+                        leaf_e(in cst, name)
+                    )
+                {
+                    surface.shadows_bootstrap_prelude = true;
+                }
+            }
+        }
+    }
+    Option::Some(surface)
 }
 
 // The parse of an empty source, for a refused `Parsed`.
@@ -619,14 +826,16 @@ fn def_rule(in registry: Reg, def: u64, i: u64) -> u64 {
     add(df(in registry, def, 9), i)
 }
 
-// `read_definition(source, decl, import)`.
-fn read_definition(
-    inout registry: Reg,
-    in src: ChunkSeq[u8],
-    in cst: Cst,
-    decl: u64,
-    import: u64
-) -> Dg {
+struct DefinitionHeader {
+    name_leaf: u64,
+    sort_leaf: u64,
+    op: u64,
+    nonassoc: bool,
+    effect_start: u64,
+    effect_end: u64,
+}
+
+fn definition_header(in src: ChunkSeq[u8], in cst: Cst, decl: u64) -> Result[DefinitionHeader, Dg] {
     let decl_start = n_start(in cst, decl);
     let decl_end = n_end(in cst, decl);
     let leaves = words(in cst, decl);
@@ -639,12 +848,12 @@ fn read_definition(
     }
     at = inc(at);
     if at >= leaves.len() {
-        return diag(in "missing sugar name", decl_start, decl_end);
+        return Result::Err(diag(in "missing sugar name", decl_start, decl_end));
     }
     let name_leaf = w64(in leaves, at);
     at = inc(at);
     if inc(at) >= leaves.len() {
-        return diag(in "missing sugar sort", decl_start, decl_end);
+        return Result::Err(diag(in "missing sugar sort", decl_start, decl_end));
     }
     let sort_leaf = w64(in leaves, inc(at));
     at = add(at, 2);
@@ -668,11 +877,43 @@ fn read_definition(
             emits_at = i;
         }
     }
+    let (effect_start, effect_end) = if emits_at == NONE {
+        (NONE, 0)
+    } else {
+        (
+            leaf_s(in cst, w64(in header, inc(emits_at))),
+            leaf_e(in cst, w64(in header, sub(header.len(), 1)))
+        )
+    };
+    Result::Ok(DefinitionHeader {
+        name_leaf: name_leaf,
+        sort_leaf: sort_leaf,
+        op: op,
+        nonassoc: nonassoc,
+        effect_start: effect_start,
+        effect_end: effect_end,
+    })
+}
+
+// `read_definition(source, decl, import)`.
+fn read_definition(
+    inout registry: Reg,
+    in src: ChunkSeq[u8],
+    in cst: Cst,
+    decl: u64,
+    import: u64
+) -> Dg {
+    let header = match definition_header(in src, in cst, decl) {
+        Result::Ok(header) => header,
+        Result::Err(problem) => return problem,
+    };
+    let decl_start = n_start(in cst, decl);
+    let decl_end = n_end(in cst, decl);
     let mut emits_first = NONE;
     let mut emits_len: u64 = 0;
-    if emits_at != NONE {
-        let start = leaf_s(in cst, w64(in header, inc(emits_at)));
-        let end = leaf_e(in cst, w64(in header, sub(header.len(), 1)));
+    if header.effect_start != NONE {
+        let start = header.effect_start;
+        let end = header.effect_end;
         let mut wrapped = ChunkSeq::new[u8]();
         cat(inout wrapped, in "fn __sugar_row() ");
         cat_range(inout wrapped, in src, start, end);
@@ -708,6 +949,64 @@ fn read_definition(
             }
         }
     }
+    record_definition(
+        inout registry,
+        in src,
+        in cst,
+        decl,
+        import,
+        in header,
+        emits_first,
+        emits_len
+    )
+}
+
+// Bootstrap templates cannot emit effects. Store the presence of a declared
+// effect row for rejection at selection, without linking the host effect
+// AST reader (also allow a registry to index unused declarations).
+fn read_bootstrap_definition(
+    inout registry: Reg,
+    in src: ChunkSeq[u8],
+    in cst: Cst,
+    decl: u64,
+    import: u64
+) -> Dg {
+    let header = match definition_header(in src, in cst, decl) {
+        Result::Ok(header) => header,
+        Result::Err(problem) => return problem,
+    };
+    let mut emits_first = NONE;
+    let mut emits_len: u64 = 0;
+    if header.effect_start != NONE {
+        emits_first = pool_push(inout registry, in src, header.effect_start, header.effect_end);
+        emits_len = sub(header.effect_end, header.effect_start);
+    }
+    record_definition(
+        inout registry,
+        in src,
+        in cst,
+        decl,
+        import,
+        in header,
+        emits_first,
+        emits_len
+    )
+}
+
+fn record_definition(
+    inout registry: Reg,
+    in src: ChunkSeq[u8],
+    in cst: Cst,
+    decl: u64,
+    import: u64,
+    in header: DefinitionHeader,
+    emits_first: u64,
+    emits_len: u64
+) -> Dg {
+    let name_leaf = header.name_leaf;
+    let sort_leaf = header.sort_leaf;
+    let op = header.op;
+    let nonassoc = header.nonassoc;
     // Rules.
     let rule_first = registry.rules.len() / RW;
     let key_first = registry.keys.len() >> 1;
@@ -1092,6 +1391,7 @@ fn operator_level(in registry: Reg, def: u64) -> u64 {
 // count, place first, count, definition, call start, end, rule start, end,
 // import (NONE for none).
 const RG: u64 = 12;
+const MAP_WORDS: u64 = 5;
 
 pub struct St {
     src: ChunkSeq[u8],
@@ -1628,6 +1928,125 @@ pub fn imports_none() -> Imports {
     }
 }
 
+// Inputs to the package-level plan. The package resolver supplies only
+// aliases it has already checked for visibility. Definition rows keep the
+// author's module and original spelling rather than the caller's alias.
+pub struct PackageSugarDefinition {
+    pub module_index: u64,
+    pub name: ChunkSeq[u8],
+    pub declaration: ChunkSeq[u8],
+}
+
+pub struct PackageSugarBinding {
+    pub module_index: u64,
+    pub alias: ChunkSeq[u8],
+    pub definition: u64,
+}
+
+fn import_plan_add(
+    inout imports: Imports,
+    inout definitions_used: ChunkSeq[u64],
+    in definitions: ChunkSeq[PackageSugarDefinition],
+    definition_index: u64,
+    in alias: ChunkSeq[u8]
+) -> Option[u64] {
+    for i in 0..definitions_used.len() {
+        let alias_start = w64(in imports.rows, i << 2);
+        let alias_length = w64(in imports.rows, inc(i << 2));
+        if w64(in definitions_used, i) == definition_index
+            && range_is(
+                in imports.text,
+                alias_start,
+                add(alias_start, alias_length),
+                in alias.as_slice()
+            )
+        {
+            return Option::Some(i);
+        }
+    }
+    if definitions_used.len() >= MAX_STEPS {
+        return Option::None;
+    }
+    match definitions.try_get(definition_index) {
+        Option::Some(definition) => {
+            let alias_start = imports.text.len();
+            if alias_start > MAX_BYTES
+                || alias.len() > sub(MAX_BYTES, alias_start)
+                || definition.declaration.len() > sub(sub(MAX_BYTES, alias_start), alias.len())
+            {
+                return Option::None;
+            }
+            cat_seq(inout imports.text, in alias);
+            let declaration_start = imports.text.len();
+            cat_seq(inout imports.text, in definition.declaration);
+            imports.rows.push(alias_start);
+            imports.rows.push(alias.len());
+            imports.rows.push(declaration_start);
+            imports.rows.push(definition.declaration.len());
+            let row = definitions_used.len();
+            definitions_used.push(definition_index);
+            Option::Some(row)
+        },
+        Option::None => Option::None,
+    }
+}
+
+fn visible_plan_name(inout imports: Imports, in alias: ChunkSeq[u8], target: u64) {
+    for i in 0..imports.visible.len() {
+        let previous = w64(in imports.visible, i) << 2;
+        let start = w64(in imports.rows, previous);
+        let length = w64(in imports.rows, inc(previous));
+        if range_is(in imports.text, start, add(start, length), in alias.as_slice()) {
+            imports.visible.try_set(i, target);
+            return;
+        }
+    }
+    imports.visible.push(target);
+}
+
+// Bootstrap supports no authored free helper or nested expansion. Index
+// only the caller's visible aliases, not the unused author-scope graph.
+pub fn plan_bootstrap_sugars(
+    caller: u64,
+    module_count: u64,
+    in definitions: ChunkSeq[PackageSugarDefinition],
+    in bindings: ChunkSeq[PackageSugarBinding]
+) -> Option[Imports] {
+    if caller >= module_count
+        || module_count > MAX_STEPS
+        || definitions.len() > MAX_STEPS
+        || bindings.len() > MAX_STEPS
+    {
+        return Option::None;
+    }
+    let mut imports = imports_none();
+    let mut definitions_used = ChunkSeq::new[u64]();
+    for i in 0..bindings.len() {
+        match bindings.try_get(i) {
+            Option::Some(binding) => {
+                if binding.module_index == caller {
+                    match import_plan_add(
+                        inout imports,
+                        inout definitions_used,
+                        in definitions,
+                        binding.definition,
+                        in binding.alias
+                    ) {
+                        Option::Some(row) => visible_plan_name(
+                            inout imports,
+                            in binding.alias,
+                            row
+                        ),
+                        Option::None => return Option::None,
+                    }
+                }
+            },
+            Option::None => {},
+        }
+    }
+    Option::Some(imports)
+}
+
 fn n_imports(in imports: Imports) -> u64 {
     imports.rows.len() >> 2
 }
@@ -1652,42 +2071,89 @@ fn read_imports(inout registry: Reg, in imports: Imports, inout work: u64) -> Dg
             return spent;
         }
         let parsed = parse(in decl, true);
-        if parsed.refused.failed {
-            return parsed.refused;
-        }
-        if parsed.diags.len() != 0 {
-            let code = w64(in parsed.diags, 0);
-            let first = w64(in parsed.diags, 3);
-            let message = range_of(in parsed.diag_text, first, add(first, w64(in parsed.diags, 4)));
-            let code_name = if code == 1 {
-                "E0001"
-            } else if code == 2 {
-                "E0002"
-            } else {
-                "E0003"
-            };
-            return dg_new(
-                in code_name,
-                in message,
-                w64(in parsed.diags, 1),
-                w64(in parsed.diags, 2)
-            );
-        }
-        let mut found = NONE;
-        for node in 0..parsed.cst.nodes.len() {
-            if node_at(in parsed.cst, node).kind == N_SUGAR_DECL {
-                found = node;
-                break;
-            }
-        }
-        if found == NONE {
-            return diag(in "imported sugar binding is missing its declaration", 0, 0);
-        }
-        let read_result = read_definition(inout registry, in decl, in parsed.cst, found, i);
-        if read_result.failed {
-            return read_result;
+        let result = read_parsed_sugar(inout registry, in decl, sink parsed, i);
+        if result.failed {
+            return result;
         }
     }
+    bind_imports(inout registry, in imports, inout work)
+}
+
+fn read_bootstrap_imports(inout registry: Reg, in imports: Imports, inout work: u64) -> Dg {
+    let n = n_imports(in imports);
+    if imports.scope_of.len() != 0 {
+        return diag(in "bootstrap sugar does not use definition scopes", 0, 0);
+    }
+    for i in 0..n {
+        let decl = import_decl(in imports, i);
+        let spent = charge(inout work, decl.len(), 0, 0);
+        if spent.failed {
+            return spent;
+        }
+        let cst = match parse_bootstrap(in decl, true) {
+            Option::Some(cst) => cst,
+            Option::None => return diag(in "invalid bootstrap sugar declaration", 0, 0),
+        };
+        let found = first_sugar_declaration(in cst);
+        if found == NONE {
+            return missing_sugar_declaration();
+        }
+        let result = read_bootstrap_definition(inout registry, in decl, in cst, found, i);
+        if result.failed {
+            return result;
+        }
+    }
+    bind_visible_imports(inout registry, in imports)
+}
+
+fn read_parsed_sugar(
+    inout registry: Reg,
+    in decl: ChunkSeq[u8],
+    sink parsed: Parsed,
+    i: u64
+) -> Dg {
+    if parsed.refused.failed {
+        return parsed.refused;
+    }
+    if parsed.diags.len() != 0 {
+        let code = w64(in parsed.diags, 0);
+        let first = w64(in parsed.diags, 3);
+        let message = range_of(in parsed.diag_text, first, add(first, w64(in parsed.diags, 4)));
+        let code_name = if code == 1 {
+            "E0001"
+        } else if code == 2 {
+            "E0002"
+        } else {
+            "E0003"
+        };
+        return dg_new(in code_name, in message, w64(in parsed.diags, 1), w64(in parsed.diags, 2));
+    }
+    read_sugar_declaration(inout registry, in decl, in parsed.cst, i)
+}
+
+fn first_sugar_declaration(in cst: Cst) -> u64 {
+    for node in 0..cst.nodes.len() {
+        if node_at(in cst, node).kind == N_SUGAR_DECL {
+            return node;
+        }
+    }
+    NONE
+}
+
+fn missing_sugar_declaration() -> Dg {
+    diag(in "imported sugar binding is missing its declaration", 0, 0)
+}
+
+fn read_sugar_declaration(inout registry: Reg, in decl: ChunkSeq[u8], in cst: Cst, i: u64) -> Dg {
+    let found = first_sugar_declaration(in cst);
+    if found == NONE {
+        return missing_sugar_declaration();
+    }
+    read_definition(inout registry, in decl, in cst, found, i)
+}
+
+fn bind_visible_imports(inout registry: Reg, in imports: Imports) -> Dg {
+    let n = n_imports(in imports);
     for visible in 0..imports.visible.len() {
         let id = w64(in imports.visible, visible);
         if id >= n {
@@ -1704,6 +2170,14 @@ fn read_imports(inout registry: Reg, in imports: Imports, inout work: u64) -> Dg
         if bound.failed {
             return bound;
         }
+    }
+    dg_ok()
+}
+
+fn bind_imports(inout registry: Reg, in imports: Imports, inout work: u64) -> Dg {
+    let bound = bind_visible_imports(inout registry, in imports);
+    if bound.failed {
+        return bound;
     }
     // One environment per distinct scope, numbered by first use.
     let mut made = ChunkSeq::new[u64]();
@@ -3472,6 +3946,777 @@ fn rename(
     rows.try_set(inc(at << 2), end);
     rows.try_set(add(at << 2, 2), first);
     rows.try_set(add(at << 2, 3), len);
+}
+
+// Stage 2 accepts only expansions with no introduced effects or hidden
+// transfers. Shared operands must enter through typed scalar bindings.
+// Author references must be fresh locals or known bootstrap prelude names.
+pub struct BootstrapSugarOutput {
+    pub source: ChunkSeq[u8],
+    // Rows of (expanded start/end, original start/end, copied).
+    pub mappings: ChunkSeq[u64],
+}
+
+struct BootstrapState {
+    src: ChunkSeq[u8],
+    mark: ChunkSeq[u8],
+    maps: ChunkSeq[u64],
+    holes: ChunkSeq[u64]
+}
+
+fn starts_generated(in state: BootstrapState, start: u64, end: u64) -> bool {
+    if sub(end, start) <= state.mark.len() {
+        return false;
+    }
+    for i in 0.. state.mark.len() {
+        if b8(in state.src, add(start, i)) != b8(in state.mark, i) {
+            return false;
+        }
+    }
+    true
+}
+
+fn bootstrap_template_word(in state: BootstrapState, start: u64, end: u64) -> bool {
+    if starts_generated(in state, start, end) {
+        return true;
+    }
+    range_is(in state.src, start, end, in "let".as_bytes())
+        || range_is(in state.src, start, end, in "mut".as_bytes())
+        || range_is(in state.src, start, end, in "if".as_bytes())
+        || range_is(in state.src, start, end, in "else".as_bytes())
+        || range_is(in state.src, start, end, in "bool".as_bytes())
+        || range_is(in state.src, start, end, in "true".as_bytes())
+        || range_is(in state.src, start, end, in "false".as_bytes())
+        || range_is(in state.src, start, end, in "u32".as_bytes())
+        || range_is(in state.src, start, end, in "u64".as_bytes())
+        || bootstrap_reserved_name(in state.src, start, end)
+}
+
+// Every captured operand in the bootstrap subset is used as the RHS
+// of a fresh scalar binding. Do not accept implicit transfers of a
+// non-copy value through a constructor or a hidden inout operation.
+fn bootstrap_template_punctuation(in state: BootstrapState, start: u64, end: u64) -> bool {
+    // Checked arithmetic, indexing, dotted dispatch and foreign/effect
+    // syntax are intentionally not part of the bootstrap language.
+    range_is(in state.src, start, end, in "(".as_bytes())
+        || range_is(in state.src, start, end, in ")".as_bytes())
+        || range_is(in state.src, start, end, in "{".as_bytes())
+        || range_is(in state.src, start, end, in "}".as_bytes())
+        || range_is(in state.src, start, end, in ":".as_bytes())
+        || range_is(in state.src, start, end, in "::".as_bytes())
+        || range_is(in state.src, start, end, in ";".as_bytes())
+        || range_is(in state.src, start, end, in ",".as_bytes())
+        || range_is(in state.src, start, end, in "=".as_bytes())
+        || range_is(in state.src, start, end, in "==".as_bytes())
+        || range_is(in state.src, start, end, in "!=".as_bytes())
+        || range_is(in state.src, start, end, in ">=".as_bytes())
+        || range_is(in state.src, start, end, in ">".as_bytes())
+        || range_is(in state.src, start, end, in "<=".as_bytes())
+        || range_is(in state.src, start, end, in "<".as_bytes())
+        || range_is(in state.src, start, end, in "!".as_bytes())
+        || range_is(in state.src, start, end, in "&&".as_bytes())
+        || range_is(in state.src, start, end, in "||".as_bytes())
+        || range_is(in state.src, start, end, in "&".as_bytes())
+        || range_is(in state.src, start, end, in "|".as_bytes())
+        || range_is(in state.src, start, end, in "^".as_bytes())
+}
+
+fn bootstrap_scalar_hole(
+    in state: BootstrapState,
+    in significant: ChunkSeq[u64],
+    start: u64,
+    inout cursor: u64
+) -> bool {
+    let pair_width: u64 = 2;
+    let mut next = cursor;
+    loop {
+        if next >= significant.len() || w64(in significant, next) >= start {
+            break;
+        }
+        next = add(next, pair_width);
+    }
+    cursor = next;
+    if next >= pair_width {
+        let prior = sub(next, pair_width);
+        if range_is(
+            in state.src,
+            w64(in significant, prior),
+            w64(in significant, inc(prior)),
+            in "(".as_bytes()
+        ) {
+            next = prior;
+        }
+    }
+    // Five tokens precede the operand: let, fresh-name, colon, type, equals.
+    let scalar_prefix_tokens: u64 = 5;
+    let prefix_width = wrapping_mul(pair_width, scalar_prefix_tokens);
+    if next < prefix_width {
+        return false;
+    }
+    let base = sub(next, prefix_width);
+    let binding = add(base, pair_width);
+    let colon = add(binding, pair_width);
+    let ty = add(colon, pair_width);
+    let assignment = add(ty, pair_width);
+    let type_start = w64(in significant, ty);
+    let type_end = w64(in significant, inc(ty));
+    range_is(
+        in state.src,
+        w64(in significant, base),
+        w64(in significant, inc(base)),
+        in "let".as_bytes()
+    )
+        && starts_generated(
+            in state,
+            w64(in significant, binding),
+            w64(in significant, inc(binding))
+        )
+        && range_is(
+            in state.src,
+            w64(in significant, colon),
+            w64(in significant, inc(colon)),
+            in ":".as_bytes()
+        )
+        && (range_is(in state.src, type_start, type_end, in "u64".as_bytes())
+            || range_is(in state.src, type_start, type_end, in "u32".as_bytes())
+            || range_is(in state.src, type_start, type_end, in "bool".as_bytes()))
+        && range_is(
+            in state.src,
+            w64(in significant, assignment),
+            w64(in significant, inc(assignment)),
+            in "=".as_bytes()
+        )
+}
+
+// A capture is inserted under the template's generated binders only.
+// The package resolver already excludes conflicting top-level names.
+// Also refuse caller-local intrinsic binders rather than linking the
+// generic whole-AST hygiene pass into the bootstrap component.
+fn bootstrap_caller_clear(in source: ChunkSeq[u8], in cst: Cst) -> bool {
+    let mut prior: u64 = NONE;
+    for token in 0..cst.token_kinds.len() {
+        let kind = tok_kind(in cst, token);
+        if trivia_kind(kind) {
+            continue;
+        }
+        let start = w64(in cst.token_starts, token);
+        let end = w64(in cst.token_ends, token);
+        let intrinsic = kind == k_lower()
+            && (range_is(in source, start, end, in "wrapping_u32".as_bytes())
+                || range_is(in source, start, end, in "wrapping_sub".as_bytes())
+                || range_is(in source, start, end, in "wrapping_shl_u64".as_bytes())
+                || range_is(in source, start, end, in "wrapping_shr_u64".as_bytes()));
+        if intrinsic {
+            let mut next = inc(token);
+            loop {
+                if next >= cst.token_kinds.len() || !trivia_kind(tok_kind(in cst, next)) {
+                    break;
+                }
+                next = inc(next);
+            }
+            if next >= cst.token_kinds.len()
+                || tok_kind(in cst, next) != k_l_paren()
+                || (prior != NONE
+                    && range_is(
+                        in source,
+                        w64(in cst.token_starts, prior),
+                        w64(in cst.token_ends, prior),
+                        in "fn".as_bytes()
+                    ))
+            {
+                return false;
+            }
+        }
+        prior = token;
+    }
+    true
+}
+
+fn bootstrap_template_safe(in state: BootstrapState) -> bool {
+    let mut diags = diags_new();
+    let lexed = lex_sugar_raw_with_limits(
+        in state.src.as_slice(),
+        inout diags,
+        MAX_BYTES,
+        HARD_TOKENS,
+        max_diagnostics()
+    );
+    if lexed.rejected || diags.code.len() != 0 {
+        return false;
+    }
+    let mut significant = ChunkSeq::new[u64]();
+    for token in 0..lexed.kind.len() {
+        if !trivia_kind(b8(in lexed.kind, token)) {
+            significant.push(w32(in lexed.start, token));
+            significant.push(token_end(in lexed, token));
+        }
+    }
+    let mut significant_cursor: u64 = 0;
+    for hole in 0..(state.holes.len() >> 1) {
+        if !bootstrap_scalar_hole(
+            in state,
+            in significant,
+            w64(in state.holes, hole << 1),
+            inout significant_cursor
+        ) {
+            return false;
+        }
+    }
+    let mut map: u64 = 0;
+    let maps = state.maps.len() / MAP_WORDS;
+    for token in 0..lexed.kind.len() {
+        let start = w32(in lexed.start, token);
+        let end = token_end(in lexed, token);
+        // Bootstrap map rows and token offsets are in source order.
+        loop {
+            if map >= maps || start < w64(in state.maps, add(wrapping_mul(map, MAP_WORDS), 1)) {
+                break;
+            }
+            map = inc(map);
+        }
+        if map < maps && w64(in state.maps, add(wrapping_mul(map, MAP_WORDS), 4)) == 1 {
+            continue;
+        }
+        let first = b8(in state.src, start);
+        let kind = b8(in lexed.kind, token);
+        let name = kind == k_lower()
+            || kind == k_upper()
+            || (first >= 65 && first <= 90)
+            || (first >= 97 && first <= 122)
+            || first == 95;
+        if trivia_kind(kind) || start == end {
+            continue;
+        }
+        if name {
+            if !bootstrap_template_word(in state, start, end) {
+                return false;
+            }
+        } else if !(first >= 48 && first <= 57)
+            && !bootstrap_template_punctuation(in state, start, end)
+        {
+            return false;
+        }
+    }
+    true
+}
+
+// The bootstrap profile uses the existing matcher and package registry,
+// but does not link general control-flow templates or whole-AST hygiene.
+fn bootstrap_capture(in caps: Caps, in template: ChunkSeq[u8], start: u64, end: u64) -> u64 {
+    for cap in 0..cap_count(in caps) {
+        let name = cap_at(in caps, cap, 0);
+        if w64(in caps.words, name) != sub(end, start) {
+            continue;
+        }
+        let mut same = true;
+        for i in 0..sub(end, start) {
+            if w64(in caps.words, add(inc(name), i)) != widen_u64(b8(in template, add(start, i))) {
+                same = false;
+                break;
+            }
+        }
+        if same {
+            return cap;
+        }
+    }
+    NONE
+}
+
+fn bootstrap_append_mapping(
+    inout state: BootstrapState,
+    in from: ChunkSeq[u8],
+    start: u64,
+    end: u64,
+    source_start: u64,
+    source_end: u64,
+    copied_bytes: bool
+) -> bool {
+    if end < start
+        || end > from.len()
+        || state.src.len() > MAX_BYTES
+        || sub(end, start) > sub(MAX_BYTES, state.src.len())
+    {
+        return false;
+    }
+    let first = state.src.len();
+    cat_range(inout state.src, in from, start, end);
+    if first != state.src.len() {
+        state.maps.push(first);
+        state.maps.push(state.src.len());
+        state.maps.push(source_start);
+        state.maps.push(source_end);
+        state.maps.push(if copied_bytes { 1 } else { 0 });
+    }
+    true
+}
+
+fn bootstrap_alias_pattern(
+    in registry: Reg,
+    rule: u64,
+    alias: bool,
+    in source: ChunkSeq[u8],
+    key_start: u64,
+    key_end: u64
+) -> ChunkSeq[u8] {
+    let pattern = pool_text(in registry, rf(in registry, rule, 0), rf(in registry, rule, 1));
+    if !alias {
+        return pattern;
+    }
+    let mut renamed = range_of(in pattern, 0, rf(in registry, rule, 2));
+    cat_range(inout renamed, in source, key_start, key_end);
+    cat_range(inout renamed, in pattern, rf(in registry, rule, 3), pattern.len());
+    renamed
+}
+
+fn bootstrap_select(
+    in registry: Reg,
+    definition: u64,
+    alias: bool,
+    in source: ChunkSeq[u8],
+    key_start: u64,
+    key_end: u64,
+    in invocation: ChunkSeq[u8],
+    inout work: u64
+) -> Option[(u64, ChunkSeq[u64])] {
+    for i in 0..df(in registry, definition, 10) {
+        let rule = def_rule(in registry, definition, i);
+        if rf(in registry, rule, 8) != 0 {
+            return Option::None;
+        }
+        let pattern = bootstrap_alias_pattern(
+            in registry,
+            rule,
+            alias,
+            in source,
+            key_start,
+            key_end
+        );
+        let matched = match_bootstrap_scalar_encoded(in pattern, in invocation, work);
+        let status = w64(in matched, 0);
+        work = w64(in matched, 1);
+        if status == 2 {
+            return Option::None;
+        }
+        if status == 1 {
+            return Option::Some((rule, matched));
+        }
+    }
+    Option::None
+}
+
+fn bootstrap_word_ranges(in source: ChunkSeq[u8]) -> Option[ChunkSeq[u64]] {
+    let mut diagnostics = diags_new();
+    let lexed = lex_sugar_raw_with_limits(
+        in source.as_slice(),
+        inout diagnostics,
+        MAX_BYTES,
+        HARD_TOKENS,
+        max_diagnostics()
+    );
+    if lexed.rejected || diagnostics.code.len() != 0 {
+        return Option::None;
+    }
+    let mut ranges = ChunkSeq::new[u64]();
+    for i in 0..lexed.kind.len() {
+        let start = w32(in lexed.start, i);
+        let end = token_end(in lexed, i);
+        if end > start && !trivia_kind(b8(in lexed.kind, i)) {
+            ranges.push(start);
+            ranges.push(end);
+        }
+    }
+    Option::Some(ranges)
+}
+
+fn bootstrap_local_index(
+    in template: ChunkSeq[u8],
+    in locals: ChunkSeq[u64],
+    start: u64,
+    end: u64
+) -> u64 {
+    for i in 0..(locals.len() >> 1) {
+        if ranges_eq(
+            in template,
+            w64(in locals, i << 1),
+            w64(in locals, inc(i << 1)),
+            in template,
+            start,
+            end
+        ) {
+            return i;
+        }
+    }
+    NONE
+}
+
+fn bootstrap_remember_locals(
+    in template: ChunkSeq[u8],
+    in tokens: ChunkSeq[u64]
+) -> Option[ChunkSeq[u64]] {
+    let mut locals = ChunkSeq::new[u64]();
+    for i in 0..(tokens.len() >> 1) {
+        if range_is(
+            in template,
+            w64(in tokens, i << 1),
+            w64(in tokens, inc(i << 1)),
+            in "let".as_bytes()
+        ) {
+            let mut binder = inc(i);
+            if range_is(
+                in template,
+                w64(in tokens, binder << 1),
+                w64(in tokens, inc(binder << 1)),
+                in "mut".as_bytes()
+            ) {
+                binder = inc(binder);
+            }
+            let start = w64(in tokens, binder << 1);
+            let end = w64(in tokens, inc(binder << 1));
+            let after = inc(binder);
+            if end <= start
+                || bootstrap_local_index(in template, in locals, start, end) != NONE
+                || !(range_is(
+                    in template,
+                    w64(in tokens, after << 1),
+                    w64(in tokens, inc(after << 1)),
+                    in ":".as_bytes()
+                )
+                    || range_is(
+                        in template,
+                        w64(in tokens, after << 1),
+                        w64(in tokens, inc(after << 1)),
+                        in "=".as_bytes()
+                    ))
+            {
+                return Option::None;
+            }
+            locals.push(start);
+            locals.push(end);
+        }
+    }
+    Option::Some(locals)
+}
+
+fn bootstrap_render(
+    inout state: BootstrapState,
+    in source: ChunkSeq[u8],
+    in template: ChunkSeq[u8],
+    in matched: Caps,
+    call_start: u64,
+    call_end: u64,
+    serial: u64
+) -> bool {
+    let ranges = match bootstrap_word_ranges(in template) {
+        Option::Some(ranges) => ranges,
+        Option::None => return false,
+    };
+    let locals = match bootstrap_remember_locals(in template, in ranges) {
+        Option::Some(locals) => locals,
+        Option::None => return false,
+    };
+    let mut used = ChunkSeq::new[bool]();
+    for _ in 0..cap_count(in matched) {
+        used.push(false);
+    }
+    let mut token: u64 = 0;
+    let mut cursor: u64 = 0;
+    loop {
+        if token >= (ranges.len() >> 1) {
+            break;
+        }
+        let start = w64(in ranges, token << 1);
+        let end = w64(in ranges, inc(token << 1));
+        let local = bootstrap_local_index(in template, in locals, start, end);
+        if range_is(in template, start, end, in "$".as_bytes()) {
+            let next = inc(token);
+            let name_start = w64(in ranges, next << 1);
+            let name_end = w64(in ranges, inc(next << 1));
+            let cap = bootstrap_capture(in matched, in template, name_start, name_end);
+            if cap == NONE
+                || used.try_get(cap) != Option::Some(false)
+                || !sort_in(in matched, cap, in "expr".as_bytes())
+                || cap_at(in matched, cap, 4) != 1
+            {
+                return false;
+            }
+            used.try_set(cap, true);
+            let row = value_at(in matched, cap, 0);
+            let value_start = add(call_start, w64(in matched.words, row));
+            let value_end = add(call_start, w64(in matched.words, inc(row)));
+            if value_end > call_end
+                || value_end <= value_start
+                || w64(in matched.words, add(row, 2)) != 0
+            {
+                return false;
+            }
+            if !bootstrap_append_mapping(
+                inout state,
+                in template,
+                cursor,
+                start,
+                call_start,
+                call_end,
+                false
+            ) {
+                return false;
+            }
+            let hole_start = state.src.len();
+            let mut parenthesis = ChunkSeq::new[u8]();
+            cat(inout parenthesis, in "(");
+            if !bootstrap_append_mapping(
+                inout state,
+                in parenthesis,
+                0,
+                1,
+                call_start,
+                call_end,
+                false
+            ) {
+                return false;
+            }
+            if !bootstrap_append_mapping(
+                inout state,
+                in source,
+                value_start,
+                value_end,
+                value_start,
+                value_end,
+                true
+            ) {
+                return false;
+            }
+            parenthesis.clear();
+            cat(inout parenthesis, in ")");
+            if !bootstrap_append_mapping(
+                inout state,
+                in parenthesis,
+                0,
+                1,
+                call_start,
+                call_end,
+                false
+            ) {
+                return false;
+            }
+            state.holes.push(hole_start);
+            state.holes.push(state.src.len());
+            cursor = name_end;
+            token = inc(next);
+        } else if local != NONE {
+            if !bootstrap_append_mapping(
+                inout state,
+                in template,
+                cursor,
+                start,
+                call_start,
+                call_end,
+                false
+            ) {
+                return false;
+            }
+            let mut fresh = ChunkSeq::new[u8]();
+            cat_seq(inout fresh, in state.mark);
+            push_decimal(inout fresh, serial);
+            cat(inout fresh, in "_scalar");
+            push_decimal(inout fresh, local);
+            if !bootstrap_append_mapping(
+                inout state,
+                in fresh,
+                0,
+                fresh.len(),
+                call_start,
+                call_end,
+                false
+            ) {
+                return false;
+            }
+            cursor = end;
+            token = inc(token);
+        } else {
+            token = inc(token);
+        }
+    }
+    bootstrap_append_mapping(
+        inout state,
+        in template,
+        cursor,
+        template.len(),
+        call_start,
+        call_end,
+        false
+    )
+}
+
+fn bootstrap_expand_raw(
+    in source: ChunkSeq[u8],
+    in imports: Imports
+) -> Result[BootstrapState, Dg] {
+    let mut registry = Reg {
+        pool: ChunkSeq::new[u8](),
+        defs: ChunkSeq::new[u64](),
+        rules: ChunkSeq::new[u64](),
+        keys: ChunkSeq::new[u64](),
+        heads: ChunkSeq::new[u64](),
+        imported_scope: ChunkSeq::new[u64]()
+    };
+    let mut state = BootstrapState {
+        src: ChunkSeq::new[u8](),
+        mark: fresh_prefix(in source, in imports),
+        maps: ChunkSeq::new[u64](),
+        holes: ChunkSeq::new[u64]()
+    };
+    if source.len() > MAX_BYTES || n_imports(in imports) > MAX_STEPS {
+        return Result::Err(limit(0, 0));
+    }
+    let mut work = WORK;
+    let imported = read_bootstrap_imports(inout registry, in imports, inout work);
+    if imported.failed {
+        return Result::Err(imported);
+    }
+    let cst = match parse_bootstrap(in source, false) {
+        Option::Some(cst) => cst,
+        Option::None => return Result::Err(diag(
+            in "invalid bootstrap sugar source",
+            0,
+            source.len()
+        )),
+    };
+    if !bootstrap_caller_clear(in source, in cst) {
+        return Result::Err(diag(in "caller shadows a bootstrap sugar intrinsic", 0, 0));
+    }
+    for node in 0..cst.nodes.len() {
+        if node_at(in cst, node).kind != N_SUGAR_DECL {
+            continue;
+        }
+        let defined = read_bootstrap_definition(inout registry, in source, in cst, node, NONE);
+        if defined.failed {
+            return Result::Err(defined);
+        }
+        let id = sub(ndefs(in registry), 1);
+        let bound = bind(inout registry, id, df(in registry, id, 0), df(in registry, id, 1), 0);
+        if bound.failed {
+            return Result::Err(bound);
+        }
+    }
+    let mut cursor: u64 = 0;
+    let mut serial: u64 = 0;
+    for node in 0..cst.nodes.len() {
+        let kind = node_at(in cst, node).kind;
+        if kind != N_TAGGED_LITERAL && kind != N_SUGAR_DECL {
+            continue;
+        }
+        let start = sig_start(in cst, node);
+        let end = n_end(in cst, node);
+        if start < cursor || end < start || serial >= MAX_STEPS {
+            return Result::Err(diag(in "nested or excessive bootstrap sugar uses", start, end));
+        }
+        if !bootstrap_append_mapping(inout state, in source, cursor, start, cursor, start, true) {
+            return Result::Err(limit(start, end));
+        }
+        cursor = end;
+        if kind == N_SUGAR_DECL {
+            let mut space = ChunkSeq::new[u8]();
+            space.push(32);
+            if !bootstrap_append_mapping(inout state, in space, 0, 1, start, end, false) {
+                return Result::Err(limit(start, end));
+            }
+            continue;
+        }
+        serial = inc(serial);
+        let tag = node_at(in cst, node);
+        let key = next_surface_leaf(in cst, widen_u64(tag.lo), widen_u64(tag.hi));
+        if key == widen_u64(tag.hi) {
+            return Result::Err(diag(in "bootstrap tag is missing its head", start, end));
+        }
+        let key_start = leaf_s(in cst, key);
+        let key_end = leaf_e(in cst, key);
+        let mut issue = dg_ok();
+        let mut alias = false;
+        let def = lookup(
+            in registry,
+            in source,
+            key_start,
+            key_end,
+            start,
+            end,
+            NONE,
+            inout alias,
+            inout issue
+        );
+        if def == NONE {
+            return Result::Err(issue);
+        }
+        if df(in registry, def, 7) != NONE || !sort_is(in registry, def, in "tag") {
+            return Result::Err(diag(in "unsupported bootstrap sugar declaration", start, end));
+        }
+        let invocation = range_of(in source, start, end);
+        let selected = bootstrap_select(
+            in registry,
+            def,
+            alias,
+            in source,
+            key_start,
+            key_end,
+            in invocation,
+            inout work
+        );
+        match selected {
+            Option::Some((rule, words)) => {
+                let template = pool_text(
+                    in registry,
+                    rf(in registry, rule, 4),
+                    rf(in registry, rule, 5)
+                );
+                let captures = caps_read(words);
+                if !bootstrap_render(
+                    inout state,
+                    in source,
+                    in template,
+                    in captures,
+                    start,
+                    end,
+                    serial
+                ) {
+                    return Result::Err(diag(in "unsupported bootstrap sugar template", start, end));
+                }
+            },
+            Option::None => return Result::Err(diag(
+                in "no bootstrap sugar rule matched",
+                start,
+                end
+            )),
+        }
+    }
+    if !bootstrap_append_mapping(
+        inout state,
+        in source,
+        cursor,
+        source.len(),
+        cursor,
+        source.len(),
+        true
+    ) {
+        return Result::Err(limit(cursor, source.len()));
+    }
+    Result::Ok(state)
+}
+
+pub fn expand_bootstrap_module(
+    in source: ChunkSeq[u8],
+    in imports: Imports
+) -> Result[BootstrapSugarOutput, Dg] {
+    let expanded = match bootstrap_expand_raw(in source, in imports) {
+        Result::Ok(state) => state,
+        Result::Err(problem) => return Result::Err(problem),
+    };
+    if !bootstrap_template_safe(in expanded) {
+        return Result::Err(diag(
+            in "this sugar needs Stage 2 definition-site, effect or place metadata",
+            0,
+            0
+        ));
+    }
+    Result::Ok(BootstrapSugarOutput { source: expanded.src, mappings: expanded.maps })
 }
 
 // ---------------------------------------------------------------- words
