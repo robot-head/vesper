@@ -148,6 +148,104 @@ pub fn mono_input(
     max_instances: usize,
     lowering: Option<&verified::Options>,
 ) -> Option<(Vec<u8>, ir_words::Pool)> {
+    mono_input_with(world, program, entry, max_instances, lowering, |_, _| {})
+}
+
+/// The input of `coverage_text` (mono.ves `coverage_input`) for
+/// `verified::coverage(world, roots, optimize)`: `mono_input`'s with the
+/// roots between the mono extras and the lowering's. Each root is a name,
+/// a class (0 plannable, 1 generic, 2 effect-polymorphic) and the text of
+/// its user effects (a name), as coverage.rs classifies them.
+pub fn coverage_input(
+    world: &vesper::check::World,
+    roots: Option<&std::collections::BTreeSet<String>>,
+    optimize: bool,
+) -> Option<Vec<u8>> {
+    let mut program = vesper::ir::lower_world(world);
+    if optimize && vesper::ir_opt::optimize(world, &mut program).is_err() {
+        return None;
+    }
+    let roots: Vec<String> = match roots {
+        Some(r) => r.iter().cloned().collect(),
+        None => program
+            .functions
+            .keys()
+            .filter(|n| !n.starts_with('$'))
+            .cloned()
+            .collect(),
+    };
+    let user = |name: &str| name != "Fail" && name != vesper::regions::REGION_EFFECT;
+    let classes: Vec<(String, u64, String)> = roots
+        .iter()
+        .map(|root| {
+            if world
+                .functions
+                .get(root)
+                .is_some_and(|f| !f.generics.is_empty())
+            {
+                return (root.clone(), 1, String::new());
+            }
+            if program
+                .functions
+                .get(root)
+                .is_some_and(|f| f.effects.instances.iter().any(|e| user(&e.name)))
+            {
+                let effects: Vec<String> = world
+                    .functions
+                    .get(root)
+                    .map(|f| {
+                        f.effects
+                            .instances
+                            .iter()
+                            .filter(|e| user(&e.name))
+                            .map(|e| e.name.clone())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                return (root.clone(), 2, effects.join(", "));
+            }
+            (root.clone(), 0, String::new())
+        })
+        .collect();
+    let entry = classes
+        .iter()
+        .find(|c| c.1 == 0)
+        .map(|c| c.0.clone())
+        .unwrap_or_default();
+    let options = verified::Options {
+        max_functions: usize::MAX,
+        max_rows: usize::MAX,
+        ..verified::Options::new(verified::Target::host()?)
+    };
+    mono_input_with(
+        world,
+        &program,
+        &entry,
+        usize::MAX,
+        Some(&options),
+        |t, words| {
+            words.push(classes.len() as u64);
+            for (name, class, effects) in &classes {
+                let n = t.enc.name(name);
+                words.push(n);
+                words.push(*class);
+                let e = t.enc.name(effects);
+                words.push(e);
+            }
+        },
+    )
+    .map(|(bytes, _)| bytes)
+}
+
+/// `mono_input` with `between` writing a section after the mono extras.
+pub fn mono_input_with(
+    world: &vesper::check::World,
+    program: &vesper::ir::Program,
+    entry: &str,
+    max_instances: usize,
+    lowering: Option<&verified::Options>,
+    between: impl FnOnce(&mut ir_words::Tables, &mut Vec<u64>),
+) -> Option<(Vec<u8>, ir_words::Pool)> {
     if !ir_words::encodable(world, program)
         || !world
             .calls
@@ -218,6 +316,7 @@ pub fn mono_input(
             words.push(i);
         }
     }
+    between(&mut t, &mut words);
     if let Some(options) = lowering {
         lowering_extras(world, entry, options, &mut words);
     }
