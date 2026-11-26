@@ -167,10 +167,7 @@ fn obj_at(in os: ChunkSeq[Obj], i: u64) -> Obj {
 }
 
 fn w_at(in s: ChunkSeq[u64], i: u64) -> u64 {
-    match s.try_get(i) {
-        Option::Some(v) => v,
-        Option::None => Absent::Row,
-    }
+    s.try_get(i).unwrap_or(Absent::Row)
 }
 
 fn linked_at(in s: ChunkSeq[Linked], i: u64) -> Linked {
@@ -628,10 +625,7 @@ impl Linker {
     }
 
     fn read32(in self, at: u64) -> u32 {
-        match self.pdata.try_read_u32_le(at) {
-            Option::Some(v) => v,
-            Option::None => 0,
-        }
+        self.pdata.try_read_u32_le(at).unwrap_or(0)
     }
 
     // The output sections, symbols and the executable.
@@ -812,10 +806,7 @@ impl Linker {
             self.not_loaded(table, inout err);
             return false;
         }
-        let count = match self.elf.try_read_u64_le(count_at) {
-            Option::Some(v) => v,
-            Option::None => 0,
-        };
+        let count = self.elf.try_read_u64_le(count_at).unwrap_or(0);
         if count != pcs.len() {
             let mut m: ChunkSeq[u8] = ChunkSeq::new[u8]();
             m.extend(in "trap table holds ".as_bytes());

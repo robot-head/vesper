@@ -28,10 +28,7 @@ pub fn align_up(v: u64, a: u64) -> u64 {
 }
 
 pub fn rd8(in b: Slice[u8], at: u64) -> u8 {
-    match b.try_get(at) {
-        Option::Some(v) => v,
-        Option::None => 0,
-    }
+    b.try_get(at).unwrap_or(0)
 }
 
 pub fn rd16(in b: Slice[u8], at: u64) -> Option[u16] {
@@ -77,10 +74,7 @@ pub fn put64(inout out: ChunkSeq[u8], at: u64, v: u64) {
 }
 
 pub fn get32(in out: ChunkSeq[u8], at: u64) -> u32 {
-    match out.try_read_u32_le(at) {
-        Option::Some(v) => v,
-        Option::None => 0,
-    }
+    out.try_read_u32_le(at).unwrap_or(0)
 }
 
 pub fn push_bytes(inout out: ChunkSeq[u8], in s: Slice[u8]) {

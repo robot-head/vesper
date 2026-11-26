@@ -48,10 +48,7 @@ const CSET_W0_NE: u64 = 0x1a9f07e0;
 const PREFIX_LEN: u64 = 9;
 
 fn at(in b: Slice[u8], i: u64) -> u8 {
-    match b.try_get(i) {
-        Option::Some(v) => v,
-        Option::None => 0,
-    }
+    b.try_get(i).unwrap_or(0)
 }
 
 // Whether `b[a..]` is `text`.
