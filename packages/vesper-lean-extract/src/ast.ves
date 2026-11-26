@@ -52,6 +52,8 @@ pub const L_INT: u64 = 0;
 pub const L_FLOAT: u64 = 1;
 pub const L_BOOL: u64 = 2;
 pub const L_STRING: u64 = 3;
+// An integer past `i128::MAX`.
+pub const L_WIDE: u64 = 4;
 
 // Sequence operations (`seq_code` in the test).
 pub const Q_NEW: u64 = 1;

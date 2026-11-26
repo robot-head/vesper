@@ -578,6 +578,34 @@ fn adt_groups(world: &World) -> Vec<Vec<&Adt>> {
 }
 
 pub fn extract(world: &World) -> Result<String, String> {
+    (LEAN_EXTRACT.get().unwrap_or(&RUST_LEAN_EXTRACT).extract)(world)
+}
+
+/// The swappable text extraction behind [`extract`] (self-hosting SH5 lane
+/// 18, #1341). `@vesper/lean-extract` (packages/vesper-lean-extract)
+/// builds the same text; the hybrid's `lean_extract` swap installs it, and
+/// tests/self_host_lean_extract.rs compares the two on the corpus.
+#[derive(Clone, Copy)]
+pub struct LeanExtractTable {
+    /// [`extract`].
+    pub extract: fn(&World) -> Result<String, String>,
+}
+
+/// The Rust implementation, the default [`LeanExtractTable`].
+pub const RUST_LEAN_EXTRACT: LeanExtractTable = LeanExtractTable {
+    extract: rust_extract,
+};
+
+static LEAN_EXTRACT: std::sync::OnceLock<LeanExtractTable> = std::sync::OnceLock::new();
+
+/// Replace [`RUST_LEAN_EXTRACT`] for the rest of the process. Only the
+/// first call takes effect; a later one returns its table back.
+pub fn install_lean_extract(table: LeanExtractTable) -> Result<(), LeanExtractTable> {
+    LEAN_EXTRACT.set(table)
+}
+
+/// [`extract`] in Rust, whatever is installed.
+pub fn rust_extract(world: &World) -> Result<String, String> {
     extract_module(world)?.render().map_err(|e| e.to_string())
 }
 /// Construct the entire module without rendering or reparsing any Lean text.

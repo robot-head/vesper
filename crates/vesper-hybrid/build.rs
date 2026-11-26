@@ -130,6 +130,14 @@ const DIVERGENT_DOC_EDIT: (&str, &str) = (
     "(sink page: ChunkSeq[u8]) -> ChunkSeq[u8] {\n    let mut p = page;\n    p.push(32);\n    p\n",
 );
 
+/// The Lean extraction module's divergence check: every text comes back
+/// empty (mirrored in BUILD.bazel).
+#[cfg(feature = "divergent-lean-extract")]
+const DIVERGENT_LEAN_EXTRACT_EDIT: (&str, &str) = (
+    "(sink text: ChunkSeq[u64]) -> ChunkSeq[u64] {\n    text\n",
+    "(sink text: ChunkSeq[u64]) -> ChunkSeq[u64] {\n    let mut t = text;\n    let _ = t.try_set(0, 0);\n    t\n",
+);
+
 /// The stack-bound divergence check: every graph is rejected as malformed
 /// (`divergent_words` in modules/stack_bound), so every report differs.
 #[cfg(feature = "divergent-stack-bound")]
@@ -303,6 +311,12 @@ fn main() {
         #[cfg(feature = "divergent-doc")]
         let port = if library == "hybrid_doc" {
             port.edit(DIVERGENT_DOC_EDIT.0, DIVERGENT_DOC_EDIT.1)
+        } else {
+            port
+        };
+        #[cfg(feature = "divergent-lean-extract")]
+        let port = if library == "hybrid_lean_extract" {
+            port.edit(DIVERGENT_LEAN_EXTRACT_EDIT.0, DIVERGENT_LEAN_EXTRACT_EDIT.1)
         } else {
             port
         };

@@ -1508,6 +1508,20 @@ vesper_package(
     deps = ["//crates/vesper-serde:port_package"],
 )
 
+# Self-hosting SH5 lane 18 (#1341): Lean extraction, for the hybrid's
+# `lean_extract` swap.
+vesper_package(
+    name = "lean_extract_package",
+    srcs = glob(["packages/vesper-lean-extract/src/**/*.ves"]),
+    manifest = "packages/vesper-lean-extract/Loom.toml",
+    visibility = ["//visibility:public"],
+    deps = [
+        ":check_data_package",
+        ":place_ir_package",
+        "//crates/vesper-lean-syntax:port_package",
+    ],
+)
+
 vesper_package(
     name = "check_loops_atomics_package",
     srcs = glob(["packages/vesper-check-loops-atomics/src/**/*.ves"]),
