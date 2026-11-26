@@ -17,7 +17,7 @@
 use @vesper/check-data::names::{Names};
 use @vesper/check-data::types::{Types, TyPass};
 use @vesper/place-ir::{BlockRow, FnRow, InstRow, PoolRow, Program};
-use self::fun::{Fun, add, has, hoistable, inc, n32, u32_at, u64_at, w};
+use self::fun::{Fun, add, counted_access, has, inc, n32, u32_at, u64_at, w};
 use self::encode::{POOL_GUARD, POOL_HOISTED, seq_class};
 use @vesper/place-ir::codes::{Op, Tag, Term};
 
@@ -69,12 +69,13 @@ pub fn prog_inst(in p: Program, fi: u64, in f: Fun, x: u64) -> u64 {
     NONE64
 }
 
-// The access an instruction's sequence operation has (`hoistable`), or 4.
+// The access an instruction's sequence operation has (`counted_access`:
+// fixed-width ones included), or 4.
 fn access_of(in p: Program, in names: Names, i: InstRow) -> u64 {
     if i.op != Op::Seq {
         return 4;
     }
-    hoistable(seq_class(in p, in names, p.op(i.a)))
+    counted_access(seq_class(in p, in names, p.op(i.a)))
 }
 
 // `make_unchecked`: the accesses at (block, instruction) become unchecked.

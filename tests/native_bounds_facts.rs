@@ -756,3 +756,48 @@ fn run() -> u64 eff [Fail[RuntimeError], Fail[ArithOverflow]] {
     // Each residue appears 3 times: 3 pairs each.
     assert_eq!(differential("bounds_pairs", &source), 12);
 }
+
+/// One length check before a decoder's straight-line fixed-width reads
+/// covers every read that ends inside the checked length (#2203): the reads
+/// at 0 and 8 are unchecked, the one at 9 (ending at 17) keeps its check.
+#[test]
+fn a_length_check_covers_straight_line_wide_reads() {
+    let source = "fn decode(in s: Slice[u8]) -> u64 {
+    let got = s.len();
+    if got < 16 {
+        return 1;
+    }
+    let a = s.try_read_u64_be(0).unwrap_or(2);
+    let b = s.try_read_u64_le(8).unwrap_or(3);
+    let c = s.try_read_u64_be(9).unwrap_or(5);
+    wrapping_add(wrapping_add(a & 255, b >> 56), c & 7)
+}
+fn bytes(n: u64) -> ChunkSeq[u8] {
+    let mut v: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    for i in 0..n {
+        v.push(wrapping_u8(wrapping_add(wrapping_mul(i, 37), 11)));
+    }
+    v
+}
+fn main() -> u64 {
+    let long = bytes(17);
+    let edge = bytes(16);
+    let short = bytes(15);
+    let x = decode(in long.as_slice());
+    let y = decode(in edge.as_slice());
+    let z = decode(in short.as_slice());
+    wrapping_add(wrapping_add(wrapping_mul(x, 1000), wrapping_mul(y, 10)), z)
+}
+";
+    let p = hoisted(source);
+    let wide = |hoisted: bool| {
+        count(&p, "decode", |op| match op {
+            SeqOp::Hoisted(vesper::seq::Access::Wide(_)) => hoisted,
+            SeqOp::Wide(_) => !hoisted,
+            _ => false,
+        })
+    };
+    assert_eq!(wide(true), 2, "unchecked wide reads");
+    assert_eq!(wide(false), 1, "checked wide reads");
+    differential("wide_facts", source);
+}
