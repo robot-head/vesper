@@ -82,43 +82,43 @@ const HASH_EXPR_CONTINUE: u8 = 21;
 
 // ------------------------------------------------------------ node access
 
-fn stmt_at(in a: Ast, i: u32) -> StmtNode {
-    a.stmts.get_or(
+fn stmt_at(in ast: Ast, i: u32) -> StmtNode {
+    ast.stmts.get_or(
         idx_from_raw[StmtNode](i),
         StmtNode { kind: 0, pat: 0, ty: 0, value: 0, mutable: false }
     )
 }
 
-fn arg_at(in a: Ast, i: u32) -> ArgNode {
-    a.args.get_or(idx_from_raw[ArgNode](i), ArgNode { pass: 0, explicit: false, expr: 0 })
+fn arg_at(in ast: Ast, i: u32) -> ArgNode {
+    ast.args.get_or(idx_from_raw[ArgNode](i), ArgNode { pass: 0, explicit: false, expr: 0 })
 }
 
-fn clause_at(in a: Ast, i: u32) -> ClauseNode {
-    a.clauses.get_or(idx_from_raw[ClauseNode](i), ClauseNode { name: 0, pats: 0, body: 0 })
+fn clause_at(in ast: Ast, i: u32) -> ClauseNode {
+    ast.clauses.get_or(idx_from_raw[ClauseNode](i), ClauseNode { name: 0, pats: 0, body: 0 })
 }
 
-fn param_at(in a: Ast, i: u32) -> ParamNode {
-    a.params.get_or(
+fn param_at(in ast: Ast, i: u32) -> ParamNode {
+    ast.params.get_or(
         idx_from_raw[ParamNode](i),
         ParamNode { name: 0, pass: 0, projections: 0, ty: 0, start: 0, end: 0 }
     )
 }
 
-fn generic_at(in a: Ast, i: u32) -> GenericNode {
-    a.generics.get_or(idx_from_raw[GenericNode](i), GenericNode { name: 0, bound: 0, row: false })
+fn generic_at(in ast: Ast, i: u32) -> GenericNode {
+    ast.generics.get_or(idx_from_raw[GenericNode](i), GenericNode { name: 0, bound: 0, row: false })
 }
 
-fn effects_at(in a: Ast, i: u32) -> EffectsNode {
-    a.effects.get_or(idx_from_raw[EffectsNode](i), EffectsNode { instances: 0, tail: none() })
+fn effects_at(in ast: Ast, i: u32) -> EffectsNode {
+    ast.effects.get_or(idx_from_raw[EffectsNode](i), EffectsNode { instances: 0, tail: none() })
 }
 
-fn effect_at(in a: Ast, i: u32) -> EffectNode {
-    a.effect_nodes
+fn effect_at(in ast: Ast, i: u32) -> EffectNode {
+    ast.effect_nodes
         .get_or(idx_from_raw[EffectNode](i), EffectNode { label: none(), name: 0, args: 0 })
 }
 
-fn fn_at(in a: Ast, i: u32) -> FnNode {
-    a.fns.get_or(
+fn fn_at(in ast: Ast, i: u32) -> FnNode {
+    ast.fns.get_or(
         idx_from_raw[FnNode](i),
         FnNode {
             name: 0,
@@ -136,127 +136,132 @@ fn fn_at(in a: Ast, i: u32) -> FnNode {
 
 // ---------------------------------------------------------- canonical bytes
 
-fn put_u8(inout b: ChunkSeq[u8], v: u8) {
-    b.push(v);
+fn put_u8(inout buf: ChunkSeq[u8], value: u8) {
+    buf.push(value);
 }
 
-fn put_bool(inout b: ChunkSeq[u8], v: bool) {
-    if v {
-        b.push(1);
+fn put_bool(inout buf: ChunkSeq[u8], value: bool) {
+    if value {
+        buf.push(1);
     } else {
-        b.push(0);
+        buf.push(0);
     }
 }
 
-fn put_u64(inout b: ChunkSeq[u8], v: u64) {
-    let mut s: u32 = 0;
+fn put_u64(inout buf: ChunkSeq[u8], value: u64) {
+    let mut shift: u32 = 0;
     loop {
-        if s >= WORD_BITS {
+        if shift >= WORD_BITS {
             break;
         }
-        b.push(wrapping_u8(wrapping_shr_u64(v, s)));
-        s = wrapping_add(s, BYTE_BITS);
+        buf.push(wrapping_u8(wrapping_shr_u64(value, shift)));
+        shift = wrapping_add(shift, BYTE_BITS);
     }
 }
 
-// `hash_str` of the bytes of `s`.
-fn put_bytes(inout b: ChunkSeq[u8], in s: Slice[u8]) {
-    put_u64(inout b, s.len());
-    b.extend(in s);
+// `hash_str` of `bytes`.
+fn put_bytes(inout buf: ChunkSeq[u8], in bytes: Slice[u8]) {
+    put_u64(inout buf, bytes.len());
+    buf.extend(in bytes);
 }
 
 // `hash_str` of a symbol's text.
-fn put_sym(inout b: ChunkSeq[u8], in a: Ast, s: u32, inout tmp: String) {
-    tmp.clear();
-    let ok = a.names.resolve_into(symbol_from_id(s), inout tmp);
-    put_bytes(inout b, in tmp.as_bytes());
+fn put_sym(inout buf: ChunkSeq[u8], in ast: Ast, sym: u32, inout scratch: String) {
+    scratch.clear();
+    let ok = ast.names.resolve_into(symbol_from_id(sym), inout scratch);
+    put_bytes(inout buf, in scratch.as_bytes());
 }
 
 // `hash_mode` of an optional-mode word: 0 Copy, 1 Affine, 2 Linear.
-fn put_mode(inout b: ChunkSeq[u8], m: u64) {
-    b.push(wrapping_u8(m));
+fn put_mode(inout buf: ChunkSeq[u8], mode: u64) {
+    buf.push(wrapping_u8(mode));
 }
 
-fn put_type(inout b: ChunkSeq[u8], in a: Ast, t: u32, inout tmp: String) {
-    let n = type_at(in a, t);
-    if n.kind == TYPE_NAMED {
-        put_u8(inout b, HASH_TYPE_NAMED);
-        put_sym(inout b, in a, n.a, inout tmp);
-        let m = list_len(in a, n.b);
-        put_u64(inout b, m);
-        for i in 0..m {
-            put_type(inout b, in a, list_at(in a, n.b, i), inout tmp);
+fn put_type(inout buf: ChunkSeq[u8], in ast: Ast, type_id: u32, inout scratch: String) {
+    let node = type_at(in ast, type_id);
+    if node.kind == TYPE_NAMED {
+        put_u8(inout buf, HASH_TYPE_NAMED);
+        put_sym(inout buf, in ast, node.a, inout scratch);
+        let count = list_len(in ast, node.b);
+        put_u64(inout buf, count);
+        for i in 0..count {
+            put_type(inout buf, in ast, list_at(in ast, node.b, i), inout scratch);
         }
-    } else if n.kind == TYPE_TUPLE {
-        put_u8(inout b, HASH_TYPE_TUPLE);
-        let m = list_len(in a, n.a);
-        put_u64(inout b, m);
-        for i in 0..m {
-            put_type(inout b, in a, list_at(in a, n.a, i), inout tmp);
+    } else if node.kind == TYPE_TUPLE {
+        put_u8(inout buf, HASH_TYPE_TUPLE);
+        let count = list_len(in ast, node.a);
+        put_u64(inout buf, count);
+        for i in 0..count {
+            put_type(inout buf, in ast, list_at(in ast, node.a, i), inout scratch);
         }
-    } else if n.kind == TYPE_FUNCTION {
-        put_u8(inout b, HASH_TYPE_FUNCTION);
-        let m = list_len(in a, n.a) / PAIR_WORDS;
-        put_u64(inout b, m);
-        for i in 0..m {
-            let k = wrapping_mul(i, PAIR_WORDS);
-            put_u8(inout b, wrapping_u8(widen_u64(list_at(in a, n.a, k))));
-            put_type(inout b, in a, list_at(in a, n.a, wrapping_add(k, 1)), inout tmp);
+    } else if node.kind == TYPE_FUNCTION {
+        put_u8(inout buf, HASH_TYPE_FUNCTION);
+        let count = list_len(in ast, node.a) / PAIR_WORDS;
+        put_u64(inout buf, count);
+        for i in 0..count {
+            let pair_at = wrapping_mul(i, PAIR_WORDS);
+            put_u8(inout buf, wrapping_u8(widen_u64(list_at(in ast, node.a, pair_at))));
+            put_type(
+                inout buf,
+                in ast,
+                list_at(in ast, node.a, wrapping_add(pair_at, 1)),
+                inout scratch
+            );
         }
-        put_type(inout b, in a, n.b, inout tmp);
-        put_effects(inout b, in a, n.c, inout tmp);
-        put_mode(inout b, widen_u64(n.d));
-    } else if n.kind == TYPE_ROW {
-        put_u8(inout b, HASH_TYPE_ROW);
-        put_effects(inout b, in a, n.a, inout tmp);
+        put_type(inout buf, in ast, node.b, inout scratch);
+        put_effects(inout buf, in ast, node.c, inout scratch);
+        put_mode(inout buf, widen_u64(node.d));
+    } else if node.kind == TYPE_ROW {
+        put_u8(inout buf, HASH_TYPE_ROW);
+        put_effects(inout buf, in ast, node.a, inout scratch);
     } else {
-        put_u8(inout b, HASH_TYPE_INFER);
+        put_u8(inout buf, HASH_TYPE_INFER);
     }
 }
 
 // `hash_effect`.
-fn put_effect(inout b: ChunkSeq[u8], in a: Ast, e: u32, inout tmp: String) {
-    let n = effect_at(in a, e);
-    if n.label != none() {
-        put_u8(inout b, HASH_SOME);
-        put_sym(inout b, in a, n.label, inout tmp);
+fn put_effect(inout buf: ChunkSeq[u8], in ast: Ast, effect_id: u32, inout scratch: String) {
+    let node = effect_at(in ast, effect_id);
+    if node.label != none() {
+        put_u8(inout buf, HASH_SOME);
+        put_sym(inout buf, in ast, node.label, inout scratch);
     } else {
-        put_u8(inout b, HASH_NONE);
+        put_u8(inout buf, HASH_NONE);
     }
-    put_sym(inout b, in a, n.name, inout tmp);
-    let m = list_len(in a, n.args);
-    put_u64(inout b, m);
-    for i in 0..m {
-        put_type(inout b, in a, list_at(in a, n.args, i), inout tmp);
+    put_sym(inout buf, in ast, node.name, inout scratch);
+    let count = list_len(in ast, node.args);
+    put_u64(inout buf, count);
+    for i in 0..count {
+        put_type(inout buf, in ast, list_at(in ast, node.args, i), inout scratch);
     }
 }
 
-// Whether the 32 bytes of `x` at `i` sort before those at `j`.
-fn digest_less(in d: ChunkSeq[u8], i: u64, j: u64) -> bool {
+// Whether the 32 bytes of `digests` at `i` sort before those at `j`.
+fn digest_less(in digests: ChunkSeq[u8], i: u64, j: u64) -> bool {
     for k in 0..DIGEST_BYTES {
-        let p = u8_at(in d, wrapping_add(wrapping_mul(i, DIGEST_BYTES), k));
-        let q = u8_at(in d, wrapping_add(wrapping_mul(j, DIGEST_BYTES), k));
-        if p != q {
-            return p < q;
+        let lhs_byte = u8_at(in digests, wrapping_add(wrapping_mul(i, DIGEST_BYTES), k));
+        let rhs_byte = u8_at(in digests, wrapping_add(wrapping_mul(j, DIGEST_BYTES), k));
+        if lhs_byte != rhs_byte {
+            return lhs_byte < rhs_byte;
         }
     }
     false
 }
 
 // `hash_effects`: every instance's own digest, sorted, then the tail.
-fn put_effects(inout b: ChunkSeq[u8], in a: Ast, effs: u32, inout tmp: String) {
-    let n = effects_at(in a, effs);
-    let m = list_len(in a, n.instances);
+fn put_effects(inout buf: ChunkSeq[u8], in ast: Ast, effects: u32, inout scratch: String) {
+    let node = effects_at(in ast, effects);
+    let count = list_len(in ast, node.instances);
     let mut digests: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    let mut one: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    for i in 0..m {
-        one.clear();
-        put_effect(inout one, in a, list_at(in a, n.instances, i), inout tmp);
-        digest_bytes(blake3(in one.as_slice()), inout digests);
+    let mut instance_bytes: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    for i in 0..count {
+        instance_bytes.clear();
+        put_effect(inout instance_bytes, in ast, list_at(in ast, node.instances, i), inout scratch);
+        digest_bytes(blake3(in instance_bytes.as_slice()), inout digests);
     }
     // Insertion sort of the order of the digests.
-    let mut order: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](m);
-    for i in 0..m {
+    let mut order: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](count);
+    for i in 0..count {
         order.push(i);
         let mut j = i;
         loop {
@@ -272,420 +277,435 @@ fn put_effects(inout b: ChunkSeq[u8], in a: Ast, effs: u32, inout tmp: String) {
         }
         let ok = order.try_set(j, i);
     }
-    put_u64(inout b, m);
-    for i in 0..m {
-        let x = order.try_get(i).unwrap_or(0);
-        let s = wrapping_mul(x, DIGEST_BYTES);
-        for k in s..wrapping_add(s, DIGEST_BYTES) {
+    put_u64(inout buf, count);
+    for i in 0..count {
+        let digest_index = order.try_get(i).unwrap_or(0);
+        let digest_start = wrapping_mul(digest_index, DIGEST_BYTES);
+        for k in digest_start..wrapping_add(digest_start, DIGEST_BYTES) {
             match digests.try_get(k) {
-                Option::Some(v) => b.push(v),
+                Option::Some(digest_byte) => buf.push(digest_byte),
                 Option::None => {},
             }
         }
     }
-    if n.tail != none() {
-        put_u8(inout b, HASH_SOME);
-        put_sym(inout b, in a, n.tail, inout tmp);
+    if node.tail != none() {
+        put_u8(inout buf, HASH_SOME);
+        put_sym(inout buf, in ast, node.tail, inout scratch);
     } else {
-        put_u8(inout b, HASH_NONE);
+        put_u8(inout buf, HASH_NONE);
     }
 }
 
 // The 16 little-endian bytes of a 128-bit value `hi:lo`.
-fn put_u128(inout b: ChunkSeq[u8], lo: u64, hi: u64) {
-    put_u64(inout b, lo);
-    put_u64(inout b, hi);
+fn put_u128(inout buf: ChunkSeq[u8], lo: u64, hi: u64) {
+    put_u64(inout buf, lo);
+    put_u64(inout buf, hi);
 }
 
-// `hash_literal` of literal `l`.
-fn put_lit(inout b: ChunkSeq[u8], in a: Ast, l: u32, inout tmp: String) {
-    let x = lit_at(in a, l);
-    if x.kind == LIT_INT {
-        put_u8(inout b, HASH_LIT_INT);
-        if x.neg {
+// `hash_literal` of literal `lit_id`.
+fn put_lit(inout buf: ChunkSeq[u8], in ast: Ast, lit_id: u32, inout scratch: String) {
+    let lit = lit_at(in ast, lit_id);
+    if lit.kind == LIT_INT {
+        put_u8(inout buf, HASH_LIT_INT);
+        if lit.neg {
             // The two's complement of the magnitude.
-            let lo = wrapping_add(!x.bits, 1);
+            let lo = wrapping_add(!lit.bits, 1);
             let carry: u64 = if lo == 0 { 1 } else { 0 };
-            put_u128(inout b, lo, wrapping_add(!x.hi, carry));
+            put_u128(inout buf, lo, wrapping_add(!lit.hi, carry));
         } else {
-            put_u128(inout b, x.bits, x.hi);
+            put_u128(inout buf, lit.bits, lit.hi);
         }
-    } else if x.kind == LIT_FLOAT {
-        put_u8(inout b, HASH_LIT_FLOAT);
-        put_u64(inout b, x.bits);
-    } else if x.kind == LIT_BOOL {
-        put_u8(inout b, HASH_LIT_BOOL);
-        put_bool(inout b, x.bits != 0);
-    } else if x.kind == LIT_WIDE_INT {
-        put_u8(inout b, HASH_LIT_WIDE_INT);
-        put_u128(inout b, x.bits, x.hi);
+    } else if lit.kind == LIT_FLOAT {
+        put_u8(inout buf, HASH_LIT_FLOAT);
+        put_u64(inout buf, lit.bits);
+    } else if lit.kind == LIT_BOOL {
+        put_u8(inout buf, HASH_LIT_BOOL);
+        put_bool(inout buf, lit.bits != 0);
+    } else if lit.kind == LIT_WIDE_INT {
+        put_u8(inout buf, HASH_LIT_WIDE_INT);
+        put_u128(inout buf, lit.bits, lit.hi);
     } else {
-        put_u8(inout b, HASH_LIT_STRING);
-        put_sym(inout b, in a, wrapping_u32(x.bits), inout tmp);
+        put_u8(inout buf, HASH_LIT_STRING);
+        put_sym(inout buf, in ast, wrapping_u32(lit.bits), inout scratch);
     }
 }
 
-fn put_pat(inout b: ChunkSeq[u8], in a: Ast, p: u32, inout tmp: String) {
-    let n = pat_at(in a, p);
-    if n.kind == PAT_WILD {
-        put_u8(inout b, HASH_PAT_WILD);
-    } else if n.kind == PAT_BIND {
-        put_u8(inout b, HASH_PAT_BIND);
-        put_sym(inout b, in a, n.a, inout tmp);
-    } else if n.kind == PAT_LITERAL {
-        put_u8(inout b, HASH_PAT_LITERAL);
-        put_lit(inout b, in a, n.a, inout tmp);
-    } else if n.kind == PAT_TUPLE {
-        put_u8(inout b, HASH_PAT_TUPLE);
-        let m = list_len(in a, n.a);
-        put_u64(inout b, m);
-        for i in 0..m {
-            put_pat(inout b, in a, list_at(in a, n.a, i), inout tmp);
+fn put_pat(inout buf: ChunkSeq[u8], in ast: Ast, pat_id: u32, inout scratch: String) {
+    let node = pat_at(in ast, pat_id);
+    if node.kind == PAT_WILD {
+        put_u8(inout buf, HASH_PAT_WILD);
+    } else if node.kind == PAT_BIND {
+        put_u8(inout buf, HASH_PAT_BIND);
+        put_sym(inout buf, in ast, node.a, inout scratch);
+    } else if node.kind == PAT_LITERAL {
+        put_u8(inout buf, HASH_PAT_LITERAL);
+        put_lit(inout buf, in ast, node.a, inout scratch);
+    } else if node.kind == PAT_TUPLE {
+        put_u8(inout buf, HASH_PAT_TUPLE);
+        let count = list_len(in ast, node.a);
+        put_u64(inout buf, count);
+        for i in 0..count {
+            put_pat(inout buf, in ast, list_at(in ast, node.a, i), inout scratch);
         }
     } else {
-        put_u8(inout b, HASH_PAT_CONSTRUCTOR);
-        put_sym(inout b, in a, n.a, inout tmp);
-        put_bool(inout b, n.c != 0);
-        let m = list_len(in a, n.b) / PAIR_WORDS;
-        put_u64(inout b, m);
-        for i in 0..m {
-            let k = wrapping_mul(i, PAIR_WORDS);
-            put_sym(inout b, in a, list_at(in a, n.b, k), inout tmp);
-            put_pat(inout b, in a, list_at(in a, n.b, wrapping_add(k, 1)), inout tmp);
+        put_u8(inout buf, HASH_PAT_CONSTRUCTOR);
+        put_sym(inout buf, in ast, node.a, inout scratch);
+        put_bool(inout buf, node.c != 0);
+        let count = list_len(in ast, node.b) / PAIR_WORDS;
+        put_u64(inout buf, count);
+        for i in 0..count {
+            let pair_at = wrapping_mul(i, PAIR_WORDS);
+            put_sym(inout buf, in ast, list_at(in ast, node.b, pair_at), inout scratch);
+            put_pat(
+                inout buf,
+                in ast,
+                list_at(in ast, node.b, wrapping_add(pair_at, 1)),
+                inout scratch
+            );
         }
     }
 }
 
-fn put_params(inout b: ChunkSeq[u8], in a: Ast, params: u32, inout tmp: String) {
-    let m = list_len(in a, params);
-    put_u64(inout b, m);
-    for i in 0..m {
-        let p = param_at(in a, list_at(in a, params, i));
-        put_sym(inout b, in a, p.name, inout tmp);
-        put_u8(inout b, p.pass);
-        let np = list_len(in a, p.projections);
-        put_u64(inout b, np);
-        for j in 0..np {
-            let proj = list_at(in a, p.projections, j);
-            let ns = list_len(in a, proj);
-            put_u64(inout b, ns);
-            for k in 0..ns {
-                put_sym(inout b, in a, list_at(in a, proj, k), inout tmp);
+fn put_params(inout buf: ChunkSeq[u8], in ast: Ast, params: u32, inout scratch: String) {
+    let count = list_len(in ast, params);
+    put_u64(inout buf, count);
+    for i in 0..count {
+        let param = param_at(in ast, list_at(in ast, params, i));
+        put_sym(inout buf, in ast, param.name, inout scratch);
+        put_u8(inout buf, param.pass);
+        let proj_count = list_len(in ast, param.projections);
+        put_u64(inout buf, proj_count);
+        for j in 0..proj_count {
+            let proj = list_at(in ast, param.projections, j);
+            let sym_count = list_len(in ast, proj);
+            put_u64(inout buf, sym_count);
+            for k in 0..sym_count {
+                put_sym(inout buf, in ast, list_at(in ast, proj, k), inout scratch);
             }
         }
-        put_type(inout b, in a, p.ty, inout tmp);
+        put_type(inout buf, in ast, param.ty, inout scratch);
     }
 }
 
-fn put_clause(inout b: ChunkSeq[u8], in a: Ast, c: u32, inout tmp: String) {
-    let n = clause_at(in a, c);
-    put_sym(inout b, in a, n.name, inout tmp);
-    let m = list_len(in a, n.pats);
-    put_u64(inout b, m);
-    for i in 0..m {
-        put_pat(inout b, in a, list_at(in a, n.pats, i), inout tmp);
+fn put_clause(inout buf: ChunkSeq[u8], in ast: Ast, clause_id: u32, inout scratch: String) {
+    let clause = clause_at(in ast, clause_id);
+    put_sym(inout buf, in ast, clause.name, inout scratch);
+    let count = list_len(in ast, clause.pats);
+    put_u64(inout buf, count);
+    for i in 0..count {
+        put_pat(inout buf, in ast, list_at(in ast, clause.pats, i), inout scratch);
     }
-    put_expr(inout b, in a, n.body, inout tmp);
+    put_expr(inout buf, in ast, clause.body, inout scratch);
 }
 
-fn put_opt_expr(inout b: ChunkSeq[u8], in a: Ast, e: u32, inout tmp: String) {
-    if e != none() {
-        put_u8(inout b, HASH_SOME);
-        put_expr(inout b, in a, e, inout tmp);
+fn put_opt_expr(inout buf: ChunkSeq[u8], in ast: Ast, expr_id: u32, inout scratch: String) {
+    if expr_id != none() {
+        put_u8(inout buf, HASH_SOME);
+        put_expr(inout buf, in ast, expr_id, inout scratch);
     } else {
-        put_u8(inout b, HASH_NONE);
+        put_u8(inout buf, HASH_NONE);
     }
 }
 
 // `hash_expr`.
-fn put_expr(inout b: ChunkSeq[u8], in a: Ast, x: u32, inout tmp: String) {
-    let e = expr_at(in a, x);
-    let k = e.kind;
-    if k == EXPR_LITERAL {
-        put_u8(inout b, HASH_EXPR_LITERAL);
-        put_lit(inout b, in a, e.a, inout tmp);
-    } else if k == EXPR_NAME {
-        put_u8(inout b, HASH_EXPR_NAME);
-        put_sym(inout b, in a, e.a, inout tmp);
-    } else if k == EXPR_TUPLE {
-        put_u8(inout b, HASH_EXPR_TUPLE);
-        let m = list_len(in a, e.a);
-        put_u64(inout b, m);
-        for i in 0..m {
-            put_expr(inout b, in a, list_at(in a, e.a, i), inout tmp);
+fn put_expr(inout buf: ChunkSeq[u8], in ast: Ast, expr_id: u32, inout scratch: String) {
+    let expr = expr_at(in ast, expr_id);
+    let kind = expr.kind;
+    if kind == EXPR_LITERAL {
+        put_u8(inout buf, HASH_EXPR_LITERAL);
+        put_lit(inout buf, in ast, expr.a, inout scratch);
+    } else if kind == EXPR_NAME {
+        put_u8(inout buf, HASH_EXPR_NAME);
+        put_sym(inout buf, in ast, expr.a, inout scratch);
+    } else if kind == EXPR_TUPLE {
+        put_u8(inout buf, HASH_EXPR_TUPLE);
+        let count = list_len(in ast, expr.a);
+        put_u64(inout buf, count);
+        for i in 0..count {
+            put_expr(inout buf, in ast, list_at(in ast, expr.a, i), inout scratch);
         }
-    } else if k == EXPR_STRUCT {
-        put_u8(inout b, HASH_EXPR_STRUCT);
-        put_sym(inout b, in a, e.a, inout tmp);
-        let m = list_len(in a, e.b) / PAIR_WORDS;
-        put_u64(inout b, m);
-        for i in 0..m {
-            let q = wrapping_mul(i, PAIR_WORDS);
-            put_sym(inout b, in a, list_at(in a, e.b, q), inout tmp);
-            put_expr(inout b, in a, list_at(in a, e.b, wrapping_add(q, 1)), inout tmp);
+    } else if kind == EXPR_STRUCT {
+        put_u8(inout buf, HASH_EXPR_STRUCT);
+        put_sym(inout buf, in ast, expr.a, inout scratch);
+        let count = list_len(in ast, expr.b) / PAIR_WORDS;
+        put_u64(inout buf, count);
+        for i in 0..count {
+            let pair_at = wrapping_mul(i, PAIR_WORDS);
+            put_sym(inout buf, in ast, list_at(in ast, expr.b, pair_at), inout scratch);
+            put_expr(
+                inout buf,
+                in ast,
+                list_at(in ast, expr.b, wrapping_add(pair_at, 1)),
+                inout scratch
+            );
         }
-    } else if k == EXPR_BLOCK {
-        put_u8(inout b, HASH_EXPR_BLOCK);
-        let m = list_len(in a, e.a);
-        put_u64(inout b, m);
-        for i in 0..m {
-            let s = stmt_at(in a, list_at(in a, e.a, i));
-            if s.kind == STMT_LET {
-                put_u8(inout b, HASH_STMT_LET);
-                put_pat(inout b, in a, s.pat, inout tmp);
-                put_type(inout b, in a, s.ty, inout tmp);
-                put_expr(inout b, in a, s.value, inout tmp);
-                put_bool(inout b, s.mutable);
+    } else if kind == EXPR_BLOCK {
+        put_u8(inout buf, HASH_EXPR_BLOCK);
+        let count = list_len(in ast, expr.a);
+        put_u64(inout buf, count);
+        for i in 0..count {
+            let stmt = stmt_at(in ast, list_at(in ast, expr.a, i));
+            if stmt.kind == STMT_LET {
+                put_u8(inout buf, HASH_STMT_LET);
+                put_pat(inout buf, in ast, stmt.pat, inout scratch);
+                put_type(inout buf, in ast, stmt.ty, inout scratch);
+                put_expr(inout buf, in ast, stmt.value, inout scratch);
+                put_bool(inout buf, stmt.mutable);
             } else {
-                put_u8(inout b, HASH_STMT_EXPR);
-                put_expr(inout b, in a, s.value, inout tmp);
+                put_u8(inout buf, HASH_STMT_EXPR);
+                put_expr(inout buf, in ast, stmt.value, inout scratch);
             }
         }
-        put_opt_expr(inout b, in a, e.b, inout tmp);
-    } else if k == EXPR_CALL {
-        put_u8(inout b, HASH_EXPR_CALL);
-        put_expr(inout b, in a, e.a, inout tmp);
-        let nt = list_len(in a, e.b);
-        put_u64(inout b, nt);
-        for i in 0..nt {
-            put_type(inout b, in a, list_at(in a, e.b, i), inout tmp);
+        put_opt_expr(inout buf, in ast, expr.b, inout scratch);
+    } else if kind == EXPR_CALL {
+        put_u8(inout buf, HASH_EXPR_CALL);
+        put_expr(inout buf, in ast, expr.a, inout scratch);
+        let type_count = list_len(in ast, expr.b);
+        put_u64(inout buf, type_count);
+        for i in 0..type_count {
+            put_type(inout buf, in ast, list_at(in ast, expr.b, i), inout scratch);
         }
-        let na = list_len(in a, e.c);
-        put_u64(inout b, na);
-        for i in 0..na {
-            let g = arg_at(in a, list_at(in a, e.c, i));
-            put_u8(inout b, g.pass);
-            put_bool(inout b, g.explicit);
-            put_expr(inout b, in a, g.expr, inout tmp);
+        let arg_count = list_len(in ast, expr.c);
+        put_u64(inout buf, arg_count);
+        for i in 0..arg_count {
+            let arg = arg_at(in ast, list_at(in ast, expr.c, i));
+            put_u8(inout buf, arg.pass);
+            put_bool(inout buf, arg.explicit);
+            put_expr(inout buf, in ast, arg.expr, inout scratch);
         }
-    } else if k == EXPR_FIELD {
-        put_u8(inout b, HASH_EXPR_FIELD);
-        put_expr(inout b, in a, e.a, inout tmp);
-        put_sym(inout b, in a, e.b, inout tmp);
-    } else if k == EXPR_INDEX {
-        put_u8(inout b, HASH_EXPR_INDEX);
-        put_expr(inout b, in a, e.a, inout tmp);
-        put_expr(inout b, in a, e.b, inout tmp);
-    } else if k == EXPR_TRY {
-        put_u8(inout b, HASH_EXPR_TRY);
-        put_expr(inout b, in a, e.a, inout tmp);
-    } else if k == EXPR_UNARY {
-        put_u8(inout b, HASH_EXPR_UNARY);
-        put_sym(inout b, in a, e.a, inout tmp);
-        put_expr(inout b, in a, e.b, inout tmp);
-    } else if k == EXPR_BINARY || k == EXPR_ASSIGN {
-        if k == EXPR_BINARY {
-            put_u8(inout b, HASH_EXPR_BINARY);
+    } else if kind == EXPR_FIELD {
+        put_u8(inout buf, HASH_EXPR_FIELD);
+        put_expr(inout buf, in ast, expr.a, inout scratch);
+        put_sym(inout buf, in ast, expr.b, inout scratch);
+    } else if kind == EXPR_INDEX {
+        put_u8(inout buf, HASH_EXPR_INDEX);
+        put_expr(inout buf, in ast, expr.a, inout scratch);
+        put_expr(inout buf, in ast, expr.b, inout scratch);
+    } else if kind == EXPR_TRY {
+        put_u8(inout buf, HASH_EXPR_TRY);
+        put_expr(inout buf, in ast, expr.a, inout scratch);
+    } else if kind == EXPR_UNARY {
+        put_u8(inout buf, HASH_EXPR_UNARY);
+        put_sym(inout buf, in ast, expr.a, inout scratch);
+        put_expr(inout buf, in ast, expr.b, inout scratch);
+    } else if kind == EXPR_BINARY || kind == EXPR_ASSIGN {
+        if kind == EXPR_BINARY {
+            put_u8(inout buf, HASH_EXPR_BINARY);
         } else {
-            put_u8(inout b, HASH_EXPR_ASSIGN);
+            put_u8(inout buf, HASH_EXPR_ASSIGN);
         }
-        put_sym(inout b, in a, e.a, inout tmp);
-        put_expr(inout b, in a, e.b, inout tmp);
-        put_expr(inout b, in a, e.c, inout tmp);
-    } else if k == EXPR_IF {
-        put_u8(inout b, HASH_EXPR_IF);
-        put_expr(inout b, in a, e.a, inout tmp);
-        put_expr(inout b, in a, e.b, inout tmp);
-        put_opt_expr(inout b, in a, e.c, inout tmp);
-    } else if k == EXPR_MATCH {
-        put_u8(inout b, HASH_EXPR_MATCH);
-        put_expr(inout b, in a, e.a, inout tmp);
-        let m = list_len(in a, e.b) / PAIR_WORDS;
-        put_u64(inout b, m);
-        for i in 0..m {
-            let q = wrapping_mul(i, PAIR_WORDS);
-            put_pat(inout b, in a, list_at(in a, e.b, q), inout tmp);
-            put_expr(inout b, in a, list_at(in a, e.b, wrapping_add(q, 1)), inout tmp);
+        put_sym(inout buf, in ast, expr.a, inout scratch);
+        put_expr(inout buf, in ast, expr.b, inout scratch);
+        put_expr(inout buf, in ast, expr.c, inout scratch);
+    } else if kind == EXPR_IF {
+        put_u8(inout buf, HASH_EXPR_IF);
+        put_expr(inout buf, in ast, expr.a, inout scratch);
+        put_expr(inout buf, in ast, expr.b, inout scratch);
+        put_opt_expr(inout buf, in ast, expr.c, inout scratch);
+    } else if kind == EXPR_MATCH {
+        put_u8(inout buf, HASH_EXPR_MATCH);
+        put_expr(inout buf, in ast, expr.a, inout scratch);
+        let count = list_len(in ast, expr.b) / PAIR_WORDS;
+        put_u64(inout buf, count);
+        for i in 0..count {
+            let pair_at = wrapping_mul(i, PAIR_WORDS);
+            put_pat(inout buf, in ast, list_at(in ast, expr.b, pair_at), inout scratch);
+            put_expr(
+                inout buf,
+                in ast,
+                list_at(in ast, expr.b, wrapping_add(pair_at, 1)),
+                inout scratch
+            );
         }
-    } else if k == EXPR_CLOSURE {
-        put_u8(inout b, HASH_EXPR_CLOSURE);
-        put_params(inout b, in a, e.a, inout tmp);
-        let mode = widen_u64(e.b) & CLOSURE_MODE_MASK;
+    } else if kind == EXPR_CLOSURE {
+        put_u8(inout buf, HASH_EXPR_CLOSURE);
+        put_params(inout buf, in ast, expr.a, inout scratch);
+        let mode = widen_u64(expr.b) & CLOSURE_MODE_MASK;
         if mode == widen_u64(MODE_NONE) {
-            put_u8(inout b, HASH_NONE);
+            put_u8(inout buf, HASH_NONE);
         } else {
-            put_u8(inout b, HASH_SOME);
-            put_mode(inout b, mode);
+            put_u8(inout buf, HASH_SOME);
+            put_mode(inout buf, mode);
         }
-        put_type(inout b, in a, e.c, inout tmp);
-        put_effects(inout b, in a, e.d, inout tmp);
-        put_bool(inout b, ((widen_u64(e.b) >> CLOSURE_INFER_SHIFT) & 1) != 0);
-        put_expr(inout b, in a, e.e, inout tmp);
-    } else if k == EXPR_HANDLE {
-        put_u8(inout b, HASH_EXPR_HANDLE);
-        put_effect(inout b, in a, e.a, inout tmp);
-        if e.b != none() {
-            put_u8(inout b, HASH_SOME);
-            put_pat(inout b, in a, e.b, inout tmp);
-            put_expr(inout b, in a, e.c, inout tmp);
+        put_type(inout buf, in ast, expr.c, inout scratch);
+        put_effects(inout buf, in ast, expr.d, inout scratch);
+        put_bool(inout buf, ((widen_u64(expr.b) >> CLOSURE_INFER_SHIFT) & 1) != 0);
+        put_expr(inout buf, in ast, expr.e, inout scratch);
+    } else if kind == EXPR_HANDLE {
+        put_u8(inout buf, HASH_EXPR_HANDLE);
+        put_effect(inout buf, in ast, expr.a, inout scratch);
+        if expr.b != none() {
+            put_u8(inout buf, HASH_SOME);
+            put_pat(inout buf, in ast, expr.b, inout scratch);
+            put_expr(inout buf, in ast, expr.c, inout scratch);
         } else {
-            put_u8(inout b, HASH_NONE);
+            put_u8(inout buf, HASH_NONE);
         }
-        put_expr(inout b, in a, e.d, inout tmp);
-        let m = list_len(in a, e.e);
-        if m > 0 {
-            put_clause(inout b, in a, list_at(in a, e.e, 0), inout tmp);
+        put_expr(inout buf, in ast, expr.d, inout scratch);
+        let count = list_len(in ast, expr.e);
+        if count > 0 {
+            put_clause(inout buf, in ast, list_at(in ast, expr.e, 0), inout scratch);
         }
-        let ops = if m > 0 { wrapping_sub(m, 1) } else { 0 };
-        put_u64(inout b, ops);
-        for i in 1..m {
-            put_clause(inout b, in a, list_at(in a, e.e, i), inout tmp);
+        let op_count = if count > 0 { wrapping_sub(count, 1) } else { 0 };
+        put_u64(inout buf, op_count);
+        for i in 1..count {
+            put_clause(inout buf, in ast, list_at(in ast, expr.e, i), inout scratch);
         }
-    } else if k == EXPR_LOOP {
-        put_u8(inout b, HASH_EXPR_LOOP);
-        put_expr(inout b, in a, e.a, inout tmp);
-    } else if k == EXPR_FOR {
-        put_u8(inout b, HASH_EXPR_FOR);
-        put_pat(inout b, in a, e.a, inout tmp);
-        put_expr(inout b, in a, e.b, inout tmp);
-        put_expr(inout b, in a, e.c, inout tmp);
-    } else if k == EXPR_RANGE {
-        put_u8(inout b, HASH_EXPR_RANGE);
-        put_expr(inout b, in a, e.a, inout tmp);
-        put_expr(inout b, in a, e.b, inout tmp);
-        put_bool(inout b, e.c != 0);
-    } else if k == EXPR_BREAK {
-        put_u8(inout b, HASH_EXPR_BREAK);
-        put_opt_expr(inout b, in a, e.a, inout tmp);
-    } else if k == EXPR_RETURN {
-        put_u8(inout b, HASH_EXPR_RETURN);
-        put_opt_expr(inout b, in a, e.a, inout tmp);
+    } else if kind == EXPR_LOOP {
+        put_u8(inout buf, HASH_EXPR_LOOP);
+        put_expr(inout buf, in ast, expr.a, inout scratch);
+    } else if kind == EXPR_FOR {
+        put_u8(inout buf, HASH_EXPR_FOR);
+        put_pat(inout buf, in ast, expr.a, inout scratch);
+        put_expr(inout buf, in ast, expr.b, inout scratch);
+        put_expr(inout buf, in ast, expr.c, inout scratch);
+    } else if kind == EXPR_RANGE {
+        put_u8(inout buf, HASH_EXPR_RANGE);
+        put_expr(inout buf, in ast, expr.a, inout scratch);
+        put_expr(inout buf, in ast, expr.b, inout scratch);
+        put_bool(inout buf, expr.c != 0);
+    } else if kind == EXPR_BREAK {
+        put_u8(inout buf, HASH_EXPR_BREAK);
+        put_opt_expr(inout buf, in ast, expr.a, inout scratch);
+    } else if kind == EXPR_RETURN {
+        put_u8(inout buf, HASH_EXPR_RETURN);
+        put_opt_expr(inout buf, in ast, expr.a, inout scratch);
     } else {
-        put_u8(inout b, HASH_EXPR_CONTINUE);
+        put_u8(inout buf, HASH_EXPR_CONTINUE);
     }
 }
 
-// `hash_function`: the canonical bytes of function `f` keyed `key`.
+// `hash_function`: the canonical bytes of function `func` keyed `key`.
 fn put_function(
-    inout b: ChunkSeq[u8],
-    in a: Ast,
+    inout buf: ChunkSeq[u8],
+    in ast: Ast,
     in key: Slice[u8],
-    in f: FnNode,
-    inout tmp: String
+    in func: FnNode,
+    inout scratch: String
 ) {
-    b.clear();
-    b.extend(in FN_HASH_DOMAIN.as_bytes());
-    b.push(NUL);
-    put_bytes(inout b, in key);
-    put_bool(inout b, f.fip);
-    let ng = list_len(in a, f.generics);
-    put_u64(inout b, ng);
-    for i in 0..ng {
-        let g = generic_at(in a, list_at(in a, f.generics, i));
-        put_sym(inout b, in a, g.name, inout tmp);
-        put_u8(inout b, g.bound);
-        put_bool(inout b, g.row);
+    buf.clear();
+    buf.extend(in FN_HASH_DOMAIN.as_bytes());
+    buf.push(NUL);
+    put_bytes(inout buf, in key);
+    put_bool(inout buf, func.fip);
+    let generic_count = list_len(in ast, func.generics);
+    put_u64(inout buf, generic_count);
+    for i in 0..generic_count {
+        let generic = generic_at(in ast, list_at(in ast, func.generics, i));
+        put_sym(inout buf, in ast, generic.name, inout scratch);
+        put_u8(inout buf, generic.bound);
+        put_bool(inout buf, generic.row);
     }
-    put_params(inout b, in a, f.params, inout tmp);
-    put_type(inout b, in a, f.result, inout tmp);
-    put_effects(inout b, in a, f.effects, inout tmp);
-    put_opt_expr(inout b, in a, f.body, inout tmp);
+    put_params(inout buf, in ast, func.params, inout scratch);
+    put_type(inout buf, in ast, func.result, inout scratch);
+    put_effects(inout buf, in ast, func.effects, inout scratch);
+    put_opt_expr(inout buf, in ast, func.body, inout scratch);
 }
 
 // ------------------------------------------------------------- type text
 
 // `Type`'s `Display` (`impl_type_key` of a type that is not Named).
-fn type_text(in a: Ast, t: u32, inout out: String, inout tmp: String) {
-    let n = type_at(in a, t);
-    if n.kind == TYPE_NAMED {
-        tmp.clear();
-        let ok = a.names.resolve_into(symbol_from_id(n.a), inout tmp);
-        let m = list_len(in a, n.b);
-        if m == 1 && is_text(in tmp.as_bytes(), 0, tmp.as_bytes().len(), in "dyn") {
+fn type_text(in ast: Ast, type_id: u32, inout out: String, inout scratch: String) {
+    let node = type_at(in ast, type_id);
+    if node.kind == TYPE_NAMED {
+        scratch.clear();
+        let ok = ast.names.resolve_into(symbol_from_id(node.a), inout scratch);
+        let count = list_len(in ast, node.b);
+        if count == 1 && is_text(in scratch.as_bytes(), 0, scratch.as_bytes().len(), in "dyn") {
             out.push_str(in "dyn ");
-            type_text(in a, list_at(in a, n.b, 0), inout out, inout tmp);
+            type_text(in ast, list_at(in ast, node.b, 0), inout out, inout scratch);
             return;
         }
-        out.push_str(in tmp.as_str());
-        if m > 0 {
+        out.push_str(in scratch.as_str());
+        if count > 0 {
             out.push_str(in "[");
-            for i in 0..m {
+            for i in 0..count {
                 if i > 0 {
                     out.push_str(in ", ");
                 }
-                type_text(in a, list_at(in a, n.b, i), inout out, inout tmp);
+                type_text(in ast, list_at(in ast, node.b, i), inout out, inout scratch);
             }
             out.push_str(in "]");
         }
-    } else if n.kind == TYPE_TUPLE {
+    } else if node.kind == TYPE_TUPLE {
         out.push_str(in "(");
-        let m = list_len(in a, n.a);
-        for i in 0..m {
+        let count = list_len(in ast, node.a);
+        for i in 0..count {
             if i > 0 {
                 out.push_str(in ", ");
             }
-            type_text(in a, list_at(in a, n.a, i), inout out, inout tmp);
+            type_text(in ast, list_at(in ast, node.a, i), inout out, inout scratch);
         }
         out.push_str(in ")");
-    } else if n.kind == TYPE_FUNCTION {
+    } else if node.kind == TYPE_FUNCTION {
         out.push_str(in "fn(");
-        let m = list_len(in a, n.a) / PAIR_WORDS;
-        for i in 0..m {
+        let count = list_len(in ast, node.a) / PAIR_WORDS;
+        for i in 0..count {
             if i > 0 {
                 out.push_str(in ", ");
             }
             type_text(
-                in a,
-                list_at(in a, n.a, wrapping_add(wrapping_mul(i, PAIR_WORDS), 1)),
+                in ast,
+                list_at(in ast, node.a, wrapping_add(wrapping_mul(i, PAIR_WORDS), 1)),
                 inout out,
-                inout tmp
+                inout scratch
             );
         }
         out.push_str(in ") -> ");
-        type_text(in a, n.b, inout out, inout tmp);
-    } else if n.kind == TYPE_ROW {
+        type_text(in ast, node.b, inout out, inout scratch);
+    } else if node.kind == TYPE_ROW {
         // `Type::Row(e)` displays as `eff {e:?}`.
         out.push_str(in "eff ");
-        effects_debug(in a, n.a, inout out, inout tmp);
+        effects_debug(in ast, node.a, inout out, inout scratch);
     } else {
         out.push_str(in "_");
     }
 }
 
 // The `Debug` text of a symbol as a Rust `String`: its quoted name.
-fn sym_debug(in a: Ast, s: u32, inout out: String, inout tmp: String) {
-    tmp.clear();
-    let ok = a.names.resolve_into(symbol_from_id(s), inout tmp);
+fn sym_debug(in ast: Ast, sym: u32, inout out: String, inout scratch: String) {
+    scratch.clear();
+    let ok = ast.names.resolve_into(symbol_from_id(sym), inout scratch);
     out.push_str(in "\"");
-    out.push_str(in tmp.as_str());
+    out.push_str(in scratch.as_str());
     out.push_str(in "\"");
 }
 
 // The `Debug` text of a list of types: `[t, u]`.
-fn types_debug(in a: Ast, list: u32, inout out: String, inout tmp: String) {
+fn types_debug(in ast: Ast, list: u32, inout out: String, inout scratch: String) {
     out.push_str(in "[");
-    let m = list_len(in a, list);
-    for i in 0..m {
+    let count = list_len(in ast, list);
+    for i in 0..count {
         if i > 0 {
             out.push_str(in ", ");
         }
-        type_debug(in a, list_at(in a, list, i), inout out, inout tmp);
+        type_debug(in ast, list_at(in ast, list, i), inout out, inout scratch);
     }
     out.push_str(in "]");
 }
 
 // The derived `Debug` text of a `Type`.
-fn type_debug(in a: Ast, t: u32, inout out: String, inout tmp: String) {
-    let n = type_at(in a, t);
-    if n.kind == TYPE_NAMED {
+fn type_debug(in ast: Ast, type_id: u32, inout out: String, inout scratch: String) {
+    let node = type_at(in ast, type_id);
+    if node.kind == TYPE_NAMED {
         out.push_str(in "Named(");
-        sym_debug(in a, n.a, inout out, inout tmp);
+        sym_debug(in ast, node.a, inout out, inout scratch);
         out.push_str(in ", ");
-        types_debug(in a, n.b, inout out, inout tmp);
+        types_debug(in ast, node.b, inout out, inout scratch);
         out.push_str(in ")");
-    } else if n.kind == TYPE_TUPLE {
+    } else if node.kind == TYPE_TUPLE {
         out.push_str(in "Tuple(");
-        types_debug(in a, n.a, inout out, inout tmp);
+        types_debug(in ast, node.a, inout out, inout scratch);
         out.push_str(in ")");
-    } else if n.kind == TYPE_FUNCTION {
+    } else if node.kind == TYPE_FUNCTION {
         out.push_str(in "Function { params: [");
-        let m = list_len(in a, n.a) / PAIR_WORDS;
-        for i in 0..m {
+        let count = list_len(in ast, node.a) / PAIR_WORDS;
+        for i in 0..count {
             if i > 0 {
                 out.push_str(in ", ");
             }
-            let k = wrapping_mul(i, PAIR_WORDS);
-            let pass = list_at(in a, n.a, k);
+            let pair_at = wrapping_mul(i, PAIR_WORDS);
+            let pass = list_at(in ast, node.a, pair_at);
             if pass == PASS_IN {
                 out.push_str(in "(In, ");
             } else if pass == PASS_INOUT {
@@ -693,23 +713,28 @@ fn type_debug(in a: Ast, t: u32, inout out: String, inout tmp: String) {
             } else {
                 out.push_str(in "(Sink, ");
             }
-            type_debug(in a, list_at(in a, n.a, wrapping_add(k, 1)), inout out, inout tmp);
+            type_debug(
+                in ast,
+                list_at(in ast, node.a, wrapping_add(pair_at, 1)),
+                inout out,
+                inout scratch
+            );
             out.push_str(in ")");
         }
         out.push_str(in "], result: ");
-        type_debug(in a, n.b, inout out, inout tmp);
+        type_debug(in ast, node.b, inout out, inout scratch);
         out.push_str(in ", effects: ");
-        effects_debug(in a, n.c, inout out, inout tmp);
-        if n.d == MODE_COPY {
+        effects_debug(in ast, node.c, inout out, inout scratch);
+        if node.d == MODE_COPY {
             out.push_str(in ", mode: Copy }");
-        } else if n.d == MODE_LINEAR {
+        } else if node.d == MODE_LINEAR {
             out.push_str(in ", mode: Linear }");
         } else {
             out.push_str(in ", mode: Affine }");
         }
-    } else if n.kind == TYPE_ROW {
+    } else if node.kind == TYPE_ROW {
         out.push_str(in "Row(");
-        effects_debug(in a, n.a, inout out, inout tmp);
+        effects_debug(in ast, node.a, inout out, inout scratch);
         out.push_str(in ")");
     } else {
         out.push_str(in "Infer");
@@ -717,33 +742,33 @@ fn type_debug(in a: Ast, t: u32, inout out: String, inout tmp: String) {
 }
 
 // The derived `Debug` text of an `Effects`.
-fn effects_debug(in a: Ast, effs: u32, inout out: String, inout tmp: String) {
-    let n = effects_at(in a, effs);
+fn effects_debug(in ast: Ast, effects: u32, inout out: String, inout scratch: String) {
+    let node = effects_at(in ast, effects);
     out.push_str(in "Effects { instances: [");
-    let m = list_len(in a, n.instances);
-    for i in 0..m {
+    let count = list_len(in ast, node.instances);
+    for i in 0..count {
         if i > 0 {
             out.push_str(in ", ");
         }
-        let e = effect_at(in a, list_at(in a, n.instances, i));
+        let effect = effect_at(in ast, list_at(in ast, node.instances, i));
         out.push_str(in "Effect { label: ");
-        if e.label != none() {
+        if effect.label != none() {
             out.push_str(in "Some(");
-            sym_debug(in a, e.label, inout out, inout tmp);
+            sym_debug(in ast, effect.label, inout out, inout scratch);
             out.push_str(in ")");
         } else {
             out.push_str(in "None");
         }
         out.push_str(in ", name: ");
-        sym_debug(in a, e.name, inout out, inout tmp);
+        sym_debug(in ast, effect.name, inout out, inout scratch);
         out.push_str(in ", args: ");
-        types_debug(in a, e.args, inout out, inout tmp);
+        types_debug(in ast, effect.args, inout out, inout scratch);
         out.push_str(in " }");
     }
     out.push_str(in "], tail: ");
-    if n.tail != none() {
+    if node.tail != none() {
         out.push_str(in "Some(");
-        sym_debug(in a, n.tail, inout out, inout tmp);
+        sym_debug(in ast, node.tail, inout out, inout scratch);
         out.push_str(in ")");
     } else {
         out.push_str(in "None");
@@ -766,154 +791,162 @@ struct Calls {
     seen: ChunkSeq[u8]
 }
 
-fn sym_flag(in s: ChunkSeq[u8], i: u32) -> bool {
-    match s.try_get(widen_u64(i)) {
+fn sym_flag(in flags: ChunkSeq[u8], i: u32) -> bool {
+    match flags.try_get(widen_u64(i)) {
         Option::Some(v) => v != 0,
         Option::None => false,
     }
 }
 
-fn add_callee(inout c: Calls, key: u32) {
-    if !sym_flag(in c.seen, key) {
-        let ok = c.seen.try_set(widen_u64(key), 1);
-        c.out.push(key);
+fn add_callee(inout call_graph: Calls, key: u32) {
+    if !sym_flag(in call_graph.seen, key) {
+        let ok = call_graph.seen.try_set(widen_u64(key), 1);
+        call_graph.out.push(key);
     }
 }
 
 // `collect_expr_calls`.
-fn calls(in a: Ast, x: u32, inout c: Calls) {
-    let e = expr_at(in a, x);
-    let k = e.kind;
-    if k == EXPR_TUPLE {
-        let m = list_len(in a, e.a);
-        for i in 0..m {
-            calls(in a, list_at(in a, e.a, i), inout c);
+fn calls(in ast: Ast, expr_id: u32, inout call_graph: Calls) {
+    let expr = expr_at(in ast, expr_id);
+    let kind = expr.kind;
+    if kind == EXPR_TUPLE {
+        let count = list_len(in ast, expr.a);
+        for i in 0..count {
+            calls(in ast, list_at(in ast, expr.a, i), inout call_graph);
         }
-    } else if k == EXPR_STRUCT {
-        let m = list_len(in a, e.b) / PAIR_WORDS;
-        for i in 0..m {
-            calls(in a, list_at(in a, e.b, wrapping_add(wrapping_mul(i, PAIR_WORDS), 1)), inout c);
+    } else if kind == EXPR_STRUCT {
+        let count = list_len(in ast, expr.b) / PAIR_WORDS;
+        for i in 0..count {
+            calls(
+                in ast,
+                list_at(in ast, expr.b, wrapping_add(wrapping_mul(i, PAIR_WORDS), 1)),
+                inout call_graph
+            );
         }
-    } else if k == EXPR_BLOCK {
-        let m = list_len(in a, e.a);
-        for i in 0..m {
-            calls(in a, stmt_at(in a, list_at(in a, e.a, i)).value, inout c);
+    } else if kind == EXPR_BLOCK {
+        let count = list_len(in ast, expr.a);
+        for i in 0..count {
+            calls(in ast, stmt_at(in ast, list_at(in ast, expr.a, i)).value, inout call_graph);
         }
-        if e.b != none() {
-            calls(in a, e.b, inout c);
+        if expr.b != none() {
+            calls(in ast, expr.b, inout call_graph);
         }
-    } else if k == EXPR_CALL {
-        let callee = expr_at(in a, e.a);
+    } else if kind == EXPR_CALL {
+        let callee = expr_at(in ast, expr.a);
         if callee.kind == EXPR_NAME {
-            if sym_flag(in c.known, callee.a) {
-                add_callee(inout c, callee.a);
+            if sym_flag(in call_graph.known, callee.a) {
+                add_callee(inout call_graph, callee.a);
             }
         } else if callee.kind == EXPR_FIELD {
-            calls(in a, callee.a, inout c);
-            let mut m = match c.method_head.try_get(widen_u64(callee.b)) {
+            calls(in ast, callee.a, inout call_graph);
+            let mut method_entry = match call_graph.method_head.try_get(widen_u64(callee.b)) {
                 Option::Some(v) => v,
                 Option::None => none(),
             };
             loop {
-                if m == none() {
+                if method_entry == none() {
                     break;
                 }
-                let key = c.method_key.try_get(widen_u64(m)).unwrap_or(0);
-                add_callee(inout c, key);
-                m = match c.method_next.try_get(widen_u64(m)) {
+                let key = call_graph.method_key.try_get(widen_u64(method_entry)).unwrap_or(0);
+                add_callee(inout call_graph, key);
+                method_entry = match call_graph.method_next.try_get(widen_u64(method_entry)) {
                     Option::Some(v) => v,
                     Option::None => none(),
                 };
             }
-            if sym_flag(in c.known, callee.b) {
-                add_callee(inout c, callee.b);
+            if sym_flag(in call_graph.known, callee.b) {
+                add_callee(inout call_graph, callee.b);
             }
         } else {
-            calls(in a, e.a, inout c);
+            calls(in ast, expr.a, inout call_graph);
         }
-        let na = list_len(in a, e.c);
-        for i in 0..na {
-            calls(in a, arg_at(in a, list_at(in a, e.c, i)).expr, inout c);
+        let arg_count = list_len(in ast, expr.c);
+        for i in 0..arg_count {
+            calls(in ast, arg_at(in ast, list_at(in ast, expr.c, i)).expr, inout call_graph);
         }
-    } else if k == EXPR_FIELD || k == EXPR_TRY || k == EXPR_LOOP {
-        calls(in a, e.a, inout c);
-    } else if k == EXPR_UNARY {
-        calls(in a, e.b, inout c);
-    } else if k == EXPR_INDEX || k == EXPR_RANGE {
-        calls(in a, e.a, inout c);
-        calls(in a, e.b, inout c);
-    } else if k == EXPR_BINARY || k == EXPR_ASSIGN {
-        calls(in a, e.b, inout c);
-        calls(in a, e.c, inout c);
-    } else if k == EXPR_IF {
-        calls(in a, e.a, inout c);
-        calls(in a, e.b, inout c);
-        if e.c != none() {
-            calls(in a, e.c, inout c);
+    } else if kind == EXPR_FIELD || kind == EXPR_TRY || kind == EXPR_LOOP {
+        calls(in ast, expr.a, inout call_graph);
+    } else if kind == EXPR_UNARY {
+        calls(in ast, expr.b, inout call_graph);
+    } else if kind == EXPR_INDEX || kind == EXPR_RANGE {
+        calls(in ast, expr.a, inout call_graph);
+        calls(in ast, expr.b, inout call_graph);
+    } else if kind == EXPR_BINARY || kind == EXPR_ASSIGN {
+        calls(in ast, expr.b, inout call_graph);
+        calls(in ast, expr.c, inout call_graph);
+    } else if kind == EXPR_IF {
+        calls(in ast, expr.a, inout call_graph);
+        calls(in ast, expr.b, inout call_graph);
+        if expr.c != none() {
+            calls(in ast, expr.c, inout call_graph);
         }
-    } else if k == EXPR_MATCH {
-        calls(in a, e.a, inout c);
-        let m = list_len(in a, e.b) / PAIR_WORDS;
-        for i in 0..m {
-            calls(in a, list_at(in a, e.b, wrapping_add(wrapping_mul(i, PAIR_WORDS), 1)), inout c);
+    } else if kind == EXPR_MATCH {
+        calls(in ast, expr.a, inout call_graph);
+        let count = list_len(in ast, expr.b) / PAIR_WORDS;
+        for i in 0..count {
+            calls(
+                in ast,
+                list_at(in ast, expr.b, wrapping_add(wrapping_mul(i, PAIR_WORDS), 1)),
+                inout call_graph
+            );
         }
-    } else if k == EXPR_CLOSURE {
-        calls(in a, e.e, inout c);
-    } else if k == EXPR_FOR {
-        calls(in a, e.b, inout c);
-        calls(in a, e.c, inout c);
-    } else if k == EXPR_HANDLE {
-        if e.b != none() {
-            calls(in a, e.c, inout c);
+    } else if kind == EXPR_CLOSURE {
+        calls(in ast, expr.e, inout call_graph);
+    } else if kind == EXPR_FOR {
+        calls(in ast, expr.b, inout call_graph);
+        calls(in ast, expr.c, inout call_graph);
+    } else if kind == EXPR_HANDLE {
+        if expr.b != none() {
+            calls(in ast, expr.c, inout call_graph);
         }
-        calls(in a, e.d, inout c);
-        let m = list_len(in a, e.e);
-        for i in 0..m {
-            calls(in a, clause_at(in a, list_at(in a, e.e, i)).body, inout c);
+        calls(in ast, expr.d, inout call_graph);
+        let count = list_len(in ast, expr.e);
+        for i in 0..count {
+            calls(in ast, clause_at(in ast, list_at(in ast, expr.e, i)).body, inout call_graph);
         }
-    } else if k == EXPR_BREAK || k == EXPR_RETURN {
-        if e.a != none() {
-            calls(in a, e.a, inout c);
+    } else if kind == EXPR_BREAK || kind == EXPR_RETURN {
+        if expr.a != none() {
+            calls(in ast, expr.a, inout call_graph);
         }
     }
 }
 
 // ------------------------------------------------------------------ entry
 
-fn grow(inout s: ChunkSeq[u8], n: u64) {
+fn grow(inout seq: ChunkSeq[u8], len: u64) {
     loop {
-        if s.len() >= n {
+        if seq.len() >= len {
             break;
         }
-        s.push(0);
+        seq.push(0);
     }
 }
 
-fn grow_u32(inout s: ChunkSeq[u32], n: u64) {
+fn grow_u32(inout seq: ChunkSeq[u32], len: u64) {
     loop {
-        if s.len() >= n {
+        if seq.len() >= len {
             break;
         }
-        s.push(none());
+        seq.push(none());
     }
 }
 
 // `FunctionGraph::from_module` over the input words.
-// `s` as a text of the result words.
-fn put_string(inout res: ChunkSeq[u64], in s: String) {
-    let b = s.as_bytes();
-    put_text(inout res, in b, 0, b.len());
+// `text` as a text of the result words.
+fn put_string(inout res: ChunkSeq[u64], in text: String) {
+    let bytes = text.as_bytes();
+    put_text(inout res, in bytes, 0, bytes.len());
 }
 
-pub fn graph(in b: Slice[u8]) -> ChunkSeq[u64] {
-    let mut r = Reader { pos: 0 };
-    let (ss, se) = r.text(in b);
-    let text = match String::from_utf8(in b[ss..se]) {
-        Option::Some(x) => x,
+pub fn graph(in input: Slice[u8]) -> ChunkSeq[u64] {
+    let mut reader = Reader { pos: 0 };
+    let (src_start, src_end) = reader.text(in input);
+    let text = match String::from_utf8(in input[src_start..src_end]) {
+        Option::Some(decoded) => decoded,
         Option::None => String::new(),
     };
-    let mut l = lower_source(in text.as_str());
-    let mut tmp = String::new();
+    let mut lowered = lower_source(in text.as_str());
+    let mut scratch = String::new();
     let mut key = String::new();
     let mut owner = String::new();
     // The entries: (key symbol, function node) in declaration order.
@@ -921,45 +954,48 @@ pub fn graph(in b: Slice[u8]) -> ChunkSeq[u64] {
     let mut fns: ChunkSeq[u32] = ChunkSeq::new[u32]();
     // method name symbol, entry index
     let mut methods: ChunkSeq[u32] = ChunkSeq::new[u32]();
-    let items = l.ast.m_items.len();
+    let items = lowered.ast.m_items.len();
     for i in 0..items {
-        let it = l.ast.m_items.try_get(i).unwrap_or(0);
-        let item = l.ast.items.get_or(idx_from_raw[ItemNode](it), ItemNode { kind: 0, node: 0 });
+        let item_id = lowered.ast.m_items.try_get(i).unwrap_or(0);
+        let item = lowered
+            .ast
+            .items
+            .get_or(idx_from_raw[ItemNode](item_id), ItemNode { kind: 0, node: 0 });
         if item.kind == ITEM_FUNCTION {
-            let f = fn_at(in l.ast, item.node);
-            keys.push(f.name);
+            let func = fn_at(in lowered.ast, item.node);
+            keys.push(func.name);
             fns.push(item.node);
         } else if item.kind == ITEM_IMPL {
-            let im = l.ast.impls.get_or(
+            let impl_node = lowered.ast.impls.get_or(
                 idx_from_raw[ImplNode](item.node),
                 ImplNode { ty: 0, generics: 0, methods: 0 }
             );
             // impl_type_key
             owner.clear();
-            let n = type_at(in l.ast, im.ty);
-            if n.kind == TYPE_NAMED {
-                let ok = l.ast.names.resolve_into(symbol_from_id(n.a), inout owner);
+            let owner_ty = type_at(in lowered.ast, impl_node.ty);
+            if owner_ty.kind == TYPE_NAMED {
+                let ok = lowered.ast.names.resolve_into(symbol_from_id(owner_ty.a), inout owner);
             } else {
-                type_text(in l.ast, im.ty, inout owner, inout tmp);
+                type_text(in lowered.ast, impl_node.ty, inout owner, inout scratch);
             }
-            let m = list_len(in l.ast, im.methods);
-            for q in 0..m {
-                let mi = list_at(in l.ast, im.methods, q);
-                let f = fn_at(in l.ast, mi);
+            let method_count = list_len(in lowered.ast, impl_node.methods);
+            for q in 0..method_count {
+                let method_fn = list_at(in lowered.ast, impl_node.methods, q);
+                let func = fn_at(in lowered.ast, method_fn);
                 key.clear();
                 key.push_str(in owner.as_str());
                 key.push_str(in "::");
-                let ok = l.ast.names.resolve_into(symbol_from_id(f.name), inout key);
-                let ks = l.ast.names.intern(in key.as_str()).id();
-                methods.push(f.name);
+                let ok = lowered.ast.names.resolve_into(symbol_from_id(func.name), inout key);
+                let key_sym = lowered.ast.names.intern(in key.as_str()).id();
+                methods.push(func.name);
                 methods.push(wrapping_u32(keys.len()));
-                keys.push(ks);
-                fns.push(mi);
+                keys.push(key_sym);
+                fns.push(method_fn);
             }
         }
     }
-    let nsym = l.ast.names.len();
-    let mut c = Calls {
+    let sym_count = lowered.ast.names.len();
+    let mut call_graph = Calls {
         known: ChunkSeq::new[u8](),
         method_head: ChunkSeq::new[u32](),
         method_next: ChunkSeq::new[u32](),
@@ -967,57 +1003,57 @@ pub fn graph(in b: Slice[u8]) -> ChunkSeq[u64] {
         out: ChunkSeq::new[u32](),
         seen: ChunkSeq::new[u8]()
     };
-    grow(inout c.known, nsym);
-    grow(inout c.seen, nsym);
-    grow_u32(inout c.method_head, nsym);
-    let n = keys.len();
-    for i in 0..n {
-        let ks = keys.try_get(i).unwrap_or(0);
-        let ok = c.known.try_set(widen_u64(ks), 1);
+    grow(inout call_graph.known, sym_count);
+    grow(inout call_graph.seen, sym_count);
+    grow_u32(inout call_graph.method_head, sym_count);
+    let entry_count = keys.len();
+    for i in 0..entry_count {
+        let key_sym = keys.try_get(i).unwrap_or(0);
+        let ok = call_graph.known.try_set(widen_u64(key_sym), 1);
     }
     // The method chains, in reverse so each chain runs in declaration
     // order (the order does not matter to a set).
-    let nm = methods.len() / PAIR_WORDS;
-    for q in 0..nm {
+    let method_pairs = methods.len() / PAIR_WORDS;
+    for q in 0..method_pairs {
         let name = methods.try_get(wrapping_mul(q, PAIR_WORDS)).unwrap_or(0);
         let entry = methods.try_get(wrapping_add(wrapping_mul(q, PAIR_WORDS), 1)).unwrap_or(0);
-        let ks = keys.try_get(widen_u64(entry)).unwrap_or(0);
-        let head = match c.method_head.try_get(widen_u64(name)) {
+        let key_sym = keys.try_get(widen_u64(entry)).unwrap_or(0);
+        let head = match call_graph.method_head.try_get(widen_u64(name)) {
             Option::Some(v) => v,
             Option::None => none(),
         };
-        c.method_key.push(ks);
-        c.method_next.push(head);
-        let ok = c.method_head.try_set(widen_u64(name), wrapping_u32(q));
+        call_graph.method_key.push(key_sym);
+        call_graph.method_next.push(head);
+        let ok = call_graph.method_head.try_set(widen_u64(name), wrapping_u32(q));
     }
     let mut res: ChunkSeq[u64] = ChunkSeq::new[u64]();
     res.push(STATUS_OK);
-    res.push(n);
+    res.push(entry_count);
     let mut bytes: ChunkSeq[u8] = ChunkSeq::new[u8]();
     let mut hex = String::new();
-    for i in 0..n {
-        let ks = keys.try_get(i).unwrap_or(0);
-        let fi = fns.try_get(i).unwrap_or(0);
-        let f = fn_at(in l.ast, fi);
+    for i in 0..entry_count {
+        let key_sym = keys.try_get(i).unwrap_or(0);
+        let fn_id = fns.try_get(i).unwrap_or(0);
+        let func = fn_at(in lowered.ast, fn_id);
         key.clear();
-        let ok = l.ast.names.resolve_into(symbol_from_id(ks), inout key);
+        let ok = lowered.ast.names.resolve_into(symbol_from_id(key_sym), inout key);
         bytes.clear();
-        put_function(inout bytes, in l.ast, in key.as_bytes(), in f, inout tmp);
+        put_function(inout bytes, in lowered.ast, in key.as_bytes(), in func, inout scratch);
         hex.clear();
         digest_hex(blake3(in bytes.as_slice()), inout hex);
         put_string(inout res, in key);
         put_string(inout res, in hex);
-        c.out.clear();
-        if f.body != none() {
-            calls(in l.ast, f.body, inout c);
+        call_graph.out.clear();
+        if func.body != none() {
+            calls(in lowered.ast, func.body, inout call_graph);
         }
-        let m = c.out.len();
-        res.push(m);
-        for j in 0..m {
-            let callee = c.out.try_get(j).unwrap_or(0);
-            let ok = c.seen.try_set(widen_u64(callee), 0);
+        let callee_count = call_graph.out.len();
+        res.push(callee_count);
+        for j in 0..callee_count {
+            let callee = call_graph.out.try_get(j).unwrap_or(0);
+            let ok = call_graph.seen.try_set(widen_u64(callee), 0);
             key.clear();
-            let ok2 = l.ast.names.resolve_into(symbol_from_id(callee), inout key);
+            let ok2 = lowered.ast.names.resolve_into(symbol_from_id(callee), inout key);
             put_string(inout res, in key);
         }
     }

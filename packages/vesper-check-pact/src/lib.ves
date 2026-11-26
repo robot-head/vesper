@@ -89,15 +89,15 @@ pub fn check_pact_declarations(in input: Str) -> ChunkSeq[u64] {
 
 // `check_pact_declarations` over the input's bytes: the entry of the hybrid
 // build's `modules/pact` (crates/vesper-hybrid).
-pub fn declarations_words(in b: Slice[u8]) -> ChunkSeq[u64] {
-    let mut r = Reader { pos: 0 };
-    let mut c = read_ctx(inout r, in b);
-    let d = read_decls(inout r, in b, in c.nmap, in c.tmap);
-    let sy = sy_new(inout c.names);
-    let mut fe = fe_new(sy);
-    let mut o = ChunkSeq::new[u8]();
-    declaration_pass(inout c, in d, inout fe, inout o);
-    pack_text(in o)
+pub fn declarations_words(in bytes: Slice[u8]) -> ChunkSeq[u64] {
+    let mut reader = Reader { pos: 0 };
+    let mut ctx = read_ctx(inout reader, in bytes);
+    let decls = read_decls(inout reader, in bytes, in ctx.nmap, in ctx.tmap);
+    let syms = sy_new(inout ctx.names);
+    let mut fe = fe_new(syms);
+    let mut out = ChunkSeq::new[u8]();
+    declaration_pass(inout ctx, in decls, inout fe, inout out);
+    pack_text(in out)
 }
 
 pub fn session_is_ok(in sess: PactSession) -> bool {

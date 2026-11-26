@@ -34,33 +34,33 @@ const OUTCOME_KILLED: u64 = 0;
 const OUTCOME_SURVIVED: u64 = 1;
 const OUTCOME_ILL_TYPED: u64 = 2;
 
-// `v` in decimal. Below 10^16 the digits are packed into two words, most
+// `value` in decimal. Below 10^16 the digits are packed into two words, most
 // significant in the lowest byte, and pushed in order.
-fn decimal(inout out: ChunkSeq[u8], v: u64) {
-    if v < 10 {
-        out.push(wrapping_u8(wrapping_add(v, widen_u64(DIGIT_ZERO))));
+fn decimal(inout out: ChunkSeq[u8], value: u64) {
+    if value < 10 {
+        out.push(wrapping_u8(wrapping_add(value, widen_u64(DIGIT_ZERO))));
         return;
     }
-    if v >= PACKED_DIGITS_LIMIT {
-        push_decimal(inout out, v);
+    if value >= PACKED_DIGITS_LIMIT {
+        push_decimal(inout out, value);
         return;
     }
     let mut lo: u64 = 0;
     let mut hi: u64 = 0;
     let mut n: u64 = 0;
-    let mut x = v;
+    let mut rest = value;
     loop {
-        let d = wrapping_add(x % 10, widen_u64(DIGIT_ZERO));
+        let digit_char = wrapping_add(rest % 10, widen_u64(DIGIT_ZERO));
         hi = wrapping_shl_u64(hi, BYTE_BITS) | wrapping_shr_u64(lo, TOP_BYTE_SHIFT);
-        lo = wrapping_shl_u64(lo, BYTE_BITS) | d;
+        lo = wrapping_shl_u64(lo, BYTE_BITS) | digit_char;
         n = wrapping_add(n, 1);
-        x = x / 10;
-        if x == 0 {
+        rest = rest / 10;
+        if rest == 0 {
             break;
         }
     }
     for i in 0..n {
-        let c = if i >= WORD_BYTES {
+        let out_char = if i >= WORD_BYTES {
             wrapping_shr_u64(
                 hi,
                 wrapping_u32(wrapping_mul(wrapping_sub(i, WORD_BYTES), widen_u64(BYTE_BITS)))
@@ -68,31 +68,38 @@ fn decimal(inout out: ChunkSeq[u8], v: u64) {
         } else {
             wrapping_shr_u64(lo, wrapping_u32(wrapping_mul(i, widen_u64(BYTE_BITS))))
         };
-        out.push(wrapping_u8(c & BYTE_MASK));
+        out.push(wrapping_u8(out_char & BYTE_MASK));
     }
 }
 
-fn push_str(inout out: ChunkSeq[u8], in s: Str) {
-    out.extend(in s.as_bytes());
+fn push_str(inout out: ChunkSeq[u8], in text: Str) {
+    out.extend(in text.as_bytes());
 }
 
-// `b[r.text()]` appended to `out`.
-fn copy_text(inout out: ChunkSeq[u8], inout r: Reader, in b: Slice[u8]) {
-    let (s, e) = r.text(in b);
-    push_range(inout out, in b, s, e);
+// `input[reader.text()]` appended to `out`.
+fn copy_text(inout out: ChunkSeq[u8], inout reader: Reader, in input: Slice[u8]) {
+    let (start, end) = reader.text(in input);
+    push_range(inout out, in input, start, end);
 }
 
 fn result(in out: ChunkSeq[u8]) -> ChunkSeq[u64] {
-    let mut w: ChunkSeq[u64] = ChunkSeq::new[u64]();
-    w.reserve(wrapping_add(out.len() / WORD_BYTES, RESULT_EXTRA_WORDS));
-    w.push(STATUS_OK);
-    put_buf(inout w, in out);
-    w
+    let mut words: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    words.reserve(wrapping_add(out.len() / WORD_BYTES, RESULT_EXTRA_WORDS));
+    words.push(STATUS_OK);
+    put_buf(inout words, in out);
+    words
 }
 
 // `{file}:{line}:{column}: `
-fn push_place(inout out: ChunkSeq[u8], in b: Slice[u8], fs: u64, fe: u64, line: u64, column: u64) {
-    push_range(inout out, in b, fs, fe);
+fn push_place(
+    inout out: ChunkSeq[u8],
+    in input: Slice[u8],
+    file_start: u64,
+    file_end: u64,
+    line: u64,
+    column: u64
+) {
+    push_range(inout out, in input, file_start, file_end);
     out.push(COLON);
     decimal(inout out, line);
     out.push(COLON);
@@ -101,33 +108,39 @@ fn push_place(inout out: ChunkSeq[u8], in b: Slice[u8], fs: u64, fe: u64, line: 
 }
 
 // `{file}:{line}:{column}: {code}: {message}\n` for each of `n` diagnostics.
-fn diags(inout out: ChunkSeq[u8], inout r: Reader, in b: Slice[u8], fs: u64, fe: u64) {
-    let n = r.word(in b);
+fn diags(
+    inout out: ChunkSeq[u8],
+    inout reader: Reader,
+    in input: Slice[u8],
+    file_start: u64,
+    file_end: u64
+) {
+    let n = reader.word(in input);
     for i in 0..n {
-        let line = r.word(in b);
-        let column = r.word(in b);
-        push_place(inout out, in b, fs, fe, line, column);
-        copy_text(inout out, inout r, in b);
+        let line = reader.word(in input);
+        let column = reader.word(in input);
+        push_place(inout out, in input, file_start, file_end, line, column);
+        copy_text(inout out, inout reader, in input);
         push_str(inout out, in ": ");
-        copy_text(inout out, inout r, in b);
+        copy_text(inout out, inout reader, in input);
         out.push(NEWLINE);
     }
 }
 
 // `rust_doc_text` over the input words.
-pub fn doc_text(in b: Slice[u8]) -> ChunkSeq[u64] {
-    let mut r = Reader { pos: 0 };
+pub fn doc_text(in input: Slice[u8]) -> ChunkSeq[u64] {
+    let mut reader = Reader { pos: 0 };
     let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    out.reserve(b.len());
-    let (fs, fe) = r.text(in b);
-    diags(inout out, inout r, in b, fs, fe);
-    let n = r.word(in b);
+    out.reserve(input.len());
+    let (file_start, file_end) = reader.text(in input);
+    diags(inout out, inout reader, in input, file_start, file_end);
+    let n = reader.word(in input);
     for i in 0..n {
-        let index = r.word(in b);
-        let line = r.word(in b);
-        let column = r.word(in b);
-        let passed = r.word(in b) != 0;
-        push_place(inout out, in b, fs, fe, line, column);
+        let index = reader.word(in input);
+        let line = reader.word(in input);
+        let column = reader.word(in input);
+        let passed = reader.word(in input) != 0;
+        push_place(inout out, in input, file_start, file_end, line, column);
         if passed {
             push_str(inout out, in "PASS doctest ");
         } else {
@@ -135,83 +148,83 @@ pub fn doc_text(in b: Slice[u8]) -> ChunkSeq[u64] {
         }
         decimal(inout out, index);
         push_str(inout out, in ": ");
-        copy_text(inout out, inout r, in b);
-        if r.word(in b) != 0 {
+        copy_text(inout out, inout reader, in input);
+        if reader.word(in input) != 0 {
             push_str(inout out, in " [");
-            copy_text(inout out, inout r, in b);
+            copy_text(inout out, inout reader, in input);
             out.push(CLOSE_BRACKET);
         }
         out.push(NEWLINE);
-        diags(inout out, inout r, in b, fs, fe);
+        diags(inout out, inout reader, in input, file_start, file_end);
     }
     result(in out)
 }
 
 // An optional text: (present, start, end).
-fn optional(inout r: Reader, in b: Slice[u8]) -> (bool, u64, u64) {
-    if r.word(in b) != 0 {
-        let (s, e) = r.text(in b);
-        (true, s, e)
+fn optional(inout reader: Reader, in input: Slice[u8]) -> (bool, u64, u64) {
+    if reader.word(in input) != 0 {
+        let (start, end) = reader.text(in input);
+        (true, start, end)
     } else {
-        let z: u64 = 0;
-        (false, z, z)
+        let zero: u64 = 0;
+        (false, zero, zero)
     }
 }
 
 // `rust_unit_text` over the input words.
-pub fn unit_text(in b: Slice[u8]) -> ChunkSeq[u64] {
-    let mut r = Reader { pos: 0 };
+pub fn unit_text(in input: Slice[u8]) -> ChunkSeq[u64] {
+    let mut reader = Reader { pos: 0 };
     let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    out.reserve(b.len());
+    out.reserve(input.len());
     let mut total: u64 = 0;
     let mut failed: u64 = 0;
     let mut file_errors: u64 = 0;
-    let nf = r.word(in b);
-    for f in 0..nf {
-        let (ds, de) = r.text(in b);
-        let (has_error, es, ee) = optional(inout r, in b);
+    let file_count = reader.word(in input);
+    for f in 0..file_count {
+        let (display_start, display_end) = reader.text(in input);
+        let (has_error, error_start, error_end) = optional(inout reader, in input);
         if has_error {
             file_errors = wrapping_add(file_errors, 1);
-            push_range(inout out, in b, ds, de);
+            push_range(inout out, in input, display_start, display_end);
             push_str(inout out, in ": FAIL: ");
-            push_range(inout out, in b, es, ee);
+            push_range(inout out, in input, error_start, error_end);
             out.push(NEWLINE);
         }
-        let nt = r.word(in b);
-        total = wrapping_add(total, nt);
-        for t in 0..nt {
-            let (ns, ne) = r.text(in b);
-            let line = r.word(in b);
-            let column = r.word(in b);
-            let passed = r.word(in b) != 0;
+        let test_count = reader.word(in input);
+        total = wrapping_add(total, test_count);
+        for t in 0..test_count {
+            let (name_start, name_end) = reader.text(in input);
+            let line = reader.word(in input);
+            let column = reader.word(in input);
+            let passed = reader.word(in input) != 0;
             if !passed {
                 failed = wrapping_add(failed, 1);
             }
-            let (ms, me) = r.text(in b);
-            let (gs, ge) = r.text(in b);
-            let (has_pin, ps, pe) = optional(inout r, in b);
-            let (has_capsule, cs, ce) = optional(inout r, in b);
+            let (msg_start, msg_end) = reader.text(in input);
+            let (engine_start, engine_end) = reader.text(in input);
+            let (has_pin, pin_start, pin_end) = optional(inout reader, in input);
+            let (has_capsule, capsule_start, capsule_end) = optional(inout reader, in input);
             if !has_error {
-                push_place(inout out, in b, ds, de, line, column);
+                push_place(inout out, in input, display_start, display_end, line, column);
                 if passed {
                     push_str(inout out, in "PASS ");
                 } else {
                     push_str(inout out, in "FAIL ");
                 }
-                push_range(inout out, in b, ns, ne);
+                push_range(inout out, in input, name_start, name_end);
                 push_str(inout out, in " (");
-                push_range(inout out, in b, ms, me);
+                push_range(inout out, in input, msg_start, msg_end);
                 push_str(inout out, in ") [");
-                push_range(inout out, in b, gs, ge);
+                push_range(inout out, in input, engine_start, engine_end);
                 push_str(inout out, in "]\n");
                 if has_pin {
                     push_str(inout out, in "  pin regression: ");
-                    push_range(inout out, in b, ps, pe);
+                    push_range(inout out, in input, pin_start, pin_end);
                     out.push(NEWLINE);
                 }
                 if has_capsule {
                     push_str(inout out, in "  replay capsule: ");
-                    push_range(inout out, in b, cs, ce);
+                    push_range(inout out, in input, capsule_start, capsule_end);
                     out.push(NEWLINE);
                 }
             }
@@ -228,36 +241,36 @@ pub fn unit_text(in b: Slice[u8]) -> ChunkSeq[u64] {
 }
 
 // `rust_baseline_text` over the input words.
-pub fn baseline_text(in b: Slice[u8]) -> ChunkSeq[u64] {
-    let mut r = Reader { pos: 0 };
+pub fn baseline_text(in input: Slice[u8]) -> ChunkSeq[u64] {
+    let mut reader = Reader { pos: 0 };
     let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    out.reserve(b.len());
-    let nf = r.word(in b);
-    for f in 0..nf {
-        let (ds, de) = r.text(in b);
-        let (has_error, es, ee) = optional(inout r, in b);
+    out.reserve(input.len());
+    let file_count = reader.word(in input);
+    for f in 0..file_count {
+        let (display_start, display_end) = reader.text(in input);
+        let (has_error, error_start, error_end) = optional(inout reader, in input);
         if has_error {
-            push_range(inout out, in b, ds, de);
+            push_range(inout out, in input, display_start, display_end);
             push_str(inout out, in ": FAIL: ");
-            push_range(inout out, in b, es, ee);
+            push_range(inout out, in input, error_start, error_end);
             out.push(NEWLINE);
         }
-        let nt = r.word(in b);
-        for t in 0..nt {
-            let (ns, ne) = r.text(in b);
-            let line = r.word(in b);
-            let column = r.word(in b);
-            let passed = r.word(in b) != 0;
-            let (ms, me) = r.text(in b);
-            let (gs, ge) = r.text(in b);
-            let pin = optional(inout r, in b);
-            let capsule = optional(inout r, in b);
+        let test_count = reader.word(in input);
+        for t in 0..test_count {
+            let (name_start, name_end) = reader.text(in input);
+            let line = reader.word(in input);
+            let column = reader.word(in input);
+            let passed = reader.word(in input) != 0;
+            let (msg_start, msg_end) = reader.text(in input);
+            let (engine_start, engine_end) = reader.text(in input);
+            let pin = optional(inout reader, in input);
+            let capsule = optional(inout reader, in input);
             if !passed {
-                push_place(inout out, in b, ds, de, line, column);
+                push_place(inout out, in input, display_start, display_end, line, column);
                 push_str(inout out, in "FAIL ");
-                push_range(inout out, in b, ns, ne);
+                push_range(inout out, in input, name_start, name_end);
                 push_str(inout out, in ": ");
-                push_range(inout out, in b, ms, me);
+                push_range(inout out, in input, msg_start, msg_end);
                 out.push(NEWLINE);
             }
         }
@@ -266,58 +279,58 @@ pub fn baseline_text(in b: Slice[u8]) -> ChunkSeq[u64] {
 }
 
 // `rust_mutants_text` over the input words.
-pub fn mutants_text(in b: Slice[u8]) -> ChunkSeq[u64] {
-    let mut r = Reader { pos: 0 };
+pub fn mutants_text(in input: Slice[u8]) -> ChunkSeq[u64] {
+    let mut reader = Reader { pos: 0 };
     let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    out.reserve(b.len());
-    let n = r.word(in b);
+    out.reserve(input.len());
+    let n = reader.word(in input);
     for i in 0..n {
-        let (fs, fe) = r.text(in b);
-        let line = r.word(in b);
-        let column = r.word(in b);
-        let (us, ue) = r.text(in b);
-        let (os, oe) = r.text(in b);
-        let (rs, re) = r.text(in b);
-        let outcome = r.word(in b);
+        let (file_start, file_end) = reader.text(in input);
+        let line = reader.word(in input);
+        let column = reader.word(in input);
+        let (func_start, func_end) = reader.text(in input);
+        let (orig_start, orig_end) = reader.text(in input);
+        let (rep_start, rep_end) = reader.text(in input);
+        let outcome = reader.word(in input);
         if outcome == OUTCOME_ILL_TYPED {
             continue;
         }
-        let mut has: bool = false;
-        let mut ks: u64 = 0;
-        let mut ke: u64 = 0;
+        let mut has_killer: bool = false;
+        let mut killer_start: u64 = 0;
+        let mut killer_end: u64 = 0;
         if outcome == OUTCOME_KILLED {
-            let (h, s, e) = optional(inout r, in b);
-            has = h;
-            ks = s;
-            ke = e;
+            let (found, start, end) = optional(inout reader, in input);
+            has_killer = found;
+            killer_start = start;
+            killer_end = end;
         }
-        push_place(inout out, in b, fs, fe, line, column);
+        push_place(inout out, in input, file_start, file_end, line, column);
         if outcome == OUTCOME_KILLED {
             push_str(inout out, in "KILLED ");
         } else {
             push_str(inout out, in "SURVIVED ");
         }
-        push_range(inout out, in b, us, ue);
+        push_range(inout out, in input, func_start, func_end);
         push_str(inout out, in " (");
-        push_range(inout out, in b, os, oe);
+        push_range(inout out, in input, orig_start, orig_end);
         push_str(inout out, in " -> ");
-        push_range(inout out, in b, rs, re);
+        push_range(inout out, in input, rep_start, rep_end);
         out.push(CLOSE_PAREN);
         if outcome == OUTCOME_KILLED {
             push_str(inout out, in " by ");
-            if has {
-                push_range(inout out, in b, ks, ke);
+            if has_killer {
+                push_range(inout out, in input, killer_start, killer_end);
             } else {
                 push_str(inout out, in "test");
             }
         }
         out.push(NEWLINE);
     }
-    let killed = r.word(in b);
-    let survived = r.word(in b);
-    let ill_typed = r.word(in b);
-    let tested = r.word(in b);
-    let total = r.word(in b);
+    let killed = reader.word(in input);
+    let survived = reader.word(in input);
+    let ill_typed = reader.word(in input);
+    let tested = reader.word(in input);
+    let total = reader.word(in input);
     push_str(inout out, in "mutation gate: ");
     decimal(inout out, killed);
     push_str(inout out, in " killed, ");

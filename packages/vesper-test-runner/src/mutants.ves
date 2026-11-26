@@ -48,22 +48,22 @@ struct Ops {
     minus_eq: u32
 }
 
-fn ops_new(inout a: Ast) -> Ops {
+fn ops_new(inout ast: Ast) -> Ops {
     Ops {
-        plus: a.names.intern(in "+").id(),
-        minus: a.names.intern(in "-").id(),
-        star: a.names.intern(in "*").id(),
-        eq_eq: a.names.intern(in "==").id(),
-        ne: a.names.intern(in "!=").id(),
-        lt: a.names.intern(in "<").id(),
-        le: a.names.intern(in "<=").id(),
-        gt: a.names.intern(in ">").id(),
-        ge: a.names.intern(in ">=").id(),
-        and: a.names.intern(in "&&").id(),
-        or: a.names.intern(in "||").id(),
-        not: a.names.intern(in "!").id(),
-        plus_eq: a.names.intern(in "+=").id(),
-        minus_eq: a.names.intern(in "-=").id()
+        plus: ast.names.intern(in "+").id(),
+        minus: ast.names.intern(in "-").id(),
+        star: ast.names.intern(in "*").id(),
+        eq_eq: ast.names.intern(in "==").id(),
+        ne: ast.names.intern(in "!=").id(),
+        lt: ast.names.intern(in "<").id(),
+        le: ast.names.intern(in "<=").id(),
+        gt: ast.names.intern(in ">").id(),
+        ge: ast.names.intern(in ">=").id(),
+        and: ast.names.intern(in "&&").id(),
+        or: ast.names.intern(in "||").id(),
+        not: ast.names.intern(in "!").id(),
+        plus_eq: ast.names.intern(in "+=").id(),
+        minus_eq: ast.names.intern(in "-=").id()
     }
 }
 
@@ -104,8 +104,8 @@ const SITE_FALSE: u64 = 16;
 const SITE_DROPPED_NOT: u64 = 17;
 
 // Site texts: 1-14 operators, 15 "true", 16 "false", 17 " " (a dropped `!`).
-fn code_text(c: u64) -> Str {
-    match c {
+fn code_text(code: u64) -> Str {
+    match code {
         SITE_PLUS => "+",
         SITE_MINUS => "-",
         SITE_STAR => "*",
@@ -126,38 +126,38 @@ fn code_text(c: u64) -> Str {
     }
 }
 
-fn site(inout s: Sites, name: u32, start: u64, end: u64, original: u64, replacement: u64) {
-    s.words.push(widen_u64(name));
-    s.words.push(start);
-    s.words.push(end);
-    s.words.push(original);
-    s.words.push(replacement);
+fn site(inout sites: Sites, name: u32, start: u64, end: u64, original: u64, replacement: u64) {
+    sites.words.push(widen_u64(name));
+    sites.words.push(start);
+    sites.words.push(end);
+    sites.words.push(original);
+    sites.words.push(replacement);
 }
 
 // The binary operator code of `op` and its one or two replacement codes
 // (0 when none): `collect_mutants_in_fn`'s table.
-fn binary_codes(in o: Ops, op: u32) -> (u64, u64, u64) {
-    if op == o.plus {
+fn binary_codes(in ops: Ops, op: u32) -> (u64, u64, u64) {
+    if op == ops.plus {
         (SITE_PLUS, SITE_MINUS, SITE_NONE)
-    } else if op == o.minus {
+    } else if op == ops.minus {
         (SITE_MINUS, SITE_PLUS, SITE_NONE)
-    } else if op == o.star {
+    } else if op == ops.star {
         (SITE_STAR, SITE_PLUS, SITE_NONE)
-    } else if op == o.eq_eq {
+    } else if op == ops.eq_eq {
         (SITE_EQ_EQ, SITE_NE, SITE_NONE)
-    } else if op == o.ne {
+    } else if op == ops.ne {
         (SITE_NE, SITE_EQ_EQ, SITE_NONE)
-    } else if op == o.lt {
+    } else if op == ops.lt {
         (SITE_LT, SITE_LE, SITE_GE)
-    } else if op == o.le {
+    } else if op == ops.le {
         (SITE_LE, SITE_LT, SITE_GT)
-    } else if op == o.gt {
+    } else if op == ops.gt {
         (SITE_GT, SITE_GE, SITE_LE)
-    } else if op == o.ge {
+    } else if op == ops.ge {
         (SITE_GE, SITE_GT, SITE_LT)
-    } else if op == o.and {
+    } else if op == ops.and {
         (SITE_AND, SITE_OR, SITE_NONE)
-    } else if op == o.or {
+    } else if op == ops.or {
         (SITE_OR, SITE_AND, SITE_NONE)
     } else {
         (SITE_NONE, SITE_NONE, SITE_NONE)
@@ -168,66 +168,66 @@ fn binary_codes(in o: Ops, op: u32) -> (u64, u64, u64) {
 // `[range_start, range_end]` whose text is `op`, as (found, start, end).
 fn find_operator(
     in src: Slice[u8],
-    in t: Toks,
+    in tokens: Toks,
     range_start: u64,
     range_end: u64,
     in op: Str
 ) -> (bool, u64, u64) {
     // partition_point(|t| t.span.start < range_start)
     let mut lo: u64 = 0;
-    let mut hi = t.kind.len();
+    let mut hi = tokens.kind.len();
     loop {
         if lo >= hi {
             break;
         }
         let mid = add(lo, sub(hi, lo) / 2);
-        if u64_at(in t.start, mid) < range_start {
+        if u64_at(in tokens.start, mid) < range_start {
             lo = inc(mid);
         } else {
             hi = mid;
         }
     }
-    let n = t.kind.len();
+    let n = tokens.kind.len();
     let mut i = lo;
     loop {
         if i >= n {
             break;
         }
-        let s = u64_at(in t.start, i);
-        let e = u64_at(in t.end, i);
-        if e > range_end {
+        let tok_start = u64_at(in tokens.start, i);
+        let tok_end = u64_at(in tokens.end, i);
+        if tok_end > range_end {
             break;
         }
-        let k = u8_at(in t.kind, i);
-        if k != k_whitespace()
-            && k != k_comment()
-            && k != k_block_comment()
-            && is_text(in src, s, e, in op)
+        let kind = u8_at(in tokens.kind, i);
+        if kind != k_whitespace()
+            && kind != k_comment()
+            && kind != k_block_comment()
+            && is_text(in src, tok_start, tok_end, in op)
         {
-            return (true, s, e);
+            return (true, tok_start, tok_end);
         }
         i = inc(i);
     }
     (false, 0, 0)
 }
 
-fn stmt_at(in a: Ast, i: u32) -> StmtNode {
-    a.stmts.get_or(
+fn stmt_at(in ast: Ast, i: u32) -> StmtNode {
+    ast.stmts.get_or(
         idx_from_raw[StmtNode](i),
         StmtNode { kind: 0, pat: 0, ty: 0, value: 0, mutable: false }
     )
 }
 
-fn arg_at(in a: Ast, i: u32) -> ArgNode {
-    a.args.get_or(idx_from_raw[ArgNode](i), ArgNode { pass: 0, explicit: false, expr: 0 })
+fn arg_at(in ast: Ast, i: u32) -> ArgNode {
+    ast.args.get_or(idx_from_raw[ArgNode](i), ArgNode { pass: 0, explicit: false, expr: 0 })
 }
 
-fn clause_at(in a: Ast, i: u32) -> ClauseNode {
-    a.clauses.get_or(idx_from_raw[ClauseNode](i), ClauseNode { name: 0, pats: 0, body: 0 })
+fn clause_at(in ast: Ast, i: u32) -> ClauseNode {
+    ast.clauses.get_or(idx_from_raw[ClauseNode](i), ClauseNode { name: 0, pats: 0, body: 0 })
 }
 
-fn fn_at(in a: Ast, i: u32) -> FnNode {
-    a.fns.get_or(
+fn fn_at(in ast: Ast, i: u32) -> FnNode {
+    ast.fns.get_or(
         idx_from_raw[FnNode](i),
         FnNode {
             name: 0,
@@ -245,8 +245,8 @@ fn fn_at(in a: Ast, i: u32) -> FnNode {
 
 // Pushes the elements of `list` (`stride` words each, the expression at
 // word `at`) in reverse order.
-fn push_rev(inout stack: ChunkSeq[u32], in a: Ast, list: u32, stride: u64, at: u64) {
-    let len = list_len(in a, list);
+fn push_rev(inout stack: ChunkSeq[u32], in ast: Ast, list: u32, stride: u64, at: u64) {
+    let len = list_len(in ast, list);
     let n = if stride == PAIR_WORDS {
         len / PAIR_WORDS
     } else {
@@ -258,308 +258,334 @@ fn push_rev(inout stack: ChunkSeq[u32], in a: Ast, list: u32, stride: u64, at: u
             break;
         }
         k = sub(k, 1);
-        stack.push(list_at(in a, list, add(wrapping_mul(k, stride), at)));
+        stack.push(list_at(in ast, list, add(wrapping_mul(k, stride), at)));
     }
 }
 
-// `collect_mutants_in_fn` for the function `f`.
+// `collect_mutants_in_fn` for the function `func`.
 fn collect_in_fn(
     in src: Slice[u8],
-    in t: Toks,
-    in a: Ast,
-    in o: Ops,
-    in f: FnNode,
+    in tokens: Toks,
+    in ast: Ast,
+    in ops: Ops,
+    in func: FnNode,
     inout stack: ChunkSeq[u32],
     inout out: Sites
 ) {
-    if f.body == none() {
+    if func.body == none() {
         return;
     }
     stack.clear();
-    stack.push(f.body);
+    stack.push(func.body);
     let mut visited: u64 = 0;
     loop {
-        let n = stack.len();
-        if n == 0 {
+        let stack_len = stack.len();
+        if stack_len == 0 {
             break;
         }
-        let ei = stack.try_get(sub(n, 1)).unwrap_or(0);
-        stack.truncate(sub(n, 1));
+        let expr_id = stack.try_get(sub(stack_len, 1)).unwrap_or(0);
+        stack.truncate(sub(stack_len, 1));
         visited = inc(visited);
         if visited > MAX_VISITED {
             break;
         }
-        let e = expr_at(in a, ei);
-        let k = e.kind;
-        if k == EXPR_LITERAL {
-            let lit = lit_at(in a, e.a);
+        let expr = expr_at(in ast, expr_id);
+        let kind = expr.kind;
+        if kind == EXPR_LITERAL {
+            let lit = lit_at(in ast, expr.a);
             if lit.kind == LIT_BOOL {
-                let s = widen_u64(e.start);
-                let z = widen_u64(e.end);
-                if z <= src.len() && s <= z {
-                    let ts = trim_start(in src, s, z);
-                    let te = trim_end(in src, ts, z);
+                let lit_start = widen_u64(expr.start);
+                let lit_end = widen_u64(expr.end);
+                if lit_end <= src.len() && lit_start <= lit_end {
+                    let text_start = trim_start(in src, lit_start, lit_end);
+                    let text_end = trim_end(in src, text_start, lit_end);
                     let value = lit.bits != 0;
-                    if value && is_text(in src, ts, te, in "true") {
-                        site(inout out, f.name, ts, te, SITE_TRUE, SITE_FALSE);
-                    } else if !value && is_text(in src, ts, te, in "false") {
-                        site(inout out, f.name, ts, te, SITE_FALSE, SITE_TRUE);
+                    if value && is_text(in src, text_start, text_end, in "true") {
+                        site(inout out, func.name, text_start, text_end, SITE_TRUE, SITE_FALSE);
+                    } else if !value && is_text(in src, text_start, text_end, in "false") {
+                        site(inout out, func.name, text_start, text_end, SITE_FALSE, SITE_TRUE);
                     }
                 }
             }
-        } else if k == EXPR_UNARY {
-            if e.a == o.not {
-                let inner = expr_at(in a, e.b);
-                let (found, s, z) = find_operator(
+        } else if kind == EXPR_UNARY {
+            if expr.a == ops.not {
+                let inner = expr_at(in ast, expr.b);
+                let (found, op_start, op_end) = find_operator(
                     in src,
-                    in t,
-                    widen_u64(e.start),
+                    in tokens,
+                    widen_u64(expr.start),
                     widen_u64(inner.start),
                     in "!"
                 );
                 if found {
-                    site(inout out, f.name, s, z, SITE_NOT, SITE_DROPPED_NOT);
+                    site(inout out, func.name, op_start, op_end, SITE_NOT, SITE_DROPPED_NOT);
                 }
             }
-            stack.push(e.b);
-        } else if k == EXPR_BINARY {
-            let (code, r1, r2) = binary_codes(in o, e.a);
+            stack.push(expr.b);
+        } else if kind == EXPR_BINARY {
+            let (code, first_rep, second_rep) = binary_codes(in ops, expr.a);
             if code != SITE_NONE {
-                let lhs = expr_at(in a, e.b);
-                let rhs = expr_at(in a, e.c);
-                let (found, s, z) = find_operator(
+                let lhs = expr_at(in ast, expr.b);
+                let rhs = expr_at(in ast, expr.c);
+                let (found, op_start, op_end) = find_operator(
                     in src,
-                    in t,
+                    in tokens,
                     widen_u64(lhs.end),
                     widen_u64(rhs.start),
                     in code_text(code)
                 );
                 if found {
-                    site(inout out, f.name, s, z, code, r1);
-                    if r2 != SITE_NONE {
-                        site(inout out, f.name, s, z, code, r2);
+                    site(inout out, func.name, op_start, op_end, code, first_rep);
+                    if second_rep != SITE_NONE {
+                        site(inout out, func.name, op_start, op_end, code, second_rep);
                     }
                 }
             }
-            stack.push(e.c);
-            stack.push(e.b);
-        } else if k == EXPR_ASSIGN {
+            stack.push(expr.c);
+            stack.push(expr.b);
+        } else if kind == EXPR_ASSIGN {
             let mut code: u64 = SITE_NONE;
-            let mut rep: u64 = SITE_NONE;
-            if e.a == o.plus_eq {
+            let mut replacement: u64 = SITE_NONE;
+            if expr.a == ops.plus_eq {
                 code = SITE_PLUS_EQ;
-                rep = SITE_MINUS_EQ;
-            } else if e.a == o.minus_eq {
+                replacement = SITE_MINUS_EQ;
+            } else if expr.a == ops.minus_eq {
                 code = SITE_MINUS_EQ;
-                rep = SITE_PLUS_EQ;
+                replacement = SITE_PLUS_EQ;
             }
             if code != SITE_NONE {
-                let lhs = expr_at(in a, e.b);
-                let rhs = expr_at(in a, e.c);
-                let (found, s, z) = find_operator(
+                let lhs = expr_at(in ast, expr.b);
+                let rhs = expr_at(in ast, expr.c);
+                let (found, op_start, op_end) = find_operator(
                     in src,
-                    in t,
+                    in tokens,
                     widen_u64(lhs.end),
                     widen_u64(rhs.start),
                     in code_text(code)
                 );
                 if found {
-                    site(inout out, f.name, s, z, code, rep);
+                    site(inout out, func.name, op_start, op_end, code, replacement);
                 }
             }
-            stack.push(e.c);
-            stack.push(e.b);
-        } else if k == EXPR_TUPLE {
-            push_rev(inout stack, in a, e.a, 1, 0);
-        } else if k == EXPR_STRUCT {
-            push_rev(inout stack, in a, e.b, PAIR_WORDS, 1);
-        } else if k == EXPR_BLOCK {
-            if e.b != none() {
-                stack.push(e.b);
+            stack.push(expr.c);
+            stack.push(expr.b);
+        } else if kind == EXPR_TUPLE {
+            push_rev(inout stack, in ast, expr.a, 1, 0);
+        } else if kind == EXPR_STRUCT {
+            push_rev(inout stack, in ast, expr.b, PAIR_WORDS, 1);
+        } else if kind == EXPR_BLOCK {
+            if expr.b != none() {
+                stack.push(expr.b);
             }
-            let m = list_len(in a, e.a);
-            let mut q = m;
+            let count = list_len(in ast, expr.a);
+            let mut q = count;
             loop {
                 if q == 0 {
                     break;
                 }
                 q = sub(q, 1);
-                let st = stmt_at(in a, list_at(in a, e.a, q));
-                stack.push(st.value);
+                let stmt = stmt_at(in ast, list_at(in ast, expr.a, q));
+                stack.push(stmt.value);
             }
-        } else if k == EXPR_CALL {
-            let m = list_len(in a, e.c);
-            let mut q = m;
+        } else if kind == EXPR_CALL {
+            let count = list_len(in ast, expr.c);
+            let mut q = count;
             loop {
                 if q == 0 {
                     break;
                 }
                 q = sub(q, 1);
-                stack.push(arg_at(in a, list_at(in a, e.c, q)).expr);
+                stack.push(arg_at(in ast, list_at(in ast, expr.c, q)).expr);
             }
-            stack.push(e.a);
-        } else if k == EXPR_FIELD || k == EXPR_TRY {
-            stack.push(e.a);
-        } else if k == EXPR_INDEX {
-            stack.push(e.b);
-            stack.push(e.a);
-        } else if k == EXPR_IF {
-            if e.c != none() {
-                stack.push(e.c);
+            stack.push(expr.a);
+        } else if kind == EXPR_FIELD || kind == EXPR_TRY {
+            stack.push(expr.a);
+        } else if kind == EXPR_INDEX {
+            stack.push(expr.b);
+            stack.push(expr.a);
+        } else if kind == EXPR_IF {
+            if expr.c != none() {
+                stack.push(expr.c);
             }
-            stack.push(e.b);
-            stack.push(e.a);
-        } else if k == EXPR_MATCH {
-            push_rev(inout stack, in a, e.b, PAIR_WORDS, 1);
-            stack.push(e.a);
-        } else if k == EXPR_CLOSURE {
-            stack.push(e.e);
-        } else if k == EXPR_LOOP {
-            stack.push(e.a);
-        } else if k == EXPR_FOR {
+            stack.push(expr.b);
+            stack.push(expr.a);
+        } else if kind == EXPR_MATCH {
+            push_rev(inout stack, in ast, expr.b, PAIR_WORDS, 1);
+            stack.push(expr.a);
+        } else if kind == EXPR_CLOSURE {
+            stack.push(expr.e);
+        } else if kind == EXPR_LOOP {
+            stack.push(expr.a);
+        } else if kind == EXPR_FOR {
             // control_children [iter, body], reversed onto the stack.
-            stack.push(e.c);
-            stack.push(e.b);
-        } else if k == EXPR_RANGE {
-            stack.push(e.b);
-            stack.push(e.a);
-        } else if k == EXPR_BREAK || k == EXPR_RETURN {
-            if e.a != none() {
-                stack.push(e.a);
+            stack.push(expr.c);
+            stack.push(expr.b);
+        } else if kind == EXPR_RANGE {
+            stack.push(expr.b);
+            stack.push(expr.a);
+        } else if kind == EXPR_BREAK || kind == EXPR_RETURN {
+            if expr.a != none() {
+                stack.push(expr.a);
             }
-        } else if k == EXPR_HANDLE {
+        } else if kind == EXPR_HANDLE {
             // The clauses: the return clause, then the operations.
-            let m = list_len(in a, e.e);
-            let mut q = m;
+            let count = list_len(in ast, expr.e);
+            let mut q = count;
             loop {
                 if q <= 1 {
                     break;
                 }
                 q = sub(q, 1);
-                stack.push(clause_at(in a, list_at(in a, e.e, q)).body);
+                stack.push(clause_at(in ast, list_at(in ast, expr.e, q)).body);
             }
-            if m > 0 {
-                stack.push(clause_at(in a, list_at(in a, e.e, 0)).body);
+            if count > 0 {
+                stack.push(clause_at(in ast, list_at(in ast, expr.e, 0)).body);
             }
-            stack.push(e.d);
-            if e.b != none() {
-                stack.push(e.c);
+            stack.push(expr.d);
+            if expr.b != none() {
+                stack.push(expr.c);
             }
         }
     }
 }
 
-// Whether `src[s..e]` is one of the test names in the input `b`.
-fn is_test_name(in b: Slice[u8], in names: ChunkSeq[u64], in name: Slice[u8]) -> bool {
+// Whether `name` is one of the test names in `input`.
+fn is_test_name(in input: Slice[u8], in names: ChunkSeq[u64], in name: Slice[u8]) -> bool {
     let n = names.len() / PAIR_WORDS;
     for i in 0..n {
-        let s = u64_at(in names, wrapping_mul(i, PAIR_WORDS));
-        let e = u64_at(in names, inc(wrapping_mul(i, PAIR_WORDS)));
-        if same(in b, s, e, in name, 0, name.len()) {
+        let name_start = u64_at(in names, wrapping_mul(i, PAIR_WORDS));
+        let name_end = u64_at(in names, inc(wrapping_mul(i, PAIR_WORDS)));
+        if same(in input, name_start, name_end, in name, 0, name.len()) {
             return true;
         }
     }
     false
 }
 
-// Site `i`'s word `w` of `s`.
-fn sw(in s: Sites, i: u64, w: u64) -> u64 {
-    u64_at(in s.words, add(wrapping_mul(i, SiteWord::Words), w))
+// Site `site_index`'s word `word` of `sites`.
+fn sw(in sites: Sites, site_index: u64, word: u64) -> u64 {
+    u64_at(in sites.words, add(wrapping_mul(site_index, SiteWord::Words), word))
 }
 
-// Whether site `x` sorts before site `y`: (start, end, replacement text).
-fn site_less(in s: Sites, x: u64, y: u64) -> bool {
-    let (xs, ys) = (sw(in s, x, SiteWord::Start), sw(in s, y, SiteWord::Start));
-    if xs != ys {
-        return xs < ys;
+// Whether site `lhs` sorts before site `rhs`: (start, end, replacement text).
+fn site_less(in sites: Sites, lhs: u64, rhs: u64) -> bool {
+    let (lhs_start, rhs_start) = (
+        sw(in sites, lhs, SiteWord::Start),
+        sw(in sites, rhs, SiteWord::Start)
+    );
+    if lhs_start != rhs_start {
+        return lhs_start < rhs_start;
     }
-    let (xe, ye) = (sw(in s, x, SiteWord::End), sw(in s, y, SiteWord::End));
-    if xe != ye {
-        return xe < ye;
+    let (lhs_end, rhs_end) = (sw(in sites, lhs, SiteWord::End), sw(in sites, rhs, SiteWord::End));
+    if lhs_end != rhs_end {
+        return lhs_end < rhs_end;
     }
-    let p = code_text(sw(in s, x, SiteWord::Replacement)).as_bytes();
-    let q = code_text(sw(in s, y, SiteWord::Replacement)).as_bytes();
-    let n = p.len();
-    let m = q.len();
+    let lhs_text = code_text(sw(in sites, lhs, SiteWord::Replacement)).as_bytes();
+    let rhs_text = code_text(sw(in sites, rhs, SiteWord::Replacement)).as_bytes();
+    let lhs_len = lhs_text.len();
+    let rhs_len = rhs_text.len();
     let mut i: u64 = 0;
     loop {
-        if i >= n || i >= m {
+        if i >= lhs_len || i >= rhs_len {
             break;
         }
-        let (c, d) = (u8_at_slice(in p, i), u8_at_slice(in q, i));
-        if c != d {
-            return c < d;
+        let (lhs_byte, rhs_byte) = (u8_at_slice(in lhs_text, i), u8_at_slice(in rhs_text, i));
+        if lhs_byte != rhs_byte {
+            return lhs_byte < rhs_byte;
         }
         i = inc(i);
     }
-    n < m
+    lhs_len < rhs_len
 }
 
-fn u8_at_slice(in s: Slice[u8], i: u64) -> u8 {
-    s.try_get(i).unwrap_or(0)
+fn u8_at_slice(in bytes: Slice[u8], i: u64) -> u8 {
+    bytes.try_get(i).unwrap_or(0)
 }
 
 // `rust_collect` over the input words.
-pub fn collect(in b: Slice[u8]) -> ChunkSeq[u64] {
-    let mut r = Reader { pos: 0 };
-    let (ss, se) = r.text(in b);
-    let count = r.word(in b);
+pub fn collect(in input: Slice[u8]) -> ChunkSeq[u64] {
+    let mut reader = Reader { pos: 0 };
+    let (src_start, src_end) = reader.text(in input);
+    let name_count = reader.word(in input);
     let mut names: ChunkSeq[u64] = ChunkSeq::new[u64]();
-    for i in 0..count {
-        let (s, e) = r.text(in b);
-        names.push(s);
-        names.push(e);
+    for i in 0..name_count {
+        let (name_start, name_end) = reader.text(in input);
+        names.push(name_start);
+        names.push(name_end);
     }
-    let src = b[ss..se];
+    let src = input[src_start..src_end];
     let text = match String::from_utf8(in src) {
-        Option::Some(x) => x,
+        Option::Some(decoded) => decoded,
         Option::None => String::new(),
     };
-    let mut l = lower_source(in text.as_str());
-    let o = ops_new(inout l.ast);
-    let t = toks(in src);
+    let mut lowered = lower_source(in text.as_str());
+    let ops = ops_new(inout lowered.ast);
+    let tokens = toks(in src);
     let mut out = Sites { words: ChunkSeq::new[u64]() };
     let mut stack: ChunkSeq[u32] = ChunkSeq::new[u32]();
     let mut comments: ChunkSeq[u64] = ChunkSeq::new[u64]();
     let mut name: String = String::new();
-    let items = l.ast.m_items.len();
+    let items = lowered.ast.m_items.len();
     for i in 0..items {
-        let it = l.ast.m_items.try_get(i).unwrap_or(0);
-        let item = l.ast.items.get_or(idx_from_raw[ItemNode](it), ItemNode { kind: 0, node: 0 });
+        let item_id = lowered.ast.m_items.try_get(i).unwrap_or(0);
+        let item = lowered
+            .ast
+            .items
+            .get_or(idx_from_raw[ItemNode](item_id), ItemNode { kind: 0, node: 0 });
         if item.kind == ITEM_FUNCTION {
-            let f = fn_at(in l.ast, item.node);
+            let func = fn_at(in lowered.ast, item.node);
             name.clear();
-            let ok = l.ast.names.resolve_into(symbol_from_id(f.name), inout name);
-            let nb = name.as_bytes();
-            let mut test = is_test_name(in b, in names, in nb)
-                || starts_with_bytes(in nb, in "test_");
+            let ok = lowered.ast.names.resolve_into(symbol_from_id(func.name), inout name);
+            let name_bytes = name.as_bytes();
+            let mut test = is_test_name(in input, in names, in name_bytes)
+                || starts_with_bytes(in name_bytes, in "test_");
             if !test {
-                preceding_comments(in t, widen_u64(f.start), inout comments);
-                let m = comments.len() / PAIR_WORDS;
-                for q in 0..m {
-                    let cs = u64_at(in comments, wrapping_mul(q, PAIR_WORDS));
-                    let ce = u64_at(in comments, inc(wrapping_mul(q, PAIR_WORDS)));
-                    let (row, x, y) = case_marker(in src, cs, ce);
-                    if is_test_marker(in src, cs, ce) || row {
+                preceding_comments(in tokens, widen_u64(func.start), inout comments);
+                let comment_count = comments.len() / PAIR_WORDS;
+                for q in 0..comment_count {
+                    let comment_start = u64_at(in comments, wrapping_mul(q, PAIR_WORDS));
+                    let comment_end = u64_at(in comments, inc(wrapping_mul(q, PAIR_WORDS)));
+                    let (is_row, row_start, row_end) = case_marker(
+                        in src,
+                        comment_start,
+                        comment_end
+                    );
+                    if is_test_marker(in src, comment_start, comment_end) || is_row {
                         test = true;
                     }
                 }
             }
             if !test {
-                collect_in_fn(in src, in t, in l.ast, in o, in f, inout stack, inout out);
+                collect_in_fn(
+                    in src,
+                    in tokens,
+                    in lowered.ast,
+                    in ops,
+                    in func,
+                    inout stack,
+                    inout out
+                );
             }
         } else if item.kind == ITEM_IMPL {
-            let im = l.ast.impls.get_or(
+            let impl_node = lowered.ast.impls.get_or(
                 idx_from_raw[ImplNode](item.node),
                 ImplNode { ty: 0, generics: 0, methods: 0 }
             );
-            let m = list_len(in l.ast, im.methods);
-            for q in 0..m {
-                let f = fn_at(in l.ast, list_at(in l.ast, im.methods, q));
-                collect_in_fn(in src, in t, in l.ast, in o, in f, inout stack, inout out);
+            let method_count = list_len(in lowered.ast, impl_node.methods);
+            for q in 0..method_count {
+                let func = fn_at(in lowered.ast, list_at(in lowered.ast, impl_node.methods, q));
+                collect_in_fn(
+                    in src,
+                    in tokens,
+                    in lowered.ast,
+                    in ops,
+                    in func,
+                    inout stack,
+                    inout out
+                );
             }
         } else if item.kind == ITEM_CONFORMANCE {
-            let c = l.ast.confs.get_or(
+            let conf = lowered.ast.confs.get_or(
                 idx_from_raw[ConfNode](item.node),
                 ConfNode {
                     model: 0,
@@ -574,18 +600,26 @@ pub fn collect(in b: Slice[u8]) -> ChunkSeq[u64] {
                     end: 0
                 }
             );
-            let m = list_len(in l.ast, c.methods);
-            for q in 0..m {
-                let f = fn_at(in l.ast, list_at(in l.ast, c.methods, q));
-                collect_in_fn(in src, in t, in l.ast, in o, in f, inout stack, inout out);
+            let method_count = list_len(in lowered.ast, conf.methods);
+            for q in 0..method_count {
+                let func = fn_at(in lowered.ast, list_at(in lowered.ast, conf.methods, q));
+                collect_in_fn(
+                    in src,
+                    in tokens,
+                    in lowered.ast,
+                    in ops,
+                    in func,
+                    inout stack,
+                    inout out
+                );
             }
         }
     }
     // A stable insertion sort of the site indices (the walk is close to
     // source order already).
-    let n = out.words.len() / SiteWord::Words;
-    let mut order: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](n);
-    for i in 0..n {
+    let site_count = out.words.len() / SiteWord::Words;
+    let mut order: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](site_count);
+    for i in 0..site_count {
         order.push(i);
         let mut j = i;
         loop {
@@ -604,29 +638,30 @@ pub fn collect(in b: Slice[u8]) -> ChunkSeq[u64] {
     }
     let mut res: ChunkSeq[u64] = ChunkSeq::new[u64]();
     res.push(STATUS_OK);
-    res.push(n);
-    for i in 0..n {
-        let x = u64_at(in order, i);
+    res.push(site_count);
+    for i in 0..site_count {
+        let site_index = u64_at(in order, i);
         name.clear();
-        let ok = l.ast
-            .names
-            .resolve_into(symbol_from_id(wrapping_u32(sw(in out, x, SiteWord::Name))), inout name);
-        let nb = name.as_bytes();
-        put_text(inout res, in nb, 0, nb.len());
-        res.push(sw(in out, x, SiteWord::Start));
-        res.push(sw(in out, x, SiteWord::End));
-        let orig = code_text(sw(in out, x, SiteWord::Original)).as_bytes();
+        let ok = lowered.ast.names.resolve_into(
+            symbol_from_id(wrapping_u32(sw(in out, site_index, SiteWord::Name))),
+            inout name
+        );
+        let name_bytes = name.as_bytes();
+        put_text(inout res, in name_bytes, 0, name_bytes.len());
+        res.push(sw(in out, site_index, SiteWord::Start));
+        res.push(sw(in out, site_index, SiteWord::End));
+        let orig = code_text(sw(in out, site_index, SiteWord::Original)).as_bytes();
         put_text(inout res, in orig, 0, orig.len());
-        let rep = code_text(sw(in out, x, SiteWord::Replacement)).as_bytes();
+        let rep = code_text(sw(in out, site_index, SiteWord::Replacement)).as_bytes();
         put_text(inout res, in rep, 0, rep.len());
     }
     res
 }
 
-fn starts_with_bytes(in b: Slice[u8], in w: Str) -> bool {
-    let c = w.as_bytes();
-    if b.len() < c.len() {
+fn starts_with_bytes(in bytes: Slice[u8], in text: Str) -> bool {
+    let prefix = text.as_bytes();
+    if bytes.len() < prefix.len() {
         return false;
     }
-    same(in b, 0, c.len(), in c, 0, c.len())
+    same(in bytes, 0, prefix.len(), in prefix, 0, prefix.len())
 }

@@ -197,92 +197,92 @@ impl Abi for vesper__check_2data__world__Variant {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct vesper__check_2pact__decl__AssocDecl { pub name: u32, pub bound: u8, pub s: u64, pub e: u64 }
+pub struct vesper__check_2pact__decl__AssocDecl { pub name: u32, pub bound: u8, pub span_start: u64, pub span_end: u64 }
 
 impl Abi for vesper__check_2pact__decl__AssocDecl {
     const WORDS: usize = 4;
     fn put(&self, out: &mut [u64]) {
         Abi::put(&self.name, &mut out[0..]);
         Abi::put(&self.bound, &mut out[1..]);
-        Abi::put(&self.s, &mut out[2..]);
-        Abi::put(&self.e, &mut out[3..]);
+        Abi::put(&self.span_start, &mut out[2..]);
+        Abi::put(&self.span_end, &mut out[3..]);
     }
     fn get(words: &[u64]) -> Self {
-        vesper__check_2pact__decl__AssocDecl { name: Abi::get(&words[0..]), bound: Abi::get(&words[1..]), s: Abi::get(&words[2..]), e: Abi::get(&words[3..]) }
+        vesper__check_2pact__decl__AssocDecl { name: Abi::get(&words[0..]), bound: Abi::get(&words[1..]), span_start: Abi::get(&words[2..]), span_end: Abi::get(&words[3..]) }
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct vesper__check_2pact__decl__Bind { pub name: u32, pub ty: u32, pub s: u64, pub e: u64 }
+pub struct vesper__check_2pact__decl__Bind { pub name: u32, pub ty: u32, pub span_start: u64, pub span_end: u64 }
 
 impl Abi for vesper__check_2pact__decl__Bind {
     const WORDS: usize = 4;
     fn put(&self, out: &mut [u64]) {
         Abi::put(&self.name, &mut out[0..]);
         Abi::put(&self.ty, &mut out[1..]);
-        Abi::put(&self.s, &mut out[2..]);
-        Abi::put(&self.e, &mut out[3..]);
+        Abi::put(&self.span_start, &mut out[2..]);
+        Abi::put(&self.span_end, &mut out[3..]);
     }
     fn get(words: &[u64]) -> Self {
-        vesper__check_2pact__decl__Bind { name: Abi::get(&words[0..]), ty: Abi::get(&words[1..]), s: Abi::get(&words[2..]), e: Abi::get(&words[3..]) }
+        vesper__check_2pact__decl__Bind { name: Abi::get(&words[0..]), ty: Abi::get(&words[1..]), span_start: Abi::get(&words[2..]), span_end: Abi::get(&words[3..]) }
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct vesper__check_2pact__decl__BoundSyn { pub param: u32, pub tref: u32, pub s: u64, pub e: u64, pub owner: u32 }
+pub struct vesper__check_2pact__decl__BoundSyn { pub param: u32, pub tref: u32, pub span_start: u64, pub span_end: u64, pub owner: u32 }
 
 impl Abi for vesper__check_2pact__decl__BoundSyn {
     const WORDS: usize = 5;
     fn put(&self, out: &mut [u64]) {
         Abi::put(&self.param, &mut out[0..]);
         Abi::put(&self.tref, &mut out[1..]);
-        Abi::put(&self.s, &mut out[2..]);
-        Abi::put(&self.e, &mut out[3..]);
+        Abi::put(&self.span_start, &mut out[2..]);
+        Abi::put(&self.span_end, &mut out[3..]);
         Abi::put(&self.owner, &mut out[4..]);
     }
     fn get(words: &[u64]) -> Self {
-        vesper__check_2pact__decl__BoundSyn { param: Abi::get(&words[0..]), tref: Abi::get(&words[1..]), s: Abi::get(&words[2..]), e: Abi::get(&words[3..]), owner: Abi::get(&words[4..]) }
+        vesper__check_2pact__decl__BoundSyn { param: Abi::get(&words[0..]), tref: Abi::get(&words[1..]), span_start: Abi::get(&words[2..]), span_end: Abi::get(&words[3..]), owner: Abi::get(&words[4..]) }
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct vesper__check_2pact__decl__Conf { pub model: bool, pub mname: u32, pub ga: u32, pub gn: u32, pub tref: u32, pub self_ty: u32, pub wa: u32, pub wn: u32, pub ba: u32, pub bn: u32, pub ma: u32, pub mn: u32, pub s: u64, pub e: u64 }
+pub struct vesper__check_2pact__decl__Conf { pub model: bool, pub model_name: u32, pub gen_start: u32, pub gen_count: u32, pub tref: u32, pub self_ty: u32, pub where_start: u32, pub where_count: u32, pub bind_start: u32, pub bind_count: u32, pub method_start: u32, pub method_count: u32, pub span_start: u64, pub span_end: u64 }
 
 impl Abi for vesper__check_2pact__decl__Conf {
     const WORDS: usize = 14;
     fn put(&self, out: &mut [u64]) {
         Abi::put(&self.model, &mut out[0..]);
-        Abi::put(&self.mname, &mut out[1..]);
-        Abi::put(&self.ga, &mut out[2..]);
-        Abi::put(&self.gn, &mut out[3..]);
+        Abi::put(&self.model_name, &mut out[1..]);
+        Abi::put(&self.gen_start, &mut out[2..]);
+        Abi::put(&self.gen_count, &mut out[3..]);
         Abi::put(&self.tref, &mut out[4..]);
         Abi::put(&self.self_ty, &mut out[5..]);
-        Abi::put(&self.wa, &mut out[6..]);
-        Abi::put(&self.wn, &mut out[7..]);
-        Abi::put(&self.ba, &mut out[8..]);
-        Abi::put(&self.bn, &mut out[9..]);
-        Abi::put(&self.ma, &mut out[10..]);
-        Abi::put(&self.mn, &mut out[11..]);
-        Abi::put(&self.s, &mut out[12..]);
-        Abi::put(&self.e, &mut out[13..]);
+        Abi::put(&self.where_start, &mut out[6..]);
+        Abi::put(&self.where_count, &mut out[7..]);
+        Abi::put(&self.bind_start, &mut out[8..]);
+        Abi::put(&self.bind_count, &mut out[9..]);
+        Abi::put(&self.method_start, &mut out[10..]);
+        Abi::put(&self.method_count, &mut out[11..]);
+        Abi::put(&self.span_start, &mut out[12..]);
+        Abi::put(&self.span_end, &mut out[13..]);
     }
     fn get(words: &[u64]) -> Self {
-        vesper__check_2pact__decl__Conf { model: Abi::get(&words[0..]), mname: Abi::get(&words[1..]), ga: Abi::get(&words[2..]), gn: Abi::get(&words[3..]), tref: Abi::get(&words[4..]), self_ty: Abi::get(&words[5..]), wa: Abi::get(&words[6..]), wn: Abi::get(&words[7..]), ba: Abi::get(&words[8..]), bn: Abi::get(&words[9..]), ma: Abi::get(&words[10..]), mn: Abi::get(&words[11..]), s: Abi::get(&words[12..]), e: Abi::get(&words[13..]) }
+        vesper__check_2pact__decl__Conf { model: Abi::get(&words[0..]), model_name: Abi::get(&words[1..]), gen_start: Abi::get(&words[2..]), gen_count: Abi::get(&words[3..]), tref: Abi::get(&words[4..]), self_ty: Abi::get(&words[5..]), where_start: Abi::get(&words[6..]), where_count: Abi::get(&words[7..]), bind_start: Abi::get(&words[8..]), bind_count: Abi::get(&words[9..]), method_start: Abi::get(&words[10..]), method_count: Abi::get(&words[11..]), span_start: Abi::get(&words[12..]), span_end: Abi::get(&words[13..]) }
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct vesper__check_2pact__decl__FnRow { pub name: u32, pub ga: u32, pub gn: u32 }
+pub struct vesper__check_2pact__decl__FnRow { pub name: u32, pub gen_start: u32, pub gen_count: u32 }
 
 impl Abi for vesper__check_2pact__decl__FnRow {
     const WORDS: usize = 3;
     fn put(&self, out: &mut [u64]) {
         Abi::put(&self.name, &mut out[0..]);
-        Abi::put(&self.ga, &mut out[1..]);
-        Abi::put(&self.gn, &mut out[2..]);
+        Abi::put(&self.gen_start, &mut out[1..]);
+        Abi::put(&self.gen_count, &mut out[2..]);
     }
     fn get(words: &[u64]) -> Self {
-        vesper__check_2pact__decl__FnRow { name: Abi::get(&words[0..]), ga: Abi::get(&words[1..]), gn: Abi::get(&words[2..]) }
+        vesper__check_2pact__decl__FnRow { name: Abi::get(&words[0..]), gen_start: Abi::get(&words[1..]), gen_count: Abi::get(&words[2..]) }
     }
 }
 
@@ -302,114 +302,114 @@ impl Abi for vesper__check_2pact__decl__Gen {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct vesper__check_2pact__decl__ItemRow { pub adt: bool, pub name: u32, pub s: u64, pub e: u64, pub a: u32, pub n: u32 }
+pub struct vesper__check_2pact__decl__ItemRow { pub adt: bool, pub name: u32, pub span_start: u64, pub span_end: u64, pub member_start: u32, pub member_count: u32 }
 
 impl Abi for vesper__check_2pact__decl__ItemRow {
     const WORDS: usize = 6;
     fn put(&self, out: &mut [u64]) {
         Abi::put(&self.adt, &mut out[0..]);
         Abi::put(&self.name, &mut out[1..]);
-        Abi::put(&self.s, &mut out[2..]);
-        Abi::put(&self.e, &mut out[3..]);
-        Abi::put(&self.a, &mut out[4..]);
-        Abi::put(&self.n, &mut out[5..]);
+        Abi::put(&self.span_start, &mut out[2..]);
+        Abi::put(&self.span_end, &mut out[3..]);
+        Abi::put(&self.member_start, &mut out[4..]);
+        Abi::put(&self.member_count, &mut out[5..]);
     }
     fn get(words: &[u64]) -> Self {
-        vesper__check_2pact__decl__ItemRow { adt: Abi::get(&words[0..]), name: Abi::get(&words[1..]), s: Abi::get(&words[2..]), e: Abi::get(&words[3..]), a: Abi::get(&words[4..]), n: Abi::get(&words[5..]) }
+        vesper__check_2pact__decl__ItemRow { adt: Abi::get(&words[0..]), name: Abi::get(&words[1..]), span_start: Abi::get(&words[2..]), span_end: Abi::get(&words[3..]), member_start: Abi::get(&words[4..]), member_count: Abi::get(&words[5..]) }
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct vesper__check_2pact__decl__Par { pub name: u32, pub pass: u8, pub ja: u32, pub jn: u32, pub ty: u32, pub s: u64, pub e: u64 }
+pub struct vesper__check_2pact__decl__Par { pub name: u32, pub pass: u8, pub proj_start: u32, pub proj_count: u32, pub ty: u32, pub span_start: u64, pub span_end: u64 }
 
 impl Abi for vesper__check_2pact__decl__Par {
     const WORDS: usize = 7;
     fn put(&self, out: &mut [u64]) {
         Abi::put(&self.name, &mut out[0..]);
         Abi::put(&self.pass, &mut out[1..]);
-        Abi::put(&self.ja, &mut out[2..]);
-        Abi::put(&self.jn, &mut out[3..]);
+        Abi::put(&self.proj_start, &mut out[2..]);
+        Abi::put(&self.proj_count, &mut out[3..]);
         Abi::put(&self.ty, &mut out[4..]);
-        Abi::put(&self.s, &mut out[5..]);
-        Abi::put(&self.e, &mut out[6..]);
+        Abi::put(&self.span_start, &mut out[5..]);
+        Abi::put(&self.span_end, &mut out[6..]);
     }
     fn get(words: &[u64]) -> Self {
-        vesper__check_2pact__decl__Par { name: Abi::get(&words[0..]), pass: Abi::get(&words[1..]), ja: Abi::get(&words[2..]), jn: Abi::get(&words[3..]), ty: Abi::get(&words[4..]), s: Abi::get(&words[5..]), e: Abi::get(&words[6..]) }
+        vesper__check_2pact__decl__Par { name: Abi::get(&words[0..]), pass: Abi::get(&words[1..]), proj_start: Abi::get(&words[2..]), proj_count: Abi::get(&words[3..]), ty: Abi::get(&words[4..]), span_start: Abi::get(&words[5..]), span_end: Abi::get(&words[6..]) }
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct vesper__check_2pact__decl__Sig { pub name: u32, pub s: u64, pub e: u64, pub ga: u32, pub gn: u32, pub pa: u32, pub pn: u32, pub result: u32, pub row: u32 }
+pub struct vesper__check_2pact__decl__Sig { pub name: u32, pub span_start: u64, pub span_end: u64, pub gen_start: u32, pub gen_count: u32, pub par_start: u32, pub par_count: u32, pub result: u32, pub row: u32 }
 
 impl Abi for vesper__check_2pact__decl__Sig {
     const WORDS: usize = 9;
     fn put(&self, out: &mut [u64]) {
         Abi::put(&self.name, &mut out[0..]);
-        Abi::put(&self.s, &mut out[1..]);
-        Abi::put(&self.e, &mut out[2..]);
-        Abi::put(&self.ga, &mut out[3..]);
-        Abi::put(&self.gn, &mut out[4..]);
-        Abi::put(&self.pa, &mut out[5..]);
-        Abi::put(&self.pn, &mut out[6..]);
+        Abi::put(&self.span_start, &mut out[1..]);
+        Abi::put(&self.span_end, &mut out[2..]);
+        Abi::put(&self.gen_start, &mut out[3..]);
+        Abi::put(&self.gen_count, &mut out[4..]);
+        Abi::put(&self.par_start, &mut out[5..]);
+        Abi::put(&self.par_count, &mut out[6..]);
         Abi::put(&self.result, &mut out[7..]);
         Abi::put(&self.row, &mut out[8..]);
     }
     fn get(words: &[u64]) -> Self {
-        vesper__check_2pact__decl__Sig { name: Abi::get(&words[0..]), s: Abi::get(&words[1..]), e: Abi::get(&words[2..]), ga: Abi::get(&words[3..]), gn: Abi::get(&words[4..]), pa: Abi::get(&words[5..]), pn: Abi::get(&words[6..]), result: Abi::get(&words[7..]), row: Abi::get(&words[8..]) }
+        vesper__check_2pact__decl__Sig { name: Abi::get(&words[0..]), span_start: Abi::get(&words[1..]), span_end: Abi::get(&words[2..]), gen_start: Abi::get(&words[3..]), gen_count: Abi::get(&words[4..]), par_start: Abi::get(&words[5..]), par_count: Abi::get(&words[6..]), result: Abi::get(&words[7..]), row: Abi::get(&words[8..]) }
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct vesper__check_2pact__decl__TRef { pub pkg: u32, pub name: u32, pub xa: u32, pub xn: u32, pub s: u64, pub e: u64 }
+pub struct vesper__check_2pact__decl__TRef { pub pkg: u32, pub name: u32, pub arg_start: u32, pub arg_count: u32, pub span_start: u64, pub span_end: u64 }
 
 impl Abi for vesper__check_2pact__decl__TRef {
     const WORDS: usize = 6;
     fn put(&self, out: &mut [u64]) {
         Abi::put(&self.pkg, &mut out[0..]);
         Abi::put(&self.name, &mut out[1..]);
-        Abi::put(&self.xa, &mut out[2..]);
-        Abi::put(&self.xn, &mut out[3..]);
-        Abi::put(&self.s, &mut out[4..]);
-        Abi::put(&self.e, &mut out[5..]);
+        Abi::put(&self.arg_start, &mut out[2..]);
+        Abi::put(&self.arg_count, &mut out[3..]);
+        Abi::put(&self.span_start, &mut out[4..]);
+        Abi::put(&self.span_end, &mut out[5..]);
     }
     fn get(words: &[u64]) -> Self {
-        vesper__check_2pact__decl__TRef { pkg: Abi::get(&words[0..]), name: Abi::get(&words[1..]), xa: Abi::get(&words[2..]), xn: Abi::get(&words[3..]), s: Abi::get(&words[4..]), e: Abi::get(&words[5..]) }
+        vesper__check_2pact__decl__TRef { pkg: Abi::get(&words[0..]), name: Abi::get(&words[1..]), arg_start: Abi::get(&words[2..]), arg_count: Abi::get(&words[3..]), span_start: Abi::get(&words[4..]), span_end: Abi::get(&words[5..]) }
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct vesper__check_2pact__decl__TraitRow { pub name: u32, pub s: u64, pub e: u64, pub ga: u32, pub gn: u32, pub aa: u32, pub an: u32, pub ma: u32, pub mn: u32 }
+pub struct vesper__check_2pact__decl__TraitRow { pub name: u32, pub span_start: u64, pub span_end: u64, pub gen_start: u32, pub gen_count: u32, pub assoc_start: u32, pub assoc_count: u32, pub method_start: u32, pub method_count: u32 }
 
 impl Abi for vesper__check_2pact__decl__TraitRow {
     const WORDS: usize = 9;
     fn put(&self, out: &mut [u64]) {
         Abi::put(&self.name, &mut out[0..]);
-        Abi::put(&self.s, &mut out[1..]);
-        Abi::put(&self.e, &mut out[2..]);
-        Abi::put(&self.ga, &mut out[3..]);
-        Abi::put(&self.gn, &mut out[4..]);
-        Abi::put(&self.aa, &mut out[5..]);
-        Abi::put(&self.an, &mut out[6..]);
-        Abi::put(&self.ma, &mut out[7..]);
-        Abi::put(&self.mn, &mut out[8..]);
+        Abi::put(&self.span_start, &mut out[1..]);
+        Abi::put(&self.span_end, &mut out[2..]);
+        Abi::put(&self.gen_start, &mut out[3..]);
+        Abi::put(&self.gen_count, &mut out[4..]);
+        Abi::put(&self.assoc_start, &mut out[5..]);
+        Abi::put(&self.assoc_count, &mut out[6..]);
+        Abi::put(&self.method_start, &mut out[7..]);
+        Abi::put(&self.method_count, &mut out[8..]);
     }
     fn get(words: &[u64]) -> Self {
-        vesper__check_2pact__decl__TraitRow { name: Abi::get(&words[0..]), s: Abi::get(&words[1..]), e: Abi::get(&words[2..]), ga: Abi::get(&words[3..]), gn: Abi::get(&words[4..]), aa: Abi::get(&words[5..]), an: Abi::get(&words[6..]), ma: Abi::get(&words[7..]), mn: Abi::get(&words[8..]) }
+        vesper__check_2pact__decl__TraitRow { name: Abi::get(&words[0..]), span_start: Abi::get(&words[1..]), span_end: Abi::get(&words[2..]), gen_start: Abi::get(&words[3..]), gen_count: Abi::get(&words[4..]), assoc_start: Abi::get(&words[5..]), assoc_count: Abi::get(&words[6..]), method_start: Abi::get(&words[7..]), method_count: Abi::get(&words[8..]) }
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct vesper__check_2pact__decl__UseRow { pub model: u32, pub s: u64, pub e: u64 }
+pub struct vesper__check_2pact__decl__UseRow { pub model: u32, pub span_start: u64, pub span_end: u64 }
 
 impl Abi for vesper__check_2pact__decl__UseRow {
     const WORDS: usize = 3;
     fn put(&self, out: &mut [u64]) {
         Abi::put(&self.model, &mut out[0..]);
-        Abi::put(&self.s, &mut out[1..]);
-        Abi::put(&self.e, &mut out[2..]);
+        Abi::put(&self.span_start, &mut out[1..]);
+        Abi::put(&self.span_end, &mut out[2..]);
     }
     fn get(words: &[u64]) -> Self {
-        vesper__check_2pact__decl__UseRow { model: Abi::get(&words[0..]), s: Abi::get(&words[1..]), e: Abi::get(&words[2..]) }
+        vesper__check_2pact__decl__UseRow { model: Abi::get(&words[0..]), span_start: Abi::get(&words[1..]), span_end: Abi::get(&words[2..]) }
     }
 }
 
@@ -998,31 +998,31 @@ impl<'a> vesper__check_2pact__session_1tables__TablesRef<'a> {
         let w: &'a [u64] = self.words;
         unsafe { vesper_port_abi::SeqRef::from_handle(w[9]) }
     }
-    pub fn ty_span_s(&self) -> vesper_port_abi::SeqRef<'a, u64> {
+    pub fn ty_span_start(&self) -> vesper_port_abi::SeqRef<'a, u64> {
         let w: &'a [u64] = self.words;
         unsafe { vesper_port_abi::SeqRef::from_handle(w[10]) }
     }
-    pub fn ty_span_e(&self) -> vesper_port_abi::SeqRef<'a, u64> {
+    pub fn ty_span_end(&self) -> vesper_port_abi::SeqRef<'a, u64> {
         let w: &'a [u64] = self.words;
         unsafe { vesper_port_abi::SeqRef::from_handle(w[11]) }
     }
-    pub fn ty_pa(&self) -> vesper_port_abi::SeqRef<'a, u32> {
+    pub fn ty_param_start(&self) -> vesper_port_abi::SeqRef<'a, u32> {
         let w: &'a [u64] = self.words;
         unsafe { vesper_port_abi::SeqRef::from_handle(w[12]) }
     }
-    pub fn ty_pn(&self) -> vesper_port_abi::SeqRef<'a, u32> {
+    pub fn ty_param_count(&self) -> vesper_port_abi::SeqRef<'a, u32> {
         let w: &'a [u64] = self.words;
         unsafe { vesper_port_abi::SeqRef::from_handle(w[13]) }
     }
-    pub fn ty_pnames(&self) -> vesper_port_abi::SeqRef<'a, u32> {
+    pub fn ty_param_names(&self) -> vesper_port_abi::SeqRef<'a, u32> {
         let w: &'a [u64] = self.words;
         unsafe { vesper_port_abi::SeqRef::from_handle(w[14]) }
     }
-    pub fn ty_pkinds(&self) -> vesper_port_abi::SeqRef<'a, u8> {
+    pub fn ty_param_kinds(&self) -> vesper_port_abi::SeqRef<'a, u8> {
         let w: &'a [u64] = self.words;
         unsafe { vesper_port_abi::SeqRef::from_handle(w[15]) }
     }
-    pub fn ty_pbounds(&self) -> vesper_port_abi::SeqRef<'a, u8> {
+    pub fn ty_param_bounds(&self) -> vesper_port_abi::SeqRef<'a, u8> {
         let w: &'a [u64] = self.words;
         unsafe { vesper_port_abi::SeqRef::from_handle(w[16]) }
     }
@@ -1030,11 +1030,11 @@ impl<'a> vesper__check_2pact__session_1tables__TablesRef<'a> {
         let w: &'a [u64] = self.words;
         unsafe { vesper_port_abi::SeqRef::from_handle(w[17]) }
     }
-    pub fn ty_ja(&self) -> vesper_port_abi::SeqRef<'a, u32> {
+    pub fn ty_join_start(&self) -> vesper_port_abi::SeqRef<'a, u32> {
         let w: &'a [u64] = self.words;
         unsafe { vesper_port_abi::SeqRef::from_handle(w[18]) }
     }
-    pub fn ty_jn(&self) -> vesper_port_abi::SeqRef<'a, u32> {
+    pub fn ty_join_count(&self) -> vesper_port_abi::SeqRef<'a, u32> {
         let w: &'a [u64] = self.words;
         unsafe { vesper_port_abi::SeqRef::from_handle(w[19]) }
     }
@@ -1050,31 +1050,31 @@ impl<'a> vesper__check_2pact__session_1tables__TablesRef<'a> {
         let w: &'a [u64] = self.words;
         unsafe { vesper_port_abi::SeqRef::from_handle(w[22]) }
     }
-    pub fn ef_span_s(&self) -> vesper_port_abi::SeqRef<'a, u64> {
+    pub fn ef_span_start(&self) -> vesper_port_abi::SeqRef<'a, u64> {
         let w: &'a [u64] = self.words;
         unsafe { vesper_port_abi::SeqRef::from_handle(w[23]) }
     }
-    pub fn ef_span_e(&self) -> vesper_port_abi::SeqRef<'a, u64> {
+    pub fn ef_span_end(&self) -> vesper_port_abi::SeqRef<'a, u64> {
         let w: &'a [u64] = self.words;
         unsafe { vesper_port_abi::SeqRef::from_handle(w[24]) }
     }
-    pub fn ef_pa(&self) -> vesper_port_abi::SeqRef<'a, u32> {
+    pub fn ef_param_start(&self) -> vesper_port_abi::SeqRef<'a, u32> {
         let w: &'a [u64] = self.words;
         unsafe { vesper_port_abi::SeqRef::from_handle(w[25]) }
     }
-    pub fn ef_pn(&self) -> vesper_port_abi::SeqRef<'a, u32> {
+    pub fn ef_param_count(&self) -> vesper_port_abi::SeqRef<'a, u32> {
         let w: &'a [u64] = self.words;
         unsafe { vesper_port_abi::SeqRef::from_handle(w[26]) }
     }
-    pub fn ef_pnames(&self) -> vesper_port_abi::SeqRef<'a, u32> {
+    pub fn ef_param_names(&self) -> vesper_port_abi::SeqRef<'a, u32> {
         let w: &'a [u64] = self.words;
         unsafe { vesper_port_abi::SeqRef::from_handle(w[27]) }
     }
-    pub fn ef_pkinds(&self) -> vesper_port_abi::SeqRef<'a, u8> {
+    pub fn ef_param_kinds(&self) -> vesper_port_abi::SeqRef<'a, u8> {
         let w: &'a [u64] = self.words;
         unsafe { vesper_port_abi::SeqRef::from_handle(w[28]) }
     }
-    pub fn ef_pbounds(&self) -> vesper_port_abi::SeqRef<'a, u8> {
+    pub fn ef_param_bounds(&self) -> vesper_port_abi::SeqRef<'a, u8> {
         let w: &'a [u64] = self.words;
         unsafe { vesper_port_abi::SeqRef::from_handle(w[29]) }
     }
@@ -1086,31 +1086,31 @@ impl<'a> vesper__check_2pact__session_1tables__TablesRef<'a> {
         let w: &'a [u64] = self.words;
         unsafe { vesper_port_abi::SeqRef::from_handle(w[31]) }
     }
-    pub fn tr_span_s(&self) -> vesper_port_abi::SeqRef<'a, u64> {
+    pub fn tr_span_start(&self) -> vesper_port_abi::SeqRef<'a, u64> {
         let w: &'a [u64] = self.words;
         unsafe { vesper_port_abi::SeqRef::from_handle(w[32]) }
     }
-    pub fn tr_span_e(&self) -> vesper_port_abi::SeqRef<'a, u64> {
+    pub fn tr_span_end(&self) -> vesper_port_abi::SeqRef<'a, u64> {
         let w: &'a [u64] = self.words;
         unsafe { vesper_port_abi::SeqRef::from_handle(w[33]) }
     }
-    pub fn tr_pa(&self) -> vesper_port_abi::SeqRef<'a, u32> {
+    pub fn tr_param_start(&self) -> vesper_port_abi::SeqRef<'a, u32> {
         let w: &'a [u64] = self.words;
         unsafe { vesper_port_abi::SeqRef::from_handle(w[34]) }
     }
-    pub fn tr_pn(&self) -> vesper_port_abi::SeqRef<'a, u32> {
+    pub fn tr_param_count(&self) -> vesper_port_abi::SeqRef<'a, u32> {
         let w: &'a [u64] = self.words;
         unsafe { vesper_port_abi::SeqRef::from_handle(w[35]) }
     }
-    pub fn tr_pkinds(&self) -> vesper_port_abi::SeqRef<'a, u8> {
+    pub fn tr_param_kinds(&self) -> vesper_port_abi::SeqRef<'a, u8> {
         let w: &'a [u64] = self.words;
         unsafe { vesper_port_abi::SeqRef::from_handle(w[36]) }
     }
-    pub fn tr_aa(&self) -> vesper_port_abi::SeqRef<'a, u32> {
+    pub fn tr_assoc_start(&self) -> vesper_port_abi::SeqRef<'a, u32> {
         let w: &'a [u64] = self.words;
         unsafe { vesper_port_abi::SeqRef::from_handle(w[37]) }
     }
-    pub fn tr_an(&self) -> vesper_port_abi::SeqRef<'a, u32> {
+    pub fn tr_assoc_count(&self) -> vesper_port_abi::SeqRef<'a, u32> {
         let w: &'a [u64] = self.words;
         unsafe { vesper_port_abi::SeqRef::from_handle(w[38]) }
     }
@@ -1126,11 +1126,11 @@ impl<'a> vesper__check_2pact__session_1tables__TablesRef<'a> {
         let w: &'a [u64] = self.words;
         unsafe { vesper_port_abi::SeqRef::from_handle(w[41]) }
     }
-    pub fn im_span_s(&self) -> vesper_port_abi::SeqRef<'a, u64> {
+    pub fn im_span_start(&self) -> vesper_port_abi::SeqRef<'a, u64> {
         let w: &'a [u64] = self.words;
         unsafe { vesper_port_abi::SeqRef::from_handle(w[42]) }
     }
-    pub fn im_span_e(&self) -> vesper_port_abi::SeqRef<'a, u64> {
+    pub fn im_span_end(&self) -> vesper_port_abi::SeqRef<'a, u64> {
         let w: &'a [u64] = self.words;
         unsafe { vesper_port_abi::SeqRef::from_handle(w[43]) }
     }
@@ -1142,11 +1142,11 @@ impl<'a> vesper__check_2pact__session_1tables__TablesRef<'a> {
         let w: &'a [u64] = self.words;
         unsafe { vesper_port_abi::SeqRef::from_handle(w[45]) }
     }
-    pub fn mo_span_s(&self) -> vesper_port_abi::SeqRef<'a, u64> {
+    pub fn mo_span_start(&self) -> vesper_port_abi::SeqRef<'a, u64> {
         let w: &'a [u64] = self.words;
         unsafe { vesper_port_abi::SeqRef::from_handle(w[46]) }
     }
-    pub fn mo_span_e(&self) -> vesper_port_abi::SeqRef<'a, u64> {
+    pub fn mo_span_end(&self) -> vesper_port_abi::SeqRef<'a, u64> {
         let w: &'a [u64] = self.words;
         unsafe { vesper_port_abi::SeqRef::from_handle(w[47]) }
     }
@@ -1203,19 +1203,19 @@ impl<'a> vesper__check_2pact__session__PactSessionRef<'a> {
         let w: &'a [u64] = self.words;
         <bool as Abi>::get(&w[0..])
     }
-    pub fn c(&self) -> vesper__check_2data__input__CtxRef<'a> {
+    pub fn ctx(&self) -> vesper__check_2data__input__CtxRef<'a> {
         let w: &'a [u64] = self.words;
         vesper__check_2data__input__CtxRef { words: &w[1..69] }
     }
-    pub fn d(&self) -> vesper__check_2pact__decl__DeclsRef<'a> {
+    pub fn decls(&self) -> vesper__check_2pact__decl__DeclsRef<'a> {
         let w: &'a [u64] = self.words;
         vesper__check_2pact__decl__DeclsRef { words: &w[69..84] }
     }
-    pub fn sy(&self) -> vesper__check_2pact__tyops__Sy {
+    pub fn syms(&self) -> vesper__check_2pact__tyops__Sy {
         let w: &'a [u64] = self.words;
         <vesper__check_2pact__tyops__Sy as Abi>::get(&w[84..])
     }
-    pub fn tb(&self) -> vesper__check_2pact__session_1tables__TablesRef<'a> {
+    pub fn tables(&self) -> vesper__check_2pact__session_1tables__TablesRef<'a> {
         let w: &'a [u64] = self.words;
         vesper__check_2pact__session_1tables__TablesRef { words: &w[91..139] }
     }
@@ -1235,7 +1235,7 @@ impl<'a> vesper__check_2pact__session__PactSessionRef<'a> {
         let w: &'a [u64] = self.words;
         unsafe { vesper_port_abi::SeqRef::from_handle(w[142]) }
     }
-    pub fn s(&self) -> vesper__pact__SRef<'a> {
+    pub fn solver(&self) -> vesper__pact__SRef<'a> {
         let w: &'a [u64] = self.words;
         vesper__pact__SRef { words: &w[143..260] }
     }
@@ -2117,44 +2117,44 @@ pub struct vesper__check_2pact__session_1tables__TablesTree {
     pub ty_tuple_k: Vec<u8>,
     pub ty_pkg: Vec<u64>,
     pub ty_name: Vec<u32>,
-    pub ty_span_s: Vec<u64>,
-    pub ty_span_e: Vec<u64>,
-    pub ty_pa: Vec<u32>,
-    pub ty_pn: Vec<u32>,
-    pub ty_pnames: Vec<u32>,
-    pub ty_pkinds: Vec<u8>,
-    pub ty_pbounds: Vec<u8>,
+    pub ty_span_start: Vec<u64>,
+    pub ty_span_end: Vec<u64>,
+    pub ty_param_start: Vec<u32>,
+    pub ty_param_count: Vec<u32>,
+    pub ty_param_names: Vec<u32>,
+    pub ty_param_kinds: Vec<u8>,
+    pub ty_param_bounds: Vec<u8>,
     pub ty_base: Vec<u8>,
-    pub ty_ja: Vec<u32>,
-    pub ty_jn: Vec<u32>,
+    pub ty_join_start: Vec<u32>,
+    pub ty_join_count: Vec<u32>,
     pub ty_joins: Vec<u32>,
     pub ef_pkg: Vec<u64>,
     pub ef_name: Vec<u32>,
-    pub ef_span_s: Vec<u64>,
-    pub ef_span_e: Vec<u64>,
-    pub ef_pa: Vec<u32>,
-    pub ef_pn: Vec<u32>,
-    pub ef_pnames: Vec<u32>,
-    pub ef_pkinds: Vec<u8>,
-    pub ef_pbounds: Vec<u8>,
+    pub ef_span_start: Vec<u64>,
+    pub ef_span_end: Vec<u64>,
+    pub ef_param_start: Vec<u32>,
+    pub ef_param_count: Vec<u32>,
+    pub ef_param_names: Vec<u32>,
+    pub ef_param_kinds: Vec<u8>,
+    pub ef_param_bounds: Vec<u8>,
     pub tr_decl_idx: Vec<u32>,
     pub tr_name: Vec<u32>,
-    pub tr_span_s: Vec<u64>,
-    pub tr_span_e: Vec<u64>,
-    pub tr_pa: Vec<u32>,
-    pub tr_pn: Vec<u32>,
-    pub tr_pkinds: Vec<u8>,
-    pub tr_aa: Vec<u32>,
-    pub tr_an: Vec<u32>,
+    pub tr_span_start: Vec<u64>,
+    pub tr_span_end: Vec<u64>,
+    pub tr_param_start: Vec<u32>,
+    pub tr_param_count: Vec<u32>,
+    pub tr_param_kinds: Vec<u8>,
+    pub tr_assoc_start: Vec<u32>,
+    pub tr_assoc_count: Vec<u32>,
     pub tr_assoc_names: Vec<u32>,
     pub im_acc_idx: Vec<u32>,
     pub im_name: Vec<u32>,
-    pub im_span_s: Vec<u64>,
-    pub im_span_e: Vec<u64>,
+    pub im_span_start: Vec<u64>,
+    pub im_span_end: Vec<u64>,
     pub mo_acc_idx: Vec<u32>,
     pub mo_name: Vec<u32>,
-    pub mo_span_s: Vec<u64>,
-    pub mo_span_e: Vec<u64>,
+    pub mo_span_start: Vec<u64>,
+    pub mo_span_end: Vec<u64>,
 }
 
 impl vesper__check_2pact__session_1tables__TablesRef<'_> {
@@ -2171,44 +2171,44 @@ impl vesper__check_2pact__session_1tables__TablesRef<'_> {
             ty_tuple_k: self.ty_tuple_k().to_vec(),
             ty_pkg: self.ty_pkg().to_vec(),
             ty_name: self.ty_name().to_vec(),
-            ty_span_s: self.ty_span_s().to_vec(),
-            ty_span_e: self.ty_span_e().to_vec(),
-            ty_pa: self.ty_pa().to_vec(),
-            ty_pn: self.ty_pn().to_vec(),
-            ty_pnames: self.ty_pnames().to_vec(),
-            ty_pkinds: self.ty_pkinds().to_vec(),
-            ty_pbounds: self.ty_pbounds().to_vec(),
+            ty_span_start: self.ty_span_start().to_vec(),
+            ty_span_end: self.ty_span_end().to_vec(),
+            ty_param_start: self.ty_param_start().to_vec(),
+            ty_param_count: self.ty_param_count().to_vec(),
+            ty_param_names: self.ty_param_names().to_vec(),
+            ty_param_kinds: self.ty_param_kinds().to_vec(),
+            ty_param_bounds: self.ty_param_bounds().to_vec(),
             ty_base: self.ty_base().to_vec(),
-            ty_ja: self.ty_ja().to_vec(),
-            ty_jn: self.ty_jn().to_vec(),
+            ty_join_start: self.ty_join_start().to_vec(),
+            ty_join_count: self.ty_join_count().to_vec(),
             ty_joins: self.ty_joins().to_vec(),
             ef_pkg: self.ef_pkg().to_vec(),
             ef_name: self.ef_name().to_vec(),
-            ef_span_s: self.ef_span_s().to_vec(),
-            ef_span_e: self.ef_span_e().to_vec(),
-            ef_pa: self.ef_pa().to_vec(),
-            ef_pn: self.ef_pn().to_vec(),
-            ef_pnames: self.ef_pnames().to_vec(),
-            ef_pkinds: self.ef_pkinds().to_vec(),
-            ef_pbounds: self.ef_pbounds().to_vec(),
+            ef_span_start: self.ef_span_start().to_vec(),
+            ef_span_end: self.ef_span_end().to_vec(),
+            ef_param_start: self.ef_param_start().to_vec(),
+            ef_param_count: self.ef_param_count().to_vec(),
+            ef_param_names: self.ef_param_names().to_vec(),
+            ef_param_kinds: self.ef_param_kinds().to_vec(),
+            ef_param_bounds: self.ef_param_bounds().to_vec(),
             tr_decl_idx: self.tr_decl_idx().to_vec(),
             tr_name: self.tr_name().to_vec(),
-            tr_span_s: self.tr_span_s().to_vec(),
-            tr_span_e: self.tr_span_e().to_vec(),
-            tr_pa: self.tr_pa().to_vec(),
-            tr_pn: self.tr_pn().to_vec(),
-            tr_pkinds: self.tr_pkinds().to_vec(),
-            tr_aa: self.tr_aa().to_vec(),
-            tr_an: self.tr_an().to_vec(),
+            tr_span_start: self.tr_span_start().to_vec(),
+            tr_span_end: self.tr_span_end().to_vec(),
+            tr_param_start: self.tr_param_start().to_vec(),
+            tr_param_count: self.tr_param_count().to_vec(),
+            tr_param_kinds: self.tr_param_kinds().to_vec(),
+            tr_assoc_start: self.tr_assoc_start().to_vec(),
+            tr_assoc_count: self.tr_assoc_count().to_vec(),
             tr_assoc_names: self.tr_assoc_names().to_vec(),
             im_acc_idx: self.im_acc_idx().to_vec(),
             im_name: self.im_name().to_vec(),
-            im_span_s: self.im_span_s().to_vec(),
-            im_span_e: self.im_span_e().to_vec(),
+            im_span_start: self.im_span_start().to_vec(),
+            im_span_end: self.im_span_end().to_vec(),
             mo_acc_idx: self.mo_acc_idx().to_vec(),
             mo_name: self.mo_name().to_vec(),
-            mo_span_s: self.mo_span_s().to_vec(),
-            mo_span_e: self.mo_span_e().to_vec(),
+            mo_span_start: self.mo_span_start().to_vec(),
+            mo_span_end: self.mo_span_end().to_vec(),
         }
     }
 }
@@ -2243,44 +2243,44 @@ unsafe fn encode_vesper__check_2pact__session_1tables___tables(tree: &vesper__ch
     w[7] = unsafe { vesper_port_abi::seq_from(RUNTIME, &tree.ty_tuple_k) };
     w[8] = unsafe { vesper_port_abi::seq_from(RUNTIME, &tree.ty_pkg) };
     w[9] = unsafe { vesper_port_abi::seq_from(RUNTIME, &tree.ty_name) };
-    w[10] = unsafe { vesper_port_abi::seq_from(RUNTIME, &tree.ty_span_s) };
-    w[11] = unsafe { vesper_port_abi::seq_from(RUNTIME, &tree.ty_span_e) };
-    w[12] = unsafe { vesper_port_abi::seq_from(RUNTIME, &tree.ty_pa) };
-    w[13] = unsafe { vesper_port_abi::seq_from(RUNTIME, &tree.ty_pn) };
-    w[14] = unsafe { vesper_port_abi::seq_from(RUNTIME, &tree.ty_pnames) };
-    w[15] = unsafe { vesper_port_abi::seq_from(RUNTIME, &tree.ty_pkinds) };
-    w[16] = unsafe { vesper_port_abi::seq_from(RUNTIME, &tree.ty_pbounds) };
+    w[10] = unsafe { vesper_port_abi::seq_from(RUNTIME, &tree.ty_span_start) };
+    w[11] = unsafe { vesper_port_abi::seq_from(RUNTIME, &tree.ty_span_end) };
+    w[12] = unsafe { vesper_port_abi::seq_from(RUNTIME, &tree.ty_param_start) };
+    w[13] = unsafe { vesper_port_abi::seq_from(RUNTIME, &tree.ty_param_count) };
+    w[14] = unsafe { vesper_port_abi::seq_from(RUNTIME, &tree.ty_param_names) };
+    w[15] = unsafe { vesper_port_abi::seq_from(RUNTIME, &tree.ty_param_kinds) };
+    w[16] = unsafe { vesper_port_abi::seq_from(RUNTIME, &tree.ty_param_bounds) };
     w[17] = unsafe { vesper_port_abi::seq_from(RUNTIME, &tree.ty_base) };
-    w[18] = unsafe { vesper_port_abi::seq_from(RUNTIME, &tree.ty_ja) };
-    w[19] = unsafe { vesper_port_abi::seq_from(RUNTIME, &tree.ty_jn) };
+    w[18] = unsafe { vesper_port_abi::seq_from(RUNTIME, &tree.ty_join_start) };
+    w[19] = unsafe { vesper_port_abi::seq_from(RUNTIME, &tree.ty_join_count) };
     w[20] = unsafe { vesper_port_abi::seq_from(RUNTIME, &tree.ty_joins) };
     w[21] = unsafe { vesper_port_abi::seq_from(RUNTIME, &tree.ef_pkg) };
     w[22] = unsafe { vesper_port_abi::seq_from(RUNTIME, &tree.ef_name) };
-    w[23] = unsafe { vesper_port_abi::seq_from(RUNTIME, &tree.ef_span_s) };
-    w[24] = unsafe { vesper_port_abi::seq_from(RUNTIME, &tree.ef_span_e) };
-    w[25] = unsafe { vesper_port_abi::seq_from(RUNTIME, &tree.ef_pa) };
-    w[26] = unsafe { vesper_port_abi::seq_from(RUNTIME, &tree.ef_pn) };
-    w[27] = unsafe { vesper_port_abi::seq_from(RUNTIME, &tree.ef_pnames) };
-    w[28] = unsafe { vesper_port_abi::seq_from(RUNTIME, &tree.ef_pkinds) };
-    w[29] = unsafe { vesper_port_abi::seq_from(RUNTIME, &tree.ef_pbounds) };
+    w[23] = unsafe { vesper_port_abi::seq_from(RUNTIME, &tree.ef_span_start) };
+    w[24] = unsafe { vesper_port_abi::seq_from(RUNTIME, &tree.ef_span_end) };
+    w[25] = unsafe { vesper_port_abi::seq_from(RUNTIME, &tree.ef_param_start) };
+    w[26] = unsafe { vesper_port_abi::seq_from(RUNTIME, &tree.ef_param_count) };
+    w[27] = unsafe { vesper_port_abi::seq_from(RUNTIME, &tree.ef_param_names) };
+    w[28] = unsafe { vesper_port_abi::seq_from(RUNTIME, &tree.ef_param_kinds) };
+    w[29] = unsafe { vesper_port_abi::seq_from(RUNTIME, &tree.ef_param_bounds) };
     w[30] = unsafe { vesper_port_abi::seq_from(RUNTIME, &tree.tr_decl_idx) };
     w[31] = unsafe { vesper_port_abi::seq_from(RUNTIME, &tree.tr_name) };
-    w[32] = unsafe { vesper_port_abi::seq_from(RUNTIME, &tree.tr_span_s) };
-    w[33] = unsafe { vesper_port_abi::seq_from(RUNTIME, &tree.tr_span_e) };
-    w[34] = unsafe { vesper_port_abi::seq_from(RUNTIME, &tree.tr_pa) };
-    w[35] = unsafe { vesper_port_abi::seq_from(RUNTIME, &tree.tr_pn) };
-    w[36] = unsafe { vesper_port_abi::seq_from(RUNTIME, &tree.tr_pkinds) };
-    w[37] = unsafe { vesper_port_abi::seq_from(RUNTIME, &tree.tr_aa) };
-    w[38] = unsafe { vesper_port_abi::seq_from(RUNTIME, &tree.tr_an) };
+    w[32] = unsafe { vesper_port_abi::seq_from(RUNTIME, &tree.tr_span_start) };
+    w[33] = unsafe { vesper_port_abi::seq_from(RUNTIME, &tree.tr_span_end) };
+    w[34] = unsafe { vesper_port_abi::seq_from(RUNTIME, &tree.tr_param_start) };
+    w[35] = unsafe { vesper_port_abi::seq_from(RUNTIME, &tree.tr_param_count) };
+    w[36] = unsafe { vesper_port_abi::seq_from(RUNTIME, &tree.tr_param_kinds) };
+    w[37] = unsafe { vesper_port_abi::seq_from(RUNTIME, &tree.tr_assoc_start) };
+    w[38] = unsafe { vesper_port_abi::seq_from(RUNTIME, &tree.tr_assoc_count) };
     w[39] = unsafe { vesper_port_abi::seq_from(RUNTIME, &tree.tr_assoc_names) };
     w[40] = unsafe { vesper_port_abi::seq_from(RUNTIME, &tree.im_acc_idx) };
     w[41] = unsafe { vesper_port_abi::seq_from(RUNTIME, &tree.im_name) };
-    w[42] = unsafe { vesper_port_abi::seq_from(RUNTIME, &tree.im_span_s) };
-    w[43] = unsafe { vesper_port_abi::seq_from(RUNTIME, &tree.im_span_e) };
+    w[42] = unsafe { vesper_port_abi::seq_from(RUNTIME, &tree.im_span_start) };
+    w[43] = unsafe { vesper_port_abi::seq_from(RUNTIME, &tree.im_span_end) };
     w[44] = unsafe { vesper_port_abi::seq_from(RUNTIME, &tree.mo_acc_idx) };
     w[45] = unsafe { vesper_port_abi::seq_from(RUNTIME, &tree.mo_name) };
-    w[46] = unsafe { vesper_port_abi::seq_from(RUNTIME, &tree.mo_span_s) };
-    w[47] = unsafe { vesper_port_abi::seq_from(RUNTIME, &tree.mo_span_e) };
+    w[46] = unsafe { vesper_port_abi::seq_from(RUNTIME, &tree.mo_span_start) };
+    w[47] = unsafe { vesper_port_abi::seq_from(RUNTIME, &tree.mo_span_end) };
 }
 
 /// An owned Rust tree of a Vesper `vesper__check_2pact__session__PactSession` value (export ABI v4): `vesper__check_2pact__session__PactSession::encode`
@@ -2288,15 +2288,15 @@ unsafe fn encode_vesper__check_2pact__session_1tables___tables(tree: &vesper__ch
 #[derive(Clone, Debug, PartialEq)]
 pub struct vesper__check_2pact__session__PactSessionTree {
     pub ok: bool,
-    pub c: vesper__check_2data__input__CtxTree,
-    pub d: vesper__check_2pact__decl__DeclsTree,
-    pub sy: vesper__check_2pact__tyops__Sy,
-    pub tb: vesper__check_2pact__session_1tables__TablesTree,
+    pub ctx: vesper__check_2data__input__CtxTree,
+    pub decls: vesper__check_2pact__decl__DeclsTree,
+    pub syms: vesper__check_2pact__tyops__Sy,
+    pub tables: vesper__check_2pact__session_1tables__TablesTree,
     pub im_conf_idx: Vec<u32>,
     pub mo_conf_idx: Vec<u32>,
     pub out: Vec<u8>,
     pub revision: Vec<u8>,
-    pub s: vesper__pact__STree,
+    pub solver: vesper__pact__STree,
 }
 
 impl vesper__check_2pact__session__PactSessionRef<'_> {
@@ -2304,15 +2304,15 @@ impl vesper__check_2pact__session__PactSessionRef<'_> {
     pub fn decode(&self) -> vesper__check_2pact__session__PactSessionTree {
         vesper__check_2pact__session__PactSessionTree {
             ok: self.ok(),
-            c: self.c().decode(),
-            d: self.d().decode(),
-            sy: self.sy(),
-            tb: self.tb().decode(),
+            ctx: self.ctx().decode(),
+            decls: self.decls().decode(),
+            syms: self.syms(),
+            tables: self.tables().decode(),
             im_conf_idx: self.im_conf_idx().to_vec(),
             mo_conf_idx: self.mo_conf_idx().to_vec(),
             out: self.out().to_vec(),
             revision: self.revision().to_vec(),
-            s: self.s().decode(),
+            solver: self.solver().decode(),
         }
     }
 }
@@ -2338,15 +2338,15 @@ impl vesper__check_2pact__session__PactSession {
 /// `w` holds 260 zeroed words; the value written there owns what it allocates.
 unsafe fn encode_vesper__check_2pact__session___pact_session(tree: &vesper__check_2pact__session__PactSessionTree, w: &mut [u64]) {
     Abi::put(&tree.ok, &mut w[0..]);
-    unsafe { encode_vesper__check_2data__input___ctx(&tree.c, &mut w[1..69]) };
-    unsafe { encode_vesper__check_2pact__decl___decls(&tree.d, &mut w[69..84]) };
-    Abi::put(&tree.sy, &mut w[84..]);
-    unsafe { encode_vesper__check_2pact__session_1tables___tables(&tree.tb, &mut w[91..139]) };
+    unsafe { encode_vesper__check_2data__input___ctx(&tree.ctx, &mut w[1..69]) };
+    unsafe { encode_vesper__check_2pact__decl___decls(&tree.decls, &mut w[69..84]) };
+    Abi::put(&tree.syms, &mut w[84..]);
+    unsafe { encode_vesper__check_2pact__session_1tables___tables(&tree.tables, &mut w[91..139]) };
     w[139] = unsafe { vesper_port_abi::seq_from(RUNTIME, &tree.im_conf_idx) };
     w[140] = unsafe { vesper_port_abi::seq_from(RUNTIME, &tree.mo_conf_idx) };
     w[141] = unsafe { vesper_port_abi::seq_from(RUNTIME, &tree.out) };
     w[142] = unsafe { vesper_port_abi::seq_from(RUNTIME, &tree.revision) };
-    unsafe { encode_vesper__pact___s(&tree.s, &mut w[143..260]) };
+    unsafe { encode_vesper__pact___s(&tree.solver, &mut w[143..260]) };
 }
 
 /// An owned Rust tree of a Vesper `vesper__pact__S` value (export ABI v4): `vesper__pact__S::encode`
@@ -2926,8 +2926,8 @@ pub mod repr {
     pub struct vesper__check_2pact__decl__AssocDecl {
         pub name: vesper_port_abi::Word<u32>,
         pub bound: vesper_port_abi::Word<u8>,
-        pub s: u64,
-        pub e: u64,
+        pub span_start: u64,
+        pub span_end: u64,
     }
 
     /// Mirror of the Vesper copy struct `vesper__check_2pact__decl__Bind` (4 words).
@@ -2936,8 +2936,8 @@ pub mod repr {
     pub struct vesper__check_2pact__decl__Bind {
         pub name: vesper_port_abi::Word<u32>,
         pub ty: vesper_port_abi::Word<u32>,
-        pub s: u64,
-        pub e: u64,
+        pub span_start: u64,
+        pub span_end: u64,
     }
 
     /// Mirror of the Vesper copy struct `vesper__check_2pact__decl__BoundSyn` (5 words).
@@ -2946,8 +2946,8 @@ pub mod repr {
     pub struct vesper__check_2pact__decl__BoundSyn {
         pub param: vesper_port_abi::Word<u32>,
         pub tref: vesper_port_abi::Word<u32>,
-        pub s: u64,
-        pub e: u64,
+        pub span_start: u64,
+        pub span_end: u64,
         pub owner: vesper_port_abi::Word<u32>,
     }
 
@@ -2956,19 +2956,19 @@ pub mod repr {
     #[derive(Clone, Copy, Debug, PartialEq)]
     pub struct vesper__check_2pact__decl__Conf {
         pub model: vesper_port_abi::Word<bool>,
-        pub mname: vesper_port_abi::Word<u32>,
-        pub ga: vesper_port_abi::Word<u32>,
-        pub gn: vesper_port_abi::Word<u32>,
+        pub model_name: vesper_port_abi::Word<u32>,
+        pub gen_start: vesper_port_abi::Word<u32>,
+        pub gen_count: vesper_port_abi::Word<u32>,
         pub tref: vesper_port_abi::Word<u32>,
         pub self_ty: vesper_port_abi::Word<u32>,
-        pub wa: vesper_port_abi::Word<u32>,
-        pub wn: vesper_port_abi::Word<u32>,
-        pub ba: vesper_port_abi::Word<u32>,
-        pub bn: vesper_port_abi::Word<u32>,
-        pub ma: vesper_port_abi::Word<u32>,
-        pub mn: vesper_port_abi::Word<u32>,
-        pub s: u64,
-        pub e: u64,
+        pub where_start: vesper_port_abi::Word<u32>,
+        pub where_count: vesper_port_abi::Word<u32>,
+        pub bind_start: vesper_port_abi::Word<u32>,
+        pub bind_count: vesper_port_abi::Word<u32>,
+        pub method_start: vesper_port_abi::Word<u32>,
+        pub method_count: vesper_port_abi::Word<u32>,
+        pub span_start: u64,
+        pub span_end: u64,
     }
 
     /// Mirror of the Vesper copy struct `vesper__check_2pact__decl__FnRow` (3 words).
@@ -2976,8 +2976,8 @@ pub mod repr {
     #[derive(Clone, Copy, Debug, PartialEq)]
     pub struct vesper__check_2pact__decl__FnRow {
         pub name: vesper_port_abi::Word<u32>,
-        pub ga: vesper_port_abi::Word<u32>,
-        pub gn: vesper_port_abi::Word<u32>,
+        pub gen_start: vesper_port_abi::Word<u32>,
+        pub gen_count: vesper_port_abi::Word<u32>,
     }
 
     /// Mirror of the Vesper copy struct `vesper__check_2pact__decl__Gen` (3 words).
@@ -2995,10 +2995,10 @@ pub mod repr {
     pub struct vesper__check_2pact__decl__ItemRow {
         pub adt: vesper_port_abi::Word<bool>,
         pub name: vesper_port_abi::Word<u32>,
-        pub s: u64,
-        pub e: u64,
-        pub a: vesper_port_abi::Word<u32>,
-        pub n: vesper_port_abi::Word<u32>,
+        pub span_start: u64,
+        pub span_end: u64,
+        pub member_start: vesper_port_abi::Word<u32>,
+        pub member_count: vesper_port_abi::Word<u32>,
     }
 
     /// Mirror of the Vesper copy struct `vesper__check_2pact__decl__Par` (7 words).
@@ -3007,11 +3007,11 @@ pub mod repr {
     pub struct vesper__check_2pact__decl__Par {
         pub name: vesper_port_abi::Word<u32>,
         pub pass: vesper_port_abi::Word<u8>,
-        pub ja: vesper_port_abi::Word<u32>,
-        pub jn: vesper_port_abi::Word<u32>,
+        pub proj_start: vesper_port_abi::Word<u32>,
+        pub proj_count: vesper_port_abi::Word<u32>,
         pub ty: vesper_port_abi::Word<u32>,
-        pub s: u64,
-        pub e: u64,
+        pub span_start: u64,
+        pub span_end: u64,
     }
 
     /// Mirror of the Vesper copy struct `vesper__check_2pact__decl__Sig` (9 words).
@@ -3019,12 +3019,12 @@ pub mod repr {
     #[derive(Clone, Copy, Debug, PartialEq)]
     pub struct vesper__check_2pact__decl__Sig {
         pub name: vesper_port_abi::Word<u32>,
-        pub s: u64,
-        pub e: u64,
-        pub ga: vesper_port_abi::Word<u32>,
-        pub gn: vesper_port_abi::Word<u32>,
-        pub pa: vesper_port_abi::Word<u32>,
-        pub pn: vesper_port_abi::Word<u32>,
+        pub span_start: u64,
+        pub span_end: u64,
+        pub gen_start: vesper_port_abi::Word<u32>,
+        pub gen_count: vesper_port_abi::Word<u32>,
+        pub par_start: vesper_port_abi::Word<u32>,
+        pub par_count: vesper_port_abi::Word<u32>,
         pub result: vesper_port_abi::Word<u32>,
         pub row: vesper_port_abi::Word<u32>,
     }
@@ -3035,10 +3035,10 @@ pub mod repr {
     pub struct vesper__check_2pact__decl__TRef {
         pub pkg: vesper_port_abi::Word<u32>,
         pub name: vesper_port_abi::Word<u32>,
-        pub xa: vesper_port_abi::Word<u32>,
-        pub xn: vesper_port_abi::Word<u32>,
-        pub s: u64,
-        pub e: u64,
+        pub arg_start: vesper_port_abi::Word<u32>,
+        pub arg_count: vesper_port_abi::Word<u32>,
+        pub span_start: u64,
+        pub span_end: u64,
     }
 
     /// Mirror of the Vesper copy struct `vesper__check_2pact__decl__TraitRow` (9 words).
@@ -3046,14 +3046,14 @@ pub mod repr {
     #[derive(Clone, Copy, Debug, PartialEq)]
     pub struct vesper__check_2pact__decl__TraitRow {
         pub name: vesper_port_abi::Word<u32>,
-        pub s: u64,
-        pub e: u64,
-        pub ga: vesper_port_abi::Word<u32>,
-        pub gn: vesper_port_abi::Word<u32>,
-        pub aa: vesper_port_abi::Word<u32>,
-        pub an: vesper_port_abi::Word<u32>,
-        pub ma: vesper_port_abi::Word<u32>,
-        pub mn: vesper_port_abi::Word<u32>,
+        pub span_start: u64,
+        pub span_end: u64,
+        pub gen_start: vesper_port_abi::Word<u32>,
+        pub gen_count: vesper_port_abi::Word<u32>,
+        pub assoc_start: vesper_port_abi::Word<u32>,
+        pub assoc_count: vesper_port_abi::Word<u32>,
+        pub method_start: vesper_port_abi::Word<u32>,
+        pub method_count: vesper_port_abi::Word<u32>,
     }
 
     /// Mirror of the Vesper copy struct `vesper__check_2pact__decl__UseRow` (3 words).
@@ -3061,8 +3061,8 @@ pub mod repr {
     #[derive(Clone, Copy, Debug, PartialEq)]
     pub struct vesper__check_2pact__decl__UseRow {
         pub model: vesper_port_abi::Word<u32>,
-        pub s: u64,
-        pub e: u64,
+        pub span_start: u64,
+        pub span_end: u64,
     }
 
     /// Mirror of the Vesper copy struct `vesper__check_2pact__decl__Where` (2 words).
@@ -3425,8 +3425,8 @@ const _: () = {
     assert!(core::mem::align_of::<repr::vesper__check_2pact__decl__AssocDecl>() == 8);
     assert!(core::mem::offset_of!(repr::vesper__check_2pact__decl__AssocDecl, name) == 0 * 8);
     assert!(core::mem::offset_of!(repr::vesper__check_2pact__decl__AssocDecl, bound) == 1 * 8);
-    assert!(core::mem::offset_of!(repr::vesper__check_2pact__decl__AssocDecl, s) == 2 * 8);
-    assert!(core::mem::offset_of!(repr::vesper__check_2pact__decl__AssocDecl, e) == 3 * 8);
+    assert!(core::mem::offset_of!(repr::vesper__check_2pact__decl__AssocDecl, span_start) == 2 * 8);
+    assert!(core::mem::offset_of!(repr::vesper__check_2pact__decl__AssocDecl, span_end) == 3 * 8);
 };
 
 // SAFETY: `repr::vesper__check_2pact__decl__AssocDecl` is `#[repr(C)]`, 4 words, eight-byte aligned
@@ -3455,8 +3455,8 @@ const _: () = {
     assert!(core::mem::align_of::<repr::vesper__check_2pact__decl__Bind>() == 8);
     assert!(core::mem::offset_of!(repr::vesper__check_2pact__decl__Bind, name) == 0 * 8);
     assert!(core::mem::offset_of!(repr::vesper__check_2pact__decl__Bind, ty) == 1 * 8);
-    assert!(core::mem::offset_of!(repr::vesper__check_2pact__decl__Bind, s) == 2 * 8);
-    assert!(core::mem::offset_of!(repr::vesper__check_2pact__decl__Bind, e) == 3 * 8);
+    assert!(core::mem::offset_of!(repr::vesper__check_2pact__decl__Bind, span_start) == 2 * 8);
+    assert!(core::mem::offset_of!(repr::vesper__check_2pact__decl__Bind, span_end) == 3 * 8);
 };
 
 // SAFETY: `repr::vesper__check_2pact__decl__Bind` is `#[repr(C)]`, 4 words, eight-byte aligned
@@ -3485,8 +3485,8 @@ const _: () = {
     assert!(core::mem::align_of::<repr::vesper__check_2pact__decl__BoundSyn>() == 8);
     assert!(core::mem::offset_of!(repr::vesper__check_2pact__decl__BoundSyn, param) == 0 * 8);
     assert!(core::mem::offset_of!(repr::vesper__check_2pact__decl__BoundSyn, tref) == 1 * 8);
-    assert!(core::mem::offset_of!(repr::vesper__check_2pact__decl__BoundSyn, s) == 2 * 8);
-    assert!(core::mem::offset_of!(repr::vesper__check_2pact__decl__BoundSyn, e) == 3 * 8);
+    assert!(core::mem::offset_of!(repr::vesper__check_2pact__decl__BoundSyn, span_start) == 2 * 8);
+    assert!(core::mem::offset_of!(repr::vesper__check_2pact__decl__BoundSyn, span_end) == 3 * 8);
     assert!(core::mem::offset_of!(repr::vesper__check_2pact__decl__BoundSyn, owner) == 4 * 8);
 };
 
@@ -3515,19 +3515,19 @@ const _: () = {
     assert!(core::mem::size_of::<repr::vesper__check_2pact__decl__Conf>() == 14 * 8);
     assert!(core::mem::align_of::<repr::vesper__check_2pact__decl__Conf>() == 8);
     assert!(core::mem::offset_of!(repr::vesper__check_2pact__decl__Conf, model) == 0 * 8);
-    assert!(core::mem::offset_of!(repr::vesper__check_2pact__decl__Conf, mname) == 1 * 8);
-    assert!(core::mem::offset_of!(repr::vesper__check_2pact__decl__Conf, ga) == 2 * 8);
-    assert!(core::mem::offset_of!(repr::vesper__check_2pact__decl__Conf, gn) == 3 * 8);
+    assert!(core::mem::offset_of!(repr::vesper__check_2pact__decl__Conf, model_name) == 1 * 8);
+    assert!(core::mem::offset_of!(repr::vesper__check_2pact__decl__Conf, gen_start) == 2 * 8);
+    assert!(core::mem::offset_of!(repr::vesper__check_2pact__decl__Conf, gen_count) == 3 * 8);
     assert!(core::mem::offset_of!(repr::vesper__check_2pact__decl__Conf, tref) == 4 * 8);
     assert!(core::mem::offset_of!(repr::vesper__check_2pact__decl__Conf, self_ty) == 5 * 8);
-    assert!(core::mem::offset_of!(repr::vesper__check_2pact__decl__Conf, wa) == 6 * 8);
-    assert!(core::mem::offset_of!(repr::vesper__check_2pact__decl__Conf, wn) == 7 * 8);
-    assert!(core::mem::offset_of!(repr::vesper__check_2pact__decl__Conf, ba) == 8 * 8);
-    assert!(core::mem::offset_of!(repr::vesper__check_2pact__decl__Conf, bn) == 9 * 8);
-    assert!(core::mem::offset_of!(repr::vesper__check_2pact__decl__Conf, ma) == 10 * 8);
-    assert!(core::mem::offset_of!(repr::vesper__check_2pact__decl__Conf, mn) == 11 * 8);
-    assert!(core::mem::offset_of!(repr::vesper__check_2pact__decl__Conf, s) == 12 * 8);
-    assert!(core::mem::offset_of!(repr::vesper__check_2pact__decl__Conf, e) == 13 * 8);
+    assert!(core::mem::offset_of!(repr::vesper__check_2pact__decl__Conf, where_start) == 6 * 8);
+    assert!(core::mem::offset_of!(repr::vesper__check_2pact__decl__Conf, where_count) == 7 * 8);
+    assert!(core::mem::offset_of!(repr::vesper__check_2pact__decl__Conf, bind_start) == 8 * 8);
+    assert!(core::mem::offset_of!(repr::vesper__check_2pact__decl__Conf, bind_count) == 9 * 8);
+    assert!(core::mem::offset_of!(repr::vesper__check_2pact__decl__Conf, method_start) == 10 * 8);
+    assert!(core::mem::offset_of!(repr::vesper__check_2pact__decl__Conf, method_count) == 11 * 8);
+    assert!(core::mem::offset_of!(repr::vesper__check_2pact__decl__Conf, span_start) == 12 * 8);
+    assert!(core::mem::offset_of!(repr::vesper__check_2pact__decl__Conf, span_end) == 13 * 8);
 };
 
 // SAFETY: `repr::vesper__check_2pact__decl__Conf` is `#[repr(C)]`, 14 words, eight-byte aligned
@@ -3555,8 +3555,8 @@ const _: () = {
     assert!(core::mem::size_of::<repr::vesper__check_2pact__decl__FnRow>() == 3 * 8);
     assert!(core::mem::align_of::<repr::vesper__check_2pact__decl__FnRow>() == 8);
     assert!(core::mem::offset_of!(repr::vesper__check_2pact__decl__FnRow, name) == 0 * 8);
-    assert!(core::mem::offset_of!(repr::vesper__check_2pact__decl__FnRow, ga) == 1 * 8);
-    assert!(core::mem::offset_of!(repr::vesper__check_2pact__decl__FnRow, gn) == 2 * 8);
+    assert!(core::mem::offset_of!(repr::vesper__check_2pact__decl__FnRow, gen_start) == 1 * 8);
+    assert!(core::mem::offset_of!(repr::vesper__check_2pact__decl__FnRow, gen_count) == 2 * 8);
 };
 
 // SAFETY: `repr::vesper__check_2pact__decl__FnRow` is `#[repr(C)]`, 3 words, eight-byte aligned
@@ -3614,10 +3614,10 @@ const _: () = {
     assert!(core::mem::align_of::<repr::vesper__check_2pact__decl__ItemRow>() == 8);
     assert!(core::mem::offset_of!(repr::vesper__check_2pact__decl__ItemRow, adt) == 0 * 8);
     assert!(core::mem::offset_of!(repr::vesper__check_2pact__decl__ItemRow, name) == 1 * 8);
-    assert!(core::mem::offset_of!(repr::vesper__check_2pact__decl__ItemRow, s) == 2 * 8);
-    assert!(core::mem::offset_of!(repr::vesper__check_2pact__decl__ItemRow, e) == 3 * 8);
-    assert!(core::mem::offset_of!(repr::vesper__check_2pact__decl__ItemRow, a) == 4 * 8);
-    assert!(core::mem::offset_of!(repr::vesper__check_2pact__decl__ItemRow, n) == 5 * 8);
+    assert!(core::mem::offset_of!(repr::vesper__check_2pact__decl__ItemRow, span_start) == 2 * 8);
+    assert!(core::mem::offset_of!(repr::vesper__check_2pact__decl__ItemRow, span_end) == 3 * 8);
+    assert!(core::mem::offset_of!(repr::vesper__check_2pact__decl__ItemRow, member_start) == 4 * 8);
+    assert!(core::mem::offset_of!(repr::vesper__check_2pact__decl__ItemRow, member_count) == 5 * 8);
 };
 
 // SAFETY: `repr::vesper__check_2pact__decl__ItemRow` is `#[repr(C)]`, 6 words, eight-byte aligned
@@ -3646,11 +3646,11 @@ const _: () = {
     assert!(core::mem::align_of::<repr::vesper__check_2pact__decl__Par>() == 8);
     assert!(core::mem::offset_of!(repr::vesper__check_2pact__decl__Par, name) == 0 * 8);
     assert!(core::mem::offset_of!(repr::vesper__check_2pact__decl__Par, pass) == 1 * 8);
-    assert!(core::mem::offset_of!(repr::vesper__check_2pact__decl__Par, ja) == 2 * 8);
-    assert!(core::mem::offset_of!(repr::vesper__check_2pact__decl__Par, jn) == 3 * 8);
+    assert!(core::mem::offset_of!(repr::vesper__check_2pact__decl__Par, proj_start) == 2 * 8);
+    assert!(core::mem::offset_of!(repr::vesper__check_2pact__decl__Par, proj_count) == 3 * 8);
     assert!(core::mem::offset_of!(repr::vesper__check_2pact__decl__Par, ty) == 4 * 8);
-    assert!(core::mem::offset_of!(repr::vesper__check_2pact__decl__Par, s) == 5 * 8);
-    assert!(core::mem::offset_of!(repr::vesper__check_2pact__decl__Par, e) == 6 * 8);
+    assert!(core::mem::offset_of!(repr::vesper__check_2pact__decl__Par, span_start) == 5 * 8);
+    assert!(core::mem::offset_of!(repr::vesper__check_2pact__decl__Par, span_end) == 6 * 8);
 };
 
 // SAFETY: `repr::vesper__check_2pact__decl__Par` is `#[repr(C)]`, 7 words, eight-byte aligned
@@ -3678,12 +3678,12 @@ const _: () = {
     assert!(core::mem::size_of::<repr::vesper__check_2pact__decl__Sig>() == 9 * 8);
     assert!(core::mem::align_of::<repr::vesper__check_2pact__decl__Sig>() == 8);
     assert!(core::mem::offset_of!(repr::vesper__check_2pact__decl__Sig, name) == 0 * 8);
-    assert!(core::mem::offset_of!(repr::vesper__check_2pact__decl__Sig, s) == 1 * 8);
-    assert!(core::mem::offset_of!(repr::vesper__check_2pact__decl__Sig, e) == 2 * 8);
-    assert!(core::mem::offset_of!(repr::vesper__check_2pact__decl__Sig, ga) == 3 * 8);
-    assert!(core::mem::offset_of!(repr::vesper__check_2pact__decl__Sig, gn) == 4 * 8);
-    assert!(core::mem::offset_of!(repr::vesper__check_2pact__decl__Sig, pa) == 5 * 8);
-    assert!(core::mem::offset_of!(repr::vesper__check_2pact__decl__Sig, pn) == 6 * 8);
+    assert!(core::mem::offset_of!(repr::vesper__check_2pact__decl__Sig, span_start) == 1 * 8);
+    assert!(core::mem::offset_of!(repr::vesper__check_2pact__decl__Sig, span_end) == 2 * 8);
+    assert!(core::mem::offset_of!(repr::vesper__check_2pact__decl__Sig, gen_start) == 3 * 8);
+    assert!(core::mem::offset_of!(repr::vesper__check_2pact__decl__Sig, gen_count) == 4 * 8);
+    assert!(core::mem::offset_of!(repr::vesper__check_2pact__decl__Sig, par_start) == 5 * 8);
+    assert!(core::mem::offset_of!(repr::vesper__check_2pact__decl__Sig, par_count) == 6 * 8);
     assert!(core::mem::offset_of!(repr::vesper__check_2pact__decl__Sig, result) == 7 * 8);
     assert!(core::mem::offset_of!(repr::vesper__check_2pact__decl__Sig, row) == 8 * 8);
 };
@@ -3714,10 +3714,10 @@ const _: () = {
     assert!(core::mem::align_of::<repr::vesper__check_2pact__decl__TRef>() == 8);
     assert!(core::mem::offset_of!(repr::vesper__check_2pact__decl__TRef, pkg) == 0 * 8);
     assert!(core::mem::offset_of!(repr::vesper__check_2pact__decl__TRef, name) == 1 * 8);
-    assert!(core::mem::offset_of!(repr::vesper__check_2pact__decl__TRef, xa) == 2 * 8);
-    assert!(core::mem::offset_of!(repr::vesper__check_2pact__decl__TRef, xn) == 3 * 8);
-    assert!(core::mem::offset_of!(repr::vesper__check_2pact__decl__TRef, s) == 4 * 8);
-    assert!(core::mem::offset_of!(repr::vesper__check_2pact__decl__TRef, e) == 5 * 8);
+    assert!(core::mem::offset_of!(repr::vesper__check_2pact__decl__TRef, arg_start) == 2 * 8);
+    assert!(core::mem::offset_of!(repr::vesper__check_2pact__decl__TRef, arg_count) == 3 * 8);
+    assert!(core::mem::offset_of!(repr::vesper__check_2pact__decl__TRef, span_start) == 4 * 8);
+    assert!(core::mem::offset_of!(repr::vesper__check_2pact__decl__TRef, span_end) == 5 * 8);
 };
 
 // SAFETY: `repr::vesper__check_2pact__decl__TRef` is `#[repr(C)]`, 6 words, eight-byte aligned
@@ -3745,14 +3745,14 @@ const _: () = {
     assert!(core::mem::size_of::<repr::vesper__check_2pact__decl__TraitRow>() == 9 * 8);
     assert!(core::mem::align_of::<repr::vesper__check_2pact__decl__TraitRow>() == 8);
     assert!(core::mem::offset_of!(repr::vesper__check_2pact__decl__TraitRow, name) == 0 * 8);
-    assert!(core::mem::offset_of!(repr::vesper__check_2pact__decl__TraitRow, s) == 1 * 8);
-    assert!(core::mem::offset_of!(repr::vesper__check_2pact__decl__TraitRow, e) == 2 * 8);
-    assert!(core::mem::offset_of!(repr::vesper__check_2pact__decl__TraitRow, ga) == 3 * 8);
-    assert!(core::mem::offset_of!(repr::vesper__check_2pact__decl__TraitRow, gn) == 4 * 8);
-    assert!(core::mem::offset_of!(repr::vesper__check_2pact__decl__TraitRow, aa) == 5 * 8);
-    assert!(core::mem::offset_of!(repr::vesper__check_2pact__decl__TraitRow, an) == 6 * 8);
-    assert!(core::mem::offset_of!(repr::vesper__check_2pact__decl__TraitRow, ma) == 7 * 8);
-    assert!(core::mem::offset_of!(repr::vesper__check_2pact__decl__TraitRow, mn) == 8 * 8);
+    assert!(core::mem::offset_of!(repr::vesper__check_2pact__decl__TraitRow, span_start) == 1 * 8);
+    assert!(core::mem::offset_of!(repr::vesper__check_2pact__decl__TraitRow, span_end) == 2 * 8);
+    assert!(core::mem::offset_of!(repr::vesper__check_2pact__decl__TraitRow, gen_start) == 3 * 8);
+    assert!(core::mem::offset_of!(repr::vesper__check_2pact__decl__TraitRow, gen_count) == 4 * 8);
+    assert!(core::mem::offset_of!(repr::vesper__check_2pact__decl__TraitRow, assoc_start) == 5 * 8);
+    assert!(core::mem::offset_of!(repr::vesper__check_2pact__decl__TraitRow, assoc_count) == 6 * 8);
+    assert!(core::mem::offset_of!(repr::vesper__check_2pact__decl__TraitRow, method_start) == 7 * 8);
+    assert!(core::mem::offset_of!(repr::vesper__check_2pact__decl__TraitRow, method_count) == 8 * 8);
 };
 
 // SAFETY: `repr::vesper__check_2pact__decl__TraitRow` is `#[repr(C)]`, 9 words, eight-byte aligned
@@ -3780,8 +3780,8 @@ const _: () = {
     assert!(core::mem::size_of::<repr::vesper__check_2pact__decl__UseRow>() == 3 * 8);
     assert!(core::mem::align_of::<repr::vesper__check_2pact__decl__UseRow>() == 8);
     assert!(core::mem::offset_of!(repr::vesper__check_2pact__decl__UseRow, model) == 0 * 8);
-    assert!(core::mem::offset_of!(repr::vesper__check_2pact__decl__UseRow, s) == 1 * 8);
-    assert!(core::mem::offset_of!(repr::vesper__check_2pact__decl__UseRow, e) == 2 * 8);
+    assert!(core::mem::offset_of!(repr::vesper__check_2pact__decl__UseRow, span_start) == 1 * 8);
+    assert!(core::mem::offset_of!(repr::vesper__check_2pact__decl__UseRow, span_end) == 2 * 8);
 };
 
 // SAFETY: `repr::vesper__check_2pact__decl__UseRow` is `#[repr(C)]`, 3 words, eight-byte aligned
