@@ -52,40 +52,40 @@ const MAX_DAMAGED: u64 = 16;
 const MAX_PARSES: u64 = 64;
 const MAX_TOKENS: u64 = 65536;
 
-fn g64(in v: ChunkSeq[u64], i: u64) -> u64 {
-    v.try_get(i).unwrap_or(0)
+fn g64(in column: ChunkSeq[u64], i: u64) -> u64 {
+    column.try_get(i).unwrap_or(0)
 }
 
-fn g8(in v: ChunkSeq[u8], i: u64) -> u8 {
-    v.try_get(i).unwrap_or(0)
+fn g8(in column: ChunkSeq[u8], i: u64) -> u8 {
+    column.try_get(i).unwrap_or(0)
 }
 
-fn inc(x: u64) -> u64 {
-    wrapping_add(x, 1)
+fn inc(value: u64) -> u64 {
+    wrapping_add(value, 1)
 }
 
 // The significant tokens (no whitespace, comments or end of file): kind,
 // start and end.
 struct Tk {
     kind: ChunkSeq[u8],
-    s: ChunkSeq[u64],
-    e: ChunkSeq[u64]
+    tok_start: ChunkSeq[u64],
+    tok_end: ChunkSeq[u64]
 }
 
 // The recovery parse (`RecoverySyntax`): declarations (kind, status, span,
 // name span or NONE64), sites (owner or NONE64, span) and diagnostic spans.
 struct Rs {
-    d_kind: ChunkSeq[u64],
-    d_status: ChunkSeq[u64],
-    d_s: ChunkSeq[u64],
-    d_e: ChunkSeq[u64],
-    d_ns: ChunkSeq[u64],
-    d_ne: ChunkSeq[u64],
+    decl_kind: ChunkSeq[u64],
+    decl_status: ChunkSeq[u64],
+    decl_start: ChunkSeq[u64],
+    decl_end: ChunkSeq[u64],
+    decl_name_start: ChunkSeq[u64],
+    decl_name_end: ChunkSeq[u64],
     site_owner: ChunkSeq[u64],
-    site_s: ChunkSeq[u64],
-    site_e: ChunkSeq[u64],
-    diag_s: ChunkSeq[u64],
-    diag_e: ChunkSeq[u64]
+    site_start: ChunkSeq[u64],
+    site_end: ChunkSeq[u64],
+    diag_start: ChunkSeq[u64],
+    diag_end: ChunkSeq[u64]
 }
 
 // An open delimiter (`Open`).
@@ -100,34 +100,34 @@ fn opens_new() -> Opens {
 }
 
 // Candidate patches (`Patch`) with their scope and `fn` start, closers in
-// one pool (cl[cl_a..+cl_n]).
+// one pool (closer_pool[closer_start..+closer_count]).
 struct Patches {
     cut: ChunkSeq[u64],
     blank_end: ChunkSeq[u64],
-    cl_a: ChunkSeq[u64],
-    cl_n: ChunkSeq[u64],
+    closer_start: ChunkSeq[u64],
+    closer_count: ChunkSeq[u64],
     kind: ChunkSeq[u8],
     depth: ChunkSeq[u64],
     keep_from: ChunkSeq[u64],
-    scope_s: ChunkSeq[u64],
-    scope_e: ChunkSeq[u64],
+    scope_start: ChunkSeq[u64],
+    scope_end: ChunkSeq[u64],
     fn_start: ChunkSeq[u64],
-    cl: ChunkSeq[u8]
+    closer_pool: ChunkSeq[u8]
 }
 
 fn patches_new() -> Patches {
     Patches {
         cut: ChunkSeq::new[u64](),
         blank_end: ChunkSeq::new[u64](),
-        cl_a: ChunkSeq::new[u64](),
-        cl_n: ChunkSeq::new[u64](),
+        closer_start: ChunkSeq::new[u64](),
+        closer_count: ChunkSeq::new[u64](),
         kind: ChunkSeq::new[u8](),
         depth: ChunkSeq::new[u64](),
         keep_from: ChunkSeq::new[u64](),
-        scope_s: ChunkSeq::new[u64](),
-        scope_e: ChunkSeq::new[u64](),
+        scope_start: ChunkSeq::new[u64](),
+        scope_end: ChunkSeq::new[u64](),
         fn_start: ChunkSeq::new[u64](),
-        cl: ChunkSeq::new[u8]()
+        closer_pool: ChunkSeq::new[u8]()
     }
 }
 
@@ -143,17 +143,17 @@ fn closer(kind: u8) -> u8 {
 
 // `closers(levels[from..=to])`: innermost first, with the `;` a block
 // inside an unterminated `let` needs.
-fn closers(inout out: ChunkSeq[u8], in st: Opens, from: u64, to: u64) {
+fn closers(inout out: ChunkSeq[u8], in opens: Opens, from: u64, to: u64) {
     let mut i = inc(to);
     loop {
         if i <= from {
             break;
         }
         i = wrapping_sub(i, 1);
-        out.push(closer(g8(in st.kind, i)));
+        out.push(closer(g8(in opens.kind, i)));
         if i > from {
             let parent = wrapping_sub(i, 1);
-            if g8(in st.kind, parent) == k_l_brace() && g8(in st.in_let, parent) != 0 {
+            if g8(in opens.kind, parent) == k_l_brace() && g8(in opens.in_let, parent) != 0 {
                 out.push(59);
             }
         }
@@ -171,73 +171,73 @@ fn starts_element(kind: u8) -> bool {
         || kind == k_return()
 }
 
-fn set8(inout v: ChunkSeq[u8], i: u64, x: u8) {
-    let ok = v.try_set(i, x);
+fn set8(inout column: ChunkSeq[u8], i: u64, value: u8) {
+    let ok = column.try_set(i, value);
 }
 
-fn set64(inout v: ChunkSeq[u64], i: u64, x: u64) {
-    let ok = v.try_set(i, x);
+fn set64(inout column: ChunkSeq[u64], i: u64, value: u64) {
+    let ok = column.try_set(i, value);
 }
 
 // `open_at`: the delimiters open at `damage`, scanning from `from`.
-fn open_at(in tk: Tk, from: u64, damage: u64) -> Opens {
-    let mut st = opens_new();
-    let n = tk.kind.len();
+fn open_at(in tokens: Tk, from: u64, damage: u64) -> Opens {
+    let mut opens = opens_new();
+    let token_count = tokens.kind.len();
     let mut i: u64 = 0;
     loop {
-        if i >= n || g64(in tk.s, i) >= from {
+        if i >= token_count || g64(in tokens.tok_start, i) >= from {
             break;
         }
         i = inc(i);
     }
     loop {
-        if i >= n || g64(in tk.s, i) >= damage {
+        if i >= token_count || g64(in tokens.tok_start, i) >= damage {
             break;
         }
-        let kind = g8(in tk.kind, i);
-        let end = g64(in tk.e, i);
+        let kind = g8(in tokens.kind, i);
+        let end = g64(in tokens.tok_end, i);
         if kind == k_l_brace() || kind == k_l_paren() || kind == k_l_bracket() {
-            st.kind.push(kind);
-            st.cut.push(end);
-            st.in_let.push(0);
+            opens.kind.push(kind);
+            opens.cut.push(end);
+            opens.in_let.push(0);
         } else if kind == k_let() {
-            let top = st.kind.len();
+            let top = opens.kind.len();
             if top > 0 {
-                set8(inout st.in_let, wrapping_sub(top, 1), 1);
+                set8(inout opens.in_let, wrapping_sub(top, 1), 1);
             }
         } else if kind == k_r_brace() || kind == k_r_paren() || kind == k_r_bracket() {
-            let closed = st.kind.pop().unwrap_or(0);
-            let had = st.cut.len() > 0;
-            let x = st.cut.pop();
-            let y = st.in_let.pop();
-            let top = st.kind.len();
+            let closed = opens.kind.pop().unwrap_or(0);
+            let had = opens.cut.len() > 0;
+            let popped_cut = opens.cut.pop();
+            let popped_in_let = opens.in_let.pop();
+            let top = opens.kind.len();
             if had && closed == k_l_brace() && top > 0 {
                 let parent = wrapping_sub(top, 1);
                 let j = inc(i);
-                if g8(in st.kind, parent) == k_l_brace()
-                    && j < n
-                    && g64(in tk.s, j) < damage
-                    && starts_element(g8(in tk.kind, j)) {
-                    set64(inout st.cut, parent, end);
+                if g8(in opens.kind, parent) == k_l_brace()
+                    && j < token_count
+                    && g64(in tokens.tok_start, j) < damage
+                    && starts_element(g8(in tokens.kind, j)) {
+                    set64(inout opens.cut, parent, end);
                 }
             }
         } else if kind == k_semi() || kind == k_comma() {
-            let top = st.kind.len();
+            let top = opens.kind.len();
             if top > 0 {
-                set64(inout st.cut, wrapping_sub(top, 1), end);
+                set64(inout opens.cut, wrapping_sub(top, 1), end);
                 if kind == k_semi() {
-                    set8(inout st.in_let, wrapping_sub(top, 1), 0);
+                    set8(inout opens.in_let, wrapping_sub(top, 1), 0);
                 }
             }
         }
         i = inc(i);
     }
-    st
+    opens
 }
 
 fn push_patch(
-    inout ps: Patches,
-    in st: Opens,
+    inout patches: Patches,
+    in opens: Opens,
     cut: u64,
     blank_end: u64,
     cl_from: u64,
@@ -245,61 +245,63 @@ fn push_patch(
     kind: u8,
     depth: u64,
     keep_from: u64,
-    scope_s: u64,
-    scope_e: u64,
+    scope_start: u64,
+    scope_end: u64,
     fn_start: u64
 ) {
-    ps.cut.push(cut);
-    ps.blank_end.push(blank_end);
-    let a = ps.cl.len();
+    patches.cut.push(cut);
+    patches.blank_end.push(blank_end);
+    let closer_start = patches.closer_pool.len();
     if cl_to != NONE64 {
-        closers(inout ps.cl, in st, cl_from, cl_to);
+        closers(inout patches.closer_pool, in opens, cl_from, cl_to);
     }
-    ps.cl_a.push(a);
-    ps.cl_n.push(wrapping_sub(ps.cl.len(), a));
-    ps.kind.push(kind);
-    ps.depth.push(depth);
-    ps.keep_from.push(keep_from);
-    ps.scope_s.push(scope_s);
-    ps.scope_e.push(scope_e);
-    ps.fn_start.push(fn_start);
+    patches.closer_start.push(closer_start);
+    patches.closer_count.push(wrapping_sub(patches.closer_pool.len(), closer_start));
+    patches.kind.push(kind);
+    patches.depth.push(depth);
+    patches.keep_from.push(keep_from);
+    patches.scope_start.push(scope_start);
+    patches.scope_end.push(scope_end);
+    patches.fn_start.push(fn_start);
 }
 
 // `candidates`: the patches for one damaged declaration, most specific
 // first.
-fn candidates(in tk: Tk, kind: u64, ss: u64, se: u64, damage: u64) -> Patches {
-    let st = open_at(in tk, ss, damage);
-    let mut ps = patches_new();
-    let n = tk.kind.len();
+fn candidates(in tokens: Tk, kind: u64, scope_start: u64, scope_end: u64, damage: u64) -> Patches {
+    let opens = open_at(in tokens, scope_start, damage);
+    let mut patches = patches_new();
+    let token_count = tokens.kind.len();
     let mut fn_start = NONE64;
     let mut next_fn = NONE64;
-    for i in 0..n {
-        let s = g64(in tk.s, i);
-        if ss <= s && g64(in tk.e, i) <= se && g8(in tk.kind, i) == k_fn() {
-            if s < damage {
-                fn_start = s;
+    for i in 0..token_count {
+        let tok_start = g64(in tokens.tok_start, i);
+        if scope_start <= tok_start
+            && g64(in tokens.tok_end, i) <= scope_end
+            && g8(in tokens.kind, i) == k_fn() {
+            if tok_start < damage {
+                fn_start = tok_start;
             } else if next_fn == NONE64 {
-                next_fn = s;
+                next_fn = tok_start;
             }
         }
     }
     let member = kind == D_STRUCT || kind == D_ENUM || kind == D_EFFECT;
     let base: u64 = if kind == D_IMPL { 1 } else { 0 };
-    let depth_n = st.kind.len();
+    let depth_n = opens.kind.len();
     let mut body_level = NONE64;
     let mut i = base;
     loop {
         if i >= depth_n {
             break;
         }
-        if g8(in st.kind, i) == k_l_brace() {
+        if g8(in opens.kind, i) == k_l_brace() {
             body_level = i;
             break;
         }
         i = inc(i);
     }
     let scope_from = if member || fn_start == NONE64 {
-        ss
+        scope_start
     } else {
         fn_start
     };
@@ -311,16 +313,16 @@ fn candidates(in tk: Tk, kind: u64, ss: u64, se: u64, damage: u64) -> Patches {
                 break;
             }
             level = wrapping_sub(level, 1);
-            if g8(in st.kind, level) != k_l_brace() {
+            if g8(in opens.kind, level) != k_l_brace() {
                 continue;
             }
-            let cut = g64(in st.cut, level);
+            let cut = g64(in opens.cut, level);
             let depth = wrapping_sub(level, body_level);
             // Inside an impl, first keep the later methods.
             if kind == D_IMPL && next_fn != NONE64 {
                 push_patch(
-                    inout ps,
-                    in st,
+                    inout patches,
+                    in opens,
                     cut,
                     next_fn,
                     base,
@@ -334,75 +336,82 @@ fn candidates(in tk: Tk, kind: u64, ss: u64, se: u64, damage: u64) -> Patches {
                 );
             }
             push_patch(
-                inout ps,
-                in st,
+                inout patches,
+                in opens,
                 cut,
-                se,
+                scope_end,
                 0,
                 level,
                 R_BODY,
                 depth,
                 NONE64,
                 scope_from,
-                se,
+                scope_end,
                 fn_start
             );
         }
-        return ps;
+        return patches;
     }
     if !member {
         // Header repair: close the parameter list at its last complete
         // parameter (or drop a damaged signature tail) and keep the body.
         if fn_start == NONE64 {
-            return ps;
+            return patches;
         }
-        let limit = if next_fn == NONE64 { se } else { next_fn };
+        let limit = if next_fn == NONE64 {
+            scope_end
+        } else {
+            next_fn
+        };
         let mut body = NONE64;
         let mut rparen = NONE64;
-        for j in 0..n {
-            let s = g64(in tk.s, j);
-            let e = g64(in tk.e, j);
-            if ss <= s && e <= se {
-                let k = g8(in tk.kind, j);
-                if body == NONE64 && k == k_l_brace() && s >= damage && s < limit {
-                    body = s;
+        for j in 0..token_count {
+            let tok_start = g64(in tokens.tok_start, j);
+            let tok_end = g64(in tokens.tok_end, j);
+            if scope_start <= tok_start && tok_end <= scope_end {
+                let tok_kind = g8(in tokens.kind, j);
+                if body == NONE64
+                    && tok_kind == k_l_brace()
+                    && tok_start >= damage
+                    && tok_start < limit {
+                    body = tok_start;
                 }
-                if k == k_r_paren() && s >= fn_start && e <= damage {
-                    rparen = e;
+                if tok_kind == k_r_paren() && tok_start >= fn_start && tok_end <= damage {
+                    rparen = tok_end;
                 }
             }
         }
         if body == NONE64 {
-            return ps;
+            return patches;
         }
         let mut params = NONE64;
-        let mut q = base;
+        let mut open_index = base;
         loop {
-            if q >= depth_n {
+            if open_index >= depth_n {
                 break;
             }
-            if g8(in st.kind, q) == k_l_paren() {
-                params = q;
+            if g8(in opens.kind, open_index) == k_l_paren() {
+                params = open_index;
                 break;
             }
-            q = inc(q);
+            open_index = inc(open_index);
         }
         if params != NONE64 {
-            ps.cut.push(g64(in st.cut, params));
-            ps.blank_end.push(body);
-            ps.cl_a.push(ps.cl.len());
-            ps.cl.push(41);
-            ps.cl_n.push(1);
-            ps.kind.push(R_HEADER);
-            ps.depth.push(0);
-            ps.keep_from.push(body);
-            ps.scope_s.push(fn_start);
-            ps.scope_e.push(limit);
-            ps.fn_start.push(fn_start);
+            patches.cut.push(g64(in opens.cut, params));
+            patches.blank_end.push(body);
+            patches.closer_start.push(patches.closer_pool.len());
+            patches.closer_pool.push(41);
+            patches.closer_count.push(1);
+            patches.kind.push(R_HEADER);
+            patches.depth.push(0);
+            patches.keep_from.push(body);
+            patches.scope_start.push(fn_start);
+            patches.scope_end.push(limit);
+            patches.fn_start.push(fn_start);
         } else if rparen != NONE64 {
             push_patch(
-                inout ps,
-                in st,
+                inout patches,
+                in opens,
                 rparen,
                 body,
                 0,
@@ -415,30 +424,30 @@ fn candidates(in tk: Tk, kind: u64, ss: u64, se: u64, damage: u64) -> Patches {
                 fn_start
             );
         }
-        return ps;
+        return patches;
     }
     // Member repair: close the struct, enum or effect at its last complete
     // member.
     for level in 0..depth_n {
-        if g8(in st.kind, level) == k_l_brace() {
+        if g8(in opens.kind, level) == k_l_brace() {
             push_patch(
-                inout ps,
-                in st,
-                g64(in st.cut, level),
-                se,
+                inout patches,
+                in opens,
+                g64(in opens.cut, level),
+                scope_end,
                 0,
                 level,
                 R_MEMBER,
                 wrapping_sub(wrapping_sub(depth_n, 1), level),
                 NONE64,
-                ss,
-                se,
+                scope_start,
+                scope_end,
                 NONE64
             );
             break;
         }
     }
-    ps
+    patches
 }
 
 fn is_newline(b: u8) -> bool {
@@ -464,24 +473,24 @@ fn blank(inout bytes: ChunkSeq[u8], s: u64, e: u64) {
 
 // `apply`: blank from the cut, then write the closers over its first
 // non-newline bytes.
-fn apply(inout bytes: ChunkSeq[u8], in ps: Patches, p: u64) -> bool {
-    let keep = g64(in ps.keep_from, p);
+fn apply(inout bytes: ChunkSeq[u8], in patches: Patches, patch: u64) -> bool {
+    let keep = g64(in patches.keep_from, patch);
     let mut end = if keep == NONE64 {
-        g64(in ps.blank_end, p)
+        g64(in patches.blank_end, patch)
     } else {
         keep
     };
     if end > bytes.len() {
         end = bytes.len();
     }
-    let cut = g64(in ps.cut, p);
+    let cut = g64(in patches.cut, patch);
     if cut > end {
         return false;
     }
     blank(inout bytes, cut, end);
     let mut at = cut;
-    let a = g64(in ps.cl_a, p);
-    for j in 0..g64(in ps.cl_n, p) {
+    let closer_start = g64(in patches.closer_start, patch);
+    for j in 0..g64(in patches.closer_count, patch) {
         loop {
             if at >= end || !is_newline(g8(in bytes, at)) {
                 break;
@@ -491,7 +500,7 @@ fn apply(inout bytes: ChunkSeq[u8], in ps: Patches, p: u64) -> bool {
         if at >= end {
             return false;
         }
-        set8(inout bytes, at, g8(in ps.cl, wrapping_add(a, j)));
+        set8(inout bytes, at, g8(in patches.closer_pool, wrapping_add(closer_start, j)));
         at = inc(at);
     }
     true
@@ -502,48 +511,49 @@ fn parses(in text: Slice[u8], max_source: u64, max_depth: u64) -> bool {
     if max_depth == 0 || max_depth > hard_depth() {
         return false;
     }
-    let mut d = diags_new();
-    let t = lex_with_limits(in text, inout d, max_source, MAX_TOKENS, 1);
-    if t.rejected {
+    let mut diags = diags_new();
+    let tokens = lex_with_limits(in text, inout diags, max_source, MAX_TOKENS, 1);
+    if tokens.rejected {
         return false;
     }
-    let p = parse_tokens(in text, t, d, 1, max_depth);
-    p.d.code.len() == 0
+    let parsed = parse_tokens(in text, tokens, diags, 1, max_depth);
+    parsed.d.code.len() == 0
 }
 
-// The length of the white space (`char::is_whitespace`) that starts `b`
+// The length of the white space (`char::is_whitespace`) that starts `bytes`
 // at `i`, or 0.
-fn white_len(in b: ChunkSeq[u8], i: u64) -> u64 {
-    let c = g8(in b, i);
-    if c == 32 || (c >= 9 && c <= 13) {
+fn white_len(in bytes: ChunkSeq[u8], i: u64) -> u64 {
+    let first = g8(in bytes, i);
+    if first == 32 || (first >= 9 && first <= 13) {
         return 1;
     }
-    if c == 194 {
-        let d = g8(in b, inc(i));
-        if d == 133 || d == 160 {
+    if first == 194 {
+        let second = g8(in bytes, inc(i));
+        if second == 133 || second == 160 {
             return 2;
         }
         return 0;
     }
-    if c == 225 {
-        if g8(in b, inc(i)) == 154 && g8(in b, wrapping_add(i, 2)) == 128 {
+    if first == 225 {
+        if g8(in bytes, inc(i)) == 154 && g8(in bytes, wrapping_add(i, 2)) == 128 {
             return 3;
         }
         return 0;
     }
-    if c == 226 {
-        let d = g8(in b, inc(i));
-        let e = g8(in b, wrapping_add(i, 2));
-        if d == 128 && ((e >= 128 && e <= 138) || e == 168 || e == 169 || e == 175) {
+    if first == 226 {
+        let second = g8(in bytes, inc(i));
+        let third = g8(in bytes, wrapping_add(i, 2));
+        if second == 128
+            && ((third >= 128 && third <= 138) || third == 168 || third == 169 || third == 175) {
             return 3;
         }
-        if d == 129 && e == 159 {
+        if second == 129 && third == 159 {
             return 3;
         }
         return 0;
     }
-    if c == 227 {
-        if g8(in b, inc(i)) == 128 && g8(in b, wrapping_add(i, 2)) == 128 {
+    if first == 227 {
+        if g8(in bytes, inc(i)) == 128 && g8(in bytes, wrapping_add(i, 2)) == 128 {
             return 3;
         }
     }
@@ -610,60 +620,69 @@ fn copy_bytes(in from: ChunkSeq[u8]) -> ChunkSeq[u8] {
 fn repair(
     inout out: ChunkSeq[u8],
     in source: Str,
-    in rs: Rs,
+    in recovery: Rs,
     max_source: u64,
     max_diag: u64,
     max_depth: u64
 ) {
-    let b = source.as_bytes();
-    let mut d = diags_new();
-    let t = lex_with_limits(in b, inout d, max_source, MAX_TOKENS, max_diag);
-    if t.rejected || t.limited {
+    let source_bytes = source.as_bytes();
+    let mut diags = diags_new();
+    let lexed = lex_with_limits(in source_bytes, inout diags, max_source, MAX_TOKENS, max_diag);
+    if lexed.rejected || lexed.limited {
         return unavailable(inout out, U_RESOURCE);
     }
-    let mut tk = Tk { kind: ChunkSeq::new[u8](), s: ChunkSeq::new[u64](), e: ChunkSeq::new[u64]() };
-    for i in 0..t.kind.len() {
-        let k = g8(in t.kind, i);
-        if k == k_whitespace() || k == k_comment() || k == k_block_comment() || k == k_eof() {
+    let mut tokens = Tk {
+        kind: ChunkSeq::new[u8](),
+        tok_start: ChunkSeq::new[u64](),
+        tok_end: ChunkSeq::new[u64]()
+    };
+    for i in 0..lexed.kind.len() {
+        let tok_kind = g8(in lexed.kind, i);
+        if tok_kind == k_whitespace()
+            || tok_kind == k_comment()
+            || tok_kind == k_block_comment()
+            || tok_kind == k_eof() {
             continue;
         }
-        tk.kind.push(k);
-        tk.s.push(widen_u64(t.start.try_get(i).unwrap_or(0)));
-        tk.e.push(token_end(in t, i));
+        tokens.kind.push(tok_kind);
+        tokens.tok_start.push(widen_u64(lexed.start.try_get(i).unwrap_or(0)));
+        tokens.tok_end.push(token_end(in lexed, i));
     }
-    let nd = rs.d_kind.len();
+    let decl_count = recovery.decl_kind.len();
     // Sites outside every damaged declaration cannot be repaired by a cut.
-    for i in 0..rs.site_owner.len() {
-        let owner = g64(in rs.site_owner, i);
-        if owner == NONE64 || owner >= nd || g64(in rs.d_status, owner) == S_COMPLETE {
+    for i in 0..recovery.site_owner.len() {
+        let owner = g64(in recovery.site_owner, i);
+        if owner == NONE64
+            || owner >= decl_count
+            || g64(in recovery.decl_status, owner) == S_COMPLETE {
             return unavailable(inout out, U_CONTEXT);
         }
     }
     let mut damaged = ChunkSeq::new[u64]();
-    for i in 0..nd {
-        if g64(in rs.d_status, i) != S_COMPLETE {
+    for i in 0..decl_count {
+        if g64(in recovery.decl_status, i) != S_COMPLETE {
             damaged.push(i);
         }
     }
     if damaged.len() > MAX_DAMAGED {
         return unavailable(inout out, U_RESOURCE);
     }
-    let mut src = ChunkSeq::with_capacity[u8](b.len());
-    for i in 0..b.len() {
-        src.push(b.try_get(i).unwrap_or(0));
+    let mut src = ChunkSeq::with_capacity[u8](source_bytes.len());
+    for i in 0..source_bytes.len() {
+        src.push(source_bytes.try_get(i).unwrap_or(0));
     }
     let mut base = copy_bytes(in src);
     for j in 0..damaged.len() {
         let i = g64(in damaged, j);
-        let kind = g64(in rs.d_kind, i);
+        let kind = g64(in recovery.decl_kind, i);
         let function_like = kind == D_FUNCTION || kind == D_IMPL;
-        if g64(in rs.d_status, i) == S_OPAQUE && !function_like {
+        if g64(in recovery.decl_status, i) == S_OPAQUE && !function_like {
             return unavailable(inout out, U_OPAQUE);
         }
         if !function_like && kind != D_STRUCT && kind != D_ENUM && kind != D_EFFECT {
             return unavailable(inout out, U_CONTEXT);
         }
-        blank(inout base, g64(in rs.d_s, i), g64(in rs.d_e, i));
+        blank(inout base, g64(in recovery.decl_start, i), g64(in recovery.decl_end, i));
     }
     // The chosen patch of each damaged declaration, and its region.
     let mut chosen = patches_new();
@@ -671,41 +690,43 @@ fn repair(
     let mut parses_left = MAX_PARSES;
     for j in 0..damaged.len() {
         let index = g64(in damaged, j);
-        let kind = g64(in rs.d_kind, index);
-        let ds = g64(in rs.d_s, index);
-        let de = g64(in rs.d_e, index);
+        let kind = g64(in recovery.decl_kind, index);
+        let decl_start = g64(in recovery.decl_start, index);
+        let decl_end = g64(in recovery.decl_end, index);
         // The first damage: its sites, then diagnostics starting inside it.
-        let mut dmg_s = NONE64;
-        let mut dmg_e: u64 = 0;
-        for q in 0..rs.site_owner.len() {
-            if g64(in rs.site_owner, q) == index {
-                let s = g64(in rs.site_s, q);
-                if dmg_s == NONE64 || s < dmg_s {
-                    dmg_s = s;
-                    dmg_e = g64(in rs.site_e, q);
+        let mut damage_start = NONE64;
+        let mut damage_end: u64 = 0;
+        for q in 0..recovery.site_owner.len() {
+            if g64(in recovery.site_owner, q) == index {
+                let site_start = g64(in recovery.site_start, q);
+                if damage_start == NONE64 || site_start < damage_start {
+                    damage_start = site_start;
+                    damage_end = g64(in recovery.site_end, q);
                 }
             }
         }
-        for q in 0..rs.diag_s.len() {
-            let s = g64(in rs.diag_s, q);
-            if ds <= s && s < de && (dmg_s == NONE64 || s < dmg_s) {
-                dmg_s = s;
-                dmg_e = g64(in rs.diag_e, q);
+        for q in 0..recovery.diag_start.len() {
+            let diag_start = g64(in recovery.diag_start, q);
+            if decl_start <= diag_start
+                && diag_start < decl_end
+                && (damage_start == NONE64 || diag_start < damage_start) {
+                damage_start = diag_start;
+                damage_end = g64(in recovery.diag_end, q);
             }
         }
-        if dmg_s == NONE64 {
-            dmg_s = de;
-            dmg_e = de;
+        if damage_start == NONE64 {
+            damage_start = decl_end;
+            damage_end = decl_end;
         }
-        let ps = candidates(in tk, kind, ds, de, dmg_s);
-        if ps.cut.len() == 0 {
+        let patches = candidates(in tokens, kind, decl_start, decl_end, damage_start);
+        if patches.cut.len() == 0 {
             if kind == D_FUNCTION || kind == D_IMPL {
                 return unavailable(inout out, U_HEADER);
             }
             return unavailable(inout out, U_CONTEXT);
         }
         let mut accepted = NONE64;
-        for p in 0..ps.cut.len() {
+        for patch in 0..patches.cut.len() {
             if parses_left == 0 {
                 return unavailable(inout out, U_RESOURCE);
             }
@@ -713,15 +734,15 @@ fn repair(
             // This repair alone: the declaration's original bytes with the
             // patch, every other damaged declaration blanked.
             let mut trial = copy_bytes(in base);
-            let mut x = ds;
+            let mut pos = decl_start;
             loop {
-                if x >= de || x >= trial.len() {
+                if pos >= decl_end || pos >= trial.len() {
                     break;
                 }
-                set8(inout trial, x, g8(in src, x));
-                x = inc(x);
+                set8(inout trial, pos, g8(in src, pos));
+                pos = inc(pos);
             }
-            if !apply(inout trial, in ps, p) {
+            if !apply(inout trial, in patches, patch) {
                 continue;
             }
             let ok = match String::from_utf8(in trial.as_slice()) {
@@ -729,27 +750,33 @@ fn repair(
                 Option::None => false,
             };
             if ok {
-                accepted = p;
+                accepted = patch;
                 break;
             }
         }
         if accepted == NONE64 {
             return unavailable(inout out, U_UNPARSED);
         }
-        let p = accepted;
+        let patch = accepted;
         // The region's name: `Owner::method` inside an impl.
         regions.push(71);
         regions.push(9);
-        let fn_start = g64(in ps.fn_start, p);
+        let fn_start = g64(in patches.fn_start, patch);
         if kind == D_IMPL && fn_start != NONE64 {
-            let ns = g64(in rs.d_ns, index);
-            if ns != NONE64 {
-                put_span(inout regions, in src, ns, g64(in rs.d_ne, index));
+            let name_start = g64(in recovery.decl_name_start, index);
+            if name_start != NONE64 {
+                put_span(inout regions, in src, name_start, g64(in recovery.decl_name_end, index));
             } else {
                 let mut found = false;
-                for q in 0..tk.kind.len() {
-                    if g64(in tk.s, q) > ds && g8(in tk.kind, q) == k_upper() {
-                        put_span(inout regions, in src, g64(in tk.s, q), g64(in tk.e, q));
+                for q in 0..tokens.kind.len() {
+                    if g64(in tokens.tok_start, q) > decl_start
+                        && g8(in tokens.kind, q) == k_upper() {
+                        put_span(
+                            inout regions,
+                            in src,
+                            g64(in tokens.tok_start, q),
+                            g64(in tokens.tok_end, q)
+                        );
                         found = true;
                         break;
                     }
@@ -761,9 +788,14 @@ fn repair(
             regions.push(58);
             regions.push(58);
             let mut found = false;
-            for q in 0..tk.kind.len() {
-                if g64(in tk.s, q) > fn_start && g8(in tk.kind, q) == k_lower() {
-                    put_span(inout regions, in src, g64(in tk.s, q), g64(in tk.e, q));
+            for q in 0..tokens.kind.len() {
+                if g64(in tokens.tok_start, q) > fn_start && g8(in tokens.kind, q) == k_lower() {
+                    put_span(
+                        inout regions,
+                        in src,
+                        g64(in tokens.tok_start, q),
+                        g64(in tokens.tok_end, q)
+                    );
                     found = true;
                     break;
                 }
@@ -772,21 +804,21 @@ fn repair(
                 regions.push(63);
             }
         } else {
-            let ns = g64(in rs.d_ns, index);
-            if ns != NONE64 {
-                put_span(inout regions, in src, ns, g64(in rs.d_ne, index));
+            let name_start = g64(in recovery.decl_name_start, index);
+            if name_start != NONE64 {
+                put_span(inout regions, in src, name_start, g64(in recovery.decl_name_end, index));
             }
         }
-        let pk = g8(in ps.kind, p);
+        let patch_kind = g8(in patches.kind, patch);
         regions.push(9);
-        if pk == R_BODY {
+        if patch_kind == R_BODY {
             put(inout regions, in "body");
-        } else if pk == R_HEADER {
+        } else if patch_kind == R_HEADER {
             put(inout regions, in "header");
         } else {
             put(inout regions, in "member");
         }
-        let cut = g64(in ps.cut, p);
+        let cut = g64(in patches.cut, patch);
         // The unfinished code starts at the first non-space after the cut.
         let mut unfinished = cut;
         let mut found = false;
@@ -794,47 +826,54 @@ fn repair(
             if unfinished >= src.len() {
                 break;
             }
-            let wl = white_len(in src, unfinished);
-            if wl == 0 {
+            let white = white_len(in src, unfinished);
+            if white == 0 {
                 found = true;
                 break;
             }
-            unfinished = wrapping_add(unfinished, wl);
+            unfinished = wrapping_add(unfinished, white);
         }
         if !found {
             unfinished = cut;
         }
-        if unfinished < dmg_e {
-            dmg_s = unfinished;
+        if unfinished < damage_end {
+            damage_start = unfinished;
         }
-        tab_u(inout regions, ds);
-        tab_u(inout regions, de);
-        tab_u(inout regions, g64(in ps.scope_s, p));
-        tab_u(inout regions, g64(in ps.scope_e, p));
-        tab_u(inout regions, if pk == R_HEADER { de } else { cut });
-        tab_u(inout regions, g64(in ps.depth, p));
-        tab_u(inout regions, dmg_s);
-        tab_u(inout regions, dmg_e);
+        tab_u(inout regions, decl_start);
+        tab_u(inout regions, decl_end);
+        tab_u(inout regions, g64(in patches.scope_start, patch));
+        tab_u(inout regions, g64(in patches.scope_end, patch));
+        tab_u(
+            inout regions,
+            if patch_kind == R_HEADER {
+                decl_end
+            } else {
+                cut
+            }
+        );
+        tab_u(inout regions, g64(in patches.depth, patch));
+        tab_u(inout regions, damage_start);
+        tab_u(inout regions, damage_end);
         regions.push(10);
         chosen.cut.push(cut);
-        chosen.blank_end.push(g64(in ps.blank_end, p));
-        chosen.cl_a.push(chosen.cl.len());
-        let a = g64(in ps.cl_a, p);
-        let cn = g64(in ps.cl_n, p);
-        for q in 0..cn {
-            chosen.cl.push(g8(in ps.cl, wrapping_add(a, q)));
+        chosen.blank_end.push(g64(in patches.blank_end, patch));
+        chosen.closer_start.push(chosen.closer_pool.len());
+        let closer_start = g64(in patches.closer_start, patch);
+        let closer_count = g64(in patches.closer_count, patch);
+        for q in 0..closer_count {
+            chosen.closer_pool.push(g8(in patches.closer_pool, wrapping_add(closer_start, q)));
         }
-        chosen.cl_n.push(cn);
-        chosen.kind.push(pk);
-        chosen.depth.push(g64(in ps.depth, p));
-        chosen.keep_from.push(g64(in ps.keep_from, p));
-        chosen.scope_s.push(0);
-        chosen.scope_e.push(0);
+        chosen.closer_count.push(closer_count);
+        chosen.kind.push(patch_kind);
+        chosen.depth.push(g64(in patches.depth, patch));
+        chosen.keep_from.push(g64(in patches.keep_from, patch));
+        chosen.scope_start.push(0);
+        chosen.scope_end.push(0);
         chosen.fn_start.push(fn_start);
     }
     let mut bytes = copy_bytes(in src);
-    for p in 0..chosen.cut.len() {
-        if !apply(inout bytes, in chosen, p) {
+    for patch in 0..chosen.cut.len() {
+        if !apply(inout bytes, in chosen, patch) {
             return unavailable(inout out, U_UNPARSED);
         }
     }
@@ -854,10 +893,10 @@ copy struct Rd {
     pos: u64
 }
 
-fn word(in b: Slice[u8], inout r: Rd) -> u64 {
-    let x = b.try_read_u64_le(r.pos).unwrap_or(0);
-    r.pos = wrapping_add(r.pos, 8);
-    x
+fn word(in bytes: Slice[u8], inout reader: Rd) -> u64 {
+    let value = bytes.try_read_u64_le(reader.pos).unwrap_or(0);
+    reader.pos = wrapping_add(reader.pos, 8);
+    value
 }
 
 // The harness input: the declarations (kind, status, span, name span or
@@ -866,53 +905,53 @@ fn word(in b: Slice[u8], inout r: Rd) -> u64 {
 // source length, then the source.
 pub fn lens_repair(in input: Str) -> ChunkSeq[u64] {
     let bytes = input.as_bytes();
-    let mut r = Rd { pos: 0 };
-    let mut rs = Rs {
-        d_kind: ChunkSeq::new[u64](),
-        d_status: ChunkSeq::new[u64](),
-        d_s: ChunkSeq::new[u64](),
-        d_e: ChunkSeq::new[u64](),
-        d_ns: ChunkSeq::new[u64](),
-        d_ne: ChunkSeq::new[u64](),
+    let mut reader = Rd { pos: 0 };
+    let mut recovery = Rs {
+        decl_kind: ChunkSeq::new[u64](),
+        decl_status: ChunkSeq::new[u64](),
+        decl_start: ChunkSeq::new[u64](),
+        decl_end: ChunkSeq::new[u64](),
+        decl_name_start: ChunkSeq::new[u64](),
+        decl_name_end: ChunkSeq::new[u64](),
         site_owner: ChunkSeq::new[u64](),
-        site_s: ChunkSeq::new[u64](),
-        site_e: ChunkSeq::new[u64](),
-        diag_s: ChunkSeq::new[u64](),
-        diag_e: ChunkSeq::new[u64]()
+        site_start: ChunkSeq::new[u64](),
+        site_end: ChunkSeq::new[u64](),
+        diag_start: ChunkSeq::new[u64](),
+        diag_end: ChunkSeq::new[u64]()
     };
-    let nd = word(in bytes, inout r);
-    for i in 0..nd {
-        rs.d_kind.push(word(in bytes, inout r));
-        rs.d_status.push(word(in bytes, inout r));
-        rs.d_s.push(word(in bytes, inout r));
-        rs.d_e.push(word(in bytes, inout r));
-        rs.d_ns.push(word(in bytes, inout r));
-        rs.d_ne.push(word(in bytes, inout r));
+    let decl_count = word(in bytes, inout reader);
+    for i in 0..decl_count {
+        recovery.decl_kind.push(word(in bytes, inout reader));
+        recovery.decl_status.push(word(in bytes, inout reader));
+        recovery.decl_start.push(word(in bytes, inout reader));
+        recovery.decl_end.push(word(in bytes, inout reader));
+        recovery.decl_name_start.push(word(in bytes, inout reader));
+        recovery.decl_name_end.push(word(in bytes, inout reader));
     }
-    let ns = word(in bytes, inout r);
-    for i in 0..ns {
-        rs.site_owner.push(word(in bytes, inout r));
-        rs.site_s.push(word(in bytes, inout r));
-        rs.site_e.push(word(in bytes, inout r));
+    let site_count = word(in bytes, inout reader);
+    for i in 0..site_count {
+        recovery.site_owner.push(word(in bytes, inout reader));
+        recovery.site_start.push(word(in bytes, inout reader));
+        recovery.site_end.push(word(in bytes, inout reader));
     }
-    let ng = word(in bytes, inout r);
-    for i in 0..ng {
-        rs.diag_s.push(word(in bytes, inout r));
-        rs.diag_e.push(word(in bytes, inout r));
+    let diag_count = word(in bytes, inout reader);
+    for i in 0..diag_count {
+        recovery.diag_start.push(word(in bytes, inout reader));
+        recovery.diag_end.push(word(in bytes, inout reader));
     }
-    let max_source = word(in bytes, inout r);
-    let max_diag = word(in bytes, inout r);
-    let max_depth = word(in bytes, inout r);
-    let reps = word(in bytes, inout r);
-    let len = word(in bytes, inout r);
-    let source = match String::from_utf8(in bytes[r.pos..wrapping_add(r.pos, len)]) {
+    let max_source = word(in bytes, inout reader);
+    let max_diag = word(in bytes, inout reader);
+    let max_depth = word(in bytes, inout reader);
+    let reps = word(in bytes, inout reader);
+    let len = word(in bytes, inout reader);
+    let source = match String::from_utf8(in bytes[reader.pos..wrapping_add(reader.pos, len)]) {
         Option::Some(x) => x,
         Option::None => String::new(),
     };
     let mut out = ChunkSeq::new[u8]();
     for round in 0..reps {
         out.clear();
-        repair(inout out, in source, in rs, max_source, max_diag, max_depth);
+        repair(inout out, in source, in recovery, max_source, max_diag, max_depth);
     }
     pack(in out.as_slice())
 }

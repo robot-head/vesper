@@ -83,23 +83,23 @@ const CT_TUPLE: u8 = 2;
 struct Wt {
     sym: ChunkSeq[u32],
     node: ChunkSeq[u32],
-    imp: ChunkSeq[u32],
+    owner_impl: ChunkSeq[u32],
     delta: ChunkSeq[u64],
     body: ChunkSeq[u8],
     // Symbol id -> function index (NONE for other names).
     by_sym: ChunkSeq[u32]
 }
 
-fn g32(in v: ChunkSeq[u32], i: u64) -> u32 {
-    v.try_get(i).unwrap_or(NONE)
+fn g32(in column: ChunkSeq[u32], i: u64) -> u32 {
+    column.try_get(i).unwrap_or(NONE)
 }
 
-fn g64(in v: ChunkSeq[u64], i: u64) -> u64 {
-    v.try_get(i).unwrap_or(0)
+fn g64(in column: ChunkSeq[u64], i: u64) -> u64 {
+    column.try_get(i).unwrap_or(0)
 }
 
-fn g8(in v: ChunkSeq[u8], i: u64) -> u8 {
-    v.try_get(i).unwrap_or(0)
+fn g8(in column: ChunkSeq[u8], i: u64) -> u8 {
+    column.try_get(i).unwrap_or(0)
 }
 
 // A lexical scope (`Scope`): bindings in order, each with its frame.
@@ -119,70 +119,70 @@ fn sc_new() -> Sc {
     }
 }
 
-fn sc_bind(inout sc: Sc, name: u32, var: u32) {
-    if sc.frames == 0 {
-        sc.frames = 1;
+fn sc_bind(inout scope: Sc, name: u32, var: u32) {
+    if scope.frames == 0 {
+        scope.frames = 1;
     }
-    sc.sym.push(name);
-    sc.var.push(var);
-    sc.frame.push(wrapping_u32(wrapping_sub(sc.frames, 1)));
+    scope.sym.push(name);
+    scope.var.push(var);
+    scope.frame.push(wrapping_u32(wrapping_sub(scope.frames, 1)));
 }
 
-fn sc_push(inout sc: Sc) {
-    sc.frames = wrapping_add(sc.frames, 1);
+fn sc_push(inout scope: Sc) {
+    scope.frames = wrapping_add(scope.frames, 1);
 }
 
-fn sc_pop(inout sc: Sc) {
-    let top = wrapping_u32(wrapping_sub(sc.frames, 1));
+fn sc_pop(inout scope: Sc) {
+    let top = wrapping_u32(wrapping_sub(scope.frames, 1));
     loop {
-        let n = sc.sym.len();
-        if n == 0 || g32(in sc.frame, wrapping_sub(n, 1)) != top {
+        let len = scope.sym.len();
+        if len == 0 || g32(in scope.frame, wrapping_sub(len, 1)) != top {
             break;
         }
-        let x = sc.sym.pop();
-        let y = sc.var.pop();
-        let z = sc.frame.pop();
+        let popped_sym = scope.sym.pop();
+        let popped_var = scope.var.pop();
+        let popped_frame = scope.frame.pop();
     }
-    sc.frames = wrapping_sub(sc.frames, 1);
+    scope.frames = wrapping_sub(scope.frames, 1);
 }
 
 // The innermost binding of `name`: var << 32 | frame, or NONE64.
-fn sc_lookup(in sc: Sc, name: u32) -> u64 {
-    let mut i = sc.sym.len();
+fn sc_lookup(in scope: Sc, name: u32) -> u64 {
+    let mut i = scope.sym.len();
     loop {
         if i == 0 {
             return 18446744073709551615;
         }
         i = wrapping_sub(i, 1);
-        if g32(in sc.sym, i) == name {
-            return wrapping_shl_u64(widen_u64(g32(in sc.var, i)), 32)
-                | widen_u64(g32(in sc.frame, i));
+        if g32(in scope.sym, i) == name {
+            return wrapping_shl_u64(widen_u64(g32(in scope.var, i)), 32)
+                | widen_u64(g32(in scope.frame, i));
         }
     }
 }
 
 // The scope as a mark: its length and frame count.
-fn sc_mark(in sc: Sc) -> u64 {
-    wrapping_shl_u64(sc.sym.len(), 32) | sc.frames
+fn sc_mark(in scope: Sc) -> u64 {
+    wrapping_shl_u64(scope.sym.len(), 32) | scope.frames
 }
 
-fn sc_reset(inout sc: Sc, mark: u64) {
-    let n = wrapping_shr_u64(mark, 32);
+fn sc_reset(inout scope: Sc, mark: u64) {
+    let keep_len = wrapping_shr_u64(mark, 32);
     loop {
-        if sc.sym.len() <= n {
+        if scope.sym.len() <= keep_len {
             break;
         }
-        let x = sc.sym.pop();
-        let y = sc.var.pop();
-        let z = sc.frame.pop();
+        let popped_sym = scope.sym.pop();
+        let popped_var = scope.var.pop();
+        let popped_frame = scope.frame.pop();
     }
-    sc.frames = mark & 4294967295;
+    scope.frames = mark & 4294967295;
 }
 
 // The builder (`Builder`): the model, its node count, the inlining stack,
 // the text start of the function being walked, and the first error.
 struct B {
-    m: Tm,
+    terms: Tm,
     nodes: u64,
     stack: ChunkSeq[u32],
     delta: u64,
@@ -193,81 +193,81 @@ struct B {
     hash: bool
 }
 
-fn fail(inout b: B) -> u32 {
-    b.failed = true;
+fn fail(inout builder: B) -> u32 {
+    builder.failed = true;
     NONE
 }
 
-fn fail_s(inout b: B, in t: Str) -> u32 {
-    b.err.clear();
-    s(inout b.err, in t);
-    fail(inout b)
+fn fail_s(inout builder: B, in message: Str) -> u32 {
+    builder.err.clear();
+    s(inout builder.err, in message);
+    fail(inout builder)
 }
 
 // `unsupported(what)`.
-fn unsupported(inout b: B, in what: Str) -> u32 {
-    b.err.clear();
-    s(inout b.err, in what);
-    s(inout b.err, in " is outside the scalar model");
-    fail(inout b)
+fn unsupported(inout builder: B, in what: Str) -> u32 {
+    builder.err.clear();
+    s(inout builder.err, in what);
+    s(inout builder.err, in " is outside the scalar model");
+    fail(inout builder)
 }
 
-fn quoted(inout b: B, in a: Ast, in pre: Str, name: u32, in post: Str) -> u32 {
-    b.err.clear();
-    s(inout b.err, in pre);
-    put_name(inout b.err, in a, name);
-    s(inout b.err, in post);
-    fail(inout b)
+fn quoted(inout builder: B, in ast: Ast, in pre: Str, name: u32, in post: Str) -> u32 {
+    builder.err.clear();
+    s(inout builder.err, in pre);
+    put_name(inout builder.err, in ast, name);
+    s(inout builder.err, in post);
+    fail(inout builder)
 }
 
-// The kind the checker gave expression `e` (`Builder::kind_at`).
-fn kind_at(inout b: B, in a: Ast, in c: Ctx, in y: Syms, e: u32) -> u8 {
-    let n = expr_at(in a, e);
-    let ty = c.world.expr_type(
-        wrapping_sub(widen_u64(n.start), b.delta),
-        wrapping_sub(widen_u64(n.end), b.delta)
+// The kind the checker gave expression `expr_id` (`Builder::kind_at`).
+fn kind_at(inout builder: B, in ast: Ast, in ctx: Ctx, in symbols: Syms, expr_id: u32) -> u8 {
+    let node = expr_at(in ast, expr_id);
+    let ty = ctx.world.expr_type(
+        wrapping_sub(widen_u64(node.start), builder.delta),
+        wrapping_sub(widen_u64(node.end), builder.delta)
     );
     if ty == NONE {
         return K_NONE;
     }
-    let cached = g8(in b.memo, widen_u64(ty));
+    let cached = g8(in builder.memo, widen_u64(ty));
     if cached != 0 {
         return wrapping_sub(cached, 1);
     }
-    let t = c.types.node(ty);
-    let mut k = K_NONE;
-    if t.kind == CT_NAMED && t.n == 0 {
-        if c.names.spells(t.name, in "u8".as_bytes()) {
-            k = K_U8;
-        } else if c.names.spells(t.name, in "u32".as_bytes()) {
-            k = K_U32;
-        } else if c.names.spells(t.name, in "u64".as_bytes()) {
-            k = K_U64;
-        } else if c.names.spells(t.name, in "i64".as_bytes()) {
-            k = K_I64;
-        } else if c.names.spells(t.name, in "bool".as_bytes())
-            || c.names.spells(t.name, in "Bool".as_bytes()) {
-            k = K_BOOL;
-        } else if c.names.spells(t.name, in "Unit".as_bytes()) {
-            k = K_UNIT;
+    let ty_node = ctx.types.node(ty);
+    let mut kind = K_NONE;
+    if ty_node.kind == CT_NAMED && ty_node.n == 0 {
+        if ctx.names.spells(ty_node.name, in "u8".as_bytes()) {
+            kind = K_U8;
+        } else if ctx.names.spells(ty_node.name, in "u32".as_bytes()) {
+            kind = K_U32;
+        } else if ctx.names.spells(ty_node.name, in "u64".as_bytes()) {
+            kind = K_U64;
+        } else if ctx.names.spells(ty_node.name, in "i64".as_bytes()) {
+            kind = K_I64;
+        } else if ctx.names.spells(ty_node.name, in "bool".as_bytes())
+            || ctx.names.spells(ty_node.name, in "Bool".as_bytes()) {
+            kind = K_BOOL;
+        } else if ctx.names.spells(ty_node.name, in "Unit".as_bytes()) {
+            kind = K_UNIT;
         }
-    } else if t.kind == CT_TUPLE && t.n == 0 {
-        k = K_UNIT;
+    } else if ty_node.kind == CT_TUPLE && ty_node.n == 0 {
+        kind = K_UNIT;
     }
     loop {
-        if b.memo.len() > widen_u64(ty) {
+        if builder.memo.len() > widen_u64(ty) {
             break;
         }
-        b.memo.push(0);
+        builder.memo.push(0);
     }
-    let ok = b.memo.try_set(widen_u64(ty), wrapping_add(k, 1));
-    k
+    let ok = builder.memo.try_set(widen_u64(ty), wrapping_add(kind, 1));
+    kind
 }
 
 // ------------------------------------------------------------ builder
 
 // A function's signature (`Builder::signature`): the parameter kinds, the
-// result kind and the body, or the reason in `b.err`.
+// result kind and the body, or the reason in `builder.err`.
 struct Sig {
     ok: bool,
     kinds: ChunkSeq[u8],
@@ -275,144 +275,154 @@ struct Sig {
     body: u32
 }
 
-fn sig_fail(inout b: B) -> Sig {
-    b.failed = true;
+fn sig_fail(inout builder: B) -> Sig {
+    builder.failed = true;
     Sig { ok: false, kinds: ChunkSeq::new[u8](), result: K_NONE, body: NONE }
 }
 
-fn signature(inout b: B, in a: Ast, in y: Syms, in wt: Wt, fi: u64) -> Sig {
-    let node = g32(in wt.node, fi);
-    let imp = g32(in wt.imp, fi);
+fn signature(
+    inout builder: B,
+    in ast: Ast,
+    in symbols: Syms,
+    in fn_table: Wt,
+    fn_index: u64
+) -> Sig {
+    let node = g32(in fn_table.node, fn_index);
+    let impl_id = g32(in fn_table.owner_impl, fn_index);
     if node == NONE {
-        b.err.clear();
-        s(inout b.err, in "?no tree");
-        return sig_fail(inout b);
+        builder.err.clear();
+        s(inout builder.err, in "?no tree");
+        return sig_fail(inout builder);
     }
-    let f = fn_at(in a, node);
-    let mut generics = list_len(in a, f.generics);
-    if imp != NONE {
-        generics = wrapping_add(generics, list_len(in a, impl_at(in a, imp).generics));
+    let fn_node = fn_at(in ast, node);
+    let mut generics = list_len(in ast, fn_node.generics);
+    if impl_id != NONE {
+        generics = wrapping_add(generics, list_len(in ast, impl_at(in ast, impl_id).generics));
     }
     if generics > 0 {
-        let x = fail_s(inout b, in "generic functions have no scalar model");
-        return sig_fail(inout b);
+        let _ = fail_s(inout builder, in "generic functions have no scalar model");
+        return sig_fail(inout builder);
     }
-    let np = list_len(in a, f.params);
-    if np > MAX_PARAMS {
-        let x = fail_s(inout b, in "too many parameters for a scalar model");
-        return sig_fail(inout b);
+    let param_count = list_len(in ast, fn_node.params);
+    if param_count > MAX_PARAMS {
+        let _ = fail_s(inout builder, in "too many parameters for a scalar model");
+        return sig_fail(inout builder);
     }
-    let es = effects_at(in a, f.effects);
-    for i in 0..list_len(in a, es.instances) {
-        let e = effect_at(in a, list_at(in a, es.instances, i));
-        let mut allowed = e.name == y.y_fail && e.name != NONE;
+    let effects = effects_at(in ast, fn_node.effects);
+    for i in 0..list_len(in ast, effects.instances) {
+        let instance = effect_at(in ast, list_at(in ast, effects.instances, i));
+        let mut allowed = instance.name == symbols.y_fail && instance.name != NONE;
         if allowed {
-            for j in 0..list_len(in a, e.args) {
-                let t = ty_at(in a, list_at(in a, e.args, j));
-                let name = if t.kind == AT_NAMED { t.a } else { NONE };
-                if name == NONE || (name != y.y_overflow && name != y.y_runtime) {
+            for j in 0..list_len(in ast, instance.args) {
+                let arg_ty = ty_at(in ast, list_at(in ast, instance.args, j));
+                let name = if arg_ty.kind == AT_NAMED {
+                    arg_ty.a
+                } else {
+                    NONE
+                };
+                if name == NONE || (name != symbols.y_overflow && name != symbols.y_runtime) {
                     allowed = false;
                 }
             }
         }
         if !allowed {
-            let x = quoted(
-                inout b,
-                in a,
+            let _ = quoted(
+                inout builder,
+                in ast,
                 in "effect '",
-                e.name,
+                instance.name,
                 in "' is outside the scalar model (only Fail[ArithOverflow] and Fail[RuntimeError])"
             );
-            return sig_fail(inout b);
+            return sig_fail(inout builder);
         }
     }
-    if es.tail != NONE {
-        let x = fail_s(inout b, in "open effect rows are outside the scalar model");
-        return sig_fail(inout b);
+    if effects.tail != NONE {
+        let _ = fail_s(inout builder, in "open effect rows are outside the scalar model");
+        return sig_fail(inout builder);
     }
     let mut kinds = ChunkSeq::new[u8]();
-    for i in 0..np {
-        let p = param_at(in a, list_at(in a, f.params, i));
-        if p.pass != 0 || list_len(in a, p.projections) != 0 {
-            let x = quoted(
-                inout b,
-                in a,
+    for i in 0..param_count {
+        let param = param_at(in ast, list_at(in ast, fn_node.params, i));
+        if param.pass != 0 || list_len(in ast, param.projections) != 0 {
+            let _ = quoted(
+                inout builder,
+                in ast,
                 in "parameter '",
-                p.name,
+                param.name,
                 in "' is not an in-mode scalar parameter"
             );
-            return sig_fail(inout b);
+            return sig_fail(inout builder);
         }
-        let ty = param_type(in a, in y, p, imp);
-        let k = kind_of_type(in a, in y, ty);
-        if k == K_NONE || k == K_UNIT {
-            b.err.clear();
-            s(inout b.err, in "parameter '");
-            put_name(inout b.err, in a, p.name);
-            s(inout b.err, in "' has type ");
-            display(inout b.err, in a, in y, ty);
-            s(inout b.err, in " outside the scalar model");
-            return sig_fail(inout b);
+        let ty = param_type(in ast, in symbols, param, impl_id);
+        let kind = kind_of_type(in ast, in symbols, ty);
+        if kind == K_NONE || kind == K_UNIT {
+            builder.err.clear();
+            s(inout builder.err, in "parameter '");
+            put_name(inout builder.err, in ast, param.name);
+            s(inout builder.err, in "' has type ");
+            display(inout builder.err, in ast, in symbols, ty);
+            s(inout builder.err, in " outside the scalar model");
+            return sig_fail(inout builder);
         }
-        kinds.push(k);
+        kinds.push(kind);
     }
     let mut result = K_UNIT;
-    if !is_infer(in a, f.result) {
-        result = kind_of_type(in a, in y, f.result);
+    if !is_infer(in ast, fn_node.result) {
+        result = kind_of_type(in ast, in symbols, fn_node.result);
         if result == K_NONE {
-            b.err.clear();
-            s(inout b.err, in "result type ");
-            display(inout b.err, in a, in y, f.result);
-            s(inout b.err, in " is outside the scalar model");
-            return sig_fail(inout b);
+            builder.err.clear();
+            s(inout builder.err, in "result type ");
+            display(inout builder.err, in ast, in symbols, fn_node.result);
+            s(inout builder.err, in " is outside the scalar model");
+            return sig_fail(inout builder);
         }
     }
-    if f.body == NONE {
-        let x = fail_s(inout b, in "the function has no body");
-        return sig_fail(inout b);
+    if fn_node.body == NONE {
+        let _ = fail_s(inout builder, in "the function has no body");
+        return sig_fail(inout builder);
     }
-    Sig { ok: true, kinds: kinds, result: result, body: f.body }
+    Sig { ok: true, kinds: kinds, result: result, body: fn_node.body }
 }
 
-fn charge(inout b: B) -> bool {
-    b.nodes = wrapping_add(b.nodes, 1);
-    if b.nodes > MAX_NODES {
-        let x = fail_s(inout b, in "the model exceeds the Lens node budget");
+fn charge(inout builder: B) -> bool {
+    builder.nodes = wrapping_add(builder.nodes, 1);
+    if builder.nodes > MAX_NODES {
+        let _ = fail_s(inout builder, in "the model exceeds the Lens node budget");
         return false;
     }
     true
 }
 
 // A new variable; a parameter keeps its sanitized name.
-fn var(inout b: B, in a: Ast, name: u32, kind: u8, param: bool) -> u32 {
-    let st = b.m.pool.len();
+fn var(inout builder: B, in ast: Ast, name: u32, kind: u8, param: bool) -> u32 {
+    let name_at = builder.terms.pool.len();
     if param {
         let mut raw = ChunkSeq::new[u8]();
-        put_name(inout raw, in a, name);
-        sanitize(inout b.m.pool, in raw);
+        put_name(inout raw, in ast, name);
+        sanitize(inout builder.terms.pool, in raw);
     }
-    b.m.v_s.push(st);
-    b.m.v_l.push(wrapping_sub(b.m.pool.len(), st));
-    b.m.v_kind.push(kind);
-    b.m.v_param.push(if param { 1 } else { 0 });
-    wrapping_u32(wrapping_sub(b.m.v_kind.len(), 1))
+    builder.terms.var_name_at.push(name_at);
+    builder.terms.var_name_len.push(wrapping_sub(builder.terms.pool.len(), name_at));
+    builder.terms.var_kind.push(kind);
+    builder.terms.var_param.push(if param { 1 } else { 0 });
+    wrapping_u32(wrapping_sub(builder.terms.var_kind.len(), 1))
 }
 
 // `sanitize`: every char that is not ASCII alphanumeric becomes `_`.
-fn sanitize(inout o: ChunkSeq[u8], in raw: ChunkSeq[u8]) {
+fn sanitize(inout out: ChunkSeq[u8], in raw: ChunkSeq[u8]) {
     for i in 0..raw.len() {
         let c = g8(in raw, i);
         if (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) {
-            o.push(c);
+            out.push(c);
         } else if c < 128 || c >= 192 {
-            o.push(95);
+            out.push(95);
         }
     }
 }
 
-fn is_int_literal(in a: Ast, e: u32) -> bool {
-    let n = expr_at(in a, e);
-    n.kind == E_LIT && lit_at(in a, n.a).kind == LIT_INT
+fn is_int_literal(in ast: Ast, expr_id: u32) -> bool {
+    let node = expr_at(in ast, expr_id);
+    node.kind == E_LIT && lit_at(in ast, node.a).kind == LIT_INT
 }
 
 // Whether `(neg, hi:lo)` lies in `kind`'s range.
@@ -435,9 +445,9 @@ fn fits(kind: u8, neg: bool, hi: u64, lo: u64) -> bool {
 }
 
 // A 128-bit magnitude in decimal.
-fn put_u128(inout o: ChunkSeq[u8], hi: u64, lo: u64) {
+fn put_u128(inout out: ChunkSeq[u8], hi: u64, lo: u64) {
     if hi == 0 {
-        put_u(inout o, lo);
+        put_u(inout out, lo);
         return;
     }
     // Four 32-bit limbs, most significant first; divide by 10 repeatedly.
@@ -450,20 +460,20 @@ fn put_u128(inout o: ChunkSeq[u8], hi: u64, lo: u64) {
         if l0 == 0 && l1 == 0 && l2 == 0 && l3 == 0 {
             break;
         }
-        let mut r: u64 = 0;
-        let x0 = wrapping_add(wrapping_shl_u64(r, 32), l0);
+        let mut carry: u64 = 0;
+        let x0 = wrapping_add(wrapping_shl_u64(carry, 32), l0);
         l0 = x0 / 10;
-        r = x0 % 10;
-        let x1 = wrapping_add(wrapping_shl_u64(r, 32), l1);
+        carry = x0 % 10;
+        let x1 = wrapping_add(wrapping_shl_u64(carry, 32), l1);
         l1 = x1 / 10;
-        r = x1 % 10;
-        let x2 = wrapping_add(wrapping_shl_u64(r, 32), l2);
+        carry = x1 % 10;
+        let x2 = wrapping_add(wrapping_shl_u64(carry, 32), l2);
         l2 = x2 / 10;
-        r = x2 % 10;
-        let x3 = wrapping_add(wrapping_shl_u64(r, 32), l3);
+        carry = x2 % 10;
+        let x3 = wrapping_add(wrapping_shl_u64(carry, 32), l3);
         l3 = x3 / 10;
-        r = x3 % 10;
-        digits.push(wrapping_add(wrapping_u8(r), 48));
+        carry = x3 % 10;
+        digits.push(wrapping_add(wrapping_u8(carry), 48));
     }
     let mut i = digits.len();
     loop {
@@ -471,176 +481,261 @@ fn put_u128(inout o: ChunkSeq[u8], hi: u64, lo: u64) {
             break;
         }
         i = wrapping_sub(i, 1);
-        o.push(g8(in digits, i));
+        out.push(g8(in digits, i));
     }
 }
 
-fn unit(inout b: B) -> u32 {
-    term(inout b.m, TM_UNIT, 0, 0, 0, K_UNIT, 0, 0)
+fn unit(inout builder: B) -> u32 {
+    term(inout builder.terms, TM_UNIT, 0, 0, 0, K_UNIT, 0, 0)
 }
 
 fn expr(
-    inout b: B,
-    inout sc: Sc,
-    in a: Ast,
-    in c: Ctx,
-    in y: Syms,
-    in wt: Wt,
-    e: u32,
+    inout builder: B,
+    inout scope: Sc,
+    in ast: Ast,
+    in ctx: Ctx,
+    in symbols: Syms,
+    in fn_table: Wt,
+    expr_id: u32,
     want: u8
 ) -> u32 {
-    if !charge(inout b) {
+    if !charge(inout builder) {
         return NONE;
     }
-    let n = expr_at(in a, e);
-    let k = n.kind;
-    if k == E_LIT {
-        let l = lit_at(in a, n.a);
-        if l.kind == LIT_INT {
-            let mut kind = kind_at(inout b, in a, in c, in y, e);
+    let node = expr_at(in ast, expr_id);
+    let expr_kind = node.kind;
+    if expr_kind == E_LIT {
+        let literal = lit_at(in ast, node.a);
+        if literal.kind == LIT_INT {
+            let mut kind = kind_at(inout builder, in ast, in ctx, in symbols, expr_id);
             if !integer(kind) {
                 kind = if integer(want) { want } else { K_I64 };
             }
-            if !fits(kind, l.neg, l.hi, l.bits) {
-                b.err.clear();
-                s(inout b.err, in "literal ");
-                if l.neg && (l.hi != 0 || l.bits != 0) {
-                    b.err.push(45);
+            if !fits(kind, literal.neg, literal.hi, literal.bits) {
+                builder.err.clear();
+                s(inout builder.err, in "literal ");
+                if literal.neg && (literal.hi != 0 || literal.bits != 0) {
+                    builder.err.push(45);
                 }
-                put_u128(inout b.err, l.hi, l.bits);
-                s(inout b.err, in " does not fit ");
-                s(inout b.err, in kind_name(kind));
-                return fail(inout b);
+                put_u128(inout builder.err, literal.hi, literal.bits);
+                s(inout builder.err, in " does not fit ");
+                s(inout builder.err, in kind_name(kind));
+                return fail(inout builder);
             }
-            return int_term(inout b.m, l.neg, l.bits, kind);
+            return int_term(inout builder.terms, literal.neg, literal.bits, kind);
         }
-        if l.kind == LIT_BOOL {
-            return term(inout b.m, TM_BOOL, 0, 0, 0, K_BOOL, 0, if l.bits != 0 { 1 } else { 0 });
+        if literal.kind == LIT_BOOL {
+            return term(
+                inout builder.terms,
+                TM_BOOL,
+                0,
+                0,
+                0,
+                K_BOOL,
+                0,
+                if literal.bits != 0 { 1 } else { 0 }
+            );
         }
-        return unsupported(inout b, in "a non-integer literal");
+        return unsupported(inout builder, in "a non-integer literal");
     }
-    if k == E_TUPLE && list_len(in a, n.a) == 0 {
-        return unit(inout b);
+    if expr_kind == E_TUPLE && list_len(in ast, node.a) == 0 {
+        return unit(inout builder);
     }
-    if k == E_NAME {
-        let v = sc_lookup(in sc, n.a);
-        if v == 18446744073709551615 {
-            return quoted(inout b, in a, in "'", n.a, in "' is not a scalar local");
+    if expr_kind == E_NAME {
+        let binding = sc_lookup(in scope, node.a);
+        if binding == 18446744073709551615 {
+            return quoted(inout builder, in ast, in "'", node.a, in "' is not a scalar local");
         }
-        return term(inout b.m, TM_VAR, wrapping_u32(wrapping_shr_u64(v, 32)), 0, 0, K_NONE, 0, 0);
+        return term(
+            inout builder.terms,
+            TM_VAR,
+            wrapping_u32(wrapping_shr_u64(binding, 32)),
+            0,
+            0,
+            K_NONE,
+            0,
+            0
+        );
     }
-    if k == E_BLOCK {
-        sc_push(inout sc);
-        let r = block(inout b, inout sc, in a, in c, in y, in wt, n.a, 0, n.b, want);
-        sc_pop(inout sc);
-        return r;
+    if expr_kind == E_BLOCK {
+        sc_push(inout scope);
+        let result = block(
+            inout builder,
+            inout scope,
+            in ast,
+            in ctx,
+            in symbols,
+            in fn_table,
+            node.a,
+            0,
+            node.b,
+            want
+        );
+        sc_pop(inout scope);
+        return result;
     }
-    if k == E_IF {
-        let cond = expr(inout b, inout sc, in a, in c, in y, in wt, n.a, K_BOOL);
+    if expr_kind == E_IF {
+        let cond = expr(
+            inout builder,
+            inout scope,
+            in ast,
+            in ctx,
+            in symbols,
+            in fn_table,
+            node.a,
+            K_BOOL
+        );
         if cond == NONE {
             return NONE;
         }
-        let mark = sc_mark(in sc);
-        let t = expr(inout b, inout sc, in a, in c, in y, in wt, n.b, want);
-        sc_reset(inout sc, mark);
-        if t == NONE {
+        let mark = sc_mark(in scope);
+        let then_term = expr(
+            inout builder,
+            inout scope,
+            in ast,
+            in ctx,
+            in symbols,
+            in fn_table,
+            node.b,
+            want
+        );
+        sc_reset(inout scope, mark);
+        if then_term == NONE {
             return NONE;
         }
         let mut other = NONE;
         let mut kind = K_UNIT;
-        if n.c != NONE {
-            kind = kind_of(in b.m, t);
-            other = expr(inout b, inout sc, in a, in c, in y, in wt, n.c, kind);
-            sc_reset(inout sc, mark);
+        if node.c != NONE {
+            kind = kind_of(in builder.terms, then_term);
+            other = expr(
+                inout builder,
+                inout scope,
+                in ast,
+                in ctx,
+                in symbols,
+                in fn_table,
+                node.c,
+                kind
+            );
+            sc_reset(inout scope, mark);
             if other == NONE {
                 return NONE;
             }
         } else {
-            other = unit(inout b);
+            other = unit(inout builder);
         }
-        return term(inout b.m, TM_ITE, cond, t, other, kind, 0, 0);
+        return term(inout builder.terms, TM_ITE, cond, then_term, other, kind, 0, 0);
     }
-    if k == E_UNARY {
-        let x = expr(inout b, inout sc, in a, in c, in y, in wt, n.b, want);
-        if x == NONE {
+    if expr_kind == E_UNARY {
+        let operand = expr(
+            inout builder,
+            inout scope,
+            in ast,
+            in ctx,
+            in symbols,
+            in fn_table,
+            node.b,
+            want
+        );
+        if operand == NONE {
             return NONE;
         }
-        let kind = kind_of(in b.m, x);
-        if n.a == y.y_not && n.a != NONE && kind == K_BOOL {
-            return term(inout b.m, TM_NOT, x, 0, 0, K_BOOL, 0, 0);
+        let kind = kind_of(in builder.terms, operand);
+        if node.a == symbols.y_not && node.a != NONE && kind == K_BOOL {
+            return term(inout builder.terms, TM_NOT, operand, 0, 0, K_BOOL, 0, 0);
         }
-        if n.a == y.y_minus && n.a != NONE && integer(kind) {
-            return term(inout b.m, TM_NEG, x, 0, 0, kind, 0, 0);
+        if node.a == symbols.y_minus && node.a != NONE && integer(kind) {
+            return term(inout builder.terms, TM_NEG, operand, 0, 0, kind, 0, 0);
         }
-        b.err.clear();
-        s(inout b.err, in "unary '");
-        put_name(inout b.err, in a, n.a);
-        s(inout b.err, in "' on ");
-        s(inout b.err, in kind_name(kind));
-        s(inout b.err, in " is outside the scalar model");
-        return fail(inout b);
+        builder.err.clear();
+        s(inout builder.err, in "unary '");
+        put_name(inout builder.err, in ast, node.a);
+        s(inout builder.err, in "' on ");
+        s(inout builder.err, in kind_name(kind));
+        s(inout builder.err, in " is outside the scalar model");
+        return fail(inout builder);
     }
-    if k == E_BINARY {
-        return binary(inout b, inout sc, in a, in c, in y, in wt, n.a, n.b, n.c);
+    if expr_kind == E_BINARY {
+        return binary(
+            inout builder,
+            inout scope,
+            in ast,
+            in ctx,
+            in symbols,
+            in fn_table,
+            node.a,
+            node.b,
+            node.c
+        );
     }
-    if k == E_CALL {
-        return call(inout b, inout sc, in a, in c, in y, in wt, e, n, want);
+    if expr_kind == E_CALL {
+        return call(
+            inout builder,
+            inout scope,
+            in ast,
+            in ctx,
+            in symbols,
+            in fn_table,
+            expr_id,
+            node,
+            want
+        );
     }
-    if k == E_ASSIGN {
-        return unsupported(inout b, in "an assignment outside a block statement position");
+    if expr_kind == E_ASSIGN {
+        return unsupported(inout builder, in "an assignment outside a block statement position");
     }
-    if k == E_MATCH {
-        return unsupported(inout b, in "a match expression");
+    if expr_kind == E_MATCH {
+        return unsupported(inout builder, in "a match expression");
     }
-    if k == E_HANDLE {
-        return unsupported(inout b, in "a handler");
+    if expr_kind == E_HANDLE {
+        return unsupported(inout builder, in "a handler");
     }
-    if k == E_CLOSURE {
-        return unsupported(inout b, in "a closure");
+    if expr_kind == E_CLOSURE {
+        return unsupported(inout builder, in "a closure");
     }
-    if k == E_LOOP || k == E_FOR || k == E_RANGE {
-        return unsupported(inout b, in "a loop");
+    if expr_kind == E_LOOP || expr_kind == E_FOR || expr_kind == E_RANGE {
+        return unsupported(inout builder, in "a loop");
     }
-    if k == E_BREAK || k == E_CONTINUE || k == E_RETURN {
-        return unsupported(inout b, in "an early exit");
+    if expr_kind == E_BREAK || expr_kind == E_CONTINUE || expr_kind == E_RETURN {
+        return unsupported(inout builder, in "an early exit");
     }
-    if k == E_STRUCT || k == E_TUPLE {
-        return unsupported(inout b, in "an aggregate value");
+    if expr_kind == E_STRUCT || expr_kind == E_TUPLE {
+        return unsupported(inout builder, in "an aggregate value");
     }
-    if k == E_FIELD || k == E_INDEX {
-        return unsupported(inout b, in "a projection");
+    if expr_kind == E_FIELD || expr_kind == E_INDEX {
+        return unsupported(inout builder, in "a projection");
     }
-    unsupported(inout b, in "'?'")
+    unsupported(inout builder, in "'?'")
 }
 
 fn call(
-    inout b: B,
-    inout sc: Sc,
-    in a: Ast,
-    in c: Ctx,
-    in y: Syms,
-    in wt: Wt,
-    e: u32,
-    n: ExprNode,
+    inout builder: B,
+    inout scope: Sc,
+    in ast: Ast,
+    in ctx: Ctx,
+    in symbols: Syms,
+    in fn_table: Wt,
+    expr_id: u32,
+    node: ExprNode,
     want: u8
 ) -> u32 {
-    let callee = expr_at(in a, n.a);
+    let callee = expr_at(in ast, node.a);
     if callee.kind != E_NAME {
-        return unsupported(inout b, in "a call through a function value");
+        return unsupported(inout builder, in "a call through a function value");
     }
     let name = callee.a;
-    if list_len(in a, n.b) != 0 || sc_lookup(in sc, name) != 18446744073709551615 {
-        return unsupported(inout b, in "a generic or local function call");
+    if list_len(in ast, node.b) != 0 || sc_lookup(in scope, name) != 18446744073709551615 {
+        return unsupported(inout builder, in "a generic or local function call");
     }
-    let na = list_len(in a, n.c);
-    for i in 0..na {
-        let g = arg_at(in a, list_at(in a, n.c, i));
-        if g.explicit && g.pass != 0 {
-            return unsupported(inout b, in "an inout or sink argument");
+    let arg_count = list_len(in ast, node.c);
+    for i in 0..arg_count {
+        let arg = arg_at(in ast, list_at(in ast, node.c, i));
+        if arg.explicit && arg.pass != 0 {
+            return unsupported(inout builder, in "an inout or sink argument");
         }
     }
     let mut text = ChunkSeq::new[u8]();
-    put_name(inout text, in a, name);
+    put_name(inout text, in ast, name);
     if starts_with(in text, in "wrapping_") {
         let op = if rest_is(in text, 9, in "add") {
             OP_ADD
@@ -652,66 +747,66 @@ fn call(
             255
         };
         if op == 255 {
-            b.err.clear();
-            s(inout b.err, in "intrinsic '");
-            sb(inout b.err, in text);
-            s(inout b.err, in "' is outside the scalar model");
-            return fail(inout b);
+            builder.err.clear();
+            s(inout builder.err, in "intrinsic '");
+            sb(inout builder.err, in text);
+            s(inout builder.err, in "' is outside the scalar model");
+            return fail(inout builder);
         }
-        if na != 2 {
-            return unsupported(inout b, in "a wrapping call without two arguments");
+        if arg_count != 2 {
+            return unsupported(inout builder, in "a wrapping call without two arguments");
         }
-        let mut kind = kind_at(inout b, in a, in c, in y, e);
+        let mut kind = kind_at(inout builder, in ast, in ctx, in symbols, expr_id);
         if !integer(kind) {
             kind = want;
         }
-        let xa = arg_at(in a, list_at(in a, n.c, 0)).expr;
-        let ya = arg_at(in a, list_at(in a, n.c, 1)).expr;
-        let mut x = NONE;
-        let mut z = NONE;
-        let kk = operands(
-            inout b,
-            inout sc,
-            in a,
-            in c,
-            in y,
-            in wt,
-            xa,
-            ya,
+        let lhs_expr = arg_at(in ast, list_at(in ast, node.c, 0)).expr;
+        let rhs_expr = arg_at(in ast, list_at(in ast, node.c, 1)).expr;
+        let mut lhs = NONE;
+        let mut rhs = NONE;
+        let arith_kind = operands(
+            inout builder,
+            inout scope,
+            in ast,
+            in ctx,
+            in symbols,
+            in fn_table,
+            lhs_expr,
+            rhs_expr,
             kind,
-            inout x,
-            inout z
+            inout lhs,
+            inout rhs
         );
-        if kk == K_NONE {
+        if arith_kind == K_NONE {
             return NONE;
         }
-        return term(inout b.m, TM_ARITH, x, z, 0, kk, op, 0);
+        return term(inout builder.terms, TM_ARITH, lhs, rhs, 0, arith_kind, op, 0);
     }
-    inline(inout b, inout sc, in a, in c, in y, in wt, name, n.c)
+    inline(inout builder, inout scope, in ast, in ctx, in symbols, in fn_table, name, node.c)
 }
 
-fn starts_with(in t: ChunkSeq[u8], in p: Str) -> bool {
-    let q = p.as_bytes();
-    if t.len() < q.len() {
+fn starts_with(in text: ChunkSeq[u8], in prefix: Str) -> bool {
+    let expected = prefix.as_bytes();
+    if text.len() < expected.len() {
         return false;
     }
-    for i in 0..q.len() {
-        let d = q.try_get(i).unwrap_or(0);
-        if g8(in t, i) != d {
+    for i in 0..expected.len() {
+        let want = expected.try_get(i).unwrap_or(0);
+        if g8(in text, i) != want {
             return false;
         }
     }
     true
 }
 
-fn rest_is(in t: ChunkSeq[u8], from: u64, in p: Str) -> bool {
-    let q = p.as_bytes();
-    if wrapping_sub(t.len(), from) != q.len() {
+fn rest_is(in text: ChunkSeq[u8], from: u64, in rest: Str) -> bool {
+    let expected = rest.as_bytes();
+    if wrapping_sub(text.len(), from) != expected.len() {
         return false;
     }
-    for i in 0..q.len() {
-        let d = q.try_get(i).unwrap_or(0);
-        if g8(in t, wrapping_add(from, i)) != d {
+    for i in 0..expected.len() {
+        let want = expected.try_get(i).unwrap_or(0);
+        if g8(in text, wrapping_add(from, i)) != want {
             return false;
         }
     }
@@ -720,302 +815,417 @@ fn rest_is(in t: ChunkSeq[u8], from: u64, in p: Str) -> bool {
 
 // `Builder::operands`: two operands of one kind (K_NONE on error).
 fn operands(
-    inout b: B,
-    inout sc: Sc,
-    in a: Ast,
-    in c: Ctx,
-    in y: Syms,
-    in wt: Wt,
-    ea: u32,
-    eb: u32,
+    inout builder: B,
+    inout scope: Sc,
+    in ast: Ast,
+    in ctx: Ctx,
+    in symbols: Syms,
+    in fn_table: Wt,
+    lhs_expr: u32,
+    rhs_expr: u32,
     want: u8,
-    inout x: u32,
-    inout z: u32
+    inout lhs: u32,
+    inout rhs: u32
 ) -> u8 {
-    let mut hint = kind_at(inout b, in a, in c, in y, ea);
+    let mut hint = kind_at(inout builder, in ast, in ctx, in symbols, lhs_expr);
     if hint == K_NONE {
-        hint = kind_at(inout b, in a, in c, in y, eb);
+        hint = kind_at(inout builder, in ast, in ctx, in symbols, rhs_expr);
     }
     if !(integer(hint) || hint == K_BOOL) {
         hint = want;
     }
-    if is_int_literal(in a, ea) && !is_int_literal(in a, eb) {
-        z = expr(inout b, inout sc, in a, in c, in y, in wt, eb, hint);
-        if z == NONE {
+    if is_int_literal(in ast, lhs_expr) && !is_int_literal(in ast, rhs_expr) {
+        rhs = expr(
+            inout builder,
+            inout scope,
+            in ast,
+            in ctx,
+            in symbols,
+            in fn_table,
+            rhs_expr,
+            hint
+        );
+        if rhs == NONE {
             return K_NONE;
         }
-        let k = kind_of(in b.m, z);
-        x = expr(inout b, inout sc, in a, in c, in y, in wt, ea, k);
+        let first_kind = kind_of(in builder.terms, rhs);
+        lhs = expr(
+            inout builder,
+            inout scope,
+            in ast,
+            in ctx,
+            in symbols,
+            in fn_table,
+            lhs_expr,
+            first_kind
+        );
     } else {
-        x = expr(inout b, inout sc, in a, in c, in y, in wt, ea, hint);
-        if x == NONE {
+        lhs = expr(
+            inout builder,
+            inout scope,
+            in ast,
+            in ctx,
+            in symbols,
+            in fn_table,
+            lhs_expr,
+            hint
+        );
+        if lhs == NONE {
             return K_NONE;
         }
-        let k = kind_of(in b.m, x);
-        z = expr(inout b, inout sc, in a, in c, in y, in wt, eb, k);
+        let first_kind = kind_of(in builder.terms, lhs);
+        rhs = expr(
+            inout builder,
+            inout scope,
+            in ast,
+            in ctx,
+            in symbols,
+            in fn_table,
+            rhs_expr,
+            first_kind
+        );
     }
-    if x == NONE || z == NONE {
+    if lhs == NONE || rhs == NONE {
         return K_NONE;
     }
-    let kx = kind_of(in b.m, x);
-    if kx != kind_of(in b.m, z) {
-        let r = fail_s(inout b, in "operands of different kinds are outside the scalar model");
+    let lhs_kind = kind_of(in builder.terms, lhs);
+    if lhs_kind != kind_of(in builder.terms, rhs) {
+        let _ = fail_s(
+            inout builder,
+            in "operands of different kinds are outside the scalar model"
+        );
         return K_NONE;
     }
-    kx
+    lhs_kind
 }
 
-fn op_outside(inout b: B, in a: Ast, op: u32, kind: u8) -> u32 {
-    b.err.clear();
-    s(inout b.err, in "'");
-    put_name(inout b.err, in a, op);
-    s(inout b.err, in "' on ");
-    s(inout b.err, in kind_name(kind));
-    s(inout b.err, in " is outside the model");
-    fail(inout b)
+fn op_outside(inout builder: B, in ast: Ast, op: u32, kind: u8) -> u32 {
+    builder.err.clear();
+    s(inout builder.err, in "'");
+    put_name(inout builder.err, in ast, op);
+    s(inout builder.err, in "' on ");
+    s(inout builder.err, in kind_name(kind));
+    s(inout builder.err, in " is outside the model");
+    fail(inout builder)
 }
 
-fn is_op(op: u32, x: u32) -> bool {
-    op == x && x != NONE
+fn is_op(op: u32, sym: u32) -> bool {
+    op == sym && sym != NONE
 }
 
 fn binary(
-    inout b: B,
-    inout sc: Sc,
-    in a: Ast,
-    in c: Ctx,
-    in y: Syms,
-    in wt: Wt,
+    inout builder: B,
+    inout scope: Sc,
+    in ast: Ast,
+    in ctx: Ctx,
+    in symbols: Syms,
+    in fn_table: Wt,
     op: u32,
-    ea: u32,
-    eb: u32
+    lhs_expr: u32,
+    rhs_expr: u32
 ) -> u32 {
-    if is_op(op, y.y_and) || is_op(op, y.y_or) {
-        let x = expr(inout b, inout sc, in a, in c, in y, in wt, ea, K_BOOL);
-        if x == NONE {
+    if is_op(op, symbols.y_and) || is_op(op, symbols.y_or) {
+        let lhs = expr(
+            inout builder,
+            inout scope,
+            in ast,
+            in ctx,
+            in symbols,
+            in fn_table,
+            lhs_expr,
+            K_BOOL
+        );
+        if lhs == NONE {
             return NONE;
         }
-        let z = expr(inout b, inout sc, in a, in c, in y, in wt, eb, K_BOOL);
-        if z == NONE {
+        let rhs = expr(
+            inout builder,
+            inout scope,
+            in ast,
+            in ctx,
+            in symbols,
+            in fn_table,
+            rhs_expr,
+            K_BOOL
+        );
+        if rhs == NONE {
             return NONE;
         }
-        if kind_of(in b.m, x) != K_BOOL || kind_of(in b.m, z) != K_BOOL {
-            return fail_s(inout b, in "logical operands must be bool");
+        if kind_of(in builder.terms, lhs) != K_BOOL || kind_of(in builder.terms, rhs) != K_BOOL {
+            return fail_s(inout builder, in "logical operands must be bool");
         }
         return term(
-            inout b.m,
-            if is_op(op, y.y_and) { TM_AND } else { TM_OR },
-            x,
-            z,
+            inout builder.terms,
+            if is_op(op, symbols.y_and) {
+                TM_AND
+            } else {
+                TM_OR
+            },
+            lhs,
+            rhs,
             0,
             K_BOOL,
             0,
             0
         );
     }
-    let cmp = if is_op(op, y.y_eq) {
+    let cmp = if is_op(op, symbols.y_eq) {
         CMP_EQ
-    } else if is_op(op, y.y_ne) {
+    } else if is_op(op, symbols.y_ne) {
         CMP_NE
-    } else if is_op(op, y.y_lt) {
+    } else if is_op(op, symbols.y_lt) {
         CMP_LT
-    } else if is_op(op, y.y_le) {
+    } else if is_op(op, symbols.y_le) {
         CMP_LE
-    } else if is_op(op, y.y_gt) {
+    } else if is_op(op, symbols.y_gt) {
         CMP_GT
-    } else if is_op(op, y.y_ge) {
+    } else if is_op(op, symbols.y_ge) {
         CMP_GE
     } else {
         255
     };
     if cmp != 255 {
-        let mut x = NONE;
-        let mut z = NONE;
+        let mut lhs = NONE;
+        let mut rhs = NONE;
         let kind = operands(
-            inout b,
-            inout sc,
-            in a,
-            in c,
-            in y,
-            in wt,
-            ea,
-            eb,
+            inout builder,
+            inout scope,
+            in ast,
+            in ctx,
+            in symbols,
+            in fn_table,
+            lhs_expr,
+            rhs_expr,
             K_NONE,
-            inout x,
-            inout z
+            inout lhs,
+            inout rhs
         );
         if kind == K_NONE {
             return NONE;
         }
         if kind == K_UNIT || (kind == K_BOOL && cmp != CMP_EQ && cmp != CMP_NE) {
-            return op_outside(inout b, in a, op, kind);
+            return op_outside(inout builder, in ast, op, kind);
         }
-        return term(inout b.m, TM_CMP, x, z, 0, kind, cmp, 0);
+        return term(inout builder.terms, TM_CMP, lhs, rhs, 0, kind, cmp, 0);
     }
-    let arith = is_op(op, y.y_plus) || is_op(op, y.y_minus) || is_op(op, y.y_star);
-    let div = is_op(op, y.y_slash) || is_op(op, y.y_percent);
+    let arith = is_op(op, symbols.y_plus)
+        || is_op(op, symbols.y_minus)
+        || is_op(op, symbols.y_star);
+    let div = is_op(op, symbols.y_slash) || is_op(op, symbols.y_percent);
     if arith || div {
-        let mut x = NONE;
-        let mut z = NONE;
+        let mut lhs = NONE;
+        let mut rhs = NONE;
         let kind = operands(
-            inout b,
-            inout sc,
-            in a,
-            in c,
-            in y,
-            in wt,
-            ea,
-            eb,
+            inout builder,
+            inout scope,
+            in ast,
+            in ctx,
+            in symbols,
+            in fn_table,
+            lhs_expr,
+            rhs_expr,
             K_NONE,
-            inout x,
-            inout z
+            inout lhs,
+            inout rhs
         );
         if kind == K_NONE {
             return NONE;
         }
         if !integer(kind) {
-            return op_outside(inout b, in a, op, kind);
+            return op_outside(inout builder, in ast, op, kind);
         }
         if arith {
-            let o = if is_op(op, y.y_plus) {
+            let arith_op = if is_op(op, symbols.y_plus) {
                 OP_ADD
-            } else if is_op(op, y.y_minus) {
+            } else if is_op(op, symbols.y_minus) {
                 OP_SUB
             } else {
                 OP_MUL
             };
-            return term(inout b.m, TM_ARITH, x, z, 0, kind, o, 1);
+            return term(inout builder.terms, TM_ARITH, lhs, rhs, 0, kind, arith_op, 1);
         }
         return term(
-            inout b.m,
+            inout builder.terms,
             TM_DIV,
-            x,
-            z,
+            lhs,
+            rhs,
             0,
             kind,
             0,
-            if is_op(op, y.y_percent) { 1 } else { 0 }
+            if is_op(op, symbols.y_percent) { 1 } else { 0 }
         );
     }
-    quoted(inout b, in a, in "operator '", op, in "' is outside the scalar model")
+    quoted(inout builder, in ast, in "operator '", op, in "' is outside the scalar model")
 }
 
 fn block(
-    inout b: B,
-    inout sc: Sc,
-    in a: Ast,
-    in c: Ctx,
-    in y: Syms,
-    in wt: Wt,
+    inout builder: B,
+    inout scope: Sc,
+    in ast: Ast,
+    in ctx: Ctx,
+    in symbols: Syms,
+    in fn_table: Wt,
     stmts: u32,
     i: u64,
     tail: u32,
     want: u8
 ) -> u32 {
-    if i >= list_len(in a, stmts) {
+    if i >= list_len(in ast, stmts) {
         if tail != NONE {
-            return expr(inout b, inout sc, in a, in c, in y, in wt, tail, want);
+            return expr(
+                inout builder,
+                inout scope,
+                in ast,
+                in ctx,
+                in symbols,
+                in fn_table,
+                tail,
+                want
+            );
         }
-        return unit(inout b);
+        return unit(inout builder);
     }
-    let depth = wrapping_sub(sc.frames, 1);
-    let st = stmt_at(in a, list_at(in a, stmts, i));
+    let depth = wrapping_sub(scope.frames, 1);
+    let stmt = stmt_at(in ast, list_at(in ast, stmts, i));
     let mut name = NONE;
     let mut value = NONE;
-    if st.kind == S_LET {
-        let p = pat_at(in a, st.pat);
-        if p.kind != P_BIND {
-            return fail_s(inout b, in "a destructuring let is outside the scalar model");
+    if stmt.kind == S_LET {
+        let pat = pat_at(in ast, stmt.pat);
+        if pat.kind != P_BIND {
+            return fail_s(inout builder, in "a destructuring let is outside the scalar model");
         }
         let mut declared = K_NONE;
-        if !is_infer(in a, st.ty) {
-            declared = kind_of_type(in a, in y, st.ty);
+        if !is_infer(in ast, stmt.ty) {
+            declared = kind_of_type(in ast, in symbols, stmt.ty);
             if declared == K_NONE {
-                return fail_s(inout b, in "a let of non-scalar type");
+                return fail_s(inout builder, in "a let of non-scalar type");
             }
         }
-        value = expr(inout b, inout sc, in a, in c, in y, in wt, st.value, declared);
+        value = expr(
+            inout builder,
+            inout scope,
+            in ast,
+            in ctx,
+            in symbols,
+            in fn_table,
+            stmt.value,
+            declared
+        );
         if value == NONE {
             return NONE;
         }
-        name = p.a;
+        name = pat.a;
     } else {
-        let v = expr_at(in a, st.value);
-        if v.kind == E_ASSIGN {
-            let target = expr_at(in a, v.b);
+        let stmt_expr = expr_at(in ast, stmt.value);
+        if stmt_expr.kind == E_ASSIGN {
+            let target = expr_at(in ast, stmt_expr.b);
             if target.kind != E_NAME {
-                return fail_s(inout b, in "assignment to a projection is outside the model");
+                return fail_s(inout builder, in "assignment to a projection is outside the model");
             }
-            let found = sc_lookup(in sc, target.a);
+            let found = sc_lookup(in scope, target.a);
             if found == 18446744073709551615 {
-                return quoted(inout b, in a, in "'", target.a, in "' is not a scalar local");
-            }
-            let old = wrapping_u32(wrapping_shr_u64(found, 32));
-            let at = found & 4294967295;
-            if at != depth || var_is_param(in b, old) {
                 return quoted(
-                    inout b,
-                    in a,
+                    inout builder,
+                    in ast,
+                    in "'",
+                    target.a,
+                    in "' is not a scalar local"
+                );
+            }
+            let old_var = wrapping_u32(wrapping_shr_u64(found, 32));
+            let frame = found & 4294967295;
+            if frame != depth || var_is_param(in builder, old_var) {
+                return quoted(
+                    inout builder,
+                    in ast,
                     in "assignment to '",
                     target.a,
                     in "' outside its own block is outside the model"
                 );
             }
-            let kind = var_kind_of(in b, old);
-            let rhs = expr(inout b, inout sc, in a, in c, in y, in wt, v.c, kind);
+            let kind = var_kind_of(in builder, old_var);
+            let rhs = expr(
+                inout builder,
+                inout scope,
+                in ast,
+                in ctx,
+                in symbols,
+                in fn_table,
+                stmt_expr.c,
+                kind
+            );
             if rhs == NONE {
                 return NONE;
             }
-            let op = v.a;
-            if is_op(op, y.y_assign) {
+            let op = stmt_expr.a;
+            if is_op(op, symbols.y_assign) {
                 value = rhs;
-            } else if is_op(op, y.y_add_assign)
-                || is_op(op, y.y_sub_assign)
-                || is_op(op, y.y_mul_assign) {
-                let o = if is_op(op, y.y_add_assign) {
+            } else if is_op(op, symbols.y_add_assign)
+                || is_op(op, symbols.y_sub_assign)
+                || is_op(op, symbols.y_mul_assign) {
+                let arith_op = if is_op(op, symbols.y_add_assign) {
                     OP_ADD
-                } else if is_op(op, y.y_sub_assign) {
+                } else if is_op(op, symbols.y_sub_assign) {
                     OP_SUB
                 } else {
                     OP_MUL
                 };
-                let old_t = term(inout b.m, TM_VAR, old, 0, 0, K_NONE, 0, 0);
-                value = term(inout b.m, TM_ARITH, old_t, rhs, 0, kind, o, 1);
-            } else if is_op(op, y.y_div_assign) || is_op(op, y.y_rem_assign) {
-                let old_t = term(inout b.m, TM_VAR, old, 0, 0, K_NONE, 0, 0);
+                let old_term = term(inout builder.terms, TM_VAR, old_var, 0, 0, K_NONE, 0, 0);
+                value = term(inout builder.terms, TM_ARITH, old_term, rhs, 0, kind, arith_op, 1);
+            } else if is_op(op, symbols.y_div_assign) || is_op(op, symbols.y_rem_assign) {
+                let old_term = term(inout builder.terms, TM_VAR, old_var, 0, 0, K_NONE, 0, 0);
                 value = term(
-                    inout b.m,
+                    inout builder.terms,
                     TM_DIV,
-                    old_t,
+                    old_term,
                     rhs,
                     0,
                     kind,
                     0,
-                    if is_op(op, y.y_rem_assign) { 1 } else { 0 }
+                    if is_op(op, symbols.y_rem_assign) {
+                        1
+                    } else {
+                        0
+                    }
                 );
             } else {
-                return quoted(inout b, in a, in "assignment '", op, in "' is outside the model");
+                return quoted(
+                    inout builder,
+                    in ast,
+                    in "assignment '",
+                    op,
+                    in "' is outside the model"
+                );
             }
             name = target.a;
         } else {
-            value = expr(inout b, inout sc, in a, in c, in y, in wt, st.value, K_NONE);
+            value = expr(
+                inout builder,
+                inout scope,
+                in ast,
+                in ctx,
+                in symbols,
+                in fn_table,
+                stmt.value,
+                K_NONE
+            );
             if value == NONE {
                 return NONE;
             }
         }
     }
-    let kind = kind_of(in b.m, value);
-    let v = var(inout b, in a, NONE, kind, false);
+    let kind = kind_of(in builder.terms, value);
+    let var_id = var(inout builder, in ast, NONE, kind, false);
     if name != NONE {
-        sc_bind(inout sc, name, v);
+        sc_bind(inout scope, name, var_id);
     }
     let body = block(
-        inout b,
-        inout sc,
-        in a,
-        in c,
-        in y,
-        in wt,
+        inout builder,
+        inout scope,
+        in ast,
+        in ctx,
+        in symbols,
+        in fn_table,
         stmts,
         wrapping_add(i, 1),
         tail,
@@ -1024,35 +1234,35 @@ fn block(
     if body == NONE {
         return NONE;
     }
-    term(inout b.m, TM_LET, v, value, body, K_NONE, 0, 0)
+    term(inout builder.terms, TM_LET, var_id, value, body, K_NONE, 0, 0)
 }
 
-fn var_is_param(in b: B, v: u32) -> bool {
-    g8(in b.m.v_param, widen_u64(v)) != 0
+fn var_is_param(in builder: B, var_id: u32) -> bool {
+    g8(in builder.terms.var_param, widen_u64(var_id)) != 0
 }
 
-fn var_kind_of(in b: B, v: u32) -> u8 {
-    g8(in b.m.v_kind, widen_u64(v))
+fn var_kind_of(in builder: B, var_id: u32) -> u8 {
+    g8(in builder.terms.var_kind, widen_u64(var_id))
 }
 
 fn inline(
-    inout b: B,
-    inout sc: Sc,
-    in a: Ast,
-    in c: Ctx,
-    in y: Syms,
-    in wt: Wt,
+    inout builder: B,
+    inout scope: Sc,
+    in ast: Ast,
+    in ctx: Ctx,
+    in symbols: Syms,
+    in fn_table: Wt,
     name: u32,
     args: u32
 ) -> u32 {
-    let fi = widen_u64(g32(in wt.by_sym, widen_u64(name)));
-    let known = fi != widen_u64(NONE);
+    let fn_index = widen_u64(g32(in fn_table.by_sym, widen_u64(name)));
+    let known = fn_index != widen_u64(NONE);
     if known {
-        for i in 0..b.stack.len() {
-            if widen_u64(g32(in b.stack, i)) == fi {
+        for i in 0..builder.stack.len() {
+            if widen_u64(g32(in builder.stack, i)) == fn_index {
                 return quoted(
-                    inout b,
-                    in a,
+                    inout builder,
+                    in ast,
                     in "recursive call to '",
                     name,
                     in "' is outside the model"
@@ -1060,142 +1270,190 @@ fn inline(
             }
         }
     }
-    if b.stack.len() > MAX_INLINE_DEPTH {
-        return fail_s(inout b, in "calls nest too deeply for the model");
+    if builder.stack.len() > MAX_INLINE_DEPTH {
+        return fail_s(inout builder, in "calls nest too deeply for the model");
     }
     if !known {
-        return quoted(inout b, in a, in "call to '", name, in "' is outside the scalar model");
+        return quoted(
+            inout builder,
+            in ast,
+            in "call to '",
+            name,
+            in "' is outside the scalar model"
+        );
     }
-    let sig = signature(inout b, in a, in y, in wt, fi);
+    let sig = signature(inout builder, in ast, in symbols, in fn_table, fn_index);
     if !sig.ok {
         let mut reason = ChunkSeq::new[u8]();
-        sb(inout reason, in b.err);
-        b.err.clear();
-        s(inout b.err, in "callee '");
-        put_name(inout b.err, in a, name);
-        s(inout b.err, in "': ");
-        sb(inout b.err, in reason);
+        sb(inout reason, in builder.err);
+        builder.err.clear();
+        s(inout builder.err, in "callee '");
+        put_name(inout builder.err, in ast, name);
+        s(inout builder.err, in "': ");
+        sb(inout builder.err, in reason);
         return NONE;
     }
-    let np = sig.kinds.len();
-    if list_len(in a, args) != np {
-        return quoted(inout b, in a, in "call to '", name, in "' has the wrong arity");
+    let param_count = sig.kinds.len();
+    if list_len(in ast, args) != param_count {
+        return quoted(inout builder, in ast, in "call to '", name, in "' has the wrong arity");
     }
     let mut values = ChunkSeq::new[u32]();
-    for i in 0..np {
+    for i in 0..param_count {
         let kind = g8(in sig.kinds, i);
-        let g = arg_at(in a, list_at(in a, args, i));
-        let v = expr(inout b, inout sc, in a, in c, in y, in wt, g.expr, kind);
-        if v == NONE {
+        let arg = arg_at(in ast, list_at(in ast, args, i));
+        let arg_value = expr(
+            inout builder,
+            inout scope,
+            in ast,
+            in ctx,
+            in symbols,
+            in fn_table,
+            arg.expr,
+            kind
+        );
+        if arg_value == NONE {
             return NONE;
         }
-        if kind_of(in b.m, v) != kind {
-            return quoted(inout b, in a, in "argument to '", name, in "' has the wrong kind");
+        if kind_of(in builder.terms, arg_value) != kind {
+            return quoted(
+                inout builder,
+                in ast,
+                in "argument to '",
+                name,
+                in "' has the wrong kind"
+            );
         }
-        values.push(v);
+        values.push(arg_value);
     }
     // The callee sees only its parameters.
-    let f = fn_at(in a, g32(in wt.node, fi));
+    let callee = fn_at(in ast, g32(in fn_table.node, fn_index));
     let mut inner = sc_new();
     let mut vars = ChunkSeq::new[u32]();
-    for i in 0..np {
-        let p = param_at(in a, list_at(in a, f.params, i));
-        let v = var(inout b, in a, NONE, g8(in sig.kinds, i), false);
-        sc_bind(inout inner, p.name, v);
-        vars.push(v);
+    for i in 0..param_count {
+        let param = param_at(in ast, list_at(in ast, callee.params, i));
+        let var_id = var(inout builder, in ast, NONE, g8(in sig.kinds, i), false);
+        sc_bind(inout inner, param.name, var_id);
+        vars.push(var_id);
     }
-    b.stack.push(wrapping_u32(fi));
-    let saved = b.delta;
-    b.delta = g64(in wt.delta, fi);
-    let body = expr(inout b, inout inner, in a, in c, in y, in wt, sig.body, sig.result);
-    b.delta = saved;
-    let x = b.stack.pop();
+    builder.stack.push(wrapping_u32(fn_index));
+    let saved = builder.delta;
+    builder.delta = g64(in fn_table.delta, fn_index);
+    let body = expr(
+        inout builder,
+        inout inner,
+        in ast,
+        in ctx,
+        in symbols,
+        in fn_table,
+        sig.body,
+        sig.result
+    );
+    builder.delta = saved;
+    let _ = builder.stack.pop();
     if body == NONE {
         return NONE;
     }
-    let mut t = body;
-    let mut i = np;
+    let mut result = body;
+    let mut i = param_count;
     loop {
         if i == 0 {
             break;
         }
         i = wrapping_sub(i, 1);
-        t = term(inout b.m, TM_LET, g32(in vars, i), g32(in values, i), t, K_NONE, 0, 0);
+        result = term(
+            inout builder.terms,
+            TM_LET,
+            g32(in vars, i),
+            g32(in values, i),
+            result,
+            K_NONE,
+            0,
+            0
+        );
     }
-    t
+    result
 }
 
-// `model`: the model of function `fi` into `out` (`O` exact, bitvec and
+// `model`: the model of function `fn_index` into `out` (`O` exact, bitvec and
 // key, each after a 0x1f) or its reason (`E`).
 fn model(
-    inout b: B,
+    inout builder: B,
     inout out: ChunkSeq[u8],
-    in a: Ast,
-    in c: Ctx,
-    in y: Syms,
-    in wt: Wt,
-    fi: u64
+    in ast: Ast,
+    in ctx: Ctx,
+    in symbols: Syms,
+    in fn_table: Wt,
+    fn_index: u64
 ) {
-    tm_clear(inout b.m);
-    b.nodes = 0;
-    b.stack.clear();
-    b.stack.push(wrapping_u32(fi));
-    b.err.clear();
-    b.failed = false;
-    b.delta = g64(in wt.delta, fi);
-    let sig = signature(inout b, in a, in y, in wt, fi);
+    tm_clear(inout builder.terms);
+    builder.nodes = 0;
+    builder.stack.clear();
+    builder.stack.push(wrapping_u32(fn_index));
+    builder.err.clear();
+    builder.failed = false;
+    builder.delta = g64(in fn_table.delta, fn_index);
+    let sig = signature(inout builder, in ast, in symbols, in fn_table, fn_index);
     if !sig.ok {
         out.push(69);
-        sb(inout out, in b.err);
+        sb(inout out, in builder.err);
         return;
     }
-    let f = fn_at(in a, g32(in wt.node, fi));
-    let mut sc = sc_new();
-    let np = sig.kinds.len();
-    for i in 0..np {
-        let p = param_at(in a, list_at(in a, f.params, i));
-        let v = var(inout b, in a, p.name, g8(in sig.kinds, i), true);
-        sc_bind(inout sc, p.name, v);
+    let fn_node = fn_at(in ast, g32(in fn_table.node, fn_index));
+    let mut scope = sc_new();
+    let param_count = sig.kinds.len();
+    for i in 0..param_count {
+        let param = param_at(in ast, list_at(in ast, fn_node.params, i));
+        let var_id = var(inout builder, in ast, param.name, g8(in sig.kinds, i), true);
+        sc_bind(inout scope, param.name, var_id);
     }
-    let root = expr(inout b, inout sc, in a, in c, in y, in wt, sig.body, sig.result);
+    let root = expr(
+        inout builder,
+        inout scope,
+        in ast,
+        in ctx,
+        in symbols,
+        in fn_table,
+        sig.body,
+        sig.result
+    );
     if root == NONE {
         out.push(69);
-        sb(inout out, in b.err);
+        sb(inout out, in builder.err);
         return;
     }
-    let mut ex = ChunkSeq::new[u8]();
-    exact(inout ex, in b.m, root);
-    let mut bv = ChunkSeq::new[u8]();
-    bitvec(inout bv, in b.m, root, np);
+    let mut exact_text = ChunkSeq::new[u8]();
+    exact(inout exact_text, in builder.terms, root);
+    let mut bitvec_text = ChunkSeq::new[u8]();
+    bitvec(inout bitvec_text, in builder.terms, root, param_count);
     out.push(79);
-    sb(inout out, in ex);
+    sb(inout out, in exact_text);
     out.push(31);
-    sb(inout out, in bv);
+    sb(inout out, in bitvec_text);
     out.push(31);
-    if !b.hash {
+    if !builder.hash {
         return;
     }
     let mut keyed = ChunkSeq::new[u8]();
     s(inout keyed, in "vesper.lens.model/1");
     keyed.push(0);
-    sb(inout keyed, in ex);
+    sb(inout keyed, in exact_text);
     keyed.push(0);
-    sb(inout keyed, in bv);
-    let d = blake3(in keyed.as_slice());
+    sb(inout keyed, in bitvec_text);
+    let digest = blake3(in keyed.as_slice());
     let mut key = ChunkSeq::new[u8]();
-    digest_bytes(d, inout key);
+    digest_bytes(digest, inout key);
     for i in 0..key.len() {
-        let x = g8(in key, i);
-        out.push(hex_digit(x >> 4));
-        out.push(hex_digit(x & 15));
+        let byte = g8(in key, i);
+        out.push(hex_digit(byte >> 4));
+        out.push(hex_digit(byte & 15));
     }
 }
 
-fn hex_digit(x: u8) -> u8 {
-    if x < 10 {
-        wrapping_add(x, 48)
+fn hex_digit(nibble: u8) -> u8 {
+    if nibble < 10 {
+        wrapping_add(nibble, 48)
     } else {
-        wrapping_add(x, 87)
+        wrapping_add(nibble, 87)
     }
 }
 
@@ -1205,10 +1463,10 @@ copy struct Rd {
     pos: u64
 }
 
-fn word(in b: Slice[u8], inout r: Rd) -> u64 {
-    let x = b.try_read_u64_le(r.pos).unwrap_or(0);
-    r.pos = wrapping_add(r.pos, 8);
-    x
+fn word(in bytes: Slice[u8], inout reader: Rd) -> u64 {
+    let value = bytes.try_read_u64_le(reader.pos).unwrap_or(0);
+    reader.pos = wrapping_add(reader.pos, 8);
+    value
 }
 
 // `proof_model::all` over the checker's facts, then the function table
@@ -1218,95 +1476,98 @@ fn word(in b: Slice[u8], inout r: Rd) -> u64 {
 // records separated by 0x1e.
 pub fn proof_models(in input: Str) -> ChunkSeq[u64] {
     let bytes = input.as_bytes();
-    let mut cr = CtxReader { pos: 0 };
-    let c = read_ctx(inout cr, in bytes);
-    let mut r = Rd { pos: cr.pos };
-    let nf = word(in bytes, inout r);
-    let mut no = ChunkSeq::new[u64]();
-    let mut nl = ChunkSeq::new[u64]();
-    let mut st = ChunkSeq::new[u64]();
-    let mut en = ChunkSeq::new[u64]();
-    let mut wt = Wt {
+    let mut ctx_reader = CtxReader { pos: 0 };
+    let ctx = read_ctx(inout ctx_reader, in bytes);
+    let mut reader = Rd { pos: ctx_reader.pos };
+    let fn_count = word(in bytes, inout reader);
+    let mut name_offsets = ChunkSeq::new[u64]();
+    let mut name_lens = ChunkSeq::new[u64]();
+    let mut fn_starts = ChunkSeq::new[u64]();
+    let mut fn_ends = ChunkSeq::new[u64]();
+    let mut fn_table = Wt {
         sym: ChunkSeq::new[u32](),
         node: ChunkSeq::new[u32](),
-        imp: ChunkSeq::new[u32](),
+        owner_impl: ChunkSeq::new[u32](),
         delta: ChunkSeq::new[u64](),
         body: ChunkSeq::new[u8](),
         by_sym: ChunkSeq::new[u32]()
     };
-    for i in 0..nf {
-        no.push(word(in bytes, inout r));
-        nl.push(word(in bytes, inout r));
-        st.push(word(in bytes, inout r));
-        en.push(word(in bytes, inout r));
-        wt.delta.push(word(in bytes, inout r));
-        wt.body.push(wrapping_u8(word(in bytes, inout r)));
+    for i in 0..fn_count {
+        name_offsets.push(word(in bytes, inout reader));
+        name_lens.push(word(in bytes, inout reader));
+        fn_starts.push(word(in bytes, inout reader));
+        fn_ends.push(word(in bytes, inout reader));
+        fn_table.delta.push(word(in bytes, inout reader));
+        fn_table.body.push(wrapping_u8(word(in bytes, inout reader)));
     }
-    let text_len = word(in bytes, inout r);
-    let names_len = word(in bytes, inout r);
+    let text_len = word(in bytes, inout reader);
+    let names_len = word(in bytes, inout reader);
     // The server keeps one parse per snapshot: `reps` rounds of every model
     // on it (the answer is the last round's).
-    let reps = word(in bytes, inout r);
+    let reps = word(in bytes, inout reader);
     let mut b_hash: u64 = 0;
     // 1: the key is hashed here (portable BLAKE3); 0: the key is left to the
     // host, which hashes the renderings with the C BLAKE3 as
     // `@vesper-std/hash-sys` does in the hosted build.
-    b_hash = word(in bytes, inout r);
-    let text = match String::from_utf8(in bytes[r.pos..wrapping_add(r.pos, text_len)]) {
+    b_hash = word(in bytes, inout reader);
+    let text = match String::from_utf8(in bytes[reader.pos..wrapping_add(reader.pos, text_len)]) {
         Option::Some(x) => x,
         Option::None => String::new(),
     };
-    let names_at = wrapping_add(r.pos, text_len);
+    let names_at = wrapping_add(reader.pos, text_len);
     let lowered = lower_source(in text);
-    let mut a = lowered.ast;
-    for i in 0..nf {
-        let o = wrapping_add(names_at, g64(in no, i));
-        let name = match String::from_utf8(in bytes[o..wrapping_add(o, g64(in nl, i))]) {
+    let mut ast = lowered.ast;
+    for i in 0..fn_count {
+        let name_at = wrapping_add(names_at, g64(in name_offsets, i));
+        let name = match String::from_utf8(
+            in bytes[name_at..wrapping_add(name_at, g64(in name_lens, i))]
+        ) {
             Option::Some(x) => x,
             Option::None => String::new(),
         };
-        let x = a.names.intern(in name);
-        wt.sym.push(x.id());
+        let symbol = ast.names.intern(in name);
+        fn_table.sym.push(symbol.id());
     }
-    for i in 0..a.names.len() {
-        wt.by_sym.push(NONE);
+    for i in 0..ast.names.len() {
+        fn_table.by_sym.push(NONE);
     }
-    for i in 0..nf {
-        let ok = wt.by_sym.try_set(widen_u64(g32(in wt.sym, i)), wrapping_u32(i));
+    for i in 0..fn_count {
+        let ok = fn_table.by_sym.try_set(widen_u64(g32(in fn_table.sym, i)), wrapping_u32(i));
     }
     // Every function tree: top-level functions and impl methods.
-    let mut fs = ChunkSeq::new[u32]();
-    let mut fi = ChunkSeq::new[u32]();
-    for i in 0..a.m_items.len() {
-        let it = item_at(in a, g32(in a.m_items, i));
-        if it.kind == ITEM_FUNCTION {
-            fs.push(it.node);
-            fi.push(NONE);
-        } else if it.kind == ITEM_IMPL {
-            let im = impl_at(in a, it.node);
-            for j in 0..list_len(in a, im.methods) {
-                fs.push(list_at(in a, im.methods, j));
-                fi.push(it.node);
+    let mut fn_nodes = ChunkSeq::new[u32]();
+    let mut fn_impls = ChunkSeq::new[u32]();
+    for i in 0..ast.m_items.len() {
+        let item = item_at(in ast, g32(in ast.m_items, i));
+        if item.kind == ITEM_FUNCTION {
+            fn_nodes.push(item.node);
+            fn_impls.push(NONE);
+        } else if item.kind == ITEM_IMPL {
+            let impl_node = impl_at(in ast, item.node);
+            for j in 0..list_len(in ast, impl_node.methods) {
+                fn_nodes.push(list_at(in ast, impl_node.methods, j));
+                fn_impls.push(item.node);
             }
         }
     }
-    for i in 0..nf {
+    for i in 0..fn_count {
         let mut node = NONE;
-        let mut imp = NONE;
-        for j in 0..fs.len() {
-            let f = fn_at(in a, g32(in fs, j));
-            if widen_u64(f.start) == g64(in st, i) && widen_u64(f.end) == g64(in en, i) {
-                node = g32(in fs, j);
-                imp = g32(in fi, j);
+        let mut impl_id = NONE;
+        for j in 0..fn_nodes.len() {
+            let fn_node = fn_at(in ast, g32(in fn_nodes, j));
+            if widen_u64(fn_node.start) == g64(in fn_starts, i)
+                && widen_u64(fn_node.end) == g64(in fn_ends, i) {
+                node = g32(in fn_nodes, j);
+                impl_id = g32(in fn_impls, j);
                 break;
             }
         }
-        wt.node.push(node);
-        wt.imp.push(imp);
+        fn_table.node.push(node);
+        fn_table.owner_impl.push(impl_id);
     }
-    let y = syms(in a);
-    let mut b = B {
-        m: tm_new(),
+    let symbols = syms(in ast);
+    let mut builder = B {
+        terms: tm_new(),
         nodes: 0,
         stack: ChunkSeq::new[u32](),
         delta: 0,
@@ -1318,28 +1579,40 @@ pub fn proof_models(in input: Str) -> ChunkSeq[u64] {
     let mut out = ChunkSeq::new[u8]();
     for round in 0..reps {
         out.clear();
-        all(inout b, inout out, in a, in c, in y, in wt, in bytes, names_at, in no, in nl, nf);
+        all(
+            inout builder,
+            inout out,
+            in ast,
+            in ctx,
+            in symbols,
+            in fn_table,
+            in bytes,
+            names_at,
+            in name_offsets,
+            in name_lens,
+            fn_count
+        );
     }
     pack(in out.as_slice())
 }
 
 // `proof_model::all`: the first `MAX_MODELS` functions with a body.
 fn all(
-    inout b: B,
+    inout builder: B,
     inout out: ChunkSeq[u8],
-    in a: Ast,
-    in c: Ctx,
-    in y: Syms,
-    in wt: Wt,
+    in ast: Ast,
+    in ctx: Ctx,
+    in symbols: Syms,
+    in fn_table: Wt,
     in bytes: Slice[u8],
     names_at: u64,
-    in no: ChunkSeq[u64],
-    in nl: ChunkSeq[u64],
-    nf: u64
+    in name_offsets: ChunkSeq[u64],
+    in name_lens: ChunkSeq[u64],
+    fn_count: u64
 ) {
     let mut count: u64 = 0;
-    for i in 0..nf {
-        if g8(in wt.body, i) == 0 {
+    for i in 0..fn_count {
+        if g8(in fn_table.body, i) == 0 {
             continue;
         }
         if count >= MAX_MODELS {
@@ -1349,9 +1622,9 @@ fn all(
             out.push(30);
         }
         count = wrapping_add(count, 1);
-        let o = wrapping_add(names_at, g64(in no, i));
-        out.extend(in bytes[o..wrapping_add(o, g64(in nl, i))]);
+        let name_at = wrapping_add(names_at, g64(in name_offsets, i));
+        out.extend(in bytes[name_at..wrapping_add(name_at, g64(in name_lens, i))]);
         out.push(31);
-        model(inout b, inout out, in a, in c, in y, in wt, i);
+        model(inout builder, inout out, in ast, in ctx, in symbols, in fn_table, i);
     }
 }
