@@ -463,6 +463,119 @@ fn driver_matches_the_default_compiler() {
     );
 }
 
+/// The session and I/O steps the Vesper driver runs itself (hd_step group
+/// 1, #1896): what `--target` names (Windows or not), `--tee`'s
+/// `vesper-tee` run, whether the input is a package, and the text of an I/O
+/// error. Each option set runs on a program, a package, a directory that
+/// is not a package, a missing file and a file in a missing directory.
+#[test]
+fn session_steps_match_the_default_compiler() {
+    let root = repository();
+    let scratch =
+        std::env::temp_dir().join(format!("vesper-hybrid-session-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&scratch);
+    std::fs::create_dir_all(scratch.join("plain-dir")).unwrap();
+    // Each compiler runs from a copy in its own directory, so `--tee` looks
+    // for `vesper-tee` in the same places for both: Bazel builds the tools
+    // beside `//:bin/vesper` (at `../crates/vesper-tools/bin`) but not beside
+    // the hybrid.
+    let alone = |exe: PathBuf, tag: &str| -> PathBuf {
+        let dir = scratch.join(format!("bin-{tag}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let copy = dir.join(exe.file_name().unwrap());
+        std::fs::copy(&exe, &copy).unwrap_or_else(|e| panic!("copy {}: {e}", exe.display()));
+        copy
+    };
+    let default = alone(default_compiler(), "default");
+    let hybrid = alone(hybrid(), "hybrid");
+    let program = scratch.join("ok.ves");
+    std::fs::write(&program, "fn main() -> i64 {\n    40 + 2\n}\n").unwrap();
+    let inputs = [
+        program,
+        root.join("examples/loom"),
+        scratch.join("plain-dir"),
+        scratch.join("missing.ves"),
+        scratch.join("no-such-dir/x.ves"),
+    ];
+    let sets: &[&[&str]] = &[
+        &["check"],
+        &["build", "-o", "{out}", "--tee"],
+        &["build", "-o", "{out}", "--target", "x86_64-pc-windows-msvc"],
+        &["build", "-o", "{out}", "--target", "x86_64-windows"],
+        &["build", "-o", "{out}", "--target", "aarch64-apple-darwin"],
+        &[
+            "build",
+            "-o",
+            "{out}",
+            "--target",
+            "x86_64-unknown-linux-gnu",
+        ],
+        &["build", "-o", "{out}", "--target", "not-a-triple"],
+        &[
+            "emit",
+            "--emit",
+            "object",
+            "--target",
+            "x86_64-pc-windows-msvc",
+        ],
+    ];
+    let mut mismatches = vec![];
+    let mut runs = 0;
+    for (i, input) in inputs.iter().enumerate() {
+        for (k, set) in sets.iter().enumerate() {
+            let mut both = vec![];
+            for (tag, compiler) in [("default", &default), ("hybrid", &hybrid)] {
+                let out = scratch.join(format!("out-{i}-{k}-{tag}"));
+                let mut args: Vec<String> = set
+                    .iter()
+                    .map(|a| match *a {
+                        "{out}" => out.display().to_string(),
+                        a => a.to_owned(),
+                    })
+                    .collect();
+                args.push(input.display().to_string());
+                let r = run(compiler, &scratch, &args, &out);
+                both.push((r, out, tag));
+            }
+            runs += 1;
+            let (d, h) = (&both[0], &both[1]);
+            let mut diff = vec![];
+            if d.0.output.status.code() != h.0.output.status.code() {
+                diff.push("exit status");
+            }
+            for (what, a, b) in [
+                ("stdout", &d.0.output.stdout, &h.0.output.stdout),
+                ("stderr", &d.0.output.stderr, &h.0.output.stderr),
+            ] {
+                if normalized(a, &d.1, d.2) != normalized(b, &h.1, h.2) {
+                    diff.push(what);
+                }
+            }
+            if d.0.written.is_some() != h.0.written.is_some() {
+                diff.push("output presence");
+            }
+            if !diff.is_empty() {
+                mismatches.push(format!(
+                    "{} {}: {} (default {:?}, hybrid {:?})",
+                    set.join(" "),
+                    input.display(),
+                    diff.join(", "),
+                    String::from_utf8_lossy(&d.0.output.stderr),
+                    String::from_utf8_lossy(&h.0.output.stderr),
+                ));
+            }
+        }
+    }
+    let _ = std::fs::remove_dir_all(&scratch);
+    eprintln!("session steps: {runs} runs, {} differ", mismatches.len());
+    assert!(
+        mismatches.is_empty(),
+        "the Vesper driver differs from the default CLI on {} runs:\n{}",
+        mismatches.len(),
+        mismatches.join("\n")
+    );
+}
+
 /// The compile commands really run in the Vesper driver, and the others
 /// in the Rust CLI.
 #[test]

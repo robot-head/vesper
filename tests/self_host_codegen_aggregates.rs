@@ -79,8 +79,7 @@ pub fn prepared() -> &'static [Prepared] {
     P.get_or_init(|| {
         let only = std::env::var("CODEGEN_AGGREGATES_ONLY").ok();
         let mut out = vec![];
-        let quiet = std::panic::take_hook();
-        std::panic::set_hook(Box::new(|_| {}));
+        let quiet = quiet_panics();
         for c in corpus().iter().step_by(step()) {
             if only.as_ref().is_some_and(|o| !c.name.contains(o.as_str())) {
                 continue;
@@ -93,7 +92,7 @@ pub fn prepared() -> &'static [Prepared] {
                 });
             }
         }
-        std::panic::set_hook(quiet);
+        drop(quiet);
         out
     })
 }

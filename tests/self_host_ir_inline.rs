@@ -65,8 +65,7 @@ fn prepared() -> &'static [Prepared] {
     static P: OnceLock<Vec<Prepared>> = OnceLock::new();
     let only = std::env::var("SELF_HOST_IR_INLINE_ONLY").ok();
     P.get_or_init(|| {
-        let quiet = std::panic::take_hook();
-        std::panic::set_hook(Box::new(|_| {}));
+        let quiet = quiet_panics();
         let mut out = vec![];
         for c in corpus().iter().step_by(step(DEFAULT_STEP)) {
             if only.as_ref().is_some_and(|o| !c.name.contains(o.as_str())) {
@@ -81,7 +80,7 @@ fn prepared() -> &'static [Prepared] {
                 });
             }
         }
-        std::panic::set_hook(quiet);
+        drop(quiet);
         out
     })
 }

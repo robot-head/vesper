@@ -104,4 +104,27 @@ sys library StdFs (
         bFailIfExists: i32
     ) -> ForeignVal[i32] errno;
     fn GetCurrentProcessId() -> ForeignVal[u32];
+    // `std`'s OS error message (`format_error` of
+    // library/std/src/sys/io/error/windows.rs). The message comes back in a
+    // buffer `FormatMessageW` allocates, read out as UTF-8.
+    fn GetModuleHandleW(nocapture in lpModuleName: CWStr) -> ForeignVal[u64];
+    fn FormatMessageW(
+        dwFlags: u32,
+        lpSource: u64,
+        dwMessageId: u32,
+        dwLanguageId: u32,
+        nocapture inout lpBuffer: u64,
+        nSize: u32,
+        Arguments: u64
+    ) -> ForeignVal[u32] errno;
+    fn WideCharToMultiByte(
+        CodePage: u32,
+        dwFlags: u32,
+        lpWideCharStr: u64,
+        cchWideChar: i32,
+        nocapture inout lpMultiByteStr: CSlice[u8],
+        lpDefaultChar: u64,
+        lpUsedDefaultChar: u64
+    ) -> ForeignVal[i32];
+    fn LocalFree(hMem: u64) -> ForeignVal[u64];
 }

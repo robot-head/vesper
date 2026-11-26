@@ -413,6 +413,63 @@ pub(super) fn skeleton_words(
     out
 }
 
+/// `render` as words for tests/self_host_sugar.rs: `[2, len, message]`
+/// when it refuses, else `[1, len, text, holes, (start, end)*, origins,
+/// (start, end, value start, value end, from tail)*, places, (start, end,
+/// pass)*]` with pass 1 In, 2 Inout, 3 Out, 4 Sink.
+pub(super) fn render_words(
+    template: &str,
+    captures: &Captures,
+    mark: &str,
+    max_bytes: usize,
+) -> Vec<u64> {
+    match render(template, captures, mark, max_bytes) {
+        Err(message) => refusal_words(&message),
+        Ok(r) => {
+            let mut out = vec![1];
+            push_rendered(&mut out, &r);
+            out
+        }
+    }
+}
+
+/// `[2, len, message]`.
+pub(super) fn refusal_words(message: &str) -> Vec<u64> {
+    let mut out = vec![2, message.len() as u64];
+    out.extend(message.bytes().map(u64::from));
+    out
+}
+
+/// A rendering's words after the leading 1 of [`render_words`].
+pub(super) fn push_rendered(out: &mut Vec<u64>, r: &Rendered) {
+    out.push(r.text.len() as u64);
+    out.extend(r.text.bytes().map(u64::from));
+    out.push(r.holes.len() as u64);
+    for h in &r.holes {
+        out.extend([h.start as u64, h.end as u64]);
+    }
+    out.push(r.origins.len() as u64);
+    for (at, value, tail) in &r.origins {
+        out.extend([
+            at.start as u64,
+            at.end as u64,
+            value.start as u64,
+            value.end as u64,
+            u64::from(*tail),
+        ]);
+    }
+    out.push(r.places.len() as u64);
+    for (at, pass) in &r.places {
+        let code = match pass {
+            SugarPass::In => 1,
+            SugarPass::Inout => 2,
+            SugarPass::Out => 3,
+            SugarPass::Sink => 4,
+        };
+        out.extend([at.start as u64, at.end as u64, code]);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

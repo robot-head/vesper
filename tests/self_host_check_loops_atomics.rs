@@ -810,10 +810,9 @@ fn control_mutant(module: &Module, m: usize) -> Module {
 
 /// Checks `module` (catching a checker panic) and returns both texts.
 fn control_case(module: &Module) -> Option<(String, String)> {
-    let quiet = std::panic::take_hook();
-    std::panic::set_hook(Box::new(|_| {}));
+    let quiet = quiet_panics();
     let checked = std::panic::catch_unwind(|| vesper::check::check(module));
-    std::panic::set_hook(quiet);
+    drop(quiet);
     let checked = checked.ok()?;
     Some((
         control_rust(&checked.diagnostics),
@@ -982,10 +981,9 @@ fn atomics_vesper(module: &Module, world: &World, program: Option<&vesper::ir::P
 }
 
 fn lower(world: &World) -> Option<vesper::ir::Program> {
-    let quiet = std::panic::take_hook();
-    std::panic::set_hook(Box::new(|_| {}));
+    let quiet = quiet_panics();
     let p = std::panic::catch_unwind(|| vesper::ir::lower_world(world)).ok();
-    std::panic::set_hook(quiet);
+    drop(quiet);
     p
 }
 

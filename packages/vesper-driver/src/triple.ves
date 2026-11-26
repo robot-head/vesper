@@ -1,0 +1,377 @@
+// @vesper/driver::triple: target triples as the Rust compiler reads them
+// (`target_lexicon` 0.13.5's `Triple::from_str`, default features), so
+// the Vesper driver decides what `--target` names without the Rust crate
+// (hd_step group 1, #1896).
+//
+// A field is the index of its name in that field's name list below
+// (`unknown` is 0 in each). `arm64` reads as `aarch64`, a vendor that is
+// not listed is `custom_vendor()`, and an OS with a deployment version
+// (`macosx10.7`) is its family's code, from `os_darwin()` on.
+
+pub copy struct Triple {
+    pub arch: u32,
+    pub vendor: u32,
+    pub os: u32,
+    pub env: u32,
+    pub binary_format: u32,
+}
+
+fn none() -> u32 {
+    4294967295
+}
+
+pub fn custom_vendor() -> u32 {
+    1000
+}
+
+// The OS codes the driver and the native backend test.
+pub fn os_unknown() -> u32 {
+    0
+}
+
+pub fn os_windows() -> u32 {
+    31
+}
+
+// `darwin`, then `ios`, `macosx`, `tvos`, `visionos`, `watchos`, `xros`.
+pub fn os_darwin() -> u32 {
+    100
+}
+
+pub fn env_msvc() -> u32 {
+    22
+}
+
+pub fn binary_format_coff() -> u32 {
+    2
+}
+
+pub fn arch_x86_64() -> u32 {
+    24
+}
+
+// Every architecture `Architecture::from_str` accepts: the plain ones,
+// then Arm, AArch64, RISC-V 32 and 64, x86-32, MIPS 32 and 64, Clever.
+fn arch_names() -> Str {
+    "unknown amdgcn asmjs avr bpfeb bpfel hexagon loongarch64 m68k msp430 nvptx64 pulley32 pulley64 pulley32be pulley64be powerpc powerpc64 powerpc64le s390x sparc sparc64 sparcv9 wasm32 wasm64 x86_64 x86_64h xtensa arm armeb armv4 armv4t armv5t armv5te armv5tej armv6 armv6j armv6k armv6z armv6kz armv6t2 armv6m armv7 armv7a armv7k armv7ve armv7m armv7r armv7s armv8 armv8a armv8.1a armv8.2a armv8.3a armv8.4a armv8.5a armv8m.base armv8m.main armv8r thumbeb thumbv4t thumbv5te thumbv6m thumbv7a thumbv7em thumbv7m thumbv7neon thumbv8m.base thumbv8m.main armebv7r aarch64 arm64 aarch64_be riscv32 riscv32gc riscv32i riscv32im riscv32ima riscv32imac riscv32imafc riscv32imc riscv64 riscv64gc riscv64imac riscv64a23 i386 i586 i686 mips mipsel mipsisa32r6 mipsisa32r6el mips64 mips64el mipsisa64r6 mipsisa64r6el clever clever1.0"
+}
+
+fn vendor_names() -> Str {
+    "unknown amd apple espressif experimental fortanix ibm kmc nintendo nvidia pc rumprun sun uwp wrs"
+}
+
+fn os_names() -> Str {
+    "unknown aix amdhsa bitrig cloudabi cuda cygwin dragonfly emscripten freebsd fuchsia haiku hermit horizon hurd illumos l4re linux nebulet netbsd none openbsd psp redox solaris solid_asp3 uefi vxworks wasi wasip1 wasip2 windows espidf"
+}
+
+// The OS names that may carry a deployment version, in the order
+// `OperatingSystem::from_str` tries them.
+fn darwin_names() -> Str {
+    "darwin ios macosx tvos visionos watchos xros"
+}
+
+fn env_names() -> Str {
+    "unknown amdgiz android androideabi eabi eabihf gnu gnuabi64 gnueabi gnueabihf gnuspe gnux32 gnu_ilp32 gnullvm hermitkernel hurdkernel linuxkernel macabi musl musleabi musleabihf muslabi64 msvc newlib none kernel uclibc uclibceabi uclibceabihf sgx sim softfloat spe threads ohos"
+}
+
+fn binary_format_names() -> Str {
+    "unknown elf coff macho wasm xcoff"
+}
+
+fn byte_at(in s: Slice[u8], i: u64) -> u8 {
+    match s.try_get(i) {
+        Option::Some(b) => b,
+        Option::None => 0,
+    }
+}
+
+fn same(in a: Slice[u8], in b: Slice[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    for i in 0..a.len() {
+        if byte_at(in a, i) != byte_at(in b, i) {
+            return false;
+        }
+    }
+    true
+}
+
+fn same_str(in a: Slice[u8], in b: Str) -> bool {
+    same(in a, in b.as_bytes())
+}
+
+// The index of `s` among the space-separated `words`, or `none()`.
+fn index_in(in s: Slice[u8], in words: Str) -> u32 {
+    let w = words.as_bytes();
+    let mut start: u64 = 0;
+    let mut k: u32 = 0;
+    for i in 0..wrapping_add(w.len(), 1) {
+        if i == w.len() || byte_at(in w, i) == 32 {
+            if same(in s, in w[start..i]) {
+                return k;
+            }
+            start = wrapping_add(i, 1);
+            k = wrapping_add(k, 1);
+        }
+    }
+    none()
+}
+
+fn arch_of(in s: Slice[u8]) -> u32 {
+    if same_str(in s, in "arm64") {
+        return index_in(in "aarch64".as_bytes(), in arch_names());
+    }
+    index_in(in s, in arch_names())
+}
+
+fn is_lower(b: u8) -> bool {
+    b >= 97 && b <= 122
+}
+
+fn vendor_of(in s: Slice[u8]) -> u32 {
+    let known = index_in(in s, in vendor_names());
+    if known != none() {
+        return known;
+    }
+    // A custom vendor: a lower-case name of `[a-z0-9_.]` that no other
+    // field would read.
+    if s.len() == 0 {
+        return none();
+    }
+    if arch_of(in s) != none()
+        || os_of(in s) != none()
+        || index_in(in s, in env_names()) != none()
+        || index_in(in s, in binary_format_names()) != none() {
+        return none();
+    }
+    if !is_lower(byte_at(in s, 0)) {
+        return none();
+    }
+    for i in 0..s.len() {
+        let b = byte_at(in s, i);
+        if !(is_lower(b) || (b >= 48 && b <= 57) || b == 95 || b == 46) {
+            return none();
+        }
+    }
+    custom_vendor()
+}
+
+// Whether `s` is a value Rust's `str::parse` gives an unsigned integer of
+// at most `max`: an optional `+`, then one or more decimal digits.
+fn parses_unsigned(in s: Slice[u8], max: u64) -> bool {
+    let mut from: u64 = 0;
+    if s.len() > 0 && byte_at(in s, 0) == 43 {
+        from = 1;
+    }
+    if from == s.len() {
+        return false;
+    }
+    let mut v: u64 = 0;
+    for i in from..s.len() {
+        let b = byte_at(in s, i);
+        if b < 48 || b > 57 {
+            return false;
+        }
+        v = wrapping_add(wrapping_mul(v, 10), widen_u64(wrapping_sub(b, 48)));
+        if v > max {
+            return false;
+        }
+    }
+    true
+}
+
+// A deployment version after a Darwin-family name: empty, or
+// `major[.minor[.patch]]` (u16, u8, u8).
+fn version_ok(in s: Slice[u8]) -> bool {
+    if s.len() == 0 {
+        return true;
+    }
+    let mut start: u64 = 0;
+    let mut part: u64 = 0;
+    for i in 0..wrapping_add(s.len(), 1) {
+        if i == s.len() || byte_at(in s, i) == 46 {
+            let max = if part == 0 {
+                65535
+            } else {
+                255
+            };
+            if part > 2 || !parses_unsigned(in s[start..i], max) {
+                return false;
+            }
+            start = wrapping_add(i, 1);
+            part = wrapping_add(part, 1);
+        }
+    }
+    true
+}
+
+fn starts_with_word(in s: Slice[u8], in w: Slice[u8]) -> bool {
+    s.len() >= w.len() && same(in s[0..w.len()], in w)
+}
+
+fn os_of(in s: Slice[u8]) -> u32 {
+    let names = darwin_names().as_bytes();
+    let mut start: u64 = 0;
+    let mut k: u32 = 0;
+    for i in 0..wrapping_add(names.len(), 1) {
+        if i == names.len() || byte_at(in names, i) == 32 {
+            let name = names[start..i];
+            if starts_with_word(in s, in name) {
+                if version_ok(in s[name.len()..s.len()]) {
+                    return wrapping_add(os_darwin(), k);
+                }
+                return none();
+            }
+            start = wrapping_add(i, 1);
+            k = wrapping_add(k, 1);
+        }
+    }
+    index_in(in s, in os_names())
+}
+
+fn code(in s: Str, in names: Str) -> u32 {
+    index_in(in s.as_bytes(), in names)
+}
+
+// `default_binary_format`: the format a triple that names none implies.
+fn default_binary_format(t: Triple) -> u32 {
+    let os = t.os;
+    if os == code(in "none", in os_names()) {
+        if t.env == code(in "eabi", in env_names()) || t.env == code(in "eabihf", in env_names()) {
+            return code(in "elf", in binary_format_names());
+        }
+        return 0;
+    }
+    if os == code(in "aix", in os_names()) {
+        return code(in "xcoff", in binary_format_names());
+    }
+    if os >= os_darwin() {
+        return code(in "macho", in binary_format_names());
+    }
+    if os == os_windows() {
+        return binary_format_coff();
+    }
+    if os == code(in "nebulet", in os_names())
+        || os == code(in "emscripten", in os_names())
+        || os == code(in "vxworks", in os_names())
+        || os == code(in "wasi", in os_names())
+        || os == os_unknown() {
+        if t.arch == code(in "wasm32", in arch_names())
+            || t.arch == code(in "wasm64", in arch_names()) {
+            return code(in "wasm", in binary_format_names());
+        }
+        if t.arch == 0 {
+            return 0;
+        }
+    }
+    code(in "elf", in binary_format_names())
+}
+
+// The end of the `-`-separated part starting at `start`.
+fn part_end(in s: Slice[u8], start: u64) -> u64 {
+    for i in start..s.len() {
+        if byte_at(in s, i) == 45 {
+            return i;
+        }
+    }
+    s.len()
+}
+
+fn special(in s: Slice[u8]) -> Option[Triple] {
+    let mut t = Triple {
+        arch: 0,
+        vendor: 0,
+        os: 0,
+        env: code(in "newlib", in env_names()),
+        binary_format: 0,
+    };
+    if same_str(in s, in "armv6k-nintendo-3ds") {
+        t.arch = code(in "armv6k", in arch_names());
+        t.vendor = code(in "nintendo", in vendor_names());
+        t.os = code(in "horizon", in os_names());
+    } else if same_str(in s, in "riscv32imc-esp-espidf") {
+        t.arch = code(in "riscv32imc", in arch_names());
+        t.vendor = code(in "espressif", in vendor_names());
+        t.os = code(in "espidf", in os_names());
+    } else {
+        return Option::None;
+    }
+    t.binary_format = default_binary_format(t);
+    Option::Some(t)
+}
+
+// `Triple::from_str`: the architecture, then each of the vendor, OS,
+// environment and binary format when the next part reads as one; any part
+// left over fails the parse.
+pub fn parse(in s: Slice[u8]) -> Option[Triple] {
+    match special(in s) {
+        Option::Some(t) => return Option::Some(t),
+        Option::None => (),
+    }
+    let mut t = Triple {
+        arch: 0,
+        vendor: 0,
+        os: 0,
+        env: 0,
+        binary_format: 0,
+    };
+    let n = s.len();
+    // The current part is `s[start..end]`; there is none once `start`
+    // passes the end.
+    let mut start: u64 = 0;
+    let mut end = part_end(in s, 0);
+    let arch = arch_of(in s[start..end]);
+    if arch == none() {
+        return Option::None;
+    }
+    t.arch = arch;
+    start = wrapping_add(end, 1);
+    let mut have = start <= n;
+    let mut has_format = false;
+    for field in 0..4 {
+        if have {
+            end = part_end(in s, start);
+            let part = s[start..end];
+            let v = if field == 0 {
+                vendor_of(in part)
+            } else if field == 1 {
+                os_of(in part)
+            } else if field == 2 {
+                index_in(in part, in env_names())
+            } else {
+                index_in(in part, in binary_format_names())
+            };
+            if v != none() {
+                if field == 0 {
+                    t.vendor = v;
+                } else if field == 1 {
+                    t.os = v;
+                } else if field == 2 {
+                    t.env = v;
+                } else {
+                    t.binary_format = v;
+                    has_format = true;
+                }
+                start = wrapping_add(end, 1);
+                have = start <= n;
+            }
+        }
+    }
+    if have {
+        return Option::None;
+    }
+    if !has_format {
+        t.binary_format = default_binary_format(t);
+    }
+    Option::Some(t)
+}
+
+// `native::windows::is_windows_target` for a given `--target`: the triple
+// parses and names Windows.
+pub fn is_windows(in target: Slice[u8]) -> bool {
+    match parse(in target) {
+        Option::Some(t) => t.os == os_windows(),
+        Option::None => false,
+    }
+}

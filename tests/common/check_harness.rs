@@ -119,6 +119,13 @@ thread_local! {
 /// message at all. So the hook is installed once and stays, and it skips
 /// only threads inside `quietly`.
 pub fn quietly<T>(f: impl FnOnce() -> T) -> T {
+    let _quiet = quiet_panics();
+    f()
+}
+
+/// Leaves this thread's panics unreported until the guard drops, as
+/// [`quietly`] does for a closure. Other threads still report theirs.
+pub fn quiet_panics() -> QuietPanics {
     static HOOK: std::sync::Once = std::sync::Once::new();
     HOOK.call_once(|| {
         let report = std::panic::take_hook();
@@ -128,14 +135,18 @@ pub fn quietly<T>(f: impl FnOnce() -> T) -> T {
             }
         }));
     });
-    struct Restore(bool);
-    impl Drop for Restore {
-        fn drop(&mut self) {
-            QUIET_PANICS.with(|q| q.set(self.0));
-        }
+    QuietPanics(QUIET_PANICS.with(|q| q.replace(true)))
+}
+
+/// The guard of [`quiet_panics`]: dropping it restores whether this thread
+/// reported panics before.
+#[must_use = "panics are quiet only while the guard lives"]
+pub struct QuietPanics(bool);
+
+impl Drop for QuietPanics {
+    fn drop(&mut self) {
+        QUIET_PANICS.with(|q| q.set(self.0));
     }
-    let _restore = Restore(QUIET_PANICS.with(|q| q.replace(true)));
-    f()
 }
 
 /// `f` of every corpus program that parses and checks with no diagnostics
