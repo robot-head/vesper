@@ -58,6 +58,7 @@ fn entry(name: &'static str) -> &'static Entry {
             "lsp_lens_repair",
             "lsp_lens_view",
             "lsp_lens_requests",
+            "lsp_proof_lenses",
         ]
         .into_iter()
         .map(|n| (n, features().entry(n, optimize())))
@@ -3403,4 +3404,347 @@ fn lens_repair_matches_rust() {
          ({regions} regions), {unavailable} unavailable {reasons:?}, {diffs} differ"
     );
     assert_eq!(diffs, 0);
+}
+
+// ---------------------------------------------------- proof code lenses
+
+const PROOF_URI: &str = "file:///proof/lens \"main\".ves";
+
+/// One proof-lens session: a corpus document's lens functions and models
+/// (as the session reads them) and finished jobs against ledgers of the
+/// given capacities.
+struct ProofLensCase {
+    name: String,
+    text: String,
+    version: i32,
+    functions: Vec<(String, usize)>,
+    models: Vec<(String, Result<[u8; 32], String>)>,
+    capacities: (usize, usize),
+    ops: Vec<vesper::lsp::ProofLensOp>,
+}
+
+fn proof_op(kind: u8, source: [u8; 32]) -> vesper::lsp::ProofLensOp {
+    vesper::lsp::ProofLensOp {
+        kind,
+        source,
+        current: source,
+        generation: 0,
+        requested: None,
+        extraction: vec![],
+        semantic: vec![],
+        reused: 0,
+        compiled: 0,
+        elapsed_ms: 0,
+    }
+}
+
+/// Outcomes of every kind: kernel-checked, native-checked, refuted,
+/// failed at the prover or kernel (kept for models) and at the toolchain
+/// (dropped for models), and not attempted, with texts that need escapes.
+fn proof_status(i: usize) -> vesper::lsp::PortProofStatus {
+    let s = |code: u8, a: &str, b: &str| (code, a.to_string(), b.to_string());
+    match i % 8 {
+        0 => s(1, "kernel replay: 0 axioms", ""),
+        1 => s(2, "bv_decide \"native\" (Lean.ofReduceBool)", ""),
+        2 => s(3, "a = 255, b = 1 \u{27c2} \\ \t", ""),
+        3 => s(4, "prove", "omega could not prove the goal:\n  a + b < 256"),
+        4 => s(4, "lean", "lean exited with signal 9 (SIGKILL)"),
+        5 => s(4, "kernel", "uses axiom sorryAx \u{1}"),
+        6 => s(0, "", ""),
+        _ => s(4, "cache", "permission denied"),
+    }
+}
+
+fn proof_lens_cases() -> Vec<ProofLensCase> {
+    let other = *blake3::hash(b"an edited buffer").as_bytes();
+    let stale = *blake3::hash(b"a model of an older body").as_bytes();
+    let mut cases = vec![];
+    for (i, d) in corpus_docs().iter().enumerate() {
+        let (mut functions, mut models) = vesper::lsp::proof_lens_inputs_for_port(&d.checked);
+        if functions.is_empty() {
+            continue;
+        }
+        let text = d.checked.source().to_string();
+        let source = d.checked.source_hash();
+        let capacities = match i % 3 {
+            0 => (1024, 4096),
+            1 => (3, 2),
+            _ => (1, 1),
+        };
+        if i % 3 == 2 {
+            // A reason past the title's 80 characters, multi-byte at the cut.
+            let reason = format!("{}\u{e9}\u{1f600} model unavailable", "x".repeat(78));
+            let first = functions[0].0.clone();
+            match models.iter_mut().find(|(name, _)| *name == first) {
+                Some(m) => m.1 = Err(reason),
+                None => {
+                    models.push((first, Err(reason)));
+                    models.sort_by(|a, b| a.0.cmp(&b.0));
+                }
+            }
+        }
+        if i % 7 == 0 {
+            functions.push(("past_the_end".into(), text.len() + 1));
+        }
+        let keyed: Vec<(String, [u8; 32])> = models
+            .iter()
+            .filter_map(|(name, m)| m.as_ref().ok().map(|k| (name.clone(), *k)))
+            .collect();
+        let first = functions[0].0.clone();
+        let second = functions.get(1).unwrap_or(&functions[0]).0.clone();
+        let job = |kind: u8, shift: usize, requested: Option<(String, bool)>| {
+            let mut op = proof_op(kind, source);
+            op.requested = requested;
+            op.extraction = functions
+                .iter()
+                .take(6)
+                .enumerate()
+                .map(|(k, (f, _))| (f.clone(), proof_status(i + k + shift)))
+                .collect();
+            op.semantic = keyed
+                .iter()
+                .take(6)
+                .enumerate()
+                .map(|(k, (f, key))| (f.clone(), *key, proof_status(i + k + shift + 2)))
+                .collect();
+            if let Some((f, _)) = keyed.first() {
+                op.semantic.push((f.clone(), stale, proof_status(shift)));
+            }
+            op.reused = i % 5;
+            op.compiled = shift;
+            op.elapsed_ms = 1234 + (i as u64) * 17;
+            op
+        };
+        let mut ops = vec![proof_op(b'L', source)];
+        ops.push(job(b'P', 0, Some((first.clone(), false))));
+        ops.push(proof_op(b'L', source));
+        ops.push(job(b'P', 3, Some((second.clone(), true))));
+        ops.push(job(b'P', 5, None));
+        ops.push(job(b'P', 1, Some(("missing".into(), true))));
+        ops.push(job(b'P', 6, Some(("missing".into(), false))));
+        ops.push(proof_op(b'L', source));
+        let mut background = job(b'B', 2, None);
+        background.generation = 7;
+        ops.push(background);
+        let mut late = job(b'B', 4, None);
+        late.generation = 8;
+        late.current = other;
+        ops.push(late);
+        ops.push(proof_op(b'L', source));
+        ops.push(proof_op(b'L', other));
+        cases.push(ProofLensCase {
+            name: d.name.clone(),
+            text,
+            version: if i % 2 == 0 { i as i32 } else { -(i as i32) },
+            functions,
+            models,
+            capacities,
+            ops,
+        });
+    }
+    cases
+}
+
+fn rust_proof_lenses(c: &ProofLensCase, rounds: u64) -> String {
+    vesper::lsp::proof_lenses_for_port(
+        PROOF_URI,
+        c.version,
+        &c.text,
+        index_limits(),
+        &c.functions,
+        &c.models,
+        c.capacities,
+        &c.ops,
+        rounds,
+    )
+}
+
+/// The input of `lsp_proof_lenses` (proof_lenses.ves `proof_lenses`).
+fn proof_lenses_input(c: &ProofLensCase, rounds: u64) -> Vec<u8> {
+    let mut w: Vec<u64> = vec![0];
+    let mut blob: Vec<u8> = vec![];
+    let mut limits = vec![];
+    index_words(&mut limits, index_limits());
+    w.extend(
+        limits
+            .chunks(8)
+            .map(|c| u64::from_le_bytes(c.try_into().unwrap())),
+    );
+    w.extend([
+        PROOF_URI.len() as u64,
+        c.text.len() as u64,
+        c.version as i64 as u64,
+        c.capacities.0 as u64,
+        c.capacities.1 as u64,
+        rounds,
+    ]);
+    blob.extend_from_slice(PROOF_URI.as_bytes());
+    blob.extend_from_slice(c.text.as_bytes());
+    w.push(c.functions.len() as u64);
+    for (name, start) in &c.functions {
+        w.extend([name.len() as u64, *start as u64]);
+        blob.extend_from_slice(name.as_bytes());
+    }
+    w.push(c.models.len() as u64);
+    for (name, model) in &c.models {
+        blob.extend_from_slice(name.as_bytes());
+        match model {
+            Ok(key) => {
+                w.extend([name.len() as u64, 1, 0]);
+                blob.extend_from_slice(key);
+            }
+            Err(reason) => {
+                w.extend([name.len() as u64, 0, reason.len() as u64]);
+                blob.extend_from_slice(reason.as_bytes());
+            }
+        }
+    }
+    w.push(c.ops.len() as u64);
+    for op in &c.ops {
+        let (requested, name) = match &op.requested {
+            None => (0, ""),
+            Some((name, semantic)) => (1 + *semantic as u64, name.as_str()),
+        };
+        w.extend([
+            op.kind as u64,
+            op.generation,
+            requested,
+            name.len() as u64,
+            op.extraction.len() as u64,
+            op.semantic.len() as u64,
+            op.reused as u64,
+            op.compiled as u64,
+            op.elapsed_ms,
+        ]);
+        blob.extend_from_slice(&op.source);
+        blob.extend_from_slice(&op.current);
+        blob.extend_from_slice(name.as_bytes());
+        let status = |w: &mut Vec<u64>, blob: &mut Vec<u8>, (code, a, b): &(u8, String, String)| {
+            w.extend([*code as u64, a.len() as u64, b.len() as u64]);
+            blob.extend_from_slice(a.as_bytes());
+            blob.extend_from_slice(b.as_bytes());
+        };
+        for (f, s) in &op.extraction {
+            w.push(f.len() as u64);
+            blob.extend_from_slice(f.as_bytes());
+            status(&mut w, &mut blob, s);
+        }
+        for (f, key, s) in &op.semantic {
+            w.push(f.len() as u64);
+            blob.extend_from_slice(f.as_bytes());
+            blob.extend_from_slice(key);
+            status(&mut w, &mut blob, s);
+        }
+    }
+    w[0] = w.len() as u64;
+    let mut input: Vec<u8> = w.iter().flat_map(|x| x.to_le_bytes()).collect();
+    input.extend_from_slice(&blob);
+    input
+}
+
+/// Proof code lenses, `vesper.proofAudit` results and background
+/// `vesper/proofStatus` notifications (Rust `code_lenses_of`, `record_of`,
+/// `proof_result_of`, `proof_status_of` over `ProofLedger`s) against the
+/// Vesper port, on every corpus document with proof-lens functions: empty,
+/// roomy and evicting ledgers, every outcome kind, unrequested and
+/// unmatched commands, stale model keys, background runs for the current
+/// and an edited buffer, long multi-byte model reasons and a span past the
+/// end of the document.
+#[test]
+fn proof_lenses_match_rust() {
+    let cases = proof_lens_cases();
+    let entry = entry("lsp_proof_lenses");
+    let (mut lenses, mut results, mut notices, mut errors, mut diffs) = (0, 0, 0, 0, 0);
+    for c in &cases {
+        let rust = rust_proof_lenses(c, 1);
+        let port = entry.text(&proof_lenses_input(c, 1));
+        for line in rust.lines() {
+            match line.split_once('\t') {
+                Some((_, body)) if body.starts_with("{\"error\"") => errors += 1,
+                Some(("L", body)) => {
+                    lenses += body.matches("\"command\":\"vesper.proofAudit\"").count()
+                }
+                Some(("P", _)) => results += 1,
+                Some(("B", body)) if body != "-" => notices += 1,
+                _ => {}
+            }
+        }
+        if rust != port {
+            diffs += 1;
+            if diffs <= 6 {
+                let (a, b): (Vec<_>, Vec<_>) = (rust.lines().collect(), port.lines().collect());
+                let i = a
+                    .iter()
+                    .zip(&b)
+                    .position(|(x, y)| x != y)
+                    .unwrap_or(a.len().min(b.len()));
+                eprintln!(
+                    "{} line {i}:\n  rust   {:?}\n  vesper {:?}",
+                    c.name,
+                    a.get(i),
+                    b.get(i)
+                );
+            }
+        }
+    }
+    eprintln!(
+        "proof lenses: {} documents, {lenses} lenses, {results} command results, {notices} \
+         background notices, {errors} span errors, {diffs} differ",
+        cases.len()
+    );
+    assert!(lenses > 0 && results > 0 && notices > 0 && errors > 0);
+    assert_eq!(diffs, 0);
+}
+
+/// Proof-lens sessions per document, `rounds` of every case less one
+/// round's setup on both sides (`CHECK_HARNESS_SPEED=1 cargo test
+/// --release --test self_host_lsp_features proof_lenses_speed --
+/// --ignored`).
+#[test]
+#[ignore]
+fn proof_lenses_speed() {
+    if !speed() {
+        return;
+    }
+    const ROUNDS: u64 = 32;
+    let cases = proof_lens_cases();
+    let entry = entry("lsp_proof_lenses");
+    let inputs: Vec<[Vec<u8>; 2]> = cases
+        .iter()
+        .map(|c| [0, ROUNDS].map(|n| proof_lenses_input(c, n)))
+        .collect();
+    let (mut rust, mut basis, mut fixed, mut full) =
+        (Duration::MAX, Duration::MAX, Duration::MAX, Duration::MAX);
+    for _ in 0..3 {
+        rust = rust.min(time(|| {
+            for c in &cases {
+                std::hint::black_box(rust_proof_lenses(c, ROUNDS));
+            }
+        }));
+        basis = basis.min(time(|| {
+            for c in &cases {
+                std::hint::black_box(rust_proof_lenses(c, 0));
+            }
+        }));
+        fixed = fixed.min(time(|| {
+            for [none, _] in &inputs {
+                std::hint::black_box(entry.text(none));
+            }
+        }));
+        full = full.min(time(|| {
+            for [_, all] in &inputs {
+                std::hint::black_box(entry.text(all));
+            }
+        }));
+    }
+    let n = cases.len() as u32 * ROUNDS as u32;
+    let (r, v) = (
+        rust.saturating_sub(basis) / n,
+        full.saturating_sub(fixed) / n,
+    );
+    eprintln!(
+        "proof-lens session per document ({} x {ROUNDS}): rust {r:?} vesper {v:?} ratio {:.2}",
+        cases.len(),
+        v.as_secs_f64() / r.as_secs_f64()
+    );
 }
