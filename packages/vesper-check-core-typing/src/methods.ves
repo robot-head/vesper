@@ -1,0 +1,399 @@
+// String literals and the method calls of `Checker::call` that are not
+// inherent world functions: the primitive `String`/`Str` methods of
+// src/strings/check.rs (`string_method_call`), string comparisons
+// (`string_comparison`) and the receiver types of src/check.rs
+// (`receiver_type`, `text_receiver_type`, `peek_type`).
+//
+// Views of sequences (`as_bytes` gives a `Slice[u8]`), sequence and tiled
+// methods and trait calls are other lanes' rules: they skip the function.
+// The checker reports no E1531 view diagnostics, which the clean corpus
+// never raises.
+
+use @vesper/check-data::util::{add, u32_at, w};
+use @vesper/check-data::types::{default_type, substitute, vars_new, TyKind};
+use self::exprs::{
+    Ck, Ex, actual_arg, binding, error, expect_type, expr, expr_expected, field_path, fn_index,
+    fn_generics, is_named, lookup, named, place_of, record, constrain_literals
+};
+use self::relations::{infer, mk_lit};
+use self::ints::{Lit};
+
+const NONE32: u32 = 4294967295;
+
+// Expression kinds (keep equal to exprs.ves).
+const E_INT: u8 = 1;
+const E_STRING: u8 = 4;
+const E_NAME: u8 = 5;
+const E_STRUCT: u8 = 7;
+const E_CALL: u8 = 9;
+const E_FIELD: u8 = 10;
+
+// Argument passing (keep equal to exprs.ves).
+const P_IN: u8 = 0;
+
+// The primitive string operations (`strings::StrOp`).
+const OP_NONE: u8 = 0;
+const OP_LEN: u8 = 1;
+const OP_BYTE_AT: u8 = 2;
+const OP_TRY_BYTE_AT: u8 = 3;
+const OP_AS_STR: u8 = 4;
+const OP_AS_BYTES: u8 = 5;
+const OP_PUSH_STR: u8 = 6;
+const OP_PUSH_CHAR: u8 = 7;
+const OP_CLEAR: u8 = 8;
+const OP_RESERVE: u8 = 9;
+
+// What a method call arm did: not this arm's call, or typed with a type.
+pub copy struct Typed {
+    handled: bool,
+    ty: u32,
+}
+
+fn unhandled() -> Typed {
+    Typed { handled: false, ty: NONE32 }
+}
+
+fn typed_as(ty: u32) -> Typed {
+    Typed { handled: true, ty: ty }
+}
+
+// `strings::is_string_type`.
+pub fn is_string(in ck: Ck, ty: u32) -> bool {
+    let node = ck.ctx.types.node(ty);
+    node.kind == TyKind::Named && node.name == ck.ctx.world.k.string && node.n == 0
+}
+
+// `strings::is_str_type`.
+pub fn is_str(in ck: Ck, ty: u32) -> bool {
+    let node = ck.ctx.types.node(ty);
+    node.kind == TyKind::Named && node.name == ck.ctx.world.k.str_ && node.n == 0
+}
+
+// `strings::is_text`.
+pub fn is_text(in ck: Ck, ty: u32) -> bool {
+    is_string(in ck, ty) || is_str(in ck, ty)
+}
+
+// The type of a string literal: `String`, or the expected `Str` in a
+// function returning `Str` (static text).
+pub fn string_literal(inout ck: Ck, expected: u32) -> u32 {
+    if ck.static_text && is_str(in ck, expected) {
+        return expected;
+    }
+    let known = ck.ctx.world.k;
+    named(inout ck, known.string)
+}
+
+// `Checker::peek_type`: a place's type from its binding, else the type
+// recorded for the expression, else the hole.
+pub fn peek_type(inout ck: Ck, e: u32) -> u32 {
+    let hole = ck.ctx.types.infer;
+    let mut path: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let root = place_of(in ck, e, inout path);
+    if root != NONE32 {
+        let bind_index = lookup(in ck, root);
+        if bind_index == NONE32 {
+            return hole;
+        }
+        let ty = field_path(inout ck, binding(in ck, bind_index).ty, in path);
+        if ty == NONE32 {
+            return hole;
+        }
+        return ty;
+    }
+    let recorded = u32_at(in ck.ex_types, w(e));
+    if recorded == NONE32 {
+        return hole;
+    }
+    recorded
+}
+
+fn is_place(in ck: Ck, e: u32) -> bool {
+    let mut path: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    place_of(in ck, e, inout path) != NONE32
+}
+
+// `Checker::receiver_type`: the static type of a receiver before it is
+// checked, or the hole. A call resolved through a trait, and a struct
+// literal receiver, skip the function.
+pub fn receiver_type(inout ck: Ck, e: u32) -> u32 {
+    let hole = ck.ctx.types.infer;
+    let ex = ck.ex(e);
+    if ex.kind == E_STRING {
+        let known = ck.ctx.world.k;
+        return named(inout ck, known.string);
+    }
+    if ex.kind == E_INT {
+        let lit = mk_lit(inout ck.ctx.types, Lit { neg: ex.neg, mag: ex.mag });
+        return default_type(inout ck.ctx.types, lit);
+    }
+    let peeked = peek_type(inout ck, e);
+    if peeked != hole {
+        return peeked;
+    }
+    if ex.kind == E_STRUCT {
+        ck.skip = true;
+        return hole;
+    }
+    if ex.kind != E_CALL {
+        return hole;
+    }
+    let callee = ck.ex(ex.x);
+    if callee.kind == E_NAME {
+        if lookup(in ck, callee.x) != NONE32 {
+            return hole;
+        }
+        let index = fn_index(in ck, callee.x);
+        if index == NONE32 {
+            return hole;
+        }
+        let sig = ck.fsig(index);
+        if sig.generic_count != 0 {
+            return hole;
+        }
+        return sig.result;
+    }
+    if callee.kind != E_FIELD {
+        return hole;
+    }
+    let base_ty = receiver_type(inout ck, callee.x);
+    if ck.skip || base_ty == hole {
+        return hole;
+    }
+    let index = inherent_index(inout ck, base_ty, callee.y);
+    if index == NONE32 {
+        // A trait method (`traits.resolve`): not ported.
+        ck.skip = true;
+        return hole;
+    }
+    let sig = ck.fsig(index);
+    if sig.param_count == 0 {
+        return hole;
+    }
+    let first = ck.param(w(sig.param_start));
+    let generics = fn_generics(in ck, sig);
+    let mut vars = vars_new();
+    let known = ck.ctx.world.k;
+    infer(inout ck.ctx.types, known, first.ty, base_ty, in generics, inout vars);
+    for i in 0..generics.len() {
+        if vars.get(u32_at(in generics, i)) == NONE32 {
+            return hole;
+        }
+    }
+    substitute(inout ck.ctx.types, sig.result, in vars)
+}
+
+// The world function `Type::method` for a receiver of type `ty`, or NONE32.
+pub fn inherent_index(inout ck: Ck, ty: u32, method: u32) -> u32 {
+    if ck.ctx.types.kind(ty) != TyKind::Named {
+        return NONE32;
+    }
+    let mut inherent = ChunkSeq::new[u8]();
+    ck.ctx.names.write(ck.ctx.types.node(ty).name, inout inherent);
+    inherent.extend(in "::".as_bytes());
+    ck.ctx.names.write(method, inout inherent);
+    let method_sym = ck.ctx.names.lookup(in inherent.as_slice());
+    if method_sym == NONE32 {
+        return NONE32;
+    }
+    fn_index(in ck, method_sym)
+}
+
+// `Checker::text_receiver_type`.
+pub fn text_receiver_type(inout ck: Ck, e: u32) -> u32 {
+    let hole = ck.ctx.types.infer;
+    let ex = ck.ex(e);
+    if ex.kind == E_STRING {
+        let known = ck.ctx.world.k;
+        return named(inout ck, known.string);
+    }
+    let peeked = peek_type(inout ck, e);
+    if peeked != hole || is_place(in ck, e) {
+        return peeked;
+    }
+    receiver_type(inout ck, e)
+}
+
+// `Checker::text_operand`.
+pub fn text_operand(inout ck: Ck, e: u32) -> bool {
+    let ty = text_receiver_type(inout ck, e);
+    is_text(in ck, ty)
+}
+
+// `Checker::string_comparison`: both operands borrowed, compared in byte
+// order.
+pub fn string_comparison(inout ck: Ck, left: u32, right: u32) -> u32 {
+    let hole = ck.ctx.types.infer;
+    let known = ck.ctx.world.k;
+    compared_text(inout ck, left);
+    compared_text(inout ck, right);
+    if ck.skip {
+        return hole;
+    }
+    named(inout ck, known.bool_)
+}
+
+fn compared_text(inout ck: Ck, e: u32) {
+    let hole = ck.ctx.types.infer;
+    let ty = expr(inout ck, e);
+    if !ck.skip && ty != hole && !is_text(in ck, ty) {
+        let ex = ck.ex(e);
+        error(inout ck, "E0200", ex.start, ex.end);
+    }
+}
+
+fn is_method(in ck: Ck, method: u32, in name: Str) -> bool {
+    ck.ctx.names.lookup(in name.as_bytes()) == method
+}
+
+// `strings::resolve`.
+fn resolve(in ck: Ck, method: u32, receiver_ty: u32) -> u8 {
+    let op = if is_method(in ck, method, "len") {
+        OP_LEN
+    } else if is_method(in ck, method, "byte_at") {
+        OP_BYTE_AT
+    } else if is_method(in ck, method, "try_byte_at") {
+        OP_TRY_BYTE_AT
+    } else if is_method(in ck, method, "as_str") {
+        OP_AS_STR
+    } else if is_method(in ck, method, "as_bytes") {
+        OP_AS_BYTES
+    } else if is_method(in ck, method, "push_str") {
+        OP_PUSH_STR
+    } else if is_method(in ck, method, "push_char") {
+        OP_PUSH_CHAR
+    } else if is_method(in ck, method, "clear") {
+        OP_CLEAR
+    } else if is_method(in ck, method, "reserve") {
+        OP_RESERVE
+    } else {
+        OP_NONE
+    };
+    if op == OP_NONE {
+        return OP_NONE;
+    }
+    if is_string(in ck, receiver_ty) || (is_str(in ck, receiver_ty) && !mutates(op)) {
+        op
+    } else {
+        OP_NONE
+    }
+}
+
+fn mutates(op: u8) -> bool {
+    op == OP_PUSH_STR || op == OP_PUSH_CHAR || op == OP_CLEAR || op == OP_RESERVE
+}
+
+fn arity(op: u8) -> u32 {
+    if op == OP_BYTE_AT
+        || op == OP_TRY_BYTE_AT
+        || op == OP_PUSH_STR
+        || op == OP_PUSH_CHAR
+        || op == OP_RESERVE
+    {
+        1
+    } else {
+        0
+    }
+}
+
+// `Checker::string_method_call`: a primitive method on a `String` or `Str`
+// receiver. Not handled when the method is a prelude method, which
+// resolves as an ordinary `String::m` / `Str::m` function.
+pub fn string_method(inout ck: Ck, ex: Ex, callee: Ex) -> Typed {
+    let hole = ck.ctx.types.infer;
+    let known = ck.ctx.world.k;
+    let base = callee.x;
+    let base_ty = text_receiver_type(inout ck, base);
+    if ck.skip {
+        return typed_as(hole);
+    }
+    if !is_text(in ck, base_ty) {
+        return unhandled();
+    }
+    let op = resolve(in ck, callee.y, base_ty);
+    if op == OP_NONE {
+        // E1532 (a `String` update on a `Str`) never reaches the corpus.
+        return unhandled();
+    }
+    if ex.m != 0 || ex.n != arity(op) {
+        error(inout ck, "E0207", ex.start, ex.end);
+    }
+    if op == OP_AS_STR || op == OP_AS_BYTES {
+        for i in 0..w(ex.n) {
+            let arg = actual_arg(in ck, ex, i);
+            expr(inout ck, arg.expr);
+        }
+        if op == OP_AS_BYTES {
+            // A `Slice[u8]` view: lane 9's.
+            ck.skip = true;
+            return typed_as(hole);
+        }
+        // `text_view`: the base is borrowed whole and records its type.
+        if !is_place(in ck, base) {
+            expr(inout ck, base);
+        }
+        record(inout ck, base, base_ty);
+        return typed_as(named(inout ck, known.str_));
+    }
+    if mutates(op) {
+        if !is_place(in ck, base) {
+            let base_ex = ck.ex(base);
+            error(inout ck, "E0300", base_ex.start, base_ex.end);
+            expr(inout ck, base);
+            return typed_as(ck.ctx.types.unit);
+        }
+        record(inout ck, base, base_ty);
+    } else {
+        let ty = expr(inout ck, base);
+        record(inout ck, base, ty);
+    }
+    for i in 0..w(ex.n) {
+        let arg = actual_arg(in ck, ex, i);
+        let arg_ex = ck.ex(arg.expr);
+        if arg.explicit && arg.pass != P_IN && i < w(arity(op)) {
+            error(inout ck, "E0308", arg_ex.start, arg_ex.end);
+        }
+        if i >= w(arity(op)) {
+            expr(inout ck, arg.expr);
+        } else if op == OP_PUSH_STR {
+            let ty = expr(inout ck, arg.expr);
+            if !ck.skip && ty != hole && !is_text(in ck, ty) {
+                let str_ty = named(inout ck, known.str_);
+                expect_type(inout ck, str_ty, ty, arg_ex.start, arg_ex.end);
+            }
+        } else {
+            let goal = if op == OP_PUSH_CHAR {
+                named(inout ck, known.u32_)
+            } else {
+                named(inout ck, known.u64_)
+            };
+            let ty = expr_expected(inout ck, arg.expr, goal);
+            if !ck.skip {
+                expect_type(inout ck, goal, ty, arg_ex.start, arg_ex.end);
+                constrain_literals(inout ck, arg.expr, goal);
+            }
+        }
+        if ck.skip {
+            return typed_as(hole);
+        }
+    }
+    if ck.skip {
+        return typed_as(hole);
+    }
+    // Fallible operations raise `IndexOutOfBounds` (lane 8's effects).
+    let result = if op == OP_LEN {
+        named(inout ck, known.u64_)
+    } else if op == OP_BYTE_AT {
+        named(inout ck, known.u8_)
+    } else if op == OP_TRY_BYTE_AT {
+        let option_sym = ck.ctx.names.intern(in "Option".as_bytes());
+        let mut targs: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        targs.push(named(inout ck, known.u8_));
+        ck.ctx.types.named(option_sym, in targs)
+    } else if op == OP_PUSH_CHAR {
+        named(inout ck, known.bool_)
+    } else {
+        ck.ctx.types.unit
+    };
+    typed_as(result)
+}

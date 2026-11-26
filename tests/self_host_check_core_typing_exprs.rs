@@ -105,12 +105,13 @@ fn encode_pattern(e: &mut Enc, p: &Pattern, out: &mut Vec<u64>) {
             }
             // The literal's type (`literal_type`), for `bind_mode`.
             // An integer past `u64::MAX` in magnitude is not ported yet (as
-            // in `encode_expr`): code 3 skips the function, as a string does.
+            // in `encode_expr`): code 3 skips the function. A string is code 5.
             out.push(match l {
                 Literal::Int(n) if fits_literal(*n) => 0,
                 Literal::Float(_) => 1,
                 Literal::Bool(_) => 2,
-                Literal::Int(_) | Literal::WideInt(_) | Literal::String(_) => 3,
+                Literal::Int(_) | Literal::WideInt(_) => 3,
+                Literal::String(_) => 5,
             });
             if let Literal::Int(n) = l
                 && fits_literal(*n)
