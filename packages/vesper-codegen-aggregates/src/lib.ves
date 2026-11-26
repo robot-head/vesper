@@ -4182,8 +4182,7 @@ fn seq_option_op(in p: Program, in names: Names, in sh: Shapes, k: u64, pool: u6
         || label_is(in p, in names, pool, "Last", false) {
         return true;
     }
-    if label_is(in p, in names, pool, "Wide(", true)
-        || label_is(in p, in names, pool, "Hoisted(Wide(", true) {
+    if label_is(in p, in names, pool, "Wide(", true) {
         return label_has(in p, in names, pool, "write: false")
             && label_has(in p, in names, pool, "total: true");
     }

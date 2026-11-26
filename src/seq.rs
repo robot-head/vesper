@@ -67,46 +67,12 @@ pub const FAULT_STATUS: i64 = 71;
 pub const HEADER_BYTES: i64 = 24;
 
 /// The shape of the index a [`SeqOp::BoundsGuard`] checks: the loop index,
-/// negated or not, plus `plus` and minus `minus` loop-invariant terms; when
-/// `scaled`, that sum times a loop-invariant scale, plus `outer_plus` and
-/// minus `outer_minus` more terms (#2022). The accesses it covers each touch
-/// `width` elements from the index (a fixed-width read or write of a byte
-/// sequence touches its `bytes`).
+/// negated or not, plus `plus` and minus `minus` loop-invariant terms.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub struct IndexForm {
     pub negated: bool,
     pub plus: u8,
     pub minus: u8,
-    pub scaled: bool,
-    pub outer_plus: u8,
-    pub outer_minus: u8,
-    pub width: u8,
-}
-
-impl IndexForm {
-    /// `±i + plus.. - minus..`, one element wide.
-    pub fn index(negated: bool, plus: u8, minus: u8) -> Self {
-        Self {
-            negated,
-            plus,
-            minus,
-            scaled: false,
-            outer_plus: 0,
-            outer_minus: 0,
-            width: 1,
-        }
-    }
-
-    /// How many guard operands follow the sequence: the terms, and the
-    /// scale when `scaled`.
-    pub fn operands(self) -> usize {
-        let scaled = if self.scaled {
-            1 + usize::from(self.outer_plus) + usize::from(self.outer_minus)
-        } else {
-            0
-        };
-        usize::from(self.plus) + usize::from(self.minus) + scaled
-    }
 }
 
 /// A sequence or slice operation in Place IR (`Op::Seq`).
@@ -163,16 +129,13 @@ pub enum SeqOp {
     /// hoisting pass ([`crate::bounds_hoist`]) creates it, in the fast copy
     /// of a counted loop; its operands are those of the access it replaces.
     Hoisted(Access),
-    /// `[lo, hi, s, p1, .., pm, n1, .., nk, (c, q1, .., qa, r1, .., rb)?,
-    /// ok?]`: whether `ok` (when given) holds and either the range `lo..hi`
-    /// (`lo..=hi` when `inclusive`) is empty or the index `form` describes
-    /// is in bounds of `s` for every index `i` of the range: `x = i + p1 +
-    /// .. + pm - n1 - .. - nk` (`p1 + .. - i - n1 - ..` when the form is
-    /// negated), or `c * x + q1 + .. + qa - r1 - .. - rb` when it is
-    /// `scaled`, evaluated exactly, so that a value that does not fit 64
-    /// bits makes the guard false. In bounds means at least 0 and at most
-    /// `s.len() - form.width`. A `bool`; total. Created by
-    /// [`crate::bounds_hoist`].
+    /// `[lo, hi, s, p1, .., pm, n1, .., nk, ok?]`: whether `ok` (when given)
+    /// holds and either the range `lo..hi` (`lo..=hi` when `inclusive`) is empty or
+    /// the index `form` describes is in bounds of `s` for every index `i` of
+    /// the range: `i + p1 + .. + pm - n1 - .. - nk` (`p1 + .. - i - n1 -
+    /// ..` when the form is negated), evaluated exactly, so that a sum that
+    /// does not fit 64 bits makes the guard false. A `bool`; total. Created
+    /// by [`crate::bounds_hoist`].
     BoundsGuard { inclusive: bool, form: IndexForm },
     /// `s.copy_from(at, in src)` (`try_copy_from` when `total`): copies every
     /// element of `src` to `s[at..at + src.len()]` with one bounds check.
@@ -327,14 +290,6 @@ impl Wide {
     pub fn name(self) -> &'static str {
         WIDE_NAMES[self.index()]
     }
-    /// The access's number in `0..24`, the order of its method names.
-    pub fn code(self) -> u8 {
-        self.index() as u8
-    }
-    /// The access numbered `code` ([`Wide::code`]).
-    pub fn from_code(code: u8) -> Option<Self> {
-        Self::parse(WIDE_NAMES.get(usize::from(code))?)
-    }
     /// The access a method name denotes, such as `try_read_u32_be`.
     pub fn parse(method: &str) -> Option<Self> {
         (0..24).find_map(|k| {
@@ -368,9 +323,6 @@ pub enum Access {
     TryGet,
     /// `try_set`: stores and yields `true`.
     TrySet,
-    /// A fixed-width read or write of a byte sequence or slice ([`Wide`]):
-    /// the value, `Unit`, `Some(value)` or `true` (#2022).
-    Wide(Wide),
 }
 
 impl Access {
@@ -384,7 +336,6 @@ impl Access {
             (Self::Set, true) => SeqOp::SliceSet,
             (Self::TryGet, _) => SeqOp::TryGet,
             (Self::TrySet, _) => SeqOp::TrySet,
-            (Self::Wide(wide), _) => SeqOp::Wide(wide),
         }
     }
 }
