@@ -46,124 +46,125 @@ const CT_ROW: u8 = 4;
 // The checker's facts: the check-data context and the function table,
 // one row per `World::functions` entry in name order.
 pub struct Facts {
-    c: Ctx,
-    // Name symbol, span, parameter rows `pa .. pa + pn`, and the
+    ctx: Ctx,
+    // Name symbol, span, parameter rows
+    // `fn_param_start .. fn_param_start + fn_param_count`, and the
     // `function_results` type (NONE when the world has none).
-    f_name: ChunkSeq[u32],
-    f_start: ChunkSeq[u64],
-    f_end: ChunkSeq[u64],
-    f_pa: ChunkSeq[u64],
-    f_pn: ChunkSeq[u64],
-    f_result: ChunkSeq[u32],
+    fn_name: ChunkSeq[u32],
+    fn_start: ChunkSeq[u64],
+    fn_end: ChunkSeq[u64],
+    fn_param_start: ChunkSeq[u64],
+    fn_param_count: ChunkSeq[u64],
+    fn_result: ChunkSeq[u32],
     // Parameter rows: span, name symbol, type.
-    p_start: ChunkSeq[u64],
-    p_end: ChunkSeq[u64],
-    p_name: ChunkSeq[u32],
-    p_ty: ChunkSeq[u32]
+    param_start: ChunkSeq[u64],
+    param_end: ChunkSeq[u64],
+    param_name: ChunkSeq[u32],
+    param_ty: ChunkSeq[u32]
 }
 
-pub fn facts_new(sink c: Ctx) -> Facts {
+pub fn facts_new(sink ctx: Ctx) -> Facts {
     Facts {
-        c: c,
-        f_name: ChunkSeq::new[u32](),
-        f_start: ChunkSeq::new[u64](),
-        f_end: ChunkSeq::new[u64](),
-        f_pa: ChunkSeq::new[u64](),
-        f_pn: ChunkSeq::new[u64](),
-        f_result: ChunkSeq::new[u32](),
-        p_start: ChunkSeq::new[u64](),
-        p_end: ChunkSeq::new[u64](),
-        p_name: ChunkSeq::new[u32](),
-        p_ty: ChunkSeq::new[u32]()
+        ctx: ctx,
+        fn_name: ChunkSeq::new[u32](),
+        fn_start: ChunkSeq::new[u64](),
+        fn_end: ChunkSeq::new[u64](),
+        fn_param_start: ChunkSeq::new[u64](),
+        fn_param_count: ChunkSeq::new[u64](),
+        fn_result: ChunkSeq::new[u32](),
+        param_start: ChunkSeq::new[u64](),
+        param_end: ChunkSeq::new[u64](),
+        param_name: ChunkSeq::new[u32](),
+        param_ty: ChunkSeq::new[u32]()
     }
 }
 
 // Adds one function row; its parameters follow with `fact_param`.
-pub fn fact_function(inout f: Facts, name: u32, start: u64, end: u64, result: u32) {
-    f.f_name.push(name);
-    f.f_start.push(start);
-    f.f_end.push(end);
-    f.f_pa.push(f.p_name.len());
-    f.f_pn.push(0);
-    f.f_result.push(result);
+pub fn fact_function(inout facts: Facts, name: u32, start: u64, end: u64, result: u32) {
+    facts.fn_name.push(name);
+    facts.fn_start.push(start);
+    facts.fn_end.push(end);
+    facts.fn_param_start.push(facts.param_name.len());
+    facts.fn_param_count.push(0);
+    facts.fn_result.push(result);
 }
 
-pub fn fact_param(inout f: Facts, start: u64, end: u64, name: u32, ty: u32) {
-    f.p_start.push(start);
-    f.p_end.push(end);
-    f.p_name.push(name);
-    f.p_ty.push(ty);
-    let last = wrapping_sub(f.f_pn.len(), 1);
-    let n = u64_at(in f.f_pn, last);
-    let ok = f.f_pn.try_set(last, wrapping_add(n, 1));
+pub fn fact_param(inout facts: Facts, start: u64, end: u64, name: u32, ty: u32) {
+    facts.param_start.push(start);
+    facts.param_end.push(end);
+    facts.param_name.push(name);
+    facts.param_ty.push(ty);
+    let last = wrapping_sub(facts.fn_param_count.len(), 1);
+    let n = u64_at(in facts.fn_param_count, last);
+    let ok = facts.fn_param_count.try_set(last, wrapping_add(n, 1));
 }
 
-fn u64_at(in s: ChunkSeq[u64], i: u64) -> u64 {
-    s.try_get(i).unwrap_or(0)
+fn u64_at(in column: ChunkSeq[u64], i: u64) -> u64 {
+    column.try_get(i).unwrap_or(0)
 }
 
 // One hover's output text and work budget (`Text`, `Budget`).
 struct Out {
-    v: ChunkSeq[u8],
+    text: ChunkSeq[u8],
     left: u64,
     err: u64
 }
 
-fn stop(inout o: Out, code: u64) -> bool {
-    if o.err == ERR_NONE {
-        o.err = code;
+fn stop(inout out: Out, code: u64) -> bool {
+    if out.err == ERR_NONE {
+        out.err = code;
     }
     false
 }
 
 // `Budget::charge` with `max_type_work` and `max_depth`.
-fn charge(inout o: Out, depth: u64) -> bool {
-    if o.left == 0 || depth > MAX_DEPTH {
-        return stop(inout o, ERR_TRAVERSAL);
+fn charge(inout out: Out, depth: u64) -> bool {
+    if out.left == 0 || depth > MAX_DEPTH {
+        return stop(inout out, ERR_TRAVERSAL);
     }
-    o.left = wrapping_sub(o.left, 1);
+    out.left = wrapping_sub(out.left, 1);
     true
 }
 
 // `text_write`: the whole piece fits under `max_output_bytes`, or nothing.
-fn text(inout o: Out, in b: Slice[u8]) -> bool {
-    if b.len() > wrapping_sub(MAX_OUTPUT_BYTES, o.v.len()) {
-        return stop(inout o, ERR_OUTPUT_BYTES);
+fn text(inout out: Out, in bytes: Slice[u8]) -> bool {
+    if bytes.len() > wrapping_sub(MAX_OUTPUT_BYTES, out.text.len()) {
+        return stop(inout out, ERR_OUTPUT_BYTES);
     }
-    o.v.extend(in b);
+    out.text.extend(in bytes);
     true
 }
 
-fn t(inout o: Out, in s: Str) -> bool {
-    text(inout o, in s.as_bytes())
+fn t(inout out: Out, in s: Str) -> bool {
+    text(inout out, in s.as_bytes())
 }
 
-fn ast_name(inout o: Out, in a: Ast, sym: u32) -> bool {
-    let mut b = ChunkSeq::new[u8]();
-    put_name(inout b, in a, sym);
-    text(inout o, in b.as_slice())
+fn ast_name(inout out: Out, in ast: Ast, sym: u32) -> bool {
+    let mut name = ChunkSeq::new[u8]();
+    put_name(inout name, in ast, sym);
+    text(inout out, in name.as_slice())
 }
 
-fn check_name(inout o: Out, in f: Facts, sym: u32) -> bool {
-    let mut b = ChunkSeq::new[u8]();
-    f.c.names.write(sym, inout b);
-    text(inout o, in b.as_slice())
+fn check_name(inout out: Out, in facts: Facts, sym: u32) -> bool {
+    let mut name = ChunkSeq::new[u8]();
+    facts.ctx.names.write(sym, inout name);
+    text(inout out, in name.as_slice())
 }
 
-fn mode_name(m: u8) -> Str {
-    if m == 0 {
+fn mode_name(mode: u8) -> Str {
+    if mode == 0 {
         "copy"
-    } else if m == 1 {
+    } else if mode == 1 {
         "affine"
     } else {
         "linear"
     }
 }
 
-fn pass_name(p: u8) -> Str {
-    if p == 0 {
+fn pass_name(pass: u8) -> Str {
+    if pass == 0 {
         "in"
-    } else if p == 1 {
+    } else if pass == 1 {
         "inout"
     } else {
         "sink"
@@ -171,304 +172,313 @@ fn pass_name(p: u8) -> Str {
 }
 
 // The check-data symbol spelled like AST name `sym`, or NONE.
-fn check_symbol(in x: Ix, in f: Facts, sym: u32) -> u32 {
-    let mut b = ChunkSeq::new[u8]();
-    put_name(inout b, in x.ast, sym);
-    f.c.names.lookup(in b.as_slice())
+fn check_symbol(in index: Ix, in facts: Facts, sym: u32) -> u32 {
+    let mut name = ChunkSeq::new[u8]();
+    put_name(inout name, in index.ast, sym);
+    facts.ctx.names.lookup(in name.as_slice())
 }
 
 // ------------------------------------------------- checker types
 
 // `print_type` of a checker type.
-fn check_type(inout o: Out, in f: Facts, ty: u32, depth: u64) -> bool {
-    if !charge(inout o, depth) {
+fn check_type(inout out: Out, in facts: Facts, ty: u32, depth: u64) -> bool {
+    if !charge(inout out, depth) {
         return false;
     }
-    let n = f.c.types.node(ty);
-    let d = wrapping_add(depth, 1);
-    if n.kind == CT_LIT {
-        if !t(inout o, in "integer literal ") {
+    let node = facts.ctx.types.node(ty);
+    let child_depth = wrapping_add(depth, 1);
+    if node.kind == CT_LIT {
+        if !t(inout out, in "integer literal ") {
             return false;
         }
-        let mut b = ChunkSeq::new[u8]();
-        if n.mode != 0 {
-            b.push(45);
+        let mut digits = ChunkSeq::new[u8]();
+        if node.mode != 0 {
+            digits.push(45);
         }
-        put_decimal(inout b, wrapping_u64(n.lit));
-        text(inout o, in b.as_slice())
-    } else if n.kind == CT_NAMED {
-        if !check_name(inout o, in f, n.name) {
+        put_decimal(inout digits, wrapping_u64(node.lit));
+        text(inout out, in digits.as_slice())
+    } else if node.kind == CT_NAMED {
+        if !check_name(inout out, in facts, node.name) {
             return false;
         }
-        if n.n == 0 {
+        if node.n == 0 {
             return true;
         }
-        if !t(inout o, in "[") {
+        if !t(inout out, in "[") {
             return false;
         }
-        for i in 0..w(n.n) {
-            if i > 0 && !t(inout o, in ", ") {
+        for i in 0..w(node.n) {
+            if i > 0 && !t(inout out, in ", ") {
                 return false;
             }
-            if !check_type(inout o, in f, f.c.types.arg(ty, i), d) {
+            if !check_type(inout out, in facts, facts.ctx.types.arg(ty, i), child_depth) {
                 return false;
             }
         }
-        t(inout o, in "]")
-    } else if n.kind == CT_TUPLE {
-        if !t(inout o, in "(") {
+        t(inout out, in "]")
+    } else if node.kind == CT_TUPLE {
+        if !t(inout out, in "(") {
             return false;
         }
-        for i in 0..w(n.n) {
-            if i > 0 && !t(inout o, in ", ") {
+        for i in 0..w(node.n) {
+            if i > 0 && !t(inout out, in ", ") {
                 return false;
             }
-            if !check_type(inout o, in f, f.c.types.arg(ty, i), d) {
+            if !check_type(inout out, in facts, facts.ctx.types.arg(ty, i), child_depth) {
                 return false;
             }
         }
-        t(inout o, in ")")
-    } else if n.kind == CT_ROW {
-        check_effects(inout o, in f, n.r2, d)
-    } else if n.kind == CT_FN {
-        if !t(inout o, in mode_name(n.mode)) || !t(inout o, in " fn(") {
+        t(inout out, in ")")
+    } else if node.kind == CT_ROW {
+        check_effects(inout out, in facts, node.r2, child_depth)
+    } else if node.kind == CT_FN {
+        if !t(inout out, in mode_name(node.mode)) || !t(inout out, in " fn(") {
             return false;
         }
-        for i in 0..w(n.n) {
-            if i > 0 && !t(inout o, in ", ") {
+        for i in 0..w(node.n) {
+            if i > 0 && !t(inout out, in ", ") {
                 return false;
             }
-            if !t(inout o, in pass_name(f.c.types.param_pass(ty, i))) || !t(inout o, in " ") {
+            if !t(inout out, in pass_name(facts.ctx.types.param_pass(ty, i)))
+                || !t(inout out, in " ")
+            {
                 return false;
             }
-            if !check_type(inout o, in f, f.c.types.arg(ty, i), d) {
+            if !check_type(inout out, in facts, facts.ctx.types.arg(ty, i), child_depth) {
                 return false;
             }
         }
-        if !t(inout o, in ") -> ") {
+        if !t(inout out, in ") -> ") {
             return false;
         }
-        if !check_type(inout o, in f, n.r, d) {
+        if !check_type(inout out, in facts, node.r, child_depth) {
             return false;
         }
-        if !t(inout o, in " ") {
+        if !t(inout out, in " ") {
             return false;
         }
-        check_effects(inout o, in f, n.r2, d)
+        check_effects(inout out, in facts, node.r2, child_depth)
     } else {
-        t(inout o, in "_")
+        t(inout out, in "_")
     }
 }
 
-fn put_decimal(inout b: ChunkSeq[u8], n: u64) {
+fn put_decimal(inout out: ChunkSeq[u8], n: u64) {
     if n >= 10 {
-        put_decimal(inout b, n / 10);
+        put_decimal(inout out, n / 10);
     }
-    b.push(wrapping_u8(wrapping_add(n % 10, 48)));
+    out.push(wrapping_u8(wrapping_add(n % 10, 48)));
 }
 
 // `print_effects` of a checker row.
-fn check_effects(inout o: Out, in f: Facts, r: u32, depth: u64) -> bool {
-    if !charge(inout o, depth) || !t(inout o, in "eff [") {
+fn check_effects(inout out: Out, in facts: Facts, row_ty: u32, depth: u64) -> bool {
+    if !charge(inout out, depth) || !t(inout out, in "eff [") {
         return false;
     }
-    let row = f.c.types.row(r);
-    let d = wrapping_add(depth, 1);
+    let row = facts.ctx.types.row(row_ty);
+    let child_depth = wrapping_add(depth, 1);
     for i in 0..w(row.n) {
-        if !charge(inout o, depth) {
+        if !charge(inout out, depth) {
             return false;
         }
-        if i > 0 && !t(inout o, in ", ") {
+        if i > 0 && !t(inout out, in ", ") {
             return false;
         }
-        let e = f.c.types.effect_at(wrapping_add(w(row.a), i));
-        if e.label != 0 {
-            if !check_name(inout o, in f, wrapping_sub(e.label, 1)) || !t(inout o, in ": ") {
+        let entry = facts.ctx.types.effect_at(wrapping_add(w(row.a), i));
+        if entry.label != 0 {
+            if !check_name(inout out, in facts, wrapping_sub(entry.label, 1))
+                || !t(inout out, in ": ")
+            {
                 return false;
             }
         }
-        if !check_name(inout o, in f, e.name) {
+        if !check_name(inout out, in facts, entry.name) {
             return false;
         }
-        if e.n != 0 {
-            if !t(inout o, in "[") {
+        if entry.n != 0 {
+            if !t(inout out, in "[") {
                 return false;
             }
-            for j in 0..w(e.n) {
-                if j > 0 && !t(inout o, in ", ") {
+            for j in 0..w(entry.n) {
+                if j > 0 && !t(inout out, in ", ") {
                     return false;
                 }
-                let arg = u32_at(in f.c.types.items, wrapping_add(w(e.a), j));
-                if !check_type(inout o, in f, arg, d) {
+                let arg = u32_at(in facts.ctx.types.items, wrapping_add(w(entry.a), j));
+                if !check_type(inout out, in facts, arg, child_depth) {
                     return false;
                 }
             }
-            if !t(inout o, in "]") {
+            if !t(inout out, in "]") {
                 return false;
             }
         }
     }
     if row.tail != 0 {
-        if row.n != 0 && !t(inout o, in " | ") {
+        if row.n != 0 && !t(inout out, in " | ") {
             return false;
         }
-        if !check_name(inout o, in f, wrapping_sub(row.tail, 1)) {
+        if !check_name(inout out, in facts, wrapping_sub(row.tail, 1)) {
             return false;
         }
     }
-    t(inout o, in "]")
+    t(inout out, in "]")
 }
 
 // ------------------------------------------------- source types
 
-fn type_at(in a: Ast, i: u32) -> TypeNode {
-    a.types.get_or(
+fn type_at(in ast: Ast, i: u32) -> TypeNode {
+    ast.types.get_or(
         idx_from_raw[TypeNode](i),
         TypeNode { kind: AT_INFER, a: NONE, b: NONE, c: NONE, d: NONE }
     )
 }
 
-fn effects_at(in a: Ast, i: u32) -> EffectsNode {
-    a.effects.get_or(idx_from_raw[EffectsNode](i), EffectsNode { instances: NONE, tail: NONE })
+fn effects_at(in ast: Ast, i: u32) -> EffectsNode {
+    ast.effects.get_or(idx_from_raw[EffectsNode](i), EffectsNode { instances: NONE, tail: NONE })
 }
 
-fn effect_at(in a: Ast, i: u32) -> EffectNode {
-    a.effect_nodes
+fn effect_at(in ast: Ast, i: u32) -> EffectNode {
+    ast.effect_nodes
         .get_or(idx_from_raw[EffectNode](i), EffectNode { label: NONE, name: NONE, args: NONE })
 }
 
-fn generic_at(in a: Ast, i: u32) -> GenericNode {
-    a.generics
+fn generic_at(in ast: Ast, i: u32) -> GenericNode {
+    ast.generics
         .get_or(idx_from_raw[GenericNode](i), GenericNode { name: NONE, bound: 0, row: false })
 }
 
 // `print_type` of a source type.
-fn source_type(inout o: Out, in a: Ast, ty: u32, depth: u64) -> bool {
-    if !charge(inout o, depth) {
+fn source_type(inout out: Out, in ast: Ast, ty: u32, depth: u64) -> bool {
+    if !charge(inout out, depth) {
         return false;
     }
-    let n = type_at(in a, ty);
-    let d = wrapping_add(depth, 1);
-    if n.kind == AT_NAMED {
-        if !ast_name(inout o, in a, n.a) {
+    let node = type_at(in ast, ty);
+    let child_depth = wrapping_add(depth, 1);
+    if node.kind == AT_NAMED {
+        if !ast_name(inout out, in ast, node.a) {
             return false;
         }
-        let k = list_len(in a, n.b);
-        if k == 0 {
+        let arg_count = list_len(in ast, node.b);
+        if arg_count == 0 {
             return true;
         }
-        if !t(inout o, in "[") {
+        if !t(inout out, in "[") {
             return false;
         }
-        for i in 0..k {
-            if i > 0 && !t(inout o, in ", ") {
+        for i in 0..arg_count {
+            if i > 0 && !t(inout out, in ", ") {
                 return false;
             }
-            if !source_type(inout o, in a, list_at(in a, n.b, i), d) {
+            if !source_type(inout out, in ast, list_at(in ast, node.b, i), child_depth) {
                 return false;
             }
         }
-        t(inout o, in "]")
-    } else if n.kind == AT_TUPLE {
-        if !t(inout o, in "(") {
+        t(inout out, in "]")
+    } else if node.kind == AT_TUPLE {
+        if !t(inout out, in "(") {
             return false;
         }
-        for i in 0..list_len(in a, n.a) {
-            if i > 0 && !t(inout o, in ", ") {
+        for i in 0..list_len(in ast, node.a) {
+            if i > 0 && !t(inout out, in ", ") {
                 return false;
             }
-            if !source_type(inout o, in a, list_at(in a, n.a, i), d) {
+            if !source_type(inout out, in ast, list_at(in ast, node.a, i), child_depth) {
                 return false;
             }
         }
-        t(inout o, in ")")
-    } else if n.kind == AT_ROW {
-        source_effects(inout o, in a, n.a, d)
-    } else if n.kind == AT_FUNCTION {
-        if !t(inout o, in mode_name(wrapping_u8(n.d))) || !t(inout o, in " fn(") {
+        t(inout out, in ")")
+    } else if node.kind == AT_ROW {
+        source_effects(inout out, in ast, node.a, child_depth)
+    } else if node.kind == AT_FUNCTION {
+        if !t(inout out, in mode_name(wrapping_u8(node.d))) || !t(inout out, in " fn(") {
             return false;
         }
         // A list of (pass, Type) word pairs.
-        let k = list_len(in a, n.a) >> 1;
-        for i in 0..k {
-            if i > 0 && !t(inout o, in ", ") {
+        let arg_count = list_len(in ast, node.a) >> 1;
+        for i in 0..arg_count {
+            if i > 0 && !t(inout out, in ", ") {
                 return false;
             }
             let at = wrapping_add(i, i);
-            let pass = wrapping_u8(list_at(in a, n.a, at));
-            if !t(inout o, in pass_name(pass)) || !t(inout o, in " ") {
+            let pass = wrapping_u8(list_at(in ast, node.a, at));
+            if !t(inout out, in pass_name(pass)) || !t(inout out, in " ") {
                 return false;
             }
-            if !source_type(inout o, in a, list_at(in a, n.a, wrapping_add(at, 1)), d) {
+            if !source_type(
+                inout out,
+                in ast,
+                list_at(in ast, node.a, wrapping_add(at, 1)),
+                child_depth
+            ) {
                 return false;
             }
         }
-        if !t(inout o, in ") -> ") {
+        if !t(inout out, in ") -> ") {
             return false;
         }
-        if !source_type(inout o, in a, n.b, d) {
+        if !source_type(inout out, in ast, node.b, child_depth) {
             return false;
         }
-        if !t(inout o, in " ") {
+        if !t(inout out, in " ") {
             return false;
         }
-        source_effects(inout o, in a, n.c, d)
+        source_effects(inout out, in ast, node.c, child_depth)
     } else {
-        t(inout o, in "_")
+        t(inout out, in "_")
     }
 }
 
 // `print_effects` of source effects.
-fn source_effects(inout o: Out, in a: Ast, e: u32, depth: u64) -> bool {
-    if !charge(inout o, depth) || !t(inout o, in "eff [") {
+fn source_effects(inout out: Out, in ast: Ast, effects_node: u32, depth: u64) -> bool {
+    if !charge(inout out, depth) || !t(inout out, in "eff [") {
         return false;
     }
-    let row = effects_at(in a, e);
-    let d = wrapping_add(depth, 1);
-    let k = list_len(in a, row.instances);
-    for i in 0..k {
-        if !charge(inout o, depth) {
+    let row = effects_at(in ast, effects_node);
+    let child_depth = wrapping_add(depth, 1);
+    let instance_count = list_len(in ast, row.instances);
+    for i in 0..instance_count {
+        if !charge(inout out, depth) {
             return false;
         }
-        if i > 0 && !t(inout o, in ", ") {
+        if i > 0 && !t(inout out, in ", ") {
             return false;
         }
-        let x = effect_at(in a, list_at(in a, row.instances, i));
-        if x.label != NONE {
-            if !ast_name(inout o, in a, x.label) || !t(inout o, in ": ") {
+        let instance = effect_at(in ast, list_at(in ast, row.instances, i));
+        if instance.label != NONE {
+            if !ast_name(inout out, in ast, instance.label) || !t(inout out, in ": ") {
                 return false;
             }
         }
-        if !ast_name(inout o, in a, x.name) {
+        if !ast_name(inout out, in ast, instance.name) {
             return false;
         }
-        let m = list_len(in a, x.args);
-        if m != 0 {
-            if !t(inout o, in "[") {
+        let arg_count = list_len(in ast, instance.args);
+        if arg_count != 0 {
+            if !t(inout out, in "[") {
                 return false;
             }
-            for j in 0..m {
-                if j > 0 && !t(inout o, in ", ") {
+            for j in 0..arg_count {
+                if j > 0 && !t(inout out, in ", ") {
                     return false;
                 }
-                if !source_type(inout o, in a, list_at(in a, x.args, j), d) {
+                if !source_type(inout out, in ast, list_at(in ast, instance.args, j), child_depth) {
                     return false;
                 }
             }
-            if !t(inout o, in "]") {
+            if !t(inout out, in "]") {
                 return false;
             }
         }
     }
     if row.tail != NONE {
-        if k != 0 && !t(inout o, in " | ") {
+        if instance_count != 0 && !t(inout out, in " | ") {
             return false;
         }
-        if !ast_name(inout o, in a, row.tail) {
+        if !ast_name(inout out, in ast, row.tail) {
             return false;
         }
     }
-    t(inout o, in "]")
+    t(inout out, in "]")
 }
 
 // ------------------------------------------------- modes
@@ -477,64 +487,78 @@ fn source_effects(inout o: Out, in a: Ast, e: u32, depth: u64) -> bool {
 // operation runs. `seen` holds the recursion keys as words: name, the
 // number of argument modes, then the modes.
 fn mode_work(
-    inout o: Out,
-    inout f: Facts,
+    inout out: Out,
+    inout facts: Facts,
     ty: u32,
     in bounds: Bounds,
     inout seen: ChunkSeq[u32],
     depth: u64
 ) -> u8 {
-    if !charge(inout o, depth) {
+    if !charge(inout out, depth) {
         return 255;
     }
-    let n = f.c.types.node(ty);
-    let d = wrapping_add(depth, 1);
-    if n.kind == CT_FN {
-        return n.mode;
+    let node = facts.ctx.types.node(ty);
+    let child_depth = wrapping_add(depth, 1);
+    if node.kind == CT_FN {
+        return node.mode;
     }
-    if n.kind == CT_TUPLE {
-        let mut m: u8 = 0;
-        for i in 0..w(n.n) {
-            let x = mode_work(inout o, inout f, f.c.types.arg(ty, i), in bounds, inout seen, d);
-            if x == 255 {
+    if node.kind == CT_TUPLE {
+        let mut mode: u8 = 0;
+        for i in 0..w(node.n) {
+            let arg_mode = mode_work(
+                inout out,
+                inout facts,
+                facts.ctx.types.arg(ty, i),
+                in bounds,
+                inout seen,
+                child_depth
+            );
+            if arg_mode == 255 {
                 return 255;
             }
-            m = join(m, x);
+            mode = join(mode, arg_mode);
         }
-        return m;
+        return mode;
     }
-    if n.kind != CT_NAMED {
+    if node.kind != CT_NAMED {
         return 0;
     }
-    let b = bounds.get(n.name);
-    if b != 255 {
-        return b;
+    let bound_mode = bounds.get(node.name);
+    if bound_mode != 255 {
+        return bound_mode;
     }
-    let k = f.c.world.k;
-    if k.is_scalar(n.name) {
+    let known = facts.ctx.world.k;
+    if known.is_scalar(node.name) {
         return 0;
     }
-    if n.name == k.string {
+    if node.name == known.string {
         return 1;
     }
-    let ai = f.c.world.lookup(n.name);
-    if ai == NONE {
+    let adt_index = facts.ctx.world.lookup(node.name);
+    if adt_index == NONE {
         return 2;
     }
-    let adt = f.c.world.adt(ai);
+    let adt = facts.ctx.world.adt(adt_index);
     let mut modes = ChunkSeq::new[u8]();
-    for i in 0..w(n.n) {
-        let x = mode_work(inout o, inout f, f.c.types.arg(ty, i), in bounds, inout seen, d);
-        if x == 255 {
+    for i in 0..w(node.n) {
+        let arg_mode = mode_work(
+            inout out,
+            inout facts,
+            facts.ctx.types.arg(ty, i),
+            in bounds,
+            inout seen,
+            child_depth
+        );
+        if arg_mode == 255 {
             return 255;
         }
-        modes.push(x);
+        modes.push(arg_mode);
     }
-    if seen_has(in seen, n.name, in modes) {
+    if seen_has(in seen, node.name, in modes) {
         return adt.mode;
     }
-    let old = seen.len();
-    seen.push(n.name);
+    let seen_len = seen.len();
+    seen.push(node.name);
     seen.push(n32(modes.len()));
     for i in 0..modes.len() {
         seen.push(widen_u32(u8_at(in modes, i)));
@@ -546,20 +570,27 @@ fn mode_work(
         modes.len()
     };
     for i in 0..pairs {
-        let g = f.c.world.generic(wrapping_add(w(adt.ga), i));
-        inner.set(g.name, u8_at(in modes, i));
+        let generic = facts.ctx.world.generic(wrapping_add(w(adt.ga), i));
+        inner.set(generic.name, u8_at(in modes, i));
     }
-    let mut m = adt.mode;
-    for v in 0..w(adt.vn) {
-        let variant = f.c.world.variant(wrapping_add(w(adt.va), v));
+    let mut mode = adt.mode;
+    for variant_index in 0..w(adt.vn) {
+        let variant = facts.ctx.world.variant(wrapping_add(w(adt.va), variant_index));
         for j in 0..w(variant.fc) {
-            let field = f.c.world.field(wrapping_add(w(variant.fa), j));
-            let intrinsic = mode_work(inout o, inout f, field.ty, in inner, inout seen, d);
+            let field = facts.ctx.world.field(wrapping_add(w(variant.fa), j));
+            let intrinsic = mode_work(
+                inout out,
+                inout facts,
+                field.ty,
+                in inner,
+                inout seen,
+                child_depth
+            );
             if intrinsic == 255 {
                 return 255;
             }
-            m = join(
-                m,
+            mode = join(
+                mode,
                 if field.modality == 0 {
                     intrinsic
                 } else {
@@ -568,8 +599,8 @@ fn mode_work(
             );
         }
     }
-    seen.truncate(old);
-    m
+    seen.truncate(seen_len);
+    mode
 }
 
 fn join(a: u8, b: u8) -> u8 {
@@ -582,10 +613,10 @@ fn seen_has(in seen: ChunkSeq[u32], name: u32, in modes: ChunkSeq[u8]) -> bool {
         if i >= seen.len() {
             return false;
         }
-        let n = w(u32_at(in seen, wrapping_add(i, 1)));
-        if u32_at(in seen, i) == name && n == modes.len() {
+        let mode_count = w(u32_at(in seen, wrapping_add(i, 1)));
+        if u32_at(in seen, i) == name && mode_count == modes.len() {
             let mut same = true;
-            for j in 0..n {
+            for j in 0..mode_count {
                 if u32_at(in seen, wrapping_add(wrapping_add(i, 2), j))
                     != widen_u32(u8_at(in modes, j))
                 {
@@ -597,48 +628,50 @@ fn seen_has(in seen: ChunkSeq[u32], name: u32, in modes: ChunkSeq[u8]) -> bool {
                 return true;
             }
         }
-        i = wrapping_add(i, wrapping_add(n, 2));
+        i = wrapping_add(i, wrapping_add(mode_count, 2));
     }
 }
 
 // `checked_mode`: the generic bounds of function node `fnode`, the mode
 // work, then `World::mode`. 255 when the budget ran out.
-fn checked_mode(inout o: Out, inout f: Facts, in x: Ix, ty: u32, fnode: u32) -> u8 {
-    let node = fn_at(in x.ast, fnode);
-    let k = list_len(in x.ast, node.generics);
+fn checked_mode(inout out: Out, inout facts: Facts, in index: Ix, ty: u32, fnode: u32) -> u8 {
+    let node = fn_at(in index.ast, fnode);
+    let generic_count = list_len(in index.ast, node.generics);
     let mut bounds = bounds_new();
-    for i in 0..k {
-        if !charge(inout o, 0) {
+    for i in 0..generic_count {
+        if !charge(inout out, 0) {
             return 255;
         }
     }
-    for i in 0..k {
-        let g = generic_at(in x.ast, list_at(in x.ast, node.generics, i));
-        let s = check_symbol(in x, in f, g.name);
-        if s != NONE {
-            bounds.set(s, g.bound);
+    for i in 0..generic_count {
+        let generic = generic_at(in index.ast, list_at(in index.ast, node.generics, i));
+        let check_sym = check_symbol(in index, in facts, generic.name);
+        if check_sym != NONE {
+            bounds.set(check_sym, generic.bound);
         }
     }
     let mut seen = ChunkSeq::new[u32]();
-    if mode_work(inout o, inout f, ty, in bounds, inout seen, 0) == 255 {
+    if mode_work(inout out, inout facts, ty, in bounds, inout seen, 0) == 255 {
         return 255;
     }
-    mode_of(inout f.c.types, in f.c.names, in f.c.world, ty, in bounds)
+    mode_of(inout facts.ctx.types, in facts.ctx.names, in facts.ctx.world, ty, in bounds)
 }
 
 // ------------------------------------------------- signature
 
 // The checker's function row for function node `fnode` whose span equals
 // the node's (`functions.get(name).filter(span == f.span)`), + 1, or 0.
-fn world_function(in x: Ix, in f: Facts, fnode: u32) -> u64 {
-    let node = fn_at(in x.ast, fnode);
-    let s = check_symbol(in x, in f, node.name);
-    if s == NONE {
+fn world_function(in index: Ix, in facts: Facts, fnode: u32) -> u64 {
+    let node = fn_at(in index.ast, fnode);
+    let name_sym = check_symbol(in index, in facts, node.name);
+    if name_sym == NONE {
         return 0;
     }
-    for i in 0..f.f_name.len() {
-        if u32_at(in f.f_name, i) == s {
-            if u64_at(in f.f_start, i) == w(node.start) && u64_at(in f.f_end, i) == w(node.end) {
+    for i in 0..facts.fn_name.len() {
+        if u32_at(in facts.fn_name, i) == name_sym {
+            if u64_at(in facts.fn_start, i) == w(node.start)
+                && u64_at(in facts.fn_end, i) == w(node.end)
+            {
                 return wrapping_add(i, 1);
             }
             return 0;
@@ -647,137 +680,142 @@ fn world_function(in x: Ix, in f: Facts, fnode: u32) -> u64 {
     0
 }
 
-fn selectors(inout o: Out, in a: Ast, projections: u32) -> bool {
-    let k = list_len(in a, projections);
-    if k == 0 {
+fn selectors(inout out: Out, in ast: Ast, projections: u32) -> bool {
+    let path_count = list_len(in ast, projections);
+    if path_count == 0 {
         return true;
     }
-    if !t(inout o, in ".{") {
+    if !t(inout out, in ".{") {
         return false;
     }
-    for i in 0..k {
-        if i > 0 && !t(inout o, in ", ") {
+    for i in 0..path_count {
+        if i > 0 && !t(inout out, in ", ") {
             return false;
         }
-        let path = list_at(in a, projections, i);
-        for j in 0..list_len(in a, path) {
-            if !charge(inout o, 0) {
+        let path = list_at(in ast, projections, i);
+        for j in 0..list_len(in ast, path) {
+            if !charge(inout out, 0) {
                 return false;
             }
-            if j > 0 && !t(inout o, in ".") {
+            if j > 0 && !t(inout out, in ".") {
                 return false;
             }
-            if !ast_name(inout o, in a, list_at(in a, path, j)) {
+            if !ast_name(inout out, in ast, list_at(in ast, path, j)) {
                 return false;
             }
         }
     }
-    t(inout o, in "}")
+    t(inout out, in "}")
 }
 
-fn signature(inout o: Out, in f: Facts, in x: Ix, fnode: u32) -> bool {
-    let node = fn_at(in x.ast, fnode);
-    if !t(inout o, in "fn ") || !ast_name(inout o, in x.ast, node.name) {
+fn signature(inout out: Out, in facts: Facts, in index: Ix, fnode: u32) -> bool {
+    let node = fn_at(in index.ast, fnode);
+    if !t(inout out, in "fn ") || !ast_name(inout out, in index.ast, node.name) {
         return false;
     }
-    let k = list_len(in x.ast, node.generics);
-    if k != 0 {
-        if !t(inout o, in "[") {
+    let generic_count = list_len(in index.ast, node.generics);
+    if generic_count != 0 {
+        if !t(inout out, in "[") {
             return false;
         }
-        for i in 0..k {
-            if !charge(inout o, 0) {
+        for i in 0..generic_count {
+            if !charge(inout out, 0) {
                 return false;
             }
-            if i > 0 && !t(inout o, in ", ") {
+            if i > 0 && !t(inout out, in ", ") {
                 return false;
             }
-            let g = generic_at(in x.ast, list_at(in x.ast, node.generics, i));
-            if !ast_name(inout o, in x.ast, g.name) {
+            let generic = generic_at(in index.ast, list_at(in index.ast, node.generics, i));
+            if !ast_name(inout out, in index.ast, generic.name) {
                 return false;
             }
-            if g.row {
-                if !t(inout o, in ": eff") {
+            if generic.row {
+                if !t(inout out, in ": eff") {
                     return false;
                 }
-            } else if !t(inout o, in ": mod ") || !t(inout o, in mode_name(g.bound)) {
+            } else if !t(inout out, in ": mod ") || !t(inout out, in mode_name(generic.bound)) {
                 return false;
             }
         }
-        if !t(inout o, in "]") {
+        if !t(inout out, in "]") {
             return false;
         }
     }
-    if !t(inout o, in "(") {
+    if !t(inout out, in "(") {
         return false;
     }
-    for i in 0..list_len(in x.ast, node.params) {
-        if !charge(inout o, 0) {
+    for i in 0..list_len(in index.ast, node.params) {
+        if !charge(inout out, 0) {
             return false;
         }
-        if i > 0 && !t(inout o, in ", ") {
+        if i > 0 && !t(inout out, in ", ") {
             return false;
         }
-        let p = param_at(in x.ast, list_at(in x.ast, node.params, i));
-        if !t(inout o, in pass_name(p.pass)) || !t(inout o, in " ") {
+        let param = param_at(in index.ast, list_at(in index.ast, node.params, i));
+        if !t(inout out, in pass_name(param.pass)) || !t(inout out, in " ") {
             return false;
         }
-        if !ast_name(inout o, in x.ast, p.name) || !selectors(inout o, in x.ast, p.projections) {
+        if !ast_name(inout out, in index.ast, param.name)
+            || !selectors(inout out, in index.ast, param.projections)
+        {
             return false;
         }
-        if !t(inout o, in ": ") || !source_type(inout o, in x.ast, p.ty, 0) {
+        if !t(inout out, in ": ") || !source_type(inout out, in index.ast, param.ty, 0) {
             return false;
         }
     }
-    if !t(inout o, in ") -> ") {
+    if !t(inout out, in ") -> ") {
         return false;
     }
-    let row = world_function(in x, in f, fnode);
+    let row = world_function(in index, in facts, fnode);
     let result = if row == 0 {
         NONE
     } else {
-        u32_at(in f.f_result, wrapping_sub(row, 1))
+        u32_at(in facts.fn_result, wrapping_sub(row, 1))
     };
     let printed = if result != NONE {
-        check_type(inout o, in f, result, 0)
+        check_type(inout out, in facts, result, 0)
     } else {
-        source_type(inout o, in x.ast, node.result, 0)
+        source_type(inout out, in index.ast, node.result, 0)
     };
-    if !printed || !t(inout o, in " ") {
+    if !printed || !t(inout out, in " ") {
         return false;
     }
-    source_effects(inout o, in x.ast, node.effects, 0)
+    source_effects(inout out, in index.ast, node.effects, 0)
 }
 
 // `docs`: the `///` lines attached before byte `start`, each after a
 // newline, in plain text.
-fn docs(inout o: Out, in x: Ix, start: u64) -> bool {
-    let b = x.src.as_bytes();
+fn docs(inout out: Out, in index: Ix, start: u64) -> bool {
+    let bytes = index.src.as_bytes();
     // Pending lines as (start, end) words.
     let mut pending = ChunkSeq::new[u64]();
-    for i in 0..x.t.kind.len() {
-        let s = token_start(in x, i);
-        if s >= start {
+    for i in 0..index.tokens.kind.len() {
+        let tok_start = token_start(in index, i);
+        if tok_start >= start {
             break;
         }
-        let e = token_end(in x.t, i);
-        let k = u8_at(in x.t.kind, i);
-        if k == TK_COMMENT
-            && wrapping_sub(e, s) >= 3
-            && byte(in b, s) == 47
-            && byte(in b, wrapping_add(s, 1)) == 47
-            && byte(in b, wrapping_add(s, 2)) == 47
-            && !(wrapping_sub(e, s) >= 4 && byte(in b, wrapping_add(s, 3)) == 47)
+        let tok_end = token_end(in index.tokens, i);
+        let kind = u8_at(in index.tokens.kind, i);
+        if kind == TK_COMMENT
+            && wrapping_sub(tok_end, tok_start) >= 3
+            && byte(in bytes, tok_start) == 47
+            && byte(in bytes, wrapping_add(tok_start, 1)) == 47
+            && byte(in bytes, wrapping_add(tok_start, 2)) == 47
+            && !(
+                wrapping_sub(tok_end, tok_start) >= 4
+                    && byte(in bytes, wrapping_add(tok_start, 3)) == 47
+            )
         {
-            let mut from = wrapping_add(s, 3);
-            if from < e && byte(in b, from) == 32 {
+            let mut from = wrapping_add(tok_start, 3);
+            if from < tok_end && byte(in bytes, from) == 32 {
                 from = wrapping_add(from, 1);
             }
-            pending.push(wrapping_shl_u64(from, 32) | e);
-        } else if k == TK_WHITESPACE {
+            pending.push(wrapping_shl_u64(from, 32) | tok_end);
+        } else if kind == TK_WHITESPACE {
             let mut lines: u64 = 0;
-            for j in s..e {
-                if byte(in b, j) == 10 {
+            for j in tok_start..tok_end {
+                if byte(in bytes, j) == 10 {
                     lines = wrapping_add(lines, 1);
                 }
             }
@@ -789,8 +827,10 @@ fn docs(inout o: Out, in x: Ix, start: u64) -> bool {
         }
     }
     for i in 0..pending.len() {
-        let v = u64_at(in pending, i);
-        if !t(inout o, in "\n") || !text(inout o, in b[wrapping_shr_u64(v, 32)..(v & 4294967295)]) {
+        let packed = u64_at(in pending, i);
+        if !t(inout out, in "\n")
+            || !text(inout out, in bytes[wrapping_shr_u64(packed, 32)..(packed & 4294967295)])
+        {
             return false;
         }
     }
@@ -800,58 +840,58 @@ fn docs(inout o: Out, in x: Ix, start: u64) -> bool {
 // ------------------------------------------------- hover
 
 // The first declaration whose selection is `s..e`, or all ones.
-fn declaration_at_target(in x: Ix, s: u64, e: u64) -> u64 {
-    for i in 0..x.d_name.len() {
-        if w(u32_at(in x.d_sel_start, i)) == s && w(u32_at(in x.d_sel_end, i)) == e {
+fn declaration_at_target(in index: Ix, s: u64, e: u64) -> u64 {
+    for i in 0..index.decl_name.len() {
+        if w(u32_at(in index.decl_sel_start, i)) == s && w(u32_at(in index.decl_sel_end, i)) == e {
             return i;
         }
     }
     18446744073709551615
 }
 
-// The answer to one hover request on `x` with facts `f`, appended to
+// The answer to one hover request on `index` with facts `facts`, appended to
 // `out` as `R<json>`, `Rnull` or `E<error>` (`put_error` codes).
 pub fn hover_answer(
     inout out: ChunkSeq[u8],
-    inout x: Ix,
-    inout f: Facts,
+    inout index: Ix,
+    inout facts: Facts,
     line: u32,
     character: u32
 ) -> u64 {
-    if x.err != ERR_NONE {
-        return x.err;
+    if index.err != ERR_NONE {
+        return index.err;
     }
     let mut at: u64 = 0;
-    if !cursor(inout x, line, character, inout at) {
-        return x.err;
+    if !cursor(inout index, line, character, inout at) {
+        return index.err;
     }
-    let mut o = Out { v: ChunkSeq::new[u8](), left: MAX_TYPE_WORK, err: ERR_NONE };
+    let mut hover = Out { text: ChunkSeq::new[u8](), left: MAX_TYPE_WORK, err: ERR_NONE };
     let mut sel_start: u64 = 0;
     let mut sel_end: u64 = 0;
-    let best = node_at(in x, at);
+    let best = node_at(in index, at);
     if best != 0 {
         let i = wrapping_sub(best, 1);
-        let ns = w(u32_at(in x.n_start, i));
-        let ne = w(u32_at(in x.n_end, i));
-        let fnode = u32_at(in x.n_fn, i);
-        let param = u32_at(in x.n_param, i);
-        let mut ty = f.c.world.expr_type(ns, ne);
+        let node_start = w(u32_at(in index.node_start, i));
+        let node_end = w(u32_at(in index.node_end, i));
+        let fnode = u32_at(in index.node_fn, i);
+        let param = u32_at(in index.node_param, i);
+        let mut ty = facts.ctx.world.expr_type(node_start, node_end);
         if ty == NONE && param != 0 {
-            let p = param_at(in x.ast, wrapping_sub(param, 1));
-            let row = world_function(in x, in f, fnode);
+            let param_node = param_at(in index.ast, wrapping_sub(param, 1));
+            let row = world_function(in index, in facts, fnode);
             if row != 0 {
-                let r = wrapping_sub(row, 1);
-                let pa = u64_at(in f.f_pa, r);
-                let ps = check_symbol(in x, in f, p.name);
-                for j in 0..u64_at(in f.f_pn, r) {
-                    let q = wrapping_add(pa, j);
-                    if u64_at(in f.p_start, q) == w(p.start)
-                        && u64_at(in f.p_end, q) == w(p.end)
-                        && u32_at(in f.p_name, q) == ps
+                let fn_row = wrapping_sub(row, 1);
+                let first_param = u64_at(in facts.fn_param_start, fn_row);
+                let param_sym = check_symbol(in index, in facts, param_node.name);
+                for j in 0..u64_at(in facts.fn_param_count, fn_row) {
+                    let param_row = wrapping_add(first_param, j);
+                    if u64_at(in facts.param_start, param_row) == w(param_node.start)
+                        && u64_at(in facts.param_end, param_row) == w(param_node.end)
+                        && u32_at(in facts.param_name, param_row) == param_sym
                     {
-                        let pt = u32_at(in f.p_ty, q);
-                        if f.c.types.node(pt).kind != 5 {
-                            ty = pt;
+                        let param_ty = u32_at(in facts.param_ty, param_row);
+                        if facts.ctx.types.node(param_ty).kind != 5 {
+                            ty = param_ty;
                         }
                         break;
                     }
@@ -862,55 +902,57 @@ pub fn hover_answer(
             put(inout out, in "Rnull");
             return ERR_NONE;
         }
-        if !t(inout o, in "type: ") || !check_type(inout o, in f, ty, 0) {
-            return o.err;
+        if !t(inout hover, in "type: ") || !check_type(inout hover, in facts, ty, 0) {
+            return hover.err;
         }
-        let mode = checked_mode(inout o, inout f, in x, ty, fnode);
+        let mode = checked_mode(inout hover, inout facts, in index, ty, fnode);
         if mode == 255 {
-            return o.err;
+            return hover.err;
         }
-        if !t(inout o, in "\ntype mode: ")
-            || !t(inout o, in mode_name(mode))
-            || !t(inout o, in " (not current ownership or a live obligation)")
+        if !t(inout hover, in "\ntype mode: ")
+            || !t(inout hover, in mode_name(mode))
+            || !t(inout hover, in " (not current ownership or a live obligation)")
         {
-            return o.err;
+            return hover.err;
         }
         if param != 0 {
-            let p = param_at(in x.ast, wrapping_sub(param, 1));
-            if !t(inout o, in "\nparameter: ")
-                || !t(inout o, in pass_name(p.pass))
-                || !t(inout o, in " ")
-                || !ast_name(inout o, in x.ast, p.name)
-                || !selectors(inout o, in x.ast, p.projections)
+            let param_node = param_at(in index.ast, wrapping_sub(param, 1));
+            if !t(inout hover, in "\nparameter: ")
+                || !t(inout hover, in pass_name(param_node.pass))
+                || !t(inout hover, in " ")
+                || !ast_name(inout hover, in index.ast, param_node.name)
+                || !selectors(inout hover, in index.ast, param_node.projections)
             {
-                return o.err;
+                return hover.err;
             }
         }
-        let ts = u32_at(in x.n_tstart, i);
-        if ts != 0 {
-            let target_s = w(wrapping_sub(ts, 1));
-            let target_e = w(wrapping_sub(u32_at(in x.n_tend, i), 1));
-            let d = declaration_at_target(in x, target_s, target_e);
-            if d != 18446744073709551615 {
-                let df = u32_at(in x.d_fn, d);
-                if df != NONE {
-                    if !t(inout o, in "\n") || !signature(inout o, in f, in x, df) {
-                        return o.err;
+        let target_tag = u32_at(in index.node_target_start, i);
+        if target_tag != 0 {
+            let target_start = w(wrapping_sub(target_tag, 1));
+            let target_end = w(wrapping_sub(u32_at(in index.node_target_end, i), 1));
+            let decl = declaration_at_target(in index, target_start, target_end);
+            if decl != 18446744073709551615 {
+                let decl_fn = u32_at(in index.decl_fn, decl);
+                if decl_fn != NONE {
+                    if !t(inout hover, in "\n")
+                        || !signature(inout hover, in facts, in index, decl_fn)
+                    {
+                        return hover.err;
                     }
-                    if !docs(inout o, in x, w(u32_at(in x.d_start, d))) {
-                        return o.err;
+                    if !docs(inout hover, in index, w(u32_at(in index.decl_start, decl))) {
+                        return hover.err;
                     }
                 }
             }
         }
-        sel_start = ns;
-        sel_end = ne;
+        sel_start = node_start;
+        sel_end = node_end;
     } else {
         let mut found: u64 = 18446744073709551615;
-        for i in 0..x.d_name.len() {
-            let s = w(u32_at(in x.d_sel_start, i));
-            let e = w(u32_at(in x.d_sel_end, i));
-            if s <= at && at < e {
+        for i in 0..index.decl_name.len() {
+            let start = w(u32_at(in index.decl_sel_start, i));
+            let end = w(u32_at(in index.decl_sel_end, i));
+            if start <= at && at < end {
                 found = i;
                 break;
             }
@@ -919,45 +961,47 @@ pub fn hover_answer(
             put(inout out, in "Rnull");
             return ERR_NONE;
         }
-        let df = u32_at(in x.d_fn, found);
-        if df != NONE {
-            if !signature(inout o, in f, in x, df) {
-                return o.err;
+        let decl_fn = u32_at(in index.decl_fn, found);
+        if decl_fn != NONE {
+            if !signature(inout hover, in facts, in index, decl_fn) {
+                return hover.err;
             }
         } else {
-            let name = u32_at(in x.d_name, found);
-            if !ast_name(inout o, in x.ast, name) {
-                return o.err;
+            let name = u32_at(in index.decl_name, found);
+            if !ast_name(inout hover, in index.ast, name) {
+                return hover.err;
             }
-            let s = check_symbol(in x, in f, name);
-            if s != NONE {
-                let ai = f.c.world.lookup(s);
-                if ai != NONE {
-                    let adt = f.c.world.adt(ai);
-                    if !t(inout o, in "\ndeclared mode: ") || !t(inout o, in mode_name(adt.mode)) {
-                        return o.err;
+            let name_sym = check_symbol(in index, in facts, name);
+            if name_sym != NONE {
+                let adt_index = facts.ctx.world.lookup(name_sym);
+                if adt_index != NONE {
+                    let adt = facts.ctx.world.adt(adt_index);
+                    if !t(inout hover, in "\ndeclared mode: ")
+                        || !t(inout hover, in mode_name(adt.mode))
+                    {
+                        return hover.err;
                     }
                 }
             }
         }
-        if !docs(inout o, in x, w(u32_at(in x.d_start, found))) {
-            return o.err;
+        if !docs(inout hover, in index, w(u32_at(in index.decl_start, found))) {
+            return hover.err;
         }
-        sel_start = w(u32_at(in x.d_sel_start, found));
-        sel_end = w(u32_at(in x.d_sel_end, found));
+        sel_start = w(u32_at(in index.decl_sel_start, found));
+        sel_end = w(u32_at(in index.decl_sel_end, found));
     }
-    let mut v = ChunkSeq::new[u8]();
-    put(inout v, in "{\"contents\":{\"kind\":\"plaintext\",\"value\":");
-    put_string(inout v, in o.v.as_slice());
-    put(inout v, in "},\"range\":");
-    if !put_source_range(inout v, inout x, sel_start, sel_end) {
-        return x.err;
+    let mut result_json = ChunkSeq::new[u8]();
+    put(inout result_json, in "{\"contents\":{\"kind\":\"plaintext\",\"value\":");
+    put_string(inout result_json, in hover.text.as_slice());
+    put(inout result_json, in "},\"range\":");
+    if !put_source_range(inout result_json, inout index, sel_start, sel_end) {
+        return index.err;
     }
-    v.push(125);
-    if v.len() > MAX_OUTPUT_BYTES {
+    result_json.push(125);
+    if result_json.len() > MAX_OUTPUT_BYTES {
         return ERR_OUTPUT_BYTES;
     }
     out.push(82);
-    put_bytes(inout out, in v.as_slice());
+    put_bytes(inout out, in result_json.as_slice());
     ERR_NONE
 }

@@ -25,40 +25,40 @@ pub copy struct XParam {
     s1: u64,
 }
 
-// A `world.functions` entry: params[pa..pa+pn], effect instance names
-// esyms[ea..ea+en].
+// A `world.functions` entry: params[param_start..param_start+param_count],
+// effect instance names eff_names[eff_start..eff_start+eff_count].
 pub copy struct XFn {
     name: u32,
     s0: u64,
     s1: u64,
-    ngen: u64,
-    pa: u64,
-    pn: u64,
+    generic_count: u64,
+    param_start: u64,
+    param_count: u64,
     result: u32,
-    ea: u64,
-    en: u64,
+    eff_start: u64,
+    eff_count: u64,
     tail: bool,
 }
 
 // An operation of an effect declaration: parameter types
-// op_params[pa..pa+pn].
+// op_params[param_start..param_start+param_count].
 pub copy struct XOp {
     name: u32,
     s0: u64,
     s1: u64,
-    pa: u64,
-    pn: u64,
+    param_start: u64,
+    param_count: u64,
     result: u32,
 }
 
-// A `world.effects` entry: ops[oa..oa+on].
+// A `world.effects` entry: ops[op_start..op_start+op_count].
 pub copy struct XEff {
     name: u32,
-    ngen: u64,
+    generic_count: u64,
     s0: u64,
     s1: u64,
-    oa: u64,
-    on: u64,
+    op_start: u64,
+    op_count: u64,
 }
 
 pub struct Extra {
@@ -71,127 +71,142 @@ pub struct Extra {
     adt_s1: ChunkSeq[u64],
     fns: ChunkSeq[XFn],
     params: ChunkSeq[XParam],
-    esyms: ChunkSeq[u32],
+    eff_names: ChunkSeq[u32],
     // symbol -> fns index + 1
-    fn_by: ChunkSeq[u32],
+    fn_by_name: ChunkSeq[u32],
     decls: ChunkSeq[XEff],
     ops: ChunkSeq[XOp],
     op_params: ChunkSeq[u32],
     // symbol -> decls index + 1
-    decl_by: ChunkSeq[u32],
+    decl_by_name: ChunkSeq[u32],
 }
 
-pub fn read_str(inout r: Reader, in b: Slice[u8], inout names: Names) -> u32 {
-    let len = r.word(in b);
-    let start = r.pos;
+pub fn read_str(inout reader: Reader, in bytes: Slice[u8], inout names: Names) -> u32 {
+    let len = reader.word(in bytes);
+    let start = reader.pos;
     let end = add(start, len);
-    let s = if end <= b.len() {
-        names.intern(in b[start..end])
+    let symbol = if end <= bytes.len() {
+        names.intern(in bytes[start..end])
     } else {
         0
     };
-    r.pos = add(start, wrapping_mul(wrapping_add(len, 7) / 8, 8));
-    s
+    reader.pos = add(start, wrapping_mul(wrapping_add(len, 7) / 8, 8));
+    symbol
 }
 
-fn read_row(inout r: Reader, in b: Slice[u8], inout t: Types, inout names: Names) -> u32 {
-    let n = r.word(in b);
-    let mut es: ChunkSeq[EffNode] = ChunkSeq::new[EffNode]();
+fn read_row(
+    inout reader: Reader,
+    in bytes: Slice[u8],
+    inout types: Types,
+    inout names: Names
+) -> u32 {
+    let n = reader.word(in bytes);
+    let mut nodes: ChunkSeq[EffNode] = ChunkSeq::new[EffNode]();
     let mut args: ChunkSeq[u32] = ChunkSeq::new[u32]();
     for i in 0..n {
-        let has = r.word(in b);
-        let label = if has != 0 {
-            inc32(read_str(inout r, in b, inout names))
+        let has_label = reader.word(in bytes);
+        let label = if has_label != 0 {
+            inc32(read_str(inout reader, in bytes, inout names))
         } else {
             0
         };
-        let name = read_str(inout r, in b, inout names);
-        let k = r.word(in b);
-        let mut mine: ChunkSeq[u32] = ChunkSeq::new[u32]();
-        for j in 0..k {
-            let a = read_ty(inout r, in b, inout t, inout names);
-            mine.push(a);
+        let name = read_str(inout reader, in bytes, inout names);
+        let arg_count = reader.word(in bytes);
+        let mut node_args: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        for j in 0..arg_count {
+            let arg_ty = read_ty(inout reader, in bytes, inout types, inout names);
+            node_args.push(arg_ty);
         }
-        let at = n32(args.len());
-        for j in 0..mine.len() {
-            args.push(u32_at(in mine, j));
+        let arg_start = n32(args.len());
+        for j in 0..node_args.len() {
+            args.push(u32_at(in node_args, j));
         }
-        es.push(EffNode { label: label, name: name, a: at, n: n32(k) });
+        nodes.push(EffNode { label: label, name: name, a: arg_start, n: n32(arg_count) });
     }
-    let has_tail = r.word(in b);
+    let has_tail = reader.word(in bytes);
     let tail = if has_tail != 0 {
-        inc32(read_str(inout r, in b, inout names))
+        inc32(read_str(inout reader, in bytes, inout names))
     } else {
         0
     };
-    t.mk_row(in es, in args, tail)
+    types.mk_row(in nodes, in args, tail)
 }
 
 // An inline type tree: 0 literal (neg, magnitude), 1 named (name, n,
 // args), 2 tuple (n, items), 3 function (n, n x (pass, type), result, row,
 // mode), 4 row, 5 infer.
-pub fn read_ty(inout r: Reader, in b: Slice[u8], inout t: Types, inout names: Names) -> u32 {
-    let kind = r.word(in b);
+pub fn read_ty(
+    inout reader: Reader,
+    in bytes: Slice[u8],
+    inout types: Types,
+    inout names: Names
+) -> u32 {
+    let kind = reader.word(in bytes);
     if kind == 0 {
-        let neg = r.word(in b) != 0;
-        let mag = r.word(in b);
-        return t.literal(neg, mag);
+        let neg = reader.word(in bytes) != 0;
+        let magnitude = reader.word(in bytes);
+        return types.literal(neg, magnitude);
     }
     if kind == 1 {
-        let name = read_str(inout r, in b, inout names);
-        let n = r.word(in b);
+        let name = read_str(inout reader, in bytes, inout names);
+        let n = reader.word(in bytes);
         let mut args: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](n);
         for i in 0..n {
-            let a = read_ty(inout r, in b, inout t, inout names);
-            args.push(a);
+            let arg_ty = read_ty(inout reader, in bytes, inout types, inout names);
+            args.push(arg_ty);
         }
-        return t.named(name, in args);
+        return types.named(name, in args);
     }
     if kind == 2 {
-        let n = r.word(in b);
+        let n = reader.word(in bytes);
         let mut args: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](n);
         for i in 0..n {
-            let a = read_ty(inout r, in b, inout t, inout names);
-            args.push(a);
+            let arg_ty = read_ty(inout reader, in bytes, inout types, inout names);
+            args.push(arg_ty);
         }
-        return t.tuple(in args);
+        return types.tuple(in args);
     }
     if kind == 3 {
-        let n = r.word(in b);
+        let n = reader.word(in bytes);
         let mut args: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](n);
         let mut passes: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](n);
         for i in 0..n {
-            passes.push(wrapping_u8(r.word(in b)));
-            let a = read_ty(inout r, in b, inout t, inout names);
-            args.push(a);
+            passes.push(wrapping_u8(reader.word(in bytes)));
+            let arg_ty = read_ty(inout reader, in bytes, inout types, inout names);
+            args.push(arg_ty);
         }
-        let result = read_ty(inout r, in b, inout t, inout names);
-        let row = read_row(inout r, in b, inout t, inout names);
-        let mode = wrapping_u8(r.word(in b));
-        return t.mk_with(TyKind::Fn, mode, 0, in args, in passes, result, row, 0);
+        let result = read_ty(inout reader, in bytes, inout types, inout names);
+        let row = read_row(inout reader, in bytes, inout types, inout names);
+        let mode = wrapping_u8(reader.word(in bytes));
+        return types.mk_with(TyKind::Fn, mode, 0, in args, in passes, result, row, 0);
     }
     if kind == 4 {
-        let row = read_row(inout r, in b, inout t, inout names);
-        return t.row_type(row);
+        let row = read_row(inout reader, in bytes, inout types, inout names);
+        return types.row_type(row);
     }
-    t.infer
+    types.infer
 }
 
-pub fn read_extra(inout r: Reader, in b: Slice[u8], inout t: Types, inout names: Names) -> Extra {
-    let entry = read_str(inout r, in b, inout names);
-    let file = read_str(inout r, in b, inout names);
-    let has_source = r.word(in b) != 0;
+pub fn read_extra(
+    inout reader: Reader,
+    in bytes: Slice[u8],
+    inout types: Types,
+    inout names: Names
+) -> Extra {
+    let entry = read_str(inout reader, in bytes, inout names);
+    let file = read_str(inout reader, in bytes, inout names);
+    let has_source = reader.word(in bytes) != 0;
     let mut source: ChunkSeq[u8] = ChunkSeq::new[u8]();
     if has_source {
-        let len = r.word(in b);
-        let start = r.pos;
+        let len = reader.word(in bytes);
+        let start = reader.pos;
         let end = add(start, len);
-        if end <= b.len() {
-            source.extend(in b[start..end]);
+        if end <= bytes.len() {
+            source.extend(in bytes[start..end]);
         }
-        r.pos = add(start, wrapping_mul(wrapping_add(len, 7) / 8, 8));
+        reader.pos = add(start, wrapping_mul(wrapping_add(len, 7) / 8, 8));
     }
-    let mut x = Extra {
+    let mut extra = Extra {
         entry: entry,
         file: file,
         has_source: has_source,
@@ -200,87 +215,103 @@ pub fn read_extra(inout r: Reader, in b: Slice[u8], inout t: Types, inout names:
         adt_s1: ChunkSeq::new[u64](),
         fns: ChunkSeq::new[XFn](),
         params: ChunkSeq::new[XParam](),
-        esyms: ChunkSeq::new[u32](),
-        fn_by: ChunkSeq::new[u32](),
+        eff_names: ChunkSeq::new[u32](),
+        fn_by_name: ChunkSeq::new[u32](),
         decls: ChunkSeq::new[XEff](),
         ops: ChunkSeq::new[XOp](),
         op_params: ChunkSeq::new[u32](),
-        decl_by: ChunkSeq::new[u32](),
+        decl_by_name: ChunkSeq::new[u32](),
     };
-    let na = r.word(in b);
-    for i in 0..na {
-        x.adt_s0.push(r.word(in b));
-        x.adt_s1.push(r.word(in b));
+    let adt_count = reader.word(in bytes);
+    for i in 0..adt_count {
+        extra.adt_s0.push(reader.word(in bytes));
+        extra.adt_s1.push(reader.word(in bytes));
     }
-    let nf = r.word(in b);
-    for i in 0..nf {
-        let name = read_str(inout r, in b, inout names);
-        let s0 = r.word(in b);
-        let s1 = r.word(in b);
-        let ngen = r.word(in b);
-        let pn = r.word(in b);
-        let pa = x.params.len();
-        for j in 0..pn {
-            let pname = read_str(inout r, in b, inout names);
-            let pass = wrapping_u8(r.word(in b));
-            let ps0 = r.word(in b);
-            let ps1 = r.word(in b);
-            let ty = read_ty(inout r, in b, inout t, inout names);
-            x.params.push(XParam { name: pname, pass: pass, ty: ty, s0: ps0, s1: ps1 });
+    let fn_count = reader.word(in bytes);
+    for i in 0..fn_count {
+        let name = read_str(inout reader, in bytes, inout names);
+        let s0 = reader.word(in bytes);
+        let s1 = reader.word(in bytes);
+        let generic_count = reader.word(in bytes);
+        let param_count = reader.word(in bytes);
+        let param_start = extra.params.len();
+        for j in 0..param_count {
+            let param_name = read_str(inout reader, in bytes, inout names);
+            let pass = wrapping_u8(reader.word(in bytes));
+            let param_s0 = reader.word(in bytes);
+            let param_s1 = reader.word(in bytes);
+            let ty = read_ty(inout reader, in bytes, inout types, inout names);
+            extra
+                .params
+                .push(XParam { name: param_name, pass: pass, ty: ty, s0: param_s0, s1: param_s1 });
         }
-        let result = read_ty(inout r, in b, inout t, inout names);
-        let en = r.word(in b);
-        let ea = x.esyms.len();
-        for j in 0..en {
-            let e = read_str(inout r, in b, inout names);
-            x.esyms.push(e);
+        let result = read_ty(inout reader, in bytes, inout types, inout names);
+        let eff_count = reader.word(in bytes);
+        let eff_start = extra.eff_names.len();
+        for j in 0..eff_count {
+            let eff_name = read_str(inout reader, in bytes, inout names);
+            extra.eff_names.push(eff_name);
         }
-        let tail = r.word(in b) != 0;
-        set_by_symbol(inout x.fn_by, name, inc32(n32(x.fns.len())));
-        x.fns.push(XFn {
+        let tail = reader.word(in bytes) != 0;
+        set_by_symbol(inout extra.fn_by_name, name, inc32(n32(extra.fns.len())));
+        extra.fns.push(XFn {
             name: name,
             s0: s0,
             s1: s1,
-            ngen: ngen,
-            pa: pa,
-            pn: pn,
+            generic_count: generic_count,
+            param_start: param_start,
+            param_count: param_count,
             result: result,
-            ea: ea,
-            en: en,
+            eff_start: eff_start,
+            eff_count: eff_count,
             tail: tail
         });
     }
-    let nd = r.word(in b);
-    for i in 0..nd {
-        let name = read_str(inout r, in b, inout names);
-        let ngen = r.word(in b);
-        let s0 = r.word(in b);
-        let s1 = r.word(in b);
-        let on = r.word(in b);
-        let oa = x.ops.len();
-        for j in 0..on {
-            let oname = read_str(inout r, in b, inout names);
-            let os0 = r.word(in b);
-            let os1 = r.word(in b);
-            let pn = r.word(in b);
-            let pa = x.op_params.len();
-            for k in 0..pn {
-                let ty = read_ty(inout r, in b, inout t, inout names);
-                x.op_params.push(ty);
+    let decl_count = reader.word(in bytes);
+    for i in 0..decl_count {
+        let name = read_str(inout reader, in bytes, inout names);
+        let generic_count = reader.word(in bytes);
+        let s0 = reader.word(in bytes);
+        let s1 = reader.word(in bytes);
+        let op_count = reader.word(in bytes);
+        let op_start = extra.ops.len();
+        for j in 0..op_count {
+            let op_name = read_str(inout reader, in bytes, inout names);
+            let op_s0 = reader.word(in bytes);
+            let op_s1 = reader.word(in bytes);
+            let param_count = reader.word(in bytes);
+            let param_start = extra.op_params.len();
+            for k in 0..param_count {
+                let ty = read_ty(inout reader, in bytes, inout types, inout names);
+                extra.op_params.push(ty);
             }
-            let result = read_ty(inout r, in b, inout t, inout names);
-            x.ops.push(XOp { name: oname, s0: os0, s1: os1, pa: pa, pn: pn, result: result });
+            let result = read_ty(inout reader, in bytes, inout types, inout names);
+            extra.ops.push(XOp {
+                name: op_name,
+                s0: op_s0,
+                s1: op_s1,
+                param_start: param_start,
+                param_count: param_count,
+                result: result
+            });
         }
-        set_by_symbol(inout x.decl_by, name, inc32(n32(x.decls.len())));
-        x.decls.push(XEff { name: name, ngen: ngen, s0: s0, s1: s1, oa: oa, on: on });
+        set_by_symbol(inout extra.decl_by_name, name, inc32(n32(extra.decls.len())));
+        extra.decls.push(XEff {
+            name: name,
+            generic_count: generic_count,
+            s0: s0,
+            s1: s1,
+            op_start: op_start,
+            op_count: op_count
+        });
     }
-    x
+    extra
 }
 
 impl Extra {
     // The `world.functions` index of `name` + 1, or 0.
     pub fn fn_index(in self, name: u32) -> u64 {
-        w(u32_at(in self.fn_by, w(name)))
+        w(u32_at(in self.fn_by_name, w(name)))
     }
 
     pub fn func(in self, i: u64) -> XFn {
@@ -290,12 +321,12 @@ impl Extra {
                 name: 0,
                 s0: 0,
                 s1: 0,
-                ngen: 0,
-                pa: 0,
-                pn: 0,
+                generic_count: 0,
+                param_start: 0,
+                param_count: 0,
                 result: 0,
-                ea: 0,
-                en: 0,
+                eff_start: 0,
+                eff_count: 0,
                 tail: false
             },
         }
@@ -309,20 +340,34 @@ impl Extra {
     }
 
     pub fn decl_index(in self, name: u32) -> u64 {
-        w(u32_at(in self.decl_by, w(name)))
+        w(u32_at(in self.decl_by_name, w(name)))
     }
 
     pub fn decl(in self, i: u64) -> XEff {
         match self.decls.try_get(i) {
             Option::Some(d) => d,
-            Option::None => XEff { name: 0, ngen: 0, s0: 0, s1: 0, oa: 0, on: 0 },
+            Option::None => XEff {
+                name: 0,
+                generic_count: 0,
+                s0: 0,
+                s1: 0,
+                op_start: 0,
+                op_count: 0
+            },
         }
     }
 
     pub fn op(in self, i: u64) -> XOp {
         match self.ops.try_get(i) {
             Option::Some(o) => o,
-            Option::None => XOp { name: 0, s0: 0, s1: 0, pa: 0, pn: 0, result: 0 },
+            Option::None => XOp {
+                name: 0,
+                s0: 0,
+                s1: 0,
+                param_start: 0,
+                param_count: 0,
+                result: 0
+            },
         }
     }
 }
