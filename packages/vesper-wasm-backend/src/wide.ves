@@ -248,12 +248,10 @@ impl L {
                 let block = self.wide_block(zero, zero);
                 self.set_value(dest_val, block);
             }
-        } else if (
-            self.is_op(op_sym, "widen_u128")
-                || self.is_op(op_sym, "widen_i128")
-                || self.is_op(op_sym, "wrapping_u128")
-                || self.is_op(op_sym, "wrapping_i128")
-        )
+        } else if (self.is_op(op_sym, "widen_u128")
+            || self.is_op(op_sym, "widen_i128")
+            || self.is_op(op_sym, "wrapping_u128")
+            || self.is_op(op_sym, "wrapping_i128"))
             && from_wide
         {
             self.set_value(dest_val, operand);
@@ -281,14 +279,12 @@ impl L {
         {
             let lo = self.word_of(operand, 0);
             self.set_value(dest_val, lo);
-        } else if (
-            self.is_op(op_sym, "wrapping_u32")
-                || self.is_op(op_sym, "wrapping_u16")
-                || self.is_op(op_sym, "wrapping_u8")
-                || self.is_op(op_sym, "wrapping_i32")
-                || self.is_op(op_sym, "wrapping_i16")
-                || self.is_op(op_sym, "wrapping_i8")
-        )
+        } else if (self.is_op(op_sym, "wrapping_u32")
+            || self.is_op(op_sym, "wrapping_u16")
+            || self.is_op(op_sym, "wrapping_u8")
+            || self.is_op(op_sym, "wrapping_i32")
+            || self.is_op(op_sym, "wrapping_i16")
+            || self.is_op(op_sym, "wrapping_i8"))
             && from_wide
             && !to_wide
         {

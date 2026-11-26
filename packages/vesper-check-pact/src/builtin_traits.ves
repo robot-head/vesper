@@ -268,11 +268,10 @@ fn user_impl_covers(in m: BuiltinMod, tname: u32, ty: u32) -> bool {
             for ai in 0..w(sn.n) {
                 let arg_ty = u32_at(in m.c.types.items, add(w(sn.a), ai));
                 let an = node_at(in m.c.types, arg_ty);
-                if !(
-                    an.kind == K_NAMED
-                        && an.n == 0
-                        && param_index(in m, c.ga, c.gn, an.name) != NONE64
-                ) {
+                if !(an.kind == K_NAMED
+                    && an.n == 0
+                    && param_index(in m, c.ga, c.gn, an.name) != NONE64)
+                {
                     all_params = false;
                     break;
                 }

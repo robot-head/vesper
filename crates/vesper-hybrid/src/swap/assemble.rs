@@ -1,14 +1,19 @@
 // The package assembly of the Vesper driver's package load (#1986): the
-// Rust loader reads the graph (`packages::read_for_target`), the driver
-// assembles it with `@vesper/check-names-packages`
+// driver reads the graph itself (modules/driver/src/load.ves, slice 2, the
+// `load` swap) or the Rust loader reads it (`packages::read_for_target`),
+// the driver assembles it with `@vesper/check-names-packages`
 // (modules/driver/src/assemble.ves, which documents the stream), and this
 // file reads the result back into `packages::Assembled`.
 
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 
 use vesper::ast::{Diagnostic, Module};
-use vesper::packages::{Assembled, Loading, PackageDiagnostic};
+use vesper::packages::{
+    Assembled, Loading, PackageDiagnostic, PackageObject, PackageVsys, SourceFile, SourceMap,
+    VSYS_TARGETS,
+};
 
 // The `ast` section reader of the parse swap.
 use super::parse::parse_words;
@@ -120,6 +125,37 @@ pub(crate) fn driver_assembled(
     words: &[u64],
     rust: impl FnOnce() -> Result<Assembled, String>,
 ) -> Result<Assembled, String> {
+    assembled_from(
+        words,
+        |module, qualified, diagnostics| loading.assembled(module, qualified, diagnostics),
+        false,
+        rust,
+    )
+}
+
+/// The graph the Vesper driver read itself (`DriverGraph`), as it
+/// assembled it into `words`: as [`driver_assembled`], and at
+/// `VESPER_HYBRID_STATS=time` the comparison with the Rust loader's load
+/// covers the whole [`Assembled`] (sources, `.vsys` libraries, objects).
+pub(crate) fn driver_graph_assembled(
+    graph: DriverGraph,
+    words: &[u64],
+    rust: impl FnOnce() -> Result<Assembled, String>,
+) -> Result<Assembled, String> {
+    assembled_from(
+        words,
+        |module, qualified, diagnostics| graph.finish(module, qualified, diagnostics),
+        true,
+        rust,
+    )
+}
+
+fn assembled_from(
+    words: &[u64],
+    finish: impl FnOnce(Module, BTreeMap<String, String>, Vec<PackageDiagnostic>) -> Assembled,
+    whole: bool,
+    rust: impl FnOnce() -> Result<Assembled, String>,
+) -> Result<Assembled, String> {
     if let Some(start) = START.with(|t| t.take()) {
         COST.vesper
             .fetch_add(start.elapsed().as_nanos() as u64, Relaxed);
@@ -164,23 +200,241 @@ pub(crate) fn driver_assembled(
         });
     }
     assert_eq!(r.at, words.len(), "vesper-hybrid: trailing assembled words");
-    let assembled = loading.assembled(module, qualified, diagnostics);
+    let assembled = finish(module, qualified, diagnostics);
     timer.lap(&COST.decode);
     COST.call(false, rust, |rust| {
         rust.as_ref().is_ok_and(|rust| {
             rust.module == assembled.module
                 && rust.sources.qualified == assembled.sources.qualified
                 && format!("{:?}", rust.diagnostics) == format!("{:?}", assembled.diagnostics)
+                && (!whole || same_graph(rust, &assembled))
         })
     });
     Ok(assembled)
 }
 
+/// Whether two loads of one package agree on everything but the module,
+/// its qualified names and its diagnostics.
+fn same_graph(a: &Assembled, b: &Assembled) -> bool {
+    let files = |x: &Assembled| -> Vec<(String, String, usize)> {
+        x.sources
+            .files
+            .iter()
+            .map(|f| (f.display.clone(), f.text.clone(), f.base))
+            .collect()
+    };
+    files(a) == files(b)
+        && a.manifest_errors.is_empty()
+        && b.manifest_errors.is_empty()
+        && a.package == b.package
+        && a.root_module == b.root_module
+        && a.root_package_files == b.root_package_files
+        && a.vsys == b.vsys
+        && a.objects == b.objects
+}
+
+/// Package graphs the Vesper driver read itself (#1986 slice 2).
+static READ: AtomicU64 = AtomicU64::new(0);
+/// Package graphs the Vesper driver started to read and handed back to the
+/// Rust loader (a manifest or I/O error, or a graph it does not cover).
+static READ_FALLBACKS: AtomicU64 = AtomicU64::new(0);
+
+/// Whether the Vesper driver reads the package graph itself (the load swap
+/// is on, and not `VESPER_HYBRID_LOAD=0`), when it assembles it.
+pub(crate) fn driver_reads(include_tests: bool) -> bool {
+    driver_assembles(include_tests) && on("load") && !env_off("VESPER_HYBRID_LOAD")
+}
+
+/// The Vesper driver starts its read: with stats on, its Vesper time runs
+/// from here to `hd_assembled`.
+pub(crate) fn driver_read_begin() {
+    if stats::level() > 0 {
+        START.with(|t| t.set(Some(std::time::Instant::now())));
+    }
+}
+
+/// The Vesper driver's read handed the graph back to the Rust loader: the
+/// time it took counts as the load's Vesper time.
+pub(crate) fn driver_read_fallback() {
+    READ_FALLBACKS.fetch_add(1, Relaxed);
+    if let Some(start) = START.with(|t| t.take()) {
+        COST.vesper
+            .fetch_add(start.elapsed().as_nanos() as u64, Relaxed);
+    }
+}
+
+/// The package graph the Vesper driver read (the `Graph` step, the layout
+/// is in src/driver/load.rs): the assembler's input, from which the
+/// sources come, and the `.vsys` libraries and objects.
+pub(crate) struct DriverGraph {
+    input: Vec<u8>,
+    vsys: Vec<PackageVsys>,
+    objects: Vec<PackageObject>,
+}
+
+/// The byte cursor of the `Graph` stream.
+struct Bytes<'a> {
+    b: &'a [u8],
+    at: usize,
+}
+
+impl<'a> Bytes<'a> {
+    fn n(&mut self) -> Result<usize, String> {
+        let w = self
+            .b
+            .get(self.at..self.at + 8)
+            .ok_or("vesper-hybrid: short package graph")?;
+        self.at += 8;
+        usize::try_from(u64::from_le_bytes(w.try_into().expect("eight bytes")))
+            .map_err(|_| "vesper-hybrid: package graph count".to_owned())
+    }
+    fn s(&mut self) -> Result<&'a str, String> {
+        let len = self.n()?;
+        let bytes = self
+            .b
+            .get(self.at..self.at + len)
+            .ok_or("vesper-hybrid: short package graph text")?;
+        self.at += len.next_multiple_of(8);
+        std::str::from_utf8(bytes).map_err(|e| format!("vesper-hybrid: package graph text: {e}"))
+    }
+    fn target(&mut self) -> Result<Option<&'static str>, String> {
+        let t = self.n()?;
+        Ok(VSYS_TARGETS.get(t).map(|t| t.triple))
+    }
+}
+
+/// The `Graph` step's stream.
+pub(crate) fn driver_graph(arg: &[u8]) -> Result<DriverGraph, String> {
+    let mut r = Bytes { b: arg, at: 0 };
+    let len = r.n()?;
+    let input = arg
+        .get(8..8 + len)
+        .ok_or("vesper-hybrid: short package graph input")?
+        .to_vec();
+    r.at = 8 + len;
+    let mut vsys = vec![];
+    for _ in 0..r.n()? {
+        let (package, display, text) = (r.s()?, r.s()?, r.s()?);
+        let mut targets = vec![];
+        for _ in 0..r.n()? {
+            let t = r
+                .target()?
+                .ok_or("vesper-hybrid: package graph .vsys target")?;
+            targets.push((t, r.s()?.to_owned(), r.s()?.to_owned()));
+        }
+        vsys.push(PackageVsys {
+            package: package.to_owned(),
+            display: display.to_owned(),
+            text: text.to_owned(),
+            targets,
+        });
+    }
+    let mut objects = vec![];
+    for _ in 0..r.n()? {
+        let (package, display) = (r.s()?, r.s()?);
+        let mut files = vec![];
+        for _ in 0..r.n()? {
+            let t = r.target()?;
+            files.push((t, PathBuf::from(r.s()?)));
+        }
+        objects.push(PackageObject {
+            package: package.to_owned(),
+            display: display.to_owned(),
+            files,
+        });
+    }
+    if r.at != arg.len() {
+        return Err("vesper-hybrid: trailing package graph bytes".into());
+    }
+    READ.fetch_add(1, Relaxed);
+    Ok(DriverGraph {
+        input,
+        vsys,
+        objects,
+    })
+}
+
+impl DriverGraph {
+    /// The [`Assembled`] of the graph around the assembler's results: the
+    /// sources, the root package and its files come from the assembler's
+    /// input (packages/vesper-check-names-packages/src/load.ves), as
+    /// `Loading::finish` takes them from the loader.
+    fn finish(
+        self,
+        module: Module,
+        qualified: BTreeMap<String, String>,
+        diagnostics: Vec<PackageDiagnostic>,
+    ) -> Assembled {
+        let mut r = Bytes {
+            b: &self.input,
+            at: 0,
+        };
+        let bad = "vesper-hybrid: the driver's assembler input";
+        let mut package = String::new();
+        for p in 0..r.n().expect(bad) {
+            let name = r.s().expect(bad);
+            if p == 0 {
+                package = name.to_owned();
+            }
+            for _ in 0..r.n().expect(bad) {
+                r.s().expect(bad);
+                r.n().expect(bad);
+            }
+            for _ in 0..r.n().expect(bad) {
+                r.s().expect(bad);
+            }
+        }
+        let mut files = vec![];
+        for _ in 0..r.n().expect(bad) {
+            let display = r.s().expect(bad).to_owned();
+            let base = r.n().expect(bad);
+            files.push(SourceFile {
+                display,
+                text: String::new(),
+                base,
+            });
+        }
+        let (mut root_module, mut root_package_files) = (None, vec![]);
+        for _ in 0..r.n().expect(bad) {
+            let p = r.n().expect(bad);
+            let segments = r.n().expect(bad);
+            for _ in 0..segments {
+                r.s().expect(bad);
+            }
+            let file = r.n().expect(bad);
+            files[file].text = r.s().expect(bad).to_owned();
+            if p == 0 {
+                if segments == 0 && root_module.is_none() {
+                    root_module = Some(file);
+                }
+                root_package_files.push(file);
+            }
+        }
+        Assembled {
+            module,
+            sources: SourceMap { files, qualified },
+            diagnostics,
+            manifest_errors: vec![],
+            package,
+            root_module,
+            root_package_files,
+            vsys: self.vsys,
+            objects: self.objects,
+        }
+    }
+}
+
 /// The flip-gate rows of this file's swaps (`swaps::on`).
-pub(super) const SWAPS: &[Swap] = &[open(
-    "assemble",
-    "driver package assembly; 0 diffs; no flip-gate configuration",
-)];
+pub(super) const SWAPS: &[Swap] = &[
+    open(
+        "assemble",
+        "driver package assembly; 0 diffs; no flip-gate configuration",
+    ),
+    open(
+        "load",
+        "driver package graph read (#1986 slice 2); 0 diffs; no flip-gate configuration",
+    ),
+];
 
 pub(super) fn register(_r: &mut Registry) {}
 
@@ -191,6 +445,11 @@ pub(super) fn report() {
         ASSEMBLED.load(Relaxed),
         FALLBACKS.load(Relaxed),
         PARSE_FALLBACKS.load(Relaxed),
+    );
+    eprintln!(
+        "vesper-hybrid: load read {} package graphs in Vesper ({} handed back to Rust)",
+        READ.load(Relaxed),
+        READ_FALLBACKS.load(Relaxed),
     );
     eprintln!(
         "vesper-hybrid: assemble: package load {:.3} ms",

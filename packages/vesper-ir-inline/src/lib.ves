@@ -1473,12 +1473,10 @@ fn cost_of(in prog: Prog, target: Tgt, in folded: Folded, in blocks: ChunkSeq[u8
                 continue;
             }
             if u8_at(in folded.known, w(inst.dest)) != 0
-                && (
-                    inst.op == O_BINARY
-                        || inst.op == O_UNARY
-                        || inst.op == O_READ
-                        || inst.op == O_DATA
-                )
+                && (inst.op == O_BINARY
+                    || inst.op == O_UNARY
+                    || inst.op == O_READ
+                    || inst.op == O_DATA)
             {
                 continue;
             }

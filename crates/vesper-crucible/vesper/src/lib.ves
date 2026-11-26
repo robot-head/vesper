@@ -2948,10 +2948,8 @@ pub fn search_key(inout s: Search, key: u64) -> bool {
         let c0 = at(in s.ca_sl_off.as_slice(), key);
         let c1 = wrapping_add(c0, at(in s.ca_sl_len.as_slice(), key));
         hit = !s.dpor
-            || (
-                !s.bounded
-                    && range_subset(in s.ca_sl.as_slice(), c0, c1, in s.sl.as_slice(), sl0, sl1)
-            );
+            || (!s.bounded
+                && range_subset(in s.ca_sl.as_slice(), c0, c1, in s.sl.as_slice(), sl0, sl1));
     }
     if hit {
         s.n_hit.try_set(n, true);

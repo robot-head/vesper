@@ -1621,10 +1621,8 @@ fn loop_candidate(
                 } else if rn.kind == K_SLOT {
                     let root = n32(rn.a);
                     if invariant_local(in f, in blocks, root)
-                        && (
-                            has(in blocks, n32(rn.b))
-                                || fa.unchanged(in f, root, n32(rn.b), rn.c, pre, pre_len)
-                        )
+                        && (has(in blocks, n32(rn.b))
+                            || fa.unchanged(in f, root, n32(rn.b), rn.c, pre, pre_len))
                     {
                         bound = BoundRow { kind: 0, a: rn.a, b: 0 };
                         found = true;

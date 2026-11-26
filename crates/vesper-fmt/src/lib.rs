@@ -573,6 +573,9 @@ pub(crate) fn format_with_capture(
 struct Line {
     docs: Vec<DocId>,
     breaks: Vec<(usize, u8)>,
+    /// The line holds a parenthesized operand, which breaks inside its
+    /// parentheses.
+    grouped: bool,
 }
 impl Line {
     fn push(&mut self, doc: DocId) {
@@ -583,6 +586,7 @@ impl Line {
         self.docs.push(lead);
     }
     fn flush(&mut self, document: &mut Document<'_>, out: &mut Vec<DocId>) -> Result<(), Error> {
+        self.grouped = false;
         if !self.docs.is_empty() {
             let group = if self.breaks.is_empty() {
                 let concat = document.push(Doc::Concat(std::mem::take(&mut self.docs)))?;
@@ -597,17 +601,25 @@ impl Line {
         }
         Ok(())
     }
-    /// Flush a control-flow head that can break at its operators or dots,
-    /// with the space before its block's `{`: when the head takes more than
-    /// one line, the `{` goes on a line of its own at the head's indent, like
-    /// rustfmt.
+    /// Flush a control-flow head that can break at its operators or dots, or
+    /// inside a parenthesized operand, with the space before its block's `{`:
+    /// when the head takes more than one line, or fits on one line only
+    /// without ` {`, the `{` goes on a line of its own at the head's indent,
+    /// like rustfmt.
     fn flush_head(
         &mut self,
         document: &mut Document<'_>,
         out: &mut Vec<DocId>,
     ) -> Result<(), Error> {
+        self.grouped = false;
         let separator = document.push(Doc::SoftLineOrSpace)?;
-        let head = self.layout(document, 0, self.docs.len(), &self.breaks, Some(separator))?;
+        let head = if self.breaks.is_empty() {
+            self.docs.push(separator);
+            let concat = document.push(Doc::Concat(std::mem::take(&mut self.docs)))?;
+            document.push(Doc::Group(concat))?
+        } else {
+            self.layout(document, 0, self.docs.len(), &self.breaks, Some(separator))?
+        };
         self.docs.clear();
         self.breaks.clear();
         out.push(head);
@@ -1015,6 +1027,29 @@ fn short_if_else(atoms: &[Piece<'_>], start: usize, end: Option<K>) -> Option<us
 /// closure with a block body, after arguments that stay on that line too
 /// (`fold(xs, 0, |a, x| {`). `open` is the call's `(`. Returns the width of
 /// the arguments up to and including the delimiter that breaks.
+/// Whether the `(` at `open` groups one operand, which hugs its parentheses
+/// like rustfmt (`(b || c)`): no comma, comment, block or sugar boundary
+/// inside, so its contents can break without leaving their line's `(`.
+fn grouping_paren(atoms: &[Piece<'_>], open: usize) -> bool {
+    let mut depth = 0usize;
+    for atom in &atoms[open + 1..] {
+        if matches!(
+            atom.kind,
+            K::Comment | K::BlockComment | K::Semi | K::LBrace | K::RBrace
+        ) || depth == 0 && atom.kind == K::Comma
+            || atom.sugar_gap.is_some()
+        {
+            return false;
+        }
+        match atom.kind {
+            K::LParen | K::LBracket => depth += 1,
+            K::RParen | K::RBracket if depth == 0 => return true,
+            K::RParen | K::RBracket => depth -= 1,
+            _ => {}
+        }
+    }
+    false
+}
 fn overflow_argument(atoms: &[Piece<'_>], open: usize) -> Option<usize> {
     let first = atoms.get(open + 1)?;
     let mut i = open + 1;
@@ -1458,7 +1493,7 @@ fn sequence<'a>(
         }
         if is_block && !soft_block {
             let spaced = matches!(spacing, Gap::Soft | Gap::Space);
-            if spaced && after_head && !line.breaks.is_empty() {
+            if spaced && after_head && (!line.breaks.is_empty() || line.grouped) {
                 line.flush_head(document, &mut output)?;
             } else {
                 line.flush(document, &mut output)?;
@@ -1473,6 +1508,7 @@ fn sequence<'a>(
         }
         *pos += 1;
         let mut params = false;
+        let mut grouped = false;
         let node = if matches!(current.kind, K::LParen | K::LBracket | K::LBrace) {
             let close = match current.kind {
                 K::LParen => K::RParen,
@@ -1487,10 +1523,24 @@ fn sequence<'a>(
             // the call's line when its first line fits there, as in rustfmt
             // (`push(Row {`, `fold(xs, 0, |a, x| {`), and breaks inside
             // instead: the column the arguments would start at.
-            let overflow = if current.kind == K::LParen
+            let call = current.kind == K::LParen
                 && current.expr
-                && previous.is_some_and(|p| matches!(p.kind, K::Lower | K::Upper))
-            {
+                && previous.is_some_and(|p| matches!(p.kind, K::Lower | K::Upper));
+            // A parenthesized operand (`a && (b || c)`) hugs its parentheses
+            // like rustfmt: its operators break inside them, nested one level.
+            let grouping = current.kind == K::LParen
+                && current.expr
+                && !empty
+                && previous.is_none_or(|p| {
+                    !matches!(
+                        p.kind,
+                        K::Lower | K::Upper | K::RParen | K::RBracket | K::Gt
+                    ) && (p.kind != K::Bang || previous_unary)
+                })
+                && grouping_paren(atoms, *pos - 1);
+            grouped = grouping;
+            // The column after the `(`.
+            let after_open = if call || grouping {
                 let mut width = Some(line_start);
                 for &doc in &line.docs {
                     width = match (width, document.width(doc)?) {
@@ -1498,8 +1548,12 @@ fn sequence<'a>(
                         _ => None,
                     };
                 }
-                width
-                    .and_then(|w| w.checked_add(1))
+                width.and_then(|w| w.checked_add(1))
+            } else {
+                None
+            };
+            let overflow = if call {
+                after_open
                     .zip(overflow_argument(atoms, *pos - 1))
                     .filter(|&(at, head)| at.saturating_add(head) <= DEFAULT_LINE_WIDTH)
                     .map(|(at, _)| at)
@@ -1507,8 +1561,8 @@ fn sequence<'a>(
                 None
             };
             // A hugging call does not indent its contents, nor does a call
-            // whose argument stays on its line.
-            let inner_indent = if tagged == Tagged::Hug || overflow.is_some() {
+            // whose argument stays on its line, nor a parenthesized operand.
+            let inner_indent = if tagged == Tagged::Hug || overflow.is_some() || grouping {
                 indent
             } else {
                 indent.checked_add(4).ok_or(Error::Overflow)?
@@ -1521,7 +1575,9 @@ fn sequence<'a>(
                 fill,
                 tagged == Tagged::Hug,
                 inner_indent,
-                overflow.unwrap_or(inner_indent),
+                overflow
+                    .or(after_open.filter(|_| grouping))
+                    .unwrap_or(inner_indent),
                 document,
             )?;
             let last_is_line_comment = *pos > 0 && atoms[*pos - 1].kind == K::Comment;
@@ -1544,7 +1600,7 @@ fn sequence<'a>(
                 && atoms.get(*pos).is_some_and(|a| a.kind == K::Arrow);
             if empty {
                 document.push(Doc::Concat(vec![start, finish]))?
-            } else if overflow.is_some() {
+            } else if overflow.is_some() || grouping {
                 let all = document.push(Doc::Concat(vec![start, inner, finish]))?;
                 document.push(Doc::Group(all))?
             } else {
@@ -1600,6 +1656,7 @@ fn sequence<'a>(
             output.push(node);
         } else {
             line.push(node);
+            line.grouped |= grouped;
             chain.push(
                 document.width(node)?,
                 current.kind == K::LParen,

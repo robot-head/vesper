@@ -1573,11 +1573,9 @@ impl Flow {
         if second_span.kind == 3
             && second_span.s0 < second_span.s1
             && !(second_span.s0 == s0 && second_span.s1 == s1)
-            && !(
-                label_count == 1
-                    && first_span.s0 == second_span.s0
-                    && first_span.s1 == second_span.s1
-            )
+            && !(label_count == 1
+                && first_span.s0 == second_span.s0
+                && first_span.s1 == second_span.s1)
         {
             let label_start = self.diags.text.len();
             push_label(inout self.diags, second_span.label, second_span.id == 1);

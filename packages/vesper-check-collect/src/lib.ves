@@ -1855,11 +1855,9 @@ fn head_is(in a: Ast, sym: u32, in lit: Str) -> bool {
         }
     }
     n == t.len()
-        || (
-            n > wrapping_add(t.len(), 1)
-                && name_byte(in a, wrapping_add(s, t.len())) == 58
-                && name_byte(in a, wrapping_add(wrapping_add(s, t.len()), 1)) == 58
-        )
+        || (n > wrapping_add(t.len(), 1)
+            && name_byte(in a, wrapping_add(s, t.len())) == 58
+            && name_byte(in a, wrapping_add(wrapping_add(s, t.len()), 1)) == 58)
 }
 
 // A name that makes the checker elaborate the module before collecting
@@ -1956,11 +1954,9 @@ fn declined(in source: Str, in a: Ast) -> bool {
     for t in 0..a.types.len() {
         let n = type_at(in a, wrapping_u32(t));
         if n.kind == 1
-            && (
-                name_is(in a, n.a, "dyn")
-                    || name_is(in a, n.a, "$projection")
-                    || name_is(in a, n.a, "[]")
-            )
+            && (name_is(in a, n.a, "dyn")
+                || name_is(in a, n.a, "$projection")
+                || name_is(in a, n.a, "[]"))
         {
             return true;
         }

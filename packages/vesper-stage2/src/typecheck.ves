@@ -928,10 +928,8 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
                                 } else {
                                     tc.types.named0(aname)
                                 }
-                            } else if (
-                                is_op(in tc, cname, in "ChunkSeq::new")
-                                    || is_op(in tc, cname, in "ChunkSeq::with_capacity")
-                            )
+                            } else if (is_op(in tc, cname, in "ChunkSeq::new")
+                                || is_op(in tc, cname, in "ChunkSeq::with_capacity"))
                                 && e.m > 0
                             {
                                 let cs_nm = tc.names.intern(in "ChunkSeq".as_bytes());
@@ -980,17 +978,13 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
                                 );
                                 let mut pt = tc.infer_ty;
                                 if tc.types.arity(bt) > 0 {
-                                    if (
-                                        is_op(in tc, mname, in "push")
-                                            || is_op(in tc, mname, in "fill")
-                                    )
+                                    if (is_op(in tc, mname, in "push")
+                                        || is_op(in tc, mname, in "fill"))
                                         && ai == 0
                                     {
                                         pt = tc.types.arg(bt, 0);
-                                    } else if (
-                                        is_op(in tc, mname, in "try_set")
-                                            || is_op(in tc, mname, in "set")
-                                    )
+                                    } else if (is_op(in tc, mname, in "try_set")
+                                        || is_op(in tc, mname, in "set"))
                                         && ai == 1
                                     {
                                         pt = tc.types.arg(bt, 0);
@@ -1027,19 +1021,15 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
                                 let u8t = tc.types.named0(tc.world.k.u8_);
                                 let sl_nm = tc.names.intern(in "Slice".as_bytes());
                                 named1(inout tc, sl_nm, u8t)
-                            } else if (
-                                is_op(in tc, mname, in "as_slice")
-                                    || is_op(in tc, mname, in "sub_slice")
-                            )
+                            } else if (is_op(in tc, mname, in "as_slice")
+                                || is_op(in tc, mname, in "sub_slice"))
                                 && tc.types.arity(bt) > 0
                             {
                                 let a0 = tc.types.arg(bt, 0);
                                 let sl_nm = tc.names.intern(in "Slice".as_bytes());
                                 named1(inout tc, sl_nm, a0)
-                            } else if (
-                                is_op(in tc, mname, in "get_or")
-                                    || is_op(in tc, mname, in "replace")
-                            )
+                            } else if (is_op(in tc, mname, in "get_or")
+                                || is_op(in tc, mname, in "replace"))
                                 && tc.types.arity(bt) > 0
                             {
                                 tc.types.arg(bt, 0)
@@ -1049,13 +1039,11 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
                                 let u8t = tc.types.named0(tc.world.k.u8_);
                                 let opt_nm = tc.names.intern(in "Option".as_bytes());
                                 named1(inout tc, opt_nm, u8t)
-                            } else if (
-                                is_op(in tc, mname, in "try_get")
-                                    || is_op(in tc, mname, in "try_get_mut")
-                                    || is_op(in tc, mname, in "get")
-                                    || is_op(in tc, mname, in "pop")
-                                    || is_op(in tc, mname, in "last")
-                            )
+                            } else if (is_op(in tc, mname, in "try_get")
+                                || is_op(in tc, mname, in "try_get_mut")
+                                || is_op(in tc, mname, in "get")
+                                || is_op(in tc, mname, in "pop")
+                                || is_op(in tc, mname, in "last"))
                                 && tc.types.arity(bt) > 0
                             {
                                 let a0 = tc.types.arg(bt, 0);

@@ -683,14 +683,10 @@ fn is_canonicalizer(in ctx: Cx, func: u64, row: u64) -> bool {
     let cond_value = arg(in ctx, row, 0);
     let true_value = arg(in ctx, row, 1);
     let false_value = arg(in ctx, row, 2);
-    (
-        is_nan_test_of(in ctx, func, cond_value, false_value, true)
-            && is_canonical_nan_const(in ctx, func, true_value)
-    )
-        || (
-            is_nan_test_of(in ctx, func, cond_value, true_value, false)
-                && is_canonical_nan_const(in ctx, func, false_value)
-        )
+    (is_nan_test_of(in ctx, func, cond_value, false_value, true)
+        && is_canonical_nan_const(in ctx, func, true_value))
+        || (is_nan_test_of(in ctx, func, cond_value, true_value, false)
+            && is_canonical_nan_const(in ctx, func, false_value))
 }
 
 fn check_nan_escape(inout ctx: Cx, func: u64, fname: u64) {
