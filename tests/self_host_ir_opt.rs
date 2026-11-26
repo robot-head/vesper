@@ -62,6 +62,15 @@ fn step() -> usize {
         .unwrap_or(24)
 }
 
+/// `ir_cases(1)`'s mutants per corpus world (`CHECK_HARNESS_MUTANTS`).
+fn mutants_per_world() -> usize {
+    std::env::var("CHECK_HARNESS_MUTANTS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1)
+        .min(IR_MUTANTS)
+}
+
 /// One input of the pass.
 struct Input {
     name: String,
@@ -72,16 +81,30 @@ struct Input {
 fn inputs() -> &'static [Input] {
     static I: OnceLock<Vec<Input>> = OnceLock::new();
     I.get_or_init(|| {
+        // Every `step`-th input of the corpus worlds followed by their
+        // mutants, lowering only the worlds that input needs: lowering the
+        // whole corpus and its mutants first outgrew a shard's memory.
+        let step = step();
+        let worlds = corpus().len();
+        let mutants = mutants_per_world();
+        let mutant_position = |world: usize, mutant: usize| worlds + world * mutants + mutant;
         let mut out = vec![];
-        for c in corpus() {
-            out.push(Input {
-                name: c.name.clone(),
-                world: &c.world,
-                program: vesper::ffi_lowering::drops::lower_world(&c.world),
-            });
+        for (i, c) in corpus().iter().enumerate() {
+            if i % step == 0 {
+                out.push(Input {
+                    name: c.name.clone(),
+                    world: &c.world,
+                    program: vesper::ffi_lowering::drops::lower_world(&c.world),
+                });
+            }
         }
-        for c in ir_cases(1) {
-            if c.name.contains("#m") {
+        let kept_world = |world: usize| (0..mutants).any(|m| mutant_position(world, m) % step == 0);
+        let kept_worlds: Vec<usize> = (0..worlds).filter(|&i| kept_world(i)).collect();
+        let mutated = ir_cases_where(mutants, kept_world)
+            .into_iter()
+            .filter(|c| c.name.contains("#m"));
+        for (k, c) in mutated.enumerate() {
+            if mutant_position(kept_worlds[k / mutants], k % mutants) % step == 0 {
                 out.push(Input {
                     name: c.name,
                     world: c.world,
@@ -89,7 +112,6 @@ fn inputs() -> &'static [Input] {
                 });
             }
         }
-        let mut out: Vec<Input> = out.into_iter().step_by(step()).collect();
         // The corpus has no `@fip` code: the fip checker's test sources
         // (tests/fip.rs and the others, gathered by SH2 lane 12) and their
         // five mutants exercise the reuse pass.
