@@ -40,12 +40,12 @@ const STACK_ARGUMENT: &str = "
 fn wide(a: u64, b: u64, c: u64, d: u64, e: u64, f: u64, g: u64, h: u64, i: u64) -> u64 {
     wrapping_add(wrapping_add(d, wrapping_mul(g, 3)), wrapping_add(h, wrapping_mul(i, 5)))
 }
-fn divide_wide(a: u64, b: u64, c: u64, d: u64, e: u64, f: u64, g: u64, h: u64) -> u64 {
-    wrapping_add(wide(a, b, c, d, e, f, g, h, a), g / 7)
+fn count_wide(a: u64, b: u64, c: u64, d: u64, e: u64, f: u64, g: u64, h: u64) -> u64 {
+    wrapping_add(wide(a, b, c, d, e, f, g, h, a), widen_u64(leading_zeros_u64(g)))
 }
 fn forward(a: u64, b: u64, c: u64, d: u64, e: u64, f: u64, g: u64, h: u64, i: u64) -> u64 {
     let first = wide(g, h, i, b, d, e, i, g, a);
-    let second = divide_wide(a, b, c, d, e, f, first, h);
+    let second = count_wide(a, b, c, d, e, f, first, h);
     wrapping_add(second, i)
 }
 fn main() -> u64 { forward(1, 2, 3, 4, 5, 6, 7, 8, 9) }
@@ -419,7 +419,7 @@ fn direct_calls_preserve_the_abi_across_object_writers() {
     let candidate_stack = compile(&stack_arguments);
     assert_eq!(CALLABLE_BLOCKS.load(Relaxed), 4);
     assert_eq!(STACK_LEAF_BLOCKS.load(Relaxed), 1);
-    // The division falls back to Cranelift and calls the Vesper-generated
+    // The leading-zero count falls back to Cranelift and calls the Vesper-generated
     // wide function. The stack ABI crosses the boundary in both directions.
     assert_ne!(candidate_stack, baseline_stack);
     let candidate_memory = compile(&memory);
@@ -451,9 +451,9 @@ fn direct_calls_preserve_the_abi_across_object_writers() {
         ("baseline", baseline, 96),
         ("candidate", candidate, 96),
         ("combined", combined, 96),
-        ("baseline_stack", baseline_stack, 154),
-        ("candidate_stack", candidate_stack, 154),
-        ("combined_stack", combined_stack, 154),
+        ("baseline_stack", baseline_stack, 207),
+        ("candidate_stack", candidate_stack, 207),
+        ("combined_stack", combined_stack, 207),
         ("baseline_memory", baseline_memory, 42),
         ("candidate_memory", candidate_memory, 42),
         ("combined_memory", combined_memory, 42),

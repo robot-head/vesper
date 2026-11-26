@@ -62,6 +62,12 @@ enum IntegerOp {
     SymbolRelative = 43,
     SymbolGot = 44,
     Trap = 45,
+    SignedDiv = 46,
+    UnsignedDiv = 47,
+    SignedRem = 48,
+    UnsignedRem = 49,
+    SignedMulHigh = 50,
+    UnsignedMulHigh = 51,
 }
 
 type Encoder = fn(&[u64]) -> Option<Vec<u8>>;
@@ -542,6 +548,31 @@ impl IntegerBlocks<'_> {
                         Opcode::Ishl => IntegerOp::ShiftLeftRegister,
                         Opcode::Ushr => IntegerOp::ShiftRightLogicalRegister,
                         _ => IntegerOp::ShiftRightArithmeticRegister,
+                    };
+                    (op, [input(left)?, input(right)?, width])
+                }
+                InstructionData::Binary {
+                    opcode:
+                        opcode @ (Opcode::Sdiv
+                        | Opcode::Udiv
+                        | Opcode::Srem
+                        | Opcode::Urem
+                        | Opcode::Smulhi
+                        | Opcode::Umulhi),
+                    args: [left, right],
+                } if matches!(output, types::I32 | types::I64)
+                    && ty(left) == output
+                    && ty(right) == output =>
+                {
+                    let op = match opcode {
+                        Opcode::Smulhi => IntegerOp::SignedMulHigh,
+                        Opcode::Umulhi => IntegerOp::UnsignedMulHigh,
+                        _ if !self.allow_hardware_faults => return None,
+                        Opcode::Sdiv => IntegerOp::SignedDiv,
+                        Opcode::Udiv => IntegerOp::UnsignedDiv,
+                        Opcode::Srem => IntegerOp::SignedRem,
+                        Opcode::Urem => IntegerOp::UnsignedRem,
+                        _ => unreachable!(),
                     };
                     (op, [input(left)?, input(right)?, width])
                 }

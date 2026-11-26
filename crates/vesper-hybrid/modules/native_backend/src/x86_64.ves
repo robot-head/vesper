@@ -41,6 +41,7 @@ const ALU_RM64_IMM8: u8 = 0x83;
 const ALU_RM64_IMM32: u8 = 0x81;
 const ALU_ADD_EXTENSION: u8 = 0;
 const ALU_SUB_EXTENSION: u8 = 5;
+const ALU_CMP_EXTENSION: u8 = 7;
 const TWO_BYTE_OPCODE: u8 = 0x0f;
 const UD2_OPCODE: u8 = 0x0b;
 const IMUL_R64_RM64: u8 = 0xaf;
@@ -55,6 +56,17 @@ const CMP_RM_R64: u8 = 0x39;
 const SETCC: u8 = 0x90;
 const CMOVCC: u8 = 0x40;
 const JCC_NEAR: u8 = 0x80;
+const JCC_SHORT: u8 = 0x70;
+const JMP_SHORT: u8 = 0xeb;
+const SIGN_EXTEND_DIVIDEND: u8 = 0x99;
+const MUL_EXTENSION: u8 = 4;
+const IMUL_EXTENSION: u8 = 5;
+const DIV_EXTENSION: u8 = 6;
+const IDIV_EXTENSION: u8 = 7;
+const TRAP_BYTES: u8 = 2;
+const SHORT_BRANCH_BYTES: u8 = 2;
+const PREFIXED_REGISTER_INSTRUCTION_BYTES: u8 = 3;
+const NEGATIVE_ONE_IMM8: u8 = 0xff;
 const TEST_RM_R64: u8 = 0x85;
 const MOVZX_R32_RM8: u8 = 0xb6;
 const MOVSX_R64_RM8: u8 = 0xbe;
@@ -93,12 +105,22 @@ pub const CC_GE: u8 = 13;
 pub const CC_LE: u8 = 14;
 pub const CC_G: u8 = 15;
 
+pub copy enum FixedArithmetic {
+    SignedDivide,
+    UnsignedDivide,
+    SignedRemainder,
+    UnsignedRemainder,
+    SignedMultiplyHigh,
+    UnsignedMultiplyHigh,
+}
+
 pub copy enum Instruction {
     Immediate(u8, u64),
     Move(u8, u8),
     Exchange(u8, u8),
     Binary(u8, u8, u8, u64),
     Multiply(u8, u8, u64),
+    Fixed(FixedArithmetic, u8, u64),
     Unary(u8, u8, u64),
     Shift(u8, u8, u8, u64),
     ShiftRegister(u8, u8, u8, u64),
@@ -170,6 +192,55 @@ fn binary(inout out: ChunkSeq[u8], opcode: u8, destination: u8, source: u8, wide
     out.push(rex(source, destination, wide));
     out.push(opcode);
     out.push(modrm(source, destination));
+}
+
+fn trap(inout out: ChunkSeq[u8]) {
+    out.push(TWO_BYTE_OPCODE);
+    out.push(UD2_OPCODE);
+}
+
+fn sign_extend_dividend(inout out: ChunkSeq[u8], wide: bool) {
+    if wide {
+        out.push(REX_W);
+    }
+    out.push(SIGN_EXTEND_DIVIDEND);
+}
+
+fn fixed_arithmetic(inout out: ChunkSeq[u8], in op: FixedArithmetic, rhs: u8, wide: bool) {
+    let extension = match op {
+        FixedArithmetic::SignedDivide => {
+            // An explicit zero trap distinguishes divide by zero from overflow.
+            binary(inout out, TEST_RM_R64, rhs, rhs, wide);
+            out.push(JCC_SHORT | CC_NE);
+            out.push(TRAP_BYTES);
+            trap(inout out);
+            sign_extend_dividend(inout out, wide);
+            IDIV_EXTENSION
+        },
+        FixedArithmetic::UnsignedDivide | FixedArithmetic::UnsignedRemainder => {
+            binary(inout out, XOR_RM_R64, RDX, RDX, false);
+            DIV_EXTENSION
+        },
+        FixedArithmetic::SignedRemainder => {
+            sign_extend_dividend(inout out, wide);
+            // The remainder by -1 is zero even when the quotient overflows.
+            out.push(rex(0, rhs, wide));
+            out.push(ALU_RM64_IMM8);
+            out.push(modrm(ALU_CMP_EXTENSION, rhs));
+            out.push(NEGATIVE_ONE_IMM8);
+            out.push(JCC_SHORT | CC_NE);
+            out.push(PREFIXED_REGISTER_INSTRUCTION_BYTES + SHORT_BRANCH_BYTES);
+            binary(inout out, XOR_RM_R64, RDX, RDX, false);
+            out.push(JMP_SHORT);
+            out.push(PREFIXED_REGISTER_INSTRUCTION_BYTES);
+            IDIV_EXTENSION
+        },
+        FixedArithmetic::SignedMultiplyHigh => IMUL_EXTENSION,
+        FixedArithmetic::UnsignedMultiplyHigh => MUL_EXTENSION,
+    };
+    out.push(rex(0, rhs, wide));
+    out.push(UNARY_GROUP);
+    out.push(modrm(extension, rhs));
 }
 
 fn immediate(inout out: ChunkSeq[u8], bits: u64, size: u64) {
@@ -352,6 +423,12 @@ fn normalize_small_result(inout out: ChunkSeq[u8], destination: u8, width: u64) 
 
 pub fn emit(inout out: ChunkSeq[u8], in instruction: Instruction) {
     match instruction {
+        Instruction::Fixed(op, rhs, width) => fixed_arithmetic(
+            inout out,
+            in op,
+            rhs,
+            width == QWORD_BITS
+        ),
         Instruction::Immediate(destination, bits) => load_constant(inout out, destination, bits),
         Instruction::Move(destination, source) => {
             if destination != source {
@@ -488,10 +565,7 @@ pub fn emit(inout out: ChunkSeq[u8], in instruction: Instruction) {
             out.push(LEA);
             memory_operand(inout out, destination, RSP, displacement);
         },
-        Instruction::Trap => {
-            out.push(TWO_BYTE_OPCODE);
-            out.push(UD2_OPCODE);
-        },
+        Instruction::Trap => trap(inout out),
         Instruction::Return => out.push(RET_NEAR),
     };
 }

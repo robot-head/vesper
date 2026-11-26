@@ -1,8 +1,8 @@
 use self::x86_64::{
     ADD_RM_R64, AND_RM_R64, ARGUMENTS, BYTE_BITS, DWORD_BITS, QWORD_BITS, WORD_BITS, CC_A, CC_AE,
-    CC_B, CC_BE, CC_E, CC_G, CC_GE, CC_L, CC_LE, CC_NE, Instruction, NEG_EXTENSION, NOT_EXTENSION,
-    OR_RM_R64, R10, R11, RAX, RDX, RSP, SAR_EXTENSION, SHL_EXTENSION, SHR_EXTENSION, SUB_RM_R64,
-    UNASSIGNED, XOR_RM_R64, REGISTER_CODES, arg_register, emit, emit_direct_call,
+    CC_B, CC_BE, CC_E, CC_G, CC_GE, CC_L, CC_LE, CC_NE, FixedArithmetic, Instruction, NEG_EXTENSION,
+    NOT_EXTENSION, OR_RM_R64, R10, R11, RAX, RDX, RSP, SAR_EXTENSION, SHL_EXTENSION, SHR_EXTENSION,
+    SUB_RM_R64, UNASSIGNED, XOR_RM_R64, REGISTER_CODES, arg_register, emit, emit_direct_call,
     emit_symbol_address, find_register, patch_forward_branch, register_bit
 };
 
@@ -53,6 +53,12 @@ const CALL_HIGH: u64 = 42;
 const SYMBOL_RELATIVE: u64 = 43;
 const SYMBOL_GOT: u64 = 44;
 const TRAP: u64 = 45;
+const SIGNED_DIV: u64 = 46;
+const UNSIGNED_DIV: u64 = 47;
+const SIGNED_REM: u64 = 48;
+const UNSIGNED_REM: u64 = 49;
+const SIGNED_MUL_HIGH: u64 = 50;
+const UNSIGNED_MUL_HIGH: u64 = 51;
 
 // Relocation kinds shared with src/native_machine.rs.
 const PLT_CALL: u64 = 0;
@@ -115,6 +121,7 @@ struct FrameLayout {
     size: u64,
     used: bool,
     outgoing: u64,
+    fixed: bool,
 }
 
 copy enum Location {
@@ -126,8 +133,8 @@ copy enum Location {
 struct Allocation {
     locations: ChunkSeq[Location],
     frame_size: u32,
-    calls: ChunkSeq[u32],
-    call_frame: u64,
+    saved_masks: ChunkSeq[u32],
+    save_frame: u64,
 }
 
 fn word_at(in words: Slice[u64], position: u64) -> u64 {
@@ -195,7 +202,7 @@ fn frame_layout(in words: Slice[u64], count: u64) -> Option[FrameLayout] {
     if size > STACK_PROBE_INTERVAL {
         return Option::None;
     }
-    Option::Some(FrameLayout { slots: slots, size: size, used: false, outgoing: 0 })
+    Option::Some(FrameLayout { slots: slots, size: size, used: false, outgoing: 0, fixed: false })
 }
 
 fn last_read(in reads: ChunkSeq[u64], value: u64) -> u64 {
@@ -255,6 +262,22 @@ fn has_no_result(op: u64) -> bool {
 
 fn is_call(op: u64) -> bool {
     op == CALL || op == CALL_VOID || op == CALL_PAIR
+}
+
+fn is_fixed_arithmetic(op: u64) -> bool {
+    op >= SIGNED_DIV && op <= UNSIGNED_MUL_HIGH
+}
+
+fn is_integer_division(op: u64) -> bool {
+    op >= SIGNED_DIV && op <= UNSIGNED_REM
+}
+
+fn fixed_result(op: u64) -> u8 {
+    if op == SIGNED_DIV || op == UNSIGNED_DIV {
+        RAX
+    } else {
+        RDX
+    }
 }
 
 fn is_symbol(op: u64) -> bool {
@@ -317,6 +340,7 @@ fn reads_right(in record: Record, paired: bool) -> bool {
         || is_comparison(op)
         || op == SELECT
         || is_register_shift(op)
+        || is_fixed_arithmetic(op)
         || is_store(op)
         || (op == EARLY_RETURN && paired && record.left != TRAP_VALUE)
 }
@@ -372,7 +396,7 @@ fn find_last_reads(
         let index = wrapping_sub(wrapping_sub(count, 1), reverse_index);
         let value = wrapping_add(arguments, index);
         let record = read_record(in words, index);
-        if record.op > TRAP
+        if record.op > UNSIGNED_MUL_HIGH
             || (record.op == STACK_SLOT && index >= frame.slots.len())
             || (record.op == RETURN_PAIR && (reverse_index != 0 || record.left >= value))
             || (record.op == TRAP && (reverse_index != 0 || result != NO_VALUE))
@@ -380,6 +404,12 @@ fn find_last_reads(
             return Option::None;
         }
         let last = last_read(in reads, value);
+        if is_fixed_arithmetic(record.op) {
+            if record.extra != DWORD_BITS && record.extra != QWORD_BITS {
+                return Option::None;
+            }
+            frame.fixed = frame.fixed || last != NEVER_READ || is_integer_division(record.op);
+        }
         if is_symbol(record.op) && (!allow_relocations || record.left > DISP32_MASK) {
             return Option::None;
         }
@@ -499,7 +529,12 @@ fn find_last_reads(
         {
             return Option::None;
         }
-        if last != NEVER_READ || record.op == LOAD || record.op == STACK_LOAD || no_result {
+        if last != NEVER_READ
+            || record.op == LOAD
+            || record.op == STACK_LOAD
+            || is_integer_division(record.op)
+            || no_result
+        {
             if has_left {
                 first_read_backwards(inout reads, record.left, value);
             }
@@ -532,7 +567,12 @@ fn emits_instruction(op: u64, result_live: bool) -> bool {
     op != STACK_SLOT
         && op != RETURN_PAIR
         && op != CALL_ARGUMENT
-        && (result_live || op == LOAD || op == STACK_LOAD || is_call(op) || has_no_result(op))
+        && (result_live
+            || op == LOAD
+            || op == STACK_LOAD
+            || is_call(op)
+            || is_integer_division(op)
+            || has_no_result(op))
 }
 
 fn dying_register(
@@ -565,15 +605,16 @@ fn allocate(
     let mut locations = ChunkSeq::with_capacity[Location](wrapping_add(arguments, count));
     let reserved = if spills {
         register_bit(LEFT_SCRATCH) | register_bit(RIGHT_SCRATCH) | register_bit(THIRD_SCRATCH)
-    } else if frame.outgoing != 0 {
+    } else if frame.outgoing != 0 || frame.fixed {
         register_bit(THIRD_SCRATCH)
     } else {
         0
     };
     let mut used = reserved;
     let mut stack_end = wrapping_add(frame.outgoing, if frame.used { frame.size } else { 0 });
-    let mut calls = ChunkSeq::new[u32]();
-    let mut call_slots: u64 = 0;
+    let mut saved_masks = ChunkSeq::new[u32]();
+    let mut save_slots: u64 = 0;
+    let mut has_calls = false;
     for argument in 0..arguments {
         if argument < ARGUMENTS {
             let reg = arg_register(argument);
@@ -595,7 +636,10 @@ fn allocate(
             locations.push(Location::Absent);
             continue;
         }
-        if is_call(record.op) {
+        let call = is_call(record.op);
+        let fixed = is_fixed_arithmetic(record.op);
+        if call {
+            has_calls = true;
             let start = wrapping_sub(index, record.right);
             for i in 0..record.right {
                 let operand = call_argument(in words, start, i);
@@ -604,17 +648,6 @@ fn allocate(
                     dying_register(in reads, in locations, operand, value)
                 );
             }
-            let saved = used & ~reserved;
-            let mut slots: u64 = 0;
-            for reg in 0..REGISTER_CODES {
-                if (saved & register_bit(wrapping_u8(reg))) != 0 {
-                    slots = wrapping_add(slots, 1);
-                }
-            }
-            if slots > call_slots {
-                call_slots = slots;
-            }
-            calls.push(saved);
         }
         let left = if reads_left(in record) {
             dying_register(in reads, in locations, record.left, value)
@@ -631,7 +664,32 @@ fn allocate(
         } else {
             UNASSIGNED
         };
-        let register = if record.op == SELECT && right != UNASSIGNED {
+        let survivors = without_register(
+            without_register(without_register(used, left), right),
+            third
+        );
+        if call || fixed {
+            let clobbers = if call {
+                ~reserved
+            } else {
+                register_bit(RAX) | register_bit(RDX)
+            };
+            let saved = survivors & clobbers & ~reserved;
+            let mut slots: u64 = 0;
+            for reg in 0..REGISTER_CODES {
+                if (saved & register_bit(wrapping_u8(reg))) != 0 {
+                    slots = wrapping_add(slots, 1);
+                }
+            }
+            if slots > save_slots {
+                save_slots = slots;
+            }
+            saved_masks.push(saved);
+        }
+        let implicit_result = fixed_result(record.op);
+        let register = if fixed && (survivors & register_bit(implicit_result)) == 0 {
+            implicit_result
+        } else if record.op == SELECT && right != UNASSIGNED {
             right
         } else if third != UNASSIGNED {
             third
@@ -642,8 +700,8 @@ fn allocate(
         } else {
             find_register(used)
         };
-        used = without_register(without_register(without_register(used, left), right), third);
-        let location = if has_no_result(record.op) || (is_call(record.op) && !result_live) {
+        used = survivors;
+        let location = if has_no_result(record.op) || ((call || fixed) && !result_live) {
             Location::Absent
         } else if register != UNASSIGNED {
             if result_live {
@@ -665,9 +723,9 @@ fn allocate(
         };
         locations.push(location);
     }
-    let call_frame = stack_end;
-    stack_end = wrapping_add(stack_end, wrapping_mul(call_slots, SPILL_SLOT_BYTES));
-    let size = if stack_end == 0 && calls.len() == 0 {
+    let save_frame = stack_end;
+    stack_end = wrapping_add(stack_end, wrapping_mul(save_slots, SPILL_SLOT_BYTES));
+    let size = if stack_end == 0 && !has_calls {
         0
     } else {
         aligned_frame_size(stack_end)
@@ -687,8 +745,8 @@ fn allocate(
     Option::Some(Allocation {
         locations: locations,
         frame_size: wrapping_u32(size),
-        calls: calls,
-        call_frame: call_frame
+        saved_masks: saved_masks,
+        save_frame: save_frame
     })
 }
 
@@ -831,7 +889,7 @@ fn move_call_arguments(
     }
 }
 
-fn move_call_result(inout out: ChunkSeq[u8], in result: Location, source: u8) {
+fn save_result(inout out: ChunkSeq[u8], in result: Location, source: u8) {
     match result {
         Location::Register(reg) => emit(inout out, in Instruction::Move(reg, source)),
         Location::Spill(offset) => emit(
@@ -842,24 +900,58 @@ fn move_call_result(inout out: ChunkSeq[u8], in result: Location, source: u8) {
     };
 }
 
+fn preserve_registers(inout out: ChunkSeq[u8], saved: u32, frame: u64, restoring: bool) {
+    let mut slot = frame;
+    for code in 0..REGISTER_CODES {
+        let reg = wrapping_u8(code);
+        if (saved & register_bit(reg)) != 0 {
+            let offset = wrapping_u32(slot);
+            let instruction = if restoring {
+                Instruction::Load(reg, RSP, offset, QWORD_BITS)
+            } else {
+                Instruction::Store(reg, RSP, offset, QWORD_BITS)
+            };
+            emit(inout out, in instruction);
+            slot = wrapping_add(slot, SPILL_SLOT_BYTES);
+        }
+    }
+}
+
+fn emit_fixed_arithmetic(
+    inout out: ChunkSeq[u8],
+    in allocation: Allocation,
+    in record: Record,
+    in result: Location
+) {
+    let left = assigned(in allocation.locations, record.left);
+    let right = assigned(in allocation.locations, record.right);
+    let mut rhs = materialize(inout out, in right, THIRD_SCRATCH);
+    if rhs == RAX || rhs == RDX {
+        emit(inout out, in Instruction::Move(THIRD_SCRATCH, rhs));
+        rhs = THIRD_SCRATCH;
+    }
+    move_return(inout out, in left, RAX);
+    let op = match record.op {
+        SIGNED_DIV => FixedArithmetic::SignedDivide,
+        UNSIGNED_DIV => FixedArithmetic::UnsignedDivide,
+        SIGNED_REM => FixedArithmetic::SignedRemainder,
+        UNSIGNED_REM => FixedArithmetic::UnsignedRemainder,
+        SIGNED_MUL_HIGH => FixedArithmetic::SignedMultiplyHigh,
+        _ => FixedArithmetic::UnsignedMultiplyHigh,
+    };
+    emit(inout out, in Instruction::Fixed(op, rhs, record.extra));
+    save_result(inout out, in result, fixed_result(record.op));
+}
+
 fn emit_call(
     inout out: ChunkSeq[u8],
     in words: Slice[u64],
     in allocation: Allocation,
-    saved: u32,
     start: u64,
     arguments: u64,
     in low: Location,
     in high: Location
 ) -> u64 {
-    let mut slot = allocation.call_frame;
-    for code in 0..REGISTER_CODES {
-        let reg = wrapping_u8(code);
-        if (saved & register_bit(reg)) != 0 {
-            emit(inout out, in Instruction::Store(reg, RSP, wrapping_u32(slot), QWORD_BITS));
-            slot = wrapping_add(slot, SPILL_SLOT_BYTES);
-        }
-    }
     let register_arguments = if arguments > ARGUMENTS {
         ARGUMENTS
     } else {
@@ -880,20 +972,12 @@ fn emit_call(
         if in_register(in high, RAX) {
             emit(inout out, in Instruction::Exchange(RAX, RDX));
         } else {
-            move_call_result(inout out, in high, RDX);
-            move_call_result(inout out, in low, RAX);
+            save_result(inout out, in high, RDX);
+            save_result(inout out, in low, RAX);
         }
     } else {
-        move_call_result(inout out, in low, RAX);
-        move_call_result(inout out, in high, RDX);
-    }
-    slot = allocation.call_frame;
-    for code in 0..REGISTER_CODES {
-        let reg = wrapping_u8(code);
-        if (saved & register_bit(reg)) != 0 {
-            emit(inout out, in Instruction::Load(reg, RSP, wrapping_u32(slot), QWORD_BITS));
-            slot = wrapping_add(slot, SPILL_SLOT_BYTES);
-        }
+        save_result(inout out, in low, RAX);
+        save_result(inout out, in high, RDX);
     }
     reference
 }
@@ -977,7 +1061,7 @@ pub fn encode_block(
     emit(inout output, in Instruction::FrameEnter(frame_size));
     let mut branch_ends = ChunkSeq::new[u64]();
     let mut branch_depth: u64 = 0;
-    let mut call_index: u64 = 0;
+    let mut clobber_index: u64 = 0;
 
     for index in 0..count {
         let value = wrapping_add(arguments, index);
@@ -986,32 +1070,38 @@ pub fn encode_block(
         if record.op == CALL_HIGH || !emits_instruction(record.op, result_live) {
             continue;
         }
-        if is_call(record.op) {
-            let saved = match allocation.calls.try_get(call_index) {
+        let call = is_call(record.op);
+        if call || is_fixed_arithmetic(record.op) {
+            let saved = match allocation.saved_masks.try_get(clobber_index) {
                 Option::Some(saved) => saved,
                 Option::None => return ChunkSeq::new[u8](),
             };
             let home = assigned(in allocation.locations, value);
-            let high = if record.op == CALL_PAIR {
-                assigned(in allocation.locations, wrapping_add(value, 1))
+            preserve_registers(inout output, saved, allocation.save_frame, false);
+            if call {
+                let high = if record.op == CALL_PAIR {
+                    assigned(in allocation.locations, wrapping_add(value, 1))
+                } else {
+                    Location::Absent
+                };
+                let start = wrapping_sub(index, record.right);
+                let offset = emit_call(
+                    inout output,
+                    in words,
+                    in allocation,
+                    start,
+                    record.right,
+                    in home,
+                    in high
+                );
+                relocations.push(offset);
+                relocations.push(PLT_CALL);
+                relocations.push(record.left);
             } else {
-                Location::Absent
-            };
-            let start = wrapping_sub(index, record.right);
-            let offset = emit_call(
-                inout output,
-                in words,
-                in allocation,
-                saved,
-                start,
-                record.right,
-                in home,
-                in high
-            );
-            relocations.push(offset);
-            relocations.push(PLT_CALL);
-            relocations.push(record.left);
-            call_index = wrapping_add(call_index, 1);
+                emit_fixed_arithmetic(inout output, in allocation, in record, in home);
+            }
+            preserve_registers(inout output, saved, allocation.save_frame, true);
+            clobber_index = wrapping_add(clobber_index, 1);
             continue;
         }
         if record.op == TRAP {

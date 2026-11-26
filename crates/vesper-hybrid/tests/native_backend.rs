@@ -27,6 +27,7 @@ enum Case {
     Constant(i64),
     Argument(usize),
     Binary(Binary),
+    MultiplyHigh(Type, bool),
     Chain,
     RepeatedOperands,
     DeadValues,
@@ -156,22 +157,26 @@ fn integer_backend_matches_cranelift_results() {
         Case::SpilledValues { fixed_slot: false },
         Case::SpilledValues { fixed_slot: true },
     ];
-    let cases: Vec<_> = cases
-        .into_iter()
-        .chain(IntCC::all().iter().copied().map(Case::Compare64))
-        .chain(
-            [types::I8, types::I16, types::I32]
-                .into_iter()
-                .flat_map(|width| {
-                    IntCC::all()
-                        .iter()
-                        .copied()
-                        .map(move |cc| Case::CompareNarrow(width, cc))
-                }),
-        )
-        .chain([types::I8, types::I16, types::I32].map(Case::NarrowArithmetic))
-        .chain([types::I8, types::I16, types::I32].map(Case::NarrowShifts))
-        .collect();
+    let cases: Vec<_> =
+        cases
+            .into_iter()
+            .chain(IntCC::all().iter().copied().map(Case::Compare64))
+            .chain(
+                [types::I8, types::I16, types::I32]
+                    .into_iter()
+                    .flat_map(|width| {
+                        IntCC::all()
+                            .iter()
+                            .copied()
+                            .map(move |cc| Case::CompareNarrow(width, cc))
+                    }),
+            )
+            .chain([types::I8, types::I16, types::I32].map(Case::NarrowArithmetic))
+            .chain([types::I8, types::I16, types::I32].map(Case::NarrowShifts))
+            .chain([types::I32, types::I64].into_iter().flat_map(|width| {
+                [false, true].map(move |signed| Case::MultiplyHigh(width, signed))
+            }))
+            .collect();
     let case_count = cases.len();
     let mut byte_differences = 0;
     for (index, case) in cases.into_iter().enumerate() {
@@ -203,6 +208,29 @@ fn integer_backend_matches_cranelift_results() {
                 Binary::Or => builder.ins().bor(e, f),
                 Binary::Xor => builder.ins().bxor(e, f),
             },
+            Case::MultiplyHigh(width, signed) => {
+                let preserved = builder.ins().iadd(a, b);
+                let (lhs, rhs) = if width == types::I64 {
+                    (a, c)
+                } else {
+                    (
+                        builder.ins().ireduce(width, a),
+                        builder.ins().ireduce(width, c),
+                    )
+                };
+                let high = if signed {
+                    builder.ins().smulhi(lhs, rhs)
+                } else {
+                    builder.ins().umulhi(lhs, rhs)
+                };
+                let high = if width == types::I64 {
+                    high
+                } else {
+                    builder.ins().uextend(types::I64, high)
+                };
+                let sum = builder.ins().iadd(high, preserved);
+                builder.ins().bxor(sum, c)
+            }
             Case::Chain => {
                 let left = builder.ins().iadd_imm(a, i64::MIN);
                 let neg = builder.ins().ineg(b);
@@ -674,6 +702,75 @@ fn integer_backend_matches_cranelift_results() {
     );
     // All code pointers have gone out of scope.
     unsafe { module.free_memory() };
+}
+
+#[test]
+fn fixed_arithmetic_preserves_live_rax_and_rdx() {
+    const SIGNED_DIV: u64 = 46;
+    const UNSIGNED_DIV: u64 = 47;
+    const SIGNED_REM: u64 = 48;
+    const UNSIGNED_REM: u64 = 49;
+    const SIGNED_MUL_HIGH: u64 = 50;
+    const UNSIGNED_MUL_HIGH: u64 = 51;
+    const WIDE_BITS: u64 = u64::BITS as u64;
+
+    type Entry = unsafe extern "C" fn(u64, u64, u64) -> u64;
+    let mut module =
+        JITModule::new(JITBuilder::new(cranelift_module::default_libcall_names()).unwrap());
+    let alignment = u64::from(module.isa().function_alignment().minimum);
+    let mut signature = module.make_signature();
+    signature.params = vec![AbiParam::new(types::I64); 3];
+    signature.returns.push(AbiParam::new(types::I64));
+
+    for width in [u32::BITS as u64, WIDE_BITS] {
+        let mask = u64::MAX >> (WIDE_BITS - width);
+        let minimum = 1u64 << (width - 1);
+        let signed = |value: u64| {
+            (value.wrapping_shl((WIDE_BITS - width) as u32) as i64 >> (WIDE_BITS - width)) as i128
+        };
+        for op in SIGNED_DIV..=UNSIGNED_MUL_HIGH {
+            let id = module
+                .declare_function(&format!("fixed_{op}_{width}"), Linkage::Local, &signature)
+                .unwrap();
+            // Hold a constant in RAX and the divisor in RDX across the operation.
+            #[rustfmt::skip]
+            let words = [
+                3, 6,
+                0, 17, 0, 0,
+                op, 0, 2, width,
+                1, 3, 4, WIDE_BITS,
+                6, 5, 2, WIDE_BITS,
+            ];
+            let bytes = binding::x86_64_integer_block(&words);
+            assert!(!bytes.is_empty());
+            module
+                .define_function_bytes(id, alignment, &bytes, &[])
+                .unwrap();
+            module.finalize_definitions().unwrap();
+            let function = unsafe {
+                std::mem::transmute::<*const u8, Entry>(module.get_finalized_function(id))
+            };
+            for (a, b) in [(0, 1), (19, 5), (19, mask - 4), (minimum, mask), (mask, 11)] {
+                if op == SIGNED_DIV && a == minimum && b == mask {
+                    continue;
+                }
+                let expected = match op {
+                    SIGNED_DIV => (signed(a) / signed(b)) as u64,
+                    UNSIGNED_DIV => a / b,
+                    SIGNED_REM => (signed(a) % signed(b)) as u64,
+                    UNSIGNED_REM => a % b,
+                    SIGNED_MUL_HIGH => ((signed(a) * signed(b)) >> width) as u64,
+                    UNSIGNED_MUL_HIGH => ((u128::from(a) * u128::from(b)) >> width) as u64,
+                    _ => unreachable!(),
+                };
+                assert_eq!(
+                    unsafe { function(a, 0, b) },
+                    (expected & mask).wrapping_add(17) ^ b,
+                    "{op} {width} {a} {b}"
+                );
+            }
+        }
+    }
 }
 
 #[test]
