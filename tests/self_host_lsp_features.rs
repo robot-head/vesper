@@ -39,6 +39,19 @@ fn features() -> &'static Package {
     PACKAGE.get_or_init(|| Package::load("packages/vesper-lsp-features"))
 }
 
+/// `@vesper/lsp-format` (#1828 part 11a) and its one entry, the formatting
+/// action. It is its own package: @vesper/fmt links C BLAKE3, which
+/// @vesper/lsp-features must not need under Stage 2.
+fn formatting_entry() -> &'static Entry {
+    static PACKAGE: OnceLock<Package> = OnceLock::new();
+    static ENTRY: OnceLock<Entry> = OnceLock::new();
+    ENTRY.get_or_init(|| {
+        PACKAGE
+            .get_or_init(|| Package::load("packages/vesper-lsp-format"))
+            .entry("lsp_formatting", optimize())
+    })
+}
+
 fn optimize() -> bool {
     std::env::var_os("LSP_FEATURES_NO_OPT").is_none()
 }
@@ -4145,6 +4158,218 @@ fn lens_state_speed() {
     eprintln!(
         "lens bookkeeping session ({} x {ROUNDS}): rust {r:?} vesper {v:?} ratio {:.2}",
         sessions.len(),
+        v.as_secs_f64() / r.as_secs_f64()
+    );
+}
+
+// ------------------------------------------------------------- formatting
+
+/// One `textDocument/formatting` case: the document and the stamp the
+/// caller expects (the document's own when `None`).
+struct FormattingCase {
+    uri: String,
+    version: i32,
+    source: String,
+    expected: Option<(i32, [u8; 32])>,
+}
+
+/// The input of `lsp_formatting` (lib.ves).
+fn formatting_input(case: &FormattingCase, rounds: u64) -> Vec<u8> {
+    let mut input = vec![];
+    push_word(&mut input, rounds);
+    push_word(&mut input, i64::from(case.version) as u64);
+    let (has, version, digest) = match case.expected {
+        Some((v, d)) => (1, v, d),
+        None => (0, 0, [0; 32]),
+    };
+    push_word(&mut input, has);
+    push_word(&mut input, i64::from(version) as u64);
+    input.extend_from_slice(&digest);
+    index_words(&mut input, vesper_span::Limits::default());
+    push_word(&mut input, case.uri.len() as u64);
+    push_word(&mut input, case.source.len() as u64);
+    input.extend_from_slice(case.uri.as_bytes());
+    input.extend_from_slice(case.source.as_bytes());
+    input
+}
+
+/// The `.ves` sources of the repository's packages up to 128 KiB, sorted.
+fn formatting_corpus() -> Vec<String> {
+    let mut paths = vec![];
+    let mut pending = vec![std::path::PathBuf::from("packages")];
+    while let Some(dir) = pending.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                pending.push(path);
+            } else if path.extension().is_some_and(|e| e == "ves") {
+                paths.push(path);
+            }
+        }
+    }
+    paths.sort();
+    paths
+        .iter()
+        .filter_map(|p| std::fs::read_to_string(p).ok())
+        .filter(|s| s.len() <= 128 * 1024)
+        .collect()
+}
+
+/// Every case of `formatting_matches_rust`: corpus sources as they are,
+/// re-indented, with CRLF line ends, with an unclosed declaration at the
+/// end or a stray token in the middle (the recovery formatter's cases),
+/// cut in half, and hand-written edges (empty text, wide characters, URI
+/// and size bounds, stale stamps).
+fn formatting_cases() -> Vec<FormattingCase> {
+    let corpus = formatting_corpus();
+    let mut cases = vec![];
+    let add = |cases: &mut Vec<FormattingCase>, source: String, version: i32| {
+        cases.push(FormattingCase {
+            uri: format!("file:///work/case{}.ves", cases.len()),
+            version,
+            source,
+            expected: None,
+        });
+    };
+    for (k, source) in corpus.iter().enumerate().step_by(7) {
+        let v = k as i32 - 40;
+        add(&mut cases, source.clone(), v);
+        add(&mut cases, source.replace("    ", "  "), v);
+        add(&mut cases, source.replace('\n', "\r\n"), v);
+        add(&mut cases, format!("{source}\nfn broken( {{\n"), v);
+        let mid = source.len() / 2;
+        let mid = (mid..source.len())
+            .find(|&i| source.is_char_boundary(i) && source.as_bytes().get(i) == Some(&b'\n'))
+            .unwrap_or(source.len());
+        add(
+            &mut cases,
+            format!("{}\n) ) )\n{}", &source[..mid], &source[mid..]),
+            v,
+        );
+        add(&mut cases, source[..mid].to_owned(), v);
+    }
+    for source in [
+        "",
+        "\n",
+        "fn main() {}\n",
+        "fn   main ( ) {   }",
+        "fn main() -> u64 { let s = \"\u{1F600}\u{e9}\"; 1 }\r\n",
+        "// \u{1F600} comment\nfn f(){1}\n",
+        "fn f() { (\n",
+        "fn ok() -> u64 { 1 }\nfn bad( {\nfn  also_ok ( ) -> u64 { 2 }\n",
+        "fn f() -> u64 {\r\n    1\r\n}\r",
+        "struct S { a: u64 }\nfn g(x: S) -> u64 { x.a }",
+        "@@@",
+    ] {
+        add(&mut cases, source.into(), 1);
+    }
+    let base = "fn   main ( ) {   }".to_owned();
+    let digest = *blake3::hash(base.as_bytes()).as_bytes();
+    for (uri, expected) in [
+        (String::new(), None),
+        ("u".repeat(4096), None),
+        ("u".repeat(4097), None),
+        ("file:///x.ves".into(), Some((7, digest))),
+        ("file:///x.ves".into(), Some((8, digest))),
+        ("file:///x.ves".into(), Some((7, [0; 32]))),
+        ("file:///\u{e9}\"quote\\.ves".into(), None),
+    ] {
+        cases.push(FormattingCase {
+            uri,
+            version: 7,
+            source: base.clone(),
+            expected,
+        });
+    }
+    let big = format!("// {}\nfn main() {{}}\n", "x".repeat(128 * 1024));
+    add(&mut cases, big, 1);
+    let at_bound = format!("fn main() {{}}\n// {}\n", "y".repeat(128 * 1024 - 17));
+    add(&mut cases, at_bound, 1);
+    cases
+}
+
+fn rust_formatting(case: &FormattingCase, rounds: u64) -> String {
+    vesper::lsp::formatting_for_port(
+        &case.uri,
+        case.version,
+        &case.source,
+        case.expected,
+        vesper_span::Limits::default(),
+        rounds,
+    )
+}
+
+/// `textDocument/formatting` against `lsp_formatting`, answer for answer.
+#[test]
+fn formatting_matches_rust() {
+    let cases = formatting_cases();
+    let entry = formatting_entry();
+    let mut differ = vec![];
+    let (mut whole, mut recovered, mut unchanged, mut refused) = (0, 0, 0, 0);
+    for (i, case) in cases.iter().enumerate() {
+        let rust = rust_formatting(case, 1);
+        let vesper = entry.text(&formatting_input(case, 1));
+        if rust.starts_with("E ") {
+            refused += 1;
+        } else if rust.contains("\"complete_declarations\"") {
+            recovered += 1;
+        } else if rust.starts_with("[]") {
+            unchanged += 1;
+        } else {
+            whole += 1;
+        }
+        if let Some(d) = first_difference(&rust, &vesper) {
+            differ.push(format!("case {i} ({}): {d}", case.uri));
+        }
+    }
+    eprintln!(
+        "formatting: {} cases ({whole} replaced, {recovered} recovered, {unchanged} unchanged, {refused} refused), {} differ",
+        cases.len(),
+        differ.len()
+    );
+    assert!(differ.is_empty(), "{:#?}", &differ[..differ.len().min(8)]);
+}
+
+/// Rust against Vesper on every case, `rounds` answers per call, best of
+/// five ABBA pairs. `CHECK_HARNESS_SPEED=1`.
+#[test]
+#[ignore]
+fn formatting_speed() {
+    let cases = formatting_cases();
+    let entry = formatting_entry();
+    let rounds = 4;
+    let inputs: Vec<Vec<u8>> = cases.iter().map(|c| formatting_input(c, rounds)).collect();
+    let time = |f: &dyn Fn()| {
+        let t = std::time::Instant::now();
+        f();
+        t.elapsed()
+    };
+    let rust = || {
+        for case in &cases {
+            std::hint::black_box(rust_formatting(case, rounds));
+        }
+    };
+    let vesper = || {
+        for input in &inputs {
+            std::hint::black_box(entry.words(input));
+        }
+    };
+    let (mut r, mut v) = (std::time::Duration::MAX, std::time::Duration::MAX);
+    for _ in 0..5 {
+        r = r.min(time(&rust));
+        v = v.min(time(&vesper));
+        v = v.min(time(&vesper));
+        r = r.min(time(&rust));
+    }
+    let per = (cases.len() as u32) * (rounds as u32);
+    eprintln!(
+        "formatting ({} cases x {rounds}): rust {:?} vesper {:?} per answer, ratio {:.2}",
+        cases.len(),
+        r / per,
+        v / per,
         v.as_secs_f64() / r.as_secs_f64()
     );
 }

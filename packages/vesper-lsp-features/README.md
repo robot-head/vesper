@@ -49,6 +49,11 @@ The session's parameter checks (`validate_input`, `cancel_params` and the
 `vesper.proofAudit` arguments, part 10b of #1828) read the JSON-RPC token
 tape, so they live in `@vesper/lsp` (`packages/vesper-lsp/src/commands.ves`).
 
+The formatting action (`textDocument/formatting`, part 11a of #1828) lives
+in `@vesper/lsp-format` (`packages/vesper-lsp-format`), because the
+formatter port links C BLAKE3, which this package must not need under
+Stage 2.
+
 The source is parsed with `@vesper/front` and `@vesper/ast`, positions use
 `@vesper/span`, and the JSON is written byte for byte as serde_json writes
 it. The package does not depend on `@vesper/serde` (see the lane 16 report,

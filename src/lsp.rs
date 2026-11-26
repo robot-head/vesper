@@ -188,6 +188,50 @@ pub fn lens_requests_for_port(
         rounds,
     )
 }
+/// `textDocument/formatting` (`actions::format_document`) on `source` at
+/// `uri` and `version`, against `expected` (a version and BLAKE3 digest;
+/// the document's own when `None`), run `rounds` times, as text for the
+/// Vesper port's differential test: `E <error>`, or the edit array, the
+/// versioned workspace edit and the provenance, one JSON value per line.
+#[doc(hidden)]
+pub fn formatting_for_port(
+    uri: &str,
+    version: i32,
+    source: &str,
+    expected: Option<(i32, [u8; 32])>,
+    index_limits: vesper_span::Limits,
+    rounds: u64,
+) -> String {
+    let index = match vesper_span::LineIndex::new(std::sync::Arc::from(source), index_limits) {
+        Ok(index) => index,
+        Err(e) => return format!("E index {e}"),
+    };
+    let mut out = String::new();
+    for _ in 0..rounds.max(1) {
+        out = match actions::ActionDocument::new(uri, version, source, &index) {
+            Err(e) => format!("E {e}"),
+            Ok(document) => {
+                let stamp = expected.map_or(document.stamp(), |(version, source_hash)| {
+                    actions::SourceStamp {
+                        version,
+                        source_hash,
+                    }
+                });
+                match actions::format_document(&document, stamp) {
+                    Err(e) => format!("E {e}"),
+                    Ok(formatting) => format!(
+                        "{}\n{}\n{}",
+                        formatting.to_json(),
+                        formatting.workspace_edit_json(),
+                        formatting.provenance
+                    ),
+                }
+            }
+        };
+        std::hint::black_box(&out);
+    }
+    out
+}
 /// The session's parameter checks (`validate_input`, `$/cancelRequest`
 /// parameters, the `vesper.proofAudit` arguments against the documents
 /// `open`), each run `rounds` times, as text, for the Vesper port's

@@ -936,11 +936,13 @@ vesper_crate(
             "tests/fixtures/**",
             "src/lsp/fixtures/**",
             "packages/vesper-lsp-features/**",
+            "packages/vesper-lsp-format/**",
             "packages/vesper-ast/**",
             "packages/vesper-check-data/**",
             "packages/vesper-front/**",
             "packages/vesper-std/**",
         ]) + [
+            "//crates/vesper-fmt:files",
             "//crates/vesper-span:files",
         ],
         # @vesper-std/fs, process and env (#1125): drivers over the packages
