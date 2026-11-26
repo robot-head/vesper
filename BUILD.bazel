@@ -1510,6 +1510,29 @@ vesper_package(
     ],
 )
 
+# The package assembler as a dependency of the hybrid driver's package load
+# (#1986), with @vesper-std/collections.
+vesper_package(
+    name = "std_collections_package",
+    srcs = glob(["packages/vesper-std/collections/src/**/*.ves"]),
+    manifest = "packages/vesper-std/collections/Loom.toml",
+    visibility = ["//visibility:public"],
+)
+
+vesper_package(
+    name = "check_names_packages_package",
+    srcs = glob(["packages/vesper-check-names-packages/src/**/*.ves"]),
+    manifest = "packages/vesper-check-names-packages/Loom.toml",
+    visibility = ["//visibility:public"],
+    deps = [
+        ":ast_package",
+        ":check_data_package",
+        ":std_arena_package",
+        ":std_collections_package",
+        ":std_intern_package",
+    ],
+)
+
 # Fip checker as a dependency of the hybrid compiler's fip module
 # (self-hosting SH2 lane 12, #1184).
 vesper_package(
