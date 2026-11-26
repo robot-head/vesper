@@ -4,36 +4,41 @@ use @vesper/codegen-freestanding::codes::{
 use @vesper/codegen-freestanding::obj::{section_header};
 use @vesper/codegen-freestanding::util::{align_up, grow, push16, push32, push64, put64};
 
-// The byte slice contains .text, optional .rodata, then the symbol names.
-// The words start with [text size, text alignment, symbol count, rodata size,
-// rodata alignment]. A zero rodata alignment omits that section.
-// Symbols give [name offset, name size, section offset, size, kind].
-// Relocations give [text offset, zero-based symbol, kind, signed addend bits].
-const HEADER_WORDS: u64 = 5;
-const TEXT_SIZE: u64 = 0;
-const TEXT_ALIGNMENT: u64 = 1;
-const SYMBOL_COUNT: u64 = 2;
-const RODATA_SIZE: u64 = 3;
-const RODATA_ALIGNMENT: u64 = 4;
-const SYMBOL_WORDS: u64 = 5;
+// The words start with the symbol count, followed by a size and alignment
+// for each payload section. Zero alignment omits the section.
+// The byte slice contains the file-backed payloads in section order, then
+// symbol names. BSS contributes no bytes.
+// Symbols contain name offset, name length, value, size, kind, and section.
+// Relocations contain source section, offset, symbol index, kind, and addend.
+const TEXT: u64 = 0;
+const RODATA: u64 = 1;
+const RELRO: u64 = 2;
+const DATA: u64 = 3;
+const BSS: u64 = 4;
+const SECTION_COUNT: u64 = 5;
+const SECTION_WORDS: u64 = 2;
+const SYMBOL_COUNT: u64 = 0;
+const SECTION_START: u64 = 1;
+const HEADER_WORDS: u64 = SECTION_START + SECTION_COUNT * SECTION_WORDS;
+const SYMBOL_WORDS: u64 = 6;
 const SYM_NAME: u64 = 0;
 const SYM_NAME_SIZE: u64 = 1;
 const SYM_VALUE: u64 = 2;
 const SYM_SIZE: u64 = 3;
 const SYM_KIND: u64 = 4;
+const SYM_SECTION: u64 = 5;
+const NO_SECTION: u64 = 0xffffffffffffffff;
 const LOCAL: u64 = 0;
 const EXPORTED: u64 = 1;
 const UNDEFINED: u64 = 2;
 const HIDDEN: u64 = 3;
 const FILE: u64 = 4;
-const RODATA_LOCAL: u64 = 5;
-const RODATA_EXPORT: u64 = 6;
-const RODATA_HIDDEN: u64 = 7;
-const RELOC_WORDS: u64 = 4;
-const RELOC_OFFSET: u64 = 0;
-const RELOC_SYMBOL: u64 = 1;
-const RELOC_KIND: u64 = 2;
-const RELOC_ADDEND: u64 = 3;
+const RELOC_WORDS: u64 = 5;
+const RELOC_SOURCE: u64 = 0;
+const RELOC_OFFSET: u64 = 1;
+const RELOC_SYMBOL: u64 = 2;
+const RELOC_KIND: u64 = 3;
+const RELOC_ADDEND: u64 = 4;
 const ABS64: u64 = 1;
 const PC32: u64 = 2;
 const PLT32: u64 = 3;
@@ -50,10 +55,17 @@ const REL_SYMBOL_SHIFT: u32 = 32;
 const ELF_WORD_ALIGNMENT: u64 = 8;
 const STT_OBJECT: u8 = 1;
 const MAX_STRING_OFFSET: u64 = 0xffffffff;
-const TEXT_SECTION: u64 = 1;
-const SYMBOL_SECTION: u64 = 3;
-const STRINGS_SECTION: u64 = 4;
-const RODATA_SECTION: u16 = 6;
+
+copy struct Layout {
+    index: u64,
+    size: u64,
+    alignment: u64,
+    offset: u64,
+    name: u64,
+    rela_offset: u64,
+    rela_size: u64,
+    rela_name: u64,
+}
 
 struct Symbols {
     table: ChunkSeq[u8],
@@ -84,9 +96,8 @@ fn append_name(inout strings: ChunkSeq[u8], in name: Slice[u8]) -> u64 {
 fn make_symbols(
     in words: Slice[u64],
     in bytes: Slice[u8],
-    text_size: u64,
-    rodata_size: u64,
-    has_rodata: bool,
+    in sections: ChunkSeq[Layout],
+    payload_size: u64,
     count: u64
 ) -> Option[Symbols] {
     let mut table = ChunkSeq::new[u8]();
@@ -99,14 +110,12 @@ fn make_symbols(
     let mut first_global: u64 = 1;
     let local_pass: u64 = 0;
     let symbol_passes: u64 = 2;
-    let payload_size = wrapping_add(text_size, rodata_size);
     for pass in 0..symbol_passes {
         for index in 0..count {
             let at = wrapping_add(HEADER_WORDS, wrapping_mul(index, SYMBOL_WORDS));
             let kind = word(in words, wrapping_add(at, SYM_KIND));
             let file = kind == FILE;
-            let rodata = kind == RODATA_LOCAL || kind == RODATA_EXPORT || kind == RODATA_HIDDEN;
-            let local = kind == LOCAL || kind == RODATA_LOCAL || file;
+            let local = kind == LOCAL || file;
             if local != (pass == local_pass) {
                 continue;
             }
@@ -115,16 +124,30 @@ fn make_symbols(
             let size = word(in words, wrapping_add(at, SYM_SIZE));
             let name_at = word(in words, wrapping_add(at, SYM_NAME));
             let name_size = word(in words, wrapping_add(at, SYM_NAME_SIZE));
-            let supported = local || undefined || kind == EXPORTED || kind == HIDDEN || rodata;
-            let section_size = if rodata { rodata_size } else { text_size };
+            let supported = local || undefined || kind == EXPORTED || kind == HIDDEN;
+            let ordinal = word(in words, wrapping_add(at, SYM_SECTION));
+            let section = if undefined || file {
+                if ordinal != NO_SECTION {
+                    return Option::None;
+                }
+                if file { Shn::Abs } else { Shn::Undef }
+            } else {
+                match sections.try_get(ordinal) {
+                    Option::Some(layout) => {
+                        if layout.index == 0 || !fits(value, size, layout.size) {
+                            return Option::None;
+                        }
+                        layout.index
+                    },
+                    Option::None => return Option::None,
+                }
+            };
             if !supported
-                || (rodata && !has_rodata)
                 || name_size == 0
                 || name_at < payload_size
                 || !fits(name_at, name_size, bytes.len())
                 || !fits(names.len(), name_size, MAX_STRING_OFFSET)
                 || ((undefined || file) && (value != 0 || size != 0))
-                || (!undefined && !file && !fits(value, size, section_size))
             {
                 return Option::None;
             }
@@ -140,25 +163,12 @@ fn make_symbols(
                 Stt::File
             } else if undefined {
                 Stt::Notype
-            } else if rodata {
+            } else if ordinal != TEXT {
                 STT_OBJECT
             } else {
                 Stt::Func
             };
-            let visibility = if kind == HIDDEN || kind == RODATA_HIDDEN {
-                Stv::Hidden
-            } else {
-                0
-            };
-            let section = if file {
-                Shn::Abs
-            } else if undefined {
-                Shn::Undef
-            } else if rodata {
-                widen_u64(RODATA_SECTION)
-            } else {
-                TEXT_SECTION
-            };
+            let visibility = if kind == HIDDEN { Stv::Hidden } else { 0 };
             push32(inout table, wrapping_u32(string_offset));
             table.push((binding << Stb::Shift) | symbol_type);
             table.push(visibility);
@@ -186,13 +196,24 @@ fn append_relocations(
     inout out: ChunkSeq[u8],
     in words: Slice[u64],
     in symbols: Symbols,
-    text_size: u64
+    source: u64,
+    in layout: Layout
 ) -> bool {
     if words.len() % RELOC_WORDS != 0 {
         return false;
     }
     for index in 0..(words.len() / RELOC_WORDS) {
         let at = wrapping_mul(index, RELOC_WORDS);
+        let from = word(in words, wrapping_add(at, RELOC_SOURCE));
+        if from >= SECTION_COUNT {
+            return false;
+        }
+        if from != source {
+            continue;
+        }
+        if layout.index == 0 || source == BSS {
+            return false;
+        }
         let kind = word(in words, wrapping_add(at, RELOC_KIND));
         let relocation = match kind {
             ABS64 => R_X86_64_64,
@@ -207,7 +228,7 @@ fn append_relocations(
             PC32_FIELD_BYTES
         };
         let offset = word(in words, wrapping_add(at, RELOC_OFFSET));
-        if !fits(offset, field_size, text_size) {
+        if !fits(offset, field_size, layout.size) {
             return false;
         }
         let symbol = word(in words, wrapping_add(at, RELOC_SYMBOL));
@@ -231,7 +252,26 @@ fn pad(inout out: ChunkSeq[u8], alignment: u64) -> u64 {
     at
 }
 
-fn header(inout out: ChunkSeq[u8], has_rodata: bool) {
+fn section_name(ordinal: u64) -> Str {
+    match ordinal {
+        TEXT => ".text",
+        RODATA => ".rodata",
+        RELRO => ".data.rel.ro",
+        DATA => ".data",
+        _ => ".bss",
+    }
+}
+
+fn relocation_name(ordinal: u64) -> Str {
+    match ordinal {
+        TEXT => ".rela.text",
+        RODATA => ".rela.rodata",
+        RELRO => ".rela.data.rel.ro",
+        _ => ".rela.data",
+    }
+}
+
+fn header(inout out: ChunkSeq[u8]) {
     out.push(Ident::Mag0);
     out.push(Ident::Mag1);
     out.push(Ident::Mag2);
@@ -248,105 +288,173 @@ fn header(inout out: ChunkSeq[u8], has_rodata: bool) {
     push16(inout out, Ehdr::Bytes);
     out.resize(Ehdr::Shentsize, 0);
     push16(inout out, Shdr::Bytes);
-    let names_section = if has_rodata {
-        wrapping_add(RODATA_SECTION, 1)
-    } else {
-        RODATA_SECTION
-    };
-    push16(inout out, wrapping_add(names_section, 1));
-    push16(inout out, names_section);
+    out.resize(Ehdr::Bytes, 0);
 }
 
 pub fn write_elf(in words: Slice[u64], in bytes: Slice[u8]) -> ChunkSeq[u8] {
-    if words.len() < HEADER_WORDS {
-        return ChunkSeq::new[u8]();
-    }
-    let text_size = word(in words, TEXT_SIZE);
-    let alignment = word(in words, TEXT_ALIGNMENT);
     let count = word(in words, SYMBOL_COUNT);
-    let rodata_size = word(in words, RODATA_SIZE);
-    let rodata_alignment = word(in words, RODATA_ALIGNMENT);
-    let has_rodata = rodata_alignment != 0;
-    if !fits(text_size, rodata_size, bytes.len())
-        || !valid_alignment(alignment)
-        || (has_rodata && !valid_alignment(rodata_alignment))
-        || (!has_rodata && rodata_size != 0)
+    if words.len() < HEADER_WORDS
         || count > wrapping_sub(words.len(), HEADER_WORDS) / SYMBOL_WORDS
         || count >= MAX_STRING_OFFSET
     {
         return ChunkSeq::new[u8]();
     }
-    let symbols = match make_symbols(
-        in words,
-        in bytes,
-        text_size,
-        rodata_size,
-        has_rodata,
-        count
-    ) {
+    let mut out = ChunkSeq::new[u8]();
+    header(inout out);
+    let mut names = ChunkSeq::new[u8]();
+    names.push(0);
+    let mut sections = ChunkSeq::with_capacity[Layout](SECTION_COUNT);
+    let mut next_index: u64 = 1;
+    let mut payload: u64 = 0;
+    for ordinal in 0..SECTION_COUNT {
+        let at = wrapping_add(SECTION_START, wrapping_mul(ordinal, SECTION_WORDS));
+        let size = word(in words, at);
+        let alignment = word(in words, wrapping_add(at, 1));
+        let mut layout = Layout {
+            index: 0,
+            name: 0,
+            size: size,
+            alignment: alignment,
+            offset: 0,
+            rela_offset: 0,
+            rela_size: 0,
+            rela_name: 0
+        };
+        if alignment == 0 {
+            if ordinal == TEXT || size != 0 {
+                return ChunkSeq::new[u8]();
+            }
+        } else {
+            if !valid_alignment(alignment) {
+                return ChunkSeq::new[u8]();
+            }
+            layout.index = next_index;
+            next_index = wrapping_add(next_index, 1);
+            layout.name = append_name(inout names, in section_name(ordinal).as_bytes());
+            if ordinal == BSS {
+                layout.offset = align_up(out.len(), alignment);
+            } else {
+                if !fits(payload, size, bytes.len()) {
+                    return ChunkSeq::new[u8]();
+                }
+                layout.offset = pad(inout out, alignment);
+                let end = wrapping_add(payload, size);
+                out.extend(in bytes[payload..end]);
+                payload = end;
+            }
+        }
+        sections.push(layout);
+    }
+    let symbols = match make_symbols(in words, in bytes, in sections, payload, count) {
         Option::Some(symbols) => symbols,
         Option::None => return ChunkSeq::new[u8](),
     };
     let reloc_start = wrapping_add(HEADER_WORDS, wrapping_mul(count, SYMBOL_WORDS));
-    let mut out = ChunkSeq::new[u8]();
-    header(inout out, has_rodata);
-    let text = pad(inout out, alignment);
-    out.extend(in bytes[0..text_size]);
-    let mut rodata: u64 = 0;
-    if has_rodata {
-        rodata = pad(inout out, rodata_alignment);
-        out.extend(in bytes[text_size..wrapping_add(text_size, rodata_size)]);
+    for ordinal in 0..SECTION_COUNT {
+        let mut layout = sections
+            .try_get(ordinal)
+            .unwrap_or(Layout {
+                index: 0,
+                size: 0,
+                alignment: 0,
+                offset: 0,
+                name: 0,
+                rela_offset: 0,
+                rela_size: 0,
+                rela_name: 0
+            });
+        let start = pad(inout out, ELF_WORD_ALIGNMENT);
+        if !append_relocations(
+            inout out,
+            in words[reloc_start..words.len()],
+            in symbols,
+            ordinal,
+            in layout
+        ) {
+            return ChunkSeq::new[u8]();
+        }
+        if out.len() != start {
+            layout.rela_offset = start;
+            layout.rela_size = wrapping_sub(out.len(), start);
+            layout.rela_name = append_name(inout names, in relocation_name(ordinal).as_bytes());
+            let _ = sections.try_set(ordinal, layout);
+            next_index = wrapping_add(next_index, 1);
+        }
     }
-    let rela = pad(inout out, ELF_WORD_ALIGNMENT);
-    if !append_relocations(inout out, in words[reloc_start..words.len()], in symbols, text_size) {
-        return ChunkSeq::new[u8]();
-    }
-    let rela_size = wrapping_sub(out.len(), rela);
+    let symbol_section = next_index;
+    let strings_section = wrapping_add(symbol_section, 1);
+    let stack_section = wrapping_add(strings_section, 1);
+    let names_section = wrapping_add(stack_section, 1);
     let symtab = pad(inout out, ELF_WORD_ALIGNMENT);
     out.extend(in symbols.table.as_slice());
     let strings = out.len();
     out.extend(in symbols.names.as_slice());
     let section_names = out.len();
-    let mut names = ChunkSeq::new[u8]();
-    names.push(0);
-    let text_name = append_name(inout names, in ".text".as_bytes());
-    let rela_name = append_name(inout names, in ".rela.text".as_bytes());
     let symtab_name = append_name(inout names, in ".symtab".as_bytes());
     let strings_name = append_name(inout names, in ".strtab".as_bytes());
     let stack_name = append_name(inout names, in ".note.GNU-stack".as_bytes());
-    let mut rodata_name: u64 = 0;
-    if has_rodata {
-        rodata_name = append_name(inout names, in ".rodata".as_bytes());
-    }
     let section_names_name = append_name(inout names, in ".shstrtab".as_bytes());
     out.extend(in names.as_slice());
-    let sections = pad(inout out, ELF_WORD_ALIGNMENT);
-    put64(inout out, Ehdr::Shoff, sections);
+
+    // The fixed payload set plus its relocation sections always fits one byte.
+    let _ = out.try_set(Ehdr::Shnum, wrapping_u8(wrapping_add(names_section, 1)));
+    let _ = out.try_set(Ehdr::Shstrndx, wrapping_u8(names_section));
+    let headers = pad(inout out, ELF_WORD_ALIGNMENT);
+    put64(inout out, Ehdr::Shoff, headers);
     let _ = grow(inout out, Shdr::Bytes);
-    section_header(
-        inout out,
-        text_name,
-        Sht::Progbits,
-        Shf::Alloc | Shf::Execinstr,
-        text,
-        text_size,
-        0,
-        0,
-        alignment,
-        0
-    );
-    section_header(
-        inout out,
-        rela_name,
-        Sht::Rela,
-        Shf::InfoLink,
-        rela,
-        rela_size,
-        SYMBOL_SECTION,
-        TEXT_SECTION,
-        ELF_WORD_ALIGNMENT,
-        RelEnt::RelaBytes
-    );
+    for ordinal in 0..SECTION_COUNT {
+        match sections.try_get(ordinal) {
+            Option::Some(layout) => {
+                if layout.index == 0 {
+                    continue;
+                }
+                let kind = if ordinal == BSS {
+                    Sht::Nobits
+                } else {
+                    Sht::Progbits
+                };
+                let flags: u64 = match ordinal {
+                    TEXT => Shf::Alloc | Shf::Execinstr,
+                    RODATA => Shf::Alloc,
+                    _ => Shf::Alloc | Shf::Write,
+                };
+                section_header(
+                    inout out,
+                    layout.name,
+                    kind,
+                    flags,
+                    layout.offset,
+                    layout.size,
+                    0,
+                    0,
+                    layout.alignment,
+                    0
+                );
+            },
+            Option::None => return ChunkSeq::new[u8](),
+        };
+    }
+    for ordinal in 0..SECTION_COUNT {
+        match sections.try_get(ordinal) {
+            Option::Some(layout) => {
+                if layout.rela_size != 0 {
+                    section_header(
+                        inout out,
+                        layout.rela_name,
+                        Sht::Rela,
+                        Shf::InfoLink,
+                        layout.rela_offset,
+                        layout.rela_size,
+                        symbol_section,
+                        layout.index,
+                        ELF_WORD_ALIGNMENT,
+                        RelEnt::RelaBytes
+                    );
+                }
+            },
+            Option::None => return ChunkSeq::new[u8](),
+        };
+    }
     section_header(
         inout out,
         symtab_name,
@@ -354,7 +462,7 @@ pub fn write_elf(in words: Slice[u64], in bytes: Slice[u8]) -> ChunkSeq[u8] {
         0,
         symtab,
         symbols.table.len(),
-        STRINGS_SECTION,
+        strings_section,
         symbols.first_global,
         ELF_WORD_ALIGNMENT,
         SymEnt::Bytes
@@ -372,20 +480,6 @@ pub fn write_elf(in words: Slice[u64], in bytes: Slice[u8]) -> ChunkSeq[u8] {
         0
     );
     section_header(inout out, stack_name, Sht::Progbits, 0, section_names, 0, 0, 0, 1, 0);
-    if has_rodata {
-        section_header(
-            inout out,
-            rodata_name,
-            Sht::Progbits,
-            Shf::Alloc,
-            rodata,
-            rodata_size,
-            0,
-            0,
-            rodata_alignment,
-            0
-        );
-    }
     section_header(
         inout out,
         section_names_name,

@@ -13,10 +13,19 @@ fn checked(source: &str) -> check::Checked {
 }
 
 #[test]
-fn ordinary_native_objects_use_opt_in_elf_with_read_only_data() {
+fn ordinary_native_objects_use_opt_in_elf_with_strings_and_vtables() {
     static EMITTED: AtomicU64 = AtomicU64::new(0);
     let code = checked("fn main() -> u64 { 42 }");
     let data = checked("fn n(s: Str) -> u64 { s.len() } fn main() -> u64 { n(\"read-only\") }");
+    let vtable = checked(
+        "
+        trait Read { fn read(in self) -> i64; }
+        impl Read for i64 { fn read(in self) -> i64 { self } }
+        fn take(in value: dyn Read) -> i64 { value.read() }
+        fn main() -> i64 { let value: i64 = 42; take(in value) }
+    ",
+    );
+    let growth = checked(include_str!("../../../../tests/fixtures/seq/growth.ves"));
     let object = |checked: &check::Checked| {
         native::object_with_options(&checked.world, "main", None, false)
             .unwrap()
@@ -24,6 +33,8 @@ fn ordinary_native_objects_use_opt_in_elf_with_read_only_data() {
     };
     let baseline_code = object(&code);
     let baseline_data = object(&data);
+    let baseline_vtable = object(&vtable);
+    let baseline_growth = object(&growth);
     assert!(
         object::File::parse(baseline_data.as_slice())
             .unwrap()
@@ -115,25 +126,58 @@ fn ordinary_native_objects_use_opt_in_elf_with_read_only_data() {
             *flags == pc32 && *addend == -(size_of::<i32>() as i64)
         })
     );
+    let candidate_vtable = object(&vtable);
+    assert_eq!(EMITTED.load(Relaxed), 4);
+    let table = object::File::parse(candidate_vtable.as_slice()).unwrap();
+    assert!(
+        table
+            .section_by_name(".data.rel.ro")
+            .unwrap()
+            .relocations()
+            .any(|(_, relocation)| relocation.flags()
+                == RelocationFlags::Elf {
+                    r_type: elf::R_X86_64_64,
+                })
+    );
+    let candidate_growth = object(&growth);
+    assert_eq!(EMITTED.load(Relaxed), 5);
+    let sequence = object::File::parse(candidate_growth.as_slice()).unwrap();
+    assert!(
+        sequence
+            .symbols()
+            .any(|symbol| symbol.is_undefined() && symbol.name() == Ok("memmove"))
+    );
     if Command::new("cc").arg("--version").output().is_err() {
         return;
     }
     let dir = std::env::temp_dir().join(format!("vesper-sh7-data-{}", std::process::id()));
     fs::create_dir(&dir).unwrap();
-    let obj = dir.join("rodata.o");
-    let exe = dir.join("rodata");
-    fs::write(&obj, candidate_data).unwrap();
-    let link = Command::new("cc")
-        .arg(&obj)
-        .arg("-o")
-        .arg(&exe)
-        .output()
-        .unwrap();
-    assert!(
-        link.status.success(),
-        "{}",
-        String::from_utf8_lossy(&link.stderr)
-    );
-    assert_eq!(Command::new(&exe).status().unwrap().code(), Some(9));
+    for (name, object, result) in [
+        ("rodata", candidate_data, 9),
+        ("vtable-baseline", baseline_vtable, 42),
+        ("vtable-candidate", candidate_vtable, 42),
+        ("growth-baseline", baseline_growth, 122),
+        ("growth-candidate", candidate_growth, 122),
+    ] {
+        let obj = dir.join(format!("{name}.o"));
+        let exe = dir.join(name);
+        fs::write(&obj, object).unwrap();
+        let link = Command::new("cc")
+            .arg(&obj)
+            .arg("-o")
+            .arg(&exe)
+            .output()
+            .unwrap();
+        assert!(
+            link.status.success(),
+            "{name}: {}",
+            String::from_utf8_lossy(&link.stderr)
+        );
+        assert_eq!(
+            Command::new(&exe).status().unwrap().code(),
+            Some(result),
+            "{name}"
+        );
+    }
     fs::remove_dir_all(dir).unwrap();
 }

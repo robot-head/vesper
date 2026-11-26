@@ -2685,13 +2685,7 @@ pub fn object_with_codegen_options(
         return windows::object(world, entry, isa, optimize, observer, instrument, options);
     }
     let capture_elf = observer.is_none() && instrument.is_none() && elf::enabled(isa.triple());
-    let builder = ObjectBuilder::new(
-        isa,
-        elf::MODULE_NAME,
-        cranelift_module::default_libcall_names(),
-    )
-    .map_err(|e| e.to_string())?;
-    let mut m = elf::ObjectModule::new(builder, capture_elf);
+    let mut m = elf::ObjectModule::new(isa, capture_elf)?;
     let (_, clif) = compile(
         &mut m, world, entry, optimize, observer, instrument, options,
     )?;

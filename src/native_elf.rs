@@ -1,20 +1,27 @@
-//! ELF serializer swap for Linux x86-64 code and read-only data.
+//! ELF serializer swap for Linux x86-64 code and data.
 use super::machine::{DATA_NAMESPACE, FUNCTION_NAMESPACE};
 use cranelift_codegen::{
-    Context, binemit::Reloc, control::ControlPlane, entity::SecondaryMap, ir, isa::TargetIsa,
+    Context,
+    binemit::Reloc,
+    control::ControlPlane,
+    ir,
+    isa::{OwnedTargetIsa, TargetIsa},
 };
 use cranelift_module::{
     DataDescription, DataId, FuncId, Init, Linkage, Module, ModuleDeclarations, ModuleReloc,
     ModuleRelocTarget, ModuleResult,
 };
 use cranelift_object::{ObjectBuilder, ObjectModule as CraneliftObject, ObjectProduct};
-use object::{FileFlags, SymbolFlags, SymbolKind, SymbolScope, write::SymbolSection};
-use std::sync::OnceLock;
+use object::{
+    FileFlags, SymbolFlags, SymbolKind, SymbolScope,
+    write::{SectionId, SymbolSection},
+};
+use std::{collections::HashMap, sync::OnceLock};
 
 type Encoder = fn(&[u64], &[u8]) -> Option<Vec<u8>>;
 static ENCODER: OnceLock<Encoder> = OnceLock::new();
 
-pub(super) const MODULE_NAME: &str = "vesper";
+const MODULE_NAME: &str = "vesper";
 
 /// Installs the opt-in ELF encoder. Declined objects use the existing writer.
 pub fn install_object_encoder(encode: Encoder) -> Result<(), Encoder> {
@@ -36,9 +43,36 @@ enum SymbolType {
     Undefined = 2,
     Hidden = 3,
     File = 4,
-    ReadOnlyLocal = 5,
-    ReadOnlyExport = 6,
-    ReadOnlyHidden = 7,
+}
+
+#[repr(usize)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Section {
+    Text = 0,
+    ReadOnly = 1,
+    Relro = 2,
+    Data = 3,
+    Bss = 4,
+}
+
+impl Section {
+    const ALL: [Self; 5] = [
+        Self::Text,
+        Self::ReadOnly,
+        Self::Relro,
+        Self::Data,
+        Self::Bss,
+    ];
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Text => ".text",
+            Self::ReadOnly => ".rodata",
+            Self::Relro => ".data.rel.ro",
+            Self::Data => ".data",
+            Self::Bss => ".bss",
+        }
+    }
 }
 
 #[repr(u64)]
@@ -59,15 +93,18 @@ impl RelocationType {
     }
 }
 
-const SYMBOL_COUNT_WORD: usize = 2;
+const SYMBOL_COUNT_WORD: usize = 0;
+const NO_SECTION: u64 = u64::MAX;
 
+#[derive(Clone, Copy)]
 enum Target {
     Function(FuncId),
     Data(DataId),
+    LibCall(ir::LibCall),
 }
 
-struct TextRelocation {
-    from: FuncId,
+struct Relocation {
+    from: Target,
     target: Target,
     offset: u32,
     kind: RelocationType,
@@ -75,9 +112,33 @@ struct TextRelocation {
 }
 
 struct ElfObject {
-    text_alignment: u64,
-    rodata_alignment: u64,
-    relocations: Vec<TextRelocation>,
+    alignments: [u64; Section::ALL.len()],
+    relocations: Vec<Relocation>,
+}
+
+impl Target {
+    fn symbol(self, product: &ObjectProduct) -> Option<(object::write::SymbolId, bool)> {
+        match self {
+            Self::Function(id) => product.functions[id],
+            Self::Data(id) => product.data_objects[id],
+            Self::LibCall(_) => None,
+        }
+    }
+
+    fn from_relocation(name: ModuleRelocTarget) -> Option<Self> {
+        match name {
+            ModuleRelocTarget::User {
+                namespace: FUNCTION_NAMESPACE,
+                index,
+            } => Some(Self::Function(FuncId::from_u32(index))),
+            ModuleRelocTarget::User {
+                namespace: DATA_NAMESPACE,
+                index,
+            } => Some(Self::Data(DataId::from_u32(index))),
+            ModuleRelocTarget::LibCall(call) => Some(Self::LibCall(call)),
+            _ => None,
+        }
+    }
 }
 
 impl ElfObject {
@@ -85,46 +146,108 @@ impl ElfObject {
         if product.object.flags != FileFlags::None {
             return None;
         }
-        let section_id = product.functions.values().find_map(|entry| {
-            let (symbol, defined) = (*entry)?;
-            if !defined {
+        let mut ids: [Option<SectionId>; Section::ALL.len()] = [None; Section::ALL.len()];
+        let mut sizes = [0; Section::ALL.len()];
+        let mut symbol_ids = HashMap::new();
+        let targets = product
+            .functions
+            .iter()
+            .filter_map(|(id, symbol)| symbol.map(|_| Target::Function(id)))
+            .chain(
+                product
+                    .data_objects
+                    .iter()
+                    .filter_map(|(id, symbol)| symbol.map(|_| Target::Data(id))),
+            );
+        let mut symbols = Vec::new();
+        for target in targets {
+            let (id, defined) = target.symbol(product)?;
+            let symbol = product.object.symbol(id);
+            let text = matches!(target, Target::Function(_));
+            let expected_kind = if text {
+                SymbolKind::Text
+            } else {
+                SymbolKind::Data
+            };
+            if symbol.kind != expected_kind || symbol.weak || symbol.flags != SymbolFlags::None {
                 return None;
             }
-            product.object.symbol(symbol).section.id()
-        })?;
-        let section = product.object.section(section_id);
-        if section.name() != Some(".text") {
-            return None;
+            let (kind, section) = match (defined, symbol.section, symbol.scope) {
+                (false, SymbolSection::Undefined, SymbolScope::Unknown) => {
+                    (SymbolType::Undefined, NO_SECTION)
+                }
+                (true, SymbolSection::Section(id), scope) => {
+                    let name = product.object.section(id).name()?;
+                    let section = Section::ALL
+                        .into_iter()
+                        .find(|section| section.name() == name)?;
+                    let index = section as usize;
+                    if text != (section == Section::Text)
+                        || ids[index].is_some_and(|current| current != id)
+                        || self.alignments[index] == 0
+                    {
+                        return None;
+                    }
+                    ids[index] = Some(id);
+                    sizes[index] = sizes[index].max(symbol.value.checked_add(symbol.size)?);
+                    let kind = match scope {
+                        SymbolScope::Compilation => SymbolType::Local,
+                        SymbolScope::Dynamic => SymbolType::Export,
+                        SymbolScope::Linkage => SymbolType::Hidden,
+                        _ => return None,
+                    };
+                    (kind, index as u64)
+                }
+                _ => return None,
+            };
+            // The first wire symbol is the compilation-unit name.
+            symbol_ids.insert(id, symbols.len() as u64 + 1);
+            symbols.push((symbol, kind, section));
         }
-        let text = section.data();
-        let rodata_id = product.data_objects.values().find_map(|entry| {
-            let (symbol, defined) = (*entry)?;
-            if !defined {
-                return None;
+        let mut libcalls = HashMap::new();
+        let libcall_name = cranelift_module::default_libcall_names();
+        for reloc in &self.relocations {
+            if let Target::LibCall(call) = reloc.target
+                && let std::collections::hash_map::Entry::Vacant(entry) = libcalls.entry(call)
+            {
+                let name = libcall_name(call);
+                let id = product.object.symbol_id(name.as_bytes())?;
+                let index = if let Some(&index) = symbol_ids.get(&id) {
+                    index
+                } else {
+                    let symbol = product.object.symbol(id);
+                    if symbol.kind != SymbolKind::Text
+                        || symbol.scope != SymbolScope::Unknown
+                        || symbol.section != SymbolSection::Undefined
+                        || symbol.weak
+                        || symbol.flags != SymbolFlags::None
+                    {
+                        return None;
+                    }
+                    let index = symbols.len() as u64 + 1;
+                    symbols.push((symbol, SymbolType::Undefined, NO_SECTION));
+                    symbol_ids.insert(id, index);
+                    index
+                };
+                entry.insert(index);
             }
-            product.object.symbol(symbol).section.id()
-        });
-        let rodata = if let Some(id) = rodata_id {
-            let section = product.object.section(id);
-            if section.name() != Some(".rodata") || self.rodata_alignment == 0 {
-                return None;
+        }
+
+        let mut words = vec![0];
+        let mut bytes = Vec::new();
+        for section in Section::ALL {
+            let index = section as usize;
+            let Some(id) = ids[index] else {
+                words.extend([0, if section == Section::Text { 1 } else { 0 }]);
+                continue;
+            };
+            if section != Section::Bss {
+                let data = product.object.section(id).data();
+                sizes[index] = data.len() as u64;
+                bytes.extend_from_slice(data);
             }
-            section.data()
-        } else {
-            &[]
-        };
-        let mut bytes = Vec::with_capacity(text.len() + rodata.len());
-        bytes.extend_from_slice(text);
-        bytes.extend_from_slice(rodata);
-        let mut words = vec![
-            text.len() as u64,
-            self.text_alignment,
-            0,
-            rodata.len() as u64,
-            self.rodata_alignment,
-        ];
-        let mut functions = SecondaryMap::<FuncId, Option<u64>>::new();
-        let mut data = SecondaryMap::<DataId, Option<u64>>::new();
+            words.extend([sizes[index], self.alignments[index]]);
+        }
         append_symbol(
             &mut words,
             &mut bytes,
@@ -132,28 +255,9 @@ impl ElfObject {
             0,
             0,
             SymbolType::File,
+            NO_SECTION,
         );
-        for (id, entry) in product.functions.iter() {
-            let Some((symbol, defined)) = *entry else {
-                continue;
-            };
-            let symbol = product.object.symbol(symbol);
-            if symbol.kind != SymbolKind::Text || symbol.weak || symbol.flags != SymbolFlags::None {
-                return None;
-            }
-            let kind = match (defined, symbol.section, symbol.scope) {
-                (false, SymbolSection::Undefined, SymbolScope::Unknown) => SymbolType::Undefined,
-                (true, SymbolSection::Section(section), scope) if section == section_id => {
-                    match scope {
-                        SymbolScope::Compilation => SymbolType::Local,
-                        SymbolScope::Dynamic => SymbolType::Export,
-                        SymbolScope::Linkage => SymbolType::Hidden,
-                        _ => return None,
-                    }
-                }
-                _ => return None,
-            };
-            functions[id] = Some(words[SYMBOL_COUNT_WORD]);
+        for (symbol, kind, section) in symbols {
             append_symbol(
                 &mut words,
                 &mut bytes,
@@ -161,54 +265,61 @@ impl ElfObject {
                 symbol.value,
                 symbol.size,
                 kind,
-            );
-        }
-        for (id, entry) in product.data_objects.iter() {
-            let Some((symbol, true)) = *entry else {
-                return None;
-            };
-            let symbol = product.object.symbol(symbol);
-            if rodata_id.is_none()
-                || symbol.section.id() != rodata_id
-                || symbol.kind != SymbolKind::Data
-                || symbol.weak
-                || symbol.flags != SymbolFlags::None
-            {
-                return None;
-            }
-            let kind = match symbol.scope {
-                SymbolScope::Compilation => SymbolType::ReadOnlyLocal,
-                SymbolScope::Dynamic => SymbolType::ReadOnlyExport,
-                SymbolScope::Linkage => SymbolType::ReadOnlyHidden,
-                _ => return None,
-            };
-            data[id] = Some(words[SYMBOL_COUNT_WORD]);
-            append_symbol(
-                &mut words,
-                &mut bytes,
-                &symbol.name,
-                symbol.value,
-                symbol.size,
-                kind,
+                section,
             );
         }
         for reloc in &self.relocations {
-            let (source, true) = product.functions[reloc.from]? else {
+            let (source, true) = reloc.from.symbol(product)? else {
                 return None;
             };
             let source = product.object.symbol(source);
+            let section = source.section.id()?;
+            let section = ids.iter().position(|&id| id == Some(section))?;
             let offset = u64::from(reloc.offset);
-            if offset.checked_add(reloc.kind.field_bytes())? > source.size {
+            if section == Section::Bss as usize
+                || offset.checked_add(reloc.kind.field_bytes())? > source.size
+            {
                 return None;
             }
             let at = source.value.checked_add(offset)?;
             let target = match reloc.target {
-                Target::Function(id) => functions[id]?,
-                Target::Data(id) => data[id]?,
+                Target::LibCall(call) => *libcalls.get(&call)?,
+                target => *symbol_ids.get(&target.symbol(product)?.0)?,
             };
-            words.extend([at, target, reloc.kind as u64, reloc.addend as u64]);
+            words.extend([
+                section as u64,
+                at,
+                target,
+                reloc.kind as u64,
+                reloc.addend as u64,
+            ]);
         }
         Some((words, bytes))
+    }
+
+    fn record(
+        &mut self,
+        from: Target,
+        relocs: impl IntoIterator<Item = ModuleReloc>,
+    ) -> Option<()> {
+        for reloc in relocs {
+            let target = Target::from_relocation(reloc.name)?;
+            let kind = match reloc.kind {
+                Reloc::Abs8 => RelocationType::Absolute64,
+                Reloc::X86PCRel4 => RelocationType::Relative32,
+                Reloc::X86CallPCRel4 | Reloc::X86CallPLTRel4 => RelocationType::PltRelative32,
+                Reloc::X86GOTPCRel4 => RelocationType::GotRelative32,
+                _ => return None,
+            };
+            self.relocations.push(Relocation {
+                from,
+                target,
+                offset: reloc.offset,
+                kind,
+                addend: reloc.addend,
+            });
+        }
+        Some(())
     }
 }
 
@@ -219,6 +330,7 @@ fn append_symbol(
     value: u64,
     size: u64,
     kind: SymbolType,
+    section: u64,
 ) {
     words.extend([
         bytes.len() as u64,
@@ -226,6 +338,7 @@ fn append_symbol(
         value,
         size,
         kind as u64,
+        section,
     ]);
     words[SYMBOL_COUNT_WORD] += 1;
     bytes.extend_from_slice(name);
@@ -239,15 +352,17 @@ pub(super) struct ObjectModule {
 }
 
 impl ObjectModule {
-    pub(super) fn new(builder: ObjectBuilder, enabled: bool) -> Self {
-        Self {
+    pub(super) fn new(isa: OwnedTargetIsa, enabled: bool) -> Result<Self, String> {
+        let builder =
+            ObjectBuilder::new(isa, MODULE_NAME, cranelift_module::default_libcall_names())
+                .map_err(|error| error.to_string())?;
+        Ok(Self {
             inner: CraneliftObject::new(builder),
             capture: enabled.then(|| ElfObject {
-                text_alignment: 1,
-                rodata_alignment: 0,
+                alignments: [0; Section::ALL.len()],
                 relocations: Vec::new(),
             }),
-        }
+        })
     }
 
     fn record(
@@ -257,42 +372,12 @@ impl ObjectModule {
         relocs: impl IntoIterator<Item = ModuleReloc>,
     ) {
         if let Some(capture) = &mut self.capture {
-            capture.text_alignment = capture
-                .text_alignment
+            let text = &mut capture.alignments[Section::Text as usize];
+            *text = (*text)
                 .max(alignment)
                 .max(self.inner.isa().symbol_alignment());
-            for reloc in relocs {
-                let target = match reloc.name {
-                    ModuleRelocTarget::User {
-                        namespace: FUNCTION_NAMESPACE,
-                        index,
-                    } => Target::Function(FuncId::from_u32(index)),
-                    ModuleRelocTarget::User {
-                        namespace: DATA_NAMESPACE,
-                        index,
-                    } => Target::Data(DataId::from_u32(index)),
-                    _ => {
-                        self.capture = None;
-                        return;
-                    }
-                };
-                let kind = match reloc.kind {
-                    Reloc::Abs8 => RelocationType::Absolute64,
-                    Reloc::X86PCRel4 => RelocationType::Relative32,
-                    Reloc::X86CallPCRel4 | Reloc::X86CallPLTRel4 => RelocationType::PltRelative32,
-                    Reloc::X86GOTPCRel4 => RelocationType::GotRelative32,
-                    _ => {
-                        self.capture = None;
-                        return;
-                    }
-                };
-                capture.relocations.push(TextRelocation {
-                    from,
-                    target,
-                    offset: reloc.offset,
-                    kind,
-                    addend: reloc.addend,
-                });
+            if capture.record(Target::Function(from), relocs).is_none() {
+                self.capture = None;
             }
         }
     }
@@ -338,14 +423,14 @@ impl Module for ObjectModule {
         writable: bool,
         tls: bool,
     ) -> ModuleResult<DataId> {
-        if writable || tls {
+        if tls {
             self.capture = None;
         }
         self.inner.declare_data(name, linkage, writable, tls)
     }
 
     fn declare_anonymous_data(&mut self, writable: bool, tls: bool) -> ModuleResult<DataId> {
-        if writable || tls {
+        if tls {
             self.capture = None;
         }
         self.inner.declare_anonymous_data(writable, tls)
@@ -354,18 +439,30 @@ impl Module for ObjectModule {
     fn define_data(&mut self, id: DataId, data: &DataDescription) -> ModuleResult<()> {
         self.inner.define_data(id, data)?;
         if let Some(capture) = &mut self.capture {
-            if !matches!(data.init, Init::Bytes { .. })
-                || !data.function_relocs.is_empty()
-                || !data.data_relocs.is_empty()
-                || data.custom_segment_section.is_some()
+            let declaration = self.inner.declarations().get_data_decl(id);
+            let relocs = !data.function_relocs.is_empty() || !data.data_relocs.is_empty();
+            if data.custom_segment_section.is_some()
                 || data.used
+                || (relocs && matches!(data.init, Init::Zeros { .. }))
             {
                 self.capture = None;
-            } else {
-                capture.rodata_alignment = capture
-                    .rodata_alignment
-                    .max(data.align.unwrap_or(1))
-                    .max(self.inner.isa().symbol_alignment());
+                return Ok(());
+            }
+            let section = match data.init {
+                Init::Zeros { .. } => Section::Bss,
+                _ if declaration.writable => Section::Data,
+                _ if relocs => Section::Relro,
+                _ => Section::ReadOnly,
+            };
+            let alignment = &mut capture.alignments[section as usize];
+            *alignment = (*alignment)
+                .max(data.align.unwrap_or(1))
+                .max(self.inner.isa().symbol_alignment());
+            if capture
+                .record(Target::Data(id), data.all_relocs(Reloc::Abs8))
+                .is_none()
+            {
+                self.capture = None;
             }
         }
         Ok(())
@@ -413,19 +510,13 @@ mod tests {
     use cranelift_codegen::settings;
 
     #[test]
-    fn writable_data_uses_the_original_artifact() {
+    fn thread_local_data_uses_the_original_artifact() {
         let isa = cranelift_native::builder()
             .unwrap()
             .finish(settings::Flags::new(settings::builder()))
             .unwrap();
         let object = |capture| {
-            let builder = ObjectBuilder::new(
-                isa.clone(),
-                MODULE_NAME,
-                cranelift_module::default_libcall_names(),
-            )
-            .unwrap();
-            let mut module = ObjectModule::new(builder, capture);
+            let mut module = ObjectModule::new(isa.clone(), capture).unwrap();
             let signature = module.make_signature();
             let entry = module
                 .declare_function("sh7_entry", Linkage::Export, &signature)
@@ -434,7 +525,7 @@ mod tests {
                 .define_function_bytes(entry, 1, &[0xc3], &[])
                 .unwrap();
             let data = module
-                .declare_data("sh7_writable", Linkage::Local, true, false)
+                .declare_data("sh7_tls", Linkage::Local, true, true)
                 .unwrap();
             let mut description = DataDescription::new();
             description.define(vec![31].into_boxed_slice());
