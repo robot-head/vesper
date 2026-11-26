@@ -1549,6 +1549,9 @@ const FMT_LIMIT_NODES: u64 = 1000000;
 const FMT_LIMIT_DEPTH: u64 = 24;
 const FMT_LIMIT_WORK: u64 = 536870912;
 
+// `recovery_edits`' words per edit: start, end and replacement length.
+const RECOVERY_EDIT_WORDS: u64 = 3;
+
 // One formatter run (`fmt_commands::format_text`): the output, whether it
 // changed and recovery mode's edit count, or the error (`ok` false).
 struct FmtRun {
@@ -1583,7 +1586,7 @@ fn fmt_run(in text: Str, recovery: bool) -> FmtRun {
             fail: FmtFail { code: 0, offset: 0 },
             output: recovery_output(in r),
             changed: recovery_changed(in r),
-            edits: edits.len() / 3,
+            edits: edits.len() / RECOVERY_EDIT_WORDS,
         };
     }
     handle Fail[FmtFail] in {
@@ -1610,37 +1613,53 @@ fn fmt_run(in text: Str, recovery: bool) -> FmtRun {
     }
 }
 
-// The `Debug` text of a vesper_fmt `Error` (`fail_code` order).
+// `FmtFail::code`: the index of the vesper_fmt `Error` variant
+// (crates/vesper-fmt/vesper/src/lib.ves `E_*`).
+const FMT_E_INPUT: u64 = 0;
+const FMT_E_OUTPUT: u64 = 1;
+const FMT_E_TOKEN: u64 = 2;
+const FMT_E_NODE: u64 = 3;
+const FMT_E_DEPTH: u64 = 4;
+const FMT_E_WORK: u64 = 5;
+const FMT_E_OVERFLOW: u64 = 6;
+const FMT_E_ALLOCATION: u64 = 7;
+const FMT_E_INVALID_DOC: u64 = 8;
+const FMT_E_SYNTAX: u64 = 9;
+const FMT_E_MACRO: u64 = 10;
+const FMT_E_CONSERVATION: u64 = 11;
+const FMT_E_IDEMPOTENT: u64 = 12;
+
+// The `Debug` text of a vesper_fmt `Error`.
 fn fmt_error_name(inout out: ChunkSeq[u8], code: u64, offset: u64) {
-    let name = if code == 0 {
+    let name = if code == FMT_E_INPUT {
         "InputLimit"
-    } else if code == 1 {
+    } else if code == FMT_E_OUTPUT {
         "OutputLimit"
-    } else if code == 2 {
+    } else if code == FMT_E_TOKEN {
         "TokenLimit"
-    } else if code == 3 {
+    } else if code == FMT_E_NODE {
         "NodeLimit"
-    } else if code == 4 {
+    } else if code == FMT_E_DEPTH {
         "DepthLimit"
-    } else if code == 5 {
+    } else if code == FMT_E_WORK {
         "WorkLimit"
-    } else if code == 6 {
+    } else if code == FMT_E_OVERFLOW {
         "Overflow"
-    } else if code == 7 {
+    } else if code == FMT_E_ALLOCATION {
         "Allocation"
-    } else if code == 8 {
+    } else if code == FMT_E_INVALID_DOC {
         "InvalidDoc"
-    } else if code == 9 {
+    } else if code == FMT_E_SYNTAX {
         "Syntax { offset: "
-    } else if code == 10 {
+    } else if code == FMT_E_MACRO {
         "OpaqueMacro"
-    } else if code == 11 {
+    } else if code == FMT_E_CONSERVATION {
         "Conservation"
     } else {
         "NotIdempotent"
     };
     out.extend(in name.as_bytes());
-    if code == 9 {
+    if code == FMT_E_SYNTAX {
         push_decimal(inout out, offset);
         out.extend(in " }".as_bytes());
     }
