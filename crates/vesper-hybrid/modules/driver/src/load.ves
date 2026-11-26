@@ -257,7 +257,8 @@ fn replace(in x: Slice[u8], in from: Slice[u8], in to: Slice[u8]) -> ChunkSeq[u8
             break;
         }
         if wrapping_add(i, from.len()) <= x.len()
-            && eq(in x[i..wrapping_add(i, from.len())], in from) {
+            && eq(in x[i..wrapping_add(i, from.len())], in from)
+        {
             out.extend(in to);
             i = wrapping_add(i, from.len());
         } else {
@@ -913,7 +914,8 @@ fn package(
                 let seg_seq = copy(in rel, k, seg_end);
                 let seg = seg_seq.as_slice();
                 if count == 1
-                    && (eq(in seg, in "lib".as_bytes()) || eq(in seg, in "main".as_bytes())) {
+                    && (eq(in seg, in "lib".as_bytes()) || eq(in seg, in "main".as_bytes()))
+                {
                     root = true;
                 } else {
                     if !is_module_segment(in seg) {
@@ -1325,7 +1327,9 @@ fn assembly_input(in l: Ld) -> ChunkSeq[u8] {
         let at = wrapping_mul(p, PKG);
         put_str(
             inout o,
-            in t[w(in l.pkgs.as_slice(), at)..w(in l.pkgs.as_slice(), wrapping_add(at, PKG_NAME_END))]
+            in t[
+                w(in l.pkgs.as_slice(), at)..w(in l.pkgs.as_slice(), wrapping_add(at, PKG_NAME_END))
+            ]
         );
         let mut n: u64 = 0;
         for k in 0..l.deps.len() / DEP {
@@ -1377,7 +1381,12 @@ fn assembly_input(in l: Ld) -> ChunkSeq[u8] {
         let a = wrapping_mul(f, FILE);
         put_str(
             inout o,
-            in t[w(in l.files.as_slice(), a)..w(in l.files.as_slice(), wrapping_add(a, FILE_DISPLAY_END))]
+            in t[
+                w(in l.files.as_slice(), a)..w(
+                    in l.files.as_slice(),
+                    wrapping_add(a, FILE_DISPLAY_END)
+                )
+            ]
         );
         put(inout o, w(in l.files.as_slice(), wrapping_add(a, FILE_BASE)));
     }
@@ -1472,7 +1481,10 @@ fn assembly_input(in l: Ld) -> ChunkSeq[u8] {
         put_str(
             inout o,
             in t[
-                w(in rows.as_slice(), wrapping_add(a, NAMED_START))..w(in rows.as_slice(), wrapping_add(a, NAMED_END))
+                w(in rows.as_slice(), wrapping_add(a, NAMED_START))..w(
+                    in rows.as_slice(),
+                    wrapping_add(a, NAMED_END)
+                )
             ]
         );
     }
@@ -1495,8 +1507,14 @@ fn graph_arg(in l: Ld, in input: Slice[u8]) -> ChunkSeq[u8] {
         let a = wrapping_mul(v, VSYS);
         let r = l.vsys.as_slice();
         put_str(inout o, in t[w(in r, a)..w(in r, wrapping_add(a, VSYS_PACKAGE_END))]);
-        put_str(inout o, in t[w(in r, wrapping_add(a, VSYS_DISPLAY))..w(in r, wrapping_add(a, VSYS_DISPLAY_END))]);
-        put_str(inout o, in t[w(in r, wrapping_add(a, VSYS_TEXT))..w(in r, wrapping_add(a, VSYS_TEXT_END))]);
+        put_str(
+            inout o,
+            in t[w(in r, wrapping_add(a, VSYS_DISPLAY))..w(in r, wrapping_add(a, VSYS_DISPLAY_END))]
+        );
+        put_str(
+            inout o,
+            in t[w(in r, wrapping_add(a, VSYS_TEXT))..w(in r, wrapping_add(a, VSYS_TEXT_END))]
+        );
         let first = w(in r, wrapping_add(a, VSYS_FIRST_TARGET));
         let n = w(in r, wrapping_add(a, VSYS_TARGETS));
         put(inout o, n);
@@ -1504,8 +1522,14 @@ fn graph_arg(in l: Ld, in input: Slice[u8]) -> ChunkSeq[u8] {
             let c = wrapping_mul(k, VT);
             let q = l.vt.as_slice();
             put(inout o, w(in q, c));
-            put_str(inout o, in t[w(in q, wrapping_add(c, VT_DISPLAY))..w(in q, wrapping_add(c, VT_DISPLAY_END))]);
-            put_str(inout o, in t[w(in q, wrapping_add(c, VT_TEXT))..w(in q, wrapping_add(c, VT_TEXT_END))]);
+            put_str(
+                inout o,
+                in t[w(in q, wrapping_add(c, VT_DISPLAY))..w(in q, wrapping_add(c, VT_DISPLAY_END))]
+            );
+            put_str(
+                inout o,
+                in t[w(in q, wrapping_add(c, VT_TEXT))..w(in q, wrapping_add(c, VT_TEXT_END))]
+            );
         }
     }
     let no = l.objs.len() / OBJ;
@@ -1514,7 +1538,10 @@ fn graph_arg(in l: Ld, in input: Slice[u8]) -> ChunkSeq[u8] {
         let a = wrapping_mul(k, OBJ);
         let r = l.objs.as_slice();
         put_str(inout o, in t[w(in r, a)..w(in r, wrapping_add(a, OBJ_PACKAGE_END))]);
-        put_str(inout o, in t[w(in r, wrapping_add(a, OBJ_DISPLAY))..w(in r, wrapping_add(a, OBJ_DISPLAY_END))]);
+        put_str(
+            inout o,
+            in t[w(in r, wrapping_add(a, OBJ_DISPLAY))..w(in r, wrapping_add(a, OBJ_DISPLAY_END))]
+        );
         let first = w(in r, wrapping_add(a, OBJ_FIRST_FILE));
         let n = w(in r, wrapping_add(a, OBJ_FILES));
         put(inout o, n);
@@ -1522,7 +1549,10 @@ fn graph_arg(in l: Ld, in input: Slice[u8]) -> ChunkSeq[u8] {
             let c = wrapping_mul(f, OF);
             let q = l.of.as_slice();
             put(inout o, w(in q, c));
-            put_str(inout o, in t[w(in q, wrapping_add(c, OF_PATH))..w(in q, wrapping_add(c, OF_PATH_END))]);
+            put_str(
+                inout o,
+                in t[w(in q, wrapping_add(c, OF_PATH))..w(in q, wrapping_add(c, OF_PATH_END))]
+            );
         }
     }
     o
