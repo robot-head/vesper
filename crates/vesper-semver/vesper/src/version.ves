@@ -2,6 +2,7 @@
 // that src/release.rs uses from the `semver` crate (1.0.28): `Version::parse`
 // with its error kinds and messages, `Version::cmp_precedence` and `Display`,
 // and release policy 1 itself (`check_release` after the comparison).
+use @vesper-std/core::iter::all;
 use self::{R, Ver};
 use self::util::{Class, div_rem, put, put_u64};
 
@@ -448,12 +449,7 @@ fn segment_end(in t: ChunkSeq[u8], i: u64, end: u64) -> u64 {
 }
 
 fn all_digits(in t: ChunkSeq[u8], i: u64, end: u64) -> bool {
-    for k in i..end {
-        if !is_digit(byte(in t, k)) {
-            return false;
-        }
-    }
-    true
+    all{ { is_digit(byte(in t, k)) } | k in i..end }
 }
 
 // Byte-wise comparison of `a[ai..ae]` and `b[bi..be]` (`str` Ord).

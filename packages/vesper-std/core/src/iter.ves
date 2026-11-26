@@ -1,7 +1,45 @@
 // Short-circuiting predicate folds from manuscript §7.8. The braced
 // predicate is evaluated in the iteration binding's scope, once per
-// visited element. Both forms evaluate the source once and allocate nothing.
+// visited element. The range and iterable forms evaluate their source once.
+// The zip form borrows two named sequences (including fields), visits only
+// their common prefix, and never evaluates unmatched elements. None allocates.
 pub sugar any: tag {
+    rule (
+        any{
+            $predicate:block
+                | $pair:pat in zip{
+                    $left:ident $(.$left_field:ident)*,
+                    $right:ident $(.$right_field:ident)*
+                }
+        }
+    ) => {
+        {
+            let left_len = $left $(.$left_field)*.len();
+            let right_len = $right $(.$right_field)*.len();
+            let left_view = $left $(.$left_field)* [0..left_len];
+            let right_view = $right $(.$right_field)* [0..right_len];
+            let pair_count = if left_len < right_len {
+                left_len
+            } else {
+                right_len
+            };
+            let mut found = false;
+            for pair_index in 0..pair_count {
+                match (left_view.try_get(pair_index), right_view.try_get(pair_index)) {
+                    (Option::Some(left_element), Option::Some(right_element)) => {
+                        let $pair = (left_element, right_element);
+                        if $predicate {
+                            found = true;
+                            break;
+                        }
+                    },
+                    _ => (),
+                }
+            }
+            found
+        }
+    }
+
     rule (any{ $predicate:block | $element:pat in $lo:expr.. $hi:expr }) => {
         {
             let mut found = false;
@@ -30,6 +68,42 @@ pub sugar any: tag {
 }
 
 pub sugar all: tag {
+    rule (
+        all{
+            $predicate:block
+                | $pair:pat in zip{
+                    $left:ident $(.$left_field:ident)*,
+                    $right:ident $(.$right_field:ident)*
+                }
+        }
+    ) => {
+        {
+            let left_len = $left $(.$left_field)*.len();
+            let right_len = $right $(.$right_field)*.len();
+            let left_view = $left $(.$left_field)* [0..left_len];
+            let right_view = $right $(.$right_field)* [0..right_len];
+            let pair_count = if left_len < right_len {
+                left_len
+            } else {
+                right_len
+            };
+            let mut accepted = true;
+            for pair_index in 0..pair_count {
+                match (left_view.try_get(pair_index), right_view.try_get(pair_index)) {
+                    (Option::Some(left_element), Option::Some(right_element)) => {
+                        let $pair = (left_element, right_element);
+                        if !$predicate {
+                            accepted = false;
+                            break;
+                        }
+                    },
+                    _ => (),
+                }
+            }
+            accepted
+        }
+    }
+
     rule (all{ $predicate:block | $element:pat in $lo:expr.. $hi:expr }) => {
         {
             let mut accepted = true;
@@ -121,6 +195,39 @@ pub sugar sum: tag emits eff [Fail] {
 // values keep the first item. The explicit type fixes the Option accumulator
 // even when no element runs the braced projection.
 pub sugar max: tag {
+    rule (
+        max{
+            $projection:block: $t:ty
+                | $pair:pat in zip{
+                    $left:ident $(.$left_field:ident)*,
+                    $right:ident $(.$right_field:ident)*
+                }
+        }
+    ) => {
+        {
+            let left_len = $left $(.$left_field)*.len();
+            let right_len = $right $(.$right_field)*.len();
+            let left_view = $left $(.$left_field)* [0..left_len];
+            let right_view = $right $(.$right_field)* [0..right_len];
+            let pair_count = if left_len < right_len {
+                left_len
+            } else {
+                right_len
+            };
+            let mut largest: Option[$t] = Option::None;
+            for pair_index in 0..pair_count {
+                match (left_view.try_get(pair_index), right_view.try_get(pair_index)) {
+                    (Option::Some(left_element), Option::Some(right_element)) => {
+                        let $pair = (left_element, right_element);
+                        largest = keep_max(largest, $projection);
+                    },
+                    _ => (),
+                }
+            }
+            largest
+        }
+    }
+
     rule (max{ $projection:block: $t:ty | $element:pat in $lo:expr.. $hi:expr }) => {
         {
             let mut largest: Option[$t] = Option::None;
@@ -365,7 +472,37 @@ test {
             return value => value,
             raise(_, _) => false,
         };
-        ok && visits == count
+        let mut any_visits: u64 = 0;
+        let found = any{ {
+            any_visits = wrapping_add(any_visits, 1);
+            x == 4 && weight == 1
+        } | (x, weight) in zip{ data.coefficients, data.weights } };
+        let mut all_visits: u64 = 0;
+        let accepted = all{ {
+            all_visits = wrapping_add(all_visits, 1);
+            x != 4 && weight == 1
+        } | (x, weight) in zip{ data.coefficients, data.weights } };
+        let largest = max{ {
+            if weight == 1 {
+                x
+            } else {
+                0
+            }
+        }: i64 | (x, weight) in zip{ data.coefficients, data.weights } };
+        let expected = match count {
+            0 => Option::None,
+            1 => Option::Some(3),
+            2 => Option::Some(4),
+            _ => Option::Some(5),
+        };
+        let predicate_visits = if count < 2 { count } else { 2 };
+        ok
+            && visits == count
+            && found == (count >= 2)
+            && accepted == (count < 2)
+            && any_visits == predicate_visits
+            && all_visits == predicate_visits
+            && largest == expected
     }
 
     fn zip(a: i64, b: i64) -> ChunkSeq[i64] {
@@ -467,9 +604,10 @@ test {
         ranks.push(Rank { score: 7, original: 2 });
         ranks.push(Rank { score: 7, original: 3 });
         let winner = max{ { x }: Rank | x in ranks.as_slice() };
-        match winner {
-            Option::Some(x) => x.original == 2,
-            Option::None => false,
+        let paired_winner = max{ { left }: Rank | (left, _) in zip{ ranks, ranks } };
+        match (winner, paired_winner) {
+            (Option::Some(x), Option::Some(y)) => x.original == 2 && y.original == 2,
+            _ => false,
         }
     }
 }

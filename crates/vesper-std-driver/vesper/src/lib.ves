@@ -111,9 +111,11 @@ fn drive() -> u64 eff [Ffi[StdFs], Ffi[StdProcess], Ffi[StdEnv], Fail[IoError]] 
     let root = setting(in "VESPER_STD_DRIVER_ROOT", in ".");
     let out = setting(in "VESPER_STD_DRIVER_OUT", in "io-driver-report.txt");
     let cc = setting(in "VESPER_STD_DRIVER_CC", in "cc");
-    let mut src: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    src.extend(in root.as_slice());
-    src.extend(in "/src".as_bytes());
+    let src = fmt{
+        new;
+        write_bytes(in root.as_slice()),
+        write_str(in "/src")
+    };
     let e = walk_path(in src.as_slice());
     let mut report: ChunkSeq[u8] = ChunkSeq::new[u8]();
     let mut files: u64 = 0;

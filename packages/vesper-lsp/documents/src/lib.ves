@@ -39,17 +39,17 @@ copy struct Reader {
     pos: u64
 }
 
-fn word(in b: Slice[u8], inout r: Reader) -> u64 {
-    let x = match b.try_read_u64_le(r.pos) {
-        Option::Some(x) => x,
+fn word(in bytes: Slice[u8], inout reader: Reader) -> u64 {
+    let value = match bytes.try_read_u64_le(reader.pos) {
+        Option::Some(value) => value,
         Option::None => 0,
     };
-    r.pos = wrapping_add(r.pos, Le::WordBytes);
-    x
+    reader.pos = wrapping_add(reader.pos, Le::WordBytes);
+    value
 }
 
-fn resource_code(r: Resource) -> u64 {
-    match r {
+fn resource_code(resource: Resource) -> u64 {
+    match resource {
         Resource::Source => 0,
         Resource::Lines => 1,
         Resource::Metadata => 2,
@@ -103,28 +103,28 @@ fn error_code(e: StoreError) -> u64 {
     )
 }
 
-fn read_index(in b: Slice[u8], inout r: Reader) -> Limits {
+fn read_index(in bytes: Slice[u8], inout reader: Reader) -> Limits {
     Limits {
-        max_source_bytes: narrow_usize(word(in b, inout r)),
-        max_lines: narrow_usize(word(in b, inout r)),
-        max_metadata_bytes: narrow_usize(word(in b, inout r)),
-        max_work: narrow_usize(word(in b, inout r)),
-        max_edits: narrow_usize(word(in b, inout r)),
-        max_output_bytes: narrow_usize(word(in b, inout r)),
-        max_diagnostics: narrow_usize(word(in b, inout r)),
-        max_labels: narrow_usize(word(in b, inout r)),
-        max_fixes: narrow_usize(word(in b, inout r)),
-        max_text_bytes: narrow_usize(word(in b, inout r))
+        max_source_bytes: narrow_usize(word(in bytes, inout reader)),
+        max_lines: narrow_usize(word(in bytes, inout reader)),
+        max_metadata_bytes: narrow_usize(word(in bytes, inout reader)),
+        max_work: narrow_usize(word(in bytes, inout reader)),
+        max_edits: narrow_usize(word(in bytes, inout reader)),
+        max_output_bytes: narrow_usize(word(in bytes, inout reader)),
+        max_diagnostics: narrow_usize(word(in bytes, inout reader)),
+        max_labels: narrow_usize(word(in bytes, inout reader)),
+        max_fixes: narrow_usize(word(in bytes, inout reader)),
+        max_text_bytes: narrow_usize(word(in bytes, inout reader))
     }
 }
 
-fn read_limits(in b: Slice[u8], inout r: Reader) -> StoreLimits {
-    let max_document_bytes = word(in b, inout r);
-    let max_documents = word(in b, inout r);
-    let max_total_bytes = word(in b, inout r);
-    let max_uri_bytes = word(in b, inout r);
-    let max_changes = word(in b, inout r);
-    let max_work = word(in b, inout r);
+fn read_limits(in bytes: Slice[u8], inout reader: Reader) -> StoreLimits {
+    let max_document_bytes = word(in bytes, inout reader);
+    let max_documents = word(in bytes, inout reader);
+    let max_total_bytes = word(in bytes, inout reader);
+    let max_uri_bytes = word(in bytes, inout reader);
+    let max_changes = word(in bytes, inout reader);
+    let max_work = word(in bytes, inout reader);
     StoreLimits {
         max_document_bytes: max_document_bytes,
         max_documents: max_documents,
@@ -132,7 +132,7 @@ fn read_limits(in b: Slice[u8], inout r: Reader) -> StoreLimits {
         max_uri_bytes: max_uri_bytes,
         max_changes: max_changes,
         max_work: max_work,
-        index: read_index(in b, inout r)
+        index: read_index(in bytes, inout reader)
     }
 }
 
@@ -147,41 +147,41 @@ fn text_at(in pool: Slice[u8], off: u64, len: u64) -> String {
 
 fn put_bytes(inout out: ChunkSeq[u64], in bytes: Slice[u8]) {
     out.push(bytes.len());
-    let mut x: u64 = 0;
-    let mut k: u32 = 0;
+    let mut packed: u64 = 0;
+    let mut packed_count: u32 = 0;
     for i in 0..bytes.len() {
-        let c = match bytes.try_get(i) {
+        let byte = match bytes.try_get(i) {
             Option::Some(v) => widen_u64(v),
             Option::None => 0,
         };
-        x = x | wrapping_shl_u64(c, wrapping_mul(k, 8));
-        k = wrapping_add(k, 1);
-        if k == Le::WordBytes {
-            out.push(x);
-            x = 0;
-            k = 0;
+        packed = packed | wrapping_shl_u64(byte, wrapping_mul(packed_count, 8));
+        packed_count = wrapping_add(packed_count, 1);
+        if packed_count == Le::WordBytes {
+            out.push(packed);
+            packed = 0;
+            packed_count = 0;
         }
     }
-    if k != 0 {
-        out.push(x);
+    if packed_count != 0 {
+        out.push(packed);
     }
 }
 
 // One op's result: its status, the store's count, total and revision, and
 // the document it returns (present, version, revision, text).
-fn put_state(inout out: ChunkSeq[u64], in s: Store, status: u64, doc: Option[u64]) {
+fn put_state(inout out: ChunkSeq[u64], in store: Store, status: u64, row: Option[u64]) {
     out.push(status);
-    out.push(store_len(in s));
-    out.push(store_total(in s));
-    out.push(store_revision(in s));
-    match doc {
+    out.push(store_len(in store));
+    out.push(store_total(in store));
+    out.push(store_revision(in store));
+    match row {
         Option::Some(at) => {
             out.push(1);
-            out.push(wrapping_u64(doc_version(in s, at)));
-            out.push(doc_revision(in s, at));
-            let mut t: ChunkSeq[u8] = ChunkSeq::new();
-            doc_text(in s, at, inout t);
-            put_bytes(inout out, in t[0..t.len()]);
+            out.push(wrapping_u64(doc_version(in store, at)));
+            out.push(doc_revision(in store, at));
+            let mut text: ChunkSeq[u8] = ChunkSeq::new();
+            doc_text(in store, at, inout text);
+            put_bytes(inout out, in text[0..text.len()]);
         }
         Option::None => {
             out.push(0);
@@ -189,29 +189,34 @@ fn put_state(inout out: ChunkSeq[u64], in s: Store, status: u64, doc: Option[u64
     }
 }
 
-fn put_closed(inout out: ChunkSeq[u64], in s: Store, in c: Closed) {
+fn put_closed(inout out: ChunkSeq[u64], in store: Store, in closed: Closed) {
     out.push(0);
-    out.push(store_len(in s));
-    out.push(store_total(in s));
-    out.push(store_revision(in s));
+    out.push(store_len(in store));
+    out.push(store_total(in store));
+    out.push(store_revision(in store));
     out.push(1);
-    out.push(wrapping_u64(c.version));
-    out.push(c.revision);
-    put_bytes(inout out, in c.text.as_bytes());
+    out.push(wrapping_u64(closed.version));
+    out.push(closed.revision);
+    put_bytes(inout out, in closed.text.as_bytes());
 }
 
-fn try_new(l: StoreLimits) -> Result[Store, StoreError] {
+fn try_new(limits: StoreLimits) -> Result[Store, StoreError] {
     handle Fail[StoreError] in {
-        store_ok(store_new(l))
+        store_ok(store_new(limits))
     } with {
         return v => v,
         raise(e, resume) => store_err(e),
     }
 }
 
-fn try_open(inout s: Store, in uri: Str, version: i64, in text: Str) -> Result[u64, StoreError] {
+fn try_open(
+    inout store: Store,
+    in uri: Str,
+    version: i64,
+    in text: Str
+) -> Result[u64, StoreError] {
     handle Fail[StoreError] in {
-        count_ok(store_open(inout s, in uri, version, in text))
+        count_ok(store_open(inout store, in uri, version, in text))
     } with {
         return v => v,
         raise(e, resume) => count_err(e),
@@ -219,32 +224,32 @@ fn try_open(inout s: Store, in uri: Str, version: i64, in text: Str) -> Result[u
 }
 
 fn try_change(
-    inout s: Store,
+    inout store: Store,
     in uri: Str,
     version: i64,
     in changes: ChunkSeq[Change]
 ) -> Result[u64, StoreError] {
     handle Fail[StoreError] in {
-        count_ok(store_change(inout s, in uri, version, in changes))
+        count_ok(store_change(inout store, in uri, version, in changes))
     } with {
         return v => v,
         raise(e, resume) => count_err(e),
     }
 }
 
-fn try_close(inout s: Store, in uri: Str) -> Result[Closed, StoreError] {
+fn try_close(inout store: Store, in uri: Str) -> Result[Closed, StoreError] {
     handle Fail[StoreError] in {
-        closed_ok(store_close(inout s, in uri))
+        closed_ok(store_close(inout store, in uri))
     } with {
         return v => v,
         raise(e, resume) => closed_err(e),
     }
 }
 
-fn after(inout out: ChunkSeq[u64], in s: Store, r: Result[u64, StoreError]) {
-    match r {
-        Result::Ok(at) => put_state(inout out, in s, 0, Option::Some(at)),
-        Result::Err(e) => put_state(inout out, in s, error_code(e), Option::None),
+fn after(inout out: ChunkSeq[u64], in store: Store, result: Result[u64, StoreError]) {
+    match result {
+        Result::Ok(at) => put_state(inout out, in store, 0, Option::Some(at)),
+        Result::Err(e) => put_state(inout out, in store, error_code(e), Option::None),
     }
 }
 
@@ -254,16 +259,16 @@ fn after(inout out: ChunkSeq[u64], in s: Store, r: Result[u64, StoreError]) {
 // offset and length); see `Op`. The result is the status of
 // `DocumentStore::new`, then `put_state` per op.
 pub fn lsp_documents(in input: Str) -> ChunkSeq[u64] {
-    let b = input.as_bytes();
-    let mut r = Reader { pos: 0 };
-    let l = read_limits(in b, inout r);
-    let n = word(in b, inout r);
-    let start = r.pos;
-    let end = wrapping_add(start, wrapping_mul(n, Le::WordBytes));
-    let pool = b[end..b.len()];
+    let bytes = input.as_bytes();
+    let mut reader = Reader { pos: 0 };
+    let limits = read_limits(in bytes, inout reader);
+    let word_count = word(in bytes, inout reader);
+    let start = reader.pos;
+    let end = wrapping_add(start, wrapping_mul(word_count, Le::WordBytes));
+    let pool = bytes[end..bytes.len()];
     let mut out: ChunkSeq[u64] = ChunkSeq::new();
-    let mut s = match try_new(l) {
-        Result::Ok(s) => s,
+    let mut store = match try_new(limits) {
+        Result::Ok(store) => store,
         Result::Err(e) => {
             out.push(error_code(e));
             return out;
@@ -271,61 +276,61 @@ pub fn lsp_documents(in input: Str) -> ChunkSeq[u64] {
     };
     out.push(0);
     loop {
-        if r.pos >= end {
+        if reader.pos >= end {
             break;
         }
-        let op = word(in b, inout r);
+        let op = word(in bytes, inout reader);
         if op == Op::SetRevision {
-            store_set_revision(inout s, word(in b, inout r));
-            put_state(inout out, in s, 0, Option::None);
+            store_set_revision(inout store, word(in bytes, inout reader));
+            put_state(inout out, in store, 0, Option::None);
             continue;
         }
-        let uri_off = word(in b, inout r);
-        let uri_len = word(in b, inout r);
+        let uri_off = word(in bytes, inout reader);
+        let uri_len = word(in bytes, inout reader);
         let uri = text_at(in pool, uri_off, uri_len);
         if op == Op::Open {
-            let version = wrapping_i64(word(in b, inout r));
-            let t_off = word(in b, inout r);
-            let t_len = word(in b, inout r);
-            let text = text_at(in pool, t_off, t_len);
-            let got = try_open(inout s, in uri, version, in text);
-            after(inout out, in s, got);
+            let version = wrapping_i64(word(in bytes, inout reader));
+            let text_off = word(in bytes, inout reader);
+            let text_len = word(in bytes, inout reader);
+            let text = text_at(in pool, text_off, text_len);
+            let outcome = try_open(inout store, in uri, version, in text);
+            after(inout out, in store, outcome);
         } else if op == Op::Change {
-            let version = wrapping_i64(word(in b, inout r));
-            let count = word(in b, inout r);
+            let version = wrapping_i64(word(in bytes, inout reader));
+            let count = word(in bytes, inout reader);
             let mut changes: ChunkSeq[Change] = ChunkSeq::new();
             for i in 0..count {
-                let has_range = word(in b, inout r) == 1;
-                let sl = wrapping_u32(word(in b, inout r));
-                let sc = wrapping_u32(word(in b, inout r));
-                let el = wrapping_u32(word(in b, inout r));
-                let ec = wrapping_u32(word(in b, inout r));
-                let has_len = word(in b, inout r) == 1;
-                let len = word(in b, inout r);
-                let t_off = word(in b, inout r);
-                let t_len = word(in b, inout r);
+                let has_range = word(in bytes, inout reader) == 1;
+                let start_line = wrapping_u32(word(in bytes, inout reader));
+                let start_char = wrapping_u32(word(in bytes, inout reader));
+                let end_line = wrapping_u32(word(in bytes, inout reader));
+                let end_char = wrapping_u32(word(in bytes, inout reader));
+                let has_len = word(in bytes, inout reader) == 1;
+                let len = word(in bytes, inout reader);
+                let text_off = word(in bytes, inout reader);
+                let text_len = word(in bytes, inout reader);
                 changes.push(Change {
                     has_range: has_range,
                     range: Range {
-                        start: Position { line: sl, character: sc },
-                        end: Position { line: el, character: ec }
+                        start: Position { line: start_line, character: start_char },
+                        end: Position { line: end_line, character: end_char }
                     },
                     has_len: has_len,
                     len: len,
-                    text: text_at(in pool, t_off, t_len)
+                    text: text_at(in pool, text_off, text_len)
                 });
             }
-            let got = try_change(inout s, in uri, version, in changes);
-            after(inout out, in s, got);
+            let outcome = try_change(inout store, in uri, version, in changes);
+            after(inout out, in store, outcome);
         } else if op == Op::Close {
-            match try_close(inout s, in uri) {
-                Result::Ok(c) => put_closed(inout out, in s, in c),
-                Result::Err(e) => put_state(inout out, in s, error_code(e), Option::None),
+            match try_close(inout store, in uri) {
+                Result::Ok(closed) => put_closed(inout out, in store, in closed),
+                Result::Err(e) => put_state(inout out, in store, error_code(e), Option::None),
             }
         } else if op == Op::Get {
-            match store_get(in s, in uri) {
-                Option::Some(at) => put_state(inout out, in s, 0, Option::Some(at)),
-                Option::None => put_state(inout out, in s, STATUS_ABSENT, Option::None),
+            match store_get(in store, in uri) {
+                Option::Some(at) => put_state(inout out, in store, 0, Option::Some(at)),
+                Option::None => put_state(inout out, in store, STATUS_ABSENT, Option::None),
             }
         }
     }

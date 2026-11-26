@@ -23,26 +23,22 @@ fn merge[T: mod copy + Ord](in src: Slice[T], inout dst: Slice[T], lo: u64, mid:
         if left >= mid || right >= hi {
             break;
         }
-        match src.try_get(left) {
-            Option::Some(a) => match src.try_get(right) {
-                Option::Some(b) => {
-                    if lt(b, a) {
-                        dst.try_set(out, b);
-                        right = wrapping_add(right, 1);
-                    } else {
-                        dst.try_set(out, a);
-                        left = wrapping_add(left, 1);
-                    }
-                    out = wrapping_add(out, 1);
-                },
-                Option::None => {
-                    right = hi;
-                },
-            },
-            Option::None => {
-                left = mid;
-            },
+        guard let Option::Some(a) = src.try_get(left) else {
+            left = mid;
+            continue;
+        };
+        guard let Option::Some(b) = src.try_get(right) else {
+            right = hi;
+            continue;
+        };
+        if lt(b, a) {
+            dst.try_set(out, b);
+            right = wrapping_add(right, 1);
+        } else {
+            dst.try_set(out, a);
+            left = wrapping_add(left, 1);
         }
+        out = wrapping_add(out, 1);
     }
     if left < mid {
         dst.try_copy_from(out, in src[left..mid]);

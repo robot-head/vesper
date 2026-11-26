@@ -231,34 +231,30 @@ fn merge_pairs[K: mod copy + Ord, V: mod copy](
             i < mid && j < hi
         }
     ) {
-        match ka.try_get(i) {
-            Option::Some(a) => match ka.try_get(j) {
-                Option::Some(b) => {
-                    let from = if lt(b, a) {
-                        j
-                    } else {
-                        i
-                    };
-                    when let Option::Some(v) = va.try_get(from) {
-                        vb.try_set(k, v);
-                    }
-                    if from == j {
-                        kb.try_set(k, b);
-                        j = wrapping_add(j, 1);
-                    } else {
-                        kb.try_set(k, a);
-                        i = wrapping_add(i, 1);
-                    }
-                    k = wrapping_add(k, 1);
-                },
-                Option::None => {
-                    j = hi;
-                },
-            },
-            Option::None => {
-                i = mid;
-            },
+        guard let Option::Some(a) = ka.try_get(i) else {
+            i = mid;
+            continue;
+        };
+        guard let Option::Some(b) = ka.try_get(j) else {
+            j = hi;
+            continue;
+        };
+        let from = if lt(b, a) {
+            j
+        } else {
+            i
+        };
+        when let Option::Some(v) = va.try_get(from) {
+            vb.try_set(k, v);
         }
+        if from == j {
+            kb.try_set(k, b);
+            j = wrapping_add(j, 1);
+        } else {
+            kb.try_set(k, a);
+            i = wrapping_add(i, 1);
+        }
+        k = wrapping_add(k, 1);
     }
     if i < mid {
         kb.try_copy_from(k, in ka[i..mid]);

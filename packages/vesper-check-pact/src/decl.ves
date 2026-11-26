@@ -25,58 +25,58 @@ pub copy struct Gen {
 // `Row` type id.
 pub copy struct Sig {
     name: u32,
-    s: u64,
-    e: u64,
-    ga: u32,
-    gn: u32,
-    pa: u32,
-    pn: u32,
+    span_start: u64,
+    span_end: u64,
+    gen_start: u32,
+    gen_count: u32,
+    par_start: u32,
+    par_count: u32,
     result: u32,
     row: u32,
 }
 
 // A parameter (`ast::Param`). Its place projections are the words
-// `words[ja..ja+jn]`: per projection its length, then its names.
+// `words[proj_start..proj_start+proj_count]`: per projection its length, then its names.
 pub copy struct Par {
     name: u32,
     pass: u8,
-    ja: u32,
-    jn: u32,
+    proj_start: u32,
+    proj_count: u32,
     ty: u32,
-    s: u64,
-    e: u64,
+    span_start: u64,
+    span_end: u64,
 }
 
 // `type A: mod m;` in a trait.
 pub copy struct AssocDecl {
     name: u32,
     bound: u8,
-    s: u64,
-    e: u64,
+    span_start: u64,
+    span_end: u64,
 }
 
 pub copy struct TraitRow {
     name: u32,
-    s: u64,
-    e: u64,
-    ga: u32,
-    gn: u32,
-    aa: u32,
-    an: u32,
-    // methods: sigs[ma..ma+mn]
-    ma: u32,
-    mn: u32,
+    span_start: u64,
+    span_end: u64,
+    gen_start: u32,
+    gen_count: u32,
+    assoc_start: u32,
+    assoc_count: u32,
+    // methods: sigs[method_start..method_start+method_count]
+    method_start: u32,
+    method_count: u32,
 }
 
 // `Trait[args]`, optionally package-qualified: `pkg` is the package name
-// symbol + 1, or 0. Arguments are `words[xa..xa+xn]` (type ids).
+// symbol + 1, or 0. Arguments are `words[arg_start..arg_start+arg_count]` (type ids).
 pub copy struct TRef {
     pkg: u32,
     name: u32,
-    xa: u32,
-    xn: u32,
-    s: u64,
-    e: u64,
+    arg_start: u32,
+    arg_count: u32,
+    span_start: u64,
+    span_end: u64,
 }
 
 // `where T: Trait[args]` on a conformance.
@@ -89,60 +89,60 @@ pub copy struct Where {
 pub copy struct Bind {
     name: u32,
     ty: u32,
-    s: u64,
-    e: u64,
+    span_start: u64,
+    span_end: u64,
 }
 
 // A canonical `impl` (`model` false) or a named `model`.
 pub copy struct Conf {
     model: bool,
-    mname: u32,
-    ga: u32,
-    gn: u32,
+    model_name: u32,
+    gen_start: u32,
+    gen_count: u32,
     tref: u32,
     self_ty: u32,
-    wa: u32,
-    wn: u32,
-    ba: u32,
-    bn: u32,
-    ma: u32,
-    mn: u32,
-    s: u64,
-    e: u64,
+    where_start: u32,
+    where_count: u32,
+    bind_start: u32,
+    bind_count: u32,
+    method_start: u32,
+    method_count: u32,
+    span_start: u64,
+    span_end: u64,
 }
 
 // `use model M;`.
 pub copy struct UseRow {
     model: u32,
-    s: u64,
-    e: u64,
+    span_start: u64,
+    span_end: u64,
 }
 
 // `ast::TraitBoundSyntax`.
 pub copy struct BoundSyn {
     param: u32,
     tref: u32,
-    s: u64,
-    e: u64,
+    span_start: u64,
+    span_end: u64,
     owner: u32,
 }
 
-// An ADT item (field types `words[a..a+n]`) or an effect item (operations
-// `sigs[a..a+n]`), in module order.
+// An ADT item (field types `words[member_start..member_start+member_count]`) or an
+// effect item (operations `sigs[member_start..member_start+member_count]`), in module order.
 pub copy struct ItemRow {
     adt: bool,
     name: u32,
-    s: u64,
-    e: u64,
-    a: u32,
-    n: u32,
+    span_start: u64,
+    span_end: u64,
+    member_start: u32,
+    member_count: u32,
 }
 
 // A function of the base world (`World::functions`) and its generics.
 pub copy struct FnRow {
     name: u32,
-    ga: u32,
-    gn: u32,
+    gen_start: u32,
+    gen_count: u32,
 }
 
 pub struct Decls {
@@ -197,12 +197,12 @@ impl Decls {
             Option::Some(x) => x,
             Option::None => Sig {
                 name: 0,
-                s: 0,
-                e: 0,
-                ga: 0,
-                gn: 0,
-                pa: 0,
-                pn: 0,
+                span_start: 0,
+                span_end: 0,
+                gen_start: 0,
+                gen_count: 0,
+                par_start: 0,
+                par_count: 0,
                 result: 0,
                 row: 0
             },
@@ -212,7 +212,15 @@ impl Decls {
     pub fn par(in self, i: u64) -> Par {
         match self.pars.try_get(i) {
             Option::Some(x) => x,
-            Option::None => Par { name: 0, pass: 0, ja: 0, jn: 0, ty: 0, s: 0, e: 0 },
+            Option::None => Par {
+                name: 0,
+                pass: 0,
+                proj_start: 0,
+                proj_count: 0,
+                ty: 0,
+                span_start: 0,
+                span_end: 0
+            },
         }
     }
 
@@ -225,14 +233,14 @@ impl Decls {
             Option::Some(x) => x,
             Option::None => TraitRow {
                 name: 0,
-                s: 0,
-                e: 0,
-                ga: 0,
-                gn: 0,
-                aa: 0,
-                an: 0,
-                ma: 0,
-                mn: 0
+                span_start: 0,
+                span_end: 0,
+                gen_start: 0,
+                gen_count: 0,
+                assoc_start: 0,
+                assoc_count: 0,
+                method_start: 0,
+                method_count: 0
             },
         }
     }
@@ -240,14 +248,21 @@ impl Decls {
     pub fn assoc(in self, i: u64) -> AssocDecl {
         match self.assocs.try_get(i) {
             Option::Some(x) => x,
-            Option::None => AssocDecl { name: 0, bound: 0, s: 0, e: 0 },
+            Option::None => AssocDecl { name: 0, bound: 0, span_start: 0, span_end: 0 },
         }
     }
 
     pub fn tref(in self, i: u64) -> TRef {
         match self.trefs.try_get(i) {
             Option::Some(x) => x,
-            Option::None => TRef { pkg: 0, name: 0, xa: 0, xn: 0, s: 0, e: 0 },
+            Option::None => TRef {
+                pkg: 0,
+                name: 0,
+                arg_start: 0,
+                arg_count: 0,
+                span_start: 0,
+                span_end: 0
+            },
         }
     }
 
@@ -256,19 +271,19 @@ impl Decls {
             Option::Some(x) => x,
             Option::None => Conf {
                 model: false,
-                mname: 0,
-                ga: 0,
-                gn: 0,
+                model_name: 0,
+                gen_start: 0,
+                gen_count: 0,
                 tref: 0,
                 self_ty: 0,
-                wa: 0,
-                wn: 0,
-                ba: 0,
-                bn: 0,
-                ma: 0,
-                mn: 0,
-                s: 0,
-                e: 0
+                where_start: 0,
+                where_count: 0,
+                bind_start: 0,
+                bind_count: 0,
+                method_start: 0,
+                method_count: 0,
+                span_start: 0,
+                span_end: 0
             },
         }
     }
@@ -283,130 +298,157 @@ impl Decls {
     pub fn bind(in self, i: u64) -> Bind {
         match self.binds.try_get(i) {
             Option::Some(x) => x,
-            Option::None => Bind { name: 0, ty: 0, s: 0, e: 0 },
+            Option::None => Bind { name: 0, ty: 0, span_start: 0, span_end: 0 },
         }
     }
 
     pub fn use_row(in self, i: u64) -> UseRow {
         match self.uses.try_get(i) {
             Option::Some(x) => x,
-            Option::None => UseRow { model: 0, s: 0, e: 0 },
+            Option::None => UseRow { model: 0, span_start: 0, span_end: 0 },
         }
     }
 
     pub fn bound_syn(in self, i: u64) -> BoundSyn {
         match self.bounds.try_get(i) {
             Option::Some(x) => x,
-            Option::None => BoundSyn { param: 0, tref: 0, s: 0, e: 0, owner: 0 },
+            Option::None => BoundSyn { param: 0, tref: 0, span_start: 0, span_end: 0, owner: 0 },
         }
     }
 
     pub fn item(in self, i: u64) -> ItemRow {
         match self.items.try_get(i) {
             Option::Some(x) => x,
-            Option::None => ItemRow { adt: false, name: 0, s: 0, e: 0, a: 0, n: 0 },
+            Option::None => ItemRow {
+                adt: false,
+                name: 0,
+                span_start: 0,
+                span_end: 0,
+                member_start: 0,
+                member_count: 0
+            },
         }
     }
 
     pub fn fn_row(in self, i: u64) -> FnRow {
         match self.fns.try_get(i) {
             Option::Some(x) => x,
-            Option::None => FnRow { name: 0, ga: 0, gn: 0 },
+            Option::None => FnRow { name: 0, gen_start: 0, gen_count: 0 },
         }
     }
 }
 
 // ------------------------------------------------------------------ decoder
 
-fn sym(in nmap: ChunkSeq[u32], x: u64) -> u32 {
-    u32_at(in nmap, x)
+fn sym(in nmap: ChunkSeq[u32], index: u64) -> u32 {
+    u32_at(in nmap, index)
 }
 
-fn tid(in tmap: ChunkSeq[u32], x: u64) -> u32 {
-    u32_at(in tmap, x)
+fn tid(in tmap: ChunkSeq[u32], index: u64) -> u32 {
+    u32_at(in tmap, index)
 }
 
-fn read_gens(inout r: Reader, in b: Slice[u8], inout d: Decls, in nmap: ChunkSeq[u32]) -> u32 {
-    let n = r.word(in b);
+fn read_gens(
+    inout reader: Reader,
+    in bytes: Slice[u8],
+    inout decls: Decls,
+    in nmap: ChunkSeq[u32]
+) -> u32 {
+    let n = reader.word(in bytes);
     for i in 0..n {
-        let name = sym(in nmap, r.word(in b));
-        let bound = wrapping_u8(r.word(in b));
-        let row = r.word(in b) != 0;
-        d.gens.push(Gen { name: name, bound: bound, row: row });
+        let name = sym(in nmap, reader.word(in bytes));
+        let bound = wrapping_u8(reader.word(in bytes));
+        let row = reader.word(in bytes) != 0;
+        decls.gens.push(Gen { name: name, bound: bound, row: row });
     }
     n32(n)
 }
 
 fn read_tref(
-    inout r: Reader,
-    in b: Slice[u8],
-    inout d: Decls,
+    inout reader: Reader,
+    in bytes: Slice[u8],
+    inout decls: Decls,
     in nmap: ChunkSeq[u32],
     in tmap: ChunkSeq[u32]
 ) -> u32 {
-    let p = r.word(in b);
-    let pkg = if p == 0 {
+    let pkg_word = reader.word(in bytes);
+    let pkg = if pkg_word == 0 {
         0
     } else {
-        wrapping_add(sym(in nmap, wrapping_sub(p, 1)), 1)
+        wrapping_add(sym(in nmap, wrapping_sub(pkg_word, 1)), 1)
     };
-    let name = sym(in nmap, r.word(in b));
-    let xn = r.word(in b);
-    let xa = n32(d.words.len());
-    for i in 0..xn {
-        let t = tid(in tmap, r.word(in b));
-        d.words.push(t);
+    let name = sym(in nmap, reader.word(in bytes));
+    let arg_count = reader.word(in bytes);
+    let arg_start = n32(decls.words.len());
+    for i in 0..arg_count {
+        let arg_ty = tid(in tmap, reader.word(in bytes));
+        decls.words.push(arg_ty);
     }
-    let s = r.word(in b);
-    let e = r.word(in b);
-    let id = n32(d.trefs.len());
-    d.trefs.push(TRef { pkg: pkg, name: name, xa: xa, xn: n32(xn), s: s, e: e });
+    let span_start = reader.word(in bytes);
+    let span_end = reader.word(in bytes);
+    let id = n32(decls.trefs.len());
+    decls.trefs.push(TRef {
+        pkg: pkg,
+        name: name,
+        arg_start: arg_start,
+        arg_count: n32(arg_count),
+        span_start: span_start,
+        span_end: span_end
+    });
     id
 }
 
 fn read_sig(
-    inout r: Reader,
-    in b: Slice[u8],
-    inout d: Decls,
+    inout reader: Reader,
+    in bytes: Slice[u8],
+    inout decls: Decls,
     in nmap: ChunkSeq[u32],
     in tmap: ChunkSeq[u32]
 ) {
-    let name = sym(in nmap, r.word(in b));
-    let s = r.word(in b);
-    let e = r.word(in b);
-    let ga = n32(d.gens.len());
-    let gn = read_gens(inout r, in b, inout d, in nmap);
-    let pn = r.word(in b);
-    let pa = n32(d.pars.len());
-    for i in 0..pn {
-        let pname = sym(in nmap, r.word(in b));
-        let pass = wrapping_u8(r.word(in b));
-        let lists = r.word(in b);
-        let ja = n32(d.words.len());
-        for j in 0..lists {
-            let len = r.word(in b);
-            d.words.push(n32(len));
+    let name = sym(in nmap, reader.word(in bytes));
+    let span_start = reader.word(in bytes);
+    let span_end = reader.word(in bytes);
+    let gen_start = n32(decls.gens.len());
+    let gen_count = read_gens(inout reader, in bytes, inout decls, in nmap);
+    let par_count = reader.word(in bytes);
+    let par_start = n32(decls.pars.len());
+    for i in 0..par_count {
+        let pname = sym(in nmap, reader.word(in bytes));
+        let pass = wrapping_u8(reader.word(in bytes));
+        let proj_lists = reader.word(in bytes);
+        let proj_start = n32(decls.words.len());
+        for j in 0..proj_lists {
+            let len = reader.word(in bytes);
+            decls.words.push(n32(len));
             for k in 0..len {
-                let x = sym(in nmap, r.word(in b));
-                d.words.push(x);
+                let proj_name = sym(in nmap, reader.word(in bytes));
+                decls.words.push(proj_name);
             }
         }
-        let jn = wrapping_sub(n32(d.words.len()), ja);
-        let ty = tid(in tmap, r.word(in b));
-        let ps = r.word(in b);
-        let pe = r.word(in b);
-        d.pars.push(Par { name: pname, pass: pass, ja: ja, jn: jn, ty: ty, s: ps, e: pe });
+        let proj_count = wrapping_sub(n32(decls.words.len()), proj_start);
+        let ty = tid(in tmap, reader.word(in bytes));
+        let par_span_start = reader.word(in bytes);
+        let par_span_end = reader.word(in bytes);
+        decls.pars.push(Par {
+            name: pname,
+            pass: pass,
+            proj_start: proj_start,
+            proj_count: proj_count,
+            ty: ty,
+            span_start: par_span_start,
+            span_end: par_span_end
+        });
     }
-    let result = tid(in tmap, r.word(in b));
-    let row = tid(in tmap, r.word(in b));
-    d.sigs.push(Sig {
+    let result = tid(in tmap, reader.word(in bytes));
+    let row = tid(in tmap, reader.word(in bytes));
+    decls.sigs.push(Sig {
         name: name,
-        s: s,
-        e: e,
-        ga: ga,
-        gn: gn,
-        pa: pa,
-        pn: n32(pn),
+        span_start: span_start,
+        span_end: span_end,
+        gen_start: gen_start,
+        gen_count: gen_count,
+        par_start: par_start,
+        par_count: n32(par_count),
         result: result,
         row: row
     });
@@ -415,175 +457,205 @@ fn read_sig(
 // Reads `n` signatures written one after another; they land in
 // `sigs[first..first+n]` because each is pushed whole.
 fn read_sigs(
-    inout r: Reader,
-    in b: Slice[u8],
-    inout d: Decls,
+    inout reader: Reader,
+    in bytes: Slice[u8],
+    inout decls: Decls,
     in nmap: ChunkSeq[u32],
     in tmap: ChunkSeq[u32]
 ) -> u32 {
-    let n = r.word(in b);
+    let n = reader.word(in bytes);
     for i in 0..n {
-        read_sig(inout r, in b, inout d, in nmap, in tmap);
+        read_sig(inout reader, in bytes, inout decls, in nmap, in tmap);
     }
     n32(n)
 }
 
 pub fn read_traits(
-    inout r: Reader,
-    in b: Slice[u8],
-    inout d: Decls,
+    inout reader: Reader,
+    in bytes: Slice[u8],
+    inout decls: Decls,
     in nmap: ChunkSeq[u32],
     in tmap: ChunkSeq[u32]
 ) {
-    let n = r.word(in b);
+    let n = reader.word(in bytes);
     for i in 0..n {
-        let name = sym(in nmap, r.word(in b));
-        let s = r.word(in b);
-        let e = r.word(in b);
-        let ga = n32(d.gens.len());
-        let gn = read_gens(inout r, in b, inout d, in nmap);
-        let an = r.word(in b);
-        let aa = n32(d.assocs.len());
-        for j in 0..an {
-            let aname = sym(in nmap, r.word(in b));
-            let bound = wrapping_u8(r.word(in b));
-            let as_ = r.word(in b);
-            let ae = r.word(in b);
-            d.assocs.push(AssocDecl { name: aname, bound: bound, s: as_, e: ae });
+        let name = sym(in nmap, reader.word(in bytes));
+        let span_start = reader.word(in bytes);
+        let span_end = reader.word(in bytes);
+        let gen_start = n32(decls.gens.len());
+        let gen_count = read_gens(inout reader, in bytes, inout decls, in nmap);
+        let assoc_count = reader.word(in bytes);
+        let assoc_start = n32(decls.assocs.len());
+        for j in 0..assoc_count {
+            let assoc_name = sym(in nmap, reader.word(in bytes));
+            let bound = wrapping_u8(reader.word(in bytes));
+            let assoc_span_start = reader.word(in bytes);
+            let assoc_span_end = reader.word(in bytes);
+            decls.assocs.push(AssocDecl {
+                name: assoc_name,
+                bound: bound,
+                span_start: assoc_span_start,
+                span_end: assoc_span_end
+            });
         }
-        let ma = n32(d.sigs.len());
-        let mn = read_sigs(inout r, in b, inout d, in nmap, in tmap);
-        d.traits.push(TraitRow {
+        let method_start = n32(decls.sigs.len());
+        let method_count = read_sigs(inout reader, in bytes, inout decls, in nmap, in tmap);
+        decls.traits.push(TraitRow {
             name: name,
-            s: s,
-            e: e,
-            ga: ga,
-            gn: gn,
-            aa: aa,
-            an: n32(an),
-            ma: ma,
-            mn: mn
+            span_start: span_start,
+            span_end: span_end,
+            gen_start: gen_start,
+            gen_count: gen_count,
+            assoc_start: assoc_start,
+            assoc_count: n32(assoc_count),
+            method_start: method_start,
+            method_count: method_count
         });
     }
 }
 
 fn read_confs(
-    inout r: Reader,
-    in b: Slice[u8],
-    inout d: Decls,
+    inout reader: Reader,
+    in bytes: Slice[u8],
+    inout decls: Decls,
     in nmap: ChunkSeq[u32],
     in tmap: ChunkSeq[u32]
 ) {
-    let n = r.word(in b);
+    let n = reader.word(in bytes);
     for i in 0..n {
-        let model = r.word(in b) != 0;
-        let mname = sym(in nmap, r.word(in b));
-        let ga = n32(d.gens.len());
-        let gn = read_gens(inout r, in b, inout d, in nmap);
-        let tref = read_tref(inout r, in b, inout d, in nmap, in tmap);
-        let self_ty = tid(in tmap, r.word(in b));
-        let wn = r.word(in b);
-        let wa = n32(d.wheres.len());
-        for j in 0..wn {
-            let ty = tid(in tmap, r.word(in b));
-            let wt = read_tref(inout r, in b, inout d, in nmap, in tmap);
-            d.wheres.push(Where { ty: ty, tref: wt });
+        let model = reader.word(in bytes) != 0;
+        let model_name = sym(in nmap, reader.word(in bytes));
+        let gen_start = n32(decls.gens.len());
+        let gen_count = read_gens(inout reader, in bytes, inout decls, in nmap);
+        let tref = read_tref(inout reader, in bytes, inout decls, in nmap, in tmap);
+        let self_ty = tid(in tmap, reader.word(in bytes));
+        let where_count = reader.word(in bytes);
+        let where_start = n32(decls.wheres.len());
+        for j in 0..where_count {
+            let ty = tid(in tmap, reader.word(in bytes));
+            let where_tref = read_tref(inout reader, in bytes, inout decls, in nmap, in tmap);
+            decls.wheres.push(Where { ty: ty, tref: where_tref });
         }
-        let bn = r.word(in b);
-        let ba = n32(d.binds.len());
-        for j in 0..bn {
-            let bname = sym(in nmap, r.word(in b));
-            let bty = tid(in tmap, r.word(in b));
-            let bs = r.word(in b);
-            let be = r.word(in b);
-            d.binds.push(Bind { name: bname, ty: bty, s: bs, e: be });
+        let bind_count = reader.word(in bytes);
+        let bind_start = n32(decls.binds.len());
+        for j in 0..bind_count {
+            let bind_name = sym(in nmap, reader.word(in bytes));
+            let bind_ty = tid(in tmap, reader.word(in bytes));
+            let bind_span_start = reader.word(in bytes);
+            let bind_span_end = reader.word(in bytes);
+            decls.binds.push(Bind {
+                name: bind_name,
+                ty: bind_ty,
+                span_start: bind_span_start,
+                span_end: bind_span_end
+            });
         }
-        let ma = n32(d.sigs.len());
-        let mn = read_sigs(inout r, in b, inout d, in nmap, in tmap);
-        let s = r.word(in b);
-        let e = r.word(in b);
-        d.confs.push(Conf {
+        let method_start = n32(decls.sigs.len());
+        let method_count = read_sigs(inout reader, in bytes, inout decls, in nmap, in tmap);
+        let span_start = reader.word(in bytes);
+        let span_end = reader.word(in bytes);
+        decls.confs.push(Conf {
             model: model,
-            mname: mname,
-            ga: ga,
-            gn: gn,
+            model_name: model_name,
+            gen_start: gen_start,
+            gen_count: gen_count,
             tref: tref,
             self_ty: self_ty,
-            wa: wa,
-            wn: n32(wn),
-            ba: ba,
-            bn: n32(bn),
-            ma: ma,
-            mn: mn,
-            s: s,
-            e: e
+            where_start: where_start,
+            where_count: n32(where_count),
+            bind_start: bind_start,
+            bind_count: n32(bind_count),
+            method_start: method_start,
+            method_count: method_count,
+            span_start: span_start,
+            span_end: span_end
         });
     }
 }
 
 fn read_items(
-    inout r: Reader,
-    in b: Slice[u8],
-    inout d: Decls,
+    inout reader: Reader,
+    in bytes: Slice[u8],
+    inout decls: Decls,
     in nmap: ChunkSeq[u32],
     in tmap: ChunkSeq[u32]
 ) {
-    let n = r.word(in b);
+    let n = reader.word(in bytes);
     for i in 0..n {
-        let adt = r.word(in b) != 0;
-        let name = sym(in nmap, r.word(in b));
-        let s = r.word(in b);
-        let e = r.word(in b);
+        let adt = reader.word(in bytes) != 0;
+        let name = sym(in nmap, reader.word(in bytes));
+        let span_start = reader.word(in bytes);
+        let span_end = reader.word(in bytes);
         if adt {
-            let fc = r.word(in b);
-            let a = n32(d.words.len());
-            for j in 0..fc {
-                let t = tid(in tmap, r.word(in b));
-                d.words.push(t);
+            let field_count = reader.word(in bytes);
+            let member_start = n32(decls.words.len());
+            for j in 0..field_count {
+                let field_ty = tid(in tmap, reader.word(in bytes));
+                decls.words.push(field_ty);
             }
-            d.items.push(ItemRow { adt: true, name: name, s: s, e: e, a: a, n: n32(fc) });
+            decls.items.push(ItemRow {
+                adt: true,
+                name: name,
+                span_start: span_start,
+                span_end: span_end,
+                member_start: member_start,
+                member_count: n32(field_count)
+            });
         } else {
-            let a = n32(d.sigs.len());
-            let on = read_sigs(inout r, in b, inout d, in nmap, in tmap);
-            d.items.push(ItemRow { adt: false, name: name, s: s, e: e, a: a, n: on });
+            let member_start = n32(decls.sigs.len());
+            let op_count = read_sigs(inout reader, in bytes, inout decls, in nmap, in tmap);
+            decls.items.push(ItemRow {
+                adt: false,
+                name: name,
+                span_start: span_start,
+                span_end: span_end,
+                member_start: member_start,
+                member_count: op_count
+            });
         }
     }
 }
 
 // Decodes the declaration section.
 pub fn read_decls(
-    inout r: Reader,
-    in b: Slice[u8],
+    inout reader: Reader,
+    in bytes: Slice[u8],
     in nmap: ChunkSeq[u32],
     in tmap: ChunkSeq[u32]
 ) -> Decls {
-    let mut d = decls_new();
-    d.identity = sym(in nmap, r.word(in b));
-    let fns = r.word(in b);
-    for i in 0..fns {
-        let name = sym(in nmap, r.word(in b));
-        let ga = n32(d.gens.len());
-        let gn = read_gens(inout r, in b, inout d, in nmap);
-        d.fns.push(FnRow { name: name, ga: ga, gn: gn });
+    let mut decls = decls_new();
+    decls.identity = sym(in nmap, reader.word(in bytes));
+    let fn_count = reader.word(in bytes);
+    for i in 0..fn_count {
+        let name = sym(in nmap, reader.word(in bytes));
+        let gen_start = n32(decls.gens.len());
+        let gen_count = read_gens(inout reader, in bytes, inout decls, in nmap);
+        decls.fns.push(FnRow { name: name, gen_start: gen_start, gen_count: gen_count });
     }
-    read_traits(inout r, in b, inout d, in nmap, in tmap);
-    read_confs(inout r, in b, inout d, in nmap, in tmap);
-    let un = r.word(in b);
-    for i in 0..un {
-        let model = sym(in nmap, r.word(in b));
-        let s = r.word(in b);
-        let e = r.word(in b);
-        d.uses.push(UseRow { model: model, s: s, e: e });
+    read_traits(inout reader, in bytes, inout decls, in nmap, in tmap);
+    read_confs(inout reader, in bytes, inout decls, in nmap, in tmap);
+    let use_count = reader.word(in bytes);
+    for i in 0..use_count {
+        let model = sym(in nmap, reader.word(in bytes));
+        let span_start = reader.word(in bytes);
+        let span_end = reader.word(in bytes);
+        decls.uses.push(UseRow { model: model, span_start: span_start, span_end: span_end });
     }
-    let bn = r.word(in b);
-    for i in 0..bn {
-        let param = sym(in nmap, r.word(in b));
-        let tref = read_tref(inout r, in b, inout d, in nmap, in tmap);
-        let s = r.word(in b);
-        let e = r.word(in b);
-        let owner = sym(in nmap, r.word(in b));
-        d.bounds.push(BoundSyn { param: param, tref: tref, s: s, e: e, owner: owner });
+    let bound_count = reader.word(in bytes);
+    for i in 0..bound_count {
+        let param = sym(in nmap, reader.word(in bytes));
+        let tref = read_tref(inout reader, in bytes, inout decls, in nmap, in tmap);
+        let span_start = reader.word(in bytes);
+        let span_end = reader.word(in bytes);
+        let owner = sym(in nmap, reader.word(in bytes));
+        decls.bounds.push(BoundSyn {
+            param: param,
+            tref: tref,
+            span_start: span_start,
+            span_end: span_end,
+            owner: owner
+        });
     }
-    read_items(inout r, in b, inout d, in nmap, in tmap);
-    d
+    read_items(inout reader, in bytes, inout decls, in nmap, in tmap);
+    decls
 }

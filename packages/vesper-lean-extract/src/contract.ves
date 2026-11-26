@@ -28,7 +28,7 @@ pub copy struct Gen {
 }
 
 pub copy struct Contract {
-    f: u32,
+    func: u32,
     requires: u32,
     ensures: u32,
     // generics of f, requires and ensures: gens[..]
@@ -46,342 +46,348 @@ pub struct Contracts {
 }
 
 fn read_gens(
-    inout r: Reader,
+    inout reader: Reader,
     in bytes: Slice[u8],
     in nmap: ChunkSeq[u32],
     inout gens: ChunkSeq[Gen]
 ) {
-    let n = r.word(in bytes);
-    for i in 0..n {
-        let name = u32_at(in nmap, r.word(in bytes));
-        let bound = r.word(in bytes);
-        let row = r.word(in bytes) != 0;
+    let count = reader.word(in bytes);
+    for i in 0..count {
+        let name = u32_at(in nmap, reader.word(in bytes));
+        let bound = reader.word(in bytes);
+        let row = reader.word(in bytes) != 0;
         gens.push(Gen { name: name, bound: bound, row: row });
     }
 }
 
-pub fn read_contracts(inout r: Reader, in bytes: Slice[u8], in nmap: ChunkSeq[u32]) -> Contracts {
-    let mut cs = Contracts {
+pub fn read_contracts(
+    inout reader: Reader,
+    in bytes: Slice[u8],
+    in nmap: ChunkSeq[u32]
+) -> Contracts {
+    let mut all_contracts = Contracts {
         list: ChunkSeq::new[Contract](),
         gens: ChunkSeq::new[Gen](),
     };
-    let n = r.word(in bytes);
-    for i in 0..n {
-        let f = u32_at(in nmap, r.word(in bytes));
-        let rw = r.word(in bytes);
-        let requires = if rw == NONE {
+    let count = reader.word(in bytes);
+    for i in 0..count {
+        let func = u32_at(in nmap, reader.word(in bytes));
+        let requires_word = reader.word(in bytes);
+        let requires = if requires_word == NONE {
             NONE32
         } else {
-            u32_at(in nmap, rw)
+            u32_at(in nmap, requires_word)
         };
-        let ensures = u32_at(in nmap, r.word(in bytes));
-        let fa = cs.gens.len();
-        read_gens(inout r, in bytes, in nmap, inout cs.gens);
-        let ra = cs.gens.len();
+        let ensures = u32_at(in nmap, reader.word(in bytes));
+        let fn_gen_start = all_contracts.gens.len();
+        read_gens(inout reader, in bytes, in nmap, inout all_contracts.gens);
+        let req_gen_start = all_contracts.gens.len();
         if requires != NONE32 {
-            read_gens(inout r, in bytes, in nmap, inout cs.gens);
+            read_gens(inout reader, in bytes, in nmap, inout all_contracts.gens);
         }
-        let ea = cs.gens.len();
-        read_gens(inout r, in bytes, in nmap, inout cs.gens);
-        let ez = cs.gens.len();
-        cs.list.push(Contract {
-            f: f,
+        let ens_gen_start = all_contracts.gens.len();
+        read_gens(inout reader, in bytes, in nmap, inout all_contracts.gens);
+        let ens_gen_end = all_contracts.gens.len();
+        all_contracts.list.push(Contract {
+            func: func,
             requires: requires,
             ensures: ensures,
-            fa: fa,
-            fz: ra,
-            ra: ra,
-            rz: ea,
-            ea: ea,
-            ez: ez
+            fa: fn_gen_start,
+            fz: req_gen_start,
+            ra: req_gen_start,
+            rz: ens_gen_start,
+            ea: ens_gen_start,
+            ez: ens_gen_end
         });
     }
-    cs
+    all_contracts
 }
 
-fn gen_at(in cs: Contracts, i: u64) -> Gen {
-    match cs.gens.try_get(i) {
-        Option::Some(g) => g,
+fn gen_at(in all_contracts: Contracts, i: u64) -> Gen {
+    match all_contracts.gens.try_get(i) {
+        Option::Some(generic) => generic,
         Option::None => Gen { name: 0, bound: 0, row: false },
     }
 }
 
-fn put(inout o: ChunkSeq[u8], in s: Str) {
-    o.extend(in s.as_bytes());
+fn put(inout out: ChunkSeq[u8], in text: Str) {
+    out.extend(in text.as_bytes());
 }
 
 // `ContractError` text into `err`.
-fn predicate_error(inout b: B, inout err: ChunkSeq[u8], p: u32, in reason: Str) {
+fn predicate_error(inout builder: B, inout err: ChunkSeq[u8], predicate: u32, in reason: Str) {
     put(inout err, in "contract predicate for '");
-    b.names.write(p, inout err);
+    builder.names.write(predicate, inout err);
     put(inout err, in "': ");
     put(inout err, in reason);
 }
 
 fn signature_error(
-    inout b: B,
+    inout builder: B,
     inout err: ChunkSeq[u8],
-    f: u32,
-    p: u32,
+    func: u32,
+    predicate: u32,
     in reason: Str,
-    n: u64,
+    count: u64,
     in tail: Str
 ) {
     put(inout err, in "contract signature for '");
-    b.names.write(f, inout err);
+    builder.names.write(func, inout err);
     put(inout err, in "': '");
-    b.names.write(p, inout err);
+    builder.names.write(predicate, inout err);
     put(inout err, in reason);
-    if n != NONE {
+    if count != NONE {
         let mut digits: ChunkSeq[u8] = ChunkSeq::new[u8]();
-        let mut v = n;
+        let mut rest = count;
         loop {
-            digits.push(wrapping_add(48, wrapping_u8(v % 10)));
-            v = v / 10;
-            if v == 0 {
+            digits.push(wrapping_add(48, wrapping_u8(rest % 10)));
+            rest = rest / 10;
+            if rest == 0 {
                 break;
             }
         }
-        let mut k = digits.len();
+        let mut digit_index = digits.len();
         loop {
-            if k == 0 {
+            if digit_index == 0 {
                 break;
             }
-            k = wrapping_sub(k, 1);
-            err.push(digits.try_get(k).unwrap_or(48));
+            digit_index = wrapping_sub(digit_index, 1);
+            err.push(digits.try_get(digit_index).unwrap_or(48));
         }
         put(inout err, in " parameter(s) of the function's types");
         put(inout err, in tail);
     }
 }
 
-fn unsupported_prefix(inout b: B, inout err: ChunkSeq[u8], f: u32) {
+fn unsupported_prefix(inout builder: B, inout err: ChunkSeq[u8], func: u32) {
     put(inout err, in "contract for '");
-    b.names.write(f, inout err);
+    builder.names.write(func, inout err);
     put(inout err, in "' is unsupported: ");
 }
 
-fn unsupported(inout b: B, inout err: ChunkSeq[u8], f: u32, in reason: Str) {
-    unsupported_prefix(inout b, inout err, f);
+fn unsupported(inout builder: B, inout err: ChunkSeq[u8], func: u32, in reason: Str) {
+    unsupported_prefix(inout builder, inout err, func);
     put(inout err, in reason);
 }
 
 // An internal (`Unsupported`) error from the builder's first failure.
-fn internal(inout b: B, inout err: ChunkSeq[u8], f: u32) -> bool {
-    if !b.failed {
+fn internal(inout builder: B, inout err: ChunkSeq[u8], func: u32) -> bool {
+    if !builder.failed {
         return false;
     }
-    unsupported_prefix(inout b, inout err, f);
-    err.extend(in b.err.as_slice());
+    unsupported_prefix(inout builder, inout err, func);
+    err.extend(in builder.err.as_slice());
     true
 }
 
-fn effectful(in t: Types, x: SrcFn) -> bool {
-    let row = t.row(t.node(x.row).r2);
+fn effectful(in types: Types, func: SrcFn) -> bool {
+    let row = types.row(types.node(func.row).r2);
     row.n > 0 || row.tail != 0
 }
 
 // `ty_with_fip(t, fip_active)`.
-fn ty(inout b: B, in t: Types, in y: Y, ty: u32) -> T {
-    let m = b.at();
-    ty_check(inout b, in t, ty, y.fip);
-    emit_ty(inout b, in t, ty, y.fip);
-    b.since(m)
+fn ty(inout builder: B, in types: Types, in ctx: Y, ty: u32) -> T {
+    let mark = builder.at();
+    ty_check(inout builder, in types, ty, ctx.fip);
+    emit_ty(inout builder, in types, ty, ctx.fip);
+    builder.since(mark)
 }
 
-fn forall(inout b: B, in binders: ChunkSeq[T], body: T) -> T {
-    let m = b.at();
-    b.w(T_FORALL);
-    b.w(binders.len());
+fn forall(inout builder: B, in binders: ChunkSeq[T], body: T) -> T {
+    let mark = builder.at();
+    builder.w(T_FORALL);
+    builder.w(binders.len());
     for i in 0..binders.len() {
-        b.put(get(in binders, i));
+        builder.put(get(in binders, i));
     }
-    b.put(body);
-    b.since(m)
+    builder.put(body);
+    builder.since(mark)
 }
 
-fn arrow_t(inout b: B, x: T, z: T) -> T {
-    let m = b.at();
-    b.w(T_ARROW);
-    b.put(x);
-    b.put(z);
-    b.since(m)
+fn arrow_t(inout builder: B, domain: T, codomain: T) -> T {
+    let mark = builder.at();
+    builder.w(T_ARROW);
+    builder.put(domain);
+    builder.put(codomain);
+    builder.since(mark)
 }
 
-fn eq(inout b: B, x: T, z: T) -> T {
-    let m = b.at();
-    b.w(21);
-    b.w(OP_EQ);
-    b.put(x);
-    b.put(z);
-    b.since(m)
+fn eq(inout builder: B, lhs: T, rhs: T) -> T {
+    let mark = builder.at();
+    builder.w(21);
+    builder.w(OP_EQ);
+    builder.put(lhs);
+    builder.put(rhs);
+    builder.since(mark)
 }
 
-fn true_t(inout b: B) -> T {
-    let m = b.at();
-    b.w(T_BOOL);
-    b.w(1);
-    b.since(m)
+fn true_t(inout builder: B) -> T {
+    let mark = builder.at();
+    builder.w(T_BOOL);
+    builder.w(1);
+    builder.since(mark)
 }
 
 // `holds(predicate, extra)`: `predicate (generics := ...) args extra = true`.
 fn holds(
-    inout b: B,
-    in cs: Contracts,
-    pa: u64,
-    pz: u64,
-    fa: u64,
-    p: u32,
+    inout builder: B,
+    in all_contracts: Contracts,
+    pred_gen_start: u64,
+    pred_gen_end: u64,
+    fn_gen_start: u64,
+    predicate: u32,
     in args: ChunkSeq[T],
     in extra: ChunkSeq[T]
 ) -> T {
     let mut arguments = empty();
-    let n = wrapping_sub(pz, pa);
-    for i in 0..n {
-        let pg = gen_at(in cs, add(pa, i));
-        let fg = gen_at(in cs, add(fa, i));
-        b.check(pg.name, in "identifier");
-        let v = sref(inout b, fg.name);
-        let na = named_arg_sym(inout b, pg.name, v);
-        arguments.push(na);
+    let gen_count = wrapping_sub(pred_gen_end, pred_gen_start);
+    for i in 0..gen_count {
+        let pred_gen = gen_at(in all_contracts, add(pred_gen_start, i));
+        let fn_gen = gen_at(in all_contracts, add(fn_gen_start, i));
+        builder.check(pred_gen.name, in "identifier");
+        let gen_ref = sref(inout builder, fn_gen.name);
+        let gen_arg = named_arg_sym(inout builder, pred_gen.name, gen_ref);
+        arguments.push(gen_arg);
     }
     for i in 0..args.len() {
-        let x = pos(inout b, get(in args, i));
-        arguments.push(x);
+        let arg = pos(inout builder, get(in args, i));
+        arguments.push(arg);
     }
     for i in 0..extra.len() {
-        let x = pos(inout b, get(in extra, i));
-        arguments.push(x);
+        let arg = pos(inout builder, get(in extra, i));
+        arguments.push(arg);
     }
-    let f = sref(inout b, p);
-    let call = app_args(inout b, f, in arguments);
-    let tr = true_t(inout b);
-    eq(inout b, call, tr)
+    let pred_ref = sref(inout builder, predicate);
+    let call = app_args(inout builder, pred_ref, in arguments);
+    let true_term = true_t(inout builder);
+    eq(inout builder, call, true_term)
 }
 
 // The contract definitions (two per contract, as declarations without the
-// module) into `cw`, their function names into `names`. False with the
+// module) into `contract_words`, their function names into `names`. False with the
 // error text in `err` when one fails.
 pub fn contracts(
-    inout b: B,
-    inout t: Types,
-    in y: Y,
-    in cs: Contracts,
+    inout builder: B,
+    inout types: Types,
+    in ctx: Y,
+    in all_contracts: Contracts,
     in status: ChunkSeq[u64],
     in reasons: ChunkSeq[u8],
-    in ra: ChunkSeq[u64],
-    in rz: ChunkSeq[u64],
-    inout cw: ChunkSeq[u64],
+    in reason_starts: ChunkSeq[u64],
+    in reason_ends: ChunkSeq[u64],
+    inout contract_words: ChunkSeq[u64],
     inout names: ChunkSeq[u32],
     inout err: ChunkSeq[u8]
 ) -> bool {
-    let bs = b.intern(in "bool");
-    let bool_ty = t.named0(bs);
-    for ci in 0..cs.list.len() {
-        let c = match cs.list.try_get(ci) {
+    let bool_sym = builder.intern(in "bool");
+    let bool_ty = types.named0(bool_sym);
+    for contract_index in 0..all_contracts.list.len() {
+        let contract = match all_contracts.list.try_get(contract_index) {
             Option::Some(x) => x,
             Option::None => break,
         };
-        let fi = y.a.fn_index(c.f);
-        let f = y.a.function(fi);
-        let ei = y.a.fn_index(c.ensures);
-        let ens = y.a.function(ei);
-        let mut ri = NONE;
-        if c.requires != NONE32 {
-            ri = y.a.fn_index(c.requires);
+        let func_index = ctx.ast.fn_index(contract.func);
+        let func = ctx.ast.function(func_index);
+        let ens_index = ctx.ast.fn_index(contract.ensures);
+        let ens_fn = ctx.ast.function(ens_index);
+        let mut req_index = NONE;
+        if contract.requires != NONE32 {
+            req_index = ctx.ast.fn_index(contract.requires);
         }
         // the predicates
         for k in 0..2 {
-            let pi = if k == 0 { ri } else { ei };
-            let pa = if k == 0 { c.ra } else { c.ea };
-            let pz = if k == 0 { c.rz } else { c.ez };
-            if pi != NONE {
-                let p = y.a.function(pi);
-                let mut row = false;
-                for i in pa..pz {
-                    if gen_at(in cs, i).row {
-                        row = true;
+            let pred_index = if k == 0 { req_index } else { ens_index };
+            let gen_start = if k == 0 { contract.ra } else { contract.ea };
+            let gen_end = if k == 0 { contract.rz } else { contract.ez };
+            if pred_index != NONE {
+                let pred = ctx.ast.function(pred_index);
+                let mut has_row = false;
+                for i in gen_start..gen_end {
+                    if gen_at(in all_contracts, i).row {
+                        has_row = true;
                     }
                 }
                 let mut inout_param = false;
-                for i in 0..p.pn {
-                    if y.a.param_pass(p, i) == TyPass::Inout {
+                for i in 0..pred.param_count {
+                    if ctx.ast.param_pass(pred, i) == TyPass::Inout {
                         inout_param = true;
                     }
                 }
-                let reason = if effectful(in t, p) {
+                let reason = if effectful(in types, pred) {
                     "it must have no effects"
-                } else if row {
+                } else if has_row {
                     "it must not have row parameters"
-                } else if p.result != bool_ty {
+                } else if pred.result != bool_ty {
                     "it must return bool"
                 } else if inout_param {
                     "it must not take inout parameters"
-                } else if u64_at(in status, pi) != 0 {
+                } else if u64_at(in status, pred_index) != 0 {
                     "it must not be recursive"
                 } else {
                     ""
                 };
                 if reason.len() > 0 {
-                    predicate_error(inout b, inout err, p.name, in reason);
+                    predicate_error(inout builder, inout err, pred.name, in reason);
                     return false;
                 }
             }
         }
-        let mut frow = false;
-        for i in c.fa..c.fz {
-            if gen_at(in cs, i).row {
-                frow = true;
+        let mut fn_has_row = false;
+        for i in contract.fa..contract.fz {
+            if gen_at(in all_contracts, i).row {
+                fn_has_row = true;
             }
         }
-        if frow {
+        if fn_has_row {
             unsupported(
-                inout b,
+                inout builder,
                 inout err,
-                c.f,
+                contract.func,
                 in "row-polymorphic functions have no contract proposition"
             );
             return false;
         }
         // the signatures
-        let mut types: ChunkSeq[u32] = ChunkSeq::new[u32]();
-        for i in 0..f.pn {
-            types.push(y.a.param_ty(f, i));
+        let mut param_tys: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        for i in 0..func.param_count {
+            param_tys.push(ctx.ast.param_ty(func, i));
         }
         for k in 0..2 {
-            let pi = if k == 0 { ri } else { ei };
-            let pa = if k == 0 { c.ra } else { c.ea };
-            let pz = if k == 0 { c.rz } else { c.ez };
-            if pi != NONE {
-                let p = y.a.function(pi);
+            let pred_index = if k == 0 { req_index } else { ens_index };
+            let gen_start = if k == 0 { contract.ra } else { contract.ea };
+            let gen_end = if k == 0 { contract.rz } else { contract.ez };
+            if pred_index != NONE {
+                let pred = ctx.ast.function(pred_index);
                 let mut expected: ChunkSeq[u32] = ChunkSeq::new[u32]();
-                for i in 0..types.len() {
-                    expected.push(u32_at(in types, i));
+                for i in 0..param_tys.len() {
+                    expected.push(u32_at(in param_tys, i));
                 }
                 if k == 1 {
-                    expected.push(f.result);
-                    for i in 0..f.pn {
-                        if y.a.param_pass(f, i) == TyPass::Inout {
-                            expected.push(y.a.param_ty(f, i));
+                    expected.push(func.result);
+                    for i in 0..func.param_count {
+                        if ctx.ast.param_pass(func, i) == TyPass::Inout {
+                            expected.push(ctx.ast.param_ty(func, i));
                         }
                     }
                 }
-                let ng = wrapping_sub(pz, pa);
-                let fg = wrapping_sub(c.fz, c.fa);
-                let mut same = ng == fg;
+                let gen_count = wrapping_sub(gen_end, gen_start);
+                let fn_gen_count = wrapping_sub(contract.fz, contract.fa);
+                let mut same = gen_count == fn_gen_count;
                 if same {
-                    for i in 0..ng {
-                        if gen_at(in cs, add(pa, i)).bound != gen_at(in cs, add(c.fa, i)).bound {
+                    for i in 0..gen_count {
+                        if gen_at(in all_contracts, add(gen_start, i)).bound
+                            != gen_at(in all_contracts, add(contract.fa, i)).bound
+                        {
                             same = false;
                         }
                     }
                 }
                 if !same {
                     signature_error(
-                        inout b,
+                        inout builder,
                         inout err,
-                        c.f,
-                        p.name,
+                        contract.func,
+                        pred.name,
                         in "' must have the function's type parameters and mode bounds in order",
                         NONE,
                         in ""
@@ -389,15 +395,15 @@ pub fn contracts(
                     return false;
                 }
                 let mut vars = vars_new();
-                for i in 0..ng {
-                    let fgn = gen_at(in cs, add(c.fa, i)).name;
-                    let ft = t.named0(fgn);
-                    vars.set(gen_at(in cs, add(pa, i)).name, ft);
+                for i in 0..gen_count {
+                    let fn_gen_name = gen_at(in all_contracts, add(contract.fa, i)).name;
+                    let gen_ty = types.named0(fn_gen_name);
+                    vars.set(gen_at(in all_contracts, add(gen_start, i)).name, gen_ty);
                 }
-                let mut ok = p.pn == expected.len();
+                let mut ok = pred.param_count == expected.len();
                 if ok {
-                    for i in 0..p.pn {
-                        let actual = substitute(inout t, y.a.param_ty(p, i), in vars);
+                    for i in 0..pred.param_count {
+                        let actual = substitute(inout types, ctx.ast.param_ty(pred, i), in vars);
                         if actual != u32_at(in expected, i) {
                             ok = false;
                         }
@@ -410,10 +416,10 @@ pub fn contracts(
                         ""
                     };
                     signature_error(
-                        inout b,
+                        inout builder,
                         inout err,
-                        c.f,
-                        p.name,
+                        contract.func,
+                        pred.name,
                         in "' must take ",
                         expected.len(),
                         in tail
@@ -423,39 +429,44 @@ pub fn contracts(
             }
         }
         // the model monad's failures
-        b.words.clear();
-        b.failed = false;
-        b.err.clear();
-        b.quiet = 0;
-        let frow_node = t.row(t.node(f.row).r2);
+        builder.words.clear();
+        builder.failed = false;
+        builder.err.clear();
+        builder.quiet = 0;
+        let frow_node = types.row(types.node(func.row).r2);
         if frow_node.tail != 0 {
-            unsupported(inout b, inout err, c.f, in "open effect rows have no model monad");
+            unsupported(
+                inout builder,
+                inout err,
+                contract.func,
+                in "open effect rows have no model monad"
+            );
             return false;
         }
         let mut all_fail = true;
         for i in 0..w(frow_node.n) {
-            let e = t.effect_at(add(w(frow_node.a), i));
-            if !spells(in b, e.name, in "Fail") || e.n != 1 {
+            let eff_node = types.effect_at(add(w(frow_node.a), i));
+            if !spells(in builder, eff_node.name, in "Fail") || eff_node.n != 1 {
                 all_fail = false;
             }
         }
         if !all_fail {
             unsupported(
-                inout b,
+                inout builder,
                 inout err,
-                c.f,
+                contract.func,
                 in "only pure and Fail[E] functions have a model monad"
             );
             return false;
         }
         let mut failures = empty();
         for i in 0..w(frow_node.n) {
-            let e = t.effect_at(add(w(frow_node.a), i));
-            let a0 = u32_at(in t.items, w(e.a));
-            let ft = ty(inout b, in t, in y, a0);
-            failures.push(ft);
+            let eff_node = types.effect_at(add(w(frow_node.a), i));
+            let error_ty = u32_at(in types.items, w(eff_node.a));
+            let failure_ty = ty(inout builder, in types, in ctx, error_ty);
+            failures.push(failure_ty);
         }
-        if internal(inout b, inout err, c.f) {
+        if internal(inout builder, inout err, contract.func) {
             return false;
         }
         // a right-associated sum
@@ -469,182 +480,209 @@ pub fn contracts(
                     break;
                 }
                 k = wrapping_sub(k, 1);
-                let sum = global(inout b, in "Sum");
-                let mut xs = empty();
-                xs.push(get(in failures, k));
-                xs.push(fail);
-                fail = app(inout b, sum, in xs);
+                let sum = global(inout builder, in "Sum");
+                let mut sum_args = empty();
+                sum_args.push(get(in failures, k));
+                sum_args.push(fail);
+                fail = app(inout builder, sum, in sum_args);
             }
         }
-        let st = u64_at(in status, fi);
-        let fuel = st == 1;
-        if st == 2 {
-            unsupported_prefix(inout b, inout err, c.f);
+        let fn_status = u64_at(in status, func_index);
+        let fuel = fn_status == 1;
+        if fn_status == 2 {
+            unsupported_prefix(inout builder, inout err, contract.func);
             put(inout err, in "it has no total form: ");
-            for q in u64_at(in ra, fi)..u64_at(in rz, fi) {
+            for q in u64_at(in reason_starts, func_index)..u64_at(in reason_ends, func_index) {
                 err.push(reasons.try_get(q).unwrap_or(0));
             }
             return false;
         }
         // binders and arguments
         let mut binders = empty();
-        for i in c.fa..c.fz {
-            let g = gen_at(in cs, i);
-            b.check(g.name, in "identifier");
-            let m = b.at();
-            b.type0();
-            let t0 = b.since(m);
-            let bd = explicit(inout b, g.name, t0);
-            binders.push(bd);
+        for i in contract.fa..contract.fz {
+            let generic = gen_at(in all_contracts, i);
+            builder.check(generic.name, in "identifier");
+            let mark = builder.at();
+            builder.type0();
+            let type_term = builder.since(mark);
+            let binder = explicit(inout builder, generic.name, type_term);
+            binders.push(binder);
         }
         let mut args = empty();
-        for i in 0..f.pn {
-            let an = b.joined(in "", y.a.param_name(f, i), in "$arg");
-            b.check(an, in "identifier");
-            let pt = ty(inout b, in t, in y, y.a.param_ty(f, i));
-            let bd = explicit(inout b, an, pt);
-            binders.push(bd);
-            let r = lref(inout b, an);
-            args.push(r);
+        for i in 0..func.param_count {
+            let arg_name = builder.joined(in "", ctx.ast.param_name(func, i), in "$arg");
+            builder.check(arg_name, in "identifier");
+            let param_ty = ty(inout builder, in types, in ctx, ctx.ast.param_ty(func, i));
+            let binder = explicit(inout builder, arg_name, param_ty);
+            binders.push(binder);
+            let arg_ref = lref(inout builder, arg_name);
+            args.push(arg_ref);
         }
-        let result = b.intern(in "$result");
+        let result = builder.intern(in "$result");
         let mut outputs = empty();
-        let r0 = ty(inout b, in t, in y, f.result);
-        outputs.push(r0);
-        for i in 0..f.pn {
-            if y.a.param_pass(f, i) == TyPass::Inout {
-                let pt = ty(inout b, in t, in y, y.a.param_ty(f, i));
-                outputs.push(pt);
+        let ret_ty = ty(inout builder, in types, in ctx, func.result);
+        outputs.push(ret_ty);
+        for i in 0..func.param_count {
+            if ctx.ast.param_pass(func, i) == TyPass::Inout {
+                let param_ty = ty(inout builder, in types, in ctx, ctx.ast.param_ty(func, i));
+                outputs.push(param_ty);
             }
         }
         let output_count = outputs.len();
-        let result_ty = product(inout b, in outputs);
+        let result_ty = product(inout builder, in outputs);
         // the model monad
         let has_model = nfail > 0 || fuel;
         let mut model = T { a: 0, n: 0 };
         if nfail == 0 && fuel {
-            model = global(inout b, in "Option");
+            model = global(inout builder, in "Option");
         } else if nfail > 0 && !fuel {
-            let ex = global(inout b, in "Except");
-            model = app1(inout b, ex, fail);
+            let except = global(inout builder, in "Except");
+            model = app1(inout builder, except, fail);
         } else if nfail > 0 {
-            let et = global(inout b, in "ExceptT");
-            let op = global(inout b, in "Option");
-            let mut xs = empty();
-            xs.push(fail);
-            xs.push(op);
-            model = app(inout b, et, in xs);
+            let except_t = global(inout builder, in "ExceptT");
+            let option = global(inout builder, in "Option");
+            let mut model_args = empty();
+            model_args.push(fail);
+            model_args.push(option);
+            model = app(inout builder, except_t, in model_args);
         }
         let mut call_args = empty();
-        for i in c.fa..c.fz {
-            let g = gen_at(in cs, i);
-            b.check(g.name, in "identifier");
-            let v = sref(inout b, g.name);
-            let na = named_arg_sym(inout b, g.name, v);
-            call_args.push(na);
+        for i in contract.fa..contract.fz {
+            let generic = gen_at(in all_contracts, i);
+            builder.check(generic.name, in "identifier");
+            let gen_ref = sref(inout builder, generic.name);
+            let call_arg = named_arg_sym(inout builder, generic.name, gen_ref);
+            call_args.push(call_arg);
         }
         if has_model {
-            let na = named_arg(inout b, in "m", model);
-            call_args.push(na);
+            let call_arg = named_arg(inout builder, in "m", model);
+            call_args.push(call_arg);
         }
         if nfail > 1 {
             for index in 0..nfail {
-                let mut error = named(inout b, in "$error");
+                let mut error = named(inout builder, in "$error");
                 if inc(index) < nfail {
-                    let inl = global2(inout b, in "Sum", in "inl");
-                    error = app1(inout b, inl, error);
+                    let inl = global2(inout builder, in "Sum", in "inl");
+                    error = app1(inout builder, inl, error);
                 }
                 for k in 0..index {
-                    let inr = global2(inout b, in "Sum", in "inr");
-                    error = app1(inout b, inr, error);
+                    let inr = global2(inout builder, in "Sum", in "inr");
+                    error = app1(inout builder, inr, error);
                 }
-                let error2 = ascribe(inout b, error, fail);
-                let throw = global2(inout b, in "MonadExcept", in "throw");
-                let thrown = app1(inout b, throw, error2);
-                let es = b.intern(in "$error");
-                let mut ins: ChunkSeq[u32] = ChunkSeq::new[u32]();
-                ins.push(es);
-                let lam = inferred(inout b, in ins, thrown);
-                let rs = b.intern(in "raise");
-                let fld = field(inout b, rs, lam);
-                let mut fs = empty();
-                fs.push(fld);
-                let rec = record(inout b, in fs);
-                let cn = b.numbered(in "$cap", index);
-                let na = named_arg_sym(inout b, cn, rec);
-                call_args.push(na);
+                let error2 = ascribe(inout builder, error, fail);
+                let throw = global2(inout builder, in "MonadExcept", in "throw");
+                let thrown = app1(inout builder, throw, error2);
+                let error_sym = builder.intern(in "$error");
+                let mut lam_params: ChunkSeq[u32] = ChunkSeq::new[u32]();
+                lam_params.push(error_sym);
+                let raise_lambda = inferred(inout builder, in lam_params, thrown);
+                let raise_sym = builder.intern(in "raise");
+                let raise_field = field(inout builder, raise_sym, raise_lambda);
+                let mut fields = empty();
+                fields.push(raise_field);
+                let raise_record = record(inout builder, in fields);
+                let cap_name = builder.numbered(in "$cap", index);
+                let call_arg = named_arg_sym(inout builder, cap_name, raise_record);
+                call_args.push(call_arg);
             }
         }
         if fuel {
-            let fv = named(inout b, in "$fuel");
-            let na = named_arg(inout b, in "$fuel", fv);
-            call_args.push(na);
+            let fuel_ref = named(inout builder, in "$fuel");
+            let call_arg = named_arg(inout builder, in "$fuel", fuel_ref);
+            call_args.push(call_arg);
         }
         for i in 0..args.len() {
-            let x = pos(inout b, get(in args, i));
-            call_args.push(x);
+            let arg = pos(inout builder, get(in args, i));
+            call_args.push(arg);
         }
         let callee = if fuel {
-            let s = b.joined(in "", c.f, in "$fuel");
-            sref(inout b, s)
+            let fuel_name = builder.joined(in "", contract.func, in "$fuel");
+            sref(inout builder, fuel_name)
         } else {
-            sref(inout b, c.f)
+            sref(inout builder, contract.func)
         };
-        let call = app_args(inout b, callee, in call_args);
+        let call = app_args(inout builder, callee, in call_args);
         // the postcondition
         let none = empty();
         let mut post = T { a: 0, n: 0 };
         if !has_model {
             let mut values = empty();
             for index in 0..output_count {
-                let v = tuple_get(inout b, call, index, output_count);
-                values.push(v);
+                let output = tuple_get(inout builder, call, index, output_count);
+                values.push(output);
             }
-            post = holds(inout b, in cs, c.ea, c.ez, c.fa, c.ensures, in args, in values);
+            post = holds(
+                inout builder,
+                in all_contracts,
+                contract.ea,
+                contract.ez,
+                contract.fa,
+                contract.ensures,
+                in args,
+                in values
+            );
         } else {
-            let rr = lref(inout b, result);
+            let result_ref = lref(inout builder, result);
             let observed = if nfail == 0 && fuel {
-                let s = global2(inout b, in "Option", in "some");
-                app1(inout b, s, rr)
+                let some_ctor = global2(inout builder, in "Option", in "some");
+                app1(inout builder, some_ctor, result_ref)
             } else if nfail > 0 && !fuel {
-                let s = global2(inout b, in "Except", in "ok");
-                app1(inout b, s, rr)
+                let ok_ctor = global2(inout builder, in "Except", in "ok");
+                app1(inout builder, ok_ctor, result_ref)
             } else {
-                let ok = global2(inout b, in "Except", in "ok");
-                let inner = app1(inout b, ok, rr);
-                let s = global2(inout b, in "Option", in "some");
-                app1(inout b, s, inner)
+                let ok_ctor = global2(inout builder, in "Except", in "ok");
+                let inner = app1(inout builder, ok_ctor, result_ref);
+                let some_ctor = global2(inout builder, in "Option", in "some");
+                app1(inout builder, some_ctor, inner)
             };
             let run = if nfail > 0 && fuel {
-                let r = global2(inout b, in "ExceptT", in "run");
-                app1(inout b, r, call)
+                let run_fn = global2(inout builder, in "ExceptT", in "run");
+                app1(inout builder, run_fn, call)
             } else {
                 call
             };
             let mut quantified = empty();
             if fuel {
-                let fs = b.intern(in "$fuel");
-                let nat = global(inout b, in "Nat");
-                let fb = explicit(inout b, fs, nat);
-                quantified.push(fb);
+                let fuel_sym = builder.intern(in "$fuel");
+                let nat = global(inout builder, in "Nat");
+                let fuel_binder = explicit(inout builder, fuel_sym, nat);
+                quantified.push(fuel_binder);
             }
-            let rb = explicit(inout b, result, result_ty);
-            quantified.push(rb);
-            let e1 = eq(inout b, run, observed);
+            let result_binder = explicit(inout builder, result, result_ty);
+            quantified.push(result_binder);
+            let run_eq = eq(inout builder, run, observed);
             let mut values = empty();
             for index in 0..output_count {
-                let rr2 = lref(inout b, result);
-                let v = tuple_get(inout b, rr2, index, output_count);
-                values.push(v);
+                let result_read = lref(inout builder, result);
+                let output = tuple_get(inout builder, result_read, index, output_count);
+                values.push(output);
             }
-            let h = holds(inout b, in cs, c.ea, c.ez, c.fa, c.ensures, in args, in values);
-            let ar = arrow_t(inout b, e1, h);
-            post = forall(inout b, in quantified, ar);
+            let ensures_holds = holds(
+                inout builder,
+                in all_contracts,
+                contract.ea,
+                contract.ez,
+                contract.fa,
+                contract.ensures,
+                in args,
+                in values
+            );
+            let implication = arrow_t(inout builder, run_eq, ensures_holds);
+            post = forall(inout builder, in quantified, implication);
         }
-        let precondition = if c.requires != NONE32 {
-            holds(inout b, in cs, c.ra, c.rz, c.fa, c.requires, in args, in none)
+        let precondition = if contract.requires != NONE32 {
+            holds(
+                inout builder,
+                in all_contracts,
+                contract.ra,
+                contract.rz,
+                contract.fa,
+                contract.requires,
+                in args,
+                in none
+            )
         } else {
-            global(inout b, in "True")
+            global(inout builder, in "True")
         };
         let mut admissible = precondition;
         let mut k = binders.len();
@@ -653,44 +691,44 @@ pub fn contracts(
                 break;
             }
             k = wrapping_sub(k, 1);
-            let mut one = empty();
-            one.push(get(in binders, k));
-            let lam = lambda(inout b, in one, admissible);
-            let ex = global(inout b, in "Exists");
-            admissible = app1(inout b, ex, lam);
+            let mut single = empty();
+            single.push(get(in binders, k));
+            let exists_body = lambda(inout builder, in single, admissible);
+            let exists = global(inout builder, in "Exists");
+            admissible = app1(inout builder, exists, exists_body);
         }
-        let mut body = if c.requires != NONE32 {
-            arrow_t(inout b, precondition, post)
+        let mut body = if contract.requires != NONE32 {
+            arrow_t(inout builder, precondition, post)
         } else {
             post
         };
         if binders.len() > 0 {
-            body = forall(inout b, in binders, body);
+            body = forall(inout builder, in binders, body);
         }
-        let cn = b.joined(in "", c.f, in "$contract");
-        let an = b.joined(in "", c.f, in "$admissible");
+        let contract_name = builder.joined(in "", contract.func, in "$contract");
+        let admissible_name = builder.joined(in "", contract.func, in "$admissible");
         // the two definitions
-        let m = b.at();
-        b.w(D_DEF);
-        b.w(K_DEF);
-        b.name(cn);
-        b.w(0);
-        b.w(2);
-        b.put(body);
-        b.w(D_DEF);
-        b.w(K_DEF);
-        b.name(an);
-        b.w(0);
-        b.w(2);
-        b.put(admissible);
-        let defs = b.since(m);
-        if internal(inout b, inout err, c.f) {
+        let mark = builder.at();
+        builder.w(D_DEF);
+        builder.w(K_DEF);
+        builder.name(contract_name);
+        builder.w(0);
+        builder.w(2);
+        builder.put(body);
+        builder.w(D_DEF);
+        builder.w(K_DEF);
+        builder.name(admissible_name);
+        builder.w(0);
+        builder.w(2);
+        builder.put(admissible);
+        let defs = builder.since(mark);
+        if internal(inout builder, inout err, contract.func) {
             return false;
         }
         for i in 0..defs.n {
-            cw.push(u64_at(in b.words, add(defs.a, i)));
+            contract_words.push(u64_at(in builder.words, add(defs.a, i)));
         }
-        names.push(c.f);
+        names.push(contract.func);
     }
     true
 }

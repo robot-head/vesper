@@ -1535,9 +1535,8 @@ fn valid_library_name(in names: Names, s: u32) -> bool {
     }
     for i in 1..n {
         let c = names.byte(s, i);
-        if !(
-            c >= LOWER_A && c <= LOWER_Z || c >= DIGIT_ZERO && c <= DIGIT_NINE || c == UNDERSCORE
-        ) {
+        if !(c >= LOWER_A && c <= LOWER_Z || c >= DIGIT_ZERO && c <= DIGIT_NINE || c == UNDERSCORE)
+        {
             return false;
         }
     }
