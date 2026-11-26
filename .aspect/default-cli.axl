@@ -4,16 +4,22 @@ load("./lib/process.axl", "capture")
 
 _FORBIDDEN = ["wasmtime", "wasmtime-wasi", "vesper-loom-sandbox"]
 
+# The packages whose binary is the default `vesper`: the Rust compiler
+# (`//:bin/vesper`) and the hybrid shipped under that name (#1397, the
+# default switch: `//:vesper_shipped`, `--features gated-default`).
+_PACKAGES = ["vesper", "vesper-hybrid"]
+
 def _check_graph(ctx: TaskContext) -> int:
     root = ctx.std.env.aspect_root_dir()
-    graph = capture(ctx, "cargo", ["tree", "--locked", "-p", "vesper", "--edges", "normal", "--prefix", "none"], root)
-    found = {}
-    for line in graph.splitlines():
-        fields = line.split()
-        if fields and fields[0] in _FORBIDDEN:
-            found[fields[0]] = True
-    if found:
-        ctx.std.process.exit(1, "Default Vesper CLI has forbidden normal dependencies: " + ", ".join(sorted(found)))
+    for package in _PACKAGES:
+        graph = capture(ctx, "cargo", ["tree", "--locked", "-p", package, "--edges", "normal", "--prefix", "none"], root)
+        found = {}
+        for line in graph.splitlines():
+            fields = line.split()
+            if fields and fields[0] in _FORBIDDEN:
+                found[fields[0]] = True
+        if found:
+            ctx.std.process.exit(1, "Default Vesper CLI (" + package + ") has forbidden normal dependencies: " + ", ".join(sorted(found)))
     return 0
 
 check_default_cli_dependencies = task(
