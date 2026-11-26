@@ -354,40 +354,20 @@ pub fn pvh_parse(in elf: Slice[u8], in ram: Slice[u64], inout out: Slice[u64])
             Option::None => return Result::Err(PvhFault::Truncated),
         };
         if add_overflows(offset, filesz) || wrapping_add(offset, filesz) > n {
-            return Result::Err(
-                PvhFault::SegmentFileRange {
-                    index: i
-                }
-            );
+            return Result::Err(PvhFault::SegmentFileRange { index: i });
         }
         if kind == PT_LOAD {
             if filesz > memsz || memsz == 0 {
-                return Result::Err(
-                    PvhFault::SegmentFileRange {
-                        index: i
-                    }
-                );
+                return Result::Err(PvhFault::SegmentFileRange { index: i });
             }
             if add_overflows(paddr, memsz) {
-                return Result::Err(
-                    PvhFault::SegmentOverflow {
-                        index: i
-                    }
-                );
+                return Result::Err(PvhFault::SegmentOverflow { index: i });
             }
             if !ram_contains(in ram, paddr, memsz) {
-                return Result::Err(
-                    PvhFault::SegmentOutsideRam {
-                        index: i
-                    }
-                );
+                return Result::Err(PvhFault::SegmentOutsideRam { index: i });
             }
             if over_boot_data(paddr, memsz) {
-                return Result::Err(
-                    PvhFault::SegmentOverBootData {
-                        index: i
-                    }
-                );
+                return Result::Err(PvhFault::SegmentOverBootData { index: i });
             }
             let w = wrapping_mul(count, LoadSegment::Words);
             out.try_set(wrapping_add(w, LoadSegment::Paddr), paddr);
@@ -416,12 +396,7 @@ pub fn pvh_parse(in elf: Slice[u8], in ram: Slice[u64], inout out: Slice[u64])
                 seg_word(in out, b, LoadSegment::Paddr),
                 seg_word(in out, b, LoadSegment::Memsz)
             ) {
-                return Result::Err(
-                    PvhFault::SegmentsOverlap {
-                        a: a,
-                        b: b
-                    }
-                );
+                return Result::Err(PvhFault::SegmentsOverlap { a: a, b: b });
             }
         }
     }
@@ -438,9 +413,5 @@ pub fn pvh_parse(in elf: Slice[u8], in ram: Slice[u64], inout out: Slice[u64])
             return Result::Ok((entry32, count));
         }
     }
-    Result::Err(
-        PvhFault::EntryNotExecutable {
-            entry: entry32
-        }
-    )
+    Result::Err(PvhFault::EntryNotExecutable { entry: entry32 })
 }

@@ -14,13 +14,7 @@ pub struct Json {
 }
 
 pub fn json_new(pretty: bool) -> Json {
-    Json {
-        out: ChunkSeq::new[u8](),
-        pretty: pretty,
-        depth: 0,
-        fresh: true,
-        keyed: false
-    }
+    Json { out: ChunkSeq::new[u8](), pretty: pretty, depth: 0, fresh: true, keyed: false }
 }
 
 fn newline(inout j: Json) {

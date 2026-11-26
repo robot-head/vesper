@@ -39,10 +39,7 @@ effect LastSeen {
 }
 
 fn last_seen_map() -> BpfMapSpec {
-    BpfMapSpec {
-        kind: BpfMapKind::Hash,
-        max_entries: 256
-    }
+    BpfMapSpec { kind: BpfMapKind::Hash, max_entries: 256 }
 }
 
 fn dns_guard() -> TcAction eff [Packet] {

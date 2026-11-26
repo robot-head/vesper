@@ -35,12 +35,7 @@ pub copy struct Digits {
 }
 
 fn none() -> Digits {
-    Digits {
-        ok: false,
-        digits: 0,
-        n: 0,
-        k: 0
-    }
+    Digits { ok: false, digits: 0, n: 0, k: 0 }
 }
 
 // Leading zeros of a 64-bit word (64 for zero), by halving.
@@ -258,12 +253,7 @@ fn round_and_weed(
         }
     }
     if wrapping_mul(2, ulp) <= plus1w && plus1w <= wrapping_sub(threshold, wrapping_mul(4, ulp)) {
-        Digits {
-            ok: true,
-            digits: digits,
-            n: n,
-            k: k
-        }
+        Digits { ok: true, digits: digits, n: n, k: k }
     } else {
         none()
     }

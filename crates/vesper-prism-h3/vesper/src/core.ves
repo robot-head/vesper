@@ -190,15 +190,9 @@ pub fn conn_core_new(cfg: H3ConfigAbi, server: bool) -> ConnCore {
 
 pub fn connection_error_code(e: ConnectionError) -> u64 {
     match e {
-        ConnectionError::Frame {
-            stream_id: _sid,
-            error: error
-        } => match error {
+        ConnectionError::Frame { stream_id: _sid, error: error } => match error {
             FrameError::Malformed => ConnectionCode::FrameError,
-            FrameError::TooLarge {
-                frame_type: _ft,
-                len: _len
-            } => CODE_EXCESSIVE_LOAD,
+            FrameError::TooLarge { frame_type: _ft, len: _len } => CODE_EXCESSIVE_LOAD,
             FrameError::Http2Frame(_) => ConnectionCode::FrameUnexpected,
             FrameError::BadSetting(_) => ConnectionCode::SettingsError,
         },
@@ -206,18 +200,14 @@ pub fn connection_error_code(e: ConnectionError) -> u64 {
             QpackError::Decompression(_) => ConnectionCode::QpackDecompressionFailed,
             QpackError::EncoderStream(_) => ConnectionCode::QpackEncoderStreamError,
             QpackError::DecoderStream(_) => ConnectionCode::QpackDecoderStreamError,
-            QpackError::FieldSectionTooLarge {
-                stream_id: _sid
-            } => CODE_EXCESSIVE_LOAD,
+            QpackError::FieldSectionTooLarge { stream_id: _sid } => CODE_EXCESSIVE_LOAD,
         },
         ConnectionError::FrameUnexpected {
             stream_id: _sid,
             frame_type: _ft
         } => ConnectionCode::FrameUnexpected,
         ConnectionError::MissingSettings => ConnectionCode::MissingSettings,
-        ConnectionError::StreamCreation {
-            stream_id: _sid
-        } => ConnectionCode::StreamCreationError,
+        ConnectionError::StreamCreation { stream_id: _sid } => ConnectionCode::StreamCreationError,
         ConnectionError::ClosedCriticalStream {
             stream_id: _sid
         } => ConnectionCode::ClosedCriticalStream,
@@ -485,10 +475,7 @@ fn run_uni_cmds(
         };
         match cmd {
             UniCmd::None => {}
-            UniCmd::StopSending {
-                stream_id,
-                code
-            } => {
+            UniCmd::StopSending { stream_id, code } => {
                 push_cmd(inout c.cmd, CMD_STOP_SENDING, stream_id, code);
             }
             UniCmd::UnknownStream => {
@@ -497,32 +484,21 @@ fn run_uni_cmds(
             UniCmd::UnknownFrame => {
                 c.stats.unknown_frames = inc(c.stats.unknown_frames);
             }
-            UniCmd::ToDecoder {
-                at,
-                len
-            } => {
+            UniCmd::ToDecoder { at, len } => {
                 let hi = wrapping_add(at, len);
                 match dec_on_encoder_stream(inout dec, in h, in c.uni.out[at..hi]) {
                     Result::Ok(_) => harvest_unblocked(inout c, inout dec),
                     Result::Err(e) => return Result::Err(ConnectionError::Qpack(e)),
                 }
             }
-            UniCmd::ToEncoder {
-                at,
-                len
-            } => {
+            UniCmd::ToEncoder { at, len } => {
                 let hi = wrapping_add(at, len);
                 match enc_on_decoder_stream(inout enc, in c.uni.out[at..hi]) {
                     Result::Ok(_) => {}
                     Result::Err(e) => return Result::Err(ConnectionError::Qpack(e)),
                 }
             }
-            UniCmd::WebTransportStream {
-                stream_id,
-                session,
-                at,
-                len
-            } => {
+            UniCmd::WebTransportStream { stream_id, session, at, len } => {
                 let hi = wrapping_add(at, len);
                 let rest_q = q_push(inout c.pool, 0, in c.uni.out[at..hi]);
                 let gone = session_known_gone(
@@ -1017,11 +993,7 @@ pub fn unpack_fields_to_hev(inout c: ConnCore, q: u64) -> UnpackedFields {
     let moff = c.hev.meta.len() / 3;
     let boff = c.hev.bytes.len();
     if q == 0 {
-        return UnpackedFields {
-            count: 0,
-            meta_off: moff,
-            byte_off: boff
-        };
+        return UnpackedFields { count: 0, meta_off: moff, byte_off: boff };
     }
     c.scratch.clear();
     let _r = q_drain_all_to(inout c.pool, q, inout c.scratch);

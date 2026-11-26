@@ -349,12 +349,7 @@ struct Sig {
 
 fn sig_fail(inout b: B) -> Sig {
     b.failed = true;
-    Sig {
-        ok: false,
-        kinds: ChunkSeq::new[u8](),
-        result: K_NONE,
-        body: NONE
-    }
+    Sig { ok: false, kinds: ChunkSeq::new[u8](), result: K_NONE, body: NONE }
 }
 
 fn signature(inout b: B, in a: Ast, in y: Syms, in wt: Wt, fi: u64) -> Sig {
@@ -452,12 +447,7 @@ fn signature(inout b: B, in a: Ast, in y: Syms, in wt: Wt, fi: u64) -> Sig {
         let x = fail_s(inout b, in "the function has no body");
         return sig_fail(inout b);
     }
-    Sig {
-        ok: true,
-        kinds: kinds,
-        result: result,
-        body: f.body
-    }
+    Sig { ok: true, kinds: kinds, result: result, body: f.body }
 }
 
 fn charge(inout b: B) -> bool {
@@ -1343,13 +1333,9 @@ fn word(in b: Slice[u8], inout r: Rd) -> u64 {
 // records separated by 0x1e.
 pub fn proof_models(in input: Str) -> ChunkSeq[u64] {
     let bytes = input.as_bytes();
-    let mut cr = CtxReader {
-        pos: 0
-    };
+    let mut cr = CtxReader { pos: 0 };
     let c = read_ctx(inout cr, in bytes);
-    let mut r = Rd {
-        pos: cr.pos
-    };
+    let mut r = Rd { pos: cr.pos };
     let nf = word(in bytes, inout r);
     let mut no = ChunkSeq::new[u64]();
     let mut nl = ChunkSeq::new[u64]();

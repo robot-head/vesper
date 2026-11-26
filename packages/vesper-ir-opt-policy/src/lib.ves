@@ -35,9 +35,7 @@ pub fn ir_opt_policy_entry(in input: Str) -> ChunkSeq[u64] {
 // The harness's screen: per block row, 1 when the screen keeps it.
 pub fn ir_opt_policy_screen_entry(in input: Str) -> ChunkSeq[u64] {
     let b = input.as_bytes();
-    let mut r = Reader {
-        pos: 0
-    };
+    let mut r = Reader { pos: 0 };
     let c = read_ctx(inout r, in b);
     let p = read_program(inout r, in b, in c);
     let cls = type_classes(in c.types, in c.names);
@@ -63,9 +61,7 @@ fn inc(x: u64) -> u64 {
 // @vesper/ir-opt's `ir_opt_words` with the screen, for the hybrid build's
 // `opt` hook (crates/vesper-hybrid/modules/ir_opt).
 pub fn policy_words(in b: Slice[u8]) -> ChunkSeq[u64] {
-    let mut r = Reader {
-        pos: 0
-    };
+    let mut r = Reader { pos: 0 };
     let c = read_ctx(inout r, in b);
     let mut p = read_program(inout r, in b, in c);
     let mode = r.word(in b);

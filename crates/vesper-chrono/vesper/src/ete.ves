@@ -194,20 +194,11 @@ fn uleb(in bytes: Slice[u8], at: u64, max: u64, offset: u64) -> Result[UlebOut, 
         let b = byte_at(in bytes, wrapping_add(at, i));
         value = value | shl(widen_u64(b & 0x7f), wrapping_mul(7, i));
         if (b & 0x80) == 0 {
-            return Result::Ok(
-                UlebOut {
-                    value: value,
-                    len: wrapping_add(i, 1)
-                }
-            );
+            return Result::Ok(UlebOut { value: value, len: wrapping_add(i, 1) });
         }
         i = wrapping_add(i, 1);
     }
-    Result::Err(
-        EteError::FieldTooLong {
-            offset: offset
-        }
-    )
+    Result::Err(EteError::FieldTooLong { offset: offset })
 }
 
 fn clone_isa(in isa: InstructionSet) -> InstructionSet {
@@ -415,67 +406,32 @@ fn decode_address(
     }
     if h == 0x90 {
         if !st.has_h0 {
-            return Result::Err(
-                EteError::EmptyAddressHistory {
-                    offset: offset
-                }
-            );
+            return Result::Err(EteError::EmptyAddressHistory { offset: offset });
         }
         let a = st.h0_addr;
         let isa = clone_isa(in st.h0_isa);
         push_address(inout st, a, in isa);
-        return Result::Ok(
-            AddrOut {
-                address: a,
-                isa: isa,
-                len: 0
-            }
-        );
+        return Result::Ok(AddrOut { address: a, isa: isa, len: 0 });
     }
     if h == 0x91 {
         if !st.has_h1 {
-            return Result::Err(
-                EteError::EmptyAddressHistory {
-                    offset: offset
-                }
-            );
+            return Result::Err(EteError::EmptyAddressHistory { offset: offset });
         }
         let a = st.h1_addr;
         let isa = clone_isa(in st.h1_isa);
         push_address(inout st, a, in isa);
-        return Result::Ok(
-            AddrOut {
-                address: a,
-                isa: isa,
-                len: 0
-            }
-        );
+        return Result::Ok(AddrOut { address: a, isa: isa, len: 0 });
     }
     if h == 0x92 {
         if !st.has_h2 {
-            return Result::Err(
-                EteError::EmptyAddressHistory {
-                    offset: offset
-                }
-            );
+            return Result::Err(EteError::EmptyAddressHistory { offset: offset });
         }
         let a = st.h2_addr;
         let isa = clone_isa(in st.h2_isa);
         push_address(inout st, a, in isa);
-        return Result::Ok(
-            AddrOut {
-                address: a,
-                isa: isa,
-                len: 0
-            }
-        );
+        return Result::Ok(AddrOut { address: a, isa: isa, len: 0 });
     }
-    Result::Err(
-        EteError::Reserved {
-            offset: offset,
-            header: h
-        }
-    )
+    Result::Err(EteError::Reserved { offset: offset, header: h })
 }
 
 fn decode_context_info(inout st: EteState, in bytes: Slice[u8], at: u64) -> Result[u64, EteError] {
@@ -507,13 +463,14 @@ fn decode_context_info(inout st: EteState, in bytes: Slice[u8], at: u64) -> Resu
         context_id = Option::Some(wrapping_u32(c0 | c1 | c2 | c3));
         len = wrapping_add(len, 4);
     }
-    st.context = EteContext {
-        el: info & 0x03,
-        sixty_four: (info & 0x10) != 0,
-        non_secure: (info & 0x20) != 0,
-        vmid: vmid,
-        context_id: context_id,
-    };
+    st
+        .context = EteContext {
+            el: info & 0x03,
+            sixty_four: (info & 0x10) != 0,
+            non_secure: (info & 0x20) != 0,
+            vmid: vmid,
+            context_id: context_id,
+        };
     Result::Ok(len)
 }
 
@@ -580,11 +537,7 @@ fn decode_packet(
                 );
             return Result::Ok(async_len());
         }
-        return Result::Err(
-            EteError::NotSynchronized {
-                offset: offset
-            }
-        );
+        return Result::Err(EteError::NotSynchronized { offset: offset });
     }
     if h == 0x00 {
         if is_async_at(in bytes, offset) {
@@ -627,17 +580,9 @@ fn decode_packet(
                 Result::Ok(_) => {}
                 Result::Err(e) => return Result::Err(e),
             }
-            return Result::Err(
-                EteError::MalformedExtension {
-                    offset: offset
-                }
-            );
+            return Result::Err(EteError::MalformedExtension { offset: offset });
         }
-        return Result::Err(
-            EteError::MalformedExtension {
-                offset: offset
-            }
-        );
+        return Result::Err(EteError::MalformedExtension { offset: offset });
     }
     if h == 0x01 {
         let pl = match uleb(in bytes, at, 1, offset) {
@@ -770,30 +715,18 @@ fn decode_packet(
             }
             let b2 = byte_at(in bytes, wrapping_add(at, 1));
             if (b2 & 0x80) != 0 {
-                return Result::Err(
-                    EteError::FieldTooLong {
-                        offset: offset
-                    }
-                );
+                return Result::Err(EteError::FieldTooLong { offset: offset });
             }
             exception_type = exception_type | (widen_u64(b2 & 0x1f) << 5);
             len = 2;
         }
         let addr_at = wrapping_add(at, len);
         if addr_at >= bytes.len() {
-            return Result::Err(
-                EteError::ExceptionWithoutAddress {
-                    offset: offset
-                }
-            );
+            return Result::Err(EteError::ExceptionWithoutAddress { offset: offset });
         }
         let ah = byte_at(in bytes, addr_at);
         if !is_addr_header(ah) {
-            return Result::Err(
-                EteError::ExceptionWithoutAddress {
-                    offset: offset
-                }
-            );
+            return Result::Err(EteError::ExceptionWithoutAddress { offset: offset });
         }
         let ao = match decode_address(inout st, in bytes, ah, wrapping_add(addr_at, 1), offset) {
             Result::Ok(v) => v,
@@ -849,9 +782,7 @@ fn decode_packet(
             .push(
                 EteElementAt {
                     offset: offset,
-                    element: EteElement::Event {
-                        mask: h & 0x0f
-                    },
+                    element: EteElement::Event { mask: h & 0x0f },
                 }
             );
         return Result::Ok(1);
@@ -968,19 +899,9 @@ fn decode_packet(
         return Result::Ok(1);
     }
     if is_unsupported_header(h) {
-        return Result::Err(
-            EteError::Unsupported {
-                offset: offset,
-                header: h
-            }
-        );
+        return Result::Err(EteError::Unsupported { offset: offset, header: h });
     }
-    Result::Err(
-        EteError::Reserved {
-            offset: offset,
-            header: h
-        }
-    )
+    Result::Err(EteError::Reserved { offset: offset, header: h })
 }
 
 fn decode_from(in bytes: Slice[u8], start: u64) -> Result[ChunkSeq[EteElementAt], EteError] {

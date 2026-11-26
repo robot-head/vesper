@@ -16,19 +16,10 @@ pub fn bbrv3_record_send(inout b: Bbrv3, now_ns: u64, packet: SentPacket, guard:
     let bytes = widen_u64(packet.bytes);
     if packet.in_flight {
         if bytes == 0 {
-            Fail::raise(
-                BbrFault::EmptyInFlightPacket {
-                    pn: packet.pn
-                }
-            );
+            Fail::raise(BbrFault::EmptyInFlightPacket { pn: packet.pn });
         }
         if guard && !send_allowed(b.inflight, b.cwnd) {
-            Fail::raise(
-                BbrFault::CwndFull {
-                    bytes_in_flight: b.inflight,
-                    cwnd: b.cwnd
-                }
-            );
+            Fail::raise(BbrFault::CwndFull { bytes_in_flight: b.inflight, cwnd: b.cwnd });
         }
         if add_overflows(b.inflight, bytes) {
             Fail::raise(BbrFault::CounterOverflow);
@@ -105,11 +96,7 @@ pub fn ack_check(
         Option::None => (),
     }
     if packet.sent_ns > now_ns {
-        Fail::raise(
-            BbrFault::AckedBeforeSent {
-                pn: packet.pn
-            }
-        );
+        Fail::raise(BbrFault::AckedBeforeSent { pn: packet.pn });
     }
     if !snapshot.counted {
         return;
@@ -135,10 +122,7 @@ pub fn ack_check(
 pub fn ack_check_totals(p: AckProgress, inflight: u64, delivered: u64) eff [Fail[BbrFault]] {
     if p.released > inflight {
         Fail::raise(
-            BbrFault::InflightUnderflow {
-                bytes_in_flight: inflight,
-                released: p.released
-            }
+            BbrFault::InflightUnderflow { bytes_in_flight: inflight, released: p.released }
         );
     }
     if add_overflows(delivered, p.newly_delivered) {
@@ -276,12 +260,7 @@ pub fn bbrv3_on_packet_lost(
     }
     let bytes = widen_u64(packet.bytes);
     if bytes > b.inflight {
-        Fail::raise(
-            BbrFault::InflightUnderflow {
-                bytes_in_flight: b.inflight,
-                released: bytes
-            }
-        );
+        Fail::raise(BbrFault::InflightUnderflow { bytes_in_flight: b.inflight, released: bytes });
     }
     if add_overflows(b.lost, bytes) {
         Fail::raise(BbrFault::CounterOverflow);

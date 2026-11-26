@@ -14,17 +14,11 @@ pub copy struct HopKind {
 }
 
 pub fn hop_mint(parent: u64) -> HopKind {
-    HopKind {
-        tag: 0,
-        aux: parent
-    }
+    HopKind { tag: 0, aux: parent }
 }
 
 pub fn hop_sink_move() -> HopKind {
-    HopKind {
-        tag: 1,
-        aux: 0
-    }
+    HopKind { tag: 1, aux: 0 }
 }
 
 pub fn hop_channel_handoff(to_fiber: u64) -> HopKind {
@@ -35,10 +29,7 @@ pub fn hop_channel_handoff(to_fiber: u64) -> HopKind {
 }
 
 pub fn hop_unpack_discharge() -> HopKind {
-    HopKind {
-        tag: 3,
-        aux: 0
-    }
+    HopKind { tag: 3, aux: 0 }
 }
 
 pub fn hop_projection(place_hash: u64) -> HopKind {
@@ -49,10 +40,7 @@ pub fn hop_projection(place_hash: u64) -> HopKind {
 }
 
 pub fn hop_leak() -> HopKind {
-    HopKind {
-        tag: 5,
-        aux: 0
-    }
+    HopKind { tag: 5, aux: 0 }
 }
 
 pub fn is_terminal_hop(k: HopKind) -> bool {

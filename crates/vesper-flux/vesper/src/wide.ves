@@ -11,10 +11,7 @@ pub copy struct Acc {
 const SIGN_BIT: u64 = 9223372036854775808;
 
 pub fn acc_zero() -> Acc {
-    Acc {
-        hi: 0,
-        lo: 0
-    }
+    Acc { hi: 0, lo: 0 }
 }
 
 pub fn acc_add(a: Acc, v: i64) -> Acc {
@@ -29,10 +26,7 @@ pub fn acc_add(a: Acc, v: i64) -> Acc {
     } else {
         0
     };
-    Acc {
-        hi: wrapping_add(wrapping_add(a.hi, sign), carry),
-        lo: lo
-    }
+    Acc { hi: wrapping_add(wrapping_add(a.hi, sign), carry), lo: lo }
 }
 
 pub fn acc_is_zero(a: Acc) -> bool {

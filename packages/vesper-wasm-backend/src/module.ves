@@ -156,25 +156,14 @@ impl Builder {
     fn type_def(in self, i: u64) -> TypeDef {
         match self.types.try_get(i) {
             Option::Some(t) => t,
-            Option::None => TypeDef {
-                kind: TD_FUNC,
-                p0: 0,
-                pn: 0,
-                rn: 0,
-                func: 0
-            },
+            Option::None => TypeDef { kind: TD_FUNC, p0: 0, pn: 0, rn: 0, func: 0 },
         }
     }
 
     fn func_row(in self, i: u64) -> FuncRow {
         match self.funcs.try_get(i) {
             Option::Some(f) => f,
-            Option::None => FuncRow {
-                ty: 0,
-                b0: 0,
-                bn: 0,
-                defined: false
-            },
+            Option::None => FuncRow { ty: 0, b0: 0, bn: 0, defined: false },
         }
     }
 
@@ -213,15 +202,7 @@ impl Builder {
         let i = self.types.len();
         self
             .types
-            .push(
-                TypeDef {
-                    kind: TD_FUNC,
-                    p0: p0,
-                    pn: params.len(),
-                    rn: results.len(),
-                    func: 0
-                }
-            );
+            .push(TypeDef { kind: TD_FUNC, p0: p0, pn: params.len(), rn: results.len(), func: 0 });
         wrapping_u32(i)
     }
 
@@ -246,31 +227,12 @@ impl Builder {
             }
         }
         let i = self.types.len();
-        self
-            .types
-            .push(
-                TypeDef {
-                    kind: TD_CONT,
-                    p0: 0,
-                    pn: 0,
-                    rn: 0,
-                    func: func
-                }
-            );
+        self.types.push(TypeDef { kind: TD_CONT, p0: 0, pn: 0, rn: 0, func: func });
         wrapping_u32(i)
     }
 
     pub fn declare_typed(inout self, ty: u32) -> u32 {
-        self
-            .funcs
-            .push(
-                FuncRow {
-                    ty: ty,
-                    b0: 0,
-                    bn: 0,
-                    defined: false
-                }
-            );
+        self.funcs.push(FuncRow { ty: ty, b0: 0, bn: 0, defined: false });
         wrapping_u32(wrapping_sub(wrapping_add(self.imports.len(), self.funcs.len()), 1))
     }
 
@@ -310,17 +272,7 @@ impl Builder {
         let ty = self.func_type(in params, in results);
         let m0 = self.put_text(in module);
         let n0 = self.put_text(in name);
-        self
-            .imports
-            .push(
-                ImportRow {
-                    m0: m0,
-                    mn: module.len(),
-                    n0: n0,
-                    nn: name.len(),
-                    ty: ty
-                }
-            );
+        self.imports.push(ImportRow { m0: m0, mn: module.len(), n0: n0, nn: name.len(), ty: ty });
         wrapping_u32(wrapping_sub(self.imports.len(), 1))
     }
 
@@ -333,12 +285,7 @@ impl Builder {
         let f = self.func_row(i);
         let b0 = self.bodies.len();
         append(inout self.bodies, in body);
-        let row = FuncRow {
-            ty: f.ty,
-            b0: b0,
-            bn: body.len(),
-            defined: true
-        };
+        let row = FuncRow { ty: f.ty, b0: b0, bn: body.len(), defined: true };
         let ok = self.funcs.try_set(i, row);
     }
 
@@ -401,16 +348,7 @@ impl Builder {
 
     pub fn export_func(inout self, in name: Slice[u8], func: u32) {
         let n0 = self.put_text(in name);
-        self
-            .exports
-            .push(
-                ExportRow {
-                    n0: n0,
-                    nn: name.len(),
-                    kind: EXPORT_FUNC,
-                    index: func
-                }
-            );
+        self.exports.push(ExportRow { n0: n0, nn: name.len(), kind: EXPORT_FUNC, index: func });
     }
 
     // The module's bytes (`Builder::finish`).

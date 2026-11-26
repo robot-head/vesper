@@ -92,11 +92,7 @@ impl [T: mod copy] RadixSeq[T] {
     // Take an O(1) snapshot of the current contents.
     pub fn freeze(inout self) -> SeqSnapshot {
         self.epoch = wrapping_add(self.epoch, 1);
-        SeqSnapshot {
-            root: self.root,
-            height: self.height,
-            len: self.len
-        }
+        SeqSnapshot { root: self.root, height: self.height, len: self.len }
     }
 
     // Replace the contents with those of `s`, in O(1). Later edits copy
@@ -110,11 +106,7 @@ impl [T: mod copy] RadixSeq[T] {
 
     // The current contents as a snapshot, without starting a new epoch.
     fn view(in self) -> SeqSnapshot {
-        SeqSnapshot {
-            root: self.root,
-            height: self.height,
-            len: self.len
-        }
+        SeqSnapshot { root: self.root, height: self.height, len: self.len }
     }
 
     fn new_leaf(inout self, fill: T) -> u64 {

@@ -3,12 +3,7 @@
 
 pub fn clock_advance_to(now_ns: u64, requested_ns: u64) -> u64 eff [Fail[ClockError]] {
     if requested_ns < now_ns {
-        Fail::raise(
-            ClockError::Backwards {
-                now_ns: now_ns,
-                requested_ns: requested_ns
-            }
-        )
+        Fail::raise(ClockError::Backwards { now_ns: now_ns, requested_ns: requested_ns })
     } else if requested_ns > max_time_ns() {
         Fail::raise(ClockError::OutOfRange)
     } else {

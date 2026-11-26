@@ -114,18 +114,14 @@ fn u64_of(in s: ChunkSeq[u64], i: u64) -> u64 {
 // order, so the IR check's constructor lookup (first ADT in name order)
 // and the layout read the same tables.
 pub fn checks_extend(inout s: Checks, in part: Slice[u8]) {
-    let mut r = Reader {
-        pos: 0
-    };
+    let mut r = Reader { pos: 0 };
     extend_ctx(inout r, in part, inout s.c);
 }
 
 // `ir_check::validate` over the shared world, after adding `part` (the
 // part `WorldLog::ir_part` writes).
 pub fn checks_validate(inout s: Checks, in part: Slice[u8]) -> ChunkSeq[u64] {
-    let mut r = Reader {
-        pos: 0
-    };
+    let mut r = Reader { pos: 0 };
     extend_ctx(inout r, in part, inout s.c);
     ir_check_task(inout r, in part, inout s.c)
 }
@@ -134,9 +130,7 @@ pub fn checks_validate(inout s: Checks, in part: Slice[u8]) -> ChunkSeq[u64] {
 // `WorldLog::layout_part` writes). The answer is in `s.out`; returns its
 // word count.
 pub fn checks_layout_of(inout s: Checks, in part: Slice[u8]) -> u64 {
-    let mut r = Reader {
-        pos: 0
-    };
+    let mut r = Reader { pos: 0 };
     extend_ctx(inout r, in part, inout s.c);
     let ty = u32_at(in s.c.tmap, r.word(in part));
     s.sync();

@@ -317,10 +317,7 @@ impl L {
                 return NONE64;
             }
         }
-        let b = Bounds {
-            keys: ChunkSeq::new[u32](),
-            modes: ChunkSeq::new[u8]()
-        };
+        let b = Bounds { keys: ChunkSeq::new[u32](), modes: ChunkSeq::new[u8]() };
         for i in 0..sig.pn {
             let pm = self.cx.f.param(add(sig.p0, i));
             // Exclude heap-allocated inout params (including i128/u128 wide_blocks

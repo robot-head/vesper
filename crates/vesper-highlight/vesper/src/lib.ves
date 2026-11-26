@@ -926,11 +926,7 @@ fn classify_lower(
 fn lex_or_refuse(in src: Slice[u8], inout d: Diags, max_diag: u64) -> Tokens eff [Fail[Refused]] {
     let t = lex_with_limits(in src, inout d, hard_source_bytes(), hard_tokens(), max_diag);
     if t.limited || t.rejected {
-        Fail::raise(
-            Refused {
-                len: src.len()
-            }
-        );
+        Fail::raise(Refused { len: src.len() });
     }
     t
 }

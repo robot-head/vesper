@@ -38,11 +38,7 @@ pub fn hotset_decode(in bytes: Slice[u8], expected: u64, inout pages: Slice[u64]
         Option::None => 0,
     };
     if page_count != expected {
-        return Result::Err(
-            HotFault::OutOfRange {
-                index: expected
-            }
-        );
+        return Result::Err(HotFault::OutOfRange { index: expected });
     }
     let count = match bytes.try_read_u32_le(12) {
         Option::Some(v) => widen_u64(v),
@@ -67,11 +63,7 @@ pub fn hotset_decode(in bytes: Slice[u8], expected: u64, inout pages: Slice[u64]
             Option::None => return Result::Err(HotFault::Truncated),
         };
         if i >= expected {
-            return Result::Err(
-                HotFault::OutOfRange {
-                    index: i
-                }
-            );
+            return Result::Err(HotFault::OutOfRange { index: i });
         }
         if have && last >= i {
             return Result::Err(HotFault::NotCanonical);

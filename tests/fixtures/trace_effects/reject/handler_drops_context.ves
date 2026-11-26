@@ -13,21 +13,11 @@ fn detached() -> u64 eff [Trace] {
     } with {
         return v => v,
         current_ctx(resume) => resume(
-            SpanContext {
-                trace_id_hi: 1,
-                trace_id_lo: 1,
-                span_id: 0,
-                flags: 0
-            }
+            SpanContext { trace_id_hi: 1, trace_id_lo: 1, span_id: 0, flags: 0 }
         ),
         start_span(schema, name, resume) => resume(
             ActiveSpan {
-                ctx: SpanContext {
-                    trace_id_hi: 1,
-                    trace_id_lo: 1,
-                    span_id: 9,
-                    flags: 0
-                },
+                ctx: SpanContext { trace_id_hi: 1, trace_id_lo: 1, span_id: 9, flags: 0 },
                 parent_span_id: 0,
                 start_mono_ns: 0,
                 schema_id: schema
@@ -35,12 +25,7 @@ fn detached() -> u64 eff [Trace] {
         ),
         start_child(p, schema, name, resume) => resume(Trace::start_child(p, schema, name)),
         emit_ok(span, attr, resume) => {
-            let ActiveSpan {
-                ctx,
-                parent_span_id,
-                start_mono_ns,
-                schema_id
-            } = span;
+            let ActiveSpan { ctx, parent_span_id, start_mono_ns, schema_id } = span;
             resume(())
         },
         emit_err(span, code, msg, resume) => {

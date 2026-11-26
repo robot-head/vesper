@@ -96,17 +96,7 @@ const KEY_WHAT_NOT_P384: u64 = 2;
 const KEY_WHAT_COORD: u64 = 3;
 
 fn key_err(what: u64) -> Never eff [Fail[AtErr]] {
-    Fail::raise(
-        AtErr {
-            kind: 5,
-            what: what,
-            reason: 0,
-            index: 0,
-            extra: 0,
-            off: 0,
-            len: 0
-        }
-    )
+    Fail::raise(AtErr { kind: 5, what: what, reason: 0, index: 0, extra: 0, off: 0, len: 0 })
 }
 
 // Whether `node` is a CBOR label (`Int(i64)` or `Text`).
@@ -686,9 +676,7 @@ pub fn sign1_parse(
     field: u64,
     reason: u64
 ) -> Unit eff [Fail[AErr]] {
-    let mut sc = Scratch {
-        pos: 0
-    };
+    let mut sc = Scratch { pos: 0 };
     handle Fail[AErr] in {
         decode_whole_at(in b, 0, field, inout n, inout st);
     } with {

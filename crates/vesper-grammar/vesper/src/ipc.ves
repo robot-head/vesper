@@ -367,11 +367,7 @@ fn table(
             }
         }
     }
-    Table {
-        pos: pos,
-        vtable: vtable,
-        slots: slots
-    }
+    Table { pos: pos, vtable: vtable, slots: slots }
 }
 
 // Fb::field: the buffer position of slot `index`, or none().
@@ -643,20 +639,10 @@ fn column_range(total: u64, offset_bytes: u64, byte_length: u64, body_at: u64)
     -> P2 eff [Fail[GErr]] {
     let r = handle Fail[GErr] in {
         let p = checked_buffer_range(total, offset_bytes, byte_length, BUFFER_ALIGN);
-        P4 {
-            a: 0,
-            b: p.a,
-            c: p.b,
-            d: 0
-        }
+        P4 { a: 0, b: p.a, c: p.b, d: 0 }
     } with {
         return v => v,
-        raise(e, k) => P4 {
-            a: 1,
-            b: e.kind,
-            c: e.offset,
-            d: 0
-        }
+        raise(e, k) => P4 { a: 1, b: e.kind, c: e.offset, d: 0 }
     };
     if r.a != 0 {
         column_fail(r.b, r.c, body_at);
@@ -882,11 +868,7 @@ pub fn parse_prefix(in input: Slice[u8], in lim: Slice[u64]) -> ChunkSeq[u64] ef
     if n > sw(in lim, 0) {
         fail(1, 0);
     }
-    let mut b = Bud {
-        remaining: sw(in lim, 10),
-        allocation: 0,
-        metadata: 0
-    };
+    let mut b = Bud { remaining: sw(in lim, 10), allocation: 0, metadata: 0 };
     work(inout b, n);
     let mut pos: u64 = 0;
     let mut have_schema = false;
@@ -957,11 +939,7 @@ pub fn parse_prefix(in input: Slice[u8], in lim: Slice[u64]) -> ChunkSeq[u64] ef
         }
         let cap = min(sw(in lim, 8), wrapping_add(length / UOFFSET_BYTES, 1));
         reserve(inout b, in lim, cap, sw(in lim, 12));
-        let f = Fb {
-            base: metadata_at,
-            len: length,
-            cap: cap
-        };
+        let f = Fb { base: metadata_at, len: length, cap: cap };
         let mut regs = ChunkSeq::new[u64]();
         claim(f, inout b, inout regs, in lim, 0, UOFFSET_BYTES, ROLE_ROOT);
         let root_at = offset(in input, f, inout b, 0);

@@ -2025,12 +2025,7 @@ pub fn extract(inout b: B, inout t: Types, in x: X, fi: u64, inout count: u64) -
     let arms = arm_bindings(in x.p, in f);
     let live = liveness(in x.p, inout b.names, in x.fx, in f, in arms);
     let sig = x.fx.sig(w(f.sig));
-    let s = S {
-        f: f,
-        live: live,
-        arms: arms,
-        sig: sig
-    };
+    let s = S { f: f, live: live, arms: arms, sig: sig };
     for k in 0..s.f.row.bc {
         block_definition(inout b, inout t, in x, in s, k);
         count = inc(count);
