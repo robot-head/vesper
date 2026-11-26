@@ -32,6 +32,7 @@ use self::prelude::{
 };
 use self::boxes::{box_dump, needs_atomics, needs_box};
 use self::floats::{float_source};
+use self::secret::{secret_source};
 use self::widths::{reserved_width_name, width_source};
 
 // The builtin declarations every world starts from (`World::collect`'s
@@ -210,26 +211,7 @@ pub fn needs_prelude(in a: Ast, in u: Uses) -> bool {
         },
         Option::None => {},
     }
-    // Secret operations over a declared secret scalar.
-    let scalar = has_name(in a, "SecU8")
-        || has_name(in a, "SecU32")
-        || has_name(in a, "SecU64")
-        || has_name(in a, "SecMask64");
-    scalar
-        && (
-            used(in u, "bit_and")
-                || used(in u, "bit_or")
-                || used(in u, "bit_xor")
-                || used(in u, "wrapping_add")
-                || used(in u, "wrapping_sub")
-                || used(in u, "wrapping_mul")
-                || used(in u, "ct_eq")
-                || used(in u, "ct_is_zero")
-                || used(in u, "ct_not")
-                || used(in u, "ct_select")
-                || used(in u, "declassify_bool")
-                || used(in u, "load_sec_u64le")
-        )
+    false
 }
 
 // ---------------------------------------------------------------- the world
@@ -761,7 +743,9 @@ struct Srcs {
     width: Ast,
     atomics: Ast,
     floats: Ast,
+    secret: Ast,
     w_shift: u32,
+    x_shift: u32,
     f_shift: u32,
     a_shift: u32,
     s_shift: u32,
@@ -779,6 +763,8 @@ fn shift_of(in s: Srcs, src: u8) -> u32 {
         s.a_shift
     } else if src == 7 {
         s.f_shift
+    } else if src == 8 {
+        s.x_shift
     } else {
         0
     }
@@ -802,6 +788,8 @@ fn dump_adt(inout o: ChunkSeq[u8], in s: Srcs, e: Entry) {
         put_adt(inout o, in s.atomics, e.node, sh);
     } else if e.src == 7 {
         put_adt(inout o, in s.floats, e.node, sh);
+    } else if e.src == 8 {
+        put_adt(inout o, in s.secret, e.node, sh);
     } else {
         put_adt(inout o, in s.option, e.node, sh);
     }
@@ -821,6 +809,8 @@ fn dump_effect(inout o: ChunkSeq[u8], in s: Srcs, e: Entry) {
         put_effect(inout o, in s.atomics, e.node, sh);
     } else if e.src == 7 {
         put_effect(inout o, in s.floats, e.node, sh);
+    } else if e.src == 8 {
+        put_effect(inout o, in s.secret, e.node, sh);
     } else {
         put_effect(inout o, in s.option, e.node, sh);
     }
@@ -840,6 +830,8 @@ fn dump_function(inout o: ChunkSeq[u8], in s: Srcs, e: Entry) {
         put_function(inout o, in s.atomics, e.node, e.imp, 1, sh);
     } else if e.src == 7 {
         put_function(inout o, in s.floats, e.node, e.imp, 1, sh);
+    } else if e.src == 8 {
+        put_function(inout o, in s.secret, e.node, e.imp, 1, sh);
     } else {
         put_function(inout o, in s.option, e.node, e.imp, 1, sh);
     }
@@ -915,10 +907,14 @@ fn world_of(in source: Str, inout o: ChunkSeq[u8]) {
     let uses = uses_of(in module);
     let defined = defined_methods(in module);
     let module_last = module_end(in module, false, in defined);
-    let w_shift = wrapping_add(module_last, 1);
+    let x_shift = wrapping_add(module_last, 1);
+    let xsrc = secret_source(in uses, in module);
+    let secret = lower_source(in xsrc.as_str()).ast;
+    let x_end = prelude_end(in secret, x_shift, in defined);
+    let w_shift = wrapping_add(max32(x_end, module_last), 1);
     let wsrc = width_source(in uses, in module);
     let width = lower_source(in wsrc.as_str()).ast;
-    let w_end0 = prelude_end(in width, w_shift, in defined);
+    let w_end0 = max32(x_end, prelude_end(in width, w_shift, in defined));
     let f_shift = wrapping_add(max32(w_end0, module_last), 1);
     let fsrc = float_source(in uses, in module);
     let floats = lower_source(in fsrc.as_str()).ast;
@@ -954,7 +950,9 @@ fn world_of(in source: Str, inout o: ChunkSeq[u8]) {
         width: width,
         atomics: atomics,
         floats: floats,
+        secret: secret,
         w_shift: w_shift,
+        x_shift: x_shift,
         f_shift: f_shift,
         a_shift: a_shift,
         s_shift: s_shift,
@@ -974,6 +972,7 @@ fn world_of(in source: Str, inout o: ChunkSeq[u8]) {
         let was = insert(inout c.adts, in key, Entry { src: 5, node: none(), imp: none() });
     }
     collect_all(inout c, in s.module, 1, 0, false, in none_defined);
+    collect_all(inout c, in s.secret, 8, x_shift, false, in none_defined);
     collect_all(inout c, in s.width, 4, w_shift, false, in none_defined);
     collect_all(inout c, in s.floats, 7, f_shift, false, in none_defined);
     collect_all(inout c, in s.strings, 2, s_shift, true, in defined);

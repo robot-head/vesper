@@ -314,6 +314,11 @@ const CASES: &[&str] = &[
     "fn float_kernel_sin_f64(x: f64, y: f64, i: u64) -> f64 { x } fn f(x: f64) -> f64 { sin_f64(x) }",
     "fn exp_f64(x: f64) -> f64 { x } fn f(x: f32) -> f32 { exp_f32(x) }",
     "fn f(x: f64, s: Str) -> f64 { let n = checked_add_u64(1, 2); exp_f64(x) }",
+    // The secret prelude.
+    "copy struct SecU64 { v: u64 } copy struct SecMask64 { m: u64 } fn f(a: SecU64, b: SecU64) -> bool { let k = a.ct_eq(b); let z = a.wrapping_add(b); let s = ct_select(k, a, b); let t = k.ct_select(a, b); let l = load_sec_u64le((1, 2, 3, 4, 5, 6, 7, 8)); k.ct_not().declassify_bool() }",
+    "copy struct SecU8 { x: u8 } copy struct SecU32 { y: u32 } fn f(a: SecU8, b: SecU32) -> SecU8 { a.bit_xor(a) }",
+    "copy struct SecU64 { v: u64 } impl SecU64 { fn bit_and(self, o: SecU64) -> SecU64 { o } } fn f(a: SecU64) -> SecU64 { a.bit_and(a).bit_or(a) }",
+    "struct SecU64 { v: u64 } fn f(a: SecU64) -> SecU64 { a.bit_and(a) }",
 ];
 
 /// Every byte-order, bit and checked builtin, named once.
