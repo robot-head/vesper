@@ -52,170 +52,175 @@ pub struct Syms {
     y_rem_assign: u32
 }
 
-pub fn sym(in a: Ast, in t: Str) -> u32 {
-    match a.names.lookup(in t) {
-        Option::Some(x) => x.id(),
+pub fn sym(in ast: Ast, in text: Str) -> u32 {
+    match ast.names.lookup(in text) {
+        Option::Some(found) => found.id(),
         Option::None => NONE,
     }
 }
 
-pub fn syms(in a: Ast) -> Syms {
+pub fn syms(in ast: Ast) -> Syms {
     Syms {
-        y_u8: sym(in a, in "u8"),
-        y_u32: sym(in a, in "u32"),
-        y_u64: sym(in a, in "u64"),
-        y_i64: sym(in a, in "i64"),
-        y_bool: sym(in a, in "bool"),
-        y_bool2: sym(in a, in "Bool"),
-        y_unit: sym(in a, in "Unit"),
-        y_fail: sym(in a, in "Fail"),
-        y_overflow: sym(in a, in "ArithOverflow"),
-        y_runtime: sym(in a, in "RuntimeError"),
-        y_self_: sym(in a, in "self"),
-        y_dyn: sym(in a, in "dyn"),
-        y_not: sym(in a, in "!"),
-        y_minus: sym(in a, in "-"),
-        y_and: sym(in a, in "&&"),
-        y_or: sym(in a, in "||"),
-        y_eq: sym(in a, in "=="),
-        y_ne: sym(in a, in "!="),
-        y_lt: sym(in a, in "<"),
-        y_le: sym(in a, in "<="),
-        y_gt: sym(in a, in ">"),
-        y_ge: sym(in a, in ">="),
-        y_plus: sym(in a, in "+"),
-        y_star: sym(in a, in "*"),
-        y_slash: sym(in a, in "/"),
-        y_percent: sym(in a, in "%"),
-        y_assign: sym(in a, in "="),
-        y_add_assign: sym(in a, in "+="),
-        y_sub_assign: sym(in a, in "-="),
-        y_mul_assign: sym(in a, in "*="),
-        y_div_assign: sym(in a, in "/="),
-        y_rem_assign: sym(in a, in "%=")
+        y_u8: sym(in ast, in "u8"),
+        y_u32: sym(in ast, in "u32"),
+        y_u64: sym(in ast, in "u64"),
+        y_i64: sym(in ast, in "i64"),
+        y_bool: sym(in ast, in "bool"),
+        y_bool2: sym(in ast, in "Bool"),
+        y_unit: sym(in ast, in "Unit"),
+        y_fail: sym(in ast, in "Fail"),
+        y_overflow: sym(in ast, in "ArithOverflow"),
+        y_runtime: sym(in ast, in "RuntimeError"),
+        y_self_: sym(in ast, in "self"),
+        y_dyn: sym(in ast, in "dyn"),
+        y_not: sym(in ast, in "!"),
+        y_minus: sym(in ast, in "-"),
+        y_and: sym(in ast, in "&&"),
+        y_or: sym(in ast, in "||"),
+        y_eq: sym(in ast, in "=="),
+        y_ne: sym(in ast, in "!="),
+        y_lt: sym(in ast, in "<"),
+        y_le: sym(in ast, in "<="),
+        y_gt: sym(in ast, in ">"),
+        y_ge: sym(in ast, in ">="),
+        y_plus: sym(in ast, in "+"),
+        y_star: sym(in ast, in "*"),
+        y_slash: sym(in ast, in "/"),
+        y_percent: sym(in ast, in "%"),
+        y_assign: sym(in ast, in "="),
+        y_add_assign: sym(in ast, in "+="),
+        y_sub_assign: sym(in ast, in "-="),
+        y_mul_assign: sym(in ast, in "*="),
+        y_div_assign: sym(in ast, in "/="),
+        y_rem_assign: sym(in ast, in "%=")
     }
 }
 
 // ------------------------------------------------------------ trees
 
-pub fn ty_at(in a: Ast, i: u32) -> TypeNode {
-    a.types.get_or(
+pub fn ty_at(in ast: Ast, i: u32) -> TypeNode {
+    ast.types.get_or(
         idx_from_raw[TypeNode](i),
         TypeNode { kind: AT_INFER, a: NONE, b: NONE, c: NONE, d: NONE }
     )
 }
 
-pub fn effects_at(in a: Ast, i: u32) -> EffectsNode {
-    a.effects.get_or(idx_from_raw[EffectsNode](i), EffectsNode { instances: NONE, tail: NONE })
+pub fn effects_at(in ast: Ast, i: u32) -> EffectsNode {
+    ast.effects.get_or(idx_from_raw[EffectsNode](i), EffectsNode { instances: NONE, tail: NONE })
 }
 
-pub fn effect_at(in a: Ast, i: u32) -> EffectNode {
-    a.effect_nodes
+pub fn effect_at(in ast: Ast, i: u32) -> EffectNode {
+    ast.effect_nodes
         .get_or(idx_from_raw[EffectNode](i), EffectNode { label: NONE, name: NONE, args: NONE })
 }
 
 // `Kind::of` of a source type.
-pub fn kind_of_type(in a: Ast, in y: Syms, ty: u32) -> u8 {
-    let n = ty_at(in a, ty);
-    if n.kind == AT_NAMED && list_len(in a, n.b) == 0 {
-        let x = n.a;
-        if x == NONE {
+pub fn kind_of_type(in ast: Ast, in symbols: Syms, ty: u32) -> u8 {
+    let node = ty_at(in ast, ty);
+    if node.kind == AT_NAMED && list_len(in ast, node.b) == 0 {
+        let name_sym = node.a;
+        if name_sym == NONE {
             K_NONE
-        } else if x == y.y_u8 {
+        } else if name_sym == symbols.y_u8 {
             K_U8
-        } else if x == y.y_u32 {
+        } else if name_sym == symbols.y_u32 {
             K_U32
-        } else if x == y.y_u64 {
+        } else if name_sym == symbols.y_u64 {
             K_U64
-        } else if x == y.y_i64 {
+        } else if name_sym == symbols.y_i64 {
             K_I64
-        } else if x == y.y_bool || x == y.y_bool2 {
+        } else if name_sym == symbols.y_bool || name_sym == symbols.y_bool2 {
             K_BOOL
-        } else if x == y.y_unit {
+        } else if name_sym == symbols.y_unit {
             K_UNIT
         } else {
             K_NONE
         }
-    } else if n.kind == AT_TUPLE && list_len(in a, n.a) == 0 {
+    } else if node.kind == AT_TUPLE && list_len(in ast, node.a) == 0 {
         K_UNIT
     } else {
         K_NONE
     }
 }
 
-pub fn is_infer(in a: Ast, ty: u32) -> bool {
-    ty == NONE || ty_at(in a, ty).kind == AT_INFER
+pub fn is_infer(in ast: Ast, ty: u32) -> bool {
+    ty == NONE || ty_at(in ast, ty).kind == AT_INFER
 }
 
 // `Display for Type`.
-pub fn display(inout o: ChunkSeq[u8], in a: Ast, in y: Syms, ty: u32) {
-    let n = ty_at(in a, ty);
-    if n.kind == AT_NAMED {
-        let k = list_len(in a, n.b);
-        if n.a == y.y_dyn && n.a != NONE && k == 1 {
-            s(inout o, in "dyn ");
-            display(inout o, in a, in y, list_at(in a, n.b, 0));
+pub fn display(inout out: ChunkSeq[u8], in ast: Ast, in symbols: Syms, ty: u32) {
+    let node = ty_at(in ast, ty);
+    if node.kind == AT_NAMED {
+        let arg_count = list_len(in ast, node.b);
+        if node.a == symbols.y_dyn && node.a != NONE && arg_count == 1 {
+            s(inout out, in "dyn ");
+            display(inout out, in ast, in symbols, list_at(in ast, node.b, 0));
             return;
         }
-        put_name(inout o, in a, n.a);
-        if k > 0 {
-            s(inout o, in "[");
-            for i in 0..k {
+        put_name(inout out, in ast, node.a);
+        if arg_count > 0 {
+            s(inout out, in "[");
+            for i in 0..arg_count {
                 if i > 0 {
-                    s(inout o, in ", ");
+                    s(inout out, in ", ");
                 }
-                display(inout o, in a, in y, list_at(in a, n.b, i));
+                display(inout out, in ast, in symbols, list_at(in ast, node.b, i));
             }
-            s(inout o, in "]");
+            s(inout out, in "]");
         }
-    } else if n.kind == AT_TUPLE {
-        s(inout o, in "(");
-        for i in 0..list_len(in a, n.a) {
+    } else if node.kind == AT_TUPLE {
+        s(inout out, in "(");
+        for i in 0..list_len(in ast, node.a) {
             if i > 0 {
-                s(inout o, in ", ");
+                s(inout out, in ", ");
             }
-            display(inout o, in a, in y, list_at(in a, n.a, i));
+            display(inout out, in ast, in symbols, list_at(in ast, node.a, i));
         }
-        s(inout o, in ")");
-    } else if n.kind == AT_FUNCTION {
-        s(inout o, in "fn(");
-        let k = list_len(in a, n.a) >> 1;
-        for i in 0..k {
+        s(inout out, in ")");
+    } else if node.kind == AT_FUNCTION {
+        s(inout out, in "fn(");
+        let arg_count = list_len(in ast, node.a) >> 1;
+        for i in 0..arg_count {
             if i > 0 {
-                s(inout o, in ", ");
+                s(inout out, in ", ");
             }
-            display(inout o, in a, in y, list_at(in a, n.a, wrapping_add(wrapping_add(i, i), 1)));
+            display(
+                inout out,
+                in ast,
+                in symbols,
+                list_at(in ast, node.a, wrapping_add(wrapping_add(i, i), 1))
+            );
         }
-        s(inout o, in ") -> ");
-        display(inout o, in a, in y, n.b);
-    } else if n.kind == AT_ROW {
-        s(inout o, in "eff ");
-        effects_debug(inout o, in a, in y, n.a);
+        s(inout out, in ") -> ");
+        display(inout out, in ast, in symbols, node.b);
+    } else if node.kind == AT_ROW {
+        s(inout out, in "eff ");
+        effects_debug(inout out, in ast, in symbols, node.a);
     } else {
-        s(inout o, in "_");
+        s(inout out, in "_");
     }
 }
 
-pub fn put_quoted(inout o: ChunkSeq[u8], in a: Ast, name: u32) {
-    s(inout o, in "\"");
-    put_name(inout o, in a, name);
-    s(inout o, in "\"");
+pub fn put_quoted(inout out: ChunkSeq[u8], in ast: Ast, name: u32) {
+    s(inout out, in "\"");
+    put_name(inout out, in ast, name);
+    s(inout out, in "\"");
 }
 
-pub fn pass_debug(p: u32) -> Str {
-    if p == 1 {
+pub fn pass_debug(pass: u32) -> Str {
+    if pass == 1 {
         "Inout"
-    } else if p == 2 {
+    } else if pass == 2 {
         "Sink"
     } else {
         "In"
     }
 }
 
-pub fn mode_debug(m: u32) -> Str {
-    if m == 1 {
+pub fn mode_debug(mode: u32) -> Str {
+    if mode == 1 {
         "Affine"
-    } else if m == 2 {
+    } else if mode == 2 {
         "Linear"
     } else {
         "Copy"
@@ -223,102 +228,106 @@ pub fn mode_debug(m: u32) -> Str {
 }
 
 // `Debug for Type` (inside `eff {:?}`).
-pub fn type_debug(inout o: ChunkSeq[u8], in a: Ast, in y: Syms, ty: u32) {
-    let n = ty_at(in a, ty);
-    if n.kind == AT_NAMED {
-        s(inout o, in "Named(");
-        put_quoted(inout o, in a, n.a);
-        s(inout o, in ", [");
-        for i in 0..list_len(in a, n.b) {
+pub fn type_debug(inout out: ChunkSeq[u8], in ast: Ast, in symbols: Syms, ty: u32) {
+    let node = ty_at(in ast, ty);
+    if node.kind == AT_NAMED {
+        s(inout out, in "Named(");
+        put_quoted(inout out, in ast, node.a);
+        s(inout out, in ", [");
+        for i in 0..list_len(in ast, node.b) {
             if i > 0 {
-                s(inout o, in ", ");
+                s(inout out, in ", ");
             }
-            type_debug(inout o, in a, in y, list_at(in a, n.b, i));
+            type_debug(inout out, in ast, in symbols, list_at(in ast, node.b, i));
         }
-        s(inout o, in "])");
-    } else if n.kind == AT_TUPLE {
-        s(inout o, in "Tuple([");
-        for i in 0..list_len(in a, n.a) {
+        s(inout out, in "])");
+    } else if node.kind == AT_TUPLE {
+        s(inout out, in "Tuple([");
+        for i in 0..list_len(in ast, node.a) {
             if i > 0 {
-                s(inout o, in ", ");
+                s(inout out, in ", ");
             }
-            type_debug(inout o, in a, in y, list_at(in a, n.a, i));
+            type_debug(inout out, in ast, in symbols, list_at(in ast, node.a, i));
         }
-        s(inout o, in "])");
-    } else if n.kind == AT_FUNCTION {
-        s(inout o, in "Function { params: [");
-        let k = list_len(in a, n.a) >> 1;
-        for i in 0..k {
+        s(inout out, in "])");
+    } else if node.kind == AT_FUNCTION {
+        s(inout out, in "Function { params: [");
+        let param_count = list_len(in ast, node.a) >> 1;
+        for i in 0..param_count {
             if i > 0 {
-                s(inout o, in ", ");
+                s(inout out, in ", ");
             }
             let at = wrapping_add(i, i);
-            s(inout o, in "(");
-            s(inout o, in pass_debug(list_at(in a, n.a, at)));
-            s(inout o, in ", ");
-            type_debug(inout o, in a, in y, list_at(in a, n.a, wrapping_add(at, 1)));
-            s(inout o, in ")");
+            s(inout out, in "(");
+            s(inout out, in pass_debug(list_at(in ast, node.a, at)));
+            s(inout out, in ", ");
+            type_debug(inout out, in ast, in symbols, list_at(in ast, node.a, wrapping_add(at, 1)));
+            s(inout out, in ")");
         }
-        s(inout o, in "], result: ");
-        type_debug(inout o, in a, in y, n.b);
-        s(inout o, in ", effects: ");
-        effects_debug(inout o, in a, in y, n.c);
-        s(inout o, in ", mode: ");
-        s(inout o, in mode_debug(n.d));
-        s(inout o, in " }");
-    } else if n.kind == AT_ROW {
-        s(inout o, in "Row(");
-        effects_debug(inout o, in a, in y, n.a);
-        s(inout o, in ")");
+        s(inout out, in "], result: ");
+        type_debug(inout out, in ast, in symbols, node.b);
+        s(inout out, in ", effects: ");
+        effects_debug(inout out, in ast, in symbols, node.c);
+        s(inout out, in ", mode: ");
+        s(inout out, in mode_debug(node.d));
+        s(inout out, in " }");
+    } else if node.kind == AT_ROW {
+        s(inout out, in "Row(");
+        effects_debug(inout out, in ast, in symbols, node.a);
+        s(inout out, in ")");
     } else {
-        s(inout o, in "Infer");
+        s(inout out, in "Infer");
     }
 }
 
-pub fn effects_debug(inout o: ChunkSeq[u8], in a: Ast, in y: Syms, e: u32) {
-    let es = effects_at(in a, e);
-    s(inout o, in "Effects { instances: [");
-    for i in 0..list_len(in a, es.instances) {
+pub fn effects_debug(inout out: ChunkSeq[u8], in ast: Ast, in symbols: Syms, effects_id: u32) {
+    let effects = effects_at(in ast, effects_id);
+    s(inout out, in "Effects { instances: [");
+    for i in 0..list_len(in ast, effects.instances) {
         if i > 0 {
-            s(inout o, in ", ");
+            s(inout out, in ", ");
         }
-        let x = effect_at(in a, list_at(in a, es.instances, i));
-        s(inout o, in "Effect { label: ");
-        if x.label == NONE {
-            s(inout o, in "None");
+        let instance = effect_at(in ast, list_at(in ast, effects.instances, i));
+        s(inout out, in "Effect { label: ");
+        if instance.label == NONE {
+            s(inout out, in "None");
         } else {
-            s(inout o, in "Some(");
-            put_quoted(inout o, in a, x.label);
-            s(inout o, in ")");
+            s(inout out, in "Some(");
+            put_quoted(inout out, in ast, instance.label);
+            s(inout out, in ")");
         }
-        s(inout o, in ", name: ");
-        put_quoted(inout o, in a, x.name);
-        s(inout o, in ", args: [");
-        for j in 0..list_len(in a, x.args) {
+        s(inout out, in ", name: ");
+        put_quoted(inout out, in ast, instance.name);
+        s(inout out, in ", args: [");
+        for j in 0..list_len(in ast, instance.args) {
             if j > 0 {
-                s(inout o, in ", ");
+                s(inout out, in ", ");
             }
-            type_debug(inout o, in a, in y, list_at(in a, x.args, j));
+            type_debug(inout out, in ast, in symbols, list_at(in ast, instance.args, j));
         }
-        s(inout o, in "] }");
+        s(inout out, in "] }");
     }
-    s(inout o, in "], tail: ");
-    if es.tail == NONE {
-        s(inout o, in "None");
+    s(inout out, in "], tail: ");
+    if effects.tail == NONE {
+        s(inout out, in "None");
     } else {
-        s(inout o, in "Some(");
-        put_quoted(inout o, in a, es.tail);
-        s(inout o, in ")");
+        s(inout out, in "Some(");
+        put_quoted(inout out, in ast, effects.tail);
+        s(inout out, in ")");
     }
-    s(inout o, in " }");
+    s(inout out, in " }");
 }
 
 // A parameter's type as the world holds it: `self: _` of a method is the
 // impl's type.
-pub fn param_type(in a: Ast, in y: Syms, p: ParamNode, imp: u32) -> u32 {
-    if imp != NONE && p.name == y.y_self_ && p.name != NONE && is_infer(in a, p.ty) {
-        impl_at(in a, imp).ty
+pub fn param_type(in ast: Ast, in symbols: Syms, param: ParamNode, impl_id: u32) -> u32 {
+    if impl_id != NONE
+        && param.name == symbols.y_self_
+        && param.name != NONE
+        && is_infer(in ast, param.ty)
+    {
+        impl_at(in ast, impl_id).ty
     } else {
-        p.ty
+        param.ty
     }
 }

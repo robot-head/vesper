@@ -99,18 +99,24 @@ test {
         length: u64,
     }
 
-    fn stage_segment(inout window: SegmentWindow, length: u64) -> u64 eff [Fail[u64]] {
-        transact inout window on[u64] returning[u64] {
-            window.start = wrapping_add(window.start, window.length);
-            window.length = length;
-            ensure window.length <= 32 else window.length;
-            window.start
+    copy struct SegmentFile {
+        window: SegmentWindow,
+        attempts: u64,
+    }
+
+    fn stage_segment(inout file: SegmentFile, length: u64) -> u64 eff [Fail[u64]] {
+        transact inout file.window on[u64] returning[u64] {
+            file.attempts = wrapping_add(file.attempts, 1);
+            file.window.start = wrapping_add(file.window.start, file.window.length);
+            file.window.length = length;
+            ensure file.window.length <= 32 else file.window.length;
+            file.window.start
         }
     }
 
-    fn observe_segment(inout window: SegmentWindow, length: u64) -> Result[u64, u64] {
+    fn observe_segment(inout file: SegmentFile, length: u64) -> Result[u64, u64] {
         handle Fail[u64] in {
-            stage_segment(inout window, length)
+            stage_segment(inout file, length)
         } with {
             return pos => Result::Ok(pos),
             raise(error, _) => Result::Err(error),
@@ -118,13 +124,14 @@ test {
     }
 
     fn check_segment_rollback() -> bool {
-        let mut window = SegmentWindow { start: 10, length: 12 };
-        if observe_segment(inout window, 20) != Result::Ok(22) {
+        let mut file = SegmentFile { window: SegmentWindow { start: 10, length: 12 }, attempts: 0 };
+        if observe_segment(inout file, 20) != Result::Ok(22) {
             return false;
         }
-        observe_segment(inout window, 77) == Result::Err(77)
-            && window.start == 22
-            && window.length == 20
+        observe_segment(inout file, 77) == Result::Err(77)
+            && file.window.start == 22
+            && file.window.length == 20
+            && file.attempts == 2
     }
 
     linear struct PendingExtent {

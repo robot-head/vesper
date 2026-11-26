@@ -18,7 +18,7 @@ pub fn empty() -> ChunkSeq[T] {
 
 fn t_at(in ts: ChunkSeq[T], i: u64) -> T {
     match ts.try_get(i) {
-        Option::Some(t) => t,
+        Option::Some(term) => term,
         Option::None => T { a: 0, n: 0 },
     }
 }
@@ -27,435 +27,442 @@ pub fn get(in ts: ChunkSeq[T], i: u64) -> T {
     t_at(in ts, i)
 }
 
-fn put_all(inout b: B, in ts: ChunkSeq[T]) {
+fn put_all(inout builder: B, in ts: ChunkSeq[T]) {
     for i in 0..ts.len() {
-        b.put(t_at(in ts, i));
+        builder.put(t_at(in ts, i));
     }
 }
 
 // `reference(&ident)`: an unrooted one-component name of a checked local.
-pub fn lref(inout b: B, s: u32) -> T {
-    let m = b.at();
-    b.w(T_REF);
-    b.w(0);
-    b.w(1);
-    b.sym(s);
-    b.since(m)
+pub fn lref(inout builder: B, sym: u32) -> T {
+    let mark = builder.at();
+    builder.w(T_REF);
+    builder.w(0);
+    builder.w(1);
+    builder.sym(sym);
+    builder.since(mark)
 }
 
-// `source_ref(s)`.
-pub fn sref(inout b: B, s: u32) -> T {
-    let m = b.at();
-    b.sref(s);
-    b.since(m)
+// `source_ref(sym)`.
+pub fn sref(inout builder: B, sym: u32) -> T {
+    let mark = builder.at();
+    builder.sref(sym);
+    builder.since(mark)
 }
 
-// `named(s)`: a fixed unrooted reference.
-pub fn named(inout b: B, in s: Str) -> T {
-    let m = b.at();
-    b.named(in s);
-    b.since(m)
+// `named(text)`: a fixed unrooted reference.
+pub fn named(inout builder: B, in text: Str) -> T {
+    let mark = builder.at();
+    builder.named(in text);
+    builder.since(mark)
 }
 
-pub fn global(inout b: B, in a: Str) -> T {
-    let m = b.at();
-    b.global(in a);
-    b.since(m)
+pub fn global(inout builder: B, in name: Str) -> T {
+    let mark = builder.at();
+    builder.global(in name);
+    builder.since(mark)
 }
 
-pub fn global2(inout b: B, in a: Str, in c: Str) -> T {
-    let m = b.at();
-    b.global2(in a, in c);
-    b.since(m)
+pub fn global2(inout builder: B, in namespace: Str, in member: Str) -> T {
+    let mark = builder.at();
+    builder.global2(in namespace, in member);
+    builder.since(mark)
 }
 
 // `unit()`: `Unit.unit`.
-pub fn unit(inout b: B) -> T {
-    global2(inout b, in "Unit", in "unit")
+pub fn unit(inout builder: B) -> T {
+    global2(inout builder, in "Unit", in "unit")
 }
 
-pub fn infer(inout b: B) -> T {
-    let m = b.at();
-    b.w(T_INFER);
-    b.since(m)
+pub fn infer(inout builder: B) -> T {
+    let mark = builder.at();
+    builder.w(T_INFER);
+    builder.since(mark)
 }
 
-pub fn nat(inout b: B, in digits: Str) -> T {
-    let m = b.at();
-    b.nat(in digits);
-    b.since(m)
+pub fn nat(inout builder: B, in digits: Str) -> T {
+    let mark = builder.at();
+    builder.nat(in digits);
+    builder.since(mark)
 }
 
-// A natural number literal of `v`.
-pub fn nat_u64(inout b: B, v: u64) -> T {
-    let mut d: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    put_decimal_u64(inout d, v);
-    let s = b.names.intern(in d.as_slice());
-    let m = b.at();
-    b.w(T_NAT);
-    b.sym(s);
-    b.since(m)
+// A natural number literal of `value`.
+pub fn nat_u64(inout builder: B, value: u64) -> T {
+    let mut digits: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    put_decimal_u64(inout digits, value);
+    let sym = builder.names.intern(in digits.as_slice());
+    let mark = builder.at();
+    builder.w(T_NAT);
+    builder.sym(sym);
+    builder.since(mark)
 }
 
-fn put_decimal_u64(inout o: ChunkSeq[u8], v: u64) {
-    if v >= 10 {
-        put_decimal_u64(inout o, v / 10);
+fn put_decimal_u64(inout out: ChunkSeq[u8], value: u64) {
+    if value >= 10 {
+        put_decimal_u64(inout out, value / 10);
     }
-    o.push(wrapping_u8(wrapping_add(v % 10, 48)));
+    out.push(wrapping_u8(wrapping_add(value % 10, 48)));
 }
 
 // A positional argument.
-pub fn pos(inout b: B, t: T) -> T {
-    let m = b.at();
-    b.w(0);
-    b.put(t);
-    b.since(m)
+pub fn pos(inout builder: B, value: T) -> T {
+    let mark = builder.at();
+    builder.w(0);
+    builder.put(value);
+    builder.since(mark)
 }
 
-// A named argument `(name := t)` with a checked source identifier.
-pub fn named_arg_sym(inout b: B, s: u32, t: T) -> T {
-    let m = b.at();
-    b.w(1);
-    b.ident(s);
-    b.put(t);
-    b.since(m)
+// A named argument `(sym := value)` with a checked source identifier.
+pub fn named_arg_sym(inout builder: B, sym: u32, value: T) -> T {
+    let mark = builder.at();
+    builder.w(1);
+    builder.ident(sym);
+    builder.put(value);
+    builder.since(mark)
 }
 
 // A named argument with a fixed name.
-pub fn named_arg(inout b: B, in s: Str, t: T) -> T {
-    let m = b.at();
-    b.w(1);
-    b.text(in s);
-    b.put(t);
-    b.since(m)
+pub fn named_arg(inout builder: B, in name: Str, value: T) -> T {
+    let mark = builder.at();
+    builder.w(1);
+    builder.text(in name);
+    builder.put(value);
+    builder.since(mark)
 }
 
 // `Term::App` over encoded arguments (`pos`, `named_arg`).
-pub fn app_args(inout b: B, f: T, in args: ChunkSeq[T]) -> T {
-    let m = b.at();
-    b.w(T_APP);
-    b.w(args.len());
-    b.w(f.n);
-    b.put(f);
-    put_all(inout b, in args);
-    b.since(m)
+pub fn app_args(inout builder: B, func: T, in args: ChunkSeq[T]) -> T {
+    let mark = builder.at();
+    builder.w(T_APP);
+    builder.w(args.len());
+    builder.w(func.n);
+    builder.put(func);
+    put_all(inout builder, in args);
+    builder.since(mark)
 }
 
-// `app(f, args)`.
-pub fn app(inout b: B, f: T, in args: ChunkSeq[T]) -> T {
-    let m = b.at();
-    b.w(T_APP);
-    b.w(args.len());
-    b.w(f.n);
-    b.put(f);
+// `app(func, args)`.
+pub fn app(inout builder: B, func: T, in args: ChunkSeq[T]) -> T {
+    let mark = builder.at();
+    builder.w(T_APP);
+    builder.w(args.len());
+    builder.w(func.n);
+    builder.put(func);
     for i in 0..args.len() {
-        b.w(0);
-        b.put(t_at(in args, i));
+        builder.w(0);
+        builder.put(t_at(in args, i));
     }
-    b.since(m)
+    builder.since(mark)
 }
 
-pub fn app1(inout b: B, f: T, x: T) -> T {
+pub fn app1(inout builder: B, func: T, arg: T) -> T {
     let mut args = empty();
-    args.push(x);
-    app(inout b, f, in args)
+    args.push(arg);
+    app(inout builder, func, in args)
 }
 
-pub fn app2(inout b: B, f: T, x: T, y: T) -> T {
+pub fn app2(inout builder: B, func: T, first: T, second: T) -> T {
     let mut args = empty();
-    args.push(x);
-    args.push(y);
-    app(inout b, f, in args)
+    args.push(first);
+    args.push(second);
+    app(inout builder, func, in args)
 }
 
-pub fn app3(inout b: B, f: T, x: T, y: T, z: T) -> T {
+pub fn app3(inout builder: B, func: T, first: T, second: T, third: T) -> T {
     let mut args = empty();
-    args.push(x);
-    args.push(y);
-    args.push(z);
-    app(inout b, f, in args)
+    args.push(first);
+    args.push(second);
+    args.push(third);
+    app(inout builder, func, in args)
 }
 
-// `app(global(&[a, c]), [x])`.
-pub fn gapp1(inout b: B, in a: Str, in c: Str, x: T) -> T {
-    let f = global2(inout b, in a, in c);
-    app1(inout b, f, x)
+// `app(global(&[namespace, member]), [arg])`.
+pub fn gapp1(inout builder: B, in namespace: Str, in member: Str, arg: T) -> T {
+    let func = global2(inout builder, in namespace, in member);
+    app1(inout builder, func, arg)
 }
 
-pub fn gapp2(inout b: B, in a: Str, in c: Str, x: T, y: T) -> T {
-    let f = global2(inout b, in a, in c);
-    app2(inout b, f, x, y)
+pub fn gapp2(inout builder: B, in namespace: Str, in member: Str, first: T, second: T) -> T {
+    let func = global2(inout builder, in namespace, in member);
+    app2(inout builder, func, first, second)
 }
 
-pub fn gapp3(inout b: B, in a: Str, in c: Str, x: T, y: T, z: T) -> T {
-    let f = global2(inout b, in a, in c);
-    app3(inout b, f, x, y, z)
+pub fn gapp3(
+    inout builder: B,
+    in namespace: Str,
+    in member: Str,
+    first: T,
+    second: T,
+    third: T
+) -> T {
+    let func = global2(inout builder, in namespace, in member);
+    app3(inout builder, func, first, second, third)
 }
 
-// `pure(t)`.
-pub fn pure(inout b: B, t: T) -> T {
-    gapp1(inout b, in "Pure", in "pure", t)
+// `pure(value)`.
+pub fn pure(inout builder: B, value: T) -> T {
+    gapp1(inout builder, in "Pure", in "pure", value)
 }
 
-pub fn binary(inout b: B, op: u64, x: T, y: T) -> T {
-    let m = b.at();
-    b.w(T_BINARY);
-    b.w(op);
-    b.put(x);
-    b.put(y);
-    b.since(m)
+pub fn binary(inout builder: B, op: u64, lhs: T, rhs: T) -> T {
+    let mark = builder.at();
+    builder.w(T_BINARY);
+    builder.w(op);
+    builder.put(lhs);
+    builder.put(rhs);
+    builder.since(mark)
 }
 
-pub fn unary(inout b: B, op: u64, x: T) -> T {
-    let m = b.at();
-    b.w(T_UNARY);
-    b.w(op);
-    b.put(x);
-    b.since(m)
+pub fn unary(inout builder: B, op: u64, operand: T) -> T {
+    let mark = builder.at();
+    builder.w(T_UNARY);
+    builder.w(op);
+    builder.put(operand);
+    builder.since(mark)
 }
 
-pub fn ite(inout b: B, c: T, y: T, n: T) -> T {
-    let m = b.at();
-    b.w(T_IF);
-    b.put(c);
-    b.put(y);
-    b.put(n);
-    b.since(m)
+pub fn ite(inout builder: B, condition: T, yes: T, no: T) -> T {
+    let mark = builder.at();
+    builder.w(T_IF);
+    builder.put(condition);
+    builder.put(yes);
+    builder.put(no);
+    builder.since(mark)
 }
 
-pub fn ascribe(inout b: B, v: T, ty: T) -> T {
-    let m = b.at();
-    b.w(T_ASCRIBE);
-    b.put(v);
-    b.put(ty);
-    b.since(m)
+pub fn ascribe(inout builder: B, value: T, ty: T) -> T {
+    let mark = builder.at();
+    builder.w(T_ASCRIBE);
+    builder.put(value);
+    builder.put(ty);
+    builder.since(mark)
 }
 
-pub fn eliminate(inout b: B, v: T) -> T {
-    let m = b.at();
-    b.w(T_ELIMINATE);
-    b.put(v);
-    b.since(m)
+pub fn eliminate(inout builder: B, value: T) -> T {
+    let mark = builder.at();
+    builder.w(T_ELIMINATE);
+    builder.put(value);
+    builder.since(mark)
 }
 
 // `Term::Do`.
-pub fn sequence(inout b: B, in ss: ChunkSeq[T], result: T) -> T {
-    let m = b.at();
-    b.w(T_DO);
-    b.w(ss.len());
-    put_all(inout b, in ss);
-    b.put(result);
-    b.since(m)
+pub fn sequence(inout builder: B, in ss: ChunkSeq[T], result: T) -> T {
+    let mark = builder.at();
+    builder.w(T_DO);
+    builder.w(ss.len());
+    put_all(inout builder, in ss);
+    builder.put(result);
+    builder.since(mark)
 }
 
 // `Term::Match` over encoded arms (`arm`).
-pub fn match_term(inout b: B, scrutinee: T, in arms: ChunkSeq[T]) -> T {
-    let m = b.at();
-    b.w(T_MATCH);
-    b.w(arms.len());
-    b.put(scrutinee);
-    put_all(inout b, in arms);
-    b.since(m)
+pub fn match_term(inout builder: B, scrutinee: T, in arms: ChunkSeq[T]) -> T {
+    let mark = builder.at();
+    builder.w(T_MATCH);
+    builder.w(arms.len());
+    builder.put(scrutinee);
+    put_all(inout builder, in arms);
+    builder.since(mark)
 }
 
-pub fn arm(inout b: B, pattern: T, body: T) -> T {
-    let m = b.at();
-    b.put(pattern);
-    b.put(body);
-    b.since(m)
+pub fn arm(inout builder: B, pattern: T, body: T) -> T {
+    let mark = builder.at();
+    builder.put(pattern);
+    builder.put(body);
+    builder.since(mark)
 }
 
 // `Term::Project` with a field: `project(base, field)` checks the field.
-pub fn project(inout b: B, base: T, field: u32) -> T {
-    let m = b.at();
-    b.w(T_PROJECT);
-    b.put(base);
-    b.w(0);
-    b.ident(field);
-    b.since(m)
+pub fn project(inout builder: B, base: T, field: u32) -> T {
+    let mark = builder.at();
+    builder.w(T_PROJECT);
+    builder.put(base);
+    builder.w(0);
+    builder.ident(field);
+    builder.since(mark)
 }
 
 // A fixed field projection (`lean_nodes::project`).
-pub fn project_fixed(inout b: B, base: T, in field: Str) -> T {
-    let m = b.at();
-    b.w(T_PROJECT);
-    b.put(base);
-    b.w(0);
-    b.text(in field);
-    b.since(m)
+pub fn project_fixed(inout builder: B, base: T, in field: Str) -> T {
+    let mark = builder.at();
+    builder.w(T_PROJECT);
+    builder.put(base);
+    builder.w(0);
+    builder.text(in field);
+    builder.since(mark)
 }
 
 // `pair_get(base, k)`.
-pub fn pair_get(inout b: B, base: T, k: u64) -> T {
-    let m = b.at();
-    b.w(T_PROJECT);
-    b.put(base);
-    b.w(1);
-    b.w(k);
-    b.since(m)
+pub fn pair_get(inout builder: B, base: T, k: u64) -> T {
+    let mark = builder.at();
+    builder.w(T_PROJECT);
+    builder.put(base);
+    builder.w(1);
+    builder.w(k);
+    builder.since(mark)
 }
 
-// `tuple_get(t, i, n)`.
-pub fn tuple_get(inout b: B, t: T, i: u64, n: u64) -> T {
+// `tuple_get(tuple_term, i, n)`.
+pub fn tuple_get(inout builder: B, tuple_term: T, i: u64, n: u64) -> T {
     if n <= 1 {
-        return t;
+        return tuple_term;
     }
-    let mut x = t;
+    let mut part = tuple_term;
     for k in 0..i {
-        x = pair_get(inout b, x, 2);
+        part = pair_get(inout builder, part, 2);
     }
     if wrapping_add(i, 1) < n {
-        x = pair_get(inout b, x, 1);
+        part = pair_get(inout builder, part, 1);
     }
-    x
+    part
 }
 
 // `lean_nodes::tuple`.
-pub fn tuple(inout b: B, in ts: ChunkSeq[T]) -> T {
+pub fn tuple(inout builder: B, in ts: ChunkSeq[T]) -> T {
     if ts.len() == 0 {
-        return unit(inout b);
+        return unit(inout builder);
     }
     if ts.len() == 1 {
         return t_at(in ts, 0);
     }
-    let m = b.at();
-    b.w(T_TUPLE);
-    b.w(ts.len());
-    put_all(inout b, in ts);
-    b.since(m)
+    let mark = builder.at();
+    builder.w(T_TUPLE);
+    builder.w(ts.len());
+    put_all(inout builder, in ts);
+    builder.since(mark)
 }
 
 // `lean_nodes::product`.
-pub fn product(inout b: B, in ts: ChunkSeq[T]) -> T {
+pub fn product(inout builder: B, in ts: ChunkSeq[T]) -> T {
     if ts.len() == 0 {
-        return global(inout b, in "Unit");
+        return global(inout builder, in "Unit");
     }
     if ts.len() == 1 {
         return t_at(in ts, 0);
     }
-    let m = b.at();
-    b.w(T_PRODUCT);
-    b.w(ts.len());
-    put_all(inout b, in ts);
-    b.since(m)
+    let mark = builder.at();
+    builder.w(T_PRODUCT);
+    builder.w(ts.len());
+    put_all(inout builder, in ts);
+    builder.since(mark)
 }
 
 // `Term::Record` over encoded fields (`field`).
-pub fn record(inout b: B, in fs: ChunkSeq[T]) -> T {
-    let m = b.at();
-    b.w(T_RECORD);
-    b.w(fs.len());
-    put_all(inout b, in fs);
-    b.since(m)
+pub fn record(inout builder: B, in fs: ChunkSeq[T]) -> T {
+    let mark = builder.at();
+    builder.w(T_RECORD);
+    builder.w(fs.len());
+    put_all(inout builder, in fs);
+    builder.since(mark)
 }
 
-pub fn update(inout b: B, base: T, in fs: ChunkSeq[T]) -> T {
-    let m = b.at();
-    b.w(T_UPDATE);
-    b.w(fs.len());
-    b.put(base);
-    put_all(inout b, in fs);
-    b.since(m)
+pub fn update(inout builder: B, base: T, in fs: ChunkSeq[T]) -> T {
+    let mark = builder.at();
+    builder.w(T_UPDATE);
+    builder.w(fs.len());
+    builder.put(base);
+    put_all(inout builder, in fs);
+    builder.since(mark)
 }
 
-// A record field `name := t` (checked).
-pub fn field(inout b: B, name: u32, t: T) -> T {
-    let m = b.at();
-    b.ident(name);
-    b.put(t);
-    b.since(m)
+// A record field `name := value` (checked).
+pub fn field(inout builder: B, name: u32, value: T) -> T {
+    let mark = builder.at();
+    builder.ident(name);
+    builder.put(value);
+    builder.since(mark)
 }
 
 // Binders: an explicit binder with a checked local (`explicit`).
-pub fn explicit(inout b: B, name: u32, ty: T) -> T {
-    let m = b.at();
-    b.w(B_EXPLICIT);
-    b.w(1);
-    b.sym(name);
-    b.put(ty);
-    b.since(m)
+pub fn explicit(inout builder: B, name: u32, ty: T) -> T {
+    let mark = builder.at();
+    builder.w(B_EXPLICIT);
+    builder.w(1);
+    builder.sym(name);
+    builder.put(ty);
+    builder.since(mark)
 }
 
 // An anonymous binder of kind `kind`.
-pub fn anonymous(inout b: B, kind: u64, ty: T) -> T {
-    let m = b.at();
-    b.w(kind);
-    b.w(0);
-    b.put(ty);
-    b.since(m)
+pub fn anonymous(inout builder: B, kind: u64, ty: T) -> T {
+    let mark = builder.at();
+    builder.w(kind);
+    builder.w(0);
+    builder.put(ty);
+    builder.since(mark)
 }
 
-pub fn binder_sym(inout b: B, kind: u64, name: u32, ty: T) -> T {
-    let m = b.at();
-    b.w(kind);
-    b.w(1);
-    b.sym(name);
-    b.put(ty);
-    b.since(m)
+pub fn binder_sym(inout builder: B, kind: u64, name: u32, ty: T) -> T {
+    let mark = builder.at();
+    builder.w(kind);
+    builder.w(1);
+    builder.sym(name);
+    builder.put(ty);
+    builder.since(mark)
 }
 
-pub fn lambda(inout b: B, in binders: ChunkSeq[T], body: T) -> T {
-    let m = b.at();
-    b.w(T_FUN);
-    b.w(binders.len());
-    put_all(inout b, in binders);
-    b.put(body);
-    b.since(m)
+pub fn lambda(inout builder: B, in binders: ChunkSeq[T], body: T) -> T {
+    let mark = builder.at();
+    builder.w(T_FUN);
+    builder.w(binders.len());
+    put_all(inout builder, in binders);
+    builder.put(body);
+    builder.since(mark)
 }
 
 // Patterns.
-pub fn p_wild(inout b: B) -> T {
-    let m = b.at();
-    b.w(P_WILD);
-    b.since(m)
+pub fn p_wild(inout builder: B) -> T {
+    let mark = builder.at();
+    builder.w(P_WILD);
+    builder.since(mark)
 }
 
-// `Pattern::Nat` of decimal text `v`.
-pub fn p_nat(inout b: B, in v: Str) -> T {
-    let m = b.at();
-    b.w(P_NAT);
-    b.text(in v);
-    b.since(m)
+// `Pattern::Nat` of decimal text `digits`.
+pub fn p_nat(inout builder: B, in digits: Str) -> T {
+    let mark = builder.at();
+    builder.w(P_NAT);
+    builder.text(in digits);
+    builder.since(mark)
 }
 
-pub fn p_bind(inout b: B, s: u32) -> T {
-    let m = b.at();
-    b.w(P_BIND);
-    b.sym(s);
-    b.since(m)
+pub fn p_bind(inout builder: B, sym: u32) -> T {
+    let mark = builder.at();
+    builder.w(P_BIND);
+    builder.sym(sym);
+    builder.since(mark)
 }
 
-pub fn p_tuple(inout b: B, in ps: ChunkSeq[T]) -> T {
-    let m = b.at();
-    b.w(P_TUPLE);
-    b.w(ps.len());
-    put_all(inout b, in ps);
-    b.since(m)
+pub fn p_tuple(inout builder: B, in ps: ChunkSeq[T]) -> T {
+    let mark = builder.at();
+    builder.w(P_TUPLE);
+    builder.w(ps.len());
+    put_all(inout builder, in ps);
+    builder.since(mark)
 }
 
 // A constructor pattern; `name` is an encoded name (`name_range`).
-pub fn p_ctor(inout b: B, name: T, in ps: ChunkSeq[T]) -> T {
-    let m = b.at();
-    b.w(P_CTOR);
-    b.put(name);
-    b.w(ps.len());
-    put_all(inout b, in ps);
-    b.since(m)
+pub fn p_ctor(inout builder: B, name: T, in ps: ChunkSeq[T]) -> T {
+    let mark = builder.at();
+    builder.w(P_CTOR);
+    builder.put(name);
+    builder.w(ps.len());
+    put_all(inout builder, in ps);
+    builder.since(mark)
 }
 
-// A fixed rooted two-component name (`fixed_name(&[a, c]).rooted()`).
-pub fn rooted2(inout b: B, in a: Str, in c: Str) -> T {
-    let m = b.at();
-    b.w(1);
-    b.w(2);
-    b.text(in a);
-    b.text(in c);
-    b.since(m)
+// A fixed rooted two-component name (`fixed_name(&[namespace, member]).rooted()`).
+pub fn rooted2(inout builder: B, in namespace: Str, in member: Str) -> T {
+    let mark = builder.at();
+    builder.w(1);
+    builder.w(2);
+    builder.text(in namespace);
+    builder.text(in member);
+    builder.since(mark)
 }
 
 // Statements (`DoStatement`).
 pub fn let_local(
-    inout b: B,
+    inout builder: B,
     inout out: ChunkSeq[T],
     name: u32,
     value: T,
@@ -463,81 +470,88 @@ pub fn let_local(
     ty: T,
     mutable: bool
 ) {
-    let m = b.at();
-    b.w(S_LET);
-    b.w(if mutable { 1 } else { 0 });
-    b.w(P_BIND);
-    b.sym(name);
+    let mark = builder.at();
+    builder.w(S_LET);
+    builder.w(if mutable { 1 } else { 0 });
+    builder.w(P_BIND);
+    builder.sym(name);
     if has_ty {
-        b.w(1);
-        b.put(ty);
+        builder.w(1);
+        builder.put(ty);
     } else {
-        b.w(0);
+        builder.w(0);
     }
-    b.put(value);
-    out.push(b.since(m));
+    builder.put(value);
+    out.push(builder.since(mark));
 }
 
 // `let pattern := value` (immutable, untyped).
-pub fn let_pattern(inout b: B, inout out: ChunkSeq[T], pattern: T, value: T) {
-    let m = b.at();
-    b.w(S_LET);
-    b.w(0);
-    b.put(pattern);
-    b.w(0);
-    b.put(value);
-    out.push(b.since(m));
+pub fn let_pattern(inout builder: B, inout out: ChunkSeq[T], pattern: T, value: T) {
+    let mark = builder.at();
+    builder.w(S_LET);
+    builder.w(0);
+    builder.put(pattern);
+    builder.w(0);
+    builder.put(value);
+    out.push(builder.since(mark));
 }
 
-pub fn bind_local(inout b: B, inout out: ChunkSeq[T], name: u32, action: T, has_ty: bool, ty: T) {
-    let m = b.at();
+pub fn bind_local(
+    inout builder: B,
+    inout out: ChunkSeq[T],
+    name: u32,
+    action: T,
+    has_ty: bool,
+    ty: T
+) {
+    let mark = builder.at();
     if has_ty {
-        b.w(S_BIND_TYPED);
-        b.w(P_BIND);
-        b.sym(name);
-        b.put(ty);
-        b.put(action);
+        builder.w(S_BIND_TYPED);
+        builder.w(P_BIND);
+        builder.sym(name);
+        builder.put(ty);
+        builder.put(action);
     } else {
-        b.w(S_BIND);
-        b.w(P_BIND);
-        b.sym(name);
-        b.put(action);
+        builder.w(S_BIND);
+        builder.w(P_BIND);
+        builder.sym(name);
+        builder.put(action);
     }
-    out.push(b.since(m));
+    out.push(builder.since(mark));
 }
 
-pub fn bind_pattern_stmt(inout b: B, inout out: ChunkSeq[T], pattern: T, action: T) {
-    let m = b.at();
-    b.w(S_BIND);
-    b.put(pattern);
-    b.put(action);
-    out.push(b.since(m));
+pub fn bind_pattern_stmt(inout builder: B, inout out: ChunkSeq[T], pattern: T, action: T) {
+    let mark = builder.at();
+    builder.w(S_BIND);
+    builder.put(pattern);
+    builder.put(action);
+    out.push(builder.since(mark));
 }
 
-pub fn assign(inout b: B, inout out: ChunkSeq[T], local: u32, value: T) {
-    let m = b.at();
-    b.w(S_ASSIGN);
-    b.sym(local);
-    b.put(value);
-    out.push(b.since(m));
+pub fn assign(inout builder: B, inout out: ChunkSeq[T], local: u32, value: T) {
+    let mark = builder.at();
+    builder.w(S_ASSIGN);
+    builder.sym(local);
+    builder.put(value);
+    out.push(builder.since(mark));
 }
 
-pub fn expr_stmt(inout b: B, t: T) -> T {
-    let m = b.at();
-    b.w(S_EXPR);
-    b.put(t);
-    b.since(m)
+pub fn expr_stmt(inout builder: B, term: T) -> T {
+    let mark = builder.at();
+    builder.w(S_EXPR);
+    builder.put(term);
+    builder.since(mark)
 }
 
 // `DS::If { condition, yes, no: None }`.
-pub fn if_stmt(inout b: B, condition: T, in yes: ChunkSeq[T]) -> T {
-    let m = b.at();
-    b.w(S_IF);
-    b.put(condition);
-    b.w(yes.len());
-    put_all(inout b, in yes);
-    b.w(0);
-    b.since(m)
+pub fn if_stmt(inout builder: B, condition: T, in yes: ChunkSeq[T]) -> T {
+    let mark = builder.at();
+    builder.w(S_IF);
+    builder.put(condition);
+    builder.w(yes.len());
+    put_all(inout builder, in yes);
+    builder.w(0);
+    builder.since(mark)
 }
 
 pub fn extend(inout out: ChunkSeq[T], in more: ChunkSeq[T]) {
@@ -548,52 +562,52 @@ pub fn extend(inout out: ChunkSeq[T], in more: ChunkSeq[T]) {
 
 // `DS::Match` with two arms.
 pub fn match_stmt2(
-    inout b: B,
+    inout builder: B,
     scrutinee: T,
     p1: T,
     in s1: ChunkSeq[T],
     p2: T,
     in s2: ChunkSeq[T]
 ) -> T {
-    let m = b.at();
-    b.w(7);
-    b.w(2);
-    b.put(scrutinee);
-    b.put(p1);
-    b.w(s1.len());
-    put_all(inout b, in s1);
-    b.put(p2);
-    b.w(s2.len());
-    put_all(inout b, in s2);
-    b.since(m)
+    let mark = builder.at();
+    builder.w(7);
+    builder.w(2);
+    builder.put(scrutinee);
+    builder.put(p1);
+    builder.w(s1.len());
+    put_all(inout builder, in s1);
+    builder.put(p2);
+    builder.w(s2.len());
+    put_all(inout builder, in s2);
+    builder.since(mark)
 }
 
 // `DS::LetInstance { name: None, ty, value }`.
-pub fn let_instance(inout b: B, ty: T, value: T) -> T {
-    let m = b.at();
-    b.w(5);
-    b.w(0);
-    b.put(ty);
-    b.put(value);
-    b.since(m)
+pub fn let_instance(inout builder: B, ty: T, value: T) -> T {
+    let mark = builder.at();
+    builder.w(5);
+    builder.w(0);
+    builder.put(ty);
+    builder.put(value);
+    builder.since(mark)
 }
 
-// `arrow(a, c)`.
-pub fn arrow(inout b: B, a: T, c: T) -> T {
-    let m = b.at();
-    b.w(T_ARROW);
-    b.put(a);
-    b.put(c);
-    b.since(m)
+// `arrow(domain, codomain)`.
+pub fn arrow(inout builder: B, domain: T, codomain: T) -> T {
+    let mark = builder.at();
+    builder.w(T_ARROW);
+    builder.put(domain);
+    builder.put(codomain);
+    builder.since(mark)
 }
 
 // `arrows(args, result)`.
-pub fn arrows(inout b: B, in args: ChunkSeq[T], result: T) -> T {
-    let m = b.at();
+pub fn arrows(inout builder: B, in args: ChunkSeq[T], result: T) -> T {
+    let mark = builder.at();
     for i in 0..args.len() {
-        b.w(T_ARROW);
-        b.put(t_at(in args, i));
+        builder.w(T_ARROW);
+        builder.put(t_at(in args, i));
     }
-    b.put(result);
-    b.since(m)
+    builder.put(result);
+    builder.since(mark)
 }

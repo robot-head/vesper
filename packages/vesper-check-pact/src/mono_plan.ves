@@ -42,19 +42,19 @@ struct PlanState {
     // Cached instances: `(origin_idx, type_ids, evidence) -> inst_name_sym`
     inst_origin: ChunkSeq[u32],
     inst_name: ChunkSeq[u32],
-    inst_ta: ChunkSeq[u32],
-    inst_tn: ChunkSeq[u32],
+    inst_ty_start: ChunkSeq[u32],
+    inst_ty_count: ChunkSeq[u32],
     inst_tys: ChunkSeq[u32],
-    inst_ea: ChunkSeq[u32],
-    inst_en: ChunkSeq[u32],
+    inst_ev_start: ChunkSeq[u32],
+    inst_ev_count: ChunkSeq[u32],
     inst_evs: ChunkSeq[u64],
     // Clone emission order (post-instantiate_body, matching Rust `self.clones`)
     clone_origin: ChunkSeq[u32],
     clone_name: ChunkSeq[u32],
     // Rewrites: `(caller_name_sym, s, e, target_name_sym)`
     rw_caller: ChunkSeq[u32],
-    rw_s: ChunkSeq[u64],
-    rw_e: ChunkSeq[u64],
+    rw_span_start: ChunkSeq[u64],
+    rw_span_end: ChunkSeq[u64],
     rw_target: ChunkSeq[u32]
 }
 
@@ -62,48 +62,48 @@ fn plan_state_new() -> PlanState {
     PlanState {
         inst_origin: ChunkSeq::new[u32](),
         inst_name: ChunkSeq::new[u32](),
-        inst_ta: ChunkSeq::new[u32](),
-        inst_tn: ChunkSeq::new[u32](),
+        inst_ty_start: ChunkSeq::new[u32](),
+        inst_ty_count: ChunkSeq::new[u32](),
         inst_tys: ChunkSeq::new[u32](),
-        inst_ea: ChunkSeq::new[u32](),
-        inst_en: ChunkSeq::new[u32](),
+        inst_ev_start: ChunkSeq::new[u32](),
+        inst_ev_count: ChunkSeq::new[u32](),
         inst_evs: ChunkSeq::new[u64](),
         clone_origin: ChunkSeq::new[u32](),
         clone_name: ChunkSeq::new[u32](),
         rw_caller: ChunkSeq::new[u32](),
-        rw_s: ChunkSeq::new[u64](),
-        rw_e: ChunkSeq::new[u64](),
+        rw_span_start: ChunkSeq::new[u64](),
+        rw_span_end: ChunkSeq::new[u64](),
         rw_target: ChunkSeq::new[u32]()
     }
 }
 
-fn type_size(in t: Types, ty: u32) -> u64 {
-    let n = t.node(ty);
-    if n.kind == K_NAMED || n.kind == K_TUPLE {
+fn type_size(in types: Types, ty: u32) -> u64 {
+    let node = types.node(ty);
+    if node.kind == K_NAMED || node.kind == K_TUPLE {
         let mut sum: u64 = 1;
-        let aa = w(n.a);
-        let an = w(n.n);
-        for i in 0..an {
-            sum = add(sum, type_size(in t, u32_at(in t.items, add(aa, i))));
+        let arg_start = w(node.a);
+        let arg_count = w(node.n);
+        for i in 0..arg_count {
+            sum = add(sum, type_size(in types, u32_at(in types.items, add(arg_start, i))));
         }
         return sum;
     }
-    if n.kind == K_FN {
+    if node.kind == K_FN {
         let mut sum: u64 = 1;
-        let aa = w(n.a);
-        let an = w(n.n);
-        for i in 0..an {
-            sum = add(sum, type_size(in t, u32_at(in t.items, add(aa, i))));
+        let arg_start = w(node.a);
+        let arg_count = w(node.n);
+        for i in 0..arg_count {
+            sum = add(sum, type_size(in types, u32_at(in types.items, add(arg_start, i))));
         }
-        return add(sum, type_size(in t, n.r));
+        return add(sum, type_size(in types, node.r));
     }
     1
 }
 
-fn has_generic_name(in d: Decls, ga: u64, gn: u64, name: u32) -> bool {
-    for i in 0..gn {
-        let g = gen_at(in d.gens, add(ga, i));
-        if g.name == name {
+fn has_generic_name(in decls: Decls, gen_start: u64, gen_count: u64, name: u32) -> bool {
+    for i in 0..gen_count {
+        let generic = gen_at(in decls.gens, add(gen_start, i));
+        if generic.name == name {
             return true;
         }
     }
@@ -111,80 +111,103 @@ fn has_generic_name(in d: Decls, ga: u64, gn: u64, name: u32) -> bool {
 }
 
 fn match_type(
-    in t: Types,
-    sy: Sy,
-    in d: Decls,
+    in types: Types,
+    syms: Sy,
+    in decls: Decls,
     pattern: u32,
     actual: u32,
-    ga: u64,
-    gn: u64,
+    gen_start: u64,
+    gen_count: u64,
     inout vars: Vars
 ) -> bool {
-    let pn = t.node(pattern);
-    let an = t.node(actual);
-    if pn.kind == K_NAMED && pn.n == 0 && has_generic_name(in d, ga, gn, pn.name) {
-        let bound = vars.get(pn.name);
+    let pattern_node = types.node(pattern);
+    let actual_node = types.node(actual);
+    if pattern_node.kind == K_NAMED
+        && pattern_node.n == 0
+        && has_generic_name(in decls, gen_start, gen_count, pattern_node.name)
+    {
+        let bound = vars.get(pattern_node.name);
         if bound == NONE32 {
-            vars.set(pn.name, actual);
+            vars.set(pattern_node.name, actual);
             return true;
         }
-        return same_type(in t, sy, bound, actual);
+        return same_type(in types, syms, bound, actual);
     }
-    if pn.kind == K_NAMED && an.kind == K_NAMED {
-        if pn.name != an.name || pn.n != an.n {
+    if pattern_node.kind == K_NAMED && actual_node.kind == K_NAMED {
+        if pattern_node.name != actual_node.name || pattern_node.n != actual_node.n {
             return false;
         }
-        for i in 0..w(pn.n) {
-            let x = u32_at(in t.items, add(w(pn.a), i));
-            let y = u32_at(in t.items, add(w(an.a), i));
-            if !match_type(in t, sy, in d, x, y, ga, gn, inout vars) {
+        for i in 0..w(pattern_node.n) {
+            let pattern_arg = u32_at(in types.items, add(w(pattern_node.a), i));
+            let actual_arg = u32_at(in types.items, add(w(actual_node.a), i));
+            if !match_type(
+                in types,
+                syms,
+                in decls,
+                pattern_arg,
+                actual_arg,
+                gen_start,
+                gen_count,
+                inout vars
+            ) {
                 return false;
             }
         }
         return true;
     }
-    if pn.kind == K_TUPLE && an.kind == K_TUPLE {
-        if pn.n != an.n {
+    if pattern_node.kind == K_TUPLE && actual_node.kind == K_TUPLE {
+        if pattern_node.n != actual_node.n {
             return false;
         }
-        for i in 0..w(pn.n) {
-            let x = u32_at(in t.items, add(w(pn.a), i));
-            let y = u32_at(in t.items, add(w(an.a), i));
-            if !match_type(in t, sy, in d, x, y, ga, gn, inout vars) {
+        for i in 0..w(pattern_node.n) {
+            let pattern_arg = u32_at(in types.items, add(w(pattern_node.a), i));
+            let actual_arg = u32_at(in types.items, add(w(actual_node.a), i));
+            if !match_type(
+                in types,
+                syms,
+                in decls,
+                pattern_arg,
+                actual_arg,
+                gen_start,
+                gen_count,
+                inout vars
+            ) {
                 return false;
             }
         }
         return true;
     }
-    if pn.kind == K_ROW && an.kind == K_ROW {
+    if pattern_node.kind == K_ROW && actual_node.kind == K_ROW {
         return true;
     }
-    same_type(in t, sy, pattern, actual)
+    same_type(in types, syms, pattern, actual)
 }
 
-fn find_fn_idx(in m: MonoTables, name: u32) -> u64 {
-    for i in 0..m.fn_names.len() {
-        if u32_at(in m.fn_names, i) == name {
+fn find_fn_idx(in mono: MonoTables, name: u32) -> u64 {
+    for i in 0..mono.fn_names.len() {
+        if u32_at(in mono.fn_names, i) == name {
             return i;
         }
     }
     NONE64
 }
 
-fn find_inst(in ps: PlanState, origin: u32, in tys: ChunkSeq[u32], in evs: ChunkSeq[u64]) -> u32 {
-    let tn = tys.len();
-    let en = evs.len();
-    for i in 0..ps.inst_origin.len() {
-        if u32_at(in ps.inst_origin, i) != origin {
+fn find_inst(in plan: PlanState, origin: u32, in tys: ChunkSeq[u32], in evs: ChunkSeq[u64]) -> u32 {
+    let ty_count = tys.len();
+    let ev_count = evs.len();
+    for i in 0..plan.inst_origin.len() {
+        if u32_at(in plan.inst_origin, i) != origin {
             continue;
         }
-        if w(u32_at(in ps.inst_tn, i)) != tn || w(u32_at(in ps.inst_en, i)) != en {
+        if w(u32_at(in plan.inst_ty_count, i)) != ty_count
+            || w(u32_at(in plan.inst_ev_count, i)) != ev_count
+        {
             continue;
         }
-        let ta = w(u32_at(in ps.inst_ta, i));
+        let ty_start = w(u32_at(in plan.inst_ty_start, i));
         let mut eq = true;
-        for j in 0..tn {
-            if u32_at(in ps.inst_tys, add(ta, j)) != u32_at(in tys, j) {
+        for j in 0..ty_count {
+            if u32_at(in plan.inst_tys, add(ty_start, j)) != u32_at(in tys, j) {
                 eq = false;
                 break;
             }
@@ -192,37 +215,37 @@ fn find_inst(in ps: PlanState, origin: u32, in tys: ChunkSeq[u32], in evs: Chunk
         if !eq {
             continue;
         }
-        let ea = w(u32_at(in ps.inst_ea, i));
-        for j in 0..en {
-            if u64_at(in ps.inst_evs, add(ea, j)) != u64_at(in evs, j) {
+        let ev_start = w(u32_at(in plan.inst_ev_start, i));
+        for j in 0..ev_count {
+            if u64_at(in plan.inst_evs, add(ev_start, j)) != u64_at(in evs, j) {
                 eq = false;
                 break;
             }
         }
         if eq {
-            return u32_at(in ps.inst_name, i);
+            return u32_at(in plan.inst_name, i);
         }
     }
     NONE32
 }
 
-fn names_has(in ps: PlanState, sym_id: u32) -> bool {
-    for i in 0..ps.inst_name.len() {
-        if u32_at(in ps.inst_name, i) == sym_id {
+fn names_has(in plan: PlanState, sym_id: u32) -> bool {
+    for i in 0..plan.inst_name.len() {
+        if u32_at(in plan.inst_name, i) == sym_id {
             return true;
         }
     }
     false
 }
 
-fn split_stub_sym(inout names: Names, s: u32) -> (bool, u32, u32) {
-    if !sym_starts_with(in names, s, "bound$") {
+fn split_stub_sym(inout names: Names, symbol: u32) -> (bool, u32, u32) {
+    if !sym_starts_with(in names, symbol, "bound$") {
         return (false, NONE32, NONE32);
     }
-    let blen = names.size(s);
+    let sym_len = names.size(symbol);
     let mut sep = NONE64;
-    for i in 6..blen {
-        if names.byte(s, i) == 36 {
+    for i in 6..sym_len {
+        if names.byte(symbol, i) == 36 {
             sep = i;
             break;
         }
@@ -230,61 +253,61 @@ fn split_stub_sym(inout names: Names, s: u32) -> (bool, u32, u32) {
     if sep == NONE64 {
         return (false, NONE32, NONE32);
     }
-    let mut tr_bytes = ChunkSeq::with_capacity[u8](sep);
+    let mut trait_bytes = ChunkSeq::with_capacity[u8](sep);
     for i in 6..sep {
-        tr_bytes.push(names.byte(s, i));
+        trait_bytes.push(names.byte(symbol, i));
     }
-    let mut m_bytes = ChunkSeq::with_capacity[u8](blen);
-    for i in add(sep, 1)..blen {
-        m_bytes.push(names.byte(s, i));
+    let mut method_bytes = ChunkSeq::with_capacity[u8](sym_len);
+    for i in add(sep, 1)..sym_len {
+        method_bytes.push(names.byte(symbol, i));
     }
-    let tr_sym = names.intern(in tr_bytes.as_slice());
-    let m_sym = names.intern(in m_bytes.as_slice());
-    (true, tr_sym, m_sym)
+    let trait_sym = names.intern(in trait_bytes.as_slice());
+    let method_sym = names.intern(in method_bytes.as_slice());
+    (true, trait_sym, method_sym)
 }
 
 fn select_evidence(
     inout sess: PactSession,
-    in m: MonoTables,
-    in cx: CxHeader,
+    in mono: MonoTables,
+    in context: CxHeader,
     origin_idx: u64,
     in origin_vars: Vars,
     in origin_ev: ChunkSeq[u64],
     trait_name: u32,
     ty: u32,
     in args: Slice[u32],
-    s: u64,
-    e: u64,
+    span_start: u64,
+    span_end: u64,
     inout errors: MonoDiags
 ) -> (bool, u64) {
     if origin_idx != NONE64 {
-        let ba = w(u32_at(in m.fn_ba, origin_idx));
-        let bn = w(u32_at(in m.fn_bn, origin_idx));
-        for bi in 0..bn {
+        let bound_start = w(u32_at(in mono.fn_bound_start, origin_idx));
+        let bound_count = w(u32_at(in mono.fn_bound_count, origin_idx));
+        for bi in 0..bound_count {
             if bi >= origin_ev.len() {
                 break;
             }
-            let bidx = add(ba, bi);
-            if u32_at(in m.bnd_trait, bidx) != trait_name {
+            let bound_idx = add(bound_start, bi);
+            if u32_at(in mono.bnd_trait, bound_idx) != trait_name {
                 continue;
             }
-            let raw_bty = u32_at(in m.bnd_ty, bidx);
-            let sub_raw = substitute(inout sess.c.types, raw_bty, in origin_vars);
-            let sub_bty = default_type(inout sess.c.types, sub_raw);
-            if sub_bty != ty {
+            let raw_bound_ty = u32_at(in mono.bnd_ty, bound_idx);
+            let subst_raw = substitute(inout sess.ctx.types, raw_bound_ty, in origin_vars);
+            let bound_ty = default_type(inout sess.ctx.types, subst_raw);
+            if bound_ty != ty {
                 continue;
             }
-            let baa = w(u32_at(in m.bnd_aa, bidx));
-            let ban = w(u32_at(in m.bnd_an, bidx));
-            if ban != args.len() {
+            let targ_start = w(u32_at(in mono.bnd_arg_start, bound_idx));
+            let targ_count = w(u32_at(in mono.bnd_arg_count, bound_idx));
+            if targ_count != args.len() {
                 continue;
             }
             let mut ok = true;
-            for ai in 0..ban {
-                let raw_a = u32_at(in m.bnd_args, add(baa, ai));
-                let sub_a = substitute(inout sess.c.types, raw_a, in origin_vars);
-                let act_a = args.try_get(ai).unwrap_or(0);
-                if !same_type(in sess.c.types, sess.sy, sub_a, act_a) {
+            for ai in 0..targ_count {
+                let raw_arg = u32_at(in mono.bnd_args, add(targ_start, ai));
+                let subst_arg = substitute(inout sess.ctx.types, raw_arg, in origin_vars);
+                let actual_arg = args.try_get(ai).unwrap_or(0);
+                if !same_type(in sess.ctx.types, sess.syms, subst_arg, actual_arg) {
                     ok = false;
                     break;
                 }
@@ -294,155 +317,159 @@ fn select_evidence(
             }
         }
     }
-    let res = select_in_cx(inout sess, in cx, trait_name, ty, 0, in args);
-    if res.status == ST_OK {
-        return (true, res.val);
+    let outcome = select_in_cx(inout sess, in context, trait_name, ty, 0, in args);
+    if outcome.status == ST_OK {
+        return (true, outcome.val);
     }
-    let mut tb = ChunkSeq::new[u8]();
-    put_sym_bytes(in sess.c.names, trait_name, inout tb);
+    let mut trait_text = ChunkSeq::new[u8]();
+    put_sym_bytes(in sess.ctx.names, trait_name, inout trait_text);
     let (code, msg) = failure_msg(
-        in sess.c.types,
-        in sess.c.names,
-        in tb.as_slice(),
+        in sess.ctx.types,
+        in sess.ctx.names,
+        in trait_text.as_slice(),
         trait_name,
         ty,
-        res.val,
-        in res.msg.as_slice()
+        outcome.val,
+        in outcome.msg.as_slice()
     );
-    push_diag(inout errors, code, s, e, in msg);
+    push_diag(inout errors, code, span_start, span_end, in msg);
     (false, 0)
 }
 
 fn callee_evidence(
     inout sess: PactSession,
-    in m: MonoTables,
-    in cx: CxHeader,
+    in mono: MonoTables,
+    in context: CxHeader,
     origin_idx: u64,
     in origin_vars: Vars,
     in origin_ev: ChunkSeq[u64],
     callee_idx: u64,
     in callee_vars: Vars,
-    s: u64,
-    e: u64,
+    span_start: u64,
+    span_end: u64,
     inout errors: MonoDiags
 ) -> ChunkSeq[u64] {
     let mut out = ChunkSeq::new[u64]();
-    let ba = w(u32_at(in m.fn_ba, callee_idx));
-    let bn = w(u32_at(in m.fn_bn, callee_idx));
-    for bi in 0..bn {
-        let bidx = add(ba, bi);
-        let tname = u32_at(in m.bnd_trait, bidx);
-        let ty_sub = substitute(inout sess.c.types, u32_at(in m.bnd_ty, bidx), in callee_vars);
-        let ty = default_type(inout sess.c.types, ty_sub);
-        let baa = w(u32_at(in m.bnd_aa, bidx));
-        let ban = w(u32_at(in m.bnd_an, bidx));
-        let mut args = ChunkSeq::with_capacity[u32](ban);
-        for ai in 0..ban {
-            let raw_a = u32_at(in m.bnd_args, add(baa, ai));
-            args.push(substitute(inout sess.c.types, raw_a, in callee_vars));
+    let bound_start = w(u32_at(in mono.fn_bound_start, callee_idx));
+    let bound_count = w(u32_at(in mono.fn_bound_count, callee_idx));
+    for bi in 0..bound_count {
+        let bound_idx = add(bound_start, bi);
+        let trait_name = u32_at(in mono.bnd_trait, bound_idx);
+        let subst_ty = substitute(
+            inout sess.ctx.types,
+            u32_at(in mono.bnd_ty, bound_idx),
+            in callee_vars
+        );
+        let ty = default_type(inout sess.ctx.types, subst_ty);
+        let targ_start = w(u32_at(in mono.bnd_arg_start, bound_idx));
+        let targ_count = w(u32_at(in mono.bnd_arg_count, bound_idx));
+        let mut args = ChunkSeq::with_capacity[u32](targ_count);
+        for ai in 0..targ_count {
+            let raw_arg = u32_at(in mono.bnd_args, add(targ_start, ai));
+            args.push(substitute(inout sess.ctx.types, raw_arg, in callee_vars));
         }
-        let (ok, ev) = select_evidence(
+        let (ok, evidence) = select_evidence(
             inout sess,
-            in m,
-            in cx,
+            in mono,
+            in context,
             origin_idx,
             in origin_vars,
             in origin_ev,
-            tname,
+            trait_name,
             ty,
             in args.as_slice(),
-            s,
-            e,
+            span_start,
+            span_end,
             inout errors
         );
         if !ok {
             return out;
         }
-        out.push(ev);
+        out.push(evidence);
     }
     out
 }
 
 fn plan_instance(
     inout sess: PactSession,
-    in m: MonoTables,
-    in cp: CxPool,
+    in mono: MonoTables,
+    in pool: CxPool,
     in fn_has_dyn: ChunkSeq[u8],
     in bounded: ChunkSeq[u8],
     origin_idx: u64,
     in vars: Vars,
     in evidence: ChunkSeq[u64],
     depth: u64,
-    s: u64,
-    e: u64,
-    inout ps: PlanState,
+    span_start: u64,
+    span_end: u64,
+    inout plan: PlanState,
     inout errors: MonoDiags
 ) -> u32 {
-    let origin_sym = u32_at(in m.fn_names, origin_idx);
-    let ga = w(u32_at(in m.fn_ga, origin_idx));
-    let gn = w(u32_at(in m.fn_gn, origin_idx));
+    let origin_sym = u32_at(in mono.fn_names, origin_idx);
+    let gen_start = w(u32_at(in mono.fn_gen_start, origin_idx));
+    let gen_count = w(u32_at(in mono.fn_gen_count, origin_idx));
     let mut types = ChunkSeq::new[u32]();
-    for gi in 0..gn {
-        let gname = u32_at(in m.gen_names, add(ga, gi));
-        let t = vars.get(gname);
-        if t != NONE32 {
-            types.push(t);
+    for gi in 0..gen_count {
+        let gen_name = u32_at(in mono.gen_names, add(gen_start, gi));
+        let arg_ty = vars.get(gen_name);
+        if arg_ty != NONE32 {
+            types.push(arg_ty);
         }
     }
-    let cached = find_inst(in ps, n32(origin_idx), in types, in evidence);
+    let cached = find_inst(in plan, n32(origin_idx), in types, in evidence);
     if cached != NONE32 {
         return cached;
     }
-    let mut tsz: u64 = 0;
+    let mut total_size: u64 = 0;
     for i in 0..types.len() {
-        tsz = add(tsz, type_size(in sess.c.types, u32_at(in types, i)));
+        total_size = add(total_size, type_size(in sess.ctx.types, u32_at(in types, i)));
     }
-    if depth > MAX_DEPTH || ps.inst_origin.len() >= MAX_INSTANCES || tsz > MAX_TYPE_SIZE {
+    if depth > MAX_DEPTH || plan.inst_origin.len() >= MAX_INSTANCES || total_size > MAX_TYPE_SIZE {
         let mut msg = ChunkSeq::new[u8]();
         put_str(inout msg, "instantiating '");
-        put_sym_bytes(in sess.c.names, origin_sym, inout msg);
+        put_sym_bytes(in sess.ctx.names, origin_sym, inout msg);
         put_str(
             inout msg,
             "' recursively creates unboundedly many instances (polymorphic recursion); monomorphization stops after 64 nested instances or type arguments of 256 nodes"
         );
-        push_diag(inout errors, CODE_E0615, s, e, in msg);
+        push_diag(inout errors, CODE_E0615, span_start, span_end, in msg);
         return origin_sym;
     }
-    let mut name_b = ChunkSeq::new[u8]();
-    put_sym_bytes(in sess.c.names, origin_sym, inout name_b);
-    put_str(inout name_b, "$mono$");
+    let mut name_bytes = ChunkSeq::new[u8]();
+    put_sym_bytes(in sess.ctx.names, origin_sym, inout name_bytes);
+    put_str(inout name_bytes, "$mono$");
     for i in 0..types.len() {
         if i > 0 {
-            name_b.push(46);
+            name_bytes.push(46);
         }
-        key_segment(in sess.c.types, in sess.c.names, u32_at(in types, i), inout name_b);
+        key_segment(in sess.ctx.types, in sess.ctx.names, u32_at(in types, i), inout name_bytes);
     }
     for i in 0..evidence.len() {
-        let c = conf_at(in sess.d, u64_at(in evidence, i));
-        if c.model {
-            name_b.push(36);
-            put_sym_bytes(in sess.c.names, c.mname, inout name_b);
+        let conf = conf_at(in sess.decls, u64_at(in evidence, i));
+        if conf.model {
+            name_bytes.push(36);
+            put_sym_bytes(in sess.ctx.names, conf.model_name, inout name_bytes);
         }
     }
-    let mut name_sym = sess.c.names.intern(in name_b.as_slice());
-    if names_has(in ps, name_sym) {
-        name_b.push(36);
-        put_num(inout name_b, ps.inst_origin.len());
-        name_sym = sess.c.names.intern(in name_b.as_slice());
+    let mut name_sym = sess.ctx.names.intern(in name_bytes.as_slice());
+    if names_has(in plan, name_sym) {
+        name_bytes.push(36);
+        put_num(inout name_bytes, plan.inst_origin.len());
+        name_sym = sess.ctx.names.intern(in name_bytes.as_slice());
     }
-    ps.inst_origin.push(n32(origin_idx));
-    ps.inst_name.push(name_sym);
-    ps.inst_ta.push(n32(ps.inst_tys.len()));
-    ps.inst_tn.push(n32(types.len()));
-    ps.inst_tys.extend(in types.as_slice());
-    ps.inst_ea.push(n32(ps.inst_evs.len()));
-    ps.inst_en.push(n32(evidence.len()));
-    ps.inst_evs.extend(in evidence.as_slice());
+    plan.inst_origin.push(n32(origin_idx));
+    plan.inst_name.push(name_sym);
+    plan.inst_ty_start.push(n32(plan.inst_tys.len()));
+    plan.inst_ty_count.push(n32(types.len()));
+    plan.inst_tys.extend(in types.as_slice());
+    plan.inst_ev_start.push(n32(plan.inst_evs.len()));
+    plan.inst_ev_count.push(n32(evidence.len()));
+    plan.inst_evs.extend(in evidence.as_slice());
 
     plan_body(
         inout sess,
-        in m,
-        in cp,
+        in mono,
+        in pool,
         in fn_has_dyn,
         in bounded,
         origin_idx,
@@ -450,18 +477,18 @@ fn plan_instance(
         in vars,
         in evidence,
         depth,
-        inout ps,
+        inout plan,
         inout errors
     );
-    ps.clone_origin.push(n32(origin_idx));
-    ps.clone_name.push(name_sym);
+    plan.clone_origin.push(n32(origin_idx));
+    plan.clone_name.push(name_sym);
     name_sym
 }
 
 fn plan_body(
     inout sess: PactSession,
-    in m: MonoTables,
-    in cp: CxPool,
+    in mono: MonoTables,
+    in pool: CxPool,
     in fn_has_dyn: ChunkSeq[u8],
     in bounded: ChunkSeq[u8],
     origin_idx: u64,
@@ -469,163 +496,163 @@ fn plan_body(
     in origin_vars: Vars,
     in origin_ev: ChunkSeq[u64],
     depth: u64,
-    inout ps: PlanState,
+    inout plan: PlanState,
     inout errors: MonoDiags
 ) {
-    let ca = w(u32_at(in m.fn_ca, origin_idx));
-    let cn = w(u32_at(in m.fn_cn, origin_idx));
-    let mut local_s = ChunkSeq::new[u64]();
-    let mut local_e = ChunkSeq::new[u64]();
+    let call_start = w(u32_at(in mono.fn_call_start, origin_idx));
+    let call_count = w(u32_at(in mono.fn_call_count, origin_idx));
+    let mut local_span_start = ChunkSeq::new[u64]();
+    let mut local_span_end = ChunkSeq::new[u64]();
     let mut local_target = ChunkSeq::new[u32]();
-    for ci in 0..cn {
-        let cidx = add(ca, ci);
-        let cs = u64_at(in m.call_s, cidx);
-        let ce = u64_at(in m.call_e, cidx);
-        let callee = w(u32_at(in m.call_callee, cidx));
-        let va = w(u32_at(in m.call_va, cidx));
-        let vn = w(u32_at(in m.call_vn, cidx));
+    for ci in 0..call_count {
+        let call_idx = add(call_start, ci);
+        let call_span_start = u64_at(in mono.call_span_start, call_idx);
+        let call_span_end = u64_at(in mono.call_span_end, call_idx);
+        let callee = w(u32_at(in mono.call_callee, call_idx));
+        let var_start = w(u32_at(in mono.call_var_start, call_idx));
+        let var_count = w(u32_at(in mono.call_var_count, call_idx));
         let has_dyn = u8_at(in fn_has_dyn, callee) != 0;
         let mut vars = vars_new();
-        for vi in 0..vn {
-            let vidx = add(va, vi);
-            let vname = u32_at(in m.call_vname, vidx);
-            if has_dyn && is_dyn_generic(in sess.c.names, vname) {
+        for vi in 0..var_count {
+            let var_idx = add(var_start, vi);
+            let var_name = u32_at(in mono.call_var_name, var_idx);
+            if has_dyn && is_dyn_generic(in sess.ctx.names, var_name) {
                 continue;
             }
-            let raw_vty = u32_at(in m.call_vty, vidx);
-            let vty_sub = substitute(inout sess.c.types, raw_vty, in origin_vars);
-            let vty = default_type(inout sess.c.types, vty_sub);
-            vars.set(vname, vty);
+            let raw_var_ty = u32_at(in mono.call_var_ty, var_idx);
+            let subst_var_ty = substitute(inout sess.ctx.types, raw_var_ty, in origin_vars);
+            let var_ty = default_type(inout sess.ctx.types, subst_var_ty);
+            vars.set(var_name, var_ty);
         }
-        let callee_sym = u32_at(in m.fn_names, callee);
-        let (is_stub, trait_sym, method_sym) = split_stub_sym(inout sess.c.names, callee_sym);
+        let callee_sym = u32_at(in mono.fn_names, callee);
+        let (is_stub, trait_sym, method_sym) = split_stub_sym(inout sess.ctx.names, callee_sym);
         if is_stub {
-            let ty = vars.get(sess.c.names.intern(in "Self".as_bytes()));
+            let named_self = vars.get(sess.ctx.names.intern(in "Self".as_bytes()));
             // `$Self` is the stub's receiver parameter name.
-            let dollar_self = vars.get(sess.c.names.intern(in "$Self".as_bytes()));
+            let dollar_self = vars.get(sess.ctx.names.intern(in "$Self".as_bytes()));
             let self_ty = if dollar_self != NONE32 {
                 dollar_self
             } else {
-                ty
+                named_self
             };
             if self_ty == NONE32 {
                 continue;
             }
-            let tr_idx = find_trait_idx(in sess.d, trait_sym);
+            let tr_idx = find_trait_idx(in sess.decls, trait_sym);
             if tr_idx == NONE64 {
                 continue;
             }
-            let tr = trait_at(in sess.d, tr_idx);
-            let infer_ty = sess.c.types.infer;
-            let mut args = ChunkSeq::with_capacity[u32](w(tr.gn));
-            for gi in 0..w(tr.gn) {
-                let g = gen_at(in sess.d.gens, add(w(tr.ga), gi));
-                let a = vars.get(g.name);
-                args.push(if a != NONE32 { a } else { infer_ty });
+            let trait_row = trait_at(in sess.decls, tr_idx);
+            let infer_ty = sess.ctx.types.infer;
+            let mut args = ChunkSeq::with_capacity[u32](w(trait_row.gen_count));
+            for gi in 0..w(trait_row.gen_count) {
+                let generic = gen_at(in sess.decls.gens, add(w(trait_row.gen_start), gi));
+                let arg = vars.get(generic.name);
+                args.push(if arg != NONE32 { arg } else { infer_ty });
             }
-            let cx = get_call_cx(in cp, in m, origin_idx, cidx);
+            let context = get_call_cx(in pool, in mono, origin_idx, call_idx);
             let (ok, conf_idx) = select_evidence(
                 inout sess,
-                in m,
-                in cx,
+                in mono,
+                in context,
                 origin_idx,
                 in origin_vars,
                 in origin_ev,
                 trait_sym,
                 self_ty,
                 in args.as_slice(),
-                cs,
-                ce,
+                call_span_start,
+                call_span_end,
                 inout errors
             );
             if !ok {
                 continue;
             }
-            let c = conf_at(in sess.d, conf_idx);
-            let mut gname_b = ChunkSeq::new[u8]();
+            let conf = conf_at(in sess.decls, conf_idx);
+            let mut gen_name_bytes = ChunkSeq::new[u8]();
             generated_name_for_conf(
-                in sess.c.types,
-                in sess.c.names,
-                in sess.d,
-                c,
+                in sess.ctx.types,
+                in sess.ctx.names,
+                in sess.decls,
+                conf,
                 method_sym,
-                inout gname_b
+                inout gen_name_bytes
             );
-            let gen_sym = sess.c.names.intern(in gname_b.as_slice());
-            let gen_idx = find_fn_idx(in m, gen_sym);
-            let mut cvars = vars_new();
+            let gen_sym = sess.ctx.names.intern(in gen_name_bytes.as_slice());
+            let gen_idx = find_fn_idx(in mono, gen_sym);
+            let mut conf_vars = vars_new();
             let _m1 = match_type(
-                in sess.c.types,
-                sess.sy,
-                in sess.d,
-                c.self_ty,
+                in sess.ctx.types,
+                sess.syms,
+                in sess.decls,
+                conf.self_ty,
                 self_ty,
-                w(c.ga),
-                w(c.gn),
-                inout cvars
+                w(conf.gen_start),
+                w(conf.gen_count),
+                inout conf_vars
             );
-            let tref = tref_at(in sess.d, w(c.tref));
-            let ta_cnt = if w(tref.xn) < args.len() {
-                w(tref.xn)
+            let tref = tref_at(in sess.decls, w(conf.tref));
+            let targ_count = if w(tref.arg_count) < args.len() {
+                w(tref.arg_count)
             } else {
                 args.len()
             };
-            for ai in 0..ta_cnt {
+            for ai in 0..targ_count {
                 let actual = u32_at(in args, ai);
-                if !closed(in sess.c.types, actual) {
+                if !closed(in sess.ctx.types, actual) {
                     continue;
                 }
-                let pat = u32_at(in sess.d.words, add(w(tref.xa), ai));
+                let pattern = u32_at(in sess.decls.words, add(w(tref.arg_start), ai));
                 let _m2 = match_type(
-                    in sess.c.types,
-                    sess.sy,
-                    in sess.d,
-                    pat,
+                    in sess.ctx.types,
+                    sess.syms,
+                    in sess.decls,
+                    pattern,
                     actual,
-                    w(c.ga),
-                    w(c.gn),
-                    inout cvars
+                    w(conf.gen_start),
+                    w(conf.gen_count),
+                    inout conf_vars
                 );
             }
             let target = if gen_idx != NONE64 && u8_at(in bounded, gen_idx) != 0 {
-                let ev = callee_evidence(
+                let callee_ev = callee_evidence(
                     inout sess,
-                    in m,
-                    in cx,
+                    in mono,
+                    in context,
                     origin_idx,
                     in origin_vars,
                     in origin_ev,
                     gen_idx,
-                    in cvars,
-                    cs,
-                    ce,
+                    in conf_vars,
+                    call_span_start,
+                    call_span_end,
                     inout errors
                 );
                 plan_instance(
                     inout sess,
-                    in m,
-                    in cp,
+                    in mono,
+                    in pool,
                     in fn_has_dyn,
                     in bounded,
                     gen_idx,
-                    in cvars,
-                    in ev,
+                    in conf_vars,
+                    in callee_ev,
                     add(depth, 1),
-                    cs,
-                    ce,
-                    inout ps,
+                    call_span_start,
+                    call_span_end,
+                    inout plan,
                     inout errors
                 )
             } else {
                 gen_sym
             };
-            local_s.push(cs);
-            local_e.push(ce);
+            local_span_start.push(call_span_start);
+            local_span_end.push(call_span_end);
             local_target.push(target);
         } else if u8_at(in bounded, callee) != 0 {
             let mut any_open = false;
             for vi in 0..vars.vals.len() {
-                if !closed(in sess.c.types, u32_at(in vars.vals, vi)) {
+                if !closed(in sess.ctx.types, u32_at(in vars.vals, vi)) {
                     any_open = true;
                     break;
                 }
@@ -633,177 +660,177 @@ fn plan_body(
             if any_open {
                 let mut msg = ChunkSeq::new[u8]();
                 put_str(inout msg, "cannot infer the type arguments of '");
-                put_sym_bytes(in sess.c.names, callee_sym, inout msg);
+                put_sym_bytes(in sess.ctx.names, callee_sym, inout msg);
                 put_str(inout msg, "' here; annotate them");
-                push_diag(inout errors, CODE_E0607, cs, ce, in msg);
+                push_diag(inout errors, CODE_E0607, call_span_start, call_span_end, in msg);
                 continue;
             }
-            let cx = get_call_cx(in cp, in m, origin_idx, cidx);
-            let ev = callee_evidence(
+            let context = get_call_cx(in pool, in mono, origin_idx, call_idx);
+            let callee_ev = callee_evidence(
                 inout sess,
-                in m,
-                in cx,
+                in mono,
+                in context,
                 origin_idx,
                 in origin_vars,
                 in origin_ev,
                 callee,
                 in vars,
-                cs,
-                ce,
+                call_span_start,
+                call_span_end,
                 inout errors
             );
             let target = plan_instance(
                 inout sess,
-                in m,
-                in cp,
+                in mono,
+                in pool,
                 in fn_has_dyn,
                 in bounded,
                 callee,
                 in vars,
-                in ev,
+                in callee_ev,
                 add(depth, 1),
-                cs,
-                ce,
-                inout ps,
+                call_span_start,
+                call_span_end,
+                inout plan,
                 inout errors
             );
-            local_s.push(cs);
-            local_e.push(ce);
+            local_span_start.push(call_span_start);
+            local_span_end.push(call_span_end);
             local_target.push(target);
         }
     }
-    for i in 0..local_s.len() {
-        ps.rw_caller.push(caller_sym);
-        ps.rw_s.push(u64_at(in local_s, i));
-        ps.rw_e.push(u64_at(in local_e, i));
-        ps.rw_target.push(u32_at(in local_target, i));
+    for i in 0..local_span_start.len() {
+        plan.rw_caller.push(caller_sym);
+        plan.rw_span_start.push(u64_at(in local_span_start, i));
+        plan.rw_span_end.push(u64_at(in local_span_end, i));
+        plan.rw_target.push(u32_at(in local_target, i));
     }
 }
 
 fn mono_plan_body(
     inout sess: PactSession,
-    inout r: Reader,
-    in b: Slice[u8],
+    inout reader: Reader,
+    in bytes: Slice[u8],
     inout out: ChunkSeq[u64]
 ) {
     let mut nmap = ChunkSeq::new[u32]();
-    read_q_names(inout r, in b, inout sess.c.names, inout nmap);
+    read_q_names(inout reader, in bytes, inout sess.ctx.names, inout nmap);
     let mut tmap = ChunkSeq::new[u32]();
-    read_q_types(inout r, in b, inout sess.c, in nmap, inout tmap);
-    let (m, cp) = read_mono_tables(inout r, in b, inout sess, in nmap, in tmap);
-    let nf = m.fn_names.len();
-    let mut fn_has_dyn = ChunkSeq::with_capacity[u8](nf);
-    for _ in 0..nf {
-        fn_has_dyn.push(if r.word(in b) != 0 { 1 } else { 0 });
+    read_q_types(inout reader, in bytes, inout sess.ctx, in nmap, inout tmap);
+    let (mono, pool) = read_mono_tables(inout reader, in bytes, inout sess, in nmap, in tmap);
+    let fn_count = mono.fn_names.len();
+    let mut fn_has_dyn = ChunkSeq::with_capacity[u8](fn_count);
+    for _ in 0..fn_count {
+        fn_has_dyn.push(if reader.word(in bytes) != 0 { 1 } else { 0 });
     }
     let mut errors = diags_new();
-    let bounded = close_bounded(in sess.c.types, in sess.c.names, in m, inout errors);
-    check_obligations(inout sess, in m, in cp, inout errors);
-    let mut ps = plan_state_new();
+    let bounded = close_bounded(in sess.ctx.types, in sess.ctx.names, in mono, inout errors);
+    check_obligations(inout sess, in mono, in pool, inout errors);
+    let mut plan = plan_state_new();
     if errors.codes.len() == 0 {
         let empty_vars = vars_new();
         let empty_ev = ChunkSeq::new[u64]();
-        for fi in 0..nf {
+        for fi in 0..fn_count {
             if u8_at(in bounded, fi) != 0 {
                 continue;
             }
-            let fname = u32_at(in m.fn_names, fi);
+            let fn_name = u32_at(in mono.fn_names, fi);
             plan_body(
                 inout sess,
-                in m,
-                in cp,
+                in mono,
+                in pool,
                 in fn_has_dyn,
                 in bounded,
                 fi,
-                fname,
+                fn_name,
                 in empty_vars,
                 in empty_ev,
                 0,
-                inout ps,
+                inout plan,
                 inout errors
             );
         }
     }
     out.push(errors.codes.len());
     for i in 0..errors.codes.len() {
-        let c = u8_at(in errors.codes, i);
+        let code = u8_at(in errors.codes, i);
         out.push(
-            if c == 1 {
+            if code == 1 {
                 1
-            } else if c == 2 {
+            } else if code == 2 {
                 2
-            } else if c == 3 {
+            } else if code == 3 {
                 3
-            } else if c == 4 {
+            } else if code == 4 {
                 4
             } else {
                 0
             }
         );
-        out.push(u64_at(in errors.s, i));
-        out.push(u64_at(in errors.e, i));
-        let ma = w(u32_at(in errors.msg_a, i));
-        let mn = w(u32_at(in errors.msg_n, i));
-        let mut msg = ChunkSeq::with_capacity[u8](mn);
-        for j in 0..mn {
-            msg.push(u8_at(in errors.msg_bytes, add(ma, j)));
+        out.push(u64_at(in errors.span_start, i));
+        out.push(u64_at(in errors.span_end, i));
+        let msg_start = w(u32_at(in errors.msg_start, i));
+        let msg_len = w(u32_at(in errors.msg_len, i));
+        let mut msg = ChunkSeq::with_capacity[u8](msg_len);
+        for j in 0..msg_len {
+            msg.push(u8_at(in errors.msg_bytes, add(msg_start, j)));
         }
-        let pmsg = pack_text(in msg);
-        out.extend(in pmsg.as_slice());
+        let packed_msg = pack_text(in msg);
+        out.extend(in packed_msg.as_slice());
     }
     if errors.codes.len() > 0 {
         return;
     }
-    out.push(ps.clone_origin.len());
-    for i in 0..ps.clone_origin.len() {
-        let orig_sym = u32_at(in m.fn_names, w(u32_at(in ps.clone_origin, i)));
-        let mut ob = ChunkSeq::new[u8]();
-        put_sym_bytes(in sess.c.names, orig_sym, inout ob);
-        let po = pack_text(in ob);
-        out.extend(in po.as_slice());
-        let cname = u32_at(in ps.clone_name, i);
-        let mut cb = ChunkSeq::new[u8]();
-        put_sym_bytes(in sess.c.names, cname, inout cb);
-        let pc = pack_text(in cb);
-        out.extend(in pc.as_slice());
+    out.push(plan.clone_origin.len());
+    for i in 0..plan.clone_origin.len() {
+        let orig_sym = u32_at(in mono.fn_names, w(u32_at(in plan.clone_origin, i)));
+        let mut orig_bytes = ChunkSeq::new[u8]();
+        put_sym_bytes(in sess.ctx.names, orig_sym, inout orig_bytes);
+        let packed_orig = pack_text(in orig_bytes);
+        out.extend(in packed_orig.as_slice());
+        let clone_sym = u32_at(in plan.clone_name, i);
+        let mut clone_bytes = ChunkSeq::new[u8]();
+        put_sym_bytes(in sess.ctx.names, clone_sym, inout clone_bytes);
+        let packed_clone = pack_text(in clone_bytes);
+        out.extend(in packed_clone.as_slice());
     }
-    out.push(ps.rw_caller.len());
-    for i in 0..ps.rw_caller.len() {
-        let mut cb = ChunkSeq::new[u8]();
-        put_sym_bytes(in sess.c.names, u32_at(in ps.rw_caller, i), inout cb);
-        let pc = pack_text(in cb);
-        out.extend(in pc.as_slice());
-        out.push(u64_at(in ps.rw_s, i));
-        out.push(u64_at(in ps.rw_e, i));
-        let mut tb = ChunkSeq::new[u8]();
-        put_sym_bytes(in sess.c.names, u32_at(in ps.rw_target, i), inout tb);
-        let pt = pack_text(in tb);
-        out.extend(in pt.as_slice());
+    out.push(plan.rw_caller.len());
+    for i in 0..plan.rw_caller.len() {
+        let mut caller_bytes = ChunkSeq::new[u8]();
+        put_sym_bytes(in sess.ctx.names, u32_at(in plan.rw_caller, i), inout caller_bytes);
+        let packed_caller = pack_text(in caller_bytes);
+        out.extend(in packed_caller.as_slice());
+        out.push(u64_at(in plan.rw_span_start, i));
+        out.push(u64_at(in plan.rw_span_end, i));
+        let mut target_bytes = ChunkSeq::new[u8]();
+        put_sym_bytes(in sess.ctx.names, u32_at(in plan.rw_target, i), inout target_bytes);
+        let packed_target = pack_text(in target_bytes);
+        out.extend(in packed_target.as_slice());
     }
 }
 
 // Entrypoint for an already-open `PactSession`: `[mono_input][fn_has_dyn...]`.
-pub fn session_mono_plan_words(inout sess: PactSession, in b: Slice[u8]) -> ChunkSeq[u64] {
-    let mut r = Reader { pos: 0 };
+pub fn session_mono_plan_words(inout sess: PactSession, in bytes: Slice[u8]) -> ChunkSeq[u64] {
+    let mut reader = Reader { pos: 0 };
     let mut out = ChunkSeq::new[u64]();
     out.push(0);
     out.push(1);
-    mono_plan_body(inout sess, inout r, in b, inout out);
+    mono_plan_body(inout sess, inout reader, in bytes, inout out);
     out
 }
 
 // Entrypoint for `check_pact_mono_plan`: `[session_input][mono_input][fn_has_dyn...]`.
-pub fn mono_plan_words(in b: Slice[u8]) -> ChunkSeq[u64] {
-    let mut r = Reader { pos: 0 };
-    let mut sess = session_open_reader(inout r, in b);
+pub fn mono_plan_words(in bytes: Slice[u8]) -> ChunkSeq[u64] {
+    let mut reader = Reader { pos: 0 };
+    let mut sess = session_open_reader(inout reader, in bytes);
     let mut out = ChunkSeq::new[u64]();
-    let p_out = pack_text(in sess.out);
-    out.extend(in p_out.as_slice());
+    let packed_out = pack_text(in sess.out);
+    out.extend(in packed_out.as_slice());
     if !sess.ok {
         out.push(0);
         return out;
     }
     out.push(1);
-    mono_plan_body(inout sess, inout r, in b, inout out);
+    mono_plan_body(inout sess, inout reader, in bytes, inout out);
     out
 }

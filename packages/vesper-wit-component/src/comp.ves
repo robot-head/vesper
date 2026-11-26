@@ -110,64 +110,64 @@ const M_EXPORT: u8 = 2;
 // The interfaces the backend's world exports (`Wit::exports`).
 const I_RUN: u8 = 0;
 
-fn byte(in b: Slice[u8], i: u64) -> u8 {
-    match b.try_get(i) {
+fn byte(in bytes: Slice[u8], i: u64) -> u8 {
+    match bytes.try_get(i) {
         Option::Some(x) => x,
         Option::None => 0,
     }
 }
 
 pub fn uleb(inout out: ChunkSeq[u8], v: u64) {
-    let mut x = v;
+    let mut rest = v;
     loop {
-        let b = wrapping_u8(x & 127);
-        x = x >> 7;
-        if x == 0 {
-            out.push(b);
+        let group = wrapping_u8(rest & 127);
+        rest = rest >> 7;
+        if rest == 0 {
+            out.push(group);
             break;
         }
-        out.push(b | 128);
+        out.push(group | 128);
     }
 }
 
 // A type index as wasm-encoder writes it (`i64`, signed LEB128).
 fn sleb_index(inout out: ChunkSeq[u8], v: u32) {
-    let mut x = widen_u64(v);
+    let mut rest = widen_u64(v);
     loop {
-        let b = wrapping_u8(x & 127);
-        x = x >> 7;
-        if x == 0 && (b & 64) == 0 {
-            out.push(b);
+        let group = wrapping_u8(rest & 127);
+        rest = rest >> 7;
+        if rest == 0 && (group & 64) == 0 {
+            out.push(group);
             break;
         }
-        out.push(b | 128);
+        out.push(group | 128);
     }
 }
 
-fn put_str(inout out: ChunkSeq[u8], in s: Slice[u8]) {
-    uleb(inout out, s.len());
-    out.extend(in s);
+fn put_str(inout out: ChunkSeq[u8], in bytes: Slice[u8]) {
+    uleb(inout out, bytes.len());
+    out.extend(in bytes);
 }
 
-// `w.text[n0..n0+nn]` as a string.
-fn put_name(inout out: ChunkSeq[u8], in w: Wit, n0: u64, nn: u64) {
-    uleb(inout out, nn);
-    out.extend(in w.text[n0..add(n0, nn)]);
+// `wit.text[name_at..name_at+name_len]` as a string.
+fn put_name(inout out: ChunkSeq[u8], in wit: Wit, name_at: u64, name_len: u64) {
+    uleb(inout out, name_len);
+    out.extend(in wit.text[name_at..add(name_at, name_len)]);
 }
 
 pub copy struct NameRow {
     ns: u8,
-    idx: u32,
-    n0: u64,
-    nn: u64,
+    index: u32,
+    name_start: u64,
+    name_len: u64,
 }
 
 pub struct B {
     out: ChunkSeq[u8],
-    cur: ChunkSeq[u8],
-    cur_id: u8,
-    cur_count: u64,
-    counts: ChunkSeq[u32],
+    section: ChunkSeq[u8],
+    section_id: u8,
+    item_count: u64,
+    space_counts: ChunkSeq[u32],
     names: ChunkSeq[NameRow],
     text: ChunkSeq[u8],
 }
@@ -189,10 +189,10 @@ pub fn b_new() -> B {
     out.push(0);
     B {
         out: out,
-        cur: ChunkSeq::new[u8](),
-        cur_id: NONE8,
-        cur_count: 0,
-        counts: counts,
+        section: ChunkSeq::new[u8](),
+        section_id: NONE8,
+        item_count: 0,
+        space_counts: counts,
         names: ChunkSeq::new[NameRow](),
         text: ChunkSeq::new[u8](),
     }
@@ -200,27 +200,27 @@ pub fn b_new() -> B {
 
 impl B {
     fn flush(inout self) {
-        if self.cur_id == NONE8 {
+        if self.section_id == NONE8 {
             return;
         }
-        let mut head = ChunkSeq::new[u8]();
-        uleb(inout head, self.cur_count);
-        self.out.push(self.cur_id);
-        uleb(inout self.out, add(head.len(), self.cur.len()));
-        self.out.extend(in head.as_slice());
-        self.out.extend(in self.cur.as_slice());
-        self.cur.clear();
-        self.cur_id = NONE8;
-        self.cur_count = 0;
+        let mut count_bytes = ChunkSeq::new[u8]();
+        uleb(inout count_bytes, self.item_count);
+        self.out.push(self.section_id);
+        uleb(inout self.out, add(count_bytes.len(), self.section.len()));
+        self.out.extend(in count_bytes.as_slice());
+        self.out.extend(in self.section.as_slice());
+        self.section.clear();
+        self.section_id = NONE8;
+        self.item_count = 0;
     }
 
-    // Start one more item of section `id` (in `self.cur`).
+    // Start one more item of section `id` (in `self.section`).
     fn item(inout self, id: u8) {
-        if self.cur_id != id {
+        if self.section_id != id {
             self.flush();
-            self.cur_id = id;
+            self.section_id = id;
         }
-        self.cur_count = inc(self.cur_count);
+        self.item_count = inc(self.item_count);
     }
 
     // A whole section of its own (`core_module_raw`, `component`, custom).
@@ -232,13 +232,13 @@ impl B {
     }
 
     fn next(inout self, ns: u8) -> u32 {
-        let k = widen_u64(ns);
-        let r = match self.counts.try_get(k) {
+        let slot = widen_u64(ns);
+        let count = match self.space_counts.try_get(slot) {
             Option::Some(x) => x,
             Option::None => 0,
         };
-        self.counts.try_set(k, wrapping_add(r, 1));
-        r
+        self.space_counts.try_set(slot, wrapping_add(count, 1));
+        count
     }
 
     fn add_anon(inout self, ns: u8) -> u32 {
@@ -246,33 +246,34 @@ impl B {
     }
 
     fn add(inout self, ns: u8, in name: Slice[u8]) -> u32 {
-        let r = self.next(ns);
-        let n0 = self.text.len();
+        let new_index = self.next(ns);
+        let name_at = self.text.len();
         self.text.extend(in name);
-        self.names.push(NameRow { ns: ns, idx: r, n0: n0, nn: name.len() });
-        r
+        self.names
+            .push(NameRow { ns: ns, index: new_index, name_start: name_at, name_len: name.len() });
+        new_index
     }
 
     fn name_map(in self, ns: u8, inout out: ChunkSeq[u8]) {
-        let mut n: u64 = 0;
+        let mut count: u64 = 0;
         for i in 0..self.names.len() {
             match self.names.try_get(i) {
-                Option::Some(r) => {
-                    if r.ns == ns {
-                        n = inc(n);
+                Option::Some(row) => {
+                    if row.ns == ns {
+                        count = inc(count);
                     }
                 },
                 Option::None => {},
             }
         }
-        uleb(inout out, n);
+        uleb(inout out, count);
         for i in 0..self.names.len() {
             match self.names.try_get(i) {
-                Option::Some(r) => {
-                    if r.ns == ns {
-                        uleb(inout out, widen_u64(r.idx));
-                        uleb(inout out, r.nn);
-                        out.extend(in self.text[r.n0..add(r.n0, r.nn)]);
+                Option::Some(row) => {
+                    if row.ns == ns {
+                        uleb(inout out, widen_u64(row.index));
+                        uleb(inout out, row.name_len);
+                        out.extend(in self.text[row.name_start..add(row.name_start, row.name_len)]);
                     }
                 },
                 Option::None => {},
@@ -283,8 +284,8 @@ impl B {
     fn has_names(in self, ns: u8) -> bool {
         for i in 0..self.names.len() {
             match self.names.try_get(i) {
-                Option::Some(r) => {
-                    if r.ns == ns {
+                Option::Some(row) => {
+                    if row.ns == ns {
                         return true;
                     }
                 },
@@ -312,22 +313,22 @@ impl B {
 
     // `append_names`: the `component-name` custom section.
     fn append_names(inout self) {
-        let mut s = ChunkSeq::new[u8]();
-        self.decls(NS_CORE_FUNC, true, CORE_FUNC, inout s);
-        self.decls(NS_CORE_MEMORY, true, CORE_MEMORY, inout s);
-        self.decls(NS_CORE_MODULE, true, CORE_MODULE, inout s);
-        self.decls(NS_CORE_INSTANCE, true, CORE_INSTANCE, inout s);
-        self.decls(NS_INSTANCE, false, SORT_INSTANCE, inout s);
-        self.decls(NS_FUNC, false, SORT_FUNC, inout s);
-        self.decls(NS_TYPE, false, SORT_TYPE, inout s);
-        self.decls(NS_COMPONENT, false, SORT_COMPONENT, inout s);
-        self.decls(NS_INSTANCE, false, SORT_INSTANCE, inout s);
-        if s.len() == 0 {
+        let mut subsections = ChunkSeq::new[u8]();
+        self.decls(NS_CORE_FUNC, true, CORE_FUNC, inout subsections);
+        self.decls(NS_CORE_MEMORY, true, CORE_MEMORY, inout subsections);
+        self.decls(NS_CORE_MODULE, true, CORE_MODULE, inout subsections);
+        self.decls(NS_CORE_INSTANCE, true, CORE_INSTANCE, inout subsections);
+        self.decls(NS_INSTANCE, false, SORT_INSTANCE, inout subsections);
+        self.decls(NS_FUNC, false, SORT_FUNC, inout subsections);
+        self.decls(NS_TYPE, false, SORT_TYPE, inout subsections);
+        self.decls(NS_COMPONENT, false, SORT_COMPONENT, inout subsections);
+        self.decls(NS_INSTANCE, false, SORT_INSTANCE, inout subsections);
+        if subsections.len() == 0 {
             return;
         }
         let mut body = ChunkSeq::new[u8]();
         put_str(inout body, in "component-name".as_bytes());
-        body.extend(in s.as_slice());
+        body.extend(in subsections.as_slice());
         self.raw(S_CUSTOM, in body.as_slice());
     }
 
@@ -341,7 +342,7 @@ impl B {
     // A type definition from its encoded bytes; its index.
     fn type_def(inout self, in body: Slice[u8]) -> u32 {
         self.item(S_TYPE);
-        self.cur.extend(in body);
+        self.section.extend(in body);
         self.add_anon(NS_TYPE)
     }
 }
@@ -365,124 +366,131 @@ fn producers(inout out: ChunkSeq[u8]) {
 // given (NONE32 if none yet), and the function types defined so far.
 pub struct E {
     mode: u8,
-    map: ChunkSeq[u32],
-    fsig: ChunkSeq[u64],
-    fidx: ChunkSeq[u32],
+    row_index: ChunkSeq[u32],
+    sig_funcs: ChunkSeq[u64],
+    sig_types: ChunkSeq[u32],
     // `import-type-*` imports, as `defs` rows, in order.
     imports: ChunkSeq[u64],
 }
 
-fn e_new(in w: Wit, mode: u8) -> E {
+fn e_new(in wit: Wit, mode: u8) -> E {
     let mut map = ChunkSeq::new[u32]();
-    for i in 0..w.tys.len() {
+    for i in 0..wit.tys.len() {
         map.push(NONE32);
     }
     E {
         mode: mode,
-        map: map,
-        fsig: ChunkSeq::new[u64](),
-        fidx: ChunkSeq::new[u32](),
+        row_index: map,
+        sig_funcs: ChunkSeq::new[u64](),
+        sig_types: ChunkSeq::new[u32](),
         imports: ChunkSeq::new[u64](),
     }
 }
 
-fn mapped(in e: E, t: u32) -> u32 {
-    match e.map.try_get(widen_u64(t)) {
+fn mapped(in encoder: E, ty_row: u32) -> u32 {
+    match encoder.row_index.try_get(widen_u64(ty_row)) {
         Option::Some(x) => x,
         Option::None => NONE32,
     }
 }
 
-// The value type of row `t` (defining it first if needed).
-fn valtype(inout e: E, inout b: B, in w: Wit, t: u32, inout out: ChunkSeq[u8]) {
-    let ty = ty_at(in w, t);
+// The value type of row `ty_row` (defining it first if needed).
+fn valtype(inout encoder: E, inout builder: B, in wit: Wit, ty_row: u32, inout out: ChunkSeq[u8]) {
+    let ty = ty_at(in wit, ty_row);
     if ty.kind == T_PRIM {
-        out.push(wrapping_u8(ty.a));
+        out.push(wrapping_u8(ty.data));
         return;
     }
-    let i = index(inout e, inout b, in w, t);
-    sleb_index(inout out, i);
+    let type_index = index(inout encoder, inout builder, in wit, ty_row);
+    sleb_index(inout out, type_index);
 }
 
 // `encode_valtype` for a non-primitive row: its index in this space.
-fn index(inout e: E, inout b: B, in w: Wit, t: u32) -> u32 {
-    let known = mapped(in e, t);
+fn index(inout encoder: E, inout builder: B, in wit: Wit, ty_row: u32) -> u32 {
+    let known = mapped(in encoder, ty_row);
     if known != NONE32 {
         return known;
     }
-    let ty = ty_at(in w, t);
+    let ty = ty_at(in wit, ty_row);
     let mut body = ChunkSeq::new[u8]();
     if ty.kind == T_TUPLE {
         body.push(TY_TUPLE);
-        uleb(inout body, ty.n);
-        for k in 0..ty.n {
-            valtype(inout e, inout b, in w, arg_at(in w, add(ty.a, k)), inout body);
+        uleb(inout body, ty.elem_count);
+        for k in 0..ty.elem_count {
+            valtype(
+                inout encoder,
+                inout builder,
+                in wit,
+                arg_at(in wit, add(ty.data, k)),
+                inout body
+            );
         }
     } else if ty.kind == T_UNIT_RESULT {
         body.push(TY_RESULT);
         body.push(0);
         body.push(0);
     } else {
-        let d = def_at(in w, ty.a);
-        if d.kind == D_RECORD {
+        let def = def_at(in wit, ty.data);
+        if def.kind == D_RECORD {
             body.push(TY_RECORD);
         } else {
             body.push(TY_VARIANT);
         }
-        uleb(inout body, d.fnum);
-        for k in 0..d.fnum {
-            let f = field_at(in w, add(d.f0, k));
-            put_name(inout body, in w, f.n0, f.nn);
-            if d.kind == D_RECORD {
-                valtype(inout e, inout b, in w, f.ty, inout body);
+        uleb(inout body, def.field_count);
+        for k in 0..def.field_count {
+            let field = field_at(in wit, add(def.field_start, k));
+            put_name(inout body, in wit, field.name_start, field.name_len);
+            if def.kind == D_RECORD {
+                valtype(inout encoder, inout builder, in wit, field.ty, inout body);
             } else {
-                if f.ty == NONE32 {
+                if field.ty == NONE32 {
                     body.push(0);
                 } else {
                     body.push(1);
-                    valtype(inout e, inout b, in w, f.ty, inout body);
+                    valtype(inout encoder, inout builder, in wit, field.ty, inout body);
                 }
                 // no `refines`
                 body.push(0);
             }
         }
     }
-    let mut i = b.type_def(in body.as_slice());
+    let mut type_index = builder.type_def(in body.as_slice());
     if ty.kind == T_NAMED {
-        let d = def_at(in w, ty.a);
-        if e.mode == M_IMPORT {
-            let mut n = ChunkSeq::new[u8]();
-            n.extend(in "import-type-".as_bytes());
-            n.extend(in w.text[d.n0..add(d.n0, d.nn)]);
-            b.item(S_IMPORT);
-            b.cur.push(0);
-            put_str(inout b.cur, in n.as_slice());
-            b.cur.push(SORT_TYPE);
+        let def = def_at(in wit, ty.data);
+        if encoder.mode == M_IMPORT {
+            let mut import_name = ChunkSeq::new[u8]();
+            import_name.extend(in "import-type-".as_bytes());
+            import_name.extend(in wit.text[def.name_start..add(def.name_start, def.name_len)]);
+            builder.item(S_IMPORT);
+            builder.section.push(0);
+            put_str(inout builder.section, in import_name.as_slice());
+            builder.section.push(SORT_TYPE);
             // TypeBounds::Eq
-            b.cur.push(0);
-            uleb(inout b.cur, widen_u64(i));
-            i = b.add(NS_TYPE, in n.as_slice());
-            e.imports.push(ty.a);
-        } else if e.mode == M_EXPORT {
-            b.item(S_EXPORT);
-            b.cur.push(0);
-            put_name(inout b.cur, in w, d.n0, d.nn);
-            b.cur.push(SORT_TYPE);
-            uleb(inout b.cur, widen_u64(i));
-            b.cur.push(0);
-            i = b.add(NS_TYPE, in w.text[d.n0..add(d.n0, d.nn)]);
+            builder.section.push(0);
+            uleb(inout builder.section, widen_u64(type_index));
+            type_index = builder.add(NS_TYPE, in import_name.as_slice());
+            encoder.imports.push(ty.data);
+        } else if encoder.mode == M_EXPORT {
+            builder.item(S_EXPORT);
+            builder.section.push(0);
+            put_name(inout builder.section, in wit, def.name_start, def.name_len);
+            builder.section.push(SORT_TYPE);
+            uleb(inout builder.section, widen_u64(type_index));
+            builder.section.push(0);
+            type_index = builder
+                .add(NS_TYPE, in wit.text[def.name_start..add(def.name_start, def.name_len)]);
         }
     }
-    e.map.try_set(widen_u64(t), i);
-    i
+    encoder.row_index.try_set(widen_u64(ty_row), type_index);
+    type_index
 }
 
-fn same_name(in w: Wit, a0: u64, an: u64, b0: u64, bn: u64) -> bool {
-    if an != bn {
+fn same_name(in wit: Wit, first_at: u64, first_len: u64, second_at: u64, second_len: u64) -> bool {
+    if first_len != second_len {
         return false;
     }
-    for k in 0..an {
-        if text_at(in w, add(a0, k)) != text_at(in w, add(b0, k)) {
+    for k in 0..first_len {
+        if text_at(in wit, add(first_at, k)) != text_at(in wit, add(second_at, k)) {
             return false;
         }
     }
@@ -491,16 +499,24 @@ fn same_name(in w: Wit, a0: u64, an: u64, b0: u64, bn: u64) -> bool {
 
 // Functions `f` and `g` have one signature (`FunctionKey`: parameter names
 // and types, and the result).
-fn same_sig(in w: Wit, f: u64, g: u64) -> bool {
-    let a = func_at(in w, f);
-    let c = func_at(in w, g);
-    if a.pn != c.pn || a.res != c.res {
+fn same_sig(in wit: Wit, f: u64, g: u64) -> bool {
+    let first = func_at(in wit, f);
+    let second = func_at(in wit, g);
+    if first.param_count != second.param_count || first.result != second.result {
         return false;
     }
-    for k in 0..a.pn {
-        let x = field_at(in w, add(a.p0, k));
-        let y = field_at(in w, add(c.p0, k));
-        if x.ty != y.ty || !same_name(in w, x.n0, x.nn, y.n0, y.nn) {
+    for k in 0..first.param_count {
+        let first_param = field_at(in wit, add(first.param_start, k));
+        let second_param = field_at(in wit, add(second.param_start, k));
+        if first_param.ty != second_param.ty
+            || !same_name(
+                in wit,
+                first_param.name_start,
+                first_param.name_len,
+                second_param.name_start,
+                second_param.name_len
+            )
+        {
             return false;
         }
     }
@@ -508,49 +524,49 @@ fn same_sig(in w: Wit, f: u64, g: u64) -> bool {
 }
 
 // `encode_func_type` for `funcs` row `f`.
-fn func_type(inout e: E, inout b: B, in w: Wit, f: u64) -> u32 {
-    for i in 0..e.fsig.len() {
-        let g = match e.fsig.try_get(i) {
+fn func_type(inout encoder: E, inout builder: B, in wit: Wit, f: u64) -> u32 {
+    for i in 0..encoder.sig_funcs.len() {
+        let seen = match encoder.sig_funcs.try_get(i) {
             Option::Some(x) => x,
             Option::None => 0,
         };
-        if same_sig(in w, f, g) {
-            return match e.fidx.try_get(i) {
+        if same_sig(in wit, f, seen) {
+            return match encoder.sig_types.try_get(i) {
                 Option::Some(x) => x,
                 Option::None => 0,
             };
         }
     }
-    let fu = func_at(in w, f);
+    let func = func_at(in wit, f);
     let mut body = ChunkSeq::new[u8]();
     body.push(TY_FUNC);
-    uleb(inout body, fu.pn);
-    for k in 0..fu.pn {
-        let p = field_at(in w, add(fu.p0, k));
-        put_name(inout body, in w, p.n0, p.nn);
-        valtype(inout e, inout b, in w, p.ty, inout body);
+    uleb(inout body, func.param_count);
+    for k in 0..func.param_count {
+        let param = field_at(in wit, add(func.param_start, k));
+        put_name(inout body, in wit, param.name_start, param.name_len);
+        valtype(inout encoder, inout builder, in wit, param.ty, inout body);
     }
-    if fu.res == NONE32 {
+    if func.result == NONE32 {
         body.push(1);
         body.push(0);
     } else {
         body.push(0);
-        valtype(inout e, inout b, in w, fu.res, inout body);
+        valtype(inout encoder, inout builder, in wit, func.result, inout body);
     }
-    let i = b.type_def(in body.as_slice());
-    e.fsig.push(f);
-    e.fidx.push(i);
-    i
+    let type_index = builder.type_def(in body.as_slice());
+    encoder.sig_funcs.push(f);
+    encoder.sig_types.push(type_index);
+    type_index
 }
 
-// Flat core values of row `t` in the canonical ABI.
-fn flat(in w: Wit, t: u32, depth: u64) -> u64 {
-    let ty = ty_at(in w, t);
+// Flat core values of row `ty_row` in the canonical ABI.
+fn flat(in wit: Wit, ty_row: u32, depth: u64) -> u64 {
+    let ty = ty_at(in wit, ty_row);
     if depth > 64 {
         return 2;
     }
     if ty.kind == T_PRIM {
-        if wrapping_u8(ty.a) == P_STRING {
+        if wrapping_u8(ty.data) == P_STRING {
             return 2;
         }
         return 1;
@@ -559,70 +575,78 @@ fn flat(in w: Wit, t: u32, depth: u64) -> u64 {
         return 1;
     }
     if ty.kind == T_TUPLE {
-        let mut n: u64 = 0;
-        for k in 0..ty.n {
-            n = add(n, flat(in w, arg_at(in w, add(ty.a, k)), inc(depth)));
+        let mut total: u64 = 0;
+        for k in 0..ty.elem_count {
+            total = add(total, flat(in wit, arg_at(in wit, add(ty.data, k)), inc(depth)));
         }
-        return n;
+        return total;
     }
-    let d = def_at(in w, ty.a);
-    let mut n: u64 = 0;
-    for k in 0..d.fnum {
-        let f = field_at(in w, add(d.f0, k));
-        if f.ty != NONE32 {
-            let m = flat(in w, f.ty, inc(depth));
-            if d.kind == D_RECORD {
-                n = add(n, m);
-            } else if m > n {
-                n = m;
+    let def = def_at(in wit, ty.data);
+    let mut total: u64 = 0;
+    for k in 0..def.field_count {
+        let field = field_at(in wit, add(def.field_start, k));
+        if field.ty != NONE32 {
+            let part = flat(in wit, field.ty, inc(depth));
+            if def.kind == D_RECORD {
+                total = add(total, part);
+            } else if part > total {
+                total = part;
             }
         }
     }
-    if d.kind == D_RECORD { n } else { inc(n) }
+    if def.kind == D_RECORD {
+        total
+    } else {
+        inc(total)
+    }
 }
 
-fn has_string(in w: Wit, t: u32, depth: u64) -> bool {
-    let ty = ty_at(in w, t);
+fn has_string(in wit: Wit, ty_row: u32, depth: u64) -> bool {
+    let ty = ty_at(in wit, ty_row);
     if depth > 64 {
         return true;
     }
     if ty.kind == T_PRIM {
-        return wrapping_u8(ty.a) == P_STRING;
+        return wrapping_u8(ty.data) == P_STRING;
     }
     if ty.kind == T_UNIT_RESULT {
         return false;
     }
     if ty.kind == T_TUPLE {
-        for k in 0..ty.n {
-            if has_string(in w, arg_at(in w, add(ty.a, k)), inc(depth)) {
+        for k in 0..ty.elem_count {
+            if has_string(in wit, arg_at(in wit, add(ty.data, k)), inc(depth)) {
                 return true;
             }
         }
         return false;
     }
-    let d = def_at(in w, ty.a);
-    for k in 0..d.fnum {
-        let f = field_at(in w, add(d.f0, k));
-        if f.ty != NONE32 && has_string(in w, f.ty, inc(depth)) {
+    let def = def_at(in wit, ty.data);
+    for k in 0..def.field_count {
+        let field = field_at(in wit, add(def.field_start, k));
+        if field.ty != NONE32 && has_string(in wit, field.ty, inc(depth)) {
             return true;
         }
     }
     false
 }
 
-// The interface's functions: `funcs[f0..f0+fnum]`; its definitions are
+// The interface's functions: `funcs[func_start..func_start+func_count]`; its definitions are
 // all of `defs` for the entry and none for wasi:cli/run.
 copy struct Iface {
     kind: u8,
-    f0: u64,
-    fnum: u64,
+    func_start: u64,
+    func_count: u64,
 }
 
-fn iface(in w: Wit, kind: u8) -> Iface {
+fn iface(in wit: Wit, kind: u8) -> Iface {
     if kind == I_RUN {
-        Iface { kind: kind, f0: w.run_func, fnum: 1 }
+        Iface { kind: kind, func_start: wit.run_func, func_count: 1 }
     } else {
-        Iface { kind: kind, f0: w.e0, fnum: wrapping_sub(w.funcs.len(), w.e0) }
+        Iface {
+            kind: kind,
+            func_start: wit.entry_start,
+            func_count: wrapping_sub(wit.funcs.len(), wit.entry_start)
+        }
     }
 }
 
@@ -634,13 +658,13 @@ fn iface_name(kind: u8, inout out: ChunkSeq[u8]) {
     }
 }
 
-fn defs_of(in w: Wit, kind: u8) -> u64 {
-    if kind == I_RUN { 0 } else { w.defs.len() }
+fn defs_of(in wit: Wit, kind: u8) -> u64 {
+    if kind == I_RUN { 0 } else { wit.defs.len() }
 }
 
-fn takes_string(in w: Wit, fu: Func) -> bool {
-    for k in 0..fu.pn {
-        if has_string(in w, field_at(in w, add(fu.p0, k)).ty, 0) {
+fn takes_string(in wit: Wit, func: Func) -> bool {
+    for k in 0..func.param_count {
+        if has_string(in wit, field_at(in wit, add(func.param_start, k)).ty, 0) {
             return true;
         }
     }
@@ -662,534 +686,597 @@ fn at64(in s: Slice[u64], i: u64) -> u64 {
 }
 
 // The core module wit-component embeds: the input and the producers.
-fn main_module(inout b: B, in core: Slice[u8]) {
+fn main_module(inout builder: B, in core: Slice[u8]) {
     let mut module = ChunkSeq::with_capacity[u8](add(core.len(), 64));
     module.extend(in core);
     producers(inout module);
-    b.raw(S_CORE_MODULE, in module.as_slice());
-    b.add(NS_CORE_MODULE, in "main".as_bytes());
+    builder.raw(S_CORE_MODULE, in module.as_slice());
+    builder.add(NS_CORE_MODULE, in "main".as_bytes());
 }
 
-fn alias_core_export(inout b: B, sort: u8, inst: u32, in name: Slice[u8]) {
-    b.item(S_ALIAS);
-    b.cur.push(SORT_CORE);
-    b.cur.push(sort);
-    b.cur.push(ALIAS_CORE_EXPORT);
-    uleb(inout b.cur, widen_u64(inst));
-    put_str(inout b.cur, in name);
+fn alias_core_export(inout builder: B, sort: u8, inst: u32, in name: Slice[u8]) {
+    builder.item(S_ALIAS);
+    builder.section.push(SORT_CORE);
+    builder.section.push(sort);
+    builder.section.push(ALIAS_CORE_EXPORT);
+    uleb(inout builder.section, widen_u64(inst));
+    put_str(inout builder.section, in name);
 }
 
-fn alias_export(inout b: B, sort: u8, inst: u32, in name: Slice[u8]) {
-    b.item(S_ALIAS);
-    b.cur.push(sort);
-    b.cur.push(ALIAS_EXPORT);
-    uleb(inout b.cur, widen_u64(inst));
-    put_str(inout b.cur, in name);
+fn alias_export(inout builder: B, sort: u8, inst: u32, in name: Slice[u8]) {
+    builder.item(S_ALIAS);
+    builder.section.push(sort);
+    builder.section.push(ALIAS_EXPORT);
+    uleb(inout builder.section, widen_u64(inst));
+    put_str(inout builder.section, in name);
 }
 
-fn memory_alias(inout b: B, inst: u32) -> u32 {
-    alias_core_export(inout b, CORE_MEMORY, inst, in "memory".as_bytes());
-    b.add(NS_CORE_MEMORY, in "memory".as_bytes())
+fn memory_alias(inout builder: B, inst: u32) -> u32 {
+    alias_core_export(inout builder, CORE_MEMORY, inst, in "memory".as_bytes());
+    builder.add(NS_CORE_MEMORY, in "memory".as_bytes())
 }
 
-// The component for core module `core` and the parsed world `w` into
+// The component for core module `core` and the parsed world `wit` into
 // `out`; 0, or why it declines (`X_*`).
-pub fn encode(in core: Slice[u8], in w: Wit, inout out: ChunkSeq[u8]) -> u64 {
-    if w.plugin {
-        return encode_plugin(in core, in w, inout out);
+pub fn encode(in core: Slice[u8], in wit: Wit, inout out: ChunkSeq[u8]) -> u64 {
+    if wit.plugin {
+        return encode_plugin(in core, in wit, inout out);
     }
-    let mut b = b_new();
+    let mut builder = b_new();
     // The host interfaces: each instance type and import, and the types
     // later interfaces alias (`encode_imports`).
-    let if_n = if_count();
-    let mut hinst = ChunkSeq::new[u32]();
-    let mut halias = ChunkSeq::new[u32]();
-    for i in 0..if_n {
-        hinst.push(NONE32);
-        halias.push(NONE32);
+    let iface_total = if_count();
+    let mut host_insts = ChunkSeq::new[u32]();
+    let mut alias_types = ChunkSeq::new[u32]();
+    for iface_id in 0..iface_total {
+        host_insts.push(NONE32);
+        alias_types.push(NONE32);
     }
-    let mut need_desc = false;
-    for x in 0..w.imports.len() {
-        let h = match w.imports.try_get(x) {
+    let mut need_descriptor = false;
+    for pos in 0..wit.imports.len() {
+        let host = match wit.imports.try_get(pos) {
             Option::Some(k) => k,
             Option::None => 0,
         };
-        if needs_descriptor_alias(h) {
-            need_desc = true;
+        if needs_descriptor_alias(host) {
+            need_descriptor = true;
         }
     }
-    for x in 0..w.imports.len() {
-        let h = match w.imports.try_get(x) {
+    for pos in 0..wit.imports.len() {
+        let host = match wit.imports.try_get(pos) {
             Option::Some(k) => k,
             Option::None => 0,
         };
-        let (first, n) = import_ifaces(h);
-        for k in 0..n {
-            let i = wrapping_add(first, wrapping_u8(k));
-            if at32(in hinst.as_slice(), widen_u64(i)) != NONE32 {
+        let (first_iface, iface_count) = import_ifaces(host);
+        for k in 0..iface_count {
+            let iface_id = wrapping_add(first_iface, wrapping_u8(k));
+            if at32(in host_insts.as_slice(), widen_u64(iface_id)) != NONE32 {
                 continue;
             }
             let mut name = ChunkSeq::new[u8]();
-            host_name(i, inout name);
-            let mut tname = ChunkSeq::new[u8]();
-            tname.extend(in "ty-".as_bytes());
-            tname.extend(in name.as_slice());
-            b.item(S_TYPE);
-            instance_type(i, in halias.as_slice(), inout b.cur);
-            let t = b.add(NS_TYPE, in tname.as_slice());
-            b.item(S_IMPORT);
-            b.cur.push(0);
-            put_str(inout b.cur, in name.as_slice());
-            b.cur.push(EXTERN_INSTANCE);
-            uleb(inout b.cur, widen_u64(t));
-            let ii = b.add(NS_INSTANCE, in name.as_slice());
-            hinst.try_set(widen_u64(i), ii);
+            host_name(iface_id, inout name);
+            let mut type_name = ChunkSeq::new[u8]();
+            type_name.extend(in "ty-".as_bytes());
+            type_name.extend(in name.as_slice());
+            builder.item(S_TYPE);
+            instance_type(iface_id, in alias_types.as_slice(), inout builder.section);
+            let inst_type = builder.add(NS_TYPE, in type_name.as_slice());
+            builder.item(S_IMPORT);
+            builder.section.push(0);
+            put_str(inout builder.section, in name.as_slice());
+            builder.section.push(EXTERN_INSTANCE);
+            uleb(inout builder.section, widen_u64(inst_type));
+            let host_inst = builder.add(NS_INSTANCE, in name.as_slice());
+            host_insts.try_set(widen_u64(iface_id), host_inst);
             let mut alias = ChunkSeq::new[u8]();
-            aliased_type(i, need_desc, inout alias);
+            aliased_type(iface_id, need_descriptor, inout alias);
             if alias.len() > 0 {
-                alias_export(inout b, SORT_TYPE, ii, in alias.as_slice());
-                let at = b.add(NS_TYPE, in alias.as_slice());
-                halias.try_set(widen_u64(i), at);
+                alias_export(inout builder, SORT_TYPE, host_inst, in alias.as_slice());
+                let alias_ty = builder.add(NS_TYPE, in alias.as_slice());
+                alias_types.try_set(widen_u64(iface_id), alias_ty);
             }
         }
     }
-    main_module(inout b, in core);
-    let c = read_core(in core);
-    if !c.ok {
+    main_module(inout builder, in core);
+    let core_info = read_core(in core);
+    if !core_info.ok {
         return X_CORE;
     }
     // Each import's interface and lowering; the indirect ones (through the
     // shim) in order.
-    let mut ifs = ChunkSeq::new[u8]();
-    let mut kinds = ChunkSeq::new[u8]();
+    let mut import_iface_ids = ChunkSeq::new[u8]();
+    let mut lowerings = ChunkSeq::new[u8]();
     let mut indirect = ChunkSeq::new[u64]();
     let mut sigs = ChunkSeq::new[u64]();
-    for k in 0..c.imps.len() {
-        let im = imp_at(in c, k);
-        let i = iface_of(in c.text[im.m0..add(im.m0, im.mn)]);
-        if i == NONE8 || at32(in hinst.as_slice(), widen_u64(i)) == NONE32 {
+    for k in 0..core_info.imports.len() {
+        let func_import = imp_at(in core_info, k);
+        let iface_id = iface_of(
+            in core_info
+                .text[
+                    func_import.module_start..add(func_import.module_start, func_import.module_len)
+                ]
+        );
+        if iface_id == NONE8 || at32(in host_insts.as_slice(), widen_u64(iface_id)) == NONE32 {
             return X_IMPORT;
         }
-        let l = lower_kind(i, in c.text[im.f0..add(im.f0, im.fl)]);
-        if !lower_ok(l) || im.ty >= c.sigs.len() {
+        let lowering = lower_kind(
+            iface_id,
+            in core_info
+                .text[func_import.field_start..add(func_import.field_start, func_import.field_len)]
+        );
+        if !lower_ok(lowering) || func_import.ty >= core_info.sigs.len() {
             return X_IMPORT;
         }
-        if lower_is_indirect(l) {
+        if lower_is_indirect(lowering) {
             indirect.push(k);
-            sigs.push(im.ty);
+            sigs.push(func_import.ty);
         }
-        ifs.push(i);
-        kinds.push(l);
+        import_iface_ids.push(iface_id);
+        lowerings.push(lowering);
     }
-    let mut p = ChunkSeq::new[u8]();
-    producers(inout p);
+    let mut producer_section = ChunkSeq::new[u8]();
+    producers(inout producer_section);
     let mut shim_inst = NONE32;
     if indirect.len() > 0 {
-        let mut m = ChunkSeq::new[u8]();
-        shim_module(in c, in sigs.as_slice(), in p.as_slice(), inout m);
-        b.raw(S_CORE_MODULE, in m.as_slice());
-        let sm = b.add(NS_CORE_MODULE, in "wit-component-shim-module".as_bytes());
-        b.item(S_CORE_INSTANCE);
-        b.cur.push(INSTANTIATE);
-        uleb(inout b.cur, widen_u64(sm));
-        uleb(inout b.cur, 0);
-        shim_inst = b.add(NS_CORE_INSTANCE, in "wit-component-shim-instance".as_bytes());
+        let mut module = ChunkSeq::new[u8]();
+        shim_module(in core_info, in sigs.as_slice(), in producer_section.as_slice(), inout module);
+        builder.raw(S_CORE_MODULE, in module.as_slice());
+        let shim_index = builder.add(NS_CORE_MODULE, in "wit-component-shim-module".as_bytes());
+        builder.item(S_CORE_INSTANCE);
+        builder.section.push(INSTANTIATE);
+        uleb(inout builder.section, widen_u64(shim_index));
+        uleb(inout builder.section, 0);
+        shim_inst = builder.add(NS_CORE_INSTANCE, in "wit-component-shim-instance".as_bytes());
     }
-    let mut root = e_new(in w, M_ROOT);
+    let mut root = e_new(in wit, M_ROOT);
     // The exported interfaces' own types.
-    for x in 0..w.exports.len() {
-        let kind = match w.exports.try_get(x) {
+    for pos in 0..wit.exports.len() {
+        let kind = match wit.exports.try_get(pos) {
             Option::Some(k) => k,
             Option::None => 0,
         };
-        for d in 0..defs_of(in w, kind) {
-            index(inout root, inout b, in w, def_at(in w, d).ty);
+        for def_row in 0..defs_of(in wit, kind) {
+            index(inout root, inout builder, in wit, def_at(in wit, def_row).ty);
         }
     }
     // One core instance per imported module (in order of first import),
     // then the main instance with them (`encode_core_instantiation`).
-    let mut args = ChunkSeq::new[u8]();
-    let mut nargs: u64 = 0;
+    let mut instance_args = ChunkSeq::new[u8]();
+    let mut arg_count: u64 = 0;
     let mut done = ChunkSeq::new[bool]();
-    for k in 0..c.imps.len() {
+    for k in 0..core_info.imports.len() {
         done.push(false);
     }
-    for k in 0..c.imps.len() {
+    for k in 0..core_info.imports.len() {
         if match done.try_get(k) {
-            Option::Some(x) => x,
+            Option::Some(is_done) => is_done,
             Option::None => true,
         }
         {
             continue;
         }
-        let head = imp_at(in c, k);
-        let i = byte(in ifs.as_slice(), k);
+        let first_import = imp_at(in core_info, k);
+        let iface_id = byte(in import_iface_ids.as_slice(), k);
         let mut exports = ChunkSeq::new[u8]();
-        let mut nex: u64 = 0;
-        for j in k..c.imps.len() {
-            let im = imp_at(in c, j);
-            if byte(in ifs.as_slice(), j) != i {
+        let mut export_count: u64 = 0;
+        for j in k..core_info.imports.len() {
+            let func_import = imp_at(in core_info, j);
+            if byte(in import_iface_ids.as_slice(), j) != iface_id {
                 continue;
             }
             done.try_set(j, true);
-            let fe = add(im.f0, im.fl);
-            let l = byte(in kinds.as_slice(), j);
-            let ii = at32(in hinst.as_slice(), widen_u64(i));
-            let mut cf: u32 = 0;
-            if lower_is_indirect(l) {
+            let field_end = add(func_import.field_start, func_import.field_len);
+            let lowering = byte(in lowerings.as_slice(), j);
+            let host_inst = at32(in host_insts.as_slice(), widen_u64(iface_id));
+            let mut core_func: u32 = 0;
+            if lower_is_indirect(lowering) {
                 let mut slot: u64 = 0;
                 for q in 0..indirect.len() {
                     if at64(in indirect.as_slice(), q) == j {
                         slot = q;
                     }
                 }
-                let mut sname = ChunkSeq::new[u8]();
-                put_decimal(inout sname, slot);
-                alias_core_export(inout b, CORE_FUNC, shim_inst, in sname.as_slice());
-                let mut n = ChunkSeq::new[u8]();
-                indirect_name(in c, im, inout n);
-                cf = b.add(NS_CORE_FUNC, in n.as_slice());
-            } else if lower_is_drop(l) {
+                let mut slot_name = ChunkSeq::new[u8]();
+                put_decimal(inout slot_name, slot);
+                alias_core_export(inout builder, CORE_FUNC, shim_inst, in slot_name.as_slice());
+                let mut func_name = ChunkSeq::new[u8]();
+                indirect_name(in core_info, func_import, inout func_name);
+                core_func = builder.add(NS_CORE_FUNC, in func_name.as_slice());
+            } else if lower_is_drop(lowering) {
                 // `[resource-drop]` and the resource's name
-                alias_export(inout b, SORT_TYPE, ii, in c.text[add(im.f0, 15)..fe]);
-                let t = b.add(NS_TYPE, in c.text[add(im.f0, 15)..fe]);
-                b.item(S_CANON);
-                b.cur.push(CANON_RESOURCE_DROP);
-                uleb(inout b.cur, widen_u64(t));
-                cf = b.add(NS_CORE_FUNC, in "resource.drop".as_bytes());
+                alias_export(
+                    inout builder,
+                    SORT_TYPE,
+                    host_inst,
+                    in core_info.text[add(func_import.field_start, 15)..field_end]
+                );
+                let resource_ty = builder
+                    .add(NS_TYPE, in core_info.text[add(func_import.field_start, 15)..field_end]);
+                builder.item(S_CANON);
+                builder.section.push(CANON_RESOURCE_DROP);
+                uleb(inout builder.section, widen_u64(resource_ty));
+                core_func = builder.add(NS_CORE_FUNC, in "resource.drop".as_bytes());
             } else {
-                alias_export(inout b, SORT_FUNC, ii, in c.text[im.f0..fe]);
-                let fi = b.add(NS_FUNC, in c.text[im.f0..fe]);
-                b.item(S_CANON);
-                b.cur.push(CANON_LOWER);
-                b.cur.push(0);
-                uleb(inout b.cur, widen_u64(fi));
-                uleb(inout b.cur, 0);
-                cf = b.add(NS_CORE_FUNC, in c.text[im.f0..fe]);
+                alias_export(
+                    inout builder,
+                    SORT_FUNC,
+                    host_inst,
+                    in core_info.text[func_import.field_start..field_end]
+                );
+                let host_func = builder
+                    .add(NS_FUNC, in core_info.text[func_import.field_start..field_end]);
+                builder.item(S_CANON);
+                builder.section.push(CANON_LOWER);
+                builder.section.push(0);
+                uleb(inout builder.section, widen_u64(host_func));
+                uleb(inout builder.section, 0);
+                core_func = builder
+                    .add(NS_CORE_FUNC, in core_info.text[func_import.field_start..field_end]);
             }
-            put_str(inout exports, in c.text[im.f0..fe]);
+            put_str(inout exports, in core_info.text[func_import.field_start..field_end]);
             exports.push(CORE_FUNC);
-            uleb(inout exports, widen_u64(cf));
-            nex = inc(nex);
+            uleb(inout exports, widen_u64(core_func));
+            export_count = inc(export_count);
         }
-        b.item(S_CORE_INSTANCE);
-        b.cur.push(FROM_EXPORTS);
-        uleb(inout b.cur, nex);
-        b.cur.extend(in exports.as_slice());
-        let me = add(head.m0, head.mn);
-        let ci = b.add(NS_CORE_INSTANCE, in c.text[head.m0..me]);
-        put_str(inout args, in c.text[head.m0..me]);
-        args.push(CORE_INSTANCE);
-        uleb(inout args, widen_u64(ci));
-        nargs = inc(nargs);
+        builder.item(S_CORE_INSTANCE);
+        builder.section.push(FROM_EXPORTS);
+        uleb(inout builder.section, export_count);
+        builder.section.extend(in exports.as_slice());
+        let module_end = add(first_import.module_start, first_import.module_len);
+        let core_inst = builder
+            .add(NS_CORE_INSTANCE, in core_info.text[first_import.module_start..module_end]);
+        put_str(inout instance_args, in core_info.text[first_import.module_start..module_end]);
+        instance_args.push(CORE_INSTANCE);
+        uleb(inout instance_args, widen_u64(core_inst));
+        arg_count = inc(arg_count);
     }
     // (core instance (instantiate 0 (with ...)))
-    b.item(S_CORE_INSTANCE);
-    b.cur.push(INSTANTIATE);
-    uleb(inout b.cur, 0);
-    uleb(inout b.cur, nargs);
-    b.cur.extend(in args.as_slice());
-    let inst = b.add(NS_CORE_INSTANCE, in "main".as_bytes());
-    let mem = memory_alias(inout b, inst);
+    builder.item(S_CORE_INSTANCE);
+    builder.section.push(INSTANTIATE);
+    uleb(inout builder.section, 0);
+    uleb(inout builder.section, arg_count);
+    builder.section.extend(in instance_args.as_slice());
+    let main_inst = builder.add(NS_CORE_INSTANCE, in "main".as_bytes());
+    let mem = memory_alias(inout builder, main_inst);
     let mut realloc = NONE32;
     // The fixup module fills the shim's table with the real lowerings.
     if indirect.len() > 0 {
-        let mut m = ChunkSeq::new[u8]();
-        fixup_module(in c, in sigs.as_slice(), in p.as_slice(), inout m);
-        b.raw(S_CORE_MODULE, in m.as_slice());
-        let fm = b.add(NS_CORE_MODULE, in "wit-component-fixup".as_bytes());
+        let mut module = ChunkSeq::new[u8]();
+        fixup_module(
+            in core_info,
+            in sigs.as_slice(),
+            in producer_section.as_slice(),
+            inout module
+        );
+        builder.raw(S_CORE_MODULE, in module.as_slice());
+        let fixup_index = builder.add(NS_CORE_MODULE, in "wit-component-fixup".as_bytes());
         let mut actual = ChunkSeq::new[u8]();
         for q in 0..indirect.len() {
             let j = at64(in indirect.as_slice(), q);
-            let im = imp_at(in c, j);
-            let fe = add(im.f0, im.fl);
-            let ii = at32(in hinst.as_slice(), widen_u64(byte(in ifs.as_slice(), j)));
-            alias_export(inout b, SORT_FUNC, ii, in c.text[im.f0..fe]);
-            let fi = b.add(NS_FUNC, in c.text[im.f0..fe]);
-            let k = byte(in kinds.as_slice(), j);
-            let need_realloc = lower_uses_realloc(k);
-            let utf8 = lower_uses_utf8(k);
+            let func_import = imp_at(in core_info, j);
+            let field_end = add(func_import.field_start, func_import.field_len);
+            let host_inst = at32(
+                in host_insts.as_slice(),
+                widen_u64(byte(in import_iface_ids.as_slice(), j))
+            );
+            alias_export(
+                inout builder,
+                SORT_FUNC,
+                host_inst,
+                in core_info.text[func_import.field_start..field_end]
+            );
+            let host_func = builder
+                .add(NS_FUNC, in core_info.text[func_import.field_start..field_end]);
+            let import_lowering = byte(in lowerings.as_slice(), j);
+            let need_realloc = lower_uses_realloc(import_lowering);
+            let utf8 = lower_uses_utf8(import_lowering);
             if need_realloc && realloc == NONE32 {
-                alias_core_export(inout b, CORE_FUNC, inst, in "cabi_realloc".as_bytes());
-                realloc = b.add(NS_CORE_FUNC, in "cabi_realloc".as_bytes());
+                alias_core_export(
+                    inout builder,
+                    CORE_FUNC,
+                    main_inst,
+                    in "cabi_realloc".as_bytes()
+                );
+                realloc = builder.add(NS_CORE_FUNC, in "cabi_realloc".as_bytes());
             }
-            b.item(S_CANON);
-            b.cur.push(CANON_LOWER);
-            b.cur.push(0);
-            uleb(inout b.cur, widen_u64(fi));
-            let mut opts: u64 = 1;
+            builder.item(S_CANON);
+            builder.section.push(CANON_LOWER);
+            builder.section.push(0);
+            uleb(inout builder.section, widen_u64(host_func));
+            let mut opt_count: u64 = 1;
             if need_realloc {
-                opts = inc(opts);
+                opt_count = inc(opt_count);
             }
             if utf8 {
-                opts = inc(opts);
+                opt_count = inc(opt_count);
             }
-            uleb(inout b.cur, opts);
-            b.cur.push(OPT_MEMORY);
-            uleb(inout b.cur, widen_u64(mem));
+            uleb(inout builder.section, opt_count);
+            builder.section.push(OPT_MEMORY);
+            uleb(inout builder.section, widen_u64(mem));
             if need_realloc {
-                b.cur.push(OPT_REALLOC);
-                uleb(inout b.cur, widen_u64(realloc));
+                builder.section.push(OPT_REALLOC);
+                uleb(inout builder.section, widen_u64(realloc));
             }
             if utf8 {
-                b.cur.push(OPT_UTF8);
+                builder.section.push(OPT_UTF8);
             }
-            let mut n = ChunkSeq::new[u8]();
-            indirect_name(in c, im, inout n);
-            let cf = b.add(NS_CORE_FUNC, in n.as_slice());
-            let mut sname = ChunkSeq::new[u8]();
-            put_decimal(inout sname, q);
-            put_str(inout actual, in sname.as_slice());
+            let mut func_name = ChunkSeq::new[u8]();
+            indirect_name(in core_info, func_import, inout func_name);
+            let core_func = builder.add(NS_CORE_FUNC, in func_name.as_slice());
+            let mut slot_name = ChunkSeq::new[u8]();
+            put_decimal(inout slot_name, q);
+            put_str(inout actual, in slot_name.as_slice());
             actual.push(CORE_FUNC);
-            uleb(inout actual, widen_u64(cf));
+            uleb(inout actual, widen_u64(core_func));
         }
-        b.item(S_CORE_INSTANCE);
-        b.cur.push(FROM_EXPORTS);
-        uleb(inout b.cur, indirect.len());
-        b.cur.extend(in actual.as_slice());
-        let a = b.add(NS_CORE_INSTANCE, in "actual".as_bytes());
-        b.item(S_CORE_INSTANCE);
-        b.cur.push(INSTANTIATE);
-        uleb(inout b.cur, widen_u64(fm));
-        uleb(inout b.cur, 2);
-        put_str(inout b.cur, in "actual".as_bytes());
-        b.cur.push(CORE_INSTANCE);
-        uleb(inout b.cur, widen_u64(a));
-        put_str(inout b.cur, in "shim".as_bytes());
-        b.cur.push(CORE_INSTANCE);
-        uleb(inout b.cur, widen_u64(shim_inst));
-        b.add(NS_CORE_INSTANCE, in "fixup".as_bytes());
+        builder.item(S_CORE_INSTANCE);
+        builder.section.push(FROM_EXPORTS);
+        uleb(inout builder.section, indirect.len());
+        builder.section.extend(in actual.as_slice());
+        let actual_inst = builder.add(NS_CORE_INSTANCE, in "actual".as_bytes());
+        builder.item(S_CORE_INSTANCE);
+        builder.section.push(INSTANTIATE);
+        uleb(inout builder.section, widen_u64(fixup_index));
+        uleb(inout builder.section, 2);
+        put_str(inout builder.section, in "actual".as_bytes());
+        builder.section.push(CORE_INSTANCE);
+        uleb(inout builder.section, widen_u64(actual_inst));
+        put_str(inout builder.section, in "shim".as_bytes());
+        builder.section.push(CORE_INSTANCE);
+        uleb(inout builder.section, widen_u64(shim_inst));
+        builder.add(NS_CORE_INSTANCE, in "fixup".as_bytes());
     }
-    for x in 0..w.exports.len() {
-        let kind = match w.exports.try_get(x) {
+    for pos in 0..wit.exports.len() {
+        let kind = match wit.exports.try_get(pos) {
             Option::Some(k) => k,
             Option::None => 0,
         };
-        export_iface(inout b, inout root, in w, iface(in w, kind), inst, mem, inout realloc);
+        export_iface(
+            inout builder,
+            inout root,
+            in wit,
+            iface(in wit, kind),
+            main_inst,
+            mem,
+            inout realloc
+        );
     }
-    b.append_names();
-    b.flush();
-    b.out.extend(in p.as_slice());
-    let r = b.finish();
-    out.extend(in r.as_slice());
+    builder.append_names();
+    builder.flush();
+    builder.out.extend(in producer_section.as_slice());
+    let component = builder.finish();
+    out.extend(in component.as_slice());
     0
 }
 
 // "indirect-<module>-<field>"
-fn indirect_name(in c: Core, im: Imp, inout out: ChunkSeq[u8]) {
+fn indirect_name(in core: Core, func_import: Imp, inout out: ChunkSeq[u8]) {
     out.extend(in "indirect-".as_bytes());
-    out.extend(in c.text[im.m0..add(im.m0, im.mn)]);
+    out.extend(
+        in core.text[
+            func_import.module_start..add(func_import.module_start, func_import.module_len)
+        ]
+    );
     out.push(45);
-    out.extend(in c.text[im.f0..add(im.f0, im.fl)]);
+    out.extend(
+        in core.text[func_import.field_start..add(func_import.field_start, func_import.field_len)]
+    );
 }
 
 // The Nexus plugin world: its functions lifted and exported at the root.
-fn encode_plugin(in core: Slice[u8], in w: Wit, inout out: ChunkSeq[u8]) -> u64 {
-    let mut b = b_new();
-    main_module(inout b, in core);
-    b.item(S_CORE_INSTANCE);
-    b.cur.push(INSTANTIATE);
-    uleb(inout b.cur, 0);
-    uleb(inout b.cur, 0);
-    let inst = b.add(NS_CORE_INSTANCE, in "main".as_bytes());
-    memory_alias(inout b, inst);
-    let mut root = e_new(in w, M_ROOT);
-    for f in w.e0..w.funcs.len() {
-        let fu = func_at(in w, f);
+fn encode_plugin(in core: Slice[u8], in wit: Wit, inout out: ChunkSeq[u8]) -> u64 {
+    let mut builder = b_new();
+    main_module(inout builder, in core);
+    builder.item(S_CORE_INSTANCE);
+    builder.section.push(INSTANTIATE);
+    uleb(inout builder.section, 0);
+    uleb(inout builder.section, 0);
+    let main_inst = builder.add(NS_CORE_INSTANCE, in "main".as_bytes());
+    memory_alias(inout builder, main_inst);
+    let mut root = e_new(in wit, M_ROOT);
+    for func_row in wit.entry_start..wit.funcs.len() {
+        let func = func_at(in wit, func_row);
         // The backend's plugin entry is fn(u32, u64) -> i64: no options.
-        if takes_string(in w, fu)
-            || (fu.res != NONE32 && (has_string(in w, fu.res, 0) || flat(in w, fu.res, 0) > 1))
+        if takes_string(in wit, func)
+            || (func.result != NONE32
+                && (has_string(in wit, func.result, 0) || flat(in wit, func.result, 0) > 1))
         {
             return X_PLUGIN;
         }
-        let ty = func_type(inout root, inout b, in w, f);
-        let ne = add(fu.n0, fu.nn);
-        alias_core_export(inout b, CORE_FUNC, inst, in w.text[fu.n0..ne]);
-        let cf = b.add(NS_CORE_FUNC, in w.text[fu.n0..ne]);
-        b.item(S_CANON);
-        b.cur.push(CANON_LIFT);
-        b.cur.push(0);
-        uleb(inout b.cur, widen_u64(cf));
-        uleb(inout b.cur, 0);
-        uleb(inout b.cur, widen_u64(ty));
-        let fi = b.add(NS_FUNC, in w.text[fu.n0..ne]);
-        b.item(S_EXPORT);
-        b.cur.push(0);
-        put_str(inout b.cur, in w.text[fu.n0..ne]);
-        b.cur.push(SORT_FUNC);
-        uleb(inout b.cur, widen_u64(fi));
-        b.cur.push(0);
-        b.add(NS_FUNC, in w.text[fu.n0..ne]);
+        let func_ty = func_type(inout root, inout builder, in wit, func_row);
+        let name_end = add(func.name_start, func.name_len);
+        alias_core_export(
+            inout builder,
+            CORE_FUNC,
+            main_inst,
+            in wit.text[func.name_start..name_end]
+        );
+        let core_func = builder.add(NS_CORE_FUNC, in wit.text[func.name_start..name_end]);
+        builder.item(S_CANON);
+        builder.section.push(CANON_LIFT);
+        builder.section.push(0);
+        uleb(inout builder.section, widen_u64(core_func));
+        uleb(inout builder.section, 0);
+        uleb(inout builder.section, widen_u64(func_ty));
+        let lifted = builder.add(NS_FUNC, in wit.text[func.name_start..name_end]);
+        builder.item(S_EXPORT);
+        builder.section.push(0);
+        put_str(inout builder.section, in wit.text[func.name_start..name_end]);
+        builder.section.push(SORT_FUNC);
+        uleb(inout builder.section, widen_u64(lifted));
+        builder.section.push(0);
+        builder.add(NS_FUNC, in wit.text[func.name_start..name_end]);
     }
-    b.append_names();
-    let mut p = ChunkSeq::new[u8]();
-    producers(inout p);
-    b.flush();
-    b.out.extend(in p.as_slice());
-    let r = b.finish();
-    out.extend(in r.as_slice());
+    builder.append_names();
+    let mut producer_section = ChunkSeq::new[u8]();
+    producers(inout producer_section);
+    builder.flush();
+    builder.out.extend(in producer_section.as_slice());
+    let component = builder.finish();
+    out.extend(in component.as_slice());
     0
 }
 
-// `encode_interface_export` for interface `it`.
+// `encode_interface_export` for interface `iface_info`.
 fn export_iface(
-    inout b: B,
+    inout builder: B,
     inout root: E,
-    in w: Wit,
-    it: Iface,
-    inst: u32,
+    in wit: Wit,
+    iface_info: Iface,
+    main_inst: u32,
     mem: u32,
     inout realloc: u32
 ) {
-    let mut full = ChunkSeq::new[u8]();
-    iface_name(it.kind, inout full);
+    let mut full_name = ChunkSeq::new[u8]();
+    iface_name(iface_info.kind, inout full_name);
     // Instantiation arguments: (name, sort, index).
-    let mut args = ChunkSeq::new[u8]();
-    let mut nargs: u64 = 0;
-    for k in 0..it.fnum {
-        let f = add(it.f0, k);
-        let fu = func_at(in w, f);
-        let ty = func_type(inout root, inout b, in w, f);
+    let mut instance_args = ChunkSeq::new[u8]();
+    let mut arg_count: u64 = 0;
+    for k in 0..iface_info.func_count {
+        let func_row = add(iface_info.func_start, k);
+        let func = func_at(in wit, func_row);
+        let func_ty = func_type(inout root, inout builder, in wit, func_row);
         let mut core_name = ChunkSeq::new[u8]();
-        core_name.extend(in full.as_slice());
+        core_name.extend(in full_name.as_slice());
         core_name.push(35);
-        core_name.extend(in w.text[fu.n0..add(fu.n0, fu.nn)]);
-        b.item(S_ALIAS);
-        b.cur.push(SORT_CORE);
-        b.cur.push(CORE_FUNC);
-        b.cur.push(1);
-        uleb(inout b.cur, widen_u64(inst));
-        put_str(inout b.cur, in core_name.as_slice());
-        let cf = b.add(NS_CORE_FUNC, in core_name.as_slice());
-        let params = takes_string(in w, fu);
-        let mut strings = params;
-        if params && realloc == NONE32 {
-            alias_core_export(inout b, CORE_FUNC, inst, in "cabi_realloc".as_bytes());
-            realloc = b.add(NS_CORE_FUNC, in "cabi_realloc".as_bytes());
+        core_name.extend(in wit.text[func.name_start..add(func.name_start, func.name_len)]);
+        builder.item(S_ALIAS);
+        builder.section.push(SORT_CORE);
+        builder.section.push(CORE_FUNC);
+        builder.section.push(1);
+        uleb(inout builder.section, widen_u64(main_inst));
+        put_str(inout builder.section, in core_name.as_slice());
+        let core_func = builder.add(NS_CORE_FUNC, in core_name.as_slice());
+        let string_params = takes_string(in wit, func);
+        let mut uses_strings = string_params;
+        if string_params && realloc == NONE32 {
+            alias_core_export(inout builder, CORE_FUNC, main_inst, in "cabi_realloc".as_bytes());
+            realloc = builder.add(NS_CORE_FUNC, in "cabi_realloc".as_bytes());
         }
-        let mut memory = false;
-        if fu.res != NONE32 {
-            if has_string(in w, fu.res, 0) {
-                strings = true;
+        let mut needs_memory = false;
+        if func.result != NONE32 {
+            if has_string(in wit, func.result, 0) {
+                uses_strings = true;
             }
-            if flat(in w, fu.res, 0) > 1 {
-                memory = true;
+            if flat(in wit, func.result, 0) > 1 {
+                needs_memory = true;
             }
         }
-        b.item(S_CANON);
-        b.cur.push(0);
-        b.cur.push(0);
-        uleb(inout b.cur, widen_u64(cf));
-        let mut opts: u64 = 0;
-        if memory || strings {
-            opts = inc(opts);
+        builder.item(S_CANON);
+        builder.section.push(0);
+        builder.section.push(0);
+        uleb(inout builder.section, widen_u64(core_func));
+        let mut opt_count: u64 = 0;
+        if needs_memory || uses_strings {
+            opt_count = inc(opt_count);
         }
-        if params {
-            opts = inc(opts);
+        if string_params {
+            opt_count = inc(opt_count);
         }
-        if strings {
-            opts = inc(opts);
+        if uses_strings {
+            opt_count = inc(opt_count);
         }
-        uleb(inout b.cur, opts);
-        if memory || strings {
-            b.cur.push(OPT_MEMORY);
-            uleb(inout b.cur, widen_u64(mem));
+        uleb(inout builder.section, opt_count);
+        if needs_memory || uses_strings {
+            builder.section.push(OPT_MEMORY);
+            uleb(inout builder.section, widen_u64(mem));
         }
-        if params {
-            b.cur.push(OPT_REALLOC);
-            uleb(inout b.cur, widen_u64(realloc));
+        if string_params {
+            builder.section.push(OPT_REALLOC);
+            uleb(inout builder.section, widen_u64(realloc));
         }
-        if strings {
-            b.cur.push(OPT_UTF8);
+        if uses_strings {
+            builder.section.push(OPT_UTF8);
         }
-        uleb(inout b.cur, widen_u64(ty));
-        let fi = b.add(NS_FUNC, in w.text[fu.n0..add(fu.n0, fu.nn)]);
-        put_import_func_name(inout args, in w, fu);
-        args.push(SORT_FUNC);
-        uleb(inout args, widen_u64(fi));
-        nargs = inc(nargs);
+        uleb(inout builder.section, widen_u64(func_ty));
+        let lifted = builder
+            .add(NS_FUNC, in wit.text[func.name_start..add(func.name_start, func.name_len)]);
+        put_import_func_name(inout instance_args, in wit, func);
+        instance_args.push(SORT_FUNC);
+        uleb(inout instance_args, widen_u64(lifted));
+        arg_count = inc(arg_count);
     }
     // The shim component.
-    let mut nb = b_new();
-    let mut ne = e_new(in w, M_IMPORT);
-    for k in 0..it.fnum {
-        let f = add(it.f0, k);
-        let fu = func_at(in w, f);
-        let t = func_type(inout ne, inout nb, in w, f);
-        let mut n = ChunkSeq::new[u8]();
-        n.extend(in "import-func-".as_bytes());
-        n.extend(in w.text[fu.n0..add(fu.n0, fu.nn)]);
-        nb.item(S_IMPORT);
-        nb.cur.push(0);
-        put_str(inout nb.cur, in n.as_slice());
-        nb.cur.push(SORT_FUNC);
-        uleb(inout nb.cur, widen_u64(t));
-        nb.add(NS_FUNC, in n.as_slice());
+    let mut shim = b_new();
+    let mut import_encoder = e_new(in wit, M_IMPORT);
+    for k in 0..iface_info.func_count {
+        let func_row = add(iface_info.func_start, k);
+        let func = func_at(in wit, func_row);
+        let import_ty = func_type(inout import_encoder, inout shim, in wit, func_row);
+        let mut import_name = ChunkSeq::new[u8]();
+        import_name.extend(in "import-func-".as_bytes());
+        import_name.extend(in wit.text[func.name_start..add(func.name_start, func.name_len)]);
+        shim.item(S_IMPORT);
+        shim.section.push(0);
+        put_str(inout shim.section, in import_name.as_slice());
+        shim.section.push(SORT_FUNC);
+        uleb(inout shim.section, widen_u64(import_ty));
+        shim.add(NS_FUNC, in import_name.as_slice());
     }
-    for k in 0..ne.imports.len() {
-        let d = def_at(
-            in w,
-            match ne.imports.try_get(k) {
+    for k in 0..import_encoder.imports.len() {
+        let def = def_at(
+            in wit,
+            match import_encoder.imports.try_get(k) {
                 Option::Some(x) => x,
                 Option::None => 0,
             }
         );
-        uleb(inout args, add(d.nn, 12));
-        args.extend(in "import-type-".as_bytes());
-        args.extend(in w.text[d.n0..add(d.n0, d.nn)]);
-        args.push(SORT_TYPE);
-        uleb(inout args, widen_u64(mapped(in root, d.ty)));
-        nargs = inc(nargs);
+        uleb(inout instance_args, add(def.name_len, 12));
+        instance_args.extend(in "import-type-".as_bytes());
+        instance_args.extend(in wit.text[def.name_start..add(def.name_start, def.name_len)]);
+        instance_args.push(SORT_TYPE);
+        uleb(inout instance_args, widen_u64(mapped(in root, def.ty)));
+        arg_count = inc(arg_count);
     }
-    let mut nx = e_new(in w, M_EXPORT);
-    for d in 0..defs_of(in w, it.kind) {
-        index(inout nx, inout nb, in w, def_at(in w, d).ty);
+    let mut export_encoder = e_new(in wit, M_EXPORT);
+    for def_row in 0..defs_of(in wit, iface_info.kind) {
+        index(inout export_encoder, inout shim, in wit, def_at(in wit, def_row).ty);
     }
-    for k in 0..it.fnum {
-        let f = add(it.f0, k);
-        let fu = func_at(in w, f);
-        let t = func_type(inout nx, inout nb, in w, f);
-        nb.item(S_EXPORT);
-        nb.cur.push(0);
-        put_name(inout nb.cur, in w, fu.n0, fu.nn);
-        nb.cur.push(SORT_FUNC);
-        uleb(inout nb.cur, k);
+    for k in 0..iface_info.func_count {
+        let func_row = add(iface_info.func_start, k);
+        let func = func_at(in wit, func_row);
+        let export_ty = func_type(inout export_encoder, inout shim, in wit, func_row);
+        shim.item(S_EXPORT);
+        shim.section.push(0);
+        put_name(inout shim.section, in wit, func.name_start, func.name_len);
+        shim.section.push(SORT_FUNC);
+        uleb(inout shim.section, k);
         // ascribed type: (func t)
-        nb.cur.push(1);
-        nb.cur.push(SORT_FUNC);
-        uleb(inout nb.cur, widen_u64(t));
-        nb.add(NS_FUNC, in w.text[fu.n0..add(fu.n0, fu.nn)]);
+        shim.section.push(1);
+        shim.section.push(SORT_FUNC);
+        uleb(inout shim.section, widen_u64(export_ty));
+        shim.add(NS_FUNC, in wit.text[func.name_start..add(func.name_start, func.name_len)]);
     }
-    let nested = nb.finish();
-    b.raw(S_COMPONENT, in nested.as_slice());
-    let mut cname = ChunkSeq::new[u8]();
-    cname.extend(in full.as_slice());
-    cname.extend(in "-shim-component".as_bytes());
-    let comp = b.add(NS_COMPONENT, in cname.as_slice());
-    b.item(S_INSTANCE);
-    b.cur.push(0);
-    uleb(inout b.cur, widen_u64(comp));
-    uleb(inout b.cur, nargs);
-    b.cur.extend(in args.as_slice());
-    let mut iname = ChunkSeq::new[u8]();
-    iname.extend(in full.as_slice());
-    iname.extend(in "-shim-instance".as_bytes());
-    let ii = b.add(NS_INSTANCE, in iname.as_slice());
-    b.item(S_EXPORT);
-    b.cur.push(0);
-    put_str(inout b.cur, in full.as_slice());
-    b.cur.push(SORT_INSTANCE);
-    uleb(inout b.cur, widen_u64(ii));
-    b.cur.push(0);
-    b.add(NS_INSTANCE, in full.as_slice());
+    let nested = shim.finish();
+    builder.raw(S_COMPONENT, in nested.as_slice());
+    let mut comp_name = ChunkSeq::new[u8]();
+    comp_name.extend(in full_name.as_slice());
+    comp_name.extend(in "-shim-component".as_bytes());
+    let shim_comp = builder.add(NS_COMPONENT, in comp_name.as_slice());
+    builder.item(S_INSTANCE);
+    builder.section.push(0);
+    uleb(inout builder.section, widen_u64(shim_comp));
+    uleb(inout builder.section, arg_count);
+    builder.section.extend(in instance_args.as_slice());
+    let mut inst_name = ChunkSeq::new[u8]();
+    inst_name.extend(in full_name.as_slice());
+    inst_name.extend(in "-shim-instance".as_bytes());
+    let shim_inst = builder.add(NS_INSTANCE, in inst_name.as_slice());
+    builder.item(S_EXPORT);
+    builder.section.push(0);
+    put_str(inout builder.section, in full_name.as_slice());
+    builder.section.push(SORT_INSTANCE);
+    uleb(inout builder.section, widen_u64(shim_inst));
+    builder.section.push(0);
+    builder.add(NS_INSTANCE, in full_name.as_slice());
     // The interface's own types leave the root maps.
-    for d in 0..defs_of(in w, it.kind) {
-        root.map.try_set(widen_u64(def_at(in w, d).ty), NONE32);
+    for def_row in 0..defs_of(in wit, iface_info.kind) {
+        root.row_index.try_set(widen_u64(def_at(in wit, def_row).ty), NONE32);
     }
 }
 
-fn put_import_func_name(inout out: ChunkSeq[u8], in w: Wit, fu: Func) {
-    uleb(inout out, add(fu.nn, 12));
+fn put_import_func_name(inout out: ChunkSeq[u8], in wit: Wit, func: Func) {
+    uleb(inout out, add(func.name_len, 12));
     out.extend(in "import-func-".as_bytes());
-    out.extend(in w.text[fu.n0..add(fu.n0, fu.nn)]);
+    out.extend(in wit.text[func.name_start..add(func.name_start, func.name_len)]);
 }
