@@ -95,6 +95,8 @@ struct AddressHasher(u64);
 
 /// The Fx hash's multiplier.
 const ADDRESS_HASH_SEED: u64 = 0x51_7c_c1_b7_27_22_0a_95;
+/// The rotation each Fx mixing step applies before the multiply.
+const ADDRESS_HASH_MIX_ROTATE: u32 = 5;
 /// The rotation `finish` applies (rustc-hash 2's).
 const ADDRESS_HASH_ROTATE: u32 = 26;
 
@@ -108,7 +110,7 @@ impl Hasher for AddressHasher {
         }
     }
     fn write_u64(&mut self, n: u64) {
-        self.0 = (self.0.rotate_left(5) ^ n).wrapping_mul(ADDRESS_HASH_SEED);
+        self.0 = (self.0.rotate_left(ADDRESS_HASH_MIX_ROTATE) ^ n).wrapping_mul(ADDRESS_HASH_SEED);
     }
     fn write_usize(&mut self, n: usize) {
         self.write_u64(n as u64);
