@@ -20,11 +20,7 @@ fn swap[T: mod copy](p: Pair[T]) -> Pair[T] {
 fn pick[T: mod copy](c: Choice[T], right: bool) -> T {
     match c {
         Choice::Left(x) => x,
-        Choice::Right(x, y) => if right {
-            y
-        } else {
-            x
-        },
+        Choice::Right(x, y) => if right { y } else { x },
     }
 }
 // Generic recursion at one instance, and a generic calling a generic.

@@ -482,11 +482,7 @@ fn primitive(
 
 // Lexicographic order of two byte ranges of one buffer (Rust slice order).
 fn less(in s: Slice[u8], a: u64, alen: u64, b: u64, blen: u64) -> bool {
-    let n = if alen < blen {
-        alen
-    } else {
-        blen
-    };
+    let n = if alen < blen { alen } else { blen };
     for i in 0..n {
         let x = sb(in s, wrapping_add(a, i));
         let y = sb(in s, wrapping_add(b, i));

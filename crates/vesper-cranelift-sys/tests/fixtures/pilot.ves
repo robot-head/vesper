@@ -198,11 +198,7 @@ pub fn invalid_function() -> u64 eff [Ffi[Cranelift]] {
     let ok = define_function(inout m, f, b);
     let err = module_error_len(in m);
     module_free(m);
-    if ok {
-        3
-    } else {
-        err
-    }
+    if ok { 3 } else { err }
 }
 
 // An unknown opcode poisons the builder; the builder is freed unused.
@@ -322,11 +318,7 @@ pub fn vectors_and_atomics() -> u64 eff [Ffi[Cranelift]] {
     let ok = define_function(inout m, f, b);
     let bytes_out = module_code_bytes(in m);
     module_free(m);
-    if ok {
-        bytes_out
-    } else {
-        0
-    }
+    if ok { bytes_out } else { 0 }
 }
 
 // An invalid value number in an argument list of a healthy builder: the

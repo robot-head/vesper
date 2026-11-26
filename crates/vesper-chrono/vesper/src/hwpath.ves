@@ -507,11 +507,7 @@ pub fn path_between(
     let b = anchor_at(in tl.anchors.as_slice(), ib);
     let start = partition_lo_le(in tl.steps.as_slice(), a.tsc);
     let end_raw = partition_hi_le(in tl.steps.as_slice(), b.tsc);
-    let end = if end_raw > start {
-        end_raw
-    } else {
-        start
-    };
+    let end = if end_raw > start { end_raw } else { start };
     let u_start_raw = partition_hi_le(in tl.steps.as_slice(), a.tsc);
     let u_start = if u_start_raw < start {
         u_start_raw
@@ -519,11 +515,7 @@ pub fn path_between(
         start
     };
     let u_end_raw = partition_lo_lt(in tl.steps.as_slice(), b.tsc);
-    let u_end = if u_end_raw > end {
-        u_end_raw
-    } else {
-        end
-    };
+    let u_end = if u_end_raw > end { u_end_raw } else { end };
     Result::Ok(
         PathSliceRange {
             from: a,

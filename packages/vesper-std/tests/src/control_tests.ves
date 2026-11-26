@@ -130,11 +130,7 @@ test {
         handle Fail[u64] in {
             scoped()
         } with {
-            return value => if value == 42 {
-                0
-            } else {
-                4
-            },
+            return value => if value == 42 { 0 } else { 4 },
             raise(_, _) => 4,
         }
     }

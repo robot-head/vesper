@@ -96,11 +96,7 @@ pub fn w_ucmp(a: W, b: W) -> i64 {
 
 // `unsigned_abs` of a signed value, as an unsigned W.
 pub fn w_uabs(a: W) -> W {
-    if w_is_neg(a) {
-        w_neg(a)
-    } else {
-        a
-    }
+    if w_is_neg(a) { w_neg(a) } else { a }
 }
 
 pub fn w_twice(a: W) -> W {

@@ -16,16 +16,8 @@ pub fn acc_zero() -> Acc {
 
 pub fn acc_add(a: Acc, v: i64) -> Acc {
     let lo = wrapping_add(a.lo, wrapping_u64(v));
-    let carry: i64 = if lo < a.lo {
-        1
-    } else {
-        0
-    };
-    let sign: i64 = if v < 0 {
-        -1
-    } else {
-        0
-    };
+    let carry: i64 = if lo < a.lo { 1 } else { 0 };
+    let sign: i64 = if v < 0 { -1 } else { 0 };
     Acc { hi: wrapping_add(wrapping_add(a.hi, sign), carry), lo: lo }
 }
 

@@ -175,11 +175,7 @@ fn value_name(inout s: St, n: u32, start: u32, end: u32) -> u32 {
         return n;
     }
     let t = resolve(inout s, n, start, end, kind_value());
-    if t == none() {
-        n
-    } else {
-        t
-    }
+    if t == none() { n } else { t }
 }
 
 // A new literal node of the constant `name`'s value, or `ast_none()` when

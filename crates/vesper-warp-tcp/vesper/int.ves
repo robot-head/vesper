@@ -29,69 +29,37 @@ fn max_u32() -> u32 {
 }
 
 fn min64(a: u64, b: u64) -> u64 {
-    if a < b {
-        a
-    } else {
-        b
-    }
+    if a < b { a } else { b }
 }
 
 fn max64(a: u64, b: u64) -> u64 {
-    if a > b {
-        a
-    } else {
-        b
-    }
+    if a > b { a } else { b }
 }
 
 fn min32(a: u32, b: u32) -> u32 {
-    if a < b {
-        a
-    } else {
-        b
-    }
+    if a < b { a } else { b }
 }
 
 fn max32(a: u32, b: u32) -> u32 {
-    if a > b {
-        a
-    } else {
-        b
-    }
+    if a > b { a } else { b }
 }
 
 fn sat_add64(a: u64, b: u64) -> u64 {
     let s = wrapping_add(a, b);
-    if s < a {
-        max_u64()
-    } else {
-        s
-    }
+    if s < a { max_u64() } else { s }
 }
 
 fn sat_sub64(a: u64, b: u64) -> u64 {
-    if a > b {
-        wrapping_sub(a, b)
-    } else {
-        0
-    }
+    if a > b { wrapping_sub(a, b) } else { 0 }
 }
 
 fn sat_add32(a: u32, b: u32) -> u32 {
     let s = wrapping_add(a, b);
-    if s < a {
-        max_u32()
-    } else {
-        s
-    }
+    if s < a { max_u32() } else { s }
 }
 
 fn sat_sub32(a: u32, b: u32) -> u32 {
-    if a > b {
-        wrapping_sub(a, b)
-    } else {
-        0
-    }
+    if a > b { wrapping_sub(a, b) } else { 0 }
 }
 
 fn sat_mul32(a: u32, b: u32) -> u32 {

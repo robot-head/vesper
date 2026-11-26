@@ -41,11 +41,7 @@ fn worker(id: u64, port: u64, delay: u64) -> Report eff [Clock, Sched, Net] {
     Sched::yield_now();
     let mut slot: u64 = 0;
     let filled = Net::fill(inout slot);
-    let value = if filled {
-        slot
-    } else {
-        received(first)
-    };
+    let value = if filled { slot } else { received(first) };
     let cancelled = Sched::cancelled();
     let finished = Clock::now();
     let Ticket { id } = ticket;

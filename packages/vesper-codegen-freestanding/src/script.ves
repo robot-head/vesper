@@ -25,11 +25,7 @@ pub fn linker_script(
     image_base: u64,
     stack_bytes: u64
 ) -> ChunkSeq[u8] {
-    let arch = if is_riscv(target) {
-        "riscv"
-    } else {
-        "aarch64"
-    };
+    let arch = if is_riscv(target) { "riscv" } else { "aarch64" };
     let stack = if stack_bytes % 16 == 0 {
         stack_bytes
     } else {

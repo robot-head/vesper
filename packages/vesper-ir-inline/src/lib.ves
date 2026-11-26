@@ -538,11 +538,7 @@ impl Prog {
             return NONE32;
         }
         let t = u32_at(in self.val, add(w(f.va), v));
-        if t == 0 {
-            NONE32
-        } else {
-            wrapping_sub(t, 1)
-        }
+        if t == 0 { NONE32 } else { wrapping_sub(t, 1) }
     }
 
     pub fn local_ty(in self, f: Fun, name: u32) -> u32 {
@@ -1889,13 +1885,7 @@ fn bindings_new() -> Bindings {
 
 impl Bindings {
     fn push(inout self, place: bool, value: u32, at: u64) {
-        self.place.push(
-            if place {
-                1
-            } else {
-                0
-            }
-        );
+        self.place.push(if place { 1 } else { 0 });
         self.value.push(value);
         self.at.push(at);
     }
@@ -2179,15 +2169,7 @@ fn binary(code: u64, a: Kn, b: Kn) -> Kn {
     } else {
         return unknown();
     };
-    Kn {
-        k: 2,
-        lo: if r {
-            1
-        } else {
-            0
-        },
-        hi: 0
-    }
+    Kn { k: 2, lo: if r { 1 } else { 0 }, hi: 0 }
 }
 
 // `site::arm`: the arm a known value takes, NONE32 when undecided.
@@ -2346,11 +2328,7 @@ fn value_bound(in p: Prog, f: Fun) -> u64 {
             }
         }
     }
-    if any {
-        inc(top)
-    } else {
-        0
-    }
+    if any { inc(top) } else { 0 }
 }
 
 // The seeds of a fold: the caller's constants passed by value to stable
@@ -3024,11 +3002,7 @@ fn renamed_root(in p: Prog, in rn: Rename, root: u64) -> u64 {
         return p.op(w(place));
     }
     let name = rn.names.get(root);
-    if name != NONE32 {
-        w(name)
-    } else {
-        root
-    }
+    if name != NONE32 { w(name) } else { root }
 }
 
 // A renamed copy of the pattern at `at` (`Rename::pattern`).
@@ -3038,13 +3012,7 @@ fn copy_pattern(inout p: Prog, in rn: Rename, at: u64) -> u64 {
     if kind == PK_BIND {
         let name = p.pat(add(at, 3));
         let r = rn.names.get(name);
-        body.push(
-            if r != NONE32 {
-                w(r)
-            } else {
-                name
-            }
-        );
+        body.push(if r != NONE32 { w(r) } else { name });
     } else if kind == PK_TUPLE {
         let n = p.pat(add(at, 3));
         body.push(n);

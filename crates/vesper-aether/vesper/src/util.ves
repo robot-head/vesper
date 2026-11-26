@@ -112,11 +112,7 @@ fn merge3(
                 at(in sc, i)
             )
         };
-        let src = if take_left {
-            i
-        } else {
-            j
-        };
+        let src = if take_left { i } else { j };
         da.try_set(k, at(in sa, src));
         db.try_set(k, at(in sb, src));
         dc.try_set(k, at(in sc, src));
@@ -130,11 +126,7 @@ fn merge3(
 }
 
 fn min64(x: u64, y: u64) -> u64 {
-    if x < y {
-        x
-    } else {
-        y
-    }
+    if x < y { x } else { y }
 }
 
 const SORT_RUN: u64 = 16;

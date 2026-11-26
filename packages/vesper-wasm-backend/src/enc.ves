@@ -173,14 +173,7 @@ pub fn vt(kind: u8) -> ValTy {
 }
 
 pub fn vt_ref(nullable: bool, index: u32) -> ValTy {
-    ValTy {
-        kind: if nullable {
-            VT_REF_NULL
-        } else {
-            VT_REF
-        },
-        index: index
-    }
+    ValTy { kind: if nullable { VT_REF_NULL } else { VT_REF }, index: index }
 }
 
 pub fn put_valtype(inout out: ChunkSeq[u8], t: ValTy) {

@@ -257,11 +257,7 @@ pub fn prepare_q(
     // limit is only checked by `lex`: an oversized query must still fail
     // with the limit error, not reserve buffers in proportion to its length.
     let cap: u64 = 4096;
-    let n = if sql.len() < cap {
-        sql.len()
-    } else {
-        cap
-    };
+    let n = if sql.len() < cap { sql.len() } else { cap };
     let mut q = new_q_sized(
         wrapping_add(wrapping_add(text.len(), wrapping_mul(n, 2)), 32),
         wrapping_add(wrapping_mul(n, 2), 48),

@@ -50,11 +50,7 @@ pub fn mul_or(a: u64, b: u64, inout out: u64) -> u8 {
 
 // `limit(value, max)`.
 pub fn limit(value: u64, max: u64) -> u8 {
-    if value > max {
-        E_LIMIT
-    } else {
-        0
-    }
+    if value > max { E_LIMIT } else { 0 }
 }
 
 // `WitnessBudget::work`: `checked_add(work, amount)` over `max_work` is
@@ -235,9 +231,5 @@ pub fn valid_limits(in b: Budget) -> u8 {
         && b.max_metadata_bytes <= 16777216
         && b.max_work >= 1
         && b.max_work <= 8000000;
-    if ok {
-        0
-    } else {
-        1
-    }
+    if ok { 0 } else { 1 }
 }

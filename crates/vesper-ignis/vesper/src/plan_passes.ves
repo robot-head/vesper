@@ -26,11 +26,7 @@ fn plan_texture(
                                 seq: seq,
                                 access: u.access,
                                 sync: u.sync,
-                                has_layout: if u.has_layout {
-                                    1
-                                } else {
-                                    0
-                                },
+                                has_layout: if u.has_layout { 1 } else { 0 },
                                 layout: layout_ord(u.layout),
                                 mip: mip,
                                 slice: slice,

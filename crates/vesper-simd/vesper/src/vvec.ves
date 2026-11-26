@@ -208,11 +208,7 @@ pub fn compare(op: u64, n: u64, in a: Slice[u8], in b: Slice[u8], inout bits: Sl
                 let i = wrapping_add(lo, t);
                 let x = byte(in a, i);
                 let y = byte(in b, i);
-                let hit = if op == CMP_EQ {
-                    x == y
-                } else {
-                    x < y
-                };
+                let hit = if op == CMP_EQ { x == y } else { x < y };
                 if hit {
                     acc = acc | wrapping_shl_u64(1, wrapping_u32(t));
                 }

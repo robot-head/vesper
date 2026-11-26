@@ -133,11 +133,7 @@ fn eq_fold(in s: Slice[u8], in lit: Str) -> bool {
 // `a + b`, or `None` on overflow (`LengthOverflow`).
 fn add(a: u64, b: u64) -> Option[u64] {
     let s = wrapping_add(a, b);
-    if s < a {
-        Option::None
-    } else {
-        Option::Some(s)
-    }
+    if s < a { Option::None } else { Option::Some(s) }
 }
 
 // Status codes this module treats specially (RFC 9110 §15), and the final
@@ -176,11 +172,7 @@ fn decimal_length(value: u64) -> u64 {
 }
 
 fn policy_length(close: bool) -> u64 {
-    if close {
-        5
-    } else {
-        10
-    }
+    if close { 5 } else { 10 }
 }
 
 fn push_text(inout out: ChunkSeq[u8], in text: Str) {
@@ -277,11 +269,7 @@ fn reason_length(status: u64) -> u64 {
 }
 
 fn wire_body_length(head: bool, representation_length: u64) -> u64 {
-    if head {
-        0
-    } else {
-        representation_length
-    }
+    if head { 0 } else { representation_length }
 }
 
 fn check_sizes(
@@ -353,11 +341,7 @@ pub fn response_plan_new(
         ConnectionPolicy::Close => true,
     };
     let head_length = plan_head_length(status, close, representation_length);
-    let header_count: u64 = if carries_length(status) {
-        2
-    } else {
-        1
-    };
+    let header_count: u64 = if carries_length(status) { 2 } else { 1 };
     match check_sizes(limits, head, representation_length, head_length, header_count) {
         Option::Some(e) => Fail::raise(e),
         Option::None => (),

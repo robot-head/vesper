@@ -230,11 +230,7 @@ pub fn move_target(in s: RState, parent: u64, at: u64, to: u64) -> u64 {
         if i != at && redge(in s.edges, i).parent == parent {
             if n == to {
                 // Past `at`, everything shifts down by one.
-                let dest = if i < at {
-                    i
-                } else {
-                    dec(i)
-                };
+                let dest = if i < at { i } else { dec(i) };
                 break dest;
             }
             n = inc(n);

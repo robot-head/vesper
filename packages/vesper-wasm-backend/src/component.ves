@@ -430,11 +430,7 @@ fn align_to(x: u64, a: u64) -> u64 {
 }
 
 fn max64(a: u64, b: u64) -> u64 {
-    if a > b {
-        a
-    } else {
-        b
-    }
+    if a > b { a } else { b }
 }
 
 // The member types of a tuple, of a struct or of variant `v` of an enum.

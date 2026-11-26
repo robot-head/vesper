@@ -437,11 +437,7 @@ fn header_hoists(in f: Fun, in us: Users, inout out: Hoists) {
         let mut both = copy_set(in blocks);
         let pk = f.block(w(pre));
         if pk.term == T_BRANCH && (pk.yes == h || pk.no == h) {
-            let other = if pk.yes == h {
-                pk.no
-            } else {
-                pk.yes
-            };
+            let other = if pk.yes == h { pk.no } else { pk.yes };
             let twin = natural_loop(in g, other);
             let mut disjoint = true;
             for q in 0..twin.len() {

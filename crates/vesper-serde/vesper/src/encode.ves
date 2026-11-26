@@ -353,11 +353,7 @@ fn value(
                     Option::Some(v) => v,
                     Option::None => 0,
                 };
-                let shorter = if p_len < len {
-                    p_len
-                } else {
-                    len
-                };
+                let shorter = if p_len < len { p_len } else { len };
                 charge(inout c, add(1, shorter));
                 if p_len == len && same_bytes(in pool, p_off, off, len) {
                     fail(ErrorKind::DuplicateKey);

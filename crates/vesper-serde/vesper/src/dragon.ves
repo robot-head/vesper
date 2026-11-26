@@ -46,11 +46,7 @@ fn limbs_for(exp: i64) -> u64 {
         wrapping_u64(exp)
     };
     let n = wrapping_add(e, LIMB_HEADROOM_BITS) / LIMB_BITS;
-    if n > MAX_LIMBS {
-        MAX_LIMBS
-    } else {
-        n
-    }
+    if n > MAX_LIMBS { MAX_LIMBS } else { n }
 }
 
 fn mask32() -> u64 {
@@ -218,11 +214,7 @@ fn format_shortest(
     inout out: ChunkSeq[u8]
 ) -> i64 {
     // `a.cmp(b) < rounding` is `a <= b` when inclusive, else `a < b`.
-    let rounding: i64 = if inclusive {
-        1
-    } else {
-        0
-    };
+    let rounding: i64 = if inclusive { 1 } else { 0 };
     let mut k = estimate_scaling_factor(wrapping_add(mant0, plus0), exp);
     let size = limbs_for(exp);
     let mut mant = big_from(mant0, size);
@@ -391,11 +383,7 @@ pub fn shortest(bits: u64) -> Shortest {
 // The length of the text `{}` writes for `s` (`digits_to_dec_str` with
 // no fractional digits requested; a zero is `0`).
 pub fn shortest_len(s: Shortest) -> u64 {
-    let sign: u64 = if s.neg {
-        1
-    } else {
-        0
-    };
+    let sign: u64 = if s.neg { 1 } else { 0 };
     if s.n == 0 {
         return wrapping_add(sign, 1);
     }

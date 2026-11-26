@@ -153,11 +153,7 @@ pub struct Ordered {
 fn names_less(in b: B, x: u32, y: u32) -> bool {
     let nx = b.names.size(x);
     let ny = b.names.size(y);
-    let n = if nx < ny {
-        nx
-    } else {
-        ny
-    };
+    let n = if nx < ny { nx } else { ny };
     for i in 0..n {
         let cx = b.names.byte(x, i);
         let cy = b.names.byte(y, i);

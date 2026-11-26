@@ -64,19 +64,11 @@ pub fn charge_or(inout remaining: u64, units: u64, kind: u64) -> Unit eff [Fail[
 }
 
 pub fn min(a: u64, b: u64) -> u64 {
-    if a < b {
-        a
-    } else {
-        b
-    }
+    if a < b { a } else { b }
 }
 
 pub fn max(a: u64, b: u64) -> u64 {
-    if a > b {
-        a
-    } else {
-        b
-    }
+    if a > b { a } else { b }
 }
 
 // The byte at `i`, or 0 past the end (callers check bounds first).
@@ -175,11 +167,7 @@ pub fn leb_len(value: u64) -> u64 {
 pub fn put_leb(inout out: Slice[u8], at: u64, value: u64, len: u64) {
     let mut v = value;
     for i in 0..len {
-        let more: u64 = if v >= LEB128_MORE {
-            LEB128_MORE
-        } else {
-            0
-        };
+        let more: u64 = if v >= LEB128_MORE { LEB128_MORE } else { 0 };
         out.try_set(wrapping_add(at, i), wrapping_u8((v & LEB128_PAYLOAD) | more));
         v = v >> LEB128_SHIFT;
     }

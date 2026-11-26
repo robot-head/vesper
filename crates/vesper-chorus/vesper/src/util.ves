@@ -147,11 +147,7 @@ pub fn sub(a: u64, b: u64) -> u64 {
 // `a + b`, saturating.
 pub fn sat_add(a: u64, b: u64) -> u64 {
     let s = wrapping_add(a, b);
-    if s < a {
-        none()
-    } else {
-        s
-    }
+    if s < a { none() } else { s }
 }
 
 // `a * b`, saturating.
@@ -249,11 +245,7 @@ pub fn sym_cmp(in c: C, x: u64, y: u64) -> u64 {
     }
     let lx = sym_len(in c, x);
     let ly = sym_len(in c, y);
-    let n = if lx < ly {
-        lx
-    } else {
-        ly
-    };
+    let n = if lx < ly { lx } else { ly };
     let ox = sw(in c.sy_off, x);
     let oy = sw(in c.sy_off, y);
     for i in 0..n {

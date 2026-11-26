@@ -79,11 +79,7 @@ pub fn finish(h: u64) -> u64 {
 // Saturating cost addition (egglog's costs are u64 sums).
 pub fn sat_add(a: u64, b: u64) -> u64 {
     let s = wrapping_add(a, b);
-    if s < a {
-        MAX_U64
-    } else {
-        s
-    }
+    if s < a { MAX_U64 } else { s }
 }
 
 pub fn copy32(in s: ChunkSeq[u32]) -> ChunkSeq[u32] {

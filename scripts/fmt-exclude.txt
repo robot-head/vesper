@@ -19,3 +19,17 @@ tests/fixtures/stylus/recovery.ves
 tests/fixtures/macro_preview/malformed.ves
 tests/fixtures/source_macro_parameters/duplicate_names.ves
 tests/fixtures/source_macro_parameters/projected.ves
+
+# bootstrap/stage1.lock pins their source bytes, so the Stage 1 ratchet
+# fails with CorpusMismatch if they are reformatted.
+bootstrap/byte-class-probe.ves
+bootstrap/corpus/ackermann.ves
+bootstrap/corpus/collatz.ves
+bootstrap/corpus/divide_by_zero.ves
+bootstrap/corpus/factorial_overflow.ves
+bootstrap/corpus/fib.ves
+bootstrap/corpus/gcd.ves
+bootstrap/corpus/lets_negative.ves
+bootstrap/corpus/max3.ves
+bootstrap/corpus/pow_mod.ves
+bootstrap/corpus/sum_squares.ves

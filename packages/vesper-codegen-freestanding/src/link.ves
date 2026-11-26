@@ -314,11 +314,7 @@ impl Linker {
                         sec: si,
                         out: out,
                         boot: text_eq(in b, s.name_at, s.name_len, in ".text.boot"),
-                        align: if s.align == 0 {
-                            1
-                        } else {
-                            s.align
-                        },
+                        align: if s.align == 0 { 1 } else { s.align },
                         data_at: data_at,
                         data_len: data_len,
                         size: s.size,
@@ -535,11 +531,7 @@ impl Linker {
             return false;
         }
         let s = sym(in self.syms, o, rel.sym);
-        let name_len = if s.name_ok {
-            s.name_len
-        } else {
-            0
-        };
+        let name_len = if s.name_ok { s.name_len } else { 0 };
         let name = b[s.name_at..add(s.name_at, name_len)];
         let mut target: u64 = 0;
         if sym_in_section(s) {
@@ -669,11 +661,7 @@ impl Linker {
                     name: k,
                     address: start,
                     data_at: data_at,
-                    data_len: if bss {
-                        0
-                    } else {
-                        sub(end, start)
-                    },
+                    data_len: if bss { 0 } else { sub(end, start) },
                     mem_bytes: sub(end, start),
                     nobits: bss,
                     writable: k >= widen_u64(Out::Data),
@@ -896,11 +884,7 @@ impl Linker {
             push64(inout out, p.offset);
             push64(inout out, p.file_bytes);
             push64(inout out, p.mem_bytes);
-            let flags = if i == 0 {
-                pf_rx()
-            } else {
-                pf_rw()
-            };
+            let flags = if i == 0 { pf_rx() } else { pf_rw() };
             push64(inout out, widen_u64(flags));
         }
         push64(inout out, self.linked.len());
@@ -915,14 +899,7 @@ impl Linker {
             put_str(inout out, in self.names[l.name_at..add(l.name_at, l.name_len)]);
             push64(inout out, l.address);
             push64(inout out, l.size);
-            push64(
-                inout out,
-                if l.global {
-                    1
-                } else {
-                    0
-                }
-            );
+            push64(inout out, if l.global { 1 } else { 0 });
         }
         push64(inout out, pcs.len());
         for i in 0..pcs.len() {
@@ -948,11 +925,7 @@ fn section_of(in secs: ChunkSeq[OutSec], addr: u64) -> u64 {
                 executable: false
             },
         };
-        let size = if s.mem_bytes == 0 {
-            1
-        } else {
-            s.mem_bytes
-        };
+        let size = if s.mem_bytes == 0 { 1 } else { s.mem_bytes };
         if addr >= s.address && addr < add(s.address, size) {
             return i;
         }
@@ -1012,11 +985,7 @@ pub fn compare_code(
         fail_object_text(inout err, in "invalid section data");
         return;
     }
-    let data_len = if is_nobits(section) {
-        0
-    } else {
-        section.size
-    };
+    let data_len = if is_nobits(section) { 0 } else { section.size };
     let start = s.value;
     if add(start, code.len) < start || add(start, code.len) > data_len {
         fail_mismatch(inout err, in sname);

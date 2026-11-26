@@ -338,11 +338,7 @@ fn is_boundary(b: u64) -> bool {
 }
 
 pub fn min_u64(a: u64, b: u64) -> u64 {
-    if a < b {
-        a
-    } else {
-        b
-    }
+    if a < b { a } else { b }
 }
 
 // Whether `s[a..b]` is valid UTF-8 (`std::str::from_utf8`); the source is
@@ -594,13 +590,7 @@ fn dump_item(inout out: ChunkSeq[u8], in d: Doc, in src: Slice[u8], id: u32) {
             put_u64(inout out, n.a);
         }
     } else if k == K_FLOAT || k == K_DATETIME {
-        out.push(
-            if k == K_FLOAT {
-                102
-            } else {
-                100
-            }
-        );
+        out.push(if k == K_FLOAT { 102 } else { 100 });
         for i in n.s..n.e {
             out.push(wrapping_u8(byte_at(in src, i)));
         }

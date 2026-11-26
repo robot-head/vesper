@@ -250,11 +250,7 @@ pub fn validate_process_timeline(in events: Slice[u64]) -> (bool, u64) {
         if crash == 0 {
             restarts = wrapping_add(restarts, 1);
         }
-        expect_crash = if expect_crash == 1 {
-            0
-        } else {
-            1
-        };
+        expect_crash = if expect_crash == 1 { 0 } else { 1 };
         has_last = true;
         last = at;
         m = wrapping_add(m, 1);

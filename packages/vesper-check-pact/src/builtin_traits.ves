@@ -333,14 +333,7 @@ fn struct_conforms(
             break;
         }
     }
-    let _ = memo_state.try_set(
-        si,
-        if ok {
-            2
-        } else {
-            1
-        }
-    );
+    let _ = memo_state.try_set(si, if ok { 2 } else { 1 });
     ok
 }
 
@@ -1011,12 +1004,6 @@ pub fn builtin_wanted_words(in b: Slice[u8]) -> ChunkSeq[u64] {
         || bytes_contains(in b, text_start, text_end, "\"Ord::")
         || bytes_contains(in b, text_start, text_end, "\"Hash::")
         || bytes_contains(in b, text_start, text_end, "\"Ordering\"");
-    out.push(
-        if found {
-            1
-        } else {
-            0
-        }
-    );
+    out.push(if found { 1 } else { 0 });
     out
 }

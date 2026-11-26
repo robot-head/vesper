@@ -282,11 +282,7 @@ pub fn validate_type(
     if !is_handle_name(k, n.name) {
         return false;
     }
-    let arity: u32 = if n.name == k.region_box {
-        2
-    } else {
-        1
-    };
+    let arity: u32 = if n.name == k.region_box { 2 } else { 1 };
     if n.n != arity {
         let c = d.open("E0797");
         let m = d.text.len();

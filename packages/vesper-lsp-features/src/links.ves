@@ -333,11 +333,7 @@ fn target_less(
     let pb = v_paths.as_slice();
     let (as_, al) = (u64_at(in v_s, a), u64_at(in v_l, a));
     let (cs, cl) = (u64_at(in v_s, c), u64_at(in v_l, c));
-    let m = if al < cl {
-        al
-    } else {
-        cl
-    };
+    let m = if al < cl { al } else { cl };
     for i in 0..m {
         let x = byte(in pb, wrapping_add(as_, i));
         let y = byte(in pb, wrapping_add(cs, i));

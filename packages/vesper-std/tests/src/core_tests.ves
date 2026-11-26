@@ -252,11 +252,7 @@ test {
         let chained = result_and_then(
             good,
             | x: u64 | -> Result[u64, u64] {
-                if x > 5 {
-                    Result::Err(x)
-                } else {
-                    Result::Ok(x)
-                }
+                if x > 5 { Result::Err(x) } else { Result::Ok(x) }
             }
         );
         r = check(some_u64(err(chained), 6), 12, r);

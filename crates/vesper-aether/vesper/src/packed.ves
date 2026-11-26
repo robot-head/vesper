@@ -75,11 +75,7 @@ fn packed_permits(
     }
     let base = wrapping_mul(wrapping_sub(lo, 1), 3);
     let access = word(in regions, wrapping_add(base, 2));
-    let denied = if write {
-        access == 0
-    } else {
-        access == 1
-    };
+    let denied = if write { access == 0 } else { access == 1 };
     if end > word(in regions, wrapping_add(base, 1)) || denied {
         return 2;
     }
@@ -188,11 +184,7 @@ pub fn packed_capture(
             readable = wrapping_add(readable, len);
         }
         let slot = wrapping_add(PACKED_HEADER_WORDS, wrapping_mul(n, 4));
-        let wrap_bit: u64 = if cw {
-            65536
-        } else {
-            0
-        };
+        let wrap_bit: u64 = if cw { 65536 } else { 0 };
         out.try_set(slot, ci | wrap_bit);
         out.try_set(wrapping_add(slot, 1), addr);
         out.try_set(wrapping_add(slot, 2), len);
@@ -217,13 +209,6 @@ pub fn packed_capture(
     out.try_set(1, readable);
     out.try_set(2, writable);
     out.try_set(3, ci);
-    out.try_set(
-        4,
-        if cw {
-            1
-        } else {
-            0
-        }
-    );
+    out.try_set(4, if cw { 1 } else { 0 });
     Result::Ok(n)
 }

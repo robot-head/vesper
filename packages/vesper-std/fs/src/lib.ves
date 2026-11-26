@@ -175,11 +175,7 @@ pub fn read_path_limit(
     // did not grow ends at the same `read` that finds its end; a file that
     // grew is read on to its end (or the limit).
     let n = os_file_len(fd);
-    let first = if n < limit {
-        wrapping_add(n, 1)
-    } else {
-        limit
-    };
+    let first = if n < limit { wrapping_add(n, 1) } else { limit };
     let mut buf: ChunkSeq[u8] = ChunkSeq::new[u8]();
     buf.resize(first, 0);
     let got = os_read(fd, inout buf, 0, inout err);
@@ -191,11 +187,7 @@ pub fn read_path_limit(
                 break;
             }
             let room = wrapping_sub(limit, at);
-            let step: u64 = if room < 4096 {
-                room
-            } else {
-                4096
-            };
+            let step: u64 = if room < 4096 { room } else { 4096 };
             buf.resize(wrapping_add(at, step), 0);
             let m = os_read(fd, inout buf, at, inout err);
             buf.truncate(wrapping_add(at, m));
@@ -423,11 +415,7 @@ pub fn read_nofollow_limit(
                 break;
             }
             let room = wrapping_sub(limit, at);
-            let step: u64 = if room < 65536 {
-                room
-            } else {
-                65536
-            };
+            let step: u64 = if room < 65536 { room } else { 65536 };
             buf.resize(wrapping_add(at, step), 0);
             let m = os_read(fd, inout buf, at, inout err);
             buf.truncate(wrapping_add(at, m));

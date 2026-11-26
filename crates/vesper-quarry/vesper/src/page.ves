@@ -324,11 +324,7 @@ pub fn update(
         if l == 0 || wrapping_add(s, l) > PAGE_SIZE {
             return ERR_SLOT_LAYOUT;
         }
-        let need = if i == slot {
-            rlen
-        } else {
-            l
-        };
+        let need = if i == slot { rlen } else { l };
         used = wrapping_add(used, need);
         i = wrapping_add(i, 1);
     }

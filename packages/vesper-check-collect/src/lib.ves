@@ -882,19 +882,11 @@ fn collect_all(inout c: Collect, in a: Ast, src: u8, shift: u32, skip: bool, in 
 // shifted, or 0 for an empty one (`integer_widths::module_end`).
 fn prelude_end(in a: Ast, shift: u32, in defined: Interner) -> u32 {
     let e = module_end(in a, true, in defined);
-    if e == 0 {
-        0
-    } else {
-        wrapping_add(e, shift)
-    }
+    if e == 0 { 0 } else { wrapping_add(e, shift) }
 }
 
 fn max32(a: u32, b: u32) -> u32 {
-    if a > b {
-        a
-    } else {
-        b
-    }
+    if a > b { a } else { b }
 }
 
 // `World::collect` over `source`: the builtins, the module, then the

@@ -336,15 +336,7 @@ fn scan_head(inout d: DecoderCore, in front: Slice[u8], in back: Slice[u8]) -> S
         let skip_to = if d.after_cr {
             d.scan
         } else if d.scan < front_len {
-            line_break(
-                in front,
-                d.scan,
-                if stop < front_len {
-                    stop
-                } else {
-                    front_len
-                }
-            )
+            line_break(in front, d.scan, if stop < front_len { stop } else { front_len })
         } else {
             wrapping_add(
                 front_len,

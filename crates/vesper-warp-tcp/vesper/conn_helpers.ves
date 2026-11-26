@@ -139,11 +139,7 @@ fn set_send_mss(inout t: Tcb) {
     } else {
         t.peer_mss
     };
-    let capped = if base > t.cfg.mss {
-        t.cfg.mss
-    } else {
-        base
-    };
+    let capped = if base > t.cfg.mss { t.cfg.mss } else { base };
     let ts: u32 = if t.ts_ok {
         wrapping_u32(PADDED_TIMESTAMPS_LEN)
     } else {
@@ -206,11 +202,7 @@ fn queue_rst_reply(inout t: Tcb, ips_in: Ips, seg: Parsed, seq_len: u32) {
             ips: ips_reversed(ips_in),
             src_port: seg.dst_port,
             dst_port: seg.src_port,
-            seq: if with_ack {
-                seg.ack
-            } else {
-                0
-            },
+            seq: if with_ack { seg.ack } else { 0 },
             ack: if with_ack {
                 Option::None
             } else {

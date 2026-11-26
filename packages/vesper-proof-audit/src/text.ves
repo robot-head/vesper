@@ -427,11 +427,7 @@ pub fn line_at(in s: Slice[u8], at: u64) -> (u64, u64) {
         }
         i = wrapping_add(i, 1);
     }
-    let next = if i < s.len() {
-        wrapping_add(i, 1)
-    } else {
-        i
-    };
+    let next = if i < s.len() { wrapping_add(i, 1) } else { i };
     // A `\r` goes only with a `\n`: the last line keeps its own.
     let mut end = i;
     if i < s.len() && end > at && byte(in s, wrapping_sub(end, 1)) == 13 {

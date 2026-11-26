@@ -449,18 +449,7 @@ fn declaration(inout x: Ix, name: u32, s: u32, e: u32, kind: u8, f: u32) -> bool
 
 fn function_decl(inout x: Ix, f: u32, kind: u8, record: bool) -> bool {
     let n = fn_at(in x.ast, f);
-    declaration(
-        inout x,
-        n.name,
-        n.start,
-        n.end,
-        kind,
-        if record {
-            f
-        } else {
-            NONE
-        }
-    )
+    declaration(inout x, n.name, n.start, n.end, kind, if record { f } else { NONE })
 }
 
 fn item(inout x: Ix, it: ItemNode) -> bool {
@@ -473,11 +462,7 @@ fn item(inout x: Ix, it: ItemNode) -> bool {
             a.name,
             a.start,
             a.end,
-            if a.is_enum {
-                KIND_ENUM
-            } else {
-                KIND_STRUCT
-            },
+            if a.is_enum { KIND_ENUM } else { KIND_STRUCT },
             NONE
         )
     } else if it.kind == ITEM_EFFECT {

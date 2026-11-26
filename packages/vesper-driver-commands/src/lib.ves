@@ -1148,11 +1148,7 @@ fn status_name(status: u32) -> Str {
 }
 
 fn mode_name(recovery: bool) -> Str {
-    if recovery {
-        "recovery"
-    } else {
-        "source"
-    }
+    if recovery { "recovery" } else { "source" }
 }
 
 // One file's `format_file` report (its keys sorted, as serde_json's map
@@ -1283,11 +1279,7 @@ fn name_before(in e: Entries, x: u64, y: u64) -> bool {
     let yb = entry_end(in e, y);
     let xl = wrapping_sub(xb, xa);
     let yl = wrapping_sub(yb, ya);
-    let n = if xl < yl {
-        xl
-    } else {
-        yl
-    };
+    let n = if xl < yl { xl } else { yl };
     for i in 0..n {
         let p = byte_at(in e.bytes.as_slice(), wrapping_add(xa, i));
         let q = byte_at(in e.bytes.as_slice(), wrapping_add(ya, i));
@@ -1355,11 +1347,7 @@ fn set64(inout s: Slice[u64], i: u64, v: u64) {
 }
 
 fn min_u64(x: u64, y: u64) -> u64 {
-    if x < y {
-        x
-    } else {
-        y
-    }
+    if x < y { x } else { y }
 }
 
 // Whether `name` holds U+FFFD: on Windows the host lists names lossily, so

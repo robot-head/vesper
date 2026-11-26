@@ -95,21 +95,13 @@ pub fn zero(inout b: Builder) -> Value eff [Ffi[Cranelift]] {
 }
 
 pub fn alloc_uninit(inout b: Builder, in m: Module, size: u32) -> Value eff [Ffi[Cranelift]] {
-    let sz = if size < 8 {
-        8
-    } else {
-        size
-    };
+    let sz = if size < 8 { 8 } else { size };
     let slot = create_stack_slot(inout b, sz, 3);
     ins_stack_addr(inout b, module_pointer_type(in m), slot, 0)
 }
 
 pub fn alloc(inout b: Builder, in m: Module, size: u32) -> Value eff [Ffi[Cranelift]] {
-    let sz = if size < 8 {
-        8
-    } else {
-        size
-    };
+    let sz = if size < 8 { 8 } else { size };
     let slot = create_stack_slot(inout b, sz, 3);
     let ptr = ins_stack_addr(inout b, module_pointer_type(in m), slot, 0);
     let mut off: u32 = 0;
