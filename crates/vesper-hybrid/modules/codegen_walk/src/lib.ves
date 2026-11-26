@@ -1,11 +1,14 @@
 // @vesper/hybrid-codegen-walk: `vesper::native::register_locals` and the
 // entry-block plans of `vesper::native::frame_plan` served from Vesper in
 // the hybrid Stage 2 build (Rust-exit gap wave 1 lane 11, #1509), through
-// the `register_locals` and `entry_plans` hooks of `vesper::codegen_swap`.
+// the `register_locals`, `entry_plans` and `block_plan` hooks of
+// `vesper::codegen_swap`.
 
 // @export abi 4
 
-use @vesper/native-walk::{native_walk_frames_bytes, native_walk_register_locals_bytes};
+use @vesper/native-walk::{
+    native_walk_block_plan_bytes, native_walk_frames_bytes, native_walk_register_locals_bytes
+};
 
 pub fn register_locals_words(in input: Slice[u8]) -> ChunkSeq[u64] {
     native_walk_register_locals_bytes(in input)
@@ -15,4 +18,10 @@ pub fn register_locals_words(in input: Slice[u8]) -> ChunkSeq[u64] {
 // 3b and 4a), from `@vesper/codegen-calls`' input with one task.
 pub fn frame_plans_words(in input: Slice[u8]) -> ChunkSeq[u64] {
     native_walk_frames_bytes(in input)
+}
+
+// One graph's block plan (part 6a, #2094): the block count, then per block
+// its successor count and successors, as little-endian words.
+pub fn block_plan_words(in input: Slice[u8]) -> ChunkSeq[u64] {
+    native_walk_block_plan_bytes(in input)
 }

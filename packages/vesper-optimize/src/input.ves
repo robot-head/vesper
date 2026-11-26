@@ -18,10 +18,7 @@ pub struct Reader {
 
 impl Reader {
     pub fn word(inout self, in b: Slice[u8]) -> u64 {
-        let x = match b.try_read_u64_le(self.pos) {
-            Option::Some(x) => x,
-            Option::None => 0,
-        };
+        let x = b.try_read_u64_le(self.pos).unwrap_or(0);
         self.pos = wrapping_add(self.pos, 8);
         x
     }
@@ -96,10 +93,7 @@ pub struct Cert {
 }
 
 pub fn cap_at(in s: ChunkSeq[u64], i: u32) -> u64 {
-    match s.try_get(widen_u64(i)) {
-        Option::Some(v) => v,
-        Option::None => 0,
-    }
+    s.try_get(widen_u64(i)).unwrap_or(0)
 }
 
 fn push_list(inout a: Ast, in words: ChunkSeq[u32]) -> u32 {

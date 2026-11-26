@@ -154,10 +154,7 @@ fn put(inout out: ChunkSeq[u8], in text: Str) {
 }
 
 fn flag(in flags: ChunkSeq[bool], i: u32) -> bool {
-    match flags.try_get(w(i)) {
-        Option::Some(value) => value,
-        Option::None => false,
-    }
+    flags.try_get(w(i)).unwrap_or(false)
 }
 
 impl Fip {

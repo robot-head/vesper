@@ -45,10 +45,7 @@ impl Json {
     fn raw(inout self, in s: Str) {
         let b = s.as_bytes();
         for i in 0..b.len() {
-            let c = match b.try_get(i) {
-                Option::Some(c) => c,
-                Option::None => 0,
-            };
+            let c = b.try_get(i).unwrap_or(0);
             self.out.push(c);
         }
     }
@@ -100,10 +97,7 @@ impl Json {
         self.out.push(34);
         let b = s.as_bytes();
         for k in 0..b.len() {
-            let c = match b.try_get(k) {
-                Option::Some(c) => c,
-                Option::None => 0,
-            };
+            let c = b.try_get(k).unwrap_or(0);
             self.esc(c);
         }
         self.out.push(34);

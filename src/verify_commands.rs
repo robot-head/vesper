@@ -23,6 +23,17 @@ const EXTRACT_BUILDER_VERSION: &str = "1";
 const MAX_INPUT: usize = 128 * 1024;
 const MAX_JSON: usize = 2 * 1024 * 1024;
 const MAX_OLEAN_BYTES: u64 = 256 * 1024 * 1024;
+/// How much of a failure message is kept, in bytes.
+const MAX_FAILURE_MESSAGE_BYTES: usize = 4096;
+/// The most command-line arguments `verify` accepts.
+const MAX_ARGS: usize = 300;
+/// The most command-line argument bytes `verify` accepts, all together.
+const MAX_ARG_BYTES: usize = 32 * 1024;
+/// The longest path argument accepted, in bytes.
+const MAX_PATH_BYTES: usize = 4096;
+/// Windows `FILE_FLAG_OPEN_REPARSE_POINT`: open a link itself, not its target.
+#[cfg(windows)]
+const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
 const HELP: &str = "Usage: vesper verify SOURCE --format [--json | --emit-lean] [--lean PATH] [--timeout SECONDS]\n       vesper verify SOURCE --extract [--proofs FILE.lean] [--theorem Name ...] [--contract-proof Function=Theorem --contract-witness Function=Theorem ...] [--allow-axiom Name ...] [--olean-store DIR|default] [--json | --emit-lean] [--lean PATH] [--timeout SECONDS]\n\n--format: Kernel-check a formatter document-algebra comment-conservation model with Lean 4.35.0.\n--extract: Extract a Lean 4 proof model from checked .ves source, compile and replay through the Lean 4.35.0 kernel, and audit axioms (sorryAx is always forbidden). Total fuel companions are noncomputable; original recursive executable definitions and their callers are omitted and listed in JSON.\n--proofs joins an explicit Lean proof script containing theorem proofs for the extracted model.\n--theorem selects theorem names to audit (default: theorems discovered in --proofs, or an internal model-compilation witness).\n--contract-proof binds an emitted function contract to a theorem; when used, every emitted contract must be covered. Each binding requires --contract-witness for the generated existential input precondition. This checks model partial correctness and inhabited input preconditions, not termination or native-code correspondence. Explicit contract admission permits only the three standard Lean axioms.\n--allow-axiom permits named axioms such as propext, Quot.sound, or Classical.choice.\n--olean-store stores audited .olean artifacts and compares cache hits with a fresh compilation in a Loom CAS directory (`default` is ~/.vesper/store).\n--emit-lean prints the generated Lean source only after compilation and kernel replay.\n--timeout bounds each Lean process (1 to 300 seconds; default 30).\nThe selected Lean toolchain and artifact parser remain trusted.\n";
 
 #[derive(Debug)]
@@ -33,7 +44,7 @@ pub(crate) struct Failure {
 impl Failure {
     fn new(stage: &'static str, message: impl std::fmt::Display) -> Self {
         let message = message.to_string();
-        let mut end = message.len().min(4096);
+        let mut end = message.len().min(MAX_FAILURE_MESSAGE_BYTES);
         while !message.is_char_boundary(end) {
             end -= 1;
         }
@@ -66,7 +77,7 @@ fn options(args: Vec<String>) -> Result<Options, Failure> {
     let size = args
         .iter()
         .try_fold(0usize, |n, arg| n.checked_add(arg.len()));
-    if args.len() > 300 || size.is_none_or(|n| n > 32 * 1024) {
+    if args.len() > MAX_ARGS || size.is_none_or(|n| n > MAX_ARG_BYTES) {
         return Err(Failure::new(
             "config",
             "verification argument limit exceeded",
@@ -111,7 +122,7 @@ fn options(args: Vec<String>) -> Result<Options, Failure> {
                     let path = args
                         .next()
                         .ok_or_else(|| Failure::new("config", "--proofs requires a path"))?;
-                    if path.len() > 4096 {
+                    if path.len() > MAX_PATH_BYTES {
                         return Err(Failure::new("config", "invalid --proofs path"));
                     }
                     proofs = Some(PathBuf::from(path));
@@ -128,7 +139,7 @@ fn options(args: Vec<String>) -> Result<Options, Failure> {
                         ));
                     }
                     theorems.insert(name);
-                    if theorems.len() > 128 {
+                    if theorems.len() > proof_commands::MAX_THEOREMS {
                         return Err(Failure::new("config", "at most 128 theorems are supported"));
                     }
                     continue;
@@ -157,7 +168,7 @@ fn options(args: Vec<String>) -> Result<Options, Failure> {
                     {
                         return Err(Failure::new("config", "duplicate contract proof binding"));
                     }
-                    if bindings.len() > 128 {
+                    if bindings.len() > proof_commands::MAX_THEOREMS {
                         return Err(Failure::new(
                             "config",
                             "at most 128 contract proofs are supported",
@@ -191,7 +202,7 @@ fn options(args: Vec<String>) -> Result<Options, Failure> {
                     let dir = args
                         .next()
                         .ok_or_else(|| Failure::new("config", "--olean-store requires a path"))?;
-                    if dir.is_empty() || dir.len() > 4096 {
+                    if dir.is_empty() || dir.len() > MAX_PATH_BYTES {
                         return Err(Failure::new("config", "invalid --olean-store path"));
                     }
                     olean_store = Some(dir);
@@ -225,7 +236,7 @@ fn options(args: Vec<String>) -> Result<Options, Failure> {
                     let seconds = value
                         .parse::<u64>()
                         .ok()
-                        .filter(|n| (1..=300).contains(n))
+                        .filter(|n| (1..=proof_commands::MAX_TIMEOUT_SECONDS).contains(n))
                         .ok_or_else(|| {
                             Failure::new("config", "--timeout must be between 1 and 300 seconds")
                         })?;
@@ -242,7 +253,7 @@ fn options(args: Vec<String>) -> Result<Options, Failure> {
                 _ => {}
             }
         }
-        if arg.len() > 4096 || source.replace(PathBuf::from(arg)).is_some() {
+        if arg.len() > MAX_PATH_BYTES || source.replace(PathBuf::from(arg)).is_some() {
             return Err(Failure::new(
                 "config",
                 "verify accepts one bounded source path",
@@ -293,7 +304,7 @@ fn options(args: Vec<String>) -> Result<Options, Failure> {
     let lean = lean
         .or_else(|| env::var("VESPER_LEAN").ok())
         .unwrap_or_else(|| "lean".into());
-    if lean.is_empty() || lean.len() > 4096 {
+    if lean.is_empty() || lean.len() > MAX_PATH_BYTES {
         return Err(Failure::new("config", "invalid Lean executable path"));
     }
     Ok(Options {
@@ -306,7 +317,7 @@ fn options(args: Vec<String>) -> Result<Options, Failure> {
         allowed_axioms,
         olean_store,
         lean,
-        timeout: timeout.unwrap_or(30),
+        timeout: timeout.unwrap_or(proof_commands::DEFAULT_TIMEOUT_SECONDS),
         json,
         emit_lean,
     })
@@ -329,7 +340,7 @@ fn read_source(path: &Path) -> Result<String, Failure> {
     #[cfg(windows)]
     {
         use std::os::windows::fs::OpenOptionsExt;
-        open.custom_flags(0x0020_0000);
+        open.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
     }
     let file = open.open(path).map_err(|e| Failure::new("io", e))?;
     let meta = file.metadata().map_err(|e| Failure::new("io", e))?;
@@ -1086,7 +1097,7 @@ pub(crate) fn discover_theorems(proofs: &str) -> Result<Vec<String>, Failure> {
                 };
                 if seen.insert(full.clone()) {
                     discovered.push(full);
-                    if discovered.len() > 128 {
+                    if discovered.len() > proof_commands::MAX_THEOREMS {
                         return Err(Failure::new(
                             "proofs",
                             "proofs file declares more than 128 theorems",
@@ -1242,7 +1253,7 @@ fn execute_extract(options: &Options) -> Result<Vec<u8>, Failure> {
     audit_theorems.extend(binding_theorems);
     audit_theorems.sort();
     audit_theorems.dedup();
-    if audit_theorems.len() > 128 {
+    if audit_theorems.len() > proof_commands::MAX_THEOREMS {
         return Err(Failure::new(
             "contracts",
             "selected theorems and contract bindings exceed 128",

@@ -94,10 +94,7 @@ fn display_hash(inout ctx: D, ast_ty: u32) -> u64 {
     display_into(inout ctx, ast_ty, inout text);
     let mut hash: u64 = 14695981039346656037;
     for i in 0..text.len() {
-        let byte = match text.try_get(i) {
-            Option::Some(byte) => byte,
-            Option::None => 0,
-        };
+        let byte = text.try_get(i).unwrap_or(0);
         hash = wrapping_mul(hash ^ widen_u64(byte), 1099511628211);
     }
     hash

@@ -3,6 +3,11 @@
 // empty containers). Strings escape `"`, `\`, `\b`, `\f`, `\n`, `\r`,
 // `\t` and the other control bytes as `\u00xx`; everything else, UTF-8
 // included, is copied.
+use self::strs::{
+    BACKSLASH, BACKSPACE, CARRIAGE_RETURN, CLOSE_BRACE, CLOSE_BRACKET, COLON, COMMA, DIGIT_ZERO,
+    FORM_FEED, HEX_LETTER_BASE, LOWER_B, LOWER_F, LOWER_N, LOWER_R, LOWER_T, LOWER_U, NEWLINE,
+    OPEN_BRACE, OPEN_BRACKET, QUOTE, SPACE, TAB
+};
 pub struct Json {
     pub out: ChunkSeq[u8],
     pretty: bool,
@@ -18,10 +23,10 @@ pub fn json_new(pretty: bool) -> Json {
 }
 
 fn newline(inout j: Json) {
-    j.out.push(10);
+    j.out.push(NEWLINE);
     for _i in 0..j.depth {
-        j.out.push(32);
-        j.out.push(32);
+        j.out.push(SPACE);
+        j.out.push(SPACE);
     }
 }
 
@@ -35,7 +40,7 @@ fn element(inout j: Json) {
         return;
     }
     if !j.fresh {
-        j.out.push(44);
+        j.out.push(COMMA);
     }
     if j.pretty {
         newline(inout j);
@@ -45,7 +50,7 @@ fn element(inout j: Json) {
 
 pub fn begin_object(inout j: Json) {
     element(inout j);
-    j.out.push(123);
+    j.out.push(OPEN_BRACE);
     j.depth = wrapping_add(j.depth, 1);
     j.fresh = true;
 }
@@ -55,13 +60,13 @@ pub fn end_object(inout j: Json) {
     if !j.fresh && j.pretty {
         newline(inout j);
     }
-    j.out.push(125);
+    j.out.push(CLOSE_BRACE);
     j.fresh = false;
 }
 
 pub fn begin_array(inout j: Json) {
     element(inout j);
-    j.out.push(91);
+    j.out.push(OPEN_BRACKET);
     j.depth = wrapping_add(j.depth, 1);
     j.fresh = true;
 }
@@ -71,66 +76,66 @@ pub fn end_array(inout j: Json) {
     if !j.fresh && j.pretty {
         newline(inout j);
     }
-    j.out.push(93);
+    j.out.push(CLOSE_BRACKET);
     j.fresh = false;
 }
 
 pub fn key(inout j: Json, in k: Str) {
     element(inout j);
     put_string(inout j.out, in k.as_bytes());
-    j.out.push(58);
+    j.out.push(COLON);
     if j.pretty {
-        j.out.push(32);
+        j.out.push(SPACE);
     }
     j.keyed = true;
 }
 
 fn hex_digit(n: u8) -> u8 {
     if n < 10 {
-        wrapping_add(n, 48)
+        wrapping_add(n, DIGIT_ZERO)
     } else {
-        wrapping_add(n, 87)
+        wrapping_add(n, HEX_LETTER_BASE)
     }
 }
 
 // `s` as a JSON string, serde_json's escapes.
 pub fn put_string(inout out: ChunkSeq[u8], in s: Slice[u8]) {
-    out.push(34);
+    out.push(QUOTE);
     for i in 0..s.len() {
         let b = s.try_get(i).unwrap_or(0);
-        if b == 34 {
-            out.push(92);
-            out.push(34);
-        } else if b == 92 {
-            out.push(92);
-            out.push(92);
-        } else if b == 10 {
-            out.push(92);
-            out.push(110);
-        } else if b == 13 {
-            out.push(92);
-            out.push(114);
-        } else if b == 9 {
-            out.push(92);
-            out.push(116);
-        } else if b == 8 {
-            out.push(92);
-            out.push(98);
-        } else if b == 12 {
-            out.push(92);
-            out.push(102);
-        } else if b < 32 {
-            out.push(92);
-            out.push(117);
-            out.push(48);
-            out.push(48);
+        if b == QUOTE {
+            out.push(BACKSLASH);
+            out.push(QUOTE);
+        } else if b == BACKSLASH {
+            out.push(BACKSLASH);
+            out.push(BACKSLASH);
+        } else if b == NEWLINE {
+            out.push(BACKSLASH);
+            out.push(LOWER_N);
+        } else if b == CARRIAGE_RETURN {
+            out.push(BACKSLASH);
+            out.push(LOWER_R);
+        } else if b == TAB {
+            out.push(BACKSLASH);
+            out.push(LOWER_T);
+        } else if b == BACKSPACE {
+            out.push(BACKSLASH);
+            out.push(LOWER_B);
+        } else if b == FORM_FEED {
+            out.push(BACKSLASH);
+            out.push(LOWER_F);
+        } else if b < SPACE {
+            out.push(BACKSLASH);
+            out.push(LOWER_U);
+            out.push(DIGIT_ZERO);
+            out.push(DIGIT_ZERO);
             out.push(hex_digit(b >> 4));
             out.push(hex_digit(b & 15));
         } else {
             out.push(b);
         }
     }
-    out.push(34);
+    out.push(QUOTE);
 }
 
 pub fn string(inout j: Json, in s: Slice[u8]) {
@@ -140,7 +145,7 @@ pub fn string(inout j: Json, in s: Slice[u8]) {
 
 pub fn put_u64(inout out: ChunkSeq[u8], n: u64) {
     if n == 0 {
-        out.push(48);
+        out.push(DIGIT_ZERO);
         return;
     }
     let mut digits: ChunkSeq[u8] = ChunkSeq::new[u8]();
@@ -158,7 +163,7 @@ pub fn put_u64(inout out: ChunkSeq[u8], n: u64) {
             break;
         }
         i = wrapping_sub(i, 1);
-        out.push(digits.try_get(i).unwrap_or(48));
+        out.push(digits.try_get(i).unwrap_or(DIGIT_ZERO));
     }
 }
 

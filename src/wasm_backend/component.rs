@@ -17,6 +17,21 @@ pub(crate) const PACKAGE: &str = "vesper:program@0.1.0";
 pub const ENTRY_INTERFACE: &str = "vesper:program/entry@0.1.0";
 pub const WASI_RUN: &str = "wasi:cli/run@0.2.0";
 
+/// How deeply exported types may nest before they are rejected.
+const MAX_TYPE_NESTING: usize = 32;
+/// Most flat core parameters the canonical ABI passes directly; more go
+/// through memory.
+const MAX_FLAT_PARAMS: usize = 16;
+/// Most cases of a variant whose discriminant is a `u8`, resp. a `u16`.
+const MAX_U8_CASES: usize = 256;
+const MAX_U16_CASES: usize = 65536;
+/// Byte offset of the length in a canonical `string` (`ptr: i32, len: i32`).
+const CABI_STRING_LEN_OFFSET: u64 = 4;
+/// Mask of the low 32 bits of an `i64`.
+const LOW_32_BITS: i64 = 0xffff_ffff;
+/// [`layout::STR_HEADER_BYTES`] as an `i32.const` operand.
+const STR_HEADER_BYTES_I32: i32 = layout::STR_HEADER_BYTES as i32;
+
 /// A WIT identifier (kebab-case, `%`-escaped) for a Vesper name.
 pub(crate) fn ident(name: &str) -> String {
     let mut words: Vec<String> = vec![];
@@ -101,7 +116,7 @@ impl Wit {
         if let Some(n) = self.names.get(&key) {
             return Ok(format!("%{n}"));
         }
-        if !self.active.insert(key.clone()) || self.active.len() > 32 {
+        if !self.active.insert(key.clone()) || self.active.len() > MAX_TYPE_NESTING {
             return Err(export_err(format!(
                 "recursive or too deeply nested type {ty}"
             )));
@@ -243,12 +258,12 @@ fn record(world: &crate::check::World, ts: &[Type]) -> Result<((u64, u64), Vec<u
     Ok(((align_to(offset, align), align), offsets))
 }
 fn discriminant(cases: usize) -> (u64, u32) {
-    if cases <= 256 {
+    if cases <= MAX_U8_CASES {
         (1, 0)
-    } else if cases <= 65536 {
-        (2, 1)
+    } else if cases <= MAX_U16_CASES {
+        (2, layout::ALIGN_2_LOG2)
     } else {
-        (4, 2)
+        (4, layout::ALIGN_4_LOG2)
     }
 }
 fn flat_count(world: &crate::check::World, ty: &Type) -> Result<usize, WasmError> {
@@ -309,7 +324,7 @@ fn store(
         code.extend([
             I::LocalGet(from),
             I::I32WrapI64,
-            I::I64Load(m(slot, 3)),
+            I::I64Load(m(slot, layout::ALIGN_8_LOG2)),
             I::LocalSet(to),
         ]);
     };
@@ -318,8 +333,8 @@ fn store(
             code.extend([I::LocalGet(base), I::I32WrapI64, I::LocalGet(v)]);
             code.push(match s {
                 Scalar::Bool | Scalar::U8 => I::I64Store8(m(offset, 0)),
-                Scalar::U32 => I::I64Store32(m(offset, 2)),
-                _ => I::I64Store(m(offset, 3)),
+                Scalar::U32 => I::I64Store32(m(offset, layout::ALIGN_4_LOG2)),
+                _ => I::I64Store(m(offset, layout::ALIGN_8_LOG2)),
             });
         }
         Shape::Str => {
@@ -328,22 +343,22 @@ fn store(
                 I::LocalGet(base),
                 I::I32WrapI64,
                 I::LocalGet(v),
-                I::I64Const(8),
+                I::I64Const(layout::STR_HEADER_BYTES_I64),
                 I::I64Add,
-                I::I64Store32(m(offset, 2)),
+                I::I64Store32(m(offset, layout::ALIGN_4_LOG2)),
                 I::LocalGet(base),
                 I::I32WrapI64,
                 I::LocalGet(v),
                 I::I32WrapI64,
-                I::I64Load(m(0, 3)),
-                I::I64Store32(m(offset + 4, 2)),
+                I::I64Load(m(0, layout::ALIGN_8_LOG2)),
+                I::I64Store32(m(offset + CABI_STRING_LEN_OFFSET, layout::ALIGN_4_LOG2)),
             ]);
         }
         Shape::Tuple(ts) => {
             let (_, offs) = record(world, &ts)?;
             for (i, t) in ts.iter().enumerate() {
                 let x = temp(locals);
-                field(code, v, 8 * i as u64, x);
+                field(code, v, layout::SLOT_BYTES * i as u64, x);
                 store(l, code, locals, nparams, base, offset + offs[i], x, t)?;
             }
         }
@@ -352,7 +367,7 @@ fn store(
             let (_, offs) = record(world, &ts)?;
             for (i, t) in ts.iter().enumerate() {
                 let x = temp(locals);
-                field(code, v, 8 * i as u64, x);
+                field(code, v, layout::SLOT_BYTES * i as u64, x);
                 store(l, code, locals, nparams, base, offset + offs[i], x, t)?;
             }
         }
@@ -406,15 +421,15 @@ fn store(
 fn single_leaf(world: &crate::check::World, ty: &Type) -> Result<(I<'static>, ValType), WasmError> {
     Ok(match layout::shape(world, ty)? {
         Shape::Scalar(Scalar::Bool | Scalar::U8) => (I::I32Load8U(m(0, 0)), ValType::I32),
-        Shape::Scalar(Scalar::U32) => (I::I32Load(m(0, 2)), ValType::I32),
-        Shape::Scalar(Scalar::F64) => (I::F64Load(m(0, 3)), ValType::F64),
-        Shape::Scalar(_) => (I::I64Load(m(0, 3)), ValType::I64),
+        Shape::Scalar(Scalar::U32) => (I::I32Load(m(0, layout::ALIGN_4_LOG2)), ValType::I32),
+        Shape::Scalar(Scalar::F64) => (I::F64Load(m(0, layout::ALIGN_8_LOG2)), ValType::F64),
+        Shape::Scalar(_) => (I::I64Load(m(0, layout::ALIGN_8_LOG2)), ValType::I64),
         Shape::Tuple(ts) if ts.len() == 1 => single_leaf(world, &ts[0])?,
         Shape::Struct { fields, .. } if fields.len() == 1 => single_leaf(world, &fields[0].1)?,
         Shape::Enum { variants, .. } => match discriminant(variants.len()).0 {
             1 => (I::I32Load8U(m(0, 0)), ValType::I32),
-            2 => (I::I32Load16U(m(0, 1)), ValType::I32),
-            _ => (I::I32Load(m(0, 2)), ValType::I32),
+            2 => (I::I32Load16U(m(0, layout::ALIGN_2_LOG2)), ValType::I32),
+            _ => (I::I32Load(m(0, layout::ALIGN_4_LOG2)), ValType::I32),
         },
         _ => return Err(WasmError::Invalid(format!("{ty} is not single-flat"))),
     })
@@ -511,7 +526,7 @@ fn lift(
     let block = |code: &mut Vec<I<'static>>, locals: &mut Vec<ValType>, slots: usize| {
         let b = temp(locals);
         code.extend([
-            I::I64Const(8 * slots as i64),
+            I::I64Const(layout::SLOT_BYTES_I64 * slots as i64),
             I::Call(l.alloc),
             I::LocalSet(b),
         ]);
@@ -522,7 +537,7 @@ fn lift(
             I::LocalGet(b),
             I::I32WrapI64,
             I::LocalGet(v),
-            I::I64Store(m(8 * slot, 3)),
+            I::I64Store(m(layout::SLOT_BYTES * slot, layout::ALIGN_8_LOG2)),
         ]);
     };
     Ok(match layout::shape(world, ty)? {
@@ -532,7 +547,7 @@ fn lift(
                 // A joined variant slot carries the i32 in its low bits.
                 code.extend([
                     I::LocalGet(x),
-                    I::I64Const(0xffff_ffff),
+                    I::I64Const(LOW_32_BITS),
                     I::I64And,
                     I::LocalSet(x),
                 ]);
@@ -544,19 +559,19 @@ fn lift(
             let b = temp(locals);
             code.extend([
                 I::LocalGet(len),
-                I::I64Const(0xffff_ffff),
+                I::I64Const(LOW_32_BITS),
                 I::I64And,
                 I::LocalTee(len),
-                I::I64Const(8),
+                I::I64Const(layout::STR_HEADER_BYTES_I64),
                 I::I64Add,
                 I::Call(l.alloc),
                 I::LocalTee(b),
                 I::I32WrapI64,
                 I::LocalGet(len),
-                I::I64Store(m(0, 3)),
+                I::I64Store(m(0, layout::ALIGN_8_LOG2)),
                 I::LocalGet(b),
                 I::I32WrapI64,
-                I::I32Const(8),
+                I::I32Const(STR_HEADER_BYTES_I32),
                 I::I32Add,
                 I::LocalGet(ptr),
                 I::I32WrapI64,
@@ -716,9 +731,9 @@ pub(crate) fn exports(
     }
     // The canonical ABI passes more than 16 flat parameters through memory;
     // the export wrapper takes them flat only.
-    if core_params.len() > 16 {
+    if core_params.len() > MAX_FLAT_PARAMS {
         return Err(WasmError::Entry(format!(
-            "entry parameters flatten to {} core values; at most 16 are supported",
+            "entry parameters flatten to {} core values; at most {MAX_FLAT_PARAMS} are supported",
             core_params.len()
         )));
     }
@@ -762,12 +777,12 @@ pub(crate) fn exports(
         let frame = nparams + locals.len() as u32;
         locals.push(ValType::I64);
         code.extend([
-            I::I64Const(8),
+            I::I64Const(layout::SLOT_BYTES_I64),
             I::Call(l.alloc),
             I::LocalTee(frame),
             I::I32WrapI64,
             I::I64Const(i64::from(slot)),
-            I::I64Store(m(0, 3)),
+            I::I64Store(m(0, layout::ALIGN_8_LOG2)),
             I::LocalGet(frame),
             I::GlobalSet(l.env[&format!("$effect:{}", c.effect())]),
         ]);

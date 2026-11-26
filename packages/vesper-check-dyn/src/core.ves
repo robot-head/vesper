@@ -210,24 +210,15 @@ pub fn inc(value: u64) -> u64 {
 }
 
 pub fn u32_at(in seq: ChunkSeq[u32], i: u64) -> u32 {
-    match seq.try_get(i) {
-        Option::Some(value) => value,
-        Option::None => NONE,
-    }
+    seq.try_get(i).unwrap_or(NONE)
 }
 
 pub fn u64_at(in seq: ChunkSeq[u64], i: u64) -> u64 {
-    match seq.try_get(i) {
-        Option::Some(value) => value,
-        Option::None => 0,
-    }
+    seq.try_get(i).unwrap_or(0)
 }
 
 pub fn u8_at(in seq: ChunkSeq[u8], i: u64) -> u8 {
-    match seq.try_get(i) {
-        Option::Some(value) => value,
-        Option::None => 0,
-    }
+    seq.try_get(i).unwrap_or(0)
 }
 
 // A symbol-indexed table entry (0 = absent).
@@ -235,10 +226,7 @@ pub fn table_get(in table: ChunkSeq[u32], sym: u32) -> u32 {
     if sym == NONE {
         return 0;
     }
-    match table.try_get(w(sym)) {
-        Option::Some(value) => value,
-        Option::None => 0,
-    }
+    table.try_get(w(sym)).unwrap_or(0)
 }
 
 pub fn table_set(inout table: ChunkSeq[u32], sym: u32, value: u32) {
@@ -585,10 +573,7 @@ pub fn sym_len(in ast: Ast, sym: u32) -> u64 {
 
 pub fn sym_byte(in ast: Ast, sym: u32, i: u64) -> u8 {
     let (text_start, text_end) = ast.names.span(symbol_from_id(sym));
-    match ast.names.text_byte(wrapping_add(text_start, i)) {
-        Option::Some(byte) => byte,
-        Option::None => 0,
-    }
+    ast.names.text_byte(wrapping_add(text_start, i)).unwrap_or(0)
 }
 
 // Byte order of two symbols' texts (`String`'s `Ord`): -1, 0 or 1.
@@ -606,14 +591,8 @@ pub fn sym_cmp(in ast: Ast, left: u32, right: u32) -> i64 {
         right_len
     };
     for i in 0..n {
-        let left_byte = match ast.names.text_byte(wrapping_add(left_start, i)) {
-            Option::Some(byte) => byte,
-            Option::None => 0,
-        };
-        let right_byte = match ast.names.text_byte(wrapping_add(right_start, i)) {
-            Option::Some(byte) => byte,
-            Option::None => 0,
-        };
+        let left_byte = ast.names.text_byte(wrapping_add(left_start, i)).unwrap_or(0);
+        let right_byte = ast.names.text_byte(wrapping_add(right_start, i)).unwrap_or(0);
         if left_byte < right_byte {
             return -1;
         }
@@ -669,10 +648,7 @@ pub fn sym_ends_with(in ast: Ast, sym: u32, in suffix: Str) -> bool {
     }
     let offset = wrapping_sub(n, suffix_bytes.len());
     for i in 0..suffix_bytes.len() {
-        let byte = match suffix_bytes.try_get(i) {
-            Option::Some(byte) => byte,
-            Option::None => 0,
-        };
+        let byte = suffix_bytes.try_get(i).unwrap_or(0);
         if sym_byte(in ast, sym, wrapping_add(offset, i)) != byte {
             return false;
         }
