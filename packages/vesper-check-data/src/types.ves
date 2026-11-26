@@ -470,7 +470,8 @@ impl Types {
             || node.r != result
             || node.r2 != row
             || node.lit != lit
-            || w(node.n) != items.len() {
+            || w(node.n) != items.len()
+        {
             return false;
         }
         for i in 0..items.len() {
@@ -511,7 +512,8 @@ impl Types {
             }
             let id = wrapping_sub(slot, 1);
             if u64_at(in self.hashes, w(id)) == hash
-                && self.same(id, kind, mode, name, in items, in passes, result, row, lit) {
+                && self.same(id, kind, mode, name, in items, in passes, result, row, lit)
+            {
                 return id;
             }
             probe = inc(probe) & self.mask;
@@ -610,7 +612,8 @@ impl Types {
             }
             let id = wrapping_sub(slot, 1);
             if u64_at(in self.row_hashes, w(id)) == hash
-                && self.same_row(id, in effs, in args, tail) {
+                && self.same_row(id, in effs, in args, tail)
+            {
                 return id;
             }
             probe = inc(probe) & self.row_mask;
@@ -657,12 +660,14 @@ impl Types {
             };
             if stored_eff.label != new_eff.label
                 || stored_eff.name != new_eff.name
-                || stored_eff.n != new_eff.n {
+                || stored_eff.n != new_eff.n
+            {
                 return false;
             }
             for j in 0..w(stored_eff.n) {
                 if u32_at(in self.items, add(w(stored_eff.a), j))
-                    != u32_at(in args, add(w(new_eff.a), j)) {
+                    != u32_at(in args, add(w(new_eff.a), j))
+                {
                     return false;
                 }
             }

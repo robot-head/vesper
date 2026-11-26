@@ -100,7 +100,8 @@ fn number(in b: Slice[u8], at: u64) -> (u8, u64) {
     if digits < n
         && byte(in b, digits) == 46
         && inc(digits) < n
-        && is_digit(byte(in b, inc(digits))) {
+        && is_digit(byte(in b, inc(digits)))
+    {
         float_end = exponent(in b, scan_digits(in b, inc(digits)));
     } else {
         let e = exponent(in b, digits);

@@ -328,7 +328,8 @@ fn node(inout s: S, env: u64, d: u64) -> bool {
         let ib = inst(inout s, bb, binder);
         if word_at(in s.bd_trait, bi) != field_a(in s, tr)
             || args != targs
-            || ib != field_b(in s, g) {
+            || ib != field_b(in s, g)
+        {
             return fail(inout s, "alias bound does not state the goal");
         }
         return single_trait_child(inout s, d, p);

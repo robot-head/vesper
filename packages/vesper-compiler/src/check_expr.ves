@@ -178,7 +178,8 @@ fn c_nominal_primary(
     } else if ctor.fields < 0 {
         c_result(ty, next, env, t.start, next, -1)
     } else if (restricted && ctor.named || c_kind(next) != c_kind(ctor.fields))
-        && (c_kind(c_next(ctor.fields)) == 35 || c_kind(c_next(ctor.fields)) == 33) {
+        && (c_kind(c_next(ctor.fields)) == 35 || c_kind(c_next(ctor.fields)) == 33)
+    {
         c_result(ty, next, env, t.start, next, -1)
     } else if restricted && ctor.named || c_kind(next) != c_kind(ctor.fields) {
         let error = c_error(203, t.start, next);

@@ -250,7 +250,8 @@ fn parse_manifest(in text: Slice[u8]) -> Manifest {
                         break;
                     }
                     if wrapping_add(p_idx, 4) <= lz
-                        && eq_bytes(in text[p_idx..wrapping_add(p_idx, 4)], in "path".as_bytes()) {
+                        && eq_bytes(in text[p_idx..wrapping_add(p_idx, 4)], in "path".as_bytes())
+                    {
                         let peq = find_byte(in text, wrapping_add(p_idx, 4), lz, 61);
                         if peq < lz {
                             let (qa, qz, qok) = parse_quoted(in text, wrapping_add(peq, 1), lz);
@@ -314,12 +315,14 @@ fn scan_mods(
         let mut la = la0;
         pos = wrapping_add(nl, 1);
         if wrapping_sub(lz, la) >= 4
-            && eq_bytes(in src[la..wrapping_add(la, 4)], in "pub ".as_bytes()) {
+            && eq_bytes(in src[la..wrapping_add(la, 4)], in "pub ".as_bytes())
+        {
             let (na, _nz) = trim_range(in src, wrapping_add(la, 4), lz);
             la = na;
         }
         if wrapping_sub(lz, la) >= 4
-            && eq_bytes(in src[la..wrapping_add(la, 4)], in "mod ".as_bytes()) {
+            && eq_bytes(in src[la..wrapping_add(la, 4)], in "mod ".as_bytes())
+        {
             let (ra, rz) = trim_range(in src, wrapping_add(la, 4), lz);
             let mut end = ra;
             loop {
@@ -335,10 +338,12 @@ fn scan_mods(
                 }
             }
         } else if wrapping_sub(lz, la) >= 4
-            && eq_bytes(in src[la..wrapping_add(la, 4)], in "use ".as_bytes()) {
+            && eq_bytes(in src[la..wrapping_add(la, 4)], in "use ".as_bytes())
+        {
             let (ra0, rz) = trim_range(in src, wrapping_add(la, 4), lz);
             if wrapping_sub(rz, ra0) >= 6
-                && eq_bytes(in src[ra0..wrapping_add(ra0, 6)], in "self::".as_bytes()) {
+                && eq_bytes(in src[ra0..wrapping_add(ra0, 6)], in "self::".as_bytes())
+            {
                 let ra = wrapping_add(ra0, 6);
                 let mut end = ra;
                 loop {
@@ -356,7 +361,8 @@ fn scan_mods(
                 }
             } else if include_super
                 && wrapping_sub(rz, ra0) >= 7
-                && eq_bytes(in src[ra0..wrapping_add(ra0, 7)], in "super::".as_bytes()) {
+                && eq_bytes(in src[ra0..wrapping_add(ra0, 7)], in "super::".as_bytes())
+            {
                 let ra = wrapping_add(ra0, 7);
                 let mut end = ra;
                 loop {
@@ -652,7 +658,8 @@ fn expand_includes(
         } else if c == 34 {
             i = string_literal_end(in s, i);
         } else if is_ident_byte(c)
-            && (i == 0 || !is_ident_byte(byte_at(in s, wrapping_sub(i, 1)))) {
+            && (i == 0 || !is_ident_byte(byte_at(in s, wrapping_sub(i, 1))))
+        {
             let start = i;
             loop {
                 if i >= n || !is_ident_byte(byte_at(in s, i)) {
@@ -661,7 +668,8 @@ fn expand_includes(
                 i = wrapping_add(i, 1);
             }
             if eq_bytes(in s[start..i], in "include_str".as_bytes())
-                && !after_dot_or_colon(in s, start) {
+                && !after_dot_or_colon(in s, start)
+            {
                 let mut end = i;
                 match include_call(in pkg_dir, in s, inout end) {
                     Option::Some(literal) => {
@@ -922,7 +930,8 @@ fn collect_mod_files(
                 sn.extend(in sub.as_slice());
                 next_segs.push(sink sn);
                 if !has_file(in files, in p1.as_slice())
-                    && !has_mod(in mods, pkg_idx, in next_segs) {
+                    && !has_mod(in mods, pkg_idx, in next_segs)
+                {
                     match try_read_file(in p1.as_slice()) {
                         Option::Some(sub_text) => {
                             collect_mod_files(
@@ -986,7 +995,8 @@ fn collect_mod_files(
                 sn.extend(in sup.as_slice());
                 next_segs.push(sink sn);
                 if !has_file(in files, in p1.as_slice())
-                    && !has_mod(in mods, pkg_idx, in next_segs) {
+                    && !has_mod(in mods, pkg_idx, in next_segs)
+                {
                     match try_read_file(in p1.as_slice()) {
                         Option::Some(sub_text) => {
                             collect_mod_files(
@@ -1050,12 +1060,14 @@ fn scan_pkg_submods(
         let mut la = la0;
         pos = wrapping_add(nl, 1);
         if wrapping_sub(lz, la) >= 4
-            && eq_bytes(in src[la..wrapping_add(la, 4)], in "pub ".as_bytes()) {
+            && eq_bytes(in src[la..wrapping_add(la, 4)], in "pub ".as_bytes())
+        {
             let (na, _nz) = trim_range(in src, wrapping_add(la, 4), lz);
             la = na;
         }
         if wrapping_sub(lz, la) >= 4
-            && eq_bytes(in src[la..wrapping_add(la, 4)], in "use ".as_bytes()) {
+            && eq_bytes(in src[la..wrapping_add(la, 4)], in "use ".as_bytes())
+        {
             let (ra, rz) = trim_range(in src, wrapping_add(la, 4), lz);
             if ra < rz && byte_at(in src, ra) == 64 {
                 let mut cc1 = ra;
@@ -1083,7 +1095,8 @@ fn scan_pkg_submods(
                         if m1 > m0
                             && wrapping_add(m1, 1) < rz
                             && byte_at(in src, m1) == 58
-                            && byte_at(in src, wrapping_add(m1, 1)) == 58 {
+                            && byte_at(in src, wrapping_add(m1, 1)) == 58
+                        {
                             let pdir = match pkgs.try_get(pi) {
                                 Option::Some(p) => {
                                     let mut d = ChunkSeq::new[u8]();

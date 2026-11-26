@@ -60,7 +60,8 @@ pub fn name_valid(in name: Slice[u8]) -> bool {
 pub fn forbidden_axiom(in name: Slice[u8]) -> bool {
     if eq(in name, in "sorryAx")
         || eq(in name, in "Lean.ofReduceBool")
-        || eq(in name, in "Lean.trustCompiler") {
+        || eq(in name, in "Lean.trustCompiler")
+    {
         return true;
     }
     let mut part_start: u64 = 0;

@@ -1319,7 +1319,8 @@ fn compute_family(
     for i in 0..widen_u64(count) {
         if get32(in s, i * QueueFamilyProperties::Bytes + QueueFamilyProperties::QueueFlags)
             & Queue::Compute
-            != 0 {
+            != 0
+        {
             found = Option::Some(i);
             break;
         }
@@ -1708,7 +1709,8 @@ pub fn buffer_new(
         );
         let allowed = (bits >> narrow_u32(i)) & 1 != 0;
         if allowed
-            && flags & MemoryProperty::HostVisibleCoherent == MemoryProperty::HostVisibleCoherent {
+            && flags & MemoryProperty::HostVisibleCoherent == MemoryProperty::HostVisibleCoherent
+        {
             chosen = Option::Some(narrow_u32(i));
             break;
         }
@@ -1915,7 +1917,8 @@ fn struct_bytes(
         for i in 0..offsets.len() {
             let w = offsets[i];
             if widen_u64(word_at(in spirv, w + 1)) == ty
-                && widen_u64(word_at(in spirv, w + 2)) == m {
+                && widen_u64(word_at(in spirv, w + 2)) == m
+            {
                 offset = widen_u64(word_at(in spirv, w + 4));
             }
         }
@@ -1971,7 +1974,8 @@ pub fn spirv_interface(
         }
         if op == Spv::EntryPoint && count >= 4 {
             if word_at(in spirv, at + 1) == Spv::GlCompute
-                && names(in spirv, at + 3, at + count, in name) {
+                && names(in spirv, at + 3, at + count, in name)
+            {
                 found = true;
             }
         } else if (op == Spv::TypeInt || op == Spv::TypeFloat) && count >= 3 {

@@ -185,7 +185,8 @@ pub fn regions_seqs_types(in input: Str) -> ChunkSeq[u64] {
                 start,
                 stop,
                 inout mismatch_diags
-            ) {
+            )
+        {
             diag_line(inout out, in mismatch_diags, 0);
         } else {
             put(inout out, "-\n");

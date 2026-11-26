@@ -535,7 +535,8 @@ pub fn parse_select(inout q: Q) {
         if q.err != 0
             || at_end(in q)
             || peek_is_sym(in q, SEMICOLON)
-            || peek_is_word(in q, kw_where()) {
+            || peek_is_word(in q, kw_where())
+        {
             break;
         }
         let kind: u64 = if word(inout q, kw_inner()) {

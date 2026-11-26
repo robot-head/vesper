@@ -993,7 +993,8 @@ fn node_advance_commit(inout rc: RaftCluster, i: u64) {
     let cur_commit = sw(in rc.nd_commit, i);
     if sw(in rc.nd_role, i) == RaftRole::Leader
         && !member(members, i)
-        && node_config_index(in rc, i) <= cur_commit {
+        && node_config_index(in rc, i) <= cur_commit
+    {
         rc.leader_step_downs = inc(rc.leader_step_downs);
         setw(inout rc.nd_role, i, RaftRole::Follower);
     }
@@ -1541,7 +1542,8 @@ fn handle_response(inout rc: RaftCluster, i: u64, p: u64, now: u64) {
         }
         if lbl == rc.sym_grant
             && o_term == sw(in rc.nd_term, i)
-            && sw(in rc.nd_role, i) == RaftRole::Candidate {
+            && sw(in rc.nd_role, i) == RaftRole::Candidate
+        {
             let m = sw(in rc.nd_votes_mask, i) | bit_at(src);
             setw(inout rc.nd_votes_mask, i, m);
             node_maybe_win(inout rc, i, now);
@@ -1569,7 +1571,8 @@ fn handle_response(inout rc: RaftCluster, i: u64, p: u64, now: u64) {
     }
     if sw(in rc.nd_role, i) != RaftRole::Leader
         || o_term != sw(in rc.nd_term, i)
-        || widen_u64(ack.follower_id) != o_peer {
+        || widen_u64(ack.follower_id) != o_peer
+    {
         return;
     }
     let idx_slot = wrapping_add(wrapping_mul(i, rc.n), o_peer);
@@ -1752,7 +1755,8 @@ fn node_persistent_differs(in rc: RaftCluster, i: u64) -> bool {
     if sw(in rc.nd_term, i) != sw(in rc.sy_term, i)
         || sw(in rc.nd_voted_for, i) != sw(in rc.sy_voted_for, i)
         || sw(in rc.nd_snap_index, i) != sw(in rc.sy_snap_index, i)
-        || sw(in rc.nd_snap_term, i) != sw(in rc.sy_snap_term, i) {
+        || sw(in rc.nd_snap_term, i) != sw(in rc.sy_snap_term, i)
+    {
         return true;
     }
     let len = node_log_len(in rc, i);

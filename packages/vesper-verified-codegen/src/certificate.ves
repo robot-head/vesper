@@ -662,7 +662,8 @@ fn destination(in r: Lir) -> u64 {
         || t == LIR_COMPARE
         || t == LIR_FARITH
         || t == LIR_FNEG
-        || t == LIR_FCOMPARE {
+        || t == LIR_FCOMPARE
+    {
         r.f1
     } else {
         MISSING
@@ -687,7 +688,8 @@ fn check_row(in f: ChunkSeq[u64], in r: Lir) -> bool {
         || t == LIR_LABEL
         || t == LIR_CALL
         || t == LIR_ENTER
-        || t == LIR_RETURN {
+        || t == LIR_RETURN
+    {
         false
     } else {
         true

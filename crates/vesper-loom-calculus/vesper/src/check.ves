@@ -170,7 +170,8 @@ fn relative(in l: L, id: u64) -> bool {
         if c == Ascii::Slash {
             if wrapping_sub(i, part) == 2
                 && gb(in l, add(off, part)) == Ascii::Dot
-                && gb(in l, add(off, inc(part))) == Ascii::Dot {
+                && gb(in l, add(off, inc(part))) == Ascii::Dot
+            {
                 return false;
             }
             part = inc(i);

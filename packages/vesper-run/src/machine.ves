@@ -337,7 +337,8 @@ fn short_of(inout machine: M, sym: u32) -> u32 {
             break;
         }
         if u8_at(in machine.ctx.names.text, pos) == 58
-            && u8_at(in machine.ctx.names.text, inc(pos)) == 58 {
+            && u8_at(in machine.ctx.names.text, inc(pos)) == 58
+        {
             tail_start = add(pos, 2);
             pos = add(pos, 2);
         } else {
@@ -368,7 +369,8 @@ fn ctor_of(inout machine: M, sym: u32) -> u32 {
             break;
         }
         if u8_at(in machine.ctx.names.text, pos) == 58
-            && u8_at(in machine.ctx.names.text, inc(pos)) == 58 {
+            && u8_at(in machine.ctx.names.text, inc(pos)) == 58
+        {
             sep_count = inc(sep_count);
             sep_at = pos;
             pos = add(pos, 2);
@@ -478,7 +480,8 @@ fn type_ok(in machine: M, ty: u32, depth: u64) -> bool {
             || name == known.region_box
             || name == known.watermark
             || name == known.dyn_
-            || spells(in machine, name, "Atomic") {
+            || spells(in machine, name, "Atomic")
+        {
             return false;
         }
     }
@@ -973,7 +976,8 @@ pub fn scan(inout machine: M) {
                     || op == Op::Index
                     || op == Op::Indirect
                     || op == Op::Try
-                    || op == Op::Loop {} else if op == Op::Closure {
+                    || op == Op::Loop
+                {} else if op == Op::Closure {
                     decline(inout machine, "a closure in ", fn_info.name);
                 } else if op == Op::Handle {
                     decline(inout machine, "a handler in ", fn_info.name);
@@ -1104,7 +1108,8 @@ fn display(in machine: M, value: Val, inout out: ChunkSeq[u8], depth: u64) {
         let mut numeric = true;
         for i in 0..aggregate.kid_count {
             if index_of(in machine, u32_at(in machine.kid_names, add(aggregate.kid_start, i)))
-                == NONE64 {
+                == NONE64
+            {
                 numeric = false;
             }
         }

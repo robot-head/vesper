@@ -202,7 +202,8 @@ fn find_operator(
         if k != k_whitespace()
             && k != k_comment()
             && k != k_block_comment()
-            && is_text(in src, s, e, in op) {
+            && is_text(in src, s, e, in op)
+        {
             return (true, s, e);
         }
         i = inc(i);

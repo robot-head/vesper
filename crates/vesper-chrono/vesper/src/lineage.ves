@@ -227,7 +227,8 @@ pub fn record(inout l: ObligationLineage, id: u64, hop: ObligationHop) -> u32 {
     }
     if hop.kind.tag == 0 {
         if contains_u64(in l.minted_ids.as_slice(), id)
-            || contains_u64(in l.truncated.as_slice(), id) {
+            || contains_u64(in l.truncated.as_slice(), id)
+        {
             return 4;
         }
         let expected = next_mint_id(in l, id);
@@ -239,7 +240,8 @@ pub fn record(inout l: ObligationLineage, id: u64, hop: ObligationHop) -> u32 {
             if parent >= id
                 || !(
                     contains_u64(in l.minted_ids.as_slice(), parent) || is_pre_window(in l, parent)
-                ) {
+                )
+            {
                 return 6;
             }
         }

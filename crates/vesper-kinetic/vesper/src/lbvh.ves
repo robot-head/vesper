@@ -55,7 +55,8 @@ fn internal(in codes: Slice[u64], n: u64, i: u64) -> (u64, u64) {
     let ii = wrapping_i64(i);
     let mut d: i64 = -1;
     if delta(in codes, n, i, a, wrapping_add(ii, 1))
-        > delta(in codes, n, i, a, wrapping_sub(ii, 1)) {
+        > delta(in codes, n, i, a, wrapping_sub(ii, 1))
+    {
         d = 1;
     }
     let delta_min = delta(in codes, n, i, a, wrapping_sub(ii, d));
@@ -73,7 +74,8 @@ fn internal(in codes: Slice[u64], n: u64, i: u64) -> (u64, u64) {
             break;
         }
         if delta(in codes, n, i, a, wrapping_add(ii, wrapping_mul(wrapping_add(l, t), d)))
-            > delta_min {
+            > delta_min
+        {
             l = wrapping_add(l, t);
         }
         t = shr_i64(t, 1);
@@ -87,7 +89,8 @@ fn internal(in codes: Slice[u64], n: u64, i: u64) -> (u64, u64) {
         // (l + div - 1) / div for l >= 0 and div = 2^log.
         let tt = shr_i64(wrapping_add(l, wrapping_sub(div, 1)), log);
         if delta(in codes, n, i, a, wrapping_add(ii, wrapping_mul(wrapping_add(s, tt), d)))
-            > delta_node {
+            > delta_node
+        {
             s = wrapping_add(s, tt);
         }
         if tt <= 1 {
@@ -393,7 +396,8 @@ pub fn pairs(
                         && pmin1 <= gf(in leaf, wrapping_add(bq, 4))
                         && gf(in leaf, inc(bq)) <= pmax1
                         && pmin2 <= gf(in leaf, wrapping_add(bq, 5))
-                        && gf(in leaf, wrapping_add(bq, 2)) <= pmax2 {
+                        && gf(in leaf, wrapping_add(bq, 2)) <= pmax2
+                    {
                         if len == max_pairs {
                             return inc(max_pairs);
                         }
@@ -416,7 +420,8 @@ pub fn pairs(
                     && pmin1 <= gf(in node_box, wrapping_add(bc, 4))
                     && gf(in node_box, inc(bc)) <= pmax1
                     && pmin2 <= gf(in node_box, wrapping_add(bc, 5))
-                    && gf(in node_box, wrapping_add(bc, 2)) <= pmax2 {
+                    && gf(in node_box, wrapping_add(bc, 2)) <= pmax2
+                {
                     // Push only the children that can hold a pair from p:
                     // a leaf after p, or a subtree reaching past p.
                     let r = g64(in right, c);

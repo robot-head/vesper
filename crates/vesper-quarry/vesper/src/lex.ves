@@ -91,7 +91,8 @@ pub fn lex(inout q: Q, in sql: Slice[u8]) {
             if (c >= LOWER_A && c <= LOWER_Z)
                 || (c >= UPPER_A && c <= UPPER_Z)
                 || c == UNDERSCORE
-                || c == COLON {
+                || c == COLON
+            {
                 let is_param = c == COLON;
                 if is_param {
                     i = wrapping_add(i, 1);
@@ -222,7 +223,8 @@ pub fn lex(inout q: Q, in sql: Slice[u8]) {
                 || c == COMMA
                 || c == DOT
                 || c == SEMICOLON
-                || c == STAR {
+                || c == STAR
+            {
                 i = wrapping_add(i, 1);
                 q.toks.push(Tok { kind: tk_sym(), a: c, b: 0, kw: 0 });
             } else {

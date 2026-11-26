@@ -532,7 +532,8 @@ impl S {
             if byte < Ascii::Space
                 || byte > Ascii::Tilde
                 || byte == Ascii::Quote
-                || byte == Ascii::Backslash {
+                || byte == Ascii::Backslash
+            {
                 self.out.push(Ascii::Backslash);
                 self.out.push(Ascii::LowerX);
                 self.out.push(hex(byte >> 4));
@@ -788,7 +789,8 @@ impl S {
         let right_node = self.tn(right);
         if left_node.kind != right_node.kind
             || left_node.name != right_node.name
-            || left_node.n != right_node.n {
+            || left_node.n != right_node.n
+        {
             return false;
         }
         for i in 0..left_node.n {
@@ -1591,7 +1593,8 @@ fn enum_eq(in state: S, left: u64, right: u64) -> bool {
     }
     for i in 0..left_enum.variant_count {
         if u32_at(in state.variant_names, add(left_enum.variant_start, i))
-            != u32_at(in state.variant_names, add(right_enum.variant_start, i)) {
+            != u32_at(in state.variant_names, add(right_enum.variant_start, i))
+        {
             return false;
         }
     }
@@ -1659,7 +1662,8 @@ pub fn generate(inout state: S) -> Err {
             let ext_type = state.xt(add(lib_row.extern_start, i));
             if find_gh(in state, ext_type.name) != NONE64
                 || find_gs(in state, ext_type.name) != NONE64
-                || find_ge(in state, ext_type.name) != NONE64 {
+                || find_ge(in state, ext_type.name) != NONE64
+            {
                 return duplicate(inout state, ext_type.name);
             }
             state.gen_handles.push(Gh {
@@ -2837,7 +2841,8 @@ fn is_x86(in state: S, triple: u32) -> bool {
 pub fn target_support(inout state: S, li: u64, target: u32) -> Err {
     let lib_row = state.lib(li);
     if !same_arch(in state, lib_row.triple, target)
-        || triple_os(in state, lib_row.triple) != triple_os(in state, target) {
+        || triple_os(in state, lib_row.triple) != triple_os(in state, target)
+    {
         let mark = state.out.len();
         state.put(in "library '");
         state.put_name(lib_row.name);
@@ -2848,7 +2853,8 @@ pub fn target_support(inout state: S, li: u64, target: u32) -> Err {
         return err_at(K_TARGET, state.intern_tail(mark), false, 0, 0);
     }
     if lib_row.handler == H_MPK
-        && !(is_x86(in state, target) && triple_os(in state, target) == TargetOs::Linux) {
+        && !(is_x86(in state, target) && triple_os(in state, target) == TargetOs::Linux)
+    {
         let mark = state.out.len();
         state.put(in "isolated(mpk) trampolines are generated for Linux x86-64 (WRPKRU) only; ");
         state.put_name(target);
@@ -2876,7 +2882,8 @@ pub fn op_plan(inout state: S, target: u32, eff_name: u32, op: u32) {
         let eff_start = state.start(eff_name);
         if state.size(eff_name) == add(name_len, 4)
             && state.text[eff_start..add(eff_start, 4)].eq(in "Ffi$".as_bytes())
-            && state.spells(name, in state.text[add(eff_start, 4).. state.end(eff_name)]) {
+            && state.spells(name, in state.text[add(eff_start, 4).. state.end(eff_name)])
+        {
             lib = li;
         }
     }

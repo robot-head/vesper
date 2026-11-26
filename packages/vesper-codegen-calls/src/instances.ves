@@ -588,7 +588,8 @@ fn function_value_instance(
     if row.n == 0
         || row.tail != 0
         || !capability_only(in types, in names, syms, info.row)
-        || info.generic_count != 0 {
+        || info.generic_count != 0
+    {
         return false;
     }
     if contains_function(inout types, in world, info.result) {
@@ -1136,7 +1137,8 @@ fn visit_node(
             }
             if arg_expr.kind == ExprKind::Name
                 && facts.has_ref(arg_expr.s0, arg_expr.s1, arg_expr.sym)
-                && non_generic(in calls, arg_expr.sym) {
+                && non_generic(in calls, arg_expr.sym)
+            {
                 let mut text: ChunkSeq[u8] = ChunkSeq::new[u8]();
                 text.extend(in "$fn:".as_bytes());
                 names.write(param.name, inout text);

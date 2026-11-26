@@ -357,7 +357,8 @@ fn run_const_time(inout ctx: Cx) {
             if id != 0 {
                 for q in 0..callee_count {
                     if pw(in ctx, wrapping_add(callees_at, wrapping_mul(q, 2)))
-                        == wrapping_sub(id, 1) {
+                        == wrapping_sub(id, 1)
+                    {
                         called = true;
                     }
                 }
@@ -709,7 +710,8 @@ pub fn derive_policy(inout ctx: Cx, explicit_all: bool) {
             let func = g(in emitted, q);
             let key = fw(in ctx, func, F_KEY);
             if has_key(in ctx, in ctx.policy.const_time, 7, key)
-                || (key != function && has_key(in ctx, in ctx.policy.const_time, 7, function)) {
+                || (key != function && has_key(in ctx, in ctx.policy.const_time, 7, function))
+            {
                 continue;
             }
             let mut declassify: ChunkSeq[u64] = ChunkSeq::new[u64]();

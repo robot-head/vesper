@@ -408,7 +408,8 @@ fn sw_component(in n: Slice[u64], c: u64, inout w: Slice[u64]) -> Unit eff [Fail
                     && key != SW_VERSION
                     && key != SW_SIGNER_ID
                     && key != SW_MEASUREMENT_DESCRIPTION
-            ) {
+            )
+        {
             cbor_err(F_SW_COMPONENT, R_UNKNOWN_KEY);
         }
         at = skip(in n, skip(in n, at));
@@ -448,7 +449,8 @@ fn tbb_rotpk(
         cbor_err(F_ROTPK_NAME, R_EXPECTED_TEXT);
     }
     if !text_eq_s(in b, in s, in n, name, "CM".as_bytes())
-        && !text_eq_s(in b, in s, in n, name, "DM".as_bytes()) {
+        && !text_eq_s(in b, in s, in n, name, "DM".as_bytes())
+    {
         cbor_err(F_ROTPK_NAME, R_CM_OR_DM);
     }
     put_str(in n, name, inout w);

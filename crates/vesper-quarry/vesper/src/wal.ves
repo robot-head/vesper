@@ -275,7 +275,8 @@ pub fn decode_header(in h: Slice[u8], inout out: Slice[u64]) -> u64 {
         || get_u8(in h, 4) != 65
         || get_u8(in h, 5) != 76
         || get_u8(in h, 6) != 48
-        || get_u8(in h, 7) != 49 {
+        || get_u8(in h, 7) != 49
+    {
         return 0;
     }
     if rd_u32(in h, 28) != 0 {

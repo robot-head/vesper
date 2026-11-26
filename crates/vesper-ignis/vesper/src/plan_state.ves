@@ -325,7 +325,8 @@ fn handoff(
     let mid = if queue_can_transition(pkind, cur, target) {
         target
     } else if queue_can_transition(pkind, cur, Layout::Common)
-        && (target == Layout::Common || queue_can_transition(kind, Layout::Common, target)) {
+        && (target == Layout::Common || queue_can_transition(kind, Layout::Common, target))
+    {
         Layout::Common
     } else {
         return StepOutcome::Failed(unsupported);
@@ -394,7 +395,8 @@ fn process(
             req.layout
         } else if cur != Layout::Undefined
             && layout_allows(cur, req.access)
-            && queue_supports_layout(kind, cur) {
+            && queue_supports_layout(kind, cur)
+        {
             cur
         } else {
             match first_auto_layout(kind, req.access) {
