@@ -38,7 +38,8 @@ use self::lower::{
     unsup
 };
 use self::evidence::{
-    evidence
+    evidence,
+    sites_new
 };
 use self::exprs::{
     Ex,
@@ -1024,8 +1025,20 @@ pub fn front_input(in b: Slice[u8]) -> ChunkSeq[u8] {
     }
     sort_fns(in m.c.names, inout m.p.fns);
     let entry0 = m.entry;
+    // whether the region prelude is active: the lowering extras' fourth
+    // word, after the entry string and the two limits
+    let pos = r.pos;
+    let len = r.word(in b);
+    for i in 0..wrapping_add(len, 7) / 8 {
+        let x = r.word(in b);
+    }
+    let x1 = r.word(in b);
+    let x2 = r.word(in b);
+    let active = r.word(in b) != 0;
+    r.pos = pos;
+    let mut sites = sites_new();
     let e2 = handle Fail[VErr] in {
-        evidence(inout m.c, inout m.p, in m.ex, entry0);
+        sites = evidence(inout m.c, inout m.p, in m.ex, entry0, active);
         err(255, ChunkSeq::new[u8]())
     } with {
         return v => v,
@@ -1066,5 +1079,5 @@ pub fn front_input(in b: Slice[u8]) -> ChunkSeq[u8] {
         qk,
         qv,
     } = m;
-    lower_program(c, p, ex, inout r, in b)
+    lower_program(c, p, ex, sites, inout r, in b)
 }

@@ -73,6 +73,10 @@ use self::machine::{
 use self::certificate::{
     put_debug
 };
+use self::evidence::{
+    Sites,
+    sites_new
+};
 use self::exprs::{
     Cl,
     Ex,
@@ -179,11 +183,11 @@ pub const E_NOT_PORTED: u8 = 5;
 const U_FLOAT: u8 = 0;
 const U_STRING: u8 = 1;
 const U_ENUM: u8 = 2;
-const U_MATCH: u8 = 3;
+pub const U_MATCH: u8 = 3;
 const U_INDEX: u8 = 4;
 const U_FUNCTION_VALUE: u8 = 5;
 pub const U_GENERIC: u8 = 6;
-const U_EFFECT: u8 = 7;
+pub const U_EFFECT: u8 = 7;
 const U_EXTERNAL_FUNCTION: u8 = 8;
 const U_STRUCTURAL_EQUALITY: u8 = 9;
 const U_TYPE: u8 = 10;
@@ -506,6 +510,8 @@ pub struct Lw {
     regions_active: bool,
     // native layouts (`Layout::of`) of region payloads
     ls: Layouts,
+    // evidence passing's failure-code rewriting
+    sites: Sites,
     entry: u32,
     max_functions: u64,
     max_rows: u64,
@@ -680,7 +686,14 @@ fn read_string(inout r: Reader, in b: Slice[u8], inout names: Names) -> u32 {
     s
 }
 
-fn decode(sink c: Ctx, sink p: Program, sink ex: Ex, inout r: Reader, in b: Slice[u8]) -> Lw {
+fn decode(
+    sink c: Ctx,
+    sink p: Program,
+    sink ex: Ex,
+    sink sites: Sites,
+    inout r: Reader,
+    in b: Slice[u8]
+) -> Lw {
     let mut c2 = c;
     let sy = sy_new(inout c2.names);
     let mut lw = Lw {
@@ -701,6 +714,7 @@ fn decode(sink c: Ctx, sink p: Program, sink ex: Ex, inout r: Reader, in b: Slic
         digits: ChunkSeq::new[u32](),
         regions_active: false,
         ls: layouts_new(),
+        sites: sites,
         entry: 0,
         max_functions: 0,
         max_rows: 0,
@@ -1819,6 +1833,10 @@ pub struct Plan {
     // symbol -> planned index + 1
     index: ChunkSeq[u32],
     fails: ChunkSeq[FailRow],
+    // by callee symbol: the handler site whose escape codes it uses (see
+    // `recode_mask`), and the number of codes before the escape codes
+    site: ChunkSeq[u64],
+    nbase: u64,
     // the resolved `handle Fail` sites
     hd: ChunkSeq[Hd],
     caps: ChunkSeq[u32],
@@ -2235,7 +2253,40 @@ fn plan(inout lw: Lw) -> Plan eff [Fail[VErr]] {
             }
         }
     }
-    if keys.len() > 63 {
+    // The handler site tags (`Sites::tags`), in text order: each adds an
+    // escape code per code (`Fails::add_escapes`).
+    let mut tags = ChunkSeq::new[u32]();
+    for j in 0..wrapping_add(lw.sites.et.len(), lw.sites.rt.len()) {
+        let t = if j < lw.sites.et.len() {
+            u32_at(in lw.sites.et, j)
+        } else {
+            u32_at(in lw.sites.rt, wrapping_sub(j, lw.sites.et.len()))
+        };
+        let mut dup = false;
+        let mut pos = tags.len();
+        for q in 0..tags.len() {
+            let c = cmp_sym(in lw.c.names, t, u32_at(in tags, q));
+            if c == 0 {
+                dup = true;
+            }
+            if c < 0 && pos == tags.len() {
+                pos = q;
+            }
+        }
+        if !dup {
+            tags.push(0);
+            let mut q = wrapping_sub(tags.len(), 1);
+            loop {
+                if q <= pos {
+                    break;
+                }
+                let ok = tags.try_set(q, u32_at(in tags, wrapping_sub(q, 1)));
+                q = wrapping_sub(q, 1);
+            }
+            let ok = tags.try_set(pos, t);
+        }
+    }
+    if wrapping_mul(keys.len(), inc(tags.len())) > 63 {
         Fail::raise(not_ported("more than 63 failure types"));
     }
     let mut fails = ChunkSeq::new[FailRow]();
@@ -2250,6 +2301,50 @@ fn plan(inout lw: Lw) -> Plan eff [Fail[VErr]] {
                     sh: sh
                 }
             );
+    }
+    let nbase = keys.len();
+    for t in 0..tags.len() {
+        for i in 0..nbase {
+            let r = fail_row(in fails, inc(i));
+            fails
+                .push(
+                    FailRow {
+                        key: NONE32,
+                        ty: r.ty,
+                        sh: r.sh
+                    }
+                );
+        }
+    }
+    // By callee: the site whose escape codes it uses, ((tag index + 1) << 1)
+    // | restore.
+    let mut site = ChunkSeq::new[u64]();
+    for j in 0..wrapping_add(lw.sites.ef.len(), lw.sites.rf.len()) {
+        let escape = j < lw.sites.ef.len();
+        let (f, t) = if escape {
+            (u32_at(in lw.sites.ef, j), u32_at(in lw.sites.et, j))
+        } else {
+            let q = wrapping_sub(j, lw.sites.ef.len());
+            (u32_at(in lw.sites.rf, q), u32_at(in lw.sites.rt, q))
+        };
+        let mut ti: u64 = 0;
+        for q in 0..tags.len() {
+            if u32_at(in tags, q) == t {
+                ti = q;
+            }
+        }
+        let code = (inc(ti) << 1) | if escape {
+            0
+        } else {
+            1
+        };
+        loop {
+            if site.len() > w(f) {
+                break;
+            }
+            site.push(0);
+        }
+        let ok = site.try_set(w(f), code);
     }
     let mut index = ChunkSeq::new[u32]();
     for i in 0..found.len() {
@@ -2269,7 +2364,12 @@ fn plan(inout lw: Lw) -> Plan eff [Fail[VErr]] {
                 let c = u32_at(in calls, add(fd.ca, j));
                 let k = w(u32_at(in index, w(c)));
                 if k != 0 {
-                    next = next | u64_at(in raises, wrapping_sub(k, 1));
+                    next = next | recode_mask(
+                        in site,
+                        nbase,
+                        c,
+                        u64_at(in raises, wrapping_sub(k, 1))
+                    );
                 }
             }
             for j in 0..fd.hn {
@@ -2368,6 +2468,8 @@ fn plan(inout lw: Lw) -> Plan eff [Fail[VErr]] {
         wb: wb,
         index: index,
         fails: fails,
+        site: site,
+        nbase: nbase,
         hd: hds,
         caps: caps,
     }
@@ -3285,6 +3387,24 @@ fn call_opening(
         push(inout fl, lir(LIR_JUMP, 0, 0, cont, 0, 0));
         push(inout fl, lir(LIR_LABEL, 0, 0, errl, 0, 0));
         let mut rest = target.raises;
+        if u64_at(in plan.site, w(target.name)) != 0 {
+            // `recode_status`
+            let done = fresh(inout fl);
+            for c in 1..64 {
+                if has(rest, c) {
+                    let to = recode_code(in plan.site, plan.nbase, target.name, c);
+                    if to != c {
+                        let other = fresh(inout fl);
+                        status_is(inout fl, st, c, inc(st), other);
+                        push(inout fl, lir(LIR_CONST, 0, 0, st, to, 0));
+                        push(inout fl, lir(LIR_JUMP, 0, 0, done, 0, 0));
+                        push(inout fl, lir(LIR_LABEL, 0, 0, other, 0, 0));
+                    }
+                }
+            }
+            push(inout fl, lir(LIR_LABEL, 0, 0, done, 0, 0));
+            rest = recode_mask(in plan.site, plan.nbase, target.name, rest);
+        }
         if code != 0 && has(rest, code) {
             rest = rest & (bit(code) ^ NONE);
             let other = fresh(inout fl);
@@ -4678,14 +4798,20 @@ pub fn lower_input(in b: Slice[u8]) -> ChunkSeq[u8] {
     let c = read_ctx(inout r, in b);
     let p = read_program(inout r, in b, in c);
     let ex = read_exprs(inout r, in b, in c);
-    lower_program(c, p, ex, inout r, in b)
+    lower_program(c, p, ex, sites_new(), inout r, in b)
 }
 
 // The lowering of a program already read (or made by monomorphization),
 // with the lowering's extra section at `r`.
-pub fn lower_program(sink c: Ctx, sink p: Program, sink ex: Ex, inout r: Reader, in b: Slice[u8])
-    -> ChunkSeq[u8] {
-    let mut lw = decode(c, p, ex, inout r, in b);
+pub fn lower_program(
+    sink c: Ctx,
+    sink p: Program,
+    sink ex: Ex,
+    sink sites: Sites,
+    inout r: Reader,
+    in b: Slice[u8]
+) -> ChunkSeq[u8] {
+    let mut lw = decode(c, p, ex, sites, inout r, in b);
     let mut out = ChunkSeq::new[u8]();
     let e = handle Fail[VErr] in {
         lower_all(inout lw, inout out);
@@ -4699,6 +4825,38 @@ pub fn lower_program(sink c: Ctx, sink p: Program, sink ex: Ex, inout r: Reader,
         put_error(in lw.c.names, in e, inout o);
         ap(inout o, "\n");
         return o;
+    }
+    out
+}
+
+// The code `c` becomes after a call of `callee` (an escape code on the way
+// out of an operation clause, the code it escapes on the way out of a
+// handler body).
+fn recode_code(in site: ChunkSeq[u64], nbase: u64, callee: u32, c: u64) -> u64 {
+    let s = u64_at(in site, w(callee));
+    if s == 0 {
+        return c;
+    }
+    let off = wrapping_mul(nbase, s >> 1);
+    if s & 1 == 0 {
+        if c >= 1 && c <= nbase {
+            return add(c, off);
+        }
+    } else if c > off && c <= add(off, nbase) {
+        return wrapping_sub(c, off);
+    }
+    c
+}
+
+fn recode_mask(in site: ChunkSeq[u64], nbase: u64, callee: u32, mask: u64) -> u64 {
+    if u64_at(in site, w(callee)) == 0 {
+        return mask;
+    }
+    let mut out: u64 = 0;
+    for c in 1..64 {
+        if has(mask, c) {
+            out = out | bit(recode_code(in site, nbase, callee, c));
+        }
     }
     out
 }

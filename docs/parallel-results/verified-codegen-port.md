@@ -289,9 +289,38 @@ where the pass runs on the program the lowering reads.
 
 **Rust lines deleted:** 0. `lower.rs` goes at the retirement.
 
+## Part 4c-3: evidence passing
+
+### What changed
+
+- `packages/vesper-verified-codegen/src/evidence.ves` ports
+  `evidence::rewrite` on the monomorphized program. It runs function-value
+  specialization (`specialize_function_arguments`, `substitute_tree`) and
+  `prune`. Tail-resumptive handlers of user effects go through `site`,
+  `tail_resumptive` and `specialize`: clause captures become `$ev<n>.<name>`
+  evidence parameters, operations become clause calls, and effectful
+  callees get `f<E#n>` instances. Region labels are relabelled from `$cap<start>`.
+  Functions are edited by appending rows to the Place IR tables.
+- `lower.ves` takes the `Sites` it returns: one escape code per code and
+  site tag (`Fails::add_escapes`), recoded raise sets in the fixpoint, and
+  `recode_status` after a call of a clause or a handler body.
+- `front_text` is now monomorphization, evidence passing and lowering in
+  one pass. The front test compares every corpus program, including those
+  with handler sites and evidence errors. `FrontOutcome` lost its skip
+  flags.
+
+### Evidence (Linux x86_64 host, release, `-C target-cpu=native`)
+
+| Check | Result |
+|---|---|
+| Monomorphization, evidence passing and lowering in one pass | **0 of 364 differ** (214 lowered; none not ported, up from 296 compared) |
+| ABBA, front half ×5 | rust 90.8 ms, vesper 62.5 ms: **0.69x** |
+
+**Rust lines deleted:** 0. `evidence.rs` goes at the retirement.
+
 ## Left
 
 - Optional: compare the per-arch `encoding_listing` text.
-- Part 4c-3: `evidence`. Part 4d:
+- Part 4d:
   `coverage`, `cli`, then the swap into the hybrid and `bootstrap/stage1.rs`, with `bootstrap/stage1.lock`
   reproduced, and the Rust deleted at the retirement.

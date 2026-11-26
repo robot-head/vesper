@@ -1529,9 +1529,8 @@ fn mono_matches_rust_on_the_corpus() {
     assert_eq!(bad, 0);
 }
 
-// The front half: monomorphization and the lowering in one Vesper pass
-// (`front_text`), against Rust's monomorphization, evidence passing and
-// lowering, on the programs evidence passing leaves unchanged.
+// The front half: monomorphization, evidence passing and the lowering in
+// one Vesper pass (`front_text`), against Rust's, on every corpus program.
 
 /// One corpus program's front-half case.
 struct FrontCase {
@@ -1550,8 +1549,7 @@ fn front_cases(options: &verified::Options) -> Vec<FrontCase> {
             continue;
         };
         let rust = match outcome {
-            Ok(o) if !o.has_sites => rust_lowering_text(&o.lowered),
-            Ok(_) => continue,
+            Ok(o) => rust_lowering_text(&o.lowered),
             Err(e) => format!("error: {e}\n"),
         };
         let Some((input, _)) = mono_input(&case.world, &program, "main", max, Some(options)) else {
@@ -1614,8 +1612,8 @@ fn front_matches_rust_on_the_corpus() {
 
 /// ABBA timing of the front half (`CHECK_HARNESS_SPEED=1`): Rust's
 /// monomorphization, evidence passing, plan, lowering and text against the
-/// package's decode, monomorphization, plan, lowering and text, over the
-/// corpus programs the package lowers.
+/// package's decode, monomorphization, evidence passing, plan, lowering and
+/// text, over the corpus programs the package lowers.
 #[test]
 fn front_flip_gate() {
     if !speed() {

@@ -2,20 +2,28 @@
 // the monomorphized Place IR: calls that pass a named function as a
 // function value get their own instance with the parameter removed
 // (`specialize_function_arguments`), then the instances no longer reached
-// are dropped (`prune`). Tail-resumptive handlers of user effects are not
-// ported yet: a program with one is answered `not ported`.
+// are dropped (`prune`), and tail-resumptive handlers of user effects are
+// passed as evidence (`site`, `tail_resumptive`, `specialize`).
 //
 // The program is edited by appending: a rewritten function gets a new row
 // (and new header, block and instruction rows where they change), and
 // `idx` maps each function name to its current row.
 
 use self::lower::{
+    E_INVALID,
+    U_EFFECT,
+    U_MATCH,
     VErr,
-    not_ported
+    ap,
+    err,
+    tx,
+    unsup
 };
 use self::exprs::{
     Ex,
     Hx,
+    P_BIND,
+    P_WILD,
     X_HANDLE,
     nested_instance,
     nested_name
@@ -24,15 +32,19 @@ use @vesper/check-data::util::{
     add,
     inc,
     n32,
+    push_decimal,
     u32_at,
     u64_at,
+    u8_at,
     w
 };
 use @vesper/check-data::names::{
     Names
 };
 use @vesper/check-data::types::{
-    TyKind
+    EffNode,
+    TyKind,
+    Types
 };
 use @vesper/check-data::input::{
     Ctx
@@ -45,7 +57,8 @@ use @vesper/place-ir::{
 };
 use @vesper/place-ir::codes::{
     Op,
-    Tag
+    Tag,
+    Term
 };
 
 const NONE32: u32 = 4294967295;
@@ -874,29 +887,1716 @@ fn prune(inout c: Ctx, inout p: Program, in ex: Ex, in idx: ChunkSeq[u32], entry
     p.fns = keep;
 }
 
-// `evidence::rewrite` on the monomorphized program `p` (entry `entry`).
-pub fn evidence(inout c: Ctx, inout p: Program, in ex: Ex, entry: u32) eff [Fail[VErr]] {
+// ----- editable functions ---------------------------------------------------------
+
+// A function decoded for editing: parameters (name, pass, type and their
+// header words `ops[wa..wa+wn]`), result and effect row, the bounds and
+// names words `ops[ma..ma+mn]`, the value table and the locals (both in
+// the Rust map order), and the blocks, whose `i0`/`ic` index `ins`.
+pub struct EF {
+    name: u32,
+    pn: ChunkSeq[u32],
+    pt: ChunkSeq[u32],
+    pp: ChunkSeq[u64],
+    pwa: ChunkSeq[u64],
+    pwn: ChunkSeq[u64],
+    result: u32,
+    effects: u32,
+    ma: u64,
+    mn: u64,
+    vv: ChunkSeq[u32],
+    vt: ChunkSeq[u32],
+    ln: ChunkSeq[u32],
+    lt: ChunkSeq[u32],
+    blocks: ChunkSeq[BlockRow],
+    ins: ChunkSeq[InstRow],
+    ta: u64,
+    tn: u64,
+}
+
+fn blk_at(in bs: ChunkSeq[BlockRow], i: u64) -> BlockRow {
+    match bs.try_get(i) {
+        Option::Some(x) => x,
+        Option::None => BlockRow {
+            ha: 0,
+            hn: 0,
+            i0: 0,
+            ic: 0,
+            term: 0,
+            ta: 0,
+            tn: 0
+        },
+    }
+}
+
+fn ins_at(in is: ChunkSeq[InstRow], i: u64) -> InstRow {
+    match is.try_get(i) {
+        Option::Some(x) => x,
+        Option::None => InstRow {
+            dest: 0,
+            ty: 0,
+            s0: 0,
+            s1: 0,
+            has_token: 0,
+            tin: 0,
+            tout: 0,
+            fallible: 0,
+            op: 0,
+            a: 0,
+            n: 0
+        },
+    }
+}
+
+fn load(in p: Program, f: FnRow) -> EF {
+    let mut ef = EF {
+        name: f.name,
+        pn: ChunkSeq::new[u32](),
+        pt: ChunkSeq::new[u32](),
+        pp: ChunkSeq::new[u64](),
+        pwa: ChunkSeq::new[u64](),
+        pwn: ChunkSeq::new[u64](),
+        result: 0,
+        effects: 0,
+        ma: 0,
+        mn: 0,
+        vv: ChunkSeq::new[u32](),
+        vt: ChunkSeq::new[u32](),
+        ln: ChunkSeq::new[u32](),
+        lt: ChunkSeq::new[u32](),
+        blocks: ChunkSeq::new[BlockRow](),
+        ins: ChunkSeq::new[InstRow](),
+        ta: f.ta,
+        tn: f.tn,
+    };
+    let mut at = f.ha;
+    let np = p.op(at);
+    at = inc(at);
+    for i in 0..np {
+        let k = p.op(add(at, 2));
+        ef.pn.push(n32(p.op(at)));
+        ef.pp.push(p.op(inc(at)));
+        ef.pt.push(n32(p.op(add(at, add(3, k)))));
+        ef.pwa.push(at);
+        ef.pwn.push(add(6, k));
+        at = add(at, add(6, k));
+    }
+    ef.result = n32(p.op(at));
+    ef.effects = n32(p.op(inc(at)));
+    at = add(at, 2);
+    ef.ma = at;
+    let nb = p.op(at);
+    at = add(at, add(1, wrapping_mul(nb, 2)));
+    let nc = p.op(at);
+    at = add(at, add(1, nc));
+    ef.mn = wrapping_sub(at, ef.ma);
+    let nv = p.op(at);
+    at = inc(at);
+    for i in 0..nv {
+        ef.vv.push(n32(p.op(add(at, wrapping_mul(i, 2)))));
+        ef.vt.push(n32(p.op(add(at, inc(wrapping_mul(i, 2))))));
+    }
+    at = add(at, wrapping_mul(nv, 2));
+    let nl = p.op(at);
+    at = inc(at);
+    for i in 0..nl {
+        ef.ln.push(n32(p.op(add(at, wrapping_mul(i, 2)))));
+        ef.lt.push(n32(p.op(add(at, inc(wrapping_mul(i, 2))))));
+    }
+    for bi in 0..f.bc {
+        let blk = p.block(add(f.b0, bi));
+        let i0 = ef.ins.len();
+        for k in 0..blk.ic {
+            ef.ins.push(p.inst(add(blk.i0, k)));
+        }
+        ef
+            .blocks
+            .push(
+                BlockRow {
+                    ha: blk.ha,
+                    hn: blk.hn,
+                    i0: i0,
+                    ic: blk.ic,
+                    term: blk.term,
+                    ta: blk.ta,
+                    tn: blk.tn
+                }
+            );
+    }
+    ef
+}
+
+fn emit(inout p: Program, in ef: EF) -> FnRow {
+    let ha = p.ops.len();
+    p.put(ef.pn.len(), Tag::Raw);
+    for i in 0..ef.pn.len() {
+        let a = u64_at(in ef.pwa, i);
+        for j in a..add(a, u64_at(in ef.pwn, i)) {
+            copy_word(inout p, j);
+        }
+    }
+    p.put(w(ef.result), Tag::Type);
+    p.put(w(ef.effects), Tag::Type);
+    for j in ef.ma..add(ef.ma, ef.mn) {
+        copy_word(inout p, j);
+    }
+    p.put(ef.vv.len(), Tag::Raw);
+    for i in 0..ef.vv.len() {
+        p.put(w(u32_at(in ef.vv, i)), Tag::Value);
+        p.put(w(u32_at(in ef.vt, i)), Tag::Type);
+    }
+    p.put(ef.ln.len(), Tag::Raw);
+    for i in 0..ef.ln.len() {
+        p.put(w(u32_at(in ef.ln, i)), Tag::Name);
+        p.put(w(u32_at(in ef.lt, i)), Tag::Type);
+    }
+    let hn = wrapping_sub(p.ops.len(), ha);
+    let b0 = p.blocks.len();
+    for bi in 0..ef.blocks.len() {
+        let blk = blk_at(in ef.blocks, bi);
+        let i0 = p.insts.len();
+        for k in 0..blk.ic {
+            p.insts.push(ins_at(in ef.ins, add(blk.i0, k)));
+        }
+        p
+            .blocks
+            .push(
+                BlockRow {
+                    ha: blk.ha,
+                    hn: blk.hn,
+                    i0: i0,
+                    ic: blk.ic,
+                    term: blk.term,
+                    ta: blk.ta,
+                    tn: blk.tn
+                }
+            );
+    }
+    FnRow {
+        name: ef.name,
+        ha: ha,
+        hn: hn,
+        b0: b0,
+        bc: ef.blocks.len(),
+        ta: ef.ta,
+        tn: ef.tn
+    }
+}
+
+fn load_fn(in p: Program, in idx: ChunkSeq[u32], name: u32) -> EF {
+    let fx = w(u32_at(in idx, w(name)));
+    load(in p, fn_at(in p.fns, wrapping_sub(fx, 1)))
+}
+
+fn exists(in idx: ChunkSeq[u32], name: u32) -> bool {
+    u32_at(in idx, w(name)) != 0
+}
+
+// The type of value `v` in the value table, or NONE32.
+fn ef_value(in ef: EF, v: u32) -> u32 {
+    for i in 0..ef.vv.len() {
+        if u32_at(in ef.vv, i) == v {
+            return u32_at(in ef.vt, i);
+        }
+    }
+    NONE32
+}
+
+// `values.insert(v, t)`.
+fn ef_set_value(inout ef: EF, v: u32, t: u32) {
+    let mut pos = ef.vv.len();
+    for i in 0..ef.vv.len() {
+        let x = u32_at(in ef.vv, i);
+        if x == v {
+            let ok = ef.vt.try_set(i, t);
+            return;
+        }
+        if x > v {
+            pos = i;
+            break;
+        }
+    }
+    insert32(inout ef.vv, pos, v);
+    insert32(inout ef.vt, pos, t);
+}
+
+// `locals.insert(n, t)`.
+fn ef_set_local(in names: Names, inout ef: EF, n: u32, t: u32) {
+    let mut pos = ef.ln.len();
+    for i in 0..ef.ln.len() {
+        let x = u32_at(in ef.ln, i);
+        if x == n {
+            let ok = ef.lt.try_set(i, t);
+            return;
+        }
+        if less(in names, n, x) {
+            pos = i;
+            break;
+        }
+    }
+    insert32(inout ef.ln, pos, n);
+    insert32(inout ef.lt, pos, t);
+}
+
+fn ef_remove_local(inout ef: EF, n: u32) {
+    let mut ln = ChunkSeq::new[u32]();
+    let mut lt = ChunkSeq::new[u32]();
+    for i in 0..ef.ln.len() {
+        if u32_at(in ef.ln, i) != n {
+            ln.push(u32_at(in ef.ln, i));
+            lt.push(u32_at(in ef.lt, i));
+        }
+    }
+    ef.ln = ln;
+    ef.lt = lt;
+}
+
+fn insert32(inout s: ChunkSeq[u32], pos: u64, x: u32) {
+    s.push(0);
+    let mut r = wrapping_sub(s.len(), 1);
+    loop {
+        if r <= pos {
+            break;
+        }
+        let ok = s.try_set(r, u32_at(in s, wrapping_sub(r, 1)));
+        r = wrapping_sub(r, 1);
+    }
+    let ok = s.try_set(pos, x);
+}
+
+// `next_value`.
+fn next_value(in p: Program, in ef: EF) -> u64 {
+    let mut top: u64 = 0;
+    let mut any = false;
+    for i in 0..ef.ins.len() {
+        let d = w(ins_at(in ef.ins, i).dest);
+        if !any || d > top {
+            top = d;
+            any = true;
+        }
+    }
+    for bi in 0..ef.blocks.len() {
+        let blk = blk_at(in ef.blocks, bi);
+        for j in blk.ha..add(blk.ha, blk.hn) {
+            if p.tag(j) == Tag::Value {
+                let d = p.op(j);
+                if !any || d > top {
+                    top = d;
+                    any = true;
+                }
+            }
+        }
+    }
+    for i in 0..ef.vv.len() {
+        let d = w(u32_at(in ef.vv, i));
+        if !any || d > top {
+            top = d;
+            any = true;
+        }
+    }
+    if any {
+        inc(top)
+    } else {
+        0
+    }
+}
+
+// The values instruction `i` reads (`op_uses`), into `out`.
+fn inst_uses(in p: Program, i: InstRow, inout out: ChunkSeq[u32]) {
+    if i.op == Op::Handle {
+        if p.op(i.a) != 0 {
+            out.push(n32(p.op(inc(i.a))));
+        }
+        return;
+    }
+    for j in i.a..add(i.a, i.n) {
+        if p.tag(j) == Tag::Value {
+            out.push(n32(p.op(j)));
+        }
+    }
+}
+
+fn ef_use_counts(in p: Program, in ef: EF, inout counts: ChunkSeq[u32]) {
+    for i in 0..ef.ins.len() {
+        let mut us = ChunkSeq::new[u32]();
+        inst_uses(in p, ins_at(in ef.ins, i), inout us);
+        for j in 0..us.len() {
+            bump(inout counts, w(u32_at(in us, j)));
+        }
+    }
+    for bi in 0..ef.blocks.len() {
+        let blk = blk_at(in ef.blocks, bi);
+        for j in blk.ta..add(blk.ta, blk.tn) {
+            if p.tag(j) == Tag::Value {
+                bump(inout counts, p.op(j));
+            }
+        }
+    }
+}
+
+// ----- effect rows ----------------------------------------------------------------
+
+fn row_has(in t: Types, ty: u32, name: u32) -> bool {
+    let node = t.node(ty);
+    if node.kind != TyKind::Row && node.kind != TyKind::Fn {
+        return false;
+    }
+    let row = t.row(node.r2);
+    for i in 0..w(row.n) {
+        if t.effect_at(add(w(row.a), i)).name == name {
+            return true;
+        }
+    }
+    false
+}
+
+// The row `ty` with the effects named `drop` removed, the region labels
+// `regions` maps relabeled (each region label kept once) and the region
+// capabilities `caps` added where no effect has their label.
+fn edit_row(
+    inout t: Types,
+    ty: u32,
+    drop: u32,
+    region: u32,
+    in rk: ChunkSeq[u32],
+    in rv: ChunkSeq[u32],
+    in caps: ChunkSeq[u32]
+) -> u32 {
+    let node = t.node(ty);
+    if node.kind != TyKind::Row {
+        return ty;
+    }
+    let row = t.row(node.r2);
+    let mut es: ChunkSeq[EffNode] = ChunkSeq::new[EffNode]();
+    let mut args: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let mut labels = ChunkSeq::new[u32]();
+    for i in 0..w(row.n) {
+        let e = t.effect_at(add(w(row.a), i));
+        if e.name == drop {
+            continue;
+        }
+        let mut label = e.label;
+        if e.name == region {
+            if label != 0 {
+                for j in 0..rk.len() {
+                    if u32_at(in rk, j) == wrapping_sub(label, 1) {
+                        label = n32(inc(w(u32_at(in rv, j))));
+                    }
+                }
+            }
+            if has32(in labels, label) {
+                continue;
+            }
+            labels.push(label);
+        }
+        let a = n32(args.len());
+        for j in 0..w(e.n) {
+            args.push(u32_at(in t.items, add(w(e.a), j)));
+        }
+        es
+            .push(
+                EffNode {
+                    label: label,
+                    name: e.name,
+                    a: a,
+                    n: e.n
+                }
+            );
+    }
+    for j in 0..caps.len() {
+        let l = n32(inc(w(u32_at(in caps, j))));
+        let mut found = false;
+        for q in 0..es.len() {
+            match es.try_get(q) {
+                Option::Some(e) => {
+                    if e.label == l {
+                        found = true;
+                    }
+                },
+                Option::None => {},
+            }
+        }
+        if !found {
+            es
+                .push(
+                    EffNode {
+                        label: l,
+                        name: region,
+                        a: 0,
+                        n: 0
+                    }
+                );
+        }
+    }
+    let r = t.mk_row(in es, in args, row.tail);
+    t.row_type(r)
+}
+
+// ----- handlers -------------------------------------------------------------------
+
+// A `Read` of `root` (no path) as the argument for a parameter with `pass`
+// and type `ty`, pushed to `out`; returns the argument's four words
+// (pass, value, place root + 1, place path) in `ops[at..at+4]`.
+fn read_argument(
+    inout p: Program,
+    inout ef: EF,
+    inout out: ChunkSeq[InstRow],
+    inout next: u64,
+    root: u32,
+    pass: u64,
+    ty: u32,
+    i: InstRow,
+    empty: u64
+) -> u64 {
+    let dest = n32(next);
+    next = inc(next);
+    let a = p.ops.len();
+    p.put(w(root), Tag::Name);
+    p.put(empty, Tag::Path);
+    p.put(pass, Tag::Raw);
+    p.put(0, Tag::Raw);
+    out
+        .push(
+            InstRow {
+                dest: dest,
+                ty: ty,
+                s0: i.s0,
+                s1: i.s1,
+                has_token: 0,
+                tin: 0,
+                tout: 0,
+                fallible: 0,
+                op: Op::Read,
+                a: a,
+                n: 4
+            }
+        );
+    ef_set_value(inout ef, dest, ty);
+    let at = p.ops.len();
+    p.put(pass, Tag::Raw);
+    p.put(w(dest), Tag::Value);
+    if pass == 1 {
+        p.put(inc(w(root)), Tag::OptName);
+        p.put(empty, Tag::Path);
+    } else {
+        p.put(0, Tag::OptName);
+        p.put(0, Tag::Path);
+    }
+    at
+}
+
+// A call instruction `dest: ty = callee(args)` where the argument words
+// are `ops[aa..aa+4n]`.
+fn call_row(inout p: Program, callee: u32, in argw: ChunkSeq[u64], dest: u32, ty: u32, i: InstRow)
+    -> InstRow {
+    let a = p.ops.len();
+    p.put(w(callee), Tag::Name);
+    p.put(argw.len(), Tag::Raw);
+    for j in 0..argw.len() {
+        let at = u64_at(in argw, j);
+        for q in at..add(at, 4) {
+            copy_word(inout p, q);
+        }
+    }
+    p.put(0, Tag::Raw);
+    p.put(0, Tag::OptName);
+    InstRow {
+        dest: dest,
+        ty: ty,
+        s0: i.s0,
+        s1: i.s1,
+        has_token: 0,
+        tin: 0,
+        tout: 0,
+        fallible: 0,
+        op: Op::Call,
+        a: a,
+        n: wrapping_sub(p.ops.len(), a)
+    }
+}
+
+// The tail-resumptive check's failures.
+fn why_text(k: u8) -> Str {
+    if k == 1 {
+        "has no continuation"
+    } else if k == 2 {
+        "projects its continuation"
+    } else if k == 3 {
+        "captures its continuation"
+    } else if k == 4 {
+        "never resumes"
+    } else if k == 5 {
+        "resumes with several values"
+    } else if k == 6 {
+        "uses its continuation other than by resuming"
+    } else if k == 7 {
+        "resumes other than in tail position"
+    } else if k == 8 {
+        "returns without resuming"
+    } else {
+        "resumes with an untyped value"
+    }
+}
+
+fn find32(in keys: ChunkSeq[u32], x: u32) -> u64 {
+    for i in 0..keys.len() {
+        if u32_at(in keys, i) == x {
+            return i;
+        }
+    }
+    NONE
+}
+
+// The type of value `v` in block `bi` of `ef`: the value table, else the
+// block's instruction that defines it, or NONE32.
+fn block_value_type(in ef: EF, bi: u64, v: u32) -> u32 {
+    let t = ef_value(in ef, v);
+    if t != NONE32 {
+        return t;
+    }
+    let blk = blk_at(in ef.blocks, bi);
+    for k in 0..blk.ic {
+        let i = ins_at(in ef.ins, add(blk.i0, k));
+        if i.dest == v {
+            return i.ty;
+        }
+    }
+    NONE32
+}
+
+// `tail_resumptive`: check that clause `c` (with `pats` pattern parameters,
+// the continuation last) resumes only in tail position, and rewrite it to
+// return the value it resumes with. 0 and the capture parameters in
+// `captures`, or the failure (`why_text`).
+fn tail_resumptive(
+    inout c: Ctx,
+    inout p: Program,
+    in ex: Ex,
+    inout ef: EF,
+    pats: u64,
+    never: u32,
+    inout captures: ChunkSeq[u32]
+) -> u8 {
+    let np = ef.pn.len();
+    if pats == 0 || np < pats {
+        return 1;
+    }
+    let resume = u32_at(in ef.pn, wrapping_sub(np, 1));
+    let kty = u32_at(in ef.pt, wrapping_sub(np, 1));
+    if c.types.node(kty).kind != TyKind::Fn {
+        return 1;
+    }
+    let mut reads = ChunkSeq::new[u32]();
+    for q in 0..ef.ins.len() {
+        let i = ins_at(in ef.ins, q);
+        if i.op == Op::Read && n32(p.op(i.a)) == resume && p.path(p.op(inc(i.a))).n == 0 {
+            reads.push(i.dest);
+        }
+    }
+    for q in 0..ef.ins.len() {
+        let i = ins_at(in ef.ins, q);
+        if i.op == Op::Read && n32(p.op(i.a)) == resume && p.path(p.op(inc(i.a))).n != 0 {
+            return 2;
+        }
+        if i.op == Op::Closure || i.op == Op::Handle {
+            let (pool, aliases) = if i.op == Op::Handle {
+                (p.op(add(i.a, 2)), add(i.a, 3))
+            } else {
+                (p.op(i.a), inc(i.a))
+            };
+            let x = ex.row(pool);
+            for j in 0..x.fnn {
+                if alias_or(in p, aliases, ex.free(x, j)) == resume {
+                    return 3;
+                }
+            }
+        }
+    }
+    if reads.len() == 0 {
+        return 4;
+    }
+    let mut counts = ChunkSeq::new[u32]();
+    ef_use_counts(in p, in ef, inout counts);
+    // resumed: (call dest, resumed value)
+    let mut rk = ChunkSeq::new[u32]();
+    let mut rv = ChunkSeq::new[u32]();
+    for q in 0..ef.ins.len() {
+        let i = ins_at(in ef.ins, q);
+        if i.op == Op::Indirect {
+            let callee = n32(p.op(i.a));
+            if has32(in reads, callee) {
+                if p.op(inc(i.a)) != 1 {
+                    return 5;
+                }
+                let arg = n32(p.op(add(i.a, 3)));
+                if u32_at(in counts, w(callee)) != 1 || has32(in reads, arg) {
+                    return 6;
+                }
+                let at = find32(in rk, i.dest);
+                if at == NONE {
+                    rk.push(i.dest);
+                    rv.push(arg);
+                } else {
+                    let ok = rv.try_set(at, arg);
+                }
+            }
+        }
+    }
+    if rk.len() != reads.len() {
+        return 6;
+    }
+    let mut tails = ChunkSeq::new[u32]();
+    let mut retyped = ChunkSeq::new[u32]();
+    let mut rebound = ChunkSeq::new[u32]();
+    for bi in 0..ef.blocks.len() {
+        let blk = blk_at(in ef.blocks, bi);
+        let mut alias = ChunkSeq::new[u32]();
+        let mut bound = ChunkSeq::new[u32]();
+        for k in 0..blk.ic {
+            let i = ins_at(in ef.ins, add(blk.i0, k));
+            if alias.len() > 0 {
+                if i.op == Op::Bind && has32(in alias, n32(p.op(i.a))) {
+                    let kind = p.op(inc(i.a));
+                    if kind == 1 {
+                        let n = n32(p.op(add(i.a, 4)));
+                        if !has32(in bound, n) {
+                            bound.push(n);
+                        }
+                    } else if kind != 0 {
+                        return 7;
+                    }
+                } else if i.op == Op::Read
+                    && p.path(p.op(inc(i.a))).n == 0
+                    && has32(in bound, n32(p.op(i.a))) {
+                    alias.push(i.dest);
+                    if !has32(in retyped, i.dest) {
+                        retyped.push(i.dest);
+                    }
+                } else {
+                    return 7;
+                }
+            } else if has32(in rk, i.dest) {
+                alias.push(i.dest);
+            } else {
+                let mut us = ChunkSeq::new[u32]();
+                inst_uses(in p, i, inout us);
+                for j in 0..us.len() {
+                    if has32(in rk, u32_at(in us, j)) {
+                        return 7;
+                    }
+                }
+            }
+        }
+        for j in 0..bound.len() {
+            if !has32(in rebound, u32_at(in bound, j)) {
+                rebound.push(u32_at(in bound, j));
+            }
+        }
+        let is_return = blk.term == Term::Return;
+        let r = n32(p.op(blk.ta));
+        if alias.len() > 0 {
+            if is_return && has32(in alias, r) {
+                tails.push(r);
+            } else {
+                return 7;
+            }
+        } else {
+            for j in blk.ta..add(blk.ta, blk.tn) {
+                if p.tag(j) == Tag::Value && has32(in rk, n32(p.op(j))) {
+                    return 7;
+                }
+            }
+        }
+        if is_return && !has32(in tails, r) {
+            let t = block_value_type(in ef, bi, r);
+            if t == NONE32 || c.types.name(t) != never {
+                return 8;
+            }
+        }
+    }
+    // The rewrite.
+    let mut result = NONE32;
+    let mut ins = ChunkSeq::new[InstRow]();
+    let mut blocks = ChunkSeq::new[BlockRow]();
+    for bi in 0..ef.blocks.len() {
+        let mut blk = blk_at(in ef.blocks, bi);
+        let i0 = ins.len();
+        for k in 0..blk.ic {
+            let mut i = ins_at(in ef.ins, add(blk.i0, k));
+            if has32(in reads, i.dest) || has32(in rk, i.dest) {
+                continue;
+            }
+            if i.op == Op::Bind {
+                let at = find32(in rk, n32(p.op(i.a)));
+                if at != NONE {
+                    let a = p.ops.len();
+                    p.put(w(u32_at(in rv, at)), Tag::Value);
+                    for q in inc(i.a)..add(i.a, i.n) {
+                        copy_word(inout p, q);
+                    }
+                    i.a = a;
+                }
+            }
+            ins.push(i);
+        }
+        blk.i0 = i0;
+        blk.ic = wrapping_sub(ins.len(), i0);
+        if blk.term == Term::Return {
+            let at = find32(in rk, n32(p.op(blk.ta)));
+            if at != NONE {
+                let v = u32_at(in rv, at);
+                let ta = p.ops.len();
+                p.put(w(v), Tag::Value);
+                blk.ta = ta;
+                blk.tn = 1;
+                if result == NONE32 {
+                    result = ef_value(in ef, v);
+                    if result == NONE32 {
+                        for q in i0..ins.len() {
+                            let x = ins_at(in ins, q);
+                            if x.dest == v && result == NONE32 {
+                                result = x.ty;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        blocks.push(blk);
+    }
+    ef.ins = ins;
+    ef.blocks = blocks;
+    let kn = c.types.node(kty);
+    if kn.n == 1 {
+        result = u32_at(in c.types.items, w(kn.a));
+    }
+    if result == NONE32 {
+        return 9;
+    }
+    ef.result = result;
+    for j in 0..rebound.len() {
+        ef_set_local(in c.names, inout ef, u32_at(in rebound, j), result);
+    }
+    for j in 0..retyped.len() {
+        ef_set_value(inout ef, u32_at(in retyped, j), result);
+    }
+    for q in 0..ef.ins.len() {
+        let mut i = ins_at(in ef.ins, q);
+        if has32(in retyped, i.dest) {
+            i.ty = result;
+            let ok = ef.ins.try_set(q, i);
+        }
+    }
+    let last = wrapping_sub(ef.pn.len(), 1);
+    ef.pn.truncate(last);
+    ef.pt.truncate(last);
+    ef.pp.truncate(last);
+    ef.pwa.truncate(last);
+    ef.pwn.truncate(last);
+    ef_remove_local(inout ef, resume);
+    let ncap = wrapping_sub(inc(ef.pn.len()), pats);
+    for j in 0..ncap {
+        captures.push(u32_at(in ef.pn, j));
+    }
+    0
+}
+
+// One handler site's context (`Ctx` of evidence.rs).
+pub struct Site {
+    effect: u32,
+    tag: u32,
+    // evidence parameters: name, capture, enclosing local, pass, type
+    evn: ChunkSeq[u32],
+    evc: ChunkSeq[u32],
+    evl: ChunkSeq[u32],
+    evp: ChunkSeq[u64],
+    evt: ChunkSeq[u32],
+    // clauses by operation: name, function, captures cap[ca..ca+cn], kept
+    // arguments keep[ka..ka+kn]
+    on: ChunkSeq[u32],
+    of: ChunkSeq[u32],
+    oca: ChunkSeq[u64],
+    ocn: ChunkSeq[u64],
+    oka: ChunkSeq[u64],
+    okn: ChunkSeq[u64],
+    cap: ChunkSeq[u32],
+    keep: ChunkSeq[u8],
+    caps: ChunkSeq[u32],
+}
+
+fn ev_param(in s: Site, capture: u32) -> u64 {
+    find32(in s.evc, capture)
+}
+
+// Evidence parameter words: name, pass, no projections, type, no span.
+fn param_words(inout p: Program, name: u32, pass: u64, ty: u32) -> u64 {
+    let a = p.ops.len();
+    p.put(w(name), Tag::Name);
+    p.put(pass, Tag::Raw);
+    p.put(0, Tag::Raw);
+    p.put(w(ty), Tag::Type);
+    p.put(0, Tag::Raw);
+    p.put(0, Tag::Raw);
+    a
+}
+
+fn uerr(in names: Names, func: u32, sink d: ChunkSeq[u8]) -> VErr {
+    unsup(U_EFFECT, func, d)
+}
+
+fn d_eff(in names: Names, in a: Str, e: u32, in b: Str) -> ChunkSeq[u8] {
+    let mut d = tx(a);
+    names.write(e, inout d);
+    ap(inout d, b);
+    d
+}
+
+// The clause of operation `op` (symbol) at `s`, or NONE.
+fn clause_of(in s: Site, op: u32) -> u64 {
+    // a map: the last clause of a name wins
+    let mut at = NONE;
+    for i in 0..s.on.len() {
+        if u32_at(in s.on, i) == op {
+            at = i;
+        }
+    }
+    at
+}
+
+// `specialize`.
+fn specialize(
+    inout c: Ctx,
+    inout p: Program,
+    in ex: Ex,
+    inout idx: ChunkSeq[u32],
+    in s: Site,
+    in rk: ChunkSeq[u32],
+    in rv: ChunkSeq[u32],
+    old: u32,
+    new: u32,
+    inout queue: ChunkSeq[u32],
+    inout done: ChunkSeq[u32],
+    region: u32,
+    empty: u64
+) eff [Fail[VErr]] {
+    if has32(in done, new) {
+        return;
+    }
+    done.push(new);
+    if !exists(in idx, old) {
+        let mut d = tx("no IR for ");
+        c.names.write(old, inout d);
+        Fail::raise(err(E_INVALID, d));
+    }
+    let mut ef = load_fn(in p, in idx, old);
+    ef.name = new;
+    ef.effects = edit_row(inout c.types, ef.effects, s.effect, region, in rk, in rv, in s.caps);
+    for j in 0..s.evn.len() {
+        let name = u32_at(in s.evn, j);
+        let pass = u64_at(in s.evp, j);
+        let ty = u32_at(in s.evt, j);
+        let wa = param_words(inout p, name, pass, ty);
+        ef.pn.push(name);
+        ef.pt.push(ty);
+        ef.pp.push(pass);
+        ef.pwa.push(wa);
+        ef.pwn.push(6);
+        ef_set_local(in c.names, inout ef, name, ty);
+    }
+    let mut next = next_value(in p, in ef);
+    let mut prefix = ChunkSeq::new[u8]();
+    c.names.write(s.effect, inout prefix);
+    ap(inout prefix, "::");
+    let plen = prefix.len();
+    let mut olds = ChunkSeq::new[u32]();
+    let mut news = ChunkSeq::new[u32]();
+    let mut ins = ChunkSeq::new[InstRow]();
+    let mut blocks = ChunkSeq::new[BlockRow]();
+    for bi in 0..ef.blocks.len() {
+        let mut blk = blk_at(in ef.blocks, bi);
+        let mut out = ChunkSeq::new[InstRow]();
+        for k in 0..blk.ic {
+            let mut i = ins_at(in ef.ins, add(blk.i0, k));
+            if i.op == Op::Call {
+                let callee = n32(p.op(i.a));
+                let n = p.op(inc(i.a));
+                let tat = add(add(i.a, 2), wrapping_mul(n, 4));
+                let nt = p.op(tat);
+                let cap = p.op(add(inc(tat), nt));
+                if cap == 0 && c.names.has_prefix(callee, in prefix.as_slice()) {
+                    let mut opn = ChunkSeq::new[u8]();
+                    for q in plen..c.names.size(callee) {
+                        opn.push(c.names.byte(callee, q));
+                    }
+                    let op = c.names.intern(in opn.as_slice());
+                    let ci = clause_of(in s, op);
+                    if ci == NONE {
+                        let mut d = tx("operation ");
+                        c.names.write(callee, inout d);
+                        ap(inout d, " without a clause");
+                        Fail::raise(uerr(in c.names, old, d));
+                    }
+                    let mut argw = ChunkSeq::new[u64]();
+                    let ca = u64_at(in s.oca, ci);
+                    for q in ca..add(ca, u64_at(in s.ocn, ci)) {
+                        let cn = u32_at(in s.cap, q);
+                        let e = ev_param(in s, cn);
+                        if e == NONE {
+                            let mut d = tx("no evidence for capture ");
+                            c.names.write(cn, inout d);
+                            Fail::raise(err(E_INVALID, d));
+                        }
+                        let at = read_argument(
+                            inout p,
+                            inout ef,
+                            inout out,
+                            inout next,
+                            u32_at(in s.evn, e),
+                            u64_at(in s.evp, e),
+                            u32_at(in s.evt, e),
+                            i,
+                            empty
+                        );
+                        argw.push(at);
+                    }
+                    let ka = u64_at(in s.oka, ci);
+                    if n != u64_at(in s.okn, ci) {
+                        let mut d = tx("arity of ");
+                        c.names.write(callee, inout d);
+                        Fail::raise(err(E_INVALID, d));
+                    }
+                    for q in 0..n {
+                        if u8_at(in s.keep, add(ka, q)) != 0 {
+                            argw.push(add(add(i.a, 2), wrapping_mul(q, 4)));
+                        }
+                    }
+                    let a = p.ops.len();
+                    p.put(w(u32_at(in s.of, ci)), Tag::Name);
+                    p.put(argw.len(), Tag::Raw);
+                    for q in 0..argw.len() {
+                        let at = u64_at(in argw, q);
+                        for z in at..add(at, 4) {
+                            copy_word(inout p, z);
+                        }
+                    }
+                    for z in tat..add(i.a, i.n) {
+                        copy_word(inout p, z);
+                    }
+                    i.a = a;
+                    i.n = wrapping_sub(p.ops.len(), a);
+                } else if cap == 0
+                    && c.names.size(callee) > 0
+                    && c.names.byte(callee, 0) != 36
+                    && exists(in idx, callee)
+                    && row_has(in c.types, load_effects(in p, in idx, callee), s.effect) {
+                    let mut argw = ChunkSeq::new[u64]();
+                    for q in 0..n {
+                        argw.push(add(add(i.a, 2), wrapping_mul(q, 4)));
+                    }
+                    for e in 0..s.evn.len() {
+                        let at = read_argument(
+                            inout p,
+                            inout ef,
+                            inout out,
+                            inout next,
+                            u32_at(in s.evn, e),
+                            u64_at(in s.evp, e),
+                            u32_at(in s.evt, e),
+                            i,
+                            empty
+                        );
+                        argw.push(at);
+                    }
+                    queue.push(callee);
+                    let mut item = ChunkSeq::new[u8]();
+                    c.names.write(s.tag, inout item);
+                    let renamed = with_suffix(inout c.names, callee, in item);
+                    let a = p.ops.len();
+                    p.put(w(renamed), Tag::Name);
+                    p.put(argw.len(), Tag::Raw);
+                    for q in 0..argw.len() {
+                        let at = u64_at(in argw, q);
+                        for z in at..add(at, 4) {
+                            copy_word(inout p, z);
+                        }
+                    }
+                    for z in tat..add(i.a, i.n) {
+                        copy_word(inout p, z);
+                    }
+                    i.a = a;
+                    i.n = wrapping_sub(p.ops.len(), a);
+                }
+            } else if i.op == Op::Handle {
+                let x = ex.row(p.op(add(i.a, 2)));
+                if x.kind == X_HANDLE && x.effect == s.effect {
+                    let d = d_eff(in c.names, "a handler for ", s.effect, " inside another one");
+                    Fail::raise(uerr(in c.names, old, d));
+                }
+                nested_of(inout c.names, in p, in ex, old, i, inout olds);
+                nested_of(inout c.names, in p, in ex, new, i, inout news);
+            } else if i.op == Op::Indirect {
+                let callee = n32(p.op(i.a));
+                let mut ty = ef_value(in ef, callee);
+                if ty == NONE32 {
+                    for q in 0..out.len() {
+                        let x = ins_at(in out, q);
+                        if x.dest == callee && ty == NONE32 {
+                            ty = x.ty;
+                        }
+                    }
+                }
+                if ty != NONE32
+                    && c.types.node(ty).kind == TyKind::Fn
+                    && row_has(in c.types, ty, s.effect) {
+                    let d = d_eff(in c.names, "a function value performing ", s.effect, "");
+                    Fail::raise(uerr(in c.names, old, d));
+                }
+            }
+            out.push(i);
+        }
+        blk.i0 = ins.len();
+        blk.ic = out.len();
+        for q in 0..out.len() {
+            ins.push(ins_at(in out, q));
+        }
+        blocks.push(blk);
+    }
+    ef.ins = ins;
+    ef.blocks = blocks;
+    let row = emit(inout p, in ef);
+    install(inout p, inout idx, row);
+    for j in 0..olds.len() {
+        let o = u32_at(in olds, j);
+        if exists(in idx, o) {
+            specialize(
+                inout c,
+                inout p,
+                in ex,
+                inout idx,
+                in s,
+                in rk,
+                in rv,
+                o,
+                u32_at(in news, j),
+                inout queue,
+                inout done,
+                region,
+                empty
+            );
+        }
+    }
+}
+
+fn load_effects(in p: Program, in idx: ChunkSeq[u32], name: u32) -> u32 {
+    let f = fn_at(in p.fns, wrapping_sub(w(u32_at(in idx, w(name))), 1));
+    let mut at = f.ha;
+    let np = p.op(at);
+    at = inc(at);
+    for i in 0..np {
+        let k = p.op(add(at, 2));
+        at = add(at, add(6, k));
+    }
+    n32(p.op(inc(at)))
+}
+
+// `lower::assigned_capture` on a function of the program (symbol + 1, or 0).
+fn assigned_capture_of(inout c: Ctx, in p: Program, f: FnRow) -> u32 {
+    let mut pn = ChunkSeq::new[u32]();
+    let mut pt = ChunkSeq::new[u32]();
+    params_of(in p, f, inout pn, inout pt);
+    let mut by_value = ChunkSeq::new[u32]();
+    let mut at = inc(f.ha);
+    for i in 0..pn.len() {
+        if p.op(inc(at)) != 1 {
+            by_value.push(n32(p.op(at)));
+        }
+        let k = p.op(add(at, 2));
+        at = add(at, add(6, k));
+    }
+    for bi in 0..f.bc {
+        let blk = p.block(add(f.b0, bi));
+        for k in 0..blk.ic {
+            let i = p.inst(add(blk.i0, k));
+            if i.op == Op::Write {
+                let place = n32(p.op(i.a));
+                let n = c.names.size(place);
+                let mut end = n;
+                for q in 0..n {
+                    if c.names.byte(place, q) == 46 {
+                        end = q;
+                        break;
+                    }
+                }
+                let root = if end == n {
+                    place
+                } else {
+                    let mut t = ChunkSeq::new[u8]();
+                    for q in 0..end {
+                        t.push(c.names.byte(place, q));
+                    }
+                    c.names.intern(in t.as_slice())
+                };
+                if has32(in by_value, root) {
+                    return n32(inc(w(root)));
+                }
+            } else if i.op == Op::Call {
+                let n = p.op(inc(i.a));
+                for j in 0..n {
+                    let a = add(add(i.a, 2), wrapping_mul(j, 4));
+                    let root = p.op(add(a, 2));
+                    if p.op(a) == 1 && root != 0 {
+                        let r = n32(wrapping_sub(root, 1));
+                        if has32(in by_value, r) {
+                            return n32(inc(w(r)));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    0
+}
+
+// The tag's number: the text after its last `#`.
+fn tag_number(in names: Names, tag: u32, inout out: ChunkSeq[u8]) {
+    let n = names.size(tag);
+    let mut at = n;
+    for i in 0..n {
+        if names.byte(tag, i) == 35 {
+            at = inc(i);
+        }
+    }
+    if at == n {
+        out.push(48);
+        return;
+    }
+    for i in at..n {
+        out.push(names.byte(tag, i));
+    }
+}
+
+// `site`: rewrite the `handle` instruction `k` of block `b` of `parent`.
+fn site(
+    inout c: Ctx,
+    inout p: Program,
+    in ex: Ex,
+    inout idx: ChunkSeq[u32],
+    in rk: ChunkSeq[u32],
+    in rv: ChunkSeq[u32],
+    parent: u32,
+    b: u64,
+    k: u64,
+    tag: u32,
+    inout sites: Sites,
+    region: u32,
+    never: u32,
+    empty: u64
+) eff [Fail[VErr]] {
+    let pf = load_fn(in p, in idx, parent);
+    let pb = blk_at(in pf.blocks, b);
+    let i = ins_at(in pf.ins, add(pb.i0, k));
+    if i.op != Op::Handle || k >= pb.ic {
+        Fail::raise(err(E_INVALID, tx("not a handle instruction")));
+    }
+    let x = ex.row(p.op(add(i.a, 2)));
+    if x.kind != X_HANDLE {
+        Fail::raise(err(E_INVALID, tx("not a handle expression")));
+    }
+    let e = x.effect;
+    if x.state || p.op(i.a) != 0 {
+        let d = d_eff(in c.names, "stateful handler for ", e, "");
+        Fail::raise(uerr(in c.names, parent, d));
+    }
+    if x.label != 0 || x.en != 0 {
+        let d = d_eff(in c.names, "labeled or parameterized handler for ", e, "");
+        Fail::raise(uerr(in c.names, parent, d));
+    }
+    let aliases = add(i.a, 3);
+    let bn = nested_name(inout c.names, "handler_body", x.b0, x.b1);
+    let body_fn = nested_instance(inout c.names, parent, bn);
+    let ret = ex.clause(x.ret);
+    let rn = nested_name(inout c.names, "handler_clause", ret.s0, ret.s1);
+    let ret_fn = nested_instance(inout c.names, parent, rn);
+    for g in [body_fn, ret_fn] {
+        if !exists(in idx, g) {
+            let mut d = tx("handler function ");
+            c.names.write(g, inout d);
+            ap(inout d, " was not lowered");
+            Fail::raise(err(E_INVALID, d));
+        }
+    }
+    let mut clause_fns = ChunkSeq::new[u32]();
+    for j in 0..x.on {
+        let cl = ex.clause(add(x.oa, j));
+        let cn = nested_name(inout c.names, "handler_clause", cl.s0, cl.s1);
+        clause_fns.push(nested_instance(inout c.names, parent, cn));
+    }
+    let mut checked = ChunkSeq::new[u32]();
+    checked.push(body_fn);
+    checked.push(ret_fn);
+    for j in 0..clause_fns.len() {
+        checked.push(u32_at(in clause_fns, j));
+    }
+    for j in 0..checked.len() {
+        let g = u32_at(in checked, j);
+        if exists(in idx, g) {
+            let f = fn_at(in p.fns, wrapping_sub(w(u32_at(in idx, w(g))), 1));
+            let root = assigned_capture_of(inout c, in p, f);
+            if root != 0 {
+                let mut d = d_eff(in c.names, "handler for ", e, " assigns the captured place '");
+                c.names.write(wrapping_sub(root, 1), inout d);
+                ap(inout d, "'");
+                Fail::raise(uerr(in c.names, parent, d));
+            }
+        }
+    }
+    let mut s = Site {
+        effect: e,
+        tag: tag,
+        evn: ChunkSeq::new[u32](),
+        evc: ChunkSeq::new[u32](),
+        evl: ChunkSeq::new[u32](),
+        evp: ChunkSeq::new[u64](),
+        evt: ChunkSeq::new[u32](),
+        on: ChunkSeq::new[u32](),
+        of: ChunkSeq::new[u32](),
+        oca: ChunkSeq::new[u64](),
+        ocn: ChunkSeq::new[u64](),
+        oka: ChunkSeq::new[u64](),
+        okn: ChunkSeq::new[u64](),
+        cap: ChunkSeq::new[u32](),
+        keep: ChunkSeq::new[u8](),
+        caps: ChunkSeq::new[u32](),
+    };
+    let mut num = ChunkSeq::new[u8]();
+    tag_number(in c.names, tag, inout num);
+    for j in 0..x.on {
+        let cl = ex.clause(add(x.oa, j));
+        let function = u32_at(in clause_fns, j);
+        if !exists(in idx, function) {
+            let mut d = tx("clause ");
+            c.names.write(function, inout d);
+            ap(inout d, " was not lowered");
+            Fail::raise(err(E_INVALID, d));
+        }
+        let mut cf = load_fn(in p, in idx, function);
+        if cl.pn == 0 {
+            Fail::raise(err(E_INVALID, tx("operation clause without patterns")));
+        }
+        let ka = s.keep.len();
+        let mut kept: u64 = 0;
+        for q in 0..wrapping_sub(cl.pn, 1) {
+            let pk = ex.pat_kind(cl, q);
+            if pk == P_BIND {
+                s.keep.push(1);
+                kept = inc(kept);
+            } else if pk == P_WILD {
+                s.keep.push(0);
+            } else {
+                Fail::raise(
+                    unsup(U_MATCH, parent, tx("a handler clause pattern other than a name or `_`"))
+                );
+            }
+        }
+        if ex.pat_kind(cl, wrapping_sub(cl.pn, 1)) != P_BIND {
+            let mut d = d_eff(in c.names, "handler for ", e, ": clause ");
+            c.names.write(cl.name, inout d);
+            ap(inout d, " never resumes (only tail-resumptive handlers)");
+            Fail::raise(uerr(in c.names, parent, d));
+        }
+        let mut captures = ChunkSeq::new[u32]();
+        let why = tail_resumptive(
+            inout c,
+            inout p,
+            in ex,
+            inout cf,
+            inc(kept),
+            never,
+            inout captures
+        );
+        if why != 0 {
+            let mut d = d_eff(in c.names, "handler for ", e, ": clause ");
+            c.names.write(cl.name, inout d);
+            ap(inout d, " ");
+            ap(inout d, why_text(why));
+            ap(inout d, " (only tail-resumptive handlers)");
+            Fail::raise(uerr(in c.names, parent, d));
+        }
+        if row_has(in c.types, cf.effects, e) {
+            let mut d = d_eff(in c.names, "handler for ", e, ": clause ");
+            c.names.write(cl.name, inout d);
+            ap(inout d, " performs the handled effect");
+            Fail::raise(uerr(in c.names, parent, d));
+        }
+        let none = ChunkSeq::new[u32]();
+        cf.effects = edit_row(inout c.types, cf.effects, NONE32, region, in rk, in rv, in none);
+        let node = c.types.node(cf.effects);
+        if node.kind == TyKind::Row {
+            let row = c.types.row(node.r2);
+            for q in 0..w(row.n) {
+                let ef = c.types.effect_at(add(w(row.a), q));
+                if ef.name == region && ef.label != 0 {
+                    let l = wrapping_sub(ef.label, 1);
+                    if c.names.byte(l, 0) != 36 && !has32(in s.caps, l) {
+                        s.caps.push(l);
+                    }
+                }
+            }
+        }
+        for q in 0..captures.len() {
+            let pn = u32_at(in cf.pn, q);
+            if ev_param(in s, pn) == NONE {
+                let local = alias_or(in p, aliases, pn);
+                let mut t = tx("$ev");
+                t.extend(in num.as_slice());
+                t.push(46);
+                c.names.write(pn, inout t);
+                let name = c.names.intern(in t.as_slice());
+                s.evn.push(name);
+                s.evc.push(pn);
+                s.evl.push(local);
+                s.evp.push(u64_at(in cf.pp, q));
+                s.evt.push(u32_at(in cf.pt, q));
+            }
+        }
+        sites.ef.push(function);
+        sites.et.push(tag);
+        s.on.push(cl.name);
+        s.of.push(function);
+        s.oca.push(s.cap.len());
+        s.ocn.push(captures.len());
+        for q in 0..captures.len() {
+            s.cap.push(u32_at(in captures, q));
+        }
+        s.oka.push(ka);
+        s.okn.push(wrapping_sub(cl.pn, 1));
+        let row = emit(inout p, in cf);
+        install(inout p, inout idx, row);
+    }
+    // The body, in place, then everything with the effect it reaches.
+    let mut queue = ChunkSeq::new[u32]();
+    let mut done = ChunkSeq::new[u32]();
+    specialize(
+        inout c,
+        inout p,
+        in ex,
+        inout idx,
+        in s,
+        in rk,
+        in rv,
+        body_fn,
+        body_fn,
+        inout queue,
+        inout done,
+        region,
+        empty
+    );
+    let mut head: u64 = 0;
+    loop {
+        if head >= queue.len() {
+            break;
+        }
+        let g = u32_at(in queue, head);
+        head = inc(head);
+        let mut item = ChunkSeq::new[u8]();
+        c.names.write(tag, inout item);
+        let new = with_suffix(inout c.names, g, in item);
+        specialize(
+            inout c,
+            inout p,
+            in ex,
+            inout idx,
+            in s,
+            in rk,
+            in rv,
+            g,
+            new,
+            inout queue,
+            inout done,
+            region,
+            empty
+        );
+    }
+    sites.rf.push(body_fn);
+    sites.rt.push(tag);
+    // The `handle` instruction: call the body, then the `return` clause.
+    let mut ret_bind = NONE32;
+    if ret.pn > 0 {
+        let k0 = ex.pat_kind(ret, 0);
+        if k0 == P_BIND {
+            ret_bind = ex.pat_name(ret, 0);
+        } else if k0 != P_WILD {
+            Fail::raise(
+                unsup(U_MATCH, parent, tx("a handler clause pattern other than a name or `_`"))
+            );
+        }
+    }
+    let bf = load_fn(in p, in idx, body_fn);
+    let rf = load_fn(in p, in idx, ret_fn);
+    let mut f = load_fn(in p, in idx, parent);
+    let mut next = next_value(in p, in f);
+    let mut out = ChunkSeq::new[InstRow]();
+    let mut argw = ChunkSeq::new[u64]();
+    for q in 0..bf.pn.len() {
+        let pn = u32_at(in bf.pn, q);
+        let ei = find32(in s.evn, pn);
+        let root = if ei != NONE {
+            u32_at(in s.evl, ei)
+        } else {
+            alias_or(in p, aliases, pn)
+        };
+        let at = read_argument(
+            inout p,
+            inout f,
+            inout out,
+            inout next,
+            root,
+            u64_at(in bf.pp, q),
+            u32_at(in bf.pt, q),
+            i,
+            empty
+        );
+        argw.push(at);
+    }
+    let value = n32(next);
+    next = inc(next);
+    out.push(call_row(inout p, body_fn, in argw, value, bf.result, i));
+    ef_set_value(inout f, value, bf.result);
+    let mut argw2 = ChunkSeq::new[u64]();
+    for q in 0..rf.pn.len() {
+        let pn = u32_at(in rf.pn, q);
+        if ret_bind != NONE32 && pn == ret_bind {
+            let at = p.ops.len();
+            p.put(u64_at(in rf.pp, q), Tag::Raw);
+            p.put(w(value), Tag::Value);
+            p.put(0, Tag::OptName);
+            p.put(0, Tag::Path);
+            argw2.push(at);
+            continue;
+        }
+        let root = alias_or(in p, aliases, pn);
+        let at = read_argument(
+            inout p,
+            inout f,
+            inout out,
+            inout next,
+            root,
+            u64_at(in rf.pp, q),
+            u32_at(in rf.pt, q),
+            i,
+            empty
+        );
+        argw2.push(at);
+    }
+    let mut last = call_row(inout p, ret_fn, in argw2, i.dest, i.ty, i);
+    last.has_token = i.has_token;
+    last.tin = i.tin;
+    last.tout = i.tout;
+    out.push(last);
+    // splice
+    let mut ins = ChunkSeq::new[InstRow]();
+    let mut blocks = ChunkSeq::new[BlockRow]();
+    for bi in 0..f.blocks.len() {
+        let mut blk = blk_at(in f.blocks, bi);
+        let i0 = ins.len();
+        for q in 0..blk.ic {
+            if bi == b && q == k {
+                for z in 0..out.len() {
+                    ins.push(ins_at(in out, z));
+                }
+            } else {
+                ins.push(ins_at(in f.ins, add(blk.i0, q)));
+            }
+        }
+        blk.i0 = i0;
+        blk.ic = wrapping_sub(ins.len(), i0);
+        blocks.push(blk);
+    }
+    f.ins = ins;
+    f.blocks = blocks;
+    let row = emit(inout p, in f);
+    install(inout p, inout idx, row);
+}
+
+// Failure-code rewriting around calls (`Sites`): clause functions `ef`
+// with their site tags `et` (escape), handler bodies `rf` with `rt`
+// (restore).
+pub struct Sites {
+    ef: ChunkSeq[u32],
+    et: ChunkSeq[u32],
+    rf: ChunkSeq[u32],
+    rt: ChunkSeq[u32],
+}
+
+pub fn sites_new() -> Sites {
+    Sites {
+        ef: ChunkSeq::new[u32](),
+        et: ChunkSeq::new[u32](),
+        rf: ChunkSeq::new[u32](),
+        rt: ChunkSeq::new[u32](),
+    }
+}
+
+// Whether `x` is a region block (`lower::region_block(..).is_some()`).
+fn is_region_block(in names: Names, in ex: Ex, x: Hx, region: u32, active: bool) -> bool {
+    if !active || x.kind != X_HANDLE || x.effect != region || x.label == 0 {
+        return false;
+    }
+    let r = ex.clause(x.ret);
+    if r.pn != 1 || ex.pat_kind(r, 0) != P_BIND {
+        return false;
+    }
+    let s = ex.pat_name(r, 0);
+    if !names.has_prefix(s, in "$region".as_bytes()) {
+        return false;
+    }
+    let n = names.size(s);
+    if n == 7 {
+        return true;
+    }
+    if names.byte(s, 7) != 58 {
+        return false;
+    }
+    let mut i: u64 = 8;
+    if i < n && names.byte(s, i) == 43 {
+        i = inc(i);
+    }
+    if i >= n {
+        return false;
+    }
+    let mut v: u64 = 0;
+    loop {
+        if i >= n {
+            break;
+        }
+        let c = names.byte(s, i);
+        if c < 48 || c > 57 {
+            return false;
+        }
+        let d = widen_u64(wrapping_sub(c, 48));
+        if v > wrapping_sub(NONE, d) / 10 {
+            return false;
+        }
+        v = wrapping_add(wrapping_mul(v, 10), d);
+        i = inc(i);
+    }
+    true
+}
+
+// The functions in name order (the Rust `BTreeMap` order).
+fn sorted_names(in names: Names, in p: Program) -> ChunkSeq[u32] {
+    let mut out = ChunkSeq::new[u32]();
+    for i in 0..p.fns.len() {
+        let s = fn_at(in p.fns, i).name;
+        let mut pos = out.len();
+        for r in 0..out.len() {
+            if less(in names, s, u32_at(in out, r)) {
+                pos = r;
+                break;
+            }
+        }
+        insert32(inout out, pos, s);
+    }
+    out
+}
+
+// `evidence::rewrite` on the monomorphized program `p` (entry `entry`):
+// the failure-code rewriting the lowering applies around calls.
+pub fn evidence(inout c: Ctx, inout p: Program, in ex: Ex, entry: u32, regions_active: bool)
+    -> Sites eff [Fail[VErr]] {
     let mut idx = ChunkSeq::new[u32]();
     for i in 0..p.fns.len() {
         set32(inout idx, w(fn_at(in p.fns, i).name), n32(inc(i)));
     }
     specialize_function_arguments(inout c, inout p, in ex, inout idx);
     prune(inout c, inout p, in ex, in idx, entry);
-    let fail = c.names.lookup(in "Fail".as_bytes());
-    let region = c.names.lookup(in "Region".as_bytes());
-    for fi in 0..p.fns.len() {
-        let f = fn_at(in p.fns, fi);
+    idx.clear();
+    for i in 0..p.fns.len() {
+        set32(inout idx, w(fn_at(in p.fns, i).name), n32(inc(i)));
+    }
+    let mut sites = sites_new();
+    let fail = c.names.intern(in "Fail".as_bytes());
+    let region = c.names.intern(in "Region".as_bytes());
+    let never = c.names.intern(in "Never".as_bytes());
+    let none = ChunkSeq::new[u32]();
+    let empty = p.add_path(in none);
+    let order = sorted_names(in c.names, in p);
+    // region labels by the checker's capability label `$cap<start>`
+    let mut rk = ChunkSeq::new[u32]();
+    let mut rv = ChunkSeq::new[u32]();
+    // sites: (function, block, instruction)
+    let mut sf = ChunkSeq::new[u32]();
+    let mut sb = ChunkSeq::new[u64]();
+    let mut sk = ChunkSeq::new[u64]();
+    for oi in 0..order.len() {
+        let name = u32_at(in order, oi);
+        let f = fn_at(in p.fns, wrapping_sub(w(u32_at(in idx, w(name))), 1));
         for bi in 0..f.bc {
             let blk = p.block(add(f.b0, bi));
             for k in 0..blk.ic {
                 let i = p.inst(add(blk.i0, k));
-                if i.op == Op::Handle {
-                    let x = ex.row(p.op(add(i.a, 2)));
-                    if x.kind == X_HANDLE && x.effect != fail && x.effect != region {
-                        Fail::raise(not_ported("handlers of user effects"));
+                if i.op != Op::Handle {
+                    continue;
+                }
+                let x = ex.row(p.op(add(i.a, 2)));
+                if x.kind != X_HANDLE {
+                    continue;
+                }
+                if is_region_block(in c.names, in ex, x, region, regions_active) {
+                    let mut t = tx("$cap");
+                    push_decimal(inout t, x.s0);
+                    let cs = c.names.intern(in t.as_slice());
+                    let at = find32(in rk, cs);
+                    if at == NONE {
+                        rk.push(cs);
+                        rv.push(wrapping_sub(x.label, 1));
+                    } else {
+                        let ok = rv.try_set(at, wrapping_sub(x.label, 1));
                     }
+                }
+                if x.effect != fail && x.effect != region {
+                    sf.push(name);
+                    sb.push(bi);
+                    sk.push(k);
                 }
             }
         }
     }
+    // Rewriting a site moves the instructions after it; go backwards.
+    let ns = sf.len();
+    for n in 0..ns {
+        let j = wrapping_sub(wrapping_sub(ns, 1), n);
+        let name = u32_at(in sf, j);
+        let b = u64_at(in sb, j);
+        let k = u64_at(in sk, j);
+        let f = load_fn(in p, in idx, name);
+        let blk = blk_at(in f.blocks, b);
+        let i = ins_at(in f.ins, add(blk.i0, k));
+        if i.op != Op::Handle || k >= blk.ic {
+            Fail::raise(err(E_INVALID, tx("not a handle instruction")));
+        }
+        let x = ex.row(p.op(add(i.a, 2)));
+        let mut t = ChunkSeq::new[u8]();
+        c.names.write(x.effect, inout t);
+        t.push(35);
+        push_decimal(inout t, n);
+        let tag = c.names.intern(in t.as_slice());
+        site(
+            inout c,
+            inout p,
+            in ex,
+            inout idx,
+            in rk,
+            in rv,
+            name,
+            b,
+            k,
+            tag,
+            inout sites,
+            region,
+            never,
+            empty
+        );
+    }
+    sites
 }

@@ -411,16 +411,12 @@ pub fn mono_for_test(
 /// differential (#1886, part 4b).
 #[doc(hidden)]
 pub struct FrontOutcome {
-    /// Evidence passing left the monomorphized program as it was.
-    pub evidence_unchanged: bool,
-    /// Evidence passing found handler sites.
-    pub has_sites: bool,
     pub lowered: Result<Lowered, VerifiedError>,
 }
 
 /// The program after ir_opt, the instance limit and the front half's
 /// outcome (or monomorphization's error; an evidence passing error is an
-/// outcome that changed the program).
+/// outcome).
 #[doc(hidden)]
 #[allow(clippy::type_complexity)]
 pub fn front_for_test(
@@ -439,27 +435,13 @@ pub fn front_for_test(
     let max = max_instances(options);
     let outcome = (|| {
         let mut mono = mono::monomorphize(world, &program, entry, max)?;
-        let before = format!("{mono:?}");
         let sites = match evidence::rewrite(world, &mut mono, &[entry.to_owned()], None) {
             Ok(sites) => sites,
-            // Evidence passing refused the program: not the front half's
-            // monomorphization or lowering.
-            Err(e) => {
-                return Ok(FrontOutcome {
-                    evidence_unchanged: false,
-                    has_sites: false,
-                    lowered: Err(e),
-                });
-            }
+            // Evidence passing refused the program.
+            Err(e) => return Ok(FrontOutcome { lowered: Err(e) }),
         };
-        let evidence_unchanged = format!("{mono:?}") == before;
-        let has_sites = !sites.escape.is_empty() || !sites.restore.is_empty();
         let lowered = lower_program(world, &mono, entry, options, &sites).map(|(_, lir)| lir);
-        Ok(FrontOutcome {
-            evidence_unchanged,
-            has_sites,
-            lowered,
-        })
+        Ok(FrontOutcome { lowered })
     })();
     Ok((program, max, outcome))
 }
