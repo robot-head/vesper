@@ -82,11 +82,7 @@ fn same(in b: Slice[u8], x: u64, y: u64, n: u64) -> bool {
 
 // Byte-wise order of `b[x..x+xn]` against `b[y..y+yn]`: -1, 0 or 1.
 fn compare(in b: Slice[u8], x: u64, xn: u64, y: u64, yn: u64) -> i64 {
-    let n = if xn < yn {
-        xn
-    } else {
-        yn
-    };
+    let n = if xn < yn { xn } else { yn };
     for i in 0..n {
         let p = bt(in b, wrapping_add(x, i));
         let q = bt(in b, wrapping_add(y, i));
@@ -982,11 +978,7 @@ pub fn proof_lenses(in input: Str) -> ChunkSeq[u64] {
         d.m_len.push(len);
         d.m_at.push(take(inout t, len));
         d.m_ok.push(ok);
-        let v_len = if ok == 1 {
-            32
-        } else {
-            reason
-        };
+        let v_len = if ok == 1 { 32 } else { reason };
         d.m_v_len.push(v_len);
         d.m_v_at.push(take(inout t, v_len));
     }
