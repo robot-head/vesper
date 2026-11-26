@@ -68,8 +68,8 @@ struct Reader {
 }
 
 impl Reader {
-    fn word(inout self, in b: Slice[u8]) -> u64 {
-        match b.try_read_u64_le(self.pos) {
+    fn word(inout self, in req: Slice[u8]) -> u64 {
+        match req.try_read_u64_le(self.pos) {
             Option::Some(v) => {
                 self.pos = wrapping_add(self.pos, 8);
                 v
@@ -81,11 +81,11 @@ impl Reader {
         }
     }
 
-    fn span(inout self, in b: Slice[u8]) -> Span {
-        let len = self.word(in b);
+    fn span(inout self, in req: Slice[u8]) -> Span {
+        let len = self.word(in req);
         let start = self.pos;
         let end = wrapping_add(start, len);
-        if end < start || end > b.len() {
+        if end < start || end > req.len() {
             self.bad = true;
             return Span { start: 0, len: 0 };
         }
@@ -94,32 +94,32 @@ impl Reader {
     }
 }
 
-fn push64(inout out: ChunkSeq[u8], v: u64) {
+fn push64(inout out: ChunkSeq[u8], value: u64) {
     let at = out.len();
     out.resize(wrapping_add(at, 8), 0);
-    let ok = out.try_write_u64_le(at, v);
+    let ok = out.try_write_u64_le(at, value);
 }
 
-fn put_str(inout out: ChunkSeq[u8], in s: Slice[u8]) {
-    push64(inout out, s.len());
-    out.extend(in s);
+fn put_str(inout out: ChunkSeq[u8], in bytes: Slice[u8]) {
+    push64(inout out, bytes.len());
+    out.extend(in bytes);
 }
 
-fn push_dec(inout out: ChunkSeq[u8], x: u64) {
-    if x >= 10 {
-        push_dec(inout out, x / 10);
+fn push_dec(inout out: ChunkSeq[u8], value: u64) {
+    if value >= 10 {
+        push_dec(inout out, value / 10);
     }
-    out.push(wrapping_u8(wrapping_add(x % 10, 48)));
+    out.push(wrapping_u8(wrapping_add(value % 10, 48)));
 }
 
 // Silicon's name of a function: `u<namespace>:<index>`.
 fn put_name(inout out: ChunkSeq[u8], namespace: u64, index: u64) {
-    let mut s: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    s.push(117);
-    push_dec(inout s, namespace);
-    s.push(58);
-    push_dec(inout s, index);
-    put_str(inout out, in s.as_slice());
+    let mut name: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    name.push(117);
+    push_dec(inout name, namespace);
+    name.push(58);
+    push_dec(inout name, index);
+    put_str(inout out, in name.as_slice());
 }
 
 fn failure(in message: Slice[u8]) -> ChunkSeq[u8] {
@@ -147,32 +147,32 @@ struct Spec {
     entries: ChunkSeq[u64],
 }
 
-fn read_spec(in req: Slice[u8], inout r: Reader) -> Spec {
-    let target = r.word(in req);
-    let uart = r.word(in req);
-    let uart_base = r.word(in req);
-    let entry = r.span(in req);
-    let entry_func_id = r.word(in req);
-    let kind = r.word(in req);
-    let bits = r.word(in req);
-    let fails = r.word(in req);
-    let instances = r.word(in req);
-    let record_bytes = r.word(in req);
-    let n = r.word(in req);
+fn read_spec(in req: Slice[u8], inout cursor: Reader) -> Spec {
+    let target = cursor.word(in req);
+    let uart = cursor.word(in req);
+    let uart_base = cursor.word(in req);
+    let entry = cursor.span(in req);
+    let entry_func_id = cursor.word(in req);
+    let kind = cursor.word(in req);
+    let bits = cursor.word(in req);
+    let fails = cursor.word(in req);
+    let instances = cursor.word(in req);
+    let record_bytes = cursor.word(in req);
+    let message_count = cursor.word(in req);
     let mut messages: ChunkSeq[Span] = ChunkSeq::new[Span]();
-    for _ in 0..n {
-        if r.bad {
+    for _ in 0..message_count {
+        if cursor.bad {
             break;
         }
-        messages.push(r.span(in req));
+        messages.push(cursor.span(in req));
     }
-    let e = r.word(in req);
+    let entry_count = cursor.word(in req);
     let mut entries: ChunkSeq[u64] = ChunkSeq::new[u64]();
-    for _ in 0..e {
-        if r.bad {
+    for _ in 0..entry_count {
+        if cursor.bad {
             break;
         }
-        entries.push(r.word(in req));
+        entries.push(cursor.word(in req));
     }
     Spec {
         target: target,
@@ -214,22 +214,22 @@ struct Strings {
     bad: bool,
 }
 
-fn same(in a: Slice[u8], in b: Slice[u8]) -> bool {
-    if a.len() != b.len() {
+fn same(in lhs: Slice[u8], in rhs: Slice[u8]) -> bool {
+    if lhs.len() != rhs.len() {
         return false;
     }
-    a.eq(in b)
+    lhs.eq(in rhs)
 }
 
 impl Strings {
-    fn find(in self, in s: Slice[u8]) -> Option[DataId] {
+    fn find(in self, in text: Slice[u8]) -> Option[DataId] {
         for i in 0..self.ids.len() {
             let start = self.starts.try_get(i).unwrap_or(0);
             let len = self.lens.try_get(i).unwrap_or(0);
             let end = wrapping_add(start, len);
             if end <= self.bytes.len() && start <= end {
                 let have = self.bytes[start..end];
-                if same(in have, in s) {
+                if same(in have, in text) {
                     return self.ids.try_get(i);
                 }
             }
@@ -237,20 +237,20 @@ impl Strings {
         Option::None
     }
 
-    fn string(inout self, inout m: Module, in s: Slice[u8]) -> DataId eff [Ffi[Cranelift]] {
-        match self.find(in s) {
+    fn string(inout self, inout module: Module, in text: Slice[u8]) -> DataId eff [Ffi[Cranelift]] {
+        match self.find(in text) {
             Option::Some(id) => return id,
             Option::None => {}
         }
         let mut name: ChunkSeq[u8] = ChunkSeq::new[u8]();
         name.extend(in "vesper_rt_str_".as_bytes());
         push_dec(inout name, self.ids.len());
-        let id = declare_data(inout m, in name.as_slice(), linkage_local(), false);
+        let id = declare_data(inout module, in name.as_slice(), linkage_local(), false);
         match data_new() {
-            Option::Some(d) => {
-                let mut d = d;
-                data_define(inout d, in s);
-                if !define_data(inout m, id, d) {
+            Option::Some(data) => {
+                let mut data = data;
+                data_define(inout data, in text);
+                if !define_data(inout module, id, data) {
                     self.bad = true;
                 }
             }
@@ -259,8 +259,8 @@ impl Strings {
             }
         }
         self.starts.push(self.bytes.len());
-        self.lens.push(s.len());
-        self.bytes.extend(in s);
+        self.lens.push(text.len());
+        self.bytes.extend(in text);
         self.ids.push(id);
         id
     }
@@ -269,69 +269,79 @@ impl Strings {
 // ---------------------------------------------------------------------------
 // Emission helpers.
 
-fn sig(inout m: Module, params: u64, returns: u64) -> SigId eff [Ffi[Cranelift]] {
-    let s = sig_new(inout m, call_conv_default());
+fn sig(inout module: Module, params: u64, returns: u64) -> SigId eff [Ffi[Cranelift]] {
+    let signature = sig_new(inout module, call_conv_default());
     for _ in 0..params {
-        sig_param(inout m, s, ty_i64());
+        sig_param(inout module, signature, ty_i64());
     }
     for _ in 0..returns {
-        sig_return(inout m, s, ty_i64());
+        sig_return(inout module, signature, ty_i64());
     }
-    s
+    signature
 }
 
 // `Gen::define`'s start: the function named `u0:<id>`, its entry block with
 // the parameters, current.
-fn start(inout b: Builder, id: FuncId) -> Block eff [Ffi[Cranelift]] {
-    set_func_name(inout b, 0, id.id);
-    let entry = create_block(inout b);
-    append_block_params_for_function_params(inout b, entry);
-    switch_to_block(inout b, entry);
+fn start(inout builder: Builder, id: FuncId) -> Block eff [Ffi[Cranelift]] {
+    set_func_name(inout builder, 0, id.id);
+    let entry = create_block(inout builder);
+    append_block_params_for_function_params(inout builder, entry);
+    switch_to_block(inout builder, entry);
     entry
 }
 
-// `call(b, m, id, args)`: a fresh import of `id` and a call.
-fn call(inout b: Builder, inout m: Module, id: FuncId, in args: Slice[u32]) eff [Ffi[Cranelift]] {
-    let f = import_function(inout b, inout m, id);
-    ins_call(inout b, f, in args);
+// `call(builder, module, id, args)`: a fresh import of `id` and a call.
+fn call(inout builder: Builder, inout module: Module, id: FuncId, in args: Slice[u32]) eff [
+    Ffi[Cranelift]
+] {
+    let func_ref = import_function(inout builder, inout module, id);
+    ins_call(inout builder, func_ref, in args);
 }
 
 // `data_address`: the data's address through a non-colocated import.
-fn data_address(inout b: Builder, in m: Module, data: DataId) -> Value eff [Ffi[Cranelift]] {
-    let gv = import_data_colocated(inout b, in m, data, false);
-    ins_symbol_value(inout b, ty_i64(), gv)
+fn data_address(
+    inout builder: Builder,
+    in module: Module,
+    data: DataId
+) -> Value eff [Ffi[Cranelift]] {
+    let global_value = import_data_colocated(inout builder, in module, data, false);
+    ins_symbol_value(inout builder, ty_i64(), global_value)
 }
 
 // `Gen::emit_puts`: `puts(ptr, len)` of a string object.
-fn emit_puts(inout b: Builder, inout m: Module, puts: FuncId, data: DataId, len: u64) eff [
-    Ffi[Cranelift]
-] {
-    let ptr = data_address(inout b, in m, data);
-    let n = ins_iconst(inout b, ty_i64(), wrapping_i64(len));
-    let args = vals2(ptr, n);
-    call(inout b, inout m, puts, in args.as_slice());
+fn emit_puts(
+    inout builder: Builder,
+    inout module: Module,
+    puts: FuncId,
+    data: DataId,
+    len: u64
+) eff [Ffi[Cranelift]] {
+    let ptr = data_address(inout builder, in module, data);
+    let len_value = ins_iconst(inout builder, ty_i64(), wrapping_i64(len));
+    let args = vals2(ptr, len_value);
+    call(inout builder, inout module, puts, in args.as_slice());
 }
 
-fn ret(inout b: Builder) eff [Ffi[Cranelift]] {
+fn ret(inout builder: Builder) eff [Ffi[Cranelift]] {
     let none: ChunkSeq[u32] = ChunkSeq::new[u32]();
-    ins_return(inout b, in none.as_slice());
+    ins_return(inout builder, in none.as_slice());
 }
 
 // Seal, define, and record the function's trap records in `traps`:
 // `(offset, TrapCode::as_raw)` pairs after its object symbol. False if it failed.
 fn finish(
-    inout m: Module,
-    sink b: Builder,
+    inout module: Module,
+    sink builder: Builder,
     id: FuncId,
     in symbol: Slice[u8],
     inout traps: ChunkSeq[u8]
 ) -> bool eff [Ffi[Cranelift]] {
-    let mut b = b;
-    seal_all_blocks(inout b);
-    if !define_function(inout m, id, b) {
+    let mut builder = builder;
+    seal_all_blocks(inout builder);
+    if !define_function(inout module, id, builder) {
         return false;
     }
-    let records = module_last_traps(in m);
+    let records = module_last_traps(in module);
     put_str(inout traps, in symbol);
     push64(inout traps, records.len() / 2);
     for i in 0..records.len() {
@@ -350,10 +360,10 @@ copy struct Ids {
     entry: FuncId,
     main: FuncId,
     trap: FuncId,
-    s0: SigId,
-    s1: SigId,
-    s2: SigId,
-    s3: SigId,
+    sig_no_args: SigId,
+    sig_one_arg: SigId,
+    sig_two_args: SigId,
+    sig_three_args: SigId,
 }
 
 // ---------------------------------------------------------------------------
@@ -361,150 +371,161 @@ copy struct Ids {
 
 // putc(byte): wait until the UART can take a byte, then write it.
 fn build_putc(
-    inout m: Module,
+    inout module: Module,
     ids: Ids,
     uart: u64,
     base: u64,
     inout traps: ChunkSeq[u8]
 ) -> bool eff [Ffi[Cranelift]] {
-    let mut b = match builder_new(in m, ids.s1) {
-        Option::Some(b) => b,
+    let mut builder = match builder_new(in module, ids.sig_one_arg) {
+        Option::Some(builder) => builder,
         Option::None => return false,
     };
-    let entry = start(inout b, ids.putc);
-    let byte = block_param(inout b, entry, 0);
-    let wait = create_block(inout b);
-    let send = create_block(inout b);
-    ins_jump0(inout b, wait);
-    switch_to_block(inout b, wait);
+    let entry = start(inout builder, ids.putc);
+    let byte = block_param(inout builder, entry, 0);
+    let wait = create_block(inout builder);
+    let send = create_block(inout builder);
+    ins_jump0(inout builder, wait);
+    switch_to_block(inout builder, wait);
     if uart == UART_NS16550 {
-        let lsr = ins_iconst(inout b, ty_i64(), wrapping_i64(wrapping_add(base, 5)));
-        let s = ins_uload8(inout b, ty_i64(), 0, lsr, 0);
-        let empty = ins_band_imm(inout b, s, 32);
-        ins_brif0(inout b, empty, send, wait);
-        switch_to_block(inout b, send);
-        let thr = ins_iconst(inout b, ty_i64(), wrapping_i64(base));
-        ins_istore8(inout b, 0, byte, thr, 0);
+        let lsr = ins_iconst(inout builder, ty_i64(), wrapping_i64(wrapping_add(base, 5)));
+        let status = ins_uload8(inout builder, ty_i64(), 0, lsr, 0);
+        let empty = ins_band_imm(inout builder, status, 32);
+        ins_brif0(inout builder, empty, send, wait);
+        switch_to_block(inout builder, send);
+        let thr = ins_iconst(inout builder, ty_i64(), wrapping_i64(base));
+        ins_istore8(inout builder, 0, byte, thr, 0);
     } else {
-        let fr = ins_iconst(inout b, ty_i64(), wrapping_i64(wrapping_add(base, 24)));
-        let s = ins_uload32(inout b, 0, fr, 0);
-        let full = ins_band_imm(inout b, s, 32);
-        ins_brif0(inout b, full, wait, send);
-        switch_to_block(inout b, send);
-        let dr = ins_iconst(inout b, ty_i64(), wrapping_i64(base));
-        ins_istore32(inout b, 0, byte, dr, 0);
+        let fr = ins_iconst(inout builder, ty_i64(), wrapping_i64(wrapping_add(base, 24)));
+        let status = ins_uload32(inout builder, 0, fr, 0);
+        let full = ins_band_imm(inout builder, status, 32);
+        ins_brif0(inout builder, full, wait, send);
+        switch_to_block(inout builder, send);
+        let dr = ins_iconst(inout builder, ty_i64(), wrapping_i64(base));
+        ins_istore32(inout builder, 0, byte, dr, 0);
     }
-    ret(inout b);
-    finish(inout m, b, ids.putc, in "vesper_rt_putc".as_bytes(), inout traps)
+    ret(inout builder);
+    finish(inout module, builder, ids.putc, in "vesper_rt_putc".as_bytes(), inout traps)
 }
 
 // puts(ptr, len): putc each byte.
-fn build_puts(inout m: Module, ids: Ids, inout traps: ChunkSeq[u8]) -> bool eff [Ffi[Cranelift]] {
-    let mut b = match builder_new(in m, ids.s2) {
-        Option::Some(b) => b,
+fn build_puts(
+    inout module: Module,
+    ids: Ids,
+    inout traps: ChunkSeq[u8]
+) -> bool eff [Ffi[Cranelift]] {
+    let mut builder = match builder_new(in module, ids.sig_two_args) {
+        Option::Some(builder) => builder,
         Option::None => return false,
     };
-    let entry = start(inout b, ids.puts);
-    let p0 = block_param(inout b, entry, 0);
-    let p1 = block_param(inout b, entry, 1);
-    let head = create_block(inout b);
-    let body = create_block(inout b);
-    let done = create_block(inout b);
-    let ptr = append_block_param(inout b, head, ty_i64());
-    let len = append_block_param(inout b, head, ty_i64());
-    let first = vals2(p0, p1);
-    ins_jump(inout b, head, in first.as_slice());
-    switch_to_block(inout b, head);
-    ins_brif0(inout b, len, body, done);
-    switch_to_block(inout b, body);
-    let c = ins_uload8(inout b, ty_i64(), 0, ptr, 0);
-    let args = vals1(c);
-    call(inout b, inout m, ids.putc, in args.as_slice());
-    let ptr1 = ins_iadd_imm(inout b, ptr, 1);
-    let len1 = ins_iadd_imm(inout b, len, -1);
-    let next = vals2(ptr1, len1);
-    ins_jump(inout b, head, in next.as_slice());
-    switch_to_block(inout b, done);
-    ret(inout b);
-    finish(inout m, b, ids.puts, in "vesper_rt_puts".as_bytes(), inout traps)
+    let entry = start(inout builder, ids.puts);
+    let ptr_arg = block_param(inout builder, entry, 0);
+    let len_arg = block_param(inout builder, entry, 1);
+    let head = create_block(inout builder);
+    let body = create_block(inout builder);
+    let done = create_block(inout builder);
+    let ptr = append_block_param(inout builder, head, ty_i64());
+    let len = append_block_param(inout builder, head, ty_i64());
+    let first = vals2(ptr_arg, len_arg);
+    ins_jump(inout builder, head, in first.as_slice());
+    switch_to_block(inout builder, head);
+    ins_brif0(inout builder, len, body, done);
+    switch_to_block(inout builder, body);
+    let byte = ins_uload8(inout builder, ty_i64(), 0, ptr, 0);
+    let args = vals1(byte);
+    call(inout builder, inout module, ids.putc, in args.as_slice());
+    let next_ptr = ins_iadd_imm(inout builder, ptr, 1);
+    let next_len = ins_iadd_imm(inout builder, len, -1);
+    let next = vals2(next_ptr, next_len);
+    ins_jump(inout builder, head, in next.as_slice());
+    switch_to_block(inout builder, done);
+    ret(inout builder);
+    finish(inout module, builder, ids.puts, in "vesper_rt_puts".as_bytes(), inout traps)
 }
 
 // put_udec(value): decimal digits into a stack buffer, then puts.
 fn build_put_udec(
-    inout m: Module,
+    inout module: Module,
     ids: Ids,
     inout traps: ChunkSeq[u8]
 ) -> bool eff [Ffi[Cranelift]] {
-    let mut b = match builder_new(in m, ids.s1) {
-        Option::Some(b) => b,
+    let mut builder = match builder_new(in module, ids.sig_one_arg) {
+        Option::Some(builder) => builder,
         Option::None => return false,
     };
-    let entry = start(inout b, ids.put_udec);
-    let p0 = block_param(inout b, entry, 0);
-    let slot = create_stack_slot(inout b, 24, 3);
-    let end = ins_stack_addr(inout b, ty_i64(), slot, 24);
-    let lp = create_block(inout b);
-    let out = create_block(inout b);
-    let v = append_block_param(inout b, lp, ty_i64());
-    let at = append_block_param(inout b, lp, ty_i64());
-    let start_at = append_block_param(inout b, out, ty_i64());
-    let first = vals2(p0, end);
-    ins_jump(inout b, lp, in first.as_slice());
-    switch_to_block(inout b, lp);
-    let ten = ins_iconst(inout b, ty_i64(), 10);
-    let q = ins_udiv(inout b, v, ten);
-    let qt = ins_imul(inout b, q, ten);
-    let r = ins_isub(inout b, v, qt);
-    let digit = ins_iadd_imm(inout b, r, 48);
-    let at1 = ins_iadd_imm(inout b, at, -1);
-    ins_istore8(inout b, 0, digit, at1, 0);
-    let again = vals2(q, at1);
-    let leave = vals1(at1);
-    ins_brif(inout b, q, lp, in again.as_slice(), out, in leave.as_slice());
-    switch_to_block(inout b, out);
-    let end2 = ins_stack_addr(inout b, ty_i64(), slot, 24);
-    let len = ins_isub(inout b, end2, start_at);
+    let entry = start(inout builder, ids.put_udec);
+    let value_arg = block_param(inout builder, entry, 0);
+    let slot = create_stack_slot(inout builder, 24, 3);
+    let buf_end = ins_stack_addr(inout builder, ty_i64(), slot, 24);
+    let loop_block = create_block(inout builder);
+    let out_block = create_block(inout builder);
+    let value = append_block_param(inout builder, loop_block, ty_i64());
+    let digit_end = append_block_param(inout builder, loop_block, ty_i64());
+    let start_at = append_block_param(inout builder, out_block, ty_i64());
+    let first = vals2(value_arg, buf_end);
+    ins_jump(inout builder, loop_block, in first.as_slice());
+    switch_to_block(inout builder, loop_block);
+    let ten = ins_iconst(inout builder, ty_i64(), 10);
+    let quotient = ins_udiv(inout builder, value, ten);
+    let quotient_ten = ins_imul(inout builder, quotient, ten);
+    let remainder = ins_isub(inout builder, value, quotient_ten);
+    let digit = ins_iadd_imm(inout builder, remainder, 48);
+    let digit_at = ins_iadd_imm(inout builder, digit_end, -1);
+    ins_istore8(inout builder, 0, digit, digit_at, 0);
+    let again = vals2(quotient, digit_at);
+    let leave = vals1(digit_at);
+    ins_brif(
+        inout builder,
+        quotient,
+        loop_block,
+        in again.as_slice(),
+        out_block,
+        in leave.as_slice()
+    );
+    switch_to_block(inout builder, out_block);
+    let out_end = ins_stack_addr(inout builder, ty_i64(), slot, 24);
+    let len = ins_isub(inout builder, out_end, start_at);
     let args = vals2(start_at, len);
-    call(inout b, inout m, ids.puts, in args.as_slice());
-    ret(inout b);
-    finish(inout m, b, ids.put_udec, in "vesper_rt_put_udec".as_bytes(), inout traps)
+    call(inout builder, inout module, ids.puts, in args.as_slice());
+    ret(inout builder);
+    finish(inout module, builder, ids.put_udec, in "vesper_rt_put_udec".as_bytes(), inout traps)
 }
 
 // put_hex(value): 16 digits.
 fn build_put_hex(
-    inout m: Module,
+    inout module: Module,
     ids: Ids,
     inout traps: ChunkSeq[u8]
 ) -> bool eff [Ffi[Cranelift]] {
-    let mut b = match builder_new(in m, ids.s1) {
-        Option::Some(b) => b,
+    let mut builder = match builder_new(in module, ids.sig_one_arg) {
+        Option::Some(builder) => builder,
         Option::None => return false,
     };
-    let entry = start(inout b, ids.put_hex);
-    let p0 = block_param(inout b, entry, 0);
-    let lp = create_block(inout b);
-    let done = create_block(inout b);
-    let shift = append_block_param(inout b, lp, ty_i64());
-    let sixty = ins_iconst(inout b, ty_i64(), 60);
+    let entry = start(inout builder, ids.put_hex);
+    let value_arg = block_param(inout builder, entry, 0);
+    let loop_block = create_block(inout builder);
+    let done = create_block(inout builder);
+    let shift = append_block_param(inout builder, loop_block, ty_i64());
+    let sixty = ins_iconst(inout builder, ty_i64(), 60);
     let first = vals1(sixty);
-    ins_jump(inout b, lp, in first.as_slice());
-    switch_to_block(inout b, lp);
-    let v = ins_ushr(inout b, p0, shift);
-    let nib = ins_band_imm(inout b, v, 15);
-    let is_digit = ins_icmp_imm(inout b, cc_ult(), nib, 10);
-    let as_digit = ins_iadd_imm(inout b, nib, 48);
-    let as_letter = ins_iadd_imm(inout b, nib, 87);
-    let c = ins_select(inout b, is_digit, as_digit, as_letter);
-    let args = vals1(c);
-    call(inout b, inout m, ids.putc, in args.as_slice());
-    let next = ins_iadd_imm(inout b, shift, -4);
-    let more = ins_icmp_imm(inout b, cc_sge(), next, 0);
+    ins_jump(inout builder, loop_block, in first.as_slice());
+    switch_to_block(inout builder, loop_block);
+    let shifted = ins_ushr(inout builder, value_arg, shift);
+    let nibble = ins_band_imm(inout builder, shifted, 15);
+    let is_digit = ins_icmp_imm(inout builder, cc_ult(), nibble, 10);
+    let as_digit = ins_iadd_imm(inout builder, nibble, 48);
+    let as_letter = ins_iadd_imm(inout builder, nibble, 87);
+    let digit_char = ins_select(inout builder, is_digit, as_digit, as_letter);
+    let args = vals1(digit_char);
+    call(inout builder, inout module, ids.putc, in args.as_slice());
+    let next = ins_iadd_imm(inout builder, shift, -4);
+    let more = ins_icmp_imm(inout builder, cc_sge(), next, 0);
     let again = vals1(next);
     let none: ChunkSeq[u32] = ChunkSeq::new[u32]();
-    ins_brif(inout b, more, lp, in again.as_slice(), done, in none.as_slice());
-    switch_to_block(inout b, done);
-    ret(inout b);
-    finish(inout m, b, ids.put_hex, in "vesper_rt_put_hex".as_bytes(), inout traps)
+    ins_brif(inout builder, more, loop_block, in again.as_slice(), done, in none.as_slice());
+    switch_to_block(inout builder, done);
+    ret(inout builder);
+    finish(inout module, builder, ids.put_hex, in "vesper_rt_put_hex".as_bytes(), inout traps)
 }
 
 // The strings `main` prints, by data id.
@@ -520,99 +541,107 @@ copy struct MainStrings {
 // main: call the entry (with a failure record when it may fail, trapping on
 // a set tag), print `vesper: <entry>() = <value>` and exit 0.
 fn build_main(
-    inout m: Module,
+    inout module: Module,
     ids: Ids,
     in spec: Spec,
     strings: MainStrings,
     inout traps: ChunkSeq[u8]
 ) -> bool eff [Ffi[Cranelift]] {
-    let mut b = match builder_new(in m, ids.s0) {
-        Option::Some(b) => b,
+    let mut builder = match builder_new(in module, ids.sig_no_args) {
+        Option::Some(builder) => builder,
         Option::None => return false,
     };
-    let entry_block = start(inout b, ids.main);
-    let r = if spec.fails == 1 {
-        let slot = create_stack_slot(inout b, wrapping_u32(spec.record_bytes), 3);
-        let record = ins_stack_addr(inout b, ty_i64(), slot, 0);
-        let zero = ins_iconst(inout b, ty_i64(), 0);
-        ins_store(inout b, mem_trusted(), zero, record, 0);
+    let entry_block = start(inout builder, ids.main);
+    let result = if spec.fails == 1 {
+        let slot = create_stack_slot(inout builder, wrapping_u32(spec.record_bytes), 3);
+        let record = ins_stack_addr(inout builder, ty_i64(), slot, 0);
+        let zero = ins_iconst(inout builder, ty_i64(), 0);
+        ins_store(inout builder, mem_trusted(), zero, record, 0);
         let args = vals1(record);
-        call(inout b, inout m, ids.entry, in args.as_slice());
-        let r = inst_result(inout b, 0);
-        let tag = ins_load(inout b, ty_i64(), mem_trusted(), record, 0);
-        let ok = create_block(inout b);
-        let failed = create_block(inout b);
-        ins_brif0(inout b, tag, failed, ok);
-        switch_to_block(inout b, failed);
+        call(inout builder, inout module, ids.entry, in args.as_slice());
+        let result = inst_result(inout builder, 0);
+        let tag = ins_load(inout builder, ty_i64(), mem_trusted(), record, 0);
+        let ok = create_block(inout builder);
+        let failed = create_block(inout builder);
+        ins_brif0(inout builder, tag, failed, ok);
+        switch_to_block(inout builder, failed);
         for i in 0..spec.instances {
-            let hit = create_block(inout b);
-            let next = create_block(inout b);
-            let is = ins_icmp_imm(inout b, cc_eq(), tag, wrapping_i64(wrapping_add(i, 1)));
-            ins_brif0(inout b, is, hit, next);
-            switch_to_block(inout b, hit);
-            ins_trap(inout b, trap_user(wrapping_add(ABORT_TRAP_BASE, wrapping_u32(i))));
-            switch_to_block(inout b, next);
+            let hit = create_block(inout builder);
+            let next = create_block(inout builder);
+            let is_tag = ins_icmp_imm(
+                inout builder,
+                cc_eq(),
+                tag,
+                wrapping_i64(wrapping_add(i, 1))
+            );
+            ins_brif0(inout builder, is_tag, hit, next);
+            switch_to_block(inout builder, hit);
+            ins_trap(inout builder, trap_user(wrapping_add(ABORT_TRAP_BASE, wrapping_u32(i))));
+            switch_to_block(inout builder, next);
         }
-        ins_trap(inout b, trap_user(wrapping_add(ABORT_TRAP_BASE, wrapping_u32(spec.instances))));
-        switch_to_block(inout b, ok);
-        r
+        ins_trap(
+            inout builder,
+            trap_user(wrapping_add(ABORT_TRAP_BASE, wrapping_u32(spec.instances)))
+        );
+        switch_to_block(inout builder, ok);
+        result
     } else {
         let none: ChunkSeq[u32] = ChunkSeq::new[u32]();
-        call(inout b, inout m, ids.entry, in none.as_slice());
-        inst_result(inout b, 0)
+        call(inout builder, inout module, ids.entry, in none.as_slice());
+        inst_result(inout builder, 0)
     };
-    emit_puts(inout b, inout m, ids.puts, strings.prefix, strings.prefix_len);
-    let done = create_block(inout b);
+    emit_puts(inout builder, inout module, ids.puts, strings.prefix, strings.prefix_len);
+    let done = create_block(inout builder);
     if spec.kind == KIND_SIGNED {
-        let neg = create_block(inout b);
-        let pos = create_block(inout b);
-        let v = append_block_param(inout b, pos, ty_i64());
-        let is_neg = ins_icmp_imm(inout b, cc_slt(), r, 0);
+        let neg = create_block(inout builder);
+        let pos = create_block(inout builder);
+        let value = append_block_param(inout builder, pos, ty_i64());
+        let is_neg = ins_icmp_imm(inout builder, cc_slt(), result, 0);
         let none: ChunkSeq[u32] = ChunkSeq::new[u32]();
-        let rv = vals1(r);
-        ins_brif(inout b, is_neg, neg, in none.as_slice(), pos, in rv.as_slice());
-        switch_to_block(inout b, neg);
-        let minus = ins_iconst(inout b, ty_i64(), 45);
-        let margs = vals1(minus);
-        call(inout b, inout m, ids.putc, in margs.as_slice());
-        let abs = ins_ineg(inout b, r);
-        let av = vals1(abs);
-        ins_jump(inout b, pos, in av.as_slice());
-        switch_to_block(inout b, pos);
-        let args = vals1(v);
-        call(inout b, inout m, ids.put_udec, in args.as_slice());
-        ins_jump0(inout b, done);
+        let result_args = vals1(result);
+        ins_brif(inout builder, is_neg, neg, in none.as_slice(), pos, in result_args.as_slice());
+        switch_to_block(inout builder, neg);
+        let minus = ins_iconst(inout builder, ty_i64(), 45);
+        let minus_args = vals1(minus);
+        call(inout builder, inout module, ids.putc, in minus_args.as_slice());
+        let abs = ins_ineg(inout builder, result);
+        let abs_args = vals1(abs);
+        ins_jump(inout builder, pos, in abs_args.as_slice());
+        switch_to_block(inout builder, pos);
+        let args = vals1(value);
+        call(inout builder, inout module, ids.put_udec, in args.as_slice());
+        ins_jump0(inout builder, done);
     } else if spec.kind == KIND_UNSIGNED {
-        let v = if spec.bits < 64 {
+        let value = if spec.bits < 64 {
             let mask = wrapping_sub(wrapping_shl_u64(1, wrapping_u32(spec.bits)), 1);
-            ins_band_imm(inout b, r, wrapping_i64(mask))
+            ins_band_imm(inout builder, result, wrapping_i64(mask))
         } else {
-            r
+            result
         };
-        let args = vals1(v);
-        call(inout b, inout m, ids.put_udec, in args.as_slice());
-        ins_jump0(inout b, done);
+        let args = vals1(value);
+        call(inout builder, inout module, ids.put_udec, in args.as_slice());
+        ins_jump0(inout builder, done);
     } else if spec.kind == KIND_BOOL {
-        let t = create_block(inout b);
-        let f = create_block(inout b);
-        ins_brif0(inout b, r, t, f);
-        switch_to_block(inout b, t);
-        emit_puts(inout b, inout m, ids.puts, strings.yes, 4);
-        ins_jump0(inout b, done);
-        switch_to_block(inout b, f);
-        emit_puts(inout b, inout m, ids.puts, strings.no, 5);
-        ins_jump0(inout b, done);
+        let true_block = create_block(inout builder);
+        let false_block = create_block(inout builder);
+        ins_brif0(inout builder, result, true_block, false_block);
+        switch_to_block(inout builder, true_block);
+        emit_puts(inout builder, inout module, ids.puts, strings.yes, 4);
+        ins_jump0(inout builder, done);
+        switch_to_block(inout builder, false_block);
+        emit_puts(inout builder, inout module, ids.puts, strings.no, 5);
+        ins_jump0(inout builder, done);
     } else {
-        emit_puts(inout b, inout m, ids.puts, strings.unit, 2);
-        ins_jump0(inout b, done);
+        emit_puts(inout builder, inout module, ids.puts, strings.unit, 2);
+        ins_jump0(inout builder, done);
     }
-    switch_to_block(inout b, done);
-    emit_puts(inout b, inout m, ids.puts, strings.newline, 1);
-    let ok = ins_iconst(inout b, ty_i64(), 0);
-    let args = vals1(ok);
-    call(inout b, inout m, ids.exit, in args.as_slice());
-    ret(inout b);
-    finish(inout m, b, ids.main, in "vesper_freestanding_main".as_bytes(), inout traps)
+    switch_to_block(inout builder, done);
+    emit_puts(inout builder, inout module, ids.puts, strings.newline, 1);
+    let exit_code = ins_iconst(inout builder, ty_i64(), 0);
+    let args = vals1(exit_code);
+    call(inout builder, inout module, ids.exit, in args.as_slice());
+    ret(inout builder);
+    finish(inout module, builder, ids.main, in "vesper_freestanding_main".as_bytes(), inout traps)
 }
 
 // The strings and table the trap handler reads.
@@ -630,92 +659,98 @@ copy struct TrapStrings {
 // reason and the registers, exit with EXIT_ABORT (found) or
 // EXIT_EXCEPTION.
 fn build_trap(
-    inout m: Module,
+    inout module: Module,
     ids: Ids,
     strings: TrapStrings,
     inout traps: ChunkSeq[u8]
 ) -> bool eff [Ffi[Cranelift]] {
-    let mut b = match builder_new(in m, ids.s3) {
-        Option::Some(b) => b,
+    let mut builder = match builder_new(in module, ids.sig_three_args) {
+        Option::Some(builder) => builder,
         Option::None => return false,
     };
-    let entry = start(inout b, ids.trap);
-    let cause = block_param(inout b, entry, 0);
-    let epc = block_param(inout b, entry, 1);
-    let tval = block_param(inout b, entry, 2);
-    emit_puts(inout b, inout m, ids.puts, strings.abort, 15);
-    let table = data_address(inout b, in m, strings.table);
-    let count = ins_load(inout b, ty_i64(), mem_trusted(), table, 0);
-    let head = create_block(inout b);
-    let check = create_block(inout b);
-    let next = create_block(inout b);
-    let found = create_block(inout b);
-    let missing = create_block(inout b);
-    let tail = create_block(inout b);
-    let i = append_block_param(inout b, head, ty_i64());
-    let status = append_block_param(inout b, tail, ty_i64());
-    let zero = ins_iconst(inout b, ty_i64(), 0);
-    let z = vals1(zero);
-    ins_jump(inout b, head, in z.as_slice());
-    switch_to_block(inout b, head);
-    let more = ins_icmp(inout b, cc_ult(), i, count);
-    ins_brif0(inout b, more, check, missing);
-    switch_to_block(inout b, check);
-    let off = ins_imul_imm(inout b, i, wrapping_i64(TRAP_ENTRY_BYTES));
-    let at = ins_iadd(inout b, table, off);
-    let pc = ins_load(inout b, ty_i64(), mem_trusted(), at, wrapping_i32(TRAP_HEADER_BYTES));
-    let hit = ins_icmp(inout b, cc_eq(), pc, epc);
-    ins_brif0(inout b, hit, found, next);
-    switch_to_block(inout b, next);
-    let i1 = ins_iadd_imm(inout b, i, 1);
-    let iv = vals1(i1);
-    ins_jump(inout b, head, in iv.as_slice());
-    switch_to_block(inout b, found);
-    let msg = ins_load(
-        inout b,
+    let entry = start(inout builder, ids.trap);
+    let cause = block_param(inout builder, entry, 0);
+    let epc = block_param(inout builder, entry, 1);
+    let tval = block_param(inout builder, entry, 2);
+    emit_puts(inout builder, inout module, ids.puts, strings.abort, 15);
+    let table = data_address(inout builder, in module, strings.table);
+    let count = ins_load(inout builder, ty_i64(), mem_trusted(), table, 0);
+    let head = create_block(inout builder);
+    let check = create_block(inout builder);
+    let next = create_block(inout builder);
+    let found = create_block(inout builder);
+    let missing = create_block(inout builder);
+    let tail = create_block(inout builder);
+    let index = append_block_param(inout builder, head, ty_i64());
+    let status = append_block_param(inout builder, tail, ty_i64());
+    let zero = ins_iconst(inout builder, ty_i64(), 0);
+    let zero_args = vals1(zero);
+    ins_jump(inout builder, head, in zero_args.as_slice());
+    switch_to_block(inout builder, head);
+    let more = ins_icmp(inout builder, cc_ult(), index, count);
+    ins_brif0(inout builder, more, check, missing);
+    switch_to_block(inout builder, check);
+    let entry_off = ins_imul_imm(inout builder, index, wrapping_i64(TRAP_ENTRY_BYTES));
+    let entry_at = ins_iadd(inout builder, table, entry_off);
+    let pc = ins_load(
+        inout builder,
         ty_i64(),
         mem_trusted(),
-        at,
+        entry_at,
+        wrapping_i32(TRAP_HEADER_BYTES)
+    );
+    let hit = ins_icmp(inout builder, cc_eq(), pc, epc);
+    ins_brif0(inout builder, hit, found, next);
+    switch_to_block(inout builder, next);
+    let next_index = ins_iadd_imm(inout builder, index, 1);
+    let next_args = vals1(next_index);
+    ins_jump(inout builder, head, in next_args.as_slice());
+    switch_to_block(inout builder, found);
+    let msg = ins_load(
+        inout builder,
+        ty_i64(),
+        mem_trusted(),
+        entry_at,
         wrapping_i32(wrapping_add(TRAP_HEADER_BYTES, 8))
     );
     let len = ins_load(
-        inout b,
+        inout builder,
         ty_i64(),
         mem_trusted(),
-        at,
+        entry_at,
         wrapping_i32(wrapping_add(TRAP_HEADER_BYTES, 16))
     );
-    let pargs = vals2(msg, len);
-    call(inout b, inout m, ids.puts, in pargs.as_slice());
-    let code = ins_iconst(inout b, ty_i64(), EXIT_ABORT);
-    let cv = vals1(code);
-    ins_jump(inout b, tail, in cv.as_slice());
-    switch_to_block(inout b, missing);
-    emit_puts(inout b, inout m, ids.puts, strings.unexpected, 20);
-    let code2 = ins_iconst(inout b, ty_i64(), EXIT_EXCEPTION);
-    let cv2 = vals1(code2);
-    ins_jump(inout b, tail, in cv2.as_slice());
-    switch_to_block(inout b, tail);
-    emit_puts(inout b, inout m, ids.puts, strings.pc, 6);
-    let a1 = vals1(epc);
-    call(inout b, inout m, ids.put_hex, in a1.as_slice());
-    emit_puts(inout b, inout m, ids.puts, strings.cause, 9);
-    let a2 = vals1(cause);
-    call(inout b, inout m, ids.put_hex, in a2.as_slice());
-    emit_puts(inout b, inout m, ids.puts, strings.tval, 8);
-    let a3 = vals1(tval);
-    call(inout b, inout m, ids.put_hex, in a3.as_slice());
-    emit_puts(inout b, inout m, ids.puts, strings.newline, 1);
-    let sv = vals1(status);
-    call(inout b, inout m, ids.exit, in sv.as_slice());
-    ret(inout b);
-    finish(inout m, b, ids.trap, in "vesper_freestanding_trap".as_bytes(), inout traps)
+    let puts_args = vals2(msg, len);
+    call(inout builder, inout module, ids.puts, in puts_args.as_slice());
+    let abort_code = ins_iconst(inout builder, ty_i64(), EXIT_ABORT);
+    let abort_args = vals1(abort_code);
+    ins_jump(inout builder, tail, in abort_args.as_slice());
+    switch_to_block(inout builder, missing);
+    emit_puts(inout builder, inout module, ids.puts, strings.unexpected, 20);
+    let exception_code = ins_iconst(inout builder, ty_i64(), EXIT_EXCEPTION);
+    let exception_args = vals1(exception_code);
+    ins_jump(inout builder, tail, in exception_args.as_slice());
+    switch_to_block(inout builder, tail);
+    emit_puts(inout builder, inout module, ids.puts, strings.pc, 6);
+    let epc_args = vals1(epc);
+    call(inout builder, inout module, ids.put_hex, in epc_args.as_slice());
+    emit_puts(inout builder, inout module, ids.puts, strings.cause, 9);
+    let cause_args = vals1(cause);
+    call(inout builder, inout module, ids.put_hex, in cause_args.as_slice());
+    emit_puts(inout builder, inout module, ids.puts, strings.tval, 8);
+    let tval_args = vals1(tval);
+    call(inout builder, inout module, ids.put_hex, in tval_args.as_slice());
+    emit_puts(inout builder, inout module, ids.puts, strings.newline, 1);
+    let status_args = vals1(status);
+    call(inout builder, inout module, ids.exit, in status_args.as_slice());
+    ret(inout builder);
+    finish(inout module, builder, ids.trap, in "vesper_freestanding_trap".as_bytes(), inout traps)
 }
 
 // The trap table: `count`, then per entry a zero PC (filled after linking),
 // the message's address (a relocation) and its length.
 fn define_table(
-    inout m: Module,
+    inout module: Module,
     in req: Slice[u8],
     in spec: Spec,
     in message_ids: ChunkSeq[DataId],
@@ -730,31 +765,31 @@ fn define_table(
         let msg = span_of(in spec.messages, word_of(in spec.entries, i));
         let ok2 = bytes.try_write_u64_le(wrapping_add(at, 16), msg.len);
     }
-    let mut d = match data_new() {
-        Option::Some(d) => d,
+    let mut data = match data_new() {
+        Option::Some(data) => data,
         Option::None => return false,
     };
-    data_define(inout d, in bytes.as_slice());
-    data_align(inout d, 8);
+    data_define(inout data, in bytes.as_slice());
+    data_align(inout data, 8);
     for i in 0..n {
         let at = wrapping_add(
             wrapping_add(TRAP_HEADER_BYTES, wrapping_mul(i, TRAP_ENTRY_BYTES)),
             8
         );
         match message_ids.try_get(word_of(in spec.entries, i)) {
-            Option::Some(id) => data_data_addr(inout d, in m, wrapping_u32(at), id, 0),
+            Option::Some(id) => data_data_addr(inout data, in module, wrapping_u32(at), id, 0),
             Option::None => {}
         }
     }
-    define_data(inout m, table, d)
+    define_data(inout module, table, data)
 }
 
-fn bytes_of(in req: Slice[u8], s: Span) -> ChunkSeq[u8] {
+fn bytes_of(in req: Slice[u8], span: Span) -> ChunkSeq[u8] {
     let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    let end = wrapping_add(s.start, s.len);
-    if end <= req.len() && s.start <= end {
-        let v = req[s.start..end];
-        out.extend(in v);
+    let end = wrapping_add(span.start, span.len);
+    if end <= req.len() && span.start <= end {
+        let bytes = req[span.start..end];
+        out.extend(in bytes);
     }
     out
 }
@@ -762,39 +797,64 @@ fn bytes_of(in req: Slice[u8], s: Span) -> ChunkSeq[u8] {
 // Everything after the module is made: declarations, functions and data in
 // `runtime::build`'s order. Writes the result's object, CLIF and traps.
 fn emit(
-    inout m: Module,
+    inout module: Module,
     in req: Slice[u8],
     in spec: Spec,
     inout traps: ChunkSeq[u8]
 ) -> bool eff [Ffi[Cranelift]] {
-    let s1 = sig(inout m, 1, 0);
-    let s2 = sig(inout m, 2, 0);
-    let s3 = sig(inout m, 3, 0);
-    let s0 = sig(inout m, 0, 0);
-    let entry_sig = sig(inout m, spec.fails, 1);
-    let putc = declare_function(inout m, in "vesper_rt_putc".as_bytes(), linkage_local(), s1);
-    let puts = declare_function(inout m, in "vesper_rt_puts".as_bytes(), linkage_local(), s2);
+    let sig_one_arg = sig(inout module, 1, 0);
+    let sig_two_args = sig(inout module, 2, 0);
+    let sig_three_args = sig(inout module, 3, 0);
+    let sig_no_args = sig(inout module, 0, 0);
+    let entry_sig = sig(inout module, spec.fails, 1);
+    let putc = declare_function(
+        inout module,
+        in "vesper_rt_putc".as_bytes(),
+        linkage_local(),
+        sig_one_arg
+    );
+    let puts = declare_function(
+        inout module,
+        in "vesper_rt_puts".as_bytes(),
+        linkage_local(),
+        sig_two_args
+    );
     let put_udec = declare_function(
-        inout m,
+        inout module,
         in "vesper_rt_put_udec".as_bytes(),
         linkage_local(),
-        s1
+        sig_one_arg
     );
-    let put_hex = declare_function(inout m, in "vesper_rt_put_hex".as_bytes(), linkage_local(), s1);
-    let exit = declare_function(inout m, in "vesper_board_exit".as_bytes(), linkage_import(), s1);
+    let put_hex = declare_function(
+        inout module,
+        in "vesper_rt_put_hex".as_bytes(),
+        linkage_local(),
+        sig_one_arg
+    );
+    let exit = declare_function(
+        inout module,
+        in "vesper_board_exit".as_bytes(),
+        linkage_import(),
+        sig_one_arg
+    );
     let entry_name = bytes_of(in req, spec.entry);
-    let entry = declare_function(inout m, in entry_name.as_slice(), linkage_import(), entry_sig);
+    let entry = declare_function(
+        inout module,
+        in entry_name.as_slice(),
+        linkage_import(),
+        entry_sig
+    );
     let main = declare_function(
-        inout m,
+        inout module,
         in "vesper_freestanding_main".as_bytes(),
         linkage_export(),
-        s0
+        sig_no_args
     );
     let trap = declare_function(
-        inout m,
+        inout module,
         in "vesper_freestanding_trap".as_bytes(),
         linkage_export(),
-        s3
+        sig_three_args
     );
     let ids = Ids {
         putc: putc,
@@ -805,21 +865,21 @@ fn emit(
         entry: entry,
         main: main,
         trap: trap,
-        s0: s0,
-        s1: s1,
-        s2: s2,
-        s3: s3
+        sig_no_args: sig_no_args,
+        sig_one_arg: sig_one_arg,
+        sig_two_args: sig_two_args,
+        sig_three_args: sig_three_args
     };
-    if !build_putc(inout m, ids, spec.uart, spec.uart_base, inout traps) {
+    if !build_putc(inout module, ids, spec.uart, spec.uart_base, inout traps) {
         return false;
     }
-    if !build_puts(inout m, ids, inout traps) {
+    if !build_puts(inout module, ids, inout traps) {
         return false;
     }
-    if !build_put_udec(inout m, ids, inout traps) {
+    if !build_put_udec(inout module, ids, inout traps) {
         return false;
     }
-    if !build_put_hex(inout m, ids, inout traps) {
+    if !build_put_hex(inout module, ids, inout traps) {
         return false;
     }
     let mut strings = Strings {
@@ -833,11 +893,11 @@ fn emit(
     prefix.extend(in "vesper: ".as_bytes());
     prefix.extend(in entry_name.as_slice());
     prefix.extend(in "() = ".as_bytes());
-    let prefix_id = strings.string(inout m, in prefix.as_slice());
-    let yes = strings.string(inout m, in "true".as_bytes());
-    let no = strings.string(inout m, in "false".as_bytes());
-    let unit = strings.string(inout m, in "()".as_bytes());
-    let newline = strings.string(inout m, in "\n".as_bytes());
+    let prefix_id = strings.string(inout module, in prefix.as_slice());
+    let yes = strings.string(inout module, in "true".as_bytes());
+    let no = strings.string(inout module, in "false".as_bytes());
+    let unit = strings.string(inout module, in "()".as_bytes());
+    let newline = strings.string(inout module, in "\n".as_bytes());
     let main_strings = MainStrings {
         prefix: prefix_id,
         prefix_len: prefix.len(),
@@ -846,23 +906,28 @@ fn emit(
         unit: unit,
         newline: newline
     };
-    if !build_main(inout m, ids, in spec, main_strings, inout traps) {
+    if !build_main(inout module, ids, in spec, main_strings, inout traps) {
         return false;
     }
     let mut message_ids: ChunkSeq[DataId] = ChunkSeq::new[DataId]();
     for i in 0..spec.messages.len() {
         let text = bytes_of(in req, span_of(in spec.messages, i));
-        message_ids.push(strings.string(inout m, in text.as_slice()));
+        message_ids.push(strings.string(inout module, in text.as_slice()));
     }
-    let table = declare_data(inout m, in "vesper_trap_table".as_bytes(), linkage_local(), false);
-    if !define_table(inout m, in req, in spec, in message_ids, table) {
+    let table = declare_data(
+        inout module,
+        in "vesper_trap_table".as_bytes(),
+        linkage_local(),
+        false
+    );
+    if !define_table(inout module, in req, in spec, in message_ids, table) {
         return false;
     }
-    let abort = strings.string(inout m, in "vesper: abort: ".as_bytes());
-    let unexpected = strings.string(inout m, in "unexpected exception".as_bytes());
-    let pc = strings.string(inout m, in " pc=0x".as_bytes());
-    let cause = strings.string(inout m, in " cause=0x".as_bytes());
-    let tval = strings.string(inout m, in " tval=0x".as_bytes());
+    let abort = strings.string(inout module, in "vesper: abort: ".as_bytes());
+    let unexpected = strings.string(inout module, in "unexpected exception".as_bytes());
+    let pc = strings.string(inout module, in " pc=0x".as_bytes());
+    let cause = strings.string(inout module, in " cause=0x".as_bytes());
+    let tval = strings.string(inout module, in " tval=0x".as_bytes());
     if strings.bad {
         return false;
     }
@@ -875,21 +940,21 @@ fn emit(
         tval: tval,
         newline: newline
     };
-    build_trap(inout m, ids, trap_strings, inout traps)
+    build_trap(inout module, ids, trap_strings, inout traps)
 }
 
 fn isa_flags(target: u64) -> ChunkSeq[u8] {
-    let mut f: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut flags: ChunkSeq[u8] = ChunkSeq::new[u8]();
     // `vesper_silicon::stack::target_isa_with`: the ISA Silicon measures.
-    f.extend(
+    flags.extend(
         in "opt_level=speed;enable_probestack=false;unwind_info=true;preserve_frame_pointers=true"
             .as_bytes()
     );
     if target == TARGET_RISCV {
         // `FreestandingTarget::isa_flags`.
-        f.extend(in ";has_zca=true;has_zcd=false".as_bytes());
+        flags.extend(in ";has_zca=true;has_zcd=false".as_bytes());
     }
-    f
+    flags
 }
 
 // `runtime::build`. Result: status 0, the object, the CLIF text, the
@@ -897,9 +962,9 @@ fn isa_flags(target: u64) -> ChunkSeq[u8] {
 // pairs, then Silicon's names of main, trap and exit; or status 1 and the
 // error.
 pub fn freestanding_runtime(in req: Slice[u8]) -> ChunkSeq[u8] eff [Ffi[Cranelift]] {
-    let mut r = Reader { pos: 0, bad: false };
-    let spec = read_spec(in req, inout r);
-    if r.bad {
+    let mut cursor = Reader { pos: 0, bad: false };
+    let spec = read_spec(in req, inout cursor);
+    if cursor.bad {
         return failure(in "malformed runtime request".as_bytes());
     }
     let triple = if spec.target == TARGET_RISCV {
@@ -908,33 +973,33 @@ pub fn freestanding_runtime(in req: Slice[u8]) -> ChunkSeq[u8] eff [Ffi[Cranelif
         "aarch64"
     };
     let flags = isa_flags(spec.target);
-    let mut m = match module_new(
+    let mut module = match module_new(
         in triple.as_bytes(),
         in flags.as_slice(),
         in "vesper-freestanding-runtime".as_bytes()
     ) {
-        Option::Some(m) => m,
+        Option::Some(module) => module,
         Option::None => {
-            let e = new_error_text();
-            return failure(in e.as_slice());
+            let message = new_error_text();
+            return failure(in message.as_slice());
         }
     };
-    module_keep_clif(inout m, true);
+    module_keep_clif(inout module, true);
     let mut traps: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    if !emit(inout m, in req, in spec, inout traps) {
-        let e = module_error_text(in m);
-        module_free(m);
-        if e.len() == 0 {
+    if !emit(inout module, in req, in spec, inout traps) {
+        let message = module_error_text(in module);
+        module_free(module);
+        if message.len() == 0 {
             return failure(in "runtime emission failed".as_bytes());
         }
-        return failure(in e.as_slice());
+        return failure(in message.as_slice());
     }
-    let clif = module_clif(in m);
-    let object = match module_finish(m) {
-        Option::Some(o) => object_bytes(o),
+    let clif = module_clif(in module);
+    let object = match module_finish(module) {
+        Option::Some(product) => object_bytes(product),
         Option::None => {
-            let e = new_error_text();
-            return failure(in e.as_slice());
+            let message = new_error_text();
+            return failure(in message.as_slice());
         }
     };
     let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();

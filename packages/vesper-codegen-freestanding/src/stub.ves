@@ -66,18 +66,18 @@ enum Symbol: _ {
     BssEnd = 6,
 }
 
-fn symbol_text(s: u64) -> Str {
-    if s == Symbol::Start {
+fn symbol_text(symbol: u64) -> Str {
+    if symbol == Symbol::Start {
         "_start"
-    } else if s == Symbol::Exit {
+    } else if symbol == Symbol::Exit {
         "vesper_board_exit"
-    } else if s == Symbol::Main {
+    } else if symbol == Symbol::Main {
         "vesper_freestanding_main"
-    } else if s == Symbol::Trap {
+    } else if symbol == Symbol::Trap {
         "vesper_freestanding_trap"
-    } else if s == Symbol::StackTop {
+    } else if symbol == Symbol::StackTop {
         "__stack_top"
-    } else if s == Symbol::BssStart {
+    } else if symbol == Symbol::BssStart {
         "__bss_start"
     } else {
         "__bss_end"
@@ -134,15 +134,15 @@ impl Asm {
         self.code.len()
     }
 
-    fn word(inout self, w: u32) -> u64 {
+    fn word(inout self, inst: u32) -> u64 {
         let at = self.code.len();
-        push32(inout self.code, w);
+        push32(inout self.code, inst);
         at
     }
 
-    fn label(inout self, l: u64) {
+    fn label(inout self, label: u64) {
         let at = self.code.len();
-        match self.labels.try_get(l) {
+        match self.labels.try_get(label) {
             Option::Some(v) => {
                 if v != Absent::Row {
                     self.broken = true;
@@ -152,23 +152,23 @@ impl Asm {
                 self.broken = true;
             }
         }
-        let ok = self.labels.try_set(l, at);
+        let ok = self.labels.try_set(label, at);
     }
 
-    fn label_at(in self, l: u64) -> u64 {
-        self.labels.try_get(l).unwrap_or(Absent::Row)
+    fn label_at(in self, label: u64) -> u64 {
+        self.labels.try_get(label).unwrap_or(Absent::Row)
     }
 
-    fn align(inout self, a: u64, fill: u32) {
-        if a <= 1 {
+    fn align(inout self, alignment: u64, fill: u32) {
+        if alignment <= 1 {
             return;
         }
         loop {
             let here = self.code.len();
-            if here % a == 0 {
+            if here % alignment == 0 {
                 break;
             }
-            if a >= 4 && here % 4 == 0 {
+            if alignment >= 4 && here % 4 == 0 {
                 let at = self.word(fill);
             } else {
                 self.code.push(0);
@@ -176,90 +176,86 @@ impl Asm {
         }
     }
 
-    fn fix(inout self, at: u64, l: u64, kind: u8) {
-        self.fixups.push(Fixup { at: at, label: l, kind: kind, base: 0 });
+    fn fix(inout self, at: u64, label: u64, kind: u8) {
+        self.fixups.push(Fixup { at: at, label: label, kind: kind, base: 0 });
     }
 
-    fn fix_pcrel(inout self, at: u64, l: u64, base: u64) {
-        self.fixups.push(Fixup { at: at, label: l, kind: Fix::RvPcrelI, base: base });
+    fn fix_pcrel(inout self, at: u64, label: u64, base: u64) {
+        self.fixups.push(Fixup { at: at, label: label, kind: Fix::RvPcrelI, base: base });
     }
 
     fn reloc(inout self, at: u64, symbol: u64, r_type: u32) {
         self.relocs.push(Reloc { at: at, symbol: symbol, r_type: r_type });
     }
 
-    fn literal(inout self, l: u64, symbol: u64, r_type: u32) {
+    fn literal(inout self, label: u64, symbol: u64, r_type: u32) {
         self.align(8, 0);
-        self.label(l);
+        self.label(label);
         let at = self.code.len();
         push64(inout self.code, 0);
         self.reloc(at, symbol, r_type);
     }
 
-    fn literal_value(inout self, l: u64, value: u64) {
+    fn literal_value(inout self, label: u64, value: u64) {
         self.align(8, 0);
-        self.label(l);
+        self.label(label);
         push64(inout self.code, value);
     }
 
     fn resolve(inout self) {
         for k in 0..self.fixups.len() {
-            let f = match self.fixups.try_get(k) {
+            let fixup = match self.fixups.try_get(k) {
                 Option::Some(v) => v,
                 Option::None => Fixup { at: 0, label: 0, kind: 0, base: 0 },
             };
-            let target = self.label_at(f.label);
+            let target = self.label_at(fixup.label);
             if target == Absent::Row {
                 self.broken = true;
                 return;
             }
-            let mut w = get32(in self.code, f.at);
+            let mut inst = get32(in self.code, fixup.at);
             // `off` as two's complement; `neg` when target < at.
-            let off = wrapping_sub(target, f.at);
-            if f.kind == Fix::RvBranch {
+            let off = wrapping_sub(target, fixup.at);
+            if fixup.kind == Fix::RvBranch {
                 if !in_range(off, 0x1000) || off & 1 != 0 {
                     self.broken = true;
                 }
-                let o = wrapping_u32(off);
-                w = w
-                    | (((o >> 12) & 1) << 31)
-                    | (((o >> 5) & 63) << 25)
-                    | (((o >> 1) & 15) << 8)
-                    | (((o >> 11) & 1) << 7);
-            } else if f.kind == Fix::RvJal {
+                let off_bits = wrapping_u32(off);
+                inst = inst | (((off_bits >> 12) & 1) << 31) | (((off_bits >> 5) & 63) << 25) | (
+                    ((off_bits >> 1) & 15) << 8
+                ) | (((off_bits >> 11) & 1) << 7);
+            } else if fixup.kind == Fix::RvJal {
                 if !in_range(off, 0x100000) || off & 1 != 0 {
                     self.broken = true;
                 }
-                let o = wrapping_u32(off);
-                w = w
-                    | (((o >> 20) & 1) << 31)
-                    | (((o >> 1) & 0x3ff) << 21)
-                    | (((o >> 11) & 1) << 20)
-                    | (((o >> 12) & 255) << 12);
-            } else if f.kind == Fix::RvPcrelI {
-                let off = wrapping_sub(target, f.base);
+                let off_bits = wrapping_u32(off);
+                inst = inst | (((off_bits >> 20) & 1) << 31) | (((off_bits >> 1) & 0x3ff) << 21) | (
+                    ((off_bits >> 11) & 1) << 20
+                ) | (((off_bits >> 12) & 255) << 12);
+            } else if fixup.kind == Fix::RvPcrelI {
+                let off = wrapping_sub(target, fixup.base);
                 if !in_range(off, 2048) {
                     self.broken = true;
                 }
-                w = w | ((wrapping_u32(off) & 0xfff) << 20);
-            } else if f.kind == Fix::A64Imm19 {
+                inst = inst | ((wrapping_u32(off) & 0xfff) << 20);
+            } else if fixup.kind == Fix::A64Imm19 {
                 if off & 3 != 0 || !in_range(off, 0x100000) {
                     self.broken = true;
                 }
-                w = w | ((wrapping_u32(sar2(off)) & 0x7ffff) << 5);
-            } else if f.kind == Fix::A64Imm26 {
+                inst = inst | ((wrapping_u32(sar2(off)) & 0x7ffff) << 5);
+            } else if fixup.kind == Fix::A64Imm26 {
                 if off & 3 != 0 {
                     self.broken = true;
                 }
-                w = w | (wrapping_u32(sar2(off)) & 0x3ffffff);
+                inst = inst | (wrapping_u32(sar2(off)) & 0x3ffffff);
             } else {
                 if !in_range(off, 0x100000) {
                     self.broken = true;
                 }
-                let o = wrapping_u32(off);
-                w = w | ((o & 3) << 29) | (((o >> 2) & 0x7ffff) << 5);
+                let off_bits = wrapping_u32(off);
+                inst = inst | ((off_bits & 3) << 29) | (((off_bits >> 2) & 0x7ffff) << 5);
             }
-            put32(inout self.code, f.at, w);
+            put32(inout self.code, fixup.at, inst);
         }
     }
 }
@@ -270,11 +266,11 @@ fn in_range(off: u64, limit: u64) -> bool {
 }
 
 // Arithmetic shift right by 2 of a two's complement word.
-fn sar2(x: u64) -> u64 {
-    if x >> 63 != 0 {
-        (x >> 2) | 0xc000000000000000
+fn sar2(value: u64) -> u64 {
+    if value >> 63 != 0 {
+        (value >> 2) | 0xc000000000000000
     } else {
-        x >> 2
+        value >> 2
     }
 }
 
@@ -309,12 +305,9 @@ fn rv_csr(f3: u32, rd: u32, rs1_or_uimm: u32, csr: u32) -> u32 {
 }
 
 fn rv_s(f3: u32, rs1: u32, rs2: u32, imm: u32) -> u32 {
-    (((imm >> 5) & 127) << 25)
-        | (rs2 << 20)
-        | (rs1 << 15)
-        | (f3 << 12)
-        | ((imm & 31) << 7)
-        | RvOpcode::Store
+    (((imm >> 5) & 127) << 25) | (rs2 << 20) | (rs1 << 15) | (f3 << 12) | (
+        (imm & 31) << 7
+    ) | RvOpcode::Store
 }
 
 fn rv_b(f3: u32, rs1: u32, rs2: u32) -> u32 {
@@ -330,91 +323,91 @@ fn rv_auipc(rd: u32) -> u32 {
 }
 
 impl Asm {
-    fn rv_la(inout self, rd: u32, l: u64) {
+    fn rv_la(inout self, rd: u32, label: u64) {
         let base = self.word(rv_auipc(rd));
         let at = self.word(rv_i(RvOpcode::OpImm, 0, rd, rd, 0));
-        self.fix_pcrel(at, l, base);
+        self.fix_pcrel(at, label, base);
     }
 
-    fn rv_ld_lit(inout self, rd: u32, l: u64) {
+    fn rv_ld_lit(inout self, rd: u32, label: u64) {
         let base = self.word(rv_auipc(rd));
         let at = self.word(rv_i(RvOpcode::Load, 3, rd, rd, 0));
-        self.fix_pcrel(at, l, base);
+        self.fix_pcrel(at, label, base);
     }
 
     fn rv_call(inout self, symbol: u64) {
         let at = self.word(rv_auipc(RA));
-        let j = self.word(rv_i(RvOpcode::Jalr, 0, RA, RA, 0));
+        let jalr_at = self.word(rv_i(RvOpcode::Jalr, 0, RA, RA, 0));
         self.reloc(at, symbol, RelType::RiscvCallPlt);
     }
 
-    fn rv_branch(inout self, f3: u32, rs1: u32, rs2: u32, l: u64) {
+    fn rv_branch(inout self, f3: u32, rs1: u32, rs2: u32, label: u64) {
         let at = self.word(rv_b(f3, rs1, rs2));
-        self.fix(at, l, Fix::RvBranch);
+        self.fix(at, label, Fix::RvBranch);
     }
 
-    fn rv_j(inout self, l: u64) {
+    fn rv_j(inout self, label: u64) {
         let at = self.word(RvOpcode::Jal);
-        self.fix(at, l, Fix::RvJal);
+        self.fix(at, label, Fix::RvJal);
     }
 }
 
 // `riscv(board)`; false for the semihosting exit, which riscv64 lacks.
-fn riscv(inout a: Asm, exit: u64, exit_base: u64) -> bool {
-    a.label(Label::Start);
-    let w0 = a.word(rv_csr(7, ZERO, RISCV_MIE_MASK, CSR_MSTATUS));
-    let w1 = a.word(rv_csr(1, ZERO, ZERO, CSR_MIE));
-    let w2 = a.word(rv_csr(2, T0, ZERO, CSR_MHARTID));
-    a.rv_branch(1, T0, ZERO, Label::Park);
-    a.rv_la(T0, Label::TrapEntry);
-    let w3 = a.word(rv_csr(1, ZERO, T0, CSR_MTVEC));
-    a.rv_ld_lit(SP, Label::LitStackTop);
-    a.rv_ld_lit(T0, Label::LitBssStart);
-    a.rv_ld_lit(T1, Label::LitBssEnd);
-    a.label(Label::BssLoop);
-    a.rv_branch(7, T0, T1, Label::BssDone);
-    let w4 = a.word(rv_s(3, T0, ZERO, 0));
-    let w5 = a.word(rv_i(RvOpcode::OpImm, 0, T0, T0, 8));
-    a.rv_j(Label::BssLoop);
-    a.label(Label::BssDone);
-    a.rv_call(Symbol::Main);
-    a.label(Label::Park);
-    let w6 = a.word(RV_WFI);
-    a.rv_j(Label::Park);
-    a.align(4, 0);
-    a.label(Label::TrapEntry);
-    let w7 = a.word(rv_csr(2, A0, ZERO, CSR_MCAUSE));
-    let w8 = a.word(rv_csr(2, A1, ZERO, CSR_MEPC));
-    let w9 = a.word(rv_csr(2, A2, ZERO, CSR_MTVAL));
-    a.rv_ld_lit(SP, Label::LitStackTop);
-    a.rv_call(Symbol::Trap);
-    a.rv_j(Label::Park);
-    a.label(Label::Exit);
+fn riscv(inout asm: Asm, exit: u64, exit_base: u64) -> bool {
+    asm.label(Label::Start);
+    let w0 = asm.word(rv_csr(7, ZERO, RISCV_MIE_MASK, CSR_MSTATUS));
+    let w1 = asm.word(rv_csr(1, ZERO, ZERO, CSR_MIE));
+    let w2 = asm.word(rv_csr(2, T0, ZERO, CSR_MHARTID));
+    asm.rv_branch(1, T0, ZERO, Label::Park);
+    asm.rv_la(T0, Label::TrapEntry);
+    let w3 = asm.word(rv_csr(1, ZERO, T0, CSR_MTVEC));
+    asm.rv_ld_lit(SP, Label::LitStackTop);
+    asm.rv_ld_lit(T0, Label::LitBssStart);
+    asm.rv_ld_lit(T1, Label::LitBssEnd);
+    asm.label(Label::BssLoop);
+    asm.rv_branch(7, T0, T1, Label::BssDone);
+    let w4 = asm.word(rv_s(3, T0, ZERO, 0));
+    let w5 = asm.word(rv_i(RvOpcode::OpImm, 0, T0, T0, 8));
+    asm.rv_j(Label::BssLoop);
+    asm.label(Label::BssDone);
+    asm.rv_call(Symbol::Main);
+    asm.label(Label::Park);
+    let w6 = asm.word(RV_WFI);
+    asm.rv_j(Label::Park);
+    asm.align(4, 0);
+    asm.label(Label::TrapEntry);
+    let w7 = asm.word(rv_csr(2, A0, ZERO, CSR_MCAUSE));
+    let w8 = asm.word(rv_csr(2, A1, ZERO, CSR_MEPC));
+    let w9 = asm.word(rv_csr(2, A2, ZERO, CSR_MTVAL));
+    asm.rv_ld_lit(SP, Label::LitStackTop);
+    asm.rv_call(Symbol::Trap);
+    asm.rv_j(Label::Park);
+    asm.label(Label::Exit);
     if exit == Exit::SifiveTest {
-        a.rv_ld_lit(T0, Label::LitExit);
-        a.rv_branch(1, A0, ZERO, Label::ExitFail);
-        let x0 = a.word(rv_lui(T1, 5));
-        let x1 = a.word(rv_i(RvOpcode::OpImm, 0, T1, T1, 0x555));
-        let x2 = a.word(rv_s(2, T0, T1, 0));
-        a.rv_j(Label::Park);
-        a.label(Label::ExitFail);
-        let x3 = a.word(rv_i(RvOpcode::OpImm, 1, T1, A0, 16));
-        let x4 = a.word(rv_lui(T2, 3));
-        let x5 = a.word(rv_i(RvOpcode::OpImm, 0, T2, T2, 819));
+        asm.rv_ld_lit(T0, Label::LitExit);
+        asm.rv_branch(1, A0, ZERO, Label::ExitFail);
+        let x0 = asm.word(rv_lui(T1, 5));
+        let x1 = asm.word(rv_i(RvOpcode::OpImm, 0, T1, T1, 0x555));
+        let x2 = asm.word(rv_s(2, T0, T1, 0));
+        asm.rv_j(Label::Park);
+        asm.label(Label::ExitFail);
+        let x3 = asm.word(rv_i(RvOpcode::OpImm, 1, T1, A0, 16));
+        let x4 = asm.word(rv_lui(T2, 3));
+        let x5 = asm.word(rv_i(RvOpcode::OpImm, 0, T2, T2, 819));
         // or t1, t1, t2
-        let x6 = a.word((T2 << 20) | (T1 << 15) | (6 << 12) | (T1 << 7) | RvOpcode::Op);
-        let x7 = a.word(rv_s(2, T0, T1, 0));
-        a.rv_j(Label::Park);
+        let x6 = asm.word((T2 << 20) | (T1 << 15) | (6 << 12) | (T1 << 7) | RvOpcode::Op);
+        let x7 = asm.word(rv_s(2, T0, T1, 0));
+        asm.rv_j(Label::Park);
     } else if exit == Exit::Park {
-        a.rv_j(Label::Park);
+        asm.rv_j(Label::Park);
     } else {
         return false;
     }
-    a.literal(Label::LitStackTop, Symbol::StackTop, RelType::Riscv64);
-    a.literal(Label::LitBssStart, Symbol::BssStart, RelType::Riscv64);
-    a.literal(Label::LitBssEnd, Symbol::BssEnd, RelType::Riscv64);
+    asm.literal(Label::LitStackTop, Symbol::StackTop, RelType::Riscv64);
+    asm.literal(Label::LitBssStart, Symbol::BssStart, RelType::Riscv64);
+    asm.literal(Label::LitBssEnd, Symbol::BssEnd, RelType::Riscv64);
     if exit == Exit::SifiveTest {
-        a.literal_value(Label::LitExit, exit_base);
+        asm.literal_value(Label::LitExit, exit_base);
     }
     true
 }
@@ -425,14 +418,14 @@ const A64_ISB: u32 = 0xd5033fdf;
 const A64_WFE: u32 = 0xd503205f;
 
 impl Asm {
-    fn a64_ldr_lit(inout self, rt: u32, l: u64) {
+    fn a64_ldr_lit(inout self, rt: u32, label: u64) {
         let at = self.word(0x58000000 | rt);
-        self.fix(at, l, Fix::A64Imm19);
+        self.fix(at, label, Fix::A64Imm19);
     }
 
-    fn a64_b(inout self, l: u64) {
+    fn a64_b(inout self, label: u64) {
         let at = self.word(0x14000000);
-        self.fix(at, l, Fix::A64Imm26);
+        self.fix(at, label, Fix::A64Imm26);
     }
 
     fn a64_bl(inout self, symbol: u64) {
@@ -441,97 +434,97 @@ impl Asm {
     }
 }
 
-fn aarch64(inout a: Asm, exit: u64, exit_base: u64) {
-    a.label(Label::Start);
+fn aarch64(inout asm: Asm, exit: u64, exit_base: u64) {
+    asm.label(Label::Start);
     // msr daifset, #mask
-    let w0 = a.word(0xd50340df | (AARCH64_DAIFSET_MASK << 8));
+    let w0 = asm.word(0xd50340df | (AARCH64_DAIFSET_MASK << 8));
     // mrs x0, mpidr_el1 ; and x0, x0, #0xff
-    let w1 = a.word(0xd53800a0);
-    let w2 = a.word(0x92401c00);
+    let w1 = asm.word(0xd53800a0);
+    let w2 = asm.word(0x92401c00);
     // cbnz x0, park
-    let at = a.word(0xb5000000);
-    a.fix(at, Label::Park, Fix::A64Imm19);
+    let park_branch = asm.word(0xb5000000);
+    asm.fix(park_branch, Label::Park, Fix::A64Imm19);
     // adr x0, vectors
-    let at2 = a.word(0x10000000);
-    a.fix(at2, Label::Vectors, Fix::A64Adr);
+    let vectors_adr = asm.word(0x10000000);
+    asm.fix(vectors_adr, Label::Vectors, Fix::A64Adr);
     // msr vbar_el1, x0 ; movz x0, #0x30, lsl #16 ; msr cpacr_el1, x0 ; isb
-    let w3 = a.word(0xd518c000);
-    let w4 = a.word(0xd2a00600);
-    let w5 = a.word(0xd5181040);
-    let w6 = a.word(A64_ISB);
-    a.a64_ldr_lit(0, Label::LitStackTop);
+    let w3 = asm.word(0xd518c000);
+    let w4 = asm.word(0xd2a00600);
+    let w5 = asm.word(0xd5181040);
+    let w6 = asm.word(A64_ISB);
+    asm.a64_ldr_lit(0, Label::LitStackTop);
     // mov sp, x0
-    let w7 = a.word(0x9100001f);
-    a.a64_ldr_lit(0, Label::LitBssStart);
-    a.a64_ldr_lit(1, Label::LitBssEnd);
-    a.label(Label::BssLoop);
+    let w7 = asm.word(0x9100001f);
+    asm.a64_ldr_lit(0, Label::LitBssStart);
+    asm.a64_ldr_lit(1, Label::LitBssEnd);
+    asm.label(Label::BssLoop);
     // cmp x0, x1 ; b.hs bss_done
-    let w8 = a.word(0xeb01001f);
-    let at3 = a.word(0x54000002);
-    a.fix(at3, Label::BssDone, Fix::A64Imm19);
+    let w8 = asm.word(0xeb01001f);
+    let done_branch = asm.word(0x54000002);
+    asm.fix(done_branch, Label::BssDone, Fix::A64Imm19);
     // str xzr, [x0], #8
-    let w9 = a.word(0xf800841f);
-    a.a64_b(Label::BssLoop);
-    a.label(Label::BssDone);
-    a.a64_bl(Symbol::Main);
-    a.label(Label::Park);
-    let w10 = a.word(A64_WFE);
-    a.a64_b(Label::Park);
-    a.label(Label::Exit);
+    let w9 = asm.word(0xf800841f);
+    asm.a64_b(Label::BssLoop);
+    asm.label(Label::BssDone);
+    asm.a64_bl(Symbol::Main);
+    asm.label(Label::Park);
+    let w10 = asm.word(A64_WFE);
+    asm.a64_b(Label::Park);
+    asm.label(Label::Exit);
     if exit == Exit::Semihosting {
         // sub sp, sp, #16 ; movz x2, #0x26 ; movk x2, #0x2, lsl #16 ;
         // stp x2, x0, [sp] ; mov x1, sp ; mov w0, #0x18 ; hlt #0xf000
-        let x0 = a.word(0xd10043ff);
-        let x1 = a.word(0xd28004c2);
-        let x2 = a.word(0xf2a00042);
-        let x3 = a.word(0xa90003e2);
-        let x4 = a.word(0x910003e1);
-        let x5 = a.word(0x52800300);
-        let x6 = a.word(0xd45e0000);
-        a.a64_b(Label::Park);
+        let x0 = asm.word(0xd10043ff);
+        let x1 = asm.word(0xd28004c2);
+        let x2 = asm.word(0xf2a00042);
+        let x3 = asm.word(0xa90003e2);
+        let x4 = asm.word(0x910003e1);
+        let x5 = asm.word(0x52800300);
+        let x6 = asm.word(0xd45e0000);
+        asm.a64_b(Label::Park);
     } else if exit == Exit::SifiveTest {
-        a.a64_ldr_lit(1, Label::LitExit);
+        asm.a64_ldr_lit(1, Label::LitExit);
         // cbnz x0, exit_fail
-        let at4 = a.word(0xb5000000);
-        a.fix(at4, Label::ExitFail, Fix::A64Imm19);
+        let fail_branch = asm.word(0xb5000000);
+        asm.fix(fail_branch, Label::ExitFail, Fix::A64Imm19);
         // mov w2, #0x5555 ; str w2, [x1]
-        let y0 = a.word(0x528aaaa2);
-        let y1 = a.word(0xb9000022);
-        a.a64_b(Label::Park);
-        a.label(Label::ExitFail);
+        let y0 = asm.word(0x528aaaa2);
+        let y1 = asm.word(0xb9000022);
+        asm.a64_b(Label::Park);
+        asm.label(Label::ExitFail);
         // mov w2, #0x3333 ; orr w2, w2, w0, lsl #16 ; str w2, [x1]
-        let y2 = a.word(0x52866662);
-        let y3 = a.word(0x2a004042);
-        let y4 = a.word(0xb9000022);
-        a.a64_b(Label::Park);
+        let y2 = asm.word(0x52866662);
+        let y3 = asm.word(0x2a004042);
+        let y4 = asm.word(0xb9000022);
+        asm.a64_b(Label::Park);
     } else {
-        a.a64_b(Label::Park);
+        asm.a64_b(Label::Park);
     }
-    a.literal(Label::LitStackTop, Symbol::StackTop, RelType::Aarch64Abs64);
-    a.literal(Label::LitBssStart, Symbol::BssStart, RelType::Aarch64Abs64);
-    a.literal(Label::LitBssEnd, Symbol::BssEnd, RelType::Aarch64Abs64);
+    asm.literal(Label::LitStackTop, Symbol::StackTop, RelType::Aarch64Abs64);
+    asm.literal(Label::LitBssStart, Symbol::BssStart, RelType::Aarch64Abs64);
+    asm.literal(Label::LitBssEnd, Symbol::BssEnd, RelType::Aarch64Abs64);
     if exit == Exit::SifiveTest {
-        a.literal_value(Label::LitExit, exit_base);
+        asm.literal_value(Label::LitExit, exit_base);
     }
     // VBAR_EL1 needs 2 KiB alignment; every entry is 0x80 bytes.
-    a.align(2048, A64_WFE);
-    a.label(Label::Vectors);
+    asm.align(2048, A64_WFE);
+    asm.label(Label::Vectors);
     for i in 0..16 {
-        let start = a.here();
+        let start = asm.here();
         // mrs x0, esr_el1 ; mrs x1, elr_el1 ; mrs x2, far_el1
-        let v0 = a.word(0xd5385200);
-        let v1 = a.word(0xd5384021);
-        let v2 = a.word(0xd5386002);
-        a.a64_ldr_lit(3, Label::LitStackTop);
+        let v0 = asm.word(0xd5385200);
+        let v1 = asm.word(0xd5384021);
+        let v2 = asm.word(0xd5386002);
+        asm.a64_ldr_lit(3, Label::LitStackTop);
         // mov sp, x3
-        let v3 = a.word(0x9100007f);
-        a.a64_bl(Symbol::Trap);
-        a.a64_b(Label::Park);
+        let v3 = asm.word(0x9100007f);
+        asm.a64_bl(Symbol::Trap);
+        asm.a64_b(Label::Park);
         loop {
-            if a.here() >= add(start, 128) {
+            if asm.here() >= add(start, 128) {
                 break;
             }
-            let f = a.word(A64_WFE);
+            let fill_word = asm.word(A64_WFE);
         }
     }
 }
@@ -540,15 +533,15 @@ fn aarch64(inout a: Asm, exit: u64, exit_base: u64) {
 // object. Empty when the board's exit device does not exist on the target
 // (`UnsupportedTarget`).
 pub fn stub_object(target: u64, exit: u64, exit_base: u64, e_flags: u32) -> ChunkSeq[u8] {
-    let mut a = asm_new();
+    let mut asm = asm_new();
     if target == Target::Riscv64 {
-        if !riscv(inout a, exit, exit_base) {
+        if !riscv(inout asm, exit, exit_base) {
             return ChunkSeq::new[u8]();
         }
     } else {
-        aarch64(inout a, exit, exit_base);
+        aarch64(inout asm, exit, exit_base);
     }
-    a.resolve();
+    asm.resolve();
     // Symbols: `_start` and `vesper_board_exit`, then each relocation
     // target in first-use order.
     let mut names: ChunkSeq[u8] = ChunkSeq::new[u8]();
@@ -557,32 +550,32 @@ pub fn stub_object(target: u64, exit: u64, exit_base: u64, e_flags: u32) -> Chun
     let mut values: ChunkSeq[u64] = ChunkSeq::new[u64]();
     let mut ids: ChunkSeq[u64] = ChunkSeq::new[u64]();
     add_symbol(inout names, inout starts, inout lens, Symbol::Start);
-    values.push(a.label_at(Label::Start));
+    values.push(asm.label_at(Label::Start));
     add_symbol(inout names, inout starts, inout lens, Symbol::Exit);
-    values.push(a.label_at(Label::Exit));
+    values.push(asm.label_at(Label::Exit));
     let mut rel_offsets: ChunkSeq[u64] = ChunkSeq::new[u64]();
     let mut rel_syms: ChunkSeq[u64] = ChunkSeq::new[u64]();
     let mut rel_types: ChunkSeq[u32] = ChunkSeq::new[u32]();
-    for k in 0..a.relocs.len() {
-        let r = match a.relocs.try_get(k) {
+    for k in 0..asm.relocs.len() {
+        let reloc = match asm.relocs.try_get(k) {
             Option::Some(v) => v,
             Option::None => Reloc { at: 0, symbol: 0, r_type: 0 },
         };
         let mut index = Absent::Row;
         for j in 0..ids.len() {
-            if ids.try_get(j) == Option::Some(r.symbol) {
+            if ids.try_get(j) == Option::Some(reloc.symbol) {
                 index = j;
             }
         }
         if index == Absent::Row {
             index = ids.len();
-            ids.push(r.symbol);
-            add_symbol(inout names, inout starts, inout lens, r.symbol);
+            ids.push(reloc.symbol);
+            add_symbol(inout names, inout starts, inout lens, reloc.symbol);
         }
-        rel_offsets.push(r.at);
+        rel_offsets.push(reloc.at);
         // After the two defined symbols.
         rel_syms.push(add(index, 2));
-        rel_types.push(r.r_type);
+        rel_types.push(reloc.r_type);
     }
     let machine = if target == Target::Riscv64 {
         Em::Riscv
@@ -594,7 +587,7 @@ pub fn stub_object(target: u64, exit: u64, exit_base: u64, e_flags: u32) -> Chun
         machine,
         e_flags,
         align,
-        in a.code,
+        in asm.code,
         in names,
         in starts,
         in lens,
@@ -610,13 +603,13 @@ fn add_symbol(
     inout names: ChunkSeq[u8],
     inout starts: ChunkSeq[u64],
     inout lens: ChunkSeq[u64],
-    s: u64
+    symbol: u64
 ) {
-    let t = symbol_text(s);
+    let text = symbol_text(symbol);
     starts.push(names.len());
-    let n = t.as_bytes();
-    lens.push(n.len());
-    names.extend(in n);
+    let bytes = text.as_bytes();
+    lens.push(bytes.len());
+    names.extend(in bytes);
 }
 
 pub fn is_riscv(target: u64) -> bool {
@@ -638,9 +631,9 @@ pub fn machine_of(target: u64) -> u16 {
 pub fn packed_constants() -> u64 {
     let mut packed = widen_u64(RISCV_MIE_MASK) | (widen_u64(AARCH64_DAIFSET_MASK) << 8);
     let mut shift: u64 = 16;
-    for t in 0..2 {
-        for e in 0..3 {
-            packed = packed | wrapping_shl_u64(exit_stack_bytes(t, e), wrapping_u32(shift));
+    for target in 0..2 {
+        for exit in 0..3 {
+            packed = packed | wrapping_shl_u64(exit_stack_bytes(target, exit), wrapping_u32(shift));
             shift = add(shift, 8);
         }
     }
