@@ -1,0 +1,6 @@
+// The scoped-worker prelude (src/atomics.rs): the sequential schedule of `parallel_for`.
+fn parallel_for[A, e: eff](in data: A, n: u64, body: fn @copy (in A, u64) eff [e]) eff [e] {
+    for i in 0..n {
+        body(in data, i);
+    }
+}

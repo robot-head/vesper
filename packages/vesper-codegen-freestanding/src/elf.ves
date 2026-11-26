@@ -244,10 +244,7 @@ pub fn write_executable(
             Option::Some(v) => widen_u64(v),
             Option::None => 0,
         };
-        let off = match file_offsets.try_get(i) {
-            Option::Some(v) => v,
-            Option::None => 0,
-        };
+        let off = file_offsets.try_get(i).unwrap_or(0);
         header_at(inout out, name, kind, flags, s.address, off, s.mem_bytes, 0, 0, 8, 0);
     }
     let strtab_index = add(secs.len(), 2);

@@ -388,3 +388,67 @@ fn collect_matches_rust() {
     assert!(matched > CASES.len(), "too few compared");
     assert_eq!(differ.len(), 0);
 }
+
+// ------------------------------------------------------------ prelude copies
+
+/// The string literal that `pub fn <name>() -> Str` returns in `text`,
+/// unescaped.
+fn returned_literal(text: &str, name: &str) -> String {
+    let head = format!("pub fn {name}() -> Str {{");
+    let start = text.find(&head).unwrap_or_else(|| panic!("no `{head}`"));
+    let rest = &text[start + head.len()..];
+    let open = rest.find('"').expect("no string literal");
+    let mut out = String::new();
+    let mut chars = rest[open + 1..].chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' => return out,
+            '\\' => match chars.next() {
+                Some('n') => out.push('\n'),
+                Some('t') => out.push('\t'),
+                Some(c) => out.push(c),
+                None => break,
+            },
+            c => out.push(c),
+        }
+    }
+    panic!("unterminated string literal in `{name}`")
+}
+
+/// The package keeps its own copy of each prelude it lowers (it cannot
+/// embed a file); every copy must be the checker's `src/preludes/*.ves`
+/// file byte for byte, so its spans land where the checker's do.
+#[test]
+fn prelude_copies_match_rust() {
+    let dir = repo().join(PACKAGE).join("src");
+    let mut texts = vec![];
+    for entry in std::fs::read_dir(&dir).unwrap().flatten() {
+        if entry.path().extension().is_some_and(|e| e == "ves") {
+            texts.push((entry.path(), std::fs::read_to_string(entry.path()).unwrap()));
+        }
+    }
+    let copies = [
+        ("strings_source", vesper::strings::PRELUDE),
+        ("option_source", vesper::option_methods::PRELUDE),
+        ("atomics_source", vesper::atomics::PRELUDE),
+        ("workers_source", vesper::atomics::WORKERS_PRELUDE),
+        ("region_source", vesper::regions::PRELUDE),
+    ];
+    let mut checked = 0;
+    for (name, rust) in copies {
+        let head = format!("pub fn {name}() -> Str {{");
+        for (path, text) in texts.iter().filter(|(_, t)| t.contains(&head)) {
+            assert!(
+                returned_literal(text, name) == rust,
+                "`{name}` in {} is not the checker's prelude; copy src/preludes again",
+                path.display()
+            );
+            checked += 1;
+        }
+    }
+    assert!(
+        checked >= 2,
+        "found {checked} prelude copies in {}",
+        dir.display()
+    );
+}
