@@ -75,15 +75,16 @@ vesper_hybrid(
     },
     # The included CLI sources (src/main.rs and its command modules) and
     # what they embed.
-    # The proof-audit module (#1341) links hash-sys's `[package] objects`
-    # (the BLAKE3 C library), which the harness compiles into its archive.
+    # The driver module's proof-audit (#1341, #2091) links hash-sys's
+    # `[package] objects` (the BLAKE3 C library), which the harness
+    # compiles into its archive.
     build_script_data = [
         "//:std_hash_sys_manifest",
         "//:std_hash_sys_package",
     ],
     build_script_env = {
         # Path dependencies are not beside the crate in Bazel.
-        "VESPER_HYBRID_OBJECT_PACKAGES_HYBRID_PROOF_AUDIT": "$(execpath //:std_hash_sys_manifest)",
+        "VESPER_HYBRID_OBJECT_PACKAGES_HYBRID_DRIVER": "$(execpath //:std_hash_sys_manifest)",
     },
     extra_compile_data = ["//:files"],
     # The differential harness runs the default compiler beside the hybrid
@@ -186,7 +187,8 @@ vesper_hybrid(
         # front-end passes (#1893) the parse module, the front end v2, the
         # AST and @vesper-std/toml's Debug text; the wasm and eBPF builds
         # (#1895) those backends and wit-component; the package load
-        # (#1986) the package assembler.
+        # (#1986) the package assembler; `vesper proof-audit` (#1341, #2091)
+        # @vesper/proof-audit.
         "hybrid_driver": [
             ":hybrid_parse_package",
             "//:ast_package",
@@ -197,14 +199,18 @@ vesper_hybrid(
             "//:ebpf_backend_package",
             "//:front_package",
             "//:place_ir_package",
+            "//:proof_audit_package",
             "//:std_env_package",
             "//:std_fmt_package",
             "//:std_fs_package",
+            "//:std_hash_package",
+            "//:std_hash_sys_package",
             "//:std_intern_package",
             "//:std_process_package",
             "//:std_toml_package",
             "//:wasm_backend_package",
             "//:wit_component_package",
+            "//crates/vesper-serde:port_package",
         ],
         # The eBPF backend swap (#1290) builds on @vesper/ebpf-backend.
         "hybrid_ebpf_backend": [
@@ -253,16 +259,6 @@ vesper_hybrid(
             "//:lean_extract_package",
             "//:place_ir_package",
             "//crates/vesper-lean-syntax:port_package",
-        ],
-        # `vesper proof-audit` (#1341) is @vesper/proof-audit.
-        "hybrid_proof_audit": [
-            "//:proof_audit_package",
-            "//:std_env_package",
-            "//:std_fs_package",
-            "//:std_hash_package",
-            "//:std_hash_sys_package",
-            "//:std_process_package",
-            "//crates/vesper-serde:port_package",
         ],
         # The verified code generator (#1886) builds on
         # @vesper/verified-codegen.

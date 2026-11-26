@@ -21,17 +21,20 @@ thread_local! {
     static FMT_OUTPUT: RefCell<String> = const { RefCell::new(String::new()) };
 }
 
-/// `vesper proof-audit` from `modules/proof_audit` (#1341), when its swap
+/// `vesper proof-audit` from the driver module (#1341, #2091), when its swap
 /// is on (src/swap/proof_audit.rs): it takes the packed arguments and
 /// returns the module's result bytes.
-static PROOF_AUDIT: std::sync::OnceLock<fn(&[u8]) -> Vec<u8>> = std::sync::OnceLock::new();
+static PROOF_AUDIT: std::sync::OnceLock<ProofAuditRun> = std::sync::OnceLock::new();
 
-/// Serve `hc_proof_audit_run` from `run` (`modules/proof_audit`).
-pub(crate) fn install_proof_audit(run: fn(&[u8]) -> Vec<u8>) -> Result<(), fn(&[u8]) -> Vec<u8>> {
+/// `proof_audit_run`: the packed arguments to the result bytes.
+pub(crate) type ProofAuditRun = fn(&[u8]) -> Vec<u8>;
+
+/// Serve `hc_proof_audit_run` from `run` (`proof_audit_run`, modules/driver).
+pub(crate) fn install_proof_audit(run: ProofAuditRun) -> Result<(), ProofAuditRun> {
     PROOF_AUDIT.set(run)
 }
 
-/// Print what `modules/proof_audit` printed and return its error: a
+/// Print what `proof_audit_run` (modules/driver) printed and return its error: a
 /// status byte, the stdout length (8 bytes, little-endian), stdout, then
 /// the error text.
 fn proof_audit_result(result: &[u8]) -> Result<(), String> {

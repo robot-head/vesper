@@ -14,6 +14,7 @@ unsafe extern "C" {
     fn vesper_hybrid_driver_live_allocations() -> i64;
     fn vesper_hybrid_driver_delegate() -> i64;
     fn vesper_hybrid_driver_main_code() -> i64;
+    fn vesper_hybrid_driver_proof_audit_run(packed: *mut u64) -> i64;
     fn vesper_hybrid_driver_record_format() -> i64;
 }
 
@@ -49,6 +50,15 @@ pub fn main_code() -> i64 {
     // every handle passed is owned or borrowed as its mode requires.
     let raw = unsafe { vesper_hybrid_driver_main_code() };
     raw
+}
+
+/// Calls `proof_audit_run` of the Vesper library `hybrid_driver` (`vesper_hybrid_driver_proof_audit_run`).
+pub fn proof_audit_run(packed: &[u8]) -> Vec<u8> {
+    // SAFETY: `vesper_hybrid_driver_proof_audit_run` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(packed, |view_packed| unsafe { vesper_hybrid_driver_proof_audit_run(view_packed) });
+    unsafe { vesper_port_abi::seq_take::<u8>(RUNTIME, raw as u64) }
 }
 
 /// Calls `record_format` of the Vesper library `hybrid_driver` (`vesper_hybrid_driver_record_format`).
