@@ -31,7 +31,8 @@ assembly) is #2033; slice 2 (the loader's I/O) follows it.
   and a `.vsys` library's type names and link mode (`vesper_ffi::sys`). A
   graph with a manifest error or an I/O error, or one this reader does not
   model (an absolute dependency path, a UNC path, a file name that is not
-  UTF-8, a source over the parser's byte budget), goes back to the Rust
+  UTF-8, a source over the parser's byte budget, a source that names
+  `include_str`, #2119, until the driver expands it), goes back to the Rust
   loader: the driver then runs `LoadPackage` as before, which reports it
   exactly.
 - **Differential: 0 differences** on all 211 Loom packages of the corpus:
@@ -55,7 +56,8 @@ assembly) is #2033; slice 2 (the loader's I/O) follows it.
 - Left for slice 2b: the manifest decode in Vesper (`@vesper/loom-calculus`
   already decodes the TOML to the manifest's JSON; the JSON-to-words step
   of its validator is still Rust's src/port.rs), the version match over its
-  SemVer port, the `.vsys` names over `@vesper/vsys`, and manifest errors
+  SemVer port, the `.vsys` names over `@vesper/vsys`, `include_str`
+  expansion, and manifest errors
   rendered in Vesper, so that no graph goes back to Rust.
 
 ## Slice 1: assembly

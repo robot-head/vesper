@@ -116,13 +116,83 @@ struct Ld {
     of: ChunkSeq[u64],
 }
 
+// The tables' record widths and field offsets (see `Ld`). A field
+// without an offset here is a record's first, at 0.
+const RANGE: u64 = 2;
 const PKG: u64 = 5;
+const PKG_NAME_END: u64 = 1;
+const PKG_CANON: u64 = 2;
+const PKG_CANON_END: u64 = 3;
+const PKG_MANIFEST: u64 = 4;
+const DEP: u64 = 4;
+const DEP_NAME: u64 = 1;
+const DEP_NAME_END: u64 = 2;
+const DEP_INDEX: u64 = 3;
+// A (package, name start, name end) row: `opts`, `foreign`.
+const NAMED: u64 = 3;
+const NAMED_START: u64 = 1;
+const NAMED_END: u64 = 2;
 const FILE: u64 = 5;
+const FILE_DISPLAY_END: u64 = 1;
+const FILE_TEXT: u64 = 2;
+const FILE_TEXT_END: u64 = 3;
+const FILE_BASE: u64 = 4;
 const MODULE: u64 = 4;
+const MOD_FILE: u64 = 1;
+const MOD_FIRST_SEG: u64 = 2;
+const MOD_SEGS: u64 = 3;
 const VSYS: u64 = 8;
+const VSYS_PACKAGE_END: u64 = 1;
+const VSYS_DISPLAY: u64 = 2;
+const VSYS_DISPLAY_END: u64 = 3;
+const VSYS_TEXT: u64 = 4;
+const VSYS_TEXT_END: u64 = 5;
+const VSYS_FIRST_TARGET: u64 = 6;
+const VSYS_TARGETS: u64 = 7;
 const VT: u64 = 5;
+const VT_DISPLAY: u64 = 1;
+const VT_DISPLAY_END: u64 = 2;
+const VT_TEXT: u64 = 3;
+const VT_TEXT_END: u64 = 4;
 const OBJ: u64 = 6;
+const OBJ_PACKAGE_END: u64 = 1;
+const OBJ_DISPLAY: u64 = 2;
+const OBJ_DISPLAY_END: u64 = 3;
+const OBJ_FIRST_FILE: u64 = 4;
+const OBJ_FILES: u64 = 5;
 const OF: u64 = 3;
+const OF_PATH: u64 = 1;
+const OF_PATH_END: u64 = 2;
+
+// The streams' word: eight little-endian bytes; texts pad to it.
+const WORD: u64 = 8;
+const BYTE_BITS: u64 = 8;
+const WORD_MASK: u64 = 18446744073709551608;
+
+// `LoadBegin`'s answer when the driver reads the graph.
+const DRIVER_READS: i64 = 1;
+// `VsysNames`' answer for a library that links statically.
+const VSYS_STATIC: i64 = 2;
+// Whether a package has a static `.vsys` library: not asked yet, no, yes.
+const STATIC_UNKNOWN: u64 = 0;
+const STATIC_NO: u64 = 1;
+const STATIC_YES: u64 = 2;
+
+// Path and name bytes.
+const SLASH: u8 = 47;
+const BACKSLASH: u8 = 92;
+const COLON: u8 = 58;
+const DOT: u8 = 46;
+const UNDERSCORE: u8 = 95;
+const LOWER_A: u8 = 97;
+const LOWER_Z: u8 = 122;
+const DIGIT_0: u8 = 48;
+const DIGIT_9: u8 = 57;
+// `.ves`, the extension a module file's last name drops.
+const VES_EXT_LEN: u64 = 4;
+// The name of the compile-time builtin `Loader::package` expands
+// (`packages::INCLUDE_STR`).
+const INCLUDE_STR: Str = "include_str";
 
 fn w(in s: Slice[u64], i: u64) -> u64 {
     match s.try_get(i) {
@@ -228,8 +298,8 @@ fn keep(inout l: Ld, in x: Slice[u8]) -> (u64, u64) {
 // ---------------------------------------------------------- the streams
 
 fn put(inout o: ChunkSeq[u8], v: u64) {
-    for k in 0..8 {
-        o.push(wrapping_u8(wrapping_shr_u64(v, wrapping_u32(wrapping_mul(k, 8)))));
+    for k in 0..WORD {
+        o.push(wrapping_u8(wrapping_shr_u64(v, wrapping_u32(wrapping_mul(k, BYTE_BITS)))));
     }
 }
 
@@ -237,7 +307,7 @@ fn put_str(inout o: ChunkSeq[u8], in x: Slice[u8]) {
     put(inout o, x.len());
     o.extend(in x);
     loop {
-        if o.len() % 8 == 0 {
+        if o.len() % WORD == 0 {
             break;
         }
         o.push(0);
@@ -249,7 +319,7 @@ fn rd(in x: Slice[u8], inout at: u64) -> u64 {
         Option::Some(v) => v,
         Option::None => 0,
     };
-    at = wrapping_add(at, 8);
+    at = wrapping_add(at, WORD);
     v
 }
 
@@ -257,7 +327,7 @@ fn rd(in x: Slice[u8], inout at: u64) -> u64 {
 fn rd_str(in x: Slice[u8], inout at: u64) -> (u64, u64) {
     let len = rd(in x, inout at);
     let s = at;
-    at = wrapping_add(at, wrapping_add(len, 7) & 18446744073709551608);
+    at = wrapping_add(at, wrapping_add(len, wrapping_sub(WORD, 1)) & WORD_MASK);
     (s, wrapping_add(s, len))
 }
 
@@ -364,7 +434,7 @@ fn kind_of(inout l: Ld, in path: Slice[u8]) -> u32 eff [Ffi[StdFs]] {
 // ---------------------------------------------------------- paths
 
 fn is_sep(c: u8, windows: bool) -> bool {
-    c == 47 || (windows && c == 92)
+    c == SLASH || (windows && c == BACKSLASH)
 }
 
 // A normalized path is its components, each followed by a 0 byte. The
@@ -377,7 +447,7 @@ fn is_normal(in c: Slice[u8], windows: bool) -> bool {
     if c.len() == 1 && is_sep(b(in c, 0), windows) {
         return false;
     }
-    !(windows && c.len() == 2 && b(in c, 1) == 58)
+    !(windows && c.len() == 2 && b(in c, 1) == COLON)
 }
 
 // The start of `p`'s last component.
@@ -424,7 +494,7 @@ fn push_path(inout l: Ld, inout p: ChunkSeq[u8], in path: Slice[u8]) {
         l.failed = true;
         return;
     }
-    if windows && path.len() >= 2 && b(in path, 1) == 58 {
+    if windows && path.len() >= 2 && b(in path, 1) == COLON {
         push_comp(inout p, in path[0..2], true);
         i = 2;
     }
@@ -464,7 +534,7 @@ fn display(in p: Slice[u8]) -> ChunkSeq[u8] {
     for i in 0..p.len() {
         if b(in p, i) == 0 {
             if !first {
-                out.push(47);
+                out.push(SLASH);
             }
             out.extend(in p[s..i]);
             first = false;
@@ -478,7 +548,7 @@ fn is_absolute(in path: Slice[u8], windows: bool) -> bool {
     if path.len() != 0 && is_sep(b(in path, 0), windows) {
         return true;
     }
-    windows && path.len() >= 2 && b(in path, 1) == 58
+    windows && path.len() >= 2 && b(in path, 1) == COLON
 }
 
 // A manifest's file path the loader accepts (`Component::Normal` and
@@ -489,7 +559,7 @@ fn plain_relative(in path: Slice[u8], windows: bool) -> bool {
     }
     let mut s: u64 = 0;
     for i in 0..wrapping_add(path.len(), 1) {
-        if i == path.len() || b(in path, i) == 47 {
+        if i == path.len() || b(in path, i) == SLASH {
             if eq(in path[s..i], in "..".as_bytes()) {
                 return false;
             }
@@ -505,10 +575,10 @@ fn plain_key(in path: Slice[u8]) -> ChunkSeq[u8] {
     let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
     let mut s: u64 = 0;
     for i in 0..wrapping_add(path.len(), 1) {
-        if i == path.len() || b(in path, i) == 47 {
+        if i == path.len() || b(in path, i) == SLASH {
             if i > s && !eq(in path[s..i], in ".".as_bytes()) {
                 if out.len() != 0 {
-                    out.push(47);
+                    out.push(SLASH);
                 }
                 out.extend(in path[s..i]);
             }
@@ -523,12 +593,12 @@ fn is_module_segment(in s: Slice[u8]) -> bool {
         return false;
     }
     let c0 = b(in s, 0);
-    if !((c0 >= 97 && c0 <= 122) || c0 == 95) {
+    if !((c0 >= LOWER_A && c0 <= LOWER_Z) || c0 == UNDERSCORE) {
         return false;
     }
     for i in 1..s.len() {
         let c = b(in s, i);
-        if !((c >= 97 && c <= 122) || (c >= 48 && c <= 57) || c == 95) {
+        if !((c >= LOWER_A && c <= LOWER_Z) || (c >= DIGIT_0 && c <= DIGIT_9) || c == UNDERSCORE) {
             return false;
         }
     }
@@ -645,7 +715,7 @@ fn walk(
     for i in 0..entry_count(in e) {
         let name_seq = copy(in names, entry_start(in e, i), entry_end(in e, i));
         let name = name_seq.as_slice();
-        if name.len() == 0 || b(in name, 0) == 46 {
+        if name.len() == 0 || b(in name, 0) == DOT {
             continue;
         }
         let path = join(in dir, in name, l.windows);
@@ -714,16 +784,16 @@ fn package(
     // A cycle is a manifest error.
     for k in 0..l.stack.len() {
         let p = w(in l.stack.as_slice(), k);
-        let cs = w(in l.pkgs.as_slice(), wrapping_add(wrapping_mul(p, PKG), 2));
-        let ce = w(in l.pkgs.as_slice(), wrapping_add(wrapping_mul(p, PKG), 3));
+        let cs = w(in l.pkgs.as_slice(), wrapping_add(wrapping_mul(p, PKG), PKG_CANON));
+        let ce = w(in l.pkgs.as_slice(), wrapping_add(wrapping_mul(p, PKG), PKG_CANON_END));
         if same_text(in l, cs, ce, in canon.as_slice()) {
             l.failed = true;
             return 0;
         }
     }
     for p in 0..np {
-        let cs = w(in l.pkgs.as_slice(), wrapping_add(wrapping_mul(p, PKG), 2));
-        let ce = w(in l.pkgs.as_slice(), wrapping_add(wrapping_mul(p, PKG), 3));
+        let cs = w(in l.pkgs.as_slice(), wrapping_add(wrapping_mul(p, PKG), PKG_CANON));
+        let ce = w(in l.pkgs.as_slice(), wrapping_add(wrapping_mul(p, PKG), PKG_CANON_END));
         if same_text(in l, cs, ce, in canon.as_slice()) {
             return p;
         }
@@ -751,7 +821,7 @@ fn package(
     // A package loaded from two directories is a manifest error.
     for p in 0..np {
         let s0 = w(in l.pkgs.as_slice(), wrapping_mul(p, PKG));
-        let e0 = w(in l.pkgs.as_slice(), wrapping_add(wrapping_mul(p, PKG), 1));
+        let e0 = w(in l.pkgs.as_slice(), wrapping_add(wrapping_mul(p, PKG), PKG_NAME_END));
         if same_text(in l, s0, e0, in name) {
             l.failed = true;
             return 0;
@@ -829,14 +899,14 @@ fn package(
             }
         }
         // The module path: the names, the last without `.ves`.
-        let first_seg = l.segs.len() / 2;
+        let first_seg = l.segs.len() / RANGE;
         let mut nseg: u64 = 0;
         k = 0;
         let mut root = false;
         for i in 0..rel.len() {
             if b(in rel, i) == 0 {
                 let seg_end = if wrapping_add(nseg, 1) == count {
-                    wrapping_sub(i, 4)
+                    wrapping_sub(i, VES_EXT_LEN)
                 } else {
                     i
                 };
@@ -867,7 +937,10 @@ fn package(
         if l.failed {
             return 0;
         }
-        if text.len() > l.max_src {
+        // `include_str` calls are expanded by the Rust loader
+        // (`packages::expand_includes`) until the driver expands them
+        // itself: a source that names it goes back to Rust.
+        if contains(in text.as_slice(), in INCLUDE_STR.as_bytes()) || text.len() > l.max_src {
             l.failed = true;
             return 0;
         }
@@ -879,9 +952,9 @@ fn package(
             0
         } else {
             let last = wrapping_mul(wrapping_sub(nf, 1), FILE);
-            let lb = w(in l.files.as_slice(), wrapping_add(last, 4));
-            let lts = w(in l.files.as_slice(), wrapping_add(last, 2));
-            let lte = w(in l.files.as_slice(), wrapping_add(last, 3));
+            let lb = w(in l.files.as_slice(), wrapping_add(last, FILE_BASE));
+            let lts = w(in l.files.as_slice(), wrapping_add(last, FILE_TEXT));
+            let lte = w(in l.files.as_slice(), wrapping_add(last, FILE_TEXT_END));
             wrapping_add(wrapping_add(lb, wrapping_sub(lte, lts)), 1)
         };
         l.files.push(ds);
@@ -892,7 +965,7 @@ fn package(
         l.mods.push(index);
         l.mods.push(nf);
         l.mods.push(first_seg);
-        l.mods.push(wrapping_sub(l.segs.len() / 2, first_seg));
+        l.mods.push(wrapping_sub(l.segs.len() / RANGE, first_seg));
     }
     if roots > 1 {
         l.failed = true;
@@ -965,13 +1038,13 @@ fn package(
                     pick = k2;
                 }
             }
-            let a = w(in l.vt.as_slice(), wrapping_add(wrapping_mul(pick, VT), 3));
-            let e = w(in l.vt.as_slice(), wrapping_add(wrapping_mul(pick, VT), 4));
+            let a = w(in l.vt.as_slice(), wrapping_add(wrapping_mul(pick, VT), VT_TEXT));
+            let e = w(in l.vt.as_slice(), wrapping_add(wrapping_mul(pick, VT), VT_TEXT_END));
             text = tx(in l, a, e);
             for k2 in first_t..l.vt.len() / VT {
                 let t = w(in l.vt.as_slice(), wrapping_mul(k2, VT));
-                let a2 = w(in l.vt.as_slice(), wrapping_add(wrapping_mul(k2, VT), 3));
-                let e2 = w(in l.vt.as_slice(), wrapping_add(wrapping_mul(k2, VT), 4));
+                let a2 = w(in l.vt.as_slice(), wrapping_add(wrapping_mul(k2, VT), VT_TEXT));
+                let e2 = w(in l.vt.as_slice(), wrapping_add(wrapping_mul(k2, VT), VT_TEXT_END));
                 let tt = tx(in l, a2, e2);
                 let _ = vsys_names(inout s, inout l, t, in tt.as_slice(), index, true);
                 if l.failed {
@@ -1011,8 +1084,8 @@ fn package(
     let nobj = rd(in ms, inout at);
     let mut oseen: ChunkSeq[u8] = ChunkSeq::new[u8]();
     // Whether one of the package's `.vsys` libraries links statically
-    // (0 not computed yet, 1 no, 2 yes).
-    let mut statically: u64 = 0;
+    // (`STATIC_UNKNOWN` until it is needed).
+    let mut statically: u64 = STATIC_UNKNOWN;
     for _k in 0..nobj {
         let (os2, oe2) = rd_str(in ms, inout at);
         let path_seq = copy(in ms, os2, oe2);
@@ -1051,32 +1124,32 @@ fn package(
             l.failed = true;
             return 0;
         }
-        if statically == 0 {
-            statically = 1;
+        if statically == STATIC_UNKNOWN {
+            statically = STATIC_NO;
             for v in 0..l.vsys.len() / VSYS {
                 let at0 = wrapping_mul(v, VSYS);
                 let vp = tx(
                     in l,
                     w(in l.vsys.as_slice(), at0),
-                    w(in l.vsys.as_slice(), wrapping_add(at0, 1))
+                    w(in l.vsys.as_slice(), wrapping_add(at0, VSYS_PACKAGE_END))
                 );
                 if !eq(in vp.as_slice(), in name) {
                     continue;
                 }
-                let ft = w(in l.vsys.as_slice(), wrapping_add(at0, 6));
-                let nt = w(in l.vsys.as_slice(), wrapping_add(at0, 7));
+                let ft = w(in l.vsys.as_slice(), wrapping_add(at0, VSYS_FIRST_TARGET));
+                let nt = w(in l.vsys.as_slice(), wrapping_add(at0, VSYS_TARGETS));
                 let (t, a, e) = if nt == 0 {
                     (
                         0,
-                        w(in l.vsys.as_slice(), wrapping_add(at0, 4)),
-                        w(in l.vsys.as_slice(), wrapping_add(at0, 5))
+                        w(in l.vsys.as_slice(), wrapping_add(at0, VSYS_TEXT)),
+                        w(in l.vsys.as_slice(), wrapping_add(at0, VSYS_TEXT_END))
                     )
                 } else {
                     let k0 = wrapping_mul(ft, VT);
                     (
                         w(in l.vt.as_slice(), k0),
-                        w(in l.vt.as_slice(), wrapping_add(k0, 3)),
-                        w(in l.vt.as_slice(), wrapping_add(k0, 4))
+                        w(in l.vt.as_slice(), wrapping_add(k0, VT_TEXT)),
+                        w(in l.vt.as_slice(), wrapping_add(k0, VT_TEXT_END))
                     )
                 };
                 let vt2 = tx(in l, a, e);
@@ -1084,13 +1157,13 @@ fn package(
                 if l.failed {
                     return 0;
                 }
-                if r == 2 {
-                    statically = 2;
+                if r == VSYS_STATIC {
+                    statically = STATIC_YES;
                     break;
                 }
             }
         }
-        if statically != 2 {
+        if statically != STATIC_YES {
             l.failed = true;
             return 0;
         }
@@ -1154,14 +1227,14 @@ fn package(
             return 0;
         }
         let dn0 = w(in l.pkgs.as_slice(), wrapping_mul(d, PKG));
-        let dn1 = w(in l.pkgs.as_slice(), wrapping_add(wrapping_mul(d, PKG), 1));
+        let dn1 = w(in l.pkgs.as_slice(), wrapping_add(wrapping_mul(d, PKG), PKG_NAME_END));
         if !same_text(in l, dn0, dn1, in dep_name) {
             l.failed = true;
             return 0;
         }
         let mut arg: ChunkSeq[u8] = ChunkSeq::new[u8]();
         put(inout arg, wrapping_sub(wrapping_u64(mi), 1));
-        put(inout arg, w(in l.pkgs.as_slice(), wrapping_add(wrapping_mul(d, PKG), 4)));
+        put(inout arg, w(in l.pkgs.as_slice(), wrapping_add(wrapping_mul(d, PKG), PKG_MANIFEST)));
         put_str(inout arg, in dep_name);
         if HybridDriver::hd_step(inout s, step_version_matches(), in arg.as_slice()) != 1 {
             l.failed = true;
@@ -1208,7 +1281,7 @@ fn object_extension(in path: Slice[u8]) -> bool {
     let mut ne: u64 = 0;
     let mut s: u64 = 0;
     for i in 0..wrapping_add(path.len(), 1) {
-        if i == path.len() || b(in path, i) == 47 {
+        if i == path.len() || b(in path, i) == SLASH {
             if i > s && !eq(in path[s..i], in ".".as_bytes()) {
                 ns = s;
                 ne = i;
@@ -1223,7 +1296,7 @@ fn object_extension(in path: Slice[u8]) -> bool {
     }
     let mut dot = name.len();
     for i in 0..name.len() {
-        if b(in name, i) == 46 {
+        if b(in name, i) == DOT {
             dot = i;
         }
     }
@@ -1252,46 +1325,46 @@ fn assembly_input(in l: Ld) -> ChunkSeq[u8] {
         let at = wrapping_mul(p, PKG);
         put_str(
             inout o,
-            in t[w(in l.pkgs.as_slice(), at)..w(in l.pkgs.as_slice(), wrapping_add(at, 1))]
+            in t[w(in l.pkgs.as_slice(), at)..w(in l.pkgs.as_slice(), wrapping_add(at, PKG_NAME_END))]
         );
         let mut n: u64 = 0;
-        for k in 0..l.deps.len() / 4 {
-            if w(in l.deps.as_slice(), wrapping_mul(k, 4)) == p {
+        for k in 0..l.deps.len() / DEP {
+            if w(in l.deps.as_slice(), wrapping_mul(k, DEP)) == p {
                 n = wrapping_add(n, 1);
             }
         }
         put(inout o, n);
-        for k in 0..l.deps.len() / 4 {
-            let a = wrapping_mul(k, 4);
+        for k in 0..l.deps.len() / DEP {
+            let a = wrapping_mul(k, DEP);
             if w(in l.deps.as_slice(), a) == p {
                 put_str(
                     inout o,
                     in t[
-                        w(in l.deps.as_slice(), wrapping_add(a, 1))..w(
+                        w(in l.deps.as_slice(), wrapping_add(a, DEP_NAME))..w(
                             in l.deps.as_slice(),
-                            wrapping_add(a, 2)
+                            wrapping_add(a, NAMED_END)
                         )
                     ]
                 );
-                put(inout o, w(in l.deps.as_slice(), wrapping_add(a, 3)));
+                put(inout o, w(in l.deps.as_slice(), wrapping_add(a, DEP_INDEX)));
             }
         }
         n = 0;
-        for k in 0..l.opts.len() / 3 {
-            if w(in l.opts.as_slice(), wrapping_mul(k, 3)) == p {
+        for k in 0..l.opts.len() / NAMED {
+            if w(in l.opts.as_slice(), wrapping_mul(k, NAMED)) == p {
                 n = wrapping_add(n, 1);
             }
         }
         put(inout o, n);
-        for k in 0..l.opts.len() / 3 {
-            let a = wrapping_mul(k, 3);
+        for k in 0..l.opts.len() / NAMED {
+            let a = wrapping_mul(k, NAMED);
             if w(in l.opts.as_slice(), a) == p {
                 put_str(
                     inout o,
                     in t[
-                        w(in l.opts.as_slice(), wrapping_add(a, 1))..w(
+                        w(in l.opts.as_slice(), wrapping_add(a, NAMED_START))..w(
                             in l.opts.as_slice(),
-                            wrapping_add(a, 2)
+                            wrapping_add(a, NAMED_END)
                         )
                     ]
                 );
@@ -1304,38 +1377,38 @@ fn assembly_input(in l: Ld) -> ChunkSeq[u8] {
         let a = wrapping_mul(f, FILE);
         put_str(
             inout o,
-            in t[w(in l.files.as_slice(), a)..w(in l.files.as_slice(), wrapping_add(a, 1))]
+            in t[w(in l.files.as_slice(), a)..w(in l.files.as_slice(), wrapping_add(a, FILE_DISPLAY_END))]
         );
-        put(inout o, w(in l.files.as_slice(), wrapping_add(a, 4)));
+        put(inout o, w(in l.files.as_slice(), wrapping_add(a, FILE_BASE)));
     }
     let nm = l.mods.len() / MODULE;
     put(inout o, nm);
     for m in 0..nm {
         let a = wrapping_mul(m, MODULE);
         put(inout o, w(in l.mods.as_slice(), a));
-        let first = w(in l.mods.as_slice(), wrapping_add(a, 2));
-        let n = w(in l.mods.as_slice(), wrapping_add(a, 3));
+        let first = w(in l.mods.as_slice(), wrapping_add(a, MOD_FIRST_SEG));
+        let n = w(in l.mods.as_slice(), wrapping_add(a, MOD_SEGS));
         put(inout o, n);
         for k in first..wrapping_add(first, n) {
             put_str(
                 inout o,
                 in t[
-                    w(in l.segs.as_slice(), wrapping_mul(k, 2))..w(
+                    w(in l.segs.as_slice(), wrapping_mul(k, RANGE))..w(
                         in l.segs.as_slice(),
-                        wrapping_add(wrapping_mul(k, 2), 1)
+                        wrapping_add(wrapping_mul(k, RANGE), 1)
                     )
                 ]
             );
         }
-        let file = w(in l.mods.as_slice(), wrapping_add(a, 1));
+        let file = w(in l.mods.as_slice(), wrapping_add(a, MOD_FILE));
         put(inout o, file);
         let fa = wrapping_mul(file, FILE);
         put_str(
             inout o,
             in t[
-                w(in l.files.as_slice(), wrapping_add(fa, 2))..w(
+                w(in l.files.as_slice(), wrapping_add(fa, FILE_TEXT))..w(
                     in l.files.as_slice(),
-                    wrapping_add(fa, 3)
+                    wrapping_add(fa, FILE_TEXT_END)
                 )
             ]
         );
@@ -1345,13 +1418,13 @@ fn assembly_input(in l: Ld) -> ChunkSeq[u8] {
     let mut rows: ChunkSeq[u64] = ChunkSeq::new[u64]();
     for p in 0..np {
         let first = rows.len();
-        for k in 0..l.foreign.len() / 3 {
-            let a = wrapping_mul(k, 3);
+        for k in 0..l.foreign.len() / NAMED {
+            let a = wrapping_mul(k, NAMED);
             if w(in l.foreign.as_slice(), a) != p {
                 continue;
             }
-            let s = w(in l.foreign.as_slice(), wrapping_add(a, 1));
-            let e = w(in l.foreign.as_slice(), wrapping_add(a, 2));
+            let s = w(in l.foreign.as_slice(), wrapping_add(a, NAMED_START));
+            let e = w(in l.foreign.as_slice(), wrapping_add(a, NAMED_END));
             // Insert in order, once.
             let mut i = first;
             let mut dup = false;
@@ -1359,8 +1432,8 @@ fn assembly_input(in l: Ld) -> ChunkSeq[u8] {
                 if i >= rows.len() {
                     break;
                 }
-                let rs = w(in rows.as_slice(), wrapping_add(i, 1));
-                let re = w(in rows.as_slice(), wrapping_add(i, 2));
+                let rs = w(in rows.as_slice(), wrapping_add(i, NAMED_START));
+                let re = w(in rows.as_slice(), wrapping_add(i, NAMED_END));
                 if eq(in t[rs..re], in t[s..e]) {
                     dup = true;
                     break;
@@ -1368,7 +1441,7 @@ fn assembly_input(in l: Ld) -> ChunkSeq[u8] {
                 if less(in t[s..e], in t[rs..re]) {
                     break;
                 }
-                i = wrapping_add(i, 3);
+                i = wrapping_add(i, NAMED);
             }
             if dup {
                 continue;
@@ -1376,30 +1449,30 @@ fn assembly_input(in l: Ld) -> ChunkSeq[u8] {
             rows.push(0);
             rows.push(0);
             rows.push(0);
-            let mut j = wrapping_sub(rows.len(), 3);
+            let mut j = wrapping_sub(rows.len(), NAMED);
             loop {
                 if j <= i {
                     break;
                 }
-                for c in 0..3 {
-                    let v = w(in rows.as_slice(), wrapping_add(wrapping_sub(j, 3), c));
+                for c in 0..NAMED {
+                    let v = w(in rows.as_slice(), wrapping_add(wrapping_sub(j, NAMED), c));
                     let _ = rows.try_set(wrapping_add(j, c), v);
                 }
-                j = wrapping_sub(j, 3);
+                j = wrapping_sub(j, NAMED);
             }
             let _ = rows.try_set(i, p);
-            let _ = rows.try_set(wrapping_add(i, 1), s);
-            let _ = rows.try_set(wrapping_add(i, 2), e);
+            let _ = rows.try_set(wrapping_add(i, NAMED_START), s);
+            let _ = rows.try_set(wrapping_add(i, NAMED_END), e);
         }
     }
-    put(inout o, rows.len() / 3);
-    for k in 0..rows.len() / 3 {
-        let a = wrapping_mul(k, 3);
+    put(inout o, rows.len() / NAMED);
+    for k in 0..rows.len() / NAMED {
+        let a = wrapping_mul(k, NAMED);
         put(inout o, w(in rows.as_slice(), a));
         put_str(
             inout o,
             in t[
-                w(in rows.as_slice(), wrapping_add(a, 1))..w(in rows.as_slice(), wrapping_add(a, 2))
+                w(in rows.as_slice(), wrapping_add(a, NAMED_START))..w(in rows.as_slice(), wrapping_add(a, NAMED_END))
             ]
         );
     }
@@ -1421,18 +1494,18 @@ fn graph_arg(in l: Ld, in input: Slice[u8]) -> ChunkSeq[u8] {
     for v in 0..nv {
         let a = wrapping_mul(v, VSYS);
         let r = l.vsys.as_slice();
-        put_str(inout o, in t[w(in r, a)..w(in r, wrapping_add(a, 1))]);
-        put_str(inout o, in t[w(in r, wrapping_add(a, 2))..w(in r, wrapping_add(a, 3))]);
-        put_str(inout o, in t[w(in r, wrapping_add(a, 4))..w(in r, wrapping_add(a, 5))]);
-        let first = w(in r, wrapping_add(a, 6));
-        let n = w(in r, wrapping_add(a, 7));
+        put_str(inout o, in t[w(in r, a)..w(in r, wrapping_add(a, VSYS_PACKAGE_END))]);
+        put_str(inout o, in t[w(in r, wrapping_add(a, VSYS_DISPLAY))..w(in r, wrapping_add(a, VSYS_DISPLAY_END))]);
+        put_str(inout o, in t[w(in r, wrapping_add(a, VSYS_TEXT))..w(in r, wrapping_add(a, VSYS_TEXT_END))]);
+        let first = w(in r, wrapping_add(a, VSYS_FIRST_TARGET));
+        let n = w(in r, wrapping_add(a, VSYS_TARGETS));
         put(inout o, n);
         for k in first..wrapping_add(first, n) {
             let c = wrapping_mul(k, VT);
             let q = l.vt.as_slice();
             put(inout o, w(in q, c));
-            put_str(inout o, in t[w(in q, wrapping_add(c, 1))..w(in q, wrapping_add(c, 2))]);
-            put_str(inout o, in t[w(in q, wrapping_add(c, 3))..w(in q, wrapping_add(c, 4))]);
+            put_str(inout o, in t[w(in q, wrapping_add(c, VT_DISPLAY))..w(in q, wrapping_add(c, VT_DISPLAY_END))]);
+            put_str(inout o, in t[w(in q, wrapping_add(c, VT_TEXT))..w(in q, wrapping_add(c, VT_TEXT_END))]);
         }
     }
     let no = l.objs.len() / OBJ;
@@ -1440,16 +1513,16 @@ fn graph_arg(in l: Ld, in input: Slice[u8]) -> ChunkSeq[u8] {
     for k in 0..no {
         let a = wrapping_mul(k, OBJ);
         let r = l.objs.as_slice();
-        put_str(inout o, in t[w(in r, a)..w(in r, wrapping_add(a, 1))]);
-        put_str(inout o, in t[w(in r, wrapping_add(a, 2))..w(in r, wrapping_add(a, 3))]);
-        let first = w(in r, wrapping_add(a, 4));
-        let n = w(in r, wrapping_add(a, 5));
+        put_str(inout o, in t[w(in r, a)..w(in r, wrapping_add(a, OBJ_PACKAGE_END))]);
+        put_str(inout o, in t[w(in r, wrapping_add(a, OBJ_DISPLAY))..w(in r, wrapping_add(a, OBJ_DISPLAY_END))]);
+        let first = w(in r, wrapping_add(a, OBJ_FIRST_FILE));
+        let n = w(in r, wrapping_add(a, OBJ_FILES));
         put(inout o, n);
         for f in first..wrapping_add(first, n) {
             let c = wrapping_mul(f, OF);
             let q = l.of.as_slice();
             put(inout o, w(in q, c));
-            put_str(inout o, in t[w(in q, wrapping_add(c, 1))..w(in q, wrapping_add(c, 2))]);
+            put_str(inout o, in t[w(in q, wrapping_add(c, OF_PATH))..w(in q, wrapping_add(c, OF_PATH_END))]);
         }
     }
     o
@@ -1467,7 +1540,7 @@ pub fn read_graph(
     in input: Slice[u8],
     windows: bool
 ) -> Option[ChunkSeq[u8]] eff [Ffi[StdFs], Ffi[HybridDriver]] {
-    if HybridDriver::hd_step(inout s, step_load_begin(), in "".as_bytes()) != 1 {
+    if HybridDriver::hd_step(inout s, step_load_begin(), in "".as_bytes()) != DRIVER_READS {
         return Option::None;
     }
     let begin = host_text(in s);
