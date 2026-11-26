@@ -1,7 +1,7 @@
 use self::x86_64::{
     ADD_RM_R64, ALU_ADD_EXTENSION, ALU_AND_EXTENSION, ALU_OR_EXTENSION, ALU_SUB_EXTENSION,
     ALU_XOR_EXTENSION, AND_RM_R64, ARGUMENTS, BYTE_BITS, DWORD_BITS, QWORD_BITS, WORD_BITS, CC_A,
-    CC_AE, CC_B, CC_BE, CC_E, CC_G, CC_GE, CC_L, CC_LE, CC_NE, FixedArithmetic, Instruction,
+    CC_AE, CC_B, CC_BE, CC_E, CC_G, CC_GE, CC_L, CC_LE, CC_NE, CC_O, FixedArithmetic, Instruction,
     NEG_EXTENSION, NOT_EXTENSION, OR_RM_R64, R10, R11, RAX, RDX, RSP, SAR_EXTENSION, SHL_EXTENSION,
     SHR_EXTENSION, SUB_RM_R64, UNASSIGNED, XOR_RM_R64, REGISTER_CODES, arg_register, emit,
     emit_direct_call, emit_symbol_address, find_register, fits_signed_byte, patch_forward_branch,
@@ -77,6 +77,13 @@ const JUMP_LABEL: u64 = 64;
 const BRANCH_LABEL: u64 = 65;
 const BLOCK_RETURN: u64 = 66;
 const BRANCH_BLOCK: u64 = 67;
+const UNSIGNED_ADD_OVERFLOW: u64 = 68;
+const SIGNED_ADD_OVERFLOW: u64 = 69;
+const UNSIGNED_SUB_OVERFLOW: u64 = 70;
+const SIGNED_SUB_OVERFLOW: u64 = 71;
+const UNSIGNED_MUL_OVERFLOW: u64 = 72;
+const SIGNED_MUL_OVERFLOW: u64 = 73;
+const OVERFLOW_FLAG: u64 = 74;
 
 // Relocation kinds shared with src/native_machine.rs.
 const PLT_CALL: u64 = 0;
@@ -337,7 +344,7 @@ fn has_no_result(op: u64) -> bool {
         || op == CALL_ARGUMENT
         || op == CALL_VOID
         || op == TRAP
-        || op >= BLOCK_LABEL
+        || (op >= BLOCK_LABEL && op <= BRANCH_BLOCK)
 }
 
 fn is_call(op: u64) -> bool {
@@ -345,7 +352,9 @@ fn is_call(op: u64) -> bool {
 }
 
 fn is_fixed_arithmetic(op: u64) -> bool {
-    op >= SIGNED_DIV && op <= UNSIGNED_MUL_HIGH
+    (op >= SIGNED_DIV && op <= UNSIGNED_MUL_HIGH)
+        || op == UNSIGNED_MUL_OVERFLOW
+        || op == SIGNED_MUL_OVERFLOW
 }
 
 fn is_integer_division(op: u64) -> bool {
@@ -353,10 +362,30 @@ fn is_integer_division(op: u64) -> bool {
 }
 
 fn fixed_result(op: u64) -> u8 {
-    if op == SIGNED_DIV || op == UNSIGNED_DIV {
+    if op == SIGNED_DIV
+        || op == UNSIGNED_DIV
+        || op == UNSIGNED_MUL_OVERFLOW
+        || op == SIGNED_MUL_OVERFLOW
+    {
         RAX
     } else {
         RDX
+    }
+}
+
+fn is_checked_arithmetic(op: u64) -> bool {
+    op >= UNSIGNED_ADD_OVERFLOW && op <= SIGNED_MUL_OVERFLOW
+}
+
+fn live_overflow_flag(in reads: ChunkSeq[u64], value: u64, op: u64) -> bool {
+    is_checked_arithmetic(op) && last_read(in reads, wrapping_add(value, 1)) != NEVER_READ
+}
+
+fn overflow_condition(op: u64) -> u8 {
+    if op == SIGNED_ADD_OVERFLOW || op == SIGNED_SUB_OVERFLOW || op == SIGNED_MUL_OVERFLOW {
+        CC_O
+    } else {
+        CC_B
     }
 }
 
@@ -410,6 +439,7 @@ fn reads_left(in record: Record) -> bool {
         && !is_symbol(op)
         && op != CALL_ARGUMENT
         && op != CALL_HIGH
+        && op != OVERFLOW_FLAG
         && op != TRAP
         && op != BLOCK_LABEL
         && op != EDGE_LABEL
@@ -424,6 +454,7 @@ fn reads_right(in record: Record, paired: bool) -> bool {
         || op == SELECT
         || is_register_shift(op)
         || is_fixed_arithmetic(op)
+        || is_checked_arithmetic(op)
         || is_store(op)
         || (is_branch_return(op) && paired && record.left != TRAP_VALUE)
 }
@@ -501,7 +532,7 @@ fn valid_block_layout(in words: Slice[u64], start: u64, count: u64, returns: u64
 
 // A shift must keep its count until the destructive instruction reads it.
 fn can_reuse_right(op: u64) -> bool {
-    op != SUB && !is_register_shift(op)
+    op != SUB && op != SIGNED_SUB_OVERFLOW && op != UNSIGNED_SUB_OVERFLOW && !is_register_shift(op)
 }
 
 fn condition_code(condition: u64) -> u8 {
@@ -523,7 +554,7 @@ fn is_conditional_branch(op: u64) -> bool {
     op == BRANCH_ZERO || op == BRANCH_LABEL || op == BRANCH_BLOCK
 }
 
-fn comparison_feeds_branch(in reads: ChunkSeq[u64], value: u64, in branch: Record) -> bool {
+fn flags_feed_branch(in reads: ChunkSeq[u64], value: u64, in branch: Record) -> bool {
     is_conditional_branch(branch.op)
         && branch.left == value
         && last_read(in reads, value) == wrapping_add(value, 1)
@@ -563,8 +594,8 @@ fn find_last_reads(
         let index = wrapping_sub(wrapping_sub(count, 1), reverse_index);
         let value = wrapping_add(arguments, index);
         let record = read_record(in words, index);
-        if record.op > BRANCH_BLOCK
-            || (!labeled && record.op >= BLOCK_LABEL)
+        if record.op > OVERFLOW_FLAG
+            || (!labeled && record.op >= BLOCK_LABEL && record.op <= BRANCH_BLOCK)
             || (record.op == STACK_SLOT && index >= frame.slots.len())
             || (record.op == RETURN_PAIR && (reverse_index != 0 || record.left >= value))
             || (record.op == TRAP && (reverse_index != 0 || result != NO_VALUE))
@@ -572,6 +603,7 @@ fn find_last_reads(
             return Option::None;
         }
         let last = last_read(in reads, value);
+        let live = last != NEVER_READ || live_overflow_flag(in reads, value, record.op);
         if labeled {
             if record.op == BLOCK_LABEL {
                 entry_end = block_end;
@@ -581,11 +613,25 @@ fn find_last_reads(
                 return Option::None;
             }
         }
-        if is_fixed_arithmetic(record.op) {
+        if is_fixed_arithmetic(record.op) || is_checked_arithmetic(record.op) {
             if record.extra != DWORD_BITS && record.extra != QWORD_BITS {
                 return Option::None;
             }
-            frame.fixed = frame.fixed || last != NEVER_READ || is_integer_division(record.op);
+            if is_fixed_arithmetic(record.op) {
+                frame.fixed = frame.fixed || live || is_integer_division(record.op);
+            }
+        }
+        if is_checked_arithmetic(record.op)
+            && (wrapping_add(index, 1) == count
+                || read_record(in words, wrapping_add(index, 1)).op != OVERFLOW_FLAG)
+        {
+            return Option::None;
+        }
+        if record.op == OVERFLOW_FLAG
+            && (index == 0
+                || !is_checked_arithmetic(read_record(in words, wrapping_sub(index, 1)).op))
+        {
+            return Option::None;
         }
         if is_symbol(record.op) && (!allow_relocations || record.left > DISP32_MASK) {
             return Option::None;
@@ -726,7 +772,7 @@ fn find_last_reads(
         {
             return Option::None;
         }
-        if last != NEVER_READ
+        if live
             || record.op == LOAD
             || record.op == STACK_LOAD
             || is_integer_division(record.op)
@@ -836,7 +882,10 @@ fn allocate(
         let value = wrapping_add(arguments, index);
         let record = read_record(in words, index);
         let result_live = last_read(in reads, value) != NEVER_READ;
-        if !emits_instruction(record.op, result_live) {
+        if !emits_instruction(
+            record.op,
+            result_live || live_overflow_flag(in reads, value, record.op)
+        ) {
             locations.push(Location::Absent);
             continue;
         }
@@ -1006,8 +1055,12 @@ fn operation(in record: Record, destination: u8, source: u8) -> Instruction {
     let width = record.extra;
     let count = wrapping_u8(record.right & wrapping_sub(width, 1));
     match record.op {
-        ADD => Instruction::Binary(ADD_RM_R64, destination, source, width),
-        SUB => Instruction::Binary(SUB_RM_R64, destination, source, width),
+        ADD
+            | UNSIGNED_ADD_OVERFLOW
+            | SIGNED_ADD_OVERFLOW => Instruction::Binary(ADD_RM_R64, destination, source, width),
+        SUB
+            | UNSIGNED_SUB_OVERFLOW
+            | SIGNED_SUB_OVERFLOW => Instruction::Binary(SUB_RM_R64, destination, source, width),
         MUL => Instruction::Multiply(destination, source, width),
         AND => Instruction::Binary(AND_RM_R64, destination, source, width),
         OR => Instruction::Binary(OR_RM_R64, destination, source, width),
@@ -1200,7 +1253,7 @@ fn emit_fixed_arithmetic(
         UNSIGNED_DIV => FixedArithmetic::UnsignedDivide,
         SIGNED_REM => FixedArithmetic::SignedRemainder,
         UNSIGNED_REM => FixedArithmetic::UnsignedRemainder,
-        SIGNED_MUL_HIGH => FixedArithmetic::SignedMultiplyHigh,
+        SIGNED_MUL_HIGH | SIGNED_MUL_OVERFLOW => FixedArithmetic::SignedMultiplyHigh,
         _ => FixedArithmetic::UnsignedMultiplyHigh,
     };
     emit(inout out, in Instruction::Fixed(op, rhs, record.extra));
@@ -1368,7 +1421,12 @@ pub fn encode_block(
         let value = wrapping_add(arguments, index);
         let record = read_record(in words, index);
         let result_live = last_read(in reads, value) != NEVER_READ;
-        if record.op == CALL_HIGH || !emits_instruction(record.op, result_live) {
+        if record.op == CALL_HIGH
+            || !emits_instruction(
+                record.op,
+                result_live || live_overflow_flag(in reads, value, record.op)
+            )
+        {
             continue;
         }
         if record.op == BLOCK_LABEL || record.op == EDGE_LABEL {
@@ -1394,17 +1452,19 @@ pub fn encode_block(
             fixups.push(Fixup { target: record.left, end: output.len(), block: true });
             continue;
         }
-        if is_comparison(record.op) && wrapping_add(index, 1) < count {
+        if (is_comparison(record.op) || record.op == OVERFLOW_FLAG)
+            && wrapping_add(index, 1) < count
+        {
             let next = read_record(in words, wrapping_add(index, 1));
-            if comparison_feeds_branch(in reads, value, in next) {
+            if flags_feed_branch(in reads, value, in next) {
                 continue;
             }
         }
         if is_conditional_branch(record.op) {
             let comparison = if index != 0 {
                 let previous = read_record(in words, wrapping_sub(index, 1));
-                if is_comparison(previous.op)
-                    && comparison_feeds_branch(in reads, wrapping_sub(value, 1), in record)
+                if (is_comparison(previous.op) || previous.op == OVERFLOW_FLAG)
+                    && flags_feed_branch(in reads, wrapping_sub(value, 1), in record)
                 {
                     Option::Some(previous)
                 } else {
@@ -1415,22 +1475,30 @@ pub fn encode_block(
             };
             let instruction = match comparison {
                 Option::Some(compare) => {
-                    // The branch skips the true arm when the comparison is false.
-                    let cc = condition_code(compare.extra) ^ INVERT_CONDITION;
-                    let width = comparison_width(compare.op);
-                    let home = assigned(in allocation.locations, compare.left);
-                    let lhs = materialize(inout output, in home, LEFT_SCRATCH);
-                    if is_immediate_comparison(compare.op) {
-                        Instruction::BranchCompareImmediate(
-                            lhs,
-                            wrapping_u32(compare.right),
-                            cc,
-                            width
+                    if compare.op == OVERFLOW_FLAG {
+                        let arithmetic = read_record(in words, wrapping_sub(index, 2));
+                        // Result moves and fixed-register restores preserve the flags.
+                        Instruction::BranchWithFlags(
+                            overflow_condition(arithmetic.op) ^ INVERT_CONDITION
                         )
                     } else {
-                        let home = assigned(in allocation.locations, compare.right);
-                        let rhs = materialize(inout output, in home, RIGHT_SCRATCH);
-                        Instruction::BranchCompare(lhs, rhs, cc, width)
+                        // The branch skips the true arm when the comparison is false.
+                        let cc = condition_code(compare.extra) ^ INVERT_CONDITION;
+                        let width = comparison_width(compare.op);
+                        let home = assigned(in allocation.locations, compare.left);
+                        let lhs = materialize(inout output, in home, LEFT_SCRATCH);
+                        if is_immediate_comparison(compare.op) {
+                            Instruction::BranchCompareImmediate(
+                                lhs,
+                                wrapping_u32(compare.right),
+                                cc,
+                                width
+                            )
+                        } else {
+                            let home = assigned(in allocation.locations, compare.right);
+                            let rhs = materialize(inout output, in home, RIGHT_SCRATCH);
+                            Instruction::BranchCompare(lhs, rhs, cc, width)
+                        }
                     }
                 },
                 Option::None => {
@@ -1615,6 +1683,12 @@ pub fn encode_block(
                 Instruction::Compare(destination, left, right, cc, width)
             };
             emit(inout output, in instruction);
+        } else if record.op == OVERFLOW_FLAG {
+            let arithmetic = read_record(in words, wrapping_sub(index, 1));
+            emit(
+                inout output,
+                in Instruction::SetCondition(destination, overflow_condition(arithmetic.op))
+            );
         } else if is_immediate_arithmetic(record.op) {
             emit_immediate_arithmetic(inout output, in record, destination, left);
         } else if record.op == TRUNCATE {

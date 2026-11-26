@@ -84,6 +84,13 @@ enum IntegerOp {
     BranchLabel = 65,
     BlockReturn = 66,
     BranchBlock = 67,
+    UnsignedAddOverflow = 68,
+    SignedAddOverflow = 69,
+    UnsignedSubOverflow = 70,
+    SignedSubOverflow = 71,
+    UnsignedMulOverflow = 72,
+    SignedMulOverflow = 73,
+    OverflowFlag = 74,
 }
 
 type Encoder = fn(&[u64]) -> Option<Vec<u8>>;
@@ -129,6 +136,18 @@ fn binary_op(opcode: Opcode) -> Option<IntegerOp> {
         Opcode::Band | Opcode::BandImm => IntegerOp::And,
         Opcode::Bor | Opcode::BorImm => IntegerOp::Or,
         Opcode::Bxor | Opcode::BxorImm => IntegerOp::Xor,
+        _ => return None,
+    })
+}
+
+fn checked_binary_op(opcode: Opcode) -> Option<IntegerOp> {
+    Some(match opcode {
+        Opcode::UaddOverflow => IntegerOp::UnsignedAddOverflow,
+        Opcode::SaddOverflow => IntegerOp::SignedAddOverflow,
+        Opcode::UsubOverflow => IntegerOp::UnsignedSubOverflow,
+        Opcode::SsubOverflow => IntegerOp::SignedSubOverflow,
+        Opcode::UmulOverflow => IntegerOp::UnsignedMulOverflow,
+        Opcode::SmulOverflow => IntegerOp::SignedMulOverflow,
         _ => return None,
     })
 }
@@ -484,6 +503,28 @@ impl IntegerBlocks<'_> {
             } = function.dfg.insts[inst]
             {
                 self.direct_call(inst, &function.dfg.ext_funcs[func_ref], values)?;
+                continue;
+            }
+            if let InstructionData::Binary {
+                opcode,
+                args: [left, right],
+            } = function.dfg.insts[inst]
+                && let Some(op) = checked_binary_op(opcode)
+            {
+                let [result, overflow] = *function.dfg.inst_results(inst) else {
+                    return None;
+                };
+                let width = ty(left);
+                if !matches!(width, types::I32 | types::I64)
+                    || ty(right) != width
+                    || ty(result) != width
+                    || ty(overflow) != types::I8
+                {
+                    return None;
+                }
+                values[result] =
+                    Some(self.append(op, [input(left)?, input(right)?, u64::from(width.bits())]));
+                values[overflow] = Some(self.append(IntegerOp::OverflowFlag, [0; 3]));
                 continue;
             }
             let [value] = *function.dfg.inst_results(inst) else {
@@ -1009,6 +1050,8 @@ impl IntegerBlocks<'_> {
 /// argument count. Argument records leave unreferenced slots.
 /// CallPair writes its low result and the immediately following CallHigh's
 /// slot holds its high result.
+/// Checked arithmetic writes its integer result, followed by OverflowFlag
+/// for the boolean result of the same instruction.
 /// SymbolRelative and SymbolGot read the data symbol ID from the left operand.
 /// A labeled function starts with BlockLabel after the stack declarations
 /// and returns through BlockReturn records. BranchLabel skips the taken edge

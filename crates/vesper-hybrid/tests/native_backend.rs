@@ -24,6 +24,8 @@ const ABI_ARGS: usize = 6;
 const MACHINE_HEADER_WORDS: usize = 2;
 const MACHINE_RECORD_WORDS: usize = 4;
 const MACHINE_BLOCK_LABEL: u64 = 62;
+const MACHINE_UNSIGNED_ADD_OVERFLOW: u64 = 68;
+const MACHINE_OVERFLOW_FLAG: u64 = 74;
 
 #[derive(Clone, Copy, Debug)]
 enum Case {
@@ -31,6 +33,7 @@ enum Case {
     Argument(usize),
     Binary(Binary),
     MultiplyHigh(Type, bool),
+    CheckedArithmetic(Type, Binary, bool, CheckedUse),
     Chain,
     RepeatedOperands,
     DeadValues,
@@ -74,6 +77,13 @@ enum Binary {
     And,
     Or,
     Xor,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum CheckedUse {
+    Value,
+    ValueAndFlag,
+    FlagBranch,
 }
 
 #[test]
@@ -187,6 +197,20 @@ fn integer_backend_matches_cranelift_results() {
             .chain([types::I32, types::I64].into_iter().flat_map(|width| {
                 [false, true].map(move |signed| Case::MultiplyHigh(width, signed))
             }))
+            .chain([types::I32, types::I64].into_iter().flat_map(|width| {
+                [Binary::Add, Binary::Sub, Binary::Mul]
+                    .into_iter()
+                    .flat_map(move |op| {
+                        [false, true].into_iter().flat_map(move |signed| {
+                            [
+                                CheckedUse::Value,
+                                CheckedUse::ValueAndFlag,
+                                CheckedUse::FlagBranch,
+                            ]
+                            .map(move |usage| Case::CheckedArithmetic(width, op, signed, usage))
+                        })
+                    })
+            }))
             .collect();
     let case_count = cases.len();
     let mut byte_differences = 0;
@@ -241,6 +265,48 @@ fn integer_backend_matches_cranelift_results() {
                 };
                 let sum = builder.ins().iadd(high, preserved);
                 builder.ins().bxor(sum, c)
+            }
+            Case::CheckedArithmetic(width, op, signed, usage) => {
+                let (lhs, rhs) = if width == types::I64 {
+                    (a, b)
+                } else {
+                    (
+                        builder.ins().ireduce(width, a),
+                        builder.ins().ireduce(width, b),
+                    )
+                };
+                let (value, flag) = match (op, signed) {
+                    (Binary::Add, false) => builder.ins().uadd_overflow(lhs, rhs),
+                    (Binary::Add, true) => builder.ins().sadd_overflow(lhs, rhs),
+                    (Binary::Sub, false) => builder.ins().usub_overflow(lhs, rhs),
+                    (Binary::Sub, true) => builder.ins().ssub_overflow(lhs, rhs),
+                    (Binary::Mul, false) => builder.ins().umul_overflow(lhs, rhs),
+                    (Binary::Mul, true) => builder.ins().smul_overflow(lhs, rhs),
+                    _ => unreachable!(),
+                };
+                if matches!(usage, CheckedUse::FlagBranch) {
+                    let yes = builder.create_block();
+                    let no = builder.create_block();
+                    builder.ins().brif(flag, yes, &[], no, &[]);
+                    builder.switch_to_block(yes);
+                    builder.ins().return_(&[d]);
+                    builder.switch_to_block(no);
+                    c
+                } else {
+                    let value = if width == types::I64 {
+                        value
+                    } else {
+                        builder.ins().uextend(types::I64, value)
+                    };
+                    let value = if matches!(usage, CheckedUse::ValueAndFlag) {
+                        let flag = builder.ins().uextend(types::I64, flag);
+                        builder.ins().bxor(value, flag)
+                    } else {
+                        value
+                    };
+                    // Keep the input in RDX live across hardware multiplication.
+                    builder.ins().iadd(value, c)
+                }
             }
             Case::Chain => {
                 let left = builder.ins().iadd_imm(a, i64::MIN);
@@ -787,6 +853,12 @@ fn integer_backend_matches_cranelift_results() {
             [0x8000, 0x7fff, 0, 0, 0, 0],
             [0x8000_0000, 0x7fff_ffff, 0, 65, 33, 0],
             [u64::MAX, 0, 0, 32, 65, 0],
+            [i64::MAX as u64, 2, 13, 17, 3, 5],
+            [i64::MIN as u64, u64::MAX, 13, 17, 3, 5],
+            [i64::MIN as u64, 2, 13, 17, 3, 5],
+            [u64::from(u32::MAX), 2, 13, 17, 3, 5],
+            [i32::MAX as u64, 2, 13, 17, 3, 5],
+            [1 << 31, 2, 13, 17, 3, 5],
         ];
         let middle = memory[256..].as_ptr() as u64;
         let odd = memory[257..].as_ptr() as u64;
@@ -829,7 +901,7 @@ fn labeled_blocks_reject_unknown_jumps_and_register_values_from_other_blocks() {
 }
 
 #[test]
-fn adjacent_branch_only_comparisons_use_flags_directly() {
+fn adjacent_branch_only_conditions_use_flags_directly() {
     // The first comparison is used only by the branch.
     let mut words = [2, 1, 12, 0, 1, 0, 28, 2, 0, 0, 29, 0, 0, 3];
     let setcc = |bytes: &[u8]| {
@@ -845,6 +917,38 @@ fn adjacent_branch_only_comparisons_use_flags_directly() {
     words[1] = 2;
     let also_returned = binding::x86_64_integer_block(&words);
     assert!(setcc(&also_returned));
+
+    const MACHINE_BRANCH_ZERO: u64 = 28;
+    const MACHINE_EARLY_RETURN: u64 = 29;
+    const QWORD_BITS: u64 = u64::BITS as u64;
+    let overflow = [
+        2,
+        1,
+        MACHINE_UNSIGNED_ADD_OVERFLOW,
+        0,
+        1,
+        QWORD_BITS,
+        MACHINE_OVERFLOW_FLAG,
+        0,
+        0,
+        0,
+        MACHINE_BRANCH_ZERO,
+        3,
+        0,
+        0,
+        MACHINE_EARLY_RETURN,
+        0,
+        0,
+        4,
+    ];
+    let only_branch = binding::x86_64_integer_block(&overflow);
+    assert!(!only_branch.is_empty());
+    assert!(!setcc(&only_branch));
+    assert!(
+        binding::x86_64_integer_block(&overflow[..MACHINE_HEADER_WORDS + MACHINE_RECORD_WORDS])
+            .is_empty()
+    );
+    assert!(binding::x86_64_integer_block(&[2, 1, MACHINE_OVERFLOW_FLAG, 0, 0, 0]).is_empty());
 }
 
 #[test]

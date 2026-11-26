@@ -108,6 +108,7 @@ pub const SHL_EXTENSION: u8 = 4;
 pub const SHR_EXTENSION: u8 = 5;
 pub const SAR_EXTENSION: u8 = 7;
 
+pub const CC_O: u8 = 0;
 pub const CC_B: u8 = 2;
 pub const CC_AE: u8 = 3;
 pub const CC_E: u8 = 4;
@@ -144,10 +145,12 @@ pub copy enum Instruction {
     Store(u8, u8, u32, u64),
     Compare(u8, u8, u8, u8, u64),
     CompareImmediate(u8, u8, u32, u8, u64),
+    SetCondition(u8, u8),
     Select(u8, u8, u8, u8, u8),
     Truncate(u8, u8, u64),
     SignExtend(u8, u8, u64, u64),
     BranchZero(u8),
+    BranchWithFlags(u8),
     BranchCompare(u8, u8, u8, u64),
     BranchCompareImmediate(u8, u32, u8, u64),
     Jump,
@@ -647,6 +650,7 @@ pub fn emit(inout out: ChunkSeq[u8], in instruction: Instruction) {
             compare_immediate(inout out, source, bits, width);
             set_condition(inout out, destination, cc);
         },
+        Instruction::SetCondition(destination, cc) => set_condition(inout out, destination, cc),
         Instruction::Select(destination, condition, first, alternative, cc) => {
             // Test before copying. The destination may share the condition register.
             binary(inout out, TEST_RM_R64, condition, condition, true);
@@ -675,6 +679,7 @@ pub fn emit(inout out: ChunkSeq[u8], in instruction: Instruction) {
             binary(inout out, TEST_RM_R64, condition, condition, true);
             conditional_jump(inout out, CC_E);
         },
+        Instruction::BranchWithFlags(cc) => conditional_jump(inout out, cc),
         Instruction::BranchCompare(left, right, cc, width) => {
             compare_registers(inout out, left, right, width);
             conditional_jump(inout out, cc);
