@@ -101,11 +101,6 @@ impl FunctionGraph {
         self.fn_blake3.get(name).map(String::as_str)
     }
 
-    /// Returns the direct callees of `name`, if present in the module.
-    pub fn direct_callees(&self, name: &str) -> Option<&BTreeSet<String>> {
-        self.callees.get(name)
-    }
-
     /// Returns the sorted transitive call closure reachable from `name`
     /// (including `name` itself), or `None` if `name` is not in the graph.
     pub fn transitive_callees(&self, name: &str) -> Option<BTreeSet<String>> {

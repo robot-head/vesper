@@ -82,10 +82,7 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::rc::Rc;
-use vesper_ffi::sys::{
-    self, Access, FunctionDescriptor, LibraryDescriptor, LinkMode, ParameterType, PointerAccess,
-    ValueType,
-};
+use vesper_ffi::sys::{self, FunctionDescriptor, LibraryDescriptor, LinkMode, ParameterType};
 
 #[path = "ffi_lowering/buffers.rs"]
 mod buffers;
@@ -1847,83 +1844,6 @@ impl<'a> Rewriter<'a> {
             .or_default()
             .insert(lengths);
         Some(format!("{effect}::{name}"))
-    }
-}
-
-/// Source-facing description of a foreign parameter, for tooling.
-pub fn describe_parameter(p: &ParameterType) -> String {
-    match p {
-        ParameterType::Handle { handle, access } => {
-            format!("{} {}", access.keyword(), handle.name())
-        }
-        ParameterType::Value(v) => describe_value(v),
-        ParameterType::Pinned { element, access } => format!(
-            "{} Pinned[{}]",
-            match access {
-                Access::In => "in",
-                Access::Inout => "inout",
-            },
-            element.name()
-        ),
-        ParameterType::Pointer {
-            pointee,
-            access,
-            nullable,
-        } => {
-            let t = pointee.name().to_owned();
-            let t = if *nullable { format!("Option[{t}]") } else { t };
-            format!(
-                "{} {t}",
-                match access {
-                    PointerAccess::In => "in",
-                    PointerAccess::Out | PointerAccess::Inout => "inout",
-                }
-            )
-        }
-        ParameterType::Slice {
-            element,
-            access,
-            nullable,
-        } => {
-            let t = format!("({}, ...)", element.name());
-            let t = if *nullable { format!("Option[{t}]") } else { t };
-            format!(
-                "{} {t}",
-                match access {
-                    Access::In => "in",
-                    Access::Inout => "inout",
-                }
-            )
-        }
-        ParameterType::CStr => "in Slice[u8]".into(),
-        ParameterType::CWStr => "in Slice[u16]".into(),
-        ParameterType::CStrList => "in Slice[u8] (NUL-ended strings)".into(),
-        ParameterType::Function { callback, retain } => describe_function(callback.name(), *retain),
-    }
-}
-fn describe_function(callback: &str, retain: bool) -> String {
-    format!(
-        "{} fn {callback}",
-        if retain { "retain" } else { "nocapture" }
-    )
-}
-fn describe_value(v: &ValueType) -> String {
-    match v {
-        ValueType::Unit => "Unit".into(),
-        ValueType::Scalar(s) => s.name().into(),
-        ValueType::Float(f) => f.name().into(),
-        ValueType::Bool => "bool".into(),
-        ValueType::Enum(e) => e.name().into(),
-        ValueType::Address { pointee, .. } => format!("Ptr[{}]", pointee.name()),
-        ValueType::Handle {
-            handle,
-            nullable: true,
-        } => format!("Option[{}]", handle.name()),
-        ValueType::Handle { handle, .. } | ValueType::NonNullHandle { handle } => {
-            handle.name().into()
-        }
-        ValueType::CStr => "Option[ChunkSeq[u8]] (a copy of the C string)".into(),
-        ValueType::CWStr => "Option[ChunkSeq[u16]] (a copy of the wide C string)".into(),
     }
 }
 
