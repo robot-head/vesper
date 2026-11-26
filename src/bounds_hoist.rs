@@ -992,7 +992,7 @@ fn counted_plan(
         candidates.insert(i.dest, (access, key));
     }
     // Keep only receivers whose length the loop cannot change.
-    receivers.retain(|_, r| stable(f, &blocks, &r.place.root));
+    receivers.retain(|_, r| stable_place(f, &blocks, &r.place));
     candidates.retain(|_, (_, key)| receivers.contains_key(key));
     if candidates.is_empty() {
         return None;
@@ -1626,42 +1626,6 @@ fn single_binding(f: &FunctionIr, name: &str) -> bool {
     count == 1
 }
 
-/// Whether nothing in `blocks` can change the length of a sequence rooted
-/// at `root`.
-fn stable(f: &FunctionIr, blocks: &BTreeSet<usize>, root: &str) -> bool {
-    if box_drops(f, blocks).any(|p| p.root == root) {
-        return false;
-    }
-    for &b in blocks {
-        for i in &f.blocks[b].instructions {
-            let rooted = |a: &Argument| a.place.as_ref().is_some_and(|p| p.root == root);
-            let ok = match &i.op {
-                Op::Write { place, .. } => place_root(place) != root,
-                Op::Bind { pattern, .. } => !binds(pattern, root),
-                Op::Read { root: r, pass, .. } => r != root || *pass != Pass::Sink,
-                Op::Seq { op, args } => {
-                    let receiver = args.first().is_some_and(rooted) && op.has_receiver();
-                    let others = if op.has_receiver() {
-                        &args[1..]
-                    } else {
-                        &args[..]
-                    };
-                    (!receiver || keeps_length(*op))
-                        && others.iter().all(|a| !rooted(a) || a.pass == Pass::In)
-                }
-                Op::Call { args, .. } | Op::Tiled { args, .. } | Op::Fip { args, .. } => {
-                    args.iter().all(|a| !rooted(a) || a.pass == Pass::In)
-                }
-                _ => true,
-            };
-            if !ok {
-                return false;
-            }
-        }
-    }
-    true
-}
-
 /// The places whose boxes the drop bookkeeping of `blocks` reclaims (a
 /// replaced field, a destructured or dead local). A sequence at or inside
 /// such a place may be freed there, so it is never hoisted.
@@ -1940,12 +1904,12 @@ pub(crate) fn copy_loop(
         guard,
         token: guard_token,
     } = guard;
-    // Fresh blocks, block parameters and tokens for the copy. Instructions
-    // keep their value ids: the native backend keeps each IR value in one
-    // frontend variable, so a fresh id per copied value would add a
-    // loop-carried variable per value to every block of the function. The
-    // two copies are disjoint paths and no loop value is used outside the
-    // loop, so every use still sees the definition of its own copy.
+    // Fresh blocks, block parameters, values and tokens for the copy. Every
+    // value the copy defines gets a fresh id: per-value facts of later
+    // passes and of the native backend (one definition per id) then hold
+    // for each copy, so an outer loop versioned around an inner versioned
+    // loop keeps both copies of the inner loop distinct (#2022: sharing ids
+    // miscompiled the eBPF verifier's state inclusion).
     let base = f.blocks.len();
     let block_map: BTreeMap<usize, usize> = blocks
         .iter()
@@ -1956,7 +1920,12 @@ pub(crate) fn copy_loop(
     let mut token_map: BTreeMap<u32, u32> = BTreeMap::new();
     for &b in blocks {
         let block = &f.blocks[b];
-        let defs: Vec<ValueId> = block.params.clone();
+        let defs: Vec<ValueId> = block
+            .params
+            .iter()
+            .copied()
+            .chain(block.instructions.iter().map(|i| i.dest))
+            .collect();
         let mut tokens = vec![block.entry_token];
         tokens.extend(
             block
@@ -2323,9 +2292,8 @@ pub fn header_hoists(f: &FunctionIr) -> Vec<HeaderHoist> {
             continue;
         }
         // A versioned loop and its fast copy share their preheader (the
-        // guard picks one) and their value ids, so a read's users span both:
-        // the hoisted words, read at the end of the shared preheader, serve
-        // both copies.
+        // guard picks one): the hoisted words, read at the end of the shared
+        // preheader, serve both copies.
         let twin = match f.blocks[*pre].terminator {
             Terminator::Branch { yes, no, .. } if yes == h || no == h => {
                 let other = if yes == h { no } else { yes };

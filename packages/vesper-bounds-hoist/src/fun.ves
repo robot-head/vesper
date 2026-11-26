@@ -2,7 +2,7 @@
 // tests/self_host_bounds_hoist/words.rs, with the graph queries and the
 // per-instruction rules of src/bounds_hoist.rs (`successors`, `reached`,
 // `reached_preds`, `idoms`, `dominates`, `natural_loop`, `binds`,
-// `hoistable`, `keeps_length`, `stable_place`, `stable`, `invariant_local`,
+// `hoistable`, `keeps_length`, `stable_place`, `invariant_local`,
 // `single_binding`, `single_bindings`, `box_drops`, `calls_out`).
 //
 // Names are the input's indices (the encoder interns them). A place is a

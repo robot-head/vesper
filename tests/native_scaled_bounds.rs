@@ -407,3 +407,55 @@ fn run() -> u64 eff [Fail[RuntimeError], Fail[ArithOverflow]] {
     assert_eq!(scaled_guards(&program, "big"), 1);
     differential("scaled_overflow", &source);
 }
+
+#[test]
+fn nested_versioned_copies_define_fresh_values() {
+    // The outer frame loop is versioned (a scaled guard) around an inner
+    // loop that is versioned first, as in the eBPF verifier's
+    // `state_includes`. The fast copy defines every value under a fresh id,
+    // so no value has two definitions: sharing ids let per-value facts of
+    // one copy of the inner loop apply to the other.
+    let source = program(
+        "fn includes(in ows: Slice[u64], in ors: Slice[u64], in crs: Slice[u64]) -> u64 {
+    let nf = gw(in ows, 0);
+    let mut oo: u64 = 0;
+    let mut acc: u64 = 0;
+    for f in 0..nf {
+        let m = wrapping_add(8, wrapping_mul(f, 17));
+        acc = wrapping_add(acc, gw(in ows, wrapping_add(m, 1)));
+        for i in 0..11 {
+            if gw(in ors, wrapping_add(wrapping_add(oo, 1), i)) > gw(in crs, wrapping_add(wrapping_add(oo, 1), i)) {
+                return 5000;
+            }
+        }
+        oo = wrapping_add(oo, 12);
+    }
+    acc
+}
+fn run() -> u64 eff [Fail[RuntimeError], Fail[ArithOverflow]] {
+    let mut ws = words(60);
+    let ok = ws.try_set(0, 3);
+    let lo = words(40);
+    let hi = words(40);
+    let short = words(20);
+    let a = includes(in ws.as_slice(), in lo.as_slice(), in hi.as_slice());
+    let b = includes(in ws.as_slice(), in short.as_slice(), in hi.as_slice());
+    let c = includes(in short.as_slice(), in lo.as_slice(), in lo.as_slice());
+    wrapping_add(a, wrapping_add(b, c))
+}",
+    );
+    let program = hoisted(&source);
+    let f = &program.functions["includes"];
+    assert_eq!(scaled_guards(&program, "includes"), 1);
+    let mut defined = std::collections::BTreeSet::new();
+    for block in &f.blocks {
+        for v in block
+            .params
+            .iter()
+            .chain(block.instructions.iter().map(|i| &i.dest))
+        {
+            assert!(defined.insert(*v), "value {v} is defined twice");
+        }
+    }
+    differential("scaled_nested_copies", &source);
+}
