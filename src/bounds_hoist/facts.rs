@@ -37,6 +37,10 @@ use std::cell::RefCell;
 
 /// The deepest chain of facts and joins one proof follows.
 const MAX_PROOF_DEPTH: usize = 4;
+/// Constant offsets and lengths a wide-access proof considers lie in
+/// `0..SMALL_CONST`, so `offset + width` and `k + 1` cannot overflow
+/// (the port's `SMALL_CONST` in `facts.ves`).
+const SMALL_CONST: i128 = 1 << 62;
 
 /// What a value is, for comparing values across reads.
 #[derive(Clone, Debug, PartialEq)]
@@ -596,7 +600,7 @@ impl<'a> Facts<'a> {
     /// decoder's straight-line reads covers them all (#2203).
     fn wide_fits(&self, t: &Term, bytes: u8, place: &Target, at: usize) -> bool {
         // Constants that fit in a word, as the Vesper port compares them.
-        let small = |n: i128| (0..1 << 62).contains(&n);
+        let small = |n: i128| (0..SMALL_CONST).contains(&n);
         let Term::Const(c) = *t else {
             return false;
         };
