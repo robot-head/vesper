@@ -82,64 +82,61 @@ impl GraphBuilder {
 
     // Freeze the edges into a `Graph`.
     pub fn build(in self) -> Graph {
-        let n = self.n;
-        let fwd = csr(n, in self.src.as_slice(), in self.dst.as_slice());
-        let bwd = csr(n, in self.dst.as_slice(), in self.src.as_slice());
-        let (s_start, s_list) = fwd;
-        let (p_start, p_list) = bwd;
+        let (succ_start, succ) = csr(self.n, in self.src.as_slice(), in self.dst.as_slice());
+        let (pred_start, pred) = csr(self.n, in self.dst.as_slice(), in self.src.as_slice());
         Graph {
-            n: n,
-            succ_start: s_start,
-            succ: s_list,
-            pred_start: p_start,
-            pred: p_list
+            n: self.n,
+            succ_start: succ_start,
+            succ: succ,
+            pred_start: pred_start,
+            pred: pred
         }
     }
 }
 
-// Compressed rows of `to` grouped by `from`, stable in edge order.
+// Compressed sparse rows: `to[e]` grouped by `from[e]`, each row in edge
+// order. The result is the row starts (`n + 1` offsets, so row `v` is
+// `starts[v]..starts[v + 1]`) and the grouped targets.
 fn csr(n: u64, in from: Slice[u32], in to: Slice[u32]) -> (ChunkSeq[u64], ChunkSeq[u32]) {
-    let m = from.len();
-    let mut start: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](wrapping_add(n, 1));
-    start.resize(wrapping_add(n, 1), 0);
-    let mut e: u64 = 0;
-    loop {
-        if e >= m {
-            break;
-        }
-        let a = widen_u64(get32(in from, e, 0));
-        let k = wrapping_add(a, 1);
-        let c = get64(in start.as_slice(), k, 0);
-        start.try_set(k, wrapping_add(c, 1));
-        e = wrapping_add(e, 1);
+    let edge_count = from.len();
+    let mut starts: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](wrapping_add(n, 1));
+    starts.resize(wrapping_add(n, 1), 0);
+    // Count the edges of row `v` into `starts[v + 1]`.
+    for source in from {
+        let slot = wrapping_add(widen_u64(source), 1);
+        let count = get64(in starts.as_slice(), slot, 0);
+        starts.try_set(slot, wrapping_add(count, 1));
     }
-    let mut v: u64 = 0;
-    let mut acc: u64 = 0;
-    loop {
-        if v > n {
-            break;
-        }
-        acc = wrapping_add(acc, get64(in start.as_slice(), v, 0));
-        start.try_set(v, acc);
-        v = wrapping_add(v, 1);
+    // A running sum turns the counts into row starts.
+    let mut total: u64 = 0;
+    for v in 0..=n {
+        total = wrapping_add(total, get64(in starts.as_slice(), v, 0));
+        starts.try_set(v, total);
     }
-    // start[v] is now the end of row v - 1; fill with a moving cursor.
-    let mut cursor: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](n);
-    cursor.extend(in start[0..n]);
-    let mut list: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](m);
-    list.resize(m, 0);
-    e = 0;
-    loop {
-        if e >= m {
-            break;
-        }
-        let a = widen_u64(get32(in from, e, 0));
-        let at = get64(in cursor.as_slice(), a, 0);
-        list.try_set(at, get32(in to, e, 0));
-        cursor.try_set(a, wrapping_add(at, 1));
-        e = wrapping_add(e, 1);
+    // Place each edge at its row's next free slot.
+    let mut next_free: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](n);
+    next_free.extend(in starts[0..n]);
+    let mut targets: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](edge_count);
+    targets.resize(edge_count, 0);
+    for e in 0..edge_count {
+        let row = widen_u64(get32(in from, e, 0));
+        let slot = get64(in next_free.as_slice(), row, 0);
+        targets.try_set(slot, get32(in to, e, 0));
+        next_free.try_set(row, wrapping_add(slot, 1));
     }
-    (start, list)
+    (starts, targets)
+}
+
+// The edge range `lo..hi` of row `v` in `starts`, or `(0, 0)` when `v` is
+// not one of the `n` nodes.
+fn row_range(in starts: Slice[u64], n: u64, v: u32) -> (u64, u64) {
+    let row = widen_u64(v);
+    if row >= n {
+        (0, 0)
+    } else {
+        let lo = get64(in starts, row, 0);
+        (lo, get64(in starts, wrapping_add(row, 1), lo))
+    }
 }
 
 // A frozen directed graph.
@@ -162,81 +159,45 @@ impl Graph {
 
     // The number of edges leaving `v` (0 for a non-node).
     pub fn succ_len(in self, v: u32) -> u64 {
-        let k = widen_u64(v);
-        if k >= self.n {
-            0
-        } else {
-            let a = get64(in self.succ_start.as_slice(), k, 0);
-            let b = get64(in self.succ_start.as_slice(), wrapping_add(k, 1), a);
-            wrapping_sub(b, a)
-        }
+        let (lo, hi) = self.succ_range(v);
+        wrapping_sub(hi, lo)
     }
 
     // The target of the `i`th edge leaving `v`, or `none()`.
     pub fn succ_at(in self, v: u32, i: u64) -> u32 {
-        let k = widen_u64(v);
-        if k >= self.n {
+        let (lo, hi) = self.succ_range(v);
+        if i >= wrapping_sub(hi, lo) {
             none()
         } else {
-            let a = get64(in self.succ_start.as_slice(), k, 0);
-            let b = get64(in self.succ_start.as_slice(), wrapping_add(k, 1), a);
-            if i >= wrapping_sub(b, a) {
-                none()
-            } else {
-                get32(in self.succ.as_slice(), wrapping_add(a, i), none())
-            }
+            self.succ_edge(wrapping_add(lo, i))
         }
     }
 
     // The number of edges entering `v` (0 for a non-node).
     pub fn pred_len(in self, v: u32) -> u64 {
-        let k = widen_u64(v);
-        if k >= self.n {
-            0
-        } else {
-            let a = get64(in self.pred_start.as_slice(), k, 0);
-            let b = get64(in self.pred_start.as_slice(), wrapping_add(k, 1), a);
-            wrapping_sub(b, a)
-        }
+        let (lo, hi) = self.pred_range(v);
+        wrapping_sub(hi, lo)
     }
 
     // The source of the `i`th edge entering `v`, or `none()`.
     pub fn pred_at(in self, v: u32, i: u64) -> u32 {
-        let k = widen_u64(v);
-        if k >= self.n {
+        let (lo, hi) = self.pred_range(v);
+        if i >= wrapping_sub(hi, lo) {
             none()
         } else {
-            let a = get64(in self.pred_start.as_slice(), k, 0);
-            let b = get64(in self.pred_start.as_slice(), wrapping_add(k, 1), a);
-            if i >= wrapping_sub(b, a) {
-                none()
-            } else {
-                get32(in self.pred.as_slice(), wrapping_add(a, i), none())
-            }
+            self.pred_edge(wrapping_add(lo, i))
         }
     }
 
     // The range `lo..hi` of `v`'s successors in edge order, for walking
     // them with `succ_edge` (empty for a non-node).
     pub fn succ_range(in self, v: u32) -> (u64, u64) {
-        let k = widen_u64(v);
-        if k >= self.n {
-            (0, 0)
-        } else {
-            let a = get64(in self.succ_start.as_slice(), k, 0);
-            (a, get64(in self.succ_start.as_slice(), wrapping_add(k, 1), a))
-        }
+        row_range(in self.succ_start.as_slice(), self.n, v)
     }
 
     // The range `lo..hi` of `v`'s predecessors in edge order.
     pub fn pred_range(in self, v: u32) -> (u64, u64) {
-        let k = widen_u64(v);
-        if k >= self.n {
-            (0, 0)
-        } else {
-            let a = get64(in self.pred_start.as_slice(), k, 0);
-            (a, get64(in self.pred_start.as_slice(), wrapping_add(k, 1), a))
-        }
+        row_range(in self.pred_start.as_slice(), self.n, v)
     }
 
     // The target of edge `e` in successor order (see `succ_range`).
@@ -251,22 +212,13 @@ impl Graph {
 
     // Whether the edge `a -> b` exists.
     pub fn has_edge(in self, a: u32, b: u32) -> bool {
-        let k = widen_u64(a);
-        if k >= self.n {
-            false
-        } else {
-            let (lo, end) = self.succ_range(a);
-            let mut e = lo;
-            loop {
-                if e >= end {
-                    break false;
-                }
-                if self.succ_edge(e) == b {
-                    break true;
-                }
-                e = wrapping_add(e, 1);
+        let (lo, hi) = self.succ_range(a);
+        for e in lo..hi {
+            if self.succ_edge(e) == b {
+                return true;
             }
         }
+        false
     }
 }
 
