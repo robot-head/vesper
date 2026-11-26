@@ -20,36 +20,31 @@ fn r_item(in a: Ast, i: u32) -> ItemNode {
 }
 
 fn r_fn(in a: Ast, i: u32) -> FnNode {
-    a
-        .fns
-        .get_or(
-            idx_from_raw[FnNode](i),
-            FnNode {
-                name: none(),
-                fip: false,
-                generics: 0,
-                params: 0,
-                result: none(),
-                effects: none(),
-                body: none(),
-                start: 0,
-                end: 0
-            }
-        )
+    a.fns.get_or(
+        idx_from_raw[FnNode](i),
+        FnNode {
+            name: none(),
+            fip: false,
+            generics: 0,
+            params: 0,
+            result: none(),
+            effects: none(),
+            body: none(),
+            start: 0,
+            end: 0
+        }
+    )
 }
 
 fn r_effect_decl(in a: Ast, i: u32) -> EffectDeclNode {
-    a
-        .effect_decls
-        .get_or(
-            idx_from_raw[EffectDeclNode](i),
-            EffectDeclNode { name: none(), linear: false, generics: 0, ops: 0, start: 0, end: 0 }
-        )
+    a.effect_decls.get_or(
+        idx_from_raw[EffectDeclNode](i),
+        EffectDeclNode { name: none(), linear: false, generics: 0, ops: 0, start: 0, end: 0 }
+    )
 }
 
 fn r_effect(in a: Ast, i: u32) -> EffectNode {
-    a
-        .effect_nodes
+    a.effect_nodes
         .get_or(idx_from_raw[EffectNode](i), EffectNode { label: none(), name: none(), args: 0 })
 }
 
@@ -62,8 +57,7 @@ fn effects_use(in a: Ast, e: u32) -> bool {
     if e == none() {
         return false;
     }
-    let n = a
-        .effects
+    let n = a.effects
         .get_or(idx_from_raw[EffectsNode](e), EffectsNode { instances: 0, tail: none() });
     for i in 0..list_len(in a, n.instances) {
         let x = r_effect(in a, list_at(in a, n.instances, i));
@@ -148,8 +142,7 @@ fn handle_types(in a: Ast, t: u32) -> bool {
 }
 
 fn param_type(in a: Ast, p: u32) -> u32 {
-    a
-        .params
+    a.params
         .get_or(
             idx_from_raw[ParamNode](p),
             ParamNode { name: none(), pass: 0, projections: 0, ty: none(), start: 0, end: 0 }
@@ -217,12 +210,10 @@ fn region_block(in a: Ast, e: u32) -> bool {
     if !is(in a, r_effect(in a, x.a).name, "Region") || list_len(in a, x.e) == 0 {
         return false;
     }
-    let ret = a
-        .clauses
-        .get_or(
-            idx_from_raw[ClauseNode](list_at(in a, x.e, 0)),
-            ClauseNode { name: none(), pats: 0, body: none() }
-        );
+    let ret = a.clauses.get_or(
+        idx_from_raw[ClauseNode](list_at(in a, x.e, 0)),
+        ClauseNode { name: none(), pats: 0, body: none() }
+    );
     if list_len(in a, ret.pats) != 1 {
         return false;
     }
@@ -256,12 +247,10 @@ fn any_expr(mode: u8, in a: Ast, e: u32) -> bool {
         }
     } else if k == 5 && mode == 1 {
         for i in 0..list_len(in a, x.a) {
-            let s = a
-                .stmts
-                .get_or(
-                    idx_from_raw[StmtNode](list_at(in a, x.a, i)),
-                    StmtNode { kind: 0, pat: none(), ty: none(), value: none(), mutable: false }
-                );
+            let s = a.stmts.get_or(
+                idx_from_raw[StmtNode](list_at(in a, x.a, i)),
+                StmtNode { kind: 0, pat: none(), ty: none(), value: none(), mutable: false }
+            );
             if s.kind == 1 && type_uses(in a, s.ty) {
                 return true;
             }
@@ -290,12 +279,10 @@ fn any_expr(mode: u8, in a: Ast, e: u32) -> bool {
         false
     } else if k == 5 {
         for i in 0..list_len(in a, x.a) {
-            let s = a
-                .stmts
-                .get_or(
-                    idx_from_raw[StmtNode](list_at(in a, x.a, i)),
-                    StmtNode { kind: 0, pat: none(), ty: none(), value: none(), mutable: false }
-                );
+            let s = a.stmts.get_or(
+                idx_from_raw[StmtNode](list_at(in a, x.a, i)),
+                StmtNode { kind: 0, pat: none(), ty: none(), value: none(), mutable: false }
+            );
             if any_expr(mode, in a, s.value) {
                 return true;
             }
@@ -306,12 +293,10 @@ fn any_expr(mode: u8, in a: Ast, e: u32) -> bool {
             return true;
         }
         for i in 0..list_len(in a, x.c) {
-            let arg = a
-                .args
-                .get_or(
-                    idx_from_raw[ArgNode](list_at(in a, x.c, i)),
-                    ArgNode { pass: 0, explicit: false, expr: none() }
-                );
+            let arg = a.args.get_or(
+                idx_from_raw[ArgNode](list_at(in a, x.c, i)),
+                ArgNode { pass: 0, explicit: false, expr: none() }
+            );
             if any_expr(mode, in a, arg.expr) {
                 return true;
             }
@@ -337,12 +322,10 @@ fn any_expr(mode: u8, in a: Ast, e: u32) -> bool {
             return true;
         }
         for i in 0..list_len(in a, x.e) {
-            let c = a
-                .clauses
-                .get_or(
-                    idx_from_raw[ClauseNode](list_at(in a, x.e, i)),
-                    ClauseNode { name: none(), pats: 0, body: none() }
-                );
+            let c = a.clauses.get_or(
+                idx_from_raw[ClauseNode](list_at(in a, x.e, i)),
+                ClauseNode { name: none(), pats: 0, body: none() }
+            );
             if any_expr(mode, in a, c.body) {
                 return true;
             }
@@ -383,8 +366,7 @@ fn function_needs(in a: Ast, f: u32) -> bool {
 }
 
 fn impl_methods(in a: Ast, i: u32) -> u32 {
-    a
-        .impls
+    a.impls
         .get_or(idx_from_raw[ImplNode](i), ImplNode { ty: none(), generics: 0, methods: 0 })
         .methods
 }
@@ -435,36 +417,30 @@ pub fn needs_region(in a: Ast) -> bool {
                 }
             }
         } else if it.kind == 1 {
-            let n = a
-                .adts
-                .get_or(
-                    idx_from_raw[AdtNode](it.node),
-                    AdtNode {
-                        name: none(),
-                        mode: 0,
-                        generics: 0,
-                        variants: 0,
-                        is_enum: false,
-                        tiled: false,
-                        tile_width: 0,
-                        start: 0,
-                        end: 0
-                    }
-                );
+            let n = a.adts.get_or(
+                idx_from_raw[AdtNode](it.node),
+                AdtNode {
+                    name: none(),
+                    mode: 0,
+                    generics: 0,
+                    variants: 0,
+                    is_enum: false,
+                    tiled: false,
+                    tile_width: 0,
+                    start: 0,
+                    end: 0
+                }
+            );
             for j in 0..list_len(in a, n.variants) {
-                let v = a
-                    .variants
-                    .get_or(
-                        idx_from_raw[VariantNode](list_at(in a, n.variants, j)),
-                        VariantNode { name: none(), fields: 0, named: false }
-                    );
+                let v = a.variants.get_or(
+                    idx_from_raw[VariantNode](list_at(in a, n.variants, j)),
+                    VariantNode { name: none(), fields: 0, named: false }
+                );
                 for k in 0..list_len(in a, v.fields) {
-                    let f = a
-                        .fields
-                        .get_or(
-                            idx_from_raw[FieldNode](list_at(in a, v.fields, k)),
-                            FieldNode { name: none(), ty: none(), modality: 3, temperature: 0 }
-                        );
+                    let f = a.fields.get_or(
+                        idx_from_raw[FieldNode](list_at(in a, v.fields, k)),
+                        FieldNode { name: none(), ty: none(), modality: 3, temperature: 0 }
+                    );
                     if type_uses(in a, f.ty) {
                         return true;
                     }

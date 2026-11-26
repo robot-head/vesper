@@ -21,64 +21,56 @@ fn b_item(in a: Ast, i: u32) -> ItemNode {
 }
 
 fn b_fn(in a: Ast, i: u32) -> FnNode {
-    a
-        .fns
-        .get_or(
-            idx_from_raw[FnNode](i),
-            FnNode {
-                name: none(),
-                fip: false,
-                generics: 0,
-                params: 0,
-                result: none(),
-                effects: none(),
-                body: none(),
-                start: 0,
-                end: 0
-            }
-        )
+    a.fns.get_or(
+        idx_from_raw[FnNode](i),
+        FnNode {
+            name: none(),
+            fip: false,
+            generics: 0,
+            params: 0,
+            result: none(),
+            effects: none(),
+            body: none(),
+            start: 0,
+            end: 0
+        }
+    )
 }
 
 fn b_adt(in a: Ast, i: u32) -> AdtNode {
-    a
-        .adts
-        .get_or(
-            idx_from_raw[AdtNode](i),
-            AdtNode {
-                name: none(),
-                mode: 0,
-                generics: 0,
-                variants: 0,
-                is_enum: false,
-                tiled: false,
-                tile_width: 0,
-                start: 0,
-                end: 0
-            }
-        )
+    a.adts.get_or(
+        idx_from_raw[AdtNode](i),
+        AdtNode {
+            name: none(),
+            mode: 0,
+            generics: 0,
+            variants: 0,
+            is_enum: false,
+            tiled: false,
+            tile_width: 0,
+            start: 0,
+            end: 0
+        }
+    )
 }
 
 fn b_effect_decl(in a: Ast, i: u32) -> EffectDeclNode {
-    a
-        .effect_decls
-        .get_or(
-            idx_from_raw[EffectDeclNode](i),
-            EffectDeclNode { name: none(), linear: false, generics: 0, ops: 0, start: 0, end: 0 }
-        )
+    a.effect_decls.get_or(
+        idx_from_raw[EffectDeclNode](i),
+        EffectDeclNode { name: none(), linear: false, generics: 0, ops: 0, start: 0, end: 0 }
+    )
 }
 
 fn b_methods(in a: Ast, it: ItemNode) -> u32 {
     if it.kind == 4 {
-        a
-            .impls
+        a.impls
             .get_or(
                 idx_from_raw[ImplNode](it.node),
                 ImplNode { ty: none(), generics: 0, methods: 0 }
             )
             .methods
     } else if it.kind == 5 {
-        a
-            .traits
+        a.traits
             .get_or(
                 idx_from_raw[TraitNode](it.node),
                 TraitNode {
@@ -93,8 +85,7 @@ fn b_methods(in a: Ast, it: ItemNode) -> u32 {
             )
             .methods
     } else {
-        a
-            .confs
+        a.confs
             .get_or(
                 idx_from_raw[ConfNode](it.node),
                 ConfNode {
@@ -168,16 +159,13 @@ fn effects_mention(m: u8, in a: Ast, e: u32) -> bool {
     if e == none() {
         return false;
     }
-    let n = a
-        .effects
+    let n = a.effects
         .get_or(idx_from_raw[EffectsNode](e), EffectsNode { instances: 0, tail: none() });
     for i in 0..list_len(in a, n.instances) {
-        let x = a
-            .effect_nodes
-            .get_or(
-                idx_from_raw[EffectNode](list_at(in a, n.instances, i)),
-                EffectNode { label: none(), name: none(), args: 0 }
-            );
+        let x = a.effect_nodes.get_or(
+            idx_from_raw[EffectNode](list_at(in a, n.instances, i)),
+            EffectNode { label: none(), name: none(), args: 0 }
+        );
         if types_mention(m, in a, x.args) {
             return true;
         }
@@ -250,8 +238,7 @@ fn pattern_mentions(m: u8, in a: Ast, p: u32) -> bool {
 }
 
 fn param_type(in a: Ast, p: u32) -> u32 {
-    a
-        .params
+    a.params
         .get_or(
             idx_from_raw[ParamNode](p),
             ParamNode { name: none(), pass: 0, projections: 0, ty: none(), start: 0, end: 0 }
@@ -269,8 +256,7 @@ fn params_mention(m: u8, in a: Ast, list: u32) -> bool {
 }
 
 fn clause_uses(m: u8, in a: Ast, c: u32) -> bool {
-    let n = a
-        .clauses
+    let n = a.clauses
         .get_or(idx_from_raw[ClauseNode](c), ClauseNode { name: none(), pats: 0, body: none() });
     for i in 0..list_len(in a, n.pats) {
         if m == 1 && pattern_mentions(m, in a, list_at(in a, n.pats, i)) {
@@ -324,12 +310,10 @@ fn expr_uses(m: u8, in a: Ast, e: u32) -> bool {
         expr_uses(m, in a, x.b) || expr_uses(m, in a, x.c)
     } else if k == 5 {
         for i in 0..list_len(in a, x.a) {
-            let s = a
-                .stmts
-                .get_or(
-                    idx_from_raw[StmtNode](list_at(in a, x.a, i)),
-                    StmtNode { kind: 0, pat: none(), ty: none(), value: none(), mutable: false }
-                );
+            let s = a.stmts.get_or(
+                idx_from_raw[StmtNode](list_at(in a, x.a, i)),
+                StmtNode { kind: 0, pat: none(), ty: none(), value: none(), mutable: false }
+            );
             if s.kind == 1 {
                 if pattern_mentions(m, in a, s.pat)
                     || type_mentions(m, in a, s.ty)
@@ -346,12 +330,10 @@ fn expr_uses(m: u8, in a: Ast, e: u32) -> bool {
             return true;
         }
         for i in 0..list_len(in a, x.c) {
-            let arg = a
-                .args
-                .get_or(
-                    idx_from_raw[ArgNode](list_at(in a, x.c, i)),
-                    ArgNode { pass: 0, explicit: false, expr: none() }
-                );
+            let arg = a.args.get_or(
+                idx_from_raw[ArgNode](list_at(in a, x.c, i)),
+                ArgNode { pass: 0, explicit: false, expr: none() }
+            );
             if expr_uses(m, in a, arg.expr) {
                 return true;
             }
@@ -433,19 +415,15 @@ fn needs(m: u8, in a: Ast) -> bool {
             let n = b_adt(in a, it.node);
             let mut found = false;
             for j in 0..list_len(in a, n.variants) {
-                let v = a
-                    .variants
-                    .get_or(
-                        idx_from_raw[VariantNode](list_at(in a, n.variants, j)),
-                        VariantNode { name: none(), fields: 0, named: false }
-                    );
+                let v = a.variants.get_or(
+                    idx_from_raw[VariantNode](list_at(in a, n.variants, j)),
+                    VariantNode { name: none(), fields: 0, named: false }
+                );
                 for k in 0..list_len(in a, v.fields) {
-                    let f = a
-                        .fields
-                        .get_or(
-                            idx_from_raw[FieldNode](list_at(in a, v.fields, k)),
-                            FieldNode { name: none(), ty: none(), modality: 3, temperature: 0 }
-                        );
+                    let f = a.fields.get_or(
+                        idx_from_raw[FieldNode](list_at(in a, v.fields, k)),
+                        FieldNode { name: none(), ty: none(), modality: 3, temperature: 0 }
+                    );
                     if type_mentions(m, in a, f.ty) {
                         found = true;
                     }
@@ -455,12 +433,10 @@ fn needs(m: u8, in a: Ast) -> bool {
         } else if it.kind == 2 {
             (m == 1 && b_fn(in a, it.node).fip) || function_uses(m, in a, it.node)
         } else if it.kind == 4 && m == 2 {
-            let b = a
-                .impls
-                .get_or(
-                    idx_from_raw[ImplNode](it.node),
-                    ImplNode { ty: none(), generics: 0, methods: 0 }
-                );
+            let b = a.impls.get_or(
+                idx_from_raw[ImplNode](it.node),
+                ImplNode { ty: none(), generics: 0, methods: 0 }
+            );
             type_mentions(m, in a, b.ty) || methods_need(m, in a, b.methods, false)
         } else if it.kind == 3 {
             methods_need(m, in a, b_effect_decl(in a, it.node).ops, false)
