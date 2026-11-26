@@ -1,13 +1,14 @@
 // ---------------------------------------------------------------------------
-// VirtIO 1.2 MMIO status-register state machine and feature negotiation
-// (src/devices/mmio.rs).
+// VirtIO 1.2 MMIO transport register file (src/devices/mmio.rs): the
+// status-register state machine and feature negotiation, then the whole
+// register file below.
 
 const MMIO_STATUS_DRIVER_OK: u32 = 4;
 const MMIO_STATUS_FEATURES_OK: u32 = 8;
 const MMIO_STATUS_DEVICE_NEEDS_RESET: u32 = 64;
 const MMIO_VIRTIO_F_VERSION_1: u64 = 4294967296;
 
-pub copy enum MmioStatusFault {
+copy enum MmioStatusFault {
     DriverSetNeedsReset,
     StatusRegression {
         from: u32,
@@ -20,7 +21,7 @@ pub copy enum MmioStatusFault {
     },
 }
 
-pub copy struct MmioStatusOutcome {
+copy struct MmioStatusOutcome {
     pub reset: bool,
     pub next_status: u32,
     pub accepted_features: bool,
@@ -28,7 +29,7 @@ pub copy struct MmioStatusOutcome {
     pub activate: bool,
 }
 
-pub fn mmio_write_status(
+fn mmio_write_status(
     old: u32,
     new_val: u32,
     driver_accepted_unknown: bool,
@@ -91,4 +92,555 @@ pub fn mmio_write_status(
             activate: activate,
         }
     )
+}
+
+// ---------------------------------------------------------------------------
+// The whole register file (MmioTransport in src/devices/mmio.rs): selectors,
+// feature negotiation, per-queue registers, interrupt status, configuration
+// generation and the transport counters. Rust keeps the device model, the
+// guest memory and the live rings, and asks this state what each register
+// access means.
+
+const MMIO_STATUS_FAILED: u32 = 128;
+const MMIO_INT_USED_BUFFER: u32 = 1;
+const MMIO_INT_CONFIG_CHANGE: u32 = 2;
+const MMIO_MAGIC: u32 = 1953655158;
+const MMIO_VERSION: u32 = 2;
+const MMIO_VENDOR_ID: u32 = 1380995926;
+const MMIO_WINDOW_BYTES: u64 = 512;
+const MMIO_CONFIG: u64 = 256;
+const MMIO_F_NOTIFICATION_DATA: u64 = 274877906944;
+const MMIO_LOW_MASK: u64 = 4294967295;
+
+// Access results: the kind in the low byte, a payload above it.
+const MMIO_OK: u64 = 0;
+const MMIO_DO_CONFIG: u64 = 1;
+const MMIO_DO_RESET: u64 = 2;
+const MMIO_DO_ACTIVATE: u64 = 3;
+const MMIO_DO_READY_ON: u64 = 4;
+const MMIO_DO_READY_OFF: u64 = 5;
+const MMIO_DO_NOTIFY: u64 = 6;
+const MMIO_DO_NOTIFY_DATA: u64 = 7;
+const MMIO_E_WIDTH: u64 = 16;
+const MMIO_E_OUT_OF_WINDOW: u64 = 17;
+const MMIO_E_READ_ONLY: u64 = 18;
+const MMIO_E_WRITE_ONLY: u64 = 19;
+const MMIO_E_UNSUPPORTED: u64 = 20;
+const MMIO_E_INVALID_QUEUE: u64 = 21;
+const MMIO_E_INVALID_QUEUE_SIZE: u64 = 22;
+const MMIO_E_CONFIGURED_WHILE_READY: u64 = 23;
+const MMIO_E_READY_BEFORE_FEATURES_OK: u64 = 24;
+const MMIO_E_STATUS_REGRESSION: u64 = 25;
+const MMIO_E_DRIVER_OK_WITHOUT_FEATURES_OK: u64 = 26;
+const MMIO_E_DRIVER_SET_NEEDS_RESET: u64 = 27;
+const MMIO_E_FEATURES_AFTER_FEATURES_OK: u64 = 28;
+const MMIO_E_CONFIG_OUT_OF_RANGE: u64 = 29;
+const MMIO_E_DEVICE_NEEDS_RESET: u64 = 30;
+const MMIO_E_DRIVER_FAILED: u64 = 31;
+const MMIO_E_NOTIFY_BEFORE_DRIVER_OK: u64 = 32;
+const MMIO_E_QUEUE_NOT_READY: u64 = 33;
+
+pub copy struct MmioStats {
+    pub notifications: u64,
+    pub chains_captured: u64,
+    pub chains_completed: u64,
+    pub interrupts: u64,
+    pub rejected_feature_sets: u64,
+    pub interrupts_suppressed: u64,
+}
+
+pub copy struct MmioQueue {
+    pub max: u16,
+    pub num: u16,
+    pub ready: bool,
+    pub desc: u64,
+    pub driver: u64,
+    pub device: u64,
+}
+
+struct MmioState {
+    device_type: u32,
+    status: u32,
+    device_features_sel: u32,
+    driver_features_sel: u32,
+    driver_features: u64,
+    driver_accepted_unknown: bool,
+    negotiated: u64,
+    queue_sel: u32,
+    queues: ChunkSeq[MmioQueue],
+    interrupt_status: u32,
+    config_generation: u32,
+    stats: MmioStats,
+}
+
+fn mmio_new_queue(max: u16) -> MmioQueue {
+    MmioQueue {
+        max: max,
+        num: 0,
+        ready: false,
+        desc: 0,
+        driver: 0,
+        device: 0,
+    }
+}
+
+// `maxes`: each queue's maximum size as two little-endian bytes.
+pub fn mmio_state_new(device_type: u32, in maxes: Slice[u8]) -> MmioState {
+    let n = wrapping_shr_u64(maxes.len(), 1);
+    let mut queues: ChunkSeq[MmioQueue] = ChunkSeq::with_capacity[MmioQueue](n);
+    for i in 0..n {
+        let lo = match maxes.try_get(wrapping_mul(i, 2)) {
+            Option::Some(b) => widen_u64(b),
+            Option::None => 0,
+        };
+        let hi = match maxes.try_get(wrapping_add(wrapping_mul(i, 2), 1)) {
+            Option::Some(b) => widen_u64(b),
+            Option::None => 0,
+        };
+        queues.push(mmio_new_queue(wrapping_u16(lo | wrapping_shl_u64(hi, 8))));
+    }
+    MmioState {
+        device_type: device_type,
+        status: 0,
+        device_features_sel: 0,
+        driver_features_sel: 0,
+        driver_features: 0,
+        driver_accepted_unknown: false,
+        negotiated: 0,
+        queue_sel: 0,
+        queues: queues,
+        interrupt_status: 0,
+        config_generation: 0,
+        stats: MmioStats {
+            notifications: 0,
+            chains_captured: 0,
+            chains_completed: 0,
+            interrupts: 0,
+            rejected_feature_sets: 0,
+            interrupts_suppressed: 0,
+        },
+    }
+}
+
+pub fn mmio_status(in st: MmioState) -> u32 {
+    st.status
+}
+
+pub fn mmio_negotiated(in st: MmioState) -> u64 {
+    st.negotiated
+}
+
+pub fn mmio_interrupt_status(in st: MmioState) -> u32 {
+    st.interrupt_status
+}
+
+pub fn mmio_stats(in st: MmioState) -> MmioStats {
+    st.stats
+}
+
+pub fn mmio_queue(in st: MmioState, index: u32) -> MmioQueue {
+    match st.queues.try_get(widen_u64(index)) {
+        Option::Some(q) => q,
+        Option::None => mmio_new_queue(0),
+    }
+}
+
+// QueueReady=1 succeeded on the Rust side: the ring is live.
+pub fn mmio_queue_set_ready(inout st: MmioState, index: u32) {
+    let mut q = mmio_queue(in st, index);
+    q.ready = true;
+    st.queues.try_set(widen_u64(index), q);
+}
+
+fn mmio_raise(inout st: MmioState, bits: u32) {
+    st.interrupt_status = st.interrupt_status | bits;
+    st.stats.interrupts = wrapping_add(st.stats.interrupts, 1);
+}
+
+fn mmio_needs_reset(inout st: MmioState) {
+    st.status = st.status | MMIO_STATUS_DEVICE_NEEDS_RESET;
+    mmio_raise(inout st, MMIO_INT_CONFIG_CHANGE);
+}
+
+// The device reported a configuration change.
+pub fn mmio_config_change(inout st: MmioState) {
+    st.config_generation = wrapping_add(st.config_generation, wrapping_u32(1));
+    mmio_raise(inout st, MMIO_INT_CONFIG_CHANGE);
+}
+
+fn mmio_reset(inout st: MmioState) {
+    st.status = 0;
+    st.device_features_sel = 0;
+    st.driver_features_sel = 0;
+    st.driver_features = 0;
+    st.driver_accepted_unknown = false;
+    st.negotiated = 0;
+    st.queue_sel = 0;
+    let n = st.queues.len();
+    for i in 0..n {
+        match st.queues.try_get(i) {
+            Option::Some(q) => {
+                st.queues.try_set(i, mmio_new_queue(q.max));
+            }
+            Option::None => {}
+        }
+    }
+    st.interrupt_status = 0;
+}
+
+fn mmio_config_check(offset: u64, len: u64, config_len: u64) -> u64 {
+    if len != 1 && len != 2 && len != 4 && len != 8 {
+        return MMIO_E_WIDTH;
+    }
+    let end = wrapping_add(wrapping_sub(offset, MMIO_CONFIG), len);
+    if end > config_len {
+        return MMIO_E_CONFIG_OUT_OF_RANGE;
+    }
+    MMIO_DO_CONFIG
+}
+
+fn mmio_value(v: u32) -> u64 {
+    wrapping_shl_u64(widen_u64(v), 8)
+}
+
+// A driver read of `len` bytes at `offset`: MMIO_OK with the register value
+// above the low byte, MMIO_DO_CONFIG (the device reads its configuration
+// space) or an error kind.
+pub fn mmio_read(in st: MmioState, offset: u64, len: u64, offered: u64, config_len: u64) -> u64 {
+    if offset >= MMIO_WINDOW_BYTES {
+        return MMIO_E_OUT_OF_WINDOW;
+    }
+    if offset >= MMIO_CONFIG {
+        return mmio_config_check(offset, len, config_len);
+    }
+    if len != 4 || (offset & 3) != 0 {
+        return MMIO_E_WIDTH;
+    }
+    let value: u32 = if offset == 0 {
+        MMIO_MAGIC
+    } else if offset == 4 {
+        MMIO_VERSION
+    } else if offset == 8 {
+        st.device_type
+    } else if offset == 12 {
+        MMIO_VENDOR_ID
+    } else if offset == 16 {
+        if st.device_features_sel == 0 {
+            wrapping_u32(offered)
+        } else if st.device_features_sel == 1 {
+            wrapping_u32(wrapping_shr_u64(offered, 32))
+        } else {
+            0
+        }
+    } else if offset == 52 {
+        match st.queues.try_get(widen_u64(st.queue_sel)) {
+            Option::Some(q) => wrapping_u32(widen_u64(q.max)),
+            Option::None => 0,
+        }
+    } else if offset == 68 {
+        match st.queues.try_get(widen_u64(st.queue_sel)) {
+            Option::Some(q) => if q.ready {
+                1
+            } else {
+                0
+            },
+            Option::None => {
+                return MMIO_E_INVALID_QUEUE | mmio_value(st.queue_sel);
+            }
+        }
+    } else if offset == 96 {
+        st.interrupt_status
+    } else if offset == 112 {
+        st.status
+    } else if offset == 176 || offset == 180 || offset == 184 || offset == 188 {
+        // No shared memory regions: length reads as -1 (§4.2.2).
+        4294967295
+    } else if offset == 252 {
+        st.config_generation
+    } else if offset == 192 {
+        return MMIO_E_UNSUPPORTED;
+    } else if offset == 20
+        || offset == 32
+        || offset == 36
+        || offset == 48
+        || offset == 56
+        || offset == 80
+        || offset == 100
+        || offset == 128
+        || offset == 132
+        || offset == 144
+        || offset == 148
+        || offset == 160
+        || offset == 164
+        || offset == 172 {
+        return MMIO_E_WRITE_ONLY;
+    } else {
+        return MMIO_E_UNSUPPORTED;
+    };
+    MMIO_OK | mmio_value(value)
+}
+
+// The selected queue for a register write: its index, or an error kind.
+fn mmio_selected_writable(in st: MmioState) -> Result[MmioQueue, u64] {
+    match st.queues.try_get(widen_u64(st.queue_sel)) {
+        Option::Some(q) => {
+            if q.ready {
+                Result::Err(MMIO_E_CONFIGURED_WHILE_READY)
+            } else {
+                Result::Ok(q)
+            }
+        }
+        Option::None => Result::Err(MMIO_E_INVALID_QUEUE | mmio_value(st.queue_sel)),
+    }
+}
+
+fn mmio_set_low(field: u64, value: u32) -> u64 {
+    (field & ~MMIO_LOW_MASK) | widen_u64(value)
+}
+
+fn mmio_set_high(field: u64, value: u32) -> u64 {
+    (field & MMIO_LOW_MASK) | wrapping_shl_u64(widen_u64(value), 32)
+}
+
+fn mmio_write_queue_reg(inout st: MmioState, offset: u64, value: u32) -> u64 {
+    let mut q = match mmio_selected_writable(in st) {
+        Result::Ok(q) => q,
+        Result::Err(e) => {
+            return e;
+        }
+    };
+    if offset == 56 {
+        if value == 0 || widen_u64(value) > widen_u64(q.max) {
+            return MMIO_E_INVALID_QUEUE_SIZE | mmio_value(value) | wrapping_shl_u64(
+                widen_u64(q.max),
+                40
+            );
+        }
+        q.num = wrapping_u16(widen_u64(value));
+    } else if offset == 128 {
+        q.desc = mmio_set_low(q.desc, value);
+    } else if offset == 132 {
+        q.desc = mmio_set_high(q.desc, value);
+    } else if offset == 144 {
+        q.driver = mmio_set_low(q.driver, value);
+    } else if offset == 148 {
+        q.driver = mmio_set_high(q.driver, value);
+    } else if offset == 160 {
+        q.device = mmio_set_low(q.device, value);
+    } else {
+        q.device = mmio_set_high(q.device, value);
+    }
+    st.queues.try_set(widen_u64(st.queue_sel), q);
+    MMIO_OK
+}
+
+fn mmio_queue_ready(inout st: MmioState, ready: bool) -> u64 {
+    let index = st.queue_sel;
+    let mut q = match st.queues.try_get(widen_u64(index)) {
+        Option::Some(q) => q,
+        Option::None => {
+            return MMIO_E_INVALID_QUEUE | mmio_value(index);
+        }
+    };
+    if !ready {
+        q.ready = false;
+        st.queues.try_set(widen_u64(index), q);
+        return MMIO_DO_READY_OFF | mmio_value(index);
+    }
+    if q.ready {
+        return MMIO_OK;
+    }
+    if q.num == 0 {
+        return MMIO_E_INVALID_QUEUE_SIZE | wrapping_shl_u64(widen_u64(q.max), 40);
+    }
+    if (st.status & MMIO_STATUS_FEATURES_OK) == 0 {
+        return MMIO_E_READY_BEFORE_FEATURES_OK;
+    }
+    MMIO_DO_READY_ON | mmio_value(index)
+}
+
+fn mmio_status_write(inout st: MmioState, value: u32, offered: u64) -> u64 {
+    match mmio_write_status(
+        st.status,
+        value,
+        st.driver_accepted_unknown,
+        st.driver_features,
+        offered
+    ) {
+        Result::Ok(o) => {
+            if o.reset {
+                mmio_reset(inout st);
+                return MMIO_DO_RESET;
+            }
+            if o.rejected_features {
+                st.stats.rejected_feature_sets = wrapping_add(st.stats.rejected_feature_sets, 1);
+            }
+            if o.accepted_features {
+                st.negotiated = st.driver_features;
+            }
+            st.status = o.next_status;
+            if o.activate {
+                MMIO_DO_ACTIVATE
+            } else {
+                MMIO_OK
+            }
+        }
+        Result::Err(fault) => match fault {
+            MmioStatusFault::DriverSetNeedsReset => MMIO_E_DRIVER_SET_NEEDS_RESET,
+            MmioStatusFault::StatusRegression {
+                from: _,
+                to: _
+            } => MMIO_E_STATUS_REGRESSION,
+            MmioStatusFault::DriverOkWithoutFeaturesOk {
+                rejected_features: r
+            } => {
+                if r {
+                    st
+                        .stats
+                        .rejected_feature_sets = wrapping_add(st.stats.rejected_feature_sets, 1);
+                }
+                MMIO_E_DRIVER_OK_WITHOUT_FEATURES_OK
+            }
+        },
+    }
+}
+
+// A driver write of `len` bytes at `offset` (`value`: the little-endian
+// 32-bit value when `len` is 4).
+pub fn mmio_write(
+    inout st: MmioState,
+    offset: u64,
+    len: u64,
+    value: u32,
+    offered: u64,
+    config_len: u64
+) -> u64 {
+    if offset >= MMIO_WINDOW_BYTES {
+        return MMIO_E_OUT_OF_WINDOW;
+    }
+    if offset >= MMIO_CONFIG {
+        return mmio_config_check(offset, len, config_len);
+    }
+    if len != 4 || (offset & 3) != 0 {
+        return MMIO_E_WIDTH;
+    }
+    if offset == 20 {
+        st.device_features_sel = value;
+    } else if offset == 36 {
+        st.driver_features_sel = value;
+    } else if offset == 32 {
+        if (st.status & MMIO_STATUS_FEATURES_OK) != 0 {
+            return MMIO_E_FEATURES_AFTER_FEATURES_OK;
+        }
+        if st.driver_features_sel == 0 {
+            st.driver_features = mmio_set_low(st.driver_features, value);
+        } else if st.driver_features_sel == 1 {
+            st.driver_features = mmio_set_high(st.driver_features, value);
+        } else if value != 0 {
+            // Bits above 63 are never offered: accepting any of them makes
+            // the feature set invalid at FEATURES_OK.
+            st.driver_accepted_unknown = true;
+        }
+    } else if offset == 48 {
+        st.queue_sel = value;
+    } else if offset == 56
+        || offset == 128
+        || offset == 132
+        || offset == 144
+        || offset == 148
+        || offset == 160
+        || offset == 164 {
+        return mmio_write_queue_reg(inout st, offset, value);
+    } else if offset == 68 {
+        return mmio_queue_ready(inout st, value != 0);
+    } else if offset == 80 {
+        st.stats.notifications = wrapping_add(st.stats.notifications, 1);
+        if (st.negotiated & MMIO_F_NOTIFICATION_DATA) != 0 {
+            return MMIO_DO_NOTIFY_DATA;
+        }
+        return MMIO_DO_NOTIFY;
+    } else if offset == 100 {
+        st.interrupt_status = st.interrupt_status & ~value;
+    } else if offset == 112 {
+        return mmio_status_write(inout st, value, offered);
+    } else if offset == 172 {
+        // SHM_SEL: no regions to select.
+    } else if offset == 192 {
+        return MMIO_E_UNSUPPORTED;
+    } else if offset == 0
+        || offset == 4
+        || offset == 8
+        || offset == 12
+        || offset == 16
+        || offset == 52
+        || offset == 96
+        || offset == 176
+        || offset == 180
+        || offset == 184
+        || offset == 188
+        || offset == 252 {
+        return MMIO_E_READ_ONLY;
+    } else {
+        return MMIO_E_UNSUPPORTED;
+    }
+    MMIO_OK
+}
+
+// Before a notification or host poll runs queue `index`: MMIO_OK or the
+// error kind.
+pub fn mmio_run_check(in st: MmioState, index: u32) -> u64 {
+    if (st.status & MMIO_STATUS_DEVICE_NEEDS_RESET) != 0 {
+        return MMIO_E_DEVICE_NEEDS_RESET;
+    }
+    if (st.status & MMIO_STATUS_FAILED) != 0 {
+        return MMIO_E_DRIVER_FAILED;
+    }
+    if (st.status & MMIO_STATUS_DRIVER_OK) == 0 {
+        return MMIO_E_NOTIFY_BEFORE_DRIVER_OK;
+    }
+    match st.queues.try_get(widen_u64(index)) {
+        Option::Some(q) => {
+            if q.ready {
+                MMIO_OK
+            } else {
+                MMIO_E_QUEUE_NOT_READY | mmio_value(index)
+            }
+        }
+        Option::None => MMIO_E_INVALID_QUEUE | mmio_value(index),
+    }
+}
+
+// After a queue pass: `flushed` is 0 (no interrupt due), 1 (interrupt) or 2
+// (the flush failed). A failed capture or flush puts the device into
+// DEVICE_NEEDS_RESET before the configuration check, as does a failed
+// device pass after it.
+pub fn mmio_run_done(
+    inout st: MmioState,
+    captured: u64,
+    capture_failed: bool,
+    completed: u64,
+    flushed: u64,
+    config_changed: bool,
+    process_failed: bool
+) {
+    st.stats.chains_captured = wrapping_add(st.stats.chains_captured, captured);
+    if capture_failed {
+        mmio_needs_reset(inout st);
+        return;
+    }
+    st.stats.chains_completed = wrapping_add(st.stats.chains_completed, completed);
+    if flushed == 1 {
+        mmio_raise(inout st, MMIO_INT_USED_BUFFER);
+    } else if flushed == 2 {
+        mmio_needs_reset(inout st);
+        return;
+    } else if completed > 0 {
+        st.stats.interrupts_suppressed = wrapping_add(st.stats.interrupts_suppressed, 1);
+    }
+    if config_changed {
+        mmio_config_change(inout st);
+    }
+    if process_failed {
+        mmio_needs_reset(inout st);
+    }
 }
