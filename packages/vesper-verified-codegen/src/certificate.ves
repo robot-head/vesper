@@ -65,6 +65,7 @@ use self::machine::{
     L_OUT,
     L_SLOT,
     Lir,
+    Lowered,
     T_DIV0,
     T_OVERFLOW,
     put_decimal
@@ -2492,6 +2493,36 @@ pub fn check_input(in b: Slice[u8], inout out: ChunkSeq[u8]) {
     } else {
         out.extend(in why.as_slice());
         out.push(10);
+    }
+}
+
+// `check` of a lowered program (`compile`'s certificate): whether it
+// passed, with `check_input`'s text in `out`.
+pub fn certify(in lo: Lowered, inout out: ChunkSeq[u8]) -> bool {
+    let mut p = Prog {
+        rows: ChunkSeq::new[Lir](),
+        starts: ChunkSeq::new[u64](),
+        names: ChunkSeq::new[u8](),
+        name_at: ChunkSeq::new[u64]()
+    };
+    for i in 0..lo.rows.len() {
+        match lo.rows.try_get(i) {
+            Option::Some(r) => p.rows.push(widen(r)),
+            Option::None => {}
+        }
+    }
+    p.starts.extend(in lo.starts.as_slice());
+    p.names.extend(in lo.names.as_slice());
+    p.name_at.extend(in lo.name_at.as_slice());
+    let c = generate(in p);
+    let mut why = ChunkSeq::new[u8]();
+    if validate(in p, in c, inout why) {
+        put_cert(inout out, in c);
+        true
+    } else {
+        out.extend(in why.as_slice());
+        out.push(10);
+        false
     }
 }
 

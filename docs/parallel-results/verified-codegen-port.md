@@ -318,9 +318,35 @@ where the pass runs on the program the lowering reads.
 
 **Rust lines deleted:** 0. `evidence.rs` goes at the retirement.
 
+## Part 4d-1: `compile` end to end
+
+### What changed
+
+- `compile_words` (lib.ves) is `compile` in one Vesper call. It runs the
+  front half (`front_rows`), the certificate (`certificate::certify`) and
+  the back half (`back`). The back half runs the Rust checks in the Rust
+  order: the heap, riscv64 off Linux, x86-64 off Linux and Windows, the
+  per-row code-byte limit, `finish`, and the container.
+- The lowering now fills a `Lowered` (machine.ves): rows, function starts,
+  names, the entry's result words and label. `put_lowered` prints it as
+  before. `build_words` reads its input into a `Lowered` and calls `back`.
+- `Asm` keeps the first failure and its label (`why`, `why_label`), so
+  every assembler error has its Rust text.
+- `verified_codegen::compile` is split at `compile_prepared`, and
+  `compile_timing_for_test` times it from the optimized program.
+
+### Evidence (Linux x86_64 host, release, `-C target-cpu=native`)
+
+| Check | Result |
+|---|---|
+| `compile` on the corpus, 5 targets × 2 protocols × optimize on/off: bytes, code size, machine instructions, result words, certificate or error text | **0 of 3,640 differ** (2,068 built) |
+| ABBA, `compile` ×5 (host target) | rust 475.0 ms, vesper 490.7 ms: **1.03x** |
+
+**Rust lines deleted:** 0. All of `src/verified_codegen` goes at the retirement.
+
 ## Left
 
 - Optional: compare the per-arch `encoding_listing` text.
-- Part 4d:
+- Part 4d-2:
   `coverage`, `cli`, then the swap into the hybrid and `bootstrap/stage1.rs`, with `bootstrap/stage1.lock`
   reproduced, and the Rust deleted at the retirement.

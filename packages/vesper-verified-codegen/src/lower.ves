@@ -60,6 +60,8 @@ use self::machine::{
     LIR_TRAP,
     LIR_WRAPPING,
     Lir,
+    Lowered,
+    lowered_new,
     OP_ADD,
     OP_DIV,
     OP_MUL,
@@ -4757,7 +4759,7 @@ fn relocate(r: Lir, out: u64) -> Lir {
 
 // ----- the entry ----------------------------------------------------------------
 
-fn lower_all(inout lw: Lw, inout out: ChunkSeq[u8]) eff [Fail[VErr]] {
+fn lower_all(inout lw: Lw, inout lo: Lowered) eff [Fail[VErr]] {
     let pl = plan(inout lw);
     let mut next_label = match pl.fs.try_get(wrapping_sub(pl.fs.len(), 1)) {
         Option::Some(x) => add(x.label, 2),
@@ -4765,7 +4767,6 @@ fn lower_all(inout lw: Lw, inout out: ChunkSeq[u8]) eff [Fail[VErr]] {
     };
     let mut lidx = ChunkSeq::new[u32]();
     let mut total: u64 = 0;
-    let mut text = ChunkSeq::new[u8]();
     for i in 0..pl.fs.len() {
         let left = if lw.max_rows > total {
             wrapping_sub(lw.max_rows, total)
@@ -4774,18 +4775,38 @@ fn lower_all(inout lw: Lw, inout out: ChunkSeq[u8]) eff [Fail[VErr]] {
         };
         let rows = lower_function(inout lw, in pl, i, inout next_label, left, inout lidx);
         total = add(total, rows.len());
-        ap(inout text, "fn ");
-        lw.put_sym(planned(in pl, i).name, inout text);
-        ap(inout text, "\n");
-        for j in 0..rows.len() {
-            match rows.try_get(j) {
-                Option::Some(r) => put_debug(inout text, in r),
+        lo.name_at.push(lo.names.len());
+        lw.put_sym(planned(in pl, i).name, inout lo.names);
+        lo.starts.push(lo.rows.len());
+        lo.rows.extend(in rows.as_slice());
+    }
+    lo.name_at.push(lo.names.len());
+    lo.starts.push(lo.rows.len());
+    let e = planned(in pl, 0);
+    lo.result_words = e.result.n;
+    lo.entry_label = e.label;
+}
+
+// `fn <name>` and the rows in the Rust `Debug` form, per function.
+pub fn put_lowered(in lo: Lowered, inout out: ChunkSeq[u8]) {
+    let nf = wrapping_sub(lo.starts.len(), 1);
+    for f in 0..nf {
+        ap(inout out, "fn ");
+        for i in u64_at(in lo.name_at, f)..u64_at(in lo.name_at, add(f, 1)) {
+            match lo.names.try_get(i) {
+                Option::Some(c) => out.push(c),
                 Option::None => {},
             }
-            ap(inout text, "\n");
+        }
+        ap(inout out, "\n");
+        for j in u64_at(in lo.starts, f)..u64_at(in lo.starts, add(f, 1)) {
+            match lo.rows.try_get(j) {
+                Option::Some(r) => put_debug(inout out, in r),
+                Option::None => {},
+            }
+            ap(inout out, "\n");
         }
     }
-    out.extend(in text.as_slice());
 }
 
 // The lowering of the harness input (see tests/self_host_verified_codegen.rs
@@ -4811,10 +4832,30 @@ pub fn lower_program(
     inout r: Reader,
     in b: Slice[u8]
 ) -> ChunkSeq[u8] {
-    let mut lw = decode(c, p, ex, sites, inout r, in b);
+    let mut lo = lowered_new();
+    let e = lower_rows(c, p, ex, sites, inout r, in b, inout lo);
+    if e.len() != 0 {
+        return e;
+    }
     let mut out = ChunkSeq::new[u8]();
+    put_lowered(in lo, inout out);
+    out
+}
+
+// The lowering into `lo`: empty, or `error: `, the error's text and a
+// newline.
+pub fn lower_rows(
+    sink c: Ctx,
+    sink p: Program,
+    sink ex: Ex,
+    sink sites: Sites,
+    inout r: Reader,
+    in b: Slice[u8],
+    inout lo: Lowered
+) -> ChunkSeq[u8] {
+    let mut lw = decode(c, p, ex, sites, inout r, in b);
     let e = handle Fail[VErr] in {
-        lower_all(inout lw, inout out);
+        lower_all(inout lw, inout lo);
         err(255, ChunkSeq::new[u8]())
     } with {
         return v => v,
@@ -4826,7 +4867,7 @@ pub fn lower_program(
         ap(inout o, "\n");
         return o;
     }
-    out
+    ChunkSeq::new[u8]()
 }
 
 // The code `c` becomes after a call of `callee` (an escape code on the way

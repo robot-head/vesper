@@ -547,7 +547,31 @@ pub fn lower_for_test(
 /// Compile `entry` (no parameters) and everything it reaches.
 pub fn compile(world: &World, entry: &str, options: &Options) -> Result<Artifact, VerifiedError> {
     let (program, sites) = prepare(world, entry, options)?;
-    let (plan, lir) = lower_program(world, &program, entry, options, &sites)?;
+    compile_prepared(world, &program, &sites, entry, options)
+}
+
+/// [`compile`] of an optimized program (the timing half of the Vesper
+/// port's end-to-end flip gate).
+#[doc(hidden)]
+pub fn compile_timing_for_test(
+    world: &World,
+    program: &crate::ir::Program,
+    entry: &str,
+    options: &Options,
+) -> Result<Artifact, VerifiedError> {
+    let mut mono = mono::monomorphize(world, program, entry, max_instances(options))?;
+    let sites = evidence::rewrite(world, &mut mono, &[entry.to_owned()], None)?;
+    compile_prepared(world, &mono, &sites, entry, options)
+}
+
+fn compile_prepared(
+    world: &World,
+    program: &crate::ir::Program,
+    sites: &evidence::Sites,
+    entry: &str,
+    options: &Options,
+) -> Result<Artifact, VerifiedError> {
+    let (plan, lir) = lower_program(world, program, entry, options, sites)?;
     let certificate = certificate::check(&lir);
     if let (true, Err(r)) = (options.require_certificate, &certificate) {
         return Err(VerifiedError::Invalid(r.to_string()));

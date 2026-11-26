@@ -22,6 +22,12 @@
 //! - Part 4b: monomorphization must give the same program (canonical dump)
 //!   or error text on the corpus.
 //!
+//! - Part 4d-1: `compile` end to end (the front half, the certificate and
+//!   the back half in one Vesper call) must give the same artifact bytes,
+//!   code size, machine instruction count, result word count and
+//!   certificate, or the same error text, on the corpus for every target
+//!   and both result protocols.
+//!
 //! - `VERIFIED_CODEGEN_STRIDE=n` keeps every n-th corpus world.
 //! - `CHECK_HARNESS_SPEED=1` runs the ABBA timing (release build).
 #[path = "common/check_harness.rs"]
@@ -1647,6 +1653,192 @@ fn front_flip_gate() {
                 for _ in 0..5 {
                     for c in &cases {
                         std::hint::black_box(front.text(&c.input));
+                    }
+                }
+            })
+        },
+    );
+    println!(
+        "flip-gate pairs rust={} vesper={}",
+        r.as_nanos(),
+        v.as_nanos()
+    );
+}
+
+// Part 4d-1: `compile` end to end (`compile_words`) against Rust's.
+
+fn target_words(options: &verified::Options) -> [u64; 5] {
+    let arch = match options.target.arch {
+        verified::Arch::X86_64 => 0,
+        verified::Arch::Aarch64 => 1,
+        verified::Arch::Riscv64 => 2,
+    };
+    let os = match options.target.os {
+        verified::Os::Linux => 0,
+        verified::Os::MacOs => 1,
+        verified::Os::Windows => 2,
+    };
+    let protocol = match options.protocol {
+        verified::ResultProtocol::ExitStatus => 0,
+        verified::ResultProtocol::Words => 1,
+    };
+    [
+        arch,
+        os,
+        protocol,
+        options.max_code_bytes as u64,
+        u64::from(options.require_certificate),
+    ]
+}
+
+/// `compile_words`'s text and bytes for a Rust `compile` result.
+fn rust_compile(r: &Result<verified::Artifact, verified::VerifiedError>) -> (String, Vec<u8>) {
+    match r {
+        Ok(a) => {
+            let cert = match &a.certificate {
+                Ok(c) => cert_text(c),
+                Err(r) => format!("{r}\n"),
+            };
+            (
+                format!(
+                    "code {}\ninstructions {}\nresult {}\n{cert}",
+                    a.code_len,
+                    a.machine_instructions,
+                    a.result_words.len()
+                ),
+                a.bytes.clone(),
+            )
+        }
+        Err(e) => (format!("error: {e}\n"), vec![]),
+    }
+}
+
+/// The two packings `compile_words` returns.
+fn vesper_compile(compile: &Entry, input: &[u8]) -> (String, Vec<u8>) {
+    let words = compile.words(input);
+    let unpack = |at: usize| -> (Vec<u8>, usize) {
+        let len = words[at] as usize;
+        let n = len.div_ceil(8);
+        let mut b: Vec<u8> = words[at + 1..at + 1 + n]
+            .iter()
+            .flat_map(|w| w.to_le_bytes())
+            .collect();
+        b.truncate(len);
+        (b, at + 1 + n)
+    };
+    let (text, at) = unpack(0);
+    let (bytes, _) = unpack(at);
+    (String::from_utf8(text).unwrap(), bytes)
+}
+
+const TRIPLES: [&str; 5] = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "aarch64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+    "riscv64gc-unknown-linux-gnu",
+];
+
+#[test]
+fn compile_matches_rust_on_the_corpus() {
+    let compile = entry("compile_words");
+    let mut bad = 0;
+    let mut compared = 0;
+    let mut built = 0;
+    for optimize in [true, false] {
+        let mut base = verified::Options::new(verified::Target::from_triple(TRIPLES[0]).unwrap());
+        base.optimize = optimize;
+        for case in front_cases(&base) {
+            let world = &corpus()[case.world].world;
+            for triple in TRIPLES {
+                for protocol in [
+                    verified::ResultProtocol::ExitStatus,
+                    verified::ResultProtocol::Words,
+                ] {
+                    let options = verified::Options {
+                        protocol,
+                        optimize,
+                        ..verified::Options::new(verified::Target::from_triple(triple).unwrap())
+                    };
+                    let rust = rust_compile(&verified::compile(world, "main", &options));
+                    let mut input: Vec<u8> = target_words(&options)
+                        .iter()
+                        .flat_map(|w| w.to_le_bytes())
+                        .collect();
+                    input.extend_from_slice(&case.input);
+                    let vesper = vesper_compile(&compile, &input);
+                    compared += 1;
+                    if !rust.0.starts_with("error: ") {
+                        built += 1;
+                    }
+                    if vesper != rust {
+                        bad += 1;
+                        if bad <= 5 {
+                            let d = first_difference(&rust.0, &vesper.0);
+                            eprintln!(
+                                "verified compile ({}, {triple}, {protocol:?}, optimize {optimize}): text difference {d:?}, {} vs {} bytes",
+                                case.name,
+                                rust.1.len(),
+                                vesper.1.len()
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+    eprintln!("verified compile corpus: {bad} of {compared} builds differ ({built} built)");
+    println!("flip-gate differential differences={bad} cases={compared}");
+    assert!(built > 200, "only {built} corpus builds");
+    assert_eq!(bad, 0);
+}
+
+/// ABBA timing of `compile` end to end (`CHECK_HARNESS_SPEED=1`, host
+/// target): Rust's monomorphization, evidence passing, lowering,
+/// certificate and back half against `compile_words`, over the corpus
+/// programs the package builds.
+#[test]
+fn compile_flip_gate() {
+    if !speed() {
+        return;
+    }
+    let Some(target) = verified::Target::host() else {
+        return;
+    };
+    let options = verified::Options::new(target);
+    let compile = entry("compile_words");
+    let head: Vec<u8> = target_words(&options)
+        .iter()
+        .flat_map(|w| w.to_le_bytes())
+        .collect();
+    let cases: Vec<_> = front_cases(&options)
+        .into_iter()
+        .map(|c| {
+            let mut input = head.clone();
+            input.extend_from_slice(&c.input);
+            (c, input)
+        })
+        .filter(|(_, input)| !vesper_compile(&compile, input).0.starts_with("error: "))
+        .collect();
+    let (r, v) = abba(
+        "verified compile",
+        &mut || {
+            time(|| {
+                for _ in 0..5 {
+                    for (c, _) in &cases {
+                        let world = &corpus()[c.world].world;
+                        let a =
+                            verified::compile_timing_for_test(world, &c.program, "main", &options);
+                        std::hint::black_box(rust_compile(&a));
+                    }
+                }
+            })
+        },
+        &mut || {
+            time(|| {
+                for _ in 0..5 {
+                    for (_, input) in &cases {
+                        std::hint::black_box(vesper_compile(&compile, input));
                     }
                 }
             })
