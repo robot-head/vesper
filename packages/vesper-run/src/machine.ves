@@ -1448,7 +1448,8 @@ pub fn scan(inout machine: M) {
                 let inst_id = add(block.i0, inst_index);
                 let inst = machine.program.inst(inst_id);
                 if !(cont_type != 0 && inst.ty == wrapping_sub(cont_type, 1))
-                    && !type_ok(in machine, inst.ty, 0) {
+                    && !type_ok(in machine, inst.ty, 0)
+                {
                     decline(inout machine, "a value type in ", fn_info.name);
                 }
                 let operand_at = inst.a;
