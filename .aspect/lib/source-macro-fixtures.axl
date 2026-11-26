@@ -1,7 +1,7 @@
 """Shared compiler and editor fixture operations for source macros."""
 
 load("../bounded-stdio.axl", "bounded_run", "utf8")
-load("./bazel_exec.axl", "executable")
+load("./bazel_exec.axl", "executable", "VESPER")
 load("./lsp-fixture.axl", "decode_frames", "frame", "notice", "request", "result")
 load("./process.axl", "root_path", "scratch_dir")
 load("./strict-json.axl", "decode_list", "decode_object")
@@ -101,7 +101,7 @@ def check_with(ctx, name, cases):
 
 def suite_with(ctx, name, variable, cases):
     root = ctx.std.env.aspect_root_dir()
-    return _run(ctx, name, ctx.std.env.var(variable) or executable(ctx, root, "//:bin/vesper"), "", cases)
+    return _run(ctx, name, ctx.std.env.var(variable) or executable(ctx, root, VESPER), "", cases)
 
 def execute(ctx, h, argv, *, expected = 0, input = None, expected_error = ""):
     output = bounded_run(
