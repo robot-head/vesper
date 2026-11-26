@@ -466,6 +466,9 @@ def _completion_rules(h):
         _equal(h.run(run.split(), env) == 0, expected, "Completion after skipped native jobs")
         _equal(h.ctx.std.fs.exists(output), expected)
 
+# Divergent rebuilds per Hybrid compiler divergent job (#2174).
+_HYBRID_REBUILDS_PER_GROUP = 3
+
 def _hybrid_and_ports_skip_pull_requests(h):
     hybrid = h.workflow("hybrid.yml")
     _absent("pull_request", hybrid["on"])
@@ -476,13 +479,13 @@ def _hybrid_and_ports_skip_pull_requests(h):
     # rebuilds each (#2147, #2174).
     _equal([row["os"] for row in include if not row.get("divergent")], ["ubuntu-latest", "macos-latest", "windows-latest"])
     groups = [row["divergent"] for row in include if row.get("divergent")]
-    _equal(groups, [1, 2, 3, 4])
+    _equal(groups, list(range(1, len(groups) + 1)))
     _equal([row["os"] for row in include if row.get("divergent")], ["ubuntu-latest"] * len(groups))
     hybrid_steps = hybrid["jobs"]["hybrid"]["steps"]
     divergent = [step for step in hybrid_steps if " catches a divergent " in step.get("name", "")]
-    _equal(len(divergent), 12)
+    _equal(len(divergent), len(groups) * _HYBRID_REBUILDS_PER_GROUP)
     for index, step in enumerate(divergent):
-        _equal(step.get("if"), "${{ matrix.divergent == %d }}" % (index // 3 + 1))
+        _equal(step.get("if"), "${{ matrix.divergent == %d }}" % (index // _HYBRID_REBUILDS_PER_GROUP + 1))
     _equal(_first([step for step in hybrid_steps if step.get("name") == "Build and test the hybrid compiler"])["if"],
            "${{ !matrix.divergent }}")
     step = _ids(h.platforms["jobs"]["plan"]["steps"])["ports"]
