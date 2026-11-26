@@ -45,10 +45,12 @@ pub const GREATER_THAN: u8 = 62;
 pub const QUESTION: u8 = 63;
 pub const AT_SIGN: u8 = 64;
 
-// Upper-case letters: the ends of the range and the hex and exponent letters.
+// Upper-case letters: the ends of the range, the hex and exponent letters
+// and the `X` of a `0X` prefix.
 pub const UPPER_A: u8 = 65;
 pub const UPPER_E: u8 = 69;
 pub const UPPER_F: u8 = 70;
+pub const UPPER_X: u8 = 88;
 pub const UPPER_Z: u8 = 90;
 
 // The punctuation between the upper-case and lower-case letters.

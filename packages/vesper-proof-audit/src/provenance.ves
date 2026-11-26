@@ -3,14 +3,14 @@
 // provenance admission rule of `vesper proof-audit --macro-provenance`.
 use @vesper-std/hash::blake3::{Digest, digest_bytes};
 use @vesper-std/hash-sys::hash;
+use @vesper-std/bytes::ascii::{DIGIT_NINE, DIGIT_ZERO, DOLLAR, DOT, UNDERSCORE};
 use self::json::{
     Json, begin_array, begin_object, end_array, end_object, json_new, key, null, number, put_u64,
     string
 };
 use self::reader::Table;
 use self::strs::{
-    DIGIT_NINE, DIGIT_ZERO, DOLLAR, DOT, HEX_LETTER_BASE, Strs, UNDERSCORE, byte, count, end, push,
-    put_str, same, same_str, set_of, start, strs_new
+    HEX_LETTER_BASE, Strs, byte, count, end, push, put_str, same, same_str, set_of, start, strs_new
 };
 
 pub const SCHEMA: Str = "vesper.forge.provenance/1";

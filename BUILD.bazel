@@ -1505,6 +1505,15 @@ vesper_package(
     visibility = ["//visibility:public"],
 )
 
+# @vesper-std/bytes, for its `ascii` byte names in the test-runner and
+# proof-audit ports.
+vesper_package(
+    name = "std_bytes_package",
+    srcs = glob(["packages/vesper-std/bytes/src/**/*.ves"]),
+    manifest = "packages/vesper-std/bytes/Loom.toml",
+    visibility = ["//visibility:public"],
+)
+
 # @vesper-std/toml, the TOML reader of @vesper/loom-calculus (Rust exit SH6
 # lane 12, #1407; #965).
 vesper_package(
@@ -1542,6 +1551,7 @@ vesper_package(
         ":ast_package",
         ":front_package",
         ":std_arena_package",
+        ":std_bytes_package",
         ":std_hash_package",
         ":std_intern_package",
     ],
@@ -1700,6 +1710,7 @@ vesper_package(
     manifest = "packages/vesper-proof-audit/Loom.toml",
     visibility = ["//visibility:public"],
     deps = [
+        ":std_bytes_package",
         ":std_env_package",
         ":std_fs_package",
         ":std_hash_package",
