@@ -118,24 +118,15 @@ pub fn int_term(inout m: Tm, neg: bool, mag: u64, kind: u8) -> u32 {
 }
 
 fn g8(in s: ChunkSeq[u8], i: u32) -> u8 {
-    match s.try_get(widen_u64(i)) {
-        Option::Some(v) => v,
-        Option::None => 0,
-    }
+    s.try_get(widen_u64(i)).unwrap_or(0)
 }
 
 fn g32(in s: ChunkSeq[u32], i: u32) -> u32 {
-    match s.try_get(widen_u64(i)) {
-        Option::Some(v) => v,
-        Option::None => 0,
-    }
+    s.try_get(widen_u64(i)).unwrap_or(0)
 }
 
 fn g64(in s: ChunkSeq[u64], i: u32) -> u64 {
-    match s.try_get(widen_u64(i)) {
-        Option::Some(v) => v,
-        Option::None => 0,
-    }
+    s.try_get(widen_u64(i)).unwrap_or(0)
 }
 
 pub fn tk(in m: Tm, t: u32) -> u8 {
@@ -315,14 +306,8 @@ fn is_text(in b: ChunkSeq[u8], in x: Str) -> bool {
         return false;
     }
     for i in 0..b.len() {
-        let c = match b.try_get(i) {
-            Option::Some(v) => v,
-            Option::None => 0,
-        };
-        let d = match y.try_get(i) {
-            Option::Some(v) => v,
-            Option::None => 0,
-        };
+        let c = b.try_get(i).unwrap_or(0);
+        let d = y.try_get(i).unwrap_or(0);
         if c != d {
             return false;
         }
