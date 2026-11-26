@@ -74,7 +74,7 @@ PORT_DIVERGENT = {
         "        if x < 128 {": "        if x < 32 {",
     }),
     "vector": ("vesper/src/vector.ves", {
-        "if x == T_FALSE || y == T_FALSE {": "if x == T_FALSE && y == T_FALSE {",
+        "let pick_x = lt_bit(x, y) ^ or_bit;": "let pick_x = lt_bit(y, x) ^ or_bit;",
     }),
 }
 
