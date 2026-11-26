@@ -232,47 +232,47 @@ fn words_eq(in text: ChunkSeq[u8], in toks: ChunkSeq[u64], i: u64, other: u64) -
 
 // ---------------------------------------------------------------- AST
 
-fn effect_of(in a: Ast, i: u32) -> EffectNode {
-    a.effect_nodes
+fn effect_of(in ast: Ast, i: u32) -> EffectNode {
+    ast.effect_nodes
         .get_or(idx_from_raw[EffectNode](i), EffectNode { label: none(), name: none(), args: 0 })
 }
 
-fn effects_of(in a: Ast, i: u32) -> EffectsNode {
-    a.effects.get_or(idx_from_raw[EffectsNode](i), EffectsNode { instances: 0, tail: none() })
+fn effects_of(in ast: Ast, i: u32) -> EffectsNode {
+    ast.effects.get_or(idx_from_raw[EffectsNode](i), EffectsNode { instances: 0, tail: none() })
 }
 
-fn item_of(in a: Ast, item_index: u64) -> ItemNode {
-    let raw = match a.m_items.try_get(item_index) {
+fn item_of(in ast: Ast, item_index: u64) -> ItemNode {
+    let raw = match ast.m_items.try_get(item_index) {
         Option::Some(id) => id,
         Option::None => none(),
     };
-    a.items.get_or(idx_from_raw[ItemNode](raw), ItemNode { kind: 0, node: 0 })
+    ast.items.get_or(idx_from_raw[ItemNode](raw), ItemNode { kind: 0, node: 0 })
 }
 
-fn rel_s(in a: Ast, expr: u32) -> u64 {
-    sub(widen_u64(expr_at(in a, expr).start), PROBE_LEN)
+fn rel_s(in ast: Ast, expr: u32) -> u64 {
+    sub(widen_u64(expr_at(in ast, expr).start), PROBE_LEN)
 }
 
-fn rel_e(in a: Ast, expr: u32) -> u64 {
-    sub(widen_u64(expr_at(in a, expr).end), PROBE_LEN)
+fn rel_e(in ast: Ast, expr: u32) -> u64 {
+    sub(widen_u64(expr_at(in ast, expr).end), PROBE_LEN)
 }
 
 // The children of `expr` in `parser::walk_exprs` order.
-fn kids(in a: Ast, expr: u32) -> ChunkSeq[u32] {
-    let expr_node = expr_at(in a, expr);
+fn kids(in ast: Ast, expr: u32) -> ChunkSeq[u32] {
+    let expr_node = expr_at(in ast, expr);
     let mut out = ChunkSeq::new[u32]();
     let kind = expr_node.kind;
     if kind == 3 {
-        for i in 0..list_len(in a, expr_node.a) {
-            out.push(list_at(in a, expr_node.a, i));
+        for i in 0..list_len(in ast, expr_node.a) {
+            out.push(list_at(in ast, expr_node.a, i));
         }
     } else if kind == 4 {
-        for i in 0..(list_len(in a, expr_node.b) >> 1) {
-            out.push(list_at(in a, expr_node.b, inc(i << 1)));
+        for i in 0..(list_len(in ast, expr_node.b) >> 1) {
+            out.push(list_at(in ast, expr_node.b, inc(i << 1)));
         }
     } else if kind == 5 {
-        for i in 0..list_len(in a, expr_node.a) {
-            let stmt = stmt_of(in a, list_at(in a, expr_node.a, i));
+        for i in 0..list_len(in ast, expr_node.a) {
+            let stmt = stmt_of(in ast, list_at(in ast, expr_node.a, i));
             if stmt.value != none() {
                 out.push(stmt.value);
             }
@@ -282,8 +282,8 @@ fn kids(in a: Ast, expr: u32) -> ChunkSeq[u32] {
         }
     } else if kind == 6 {
         out.push(expr_node.a);
-        for i in 0..list_len(in a, expr_node.c) {
-            out.push(arg_of(in a, list_at(in a, expr_node.c, i)).expr);
+        for i in 0..list_len(in ast, expr_node.c) {
+            out.push(arg_of(in ast, list_at(in ast, expr_node.c, i)).expr);
         }
     } else if kind == 7 || kind == 9 || kind == 17 {
         out.push(expr_node.a);
@@ -303,8 +303,8 @@ fn kids(in a: Ast, expr: u32) -> ChunkSeq[u32] {
         }
     } else if kind == 14 {
         out.push(expr_node.a);
-        for i in 0..(list_len(in a, expr_node.b) >> 1) {
-            out.push(list_at(in a, expr_node.b, inc(i << 1)));
+        for i in 0..(list_len(in ast, expr_node.b) >> 1) {
+            out.push(list_at(in ast, expr_node.b, inc(i << 1)));
         }
     } else if kind == 15 {
         out.push(expr_node.e);
@@ -313,8 +313,8 @@ fn kids(in a: Ast, expr: u32) -> ChunkSeq[u32] {
             out.push(expr_node.c);
         }
         out.push(expr_node.d);
-        for i in 0..list_len(in a, expr_node.e) {
-            out.push(clause_of(in a, list_at(in a, expr_node.e, i)).body);
+        for i in 0..list_len(in ast, expr_node.e) {
+            out.push(clause_of(in ast, list_at(in ast, expr_node.e, i)).body);
         }
     } else if kind == 18 {
         out.push(expr_node.b);
@@ -328,7 +328,7 @@ fn kids(in a: Ast, expr: u32) -> ChunkSeq[u32] {
 }
 
 // The expressions under `root` in `walk_exprs` order (children first).
-fn post_order(in a: Ast, root: u32) -> ChunkSeq[u32] {
+fn post_order(in ast: Ast, root: u32) -> ChunkSeq[u32] {
     let mut out = ChunkSeq::new[u32]();
     // A stack of (expression, next child) rows.
     let mut stack = ChunkSeq::new[u64]();
@@ -337,7 +337,7 @@ fn post_order(in a: Ast, root: u32) -> ChunkSeq[u32] {
     stack.push(widen_u64(root));
     stack.push(0);
     kid_at.push(0);
-    let first = kids(in a, root);
+    let first = kids(in ast, root);
     kid_at.push(first.len());
     kid_lists.extend(in first.as_slice());
     loop {
@@ -359,7 +359,7 @@ fn post_order(in a: Ast, root: u32) -> ChunkSeq[u32] {
             if child == none() {
                 continue;
             }
-            let child_kids = kids(in a, child);
+            let child_kids = kids(in ast, child);
             stack.push(widen_u64(child));
             stack.push(0);
             kid_at.push(kid_lists.len());
@@ -406,12 +406,12 @@ fn jumps(in body: ChunkSeq[u8], inout ctl: Ctl) -> Sc {
     if lowered.p.d.code.len() != 0 {
         return sc_err(in "expand nested surface forms before capturing a scope".as_bytes());
     }
-    let a = lowered.ast;
-    let item = item_of(in a, 0);
-    if a.m_items.len() == 0 || item.kind != 2 {
+    let ast = lowered.ast;
+    let item = item_of(in ast, 0);
+    if ast.m_items.len() == 0 || item.kind != 2 {
         return sc_err(in "invalid scope body".as_bytes());
     }
-    let func = fn_of(in a, item.node);
+    let func = fn_of(in ast, item.node);
     if func.body == none() {
         return sc_err(in "invalid scope body".as_bytes());
     }
@@ -421,34 +421,34 @@ fn jumps(in body: ChunkSeq[u8], inout ctl: Ctl) -> Sc {
     let mut forbidden = ChunkSeq::new[u64]();
     let mut jump_rows = ChunkSeq::new[u64]();
     let mut tries = ChunkSeq::new[u64]();
-    let order = post_order(in a, func.body);
+    let order = post_order(in ast, func.body);
     for order_index in 0..order.len() {
         let expr = match order.try_get(order_index) {
             Option::Some(expr) => expr,
             Option::None => none(),
         };
-        let expr_node = expr_at(in a, expr);
+        let expr_node = expr_at(in ast, expr);
         let kind = expr_node.kind;
         if kind == 15 {
-            sp_push(inout closures, rel_s(in a, expr_node.e), rel_e(in a, expr_node.e));
+            sp_push(inout closures, rel_s(in ast, expr_node.e), rel_e(in ast, expr_node.e));
         } else if kind == 17 {
-            sp_push(inout loops, rel_s(in a, expr_node.a), rel_e(in a, expr_node.a));
+            sp_push(inout loops, rel_s(in ast, expr_node.a), rel_e(in ast, expr_node.a));
         } else if kind == 18 {
-            sp_push(inout loops, rel_s(in a, expr_node.c), rel_e(in a, expr_node.c));
+            sp_push(inout loops, rel_s(in ast, expr_node.c), rel_e(in ast, expr_node.c));
         } else if kind == 16 {
-            sp_push(inout handlers, rel_s(in a, expr), rel_e(in a, expr));
-            for i in 0..list_len(in a, expr_node.e) {
-                let handler_body = clause_of(in a, list_at(in a, expr_node.e, i)).body;
-                sp_push(inout forbidden, rel_s(in a, handler_body), rel_e(in a, handler_body));
+            sp_push(inout handlers, rel_s(in ast, expr), rel_e(in ast, expr));
+            for i in 0..list_len(in ast, expr_node.e) {
+                let handler_body = clause_of(in ast, list_at(in ast, expr_node.e, i)).body;
+                sp_push(inout forbidden, rel_s(in ast, handler_body), rel_e(in ast, handler_body));
             }
-            if name_is(in a, effect_of(in a, expr_node.a).name, in "Region".as_bytes()) {
-                sp_push(inout forbidden, rel_s(in a, expr), rel_e(in a, expr));
+            if name_is(in ast, effect_of(in ast, expr_node.a).name, in "Region".as_bytes()) {
+                sp_push(inout forbidden, rel_s(in ast, expr), rel_e(in ast, expr));
             }
         } else if kind == 9 {
-            tries.push(rel_s(in a, expr));
-            tries.push(rel_e(in a, expr));
-            tries.push(rel_s(in a, expr_node.a));
-            tries.push(rel_e(in a, expr_node.a));
+            tries.push(rel_s(in ast, expr));
+            tries.push(rel_e(in ast, expr));
+            tries.push(rel_s(in ast, expr_node.a));
+            tries.push(rel_e(in ast, expr_node.a));
         } else if kind == 20 || kind == 21 || kind == 22 {
             jump_rows.push(
                 if kind == 20 {
@@ -459,11 +459,11 @@ fn jumps(in body: ChunkSeq[u8], inout ctl: Ctl) -> Sc {
                     X_CONTINUE
                 }
             );
-            jump_rows.push(rel_s(in a, expr));
-            jump_rows.push(rel_e(in a, expr));
+            jump_rows.push(rel_s(in ast, expr));
+            jump_rows.push(rel_e(in ast, expr));
             if kind != 22 && expr_node.a != none() {
-                jump_rows.push(rel_s(in a, expr_node.a));
-                jump_rows.push(rel_e(in a, expr_node.a));
+                jump_rows.push(rel_s(in ast, expr_node.a));
+                jump_rows.push(rel_e(in ast, expr_node.a));
             } else {
                 jump_rows.push(NONE);
                 jump_rows.push(NONE);
@@ -532,11 +532,11 @@ fn jumps(in body: ChunkSeq[u8], inout ctl: Ctl) -> Sc {
 // ---------------------------------------------------------------- types
 
 // `source_type(t)`: whether `ty` is built of named and tuple types only.
-fn source_ok(in a: Ast, ty: u32) -> bool {
+fn source_ok(in ast: Ast, ty: u32) -> bool {
     if ty == none() {
         return true;
     }
-    let ty_node = type_at(in a, ty);
+    let ty_node = type_at(in ast, ty);
     let list = if ty_node.kind == 1 {
         ty_node.b
     } else if ty_node.kind == 2 {
@@ -544,53 +544,53 @@ fn source_ok(in a: Ast, ty: u32) -> bool {
     } else {
         return false;
     };
-    for i in 0..list_len(in a, list) {
-        if !source_ok(in a, list_at(in a, list, i)) {
+    for i in 0..list_len(in ast, list) {
+        if !source_ok(in ast, list_at(in ast, list, i)) {
             return false;
         }
     }
     true
 }
 
-pub fn push_name(inout out: ChunkSeq[u8], in a: Ast, sym: u32) {
-    for j in 0..name_len(in a, sym) {
-        out.push(name_byte(in a, sym, j));
+pub fn push_name(inout out: ChunkSeq[u8], in ast: Ast, sym: u32) {
+    for j in 0..name_len(in ast, sym) {
+        out.push(name_byte(in ast, sym, j));
     }
 }
 
 // `Type`'s Display for named and tuple types (an absent type is the unit
 // tuple).
-fn type_text(inout out: ChunkSeq[u8], in a: Ast, ty: u32) {
+fn type_text(inout out: ChunkSeq[u8], in ast: Ast, ty: u32) {
     if ty == none() {
         out.extend(in "()".as_bytes());
         return;
     }
-    let ty_node = type_at(in a, ty);
+    let ty_node = type_at(in ast, ty);
     if ty_node.kind == 1 {
-        let count = list_len(in a, ty_node.b);
-        if count == 1 && name_is(in a, ty_node.a, in "dyn".as_bytes()) {
+        let count = list_len(in ast, ty_node.b);
+        if count == 1 && name_is(in ast, ty_node.a, in "dyn".as_bytes()) {
             out.extend(in "dyn ".as_bytes());
-            type_text(inout out, in a, list_at(in a, ty_node.b, 0));
+            type_text(inout out, in ast, list_at(in ast, ty_node.b, 0));
             return;
         }
-        push_name(inout out, in a, ty_node.a);
+        push_name(inout out, in ast, ty_node.a);
         if count != 0 {
             out.push(91);
             for i in 0..count {
                 if i != 0 {
                     out.extend(in ", ".as_bytes());
                 }
-                type_text(inout out, in a, list_at(in a, ty_node.b, i));
+                type_text(inout out, in ast, list_at(in ast, ty_node.b, i));
             }
             out.push(93);
         }
     } else if ty_node.kind == 2 {
         out.push(40);
-        for i in 0..list_len(in a, ty_node.a) {
+        for i in 0..list_len(in ast, ty_node.a) {
             if i != 0 {
                 out.extend(in ", ".as_bytes());
             }
-            type_text(inout out, in a, list_at(in a, ty_node.a, i));
+            type_text(inout out, in ast, list_at(in ast, ty_node.a, i));
         }
         out.push(41);
     }
@@ -603,10 +603,10 @@ fn type_text(inout out: ChunkSeq[u8], in a: Ast, ty: u32) {
 // type, whether it is named Option).
 struct Amb {
     rows: ChunkSeq[u8],
-    nrows: u64,
+    row_count: u64,
     result: ChunkSeq[u8],
-    result_ok: bool,
-    option: bool
+    result_is_source: bool,
+    result_is_option: bool
 }
 
 fn has_row(in rows: ChunkSeq[u8], in row: ChunkSeq[u8]) -> bool {
@@ -650,13 +650,13 @@ fn ambient(in source: ChunkSeq[u8], call_start: u64, call_end: u64, inout amb: A
     if lowered.p.d.code.len() != 0 {
         return sc_err(in "could not determine effects at scope capture".as_bytes());
     }
-    let a = lowered.ast;
+    let ast = lowered.ast;
     // The linear effects, by name.
     let mut linear = ChunkSeq::new[u32]();
-    for item_index in 0..a.m_items.len() {
-        let item = item_of(in a, item_index);
+    for item_index in 0..ast.m_items.len() {
+        let item = item_of(in ast, item_index);
         if item.kind == 3 {
-            let effect_decl = a.effect_decls.get_or(
+            let effect_decl = ast.effect_decls.get_or(
                 idx_from_raw[EffectDeclNode](item.node),
                 EffectDeclNode {
                     name: none(),
@@ -675,24 +675,24 @@ fn ambient(in source: ChunkSeq[u8], call_start: u64, call_end: u64, inout amb: A
     // The first function, method or conformance method whose body covers
     // the call.
     let mut found = none();
-    for item_index in 0..a.m_items.len() {
+    for item_index in 0..ast.m_items.len() {
         if found != none() {
             break;
         }
-        let item = item_of(in a, item_index);
+        let item = item_of(in ast, item_index);
         let mut fns = ChunkSeq::new[u32]();
         if item.kind == 2 {
             fns.push(item.node);
         } else if item.kind == 4 {
-            let owner = a.impls.get_or(
+            let owner = ast.impls.get_or(
                 idx_from_raw[ImplNode](item.node),
                 ImplNode { ty: none(), generics: 0, methods: 0 }
             );
-            for method in 0..list_len(in a, owner.methods) {
-                fns.push(list_at(in a, owner.methods, method));
+            for method in 0..list_len(in ast, owner.methods) {
+                fns.push(list_at(in ast, owner.methods, method));
             }
         } else if item.kind == 6 {
-            let owner = a.confs.get_or(
+            let owner = ast.confs.get_or(
                 idx_from_raw[ConfNode](item.node),
                 ConfNode {
                     model: none(),
@@ -707,8 +707,8 @@ fn ambient(in source: ChunkSeq[u8], call_start: u64, call_end: u64, inout amb: A
                     end: 0
                 }
             );
-            for method in 0..list_len(in a, owner.methods) {
-                fns.push(list_at(in a, owner.methods, method));
+            for method in 0..list_len(in ast, owner.methods) {
+                fns.push(list_at(in ast, owner.methods, method));
             }
         }
         for fn_pos in 0..fns.len() {
@@ -716,9 +716,9 @@ fn ambient(in source: ChunkSeq[u8], call_start: u64, call_end: u64, inout amb: A
                 Option::Some(raw_fn) => raw_fn,
                 Option::None => none(),
             };
-            let func = fn_of(in a, fn_id);
+            let func = fn_of(in ast, fn_id);
             if func.body != none() {
-                let body_expr = expr_at(in a, func.body);
+                let body_expr = expr_at(in ast, func.body);
                 if covers(
                     widen_u64(body_expr.start),
                     widen_u64(body_expr.end),
@@ -734,12 +734,12 @@ fn ambient(in source: ChunkSeq[u8], call_start: u64, call_end: u64, inout amb: A
     if found == none() {
         return sc_err(in "scope capture requires a function body".as_bytes());
     }
-    let func = fn_of(in a, found);
+    let func = fn_of(in ast, found);
     let mut result = func.result;
-    let fn_effects = effects_of(in a, func.effects);
+    let fn_effects = effects_of(in ast, func.effects);
     let mut instances = ChunkSeq::new[u32]();
-    for i in 0..list_len(in a, fn_effects.instances) {
-        instances.push(list_at(in a, fn_effects.instances, i));
+    for i in 0..list_len(in ast, fn_effects.instances) {
+        instances.push(list_at(in ast, fn_effects.instances, i));
     }
     let mut tail = if func.effects == none() {
         none()
@@ -748,13 +748,13 @@ fn ambient(in source: ChunkSeq[u8], call_start: u64, call_end: u64, inout amb: A
     };
     // Frames as rows (body length, expression), longest first, stable.
     let mut frames = ChunkSeq::new[u64]();
-    let order = post_order(in a, func.body);
+    let order = post_order(in ast, func.body);
     for order_index in 0..order.len() {
         let expr = match order.try_get(order_index) {
             Option::Some(expr) => expr,
             Option::None => none(),
         };
-        let expr_node = expr_at(in a, expr);
+        let expr_node = expr_at(in ast, expr);
         let body = if expr_node.kind == 16 {
             expr_node.d
         } else if expr_node.kind == 15 {
@@ -765,7 +765,7 @@ fn ambient(in source: ChunkSeq[u8], call_start: u64, call_end: u64, inout amb: A
         if body == none() {
             continue;
         }
-        let body_expr = expr_at(in a, body);
+        let body_expr = expr_at(in ast, body);
         let body_start = widen_u64(body_expr.start);
         let body_end = widen_u64(body_expr.end);
         if !covers(body_start, body_end, call_start, call_end) {
@@ -795,7 +795,7 @@ fn ambient(in source: ChunkSeq[u8], call_start: u64, call_end: u64, inout amb: A
     }
     for frame in 0..(frames.len() >> 1) {
         let expr = wrapping_u32(w64(in frames, inc(frame << 1)));
-        let expr_node = expr_at(in a, expr);
+        let expr_node = expr_at(in ast, expr);
         if expr_node.kind == 15 {
             if (expr_node.b >> 8) != 0 {
                 return sc_err(
@@ -804,10 +804,10 @@ fn ambient(in source: ChunkSeq[u8], call_start: u64, call_end: u64, inout amb: A
                 );
             }
             result = expr_node.c;
-            let closure_effects = effects_of(in a, expr_node.d);
+            let closure_effects = effects_of(in ast, expr_node.d);
             instances.clear();
-            for i in 0..list_len(in a, closure_effects.instances) {
-                instances.push(list_at(in a, closure_effects.instances, i));
+            for i in 0..list_len(in ast, closure_effects.instances) {
+                instances.push(list_at(in ast, closure_effects.instances, i));
             }
             tail = if expr_node.d == none() {
                 none()
@@ -826,36 +826,36 @@ fn ambient(in source: ChunkSeq[u8], call_start: u64, call_end: u64, inout amb: A
             Option::Some(raw_effect) => raw_effect,
             Option::None => none(),
         };
-        let effect = effect_of(in a, effect_index);
-        if name_is(in a, effect.name, in "Fail".as_bytes()) {
+        let effect = effect_of(in ast, effect_index);
+        if name_is(in ast, effect.name, in "Fail".as_bytes()) {
             if effect.label != none() {
                 return sc_err(
                     in "exit-aware scope cannot intercept a labelled Fail capability".as_bytes()
                 );
             }
-            if list_len(in a, effect.args) != 1 {
+            if list_len(in ast, effect.args) != 1 {
                 return sc_err(in "expected Fail with one error type".as_bytes());
             }
-            let arg = list_at(in a, effect.args, 0);
-            if !source_ok(in a, arg) {
+            let arg = list_at(in ast, effect.args, 0);
+            if !source_ok(in ast, arg) {
                 return sc_err(
                     in "scope exit requires an explicit named or tuple payload type".as_bytes()
                 );
             }
             let mut row = ChunkSeq::new[u8]();
             row.extend(in "Fail[".as_bytes());
-            type_text(inout row, in a, arg);
+            type_text(inout row, in ast, arg);
             row.push(93);
             if !has_row(in amb.rows, in row) {
                 amb.rows.extend(in row.as_slice());
                 amb.rows.push(0);
-                amb.nrows = inc(amb.nrows);
+                amb.row_count = inc(amb.row_count);
             }
-        } else if name_is(in a, effect.name, in "ConstTime".as_bytes())
-            || name_is(in a, effect.name, in "Realtime".as_bytes())
-            || name_is(in a, effect.name, in "ConstDenorm".as_bytes())
-            || name_is(in a, effect.name, in "DetFloat".as_bytes())
-            || name_is(in a, effect.name, in "Region".as_bytes()) {} else {
+        } else if name_is(in ast, effect.name, in "ConstTime".as_bytes())
+            || name_is(in ast, effect.name, in "Realtime".as_bytes())
+            || name_is(in ast, effect.name, in "ConstDenorm".as_bytes())
+            || name_is(in ast, effect.name, in "DetFloat".as_bytes())
+            || name_is(in ast, effect.name, in "Region".as_bytes()) {} else {
             let mut is_linear = false;
             for j in 0.. linear.len() {
                 if match linear.try_get(j) {
@@ -872,17 +872,17 @@ fn ambient(in source: ChunkSeq[u8], call_start: u64, call_end: u64, inout amb: A
                 message.extend(
                     in "exit-aware scope cannot relay potentially abortive effect `".as_bytes()
                 );
-                push_name(inout message, in a, effect.name);
+                push_name(inout message, in ast, effect.name);
                 message.push(96);
                 return sc_err_seq(in message);
             }
         }
     }
-    amb.result_ok = source_ok(in a, result);
-    type_text(inout amb.result, in a, result);
-    amb.option = result != none()
-        && type_at(in a, result).kind == 1
-        && name_is(in a, type_at(in a, result).a, in "Option".as_bytes());
+    amb.result_is_source = source_ok(in ast, result);
+    type_text(inout amb.result, in ast, result);
+    amb.result_is_option = result != none()
+        && type_at(in ast, result).kind == 1
+        && name_is(in ast, type_at(in ast, result).a, in "Option".as_bytes());
     sc_ok()
 }
 
@@ -1103,7 +1103,7 @@ fn exit_known(in kinds: ChunkSeq[u64], exit: u64) -> u64 {
 // `lower(r, captures, source, call, mark, max)`.
 pub fn lower(
     inout rendered: Rd,
-    in c: Caps,
+    in caps: Caps,
     in source: ChunkSeq[u8],
     call_start: u64,
     call_end: u64,
@@ -1113,11 +1113,11 @@ pub fn lower(
     // The scope captures' values.
     let mut scope = NONE;
     let mut nscopes: u64 = 0;
-    for cap in 0..cap_count(in c) {
-        if sort_in(in c, cap, in "scope".as_bytes()) {
-            for value_index in 0..cap_at(in c, cap, 4) {
+    for cap in 0..cap_count(in caps) {
+        if sort_in(in caps, cap, in "scope".as_bytes()) {
+            for value_index in 0..cap_at(in caps, cap, 4) {
                 if nscopes == 0 {
-                    scope = value_at(in c, cap, value_index);
+                    scope = value_at(in caps, cap, value_index);
                 }
                 nscopes = inc(nscopes);
             }
@@ -1129,9 +1129,9 @@ pub fn lower(
     if nscopes > 1 {
         return sc_err(in "a rule can resume only one captured scope".as_bytes());
     }
-    let value_start = w64(in c.w, scope);
-    let value_end = w64(in c.w, inc(scope));
-    let from_tail = w64(in c.w, add(scope, 2)) != 0;
+    let value_start = w64(in caps.words, scope);
+    let value_end = w64(in caps.words, inc(scope));
+    let from_tail = w64(in caps.words, add(scope, 2)) != 0;
     let mut matches: u64 = 0;
     let mut body_start: u64 = 0;
     let mut body_end: u64 = 0;
@@ -1219,17 +1219,17 @@ pub fn lower(
     }
     let mut amb = Amb {
         rows: ChunkSeq::new[u8](),
-        nrows: 0,
+        row_count: 0,
         result: ChunkSeq::new[u8](),
-        result_ok: false,
-        option: false
+        result_is_source: false,
+        result_is_option: false
     };
     let ambient_sc = ambient(in source, call_start, call_end, inout amb);
     if ambient_sc.failed {
         return ambient_sc;
     }
-    let option_try = ctl.questions.len() != 0 && amb.option;
-    if option_try && (amb.nrows != 0 || ctl.question_in_handler) {
+    let option_try = ctl.questions.len() != 0 && amb.result_is_option;
+    if option_try && (amb.row_count != 0 || ctl.question_in_handler) {
         return sc_err(
             in "use an explicit match for `?` when both Option and Fail exits are active in a scope"
                 .as_bytes()
@@ -1260,7 +1260,7 @@ pub fn lower(
     let mut head = ChunkSeq::new[u8]();
     let mut foot = ChunkSeq::new[u8]();
     if relay_return {
-        if !amb.result_ok {
+        if !amb.result_is_source {
             return sc_err(
                 in "scope exit requires an explicit named or tuple payload type".as_bytes()
             );
@@ -1275,7 +1275,7 @@ pub fn lower(
     }
     // The Fail rows, each closed by a 0 byte.
     let mut at: u64 = 0;
-    for fail_row in 0..amb.nrows {
+    for fail_row in 0..amb.row_count {
         cat(inout head, in "handle ");
         loop {
             let byte = b8(in amb.rows, at);
@@ -1296,7 +1296,7 @@ pub fn lower(
         cat_seq(inout foot, in encoded);
         cat(inout foot, in "; }");
     }
-    for fail_row in 0..amb.nrows {
+    for fail_row in 0..amb.row_count {
         cat(inout foot, in " } with { return ");
         cat_seq(inout foot, in value);
         cat(inout foot, in " => Result::Ok(");
@@ -1423,7 +1423,7 @@ pub fn lower(
         cat(inout text, in ", }");
         result = text;
     }
-    for fail_wrap in 0..amb.nrows {
+    for fail_wrap in 0..amb.row_count {
         let mut text = ChunkSeq::new[u8]();
         cat(inout text, in "match ");
         cat_seq(inout text, in value);

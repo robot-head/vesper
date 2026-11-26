@@ -86,9 +86,9 @@ pub fn pattern_hygiene(inout rendered: Rd, in mark: ChunkSeq[u8]) -> Sc {
         }
         return sc_err_seq(in message);
     }
-    let a = lowered.ast;
-    let item = match a.m_items.try_get(0) {
-        Option::Some(raw_item) => a.items.get_or(
+    let ast = lowered.ast;
+    let item = match ast.m_items.try_get(0) {
+        Option::Some(raw_item) => ast.items.get_or(
             @vesper-std/arena::idx_from_raw[@vesper/ast::ItemNode](raw_item),
             @vesper/ast::ItemNode { kind: 0, node: 0 }
         ),
@@ -97,22 +97,22 @@ pub fn pattern_hygiene(inout rendered: Rd, in mark: ChunkSeq[u8]) -> Sc {
     if item.kind != 2 {
         return sc_err(in "missing pattern template wrapper".as_bytes());
     }
-    let func = fn_of(in a, item.node);
+    let func = fn_of(in ast, item.node);
     if func.body == none() {
         return sc_err(in "missing pattern template".as_bytes());
     }
-    let body = expr_at(in a, func.body);
+    let body = expr_at(in ast, func.body);
     if body.kind != 5 || body.b == none() {
         return sc_err(in "missing match pattern".as_bytes());
     }
-    let tail = expr_at(in a, body.b);
+    let tail = expr_at(in ast, body.b);
     if tail.kind != 14 {
         return sc_err(in "expected a match pattern".as_bytes());
     }
     // The stack of (pattern, field name or NONE).
     let mut stack = ChunkSeq::new[u32]();
-    for i in 0..(list_len(in a, tail.b) >> 1) {
-        stack.push(list_at(in a, tail.b, i << 1));
+    for i in 0..(list_len(in ast, tail.b) >> 1) {
+        stack.push(list_at(in ast, tail.b, i << 1));
         stack.push(none());
     }
     let mut names = ChunkSeq::new[u32]();
@@ -134,18 +134,18 @@ pub fn pattern_hygiene(inout rendered: Rd, in mark: ChunkSeq[u8]) -> Sc {
             Option::None => none(),
         };
         stack.truncate(sub(n, 2));
-        let pat = pat_at(in a, pat_index);
+        let pat = pat_at(in ast, pat_index);
         if pat.kind == 4 {
-            for i in 0..list_len(in a, pat.a) {
-                stack.push(list_at(in a, pat.a, i));
+            for i in 0..list_len(in ast, pat.a) {
+                stack.push(list_at(in ast, pat.a, i));
                 stack.push(none());
             }
         } else if pat.kind == 5 {
-            for i in 0..(list_len(in a, pat.b) >> 1) {
-                stack.push(list_at(in a, pat.b, inc(i << 1)));
+            for i in 0..(list_len(in ast, pat.b) >> 1) {
+                stack.push(list_at(in ast, pat.b, inc(i << 1)));
                 stack.push(
                     if pat.c != 0 {
-                        list_at(in a, pat.b, i << 1)
+                        list_at(in ast, pat.b, i << 1)
                     } else {
                         none()
                     }
@@ -171,11 +171,11 @@ pub fn pattern_hygiene(inout rendered: Rd, in mark: ChunkSeq[u8]) -> Sc {
             fresh.extend(in "pattern_".as_bytes());
             push_decimal(inout fresh, id);
             let shorthand = field != none()
-                && same_name(in a, field, pat.a)
+                && same_name(in ast, field, pat.a)
                 && !after_colon(in rendered.text, binder_start);
             let first = pool.len();
             if shorthand {
-                push_name(inout pool, in a, pat.a);
+                push_name(inout pool, in ast, pat.a);
                 pool.extend(in ": ".as_bytes());
             }
             pool.extend(in fresh.as_slice());
@@ -272,12 +272,12 @@ pub fn pattern_hygiene(inout rendered: Rd, in mark: ChunkSeq[u8]) -> Sc {
     sc_ok()
 }
 
-fn same_name(in a: @vesper/ast::Ast, left_name: u32, right_name: u32) -> bool {
-    if name_len(in a, left_name) != name_len(in a, right_name) {
+fn same_name(in ast: @vesper/ast::Ast, left_name: u32, right_name: u32) -> bool {
+    if name_len(in ast, left_name) != name_len(in ast, right_name) {
         return false;
     }
-    for j in 0..name_len(in a, left_name) {
-        if name_byte(in a, left_name, j) != name_byte(in a, right_name, j) {
+    for j in 0..name_len(in ast, left_name) {
+        if name_byte(in ast, left_name, j) != name_byte(in ast, right_name, j) {
             return false;
         }
     }

@@ -73,13 +73,13 @@ pub fn push_range(inout out: ChunkSeq[u8], in bytes: ChunkSeq[u8], start: u64, e
 
 // The captures of one match: the matcher's words and, per capture in
 // name order, rows of seven words (word offsets of its name and sort,
-// its pass code, the first and count of its value offsets in `voff`, the
-// first and count of its extent offsets in `eoff`).
+// its pass code, the first and count of its value offsets in `value_offsets`, the
+// first and count of its extent offsets in `extent_offsets`).
 pub struct Caps {
-    w: ChunkSeq[u64],
-    cr: ChunkSeq[u64],
-    voff: ChunkSeq[u64],
-    eoff: ChunkSeq[u64]
+    words: ChunkSeq[u64],
+    rows: ChunkSeq[u64],
+    value_offsets: ChunkSeq[u64],
+    extent_offsets: ChunkSeq[u64]
 }
 
 pub fn caps_read(sink words: ChunkSeq[u64]) -> Caps {
@@ -117,43 +117,43 @@ pub fn caps_read(sink words: ChunkSeq[u64]) -> Caps {
         cr.push(efirst);
         cr.push(extent_count);
     }
-    Caps { w: words, cr: cr, voff: voff, eoff: eoff }
+    Caps { words: words, rows: cr, value_offsets: voff, extent_offsets: eoff }
 }
 
-pub fn cap_count(in c: Caps) -> u64 {
-    c.cr.len() / 7
+pub fn cap_count(in caps: Caps) -> u64 {
+    caps.rows.len() / 7
 }
 
-pub fn cap_at(in c: Caps, cap: u64, field: u64) -> u64 {
-    w64(in c.cr, add(wrapping_mul(cap, 7), field))
+pub fn cap_at(in caps: Caps, cap: u64, field: u64) -> u64 {
+    w64(in caps.rows, add(wrapping_mul(cap, 7), field))
 }
 
 // Word offset of value `value_index` of capture `cap`: start, end, from_tail, then
 // the indices (length, words).
-pub fn value_at(in c: Caps, cap: u64, value_index: u64) -> u64 {
-    w64(in c.voff, add(cap_at(in c, cap, 3), value_index))
+pub fn value_at(in caps: Caps, cap: u64, value_index: u64) -> u64 {
+    w64(in caps.value_offsets, add(cap_at(in caps, cap, 3), value_index))
 }
 
-fn extent_at(in c: Caps, cap: u64, extent: u64) -> u64 {
-    w64(in c.eoff, add(cap_at(in c, cap, 5), extent))
+fn extent_at(in caps: Caps, cap: u64, extent: u64) -> u64 {
+    w64(in caps.extent_offsets, add(cap_at(in caps, cap, 5), extent))
 }
 
 // Whether the text at word offset `at` (length, bytes) is `b[s..e]`.
-fn text_eq(in c: Caps, at: u64, in bytes: ChunkSeq[u8], start: u64, end: u64) -> bool {
-    let n = w64(in c.w, at);
+fn text_eq(in caps: Caps, at: u64, in bytes: ChunkSeq[u8], start: u64, end: u64) -> bool {
+    let n = w64(in caps.words, at);
     if n != sub(end, start) {
         return false;
     }
     for j in 0..n {
-        if w64(in c.w, add(inc(at), j)) != widen_u64(b8(in bytes, add(start, j))) {
+        if w64(in caps.words, add(inc(at), j)) != widen_u64(b8(in bytes, add(start, j))) {
             return false;
         }
     }
     true
 }
 
-pub fn text_is(in c: Caps, at: u64, in expected: Slice[u8]) -> bool {
-    let n = w64(in c.w, at);
+pub fn text_is(in caps: Caps, at: u64, in expected: Slice[u8]) -> bool {
+    let n = w64(in caps.words, at);
     if n != expected.len() {
         return false;
     }
@@ -162,7 +162,7 @@ pub fn text_is(in c: Caps, at: u64, in expected: Slice[u8]) -> bool {
             Option::Some(byte) => byte,
             Option::None => 0,
         };
-        if w64(in c.w, add(inc(at), j)) != widen_u64(byte) {
+        if w64(in caps.words, add(inc(at), j)) != widen_u64(byte) {
             return false;
         }
     }
@@ -170,9 +170,9 @@ pub fn text_is(in c: Caps, at: u64, in expected: Slice[u8]) -> bool {
 }
 
 // `captures.get(name)` for the template's `b[s..e]`: the capture, or NONE.
-fn find_cap(in c: Caps, in bytes: ChunkSeq[u8], start: u64, end: u64) -> u64 {
-    for cap in 0..cap_count(in c) {
-        if text_eq(in c, cap_at(in c, cap, 0), in bytes, start, end) {
+fn find_cap(in caps: Caps, in bytes: ChunkSeq[u8], start: u64, end: u64) -> u64 {
+    for cap in 0..cap_count(in caps) {
+        if text_eq(in caps, cap_at(in caps, cap, 0), in bytes, start, end) {
             return cap;
         }
     }
@@ -181,11 +181,11 @@ fn find_cap(in c: Caps, in bytes: ChunkSeq[u8], start: u64, end: u64) -> u64 {
 
 // `v.indices.as_slice().cmp(&ix[..n])` for the value at word offset `at`:
 // 0 less, 1 equal, 2 greater.
-fn indices_cmp(in c: Caps, at: u64, in indices: ChunkSeq[u64], n: u64) -> u64 {
-    let len = w64(in c.w, at);
+fn indices_cmp(in caps: Caps, at: u64, in indices: ChunkSeq[u64], n: u64) -> u64 {
+    let len = w64(in caps.words, at);
     let common = if len < n { len } else { n };
     for j in 0..common {
-        let value_index = w64(in c.w, add(inc(at), j));
+        let value_index = w64(in caps.words, add(inc(at), j));
         let wanted_index = w64(in indices, j);
         if value_index < wanted_index {
             return 0;
@@ -205,8 +205,8 @@ fn indices_cmp(in c: Caps, at: u64, in indices: ChunkSeq[u64], n: u64) -> u64 {
 
 // `cap.values.binary_search_by(|v| v.indices.cmp(&ix[..n]))` in std's
 // order of probes: the value's index, or NONE.
-fn value_search(in c: Caps, cap: u64, in indices: ChunkSeq[u64], n: u64) -> u64 {
-    let mut size = cap_at(in c, cap, 4);
+fn value_search(in caps: Caps, cap: u64, in indices: ChunkSeq[u64], n: u64) -> u64 {
+    let mut size = cap_at(in caps, cap, 4);
     if size == 0 {
         return NONE;
     }
@@ -217,12 +217,12 @@ fn value_search(in c: Caps, cap: u64, in indices: ChunkSeq[u64], n: u64) -> u64 
         }
         let half = size >> 1;
         let mid = add(base, half);
-        if indices_cmp(in c, add(value_at(in c, cap, mid), 3), in indices, n) != 2 {
+        if indices_cmp(in caps, add(value_at(in caps, cap, mid), 3), in indices, n) != 2 {
             base = mid;
         }
         size = sub(size, half);
     }
-    if indices_cmp(in c, add(value_at(in c, cap, base), 3), in indices, n) == 1 {
+    if indices_cmp(in caps, add(value_at(in caps, cap, base), 3), in indices, n) == 1 {
         base
     } else {
         NONE
@@ -230,10 +230,10 @@ fn value_search(in c: Caps, cap: u64, in indices: ChunkSeq[u64], n: u64) -> u64 
 }
 
 // `cap.extents.get(&ix[..n])`: the extent's word offset, or NONE.
-fn extent_find(in c: Caps, cap: u64, in indices: ChunkSeq[u64], n: u64) -> u64 {
-    for extent in 0..cap_at(in c, cap, 6) {
-        let at = extent_at(in c, cap, extent);
-        if indices_cmp(in c, at, in indices, n) == 1 {
+fn extent_find(in caps: Caps, cap: u64, in indices: ChunkSeq[u64], n: u64) -> u64 {
+    for extent in 0..cap_at(in caps, cap, 6) {
+        let at = extent_at(in caps, cap, extent);
+        if indices_cmp(in caps, at, in indices, n) == 1 {
             return at;
         }
     }
@@ -243,32 +243,32 @@ fn extent_find(in c: Caps, cap: u64, in indices: ChunkSeq[u64], n: u64) -> u64 {
 // The template's tokens, trivia and Eof included: rows of kind, start,
 // end.
 struct Tt {
-    tk: ChunkSeq[u32]
+    tokens: ChunkSeq[u32]
 }
 
-fn tt_len(in t: Tt) -> u64 {
-    t.tk.len() / 3
+fn tt_len(in toks: Tt) -> u64 {
+    toks.tokens.len() / 3
 }
 
-fn tt_kind(in t: Tt, i: u64) -> u8 {
-    match t.tk.try_get(wrapping_mul(i, 3)) {
+fn tt_kind(in toks: Tt, i: u64) -> u8 {
+    match toks.tokens.try_get(wrapping_mul(i, 3)) {
         Option::Some(k) => wrapping_u8(widen_u64(k)),
         Option::None => k_eof(),
     }
 }
 
-fn tt_s(in t: Tt, i: u64) -> u64 {
-    w32(in t.tk, inc(wrapping_mul(i, 3)))
+fn tt_s(in toks: Tt, i: u64) -> u64 {
+    w32(in toks.tokens, inc(wrapping_mul(i, 3)))
 }
 
-fn tt_e(in t: Tt, i: u64) -> u64 {
-    w32(in t.tk, add(wrapping_mul(i, 3), 2))
+fn tt_e(in toks: Tt, i: u64) -> u64 {
+    w32(in toks.tokens, add(wrapping_mul(i, 3), 2))
 }
 
-fn next(in t: Tt, i: u64) -> u64 {
+fn next(in toks: Tt, i: u64) -> u64 {
     let mut pos = i;
     loop {
-        if pos >= tt_len(in t) || !trivia_kind(tt_kind(in t, pos)) {
+        if pos >= tt_len(in toks) || !trivia_kind(tt_kind(in toks, pos)) {
             break;
         }
         pos = inc(pos);
@@ -283,24 +283,24 @@ struct Tx {
     failed: bool,
     msg: ChunkSeq[u8],
     parts: ChunkSeq[u64],
-    lp: ChunkSeq[u64],
-    np: ChunkSeq[u64]
+    child_lists: ChunkSeq[u64],
+    name_sets: ChunkSeq[u64]
 }
 
-fn tx_fail(inout x: Tx, in text: Slice[u8]) {
-    if !x.failed {
-        x.failed = true;
-        x.msg.clear();
-        x.msg.extend(in text);
+fn tx_fail(inout parsed: Tx, in text: Slice[u8]) {
+    if !parsed.failed {
+        parsed.failed = true;
+        parsed.msg.clear();
+        parsed.msg.extend(in text);
     }
 }
 
-fn part_at(in x: Tx, part: u64, field: u64) -> u64 {
-    w64(in x.parts, add(wrapping_mul(part, PW), field))
+fn part_at(in parsed: Tx, part: u64, field: u64) -> u64 {
+    w64(in parsed.parts, add(wrapping_mul(part, PW), field))
 }
 
 fn push_part(
-    inout x: Tx,
+    inout parsed: Tx,
     kind: u64,
     a: u64,
     b: u64,
@@ -310,26 +310,32 @@ fn push_part(
     f: u64,
     g: u64
 ) -> u64 {
-    let id = x.parts.len() / PW;
-    x.parts.push(kind);
-    x.parts.push(a);
-    x.parts.push(b);
-    x.parts.push(c);
-    x.parts.push(d);
-    x.parts.push(e);
-    x.parts.push(f);
-    x.parts.push(g);
+    let id = parsed.parts.len() / PW;
+    parsed.parts.push(kind);
+    parsed.parts.push(a);
+    parsed.parts.push(b);
+    parsed.parts.push(c);
+    parsed.parts.push(d);
+    parsed.parts.push(e);
+    parsed.parts.push(f);
+    parsed.parts.push(g);
     id
 }
 
 // `b[s1..e1] < b[s2..e2]` byte-wise.
-fn range_less(in bytes: ChunkSeq[u8], s1: u64, e1: u64, s2: u64, e2: u64) -> bool {
-    let n1 = sub(e1, s1);
-    let n2 = sub(e2, s2);
+fn range_less(
+    in bytes: ChunkSeq[u8],
+    left_start: u64,
+    left_end: u64,
+    right_start: u64,
+    right_end: u64
+) -> bool {
+    let n1 = sub(left_end, left_start);
+    let n2 = sub(right_end, right_start);
     let common = if n1 < n2 { n1 } else { n2 };
     for j in 0..common {
-        let left_byte = b8(in bytes, add(s1, j));
-        let right_byte = b8(in bytes, add(s2, j));
+        let left_byte = b8(in bytes, add(left_start, j));
+        let right_byte = b8(in bytes, add(right_start, j));
         if left_byte != right_byte {
             return left_byte < right_byte;
         }
@@ -337,8 +343,15 @@ fn range_less(in bytes: ChunkSeq[u8], s1: u64, e1: u64, s2: u64, e2: u64) -> boo
     n1 < n2
 }
 
-fn range_eq(in bytes: ChunkSeq[u8], s1: u64, e1: u64, s2: u64, e2: u64) -> bool {
-    !range_less(in bytes, s1, e1, s2, e2) && !range_less(in bytes, s2, e2, s1, e1)
+fn range_eq(
+    in bytes: ChunkSeq[u8],
+    left_start: u64,
+    left_end: u64,
+    right_start: u64,
+    right_end: u64
+) -> bool {
+    !range_less(in bytes, left_start, left_end, right_start, right_end)
+        && !range_less(in bytes, right_start, right_end, left_start, left_end)
 }
 
 fn ascii_punctuation(byte: u8) -> bool {
@@ -358,17 +371,17 @@ fn hole_name_kind(kind: u8) -> bool {
 }
 
 // `parse(s, tokens, start..end, depth)`: the list of parts (first << 32
-// | count in `lp`), or the refusal.
+// | count in `child_lists`), or the refusal.
 fn parse(
     in template: ChunkSeq[u8],
     in toks: Tt,
-    inout x: Tx,
+    inout parsed: Tx,
     start: u64,
     end: u64,
     depth: u64
 ) -> u64 {
     if depth >= 64 {
-        tx_fail(inout x, in "template repetition nesting limit exceeded".as_bytes());
+        tx_fail(inout parsed, in "template repetition nesting limit exceeded".as_bytes());
         return 0;
     }
     let mut ids = ChunkSeq::new[u64]();
@@ -379,7 +392,17 @@ fn parse(
         }
         if tt_kind(in toks, tok) != k_dollar() {
             ids.push(
-                push_part(inout x, P_TEXT, tt_s(in toks, tok), tt_e(in toks, tok), 0, 0, 0, 0, 0)
+                push_part(
+                    inout parsed,
+                    P_TEXT,
+                    tt_s(in toks, tok),
+                    tt_e(in toks, tok),
+                    0,
+                    0,
+                    0,
+                    0,
+                    0
+                )
             );
             tok = inc(tok);
             continue;
@@ -405,31 +428,31 @@ fn parse(
                 tok = inc(tok);
             }
             if tok == end {
-                tx_fail(inout x, in "unclosed template repetition".as_bytes());
+                tx_fail(inout parsed, in "unclosed template repetition".as_bytes());
                 return 0;
             }
-            let body = parse(in template, in toks, inout x, begin, tok, inc(depth));
-            if x.failed {
+            let body = parse(in template, in toks, inout parsed, begin, tok, inc(depth));
+            if parsed.failed {
                 return 0;
             }
             // The body's hole names and its repetitions' names, sorted
             // and without duplicates (a `BTreeSet`).
             let mut names = ChunkSeq::new[u64]();
             for j in 0..(body & 4294967295) {
-                let part = w64(in x.lp, add(body >> 32, j));
-                let kind = part_at(in x, part, 0);
+                let part = w64(in parsed.child_lists, add(body >> 32, j));
+                let kind = part_at(in parsed, part, 0);
                 if kind == P_HOLE {
-                    names.push(part_at(in x, part, 1));
-                    names.push(part_at(in x, part, 2));
+                    names.push(part_at(in parsed, part, 1));
+                    names.push(part_at(in parsed, part, 2));
                 } else if kind == P_REPEAT {
-                    let first = part_at(in x, part, 6);
-                    for name in 0..part_at(in x, part, 7) {
-                        names.push(w64(in x.np, add(first, name << 1)));
-                        names.push(w64(in x.np, inc(add(first, name << 1))));
+                    let first = part_at(in parsed, part, 6);
+                    for name in 0..part_at(in parsed, part, 7) {
+                        names.push(w64(in parsed.name_sets, add(first, name << 1)));
+                        names.push(w64(in parsed.name_sets, inc(add(first, name << 1))));
                     }
                 }
             }
-            let first = x.np.len();
+            let first = parsed.name_sets.len();
             let mut count: u64 = 0;
             for j in 0..(names.len() >> 1) {
                 let name_start = w64(in names, j << 1);
@@ -438,8 +461,8 @@ fn parse(
                 let mut at = count;
                 let mut dup = false;
                 for existing in 0..count {
-                    let other_start = w64(in x.np, add(first, existing << 1));
-                    let other_end = w64(in x.np, inc(add(first, existing << 1)));
+                    let other_start = w64(in parsed.name_sets, add(first, existing << 1));
+                    let other_end = w64(in parsed.name_sets, inc(add(first, existing << 1)));
                     if range_eq(in template, name_start, name_end, other_start, other_end) {
                         dup = true;
                         break;
@@ -452,8 +475,8 @@ fn parse(
                 if dup {
                     continue;
                 }
-                x.np.push(0);
-                x.np.push(0);
+                parsed.name_sets.push(0);
+                parsed.name_sets.push(0);
                 let mut slot = count;
                 loop {
                     if slot <= at {
@@ -461,12 +484,12 @@ fn parse(
                     }
                     let from = add(first, sub(slot, 1) << 1);
                     let to = add(first, slot << 1);
-                    x.np.try_set(to, w64(in x.np, from));
-                    x.np.try_set(inc(to), w64(in x.np, inc(from)));
+                    parsed.name_sets.try_set(to, w64(in parsed.name_sets, from));
+                    parsed.name_sets.try_set(inc(to), w64(in parsed.name_sets, inc(from)));
                     slot = sub(slot, 1);
                 }
-                x.np.try_set(add(first, at << 1), name_start);
-                x.np.try_set(inc(add(first, at << 1)), name_end);
+                parsed.name_sets.try_set(add(first, at << 1), name_start);
+                parsed.name_sets.try_set(inc(add(first, at << 1)), name_end);
                 count = inc(count);
             }
             tok = next(in toks, inc(tok));
@@ -475,32 +498,35 @@ fn parse(
             let kind = tt_kind(in toks, tok);
             if !(tok < tt_len(in toks) && (kind == k_plus() || kind == k_star())) {
                 if !(tok < end) {
-                    tx_fail(inout x, in "missing template repetition quantifier".as_bytes());
+                    tx_fail(inout parsed, in "missing template repetition quantifier".as_bytes());
                     return 0;
                 }
                 sep_start = tt_s(in toks, tok);
                 sep_end = tt_e(in toks, tok);
                 for j in sep_start..sep_end {
                     if !ascii_punctuation(b8(in template, j)) {
-                        tx_fail(inout x, in "invalid template repetition separator".as_bytes());
+                        tx_fail(
+                            inout parsed,
+                            in "invalid template repetition separator".as_bytes()
+                        );
                         return 0;
                     }
                 }
                 tok = next(in toks, inc(tok));
             }
             if !(tok < end) {
-                tx_fail(inout x, in "missing template repetition quantifier".as_bytes());
+                tx_fail(inout parsed, in "missing template repetition quantifier".as_bytes());
                 return 0;
             }
             let quant = tt_kind(in toks, tok);
             if quant != k_star() && quant != k_plus() {
-                tx_fail(inout x, in "expected * or + after template repetition".as_bytes());
+                tx_fail(inout parsed, in "expected * or + after template repetition".as_bytes());
                 return 0;
             }
             let plus: u64 = if quant == k_plus() { 1 } else { 0 };
             ids.push(
                 push_part(
-                    inout x,
+                    inout parsed,
                     P_REPEAT,
                     body >> 32,
                     body & 4294967295,
@@ -517,13 +543,13 @@ fn parse(
                 tok = next(in toks, inc(tok));
             }
             if !(tok < end && hole_name_kind(tt_kind(in toks, tok))) {
-                tx_fail(inout x, in "expected a template hole name".as_bytes());
+                tx_fail(inout parsed, in "expected a template hole name".as_bytes());
                 return 0;
             }
             let seq_code: u64 = if seq { 1 } else { 0 };
             ids.push(
                 push_part(
-                    inout x,
+                    inout parsed,
                     P_HOLE,
                     tt_s(in toks, tok),
                     tt_e(in toks, tok),
@@ -537,9 +563,9 @@ fn parse(
         }
         tok = inc(tok);
     }
-    let first = x.lp.len();
+    let first = parsed.child_lists.len();
     for j in 0..ids.len() {
-        x.lp.push(w64(in ids, j));
+        parsed.child_lists.push(w64(in ids, j));
     }
     (first << 32) | ids.len()
 }
@@ -552,29 +578,29 @@ pub struct Sk {
     holes: ChunkSeq[u64],
     slots: ChunkSeq[u64],
     steps: u64,
-    max: u64,
+    max_bytes: u64,
     failed: bool,
     msg: ChunkSeq[u8]
 }
 
-pub fn sk_fail(inout sk: Sk, in text: Slice[u8]) {
-    if !sk.failed {
-        sk.failed = true;
-        sk.msg.clear();
-        sk.msg.extend(in text);
+pub fn sk_fail(inout skeleton: Sk, in text: Slice[u8]) {
+    if !skeleton.failed {
+        skeleton.failed = true;
+        skeleton.msg.clear();
+        skeleton.msg.extend(in text);
     }
 }
 
 // `bounded`'s check: false (and the refusal) when `n` more bytes would
 // pass the limit.
-pub fn room(inout sk: Sk, n: u64) -> bool {
-    let left = if sk.src.len() > sk.max {
+pub fn room(inout skeleton: Sk, n: u64) -> bool {
+    let left = if skeleton.src.len() > skeleton.max_bytes {
         0
     } else {
-        sub(sk.max, sk.src.len())
+        sub(skeleton.max_bytes, skeleton.src.len())
     };
     if n > left {
-        sk_fail(inout sk, in "sugar expansion byte limit exceeded".as_bytes());
+        sk_fail(inout skeleton, in "sugar expansion byte limit exceeded".as_bytes());
         return false;
     }
     true
@@ -672,15 +698,15 @@ fn operand_span(in text: ChunkSeq[u8]) -> u64 {
 }
 
 pub fn value_text(
-    in c: Caps,
+    in caps: Caps,
     at: u64,
     in invocation: ChunkSeq[u8],
     in tail: ChunkSeq[u8]
 ) -> ChunkSeq[u8] {
-    let start = w64(in c.w, at);
-    let end = w64(in c.w, inc(at));
+    let start = w64(in caps.words, at);
+    let end = w64(in caps.words, inc(at));
     let mut out = ChunkSeq::new[u8]();
-    if w64(in c.w, add(at, 2)) == 1 {
+    if w64(in caps.words, add(at, 2)) == 1 {
         push_range(inout out, in tail, start, end);
     } else {
         push_range(inout out, in invocation, start, end);
@@ -688,42 +714,42 @@ pub fn value_text(
     out
 }
 
-pub fn sort_in(in c: Caps, cap: u64, in names: Slice[u8]) -> bool {
-    text_is(in c, cap_at(in c, cap, 1), in names)
+pub fn sort_in(in caps: Caps, cap: u64, in names: Slice[u8]) -> bool {
+    text_is(in caps, cap_at(in caps, cap, 1), in names)
 }
 
 // `Skeleton::emit(parts, caps, indices)` for the part list `list`.
 fn emit(
     in template: ChunkSeq[u8],
-    in x: Tx,
+    in parsed: Tx,
     list: u64,
-    in c: Caps,
+    in caps: Caps,
     in invocation: ChunkSeq[u8],
     in tail: ChunkSeq[u8],
     in mark: ChunkSeq[u8],
-    inout sk: Sk,
+    inout skeleton: Sk,
     inout indices: ChunkSeq[u64]
 ) {
     for j in 0..(list & 4294967295) {
-        let part = w64(in x.lp, add(list >> 32, j));
-        if sk.steps == 0 {
-            sk_fail(inout sk, in "sugar template work limit exceeded".as_bytes());
+        let part = w64(in parsed.child_lists, add(list >> 32, j));
+        if skeleton.steps == 0 {
+            sk_fail(inout skeleton, in "sugar template work limit exceeded".as_bytes());
             return;
         }
-        sk.steps = sub(sk.steps, 1);
-        let kind = part_at(in x, part, 0);
+        skeleton.steps = sub(skeleton.steps, 1);
+        let kind = part_at(in parsed, part, 0);
         if kind == P_TEXT {
-            let text_start = part_at(in x, part, 1);
-            let text_end = part_at(in x, part, 2);
-            if !room(inout sk, sub(text_end, text_start)) {
+            let text_start = part_at(in parsed, part, 1);
+            let text_end = part_at(in parsed, part, 2);
+            if !room(inout skeleton, sub(text_end, text_start)) {
                 return;
             }
-            push_range(inout sk.src, in template, text_start, text_end);
+            push_range(inout skeleton.src, in template, text_start, text_end);
         } else if kind == P_HOLE {
-            let name_start = part_at(in x, part, 1);
-            let name_end = part_at(in x, part, 2);
-            let sequence = part_at(in x, part, 3) == 1;
-            let cap = find_cap(in c, in template, name_start, name_end);
+            let name_start = part_at(in parsed, part, 1);
+            let name_end = part_at(in parsed, part, 2);
+            let sequence = part_at(in parsed, part, 3) == 1;
+            let cap = find_cap(in caps, in template, name_start, name_end);
             if cap == NONE {
                 let mut message = ChunkSeq::new[u8]();
                 hole_message(
@@ -733,15 +759,15 @@ fn emit(
                     name_start,
                     name_end
                 );
-                sk_fail(inout sk, in message.as_slice());
+                sk_fail(inout skeleton, in message.as_slice());
                 return;
             }
-            let seq_sort = sort_in(in c, cap, in "stmts".as_bytes())
-                || sort_in(in c, cap, in "args".as_bytes())
-                || sort_in(in c, cap, in "pats".as_bytes())
-                || sort_in(in c, cap, in "items".as_bytes());
+            let seq_sort = sort_in(in caps, cap, in "stmts".as_bytes())
+                || sort_in(in caps, cap, in "args".as_bytes())
+                || sort_in(in caps, cap, in "pats".as_bytes())
+                || sort_in(in caps, cap, in "items".as_bytes());
             if seq_sort && !sequence
-                || sequence && !seq_sort && !sort_in(in c, cap, in "scope".as_bytes()) {
+                || sequence && !seq_sort && !sort_in(in caps, cap, in "scope".as_bytes()) {
                 let mut message = ChunkSeq::new[u8]();
                 hole_message(
                     inout message,
@@ -751,21 +777,21 @@ fn emit(
                     name_end
                 );
                 message.push(58);
-                let sort = cap_at(in c, cap, 1);
-                for sort_byte in 0..w64(in c.w, sort) {
-                    message.push(wrapping_u8(w64(in c.w, add(inc(sort), sort_byte))));
+                let sort = cap_at(in caps, cap, 1);
+                for sort_byte in 0..w64(in caps.words, sort) {
+                    message.push(wrapping_u8(w64(in caps.words, add(inc(sort), sort_byte))));
                 }
-                sk_fail(inout sk, in message.as_slice());
+                sk_fail(inout skeleton, in message.as_slice());
                 return;
             }
             let mut depth = indices.len();
             let mut value_index = NONE;
             loop {
-                value_index = value_search(in c, cap, in indices, depth);
+                value_index = value_search(in caps, cap, in indices, depth);
                 if value_index != NONE {
                     break;
                 }
-                if extent_find(in c, cap, in indices, depth) != NONE || depth == 0 {
+                if extent_find(in caps, cap, in indices, depth) != NONE || depth == 0 {
                     let mut message = ChunkSeq::new[u8]();
                     hole_message(
                         inout message,
@@ -774,51 +800,51 @@ fn emit(
                         name_start,
                         name_end
                     );
-                    sk_fail(inout sk, in message.as_slice());
+                    sk_fail(inout skeleton, in message.as_slice());
                     return;
                 }
                 depth = sub(depth, 1);
             }
             let mut id = NONE;
-            for hole in 0..(sk.holes.len() >> 2) {
-                if w64(in sk.holes, hole << 2) == cap
-                    && w64(in sk.holes, inc(hole << 2)) == value_index {
+            for hole in 0..(skeleton.holes.len() >> 2) {
+                if w64(in skeleton.holes, hole << 2) == cap
+                    && w64(in skeleton.holes, inc(hole << 2)) == value_index {
                     id = hole;
                     break;
                 }
             }
             if id == NONE {
-                id = sk.holes.len() >> 2;
+                id = skeleton.holes.len() >> 2;
                 let text = value_text(
-                    in c,
-                    value_at(in c, cap, value_index),
+                    in caps,
+                    value_at(in caps, cap, value_index),
                     in invocation,
                     in tail
                 );
                 let operand = operand_span(in text);
-                sk.holes.push(cap);
-                sk.holes.push(value_index);
-                sk.holes.push(operand >> 32);
-                sk.holes.push(operand & 4294967295);
+                skeleton.holes.push(cap);
+                skeleton.holes.push(value_index);
+                skeleton.holes.push(operand >> 32);
+                skeleton.holes.push(operand & 4294967295);
             }
             let mut marker = ChunkSeq::new[u8]();
             marker.extend(in mark.as_slice());
             push_decimal(inout marker, id);
-            let start = sk.src.len();
-            if !room(inout sk, marker.len()) {
+            let start = skeleton.src.len();
+            if !room(inout skeleton, marker.len()) {
                 return;
             }
-            sk.src.extend(in marker.as_slice());
-            sk.slots.push(id);
-            sk.slots.push(start);
-            sk.slots.push(sk.src.len());
+            skeleton.src.extend(in marker.as_slice());
+            skeleton.slots.push(id);
+            skeleton.slots.push(start);
+            skeleton.slots.push(skeleton.src.len());
         } else {
             let mut count = NONE;
-            let first = part_at(in x, part, 6);
-            for name in 0..part_at(in x, part, 7) {
-                let name_start = w64(in x.np, add(first, name << 1));
-                let name_end = w64(in x.np, inc(add(first, name << 1)));
-                let cap = find_cap(in c, in template, name_start, name_end);
+            let first = part_at(in parsed, part, 6);
+            for name in 0..part_at(in parsed, part, 7) {
+                let name_start = w64(in parsed.name_sets, add(first, name << 1));
+                let name_end = w64(in parsed.name_sets, inc(add(first, name << 1)));
+                let cap = find_cap(in caps, in template, name_start, name_end);
                 if cap == NONE {
                     let mut message = ChunkSeq::new[u8]();
                     hole_message(
@@ -828,57 +854,60 @@ fn emit(
                         name_start,
                         name_end
                     );
-                    sk_fail(inout sk, in message.as_slice());
+                    sk_fail(inout skeleton, in message.as_slice());
                     return;
                 }
-                let extent = extent_find(in c, cap, in indices, indices.len());
+                let extent = extent_find(in caps, cap, in indices, indices.len());
                 if extent != NONE {
-                    let got = w64(in c.w, add(inc(extent), w64(in c.w, extent)));
+                    let got = w64(in caps.words, add(inc(extent), w64(in caps.words, extent)));
                     let prev = count;
                     count = got;
                     if prev != NONE && prev != got {
-                        sk_fail(inout sk, in "incompatible sugar repetition lengths".as_bytes());
+                        sk_fail(
+                            inout skeleton,
+                            in "incompatible sugar repetition lengths".as_bytes()
+                        );
                         return;
                     }
                 }
             }
             if count == NONE {
                 sk_fail(
-                    inout sk,
+                    inout skeleton,
                     in "template repetition has no captured sequence at this depth".as_bytes()
                 );
                 return;
             }
-            if part_at(in x, part, 5) == 1 && count == 0 {
+            if part_at(in parsed, part, 5) == 1 && count == 0 {
                 sk_fail(
-                    inout sk,
+                    inout skeleton,
                     in "nonempty template repetition matched zero elements".as_bytes()
                 );
                 return;
             }
-            let body = (part_at(in x, part, 1) << 32) | part_at(in x, part, 2);
-            let sep_start = part_at(in x, part, 3);
-            let sep_end = part_at(in x, part, 4);
+            let body = (part_at(in parsed, part, 1) << 32) | part_at(in parsed, part, 2);
+            let sep_start = part_at(in parsed, part, 3);
+            let sep_end = part_at(in parsed, part, 4);
             for rep in 0..count {
                 if rep > 0 {
-                    if !room(inout sk, sub(sep_end, sep_start)) {
+                    if !room(inout skeleton, sub(sep_end, sep_start)) {
                         return;
                     }
-                    push_range(inout sk.src, in template, sep_start, sep_end);
+                    push_range(inout skeleton.src, in template, sep_start, sep_end);
                 }
                 indices.push(rep);
                 emit(
                     in template,
-                    in x,
+                    in parsed,
                     body,
-                    in c,
+                    in caps,
                     in invocation,
                     in tail,
                     in mark,
-                    inout sk,
+                    inout skeleton,
                     inout indices
                 );
-                if sk.failed {
+                if skeleton.failed {
                     return;
                 }
                 indices.truncate(sub(indices.len(), 1));
@@ -901,13 +930,13 @@ pub fn refused(in message: Slice[u8]) -> ChunkSeq[u64] {
     out
 }
 
-// The skeleton of template `template` for the captures `c` (a match of
+// The skeleton of template `template` for the captures `caps` (a match of
 // matcher.ves `match_rule_encoded`, whose values are spans of `invocation`, or of
 // `tail` from the tail): `render`'s `skeleton`, with a refusal in
 // `failed`/`msg`.
 pub fn skeleton_run(
     in template: ChunkSeq[u8],
-    in c: Caps,
+    in caps: Caps,
     in invocation: ChunkSeq[u8],
     in tail: ChunkSeq[u8],
     in mark: ChunkSeq[u8],
@@ -918,12 +947,12 @@ pub fn skeleton_run(
     } else {
         max_bytes << 2
     };
-    let mut sk = Sk {
+    let mut skeleton = Sk {
         src: ChunkSeq::new[u8](),
         holes: ChunkSeq::new[u64](),
         slots: ChunkSeq::new[u64](),
         steps: steps,
-        max: max_bytes,
+        max_bytes: max_bytes,
         failed: false,
         msg: ChunkSeq::new[u8]()
     };
@@ -945,44 +974,44 @@ pub fn skeleton_run(
         for j in w32(in diags.at, 0)..end {
             message.push(b8(in diags.text, j));
         }
-        sk_fail(inout sk, in message.as_slice());
-        return sk;
+        sk_fail(inout skeleton, in message.as_slice());
+        return skeleton;
     }
     if diags.code.len() != 0 {
-        sk_fail(inout sk, in "invalid token in sugar template".as_bytes());
-        return sk;
+        sk_fail(inout skeleton, in "invalid token in sugar template".as_bytes());
+        return skeleton;
     }
-    let mut toks = Tt { tk: ChunkSeq::new[u32]() };
+    let mut toks = Tt { tokens: ChunkSeq::new[u32]() };
     for i in 0..raw.kind.len() {
-        toks.tk.push(widen_u32(b8(in raw.kind, i)));
-        toks.tk.push(wrapping_u32(w32(in raw.start, i)));
-        toks.tk.push(wrapping_u32(token_end(in raw, i)));
+        toks.tokens.push(widen_u32(b8(in raw.kind, i)));
+        toks.tokens.push(wrapping_u32(w32(in raw.start, i)));
+        toks.tokens.push(wrapping_u32(token_end(in raw, i)));
     }
     let mut parsed = Tx {
         failed: false,
         msg: ChunkSeq::new[u8](),
         parts: ChunkSeq::new[u64](),
-        lp: ChunkSeq::new[u64](),
-        np: ChunkSeq::new[u64]()
+        child_lists: ChunkSeq::new[u64](),
+        name_sets: ChunkSeq::new[u64]()
     };
     let top = parse(in template, in toks, inout parsed, 0, sub(tt_len(in toks), 1), 0);
     if parsed.failed {
-        sk_fail(inout sk, in parsed.msg.as_slice());
-        return sk;
+        sk_fail(inout skeleton, in parsed.msg.as_slice());
+        return skeleton;
     }
     let mut indices = ChunkSeq::new[u64]();
     emit(
         in template,
         in parsed,
         top,
-        in c,
+        in caps,
         in invocation,
         in tail,
         in mark,
-        inout sk,
+        inout skeleton,
         inout indices
     );
-    sk
+    skeleton
 }
 
 // The skeleton of `template` for the captures `words`, as
@@ -999,25 +1028,25 @@ pub fn skeleton_encoded(
     in mark: ChunkSeq[u8],
     max_bytes: u64
 ) -> ChunkSeq[u64] {
-    let c = caps_read(words);
-    let sk = skeleton_run(in template, in c, in invocation, in tail, in mark, max_bytes);
-    if sk.failed {
-        return refused(in sk.msg.as_slice());
+    let caps = caps_read(words);
+    let skeleton = skeleton_run(in template, in caps, in invocation, in tail, in mark, max_bytes);
+    if skeleton.failed {
+        return refused(in skeleton.msg.as_slice());
     }
     let mut out = ChunkSeq::new[u64]();
     out.push(1);
-    out.push(sk.steps);
-    out.push(sk.src.len());
-    for j in 0..sk.src.len() {
-        out.push(widen_u64(b8(in sk.src, j)));
+    out.push(skeleton.steps);
+    out.push(skeleton.src.len());
+    for j in 0..skeleton.src.len() {
+        out.push(widen_u64(b8(in skeleton.src, j)));
     }
-    out.push(sk.holes.len() >> 2);
-    for j in 0..sk.holes.len() {
-        out.push(w64(in sk.holes, j));
+    out.push(skeleton.holes.len() >> 2);
+    for j in 0..skeleton.holes.len() {
+        out.push(w64(in skeleton.holes, j));
     }
-    out.push(sk.slots.len() / 3);
-    for j in 0..sk.slots.len() {
-        out.push(w64(in sk.slots, j));
+    out.push(skeleton.slots.len() / 3);
+    for j in 0..skeleton.slots.len() {
+        out.push(w64(in skeleton.slots, j));
     }
     out
 }
