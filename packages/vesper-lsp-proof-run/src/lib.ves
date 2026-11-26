@@ -199,23 +199,21 @@ fn read_job(in bytes: Slice[u8]) -> Job {
             params.push(wrapping_sub(pool.len(), at));
             kinds.push(word(in bytes, inout reader));
         }
-        models.push(
-            Model {
-                function: function,
-                function_len: wrapping_sub(module, function),
-                module: module,
-                module_len: wrapping_sub(theorem, module),
-                theorem: theorem,
-                theorem_len: wrapping_sub(exact, theorem),
-                exact: exact,
-                exact_len: wrapping_sub(bitvec, exact),
-                bitvec: bitvec,
-                bitvec_len: wrapping_sub(key, bitvec),
-                key: key,
-                param_start: param_start,
-                param_count: param_count
-            }
-        );
+        models.push(Model {
+            function: function,
+            function_len: wrapping_sub(module, function),
+            module: module,
+            module_len: wrapping_sub(theorem, module),
+            theorem: theorem,
+            theorem_len: wrapping_sub(exact, theorem),
+            exact: exact,
+            exact_len: wrapping_sub(bitvec, exact),
+            bitvec: bitvec,
+            bitvec_len: wrapping_sub(key, bitvec),
+            key: key,
+            param_start: param_start,
+            param_count: param_count
+        });
     }
     Job {
         launcher: launcher,

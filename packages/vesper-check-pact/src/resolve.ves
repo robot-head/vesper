@@ -724,15 +724,13 @@ fn add_gen_bounds(
             };
             args.push(QArg { is_row: trait_gen.row, ty: arg_ty });
         }
-        assumptions.push(
-            QGoal {
-                self_ty: self_ty,
-                trait_name: trait_name,
-                brand_opt: 0,
-                arg_start: arg_start,
-                arg_count: trait_row.gen_count
-            }
-        );
+        assumptions.push(QGoal {
+            self_ty: self_ty,
+            trait_name: trait_name,
+            brand_opt: 0,
+            arg_start: arg_start,
+            arg_count: trait_row.gen_count
+        });
     }
 }
 
@@ -803,15 +801,13 @@ pub fn read_cx_header(
                             };
                             args.push(QArg { is_row: trait_gen.row, ty: arg_ty });
                         }
-                        assumptions.push(
-                            QGoal {
-                                self_ty: where_decl.ty,
-                                trait_name: tref.name,
-                                brand_opt: 0,
-                                arg_start: arg_start,
-                                arg_count: trait_row.gen_count
-                            }
-                        );
+                        assumptions.push(QGoal {
+                            self_ty: where_decl.ty,
+                            trait_name: tref.name,
+                            brand_opt: 0,
+                            arg_start: arg_start,
+                            arg_count: trait_row.gen_count
+                        });
                     }
                 }
             }
@@ -845,15 +841,13 @@ pub fn read_cx_header(
                 }
             }
             if ok {
-                assumptions.push(
-                    QGoal {
-                        self_ty: bound_ty,
-                        trait_name: trait_sym,
-                        brand_opt: 0,
-                        arg_start: arg_start,
-                        arg_count: trait_row.gen_count
-                    }
-                );
+                assumptions.push(QGoal {
+                    self_ty: bound_ty,
+                    trait_name: trait_sym,
+                    brand_opt: 0,
+                    arg_start: arg_start,
+                    arg_count: trait_row.gen_count
+                });
             }
         } else {
             for _ in 0..arg_count {
@@ -1486,51 +1480,45 @@ fn conform_type_vars(
     if node.kind == K_NAMED {
         let mut new_args = ChunkSeq::with_capacity[u32](w(node.n));
         for i in 0..w(node.n) {
-            new_args.push(
-                conform_type_vars(
-                    inout types,
-                    syms,
-                    in decls,
-                    u32_at(in types.items, add(w(node.a), i)),
-                    conf,
-                    in var_names,
-                    in var_tys
-                )
-            );
+            new_args.push(conform_type_vars(
+                inout types,
+                syms,
+                in decls,
+                u32_at(in types.items, add(w(node.a), i)),
+                conf,
+                in var_names,
+                in var_tys
+            ));
         }
         return types.named(node.name, in new_args);
     }
     if node.kind == K_TUPLE {
         let mut new_args = ChunkSeq::with_capacity[u32](w(node.n));
         for i in 0..w(node.n) {
-            new_args.push(
-                conform_type_vars(
-                    inout types,
-                    syms,
-                    in decls,
-                    u32_at(in types.items, add(w(node.a), i)),
-                    conf,
-                    in var_names,
-                    in var_tys
-                )
-            );
+            new_args.push(conform_type_vars(
+                inout types,
+                syms,
+                in decls,
+                u32_at(in types.items, add(w(node.a), i)),
+                conf,
+                in var_names,
+                in var_tys
+            ));
         }
         return types.tuple(in new_args);
     }
     if node.kind == K_FN {
         let mut param_tys = ChunkSeq::with_capacity[u32](w(node.n));
         for i in 0..w(node.n) {
-            param_tys.push(
-                conform_type_vars(
-                    inout types,
-                    syms,
-                    in decls,
-                    u32_at(in types.items, add(w(node.a), i)),
-                    conf,
-                    in var_names,
-                    in var_tys
-                )
-            );
+            param_tys.push(conform_type_vars(
+                inout types,
+                syms,
+                in decls,
+                u32_at(in types.items, add(w(node.a), i)),
+                conf,
+                in var_names,
+                in var_tys
+            ));
         }
         let new_result = conform_type_vars(
             inout types,
@@ -1587,21 +1575,22 @@ fn conform_row_vars(
         let eff_node = types.effect_at(add(w(row.a), i));
         let arg_start = n32(eff_args.len());
         for j in 0..w(eff_node.n) {
-            eff_args.push(
-                conform_type_vars(
-                    inout types,
-                    syms,
-                    in decls,
-                    u32_at(in types.items, add(w(eff_node.a), j)),
-                    conf,
-                    in var_names,
-                    in var_tys
-                )
-            );
+            eff_args.push(conform_type_vars(
+                inout types,
+                syms,
+                in decls,
+                u32_at(in types.items, add(w(eff_node.a), j)),
+                conf,
+                in var_names,
+                in var_tys
+            ));
         }
-        effs.push(
-            EffNode { label: eff_node.label, name: eff_node.name, a: arg_start, n: eff_node.n }
-        );
+        effs.push(EffNode {
+            label: eff_node.label,
+            name: eff_node.name,
+            a: arg_start,
+            n: eff_node.n
+        });
     }
     types.mk_row(in effs, in eff_args, row.tail)
 }
@@ -1967,9 +1956,12 @@ fn normalize_row_rec(
             }
             eff_args.push(norm_arg);
         }
-        effs.push(
-            EffNode { label: eff_node.label, name: eff_node.name, a: arg_start, n: eff_node.n }
-        );
+        effs.push(EffNode {
+            label: eff_node.label,
+            name: eff_node.name,
+            a: arg_start,
+            n: eff_node.n
+        });
     }
     (true, sess.ctx.types.mk_row(in effs, in eff_args, row.tail), none_outcome())
 }

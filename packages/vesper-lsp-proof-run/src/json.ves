@@ -345,10 +345,8 @@ fn string(inout doc: Doc, in text: Slice[u8], inout cursor: P) -> u64 {
                 return fail(inout doc, LONE_SURROGATE, cursor.pos);
             }
             let code_point = wrapping_add(
-                wrapping_shl_u64(wrapping_sub(code_unit, 55296), 10) | wrapping_sub(
-                    low_unit,
-                    56320
-                ),
+                wrapping_shl_u64(wrapping_sub(code_unit, 55296), 10)
+                    | wrapping_sub(low_unit, 56320),
                 65536
             );
             push_code(inout doc.pool, code_point);

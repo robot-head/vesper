@@ -254,20 +254,18 @@ pub fn read_extra(
         }
         let tail = reader.word(in bytes) != 0;
         set_by_symbol(inout extra.fn_by_name, name, inc32(n32(extra.fns.len())));
-        extra.fns.push(
-            XFn {
-                name: name,
-                s0: s0,
-                s1: s1,
-                generic_count: generic_count,
-                param_start: param_start,
-                param_count: param_count,
-                result: result,
-                eff_start: eff_start,
-                eff_count: eff_count,
-                tail: tail
-            }
-        );
+        extra.fns.push(XFn {
+            name: name,
+            s0: s0,
+            s1: s1,
+            generic_count: generic_count,
+            param_start: param_start,
+            param_count: param_count,
+            result: result,
+            eff_start: eff_start,
+            eff_count: eff_count,
+            tail: tail
+        });
     }
     let decl_count = reader.word(in bytes);
     for i in 0..decl_count {
@@ -288,28 +286,24 @@ pub fn read_extra(
                 extra.op_params.push(ty);
             }
             let result = read_ty(inout reader, in bytes, inout types, inout names);
-            extra.ops.push(
-                XOp {
-                    name: op_name,
-                    s0: op_s0,
-                    s1: op_s1,
-                    param_start: param_start,
-                    param_count: param_count,
-                    result: result
-                }
-            );
+            extra.ops.push(XOp {
+                name: op_name,
+                s0: op_s0,
+                s1: op_s1,
+                param_start: param_start,
+                param_count: param_count,
+                result: result
+            });
         }
         set_by_symbol(inout extra.decl_by_name, name, inc32(n32(extra.decls.len())));
-        extra.decls.push(
-            XEff {
-                name: name,
-                generic_count: generic_count,
-                s0: s0,
-                s1: s1,
-                op_start: op_start,
-                op_count: op_count
-            }
-        );
+        extra.decls.push(XEff {
+            name: name,
+            generic_count: generic_count,
+            s0: s0,
+            s1: s1,
+            op_start: op_start,
+            op_count: op_count
+        });
     }
     extra
 }

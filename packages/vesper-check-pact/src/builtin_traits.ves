@@ -732,18 +732,16 @@ fn read_builtin_mod(in bytes: Slice[u8]) -> BuiltinMod {
             field_names.push(u32_at(in ctx.nmap, reader.word(in bytes)));
             field_tys.push(u32_at(in ctx.tmap, reader.word(in bytes)));
         }
-        structs.push(
-            StructInfo {
-                name: struct_name,
-                mode: struct_mode,
-                is_enum: is_enum,
-                has_row_gen: has_row_gen,
-                gen_start: gen_start,
-                gen_count: n32(gen_count),
-                field_start: field_start,
-                field_count: n32(field_count)
-            }
-        );
+        structs.push(StructInfo {
+            name: struct_name,
+            mode: struct_mode,
+            is_enum: is_enum,
+            has_row_gen: has_row_gen,
+            gen_start: gen_start,
+            gen_count: n32(gen_count),
+            field_start: field_start,
+            field_count: n32(field_count)
+        });
     }
 
     let conf_count = reader.word(in bytes);
@@ -765,21 +763,19 @@ fn read_builtin_mod(in bytes: Slice[u8]) -> BuiltinMod {
         let empty_body = reader.word(in bytes) != 0;
         let span_start = reader.word(in bytes);
         let span_end = reader.word(in bytes);
-        confs.push(
-            ConfInfo {
-                is_canonical: is_canonical,
-                pkg_none: pkg_none,
-                trait_name: trait_name,
-                targ_count: targ_count,
-                self_ty: self_ty,
-                gen_start: gen_start,
-                gen_count: n32(gen_count),
-                has_where: has_where,
-                empty_body: empty_body,
-                span_start: span_start,
-                span_end: span_end
-            }
-        );
+        confs.push(ConfInfo {
+            is_canonical: is_canonical,
+            pkg_none: pkg_none,
+            trait_name: trait_name,
+            targ_count: targ_count,
+            self_ty: self_ty,
+            gen_start: gen_start,
+            gen_count: n32(gen_count),
+            has_where: has_where,
+            empty_body: empty_body,
+            span_start: span_start,
+            span_end: span_end
+        });
     }
 
     let bound_count = reader.word(in bytes);
@@ -794,15 +790,13 @@ fn read_builtin_mod(in bytes: Slice[u8]) -> BuiltinMod {
         for _ in 0..arg_count {
             bound_args.push(u32_at(in ctx.tmap, reader.word(in bytes)));
         }
-        own_bounds.push(
-            OwnBound {
-                owner: owner,
-                param: param,
-                trait_name: trait_name,
-                arg_start: arg_start,
-                arg_count: n32(arg_count)
-            }
-        );
+        own_bounds.push(OwnBound {
+            owner: owner,
+            param: param,
+            trait_name: trait_name,
+            arg_start: arg_start,
+            arg_count: n32(arg_count)
+        });
     }
 
     BuiltinMod {

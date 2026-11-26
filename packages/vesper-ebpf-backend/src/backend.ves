@@ -1474,16 +1474,14 @@ fn map_effect(
     }
     let index = backend.map_defs.len();
     let map_sym = ctx.names.intern(in map_name.as_slice());
-    backend.map_defs.push(
-        MapRow {
-            name: map_sym,
-            kind: map_kind,
-            key: key_bytes,
-            value: value_bytes,
-            max: max,
-            flags: 0
-        }
-    );
+    backend.map_defs.push(MapRow {
+        name: map_sym,
+        kind: map_kind,
+        key: key_bytes,
+        value: value_bytes,
+        max: max,
+        flags: 0
+    });
     backend.map_effects.push(name);
     for k in 0..decl.op_count {
         let op = extra.op(add(decl.op_start, k));
@@ -1706,16 +1704,14 @@ fn read_params(inout backend: G, in program: Program, func: FnRow) {
         let pass = wrapping_u8(program.op(inc(at)));
         let proj_count = program.op(add(at, 2));
         let ty_at = add(at, add(3, proj_count));
-        backend.params.push(
-            PInfo {
-                name: name,
-                pass: pass,
-                proj_count: proj_count,
-                ty: pos32(in program, ty_at),
-                s0: program.op(inc(ty_at)),
-                s1: program.op(add(ty_at, 2))
-            }
-        );
+        backend.params.push(PInfo {
+            name: name,
+            pass: pass,
+            proj_count: proj_count,
+            ty: pos32(in program, ty_at),
+            s0: program.op(inc(ty_at)),
+            s1: program.op(add(ty_at, 2))
+        });
         at = add(ty_at, 3);
     }
 }

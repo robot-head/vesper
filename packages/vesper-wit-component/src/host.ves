@@ -587,16 +587,14 @@ pub fn read_core(in wasm: Slice[u8]) -> Core {
                 let form = rd_byte(inout reader, in wasm);
                 if form == FORM_CONT {
                     rd_leb(inout reader, in wasm);
-                    core.sigs.push(
-                        Sig {
-                            param_start: 0,
-                            param_len: 0,
-                            param_count: 0,
-                            result_start: 0,
-                            result_len: 0,
-                            result_count: 0
-                        }
-                    );
+                    core.sigs.push(Sig {
+                        param_start: 0,
+                        param_len: 0,
+                        param_count: 0,
+                        result_start: 0,
+                        result_len: 0,
+                        result_count: 0
+                    });
                 } else if form == FORM_FUNC {
                     let (param_start, param_len, param_count) = valtypes(
                         inout reader,
@@ -608,16 +606,14 @@ pub fn read_core(in wasm: Slice[u8]) -> Core {
                         in wasm,
                         inout core
                     );
-                    core.sigs.push(
-                        Sig {
-                            param_start: param_start,
-                            param_len: param_len,
-                            param_count: param_count,
-                            result_start: result_start,
-                            result_len: result_len,
-                            result_count: result_count
-                        }
-                    );
+                    core.sigs.push(Sig {
+                        param_start: param_start,
+                        param_len: param_len,
+                        param_count: param_count,
+                        result_start: result_start,
+                        result_len: result_len,
+                        result_count: result_count
+                    });
                 } else {
                     core.ok = false;
                     return core;
@@ -641,15 +637,13 @@ pub fn read_core(in wasm: Slice[u8]) -> Core {
                     return core;
                 }
                 let sig_index = rd_leb(inout reader, in wasm);
-                core.imports.push(
-                    Imp {
-                        module_start: module_start,
-                        module_len: module_len,
-                        field_start: field_start,
-                        field_len: field_len,
-                        ty: sig_index
-                    }
-                );
+                core.imports.push(Imp {
+                    module_start: module_start,
+                    module_len: module_len,
+                    field_start: field_start,
+                    field_len: field_len,
+                    ty: sig_index
+                });
             }
         }
         if !reader.ok || reader.pos > end {

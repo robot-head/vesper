@@ -464,13 +464,11 @@ fn def(inout cursor: Cur, in src: Slice[u8], inout wit: Wit, kind: u8) {
             punct(inout cursor, in src, inout wit, C_RPAREN);
         }
         let field_name_at = name(inout wit, in src, field_name_start, field_name_end);
-        items.push(
-            Field {
-                name_start: field_name_at,
-                name_len: wrapping_sub(field_name_end, field_name_start),
-                ty: field_ty
-            }
-        );
+        items.push(Field {
+            name_start: field_name_at,
+            name_len: wrapping_sub(field_name_end, field_name_start),
+            ty: field_ty
+        });
         if peek(inout cursor, in src) == C_COMMA {
             cursor.pos = inc(cursor.pos);
         }
@@ -484,16 +482,14 @@ fn def(inout cursor: Cur, in src: Slice[u8], inout wit: Wit, kind: u8) {
     let name_at = name(inout wit, in src, start, end);
     let def_row = wit.defs.len();
     let def_ty = intern(inout wit, T_NAMED, def_row, 0);
-    wit.defs.push(
-        Def {
-            kind: kind,
-            name_start: name_at,
-            name_len: wrapping_sub(end, start),
-            field_start: first_field,
-            field_count: items.len(),
-            ty: def_ty
-        }
-    );
+    wit.defs.push(Def {
+        kind: kind,
+        name_start: name_at,
+        name_len: wrapping_sub(end, start),
+        field_start: first_field,
+        field_count: items.len(),
+        ty: def_ty
+    });
 }
 
 // `name: func(%p: ty, ...) [-> ty];` after its name `src[start..end]`.
@@ -510,13 +506,11 @@ fn func(inout cursor: Cur, in src: Slice[u8], inout wit: Wit, start: u64, end: u
         punct(inout cursor, in src, inout wit, C_COLON);
         let param_ty = ty(inout cursor, in src, inout wit, 0);
         let param_name_at = name(inout wit, in src, param_name_start, param_name_end);
-        params.push(
-            Field {
-                name_start: param_name_at,
-                name_len: wrapping_sub(param_name_end, param_name_start),
-                ty: param_ty
-            }
-        );
+        params.push(Field {
+            name_start: param_name_at,
+            name_len: wrapping_sub(param_name_end, param_name_start),
+            ty: param_ty
+        });
         if peek(inout cursor, in src) == C_COMMA {
             cursor.pos = inc(cursor.pos);
         }
@@ -535,15 +529,13 @@ fn func(inout cursor: Cur, in src: Slice[u8], inout wit: Wit, start: u64, end: u
     let first_param = wit.fields.len();
     wit.fields.extend(in params.as_slice());
     let name_at = name(inout wit, in src, start, end);
-    wit.funcs.push(
-        Func {
-            name_start: name_at,
-            name_len: wrapping_sub(end, start),
-            param_start: first_param,
-            param_count: params.len(),
-            result: result
-        }
-    );
+    wit.funcs.push(Func {
+        name_start: name_at,
+        name_len: wrapping_sub(end, start),
+        param_start: first_param,
+        param_count: params.len(),
+        result: result
+    });
 }
 
 // The text of a world item up to its `;`, blanks removed.
@@ -640,15 +632,13 @@ pub fn parse(in src: Slice[u8]) -> Wit {
     let run_name = wit.text.len();
     wit.text.extend(in "run".as_bytes());
     wit.run_func = wit.funcs.len();
-    wit.funcs.push(
-        Func {
-            name_start: run_name,
-            name_len: 3,
-            param_start: 0,
-            param_count: 0,
-            result: result_ty
-        }
-    );
+    wit.funcs.push(Func {
+        name_start: run_name,
+        name_len: 3,
+        param_start: 0,
+        param_count: 0,
+        result: result_ty
+    });
     wit.entry_start = wit.funcs.len();
     let (kw_start, kw_end) = word(inout cursor, in src, inout wit);
     if same(in src, kw_start, kw_end, in "world".as_bytes()) {

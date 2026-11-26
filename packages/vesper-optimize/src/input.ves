@@ -131,9 +131,12 @@ pub fn add_int(inout tree: Tree, value: i128, start: u32, end: u32) -> u32 {
     let neg = value < 0;
     // `i128::MIN` negates to itself; its magnitude 2^127 is that bit pattern.
     let magnitude = wrapping_u128(if neg { wrapping_neg_i128(value) } else { value });
-    let lit = tree.ast.lits.alloc(
-        Lit { kind: 1, neg: neg, bits: wrapping_u64(magnitude), hi: wrapping_u64(magnitude >> 64) }
-    );
+    let lit = tree.ast.lits.alloc(Lit {
+        kind: 1,
+        neg: neg,
+        bits: wrapping_u64(magnitude),
+        hi: wrapping_u64(magnitude >> 64)
+    });
     add_expr(inout tree, node(1, start, end, lit.raw(), 0, 0), 0, 0)
 }
 

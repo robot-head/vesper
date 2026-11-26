@@ -195,9 +195,13 @@ impl Asm {
                 self.lines.truncate(wrapping_sub(n, 1));
             }
         }
-        self.lines.push(
-            LineRow { slot: slot, line: line, col: col, text_start: text_start, text_end: text_end }
-        );
+        self.lines.push(LineRow {
+            slot: slot,
+            line: line,
+            col: col,
+            text_start: text_start,
+            text_end: text_end
+        });
     }
 
     pub fn function(inout self, name: u32, entry: u64) {

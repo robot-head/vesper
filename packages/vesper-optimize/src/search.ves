@@ -1853,14 +1853,12 @@ fn search(
     }
     let mut extracted: ChunkSeq[MathNode] = ChunkSeq::with_capacity[MathNode](extraction.len());
     for i in 0..extraction.len() {
-        extracted.push(
-            MathNode {
-                op: extraction.op_at(i),
-                data: extraction.data_at(i),
-                child0: extraction.child_at(i, 0),
-                child1: extraction.child_at(i, 1)
-            }
-        );
+        extracted.push(MathNode {
+            op: extraction.op_at(i),
+            data: extraction.data_at(i),
+            child0: extraction.child_at(i, 0),
+            child1: extraction.child_at(i, 1)
+        });
     }
     let mut best_map: ChunkSeq[u32] = ChunkSeq::new[u32]();
     let e = translate(inout builder, in extracted, vars, inout budget, inout best_map);
@@ -1875,14 +1873,12 @@ fn search(
         let mut graph_nodes: ChunkSeq[MathNode] = ChunkSeq::with_capacity[MathNode](raw);
         for k in 0..raw {
             let id = wrapping_u32(k);
-            graph_nodes.push(
-                MathNode {
-                    op: graph.raw_op(id),
-                    data: graph.raw_data(id),
-                    child0: graph.raw_child(id, 0),
-                    child1: graph.raw_child(id, 1)
-                }
-            );
+            graph_nodes.push(MathNode {
+                op: graph.raw_op(id),
+                data: graph.raw_data(id),
+                child0: graph.raw_child(id, 0),
+                child1: graph.raw_child(id, 1)
+            });
         }
         let mut raw_map: ChunkSeq[u32] = ChunkSeq::new[u32]();
         let e = translate(inout builder, in graph_nodes, vars, inout budget, inout raw_map);

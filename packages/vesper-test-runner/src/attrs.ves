@@ -526,16 +526,14 @@ impl Stream {
                 self.bump();
             }
             let (value, value_start, value_end) = self.value(in src);
-            self.out.args.push(
-                Arg {
-                    has_name: named,
-                    name_start: name_start,
-                    name_end: name_end,
-                    value: value,
-                    start: arg_start,
-                    end: value_end
-                }
-            );
+            self.out.args.push(Arg {
+                has_name: named,
+                name_start: name_start,
+                name_end: name_end,
+                value: value,
+                start: arg_start,
+                end: value_end
+            });
             if self.kind() == k_comma() {
                 self.bump();
             } else if self.kind() != k_r_paren() {
@@ -622,16 +620,14 @@ impl Stream {
                                 Option::None => {},
                             }
                         }
-                        self.out.fns.push(
-                            FnAttrs {
-                                name_start: name_start,
-                                name_end: name_end,
-                                has_test: has_test,
-                                test: test,
-                                case_start: case_start,
-                                case_count: case_count
-                            }
-                        );
+                        self.out.fns.push(FnAttrs {
+                            name_start: name_start,
+                            name_end: name_end,
+                            has_test: has_test,
+                            test: test,
+                            case_start: case_start,
+                            case_count: case_count
+                        });
                     }
                 }
                 has_test = false;

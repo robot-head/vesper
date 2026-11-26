@@ -387,16 +387,14 @@ fn read_tref(
     let span_start = reader.word(in bytes);
     let span_end = reader.word(in bytes);
     let id = n32(decls.trefs.len());
-    decls.trefs.push(
-        TRef {
-            pkg: pkg,
-            name: name,
-            arg_start: arg_start,
-            arg_count: n32(arg_count),
-            span_start: span_start,
-            span_end: span_end
-        }
-    );
+    decls.trefs.push(TRef {
+        pkg: pkg,
+        name: name,
+        arg_start: arg_start,
+        arg_count: n32(arg_count),
+        span_start: span_start,
+        span_end: span_end
+    });
     id
 }
 
@@ -431,33 +429,29 @@ fn read_sig(
         let ty = tid(in tmap, reader.word(in bytes));
         let par_span_start = reader.word(in bytes);
         let par_span_end = reader.word(in bytes);
-        decls.pars.push(
-            Par {
-                name: pname,
-                pass: pass,
-                proj_start: proj_start,
-                proj_count: proj_count,
-                ty: ty,
-                span_start: par_span_start,
-                span_end: par_span_end
-            }
-        );
+        decls.pars.push(Par {
+            name: pname,
+            pass: pass,
+            proj_start: proj_start,
+            proj_count: proj_count,
+            ty: ty,
+            span_start: par_span_start,
+            span_end: par_span_end
+        });
     }
     let result = tid(in tmap, reader.word(in bytes));
     let row = tid(in tmap, reader.word(in bytes));
-    decls.sigs.push(
-        Sig {
-            name: name,
-            span_start: span_start,
-            span_end: span_end,
-            gen_start: gen_start,
-            gen_count: gen_count,
-            par_start: par_start,
-            par_count: n32(par_count),
-            result: result,
-            row: row
-        }
-    );
+    decls.sigs.push(Sig {
+        name: name,
+        span_start: span_start,
+        span_end: span_end,
+        gen_start: gen_start,
+        gen_count: gen_count,
+        par_start: par_start,
+        par_count: n32(par_count),
+        result: result,
+        row: row
+    });
 }
 
 // Reads `n` signatures written one after another; they land in
@@ -497,30 +491,26 @@ pub fn read_traits(
             let bound = wrapping_u8(reader.word(in bytes));
             let assoc_span_start = reader.word(in bytes);
             let assoc_span_end = reader.word(in bytes);
-            decls.assocs.push(
-                AssocDecl {
-                    name: assoc_name,
-                    bound: bound,
-                    span_start: assoc_span_start,
-                    span_end: assoc_span_end
-                }
-            );
+            decls.assocs.push(AssocDecl {
+                name: assoc_name,
+                bound: bound,
+                span_start: assoc_span_start,
+                span_end: assoc_span_end
+            });
         }
         let method_start = n32(decls.sigs.len());
         let method_count = read_sigs(inout reader, in bytes, inout decls, in nmap, in tmap);
-        decls.traits.push(
-            TraitRow {
-                name: name,
-                span_start: span_start,
-                span_end: span_end,
-                gen_start: gen_start,
-                gen_count: gen_count,
-                assoc_start: assoc_start,
-                assoc_count: n32(assoc_count),
-                method_start: method_start,
-                method_count: method_count
-            }
-        );
+        decls.traits.push(TraitRow {
+            name: name,
+            span_start: span_start,
+            span_end: span_end,
+            gen_start: gen_start,
+            gen_count: gen_count,
+            assoc_start: assoc_start,
+            assoc_count: n32(assoc_count),
+            method_start: method_start,
+            method_count: method_count
+        });
     }
 }
 
@@ -553,37 +543,33 @@ fn read_confs(
             let bind_ty = tid(in tmap, reader.word(in bytes));
             let bind_span_start = reader.word(in bytes);
             let bind_span_end = reader.word(in bytes);
-            decls.binds.push(
-                Bind {
-                    name: bind_name,
-                    ty: bind_ty,
-                    span_start: bind_span_start,
-                    span_end: bind_span_end
-                }
-            );
+            decls.binds.push(Bind {
+                name: bind_name,
+                ty: bind_ty,
+                span_start: bind_span_start,
+                span_end: bind_span_end
+            });
         }
         let method_start = n32(decls.sigs.len());
         let method_count = read_sigs(inout reader, in bytes, inout decls, in nmap, in tmap);
         let span_start = reader.word(in bytes);
         let span_end = reader.word(in bytes);
-        decls.confs.push(
-            Conf {
-                model: model,
-                model_name: model_name,
-                gen_start: gen_start,
-                gen_count: gen_count,
-                tref: tref,
-                self_ty: self_ty,
-                where_start: where_start,
-                where_count: n32(where_count),
-                bind_start: bind_start,
-                bind_count: n32(bind_count),
-                method_start: method_start,
-                method_count: method_count,
-                span_start: span_start,
-                span_end: span_end
-            }
-        );
+        decls.confs.push(Conf {
+            model: model,
+            model_name: model_name,
+            gen_start: gen_start,
+            gen_count: gen_count,
+            tref: tref,
+            self_ty: self_ty,
+            where_start: where_start,
+            where_count: n32(where_count),
+            bind_start: bind_start,
+            bind_count: n32(bind_count),
+            method_start: method_start,
+            method_count: method_count,
+            span_start: span_start,
+            span_end: span_end
+        });
     }
 }
 
@@ -607,29 +593,25 @@ fn read_items(
                 let field_ty = tid(in tmap, reader.word(in bytes));
                 decls.words.push(field_ty);
             }
-            decls.items.push(
-                ItemRow {
-                    adt: true,
-                    name: name,
-                    span_start: span_start,
-                    span_end: span_end,
-                    member_start: member_start,
-                    member_count: n32(field_count)
-                }
-            );
+            decls.items.push(ItemRow {
+                adt: true,
+                name: name,
+                span_start: span_start,
+                span_end: span_end,
+                member_start: member_start,
+                member_count: n32(field_count)
+            });
         } else {
             let member_start = n32(decls.sigs.len());
             let op_count = read_sigs(inout reader, in bytes, inout decls, in nmap, in tmap);
-            decls.items.push(
-                ItemRow {
-                    adt: false,
-                    name: name,
-                    span_start: span_start,
-                    span_end: span_end,
-                    member_start: member_start,
-                    member_count: op_count
-                }
-            );
+            decls.items.push(ItemRow {
+                adt: false,
+                name: name,
+                span_start: span_start,
+                span_end: span_end,
+                member_start: member_start,
+                member_count: op_count
+            });
         }
     }
 }
@@ -666,15 +648,13 @@ pub fn read_decls(
         let span_start = reader.word(in bytes);
         let span_end = reader.word(in bytes);
         let owner = sym(in nmap, reader.word(in bytes));
-        decls.bounds.push(
-            BoundSyn {
-                param: param,
-                tref: tref,
-                span_start: span_start,
-                span_end: span_end,
-                owner: owner
-            }
-        );
+        decls.bounds.push(BoundSyn {
+            param: param,
+            tref: tref,
+            span_start: span_start,
+            span_end: span_end,
+            owner: owner
+        });
     }
     read_items(inout reader, in bytes, inout decls, in nmap, in tmap);
     decls

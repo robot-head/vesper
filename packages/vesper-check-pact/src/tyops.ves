@@ -391,14 +391,12 @@ pub fn conform_row(
             );
             args.push(conformed);
         }
-        effs.push(
-            EffNode {
-                label: row_effect.label,
-                name: row_effect.name,
-                a: arg_start,
-                n: row_effect.n
-            }
-        );
+        effs.push(EffNode {
+            label: row_effect.label,
+            name: row_effect.name,
+            a: arg_start,
+            n: row_effect.n
+        });
     }
     let mapped = types.mk_row(in effs, in args, row.tail);
     substitute_row(inout types, mapped, in vars)

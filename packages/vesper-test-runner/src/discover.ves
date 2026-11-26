@@ -47,12 +47,10 @@ pub fn toks(in src: Slice[u8]) -> Toks {
     let mut start = ChunkSeq::with_capacity[u64](n);
     let mut end = ChunkSeq::with_capacity[u64](n);
     for i in 0..n {
-        start.push(
-            match lexed.start.try_get(i) {
-                Option::Some(offset) => widen_u64(offset),
-                Option::None => 0,
-            }
-        );
+        start.push(match lexed.start.try_get(i) {
+            Option::Some(offset) => widen_u64(offset),
+            Option::None => 0,
+        });
         end.push(token_end(in lexed, i));
     }
     Toks { kind: lexed.kind, start: start, end: end }
@@ -772,21 +770,19 @@ pub fn discover(in input: Slice[u8]) -> ChunkSeq[u64] {
     for i in 0..item_count {
         let is_fn = reader.word(in input) != 0;
         if !is_fn {
-            items.push(
-                Item {
-                    is_fn: false,
-                    name_start: 0,
-                    name_end: 0,
-                    start: 0,
-                    end: 0,
-                    is_generic: false,
-                    has_body: false,
-                    param_start: 0,
-                    param_count: 0,
-                    effect_start: 0,
-                    effect_count: 0
-                }
-            );
+            items.push(Item {
+                is_fn: false,
+                name_start: 0,
+                name_end: 0,
+                start: 0,
+                end: 0,
+                is_generic: false,
+                has_body: false,
+                param_start: 0,
+                param_count: 0,
+                effect_start: 0,
+                effect_count: 0
+            });
             continue;
         }
         let (name_start, name_end) = reader.text(in input);
@@ -799,14 +795,12 @@ pub fn discover(in input: Slice[u8]) -> ChunkSeq[u64] {
         for k in 0..param_count {
             let (param_name_start, param_name_end) = reader.text(in input);
             let (type_start, type_end) = reader.text(in input);
-            params.push(
-                Param {
-                    name_start: param_name_start,
-                    name_end: param_name_end,
-                    type_start: type_start,
-                    type_end: type_end
-                }
-            );
+            params.push(Param {
+                name_start: param_name_start,
+                name_end: param_name_end,
+                type_start: type_start,
+                type_end: type_end
+            });
         }
         let effect_start = effects.len() / 2;
         let effect_count = reader.word(in input);
@@ -815,21 +809,19 @@ pub fn discover(in input: Slice[u8]) -> ChunkSeq[u64] {
             effects.push(eff_name_start);
             effects.push(eff_name_end);
         }
-        items.push(
-            Item {
-                is_fn: true,
-                name_start: name_start,
-                name_end: name_end,
-                start: start,
-                end: end,
-                is_generic: is_generic,
-                has_body: has_body,
-                param_start: param_start,
-                param_count: param_count,
-                effect_start: effect_start,
-                effect_count: effect_count
-            }
-        );
+        items.push(Item {
+            is_fn: true,
+            name_start: name_start,
+            name_end: name_end,
+            start: start,
+            end: end,
+            is_generic: is_generic,
+            has_body: has_body,
+            param_start: param_start,
+            param_count: param_count,
+            effect_start: effect_start,
+            effect_count: effect_count
+        });
     }
     let case_count = reader.word(in input);
     let mut cases: ChunkSeq[Case] = ChunkSeq::with_capacity[Case](case_count);
@@ -839,17 +831,15 @@ pub fn discover(in input: Slice[u8]) -> ChunkSeq[u64] {
         let start = reader.word(in input);
         let end = reader.word(in input);
         let target = reader.word(in input);
-        cases.push(
-            Case {
-                entry_start: entry_start,
-                entry_end: entry_end,
-                name_start: name_start,
-                name_end: name_end,
-                start: start,
-                end: end,
-                target: target
-            }
-        );
+        cases.push(Case {
+            entry_start: entry_start,
+            entry_end: entry_end,
+            name_start: name_start,
+            name_end: name_end,
+            start: start,
+            end: end,
+            target: target
+        });
     }
     let tokens = toks(in src);
     let attrs = extract_test_attrs(in src, in tokens.kind, in tokens.start, in tokens.end);
