@@ -138,6 +138,30 @@ const PROGRAMS: &[(&str, &str)] = &[
          handle Fail[String] in { h() } with { return v => v, raise(e, k) => 98 }) }",
     ),
     (
+        // An effectful function value binds the incoming capability
+        // (`bind_callable_evidence`): the outer handler answers.
+        "bound_evidence",
+        "effect Ask { fn ask() -> i64; } fn ask() -> i64 eff [Ask] { Ask::ask() } \
+         fn apply(sink f: fn() -> i64 eff [Ask]) -> i64 eff [Ask] { handle inner: Ask in { f() } \
+         with { return x => x, ask(k) => 2, } } \
+         fn main() -> i64 { let f = ask; handle outer: Ask in { apply(sink f) } \
+         with { return x => x, ask(k) => 1, } }",
+    ),
+    (
+        // A clause writes an `inout` operation argument before aborting.
+        "inout_operation",
+        "effect Stop { fn stop(inout x: i64) -> i64; } fn main() -> i64 { let mut x = 0; \
+         let r = handle Stop in { x += 5; Stop::stop(inout x); x = wrapping_add(x, 100); 1 } \
+         with { return v => v, stop(x, k) => { x = wrapping_add(x, 30); 7 }, }; \
+         wrapping_add(wrapping_mul(r, 1000), x) }",
+    ),
+    (
+        "aborting_operation",
+        "effect Stop { fn stop() -> i64; } fn main() -> i64 { let mut x = 0; \
+         let r = handle Stop in { x += 5; Stop::stop(); x += 100; 1 } \
+         with { return v => v, stop(k) => 7, }; wrapping_add(wrapping_mul(r, 1000), x) }",
+    ),
+    (
         "unhandled_in_clause",
         "fn d(a: u64, b: u64) -> u64 eff [Fail[RuntimeError]] { a / b } \
          fn main() -> u64 { handle Fail[RuntimeError] in { \
