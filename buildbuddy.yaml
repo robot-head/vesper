@@ -154,7 +154,10 @@ actions:
         branches:
           - "*"
     env:
-      BAZEL_FLAGS: "--config=ci --config=rbe_build"
+      # Optimized, like the test checks (--config=ci_opt in .bazelrc): every
+      # acceptance task runs the compiler, and these executables then come
+      # from the same remote-cache entries as "Test all targets" builds.
+      BAZEL_FLAGS: "--config=ci --config=rbe_build --config=ci_opt"
       # Written by the prebuild step below and read by the acceptance tasks.
       VESPER_BAZEL_EXECUTABLES: ".ci-bazel-executables"
     steps:

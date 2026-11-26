@@ -1,0 +1,52 @@
+// The tensor prelude (src/tensor_types/elaborate.rs): built-in tensor and KV-cache declarations.
+copy struct Tensor {
+    id: u64
+}
+copy struct Dims {
+    rank: u64,
+    d0: u64,
+    d1: u64,
+    d2: u64,
+    d3: u64
+}
+linear struct KvPageLease {
+    lease: u64
+}
+linear struct ActiveKvSeq {
+    seq: u64
+}
+copy enum KvOomError {
+    OutOfPages,
+    PageFull,
+    TokenLimit
+}
+linear effect Tensor {
+    fn matmul(a: Tensor, b: Tensor) -> Tensor;
+    fn matvec(a: Tensor, x: Tensor) -> Tensor;
+    fn add(a: Tensor, b: Tensor) -> Tensor;
+    fn mul(a: Tensor, b: Tensor) -> Tensor;
+    fn swiglu(gate: Tensor, up: Tensor) -> Tensor;
+    fn reshape(x: Tensor, dims: Dims) -> Tensor;
+    fn transpose(x: Tensor) -> Tensor;
+    fn softmax(x: Tensor) -> Tensor;
+    fn silu(x: Tensor) -> Tensor;
+    fn to_bf16(x: Tensor) -> Tensor;
+    fn to_f32(x: Tensor) -> Tensor;
+    fn argmax(x: Tensor) -> u64;
+    fn fill(value: f64, dims: Dims) -> Tensor;
+    fn rms_norm(x: Tensor, w: Tensor, epsilon: f64) -> Tensor;
+    fn rope(x: Tensor, position: u64) -> Tensor;
+    fn qmatvec(w: Tensor, x: Tensor) -> Tensor;
+    fn block_scale(w: Tensor, row: u64, block: u64) -> f64;
+}
+linear effect KvCachePool {
+    fn begin_sequence(seq_id: u64) -> Result[ActiveKvSeq, KvOomError];
+    fn append_kv_step(inout seq: ActiveKvSeq, k: Tensor, v: Tensor) -> Result[Unit, KvOomError];
+    fn attend(seq: ActiveKvSeq, q: Tensor) -> Tensor;
+    fn tokens(seq: ActiveKvSeq) -> u64;
+    fn release_sequence(sink seq: ActiveKvSeq) -> Unit;
+    fn lease_page() -> Result[KvPageLease, KvOomError];
+    fn write_page(inout page: KvPageLease, k: Tensor, v: Tensor) -> Result[Unit, KvOomError];
+    fn page_tokens(page: KvPageLease) -> u64;
+    fn release_page(sink page: KvPageLease) -> Unit;
+}

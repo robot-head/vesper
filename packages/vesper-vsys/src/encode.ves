@@ -91,10 +91,7 @@ pub fn put_decimal_const(inout e: Encoder, neg: bool, mag: u64) eff [Fail[VsysEr
             break;
         }
         k = wrapping_sub(k, 1);
-        let ch = match rev.try_get(k) {
-            Option::Some(v) => v,
-            Option::None => 48,
-        };
+        let ch = rev.try_get(k).unwrap_or(48);
         tmp.push(ch);
     }
     put_bytes(inout e, in tmp.as_slice());

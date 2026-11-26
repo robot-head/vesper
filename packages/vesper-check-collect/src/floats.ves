@@ -1,0 +1,204 @@
+// The transcendental functions a module calls, with their helpers, as
+// the checker's float prelude adds them (`float_math::prelude`,
+// `numeric::float::transcendental_closure` and `transcendental_source`):
+// the same Vesper text byte for byte.
+
+use @vesper/ast::{Ast, FnNode, ItemNode, none};
+use @vesper-std/arena::{idx_from_raw};
+use @vesper-std/intern::{Interner, interner_new, symbol_from_id};
+use self::prelude::{Uses, sorted_symbols};
+
+// The sources by index, in `ALL_SOURCES` order: exp, ln, sin, cos of f64
+// (0-3) and f32 (4-7), then the sine and cosine kernels and the pi/2
+// reduction (8-10); 255 for none.
+fn source_name(k: u8) -> Str {
+    if k == 0 {
+        "exp_f64"
+    } else if k == 1 {
+        "ln_f64"
+    } else if k == 2 {
+        "sin_f64"
+    } else if k == 3 {
+        "cos_f64"
+    } else if k == 4 {
+        "exp_f32"
+    } else if k == 5 {
+        "ln_f32"
+    } else if k == 6 {
+        "sin_f32"
+    } else if k == 7 {
+        "cos_f32"
+    } else if k == 8 {
+        "float_kernel_sin_f64"
+    } else if k == 9 {
+        "float_kernel_cos_f64"
+    } else if k == 10 {
+        "float_rem_pio2_f64"
+    } else {
+        ""
+    }
+}
+
+// `transcendental_source`.
+fn source_text(k: u8) -> Str {
+    if k == 0 {
+        "fn exp_f64(x: f64) -> f64 {\n    let bits: u64 = to_bits_f64(x);\n    let hx: u64 = (bits >> 32) & 2147483647;\n    let negative: bool = (bits >> 63) == 1;\n    if x != x {\n        x\n    } else if x > 709.782712893383973096 {\n        from_bits_f64(9218868437227405312)\n    } else if x < -745.13321910194110842 {\n        0.0\n    } else if hx < 1043333120 {\n        1.0 + x\n    } else {\n        let k: i64 = if hx > 1071001154 {\n            if hx < 1072734898 {\n                if negative { -1 } else { 1 }\n            } else {\n                let half: f64 = if negative { -0.5 } else { 0.5 };\n                saturating_i64(1.44269504088896338700 * x + half)\n            }\n        } else {\n            0\n        };\n        let kf: f64 = nearest_f64(k);\n        let hi: f64 = x - kf * 6.93147180369123816490e-01;\n        let lo: f64 = kf * 1.90821492927058770002e-10;\n        let r: f64 = if k == 0 { x } else { hi - lo };\n        let t: f64 = r * r;\n        let c: f64 = r - t * (1.66666666666666019037e-01 + t * (-2.77777777770155933842e-03 + t * (6.61375632143793436117e-05 + t * (-1.65339022054652515390e-06 + t * 4.13813679705723846039e-08))));\n        if k == 0 {\n            1.0 - ((r * c) / (c - 2.0) - r)\n        } else {\n            let y: f64 = 1.0 - ((lo - (r * c) / (2.0 - c)) - hi);\n            if k > 1023 {\n                y * 2.0 * from_bits_f64(9214364837600034816)\n            } else if k >= -1021 {\n                y * from_bits_f64(wrapping_u64(wrapping_add(k, 1023)) << 52)\n            } else {\n                y * from_bits_f64(wrapping_u64(wrapping_add(k, 2023)) << 52) * from_bits_f64(103582791429521408)\n            }\n        }\n    }\n}"
+    } else if k == 1 {
+        "fn ln_f64(x: f64) -> f64 {\n    let raw: u64 = to_bits_f64(x);\n    if x != x {\n        x\n    } else if (raw & 9223372036854775807) == 0 {\n        from_bits_f64(18442240474082181120)\n    } else if (raw >> 63) == 1 {\n        from_bits_f64(9221120237041090560)\n    } else if raw >= 9218868437227405312 {\n        x\n    } else {\n        let subnormal: bool = raw < 4503599627370496;\n        let scaled: f64 = if subnormal { x * 1.80143985094819840000e+16 } else { x };\n        let bits: u64 = to_bits_f64(scaled);\n        let high: u64 = bits >> 32;\n        let bias: i64 = if subnormal { 1077 } else { 1023 };\n        let k0: i64 = wrapping_sub(wrapping_i64(high >> 20), bias);\n        let hx: u64 = high & 1048575;\n        let i: u64 = wrapping_add(hx, 614244) & 1048576;\n        let k: i64 = wrapping_add(k0, wrapping_i64(i >> 20));\n        let m: f64 = from_bits_f64((((hx | (i ^ 1072693248))) << 32) | (bits & 4294967295));\n        let f: f64 = m - 1.0;\n        let dk: f64 = nearest_f64(k);\n        if (wrapping_add(hx, 2) & 1048575) < 3 {\n            if f == 0.0 {\n                if k == 0 { 0.0 } else { dk * 6.93147180369123816490e-01 + dk * 1.90821492927058770002e-10 }\n            } else {\n                let r: f64 = f * f * (0.5 - 0.33333333333333333 * f);\n                if k == 0 { f - r } else { dk * 6.93147180369123816490e-01 - ((r - dk * 1.90821492927058770002e-10) - f) }\n            }\n        } else {\n            let s: f64 = f / (2.0 + f);\n            let z: f64 = s * s;\n            let w: f64 = z * z;\n            let t1: f64 = w * (3.999999999940941908e-01 + w * (2.222219843214978396e-01 + w * 1.531383769920937332e-01));\n            let t2: f64 = z * (6.666666666666735130e-01 + w * (2.857142874366239149e-01 + w * (1.818357216161805012e-01 + w * 1.479819860511658591e-01)));\n            let r: f64 = t2 + t1;\n            let large: bool = hx >= 398458 && hx <= 440401;\n            if large {\n                let hfsq: f64 = 0.5 * f * f;\n                if k == 0 { f - (hfsq - s * (hfsq + r)) } else { dk * 6.93147180369123816490e-01 - ((hfsq - (s * (hfsq + r) + dk * 1.90821492927058770002e-10)) - f) }\n            } else {\n                if k == 0 { f - s * (f - r) } else { dk * 6.93147180369123816490e-01 - ((s * (f - r) - dk * 1.90821492927058770002e-10) - f) }\n            }\n        }\n    }\n}"
+    } else if k == 2 {
+        "fn sin_f64(x: f64) -> f64 {\n    let ix: u64 = (to_bits_f64(x) >> 32) & 2147483647;\n    if ix <= 1072243195 {\n        if ix < 1045430272 {\n            x\n        } else {\n            float_kernel_sin_f64(x, 0.0, false)\n        }\n    } else if x != x {\n        x\n    } else if ix >= 2146435072 {\n        from_bits_f64(9221120237041090560)\n    } else {\n        let (n, y0, y1) = float_rem_pio2_f64(x);\n        if n == 0 {\n            float_kernel_sin_f64(y0, y1, true)\n        } else if n == 1 {\n            float_kernel_cos_f64(y0, y1)\n        } else if n == 2 {\n            -float_kernel_sin_f64(y0, y1, true)\n        } else {\n            -float_kernel_cos_f64(y0, y1)\n        }\n    }\n}"
+    } else if k == 3 {
+        "fn cos_f64(x: f64) -> f64 {\n    let ix: u64 = (to_bits_f64(x) >> 32) & 2147483647;\n    if ix <= 1072243195 {\n        if ix < 1044816030 {\n            1.0\n        } else {\n            float_kernel_cos_f64(x, 0.0)\n        }\n    } else if x != x {\n        x\n    } else if ix >= 2146435072 {\n        from_bits_f64(9221120237041090560)\n    } else {\n        let (n, y0, y1) = float_rem_pio2_f64(x);\n        if n == 0 {\n            float_kernel_cos_f64(y0, y1)\n        } else if n == 1 {\n            -float_kernel_sin_f64(y0, y1, true)\n        } else if n == 2 {\n            -float_kernel_cos_f64(y0, y1)\n        } else {\n            float_kernel_sin_f64(y0, y1, true)\n        }\n    }\n}"
+    } else if k == 4 {
+        "fn exp_f32(x: f32) -> f32 { nearest_f32(exp_f64(widen_f64(x))) }"
+    } else if k == 5 {
+        "fn ln_f32(x: f32) -> f32 { nearest_f32(ln_f64(widen_f64(x))) }"
+    } else if k == 6 {
+        "fn sin_f32(x: f32) -> f32 { nearest_f32(sin_f64(widen_f64(x))) }"
+    } else if k == 7 {
+        "fn cos_f32(x: f32) -> f32 { nearest_f32(cos_f64(widen_f64(x))) }"
+    } else if k == 8 {
+        "fn float_kernel_sin_f64(x: f64, y: f64, tail: bool) -> f64 {\n    let z: f64 = x * x;\n    let w: f64 = z * z;\n    let r: f64 = 8.33333333332248946124e-03 + z * (-1.98412698298579493134e-04 + z * 2.75573137070700676789e-06) + z * w * (-2.50507602534068634195e-08 + z * 1.58969099521155010221e-10);\n    let v: f64 = z * x;\n    if tail {\n        x - ((z * (0.5 * y - v * r) - y) - v * -1.66666666666666324348e-01)\n    } else {\n        x + v * (-1.66666666666666324348e-01 + z * r)\n    }\n}"
+    } else if k == 9 {
+        "fn float_kernel_cos_f64(x: f64, y: f64) -> f64 {\n    let z: f64 = x * x;\n    let w: f64 = z * z;\n    let r: f64 = z * (4.16666666666666019037e-02 + z * (-1.38888888888741095749e-03 + z * 2.48015872894767294178e-05)) + w * w * (-2.75573143513906633035e-07 + z * (2.08757232129817482790e-09 + z * -1.13596475577881948265e-11));\n    let hz: f64 = 0.5 * z;\n    let one_minus: f64 = 1.0 - hz;\n    one_minus + (((1.0 - one_minus) - hz) + (z * r - x * y))\n}"
+    } else if k == 10 {
+        "fn float_rem_pio2_f64(x: f64) -> (i64, f64, f64) {\n    let ex: i64 = wrapping_i64((to_bits_f64(x) >> 52) & 2047);\n    let fnv: f64 = x * 6.36619772367581382433e-01 + 6755399441055744.0 - 6755399441055744.0;\n    let n: i64 = saturating_i64(fnv) & 3;\n    let r1: f64 = x - fnv * 1.57079632673412561417e+00;\n    let w1: f64 = fnv * 6.07710050650619224932e-11;\n    let y1: f64 = r1 - w1;\n    let ey1: i64 = wrapping_i64((to_bits_f64(y1) >> 52) & 2047);\n    if wrapping_sub(ex, ey1) > 16 {\n        let t2: f64 = r1;\n        let v2: f64 = fnv * 6.07710050630396597660e-11;\n        let r2: f64 = t2 - v2;\n        let w2: f64 = fnv * 2.02226624879595063154e-21 - ((t2 - r2) - v2);\n        let y2: f64 = r2 - w2;\n        let ey2: i64 = wrapping_i64((to_bits_f64(y2) >> 52) & 2047);\n        if wrapping_sub(ex, ey2) > 49 {\n            let t3: f64 = r2;\n            let v3: f64 = fnv * 2.02226624871116645580e-21;\n            let r3: f64 = t3 - v3;\n            let w3: f64 = fnv * 8.47842766036889956997e-32 - ((t3 - r3) - v3);\n            let y3: f64 = r3 - w3;\n            (n, y3, (r3 - y3) - w3)\n        } else {\n            (n, y2, (r2 - y2) - w2)\n        }\n    } else {\n        (n, y1, (r1 - y1) - w1)\n    }\n}"
+    } else {
+        ""
+    }
+}
+
+fn source_of(in name: Str) -> u8 {
+    for k in 0..11 {
+        let kk = wrapping_u8(k);
+        if eq(in name, source_name(kk)) {
+            return kk;
+        }
+    }
+    255
+}
+
+fn eq(in x: Str, in y: Str) -> bool {
+    let a = x.as_bytes();
+    let b = y.as_bytes();
+    if a.len() != b.len() {
+        return false;
+    }
+    for i in 0..a.len() {
+        if a.try_get(i) != b.try_get(i) {
+            return false;
+        }
+    }
+    true
+}
+
+// `transcendental_closure`: `k` and its helpers, depth first.
+fn closure(k: u8, inout out: ChunkSeq[u8]) {
+    for i in 0..out.len() {
+        if out.try_get(i) == Option::Some(k) {
+            return;
+        }
+    }
+    out.push(k);
+    if k == 2 || k == 3 {
+        closure(8, inout out);
+        closure(9, inout out);
+        closure(10, inout out);
+    } else if k >= 4 && k <= 7 {
+        closure(wrapping_sub(k, 4), inout out);
+    }
+}
+
+fn f_item(in a: Ast, i: u32) -> ItemNode {
+    a.items.get_or(idx_from_raw[ItemNode](i), ItemNode { kind: 0, node: none() })
+}
+
+fn f_fn_name(in a: Ast, i: u32) -> u32 {
+    a.fns
+        .get_or(
+            idx_from_raw[FnNode](i),
+            FnNode {
+                name: none(),
+                fip: false,
+                generics: 0,
+                params: 0,
+                result: none(),
+                effects: none(),
+                body: none(),
+                start: 0,
+                end: 0
+            }
+        )
+        .name
+}
+
+fn has(in s: ChunkSeq[u8], k: u8) -> bool {
+    for i in 0..s.len() {
+        if s.try_get(i) == Option::Some(k) {
+            return true;
+        }
+    }
+    false
+}
+
+// The float prelude's source for a module with uses `u`: the closure of
+// each transcendental it names and does not define, in name order, less
+// the functions it defines, one per line.
+pub fn float_source(in u: Uses, in module: Ast) -> String {
+    let mut defined = interner_new();
+    for i in 0..module.m_items.len() {
+        let it = match module.m_items.try_get(i) {
+            Option::Some(v) => f_item(in module, v),
+            Option::None => ItemNode { kind: 0, node: none() },
+        };
+        if it.kind == 2 {
+            let mut t = String::new();
+            let ok = module
+                .names
+                .resolve_into(symbol_from_id(f_fn_name(in module, it.node)), inout t);
+            let s = defined.intern(in t.as_str());
+        }
+    }
+    let mut names = ChunkSeq::new[u8]();
+    let order = sorted_symbols(in u.names);
+    for i in 0..order.len() {
+        let id = match order.try_get(i) {
+            Option::Some(v) => v,
+            Option::None => 0,
+        };
+        let mut t = String::new();
+        let ok = u.names.resolve_into(symbol_from_id(id), inout t);
+        let k = source_of(in t.as_str());
+        if k >= 8 || is_defined(in defined, source_name(k)) {
+            continue;
+        }
+        let mut c = ChunkSeq::new[u8]();
+        closure(k, inout c);
+        for j in 0..c.len() {
+            let f = match c.try_get(j) {
+                Option::Some(v) => v,
+                Option::None => 255,
+            };
+            if !is_defined(in defined, source_name(f)) && !has(in names, f) {
+                names.push(f);
+            }
+        }
+    }
+    let mut out = String::new();
+    for i in 0..names.len() {
+        let k = match names.try_get(i) {
+            Option::Some(v) => v,
+            Option::None => 255,
+        };
+        out.push_str(in source_text(k));
+        out.push_str(in "\n");
+    }
+    out
+}
+
+fn is_defined(in d: Interner, in name: Str) -> bool {
+    match d.lookup(in name) {
+        Option::Some(s) => true,
+        Option::None => false,
+    }
+}
