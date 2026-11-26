@@ -184,8 +184,11 @@ pub fn rx_on_packet_received(
 
 // The ACK Delay field of the ACK frame to send now, or `None` if nothing
 // was received.
-pub fn rx_ack_delay(in s: RxState, now_ns: u64, ack_delay_exponent: u8)
-    -> Option[u64] eff [Fail[AckErr]] {
+pub fn rx_ack_delay(
+    in s: RxState,
+    now_ns: u64,
+    ack_delay_exponent: u8
+) -> Option[u64] eff [Fail[AckErr]] {
     if ack_delay_exponent > MAX_ACK_DELAY_EXPONENT {
         Fail::raise(AckErr::BadAckDelayExponent { exponent: ack_delay_exponent });
     }

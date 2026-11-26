@@ -363,8 +363,11 @@ fn set_node(inout r: RouterCore, i: u64, n: Node) {
 
 // `Router::insert`: the route id, or why it was refused. The router is
 // unchanged on every refusal: conflicts are found by a dry run first.
-pub fn router_core_insert(inout r: RouterCore, in method: Slice[u8], in pattern: Slice[u8])
-    -> Result[u64, RouteFault] {
+pub fn router_core_insert(
+    inout r: RouterCore,
+    in method: Slice[u8],
+    in pattern: Slice[u8]
+) -> Result[u64, RouteFault] {
     if method.len() == 0 {
         return Result::Err(RouteFault::InvalidMethod);
     }

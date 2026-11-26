@@ -98,8 +98,12 @@ pub fn bound_string(max_utf8_bytes: u64) -> Bound eff [Fail[Error]] {
 }
 
 // `JsonSizeBound::combine_field`.
-pub fn bound_field(object: Bound, key_escaped_len: u64, field: Bound, first: bool)
-    -> Bound eff [Fail[Error]] {
+pub fn bound_field(
+    object: Bound,
+    key_escaped_len: u64,
+    field: Bound,
+    first: bool
+) -> Bound eff [Fail[Error]] {
     let not_first: u64 = if first {
         0
     } else {

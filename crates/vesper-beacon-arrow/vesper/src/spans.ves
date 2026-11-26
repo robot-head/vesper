@@ -142,8 +142,12 @@ fn word(in s: Slice[u64], i: u64) -> u64 {
 // ids and times, then the attribute value) one after another, `narrow` the
 // five u8 columns. Returns the bytes written, or 0 when the column lengths do
 // not match `rows` or `out` is shorter than `stream_len(rows)`.
-pub fn stream_into(in wide: Slice[u64], in narrow: Slice[u8], rows: u64, inout out: Slice[u8])
-    -> u64 {
+pub fn stream_into(
+    in wide: Slice[u64],
+    in narrow: Slice[u8],
+    rows: u64,
+    inout out: Slice[u8]
+) -> u64 {
     if wide.len() != wrapping_mul(rows, WIDE) || narrow.len() != wrapping_mul(rows, NARROW) {
         return 0;
     }

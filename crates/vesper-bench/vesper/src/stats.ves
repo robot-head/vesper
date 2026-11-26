@@ -68,8 +68,10 @@ pub fn cadd(a: u64, b: u64) -> u64 eff [Fail[PortError]] {
 // ---------------------------------------------------------------------------
 // statistics.rs
 
-pub fn do_mann_whitney_ranks(in first: Slice[u64], in second: Slice[u64])
-    -> MannWhitneyRanks eff [Fail[PortError]] {
+pub fn do_mann_whitney_ranks(
+    in first: Slice[u64],
+    in second: Slice[u64]
+) -> MannWhitneyRanks eff [Fail[PortError]] {
     let n = first.len();
     let m = second.len();
     if n == 0 || m == 0 {
@@ -128,8 +130,10 @@ fn check_exact_sizes(n: u64, m: u64) eff [Fail[PortError]] {
     }
 }
 
-pub fn do_mann_whitney_exact(in first: Slice[u64], in second: Slice[u64])
-    -> ExactMw eff [Fail[PortError]] {
+pub fn do_mann_whitney_exact(
+    in first: Slice[u64],
+    in second: Slice[u64]
+) -> ExactMw eff [Fail[PortError]] {
     let n = first.len();
     let m = second.len();
     check_exact_sizes(n, m);
@@ -189,8 +193,10 @@ pub fn do_mann_whitney_exact(in first: Slice[u64], in second: Slice[u64])
     }
 }
 
-pub fn do_mann_whitney_exact_with_ties(in first: Slice[u64], in second: Slice[u64])
-    -> ExactMw eff [Fail[PortError]] {
+pub fn do_mann_whitney_exact_with_ties(
+    in first: Slice[u64],
+    in second: Slice[u64]
+) -> ExactMw eff [Fail[PortError]] {
     let n = first.len();
     let m = second.len();
     check_exact_sizes(n, m);
@@ -260,8 +266,11 @@ pub fn do_mann_whitney_exact_with_ties(in first: Slice[u64], in second: Slice[u6
 // ---------------------------------------------------------------------------
 // contract.rs PairedSample
 
-pub fn do_paired_sample_new(baseline: u64, candidate: u64, operations: u64)
-    -> Sample eff [Fail[PortError]] {
+pub fn do_paired_sample_new(
+    baseline: u64,
+    candidate: u64,
+    operations: u64
+) -> Sample eff [Fail[PortError]] {
     if baseline == 0 || candidate == 0 || operations == 0 {
         Fail::raise(PortError::NonPositiveEvidence);
     }
@@ -389,8 +398,10 @@ fn sorted_by_ratio(in samples: Slice[Sample]) -> ChunkSeq[Sample] {
 }
 
 // Decision codes are the crate's `Decision`; reasons are Reason codes.
-pub fn do_analyze_pairs(in samples: Slice[Sample], max_regression_bp: i64)
-    -> AnalysisOut eff [Fail[PortError]] {
+pub fn do_analyze_pairs(
+    in samples: Slice[Sample],
+    max_regression_bp: i64
+) -> AnalysisOut eff [Fail[PortError]] {
     let n = samples.len();
     if n == 0 {
         Fail::raise(PortError::EmptyEvidence);

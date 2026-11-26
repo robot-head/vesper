@@ -199,8 +199,12 @@ fn all_zero(in b: Slice[u8], start: u64, len: u64) -> bool {
 // leaf heap values overlap, 13 free leaf slot is not zeroed.
 // Scratch: `seen` at least `c` bytes, `mask` 256 words, `cols` 3 words per
 // column.
-pub fn check(in b: Slice[u8], inout seen: Slice[u8], inout mask: Slice[u64], inout cols: Slice[u64])
-    -> u64 {
+pub fn check(
+    in b: Slice[u8],
+    inout seen: Slice[u8],
+    inout mask: Slice[u64],
+    inout cols: Slice[u64]
+) -> u64 {
     let ncols = rd16(in b, 32);
     let c = rd16(in b, 26);
     let n = rd16(in b, 20);

@@ -264,8 +264,11 @@ pub fn unpacked_len(in input: Slice[u8], in lim: Slice[u64]) -> u64 eff [Fail[GE
     size
 }
 
-pub fn unpack_into(in input: Slice[u8], inout output: Slice[u8], in lim: Slice[u64])
-    -> u64 eff [Fail[GErr]] {
+pub fn unpack_into(
+    in input: Slice[u8],
+    inout output: Slice[u8],
+    in lim: Slice[u64]
+) -> u64 eff [Fail[GErr]] {
     let size = unpacked_len(in input, in lim);
     if output.len() < size {
         fail(8, 0);
@@ -392,8 +395,11 @@ pub fn packed_len(in input: Slice[u8], in lim: Slice[u64]) -> u64 eff [Fail[GErr
     size
 }
 
-pub fn pack_into(in input: Slice[u8], inout output: Slice[u8], in lim: Slice[u64])
-    -> u64 eff [Fail[GErr]] {
+pub fn pack_into(
+    in input: Slice[u8],
+    inout output: Slice[u8],
+    in lim: Slice[u64]
+) -> u64 eff [Fail[GErr]] {
     let size = packed_len(in input, in lim);
     if output.len() < size {
         fail(8, 0);

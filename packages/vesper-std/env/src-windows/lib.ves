@@ -127,8 +127,12 @@ fn is_cmd_ws(c: u16) -> bool {
 
 // Parse Windows command line (`CommandLineToArgvW` rules) into argument `target`
 // (or count all arguments when `count_only` is true).
-fn parse_cmdline(in cmd: Slice[u16], target: u64, count_only: bool, inout out: ChunkSeq[u16])
-    -> (u64, bool) {
+fn parse_cmdline(
+    in cmd: Slice[u16],
+    target: u64,
+    count_only: bool,
+    inout out: ChunkSeq[u16]
+) -> (u64, bool) {
     let n = cmd.len();
     let mut i: u64 = 0;
     loop {

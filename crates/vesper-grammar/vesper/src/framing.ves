@@ -64,8 +64,13 @@ pub fn leb_decode(
 }
 
 // framing::decode over a whole slice with the crate's own codes.
-pub fn decode(in s: Slice[u8], start: u64, end: u64, inout work: u64, base: u64)
-    -> P2 eff [Fail[GErr]] {
+pub fn decode(
+    in s: Slice[u8],
+    start: u64,
+    end: u64,
+    inout work: u64,
+    base: u64
+) -> P2 eff [Fail[GErr]] {
     leb_decode(in s, start, end, inout work, base, 0, 1, 2, 8)
 }
 
@@ -74,8 +79,11 @@ pub fn decode_prefix(in input: Slice[u8], work: u64) -> P2 eff [Fail[GErr]] {
     decode(in input, 0, input.len(), inout w, 0)
 }
 
-pub fn encode_u64_into(value: u64, inout output: Slice[u8], in lim: Slice[u64])
-    -> u64 eff [Fail[GErr]] {
+pub fn encode_u64_into(
+    value: u64,
+    inout output: Slice[u8],
+    in lim: Slice[u64]
+) -> u64 eff [Fail[GErr]] {
     let len = leb_len(value);
     bound(len, sw(in lim, 2), 6);
     bound(len, sw(in lim, 3), 8);
@@ -122,8 +130,11 @@ pub fn u24_frame_parts(in input: Slice[u8], in lim: Slice[u64]) -> P2 eff [Fail[
     pair(U24_HEADER_BYTES, end)
 }
 
-pub fn encode_u24_frame_into(in payload: Slice[u8], inout output: Slice[u8], in lim: Slice[u64])
-    -> u64 eff [Fail[GErr]] {
+pub fn encode_u24_frame_into(
+    in payload: Slice[u8],
+    inout output: Slice[u8],
+    in lim: Slice[u64]
+) -> u64 eff [Fail[GErr]] {
     let n = payload.len();
     if n > MAX_U24_PAYLOAD {
         fail(2, 0);
@@ -156,8 +167,11 @@ pub fn frame_encoded_len(n: u64, in lim: Slice[u64]) -> u64 eff [Fail[GErr]] {
     size
 }
 
-pub fn encode_frame_into(in payload: Slice[u8], inout output: Slice[u8], in lim: Slice[u64])
-    -> u64 eff [Fail[GErr]] {
+pub fn encode_frame_into(
+    in payload: Slice[u8],
+    inout output: Slice[u8],
+    in lim: Slice[u64]
+) -> u64 eff [Fail[GErr]] {
     let n = payload.len();
     let size = frame_encoded_len(n, in lim);
     if output.len() < size {

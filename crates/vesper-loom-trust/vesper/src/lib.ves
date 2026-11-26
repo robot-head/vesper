@@ -830,8 +830,11 @@ fn copy_diagnostic(in d: Diagnostic) -> Diagnostic {
 }
 
 // The text of each diagnostic, sorted and without repeats.
-fn diagnostics(in policy: Policy, in bundle: Bundle, in ds: ChunkSeq[Diag])
-    -> ChunkSeq[Diagnostic] {
+fn diagnostics(
+    in policy: Policy,
+    in bundle: Bundle,
+    in ds: ChunkSeq[Diag]
+) -> ChunkSeq[Diagnostic] {
     let mut made: ChunkSeq[Diagnostic] = ChunkSeq::new[Diagnostic]();
     for d in ds {
         let key: Option[String] = if d.key == NONE {
@@ -984,8 +987,12 @@ fn builder_index(in policy: Policy, in id: Str) -> u64 {
 // invalid extra rejects the whole bundle. Key and statement intervals are
 // half-open; a statement's interval must lie inside its key's, and `now`
 // inside both.
-pub fn verify(in expected: Identity, in bundle: Bundle, in policy: Policy, now: u64)
-    -> Report eff [Ffi[Crypto]] {
+pub fn verify(
+    in expected: Identity,
+    in bundle: Bundle,
+    in policy: Policy,
+    now: u64
+) -> Report eff [Ffi[Crypto]] {
     let mut ds: ChunkSeq[Diag] = ChunkSeq::new[Diag]();
     let no_names: ChunkSeq[Name] = ChunkSeq::new[Name]();
     let e = identity_error(in expected);

@@ -337,8 +337,13 @@ fn valid_offset(in t: Slice[u8], offset: u64) -> Unit eff [Fail[Failure]] {
 }
 
 // `prepare` before the copies: the label and text totals.
-pub fn prepare_check(in text: Str, in input: Slice[u64], count: u64, in caps: Caps, in sizes: Sizes)
-    -> Totals eff [Fail[Failure]] {
+pub fn prepare_check(
+    in text: Str,
+    in input: Slice[u64],
+    count: u64,
+    in caps: Caps,
+    in sizes: Sizes
+) -> Totals eff [Fail[Failure]] {
     validate(in caps);
     let t = text.as_bytes();
     let n = text.len();

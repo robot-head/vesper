@@ -106,8 +106,13 @@ pub fn prepared_empty(session: u64, base: u64, serial: u64) -> Prepared {
 
 // A prepared update for the validated `tree`, with the next mounted state
 // sized to the tree's shape.
-pub fn prepared_for(session: u64, base: u64, serial: u64, sink tree: Tree, text_len: u64)
-    -> Prepared {
+pub fn prepared_for(
+    session: u64,
+    base: u64,
+    serial: u64,
+    sink tree: Tree,
+    text_len: u64
+) -> Prepared {
     let n = tree.nodes.len();
     let np = tree.props.len();
     let ns = tree.subs.len();

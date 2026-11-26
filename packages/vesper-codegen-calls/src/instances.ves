@@ -343,8 +343,13 @@ pub struct Conc {
     row: u32,
 }
 
-pub fn concrete(inout t: Types, inout names: Names, in d: Calls, name: u32, in vars: IVars)
-    -> Conc {
+pub fn concrete(
+    inout t: Types,
+    inout names: Names,
+    in d: Calls,
+    name: u32,
+    in vars: IVars
+) -> Conc {
     let fi = d.function(name);
     let f = d.fn_info(fi);
     let v = vars.vars();
@@ -480,8 +485,11 @@ pub fn capability_only(in t: Types, in names: Names, k: Syms, row: u32) -> bool 
     true
 }
 
-fn any_param_contains_function(inout t: Types, in wd: World, in params: ChunkSeq[ParamInfo])
-    -> bool {
+fn any_param_contains_function(
+    inout t: Types,
+    in wd: World,
+    in params: ChunkSeq[ParamInfo]
+) -> bool {
     for i in 0..params.len() {
         let p = match params.try_get(i) {
             Option::Some(p) => p,

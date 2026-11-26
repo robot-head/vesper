@@ -299,8 +299,13 @@ test {
             && bytes_match(in bytes.as_slice(), 9, 8, be)
     }
 
-    fn put_bytes_match(in bytes: Slice[u8], offset: u64, width: u64, written: bool, packed: u64)
-        -> bool {
+    fn put_bytes_match(
+        in bytes: Slice[u8],
+        offset: u64,
+        width: u64,
+        written: bool,
+        packed: u64
+    ) -> bool {
         for i in 0..bytes.len() {
             if !written || i < offset || i >= wrapping_add(offset, width) {
                 if bytes.try_get(i) != Option::Some(90) {

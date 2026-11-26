@@ -139,8 +139,12 @@ pub fn pid_check(in gains: Slice[u32]) eff [
     k_pid_check(in gains);
 }
 
-pub fn pid_step(in gains: Slice[u32], inout st: Slice[u32], setpoint: u32, measurement: u32)
-    -> u32 eff [Fail[RuntimeError], Fail[ArithOverflow], Fail[PidFault]] {
+pub fn pid_step(
+    in gains: Slice[u32],
+    inout st: Slice[u32],
+    setpoint: u32,
+    measurement: u32
+) -> u32 eff [Fail[RuntimeError], Fail[ArithOverflow], Fail[PidFault]] {
     k_pid_step(in gains, inout st, setpoint, measurement)
 }
 
@@ -153,13 +157,17 @@ pub fn event_encode(in w: Wire, inout out: Slice[u8]) eff [
     e_encode(in w, inout out);
 }
 
-pub fn event_decode(in b: Slice[u8], at: u64)
-    -> Wire eff [Fail[RuntimeError], Fail[ArithOverflow], Fail[EventFault]] {
+pub fn event_decode(
+    in b: Slice[u8],
+    at: u64
+) -> Wire eff [Fail[RuntimeError], Fail[ArithOverflow], Fail[EventFault]] {
     e_decode(in b, at)
 }
 
-pub fn event_frames(len: u64, budget: u64)
-    -> u64 eff [Fail[RuntimeError], Fail[ArithOverflow], Fail[EventFault]] {
+pub fn event_frames(
+    len: u64,
+    budget: u64
+) -> u64 eff [Fail[RuntimeError], Fail[ArithOverflow], Fail[EventFault]] {
     e_frames(len, budget)
 }
 
@@ -232,8 +240,11 @@ pub fn line_read(in buf: Slice[u32], head: u64, delay: u64, inout out: Slice[u32
     p_line_read(in buf, head, delay, inout out);
 }
 
-pub fn line_advance(head: u64, block: u64, len: u64)
-    -> u64 eff [Fail[RuntimeError], Fail[ArithOverflow]] {
+pub fn line_advance(
+    head: u64,
+    block: u64,
+    len: u64
+) -> u64 eff [Fail[RuntimeError], Fail[ArithOverflow]] {
     p_line_advance(head, block, len)
 }
 
@@ -261,13 +272,17 @@ pub fn copy_samples(inout out: Slice[u32], in src: Slice[u32]) eff [Fail[Runtime
 
 // ----- slab ------------------------------------------------------------------
 
-pub fn tiled_geometry(buffers: u64, block: u64)
-    -> (u64, u64) eff [Fail[RuntimeError], Fail[ArithOverflow], Fail[SlabFault]] {
+pub fn tiled_geometry(
+    buffers: u64,
+    block: u64
+) -> (u64, u64) eff [Fail[RuntimeError], Fail[ArithOverflow], Fail[SlabFault]] {
     s_tiled(buffers, block)
 }
 
-pub fn delay_layout(in delays: Slice[u32], block: u64)
-    -> ChunkSeq[u64] eff [Fail[RuntimeError], Fail[ArithOverflow], Fail[SlabFault]] {
+pub fn delay_layout(
+    in delays: Slice[u32],
+    block: u64
+) -> ChunkSeq[u64] eff [Fail[RuntimeError], Fail[ArithOverflow], Fail[SlabFault]] {
     s_delays(in delays, block)
 }
 

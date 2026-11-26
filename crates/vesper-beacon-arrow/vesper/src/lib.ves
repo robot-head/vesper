@@ -11,7 +11,11 @@ pub fn span_stream_len(rows: u64) -> u64 {
 // Writes the span stream of `rows` rows into `out` (see spans.ves for the
 // column layout); returns the bytes written, or 0 when the columns do not
 // match `rows` or `out` is too short.
-pub fn span_stream_into(in wide: Slice[u64], in narrow: Slice[u8], rows: u64, inout out: Slice[u8])
-    -> u64 {
+pub fn span_stream_into(
+    in wide: Slice[u64],
+    in narrow: Slice[u8],
+    rows: u64,
+    inout out: Slice[u8]
+) -> u64 {
     stream_into(in wide, in narrow, rows, inout out)
 }

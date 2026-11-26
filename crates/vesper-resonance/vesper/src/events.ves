@@ -52,8 +52,10 @@ pub fn e_encode(in w: Wire, inout out: Slice[u8]) eff [Fail[RuntimeError], Fail[
 }
 
 // `RtParamEvent::decode` of the EVENT_BYTES bytes at `at`.
-pub fn e_decode(in b: Slice[u8], at: u64)
-    -> Wire eff [Fail[RuntimeError], Fail[ArithOverflow], Fail[EventFault]] {
+pub fn e_decode(
+    in b: Slice[u8],
+    at: u64
+) -> Wire eff [Fail[RuntimeError], Fail[ArithOverflow], Fail[EventFault]] {
     let target = le32(in b, at + At::Target);
     if !finite_bits(target) {
         Fail::raise(EventFault::NonFiniteTarget);
@@ -69,8 +71,10 @@ pub fn e_decode(in b: Slice[u8], at: u64)
 
 // The length checks of `decode_events`: the number of frames in `len`
 // bytes, at most `budget`.
-pub fn e_frames(len: u64, budget: u64)
-    -> u64 eff [Fail[RuntimeError], Fail[ArithOverflow], Fail[EventFault]] {
+pub fn e_frames(
+    len: u64,
+    budget: u64
+) -> u64 eff [Fail[RuntimeError], Fail[ArithOverflow], Fail[EventFault]] {
     if len % EVENT_BYTES != 0 {
         Fail::raise(EventFault::TrailingBytes(len % EVENT_BYTES));
     }

@@ -62,8 +62,12 @@ pub fn table_core_check(in c: TableCore, index: u64, generation: u64) -> bool {
     c.live(index, generation)
 }
 
-pub fn table_core_insert(inout c: TableCore, hash: u64, key: CidKey, s: CoreState)
-    -> Result[(u64, u64), CoreFault] {
+pub fn table_core_insert(
+    inout c: TableCore,
+    hash: u64,
+    key: CidKey,
+    s: CoreState
+) -> Result[(u64, u64), CoreFault] {
     match pn_fault(s) {
         Option::Some(e) => {
             return Result::Err(e);
@@ -106,8 +110,12 @@ pub fn table_core_key_at(in c: TableCore, index: u64) -> CidKey {
     c.key_of(index)
 }
 
-pub fn table_core_set(inout c: TableCore, index: u64, generation: u64, s: CoreState)
-    -> Option[CoreFault] {
+pub fn table_core_set(
+    inout c: TableCore,
+    index: u64,
+    generation: u64,
+    s: CoreState
+) -> Option[CoreFault] {
     if !c.live(index, generation) {
         return Option::Some(CoreFault::Stale);
     }
@@ -122,8 +130,13 @@ pub fn table_core_set(inout c: TableCore, index: u64, generation: u64, s: CoreSt
 
 // Rekey a live slot (the wrapper checked the handle, the length and that
 // the key changes): `DuplicateCid` if `key` already routes.
-pub fn table_core_rekey(inout c: TableCore, index: u64, new_hash: u64, key: CidKey, old_hash: u64)
-    -> Option[CoreFault] {
+pub fn table_core_rekey(
+    inout c: TableCore,
+    index: u64,
+    new_hash: u64,
+    key: CidKey,
+    old_hash: u64
+) -> Option[CoreFault] {
     if c.ix_find(new_hash, key) != NO_INDEX {
         return Option::Some(CoreFault::DuplicateCid);
     }
@@ -134,8 +147,12 @@ pub fn table_core_rekey(inout c: TableCore, index: u64, new_hash: u64, key: CidK
 }
 
 // Remove a live slot whose local CID hashes to `hash`; its state.
-pub fn table_core_remove(inout c: TableCore, index: u64, generation: u64, hash: u64)
-    -> Option[CoreState] {
+pub fn table_core_remove(
+    inout c: TableCore,
+    index: u64,
+    generation: u64,
+    hash: u64
+) -> Option[CoreState] {
     if !c.live(index, generation) {
         return Option::None;
     }
@@ -191,8 +208,13 @@ pub fn table_core_lookup_scan(in c: TableCore, key: CidKey, vector: bool) -> Opt
 // spells its constants out (16 lanes, 5 words a tile, 80 words a tile) and
 // reads the sequences itself: the code generator does not inline calls
 // into a vector function (port gap 5 in docs/parallel-results/rust-exit-warp.md).
-fn lookup_scan_vec(in kw: Slice[u32], in occupied: Slice[u64], tiles: u64, words: u64, key: CidKey)
-    -> u64 eff [Isa[Baseline128]] {
+fn lookup_scan_vec(
+    in kw: Slice[u32],
+    in occupied: Slice[u64],
+    tiles: u64,
+    words: u64,
+    key: CidKey
+) -> u64 eff [Isa[Baseline128]] {
     let k0 = Vec::splat[u32, 4](wrapping_u32(key.w0));
     let k1 = Vec::splat[u32, 4](wrapping_u32(key.w1));
     let k2 = Vec::splat[u32, 4](wrapping_u32(key.w2));
@@ -286,8 +308,13 @@ struct ScanCursor {
 impl TableCore {
     // Write the live lanes of `tile` set in `due` (at or after `cur.from`)
     // into `out`; the next such slot once `out` is full, or NO_INDEX.
-    fn emit_idle(in self, tile: u64, due: u64, inout cur: ScanCursor, inout out: Slice[u64])
-        -> u64 {
+    fn emit_idle(
+        in self,
+        tile: u64,
+        due: u64,
+        inout cur: ScanCursor,
+        inout out: Slice[u64]
+    ) -> u64 {
         let at = wrapping_mul(tile, LANES);
         let mut mask = due & 65535 & get64(in self.occupied, tile);
         if tile == cur.from / LANES {

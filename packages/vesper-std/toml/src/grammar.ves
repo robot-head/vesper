@@ -2078,8 +2078,14 @@ fn duplicate_key_err(inout p: P, in s: Slice[u8], in path: ChunkSeq[Part], i: u6
 }
 
 // `ParseState::descend_path(table, path[from..to], dotted)`.
-fn descend(inout p: P, in path: ChunkSeq[Part], table: u32, from: u64, to: u64, dotted: bool)
-    -> u32 {
+fn descend(
+    inout p: P,
+    in path: ChunkSeq[Part],
+    table: u32,
+    from: u64,
+    to: u64,
+    dotted: bool
+) -> u32 {
     let mut t = table;
     for i in from..to {
         let k = part_at(in path, i);

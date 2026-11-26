@@ -161,8 +161,14 @@ impl Paths {
     }
 
     // `World::field(ty, path)`; NONE32 for None.
-    pub fn field_type(in self, inout t: Types, inout names: Names, in wd: World, ty: u32, p: u32)
-        -> u32 {
+    pub fn field_type(
+        in self,
+        inout t: Types,
+        inout names: Names,
+        in wd: World,
+        ty: u32,
+        p: u32
+    ) -> u32 {
         if p == 0 {
             return ty;
         }
@@ -362,8 +368,12 @@ fn read_path(
 // Constructor: qualifier + 1 (0 none), short, n, (field, child)*;
 // multi-segment path constructors are kind 3 (never resolve). Children are
 // pool positions.
-fn read_pattern(inout r: Reader, in b: Slice[u8], in nmap: ChunkSeq[u32], inout pats: ChunkSeq[u64])
-    -> u64 {
+fn read_pattern(
+    inout r: Reader,
+    in b: Slice[u8],
+    in nmap: ChunkSeq[u32],
+    inout pats: ChunkSeq[u64]
+) -> u64 {
     let kind = r.word(in b);
     let s0 = r.word(in b);
     let s1 = r.word(in b);

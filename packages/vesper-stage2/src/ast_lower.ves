@@ -1064,8 +1064,10 @@ fn last_colon_seg(inout names: Names, sym: u32) -> u32 {
     names.intern(in buf.as_slice())
 }
 
-pub fn build_ir_ast(sink prog: CollectedProgram, in mods: ChunkSeq[AssembledModule])
-    -> (IrAst, Names, Types, World) {
+pub fn build_ir_ast(
+    sink prog: CollectedProgram,
+    in mods: ChunkSeq[AssembledModule]
+) -> (IrAst, Names, Types, World) {
     build_ir_ast_for_entry(sink prog, in mods, in "")
 }
 

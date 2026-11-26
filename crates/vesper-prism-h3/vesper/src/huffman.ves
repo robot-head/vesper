@@ -179,8 +179,12 @@ pub fn huff_encode(in h: Huff, in data: Slice[u8], len: u64, inout out: ChunkSeq
 // bytes of output (`TooLong`) before it is produced: four bits per step
 // through the nibble table, with the RFC 7541 §5.2 padding and EOS rules
 // (the same results as decoding one bit at a time).
-pub fn huff_decode(in h: Huff, in data: Slice[u8], max_len: u64, inout out: ChunkSeq[u8])
-    -> Option[HuffmanError] {
+pub fn huff_decode(
+    in h: Huff,
+    in data: Slice[u8],
+    max_len: u64,
+    inout out: ChunkSeq[u8]
+) -> Option[HuffmanError] {
     let mut node_at: u64 = 0;
     let mut produced: u64 = 0;
     for i in 0..data.len() {

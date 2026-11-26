@@ -184,8 +184,14 @@ impl L {
 
     // A unary operation with a `u128` operand or result; false when
     // neither is one.
-    pub fn wide_unary(inout self, dv: u64, opn: u32, x: u32, from: u32, to: u32)
-        -> bool eff [Fail[WErr]] {
+    pub fn wide_unary(
+        inout self,
+        dv: u64,
+        opn: u32,
+        x: u32,
+        from: u32,
+        to: u32
+    ) -> bool eff [Fail[WErr]] {
         let wf = self.is_u128(from);
         let wt = self.is_u128(to);
         if self.is_op(opn, "~") && !wf {
@@ -340,8 +346,15 @@ impl L {
 
     // A binary operation with a `u128`/`i128` left operand; false otherwise.
     // `==` and `!=` stay the tuple's.
-    pub fn wide_binary(inout self, dv: u64, opn: u32, x: u32, y: u32, sa: u32, sb: u32)
-        -> bool eff [Fail[WErr]] {
+    pub fn wide_binary(
+        inout self,
+        dv: u64,
+        opn: u32,
+        x: u32,
+        y: u32,
+        sa: u32,
+        sb: u32
+    ) -> bool eff [Fail[WErr]] {
         if !self.is_u128(sa) || self.is_op(opn, "==") || self.is_op(opn, "!=") {
             return false;
         }

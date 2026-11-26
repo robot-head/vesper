@@ -89,8 +89,16 @@ fn sink_value(inout p: Program, v: u64) {
 }
 
 // A `BoundsGuard` instruction over the argument words from `a`.
-fn guard_inst(dest: u64, ty: u32, s0: u64, s1: u64, tin: u64, tout: u64, a: u64, n: u64)
-    -> InstRow {
+fn guard_inst(
+    dest: u64,
+    ty: u32,
+    s0: u64,
+    s1: u64,
+    tin: u64,
+    tout: u64,
+    a: u64,
+    n: u64
+) -> InstRow {
     InstRow {
         dest: n32(dest),
         ty: ty,
@@ -106,8 +114,15 @@ fn guard_inst(dest: u64, ty: u32, s0: u64, s1: u64, tin: u64, tout: u64, a: u64,
     }
 }
 
-fn read_row(inout p: Program, dest: u64, ty: u32, s0: u64, s1: u64, tok: u64, root: u32)
-    -> InstRow {
+fn read_row(
+    inout p: Program,
+    dest: u64,
+    ty: u32,
+    s0: u64,
+    s1: u64,
+    tok: u64,
+    root: u32
+) -> InstRow {
     let a = p.ops.len();
     p.put(w(root), 1);
     p.put(0, Tag::Path);
@@ -446,8 +461,13 @@ fn guard_and_copy(
 }
 
 // `hoist_function`: returns how many loops it versioned.
-pub fn hoist_function(inout p: Program, inout t: Types, inout names: Names, inout cx: Ctx2, fi: u64)
-    -> u64 {
+pub fn hoist_function(
+    inout p: Program,
+    inout t: Types,
+    inout names: Names,
+    inout cx: Ctx2,
+    fi: u64
+) -> u64 {
     // The function is encoded afresh only after a rewrite changed it.
     let mut f = fun_of(in p, inout t, in names, inout cx, fi);
     let compared = compared_list(in f);

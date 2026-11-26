@@ -187,8 +187,13 @@ fn schema_check(in sch: Slice[u64], inout m: Meter) -> Unit eff [Fail[GErr]] {
     schema_visit(in sch, inout m, inout count, 0, 1);
 }
 
-fn schema_visit(in sch: Slice[u64], inout m: Meter, inout count: u64, id: u64, depth: u64)
-    -> Unit eff [Fail[GErr]] {
+fn schema_visit(
+    in sch: Slice[u64],
+    inout m: Meter,
+    inout count: u64,
+    id: u64,
+    depth: u64
+) -> Unit eff [Fail[GErr]] {
     charge(inout m, 1);
     bound(depth, m.max_depth, 5);
     count = add(count, 1);
@@ -381,8 +386,14 @@ fn printable(b: u64) -> bool {
 }
 
 // primitive: checks `s[start..end]` as content of `kind`; errors at `offset`.
-fn primitive(kind: u64, in s: Slice[u8], start: u64, end: u64, offset: u64, inout m: Meter)
-    -> Unit eff [Fail[GErr]] {
+fn primitive(
+    kind: u64,
+    in s: Slice[u8],
+    start: u64,
+    end: u64,
+    offset: u64,
+    inout m: Meter
+) -> Unit eff [Fail[GErr]] {
     let len = wrapping_sub(end, start);
     charge(inout m, len);
     bound(len, m.max_value, 2);
@@ -564,8 +575,11 @@ fn parse_node(
 }
 
 // parse_prefix: the document records, then the consumed length.
-pub fn parse_prefix(in input: Slice[u8], in sch: Slice[u64], in lim: Slice[u64])
-    -> ChunkSeq[u64] eff [Fail[GErr]] {
+pub fn parse_prefix(
+    in input: Slice[u8],
+    in sch: Slice[u64],
+    in lim: Slice[u64]
+) -> ChunkSeq[u64] eff [Fail[GErr]] {
     validate_limits(in lim);
     bound(input.len(), sw(in lim, 0), 1);
     let mut m = new_meter(in lim);
@@ -986,8 +1000,13 @@ fn node_size(in recs: Slice[u64], i: u64) -> u64 {
     wrapping_add(wrapping_add(1, length_octets(content)), content)
 }
 
-fn build_node(in recs: Slice[u64], in input: Slice[u8], inout out: Slice[u8], i: u64, at: u64)
-    -> u64 {
+fn build_node(
+    in recs: Slice[u64],
+    in input: Slice[u8],
+    inout out: Slice[u8],
+    i: u64,
+    at: u64
+) -> u64 {
     let kind = rw(in recs, i, 0);
     if kind == 9 || kind == 10 {
         let mut len: u64 = 0;

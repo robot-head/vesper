@@ -348,8 +348,13 @@ fn next_slot(in w: Slice[u64]) -> u64 {
 
 // A string of major type `major` whose header is `h`: its chunks
 // shifted by `base`.
-fn string(in b: Slice[u8], h: Head, base: u64, field: u64, inout w: Slice[u64])
-    -> u64 eff [Fail[AErr]] {
+fn string(
+    in b: Slice[u8],
+    h: Head,
+    base: u64,
+    field: u64,
+    inout w: Slice[u64]
+) -> u64 eff [Fail[AErr]] {
     let kind = if h.major == CborMajor::Text {
         K_TEXT
     } else {
@@ -401,8 +406,13 @@ fn string(in b: Slice[u8], h: Head, base: u64, field: u64, inout w: Slice[u64])
 
 // A bignum: tag 2 or 3 over the definite byte string `h` of at most 16
 // bytes.
-fn bignum(in b: Slice[u8], tag: u64, h: Head, field: u64, inout w: Slice[u64])
-    -> u64 eff [Fail[AErr]] {
+fn bignum(
+    in b: Slice[u8],
+    tag: u64,
+    h: Head,
+    field: u64,
+    inout w: Slice[u64]
+) -> u64 eff [Fail[AErr]] {
     let end = span(in b, h.end, h.arg, field);
     let mut hi = 0;
     let mut lo = 0;
@@ -439,8 +449,13 @@ fn bignum(in b: Slice[u8], tag: u64, h: Head, field: u64, inout w: Slice[u64])
 
 // Decode one item at the start of `b` into `w` (adding `base` to chunk
 // offsets); returns the bytes it used.
-pub fn decode_at(in b: Slice[u8], base: u64, field: u64, inout w: Slice[u64], inout st: Slice[u64])
-    -> u64 eff [Fail[AErr]] {
+pub fn decode_at(
+    in b: Slice[u8],
+    base: u64,
+    field: u64,
+    inout w: Slice[u64],
+    inout st: Slice[u64]
+) -> u64 eff [Fail[AErr]] {
     let n = b.len();
     let mut p = 0;
     let mut depth = 0;
@@ -695,8 +710,13 @@ pub fn str_byte(in b: Slice[u8], in s: Slice[u8], off: u64, j: u64) -> u64 {
 }
 
 // Whether the text node at `i` (with chunks in `b` or `s`) reads `lit`.
-pub fn text_eq_s(in b: Slice[u8], in s: Slice[u8], in n: Slice[u64], i: u64, in lit: Slice[u8])
-    -> bool {
+pub fn text_eq_s(
+    in b: Slice[u8],
+    in s: Slice[u8],
+    in n: Slice[u64],
+    i: u64,
+    in lit: Slice[u8]
+) -> bool {
     if kind(in n, i) != K_TEXT || str_len(in n, i) != lit.len() {
         return false;
     }

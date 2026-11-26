@@ -92,8 +92,12 @@ fn ty(inout r: Reader, in b: Slice[u8], in tmap: ChunkSeq[u32]) -> u32 {
     u32_at(in tmap, x)
 }
 
-pub fn read_fns(inout r: Reader, in b: Slice[u8], in nmap: ChunkSeq[u32], in tmap: ChunkSeq[u32])
-    -> Fns {
+pub fn read_fns(
+    inout r: Reader,
+    in b: Slice[u8],
+    in nmap: ChunkSeq[u32],
+    in tmap: ChunkSeq[u32]
+) -> Fns {
     let mut out = Fns {
         sigs: ChunkSeq::new[Sig](),
         gens: ChunkSeq::new[Generic](),

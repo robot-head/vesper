@@ -167,8 +167,12 @@ fn call(inout b: Builder, inout m: Module, f: FuncId, in args: Slice[u32]) eff [
     let r = import_function(inout b, inout m, f);
     ins_call(inout b, r, in args);
 }
-fn call1(inout b: Builder, inout m: Module, f: FuncId, in args: Slice[u32])
-    -> Value eff [Ffi[Cranelift]] {
+fn call1(
+    inout b: Builder,
+    inout m: Module,
+    f: FuncId,
+    in args: Slice[u32]
+) -> Value eff [Ffi[Cranelift]] {
     call(inout b, inout m, f, in args);
     inst_result(inout b, 0)
 }
@@ -207,8 +211,13 @@ fn count(inout b: Builder, inout m: Module, rt: Rt, delta: i64) eff [Ffi[Craneli
 }
 
 // `cap * max(stride, 1)`, faulting on overflow past `isize::MAX`.
-fn checked_bytes(inout b: Builder, inout m: Module, rt: Rt, cap: Value, stride: Value)
-    -> Value eff [Ffi[Cranelift]] {
+fn checked_bytes(
+    inout b: Builder,
+    inout m: Module,
+    rt: Rt,
+    cap: Value,
+    stride: Value
+) -> Value eff [Ffi[Cranelift]] {
     let one = iconst(inout b, 1);
     let unit = ins_umax(inout b, stride, one);
     let bytes = ins_overflow(inout b, UMUL_OVERFLOW, cap, unit);
@@ -237,8 +246,13 @@ fn buffer(inout b: Builder, inout m: Module, rt: Rt, bytes: Value) -> Value eff 
 
 // Whether `{cap, data}` of the header at `header` is a separate buffer the
 // runtime owns: not borrowed, not absent, not the header's inline elements.
-fn separate_buffer(inout b: Builder, rt: Rt, header: Value, cap: Value, data: Value)
-    -> Value eff [Ffi[Cranelift]] {
+fn separate_buffer(
+    inout b: Builder,
+    rt: Rt,
+    header: Value,
+    cap: Value,
+    data: Value
+) -> Value eff [Ffi[Cranelift]] {
     let present = ins_icmp_imm(inout b, cc_ne(), data, 0);
     let owned = ins_icmp_imm(inout b, cc_ne(), cap, 0);
     let after = ins_iadd_imm(inout b, header, rt.header);
@@ -371,8 +385,13 @@ fn define_make(inout m: Module, rt: Rt, id: FuncId, new: FuncId) -> bool eff [Ff
 
 // `vesper_seq_grow(header, stride, needed)`: room for `needed` elements;
 // returns the header to use afterwards.
-fn define_grow(inout m: Module, rt: Rt, id: FuncId, make: FuncId, memcpy: FuncId)
-    -> bool eff [Ffi[Cranelift]] {
+fn define_grow(
+    inout m: Module,
+    rt: Rt,
+    id: FuncId,
+    make: FuncId,
+    memcpy: FuncId
+) -> bool eff [Ffi[Cranelift]] {
     let mut b = match begin(inout m, 3) {
         Some(b) => b,
         None => return false,
@@ -489,8 +508,12 @@ fn define_free(inout m: Module, rt: Rt, id: FuncId, free: FuncId) -> bool eff [F
 
 // `vesper_str_release(value)`: free the buffer an inline `String` value
 // owns; borrowed bytes stay.
-fn define_release_str(inout m: Module, rt: Rt, id: FuncId, free: FuncId)
-    -> bool eff [Ffi[Cranelift]] {
+fn define_release_str(
+    inout m: Module,
+    rt: Rt,
+    id: FuncId,
+    free: FuncId
+) -> bool eff [Ffi[Cranelift]] {
     let mut b = match begin(inout m, 1) {
         Some(b) => b,
         None => return false,

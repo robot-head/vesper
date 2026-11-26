@@ -263,8 +263,13 @@ fn mget(in meta: ChunkSeq[u64], i: u64) -> u64 {
     }
 }
 
-fn schema_depth(in schema: Slice[u64], inout meta: ChunkSeq[u64], inout b: Pb, id: u64, depth: u64)
-    -> u64 eff [Fail[GErr]] {
+fn schema_depth(
+    in schema: Slice[u64],
+    inout meta: ChunkSeq[u64],
+    inout b: Pb,
+    id: u64,
+    depth: u64
+) -> u64 eff [Fail[GErr]] {
     work(inout b, 1);
     let color = mget(in meta, wrapping_mul(id, META_WORDS));
     if color == VISITING {
@@ -296,8 +301,13 @@ fn schema_depth(in schema: Slice[u64], inout meta: ChunkSeq[u64], inout b: Pb, i
 }
 
 // Schema::lookup: the offset of field `number` of message `id`.
-fn lookup(in schema: Slice[u64], inout b: Pb, id: u64, number: u64, at: u64)
-    -> u64 eff [Fail[GErr]] {
+fn lookup(
+    in schema: Slice[u64],
+    inout b: Pb,
+    id: u64,
+    number: u64,
+    at: u64
+) -> u64 eff [Fail[GErr]] {
     let mut lo: u64 = 0;
     let mut hi = sw(in schema, msg_rec(in schema, id));
     loop {
@@ -346,8 +356,12 @@ fn find(in schema: Slice[u64], id: u64, number: u64) -> u64 {
 
 // Parsing.
 
-pub fn parse_exact(in schema: Slice[u64], root: u64, in lim: Slice[u64], in input: Slice[u8])
-    -> ChunkSeq[u64] eff [Fail[GErr]] {
+pub fn parse_exact(
+    in schema: Slice[u64],
+    root: u64,
+    in lim: Slice[u64],
+    in input: Slice[u8]
+) -> ChunkSeq[u64] eff [Fail[GErr]] {
     let n = input.len();
     bound(n, sw(in lim, 4), 12);
     bound(n, max_wire(), 10);
@@ -767,8 +781,12 @@ pub fn encoded_size(
     size
 }
 
-pub fn encoded_len(in schema: Slice[u64], root: u64, in lim: Slice[u64], in vals: Slice[u64])
-    -> u64 eff [Fail[GErr]] {
+pub fn encoded_len(
+    in schema: Slice[u64],
+    root: u64,
+    in lim: Slice[u64],
+    in vals: Slice[u64]
+) -> u64 eff [Fail[GErr]] {
     let mut sizes = ChunkSeq::new[u64]();
     encoded_size(in schema, root, in lim, in vals, inout sizes)
 }

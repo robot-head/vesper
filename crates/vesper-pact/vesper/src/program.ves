@@ -697,8 +697,16 @@ fn r_what(inout s: S, what: u64, x: u64) {
     }
 }
 
-fn v_args(inout s: S, params: u64, args: u64, sv: u64, sa: u64, sb: u64, what: u64, x: u64)
-    -> bool {
+fn v_args(
+    inout s: S,
+    params: u64,
+    args: u64,
+    sv: u64,
+    sa: u64,
+    sb: u64,
+    what: u64,
+    x: u64
+) -> bool {
     let np = kid_count(in s, params);
     let na = kid_count(in s, args);
     if np != na {

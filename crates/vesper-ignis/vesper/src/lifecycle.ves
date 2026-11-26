@@ -208,8 +208,12 @@ pub fn lifecycle_check_new(limits: Limits, in initial: Slice[u64]) -> LifeError 
     LifeError::None
 }
 
-pub fn lifecycle_new(id: u64, limits: Limits, in kinds: Slice[QueueKind], in initial: Slice[u64])
-    -> Lifecycle {
+pub fn lifecycle_new(
+    id: u64,
+    limits: Limits,
+    in kinds: Slice[QueueKind],
+    in initial: Slice[u64]
+) -> Lifecycle {
     let mut l = Lifecycle {
         id: id,
         limits: limits,

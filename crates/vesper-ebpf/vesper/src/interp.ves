@@ -971,8 +971,15 @@ fn ret_err(e: u64) -> Val {
     scalar(neg(e))
 }
 
-fn map_elem(inout i: I, pc: u64, id: u64, a0: Val, a1: Val, a2: Val, a3: Val)
-    -> Val eff [Fail[IErr]] {
+fn map_elem(
+    inout i: I,
+    pc: u64,
+    id: u64,
+    a0: Val,
+    a1: Val,
+    a2: Val,
+    a3: Val
+) -> Val eff [Fail[IErr]] {
     let m = map_of(in i, pc, a0);
     let t = mword(in i, m, 0);
     if t == MapType::Ringbuf {

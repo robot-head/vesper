@@ -52,8 +52,11 @@ fn syntax_words() -> SyntaxSlots[RegionBox[r, i64]] eff [r: Region] {
 fn syntax_read_0(page: SyntaxSlots[RegionBox[r, i64]], index: i64) -> i64 eff [r: Region] {
     r.get(syntax_slot(page, index))
 }
-fn syntax_write_0(page: SyntaxSlots[RegionBox[r, i64]], index: i64, value: i64)
-    -> Unit eff [r: Region] {
+fn syntax_write_0(
+    page: SyntaxSlots[RegionBox[r, i64]],
+    index: i64,
+    value: i64
+) -> Unit eff [r: Region] {
     r.set(syntax_slot(page, index), value)
 }
 

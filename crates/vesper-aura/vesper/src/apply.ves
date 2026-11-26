@@ -74,8 +74,13 @@ pub fn push_text(inout s: RState, in text: Slice[u8], tstart: u64, tlen: u64) ->
 
 // RecordingSnapshot::apply for the patch at `w[base ..]` (ten words: the tag,
 // then every identity as a session and a serial; see src/ported/codec.rs).
-pub fn apply_patch(inout s: RState, lim: Lim, in w: Slice[u64], base: u64, in text: Slice[u8])
-    -> Option[BackendFault] {
+pub fn apply_patch(
+    inout s: RState,
+    lim: Lim,
+    in w: Slice[u64],
+    base: u64,
+    in text: Slice[u8]
+) -> Option[BackendFault] {
     let tag = word(in w, base, 0);
     if tag == OpTag::SetRoot {
         patch_set_root(inout s, lim, in w, base, in text)

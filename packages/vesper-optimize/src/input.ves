@@ -154,8 +154,15 @@ pub fn add_name(inout t: Tree, sym: u32, len: u64, start: u32, end: u32) -> u32 
     add_expr(inout t, node(2, start, end, sym, 0, 0), len, 0)
 }
 
-pub fn add_binary(inout t: Tree, op: u32, cap: u64, left: u32, right: u32, start: u32, end: u32)
-    -> u32 {
+pub fn add_binary(
+    inout t: Tree,
+    op: u32,
+    cap: u64,
+    left: u32,
+    right: u32,
+    start: u32,
+    end: u32
+) -> u32 {
     add_expr(inout t, node(11, start, end, op, left, right), cap, 0)
 }
 

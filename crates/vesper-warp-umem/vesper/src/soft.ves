@@ -354,8 +354,13 @@ impl Nic {
 }
 
 // One device step (`SoftNic::step`), with the batch sizes the wrapper keeps.
-fn nic_step(inout n: Nic, inout mem: Slice[u8], fill_batch: u32, tx_batch: u32, rx_batch: u32)
-    -> SoftStepReport {
+fn nic_step(
+    inout n: Nic,
+    inout mem: Slice[u8],
+    fill_batch: u32,
+    tx_batch: u32,
+    rx_batch: u32
+) -> SoftStepReport {
     let mut report = SoftStepReport {
         completed: 0,
         fill_pulled: 0,

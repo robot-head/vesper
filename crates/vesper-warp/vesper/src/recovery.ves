@@ -402,8 +402,12 @@ fn scan(in st: RecState, in r: Rtt, in spaces: Slice[RecSpace], now_ns: u64) -> 
     }
 }
 
-pub fn rec_pto_time_and_space(in st: RecState, in r: Rtt, in spaces: Slice[RecSpace], now_ns: u64)
-    -> PtoOut {
+pub fn rec_pto_time_and_space(
+    in st: RecState,
+    in r: Rtt,
+    in spaces: Slice[RecSpace],
+    now_ns: u64
+) -> PtoOut {
     scan(in st, in r, in spaces, now_ns).pto
 }
 
@@ -526,8 +530,13 @@ pub fn rec_on_packet_sent(
 }
 
 // The first record of space `i` with `pn >= smallest` (binary search).
-fn partition_point(in st: RecState, in s: RecSpace, in ents: Slice[RecEntry], i: u64, smallest: u64)
-    -> u64 {
+fn partition_point(
+    in st: RecState,
+    in s: RecSpace,
+    in ents: Slice[RecEntry],
+    i: u64,
+    smallest: u64
+) -> u64 {
     let mut lo: u64 = 0;
     let mut hi = s.len;
     loop {

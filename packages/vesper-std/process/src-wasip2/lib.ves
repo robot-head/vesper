@@ -270,8 +270,10 @@ pub fn wait(inout ch: ProcChild) -> Result[ExitStatus, IoError] eff [Ffi[StdProc
     Result::Err(io_kind(unsupported()))
 }
 
-pub fn wait_timeout(inout ch: ProcChild, millis: u64)
-    -> Result[Option[ExitStatus], IoError] eff [Ffi[StdProcess]] {
+pub fn wait_timeout(
+    inout ch: ProcChild,
+    millis: u64
+) -> Result[Option[ExitStatus], IoError] eff [Ffi[StdProcess]] {
     let _ = millis;
     if ch.pid <= 0 {
         return Result::Err(io_kind(invalid_input()));

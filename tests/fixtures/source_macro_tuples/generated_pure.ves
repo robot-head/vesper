@@ -14,13 +14,14 @@ macro make() -> expr {
         )
     }
 }
-fn forward(in ignored: u64)
-    -> (
+fn forward(
+    in ignored: u64
+) -> (
+    u64,
+    (
         u64,
-        (
-            u64,
-        )
-    ) eff [Fail[ArithOverflow]] {
+    )
+) eff [Fail[ArithOverflow]] {
     make!()
 }
 fn main() -> u64 eff [Fail[ArithOverflow]] {

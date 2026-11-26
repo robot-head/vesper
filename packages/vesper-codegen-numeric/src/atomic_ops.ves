@@ -104,8 +104,12 @@ fn a_widen(inout b: Builder, v: Value, t: u32, signed: bool) -> Value eff [Ffi[C
     }
 }
 
-pub fn atomic_request(call: u64, op: u32, inout b: Builder, inout m: Module)
-    -> Value eff [Ffi[Cranelift]] {
+pub fn atomic_request(
+    call: u64,
+    op: u32,
+    inout b: Builder,
+    inout m: Module
+) -> Value eff [Ffi[Cranelift]] {
     let flags = mem_trusted();
     if op == NUM_ATOMIC_CELL {
         // `Atomic { cell }` -> sequence header `{len, cap, data}` -> element.

@@ -80,8 +80,9 @@ fn cli_version() -> Str {
 
 // The exit code of the command in `args` (every argument after the
 // program name), or `delegate()`.
-pub fn run(in args: Args)
-    -> i64 eff [Ffi[StdFs], Ffi[StdEnv], Ffi[StdProcess], Ffi[HybridCommands]] {
+pub fn run(
+    in args: Args
+) -> i64 eff [Ffi[StdFs], Ffi[StdEnv], Ffi[StdProcess], Ffi[HybridCommands]] {
     handle Fail[PrintFailed] in {
         route(in args)
     } with {
@@ -90,8 +91,9 @@ pub fn run(in args: Args)
     }
 }
 
-fn route(in args: Args)
-    -> i64 eff [Ffi[StdFs], Ffi[StdEnv], Ffi[StdProcess], Ffi[HybridCommands], Fail[PrintFailed]] {
+fn route(
+    in args: Args
+) -> i64 eff [Ffi[StdFs], Ffi[StdEnv], Ffi[StdProcess], Ffi[HybridCommands], Fail[PrintFailed]] {
     let n = args_count(in args);
     if n == 0 {
         print(stdout_stream(), in cli_help().as_bytes());
@@ -692,8 +694,11 @@ fn exe_parent_dir(canonical: bool, inout none: bool) -> ChunkSeq[u8] eff [Ffi[St
 
 // The candidates in one directory beside the executable: Cargo puts the
 // tools beside `vesper`, Bazel at `<bin>/crates/vesper-tools/bin/`.
-fn in_exe_dir(in dir: Slice[u8], in name: Slice[u8], windows: bool)
-    -> ChunkSeq[u8] eff [Ffi[StdFs]] {
+fn in_exe_dir(
+    in dir: Slice[u8],
+    in name: Slice[u8],
+    windows: bool
+) -> ChunkSeq[u8] eff [Ffi[StdFs]] {
     let direct = join(in dir, in name, windows);
     if executable(in direct.as_slice()) {
         return direct;
@@ -810,8 +815,10 @@ fn missing(in t: Slice[u8]) -> i64 eff [Ffi[StdFs], Fail[PrintFailed]] {
 // `run` and `exit_code`: the tool with the arguments after the command,
 // inheriting the standard streams; its exit code, 128 plus the signal that
 // killed it, or 1.
-fn run_tool(in binary: Slice[u8], in args: Args)
-    -> i64 eff [Ffi[StdFs], Ffi[StdProcess], Fail[PrintFailed]] {
+fn run_tool(
+    in binary: Slice[u8],
+    in args: Args
+) -> i64 eff [Ffi[StdFs], Ffi[StdProcess], Fail[PrintFailed]] {
     let mut c = command_path(in binary);
     let n = args_count(in args);
     for i in 1..n {
@@ -850,8 +857,9 @@ pub fn measure_tee(in path: Slice[u8]) -> i64 eff [Ffi[StdFs], Ffi[StdEnv], Ffi[
     }
 }
 
-fn tee_measure(in path: Slice[u8])
-    -> i64 eff [Ffi[StdFs], Ffi[StdEnv], Ffi[StdProcess], Fail[PrintFailed]] {
+fn tee_measure(
+    in path: Slice[u8]
+) -> i64 eff [Ffi[StdFs], Ffi[StdEnv], Ffi[StdProcess], Fail[PrintFailed]] {
     let binary = locate(in "tee".as_bytes());
     if binary.len() == 0 {
         return missing(in "tee".as_bytes());
@@ -1230,8 +1238,12 @@ struct Listed {
 // `out`, in the OS's order, reading at most `budget` entries: one more sets
 // `over` and stops, so the walk's limit holds while the listing is read,
 // as in Rust. 0, or the error word of a directory that cannot be read.
-fn list_bounded(in dir: Slice[u8], budget: u64, inout out: Entries, inout over: bool)
-    -> u64 eff [Ffi[StdFs]] {
+fn list_bounded(
+    in dir: Slice[u8],
+    budget: u64,
+    inout out: Entries,
+    inout over: bool
+) -> u64 eff [Ffi[StdFs]] {
     // The error comes back in the handled value: a clause's assignment to
     // an outer local changes only the clause's copy (#2038).
     let got = handle Fail[IoError] in {
@@ -1403,8 +1415,12 @@ fn skipped_dir(in name: Slice[u8]) -> bool {
 // with `err` set when a directory cannot be read or the walk visits too
 // many entries; or `walk_delegate()` when a Windows name may have been
 // listed lossily, so the Rust CLI, which keeps the `OsString`, must run.
-fn walk(in root: Slice[u8], inout files: Paths, inout visited: u64, inout err: ChunkSeq[u8])
-    -> u32 eff [Ffi[StdFs], Ffi[StdEnv]] {
+fn walk(
+    in root: Slice[u8],
+    inout files: Paths,
+    inout visited: u64,
+    inout err: ChunkSeq[u8]
+) -> u32 eff [Ffi[StdFs], Ffi[StdEnv]] {
     let windows = os() == os_windows();
     let mut pending = paths_new();
     paths_push(inout pending, in root);
@@ -1481,8 +1497,12 @@ fn walk_delegate() -> u32 {
     2
 }
 
-fn format_one(in path: Slice[u8], check: bool, recovery: bool, inout stats: ChunkSeq[u64])
-    -> u32 eff [Ffi[HybridCommands]] {
+fn format_one(
+    in path: Slice[u8],
+    check: bool,
+    recovery: bool,
+    inout stats: ChunkSeq[u64]
+) -> u32 eff [Ffi[HybridCommands]] {
     let mut flags: u32 = 0;
     if check {
         flags = flags | 1;
