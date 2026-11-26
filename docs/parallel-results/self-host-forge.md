@@ -281,3 +281,51 @@ Rust surface parse and its rows (median; range 0.30x to 0.48x).
 
 A divergence check (changing one surface diagnostic's message) fails
 `surface_profile_matches_on_the_sugar_corpus` at the case that reaches it.
+
+## Part 4a: the sugar rule matcher (`@vesper/sugar`)
+
+`packages/vesper-sugar` is the new home of the sugar expansion in Vesper
+(`crates/vesper-syntax/src/sugar_expand*`, about 3,800 lines of Rust).
+Part 4a ports its rule matcher, `sugar_expand/matcher.rs`
+(`match_rule`, `captures_tail`), to `src/matcher.ves`:
+
+- the pattern compiler (literals with their adjacency, typed holes,
+  sequence holes, block tails and nested `$( ... ) sep* / +`
+  repetitions, with every refusal message),
+- the backtracking matcher (states on an explicit stack whose frames
+  live in one pool, an event log of values and repetition extents), and
+- typed hole validation, which reparses each candidate fragment with
+  the surface profile (`@vesper/front`'s new `surface_fragment_status`,
+  Rust's `parse_sugar_fragment`).
+
+Work accounting follows Rust exactly: every `spend` happens at the
+same point for the same amount, so the remaining budget and the work
+limit refusal agree as well as the captures.
+
+Other changes:
+
+- `@vesper/front`: `surface_fragment_status`, `lex_sugar_raw_with_limits`
+  (the sugar lexer without symbols) and `core_operator_kind`. Short
+  sources start with a 32-slot interner instead of 256; symbol ids do
+  not change.
+- `crates/vesper-syntax/src/sugar_expand.rs`: a `#[doc(hidden)]` test
+  hook, `match_rule_words`, that encodes `match_rule`'s result the way
+  the Vesper entry does. It does not change behaviour.
+- `tests/self_host_sugar.rs`: the differential.
+
+Tests (release, this 4-core cloud machine):
+
+| Test | Cases | Result |
+|---|---|---|
+| `matcher_matches_on_the_rule_examples` | 62 hand-written rules and calls (the matcher's own tests, every sort, passing modes, repetitions, adjacency and each refusal), under 4 work budgets, with and without a tail | 0 differences |
+| `matcher_matches_on_the_sugar_test_suites` | every rule pattern in the string literals of the sugar test suites, `sugar_expand`, the forge and package CLI tests and the surface corpus, against the sugar uses of its own source and a spread of others (about 800 cases) | 0 differences |
+| `matcher_matches_on_the_fuzzed_corpus` | 40,000 rounds (`VESPER_SUGAR_FUZZ=40000`; CI runs 4,000) of edited rules and calls under 4 budgets | 0 differences |
+| front end v2 and AST differentials | after the `@vesper/front` changes | pass, unchanged |
+
+Speed (`matcher_speed`, ignored; one host call over all corpus cases):
+the Vesper matcher takes **1.5x to 1.7x** the time of Rust's. Its
+fragment reparse alone is faster than Rust's (3.0 µs against 4.5 µs per
+fragment); the rest is the matcher's fixed cost per call (two lexes and
+the tables). The module flip is measured on the whole expansion at the
+swap (part 5), where each round's whole-source surface parse
+(0.35x) dominates.

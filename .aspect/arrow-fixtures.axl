@@ -1,0 +1,178 @@
+"""Build the Arrow IPC corpus from pinned PyArrow metadata and native buffers."""
+
+load("@std//base64.axl", "base64")
+load("@std//hash.axl", "sha256")
+load("./lib/binary-fixture.axl", "le", "read_le", "write_bytes")
+load("./lib/pretty-json.axl", "pretty_json")
+load("./lib/process.axl", "command", "root_path", "scratch_dir")
+
+_FIXTURES = "crates/vesper-grammar/tests/fixtures/ipc"
+_BATCHES = [
+    [[1, None, -2, 0, 1099511627776, -1099511627776, None, 7, 5], list(range(10, 100, 10))],
+    [[], []],
+    [[None] * 4, [-9, 0, 9, 12]],
+]
+_USAGE = "aspect crate grammar generate -- [--output DIRECTORY]"
+
+def _require(value, message):
+    if not value:
+        fail(message)
+
+def _padded(data):
+    return data + bytes([0] * ((-len(data)) % 8))
+
+def _values(values, width):
+    out = bytes([])
+    for value in values:
+        out += le(value or 0, width)
+    return out
+
+def _validity(values):
+    if None not in values:
+        return bytes([])
+    mask = []
+    for index in range(0, len(values), 8):
+        bit = 1
+        byte = 0
+        for value in values[index:index + 8]:
+            if value != None:
+                byte += bit
+            bit *= 2
+        mask.append(byte)
+    return bytes(mask)
+
+def _buffers(columns, widths):
+    buffers = []
+    for index, values in enumerate(columns):
+        buffers.extend([_validity(values), _values(values, widths[index])])
+    return buffers
+
+def _body(columns, widths):
+    body = bytes([])
+    for buffer in _buffers(columns, widths):
+        body += _padded(buffer)
+    return body
+
+def _compress(ctx, root, work, columns):
+    lz4 = ctx.std.process.which("lz4")
+    _require(lz4, "Install lz4 to produce the compressed Arrow fixture")
+    result = bytes([])
+    for buffer in _buffers(columns, [8, 8]):
+        if not buffer:
+            continue
+        source, output = work + "/input", work + "/compressed"
+        write_bytes(ctx, source, buffer)
+        status = command(ctx, lz4, ["-z", "-q", "-B4", "-BI", "--no-frame-crc", "-c", source], root).stdout(ctx.std.fs.create(output)).status()
+        _require(status.success, "LZ4 frame encoding failed")
+        result += _padded(le(len(buffer), 8) + ctx.std.fs.open(output).read())
+    return result
+
+def _metadata_body_length(metadata):
+    table = read_le(metadata, 0, 4)
+    displacement = read_le(metadata, table, 4)
+    if displacement >= 2147483648:
+        displacement -= 4294967296
+    vtable = table - displacement
+    size = read_le(metadata, vtable, 2)
+    field = read_le(metadata, vtable + 10, 2) if size > 10 else 0
+    return read_le(metadata, table + field, 8) if field else 0
+
+def _wire(name, recipe, payloads):
+    metadata = [base64.decode(value) for value in recipe["messages"]]
+    _require(len(metadata) == len(payloads), "Arrow message count differs for " + name)
+    prefix = bytes([]) if recipe["legacy"] else le(4294967295, 4)
+    wire = bytes([])
+    for index, block in enumerate(metadata):
+        payload = payloads[index]
+        _require(_metadata_body_length(block) == len(payload), "Arrow body length differs for %s message %d" % (name, index))
+        wire += prefix + le(len(block), 4) + block + payload
+    return wire + prefix + le(0, 4)
+
+def _sum(column):
+    if not any([value != None for value in column]) or any([value != None and type(value) != "int" for value in column]):
+        return None
+    result = 0
+    for value in column:
+        result += value or 0
+    return result
+
+def _record(wire, values):
+    hash = sha256()
+    hash.update(wire)
+    receipt = {"bytes": len(wire), "sha256": hash.hexdigest()}
+    if values == None:
+        receipt["unsupported"] = "dictionary"
+    else:
+        receipt.update(sums = [[_sum(column) for column in batch] for batch in values], values = values)
+    return receipt
+
+def _generate(ctx, root, output):
+    work = scratch_dir(ctx, "vesper-arrow-fixtures-")
+    metadata = json.decode(ctx.std.fs.read_to_string(root + "/" + _FIXTURES + "/wire-metadata.json"))
+    empty = bytes([])
+    base_bodies = [empty] + [_body(columns, [8, 8]) for columns in _BATCHES]
+    overflow, signed, unsigned = [[[9223372036854775807, 1]]], [[[1, None, -2]]], [[[1, None, 2]]]
+    nested = _padded(_validity([[1, 2], None, []])) + _padded(_values([0, 2, 2, 2], 4)) + _body([[1, 2]], [8])
+    cases = {
+        "compressed.arrow": ([empty, _compress(ctx, root, work, _BATCHES[0])], _BATCHES[:1]),
+        "custom-metadata.arrow": ([empty], []),
+        "dictionary.arrow": ([empty, _body([[1, 2]], [8]), _body([[0, 1, 0, None]], [1])], None),
+        "empty-schema.arrow": ([empty, empty], [[]]),
+        "int32.arrow": ([empty, _body(signed[0], [4])], signed),
+        "legacy-v4.arrow": (base_bodies, _BATCHES),
+        "modern-v5.arrow": (base_bodies, _BATCHES),
+        "nested.arrow": ([empty, nested], [[[[1, 2], None, []]]]),
+        "schema-only.arrow": ([empty], []),
+        "sum-overflow.arrow": ([empty, _body(overflow[0], [8])], overflow),
+        "unsigned.arrow": ([empty, _body(unsigned[0], [8])], unsigned),
+    }
+    _require(sorted(cases) == sorted(metadata), "Arrow fixture metadata inventory differs")
+    files, records = {}, {}
+    for name in sorted(cases):
+        bodies, values = cases[name]
+        files[name] = _wire(name, metadata[name], bodies)
+        records[name] = _record(files[name], values)
+    ctx.std.fs.create_dir_all(output)
+    for name, data in files.items():
+        write_bytes(ctx, output + "/" + name, data)
+    ctx.std.fs.write(output + "/expected.json", pretty_json({"fixtures": records, "producer": "Apache Arrow pyarrow", "version": "20.0.0"}))
+    return {name: record["bytes"] for name, record in records.items()}
+
+def _run(ctx):
+    root = ctx.std.env.aspect_root_dir()
+    values = ctx.args.tool_args
+    if values in [["--help"], ["-h"]]:
+        ctx.std.io.stdout.write(_USAGE + "\n")
+        return 0
+    output = root + "/" + _FIXTURES
+    if values:
+        if len(values) != 2 or values[0] != "--output" or not values[1]:
+            ctx.std.process.exit(2, _USAGE)
+        output = root_path(ctx.std.env.current_dir(), values[1])
+    ctx.std.io.stdout.write(json.encode(_generate(ctx, root, output)) + "\n")
+    return 0
+
+generate_arrow = task(
+    kind = "generate", group = ["crate", "grammar"], summary = "Build the independent Arrow IPC fixture corpus",
+    implementation = _run, args = {"tool_args": args.trailing_var_args(description = _USAGE)},
+)
+
+def _test(ctx):
+    root = ctx.std.env.aspect_root_dir()
+    if _validity(_BATCHES[0][0]) != bytes([189, 1]) or _values([-2], 4) != bytes([254, 255, 255, 255]):
+        fail("Arrow validity or integer encoding changed")
+    if _sum([None, None]) != None or _sum([9223372036854775807, 1]) != 9223372036854775808:
+        fail("Arrow fixture sums lost exact integer or null semantics")
+    output = scratch_dir(ctx, "vesper-arrow-fixtures-test-")
+    files = list(_generate(ctx, root, output)) + ["expected.json"]
+    for name in files:
+        generated = ctx.std.fs.open(output + "/" + name).read()
+        committed = ctx.std.fs.open(root + "/" + _FIXTURES + "/" + name).read()
+        _require(generated == committed, "Independent Arrow corpus differs for " + name)
+    ctx.std.io.stdout.write("Reproduced all 11 Arrow streams and their manifest byte for byte\n")
+    return 0
+
+test_arrow_fixtures = task(
+    kind = "arrow-fixtures", group = ["ci", "tests"], summary = "Check native regeneration of the committed Arrow IPC corpus",
+    implementation = _test,
+)

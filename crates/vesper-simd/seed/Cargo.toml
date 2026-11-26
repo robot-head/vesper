@@ -1,0 +1,42 @@
+[package]
+name = "vesper-simd-seed"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false
+description = "Frozen Rust seed copy of vesper-simd for the compiler's own build graph"
+autotests = false
+autoexamples = false
+autobenches = false
+build = false
+
+# The seed-copy rule (port wave P1 lane 2, #899; vesper-simd port #1969):
+# the Rust build of ../src under the library name `vesper_simd`. The
+# compiler's tests, vesper-tools (run-time tools of //:bin/vesper) and the
+# hybrid compiler depend on it with
+# `vesper-simd = { path = ".../seed", package = "vesper-simd-seed" }`,
+# because the port-backed package's build script needs a `vesper` that is
+# itself built from them. Every other crate uses `vesper-simd`.
+[lib]
+name = "vesper_simd"
+path = "../src/lib.rs"
+
+[dependencies]
+cranelift-codegen = { version = "0.125", features = ["arm64", "x86"] }
+cranelift-frontend = "0.125"
+cranelift-module = "0.125"
+# selinux-fix maps JIT code with mmap: hardened kernels (SELinux execheap,
+# BuildBuddy workflow VMs) refuse to make heap memory executable.
+cranelift-jit = { version = "0.125", features = ["selinux-fix"] }
+cranelift-object = "0.125"
+target-lexicon = "0.13"
+
+[dev-dependencies]
+object = { version = "0.37", default-features = false, features = ["read", "std", "elf"] }
+
+[target.'cfg(unix)'.dev-dependencies]
+libc = "0.2"
+
+[lints.rust]
+# feature = "vesper-port" is set only on the port-backed package.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("vesper-port"))'] }

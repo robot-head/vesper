@@ -27,6 +27,7 @@ test {
         check_version
     };
     use self::string_tests::check_fmt_string;
+    use self::control_tests::check_core_control;
     use self::traces::{
         map_trace,
         seq_trace
@@ -60,6 +61,7 @@ test {
         r = first_failure(12, check_radix_seq(radix), r);
         r = first_failure(13, check_version(), r);
         r = first_failure(14, check_fmt_string(), r);
+        r = first_failure(15, check_core_control(), r);
         r
     }
 

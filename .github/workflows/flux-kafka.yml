@@ -24,6 +24,7 @@ on:
       - 'crates/vesper-loom-cas/**'
       - 'crates/vesper-simpulse/**'
       - '.github/workflows/flux-kafka.yml'
+      - '.aspect/hardware-ci.axl'
       - 'Cargo.toml'
       - 'Cargo.lock'
   pull_request:
@@ -36,6 +37,7 @@ on:
       - 'crates/vesper-loom-cas/**'
       - 'crates/vesper-simpulse/**'
       - '.github/workflows/flux-kafka.yml'
+      - '.aspect/hardware-ci.axl'
 
 permissions:
   contents: read
@@ -74,7 +76,15 @@ jobs:
           fetch-depth: 0
           sparse-checkout: |
             .github/actions
-            scripts/ci
+            .aspect
+      - name: Set up Aspect for the merge gate
+        if: github.event_name == 'pull_request'
+        uses: aspect-build/setup-aspect@ccc445383a7d4cea499744d823a7698ae077a407 # v2026.45.0
+        with:
+          launcher-version: '2026.47.12'
+          bazelrc-generate: 'false'
+          bazelisk-cache: 'false'
+          disk-cache: 'false'
       - name: Merge gate
         if: github.event_name == 'pull_request'
         uses: ./.gate/.github/actions/merge-gate
@@ -83,6 +93,7 @@ jobs:
           base-ref: ${{ github.event.pull_request.base.ref }}
           head-sha: ${{ github.event.pull_request.head.sha }}
       - uses: actions/checkout@v4
+      - uses: ./.github/actions/aspect
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -90,16 +101,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Download Apache Kafka
-        run: |
-          name="kafka_${KAFKA_SCALA}-${KAFKA_VERSION}"
-          curl -sSfL -o kafka.tgz "https://archive.apache.org/dist/kafka/${KAFKA_VERSION}/${name}.tgz"
-          echo "${KAFKA_SHA512}  kafka.tgz" | sha512sum -c -
-          tar xzf kafka.tgz -C "$RUNNER_TEMP"
-          echo "VESPER_KAFKA_HOME=$RUNNER_TEMP/${name}" >> "$GITHUB_ENV"
+        run: aspect ci install-kafka
       - name: Show the broker version
-        run: |
-          java -version
-          "$VESPER_KAFKA_HOME/bin/kafka-server-start.sh" --version
+        run: aspect ci report-kafka
       - name: Interop tests against the broker
         run: cargo test --locked --release -p vesper-flux --test kafka -- --nocapture --test-threads=2
       - name: Unit tests (wire codec, record batches, compression)

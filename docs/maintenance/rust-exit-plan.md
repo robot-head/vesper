@@ -3,7 +3,7 @@
 > Written 2026-11-21 against `main` at `af7dd900` (claims #1396-#1414). The
 > [manuscript](../manuscript/README.md) is the sole specification. The
 > numbers per crate and per compiler module are in the generated
-> [census](rust-census.md) (`python3 scripts/rust-census.py`). The compiler
+> [census](rust-census.md) (`aspect maintenance rust-census`). The compiler
 > waves are in [self-hosting-plan.md](self-hosting-plan.md); the first wave of
 > this plan is [SH6](../agent-prompts/self-host-sh6/README.md).
 
@@ -42,23 +42,25 @@ In practice, a crate or compiler module flips when:
 3. The crate's Rust tests are converted or kept as a differential against the
    last Rust commit.
 
-`scripts/ci/flip_gate.py` (SH6 lane 1) checks 1 and 2 and prints the row for
+`aspect ci flip-gate -- <crate>` (SH6 lane 1) checks 1 and 2 and prints the row for
 the census. A lane that passes flips without asking the owner; the recipe is
 below.
 
 ## Flipping a module
 
-Every flip PR runs `scripts/ci/flip_gate.py` and pastes its two output lines
+Every flip PR runs `aspect ci flip-gate -- <crate>` and pastes its two output lines
 (the verdict and the scoreboard row) into the PR body. A lane that gets PASS
 flips and deletes without asking the owner.
 
-1. **Write the gate's configuration** at `crates/<crate>/flip-gate.toml` (a
-   compiler module: `scripts/ci/flip-gate/<module>.toml`). It lists the build
-   commands, every test command (the crate's tests against the Vesper build,
-   and the seed's), the differential, one `[[abba]]` table per workload and
-   the Rust paths the flip deletes (`rust = [...]`, counted for the
-   scoreboard). The format is in the script's header;
-   `scripts/ci/flip-gate/vesper-span.toml` is a worked example.
+1. **Write the gate's configuration** at `crates/<crate>/flip-gate.json`, or at
+   `scripts/ci/flip-gate/<module>.json` for a compiler module. List the build
+   commands, tests against the Vesper build and the seed, the differential,
+   one `abba` entry per workload, and the Rust paths to count for the
+   scoreboard. Write commands as argument arrays. Use an object with `argv`
+   and `env` for command-specific variables, `cargo_target` and `args` for
+   paths relative to Cargo's target directory, or `sequence` for commands
+   that run in order and stop at the first failure. See
+   `scripts/ci/flip-gate/vesper-span.json` for a worked example.
 2. **ABBA.** Either point `rust` and `vesper` at two commands that run the
    same workload once (an `abba once <workload> <rust|vesper> <batches>`
    example, or the Rust and hybrid compilers on one package), and the gate
@@ -78,8 +80,8 @@ flips and deletes without asking the owner.
    counts its cases prints
    `flip-gate differential differences=<D> cases=<C>`, which goes into the
    row; D must be 0.
-4. **Run it:** `VESPER_PORT_COMPILER=<prebuilt vesper> python3
-   scripts/ci/flip_gate.py <crate>`. Exit 0 is PASS (every test and the
+4. **Run it** with `VESPER_PORT_COMPILER=<prebuilt vesper> aspect ci flip-gate -- <crate>`.
+   Exit 0 is PASS (every test and the
    differential pass, and every workload's 95% interval has its upper end at
    or below 1.5x), 1 is FAIL (a failing test, a difference, or a lower end
    above 1.5x), 2 is INCONCLUSIVE (an interval crosses 1.5x: rerun on a
@@ -89,9 +91,9 @@ flips and deletes without asking the owner.
 5. **Flip.** On PASS: make Vesper the only build (a crate outside the
    compiler's closure deletes its Rust; a crate the compiler links moves
    its Rust engine to `seed/`, #1102), convert or keep its Rust tests
-   (lane 19), keep `flip-gate.toml` working against the last Rust commit or
+   (lane 19), keep `flip-gate.json` working against the last Rust commit or
    the seed, and add the gate's row to the scoreboard below and the crate's
-   STATUS in `scripts/rust-census.py`.
+   STATUS in `.aspect/rust-census.axl`.
 
 ## Where Rust can be deleted, and when
 
@@ -133,7 +135,7 @@ flip-gate row is in its own file, `crates/vesper-hybrid/src/swap/<file>.rs`,
 | `none` | no swap: the Rust compiler behind the Vesper driver | checking the driver alone |
 
 A swap joins `gated` in the PR that passes its gate: that PR adds the gate
-configuration (`scripts/ci/flip-gate/<name>.toml`), the scoreboard row
+configuration (`scripts/ci/flip-gate/<name>.json`), the scoreboard row
 below, and changes the swap's row in its `src/swap/` file to `pass(...)`.
 `crates/vesper-hybrid/tests/swaps.rs` checks that every `gated` swap has
 both and that the others really stay on Rust, and
@@ -178,16 +180,16 @@ gated set over the whole corpus with 0 differences. Today `gated` holds
    `stage2.cwasm` under the pinned wasmtime CLI (#1928). Four packages are
    gaps, listed in `STAGE2_PACKAGE_GAPS` with the reason: the native
    Cranelift glue (`codegen-base`, `codegen-control-emit`,
-   `codegen-numeric`, whose `cranelift.vsys` handle types Stage 2 does not
-   resolve and whose `Ffi[Cranelift]` entry points a Wasm build cannot
-   carry; they drive the native backend over `vesper-cranelift-sys`, and
-   Stage 2 emits only Wasm) and `driver-commands`, whose printing, help and
+   `codegen-numeric`: they assemble and check, since the Stage 2 loader
+   reads each package's `[package] vsys` types, but they drive the native
+   backend over `vesper-cranelift-sys`, and Stage 2 emits only Wasm, where
+   the Cranelift imports and `Ffi[Cranelift]` entry points have no host) and `driver-commands`, whose printing, help and
    formatting go through the `HybridCommands` import that only the hybrid's
    Rust implements (item 2). `@vesper-std/process` builds for WASI
    (`src-wasip2`: every start is refused with Unsupported, since WASI 0.2
    cannot start a process), and the Wasm backend takes `Ffi[StdProcess]`
    as a host capability that imports nothing. The
-   test fails when a gap closes, and `stage2_fixed_point_lists_every_package`
+   test fails when a gap closes or fails before the Wasm backend, and `stage2_fixed_point_lists_every_package`
    fails when a package under `packages/` is in no list. What is not yet
    covered is the whole compiler as one program, which waits for item 2.
    `bootstrap/seed/runner/vwasm.c` is frozen (owner decision): it is not a
@@ -238,7 +240,7 @@ gated set over the whole corpus with 0 differences. Today `gated` holds
   with `Cargo.lock` regenerated by cargo) and runs
   `tools/bazel/sync_build_files.py`.
 - Sets the deleted rows to `gone` in the STATUS tables of
-  `scripts/rust-census.py` (never the generated census), adds its row to
+  `.aspect/rust-census.axl` (never the generated census), adds its row to
   the scoreboard, and reports the Rust lines deleted in the PR body and in
   `docs/parallel-results/rust-exit-stage2-retirement.md`.
 - Closes #1397.

@@ -220,13 +220,15 @@ pub type RegisterLocalsHook = fn(
     bool,
 ) -> Option<std::collections::BTreeSet<String>>;
 
-/// The native walk's entry plans (`#1509` parts 3b and 4a): each
-/// instance's entry block (`native::frame_plan`) and internal convention
+/// The native walk's entry plans (`#1509` parts 3b, 4a and 4b): the
+/// instances an entry compile defines (`instances_for_entry`), each one's
+/// entry block (`native::frame_plan`) and internal convention
 /// (`NativeAbi::plan`). Called once per entry compile without a trace host,
 /// with the world's first lowering, the entry and whether the compile
 /// optimizes. An instance the frames leave out keeps the Rust frame plan;
 /// the conventions are used only when the frames cover exactly the
-/// instances Rust discovered. `None` keeps every Rust plan.
+/// instances the compile defines. `None`, or no instances, keeps every Rust
+/// plan.
 pub type EntryPlansHook =
     fn(&World, &crate::ir::Program, &str, bool) -> Option<crate::native::EntryPlans>;
 
