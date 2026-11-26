@@ -111,9 +111,9 @@ actions:
   # These carry no resources:memory tag, so the VM gets the same 25GB as the
   # other differentials: at 22GB the check failed after about 50 minutes on
   # #1950 and #1970, before self_host_native_walk reserved its 8GiB (#1993).
-  # Its local test budget is 20GiB instead of ci_tests' 18GiB, so five
-  # 4GiB tests run at once instead of four, with 5GiB left over (the 22GB
-  # VMs keep 4GiB). At 18GiB the 28 targets averaged 3.4 at a time.
+  # It keeps ci_tests' 18GiB local test budget: at 20GiB (#2047), five
+  # codegen differentials at once ran the VM out of memory and the kernel
+  # killed the Bazel server (exit 37) on #2040 and #2048.
   - name: "Self-host codegen differentials"
     container_image: "ubuntu-24.04"
     resource_requests:
@@ -137,7 +137,7 @@ actions:
       - run: ./.git/vesper-aspect/aspect ci install-lean
       - *apt_update
       - *build_tools
-      - run: ./.git/vesper-aspect/aspect ci bazel-tests -- --config=ci --config=rbe_build --config=ci_tests --local_resources=memory=20480 --config=ci_opt --remote_download_outputs=minimal --build_tests_only --test_summary=short --test_tag_filters=self_host_codegen,-lean_replay //...
+      - run: ./.git/vesper-aspect/aspect ci bazel-tests -- --config=ci --config=rbe_build --config=ci_tests --config=ci_opt --remote_download_outputs=minimal --build_tests_only --test_summary=short --test_tag_filters=self_host_codegen,-lean_replay //...
 
   - name: "Native and acceptance scripts"
     container_image: "ubuntu-24.04"
