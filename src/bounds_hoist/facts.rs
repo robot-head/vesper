@@ -37,6 +37,10 @@ use std::cell::RefCell;
 
 /// The deepest chain of facts and joins one proof follows.
 const MAX_PROOF_DEPTH: usize = 4;
+/// Constant offsets and lengths a wide-access proof considers lie in
+/// `0..SMALL_CONST`, so `offset + width` and `k + 1` cannot overflow
+/// (the port's `SMALL_CONST` in `facts.ves`).
+const SMALL_CONST: i128 = 1 << 62;
 
 /// What a value is, for comparing values across reads.
 #[derive(Clone, Debug, PartialEq)]
@@ -589,6 +593,33 @@ impl<'a> Facts<'a> {
         })
     }
 
+    /// Whether a fixed-width access of `bytes` bytes at the constant `t`
+    /// fits in `place` wherever block `at` runs: a comparison `k <= r` (or
+    /// `k < r`) of a constant `k` with a value `r` at most the length, and
+    /// `t + bytes <= k` (or `<= k + 1`). One length check before a
+    /// decoder's straight-line reads covers them all (#2203).
+    fn wide_fits(&self, t: &Term, bytes: u8, place: &Target, at: usize) -> bool {
+        // Constants that fit in a word, as the Vesper port compares them.
+        let small = |n: i128| (0..SMALL_CONST).contains(&n);
+        let Term::Const(c) = *t else {
+            return false;
+        };
+        if !small(c) {
+            return false;
+        }
+        let need = c + i128::from(bytes);
+        self.holding(at).any(|e| {
+            let Term::Const(k) = self.term(e.lhs) else {
+                return false;
+            };
+            if !small(k) {
+                return false;
+            }
+            let room = if e.strict { k + 1 } else { k };
+            need <= room && self.at_most_len(&self.term(e.rhs), place, e.from, 1)
+        })
+    }
+
     /// Whether `t` is at most the length of `place` wherever block `at`
     /// runs.
     fn at_most_len(&self, t: &Term, place: &Target, at: usize, depth: usize) -> bool {
@@ -626,12 +657,21 @@ impl<'a> Facts<'a> {
     /// The element accesses of block `b`: (instruction, access, receiver
     /// place, index value), for receivers read from a stable place.
     fn accesses(&self, b: usize) -> Vec<(usize, Access, Place, ValueId)> {
+        self.accesses_of(b, hoistable)
+    }
+
+    /// [`Self::accesses`] with the fixed-width reads and writes too.
+    fn accesses_of(
+        &self,
+        b: usize,
+        access: fn(SeqOp) -> Option<Access>,
+    ) -> Vec<(usize, Access, Place, ValueId)> {
         let mut out = vec![];
         for (k, i) in self.f.blocks[b].instructions.iter().enumerate() {
             let Op::Seq { op, args } = &i.op else {
                 continue;
             };
-            let (Some(access), Some(index)) = (hoistable(*op), args.get(1)) else {
+            let (Some(access), Some(index)) = (access(*op), args.get(1)) else {
                 continue;
             };
             let Some(place) = args.first().and_then(|a| a.place.as_ref()) else {
@@ -654,12 +694,17 @@ pub(super) fn compared_checks(f: &FunctionIr) -> Vec<(usize, usize, Access)> {
     }
     let mut found = vec![];
     for &b in &facts.reached {
-        for (k, access, place, index) in facts.accesses(b) {
+        for (k, access, place, index) in facts.accesses_of(b, counted_access) {
             let target = Target {
                 place: facts.length_place(&place),
                 at: (b, k),
             };
-            if facts.below_len(&facts.term(index), &target, b, 0) {
+            let t = facts.term(index);
+            let fits = match access {
+                Access::Wide(wide) => facts.wide_fits(&t, wide.bytes, &target, b),
+                _ => facts.below_len(&t, &target, b, 0),
+            };
+            if fits {
                 found.push((b, k, access));
             }
         }

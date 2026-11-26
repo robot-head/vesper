@@ -14,13 +14,14 @@
 // Slice 1 (machine.ves) is the core machine: integers of the 64-bit kinds
 // and narrower, `bool`, string literals, tuples, data, function values,
 // direct and indirect calls with `inout` places, patterns, `?` and the
-// primitive failures. Slice 2 adds handlers without a state: the handler
-// frame, its return clause, and `perform` of primitive failures, `?` and
-// effect operation calls into the operation clauses. A program reaching
-// anything else (closures, state handlers, sequences, floats, 128-bit
-// integers, vector, tiled and `Box` operations) is declined before it runs
-// (`scan`), and a clause that resumes its continuation is declined when
-// it does; the caller then runs the Rust evaluator instead.
+// primitive failures. Slice 2 adds handlers: the handler frame, its return
+// clause, and `perform` of primitive failures, `?` and effect operation
+// calls into the operation clauses. Slice 3 resumes one-shot
+// continuations and runs state handlers. A program reaching anything else
+// (closures, sequences, floats, 128-bit integers, vector, tiled and `Box`
+// operations) is declined before it runs (`scan`), and a continuation
+// resumed outside its handler's activation is declined when it is; the
+// caller then runs the Rust evaluator instead.
 //
 // The input (tests/common/run_words.rs `run_input`): check-data's names,
 // types and world, the program section of `ir_words::program_input`, then

@@ -157,3 +157,42 @@ fn every_length_and_random_bytes_decode_like_rust() {
         }
     }
 }
+
+/// The mitigator's reference model, which decodes the frame on the Vesper
+/// side (#2230), against the Rust one: random TCP/IPv4 frames with random
+/// IHL, flags, ether types, protocols, prior counters and truncations.
+#[test]
+fn reference_decisions_match_rust() {
+    use vesper_ebpf::mitigator::reference_decision;
+    use vesper_ebpf_rust::mitigator::reference_decision as rust_decision;
+    let mut r = Rng(0x2230_eb9f_0000_0004);
+    for _ in 0..50_000 {
+        let (frame, _) = frame(&mut r);
+        let mut pkt = frame.encode();
+        let x = r.next();
+        if !x.is_multiple_of(4) {
+            pkt[12] = 0x08;
+            pkt[13] = 0x00;
+            pkt[23] = 6;
+            pkt[14] = 0x40 | if x % 8 == 1 { (x >> 8) as u8 & 0x0f } else { 5 };
+        }
+        let extra = (x >> 16) as usize % 70;
+        pkt.extend((0..extra).map(|_| r.next() as u8));
+        if (x >> 24).is_multiple_of(10) {
+            pkt.truncate((x >> 32) as usize % 80);
+        }
+        let prior = match (x >> 40) % 3 {
+            0 => None,
+            1 => Some((x >> 44) % 8),
+            _ => Some(u64::MAX - (x >> 60)),
+        };
+        let threshold = (x >> 48) % 6;
+        let port = reference_decision(&pkt, prior, threshold);
+        let rust = rust_decision(&pkt, prior, threshold);
+        assert_eq!(
+            (port.0 as u64, port.1),
+            (rust.0 as u64, rust.1),
+            "{pkt:?} {prior:?} {threshold}"
+        );
+    }
+}

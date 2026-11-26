@@ -401,6 +401,8 @@ vesper_crate(
             # @vesper/driver-commands formats through @vesper/fmt (#1996).
             "//crates/vesper-fmt:files",
             "//crates/vesper-lean-syntax:files",
+            # ... and graphs Loom.lock through @vesper/loom-calculus (#1996).
+            "//crates/vesper-loom-calculus:files",
             "//crates/vesper-pact:files",
             "//crates/vesper-resonance:files",
             "//crates/vesper-serde:files",
@@ -1128,6 +1130,14 @@ vesper_crate(
         # about 5 GiB per shard locally (#1913).
         "test/self_host_swap_inputs": [
             "resources:memory:6144",
+        ],
+        # One thread, but it keeps every fixture world's check data and
+        # machine arenas: 12.3 GiB peak RSS locally (782 runs, Nov 2026).
+        # Unreserved, the kernel killed it in "Self-host differentials" on
+        # #2151 and #2190.
+        "test/self_host_run": [
+            "resources:memory:13312",
+            "resources:cpu:1",
         ],
         # Four actual corpus workers; memory is an estimate, not an RSS cap.
         "test/self_host_front_end": [
@@ -2136,6 +2146,7 @@ vesper_package(
         ":std_fs_package",
         ":std_process_package",
         "//crates/vesper-fmt:port_package",
+        "//crates/vesper-loom-calculus:port_package",
     ],
 )
 

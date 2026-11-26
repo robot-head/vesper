@@ -19,3 +19,6 @@ vsys = ["commands.vsys"]
 "@vesper-std/process" = { version = "^0.1", path = "../vesper-std/process" }
 # `vesper fmt`'s formatter, the Vesper port of vesper_fmt (#1996 part 3d).
 "@vesper/fmt" = { version = "^0.1", path = "../../crates/vesper-fmt/vesper" }
+# `vesper graph`'s lockfile reader, validation and report, the Vesper port
+# of vesper_loom_calculus (#1996).
+"@vesper/loom-calculus" = { version = "^0.1", path = "../../crates/vesper-loom-calculus/vesper" }

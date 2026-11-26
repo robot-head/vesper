@@ -20,6 +20,8 @@ use @vesper-std/toml::{parse, dump};
 use self::manifest_toml::{manifest_from_toml};
 use self::semver_text::{SCmp, parse_version, parse_req};
 use self::encode::{encode_manifest_diags, encode_upgrade, encode_validation};
+use self::lock_json::{solution_from_json};
+use self::lock_graph::{graph_focus_error, graph_run};
 
 // A SemVer version; pre, build and text are string ids.
 pub copy struct Ver {
@@ -305,6 +307,14 @@ pub fn check_upgrade(in words: Slice[u64], in text: Slice[u8]) -> L {
 
 // The TOML reader's result on `text` (see `@vesper-std/toml::dump`), for
 // the differential tests against the `toml` crate.
+// `vesper graph`'s result (lock_graph): the status (`GRAPH_*`), stdout
+// and the error message.
+pub struct GraphRun {
+    status: u64,
+    out: ChunkSeq[u8],
+    err: ChunkSeq[u8]
+}
+
 pub struct TomlRead {
     pool: ChunkSeq[u8]
 }
@@ -391,4 +401,35 @@ pub fn manifest_toml(in text: Slice[u8]) -> TomlRead {
     }
     out.extend(in body.as_slice());
     TomlRead { pool: out }
+}
+
+// `serde_json::from_slice::<Solution>` for the differential tests: the
+// pool is the solution's JSON (`serde_json::to_string`), or `!` and the
+// error text.
+pub fn lock_json(in text: Slice[u8]) -> TomlRead {
+    let (ok, body) = solution_from_json(in text);
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    if !ok {
+        out.push(33);
+    }
+    out.extend(in body.as_slice());
+    TomlRead { pool: out }
+}
+
+// `vesper graph` on Loom.lock bytes after the option checks (lock_graph).
+pub fn lock_graph(
+    in lock: Slice[u8],
+    has_focus: bool,
+    in focus: Slice[u8],
+    invert: bool,
+    json: bool,
+    dot: bool
+) -> GraphRun {
+    graph_run(in lock, has_focus, in focus, invert, json, dot)
+}
+
+// `PackageName::parse`'s error for a `vesper graph --package` value, or
+// empty (lock_graph).
+pub fn lock_graph_focus_error(in name: Slice[u8]) -> TomlRead {
+    TomlRead { pool: graph_focus_error(in name) }
 }
