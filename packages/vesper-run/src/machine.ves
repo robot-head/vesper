@@ -46,6 +46,8 @@ pub const T_CONT: u8 = 13;
 // `slices` index.
 pub const T_SEQ: u8 = 14;
 pub const T_SLICE: u8 = 15;
+// A closure (`Value::Closure`): its `closures` index.
+pub const T_CLOS: u8 = 16;
 pub const T_UNDEF: u8 = 255;
 
 // Unary codes; a conversion is U_CONV + family * 16 + target kind.
@@ -84,6 +86,7 @@ const P_INDEX: u8 = 4;
 const SITE_HANDLE: u64 = 1;
 const SITE_EFFECT_CALL: u64 = 2;
 const SITE_TRY: u64 = 3;
+const SITE_CLOSURE: u64 = 4;
 
 // A type's integer kind is not known yet / it has none.
 const TK_UNSEEN: u8 = 254;
@@ -144,6 +147,14 @@ copy struct Wr {
     seg_start: u64,
     seg_count: u64,
     code: u64,
+}
+
+// A closure: its effect-table site and captures
+// `clos_*[cap_start..cap_start + cap_count]`.
+copy struct Cl {
+    site: u64,
+    cap_start: u64,
+    cap_count: u64,
 }
 
 // A sequence: its elements `seq_items[at..at + len]`, with room for `cap`.
@@ -245,6 +256,10 @@ pub struct M {
     k_hnames: ChunkSeq[u32],
     k_hvals: ChunkSeq[Val],
     k_serial: u64,
+    // Closures (site, captures) and their captured environments.
+    closures: ChunkSeq[Cl],
+    clos_names: ChunkSeq[u32],
+    clos_vals: ChunkSeq[Val],
     // Sequences, their elements and slice views.
     seqs: ChunkSeq[Sq],
     seq_items: ChunkSeq[Val],
@@ -336,6 +351,9 @@ pub fn machine_new(sink ctx: Ctx, sink program: Program, fuel: u64) -> M {
         k_hnames: ChunkSeq::new[u32](),
         k_hvals: ChunkSeq::new[Val](),
         k_serial: 0,
+        closures: ChunkSeq::new[Cl](),
+        clos_names: ChunkSeq::new[u32](),
+        clos_vals: ChunkSeq::new[Val](),
         seqs: ChunkSeq::new[Sq](),
         seq_items: ChunkSeq::new[Val](),
         slices: ChunkSeq::new[Sl](),
@@ -439,6 +457,19 @@ const EC_OP: u64 = 3;
 const EC_KEY: u64 = 4;
 // try: instance key + 1.
 const TRY_KEY: u64 = 2;
+// closure: coerce flag, captured names (count, names), body fn + 1, then
+// the parameter count.
+const CS_COERCE: u64 = 2;
+const CS_FREE_COUNT: u64 = 3;
+const CS_FREE: u64 = 4;
+// After the captured names.
+const CT_BODY: u64 = 0;
+const CT_PARAM_COUNT: u64 = 1;
+// `Op::Closure` operands: pool index, then the alias count and pairs.
+const CO_ALIAS_COUNT: u64 = 1;
+// A closure's `Control::Eval`: the `Eval` itself (its `Frame::Coerce` pop
+// is one more when the closure is typed).
+const CLOSURE_EVAL_STEPS: u64 = 1;
 // Handle flags: the expression has a type (a `Frame::Coerce`); a state;
 // the state initializer has a type.
 const FLAG_COERCE: u64 = 1;
@@ -456,6 +487,13 @@ const STATE_INIT_STEPS: u64 = 2;
 // alias count and (name, slot) pairs.
 const HO_STATE_VALUE: u64 = 1;
 const HO_ALIAS_COUNT: u64 = 3;
+// The width of one (name, slot) alias pair in `Op::Handle` and
+// `Op::Closure` operands.
+const ALIAS_PAIR_WORDS: u64 = 2;
+// `Op::Data` operands: the constructor, the field count, then (name,
+// value) pairs.
+const DATA_FIELDS_AT: u64 = 2;
+const DATA_FIELD_WORDS: u64 = 2;
 // A call argument's pass word for `inout` (`Pass::Inout`).
 const PASS_INOUT: u64 = 1;
 // Words per call argument: pass, value, root + 1, path.
@@ -552,6 +590,17 @@ pub fn read_sites(inout machine: M, inout reader: Reader, in bytes: Slice[u8]) {
         } else if kind == SITE_TRY {
             let key = opt_name_word(in machine, reader.word(in bytes));
             machine.sites.push(key);
+        } else if kind == SITE_CLOSURE {
+            machine.sites.push(reader.word(in bytes));
+            let free_count = reader.word(in bytes);
+            machine.sites.push(free_count);
+            for j in 0..free_count {
+                let name = name_word(in machine, reader.word(in bytes));
+                machine.sites.push(name);
+            }
+            let body = opt_name_word(in machine, reader.word(in bytes));
+            machine.sites.push(body);
+            machine.sites.push(reader.word(in bytes));
         }
     }
 }
@@ -676,7 +725,7 @@ fn install(inout machine: M) {
     let mut slots: ChunkSeq[En] = ChunkSeq::new[En]();
     let alias_at = add(inst.a, HO_ALIAS_COUNT);
     for i in 0..machine.program.op(alias_at) {
-        let pair_at = add(inc(alias_at), wrapping_mul(i, 2));
+        let pair_at = add(inc(alias_at), wrapping_mul(i, ALIAS_PAIR_WORDS));
         let name = n32(machine.program.op(pair_at));
         let bound_index = binding(in machine, n32(machine.program.op(inc(pair_at))));
         if bound_index != NONE64 {
@@ -1947,7 +1996,23 @@ pub fn scan(inout machine: M) {
                     || op == Op::Try
                     || op == Op::Loop
                 {} else if op == Op::Closure {
-                    decline(inout machine, "a closure in ", fn_info.name);
+                    let closure_site = site(in machine, inst_id, SITE_CLOSURE);
+                    let body = if closure_site == NONE64 {
+                        NONE64
+                    } else {
+                        site_fn(
+                            in machine,
+                            site_word(
+                                in machine,
+                                add(closure_tail(in machine, closure_site), CT_BODY)
+                            )
+                        )
+                    };
+                    if body == NONE64 {
+                        decline(inout machine, "a closure in ", fn_info.name);
+                    } else {
+                        reach(inout machine, body, inout work);
+                    }
                 } else if op == Op::Handle {
                     let handle_site = site(in machine, inst_id, SITE_HANDLE);
                     if handle_site == NONE64 {
@@ -2063,6 +2128,8 @@ fn display(in machine: M, value: Val, inout out: ChunkSeq[u8], depth: u64) {
         put(inout out, ">");
     } else if value.tag == T_CONT {
         put(inout out, "<one-shot continuation>");
+    } else if value.tag == T_CLOS {
+        put(inout out, "<closure>");
     } else if value.tag == T_SEQ {
         put(inout out, "<ChunkSeq len=");
         push_decimal(inout out, sq_at(in machine, value.payload).len);
@@ -2784,19 +2851,29 @@ fn collect_args(inout machine: M, args_at: u64) -> u64 {
 // `invoke_scoped` of function `func_index` on the collected arguments, after the
 // caller was suspended: the callee's activation becomes current.
 fn invoke(inout machine: M, func_index: u64) {
+    invoke_with(inout machine, func_index, 0, 0, false);
+}
+
+// `invoke` over captured names `clos_names[cap_start..cap_start + cap_count]`
+// (a closure's environment, shadowed by its parameters). A closure's
+// lowered body lists its captures before its parameters, which take the
+// arguments.
+fn invoke_with(inout machine: M, func_index: u64, cap_start: u64, cap_count: u64, closure: bool) {
     let fn_info = func(in machine, func_index);
-    if machine.arg_vals.len() != fn_info.param_count {
+    let arg_count = machine.arg_vals.len();
+    if arg_count > fn_info.param_count || (!closure && arg_count != fn_info.param_count) {
         fail(inout machine, "argument arity mismatch");
         return;
     }
+    let skip = wrapping_sub(fn_info.param_count, arg_count);
     let val_base = machine.vals.len();
     let env_base = machine.env.len();
     let cell_base = machine.cells.len();
     let seg_base = machine.segs.len();
     // The `inout` places resolve in the caller's environment.
     let mut slots: ChunkSeq[En] = ChunkSeq::new[En]();
-    for i in 0..fn_info.param_count {
-        let param_row = param(in machine, add(fn_info.param_start, i));
+    for i in 0..arg_count {
+        let param_row = param(in machine, add(add(fn_info.param_start, skip), i));
         if param_row.pass == PASS_INOUT {
             let root = u64_at(in machine.arg_roots, i);
             let mut found = false;
@@ -2841,6 +2918,17 @@ fn invoke(inout machine: M, func_index: u64) {
             slots.push(En { name: param_row.name, cell: cell, seg_start: 0, seg_count: 0 });
         }
     }
+    // `snapshot_environment`: the captures, by value.
+    for i in 0..cap_count {
+        let cell = machine.cells.len();
+        machine.cells.push(val_at(in machine.clos_vals, add(cap_start, i)));
+        machine.env.push(En {
+            name: u32_at(in machine.clos_names, add(cap_start, i)),
+            cell: cell,
+            seg_start: 0,
+            seg_count: 0
+        });
+    }
     for i in 0..slots.len() {
         match slots.try_get(i) {
             Option::Some(env_entry) => machine.env.push(env_entry),
@@ -2867,6 +2955,10 @@ fn invoke(inout machine: M, func_index: u64) {
 fn call_value(inout machine: M, callee: Val) {
     if callee.tag == T_CONT {
         resume_cont(inout machine, callee);
+        return;
+    }
+    if callee.tag == T_CLOS {
+        call_closure(inout machine, callee);
         return;
     }
     if callee.tag == T_FN {
@@ -3019,7 +3111,7 @@ fn step(inout machine: M) {
         let n = machine.program.op(inc(operand_at));
         let kid_start = machine.kids.len();
         for i in 0..n {
-            let field_at = add(add(operand_at, 2), wrapping_mul(i, 2));
+            let field_at = add(add(operand_at, DATA_FIELDS_AT), wrapping_mul(i, DATA_FIELD_WORDS));
             let value = get(inout machine, machine.program.op(inc(field_at)));
             push_kid(inout machine, n32(machine.program.op(field_at)), value);
         }
@@ -3056,6 +3148,9 @@ fn step(inout machine: M) {
             fail(inout machine, "IR projection requires data");
             return;
         }
+    } else if op == Op::Closure {
+        make_closure(inout machine, inst_id, inst);
+        return;
     } else if op == Op::Seq {
         let n = collect_args(inout machine, inc(operand_at));
         if machine.failed {
@@ -3902,4 +3997,80 @@ fn wide_op(inout machine: M, form: u64, inout oob: bool) -> Val {
         oob = true;
     }
     read
+}
+
+// ----- closures ------------------------------------------------------------------
+
+// The first word after a closure site's captured names.
+fn closure_tail(in machine: M, at: u64) -> u64 {
+    add(add(at, CS_FREE), site_word(in machine, add(at, CS_FREE_COUNT)))
+}
+
+fn cl_at(in machine: M, id: u64) -> Cl {
+    match machine.closures.try_get(id) {
+        Option::Some(found) => found,
+        Option::None => Cl { site: 0, cap_start: 0, cap_count: 0 },
+    }
+}
+
+// `Op::Closure` (`Control::Eval` of `ExprKind::Closure`): the closure over
+// the captured free names it reads through its aliases, by value, returned
+// into the suspended activation.
+fn make_closure(inout machine: M, inst_id: u64, inst: InstRow) {
+    let at = site(in machine, inst_id, SITE_CLOSURE);
+    let mut steps = CLOSURE_EVAL_STEPS;
+    if site_word(in machine, add(at, CS_COERCE)) != 0 {
+        steps = inc(steps);
+    }
+    for i in 0..steps {
+        if machine.fuel == 0 {
+            fail(inout machine, "execution fuel exhausted");
+            return;
+        }
+        machine.fuel = wrapping_sub(machine.fuel, 1);
+    }
+    let cap_start = machine.clos_names.len();
+    let alias_at = add(inst.a, CO_ALIAS_COUNT);
+    let alias_count = machine.program.op(alias_at);
+    for i in 0..site_word(in machine, add(at, CS_FREE_COUNT)) {
+        let name = n32(site_word(in machine, add(add(at, CS_FREE), i)));
+        for j in 0..alias_count {
+            let pair_at = add(inc(alias_at), wrapping_mul(j, ALIAS_PAIR_WORDS));
+            if n32(machine.program.op(pair_at)) == name {
+                let bound_index = binding(in machine, n32(machine.program.op(inc(pair_at))));
+                if bound_index != NONE64 {
+                    let env_entry = entry(in machine, bound_index);
+                    slot_path(inout machine, env_entry);
+                    let value = read_path(inout machine, env_entry.cell);
+                    if machine.failed {
+                        return;
+                    }
+                    machine.clos_names.push(name);
+                    machine.clos_vals.push(value);
+                }
+            }
+        }
+    }
+    let id = machine.closures.len();
+    machine.closures.push(Cl {
+        site: at,
+        cap_start: cap_start,
+        cap_count: wrapping_sub(machine.clos_names.len(), cap_start)
+    });
+    suspend(inout machine, inst.dest, inst.ty);
+    machine.ret_value = Val { tag: T_CLOS, payload: id };
+    machine.control = C_RET;
+}
+
+// Calls closure `callee` on the collected arguments (`Value::Closure` in
+// `call_value`): its lowered body over its captures and parameters.
+fn call_closure(inout machine: M, callee: Val) {
+    let closure = cl_at(in machine, callee.payload);
+    let tail = closure_tail(in machine, closure.site);
+    if machine.arg_vals.len() != site_word(in machine, add(tail, CT_PARAM_COUNT)) {
+        fail(inout machine, "closure argument arity mismatch");
+        return;
+    }
+    let body = site_fn(in machine, site_word(in machine, add(tail, CT_BODY)));
+    invoke_with(inout machine, body, closure.cap_start, closure.cap_count, true);
 }

@@ -1251,12 +1251,35 @@ pub mod scalar {
 pub mod body {
     /// Emit one function body. [`super::Site`] names the function (the
     /// `Program` key) with no block or instruction; args
-    /// `[status, locations, var of each parameter...]`, `status` 1 when
-    /// the function returns a status word beside its value
-    /// (`FnAbi::status`), `locations` 1 when instructions carry their
-    /// source locations (`CodegenOptions::source_locations`), the
-    /// variables in parameter order. No result.
+    /// `[status, locations, n, var of each of the n parameters..., m,
+    /// callee of each of the m calls...]`, `status` 1 when the function
+    /// returns a status word beside its value (`FnAbi::status`),
+    /// `locations` 1 when instructions carry their source locations
+    /// (`CodegenOptions::source_locations`), the variables in parameter
+    /// order, and for each `Op::Call` of the body in instruction order the
+    /// `FuncId` the walk would call directly with nothing else around the
+    /// call (part 6b), or [`NO_CALLEE`]. No result.
     pub const FUNCTION: u32 = 1;
+
+    /// A call [`FUNCTION`]'s hook cannot emit as one direct `call`: the
+    /// hook declines the body.
+    pub const NO_CALLEE: u64 = u64::MAX;
+
+    /// [`FUNCTION`]'s leading flags, `status` and `locations`: the words
+    /// before the parameter count.
+    pub const FLAGS: usize = 2;
+
+    /// The callee words of a [`FUNCTION`] request's arguments (after the
+    /// parameters and the callee count), or `None` when the arguments do
+    /// not have that layout.
+    pub fn callees(args: &[u64]) -> Option<&[u64]> {
+        let params = usize::try_from(*args.get(FLAGS)?).ok()?;
+        // The parameter count, then the parameter variables.
+        let count_at = FLAGS + 1 + params;
+        let count = usize::try_from(*args.get(count_at)?).ok()?;
+        args.get(count_at + 1..)
+            .filter(|callees| callees.len() == count)
+    }
 }
 
 /// The `seq` family's helper requests (self-hosting SH4 lane 9, #1283).
