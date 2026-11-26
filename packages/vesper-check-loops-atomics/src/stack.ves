@@ -89,15 +89,7 @@ pub fn read_graph(inout r: Reader, in b: Slice[u8], in nmap: ChunkSeq[u32]) -> G
         let id = wrapping_u32(r.word(in b));
         let name = sym(in nmap, r.word(in b));
         let frame = wrapping_u32(r.word(in b));
-        g
-            .fns
-            .push(
-                StackFn {
-                    id: id,
-                    name: name,
-                    frame: frame
-                }
-            );
+        g.fns.push(StackFn { id: id, name: name, frame: frame });
     }
     let n = r.word(in b);
     g.calls.reserve(wrapping_mul(n, 2));
@@ -112,15 +104,7 @@ pub fn read_graph(inout r: Reader, in b: Slice[u8], in nmap: ChunkSeq[u32]) -> G
     for i in 0..n {
         let caller = wrapping_u32(r.word(in b));
         let inst = opt(r.word(in b));
-        g
-            .indirect
-            .push(
-                Site {
-                    caller: caller,
-                    symbol: NONE32,
-                    inst: inst
-                }
-            );
+        g.indirect.push(Site { caller: caller, symbol: NONE32, inst: inst });
     }
     let n = r.word(in b);
     g.external.reserve(n);
@@ -128,41 +112,19 @@ pub fn read_graph(inout r: Reader, in b: Slice[u8], in nmap: ChunkSeq[u32]) -> G
         let caller = wrapping_u32(r.word(in b));
         let symbol = sym(in nmap, r.word(in b));
         let inst = opt(r.word(in b));
-        g
-            .external
-            .push(
-                Site {
-                    caller: caller,
-                    symbol: symbol,
-                    inst: inst
-                }
-            );
+        g.external.push(Site { caller: caller, symbol: symbol, inst: inst });
     }
     let n = r.word(in b);
     for i in 0..n {
         let key = sym(in nmap, r.word(in b));
         let value = wrapping_u32(r.word(in b));
-        g
-            .roots
-            .push(
-                Pair {
-                    key: key,
-                    value: value
-                }
-            );
+        g.roots.push(Pair { key: key, value: value });
     }
     let n = r.word(in b);
     for i in 0..n {
         let key = sym(in nmap, r.word(in b));
         let value = wrapping_u32(r.word(in b));
-        g
-            .bounds
-            .push(
-                Pair {
-                    key: key,
-                    value: value
-                }
-            );
+        g.bounds.push(Pair { key: key, value: value });
     }
     let n = r.word(in b);
     for i in 0..n {
@@ -172,15 +134,7 @@ pub fn read_graph(inout r: Reader, in b: Slice[u8], in nmap: ChunkSeq[u32]) -> G
         for j in 0..k {
             g.targets.push(sym(in nmap, r.word(in b)));
         }
-        g
-            .target_rows
-            .push(
-                Site {
-                    caller: caller,
-                    symbol: wrapping_u32(k),
-                    inst: a
-                }
-            );
+        g.target_rows.push(Site { caller: caller, symbol: wrapping_u32(k), inst: a });
     }
     g
 }
@@ -288,11 +242,7 @@ impl Graph {
     fn function(in self, i: u64) -> StackFn {
         match self.fns.try_get(i) {
             Option::Some(f) => f,
-            Option::None => StackFn {
-                id: NONE32,
-                name: NONE32,
-                frame: 0
-            },
+            Option::None => StackFn { id: NONE32, name: NONE32, frame: 0 },
         }
     }
 
@@ -305,10 +255,7 @@ impl Graph {
         for i in 0..self.bounds.len() {
             let p = match self.bounds.try_get(i) {
                 Option::Some(p) => p,
-                Option::None => Pair {
-                    key: NONE32,
-                    value: 0
-                },
+                Option::None => Pair { key: NONE32, value: 0 },
             };
             if p.key == symbol {
                 return widen_u64(p.value);
@@ -346,11 +293,7 @@ impl Graph {
         for i in 0..self.target_rows.len() {
             let t = match self.target_rows.try_get(i) {
                 Option::Some(t) => t,
-                Option::None => Site {
-                    caller: NONE32,
-                    symbol: 0,
-                    inst: 0
-                },
+                Option::None => Site { caller: NONE32, symbol: 0, inst: 0 },
             };
             if t.caller == caller {
                 return i;
@@ -568,11 +511,7 @@ pub fn report(inout o: ChunkSeq[u8], in names: Names, in g: Graph) -> Report {
     for i in 0..g.external.len() {
         let e = match g.external.try_get(i) {
             Option::Some(e) => e,
-            Option::None => Site {
-                caller: 0,
-                symbol: NONE32,
-                inst: NONE64
-            },
+            Option::None => Site { caller: 0, symbol: NONE32, inst: NONE64 },
         };
         let c = widen_u64(e.caller);
         if g.bound(e.symbol) != NONE64 {
@@ -597,11 +536,7 @@ pub fn report(inout o: ChunkSeq[u8], in names: Names, in g: Graph) -> Report {
     for i in 0..g.indirect.len() {
         let s = match g.indirect.try_get(i) {
             Option::Some(s) => s,
-            Option::None => Site {
-                caller: 0,
-                symbol: NONE32,
-                inst: NONE64
-            },
+            Option::None => Site { caller: 0, symbol: NONE32, inst: NONE64 },
         };
         let c = widen_u64(s.caller);
         let caller = g.name(c);
@@ -619,11 +554,7 @@ pub fn report(inout o: ChunkSeq[u8], in names: Names, in g: Graph) -> Report {
         } else {
             let t = match g.target_rows.try_get(row) {
                 Option::Some(t) => t,
-                Option::None => Site {
-                    caller: NONE32,
-                    symbol: 0,
-                    inst: 0
-                },
+                Option::None => Site { caller: NONE32, symbol: 0, inst: 0 },
             };
             for j in 0..widen_u64(t.symbol) {
                 let target = u32_at(in g.targets, wrapping_add(t.inst, j));
@@ -798,10 +729,7 @@ pub fn report(inout o: ChunkSeq[u8], in names: Names, in g: Graph) -> Report {
     for i in 0..g.roots.len() {
         let root = match g.roots.try_get(i) {
             Option::Some(p) => p,
-            Option::None => Pair {
-                key: NONE32,
-                value: 0
-            },
+            Option::None => Pair { key: NONE32, value: 0 },
         };
         let id = g.by_name(root.key);
         let pa = wrapping_u32(rep.paths.len());

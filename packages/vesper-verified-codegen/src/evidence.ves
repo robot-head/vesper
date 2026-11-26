@@ -34,15 +34,7 @@ fn set32(inout t: ChunkSeq[u32], i: u64, v: u32) {
 fn fn_at(in fns: ChunkSeq[FnRow], i: u64) -> FnRow {
     match fns.try_get(i) {
         Option::Some(x) => x,
-        Option::None => FnRow {
-            name: 0,
-            ha: 0,
-            hn: 0,
-            b0: 0,
-            bc: 0,
-            ta: 0,
-            tn: 0
-        },
+        Option::None => FnRow { name: 0, ha: 0, hn: 0, b0: 0, bc: 0, ta: 0, tn: 0 },
     }
 }
 
@@ -331,15 +323,7 @@ fn rebuild(
                 }
             );
     }
-    FnRow {
-        name: name,
-        ha: ha,
-        hn: hn,
-        b0: b0,
-        bc: f.bc,
-        ta: f.ta,
-        tn: f.tn
-    }
+    FnRow { name: name, ha: ha, hn: hn, b0: b0, bc: f.bc, ta: f.ta, tn: f.tn }
 }
 
 // Install `row` as the function of its name.
@@ -477,18 +461,7 @@ fn substitute_tree(
                 }
             );
     }
-    made
-        .push(
-            FnRow {
-                name: new,
-                ha: ha,
-                hn: hn,
-                b0: b0,
-                bc: f.bc,
-                ta: f.ta,
-                tn: f.tn
-            }
-        );
+    made.push(FnRow { name: new, ha: ha, hn: hn, b0: b0, bc: f.bc, ta: f.ta, tn: f.tn });
     for q in 0..nested.len() {
         let i = match nested.try_get(q) {
             Option::Some(x) => x,
@@ -874,15 +847,7 @@ pub struct EF {
 fn blk_at(in bs: ChunkSeq[BlockRow], i: u64) -> BlockRow {
     match bs.try_get(i) {
         Option::Some(x) => x,
-        Option::None => BlockRow {
-            ha: 0,
-            hn: 0,
-            i0: 0,
-            ic: 0,
-            term: 0,
-            ta: 0,
-            tn: 0
-        },
+        Option::None => BlockRow { ha: 0, hn: 0, i0: 0, ic: 0, term: 0, ta: 0, tn: 0 },
     }
 }
 
@@ -1029,15 +994,7 @@ fn emit(inout p: Program, in ef: EF) -> FnRow {
                 }
             );
     }
-    FnRow {
-        name: ef.name,
-        ha: ha,
-        hn: hn,
-        b0: b0,
-        bc: ef.blocks.len(),
-        ta: ef.ta,
-        tn: ef.tn
-    }
+    FnRow { name: ef.name, ha: ha, hn: hn, b0: b0, bc: ef.blocks.len(), ta: ef.ta, tn: ef.tn }
 }
 
 fn load_fn(in p: Program, in idx: ChunkSeq[u32], name: u32) -> EF {
@@ -1250,15 +1207,7 @@ fn edit_row(
         for j in 0..w(e.n) {
             args.push(u32_at(in t.items, add(w(e.a), j)));
         }
-        es
-            .push(
-                EffNode {
-                    label: label,
-                    name: e.name,
-                    a: a,
-                    n: e.n
-                }
-            );
+        es.push(EffNode { label: label, name: e.name, a: a, n: e.n });
     }
     for j in 0..caps.len() {
         let l = n32(inc(w(u32_at(in caps, j))));
@@ -1274,15 +1223,7 @@ fn edit_row(
             }
         }
         if !found {
-            es
-                .push(
-                    EffNode {
-                        label: l,
-                        name: region,
-                        a: 0,
-                        n: 0
-                    }
-                );
+            es.push(EffNode { label: l, name: region, a: 0, n: 0 });
         }
     }
     let r = t.mk_row(in es, in args, row.tail);

@@ -144,11 +144,7 @@ pub fn fn_view(in p: Program, f: FnRow) -> FnView {
         locals.push(n32(p.op(at)));
         at = add(at, 2);
     }
-    FnView {
-        vty: vty,
-        next_value: next,
-        locals: locals
-    }
+    FnView { vty: vty, next_value: next, locals: locals }
 }
 
 // A block header: entry token, ni, ni x (block, token), outgoing token,

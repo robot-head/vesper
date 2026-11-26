@@ -190,13 +190,7 @@ pub fn parse_format_spec(in text: Slice[u8]) -> Option[FormatSpec] {
         if lo > hi || hi > 63 {
             return Option::None;
         }
-        ranges
-            .push(
-                FormatRange {
-                    lo: lo,
-                    hi: hi
-                }
-            );
+        ranges.push(FormatRange { lo: lo, hi: hi });
         if ranges.len() > 8 {
             return Option::None;
         }
@@ -208,12 +202,7 @@ pub fn parse_format_spec(in text: Slice[u8]) -> Option[FormatSpec] {
     if ranges.len() == 0 {
         return Option::None;
     }
-    Option::Some(
-        FormatSpec {
-            word: word,
-            ranges: ranges
-        }
-    )
+    Option::Some(FormatSpec { word: word, ranges: ranges })
 }
 
 // Scatter `value` into `spec`'s bit ranges, low bits first.
@@ -510,18 +499,12 @@ pub fn checked_delta(
     end_running: u64
 ) -> DeltaResult {
     if end_enabled < start_enabled || end_running < start_running || end_val < start_val {
-        return DeltaResult {
-            ok: false,
-            delta: 0
-        };
+        return DeltaResult { ok: false, delta: 0 };
     }
     let en = wrapping_sub(end_enabled, start_enabled);
     let run = wrapping_sub(end_running, start_running);
     if en == 0 || en != run {
-        return DeltaResult {
-            ok: false,
-            delta: 0
-        };
+        return DeltaResult { ok: false, delta: 0 };
     }
     DeltaResult {
         ok: true,
@@ -532,23 +515,11 @@ pub fn checked_delta(
 // Decode a 2-event Linux `READ_FORMAT = 1|2|4|8` (40 bytes) group read in ID order.
 pub fn decode_group_read(in buf: Slice[u8], id0: u64, id1: u64) -> GroupRead {
     if buf.len() != 40 {
-        return GroupRead {
-            ok: false,
-            count0: 0,
-            count1: 0,
-            time_enabled: 0,
-            time_running: 0
-        };
+        return GroupRead { ok: false, count0: 0, count1: 0, time_enabled: 0, time_running: 0 };
     }
     let nr = read_u64_le(in buf, 0);
     if nr != 2 {
-        return GroupRead {
-            ok: false,
-            count0: 0,
-            count1: 0,
-            time_enabled: 0,
-            time_running: 0
-        };
+        return GroupRead { ok: false, count0: 0, count1: 0, time_enabled: 0, time_running: 0 };
     }
     let enabled = read_u64_le(in buf, 8);
     let running = read_u64_le(in buf, 16);
@@ -566,23 +537,11 @@ pub fn decode_group_read(in buf: Slice[u8], id0: u64, id1: u64) -> GroupRead {
 // Decode a 2-event Linux `READ_FORMAT = 1|2|4|8` (56 bytes: nr, enabled, running, val0, id0, val1, id1).
 pub fn decode_group_read2(in buf: Slice[u8], id0: u64, id1: u64) -> GroupRead {
     if buf.len() != 56 {
-        return GroupRead {
-            ok: false,
-            count0: 0,
-            count1: 0,
-            time_enabled: 0,
-            time_running: 0
-        };
+        return GroupRead { ok: false, count0: 0, count1: 0, time_enabled: 0, time_running: 0 };
     }
     let nr = read_u64_le(in buf, 0);
     if nr != 2 {
-        return GroupRead {
-            ok: false,
-            count0: 0,
-            count1: 0,
-            time_enabled: 0,
-            time_running: 0
-        };
+        return GroupRead { ok: false, count0: 0, count1: 0, time_enabled: 0, time_running: 0 };
     }
     let enabled = read_u64_le(in buf, 8);
     let running = read_u64_le(in buf, 16);
@@ -607,13 +566,7 @@ pub fn decode_group_read2(in buf: Slice[u8], id0: u64, id1: u64) -> GroupRead {
             time_running: running
         }
     } else {
-        GroupRead {
-            ok: false,
-            count0: 0,
-            count1: 0,
-            time_enabled: 0,
-            time_running: 0
-        }
+        GroupRead { ok: false, count0: 0, count1: 0, time_enabled: 0, time_running: 0 }
     }
 }
 
@@ -621,12 +574,7 @@ pub fn decode_group_read2(in buf: Slice[u8], id0: u64, id1: u64) -> GroupRead {
 // `raw_pmc` is the counter value read from hardware for `index - 1`.
 pub fn read_perf_page_once(in page: Slice[u8], raw_pmc: u64, is_aarch64: bool) -> PageReading {
     if page.len() < 56 {
-        return PageReading {
-            status: 3,
-            count: 0,
-            time_enabled: 0,
-            time_running: 0
-        };
+        return PageReading { status: 3, count: 0, time_enabled: 0, time_running: 0 };
     }
     let seq = match page.try_atomic_load_u32(8, MemoryOrder::Acquire) {
         Option::Some(v) => v,
@@ -653,44 +601,19 @@ pub fn read_perf_page_once(in page: Slice[u8], raw_pmc: u64, is_aarch64: bool) -
         },
     };
     if seq != seq2 {
-        return PageReading {
-            status: 4,
-            count: 0,
-            time_enabled: 0,
-            time_running: 0
-        };
+        return PageReading { status: 4, count: 0, time_enabled: 0, time_running: 0 };
     }
     if (caps & 4) == 0 {
-        return PageReading {
-            status: 1,
-            count: 0,
-            time_enabled: 0,
-            time_running: 0
-        };
+        return PageReading { status: 1, count: 0, time_enabled: 0, time_running: 0 };
     }
     if index == 0 {
-        return PageReading {
-            status: 2,
-            count: 0,
-            time_enabled: 0,
-            time_running: 0
-        };
+        return PageReading { status: 2, count: 0, time_enabled: 0, time_running: 0 };
     }
     if is_aarch64 && index > 32 {
-        return PageReading {
-            status: 3,
-            count: 0,
-            time_enabled: 0,
-            time_running: 0
-        };
+        return PageReading { status: 3, count: 0, time_enabled: 0, time_running: 0 };
     }
     if width == 0 || width > 64 {
-        return PageReading {
-            status: 3,
-            count: 0,
-            time_enabled: 0,
-            time_running: 0
-        };
+        return PageReading { status: 3, count: 0, time_enabled: 0, time_running: 0 };
     }
     let pmc = sign_extend_pmc(raw_pmc, width);
     let count = wrapping_add(wrapping_u64(offset), wrapping_u64(pmc));
@@ -787,25 +710,13 @@ pub fn perf_group_disable_and_read(in g: PerfGroup) -> GroupRead eff [Ffi[PerfSy
         PerfSys::PERF_IOC_FLAG_GROUP
     );
     if r != 0 {
-        return GroupRead {
-            ok: false,
-            count0: 0,
-            count1: 0,
-            time_enabled: 0,
-            time_running: 0
-        };
+        return GroupRead { ok: false, count0: 0, count1: 0, time_enabled: 0, time_running: 0 };
     }
     let mut buf: ChunkSeq[u8] = ChunkSeq::new[u8]();
     buf.resize(56, 0);
     let (n, _) = PerfSys::read(g.leader_fd, inout buf.as_slice_mut());
     if n != 56 {
-        return GroupRead {
-            ok: false,
-            count0: 0,
-            count1: 0,
-            time_enabled: 0,
-            time_running: 0
-        };
+        return GroupRead { ok: false, count0: 0, count1: 0, time_enabled: 0, time_running: 0 };
     }
     decode_group_read2(in buf.as_slice(), g.id0, g.id1)
 }

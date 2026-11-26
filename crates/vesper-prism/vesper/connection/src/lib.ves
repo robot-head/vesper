@@ -141,24 +141,14 @@ fn saturating_add(a: u64, b: u64) -> u64 {
 fn slot_at(in c: ConnectionCore, i: u64) -> Slot {
     match c.slots.try_get(i) {
         Option::Some(s) => s,
-        Option::None => Slot {
-            id: false,
-            head: false,
-            request_close: false,
-            phase: 3,
-            len: 0
-        },
+        Option::None => Slot { id: false, head: false, request_close: false, phase: 3, len: 0 },
     }
 }
 
 fn chunk_at(in c: ConnectionCore, i: u64) -> Chunk {
     match c.outbound.try_get(i) {
         Option::Some(k) => k,
-        Option::None => Chunk {
-            id: false,
-            sequence: 0,
-            len: 0
-        },
+        Option::None => Chunk { id: false, sequence: 0, len: 0 },
     }
 }
 
@@ -237,17 +227,7 @@ pub fn connection_core_poll(inout c: ConnectionCore) -> Gate {
 pub fn connection_core_issue(inout c: ConnectionCore, head: bool, close: bool) -> u64 {
     let sequence = c.next_sequence;
     c.next_sequence = wrapping_add(sequence, 1);
-    c
-        .slots
-        .push(
-            Slot {
-                id: true,
-                head: head,
-                request_close: close,
-                phase: 0,
-                len: 0
-            }
-        );
+    c.slots.push(Slot { id: true, head: head, request_close: close, phase: 0, len: 0 });
     if close {
         c.has_close_after = true;
         c.close_after = sequence;
@@ -299,22 +279,8 @@ fn promote(inout c: ConnectionCore, inout plan: ChunkSeq[Action]) {
         let sequence = c.base_sequence;
         c.base_sequence = wrapping_add(sequence, 1);
         if front.phase == 1 || front.phase == 2 {
-            c
-                .outbound
-                .push(
-                    Chunk {
-                        id: front.id,
-                        sequence: sequence,
-                        len: front.len
-                    }
-                );
-            plan
-                .push(
-                    Action::Promote {
-                        sequence: sequence,
-                        id: front.id
-                    }
-                );
+            c.outbound.push(Chunk { id: front.id, sequence: sequence, len: front.len });
+            plan.push(Action::Promote { sequence: sequence, id: front.id });
         }
         if c.has_close_after && c.close_after == sequence {
             c.close_promoted = true;
@@ -339,17 +305,7 @@ pub fn connection_core_record_failure(
     } else {
         3
     };
-    c
-        .slots
-        .push(
-            Slot {
-                id: false,
-                head: false,
-                request_close: true,
-                phase: phase,
-                len: len
-            }
-        );
+    c.slots.push(Slot { id: false, head: false, request_close: true, phase: phase, len: len });
     c.has_close_after = true;
     c.close_after = sequence;
     promote(inout c, inout plan);
@@ -412,21 +368,11 @@ fn close_at(inout c: ConnectionCore, sequence: u64, inout plan: ChunkSeq[Action]
             c.retained = wrapping_sub(c.retained, slot.len);
         }
         if slot.id {
-            plan
-                .push(
-                    Action::Abandon {
-                        sequence: at
-                    }
-                );
+            plan.push(Action::Abandon { sequence: at });
         } else if slot.phase == 2 {
             // A generated error response for a later parse failure is
             // superseded: the connection closes before that position.
-            plan
-                .push(
-                    Action::Discard {
-                        sequence: at
-                    }
-                );
+            plan.push(Action::Discard { sequence: at });
         }
     }
     c.slots.truncate(keep);
@@ -482,10 +428,7 @@ pub fn connection_core_pending_len(in c: ConnectionCore) -> u64 {
 pub fn connection_core_advance(inout c: ConnectionCore, written: u64) -> Advance {
     let pending = front_pending(in c);
     if written > pending {
-        return Advance::Overrun {
-            pending: pending,
-            advanced: written
-        };
+        return Advance::Overrun { pending: pending, advanced: written };
     }
     c.cursor = wrapping_add(c.cursor, written);
     c.retained = wrapping_sub(c.retained, written);
@@ -505,13 +448,9 @@ pub fn connection_core_advance(inout c: ConnectionCore, written: u64) -> Advance
             c.outbound = kept;
             c.out_head = 0;
         }
-        return Advance::Advanced {
-            popped: true
-        };
+        return Advance::Advanced { popped: true };
     }
-    Advance::Advanced {
-        popped: false
-    }
+    Advance::Advanced { popped: false }
 }
 
 pub fn connection_core_state(in c: ConnectionCore) -> ConnectionState {

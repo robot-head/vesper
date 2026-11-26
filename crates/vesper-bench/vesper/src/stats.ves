@@ -113,11 +113,7 @@ pub fn do_mann_whitney_ranks(in first: Slice[u64], in second: Slice[u64])
         Fail::raise(PortError::EmptyEvidence);
     }
     if n > MAX_EPOCHS || m > MAX_EPOCHS {
-        Fail::raise(
-            PortError::Limit {
-                code: Limit::Rank
-            }
-        );
+        Fail::raise(PortError::Limit { code: Limit::Rank });
     }
     let mut greater: u64 = 0;
     let mut less: u64 = 0;
@@ -165,11 +161,7 @@ fn check_exact_sizes(n: u64, m: u64) eff [Fail[PortError]] {
         Fail::raise(PortError::EmptyEvidence);
     }
     if n > MAX_EXACT_RANK_SAMPLES || m > MAX_EXACT_RANK_SAMPLES {
-        Fail::raise(
-            PortError::Limit {
-                code: Limit::ExactRank
-            }
-        );
+        Fail::raise(PortError::Limit { code: Limit::ExactRank });
     }
 }
 
@@ -310,11 +302,7 @@ pub fn do_paired_sample_new(baseline: u64, candidate: u64, operations: u64)
     if baseline == 0 || candidate == 0 || operations == 0 {
         Fail::raise(PortError::NonPositiveEvidence);
     }
-    Sample {
-        baseline: baseline,
-        candidate: candidate,
-        operations: operations
-    }
+    Sample { baseline: baseline, candidate: candidate, operations: operations }
 }
 
 // Directed rounding of the regression in basis points, floor and ceiling.
@@ -350,15 +338,9 @@ pub fn do_regression_bp_bounds(s: Sample) -> BpBounds {
         w_add(down, w_u64(1))
     };
     if up {
-        BpBounds {
-            floor: down,
-            ceil: away
-        }
+        BpBounds { floor: down, ceil: away }
     } else {
-        BpBounds {
-            floor: w_neg(away),
-            ceil: w_neg(down)
-        }
+        BpBounds { floor: w_neg(away), ceil: w_neg(down) }
     }
 }
 
@@ -451,11 +433,7 @@ pub fn do_analyze_pairs(in samples: Slice[Sample], max_regression_bp: i64)
         Fail::raise(PortError::EmptyEvidence);
     }
     if n > MAX_EPOCHS {
-        Fail::raise(
-            PortError::Limit {
-                code: Limit::Epochs
-            }
-        );
+        Fail::raise(PortError::Limit { code: Limit::Epochs });
     }
     if max_regression_bp < MIN_REGRESSION_BP {
         Fail::raise(PortError::InvalidThreshold);
@@ -532,11 +510,7 @@ pub fn do_analyze_pairs(in samples: Slice[Sample], max_regression_bp: i64)
 
 pub fn do_layout_survival(in per_layout: Slice[Sample]) -> SurvivalOut eff [Fail[PortError]] {
     if per_layout.len() > MAX_EPOCHS {
-        Fail::raise(
-            PortError::Limit {
-                code: Limit::Layouts
-            }
-        );
+        Fail::raise(PortError::Limit { code: Limit::Layouts });
     }
     let analysis = do_analyze_pairs(in per_layout, 0);
     let verdict: u64 = if !analysis.has_interval {
@@ -551,10 +525,7 @@ pub fn do_layout_survival(in per_layout: Slice[Sample]) -> SurvivalOut eff [Fail
             },
         }
     };
-    SurvivalOut {
-        verdict: verdict,
-        analysis: analysis
-    }
+    SurvivalOut { verdict: verdict, analysis: analysis }
 }
 
 // Every measured epoch of one run summed into one paired sample.

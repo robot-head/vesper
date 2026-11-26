@@ -263,10 +263,7 @@ pub fn table_core_scan_idle(
     inout out: Slice[u64],
     vector: bool
 ) -> (u64, u64) {
-    let mut cur = ScanCursor {
-        written: 0,
-        from: from
-    };
+    let mut cur = ScanCursor { written: 0, from: from };
     let first = from / LANES;
     for t in first..c.tiles {
         let at = wrapping_mul(t, LANES);

@@ -32,12 +32,7 @@ pub fn decode_range(inout l: L) -> Rng {
     let has_fixed = rd_bool(inout l);
     let fixed = rd(inout l);
     let pre = rd_bool(inout l);
-    Rng {
-        intro: intro,
-        has_fixed: has_fixed,
-        fixed: fixed,
-        pre: pre
-    }
+    Rng { intro: intro, has_fixed: has_fixed, fixed: fixed, pre: pre }
 }
 
 // schema, id, nadv, (id, kind, name, nrange, range*, severity, summary)*,
@@ -60,32 +55,14 @@ pub fn decode_catalog(inout s: A) {
         let sum = rd_str(inout s.l);
         s
             .advs
-            .push(
-                Adv {
-                    id: id,
-                    kind: kind,
-                    name: name,
-                    r_at: r_at,
-                    r_n: nr,
-                    sev: sev,
-                    sum: sum
-                }
-            );
+            .push(Adv { id: id, kind: kind, name: name, r_at: r_at, r_n: nr, sev: sev, sum: sum });
     }
     let nnat = rd(inout s.l);
     for i in 0..nnat {
         let name = rd_str(inout s.l);
         let ver = rd(inout s.l);
         let expr = rd_str(inout s.l);
-        s
-            .nats
-            .push(
-                Nat {
-                    name: name,
-                    ver: ver,
-                    expr: expr
-                }
-            );
+        s.nats.push(Nat { name: name, ver: ver, expr: expr });
     }
 }
 

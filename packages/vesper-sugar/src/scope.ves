@@ -61,11 +61,7 @@ pub struct Sc {
 }
 
 pub fn sc_ok() -> Sc {
-    Sc {
-        failed: false,
-        msg: ChunkSeq::new[u8](),
-        items: ChunkSeq::new[u8]()
-    }
+    Sc { failed: false, msg: ChunkSeq::new[u8](), items: ChunkSeq::new[u8]() }
 }
 
 pub fn sc_err(in m: Slice[u8]) -> Sc {
@@ -252,26 +248,11 @@ fn words_eq(in text: ChunkSeq[u8], in ts: ChunkSeq[u64], i: u64, k: u64) -> bool
 fn effect_of(in a: Ast, i: u32) -> EffectNode {
     a
         .effect_nodes
-        .get_or(
-            idx_from_raw[EffectNode](i),
-            EffectNode {
-                label: none(),
-                name: none(),
-                args: 0
-            }
-        )
+        .get_or(idx_from_raw[EffectNode](i), EffectNode { label: none(), name: none(), args: 0 })
 }
 
 fn effects_of(in a: Ast, i: u32) -> EffectsNode {
-    a
-        .effects
-        .get_or(
-            idx_from_raw[EffectsNode](i),
-            EffectsNode {
-                instances: 0,
-                tail: none()
-            }
-        )
+    a.effects.get_or(idx_from_raw[EffectsNode](i), EffectsNode { instances: 0, tail: none() })
 }
 
 fn item_of(in a: Ast, k: u64) -> ItemNode {
@@ -279,15 +260,7 @@ fn item_of(in a: Ast, k: u64) -> ItemNode {
         Option::Some(v) => v,
         Option::None => none(),
     };
-    a
-        .items
-        .get_or(
-            idx_from_raw[ItemNode](raw),
-            ItemNode {
-                kind: 0,
-                node: 0
-            }
-        )
+    a.items.get_or(idx_from_raw[ItemNode](raw), ItemNode { kind: 0, node: 0 })
 }
 
 fn rel_s(in a: Ast, e: u32) -> u64 {
@@ -731,11 +704,7 @@ fn ambient(in source: ChunkSeq[u8], call_s: u64, call_e: u64, inout amb: Amb) ->
                 .impls
                 .get_or(
                     idx_from_raw[ImplNode](it.node),
-                    ImplNode {
-                        ty: none(),
-                        generics: 0,
-                        methods: 0
-                    }
+                    ImplNode { ty: none(), generics: 0, methods: 0 }
                 );
             for m in 0..list_len(in a, n.methods) {
                 fns.push(list_at(in a, n.methods, m));

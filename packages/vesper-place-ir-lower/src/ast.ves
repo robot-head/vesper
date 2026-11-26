@@ -470,27 +470,14 @@ impl Ast {
         let mut paths = ChunkSeq::with_capacity[PathR](self.paths.len());
         for i in 0..self.paths.len() {
             match self.paths.try_get(i) {
-                Option::Some(v) => paths
-                    .push(
-                        PathR {
-                            a: v.a,
-                            n: v.n
-                        }
-                    ),
+                Option::Some(v) => paths.push(PathR { a: v.a, n: v.n }),
                 Option::None => {},
             }
         }
         let mut gens = ChunkSeq::with_capacity[Gn](self.gens.len());
         for i in 0..self.gens.len() {
             match self.gens.try_get(i) {
-                Option::Some(v) => gens
-                    .push(
-                        Gn {
-                            name: v.name,
-                            bound: v.bound,
-                            row: v.row
-                        }
-                    ),
+                Option::Some(v) => gens.push(Gn { name: v.name, bound: v.bound, row: v.row }),
                 Option::None => {},
             }
         }
@@ -610,15 +597,7 @@ impl Ast {
     pub fn pt(in self, i: u64) -> Pt {
         match self.pts.try_get(i) {
             Option::Some(x) => x,
-            Option::None => Pt {
-                kind: 0,
-                s0: 0,
-                s1: 0,
-                a: 0,
-                b: 0,
-                c: 0,
-                n: 0
-            },
+            Option::None => Pt { kind: 0, s0: 0, s1: 0, a: 0, b: 0, c: 0, n: 0 },
         }
     }
 
@@ -656,36 +635,21 @@ impl Ast {
     pub fn param(in self, i: u64) -> Pm {
         match self.pms.try_get(i) {
             Option::Some(x) => x,
-            Option::None => Pm {
-                name: 0,
-                pass: 0,
-                qa: 0,
-                qn: 0,
-                ty: 0,
-                s0: 0,
-                s1: 0
-            },
+            Option::None => Pm { name: 0, pass: 0, qa: 0, qn: 0, ty: 0, s0: 0, s1: 0 },
         }
     }
 
     pub fn generic(in self, i: u64) -> Gn {
         match self.gens.try_get(i) {
             Option::Some(x) => x,
-            Option::None => Gn {
-                name: 0,
-                bound: 0,
-                row: false
-            },
+            Option::None => Gn { name: 0, bound: 0, row: false },
         }
     }
 
     pub fn path(in self, i: u64) -> PathR {
         match self.paths.try_get(i) {
             Option::Some(x) => x,
-            Option::None => PathR {
-                a: 0,
-                n: 0
-            },
+            Option::None => PathR { a: 0, n: 0 },
         }
     }
 
@@ -717,14 +681,7 @@ impl Ast {
     pub fn effect_decl(in self, i: u64) -> Ef {
         match self.effs.try_get(i) {
             Option::Some(x) => x,
-            Option::None => Ef {
-                name: 0,
-                linear: false,
-                ga: 0,
-                gn: 0,
-                oa: 0,
-                on: 0
-            },
+            Option::None => Ef { name: 0, linear: false, ga: 0, gn: 0, oa: 0, on: 0 },
         }
     }
 
@@ -735,12 +692,7 @@ impl Ast {
     pub fn eop(in self, i: u64) -> Eop {
         match self.eops.try_get(i) {
             Option::Some(x) => x,
-            Option::None => Eop {
-                name: 0,
-                pa: 0,
-                pn: 0,
-                result: 0
-            },
+            Option::None => Eop { name: 0, pa: 0, pn: 0, result: 0 },
         }
     }
 
@@ -769,12 +721,7 @@ impl Ast {
     pub fn clause(in self, i: u64) -> Cl {
         match self.cls.try_get(i) {
             Option::Some(x) => x,
-            Option::None => Cl {
-                name: 0,
-                pa: 0,
-                pn: 0,
-                body: NONE64
-            },
+            Option::None => Cl { name: 0, pa: 0, pn: 0, body: NONE64 },
         }
     }
 
@@ -834,14 +781,7 @@ fn read_path(inout r: Reader, in b: Slice[u8], in c: Ctx, inout a: Ast) -> u64 {
         a.psyms.push(sym(in c, r.word(in b)));
     }
     let id = a.paths.len();
-    a
-        .paths
-        .push(
-            PathR {
-                a: at,
-                n: k
-            }
-        );
+    a.paths.push(PathR { a: at, n: k });
     id
 }
 
@@ -864,19 +804,7 @@ fn read_params(inout r: Reader, in b: Slice[u8], in c: Ctx, inout a: Ast) -> u64
         let ty = tyw(in c, r.word(in b));
         let s0 = r.word(in b);
         let s1 = r.word(in b);
-        a
-            .pms
-            .push(
-                Pm {
-                    name: name,
-                    pass: pass,
-                    qa: qa,
-                    qn: qn,
-                    ty: ty,
-                    s0: s0,
-                    s1: s1
-                }
-            );
+        a.pms.push(Pm { name: name, pass: pass, qa: qa, qn: qn, ty: ty, s0: s0, s1: s1 });
     }
     n
 }
@@ -892,15 +820,7 @@ fn read_literal(inout r: Reader, in b: Slice[u8], in c: Ctx, inout x: Ex) {
 
 fn read_pattern(inout r: Reader, in b: Slice[u8], in c: Ctx, inout a: Ast) {
     let kind = wrapping_u8(r.word(in b));
-    let mut p = Pt {
-        kind: kind,
-        s0: r.word(in b),
-        s1: r.word(in b),
-        a: 0,
-        b: 0,
-        c: 0,
-        n: 0
-    };
+    let mut p = Pt { kind: kind, s0: r.word(in b), s1: r.word(in b), a: 0, b: 0, c: 0, n: 0 };
     if kind == Pat::Bind {
         p.a = w(sym(in c, r.word(in b)));
     } else if kind == Pat::Literal {
@@ -1048,16 +968,7 @@ fn read_clause(inout r: Reader, in b: Slice[u8], in c: Ctx, inout a: Ast) {
         a.xs.push(r.word(in b));
     }
     let body = r.word(in b);
-    a
-        .cls
-        .push(
-            Cl {
-                name: name,
-                pa: pa,
-                pn: pn,
-                body: body
-            }
-        );
+    a.cls.push(Cl { name: name, pa: pa, pn: pn, body: body });
 }
 
 fn read_handler(inout r: Reader, in b: Slice[u8], in c: Ctx, inout a: Ast) {
@@ -1203,29 +1114,9 @@ pub fn read_ast(inout r: Reader, in b: Slice[u8], in c: Ctx) -> Ast {
             let pa = a.pms.len();
             let pn = read_params(inout r, in b, in c, inout a);
             let result = tyw(in c, r.word(in b));
-            a
-                .eops
-                .push(
-                    Eop {
-                        name: op,
-                        pa: pa,
-                        pn: pn,
-                        result: result
-                    }
-                );
+            a.eops.push(Eop { name: op, pa: pa, pn: pn, result: result });
         }
-        a
-            .effs
-            .push(
-                Ef {
-                    name: name,
-                    linear: linear,
-                    ga: ga,
-                    gn: gn,
-                    oa: oa,
-                    on: on
-                }
-            );
+        a.effs.push(Ef { name: name, linear: linear, ga: ga, gn: gn, oa: oa, on: on });
         set_by_symbol(inout a.eff_by_name, name, n32(inc(i)));
     }
     let np = r.word(in b);

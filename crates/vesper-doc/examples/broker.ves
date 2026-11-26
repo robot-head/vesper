@@ -51,21 +51,15 @@ fn checksum(in broker: Broker) -> u64 {
 
 /// Starts a transaction at the broker's index.
 fn begin(in broker.{index}: Broker) -> WriteTxn {
-    WriteTxn {
-        slot: broker.index
-    }
+    WriteTxn { slot: broker.index }
 }
 
 /// Commits a transaction to storage.
 ///
 /// @proof(Codex.Broker.commit_slot)
 fn commit(sink tx: WriteTxn) -> Receipt eff [Storage] {
-    let WriteTxn {
-        slot
-    } = tx;
-    Receipt {
-        slot: Storage::append(slot)
-    }
+    let WriteTxn { slot } = tx;
+    Receipt { slot: Storage::append(slot) }
 }
 
 /// Generic identity: matched in signature search by instantiation.

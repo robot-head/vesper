@@ -246,12 +246,7 @@ fn push_edge(inout r: RouterCore, e: Edge) {
 pub fn term_at(in r: RouterCore, i: u64) -> Term {
     match r.terms.try_get(i) {
         Option::Some(t) => t,
-        Option::None => Term {
-            next: none(),
-            method_lo: 0,
-            method_hi: 0,
-            route: none()
-        },
+        Option::None => Term { next: none(), method_lo: 0, method_hi: 0, route: none() },
     }
 }
 
@@ -394,11 +389,7 @@ pub fn router_core_insert(inout r: RouterCore, in method: Slice[u8], in pattern:
         if walking {
             let piece = match parsed.pieces.try_get(k) {
                 Option::Some(q) => q,
-                Option::None => Piece {
-                    param: false,
-                    lo: 0,
-                    hi: 0
-                },
+                Option::None => Piece { param: false, lo: 0, hi: 0 },
             };
             let next = if piece.param {
                 let current = node_at(in r, node);
@@ -450,11 +441,7 @@ pub fn router_core_insert(inout r: RouterCore, in method: Slice[u8], in pattern:
     for k in 0..parsed.pieces.len() {
         let piece = match parsed.pieces.try_get(k) {
             Option::Some(q) => q,
-            Option::None => Piece {
-                param: false,
-                lo: 0,
-                hi: 0
-            },
+            Option::None => Piece { param: false, lo: 0, hi: 0 },
         };
         let mut current = node_at(in r, node);
         if piece.param {

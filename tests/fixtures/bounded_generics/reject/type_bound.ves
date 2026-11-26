@@ -5,9 +5,6 @@ copy struct Interval[K: Ord] {
 }
 
 fn main() -> i64 {
-    let i = Interval {
-        lo: 1.0,
-        hi: 2.0
-    };
+    let i = Interval { lo: 1.0, hi: 2.0 };
     0
 }

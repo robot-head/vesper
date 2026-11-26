@@ -394,15 +394,7 @@ fn rid(inout o: Ow, inout c: Ctx, in a: Ast, e: u32) -> u32 {
             wrapping_add(nsym(inout o, inout c, in a, x.label), 1)
         };
         let name = nsym(inout o, inout c, in a, x.name);
-        es
-            .push(
-                EffNode {
-                    label: label,
-                    name: name,
-                    a: at,
-                    n: wrapping_u32(k)
-                }
-            );
+        es.push(EffNode { label: label, name: name, a: at, n: wrapping_u32(k) });
     }
     let tail = if en.tail == NONE {
         0
@@ -1683,13 +1675,9 @@ fn link_callees(
 // the names blob.
 pub fn lens_facts(in input: Str) -> ChunkSeq[u64] {
     let bytes = input.as_bytes();
-    let mut cr = CtxReader {
-        pos: 0
-    };
+    let mut cr = CtxReader { pos: 0 };
     let mut c = read_ctx(inout cr, in bytes);
-    let mut r = Rd {
-        pos: cr.pos
-    };
+    let mut r = Rd { pos: cr.pos };
     let mut fn_name = ChunkSeq::new[u64]();
     let mut k = callees_new();
     let mut ef_name = ChunkSeq::new[u64]();
@@ -2485,13 +2473,9 @@ fn names_pair(in bytes: Slice[u8], inout r: Rd, inout to: ChunkSeq[u64]) {
 
 // Reads the harness input of a view (see `lens_view`).
 fn view_setup(in bytes: Slice[u8]) -> Setup {
-    let mut cr = CtxReader {
-        pos: 0
-    };
+    let mut cr = CtxReader { pos: 0 };
     let mut c = read_ctx(inout cr, in bytes);
-    let mut r = Rd {
-        pos: cr.pos
-    };
+    let mut r = Rd { pos: cr.pos };
     let mut fn_name = ChunkSeq::new[u64]();
     let mut k = callees_new();
     let mut ef_name = ChunkSeq::new[u64]();
@@ -2763,10 +2747,7 @@ fn rq_range(in d: Doc, s: u64, e: u64) -> Result[Range, SpanError] {
                 in d.text,
                 in d.lines.as_slice(),
                 d.max_work,
-                ByteSpan {
-                    start: narrow_usize(s),
-                    end: narrow_usize(e)
-                }
+                ByteSpan { start: narrow_usize(s), end: narrow_usize(e) }
             )
         )
     } with {
@@ -3481,9 +3462,7 @@ fn inlays(
 pub fn lens_requests(in input: Str) -> ChunkSeq[u64] {
     let bytes = input.as_bytes();
     let mut st = view_setup(in bytes);
-    let mut r = Rd {
-        pos: st.end
-    };
+    let mut r = Rd { pos: st.end };
     let l = Limits {
         max_source_bytes: narrow_usize(word(in bytes, inout r)),
         max_lines: narrow_usize(word(in bytes, inout r)),

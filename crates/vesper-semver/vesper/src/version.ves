@@ -569,11 +569,7 @@ fn issue(inout r: R, code: u64, in m: Str) {
 }
 
 fn new_r() -> R {
-    R {
-        err: Side::None,
-        words: ChunkSeq::new[u64](),
-        pool: ChunkSeq::new[u8]()
-    }
+    R { err: Side::None, words: ChunkSeq::new[u64](), pool: ChunkSeq::new[u8]() }
 }
 
 // Release policy 1 (src/release.rs `check_release`) once the comparison is

@@ -53,12 +53,7 @@ const HARD_WORDS: u64 = 8388608;
 const HARD_WORK: u64 = 536870912;
 
 fn p4(a: u64, b: u64, c: u64, d: u64) -> P4 {
-    P4 {
-        a: a,
-        b: b,
-        c: c,
-        d: d
-    }
+    P4 { a: a, b: b, c: c, d: d }
 }
 
 // parse_prefix: (segment count, payload start, end).

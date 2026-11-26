@@ -1066,19 +1066,15 @@ fn compile_entry<M: Module>(
     {
         return Err("native entry cannot expose specialized closure values; invoke them within the entry function".into());
     }
-    // The `entry_plans` swap hook (#1509 parts 3b, 4a and 4b) answers, from
-    // the first lowering, the instances, their entry-block plans and their
-    // internal conventions; a trace host keeps the Rust plans. Without the
-    // hook, discovery comes first as before.
-    let hook = if trace_ok {
-        None
-    } else {
-        crate::codegen_swap::installed().entry_plans
-    };
+    // The `entry_plans` swap hook (#1509 parts 3b, 4a, 4b and 5) answers,
+    // from the first lowering, the instances, their entry-block plans and
+    // their internal conventions, trace hosts included. Without the hook,
+    // discovery comes first as before.
+    let hook = crate::codegen_swap::installed().entry_plans;
     let (instances, mut program, plans) = match hook {
         Some(hook) => {
             let program = crate::ir_swap::lower(world);
-            let plans = hook(world, &program, entry, optimize);
+            let plans = hook(world, &program, entry, optimize, trace_ok);
             let instances = match plans.as_ref().filter(|p| !p.instances.is_empty()) {
                 Some(p) => p.instances.clone(),
                 None => instances_for_entry(world, entry, trace_ok)?,

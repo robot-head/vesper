@@ -9,9 +9,7 @@ pub struct Keys {
 }
 
 pub fn keys_new() -> Keys {
-    Keys {
-        v: ChunkSeq::new[u64]()
-    }
+    Keys { v: ChunkSeq::new[u64]() }
 }
 
 pub fn pair(a: u32, b: u32) -> u64 {
@@ -108,12 +106,7 @@ pub struct Sums {
 }
 
 pub fn sums_new() -> Sums {
-    Sums {
-        inferred: keys_new(),
-        outputs: keys_new(),
-        resumed: keys_new(),
-        addr: keys_new()
-    }
+    Sums { inferred: keys_new(), outputs: keys_new(), resumed: keys_new(), addr: keys_new() }
 }
 
 impl Sums {

@@ -97,20 +97,14 @@ fn setw(inout q: ChunkSeq[u64], i: u64, v: u64) {
 fn ge(in s: Slice[RaftEntry], i: u64) -> RaftEntry {
     match s.try_get(i) {
         Option::Some(e) => e,
-        Option::None => RaftEntry {
-            term: 0,
-            cmd: 0
-        },
+        Option::None => RaftEntry { term: 0, cmd: 0 },
     }
 }
 
 fn gce(in q: ChunkSeq[RaftEntry], i: u64) -> RaftEntry {
     match q.try_get(i) {
         Option::Some(e) => e,
-        Option::None => RaftEntry {
-            term: 0,
-            cmd: 0
-        },
+        Option::None => RaftEntry { term: 0, cmd: 0 },
     }
 }
 
@@ -150,12 +144,7 @@ pub fn header_decode_at(in b: Slice[u8], at: u64) -> WireHeader {
 
 pub fn header_decode(in b: Slice[u8]) -> WireHeader eff [Fail[WireErr]] {
     if b.len() != APPEND_HEADER_LEN {
-        Fail::raise(
-            WireErr::Length {
-                expected: APPEND_HEADER_LEN,
-                found: b.len()
-            }
-        );
+        Fail::raise(WireErr::Length { expected: APPEND_HEADER_LEN, found: b.len() });
     }
     header_decode_at(in b, 0)
 }
@@ -211,12 +200,7 @@ pub fn batch_decode_range(
 ) -> WireHeader eff [Fail[WireErr]] {
     let min_len = wrapping_add(APPEND_HEADER_LEN, 4);
     if len < min_len {
-        Fail::raise(
-            WireErr::Length {
-                expected: min_len,
-                found: len
-            }
-        );
+        Fail::raise(WireErr::Length { expected: min_len, found: len });
     }
     let h = header_decode_at(in b, off);
     let count_u32 = be32(in b, wrapping_add(off, APPEND_HEADER_LEN));
@@ -226,23 +210,12 @@ pub fn batch_decode_range(
     }
     let want = wrapping_add(min_len, wrapping_mul(16, count));
     if len != want {
-        Fail::raise(
-            WireErr::Length {
-                expected: want,
-                found: len
-            }
-        );
+        Fail::raise(WireErr::Length { expected: want, found: len });
     }
     out_entries.clear();
     let mut at = wrapping_add(off, min_len);
     for _ in 0..count {
-        out_entries
-            .push(
-                RaftEntry {
-                    term: be64(in b, at),
-                    cmd: be64(in b, wrapping_add(at, 8))
-                }
-            );
+        out_entries.push(RaftEntry { term: be64(in b, at), cmd: be64(in b, wrapping_add(at, 8)) });
         at = wrapping_add(at, 16);
     }
     h
@@ -281,12 +254,7 @@ pub fn ack_encode_seq(in a: WireAck, inout out: ChunkSeq[u8]) {
 
 pub fn ack_decode_range(in b: Slice[u8], off: u64, len: u64) -> WireAck eff [Fail[WireErr]] {
     if len != ACK_LEN {
-        Fail::raise(
-            WireErr::Length {
-                expected: ACK_LEN,
-                found: len
-            }
-        );
+        Fail::raise(WireErr::Length { expected: ACK_LEN, found: len });
     }
     let fb = bu8(in b, wrapping_add(off, 20));
     let accepted = if fb == 0 {
@@ -328,12 +296,7 @@ pub fn votereq_encode_seq(in v: WireVoteReq, inout out: ChunkSeq[u8]) {
 pub fn votereq_decode_range(in b: Slice[u8], off: u64, len: u64)
     -> WireVoteReq eff [Fail[WireErr]] {
     if len != VOTE_REQ_LEN {
-        Fail::raise(
-            WireErr::Length {
-                expected: VOTE_REQ_LEN,
-                found: len
-            }
-        );
+        Fail::raise(WireErr::Length { expected: VOTE_REQ_LEN, found: len });
     }
     WireVoteReq {
         term: be64(in b, off),
@@ -355,12 +318,7 @@ pub fn term_encode_seq(t: u64, inout out: ChunkSeq[u8]) {
 
 pub fn term_decode_range(in b: Slice[u8], off: u64, len: u64) -> u64 eff [Fail[WireErr]] {
     if len != 8 {
-        Fail::raise(
-            WireErr::Length {
-                expected: 8,
-                found: len
-            }
-        );
+        Fail::raise(WireErr::Length { expected: 8, found: len });
     }
     be64(in b, off)
 }

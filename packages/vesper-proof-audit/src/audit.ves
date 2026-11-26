@@ -122,10 +122,7 @@ pub struct Au {
 }
 
 fn au_new() -> Au {
-    Au {
-        failed: false,
-        err: ChunkSeq::new[u8]()
-    }
+    Au { failed: false, err: ChunkSeq::new[u8]() }
 }
 
 fn refuse(inout a: Au, in why: Str) {
@@ -151,10 +148,7 @@ fn refuse_bytes(inout a: Au, in why: Slice[u8]) {
 }
 
 fn no_error() -> IoError {
-    IoError {
-        kind: 0,
-        os: 0
-    }
+    IoError { kind: 0, os: 0 }
 }
 
 fn seq(in b: Slice[u8]) -> ChunkSeq[u8] {
@@ -426,11 +420,7 @@ pub fn execute(inout a: Au, sink c: ProcCommand, seconds: u64) -> Ran eff [Ffi[S
     capture_limit(inout c, MAX_CAPTURE);
     process_group(inout c);
     let mut ran = Ran {
-        status: ExitStatus {
-            code: 0,
-            signal: 0,
-            exited: true
-        },
+        status: ExitStatus { code: 0, signal: 0, exited: true },
         stdout: ChunkSeq::new[u8]()
     };
     let mut ch = match spawn(c) {
@@ -589,11 +579,7 @@ pub struct Files {
 }
 
 pub fn files_new() -> Files {
-    Files {
-        paths: strs_new(),
-        bytes: ChunkSeq::new[u64](),
-        digests: strs_new()
-    }
+    Files { paths: strs_new(), bytes: ChunkSeq::new[u64](), digests: strs_new() }
 }
 
 fn at64(in s: Slice[u64], i: u64) -> u64 {

@@ -148,14 +148,7 @@ pub fn set_scope(inout a: Asm, ovf: u64, div0: u64) {
 
 pub fn bind_copy(inout a: Asm, l: u64) {
     let at = a.code.len();
-    a
-        .copies
-        .push(
-            Copy {
-                label: l,
-                at: at
-            }
-        );
+    a.copies.push(Copy { label: l, at: at });
 }
 
 // Where the last copy of the abort exits was bound.
@@ -212,15 +205,7 @@ pub fn bind(inout a: Asm, l: u64) {
 }
 
 pub fn fixup(inout a: Asm, at: u64, l: u64, kind: u8) {
-    a
-        .fixups
-        .push(
-            Fixup {
-                at: at,
-                label: l,
-                kind: kind
-            }
-        );
+    a.fixups.push(Fixup { at: at, label: l, kind: kind });
 }
 
 fn read32(in a: Asm, at: u64) -> u32 {
@@ -254,11 +239,7 @@ pub fn finish(inout a: Asm) {
     for i in 0..a.fixups.len() {
         let f = match a.fixups.try_get(i) {
             Option::Some(f) => f,
-            Option::None => Fixup {
-                at: 0,
-                label: 0,
-                kind: 0
-            },
+            Option::None => Fixup { at: 0, label: 0, kind: 0 },
         };
         let bound = label_at(in a, f.label);
         if bound == 0 {

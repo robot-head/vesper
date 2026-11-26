@@ -155,24 +155,14 @@ pub copy struct Range {
 fn slot_at(in s: ChunkSeq[Slot], i: u64) -> Slot {
     match s.try_get(i) {
         Option::Some(x) => x,
-        Option::None => Slot {
-            slot_id: 0,
-            bind: 0,
-            sidx: 0,
-            key: 0,
-            rank: 0,
-            size: 0
-        },
+        Option::None => Slot { slot_id: 0, bind: 0, sidx: 0, key: 0, rank: 0, size: 0 },
     }
 }
 
 fn range_at(in s: ChunkSeq[Range], i: u64) -> Range {
     match s.try_get(i) {
         Option::Some(x) => x,
-        Option::None => Range {
-            start: 0,
-            len: 0
-        },
+        Option::None => Range { start: 0, len: 0 },
     }
 }
 
@@ -188,12 +178,7 @@ pub struct Reuse {
 }
 
 pub fn reuse_new() -> Reuse {
-    Reuse {
-        payloads: ChunkSeq::new[u64](),
-        matched: 0,
-        status: 0,
-        error: 0
-    }
+    Reuse { payloads: ChunkSeq::new[u64](), matched: 0, status: 0, error: 0 }
 }
 
 pub const S_FIP_ERROR: u8 = 3;
@@ -464,13 +449,7 @@ fn reuse_function(
     let mut exits: ChunkSeq[Range] = ChunkSeq::with_capacity[Range](nb);
     let mut exit_caller: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](nb);
     for b in 0..nb {
-        exits
-            .push(
-                Range {
-                    start: 0,
-                    len: 0
-                }
-            );
+        exits.push(Range { start: 0, len: 0 });
         exit_caller.push(0);
     }
     let mut calls = read_call_slots(in p, f);
@@ -593,14 +572,7 @@ fn reuse_function(
                             if confirmed(fa, chosen.rank, chosen) {
                                 out.matched = inc(out.matched);
                                 let np = p.pool.len();
-                                p
-                                    .pool
-                                    .push(
-                                        PoolRow {
-                                            kind: PoolKind::Fip,
-                                            label: 0
-                                        }
-                                    );
+                                p.pool.push(PoolRow { kind: PoolKind::Fip, label: 0 });
                                 out.payloads.push(w(chosen.bind));
                                 out.payloads.push(chosen.sidx);
                                 out.payloads.push(chosen.size);
@@ -642,14 +614,7 @@ fn reuse_function(
             ranks.try_set(u64_of(in touched, k), 0);
         }
         touched.clear();
-        exits
-            .try_set(
-                b,
-                Range {
-                    start: slab.len(),
-                    len: live.len()
-                }
-            );
+        exits.try_set(b, Range { start: slab.len(), len: live.len() });
         for k in 0..live.len() {
             slab.push(slot_at(in live, k));
         }

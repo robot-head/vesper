@@ -27,11 +27,7 @@ pub struct Sizes {
 }
 
 pub fn sizes_new() -> Sizes {
-    Sizes {
-        memo: ChunkSeq::new[u64](),
-        failed: ChunkSeq::new[bool](),
-        seen: ChunkSeq::new[u32]()
-    }
+    Sizes { memo: ChunkSeq::new[u64](), failed: ChunkSeq::new[bool](), seen: ChunkSeq::new[u32]() }
 }
 
 fn fits_i32(x: i64) -> bool {

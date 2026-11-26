@@ -50,12 +50,7 @@ enum Flag: _ {
 }
 
 fn perr(kind: ErrorKind, offset: u64) eff [Fail[ParseError]] {
-    Fail::raise(
-        ParseError {
-            kind: kind,
-            offset: widen_usize(offset)
-        }
-    );
+    Fail::raise(ParseError { kind: kind, offset: widen_usize(offset) });
 }
 
 // `u8::is_ascii_whitespace`: space, tab, line feed, form feed, return.

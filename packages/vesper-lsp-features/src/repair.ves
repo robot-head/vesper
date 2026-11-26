@@ -120,11 +120,7 @@ struct Opens {
 }
 
 fn opens_new() -> Opens {
-    Opens {
-        kind: ChunkSeq::new[u8](),
-        cut: ChunkSeq::new[u64](),
-        in_let: ChunkSeq::new[u8]()
-    }
+    Opens { kind: ChunkSeq::new[u8](), cut: ChunkSeq::new[u64](), in_let: ChunkSeq::new[u8]() }
 }
 
 // Candidate patches (`Patch`) with their scope and `fn` start, closers in
@@ -660,11 +656,7 @@ fn repair(
     if t.rejected || t.limited {
         return unavailable(inout out, U_RESOURCE);
     }
-    let mut tk = Tk {
-        kind: ChunkSeq::new[u8](),
-        s: ChunkSeq::new[u64](),
-        e: ChunkSeq::new[u64]()
-    };
+    let mut tk = Tk { kind: ChunkSeq::new[u8](), s: ChunkSeq::new[u64](), e: ChunkSeq::new[u64]() };
     for i in 0..t.kind.len() {
         let k = g8(in t.kind, i);
         if k == k_whitespace() || k == k_comment() || k == k_block_comment() || k == k_eof() {
@@ -934,9 +926,7 @@ fn word(in b: Slice[u8], inout r: Rd) -> u64 {
 // source length, then the source.
 pub fn lens_repair(in input: Str) -> ChunkSeq[u64] {
     let bytes = input.as_bytes();
-    let mut r = Rd {
-        pos: 0
-    };
+    let mut r = Rd { pos: 0 };
     let mut rs = Rs {
         d_kind: ChunkSeq::new[u64](),
         d_status: ChunkSeq::new[u64](),

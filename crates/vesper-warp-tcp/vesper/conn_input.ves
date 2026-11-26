@@ -61,11 +61,7 @@ pub fn tcb_on_segment(inout t: Tcb, now: u64, ips: Ips, in bytes: Slice[u8], ino
             return Result::Err(TcpFail::NotForThisConnection);
         }
     }
-    let seg = Seg {
-        h: h,
-        pay_off: h.header_len,
-        pay_len: wrapping_sub(bytes.len(), h.header_len)
-    };
+    let seg = Seg { h: h, pay_off: h.header_len, pay_len: wrapping_sub(bytes.len(), h.header_len) };
     if t.st == State::Closed {
         if !has(h.flags, rst_bit()) {
             queue_rst_reply(inout t, ips, h, segment_seq_len(h.flags, seg.pay_len));
@@ -473,18 +469,11 @@ fn advance_una(inout t: Tcb, now: u64, ack_abs: u64) {
 }
 
 fn report_acked(inout t: Tcb, now: u64, s: SentSeg, bytes: u32) {
-    let packet = AckedPacket {
-        pn: s.pn,
-        sent_ns: s.sent_ns,
-        bytes: bytes
-    };
+    let packet = AckedPacket { pn: s.pn, sent_ns: s.sent_ns, bytes: bytes };
     let bytes_in_flight = pipe(in t);
     cc_event(
         inout t,
-        CongestionEvent::Acked {
-            packet: packet,
-            bytes_in_flight: bytes_in_flight
-        },
+        CongestionEvent::Acked { packet: packet, bytes_in_flight: bytes_in_flight },
         now
     );
 }
@@ -498,17 +487,10 @@ fn mark_lost(inout t: Tcb, now: u64, i: u64) {
     let mut e = s;
     e.lost = true;
     sq_set(inout t, i, e);
-    let packet = LostPacket {
-        pn: s.pn,
-        sent_ns: s.sent_ns,
-        bytes: seg_bytes(s)
-    };
+    let packet = LostPacket { pn: s.pn, sent_ns: s.sent_ns, bytes: seg_bytes(s) };
     cc_event(
         inout t,
-        CongestionEvent::Lost {
-            packet: packet,
-            bytes_in_flight: bytes_in_flight
-        },
+        CongestionEvent::Lost { packet: packet, bytes_in_flight: bytes_in_flight },
         now
     );
 }

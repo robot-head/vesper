@@ -255,12 +255,7 @@ pub fn set_rows_run(inout q: Q, inout ds: D, in prog: Slice[u64], in text: Slice
         return;
     }
     let nrows = ex(in q, p);
-    let rows = CTab {
-        noff: name,
-        nlen: tlen,
-        start: wrapping_add(p, 1),
-        n: nrows
-    };
+    let rows = CTab { noff: name, nlen: tlen, start: wrapping_add(p, 1), n: nrows };
     if !bound(inout q, nrows, 7, "input row limit") {
         return;
     }

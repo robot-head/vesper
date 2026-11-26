@@ -483,27 +483,14 @@ pub struct Core {
 pub fn imp_at(in c: Core, i: u64) -> Imp {
     match c.imps.try_get(i) {
         Option::Some(x) => x,
-        Option::None => Imp {
-            m0: 0,
-            mn: 0,
-            f0: 0,
-            fl: 0,
-            ty: 0
-        },
+        Option::None => Imp { m0: 0, mn: 0, f0: 0, fl: 0, ty: 0 },
     }
 }
 
 pub fn sig_at(in c: Core, i: u64) -> Sig {
     match c.sigs.try_get(i) {
         Option::Some(x) => x,
-        Option::None => Sig {
-            p0: 0,
-            pn: 0,
-            pc: 0,
-            r0: 0,
-            rn: 0,
-            rc: 0
-        },
+        Option::None => Sig { p0: 0, pn: 0, pc: 0, r0: 0, rn: 0, rc: 0 },
     }
 }
 
@@ -572,10 +559,7 @@ pub fn read_core(in b: Slice[u8]) -> Core {
         text: ChunkSeq::new[u8](),
         imps: ChunkSeq::new[Imp](),
     };
-    let mut r = Rd {
-        pos: CORE_HEADER_BYTES,
-        ok: b.len() >= CORE_HEADER_BYTES
-    };
+    let mut r = Rd { pos: CORE_HEADER_BYTES, ok: b.len() >= CORE_HEADER_BYTES };
     loop {
         if !r.ok || r.pos >= b.len() {
             break;
@@ -593,33 +577,11 @@ pub fn read_core(in b: Slice[u8]) -> Core {
                 let form = rd_byte(inout r, in b);
                 if form == FORM_CONT {
                     rd_leb(inout r, in b);
-                    c
-                        .sigs
-                        .push(
-                            Sig {
-                                p0: 0,
-                                pn: 0,
-                                pc: 0,
-                                r0: 0,
-                                rn: 0,
-                                rc: 0
-                            }
-                        );
+                    c.sigs.push(Sig { p0: 0, pn: 0, pc: 0, r0: 0, rn: 0, rc: 0 });
                 } else if form == FORM_FUNC {
                     let (p0, pn, pc) = valtypes(inout r, in b, inout c);
                     let (r0, rn, rc) = valtypes(inout r, in b, inout c);
-                    c
-                        .sigs
-                        .push(
-                            Sig {
-                                p0: p0,
-                                pn: pn,
-                                pc: pc,
-                                r0: r0,
-                                rn: rn,
-                                rc: rc
-                            }
-                        );
+                    c.sigs.push(Sig { p0: p0, pn: pn, pc: pc, r0: r0, rn: rn, rc: rc });
                 } else {
                     c.ok = false;
                     return c;
@@ -643,17 +605,7 @@ pub fn read_core(in b: Slice[u8]) -> Core {
                     return c;
                 }
                 let ty = rd_leb(inout r, in b);
-                c
-                    .imps
-                    .push(
-                        Imp {
-                            m0: m0,
-                            mn: ml,
-                            f0: f0,
-                            fl: fl,
-                            ty: ty
-                        }
-                    );
+                c.imps.push(Imp { m0: m0, mn: ml, f0: f0, fl: fl, ty: ty });
             }
         }
         if !r.ok || r.pos > end {

@@ -25,12 +25,7 @@ pub copy struct Board {
 }
 
 pub fn report_new(id: u64, seed: u8) -> Report {
-    let mut r = Report {
-        id: id,
-        hash: [seed; 32],
-        words: [0; 16],
-        pair: [1, 2]
-    };
+    let mut r = Report { id: id, hash: [seed; 32], words: [0; 16], pair: [1, 2] };
     for i in 0..32 {
         r.hash[i] = wrapping_u8(wrapping_add(widen_u64(seed), i));
     }
@@ -80,15 +75,7 @@ pub fn words_reversed(in xs: [u64; 16]) -> [u64; 16] {
 }
 
 pub fn board_new() -> Board {
-    Board {
-        len: 0,
-        blocks: [
-            Block {
-                lo: 0,
-                hi: 0
-            }; 16
-        ]
-    }
+    Board { len: 0, blocks: [Block { lo: 0, hi: 0 }; 16] }
 }
 
 // Adds a block, merging with an overlapping one; a full board drops the
@@ -109,29 +96,20 @@ pub fn board_add(inout b: Board, lo: u64, hi: u64) -> u64 {
                 } else {
                     x.hi
                 };
-                b.blocks[i] = Block {
-                    lo: nlo,
-                    hi: nhi
-                };
+                b.blocks[i] = Block { lo: nlo, hi: nhi };
                 merged = true;
             }
         }
     }
     if !merged {
         if b.len < 16 {
-            b.blocks[b.len & 15] = Block {
-                lo: lo,
-                hi: hi
-            };
+            b.blocks[b.len & 15] = Block { lo: lo, hi: hi };
             b.len = wrapping_add(b.len, 1);
         } else {
             for i in 0..15 {
                 b.blocks[i] = b.blocks[i + 1];
             }
-            b.blocks[15] = Block {
-                lo: lo,
-                hi: hi
-            };
+            b.blocks[15] = Block { lo: lo, hi: hi };
         }
     }
     b.len

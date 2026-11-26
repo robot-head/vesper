@@ -17,15 +17,7 @@ const NONE32: u32 = 4294967295;
 pub fn region_row(inout t: Types, k: Known, label: u32) -> u32 {
     let mut es: ChunkSeq[EffNode] = ChunkSeq::new[EffNode]();
     let args: ChunkSeq[u32] = ChunkSeq::new[u32]();
-    es
-        .push(
-            EffNode {
-                label: inc32(label),
-                name: k.region,
-                a: 0,
-                n: 0
-            }
-        );
+    es.push(EffNode { label: inc32(label), name: k.region, a: 0, n: 0 });
     let row = t.mk_row(in es, in args, 0);
     t.row_type(row)
 }

@@ -186,10 +186,7 @@ pub fn trim_ows(in s: Slice[u8], lo: u64, hi: u64) -> Span {
         }
         b = dec(b);
     }
-    Span {
-        lo: a,
-        hi: b
-    }
+    Span { lo: a, hi: b }
 }
 
 fn first_byte(in s: Slice[u8], b: u8) -> Option[u64] {
@@ -373,11 +370,7 @@ pub copy struct Groups {
 }
 
 pub fn groups(count: u64, ipv4: bool, at: u64) -> Groups {
-    Groups {
-        count: count,
-        ipv4: ipv4,
-        at: at
-    }
+    Groups { count: count, ipv4: ipv4, at: at }
 }
 
 // Rust's `read_groups` of the IPv6 parser.
@@ -399,11 +392,7 @@ pub fn read_groups(in s: Slice[u8], at: u64, hi: u64, limit: u64) -> Groups {
         if inc(g) < limit {
             let v4 = read_ipv4(in s, start, hi);
             if v4 != max_u64() {
-                return Groups {
-                    count: wrapping_add(g, 2),
-                    ipv4: true,
-                    at: v4
-                };
+                return Groups { count: wrapping_add(g, 2), ipv4: true, at: v4 };
             }
         }
         let next = read_number(in s, start, hi, 16, IPV6_GROUP_DIGITS, true, MAX_IPV6_GROUP);
