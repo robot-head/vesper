@@ -475,7 +475,16 @@ fn once(
     doc_limits.max_work = work.max - work.used;
     let mut document = Document::new(doc_limits)?;
     let mut pos = 0;
-    let root = sequence(&atoms, &mut pos, None, false, false, false, &mut document)?;
+    let root = sequence(
+        &atoms,
+        &mut pos,
+        None,
+        false,
+        false,
+        false,
+        0,
+        &mut document,
+    )?;
     let end = document.push(Doc::HardLine)?;
     let root = document.push(Doc::Concat(vec![root, end]))?;
     let output = document.render(root)?;
@@ -608,6 +617,89 @@ impl Line {
         segments.push(nest_continuation(document, lead, rhs)?);
         let concat = document.push(Doc::Concat(segments))?;
         document.push(Doc::Group(concat))
+    }
+}
+
+/// The member chain of the operand at the end of a `Line`: its flat width so
+/// far and each `.` break with the width before it, so a chain breaks at its
+/// dots like rustfmt. A short receiver keeps its first step (`self.f`), and a
+/// chain whose one method call ends it keeps its dots on one line when that
+/// call could not fit on a line of its own anyway: its arguments break instead
+/// (`out.rows.push(Row {`).
+struct Chain {
+    width: Option<usize>,
+    dots: Vec<(usize, Option<usize>)>,
+    calls: usize,
+    ends_with_call: bool,
+}
+impl Default for Chain {
+    fn default() -> Self {
+        Chain {
+            width: Some(0),
+            dots: Vec::new(),
+            calls: 0,
+            ends_with_call: false,
+        }
+    }
+}
+impl Chain {
+    fn dot(&mut self, at: usize) {
+        self.dots.push((at, self.width));
+    }
+    fn push(&mut self, width: Option<usize>, call: bool, kind: K) -> Result<(), Error> {
+        self.width = match (self.width, width) {
+            (Some(a), Some(b)) => Some(a.checked_add(b).ok_or(Error::Overflow)?),
+            _ => None,
+        };
+        if call && !self.dots.is_empty() {
+            self.calls += 1;
+            self.ends_with_call = true;
+        } else if !matches!(kind, K::Question | K::Semi | K::Comma) {
+            self.ends_with_call = false;
+        }
+        Ok(())
+    }
+    fn finish(
+        &mut self,
+        line: &mut Line,
+        indent: usize,
+        document: &mut Document<'_>,
+    ) -> Result<(), Error> {
+        let chain = std::mem::take(self);
+        let Some(&(first, _)) = chain.dots.first() else {
+            return Ok(());
+        };
+        let before_last = chain.dots[chain.dots.len() - 1].1;
+        // The last step's flat width on a line of its own, or `None` when it
+        // holds a line break.
+        let alone = match (chain.width, before_last) {
+            (Some(w), Some(b)) => Some(
+                indent
+                    .checked_add(5)
+                    .and_then(|i| i.checked_add(w - b))
+                    .ok_or(Error::Overflow)?,
+            ),
+            _ => None,
+        };
+        let mut kept = 0;
+        if chain.calls == 1 && chain.ends_with_call && alone.is_none_or(|w| w > DEFAULT_LINE_WIDTH)
+        {
+            kept = chain.dots.len();
+        } else {
+            while let Some(&(_, Some(root))) = chain.dots.get(kept) {
+                if root > 4 {
+                    break;
+                }
+                kept += 1;
+            }
+        }
+        for &(at, _) in &chain.dots[..kept] {
+            let (offset, _) = line.breaks[at];
+            line.docs[offset] = document.push(Doc::Nil)?;
+        }
+        // No other break follows the chain's dots: an operator ends it.
+        line.breaks.drain(first..first + kept);
+        Ok(())
     }
 }
 
@@ -827,6 +919,8 @@ fn tagged_layout(atoms: &[Piece<'_>], open: usize) -> Tagged {
         Tagged::List
     }
 }
+// One flag per enclosing layout, mirrored by the Vesper port's `sequence`.
+#[allow(clippy::too_many_arguments)]
 fn sequence<'a>(
     atoms: &[Piece<'a>],
     pos: &mut usize,
@@ -834,6 +928,10 @@ fn sequence<'a>(
     block: bool,
     fill: bool,
     hug: bool,
+    // The least column a line inside this sequence can start at: every
+    // delimiter or block it is nested in adds 4 once it breaks, and a line
+    // break inside one means it broke.
+    indent: usize,
     document: &mut Document<'a>,
 ) -> Result<DocId, Error> {
     // A delimited, non-block list breaks at its comma separators: those soft
@@ -863,6 +961,8 @@ fn sequence<'a>(
     // The previous atom was a non-empty parameter list before `->`.
     let mut previous_params = false;
     let mut previous_hugged = false;
+    // The member chain being built on `line` (`out.rows.push(..)`).
+    let mut chain = Chain::default();
     while *pos < atoms.len() && Some(atoms[*pos].kind) != end {
         let current = atoms[*pos];
         // `{` after `.` or `::` opens a list, not a block: a tagged literal or
@@ -915,6 +1015,10 @@ fn sequence<'a>(
             Gap::Return if previous_params => Gap::Soft,
             spacing => spacing,
         };
+        // Anything but an attached token ends the operand and its chain.
+        if is_block || !matches!(spacing, Gap::None | Gap::Empty) {
+            chain.finish(&mut line, indent, document)?;
+        }
         let after_comma = previous.is_some_and(|p| p.kind == K::Comma);
         let near_comment = matches!(current.kind, K::Comment | K::BlockComment)
             || previous.is_some_and(|p| p.kind == K::BlockComment);
@@ -945,6 +1049,7 @@ fn sequence<'a>(
             }
             Gap::Empty => {
                 line.push_break(document.push(Doc::SoftLineOrEmpty)?, 12);
+                chain.dot(line.breaks.len() - 1);
             }
             Gap::Operator(precedence) => {
                 line.push_break(document.push(Doc::SoftLineOrSpace)?, precedence);
@@ -969,6 +1074,12 @@ fn sequence<'a>(
             let start = document.push(Doc::Text(current.text))?;
             let fill =
                 current.kind == K::LBrace && previous.is_some_and(|p| p.kind == K::ColonColon);
+            // A hugging call does not indent its contents.
+            let inner_indent = if tagged == Tagged::Hug {
+                indent
+            } else {
+                indent.checked_add(4).ok_or(Error::Overflow)?
+            };
             let inner = sequence(
                 atoms,
                 pos,
@@ -976,6 +1087,7 @@ fn sequence<'a>(
                 is_block,
                 fill,
                 tagged == Tagged::Hug,
+                inner_indent,
                 document,
             )?;
             let last_is_line_comment = *pos > 0 && atoms[*pos - 1].kind == K::Comment;
@@ -1050,6 +1162,11 @@ fn sequence<'a>(
             output.push(node);
         } else {
             line.push(node);
+            chain.push(
+                document.width(node)?,
+                current.kind == K::LParen,
+                current.kind,
+            )?;
         }
         previous_block = is_block;
         previous_params = params;
@@ -1083,6 +1200,7 @@ fn sequence<'a>(
             tagged: false,
         });
     }
+    chain.finish(&mut line, indent, document)?;
     line.flush(document, &mut output)?;
     if fill && !commented && previous.is_some_and(|p| p.kind != K::Comma) {
         let mut filled = Vec::new();

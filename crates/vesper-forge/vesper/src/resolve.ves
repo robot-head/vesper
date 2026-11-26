@@ -1036,8 +1036,7 @@ pub fn term(
             let _ = r.alias.try_set(wrapping_add(row, Alias::Package), ap);
             let _ = r.alias.try_set(wrapping_add(row, Alias::Item), ai);
             let _ = r.alias.try_set(wrapping_add(row, Alias::First), afrom);
-            let _ = r
-                .alias
+            let _ = r.alias
                 .try_set(wrapping_add(row, Alias::Len), wrapping_sub(r.apool.len(), afrom));
         }
         bind(in w, inout r, binder, inner, id);

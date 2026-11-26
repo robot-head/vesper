@@ -555,10 +555,10 @@ fn inv_function(
 }
 
 fn type_node(in x: Ix, t: u32) -> TypeNode {
-    x
-        .ast
-        .types
-        .get_or(idx_from_raw[TypeNode](t), TypeNode { kind: 5, a: NONE, b: NONE, c: NONE, d: NONE })
+    x.ast.types.get_or(
+        idx_from_raw[TypeNode](t),
+        TypeNode { kind: 5, a: NONE, b: NONE, c: NONE, d: NONE }
+    )
 }
 
 // `Inventory::collect`.

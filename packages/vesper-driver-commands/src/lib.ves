@@ -377,11 +377,10 @@ fn lossy(in s: Slice[u8]) -> ChunkSeq[u8] {
 // message itself is ignored, as the hook ignores it.
 fn print_panic(f: PrintFailed) -> i64 eff [Ffi[StdFs]] {
     let mut m: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    m
-        .extend(
-            in "thread 'vesper' panicked at library/std/src/io/stdio.rs:\nfailed printing to "
-                .as_bytes()
-        );
+    m.extend(
+        in "thread 'vesper' panicked at library/std/src/io/stdio.rs:\nfailed printing to "
+            .as_bytes()
+    );
     if f.stream == stderr_stream() {
         m.extend(in "stderr: ".as_bytes());
     } else {
@@ -389,11 +388,10 @@ fn print_panic(f: PrintFailed) -> i64 eff [Ffi[StdFs]] {
     }
     let t = error_text(f.error);
     m.extend(in t.as_slice());
-    m
-        .extend(
-            in "\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n"
-                .as_bytes()
-        );
+    m.extend(
+        in "\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n"
+            .as_bytes()
+    );
     handle Fail[IoError] in {
         write_stderr(in m.as_slice());
     } with {
@@ -462,11 +460,10 @@ fn version() -> i64 eff [Ffi[StdFs], Fail[PrintFailed]] {
     b.extend(in arch_name().as_bytes());
     b.push(Ascii::Dash);
     b.extend(in os_name().as_bytes());
-    b
-        .extend(
-            in " (cranelift + lean4)\n    \\\\||/    modes: copy <= affine <= linear | 0 sorryAx\n     \\/\n"
-                .as_bytes()
-        );
+    b.extend(
+        in " (cranelift + lean4)\n    \\\\||/    modes: copy <= affine <= linear | 0 sorryAx\n     \\/\n"
+            .as_bytes()
+    );
     print(stdout_stream(), in b.as_slice());
     0
 }
@@ -806,11 +803,10 @@ fn missing(in t: Slice[u8]) -> i64 eff [Ffi[StdFs], Fail[PrintFailed]] {
     m.extend(in t);
     m.extend(in "` is provided by the `vesper-".as_bytes());
     m.extend(in t);
-    m
-        .extend(
-            in "` tool, which was not found next to the vesper executable or on PATH; build it with `cargo build -p vesper-tools` (or `bazel build //crates/vesper-tools:all`) and install it beside vesper"
-                .as_bytes()
-        );
+    m.extend(
+        in "` tool, which was not found next to the vesper executable or on PATH; build it with `cargo build -p vesper-tools` (or `bazel build //crates/vesper-tools:all`) and install it beside vesper"
+            .as_bytes()
+    );
     fail(in m.as_slice())
 }
 
@@ -1448,11 +1444,9 @@ fn walk(
             return walk_failed();
         }
         if over {
-            err
-                .extend(
-                    in "fmt visited more than 200000 directory entries; pass narrower paths"
-                        .as_bytes()
-                );
+            err.extend(
+                in "fmt visited more than 200000 directory entries; pass narrower paths".as_bytes()
+            );
             return walk_failed();
         }
         let count = entry_count(in entries);
