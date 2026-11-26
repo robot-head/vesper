@@ -30,74 +30,74 @@ pub struct Graph {
     targets: ChunkSeq[u32],
 }
 
-fn excluded(in b: B, in wd: World, a: Adt) -> bool {
-    spells(in b, a.name, in "Option")
-        || spells(in b, a.name, in "Result")
-        || (wd.box_active && spells(in b, a.name, in "Box"))
+fn excluded(in builder: B, in world: World, adt: Adt) -> bool {
+    spells(in builder, adt.name, in "Option")
+        || spells(in builder, adt.name, in "Result")
+        || (world.box_active && spells(in builder, adt.name, in "Box"))
 }
 
 // `dependencies`/`deps`: the named types of `ty`, in preorder.
-fn deps(in t: Types, ty: u32, inout out: ChunkSeq[u32]) {
-    let n = t.node(ty);
-    if n.kind == TyKind::Named {
-        out.push(n.name);
-        for i in 0..w(n.n) {
-            deps(in t, t.arg(ty, i), inout out);
+fn deps(in types: Types, ty: u32, inout out: ChunkSeq[u32]) {
+    let node = types.node(ty);
+    if node.kind == TyKind::Named {
+        out.push(node.name);
+        for i in 0..w(node.n) {
+            deps(in types, types.arg(ty, i), inout out);
         }
-    } else if n.kind == TyKind::Tuple {
-        for i in 0..w(n.n) {
-            deps(in t, t.arg(ty, i), inout out);
+    } else if node.kind == TyKind::Tuple {
+        for i in 0..w(node.n) {
+            deps(in types, types.arg(ty, i), inout out);
         }
-    } else if n.kind == TyKind::Fn {
-        for i in 0..w(n.n) {
-            deps(in t, t.arg(ty, i), inout out);
+    } else if node.kind == TyKind::Fn {
+        for i in 0..w(node.n) {
+            deps(in types, types.arg(ty, i), inout out);
         }
-        deps(in t, n.r, inout out);
+        deps(in types, node.r, inout out);
     }
 }
 
-pub fn graph(in b: B, in t: Types, in wd: World) -> Graph {
-    let count = wd.adts.len();
-    let mut g = Graph {
+pub fn graph(in builder: B, in types: Types, in world: World) -> Graph {
+    let adt_count = world.adts.len();
+    let mut adt_graph = Graph {
         adts: ChunkSeq::new[u32](),
-        node_of: ChunkSeq::with_capacity[u32](count),
+        node_of: ChunkSeq::with_capacity[u32](adt_count),
         starts: ChunkSeq::new[u64](),
         targets: ChunkSeq::new[u32](),
     };
-    g.node_of.resize(count, 0);
-    for i in 0..count {
-        let a = wd.adt(wrapping_u32(i));
-        if !excluded(in b, in wd, a) {
-            let v = g.adts.len();
-            g.adts.push(wrapping_u32(i));
-            let ok = g.node_of.try_set(i, wrapping_u32(wrapping_add(v, 1)));
+    adt_graph.node_of.resize(adt_count, 0);
+    for i in 0..adt_count {
+        let adt = world.adt(wrapping_u32(i));
+        if !excluded(in builder, in world, adt) {
+            let node = adt_graph.adts.len();
+            adt_graph.adts.push(wrapping_u32(i));
+            let ok = adt_graph.node_of.try_set(i, wrapping_u32(wrapping_add(node, 1)));
         }
     }
     let mut names: ChunkSeq[u32] = ChunkSeq::new[u32]();
-    for v in 0..g.adts.len() {
-        let start = g.targets.len();
-        g.starts.push(start);
-        let a = wd.adt(u32_at(in g.adts, v));
-        for vi in 0..w(a.vn) {
-            let variant = wd.variant(add(w(a.va), vi));
-            for fi in 0..w(variant.fc) {
-                let f = wd.field(add(w(variant.fa), fi));
+    for node in 0..adt_graph.adts.len() {
+        let start = adt_graph.targets.len();
+        adt_graph.starts.push(start);
+        let adt = world.adt(u32_at(in adt_graph.adts, node));
+        for variant_index in 0..w(adt.vn) {
+            let variant = world.variant(add(w(adt.va), variant_index));
+            for field_index in 0..w(variant.fc) {
+                let field = world.field(add(w(variant.fa), field_index));
                 names.clear();
-                deps(in t, f.ty, inout names);
+                deps(in types, field.ty, inout names);
                 for k in 0..names.len() {
-                    let adt = wd.lookup(u32_at(in names, k));
-                    if adt != NONE32 {
-                        let target = u32_at(in g.node_of, w(adt));
+                    let dep_index = world.lookup(u32_at(in names, k));
+                    if dep_index != NONE32 {
+                        let target = u32_at(in adt_graph.node_of, w(dep_index));
                         if target != 0 {
                             let to = wrapping_sub(target, 1);
                             let mut seen = false;
-                            for e in start..g.targets.len() {
-                                if u32_at(in g.targets, e) == to {
+                            for edge in start..adt_graph.targets.len() {
+                                if u32_at(in adt_graph.targets, edge) == to {
                                     seen = true;
                                 }
                             }
                             if !seen {
-                                g.targets.push(to);
+                                adt_graph.targets.push(to);
                             }
                         }
                     }
@@ -105,17 +105,17 @@ pub fn graph(in b: B, in t: Types, in wd: World) -> Graph {
             }
         }
     }
-    let end = g.targets.len();
-    g.starts.push(end);
-    g
+    let end = adt_graph.targets.len();
+    adt_graph.starts.push(end);
+    adt_graph
 }
 
 impl Graph {
     pub fn has_edge(in self, from: u32, to: u32) -> bool {
-        let a = u64_at(in self.starts, w(from));
-        let z = u64_at(in self.starts, add(w(from), 1));
-        for e in a..z {
-            if u32_at(in self.targets, e) == to {
+        let edge_start = u64_at(in self.starts, w(from));
+        let edge_end = u64_at(in self.starts, add(w(from), 1));
+        for edge in edge_start..edge_end {
+            if u32_at(in self.targets, edge) == to {
                 return true;
             }
         }
@@ -134,145 +134,148 @@ pub struct Tarjan {
     ends: ChunkSeq[u64],
 }
 
-fn root_of(in s: Tarjan, v: u32) -> u64 {
-    u64_at(in s.root, w(v))
+fn root_of(in tarjan: Tarjan, node: u32) -> u64 {
+    u64_at(in tarjan.root, w(node))
 }
 
-fn set_root(inout s: Tarjan, v: u32, x: u64) {
-    let ok = s.root.try_set(w(v), x);
+fn set_root(inout tarjan: Tarjan, node: u32, root: u64) {
+    let ok = tarjan.root.try_set(w(node), root);
 }
 
-fn visit(in g: Graph, inout s: Tarjan, v: u32) {
+fn visit(in adt_graph: Graph, inout tarjan: Tarjan, node: u32) {
     let mut local_root = true;
-    set_root(inout s, v, s.index);
-    s.index = wrapping_add(s.index, 1);
-    let a = u64_at(in g.starts, w(v));
-    let z = u64_at(in g.starts, add(w(v), 1));
-    for e in a..z {
-        let x = u32_at(in g.targets, e);
-        if root_of(in s, x) == 0 {
-            visit(in g, inout s, x);
+    set_root(inout tarjan, node, tarjan.index);
+    tarjan.index = wrapping_add(tarjan.index, 1);
+    let edge_start = u64_at(in adt_graph.starts, w(node));
+    let edge_end = u64_at(in adt_graph.starts, add(w(node), 1));
+    for edge in edge_start..edge_end {
+        let target = u32_at(in adt_graph.targets, edge);
+        if root_of(in tarjan, target) == 0 {
+            visit(in adt_graph, inout tarjan, target);
         }
-        if root_of(in s, x) < root_of(in s, v) {
-            let r = root_of(in s, x);
-            set_root(inout s, v, r);
+        if root_of(in tarjan, target) < root_of(in tarjan, node) {
+            let target_root = root_of(in tarjan, target);
+            set_root(inout tarjan, node, target_root);
             local_root = false;
         }
     }
     if local_root {
         let mut adjustment: u64 = 1;
-        let c = s.count;
-        let rv = root_of(in s, v);
+        let component = tarjan.count;
+        let node_root = root_of(in tarjan, node);
         let mut start: u64 = 0;
-        let mut i = s.stack.len();
+        let mut i = tarjan.stack.len();
         loop {
             if i == 0 {
                 break;
             }
-            let x = u32_at(in s.stack, wrapping_sub(i, 1));
-            if rv > root_of(in s, x) {
+            let target = u32_at(in tarjan.stack, wrapping_sub(i, 1));
+            if node_root > root_of(in tarjan, target) {
                 start = i;
                 break;
             }
-            set_root(inout s, x, c);
+            set_root(inout tarjan, target, component);
             adjustment = wrapping_add(adjustment, 1);
             i = wrapping_sub(i, 1);
         }
-        set_root(inout s, v, c);
-        s.stack.push(v);
-        for k in start..s.stack.len() {
-            let y = u32_at(in s.stack, k);
-            s.out.push(y);
+        set_root(inout tarjan, node, component);
+        tarjan.stack.push(node);
+        for k in start..tarjan.stack.len() {
+            let member = u32_at(in tarjan.stack, k);
+            tarjan.out.push(member);
         }
-        let end = s.out.len();
-        s.ends.push(end);
-        s.stack.truncate(start);
-        s.index = wrapping_sub(s.index, adjustment);
-        s.count = wrapping_sub(s.count, 1);
+        let end = tarjan.out.len();
+        tarjan.ends.push(end);
+        tarjan.stack.truncate(start);
+        tarjan.index = wrapping_sub(tarjan.index, adjustment);
+        tarjan.count = wrapping_sub(tarjan.count, 1);
     } else {
-        s.stack.push(v);
+        tarjan.stack.push(node);
     }
 }
 
 // `tarjan_scc`: components as node lists (`out`, cut at `ends`).
-pub fn scc(in g: Graph) -> Tarjan {
-    let n = g.adts.len();
-    let mut s = Tarjan {
-        root: ChunkSeq::with_capacity[u64](n),
+pub fn scc(in adt_graph: Graph) -> Tarjan {
+    let node_count = adt_graph.adts.len();
+    let mut tarjan = Tarjan {
+        root: ChunkSeq::with_capacity[u64](node_count),
         index: 1,
         count: 18446744073709551615,
         stack: ChunkSeq::new[u32](),
         out: ChunkSeq::new[u32](),
         ends: ChunkSeq::new[u64](),
     };
-    s.root.resize(n, 0);
-    for v in 0..n {
-        if root_of(in s, wrapping_u32(v)) == 0 {
-            visit(in g, inout s, wrapping_u32(v));
+    tarjan.root.resize(node_count, 0);
+    for node in 0..node_count {
+        if root_of(in tarjan, wrapping_u32(node)) == 0 {
+            visit(in adt_graph, inout tarjan, wrapping_u32(node));
         }
     }
-    s
+    tarjan
 }
 
 // `recursive_structs`: per node, whether it is a structure on a cycle.
-fn recursive(in g: Graph, in s: Tarjan, in wd: World) -> ChunkSeq[bool] {
-    let mut rec: ChunkSeq[bool] = ChunkSeq::with_capacity[bool](g.adts.len());
-    rec.resize(g.adts.len(), false);
-    let mut a: u64 = 0;
-    for c in 0..s.ends.len() {
-        let z = u64_at(in s.ends, c);
-        let first = u32_at(in s.out, a);
-        let cycle = wrapping_sub(z, a) > 1 || g.has_edge(first, first);
+fn recursive(in adt_graph: Graph, in tarjan: Tarjan, in world: World) -> ChunkSeq[bool] {
+    let mut rec: ChunkSeq[bool] = ChunkSeq::with_capacity[bool](adt_graph.adts.len());
+    rec.resize(adt_graph.adts.len(), false);
+    let mut comp_start: u64 = 0;
+    for component in 0..tarjan.ends.len() {
+        let comp_end = u64_at(in tarjan.ends, component);
+        let first = u32_at(in tarjan.out, comp_start);
+        let cycle = wrapping_sub(comp_end, comp_start) > 1 || adt_graph.has_edge(first, first);
         if cycle {
-            for k in a..z {
-                let v = u32_at(in s.out, k);
-                if !wd.adt(u32_at(in g.adts, w(v))).is_enum {
-                    let ok = rec.try_set(w(v), true);
+            for k in comp_start..comp_end {
+                let node = u32_at(in tarjan.out, k);
+                if !world.adt(u32_at(in adt_graph.adts, w(node))).is_enum {
+                    let ok = rec.try_set(w(node), true);
                 }
             }
         }
-        a = z;
+        comp_start = comp_end;
     }
     rec
 }
 
-fn is_rec(in rec: ChunkSeq[bool], v: u32) -> bool {
-    rec.try_get(w(v)).unwrap_or(false)
+fn is_rec(in rec: ChunkSeq[bool], node: u32) -> bool {
+    match rec.try_get(w(node)) {
+        Option::Some(flag) => flag,
+        Option::None => false,
+    }
 }
 
-// The non-row generics of `a`, as `(name : Type)` binders of `kind`.
-fn generic_count(in wd: World, a: Adt) -> u64 {
-    let mut n: u64 = 0;
-    for i in 0..w(a.gn) {
-        if !wd.generic(add(w(a.ga), i)).row {
-            n = wrapping_add(n, 1);
+// The non-row generics of `adt`, as `(name : Type)` binders of `kind`.
+fn generic_count(in world: World, adt: Adt) -> u64 {
+    let mut count: u64 = 0;
+    for i in 0..w(adt.gn) {
+        if !world.generic(add(w(adt.ga), i)).row {
+            count = wrapping_add(count, 1);
         }
     }
-    n
+    count
 }
 
-fn generic_binders(inout b: B, in wd: World, a: Adt, kind: u64) {
-    for i in 0..w(a.gn) {
-        let g = wd.generic(add(w(a.ga), i));
-        if !g.row {
-            b.w(kind);
-            b.w(1);
-            b.ident(g.name);
-            b.type0();
+fn generic_binders(inout builder: B, in world: World, adt: Adt, kind: u64) {
+    for i in 0..w(adt.gn) {
+        let generic = world.generic(add(w(adt.ga), i));
+        if !generic.row {
+            builder.w(kind);
+            builder.w(1);
+            builder.ident(generic.name);
+            builder.type0();
         }
     }
 }
 
 // `(fNAME : T)` binders of a variant's fields.
-fn field_binders(inout b: B, in t: Types, in wd: World, fa: u32, fc: u32) {
-    b.w(w(fc));
+fn field_binders(inout builder: B, in types: Types, in world: World, fa: u32, fc: u32) {
+    builder.w(w(fc));
     for i in 0..w(fc) {
-        let f = wd.field(add(w(fa), i));
-        b.w(B_EXPLICIT);
-        b.w(1);
-        let s = b.joined(in "f", f.name, in "");
-        b.ident(s);
-        emit_ty(inout b, in t, f.ty, wd.box_active);
+        let field = world.field(add(w(fa), i));
+        builder.w(B_EXPLICIT);
+        builder.w(1);
+        let field_sym = builder.joined(in "f", field.name, in "");
+        builder.ident(field_sym);
+        emit_ty(inout builder, in types, field.ty, world.box_active);
     }
 }
 
@@ -281,379 +284,396 @@ fn field_binders(inout b: B, in t: Types, in wd: World, fa: u32, fc: u32) {
 // getters come first) the self type and the getters' field names and
 // types, then the declaration's name, constructor names, field names and
 // field types.
-fn check_adt(inout b: B, in t: Types, in wd: World, a: Adt, rec: bool) {
-    for i in 0..w(a.gn) {
-        let g = wd.generic(add(w(a.ga), i));
-        if !g.row {
-            b.check(g.name, in "identifier");
+fn check_adt(inout builder: B, in types: Types, in world: World, adt: Adt, rec: bool) {
+    for i in 0..w(adt.gn) {
+        let generic = world.generic(add(w(adt.ga), i));
+        if !generic.row {
+            builder.check(generic.name, in "identifier");
         }
     }
     if rec {
-        for i in 0..w(a.gn) {
-            let g = wd.generic(add(w(a.ga), i));
-            if !g.row {
-                b.check(g.name, in "name");
+        for i in 0..w(adt.gn) {
+            let generic = world.generic(add(w(adt.ga), i));
+            if !generic.row {
+                builder.check(generic.name, in "name");
             }
         }
-        b.check(a.name, in "name");
-        b.check(a.name, in "identifier");
-        let variant = wd.variant(w(a.va));
-        for fi in 0..w(variant.fc) {
-            let f = wd.field(add(w(variant.fa), fi));
-            b.check(a.name, in "identifier");
-            b.check(f.name, in "identifier");
-            ty_check(inout b, in t, f.ty, wd.box_active);
+        builder.check(adt.name, in "name");
+        builder.check(adt.name, in "identifier");
+        let variant = world.variant(w(adt.va));
+        for field_index in 0..w(variant.fc) {
+            let field = world.field(add(w(variant.fa), field_index));
+            builder.check(adt.name, in "identifier");
+            builder.check(field.name, in "identifier");
+            ty_check(inout builder, in types, field.ty, world.box_active);
         }
     }
-    b.check(a.name, in "name");
-    for vi in 0..w(a.vn) {
-        let variant = wd.variant(add(w(a.va), vi));
-        if a.is_enum {
-            b.check(variant.name, in "identifier");
+    builder.check(adt.name, in "name");
+    for variant_index in 0..w(adt.vn) {
+        let variant = world.variant(add(w(adt.va), variant_index));
+        if adt.is_enum {
+            builder.check(variant.name, in "identifier");
         }
-        for fi in 0..w(variant.fc) {
-            let f = wd.field(add(w(variant.fa), fi));
-            if a.is_enum || rec {
-                let s = b.joined(in "f", f.name, in "");
-                b.check(s, in "identifier");
+        for field_index in 0..w(variant.fc) {
+            let field = world.field(add(w(variant.fa), field_index));
+            if adt.is_enum || rec {
+                let field_sym = builder.joined(in "f", field.name, in "");
+                builder.check(field_sym, in "identifier");
             } else {
-                b.check(f.name, in "identifier");
+                builder.check(field.name, in "identifier");
             }
-            ty_check(inout b, in t, f.ty, wd.box_active);
+            ty_check(inout builder, in types, field.ty, world.box_active);
         }
     }
 }
 
-fn deriving(inout b: B, a: Adt) {
-    if a.tile != 0 {
-        b.w(1);
-        b.name_fixed(in "Inhabited");
+fn deriving(inout builder: B, adt: Adt) {
+    if adt.tile != 0 {
+        builder.w(1);
+        builder.name_fixed(in "Inhabited");
     } else {
-        b.w(0);
+        builder.w(0);
     }
 }
 
-fn type_declaration(inout b: B, in t: Types, in wd: World, a: Adt, rec: bool) {
-    let params = generic_count(in wd, a);
-    if a.is_enum {
-        b.w(TD_INDUCTIVE);
-        b.name(a.name);
-        b.w(params);
-        generic_binders(inout b, in wd, a, B_EXPLICIT);
-        b.type0();
-        b.w(w(a.vn));
-        for vi in 0..w(a.vn) {
-            let variant = wd.variant(add(w(a.va), vi));
-            b.ident(variant.name);
-            field_binders(inout b, in t, in wd, variant.fa, variant.fc);
-            b.w(0);
+fn type_declaration(inout builder: B, in types: Types, in world: World, adt: Adt, rec: bool) {
+    let params = generic_count(in world, adt);
+    if adt.is_enum {
+        builder.w(TD_INDUCTIVE);
+        builder.name(adt.name);
+        builder.w(params);
+        generic_binders(inout builder, in world, adt, B_EXPLICIT);
+        builder.type0();
+        builder.w(w(adt.vn));
+        for variant_index in 0..w(adt.vn) {
+            let variant = world.variant(add(w(adt.va), variant_index));
+            builder.ident(variant.name);
+            field_binders(inout builder, in types, in world, variant.fa, variant.fc);
+            builder.w(0);
         }
-        b.w(0);
+        builder.w(0);
     } else if rec {
-        let variant = wd.variant(w(a.va));
-        b.w(TD_INDUCTIVE);
-        b.name(a.name);
-        b.w(params);
-        generic_binders(inout b, in wd, a, B_EXPLICIT);
-        b.type0();
-        b.w(1);
-        b.text(in "mk");
-        field_binders(inout b, in t, in wd, variant.fa, variant.fc);
-        b.w(0);
-        deriving(inout b, a);
+        let variant = world.variant(w(adt.va));
+        builder.w(TD_INDUCTIVE);
+        builder.name(adt.name);
+        builder.w(params);
+        generic_binders(inout builder, in world, adt, B_EXPLICIT);
+        builder.type0();
+        builder.w(1);
+        builder.text(in "mk");
+        field_binders(inout builder, in types, in world, variant.fa, variant.fc);
+        builder.w(0);
+        deriving(inout builder, adt);
     } else {
-        let variant = wd.variant(w(a.va));
-        b.w(TD_STRUCTURE);
-        b.name(a.name);
-        b.w(params);
-        generic_binders(inout b, in wd, a, B_EXPLICIT);
-        b.w(w(variant.fc));
+        let variant = world.variant(w(adt.va));
+        builder.w(TD_STRUCTURE);
+        builder.name(adt.name);
+        builder.w(params);
+        generic_binders(inout builder, in world, adt, B_EXPLICIT);
+        builder.w(w(variant.fc));
         for i in 0..w(variant.fc) {
-            let f = wd.field(add(w(variant.fa), i));
-            b.ident(f.name);
-            emit_ty(inout b, in t, f.ty, wd.box_active);
-            b.w(0);
+            let field = world.field(add(w(variant.fa), i));
+            builder.ident(field.name);
+            emit_ty(inout builder, in types, field.ty, world.box_active);
+            builder.w(0);
         }
-        deriving(inout b, a);
+        deriving(inout builder, adt);
     }
 }
 
 // The getters of a recursive structure: `def A.f {α} ($self : A α) : T :=
 // match $self with | A.mk _ .. $field .. _ => $field`.
-fn getters(inout b: B, in t: Types, in wd: World, a: Adt) -> u64 {
-    let variant = wd.variant(w(a.va));
-    let params = generic_count(in wd, a);
-    let mk = b.intern(in "mk");
+fn getters(inout builder: B, in types: Types, in world: World, adt: Adt) -> u64 {
+    let variant = world.variant(w(adt.va));
+    let params = generic_count(in world, adt);
+    let mk_sym = builder.intern(in "mk");
     for i in 0..w(variant.fc) {
-        let f = wd.field(add(w(variant.fa), i));
-        b.w(D_DEF);
-        b.w(K_DEF);
-        b.name2(a.name, f.name);
-        b.w(wrapping_add(params, 1));
-        generic_binders(inout b, in wd, a, B_IMPLICIT);
-        b.w(B_EXPLICIT);
-        b.w(1);
-        b.text(in "$self");
+        let field = world.field(add(w(variant.fa), i));
+        builder.w(D_DEF);
+        builder.w(K_DEF);
+        builder.name2(adt.name, field.name);
+        builder.w(wrapping_add(params, 1));
+        generic_binders(inout builder, in world, adt, B_IMPLICIT);
+        builder.w(B_EXPLICIT);
+        builder.w(1);
+        builder.text(in "$self");
         if params == 0 {
-            b.sref(a.name);
+            builder.sref(adt.name);
         } else {
-            let m = b.app(params);
-            b.sref(a.name);
-            b.args(m);
-            for gi in 0..w(a.gn) {
-                let g = wd.generic(add(w(a.ga), gi));
-                if !g.row {
-                    b.arg();
-                    b.sref(g.name);
+            let mark = builder.app(params);
+            builder.sref(adt.name);
+            builder.args(mark);
+            for generic_index in 0..w(adt.gn) {
+                let generic = world.generic(add(w(adt.ga), generic_index));
+                if !generic.row {
+                    builder.arg();
+                    builder.sref(generic.name);
                 }
             }
         }
-        emit_ty(inout b, in t, f.ty, wd.box_active);
-        b.w(T_MATCH);
-        b.w(1);
-        b.named(in "$self");
-        b.w(P_CTOR);
-        b.name2(a.name, mk);
-        b.w(w(variant.fc));
-        for k in 0..w(variant.fc) {
-            if k == i {
-                b.w(P_BIND);
-                b.text(in "$field");
+        emit_ty(inout builder, in types, field.ty, world.box_active);
+        builder.w(T_MATCH);
+        builder.w(1);
+        builder.named(in "$self");
+        builder.w(P_CTOR);
+        builder.name2(adt.name, mk_sym);
+        builder.w(w(variant.fc));
+        for field_index in 0..w(variant.fc) {
+            if field_index == i {
+                builder.w(P_BIND);
+                builder.text(in "$field");
             } else {
-                b.w(P_WILD);
+                builder.w(P_WILD);
             }
         }
-        b.named(in "$field");
+        builder.named(in "$field");
     }
     w(variant.fc)
 }
 
 // The ADT groups and their getters; returns the number of declarations.
-pub fn adt_groups(inout b: B, in t: Types, in wd: World) -> u64 {
-    let g = graph(in b, in t, in wd);
-    let s = scc(in g);
-    let rec = recursive(in g, in s, in wd);
+pub fn adt_groups(inout builder: B, in types: Types, in world: World) -> u64 {
+    let adt_graph = graph(in builder, in types, in world);
+    let tarjan = scc(in adt_graph);
+    let rec = recursive(in adt_graph, in tarjan, in world);
     let mut count: u64 = 0;
-    let mut a: u64 = 0;
-    for c in 0..s.ends.len() {
-        let z = u64_at(in s.ends, c);
-        for k in a..z {
-            let v = u32_at(in s.out, k);
-            let adt = wd.adt(u32_at(in g.adts, w(v)));
-            check_adt(inout b, in t, in wd, adt, is_rec(in rec, v));
+    let mut comp_start: u64 = 0;
+    for component in 0..tarjan.ends.len() {
+        let comp_end = u64_at(in tarjan.ends, component);
+        for k in comp_start..comp_end {
+            let node = u32_at(in tarjan.out, k);
+            let adt = world.adt(u32_at(in adt_graph.adts, w(node)));
+            check_adt(inout builder, in types, in world, adt, is_rec(in rec, node));
         }
-        b.w(D_MUTUAL_TYPES);
-        b.w(wrapping_sub(z, a));
-        for k in a..z {
-            let v = u32_at(in s.out, k);
-            let adt = wd.adt(u32_at(in g.adts, w(v)));
-            type_declaration(inout b, in t, in wd, adt, is_rec(in rec, v));
+        builder.w(D_MUTUAL_TYPES);
+        builder.w(wrapping_sub(comp_end, comp_start));
+        for k in comp_start..comp_end {
+            let node = u32_at(in tarjan.out, k);
+            let adt = world.adt(u32_at(in adt_graph.adts, w(node)));
+            type_declaration(inout builder, in types, in world, adt, is_rec(in rec, node));
         }
         count = wrapping_add(count, 1);
-        for k in a..z {
-            let v = u32_at(in s.out, k);
-            if is_rec(in rec, v) {
-                let adt = wd.adt(u32_at(in g.adts, w(v)));
-                let n = getters(inout b, in t, in wd, adt);
-                count = wrapping_add(count, n);
+        for k in comp_start..comp_end {
+            let node = u32_at(in tarjan.out, k);
+            if is_rec(in rec, node) {
+                let adt = world.adt(u32_at(in adt_graph.adts, w(node)));
+                let getter_count = getters(inout builder, in types, in world, adt);
+                count = wrapping_add(count, getter_count);
             }
         }
-        a = z;
+        comp_start = comp_end;
     }
     count
 }
 
 // `Effect_E α.. m` applied to the caller's last argument (written after).
-fn effect_app(inout b: B, in fx: Effects, e: Effect, cls: u32) {
-    let m = b.app(wrapping_add(w(e.gn), 1));
-    b.sref(cls);
-    b.args(m);
-    for i in 0..w(e.gn) {
-        b.arg();
-        b.sref(fx.generic(e, i));
+fn effect_app(inout builder: B, in effects: Effects, decl: Effect, class_sym: u32) {
+    let mark = builder.app(wrapping_add(w(decl.gn), 1));
+    builder.sref(class_sym);
+    builder.args(mark);
+    for i in 0..w(decl.gn) {
+        builder.arg();
+        builder.sref(effects.generic(decl, i));
     }
-    b.arg();
+    builder.arg();
 }
 
 // Each effect's class: `class Effect_E (α : Type) .. (m : Type → Type)
 // where op : P.. → m (R × inout..)`.
-pub fn effect_classes(inout b: B, in t: Types, in wd: World, in fx: Effects) -> u64 {
-    let n = fx.effects.len();
-    for i in 0..n {
-        let e = fx.effect_at(i);
-        for oi in 0..w(e.on) {
-            let op = fx.op(e, oi);
-            ty_check(inout b, in t, op.result, wd.box_active);
-            for pi in 0..w(op.pn) {
-                let p = fx.param(op, pi);
-                if p.pass == TyPass::Inout {
-                    ty_check(inout b, in t, p.ty, wd.box_active);
+pub fn effect_classes(
+    inout builder: B,
+    in types: Types,
+    in world: World,
+    in effects: Effects
+) -> u64 {
+    let effect_count = effects.effects.len();
+    for i in 0..effect_count {
+        let decl = effects.effect_at(i);
+        for op_index in 0..w(decl.op_count) {
+            let op = effects.op(decl, op_index);
+            ty_check(inout builder, in types, op.result, world.box_active);
+            for param_index in 0..w(op.param_count) {
+                let param = effects.param(op, param_index);
+                if param.pass == TyPass::Inout {
+                    ty_check(inout builder, in types, param.ty, world.box_active);
                 }
             }
-            for pi in 0..w(op.pn) {
-                ty_check(inout b, in t, fx.param(op, pi).ty, wd.box_active);
+            for param_index in 0..w(op.param_count) {
+                ty_check(
+                    inout builder,
+                    in types,
+                    effects.param(op, param_index).ty,
+                    world.box_active
+                );
             }
         }
-        b.w(D_TYPE);
-        b.w(TD_CLASS);
-        let cls = b.joined(in "Effect_", e.name, in "");
-        b.name(cls);
-        b.w(wrapping_add(w(e.gn), 1));
-        for gi in 0..w(e.gn) {
-            b.w(B_EXPLICIT);
-            b.w(1);
-            b.ident(fx.generic(e, gi));
-            b.type0();
+        builder.w(D_TYPE);
+        builder.w(TD_CLASS);
+        let class_sym = builder.joined(in "Effect_", decl.name, in "");
+        builder.name(class_sym);
+        builder.w(wrapping_add(w(decl.gn), 1));
+        for generic_index in 0..w(decl.gn) {
+            builder.w(B_EXPLICIT);
+            builder.w(1);
+            builder.ident(effects.generic(decl, generic_index));
+            builder.type0();
         }
-        b.binder(B_EXPLICIT, in "m");
-        b.monad_ty();
-        b.w(w(e.on));
-        for oi in 0..w(e.on) {
-            let op = fx.op(e, oi);
-            b.ident(op.name);
-            for pi in 0..w(op.pn) {
-                b.w(T_ARROW);
-                emit_ty(inout b, in t, fx.param(op, pi).ty, wd.box_active);
+        builder.binder(B_EXPLICIT, in "m");
+        builder.monad_ty();
+        builder.w(w(decl.op_count));
+        for op_index in 0..w(decl.op_count) {
+            let op = effects.op(decl, op_index);
+            builder.ident(op.name);
+            for param_index in 0..w(op.param_count) {
+                builder.w(T_ARROW);
+                emit_ty(
+                    inout builder,
+                    in types,
+                    effects.param(op, param_index).ty,
+                    world.box_active
+                );
             }
-            let m = b.app(1);
-            b.named(in "m");
-            b.args(m);
-            b.arg();
+            let mark = builder.app(1);
+            builder.named(in "m");
+            builder.args(mark);
+            builder.arg();
             let mut results: u64 = 1;
-            for pi in 0..w(op.pn) {
-                if fx.param(op, pi).pass == TyPass::Inout {
+            for param_index in 0..w(op.param_count) {
+                if effects.param(op, param_index).pass == TyPass::Inout {
                     results = wrapping_add(results, 1);
                 }
             }
             if results > 1 {
-                b.w(T_PRODUCT);
-                b.w(results);
+                builder.w(T_PRODUCT);
+                builder.w(results);
             }
-            emit_ty(inout b, in t, op.result, wd.box_active);
-            for pi in 0..w(op.pn) {
-                let p = fx.param(op, pi);
-                if p.pass == TyPass::Inout {
-                    emit_ty(inout b, in t, p.ty, wd.box_active);
+            emit_ty(inout builder, in types, op.result, world.box_active);
+            for param_index in 0..w(op.param_count) {
+                let param = effects.param(op, param_index);
+                if param.pass == TyPass::Inout {
+                    emit_ty(inout builder, in types, param.ty, world.box_active);
                 }
             }
-            b.w(0);
+            builder.w(0);
         }
     }
-    n
+    effect_count
 }
 
 // `{S O : Type} {m : Type → Type} [Monad m] {α : Type} ..`.
-fn lift_binders(inout b: B, in fx: Effects, e: Effect) {
-    b.implicit_type(in "S");
-    b.implicit_type(in "O");
-    b.binder(B_IMPLICIT, in "m");
-    b.monad_ty();
-    b.monad_instance();
-    for gi in 0..w(e.gn) {
-        b.w(B_IMPLICIT);
-        b.w(1);
-        b.ident(fx.generic(e, gi));
-        b.type0();
+fn lift_binders(inout builder: B, in effects: Effects, decl: Effect) {
+    builder.implicit_type(in "S");
+    builder.implicit_type(in "O");
+    builder.binder(B_IMPLICIT, in "m");
+    builder.monad_ty();
+    builder.monad_instance();
+    for generic_index in 0..w(decl.gn) {
+        builder.w(B_IMPLICIT);
+        builder.w(1);
+        builder.ident(effects.generic(decl, generic_index));
+        builder.type0();
     }
 }
 
 // `Effect_E α.. (HandlerCPS S O m)`.
-fn destination(inout b: B, in fx: Effects, e: Effect, cls: u32) {
-    effect_app(inout b, in fx, e, cls);
-    let m = b.app(3);
-    b.named(in "HandlerCPS");
-    b.args(m);
-    b.arg();
-    b.named(in "S");
-    b.arg();
-    b.named(in "O");
-    b.arg();
-    b.named(in "m");
+fn destination(inout builder: B, in effects: Effects, decl: Effect, class_sym: u32) {
+    effect_app(inout builder, in effects, decl, class_sym);
+    let mark = builder.app(3);
+    builder.named(in "HandlerCPS");
+    builder.args(mark);
+    builder.arg();
+    builder.named(in "S");
+    builder.arg();
+    builder.named(in "O");
+    builder.arg();
+    builder.named(in "m");
 }
 
 // Each effect's `abbrev lift_E` and its instance.
-pub fn effect_lifts(inout b: B, in fx: Effects) -> u64 {
-    let n = fx.effects.len();
-    for i in 0..n {
-        let e = fx.effect_at(i);
-        let cls = b.joined(in "Effect_", e.name, in "");
-        let lift = b.joined(in "lift_", e.name, in "");
-        b.w(D_DEF);
-        b.w(K_ABBREV);
-        b.name(lift);
-        b.w(wrapping_add(w(e.gn), 5));
-        lift_binders(inout b, in fx, e);
-        b.binder(B_EXPLICIT, in "evidence");
-        effect_app(inout b, in fx, e, cls);
-        b.named(in "m");
-        destination(inout b, in fx, e, cls);
-        b.w(T_RECORD);
-        b.w(w(e.on));
-        for oi in 0..w(e.on) {
-            let op = fx.op(e, oi);
-            b.ident(op.name);
+pub fn effect_lifts(inout builder: B, in effects: Effects) -> u64 {
+    let effect_count = effects.effects.len();
+    for i in 0..effect_count {
+        let decl = effects.effect_at(i);
+        let class_sym = builder.joined(in "Effect_", decl.name, in "");
+        let lift = builder.joined(in "lift_", decl.name, in "");
+        builder.w(D_DEF);
+        builder.w(K_ABBREV);
+        builder.name(lift);
+        builder.w(wrapping_add(w(decl.gn), 5));
+        lift_binders(inout builder, in effects, decl);
+        builder.binder(B_EXPLICIT, in "evidence");
+        effect_app(inout builder, in effects, decl, class_sym);
+        builder.named(in "m");
+        destination(inout builder, in effects, decl, class_sym);
+        builder.w(T_RECORD);
+        builder.w(w(decl.op_count));
+        for op_index in 0..w(decl.op_count) {
+            let op = effects.op(decl, op_index);
+            builder.ident(op.name);
             // fun $arg0 .. k s => do let result ← Effect_E.op (self :=
             // evidence) $arg0 ..; k result s
-            b.lambda(wrapping_add(w(op.pn), 2));
-            for pi in 0..w(op.pn) {
-                let arg = b.numbered(in "$arg", pi);
-                b.lambda_sym(arg);
+            builder.lambda(wrapping_add(w(op.param_count), 2));
+            for param_index in 0..w(op.param_count) {
+                let arg = builder.numbered(in "$arg", param_index);
+                builder.lambda_sym(arg);
             }
-            b.lambda_name(in "k");
-            b.lambda_name(in "s");
-            b.w(T_DO);
-            b.w(1);
-            b.w(S_BIND);
-            b.w(P_BIND);
-            b.text(in "result");
-            let m = b.app(wrapping_add(w(op.pn), 1));
-            b.w(1);
-            b.name2(cls, op.name);
-            b.args(m);
-            b.named_arg(in "self");
-            b.named(in "evidence");
-            for pi in 0..w(op.pn) {
-                b.arg();
-                let arg = b.numbered(in "$arg", pi);
-                b.w(1);
-                b.w(0);
-                b.w(1);
-                b.ident(arg);
+            builder.lambda_name(in "k");
+            builder.lambda_name(in "s");
+            builder.w(T_DO);
+            builder.w(1);
+            builder.w(S_BIND);
+            builder.w(P_BIND);
+            builder.text(in "result");
+            let mark = builder.app(wrapping_add(w(op.param_count), 1));
+            builder.w(1);
+            builder.name2(class_sym, op.name);
+            builder.args(mark);
+            builder.named_arg(in "self");
+            builder.named(in "evidence");
+            for param_index in 0..w(op.param_count) {
+                builder.arg();
+                let arg = builder.numbered(in "$arg", param_index);
+                builder.w(1);
+                builder.w(0);
+                builder.w(1);
+                builder.ident(arg);
             }
-            let k = b.app(2);
-            b.named(in "k");
-            b.args(k);
-            b.arg();
-            b.named(in "result");
-            b.arg();
-            b.named(in "s");
+            let cont_mark = builder.app(2);
+            builder.named(in "k");
+            builder.args(cont_mark);
+            builder.arg();
+            builder.named(in "result");
+            builder.arg();
+            builder.named(in "s");
         }
         // instance [evidence : Effect_E α.. m] : Effect_E α.. (HandlerCPS S O m)
-        b.w(D_INSTANCE);
-        b.w(0);
-        b.w(wrapping_add(w(e.gn), 5));
-        lift_binders(inout b, in fx, e);
-        b.w(2);
-        b.w(1);
-        b.text(in "evidence");
-        effect_app(inout b, in fx, e, cls);
-        b.named(in "m");
-        destination(inout b, in fx, e, cls);
-        let m = b.app(1);
-        b.sref(lift);
-        b.args(m);
-        b.arg();
-        b.named(in "evidence");
+        builder.w(D_INSTANCE);
+        builder.w(0);
+        builder.w(wrapping_add(w(decl.gn), 5));
+        lift_binders(inout builder, in effects, decl);
+        builder.w(2);
+        builder.w(1);
+        builder.text(in "evidence");
+        effect_app(inout builder, in effects, decl, class_sym);
+        builder.named(in "m");
+        destination(inout builder, in effects, decl, class_sym);
+        let mark = builder.app(1);
+        builder.sref(lift);
+        builder.args(mark);
+        builder.arg();
+        builder.named(in "evidence");
     }
-    wrapping_mul(n, 2)
+    wrapping_mul(effect_count, 2)
 }
 
 // Whether `world.effects["Fail"]` is `Fail[E]` with the one op `raise`.
-pub fn has_fail_model(in b: B, in fx: Effects) -> bool {
-    for i in 0..fx.effects.len() {
-        let e = fx.effect_at(i);
-        if spells(in b, e.name, in "Fail") {
-            return e.gn == 1 && e.on == 1 && spells(in b, fx.op(e, 0).name, in "raise");
+pub fn has_fail_model(in builder: B, in effects: Effects) -> bool {
+    for i in 0..effects.effects.len() {
+        let decl = effects.effect_at(i);
+        if spells(in builder, decl.name, in "Fail") {
+            return decl.gn == 1
+                && decl.op_count == 1
+                && spells(in builder, effects.op(decl, 0).name, in "raise");
         }
     }
     false
@@ -661,15 +681,15 @@ pub fn has_fail_model(in b: B, in fx: Effects) -> bool {
 
 // `recursive_structs`, by ADT index: whether the ADT is a structure in a
 // recursive group.
-pub fn recursive_structs(in b: B, in t: Types, in wd: World) -> ChunkSeq[bool] {
-    let g = graph(in b, in t, in wd);
-    let s = scc(in g);
-    let rec = recursive(in g, in s, in wd);
-    let mut out: ChunkSeq[bool] = ChunkSeq::with_capacity[bool](wd.adts.len());
-    out.resize(wd.adts.len(), false);
-    for v in 0..g.adts.len() {
-        if is_rec(in rec, n32(v)) {
-            let ok = out.try_set(w(u32_at(in g.adts, v)), true);
+pub fn recursive_structs(in builder: B, in types: Types, in world: World) -> ChunkSeq[bool] {
+    let adt_graph = graph(in builder, in types, in world);
+    let tarjan = scc(in adt_graph);
+    let rec = recursive(in adt_graph, in tarjan, in world);
+    let mut out: ChunkSeq[bool] = ChunkSeq::with_capacity[bool](world.adts.len());
+    out.resize(world.adts.len(), false);
+    for node in 0..adt_graph.adts.len() {
+        if is_rec(in rec, n32(node)) {
+            let ok = out.try_set(w(u32_at(in adt_graph.adts, node)), true);
         }
     }
     out

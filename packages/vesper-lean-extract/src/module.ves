@@ -22,7 +22,7 @@ const K_SIMP: u64 = 4;
 const NONE: u64 = 18446744073709551615;
 
 // One definition: its words (kind, name, binders, result, body) are
-// `dw[at..end]`.
+// `Defs::words[at..end]`.
 pub copy struct Def {
     owner: u64,
     key: u32,
@@ -35,23 +35,26 @@ pub copy struct Def {
 }
 
 pub struct Defs {
-    dw: ChunkSeq[u64],
+    words: ChunkSeq[u64],
     defs: ChunkSeq[Def],
 }
 
 pub fn defs_new() -> Defs {
     Defs {
-        dw: ChunkSeq::new[u64](),
+        words: ChunkSeq::new[u64](),
         defs: ChunkSeq::new[Def](),
     }
 }
 
-fn wd_at(in s: Slice[u64], i: u64) -> u64 {
-    s.try_get(i).unwrap_or(0)
+fn wd_at(in words: Slice[u64], i: u64) -> u64 {
+    match words.try_get(i) {
+        Option::Some(x) => x,
+        Option::None => 0,
+    }
 }
 
-fn def_at(in d: Defs, i: u64) -> Def {
-    match d.defs.try_get(i) {
+fn def_at(in defs: Defs, i: u64) -> Def {
+    match defs.defs.try_get(i) {
         Option::Some(x) => x,
         Option::None => Def {
             owner: 0,
@@ -67,60 +70,66 @@ fn def_at(in d: Defs, i: u64) -> Def {
 }
 
 // The symbol of the text `pool[off..off + len]`.
-fn text_symbol(in b: B, off: u64, len: u64) -> u32 {
-    let bytes = b.names.text.as_slice();
-    b.names.lookup(in bytes[off..add(off, len)])
+fn text_symbol(in builder: B, off: u64, len: u64) -> u32 {
+    let bytes = builder.names.text.as_slice();
+    builder.names.lookup(in bytes[off..add(off, len)])
 }
 
-fn starts_with(in b: B, off: u64, len: u64, in prefix: Str) -> bool {
-    let p = prefix.as_bytes();
-    if len < p.len() {
+fn starts_with(in builder: B, off: u64, len: u64, in prefix: Str) -> bool {
+    let prefix_bytes = prefix.as_bytes();
+    if len < prefix_bytes.len() {
         return false;
     }
-    for i in 0..p.len() {
-        let x = b.names.text.try_get(add(off, i)).unwrap_or(0);
-        let y = p.try_get(i).unwrap_or(0);
-        if x != y {
+    for i in 0..prefix_bytes.len() {
+        let byte = match builder.names.text.try_get(add(off, i)) {
+            Option::Some(c) => c,
+            Option::None => 0,
+        };
+        let prefix_byte = match prefix_bytes.try_get(i) {
+            Option::Some(c) => c,
+            Option::None => 0,
+        };
+        if byte != prefix_byte {
             return false;
         }
     }
     true
 }
 
-// Copies the definitions of the module at `b.words[0..]` (no imports, a
-// count, then the declarations) into `d` for `owner`. False when one is
+// Copies the definitions of the module at `builder.words[0..]` (no imports, a
+// count, then the declarations) into `defs` for `owner`. False when one is
 // not a definition.
-pub fn take_module(inout b: B, inout d: Defs, owner: u64) -> bool {
-    let s = b.words.as_slice();
-    let count = wd_at(in s, 1);
+pub fn take_module(inout builder: B, inout defs: Defs, owner: u64) -> bool {
+    let words = builder.words.as_slice();
+    let count = wd_at(in words, 1);
     let mut at: u64 = 2;
     for k in 0..count {
-        if wd_at(in s, at) != D_DEF {
+        if wd_at(in words, at) != D_DEF {
             return false;
         }
         let kind_at = inc(at);
-        let q = inc(kind_at);
-        let n = wd_at(in s, inc(q));
-        let off = wd_at(in s, add(q, 2));
-        let len = wd_at(in s, add(q, 3));
-        let ba = add(add(q, 2), wrapping_mul(n, 2));
-        let ra = binders_end(in s, in "", ba);
-        let bo = term_end(in s, in "", ra);
-        let end = term_end(in s, in "", bo);
-        let base = d.dw.len();
+        let name_at = inc(kind_at);
+        let part_count = wd_at(in words, inc(name_at));
+        let off = wd_at(in words, add(name_at, 2));
+        let len = wd_at(in words, add(name_at, 3));
+        let binders_at = add(add(name_at, 2), wrapping_mul(part_count, 2));
+        let result_at = binders_end(in words, in "", binders_at);
+        let body_at = term_end(in words, in "", result_at);
+        let end = term_end(in words, in "", body_at);
+        let base = defs.words.len();
         for i in kind_at..end {
-            d.dw.push(wd_at(in s, i));
+            defs.words.push(wd_at(in words, i));
         }
-        let key = text_symbol(in b, off, len);
-        let block = starts_with(in b, off, len, in "$block_");
-        d.defs.push(Def {
+        let key = text_symbol(in builder, off, len);
+        let block = starts_with(in builder, off, len, in "$block_");
+        defs.defs.push(Def {
             owner: owner,
             key: key,
             at: base,
-            binders: add(base, wrapping_sub(ba, kind_at)),
-            body: add(base, wrapping_sub(bo, kind_at)),
+            binders: add(base, wrapping_sub(binders_at, kind_at)),
+            body: add(base, wrapping_sub(body_at, kind_at)),
             end: add(base, wrapping_sub(end, kind_at)),
-            nullary: wd_at(in s, ba) == 0,
+            nullary: wd_at(in words, binders_at) == 0,
             block: block
         });
         at = end;
@@ -133,88 +142,92 @@ pub fn take_module(inout b: B, inout d: Defs, owner: u64) -> bool {
 pub struct Ordered {
     // per declaration: cyclic, first member, member count
     cyclic: ChunkSeq[bool],
-    ma: ChunkSeq[u64],
-    mn: ChunkSeq[u64],
+    member_start: ChunkSeq[u64],
+    member_count: ChunkSeq[u64],
     members: ChunkSeq[u64],
     kinds: ChunkSeq[u64],
 }
 
-fn names_less(in b: B, x: u32, y: u32) -> bool {
-    let nx = b.names.size(x);
-    let ny = b.names.size(y);
-    let n = if nx < ny { nx } else { ny };
-    for i in 0..n {
-        let cx = b.names.byte(x, i);
-        let cy = b.names.byte(y, i);
-        if cx != cy {
-            return cx < cy;
+fn names_less(in builder: B, x: u32, y: u32) -> bool {
+    let x_len = builder.names.size(x);
+    let y_len = builder.names.size(y);
+    let len = if x_len < y_len { x_len } else { y_len };
+    for i in 0..len {
+        let x_byte = builder.names.byte(x, i);
+        let y_byte = builder.names.byte(y, i);
+        if x_byte != y_byte {
+            return x_byte < y_byte;
         }
     }
-    nx < ny
+    x_len < y_len
 }
 
-// `order_definitions(definitions, recursive)` over `d.defs[from..]`;
+// `order_definitions(definitions, recursive)` over `defs.defs[from..]`;
 // `reach` gets 1 at each owner in, or reaching, a recursive group.
 pub fn order(
-    inout b: B,
-    in d: Defs,
+    inout builder: B,
+    in defs: Defs,
     from: u64,
     recursive: u64,
     inout reach: ChunkSeq[u32]
 ) -> Ordered {
-    let n = wrapping_sub(d.defs.len(), from);
-    let pool = match String::from_utf8(in b.names.text.as_slice()) {
+    let def_count = wrapping_sub(defs.defs.len(), from);
+    let pool = match String::from_utf8(in builder.names.text.as_slice()) {
         Option::Some(s) => s,
         Option::None => String::new(),
     };
     // definition name -> local index + 1 (a later definition wins)
     let mut index: ChunkSeq[u32] = ChunkSeq::new[u32]();
-    for i in 0..n {
-        let x = def_at(in d, add(from, i));
-        set_by_symbol(inout index, x.key, wrapping_u32(inc(i)));
+    for i in 0..def_count {
+        let def = def_at(in defs, add(from, i));
+        set_by_symbol(inout index, def.key, wrapping_u32(inc(i)));
     }
-    let mut g = Graph {
+    let mut def_graph = Graph {
         adts: ChunkSeq::new[u32](),
         node_of: ChunkSeq::new[u32](),
         starts: ChunkSeq::new[u64](),
         targets: ChunkSeq::new[u32](),
     };
-    let s = d.dw.as_slice();
-    for i in 0..n {
-        g.adts.push(0);
-        let x = def_at(in d, add(from, i));
-        let start = g.targets.len();
-        g.starts.push(start);
-        let refs = free_references_at(in s, in pool.as_str(), x.binders, x.body);
+    let words = defs.words.as_slice();
+    for i in 0..def_count {
+        def_graph.adts.push(0);
+        let def = def_at(in defs, add(from, i));
+        let start = def_graph.targets.len();
+        def_graph.starts.push(start);
+        let refs = free_references_at(in words, in pool.as_str(), def.binders, def.body);
         for k in 0..refs.len() {
-            let q = u64_at(in refs, k);
-            if wd_at(in s, q) == 0 && wd_at(in s, inc(q)) == 1 {
-                let sym = text_symbol(in b, wd_at(in s, add(q, 2)), wd_at(in s, add(q, 3)));
-                let j = u32_at(in index, w(sym));
-                if sym != 4294967295 && j != 0 {
-                    let to = wrapping_sub(j, 1);
+            let ref_at = u64_at(in refs, k);
+            if wd_at(in words, ref_at) == 0 && wd_at(in words, inc(ref_at)) == 1 {
+                let sym = text_symbol(
+                    in builder,
+                    wd_at(in words, add(ref_at, 2)),
+                    wd_at(in words, add(ref_at, 3))
+                );
+                let entry = u32_at(in index, w(sym));
+                if sym != 4294967295 && entry != 0 {
+                    let to = wrapping_sub(entry, 1);
                     let mut seen = false;
-                    for e in start..g.targets.len() {
-                        if u32_at(in g.targets, e) == to {
+                    for edge in start..def_graph.targets.len() {
+                        if u32_at(in def_graph.targets, edge) == to {
                             seen = true;
                         }
                     }
                     if !seen {
                         // in name order (`BTreeSet<Name>`)
-                        let ty = def_at(in d, add(from, w(to))).key;
-                        let mut pos = g.targets.len();
-                        g.targets.push(to);
+                        let to_key = def_at(in defs, add(from, w(to))).key;
+                        let mut pos = def_graph.targets.len();
+                        def_graph.targets.push(to);
                         loop {
                             if pos <= start {
                                 break;
                             }
-                            let prev = u32_at(in g.targets, wrapping_sub(pos, 1));
-                            let py = def_at(in d, add(from, w(prev))).key;
-                            if !names_less(in b, ty, py) {
+                            let prev = u32_at(in def_graph.targets, wrapping_sub(pos, 1));
+                            let prev_key = def_at(in defs, add(from, w(prev))).key;
+                            if !names_less(in builder, to_key, prev_key) {
                                 break;
                             }
-                            let ok1 = g.targets.try_set(pos, prev);
-                            let ok2 = g.targets.try_set(wrapping_sub(pos, 1), to);
+                            let ok1 = def_graph.targets.try_set(pos, prev);
+                            let ok2 = def_graph.targets.try_set(wrapping_sub(pos, 1), to);
                             pos = wrapping_sub(pos, 1);
                         }
                     }
@@ -222,53 +235,53 @@ pub fn order(
             }
         }
     }
-    let end = g.targets.len();
-    g.starts.push(end);
-    let sc = scc(in g);
-    let mut tainted: ChunkSeq[bool] = ChunkSeq::with_capacity[bool](n);
-    tainted.resize(n, false);
-    let mut o = Ordered {
+    let end = def_graph.targets.len();
+    def_graph.starts.push(end);
+    let tarjan = scc(in def_graph);
+    let mut tainted: ChunkSeq[bool] = ChunkSeq::with_capacity[bool](def_count);
+    tainted.resize(def_count, false);
+    let mut ordered = Ordered {
         cyclic: ChunkSeq::new[bool](),
-        ma: ChunkSeq::new[u64](),
-        mn: ChunkSeq::new[u64](),
+        member_start: ChunkSeq::new[u64](),
+        member_count: ChunkSeq::new[u64](),
         members: ChunkSeq::new[u64](),
         kinds: ChunkSeq::new[u64](),
     };
-    let mut a: u64 = 0;
+    let mut comp_start: u64 = 0;
     let mut group: ChunkSeq[u64] = ChunkSeq::new[u64]();
-    for c in 0..sc.ends.len() {
-        let z = u64_at(in sc.ends, c);
+    for component in 0..tarjan.ends.len() {
+        let comp_end = u64_at(in tarjan.ends, component);
         group.clear();
-        for k in a..z {
-            let v = widen_u64(u32_at(in sc.out, k));
+        for k in comp_start..comp_end {
+            let member = widen_u64(u32_at(in tarjan.out, k));
             // sorted insert
             let mut pos = group.len();
-            group.push(v);
+            group.push(member);
             loop {
                 if pos == 0 {
                     break;
                 }
                 let prev = u64_at(in group, wrapping_sub(pos, 1));
-                if prev <= v {
+                if prev <= member {
                     break;
                 }
                 let ok1 = group.try_set(pos, prev);
-                let ok2 = group.try_set(wrapping_sub(pos, 1), v);
+                let ok2 = group.try_set(wrapping_sub(pos, 1), member);
                 pos = wrapping_sub(pos, 1);
             }
         }
-        a = z;
+        comp_start = comp_end;
         let first = wrapping_u32(u64_at(in group, 0));
-        let cyclic = group.len() > 1 || g.has_edge(first, first);
+        let cyclic = group.len() > 1 || def_graph.has_edge(first, first);
         let mut reaches = cyclic;
         if !reaches {
             for k in 0..group.len() {
-                let v = u64_at(in group, k);
-                let ea = u64_at(in g.starts, v);
-                let ez = u64_at(in g.starts, inc(v));
-                for e in ea..ez {
-                    let t2 = widen_u64(u32_at(in g.targets, e));
-                    match tainted.try_get(t2) {
+                let member = u64_at(in group, k);
+                let edge_start = u64_at(in def_graph.starts, member);
+                let edge_end = u64_at(in def_graph.starts, inc(member));
+                for edge in edge_start..edge_end {
+                    let target = widen_u64(u32_at(in def_graph.targets, edge));
+                    match tainted.try_get(target) {
                         Option::Some(true) => reaches = true,
                         _ => {},
                     }
@@ -277,60 +290,60 @@ pub fn order(
         }
         if reaches {
             for k in 0..group.len() {
-                let v = u64_at(in group, k);
-                let ok = tainted.try_set(v, true);
-                let x = def_at(in d, add(from, v));
+                let member = u64_at(in group, k);
+                let ok = tainted.try_set(member, true);
+                let def = def_at(in defs, add(from, member));
                 loop {
-                    if reach.len() > x.owner {
+                    if reach.len() > def.owner {
                         break;
                     }
                     reach.push(0);
                 }
-                let ok2 = reach.try_set(x.owner, 1);
+                let ok2 = reach.try_set(def.owner, 1);
             }
         }
-        o.cyclic.push(cyclic);
-        o.ma.push(o.members.len());
-        o.mn.push(group.len());
+        ordered.cyclic.push(cyclic);
+        ordered.member_start.push(ordered.members.len());
+        ordered.member_count.push(group.len());
         for k in 0..group.len() {
-            let v = u64_at(in group, k);
-            let x = def_at(in d, add(from, v));
-            o.members.push(add(from, v));
+            let member = u64_at(in group, k);
+            let def = def_at(in defs, add(from, member));
+            ordered.members.push(add(from, member));
             let kind = if cyclic {
                 recursive
-            } else if x.block && x.nullary {
+            } else if def.block && def.nullary {
                 K_ABBREV
-            } else if x.block {
+            } else if def.block {
                 K_SIMP
             } else {
                 K_DEF
             };
-            o.kinds.push(kind);
+            ordered.kinds.push(kind);
         }
     }
-    o
+    ordered
 }
 
-// The declarations of `o` into `b.words`; `only` selects them (NONE: all,
+// The declarations of `ordered` into `builder.words`; `only` selects them (NONE: all,
 // else 0 or 1 against `skip_owner`), `kind` overrides every member's kind
 // (NONE: keep). Returns the number written.
 pub fn emit_ordered(
-    inout b: B,
-    in d: Defs,
-    in o: Ordered,
+    inout builder: B,
+    in defs: Defs,
+    in ordered: Ordered,
     in skip_owner: ChunkSeq[u32],
     use_skip: bool,
     kind: u64
 ) -> u64 {
     let mut count: u64 = 0;
-    for k in 0..o.cyclic.len() {
-        let ma = u64_at(in o.ma, k);
-        let mn = u64_at(in o.mn, k);
+    for k in 0..ordered.cyclic.len() {
+        let member_start = u64_at(in ordered.member_start, k);
+        let member_count = u64_at(in ordered.member_count, k);
         if use_skip {
             let mut skipped = false;
-            for i in 0..mn {
-                let x = def_at(in d, u64_at(in o.members, add(ma, i)));
-                if u32_at(in skip_owner, x.owner) != 0 {
+            for i in 0..member_count {
+                let def = def_at(in defs, u64_at(in ordered.members, add(member_start, i)));
+                if u32_at(in skip_owner, def.owner) != 0 {
                     skipped = true;
                 }
             }
@@ -338,23 +351,26 @@ pub fn emit_ordered(
                 continue;
             }
         }
-        let cyclic = o.cyclic.try_get(k).unwrap_or(false);
+        let cyclic = match ordered.cyclic.try_get(k) {
+            Option::Some(flag) => flag,
+            Option::None => false,
+        };
         if cyclic {
-            b.w(D_MUTUAL_DEFS);
-            b.w(mn);
+            builder.w(D_MUTUAL_DEFS);
+            builder.w(member_count);
         }
-        for i in 0..mn {
-            let x = def_at(in d, u64_at(in o.members, add(ma, i)));
+        for i in 0..member_count {
+            let def = def_at(in defs, u64_at(in ordered.members, add(member_start, i)));
             if !cyclic {
-                b.w(D_DEF);
+                builder.w(D_DEF);
             }
             if kind == NONE {
-                b.w(u64_at(in o.kinds, add(ma, i)));
+                builder.w(u64_at(in ordered.kinds, add(member_start, i)));
             } else {
-                b.w(kind);
+                builder.w(kind);
             }
-            for j in inc(x.at)..x.end {
-                b.w(u64_at(in d.dw, j));
+            for j in inc(def.at)..def.end {
+                builder.w(u64_at(in defs.words, j));
             }
         }
         count = inc(count);
@@ -362,18 +378,18 @@ pub fn emit_ordered(
     count
 }
 
-// Whether the body of definition `x` references `n$fuel` (`fuel_sym`):
+// Whether the body of definition `def` references `n$fuel` (`fuel_sym`):
 // `Term::references` of the body.
-pub fn references_symbol(in b: B, in d: Defs, x: Def, fuel_sym: u32) -> bool {
-    let s = d.dw.as_slice();
-    let body = s[x.body..x.end];
+pub fn references_symbol(in builder: B, in defs: Defs, def: Def, fuel_sym: u32) -> bool {
+    let words = defs.words.as_slice();
+    let body = words[def.body..def.end];
     let refs = references(in body, in "");
     for k in 0..refs.len() {
-        let q = u64_at(in refs, k);
-        if wd_at(in body, q) == 0 && wd_at(in body, inc(q)) == 1 {
-            let off = wd_at(in body, add(q, 2));
-            let len = wd_at(in body, add(q, 3));
-            if off == b.names.start(fuel_sym) && len == b.names.size(fuel_sym) {
+        let ref_at = u64_at(in refs, k);
+        if wd_at(in body, ref_at) == 0 && wd_at(in body, inc(ref_at)) == 1 {
+            let off = wd_at(in body, add(ref_at, 2));
+            let len = wd_at(in body, add(ref_at, 3));
+            if off == builder.names.start(fuel_sym) && len == builder.names.size(fuel_sym) {
                 return true;
             }
         }

@@ -24,9 +24,9 @@ pub const ARG_WORDS: u64 = 4;
 pub copy struct PRow {
     name: u32,
     pass: u64,
-    // projection path indices: ops[qa..qa+qn]
-    qa: u64,
-    qn: u64,
+    // projection path indices: ops[proj_start..proj_start+proj_count]
+    proj_start: u64,
+    proj_count: u64,
     ty: u32,
 }
 
@@ -38,204 +38,210 @@ pub struct Fun {
     params: ChunkSeq[PRow],
     result: u32,
     effects: u32,
-    vids: ChunkSeq[u64],
-    vtys: ChunkSeq[u32],
-    lnames: ChunkSeq[u32],
-    ltys: ChunkSeq[u32],
+    value_ids: ChunkSeq[u64],
+    value_tys: ChunkSeq[u32],
+    local_names: ChunkSeq[u32],
+    local_tys: ChunkSeq[u32],
     // bits per set and words per set
-    nbits: u64,
-    nw: u64,
+    set_bits: u64,
+    set_words: u64,
 }
 
-pub fn fun(in p: Program, in fx: Fns, fi: u64) -> Fun {
-    let row = p.function(fi);
-    let mut i = row.ha;
-    let mut f = Fun {
+pub fn fun(in program: Program, in fns: Fns, func_index: u64) -> Fun {
+    let row = program.function(func_index);
+    let mut at = row.ha;
+    let mut func = Fun {
         row: row,
-        sig: fx.find(row.name),
+        sig: fns.find(row.name),
         params: ChunkSeq::new[PRow](),
         result: 0,
         effects: 0,
-        vids: ChunkSeq::new[u64](),
-        vtys: ChunkSeq::new[u32](),
-        lnames: ChunkSeq::new[u32](),
-        ltys: ChunkSeq::new[u32](),
-        nbits: 0,
-        nw: 0,
+        value_ids: ChunkSeq::new[u64](),
+        value_tys: ChunkSeq::new[u32](),
+        local_names: ChunkSeq::new[u32](),
+        local_tys: ChunkSeq::new[u32](),
+        set_bits: 0,
+        set_words: 0,
     };
-    let np = p.op(i);
-    i = inc(i);
-    for k in 0..np {
-        let name = n32(p.op(i));
-        let pass = p.op(inc(i));
-        let qn = p.op(add(i, 2));
-        let qa = add(i, 3);
-        i = add(qa, qn);
-        let ty = n32(p.op(i));
+    let param_count = program.op(at);
+    at = inc(at);
+    for k in 0..param_count {
+        let name = n32(program.op(at));
+        let pass = program.op(inc(at));
+        let proj_count = program.op(add(at, 2));
+        let proj_start = add(at, 3);
+        at = add(proj_start, proj_count);
+        let ty = n32(program.op(at));
         // type, span start and end
-        i = add(i, 3);
-        f.params.push(PRow { name: name, pass: pass, qa: qa, qn: qn, ty: ty });
+        at = add(at, 3);
+        func.params.push(PRow {
+            name: name,
+            pass: pass,
+            proj_start: proj_start,
+            proj_count: proj_count,
+            ty: ty
+        });
     }
-    f.result = n32(p.op(i));
-    f.effects = n32(p.op(inc(i)));
-    i = add(i, 2);
-    let nb = p.op(i);
-    i = add(inc(i), wrapping_mul(nb, 2));
-    let nc = p.op(i);
-    i = add(inc(i), nc);
-    let nv = p.op(i);
-    i = inc(i);
-    for k in 0..nv {
-        let v = p.op(i);
-        let t = n32(p.op(inc(i)));
-        f.vids.push(v);
-        f.vtys.push(t);
-        i = add(i, 2);
+    func.result = n32(program.op(at));
+    func.effects = n32(program.op(inc(at)));
+    at = add(at, 2);
+    let bound_count = program.op(at);
+    at = add(inc(at), wrapping_mul(bound_count, 2));
+    let name_count = program.op(at);
+    at = add(inc(at), name_count);
+    let value_count = program.op(at);
+    at = inc(at);
+    for k in 0..value_count {
+        let value = program.op(at);
+        let value_ty = n32(program.op(inc(at)));
+        func.value_ids.push(value);
+        func.value_tys.push(value_ty);
+        at = add(at, 2);
     }
-    let nl = p.op(i);
-    i = inc(i);
-    for k in 0..nl {
-        let s = n32(p.op(i));
-        let t = n32(p.op(inc(i)));
-        f.lnames.push(s);
-        f.ltys.push(t);
-        i = add(i, 2);
+    let local_count = program.op(at);
+    at = inc(at);
+    for k in 0..local_count {
+        let slot = n32(program.op(at));
+        let slot_ty = n32(program.op(inc(at)));
+        func.local_names.push(slot);
+        func.local_tys.push(slot_ty);
+        at = add(at, 2);
     }
-    f.nbits = add(nl, nv);
-    f.nw = wrapping_add(f.nbits, 63) / 64;
-    f
+    func.set_bits = add(local_count, value_count);
+    func.set_words = wrapping_add(func.set_bits, 63) / 64;
+    func
 }
 
 impl Fun {
     pub fn nlocals(in self) -> u64 {
-        self.lnames.len()
+        self.local_names.len()
     }
 
-    // The bit of slot `s`, or NONE64 when it is not a local.
-    pub fn slot_bit(in self, s: u32) -> u64 {
-        for k in 0..self.lnames.len() {
-            if u32_at(in self.lnames, k) == s {
-                return k;
+    // The bit of slot `sym`, or NONE64 when it is not a local.
+    pub fn slot_bit(in self, sym: u32) -> u64 {
+        for bit_index in 0..self.local_names.len() {
+            if u32_at(in self.local_names, bit_index) == sym {
+                return bit_index;
             }
         }
         NONE64
     }
 
-    // The bit of value `v`, or NONE64 when it has no type.
-    pub fn value_bit(in self, v: u64) -> u64 {
+    // The bit of value `value`, or NONE64 when it has no type.
+    pub fn value_bit(in self, value: u64) -> u64 {
         let mut lo: u64 = 0;
-        let mut hi = self.vids.len();
+        let mut hi = self.value_ids.len();
         loop {
             if lo >= hi {
                 break;
             }
             let mid = add(lo, wrapping_sub(hi, lo) / 2);
-            if u64_at(in self.vids, mid) < v {
+            if u64_at(in self.value_ids, mid) < value {
                 lo = inc(mid);
             } else {
                 hi = mid;
             }
         }
-        if lo < self.vids.len() && u64_at(in self.vids, lo) == v {
-            add(self.lnames.len(), lo)
+        if lo < self.value_ids.len() && u64_at(in self.value_ids, lo) == value {
+            add(self.local_names.len(), lo)
         } else {
             NONE64
         }
     }
 
     // `f.locals.get(s)`: the slot's type, or NONE32.
-    pub fn local_ty(in self, s: u32) -> u32 {
-        let k = self.slot_bit(s);
-        if k == NONE64 {
+    pub fn local_ty(in self, sym: u32) -> u32 {
+        let bit_index = self.slot_bit(sym);
+        if bit_index == NONE64 {
             NONE32
         } else {
-            u32_at(in self.ltys, k)
+            u32_at(in self.local_tys, bit_index)
         }
     }
 
     // `f.values.get(v)`: the value's type, or NONE32.
-    pub fn value_ty(in self, v: u64) -> u32 {
-        let k = self.value_bit(v);
-        if k == NONE64 {
+    pub fn value_ty(in self, value: u64) -> u32 {
+        let bit_index = self.value_bit(value);
+        if bit_index == NONE64 {
             NONE32
         } else {
-            u32_at(in self.vtys, wrapping_sub(k, self.lnames.len()))
+            u32_at(in self.value_tys, wrapping_sub(bit_index, self.local_names.len()))
         }
     }
 
     pub fn param(in self, k: u64) -> PRow {
         match self.params.try_get(k) {
             Option::Some(r) => r,
-            Option::None => PRow { name: 0, pass: 0, qa: 0, qn: 0, ty: 0 },
+            Option::None => PRow { name: 0, pass: 0, proj_start: 0, proj_count: 0, ty: 0 },
         }
     }
 
     // The type of the local behind bit `k`.
     pub fn bit_ty(in self, k: u64) -> u32 {
-        if k < self.lnames.len() {
-            u32_at(in self.ltys, k)
+        if k < self.local_names.len() {
+            u32_at(in self.local_tys, k)
         } else {
-            u32_at(in self.vtys, wrapping_sub(k, self.lnames.len()))
+            u32_at(in self.value_tys, wrapping_sub(k, self.local_names.len()))
         }
     }
 
     // Block `k` of the function.
-    pub fn block(in self, in p: Program, k: u64) -> BlockRow {
-        p.block(add(self.row.b0, k))
+    pub fn block(in self, in program: Program, k: u64) -> BlockRow {
+        program.block(add(self.row.b0, k))
     }
 }
 
 // ----- sets ---------------------------------------------------------------------
 
-pub fn set_new(nw: u64) -> ChunkSeq[u64] {
-    let mut s: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](nw);
-    for i in 0..nw {
-        s.push(0);
+pub fn set_new(set_words: u64) -> ChunkSeq[u64] {
+    let mut set: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](set_words);
+    for i in 0..set_words {
+        set.push(0);
     }
-    s
+    set
 }
 
 fn bit(k: u64) -> u64 {
     wrapping_shl_u64(1, wrapping_u32(k % 64))
 }
 
-pub fn set_add(inout s: ChunkSeq[u64], k: u64) {
+pub fn set_add(inout set: ChunkSeq[u64], k: u64) {
     if k == NONE64 {
         return;
     }
-    let i = k / 64;
-    let x = u64_at(in s, i) | bit(k);
-    let ok = s.try_set(i, x);
+    let word_index = k / 64;
+    let word = u64_at(in set, word_index) | bit(k);
+    let ok = set.try_set(word_index, word);
 }
 
-pub fn set_remove(inout s: ChunkSeq[u64], k: u64) -> bool {
+pub fn set_remove(inout set: ChunkSeq[u64], k: u64) -> bool {
     if k == NONE64 {
         return false;
     }
-    let i = k / 64;
-    let x = u64_at(in s, i);
-    let ok = s.try_set(i, x & (bit(k) ^ 18446744073709551615));
-    (x & bit(k)) != 0
+    let word_index = k / 64;
+    let word = u64_at(in set, word_index);
+    let ok = set.try_set(word_index, word & (bit(k) ^ 18446744073709551615));
+    (word & bit(k)) != 0
 }
 
-pub fn set_has(in s: ChunkSeq[u64], k: u64) -> bool {
+pub fn set_has(in set: ChunkSeq[u64], k: u64) -> bool {
     if k == NONE64 {
         return false;
     }
-    (u64_at(in s, k / 64) & bit(k)) != 0
+    (u64_at(in set, k / 64) & bit(k)) != 0
 }
 
-// The next member of `s` at or after `k`, or NONE64.
-pub fn set_next(in s: ChunkSeq[u64], k: u64, nbits: u64) -> u64 {
+// The next member of `set` at or after `k`, or NONE64.
+pub fn set_next(in set: ChunkSeq[u64], k: u64, set_bits: u64) -> u64 {
     let mut i = k;
     loop {
-        if i >= nbits {
+        if i >= set_bits {
             return NONE64;
         }
-        let x = wrapping_shr_u64(u64_at(in s, i / 64), wrapping_u32(i % 64));
-        if x == 0 {
+        let word = wrapping_shr_u64(u64_at(in set, i / 64), wrapping_u32(i % 64));
+        if word == 0 {
             i = wrapping_mul(inc(i / 64), 64);
-        } else if (x & 1) != 0 {
+        } else if (word & 1) != 0 {
             return i;
         } else {
             i = inc(i);
@@ -243,131 +249,131 @@ pub fn set_next(in s: ChunkSeq[u64], k: u64, nbits: u64) -> u64 {
     }
 }
 
-// The members of block `b`'s set in `all` (nw words per block) into `s`.
-fn union_block(inout s: ChunkSeq[u64], in all: ChunkSeq[u64], b: u64, nw: u64) {
-    for i in 0..nw {
-        let x = u64_at(in s, i) | u64_at(in all, add(wrapping_mul(b, nw), i));
-        let ok = s.try_set(i, x);
+// The members of block `block`'s set in `all` (`set_words` words per block) into `set`.
+fn union_block(inout set: ChunkSeq[u64], in all: ChunkSeq[u64], block: u64, set_words: u64) {
+    for i in 0..set_words {
+        let word = u64_at(in set, i) | u64_at(in all, add(wrapping_mul(block, set_words), i));
+        let ok = set.try_set(i, word);
     }
 }
 
-pub fn block_has(in all: ChunkSeq[u64], b: u64, nw: u64, k: u64) -> bool {
+pub fn block_has(in all: ChunkSeq[u64], block: u64, set_words: u64, k: u64) -> bool {
     if k == NONE64 {
         return false;
     }
-    let x = u64_at(in all, add(wrapping_mul(b, nw), k / 64));
-    (x & bit(k)) != 0
+    let word = u64_at(in all, add(wrapping_mul(block, set_words), k / 64));
+    (word & bit(k)) != 0
 }
 
 // ----- operands -----------------------------------------------------------------
 
-// The index after the pattern at `i`.
-pub fn pattern_end(in p: Program, i: u64) -> u64 {
-    let kind = p.op(i);
-    let j = add(i, 3);
+// The index after the pattern at `at`.
+pub fn pattern_end(in program: Program, at: u64) -> u64 {
+    let kind = program.op(at);
+    let payload = add(at, 3);
     if kind == Pat::Bind {
-        inc(j)
+        inc(payload)
     } else if kind == Pat::Literal {
-        add(j, 3)
+        add(payload, 3)
     } else if kind == Pat::Tuple {
-        let n = p.op(j);
-        let mut k = inc(j);
-        for m in 0..n {
-            k = pattern_end(in p, k);
+        let count = program.op(payload);
+        let mut k = inc(payload);
+        for m in 0..count {
+            k = pattern_end(in program, k);
         }
         k
     } else if kind == Pat::Constructor {
-        let n = p.op(add(j, 2));
-        let mut k = add(j, 3);
-        for m in 0..n {
-            k = pattern_end(in p, inc(k));
+        let count = program.op(add(payload, 2));
+        let mut k = add(payload, 3);
+        for m in 0..count {
+            k = pattern_end(in program, inc(k));
         }
         k
     } else {
-        j
+        payload
     }
 }
 
-// `slots`: the bits of the slots the pattern at `i` binds, added to `s`.
-pub fn pattern_slots(in p: Program, in f: Fun, i: u64, inout s: ChunkSeq[u64]) {
-    let kind = p.op(i);
-    let j = add(i, 3);
+// `slots`: the bits of the slots the pattern at `at` binds, added to `slots`.
+pub fn pattern_slots(in program: Program, in func: Fun, at: u64, inout slots: ChunkSeq[u64]) {
+    let kind = program.op(at);
+    let payload = add(at, 3);
     if kind == Pat::Bind {
-        set_add(inout s, f.slot_bit(n32(p.op(j))));
+        set_add(inout slots, func.slot_bit(n32(program.op(payload))));
     } else if kind == Pat::Tuple {
-        let n = p.op(j);
-        let mut k = inc(j);
-        for m in 0..n {
-            pattern_slots(in p, in f, k, inout s);
-            k = pattern_end(in p, k);
+        let count = program.op(payload);
+        let mut k = inc(payload);
+        for m in 0..count {
+            pattern_slots(in program, in func, k, inout slots);
+            k = pattern_end(in program, k);
         }
     } else if kind == Pat::Constructor {
-        let n = p.op(add(j, 2));
-        let mut k = add(j, 3);
-        for m in 0..n {
-            pattern_slots(in p, in f, inc(k), inout s);
-            k = pattern_end(in p, inc(k));
+        let count = program.op(add(payload, 2));
+        let mut k = add(payload, 3);
+        for m in 0..count {
+            pattern_slots(in program, in func, inc(k), inout slots);
+            k = pattern_end(in program, inc(k));
         }
     }
 }
 
 // The root of a `Write` place `a.b.c`: the symbol of its first part, and
 // whether it has more.
-pub fn place_root(inout names: Names, s: u32, inout dotted: bool) -> u32 {
-    let n = names.size(s);
-    let mut b: ChunkSeq[u8] = ChunkSeq::new[u8]();
+pub fn place_root(inout names: Names, sym: u32, inout dotted: bool) -> u32 {
+    let len = names.size(sym);
+    let mut prefix: ChunkSeq[u8] = ChunkSeq::new[u8]();
     dotted = false;
-    for i in 0..n {
-        let c = names.byte(s, i);
-        if c == 46 {
+    for i in 0..len {
+        let byte = names.byte(sym, i);
+        if byte == 46 {
             dotted = true;
             break;
         }
-        b.push(c);
+        prefix.push(byte);
     }
     if !dotted {
-        return s;
+        return sym;
     }
-    names.intern(in b.as_slice())
+    names.intern(in prefix.as_slice())
 }
 
-// The argument `k` of an argument list at `i`: its first word.
-pub fn arg_at(i: u64, k: u64) -> u64 {
-    add(inc(i), wrapping_mul(k, ARG_WORDS))
+// The argument `k` of an argument list at `at`: its first word.
+pub fn arg_at(at: u64, k: u64) -> u64 {
+    add(inc(at), wrapping_mul(k, ARG_WORDS))
 }
 
-// The index after an argument list at `i`.
-pub fn args_end(in p: Program, i: u64) -> u64 {
-    arg_at(i, p.op(i))
+// The index after an argument list at `at`.
+pub fn args_end(in program: Program, at: u64) -> u64 {
+    arg_at(at, program.op(at))
 }
 
 // ----- the gate -----------------------------------------------------------------
 
-fn has_effects(in t: Types, row_ty: u32) -> bool {
-    let n = t.node(row_ty);
+fn has_effects(in types: Types, row_ty: u32) -> bool {
+    let node = types.node(row_ty);
     // A row type holds its row in `r2`.
-    let row = t.row(n.r2);
+    let row = types.row(node.r2);
     row.n > 0 || row.tail != 0
 }
 
 // `effectful_arrow`.
-pub fn effectful_arrow(in t: Types, ty: u32) -> bool {
-    let n = t.node(ty);
-    if n.kind == TyKind::Fn {
-        let row = t.row(n.r2);
+pub fn effectful_arrow(in types: Types, ty: u32) -> bool {
+    let node = types.node(ty);
+    if node.kind == TyKind::Fn {
+        let row = types.row(node.r2);
         if row.n > 0 || row.tail != 0 {
             return true;
         }
-        for i in 0..w(n.n) {
-            if effectful_arrow(in t, t.arg(ty, i)) {
+        for i in 0..w(node.n) {
+            if effectful_arrow(in types, types.arg(ty, i)) {
                 return true;
             }
         }
-        return effectful_arrow(in t, n.r);
+        return effectful_arrow(in types, node.r);
     }
-    if n.kind == TyKind::Named || n.kind == TyKind::Tuple {
-        for i in 0..w(n.n) {
-            if effectful_arrow(in t, t.arg(ty, i)) {
+    if node.kind == TyKind::Named || node.kind == TyKind::Tuple {
+        for i in 0..w(node.n) {
+            if effectful_arrow(in types, types.arg(ty, i)) {
                 return true;
             }
         }
@@ -377,33 +383,39 @@ pub fn effectful_arrow(in t: Types, ty: u32) -> bool {
 
 // The gate of `extract_function_nodes`: whether the CFG extractor takes
 // the function (before its closures).
-pub fn takes(in p: Program, in t: Types, in wd: World, in fx: Fns, in f: Fun) -> bool {
-    for k in 0..f.vtys.len() {
-        if effectful_arrow(in t, u32_at(in f.vtys, k)) {
+pub fn takes(
+    in program: Program,
+    in types: Types,
+    in world: World,
+    in fns: Fns,
+    in func: Fun
+) -> bool {
+    for k in 0..func.value_tys.len() {
+        if effectful_arrow(in types, u32_at(in func.value_tys, k)) {
             return false;
         }
     }
-    if has_effects(in t, f.effects) {
+    if has_effects(in types, func.effects) {
         return false;
     }
-    for bi in 0..f.row.bc {
-        let blk = f.block(in p, bi);
-        for ii in 0..blk.ic {
-            let ins = p.inst(add(blk.i0, ii));
-            if ins.fallible != 0
-                || wd.is_partial(ins.s0, ins.s1)
-                || wd.may_overflow(ins.s0, ins.s1) {
+    for block_index in 0..func.row.bc {
+        let block = func.block(in program, block_index);
+        for inst_index in 0..block.ic {
+            let inst = program.inst(add(block.i0, inst_index));
+            if inst.fallible != 0
+                || world.is_partial(inst.s0, inst.s1)
+                || world.may_overflow(inst.s0, inst.s1) {
                 return false;
             }
-            if ins.op == Op::Handle
-                || ins.op == Op::Try
-                || ins.op == Op::Index
-                || ins.op == Op::Seq {
+            if inst.op == Op::Handle
+                || inst.op == Op::Try
+                || inst.op == Op::Index
+                || inst.op == Op::Seq {
                 return false;
             }
-            if ins.op == Op::Call {
-                let callee = fx.find(n32(p.op(ins.a)));
-                if callee == NONE32 || fx.sig(w(callee)).effectful {
+            if inst.op == Op::Call {
+                let callee = fns.find(n32(program.op(inst.a)));
+                if callee == NONE32 || fns.sig(w(callee)).effectful {
                     return false;
                 }
             }
@@ -417,26 +429,26 @@ pub fn takes(in p: Program, in t: Types, in wd: World, in fx: Fns, in f: Fun) ->
 // `arm_bindings`: per block, the index of the pattern of its first
 // instruction when the block is a match arm and that instruction is a
 // `Bind`, else NONE64.
-pub fn arm_bindings(in p: Program, in f: Fun) -> ChunkSeq[u64] {
-    let mut arms: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](f.row.bc);
-    for bi in 0..f.row.bc {
+pub fn arm_bindings(in program: Program, in func: Fun) -> ChunkSeq[u64] {
+    let mut arms: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](func.row.bc);
+    for block_index in 0..func.row.bc {
         arms.push(NONE64);
     }
-    for bi in 0..f.row.bc {
-        let blk = f.block(in p, bi);
-        if blk.term == Term::Match {
-            let n = p.op(inc(blk.ta));
-            let mut k = add(blk.ta, 2);
-            for m in 0..n {
-                k = pattern_end(in p, k);
-                let target = p.op(k);
-                k = inc(k);
-                let tb = f.block(in p, target);
-                if tb.ic > 0 {
-                    let first = p.inst(tb.i0);
-                    if first.op == Op::Bind {
+    for block_index in 0..func.row.bc {
+        let block = func.block(in program, block_index);
+        if block.term == Term::Match {
+            let arm_count = program.op(inc(block.ta));
+            let mut at = add(block.ta, 2);
+            for m in 0..arm_count {
+                at = pattern_end(in program, at);
+                let target = program.op(at);
+                at = inc(at);
+                let target_block = func.block(in program, target);
+                if target_block.ic > 0 {
+                    let first_inst = program.inst(target_block.i0);
+                    if first_inst.op == Op::Bind {
                         // operands: value, then the pattern
-                        let ok = arms.try_set(target, inc(first.a));
+                        let ok = arms.try_set(target, inc(first_inst.a));
                     }
                 }
             }
@@ -445,237 +457,242 @@ pub fn arm_bindings(in p: Program, in f: Fun) -> ChunkSeq[u64] {
     arms
 }
 
-// The inout arguments with a place of the argument list at `i`: their
+// The inout arguments with a place of the argument list at `at`: their
 // roots' bits as uses and definitions.
 fn inout_roots(
-    in p: Program,
-    in f: Fun,
-    i: u64,
+    in program: Program,
+    in func: Fun,
+    at: u64,
     inout uses: ChunkSeq[u64],
     inout defs: ChunkSeq[u64]
 ) {
-    let n = p.op(i);
-    for k in 0..n {
-        let a = arg_at(i, k);
-        let root = p.op(add(a, 2));
-        if p.op(a) == TyPass::Inout && root != 0 {
-            let s = f.slot_bit(n32(wrapping_sub(root, 1)));
-            set_add(inout uses, s);
-            set_add(inout defs, s);
+    let arg_count = program.op(at);
+    for k in 0..arg_count {
+        let arg = arg_at(at, k);
+        let root = program.op(add(arg, 2));
+        if program.op(arg) == TyPass::Inout && root != 0 {
+            let slot = func.slot_bit(n32(wrapping_sub(root, 1)));
+            set_add(inout uses, slot);
+            set_add(inout defs, slot);
         }
     }
 }
 
-fn arg_values(in p: Program, in f: Fun, i: u64, inout uses: ChunkSeq[u64]) {
-    let n = p.op(i);
-    for k in 0..n {
-        set_add(inout uses, f.value_bit(p.op(inc(arg_at(i, k)))));
+fn arg_values(in program: Program, in func: Fun, at: u64, inout uses: ChunkSeq[u64]) {
+    let arg_count = program.op(at);
+    for k in 0..arg_count {
+        set_add(inout uses, func.value_bit(program.op(inc(arg_at(at, k)))));
     }
 }
 
-fn value_list(in p: Program, in f: Fun, i: u64, inout uses: ChunkSeq[u64]) {
-    let n = p.op(i);
-    for k in 0..n {
-        set_add(inout uses, f.value_bit(p.op(add(inc(i), k))));
+fn value_list(in program: Program, in func: Fun, at: u64, inout uses: ChunkSeq[u64]) {
+    let value_count = program.op(at);
+    for k in 0..value_count {
+        set_add(inout uses, func.value_bit(program.op(add(inc(at), k))));
     }
 }
 
-// `uses_defs` of instruction `ins`.
+// `uses_defs` of instruction `inst`.
 pub fn uses_defs(
-    in p: Program,
+    in program: Program,
     inout names: Names,
-    in fx: Fns,
-    in f: Fun,
-    ins: InstRow,
+    in fns: Fns,
+    in func: Fun,
+    inst: InstRow,
     inout uses: ChunkSeq[u64],
     inout defs: ChunkSeq[u64]
 ) {
-    let a = ins.a;
-    let op = ins.op;
+    let operand_at = inst.a;
+    let op = inst.op;
     if op == Op::Read {
-        let root = n32(p.op(a));
-        let k = f.slot_bit(root);
-        if k != NONE64 || fx.find(root) == NONE32 {
-            set_add(inout uses, k);
+        let root = n32(program.op(operand_at));
+        let slot = func.slot_bit(root);
+        if slot != NONE64 || fns.find(root) == NONE32 {
+            set_add(inout uses, slot);
         }
     } else if op == Op::Bind {
-        set_add(inout uses, f.value_bit(p.op(a)));
-        pattern_slots(in p, in f, inc(a), inout defs);
+        set_add(inout uses, func.value_bit(program.op(operand_at)));
+        pattern_slots(in program, in func, inc(operand_at), inout defs);
     } else if op == Op::Write {
-        set_add(inout uses, f.value_bit(p.op(add(a, 2))));
+        set_add(inout uses, func.value_bit(program.op(add(operand_at, 2))));
         let mut dotted = false;
-        let root = place_root(inout names, n32(p.op(a)), inout dotted);
-        let k = f.slot_bit(root);
-        if dotted || !names.spells(n32(p.op(inc(a))), in "=".as_bytes()) {
-            set_add(inout uses, k);
+        let root = place_root(inout names, n32(program.op(operand_at)), inout dotted);
+        let slot = func.slot_bit(root);
+        if dotted || !names.spells(n32(program.op(inc(operand_at))), in "=".as_bytes()) {
+            set_add(inout uses, slot);
         }
-        set_add(inout defs, k);
+        set_add(inout defs, slot);
     } else if op == Op::Unary {
-        set_add(inout uses, f.value_bit(p.op(inc(a))));
+        set_add(inout uses, func.value_bit(program.op(inc(operand_at))));
     } else if op == Op::Project {
-        set_add(inout uses, f.value_bit(p.op(a)));
+        set_add(inout uses, func.value_bit(program.op(operand_at)));
     } else if op == Op::Binary {
-        set_add(inout uses, f.value_bit(p.op(inc(a))));
-        set_add(inout uses, f.value_bit(p.op(add(a, 2))));
+        set_add(inout uses, func.value_bit(program.op(inc(operand_at))));
+        set_add(inout uses, func.value_bit(program.op(add(operand_at, 2))));
     } else if op == Op::Index {
-        set_add(inout uses, f.value_bit(p.op(a)));
-        set_add(inout uses, f.value_bit(p.op(inc(a))));
+        set_add(inout uses, func.value_bit(program.op(operand_at)));
+        set_add(inout uses, func.value_bit(program.op(inc(operand_at))));
     } else if op == Op::Tuple {
-        value_list(in p, in f, a, inout uses);
+        value_list(in program, in func, operand_at, inout uses);
     } else if op == Op::Vector {
-        value_list(in p, in f, inc(a), inout uses);
+        value_list(in program, in func, inc(operand_at), inout uses);
     } else if op == Op::Data {
-        let n = p.op(inc(a));
-        for k in 0..n {
-            set_add(inout uses, f.value_bit(p.op(add(a, add(3, wrapping_mul(k, 2))))));
+        let count = program.op(inc(operand_at));
+        for k in 0..count {
+            set_add(
+                inout uses,
+                func.value_bit(program.op(add(operand_at, add(3, wrapping_mul(k, 2)))))
+            );
         }
     } else if op == Op::Closure {
-        let c = fx.closure(f.row.name, w(ins.dest));
-        if c != NONE32 {
-            let row = fx.closure_at(w(c));
-            for k in 0..row.n {
-                set_add(inout uses, f.slot_bit(fx.capture(row, k)));
+        let closure_index = fns.closure(func.row.name, w(inst.dest));
+        if closure_index != NONE32 {
+            let closure = fns.closure_at(w(closure_index));
+            for k in 0..closure.n {
+                set_add(inout uses, func.slot_bit(fns.capture(closure, k)));
             }
         }
     } else if op == Op::Indirect {
-        set_add(inout uses, f.value_bit(p.op(a)));
-        arg_values(in p, in f, inc(a), inout uses);
-        inout_roots(in p, in f, inc(a), inout uses, inout defs);
+        set_add(inout uses, func.value_bit(program.op(operand_at)));
+        arg_values(in program, in func, inc(operand_at), inout uses);
+        inout_roots(in program, in func, inc(operand_at), inout uses, inout defs);
     } else if op == Op::Call {
-        let args = inc(a);
-        arg_values(in p, in f, args, inout uses);
-        let callee = fx.find(n32(p.op(a)));
+        let args_at = inc(operand_at);
+        arg_values(in program, in func, args_at, inout uses);
+        let callee = fns.find(n32(program.op(operand_at)));
         if callee != NONE32 {
-            let sig = fx.sig(w(callee));
-            let n = p.op(args);
-            for k in 0..n {
-                if k < sig.pn && widen_u64(fx.param(sig, k).pass) == TyPass::Inout {
-                    let root = p.op(add(arg_at(args, k), 2));
+            let sig = fns.sig(w(callee));
+            let count = program.op(args_at);
+            for k in 0..count {
+                if k < sig.param_count && widen_u64(fns.param(sig, k).pass) == TyPass::Inout {
+                    let root = program.op(add(arg_at(args_at, k), 2));
                     if root != 0 {
-                        let s = f.slot_bit(n32(wrapping_sub(root, 1)));
-                        set_add(inout uses, s);
-                        set_add(inout defs, s);
+                        let arg_slot = func.slot_bit(n32(wrapping_sub(root, 1)));
+                        set_add(inout uses, arg_slot);
+                        set_add(inout defs, arg_slot);
                     }
                 }
             }
         }
     } else if op == Op::Tiled || op == Op::Seq || op == Op::Fip {
-        arg_values(in p, in f, inc(a), inout uses);
-        inout_roots(in p, in f, inc(a), inout uses, inout defs);
+        arg_values(in program, in func, inc(operand_at), inout uses);
+        inout_roots(in program, in func, inc(operand_at), inout uses, inout defs);
     }
 }
 
-fn clear(inout s: ChunkSeq[u64]) {
-    for i in 0..s.len() {
-        let ok = s.try_set(i, 0);
+fn clear(inout set: ChunkSeq[u64]) {
+    for i in 0..set.len() {
+        let ok = set.try_set(i, 0);
     }
 }
 
 // `liveness`: per block, the locals live on entry (nw words each).
 pub fn liveness(
-    in p: Program,
+    in program: Program,
     inout names: Names,
-    in fx: Fns,
-    in f: Fun,
+    in fns: Fns,
+    in func: Fun,
     in arms: ChunkSeq[u64]
 ) -> ChunkSeq[u64] {
-    let nw = f.nw;
-    let nb = f.row.bc;
-    let mut live = set_new(wrapping_mul(nb, nw));
-    let mut required = set_new(nw);
-    let mut uses = set_new(nw);
-    let mut defs = set_new(nw);
-    let mut incoming = set_new(nw);
+    let set_words = func.set_words;
+    let block_count = func.row.bc;
+    let mut live = set_new(wrapping_mul(block_count, set_words));
+    let mut required = set_new(set_words);
+    let mut uses = set_new(set_words);
+    let mut defs = set_new(set_words);
+    let mut incoming = set_new(set_words);
     loop {
         let mut changed = false;
-        let mut id = nb;
+        let mut block_id = block_count;
         loop {
-            if id == 0 {
+            if block_id == 0 {
                 break;
             }
-            id = wrapping_sub(id, 1);
-            let blk = f.block(in p, id);
+            block_id = wrapping_sub(block_id, 1);
+            let block = func.block(in program, block_id);
             clear(inout required);
-            if blk.term == Term::Return {
-                set_add(inout required, f.value_bit(p.op(blk.ta)));
-                for k in 0..f.params.len() {
-                    let q = f.param(k);
-                    if q.pass == TyPass::Inout {
-                        set_add(inout required, f.slot_bit(q.name));
+            if block.term == Term::Return {
+                set_add(inout required, func.value_bit(program.op(block.ta)));
+                for k in 0..func.params.len() {
+                    let param_row = func.param(k);
+                    if param_row.pass == TyPass::Inout {
+                        set_add(inout required, func.slot_bit(param_row.name));
                     }
                 }
-            } else if blk.term == Term::Jump {
-                let target = p.op(blk.ta);
-                union_block(inout required, in live, target, nw);
-                let tb = f.block(in p, target);
+            } else if block.term == Term::Jump {
+                let target = program.op(block.ta);
+                union_block(inout required, in live, target, set_words);
+                let target_block = func.block(in program, target);
                 // the target's params: the last list of its header
-                let tps = block_params(in p, tb);
-                let n = p.op(add(blk.ta, 1));
-                let np = p.op(tps);
-                for k in 0..n {
-                    if k < np {
-                        let param = p.op(add(inc(tps), k));
-                        let arg = p.op(add(add(blk.ta, 2), k));
-                        if set_remove(inout required, f.value_bit(param)) {
-                            set_add(inout required, f.value_bit(arg));
+                let params_at = block_params(in program, target_block);
+                let arg_count = program.op(add(block.ta, 1));
+                let param_count = program.op(params_at);
+                for k in 0..arg_count {
+                    if k < param_count {
+                        let param = program.op(add(inc(params_at), k));
+                        let arg = program.op(add(add(block.ta, 2), k));
+                        if set_remove(inout required, func.value_bit(param)) {
+                            set_add(inout required, func.value_bit(arg));
                         }
                     }
                 }
-            } else if blk.term == Term::Branch {
-                set_add(inout required, f.value_bit(p.op(blk.ta)));
-                union_block(inout required, in live, p.op(inc(blk.ta)), nw);
-                union_block(inout required, in live, p.op(add(blk.ta, 2)), nw);
-            } else if blk.term == Term::Match {
-                set_add(inout required, f.value_bit(p.op(blk.ta)));
-                let n = p.op(inc(blk.ta));
-                let mut k = add(blk.ta, 2);
-                for m in 0..n {
-                    k = pattern_end(in p, k);
-                    let target = p.op(k);
-                    k = inc(k);
+            } else if block.term == Term::Branch {
+                set_add(inout required, func.value_bit(program.op(block.ta)));
+                union_block(inout required, in live, program.op(inc(block.ta)), set_words);
+                union_block(inout required, in live, program.op(add(block.ta, 2)), set_words);
+            } else if block.term == Term::Match {
+                set_add(inout required, func.value_bit(program.op(block.ta)));
+                let arm_count = program.op(inc(block.ta));
+                let mut live_at = add(block.ta, 2);
+                for m in 0..arm_count {
+                    live_at = pattern_end(in program, live_at);
+                    let target = program.op(live_at);
+                    live_at = inc(live_at);
                     clear(inout incoming);
-                    union_block(inout incoming, in live, target, nw);
+                    union_block(inout incoming, in live, target, set_words);
                     let pat = u64_at(in arms, target);
                     if pat != NONE64 {
                         clear(inout defs);
-                        pattern_slots(in p, in f, pat, inout defs);
-                        for j in 0..nw {
-                            let x = u64_at(in incoming, j)
+                        pattern_slots(in program, in func, pat, inout defs);
+                        for j in 0..set_words {
+                            let word = u64_at(in incoming, j)
                                 & (u64_at(in defs, j) ^ 18446744073709551615);
-                            let ok = incoming.try_set(j, x);
+                            let ok = incoming.try_set(j, word);
                         }
                     }
-                    for j in 0..nw {
-                        let x = u64_at(in required, j) | u64_at(in incoming, j);
-                        let ok = required.try_set(j, x);
+                    for j in 0..set_words {
+                        let word = u64_at(in required, j) | u64_at(in incoming, j);
+                        let ok = required.try_set(j, word);
                     }
                 }
             }
-            let mut index = blk.ic;
+            let mut index = block.ic;
             loop {
                 if index == 0 {
                     break;
                 }
                 index = wrapping_sub(index, 1);
-                let ins = p.inst(add(blk.i0, index));
-                let gone = set_remove(inout required, f.value_bit(w(ins.dest)));
-                if index == 0 && u64_at(in arms, id) != NONE64 {
+                let inst = program.inst(add(block.i0, index));
+                let gone = set_remove(inout required, func.value_bit(w(inst.dest)));
+                if index == 0 && u64_at(in arms, block_id) != NONE64 {
                     continue;
                 }
                 clear(inout uses);
                 clear(inout defs);
-                uses_defs(in p, inout names, in fx, in f, ins, inout uses, inout defs);
-                for j in 0..nw {
-                    let x = (u64_at(in required, j) & (u64_at(in defs, j) ^ 18446744073709551615))
+                uses_defs(in program, inout names, in fns, in func, inst, inout uses, inout defs);
+                for j in 0..set_words {
+                    let word = (
+                        u64_at(in required, j) & (u64_at(in defs, j) ^ 18446744073709551615)
+                    )
                         | u64_at(in uses, j);
-                    let ok = required.try_set(j, x);
+                    let ok = required.try_set(j, word);
                 }
             }
-            for j in 0..nw {
-                let at = add(wrapping_mul(id, nw), j);
-                let x = u64_at(in required, j);
-                if u64_at(in live, at) != x {
-                    let ok = live.try_set(at, x);
+            for j in 0..set_words {
+                let live_at = add(wrapping_mul(block_id, set_words), j);
+                let word = u64_at(in required, j);
+                if u64_at(in live, live_at) != word {
+                    let ok = live.try_set(live_at, word);
                     changed = true;
                 }
             }
@@ -688,7 +705,7 @@ pub fn liveness(
 
 // The index of a block's parameter list (count, then values) in its
 // header: entry token, ni, ni x (block, token), outgoing token, params.
-pub fn block_params(in p: Program, blk: BlockRow) -> u64 {
-    let ni = p.op(inc(blk.ha));
-    add(add(blk.ha, 3), wrapping_mul(ni, 2))
+pub fn block_params(in program: Program, block: BlockRow) -> u64 {
+    let incoming_count = program.op(inc(block.ha));
+    add(add(block.ha, 3), wrapping_mul(incoming_count, 2))
 }
