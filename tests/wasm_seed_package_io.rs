@@ -2516,6 +2516,13 @@ const COMPILER_PACKAGES: &[(&str, &str, &str, &str, CompilerExecCheck)] = &[
         CompilerExecCheck::CompileOnly,
     ),
     (
+        "lsp-proof-run",
+        "@vesper/lsp-proof-run",
+        "packages/vesper-lsp-proof-run",
+        "job_obligations(in \"\".as_bytes())",
+        CompilerExecCheck::CompileOnly,
+    ),
+    (
         "memo",
         "@vesper/memo",
         "packages/vesper-memo",

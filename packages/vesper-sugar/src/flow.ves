@@ -459,7 +459,7 @@ pub fn clause_of(in a: Ast, i: u32) -> ClauseNode {
         )
 }
 
-fn param_of(in a: Ast, i: u32) -> ParamNode {
+pub fn param_of(in a: Ast, i: u32) -> ParamNode {
     a
         .params
         .get_or(

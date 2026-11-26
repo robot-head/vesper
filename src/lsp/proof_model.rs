@@ -39,6 +39,17 @@ pub(crate) enum Kind {
     Unit,
 }
 impl Kind {
+    /// The kind's code in the Vesper port's proof jobs.
+    pub(crate) fn code(self) -> u64 {
+        match self {
+            Self::U8 => 0,
+            Self::U32 => 1,
+            Self::U64 => 2,
+            Self::I64 => 3,
+            Self::Bool => 4,
+            Self::Unit => 5,
+        }
+    }
     fn of(ty: &Type) -> Option<Self> {
         match ty {
             Type::Named(name, args) if args.is_empty() => match name.as_str() {
