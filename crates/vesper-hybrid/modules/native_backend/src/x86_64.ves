@@ -42,6 +42,7 @@ const ALU_RM64_IMM32: u8 = 0x81;
 const ALU_ADD_EXTENSION: u8 = 0;
 const ALU_SUB_EXTENSION: u8 = 5;
 const TWO_BYTE_OPCODE: u8 = 0x0f;
+const UD2_OPCODE: u8 = 0x0b;
 const IMUL_R64_RM64: u8 = 0xaf;
 const UNARY_GROUP: u8 = 0xf7;
 const SHIFT_BYTE_GROUP_IMM8: u8 = 0xc0;
@@ -111,6 +112,7 @@ pub copy enum Instruction {
     FrameEnter(u32),
     FrameLeave(u32),
     StackAddress(u8, u32),
+    Trap,
     Return,
 }
 
@@ -485,6 +487,10 @@ pub fn emit(inout out: ChunkSeq[u8], in instruction: Instruction) {
             out.push(rex(destination, RSP, true));
             out.push(LEA);
             memory_operand(inout out, destination, RSP, displacement);
+        },
+        Instruction::Trap => {
+            out.push(TWO_BYTE_OPCODE);
+            out.push(UD2_OPCODE);
         },
         Instruction::Return => out.push(RET_NEAR),
     };

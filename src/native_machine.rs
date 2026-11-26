@@ -61,6 +61,7 @@ enum IntegerOp {
     CallHigh = 42,
     SymbolRelative = 43,
     SymbolGot = 44,
+    Trap = 45,
 }
 
 type Encoder = fn(&[u64]) -> Option<Vec<u8>>;
@@ -82,6 +83,7 @@ const RETURN_VALUE: usize = 1;
 const HEADER_WORDS: usize = 2;
 const INSTRUCTION_WORDS: usize = 4;
 const NO_VALUE: u64 = u64::MAX;
+const TRAP_VALUE: u64 = NO_VALUE - 1;
 const GP_REGISTER_ARGUMENTS: usize = 6;
 const STACK_PROBE_INTERVAL: usize = 4096;
 const MAX_GP_ARGUMENTS: usize = GP_REGISTER_ARGUMENTS + STACK_PROBE_INTERVAL / size_of::<u64>() - 1;
@@ -147,6 +149,11 @@ fn integer_bits(bits: i64, ty: Type) -> u64 {
 }
 
 type Values = SecondaryMap<Value, Option<u64>>;
+
+enum PathExit {
+    Return(u64, Option<u64>),
+    Trap,
+}
 
 fn supports_memory_format(flags: MemFlags) -> bool {
     !flags.checked() && flags.endianness(Endianness::Little) == Endianness::Little
@@ -611,15 +618,15 @@ impl IntegerBlocks<'_> {
         }
     }
 
-    // Each arm follows its path to a return. If the paths rejoin, the shared
+    // Each arm follows its path to a return or trap. If the paths rejoin, the shared
     // suffix is emitted for each arm with that arm's argument bindings.
     // Each traversal includes the prefix in its visited set to reject cycles.
-    fn returned_from_path(
+    fn path_exit(
         &mut self,
         entry: Block,
         mut values: Values,
         mut visited: SecondaryMap<Block, bool>,
-    ) -> Option<(u64, Option<u64>)> {
+    ) -> Option<PathExit> {
         let terminator = self.follow_jumps(entry, &mut values, &mut visited)?;
         let InstructionData::Brif {
             opcode: Opcode::Brif,
@@ -627,7 +634,14 @@ impl IntegerBlocks<'_> {
             blocks: [yes_edge, no_edge],
         } = self.function.dfg.insts[terminator]
         else {
-            return self.returned(terminator, &values);
+            return if self.allow_hardware_faults
+                && self.function.dfg.insts[terminator].opcode() == Opcode::Trap
+            {
+                Some(PathExit::Trap)
+            } else {
+                self.returned(terminator, &values)
+                    .map(|(low, high)| PathExit::Return(low, high))
+            };
         };
         if self.branches == MAX_LINEARIZED_BRANCHES {
             return None;
@@ -638,15 +652,14 @@ impl IntegerBlocks<'_> {
         let branch = self.append(IntegerOp::BranchZero, [condition, 0, 0]);
         let mut yes_values = values.clone();
         let yes_block = self.edge(yes_edge, &mut yes_values)?;
-        let (yes_low, yes_high) =
-            self.returned_from_path(yes_block, yes_values, visited.clone())?;
-        self.append(
-            IntegerOp::EarlyReturn,
-            [yes_low, yes_high.unwrap_or(0), branch],
-        );
+        let (yes_low, yes_high) = match self.path_exit(yes_block, yes_values, visited.clone())? {
+            PathExit::Return(low, high) => (low, high.unwrap_or(0)),
+            PathExit::Trap => (TRAP_VALUE, 0),
+        };
+        self.append(IntegerOp::EarlyReturn, [yes_low, yes_high, branch]);
 
         let no_block = self.edge(no_edge, &mut values)?;
-        self.returned_from_path(no_block, values, visited)
+        self.path_exit(no_block, values, visited)
     }
 }
 
@@ -663,6 +676,7 @@ impl IntegerBlocks<'_> {
 /// BranchZero skips to the instruction after its matching EarlyReturn. Each
 /// EarlyReturn's extra word is the slot ID of its BranchZero. These records
 /// leave unreferenced slots. An early return from a procedure uses NO_VALUE.
+/// A trapping arm uses TRAP_VALUE, and a final Trap records the return arity.
 /// No arm may read values defined in a sibling arm.
 /// A trailing ReturnPair gives the second result ID and makes EarlyReturn's
 /// right operand a second result ID as well.
@@ -729,11 +743,18 @@ fn integer_program(
         let alignment = 1u64.checked_shl(u32::from(slot.align_shift))?;
         blocks.append(IntegerOp::StackSlot, [u64::from(slot.size), alignment, 0]);
     }
-    let (low, high) = blocks.returned_from_path(block, values, SecondaryMap::new())?;
     blocks.words[ARGUMENT_COUNT] = arity as u64;
-    blocks.words[RETURN_VALUE] = low;
-    if let Some(high) = high {
-        blocks.append(IntegerOp::ReturnPair, [high, 0, 0]);
+    match blocks.path_exit(block, values, SecondaryMap::new())? {
+        PathExit::Return(low, high) => {
+            blocks.words[RETURN_VALUE] = low;
+            if let Some(high) = high {
+                blocks.append(IntegerOp::ReturnPair, [high, 0, 0]);
+            }
+        }
+        PathExit::Trap => {
+            blocks.words[RETURN_VALUE] = NO_VALUE;
+            blocks.append(IntegerOp::Trap, [signature.returns.len() as u64, 0, 0]);
+        }
     }
     Some((blocks.words, blocks.relocations))
 }

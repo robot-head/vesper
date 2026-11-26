@@ -52,6 +52,7 @@ const CALL_PAIR: u64 = 41;
 const CALL_HIGH: u64 = 42;
 const SYMBOL_RELATIVE: u64 = 43;
 const SYMBOL_GOT: u64 = 44;
+const TRAP: u64 = 45;
 
 // Relocation kinds shared with src/native_machine.rs.
 const PLT_CALL: u64 = 0;
@@ -79,6 +80,8 @@ const EXTRA: u64 = 3;
 const RECORD_WORDS: u64 = 4;
 const NEVER_READ: u64 = 0;
 const NO_VALUE: u64 = 0xffffffffffffffff;
+const TRAP_VALUE: u64 = NO_VALUE - 1;
+const PAIRED_RESULTS: u64 = 2;
 const DISP32_MASK: u64 = 0xffffffff;
 const STACK_ALIGNMENT: u64 = 16;
 const RETURN_ADDRESS_BYTES: u64 = 8;
@@ -247,6 +250,7 @@ fn has_no_result(op: u64) -> bool {
         || op == RETURN_PAIR
         || op == CALL_ARGUMENT
         || op == CALL_VOID
+        || op == TRAP
 }
 
 fn is_call(op: u64) -> bool {
@@ -303,16 +307,18 @@ fn reads_left(in record: Record) -> bool {
         && !is_symbol(op)
         && op != CALL_ARGUMENT
         && op != CALL_HIGH
-        && (op != EARLY_RETURN || record.left != NO_VALUE)
+        && op != TRAP
+        && (op != EARLY_RETURN || (record.left != NO_VALUE && record.left != TRAP_VALUE))
 }
 
-fn reads_right(op: u64, paired: bool) -> bool {
+fn reads_right(in record: Record, paired: bool) -> bool {
+    let op = record.op;
     (op >= ADD && op <= XOR)
         || is_comparison(op)
         || op == SELECT
         || is_register_shift(op)
         || is_store(op)
-        || (op == EARLY_RETURN && paired)
+        || (op == EARLY_RETURN && paired && record.left != TRAP_VALUE)
 }
 
 // A shift must keep its count until the destructive instruction reads it.
@@ -343,6 +349,7 @@ fn find_last_reads(
     count: u64,
     result: u64,
     second: u64,
+    return_arity: u64,
     allow_relocations: bool,
     inout frame: FrameLayout
 ) -> Option[ChunkSeq[u64]] {
@@ -354,8 +361,8 @@ fn find_last_reads(
     if result != NO_VALUE {
         let _ = reads.try_set(result, values);
     }
-    let paired = second != NO_VALUE;
-    if paired {
+    let paired = return_arity == PAIRED_RESULTS;
+    if second != NO_VALUE {
         let _ = reads.try_set(second, values);
     }
     let mut arms = ChunkSeq::new[BranchArm]();
@@ -365,9 +372,10 @@ fn find_last_reads(
         let index = wrapping_sub(wrapping_sub(count, 1), reverse_index);
         let value = wrapping_add(arguments, index);
         let record = read_record(in words, index);
-        if record.op > SYMBOL_GOT
+        if record.op > TRAP
             || (record.op == STACK_SLOT && index >= frame.slots.len())
             || (record.op == RETURN_PAIR && (reverse_index != 0 || record.left >= value))
+            || (record.op == TRAP && (reverse_index != 0 || result != NO_VALUE))
         {
             return Option::None;
         }
@@ -425,7 +433,7 @@ fn find_last_reads(
         let arm = arms.try_get(wrapping_sub(depth, 1))
             .unwrap_or(BranchArm { start: NO_VALUE, end: values });
         if record.op == EARLY_RETURN {
-            if (record.left == NO_VALUE) != (result == NO_VALUE)
+            if (record.left != TRAP_VALUE && (record.left == NO_VALUE) != (return_arity == 0))
                 || record.extra < arguments
                 || record.extra >= value
                 || (depth != 0 && record.extra <= arm.start)
@@ -482,7 +490,7 @@ fn find_last_reads(
             pending_arguments = record.right;
         }
         let has_left = reads_left(in record);
-        let has_right = reads_right(record.op, paired);
+        let has_right = reads_right(in record, paired);
         let has_third = record.op == SELECT;
         if (has_left && record.left >= value)
             || (has_right && record.right >= value)
@@ -613,7 +621,7 @@ fn allocate(
         } else {
             UNASSIGNED
         };
-        let right = if reads_right(record.op, paired) {
+        let right = if reads_right(in record, paired) {
             dying_register(in reads, in locations, record.right, value)
         } else {
             UNASSIGNED
@@ -908,18 +916,27 @@ pub fn encode_block(
     {
         return ChunkSeq::new[u8]();
     }
-    let second = if count == 0 {
-        NO_VALUE
+    let tail = if count == 0 {
+        Record { op: CONSTANT, left: 0, right: 0, extra: 0 }
     } else {
-        let tail = read_record(in words, wrapping_sub(count, 1));
-        if tail.op == RETURN_PAIR {
-            tail.left
-        } else {
-            NO_VALUE
-        }
+        read_record(in words, wrapping_sub(count, 1))
     };
-    let paired = second != NO_VALUE;
-    if paired && result == NO_VALUE {
+    let second = if tail.op == RETURN_PAIR {
+        tail.left
+    } else {
+        NO_VALUE
+    };
+    let return_arity = if tail.op == TRAP {
+        tail.left
+    } else if second != NO_VALUE {
+        PAIRED_RESULTS
+    } else if result != NO_VALUE {
+        1
+    } else {
+        0
+    };
+    let paired = return_arity == PAIRED_RESULTS;
+    if return_arity > PAIRED_RESULTS || (second != NO_VALUE && result == NO_VALUE) {
         return ChunkSeq::new[u8]();
     }
     let mut frame = match frame_layout(in words, count) {
@@ -932,6 +949,7 @@ pub fn encode_block(
         count,
         result,
         second,
+        return_arity,
         allow_relocations,
         inout frame
     ) {
@@ -996,16 +1014,23 @@ pub fn encode_block(
             call_index = wrapping_add(call_index, 1);
             continue;
         }
+        if record.op == TRAP {
+            emit(inout output, in Instruction::Trap);
+            return output;
+        }
         if record.op == EARLY_RETURN {
-            let low = assigned(in allocation.locations, record.left);
-            let high = if paired {
-                assigned(in allocation.locations, record.right)
+            if record.left == TRAP_VALUE {
+                emit(inout output, in Instruction::Trap);
             } else {
-                Location::Absent
-            };
-            // Values in scope on the false path retain their homes. This
-            // return and its stack adjustment run only on the true path.
-            emit_return(inout output, in low, in high, frame_size);
+                let low = assigned(in allocation.locations, record.left);
+                let high = if paired {
+                    assigned(in allocation.locations, record.right)
+                } else {
+                    Location::Absent
+                };
+                // This epilogue runs only on the true path.
+                emit_return(inout output, in low, in high, frame_size);
+            }
             branch_depth = wrapping_sub(branch_depth, 1);
             let offset = branch_ends.try_get(branch_depth).unwrap_or(0);
             if !patch_forward_branch(inout output, offset) {
@@ -1013,7 +1038,7 @@ pub fn encode_block(
             }
             continue;
         }
-        let has_right = reads_right(record.op, paired);
+        let has_right = reads_right(in record, paired);
         let left = if reads_left(in record) {
             let location = assigned(in allocation.locations, record.left);
             materialize(inout output, in location, LEFT_SCRATCH)

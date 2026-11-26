@@ -677,6 +677,27 @@ fn integer_backend_matches_cranelift_results() {
 }
 
 #[test]
+fn integer_backend_requires_traps_to_end_their_path() {
+    const NO_VALUE: u64 = u64::MAX;
+    const TRAP_VALUE: u64 = NO_VALUE - 1;
+    const UD2: [u8; 2] = [0x0f, 0x0b];
+
+    assert_eq!(
+        binding::x86_64_integer_block(&[0, NO_VALUE, 45, 1, 0, 0]),
+        UD2
+    );
+    let trapping_true_arm = [1, 0, 28, 0, 0, 0, 29, TRAP_VALUE, 0, 1];
+    let code = binding::x86_64_integer_block(&trapping_true_arm);
+    assert!(code.windows(UD2.len()).any(|bytes| bytes == UD2));
+    assert_eq!(code.last(), Some(&0xc3));
+
+    let returning_pair = [2, NO_VALUE, 28, 0, 0, 0, 29, 0, 1, 2, 45, 2, 0, 0];
+    assert!(binding::x86_64_integer_block(&returning_pair).ends_with(&UD2));
+    assert!(binding::x86_64_integer_block(&[0, NO_VALUE, 45, 3, 0, 0]).is_empty());
+    assert!(binding::x86_64_integer_block(&[0, 1, 45, 1, 0, 0, 0, 42, 0, 0]).is_empty());
+}
+
+#[test]
 fn integer_backend_matches_paired_system_v_returns() {
     // Reject a misplaced pair record, a self-reference, and a false-path
     // result defined on the true path.
