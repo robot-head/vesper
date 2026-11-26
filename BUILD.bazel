@@ -66,6 +66,14 @@ filegroup(
     visibility = ["//visibility:public"],
 )
 
+# The tools on their own, for builds that download only top-level outputs
+# (`aspect ci prebuild-acceptance`): a filegroup's data is not fetched there.
+filegroup(
+    name = "vesper_tools",
+    srcs = _TOOLS,
+    visibility = ["//visibility:public"],
+)
+
 # The root package also owns docs/, examples/, lean/, scripts/ and tools/
 # (directories without their own BUILD.bazel), which the CLI and its tests read.
 vesper_crate(

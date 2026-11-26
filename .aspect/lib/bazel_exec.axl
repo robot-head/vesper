@@ -8,6 +8,10 @@ load("./process.axl", "capture", "check", "command", "exit_code", "root_path")
 # `//:bin/vesper` stays the compiler that builds the port objects.
 VESPER = "//:vesper_shipped"
 
+# The CLI tools `VESPER` runs (`vesper grammar` and the rest), built with it
+# where only top-level outputs are downloaded.
+VESPER_TOOLS = "//:vesper_tools"
+
 def executable(ctx: TaskContext, root: str, label: str, absolute: bool = True) -> str:
     manifest = ctx.std.env.var("VESPER_BAZEL_EXECUTABLES")
     if manifest:
