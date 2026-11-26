@@ -3,11 +3,11 @@
 // checking, and optional Linux kernel load (`src/ebpf_commands.rs`) to
 // `HybridCommands::hc_ebpf_check`.
 use @vesper/driver::{Args, args_count, arg_start, arg_end, eq};
-use super::{arg, byte_at, print, fail, stdout_stream};
+use super::{PrintFailed, arg, byte_at, print, fail, stdout_stream};
 
 const BPF_MAX_STACK_BYTES: u64 = 512;
 
-pub fn run_ebpf(in args: Args) -> i64 eff [Ffi[HybridCommands]] {
+pub fn run_ebpf(in args: Args) -> i64 eff [Ffi[StdFs], Ffi[HybridCommands], Fail[PrintFailed]] {
     let n = args_count(in args);
     if n <= 1 {
         print_help();
@@ -89,7 +89,7 @@ pub fn run_ebpf(in args: Args) -> i64 eff [Ffi[HybridCommands]] {
     fail(in err.as_slice())
 }
 
-fn print_help() eff [Ffi[HybridCommands]] {
+fn print_help() eff [Ffi[StdFs], Fail[PrintFailed]] {
     print(
         stdout_stream(),
         in "Usage: vesper ebpf check <object.o | program.bin | program.hex> [--load] [--stack-budget <bytes>]\n\nRun the Vesper eBPF pre-flight verifier and report typed findings.\n\nOptions:\n  --load                 Also load into the kernel where bpf() is permitted (Linux)\n  --stack-budget <bytes> Root stack budget for the stack-bound report (default 512)\n  --disassemble          Print the instructions\n"
