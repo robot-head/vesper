@@ -3,20 +3,8 @@ use self::codes::{Budget, ValueTag, WidgetKind, MAX_U64, NONE_ID};
 use self::plan::{teardown};
 use self::{Lim, TNode, TProp, TSub, Tree, ViewFault};
 use self::util::{
-    add,
-    dec,
-    event_valid,
-    find_key,
-    get_u64,
-    inc,
-    lim_ok,
-    property_valid,
-    seq_bool,
-    seq_u64,
-    sort_by_key,
-    tnode,
-    tprop,
-    tsub
+    add, dec, event_valid, find_key, get_u64, inc, lim_ok, property_valid, seq_bool, seq_u64,
+    sort_by_key, tnode, tprop, tsub
 };
 
 pub fn tree_new() -> Tree {

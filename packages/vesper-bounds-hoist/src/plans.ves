@@ -4,48 +4,14 @@
 // writes the decision text `Step::decision` holds.
 
 use self::fun::{
-    Arg,
-    Blk,
-    Fun,
-    Ins,
-    access_width,
-    add,
-    counted_access,
-    calls_out,
-    has,
-    has_receiver,
-    hoistable,
-    inc,
-    insert,
-    is_hoisted,
-    is_wide,
-    keeps_length,
-    n32,
-    set_u32,
-    set_u8,
-    u32_at,
-    u64_at,
-    u8_at,
-    w
+    Arg, Blk, Fun, Ins, access_width, add, counted_access, calls_out, has, has_receiver, hoistable,
+    inc, insert, is_hoisted, is_wide, keeps_length, n32, set_u32, set_u8, u32_at, u64_at, u8_at, w
 };
 use self::graph::{
-    Graph,
-    entered_inside,
-    graph,
-    is_loop_header,
-    natural_loop,
-    no_cut,
-    outside_preds,
-    successors
+    Graph, entered_inside, graph, is_loop_header, natural_loop, no_cut, outside_preds, successors
 };
 use self::rules::{
-    all_blocks,
-    escapes,
-    invariant_local,
-    opaque,
-    single_binding,
-    stable_place,
-    stable_root
+    all_blocks, escapes, invariant_local, opaque, single_binding, stable_place, stable_root
 };
 use self::facts::{Edge, Facts, TermNode, facts_new};
 use self::text::{Keys, keys_new, put, put_blocks, put_bool, put_i128, put_u128, put_u64};

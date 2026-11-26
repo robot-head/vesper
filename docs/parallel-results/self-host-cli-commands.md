@@ -86,7 +86,7 @@ does not touch).
 
 | Command | Rust layer | Engine | Owner or blocker |
 |---|---|---|---|
-| `fmt` (one file's read, format and replace) | `fmt_commands::format_file` | `vesper-fmt` (port) | CLI/walk/JSON in Vesper (#1644); per-file atomic replace stays in `hc_fmt_file` until `@vesper-std/fs` has no-follow open, inode identity, permission copy and `sync_all` |
+| `fmt` (one file's read, format and replace) | `fmt_commands::format_file` | `vesper-fmt` (port) | CLI/walk/JSON in Vesper (#1644); bounded no-follow read and checked atomic replace in Vesper over `@vesper-std/fs` (#1996 part 3b); the formatter stays in `hc_fmt_source` (`fmt_commands::format_text`) |
 | `lint` | `HybridCommands::hc_lint_run` | `vesper::tooling::lint` / `vesper-lint` (port) | CLI option parsing, validation, and `--help` in Vesper (`lint.ves`, #1730) |
 | `forge` | `HybridCommands::hc_forge_run` | `vesper-forge` (port) | CLI option parsing, validation, and `--help` in Vesper (`forge.ves`, #1660) |
 | `ebpf` | `HybridCommands::hc_ebpf_check` | `vesper-ebpf` (port) / `vesper::stack_bound` | CLI option parsing, validation, and `--help` in Vesper (`ebpf.ves`, #1653) |
@@ -157,29 +157,31 @@ the Rust CLI. **Rust stays the default build**: the only `src/**` change is
 - **Non-UTF-8 arguments.** Any argument that is not UTF-8 goes back to
   Rust, which panics on it as before.
 
-**What stays on the host.** `hc_fmt_file` calls `fmt_commands::format_file`
-for one file. That is the bounded read (`O_NOFOLLOW`, regular file,
-256 KiB, UTF-8), the formatter, and the checked atomic replace:
+**What stays on the host.** Before #1996 part 3b, `hc_fmt_file` ran all
+of `fmt_commands::format_file`. Now the Vesper layer does one file's
+bounded read and the checked atomic replace itself, over
+`@vesper-std/fs` (`read_nofollow_limit`, `create_staged`, `same_file`,
+`rename_path`, `remove_staged`):
 
+- the read: `O_NOFOLLOW | O_NONBLOCK`, regular file, 256 KiB, UTF-8;
 - a 0600 stage file;
 - the permission copy;
 - `sync_all`;
 - a re-read that checks dev, inode, length and mtime;
 - the rename.
 
-`@vesper-std/fs` has none of the open flags, inode identity, permission or
-sync calls yet, and this replace is the security-relevant part. The hybrid
-links the Rust seed formatter (`vesper-fmt-seed`), as every other compiler
-crate does, so the engine is unchanged. The Codex §39 formatter work had no
+Only the formatter stays on the host: `hc_fmt_source` runs
+`fmt_commands::format_text` on the text that was read, and
+`hc_fmt_output` copies the output out. The Codex §39 formatter work had no
 open issue or PR, and nothing under crates/vesper-fmt changed.
 
 | Path | What |
 |---|---|
 | `packages/vesper-driver-commands/src/lib.ves` | `fmt`, the dispatch row, the walk, the JSON writer, the UTF-8 check |
-| `packages/vesper-driver-commands/commands.vsys` | `hc_fmt_file` (status, plus changed, input bytes, output bytes and edits in a `u64` slice) and `hc_fmt_error` (the last error, copied out) |
+| `packages/vesper-driver-commands/commands.vsys` | `hc_fmt_source` (status, plus changed, output bytes and edits in a `u64` slice), `hc_fmt_output` (the output, copied out) and `hc_fmt_error` (the last error, copied out) |
 | `crates/vesper-hybrid/src/commands.rs` | their host side |
 | `crates/vesper-hybrid/port/driver.rs` | regenerated binding (keeps the two symbols linked) |
-| `src/fmt_commands.rs` | `format_file` is `pub(crate)` |
+| `src/fmt_commands.rs` | `format_text` (the formatter of one file's text) is `pub(crate)` |
 | `crates/vesper-hybrid/tests/self_host_cli_commands.rs` | `fmt_matches_the_default_compiler`, `fmt_walk_limit_matches_the_default_compiler` (Linux: 200,000 entries walk, 200,001 give the bounded-walk error, on both compilers); `routing_runs_in_vesper` now expects `fmt` to print from Vesper |
 
 **The differential.** `fmt_matches_the_default_compiler` builds a fresh

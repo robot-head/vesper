@@ -2,16 +2,8 @@
 // from `Str`).
 test {
     use @vesper-std/fmt::text::{
-        push_u64_radix,
-        push_u64,
-        push_i64,
-        push_hex_u64,
-        push_bool,
-        u64_to_string,
-        i64_to_string,
-        parse_u64_radix_str,
-        parse_u64_str,
-        parse_i64_str
+        push_u64_radix, push_u64, push_i64, push_hex_u64, push_bool, u64_to_string, i64_to_string,
+        parse_u64_radix_str, parse_u64_str, parse_i64_str
     };
     use self::support::{check, parsed_u64, parsed_i64, parse_error, parse_error_i64};
 

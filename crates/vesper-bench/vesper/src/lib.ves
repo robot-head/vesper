@@ -22,51 +22,25 @@
 // crate error type.
 use self::contract::{do_gate_evaluate, do_parse_attribute};
 use self::plan::{
-    do_evaluate_evidence_requirement,
-    do_experiment_run,
-    do_fold_epoch,
-    do_layout_offset_bytes,
-    do_layout_plan,
-    do_median_i64,
-    do_median_run,
-    do_modular_counter_delta,
-    do_predicted_bp,
-    do_region_delay,
-    do_unavailable_evidence,
-    do_validate_config
+    do_evaluate_evidence_requirement, do_experiment_run, do_fold_epoch, do_layout_offset_bytes,
+    do_layout_plan, do_median_i64, do_median_run, do_modular_counter_delta, do_predicted_bp,
+    do_region_delay, do_unavailable_evidence, do_validate_config
 };
 use self::ranks::{
-    do_classify_differences,
-    do_classify_samples,
-    do_compare_endpoint,
-    do_exact_paired_differences,
-    do_gate_paired_difference,
-    do_hodges_lehmann_paired,
-    do_paired_samples_confidence_set,
-    do_signed_rank_confidence_set,
-    do_signed_rank_exact,
-    do_signed_rank_exact_paired_samples,
+    do_classify_differences, do_classify_samples, do_compare_endpoint, do_exact_paired_differences,
+    do_gate_paired_difference, do_hodges_lehmann_paired, do_paired_samples_confidence_set,
+    do_signed_rank_confidence_set, do_signed_rank_exact, do_signed_rank_exact_paired_samples,
     do_walsh_pseudomedian
 };
 use self::stats::{
-    do_analyze_pairs,
-    do_layout_sample,
-    do_layout_survival,
-    do_mann_whitney_exact,
-    do_mann_whitney_exact_with_ties,
-    do_mann_whitney_ranks,
-    do_paired_sample_new,
+    do_analyze_pairs, do_layout_sample, do_layout_survival, do_mann_whitney_exact,
+    do_mann_whitney_exact_with_ties, do_mann_whitney_ranks, do_paired_sample_new,
     do_regression_bp_bounds
 };
 use self::wide::{w};
 use self::wire::{
-    do_backend_bound_bp,
-    do_mask_check,
-    do_sample_check,
-    do_wire_decode,
-    do_wire_encode,
-    do_wire_from_values,
-    do_wire_validate
+    do_backend_bound_bp, do_mask_check, do_sample_check, do_wire_decode, do_wire_encode,
+    do_wire_from_values, do_wire_validate
 };
 
 // ---------------------------------------------------------------------------

@@ -144,7 +144,7 @@ fn calls_encodable(w: &World) -> bool {
 }
 
 /// The calls section (packages/vesper-codegen-calls/src/data.ves).
-fn calls_section(e: &mut Enc, w: &World, tasks: &[(String, bool)]) -> Vec<u64> {
+fn calls_section(e: &mut Enc, w: &World, tasks: &[(String, u64)]) -> Vec<u64> {
     let mut out = vec![vesper::trace_effects::active(w) as u64];
     let mut exprs = vec![];
     out.push(w.functions.len() as u64);
@@ -214,9 +214,9 @@ fn calls_section(e: &mut Enc, w: &World, tasks: &[(String, bool)]) -> Vec<u64> {
         out.push(e.name(s));
     }
     out.push(tasks.len() as u64);
-    for (entry, optimize) in tasks {
+    for (entry, flags) in tasks {
         out.push(e.name(entry));
-        out.push(*optimize as u64);
+        out.push(*flags);
     }
     out
 }
@@ -237,6 +237,13 @@ fn pool_label(p: &Payload) -> String {
 /// section of `program`, then the calls section. `None` when a type does
 /// not fit the decoder.
 pub fn calls_input(w: &World, program: &Program, tasks: &[(String, bool)]) -> Option<Vec<u8>> {
+    let flags: Vec<(String, u64)> = tasks.iter().map(|(e, o)| (e.clone(), *o as u64)).collect();
+    calls_input_flags(w, program, &flags)
+}
+
+/// [`calls_input`] with each task's flags word: 1 optimizes, 2 asks for a
+/// Beacon trace host (`EntryEffects::TraceHost`).
+pub fn calls_input_flags(w: &World, program: &Program, tasks: &[(String, u64)]) -> Option<Vec<u8>> {
     if !ir_words::encodable(w, program) || !calls_encodable(w) {
         return None;
     }

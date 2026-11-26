@@ -12,13 +12,7 @@
 use @vesper/check-data::util::{add, inc, inc32, n32, push_decimal, u32_at, w};
 use @vesper/check-data::names::{Names};
 use @vesper/check-data::types::{
-    Types,
-    debug_type,
-    default_type,
-    display,
-    substitute,
-    TyKind,
-    TyPass
+    Types, debug_type, default_type, display, substitute, TyKind, TyPass
 };
 use @vesper/check-data::world::{World};
 use @vesper/check-layout::{Layouts, layout_of};

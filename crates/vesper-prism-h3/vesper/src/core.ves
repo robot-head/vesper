@@ -4,21 +4,8 @@
 // flush scheduling.
 
 use self::{
-    Settings,
-    FrameError,
-    QpackError,
-    Priority,
-    PriorityUpdate,
-    TransportError,
-    ConnectionError,
-    ConnectionStats,
-    H3ConfigAbi,
-    EncoderCore,
-    DecoderCore,
-    Huff,
-    UniCmd,
-    FlushStep,
-    ConnCore,
+    Settings, FrameError, QpackError, Priority, PriorityUpdate, TransportError, ConnectionError,
+    ConnectionStats, H3ConfigAbi, EncoderCore, DecoderCore, Huff, UniCmd, FlushStep, ConnCore,
     UnpackedFields
 };
 use self::int::{inc, min64, sat_add, word, byte, remove_word};
@@ -29,45 +16,15 @@ use self::encoder::{enc_on_decoder_stream, enc_apply_peer_settings};
 use self::decoder::{dec_on_encoder_stream, dec_cancel_stream, dec_take_decoder_stream};
 use self::control::{uni_new, uni_clear, uni_accept, uni_contains, uni_closed, uni_bytes};
 use self::pool::{
-    BytePool,
-    PoolRange,
-    CMD_STOP_SENDING,
-    CMD_RESET,
-    CMD_FINISH,
-    CMD_CLOSE,
-    CMD_SET_PRIORITY,
-    pool_new,
-    q_len,
-    q_push,
-    q_consume,
-    q_head_range,
-    q_drain_all_to,
-    put_u64_le,
-    get_u64_le,
-    bsearch_u64,
-    insert_word,
-    set_u64_contains,
-    set_u64_insert,
-    set_u64_remove,
-    out_map_new,
-    out_queued,
-    out_queue,
-    out_queue_fin,
-    out_discard,
-    out_remove_at,
-    cmd_buf_new,
-    cmd_clear,
-    push_cmd,
-    sev_buf_new,
-    hev_buf_new
+    BytePool, PoolRange, CMD_STOP_SENDING, CMD_RESET, CMD_FINISH, CMD_CLOSE, CMD_SET_PRIORITY,
+    pool_new, q_len, q_push, q_consume, q_head_range, q_drain_all_to, put_u64_le, get_u64_le,
+    bsearch_u64, insert_word, set_u64_contains, set_u64_insert, set_u64_remove, out_map_new,
+    out_queued, out_queue, out_queue_fin, out_discard, out_remove_at, cmd_buf_new, cmd_clear,
+    push_cmd, sev_buf_new, hev_buf_new
 };
 use self::session::{
-    CODE_DATAGRAM_ERROR,
-    CODE_EXCESSIVE_LOAD,
-    session_table_new,
-    session_known_gone,
-    incoming_wt_stream_fin,
-    wt_peer_fin
+    CODE_DATAGRAM_ERROR, CODE_EXCESSIVE_LOAD, session_table_new, session_known_gone,
+    incoming_wt_stream_fin, wt_peer_fin
 };
 
 const STREAM_CONTROL: u64 = 0x00;

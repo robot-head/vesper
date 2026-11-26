@@ -1,0 +1,2223 @@
+// The core machine of `Runtime::drive` over Place IR (slice 1 of #2053).
+//
+// Values are two words (`Val`): a tag and a payload. Integers carry their
+// kind in the tag (arith.ves); tuples and data point at a row of `heap`,
+// whose children are `kids[a..a+n]` (and, for data, the field names
+// `knames[a..a+n]`). Values never change once made, so a Rust `clone` is a
+// copy here, and assigning through a place rebuilds the aggregates along
+// its path (`put_path`), as Rust's `slot_set` changes a clone.
+//
+// An activation (`IrState`) is a frame `Fr` over four stacks: its IR
+// values `vals[vb..]` (one per value id of its function), its environment
+// `env[eb..]` (name, cell, path; the latest binding of a name wins, as a
+// `BTreeMap` insert), the cells its bindings own `cells[cb..]` and the
+// path segments of its `inout` slots `segs[sb..]`. Without closures and
+// handlers nothing outlives its activation but the returned value, so a
+// return truncates all four.
+
+use @vesper/check-data::util::{add, inc, n32, push_decimal, u32_at, u64_at, u8_at, w};
+use @vesper/check-data::names::{Names};
+use @vesper/check-data::types::{TyKind, Types};
+use @vesper/check-data::world::{constructor};
+use @vesper/check-data::input::{Ctx};
+use @vesper/place-ir::codes::{Lit, Op, Pat, Term};
+use @vesper/place-ir::{BlockRow, FnRow, InstRow, Program};
+use self::arith::{
+    B_ADD, B_AND, B_BAND, B_BOR, B_BSHL, B_BSHR, B_BXOR, B_DIV, B_EQ, B_GE, B_GT, B_LAND, B_LE,
+    B_LOR, B_LT, B_MUL, B_NE, B_OR, B_REM, B_ROTL, B_ROTR, B_SHL, B_SHR, B_SUB, B_WADD, B_WMUL,
+    B_WSUB, B_XOR, F_OK, F_OVERFLOW, K_I16, K_I32, K_I64, K_I8, K_U16, K_U32, K_U64, K_U8, bit,
+    bitwise, checked, exact, fits, is_signed, not, rotate, shift, wrap, wrapping
+};
+
+const NONE32: u32 = 4294967295;
+const NONE64: u64 = 18446744073709551615;
+
+// Value tags beyond the integer kinds 0..=7.
+pub const T_BOOL: u8 = 8;
+pub const T_STR: u8 = 9;
+pub const T_TUPLE: u8 = 10;
+pub const T_DATA: u8 = 11;
+pub const T_FN: u8 = 12;
+pub const T_UNDEF: u8 = 255;
+
+// Unary codes; a conversion is U_CONV + family * 16 + target kind.
+const U_NEG: u64 = 1;
+const U_NOT: u64 = 2;
+const U_INV: u64 = 3;
+const U_CONV: u64 = 16;
+const C_WIDEN: u64 = 0;
+const C_NARROW: u64 = 1;
+const C_WRAPPING: u64 = 2;
+
+// Frame kinds (`Frame::IrResume`, `Frame::Try`).
+const FR_IR: u8 = 0;
+const FR_TRY: u8 = 1;
+
+// What `drive` holds (`Control::Ir`, `Control::Return`).
+const C_IR: u8 = 0;
+const C_RET: u8 = 1;
+
+// A type's integer kind is not known yet / it has none.
+const TK_UNSEEN: u8 = 254;
+const TK_NONE: u8 = 255;
+
+pub copy struct Val {
+    t: u8,
+    x: u64,
+}
+
+copy struct Agg {
+    ctor: u32,
+    a: u64,
+    n: u64,
+}
+
+copy struct Fr {
+    f: u64,
+    blk: u64,
+    ip: u64,
+    vb: u64,
+    eb: u64,
+    cb: u64,
+    sb: u64,
+    dest: u32,
+    ty: u32,
+    kind: u8,
+}
+
+copy struct En {
+    name: u32,
+    cell: u64,
+    pa: u64,
+    pn: u64,
+}
+
+// A function: its parameters `prm[pa..pa+pn]`, its value count, its
+// first block and whether `scan` reached it.
+copy struct Fi {
+    name: u32,
+    pa: u64,
+    pn: u64,
+    nv: u64,
+    b0: u64,
+    reach: bool,
+}
+
+copy struct Pm {
+    name: u32,
+    pass: u64,
+}
+
+// A `Write` place split at its dots: root, segments `wsegs[sa..sa+sn]`,
+// and the compound operator's code (0 for `=`).
+copy struct Wr {
+    root: u32,
+    sa: u64,
+    sn: u64,
+    code: u64,
+}
+
+pub struct M {
+    c: Ctx,
+    p: Program,
+    fuel: u64,
+    entry: u64,
+    fns: ChunkSeq[Fi],
+    prm: ChunkSeq[Pm],
+    // symbol -> function index + 1
+    fn_of: ChunkSeq[u32],
+    // per instruction: its operator code, callee, constructor or `Write` row
+    aux: ChunkSeq[u64],
+    wr: ChunkSeq[Wr],
+    wsegs: ChunkSeq[u32],
+    // per block: the operand index of its parameter count
+    bparams: ChunkSeq[u64],
+    // per type id: its integer kind, TK_NONE, or TK_UNSEEN
+    tk: ChunkSeq[u8],
+    // per symbol: the symbol of its last `::` segment + 1, or 0 unseen
+    short: ChunkSeq[u32],
+    vals: ChunkSeq[Val],
+    env: ChunkSeq[En],
+    cells: ChunkSeq[Val],
+    segs: ChunkSeq[u32],
+    heap: ChunkSeq[Agg],
+    kids: ChunkSeq[Val],
+    knames: ChunkSeq[u32],
+    stack: ChunkSeq[Fr],
+    cur: Fr,
+    rv: Val,
+    ctrl: u8,
+    // scratch: a slot path being read or written, call arguments
+    path: ChunkSeq[u32],
+    argv: ChunkSeq[Val],
+    argc: ChunkSeq[u64],
+    argp: ChunkSeq[u64],
+    failed: bool,
+    declined: bool,
+    msg: ChunkSeq[u8],
+    // well-known symbols
+    s_ok: u32,
+    s_err: u32,
+    s_zero: u32,
+    s_dot: u32,
+}
+
+fn fr_zero() -> Fr {
+    Fr { f: 0, blk: 0, ip: 0, vb: 0, eb: 0, cb: 0, sb: 0, dest: 0, ty: 0, kind: FR_IR }
+}
+
+fn undef() -> Val {
+    Val { t: T_UNDEF, x: 0 }
+}
+
+fn unit() -> Val {
+    Val { t: T_TUPLE, x: NONE64 }
+}
+
+pub fn machine_new(sink c: Ctx, sink p: Program, fuel: u64) -> M {
+    M {
+        c: c,
+        p: p,
+        fuel: fuel,
+        entry: NONE64,
+        fns: ChunkSeq::new[Fi](),
+        prm: ChunkSeq::new[Pm](),
+        fn_of: ChunkSeq::new[u32](),
+        aux: ChunkSeq::new[u64](),
+        wr: ChunkSeq::new[Wr](),
+        wsegs: ChunkSeq::new[u32](),
+        bparams: ChunkSeq::new[u64](),
+        tk: ChunkSeq::new[u8](),
+        short: ChunkSeq::new[u32](),
+        vals: ChunkSeq::new[Val](),
+        env: ChunkSeq::new[En](),
+        cells: ChunkSeq::new[Val](),
+        segs: ChunkSeq::new[u32](),
+        heap: ChunkSeq::new[Agg](),
+        kids: ChunkSeq::new[Val](),
+        knames: ChunkSeq::new[u32](),
+        stack: ChunkSeq::new[Fr](),
+        cur: fr_zero(),
+        rv: unit(),
+        ctrl: C_IR,
+        path: ChunkSeq::new[u32](),
+        argv: ChunkSeq::new[Val](),
+        argc: ChunkSeq::new[u64](),
+        argp: ChunkSeq::new[u64](),
+        failed: false,
+        declined: false,
+        msg: ChunkSeq::new[u8](),
+        s_ok: 0,
+        s_err: 0,
+        s_zero: 0,
+        s_dot: 0,
+    }
+}
+
+// ----- text --------------------------------------------------------------------
+
+fn put(inout o: ChunkSeq[u8], in s: Str) {
+    o.extend(in s.as_bytes());
+}
+
+fn put_sym(inout o: ChunkSeq[u8], in names: Names, s: u32) {
+    let a = names.start(s);
+    let e = names.end(s);
+    for i in a..e {
+        o.push(u8_at(in names.text, i));
+    }
+}
+
+fn put_signed(inout o: ChunkSeq[u8], v: i64) {
+    if v < 0 {
+        o.push(45);
+        push_decimal(inout o, wrapping_u64(wrapping_sub(0, v)));
+    } else {
+        push_decimal(inout o, wrapping_u64(v));
+    }
+}
+
+fn fail(inout m: M, in s: Str) {
+    if !m.failed {
+        m.failed = true;
+        m.msg.clear();
+        put(inout m.msg, s);
+    }
+}
+
+// `"<a>'<sym>'<b>"`, as Rust's `format!("{a}'{sym}'{b}")`.
+fn fail_sym(inout m: M, in a: Str, s: u32, in b: Str) {
+    if !m.failed {
+        m.failed = true;
+        m.msg.clear();
+        put(inout m.msg, a);
+        put_sym(inout m.msg, in m.c.names, s);
+        put(inout m.msg, b);
+    }
+}
+
+fn decline(inout m: M, in a: Str, s: u32) {
+    if !m.declined {
+        m.declined = true;
+        m.msg.clear();
+        put(inout m.msg, a);
+        if s != NONE32 {
+            put_sym(inout m.msg, in m.c.names, s);
+        }
+    }
+}
+
+// A primitive failure (`raise_primitive`): with no handler installed the
+// `Fail::raise` it performs is unhandled.
+fn raise(inout m: M) {
+    fail(inout m, "unhandled effect Fail::raise");
+}
+
+// ----- symbols -----------------------------------------------------------------
+
+fn lookup(in m: M, in s: Str) -> u32 {
+    m.c.names.lookup(in s.as_bytes())
+}
+
+fn spells(in m: M, s: u32, in t: Str) -> bool {
+    m.c.names.spells(s, in t.as_bytes())
+}
+
+// `s.parse::<usize>()` of a symbol's text, or NONE64.
+fn index_of(in m: M, s: u32) -> u64 {
+    let a = m.c.names.start(s);
+    let e = m.c.names.end(s);
+    let mut i = a;
+    if i < e && u8_at(in m.c.names.text, i) == 43 {
+        i = inc(i);
+    }
+    if i >= e {
+        return NONE64;
+    }
+    let mut n: u64 = 0;
+    for j in i..e {
+        let c = u8_at(in m.c.names.text, j);
+        if c < 48 || c > 57 {
+            return NONE64;
+        }
+        let d = widen_u64(wrapping_sub(c, 48));
+        if n > 1844674407370955161 || (n == 1844674407370955161 && d > 5) {
+            return NONE64;
+        }
+        n = wrapping_add(wrapping_mul(n, 10), d);
+    }
+    n
+}
+
+// The symbol of the text after the last `::` of `s` (`rsplit("::")`).
+fn short_of(inout m: M, s: u32) -> u32 {
+    let cached = u32_at(in m.short, w(s));
+    if cached != 0 {
+        return wrapping_sub(cached, 1);
+    }
+    let a = m.c.names.start(s);
+    let e = m.c.names.end(s);
+    let mut cut = a;
+    let mut i = a;
+    loop {
+        if inc(i) >= e {
+            break;
+        }
+        if u8_at(in m.c.names.text, i) == 58 && u8_at(in m.c.names.text, inc(i)) == 58 {
+            cut = add(i, 2);
+            i = add(i, 2);
+        } else {
+            i = inc(i);
+        }
+    }
+    let mut bytes: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    for j in cut..e {
+        bytes.push(u8_at(in m.c.names.text, j));
+    }
+    let r = m.c.names.intern(in bytes[0..bytes.len()]);
+    if w(s) >= m.short.len() {
+        m.short.resize(inc(w(s)), 0);
+    }
+    let ok = m.short.try_set(w(s), wrapping_add(r, 1));
+    r
+}
+
+// `World::constructor(name)`: the variant's symbol, or NONE32.
+fn ctor_of(inout m: M, s: u32) -> u32 {
+    let a = m.c.names.start(s);
+    let e = m.c.names.end(s);
+    let mut seps: u64 = 0;
+    let mut cut = a;
+    let mut i = a;
+    loop {
+        if inc(i) >= e {
+            break;
+        }
+        if u8_at(in m.c.names.text, i) == 58 && u8_at(in m.c.names.text, inc(i)) == 58 {
+            seps = inc(seps);
+            cut = i;
+            i = add(i, 2);
+        } else {
+            i = inc(i);
+        }
+    }
+    if seps > 1 {
+        return NONE32;
+    }
+    let mut qual = NONE32;
+    let mut short = s;
+    if seps == 1 {
+        let mut q: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        for j in a..cut {
+            q.push(u8_at(in m.c.names.text, j));
+        }
+        let mut t: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        for j in add(cut, 2)..e {
+            t.push(u8_at(in m.c.names.text, j));
+        }
+        qual = m.c.names.lookup(in q[0..q.len()]);
+        short = m.c.names.lookup(in t[0..t.len()]);
+        if qual == NONE32 || short == NONE32 {
+            return NONE32;
+        }
+    }
+    if constructor(in m.c.world, qual, short) == NONE64 {
+        NONE32
+    } else {
+        short
+    }
+}
+
+// ----- types -------------------------------------------------------------------
+
+fn int_kind(inout m: M, ty: u32) -> u8 {
+    let i = w(ty);
+    let cached = u8_at(in m.tk, i);
+    if i < m.tk.len() && cached != TK_UNSEEN {
+        return cached;
+    }
+    let k = if m.c.types.kind(ty) != TyKind::Named || m.c.types.arity(ty) != 0 {
+        TK_NONE
+    } else {
+        let s = m.c.types.name(ty);
+        let kn = m.c.world.k;
+        if s == kn.i64_ || s == kn.isize_ {
+            K_I64
+        } else if s == kn.u8_ {
+            K_U8
+        } else if s == kn.u16_ {
+            K_U16
+        } else if s == kn.u32_ {
+            K_U32
+        } else if s == kn.u64_ || s == kn.usize_ {
+            K_U64
+        } else if s == kn.i8_ {
+            K_I8
+        } else if s == kn.i16_ {
+            K_I16
+        } else if s == kn.i32_ {
+            K_I32
+        } else {
+            TK_NONE
+        }
+    };
+    if i >= m.tk.len() {
+        m.tk.resize(inc(i), TK_UNSEEN);
+    }
+    let ok = m.tk.try_set(i, k);
+    k
+}
+
+// `coerce_value`: an integer takes the kind of an integer type.
+fn coerce(inout m: M, v: Val, ty: u32) -> Val {
+    if v.t > K_I32 {
+        return v;
+    }
+    let k = int_kind(inout m, ty);
+    if k == TK_NONE {
+        return v;
+    }
+    Val { t: k, x: wrap(k, exact(v.t, v.x)) }
+}
+
+// Whether the machine runs values of type `ty` (`scan`).
+fn type_ok(in m: M, ty: u32, depth: u64) -> bool {
+    if depth > 64 {
+        return false;
+    }
+    let n = m.c.types.node(ty);
+    if n.kind == TyKind::Named {
+        let s = n.name;
+        let kn = m.c.world.k;
+        if s == kn.f32_
+            || s == kn.f64_
+            || s == kn.i128_
+            || s == kn.u128_
+            || s == kn.chunk_seq
+            || s == kn.slice
+            || s == kn.tiled_seq
+            || s == kn.box_
+            || s == kn.vec
+            || s == kn.mask
+            || s == kn.region
+            || s == kn.region_box
+            || s == kn.watermark
+            || s == kn.dyn_
+            || spells(in m, s, "Atomic") {
+            return false;
+        }
+    }
+    if n.kind == TyKind::Fn {
+        let r = m.c.types.row(n.r2);
+        if r.n != 0 || r.tail != 0 {
+            return false;
+        }
+        if !type_ok(in m, n.r, inc(depth)) {
+            return false;
+        }
+    }
+    if n.kind == TyKind::Named || n.kind == TyKind::Tuple || n.kind == TyKind::Fn {
+        for i in 0..w(n.n) {
+            if !type_ok(in m, m.c.types.arg(ty, i), inc(depth)) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+// ----- loading -----------------------------------------------------------------
+
+fn op_code(in m: M, s: u32) -> u64 {
+    let a = m.c.names.start(s);
+    let e = m.c.names.end(s);
+    let n = wrapping_sub(e, a);
+    if n == 1 {
+        let c = u8_at(in m.c.names.text, a);
+        if c == 43 {
+            return widen_u64(B_ADD);
+        } else if c == 45 {
+            return widen_u64(B_SUB);
+        } else if c == 42 {
+            return widen_u64(B_MUL);
+        } else if c == 47 {
+            return widen_u64(B_DIV);
+        } else if c == 37 {
+            return widen_u64(B_REM);
+        } else if c == 38 {
+            return widen_u64(B_AND);
+        } else if c == 124 {
+            return widen_u64(B_OR);
+        } else if c == 94 {
+            return widen_u64(B_XOR);
+        } else if c == 60 {
+            return widen_u64(B_LT);
+        } else if c == 62 {
+            return widen_u64(B_GT);
+        }
+        return 0;
+    }
+    if spells(in m, s, "<<") {
+        widen_u64(B_SHL)
+    } else if spells(in m, s, ">>") {
+        widen_u64(B_SHR)
+    } else if spells(in m, s, "==") {
+        widen_u64(B_EQ)
+    } else if spells(in m, s, "!=") {
+        widen_u64(B_NE)
+    } else if spells(in m, s, "<=") {
+        widen_u64(B_LE)
+    } else if spells(in m, s, ">=") {
+        widen_u64(B_GE)
+    } else if spells(in m, s, "&&") {
+        widen_u64(B_LAND)
+    } else if spells(in m, s, "||") {
+        widen_u64(B_LOR)
+    } else if spells(in m, s, "wrapping_add") {
+        widen_u64(B_WADD)
+    } else if spells(in m, s, "wrapping_sub") {
+        widen_u64(B_WSUB)
+    } else if spells(in m, s, "wrapping_mul") {
+        widen_u64(B_WMUL)
+    } else if spells(in m, s, "rotate_left") {
+        widen_u64(B_ROTL)
+    } else if spells(in m, s, "rotate_right") {
+        widen_u64(B_ROTR)
+    } else if spells(in m, s, "bit_and") {
+        widen_u64(B_BAND)
+    } else if spells(in m, s, "bit_or") {
+        widen_u64(B_BOR)
+    } else if spells(in m, s, "bit_xor") {
+        widen_u64(B_BXOR)
+    } else if spells(in m, s, "bit_shl") {
+        widen_u64(B_BSHL)
+    } else if spells(in m, s, "bit_shr") {
+        widen_u64(B_BSHR)
+    } else {
+        0
+    }
+}
+
+// The kind named by the text `names.text[a..e]`, or TK_NONE.
+fn kind_named(in m: M, a: u64, e: u64) -> u8 {
+    let mut b: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    for j in a..e {
+        b.push(u8_at(in m.c.names.text, j));
+    }
+    let s = m.c.names.lookup(in b[0..b.len()]);
+    if s == NONE32 {
+        return TK_NONE;
+    }
+    let kn = m.c.world.k;
+    if s == kn.i64_ || s == kn.isize_ {
+        K_I64
+    } else if s == kn.u8_ {
+        K_U8
+    } else if s == kn.u16_ {
+        K_U16
+    } else if s == kn.u32_ {
+        K_U32
+    } else if s == kn.u64_ || s == kn.usize_ {
+        K_U64
+    } else if s == kn.i8_ {
+        K_I8
+    } else if s == kn.i16_ {
+        K_I16
+    } else if s == kn.i32_ {
+        K_I32
+    } else {
+        TK_NONE
+    }
+}
+
+fn has_prefix(in m: M, s: u32, in pre: Str) -> bool {
+    m.c.names.has_prefix(s, in pre.as_bytes())
+}
+
+fn unary_code(in m: M, s: u32) -> u64 {
+    if spells(in m, s, "-") {
+        return U_NEG;
+    }
+    if spells(in m, s, "!") {
+        return U_NOT;
+    }
+    if spells(in m, s, "~") {
+        return U_INV;
+    }
+    let a = m.c.names.start(s);
+    let e = m.c.names.end(s);
+    let mut fam = NONE64;
+    let mut at = a;
+    if has_prefix(in m, s, "widen_") {
+        fam = C_WIDEN;
+        at = add(a, 6);
+    } else if has_prefix(in m, s, "narrow_") {
+        fam = C_NARROW;
+        at = add(a, 7);
+    } else if has_prefix(in m, s, "wrapping_") {
+        fam = C_WRAPPING;
+        at = add(a, 9);
+    }
+    if fam == NONE64 {
+        return 0;
+    }
+    let k = kind_named(in m, at, e);
+    if k == TK_NONE {
+        return 0;
+    }
+    add(add(U_CONV, wrapping_mul(fam, 16)), widen_u64(k))
+}
+
+// Reads every function's header: parameters, value count, first block.
+pub fn load(inout m: M, entry_index: u64) {
+    m.s_ok = m.c.names.intern(in "Ok".as_bytes());
+    m.s_err = m.c.names.intern(in "Err".as_bytes());
+    m.s_zero = m.c.names.intern(in "0".as_bytes());
+    m.s_dot = m.c.names.intern(in ".".as_bytes());
+    let entry = u32_at(in m.c.nmap, entry_index);
+    m.aux.resize(m.p.insts.len(), 0);
+    m.bparams.resize(m.p.blocks.len(), 0);
+    for fi in 0..m.p.fns.len() {
+        let f = m.p.function(fi);
+        let mut q = f.ha;
+        let np = m.p.op(q);
+        q = inc(q);
+        let pa = m.prm.len();
+        for i in 0..np {
+            let name = n32(m.p.op(q));
+            let pass = m.p.op(inc(q));
+            let k = m.p.op(add(q, 2));
+            q = add(q, add(3, k));
+            // type, span start, end
+            q = add(q, 3);
+            m.prm.push(Pm { name: name, pass: pass });
+        }
+        // result, effects
+        q = add(q, 2);
+        let nb = m.p.op(q);
+        q = add(inc(q), wrapping_mul(nb, 2));
+        let nc = m.p.op(q);
+        q = add(inc(q), nc);
+        let nv = m.p.op(q);
+        q = inc(q);
+        let mut most: u64 = 0;
+        for i in 0..nv {
+            let v = m.p.op(q);
+            if inc(v) > most {
+                most = inc(v);
+            }
+            q = add(q, 2);
+        }
+        // Instruction destinations and block parameters too.
+        for bi in 0..f.bc {
+            let bx = add(f.b0, bi);
+            let b = m.p.block(bx);
+            let ni = m.p.op(inc(b.ha));
+            let at = add(add(b.ha, 3), wrapping_mul(ni, 2));
+            let ok = m.bparams.try_set(bx, at);
+            let npar = m.p.op(at);
+            for j in 0..npar {
+                let v = m.p.op(add(inc(at), j));
+                if inc(v) > most {
+                    most = inc(v);
+                }
+            }
+            for ii in 0..b.ic {
+                let inst = m.p.inst(add(b.i0, ii));
+                if inc(w(inst.dest)) > most {
+                    most = inc(w(inst.dest));
+                }
+            }
+        }
+        m.fns.push(Fi { name: f.name, pa: pa, pn: np, nv: most, b0: f.b0, reach: false });
+        if w(f.name) >= m.fn_of.len() {
+            m.fn_of.resize(inc(w(f.name)), 0);
+        }
+        let ok = m.fn_of.try_set(w(f.name), n32(inc(fi)));
+    }
+    let e = u32_at(in m.fn_of, w(entry));
+    if entry_index == NONE64 || e == 0 {
+        decline(inout m, "the entry has no lowered body", NONE32);
+        return;
+    }
+    m.entry = w(wrapping_sub(e, 1));
+}
+
+fn fn_index(in m: M, s: u32) -> u64 {
+    let e = u32_at(in m.fn_of, w(s));
+    if e == 0 {
+        NONE64
+    } else {
+        w(wrapping_sub(e, 1))
+    }
+}
+
+// The end of the pattern at operand `at`.
+fn pat_end(in m: M, at: u64) -> u64 {
+    let kind = m.p.op(at);
+    let q = add(at, 3);
+    if kind == widen_u64(Pat::Bind) {
+        inc(q)
+    } else if kind == widen_u64(Pat::Literal) {
+        add(q, 3)
+    } else if kind == widen_u64(Pat::Tuple) {
+        let n = m.p.op(q);
+        let mut r = inc(q);
+        for i in 0..n {
+            r = pat_end(in m, r);
+        }
+        r
+    } else if kind == widen_u64(Pat::Constructor) {
+        let n = m.p.op(add(q, 2));
+        let mut r = add(q, 3);
+        for i in 0..n {
+            r = pat_end(in m, inc(r));
+        }
+        r
+    } else {
+        q
+    }
+}
+
+// Declines a literal the machine has no value for (a float, a 128-bit
+// integer, a non-ASCII string, whose `Debug` text needs Unicode tables).
+fn scan_literal(inout m: M, at: u64) {
+    let kind = m.p.op(at);
+    let lo = m.p.op(inc(at));
+    let hi = m.p.op(add(at, 2));
+    if kind == widen_u64(Lit::Int) {
+        let neg = hi == NONE64 && (lo >> 63) == 1;
+        if !(hi == 0 || neg) {
+            decline(inout m, "a 128-bit integer literal", NONE32);
+        }
+    } else if kind == widen_u64(Lit::String) {
+        let s = n32(lo);
+        let a = m.c.names.start(s);
+        let e = m.c.names.end(s);
+        for i in a..e {
+            if u8_at(in m.c.names.text, i) >= 128 {
+                decline(inout m, "a non-ASCII string literal", NONE32);
+            }
+        }
+    } else if kind != widen_u64(Lit::Bool) {
+        decline(inout m, "a float or wide literal", NONE32);
+    }
+}
+
+fn scan_pattern(inout m: M, at: u64) {
+    let kind = m.p.op(at);
+    let q = add(at, 3);
+    if kind == widen_u64(Pat::Literal) {
+        scan_literal(inout m, q);
+    } else if kind == widen_u64(Pat::Tuple) {
+        let n = m.p.op(q);
+        let mut r = inc(q);
+        for i in 0..n {
+            scan_pattern(inout m, r);
+            r = pat_end(in m, r);
+        }
+    } else if kind == widen_u64(Pat::Constructor) {
+        let n = m.p.op(add(q, 2));
+        let mut r = add(q, 3);
+        for i in 0..n {
+            scan_pattern(inout m, inc(r));
+            r = pat_end(in m, inc(r));
+        }
+    }
+}
+
+fn reach(inout m: M, f: u64, inout work: ChunkSeq[u64]) {
+    match m.fns.try_get(f) {
+        Option::Some(x) => {
+            if !x.reach {
+                let mut y = x;
+                y.reach = true;
+                let ok = m.fns.try_set(f, y);
+                work.push(f);
+            }
+        },
+        Option::None => {},
+    }
+}
+
+// Splits a `Write` place at its dots into a `wr` row.
+fn split_place(inout m: M, place: u32, code: u64) -> u64 {
+    let a = m.c.names.start(place);
+    let e = m.c.names.end(place);
+    let mut parts: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let mut cur: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    for i in a..e {
+        let c = u8_at(in m.c.names.text, i);
+        if c == 46 {
+            parts.push(m.c.names.intern(in cur[0..cur.len()]));
+            cur.clear();
+        } else {
+            cur.push(c);
+        }
+    }
+    parts.push(m.c.names.intern(in cur[0..cur.len()]));
+    let sa = m.wsegs.len();
+    for i in 1..parts.len() {
+        m.wsegs.push(u32_at(in parts, i));
+    }
+    let row = m.wr.len();
+    m
+        .wr
+        .push(
+            Wr { root: u32_at(in parts, 0), sa: sa, sn: wrapping_sub(parts.len(), 1), code: code }
+        );
+    row
+}
+
+// Whether every function the entry reaches runs on this machine; fills
+// `aux` for their instructions.
+pub fn scan(inout m: M) {
+    let mut work: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    reach(inout m, m.entry, inout work);
+    loop {
+        if m.declined {
+            return;
+        }
+        let f = match work.pop() {
+            Option::Some(f) => f,
+            Option::None => {
+                break;
+            },
+        };
+        let fi = match m.fns.try_get(f) {
+            Option::Some(x) => x,
+            Option::None => {
+                break;
+            },
+        };
+        let fr = m.p.function(f);
+        // Header types: parameters, result, effects aside, values.
+        let mut q = fr.ha;
+        let np = m.p.op(q);
+        q = inc(q);
+        for i in 0..np {
+            let k = m.p.op(add(q, 2));
+            q = add(q, add(3, k));
+            if !type_ok(in m, n32(m.p.op(q)), 0) {
+                decline(inout m, "a parameter type of ", fi.name);
+            }
+            q = add(q, 3);
+        }
+        if !type_ok(in m, n32(m.p.op(q)), 0) {
+            decline(inout m, "the result type of ", fi.name);
+        }
+        for bi in 0..fr.bc {
+            let bx = add(fr.b0, bi);
+            let b = m.p.block(bx);
+            for ii in 0..b.ic {
+                let ix = add(b.i0, ii);
+                let inst = m.p.inst(ix);
+                if !type_ok(in m, inst.ty, 0) {
+                    decline(inout m, "a value type in ", fi.name);
+                }
+                let a = inst.a;
+                let op = inst.op;
+                if op == Op::Const {
+                    scan_literal(inout m, a);
+                } else if op == Op::Read {
+                    let root = n32(m.p.op(a));
+                    let path = m.p.op(inc(a));
+                    let g = fn_index(in m, root);
+                    if g != NONE64 && path == 0 {
+                        reach(inout m, g, inout work);
+                    }
+                } else if op == Op::Bind {
+                    scan_pattern(inout m, inc(a));
+                } else if op == Op::Write {
+                    let o = n32(m.p.op(inc(a)));
+                    let mut code: u64 = 0;
+                    if !spells(in m, o, "=") {
+                        if has_prefix(in m, o, "[]") {
+                            decline(inout m, "an array element write", NONE32);
+                        }
+                        let s0 = m.c.names.start(o);
+                        let mut first: ChunkSeq[u8] = ChunkSeq::new[u8]();
+                        first.push(u8_at(in m.c.names.text, s0));
+                        let fs = m.c.names.intern(in first[0..1]);
+                        code = op_code(in m, fs);
+                        if code == 0 {
+                            decline(inout m, "the compound assignment ", o);
+                        }
+                    }
+                    let row = split_place(inout m, n32(m.p.op(a)), code);
+                    let ok = m.aux.try_set(ix, row);
+                } else if op == Op::Unary {
+                    let code = unary_code(in m, n32(m.p.op(a)));
+                    if code == 0 {
+                        decline(inout m, "the unary operator ", n32(m.p.op(a)));
+                    }
+                    let ok = m.aux.try_set(ix, code);
+                } else if op == Op::Binary {
+                    let code = op_code(in m, n32(m.p.op(a)));
+                    if code == 0 {
+                        decline(inout m, "the binary operator ", n32(m.p.op(a)));
+                    }
+                    let ok = m.aux.try_set(ix, code);
+                } else if op == Op::Data {
+                    let c = ctor_of(inout m, n32(m.p.op(a)));
+                    let ok = m
+                        .aux
+                        .try_set(
+                            ix,
+                            if c == NONE32 {
+                                0
+                            } else {
+                                inc(w(c))
+                            }
+                        );
+                } else if op == Op::Call {
+                    let callee = n32(m.p.op(a));
+                    let g = fn_index(in m, callee);
+                    if g == NONE64 {
+                        decline(inout m, "a call of ", callee);
+                    } else {
+                        reach(inout m, g, inout work);
+                        let ok = m.aux.try_set(ix, g);
+                    }
+                } else if op == Op::Exit {
+                    if n32(m.p.op(inc(a))) != fi.name {
+                        decline(inout m, "a `return` out of a nested body", NONE32);
+                    }
+                } else if op == Op::Tuple
+                    || op == Op::Unit
+                    || op == Op::Project
+                    || op == Op::Index
+                    || op == Op::Indirect
+                    || op == Op::Try
+                    || op == Op::Loop {} else if op == Op::Closure {
+                    decline(inout m, "a closure in ", fi.name);
+                } else if op == Op::Handle {
+                    decline(inout m, "a handler in ", fi.name);
+                } else if op == Op::Seq {
+                    decline(inout m, "a sequence operation in ", fi.name);
+                } else {
+                    decline(inout m, "a vector, tiled or Box operation in ", fi.name);
+                }
+            }
+            if b.term == Term::Match {
+                let n = m.p.op(inc(b.ta));
+                let mut r = add(b.ta, 2);
+                for i in 0..n {
+                    scan_pattern(inout m, r);
+                    r = inc(pat_end(in m, r));
+                }
+            }
+        }
+    }
+}
+
+// ----- values ------------------------------------------------------------------
+
+fn agg(in m: M, v: Val) -> Agg {
+    if v.x == NONE64 {
+        return Agg { ctor: 0, a: 0, n: 0 };
+    }
+    match m.heap.try_get(v.x) {
+        Option::Some(a) => a,
+        Option::None => Agg { ctor: 0, a: 0, n: 0 },
+    }
+}
+
+fn kid(in m: M, i: u64) -> Val {
+    match m.kids.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => undef(),
+    }
+}
+
+// A new aggregate from `kids[a..]` (appended by the caller).
+fn make(inout m: M, t: u8, ctor: u32, a: u64) -> Val {
+    let n = wrapping_sub(m.kids.len(), a);
+    if t == T_TUPLE && n == 0 {
+        return unit();
+    }
+    let h = m.heap.len();
+    m.heap.push(Agg { ctor: ctor, a: a, n: n });
+    Val { t: t, x: h }
+}
+
+fn push_kid(inout m: M, name: u32, v: Val) {
+    m.kids.push(v);
+    m.knames.push(name);
+}
+
+// The index of field `name` of a data value, or NONE64.
+fn field_index(in m: M, g: Agg, name: u32) -> u64 {
+    for i in 0..g.n {
+        if u32_at(in m.knames, add(g.a, i)) == name {
+            return i;
+        }
+    }
+    NONE64
+}
+
+fn sym_less(in m: M, a: u32, b: u32) -> bool {
+    let a0 = m.c.names.start(a);
+    let a1 = m.c.names.end(a);
+    let b0 = m.c.names.start(b);
+    let b1 = m.c.names.end(b);
+    let la = wrapping_sub(a1, a0);
+    let lb = wrapping_sub(b1, b0);
+    let n = if la < lb {
+        la
+    } else {
+        lb
+    };
+    for i in 0..n {
+        let x = u8_at(in m.c.names.text, add(a0, i));
+        let y = u8_at(in m.c.names.text, add(b0, i));
+        if x != y {
+            return x < y;
+        }
+    }
+    la < lb
+}
+
+// `Value::Display`.
+fn display(in m: M, v: Val, inout o: ChunkSeq[u8], depth: u64) {
+    if v.t <= K_I32 {
+        if is_signed(v.t) {
+            put_signed(inout o, wrapping_i64(v.x));
+        } else {
+            push_decimal(inout o, v.x);
+        }
+    } else if v.t == T_BOOL {
+        if v.x != 0 {
+            put(inout o, "true");
+        } else {
+            put(inout o, "false");
+        }
+    } else if v.t == T_STR {
+        debug_str(inout o, in m.c.names, n32(v.x));
+    } else if v.t == T_FN {
+        put(inout o, "<fn ");
+        put_sym(inout o, in m.c.names, n32(v.x));
+        put(inout o, ">");
+    } else if v.t == T_TUPLE {
+        let g = agg(in m, v);
+        o.push(40);
+        for i in 0..g.n {
+            if i > 0 {
+                put(inout o, ", ");
+            }
+            display(in m, kid(in m, add(g.a, i)), inout o, inc(depth));
+        }
+        o.push(41);
+    } else if v.t == T_DATA {
+        let g = agg(in m, v);
+        put_sym(inout o, in m.c.names, g.ctor);
+        if g.n == 0 {
+            return;
+        }
+        // The fields in `BTreeMap` order, or by number when every name
+        // is one.
+        let mut numeric = true;
+        for i in 0..g.n {
+            if index_of(in m, u32_at(in m.knames, add(g.a, i))) == NONE64 {
+                numeric = false;
+            }
+        }
+        let mut order: ChunkSeq[u64] = ChunkSeq::new[u64]();
+        for i in 0..g.n {
+            order.push(i);
+        }
+        // insertion sort (data values have few fields)
+        for i in 1..g.n {
+            let mut j = i;
+            loop {
+                if j == 0 {
+                    break;
+                }
+                let x = u64_at(in order, wrapping_sub(j, 1));
+                let y = u64_at(in order, j);
+                let sx = u32_at(in m.knames, add(g.a, x));
+                let sy = u32_at(in m.knames, add(g.a, y));
+                let less = if numeric {
+                    index_of(in m, sy) < index_of(in m, sx)
+                } else {
+                    sym_less(in m, sy, sx)
+                };
+                if !less {
+                    break;
+                }
+                let ok1 = order.try_set(wrapping_sub(j, 1), y);
+                let ok2 = order.try_set(j, x);
+                j = wrapping_sub(j, 1);
+            }
+        }
+        if numeric {
+            o.push(40);
+        } else {
+            put(inout o, " { ");
+        }
+        for i in 0..g.n {
+            if i > 0 {
+                put(inout o, ", ");
+            }
+            let k = add(g.a, u64_at(in order, i));
+            if !numeric {
+                put_sym(inout o, in m.c.names, u32_at(in m.knames, k));
+                put(inout o, ": ");
+            }
+            display(in m, kid(in m, k), inout o, inc(depth));
+        }
+        if numeric {
+            o.push(41);
+        } else {
+            put(inout o, " }");
+        }
+    }
+}
+
+fn hex(d: u64) -> u8 {
+    if d < 10 {
+        wrapping_u8(add(d, 48))
+    } else {
+        wrapping_u8(add(d, 87))
+    }
+}
+
+// Rust's `{:?}` of an ASCII string (`scan` declines the others).
+fn debug_str(inout o: ChunkSeq[u8], in names: Names, s: u32) {
+    o.push(34);
+    let a = names.start(s);
+    let e = names.end(s);
+    for i in a..e {
+        let c = u8_at(in names.text, i);
+        if c == 34 {
+            o.push(92);
+            o.push(34);
+        } else if c == 92 {
+            o.push(92);
+            o.push(92);
+        } else if c == 10 {
+            o.push(92);
+            o.push(110);
+        } else if c == 13 {
+            o.push(92);
+            o.push(114);
+        } else if c == 9 {
+            o.push(92);
+            o.push(116);
+        } else if c == 0 {
+            o.push(92);
+            o.push(48);
+        } else if c < 32 || c == 127 {
+            put(inout o, "\\u{");
+            let d = widen_u64(c);
+            if d >= 16 {
+                o.push(hex(d / 16));
+            }
+            o.push(hex(d % 16));
+            o.push(125);
+        } else {
+            o.push(c);
+        }
+    }
+    o.push(34);
+}
+
+// `equal`.
+fn equal(in m: M, a: Val, b: Val) -> bool {
+    if a.t <= K_I32 || a.t == T_BOOL || a.t == T_STR {
+        return a.t == b.t && a.x == b.x;
+    }
+    if a.t == T_TUPLE && b.t == T_TUPLE {
+        let ga = agg(in m, a);
+        let gb = agg(in m, b);
+        if ga.n != gb.n {
+            return false;
+        }
+        for i in 0..ga.n {
+            if !equal(in m, kid(in m, add(ga.a, i)), kid(in m, add(gb.a, i))) {
+                return false;
+            }
+        }
+        return true;
+    }
+    if a.t == T_DATA && b.t == T_DATA {
+        let ga = agg(in m, a);
+        let gb = agg(in m, b);
+        if ga.ctor != gb.ctor || ga.n != gb.n {
+            return false;
+        }
+        for i in 0..ga.n {
+            let j = field_index(in m, gb, u32_at(in m.knames, add(ga.a, i)));
+            if j == NONE64 {
+                return false;
+            }
+            if !equal(in m, kid(in m, add(ga.a, i)), kid(in m, add(gb.a, j))) {
+                return false;
+            }
+        }
+        return true;
+    }
+    false
+}
+
+// ----- places ------------------------------------------------------------------
+
+// The child of `v` named by segment `seg` (`slot_get`'s step), or an
+// error: 1 unknown field, 2 not a tuple index, 3 out of bounds, 4 not an
+// aggregate.
+fn child(in m: M, v: Val, seg: u32, inout err: u64) -> u64 {
+    let g = agg(in m, v);
+    if v.t == T_DATA {
+        let i = field_index(in m, g, seg);
+        if i == NONE64 {
+            err = 1;
+        }
+        return i;
+    }
+    if v.t == T_TUPLE {
+        let i = index_of(in m, seg);
+        if i == NONE64 {
+            err = 2;
+            return i;
+        }
+        if i >= g.n {
+            err = 3;
+            return NONE64;
+        }
+        return i;
+    }
+    err = 4;
+    NONE64
+}
+
+// `slot_get` of `cells[cell]` along `m.path`.
+fn read_path(inout m: M, cell: u64) -> Val {
+    let mut v = match m.cells.try_get(cell) {
+        Option::Some(v) => v,
+        Option::None => undef(),
+    };
+    for i in 0..m.path.len() {
+        let seg = u32_at(in m.path, i);
+        let mut err: u64 = 0;
+        let k = child(in m, v, seg, inout err);
+        if err == 1 {
+            fail_sym(inout m, "unknown field ", seg, "");
+            // Rust quotes the field: `unknown field 'f'`.
+            m.msg.clear();
+            put(inout m.msg, "unknown field '");
+            put_sym(inout m.msg, in m.c.names, seg);
+            put(inout m.msg, "'");
+            return undef();
+        } else if err == 2 {
+            fail(inout m, "invalid tuple index");
+            return undef();
+        } else if err == 3 {
+            fail(inout m, "tuple index out of bounds");
+            return undef();
+        } else if err == 4 {
+            fail(inout m, "field access requires aggregate");
+            return undef();
+        }
+        v = kid(in m, add(agg(in m, v).a, k));
+    }
+    v
+}
+
+// `v` with the value at `m.path[i..]` replaced by `new`.
+fn put_path(inout m: M, v: Val, i: u64, new: Val) -> Val {
+    if i >= m.path.len() {
+        return new;
+    }
+    let seg = u32_at(in m.path, i);
+    let mut err: u64 = 0;
+    let k = child(in m, v, seg, inout err);
+    if err == 1 {
+        fail(inout m, "unknown field");
+        return undef();
+    } else if err == 2 {
+        fail(inout m, "invalid index");
+        return undef();
+    } else if err == 3 {
+        fail(inout m, "index out of bounds");
+        return undef();
+    } else if err == 4 {
+        fail(inout m, "assignment requires aggregate");
+        return undef();
+    }
+    let g = agg(in m, v);
+    let inner = put_path(inout m, kid(in m, add(g.a, k)), inc(i), new);
+    if m.failed {
+        return undef();
+    }
+    let a = m.kids.len();
+    for j in 0..g.n {
+        let name = u32_at(in m.knames, add(g.a, j));
+        if j == k {
+            push_kid(inout m, name, inner);
+        } else {
+            push_kid(inout m, name, kid(in m, add(g.a, j)));
+        }
+    }
+    make(inout m, v.t, g.ctor, a)
+}
+
+fn write_path(inout m: M, cell: u64, new: Val) {
+    let old = match m.cells.try_get(cell) {
+        Option::Some(v) => v,
+        Option::None => undef(),
+    };
+    let v = put_path(inout m, old, 0, new);
+    if !m.failed {
+        let ok = m.cells.try_set(cell, v);
+    }
+}
+
+// The latest binding of `name` in the current activation, or NONE64.
+fn binding(in m: M, name: u32) -> u64 {
+    let mut i = m.env.len();
+    loop {
+        if i <= m.cur.eb {
+            return NONE64;
+        }
+        i = wrapping_sub(i, 1);
+        match m.env.try_get(i) {
+            Option::Some(e) => {
+                if e.name == name {
+                    return i;
+                }
+            },
+            Option::None => {},
+        }
+    }
+}
+
+fn entry(in m: M, i: u64) -> En {
+    match m.env.try_get(i) {
+        Option::Some(e) => e,
+        Option::None => En { name: 0, cell: 0, pa: 0, pn: 0 },
+    }
+}
+
+// `m.path` = the slot path of binding `e`.
+fn slot_path(inout m: M, e: En) {
+    m.path.clear();
+    for i in 0..e.pn {
+        m.path.push(u32_at(in m.segs, add(e.pa, i)));
+    }
+}
+
+// Binds `name` to `v`. The Rust evaluator's environment is a map, so a
+// rebinding (a loop body's pattern, each iteration) replaces the entry,
+// reusing the entry's own cell: nothing else refers to it once no call is
+// in flight. The environment stays as small as Rust's.
+fn bind_new(inout m: M, name: u32, v: Val) {
+    let b = binding(in m, name);
+    if b != NONE64 {
+        let e = entry(in m, b);
+        if e.pn == 0 && e.cell >= m.cur.cb {
+            let ok = m.cells.try_set(e.cell, v);
+            return;
+        }
+        let cell = m.cells.len();
+        m.cells.push(v);
+        let ok = m.env.try_set(b, En { name: name, cell: cell, pa: 0, pn: 0 });
+        return;
+    }
+    let cell = m.cells.len();
+    m.cells.push(v);
+    m.env.push(En { name: name, cell: cell, pa: 0, pn: 0 });
+}
+
+// ----- patterns ----------------------------------------------------------------
+
+// Whether literal words `at` (kind, lo, hi) match `v` (`bind_pattern`).
+fn literal_matches(in m: M, at: u64, v: Val) -> bool {
+    let kind = m.p.op(at);
+    let lo = m.p.op(inc(at));
+    let hi = m.p.op(add(at, 2));
+    if kind == widen_u64(Lit::Int) {
+        if v.t > K_I32 {
+            return false;
+        }
+        let vhi = if is_signed(v.t) && wrapping_i64(v.x) < 0 {
+            NONE64
+        } else {
+            0
+        };
+        return lo == v.x && hi == vhi;
+    }
+    if kind == widen_u64(Lit::Bool) {
+        return v.t == T_BOOL && v.x == lo;
+    }
+    if kind == widen_u64(Lit::String) {
+        return v.t == T_STR && v.x == lo;
+    }
+    false
+}
+
+fn pat_matches(inout m: M, at: u64, v: Val) -> bool {
+    let kind = m.p.op(at);
+    let q = add(at, 3);
+    if kind == widen_u64(Pat::Wild) || kind == widen_u64(Pat::Bind) {
+        return true;
+    }
+    if kind == widen_u64(Pat::Literal) {
+        return literal_matches(in m, q, v);
+    }
+    if kind == widen_u64(Pat::Tuple) {
+        if v.t != T_TUPLE {
+            return false;
+        }
+        let g = agg(in m, v);
+        let n = m.p.op(q);
+        if n != g.n {
+            return false;
+        }
+        let mut r = inc(q);
+        for i in 0..n {
+            if !pat_matches(inout m, r, kid(in m, add(g.a, i))) {
+                return false;
+            }
+            r = pat_end(in m, r);
+        }
+        return true;
+    }
+    if kind == widen_u64(Pat::Constructor) {
+        if v.t != T_DATA {
+            return false;
+        }
+        let g = agg(in m, v);
+        if short_of(inout m, n32(m.p.op(q))) != g.ctor {
+            return false;
+        }
+        let n = m.p.op(add(q, 2));
+        let mut r = add(q, 3);
+        for i in 0..n {
+            let f = n32(m.p.op(r));
+            let j = field_index(in m, g, f);
+            if j == NONE64 {
+                return false;
+            }
+            if !pat_matches(inout m, inc(r), kid(in m, add(g.a, j))) {
+                return false;
+            }
+            r = pat_end(in m, inc(r));
+        }
+        return true;
+    }
+    false
+}
+
+// Binds a pattern `pat_matches` accepted, each name in a new cell.
+fn pat_bind(inout m: M, at: u64, v: Val) {
+    let kind = m.p.op(at);
+    let q = add(at, 3);
+    if kind == widen_u64(Pat::Bind) {
+        bind_new(inout m, n32(m.p.op(q)), v);
+    } else if kind == widen_u64(Pat::Tuple) {
+        let g = agg(in m, v);
+        let n = m.p.op(q);
+        let mut r = inc(q);
+        for i in 0..n {
+            pat_bind(inout m, r, kid(in m, add(g.a, i)));
+            r = pat_end(in m, r);
+        }
+    } else if kind == widen_u64(Pat::Constructor) {
+        let g = agg(in m, v);
+        let n = m.p.op(add(q, 2));
+        let mut r = add(q, 3);
+        for i in 0..n {
+            let j = field_index(in m, g, n32(m.p.op(r)));
+            pat_bind(inout m, inc(r), kid(in m, add(g.a, j)));
+            r = pat_end(in m, inc(r));
+        }
+    }
+}
+
+// ----- operators ---------------------------------------------------------------
+
+fn int_val(k: u8, n: i128) -> Val {
+    Val { t: k, x: wrap(k, n) }
+}
+
+fn bool_val(b: bool) -> Val {
+    Val {
+        t: T_BOOL,
+        x: if b {
+            1
+        } else {
+            0
+        }
+    }
+}
+
+// `binary` (without floats and 128-bit integers); a failure in `st`.
+fn binary(inout m: M, code: u64, a: Val, b: Val, inout st: u8) -> Val {
+    let op = wrapping_u8(code);
+    if a.t <= K_I32 && b.t <= K_I32 {
+        let ak = a.t;
+        if op == B_SHL || op == B_SHR {
+            let r = shift(ak, op, exact(ak, a.x), exact(b.t, b.x), inout st);
+            return int_val(ak, r);
+        }
+        if op == B_ROTL || op == B_ROTR {
+            return int_val(ak, rotate(ak, op == B_ROTL, exact(ak, a.x), exact(b.t, b.x)));
+        }
+        let k = if ak != K_I64 {
+            ak
+        } else {
+            b.t
+        };
+        let x = exact(k, wrap(k, exact(ak, a.x)));
+        let y = exact(k, wrap(k, exact(b.t, b.x)));
+        if op == B_ADD || op == B_SUB || op == B_MUL || op == B_DIV || op == B_REM {
+            let r = checked(k, op, x, y, inout st);
+            return int_val(k, r);
+        }
+        if op == B_WADD || op == B_WSUB || op == B_WMUL {
+            return int_val(k, wrapping(k, op, x, y));
+        }
+        if op == B_BAND || op == B_BOR || op == B_BXOR || op == B_BSHL || op == B_BSHR {
+            return int_val(k, bitwise(k, op, x, y));
+        }
+        if op == B_AND || op == B_OR || op == B_XOR {
+            return int_val(k, bit(k, op, x, y));
+        }
+        if op == B_EQ {
+            return bool_val(x == y);
+        } else if op == B_NE {
+            return bool_val(x != y);
+        } else if op == B_LT {
+            return bool_val(x < y);
+        } else if op == B_LE {
+            return bool_val(x <= y);
+        } else if op == B_GT {
+            return bool_val(x > y);
+        } else if op == B_GE {
+            return bool_val(x >= y);
+        }
+        fail(inout m, "invalid integer operator");
+        return undef();
+    }
+    if a.t == T_BOOL && b.t == T_BOOL {
+        if op == B_LAND {
+            return bool_val(a.x != 0 && b.x != 0);
+        } else if op == B_LOR {
+            return bool_val(a.x != 0 || b.x != 0);
+        } else if op == B_EQ {
+            return bool_val(a.x == b.x);
+        } else if op == B_NE {
+            return bool_val(a.x != b.x);
+        }
+        fail(inout m, "invalid boolean operator");
+        return undef();
+    }
+    if a.t == T_STR && b.t == T_STR {
+        let sa = n32(a.x);
+        let sb = n32(b.x);
+        if op == B_EQ {
+            return bool_val(sa == sb);
+        } else if op == B_NE {
+            return bool_val(sa != sb);
+        } else if op == B_LT {
+            return bool_val(sym_less(in m, sa, sb));
+        } else if op == B_LE {
+            return bool_val(!sym_less(in m, sb, sa));
+        } else if op == B_GT {
+            return bool_val(sym_less(in m, sb, sa));
+        } else if op == B_GE {
+            return bool_val(!sym_less(in m, sa, sb));
+        }
+        fail(inout m, "invalid string operator");
+        return undef();
+    }
+    if op == B_EQ {
+        return bool_val(equal(in m, a, b));
+    } else if op == B_NE {
+        return bool_val(!equal(in m, a, b));
+    }
+    fail(inout m, "incompatible binary operands");
+    undef()
+}
+
+// `unary` (without floats and 128-bit integers).
+fn unary(inout m: M, code: u64, v: Val, inout st: u8) -> Val {
+    if code == U_NOT && v.t == T_BOOL {
+        return bool_val(v.x == 0);
+    }
+    if code >= U_CONV {
+        let fam = wrapping_sub(code, U_CONV) / 16;
+        let to = wrapping_u8(wrapping_sub(code, U_CONV) % 16);
+        if v.t > K_I32 {
+            fail(inout m, "invalid conversion operand");
+            return undef();
+        }
+        let n = exact(v.t, v.x);
+        if fam == C_WRAPPING {
+            return int_val(to, n);
+        }
+        if !fits(to, n) {
+            st = F_OVERFLOW;
+            return undef();
+        }
+        return int_val(to, n);
+    }
+    if v.t > K_I32 {
+        fail(inout m, "invalid unary operands");
+        return undef();
+    }
+    let n = exact(v.t, v.x);
+    if code == U_NOT || code == U_INV {
+        return int_val(v.t, not(v.t, n));
+    }
+    let r = wrapping_sub(0, n);
+    if !fits(v.t, r) {
+        st = F_OVERFLOW;
+        return undef();
+    }
+    int_val(v.t, r)
+}
+
+// ----- the machine -------------------------------------------------------------
+
+fn val(in m: M, id: u64) -> Val {
+    match m.vals.try_get(add(m.cur.vb, id)) {
+        Option::Some(v) => v,
+        Option::None => undef(),
+    }
+}
+
+fn set_val(inout m: M, id: u64, v: Val) {
+    let ok = m.vals.try_set(add(m.cur.vb, id), v);
+}
+
+fn undefined(inout m: M, id: u64) {
+    if !m.failed {
+        m.failed = true;
+        m.msg.clear();
+        put(inout m.msg, "undefined IR value %");
+        push_decimal(inout m.msg, id);
+    }
+}
+
+// The operand value `id`, or an `undefined IR value` failure.
+fn get(inout m: M, id: u64) -> Val {
+    let v = val(in m, id);
+    if v.t == T_UNDEF {
+        undefined(inout m, id);
+    }
+    v
+}
+
+fn func(in m: M, f: u64) -> Fi {
+    match m.fns.try_get(f) {
+        Option::Some(x) => x,
+        Option::None => Fi { name: 0, pa: 0, pn: 0, nv: 0, b0: 0, reach: false },
+    }
+}
+
+fn param(in m: M, i: u64) -> Pm {
+    match m.prm.try_get(i) {
+        Option::Some(x) => x,
+        Option::None => Pm { name: 0, pass: 0 },
+    }
+}
+
+// Ends the current activation with value `v` (`Control::Return`).
+fn leave(inout m: M, v: Val) {
+    let fr = m.cur;
+    m.vals.truncate(fr.vb);
+    m.env.truncate(fr.eb);
+    m.cells.truncate(fr.cb);
+    m.segs.truncate(fr.sb);
+    m.rv = v;
+    m.ctrl = C_RET;
+}
+
+// Suspends the current activation for a call or `?` (`Frame::IrResume`).
+fn suspend(inout m: M, dest: u32, ty: u32) {
+    let mut fr = m.cur;
+    fr.dest = dest;
+    fr.ty = ty;
+    fr.kind = FR_IR;
+    m.stack.push(fr);
+}
+
+// Collects call arguments at operand `q` (`n`, then pass, value, root + 1,
+// path each) into `argv` (values) and `argc`/`argp` (place root + 1 and
+// path, or 0).
+fn collect_args(inout m: M, q: u64) -> u64 {
+    let n = m.p.op(q);
+    m.argv.clear();
+    m.argc.clear();
+    m.argp.clear();
+    for i in 0..n {
+        let at = add(inc(q), wrapping_mul(i, 4));
+        let v = get(inout m, m.p.op(inc(at)));
+        m.argv.push(v);
+        m.argc.push(m.p.op(add(at, 2)));
+        m.argp.push(m.p.op(add(at, 3)));
+    }
+    n
+}
+
+// `invoke_scoped` of function `f` on the collected arguments, after the
+// caller was suspended: the callee's activation becomes current.
+fn invoke(inout m: M, f: u64) {
+    let fi = func(in m, f);
+    if m.argv.len() != fi.pn {
+        fail(inout m, "argument arity mismatch");
+        return;
+    }
+    let vb = m.vals.len();
+    let eb = m.env.len();
+    let cb = m.cells.len();
+    let sb = m.segs.len();
+    // The `inout` places resolve in the caller's environment.
+    let mut slots: ChunkSeq[En] = ChunkSeq::new[En]();
+    for i in 0..fi.pn {
+        let p = param(in m, add(fi.pa, i));
+        if p.pass == 1 {
+            let root = u64_at(in m.argc, i);
+            let mut found = false;
+            if root != 0 {
+                let b = binding(in m, n32(wrapping_sub(root, 1)));
+                if b != NONE64 {
+                    let e = entry(in m, b);
+                    let pa = m.segs.len();
+                    for j in 0..e.pn {
+                        m.segs.push(u32_at(in m.segs, add(e.pa, j)));
+                    }
+                    let path = u64_at(in m.argp, i);
+                    let pr = m.p.path(path);
+                    for j in 0..pr.n {
+                        m.segs.push(m.p.path_name(path, j));
+                    }
+                    slots
+                        .push(
+                            En {
+                                name: p.name,
+                                cell: e.cell,
+                                pa: pa,
+                                pn: wrapping_sub(m.segs.len(), pa)
+                            }
+                        );
+                    found = true;
+                }
+            }
+            if !found {
+                fail(inout m, "inout argument requires place");
+                return;
+            }
+        } else {
+            let cell = m.cells.len();
+            m
+                .cells
+                .push(
+                    match m.argv.try_get(i) {
+                        Option::Some(v) => v,
+                        Option::None => undef(),
+                    }
+                );
+            slots.push(En { name: p.name, cell: cell, pa: 0, pn: 0 });
+        }
+    }
+    for i in 0..slots.len() {
+        match slots.try_get(i) {
+            Option::Some(e) => m.env.push(e),
+            Option::None => {},
+        }
+    }
+    m.vals.resize(add(vb, fi.nv), undef());
+    m
+        .cur = Fr {
+            f: f,
+            blk: fi.b0,
+            ip: 0,
+            vb: vb,
+            eb: eb,
+            cb: cb,
+            sb: sb,
+            dest: 0,
+            ty: 0,
+            kind: FR_IR
+        };
+}
+
+// Calls value `callee` (`Op::Indirect`).
+fn call_value(inout m: M, callee: Val) {
+    if callee.t == T_FN {
+        let f = fn_index(in m, n32(callee.x));
+        if f == NONE64 {
+            fail_sym(inout m, "unknown function '", n32(callee.x), "'");
+            return;
+        }
+        invoke(inout m, f);
+        return;
+    }
+    fail(inout m, "value is not callable");
+}
+
+// One `ir_step` of the current activation.
+fn step(inout m: M) {
+    let b = m.p.block(m.cur.blk);
+    if m.cur.ip >= b.ic {
+        terminate(inout m, b);
+        return;
+    }
+    let ix = add(b.i0, m.cur.ip);
+    let inst = m.p.inst(ix);
+    m.cur.ip = inc(m.cur.ip);
+    let a = inst.a;
+    let op = inst.op;
+    let mut st: u8 = F_OK;
+    let mut r = unit();
+    if op == Op::Loop || op == Op::Unit {
+        r = unit();
+    } else if op == Op::Exit {
+        let v = get(inout m, m.p.op(a));
+        if m.failed {
+            return;
+        }
+        leave(inout m, v);
+        return;
+    } else if op == Op::Const {
+        let kind = m.p.op(a);
+        let lo = m.p.op(inc(a));
+        if kind == widen_u64(Lit::Int) {
+            let hi = m.p.op(add(a, 2));
+            r = if hi == 0 && (lo >> 63) == 1 {
+                Val { t: K_U64, x: lo }
+            } else {
+                Val { t: K_I64, x: lo }
+            };
+        } else if kind == widen_u64(Lit::Bool) {
+            r = bool_val(lo != 0);
+        } else {
+            r = Val { t: T_STR, x: lo };
+        }
+    } else if op == Op::Read {
+        let root = n32(m.p.op(a));
+        let path = m.p.op(inc(a));
+        let bnd = binding(in m, root);
+        if path == 0 && bnd == NONE64 && fn_index(in m, root) != NONE64 {
+            r = Val { t: T_FN, x: w(root) };
+        } else {
+            if bnd == NONE64 {
+                fail_sym(inout m, "undefined IR place '", root, "'");
+                return;
+            }
+            let e = entry(in m, bnd);
+            slot_path(inout m, e);
+            let pr = m.p.path(path);
+            for j in 0..pr.n {
+                m.path.push(m.p.path_name(path, j));
+            }
+            r = read_path(inout m, e.cell);
+        }
+    } else if op == Op::Bind {
+        let v = get(inout m, m.p.op(a));
+        if m.failed {
+            return;
+        }
+        if !pat_matches(inout m, inc(a), v) {
+            fail(inout m, "IR binding pattern mismatch");
+            return;
+        }
+        pat_bind(inout m, inc(a), v);
+        r = unit();
+    } else if op == Op::Write {
+        let v = get(inout m, m.p.op(add(a, 2)));
+        if m.failed {
+            return;
+        }
+        let wrow = match m.wr.try_get(u64_at(in m.aux, ix)) {
+            Option::Some(x) => x,
+            Option::None => Wr { root: 0, sa: 0, sn: 0, code: 0 },
+        };
+        let bnd = binding(in m, wrow.root);
+        if bnd == NONE64 {
+            fail(inout m, "undefined IR assignment place");
+            return;
+        }
+        let e = entry(in m, bnd);
+        slot_path(inout m, e);
+        for j in 0..wrow.sn {
+            m.path.push(u32_at(in m.wsegs, add(wrow.sa, j)));
+        }
+        let mut new = v;
+        if wrow.code != 0 {
+            let old = read_path(inout m, e.cell);
+            if m.failed {
+                return;
+            }
+            new = binary(inout m, wrow.code, old, v, inout st);
+            if st != F_OK {
+                suspend(inout m, inst.dest, inst.ty);
+                raise(inout m);
+                return;
+            }
+            if m.failed {
+                return;
+            }
+        }
+        write_path(inout m, e.cell, new);
+        r = unit();
+    } else if op == Op::Unary {
+        let v = get(inout m, m.p.op(inc(a)));
+        if m.failed {
+            return;
+        }
+        r = unary(inout m, u64_at(in m.aux, ix), v, inout st);
+    } else if op == Op::Binary {
+        let x = get(inout m, m.p.op(inc(a)));
+        let y = get(inout m, m.p.op(add(a, 2)));
+        if m.failed {
+            return;
+        }
+        r = binary(inout m, u64_at(in m.aux, ix), x, y, inout st);
+    } else if op == Op::Tuple {
+        let n = m.p.op(a);
+        let k0 = m.kids.len();
+        for i in 0..n {
+            let v = get(inout m, m.p.op(add(inc(a), i)));
+            push_kid(inout m, 0, v);
+        }
+        if m.failed {
+            return;
+        }
+        r = make(inout m, T_TUPLE, 0, k0);
+    } else if op == Op::Data {
+        let c = u64_at(in m.aux, ix);
+        if c == 0 {
+            fail(inout m, "unknown IR constructor");
+            return;
+        }
+        let n = m.p.op(inc(a));
+        let k0 = m.kids.len();
+        for i in 0..n {
+            let at = add(add(a, 2), wrapping_mul(i, 2));
+            let v = get(inout m, m.p.op(inc(at)));
+            push_kid(inout m, n32(m.p.op(at)), v);
+        }
+        if m.failed {
+            return;
+        }
+        r = make(inout m, T_DATA, n32(wrapping_sub(c, 1)), k0);
+    } else if op == Op::Project {
+        let v = get(inout m, m.p.op(a));
+        if m.failed {
+            return;
+        }
+        let f = n32(m.p.op(inc(a)));
+        let g = agg(in m, v);
+        if v.t == T_DATA {
+            let j = field_index(in m, g, f);
+            if j == NONE64 {
+                fail(inout m, "unknown IR field");
+                return;
+            }
+            r = kid(in m, add(g.a, j));
+        } else if v.t == T_TUPLE {
+            let j = index_of(in m, f);
+            if j == NONE64 {
+                fail(inout m, "invalid IR tuple field");
+                return;
+            }
+            if j >= g.n {
+                fail(inout m, "IR tuple field out of bounds");
+                return;
+            }
+            r = kid(in m, add(g.a, j));
+        } else {
+            fail(inout m, "IR projection requires data");
+            return;
+        }
+    } else if op == Op::Index {
+        let iv = get(inout m, m.p.op(inc(a)));
+        if m.failed {
+            return;
+        }
+        if iv.t > K_I32 {
+            fail(inout m, "IR index must be integer");
+            return;
+        }
+        let neg = is_signed(iv.t) && wrapping_i64(iv.x) < 0;
+        let base = get(inout m, m.p.op(a));
+        if m.failed {
+            return;
+        }
+        if base.t != T_TUPLE {
+            fail(inout m, "IR index requires tuple");
+            return;
+        }
+        let g = agg(in m, base);
+        if neg || iv.x >= g.n {
+            suspend(inout m, inst.dest, inst.ty);
+            raise(inout m);
+            return;
+        }
+        r = kid(in m, add(g.a, iv.x));
+    } else if op == Op::Call {
+        let n = collect_args(inout m, inc(a));
+        if m.failed {
+            return;
+        }
+        suspend(inout m, inst.dest, inst.ty);
+        invoke(inout m, u64_at(in m.aux, ix));
+        return;
+    } else if op == Op::Indirect {
+        let callee = get(inout m, m.p.op(a));
+        let n = collect_args(inout m, inc(a));
+        if m.failed {
+            return;
+        }
+        suspend(inout m, inst.dest, inst.ty);
+        call_value(inout m, callee);
+        return;
+    } else if op == Op::Try {
+        let v = get(inout m, m.p.op(a));
+        if m.failed {
+            return;
+        }
+        suspend(inout m, inst.dest, inst.ty);
+        let mut t = m.cur;
+        t.kind = FR_TRY;
+        m.stack.push(t);
+        m.rv = v;
+        m.ctrl = C_RET;
+        return;
+    } else {
+        fail(inout m, "the run machine does not know this operation");
+        return;
+    }
+    if m.failed {
+        return;
+    }
+    if st != F_OK {
+        // `primitive_failure`: the raise is unhandled.
+        suspend(inout m, inst.dest, inst.ty);
+        raise(inout m);
+        return;
+    }
+    let c = coerce(inout m, r, inst.ty);
+    set_val(inout m, w(inst.dest), c);
+}
+
+// A block's terminator.
+fn terminate(inout m: M, b: BlockRow) {
+    let at = b.ta;
+    let f = func(in m, m.cur.f);
+    if b.term == Term::Return {
+        let id = m.p.op(at);
+        let v = val(in m, id);
+        if v.t == T_UNDEF {
+            fail(inout m, "missing IR return value");
+            return;
+        }
+        leave(inout m, v);
+        return;
+    }
+    if b.term == Term::Jump {
+        let target = add(f.b0, m.p.op(at));
+        let n = m.p.op(inc(at));
+        let k0 = m.argv.len();
+        m.argv.clear();
+        for i in 0..n {
+            let v = val(in m, m.p.op(add(add(at, 2), i)));
+            if v.t == T_UNDEF {
+                fail(inout m, "missing IR edge argument");
+                return;
+            }
+            m.argv.push(v);
+        }
+        let pa = u64_at(in m.bparams, target);
+        let np = m.p.op(pa);
+        for i in 0..np {
+            if i < n {
+                let id = m.p.op(add(inc(pa), i));
+                match m.argv.try_get(i) {
+                    Option::Some(v) => set_val(inout m, id, v),
+                    Option::None => {},
+                }
+            }
+        }
+        let _ = k0;
+        m.cur.blk = target;
+        m.cur.ip = 0;
+        return;
+    }
+    if b.term == Term::Branch {
+        let v = val(in m, m.p.op(at));
+        if v.t == T_UNDEF {
+            fail(inout m, "missing IR condition");
+            return;
+        }
+        if v.t != T_BOOL {
+            fail(inout m, "IR branch condition must be bool");
+            return;
+        }
+        let target = if v.x != 0 {
+            m.p.op(inc(at))
+        } else {
+            m.p.op(add(at, 2))
+        };
+        m.cur.blk = add(f.b0, target);
+        m.cur.ip = 0;
+        return;
+    }
+    if b.term == Term::Match {
+        let v = val(in m, m.p.op(at));
+        if v.t == T_UNDEF {
+            fail(inout m, "missing IR match value");
+            return;
+        }
+        let n = m.p.op(inc(at));
+        let mut r = add(at, 2);
+        for i in 0..n {
+            let e = pat_end(in m, r);
+            if pat_matches(inout m, r, v) {
+                m.cur.blk = add(f.b0, m.p.op(e));
+                m.cur.ip = 0;
+                return;
+            }
+            r = inc(e);
+        }
+        fail(inout m, "non-exhaustive IR match");
+        return;
+    }
+    fail(inout m, "reached an unreachable IR block");
+}
+
+// A returned value meets the top frame (`Control::Return` in `drive`);
+// false when the run is complete.
+fn resume(inout m: M) -> bool {
+    let fr = match m.stack.pop() {
+        Option::Some(f) => f,
+        Option::None => {
+            return false;
+        },
+    };
+    if fr.kind == FR_TRY {
+        let v = m.rv;
+        if v.t == T_DATA {
+            let g = agg(in m, v);
+            if g.ctor == m.s_ok || g.ctor == m.s_err {
+                let j = field_index(in m, g, m.s_zero);
+                if j == NONE64 {
+                    if g.ctor == m.s_ok {
+                        fail(inout m, "missing Ok payload");
+                    } else {
+                        fail(inout m, "missing Err payload");
+                    }
+                    return true;
+                }
+                if g.ctor == m.s_ok {
+                    m.rv = kid(in m, add(g.a, j));
+                    return true;
+                }
+                raise(inout m);
+                return true;
+            }
+        }
+        fail(inout m, "'?' requires Result");
+        return true;
+    }
+    m.cur = fr;
+    let rv = m.rv;
+    let c = coerce(inout m, rv, fr.ty);
+    set_val(inout m, w(fr.dest), c);
+    m.ctrl = C_IR;
+    true
+}
+
+// `Runtime::run` of the entry with no arguments: the value's text in
+// `msg`, or the error in `msg` with `failed`.
+pub fn drive(inout m: M) {
+    m.argv.clear();
+    m.argc.clear();
+    m.argp.clear();
+    m.cur = fr_zero();
+    invoke(inout m, m.entry);
+    m.ctrl = C_IR;
+    loop {
+        if m.failed {
+            return;
+        }
+        if m.fuel == 0 {
+            fail(inout m, "execution fuel exhausted");
+            return;
+        }
+        m.fuel = wrapping_sub(m.fuel, 1);
+        if m.ctrl == C_IR {
+            step(inout m);
+        } else if !resume(inout m) {
+            break;
+        }
+    }
+    m.msg.clear();
+    let v = m.rv;
+    let mut o: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    display(in m, v, inout o, 0);
+    m.msg = o;
+}

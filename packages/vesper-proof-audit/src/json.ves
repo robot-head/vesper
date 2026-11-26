@@ -97,10 +97,7 @@ fn hex_digit(n: u8) -> u8 {
 pub fn put_string(inout out: ChunkSeq[u8], in s: Slice[u8]) {
     out.push(34);
     for i in 0..s.len() {
-        let b = match s.try_get(i) {
-            Option::Some(b) => b,
-            Option::None => 0,
-        };
+        let b = s.try_get(i).unwrap_or(0);
         if b == 34 {
             out.push(92);
             out.push(34);
@@ -161,13 +158,7 @@ pub fn put_u64(inout out: ChunkSeq[u8], n: u64) {
             break;
         }
         i = wrapping_sub(i, 1);
-        out
-            .push(
-                match digits.try_get(i) {
-                    Option::Some(d) => d,
-                    Option::None => 48,
-                }
-            );
+        out.push(digits.try_get(i).unwrap_or(48));
     }
 }
 

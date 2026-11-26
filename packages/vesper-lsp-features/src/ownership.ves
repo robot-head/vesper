@@ -13,49 +13,19 @@
 // it out.
 
 use @vesper/ast::{
-    Ast,
-    ExprNode,
-    PatNode,
-    StmtNode,
-    ArgNode,
-    ParamNode,
-    FnNode,
-    ImplNode,
-    ItemNode,
-    TypeNode,
-    EffectsNode,
-    EffectNode,
-    ClauseNode,
-    list_len,
-    list_at,
-    expr_at,
-    pat_at
+    Ast, ExprNode, PatNode, StmtNode, ArgNode, ParamNode, FnNode, ImplNode, ItemNode, TypeNode,
+    EffectsNode, EffectNode, ClauseNode, list_len, list_at, expr_at, pat_at
 };
 use @vesper/ast::lower::{lower_source};
 use @vesper/check-data::input::{Ctx, Reader as CtxReader, read_ctx};
 use @vesper/check-data::types::{EffNode, Vars, vars_new, substitute, display as type_display};
 use @vesper/check-data::world::{
-    Adt,
-    Generic,
-    Variant,
-    Field,
-    Bounds,
-    bounds_new,
-    mode_of,
-    constructor
+    Adt, Generic, Variant, Field, Bounds, bounds_new, mode_of, constructor
 };
 use @vesper-std/intern::{symbol_from_id};
 use self::json::{byte, pack, put, put_bytes, put_position, put_range, put_string, put_u64};
 use self::nav::{
-    arg_at,
-    clause_at,
-    fn_at,
-    impl_at,
-    item_at,
-    param_at,
-    put_name,
-    put_span_error,
-    stmt_at
+    arg_at, clause_at, fn_at, impl_at, item_at, param_at, put_name, put_span_error, stmt_at
 };
 use @vesper/span::{ByteSpan, Limits, Position, Range, line_table, offset, position, range};
 use @vesper/span::Error as SpanError;

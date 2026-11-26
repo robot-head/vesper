@@ -14,21 +14,9 @@
 //
 // @export abi 4 options
 use @vesper/crypto::{
-    Aead,
-    CryptoError,
-    aead_open,
-    aead_seal,
-    ct_eq,
-    mlkem768_decaps,
-    mlkem768_encaps,
-    mlkem768_isa_available,
-    mlkem768_isa_detect,
-    mlkem768_keygen,
-    mlkem768_validate,
-    random,
-    wipe,
-    x25519,
-    x25519_base
+    Aead, CryptoError, aead_open, aead_seal, ct_eq, mlkem768_decaps, mlkem768_encaps,
+    mlkem768_isa_available, mlkem768_isa_detect, mlkem768_keygen, mlkem768_validate, random, wipe,
+    x25519, x25519_base
 };
 
 // ---------------------------------------------------------------------------

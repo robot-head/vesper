@@ -50,6 +50,9 @@ divergent-pact = []
 # The same check for the Lean extraction module (#1341): every module text
 # comes back empty.
 divergent-lean-extract = []
+# The same check for the verified code generator (#1886): every build's
+# summary comes back empty, so every build fails.
+divergent-verified-codegen = []
 
 [dependencies]
 vesper = { path = "../.." }

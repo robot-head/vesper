@@ -2,23 +2,8 @@
 // spellings, diagnostics and `validate_manifest`.
 use self::{Diag, L, Man};
 use self::util::{
-    Ascii,
-    Code,
-    add,
-    dep,
-    feat,
-    find_dep,
-    find_feat,
-    gb,
-    id_at,
-    inc,
-    man,
-    none,
-    put,
-    put_id,
-    slen,
-    soff,
-    sys
+    Ascii, Code, add, dep, feat, find_dep, find_feat, gb, id_at, inc, man, none, put, put_id, slen,
+    soff, sys
 };
 
 // The length of the `std` scope that unscoped package names must have.

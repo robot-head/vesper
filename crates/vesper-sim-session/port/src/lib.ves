@@ -17,22 +17,10 @@
 
 use self::failure::{FailureTable, failure_table_clone, failure_table_new, failure_table_next};
 use self::process::{
-    ProcessTable,
-    process_table_clone,
-    process_table_crash,
-    process_table_crashes,
-    process_table_epoch,
-    process_table_is_up,
-    process_table_len,
-    process_table_new,
-    process_table_restart,
-    validate_log_bounds,
-    validate_model_bounds,
-    validate_network_bounds,
-    validate_process_timeline,
-    validate_warp_bounds,
-    validate_warp_link_params,
-    warp_admit_allows
+    ProcessTable, process_table_clone, process_table_crash, process_table_crashes,
+    process_table_epoch, process_table_is_up, process_table_len, process_table_new,
+    process_table_restart, validate_log_bounds, validate_model_bounds, validate_network_bounds,
+    validate_process_timeline, validate_warp_bounds, validate_warp_link_params, warp_admit_allows
 };
 use self::sha256::{sha256_digest};
 use self::wal::{ScanResult, frame_bytes, scan_bytes};

@@ -1,35 +1,12 @@
 // `@vesper/vsys`: `.vsys` parser, validator, and canonical encoder
 // (`crates/vesper-ffi/src/sys`).
 use self::lexer::{
-    Lexed,
-    Tok,
-    VsysError,
-    err_duplicate,
-    err_limit,
-    err_syntax,
-    err_type,
-    err_unsupported,
-    fail_vsys,
-    lex,
-    tok_arrow,
-    tok_ellipsis,
-    tok_eof,
-    tok_num,
-    tok_punct,
-    tok_text,
-    tok_word
+    Lexed, Tok, VsysError, err_duplicate, err_limit, err_syntax, err_type, err_unsupported,
+    fail_vsys, lex, tok_arrow, tok_ellipsis, tok_eof, tok_num, tok_punct, tok_text, tok_word
 };
 use self::wire::{
-    WireField,
-    WireStructDef,
-    compile_all,
-    endian_be,
-    endian_le,
-    endian_native,
-    wt_bytes,
-    wt_int,
-    wt_pad,
-    wt_struct
+    WireField, WireStructDef, compile_all, endian_be, endian_le, endian_native, wt_bytes, wt_int,
+    wt_pad, wt_struct
 };
 use self::encode::{Encoder, new_encoder, put_bytes, put_count, put_decimal_const, put_str, put_u16};
 

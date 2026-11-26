@@ -6,20 +6,10 @@ use self::{FrameError, FrameOut, CapsuleError, CapsuleOut};
 use self::int::{inc, min64, word, byte, remove_word};
 use self::varint::{vdec};
 use self::frame::{
-    data_type,
-    headers_type,
-    webtransport_stream_type,
-    is_http2_frame,
-    buffered_type,
-    parse_payload
+    data_type, headers_type, webtransport_stream_type, is_http2_frame, buffered_type, parse_payload
 };
 use self::capsule::{
-    datagram_type,
-    close_type,
-    drain_type,
-    close_code_len,
-    max_close_reason,
-    parse_value
+    datagram_type, close_type, drain_type, close_code_len, max_close_reason, parse_value
 };
 
 // Pooled reader modes (match frame.ves and capsule.ves).

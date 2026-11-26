@@ -51,14 +51,8 @@ use @vesper/check-data::types::{Types};
 use @vesper/check-data::world::{World};
 use self::gen::{G, Y, function, gen_new};
 use self::prelude::{
-    arithmetic_semantics,
-    arithmetic_simp_bundle,
-    cps_monad,
-    divergence,
-    fail_models,
-    handler_cps,
-    in_i64,
-    lift_action
+    arithmetic_semantics, arithmetic_simp_bundle, cps_monad, divergence, fail_models, handler_cps,
+    in_i64, lift_action
 };
 
 // The prelude's declarations: HandlerCPS, its Monad, liftAction, the simp
