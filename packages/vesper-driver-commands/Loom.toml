@@ -9,7 +9,7 @@ edition = "2026"
 # through @vesper-std/process; the command engines it calls are the
 # `HybridCommands` import (commands.vsys), which the hybrid compiler
 # implements (crates/vesper-hybrid/src/commands.rs).
-capability_ceiling = ["Fail", "Alloc", "Ffi[StdFs]", "Ffi[StdEnv]", "Ffi[StdProcess]", "Ffi[HybridCommands]"]
+capability_ceiling = ["Fail", "Alloc", "Ffi[StdFs]", "Ffi[StdEnv]", "Ffi[StdProcess]", "Ffi[HybridCommands]", "Ffi[Blake3]"]
 vsys = ["commands.vsys"]
 
 [dependencies]
@@ -19,3 +19,10 @@ vsys = ["commands.vsys"]
 "@vesper-std/process" = { version = "^0.1", path = "../vesper-std/process" }
 # `vesper fmt`'s formatter, the Vesper port of vesper_fmt (#1996 part 3d).
 "@vesper/fmt" = { version = "^0.1", path = "../../crates/vesper-fmt/vesper" }
+# `vesper graph`'s lockfile reader, validation and report, the Vesper port
+# of vesper_loom_calculus (#1996).
+"@vesper/loom-calculus" = { version = "^0.1", path = "../../crates/vesper-loom-calculus/vesper" }
+# `vesper proof-audit`, the Vesper port of src/proof_commands.rs (#1341,
+# #1996), and `vesper verify SOURCE --format`, of src/verify_commands.rs.
+"@vesper/proof-audit" = { version = "^0.1", path = "../vesper-proof-audit" }
+"@vesper/verify" = { version = "^0.1", path = "../vesper-verify" }

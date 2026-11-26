@@ -1,0 +1,414 @@
+// Generated from packages/vesper-cranelift/cranelift.vsys by
+// crates/vesper-cranelift-component (#2210). Do not edit: rerun its
+// tests with VESPER_BLESS=1.
+//
+// The `vesper:cranelift/vcl@0.1.0` imports (`vesper_table` in
+// crates/vesper-cranelift-component/build.rs says what the
+// letters of a row mean).
+
+pub fn vcl_count() -> u64 {
+    133
+}
+
+pub fn vcl_row(i: u64) -> Str {
+    if i == 0 {
+        return "vcl_module_new aaa iii o";
+    }
+    if i == 1 {
+        return "vcl_new_error A o q";
+    }
+    if i == 2 {
+        return "vcl_module_free h s u";
+    }
+    if i == 3 {
+        return "vcl_module_error hA io q";
+    }
+    if i == 4 {
+        return "vcl_module_pointer_type h i w";
+    }
+    if i == 5 {
+        return "vcl_module_keep_clif hw oi u";
+    }
+    if i == 6 {
+        return "vcl_module_code_bytes h i q";
+    }
+    if i == 7 {
+        return "vcl_module_clif hqA iio q";
+    }
+    if i == 8 {
+        return "vcl_sig_new hw oi w";
+    }
+    if i == 9 {
+        return "vcl_sig_param hww oii w";
+    }
+    if i == 10 {
+        return "vcl_sig_return hww oii w";
+    }
+    if i == 11 {
+        return "vcl_declare_function haww oiii w";
+    }
+    if i == 12 {
+        return "vcl_declare_data hawww oiiii w";
+    }
+    if i == 13 {
+        return "vcl_define_function hwh ois w";
+    }
+    if i == 14 {
+        return "vcl_define_data hwh ois w";
+    }
+    if i == 15 {
+        return "vcl_module_finish h s o";
+    }
+    if i == 16 {
+        return "vcl_object_len h i q";
+    }
+    if i == 17 {
+        return "vcl_object_read hqA iio q";
+    }
+    if i == 18 {
+        return "vcl_object_publish h s q";
+    }
+    if i == 19 {
+        return "vcl_object_free h s u";
+    }
+    if i == 20 {
+        return "vcl_data_new - - o";
+    }
+    if i == 21 {
+        return "vcl_data_free h s u";
+    }
+    if i == 22 {
+        return "vcl_data_define ha oi u";
+    }
+    if i == 23 {
+        return "vcl_data_zeroinit hq oi u";
+    }
+    if i == 24 {
+        return "vcl_data_align hq oi u";
+    }
+    if i == 25 {
+        return "vcl_data_func_addr hhww oiii u";
+    }
+    if i == 26 {
+        return "vcl_data_data_addr hhwwq oiiii u";
+    }
+    if i == 27 {
+        return "vcl_builder_new hw ii o";
+    }
+    if i == 28 {
+        return "vcl_builder_free h s u";
+    }
+    if i == 29 {
+        return "vcl_builder_error hA io q";
+    }
+    if i == 30 {
+        return "vcl_import_function hhw ooi w";
+    }
+    if i == 31 {
+        return "vcl_import_signature hhw oii w";
+    }
+    if i == 32 {
+        return "vcl_import_data hhw oii w";
+    }
+    if i == 33 {
+        return "vcl_create_block h o w";
+    }
+    if i == 34 {
+        return "vcl_append_block_param hww oii w";
+    }
+    if i == 35 {
+        return "vcl_append_block_params_for_function_params hw oi w";
+    }
+    if i == 36 {
+        return "vcl_block_param hww oii w";
+    }
+    if i == 37 {
+        return "vcl_switch_to_block hw oi u";
+    }
+    if i == 38 {
+        return "vcl_seal_block hw oi u";
+    }
+    if i == 39 {
+        return "vcl_seal_all_blocks h o u";
+    }
+    if i == 40 {
+        return "vcl_declare_var hw oi w";
+    }
+    if i == 41 {
+        return "vcl_def_var hww oii u";
+    }
+    if i == 42 {
+        return "vcl_use_var hw oi w";
+    }
+    if i == 43 {
+        return "vcl_stack_slot hww oii w";
+    }
+    if i == 44 {
+        return "vcl_inst_result hw oi w";
+    }
+    if i == 45 {
+        return "vcl_value_type hw oi w";
+    }
+    if i == 46 {
+        return "vcl_iconst hwq oii w";
+    }
+    if i == 47 {
+        return "vcl_f32const hw oi w";
+    }
+    if i == 48 {
+        return "vcl_f64const hq oi w";
+    }
+    if i == 49 {
+        return "vcl_binary hwww oiii w";
+    }
+    if i == 50 {
+        return "vcl_binary_imm hwwq oiii w";
+    }
+    if i == 51 {
+        return "vcl_unary hww oii w";
+    }
+    if i == 52 {
+        return "vcl_convert hwww oiii w";
+    }
+    if i == 53 {
+        return "vcl_ternary hwwww oiiii w";
+    }
+    if i == 54 {
+        return "vcl_overflow hwww oiii w";
+    }
+    if i == 55 {
+        return "vcl_icmp hwww oiii w";
+    }
+    if i == 56 {
+        return "vcl_icmp_imm hwwq oiii w";
+    }
+    if i == 57 {
+        return "vcl_fcmp hwww oiii w";
+    }
+    if i == 58 {
+        return "vcl_load hwwwww oiiiii w";
+    }
+    if i == 59 {
+        return "vcl_store hwwwww oiiiii u";
+    }
+    if i == 60 {
+        return "vcl_stack_addr hwww oiii w";
+    }
+    if i == 61 {
+        return "vcl_stack_load hwww oiii w";
+    }
+    if i == 62 {
+        return "vcl_stack_store hwww oiii u";
+    }
+    if i == 63 {
+        return "vcl_extractlane hww oii w";
+    }
+    if i == 64 {
+        return "vcl_insertlane hwww oiii w";
+    }
+    if i == 65 {
+        return "vcl_vconst hwa oii w";
+    }
+    if i == 66 {
+        return "vcl_shuffle hwwa oiii w";
+    }
+    if i == 67 {
+        return "vcl_atomic_rmw hwwwww oiiiii w";
+    }
+    if i == 68 {
+        return "vcl_atomic_load hwww oiii w";
+    }
+    if i == 69 {
+        return "vcl_atomic_store hwww oiii u";
+    }
+    if i == 70 {
+        return "vcl_atomic_cas hwwww oiiii w";
+    }
+    if i == 71 {
+        return "vcl_isplit hw oi w";
+    }
+    if i == 72 {
+        return "vcl_iconcat hww oii w";
+    }
+    if i == 73 {
+        return "vcl_func_addr hww oii w";
+    }
+    if i == 74 {
+        return "vcl_symbol_value hww oii w";
+    }
+    if i == 75 {
+        return "vcl_global_value hww oii w";
+    }
+    if i == 76 {
+        return "vcl_get_stack_pointer hw oi w";
+    }
+    if i == 77 {
+        return "vcl_call hwc oii w";
+    }
+    if i == 78 {
+        return "vcl_call_indirect hwwc oiii w";
+    }
+    if i == 79 {
+        return "vcl_return_call hwc oii u";
+    }
+    if i == 80 {
+        return "vcl_jump hwc oii u";
+    }
+    if i == 81 {
+        return "vcl_brif hwwcwc oiiiii u";
+    }
+    if i == 82 {
+        return "vcl_return hc oi u";
+    }
+    if i == 83 {
+        return "vcl_trap hw oi u";
+    }
+    if i == 84 {
+        return "vcl_trap_if hwww oiii u";
+    }
+    if i == 85 {
+        return "vcl_emit heC oio w";
+    }
+    if i == 86 {
+        return "vcl_jit_module_new aae iii o";
+    }
+    if i == 87 {
+        return "vcl_module_finalize h o w";
+    }
+    if i == 88 {
+        return "vcl_function_address hw oi q";
+    }
+    if i == 89 {
+        return "vcl_module_function_count h i w";
+    }
+    if i == 90 {
+        return "vcl_module_function_name hwA iio q";
+    }
+    if i == 91 {
+        return "vcl_module_get_function ha oi w";
+    }
+    if i == 92 {
+        return "vcl_module_get_data ha oi w";
+    }
+    if i == 93 {
+        return "vcl_module_kind h i w";
+    }
+    if i == 94 {
+        return "vcl_compile hh os q";
+    }
+    if i == 95 {
+        return "vcl_module_last_code hqA iio q";
+    }
+    if i == 96 {
+        return "vcl_module_last_unwind hA io q";
+    }
+    if i == 97 {
+        return "vcl_module_last_traps hE io q";
+    }
+    if i == 98 {
+        return "vcl_import_data_colocated hhww oiii w";
+    }
+    if i == 99 {
+        return "vcl_set_srcloc hw oi u";
+    }
+    if i == 100 {
+        return "vcl_set_cold_block hw oi u";
+    }
+    if i == 101 {
+        return "vcl_current_block h o w";
+    }
+    if i == 102 {
+        return "vcl_set_func_name hww oii u";
+    }
+    if i == 103 {
+        return "vcl_import_function_colocated hhww ooii w";
+    }
+    if i == 104 {
+        return "vcl_switch hwwec oiiii u";
+    }
+    if i == 105 {
+        return "vcl_call_op q i w";
+    }
+    if i == 106 {
+        return "vcl_call_arg_count q i q";
+    }
+    if i == 107 {
+        return "vcl_call_arg qq ii q";
+    }
+    if i == 108 {
+        return "vcl_call_args qE io q";
+    }
+    if i == 109 {
+        return "vcl_call_result qq ii u";
+    }
+    if i == 110 {
+        return "vcl_call_builder q i o";
+    }
+    if i == 111 {
+        return "vcl_call_module q i o";
+    }
+    if i == 112 {
+        return "vcl_call_return_builder qh is u";
+    }
+    if i == 113 {
+        return "vcl_call_return_module qh is u";
+    }
+    if i == 114 {
+        return "vcl_sig_param_ext hwww oiii w";
+    }
+    if i == 115 {
+        return "vcl_sig_return_ext hwww oiii w";
+    }
+    if i == 116 {
+        return "vcl_define_function_bytes hwqae oiiii w";
+    }
+    if i == 117 {
+        return "vcl_module_function_at hw oi w";
+    }
+    if i == 118 {
+        return "vcl_module_function_linkage hw oi w";
+    }
+    if i == 119 {
+        return "vcl_module_function_signature hw oi w";
+    }
+    if i == 120 {
+        return "vcl_module_data_count h i w";
+    }
+    if i == 121 {
+        return "vcl_module_data_at hw oi w";
+    }
+    if i == 122 {
+        return "vcl_module_data_name hwA iio q";
+    }
+    if i == 123 {
+        return "vcl_module_data_linkage hw oi w";
+    }
+    if i == 124 {
+        return "vcl_module_last_clif hqA iio q";
+    }
+    if i == 125 {
+        return "vcl_module_last_relocs hE io q";
+    }
+    if i == 126 {
+        return "vcl_module_last_call_sites hE io q";
+    }
+    if i == 127 {
+        return "vcl_module_last_frame_size h i q";
+    }
+    if i == 128 {
+        return "vcl_declare_anonymous_data hww oii w";
+    }
+    if i == 129 {
+        return "vcl_call_memset hhwww oiiii u";
+    }
+    if i == 130 {
+        return "vcl_call_memmove hhwww oiiii u";
+    }
+    if i == 131 {
+        return "vcl_isa_triple_arch h i w";
+    }
+    if i == 132 {
+        return "vcl_has_x86_pshufb_lowering h i w";
+    }
+    ""
+}

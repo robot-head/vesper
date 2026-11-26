@@ -231,8 +231,6 @@ struct Runner {
     cases: usize,
     rust_time: Duration,
     port_time: Duration,
-    /// Every case's arguments, for the flip gate's rounds.
-    args: Vec<Vec<String>>,
 }
 impl Runner {
     fn run(command: &mut Command) -> (Output, Duration) {
@@ -242,8 +240,6 @@ impl Runner {
     }
     /// Run `proof-audit args` both ways; they must agree.
     fn case(&mut self, args: &[&str]) -> Output {
-        self.args
-            .push(args.iter().map(|a| (*a).to_owned()).collect());
         let (rust, rust_time) = Self::run(vesper().arg("proof-audit").args(args));
         let (port, port_time) = Self::run(Command::new(&self.port).args(args));
         self.cases += 1;
@@ -266,42 +262,6 @@ impl Runner {
             show(&port)
         );
         rust
-    }
-
-    /// The flip gate (scripts/ci/flip-gate/proof-audit.json, #2207), with
-    /// `FLIP_GATE` set: `FLIP_GATE_EPOCHS` (default 12) ABBA rounds of
-    /// every recorded case, Rust's `vesper proof-audit` against the Vesper port,
-    /// after a warm-up of each.
-    fn flip_gate(&self, workload: &str) {
-        if std::env::var_os("FLIP_GATE").is_none() {
-            return;
-        }
-        let epochs: usize = std::env::var("FLIP_GATE_EPOCHS")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(12);
-        let rust = || {
-            let t = Instant::now();
-            for a in &self.args {
-                std::hint::black_box(vesper().arg("proof-audit").args(a).output().unwrap());
-            }
-            t.elapsed()
-        };
-        let port = || {
-            let t = Instant::now();
-            for a in &self.args {
-                std::hint::black_box(Command::new(&self.port).args(a).output().unwrap());
-            }
-            t.elapsed()
-        };
-        rust();
-        port();
-        let mut pairs = String::new();
-        for _ in 0..epochs {
-            let (r1, v1, v2, r2) = (rust(), port(), port(), rust());
-            pairs += &format!(" {}:{}", (r1 + r2).as_nanos(), (v1 + v2).as_nanos());
-        }
-        println!("flip-gate pairs {workload}{pairs}");
     }
 }
 
@@ -739,7 +699,6 @@ fn vesper_port_matches_rust_proof_audit() {
         cases: 0,
         rust_time: Duration::ZERO,
         port_time: Duration::ZERO,
-        args: vec![],
     };
     option_cases(&mut r);
     let options = r.cases;
@@ -749,7 +708,6 @@ fn vesper_port_matches_rust_proof_audit() {
     };
     r.rust_time = Duration::ZERO;
     r.port_time = Duration::ZERO;
-    r.args.clear();
     lean_cases(&mut r, &lean);
     provenance_cases(&mut r, &lean);
     eprintln!(
@@ -760,5 +718,4 @@ fn vesper_port_matches_rust_proof_audit() {
         r.port_time,
         r.port_time.as_secs_f64() / r.rust_time.as_secs_f64()
     );
-    r.flip_gate("audit");
 }

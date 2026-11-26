@@ -1,10 +1,38 @@
-// `vesper verify`: CLI option parsing, validation, and `--help` in Vesper,
-// delegating Lean formatter-model / extraction verification (`src/verify_commands.rs`)
-// to `HybridCommands::hc_verify_run`. (`vesper verify --refute` continues to dispatch
-// to `vesper-refute` in `lib.ves`.)
+// `vesper verify`: CLI option parsing, validation, and `--help` in Vesper.
+// `--format` runs in @vesper/verify (the Vesper port of
+// src/verify_commands.rs' formatter-model check, 0 of 29 cases differ);
+// `--extract` is still `HybridCommands::hc_verify_run`. (`vesper verify
+// --refute` continues to dispatch to `vesper-refute` in `lib.ves`.)
 use @vesper/driver::{Args, args_count, eq};
+use @vesper/verify::{run_format};
+use @vesper/proof-audit::json::{put_string};
 use super::{PrintFailed, arg, byte_at, print, fail, stdout_stream};
-use super::proof_audit::{name_valid, forbidden_axiom};
+use super::proof_audit::{name_valid, forbidden_axiom, audit_args};
+
+// The `"schema"` of a rejection document: `--extract`'s and `--format`'s.
+const EXTRACT_SCHEMA: Str = "vesper.verify-extract/1";
+const FORMAT_SCHEMA: Str = "vesper.format-proof/1";
+
+// The rejection document of a CLI error under `--json`, as
+// `serde_json::json!` prints it (keys sorted) followed by a newline.
+fn print_json_rejection(has_extract: bool, in message: Slice[u8]) eff [
+    Ffi[StdFs],
+    Fail[PrintFailed]
+] {
+    let mut doc: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    doc.extend(in "{\"message\":".as_bytes());
+    put_string(inout doc, in message);
+    doc.extend(in ",\"schema\":".as_bytes());
+    if has_extract {
+        put_string(inout doc, in EXTRACT_SCHEMA.as_bytes());
+    } else {
+        put_string(inout doc, in FORMAT_SCHEMA.as_bytes());
+    }
+    doc.extend(in ",\"stage\":\"config\",\"status\":\"rejected\"}\n".as_bytes());
+    // `print` replaces ill-formed UTF-8 as `String::from_utf8_lossy` did
+    // to the message.
+    print(stdout_stream(), in doc.as_slice());
+}
 
 fn print_verify_help() eff [Ffi[StdFs], Fail[PrintFailed]] {
     print(
@@ -56,9 +84,9 @@ fn fail_verify(
     has_json: bool,
     has_extract: bool,
     in message: Slice[u8]
-) -> i64 eff [Ffi[StdFs], Ffi[HybridCommands], Fail[PrintFailed]] {
+) -> i64 eff [Ffi[StdFs], Fail[PrintFailed]] {
     if has_json {
-        HybridCommands::hc_verify_json_err(has_extract, in message);
+        print_json_rejection(has_extract, in message);
     }
     let mut full: ChunkSeq[u8] = ChunkSeq::new[u8]();
     if has_extract {
@@ -137,7 +165,29 @@ fn run_packed(
     fail(in err.as_slice())
 }
 
-pub fn run_verify(in args: Args) -> i64 eff [Ffi[StdFs], Ffi[HybridCommands], Fail[PrintFailed]] {
+// `--format`: the check in @vesper/verify, its report and its error.
+fn run_format_check(
+    in args: Args,
+    n: u64
+) -> i64 eff [Ffi[StdFs], Ffi[StdEnv], Ffi[StdProcess], Ffi[Blake3], Fail[PrintFailed]] {
+    let ran = run_format(in audit_args(in args, n));
+    print(stdout_stream(), in ran.out.as_slice());
+    if ran.failed {
+        return fail(in ran.err.as_slice());
+    }
+    0
+}
+
+pub fn run_verify(
+    in args: Args
+) -> i64 eff [
+    Ffi[StdFs],
+    Ffi[StdEnv],
+    Ffi[StdProcess],
+    Ffi[Blake3],
+    Ffi[HybridCommands],
+    Fail[PrintFailed]
+] {
     let n = args_count(in args);
     if has_help_before_sep(in args, n) {
         print_verify_help();
@@ -461,6 +511,9 @@ pub fn run_verify(in args: Args) -> i64 eff [Ffi[StdFs], Ffi[HybridCommands], Fa
     }
     if !has_source {
         return fail_verify(has_json, has_extract, in "verify requires a source file".as_bytes());
+    }
+    if format {
+        return run_format_check(in args, n);
     }
     run_packed(in args, n)
 }

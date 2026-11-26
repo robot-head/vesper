@@ -30,9 +30,8 @@ Modules:
   messages and positions, and its string writer.
 - `text.ves`: lossy UTF-8, `str::trim`, `first_error`, `io::Error` and
   `ExitStatus` displays.
-- `numbers.ves`: serde_json's "number out of range" check, copied from
-  `@vesper/lsp` (depending on `@vesper/lsp` puts `@vesper/serde`'s
-  `Kind::String` in the scope of `String::` paths).
+
+serde_json's "number out of range" check comes from `@vesper/lsp`.
 
 Cancellation (the server's `CancelToken`) is not part of this package yet;
 the hybrid wiring adds it.

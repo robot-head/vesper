@@ -17,9 +17,11 @@
 // primitive failures. Slice 2 adds handlers: the handler frame, its return
 // clause, and `perform` of primitive failures, `?` and effect operation
 // calls into the operation clauses. Slice 3 resumes one-shot
-// continuations and runs state handlers. A program reaching anything else
-// (closures, sequences, floats, 128-bit integers, vector, tiled and `Box`
-// operations) is declined before it runs (`scan`), and a continuation
+// continuations and runs state handlers. Slice 4 adds `ChunkSeq` and `Slice`
+// values: their element operations and fixed-width byte access. Slice 5
+// adds closures without effects: their captures and lowered bodies. A
+// program reaching anything else (effectful closures, string operations,
+// floats, 128-bit integers, vector, tiled and `Box` operations) is declined before it runs (`scan`), and a continuation
 // resumed outside its handler's activation is declined when it is; the
 // caller then runs the Rust evaluator instead.
 //

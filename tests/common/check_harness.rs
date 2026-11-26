@@ -25,7 +25,7 @@ use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 use vesper::ast::{Effects, Mode, Pass, Type};
 use vesper::check::World;
-use vesper::{check, native, packages};
+use vesper::{check, ffi_lowering, native, packages};
 
 pub fn repo() -> PathBuf {
     // The root package's tests, or a workspace crate's that includes this
@@ -593,7 +593,16 @@ impl Package {
             assembled.diagnostics,
             assembled.manifest_errors
         );
-        let checked = check::check(&assembled.module);
+        // A package whose dependencies bind `.vsys` libraries checks with
+        // their imports; its entries must not reach a foreign call.
+        let checked = if assembled.vsys.is_empty() {
+            check::check(&assembled.module)
+        } else {
+            let imports = assembled.imports(None).unwrap();
+            ffi_lowering::check_module(&assembled.module, &imports)
+                .unwrap_or_else(|e| panic!("{e}"))
+                .checked
+        };
         let shown: Vec<_> = checked
             .diagnostics
             .iter()

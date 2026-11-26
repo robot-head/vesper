@@ -1079,3 +1079,69 @@ fn main() -> u64 {
         "expected bool select and identity BinaryImm ops to fold in check_bool:\n{fn_clif}"
     );
 }
+
+#[test]
+fn seq_header_and_data_loads_reuse_across_nested_try_set_diamonds() {
+    let source = "
+struct WheelLists {
+    e: ChunkSeq[u64],
+    l: ChunkSeq[u64],
+}
+
+fn at_seq(in s: ChunkSeq[u64], i: u64) -> u64 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+fn link_entry(inout w: WheelLists, list: u64, idx: u64) -> u64 {
+    let tail = at_seq(in w.l, wrapping_add(wrapping_mul(list, 2), 1));
+    let prev = at_seq(in w.e, wrapping_add(wrapping_mul(idx, 4), 1));
+    let _ = w.e.try_set(wrapping_mul(idx, 4), tail);
+    let _ = w.e.try_set(wrapping_add(wrapping_mul(idx, 4), 1), 999);
+    if tail == 999 {
+        let _ = w.l.try_set(wrapping_mul(list, 2), idx);
+    } else {
+        let _ = w.e.try_set(wrapping_add(wrapping_mul(tail, 4), 1), idx);
+    }
+    let _ = w.l.try_set(wrapping_add(wrapping_mul(list, 2), 1), idx);
+    wrapping_add(tail, prev)
+}
+
+fn main() -> u64 {
+    let mut e: ChunkSeq[u64] = ChunkSeq::new();
+    let mut l: ChunkSeq[u64] = ChunkSeq::new();
+    let mut i = 0;
+    loop {
+        if i >= 16 {
+            break;
+        }
+        e.push(999);
+        i = wrapping_add(i, 1);
+    }
+    l.push(999);
+    l.push(999);
+    let mut w = WheelLists { e: e, l: l };
+    let a = link_entry(inout w, 0, 1);
+    let b = link_entry(inout w, 0, 2);
+    let c = link_entry(inout w, 0, 3);
+    wrapping_add(wrapping_add(a, b), c)
+}";
+    let c = accepted(source);
+    let (_, clif) = native::object(&c.world, "main").unwrap();
+    let eval = vesper::runtime::Runtime::new(&c.world)
+        .run("main", vec![])
+        .unwrap();
+    let jit = native::jit(&c.world, "main").unwrap();
+    assert_eq!(eval.to_string(), jit.to_string());
+    let fn_clif = clif
+        .split("\n; ")
+        .find(|s| s.starts_with("link_entry\n"))
+        .unwrap_or(&clif);
+    let data_loads = fn_clif.matches("+16").count();
+    assert!(
+        data_loads <= 2,
+        "expected w.e and w.l SeqHeader data pointers (+16) to be loaded at most once each (got {data_loads}):\n{fn_clif}"
+    );
+}

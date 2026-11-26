@@ -28,7 +28,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/aspect
       - name: Install the bootstrap toolchain
-        run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
+        # wasm32-wasip2 builds the Cranelift component Stage 2 calls (#2210).
+        run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --target wasm32-wasip2
       - uses: Swatinem/rust-cache@v2
       - name: Install pinned wasmtime CLI (v50.0.1) for Stage 2 checks
         run: aspect ci install-wasmtime
@@ -44,6 +45,17 @@ jobs:
         env:
           WASMTIME_BIN: ${{ runner.temp }}/wasmtime/wasmtime
         run: cargo test --locked -p vesper --test wasm_seed_breadth --test wasm_seed_package_io -- --test-threads=1
+      - name: Compare the Cranelift component's objects with the native shim's
+        run: cargo test --locked -p vesper-cranelift-component --test objects -- --test-threads=1
+      - name: Install pinned wac CLI (v0.8.1) for the Cranelift component
+        run: aspect ci install-wac
+      - name: Run Cranelift programs through the Wasm backend and the composed component
+        env:
+          WAC_BIN: ${{ runner.temp }}/wac/wac
+          WASMTIME_BIN: ${{ runner.temp }}/wasmtime/wasmtime
+        run: cargo test --locked -p vesper-cranelift-component --test wasm_imports -- --test-threads=1
+      - name: Compare the Vesper wit-component's Cranelift imports with wit-component's
+        run: cargo test --locked -p vesper --test wasm_cranelift_wit_component -- --test-threads=1
       - name: Compare Vesper package assembly with the bootstrap loader
         run: cargo test --locked -p vesper --test self_host_check_names_packages -- --test-threads=1
       - name: Compare the hybrid driver with the default compiler

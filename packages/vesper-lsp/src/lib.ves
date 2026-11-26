@@ -16,6 +16,7 @@ use @vesper/serde::Doc;
 use self::encode::encode_frame;
 use self::frame::{Body, Cursor, read_frame};
 use self::commands::command_checks;
+pub use self::numbers::{U64_MAX_LAST_DIGIT, U64_MAX_TENTH, number_out_of_range};
 
 // A `read_frame` step's status.
 enum Status: _ {

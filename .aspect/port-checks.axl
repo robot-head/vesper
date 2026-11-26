@@ -259,12 +259,13 @@ fusion_test_port = port_checks(
     [
         ["-p", "vesper-fusion"],
     ],
-    [divergence(
-        "combined checks",
-        _FEATURE + ["--no-fail-fast", "--test", "witness"] + _SERIAL,
-        ["every_shipped_rule_appears_in_a_checked_witness"],
-        ["rule_sets_name_every_rewrite_with_a_lemma"],
-    )],
+    [
+        divergence(name, _FEATURE + ["--no-fail-fast", "--test", "witness"] + _SERIAL, [failed], [passed], env = {"VESPER_FUSION_DIVERGE": name})
+        for name, failed, passed in [
+            ("engine", "every_shipped_rule_appears_in_a_checked_witness", "rule_sets_name_every_rewrite_with_a_lemma"),
+            ("witness", "checking_against_the_wrong_source_or_target_is_refused", "rule_sets_name_every_rewrite_with_a_lemma"),
+        ]
+    ],
 )
 
 highlight_test_port = port_checks(
@@ -308,6 +309,7 @@ kinetic_check = port_checks(
             ("solve", ["joint_drives"], "hinge_motor_reaches_its_target_rate", "hinge_servo_holds_the_target_angle_against_gravity", "12"),
             ("world", ["contacts"], "restitution_bounces_to_e_squared_of_the_drop", "static_friction_holds_below_the_coulomb_limit", "13"),
             ("soft", ["soft"], "a_jelly_cube_lands_and_keeps_its_volume", "a_rope_hangs_straight_at_its_length", "14"),
+            ("couple", ["couple"], "a_jelly_rests_on_a_static_box", "coupling_errors_are_typed", "15"),
         ]
     ],
 )
@@ -789,6 +791,8 @@ loom_calculus_check = port_checks(
                 "unsafe_ffi_policy_relaxation_is_rejected_for_existing_and_new_packages",
                 "manifest_cases_match_the_toml_crate",
                 "semver_cases_match_the_semver_crate",
+                "edge_cases_match_serde_json",
+                "graphs_match_the_rust_graph_command",
             ],
             ["documented_manifest_is_declarative_and_secure_by_default"],
         ),

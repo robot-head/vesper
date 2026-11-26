@@ -1,7 +1,9 @@
-// `vesper proof-audit`: CLI option parsing, validation, and `--help` in Vesper,
-// delegating Lean artifact replay and axiom-policy auditing (`src/proof_commands.rs`)
-// to `HybridCommands::hc_proof_audit_run`.
+// `vesper proof-audit`: CLI option parsing, validation, and `--help` here,
+// then Lean artifact replay and axiom-policy auditing in @vesper/proof-audit
+// (the Vesper port of src/proof_commands.rs, 0 of 76 cases differ).
 use @vesper/driver::{Args, args_count, eq};
+use @vesper/proof-audit::{run as audit_run};
+use @vesper/proof-audit::strs::{Strs, strs_new, push as strs_push};
 use super::{PrintFailed, arg, byte_at, print, fail, stdout_stream};
 
 fn print_proof_audit_help() eff [Ffi[StdFs], Fail[PrintFailed]] {
@@ -121,45 +123,37 @@ fn parse_timeout(in text: Slice[u8]) -> u32 {
     0
 }
 
-fn pack_args(in args: Args, n: u64) -> ChunkSeq[u8] {
-    let mut packed: ChunkSeq[u8] = ChunkSeq::new[u8]();
+// The arguments after the command name, as @vesper/proof-audit takes them.
+pub fn audit_args(in args: Args, n: u64) -> Strs {
+    let mut strs = strs_new();
     let mut i: u64 = 1;
     loop {
         if i >= n {
             break;
         }
         let arg_buf = arg(in args, i);
-        packed.extend(in arg_buf.as_slice());
-        packed.push(0);
+        strs_push(inout strs, in arg_buf.as_slice());
         i = wrapping_add(i, 1);
     }
-    packed
+    strs
 }
 
-fn run_packed(
+// Run the audit and print its report, or fail with its error.
+fn run_audit(
     in args: Args,
     n: u64
-) -> i64 eff [Ffi[StdFs], Ffi[HybridCommands], Fail[PrintFailed]] {
-    let packed = pack_args(in args, n);
-    let err_len = HybridCommands::hc_proof_audit_run(in packed.as_slice());
-    if err_len == 0 {
-        return 0;
+) -> i64 eff [Ffi[StdFs], Ffi[StdEnv], Ffi[StdProcess], Ffi[Blake3], Fail[PrintFailed]] {
+    let outcome = audit_run(in audit_args(in args, n));
+    print(stdout_stream(), in outcome.out.as_slice());
+    if outcome.failed {
+        return fail(in outcome.err.as_slice());
     }
-    let mut err: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    err.resize(err_len, 0);
-    let actual = HybridCommands::hc_proof_audit_err(inout err.as_slice_mut());
-    if actual > err.len() {
-        err.resize(actual, 0);
-        let _got = HybridCommands::hc_proof_audit_err(inout err.as_slice_mut());
-    } else {
-        err.truncate(actual);
-    }
-    fail(in err.as_slice())
+    0
 }
 
 pub fn run_proof_audit(
     in args: Args
-) -> i64 eff [Ffi[StdFs], Ffi[HybridCommands], Fail[PrintFailed]] {
+) -> i64 eff [Ffi[StdFs], Ffi[StdEnv], Ffi[StdProcess], Ffi[Blake3], Fail[PrintFailed]] {
     let n = args_count(in args);
     let mut has_module = false;
     let mut module: ChunkSeq[u8] = ChunkSeq::new[u8]();
@@ -240,7 +234,7 @@ pub fn run_proof_audit(
             }
             has_timeout = true;
         } else if eq(in arg_text, in "--json") {
-            // Forwarded to `hc_proof_audit_run`.
+            // Read by @vesper/proof-audit.
         } else if eq(in arg_text, in "--macro-provenance") {
             if has_macro_prov {
                 return fail(in "--macro-provenance may only be specified once".as_bytes());
@@ -281,5 +275,5 @@ pub fn run_proof_audit(
     if !has_root {
         return fail(in "proof-audit requires --root".as_bytes());
     }
-    run_packed(in args, n)
+    run_audit(in args, n)
 }

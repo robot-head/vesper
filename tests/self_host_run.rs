@@ -185,6 +185,34 @@ const PROGRAMS: &[(&str, &str)] = &[
          return p => p, next(c, k) => k(c, wrapping_mul(c, 2)), }) }",
     ),
     (
+        "sequences",
+        "fn len(in s: Slice[u8]) -> u64 { s.len() } \
+         fn run() -> (u64, ChunkSeq[u8], u32, u16, bool, u64) eff [Fail[RuntimeError]] { \
+         let mut b: ChunkSeq[u8] = ChunkSeq::new[u8](); for i in 0..40 { b.push(wrapping_u8(i)); } \
+         b.write_u32_be(4, 3735928559); let r = b.read_u32_be(4); let w = b.read_u16_le(8); \
+         let ok = b.try_write_u64_le(36, 1); let mut c: ChunkSeq[u8] = ChunkSeq::new[u8](); \
+         c.extend(in b[2..6]); c.extend(in b[30..33]); let head = match c.pop() { \
+         Option::Some(x) => widen_u64(x), Option::None => 99 }; \
+         (head, c, r, w, ok, len(in b[10..15])) } \
+         fn main() -> (u64, ChunkSeq[u8], u32, u16, bool, u64) { handle Fail[RuntimeError] in { run() } \
+         with { return v => v, raise(e, k) => (0, ChunkSeq::new[u8](), 0, 0, false, 0) } }",
+    ),
+    (
+        "sequence_faults",
+        "fn get(in s: Slice[u64], i: u64) -> u64 eff [Fail[RuntimeError]] { s[i] } \
+         fn main() -> (u64, u64) { let mut s: ChunkSeq[u64] = ChunkSeq::new[u64](); s.push(5); \
+         (handle Fail[RuntimeError] in { get(in s.as_slice(), 3) } with { return v => v, raise(e, k) => 77 }, \
+         handle Fail[RuntimeError] in { get(in s.as_slice(), 0) } with { return v => v, raise(e, k) => 78 }) }",
+    ),
+    (
+        "closures",
+        "fn apply(f: fn(i64) -> i64, x: i64) -> i64 { f(x) } \
+         fn adder(n: i64) -> fn(i64) -> i64 { |x: i64| wrapping_add(x, n) } \
+         fn main() -> (i64, i64, fn(i64) -> i64) { let k = 10; let mut s = 0; \
+         for i in 0..5 { s = wrapping_add(s, apply(|x: i64| wrapping_mul(x, k), i)); } \
+         let add3 = adder(3); (s, apply(|x: i64| wrapping_add(x, 1), 4), add3) }",
+    ),
+    (
         "unhandled_in_clause",
         "fn d(a: u64, b: u64) -> u64 eff [Fail[RuntimeError]] { a / b } \
          fn main() -> u64 { handle Fail[RuntimeError] in { \

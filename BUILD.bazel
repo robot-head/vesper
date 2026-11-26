@@ -1,3 +1,4 @@
+load("@bazel_skylib//rules:copy_file.bzl", "copy_file")
 load("//tools/bazel:defs.bzl", "vesper_crate")
 load("//tools/bazel:vesper_port.bzl", "vesper_package")
 load("//tools/bazel/tests:ci_analysis_test.bzl", "compile_inputs_test", "environment_test", "runfiles_test")
@@ -30,6 +31,48 @@ _TOOLS = [
     "//crates/vesper-tools:bin/vesper-top",
     "//crates/vesper-tools:bin/vesper-traceparent",
 ]
+
+# The hybrid under the name the default compiler ships as (#1397, the
+# default switch): started as `vesper`, it runs the gated swap set with no
+# variable (crates/vesper-hybrid/src/swaps.rs), so this is the compiler the
+# default `vesper` switches to. A copy, not a second build of the crate, and
+# not a symlink: the tool lookup starts from the resolved executable, so a
+# symlink would look beside `crates/vesper-hybrid/bin/`. The copy sits at
+# `<bin>/shipped/vesper` and finds the tools (data below) at
+# `<bin>/crates/vesper-tools/bin/`, as `//:bin/vesper` does.
+_HYBRID = "//crates/vesper-hybrid:bin/vesper-hybrid"
+
+copy_file(
+    name = "vesper_shipped_unix",
+    src = _HYBRID,
+    out = "shipped/vesper",
+    is_executable = True,
+)
+
+copy_file(
+    name = "vesper_shipped_windows",
+    src = _HYBRID,
+    out = "shipped/vesper.exe",
+    is_executable = True,
+)
+
+filegroup(
+    name = "vesper_shipped",
+    srcs = select({
+        "@platforms//os:windows": [":vesper_shipped_windows"],
+        "//conditions:default": [":vesper_shipped_unix"],
+    }),
+    data = _TOOLS,
+    visibility = ["//visibility:public"],
+)
+
+# The tools on their own, for builds that download only top-level outputs
+# (`aspect ci prebuild-acceptance`): a filegroup's data is not fetched there.
+filegroup(
+    name = "vesper_tools",
+    srcs = _TOOLS,
+    visibility = ["//visibility:public"],
+)
 
 # The root package also owns docs/, examples/, lean/, scripts/ and tools/
 # (directories without their own BUILD.bazel), which the CLI and its tests read.
@@ -67,6 +110,8 @@ vesper_crate(
         "//crates/vesper-doc:files",
         # tests/native_export_v2.rs embeds the port pilot's Vesper sources.
         "//crates/vesper-port-pilot:files",
+        # tests/common/wasm_words.rs embeds the Cranelift component's WIT (#2210).
+        "//crates/vesper-cranelift-component:wit/vcl.wit",
     ],
     extra_test_data = [
         "//crates/vesper-doc:files",
@@ -401,11 +446,16 @@ vesper_crate(
             # @vesper/driver-commands formats through @vesper/fmt (#1996).
             "//crates/vesper-fmt:files",
             "//crates/vesper-lean-syntax:files",
+            # ... and graphs Loom.lock through @vesper/loom-calculus (#1996).
+            "//crates/vesper-loom-calculus:files",
             "//crates/vesper-pact:files",
             "//crates/vesper-resonance:files",
             "//crates/vesper-serde:files",
             "//crates/vesper-span:files",
         ],
+        # #2210: @vesper/wit-component against wit-component over the
+        # Cranelift imports.
+        "test/wasm_cranelift_wit_component": glob(["packages/**"]),
         # SH5 lane 11 (#1334): @vesper/wit-component against wit-component
         # over the same programs.
         "test/self_host_wit_component": glob([
@@ -886,11 +936,13 @@ vesper_crate(
             "tests/fixtures/**",
             "src/lsp/fixtures/**",
             "packages/vesper-lsp-features/**",
+            "packages/vesper-lsp-format/**",
             "packages/vesper-ast/**",
             "packages/vesper-check-data/**",
             "packages/vesper-front/**",
             "packages/vesper-std/**",
         ]) + [
+            "//crates/vesper-fmt:files",
             "//crates/vesper-span:files",
         ],
         # @vesper-std/fs, process and env (#1125): drivers over the packages
@@ -904,8 +956,12 @@ vesper_crate(
         "test/std_fs": [":files"],
         "test/std_process": [":files"],
         # The proof-lens runner (#1828 part 8): a driver over
-        # @vesper/lsp-proof-run and @vesper-std/fs, process and env.
-        "test/self_host_proof_lens": [":files"] + glob([
+        # @vesper/lsp-proof-run, @vesper/lsp and @vesper-std/fs, process and env.
+        "test/self_host_proof_lens": [
+            ":files",
+            "//crates/vesper-serde:files",
+        ] + glob([
+            "packages/vesper-lsp/**",
             "packages/vesper-lsp-proof-run/**",
             "packages/vesper-std/**",
             "tests/fixtures/proof-lens-toolchain/**",
@@ -1610,6 +1666,32 @@ vesper_package(
     visibility = ["//visibility:public"],
 )
 
+# The checker's declaration collector, which the hybrid driver runs for
+# its checked-world declarations (#2024 slice 2c-2).
+vesper_package(
+    name = "check_collect_package",
+    srcs = glob(["packages/vesper-check-collect/src/**/*.ves"]),
+    manifest = "packages/vesper-check-collect/Loom.toml",
+    visibility = ["//visibility:public"],
+    deps = [
+        ":ast_package",
+        ":check_data_package",
+        ":preludes_package",
+        ":std_arena_package",
+        ":std_intern_package",
+    ],
+)
+
+# The checker's preludes as text. Its sources `include_str` the files
+# under preludes/, which ride along as `objects` (files under the package).
+vesper_package(
+    name = "preludes_package",
+    srcs = glob(["packages/vesper-preludes/src/**/*.ves"]),
+    manifest = "packages/vesper-preludes/Loom.toml",
+    objects = glob(["packages/vesper-preludes/preludes/*.ves"]),
+    visibility = ["//visibility:public"],
+)
+
 vesper_package(
     name = "check_layout_package",
     srcs = glob(["packages/vesper-check-layout/src/**/*.ves"]),
@@ -1719,7 +1801,7 @@ vesper_package(
 # Self-hosting SH5 lane 18 (#1341): Lean extraction, for the hybrid's
 # `lean_extract` swap.
 # @vesper/proof-audit, `vesper proof-audit` in Vesper (SH5 lane 18, #1341),
-# for the hybrid's `proof_audit` swap.
+# which @vesper/driver-commands runs (#1996).
 vesper_package(
     name = "proof_audit_package",
     srcs = glob(["packages/vesper-proof-audit/src/**/*.ves"]),
@@ -1737,7 +1819,7 @@ vesper_package(
 )
 
 # @vesper/verify, `vesper verify SOURCE --format` in Vesper (SH5 lane 18,
-# #1341), for the hybrid's `verify` swap.
+# #1341), which @vesper/driver-commands runs (#1996).
 vesper_package(
     name = "verify_package",
     srcs = glob(["packages/vesper-verify/src/**/*.ves"]),
@@ -2140,10 +2222,13 @@ vesper_package(
     vsys = ["packages/vesper-driver-commands/commands.vsys"],
     deps = [
         ":driver_package",
+        ":proof_audit_package",
         ":std_env_package",
         ":std_fs_package",
         ":std_process_package",
+        ":verify_package",
         "//crates/vesper-fmt:port_package",
+        "//crates/vesper-loom-calculus:port_package",
     ],
 )
 

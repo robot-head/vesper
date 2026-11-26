@@ -252,7 +252,7 @@ impl L {
     }
 
     // A host capability of the plan (`plan.host`): the WASI libraries
-    // (StdProcess imports nothing).
+    // (StdProcess imports nothing) and Cranelift's component imports.
     pub fn host_effect(in self, name: u32) -> bool {
         let code: u8 = if name == self.ctx.syms.ffi_env {
             3
@@ -260,6 +260,8 @@ impl L {
             4
         } else if name == self.ctx.syms.ffi_proc {
             5
+        } else if name == self.ctx.syms.ffi_cranelift {
+            6
         } else {
             return false;
         };

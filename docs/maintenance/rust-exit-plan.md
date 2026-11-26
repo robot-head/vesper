@@ -141,8 +141,12 @@ below, and changes the swap's row in its `src/swap/` file to `pass(...)`.
 both and that the others really stay on Rust, and
 `gated_hybrid_matches_the_default_compiler` (tests/differential.rs) runs the
 gated set over the whole corpus with 0 differences. Today `gated` holds
-every swap whose row in its `src/swap/` file is `pass(...)`; the
-scoreboard below has one PASS row per gate configuration.
+every swap whose row in its `src/swap/` file is `pass(...)`, one PASS
+row of the scoreboard below per gate configuration. A hybrid started as `vesper` (Bazel's
+`//:vesper_shipped`, a copy of the hybrid under the shipped
+name) or built with the `gated-default` feature runs `gated` when no
+variable names a set: that is the compiler the default `vesper` switches
+to.
 
 ### Before the retirement PR
 
@@ -304,8 +308,6 @@ the Rust lines deleted.
 | `ebpf` (PASS; compiler module, `src/ebpf_backend*` goes at the retirement) | SH4-16 | 0 differences; tests 1/1 pass | ebpf-with-encoding 1.09x [1.03x, 1.16x] n=12 | 0 (2,336 at the retirement) | #2207 |
 | `doc` (PASS; compiler module, the renderers of `crates/vesper-doc` go at the retirement) | SH5-15 | 0 differences; tests 1/1 pass | render 0.94x [0.93x, 0.97x] n=12 | 0 (1,969 at the retirement) | #2207 |
 | `inline` (PASS; compiler module, `src/ir_inline*` goes at the retirement; with `ir_lower` off the swap skips the identity round trip) | SH3-11 | 0 differences; tests 1/1 pass | inline-with-encoding 0.33x [0.33x, 0.33x] n=12 | 0 (2,033 at the retirement) | #2207 |
-| `verify` (PASS; compiler module, `src/verify_commands.rs` goes at the retirement) | SH5-18 | 0 differences; tests 1/1 pass | format 0.98x [0.93x, 1.07x] n=6 | 0 (1,619 at the retirement) | #2207 |
-| `proof-audit` (PASS; compiler module, `src/proof_commands.rs` goes at the retirement) | SH5-18 | 0 differences; tests 1/1 pass | audit 0.89x [0.84x, 0.97x] n=6 | 0 (1,127 at the retirement) | #2207 |
 | `wit-component` (PASS; compiler module, `src/wasm_backend/component.rs` and the wit-component dependency go at the retirement) | SH5-11 | 0 differences on 1,383 cases; tests 1/1 pass | wrap 0.05x [0.05x, 0.05x] n=12; build 0.67x [0.65x, 0.68x] n=12 | 0 (933 at the retirement) | #1334 flip |
 | `vesper-aether` virtqueue walks (PASS) | SH6-14 | 0 differences; tests 2/2 pass | virtqueue 1.44x [1.36x, 1.47x] n=30 | 331 (now the tests' reference) | #1494 |
 | `native-walk` (PASS; compiler module, the walk's planning in `src/native.rs` and `src/native_export.rs` goes at the retirement) | G1-11 | 0 differences on 978 cases; tests 1/1 pass | entries 1.00x [0.98x, 1.03x] n=12; exports 0.99x [0.93x, 1.03x] n=12 | 0 | #2056 |
@@ -315,3 +317,4 @@ the Rust lines deleted.
 | `doctest-verdict` (PASS; compiler module, `src/doctest_verdict.rs` goes at the retirement) | SH5-14 | 0 differences; tests 1/1 pass | verdict 1.21x [1.20x, 1.22x] n=12 | 0 (221 at the retirement) | #2207 |
 | `test-mutants` (PASS; compiler module, `src/test_mutants.rs` goes at the retirement) | SH5-14 | 0 differences; tests 1/1 pass | sites 0.53x [0.53x, 0.54x] n=12 | 0 (283 at the retirement) | #2207 |
 | `sugar` (PASS; compiler module, `crates/vesper-syntax/src/sugar_expand*.rs` goes at the retirement) | SH1-14 | 0 differences on 3,872 cases; tests 1/1 pass | expand 1.33x [1.28x, 1.36x] n=12 | 0 (3,282 at the retirement) | #1157 part 7 |
+| `verified-codegen` (PASS; compiler module, `src/verified_codegen` goes at the retirement) | SH6-2 | 0 differences on 4,724 cases; tests 1/1 pass | compile 1.02x [0.97x, 1.05x] n=12 | 0 (9,760 at the retirement) | #1886 |

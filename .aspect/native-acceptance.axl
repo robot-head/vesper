@@ -1,4 +1,4 @@
-load("./lib/bazel_exec.axl", "executable", "run_target")
+load("./lib/bazel_exec.axl", "executable", "run_target", "VESPER")
 load("./lib/process.axl", "capture", "check", "command", "exit_code", "root_path", "scratch_dir")
 
 def _native_cases(ctx: TaskContext, root: str) -> list[str]:
@@ -29,7 +29,7 @@ def _host_examples(ctx: TaskContext, root: str, vesper: str, suffix: str) -> int
 
 def _host(ctx: TaskContext) -> int:
     root = ctx.std.env.aspect_root_dir()
-    return _host_examples(ctx, root, executable(ctx, root, "//:bin/vesper"), "")
+    return _host_examples(ctx, root, executable(ctx, root, VESPER), "")
 
 test_native_host = task(
     kind = "test-native-host",
@@ -56,7 +56,7 @@ def _aarch64_case(ctx: TaskContext, root: str, artifacts: str, vesper: str, link
 def _aarch64(ctx: TaskContext) -> int:
     root = ctx.std.env.aspect_root_dir()
     artifacts = scratch_dir(ctx, "vesper-aarch64-")
-    vesper = executable(ctx, root, "//:bin/vesper")
+    vesper = executable(ctx, root, VESPER)
     assembler = ctx.std.env.var("AARCH64_AS") or "aarch64-linux-gnu-as"
     linker = ctx.std.env.var("AARCH64_LD") or "aarch64-linux-gnu-ld"
     emulator = ctx.std.env.var("QEMU_AARCH64") or "qemu-aarch64"
@@ -158,7 +158,7 @@ check_fmt = task(
 
 def _test_fmt(ctx: TaskContext) -> int:
     root = ctx.std.env.aspect_root_dir()
-    binary = ctx.std.env.var("VESPER_FMT_BINARY") or executable(ctx, root, "//:bin/vesper")
+    binary = ctx.std.env.var("VESPER_FMT_BINARY") or executable(ctx, root, VESPER)
     candidate = binary + ".exe"
     candidate_path = root_path(root, candidate)
     if ctx.std.fs.exists(candidate_path) and ctx.std.fs.metadata(candidate_path).is_file:

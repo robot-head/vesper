@@ -1,6 +1,6 @@
 """Exercise actual Lean formatter document proofs and emitted witnesses."""
 
-load("./lib/bazel_exec.axl", "executable")
+load("./lib/bazel_exec.axl", "executable", "VESPER")
 load("./lib/process.axl", "command", "exit_code", "root_path", "scratch_dir")
 load("./lib/strict-json.axl", "decode_object")
 
@@ -208,7 +208,7 @@ check_format_proof = task(
 )
 
 def suite_with(ctx: TaskContext, root: str, run_process = _run_process) -> int:
-    binary = ctx.std.env.var("VESPER_FORMAT_PROOF_BINARY") or executable(ctx, root, "//:bin/vesper")
+    binary = ctx.std.env.var("VESPER_FORMAT_PROOF_BINARY") or executable(ctx, root, VESPER)
     lean = ctx.std.env.var("VESPER_LEAN")
     lean_path = root + "/.ci-lean-path"
     if not lean and ctx.std.fs.exists(lean_path):

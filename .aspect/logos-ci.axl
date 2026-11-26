@@ -1,6 +1,6 @@
 """Prepare the sealed Logos checker and independently replay Lean modules."""
 
-load("./lib/bazel_exec.axl", "executable")
+load("./lib/bazel_exec.axl", "executable", "VESPER")
 load("./lib/flip-statistics.axl", "natural")
 load("./lib/process.axl", "capture", "check", "command", "root_path")
 load("./disk-ci.axl", "start_disk_watcher")
@@ -64,7 +64,7 @@ def _sweep(ctx: TaskContext) -> int:
     if len(args) != 2 or not lean:
         ctx.std.process.exit(2, "usage: VESPER_LEAN=actual-lean aspect ci logos-sweep -- SEALED_ROOT REPORT")
     driver = ctx.std.env.var("LOGOS42_DRIVER") or executable(ctx, root, _LOGOS_DRIVER)
-    vesper = ctx.std.env.var("VESPER_BIN") or executable(ctx, root, "//:bin/vesper")
+    vesper = ctx.std.env.var("VESPER_BIN") or executable(ctx, root, VESPER)
     batch_jobs = ctx.std.env.var("LOGOS_SWEEP_BATCH_JOBS") or "2"
     return _run_sweep(ctx, root, args[0], args[1], driver, vesper, lean, batch_jobs)
 

@@ -1576,48 +1576,58 @@ fn compile_flip_gate() {
     };
     let options = verified::Options::new(target);
     let compile = entry("compile_words");
-    let head: Vec<u8> = target_words(&options)
+    // The swap's whole path from the checked world, as the hybrid runs it
+    // (crates/vesper-hybrid/src/swap/verified_codegen.rs): the optimized
+    // program and `compile_input`'s encoding, `compile_words` and the
+    // decoding, against Rust's `build` from the same world. Worlds the
+    // port refuses (Rust's build then runs) are left out.
+    let worlds: Vec<_> = corpus()
         .iter()
-        .flat_map(|w| w.to_le_bytes())
-        .collect();
-    let cases: Vec<_> = front_cases(&options)
-        .into_iter()
-        .map(|c| {
-            let mut input = head.clone();
-            input.extend_from_slice(&c.input);
-            (c, input)
+        .step_by(stride())
+        .map(|c| &c.world)
+        .filter(|world| {
+            compile_input(world, "main", &options)
+                .ok()
+                .flatten()
+                .is_some_and(|input| !vesper_compile(&compile, &input).0.starts_with("error: "))
         })
-        .filter(|(_, input)| !vesper_compile(&compile, input).0.starts_with("error: "))
         .collect();
-    let (r, v) = abba(
-        "verified compile",
-        &mut || {
-            time(|| {
-                for _ in 0..5 {
-                    for (c, _) in &cases {
-                        let world = &corpus()[c.world].world;
-                        let a =
-                            verified::compile_timing_for_test(world, &c.program, "main", &options);
-                        std::hint::black_box(rust_compile(&a));
-                    }
+    let rust = || {
+        time(|| {
+            for _ in 0..5 {
+                for world in &worlds {
+                    std::hint::black_box(verified::rust_build(world, "main", &options)).ok();
                 }
-            })
-        },
-        &mut || {
-            time(|| {
-                for _ in 0..5 {
-                    for (_, input) in &cases {
-                        std::hint::black_box(vesper_compile(&compile, input));
-                    }
+            }
+        })
+        .as_nanos()
+    };
+    let vesper = || {
+        time(|| {
+            for _ in 0..5 {
+                for world in &worlds {
+                    let input = compile_input(world, "main", &options).unwrap().unwrap();
+                    std::hint::black_box(vesper_compile(&compile, &input));
                 }
-            })
-        },
-    );
-    println!(
-        "flip-gate pairs rust={} vesper={}",
-        r.as_nanos(),
-        v.as_nanos()
-    );
+            }
+        })
+        .as_nanos()
+    };
+    // `aspect ci flip-gate verified-codegen`: one pair per epoch, each the
+    // sum of two Rust and two Vesper runs in ABBA order, after a warm-up.
+    let epochs: usize = std::env::var("VERIFIED_GATE_EPOCHS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(12);
+    rust();
+    vesper();
+    let mut pairs = String::new();
+    for _ in 0..epochs {
+        let (r1, v1, v2, r2) = (rust(), vesper(), vesper(), rust());
+        pairs += &format!(" {}:{}", r1 + r2, v1 + v2);
+    }
+    eprintln!("compile workload: {} worlds", worlds.len());
+    println!("flip-gate pairs compile{pairs}");
 }
 
 // Part 4d-4: `coverage` (every refusal of every function) against Rust's.

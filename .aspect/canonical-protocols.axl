@@ -2,7 +2,7 @@
 
 load("@std//hash.axl", "sha256")
 load("./bounded-stdio.axl", "bounded_run", "utf8")
-load("./lib/bazel_exec.axl", "executable", "run_target")
+load("./lib/bazel_exec.axl", "executable", "run_target", "VESPER")
 load("./lib/process.axl", "capture", "command", "exit_code", "root_path", "scratch_dir")
 load("./lib/source-macro-fixtures.axl", "digest", "equal", "require")
 load("./lib/strict-json.axl", "decode_list", "decode_object")
@@ -424,7 +424,7 @@ def _probe_status(status):
 
 def _suite(ctx):
     root = ctx.std.env.aspect_root_dir()
-    binary = executable(ctx, root, "//:bin/vesper")
+    binary = executable(ctx, root, VESPER)
     if ctx.std.fs.exists(binary + ".exe") and ctx.std.fs.metadata(binary + ".exe").is_file:
         binary += ".exe"
     _check_fixtures(ctx, root, scratch_dir(ctx, "vesper-canonical-protocols-"), binary)

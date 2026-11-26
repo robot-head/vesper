@@ -12,3 +12,4 @@ capability_ceiling = ["Fail", "Alloc", "Ffi[StdFs]", "Ffi[StdProcess]", "Ffi[Std
 "@vesper-std/env" = { version = "^0.1", path = "../vesper-std/env" }
 "@vesper-std/hash" = { version = "^0.1", path = "../vesper-std/hash" }
 "@vesper-std/bytes" = { version = "^0.1", path = "../vesper-std/bytes" }
+"@vesper/lsp" = { version = "^0.1", path = "../vesper-lsp" }

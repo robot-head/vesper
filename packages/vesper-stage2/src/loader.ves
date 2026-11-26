@@ -1329,89 +1329,6 @@ fn next_code_byte(in src: Slice[u8], pos0: u64) -> (u64, u64) {
     (pos0, 0)
 }
 
-fn mod_has_enum_variant(in src: Slice[u8], in variant: Slice[u8]) -> bool {
-    let n = src.len();
-    let mut pos: u64 = 0;
-    let mut in_enum = false;
-    let mut brace_depth: u64 = 0;
-    let mut paren_depth: u64 = 0;
-    let mut expect_variant = false;
-    loop {
-        if pos >= n {
-            break;
-        }
-        let (next_p, skipped) = next_code_byte(in src, pos);
-        if skipped != 0 {
-            pos = next_p;
-            continue;
-        }
-        let b = byte_at(in src, pos);
-        if is_ident_byte(b) {
-            let start = pos;
-            loop {
-                if pos >= n || !is_ident_byte(byte_at(in src, pos)) {
-                    break;
-                }
-                pos = wrapping_add(pos, 1);
-            }
-            if !in_enum && brace_depth == 0 && eq_bytes(in src[start..pos], in "enum".as_bytes()) {
-                in_enum = true;
-            } else if in_enum && brace_depth == 1 && paren_depth == 0 && expect_variant {
-                if eq_bytes(in src[start..pos], in variant) {
-                    return true;
-                }
-                expect_variant = false;
-            }
-            continue;
-        }
-        if b == 40 {
-            paren_depth = wrapping_add(paren_depth, 1);
-        } else if b == 41 {
-            if paren_depth > 0 {
-                paren_depth = wrapping_sub(paren_depth, 1);
-            }
-        } else if b == 123 {
-            brace_depth = wrapping_add(brace_depth, 1);
-            if in_enum && brace_depth == 1 {
-                expect_variant = true;
-            }
-        } else if b == 125 {
-            if brace_depth > 0 {
-                brace_depth = wrapping_sub(brace_depth, 1);
-            }
-            if brace_depth == 0 {
-                in_enum = false;
-                paren_depth = 0;
-                expect_variant = false;
-            }
-        } else if b == 44 && in_enum && brace_depth == 1 && paren_depth == 0 {
-            expect_variant = true;
-        } else if (b == 58 || b == 59) && brace_depth == 0 {
-            // `:` before `{` starts a value enum (`enum E: T`), which does not register variants.
-            in_enum = false;
-        }
-        pos = wrapping_add(pos, 1);
-    }
-    false
-}
-
-/// Checks whether any module in `mods` declares a non-value ADT enum variant
-/// named `variant` (e.g. `@vesper/serde::Kind::String`), which conflicts with
-/// `impl String` during `@vesper/check-names-packages` resolution if injected
-/// before assembly.
-fn has_enum_variant(in mods: ChunkSeq[ModEntry], in variant: Slice[u8]) -> bool {
-    for mi in 0..mods.len() {
-        let hit = match mods.try_get(mi) {
-            Option::Some(m) => mod_has_enum_variant(in m.text.as_slice(), in variant),
-            Option::None => false,
-        };
-        if hit {
-            return true;
-        }
-    }
-    false
-}
-
 fn push_swar(inout out: ChunkSeq[u8], in suf: Str) {
     out.extend(in "let v1".as_bytes());
     out.extend(in suf.as_bytes());
@@ -2205,9 +2122,7 @@ pub fn load_package_graph_bytes(in root_dir: Slice[u8]) -> Option[ChunkSeq[u8]] 
     sp_seg.extend(in "intrinsics".as_bytes());
     sp_segs.push(sink sp_seg);
     let mut sp_src = ChunkSeq::new[u8]();
-    if !has_enum_variant(in mods, in "String".as_bytes()) {
-        sp_src.extend(in include_str("preludes/string.ves").as_bytes());
-    }
+    sp_src.extend(in include_str("preludes/string.ves").as_bytes());
     sp_src.extend(in include_str("preludes/intrinsics.ves").as_bytes());
     append_option_methods(in mods, inout sp_src);
     append_extra_intrinsics(in mods, inout sp_src);
