@@ -1,7 +1,8 @@
 //! The Vesper port's boundary types: the crate's own where they match, and
 //! port-only ones the binding converts.
 
-pub(crate) use crate::devices::vsock::VsockHeader;
+pub(crate) use crate::devices::net::NetStats;
+pub(crate) use crate::devices::vsock::{VsockHeader, VsockStats};
 pub(crate) use crate::fork::VmGenIdWire;
 pub(crate) use crate::slot_plan::{KvmHostLimits, PlannedRegion};
 
@@ -319,31 +320,54 @@ impl From<MemFault> for crate::guest_mem::MemError {
     }
 }
 
-/// Status-transition errors returned by the Vesper MMIO state machine.
+/// The Vesper MMIO register file's counters (same fields as the Rust
+/// transport's).
+pub(crate) use crate::devices::mmio::TransportStats as MmioStats;
+
+/// One queue's registers as the Vesper MMIO register file holds them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum MmioStatusFault {
-    DriverSetNeedsReset,
-    StatusRegression { from: u32, to: u32 },
-    DriverOkWithoutFeaturesOk { rejected_features: bool },
+pub(crate) struct MmioQueue {
+    pub max: u16,
+    pub num: u16,
+    pub ready: bool,
+    pub desc: u64,
+    pub driver: u64,
+    pub device: u64,
 }
 
-/// Outcome of a valid MMIO `STATUS` write from the Vesper port.
+/// A Vesper vsock connection as the port's device state holds it (read only
+/// through the state's views).
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct MmioStatusOutcome {
-    pub reset: bool,
-    pub next_status: u32,
-    pub accepted_features: bool,
-    pub rejected_features: bool,
-    pub activate: bool,
+pub(crate) struct VsockConn {
+    pub kind: u16,
+    pub connected: bool,
+    pub peer_buf_alloc: u32,
+    pub peer_fwd_cnt: u32,
+    pub tx_cnt: u32,
+    pub rx_cnt: u32,
+    pub fwd_cnt: u32,
+    pub messages: u64,
+    pub peer_shutdown: u32,
 }
 
-impl From<MmioStatusFault> for crate::devices::mmio::MmioError {
-    fn from(e: MmioStatusFault) -> Self {
-        use crate::devices::mmio::MmioError as E;
-        match e {
-            MmioStatusFault::DriverSetNeedsReset => E::DriverSetNeedsReset,
-            MmioStatusFault::StatusRegression { from, to } => E::StatusRegression { from, to },
-            MmioStatusFault::DriverOkWithoutFeaturesOk { .. } => E::DriverOkWithoutFeaturesOk,
-        }
-    }
+/// `BlockStats` as the Vesper block device keeps it (`per_queue` as eight
+/// fields).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct BlkStats {
+    pub reads: u64,
+    pub writes: u64,
+    pub flushes: u64,
+    pub io_errors: u64,
+    pub unsupported: u64,
+    pub discards: u64,
+    pub write_zeroes: u64,
+    pub q0: u64,
+    pub q1: u64,
+    pub q2: u64,
+    pub q3: u64,
+    pub q4: u64,
+    pub q5: u64,
+    pub q6: u64,
+    pub q7: u64,
 }
