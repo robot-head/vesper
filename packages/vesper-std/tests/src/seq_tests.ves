@@ -1,23 +1,10 @@
 // Unit tests for the sets and sequences of @vesper-std/collections.
 test {
     use @vesper-std/collections::version;
-    use @vesper-std/collections::sets::{
-        OrderedSet,
-        FlatSet,
-        ordered_set_new,
-        flat_set_new
-    };
-    use @vesper-std/collections::radix_seq::{
-        RadixSeq,
-        SeqSnapshot,
-        radix_seq_new,
-        snapshot_len
-    };
+    use @vesper-std/collections::sets::{OrderedSet, FlatSet, ordered_set_new, flat_set_new};
+    use @vesper-std/collections::radix_seq::{RadixSeq, SeqSnapshot, radix_seq_new, snapshot_len};
     use @vesper-std/core::option::is_none;
-    use self::support::{
-        check,
-        some_u64
-    };
+    use self::support::{check, some_u64};
 
     pub fn check_sets() -> u64 {
         let mut r: u64 = 0;

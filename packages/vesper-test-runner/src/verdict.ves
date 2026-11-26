@@ -19,17 +19,9 @@
 // message, start, end, line, column), and the decision (0, or 1, passed
 // and the message) (tests/common/doctest_verdict_words.rs).
 
-use @vesper-std/intern::{
-    Interner,
-    interner_new
-};
-use @vesper/front::kinds::{
-    k_lower,
-    k_upper
-};
-use self::discover::{
-    toks
-};
+use @vesper-std/intern::{Interner, interner_new};
+use @vesper/front::kinds::{k_lower, k_upper};
+use self::discover::{toks};
 use self::util::{
     Reader,
     add,

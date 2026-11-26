@@ -5,31 +5,9 @@
 //   1 Unmergeable: role decider notified npath path.. left_label
 //     right_label left right
 //   2 PayloadMismatch: role peer label left right
-use self::{
-    C
-};
-use self::util::{
-    add,
-    intern_tb,
-    none,
-    role_sym,
-    setw,
-    sw,
-    tb_str,
-    tb_sym,
-    Br,
-    GTag,
-    LTag
-};
-use self::tree::{
-    ga,
-    gb,
-    gbr,
-    gc,
-    gt,
-    free_vars_within,
-    involves
-};
+use self::{C};
+use self::util::{add, intern_tb, none, role_sym, setw, sw, tb_str, tb_sym, Br, GTag, LTag};
+use self::tree::{ga, gb, gbr, gc, gt, free_vars_within, involves};
 use self::local::{
     alpha_eq,
     choice,

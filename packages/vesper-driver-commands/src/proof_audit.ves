@@ -1,18 +1,8 @@
 // `vesper proof-audit`: CLI option parsing, validation, and `--help` in Vesper,
 // delegating Lean artifact replay and axiom-policy auditing (`src/proof_commands.rs`)
 // to `HybridCommands::hc_proof_audit_run`.
-use @vesper/driver::{
-    Args,
-    args_count,
-    eq
-};
-use super::{
-    arg,
-    byte_at,
-    print,
-    fail,
-    stdout_stream
-};
+use @vesper/driver::{Args, args_count, eq};
+use super::{arg, byte_at, print, fail, stdout_stream};
 
 fn print_proof_audit_help() eff [Ffi[HybridCommands]] {
     print(

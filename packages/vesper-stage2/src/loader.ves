@@ -2,21 +2,8 @@
 // the package graph into the word stream expected by
 // `@vesper/check-names-packages::assembly_begin`.
 
-use @vesper-std/fs::{
-    IoError,
-    kind_dir,
-    kind_file,
-    kind_symlink,
-    read_path
-};
-use @vesper-std/fs::walk::{
-    Entries,
-    entry_count,
-    entry_join,
-    entry_kind,
-    entry_path,
-    list_dir_path
-};
+use @vesper-std/fs::{IoError, kind_dir, kind_file, kind_symlink, read_path};
+use @vesper-std/fs::walk::{Entries, entry_count, entry_join, entry_kind, entry_path, list_dir_path};
 
 fn put_u64(inout o: ChunkSeq[u8], v: u64) {
     for k in 0..8 {

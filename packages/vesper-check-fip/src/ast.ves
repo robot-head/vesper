@@ -31,15 +31,8 @@
 // (pool[a..a+b]), 5 Constructor (a = name, pool[b..b+2c] = (field name,
 // pattern)).
 
-use @vesper/check-data::util::{
-    add,
-    n32,
-    u32_at,
-    w
-};
-use @vesper/check-data::input::{
-    Reader
-};
+use @vesper/check-data::util::{add, n32, u32_at, w};
+use @vesper/check-data::input::{Reader};
 
 pub copy struct ExprRow {
     kind: u8,

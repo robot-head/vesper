@@ -21,44 +21,13 @@ use self::{
     ConnCore,
     UnpackedFields
 };
-use self::int::{
-    inc,
-    min64,
-    sat_add,
-    word,
-    byte,
-    remove_word
-};
-use self::varint::{
-    vput,
-    put_record
-};
-use self::frame::{
-    goaway_type,
-    settings_write
-};
-use self::priority::{
-    priority_default,
-    priority_parse_value,
-    schedule_into
-};
-use self::encoder::{
-    enc_on_decoder_stream,
-    enc_apply_peer_settings
-};
-use self::decoder::{
-    dec_on_encoder_stream,
-    dec_cancel_stream,
-    dec_take_decoder_stream
-};
-use self::control::{
-    uni_new,
-    uni_clear,
-    uni_accept,
-    uni_contains,
-    uni_closed,
-    uni_bytes
-};
+use self::int::{inc, min64, sat_add, word, byte, remove_word};
+use self::varint::{vput, put_record};
+use self::frame::{goaway_type, settings_write};
+use self::priority::{priority_default, priority_parse_value, schedule_into};
+use self::encoder::{enc_on_decoder_stream, enc_apply_peer_settings};
+use self::decoder::{dec_on_encoder_stream, dec_cancel_stream, dec_take_decoder_stream};
+use self::control::{uni_new, uni_clear, uni_accept, uni_contains, uni_closed, uni_bytes};
 use self::pool::{
     BytePool,
     PoolRange,

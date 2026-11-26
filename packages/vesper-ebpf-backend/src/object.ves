@@ -13,40 +13,14 @@
 // and `.shstrtab`; string tables sorted by reversed bytes with suffixes
 // merged.
 
-use @vesper/check-data::util::{
-    push_decimal,
-    u32_at,
-    u64_at,
-    u8_at,
-    w
-};
-use @vesper/check-data::names::{
-    Names
-};
-use @vesper/ebpf::insn::{
-    RawInsn
-};
-use @vesper/ebpf::program::{
-    MapKind,
-    ProgramType,
-    map_validate
-};
-use @vesper/ebpf::verifier::{
-    Outcome,
-    new_pools,
-    verify_program
-};
-use self::asm::{
-    MapRow,
-    LineRow,
-    slot_at
-};
-use self::backend::{
-    G
-};
-use self::extra::{
-    Extra
-};
+use @vesper/check-data::util::{push_decimal, u32_at, u64_at, u8_at, w};
+use @vesper/check-data::names::{Names};
+use @vesper/ebpf::insn::{RawInsn};
+use @vesper/ebpf::program::{MapKind, ProgramType, map_validate};
+use @vesper/ebpf::verifier::{Outcome, new_pools, verify_program};
+use self::asm::{MapRow, LineRow, slot_at};
+use self::backend::{G};
+use self::extra::{Extra};
 
 // BTF (src/btf.rs) and `.BTF.ext` (src/btf_ext.rs) constants.
 const BTF_MAGIC: u64 = 60319;

@@ -6,21 +6,9 @@
 // The random operation choices depend on earlier results (`nth` key
 // removals), so a wrong result changes the rest of the trace too.
 test {
-    use @vesper-std/collections::btree::{
-        CacheBTree,
-        btree_new
-    };
-    use @vesper-std/collections::radix_seq::{
-        RadixSeq,
-        SeqSnapshot,
-        radix_seq_new,
-        snapshot_len
-    };
-    use @vesper-std/fmt::{
-        write_u64,
-        write_hex_u64,
-        fnv1a64
-    };
+    use @vesper-std/collections::btree::{CacheBTree, btree_new};
+    use @vesper-std/collections::radix_seq::{RadixSeq, SeqSnapshot, radix_seq_new, snapshot_len};
+    use @vesper-std/fmt::{write_u64, write_hex_u64, fnv1a64};
 
     copy struct Rng {
         bits: u64

@@ -8,10 +8,7 @@
 // string parameters, and Nexus plugins. A WIT or core module outside that
 // is declined, and the caller wraps the module with Rust's wit-component.
 
-use self::wit::{
-    Wit,
-    parse
-};
+use self::wit::{Wit, parse};
 use self::comp::encode;
 use @vesper/check-data::pack_text;
 

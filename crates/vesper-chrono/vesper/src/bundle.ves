@@ -1,8 +1,5 @@
 // `.vchrono` crash bundles: serialized, redacted, and authenticated recordings.
-use @vesper-std/hash::blake3::{
-    blake3_keyed,
-    digest_bytes
-};
+use @vesper-std/hash::blake3::{blake3_keyed, digest_bytes};
 use super::redact::{
     RedactionEntry,
     RedactionPolicy,

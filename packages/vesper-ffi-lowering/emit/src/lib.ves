@@ -90,9 +90,7 @@ use @vesper/cranelift::{
     value_word,
     block_word
 };
-use @vesper/codegen-base::{
-    alloc
-};
+use @vesper/codegen-base::{alloc};
 
 // The answer of a hook (`codegen_swap`).
 const HANDLED: u64 = 1;

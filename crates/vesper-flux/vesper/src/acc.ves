@@ -12,16 +12,9 @@
 // inserted (rows whose sums later cancel still count), an i128 sum that
 // overflows fails at that addition, and an i64 range failure is reported
 // when the input finishes.
-use self::util::{
-    cell,
-    push_row,
-    word
-};
+use self::util::{cell, push_row, word};
 use self::sort::sort_rows;
-use self::{
-    ZAcc,
-    ZErr
-};
+use self::{ZAcc, ZErr};
 
 const START_SLOTS: u64 = 16;
 

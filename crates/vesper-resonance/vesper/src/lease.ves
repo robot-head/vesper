@@ -3,12 +3,8 @@
 // non-Clone `#[must_use]` value, and the port's auditor counts drops), the
 // period buffers and the atomic counters; the checks and the sample
 // movement are here.
-use self::{
-    LeaseFault
-};
-use self::util::{
-    finite_bits
-};
+use self::{LeaseFault};
+use self::util::{finite_bits};
 
 // `RtBufferLease::write_frame`: the checks, then frame `frame` of `samples`
 // into the interleaved period `data`. Returns the new written count.

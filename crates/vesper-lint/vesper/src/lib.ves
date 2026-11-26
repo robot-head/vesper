@@ -21,35 +21,11 @@
 // port.rs's tables. tests/differential.rs runs the Rust code and this
 // package on the same inputs and requires equal results.
 
-use @vesper/ast::{
-    TypeNode,
-    EffectNode,
-    EffectsNode,
-    GenericNode,
-    ListRef
-};
-use @vesper-std/intern::{
-    Interner,
-    Symbol,
-    interner_new,
-    symbol_from_id
-};
-use self::policy::{
-    parse_policy
-};
-use self::util::{
-    fail,
-    at,
-    word,
-    u32_at,
-    inc,
-    cadd,
-    push_text,
-    put
-};
-use @vesper-std/sort::unstable::{
-    sort
-};
+use @vesper/ast::{TypeNode, EffectNode, EffectsNode, GenericNode, ListRef};
+use @vesper-std/intern::{Interner, Symbol, interner_new, symbol_from_id};
+use self::policy::{parse_policy};
+use self::util::{fail, at, word, u32_at, inc, cadd, push_text, put};
+use @vesper-std/sort::unstable::{sort};
 
 // ---------------------------------------------------------------- common
 

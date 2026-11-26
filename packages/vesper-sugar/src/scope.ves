@@ -28,13 +28,8 @@ use @vesper/ast::{
     none,
     type_at
 };
-use @vesper/ast::lower::{
-    lower_source,
-    lower_surface_source
-};
-use @vesper-std/arena::{
-    idx_from_raw
-};
+use @vesper/ast::lower::{lower_source, lower_surface_source};
+use @vesper-std/arena::{idx_from_raw};
 use @vesper/front::lex::{
     lex_sugar_raw_with_limits,
     max_diagnostics,
@@ -43,35 +38,10 @@ use @vesper/front::lex::{
     token_end,
     trivia_kind
 };
-use @vesper/front::diag::{
-    diags_new
-};
-use @vesper/front::kinds::{
-    k_eof
-};
-use self::flow::{
-    Rd,
-    arg_of,
-    clause_of,
-    fn_of,
-    name_byte,
-    name_is,
-    name_len,
-    stmt_of
-};
-use self::template::{
-    Caps,
-    add,
-    b8,
-    cap_at,
-    cap_count,
-    inc,
-    sort_in,
-    sub,
-    value_at,
-    w32,
-    w64
-};
+use @vesper/front::diag::{diags_new};
+use @vesper/front::kinds::{k_eof};
+use self::flow::{Rd, arg_of, clause_of, fn_of, name_byte, name_is, name_len, stmt_of};
+use self::template::{Caps, add, b8, cap_at, cap_count, inc, sort_in, sub, value_at, w32, w64};
 
 const NONE: u64 = 18446744073709551615;
 const PROBE: Str = "fn __scope_probe() ";

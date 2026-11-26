@@ -9,35 +9,11 @@
 // from rhead to rtail per dependency name (in owner name order), native
 // requirements yl_req/yl_next per native name; rnames and ynames list the
 // names that have any, ascending.
-use @vesper/loom-calculus::util::{
-    add,
-    dep,
-    feat,
-    find_feat,
-    id_at,
-    inc,
-    man,
-    none,
-    sw,
-    sys
-};
-use @vesper/loom-calculus::check::{
-    system_name_valid
-};
-use @vesper/loom-calculus::semver::{
-    matches
-};
-use self::{
-    S
-};
-use self::diag::{
-    SolverCode,
-    dlit,
-    emit,
-    setw,
-    sort_values,
-    subj_id
-};
+use @vesper/loom-calculus::util::{add, dep, feat, find_feat, id_at, inc, man, none, sw, sys};
+use @vesper/loom-calculus::check::{system_name_valid};
+use @vesper/loom-calculus::semver::{matches};
+use self::{S};
+use self::diag::{SolverCode, dlit, emit, setw, sort_values, subj_id};
 
 // The manifest assigned to name id x in the current assignment, or none().
 pub fn assigned(in s: S, x: u64) -> u64 {

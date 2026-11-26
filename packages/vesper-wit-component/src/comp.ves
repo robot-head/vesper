@@ -15,11 +15,7 @@
 // share a section, and every index space counts its items and keeps the
 // debug names given.
 
-use @vesper/check-data::util::{
-    add,
-    inc,
-    w
-};
+use @vesper/check-data::util::{add, inc, w};
 use self::host::{
     Core,
     Imp,
@@ -42,19 +38,7 @@ use self::host::{
     read_core,
     shim_module
 };
-use self::wit::{
-    Wit,
-    Ty,
-    Def,
-    Field,
-    Func,
-    ty_at,
-    def_at,
-    field_at,
-    func_at,
-    arg_at,
-    text_at
-};
+use self::wit::{Wit, Ty, Def, Field, Func, ty_at, def_at, field_at, func_at, arg_at, text_at};
 
 // wit.ves's constants (a `use` of a constant is not read by the Vesper
 // package assembler yet, so they are repeated here).

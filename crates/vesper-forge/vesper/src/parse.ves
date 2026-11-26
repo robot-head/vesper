@@ -14,15 +14,7 @@
 //   primary := path | INT | STRING | '(' expr ')' | block
 //   block   := '{' [ expr { ';' expr } [';'] ] '}'
 //   path    := IDENT { '::' IDENT }
-use self::util::{
-    Code,
-    Node,
-    Row,
-    Tk,
-    Want,
-    spells,
-    wd
-};
+use self::util::{Code, Node, Row, Tk, Want, spells, wd};
 
 // `check_delimiters` over the kinds of `n` rows of `stride` words from
 // rows[base..]: 0 when balanced and at most `max_depth` deep, else

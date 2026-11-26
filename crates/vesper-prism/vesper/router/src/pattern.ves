@@ -2,17 +2,8 @@
 
 // ASCII bytes this module compares against (constants are per module).
 
-use self::{
-    RouteFault,
-    Piece,
-    Pattern,
-    byte,
-    is_digit,
-    is_alpha
-};
-use self::ascii::{
-    Ascii
-};
+use self::{RouteFault, Piece, Pattern, byte, is_digit, is_alpha};
+use self::ascii::{Ascii};
 
 // A C0, Ascii::Del or C1 control character (`char::is_control`) at `i` of UTF-8 text.
 fn control_at(in p: Slice[u8], i: u64, hi: u64) -> bool {

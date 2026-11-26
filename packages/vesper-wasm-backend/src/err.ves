@@ -1,10 +1,5 @@
-use @vesper/check-data::names::{
-    Names
-};
-use @vesper/check-data::util::{
-    push_decimal,
-    w
-};
+use @vesper/check-data::names::{Names};
+use @vesper/check-data::util::{push_decimal, w};
 
 // `WasmError` of src/wasm_backend.rs: what the backend raises (as
 // `Fail[WErr]`) when it rejects a program. The harness compares the kind

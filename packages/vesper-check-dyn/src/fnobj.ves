@@ -26,10 +26,7 @@ use @vesper/ast::{
     EffectsNode,
     EffectNode
 };
-use @vesper/check-data::types::{
-    debug_type,
-    debug_row
-};
+use @vesper/check-data::types::{debug_type, debug_row};
 use self::core::{
     D,
     w,
@@ -115,12 +112,8 @@ use self::core::{
     dtype,
     ddec
 };
-use @vesper-std/intern::{
-    symbol_from_id
-};
-use @vesper-std/arena::{
-    idx_from_raw
-};
+use @vesper-std/intern::{symbol_from_id};
+use @vesper-std/arena::{idx_from_raw};
 
 const NONE: u32 = 4294967295;
 

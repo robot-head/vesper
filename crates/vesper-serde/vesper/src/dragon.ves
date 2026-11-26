@@ -6,13 +6,8 @@
 // numbers held as 40 little-endian 32-bit limbs; the layout is
 // `flt2dec::digits_to_dec_str` with no fractional digits requested.
 
-use self::grisu::{
-    clz64,
-    grisu_shortest
-};
-use self::ascii::{
-    Ascii
-};
+use self::grisu::{clz64, grisu_shortest};
+use self::ascii::{Ascii};
 
 // Rust's `Big32x40`: 40 little-endian 32-bit limbs, enough for any
 // binary64 exponent plus the 192-bit headroom of `limbs_for`.

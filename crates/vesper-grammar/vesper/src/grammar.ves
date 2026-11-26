@@ -15,26 +15,9 @@
 //
 // Metadata (`meta`, the result of `validate`): seven words per rule, the
 // FIRST set as four 64-bit words, nullable, color and height.
-use self::{
-    GErr,
-    P2
-};
-use self::common::{
-    add_or,
-    bound,
-    charge_or,
-    fail,
-    min,
-    mul_or,
-    none,
-    sb,
-    shl,
-    shr,
-    sw
-};
-use self::framing::{
-    decode
-};
+use self::{GErr, P2};
+use self::common::{add_or, bound, charge_or, fail, min, mul_or, none, sb, shl, shr, sw};
+use self::framing::{decode};
 
 // Rule record tags (see above).
 const R_EMPTY: u64 = 0;

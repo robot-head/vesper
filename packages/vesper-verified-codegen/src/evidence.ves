@@ -9,57 +9,14 @@
 // (and new header, block and instruction rows where they change), and
 // `idx` maps each function name to its current row.
 
-use self::lower::{
-    E_INVALID,
-    U_EFFECT,
-    U_MATCH,
-    VErr,
-    ap,
-    err,
-    tx,
-    unsup
-};
-use self::exprs::{
-    Ex,
-    Hx,
-    P_BIND,
-    P_WILD,
-    X_HANDLE,
-    nested_instance,
-    nested_name
-};
-use @vesper/check-data::util::{
-    add,
-    inc,
-    n32,
-    push_decimal,
-    u32_at,
-    u64_at,
-    u8_at,
-    w
-};
-use @vesper/check-data::names::{
-    Names
-};
-use @vesper/check-data::types::{
-    EffNode,
-    TyKind,
-    Types
-};
-use @vesper/check-data::input::{
-    Ctx
-};
-use @vesper/place-ir::{
-    BlockRow,
-    FnRow,
-    InstRow,
-    Program
-};
-use @vesper/place-ir::codes::{
-    Op,
-    Tag,
-    Term
-};
+use self::lower::{E_INVALID, U_EFFECT, U_MATCH, VErr, ap, err, tx, unsup};
+use self::exprs::{Ex, Hx, P_BIND, P_WILD, X_HANDLE, nested_instance, nested_name};
+use @vesper/check-data::util::{add, inc, n32, push_decimal, u32_at, u64_at, u8_at, w};
+use @vesper/check-data::names::{Names};
+use @vesper/check-data::types::{EffNode, TyKind, Types};
+use @vesper/check-data::input::{Ctx};
+use @vesper/place-ir::{BlockRow, FnRow, InstRow, Program};
+use @vesper/place-ir::codes::{Op, Tag, Term};
 
 const NONE32: u32 = 4294967295;
 const NONE: u64 = 18446744073709551615;

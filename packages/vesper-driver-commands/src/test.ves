@@ -1,18 +1,8 @@
 // `vesper test`: CLI option parsing, validation, and `--help` in Vesper,
 // delegating doctest (`src/doctest_commands.rs`) and unit/mutation test
 // execution (`src/test_runner.rs`) to `HybridCommands::hc_test_run`.
-use @vesper/driver::{
-    Args,
-    args_count,
-    eq
-};
-use super::{
-    arg,
-    byte_at,
-    print,
-    fail,
-    stdout_stream
-};
+use @vesper/driver::{Args, args_count, eq};
+use super::{arg, byte_at, print, fail, stdout_stream};
 
 fn print_test_help() eff [Ffi[HybridCommands]] {
     print(

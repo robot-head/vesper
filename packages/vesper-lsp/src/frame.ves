@@ -4,19 +4,7 @@
 // over in one piece; chunking does not change which error is raised
 // (crates/vesper-lsp/tests/transport.rs reads at every chunk size).
 
-use self::limits::{
-    Ascii,
-    Crlf,
-    Perr,
-    Plimits,
-    add,
-    bound,
-    byte,
-    min64,
-    sat_add,
-    sat_sub,
-    validate
-};
+use self::limits::{Ascii, Crlf, Perr, Plimits, add, bound, byte, min64, sat_add, sat_sub, validate};
 
 // The bit that tells a lower-case ASCII letter from its capital.
 const CASE_BIT: u8 = 32;

@@ -1,15 +1,8 @@
 // Module replog of @vesper/chorus (see lib.ves): replicated-log consensus
 // state machine, partition generation, invariant checking, convergence, and
 // report digest (src/replog.rs).
-use self::util::{
-    inc,
-    none,
-    setw,
-    sw
-};
-use self::simnet::{
-    sm_chance
-};
+use self::util::{inc, none, setw, sw};
+use self::simnet::{sm_chance};
 use self::wire::{
     checker_core_committed_arena,
     checker_core_leader_elected,

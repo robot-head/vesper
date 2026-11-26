@@ -1,9 +1,6 @@
 // The case folding of the tree's case-collision check: `str::to_lowercase`
 // of a valid UTF-8 name, from the generated table in `lower`.
-use self::lower::{
-    lower_char,
-    case_class
-};
+use self::lower::{lower_char, case_class};
 use self::name::seq_len;
 
 fn byte(in s: Slice[u8], i: u64) -> u8 {

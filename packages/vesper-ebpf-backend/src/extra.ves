@@ -10,27 +10,11 @@
 // the context's types (`read_ty`), so they need no index in the stream's
 // own type table.
 
-use @vesper/check-data::util::{
-    add,
-    inc32,
-    n32,
-    u32_at,
-    w
-};
-use @vesper/check-data::names::{
-    Names
-};
-use @vesper/check-data::types::{
-    EffNode,
-    Types,
-    TyKind
-};
-use @vesper/check-data::input::{
-    Reader
-};
-use @vesper/check-data::world::{
-    set_by_symbol
-};
+use @vesper/check-data::util::{add, inc32, n32, u32_at, w};
+use @vesper/check-data::names::{Names};
+use @vesper/check-data::types::{EffNode, Types, TyKind};
+use @vesper/check-data::input::{Reader};
+use @vesper/check-data::world::{set_by_symbol};
 
 // A parameter of a `world.functions` entry.
 pub copy struct XParam {

@@ -2,9 +2,7 @@
 // orphan rule, overlap of canonical impl heads and well-formedness of
 // impls and models. Conformance c is row c of the cf_* tables: impls
 // first (c = impl id), then models (c = nimpl + model id).
-use self::{
-    S
-};
+use self::{S};
 use self::term::{
     add,
     byte_at,
@@ -38,35 +36,11 @@ use self::term::{
     vkind,
     word_at
 };
-use self::fold::{
-    inst,
-    run
-};
-use self::infer::{
-    fresh_args,
-    unify_trait_ref
-};
-use self::render::{
-    byte,
-    d_label_key,
-    lit,
-    num,
-    r_failure,
-    r_goal,
-    r_id,
-    r_ty,
-    r_var
-};
-use self::diag::{
-    emit,
-    render_diags,
-    sort_diags,
-    truncate_diags
-};
-use self::query::{
-    reset_solver,
-    solve_query
-};
+use self::fold::{inst, run};
+use self::infer::{fresh_args, unify_trait_ref};
+use self::render::{byte, d_label_key, lit, num, r_failure, r_goal, r_id, r_ty, r_var};
+use self::diag::{emit, render_diags, sort_diags, truncate_diags};
+use self::query::{reset_solver, solve_query};
 
 // Coherence checks run with the default solver limits, as in the Rust `SolverConfig::default()`. The
 // depth bound keeps recursion within a 2 MiB thread stack.

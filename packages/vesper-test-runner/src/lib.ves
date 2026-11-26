@@ -30,36 +30,14 @@
 // - guard.ves: the fail-closed source profile a doctest module passes
 //   before checking (src/doctest_guard.rs), over @vesper/ast.
 
-use self::discover::{
-    case_rows,
-    discover
-};
-use self::doctest::{
-    extract,
-    preflight
-};
-use self::graph::{
-    graph
-};
-use self::generate::{
-    generate
-};
-use self::guard::{
-    guard
-};
-use self::report::{
-    baseline_text,
-    doc_text,
-    mutants_text,
-    unit_text
-};
-use self::verdict::{
-    verdict,
-    wrappers
-};
-use self::mutants::{
-    collect
-};
+use self::discover::{case_rows, discover};
+use self::doctest::{extract, preflight};
+use self::graph::{graph};
+use self::generate::{generate};
+use self::guard::{guard};
+use self::report::{baseline_text, doc_text, mutants_text, unit_text};
+use self::verdict::{verdict, wrappers};
+use self::mutants::{collect};
 
 // The word format of the entries; tests/common/test_runner_words.rs
 // checks it.
