@@ -361,6 +361,12 @@ jobs:
         # profile, so they reuse its dependencies: a separate debug build
         # took 9 minutes of this job.
         run: cargo build --locked --profile port-compiler --bin vesper
+      - name: Test the Vesper Pulse port on IOCP
+        # @vesper/pulse's Windows copy (frames, readiness, scheduler, the
+        # IOCP bindings) against vesper_pulse; Linux runs the epoll copy
+        # and macOS the kqueue copy (`aspect ci test-pulse-port`, the same
+        # Cargo command, which Windows cannot run).
+        run: cargo test --locked --profile port-compiler --test pulse_port
       - name: Validate native COFF executables
         if: ${{ hashFiles('scripts/windows/test-native-executables.ps1') != '' }}
         shell: pwsh

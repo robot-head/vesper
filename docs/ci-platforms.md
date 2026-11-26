@@ -21,7 +21,8 @@ The native lanes run only host-specific coverage:
 
 Both lanes build the compiler and every test above it with the
 `port-compiler` Cargo profile: release optimizations with debug assertions
-and overflow checks kept on, and so does the macOS Pulse port test. The
+and overflow checks kept on, and so do the Pulse port tests (kqueue on
+macOS, IOCP on Windows, where Cargo runs them directly). The
 fiber, `vesper-pulse` and Loom tests and the port ABI tier's Rust tests
 build for debug.
 
