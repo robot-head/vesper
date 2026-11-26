@@ -3,35 +3,25 @@
 // first byte most significant.
 use self::common::{shl, shr};
 
-// The frame of `EthIpv4TcpWire`: field byte offsets and size (src/wire.rs
-// `eth_ipv4_tcp`).
-const DST_MAC: u64 = 0;
-const SRC_MAC: u64 = 6;
-const ETHER_TYPE: u64 = 12;
-const VER_IHL: u64 = 14;
-const TOS: u64 = 15;
-const TOTAL_LEN: u64 = 16;
-const IDENT: u64 = 18;
-const FRAG_OFF: u64 = 20;
-const TTL: u64 = 22;
-const PROTO: u64 = 23;
-const IP_CHECKSUM: u64 = 24;
-const SRC_IPV4: u64 = 26;
-const DST_IPV4: u64 = 30;
-const SRC_PORT: u64 = 34;
-const DST_PORT: u64 = 36;
-const SEQ_NUM: u64 = 38;
-const ACK_NUM: u64 = 42;
-const DATA_OFFSET_FLAGS: u64 = 46;
-const WINDOW_SIZE: u64 = 48;
-const TCP_CHECKSUM: u64 = 50;
-const URGENT_PTR: u64 = 52;
+// The frame of `EthIpv4TcpWire` (src/wire.rs `eth_ipv4_tcp`) as seven
+// big-endian words, by byte offset: W0 dst_mac + src_mac[0..2], W8
+// src_mac[2..6] + ether_type + ver_ihl + tos, W16 total_len + ident +
+// frag_off + ttl + proto, W24 ip_checksum + src_ipv4 + dst_ipv4[0..2], W32
+// dst_ipv4[2..4] + src_port + dst_port + seq_num[0..2], W40 seq_num[2..4] +
+// ack_num + data_offset_flags, W46 data_offset_flags + window_size +
+// tcp_checksum + urgent_ptr.
+const W0: u64 = 0;
+const W8: u64 = 8;
+const W16: u64 = 16;
+const W24: u64 = 24;
+const W32: u64 = 32;
+const W40: u64 = 40;
+const W46: u64 = 46;
 const ETH_FRAME_SIZE: u64 = 54;
 
-// `SynDropAlertWire`: offsets (`syn_drop_alert`) and size.
-const ALERT_SRC_IPV4: u64 = 0;
-const ALERT_DST_PORT: u64 = 4;
-const ALERT_TCP_FLAGS: u64 = 6;
+// `SynDropAlertWire` (`syn_drop_alert`): src_ipv4 + dst_port + tcp_flags
+// big-endian at 0, observed_pps little-endian at 8.
+const ALERT_HEAD: u64 = 0;
 const ALERT_OBSERVED_PPS: u64 = 8;
 const ALERT_SIZE: u64 = 16;
 
@@ -73,116 +63,128 @@ pub copy struct SynDropAlertWire {
     observed_pps: u64
 }
 
-fn put_be(inout out: ChunkSeq[u8], v: u64, n: u64) {
-    let mut i = n;
-    loop {
-        if !(i > 0) {
-            break;
-        }
-        i = wrapping_sub(i, 1);
-        out.push(wrapping_u8(shr(v, wrapping_mul(i, 8))));
-    }
+// The codecs move whole big-endian words: the 54-byte frame is the words at
+// 0, 8, .., 40 plus the word at 46 (overlapping the one at 40 by two bytes),
+// the 16-byte alert one big-endian word and the little-endian rate. A
+// caller has checked the length, so the reads never miss; the encoders
+// write into a buffer the caller lends (no sequence is built on the Vesper
+// side and nothing is copied back across the port), and a shorter buffer
+// keeps the words that fit.
+
+fn rd(in s: Slice[u8], at: u64) -> u64 {
+    s.try_read_u64_be(at).unwrap_or(0)
 }
 
-fn b(in s: Slice[u8], i: u64) -> u64 {
-    match s.try_get(i) {
-        Option::Some(v) => widen_u64(v),
-        Option::None => 0,
-    }
-}
-
-fn be(in s: Slice[u8], at: u64, n: u64) -> u64 {
-    let mut v: u64 = 0;
-    for i in 0..n {
-        v = (v << 8) | b(in s, wrapping_add(at, i));
-    }
-    v
+fn wr(inout out: Slice[u8], at: u64, v: u64) {
+    let _ = out.try_write_u64_be(at, v);
 }
 
 fn short(need: u64, got: u64) -> Never eff [Fail[WireError]] {
     Fail::raise(WireError::Short { need: narrow_usize(need), got: narrow_usize(got) })
 }
 
-pub fn eth_encode(w: EthIpv4TcpWire) -> ChunkSeq[u8] {
-    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    put_be(inout out, w.dst_mac, 6);
-    put_be(inout out, w.src_mac, 6);
-    put_be(inout out, widen_u64(w.ether_type), 2);
-    out.push(w.ver_ihl);
-    out.push(w.tos);
-    put_be(inout out, widen_u64(w.total_len), 2);
-    put_be(inout out, widen_u64(w.ident), 2);
-    put_be(inout out, widen_u64(w.frag_off), 2);
-    out.push(w.ttl);
-    out.push(w.proto);
-    put_be(inout out, widen_u64(w.ip_checksum), 2);
-    put_be(inout out, widen_u64(w.src_ipv4), 4);
-    put_be(inout out, widen_u64(w.dst_ipv4), 4);
-    put_be(inout out, widen_u64(w.src_port), 2);
-    put_be(inout out, widen_u64(w.dst_port), 2);
-    put_be(inout out, widen_u64(w.seq_num), 4);
-    put_be(inout out, widen_u64(w.ack_num), 4);
-    put_be(inout out, widen_u64(w.data_offset_flags), 2);
-    put_be(inout out, widen_u64(w.window_size), 2);
-    put_be(inout out, widen_u64(w.tcp_checksum), 2);
-    put_be(inout out, widen_u64(w.urgent_ptr), 2);
-    out
+pub fn eth_encode_into(w: EthIpv4TcpWire, inout out: Slice[u8]) {
+    let dst_ipv4 = widen_u64(w.dst_ipv4);
+    let seq_num = widen_u64(w.seq_num);
+    let data_offset_flags = widen_u64(w.data_offset_flags);
+    wr(inout out, W0, shl(w.dst_mac, 16) | shr(w.src_mac, 32));
+    wr(
+        inout out,
+        W8,
+        shl(w.src_mac, 32)
+            | shl(widen_u64(w.ether_type), 16)
+            | shl(widen_u64(w.ver_ihl), 8)
+            | widen_u64(w.tos)
+    );
+    wr(
+        inout out,
+        W16,
+        shl(widen_u64(w.total_len), 48)
+            | shl(widen_u64(w.ident), 32)
+            | shl(widen_u64(w.frag_off), 16)
+            | shl(widen_u64(w.ttl), 8)
+            | widen_u64(w.proto)
+    );
+    wr(
+        inout out,
+        W24,
+        shl(widen_u64(w.ip_checksum), 48) | shl(widen_u64(w.src_ipv4), 16) | shr(dst_ipv4, 16)
+    );
+    wr(
+        inout out,
+        W32,
+        shl(dst_ipv4, 48)
+            | shl(widen_u64(w.src_port), 32)
+            | shl(widen_u64(w.dst_port), 16)
+            | shr(seq_num, 16)
+    );
+    wr(inout out, W40, shl(seq_num, 48) | shl(widen_u64(w.ack_num), 16) | data_offset_flags);
+    wr(
+        inout out,
+        W46,
+        shl(data_offset_flags, 48)
+            | shl(widen_u64(w.window_size), 32)
+            | shl(widen_u64(w.tcp_checksum), 16)
+            | widen_u64(w.urgent_ptr)
+    );
 }
 
 pub fn eth_decode(in s: Slice[u8]) -> EthIpv4TcpWire eff [Fail[WireError]] {
-    if s.len() < ETH_FRAME_SIZE {
-        short(ETH_FRAME_SIZE, s.len());
+    let got = s.len();
+    if got < ETH_FRAME_SIZE {
+        short(ETH_FRAME_SIZE, got);
     }
+    let w0 = rd(in s, W0);
+    let w1 = rd(in s, W8);
+    let w2 = rd(in s, W16);
+    let w3 = rd(in s, W24);
+    let w4 = rd(in s, W32);
+    let w5 = rd(in s, W40);
+    let w6 = rd(in s, W46);
     EthIpv4TcpWire {
-        dst_mac: be(in s, DST_MAC, 6),
-        src_mac: be(in s, SRC_MAC, 6),
-        ether_type: wrapping_u16(be(in s, ETHER_TYPE, 2)),
-        ver_ihl: wrapping_u8(b(in s, VER_IHL)),
-        tos: wrapping_u8(b(in s, TOS)),
-        total_len: wrapping_u16(be(in s, TOTAL_LEN, 2)),
-        ident: wrapping_u16(be(in s, IDENT, 2)),
-        frag_off: wrapping_u16(be(in s, FRAG_OFF, 2)),
-        ttl: wrapping_u8(b(in s, TTL)),
-        proto: wrapping_u8(b(in s, PROTO)),
-        ip_checksum: wrapping_u16(be(in s, IP_CHECKSUM, 2)),
-        src_ipv4: wrapping_u32(be(in s, SRC_IPV4, 4)),
-        dst_ipv4: wrapping_u32(be(in s, DST_IPV4, 4)),
-        src_port: wrapping_u16(be(in s, SRC_PORT, 2)),
-        dst_port: wrapping_u16(be(in s, DST_PORT, 2)),
-        seq_num: wrapping_u32(be(in s, SEQ_NUM, 4)),
-        ack_num: wrapping_u32(be(in s, ACK_NUM, 4)),
-        data_offset_flags: wrapping_u16(be(in s, DATA_OFFSET_FLAGS, 2)),
-        window_size: wrapping_u16(be(in s, WINDOW_SIZE, 2)),
-        tcp_checksum: wrapping_u16(be(in s, TCP_CHECKSUM, 2)),
-        urgent_ptr: wrapping_u16(be(in s, URGENT_PTR, 2))
+        dst_mac: shr(w0, 16),
+        src_mac: shl(w0 & 0xffff, 32) | shr(w1, 32),
+        ether_type: wrapping_u16(shr(w1, 16)),
+        ver_ihl: wrapping_u8(shr(w1, 8)),
+        tos: wrapping_u8(w1),
+        total_len: wrapping_u16(shr(w2, 48)),
+        ident: wrapping_u16(shr(w2, 32)),
+        frag_off: wrapping_u16(shr(w2, 16)),
+        ttl: wrapping_u8(shr(w2, 8)),
+        proto: wrapping_u8(w2),
+        ip_checksum: wrapping_u16(shr(w3, 48)),
+        src_ipv4: wrapping_u32(shr(w3, 16)),
+        dst_ipv4: wrapping_u32(shl(w3, 16) | shr(w4, 48)),
+        src_port: wrapping_u16(shr(w4, 32)),
+        dst_port: wrapping_u16(shr(w4, 16)),
+        seq_num: wrapping_u32(shl(w4, 16) | shr(w5, 48)),
+        ack_num: wrapping_u32(shr(w5, 16)),
+        data_offset_flags: wrapping_u16(w5),
+        window_size: wrapping_u16(shr(w6, 32)),
+        tcp_checksum: wrapping_u16(shr(w6, 16)),
+        urgent_ptr: wrapping_u16(w6)
     }
 }
 
-pub fn alert_encode(w: SynDropAlertWire) -> ChunkSeq[u8] {
-    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    put_be(inout out, widen_u64(w.src_ipv4), 4);
-    put_be(inout out, widen_u64(w.dst_port), 2);
-    put_be(inout out, widen_u64(w.tcp_flags), 2);
-    let eight: u64 = 8;
-    for i in 0..eight {
-        out.push(wrapping_u8(shr(w.observed_pps, wrapping_mul(i, 8))));
-    }
-    out
+pub fn alert_encode_into(w: SynDropAlertWire, inout out: Slice[u8]) {
+    wr(
+        inout out,
+        ALERT_HEAD,
+        shl(widen_u64(w.src_ipv4), 32) | shl(widen_u64(w.dst_port), 16) | widen_u64(w.tcp_flags)
+    );
+    let _ = out.try_write_u64_le(ALERT_OBSERVED_PPS, w.observed_pps);
 }
 
 pub fn alert_decode(in s: Slice[u8]) -> SynDropAlertWire eff [Fail[WireError]] {
-    if s.len() < ALERT_SIZE {
-        short(ALERT_SIZE, s.len());
+    let got = s.len();
+    if got < ALERT_SIZE {
+        short(ALERT_SIZE, got);
     }
-    let mut pps: u64 = 0;
-    let eight: u64 = 8;
-    for i in 0..eight {
-        pps = pps | shl(b(in s, wrapping_add(ALERT_OBSERVED_PPS, i)), wrapping_mul(i, 8));
-    }
+    let w0 = rd(in s, ALERT_HEAD);
     SynDropAlertWire {
-        src_ipv4: wrapping_u32(be(in s, ALERT_SRC_IPV4, 4)),
-        dst_port: wrapping_u16(be(in s, ALERT_DST_PORT, 2)),
-        tcp_flags: wrapping_u16(be(in s, ALERT_TCP_FLAGS, 2)),
-        observed_pps: pps
+        src_ipv4: wrapping_u32(shr(w0, 32)),
+        dst_port: wrapping_u16(shr(w0, 16)),
+        tcp_flags: wrapping_u16(w0),
+        observed_pps: s.try_read_u64_le(ALERT_OBSERVED_PPS).unwrap_or(0)
     }
 }
