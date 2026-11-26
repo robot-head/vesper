@@ -1,0 +1,791 @@
+// `vesper verify --format`'s witness: crates/vesper-fmt/src/proof_lean.rs
+// `emit` over the model @vesper/fmt's `format_for_verification` captures
+// (the `Preflight::check` bounds first, then the fixed Lean module through
+// @vesper/lean-syntax's printer), and the `Failure` messages of the
+// `format_model` and `emit` stages.
+
+use @vesper/fmt::{
+    FmtFail, ProofFail, ProofLimits, Verified, fail_code, fail_offset, hash_hex, model_args,
+    model_comments, model_depth, model_kinds, model_node_count, model_text, model_text_bytes,
+    model_text_ends, no_proof_fail, proof_limits_valid, verified_output_hash, verified_source_hash
+};
+use @vesper/lean-syntax::{LeanError, render_module};
+use @vesper/proof-audit::strs::{byte, put_str};
+
+// The `ProofError` codes and resources of @vesper/fmt (proof section).
+const P_NONE: u64 = 0;
+const P_INVALID_LIMITS: u64 = 1;
+const P_RESOURCE: u64 = 2;
+const P_INVALID_DOCUMENT: u64 = 3;
+const P_ALLOCATION: u64 = 4;
+const P_FORMATTER: u64 = 5;
+const P_CONSERVATION: u64 = 6;
+const P_LEAN_SYNTAX: u64 = 7;
+
+// Emitter resources, after @vesper/fmt's (0-6).
+const R_E_ARITHMETIC: u64 = 7;
+const R_E_WORK: u64 = 8;
+const R_E_DEPTH: u64 = 9;
+const R_E_NODES: u64 = 10;
+const R_E_TEXT: u64 = 11;
+const R_E_LIST: u64 = 12;
+const R_E_LEAN_BYTES: u64 = 13;
+const R_E_METADATA: u64 = 14;
+const R_E_AST_DEPTH: u64 = 15;
+
+// The model's node kinds (@vesper/fmt's `D_` kinds).
+const D_NIL: u8 = 0;
+const D_TEXT: u8 = 1;
+const D_COMMENT: u8 = 2;
+const D_HARD: u8 = 3;
+const D_SOFT_SPACE: u8 = 4;
+const D_SOFT_EMPTY: u8 = 5;
+const D_NEST: u8 = 6;
+const D_CONCAT: u8 = 7;
+const D_GROUP: u8 = 8;
+
+const U64_MAX: u64 = 18446744073709551615;
+
+// The captured model, copied out of the sealed `Verified`.
+struct Model {
+    kind: ChunkSeq[u8],
+    arg: ChunkSeq[u64],
+    text: ChunkSeq[u8],
+    text_ends: ChunkSeq[u64],
+    node_count: u64,
+    text_bytes: u64,
+    depth: u64,
+    comments: u64
+}
+
+fn model_of(in v: Verified) -> Model {
+    Model {
+        kind: model_kinds(in v),
+        arg: model_args(in v),
+        text: model_text(in v),
+        text_ends: model_text_ends(in v),
+        node_count: model_node_count(in v),
+        text_bytes: model_text_bytes(in v),
+        depth: model_depth(in v),
+        comments: model_comments(in v)
+    }
+}
+
+// What `emit` returns: the Lean source, or the error (`fail.code` is not
+// `P_NONE`; `lean` is a `LeanSyntax` printer error).
+pub struct Emitted {
+    pub fail: ProofFail,
+    pub lean: ChunkSeq[u8]
+}
+
+fn emitted_fail(f: ProofFail) -> Emitted {
+    Emitted { fail: f, lean: ChunkSeq::new[u8]() }
+}
+
+fn none() -> ProofFail {
+    no_proof_fail()
+}
+
+fn code(c: u64) -> ProofFail {
+    let mut f = no_proof_fail();
+    f.code = c;
+    f
+}
+
+fn res(r: u64) -> ProofFail {
+    let mut f = no_proof_fail();
+    f.code = P_RESOURCE;
+    f.resource = r;
+    f
+}
+
+// `a + b` and `a * b`, or `U64_MAX` when either overflows (then an
+// "emitter arithmetic" error).
+fn add(a: u64, b: u64) -> u64 {
+    if a == U64_MAX || b == U64_MAX || a > wrapping_sub(U64_MAX, b) {
+        U64_MAX
+    } else {
+        wrapping_add(a, b)
+    }
+}
+
+fn mul(a: u64, b: u64) -> u64 {
+    if a == U64_MAX || b == U64_MAX {
+        return U64_MAX;
+    }
+    match checked_mul_u64(a, b) {
+        Option::Some(v) => v,
+        Option::None => U64_MAX,
+    }
+}
+
+// `Preflight`.
+struct Pre {
+    nodes: u64,
+    text: u64,
+    comments: u64,
+    depth: u64,
+    ast_nodes: u64,
+    quoted: u64,
+    work: u64,
+    fail: ProofFail
+}
+
+fn pre_charge(inout p: Pre, amount: u64, in l: ProofLimits) -> bool {
+    p.work = add(p.work, amount);
+    if p.work == U64_MAX {
+        p.fail = res(R_E_ARITHMETIC);
+        return false;
+    }
+    if p.work > l.max_work {
+        p.fail = res(R_E_WORK);
+        return false;
+    }
+    true
+}
+
+// Payload `t` of the model.
+fn text_start(in m: Model, t: u64) -> u64 {
+    if t == 0 {
+        0
+    } else {
+        word(in m.text_ends, wrapping_sub(t, 1))
+    }
+}
+
+fn word(in s: ChunkSeq[u64], i: u64) -> u64 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+fn kind(in m: Model, i: u64) -> u8 {
+    match m.kind.try_get(i) {
+        Option::Some(k) => k,
+        Option::None => D_NIL,
+    }
+}
+
+// `quoted_bytes`: the printer's escaped length of `s[a..b]`, quotes
+// included.
+fn quoted_bytes(in s: Slice[u8], a: u64, b: u64) -> u64 {
+    let mut n: u64 = 2;
+    let mut i = a;
+    loop {
+        if i >= b {
+            break;
+        }
+        let c0 = byte(in s, i);
+        if c0 < 128 {
+            n = add(
+                n,
+                if c0 == 92 || c0 == 10 || c0 == 13 || c0 == 9 || c0 == 34 {
+                    2
+                } else if c0 < 32 || c0 == 127 {
+                    4
+                } else {
+                    1
+                }
+            );
+            i = wrapping_add(i, 1);
+        } else if c0 < 224 {
+            // Two bytes: U+0080..U+07FF; U+0080..U+009F are controls.
+            let c1 = byte(in s, wrapping_add(i, 1));
+            let cp = wrapping_add(wrapping_mul(widen_u64(c0) % 32, 64), widen_u64(c1) % 64);
+            n = add(
+                n,
+                if cp < 160 {
+                    4
+                } else {
+                    2
+                }
+            );
+            i = wrapping_add(i, 2);
+        } else if c0 < 240 {
+            let c1 = byte(in s, wrapping_add(i, 1));
+            let c2 = byte(in s, wrapping_add(i, 2));
+            // U+2028 and U+2029 are E2 80 A8 and E2 80 A9.
+            n = add(
+                n,
+                if c0 == 226 && c1 == 128 && (c2 == 168 || c2 == 169) {
+                    6
+                } else {
+                    3
+                }
+            );
+            i = wrapping_add(i, 3);
+        } else {
+            n = add(n, 4);
+            i = wrapping_add(i, 4);
+        }
+    }
+    n
+}
+
+// `Preflight::visit` of the node at `at` (prefix order), with its payload
+// numbers counted by `t`. The node's AST depth, or 0 after a failure.
+fn visit(
+    inout p: Pre,
+    in m: Model,
+    inout at: u64,
+    inout t: u64,
+    depth: u64,
+    in l: ProofLimits
+) -> u64 {
+    if !pre_charge(inout p, 64, in l) {
+        return 0;
+    }
+    if depth > l.max_depth {
+        p.fail = res(R_E_DEPTH);
+        return 0;
+    }
+    if depth > p.depth {
+        p.depth = depth;
+    }
+    p.nodes = add(p.nodes, 1);
+    if p.nodes > l.max_nodes {
+        p.fail = res(R_E_NODES);
+        return 0;
+    }
+    p.ast_nodes = add(p.ast_nodes, 4);
+    let k = kind(in m, at);
+    let arg = word(in m.arg, at);
+    at = wrapping_add(at, 1);
+    let mut child_depth: u64 = 0;
+    if k == D_TEXT || k == D_COMMENT {
+        let a = text_start(in m, t);
+        let b = word(in m.text_ends, t);
+        t = wrapping_add(t, 1);
+        let len = wrapping_sub(b, a);
+        p.text = add(p.text, len);
+        if p.text > l.max_text_bytes {
+            p.fail = res(R_E_TEXT);
+            return 0;
+        }
+        if !pre_charge(inout p, len, in l) {
+            return 0;
+        }
+        p.quoted = add(p.quoted, quoted_bytes(in m.text.as_slice(), a, b));
+        if k == D_COMMENT {
+            p.comments = add(p.comments, 1);
+        }
+        child_depth = 1;
+    } else if k == D_NEST || k == D_GROUP {
+        child_depth = visit(inout p, in m, inout at, inout t, add(depth, 1), in l);
+        if p.fail.code != P_NONE {
+            return 0;
+        }
+    } else if k == D_CONCAT {
+        if arg > l.max_nodes {
+            p.fail = res(R_E_LIST);
+            return 0;
+        }
+        for _i in 0..arg {
+            let d = visit(inout p, in m, inout at, inout t, add(depth, 1), in l);
+            if p.fail.code != P_NONE {
+                return 0;
+            }
+            if d > child_depth {
+                child_depth = d;
+            }
+        }
+        child_depth = add(child_depth, 1);
+    }
+    add(child_depth, 1)
+}
+
+// `Preflight::check`: the bound on the rendered bytes, or the error.
+fn check(in m: Model, in l: ProofLimits, inout f: ProofFail) -> u64 {
+    if !proof_limits_valid(in l) {
+        f = code(P_INVALID_LIMITS);
+        return 0;
+    }
+    if 4096 > l.max_lean_bytes {
+        f = res(R_E_LEAN_BYTES);
+        return 0;
+    }
+    if 8192 > l.max_metadata_bytes {
+        f = res(R_E_METADATA);
+        return 0;
+    }
+    if m.node_count > l.max_nodes {
+        f = res(R_E_NODES);
+        return 0;
+    }
+    if m.text_bytes > l.max_text_bytes {
+        f = res(R_E_TEXT);
+        return 0;
+    }
+    if m.depth > l.max_depth {
+        f = res(R_E_DEPTH);
+        return 0;
+    }
+    let mut p = Pre {
+        nodes: 0,
+        text: 0,
+        comments: 0,
+        depth: 0,
+        ast_nodes: 0,
+        quoted: 0,
+        work: 0,
+        fail: none()
+    };
+    if !pre_charge(inout p, 512, in l) {
+        f = p.fail;
+        return 0;
+    }
+    let mut at: u64 = 0;
+    let mut t: u64 = 0;
+    let ast_depth = visit(inout p, in m, inout at, inout t, 1, in l);
+    if p.fail.code != P_NONE {
+        f = p.fail;
+        return 0;
+    }
+    if p.nodes != m.node_count
+        || p.text != m.text_bytes
+        || p.depth != m.depth
+        || p.comments != m.comments {
+        f = code(P_CONSERVATION);
+        return 0;
+    }
+    let rendered = add(add(4096, mul(p.nodes, 128)), p.quoted);
+    if rendered == U64_MAX {
+        f = res(R_E_ARITHMETIC);
+        return 0;
+    }
+    if rendered > l.max_lean_bytes {
+        f = res(R_E_LEAN_BYTES);
+        return 0;
+    }
+    let owned_ast = add(add(8192, mul(p.nodes, 768)), p.text);
+    let printer = mul(rendered, add(ast_depth, 8));
+    let metadata = add(owned_ast, printer);
+    if metadata == U64_MAX {
+        f = res(R_E_ARITHMETIC);
+        return 0;
+    }
+    if metadata > l.max_metadata_bytes {
+        f = res(R_E_METADATA);
+        return 0;
+    }
+    if ast_depth > 512 {
+        f = res(R_E_AST_DEPTH);
+        return 0;
+    }
+    let print_work = mul(rendered, add(mul(ast_depth, 2), 16));
+    let w = add(p.work, add(add(add(mul(metadata, 2), print_work), p.text), mul(p.ast_nodes, 64)));
+    if w == U64_MAX {
+        f = res(R_E_ARITHMETIC);
+        return 0;
+    }
+    if w > l.max_work {
+        f = res(R_E_WORK);
+        return 0;
+    }
+    rendered
+}
+
+// ---------------------------------------------------------------- words
+
+// The printer's word stream (crates/vesper-lean-syntax/src/port.rs
+// `Encoder`) and its text pool.
+struct W {
+    words: ChunkSeq[u64],
+    pool: ChunkSeq[u8]
+}
+
+fn w(inout e: W, v: u64) {
+    e.words.push(v);
+}
+
+fn text(inout e: W, in s: Slice[u8]) {
+    e.words.push(e.pool.len());
+    e.words.push(s.len());
+    e.pool.extend(in s);
+}
+
+fn text_str(inout e: W, in s: Str) {
+    text(inout e, in s.as_bytes());
+}
+
+// A `Name` of `parts` separated by `.`.
+fn name(inout e: W, rooted: bool, in parts: Str) {
+    let b = parts.as_bytes();
+    w(
+        inout e,
+        if rooted {
+            1
+        } else {
+            0
+        }
+    );
+    let mut n: u64 = 1;
+    for i in 0..b.len() {
+        if byte(in b, i) == 46 {
+            n = wrapping_add(n, 1);
+        }
+    }
+    w(inout e, n);
+    let mut a: u64 = 0;
+    for i in 0..b.len() {
+        if byte(in b, i) == 46 {
+            text(inout e, in b[a..i]);
+            a = wrapping_add(i, 1);
+        }
+    }
+    text(inout e, in b[a..b.len()]);
+}
+
+// `Term::Ref` of a rooted name (`reference`) or a local (`local`).
+fn reference(inout e: W, in parts: Str) {
+    w(inout e, 1);
+    name(inout e, true, in parts);
+}
+
+fn local(inout e: W, in v: Str) {
+    w(inout e, 1);
+    name(inout e, false, in v);
+}
+
+// The head of `Term::app(function, args)`: tag, argument count, then the
+// function's size (patched by `app_end`) and the function.
+fn app(inout e: W, args: u64) -> u64 {
+    w(inout e, 8);
+    w(inout e, args);
+    let size = e.words.len();
+    w(inout e, 0);
+    size
+}
+
+fn app_end(inout e: W, size: u64) {
+    let _ = e.words.try_set(size, wrapping_sub(wrapping_sub(e.words.len(), size), 1));
+}
+
+fn positional(inout e: W) {
+    w(inout e, 0);
+}
+
+fn ctor(inout e: W, in c: Str) {
+    w(inout e, 1);
+    w(inout e, 1);
+    w(inout e, 4);
+    text_str(inout e, "Vesper");
+    text_str(inout e, "StylusSafety");
+    text_str(inout e, "Doc");
+    text_str(inout e, c);
+}
+
+fn string_term(inout e: W, in s: Slice[u8]) {
+    w(inout e, 6);
+    text(inout e, in s);
+}
+
+// The decimal digits of `n`.
+fn decimal(n: u64) -> ChunkSeq[u8] {
+    let mut digits: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut v = n;
+    loop {
+        digits.push(wrapping_u8(wrapping_add(48, v % 10)));
+        v = v / 10;
+        if v == 0 {
+            break;
+        }
+    }
+    let mut out: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](digits.len());
+    let mut i = digits.len();
+    loop {
+        if i == 0 {
+            break;
+        }
+        i = wrapping_sub(i, 1);
+        out.push(byte(in digits.as_slice(), i));
+    }
+    out
+}
+
+// `doc_term` of the node at `at`.
+fn doc_term(inout e: W, in m: Model, inout at: u64, inout t: u64) {
+    let k = kind(in m, at);
+    let arg = word(in m.arg, at);
+    at = wrapping_add(at, 1);
+    if k == D_NIL {
+        ctor(inout e, "nil");
+    } else if k == D_TEXT || k == D_COMMENT {
+        let a = text_start(in m, t);
+        let b = word(in m.text_ends, t);
+        t = wrapping_add(t, 1);
+        let s = app(inout e, 1);
+        if k == D_TEXT {
+            ctor(inout e, "text");
+        } else {
+            ctor(inout e, "comment");
+        }
+        app_end(inout e, s);
+        positional(inout e);
+        string_term(inout e, in m.text[a..b]);
+    } else if k == D_HARD {
+        ctor(inout e, "hardLine");
+    } else if k == D_SOFT_SPACE {
+        ctor(inout e, "softLineOrSpace");
+    } else if k == D_SOFT_EMPTY {
+        ctor(inout e, "softLineOrEmpty");
+    } else if k == D_NEST {
+        let s = app(inout e, 2);
+        ctor(inout e, "nest");
+        app_end(inout e, s);
+        positional(inout e);
+        w(inout e, 4);
+        let digits = decimal(arg);
+        text(inout e, in digits.as_slice());
+        positional(inout e);
+        doc_term(inout e, in m, inout at, inout t);
+    } else if k == D_CONCAT {
+        let s = app(inout e, 1);
+        ctor(inout e, "concat");
+        app_end(inout e, s);
+        positional(inout e);
+        w(inout e, 14);
+        w(inout e, arg);
+        for _i in 0..arg {
+            doc_term(inout e, in m, inout at, inout t);
+        }
+    } else {
+        let s = app(inout e, 1);
+        ctor(inout e, "group");
+        app_end(inout e, s);
+        positional(inout e);
+        doc_term(inout e, in m, inout at, inout t);
+    }
+}
+
+// `Vesper.StylusSafety.commentsOf (Vesper.StylusSafety.render width col
+// (Vesper.StylusSafety.Mode.<mode>) Vesper.StylusGenerated.document)`.
+fn rendered_comments(inout e: W, in mode: Str) {
+    let s = app(inout e, 1);
+    reference(inout e, "Vesper.StylusSafety.commentsOf");
+    app_end(inout e, s);
+    positional(inout e);
+    let r = app(inout e, 4);
+    reference(inout e, "Vesper.StylusSafety.render");
+    app_end(inout e, r);
+    positional(inout e);
+    local(inout e, "width");
+    positional(inout e);
+    local(inout e, "col");
+    positional(inout e);
+    w(inout e, 1);
+    w(inout e, 1);
+    w(inout e, 4);
+    text_str(inout e, "Vesper");
+    text_str(inout e, "StylusSafety");
+    text_str(inout e, "Mode");
+    text_str(inout e, mode);
+    positional(inout e);
+    reference(inout e, "Vesper.StylusGenerated.document");
+}
+
+// A `Def` (0) or `NoncomputableDef` (1) with no binders.
+fn definition(inout e: W, kind: u64, in n: Str) {
+    w(inout e, 2);
+    w(inout e, kind);
+    name(inout e, false, in n);
+    w(inout e, 0);
+}
+
+// `emit(model, source, output, ProofLimits::default())`.
+pub fn emit(in v: Verified, in l: ProofLimits) -> Emitted {
+    let mut f = none();
+    let m = model_of(in v);
+    let bound = check(in m, in l, inout f);
+    if f.code != P_NONE {
+        return emitted_fail(f);
+    }
+    let mut e = W { words: ChunkSeq::new[u64](), pool: ChunkSeq::new[u8]() };
+    // Imports: StylusAndLintSafety.
+    w(inout e, 1);
+    w(inout e, 1);
+    text_str(inout e, "StylusAndLintSafety");
+    // Three declarations: two options and the namespace.
+    w(inout e, 3);
+    w(inout e, 1);
+    w(inout e, 1);
+    w(inout e, 1);
+    w(inout e, 4096);
+    w(inout e, 1);
+    w(inout e, 2);
+    w(inout e, 1);
+    w(inout e, 1000000);
+    w(inout e, 6);
+    name(inout e, false, "Vesper.StylusGenerated");
+    w(inout e, 4);
+    // document : Vesper.StylusSafety.Doc := <doc>
+    definition(inout e, 1, "document");
+    reference(inout e, "Vesper.StylusSafety.Doc");
+    let mut at: u64 = 0;
+    let mut t: u64 = 0;
+    doc_term(inout e, in m, inout at, inout t);
+    // The two digests.
+    definition(inout e, 0, "source_blake3");
+    reference(inout e, "String");
+    let sh = hash_hex(verified_source_hash(in v));
+    string_term(inout e, in sh.as_slice());
+    definition(inout e, 0, "output_blake3");
+    reference(inout e, "String");
+    let oh = hash_hex(verified_output_hash(in v));
+    string_term(inout e, in oh.as_slice());
+    // theorem comments_preserved (width : Nat) (col : Nat) : ... = ... := ...
+    w(inout e, 7);
+    name(inout e, false, "comments_preserved");
+    w(inout e, 2);
+    w(inout e, 0);
+    w(inout e, 1);
+    text_str(inout e, "width");
+    reference(inout e, "Nat");
+    w(inout e, 0);
+    w(inout e, 1);
+    text_str(inout e, "col");
+    reference(inout e, "Nat");
+    w(inout e, 21);
+    w(inout e, 5);
+    rendered_comments(inout e, "flat");
+    rendered_comments(inout e, "broken");
+    let s = app(inout e, 3);
+    reference(inout e, "Vesper.StylusSafety.comments_render_invariant");
+    app_end(inout e, s);
+    positional(inout e);
+    reference(inout e, "Vesper.StylusGenerated.document");
+    positional(inout e);
+    local(inout e, "width");
+    positional(inout e);
+    local(inout e, "col");
+    let pool = match String::from_utf8(in e.pool.as_slice()) {
+        Option::Some(p) => p,
+        Option::None => {
+            return emitted_fail(code(P_CONSERVATION));
+        },
+    };
+    let rendered: Result[String, LeanError] = handle Fail[LeanError] in {
+        render_module(in e.words.as_slice(), in pool.as_str())
+    } with {
+        return x => Result::Ok(x),
+        raise(error, _k) => Result::Err(error),
+    };
+    let out = match rendered {
+        Result::Ok(r) => r,
+        Result::Err(_) => {
+            return emitted_fail(code(P_LEAN_SYNTAX));
+        },
+    };
+    let b = out.as_bytes();
+    if b.len() > bound {
+        return emitted_fail(code(P_CONSERVATION));
+    }
+    if b.len() > l.max_lean_bytes {
+        return emitted_fail(res(R_E_LEAN_BYTES));
+    }
+    let mut lean: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](b.len());
+    lean.extend(in b);
+    Emitted { fail: none(), lean: lean }
+}
+
+// `ProofError`'s `Display`.
+pub fn message(f: ProofFail) -> ChunkSeq[u8] {
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    if f.code == P_INVALID_LIMITS {
+        put_str(inout out, "invalid formatter proof limits");
+    } else if f.code == P_RESOURCE {
+        put_str(inout out, "formatter proof ");
+        put_str(inout out, resource_name(f.resource));
+        put_str(inout out, " limit exceeded");
+    } else if f.code == P_INVALID_DOCUMENT {
+        put_str(inout out, "invalid formatter document reference");
+    } else if f.code == P_ALLOCATION {
+        put_str(inout out, "formatter proof allocation failed");
+    } else if f.code == P_FORMATTER {
+        put_str(inout out, "formatter unavailable: ");
+        fmt_error(inout out, f.fmt);
+    } else if f.code == P_CONSERVATION {
+        put_str(inout out, "formatter proof conservation check failed");
+    } else {
+        put_str(inout out, "formatter proof Lean syntax: ");
+    }
+    out
+}
+
+fn resource_name(r: u64) -> Str {
+    if r == 0 {
+        "arithmetic"
+    } else if r == 1 {
+        "work"
+    } else if r == 2 {
+        "metadata"
+    } else if r == 3 {
+        "nodes"
+    } else if r == 4 {
+        "depth"
+    } else if r == 5 {
+        "text"
+    } else if r == 6 {
+        "source association work"
+    } else if r == R_E_ARITHMETIC {
+        "emitter arithmetic"
+    } else if r == R_E_WORK {
+        "emitter work"
+    } else if r == R_E_DEPTH {
+        "emitter depth"
+    } else if r == R_E_NODES {
+        "emitter nodes"
+    } else if r == R_E_TEXT {
+        "emitter text"
+    } else if r == R_E_LIST {
+        "emitter list"
+    } else if r == R_E_LEAN_BYTES {
+        "emitter Lean bytes"
+    } else if r == R_E_METADATA {
+        "emitter metadata"
+    } else {
+        "emitter AST depth"
+    }
+}
+
+// `vesper_fmt::Error`'s `Display` (its `Debug`).
+fn fmt_error(inout out: ChunkSeq[u8], e: FmtFail) {
+    let c = fail_code(e);
+    if c == 9 {
+        put_str(inout out, "Syntax { offset: ");
+        let d = decimal(fail_offset(e));
+        out.extend(in d.as_slice());
+        put_str(inout out, " }");
+        return;
+    }
+    put_str(inout out, fmt_error_name(c));
+}
+
+fn fmt_error_name(c: u64) -> Str {
+    if c == 0 {
+        "InputLimit"
+    } else if c == 1 {
+        "OutputLimit"
+    } else if c == 2 {
+        "TokenLimit"
+    } else if c == 3 {
+        "NodeLimit"
+    } else if c == 4 {
+        "DepthLimit"
+    } else if c == 5 {
+        "WorkLimit"
+    } else if c == 6 {
+        "Overflow"
+    } else if c == 7 {
+        "Allocation"
+    } else if c == 8 {
+        "InvalidDoc"
+    } else if c == 10 {
+        "OpaqueMacro"
+    } else if c == 11 {
+        "Conservation"
+    } else {
+        "NotIdempotent"
+    }
+}

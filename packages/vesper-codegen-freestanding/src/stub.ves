@@ -156,10 +156,7 @@ impl Asm {
     }
 
     fn label_at(in self, l: u64) -> u64 {
-        match self.labels.try_get(l) {
-            Option::Some(v) => v,
-            Option::None => Absent::Row,
-        }
+        self.labels.try_get(l).unwrap_or(Absent::Row)
     }
 
     fn align(inout self, a: u64, fill: u32) {
