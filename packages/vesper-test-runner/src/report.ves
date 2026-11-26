@@ -1,0 +1,329 @@
+// The text reports of `vesper test` and `vesper test --doc`: `rust_doc_text`,
+// `rust_unit_text`, `rust_baseline_text` and `rust_mutants_text` of
+// src/test_report.rs.
+//
+// Input words (tests/common/test_report_words.rs):
+// - `doc_text`: the file, the base diagnostic count and each diagnostic,
+//   the example count and per example the index, line, column, passed, the
+//   message, the engine (0, or 1 and the name) and its diagnostics (count
+//   and each). A diagnostic is its line, column, code and message.
+// - `unit_text` and `baseline_text`: the file count and per file the
+//   display name, the error (0, or 1 and the text), the test count and per
+//   test the name, line, column, passed, the message, the engine, the pin
+//   and the capsule (each 0, or 1 and the text).
+// - `mutants_text`: the mutant count and per mutant the file, line,
+//   column, function, original and replacement and the outcome (0 and the
+//   killer (0, or 1 and the name), 1 survived, 2 ill-typed), then the
+//   killed, survived, ill-typed, tested and total counts.
+// Result words: 0 and the text.
+
+use self::util::{
+    Reader,
+    push_decimal,
+    push_range,
+    put_buf,
+    sub
+};
+
+// `v` in decimal. Below 10^16 the digits are packed into two words, most
+// significant in the lowest byte, and pushed in order.
+fn decimal(inout out: ChunkSeq[u8], v: u64) {
+    if v < 10 {
+        out.push(wrapping_u8(wrapping_add(v, 48)));
+        return;
+    }
+    if v >= 10000000000000000 {
+        push_decimal(inout out, v);
+        return;
+    }
+    let mut lo: u64 = 0;
+    let mut hi: u64 = 0;
+    let mut n: u64 = 0;
+    let mut x = v;
+    loop {
+        let d = wrapping_add(x % 10, 48);
+        hi = wrapping_shl_u64(hi, 8) | wrapping_shr_u64(lo, 56);
+        lo = wrapping_shl_u64(lo, 8) | d;
+        n = wrapping_add(n, 1);
+        x = x / 10;
+        if x == 0 {
+            break;
+        }
+    }
+    for i in 0..n {
+        let c = if i >= 8 {
+            wrapping_shr_u64(hi, wrapping_u32(wrapping_mul(wrapping_sub(i, 8), 8)))
+        } else {
+            wrapping_shr_u64(lo, wrapping_u32(wrapping_mul(i, 8)))
+        };
+        out.push(wrapping_u8(c & 255));
+    }
+}
+
+fn push_str(inout out: ChunkSeq[u8], in s: Str) {
+    out.extend(in s.as_bytes());
+}
+
+// `b[r.text()]` appended to `out`.
+fn copy_text(inout out: ChunkSeq[u8], inout r: Reader, in b: Slice[u8]) {
+    let (s, e) = r.text(in b);
+    push_range(inout out, in b, s, e);
+}
+
+fn result(in out: ChunkSeq[u8]) -> ChunkSeq[u64] {
+    let mut w: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    w.reserve(wrapping_add(out.len() / 8, 3));
+    w.push(0);
+    put_buf(inout w, in out);
+    w
+}
+
+// `{file}:{line}:{column}: `
+fn push_place(inout out: ChunkSeq[u8], in b: Slice[u8], fs: u64, fe: u64, line: u64, column: u64) {
+    push_range(inout out, in b, fs, fe);
+    out.push(58);
+    decimal(inout out, line);
+    out.push(58);
+    decimal(inout out, column);
+    push_str(inout out, in ": ");
+}
+
+// `{file}:{line}:{column}: {code}: {message}\n` for each of `n` diagnostics.
+fn diags(inout out: ChunkSeq[u8], inout r: Reader, in b: Slice[u8], fs: u64, fe: u64) {
+    let n = r.word(in b);
+    for i in 0..n {
+        let line = r.word(in b);
+        let column = r.word(in b);
+        push_place(inout out, in b, fs, fe, line, column);
+        copy_text(inout out, inout r, in b);
+        push_str(inout out, in ": ");
+        copy_text(inout out, inout r, in b);
+        out.push(10);
+    }
+}
+
+// `rust_doc_text` over the input words.
+pub fn doc_text(in b: Slice[u8]) -> ChunkSeq[u64] {
+    let mut r = Reader {
+        pos: 0
+    };
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    out.reserve(b.len());
+    let (fs, fe) = r.text(in b);
+    diags(inout out, inout r, in b, fs, fe);
+    let n = r.word(in b);
+    for i in 0..n {
+        let index = r.word(in b);
+        let line = r.word(in b);
+        let column = r.word(in b);
+        let passed = r.word(in b) != 0;
+        push_place(inout out, in b, fs, fe, line, column);
+        if passed {
+            push_str(inout out, in "PASS doctest ");
+        } else {
+            push_str(inout out, in "FAIL doctest ");
+        }
+        decimal(inout out, index);
+        push_str(inout out, in ": ");
+        copy_text(inout out, inout r, in b);
+        if r.word(in b) != 0 {
+            push_str(inout out, in " [");
+            copy_text(inout out, inout r, in b);
+            out.push(93);
+        }
+        out.push(10);
+        diags(inout out, inout r, in b, fs, fe);
+    }
+    result(in out)
+}
+
+// An optional text: (present, start, end).
+fn optional(inout r: Reader, in b: Slice[u8]) -> (bool, u64, u64) {
+    if r.word(in b) != 0 {
+        let (s, e) = r.text(in b);
+        (true, s, e)
+    } else {
+        let z: u64 = 0;
+        (false, z, z)
+    }
+}
+
+// `rust_unit_text` over the input words.
+pub fn unit_text(in b: Slice[u8]) -> ChunkSeq[u64] {
+    let mut r = Reader {
+        pos: 0
+    };
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    out.reserve(b.len());
+    let mut total: u64 = 0;
+    let mut failed: u64 = 0;
+    let mut file_errors: u64 = 0;
+    let nf = r.word(in b);
+    for f in 0..nf {
+        let (ds, de) = r.text(in b);
+        let (has_error, es, ee) = optional(inout r, in b);
+        if has_error {
+            file_errors = wrapping_add(file_errors, 1);
+            push_range(inout out, in b, ds, de);
+            push_str(inout out, in ": FAIL: ");
+            push_range(inout out, in b, es, ee);
+            out.push(10);
+        }
+        let nt = r.word(in b);
+        total = wrapping_add(total, nt);
+        for t in 0..nt {
+            let (ns, ne) = r.text(in b);
+            let line = r.word(in b);
+            let column = r.word(in b);
+            let passed = r.word(in b) != 0;
+            if !passed {
+                failed = wrapping_add(failed, 1);
+            }
+            let (ms, me) = r.text(in b);
+            let (gs, ge) = r.text(in b);
+            let (has_pin, ps, pe) = optional(inout r, in b);
+            let (has_capsule, cs, ce) = optional(inout r, in b);
+            if !has_error {
+                push_place(inout out, in b, ds, de, line, column);
+                if passed {
+                    push_str(inout out, in "PASS ");
+                } else {
+                    push_str(inout out, in "FAIL ");
+                }
+                push_range(inout out, in b, ns, ne);
+                push_str(inout out, in " (");
+                push_range(inout out, in b, ms, me);
+                push_str(inout out, in ") [");
+                push_range(inout out, in b, gs, ge);
+                push_str(inout out, in "]\n");
+                if has_pin {
+                    push_str(inout out, in "  pin regression: ");
+                    push_range(inout out, in b, ps, pe);
+                    out.push(10);
+                }
+                if has_capsule {
+                    push_str(inout out, in "  replay capsule: ");
+                    push_range(inout out, in b, cs, ce);
+                    out.push(10);
+                }
+            }
+        }
+    }
+    push_str(inout out, in "tests: ");
+    decimal(inout out, sub(total, failed));
+    push_str(inout out, in " passed, ");
+    decimal(inout out, failed);
+    push_str(inout out, in " failed (");
+    decimal(inout out, file_errors);
+    push_str(inout out, in " file error(s))\n");
+    result(in out)
+}
+
+// `rust_baseline_text` over the input words.
+pub fn baseline_text(in b: Slice[u8]) -> ChunkSeq[u64] {
+    let mut r = Reader {
+        pos: 0
+    };
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    out.reserve(b.len());
+    let nf = r.word(in b);
+    for f in 0..nf {
+        let (ds, de) = r.text(in b);
+        let (has_error, es, ee) = optional(inout r, in b);
+        if has_error {
+            push_range(inout out, in b, ds, de);
+            push_str(inout out, in ": FAIL: ");
+            push_range(inout out, in b, es, ee);
+            out.push(10);
+        }
+        let nt = r.word(in b);
+        for t in 0..nt {
+            let (ns, ne) = r.text(in b);
+            let line = r.word(in b);
+            let column = r.word(in b);
+            let passed = r.word(in b) != 0;
+            let (ms, me) = r.text(in b);
+            let (gs, ge) = r.text(in b);
+            let pin = optional(inout r, in b);
+            let capsule = optional(inout r, in b);
+            if !passed {
+                push_place(inout out, in b, ds, de, line, column);
+                push_str(inout out, in "FAIL ");
+                push_range(inout out, in b, ns, ne);
+                push_str(inout out, in ": ");
+                push_range(inout out, in b, ms, me);
+                out.push(10);
+            }
+        }
+    }
+    result(in out)
+}
+
+// `rust_mutants_text` over the input words.
+pub fn mutants_text(in b: Slice[u8]) -> ChunkSeq[u64] {
+    let mut r = Reader {
+        pos: 0
+    };
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    out.reserve(b.len());
+    let n = r.word(in b);
+    for i in 0..n {
+        let (fs, fe) = r.text(in b);
+        let line = r.word(in b);
+        let column = r.word(in b);
+        let (us, ue) = r.text(in b);
+        let (os, oe) = r.text(in b);
+        let (rs, re) = r.text(in b);
+        let outcome = r.word(in b);
+        if outcome == 2 {
+            continue;
+        }
+        let mut has: bool = false;
+        let mut ks: u64 = 0;
+        let mut ke: u64 = 0;
+        if outcome == 0 {
+            let (h, s, e) = optional(inout r, in b);
+            has = h;
+            ks = s;
+            ke = e;
+        }
+        push_place(inout out, in b, fs, fe, line, column);
+        if outcome == 0 {
+            push_str(inout out, in "KILLED ");
+        } else {
+            push_str(inout out, in "SURVIVED ");
+        }
+        push_range(inout out, in b, us, ue);
+        push_str(inout out, in " (");
+        push_range(inout out, in b, os, oe);
+        push_str(inout out, in " -> ");
+        push_range(inout out, in b, rs, re);
+        out.push(41);
+        if outcome == 0 {
+            push_str(inout out, in " by ");
+            if has {
+                push_range(inout out, in b, ks, ke);
+            } else {
+                push_str(inout out, in "test");
+            }
+        }
+        out.push(10);
+    }
+    let killed = r.word(in b);
+    let survived = r.word(in b);
+    let ill_typed = r.word(in b);
+    let tested = r.word(in b);
+    let total = r.word(in b);
+    push_str(inout out, in "mutation gate: ");
+    decimal(inout out, killed);
+    push_str(inout out, in " killed, ");
+    decimal(inout out, survived);
+    push_str(inout out, in " survived, ");
+    decimal(inout out, ill_typed);
+    push_str(inout out, in " ill-typed (of ");
+    decimal(inout out, tested);
+    out.push(47);
+    decimal(inout out, total);
+    push_str(inout out, in " candidate(s))\n");
+    result(in out)
+}

@@ -129,9 +129,13 @@ vesper_crate(
             "//crates/vesper-prism-h3:files",
             "//crates/vesper-semver:files",
         ],
+        # sort imports `guard` and `when` from @vesper-std/sugar, so testing
+        # sort/src/unstable.ves resolves sort's manifest and its dependency.
         "test/test_runner_cli": glob([
             "packages/vesper-std/*/src/*.ves",
         ]) + [
+            "packages/vesper-std/sort/Loom.toml",
+            "packages/vesper-std/sugar/Loom.toml",
             "//crates/vesper-crucible:files",
             "//crates/vesper-lean-syntax:files",
             "//crates/vesper-simpulse:files",
@@ -753,6 +757,14 @@ vesper_crate(
             "src/doctest_extract.rs",
             "tests/doctest_cli.rs",
         ]),
+        # Part 8: the text reports of `vesper test` and `vesper test --doc`
+        # against test_report's Rust renderers, over texts of the .ves files.
+        "test/self_host_test_report": glob([
+            "examples/**/*.ves",
+            "packages/**",
+            "src/**/*.ves",
+            "tests/**/*.ves",
+        ]),
         # Self-hosting SH4 lane 17 (#1291): @vesper/backend-checks against
         # native_verifiers on the verifier fixtures and the corpus. Anchored
         # globs; @vesper/resonance comes from its crate's package.
@@ -1293,6 +1305,7 @@ vesper_crate(
         # The doctest generate differential (#1337) runs 39k snippets twice.
         "test/self_host_doctest_generate": "long",
         "test/self_host_doctest_verdict": "long",
+        "test/self_host_test_report": "long",
         # The backend-checks differential emits every corpus program 4 times.
         "test/self_host_backend_checks": "long",
         # The optimizer policy (#1279) optimizes every corpus world three times.
@@ -1324,6 +1337,16 @@ vesper_package(
     name = "std_sort_package",
     srcs = glob(["packages/vesper-std/sort/src/**/*.ves"]),
     manifest = "packages/vesper-std/sort/Loom.toml",
+    visibility = ["//visibility:public"],
+    deps = [":std_sugar_package"],
+)
+
+# @vesper-std/sugar, the `guard` and `when` sugars, as a path dependency of
+# @vesper-std/sort and any port package that imports them.
+vesper_package(
+    name = "std_sugar_package",
+    srcs = glob(["packages/vesper-std/sugar/src/**/*.ves"]),
+    manifest = "packages/vesper-std/sugar/Loom.toml",
     visibility = ["//visibility:public"],
 )
 

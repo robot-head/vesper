@@ -131,7 +131,7 @@ port_harness_selection = task(
 )
 
 def _run_workflow(ctx: TaskContext) -> int:
-    root = ctx.std.env.aspect_root_dir()
+    root = ctx.std.env.var("PLATFORM_WORKSPACE") or ctx.std.env.aspect_root_dir()
     output = ctx.std.env.var("GITHUB_OUTPUT")
     if not output:
         ctx.std.process.exit(2, "GITHUB_OUTPUT is required")

@@ -1,0 +1,129 @@
+"""Test toolchain installation without executable fixture scripts or downloads."""
+
+load("./lean-ci.axl", "install_lean_with", "install_logos_rust_with")
+load("./lib/process.axl", "command", "exit_code", "scratch_dir")
+
+def _equal(actual, expected):
+    if actual != expected:
+        fail("Expected %r, got %r" % (expected, actual))
+
+def _scenario(ctx):
+    root, kind, mode = ctx.args.tool_args
+    log = []
+    home = ctx.std.env.var("ELAN_HOME" if kind == "lean" else "CARGO_HOME") + "/bin"
+    installed = {"lean": mode != "install", "rust": mode != "install"}
+    workspace = root
+    arch = ctx.std.env.arch()
+    suffix = "apple-darwin" if ctx.std.env.os() == "macos" else "unknown-linux-gnu"
+    target = arch + "-" + suffix
+
+    def resolve(_ctx, bin_dir, name):
+        _equal(bin_dir, home)
+        return home + "/" + name if installed[kind] else None
+
+    def execute(ctx, executable, argv, cwd, env = {}):
+        _equal(cwd, workspace)
+        directory, _, name = executable.rpartition("/")
+        log.append([name, argv])
+        if name == "curl":
+            _equal(env, {})
+            _equal(argv[:4], ["--proto", "=https", "--tlsv1.2", "-fsSL"])
+            _equal(argv[5], "-o")
+            if kind == "lean":
+                _equal(argv[4], "https://github.com/leanprover/elan/releases/latest/download/elan-" + target + ".tar.gz")
+            else:
+                base = ctx.std.env.var("RUSTUP_UPDATE_ROOT")
+                channel = (base.rstrip("/") + "/archive/3.1.4") if base else "https://static.rust-lang.org/rustup/dist"
+                _equal(argv[4], channel + "/" + target + "/rustup-init")
+            ctx.std.fs.write(argv[6], "mock release")
+            return ""
+        if name == "tar":
+            _equal(env, {})
+            _equal(argv, ["-xzf", argv[3] + "/elan.tar.gz", "-C", argv[3], "elan-init"])
+            _equal(ctx.std.fs.read_to_string(argv[1]), "mock release")
+            ctx.std.fs.write(argv[3] + "/elan-init", "mock release")
+            return ""
+        _equal(env["PATH"].partition(":")[0], home)
+        if name in ["elan-init", "rustup-init"]:
+            _equal(ctx.std.fs.read_to_string(executable), "mock release")
+            if name == "elan-init":
+                _equal(argv, ["-y", "--default-toolchain", "none"])
+            else:
+                _equal(argv, ["-y", "--no-modify-path", "--profile", "minimal", "--default-toolchain", "1.99.0"])
+            installed[kind] = True
+            ctx.std.fs.write(workspace + "/installer-directory", directory)
+            return ""
+        if name == "elan":
+            _equal(executable, home + "/elan")
+            _equal(argv, ["which", "lean"])
+            return "" if mode == "empty" else home + "/lean\r\n"
+        if name == "rustup":
+            _equal(executable, home + "/rustup")
+            if argv[0] == "which":
+                _equal(argv, ["which", "--toolchain", "1.99.0", "cargo"])
+                return "" if mode == "empty" else home + "/cargo\r\n"
+            _equal(argv, ["toolchain", "install", "1.99.0", "--profile", "minimal"])
+            return ""
+        _equal(executable, home + "/" + ("lean" if kind == "lean" else "cargo"))
+        _equal(argv, ["--version"])
+        if mode == "bad-version":
+            ctx.std.process.exit(17, "fixture version failed")
+        return ""
+
+    install = install_lean_with if kind == "lean" else install_logos_rust_with
+    status = install(ctx, root, resolve, execute, execute)
+    ctx.std.fs.write(root + "/calls.json", json.encode(log))
+    return status
+
+toolchain_fixture = task(
+    kind = "lean-toolchain-fixture", group = ["ci", "tests", "internal"],
+    summary = "Run a native toolchain installation fixture",
+    implementation = _scenario,
+    args = {"tool_args": args.trailing_var_args(description = "Fixture workspace, toolchain and scenario.")},
+)
+
+def _test(ctx):
+    root = scratch_dir(ctx, "vesper-lean-toolchain-test-")
+    cwd = ctx.std.env.aspect_root_dir()
+
+    def scenario(kind, mode, status, mirror = ""):
+        workspace = root + "/" + kind + " toolchain"
+        ctx.std.fs.create_dir_all(workspace)
+        home = workspace + "/separate tools"
+        env = {
+            "ELAN_HOME": home,
+            "CARGO_HOME": home,
+            "RUSTUP_UPDATE_ROOT": mirror,
+            "RUSTUP_VERSION": "3.1.4" if mirror else "",
+        }
+        receipt = workspace + ("/.ci-lean-path" if kind == "lean" else "/.ci-logos-cargo-path")
+        ctx.std.fs.write(receipt, "previous good path\n")
+        argv = ["ci", "tests", "internal", "lean-toolchain-fixture", "--", workspace, kind, mode]
+        result = command(ctx, ctx.std.env.current_exe(), argv, cwd, env).stdout("piped").stderr("piped").spawn().wait_with_output()
+        if exit_code(result.status) != status:
+            fail(kind + " " + mode + ": " + result.stdout + result.stderr)
+        name = "lean" if kind == "lean" else "cargo"
+        _equal(ctx.std.fs.read_to_string(receipt), "previous good path\n" if status else home + "/bin/" + name + "\n")
+        if not status:
+            calls = [call[0] for call in json.decode(ctx.std.fs.read_to_string(workspace + "/calls.json"))]
+            if kind == "lean":
+                _equal(calls, (["curl", "tar", "elan-init"] if mode == "install" else []) + ["lean", "elan"])
+            else:
+                _equal(calls, (["curl", "rustup-init"] if mode == "install" else ["rustup"]) + ["rustup", "cargo"])
+        if mode == "install":
+            scratch = ctx.std.fs.read_to_string(workspace + "/installer-directory")
+            _equal(ctx.std.fs.exists(scratch), False)
+
+    for kind in ["lean", "rust"]:
+        scenario(kind, "preinstalled", 0)
+        scenario(kind, "bad-version", 17)
+        scenario(kind, "empty", 1)
+        scenario(kind, "install", 0)
+    scenario("rust", "install", 0, "https://fixture.invalid/rustup/")
+    return 0
+
+test_toolchains = task(
+    kind = "lean-toolchains", group = ["ci", "tests"],
+    summary = "Check native Lean and Logos Rust toolchain installation and failure paths",
+    implementation = _test,
+)

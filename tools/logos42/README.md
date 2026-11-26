@@ -15,13 +15,13 @@ bounds-checked indexing; the Arena's `unchecked-access` feature is disabled.
 
 ## Setup and acceptance
 
-Use Python 3.11+, Git, a Rust toolchain supporting the pinned packages, and the
-already installed Lean/Lake toolchain. Setup uses Python's standard library.
-The destination must not exist.
+Use Aspect on Linux or macOS, Git, a Rust toolchain supporting the pinned
+packages, and the already installed Lean/Lake toolchain. The destination must
+be absent.
 
 ```sh
 cargo build --locked --bin logos42
-python3 tools/logos42/setup.py \
+aspect maintenance logos42 setup -- \
   --directory /absolute/path/to/NEW_LOGOS_ROOT \
   --driver "$PWD/target/debug/logos42" \
   --lean "$(elan which lean)" --lake "$(elan which lake)" \
@@ -85,6 +85,6 @@ The existing `Lean4LeanLevel42` proof packets remain proofs about their archived
 helper sources. They are not implementation proofs of Logos.
 
 Maintainers can refresh the embedded associations from an assembled candidate
-with `python3 tools/logos42/update-pins.py CANDIDATE` (requires Python `blake3`).
+with `aspect maintenance logos42 update-pins -- CANDIDATE` using `b3sum`.
 This produces source expectations, not a success receipt. A clean setup and the
 actual acceptance suite must still pass after a source or pin change.

@@ -1,0 +1,148 @@
+"""Exercise the Tier 1 macro pipeline and explicit normal-source execution."""
+
+load("./lib/lsp-fixture.axl", "error", "opened", "request")
+load("./lib/source-macro-fixtures.axl", "byte_index", "check_with", "digest", "equal", "execute", "explicit_run", "fixture", "forge", "lsp", "next_path", "no_fields", "require", "source_range", "suite_with")
+load("./lib/strict-json.axl", "decode_list")
+load("./bounded-stdio.axl", "utf8")
+
+_NAME = "source-macros"
+_STAGES = ["parse", "expand", "resolve", "lower", "check", "authority", "ir", "resource", "unsupported", "config", "io"]
+
+def _policy(name, effect, emits, ceiling):
+    return {"schema": "vesper.forge.policy/1", "macro_emits": [{"name": name, "effects": [effect]}] if emits else [], "caller_ceiling": [effect] if ceiling else []}
+
+def _policy_file(ctx, h, policy):
+    return next_path(ctx, h, "policy", ".json", policy if type(policy) == "string" else json.encode(policy))
+
+def _accepted(ctx, h, source, options = []):
+    value = forge(ctx, h, source, options = options)
+    equal(value["scope"], "tier1_source", "Forge scope")
+    require(digest(value["source_blake3"]) and digest(value["expanded_blake3"]) and value["source_blake3"] != value["expanded_blake3"], "Invalid original or expanded source digests")
+    require(value["macro_definitions"] > 0 and value["invocations"] > 0 and len(value["audits"]) == value["invocations"], "Invalid expanded macro counts")
+    for entry in value["source_map"]:
+        require(entry["kind"] in ["source", "generated"] and (entry["macro"] == None or type(entry["macro"]) == "string"), "Invalid source mapping metadata")
+    for audit in value["audits"]:
+        require(audit["scope"] == "expanded_function" and audit["macro"] and "!(" in source_range(audit["invocation"], source), "Invalid macro invocation record")
+    no_fields(value, ["world", "original_checked", "source_checked", "checked_original"])
+    return value
+
+def _rejected(ctx, h, source, options = []):
+    value = forge(ctx, h, source, success = False, options = options)
+    require(value["message"] and value["stage"] in _STAGES, "Missing or invalid rejection stage")
+    return value
+
+def _happy(ctx, h):
+    for name in ["keep", "addone", "argument_capture", "reference_capture", "initializer", "global_helper", "repeated", "block_argument", "literal_context"]:
+        report = _accepted(ctx, h, fixture(ctx, h, name))
+        require(report["package"] == "@local/source" and report["macro_definitions"] == 1 and report["invocations"] == 1, "Unexpected macro report for " + name)
+        if name == "global_helper":
+            require("fn helper() -> i64 { 42 }" in report["expanded_source"], "Global helper was lost")
+        explicit_run(ctx, h, report["expanded_source"])
+    repeated = fixture(ctx, h, "repeated")
+    for source, expected in [(repeated, "42"), ("// 🦀😀 CRLF revision\r\n" + repeated.replace("let n = 21", "let n = 20"), "40")]:
+        report = _accepted(ctx, h, source)
+        start = byte_index(source, "twice!(n)") + len("twice!(")
+        copies = {}
+        for entry in report["source_map"]:
+            span = entry["expanded"]
+            if entry["original"] == {"start": start, "end": start + 1} and span["start"] < span["end"]:
+                copies[(span["start"], span["end"])] = True
+        spans = sorted(copies)
+        require(len(spans) >= 2 and all([left[1] <= right[0] for left, right in zip(spans, spans[1:])]), "Copied input must have distinct expanded spans")
+        explicit_run(ctx, h, report["expanded_source"], expected)
+
+def _effects(ctx, h):
+    for name, code in [("linear_duplicate", "E0303"), ("trailing_unit", "E0200")]:
+        value = _rejected(ctx, h, fixture(ctx, h, name))
+        equal(value["stage"], "check", "Rejected candidate stage")
+        candidate = value["expanded_source"]
+        diagnostic = [entry for entry in value["diagnostics"] if entry["code"] == code][0]
+        primary = source_range(diagnostic["span"], candidate)
+        require(bool(primary), "Missing rejected source diagnostic span")
+        if code == "E0303":
+            earlier = [entry for entry in diagnostic["related"] if entry["message"] == "earlier ownership-taking use of this place"][0]
+            require(earlier["span"]["end"] <= diagnostic["span"]["start"], "Unexpected ownership-taking occurrence order")
+            equal(source_range(earlier["span"], candidate), primary, "Ownership diagnostic source spelling")
+    transitive = fixture(ctx, h, "transitive_effect")
+    equal(_rejected(ctx, h, transitive)["stage"], "authority", "Transitive effect rejection")
+    for emits, ceiling in [(False, True), (True, False), (True, True)]:
+        options = ["--policy", _policy_file(ctx, h, _policy("leaky", "Log", emits, ceiling))]
+        if emits and ceiling:
+            _accepted(ctx, h, transitive, options)
+        else:
+            equal(_rejected(ctx, h, transitive, options)["stage"], "authority", "Policy must permit both macro and caller")
+    _accepted(ctx, h, fixture(ctx, h, "pure_declared_row"))
+    for name, macro, argument in [("implicit_overflow", "bump", "ArithOverflow"), ("implicit_runtime_fail", "division", "RuntimeError")]:
+        source = fixture(ctx, h, name)
+        equal(_rejected(ctx, h, source)["stage"], "authority", "Implicit effect rejection")
+        denied = _policy_file(ctx, h, _policy(macro, "builtin::Fail", False, True))
+        equal(_rejected(ctx, h, source, ["--policy", denied])["stage"], "authority", "Missing macro effect authority")
+        allowed = _policy_file(ctx, h, _policy(macro, "builtin::Fail", True, True))
+        require(argument in _accepted(ctx, h, source, ["--policy", allowed])["expanded_source"], "Expanded Fail argument was lost")
+
+def _invalid(ctx, h):
+    for source in [
+        "macro keep($x:expr)->expr{quote{$x}} fn main()->i64{unknown!(42)}",
+        "macro keep($x:expr)->expr{quote{$x}} fn main()->i64{keep!(keep!(42))}",
+        "macro keep($x:expr)->expr{quote{$x}} fn main()->i64{keep!()}",
+        "macro keep($x:expr)->expr{quote{$x}} fn main()->i64{keep!(1,2)}",
+        "macro bad($x:expr)->expr{quote{let $x=42;$x}} fn main()->i64{bad!(name)}",
+        "macro bad($x:ty)->expr{quote{42}} fn main()->i64{bad!(i64)}",
+        "copy struct Record { field:i64 } macro keep($x:expr)->expr{quote{$x}} fn main(in n.{field}:Record)->i64{keep!(42)}",
+        "macro keep($x:expr)->expr{quote{$x}} fn main[T:mod copy]()->i64{keep!(42)}",
+        "macro call($x:expr)->expr{quote{$x(2)}} fn main()->i64{call!(let a=1;a)}",
+        '#[wasm_macro(component="file:///must-not-be-loaded.wasm")] macro x()->expr{quote{42}} fn main()->i64{x!()}',
+        "effect E[T:mod copy]{fn take(in x:T);} macro emit()->expr{quote{E::take(1)}} fn main()eff[E[u64]]{emit!()}",
+    ]:
+        _rejected(ctx, h, source)
+    keep = fixture(ctx, h, "keep")
+    equal(_rejected(ctx, h, "//" + "x" * (128 * 1024) + "\n" + keep)["stage"], "resource", "Oversized source rejection")
+    equal(_accepted(ctx, h, keep, ["--package", "@acceptance/macros"])["package"], "@acceptance/macros", "Explicit package")
+    for package in ["@vesper/builtin", "bad package"]:
+        equal(_rejected(ctx, h, keep, ["--package", package])["stage"], "config", "Invalid package rejection")
+    for value in [
+        {"schema": "vesper.forge.policy/1", "approved": True},
+        {"schema": "vesper.forge.policy/1", "caller_ceiling": ["Unknown"]},
+        '{"schema":"vesper.forge.policy/1","caller_ceiling":[],"caller_ceiling":["builtin::Fail"]}',
+        {"schema": "vesper.forge.policy/1", "macro_emits": [{"name": "keep", "effects": []}, {"name": "keep", "effects": []}]},
+        {"schema": "vesper.forge.policy/1", "macro_emits": [{"name": "missing", "effects": []}]},
+    ]:
+        path = _policy_file(ctx, h, value)
+        equal(_rejected(ctx, h, keep, ["--policy", path])["stage"], "config", "Invalid policy rejection")
+    path = _policy_file(ctx, h, " " * 65537)
+    require(_rejected(ctx, h, keep, ["--policy", path])["stage"] in ["config", "resource"], "Oversized policy was accepted")
+    original = next_path(ctx, h, "original", ".ves", keep)
+    equal(execute(ctx, h, ["forge", "expand", original, "--json"], expected = 1), bytes([]), "Rejected expand output")
+    require(bool(decode_list(utf8(execute(ctx, h, ["check", original, "--json"], expected = 1)))), "Ordinary compiler check must diagnose macro source")
+    uri = "file:///not-implicitly-loaded/source-macros.ves"
+    replies = lsp(ctx, h, [
+        opened(uri, 1, keep),
+        request(2, "textDocument/hover", {"textDocument": {"uri": uri}, "position": {"line": 1, "character": 5}, "approved": True}),
+    ])
+    publications = [message["params"] for message in replies if message.get("method") == "textDocument/publishDiagnostics"]
+    equal(publications[0]["vesper"]["status"], "parse_error", "Ordinary LSP diagnostics")
+    error(replies, 2, -32003)
+
+def _cases(ctx, h):
+    _happy(ctx, h)
+    _effects(ctx, h)
+    _invalid(ctx, h)
+    return {
+        "explicit_normal_source_runs": h.counts["runs"],
+        "scope": "actual Tier1 compiler pipeline; structured WASI foundation is separate",
+    }
+
+check_source_macros = task(
+    kind = "check-source-macros",
+    group = ["acceptance"],
+    summary = "Check Tier 1 source macros with a supplied compiler",
+    implementation = lambda ctx: check_with(ctx, _NAME, _cases),
+    args = {"tool_args": args.trailing_var_args(description = "Pass -- --binary <vesper> [--work <directory>].")},
+)
+
+test_source_macros = task(
+    kind = "test-source-macros",
+    group = ["acceptance"],
+    summary = "Exercise the Tier 1 compiler pipeline and executable macro output",
+    implementation = lambda ctx: suite_with(ctx, _NAME, "VESPER_SOURCE_MACROS_BINARY", _cases),
+)

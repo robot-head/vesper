@@ -88,7 +88,12 @@ fn swaps(output: &Output) -> (String, Vec<Line>) {
             };
             let config = rest
                 .split_once("flip gate PASS (scripts/ci/flip-gate/")
-                .map(|(_, c)| c.split(".toml").next().unwrap().to_string());
+                .map(|(_, report)| {
+                    let (file, _) = report.split_once(", ").expect("gate file and PR");
+                    file.strip_suffix(".json")
+                        .expect("JSON gate configuration")
+                        .to_owned()
+                });
             Line {
                 name: name.to_string(),
                 on,
@@ -136,7 +141,7 @@ fn gated_turns_on_exactly_the_flip_gate_passes() {
             continue;
         };
         passed += 1;
-        let path = root.join(format!("scripts/ci/flip-gate/{config}.toml"));
+        let path = root.join(format!("scripts/ci/flip-gate/{config}.json"));
         assert!(
             path.is_file(),
             "swap {} names a missing gate configuration {}",

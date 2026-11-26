@@ -1,14 +1,15 @@
 name: Merge gate
 description: >-
   Project rule (#1321): no CI for pull requests that cannot merge yet. Runs
-  scripts/ci/merge_gate.py against main and the open pull requests. When the
+  the Aspect merge gate against main and the open pull requests. When the
   pull request cannot merge yet (its base is not main, it carries an open
   parent's commits, or it conflicts with main), it cancels every GitHub
   Actions run for the commit, this one included, and fails with the reason.
   It runs as the first step of each job it guards (#1479), so it takes no
   runner of its own. The caller checks the pull request head out into `path`
-  first (full history, sparse is fine: .github/actions and scripts/ci), since
-  the job's own checkout of the merge ref fails on a conflicting pull request.
+  first (full history, sparse is fine: .github/actions and .aspect) and
+  installs Aspect with a top-level setup step so its post-job hook survives
+  the job's subsequent checkout.
   BuildBuddy checks are not GitHub Actions runs and are not cancelled here.
 inputs:
   number:
@@ -46,42 +47,4 @@ runs:
         BASE_REF: ${{ inputs.base-ref }}
         HEAD_SHA: ${{ inputs.head-sha }}
         RUN_ID: ${{ github.run_id }}
-      run: |
-        set -euo pipefail
-        gate="$RUNNER_TEMP/merge-gate-$RUN_ID-$GITHUB_JOB"
-        mkdir -p "$gate"
-        git fetch --quiet origin +refs/heads/main:refs/remotes/origin/main
-        gh api --paginate "repos/$REPO/pulls?state=open&per_page=100" \
-          --jq '.[] | {number, base: .base.ref, ref: "refs/gate/pr/\(.number)"}' \
-          | jq -s . > "$gate/open-prs.json"
-        refspecs=$(jq -r '.[] | "+refs/pull/\(.number)/head:refs/gate/pr/\(.number)"' "$gate/open-prs.json")
-        # shellcheck disable=SC2086
-        [ -z "$refspecs" ] || git fetch --quiet origin $refspecs
-        git config user.name merge-gate
-        git config user.email merge-gate@users.noreply.github.com
-        if python3 scripts/ci/merge_gate.py --number "$NUMBER" --base-ref "$BASE_REF" \
-            --head "$HEAD_SHA" --main origin/main --open-prs "$gate/open-prs.json" \
-            | tee "$gate/gate.txt"; then
-          echo "blocked=false" >> "$GITHUB_OUTPUT"
-          exit 0
-        fi
-        echo "blocked=true" >> "$GITHUB_OUTPUT"
-        {
-          echo "### CI skipped: this pull request cannot merge yet"
-          cat "$gate/gate.txt"
-          echo
-          echo "Push again once the parent has merged or the conflict is fixed."
-        } >> "$GITHUB_STEP_SUMMARY"
-        # Runs for the same push can appear a few seconds after this one.
-        for pass in 1 2 3; do
-          gh api --paginate "repos/$REPO/actions/runs?head_sha=$HEAD_SHA&per_page=100" \
-            --jq ".workflow_runs[] | select(.id != $RUN_ID and .status != \"completed\") | .id" |
-          while read -r id; do
-            echo "cancelling run $id"
-            gh api -X POST "repos/$REPO/actions/runs/$id/cancel" >/dev/null || true
-          done
-          [ "$pass" = 3 ] || sleep 20
-        done
-        # Last, this run, so its other jobs do not take runners either.
-        gh api -X POST "repos/$REPO/actions/runs/$RUN_ID/cancel" >/dev/null || true
-        exit 1
+      run: aspect ci merge-gate-workflow

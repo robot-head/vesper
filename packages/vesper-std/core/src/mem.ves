@@ -1,0 +1,11 @@
+// Symmetric in-place exchange from manuscript §7.6. Both captures carry
+// the inout floor and expand to one call, so the checker sees both loans.
+use self::swap as swap_values;
+
+pub sugar swap: stmt {
+    rule (swap inout $left:place with inout $right:place;) => {
+        {
+            swap_values(inout $left, inout $right);
+        }
+    }
+}
