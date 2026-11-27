@@ -202,6 +202,11 @@ const TERM_RETURN_SRET: u64 = 32;
 // `Codegen::data_into`'s word step, and its smallest storage.
 const WORD_BYTES: u64 = 8;
 
+// `Op::Data`'s operands: a header of name and count, then one
+// (field name, value) pair per field.
+const DATA_HEADER_WORDS: u64 = 2;
+const DATA_PAIR_WORDS: u64 = 2;
+
 // Pattern word counts and table bitfields.
 const PAT_WILD_WORDS: u64 = 3;
 const PAT_BIND_WORDS: u64 = 4;
@@ -383,7 +388,7 @@ impl Gen {
         let mut ok = true;
         for k in 0..n {
             let (field, at) = if data {
-                let pair = add(add(i.a, 2), wrapping_mul(k, 2));
+                let pair = add(add(i.a, DATA_HEADER_WORDS), wrapping_mul(k, DATA_PAIR_WORDS));
                 (self.layouts.field_named(l, n32(self.program.op(pair))), inc(pair))
             } else {
                 (wrapping_u32(k), add(inc(i.a), k))
