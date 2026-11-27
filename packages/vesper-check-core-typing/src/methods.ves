@@ -13,7 +13,8 @@ use @vesper/check-data::util::{add, u32_at, w};
 use @vesper/check-data::types::{default_type, substitute, vars_new, TyKind, TyMode};
 use self::exprs::{
     Arg, Ck, Ex, actual_arg, mode, note, binding, error, expect_type, expr, expr_expected,
-    field_path, fn_index, fn_generics, is_named, lookup, named, place_of, record, constrain_literals
+    field_path, fn_index, fn_generics, is_named, lookup, named, place_of, record,
+    constrain_literals, trait_method
 };
 use self::relations::{infer, lit_of, mk_lit};
 use self::ints::{Lit, default_of, fits, int_bits, int_unsigned};
@@ -218,6 +219,10 @@ pub fn receiver_type(inout ck: Ck, e: u32) -> u32 {
         return hole;
     }
     let index = inherent_index(inout ck, base_ty, callee.y);
+    if index == NONE32 && !trait_method(in ck, callee.y) {
+        // No trait declares the method: `traits.resolve` finds none.
+        return hole;
+    }
     if index == NONE32 {
         // A trait method (`traits.resolve`): not ported.
         ck.skip = true;

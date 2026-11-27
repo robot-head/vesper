@@ -3144,6 +3144,71 @@ fn check_compiler_packages_fixed_point(
             b.err()
         )),
     }
+    // @vesper-std/hash-sys on WASI (src-wasip2, #2323): delegates Ffi[Blake3]
+    // to portable @vesper-std/hash::blake3 with zero Wasm imports, built the
+    // same by both Stage 2 compilers.
+    let hash_manifest = "[package]\nname = \"@vesper-test/probe-hash-sys-wasi\"\nversion = \"0.1.0\"\nedition = \"2026\"\n\n[dependencies]\n\"@vesper-std/hash-sys\" = { version = \"^0.1\", path = \"/repo/packages/vesper-std/hash/sys\" }\n";
+    let hash_src = "use @vesper-std/hash-sys::{hash, derive_key_hash, hasher_new, hasher_new_keyed, hasher_new_derive_key, update, finalize, finalize_xof, hasher_free};\n\
+        pub fn main() -> u64 eff [Ffi[Blake3]] {\n\
+            let d0 = hash(in \"\".as_bytes());\n\
+            let d1 = match hasher_new() {\n\
+                Option::Some(h0) => {\n\
+                    let mut h = h0;\n\
+                    update(inout h, in \"\".as_bytes());\n\
+                    let mut xof = ChunkSeq::new[u8]();\n\
+                    finalize_xof(in h, 4, inout xof);\n\
+                    let d = finalize(in h);\n\
+                    hasher_free(h);\n\
+                    if xof.len() != 4 { return 1; }\n\
+                    d\n\
+                },\n\
+                Option::None => return 2,\n\
+            };\n\
+            if d0.w0 != d1.w0 || d0.w1 != d1.w1 || d0.w2 != d1.w2 || d0.w3 != d1.w3 { return 3; }\n\
+            let bad_key = match hasher_new_keyed(in \"short\".as_bytes()) {\n\
+                Option::Some(h) => { hasher_free(h); false },\n\
+                Option::None => true,\n\
+            };\n\
+            if !bad_key { return 4; }\n\
+            let mut bad_utf8 = ChunkSeq::new[u8]();\n\
+            bad_utf8.push(255);\n\
+            let mut dk_out = ChunkSeq::new[u8]();\n\
+            if derive_key_hash(in bad_utf8.as_slice(), in \"x\".as_bytes(), 8, inout dk_out) { return 5; }\n\
+            if !derive_key_hash(in \"ctx\".as_bytes(), in \"x\".as_bytes(), 8, inout dk_out) { return 6; }\n\
+            if dk_out.len() != 8 { return 7; }\n\
+            let ok_dk = match hasher_new_derive_key(in \"ctx\".as_bytes()) {\n\
+                Option::Some(h) => { hasher_free(h); true },\n\
+                Option::None => false,\n\
+            };\n\
+            if !ok_dk { return 8; }\n\
+            d0.w0 & 255\n\
+        }\n";
+    write_probe(&wrap_dir, hash_manifest, hash_src);
+    match (
+        build_compiler_package_probe(boot, boot_syms, dir, "boot stage2"),
+        build_compiler_package_probe(stage2, stage2_syms, dir, "stage2.wasm"),
+    ) {
+        (Ok(a), Ok(b)) => {
+            if a != b {
+                failures.push(format!(
+                    "@vesper-std/hash-sys (WASI probe): boot stage2 built {} bytes, stage2.wasm built {} different bytes",
+                    a.len(),
+                    b.len()
+                ));
+            }
+            match run(&b, &Ctx::default()) {
+                Ok(175) => {}
+                other => failures.push(format!(
+                    "@vesper-std/hash-sys (WASI probe): expected BLAKE3(\"\")[0] (175 / 0xaf), got {other:?}"
+                )),
+            }
+        }
+        (a, b) => failures.push(format!(
+            "@vesper-std/hash-sys (WASI probe): {:?} / {:?}",
+            a.err(),
+            b.err()
+        )),
+    }
     remove_stage2_sidecars(&out_wasm);
     let _ = std::fs::remove_dir_all(&wrap_dir);
     assert!(

@@ -262,6 +262,8 @@ impl L {
             5
         } else if name == self.ctx.syms.ffi_cranelift {
             6
+        } else if name == self.ctx.syms.ffi_blake3 {
+            7
         } else {
             return false;
         };

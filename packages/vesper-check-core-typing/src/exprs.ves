@@ -66,6 +66,21 @@ const E_RANGE: u8 = 18;
 const E_LOOP: u8 = 19;
 const E_BREAK: u8 = 20;
 const E_CONTINUE: u8 = 21;
+// `handle Eff[args] { body } with { return(p) => .., op(ps) => .. }`: y =
+// effect, b/m = its type arguments, z = state value (NONE32 without one,
+// its pattern in mag), x = body, a/n = clauses (the return clause first).
+const E_HANDLE: u8 = 22;
+
+// `numeric::WRAPPING_INTRINSICS`.
+const WRAPPING_ADD: Str = "wrapping_add";
+const WRAPPING_SUB: Str = "wrapping_sub";
+const WRAPPING_MUL: Str = "wrapping_mul";
+
+// The length of `::` in an `Eff::op` name.
+const PATH_SEPARATOR_LEN: u64 = 2;
+
+// `regions::REGION_EFFECT`: a handler of it is a region block.
+const REGION_EFFECT: Str = "Region";
 
 // Pattern kinds (patterns.ves).
 const P_WILD: u8 = 0;
@@ -182,6 +197,36 @@ pub copy struct FnSig {
     effectful: bool,
     // `world.function_results`, or the declared result
     inferred: u32,
+    // The effect instances of the function's row (`Inst`s), or for an
+    // effect operation its effect's name (NONE32 for a function).
+    inst_start: u32,
+    inst_count: u32,
+    effect: u32,
+}
+
+// A handler clause: the operation name (the return clause's is ignored),
+// its patterns (in `clause_pats`) and body.
+pub copy struct ClauseX {
+    name: u32,
+    pat_start: u32,
+    pat_count: u32,
+    body: u32,
+}
+
+// An effect declaration: its generics and operations (contiguous in `fns`).
+pub copy struct EffDecl {
+    name: u32,
+    generic_start: u32,
+    generic_count: u32,
+    op_start: u32,
+    op_count: u32,
+}
+
+// One effect instance of a row: its name and type arguments.
+pub copy struct Inst {
+    name: u32,
+    arg_start: u32,
+    arg_count: u32,
 }
 
 pub copy struct ParamSig {
@@ -226,6 +271,22 @@ pub struct Ck {
     params: ChunkSeq[ParamSig],
     // symbol -> function index + 1
     fn_by_name: ChunkSeq[u32],
+    // Effect operations (`Eff::op`), by symbol, as indices into `fns`.
+    op_by_name: ChunkSeq[u32],
+    insts: ChunkSeq[Inst],
+    inst_args: ChunkSeq[u32],
+    // The function being checked (its `fns` index).
+    current: u32,
+    effect_decls: ChunkSeq[EffDecl],
+    clauses: ChunkSeq[ClauseX],
+    clause_pats: ChunkSeq[u32],
+    // Handler capabilities in scope, innermost last (`Checker::caps` past
+    // the function's own), and how many handlers enclose the expression.
+    handler_caps: ChunkSeq[Inst],
+    handlers: u64,
+    // Loops entered before the innermost handler: a `break` or `continue`
+    // that would leave a handler is not ported.
+    loop_floor: u64,
     // The function being checked.
     env: ChunkSeq[Bind],
     bounds: Bounds,
@@ -251,6 +312,9 @@ pub struct Ck {
     // `for` range's lowered test and increment): start, end, type.
     extra_rows: ChunkSeq[u64],
     range_sym: u32,
+    // Every method name a trait in scope declares (`traits.resolve` finds
+    // no trait for any other name).
+    pub trait_methods: ChunkSeq[u32],
 }
 
 fn put(inout out: ChunkSeq[u8], in text: Str) {
@@ -302,6 +366,16 @@ pub fn ck_new(sink ctx: Ctx) -> Ck {
         generics: ChunkSeq::new[Generic](),
         params: ChunkSeq::new[ParamSig](),
         fn_by_name: ChunkSeq::new[u32](),
+        op_by_name: ChunkSeq::new[u32](),
+        insts: ChunkSeq::new[Inst](),
+        inst_args: ChunkSeq::new[u32](),
+        current: NONE32,
+        effect_decls: ChunkSeq::new[EffDecl](),
+        clauses: ChunkSeq::new[ClauseX](),
+        clause_pats: ChunkSeq::new[u32](),
+        handler_caps: ChunkSeq::new[Inst](),
+        handlers: 0,
+        loop_floor: 0,
         env: ChunkSeq::new[Bind](),
         bounds: bounds_new(),
         ex_types: ChunkSeq::new[u32](),
@@ -317,6 +391,7 @@ pub fn ck_new(sink ctx: Ctx) -> Ck {
         loop_values: ChunkSeq::new[u32](),
         extra_rows: ChunkSeq::new[u64](),
         range_sym: 0,
+        trait_methods: ChunkSeq::new[u32](),
     };
     let pats = pats_new(inout ck.ctx.names);
     ck.pats = pats;
@@ -405,8 +480,18 @@ impl Ck {
                 param_count: 0,
                 result: 0,
                 effectful: true,
-                inferred: 0
+                inferred: 0,
+                inst_start: 0,
+                inst_count: 0,
+                effect: NONE32
             },
+        }
+    }
+
+    pub fn inst(in self, i: u64) -> Inst {
+        match self.insts.try_get(i) {
+            Option::Some(x) => x,
+            Option::None => Inst { name: NONE32, arg_start: 0, arg_count: 0 },
         }
     }
 
@@ -654,6 +739,49 @@ fn read_expr(inout reader: Reader, in bytes: Slice[u8], inout ck: Ck) -> u32 {
         if ex.y != 0 {
             ex.b = read_expr(inout reader, in bytes, inout ck);
         }
+    } else if kind == E_HANDLE {
+        ex.y = sym(in ck.ctx, reader.word(in bytes));
+        let targ_count = reader.word(in bytes);
+        ex.b = n32(ck.targs.len());
+        ex.m = n32(targ_count);
+        for i in 0..targ_count {
+            ck.targs.push(tyw(in ck.ctx, reader.word(in bytes)));
+        }
+        if reader.word(in bytes) != 0 {
+            ex.mag = w(read_xpat(inout reader, in bytes, inout ck));
+            ex.z = read_expr(inout reader, in bytes, inout ck);
+        }
+        ex.x = read_expr(inout reader, in bytes, inout ck);
+        let count = reader.word(in bytes);
+        let mut read_clauses: ChunkSeq[ClauseX] = ChunkSeq::new[ClauseX]();
+        for i in 0..count {
+            let name = sym(in ck.ctx, reader.word(in bytes));
+            let pat_count = reader.word(in bytes);
+            let mut pats: ChunkSeq[u32] = ChunkSeq::new[u32]();
+            for j in 0..pat_count {
+                let pat = read_xpat(inout reader, in bytes, inout ck);
+                pats.push(pat);
+            }
+            let pat_start = n32(ck.clause_pats.len());
+            for j in 0..pat_count {
+                ck.clause_pats.push(u32_at(in pats, j));
+            }
+            let body = read_expr(inout reader, in bytes, inout ck);
+            read_clauses.push(ClauseX {
+                name: name,
+                pat_start: pat_start,
+                pat_count: n32(pat_count),
+                body: body
+            });
+        }
+        ex.a = n32(ck.clauses.len());
+        ex.n = n32(count);
+        for i in 0..count {
+            match read_clauses.try_get(i) {
+                Option::Some(clause) => ck.clauses.push(clause),
+                Option::None => {},
+            }
+        }
     } else if kind == E_MATCH {
         ex.x = read_expr(inout reader, in bytes, inout ck);
         let count = reader.word(in bytes);
@@ -675,11 +803,76 @@ fn read_expr(inout reader: Reader, in bytes: Slice[u8], inout ck: Ck) -> u32 {
     push_ex(inout ck, ex)
 }
 
-// The function table of the task input.
+// One signature of the function table: generics, parameters and result.
+fn read_sig(inout reader: Reader, in bytes: Slice[u8], inout ck: Ck, name: u32) -> FnSig {
+    let generic_start = n32(ck.generics.len());
+    let generic_count = reader.word(in bytes);
+    for j in 0..generic_count {
+        let generic = Generic {
+            name: sym(in ck.ctx, reader.word(in bytes)),
+            bound: wrapping_u8(reader.word(in bytes)),
+            row: reader.word(in bytes) != 0
+        };
+        ck.generics.push(generic);
+    }
+    let param_start = n32(ck.params.len());
+    let param_count = reader.word(in bytes);
+    for j in 0..param_count {
+        let param = ParamSig {
+            pass: wrapping_u8(reader.word(in bytes)),
+            name: sym(in ck.ctx, reader.word(in bytes)),
+            ty: tyw(in ck.ctx, reader.word(in bytes)),
+            projections: n32(reader.word(in bytes)),
+            start: reader.word(in bytes),
+            end: reader.word(in bytes)
+        };
+        ck.params.push(param);
+    }
+    let result = tyw(in ck.ctx, reader.word(in bytes));
+    FnSig {
+        name: name,
+        generic_start: generic_start,
+        generic_count: n32(generic_count),
+        param_start: param_start,
+        param_count: n32(param_count),
+        result: result,
+        effectful: false,
+        inferred: result,
+        inst_start: 0,
+        inst_count: 0,
+        effect: NONE32
+    }
+}
+
+// The function table of the task input, then the effect declarations.
 pub fn read_fns(inout reader: Reader, in bytes: Slice[u8], inout ck: Ck) {
     let fn_count = reader.word(in bytes);
     for i in 0..fn_count {
         let name = sym(in ck.ctx, reader.word(in bytes));
+        let mut sig = read_sig(inout reader, in bytes, inout ck, name);
+        sig.effectful = reader.word(in bytes) != 0;
+        sig.inst_start = n32(ck.insts.len());
+        let inst_count = reader.word(in bytes);
+        for j in 0..inst_count {
+            let inst_name = sym(in ck.ctx, reader.word(in bytes));
+            let arg_start = n32(ck.inst_args.len());
+            let arg_count = reader.word(in bytes);
+            for k in 0..arg_count {
+                let arg = tyw(in ck.ctx, reader.word(in bytes));
+                ck.inst_args.push(arg);
+            }
+            ck.insts
+                .push(Inst { name: inst_name, arg_start: arg_start, arg_count: n32(arg_count) });
+        }
+        sig.inst_count = n32(inst_count);
+        sig.inferred = tyw(in ck.ctx, reader.word(in bytes));
+        let id = n32(ck.fns.len());
+        ck.fns.push(sig);
+        set_by_symbol(inout ck.fn_by_name, name, inc32w(id));
+    }
+    let effect_count = reader.word(in bytes);
+    for i in 0..effect_count {
+        let effect = sym(in ck.ctx, reader.word(in bytes));
         let generic_start = n32(ck.generics.len());
         let generic_count = reader.word(in bytes);
         for j in 0..generic_count {
@@ -690,34 +883,35 @@ pub fn read_fns(inout reader: Reader, in bytes: Slice[u8], inout ck: Ck) {
             };
             ck.generics.push(generic);
         }
-        let param_start = n32(ck.params.len());
-        let param_count = reader.word(in bytes);
-        for j in 0..param_count {
-            let param = ParamSig {
-                pass: wrapping_u8(reader.word(in bytes)),
-                name: sym(in ck.ctx, reader.word(in bytes)),
-                ty: tyw(in ck.ctx, reader.word(in bytes)),
-                projections: n32(reader.word(in bytes)),
-                start: reader.word(in bytes),
-                end: reader.word(in bytes)
-            };
-            ck.params.push(param);
-        }
-        let result = tyw(in ck.ctx, reader.word(in bytes));
-        let effectful = reader.word(in bytes) != 0;
-        let inferred = tyw(in ck.ctx, reader.word(in bytes));
-        let id = n32(ck.fns.len());
-        ck.fns.push(FnSig {
-            name: name,
+        let op_count = reader.word(in bytes);
+        ck.effect_decls.push(EffDecl {
+            name: effect,
             generic_start: generic_start,
             generic_count: n32(generic_count),
-            param_start: param_start,
-            param_count: n32(param_count),
-            result: result,
-            effectful: effectful,
-            inferred: inferred
+            op_start: n32(ck.fns.len()),
+            op_count: n32(op_count)
         });
-        set_by_symbol(inout ck.fn_by_name, name, inc32w(id));
+        for j in 0..op_count {
+            let name = sym(in ck.ctx, reader.word(in bytes));
+            let mut sig = read_sig(inout reader, in bytes, inout ck, name);
+            // An operation takes its effect's generics.
+            sig.generic_start = generic_start;
+            sig.generic_count = n32(generic_count);
+            sig.effect = effect;
+            let id = n32(ck.fns.len());
+            ck.fns.push(sig);
+            set_by_symbol(inout ck.op_by_name, name, inc32w(id));
+        }
+    }
+}
+
+// The effect operation named `name` (`Eff::op`), or NONE32.
+fn op_index(in ck: Ck, name: u32) -> u32 {
+    let entry = u32_at(in ck.op_by_name, w(name));
+    if entry == 0 {
+        NONE32
+    } else {
+        wrapping_sub(entry, 1)
     }
 }
 
@@ -954,13 +1148,15 @@ pub fn expr_expected(inout ck: Ck, e: u32, expected: u32) -> u32 {
     } else if ex.kind == E_LOOP {
         let ty = loop_body(inout ck, ex.x, expected, true, NONE32, hole);
         ty
+    } else if ex.kind == E_HANDLE {
+        handle_expr(inout ck, ex, expected)
     } else if ex.kind == E_FOR {
         for_expr(inout ck, ex)
     } else if ex.kind == E_BREAK {
         break_expr(inout ck, ex)
     } else if ex.kind == E_CONTINUE {
-        if ck.loops.len() == 0 {
-            // E0213 outside a loop: not ported.
+        if ck.loops.len() <= ck.loop_floor {
+            // E0213 outside a loop, or leaving a handler: not ported.
             ck.skip = true;
         }
         named(inout ck, ck.ctx.world.k.never)
@@ -1021,8 +1217,14 @@ fn name_expr(inout ck: Ck, ex: Ex, expected: u32) -> u32 {
     let hole = ck.ctx.types.infer;
     let bind_index = lookup(in ck, ex.x);
     if bind_index != NONE32 {
-        // `place` on the whole binding (modes and moves: part 3).
-        return binding(in ck, bind_index).ty;
+        // `place` on the whole binding (modes and moves: part 3). A
+        // handler's continuation has a function type: not ported.
+        let ty = binding(in ck, bind_index).ty;
+        if foreign(in ck, ty) {
+            ck.skip = true;
+            return hole;
+        }
+        return ty;
     }
     if fn_index(in ck, ex.x) != NONE32 {
         // A function value has a function type.
@@ -1821,11 +2023,260 @@ pub fn constrain_literals(inout ck: Ck, e: u32, target: u32) {
 
 // ----- control ---------------------------------------------------------------
 
+// ----- handlers ----------------------------------------------------------------
+
+fn effect_decl(in ck: Ck, name: u32) -> EffDecl {
+    for i in 0..ck.effect_decls.len() {
+        match ck.effect_decls.try_get(i) {
+            Option::Some(d) => {
+                if d.name == name {
+                    return d;
+                }
+            },
+            Option::None => {},
+        }
+    }
+    EffDecl { name: NONE32, generic_start: 0, generic_count: 0, op_start: 0, op_count: 0 }
+}
+
+fn clause_at(in ck: Ck, i: u64) -> ClauseX {
+    match ck.clauses.try_get(i) {
+        Option::Some(c) => c,
+        Option::None => ClauseX { name: NONE32, pat_start: 0, pat_count: 0, body: NONE32 },
+    }
+}
+
+// Whether `ty` holds an `i128` or `u128` (`integer_widths::holds_wide`).
+fn holds_wide(in ck: Ck, ty: u32) -> bool {
+    let node = ck.ctx.types.node(ty);
+    let known = ck.ctx.world.k;
+    if node.kind == TyKind::Named && (node.name == known.i128_ || node.name == known.u128_) {
+        return true;
+    }
+    if node.kind == TyKind::Named || node.kind == TyKind::Tuple {
+        for i in 0..w(node.n) {
+            if holds_wide(in ck, item(in ck.ctx.types, add(w(node.a), i))) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+// `Checker::handle`: the body is checked with the handled capability
+// innermost, the return clause against the goal, and each operation clause
+// against the handler's type with its arguments, the state and the
+// continuation bound. Region blocks, capability effects and labels are
+// not ported (their effects are foreign or unknown here).
+fn handle_expr(inout ck: Ck, ex: Ex, expected: u32) -> u32 {
+    let hole = ck.ctx.types.infer;
+    let known = ck.ctx.world.k;
+    let decl = effect_decl(in ck, ex.y);
+    // A region block (`regions::region_block`) is lane 12's.
+    if decl.name == NONE32 || is_qualified(in ck, ex.y, REGION_EFFECT) {
+        ck.skip = true;
+        return hole;
+    }
+    if ex.m != decl.generic_count {
+        error(inout ck, "E0400", ex.start, ex.end);
+    }
+    for i in 0..w(ex.m) {
+        note(inout ck, u32_at(in ck.targs, add(w(ex.b), i)));
+    }
+    let state_ty = if ex.z != NONE32 {
+        expr(inout ck, ex.z)
+    } else {
+        ck.ctx.types.unit
+    };
+    if ck.skip {
+        return hole;
+    }
+    let env_mark = ck.env.len();
+    let floor = ck.loop_floor;
+    ck.loop_floor = ck.loops.len();
+    ck.handlers = inc(ck.handlers);
+    let arg_start = n32(ck.inst_args.len());
+    for i in 0..w(ex.m) {
+        ck.inst_args.push(u32_at(in ck.targs, add(w(ex.b), i)));
+    }
+    ck.handler_caps.push(Inst { name: ex.y, arg_start: arg_start, arg_count: ex.m });
+    let body_ty = expr(inout ck, ex.x);
+    ck.handler_caps.truncate(wrapping_sub(ck.handler_caps.len(), 1));
+    ck.env.truncate(env_mark);
+    if ck.skip {
+        return hole;
+    }
+    let return_ty = if ex.z != NONE32 {
+        let mut parts: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        parts.push(body_ty);
+        parts.push(state_ty);
+        ck.ctx.types.tuple(in parts)
+    } else {
+        body_ty
+    };
+    let ret = clause_at(in ck, w(ex.a));
+    let ret_pat = u32_at(in ck.clause_pats, w(ret.pat_start));
+    if !clause_pattern(inout ck, ret_pat, return_ty) {
+        let extra = ck.patx(ret_pat);
+        error(inout ck, "E0210", extra.start, extra.end);
+    }
+    bind_mode(inout ck, ret_pat, return_ty, P_SINK);
+    let returned = expr_expected(inout ck, ret.body, expected);
+    ck.env.truncate(env_mark);
+    if ck.skip {
+        return hole;
+    }
+    let mut out = if is_named(in ck, returned, known.never) && expected != hole {
+        expected
+    } else {
+        returned
+    };
+    let mut vars = vars_new();
+    let mut zip_len = w(decl.generic_count);
+    if w(ex.m) < zip_len {
+        zip_len = w(ex.m);
+    }
+    for i in 0..zip_len {
+        let generic = ck.gen(add(w(decl.generic_start), i));
+        vars.set(generic.name, u32_at(in ck.targs, add(w(ex.b), i)));
+    }
+    let mut seen: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    for c in 1..w(ex.n) {
+        let clause = clause_at(in ck, add(w(ex.a), c));
+        let body_ex = ck.ex(clause.body);
+        for i in 0..seen.len() {
+            if u32_at(in seen, i) == clause.name {
+                error(inout ck, "E0405", body_ex.start, body_ex.end);
+            }
+        }
+        seen.push(clause.name);
+        let mut op = NONE32;
+        for i in 0..w(decl.op_count) {
+            let sig = ck.fsig(n32(add(w(decl.op_start), i)));
+            if op_short_name(inout ck, sig.name, decl.name) == clause.name {
+                op = n32(add(w(decl.op_start), i));
+            }
+        }
+        if op == NONE32 {
+            error(inout ck, "E0405", body_ex.start, body_ex.end);
+            continue;
+        }
+        let sig = ck.fsig(op);
+        let mut ts: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        let mut passes: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        for i in 0..w(sig.param_count) {
+            let param = ck.param(add(w(sig.param_start), i));
+            let ty = substitute(inout ck.ctx.types, param.ty, in vars);
+            ts.push(ty);
+            passes.push(param.pass);
+        }
+        if ex.z != NONE32 {
+            ts.push(state_ty);
+            passes.push(P_SINK);
+        }
+        // The continuation: a function type (not ported, so a clause that
+        // uses it skips at the use).
+        let mut resume: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        resume.push(substitute(inout ck.ctx.types, sig.result, in vars));
+        let continuation = ck.ctx.types.mk(TyKind::Fn, 0, 0, in resume, out, 0, 0);
+        ts.push(continuation);
+        passes.push(P_SINK);
+        if w(clause.pat_count) != ts.len() {
+            error(inout ck, "E0405", body_ex.start, body_ex.end);
+        }
+        let mut pat_len = w(clause.pat_count);
+        if ts.len() < pat_len {
+            pat_len = ts.len();
+        }
+        for i in 0..pat_len {
+            let pat = u32_at(in ck.clause_pats, add(w(clause.pat_start), i));
+            let ty = u32_at(in ts, i);
+            if !clause_pattern(inout ck, pat, ty) {
+                let extra = ck.patx(pat);
+                error(inout ck, "E0210", extra.start, extra.end);
+            }
+            if ck.ctx.types.kind(ty) == TyKind::Fn {
+                bind_continuation(inout ck, pat, ty);
+            } else {
+                let pass = match passes.try_get(i) {
+                    Option::Some(p) => p,
+                    Option::None => P_SINK,
+                };
+                bind_mode(inout ck, pat, ty, pass);
+            }
+        }
+        let actual = expr_expected(inout ck, clause.body, out);
+        ck.env.truncate(env_mark);
+        if ck.skip {
+            return hole;
+        }
+        expect_type(inout ck, out, actual, body_ex.start, body_ex.end);
+        if unresolved(in ck.ctx.types, out) {
+            out = join(inout ck, out, actual, body_ex.start, body_ex.end);
+        }
+        if holds_wide(in ck, out) {
+            constrain_literals(inout ck, clause.body, out);
+        }
+    }
+    for i in 0..w(decl.op_count) {
+        let sig = ck.fsig(n32(add(w(decl.op_start), i)));
+        let short = op_short_name(inout ck, sig.name, decl.name);
+        let mut handled = false;
+        for j in 0..seen.len() {
+            if u32_at(in seen, j) == short {
+                handled = true;
+            }
+        }
+        if !handled {
+            error(inout ck, "E0405", ex.start, ex.end);
+        }
+    }
+    ck.handlers = wrapping_sub(ck.handlers, 1);
+    ck.loop_floor = floor;
+    out
+}
+
+// Whether a clause pattern is irrefutable for `ty`.
+fn clause_pattern(inout ck: Ck, pat: u32, ty: u32) -> bool {
+    irrefutable(inout ck.ctx.types, inout ck.ctx.names, in ck.ctx.world, inout ck.pats, pat, ty)
+}
+
+// Binds a continuation pattern: a name gets the function type without
+// `note` (a use of it skips in `name_expr`).
+fn bind_continuation(inout ck: Ck, pat: u32, ty: u32) {
+    let p = ck.pats.pat(pat);
+    if p.kind == P_BIND {
+        let extra = ck.patx(pat);
+        ck.env.push(Bind { name: extra.name, ty: ty, pass: P_SINK });
+    } else if p.kind != P_WILD {
+        ck.skip = true;
+    }
+}
+
+// The operation's own name in an `Eff::op` symbol.
+fn op_short_name(inout ck: Ck, full: u32, effect: u32) -> u32 {
+    let mut text = ChunkSeq::new[u8]();
+    ck.ctx.names.write(full, inout text);
+    let mut prefix = ChunkSeq::new[u8]();
+    ck.ctx.names.write(effect, inout prefix);
+    let skip = add(prefix.len(), PATH_SEPARATOR_LEN);
+    let mut short = ChunkSeq::new[u8]();
+    for i in skip..text.len() {
+        short.push(u8_at(in text, i));
+    }
+    ck.ctx.names.lookup(in short.as_slice())
+}
+
 // `Checker::return_expr` inside the function frame: the value is checked
 // against the declared result, and an inferred result joins every early
 // return. The expression itself is `Never`.
 fn return_expr(inout ck: Ck, ex: Ex) -> u32 {
     let hole = ck.ctx.types.infer;
+    if ck.handlers != 0 {
+        // A `return` out of a handled body or clause: not ported.
+        ck.skip = true;
+        return hole;
+    }
     let known = ck.ctx.world.k;
     let expected = ck.fn_result;
     let actual = if ex.y != 0 {
@@ -1997,7 +2448,7 @@ fn break_expr(inout ck: Ck, ex: Ex) -> u32 {
     let hole = ck.ctx.types.infer;
     let known = ck.ctx.world.k;
     let depth = ck.loops.len();
-    if depth == 0 {
+    if depth <= ck.loop_floor {
         // E0213 outside a loop: not ported.
         ck.skip = true;
         return hole;
@@ -2080,11 +2531,110 @@ fn assign_expr(inout ck: Ck, ex: Ex) -> u32 {
 
 // ----- calls -----------------------------------------------------------------
 
+// `numeric::wrapping_intrinsic`: `wrapping_add`, `wrapping_sub` or
+// `wrapping_mul`.
+// `receiver_type`'s `world.types` lookup: the type the previous checking
+// round recorded for `e`, which Rust's fixed-point loop reaches. Here `e`
+// is checked once ahead of its real check, and that check's diagnostics
+// are dropped (the real check reports them).
+fn previous_pass_type(inout ck: Ck, e: u32) -> u32 {
+    let out_mark = ck.out.len();
+    let errors = ck.errors;
+    let ty = expr(inout ck, e);
+    ck.out.truncate(out_mark);
+    ck.errors = errors;
+    ty
+}
+
+// Whether some trait in scope declares a method named `method`.
+pub fn trait_method(in ck: Ck, method: u32) -> bool {
+    for i in 0..ck.trait_methods.len() {
+        if u32_at(in ck.trait_methods, i) == method {
+            return true;
+        }
+    }
+    false
+}
+
+fn is_wrapping(in ck: Ck, name: u32) -> bool {
+    is_qualified(in ck, name, WRAPPING_ADD)
+        || is_qualified(in ck, name, WRAPPING_SUB)
+        || is_qualified(in ck, name, WRAPPING_MUL)
+}
+
+// `Checker::wrapping_call`: two operands of one integer kind, the goal's
+// when it is an integer kind; literal operands settle at the common kind.
+fn wrapping_call(inout ck: Ck, ex: Ex, expected: u32) -> u32 {
+    let hole = ck.ctx.types.infer;
+    if ex.m != 0 {
+        error(inout ck, "E0207", ex.start, ex.end);
+    }
+    if ex.n != 2 {
+        error(inout ck, "E0207", ex.start, ex.end);
+    }
+    for i in 0..w(ex.n) {
+        let arg = ck.arg(add(w(ex.a), i));
+        if arg.pass != P_IN || arg.explicit {
+            let arg_ex = ck.ex(arg.expr);
+            error(inout ck, "E0308", arg_ex.start, arg_ex.end);
+        }
+    }
+    let goal = if integer_named(in ck, expected) {
+        expected
+    } else {
+        hole
+    };
+    let mut common = goal;
+    let mut actuals: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    for i in 0..w(ex.n) {
+        let arg = ck.arg(add(w(ex.a), i));
+        let common_lit = ck.ctx.types.kind(common) == TyKind::Lit;
+        let arg_goal = if common_lit { hole } else { common };
+        let t = expr_expected(inout ck, arg.expr, arg_goal);
+        if ck.skip {
+            return hole;
+        }
+        if common == hole || common_lit {
+            let both_lit = common_lit && ck.ctx.types.kind(t) == TyKind::Lit;
+            common = if both_lit {
+                let a = lit_of(ck.ctx.types.node(common));
+                let b = lit_of(ck.ctx.types.node(t));
+                mk_lit(inout ck.ctx.types, lit_max(a, b))
+            } else {
+                t
+            };
+        }
+        actuals.push(t);
+    }
+    let settled = default_type(inout ck.ctx.types, common);
+    if !integer_named(in ck, settled) {
+        error(inout ck, "E0200", ex.start, ex.end);
+        return hole;
+    }
+    for i in 0..w(ex.n) {
+        let arg = ck.arg(add(w(ex.a), i));
+        let arg_ex = ck.ex(arg.expr);
+        let t = u32_at(in actuals, i);
+        expect_type(inout ck, settled, t, arg_ex.start, arg_ex.end);
+        if ck.ctx.types.kind(t) == TyKind::Lit {
+            record(inout ck, arg.expr, settled);
+        }
+    }
+    settled
+}
+
 fn call_expr(inout ck: Ck, ex: Ex, expected: u32) -> u32 {
     let hole = ck.ctx.types.infer;
     let callee = ck.ex(ex.x);
     if callee.kind == E_FIELD {
         return method_call(inout ck, ex, callee, expected);
+    }
+    if callee.kind == E_NAME
+        && lookup(in ck, callee.x) == NONE32
+        && ex.y != 0
+        && is_wrapping(in ck, callee.x)
+    {
+        return wrapping_call(inout ck, ex, expected);
     }
     if callee.kind != E_NAME || lookup(in ck, callee.x) != NONE32 || ex.y != 0 {
         // Closures, function values and intrinsics: not ported yet.
@@ -2145,16 +2695,16 @@ fn call_expr(inout ck: Ck, ex: Ex, expected: u32) -> u32 {
         if is_conversion(conv) {
             return conversion_call(inout ck, ex, conv);
         }
+        let op = op_index(in ck, callee.x);
+        if op != NONE32 {
+            return op_call(inout ck, ex, ck.fsig(op));
+        }
         // Other intrinsics, effect operations and trait calls: not ported
         // yet.
         ck.skip = true;
         return hole;
     }
     let sig = ck.fsig(callee_index);
-    if sig.effectful {
-        ck.skip = true;
-        return hole;
-    }
     apply(inout ck, sig, ex, NONE32, expected)
 }
 
@@ -2189,10 +2739,15 @@ fn method_call(inout ck: Ck, ex: Ex, callee: Ex, expected: u32) -> u32 {
         return elements.ty;
     }
     let peeked = peek_type(inout ck, callee.x);
-    let receiver_ty = if peeked == hole && root == NONE32 {
+    let declared = if peeked == hole && root == NONE32 {
         receiver_type(inout ck, callee.x)
     } else {
         peeked
+    };
+    let receiver_ty = if declared == hole && root == NONE32 && !ck.skip {
+        previous_pass_type(inout ck, callee.x)
+    } else {
+        declared
     };
     if ck.skip
         || receiver_ty == hole
@@ -2209,10 +2764,6 @@ fn method_call(inout ck: Ck, ex: Ex, callee: Ex, expected: u32) -> u32 {
         return hole;
     }
     let sig = ck.fsig(method_index);
-    if sig.effectful {
-        ck.skip = true;
-        return hole;
-    }
     apply(inout ck, sig, ex, callee.x, expected)
 }
 
@@ -2234,11 +2785,76 @@ fn apply(inout ck: Ck, sig: FnSig, ex: Ex, receiver: u32, expected: u32) -> u32 
     if expected != hole {
         infer(inout ck.ctx.types, known, sig.result, expected, in generics, inout vars);
     }
-    let result_ty = apply_args(inout ck, sig, ex, receiver, inout vars);
+    let types = explicit_types(in ck, ex);
+    let result_ty = apply_args(inout ck, sig, ex, receiver, in types, inout vars);
     if ck.skip {
         return hole;
     }
     substitute(inout ck.ctx.types, sig.inferred, in vars)
+}
+
+// The call's written type arguments.
+fn explicit_types(in ck: Ck, ex: Ex) -> ChunkSeq[u32] {
+    let mut types: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    for i in 0..w(ex.m) {
+        types.push(u32_at(in ck.targs, add(w(ex.b), i)));
+    }
+    types
+}
+
+// The effect-operation arm of `Checker::call`: `Eff::op(args)` is applied
+// with the effect's generics, taken from the written type arguments or
+// else from the innermost instance of the effect in the function's row
+// (`active_effect`).
+fn op_call(inout ck: Ck, ex: Ex, sig: FnSig) -> u32 {
+    let hole = ck.ctx.types.infer;
+    let types = if ex.m != 0 {
+        explicit_types(in ck, ex)
+    } else {
+        context_args(in ck, sig.effect)
+    };
+    let mut vars = vars_new();
+    let result = apply_args(inout ck, sig, ex, NONE32, in types, inout vars);
+    if ck.skip {
+        return hole;
+    }
+    result
+}
+
+// The type arguments of the last instance of `effect` in the current
+// function's row, or none.
+fn context_args(in ck: Ck, effect: u32) -> ChunkSeq[u32] {
+    let mut args: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    for i in 0..ck.handler_caps.len() {
+        let cap = match ck.handler_caps
+            .try_get(wrapping_sub(wrapping_sub(ck.handler_caps.len(), 1), i))
+        {
+            Option::Some(c) => c,
+            Option::None => Inst { name: NONE32, arg_start: 0, arg_count: 0 },
+        };
+        if cap.name == effect {
+            for j in 0..w(cap.arg_count) {
+                args.push(u32_at(in ck.inst_args, add(w(cap.arg_start), j)));
+            }
+            return args;
+        }
+    }
+    let current = ck.fsig(ck.current);
+    let mut found = NONE32;
+    for i in 0..w(current.inst_count) {
+        let inst = ck.inst(add(w(current.inst_start), i));
+        if inst.name == effect {
+            found = n32(add(w(current.inst_start), i));
+        }
+    }
+    if found == NONE32 {
+        return args;
+    }
+    let inst = ck.inst(w(found));
+    for i in 0..w(inst.arg_count) {
+        args.push(u32_at(in ck.inst_args, add(w(inst.arg_start), i)));
+    }
+    args
 }
 
 fn copy_vars(in vars: Vars) -> Vars {
@@ -2275,13 +2891,20 @@ fn actual_at(in actuals: ChunkSeq[Arg], i: u64) -> Arg {
 }
 
 // `Checker::apply_args` for an effect-free function without projections.
-fn apply_args(inout ck: Ck, sig: FnSig, ex: Ex, receiver: u32, inout vars: Vars) -> u32 {
+fn apply_args(
+    inout ck: Ck,
+    sig: FnSig,
+    ex: Ex,
+    receiver: u32,
+    in types: ChunkSeq[u32],
+    inout vars: Vars
+) -> u32 {
     let hole = ck.ctx.types.infer;
     let known = ck.ctx.world.k;
     let generics = fn_generics(in ck, sig);
     let mut explicit: u64 = 0;
     for i in 0..w(sig.generic_count) {
-        if explicit >= w(ex.m) {
+        if explicit >= types.len() {
             break;
         }
         let generic = ck.gen(add(w(sig.generic_start), i));
@@ -2289,12 +2912,12 @@ fn apply_args(inout ck: Ck, sig: FnSig, ex: Ex, receiver: u32, inout vars: Vars)
             ck.skip = true;
             return hole;
         }
-        let targ = u32_at(in ck.targs, add(w(ex.b), explicit));
+        let targ = u32_at(in types, explicit);
         explicit = inc(explicit);
         note(inout ck, targ);
         vars.set(generic.name, targ);
     }
-    if explicit < w(ex.m) {
+    if explicit < types.len() {
         error(inout ck, "E0205", ex.start, ex.end);
     }
     let call_args = actuals_of(in ck, ex, receiver);
@@ -2387,6 +3010,7 @@ pub fn check_function(inout ck: Ck, fname: u32, start: u64, end: u64, body: u32,
     ck.skip = false;
     ck.env.truncate(0);
     let sig_index = fn_index(in ck, fname);
+    ck.current = sig_index;
     if sig_index == NONE32 {
         ck.skip = true;
     }
@@ -2411,6 +3035,9 @@ pub fn check_function(inout ck: Ck, fname: u32, start: u64, end: u64, body: u32,
     ck.loops.truncate(0);
     ck.loop_values.truncate(0);
     ck.extra_rows.truncate(0);
+    ck.handler_caps.truncate(0);
+    ck.handlers = 0;
+    ck.loop_floor = 0;
     if !ck.skip {
         let body_actual = expr_expected(inout ck, body, sig.result);
         if !ck.skip {
@@ -2470,6 +3097,11 @@ pub fn check_function(inout ck: Ck, fname: u32, start: u64, end: u64, body: u32,
 // body tree), checked as it is read.
 pub fn check_exprs(inout reader: Reader, in bytes: Slice[u8], inout ck: Ck) {
     read_fns(inout reader, in bytes, inout ck);
+    let method_count = reader.word(in bytes);
+    for i in 0..method_count {
+        let method = sym(in ck.ctx, reader.word(in bytes));
+        ck.trait_methods.push(method);
+    }
     let fn_count = reader.word(in bytes);
     for i in 0..fn_count {
         let name = sym(in ck.ctx, reader.word(in bytes));

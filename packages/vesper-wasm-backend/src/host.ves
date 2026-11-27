@@ -81,13 +81,14 @@ const U_EXTERNAL_FUNCTION: u8 = 11;
 const NONE32: u32 = 4294967295;
 const MASK32: u64 = 4294967295;
 
-// `Plan.host` codes of the libraries. StdProcess (5) has no functions on
-// WASI and imports nothing.
+// `Plan.host` codes of the libraries. StdProcess (5) and Blake3 (7) have
+// no functions on WASI and import nothing.
 pub const HOST_ENV: u8 = 3;
 pub const HOST_FS: u8 = 4;
 pub const HOST_PROC: u8 = 5;
 // `Ffi[Cranelift]`: imports of `vesper:cranelift/vcl` (src/vcl_host.ves).
 pub const HOST_VCL: u8 = 6;
+pub const HOST_BLAKE3: u8 = 7;
 
 // The operations, by index (`op_index`).
 pub const ENV_ARG_COUNT: u64 = 0;
