@@ -76,6 +76,7 @@ unsafe fn words(b: *mut Builder, flags: u32, ptr: u32) -> Vec<u8> {
 
 #[test]
 fn function_words_match_clif_words() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     // SAFETY: handles from `build`, freed once.
     unsafe {
         let (m, _, b) = build();
@@ -95,6 +96,7 @@ fn function_words_match_clif_words() {
 
 #[test]
 fn apply_edits_matches_clif_words_and_defines() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     // SAFETY: handles from `build`, each consumed once.
     unsafe {
         let (m, func, b) = build();
@@ -134,6 +136,7 @@ fn apply_edits_matches_clif_words_and_defines() {
 
 #[test]
 fn the_seam_refuses_what_it_cannot_do() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     // SAFETY: handles from the calls before, each consumed once.
     unsafe {
         let null = std::ptr::null();
