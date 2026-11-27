@@ -71,6 +71,17 @@ const E_CONTINUE: u8 = 21;
 // its pattern in mag), x = body, a/n = clauses (the return clause first).
 const E_HANDLE: u8 = 22;
 
+// `numeric::WRAPPING_INTRINSICS`.
+const WRAPPING_ADD: Str = "wrapping_add";
+const WRAPPING_SUB: Str = "wrapping_sub";
+const WRAPPING_MUL: Str = "wrapping_mul";
+
+// The length of `::` in an `Eff::op` name.
+const PATH_SEPARATOR_LEN: u64 = 2;
+
+// `regions::REGION_EFFECT`: a handler of it is a region block.
+const REGION_EFFECT: Str = "Region";
+
 // Pattern kinds (patterns.ves).
 const P_WILD: u8 = 0;
 const P_BIND: u8 = 1;
@@ -850,7 +861,8 @@ pub fn read_fns(inout reader: Reader, in bytes: Slice[u8], inout ck: Ck) {
                 let arg = tyw(in ck.ctx, reader.word(in bytes));
                 ck.inst_args.push(arg);
             }
-            ck.insts.push(Inst { name: inst_name, arg_start: arg_start, arg_count: n32(arg_count) });
+            ck.insts
+                .push(Inst { name: inst_name, arg_start: arg_start, arg_count: n32(arg_count) });
         }
         sig.inst_count = n32(inst_count);
         sig.inferred = tyw(in ck.ctx, reader.word(in bytes));
@@ -2061,7 +2073,7 @@ fn handle_expr(inout ck: Ck, ex: Ex, expected: u32) -> u32 {
     let known = ck.ctx.world.k;
     let decl = effect_decl(in ck, ex.y);
     // A region block (`regions::region_block`) is lane 12's.
-    if decl.name == NONE32 || is_qualified(in ck, ex.y, "Region") {
+    if decl.name == NONE32 || is_qualified(in ck, ex.y, REGION_EFFECT) {
         ck.skip = true;
         return hole;
     }
@@ -2226,14 +2238,7 @@ fn handle_expr(inout ck: Ck, ex: Ex, expected: u32) -> u32 {
 
 // Whether a clause pattern is irrefutable for `ty`.
 fn clause_pattern(inout ck: Ck, pat: u32, ty: u32) -> bool {
-    irrefutable(
-        inout ck.ctx.types,
-        inout ck.ctx.names,
-        in ck.ctx.world,
-        inout ck.pats,
-        pat,
-        ty
-    )
+    irrefutable(inout ck.ctx.types, inout ck.ctx.names, in ck.ctx.world, inout ck.pats, pat, ty)
 }
 
 // Binds a continuation pattern: a name gets the function type without
@@ -2254,7 +2259,7 @@ fn op_short_name(inout ck: Ck, full: u32, effect: u32) -> u32 {
     ck.ctx.names.write(full, inout text);
     let mut prefix = ChunkSeq::new[u8]();
     ck.ctx.names.write(effect, inout prefix);
-    let skip = add(prefix.len(), 2);
+    let skip = add(prefix.len(), PATH_SEPARATOR_LEN);
     let mut short = ChunkSeq::new[u8]();
     for i in skip..text.len() {
         short.push(u8_at(in text, i));
@@ -2552,9 +2557,9 @@ pub fn trait_method(in ck: Ck, method: u32) -> bool {
 }
 
 fn is_wrapping(in ck: Ck, name: u32) -> bool {
-    is_qualified(in ck, name, "wrapping_add")
-        || is_qualified(in ck, name, "wrapping_sub")
-        || is_qualified(in ck, name, "wrapping_mul")
+    is_qualified(in ck, name, WRAPPING_ADD)
+        || is_qualified(in ck, name, WRAPPING_SUB)
+        || is_qualified(in ck, name, WRAPPING_MUL)
 }
 
 // `Checker::wrapping_call`: two operands of one integer kind, the goal's
@@ -2584,11 +2589,7 @@ fn wrapping_call(inout ck: Ck, ex: Ex, expected: u32) -> u32 {
     for i in 0..w(ex.n) {
         let arg = ck.arg(add(w(ex.a), i));
         let common_lit = ck.ctx.types.kind(common) == TyKind::Lit;
-        let arg_goal = if common_lit {
-            hole
-        } else {
-            common
-        };
+        let arg_goal = if common_lit { hole } else { common };
         let t = expr_expected(inout ck, arg.expr, arg_goal);
         if ck.skip {
             return hole;
@@ -2628,7 +2629,9 @@ fn call_expr(inout ck: Ck, ex: Ex, expected: u32) -> u32 {
     if callee.kind == E_FIELD {
         return method_call(inout ck, ex, callee, expected);
     }
-    if callee.kind == E_NAME && lookup(in ck, callee.x) == NONE32 && ex.y != 0
+    if callee.kind == E_NAME
+        && lookup(in ck, callee.x) == NONE32
+        && ex.y != 0
         && is_wrapping(in ck, callee.x)
     {
         return wrapping_call(inout ck, ex, expected);
@@ -2823,7 +2826,9 @@ fn op_call(inout ck: Ck, ex: Ex, sig: FnSig) -> u32 {
 fn context_args(in ck: Ck, effect: u32) -> ChunkSeq[u32] {
     let mut args: ChunkSeq[u32] = ChunkSeq::new[u32]();
     for i in 0..ck.handler_caps.len() {
-        let cap = match ck.handler_caps.try_get(wrapping_sub(wrapping_sub(ck.handler_caps.len(), 1), i)) {
+        let cap = match ck.handler_caps
+            .try_get(wrapping_sub(wrapping_sub(ck.handler_caps.len(), 1), i))
+        {
             Option::Some(c) => c,
             Option::None => Inst { name: NONE32, arg_start: 0, arg_count: 0 },
         };
