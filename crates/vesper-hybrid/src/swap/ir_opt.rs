@@ -15,7 +15,7 @@ mod ir_opt_words;
 
 use super::place_ir::round_trip_after_pass;
 // The word encoders read the shared ones through `super::`.
-use super::{Registry, Swap, ir_words, on, open};
+use super::{Registry, Swap, ir_words, on, pass};
 
 /// Programs optimized by the Vesper IR optimizer module.
 static IR_OPT_CALLS: AtomicU64 = AtomicU64::new(0);
@@ -42,7 +42,7 @@ fn vesper_optimize(
 }
 
 /// The flip-gate rows of this file's swaps (`swaps::on`).
-pub(super) const SWAPS: &[Swap] = &[open("ir_opt", "0.0036x; no flip-gate configuration")];
+pub(super) const SWAPS: &[Swap] = &[pass("ir_opt", "ir-opt", "#2289")];
 
 pub(super) fn register(r: &mut Registry) {
     if on("ir_opt") {

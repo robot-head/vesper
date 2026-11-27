@@ -1,0 +1,99 @@
+{
+  "notes": [
+    "Flip gate for the native IR optimizer (`ir_opt::optimize`), ported as",
+    "@vesper/ir-opt and @vesper/ir-opt-policy and installed as the hybrid's `ir_opt`",
+    "swap. The `ir-opt-with-encoding` workload times Rust's optimizer against the",
+    "swap's path (prepare, the Vesper entry, finish).",
+    "The timing takes every 2nd corpus case (CHECK_HARNESS_STRIDE=2) and the tests run one at a time: the whole corpus with its mutants does not fit a 16 GB host."
+  ],
+  "name": "ir-opt",
+  "lane": "SH3-9",
+  "rust": [
+    "src/ir_opt.rs",
+    "src/ir_opt_policy.rs"
+  ],
+  "env": {
+    "CARGO_PROFILE_DEV_DEBUG": "0",
+    "CARGO_PROFILE_TEST_DEBUG": "0",
+    "CARGO_PROFILE_RELEASE_DEBUG": "0",
+    "RUST_TEST_THREADS": "1"
+  },
+  "build": [
+    [
+      "cargo",
+      "test",
+      "--locked",
+      "--release",
+      "--test",
+      "self_host_ir_opt",
+      "--no-run"
+    ]
+  ],
+  "tests": [
+    {
+      "run": [
+        "cargo",
+        "test",
+        "--locked",
+        "--release",
+        "--test",
+        "self_host_ir_opt"
+      ]
+    }
+  ],
+  "differential": {
+    "run": {
+      "sequence": [
+        [
+          "cargo",
+          "test",
+          "--locked",
+          "--release",
+          "--test",
+          "self_host_ir_opt",
+          "optimize_matches_rust",
+          "--",
+          "--exact",
+          "--nocapture"
+        ],
+        [
+          "cargo",
+          "test",
+          "--locked",
+          "--release",
+          "--test",
+          "self_host_ir_opt",
+          "fip_reuse_matches_rust",
+          "--",
+          "--exact",
+          "--nocapture"
+        ]
+      ]
+    }
+  },
+  "abba": [
+    {
+      "workload": "ir-opt-with-encoding",
+      "run": {
+        "argv": [
+          "cargo",
+          "test",
+          "--locked",
+          "--release",
+          "--test",
+          "self_host_ir_opt",
+          "optimize_cost",
+          "--",
+          "--exact",
+          "--ignored",
+          "--nocapture"
+        ],
+        "env": {
+          "FLIP_GATE": "1",
+          "CHECK_HARNESS_SPEED": "1",
+          "CHECK_HARNESS_STRIDE": "2"
+        }
+      }
+    }
+  ]
+}
