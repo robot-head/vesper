@@ -11,8 +11,12 @@
 // Part 1: remove_unreachable, float_constants, fold_constant_branches,
 // shrink_unused_slots. Part 2: merge_blocks, remove_constant_params.
 // branches.ves (#2423): the branch-threading steps. folds.ves (#2423):
-// canonicalize_imm_ops, fold_load_store_offsets, cse_dom_pure.
+// canonicalize_imm_ops, fold_load_store_offsets, cse_dom_pure. Part 3:
+// extends.ves, fold_narrow_extends and fold_trivial_arith_and_bool_extends;
+// slots.ves, split_join_slots and promote_slots.
 
+use self::extends::{fold_narrow_extends, fold_trivial_arith_and_bool_extends};
+use self::slots::{promote_slots, split_join_slots};
 use self::folds::{canonicalize_imm_ops, cse_dom_pure, fold_load_store_offsets};
 use self::branches::{
     propagate_branch_conditions, sink_compares, thread_branches, thread_constant_param_jumps,
@@ -33,6 +37,10 @@ pub const STEP_FOLD_CONSTANT_BRANCHES: u64 = 3;
 pub const STEP_SHRINK_UNUSED_SLOTS: u64 = 4;
 pub const STEP_MERGE_BLOCKS: u64 = 5;
 pub const STEP_REMOVE_CONSTANT_PARAMS: u64 = 6;
+pub const STEP_FOLD_NARROW_EXTENDS: u64 = 7;
+pub const STEP_FOLD_TRIVIAL_ARITH_AND_BOOL_EXTENDS: u64 = 8;
+pub const STEP_SPLIT_JOIN_SLOTS: u64 = 9;
+pub const STEP_PROMOTE_SLOTS: u64 = 10;
 // 32 up: the branch-threading steps of #2423 (branches.ves).
 pub const STEP_SINK_COMPARES: u64 = 32;
 pub const STEP_THREAD_BRANCHES: u64 = 33;
@@ -637,6 +645,10 @@ pub fn clif_opt_words(in input: Str) -> ChunkSeq[u64] {
         || step == STEP_SHRINK_UNUSED_SLOTS
         || step == STEP_MERGE_BLOCKS
         || step == STEP_REMOVE_CONSTANT_PARAMS
+        || step == STEP_FOLD_NARROW_EXTENDS
+        || step == STEP_FOLD_TRIVIAL_ARITH_AND_BOOL_EXTENDS
+        || step == STEP_SPLIT_JOIN_SLOTS
+        || step == STEP_PROMOTE_SLOTS
         || step == STEP_SINK_COMPARES
         || step == STEP_THREAD_BRANCHES
         || step == STEP_THREAD_DECIDED_BRANCHES
@@ -662,6 +674,14 @@ pub fn clif_opt_words(in input: Str) -> ChunkSeq[u64] {
         shrink_unused_slots(inout f);
     } else if step == STEP_MERGE_BLOCKS {
         merge_blocks(inout f);
+    } else if step == STEP_FOLD_NARROW_EXTENDS {
+        fold_narrow_extends(inout f);
+    } else if step == STEP_FOLD_TRIVIAL_ARITH_AND_BOOL_EXTENDS {
+        fold_trivial_arith_and_bool_extends(inout f);
+    } else if step == STEP_SPLIT_JOIN_SLOTS {
+        split_join_slots(inout f);
+    } else if step == STEP_PROMOTE_SLOTS {
+        promote_slots(inout f);
     } else if step == STEP_SINK_COMPARES {
         sink_compares(inout f);
     } else if step == STEP_THREAD_BRANCHES {

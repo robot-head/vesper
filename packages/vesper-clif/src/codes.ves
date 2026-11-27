@@ -171,6 +171,12 @@ pub const E_ALIAS: u64 = 16;
 pub const E_MOVE_INST: u64 = 17;
 pub const E_REMOVE_DEST_ARG: u64 = 18;
 pub const E_INS_BEFORE: u64 = 19;
+// The extend and trivial-arithmetic folds (#2362 part 3).
+pub const E_SET_UNARY: u64 = 20;
+pub const E_SET_BINARY: u64 = 21;
+// The slot steps (#2362 part 3).
+pub const E_NEW_SLOT: u64 = 22;
+pub const E_ZERO_BEFORE: u64 = 23;
 // 64 up: the branch and fold steps of #2423 (20 to 63 are #2362's).
 pub const E_APPEND_DEST_ARG: u64 = 64;
 pub const E_SET_DEST: u64 = 65;

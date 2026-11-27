@@ -59,7 +59,16 @@
 //! - [`E_REMOVE_DEST_ARG`] `inst k a`: argument `a` of destination `k` of
 //!   `inst` removed;
 //! - [`E_INS_BEFORE`] `inst opcode ...`: [`E_INS`] with a cursor at `inst`
-//!   in place of the block.
+//!   in place of the block;
+//! - [`E_SET_UNARY`] `inst opcode arg`: the instruction becomes the
+//!   `Unary` opcode on `arg`, its results kept (the extend folds);
+//! - [`E_SET_BINARY`] `inst opcode a b`: the instruction becomes the
+//!   `Binary` opcode on `a` and `b`, its results kept;
+//! - [`E_NEW_SLOT`] `size align_shift new`: `create_sized_stack_slot` of an
+//!   explicit slot (the slot steps);
+//! - [`E_ZERO_BEFORE`] `inst type new`: a zero of `type` just before `inst`,
+//!   as `promote_slots` makes it (`vconst` of a new 16-byte zero constant,
+//!   `f32const`, `f64const` or `iconst`).
 //! - [`E_APPEND_DEST_ARG`] `inst k value`: `append_argument` on destination
 //!   `k` of `inst` (the branch steps of #2423);
 //! - [`E_SET_DEST`] `inst k block n args...`: destination `k` of `inst`
@@ -112,6 +121,10 @@ pub const E_ALIAS: u64 = 16;
 pub const E_MOVE_INST: u64 = 17;
 pub const E_REMOVE_DEST_ARG: u64 = 18;
 pub const E_INS_BEFORE: u64 = 19;
+pub const E_SET_UNARY: u64 = 20;
+pub const E_SET_BINARY: u64 = 21;
+pub const E_NEW_SLOT: u64 = 22;
+pub const E_ZERO_BEFORE: u64 = 23;
 // 64 up: the branch and fold steps of #2423 (20 to 63 are #2362's).
 pub const E_APPEND_DEST_ARG: u64 = 64;
 pub const E_SET_DEST: u64 = 65;
@@ -356,10 +369,16 @@ fn mem_word(f: MemFlags) -> u64 {
 /// The flags of a builder-made access: `MemFlags::new()`, or with an
 /// explicit endianness.
 fn mem_flags(m: u64) -> Result<MemFlags, String> {
-    if m & !(M_ENDIAN | M_LITTLE) != 0 {
+    if m & !(M_ENDIAN | M_LITTLE | M_NOTRAP | M_ALIGNED) != 0 {
         return Err(format!("memory flags {m:#x} on a new instruction"));
     }
-    let f = MemFlags::new();
+    let mut f = MemFlags::new();
+    if m & M_NOTRAP != 0 {
+        f = f.with_notrap();
+    }
+    if m & M_ALIGNED != 0 {
+        f = f.with_aligned();
+    }
     Ok(if m & M_ENDIAN == 0 {
         f
     } else if m & M_LITTLE != 0 {
@@ -733,6 +752,50 @@ pub fn apply(func: &mut ir::Function, words: &[u64]) -> Result<(), String> {
                 let want = Inst::from_u32(s.next()? as u32);
                 expect("instruction", made, want)?;
             }
+            E_SET_UNARY => {
+                let inst = Inst::from_u32(s.next()? as u32);
+                let opcode = opcode_of(s.next()?)?;
+                let arg = s.value()?;
+                func.dfg.insts[inst] = InstructionData::Unary { opcode, arg };
+            }
+            E_SET_BINARY => {
+                let inst = Inst::from_u32(s.next()? as u32);
+                let opcode = opcode_of(s.next()?)?;
+                let a = s.value()?;
+                let b = s.value()?;
+                func.dfg.insts[inst] = InstructionData::Binary {
+                    opcode,
+                    args: [a, b],
+                };
+            }
+            E_NEW_SLOT => {
+                let size = u32::try_from(s.next()?).map_err(|e| e.to_string())?;
+                let align = u8::try_from(s.next()?).map_err(|e| e.to_string())?;
+                let want = ir::StackSlot::from_u32(s.next()? as u32);
+                let made = func.create_sized_stack_slot(ir::StackSlotData::new(
+                    ir::StackSlotKind::ExplicitSlot,
+                    size,
+                    align,
+                ));
+                expect("slot", made, want)?;
+            }
+            E_ZERO_BEFORE => {
+                let inst = Inst::from_u32(s.next()? as u32);
+                let ty = type_of(s.next()?)?;
+                let want = Inst::from_u32(s.next()? as u32);
+                if ty.is_vector() {
+                    let zero = func.dfg.constants.insert(vec![0u8; 16].into());
+                    FuncCursor::new(func).at_inst(inst).ins().vconst(ty, zero);
+                } else {
+                    let mut pos = FuncCursor::new(func).at_inst(inst);
+                    match ty {
+                        types::F32 => pos.ins().f32const(0.0),
+                        types::F64 => pos.ins().f64const(0.0),
+                        _ => pos.ins().iconst(ty, 0),
+                    };
+                }
+                expect("zero", made_inst(func, Place::Before(inst))?, want)?;
+            }
             E_APPEND_DEST_ARG => {
                 let inst = Inst::from_u32(s.next()? as u32);
                 let k = s.next()? as usize;
@@ -889,6 +952,11 @@ fn build(func: &mut ir::Function, place: Place, s: &mut Script) -> Result<Inst, 
     };
     let ins = pos.ins();
     let made = match op {
+        Opcode::StackAddr => {
+            arity(0)?;
+            let slot = ir::StackSlot::from_u32(u32::try_from(imm).map_err(|e| e.to_string())?);
+            ins.stack_addr(type_of(ty_word)?, slot, offset)
+        }
         Opcode::Iconst => {
             arity(0)?;
             ins.iconst(type_of(ty_word)?, imm)
