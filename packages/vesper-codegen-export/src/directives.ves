@@ -26,6 +26,7 @@ use self::text::{CASE_BIT, WORD_BYTES, WORD_ROUND_UP, copy_of, nl, put, put_seq,
 
 // `split_whitespace` words as (start, end) pairs.
 const PAIR_WORDS: u64 = 2;
+const PAIR_WORDS_SHIFT: u32 = 1;
 
 // The comments that hold directives, and the lines of a `vsys` body.
 const EXPORT_MARKER: Str = "// @export";
@@ -672,7 +673,7 @@ pub fn directives_text(
         if starts_with(in rest, ABI_DIRECTIVE) {
             let spec = after(in rest, ABI_DIRECTIVE);
             let ws = words(in spec);
-            let nw = ws.len() / PAIR_WORDS;
+            let nw = wrapping_shr_u64(ws.len(), PAIR_WORDS_SHIFT);
             let version = if nw > 0 {
                 word(in spec, in ws, 0)
             } else {
@@ -721,7 +722,7 @@ pub fn directives_text(
             let mut handler: u8 = HANDLER_NONE;
             let mut rust = ChunkSeq::new[u8]();
             let mut has_rust = false;
-            for k in 1..ws.len() / PAIR_WORDS {
+            for k in 1..wrapping_shr_u64(ws.len(), PAIR_WORDS_SHIFT) {
                 let wd = word(in spec, in ws, k);
                 if same_str(in wd, DIRECT_HANDLER) && handler == HANDLER_NONE {
                     handler = HANDLER_DIRECT;
@@ -775,7 +776,7 @@ pub fn directives_text(
         } else if starts_with(in rest, VSYS_DIRECTIVE) {
             let spec = after(in rest, VSYS_DIRECTIVE);
             let ws = words(in spec);
-            let nw = ws.len() / PAIR_WORDS;
+            let nw = wrapping_shr_u64(ws.len(), PAIR_WORDS_SHIFT);
             let first = if nw > 0 {
                 word(in spec, in ws, 0)
             } else {

@@ -2297,3 +2297,40 @@ pub fn migrate_render_vsys_fn(
     pos = copy_range(in result, 0, result.len(), inout out, pos);
     copy_str(in "];\n", inout out, pos)
 }
+
+pub fn migrate_render_vsys_enum(
+    in name: Slice[u8],
+    in carrier: Slice[u8],
+    in vars_buf: Slice[u8],
+    in vars_starts: Slice[u64],
+    in vars_lens: Slice[u64],
+    inout out: Slice[u8],
+) -> u64 {
+    let mut pos = copy_str(in "    enum ", inout out, 0);
+    pos = copy_range(in name, 0, name.len(), inout out, pos);
+    pos = copy_str(in ": ", inout out, pos);
+    pos = copy_range(in carrier, 0, carrier.len(), inout out, pos);
+    pos = copy_str(in " { ", inout out, pos);
+    pos = write_joined_args(in vars_buf, in vars_starts, in vars_lens, inout out, pos);
+    copy_str(in " }\n", inout out, pos)
+}
+
+pub fn migrate_render_vsys_wire_struct(
+    in name: Slice[u8],
+    in fields_buf: Slice[u8],
+    in fields_starts: Slice[u64],
+    in fields_lens: Slice[u64],
+    inout out: Slice[u8],
+) -> u64 {
+    let mut pos = copy_str(in "    wire struct ", inout out, 0);
+    pos = copy_range(in name, 0, name.len(), inout out, pos);
+    pos = copy_str(in " { ", inout out, pos);
+    pos = write_joined_args(
+        in fields_buf,
+        in fields_starts,
+        in fields_lens,
+        inout out,
+        pos,
+    );
+    copy_str(in " }\n", inout out, pos)
+}

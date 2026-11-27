@@ -84,6 +84,12 @@ pub const OP_ULOAD32: u64 = 75;
 pub const OP_SLOAD32: u64 = 76;
 pub const OP_ISTORE8: u64 = 77;
 pub const OP_ISTORE16: u64 = 78;
+// hoist_loop_invariants (#2362 part 5).
+pub const OP_FSUB: u64 = 79;
+pub const OP_FNEG: u64 = 80;
+pub const OP_FABS: u64 = 81;
+pub const OP_FCVT_FROM_UINT: u64 = 82;
+pub const OP_FCMP: u64 = 83;
 
 // Types.
 pub const TY_OTHER: u64 = 0;
@@ -128,6 +134,10 @@ pub const M_ENDIAN: u64 = 4;
 pub const M_LITTLE: u64 = 8;
 pub const M_NOTRAP: u64 = 16;
 pub const M_ALIGNED: u64 = 32;
+// The alias region (0: none, then heap, table, vmctx) sits at this shift,
+// under this mask.
+pub const M_REGION_SHIFT: u64 = 6;
+pub const M_REGION_MASK: u64 = 192;
 
 // Effect bits.
 pub const F_TERMINATOR: u64 = 1;
@@ -181,6 +191,8 @@ pub const E_ZERO_BEFORE: u64 = 23;
 pub const E_REPLACE_BITCAST: u64 = 24;
 pub const E_REPLACE_STORE: u64 = 25;
 pub const E_MOVE_BEFORE: u64 = 26;
+// share_invariant_loads (#2362 part 5).
+pub const E_TRUST_LOAD: u64 = 27;
 // 64 up: the branch and fold steps of #2423 (20 to 63 are #2362's).
 pub const E_APPEND_DEST_ARG: u64 = 64;
 pub const E_SET_DEST: u64 = 65;

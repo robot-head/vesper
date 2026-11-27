@@ -1941,15 +1941,21 @@ impl Gen {
             if path.n == 0 {
                 let local_ty = self.body_local_type(in h, k);
                 if self.body_lane(local_ty) == LANE_PRODUCT {
-                    return false;
+                    if self.program.op(add(i.a, 2)) != PASS_IN {
+                        return false;
+                    }
+                    kind = INST_READ;
+                    extra.push(k);
+                    extra.push(0);
+                } else {
+                    let read = self.body_kind(local_ty);
+                    if read == NONE64 {
+                        return false;
+                    }
+                    kind = INST_READ;
+                    extra.push(k);
+                    extra.push(read);
                 }
-                let read = self.body_kind(local_ty);
-                if read == NONE64 {
-                    return false;
-                }
-                kind = INST_READ;
-                extra.push(k);
-                extra.push(read);
             } else {
                 let res_lane = self.body_lane(i.ty);
                 if res_lane == 0 || res_lane == LANE_PRODUCT || post != 0 {
@@ -2123,10 +2129,10 @@ impl Gen {
         // A product is only built (INST_DATA) and returned: any other
         // instruction that makes or reads one is left to the walk.
         if kind != INST_DATA {
-            if self.body_lane(i.ty) == LANE_PRODUCT {
+            if self.body_lane(i.ty) == LANE_PRODUCT && kind != INST_READ {
                 return false;
             }
-            if kind != INST_PROJECT {
+            if kind != INST_PROJECT && kind != INST_BIND && kind != INST_CALL {
                 for k in 0..ops.len() {
                     if self.body_lane(n32(u64_at(in h.vty, u64_at(in ops, k)))) == LANE_PRODUCT {
                         return false;
@@ -2372,7 +2378,7 @@ impl Gen {
                     is_param = true;
                 }
             }
-            if !self.body_register(t) && !(is_param && self.body_lane(t) == LANE_PRODUCT) {
+            if !self.body_register(t) && self.body_lane(t) != LANE_PRODUCT {
                 return;
             }
             if entry == 0 {

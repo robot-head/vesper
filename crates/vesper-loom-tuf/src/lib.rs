@@ -113,17 +113,146 @@ struct State {
     verified_at: String,
 }
 
+const CK_OUT_SCHEMA_VER: usize = 0;
+const CK_OUT_REPO_START: usize = 1;
+const CK_OUT_REPO_END: usize = 2;
+const CK_OUT_BOOT_START: usize = 3;
+const CK_OUT_BOOT_END: usize = 4;
+const CK_OUT_TS_VER: usize = 5;
+const CK_OUT_SNAP_VER: usize = 6;
+const CK_OUT_VER_AT_START: usize = 7;
+const CK_OUT_VER_AT_END: usize = 8;
+const CK_OUT_CSUM_START: usize = 9;
+const CK_OUT_CSUM_END: usize = 10;
+const CK_OUT_ROOT_COUNT: usize = 11;
+const CK_OUT_ROLE_COUNT: usize = 12;
+const CK_OUT_LEN: usize = 13;
+
+const CK_ERR_OK: u64 = 0;
+const CK_ERR_CAPACITY: u64 = 2;
+const CK_ERR_ESCAPE: u64 = 3;
+
+const CK_STACK_ROOTS_FLAT: usize = 8192;
+const CK_STACK_ROOTS_MAX: usize = 16;
+const CK_STACK_ROLES_MAX: usize = 32;
+
 impl Checkpoint {
     /// Decode only the bounded wire structure. Authenticity/identity/floors are checked by verify_target.
     pub fn from_json(bytes: &[u8], limits: &Limits) -> Result<Self, TufError> {
         if bytes.len() > limits.checkpoint_bytes {
             return fail("checkpoint exceeds limit");
         }
-        let wire: CheckpointWire = serde_json::from_slice(bytes)
-            .map_err(|e| TufError(format!("invalid checkpoint: {e}")))?;
+        let mut out = [0u64; CK_OUT_LEN];
+        let mut stack_roots = [0u8; CK_STACK_ROOTS_FLAT];
+        let mut stack_root_lens = [0u64; CK_STACK_ROOTS_MAX];
+        let mut stack_role_spans = [0u64; CK_STACK_ROLES_MAX * 2];
+        let mut stack_role_vers = [0u64; CK_STACK_ROLES_MAX];
+
+        let mut heap_roots = Vec::new();
+        let mut heap_root_lens = Vec::new();
+        let mut heap_role_spans = Vec::new();
+        let mut heap_role_vers = Vec::new();
+
+        let rc = binding::tuf_parse_checkpoint_json(
+            bytes,
+            &mut out,
+            &mut stack_roots,
+            &mut stack_root_lens,
+            &mut stack_role_spans,
+            &mut stack_role_vers,
+        );
+        let (roots_flat, root_lens, role_spans, role_vers) = if rc == CK_ERR_CAPACITY {
+            let mut roots_cap = bytes.len().max(CK_STACK_ROOTS_FLAT * 2);
+            let mut rcnt_cap = CK_STACK_ROOTS_MAX * 2;
+            let mut role_cap = CK_STACK_ROLES_MAX * 2;
+            loop {
+                heap_roots.resize(roots_cap, 0);
+                heap_root_lens.resize(rcnt_cap, 0);
+                heap_role_spans.resize(role_cap * 2, 0);
+                heap_role_vers.resize(role_cap, 0);
+                let retry_rc = binding::tuf_parse_checkpoint_json(
+                    bytes,
+                    &mut out,
+                    &mut heap_roots,
+                    &mut heap_root_lens,
+                    &mut heap_role_spans,
+                    &mut heap_role_vers,
+                );
+                if retry_rc == CK_ERR_OK {
+                    break (
+                        heap_roots.as_slice(),
+                        heap_root_lens.as_slice(),
+                        heap_role_spans.as_slice(),
+                        heap_role_vers.as_slice(),
+                    );
+                }
+                if retry_rc == CK_ERR_ESCAPE {
+                    let wire: CheckpointWire = serde_json::from_slice(bytes)
+                        .map_err(|e| TufError(format!("invalid checkpoint: {e}")))?;
+                    return Ok(Self {
+                        state: wire.state,
+                        checksum: wire.checksum,
+                    });
+                }
+                if retry_rc != CK_ERR_CAPACITY {
+                    return Err(TufError("invalid checkpoint: malformed JSON".into()));
+                }
+                roots_cap *= 2;
+                rcnt_cap *= 2;
+                role_cap *= 2;
+            }
+        } else if rc == CK_ERR_ESCAPE {
+            let wire: CheckpointWire = serde_json::from_slice(bytes)
+                .map_err(|e| TufError(format!("invalid checkpoint: {e}")))?;
+            return Ok(Self {
+                state: wire.state,
+                checksum: wire.checksum,
+            });
+        } else if rc == CK_ERR_OK {
+            (
+                stack_roots.as_slice(),
+                stack_root_lens.as_slice(),
+                stack_role_spans.as_slice(),
+                stack_role_vers.as_slice(),
+            )
+        } else {
+            return Err(TufError("invalid checkpoint: malformed JSON".into()));
+        };
+
+        let span_str = |s: u64, e: u64| -> Result<String, TufError> {
+            std::str::from_utf8(&bytes[s as usize..e as usize])
+                .map(str::to_owned)
+                .map_err(|err| TufError(format!("invalid checkpoint: {err}")))
+        };
+
+        let root_count = out[CK_OUT_ROOT_COUNT] as usize;
+        let mut roots = Vec::with_capacity(root_count);
+        let mut pos = 0usize;
+        for &len in &root_lens[..root_count] {
+            let n = len as usize;
+            roots.push(roots_flat[pos..pos + n].to_vec());
+            pos += n;
+        }
+
+        let role_count = out[CK_OUT_ROLE_COUNT] as usize;
+        let mut role_versions = BTreeMap::new();
+        for k in 0..role_count {
+            let name = span_str(role_spans[k * 2], role_spans[k * 2 + 1])?;
+            role_versions.insert(name, role_vers[k]);
+        }
+
         Ok(Self {
-            state: wire.state,
-            checksum: wire.checksum,
+            state: State {
+                schema_version: out[CK_OUT_SCHEMA_VER] as u32,
+                repository_id: span_str(out[CK_OUT_REPO_START], out[CK_OUT_REPO_END])?,
+                bootstrap_sha256: span_str(out[CK_OUT_BOOT_START], out[CK_OUT_BOOT_END])?,
+                roots,
+                timestamp_version: out[CK_OUT_TS_VER],
+                snapshot_version: out[CK_OUT_SNAP_VER],
+                role_versions,
+                verified_at: span_str(out[CK_OUT_VER_AT_START], out[CK_OUT_VER_AT_END])?,
+            },
+            checksum: span_str(out[CK_OUT_CSUM_START], out[CK_OUT_CSUM_END])?,
         })
     }
     pub fn to_json(&self) -> Result<Vec<u8>, TufError> {

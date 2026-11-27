@@ -1,0 +1,218 @@
+// merge_tails of src/native_clif_opt.rs in Vesper (#2362 part 5).
+//
+// The Rust step keys a block by the text of its instructions with each
+// value renumbered. Here the key is each instruction's shape number (the
+// optional shapes section of the words: the text with values and blocks
+// blanked), its destination blocks, and its values renumbered the same
+// way: a result of the block by its place among the block's results, any
+// other value by its number.
+
+use @vesper/clif::{Func, inc, u32_at, u64_at, w};
+use @vesper/clif::codes::{NONE, NONE64};
+use super::{layout_blocks, layout_insts};
+use super::branches::{values_of};
+
+// The first word of every key.
+const KEY_START: u64 = 0;
+// `merge_tails` makes at most this many rounds.
+const MAX_TAIL_ROUNDS: u64 = 4;
+// A value of the block itself, by its place among the block's results.
+const LOCAL_BIT: u64 = 9223372036854775808;
+// FNV-1a over the key words.
+const FNV_OFFSET: u64 = 14695981039346656037;
+const FNV_PRIME: u64 = 1099511628211;
+
+fn g8(in s: ChunkSeq[u8], i: u64) -> u8 {
+    s.try_get(i).unwrap_or(0)
+}
+
+// The block that defines `v` in the layout, or NONE.
+fn layout_def_block(in f: Func, v: u32) -> u32 {
+    let b = f.def_block(v);
+    if b == NONE || !f.blk(w(b)).placed {
+        return NONE;
+    }
+    b
+}
+
+// The groups so far: each first block, its key's hash, and its key words
+// `words[at..at + len]`.
+struct Groups {
+    block: ChunkSeq[u32],
+    hash: ChunkSeq[u64],
+    at: ChunkSeq[u64],
+    len: ChunkSeq[u64],
+    words: ChunkSeq[u64],
+}
+
+fn hash_of(in key: ChunkSeq[u64]) -> u64 {
+    let mut h = FNV_OFFSET;
+    for k in 0..key.len() {
+        h = wrapping_mul(h ^ u64_at(in key, k), FNV_PRIME);
+    }
+    h
+}
+
+// The first block of the group whose key is `key`, or NONE.
+fn find(in g: Groups, in key: ChunkSeq[u64], h: u64) -> u32 {
+    for q in 0..g.block.len() {
+        if u64_at(in g.hash, q) != h || u64_at(in g.len, q) != key.len() {
+            continue;
+        }
+        let at = u64_at(in g.at, q);
+        let mut same = true;
+        for k in 0..key.len() {
+            if u64_at(in g.words, wrapping_add(at, k)) != u64_at(in key, k) {
+                same = false;
+                break;
+            }
+        }
+        if same {
+            return u32_at(in g.block, q);
+        }
+    }
+    NONE
+}
+
+// A block's key, or an empty one for a block that branches to itself or
+// has an instruction with no shape.
+fn key_of(in f: Func, inout local: ChunkSeq[u64], b: u32) -> ChunkSeq[u64] {
+    let mut key = ChunkSeq::new[u64]();
+    // A leading word, so that an empty block has a key too.
+    key.push(KEY_START);
+    let mut mine = ChunkSeq::new[u32]();
+    let mut nres: u64 = 0;
+    let mut ok = true;
+    let mut i = f.first_inst(b);
+    loop {
+        if i == NONE {
+            break;
+        }
+        let shape = f.shape(i);
+        if shape == NONE64 {
+            ok = false;
+            break;
+        }
+        for k in 0..f.nresults(i) {
+            let r = f.result(i, k);
+            let set = local.try_set(w(r), nres);
+            mine.push(r);
+            nres = inc(nres);
+        }
+        key.push(shape);
+        let nd = f.ndests(i);
+        key.push(nd);
+        for d in 0..nd {
+            let to = f.dest_block(i, d);
+            if to == b {
+                ok = false;
+            }
+            key.push(w(to));
+        }
+        let vals = values_of(in f, i);
+        key.push(vals.len());
+        for k in 0..vals.len() {
+            let v = u32_at(in vals, k);
+            let at = local.try_get(w(v)).unwrap_or(NONE64);
+            key.push(if at == NONE64 { w(v) } else { LOCAL_BIT | at });
+        }
+        i = f.next_inst(i);
+    }
+    for k in 0..mine.len() {
+        let set = local.try_set(w(u32_at(in mine, k)), NONE64);
+    }
+    if !ok {
+        return ChunkSeq::new[u64]();
+    }
+    key
+}
+
+// `merge_tails`: blocks with the same instructions on the same inputs,
+// ending in the same branch or return, become the first of them.
+pub fn merge_tails(inout f: Func) {
+    let nb = f.nblocks();
+    let mut local = ChunkSeq::new[u64]();
+    local.resize(f.nvalues(), NONE64);
+    for _ in 0..MAX_TAIL_ROUNDS {
+        let blocks = layout_blocks(in f);
+        // Blocks that define a value used in another block.
+        let mut escapes = ChunkSeq::new[u8]();
+        escapes.resize(nb, 0);
+        for q in 0..blocks.len() {
+            let block = u32_at(in blocks, q);
+            let mut i = f.first_inst(block);
+            loop {
+                if i == NONE {
+                    break;
+                }
+                let vals = values_of(in f, i);
+                for k in 0..vals.len() {
+                    let d = layout_def_block(in f, u32_at(in vals, k));
+                    if d != NONE && d != block {
+                        let set = escapes.try_set(w(d), 1);
+                    }
+                }
+                i = f.next_inst(i);
+            }
+        }
+        let entry = f.first_block();
+        let mut g = Groups {
+            block: ChunkSeq::new[u32](),
+            hash: ChunkSeq::new[u64](),
+            at: ChunkSeq::new[u64](),
+            len: ChunkSeq::new[u64](),
+            words: ChunkSeq::new[u64]()
+        };
+        let mut replace = ChunkSeq::new[u32]();
+        replace.resize(nb, NONE);
+        let mut gone = ChunkSeq::new[u32]();
+        for q in 0..blocks.len() {
+            let block = u32_at(in blocks, q);
+            if block == entry || g8(in escapes, w(block)) != 0 || f.nparams(block) != 0 {
+                continue;
+            }
+            let key = key_of(in f, inout local, block);
+            if key.len() == 0 {
+                continue;
+            }
+            let h = hash_of(in key);
+            let first = find(in g, in key, h);
+            if first != NONE {
+                let set = replace.try_set(w(block), first);
+                gone.push(block);
+            } else {
+                g.block.push(block);
+                g.hash.push(h);
+                g.at.push(g.words.len());
+                g.len.push(key.len());
+                g.words.extend(in key.as_slice());
+            }
+        }
+        if gone.len() == 0 {
+            return;
+        }
+        let all = layout_insts(in f);
+        for q in 0..all.len() {
+            let inst = u32_at(in all, q);
+            let nd = f.ndests(inst);
+            for d in 0..nd {
+                let from = f.dest_block(inst, d);
+                let to = u32_at(in replace, w(from));
+                if to != NONE {
+                    f.retarget(inst, from, to);
+                }
+            }
+        }
+        for k in 0..gone.len() {
+            let b = u32_at(in gone, k);
+            loop {
+                let i = f.first_inst(b);
+                if i == NONE {
+                    break;
+                }
+                f.remove_inst(i);
+            }
+            f.remove_block_edit(b);
+        }
+    }
+}

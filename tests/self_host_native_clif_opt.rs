@@ -13,6 +13,8 @@
 //! - `NATIVE_CLIF_OPT_STRIDE=n` keeps every n-th corpus world (default 1).
 #[path = "common/check_harness.rs"]
 mod check_harness;
+#[path = "common/clif_opt_programs.rs"]
+mod clif_opt_programs;
 #[path = "common/clif_words.rs"]
 mod clif_words;
 #[path = "common/vector_programs.rs"]
@@ -39,6 +41,11 @@ const PORTED: &[(&str, u64)] = &[
     ("vector_registers", 11),
     ("remove_dead", 12),
     ("sink_slot_inits", 13),
+    ("share_invariant_loads", 14),
+    ("hoist_loop_invariants", 15),
+    ("merge_tails", 16),
+    ("eliminate_guarded_loop_add_overflows", 17),
+    ("reuse_seq_header_loads", 18),
     ("sink_compares", 32),
     ("thread_branches", 33),
     ("thread_decided_branches", 34),
@@ -51,6 +58,8 @@ const PORTED: &[(&str, u64)] = &[
 
 /// The package's answer word for a step it ran.
 const ANSWER_PORTED: u64 = 1;
+/// The step that reads the shapes section (`clif_words::shapes`).
+const MERGE_TAILS_CODE: u64 = 16;
 
 /// How many differing functions the differential prints.
 const MAX_REPORTED: usize = 6;
@@ -76,6 +85,9 @@ fn step_code(name: &str) -> Option<(usize, u64)> {
 fn through_vesper(f: &ir::Function, code: u64) -> Result<ir::Function, String> {
     let mut input = code.to_le_bytes().to_vec();
     input.extend(clif_words::encode(f, false));
+    if code == MERGE_TAILS_CODE {
+        input.extend(clif_words::shapes(f));
+    }
     let words = entry().words(&input);
     let (&answer, script) = words.split_first().ok_or("no answer")?;
     if answer != ANSWER_PORTED {
@@ -121,16 +133,25 @@ fn compare_steps(f: &ir::Function, runs: &mut Runs, bad: &mut Vec<String>) {
     }
 }
 
-/// The vector programs added to the corpus, by name.
-const VECTOR_PROGRAMS: &[(&str, &str)] = &[
+/// The vector programs, and the programs of tests/native_clif_opt.rs that
+/// exercise particular steps, added to the corpus by name.
+const EXTRA_PROGRAMS: &[(&str, &str)] = &[
     ("vector acc4", vector_programs::ACC4),
     ("vector tick", vector_programs::TICK),
     ("vector ramp", vector_programs::RAMP),
     ("vector sums", vector_programs::SUMS),
+    ("guarded add", clif_opt_programs::GUARDED_ADD),
+    ("guarded add const", clif_opt_programs::GUARDED_ADD_CONST),
+    ("guarded join param", clif_opt_programs::GUARDED_JOIN_PARAM),
+    ("seq try_set", clif_opt_programs::SEQ_TRY_SET),
+    (
+        "seq try_get diamond",
+        clif_opt_programs::SEQ_TRY_GET_DIAMOND,
+    ),
 ];
 
-/// The checked world of a vector program.
-fn vector_world(source: &str) -> check::World {
+/// The checked world of an extra program.
+fn extra_world(source: &str) -> check::World {
     let p = parser::parse(source);
     assert!(p.diagnostics.is_empty(), "{:?}", p.diagnostics);
     let c = check::check(&p.module);
@@ -154,10 +175,11 @@ fn corpus_matches_native_clif_opt_steps() {
         ran: vec![0; PORTED.len()],
         changed: vec![0; PORTED.len()],
     };
-    // The corpus mains have no vector slots; the vector programs do.
-    let vectors: Vec<(String, check::World)> = VECTOR_PROGRAMS
+    // The corpus mains have no vector slots or bounds-hoisted copy loops;
+    // the extra programs do.
+    let vectors: Vec<(String, check::World)> = EXTRA_PROGRAMS
         .iter()
-        .map(|&(name, source)| (name.to_string(), vector_world(source)))
+        .map(|&(name, source)| (name.to_string(), extra_world(source)))
         .collect();
     let worlds = cases
         .iter()
@@ -182,7 +204,7 @@ fn corpus_matches_native_clif_opt_steps() {
     eprintln!(
         "native clif opt corpus: {bad_funcs} differ over {funcs} functions of {} worlds; \
          steps ran {:?}, changed {:?}; {:.1?}",
-        cases.len().div_ceil(stride()) + VECTOR_PROGRAMS.len(),
+        cases.len().div_ceil(stride()) + EXTRA_PROGRAMS.len(),
         runs.ran,
         runs.changed,
         start.elapsed()

@@ -342,7 +342,7 @@ pub fn sink_slot_inits(inout f: Func) {
 }
 
 // The nearest common dominator of two reachable blocks.
-fn common(in dom: super::branches::Dom, in rank: ChunkSeq[u64], a0: u32, b0: u32) -> u32 {
+pub fn common(in dom: super::branches::Dom, in rank: ChunkSeq[u64], a0: u32, b0: u32) -> u32 {
     let mut a = a0;
     let mut b = b0;
     loop {
