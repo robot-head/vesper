@@ -3,6 +3,7 @@ use @vesper/codegen-freestanding::codes::{
 };
 use @vesper/codegen-freestanding::obj::{section_header};
 use @vesper/codegen-freestanding::util::{align_up, grow, push16, push32, push64, put64};
+use self::scalar::{PLT_CALL};
 
 // The words start with the symbol count, followed by a size and alignment
 // for each payload section. Zero alignment omits the section.
@@ -63,29 +64,105 @@ const REL_SYMBOL_SHIFT: u32 = 32;
 const ELF_WORD_ALIGNMENT: u64 = 8;
 const STT_OBJECT: u8 = 1;
 const MAX_STRING_OFFSET: u64 = 0xffffffff;
+const CALL_RELOCATION_WORDS: u64 = 3;
+const CALL_RELOCATION_KIND: u64 = 1;
+const CALL_RELOCATION_SYMBOL: u64 = 2;
 
-pub fn write_x86_64_leaf(in code: Slice[u8], in name: Slice[u8]) -> ChunkSeq[u8] {
-    if code.len() == 0 {
-        return ChunkSeq::new[u8]();
+copy struct TextSymbol {
+    name: u64,
+    name_length: u64,
+    offset: u64,
+    size: u64,
+    linkage: u64,
+}
+
+pub struct X86TextObject {
+    text: ChunkSeq[u8],
+    names: ChunkSeq[u8],
+    symbols: ChunkSeq[TextSymbol],
+    relocations: ChunkSeq[u64],
+}
+
+pub fn x86_text_object() -> X86TextObject {
+    X86TextObject {
+        text: ChunkSeq::new[u8](),
+        names: ChunkSeq::new[u8](),
+        symbols: ChunkSeq::new[TextSymbol](),
+        relocations: ChunkSeq::new[u64]()
     }
-    let mut words = ChunkSeq::new[u64]();
-    words.push(1);
-    words.push(code.len());
-    words.push(1);
-    for section in RODATA..SECTION_COUNT {
-        words.push(0);
-        words.push(0);
+}
+
+impl X86TextObject {
+    // Relocation target IDs are the ordinal positions of the functions added
+    // to this object, including functions whose code has yet to be emitted.
+    pub fn add_function(
+        inout self,
+        in code: Slice[u8],
+        in name: Slice[u8],
+        in calls: Slice[u64],
+        exported: bool
+    ) -> bool {
+        if code.len() == 0 || name.len() == 0 || calls.len() % CALL_RELOCATION_WORDS != 0 {
+            return false;
+        }
+        let base = self.text.len();
+        let mut relocations = ChunkSeq::new[u64]();
+        for i in 0..(calls.len() / CALL_RELOCATION_WORDS) {
+            let at = wrapping_mul(i, CALL_RELOCATION_WORDS);
+            let offset = word(in calls, at);
+            if word(in calls, wrapping_add(at, CALL_RELOCATION_KIND)) != PLT_CALL
+                || !fits(offset, PC32_FIELD_BYTES, code.len())
+            {
+                return false;
+            }
+            relocations.push(TEXT);
+            relocations.push(wrapping_add(base, offset));
+            relocations.push(word(in calls, wrapping_add(at, CALL_RELOCATION_SYMBOL)));
+            relocations.push(PLT32);
+            relocations.push(wrapping_sub(0, PC32_FIELD_BYTES));
+        }
+        self.symbols.push(TextSymbol {
+            name: self.names.len(),
+            name_length: name.len(),
+            offset: base,
+            size: code.len(),
+            linkage: if exported { EXPORTED } else { LOCAL }
+        });
+        self.text.extend(in code);
+        self.names.extend(in name);
+        self.relocations.extend(in relocations.as_slice());
+        true
     }
-    words.push(code.len());
-    words.push(name.len());
-    words.push(0);
-    words.push(code.len());
-    words.push(EXPORTED);
-    words.push(TEXT);
-    let mut bytes = ChunkSeq::new[u8]();
-    bytes.extend(in code);
-    bytes.extend(in name);
-    write_elf(in words.as_slice(), in bytes.as_slice(), false)
+
+    pub fn write(in self) -> ChunkSeq[u8] {
+        let size = self.text.len();
+        let mut words = ChunkSeq::new[u64]();
+        words.push(self.symbols.len());
+        words.push(size);
+        words.push(1);
+        for section in RODATA..SECTION_COUNT {
+            words.push(0);
+            words.push(0);
+        }
+        for i in 0..self.symbols.len() {
+            match self.symbols.try_get(i) {
+                Option::Some(symbol) => {
+                    words.push(wrapping_add(size, symbol.name));
+                    words.push(symbol.name_length);
+                    words.push(symbol.offset);
+                    words.push(symbol.size);
+                    words.push(symbol.linkage);
+                    words.push(TEXT);
+                },
+                Option::None => return ChunkSeq::new[u8](),
+            }
+        }
+        words.extend(in self.relocations.as_slice());
+        let mut bytes = ChunkSeq::new[u8]();
+        bytes.extend(in self.text.as_slice());
+        bytes.extend(in self.names.as_slice());
+        write_elf(in words.as_slice(), in bytes.as_slice(), false)
+    }
 }
 
 copy struct Layout {

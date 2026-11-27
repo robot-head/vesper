@@ -2266,11 +2266,13 @@ fn stage2_self_compilation_fixed_point_impl() {
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
-    let package = dir.join("native-leaf");
+    use object::{Object, ObjectSection, ObjectSymbol};
+
+    let package = dir.join("native-scalar");
     std::fs::create_dir_all(package.join("src")).unwrap();
     std::fs::write(
         package.join("Loom.toml"),
-        "[package]\nname = \"@vesper-test/native-leaf\"\nversion = \"0.1.0\"\nedition = \"2026\"\n",
+        "[package]\nname = \"@vesper-test/native-scalar\"\nversion = \"0.1.0\"\nedition = \"2026\"\n",
     )
     .unwrap();
     std::fs::write(
@@ -2282,14 +2284,22 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
                  if y >= 2 && x != 0 { x } else { y }\n\
              )\n\
          }\n\
-         pub fn decline(x: u64) -> u64 { match x { 0 => 7, _ => 9 } }\n",
+         fn twist(x: u64, y: u64) -> u64 { wrapping_mul(x ^ 5, wrapping_add(y, 1)) }\n\
+         fn factorial(x: u64) -> u64 {\n\
+             if x <= 1 { 1 } else { wrapping_mul(x, factorial(wrapping_sub(x, 1))) }\n\
+         }\n\
+         pub fn calls(x: u64, y: u64) -> u64 {\n\
+             wrapping_add(twist(y, x), wrapping_add(twist(x, y), factorial(x & 7)))\n\
+         }\n\
+         fn unsupported(x: u64) -> u64 { match x { 0 => 7, _ => 9 } }\n\
+         pub fn decline(x: u64) -> u64 { unsupported(x) }\n",
     )
     .unwrap();
-    let object = dir.join("native-leaf.o");
+    let object = dir.join("native-scalar.o");
     let compile = |entry| {
         stage2
             .run(&Ctx {
-                args: vec!["stage2", "native-leaf", "/out/native-leaf.o", entry],
+                args: vec!["stage2", "native-scalar", "/out/native-scalar.o", entry],
                 env: vec![("VESPER_STAGE2_X86_64_ELF", "1")],
                 dirs: vec![(dir.into(), ".".into()), (dir.into(), "/out".into())],
                 fuel: Some(u64::MAX),
@@ -2312,28 +2322,49 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
         "{:?}",
         read_stage2_sidecar_notes(&object)
     );
+    let branch = dir.join("native-choose.o");
+    std::fs::rename(&object, &branch).unwrap();
+    assert_eq!(
+        compile("calls"),
+        0,
+        "{:?}",
+        read_stage2_sidecar_notes(&object)
+    );
     let bytes = std::fs::read(&object).unwrap();
-    assert!(bytes.starts_with(b"\x7fELF"));
+    let file = object::File::parse(bytes.as_slice()).unwrap();
+    assert_eq!(file.format(), object::BinaryFormat::Elf);
+    assert!(file.symbol_by_name("calls").unwrap().is_global());
+    for name in ["twist", "factorial"] {
+        let symbol = file.symbol_by_name(name).unwrap();
+        assert!(symbol.is_definition() && !symbol.is_global());
+    }
+    assert_eq!(
+        file.section_by_name(".text").unwrap().relocations().count(),
+        4
+    );
     assert_ne!(compile("decline"), 0);
     assert!(read_stage2_sidecar_notes(&object).contains("unsupported x86-64 ELF entry"));
     assert_eq!(std::fs::read(&object).unwrap(), bytes);
 
-    let caller = dir.join("native-leaf-caller.c");
-    let binary = dir.join("native-leaf-caller");
+    let caller = dir.join("native-scalar-caller.c");
+    let binary = dir.join("native-scalar-caller");
     std::fs::write(
         &caller,
         "#include <stdint.h>\n\
          extern uint64_t mix(uint64_t, uint64_t);\n\
          extern uint64_t choose(uint64_t, uint64_t);\n\
+         extern uint64_t calls(uint64_t, uint64_t);\n\
          int main(void) {\n\
              if (mix(10, 4) != 65 || mix(UINT64_MAX, UINT64_MAX) != UINT64_MAX - 16) return 1;\n\
-             return choose(0, 4) != 8 || choose(2, 4) != 8 || choose(4, 1) != 10\n\
-                 || choose(UINT64_MAX, 2) != 9 || choose(2, UINT64_MAX) != 8;\n\
+             if (choose(0, 4) != 8 || choose(2, 4) != 8 || choose(4, 1) != 10\n\
+                 || choose(UINT64_MAX, 2) != 9 || choose(2, UINT64_MAX) != 8) return 2;\n\
+             return calls(0, 1) != 15 || calls(6, 2) != 778\n\
+                 || calls(UINT64_MAX, UINT64_MAX) != 5040;\n\
          }\n",
     )
     .unwrap();
     let link = std::process::Command::new("cc")
-        .args([&caller, &leaf, &object])
+        .args([&caller, &leaf, &branch, &object])
         .arg("-o")
         .arg(&binary)
         .output()

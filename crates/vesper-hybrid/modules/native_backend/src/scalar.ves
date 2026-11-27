@@ -251,7 +251,7 @@ const XMM_ARGUMENTS: u64 = 8;
 pub const CHECKED_ARITHMETIC_RECORDS: u64 = 2;
 
 // Relocation kinds shared with src/native_machine.rs.
-const PLT_CALL: u64 = 0;
+pub const PLT_CALL: u64 = 0;
 const WIN64_CALL: u64 = 11;
 const RELATIVE_DATA: u64 = 1;
 const GOT_DATA: u64 = 2;

@@ -1,15 +1,14 @@
 use @vesper/check-data::types::{TyKind, TyPass};
 use @vesper/check-data::util::{add, inc, n32, w};
-use @vesper/hybrid-native-backend::{x86_64_integer_block};
-use @vesper/hybrid-native-backend::elf::{write_x86_64_leaf};
+use @vesper/hybrid-native-backend::elf::{x86_text_object};
 use @vesper/hybrid-native-backend::scalar::{
-    ADD, AND, BLOCK_LABEL, BLOCK_RETURN, BRANCH_BLOCK, COMPARE, CONSTANT, EQUAL, HEADER_WORDS,
-    JUMP_LABEL, MUL, NOT_EQUAL, NO_VALUE, OR, RECORD_WORDS, RETURN_VALUE, STACK_LOAD, STACK_SLOT,
-    STACK_STORE_QWORD, SUB, UNSIGNED_GREATER, UNSIGNED_GREATER_EQUAL, UNSIGNED_LESS,
-    UNSIGNED_LESS_EQUAL, XOR
+    ADD, AND, BLOCK_LABEL, BLOCK_RETURN, BRANCH_BLOCK, CALL, CALL_ARGUMENT, COMPARE, CONSTANT,
+    EQUAL, HEADER_WORDS, JUMP_LABEL, MUL, NOT_EQUAL, NO_VALUE, OR, RECORD_WORDS, RETURN_VALUE,
+    STACK_LOAD, STACK_SLOT, STACK_STORE_QWORD, SUB, UNSIGNED_GREATER, UNSIGNED_GREATER_EQUAL,
+    UNSIGNED_LESS, UNSIGNED_LESS_EQUAL, XOR, encode_block
 };
 use @vesper/hybrid-native-backend::x86_64::{ARGUMENTS, BYTE_BITS, QWORD_BITS};
-use @vesper/place-ir::{BlockRow, FnRow, Lit, Op, Term};
+use @vesper/place-ir::{BlockRow, FnRow, InstRow, Lit, Op, Term};
 use @vesper/place-ir-lower::ast::{FnR};
 use @vesper/place-ir-lower::lower::{L};
 
@@ -34,6 +33,31 @@ const JUMP_ARGUMENT: u64 = 2;
 const HOME_BYTES: u64 = QWORD_BITS / BYTE_BITS;
 const HOME_SLOT: u64 = 0;
 const SCALAR_RESULTS: u64 = 1;
+const CALL_COUNT: u64 = 1;
+const CALL_ARGUMENTS: u64 = 2;
+const ARGUMENT_WORDS: u64 = 4;
+const ARGUMENT_VALUE: u64 = 1;
+const ARGUMENT_PATH: u64 = 3;
+
+struct CallGraph {
+    indices: ChunkSeq[u64],
+    pending: ChunkSeq[u64],
+}
+
+impl CallGraph {
+    fn discover(inout self, index: u64) -> u64 {
+        let existing = self.indices.try_get(index).unwrap_or(NO_VALUE);
+        if existing != NO_VALUE {
+            return existing;
+        }
+        let id = self.pending.len();
+        if !self.indices.try_set(index, id) {
+            return NO_VALUE;
+        }
+        self.pending.push(index);
+        id
+    }
+}
 
 copy struct Value {
     owner: u64,
@@ -183,6 +207,68 @@ fn argument_value(in low: L, f: FnR, root: u32) -> u64 {
     NO_VALUE
 }
 
+fn call_arity(in low: L, inst: InstRow) -> u64 {
+    let count = low.program.op(add(inst.a, CALL_COUNT));
+    if count > ARGUMENTS {
+        return NO_VALUE;
+    }
+    let type_args = add(CALL_ARGUMENTS, wrapping_mul(count, ARGUMENT_WORDS));
+    let capability = inc(type_args);
+    if inst.n != inc(capability)
+        || low.program.op(add(inst.a, type_args)) != 0
+        || low.program.op(add(inst.a, capability)) != 0
+    {
+        return NO_VALUE;
+    }
+    count
+}
+
+fn call_argument(at: u64, index: u64) -> u64 {
+    add(add(at, CALL_ARGUMENTS), wrapping_mul(index, ARGUMENT_WORDS))
+}
+
+fn lower_call(
+    in low: L,
+    inst: InstRow,
+    block: u64,
+    inout m: Function,
+    inout graph: CallGraph
+) -> u64 {
+    let index = low.ast.fn_index(n32(low.program.op(inst.a)));
+    let count = call_arity(in low, inst);
+    if count == NO_VALUE || index >= low.ast.fns.len() {
+        return NO_VALUE;
+    }
+    let callee = low.ast.function(index);
+    if count != callee.param_count || !sysv_signature(in low, callee) {
+        return NO_VALUE;
+    }
+    let mut args = ChunkSeq::new[u64]();
+    for i in 0..count {
+        let at = call_argument(inst.a, i);
+        if low.program.op(at) == TyPass::Inout
+            || low.program.path(low.program.op(add(at, ARGUMENT_PATH))).n != 0
+        {
+            return NO_VALUE;
+        }
+        let id = add(m.arguments, low.program.op(add(at, ARGUMENT_VALUE)));
+        let value = m.read(id, block);
+        if value == NO_VALUE {
+            return NO_VALUE;
+        }
+        args.push(value);
+    }
+    let target = graph.discover(index);
+    if target == NO_VALUE {
+        return NO_VALUE;
+    }
+    // Operand loads must precede the contiguous call argument records.
+    for i in 0..count {
+        let _ = m.record(CALL_ARGUMENT, args.try_get(i).unwrap_or(NO_VALUE), 0, 0);
+    }
+    m.record(CALL, target, count, 0)
+}
+
 fn block_parameter(in low: L, b: BlockRow) -> u64 {
     let incoming = low.program.op(add(b.ha, BLOCK_INCOMING_COUNT));
     let first = add(BLOCK_HEADER_WORDS, wrapping_mul(incoming, BLOCK_INCOMING_WORDS));
@@ -300,6 +386,17 @@ fn plan_homes(in low: L, f: FnR, row: FnRow, inout m: Function) -> bool {
                 if !m.use_in(lhs, block) || !m.use_in(rhs, block) {
                     return false;
                 }
+            } else if inst.op == Op::Call {
+                let count = call_arity(in low, inst);
+                if count == NO_VALUE {
+                    return false;
+                }
+                for i in 0..count {
+                    let argument = add(call_argument(at, i), ARGUMENT_VALUE);
+                    if !m.use_in(add(f.param_count, low.program.op(argument)), block) {
+                        return false;
+                    }
+                }
             }
         }
         if b.term == Term::Branch || b.term == Term::Return {
@@ -316,7 +413,14 @@ fn plan_homes(in low: L, f: FnR, row: FnRow, inout m: Function) -> bool {
     true
 }
 
-fn lower_block(in low: L, f: FnR, b: BlockRow, block: u64, inout m: Function) -> bool {
+fn lower_block(
+    in low: L,
+    f: FnR,
+    b: BlockRow,
+    block: u64,
+    inout m: Function,
+    inout graph: CallGraph
+) -> bool {
     for index in b.i0..add(b.i0, b.ic) {
         let inst = low.program.inst(index);
         let at = inst.a;
@@ -363,6 +467,8 @@ fn lower_block(in low: L, f: FnR, b: BlockRow, block: u64, inout m: Function) ->
                 }
                 m.record(op, lhs, rhs, QWORD_BITS)
             }
+        } else if inst.op == Op::Call && wide {
+            lower_call(in low, inst, block, inout m, inout graph)
         } else {
             return false;
         };
@@ -437,7 +543,13 @@ fn lower_terminator(in low: L, row: FnRow, b: BlockRow, block: u64, inout m: Fun
     true
 }
 
-fn lower_function(in low: L, f: FnR, row: FnRow) -> ChunkSeq[u8] {
+fn lower_function(
+    in low: L,
+    f: FnR,
+    row: FnRow,
+    inout graph: CallGraph,
+    inout calls: ChunkSeq[u64]
+) -> ChunkSeq[u8] {
     if row.bc == 0 {
         return ChunkSeq::new[u8]();
     }
@@ -472,33 +584,63 @@ fn lower_function(in low: L, f: FnR, row: FnRow) -> ChunkSeq[u8] {
             }
         }
         let b = low.program.block(add(row.b0, block));
-        if !lower_block(in low, f, b, block, inout m)
+        if !lower_block(in low, f, b, block, inout m, inout graph)
             || !lower_terminator(in low, row, b, block, inout m)
         {
             return ChunkSeq::new[u8]();
         }
     }
-    x86_64_integer_block(in m.words.as_slice())
+    encode_block(in m.words.as_slice(), true, inout calls)
 }
 
-// Lower one effect-free SysV function whose values need no layout beyond u64.
-// The caller publishes the object only after the entire request succeeds.
+// Emit the entry and its reachable effect-free SysV functions, exporting only
+// the requested entry. Keep the object private until every definition passes.
 pub fn compile_x86_64_elf(in low: L, entry: u32, in name: Slice[u8]) -> ChunkSeq[u8] {
-    let index = low.ast.fn_index(entry);
-    if index >= low.ast.fns.len() {
+    let entry_index = low.ast.fn_index(entry);
+    if entry_index >= low.ast.fns.len() || !sysv_signature(in low, low.ast.function(entry_index)) {
         return ChunkSeq::new[u8]();
     }
-    let f = low.ast.function(index);
-    if !sysv_signature(in low, f) {
-        return ChunkSeq::new[u8]();
-    }
+    let mut rows = ChunkSeq::new[u64]();
+    rows.resize(low.ast.fns.len(), NO_VALUE);
     for row_index in 0..low.program.fns.len() {
         let row = low.program.function(row_index);
-        if row.name != entry {
-            continue;
-        }
-        let code = lower_function(in low, f, row);
-        return write_x86_64_leaf(in code.as_slice(), in name);
+        let index = low.ast.fn_index(row.name);
+        let _ = rows.try_set(index, row_index);
     }
-    ChunkSeq::new[u8]()
+    let mut graph = CallGraph { indices: ChunkSeq::new[u64](), pending: ChunkSeq::new[u64]() };
+    graph.indices.resize(low.ast.fns.len(), NO_VALUE);
+    let _ = graph.discover(entry_index);
+    let mut object = x86_text_object();
+    let mut symbol: u64 = 0;
+    loop {
+        let index = match graph.pending.try_get(symbol) {
+            Option::Some(next) => next,
+            Option::None => return object.write(),
+        };
+        let row_index = rows.try_get(index).unwrap_or(NO_VALUE);
+        if row_index == NO_VALUE {
+            return ChunkSeq::new[u8]();
+        }
+        let f = low.ast.function(index);
+        let row = low.program.function(row_index);
+        let mut calls = ChunkSeq::new[u64]();
+        let code = lower_function(in low, f, row, inout graph, inout calls);
+        let mut spelling = ChunkSeq::new[u8]();
+        if symbol == 0 {
+            spelling.extend(in name);
+        } else {
+            for i in 0..low.ctx.names.size(f.name) {
+                spelling.push(low.ctx.names.byte(f.name, i));
+            }
+        }
+        if !object.add_function(
+            in code.as_slice(),
+            in spelling.as_slice(),
+            in calls.as_slice(),
+            symbol == 0
+        ) {
+            return ChunkSeq::new[u8]();
+        }
+        symbol = inc(symbol);
+    }
 }
