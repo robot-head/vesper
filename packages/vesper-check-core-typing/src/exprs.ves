@@ -151,10 +151,14 @@ const SWAP: Str = "swap";
 const REPLACE: Str = "replace";
 // `ChunkSeq::finish(s)`: consumes an empty sequence.
 const SEQ_FINISH: Str = "ChunkSeq::finish";
+// The fip prelude's box constructors (`fip::BOX_NEW`, `BOX_NEW_IN_CALLER`).
+const BOX_NEW: Str = "Box::new";
+const BOX_NEW_IN_CALLER: Str = "Box::new_in_caller";
 const PLACE_PRIMITIVE_OPERANDS: u32 = 2;
 
 // The length of `::` in an `Eff::op` name.
 const PATH_SEPARATOR_LEN: u64 = 2;
+const PATH_SEPARATOR: Str = "::";
 
 // `regions::REGION_EFFECT`: a handler of it is a region block.
 const REGION_EFFECT: Str = "Region";
@@ -387,6 +391,10 @@ pub struct Ck {
     alias_from: ChunkSeq[u32],
     alias_to: ChunkSeq[u32],
     handlers: u64,
+    // Clauses and region bodies being checked, which a `return` cannot
+    // leave (E0213), and handled bodies with handler state, whose linear
+    // state a `return` would discard (E0402): neither is ported.
+    no_return: u64,
     // Loops entered before the innermost handler: a `break` or `continue`
     // that would leave a handler is not ported.
     loop_floor: u64,
@@ -396,6 +404,9 @@ pub struct Ck {
     // expression id -> recorded type, or NONE32
     ex_types: ChunkSeq[u32],
     skip: bool,
+    // The start of the `s[i]` argument lent to an `in` parameter being
+    // checked (`Usage::Borrow(In)`), or NONE64.
+    pub lent_element: u64,
     // The closures being checked, innermost last, and the effects their
     // bodies use from outside (each frame's from its `obs_start`).
     frames: ChunkSeq[Frame],
@@ -497,11 +508,13 @@ pub fn ck_new(sink ctx: Ctx) -> Ck {
         alias_from: ChunkSeq::new[u32](),
         alias_to: ChunkSeq::new[u32](),
         handlers: 0,
+        no_return: 0,
         loop_floor: 0,
         env: ChunkSeq::new[Bind](),
         bounds: bounds_new(),
         ex_types: ChunkSeq::new[u32](),
         skip: false,
+        lent_element: NONE64,
         frames: ChunkSeq::new[Frame](),
         observed: ChunkSeq::new[Inst](),
         closure_free: ChunkSeq::new[u32](),
@@ -1169,7 +1182,7 @@ fn foreign(in ck: Ck, ty: u32) -> bool {
     if node.kind == TyKind::Named {
         let known = ck.ctx.world.k;
         let name = node.name;
-        if name == known.tiled_seq || name == known.box_ || name == known.dyn_ {
+        if name == known.tiled_seq || name == known.dyn_ {
             return true;
         }
     }
@@ -3036,6 +3049,8 @@ fn closure_expr(inout ck: Ck, ex: Ex, expected: u32) -> u32 {
     let outer_returned = ck.returned;
     let outer_floor = ck.loop_floor;
     let outer_handlers = ck.handlers;
+    let outer_no_return = ck.no_return;
+    ck.no_return = 0;
     ck.fn_result = result;
     ck.returned = NONE32;
     ck.loop_floor = ck.loops.len();
@@ -3057,6 +3072,7 @@ fn closure_expr(inout ck: Ck, ex: Ex, expected: u32) -> u32 {
     ck.returned = outer_returned;
     ck.loop_floor = outer_floor;
     ck.handlers = outer_handlers;
+    ck.no_return = outer_no_return;
     ck.handler_caps.truncate(caps_mark);
     let frame_index = wrapping_sub(ck.frames.len(), 1);
     let frame = match ck.frames.try_get(frame_index) {
@@ -3426,9 +3442,16 @@ pub fn constrain_literals(inout ck: Ck, e: u32, target: u32) {
             let callee = ck.ex(ex.x);
             (callee.y, callee.z)
         };
+        if ex.kind == E_CALL && is_box_new(in ck, ex) {
+            let target_node = ck.ctx.types.node(target);
+            if target_node.kind == TyKind::Named && target_node.n != 0 && ex.n != 0 {
+                let payload = item(in ck.ctx.types, w(target_node.a));
+                constrain_literals(inout ck, actual_arg(in ck, ex, 0).expr, payload);
+            }
+            return;
+        }
         if ex.kind == E_CALL && ex.y != 0 {
-            // `Box::new` under fip (lane 12) never reaches here: boxes
-            // skip the function.
+            // A wrapping intrinsic: its arguments are not constructor fields.
             return;
         }
         let ctor = ctor_of(in ck, qualifier, short_name);
@@ -3627,7 +3650,14 @@ fn handle_expr(inout ck: Ck, ex: Ex, expected: u32) -> u32 {
         ck.alias_from.push(label);
         ck.alias_to.push(cap_label);
     }
+    let blocks_return = region || ex.z != NONE32;
+    if blocks_return {
+        ck.no_return = inc(ck.no_return);
+    }
     let body_ty = expr(inout ck, ex.x);
+    if blocks_return {
+        ck.no_return = wrapping_sub(ck.no_return, 1);
+    }
     ck.handler_caps.truncate(wrapping_sub(ck.handler_caps.len(), 1));
     ck.alias_from.truncate(aliases);
     ck.alias_to.truncate(aliases);
@@ -3657,6 +3687,7 @@ fn handle_expr(inout ck: Ck, ex: Ex, expected: u32) -> u32 {
         error(inout ck, "E0210", extra.start, extra.end);
     }
     bind_mode(inout ck, ret_pat, return_ty, P_SINK);
+    ck.no_return = inc(ck.no_return);
     let returned = expr_expected(inout ck, ret.body, expected);
     ck.env.truncate(env_mark);
     if ck.skip {
@@ -3792,6 +3823,7 @@ fn handle_expr(inout ck: Ck, ex: Ex, expected: u32) -> u32 {
         }
     }
     ck.handlers = wrapping_sub(ck.handlers, 1);
+    ck.no_return = wrapping_sub(ck.no_return, 1);
     ck.loop_floor = floor;
     out
 }
@@ -3832,8 +3864,9 @@ fn op_short_name(inout ck: Ck, full: u32, effect: u32) -> u32 {
 // return. The expression itself is `Never`.
 fn return_expr(inout ck: Ck, ex: Ex) -> u32 {
     let hole = ck.ctx.types.infer;
-    if ck.handlers != 0 {
-        // A `return` out of a handled body or clause: not ported.
+    if ck.no_return != 0 {
+        // A `return` out of a clause, a region block or a stateful handled
+        // body: not ported.
         ck.skip = true;
         return hole;
     }
@@ -4547,6 +4580,9 @@ fn call_expr(inout ck: Ck, ex: Ex, expected: u32) -> u32 {
     if callee.kind == E_NAME && lookup(in ck, callee.x) != NONE32 && ex.y == 0 {
         return value_call(inout ck, ex, expected);
     }
+    if callee.kind == E_NAME && lookup(in ck, callee.x) == NONE32 && is_box_new(in ck, ex) {
+        return box_call(inout ck, ex, expected);
+    }
     if callee.kind != E_NAME || lookup(in ck, callee.x) != NONE32 || ex.y != 0 {
         // Closures, function values and intrinsics: not ported yet.
         ck.skip = true;
@@ -4661,6 +4697,67 @@ fn call_expr(inout ck: Ck, ex: Ex, expected: u32) -> u32 {
     apply(inout ck, sig, ex, NONE32, expected)
 }
 
+// Whether the special call `ex` is the fip prelude's `Box::new` or
+// `Box::new_in_caller` (`special_call` marks those only when it is active).
+fn is_box_new(in ck: Ck, ex: Ex) -> bool {
+    let callee = ck.ex(ex.x);
+    ex.y != 0
+        && (is_qualified(in ck, callee.x, BOX_NEW)
+            || is_qualified(in ck, callee.x, BOX_NEW_IN_CALLER))
+}
+
+// `Checker::fip_box_call`: a box of its one argument, expected as the
+// explicit type argument or the expected box's payload. Boxing a trait
+// object (`Box[dyn Trait]`) is not ported: `dyn` types are foreign.
+fn box_call(inout ck: Ck, ex: Ex, expected: u32) -> u32 {
+    let hole = ck.ctx.types.infer;
+    let box_sym = ck.ctx.world.k.box_;
+    if ex.m > 1 {
+        error(inout ck, "E0207", ex.start, ex.end);
+    }
+    if ex.n != 1 {
+        error(inout ck, "E0207", ex.start, ex.end);
+        for i in 0..w(ex.n) {
+            let t = expr(inout ck, actual_arg(in ck, ex, i).expr);
+        }
+        let mut infer_args: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        infer_args.push(hole);
+        return ck.ctx.types.named(box_sym, in infer_args);
+    }
+    let arg = actual_arg(in ck, ex, 0);
+    let arg_ex = ck.ex(arg.expr);
+    if arg.explicit && arg.pass != P_SINK {
+        error(inout ck, "E0308", arg_ex.start, arg_ex.end);
+    }
+    let inner_expected = if ex.m != 0 {
+        let t = u32_at(in ck.targs, w(ex.b));
+        note(inout ck, t);
+        t
+    } else if is_named(in ck, expected, box_sym) && ck.ctx.types.node(expected).n == 1 {
+        item(in ck.ctx.types, w(ck.ctx.types.node(expected).a))
+    } else {
+        hole
+    };
+    note(inout ck, inner_expected);
+    if ck.skip {
+        return hole;
+    }
+    let actual = expr_expected(inout ck, arg.expr, inner_expected);
+    if ck.skip {
+        return hole;
+    }
+    let inner = if inner_expected != hole {
+        expect_type(inout ck, inner_expected, actual, arg_ex.start, arg_ex.end);
+        refine_annotation(inout ck.ctx.types, inner_expected, actual)
+    } else {
+        default_type(inout ck.ctx.types, actual)
+    };
+    constrain_literals(inout ck, arg.expr, inner);
+    let mut args: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    args.push(inner);
+    ck.ctx.types.named(box_sym, in args)
+}
+
 // The method arms of `Checker::call`: `receiver.method(args)`. A primitive
 // `String`/`Str` method is typed by methods.ves; otherwise a receiver whose
 // type has a `Type::method` function in the world is checked as that
@@ -4680,7 +4777,11 @@ fn method_call(inout ck: Ck, ex: Ex, callee: Ex, expected: u32) -> u32 {
                 return region_op(inout ck, cap, callee.y, ex, expected);
             }
         }
-        // An effect capability, or a qualified name.
+        let labeled = labeled_cap(inout ck, root);
+        if labeled != NONE64 {
+            return labeled_op(inout ck, labeled, callee.y, ex);
+        }
+        // An unknown capability label, or a qualified name.
         ck.skip = true;
         return hole;
     }
@@ -4848,6 +4949,61 @@ fn op_call(inout ck: Ck, ex: Ex, sig: FnSig) -> u32 {
     result
 }
 
+// The capability (a `cap_at` index) a source label names, through its
+// alias: the innermost handler's, else the function's; NONE64 for none.
+fn labeled_cap(inout ck: Ck, label: u32) -> u64 {
+    let source = inc32w(label);
+    let alias = lookup_alias(in ck, source);
+    let target = if alias == 0 { source } else { alias };
+    for i in 0..total_caps(in ck) {
+        if cap_label(inout ck, i) == target {
+            return i;
+        }
+    }
+    NONE64
+}
+
+// `label.op(args)`: the effect operation of the capability at `cap_index`,
+// with the capability's effect arguments, requiring that capability.
+fn labeled_op(inout ck: Ck, cap_index: u64, method: u32, ex: Ex) -> u32 {
+    let hole = ck.ctx.types.infer;
+    let cap = cap_at(in ck, cap_index);
+    let label = cap_label(inout ck, cap_index);
+    let mut text = ChunkSeq::new[u8]();
+    ck.ctx.names.write(cap.name, inout text);
+    put(inout text, PATH_SEPARATOR);
+    ck.ctx.names.write(method, inout text);
+    let full = ck.ctx.names.lookup(in text.as_slice());
+    let op = if full == NONE32 {
+        NONE32
+    } else {
+        op_index(in ck, full)
+    };
+    if op == NONE32 {
+        // Not an operation of the effect: E0206 and friends, not ported.
+        ck.skip = true;
+        return hole;
+    }
+    let sig = ck.fsig(op);
+    let mut types: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    for j in 0..w(cap.arg_count) {
+        types.push(u32_at(in ck.inst_args, add(w(cap.arg_start), j)));
+    }
+    let mut vars = vars_new();
+    let result = apply_args(inout ck, sig, ex, NONE32, in types, inout vars);
+    if ck.skip {
+        return hole;
+    }
+    let request = Inst {
+        name: cap.name,
+        label: label,
+        arg_start: cap.arg_start,
+        arg_count: cap.arg_count
+    };
+    require_effect(inout ck, request);
+    result
+}
+
 // The type arguments of the last instance of `effect` in the current
 // function's row, or none.
 fn context_args(in ck: Ck, effect: u32) -> ChunkSeq[u32] {
@@ -5001,6 +5157,9 @@ fn apply_args(
         if lent {
             ck.lent_closure = arg_ex.start;
         }
+        if param.pass == P_IN && arg_ex.kind == E_INDEX {
+            ck.lent_element = arg_ex.start;
+        }
         let checked_arg = if projected && place != NONE32 {
             peek_type(inout ck, arg.expr)
         } else if projected {
@@ -5010,6 +5169,7 @@ fn apply_args(
         } else {
             expr_expected(inout ck, arg.expr, target)
         };
+        ck.lent_element = NONE64;
         if ck.skip {
             return hole;
         }
@@ -5110,6 +5270,7 @@ fn run_body(
     ck.extra_rows.truncate(0);
     ck.handler_caps.truncate(0);
     ck.handlers = 0;
+    ck.no_return = 0;
     ck.loop_floor = 0;
     ck.frames.truncate(0);
     ck.observed.truncate(0);

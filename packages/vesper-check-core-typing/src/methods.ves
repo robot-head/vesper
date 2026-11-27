@@ -1153,8 +1153,12 @@ pub fn index_expr(inout ck: Ck, ex: Ex) -> u32 {
         return tuple_index(inout ck, ex);
     }
     let elem_ty = seq_elem(in ck, base_ty);
-    if elem_ty != hole && mode(inout ck, elem_ty) != TyMode::Copy {
-        // An element lent in place (or E1522): not ported.
+    // An element whose type is not copy is borrowed in place when it is
+    // lent to an `in` parameter (an element view, §13); `Box` elements
+    // are foreign.
+    let lent = ck.lent_element == ex.start;
+    if elem_ty != hole && mode(inout ck, elem_ty) != TyMode::Copy && !lent {
+        // E1522: not ported.
         ck.skip = true;
         return hole;
     }
