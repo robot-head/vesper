@@ -458,7 +458,7 @@ pub fn outcome(words: &[u64]) -> Outcome {
 /// The WASI packages a command world without host imports names
 /// (src/wasm_backend/host.rs `IO_WIT`, `CLI_WIT`).
 const IO_WIT: &str = "package wasi:io@0.2.0;\n\ninterface error {\n  resource error;\n}\n\ninterface streams {\n  use error.{error};\n  variant stream-error {\n    last-operation-failed(error),\n    closed,\n  }\n  resource output-stream {\n    blocking-write-and-flush: func(contents: list<u8>) -> result<_, stream-error>;\n  }\n}\n";
-const CLI_WIT: &str = "package wasi:cli@0.2.0;\n\ninterface run {\n  run: func() -> result;\n}\n\ninterface stdout {\n  use wasi:io/streams@0.2.0.{output-stream};\n  get-stdout: func() -> output-stream;\n}\n\ninterface environment {\n  get-environment: func() -> list<tuple<string, string>>;\n  get-arguments: func() -> list<string>;\n  initial-cwd: func() -> option<string>;\n}\n";
+const CLI_WIT: &str = "package wasi:cli@0.2.0;\n\ninterface run {\n  run: func() -> result;\n}\n\ninterface stdout {\n  use wasi:io/streams@0.2.0.{output-stream};\n  get-stdout: func() -> output-stream;\n}\n\ninterface stderr {\n  use wasi:io/streams@0.2.0.{output-stream};\n  get-stderr: func() -> output-stream;\n}\n\ninterface environment {\n  get-environment: func() -> list<tuple<string, string>>;\n  get-arguments: func() -> list<string>;\n  initial-cwd: func() -> option<string>;\n}\n";
 /// The WASI 0.2 interfaces the standard I/O libraries lower to
 /// (packages/vesper-wasm-backend/src/host.ves): every type as WASI defines
 /// it, and only the functions the shims import.

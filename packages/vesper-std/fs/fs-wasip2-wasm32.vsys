@@ -31,4 +31,6 @@ sys library StdFs (
     fn vstd_fs_read_dir(nocapture in path: CSlice[u8], nocapture inout err: u64) -> ForeignVal[Option[FsDir]];
     fn vstd_fs_dir_next(inout d: FsDir, nocapture inout name: CSlice[u8], nocapture inout kind: u32) -> ForeignVal[i64];
     fn vstd_fs_dir_close(sink d: FsDir) -> ForeignVal[Unit];
+    fn vstd_fs_write_stdout(nocapture in buf: CSlice[u8], nocapture inout err: u64) -> ForeignVal[u32];
+    fn vstd_fs_write_stderr(nocapture in buf: CSlice[u8], nocapture inout err: u64) -> ForeignVal[u32];
 }

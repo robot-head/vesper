@@ -231,16 +231,20 @@ fn write_mode(in path: Slice[u8], in data: Slice[u8], mode: u32, sync: bool) eff
 // ---------------------------------------------------------------------------
 // Standard output and standard error.
 
-// The Wasm hosts do not yet give @vesper-std a stream to standard output
-// or standard error, so both writes raise `unsupported()`.
+// Write `data` to standard output via `wasi:cli/stdout@0.2.0` (#2507).
 pub fn write_stdout(in data: Slice[u8]) eff [Ffi[StdFs], Fail[IoError]] {
-    let _ = data.len();
-    raise_kind(unsupported())
+    let mut err: u64 = 0;
+    if StdFs::vstd_fs_write_stdout(in data, inout err) == 0 {
+        return raise_io(err);
+    }
 }
 
+// Write `data` to standard error via `wasi:cli/stderr@0.2.0` (#2507).
 pub fn write_stderr(in data: Slice[u8]) eff [Ffi[StdFs], Fail[IoError]] {
-    let _ = data.len();
-    raise_kind(unsupported())
+    let mut err: u64 = 0;
+    if StdFs::vstd_fs_write_stderr(in data, inout err) == 0 {
+        return raise_io(err);
+    }
 }
 
 // Write `data` as the whole file at `path`, creating it or truncating it.
