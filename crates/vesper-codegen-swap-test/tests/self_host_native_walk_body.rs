@@ -1315,3 +1315,57 @@ fn vesper_scalar_bodies_part_6n() {
         assert!(total.is_clean(), "{}", total.summary());
     });
 }
+
+/// Part 6o: `bool` `==`/`!=`, integer-to-float (`widen_f64`/`widen_f32`/
+/// `nearest_f32`/`nearest_f64`), and saturating float-to-int conversions across
+/// both optimized and unoptimized builds.
+const SCALARS_6O: &str = "
+fn int_float_roundtrip(a: i32, b: u32, c: i64, d: u64, p: bool, q: bool) -> i64 {
+    let f1: f64 = widen_f64(a) + widen_f64(b);
+    let f2: f64 = nearest_f64(c) - nearest_f64(d);
+    let f3: f32 = nearest_f32(a) + nearest_f32(b);
+    let total: f64 = sqrt(abs(f1 + f2)) + widen_f64(f3);
+    let s8: i8 = saturating_i8(total);
+    let u8v: u8 = saturating_u8(total);
+    let s16: i16 = saturating_i16(total);
+    let u16v: u16 = saturating_u16(total);
+    let s32: i32 = saturating_i32(total);
+    let u32v: u32 = saturating_u32(total);
+    let eq_bit: i64 = if p == q { 1 } else { 0 };
+    let ne_bit: i64 = if p != q { 2 } else { 0 };
+    widen_i64(s8) ^ widen_i64(u8v) ^ widen_i64(s16) ^ widen_i64(u16v) ^ widen_i64(s32)
+        ^ widen_i64(u32v) ^ eq_bit ^ ne_bit
+}
+fn main() -> i64 {
+    int_float_roundtrip(-15, 42, 1000, 250, true, false)
+        ^ int_float_roundtrip(7, 9, -50, 12, true, true)
+}
+";
+
+#[test]
+fn vesper_scalar_bodies_part_6o() {
+    big_stack(|| {
+        let parsed = vesper::parser::parse(SCALARS_6O);
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        let checked = vesper::check::check(&parsed.module);
+        assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
+        if let Err(e) = build(&checked.world, "main", true) {
+            panic!("the part 6o scalar program does not build: {e}");
+        }
+        let before = EMITTED.load(Ordering::Relaxed);
+        let total = both("scalars_6o", &checked.world, true);
+        let emitted = EMITTED.load(Ordering::Relaxed) - before;
+        eprintln!(
+            "scalars_6o: {}; {emitted} functions emitted from Vesper",
+            total.summary()
+        );
+        let ran = if cross() { 0 } else { 2 };
+        assert_eq!((total.worlds, total.ran), (2, ran), "{}", total.summary());
+        let min_emitted = if cross() { 4 } else { 8 };
+        assert!(
+            emitted >= min_emitted,
+            "part 6o functions should come from Vesper (expected >= {min_emitted}, got {emitted})"
+        );
+        assert!(total.is_clean(), "{}", total.summary());
+    });
+}

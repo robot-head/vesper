@@ -1279,6 +1279,18 @@ impl Gen {
                 extra.push(rk);
                 return true;
             }
+        } else if op == ops_s.eq || op == ops_s.ne {
+            let n0 = self.ctx.types.node(d0);
+            if n0.kind == TyKind::Named && n0.n == 0 && n0.name == self.ctx.world.k.bool_ {
+                kind = INST_INT_EXTRA;
+                extra.push(IEX_WORD_BIN);
+                extra.push(if op == ops_s.eq { WBIN_EQ } else { WBIN_NE });
+                extra.push(0);
+                extra.push(k0);
+                extra.push(k1);
+                extra.push(rk);
+                return true;
+            }
         }
         false
     }
