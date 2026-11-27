@@ -799,6 +799,7 @@ const DECLINE_REASONS: &[&str] = &[
     "Box types",
     "fip functions",
     "the planner refused it",
+    "syntax or assembly errors",
 ];
 
 /// The libraries Stage 2's front end must build byte-identically today, so

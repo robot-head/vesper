@@ -27,7 +27,8 @@ use @vesper/check-data::world::{
 };
 use @vesper/check-layout::{L_ENUM, L_PRODUCT, L_SCALAR, Layouts, layout_of, layouts_new};
 use @vesper/check-names-packages::{
-    AssembledModule, assemble_next_bytes, assembly_begin_bytes, assembly_metadata
+    AssembledModule, assemble_next_bytes, assembly_begin_bytes, assembly_metadata,
+    assembly_parse_errors
 };
 use @vesper/codegen-export::{export_files_of_plan, export_plan_bytes};
 use @vesper/codegen-export::directives::{directives_text};
@@ -53,6 +54,12 @@ pub const DECLINE_BOX: u8 = 4;
 pub const DECLINE_FIP: u8 = 5;
 // The planner refused the library (`ExportFiles` only).
 pub const DECLINE_REFUSED: u8 = 6;
+// The package has syntax or assembly errors.
+pub const DECLINE_DIAGNOSTICS: u8 = 7;
+
+// A little-endian word of the planner's input: its bytes, and a byte's bits.
+const WORD_BYTES: u64 = 8;
+const BYTE_BITS: u64 = 8;
 
 // The type classes of the input (plan_words.rs `C_*`).
 const C_OTHER: u64 = 0;
@@ -506,7 +513,14 @@ pub fn export_plan_input(
             Option::None => break,
         }
     }
+    if assembly_parse_errors(in a) != 0 {
+        return declined(DECLINE_DIAGNOSTICS);
+    }
     let meta = assembly_metadata(sink a);
+    // The Rust CLI rejects a package with syntax or assembly errors.
+    if meta.diagnostics.len() > 0 {
+        return declined(DECLINE_DIAGNOSTICS);
+    }
     let cp = collect_program(in mods);
     // The root module's public names (not qualified), as collected symbols.
     let mut public = ChunkSeq::new[bool]();
@@ -670,11 +684,14 @@ pub fn export_plan_input(
         }
     }
     out.extend(in funcs.as_slice());
-    let mut bytes = ChunkSeq::with_capacity[u8](wrapping_mul(out.len(), 8));
+    let mut bytes = ChunkSeq::with_capacity[u8](wrapping_mul(out.len(), WORD_BYTES));
     for i in 0..out.len() {
         let word = u64_at(in out, i);
-        for b in 0..8 {
-            bytes.push(wrapping_u8(wrapping_shr_u64(word, wrapping_u32(wrapping_mul(b, 8)))));
+        for b in 0..WORD_BYTES {
+            bytes.push(wrapping_u8(wrapping_shr_u64(
+                word,
+                wrapping_u32(wrapping_mul(b, BYTE_BITS))
+            )));
         }
     }
     PlanInput { declined: DECLINE_NONE, bytes: bytes }
