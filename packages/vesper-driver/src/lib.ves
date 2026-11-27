@@ -1021,6 +1021,11 @@ enum RecordFlag: _ {
     AstOptimize = 32,
 }
 
+pub use self::windows_link::{
+    WindowsLinkerFlavor, format_windows_linker_failed, windows_link_args_nul, windows_link_check,
+    windows_linker_flavor
+};
+
 pub fn record_format() -> u64 {
     3
 }
