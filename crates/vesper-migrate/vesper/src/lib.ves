@@ -1902,3 +1902,112 @@ pub fn migrate_render_ctype_vesper(
     }
     copy_str(in "<refused>", inout out, 0)
 }
+
+// ---------------------------------------------------------------------------
+// Rust-to-Vesper type renderer (`rust.rs::RTy::vesper`).
+
+const BYTE_LPAREN: u8 = 40;
+const BYTE_RPAREN: u8 = 41;
+
+const RTY_UNIT: u8 = 0;
+const RTY_BOOL: u8 = 1;
+const RTY_STR: u8 = 2;
+const RTY_BYTE_SLICE: u8 = 3;
+const RTY_PASSTHROUGH: u8 = 4;
+const RTY_SLICE: u8 = 5;
+const RTY_ARRAY: u8 = 6;
+const RTY_STD_ARGS: u8 = 7;
+const RTY_TUPLE: u8 = 8;
+
+fn write_joined_args(
+    in args_buf: Slice[u8],
+    in args_starts: Slice[u64],
+    in args_lens: Slice[u64],
+    inout out: Slice[u8],
+    dst_pos: u64,
+) -> u64 {
+    let k = args_starts.len();
+    let mut pos = dst_pos;
+    let mut i: u64 = 0;
+    loop {
+        if i >= k {
+            break;
+        }
+        if i > 0 {
+            let _ = out.try_set(pos, BYTE_COMMA);
+            pos = wrapping_add(pos, 1);
+            let _ = out.try_set(pos, BYTE_SPACE);
+            pos = wrapping_add(pos, 1);
+        }
+        let s = match args_starts.try_get(i) {
+            Some(v) => v,
+            None => break
+        };
+        let l = match args_lens.try_get(i) {
+            Some(v) => v,
+            None => break
+        };
+        pos = copy_range(in args_buf, s, l, inout out, pos);
+        i = wrapping_add(i, 1);
+    }
+    pos
+}
+
+pub fn migrate_render_rty_vesper(
+    kind: u8,
+    array_len: u64,
+    in head: Slice[u8],
+    in args_buf: Slice[u8],
+    in args_starts: Slice[u64],
+    in args_lens: Slice[u64],
+    inout out: Slice[u8],
+) -> u64 {
+    if kind == RTY_UNIT {
+        return copy_str(in "Unit", inout out, 0);
+    }
+    if kind == RTY_BOOL {
+        return copy_str(in "bool", inout out, 0);
+    }
+    if kind == RTY_STR {
+        return copy_str(in "Str", inout out, 0);
+    }
+    if kind == RTY_BYTE_SLICE {
+        return copy_str(in "ByteSlice", inout out, 0);
+    }
+    if kind == RTY_PASSTHROUGH {
+        return copy_range(in head, 0, head.len(), inout out, 0);
+    }
+    if kind == RTY_SLICE {
+        let mut pos = copy_str(in "Slice[", inout out, 0);
+        pos = copy_range(in head, 0, head.len(), inout out, pos);
+        let _ = out.try_set(pos, BYTE_RBRACKET);
+        return wrapping_add(pos, 1);
+    }
+    if kind == RTY_ARRAY {
+        let mut pos: u64 = 0;
+        let _ = out.try_set(pos, BYTE_LBRACKET);
+        pos = wrapping_add(pos, 1);
+        pos = copy_range(in head, 0, head.len(), inout out, pos);
+        pos = copy_str(in "; ", inout out, pos);
+        pos = write_u64_dec(array_len, inout out, pos);
+        let _ = out.try_set(pos, BYTE_RBRACKET);
+        return wrapping_add(pos, 1);
+    }
+    if kind == RTY_STD_ARGS {
+        let mut pos = copy_range(in head, 0, head.len(), inout out, 0);
+        let _ = out.try_set(pos, BYTE_LBRACKET);
+        pos = wrapping_add(pos, 1);
+        pos = write_joined_args(in args_buf, in args_starts, in args_lens, inout out, pos);
+        let _ = out.try_set(pos, BYTE_RBRACKET);
+        return wrapping_add(pos, 1);
+    }
+    if kind == RTY_TUPLE {
+        let mut pos: u64 = 0;
+        let _ = out.try_set(pos, BYTE_LPAREN);
+        pos = wrapping_add(pos, 1);
+        pos = write_joined_args(in args_buf, in args_starts, in args_lens, inout out, pos);
+        let _ = out.try_set(pos, BYTE_RPAREN);
+        return wrapping_add(pos, 1);
+    }
+    0
+}
