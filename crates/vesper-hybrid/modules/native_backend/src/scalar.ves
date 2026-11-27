@@ -2,10 +2,10 @@ use self::x86_64::{
     XMM0, XMM_AUX_SCRATCH, XMM_LEFT_SCRATCH, XMM_RIGHT_SCRATCH, SSE_ADD, SSE_SUB, SSE_MUL, SSE_DIV,
     SSE_SQRT, FLOAT_UNORDERED_OR_GREATER_EQUAL, is_xmm, find_float_register, ADC_RM_R64, ADD_RM_R64,
     ALU_ADD_EXTENSION, ALU_AND_EXTENSION, ALU_OR_EXTENSION, ALU_SUB_EXTENSION, ALU_XOR_EXTENSION,
-    AND_RM_R64, ARGUMENTS, BYTE_BITS, DWORD_BITS, QWORD_BITS, WORD_BITS, CC_A, CC_AE, CC_B, CC_BE,
-    CC_E, CC_G, CC_GE, CC_L, CC_LE, CC_NE, CC_O, AtomicMemory, AtomicUpdate, FixedArithmetic,
-    Instruction, NEG_EXTENSION, NOT_EXTENSION, OR_RM_R64, R10, R11, RAX, RDX, RSP, SAR_EXTENSION,
-    SHL_EXTENSION, SHR_EXTENSION, SBB_RM_R64, SUB_RM_R64, UNASSIGNED, XOR_RM_R64,
+    ALL_REGISTER_BITS, AND_RM_R64, ARGUMENTS, BYTE_BITS, DWORD_BITS, QWORD_BITS, WORD_BITS, CC_A,
+    CC_AE, CC_B, CC_BE, CC_E, CC_G, CC_GE, CC_L, CC_LE, CC_NE, CC_O, AtomicMemory, AtomicUpdate,
+    FixedArithmetic, Instruction, NEG_EXTENSION, NOT_EXTENSION, OR_RM_R64, R10, R11, RAX, RDX, RSP,
+    SAR_EXTENSION, SHL_EXTENSION, SHR_EXTENSION, SBB_RM_R64, SUB_RM_R64, UNASSIGNED, XOR_RM_R64,
     ALL_REGISTER_CODES, REGISTER_CODES, arg_register, emit, emit_direct_call, emit_direct_jump,
     emit_indirect_call, emit_jump_table, emit_jump_table_entry, emit_symbol_address,
     callee_saved_registers, find_callee_saved_register, find_register, fits_signed_byte,
@@ -199,6 +199,12 @@ pub const VECTOR_ALL_TRUE: u64 = 179;
 pub const VECTOR_HIGH_BITS: u64 = 180;
 pub const TAIL_CALL: u64 = 181;
 pub const VECTOR_INTEGER_COMPARE: u64 = 182;
+const POWER_QUOTIENT: u64 = 183;
+const POWER_REMAINDER: u64 = 184;
+const POWER_SHIFT_MASK: u64 = QWORD_BITS - 1;
+const POWER_SIGNED: u64 = 0x40;
+const POWER_NEGATIVE: u64 = 0x80;
+const POWER_DIVISOR_MASK: u64 = POWER_SHIFT_MASK | POWER_SIGNED | POWER_NEGATIVE;
 pub const VECTOR_CONDITION_SHIFT: u32 = 8;
 pub const AARCH64_TAIL_RESERVED_GP: u64 = 2;
 pub const VECTOR_LANE_INDEX_SHIFT: u32 = 8;
@@ -405,6 +411,59 @@ fn fold_memory_address(
     })
 }
 
+fn fold_power_divisor(in words: Slice[u64], arguments: u64, in divide: Record) -> Option[Record] {
+    if !is_integer_division(divide.op) || divide.right < arguments {
+        return Option::None;
+    }
+    let divisor = read_record(in words, wrapping_sub(divide.right, arguments));
+    if divisor.op != CONSTANT {
+        return Option::None;
+    }
+    let width = divide.extra;
+    let mask = wrapping_shr_u64(ALL_REGISTER_BITS, wrapping_u32(wrapping_sub(QWORD_BITS, width)));
+    let raw = divisor.left & mask;
+    let signed = divide.op == SIGNED_DIV || divide.op == SIGNED_REM;
+    let remainder = divide.op == SIGNED_REM || divide.op == UNSIGNED_REM;
+    let negative = signed && wrapping_shr_u64(raw, wrapping_u32(wrapping_sub(width, 1))) != 0;
+    let magnitude = if negative {
+        wrapping_sub(0, raw) & mask
+    } else {
+        raw
+    };
+    if magnitude == 0 || (magnitude & wrapping_sub(magnitude, 1)) != 0 {
+        return Option::None;
+    }
+    if magnitude == 1 {
+        if remainder {
+            return Option::Some(Record { op: CONSTANT, left: 0, right: 0, extra: 0 });
+        }
+        // Signed MIN / -1 keeps the original overflow trap.
+        if negative {
+            return Option::None;
+        }
+        return Option::Some(Record { op: SHR, left: divide.left, right: 0, extra: width });
+    }
+    let shift = widen_u64(trailing_zeros_u64(magnitude));
+    let mode = (if signed { POWER_SIGNED } else { 0 })
+        | (
+            if negative && !remainder {
+                POWER_NEGATIVE
+            } else {
+                0
+            }
+        );
+    Option::Some(Record {
+        op: if remainder {
+            POWER_REMAINDER
+        } else {
+            POWER_QUOTIENT
+        },
+        left: divide.left,
+        right: shift | mode,
+        extra: width
+    })
+}
+
 // Keep original record IDs when rewriting inputs. The second analysis
 // discards dead arithmetic and computes the new operand lifetimes.
 fn optimize_scalar_block(
@@ -421,12 +480,17 @@ fn optimize_scalar_block(
         }
         let first = read_record(in words, index);
         if first.op != ADD || (first.extra != DWORD_BITS && first.extra != QWORD_BITS) {
-            match fold_memory_address(in words, in reads, arguments, index, in first) {
-                Option::Some(memory) => {
+            let replacement = if is_integer_division(first.op) {
+                fold_power_divisor(in words, arguments, in first)
+            } else {
+                fold_memory_address(in words, in reads, arguments, index, in first)
+            };
+            match replacement {
+                Option::Some(record) => {
                     if folded.len() == 0 {
                         folded.extend(in words);
                     }
-                    write_record(inout folded, index, in memory);
+                    write_record(inout folded, index, in record);
                 },
                 Option::None => {},
             };
@@ -715,6 +779,10 @@ fn is_bit_mix(op: u64) -> bool {
 
 pub fn is_integer_division(op: u64) -> bool {
     op >= SIGNED_DIV && op <= UNSIGNED_REM
+}
+
+fn is_power_division(op: u64) -> bool {
+    op == POWER_QUOTIENT || op == POWER_REMAINDER
 }
 
 fn fixed_result(op: u64) -> u8 {
@@ -1275,6 +1343,7 @@ fn find_last_reads(
             && !bit_mix
             && !cas
             && !atomic_retry
+            && !is_power_division(record.op)
             && !is_vector_operation(record.op))
             || (!labeled && is_cfg_record(record.op))
             || (record.op == STACK_SLOT && index >= frame.slots.len())
@@ -1451,6 +1520,22 @@ fn find_last_reads(
             }
             if is_fixed_arithmetic(record.op) {
                 frame.fixed = frame.fixed || live || is_integer_division(record.op);
+            }
+        }
+        if is_power_division(record.op) {
+            let shift = record.right & POWER_SHIFT_MASK;
+            let signed = (record.right & POWER_SIGNED) != 0;
+            if (record.extra != DWORD_BITS && record.extra != QWORD_BITS)
+                || shift == 0
+                || shift >= record.extra
+                || (record.right & ~POWER_DIVISOR_MASK) != 0
+                || ((record.right & POWER_NEGATIVE) != 0
+                    && (!signed || record.op == POWER_REMAINDER))
+            {
+                return Option::None;
+            }
+            if signed {
+                frame.temporary_registers = frame.temporary_registers | register_bit(THIRD_SCRATCH);
             }
         }
         if is_checked_arithmetic(record.op)
@@ -3410,6 +3495,19 @@ fn encode_block_pass(
             emit_bit_operation(inout output, in record, destination, left);
         } else if is_bit_mix(record.op) {
             emit_bit_mix(inout output, in record, destination, left, right);
+        } else if is_power_division(record.op) {
+            emit(
+                inout output,
+                in Instruction::PowerDivision(
+                    destination,
+                    left,
+                    record.extra,
+                    record.right & POWER_SHIFT_MASK,
+                    (record.right & POWER_SIGNED) != 0,
+                    (record.right & POWER_NEGATIVE) != 0,
+                    record.op == POWER_REMAINDER
+                )
+            );
         } else if record.op == STACK_POINTER {
             emit(inout output, in Instruction::Move(destination, RSP));
         } else if is_symbol(record.op) {

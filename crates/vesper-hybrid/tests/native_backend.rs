@@ -10,6 +10,8 @@ mod binding;
 mod atomic;
 #[path = "native_backend/bit_ops.rs"]
 mod bit_ops;
+#[path = "native_backend/division.rs"]
+mod division;
 #[path = "native_backend/elf.rs"]
 mod elf;
 #[path = "native_backend/elf_host.rs"]

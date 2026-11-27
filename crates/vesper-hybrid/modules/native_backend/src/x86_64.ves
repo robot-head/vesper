@@ -161,7 +161,7 @@ const F32_EXPONENT_BIAS: u64 = 127;
 const F64_EXPONENT_BIAS: u64 = 1023;
 const F32_EXPONENT_SHIFT: u32 = 23;
 const F64_EXPONENT_SHIFT: u32 = 52;
-const ALL_REGISTER_BITS: u64 = 0xffffffffffffffff;
+pub const ALL_REGISTER_BITS: u64 = 0xffffffffffffffff;
 pub const SSE_ADD: u8 = 0x58;
 pub const SSE_SUB: u8 = 0x5c;
 pub const SSE_MUL: u8 = 0x59;
@@ -365,6 +365,7 @@ pub copy enum Instruction {
     Multiply(u8, u8, u64),
     MultiplyImmediate(u8, u8, u32, u64),
     Fixed(FixedArithmetic, u8, u64),
+    PowerDivision(u8, u8, u64, u64, bool, bool, bool),
     Atomic(AtomicMemory, u8, u8, u64),
     AtomicUpdate(AtomicUpdate, u8, u64),
     Fence,
@@ -957,6 +958,48 @@ fn shift_immediate(
     out.push(modrm(extension, destination));
     out.push(wrapping_u8(count));
     normalize_small_result(inout out, destination, width);
+}
+
+fn power_division(
+    inout out: ChunkSeq[u8],
+    dest: u8,
+    source: u8,
+    width: u64,
+    shift: u64,
+    signed: bool,
+    negative: bool,
+    remainder: bool
+) {
+    let wide = width == QWORD_BITS;
+    let discard = wrapping_sub(width, shift);
+    gp_move(inout out, dest, source);
+    if signed {
+        // Add 2^shift - 1 only for a negative dividend to round toward zero.
+        gp_move(inout out, R11, source);
+        if shift != 1 {
+            shift_immediate(inout out, SAR_EXTENSION, R11, wrapping_sub(width, 1), width);
+        }
+        shift_immediate(inout out, SHR_EXTENSION, R11, discard, width);
+        binary(inout out, ADD_RM_R64, dest, R11, wide);
+    }
+    if remainder {
+        if shift < DWORD_BITS {
+            let mask = wrapping_sub(wrapping_shl_u64(1, wrapping_u32(shift)), 1);
+            alu_immediate(inout out, ALU_AND_EXTENSION, dest, wrapping_u32(mask), width);
+        } else {
+            shift_immediate(inout out, SHL_EXTENSION, dest, discard, width);
+            shift_immediate(inout out, SHR_EXTENSION, dest, discard, width);
+        }
+        if signed {
+            binary(inout out, SUB_RM_R64, dest, R11, wide);
+        }
+    } else {
+        let extension = if signed { SAR_EXTENSION } else { SHR_EXTENSION };
+        shift_immediate(inout out, extension, dest, shift, width);
+        if negative {
+            gp_unary(inout out, NEG_EXTENSION, dest, width);
+        }
+    }
 }
 
 fn bit_scan(inout out: ChunkSeq[u8], dest: u8, source: u8, width: u64, leading: bool) {
@@ -1955,6 +1998,26 @@ pub fn emit(inout out: ChunkSeq[u8], in instruction: Instruction) {
             rhs,
             width == QWORD_BITS
         ),
+        Instruction::PowerDivision(
+            destination,
+            source,
+            width,
+            shift,
+            signed,
+            negative,
+            remainder
+        ) => {
+            power_division(
+                inout out,
+                destination,
+                source,
+                width,
+                shift,
+                signed,
+                negative,
+                remainder
+            );
+        },
         Instruction::Immediate(destination, bits) => load_constant(inout out, destination, bits),
         Instruction::FloatImmediate(destination, bits, width) => float_immediate(
             inout out,
