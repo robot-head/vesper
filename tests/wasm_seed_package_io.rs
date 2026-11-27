@@ -88,6 +88,20 @@ fn options(optimize: bool) -> WasmOptions {
     }
 }
 
+/// Stage 2's own compile limits (`packages/vesper-stage2/src/lib.ves`
+/// `empty_facts`): the boot compile of @vesper/stage2 outgrows the CLI's
+/// default instruction budget, which Stage 2 never applies to itself.
+const STAGE2_MAX_MEMORY_PAGES: u32 = 65535;
+const STAGE2_MAX_INSTRUCTIONS: usize = 50_000_000;
+
+fn stage2_boot_options() -> WasmOptions {
+    WasmOptions {
+        max_memory_pages: STAGE2_MAX_MEMORY_PAGES,
+        max_instructions: STAGE2_MAX_INSTRUCTIONS,
+        ..options(false)
+    }
+}
+
 /// The port's component for `src`, or its refusal.
 fn port(c: &ForeignChecked, o: &WasmOptions) -> Result<Vec<u8>, String> {
     let w = &c.checked.world;
@@ -1895,8 +1909,7 @@ fn stage2_collects_package_under_wasi_impl() {
             .expect("load");
     assert!(assembled.ok(), "{:?}", assembled.diagnostics);
     let checked = vesper::ffi_lowering::check_module(&assembled.module, &imports()).expect("check");
-    let mut o = options(false);
-    o.max_memory_pages = 65535;
+    let o = stage2_boot_options();
     let component = port(&checked, &o).expect("compile @vesper/stage2 to wasm");
     let got = run(
         &component,
@@ -1981,8 +1994,7 @@ fn stage2_compiles_package_to_runnable_wasm_impl() {
         vesper::packages::load_for_target(&runner_dir, Some("wasm32-wasip2"), false).expect("load");
     assert!(assembled.ok(), "{:?}", assembled.diagnostics);
     let checked = vesper::ffi_lowering::check_module(&assembled.module, &imports()).expect("check");
-    let mut o = options(false);
-    o.max_memory_pages = 65535;
+    let o = stage2_boot_options();
     let component = port(&checked, &o).expect("compile @vesper/stage2 to wasm");
     let out_diag = sample_dir.join("out.wasm");
     remove_stage2_sidecars(&out_diag);
@@ -2074,8 +2086,7 @@ fn stage2_compiles_vesper_ast_impl() {
         vesper::packages::load_for_target(&runner_dir, Some("wasm32-wasip2"), false).expect("load");
     assert!(assembled.ok(), "{:?}", assembled.diagnostics);
     let checked = vesper::ffi_lowering::check_module(&assembled.module, &imports()).expect("check");
-    let mut o = options(false);
-    o.max_memory_pages = 65535;
+    let o = stage2_boot_options();
     let component = port(&checked, &o).expect("compile @vesper/stage2 to wasm");
     let ast_out_path = dir.join("tmp_stage2_ast_out.wasm");
     remove_stage2_sidecars(&ast_out_path);
@@ -2120,8 +2131,7 @@ fn stage2_self_compilation_fixed_point_impl() {
         .expect("load @vesper/stage2");
     assert!(assembled.ok(), "{:?}", assembled.diagnostics);
     let checked = vesper::ffi_lowering::check_module(&assembled.module, &imports()).expect("check");
-    let mut o = options(false);
-    o.max_memory_pages = 65535;
+    let o = stage2_boot_options();
     let stage2_guest = "/out/tmp_stage2_fp.wasm";
     let stage3_guest = "/out/tmp_stage3_fp.wasm";
     let stage2_path = dir.join("tmp_stage2_fp.wasm");
@@ -2278,8 +2288,7 @@ fn stage2_compiles_package_under_seed_runner_impl() {
         .expect("load @vesper/stage2");
     assert!(assembled.ok(), "{:?}", assembled.diagnostics);
     let checked = vesper::ffi_lowering::check_module(&assembled.module, &imports()).expect("check");
-    let mut o = options(false);
-    o.max_memory_pages = 65535;
+    let o = stage2_boot_options();
     let boot_component = port(&checked, &o).expect("compile @vesper/stage2 boot component");
     let stage2_wasm = dir.join("stage2_boot.wasm");
     std::fs::write(&stage2_wasm, &boot_component).unwrap();
@@ -3157,8 +3166,7 @@ fn stage2_compiles_compiler_packages() {
         assert!(assembled.ok(), "{:?}", assembled.diagnostics);
         let checked =
             vesper::ffi_lowering::check_module(&assembled.module, &imports()).expect("check");
-        let mut o = options(false);
-        o.max_memory_pages = 65535;
+        let o = stage2_boot_options();
         let stage2_comp_path = dir.join("stage2_boot.wasm");
         let syms_path = sidecar_path(&stage2_comp_path, ".boot.syms");
         let boot_component = port_with_syms(&checked, &o, &syms_path).expect("boot");
