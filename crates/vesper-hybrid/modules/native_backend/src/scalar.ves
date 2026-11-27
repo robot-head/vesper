@@ -916,6 +916,16 @@ pub fn uses_vector_left(op: u64) -> bool {
     is_vector_binary(op) || is_vector_convert(op) || op >= VECTOR_INSERT && op <= VECTOR_HIGH_BITS
 }
 
+fn x86_vector_opcode(op: u64) -> bool {
+    op >= VECTOR_CONSTANT && op <= VECTOR_DEMOTE || op >= VECTOR_INSERT && op <= VECTOR_HIGH_BITS
+}
+
+pub fn valid_vector_lane(index: u64, width: u64) -> bool {
+    valid_width(width)
+        && index < VECTOR_BITS / BYTE_BITS
+        && wrapping_mul(index, width) < VECTOR_BITS
+}
+
 fn vector_binary_opcode(op: u64, width: u64) -> u8 {
     let packed = match op {
         VECTOR_AND => return PAND,
@@ -1010,8 +1020,7 @@ fn valid_vector_operands(in words: Slice[u64], arguments: u64, count: u64, paire
         let record = read_record(in words, index);
         let vector_binary = is_vector_binary(record.op);
         if (reads_left(in record)
-            && vector_value(in words, arguments, record.left)
-                != (vector_binary || is_vector_convert(record.op)))
+            && vector_value(in words, arguments, record.left) != uses_vector_left(record.op))
             || (reads_right(in record, paired)
                 && vector_value(in words, arguments, record.right)
                     != (vector_binary || record.op == VECTOR_STORE))
@@ -1195,7 +1204,7 @@ fn find_last_reads(
             && record.op != STACK_POINTER
             && record.op != FLOAT_TO_INTEGER_TRUNC
             && !is_conditional_trap(record.op)
-            && (record.op < VECTOR_CONSTANT || record.op > VECTOR_DEMOTE))
+            && !x86_vector_opcode(record.op))
             || (!labeled && is_cfg_record(record.op))
             || (record.op == STACK_SLOT && index >= frame.slots.len())
             || (record.op == RETURN_PAIR && (reverse_index != 0 || record.left >= value))
@@ -1230,7 +1239,7 @@ fn find_last_reads(
         }
         let last = last_read(in reads, value);
         let live = last != NEVER_READ || live_overflow_flag(in reads, value, record.op);
-        if record.op >= VECTOR_CONSTANT && record.op <= VECTOR_DEMOTE {
+        if x86_vector_opcode(record.op) {
             let valid = match record.op {
                 VECTOR_CONSTANT | VECTOR_AND | VECTOR_OR | VECTOR_XOR => record.extra == 0,
                 VECTOR_LOAD => record.right <= DISP32_MASK && record.extra == 0,
@@ -1238,6 +1247,14 @@ fn find_last_reads(
                 VECTOR_SPLAT => record.right == 0 && valid_width(record.extra),
                 VECTOR_ADD | VECTOR_SUB => valid_width(record.extra),
                 VECTOR_PROMOTE_LOW | VECTOR_DEMOTE => record.right == 0 && record.extra == 0,
+                VECTOR_INSERT => valid_vector_lane(
+                    wrapping_shr_u64(record.extra, VECTOR_LANE_INDEX_SHIFT),
+                    record.extra & VECTOR_LANE_WIDTH_MASK
+                ),
+                VECTOR_EXTRACT => valid_vector_lane(record.right, record.extra),
+                VECTOR_ANY_TRUE | VECTOR_ALL_TRUE | VECTOR_HIGH_BITS => {
+                    record.right == 0 && valid_width(record.extra)
+                },
                 _ => record.extra == BYTE_BITS || record.extra == WORD_BITS,
             };
             if !valid {
@@ -2357,6 +2374,60 @@ pub fn encode_block(
     encode_block_pass(in words, allow_relocations, inout relocations, true)
 }
 
+fn emit_vector_instruction(
+    inout output: ChunkSeq[u8],
+    in record: Record,
+    destination: u8,
+    left: u8,
+    right: u8
+) {
+    let instruction = match record.op {
+        VECTOR_CONSTANT => Instruction::VectorConstant(destination, record.left, record.right),
+        VECTOR_SPLAT => Instruction::VectorSplat(destination, left, record.extra),
+        VECTOR_LOAD => Instruction::Load(
+            destination,
+            left,
+            wrapping_u32(record.right),
+            VECTOR_BITS
+        ),
+        VECTOR_PROMOTE_LOW
+            | VECTOR_DEMOTE => Instruction::VectorConvert(
+                destination,
+                left,
+                record.op == VECTOR_DEMOTE
+            ),
+        VECTOR_INSERT => {
+            let lane = wrapping_shr_u64(record.extra, VECTOR_LANE_INDEX_SHIFT);
+            let width = record.extra & VECTOR_LANE_WIDTH_MASK;
+            emit(inout output, in Instruction::Move(destination, left));
+            Instruction::VectorInsert(destination, right, lane, width)
+        },
+        VECTOR_EXTRACT => Instruction::VectorExtract(destination, left, record.right, record.extra),
+        VECTOR_HIGH_BITS => Instruction::VectorHighBits(destination, left, record.extra),
+        VECTOR_ANY_TRUE
+            | VECTOR_ALL_TRUE => Instruction::VectorTruth(
+                destination,
+                left,
+                record.op == VECTOR_ALL_TRUE,
+                record.extra
+            ),
+        _ => {
+            let (first, second) = if destination == right && can_reuse_right(record.op) {
+                (right, left)
+            } else {
+                (left, right)
+            };
+            emit(inout output, in Instruction::Move(destination, first));
+            Instruction::VectorBinary(
+                vector_binary_opcode(record.op, record.extra),
+                destination,
+                second
+            )
+        },
+    };
+    emit(inout output, in instruction);
+}
+
 fn encode_block_pass(
     in words: Slice[u64],
     allow_relocations: bool,
@@ -2783,7 +2854,7 @@ fn encode_block_pass(
         }
         let has_right = reads_right(in record, paired);
         let vector_binary = is_vector_binary(record.op);
-        let operand_width = if vector_binary || is_vector_convert(record.op) {
+        let left_width = if uses_vector_left(record.op) {
             VECTOR_BITS
         } else {
             QWORD_BITS
@@ -2798,7 +2869,7 @@ fn encode_block_pass(
                 } else {
                     LEFT_SCRATCH
                 },
-                operand_width
+                left_width
             )
         } else {
             UNASSIGNED
@@ -2816,7 +2887,12 @@ fn encode_block_pass(
             } else {
                 RIGHT_SCRATCH
             };
-            materialize_width(inout output, in location, scratch, operand_width)
+            let width = if vector_binary {
+                VECTOR_BITS
+            } else {
+                QWORD_BITS
+            };
+            materialize_width(inout output, in location, scratch, width)
         } else {
             UNASSIGNED
         };
@@ -2851,32 +2927,8 @@ fn encode_block_pass(
         };
         if record.op == CONSTANT {
             emit(inout output, in Instruction::Immediate(destination, record.left));
-        } else if record.op == VECTOR_CONSTANT {
-            emit(
-                inout output,
-                in Instruction::VectorConstant(destination, record.left, record.right)
-            );
-        } else if record.op == VECTOR_SPLAT {
-            emit(inout output, in Instruction::VectorSplat(destination, left, record.extra));
-        } else if record.op == VECTOR_LOAD {
-            emit(
-                inout output,
-                in Instruction::Load(destination, left, wrapping_u32(record.right), VECTOR_BITS)
-            );
-        } else if vector_binary {
-            let (first, second) = if destination == right && can_reuse_right(record.op) {
-                (right, left)
-            } else {
-                (left, right)
-            };
-            let opcode = vector_binary_opcode(record.op, record.extra);
-            emit(inout output, in Instruction::Move(destination, first));
-            emit(inout output, in Instruction::VectorBinary(opcode, destination, second));
-        } else if is_vector_convert(record.op) {
-            emit(
-                inout output,
-                in Instruction::VectorConvert(destination, left, record.op == VECTOR_DEMOTE)
-            );
+        } else if x86_vector_opcode(record.op) {
+            emit_vector_instruction(inout output, in record, destination, left, right);
         } else if record.op == STACK_POINTER {
             emit(inout output, in Instruction::Move(destination, RSP));
         } else if record.op == FLOAT_CONSTANT {

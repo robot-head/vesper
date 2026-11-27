@@ -40,7 +40,7 @@ use self::scalar::{
     VECTOR_PROMOTE_LOW, VECTOR_DEMOTE, VECTOR_PAIRWISE_ADD, VECTOR_SWIZZLE, VECTOR_INSERT,
     VECTOR_EXTRACT, VECTOR_ANY_TRUE, VECTOR_ALL_TRUE, VECTOR_HIGH_BITS, VECTOR_LANE_INDEX_SHIFT,
     VECTOR_LANE_WIDTH_MASK, is_vector_binary, uses_vector_left, vector_value, TAIL_CALL,
-    AARCH64_TAIL_RESERVED_GP
+    AARCH64_TAIL_RESERVED_GP, valid_vector_lane
 };
 use self::x86_64::{
     BYTE_BITS, WORD_BITS, DWORD_BITS, QWORD_BITS, FLOAT_ORDERED, FLOAT_UNORDERED, FLOAT_EQUAL,
@@ -1391,12 +1391,6 @@ fn operands(in r: Record, returns: u64) -> Option[u64] {
         },
         _ => Option::None,
     }
-}
-
-fn valid_vector_lane(index: u64, width: u64) -> bool {
-    scalar_width(width)
-        && index < VECTOR_BITS / BYTE_BITS
-        && wrapping_mul(index, width) < VECTOR_BITS
 }
 
 fn valid_vector_inputs(in words: Slice[u64], args: u64, count: u64, returns: u64) -> bool {

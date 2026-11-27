@@ -2011,7 +2011,7 @@ impl IntegerBlocks<'_> {
                 opcode: Opcode::Insertlane,
                 args: [vector, scalar],
                 imm,
-            } if self.aarch64 && ty(vector) == output && ty(scalar) == output.lane_type() => {
+            } if ty(vector) == output && ty(scalar) == output.lane_type() => {
                 let lane = u64::from(imm);
                 if lane >= u64::from(output.lane_count()) {
                     return None;
@@ -2348,12 +2348,10 @@ impl IntegerBlocks<'_> {
                 values.low[value] = Some(self.vector_instruction(inst, value, values)?);
                 continue;
             }
-            if self.aarch64
-                && matches!(
-                    function.dfg.insts[inst].opcode(),
-                    Opcode::Extractlane | Opcode::VanyTrue | Opcode::VallTrue | Opcode::VhighBits
-                )
-            {
+            if matches!(
+                function.dfg.insts[inst].opcode(),
+                Opcode::Extractlane | Opcode::VanyTrue | Opcode::VallTrue | Opcode::VhighBits
+            ) {
                 values.low[value] = Some(self.vector_scalar_instruction(inst, value, values)?);
                 continue;
             }

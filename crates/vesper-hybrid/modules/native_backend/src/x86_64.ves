@@ -100,6 +100,19 @@ const PSUBUSW: u8 = 0xd9;
 const PAVGB: u8 = 0xe0;
 const PAVGW: u8 = 0xe3;
 const CONVERT_PACKED_PRECISION: u8 = 0x5a;
+const PEXTRW: u8 = 0xc5;
+const PINSRW: u8 = 0xc4;
+const PMOVMSKB: u8 = 0xd7;
+const MOVMSK: u8 = 0x50;
+const PACKSSWB: u8 = 0x63;
+const PCMPEQB: u8 = 0x74;
+const PCMPEQW: u8 = 0x75;
+const PCMPEQD: u8 = 0x76;
+const SWAP_ADJACENT_DWORDS: u8 = 0xb1;
+const HIGH_QWORD_TO_LOW: u8 = 0x0e;
+const LOW_BYTE_MASK: u32 = 0xff;
+const ALL_BYTE_SIGN_BITS: u32 = 0xffff;
+const BYTE_LANES_PER_WORD: u64 = WORD_BITS / BYTE_BITS;
 const DUPLICATE_LOW_DWORD: u8 = 0x00;
 const DUPLICATE_LOW_QWORD: u8 = 0x44;
 const GPR_TO_XMM: u8 = 0x6e;
@@ -239,6 +252,10 @@ pub copy enum Instruction {
     VectorSplat(u8, u8, u64),
     VectorBinary(u8, u8, u8),
     VectorConvert(u8, u8, bool),
+    VectorExtract(u8, u8, u64, u64),
+    VectorInsert(u8, u8, u64, u64),
+    VectorHighBits(u8, u8, u64),
+    VectorTruth(u8, u8, bool, u64),
     FloatCompare(u8, u8, u8, u64, u64),
     Move(u8, u8),
     Exchange(u8, u8),
@@ -737,13 +754,17 @@ fn atomic_memory(inout out: ChunkSeq[u8], in op: AtomicMemory, register: u8, bas
     memory_operand(inout out, register, base, 0);
 }
 
+fn rotate_word_bytes(inout out: ChunkSeq[u8], register: u8) {
+    out.push(OPERAND_SIZE_OVERRIDE);
+    emit_rex(inout out, 0, register, false, false);
+    out.push(SHIFT_GROUP_IMM8);
+    out.push(modrm(ROR_EXTENSION, register));
+    out.push(wrapping_u8(BYTE_BITS));
+}
+
 fn byte_swap(inout out: ChunkSeq[u8], register: u8, width: u64) {
     if width == WORD_BITS {
-        out.push(OPERAND_SIZE_OVERRIDE);
-        emit_rex(inout out, 0, register, false, false);
-        out.push(SHIFT_GROUP_IMM8);
-        out.push(modrm(ROR_EXTENSION, register));
-        out.push(wrapping_u8(BYTE_BITS));
+        rotate_word_bytes(inout out, register);
     } else {
         emit_rex(inout out, 0, register, width == QWORD_BITS, false);
         out.push(TWO_BYTE_OPCODE);
@@ -939,9 +960,9 @@ fn float_bits(inout out: ChunkSeq[u8], destination: u8, source: u8, width: u64) 
     out.push(modrm(xmm, gp));
 }
 
-fn packed_shuffle(inout out: ChunkSeq[u8], destination: u8, lanes: u8) {
+fn packed_shuffle(inout out: ChunkSeq[u8], destination: u8, source: u8, lanes: u8) {
     out.push(OPERAND_SIZE_OVERRIDE);
-    xmm_binary(inout out, PSHUFD, destination, destination);
+    xmm_binary(inout out, PSHUFD, destination, source);
     out.push(lanes);
 }
 
@@ -957,7 +978,7 @@ fn vector_constant(inout out: ChunkSeq[u8], destination: u8, low: u64, high: u64
         return;
     }
     if high == low {
-        packed_shuffle(inout out, destination, DUPLICATE_LOW_QWORD);
+        packed_shuffle(inout out, destination, destination, DUPLICATE_LOW_QWORD);
     } else {
         move_constant(inout out, R11, high);
         float_bits(inout out, XMM_RIGHT_SCRATCH, R11, QWORD_BITS);
@@ -986,7 +1007,141 @@ fn vector_splat(inout out: ChunkSeq[u8], destination: u8, source: u8, lane: u64)
     } else {
         DUPLICATE_LOW_DWORD
     };
-    packed_shuffle(inout out, destination, lanes);
+    packed_shuffle(inout out, destination, destination, lanes);
+}
+
+fn shift_right_lane(inout out: ChunkSeq[u8], destination: u8, shift: u64, wide: bool) {
+    emit_rex(inout out, 0, destination, wide, false);
+    out.push(SHIFT_GROUP_IMM8);
+    out.push(modrm(SHR_EXTENSION, destination));
+    out.push(wrapping_u8(shift));
+}
+
+fn extract_word(inout out: ChunkSeq[u8], destination: u8, source: u8, lane: u64) {
+    let source = xmm_code(source);
+    out.push(OPERAND_SIZE_OVERRIDE);
+    emit_rex(inout out, destination, source, false, false);
+    out.push(TWO_BYTE_OPCODE);
+    out.push(PEXTRW);
+    out.push(modrm(destination, source));
+    out.push(wrapping_u8(lane));
+}
+
+fn insert_word(inout out: ChunkSeq[u8], destination: u8, source: u8, lane: u64) {
+    let destination = xmm_code(destination);
+    out.push(OPERAND_SIZE_OVERRIDE);
+    emit_rex(inout out, destination, source, false, false);
+    out.push(TWO_BYTE_OPCODE);
+    out.push(PINSRW);
+    out.push(modrm(destination, source));
+    out.push(wrapping_u8(lane));
+}
+
+fn vector_extract(inout out: ChunkSeq[u8], dest: u8, source: u8, lane: u64, width: u64) {
+    if width <= WORD_BITS {
+        let word = if width == BYTE_BITS {
+            lane / BYTE_LANES_PER_WORD
+        } else {
+            lane
+        };
+        extract_word(inout out, dest, source, word);
+        if width == BYTE_BITS {
+            if lane % BYTE_LANES_PER_WORD == 0 {
+                truncate(inout out, dest, dest, BYTE_BITS);
+            } else {
+                shift_right_lane(inout out, dest, BYTE_BITS, false);
+            }
+        }
+    } else {
+        let mut source = source;
+        if lane != 0 {
+            let shuffle = if width == QWORD_BITS {
+                HIGH_QWORD_TO_LOW
+            } else {
+                wrapping_u8(lane)
+            };
+            packed_shuffle(inout out, XMM_RIGHT_SCRATCH, source, shuffle);
+            source = XMM_RIGHT_SCRATCH;
+        }
+        float_bits(inout out, dest, source, width);
+    }
+}
+
+fn vector_insert(inout out: ChunkSeq[u8], dest: u8, source: u8, lane: u64, width: u64) {
+    if width == BYTE_BITS {
+        let word = lane / BYTE_LANES_PER_WORD;
+        let odd = lane % BYTE_LANES_PER_WORD != 0;
+        extract_word(inout out, R11, dest, word);
+        if odd {
+            rotate_word_bytes(inout out, R11);
+        }
+        emit_rex(inout out, source, R11, false, true);
+        out.push(MOV_RM_R8);
+        out.push(modrm(source, R11));
+        if odd {
+            rotate_word_bytes(inout out, R11);
+        }
+        insert_word(inout out, dest, R11, word);
+        return;
+    }
+    let words = width / WORD_BITS;
+    let first = wrapping_mul(lane, words);
+    insert_word(inout out, dest, source, first);
+    if words > 1 {
+        binary(inout out, MOV_RM_R64, R11, source, width == QWORD_BITS);
+        for word in 1..words {
+            shift_right_lane(inout out, R11, WORD_BITS, width == QWORD_BITS);
+            insert_word(inout out, dest, R11, wrapping_add(first, word));
+        }
+    }
+}
+
+fn vector_mask(inout out: ChunkSeq[u8], dest: u8, source: u8, width: u64) {
+    if width == BYTE_BITS || width == QWORD_BITS {
+        out.push(OPERAND_SIZE_OVERRIDE);
+    }
+    let source = xmm_code(source);
+    emit_rex(inout out, dest, source, false, false);
+    out.push(TWO_BYTE_OPCODE);
+    out.push(if width == BYTE_BITS { PMOVMSKB } else { MOVMSK });
+    out.push(modrm(dest, source));
+}
+
+fn vector_high_bits(inout out: ChunkSeq[u8], dest: u8, source: u8, width: u64) {
+    if width == WORD_BITS {
+        // Signed saturation preserves each word's sign in the corresponding byte.
+        float_move(inout out, XMM_LEFT_SCRATCH, source);
+        out.push(OPERAND_SIZE_OVERRIDE);
+        xmm_binary(inout out, PACKSSWB, XMM_LEFT_SCRATCH, XMM_LEFT_SCRATCH);
+        vector_mask(inout out, dest, XMM_LEFT_SCRATCH, BYTE_BITS);
+        alu_immediate(inout out, ALU_AND_EXTENSION, dest, LOW_BYTE_MASK, DWORD_BITS);
+    } else {
+        vector_mask(inout out, dest, source, width);
+    }
+}
+
+fn vector_truth(inout out: ChunkSeq[u8], dest: u8, source: u8, all: bool, width: u64) {
+    float_move(inout out, XMM_LEFT_SCRATCH, source);
+    if all && width == QWORD_BITS {
+        // SSE2 compares dwords. OR each qword's two halves into both dwords.
+        packed_shuffle(inout out, XMM_RIGHT_SCRATCH, XMM_LEFT_SCRATCH, SWAP_ADJACENT_DWORDS);
+        out.push(OPERAND_SIZE_OVERRIDE);
+        xmm_binary(inout out, POR, XMM_LEFT_SCRATCH, XMM_RIGHT_SCRATCH);
+    }
+    out.push(OPERAND_SIZE_OVERRIDE);
+    xmm_binary(inout out, PXOR, XMM_RIGHT_SCRATCH, XMM_RIGHT_SCRATCH);
+    let compare = if !all || width == BYTE_BITS {
+        PCMPEQB
+    } else if width == WORD_BITS {
+        PCMPEQW
+    } else {
+        PCMPEQD
+    };
+    out.push(OPERAND_SIZE_OVERRIDE);
+    xmm_binary(inout out, compare, XMM_LEFT_SCRATCH, XMM_RIGHT_SCRATCH);
+    vector_mask(inout out, dest, XMM_LEFT_SCRATCH, BYTE_BITS);
+    compare_immediate(inout out, dest, if all { 0 } else { ALL_BYTE_SIGN_BITS }, DWORD_BITS);
+    set_condition(inout out, dest, if all { CC_E } else { CC_NE });
 }
 
 fn float_memory(
@@ -1151,6 +1306,33 @@ pub fn emit(inout out: ChunkSeq[u8], in instruction: Instruction) {
             }
             xmm_binary(inout out, CONVERT_PACKED_PRECISION, destination, source);
         },
+        Instruction::VectorExtract(destination, source, lane, width) => vector_extract(
+            inout out,
+            destination,
+            source,
+            lane,
+            width
+        ),
+        Instruction::VectorInsert(destination, source, lane, width) => vector_insert(
+            inout out,
+            destination,
+            source,
+            lane,
+            width
+        ),
+        Instruction::VectorHighBits(destination, source, width) => vector_high_bits(
+            inout out,
+            destination,
+            source,
+            width
+        ),
+        Instruction::VectorTruth(destination, source, all, width) => vector_truth(
+            inout out,
+            destination,
+            source,
+            all,
+            width
+        ),
         Instruction::FloatBits(destination, source, width) => float_bits(
             inout out,
             destination,

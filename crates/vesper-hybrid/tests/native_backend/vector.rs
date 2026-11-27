@@ -349,3 +349,152 @@ fn packed_float_precision_conversions_match_cranelift() {
     }
     unsafe { module.free_memory() };
 }
+
+#[test]
+fn vector_lane_access_matches_cranelift_for_each_index() {
+    let mut module = module();
+    for ty in [
+        types::I8X16,
+        types::I16X8,
+        types::I32X4,
+        types::I64X2,
+        types::F32X4,
+        types::F64X2,
+    ] {
+        let lane = ty.lane_type();
+        let int = lane.as_int();
+        let width = lane.bytes() as usize;
+        for index in 0..ty.lane_count() {
+            let mut context = module.make_context();
+            context.func.signature.params = vec![AbiParam::new(types::I64); 3];
+            context
+                .func
+                .signature
+                .returns
+                .push(AbiParam::new(types::I64));
+            let mut frontend = FunctionBuilderContext::new();
+            let mut builder = FunctionBuilder::new(&mut context.func, &mut frontend);
+            let entry = builder.create_block();
+            builder.append_block_params_for_function_params(entry);
+            builder.switch_to_block(entry);
+            let [source, destination, bits] = *builder.block_params(entry) else {
+                unreachable!()
+            };
+            let flags = MemFlags::new().with_notrap();
+            let before = builder.ins().load(ty, flags, source, 0);
+            let input = if int == types::I64 {
+                bits
+            } else {
+                builder.ins().ireduce(int, bits)
+            };
+            let input = if lane.is_float() {
+                builder.ins().bitcast(lane, MemFlags::new(), input)
+            } else {
+                input
+            };
+            let after = builder.ins().insertlane(before, input, index as u8);
+            let extracted = builder.ins().extractlane(before, index as u8);
+            let extracted = if lane.is_float() {
+                builder.ins().bitcast(int, MemFlags::new(), extracted)
+            } else {
+                extracted
+            };
+            let extracted = if int == types::I64 {
+                extracted
+            } else {
+                builder.ins().uextend(types::I64, extracted)
+            };
+            builder.ins().store(flags, after, destination, 0);
+            builder.ins().return_(&[extracted]);
+            builder.seal_all_blocks();
+            builder.finalize();
+
+            let functions = compile(&mut module, &mut context);
+            let source: [u8; VECTOR_BYTES] = std::array::from_fn(|i| 0xa5 ^ (i as u8 * 13));
+            let start = index as usize * width;
+            let range = start..start + width;
+            let mut old = [0u8; size_of::<u64>()];
+            old[..width].copy_from_slice(&source[range.clone()]);
+            for bits in [u64::MAX, 0x7ff8_ccdd_7fc0_0042, 0x4488_3322_fe67_8910] {
+                let mut want = source;
+                want[range.clone()].copy_from_slice(&bits.to_le_bytes()[..width]);
+                for pointer in functions {
+                    type Entry = unsafe extern "C" fn(*const u8, *mut u8, u64) -> u64;
+                    let run = unsafe { std::mem::transmute::<*const u8, Entry>(pointer) };
+                    let mut got = [0; VECTOR_BYTES];
+                    let result = unsafe { run(source.as_ptr(), got.as_mut_ptr(), bits) };
+                    assert_eq!(got, want, "{ty} lane {index}");
+                    assert_eq!(result, u64::from_le_bytes(old), "{ty} lane {index}");
+                }
+            }
+        }
+    }
+    unsafe { module.free_memory() };
+}
+
+#[test]
+fn vector_reductions_match_cranelift_on_zero_and_sign_bits() {
+    let mut module = module();
+    for ty in [types::I8X16, types::I16X8, types::I32X4, types::I64X2] {
+        let width = ty.lane_type().bytes() as usize;
+        let mut context = module.make_context();
+        context.func.signature.params = vec![AbiParam::new(types::I64); 2];
+        let mut frontend = FunctionBuilderContext::new();
+        let mut builder = FunctionBuilder::new(&mut context.func, &mut frontend);
+        let entry = builder.create_block();
+        builder.append_block_params_for_function_params(entry);
+        builder.switch_to_block(entry);
+        let [source, destination] = *builder.block_params(entry) else {
+            unreachable!()
+        };
+        let flags = MemFlags::new().with_notrap();
+        let vector = builder.ins().load(ty, flags, source, 0);
+        let any = builder.ins().vany_true(vector);
+        let any = builder.ins().uextend(types::I64, any);
+        let all = builder.ins().vall_true(vector);
+        let all = builder.ins().uextend(types::I64, all);
+        let mask = builder.ins().vhigh_bits(types::I64, vector);
+        for (i, value) in [any, all, mask].into_iter().enumerate() {
+            builder
+                .ins()
+                .store(flags, value, destination, (i * size_of::<u64>()) as i32);
+        }
+        builder.ins().return_(&[]);
+        builder.seal_all_blocks();
+        builder.finalize();
+
+        let functions = compile(&mut module, &mut context);
+        let signed: [u8; VECTOR_BYTES] = std::array::from_fn(|i| {
+            if i % width == width - 1 && (i / width).is_multiple_of(2) {
+                0x80
+            } else {
+                0
+            }
+        });
+        let low_bytes: [u8; VECTOR_BYTES] =
+            std::array::from_fn(|i| u8::from(i.is_multiple_of(width)));
+        for source in [
+            [0u8; VECTOR_BYTES],
+            [1; VECTOR_BYTES],
+            [0xff; VECTOR_BYTES],
+            signed,
+            low_bytes,
+        ] {
+            let lanes = source.chunks_exact(width);
+            let nonzero = |lane: &[u8]| lane.iter().any(|&b| b != 0);
+            let any = u64::from(lanes.clone().any(nonzero));
+            let all = u64::from(lanes.clone().all(nonzero));
+            let sign = lanes.enumerate().fold(0, |acc, (i, lane)| {
+                acc | (u64::from(lane[width - 1] >> (u8::BITS - 1)) << i)
+            });
+            for pointer in functions {
+                type Entry = unsafe extern "C" fn(*const u8, *mut u64);
+                let run = unsafe { std::mem::transmute::<*const u8, Entry>(pointer) };
+                let mut output = [u64::MAX; 3];
+                unsafe { run(source.as_ptr(), output.as_mut_ptr()) };
+                assert_eq!(output, [any, all, sign], "{ty} {source:?}");
+            }
+        }
+    }
+    unsafe { module.free_memory() };
+}
