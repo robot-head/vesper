@@ -524,18 +524,41 @@ pub fn ec_public_key_from_pem(pem: &str) -> Result<EcPublicKey, AttestError> {
     )
 }
 
+const PEM_STATUS_MASK: u64 = 7;
+const PEM_STATUS_SHIFT: u64 = 3;
+const PEM_STATUS_OK: u64 = 0;
+const PEM_STATUS_EMPTY: u64 = 2;
+const PEM_STATUS_TOO_SMALL: u64 = 3;
+const PEM_SPAN_STRIDE: usize = 2;
+const PEM_INIT_CERT_CAP: usize = 8;
+const PEM_B64_NUM: usize = 3;
+const PEM_B64_DEN: usize = 4;
+const PEM_B64_PAD: usize = 4;
+
 /// Split concatenated PEM certificates (leaf first) into DER blobs.
 pub fn pem_certificates(pem: &[u8]) -> Result<Vec<Vec<u8>>, ParseError> {
-    use rustls_pki_types::pem::PemObject;
-    let mut out = Vec::new();
-    for item in CertificateDer::pem_slice_iter(pem) {
-        let cert = item.map_err(|_| ParseError::Pem("malformed PEM certificate"))?;
-        out.push(cert.as_ref().to_vec());
+    let mut der_out = vec![0u8; (pem.len() * PEM_B64_NUM) / PEM_B64_DEN + PEM_B64_PAD];
+    let mut spans = vec![0u64; PEM_INIT_CERT_CAP * PEM_SPAN_STRIDE];
+    loop {
+        let res = crate::port::vesper::decode_pem_certificates(pem, &mut der_out, &mut spans);
+        match res & PEM_STATUS_MASK {
+            PEM_STATUS_OK => {
+                let count = (res >> PEM_STATUS_SHIFT) as usize;
+                let mut out = Vec::with_capacity(count);
+                for i in 0..count {
+                    let s = spans[i * PEM_SPAN_STRIDE] as usize;
+                    let e = spans[i * PEM_SPAN_STRIDE + 1] as usize;
+                    out.push(der_out[s..e].to_vec());
+                }
+                return Ok(out);
+            }
+            PEM_STATUS_EMPTY => return Err(ParseError::Pem("no certificates")),
+            PEM_STATUS_TOO_SMALL => {
+                spans.resize(spans.len() * 2, 0);
+            }
+            _ => return Err(ParseError::Pem("malformed PEM certificate")),
+        }
     }
-    if out.is_empty() {
-        return Err(ParseError::Pem("no certificates"));
-    }
-    Ok(out)
 }
 
 #[cfg(test)]
@@ -558,5 +581,23 @@ mod der_cert_tests {
         let mut trailing = der.to_vec();
         trailing.push(0);
         assert!(RawCert::parse(&trailing).is_err());
+    }
+
+    #[test]
+    fn pem_certificates_matches_rust_reference() {
+        use rustls_pki_types::pem::PemObject;
+        let c1 = rcgen::generate_simple_self_signed(vec!["a.vesper.test".to_string()]).unwrap();
+        let c2 = rcgen::generate_simple_self_signed(vec!["b.vesper.test".to_string()]).unwrap();
+        let pem = format!("{}\n{}\n", c1.cert.pem(), c2.cert.pem());
+        let rust_certs: Vec<Vec<u8>> = CertificateDer::pem_slice_iter(pem.as_bytes())
+            .map(|item| item.unwrap().as_ref().to_vec())
+            .collect();
+        let vesper_certs = pem_certificates(pem.as_bytes()).unwrap();
+        assert_eq!(vesper_certs, rust_certs);
+        assert!(pem_certificates(b"").is_err());
+        assert!(
+            pem_certificates(b"-----BEGIN CERTIFICATE-----\n@@@\n-----END CERTIFICATE-----\n")
+                .is_err()
+        );
     }
 }
