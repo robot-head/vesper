@@ -23,7 +23,10 @@ const VESPER_FIP_CHECK: vesper::fip::FipCheckTable = vesper::fip::FipCheckTable 
 };
 
 /// The flip-gate rows of this file's swaps (`swaps::on`).
-pub(super) const SWAPS: &[Swap] = &[open("fip", "0.92x; no flip-gate configuration")];
+pub(super) const SWAPS: &[Swap] = &[open(
+    "fip",
+    "flip gate FAIL 1.80x / 1.67x with encoding (scripts/ci/flip-gate/fip.json, #2289)",
+)];
 
 pub(super) fn register(_r: &mut Registry) {
     if on("fip") {

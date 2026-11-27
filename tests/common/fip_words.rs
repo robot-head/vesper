@@ -17,13 +17,22 @@ struct FipEnc {
     pool: Vec<(u64, u64)>,
     exprs: Vec<[u64; 8]>,
     pats: Vec<[u64; 6]>,
+    /// List words being gathered, innermost list last: a node pushes its
+    /// items here from `base` and [`FipEnc::close`]s them into the pool, so
+    /// no list needs a vector of its own.
+    stack: Vec<(u64, u64)>,
+    /// The index of `Type::Infer` once interned (a statement's type word).
+    infer: Option<u64>,
 }
 
 impl FipEnc {
-    fn list(&mut self, words: &[(u64, u64)]) -> u64 {
+    /// Moves the items gathered from `base` to the pool: their start there
+    /// and their count.
+    fn close(&mut self, base: usize) -> (u64, u64) {
         let at = self.pool.len() as u64;
-        self.pool.extend_from_slice(words);
-        at
+        let n = (self.stack.len() - base) as u64;
+        self.pool.extend(self.stack.drain(base..));
+        (at, n)
     }
 
     fn idx(i: u64) -> (u64, u64) {
@@ -36,19 +45,25 @@ impl FipEnc {
             PatternKind::Bind(n) => (2, enc.name(n), 0, 0),
             PatternKind::Literal(_) => (3, 0, 0, 0),
             PatternKind::Tuple(ps) => {
-                let items: Vec<_> = ps.iter().map(|q| Self::idx(self.pat(enc, q))).collect();
-                (4, self.list(&items), items.len() as u64, 0)
+                let base = self.stack.len();
+                for q in ps {
+                    let i = self.pat(enc, q);
+                    self.stack.push(Self::idx(i));
+                }
+                let (at, n) = self.close(base);
+                (4, at, n, 0)
             }
             PatternKind::Constructor { name, fields, .. } => {
-                let mut items = vec![];
+                let base = self.stack.len();
                 for (f, q) in fields {
                     let fname = enc.name(f);
                     let sub = self.pat(enc, q);
-                    items.push((1, fname));
-                    items.push(Self::idx(sub));
+                    self.stack.push((1, fname));
+                    self.stack.push(Self::idx(sub));
                 }
                 let name = enc.name(name);
-                (5, name, self.list(&items), fields.len() as u64)
+                let (at, _) = self.close(base);
+                (5, name, at, fields.len() as u64)
             }
         };
         let i = self.pats.len() as u64;
@@ -57,8 +72,14 @@ impl FipEnc {
         i
     }
 
-    fn exprs(&mut self, enc: &mut Enc, es: &[&Expr]) -> Vec<(u64, u64)> {
-        es.iter().map(|e| Self::idx(self.expr(enc, e))).collect()
+    /// The expressions `es`, encoded, as one pool list: its start and length.
+    fn exprs<'e>(&mut self, enc: &mut Enc, es: impl IntoIterator<Item = &'e Expr>) -> (u64, u64) {
+        let base = self.stack.len();
+        for e in es {
+            let i = self.expr(enc, e);
+            self.stack.push(Self::idx(i));
+        }
+        self.close(base)
     }
 
     fn expr(&mut self, enc: &mut Enc, e: &Expr) -> u64 {
@@ -68,42 +89,48 @@ impl FipEnc {
             ExprKind::Literal(_) => [1, 0, 0, 0, 0, 0],
             ExprKind::Name(n) => [2, enc.name(n), 0, 0, 0, 0],
             ExprKind::Tuple(es) => {
-                let items = self.exprs(enc, &es.iter().collect::<Vec<_>>());
-                [3, self.list(&items), items.len() as u64, 0, 0, 0]
+                let (at, n) = self.exprs(enc, es);
+                [3, at, n, 0, 0, 0]
             }
             ExprKind::Struct { fields, .. } => {
-                let items = self.exprs(enc, &fields.iter().map(|(_, e)| e).collect::<Vec<_>>());
-                [4, self.list(&items), items.len() as u64, 0, 0, 0]
+                let (at, n) = self.exprs(enc, fields.iter().map(|(_, e)| e));
+                [4, at, n, 0, 0, 0]
             }
             ExprKind::Block { statements, tail } => {
-                let mut items = vec![];
+                let base = self.stack.len();
                 for s in statements {
                     match s {
                         Statement::Let { pat, ty, value, .. } => {
                             let v = self.expr(enc, value);
                             let p = self.pat(enc, pat);
                             let t = enc.ty(ty);
-                            items.extend([Self::idx(p + 1), (2, t), Self::idx(v)]);
+                            self.stack.extend([Self::idx(p + 1), (2, t), Self::idx(v)]);
                         }
                         Statement::Expr(x) => {
                             let v = self.expr(enc, x);
                             // A statement's type word is unused: any type.
-                            let t = enc.ty(&Type::Infer);
-                            items.extend([Self::idx(0), (2, t), Self::idx(v)]);
+                            let t = match self.infer {
+                                Some(t) => t,
+                                None => *self.infer.insert(enc.ty(&Type::Infer)),
+                            };
+                            self.stack.extend([Self::idx(0), (2, t), Self::idx(v)]);
                         }
                     }
                 }
+                // The tail's lists go to the pool before the block's own.
                 let t = tail.as_deref().map(|t| self.expr(enc, t));
-                [5, self.list(&items), statements.len() as u64, opt(t), 0, 0]
+                let (at, _) = self.close(base);
+                [5, at, statements.len() as u64, opt(t), 0, 0]
             }
             ExprKind::Call { callee, args, .. } => {
                 let c = self.expr(enc, callee);
-                let mut items = vec![];
+                let base = self.stack.len();
                 for a in args {
                     let x = self.expr(enc, &a.expr);
-                    items.extend([Self::idx(pass(a.pass)), Self::idx(x)]);
+                    self.stack.extend([Self::idx(pass(a.pass)), Self::idx(x)]);
                 }
-                [6, c, self.list(&items), args.len() as u64, 0, 0]
+                let (at, _) = self.close(base);
+                [6, c, at, args.len() as u64, 0, 0]
             }
             ExprKind::Field(b, n) => {
                 let x = self.expr(enc, b);
@@ -138,13 +165,14 @@ impl FipEnc {
             }
             ExprKind::Match { value, arms } => {
                 let v = self.expr(enc, value);
-                let mut items = vec![];
+                let base = self.stack.len();
                 for (p, body) in arms {
                     let pi = self.pat(enc, p);
                     let bi = self.expr(enc, body);
-                    items.extend([Self::idx(pi), Self::idx(bi)]);
+                    self.stack.extend([Self::idx(pi), Self::idx(bi)]);
                 }
-                [14, v, self.list(&items), arms.len() as u64, 0, 0]
+                let (at, _) = self.close(base);
+                [14, v, at, arms.len() as u64, 0, 0]
             }
             ExprKind::Closure { body, .. } => [15, self.expr(enc, body), 0, 0, 0, 0],
             ExprKind::Handle {
@@ -162,15 +190,20 @@ impl FipEnc {
                     None => (0, 0),
                 };
                 let b = self.expr(enc, body);
-                let mut items = vec![Self::idx(1 + ops.len() as u64)];
+                let base = self.stack.len();
+                self.stack.push(Self::idx(1 + ops.len() as u64));
                 for c in std::iter::once(&**ret).chain(ops) {
                     let ci = self.expr(enc, &c.body);
-                    let ps: Vec<_> = c.pats.iter().map(|p| Self::idx(self.pat(enc, p))).collect();
-                    items.push(Self::idx(ci));
-                    items.push(Self::idx(ps.len() as u64));
-                    items.extend(ps);
+                    // The clause's body, its pattern count, then its patterns.
+                    self.stack
+                        .extend([Self::idx(ci), Self::idx(c.pats.len() as u64)]);
+                    for p in &c.pats {
+                        let pi = self.pat(enc, p);
+                        self.stack.push(Self::idx(pi));
+                    }
                 }
-                [16, enc.name(&effect.name), sp, sv, b, self.list(&items)]
+                let (list, _) = self.close(base);
+                [16, enc.name(&effect.name), sp, sv, b, list]
             }
             k => {
                 let kind = match k {
@@ -182,8 +215,8 @@ impl FipEnc {
                     _ => 22,
                 };
                 let kids = k.control_children().unwrap_or_default();
-                let items = self.exprs(enc, &kids);
-                [kind, self.list(&items), items.len() as u64, 0, 0, 0]
+                let (at, n) = self.exprs(enc, kids);
+                [kind, at, n, 0, 0, 0]
             }
         };
         let i = self.exprs.len() as u64;
@@ -202,42 +235,37 @@ impl FipEnc {
 }
 
 /// Writes the fip task section of `world` to `tail`.
-fn fip_task(enc: &mut Enc, tail: &mut Vec<u64>, world: &World) {
+pub fn fip_task(enc: &mut Enc, tail: &mut Vec<u64>, world: &World) {
     let mut fe = FipEnc::default();
+    // Every function's words, one after another (they follow the tables).
     let mut fns = vec![];
     for f in world.functions.values() {
-        let mut words = vec![enc.name(&f.name), f.fip as u64];
-        words.extend([f.span.start as u64, f.span.end as u64]);
-        words.push(f.generics.len() as u64);
+        fns.extend([enc.name(&f.name), f.fip as u64]);
+        fns.extend([f.span.start as u64, f.span.end as u64]);
+        fns.push(f.generics.len() as u64);
         for g in &f.generics {
-            words.extend([enc.name(&g.name), g.row as u64]);
+            fns.extend([enc.name(&g.name), g.row as u64]);
         }
-        words.push(f.params.len() as u64);
+        fns.push(f.params.len() as u64);
         for p in &f.params {
-            words.extend([enc.name(&p.name), pass_word(p.pass), enc.ty(&p.ty)]);
-            words.extend([p.span.start as u64, p.span.end as u64]);
+            fns.extend([enc.name(&p.name), pass_word(p.pass), enc.ty(&p.ty)]);
+            fns.extend([p.span.start as u64, p.span.end as u64]);
         }
-        words.push(enc.ty(&f.result));
-        words.push(enc.ty(&Type::Row(f.effects.clone())));
-        words.push(f.body.as_ref().map_or(0, |b| fe.expr(enc, b) + 1));
-        fns.push(words);
+        fns.push(enc.ty(&f.result));
+        fns.push(enc.ty(&Type::Row(f.effects.clone())));
+        fns.push(f.body.as_ref().map_or(0, |b| fe.expr(enc, b) + 1));
     }
+    tail.reserve(4 + 2 * fe.pool.len() + 8 * fe.exprs.len() + 6 * fe.pats.len() + fns.len());
     tail.push(fe.pool.len() as u64);
     for (tag, x) in &fe.pool {
         tail.extend([*tag, *x]);
     }
     tail.push(fe.exprs.len() as u64);
-    for e in &fe.exprs {
-        tail.extend(e);
-    }
+    tail.extend(fe.exprs.iter().flatten());
     tail.push(fe.pats.len() as u64);
-    for p in &fe.pats {
-        tail.extend(p);
-    }
-    tail.push(fns.len() as u64);
-    for f in fns {
-        tail.extend(f);
-    }
+    tail.extend(fe.pats.iter().flatten());
+    tail.push(world.functions.len() as u64);
+    tail.extend(fns);
 }
 
 /// Encode `world` and its fip task words into the binary input consumed by

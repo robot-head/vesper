@@ -268,6 +268,27 @@ fn abba_cases(cases: &[(String, World)], label: &str) {
             })
         },
     );
+    // The swap encodes each world itself: the flip gate's workload.
+    abba(
+        &format!("fip with encoding, {label}"),
+        &mut || {
+            time(|| {
+                for (_, w) in cases {
+                    sink.set(
+                        sink.get()
+                            .wrapping_add(vesper::fip::check_world(w).len() as u64),
+                    );
+                }
+            })
+        },
+        &mut || {
+            time(|| {
+                for (_, w) in cases {
+                    sink.set(sink.get().wrapping_add(count.word(&fip_input(w))));
+                }
+            })
+        },
+    );
     let (_, d) = abba(&format!("fip decode only, {label}"), &mut || r, &mut || {
         time(|| {
             for i in &inputs {
@@ -311,6 +332,50 @@ fn callgrind_side() {
         "vesper" => {
             for i in &inputs {
                 n += count.word(i);
+            }
+        }
+        "phases" => {
+            use std::time::Instant;
+            let (mut tr, mut tw, mut tt, mut tf) = (0f64, 0f64, 0f64, 0f64);
+            for (_, w) in &cases {
+                let t = Instant::now();
+                n += vesper::fip::check_world(w).len() as u64;
+                tr += t.elapsed().as_secs_f64();
+                let t = Instant::now();
+                let mut enc = check_words::Enc::default();
+                let ws = enc.world(w);
+                tw += t.elapsed().as_secs_f64();
+                let t = Instant::now();
+                let mut tail = vec![];
+                fip_words::fip_task(&mut enc, &mut tail, w);
+                tt += t.elapsed().as_secs_f64();
+                let t = Instant::now();
+                n += enc.finish(&ws, &tail).len() as u64;
+                tf += t.elapsed().as_secs_f64();
+            }
+            eprintln!("rust {tr:.3}s world {tw:.3}s task {tt:.3}s finish {tf:.3}s");
+            // The same work as separate passes (the ABBA's shape).
+            let t = Instant::now();
+            for (_, w) in &cases {
+                n += vesper::fip::check_world(w).len() as u64;
+            }
+            let r = t.elapsed().as_secs_f64();
+            let t = Instant::now();
+            let inputs: Vec<Vec<u8>> = cases.iter().map(|(_, w)| fip_input(w)).collect();
+            let e = t.elapsed().as_secs_f64();
+            let t = Instant::now();
+            for i in &inputs {
+                n += count.word(i);
+            }
+            let v = t.elapsed().as_secs_f64();
+            eprintln!("passes: rust {r:.3}s encode {e:.3}s vesper {v:.3}s");
+            let types: usize = cases.iter().map(|(_, w)| w.types.len()).sum();
+            let fns: usize = cases.iter().map(|(_, w)| w.functions.len()).sum();
+            eprintln!("{} worlds, {types} expression types, {fns} functions", cases.len());
+        }
+        "encode" => {
+            for (_, w) in &cases {
+                n += fip_input(w).len() as u64;
             }
         }
         _ => {}
