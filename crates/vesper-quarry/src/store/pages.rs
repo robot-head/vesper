@@ -184,38 +184,68 @@ pub(crate) fn tag_type(t: u8) -> Option<ScalarType> {
     })
 }
 
-struct Cursor<'a> {
-    b: &'a [u8],
-    at: usize,
-}
-impl Cursor<'_> {
-    fn take(&mut self, n: usize) -> StoreResult<&[u8]> {
-        let end = self.at.checked_add(n).filter(|&e| e <= self.b.len());
-        let end = end.ok_or_else(|| corrupt("meta page overrun"))?;
-        let s = &self.b[self.at..end];
-        self.at = end;
-        Ok(s)
-    }
-    fn u8(&mut self) -> StoreResult<u8> {
-        Ok(self.take(1)?[0])
-    }
-    fn u16(&mut self) -> StoreResult<u16> {
-        Ok(rd16(self.take(2)?, 0))
-    }
-    fn u32(&mut self) -> StoreResult<u32> {
-        Ok(rd32(self.take(4)?, 0))
-    }
-    fn u64(&mut self) -> StoreResult<u64> {
-        Ok(rd64(self.take(8)?, 0))
-    }
-    fn name(&mut self) -> StoreResult<String> {
-        let n = self.u8()? as usize;
-        let s = std::str::from_utf8(self.take(n)?).map_err(|_| corrupt("meta name"))?;
-        crate::identifier(s)
-            .ok()
-            .filter(|x| x == s)
-            .ok_or_else(|| corrupt("meta name is not a normalized identifier"))
-    }
+const META_HDR_LEN: usize = 7;
+const META_HDR_LAST_TS: usize = 0;
+const META_HDR_PAGE_COUNT: usize = 1;
+const META_HDR_CATALOG_REV: usize = 2;
+const META_HDR_NEXT_TABLE_ID: usize = 3;
+const META_HDR_NTABLES: usize = 4;
+const META_HDR_NCOLS: usize = 5;
+const META_HDR_NINDEXES: usize = 6;
+
+const META_TABLE_STRIDE: usize = 7;
+const META_TABLE_NAME_OFF: usize = 0;
+const META_TABLE_NAME_LEN: usize = 1;
+const META_TABLE_ID: usize = 2;
+const META_TABLE_ROOT: usize = 3;
+const META_TABLE_NEXT_ROWID: usize = 4;
+const META_TABLE_COL_START: usize = 5;
+const META_TABLE_NCOLS: usize = 6;
+
+const META_COL_STRIDE: usize = 4;
+const META_COL_NAME_OFF: usize = 0;
+const META_COL_NAME_LEN: usize = 1;
+const META_COL_TYPE_TAG: usize = 2;
+const META_COL_NULLABLE: usize = 3;
+
+const META_INDEX_STRIDE: usize = 7;
+const META_INDEX_NAME_OFF: usize = 0;
+const META_INDEX_NAME_LEN: usize = 1;
+const META_INDEX_ID: usize = 2;
+const META_INDEX_TNAME_OFF: usize = 3;
+const META_INDEX_TNAME_LEN: usize = 4;
+const META_INDEX_COLUMN: usize = 5;
+const META_INDEX_ROOT: usize = 6;
+
+const META_STACK_TABLES: usize = 16;
+const META_STACK_COLS: usize = 64;
+const META_STACK_INDEXES: usize = 16;
+
+const META_STATUS_OK: u64 = 0;
+const META_STATUS_GROW: u64 = 14;
+const META_ERRORS: [&str; 13] = [
+    "meta page kind",
+    "meta page length",
+    "meta page overrun",
+    "meta page magic or format",
+    "meta name is not a normalized identifier",
+    "meta column type",
+    "meta nullability",
+    "duplicate meta column",
+    "meta table entry",
+    "duplicate meta table",
+    "meta index entry",
+    "duplicate meta index",
+    "meta page trailer",
+];
+
+fn meta_slice_str(b: &[u8], off: u64, len: u64) -> String {
+    let start = off as usize;
+    let end = start + len as usize;
+    // Validated as ASCII normalized identifier by `@vesper/quarry::meta`.
+    std::str::from_utf8(&b[start..end])
+        .expect("validated ASCII identifier")
+        .to_string()
 }
 
 impl Meta {
@@ -273,116 +303,139 @@ impl Meta {
         Ok(())
     }
     pub fn decode(b: &[u8]) -> StoreResult<Self> {
-        if kind(b) != KIND_META || level(b) != 0 {
-            return Err(corrupt("meta page kind"));
-        }
-        let len = rd32(b, 32) as usize;
-        if 36 + len > PAGE_SIZE || b[36 + len..].iter().any(|&x| x != 0) {
-            return Err(corrupt("meta page length"));
-        }
-        let mut c = Cursor {
-            b: &b[36..36 + len],
-            at: 0,
+        let mut hdr = [0u64; META_HDR_LEN];
+        let mut s_tables = [0u64; META_STACK_TABLES * META_TABLE_STRIDE];
+        let mut s_cols = [0u64; META_STACK_COLS * META_COL_STRIDE];
+        let mut s_indexes = [0u64; META_STACK_INDEXES * META_INDEX_STRIDE];
+
+        let mut h_tables = Vec::new();
+        let mut h_cols = Vec::new();
+        let mut h_indexes = Vec::new();
+
+        let status = loop {
+            let tables_buf: &mut [u64] = if h_tables.is_empty() {
+                &mut s_tables
+            } else {
+                &mut h_tables
+            };
+            let cols_buf: &mut [u64] = if h_cols.is_empty() {
+                &mut s_cols
+            } else {
+                &mut h_cols
+            };
+            let indexes_buf: &mut [u64] = if h_indexes.is_empty() {
+                &mut s_indexes
+            } else {
+                &mut h_indexes
+            };
+            let st =
+                crate::port::binding::meta_decode(b, &mut hdr, tables_buf, cols_buf, indexes_buf);
+            if st != META_STATUS_GROW {
+                break st;
+            }
+            let need_t = (hdr[META_HDR_NTABLES] as usize) * META_TABLE_STRIDE;
+            if need_t > tables_buf.len() {
+                h_tables.resize(need_t, 0);
+            }
+            let need_c = (hdr[META_HDR_NCOLS] as usize) * META_COL_STRIDE;
+            if need_c > cols_buf.len() {
+                h_cols.resize(need_c, 0);
+            }
+            let need_i = (hdr[META_HDR_NINDEXES] as usize) * META_INDEX_STRIDE;
+            if need_i > indexes_buf.len() {
+                h_indexes.resize(need_i, 0);
+            }
         };
-        if c.take(8)? != META_MAGIC || c.u32()? != META_FORMAT {
-            return Err(corrupt("meta page magic or format"));
+
+        if status != META_STATUS_OK {
+            let msg = META_ERRORS
+                .get((status as usize).saturating_sub(1))
+                .copied()
+                .unwrap_or("meta page corrupt");
+            return Err(corrupt(msg));
         }
-        let last_ts = c.u64()?;
-        let page_count = c.u64()?;
-        let catalog_revision = c.u64()?;
-        let next_table_id = c.u32()?;
-        let n = c.u16()? as usize;
+
+        let tables_buf: &[u64] = if h_tables.is_empty() {
+            &s_tables
+        } else {
+            &h_tables
+        };
+        let cols_buf: &[u64] = if h_cols.is_empty() { &s_cols } else { &h_cols };
+        let indexes_buf: &[u64] = if h_indexes.is_empty() {
+            &s_indexes
+        } else {
+            &h_indexes
+        };
+
+        let ntables = hdr[META_HDR_NTABLES] as usize;
         let mut tables = BTreeMap::new();
-        let mut ids = BTreeSet::new();
-        for _ in 0..n {
-            let name = c.name()?;
-            let id = c.u32()?;
-            let root = c.u64()?;
-            let next_rowid = c.u64()?;
-            let ncols = c.u16()? as usize;
-            let mut columns = Vec::with_capacity(ncols.min(128));
-            let mut names = BTreeSet::new();
-            for _ in 0..ncols {
-                let cname = c.name()?;
-                let ty = tag_type(c.u8()?).ok_or_else(|| corrupt("meta column type"))?;
-                let nullable = match c.u8()? {
-                    0 => false,
-                    1 => true,
-                    _ => return Err(corrupt("meta nullability")),
-                };
-                if !names.insert(cname.clone()) {
-                    return Err(corrupt("duplicate meta column"));
-                }
+        for ti in 0..ntables {
+            let tb = ti * META_TABLE_STRIDE;
+            let name = meta_slice_str(
+                b,
+                tables_buf[tb + META_TABLE_NAME_OFF],
+                tables_buf[tb + META_TABLE_NAME_LEN],
+            );
+            let col_start = tables_buf[tb + META_TABLE_COL_START] as usize;
+            let ncols = tables_buf[tb + META_TABLE_NCOLS] as usize;
+            let mut columns = Vec::with_capacity(ncols);
+            for ci in 0..ncols {
+                let cb = (col_start + ci) * META_COL_STRIDE;
+                let cname = meta_slice_str(
+                    b,
+                    cols_buf[cb + META_COL_NAME_OFF],
+                    cols_buf[cb + META_COL_NAME_LEN],
+                );
+                let ty = tag_type(cols_buf[cb + META_COL_TYPE_TAG] as u8)
+                    .expect("validated column type");
+                let nullable = cols_buf[cb + META_COL_NULLABLE] != 0;
                 columns.push(ColumnDef {
                     name: cname,
                     ty,
                     nullable,
                 });
             }
-            if id == 0
-                || id >= next_table_id
-                || !ids.insert(id)
-                || root <= FSM_PAGE
-                || root >= page_count
-                || next_rowid == 0
-                || columns.is_empty()
-            {
-                return Err(corrupt("meta table entry"));
-            }
-            if tables
-                .insert(
-                    name,
-                    TableMeta {
-                        id,
-                        root,
-                        next_rowid,
-                        columns,
-                    },
-                )
-                .is_some()
-            {
-                return Err(corrupt("duplicate meta table"));
-            }
+            tables.insert(
+                name,
+                TableMeta {
+                    id: tables_buf[tb + META_TABLE_ID] as u32,
+                    root: tables_buf[tb + META_TABLE_ROOT],
+                    next_rowid: tables_buf[tb + META_TABLE_NEXT_ROWID],
+                    columns,
+                },
+            );
         }
-        let ni = c.u16()? as usize;
+
+        let nindexes = hdr[META_HDR_NINDEXES] as usize;
         let mut indexes = BTreeMap::new();
-        for _ in 0..ni {
-            let name = c.name()?;
-            let id = c.u32()?;
-            let table = c.name()?;
-            let column = c.u16()? as usize;
-            let root = c.u64()?;
-            let ok = tables
-                .get(&table)
-                .is_some_and(|t: &TableMeta| column < t.columns.len());
-            if !ok
-                || id == 0
-                || id >= next_table_id
-                || !ids.insert(id)
-                || root <= FSM_PAGE
-                || root >= page_count
-                || tables.contains_key(&name)
-            {
-                return Err(corrupt("meta index entry"));
-            }
-            let ix = IndexMeta {
-                id,
-                table,
-                column,
-                root,
-            };
-            if indexes.insert(name, ix).is_some() {
-                return Err(corrupt("duplicate meta index"));
-            }
+        for ii in 0..nindexes {
+            let ib = ii * META_INDEX_STRIDE;
+            let name = meta_slice_str(
+                b,
+                indexes_buf[ib + META_INDEX_NAME_OFF],
+                indexes_buf[ib + META_INDEX_NAME_LEN],
+            );
+            let table = meta_slice_str(
+                b,
+                indexes_buf[ib + META_INDEX_TNAME_OFF],
+                indexes_buf[ib + META_INDEX_TNAME_LEN],
+            );
+            indexes.insert(
+                name,
+                IndexMeta {
+                    id: indexes_buf[ib + META_INDEX_ID] as u32,
+                    table,
+                    column: indexes_buf[ib + META_INDEX_COLUMN] as usize,
+                    root: indexes_buf[ib + META_INDEX_ROOT],
+                },
+            );
         }
-        if c.at != len || page_count < 2 || count(b) != n {
-            return Err(corrupt("meta page trailer"));
-        }
+
         Ok(Self {
-            last_ts,
-            page_count,
-            catalog_revision,
-            next_table_id,
+            last_ts: hdr[META_HDR_LAST_TS],
+            page_count: hdr[META_HDR_PAGE_COUNT],
+            catalog_revision: hdr[META_HDR_CATALOG_REV],
+            next_table_id: hdr[META_HDR_NEXT_TABLE_ID] as u32,
             tables,
             indexes,
         })
@@ -1201,5 +1254,338 @@ mod leaf_differential {
                 assert_eq!(got, want, "bits {bits:#x}, slot {slot}");
             }
         }
+    }
+
+    struct RefCursor<'a> {
+        b: &'a [u8],
+        at: usize,
+    }
+    impl RefCursor<'_> {
+        fn take(&mut self, n: usize) -> StoreResult<&[u8]> {
+            let end = self.at.checked_add(n).filter(|&e| e <= self.b.len());
+            let end = end.ok_or_else(|| corrupt("meta page overrun"))?;
+            let s = &self.b[self.at..end];
+            self.at = end;
+            Ok(s)
+        }
+        fn u8(&mut self) -> StoreResult<u8> {
+            Ok(self.take(1)?[0])
+        }
+        fn u16(&mut self) -> StoreResult<u16> {
+            Ok(rd16(self.take(2)?, 0))
+        }
+        fn u32(&mut self) -> StoreResult<u32> {
+            Ok(rd32(self.take(4)?, 0))
+        }
+        fn u64(&mut self) -> StoreResult<u64> {
+            Ok(rd64(self.take(8)?, 0))
+        }
+        fn name(&mut self) -> StoreResult<String> {
+            let n = self.u8()? as usize;
+            let s = std::str::from_utf8(self.take(n)?).map_err(|_| corrupt("meta name"))?;
+            crate::identifier(s)
+                .ok()
+                .filter(|x| x == s)
+                .ok_or_else(|| corrupt("meta name is not a normalized identifier"))
+        }
+    }
+
+    fn meta_decode_reference(b: &[u8]) -> StoreResult<Meta> {
+        if kind(b) != KIND_META || level(b) != 0 {
+            return Err(corrupt("meta page kind"));
+        }
+        let len = rd32(b, 32) as usize;
+        if 36 + len > PAGE_SIZE || b[36 + len..].iter().any(|&x| x != 0) {
+            return Err(corrupt("meta page length"));
+        }
+        let mut c = RefCursor {
+            b: &b[36..36 + len],
+            at: 0,
+        };
+        if c.take(8)? != META_MAGIC || c.u32()? != META_FORMAT {
+            return Err(corrupt("meta page magic or format"));
+        }
+        let last_ts = c.u64()?;
+        let page_count = c.u64()?;
+        let catalog_revision = c.u64()?;
+        let next_table_id = c.u32()?;
+        let n = c.u16()? as usize;
+        let mut tables = BTreeMap::new();
+        let mut ids = BTreeSet::new();
+        for _ in 0..n {
+            let name = c.name()?;
+            let id = c.u32()?;
+            let root = c.u64()?;
+            let next_rowid = c.u64()?;
+            let ncols = c.u16()? as usize;
+            let mut columns = Vec::with_capacity(ncols.min(128));
+            let mut names = BTreeSet::new();
+            for _ in 0..ncols {
+                let cname = c.name()?;
+                let ty = tag_type(c.u8()?).ok_or_else(|| corrupt("meta column type"))?;
+                let nullable = match c.u8()? {
+                    0 => false,
+                    1 => true,
+                    _ => return Err(corrupt("meta nullability")),
+                };
+                if !names.insert(cname.clone()) {
+                    return Err(corrupt("duplicate meta column"));
+                }
+                columns.push(ColumnDef {
+                    name: cname,
+                    ty,
+                    nullable,
+                });
+            }
+            if id == 0
+                || id >= next_table_id
+                || !ids.insert(id)
+                || root <= FSM_PAGE
+                || root >= page_count
+                || next_rowid == 0
+                || columns.is_empty()
+            {
+                return Err(corrupt("meta table entry"));
+            }
+            if tables
+                .insert(
+                    name,
+                    TableMeta {
+                        id,
+                        root,
+                        next_rowid,
+                        columns,
+                    },
+                )
+                .is_some()
+            {
+                return Err(corrupt("duplicate meta table"));
+            }
+        }
+        let ni = c.u16()? as usize;
+        let mut indexes = BTreeMap::new();
+        for _ in 0..ni {
+            let name = c.name()?;
+            let id = c.u32()?;
+            let table = c.name()?;
+            let column = c.u16()? as usize;
+            let root = c.u64()?;
+            let ok = tables
+                .get(&table)
+                .is_some_and(|t: &TableMeta| column < t.columns.len());
+            if !ok
+                || id == 0
+                || id >= next_table_id
+                || !ids.insert(id)
+                || root <= FSM_PAGE
+                || root >= page_count
+                || tables.contains_key(&name)
+            {
+                return Err(corrupt("meta index entry"));
+            }
+            let ix = IndexMeta {
+                id,
+                table,
+                column,
+                root,
+            };
+            if indexes.insert(name, ix).is_some() {
+                return Err(corrupt("duplicate meta index"));
+            }
+        }
+        if c.at != len || page_count < 2 || count(b) != n {
+            return Err(corrupt("meta page trailer"));
+        }
+        Ok(Meta {
+            last_ts,
+            page_count,
+            catalog_revision,
+            next_table_id,
+            tables,
+            indexes,
+        })
+    }
+
+    fn sample_meta(ntables: usize, nindexes: usize) -> Meta {
+        let mut m = Meta::new();
+        m.last_ts = 42;
+        m.page_count = 1000;
+        m.catalog_revision = 7;
+        let mut next_id = 1u32;
+        for t in 0..ntables {
+            let id = next_id;
+            next_id += 1;
+            let tname = format!("tbl_{t}");
+            m.tables.insert(
+                tname,
+                TableMeta {
+                    id,
+                    root: 2 + t as u64,
+                    next_rowid: 10 + t as u64,
+                    columns: vec![
+                        ColumnDef {
+                            name: "id".to_string(),
+                            ty: ScalarType::U64,
+                            nullable: false,
+                        },
+                        ColumnDef {
+                            name: "val".to_string(),
+                            ty: ScalarType::Text,
+                            nullable: true,
+                        },
+                        ColumnDef {
+                            name: "score".to_string(),
+                            ty: ScalarType::F64,
+                            nullable: true,
+                        },
+                    ],
+                },
+            );
+        }
+        for ix in 0..nindexes {
+            let id = next_id;
+            next_id += 1;
+            let tname = format!("tbl_{}", ix % ntables.max(1));
+            m.indexes.insert(
+                format!("idx_{ix}"),
+                IndexMeta {
+                    id,
+                    table: tname,
+                    column: ix % 3,
+                    root: 500 + ix as u64,
+                },
+            );
+        }
+        m.next_table_id = next_id;
+        m
+    }
+
+    #[test]
+    fn meta_decode_matches_reference() {
+        const DIFF_CASES: usize = 512;
+        let mut state: u64 = 0x6d65_7461_cafe_babe;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1);
+            state >> 32
+        };
+
+        let mut ok_count = 0usize;
+        let mut err_count = 0usize;
+        for case in 0..DIFF_CASES {
+            let ntables = if case == 0 {
+                20
+            } else {
+                1 + (next() % 5) as usize
+            };
+            let nindexes = if case == 0 { 20 } else { (next() % 4) as usize };
+            let meta = sample_meta(ntables, nindexes);
+            let mut b = new_page();
+            format(&mut b[..], META_PAGE, KIND_META, 0);
+            meta.encode(&mut b[..]).unwrap();
+
+            if case >= 16 {
+                let len = rd32(&b[..], 32) as usize;
+                let mutations = 1 + (next() % 3) as usize;
+                for _ in 0..mutations {
+                    let at = match next() % 3 {
+                        0 => 20 + (next() % 20) as usize,
+                        1 => 36 + (next() % len.max(1) as u64) as usize,
+                        _ => (next() % PAGE_SIZE as u64) as usize,
+                    };
+                    if next() % 2 == 0 {
+                        b[at] ^= 1 << (next() % 8);
+                    } else {
+                        b[at] = next() as u8;
+                    }
+                }
+            }
+            let got = Meta::decode(&b[..]);
+            let want = meta_decode_reference(&b[..]);
+            match (&got, &want) {
+                (Ok(gm), Ok(wm)) => {
+                    assert_eq!(gm, wm, "case {case}");
+                    ok_count += 1;
+                }
+                (Err(_), Err(_)) => {
+                    err_count += 1;
+                }
+                _ => panic!("case {case}: port {got:?}, Rust {want:?}"),
+            }
+        }
+        assert!(ok_count >= 16 && err_count >= 100);
+    }
+
+    #[test]
+    #[ignore = "ABBA benchmark; run in release with --ignored --nocapture"]
+    fn abba_meta_decode() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        const ABBA_EPOCHS: usize = 30;
+        const ABBA_WARMUP: usize = 2;
+        const ABBA_ITERS: usize = 200;
+        const SIGN_ALPHA_HALF: f64 = 0.025;
+        const FLIP_LIMIT: f64 = 1.50;
+
+        let meta = sample_meta(6, 4);
+        let mut b = new_page();
+        format(&mut b[..], META_PAGE, KIND_META, 0);
+        meta.encode(&mut b[..]).unwrap();
+
+        let mut ratios = Vec::with_capacity(ABBA_EPOCHS);
+        for epoch in 0..(ABBA_WARMUP + ABBA_EPOCHS) {
+            let t0 = Instant::now();
+            for _ in 0..ABBA_ITERS {
+                black_box(meta_decode_reference(black_box(&b[..])).unwrap());
+            }
+            let r1 = t0.elapsed().as_nanos();
+
+            let t1 = Instant::now();
+            for _ in 0..ABBA_ITERS {
+                black_box(Meta::decode(black_box(&b[..])).unwrap());
+            }
+            let p1 = t1.elapsed().as_nanos();
+
+            let t2 = Instant::now();
+            for _ in 0..ABBA_ITERS {
+                black_box(Meta::decode(black_box(&b[..])).unwrap());
+            }
+            let p2 = t2.elapsed().as_nanos();
+
+            let t3 = Instant::now();
+            for _ in 0..ABBA_ITERS {
+                black_box(meta_decode_reference(black_box(&b[..])).unwrap());
+            }
+            let r2 = t3.elapsed().as_nanos();
+
+            if epoch >= ABBA_WARMUP {
+                ratios.push((p1 + p2) as f64 / (r1 + r2) as f64);
+            }
+        }
+        ratios.sort_by(f64::total_cmp);
+        let mid = ratios.len() / 2;
+        let mut cdf = 0.0;
+        let mut choose = 1.0;
+        let mut k = 0usize;
+        for j in 0..ratios.len() {
+            cdf += choose * 0.5f64.powi(ratios.len() as i32);
+            if cdf > SIGN_ALPHA_HALF {
+                break;
+            }
+            k = j + 1;
+            choose = choose * (ratios.len() - j) as f64 / (j + 1) as f64;
+        }
+        let i = k.saturating_sub(1).min(mid);
+        let (ci_lo, ci_hi) = (ratios[i], ratios[ratios.len() - 1 - i]);
+        println!(
+            "ABBA meta_decode: median {:.3}x [{ci_lo:.3}x, {ci_hi:.3}x]",
+            ratios[mid]
+        );
+        assert!(
+            ci_hi <= FLIP_LIMIT,
+            "ABBA 95% upper bound {ci_hi:.3}x exceeds {FLIP_LIMIT:.2}x"
+        );
     }
 }

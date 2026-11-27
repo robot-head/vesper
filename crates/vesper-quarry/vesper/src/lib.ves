@@ -32,6 +32,7 @@
 //     sizes of a Rust `Value` and a Rust `Vec<Value>` (the row executor
 //     charges them exactly as the Rust executor did).
 
+use self::meta::meta_decode as meta_decode_impl;
 use self::store_log::record_decode as sl_record_decode;
 use self::util::{ex, lim, raw};
 use self::ddl::{ddl_apply_q};
@@ -419,4 +420,14 @@ pub fn store_log_record_decode(
     inout out_ranges: Slice[u64]
 ) -> u64 {
     sl_record_decode(in payload, inout out_hdr, inout out_ranges)
+}
+
+pub fn meta_decode(
+    in b: Slice[u8],
+    inout out_hdr: Slice[u64],
+    inout out_tables: Slice[u64],
+    inout out_cols: Slice[u64],
+    inout out_indexes: Slice[u64]
+) -> u64 {
+    meta_decode_impl(in b, inout out_hdr, inout out_tables, inout out_cols, inout out_indexes)
 }
