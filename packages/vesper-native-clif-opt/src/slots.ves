@@ -1,0 +1,1202 @@
+// The stack-slot steps of src/native_clif_opt.rs in Vesper (#2362 part 3):
+// split_join_slots and promote_slots (mem2reg).
+
+use @vesper/clif::{Func, inc, n32, u32_at, u64_at, w};
+use @vesper/clif::codes::{
+    F_BRANCH, F_STACK_SLOT, M_ALIGNED, M_NOTRAP, NONE, OP_IADD_IMM, OP_ISTORE16, OP_ISTORE32,
+    OP_ISTORE8, OP_JUMP, OP_LOAD, OP_SLOAD16, OP_SLOAD32, OP_SLOAD8, OP_STACK_ADDR, OP_STORE,
+    OP_ULOAD16, OP_ULOAD32, OP_ULOAD8, S_EXPLICIT, TY_F32, TY_F32X4, TY_F64, TY_F64X2, TY_I16,
+    TY_I16X8, TY_I32, TY_I32X4, TY_I64, TY_I64X2, TY_I8, TY_I8X16
+};
+use super::{layout_blocks, layout_insts, params_of, type_bits};
+use super::branches::{Dom, block_insts, cfg_of, dom_of, values_of};
+
+// `split_join_slots` stops after this many splits.
+const MAX_SPLIT_ROUNDS: u64 = 8;
+// The alignment (as a shift) of a slot `split_join_slots` makes.
+const MERGED_ALIGN_SHIFT: u64 = 3;
+// `MemFlags::trusted()`.
+const TRUSTED: u64 = M_NOTRAP | M_ALIGNED;
+// The bytes of a 128-bit vector.
+const VECTOR_BYTES: u64 = 16;
+const BITS_PER_BYTE: u64 = 8;
+// A store's stored value and address arguments.
+const STORE_VALUE_ARG: u64 = 0;
+const STORE_ADDR_ARG: u64 = 1;
+// The sign bit of an i64.
+const SIGN_BIT: u64 = 9223372036854775808;
+// Bits in a liveness word.
+const WORD_BITS: u64 = 64;
+// An access's kind.
+const ACC_NONE: u8 = 0;
+const ACC_LOAD: u8 = 1;
+const ACC_STORE: u8 = 2;
+
+fn g32(in s: ChunkSeq[u32], i: u64) -> u32 {
+    s.try_get(i).unwrap_or(NONE)
+}
+
+fn g64(in s: ChunkSeq[u64], i: u64) -> u64 {
+    s.try_get(i).unwrap_or(0)
+}
+
+fn g8(in s: ChunkSeq[u8], i: u64) -> u8 {
+    s.try_get(i).unwrap_or(0)
+}
+
+fn s32(inout s: ChunkSeq[u32], i: u64, x: u32) {
+    let ok = s.try_set(i, x);
+}
+
+fn s64(inout s: ChunkSeq[u64], i: u64, x: u64) {
+    let ok = s.try_set(i, x);
+}
+
+fn s8(inout s: ChunkSeq[u8], i: u64, x: u8) {
+    let ok = s.try_set(i, x);
+}
+
+// Grows `s` to `n` entries of `x`.
+fn grow32(inout s: ChunkSeq[u32], n: u64, x: u32) {
+    if s.len() < n {
+        s.resize(n, x);
+    }
+}
+
+fn grow64(inout s: ChunkSeq[u64], n: u64, x: u64) {
+    if s.len() < n {
+        s.resize(n, x);
+    }
+}
+
+fn grow8(inout s: ChunkSeq[u8], n: u64, x: u8) {
+    if s.len() < n {
+        s.resize(n, x);
+    }
+}
+
+// `a < b` as i64s.
+fn slt(a: u64, b: u64) -> bool {
+    (a ^ SIGN_BIT) < (b ^ SIGN_BIT)
+}
+
+fn is_vector_type(ty: u64) -> bool {
+    ty == TY_I8X16
+        || ty == TY_I16X8
+        || ty == TY_I32X4
+        || ty == TY_I64X2
+        || ty == TY_F32X4
+        || ty == TY_F64X2
+}
+
+// `ty.bytes()`, 0 for a type the codes do not name.
+fn type_bytes(ty: u64) -> u64 {
+    if is_vector_type(ty) {
+        return VECTOR_BYTES;
+    }
+    type_bits(ty) / BITS_PER_BYTE
+}
+
+// `promotable_type`.
+fn promotable_type(ty: u64) -> bool {
+    ty == TY_I8
+        || ty == TY_I16
+        || ty == TY_I32
+        || ty == TY_I64
+        || ty == TY_F32
+        || ty == TY_F64
+        || is_vector_type(ty)
+}
+
+fn is_load_format(op: u64) -> bool {
+    op == OP_LOAD
+        || op == OP_ULOAD8
+        || op == OP_SLOAD8
+        || op == OP_ULOAD16
+        || op == OP_SLOAD16
+        || op == OP_ULOAD32
+        || op == OP_SLOAD32
+}
+
+fn is_store_format(op: u64) -> bool {
+    op == OP_STORE || op == OP_ISTORE8 || op == OP_ISTORE16 || op == OP_ISTORE32
+}
+
+// Value -> (slot, offset) maps (`HashMap<Value, (K, i64)>`), NONE for a
+// value with no entry.
+struct Addrs {
+    slot: ChunkSeq[u32],
+    off: ChunkSeq[u64],
+    n: u64,
+}
+
+fn addrs_new(nv: u64) -> Addrs {
+    let mut a = Addrs { slot: ChunkSeq::new[u32](), off: ChunkSeq::new[u64](), n: 0 };
+    a.slot.resize(nv, NONE);
+    a.off.resize(nv, 0);
+    a
+}
+
+fn addr_slot(in a: Addrs, v: u32) -> u32 {
+    g32(in a.slot, w(v))
+}
+
+fn addr_off(in a: Addrs, v: u32) -> u64 {
+    g64(in a.off, w(v))
+}
+
+// `insert`: a new or replaced entry.
+fn addr_put(inout a: Addrs, v: u32, slot: u32, off: u64) {
+    grow32(inout a.slot, inc(w(v)), NONE);
+    grow64(inout a.off, inc(w(v)), 0);
+    if g32(in a.slot, w(v)) == NONE {
+        a.n = inc(a.n);
+    }
+    s32(inout a.slot, w(v), slot);
+    s64(inout a.off, w(v), off);
+}
+
+// `derive`: `iadd_imm`s of known addresses, until none is new.
+fn derive(in f: Func, in all: ChunkSeq[u32], inout seeds: Addrs) {
+    loop {
+        let before = seeds.n;
+        for q in 0..all.len() {
+            let inst = u32_at(in all, q);
+            if f.op(inst) != OP_IADD_IMM {
+                continue;
+            }
+            let r = f.result(inst, 0);
+            if addr_slot(in seeds, r) != NONE {
+                continue;
+            }
+            let arg = f.resolve(f.arg(inst, 0));
+            let k = addr_slot(in seeds, arg);
+            if k != NONE {
+                let off = wrapping_add(addr_off(in seeds, arg), f.inst(w(inst)).imm);
+                addr_put(inout seeds, r, k, off);
+            }
+        }
+        if seeds.n == before {
+            return;
+        }
+    }
+}
+
+// ----- split_join_slots ------------------------------------------------------
+
+// The words a join reads at constant offsets: unique offsets and their
+// types (`BTreeMap<i64, Type>`), sorted by `sort_reads`.
+struct Reads {
+    off: ChunkSeq[u64],
+    ty: ChunkSeq[u64],
+}
+
+fn reads_find(in r: Reads, off: u64) -> u64 {
+    for k in 0..r.off.len() {
+        if u64_at(in r.off, k) == off {
+            return k;
+        }
+    }
+    NONE_INDEX
+}
+
+// "No entry" for an index.
+const NONE_INDEX: u64 = 18446744073709551615;
+
+// Insertion sort by signed offset.
+fn sort_reads(inout r: Reads) {
+    for i in 1..r.off.len() {
+        let x = u64_at(in r.off, i);
+        let xt = u64_at(in r.ty, i);
+        let mut j = i;
+        loop {
+            if j == 0 {
+                break;
+            }
+            let y = u64_at(in r.off, wrapping_sub(j, 1));
+            if !slt(x, y) {
+                break;
+            }
+            s64(inout r.off, j, y);
+            s64(inout r.ty, j, u64_at(in r.ty, wrapping_sub(j, 1)));
+            j = wrapping_sub(j, 1);
+        }
+        s64(inout r.off, j, x);
+        s64(inout r.ty, j, xt);
+    }
+}
+
+// `split_join_slots`: a join block's parameter that holds one of several
+// whole slot addresses, each slot used only in the block that jumps
+// there, becomes the address of one new slot each predecessor copies the
+// words the join reads into.
+pub fn split_join_slots(inout f: Func) {
+    let mut merged = ChunkSeq::new[u8]();
+    for _ in 0..MAX_SPLIT_ROUNDS {
+        if !split_one_join_slot(inout f, inout merged) {
+            break;
+        }
+    }
+}
+
+fn is_merged(in merged: ChunkSeq[u8], slot: u32) -> bool {
+    g8(in merged, w(slot)) != 0
+}
+
+fn split_one_join_slot(inout f: Func, inout merged: ChunkSeq[u8]) -> bool {
+    let all = layout_insts(in f);
+    let nv = f.nvalues();
+    let mut slot_addr = addrs_new(nv);
+    for q in 0..all.len() {
+        let inst = u32_at(in all, q);
+        if f.op(inst) == OP_STACK_ADDR {
+            let row = f.inst(w(inst));
+            addr_put(inout slot_addr, f.result(inst, 0), n32(row.imm), row.off);
+        }
+    }
+    if slot_addr.n == 0 {
+        return false;
+    }
+    derive(in f, in all, inout slot_addr);
+    // The block each slot is used in (NONE: none yet), whether in more than
+    // one, and how often its addresses are branch arguments.
+    let ns = f.nslots();
+    let mut used_first = ChunkSeq::new[u32]();
+    used_first.resize(ns, NONE);
+    let mut used_many = ChunkSeq::new[u8]();
+    used_many.resize(ns, 0);
+    let mut as_arg = ChunkSeq::new[u64]();
+    as_arg.resize(ns, 0);
+    let nb = f.nblocks();
+    let mut edge_first = ChunkSeq::new[u32]();
+    edge_first.resize(nb, NONE);
+    let mut edge_last = ChunkSeq::new[u32]();
+    edge_last.resize(nb, NONE);
+    let mut edge_count = ChunkSeq::new[u64]();
+    edge_count.resize(nb, 0);
+    let mut edge_next = ChunkSeq::new[u32]();
+    edge_next.resize(f.ninsts(), NONE);
+    let mut bad_target = ChunkSeq::new[u8]();
+    bad_target.resize(nb, 0);
+    for q in 0..all.len() {
+        let inst = u32_at(in all, q);
+        let block = f.inst(w(inst)).block;
+        let row = f.inst(w(inst));
+        if row.eff & F_STACK_SLOT != 0 {
+            use_slot(inout used_first, inout used_many, n32(row.imm), block);
+        }
+        let vals = values_of(in f, inst);
+        for k in 0..vals.len() {
+            let s = addr_slot(in slot_addr, u32_at(in vals, k));
+            if s != NONE {
+                use_slot(inout used_first, inout used_many, s, block);
+            }
+        }
+        let jump = f.op(inst) == OP_JUMP;
+        for d in 0..f.ndests(inst) {
+            for a in 0..f.dest_nargs(inst, d) {
+                let v = f.dest_arg(inst, d, a);
+                if v == NONE {
+                    continue;
+                }
+                let s = addr_slot(in slot_addr, f.resolve(v));
+                if s != NONE {
+                    s64(inout as_arg, w(s), inc(g64(in as_arg, w(s))));
+                }
+            }
+            let b = w(f.dest_block(inst, d));
+            if jump {
+                let tail = g32(in edge_last, b);
+                if tail == NONE {
+                    s32(inout edge_first, b, inst);
+                } else {
+                    s32(inout edge_next, w(tail), inst);
+                }
+                s32(inout edge_last, b, inst);
+                s64(inout edge_count, b, inc(g64(in edge_count, b)));
+            } else {
+                s8(inout bad_target, b, 1);
+            }
+        }
+    }
+    let mut did_split = false;
+    let blocks = layout_blocks(in f);
+    for bq in 0..blocks.len() {
+        let join = u32_at(in blocks, bq);
+        if g8(in bad_target, w(join)) != 0 || g64(in edge_count, w(join)) < 2 {
+            continue;
+        }
+        let mut incoming = ChunkSeq::new[u32]();
+        let mut e = g32(in edge_first, w(join));
+        loop {
+            if e == NONE {
+                break;
+            }
+            incoming.push(e);
+            e = g32(in edge_next, w(e));
+        }
+        let params = params_of(in f, join);
+        let mut i = params.len();
+        loop {
+            if i == 0 {
+                break;
+            }
+            i = wrapping_sub(i, 1);
+            let p = u32_at(in params, i);
+            // Every edge passes a distinct whole slot, used only in its block
+            // (or a slot made by splitting an earlier join).
+            let mut src_inst = ChunkSeq::new[u32]();
+            let mut src_slot = ChunkSeq::new[u32]();
+            let mut src_val = ChunkSeq::new[u32]();
+            let mut ok = true;
+            for k in 0..incoming.len() {
+                let inst = u32_at(in incoming, k);
+                if i >= f.dest_nargs(inst, 0) {
+                    ok = false;
+                    break;
+                }
+                let raw = f.dest_arg(inst, 0, i);
+                if raw == NONE {
+                    ok = false;
+                    break;
+                }
+                let v = f.resolve(raw);
+                let slot = addr_slot(in slot_addr, v);
+                if slot == NONE || addr_off(in slot_addr, v) != 0 {
+                    ok = false;
+                    break;
+                }
+                let block = f.inst(w(inst)).block;
+                let only_here = is_merged(in merged, slot)
+                    || (g32(in used_first, w(slot)) == block && g8(in used_many, w(slot)) == 0);
+                let mut dup = false;
+                for x in 0..src_slot.len() {
+                    if u32_at(in src_slot, x) == slot {
+                        dup = true;
+                    }
+                }
+                if !only_here
+                    || g64(in as_arg, w(slot)) != 1
+                    || dup
+                    || f.slot(w(slot)).kind != S_EXPLICIT
+                {
+                    ok = false;
+                    break;
+                }
+                src_inst.push(inst);
+                src_slot.push(slot);
+                src_val.push(v);
+            }
+            if !ok {
+                continue;
+            }
+            // The parameter (and any parameter it is forwarded to by a jump
+            // elsewhere): read and written at constant offsets only.
+            let mut through = addrs_new(f.nvalues());
+            addr_put(inout through, p, 0, 0);
+            loop {
+                let before = through.n;
+                derive(in f, in all, inout through);
+                for q in 0..all.len() {
+                    let inst = u32_at(in all, q);
+                    if f.op(inst) != OP_JUMP {
+                        continue;
+                    }
+                    let target = f.dest_block(inst, 0);
+                    if target == join {
+                        continue;
+                    }
+                    for k in 0..f.dest_nargs(inst, 0) {
+                        let a = f.dest_arg(inst, 0, k);
+                        if a == NONE {
+                            continue;
+                        }
+                        let r = f.resolve(a);
+                        if addr_slot(in through, r) == NONE || addr_off(in through, r) != 0 {
+                            continue;
+                        }
+                        if k < f.nparams(target) {
+                            let tp = f.param(target, k);
+                            if addr_slot(in through, tp) == NONE {
+                                addr_put(inout through, tp, 0, 0);
+                            }
+                        }
+                    }
+                }
+                if through.n == before {
+                    break;
+                }
+            }
+            let mut reads = Reads { off: ChunkSeq::new[u64](), ty: ChunkSeq::new[u64]() };
+            for q in 0..all.len() {
+                let inst = u32_at(in all, q);
+                let vals = values_of(in f, inst);
+                let mut touches = false;
+                for k in 0..vals.len() {
+                    if addr_slot(in through, u32_at(in vals, k)) != NONE {
+                        touches = true;
+                    }
+                }
+                if !touches {
+                    continue;
+                }
+                let op = f.op(inst);
+                let row = f.inst(w(inst));
+                if op == OP_IADD_IMM {} else if op == OP_JUMP {
+                    if f.dest_block(inst, 0) == join {
+                        ok = false;
+                    }
+                } else if op == OP_LOAD {
+                    let arg = f.resolve(f.arg(inst, 0));
+                    let ty = f.value_type(f.result(inst, 0));
+                    let off = wrapping_add(addr_off(in through, arg), row.off);
+                    let at = reads_find(in reads, off);
+                    if at != NONE_INDEX {
+                        if u64_at(in reads.ty, at) != ty {
+                            ok = false;
+                        }
+                    } else {
+                        reads.off.push(off);
+                        reads.ty.push(ty);
+                    }
+                    // A type the codes do not name cannot be copied.
+                    if type_bytes(ty) == 0 {
+                        ok = false;
+                    }
+                } else if op == OP_STORE
+                    && addr_slot(in through, f.resolve(f.arg(inst, STORE_VALUE_ARG))) == NONE
+                {} else {
+                    ok = false;
+                }
+                if !ok {
+                    break;
+                }
+            }
+            if !ok {
+                continue;
+            }
+            sort_reads(inout reads);
+            let mut end: u64 = 0;
+            for k in 0..reads.off.len() {
+                let off = u64_at(in reads.off, k);
+                if slt(off, end) || slt(off, 0) {
+                    ok = false;
+                }
+                end = wrapping_add(off, type_bytes(u64_at(in reads.ty, k)));
+            }
+            let mut size: u64 = 0;
+            for k in 0..src_slot.len() {
+                let sz = f.slot(w(u32_at(in src_slot, k))).size;
+                if sz > size {
+                    size = sz;
+                }
+            }
+            if !ok || slt(size, end) {
+                continue;
+            }
+            // Each source block stores before it reads its slot (earlier
+            // split slots have every read offset stored at their edges).
+            for k in 0..src_inst.len() {
+                let slot = u32_at(in src_slot, k);
+                if is_merged(in merged, slot) {
+                    continue;
+                }
+                let block = f.inst(w(u32_at(in src_inst, k))).block;
+                let body = block_insts(in f, block);
+                let mut stored = ChunkSeq::new[u64]();
+                for x in 0..body.len() {
+                    let b_inst = u32_at(in body, x);
+                    let op = f.op(b_inst);
+                    let row = f.inst(w(b_inst));
+                    if is_load_format(op) {
+                        let a = f.resolve(f.arg(b_inst, 0));
+                        if addr_slot(in slot_addr, a) == slot {
+                            let off = wrapping_add(addr_off(in slot_addr, a), row.off);
+                            let mut seen = false;
+                            for y in 0..stored.len() {
+                                if u64_at(in stored, y) == off {
+                                    seen = true;
+                                }
+                            }
+                            if !seen {
+                                ok = false;
+                            }
+                        }
+                    } else if is_store_format(op) {
+                        let a = f.resolve(f.arg(b_inst, STORE_ADDR_ARG));
+                        if addr_slot(in slot_addr, a) == slot {
+                            stored.push(wrapping_add(addr_off(in slot_addr, a), row.off));
+                        }
+                    }
+                }
+            }
+            if !ok {
+                continue;
+            }
+            let new_slot = f.new_slot(size, MERGED_ALIGN_SHIFT);
+            grow8(inout merged, inc(new_slot), 0);
+            s8(inout merged, new_slot, 1);
+            let none_dests = ChunkSeq::new[u32]();
+            let none_args = ChunkSeq::new[u32]();
+            for k in 0..src_inst.len() {
+                let inst = u32_at(in src_inst, k);
+                let from = u32_at(in src_val, k);
+                let ta = f.ins_before(
+                    inst,
+                    OP_STACK_ADDR,
+                    TY_I64,
+                    0,
+                    new_slot,
+                    0,
+                    0,
+                    in none_args,
+                    in none_dests
+                );
+                let to = f.result(ta, 0);
+                for r in 0..reads.off.len() {
+                    let off = u64_at(in reads.off, r);
+                    let ty = u64_at(in reads.ty, r);
+                    let mut largs = ChunkSeq::new[u32]();
+                    largs.push(from);
+                    let ld = f.ins_before(
+                        inst,
+                        OP_LOAD,
+                        ty,
+                        0,
+                        0,
+                        off,
+                        TRUSTED,
+                        in largs,
+                        in none_dests
+                    );
+                    let v = f.result(ld, 0);
+                    let mut sargs = ChunkSeq::new[u32]();
+                    sargs.push(v);
+                    sargs.push(to);
+                    let st = f.ins_before(
+                        inst,
+                        OP_STORE,
+                        0,
+                        0,
+                        0,
+                        off,
+                        TRUSTED,
+                        in sargs,
+                        in none_dests
+                    );
+                }
+            }
+            for k in 0..src_inst.len() {
+                f.remove_dest_arg(u32_at(in src_inst, k), 0, i);
+            }
+            f.remove_param(p);
+            let first = f.first_inst(join);
+            let ja = f.ins_before(
+                first,
+                OP_STACK_ADDR,
+                TY_I64,
+                0,
+                new_slot,
+                0,
+                0,
+                in none_args,
+                in none_dests
+            );
+            let a = f.result(ja, 0);
+            f.alias(p, a);
+            did_split = true;
+            // The analysis is stale for this block now: one parameter per
+            // join per run.
+            break;
+        }
+    }
+    did_split
+}
+
+fn use_slot(inout first: ChunkSeq[u32], inout many: ChunkSeq[u8], slot: u32, block: u32) {
+    let at = g32(in first, w(slot));
+    if at == NONE {
+        s32(inout first, w(slot), block);
+    } else if at != block {
+        s8(inout many, w(slot), 1);
+    }
+}
+
+// ----- promote_slots ---------------------------------------------------------
+
+// The cells of the accessed slots: per slot a list (`first`, `next`) of
+// (offset, type) cells, the first type an offset was accessed with.
+struct Cells {
+    first: ChunkSeq[u32],
+    next: ChunkSeq[u32],
+    off: ChunkSeq[u64],
+    ty: ChunkSeq[u64],
+    id: ChunkSeq[u32],
+}
+
+fn cell_find(in c: Cells, slot: u32, off: u64) -> u32 {
+    let mut e = g32(in c.first, w(slot));
+    loop {
+        if e == NONE {
+            return NONE;
+        }
+        if u64_at(in c.off, w(e)) == off {
+            return e;
+        }
+        e = g32(in c.next, w(e));
+    }
+}
+
+// A slot's cells sorted by signed offset.
+fn slot_cells_sorted(in c: Cells, slot: u32) -> ChunkSeq[u32] {
+    let mut out = ChunkSeq::new[u32]();
+    let mut e = g32(in c.first, w(slot));
+    loop {
+        if e == NONE {
+            break;
+        }
+        out.push(e);
+        e = g32(in c.next, w(e));
+    }
+    for i in 1..out.len() {
+        let x = u32_at(in out, i);
+        let xo = u64_at(in c.off, w(x));
+        let mut j = i;
+        loop {
+            if j == 0 {
+                break;
+            }
+            let y = u32_at(in out, wrapping_sub(j, 1));
+            if !slt(xo, u64_at(in c.off, w(y))) {
+                break;
+            }
+            s32(inout out, j, y);
+            j = wrapping_sub(j, 1);
+        }
+        s32(inout out, j, x);
+    }
+    out
+}
+
+fn has_bit(in bits: ChunkSeq[u64], words: u64, b: u64, c: u64) -> bool {
+    let word = g64(in bits, wrapping_add(wrapping_mul(b, words), c / WORD_BITS));
+    wrapping_shr_u64(word, wrapping_u32(c % WORD_BITS)) & 1 != 0
+}
+
+fn set_bit(inout bits: ChunkSeq[u64], words: u64, b: u64, c: u64) {
+    let at = wrapping_add(wrapping_mul(b, words), c / WORD_BITS);
+    let word = g64(in bits, at);
+    s64(inout bits, at, word | wrapping_shl_u64(1, wrapping_u32(c % WORD_BITS)));
+}
+
+// Per-block lists of entries (`first`, `last`, `next`, `val`), kept in
+// push order.
+struct Lists {
+    first: ChunkSeq[u32],
+    last: ChunkSeq[u32],
+    next: ChunkSeq[u32],
+    val: ChunkSeq[u64],
+}
+
+fn lists_new(n: u64) -> Lists {
+    let mut l = Lists {
+        first: ChunkSeq::new[u32](),
+        last: ChunkSeq::new[u32](),
+        next: ChunkSeq::new[u32](),
+        val: ChunkSeq::new[u64]()
+    };
+    l.first.resize(n, NONE);
+    l.last.resize(n, NONE);
+    l
+}
+
+fn list_push(inout l: Lists, b: u64, x: u64) -> u32 {
+    let e = n32(l.val.len());
+    l.val.push(x);
+    l.next.push(NONE);
+    let tail = g32(in l.last, b);
+    if tail == NONE {
+        s32(inout l.first, b, e);
+    } else {
+        s32(inout l.next, w(tail), e);
+    }
+    s32(inout l.last, b, e);
+    e
+}
+
+fn list_has(in l: Lists, b: u64, x: u64) -> bool {
+    let mut e = g32(in l.first, b);
+    loop {
+        if e == NONE {
+            return false;
+        }
+        if g64(in l.val, w(e)) == x {
+            return true;
+        }
+        e = g32(in l.next, w(e));
+    }
+}
+
+// The entries of block `b`'s list.
+fn list_of(in l: Lists, b: u64) -> ChunkSeq[u32] {
+    let mut out = ChunkSeq::new[u32]();
+    let mut e = g32(in l.first, b);
+    loop {
+        if e == NONE {
+            break;
+        }
+        out.push(e);
+        e = g32(in l.next, w(e));
+    }
+    out
+}
+
+// `domtree.idom(b)`: NONE for the entry block and unreachable ones.
+fn idom_of(in dom: Dom, b: u32) -> u32 {
+    let p = g32(in dom.idom, w(b));
+    if p == b { NONE } else { p }
+}
+
+// A walk item: enter a block (by index), or leave one and undo back to
+// `mark`.
+copy struct Step {
+    enter: bool,
+    bi: u64,
+    mark: u64,
+}
+
+// `promote_slots`: mem2reg over explicit slots whose address does not
+// escape.
+pub fn promote_slots(inout f: Func) {
+    let ns = f.nslots();
+    if ns == 0 {
+        return;
+    }
+    let all = layout_insts(in f);
+    let mut addr = addrs_new(f.nvalues());
+    let mut escaped = ChunkSeq::new[u8]();
+    escaped.resize(ns, 0);
+    loop {
+        let before = addr.n;
+        for q in 0..all.len() {
+            let inst = u32_at(in all, q);
+            let op = f.op(inst);
+            let row = f.inst(w(inst));
+            if op == OP_STACK_ADDR {
+                addr_put(inout addr, f.result(inst, 0), n32(row.imm), row.off);
+            } else if row.eff & F_STACK_SLOT != 0 {
+                s8(inout escaped, row.imm, 1);
+            } else if op == OP_IADD_IMM {
+                let arg = f.resolve(f.arg(inst, 0));
+                let slot = addr_slot(in addr, arg);
+                if slot != NONE {
+                    let off = wrapping_add(addr_off(in addr, arg), row.imm);
+                    addr_put(inout addr, f.result(inst, 0), slot, off);
+                }
+            }
+        }
+        if addr.n == before {
+            break;
+        }
+    }
+    if addr.n == 0 {
+        return;
+    }
+    let ni = f.ninsts();
+    let mut acc_kind = ChunkSeq::new[u8]();
+    acc_kind.resize(ni, ACC_NONE);
+    let mut acc_slot = ChunkSeq::new[u32]();
+    acc_slot.resize(ni, NONE);
+    let mut acc_cell = ChunkSeq::new[u32]();
+    acc_cell.resize(ni, NONE);
+    let mut acc_value = ChunkSeq::new[u32]();
+    acc_value.resize(ni, NONE);
+    let mut cells = Cells {
+        first: ChunkSeq::new[u32](),
+        next: ChunkSeq::new[u32](),
+        off: ChunkSeq::new[u64](),
+        ty: ChunkSeq::new[u64](),
+        id: ChunkSeq::new[u32]()
+    };
+    cells.first.resize(ns, NONE);
+    let mut acc_list = ChunkSeq::new[u32]();
+    let mut acc_off = ChunkSeq::new[u64]();
+    acc_off.resize(ni, 0);
+    let mut acc_ty = ChunkSeq::new[u64]();
+    acc_ty.resize(ni, 0);
+    for q in 0..all.len() {
+        let inst = u32_at(in all, q);
+        let op = f.op(inst);
+        let row = f.inst(w(inst));
+        if op == OP_STACK_ADDR {
+            continue;
+        }
+        if op == OP_IADD_IMM && addr_slot(in addr, f.resolve(f.arg(inst, 0))) != NONE {
+            continue;
+        }
+        if op == OP_LOAD {
+            let arg = f.resolve(f.arg(inst, 0));
+            let slot = addr_slot(in addr, arg);
+            if slot != NONE {
+                s8(inout acc_kind, w(inst), ACC_LOAD);
+                s32(inout acc_slot, w(inst), slot);
+                s64(inout acc_off, w(inst), wrapping_add(addr_off(in addr, arg), row.off));
+                s64(inout acc_ty, w(inst), f.value_type(f.result(inst, 0)));
+                acc_list.push(inst);
+            }
+            continue;
+        }
+        if op == OP_STORE {
+            let value = f.resolve(f.arg(inst, STORE_VALUE_ARG));
+            let base = f.resolve(f.arg(inst, STORE_ADDR_ARG));
+            let vs = addr_slot(in addr, value);
+            if vs != NONE {
+                s8(inout escaped, w(vs), 1);
+            }
+            let slot = addr_slot(in addr, base);
+            if slot != NONE {
+                s8(inout acc_kind, w(inst), ACC_STORE);
+                s32(inout acc_slot, w(inst), slot);
+                s64(inout acc_off, w(inst), wrapping_add(addr_off(in addr, base), row.off));
+                s64(inout acc_ty, w(inst), f.value_type(value));
+                s32(inout acc_value, w(inst), value);
+                acc_list.push(inst);
+            }
+            continue;
+        }
+        let vals = values_of(in f, inst);
+        for k in 0..vals.len() {
+            let s = addr_slot(in addr, u32_at(in vals, k));
+            if s != NONE {
+                s8(inout escaped, w(s), 1);
+            }
+        }
+    }
+    // Cells: one type per offset, no overlap, inside the slot.
+    for k in 0..acc_list.len() {
+        let inst = u32_at(in acc_list, k);
+        let slot = g32(in acc_slot, w(inst));
+        let off = g64(in acc_off, w(inst));
+        let ty = g64(in acc_ty, w(inst));
+        let e = cell_find(in cells, slot, off);
+        if e == NONE {
+            let n = n32(cells.off.len());
+            cells.off.push(off);
+            cells.ty.push(ty);
+            cells.id.push(NONE);
+            cells.next.push(g32(in cells.first, w(slot)));
+            s32(inout cells.first, w(slot), n);
+            s32(inout acc_cell, w(inst), n);
+        } else {
+            if u64_at(in cells.ty, w(e)) != ty {
+                s8(inout escaped, w(slot), 1);
+            }
+            s32(inout acc_cell, w(inst), e);
+        }
+        if !promotable_type(ty) {
+            s8(inout escaped, w(slot), 1);
+        }
+    }
+    let mut cell_types = ChunkSeq::new[u64]();
+    for s in 0..ns {
+        let slot = n32(s);
+        if g32(in cells.first, s) == NONE {
+            continue;
+        }
+        let data = f.slot(s);
+        if data.kind != S_EXPLICIT {
+            s8(inout escaped, s, 1);
+            continue;
+        }
+        let sorted = slot_cells_sorted(in cells, slot);
+        let mut end: u64 = 0;
+        for k in 0..sorted.len() {
+            let e = w(u32_at(in sorted, k));
+            let off = u64_at(in cells.off, e);
+            let stop = wrapping_add(off, type_bytes(u64_at(in cells.ty, e)));
+            if slt(off, end) || slt(off, 0) || slt(data.size, stop) {
+                s8(inout escaped, s, 1);
+                break;
+            }
+            end = stop;
+        }
+        if g8(in escaped, s) != 0 {
+            continue;
+        }
+        for k in 0..sorted.len() {
+            let e = w(u32_at(in sorted, k));
+            s32(inout cells.id, e, n32(cell_types.len()));
+            cell_types.push(u64_at(in cells.ty, e));
+        }
+    }
+    let n = cell_types.len();
+    if n == 0 {
+        return;
+    }
+    // A cell of an escaped slot keeps id NONE.
+    let cfg = cfg_of(in f);
+    let dom = dom_of(in f, in cfg);
+    let blocks = layout_blocks(in f);
+    let nbl = blocks.len();
+    let mut index = ChunkSeq::new[u64]();
+    index.resize(f.nblocks(), NONE_INDEX);
+    for k in 0..nbl {
+        s64(inout index, w(u32_at(in blocks, k)), k);
+    }
+    let words = wrapping_sub(wrapping_add(n, WORD_BITS), 1) / WORD_BITS;
+    let mut defs = ChunkSeq::new[u64]();
+    defs.resize(wrapping_mul(nbl, words), 0);
+    let mut upward = ChunkSeq::new[u64]();
+    upward.resize(wrapping_mul(nbl, words), 0);
+    for bi in 0..nbl {
+        let body = block_insts(in f, u32_at(in blocks, bi));
+        for k in 0..body.len() {
+            let inst = u32_at(in body, k);
+            let c = access_cell(in acc_kind, in acc_cell, in cells, inst);
+            if c == NONE {
+                continue;
+            }
+            if g8(in acc_kind, w(inst)) == ACC_LOAD {
+                if !has_bit(in defs, words, bi, w(c)) {
+                    set_bit(inout upward, words, bi, w(c));
+                }
+            } else {
+                set_bit(inout defs, words, bi, w(c));
+            }
+        }
+    }
+    // Liveness over the reachable blocks.
+    let mut live_in = ChunkSeq::new[u64]();
+    live_in.extend(in upward.as_slice());
+    let mut changed = true;
+    loop {
+        if !changed {
+            break;
+        }
+        changed = false;
+        for k in 0..dom.post.len() {
+            let block = u32_at(in dom.post, k);
+            let bi = g64(in index, w(block));
+            let last = f.last_inst(block);
+            for x in 0..words {
+                let mut out: u64 = 0;
+                if last != NONE {
+                    for d in 0..f.ndests(last) {
+                        let si = g64(in index, w(f.dest_block(last, d)));
+                        if si != NONE_INDEX {
+                            out = out | g64(in live_in, wrapping_add(wrapping_mul(si, words), x));
+                        }
+                    }
+                }
+                let at = wrapping_add(wrapping_mul(bi, words), x);
+                let new = g64(in upward, at) | (out & (g64(in defs, at) ^ ALL_ONES));
+                if new != g64(in live_in, at) {
+                    s64(inout live_in, at, new);
+                    changed = true;
+                }
+            }
+        }
+    }
+    // Dominance frontiers.
+    let mut frontier = lists_new(nbl);
+    for bi in 0..nbl {
+        let block = u32_at(in blocks, bi);
+        let lo = cfg.at.try_get(w(block)).unwrap_or(0);
+        let hi = cfg.at.try_get(inc(w(block))).unwrap_or(0);
+        if wrapping_sub(hi, lo) < 2 {
+            continue;
+        }
+        let idom = idom_of(in dom, block);
+        if idom == NONE {
+            continue;
+        }
+        for x in lo..hi {
+            let mut runner = f.inst(w(u32_at(in cfg.inst, x))).block;
+            loop {
+                if runner == idom {
+                    break;
+                }
+                let ri = g64(in index, w(runner));
+                if !list_has(in frontier, ri, bi) {
+                    let e = list_push(inout frontier, ri, bi);
+                }
+                let up = idom_of(in dom, runner);
+                if up == NONE {
+                    break;
+                }
+                runner = up;
+            }
+        }
+    }
+    // Phi placement, pruned by liveness.
+    let mut phis = lists_new(nbl);
+    for c in 0..n {
+        let mut placed = ChunkSeq::new[u8]();
+        placed.resize(nbl, 0);
+        let mut queued = ChunkSeq::new[u8]();
+        queued.resize(nbl, 0);
+        let mut work = ChunkSeq::new[u64]();
+        for b in 0..nbl {
+            if has_bit(in defs, words, b, c) {
+                work.push(b);
+                s8(inout queued, b, 1);
+            }
+        }
+        loop {
+            let b = match work.pop() {
+                Option::Some(x) => x,
+                Option::None => break,
+            };
+            let fr = list_of(in frontier, b);
+            for k in 0..fr.len() {
+                let fb = g64(in frontier.val, w(u32_at(in fr, k)));
+                if g8(in placed, fb) != 0 || !has_bit(in live_in, words, fb, c) {
+                    continue;
+                }
+                s8(inout placed, fb, 1);
+                let e = list_push(inout phis, fb, c);
+                if g8(in queued, fb) == 0 {
+                    s8(inout queued, fb, 1);
+                    work.push(fb);
+                }
+            }
+        }
+    }
+    let mut phi_param = ChunkSeq::new[u32]();
+    phi_param.resize(phis.val.len(), NONE);
+    for bi in 0..nbl {
+        let es = list_of(in phis, bi);
+        for k in 0..es.len() {
+            let e = w(u32_at(in es, k));
+            let c = g64(in phis.val, e);
+            let p = f.append_param(u32_at(in blocks, bi), u64_at(in cell_types, c));
+            s32(inout phi_param, e, p);
+        }
+    }
+    // Initial values: zero, defined at the top of the entry block.
+    let entry = u32_at(in blocks, 0);
+    let first = f.first_inst(entry);
+    let mut zero_ty = ChunkSeq::new[u64]();
+    let mut zero_val = ChunkSeq::new[u32]();
+    let mut current = ChunkSeq::new[u32]();
+    for c in 0..n {
+        let ty = u64_at(in cell_types, c);
+        let mut v = NONE;
+        for k in 0..zero_ty.len() {
+            if u64_at(in zero_ty, k) == ty {
+                v = u32_at(in zero_val, k);
+            }
+        }
+        if v == NONE {
+            v = f.zero_before(first, ty);
+            zero_ty.push(ty);
+            zero_val.push(v);
+        }
+        current.push(v);
+    }
+    // Rename along the dominator tree, children in layout order.
+    let mut kids = lists_new(nbl);
+    for bi in 0..nbl {
+        let idom = idom_of(in dom, u32_at(in blocks, bi));
+        if idom != NONE {
+            let e = list_push(inout kids, g64(in index, w(idom)), bi);
+        }
+    }
+    let mut undo_c = ChunkSeq::new[u64]();
+    let mut undo_v = ChunkSeq::new[u32]();
+    let mut stack = ChunkSeq::new[Step]();
+    stack.push(Step { enter: true, bi: 0, mark: 0 });
+    loop {
+        let step = match stack.pop() {
+            Option::Some(x) => x,
+            Option::None => break,
+        };
+        if !step.enter {
+            loop {
+                if undo_c.len() <= step.mark {
+                    break;
+                }
+                let c = match undo_c.pop() {
+                    Option::Some(x) => x,
+                    Option::None => break,
+                };
+                let v = match undo_v.pop() {
+                    Option::Some(x) => x,
+                    Option::None => break,
+                };
+                s32(inout current, c, v);
+            }
+            continue;
+        }
+        let bi = step.bi;
+        let block = u32_at(in blocks, bi);
+        let mark = undo_c.len();
+        let es = list_of(in phis, bi);
+        for k in 0..es.len() {
+            let e = w(u32_at(in es, k));
+            let c = g64(in phis.val, e);
+            undo_c.push(c);
+            undo_v.push(u32_at(in current, c));
+            s32(inout current, c, g32(in phi_param, e));
+        }
+        let body = block_insts(in f, block);
+        for k in 0..body.len() {
+            let inst = u32_at(in body, k);
+            let cell = access_cell(in acc_kind, in acc_cell, in cells, inst);
+            if cell != NONE {
+                let c = w(cell);
+                if g8(in acc_kind, w(inst)) == ACC_LOAD {
+                    let r = f.result(inst, 0);
+                    f.detach_results(inst);
+                    f.remove_inst(inst);
+                    f.alias(r, u32_at(in current, c));
+                } else {
+                    undo_c.push(c);
+                    undo_v.push(u32_at(in current, c));
+                    s32(inout current, c, g32(in acc_value, w(inst)));
+                    f.remove_inst(inst);
+                }
+                continue;
+            }
+            if f.inst(w(inst)).eff & F_BRANCH != 0 {
+                for d in 0..f.ndests(inst) {
+                    let ti = g64(in index, w(f.dest_block(inst, d)));
+                    if ti == NONE_INDEX {
+                        continue;
+                    }
+                    let ts = list_of(in phis, ti);
+                    for x in 0..ts.len() {
+                        let c = g64(in phis.val, w(u32_at(in ts, x)));
+                        f.append_dest_arg(inst, d, u32_at(in current, c));
+                    }
+                }
+            }
+        }
+        stack.push(Step { enter: false, bi: bi, mark: mark });
+        let ch = list_of(in kids, bi);
+        let mut k = ch.len();
+        loop {
+            if k == 0 {
+                break;
+            }
+            k = wrapping_sub(k, 1);
+            let child = g64(in kids.val, w(u32_at(in ch, k)));
+            stack.push(Step { enter: true, bi: child, mark: 0 });
+        }
+    }
+}
+
+// Every bit of a word.
+const ALL_ONES: u64 = 18446744073709551615;
+
+// The cell id an access of `inst` goes to, or NONE.
+fn access_cell(in kind: ChunkSeq[u8], in cell: ChunkSeq[u32], in cells: Cells, inst: u32) -> u32 {
+    if g8(in kind, w(inst)) == ACC_NONE {
+        return NONE;
+    }
+    let e = g32(in cell, w(inst));
+    if e == NONE {
+        return NONE;
+    }
+    g32(in cells.id, w(e))
+}

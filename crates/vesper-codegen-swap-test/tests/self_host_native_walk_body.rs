@@ -1369,3 +1369,64 @@ fn vesper_scalar_bodies_part_6o() {
         assert!(total.is_clean(), "{}", total.summary());
     });
 }
+
+/// Part 6p: multi-capability erased effect rows (`eff [ConstTime, Realtime]`),
+/// mixed-lane direct calls (`f32`, `f64`, `i128`, `u128`, `bool`, `u8`, `i16`),
+/// and full `f32`/`f64` comparison + unary `-` coverage across both optimized
+/// and unoptimized builds.
+const SCALARS_6P: &str = "
+fn ct_rt_mix(a: u8, b: i16, w: i128, u: u128) -> i128 eff [ConstTime, Realtime] {
+    let base: i128 = wrapping_add(w, widen_i128(b));
+    let mask: i128 = widen_i128(a);
+    wrapping_sub(base ^ mask, wrapping_i128(u & 255))
+}
+fn flt_cmp_all(a: f32, b: f32, x: f64, y: f64) -> i64 {
+    let mut acc: i64 = 0;
+    if -a < b && a <= b {
+        acc = wrapping_add(acc, 1);
+    }
+    if a != b && b > a {
+        acc = wrapping_add(acc, 2);
+    }
+    if -x < y && x <= y && y >= x && x != y {
+        acc = wrapping_add(acc, 4);
+    }
+    if a == a && x == x {
+        acc = wrapping_add(acc, 8);
+    }
+    acc
+}
+fn main() -> i64 {
+    let w: i128 = ct_rt_mix(17, -42, widen_i128(1000), widen_u128(99));
+    let c: i64 = flt_cmp_all(1.25, 2.5, 3.5, 4.75);
+    wrapping_i64(w) ^ c
+}
+";
+
+#[test]
+fn vesper_scalar_bodies_part_6p() {
+    big_stack(|| {
+        let parsed = vesper::parser::parse(SCALARS_6P);
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        let checked = vesper::check::check(&parsed.module);
+        assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
+        if let Err(e) = build(&checked.world, "main", true) {
+            panic!("the part 6p scalar program does not build: {e}");
+        }
+        let before = EMITTED.load(Ordering::Relaxed);
+        let total = both("scalars_6p", &checked.world, true);
+        let emitted = EMITTED.load(Ordering::Relaxed) - before;
+        eprintln!(
+            "scalars_6p: {}; {emitted} functions emitted from Vesper",
+            total.summary()
+        );
+        let ran = if cross() { 0 } else { 2 };
+        assert_eq!((total.worlds, total.ran), (2, ran), "{}", total.summary());
+        let min_emitted = if cross() { 4 } else { 8 };
+        assert!(
+            emitted >= min_emitted,
+            "part 6p functions should come from Vesper (expected >= {min_emitted}, got {emitted})"
+        );
+        assert!(total.is_clean(), "{}", total.summary());
+    });
+}

@@ -89,6 +89,10 @@
     {
       "workload": "pck_ext",
       "run": ["cargo", "run", "--locked", "--release", "-p", "vesper-aegis", "--example", "abba", "--", "flip-gate-inproc", "pck_ext"]
+    },
+    {
+      "workload": "spki",
+      "run": ["cargo", "run", "--locked", "--release", "-p", "vesper-aegis", "--example", "abba", "--", "flip-gate-inproc", "spki"]
     }
   ]
 }
