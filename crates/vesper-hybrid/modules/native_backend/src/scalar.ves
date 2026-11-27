@@ -165,6 +165,7 @@ pub const FLOAT_FMA64: u64 = 148;
 pub const STACK_ARGUMENT: u64 = 149;
 pub const FLOAT_STACK_ARGUMENT: u64 = 150;
 pub const CALL_STACK_ARGUMENT: u64 = 151;
+pub const FUNCTION_GOT: u64 = 152;
 const XMM_ARGUMENTS: u64 = 8;
 pub const CHECKED_ARITHMETIC_RECORDS: u64 = 2;
 
@@ -741,6 +742,7 @@ fn reads_left(in record: Record) -> bool {
         && op != RETURN_PAIR
         && !is_call(op)
         && !is_symbol(op)
+        && op != FUNCTION_GOT
         && op != CALL_ARGUMENT
         && op != CALL_STACK_ARGUMENT
         && op != CALL_HIGH

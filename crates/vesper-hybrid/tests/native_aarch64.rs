@@ -119,6 +119,7 @@ const FLOAT_FMA64: u64 = 148;
 const STACK_ARGUMENT: u64 = 149;
 const FLOAT_STACK_ARGUMENT: u64 = 150;
 const CALL_STACK_ARGUMENT: u64 = 151;
+const FUNCTION_GOT: u64 = 152;
 const CALL_STACK_COUNT_SHIFT: u32 = 4;
 const INDIRECT_CALL: u64 = 1 << (u64::BITS - 1);
 const EQUAL: u64 = 0;
@@ -1620,21 +1621,24 @@ fn aarch64_symbol_addresses_emit_paired_got_relocations() {
     const LDR_X0_FROM_X0: u32 = 0xf940_0000;
     const ARM64_GOT_PAGE: u64 = 6;
     const ARM64_GOT_LOAD: u64 = 7;
+    const ARM64_FUNCTION_GOT_PAGE: u64 = 8;
+    const ARM64_FUNCTION_GOT_LOAD: u64 = 9;
     const SYMBOL: u64 = 42;
     let expected = [ADRP_X0, LDR_X0_FROM_X0, RET]
         .map(u32::to_le_bytes)
         .concat();
-    let relocations = [
-        0,
-        ARM64_GOT_PAGE,
-        SYMBOL,
-        size_of::<u32>() as u64,
-        ARM64_GOT_LOAD,
-        SYMBOL,
-    ]
-    .map(u64::to_le_bytes)
-    .concat();
-    for operation in [SYMBOL_RELATIVE, SYMBOL_GOT] {
+    for (operation, page, load) in [
+        (SYMBOL_RELATIVE, ARM64_GOT_PAGE, ARM64_GOT_LOAD),
+        (SYMBOL_GOT, ARM64_GOT_PAGE, ARM64_GOT_LOAD),
+        (
+            FUNCTION_GOT,
+            ARM64_FUNCTION_GOT_PAGE,
+            ARM64_FUNCTION_GOT_LOAD,
+        ),
+    ] {
+        let relocations = [0, page, SYMBOL, size_of::<u32>() as u64, load, SYMBOL]
+            .map(u64::to_le_bytes)
+            .concat();
         let request = [0, 0, operation, SYMBOL, 0, 0];
         assert!(binding::aarch64_integer_leaf(&request).is_empty());
         let packet = binding::aarch64_relocatable_block(&request);
@@ -1643,7 +1647,9 @@ fn aarch64_symbol_addresses_emit_paired_got_relocations() {
         assert_eq!(code, expected);
         assert_eq!(records, relocations);
     }
-    assert!(binding::aarch64_relocatable_block(&[0, 0, SYMBOL_GOT, u64::MAX, 0, 0]).is_empty());
+    for operation in [SYMBOL_GOT, FUNCTION_GOT] {
+        assert!(binding::aarch64_relocatable_block(&[0, 0, operation, u64::MAX, 0, 0]).is_empty());
+    }
 }
 
 #[test]

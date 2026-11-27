@@ -171,6 +171,7 @@ enum IntegerOp {
     StackArgument = 149,
     FloatStackArgument = 150,
     CallStackArgument = 151,
+    FunctionGot = 152,
 }
 
 fn integer_bit_op(op: Opcode) -> Option<IntegerOp> {
@@ -254,6 +255,8 @@ const ARM64_CALL: u64 = 4;
 const ARM64_LIBCALL: u64 = 5;
 const ARM64_GOT_PAGE: u64 = 6;
 const ARM64_GOT_LOAD: u64 = 7;
+const ARM64_FUNCTION_GOT_PAGE: u64 = 8;
+const ARM64_FUNCTION_GOT_LOAD: u64 = 9;
 const LIBCALL_TARGET_BASE: u64 = u32::MAX as u64 + 1;
 const MEMMOVE_LIBCALL: u32 = 0;
 const MEMCPY_LIBCALL: u32 = 1;
@@ -1901,6 +1904,24 @@ impl IntegerBlocks<'_> {
                     values.low[value] = Some(self.symbol_address(global_value, width)?);
                     continue;
                 }
+                InstructionData::FuncAddr {
+                    opcode: Opcode::FuncAddr,
+                    func_ref,
+                } if self.aarch64 && output == types::I64 => {
+                    let ExternalName::User(name) = function.dfg.ext_funcs[func_ref].name else {
+                        return None;
+                    };
+                    let name = function.params.user_named_funcs().get(name)?;
+                    if name.namespace != FUNCTION_NAMESPACE
+                        || self.declarations.is_some_and(|declarations| {
+                            name.index as usize >= declarations.get_functions().size_hint().0
+                        })
+                    {
+                        return None;
+                    }
+                    self.relocations = true;
+                    (IntegerOp::FunctionGot, [u64::from(name.index), 0, 0])
+                }
                 InstructionData::UnaryImm {
                     opcode: Opcode::Iconst,
                     imm,
@@ -2641,6 +2662,7 @@ impl IntegerBlocks<'_> {
 /// A stacked i128 occupies two consecutive integer records.
 /// A trailing FloatReturn selects the ABI's single floating-point result.
 /// SymbolRelative and SymbolGot read the data symbol ID from the left operand.
+/// AArch64 FunctionGot reads the function symbol ID from the left operand.
 /// A labeled function starts with BlockLabel after the stack declarations
 /// and returns through BlockReturn records. The label's extra word describes
 /// the integer return arity or a single floating-point result. The entry argument
@@ -2844,6 +2866,14 @@ fn decode_relocatable(packet: &[u8]) -> Option<MachineCode> {
             ARM64_GOT_LOAD => (
                 Reloc::Aarch64Ld64GotLo12Nc,
                 ModuleRelocTarget::user(DATA_NAMESPACE, target),
+            ),
+            ARM64_FUNCTION_GOT_PAGE => (
+                Reloc::Aarch64AdrGotPage21,
+                ModuleRelocTarget::user(FUNCTION_NAMESPACE, target),
+            ),
+            ARM64_FUNCTION_GOT_LOAD => (
+                Reloc::Aarch64Ld64GotLo12Nc,
+                ModuleRelocTarget::user(FUNCTION_NAMESPACE, target),
             ),
             PLT_LIBCALL | ARM64_LIBCALL => {
                 let call = match target {
