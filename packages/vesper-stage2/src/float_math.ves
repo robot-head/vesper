@@ -1,0 +1,51 @@
+use @vesper/check-data::names::{Names};
+
+pub enum FloatMath: _ {
+    None = 0,
+    Abs = 1,
+    Sqrt = 2,
+    Floor = 3,
+    Ceil = 4,
+    Trunc = 5,
+    Round = 6,
+    Min = 7,
+    Max = 8,
+    Fma = 9,
+}
+
+pub const UNARY_FLOAT_ARGUMENTS: u64 = 1;
+pub const BINARY_FLOAT_ARGUMENTS: u64 = 2;
+pub const FUSED_FLOAT_ARGUMENTS: u64 = 3;
+
+pub fn math_op(in names: Names, symbol: u32) -> u8 {
+    if names.spells(symbol, in "abs".as_bytes()) {
+        FloatMath::Abs
+    } else if names.spells(symbol, in "sqrt".as_bytes()) {
+        FloatMath::Sqrt
+    } else if names.spells(symbol, in "floor".as_bytes()) {
+        FloatMath::Floor
+    } else if names.spells(symbol, in "ceil".as_bytes()) {
+        FloatMath::Ceil
+    } else if names.spells(symbol, in "trunc".as_bytes()) {
+        FloatMath::Trunc
+    } else if names.spells(symbol, in "round".as_bytes()) {
+        FloatMath::Round
+    } else if names.spells(symbol, in "min".as_bytes()) {
+        FloatMath::Min
+    } else if names.spells(symbol, in "max".as_bytes()) {
+        FloatMath::Max
+    } else if names.spells(symbol, in "fma".as_bytes()) {
+        FloatMath::Fma
+    } else {
+        FloatMath::None
+    }
+}
+
+pub fn math_arity(op: u8) -> u64 {
+    match op {
+        FloatMath::None => 0,
+        FloatMath::Min | FloatMath::Max => BINARY_FLOAT_ARGUMENTS,
+        FloatMath::Fma => FUSED_FLOAT_ARGUMENTS,
+        _ => UNARY_FLOAT_ARGUMENTS,
+    }
+}

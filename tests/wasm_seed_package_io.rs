@@ -2520,6 +2520,13 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
              (first + second) + widen_f64(x % y)\n\
          }\n\
          fn fmod(a: f64, b: f64) -> f64 { a % b }\n\
+         pub fn floating_math(x: f64, y: f32) -> (f64, f64, f64, f64, f64, f64, f64, f32, f32, f32, f32, f32, f32, f32) {\n\
+             let fused64 = fma(1.0000000000000002, 0.9999999999999998, -1.0);\n\
+             let fused32: f32 = fma(1.00000011920928955078125, 0.99999988079071044921875, -1.0);\n\
+             let minimum32 = min(-0.0, y);\n\
+             (floor(x), ceil(x), trunc(x), round(x), min(-0.0, x), max(0.0, x), fused64,\n\
+              floor(y), ceil(y), trunc(y), round(y), minimum32, max(0.0, y), fused32)\n\
+         }\n\
          fn unsupported(x: u64) -> u64 { match (x, x) { (0, _) => 7, _ => 9 } }\n\
          pub fn decline(x: u64) -> u64 { unsupported(x) }\n",
     )
@@ -2781,6 +2788,14 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
     assert_ne!(compile("decline"), 0);
     assert!(read_stage2_sidecar_notes(&object).contains("unsupported x86-64 ELF entry"));
     assert_eq!(std::fs::read(&object).unwrap(), bytes);
+    let remainder_object = dir.join("native-remainder.o");
+    std::fs::rename(&object, &remainder_object).unwrap();
+    assert_eq!(
+        compile("floating_math"),
+        0,
+        "{:?}",
+        read_stage2_sidecar_notes(&object)
+    );
 
     let caller = dir.join("native-scalar-caller.c");
     let binary = dir.join("native-scalar-caller");
@@ -2817,6 +2832,7 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
          extern uint64_t float_literals(uint64_t *, bool);\n\
          extern uint64_t aggregate_calls(int64_t, bool, float);\n\
          extern double float_remainders(double, double, float, float);\n\
+         extern uint64_t floating_math(uint64_t *, double, float);\n\
          int main(void) {\n\
              if (mix(10, 4) != 65 || mix(UINT64_MAX, UINT64_MAX) != UINT64_MAX - 16) return 1;\n\
              if (choose(0, 4) != 8 || choose(2, 4) != 8 || choose(4, 1) != 10\n\
@@ -2888,9 +2904,19 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
              if (float_literals(literals, false) != 0 || literals[6] != UINT64_C(0x40000000)) return 27;\n\
              if (aggregate_calls(127, true, 1.5f) != UINT64_C(0x3fbfff86)\n\
                  || aggregate_calls(127, false, 1.5f) != 390 || aggregate_calls(-2, false, 0.0f) != 3) return 28;\n\
-             return float_remainders(7.5, 2.0, -4.5f, 3.0f) != 2.0\n\
+             if (float_remainders(7.5, 2.0, -4.5f, 3.0f) != 2.0\n\
                  || float_remainders(-7.5, 2.0, 4.5f, 3.0f) != 2.0\n\
-                 || !isnan(float_remainders(7.5, 0.0, 4.5f, 3.0f));\n\
+                 || !isnan(float_remainders(7.5, 0.0, 4.5f, 3.0f))) return 29;\n\
+             uint64_t math[14] = {0};\n\
+             if (floating_math(math, -2.5, -0.5f) != 0\n\
+                 || math[0] != UINT64_C(0xc008000000000000) || math[1] != UINT64_C(0xc000000000000000)\n\
+                 || math[2] != math[1] || math[3] != math[0] || math[4] != UINT64_C(0xc004000000000000)\n\
+                 || math[5] != 0 || math[6] != UINT64_C(0xb970000000000000)\n\
+                 || math[7] != UINT64_C(0xbf800000) || math[8] != UINT64_C(0x80000000)\n\
+                 || math[9] != math[8] || math[10] != math[7] || math[11] != UINT64_C(0xbf000000)\n\
+                 || math[12] != 0 || math[13] != UINT64_C(0xa8800000)) return 30;\n\
+             return floating_math(math, 0.0, 0.0f) != 0 || math[4] != UINT64_C(0x8000000000000000)\n\
+                 || math[5] != 0 || math[11] != UINT64_C(0x80000000) || math[12] != 0;\n\
          }\n",
     )
     .unwrap();
@@ -2922,6 +2948,7 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
             &result_object,
             &literals_object,
             &aggregate_call_object,
+            &remainder_object,
             &object,
         ])
         .arg("-lm")

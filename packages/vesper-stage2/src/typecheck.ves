@@ -11,6 +11,7 @@ use @vesper/check-data::world::{Known, SpanRow, World, constructor, field_step, 
 use @vesper/place-ir::codes::{Lit, Pat};
 use @vesper/wasm-backend::ir::{CallRow, Pair};
 use @vesper/place-ir-lower::ast::{Ast, Ex, FnR, Pm, Pt};
+use self::float_math::{FloatMath, math_op};
 
 const NONE32: u32 = 4294967295;
 const NONE64: u64 = 18446744073709551615;
@@ -618,6 +619,39 @@ fn is_float_lit_expr(in tc: Tc, in a: Ast, eid: u64) -> bool {
     }
 }
 
+fn is_float_type(in tc: Tc, ty: u32) -> bool {
+    let name = tc.types.name(ty);
+    tc.types.kind(ty) == TyKind::Named && (name == tc.world.k.f32_ || name == tc.world.k.f64_)
+}
+
+fn check_math_call(inout tc: Tc, in a: Ast, e: Ex, callee: Ex, expected: u32) -> u32 {
+    let mut ty = expected;
+    let mut typed = e.n;
+    if !is_float_type(in tc, expected) {
+        ty = tc.f64_ty;
+        // A typed operand supplies the common width even if literals precede it.
+        for i in 0..e.n {
+            let argument = call_arg_expr(in a, e, i);
+            if !is_float_lit_expr(in tc, in a, argument) {
+                let found = check_expr(inout tc, in a, argument, tc.infer_ty);
+                if is_float_type(in tc, found) {
+                    ty = found;
+                }
+                typed = i;
+                break;
+            }
+        }
+    }
+    for i in 0..e.n {
+        if i != typed {
+            let _ = check_expr(inout tc, in a, call_arg_expr(in a, e, i), ty);
+        }
+    }
+    record_span(inout tc, callee.s0, callee.s1, ty);
+    record_span(inout tc, e.s0, e.s1, ty);
+    ty
+}
+
 fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
     if eid == NONE64 {
         return tc.unit_ty;
@@ -968,6 +1002,9 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
                             return check_fn_call(inout tc, in a, f, NONE32, e, ce);
                         },
                         Option::None => {
+                            if math_op(in tc.names, cname) != FloatMath::None {
+                                return check_math_call(inout tc, in a, e, ce, expected);
+                            }
                             let conv_ty = conv_target_type(inout tc, cname);
                             let same_int = is_same_int_op(in tc, cname);
                             let is_builtin = conv_ty != NONE32
