@@ -86,7 +86,7 @@ pub fn run(func: &mut ir::Function) {
     merge_blocks(func);
     canonicalize_imm_ops(func);
     fold_load_store_offsets(func);
-    cse_local_pure(func);
+    cse_dom_pure(func);
     dense_icmp_chains_to_br_table(func);
     remove_dead(func);
     sink_slot_inits(func);
@@ -5443,10 +5443,11 @@ fn fold_load_store_offsets(func: &mut ir::Function) {
     }
 }
 
-/// Intra-block pure CSE for `StackAddr`, `Unary` integer casts/negations,
-/// `Binary` / `BinaryImm64` integer ops, and `IntCompare` / `IntCompareImm`
-/// (excluding `Iconst` so constant live ranges are never extended).
-fn cse_local_pure(func: &mut ir::Function) {
+/// Call-bounded dominator-tree pure CSE for `StackAddr`, `Unary` integer
+/// casts/negations, `Binary` / `BinaryImm64` integer ops, and `IntCompare` /
+/// `IntCompareImm` (excluding `Iconst` so constant live ranges are never
+/// extended, and clearing on `Call`/`CallIndirect` to avoid spills across calls).
+fn cse_dom_pure(func: &mut ir::Function) {
     #[derive(Clone, Copy, PartialEq, Eq, Hash)]
     enum PureKey {
         StackAddr(StackSlot, i32, Type),
@@ -5457,11 +5458,31 @@ fn cse_local_pure(func: &mut ir::Function) {
         IcmpImm(ir::condcodes::IntCC, Value, i64),
     }
 
-    let blocks: Vec<Block> = func.layout.blocks().collect();
-    for block in blocks {
-        let mut seen: HashMap<PureKey, Value> = HashMap::new();
+    let Some(entry) = func.layout.entry_block() else {
+        return;
+    };
+    let cfg = ControlFlowGraph::with_function(func);
+    let domtree = DominatorTree::with_function(func, &cfg);
+    let mut dom_children: HashMap<Block, Vec<Block>> = HashMap::new();
+    for b in domtree.cfg_postorder().iter().rev().copied() {
+        if let Some(idom) = domtree.idom(b)
+            && idom != b
+        {
+            dom_children.entry(idom).or_default().push(b);
+        }
+    }
+
+    let mut stack: Vec<(Block, HashMap<PureKey, Value>)> = vec![(entry, HashMap::new())];
+    while let Some((block, mut seen)) = stack.pop() {
         let block_insts: Vec<Inst> = func.layout.block_insts(block).collect();
         for inst in block_insts {
+            if matches!(
+                func.dfg.insts[inst].opcode(),
+                Opcode::Call | Opcode::CallIndirect
+            ) {
+                seen.clear();
+                continue;
+            }
             let Some(&dest) = func.dfg.inst_results(inst).first() else {
                 continue;
             };
@@ -5566,6 +5587,16 @@ fn cse_local_pure(func: &mut ir::Function) {
                 } else {
                     seen.insert(k, dest);
                 }
+            }
+        }
+        if let Some(children) = dom_children.get(&block) {
+            for (idx, &child) in children.iter().enumerate() {
+                let child_seen = if idx + 1 == children.len() {
+                    std::mem::take(&mut seen)
+                } else {
+                    seen.clone()
+                };
+                stack.push((child, child_seen));
             }
         }
     }
