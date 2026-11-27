@@ -1314,13 +1314,10 @@ fn encode_pass(
     let mut home_candidates: u32 = 0;
     let mut unpromotable_homes: u32 = 0;
     let mut home_cells = ChunkSeq::new[HomeCell]();
-    let mut home_aliases = ChunkSeq::new[bool]();
+    let mut home_aliases = ChunkSeq::new[u64]();
     if register_home {
         for index in 0..HOME_REGISTERS {
             home_cells.push(HomeCell { width: 0, next_store: values });
-        }
-        for index in 0..count {
-            home_aliases.push(false);
         }
     }
     let mut frame_used = false;
@@ -1436,11 +1433,15 @@ fn encode_pass(
                             }
                             home_candidates = home_candidates | bit;
                             let next_store = if store { value } else { previous.next_store };
-                            let _ = home_cells
-                                .try_set(cell, HomeCell { width: width, next_store: next_store });
+                            if store || previous.width == 0 {
+                                let _ = home_cells.try_set(
+                                    cell,
+                                    HomeCell { width: width, next_store: next_store }
+                                );
+                            }
                             if !store && last <= next_store {
                                 // Until the next store, the home itself holds this SSA value.
-                                let _ = home_aliases.try_set(index, true);
+                                home_aliases.push(index);
                             }
                         },
                         Option::None => frame_used = true,
@@ -1590,6 +1591,8 @@ fn encode_pass(
     let mut labels = ChunkSeq::new[Label]();
     let mut fixups = ChunkSeq::new[LabelBranch]();
     let mut table_fixups = ChunkSeq::new[TableFixup]();
+    let mut remaining_aliases = home_aliases.len();
+    let mut next_alias = home_aliases.try_get(wrapping_sub(remaining_aliases, 1)).unwrap_or(count);
     let mut remaining_calls = call_sites.len();
     let mut next_call = call_sites.try_get(wrapping_sub(remaining_calls, 1)).unwrap_or(values);
     if labeled {
@@ -1839,9 +1842,13 @@ fn encode_pass(
         } else {
             UNASSIGNED
         };
-        if home != UNASSIGNED && home_aliases.try_get(index).unwrap_or(false) {
-            locations.push(home);
-            continue;
+        if index == next_alias {
+            remaining_aliases = wrapping_sub(remaining_aliases, 1);
+            next_alias = home_aliases.try_get(wrapping_sub(remaining_aliases, 1)).unwrap_or(count);
+            if home != UNASSIGNED {
+                locations.push(home);
+                continue;
+            }
         }
         let last = last_read(in ends, value);
         let preserved = if last > next_call {
