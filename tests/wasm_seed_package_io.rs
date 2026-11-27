@@ -2606,7 +2606,20 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
              value += b;\n\
              value\n\
          }\n\
-         fn unsupported(x: u64) -> u64 { match (x, x) { (0, _) => 7, _ => 9 } }\n\
+         pub fn tuple_match_native(x: i8, y: u16, ready: bool) -> u64 {\n\
+             let pair = (x, (y, ready));\n\
+             match pair {\n\
+                 (-1, (0, true)) | (-2, (1, false)) => 100,\n\
+                 (0, (n, true)) | (1, (n, false)) => wrapping_add(200, widen_u64(n)),\n\
+                 (_, (n, false)) => widen_u64(n),\n\
+                 _ => { let (_, (n, _)) = pair; wrapping_add(1000, widen_u64(n)) },\n\
+             }\n\
+         }\n\
+         copy enum UnsupportedMatch { Empty, HasValue(u64) }\n\
+         fn unsupported(x: u64) -> u64 {\n\
+             let value = UnsupportedMatch::HasValue(x);\n\
+             match value { UnsupportedMatch::Empty => 7, _ => 9 }\n\
+         }\n\
          pub fn decline(x: u64) -> u64 { unsupported(x) }\n",
     )
     .unwrap();
@@ -2927,6 +2940,14 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
     assert_ne!(compile("overflowing_compound"), 0);
     assert!(read_stage2_sidecar_notes(&object).contains("unsupported x86-64 ELF entry"));
     assert_eq!(std::fs::read(&object).unwrap(), compound_bytes);
+    let compound_object = dir.join("native-compound-writes.o");
+    std::fs::rename(&object, &compound_object).unwrap();
+    assert_eq!(
+        compile("tuple_match_native"),
+        0,
+        "{:?}",
+        read_stage2_sidecar_notes(&object)
+    );
 
     let caller = dir.join("native-scalar-caller.c");
     let binary = dir.join("native-scalar-caller");
@@ -2970,6 +2991,7 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
          extern uint64_t product_inputs(uint64_t *, uint64_t, uint64_t, uint64_t, uint64_t, const uint64_t *, const uint64_t *, double);\n\
          extern uint64_t product_caller(uint64_t *, int64_t, float, bool);\n\
          extern uint64_t compound_values(uint64_t *, double, double, float, bool);\n\
+         extern uint64_t tuple_match_native(int8_t, uint16_t, bool);\n\
          int main(void) {\n\
              if (mix(10, 4) != 65 || mix(UINT64_MAX, UINT64_MAX) != UINT64_MAX - 16) return 1;\n\
              if (choose(0, 4) != 8 || choose(2, 4) != 8 || choose(4, 1) != 10\n\
@@ -3102,9 +3124,12 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
              if (compound_values(compound, 7.5, 2.0, 3.5f, true) != 0\n\
                  || compound[0] != UINT64_C(0x3ff8000000000000) || compound[1] != UINT64_C(0x3fa00000)\n\
                  || compound[2] != 2 || compound[3] != UINT64_MAX || compound[4] != UINT64_MAX) return 39;\n\
-             return compound_values(compound, 7.5, 2.0, 3.5f, false) != 0\n\
+             if (compound_values(compound, 7.5, 2.0, 3.5f, false) != 0\n\
                  || compound[0] != UINT64_C(0x3ff8000000000000) || compound[1] != UINT64_C(0x40500000)\n\
-                 || compound[2] != 2 || compound[3] != UINT64_MAX || compound[4] != UINT64_MAX;\n\
+                 || compound[2] != 2 || compound[3] != UINT64_MAX || compound[4] != UINT64_MAX) return 40;\n\
+             return tuple_match_native(-1, 0, true) != 100 || tuple_match_native(-2, 1, false) != 100\n\
+                 || tuple_match_native(0, UINT16_MAX, true) != 65735 || tuple_match_native(1, 9, false) != 209\n\
+                 || tuple_match_native(-1, 1, false) != 1 || tuple_match_native(127, 0, true) != 1000;\n\
          }\n",
     )
     .unwrap();
@@ -3143,6 +3168,7 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
             &nested_object,
             &product_inputs_object,
             &product_caller_object,
+            &compound_object,
             &object,
         ])
         .arg("-lm")

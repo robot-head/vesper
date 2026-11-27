@@ -29,6 +29,9 @@ use @vesper/hybrid-native-backend::scalar::{
     CALL_VOID, DISP32_MASK, FLOAT_LOAD, FLOAT_STORE32, FLOAT_STORE64, LOAD, STACK_ADDRESS,
     STORE_QWORD, ROTATE_LEFT_REGISTER, ROTATE_RIGHT, ROTATE_RIGHT_REGISTER
 };
+use @vesper/hybrid-native-backend::scalar::{
+    COMPARE_BYTE_IMMEDIATE, COMPARE_DWORD_IMMEDIATE, COMPARE_WORD_IMMEDIATE
+};
 use self::float_math::{
     BINARY_FLOAT_ARGUMENTS, FUSED_FLOAT_ARGUMENTS, FloatMath, NEAREST_PREFIX, SATURATING_PREFIX,
     UNARY_FLOAT_ARGUMENTS, math_arity, math_op
@@ -43,7 +46,6 @@ const DATA_HEADER_WORDS: u64 = 2;
 const DATA_FIELD_WORDS: u64 = 2;
 const PROJECT_WORDS: u64 = 2;
 const PROJECT_MEMBER: u64 = 1;
-const TUPLE_PATTERN_COUNT: u64 = BIND_NAME;
 const ASCII_ZERO: u8 = 48;
 const DECIMAL_BASE: u64 = 10;
 const PLAIN_READ_WORDS: u64 = 4;
@@ -255,7 +257,6 @@ struct Function {
     blocks: ChunkSeq[u64],
     next_label: u64,
     bindings: ChunkSeq[u32],
-    binding_fields: ChunkSeq[u32],
     product_indices: ChunkSeq[u64],
     products: ChunkSeq[Product],
     call_result_bytes: u64,
@@ -856,13 +857,7 @@ fn place_value(in low: L, f: FnR, root: u32, in m: Function) -> u64 {
     if binding == 0 {
         return argument_value(in low, f, root);
     }
-    let source = add(m.arguments, wrapping_sub(w(binding), 1));
-    let field = u32_at(in m.binding_fields, w(root));
-    if field == 0 {
-        source
-    } else {
-        tuple_member(in low, source, wrapping_sub(w(field), 1), in m)
-    }
+    wrapping_sub(w(binding), 1)
 }
 
 fn aggregate_member(in low: L, source: u64, member: u32, in m: Function) -> u64 {
@@ -977,42 +972,20 @@ fn collect_binding(in low: L, inst: InstRow, inout m: Function) -> bool {
     if pattern == Pat::Bind {
         // Shadowed names already have distinct Place IR symbols.
         return inst.n == inc(BIND_NAME)
-            && record_binding(n32(low.program.op(add(at, BIND_NAME))), source, inout m);
+            && record_binding(
+                n32(low.program.op(add(at, BIND_NAME))),
+                add(m.arguments, source),
+                inout m
+            );
     }
-    if pattern != Pat::Tuple || inst.n <= TUPLE_PATTERN_COUNT {
-        return false;
-    }
-    let end = add(at, inst.n);
-    let count_at = add(at, TUPLE_PATTERN_COUNT);
-    let mut child = inc(count_at);
-    for field in 0..low.program.op(count_at) {
-        let next = add(child, PATTERN_HEADER_WORDS);
-        if next > end {
-            return false;
-        }
-        let shape = low.program.op(child);
-        child = next;
-        if shape == Pat::Bind {
-            if child >= end {
-                return false;
-            }
-            let name = n32(low.program.op(child));
-            if !record_binding(name, source, inout m) {
-                return false;
-            }
-            set_by_symbol(inout m.binding_fields, name, n32(inc(field)));
-            child = inc(child);
-        } else if shape != Pat::Wild {
-            return false;
-        }
-    }
-    child == end
+    // Tuple fields are available only after their source products are planned.
+    pattern == Pat::Tuple
 }
 fn collect_mutating_place(in low: L, f: FnR, name: u32, inout m: Function) -> bool {
     if m.is_inout(argument_value(in low, f, name)) {
         return true;
     }
-    if u32_at(in m.bindings, w(name)) == 0 || u32_at(in m.binding_fields, w(name)) != 0 {
+    if u32_at(in m.bindings, w(name)) == 0 {
         return false;
     }
     if u32_at(in m.mutable_slots, w(name)) == 0 {
@@ -1141,13 +1114,7 @@ fn lower_local_store(
     if inst.op == Op::Bind {
         let pattern = low.program.op(add(at, BIND_PATTERN));
         if pattern == Pat::Tuple {
-            let source = add(m.arguments, low.program.op(at));
-            return match m.product(source) {
-                Option::Some(product) => m.value_kind(source) == ScalarKind::Tuple
-                    && product_count(in low, product.ty)
-                        == low.program.op(add(at, TUPLE_PATTERN_COUNT)),
-                Option::None => false,
-            };
+            return true;
         }
         if pattern == Pat::Wild || pattern == Pat::Literal {
             // Planning confirms that literal binds belong to match arms.
@@ -1203,7 +1170,7 @@ fn lower_local_store(
         return inst.op == Op::Bind && kind != ScalarKind::Unsupported;
     }
     let initial = u32_at(in m.bindings, w(name));
-    if initial == 0 || abi_width(kind) == 0 || kind != m.kind(wrapping_sub(w(initial), 1)) {
+    if initial == 0 || abi_width(kind) == 0 || kind != m.value_kind(wrapping_sub(w(initial), 1)) {
         return false;
     }
     let rhs = m.read(add(m.arguments, source), block);
@@ -1460,29 +1427,137 @@ fn block_parameter(in low: L, b: BlockRow) -> u64 {
     }
 }
 
-fn match_target_word(in low: L, pattern: u64, end: u64) -> u64 {
-    if pattern >= end {
+fn pattern_payload(in low: L, at: u64, end: u64) -> u64 {
+    if end < at || wrapping_sub(end, at) < PATTERN_HEADER_WORDS {
         return NO_VALUE;
     }
-    let extra = match low.program.op(pattern) {
+    let extra = match low.program.op(at) {
         Pat::Wild => 0,
-        Pat::Bind => 1,
+        Pat::Bind | Pat::Tuple => 1,
         Pat::Literal => LITERAL_WORDS,
         _ => return NO_VALUE,
     };
-    let target = add(add(pattern, PATTERN_HEADER_WORDS), extra);
-    if target >= end || low.program.tag(target) != Tag::Block {
-        NO_VALUE
+    let next = add(add(at, PATTERN_HEADER_WORDS), extra);
+    if next > end { NO_VALUE } else { next }
+}
+
+copy struct MatchArm {
+    target: u64,
+    tests: u64,
+}
+
+fn match_arm(in low: L, pattern: u64, end: u64) -> MatchArm {
+    let invalid = MatchArm { target: NO_VALUE, tests: 0 };
+    let mut at = pattern;
+    let mut pending: u64 = 1;
+    let mut tests: u64 = 0;
+    loop {
+        if pending == 0 {
+            break;
+        }
+        let next = pattern_payload(in low, at, end);
+        if next == NO_VALUE {
+            return invalid;
+        }
+        pending = wrapping_sub(pending, 1);
+        let kind = low.program.op(at);
+        if kind == Pat::Tuple {
+            let fields = low.program.op(add(at, PATTERN_HEADER_WORDS));
+            if fields > wrapping_sub(end, next) / PATTERN_HEADER_WORDS {
+                return invalid;
+            }
+            pending = add(pending, fields);
+        }
+        if kind == Pat::Literal {
+            tests = inc(tests);
+        }
+        at = next;
+    }
+    if at >= end || low.program.tag(at) != Tag::Block {
+        invalid
     } else {
-        target
+        MatchArm { target: at, tests: tests }
     }
 }
 
-fn is_match_literal_binding(in low: L, row: FnRow, b: BlockRow, index: u64, inst: InstRow) -> bool {
-    if index != b.i0
-        || inst.n != add(BIND_NAME, LITERAL_WORDS)
-        || low.program.op(add(inst.a, BIND_PATTERN)) != Pat::Literal
-    {
+copy struct PatternLeaf {
+    value: u64,
+    operand: u64,
+    kind: u8,
+}
+
+fn pattern_leaves(
+    in low: L,
+    root: u64,
+    pattern: u64,
+    end: u64,
+    in m: Function,
+    inout leaves: ChunkSeq[PatternLeaf]
+) -> bool {
+    let mut values = ChunkSeq::new[u64]();
+    values.push(root);
+    let mut at = pattern;
+    loop {
+        let value = match values.pop() {
+            Option::Some(value) => value,
+            Option::None => return at == end,
+        };
+        let next = pattern_payload(in low, at, end);
+        let kind = m.value_kind(value);
+        if next == NO_VALUE || kind == ScalarKind::Unsupported {
+            return false;
+        }
+        let payload = add(at, PATTERN_HEADER_WORDS);
+        match low.program.op(at) {
+            Pat::Tuple => {
+                let count = low.program.op(payload);
+                if count == 0 && kind == ScalarKind::Unit {
+                    at = next;
+                    continue;
+                }
+                let product = match m.product(value) {
+                    Option::Some(product) => product,
+                    Option::None => return false,
+                };
+                if kind != ScalarKind::Tuple
+                    || count != product_count(in low, product.ty)
+                    || count > wrapping_sub(end, next) / PATTERN_HEADER_WORDS
+                {
+                    return false;
+                }
+                for i in 0..count {
+                    let child = product_field(in low, product, wrapping_sub(count, inc(i)), in m);
+                    if child == NO_VALUE {
+                        return false;
+                    }
+                    values.push(child);
+                }
+            },
+            Pat::Bind => {
+                if low.program.tag(payload) != Tag::Name {
+                    return false;
+                }
+                leaves.push(PatternLeaf {
+                    value: value,
+                    operand: low.program.op(payload),
+                    kind: Pat::Bind
+                });
+            },
+            Pat::Literal => {
+                let bits = match literal_bits(in low, payload, kind) {
+                    Option::Some(bits) => bits,
+                    Option::None => return false,
+                };
+                leaves.push(PatternLeaf { value: value, operand: bits, kind: Pat::Literal });
+            },
+            _ => (),
+        };
+        at = next;
+    }
+}
+
+fn is_match_binding(in low: L, row: FnRow, b: BlockRow, index: u64, inst: InstRow) -> bool {
+    if index != b.i0 {
         return false;
     }
     let count = add(b.ha, BLOCK_INCOMING_COUNT);
@@ -1491,6 +1566,12 @@ fn is_match_literal_binding(in low: L, row: FnRow, b: BlockRow, index: u64, inst
     }
     let pred = low.program.block(add(row.b0, low.program.op(inc(count))));
     pred.term == Term::Match && low.program.op(pred.ta) == low.program.op(inst.a)
+}
+
+fn is_match_literal_binding(in low: L, row: FnRow, b: BlockRow, index: u64, inst: InstRow) -> bool {
+    inst.n == add(BIND_NAME, LITERAL_WORDS)
+        && low.program.op(add(inst.a, BIND_PATTERN)) == Pat::Literal
+        && is_match_binding(in low, row, b, index, inst)
 }
 
 fn queue_block(inout labels: ChunkSeq[u64], inout pending: ChunkSeq[u64], target: u64) -> bool {
@@ -1537,16 +1618,16 @@ fn plan_blocks(in low: L, row: FnRow, inout m: Function) -> bool {
             let end = add(b.ta, b.tn);
             let mut pattern = add(b.ta, MATCH_FIRST_ARM);
             for arm in 0..count {
-                let target = match_target_word(in low, pattern, end);
-                if target == NO_VALUE
-                    || !queue_block(inout m.labels, inout pending, low.program.op(target))
+                let shape = match_arm(in low, pattern, end);
+                if shape.target == NO_VALUE
+                    || !queue_block(inout m.labels, inout pending, low.program.op(shape.target))
                 {
                     return false;
                 }
-                if low.program.op(pattern) != Pat::Literal {
+                if shape.tests == 0 {
                     break;
                 }
-                pattern = inc(target);
+                pattern = inc(shape.target);
             }
         }
         index = inc(index);
@@ -1667,6 +1748,36 @@ fn plan_call_arguments(in low: L, inst: InstRow, inout m: Function) -> bool {
     true
 }
 
+fn plan_tuple_binding(in low: L, inst: InstRow, matched: bool, inout m: Function) -> bool {
+    let root = add(m.arguments, low.program.op(inst.a));
+    let mut leaves = ChunkSeq::new[PatternLeaf]();
+    if !pattern_leaves(
+        in low,
+        root,
+        add(inst.a, BIND_PATTERN),
+        add(inst.a, inst.n),
+        in m,
+        inout leaves
+    ) {
+        return false;
+    }
+    for i in 0..leaves.len() {
+        match leaves.try_get(i) {
+            Option::Some(leaf) => {
+                if leaf.kind == Pat::Bind {
+                    if !record_binding(n32(leaf.operand), leaf.value, inout m) {
+                        return false;
+                    }
+                } else if !matched {
+                    return false;
+                }
+            },
+            Option::None => return false,
+        };
+    }
+    true
+}
+
 // Cache the product behind each aggregate SSA value.
 fn plan_aggregates(in low: L, f: FnR, row: FnRow, inout m: Function) -> bool {
     m.product_indices.resize(m.values.len(), NO_VALUE);
@@ -1686,6 +1797,13 @@ fn plan_aggregates(in low: L, f: FnR, row: FnRow, inout m: Function) -> bool {
             let inst = low.program.inst(index);
             let value = add(m.arguments, w(inst.dest));
             let aggregate = is_aggregate(m.value_kind(value));
+            if inst.op == Op::Bind && low.program.op(add(inst.a, BIND_PATTERN)) == Pat::Tuple {
+                let matched = is_match_binding(in low, row, b, index, inst);
+                if !plan_tuple_binding(in low, inst, matched, inout m) {
+                    return false;
+                }
+                continue;
+            }
             if inst.op == Op::Call {
                 if !plan_call_arguments(in low, inst, inout m) {
                     return false;
@@ -1814,6 +1932,43 @@ fn plan_value(in low: L, value: u64, block: u64, inout m: Function) -> bool {
     true
 }
 
+fn plan_tuple_match(in low: L, b: BlockRow, source: u64, block: u64, inout m: Function) -> bool {
+    let end = add(b.ta, b.tn);
+    let count = low.program.op(add(b.ta, MATCH_ARM_COUNT));
+    let mut pattern = add(b.ta, MATCH_FIRST_ARM);
+    for arm in 0..count {
+        let shape = match_arm(in low, pattern, end);
+        if shape.target == NO_VALUE {
+            return false;
+        }
+        let mut leaves = ChunkSeq::new[PatternLeaf]();
+        if !pattern_leaves(in low, source, pattern, shape.target, in m, inout leaves) {
+            return false;
+        }
+        for i in 0..leaves.len() {
+            match leaves.try_get(i) {
+                Option::Some(leaf) => if leaf.kind == Pat::Literal {
+                    // Later arm tests use synthetic machine blocks and reload their operands.
+                    let planned = if arm == 0 {
+                        m.use_in(leaf.value, block)
+                    } else {
+                        m.home(leaf.value, block)
+                    };
+                    if !planned {
+                        return false;
+                    }
+                },
+                Option::None => return false,
+            };
+        }
+        if shape.tests == 0 {
+            return true;
+        }
+        pattern = inc(shape.target);
+    }
+    false
+}
+
 // Stack homes hold branch results and the values read outside their defining block.
 fn plan_homes(in low: L, f: FnR, row: FnRow, inout m: Function) -> bool {
     let mut value_count: u64 = 0;
@@ -1839,6 +1994,8 @@ fn plan_homes(in low: L, f: FnR, row: FnRow, inout m: Function) -> bool {
                 has_aggregates = has_aggregates
                     || (inst.op == Op::Tuple && inst.n > EMPTY_TUPLE_WORDS)
                     || inst.op == Op::Data
+                    || (inst.op == Op::Bind
+                        && low.program.op(add(inst.a, BIND_PATTERN)) == Pat::Tuple)
                     || (inst.op == Op::Call && is_aggregate(scalar_kind(in low, inst.ty)));
                 if inst.op == Op::Bind
                     && !is_match_literal_binding(in low, row, b, index, inst)
@@ -1997,6 +2154,14 @@ fn plan_homes(in low: L, f: FnR, row: FnRow, inout m: Function) -> bool {
         } else if b.term == Term::Branch || b.term == Term::Match {
             let id = low.program.op(b.ta);
             let source = add(f.param_count, id);
+            if b.term == Term::Match
+                && (m.kind(id) == ScalarKind::Tuple || m.kind(id) == ScalarKind::Unit)
+            {
+                if !plan_tuple_match(in low, b, source, block, inout m) {
+                    return false;
+                }
+                continue;
+            }
             if m.kind(id) != ScalarKind::Unit && !m.use_in(source, block) {
                 return false;
             }
@@ -3266,33 +3431,146 @@ fn lower_return(in low: L, result: u64, block: u64, inout m: Function) -> bool {
     true
 }
 
+fn match_label(in low: L, row: FnRow, target: u64, in m: Function) -> u64 {
+    let block = low.program.op(target);
+    let label = m.label(block);
+    if label == 0
+        || label == NO_VALUE
+        || block_parameter(in low, low.program.block(add(row.b0, block))) != NO_VALUE
+    {
+        NO_VALUE
+    } else {
+        label
+    }
+}
+
+fn match_value(inout m: Function, source: u64, arm: u64, block: u64) -> u64 {
+    if arm == 0 {
+        return m.read(source, block);
+    }
+    let home = m.values.try_get(source).unwrap_or(value_new(NO_VALUE)).home;
+    if home >= LITERAL_HOME {
+        return NO_VALUE;
+    }
+    m.record(STACK_LOAD, HOME_SLOT, home, QWORD_BITS)
+}
+
+fn match_branch(condition: u64, label: u64, inout m: Function) {
+    let next_test = m.next_label;
+    m.next_label = inc(next_test);
+    let _ = m.record(BRANCH_BLOCK, condition, label, 0);
+    let _ = m.record(JUMP_LABEL, next_test, 0, 0);
+    let returns = m.return_layout();
+    let _ = m.record(BLOCK_LABEL, next_test, 0, returns);
+}
+
+fn lower_tuple_match(
+    in low: L,
+    row: FnRow,
+    b: BlockRow,
+    source: u64,
+    block: u64,
+    inout m: Function
+) -> bool {
+    let count = low.program.op(add(b.ta, MATCH_ARM_COUNT));
+    let end = add(b.ta, b.tn);
+    let mut pattern = add(b.ta, MATCH_FIRST_ARM);
+    for arm in 0..count {
+        let shape = match_arm(in low, pattern, end);
+        if shape.target == NO_VALUE {
+            return false;
+        }
+        let label = match_label(in low, row, shape.target, in m);
+        if label == NO_VALUE {
+            return false;
+        }
+        if shape.tests == 0 {
+            let _ = m.record(JUMP_LABEL, label, 0, 0);
+            return true;
+        }
+        let mut leaves = ChunkSeq::new[PatternLeaf]();
+        if !pattern_leaves(in low, source, pattern, shape.target, in m, inout leaves) {
+            return false;
+        }
+        let mut condition = NO_VALUE;
+        for i in 0..leaves.len() {
+            let leaf = match leaves.try_get(i) {
+                Option::Some(leaf) => leaf,
+                Option::None => return false,
+            };
+            if leaf.kind != Pat::Literal {
+                continue;
+            }
+            let value = match_value(inout m, leaf.value, arm, block);
+            if value == NO_VALUE {
+                return false;
+            }
+            let test = if leaf.operand == 0 {
+                value
+            } else if shape.tests == 1 {
+                let kind = m.value_kind(leaf.value);
+                let immediate = match abi_width(kind) {
+                    BYTE_BITS => COMPARE_BYTE_IMMEDIATE,
+                    WORD_BITS => COMPARE_WORD_IMMEDIATE,
+                    DWORD_BITS => COMPARE_DWORD_IMMEDIATE,
+                    _ => NO_VALUE,
+                };
+                if immediate == NO_VALUE {
+                    let literal = m.record(CONSTANT, leaf.operand, 0, 0);
+                    m.record(comparison_operation(kind), value, literal, NOT_EQUAL)
+                } else {
+                    m.record(immediate, value, leaf.operand, NOT_EQUAL)
+                }
+            } else {
+                // Canonical integer lanes can share one zero test for all fields.
+                let literal = m.record(CONSTANT, leaf.operand, 0, 0);
+                m.record(XOR, value, literal, QWORD_BITS)
+            };
+            condition = if condition == NO_VALUE {
+                test
+            } else {
+                m.record(OR, condition, test, QWORD_BITS)
+            };
+        }
+        if condition == NO_VALUE || inc(arm) == count {
+            return false;
+        }
+        match_branch(condition, label, inout m);
+        pattern = inc(shape.target);
+    }
+    false
+}
+
 fn lower_match(in low: L, row: FnRow, b: BlockRow, block: u64, inout m: Function) -> bool {
     let id = low.program.op(b.ta);
     let kind = m.kind(id);
+    let source = add(m.arguments, id);
+    if kind == ScalarKind::Tuple || kind == ScalarKind::Unit {
+        return lower_tuple_match(in low, row, b, source, block, inout m);
+    }
     if abi_width(kind) == 0 || is_float(kind) {
         return false;
     }
-    let source = add(m.arguments, id);
     let end = add(b.ta, b.tn);
     let count = low.program.op(add(b.ta, MATCH_ARM_COUNT));
     let mut seen_bools: u64 = 0;
     let mut pattern = add(b.ta, MATCH_FIRST_ARM);
     for arm in 0..count {
-        let target = match_target_word(in low, pattern, end);
+        let target = match_arm(in low, pattern, end).target;
         if target == NO_VALUE {
             return false;
         }
-        let target_block = low.program.op(target);
-        let label = m.label(target_block);
-        if label == 0
-            || label == NO_VALUE
-            || block_parameter(in low, low.program.block(add(row.b0, target_block))) != NO_VALUE
-        {
+        let label = match_label(in low, row, target, in m);
+        if label == NO_VALUE {
             return false;
         }
-        if low.program.op(pattern) != Pat::Literal {
+        let pat = low.program.op(pattern);
+        if pat == Pat::Wild || pat == Pat::Bind {
             let _ = m.record(JUMP_LABEL, label, 0, 0);
             return true;
+        }
+        if pat != Pat::Literal {
+            return false;
         }
         let bits = match literal_bits(in low, add(pattern, PATTERN_HEADER_WORDS), kind) {
             Option::Some(bits) => bits,
@@ -3308,28 +3586,13 @@ fn lower_match(in low: L, row: FnRow, b: BlockRow, block: u64, inout m: Function
         if inc(arm) == count {
             return false;
         }
-        let value = if arm == 0 {
-            m.read(source, block)
-        } else {
-            // Each test is a machine block. Reload the scrutinee from its
-            // home so no register value crosses the synthetic edges.
-            let home = m.values.try_get(source).unwrap_or(value_new(NO_VALUE)).home;
-            if home == NO_VALUE {
-                return false;
-            }
-            m.record(STACK_LOAD, HOME_SLOT, home, QWORD_BITS)
-        };
+        let value = match_value(inout m, source, arm, block);
         if value == NO_VALUE {
             return false;
         }
         let constant = m.record(CONSTANT, bits, 0, 0);
         let condition = m.record(comparison_operation(kind), value, constant, NOT_EQUAL);
-        let next_test = m.next_label;
-        m.next_label = inc(next_test);
-        let _ = m.record(BRANCH_BLOCK, condition, label, 0);
-        let _ = m.record(JUMP_LABEL, next_test, 0, 0);
-        let returns = m.return_layout();
-        let _ = m.record(BLOCK_LABEL, next_test, 0, returns);
+        match_branch(condition, label, inout m);
         pattern = inc(target);
     }
     false
@@ -3518,7 +3781,6 @@ fn lower_function(
         blocks: ChunkSeq::new[u64](),
         next_label: 0,
         bindings: ChunkSeq::new[u32](),
-        binding_fields: ChunkSeq::new[u32](),
         product_indices: ChunkSeq::new[u64](),
         products: ChunkSeq::new[Product](),
         call_result_bytes: 0,
