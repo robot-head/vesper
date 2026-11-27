@@ -2493,10 +2493,13 @@ impl Gen {
         o.push(builtin_calls.len());
         o.extend(in builtin_calls.as_slice());
         // The failure header: the row's `Fail` count, then (when there is
-        // one) the lane of the result a failure exit returns a zero of.
+        // one) the lane of the result a failure exit returns a zero of: a
+        // struct result's function returns the word 0 beside its result
+        // pointer (#2581).
         o.push(nfail);
         if nfail != 0 {
-            o.push(self.body_lane(h.result));
+            let lane = self.body_lane(h.result);
+            o.push(if lane == LANE_PRODUCT { LANE_I64 } else { lane });
         }
         o.extend(in graph_words.as_slice());
         o.extend(in block_words.as_slice());
