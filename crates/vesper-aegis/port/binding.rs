@@ -96,6 +96,7 @@ unsafe extern "C" {
     fn vesper_aegis_host_unmap(iv: *mut u64, count: i64, win_start: i64, win_end: i64, addr: i64, len: i64) -> i64;
     fn vesper_aegis_host_validate_clock(has_prev: i64, prev: i64, max_step: i64, reported: i64) -> i64;
     fn vesper_aegis_iso8601_utc_to_unix(result: *mut u64, s: *mut u64) -> i64;
+    fn vesper_aegis_parse_amd_cert_ext(der: *mut u64, want_hwid_len: i64, out: *mut u64) -> i64;
     fn vesper_aegis_parse_crl_this_update(result: *mut u64, der: *mut u64) -> i64;
     fn vesper_aegis_parse_raw_cert(der: *mut u64, out: *mut u64) -> i64;
     fn vesper_aegis_sgx_parse(b: *mut u64, mode: i64, w: *mut u64, fail: *mut u64) -> i64;
@@ -424,6 +425,15 @@ pub fn iso8601_utc_to_unix(s: &[u8]) -> Option<u64> {
     // every handle passed is owned or borrowed as its mode requires.
     let raw = vesper_port_abi::with_slice(s, |view_s| unsafe { vesper_aegis_iso8601_utc_to_unix(result.as_mut_ptr(), view_s) });
     <Option<u64> as Abi>::get(&result[0..])
+}
+
+/// Calls `parse_amd_cert_ext` of the Vesper library `aegis` (`vesper_aegis_parse_amd_cert_ext`).
+pub fn parse_amd_cert_ext(der: &[u8], want_hwid_len: u64, out: &mut [u64]) -> u64 {
+    // SAFETY: `vesper_aegis_parse_amd_cert_ext` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(der, |view_der| vesper_port_abi::with_slice_mut(out, |view_out| unsafe { vesper_aegis_parse_amd_cert_ext(view_der, want_hwid_len as i64, view_out) }));
+    raw as u64
 }
 
 /// Calls `parse_crl_this_update` of the Vesper library `aegis` (`vesper_aegis_parse_crl_this_update`).

@@ -17,6 +17,7 @@
 // (FIELDS), and `a`, `b` the variant's numbers.
 use self::cbor::decode as cbor_decode_impl;
 use self::der_cert::{
+    parse_amd_cert_ext as parse_amd_cert_ext_impl,
     parse_crl_this_update as parse_crl_this_update_impl, parse_raw_cert as parse_raw_cert_impl
 };
 use self::pem::{
@@ -327,6 +328,10 @@ pub fn parse_raw_cert(in der: Slice[u8], inout out: Slice[u64]) -> u64 {
 
 pub fn parse_crl_this_update(in der: Slice[u8]) -> (u64, u64) {
     parse_crl_this_update_impl(in der)
+}
+
+pub fn parse_amd_cert_ext(in der: Slice[u8], want_hwid_len: u64, inout out: Slice[u64]) -> u64 {
+    parse_amd_cert_ext_impl(in der, want_hwid_len, inout out)
 }
 
 pub fn decode_pem_certificates(
