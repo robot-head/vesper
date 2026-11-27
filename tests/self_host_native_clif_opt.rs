@@ -39,6 +39,9 @@ const PORTED: &[(&str, u64)] = &[
     ("vector_registers", 11),
     ("remove_dead", 12),
     ("sink_slot_inits", 13),
+    ("share_invariant_loads", 14),
+    ("hoist_loop_invariants", 15),
+    ("merge_tails", 16),
     ("sink_compares", 32),
     ("thread_branches", 33),
     ("thread_decided_branches", 34),
@@ -51,6 +54,8 @@ const PORTED: &[(&str, u64)] = &[
 
 /// The package's answer word for a step it ran.
 const ANSWER_PORTED: u64 = 1;
+/// The step that reads the shapes section (`clif_words::shapes`).
+const MERGE_TAILS_CODE: u64 = 16;
 
 /// How many differing functions the differential prints.
 const MAX_REPORTED: usize = 6;
@@ -76,6 +81,9 @@ fn step_code(name: &str) -> Option<(usize, u64)> {
 fn through_vesper(f: &ir::Function, code: u64) -> Result<ir::Function, String> {
     let mut input = code.to_le_bytes().to_vec();
     input.extend(clif_words::encode(f, false));
+    if code == MERGE_TAILS_CODE {
+        input.extend(clif_words::shapes(f));
+    }
     let words = entry().words(&input);
     let (&answer, script) = words.split_first().ok_or("no answer")?;
     if answer != ANSWER_PORTED {
