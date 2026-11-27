@@ -101,6 +101,12 @@ const PROBE_ROUNDS: u64 = 4;
 // not ported (`Bind`).
 const CONTINUATION: u32 = 4294967294;
 
+// The place primitives of `seq::resolve` (`SeqOp::Swap`, `SeqOp::Replace`)
+// and their operand count.
+const SWAP: Str = "swap";
+const REPLACE: Str = "replace";
+const PLACE_PRIMITIVE_OPERANDS: u32 = 2;
+
 // The length of `::` in an `Eff::op` name.
 const PATH_SEPARATOR_LEN: u64 = 2;
 
@@ -3004,6 +3010,112 @@ fn value_call(inout ck: Ck, ex: Ex, expected: u32) -> u32 {
     result
 }
 
+// Whether `ty` mentions `Slice` anywhere (`seq::mentions_slice`).
+fn mentions_slice(in ck: Ck, ty: u32) -> bool {
+    let node = ck.ctx.types.node(ty);
+    if node.kind == TyKind::Named && node.name == ck.ctx.world.k.slice {
+        return true;
+    }
+    if node.kind == TyKind::Named || node.kind == TyKind::Tuple || node.kind == TyKind::Fn {
+        for i in 0..w(node.n) {
+            if mentions_slice(in ck, item(in ck.ctx.types, add(w(node.a), i))) {
+                return true;
+            }
+        }
+    }
+    node.kind == TyKind::Fn && mentions_slice(in ck, node.r)
+}
+
+// Whether one field path is a prefix of the other (`Place::overlaps` for
+// places of one root).
+fn paths_overlap(in a: ChunkSeq[u32], in b: ChunkSeq[u32]) -> bool {
+    let mut shared = a.len();
+    if b.len() < shared {
+        shared = b.len();
+    }
+    for i in 0..shared {
+        if u32_at(in a, i) != u32_at(in b, i) {
+            return false;
+        }
+    }
+    true
+}
+
+// `Checker::place_primitive_call`: `swap(inout a, inout b)` and
+// `replace(inout a, v)` exchange values of one type between disjoint
+// places. Element places (`swap(inout xs[i], inout xs[j])`) are not ported.
+fn place_primitive(inout ck: Ck, ex: Ex, swap: bool) -> u32 {
+    let hole = ck.ctx.types.infer;
+    let known = ck.ctx.world.k;
+    if ex.m != 0 {
+        error(inout ck, "E0207", ex.start, ex.end);
+    }
+    if ex.n != PLACE_PRIMITIVE_OPERANDS {
+        error(inout ck, "E0207", ex.start, ex.end);
+    }
+    let mut first = hole;
+    let mut first_root = NONE32;
+    let mut first_path: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    for i in 0..w(ex.n) {
+        let arg = actual_arg(in ck, ex, i);
+        let arg_ex = ck.ex(arg.expr);
+        if i >= w(PLACE_PRIMITIVE_OPERANDS) {
+            let extra = expr(inout ck, arg.expr);
+        } else if i == 1 && !swap {
+            if arg.explicit && arg.pass != P_SINK {
+                error(inout ck, "E0308", arg_ex.start, arg_ex.end);
+            }
+            let t = expr_expected(inout ck, arg.expr, first);
+            expect_type(inout ck, first, t, arg_ex.start, arg_ex.end);
+        } else {
+            if !(arg.explicit && arg.pass == P_INOUT) {
+                error(inout ck, "E0308", arg_ex.start, arg_ex.end);
+            }
+            if arg_ex.kind == E_INDEX {
+                ck.skip = true;
+                return hole;
+            }
+            let mut path: ChunkSeq[u32] = ChunkSeq::new[u32]();
+            let root = place_of(in ck, arg.expr, inout path);
+            if root == NONE32 {
+                error(inout ck, "E0300", arg_ex.start, arg_ex.end);
+                let value = expr(inout ck, arg.expr);
+            } else {
+                let t = expr(inout ck, arg.expr);
+                if ck.skip {
+                    return hole;
+                }
+                if mentions_slice(in ck, t) || is_str(in ck, t) {
+                    error(inout ck, "E1520", arg_ex.start, arg_ex.end);
+                }
+                if i == 0 {
+                    first = t;
+                    first_root = root;
+                    first_path = path;
+                } else {
+                    expect_type(inout ck, first, t, arg_ex.start, arg_ex.end);
+                    let interchangeable = compatible(in ck.ctx.types, known, first, t)
+                        && compatible(in ck.ctx.types, known, t, first);
+                    if first != hole && t != hole && !interchangeable {
+                        error(inout ck, "E0403", arg_ex.start, arg_ex.end);
+                    }
+                    if first_root == root && paths_overlap(in first_path, in path) {
+                        error(inout ck, "E0301", arg_ex.start, arg_ex.end);
+                    }
+                }
+            }
+        }
+        if ck.skip {
+            return hole;
+        }
+    }
+    if swap {
+        ck.ctx.types.unit
+    } else {
+        first
+    }
+}
+
 fn call_expr(inout ck: Ck, ex: Ex, expected: u32) -> u32 {
     let hole = ck.ctx.types.infer;
     let callee = ck.ex(ex.x);
@@ -3073,6 +3185,12 @@ fn call_expr(inout ck: Ck, ex: Ex, expected: u32) -> u32 {
     }
     if callee_index == NONE32 && is_qualified(in ck, callee.x, "ChunkSeq::with_capacity") {
         return seq_new(inout ck, ex, true, expected);
+    }
+    if callee_index == NONE32 && is_qualified(in ck, callee.x, SWAP) {
+        return place_primitive(inout ck, ex, true);
+    }
+    if callee_index == NONE32 && is_qualified(in ck, callee.x, REPLACE) {
+        return place_primitive(inout ck, ex, false);
     }
     if callee_index == NONE32 {
         if is_bit_intrinsic(in ck, callee.x) {
