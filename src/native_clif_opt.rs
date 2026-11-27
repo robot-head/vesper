@@ -5099,6 +5099,12 @@ fn canonicalize_imm_ops(func: &mut ir::Function) {
         Some(((c as u64) << shift) as i64 >> shift)
     };
     for _ in 0..MAX_IMM_CANON_ROUNDS {
+        let mut use_counts: HashMap<Value, usize> = HashMap::new();
+        for (_, inst) in insts(func) {
+            for v in func.dfg.inst_values(inst) {
+                *use_counts.entry(func.dfg.resolve_aliases(v)).or_insert(0) += 1;
+            }
+        }
         let mut changed = false;
         for (_, inst) in insts(func) {
             match func.dfg.insts[inst] {
@@ -5137,6 +5143,9 @@ fn canonicalize_imm_ops(func: &mut ir::Function) {
                     else {
                         if op == Opcode::Iadd {
                             let iadd_imm_parts = |v: Value| -> Option<(Value, i64)> {
+                                if use_counts.get(&v).copied().unwrap_or(0) != 1 {
+                                    return None;
+                                }
                                 let ir::ValueDef::Result(d, 0) = func.dfg.value_def(v) else {
                                     return None;
                                 };
@@ -5293,7 +5302,10 @@ fn canonicalize_imm_ops(func: &mut ir::Function) {
                         continue;
                     };
                     if inner_op != op {
-                        if op == Opcode::ImulImm && inner_op == Opcode::IaddImm {
+                        if op == Opcode::ImulImm
+                            && inner_op == Opcode::IaddImm
+                            && use_counts.get(&arg).copied().unwrap_or(0) == 1
+                        {
                             let inner_arg = func.dfg.resolve_aliases(inner_arg);
                             let c1 = inner_imm.bits();
                             let k = imm.bits();
