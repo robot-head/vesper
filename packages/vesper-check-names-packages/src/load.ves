@@ -173,6 +173,22 @@ pub fn decode_bytes(inout loader: St, in input: Slice[u8]) {
             copied: copied
         });
     }
+    // Optional policy trailer. Its length is in words; check it before
+    // allocating so a short trailer cannot turn into apparent empty policy.
+    if pos < input.len() {
+        let words = rd(in input, inout pos);
+        if pos > input.len()
+            || wrapping_sub(input.len(), pos) % 8 != 0
+            || words != wrapping_sub(input.len(), pos) / 8
+        {
+            loader.sugar_policy_truncated = true;
+            return;
+        }
+        loader.sugar_policy_words.reserve(words);
+        for _ in 0..words {
+            loader.sugar_policy_words.push(rd(in input, inout pos));
+        }
+    }
 }
 
 // ---------------------------------------------------------------- AST symbols

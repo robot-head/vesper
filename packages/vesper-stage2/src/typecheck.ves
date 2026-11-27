@@ -4,13 +4,24 @@
 
 use @vesper/wasm-backend::tables::{stage2_heap_mark, stage2_heap_reset, stage2_heap_swap};
 use @vesper/check-core-typing::relations::{infer};
+use @vesper/check-data::input::{Ctx};
 use @vesper/check-data::names::{Names, names_new};
-use @vesper/check-data::types::{TyKind, Types, Vars, types_new, default_type, substitute, vars_new};
+use @vesper/check-data::types::{
+    EffNode, TyKind, TyMode, TyPass, Types, Vars, types_new, default_type, substitute,
+    substitute_row, vars_new
+};
 use @vesper/check-data::util::{n32, u32_at, u64_at, w};
-use @vesper/check-data::world::{Known, SpanRow, World, constructor, field_step, world_new};
+use @vesper/check-data::world::{
+    Known, SpanRow, World, bounds_new, constructor, field_step, mode_of, world_new
+};
 use @vesper/place-ir::codes::{Lit, Pat};
 use @vesper/wasm-backend::ir::{CallRow, Pair};
-use @vesper/place-ir-lower::ast::{Ast, Ex, FnR, Pm, Pt};
+use @vesper/place-ir-lower::ast::{Ast, Ef, Eop, Ex, FnR, Hd, Pm, Pt};
+use self::sugar_policy::{
+    POLICY_BAD_METADATA, POLICY_OK, PolicyFailure, PolicyInputs, PolicySpan, caller_supplied,
+    captured_value_fault, contains, diagnose_policy_fault, effect_failure, empty_inputs,
+    failure_row, has_policy_at, primitive_failure, resolved_place_failure, resolved_span
+};
 
 const NONE32: u32 = 4294967295;
 const NONE64: u64 = 18446744073709551615;
@@ -40,6 +51,7 @@ const X_HANDLE: u8 = 22;
 copy struct Binding {
     name: u32,
     ty: u32,
+    pass: u8,
 }
 
 struct Tc {
@@ -61,13 +73,19 @@ struct Tc {
     calls: ChunkSeq[CallRow],
     pairs: ChunkSeq[Pair],
     scratch1: ChunkSeq[u32],
+    sugar: PolicyInputs,
+    sugar_violation: u64,
+    sugar_checked_calls: ChunkSeq[bool],
+    sugar_ambient_row: u32,
+    sugar_handler_row: u32,
+    sugar_generic_start: u64,
+    sugar_generic_count: u64,
 }
 
-fn tc_new(sink names: Names, sink types: Types, sink world: World) -> Tc {
+fn tc_new(sink names: Names, sink types: Types, sink world: World, sink sugar: PolicyInputs) -> Tc {
     let empty = ChunkSeq::new[u32]();
     let empty_p = ChunkSeq::new[u8]();
     let mut t = types;
-    let mut n = names;
     let infer_ty = t.mk_with(TyKind::Infer, 0, 0, in empty, in empty_p, 0, 0, 0);
     let unit_ty = t.named0(world.k.unit);
     let bool_ty = t.named0(world.k.bool_);
@@ -76,8 +94,9 @@ fn tc_new(sink names: Names, sink types: Types, sink world: World) -> Tc {
     let f64_ty = t.named0(world.k.f64_);
     let str_ty = t.named0(world.k.str_);
     let never_ty = t.named0(world.k.never);
+    let empty_row = t.empty_row;
     Tc {
-        names: n,
+        names: names,
         types: t,
         world: world,
         env: ChunkSeq::new[Binding](),
@@ -94,7 +113,14 @@ fn tc_new(sink names: Names, sink types: Types, sink world: World) -> Tc {
         never_ty: never_ty,
         calls: ChunkSeq::new[CallRow](),
         pairs: ChunkSeq::new[Pair](),
-        scratch1: ChunkSeq::new[u32]()
+        scratch1: ChunkSeq::new[u32](),
+        sugar: sugar,
+        sugar_violation: POLICY_OK,
+        sugar_checked_calls: ChunkSeq::new[bool](),
+        sugar_ambient_row: empty_row,
+        sugar_handler_row: empty_row,
+        sugar_generic_start: 0,
+        sugar_generic_count: 0
     }
 }
 
@@ -120,7 +146,7 @@ fn pop_scope(inout tc: Tc) {
 }
 
 fn bind_var(inout tc: Tc, name: u32, ty: u32) {
-    tc.env.push(Binding { name: name, ty: ty });
+    tc.env.push(Binding { name: name, ty: ty, pass: TyPass::Sink });
 }
 
 fn lookup_var(in tc: Tc, name: u32) -> u32 {
@@ -152,14 +178,18 @@ fn find_fn(in a: Ast, name: u32) -> Option[FnR] {
     Option::None
 }
 
-fn find_eop_result(in a: Ast, inout names: Names, cname: u32) -> u32 {
+fn find_eop(in a: Ast, inout names: Names, cname: u32) -> Option[(Ef, Eop)] {
     let (ename, opname) = split_last_colon(inout names, cname);
+    find_effect_method(in a, ename, opname)
+}
+
+fn find_effect_method(in a: Ast, ename: u32, opname: u32) -> Option[(Ef, Eop)] {
     if ename == NONE32 || w(ename) >= a.eff_by_name.len() {
-        return NONE32;
+        return Option::None;
     }
     let idx = u32_at(in a.eff_by_name, w(ename));
     if idx == 0 {
-        return NONE32;
+        return Option::None;
     }
     match a.effs.try_get(wrapping_sub(w(idx), 1)) {
         Option::Some(ef) => {
@@ -167,15 +197,15 @@ fn find_eop_result(in a: Ast, inout names: Names, cname: u32) -> u32 {
                 match a.eops.try_get(wrapping_add(ef.op_start, oi)) {
                     Option::Some(op) => {
                         if op.name == opname {
-                            return op.result;
+                            return Option::Some((ef, op));
                         }
                     },
                     Option::None => {},
                 }
             }
-            NONE32
+            Option::None
         },
-        Option::None => NONE32,
+        Option::None => Option::None,
     }
 }
 
@@ -478,8 +508,389 @@ fn join_method_sym(inout names: Names, tname: u32, mname: u32) -> u32 {
     names.intern(in buf.as_slice())
 }
 
+fn sugar_operation_span(inout tc: Tc, e: Ex) -> Option[PolicySpan] {
+    match resolved_span(in tc.sugar, e.s0, e.s1) {
+        Option::Some(span) => Option::Some(span),
+        Option::None => {
+            if has_policy_at(in tc.sugar, e.s0) || has_policy_at(in tc.sugar, e.s1) {
+                // A malformed span cannot establish that the operation was
+                // outside its expansion or inside a caller hole.
+                note_sugar_violation(inout tc, POLICY_BAD_METADATA);
+            }
+            Option::None
+        },
+    }
+}
+
+fn sugar_applies(inout tc: Tc, e: Ex) -> bool {
+    if tc.sugar.policies.regions.len() == 0 {
+        return false;
+    }
+    let operation = match sugar_operation_span(inout tc, e) {
+        Option::Some(span) => span,
+        Option::None => return false,
+    };
+    for i in 0..tc.sugar.policies.regions.len() {
+        match tc.sugar.policies.regions.try_get(i) {
+            Option::Some(region) => {
+                if contains(region.span, operation)
+                    && !caller_supplied(in tc.sugar.policies, region, operation)
+                {
+                    return true;
+                }
+            },
+            Option::None => {},
+        }
+    }
+    false
+}
+
+// An unnamed operation with no explicit type arguments takes its
+// instance from the innermost matching handler, then the function row.
+fn effect_with_name(in types: Types, row: u32, name: u32) -> Option[EffNode] {
+    let effects = types.row(row);
+    let mut i = w(effects.n);
+    loop {
+        if i == 0 {
+            break;
+        }
+        i = wrapping_sub(i, 1);
+        let effect = types.effect_at(wrapping_add(w(effects.a), i));
+        if effect.name == name {
+            return Option::Some(effect);
+        }
+    }
+    Option::None
+}
+
+fn effect_with_label(in types: Types, row: u32, label: u32) -> Option[EffNode] {
+    let effects = types.row(row);
+    let mut i = w(effects.n);
+    loop {
+        if i == 0 {
+            break;
+        }
+        i = wrapping_sub(i, 1);
+        let effect = types.effect_at(wrapping_add(w(effects.a), i));
+        if effect.label == label {
+            return Option::Some(effect);
+        }
+    }
+    Option::None
+}
+
+fn contextual_effect(in tc: Tc, name: u32) -> Option[EffNode] {
+    match effect_with_name(in tc.types, tc.sugar_handler_row, name) {
+        Option::Some(effect) => Option::Some(effect),
+        Option::None => effect_with_name(in tc.types, tc.sugar_ambient_row, name),
+    }
+}
+
+fn push_effect_args(in types: Types, effect: EffNode, inout args: ChunkSeq[u32]) {
+    for i in 0..w(effect.n) {
+        args.push(u32_at(in types.items, wrapping_add(w(effect.a), i)));
+    }
+}
+
+// Only the handled body has the new capability in scope. A row id is
+// restored on exit so there is no separately allocated lexical stack.
+fn policy_handler_row(inout tc: Tc, in a: Ast, handler: Hd) -> u32 {
+    let previous = tc.sugar_handler_row;
+    if tc.sugar.policies.regions.len() == 0 {
+        return previous;
+    }
+    let row = tc.types.row(previous);
+    let mut effects = ChunkSeq::new[EffNode]();
+    let mut args = ChunkSeq::new[u32]();
+    for i in 0..w(row.n) {
+        let effect = tc.types.effect_at(wrapping_add(w(row.a), i));
+        let start = n32(args.len());
+        push_effect_args(in tc.types, effect, inout args);
+        effects.push(EffNode { label: effect.label, name: effect.name, a: start, n: effect.n });
+    }
+    let start = n32(args.len());
+    for i in 0..handler.arg_ty_count {
+        args.push(n32(u64_at(in a.xs, wrapping_add(handler.arg_ty_start, i))));
+    }
+    effects.push(EffNode {
+        label: handler.label,
+        name: handler.eff_name,
+        a: start,
+        n: n32(handler.arg_ty_count)
+    });
+    tc.types.mk_row(in effects, in args, 0)
+}
+
+fn check_sugar_effect_operation(
+    inout tc: Tc,
+    in a: Ast,
+    ef: Ef,
+    op: Eop,
+    e: Ex,
+    ce: Ex,
+    context: Option[EffNode],
+    label: u32
+) -> u32 {
+    check_sugar_call_access(inout tc, in a, op.param_start, op.param_count, false, e, ce);
+    let mut generics = ChunkSeq::new[u32]();
+    let mut inferred = vars_new();
+    for i in 0..ef.generic_count {
+        let name = a.egen(wrapping_add(ef.generic_start, i));
+        generics.push(name);
+        if i < e.m {
+            inferred.set(name, n32(u64_at(in a.xs, wrapping_add(e.c, i))));
+        } else {
+            match context {
+                Option::Some(effect) => {
+                    if i < w(effect.n) {
+                        inferred.set(name, u32_at(in tc.types.items, wrapping_add(w(effect.a), i)));
+                    }
+                },
+                Option::None => {},
+            }
+        }
+    }
+    for i in 0..e.n {
+        let param = if i < op.param_count {
+            a.param(wrapping_add(op.param_start, i)).ty
+        } else {
+            tc.infer_ty
+        };
+        let wanted = substitute(inout tc.types, param, in inferred);
+        let actual = check_expr(inout tc, in a, call_arg_expr(in a, e, i), wanted);
+        infer(inout tc.types, tc.world.k, param, actual, in generics, inout inferred);
+    }
+    let mut args = ChunkSeq::new[u32]();
+    for i in 0..generics.len() {
+        let ty = inferred.get(u32_at(in generics, i));
+        args.push(
+            if ty == NONE32 {
+                tc.infer_ty
+            } else {
+                default_type(inout tc.types, ty)
+            }
+        );
+    }
+    let mut effects = ChunkSeq::new[EffNode]();
+    effects.push(EffNode { label: label, name: ef.name, a: 0, n: n32(args.len()) });
+    let row = tc.types.mk_row(in effects, in args, 0);
+    check_sugar_call_row(inout tc, e, row);
+    let result = substitute(inout tc.types, op.result, in inferred);
+    record_span(inout tc, ce.s0, ce.s1, result);
+    record_span(inout tc, e.s0, e.s1, result);
+    result
+}
+
+fn check_direct_effect(inout tc: Tc, in a: Ast, ef: Ef, op: Eop, e: Ex, ce: Ex) -> u32 {
+    let context = if e.m == 0 {
+        contextual_effect(in tc, ef.name)
+    } else {
+        Option::None
+    };
+    check_sugar_effect_operation(inout tc, in a, ef, op, e, ce, context, 0)
+}
+
+fn check_labeled_sugar_effect(inout tc: Tc, in a: Ast, e: Ex, ce: Ex) -> Option[u32] {
+    let receiver = a.ex(ce.a);
+    if receiver.kind != X_NAME
+        || lookup_var(in tc, n32(receiver.a)) != NONE32
+        || !sugar_applies(inout tc, e)
+    {
+        return Option::None;
+    }
+    let label = wrapping_add(n32(receiver.a), 1);
+    let active = effect_with_label(in tc.types, tc.sugar_handler_row, label);
+    let (effect, handled) = match active {
+        Option::Some(effect) => (effect, true),
+        Option::None => match effect_with_label(in tc.types, tc.sugar_ambient_row, label) {
+            Option::Some(effect) => (effect, false),
+            Option::None => return Option::None,
+        },
+    };
+    let (ef, op) = match find_effect_method(in a, effect.name, n32(ce.b)) {
+        Option::Some(operation) => operation,
+        Option::None => return Option::None,
+    };
+    // An active handler's lexical alias names a fresh capability, not a
+    // user-spellable label. Its nominal effect can still be authorized
+    // by an unlabeled declaration. This marker is only used in the audit.
+    let actual_label = if handled {
+        wrapping_add(tc.names.intern(in "$stage2_handled_cap".as_bytes()), 1)
+    } else {
+        label
+    };
+    Option::Some(check_sugar_effect_operation(
+        inout tc,
+        in a,
+        ef,
+        op,
+        e,
+        ce,
+        Option::Some(effect),
+        actual_label
+    ))
+}
+
+// These lexically resolved primitives do not have package signatures.
+fn check_sugar_named_sequence(inout tc: Tc, in a: Ast, e: Ex, ce: Ex) -> Option[u32] {
+    let name = n32(ce.a);
+    if lookup_var(in tc, name) != NONE32 {
+        return Option::None;
+    }
+    let swap = is_op(in tc, name, in "swap");
+    let replace = is_op(in tc, name, in "replace");
+    let finish = is_op(in tc, name, in "ChunkSeq::finish");
+    if !(swap || replace || finish) {
+        return Option::None;
+    }
+    let arguments: u64 = if finish { 1 } else { 2 };
+    if e.n != arguments {
+        note_sugar_violation(inout tc, POLICY_BAD_METADATA);
+        return Option::Some(tc.infer_ty);
+    }
+    let site = sugar_operation_span(inout tc, e);
+    let first = call_arg_expr(in a, e, 0);
+    let first_ty = check_expr(inout tc, in a, first, tc.infer_ty);
+    let first_pass = if finish { TyPass::Sink } else { TyPass::Inout };
+    match site {
+        Option::Some(site) => check_sugar_resolved_place(inout tc, in a, site, first, first_pass),
+        Option::None => {},
+    }
+    if finish {
+        let runtime = tc.names.intern(in "RuntimeError".as_bytes());
+        let ty = tc.types.named0(runtime);
+        let row = failure_row(inout tc.names, inout tc.types, ty);
+        check_sugar_call_row(inout tc, e, row);
+    } else {
+        let second = call_arg_expr(in a, e, 1);
+        let second_ty = check_expr(inout tc, in a, second, first_ty);
+        let pass = if swap {
+            TyPass::Inout
+        } else {
+            // replace takes the new value by value, not by an explicit
+            // sink if it is known to be Copy.
+            let bounds = bounds_new();
+            if tc.types.kind(second_ty) != TyKind::Infer
+                && mode_of(inout tc.types, in tc.names, in tc.world, second_ty, in bounds)
+                    == TyMode::Copy
+            {
+                TyPass::In
+            } else {
+                TyPass::Sink
+            }
+        };
+        match site {
+            Option::Some(site) => check_sugar_resolved_place(inout tc, in a, site, second, pass),
+            Option::None => {},
+        }
+    }
+    let result = if replace { first_ty } else { tc.unit_ty };
+    record_span(inout tc, ce.s0, ce.s1, result);
+    record_span(inout tc, e.s0, e.s1, result);
+    Option::Some(result)
+}
+
+fn note_sugar_violation(inout tc: Tc, violation: u64) {
+    if tc.sugar_violation == POLICY_OK {
+        tc.sugar_violation = violation;
+    }
+}
+
+fn check_sugar_call_row(inout tc: Tc, e: Ex, actual: u32) {
+    if tc.sugar.policies.regions.len() == 0 {
+        return;
+    }
+    let site = match sugar_operation_span(inout tc, e) {
+        Option::Some(site) => site,
+        Option::None => return,
+    };
+    let denied = effect_failure(in tc.names, in tc.types, in tc.sugar, site, actual);
+    note_sugar_violation(inout tc, denied);
+}
+
+fn check_sugar_resolved_place(inout tc: Tc, in a: Ast, site: PolicySpan, place: u64, mode: u8) {
+    let denied = resolved_place_failure(in tc.sugar, in a, site, place, mode);
+    note_sugar_violation(inout tc, denied);
+}
+
+fn check_sugar_call_access(
+    inout tc: Tc,
+    in a: Ast,
+    param_start: u64,
+    param_count: u64,
+    recv: bool,
+    e: Ex,
+    ce: Ex
+) {
+    if tc.sugar.policies.regions.len() == 0 {
+        return;
+    }
+    let site = match sugar_operation_span(inout tc, e) {
+        Option::Some(site) => site,
+        Option::None => return,
+    };
+    let offset: u64 = if recv { 1 } else { 0 };
+    if recv {
+        match a.pms.try_get(param_start) {
+            Option::Some(pm) => check_sugar_resolved_place(inout tc, in a, site, ce.a, pm.pass),
+            Option::None => {},
+        }
+    }
+    for i in 0..e.n {
+        let p = wrapping_add(i, offset);
+        if p >= param_count {
+            break;
+        }
+        match a.pms.try_get(wrapping_add(param_start, p)) {
+            Option::Some(pm) => check_sugar_resolved_place(
+                inout tc,
+                in a,
+                site,
+                call_arg_expr(in a, e, i),
+                pm.pass
+            ),
+            Option::None => {},
+        }
+    }
+}
+
+// A lexical callable is not a package-level function, but its resolved
+// function type still specifies the actual row and parameter passes.
+fn check_sugar_value_call(inout tc: Tc, in a: Ast, callable: u32, e: Ex, ce: Ex) -> u32 {
+    let signature = tc.types.node(callable);
+    check_sugar_call_row(inout tc, e, signature.r2);
+    let site = sugar_operation_span(inout tc, e);
+    for i in 0..e.n {
+        let arg = call_arg_expr(in a, e, i);
+        let want = if i < w(signature.n) {
+            let mode = tc.types.param_pass(callable, i);
+            match site {
+                Option::Some(site) => check_sugar_resolved_place(inout tc, in a, site, arg, mode),
+                Option::None => {},
+            }
+            tc.types.arg(callable, i)
+        } else {
+            tc.infer_ty
+        };
+        let _actual = check_expr(inout tc, in a, arg, want);
+    }
+    record_span(inout tc, ce.s0, ce.s1, callable);
+    record_span(inout tc, e.s0, e.s1, signature.r);
+    signature.r
+}
+
 fn check_fn_call(inout tc: Tc, in a: Ast, f: FnR, receiver_ty: u32, e: Ex, ce: Ex) -> u32 {
+    check_sugar_call_access(
+        inout tc,
+        in a,
+        f.param_start,
+        f.param_count,
+        receiver_ty != NONE32,
+        e,
+        ce
+    );
     if f.generic_count == 0 {
+        check_sugar_call_row(inout tc, e, f.effects);
         let p_off: u64 = if receiver_ty != NONE32 { 1 } else { 0 };
         for ai in 0..e.n {
             let av = u64_at(in a.xs, wrapping_add(e.b, wrapping_add(wrapping_mul(ai, 2), 1)));
@@ -561,6 +972,10 @@ fn check_fn_call(inout tc: Tc, in a: Ast, f: FnR, receiver_ty: u32, e: Ex, ce: E
             tc.calls.push(CallRow { s0: e.s0, s1: e.s1, v0: v0, vn: vn });
         }
     }
+    if tc.sugar.policies.regions.len() != 0 {
+        let call_row = substitute_row(inout tc.types, f.effects, in vars);
+        check_sugar_call_row(inout tc, e, call_row);
+    }
     let rty = substitute(inout tc.types, f.result, in vars);
     record_span(inout tc, ce.s0, ce.s1, rty);
     record_span(inout tc, e.s0, e.s1, rty);
@@ -607,6 +1022,165 @@ fn is_num_lit_expr(in tc: Tc, in a: Ast, eid: u64) -> bool {
         },
         Option::None => false,
     }
+}
+
+fn check_sugar_try(inout tc: Tc, in a: Ast, e: Ex, expected: u32) -> u32 {
+    let result = tc.names.intern(in "Result".as_bytes());
+    let target = if tc.types.kind(expected) == TyKind::Infer {
+        tc.infer_ty
+    } else {
+        let mut args = ChunkSeq::new[u32]();
+        args.push(expected);
+        args.push(tc.infer_ty);
+        tc.types.named(result, in args)
+    };
+    let operand = check_owned_expr(inout tc, in a, e.a, target);
+    let name = tc.types.name(operand);
+    let argc = tc.types.arity(operand);
+    if name == result && argc == 2 {
+        let err = tc.types.arg(operand, 1);
+        let actual = failure_row(inout tc.names, inout tc.types, err);
+        check_sugar_call_row(inout tc, e, actual);
+        let ok = tc.types.arg(operand, 0);
+        if tc.types.kind(ok) == TyKind::Infer {
+            tc.unit_ty
+        } else {
+            ok
+        }
+    } else if argc == 1
+        && tc.names.spells(name, in "Option".as_bytes())
+        && tc.names.spells(tc.types.name(tc.ret_ty), in "Option".as_bytes())
+    {
+        // Option propagation returns to the enclosing function; only
+        // Result propagation performs a Fail effect.
+        tc.types.arg(operand, 0)
+    } else {
+        note_sugar_violation(inout tc, POLICY_BAD_METADATA);
+        expected
+    }
+}
+
+fn certify_sugar_call(inout tc: Tc, id: u64) {
+    if id < tc.sugar_checked_calls.len() {
+        let _ = tc.sugar_checked_calls.try_set(id, true);
+    }
+}
+
+fn total_named_builtin(in tc: Tc, name: u32, conv: u32, argc: u64) -> bool {
+    if argc == 0 {
+        return is_op(in tc, name, in "ChunkSeq::new") || is_op(in tc, name, in "String::new");
+    }
+    if argc == 1 {
+        return conv != NONE32
+            || is_op(in tc, name, in "inc32")
+            || is_op(in tc, name, in "ChunkSeq::with_capacity")
+            || is_op(in tc, name, in "String::from_utf8");
+    }
+    if argc != 2 {
+        return false;
+    }
+    is_op(in tc, name, in "wrapping_add")
+        || is_op(in tc, name, in "wrapping_sub")
+        || is_op(in tc, name, in "wrapping_mul")
+        || is_op(in tc, name, in "wrapping_shl_u64")
+        || is_op(in tc, name, in "wrapping_shr_u64")
+        || is_op(in tc, name, in "wrapping_shl")
+        || is_op(in tc, name, in "wrapping_shr")
+        || is_op(in tc, name, in "rotate_left")
+        || is_op(in tc, name, in "rotate_right")
+        || is_op(in tc, name, in "min_u64")
+        || is_op(in tc, name, in "max_u64")
+        || is_op(in tc, name, in "bit_and")
+        || is_op(in tc, name, in "bit_or")
+        || is_op(in tc, name, in "bit_xor")
+        || is_op(in tc, name, in "bit_shl")
+        || is_op(in tc, name, in "bit_shr")
+}
+
+// Where the syntax consumes a value, a captured Copy value is a read
+// and a non-Copy value is a sink. The call/sequence paths separately
+// choose their resolved borrow modes and must not use this wrapper.
+fn check_owned_expr(inout tc: Tc, in a: Ast, id: u64, expected: u32) -> u32 {
+    let ty = check_expr(inout tc, in a, id, expected);
+    check_value_place(inout tc, in a, id, ty, true);
+    ty
+}
+
+fn check_value_place(inout tc: Tc, in a: Ast, id: u64, ty: u32, owned: bool) {
+    if tc.sugar.policies.regions.len() == 0 || id == NONE64 {
+        return;
+    }
+    let e = a.ex(id);
+    if e.kind != X_NAME && e.kind != X_FIELD && e.kind != X_INDEX {
+        return;
+    }
+    if e.kind == X_INDEX {
+        let index = a.ex(e.b);
+        if index.kind == X_RANGE
+            || (index.kind == X_BINARY && is_op(in tc, n32(index.a), in ".."))
+        {
+            // A slice view remains a borrow even as a let initializer.
+            return;
+        }
+    }
+    let site = match sugar_operation_span(inout tc, e) {
+        Option::Some(site) => site,
+        Option::None => return,
+    };
+    if !owned {
+        let fault = captured_value_fault(in tc.sugar.policies, site, TyPass::In);
+        note_sugar_violation(inout tc, fault);
+        return;
+    }
+    let moving = captured_value_fault(in tc.sugar.policies, site, TyPass::Sink);
+    if moving == POLICY_OK {
+        return;
+    }
+    let mut bounds = bounds_new();
+    for i in 0..tc.sugar_generic_count {
+        let generic = a.generic(wrapping_add(tc.sugar_generic_start, i));
+        if !generic.is_row {
+            bounds.set(generic.name, generic.bound);
+        }
+    }
+    let fault = if tc.types.kind(ty) != TyKind::Infer
+        && mode_of(inout tc.types, in tc.names, in tc.world, ty, in bounds) == TyMode::Copy
+    {
+        captured_value_fault(in tc.sugar.policies, site, TyPass::In)
+    } else {
+        moving
+    };
+    note_sugar_violation(inout tc, fault);
+}
+
+fn borrowed_match_place(in tc: Tc, in a: Ast, id: u64) -> bool {
+    let mut e = a.ex(id);
+    loop {
+        if e.kind != X_FIELD {
+            break;
+        }
+        e = a.ex(e.a);
+    }
+    if e.kind != X_NAME {
+        return false;
+    }
+    let name = n32(e.a);
+    let mut i = tc.env.len();
+    loop {
+        if i == 0 {
+            break;
+        }
+        i = wrapping_sub(i, 1);
+        match tc.env.try_get(i) {
+            Option::Some(binding) => {
+                if binding.name == name {
+                    return binding.pass != TyPass::Sink;
+                }
+            },
+            Option::None => {},
+        }
+    }
+    false
 }
 
 fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
@@ -674,7 +1248,7 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
             } else {
                 expected
             };
-            elems.push(check_expr(inout tc, in a, sub, exp_i));
+            elems.push(check_owned_expr(inout tc, in a, sub, exp_i));
         }
         tc.types.tuple(in elems)
     } else if e.kind == X_STRUCT {
@@ -695,7 +1269,7 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
                     }
                 }
             }
-            let _t = check_expr(inout tc, in a, sub, fty);
+            let _t = check_owned_expr(inout tc, in a, sub, fty);
         }
         if adt != NONE32
             && tc.types.kind(dt) == TyKind::Named
@@ -801,7 +1375,7 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
         } else {
             lt
         };
-        let _rt = check_expr(inout tc, in a, e.c, rhs_exp);
+        let _rt = check_owned_expr(inout tc, in a, e.c, rhs_exp);
         tc.unit_ty
     } else if e.kind == X_BLOCK {
         push_scope(inout tc);
@@ -823,7 +1397,7 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
                     Option::None => {},
                 }
             }
-            let vt = check_expr(inout tc, in a, val, exp);
+            let vt = check_owned_expr(inout tc, in a, val, exp);
             if is_let != 0 {
                 bind_pat(inout tc, in a, pt, vt);
             }
@@ -831,18 +1405,20 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
         let tail_ty = if e.b == NONE64 {
             tc.unit_ty
         } else {
-            check_expr(inout tc, in a, e.b, expected)
+            check_owned_expr(inout tc, in a, e.b, expected)
         };
         pop_scope(inout tc);
         tail_ty
+    } else if e.kind == X_TRY && sugar_applies(inout tc, e) {
+        check_sugar_try(inout tc, in a, e, expected)
     } else if e.kind == X_IF {
-        let _ct = check_expr(inout tc, in a, e.a, tc.bool_ty);
-        let tt = check_expr(inout tc, in a, e.b, expected);
+        let _ct = check_owned_expr(inout tc, in a, e.a, tc.bool_ty);
+        let tt = check_owned_expr(inout tc, in a, e.b, expected);
         if e.c == NONE64 {
             tc.unit_ty
         } else {
             let exp_e = if tt == tc.never_ty { expected } else { tt };
-            let et = check_expr(inout tc, in a, e.c, exp_e);
+            let et = check_owned_expr(inout tc, in a, e.c, exp_e);
             if tt == tc.never_ty || tc.types.kind(tt) == TyKind::Infer {
                 et
             } else {
@@ -851,6 +1427,10 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
         }
     } else if e.kind == X_MATCH {
         let vt = check_expr(inout tc, in a, e.a, tc.infer_ty);
+        if tc.sugar.policies.regions.len() != 0 {
+            let borrowed = borrowed_match_place(in tc, in a, e.a);
+            check_value_place(inout tc, in a, e.a, vt, !borrowed);
+        }
         let mut res = expected;
         for i in 0..e.n {
             let pt = u64_at(in a.xs, wrapping_add(e.b, wrapping_mul(i, 2)));
@@ -858,7 +1438,7 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
             push_scope(inout tc);
             bind_pat(inout tc, in a, pt, vt);
             let exp_b = if res == tc.never_ty { expected } else { res };
-            let bt = check_expr(inout tc, in a, body, exp_b);
+            let bt = check_owned_expr(inout tc, in a, body, exp_b);
             if (tc.types.kind(res) == TyKind::Infer || res == tc.never_ty) && bt != tc.never_ty {
                 res = bt;
             }
@@ -881,12 +1461,12 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
         st
     } else if e.kind == X_BREAK {
         if e.a != NONE64 {
-            let _vt = check_expr(inout tc, in a, e.a, tc.infer_ty);
+            let _vt = check_owned_expr(inout tc, in a, e.a, tc.infer_ty);
         }
         tc.never_ty
     } else if e.kind == X_RETURN {
         if e.a != NONE64 {
-            let _vt = check_expr(inout tc, in a, e.a, tc.ret_ty);
+            let _vt = check_owned_expr(inout tc, in a, e.a, tc.ret_ty);
         }
         tc.never_ty
     } else if e.kind == X_CONTINUE {
@@ -895,10 +1475,13 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
         match a.hds.try_get(e.a) {
             Option::Some(h) => {
                 if h.has_state {
-                    let st = check_expr(inout tc, in a, h.state_expr, tc.infer_ty);
+                    let st = check_owned_expr(inout tc, in a, h.state_expr, tc.infer_ty);
                     bind_pat(inout tc, in a, h.state_pattern, st);
                 }
-                let bt = check_expr(inout tc, in a, h.body, expected);
+                let outer_handler_row = tc.sugar_handler_row;
+                tc.sugar_handler_row = policy_handler_row(inout tc, in a, h);
+                let bt = check_owned_expr(inout tc, in a, h.body, expected);
+                tc.sugar_handler_row = outer_handler_row;
                 let mut rt = expected;
                 match a.cls.try_get(h.return_clause) {
                     Option::Some(rc) => {
@@ -906,7 +1489,7 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
                         if rc.pattern_count > 0 {
                             bind_pat(inout tc, in a, u64_at(in a.xs, rc.pattern_start), bt);
                         }
-                        rt = check_expr(inout tc, in a, rc.body, expected);
+                        rt = check_owned_expr(inout tc, in a, rc.body, expected);
                         pop_scope(inout tc);
                     },
                     Option::None => {},
@@ -928,7 +1511,7 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
                                     pty
                                 );
                             }
-                            let _ot = check_expr(inout tc, in a, oc.body, rt);
+                            let _ot = check_owned_expr(inout tc, in a, oc.body, rt);
                             pop_scope(inout tc);
                         },
                         Option::None => {},
@@ -943,22 +1526,58 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
             Option::Some(ce) => {
                 if ce.kind == X_NAME {
                     let cname = n32(ce.a);
-                    let fn_opt = match find_fn(in a, cname) {
-                        Option::Some(f) => Option::Some(f),
-                        Option::None => {
-                            let (qf, sf) = split_last_colon(inout tc.names, cname);
-                            if qf != NONE32 {
-                                find_fn(in a, sf)
-                            } else {
-                                Option::None
-                            }
-                        },
+                    if tc.sugar.policies.regions.len() != 0 {
+                        let callable = lookup_var(in tc, cname);
+                        if callable != NONE32
+                            && tc.types.kind(callable) == TyKind::Fn
+                            && sugar_applies(inout tc, e)
+                        {
+                            certify_sugar_call(inout tc, eid);
+                            return check_sugar_value_call(inout tc, in a, callable, e, ce);
+                        }
+                    }
+                    let authored = sugar_applies(inout tc, e);
+                    let fn_opt = if authored && lookup_var(in tc, cname) != NONE32 {
+                        Option::None
+                    } else {
+                        match find_fn(in a, cname) {
+                            Option::Some(f) => Option::Some(f),
+                            Option::None => {
+                                if authored {
+                                    Option::None
+                                } else {
+                                    let (qf, sf) = split_last_colon(inout tc.names, cname);
+                                    if qf != NONE32 {
+                                        find_fn(in a, sf)
+                                    } else {
+                                        Option::None
+                                    }
+                                }
+                            },
+                        }
                     };
                     match fn_opt {
                         Option::Some(f) => {
+                            certify_sugar_call(inout tc, eid);
                             return check_fn_call(inout tc, in a, f, NONE32, e, ce);
                         },
                         Option::None => {
+                            if authored && lookup_var(in tc, cname) == NONE32 {
+                                match find_eop(in a, inout tc.names, cname) {
+                                    Option::Some((ef, op)) => {
+                                        certify_sugar_call(inout tc, eid);
+                                        return check_direct_effect(inout tc, in a, ef, op, e, ce);
+                                    },
+                                    Option::None => {},
+                                }
+                                match check_sugar_named_sequence(inout tc, in a, e, ce) {
+                                    Option::Some(result) => {
+                                        certify_sugar_call(inout tc, eid);
+                                        return result;
+                                    },
+                                    Option::None => {},
+                                }
+                            }
                             let conv_ty = conv_target_type(inout tc, cname);
                             let same_int = is_same_int_op(in tc, cname);
                             let is_builtin = conv_ty != NONE32
@@ -974,6 +1593,13 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
                             } else {
                                 ctor_info(inout tc, cname, dt)
                             };
+                            if authored
+                                && lookup_var(in tc, cname) == NONE32
+                                && (adt != NONE32
+                                    || total_named_builtin(in tc, cname, conv_ty, e.n))
+                            {
+                                certify_sugar_call(inout tc, eid);
+                            }
                             let mut vars = vars0;
                             let mut gnames = ChunkSeq::new[u32]();
                             if adt != NONE32 {
@@ -1095,8 +1721,10 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
                                     tc.u64_ty
                                 }
                             } else {
-                                let eres = find_eop_result(in a, inout tc.names, cname);
-                                if eres != NONE32 { eres } else { expected }
+                                match find_eop(in a, inout tc.names, cname) {
+                                    Option::Some((_, op)) => op.result,
+                                    Option::None => expected,
+                                }
                             };
                             record_span(inout tc, ce.s0, ce.s1, rty);
                             record_span(inout tc, e.s0, e.s1, rty);
@@ -1104,15 +1732,37 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
                         },
                     }
                 } else if ce.kind == X_FIELD {
+                    match check_labeled_sugar_effect(inout tc, in a, e, ce) {
+                        Option::Some(result) => {
+                            certify_sugar_call(inout tc, eid);
+                            return result;
+                        },
+                        Option::None => {},
+                    }
                     let bt = check_expr(inout tc, in a, ce.a, tc.infer_ty);
                     let mname = n32(ce.b);
                     let tname = tc.types.name(bt);
                     let cname = join_method_sym(inout tc.names, tname, mname);
                     match find_fn(in a, cname) {
                         Option::Some(f) => {
+                            certify_sugar_call(inout tc, eid);
                             return check_fn_call(inout tc, in a, f, bt, e, ce);
                         },
                         Option::None => {
+                            if sugar_applies(inout tc, e) {
+                                let callable = field_step(
+                                    inout tc.types,
+                                    inout tc.names,
+                                    in tc.world,
+                                    bt,
+                                    mname,
+                                    false
+                                );
+                                if callable != NONE32 && tc.types.kind(callable) == TyKind::Fn {
+                                    certify_sugar_call(inout tc, eid);
+                                    return check_sugar_value_call(inout tc, in a, callable, e, ce);
+                                }
+                            }
                             for ai in 0..e.n {
                                 let av = u64_at(
                                     in a.xs,
@@ -1225,14 +1875,23 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
                             {
                                 tc.bool_ty
                             } else {
-                                let eres = find_eop_result(in a, inout tc.names, cname);
-                                if eres != NONE32 { eres } else { expected }
+                                match find_eop(in a, inout tc.names, cname) {
+                                    Option::Some((_, op)) => op.result,
+                                    Option::None => expected,
+                                }
                             };
                             record_span(inout tc, ce.s0, ce.s1, rty);
                             record_span(inout tc, e.s0, e.s1, rty);
                             return rty;
                         },
                     }
+                } else if sugar_applies(inout tc, e) {
+                    let callable = check_expr(inout tc, in a, e.a, tc.infer_ty);
+                    if tc.types.kind(callable) == TyKind::Fn {
+                        certify_sugar_call(inout tc, eid);
+                        return check_sugar_value_call(inout tc, in a, callable, e, ce);
+                    }
+                    note_sugar_violation(inout tc, POLICY_BAD_METADATA);
                 }
             },
             Option::None => {},
@@ -1385,6 +2044,7 @@ fn dummy_tc(k: Known) -> Tc {
     let mut dn = names_new();
     let dt = types_new(inout dn);
     let dw = world_new(k);
+    let empty_row = dt.empty_row;
     Tc {
         names: dn,
         types: dt,
@@ -1404,6 +2064,13 @@ fn dummy_tc(k: Known) -> Tc {
         calls: ChunkSeq::new[CallRow](),
         pairs: ChunkSeq::new[Pair](),
         scratch1: ChunkSeq::new[u32](),
+        sugar: empty_inputs(),
+        sugar_violation: POLICY_OK,
+        sugar_checked_calls: ChunkSeq::new[bool](),
+        sugar_ambient_row: empty_row,
+        sugar_handler_row: empty_row,
+        sugar_generic_start: 0,
+        sugar_generic_count: 0,
     }
 }
 
@@ -1438,6 +2105,13 @@ fn rebuild_tc(
         calls: tc_calls_in,
         pairs: tc_pairs_in,
         scratch1: tc_scratch1,
+        sugar: tc_sugar,
+        sugar_violation: tc_sugar_violation,
+        sugar_checked_calls: tc_sugar_checked_calls,
+        sugar_ambient_row: tc_sugar_ambient_row,
+        sugar_handler_row: tc_sugar_handler_row,
+        sugar_generic_start: tc_sugar_generic_start,
+        sugar_generic_count: tc_sugar_generic_count,
     } = old_tc;
     let mut tc_spans = tc_spans_in;
     let mut tc_calls = tc_calls_in;
@@ -1515,6 +2189,13 @@ fn rebuild_tc(
         calls: tc_calls,
         pairs: tc_pairs,
         scratch1: tc_scratch1,
+        sugar: tc_sugar,
+        sugar_violation: tc_sugar_violation,
+        sugar_checked_calls: tc_sugar_checked_calls,
+        sugar_ambient_row: tc_sugar_ambient_row,
+        sugar_handler_row: tc_sugar_handler_row,
+        sugar_generic_start: tc_sugar_generic_start,
+        sugar_generic_count: tc_sugar_generic_count,
     };
     let next_perm = stage2_heap_swap(s_rb);
     if next_perm < tc_perm_end {
@@ -1529,9 +2210,13 @@ pub fn typecheck_ast(
     in a: Ast,
     sink names: Names,
     sink types: Types,
-    sink world: World
-) -> (Names, Types, World, ChunkSeq[CallRow], ChunkSeq[Pair]) {
-    let mut tc = tc_new(sink names, sink types, sink world);
+    sink world: World,
+    sink sugar: PolicyInputs
+) -> (Names, Types, World, ChunkSeq[CallRow], ChunkSeq[Pair], Option[PolicyFailure]) {
+    let mut tc = tc_new(sink names, sink types, sink world, sink sugar);
+    if tc.sugar.policies.regions.len() != 0 {
+        tc.sugar_checked_calls.resize(a.exs.len(), false);
+    }
     let mut max_spans = 262144;
     let mut max_calls = 131072;
     let mut max_pairs = 131072;
@@ -1579,12 +2264,16 @@ pub fn typecheck_ast(
         push_scope(inout tc);
         for pi in 0..f.param_count {
             match a.pms.try_get(wrapping_add(f.param_start, pi)) {
-                Option::Some(pm) => bind_var(inout tc, pm.name, pm.ty),
+                Option::Some(pm) => tc.env
+                    .push(Binding { name: pm.name, ty: pm.ty, pass: pm.pass }),
                 Option::None => {},
             }
         }
         tc.ret_ty = f.result;
-        let _rt = check_expr(inout tc, in a, f.body, f.result);
+        tc.sugar_ambient_row = f.effects;
+        tc.sugar_generic_start = f.generic_start;
+        tc.sugar_generic_count = f.generic_count;
+        let _rt = check_owned_expr(inout tc, in a, f.body, f.result);
         pop_scope(inout tc);
         tc.scratch1.clear();
         if tc.names.mask_val() == n_mask
@@ -1658,5 +2347,18 @@ pub fn typecheck_ast(
     sort_spans(inout tc.spans);
     sort_calls(inout tc.calls);
     tc.world.expr_types = tc.spans;
-    (tc.names, tc.types, tc.world, tc.calls, tc.pairs)
+    let mut context = Ctx {
+        names: tc.names,
+        types: tc.types,
+        world: tc.world,
+        tmap: ChunkSeq::new[u32](),
+        nmap: ChunkSeq::new[u32]()
+    };
+    let fault = if tc.sugar_violation != POLICY_OK {
+        tc.sugar_violation
+    } else {
+        primitive_failure(inout context, in a, in tc.sugar, in tc.sugar_checked_calls)
+    };
+    let violation = diagnose_policy_fault(in tc.sugar, fault);
+    (context.names, context.types, context.world, tc.calls, tc.pairs, violation)
 }

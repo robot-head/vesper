@@ -11,7 +11,8 @@ use @vesper/check-data::world::{World, set_by_symbol};
 use @vesper/place-ir::{Program};
 use @vesper/place-ir-lower::ast::{Ast as IrAst};
 use @vesper/check-names-packages::{
-    AssembledModule, assemble_next_bytes, assembly_begin_bytes, assembly_metadata
+    AssembledModule, Assembly, AssemblyMetadata, assemble_next_bytes, assembly_begin_bytes,
+    assembly_metadata
 };
 use @vesper/place-ir-lower::lower::{L, l_new, lower_all};
 use @vesper/wasm-backend::{compile_with_facts, compile_with_facts_diag};
@@ -22,10 +23,53 @@ use @vesper/wasm-backend::ir::{add_eff_decl, add_fn_sig, empty_facts, push_hop, 
 use @vesper/place-ir::codes::{Op, Pat, PoolKind};
 use @vesper-std/env::{arg, arg_count, var};
 use @vesper-std/fs::{IoError, write_path};
-use self::ast_lower::{build_ir_ast_for_entry};
+use self::ast_lower::{build_ir_ast, build_ir_ast_for_entry};
 use self::collect::{collect_program};
 use self::loader::{load_package_graph_bytes};
+use self::sugar_policy::{
+    PolicyFailure, PolicyFailureKind, PolicyInputs, copy_inputs, explicit_access_valid, has_failure,
+    policy_inputs, resolve_rows
+};
 use self::typecheck::{typecheck_ast};
+
+const INVALID_SUGAR_POLICY: Str = "invalid sugar policy metadata";
+
+/// Check the sugar policy wire and explicit accesses in assembled modules.
+pub fn sugar_policy_access_valid(
+    in meta: AssemblyMetadata,
+    in mods: ChunkSeq[AssembledModule]
+) -> bool {
+    explicit_access_valid(in meta, in mods)
+}
+
+pub fn sugar_policy_exports_valid(
+    inout assembly: Assembly,
+    in mods: ChunkSeq[AssembledModule]
+) -> bool {
+    let mut problem: Option[PolicyFailure] = Option::None;
+    let mut sugar = match policy_inputs(in assembly, in mods, inout problem) {
+        Option::Some(sugar) => sugar,
+        Option::None => return false,
+    };
+    if sugar.policies.regions.len() == 0 {
+        return true;
+    }
+    let p = collect_program(in mods);
+    let (ast, names0, types0, world) = build_ir_ast(sink p, in mods);
+    let mut names = names0;
+    let mut types = types0;
+    if !resolve_rows(inout sugar, inout assembly, inout names, inout types) {
+        return false;
+    }
+    let (_, _, _, _, _, violation) = typecheck_ast(
+        in ast,
+        sink names,
+        sink types,
+        sink world,
+        sink sugar
+    );
+    !has_failure(violation)
+}
 
 /// Load, assemble, and collect declarations of a Loom package from `root_dir`
 /// via `@vesper-std/fs`, returning `(module_count, fn_count, adt_count, diagnostic_bytes)`.
@@ -48,6 +92,9 @@ pub fn stage2_collect_dir(in root_dir: Str) -> (u64, u64, u64, u64) eff [Ffi[Std
     }
     let mod_count = mods.len();
     let meta = assembly_metadata(sink a);
+    if !sugar_policy_access_valid(in meta, in mods) {
+        return (0, 0, 0, INVALID_SUGAR_POLICY.len());
+    }
     let collected = collect_program(in mods);
     (mod_count, collected.fns.len(), collected.world.adts.len(), meta.diagnostics.len())
 }
@@ -185,29 +232,64 @@ fn write_err_header(in out_wasm: Str, in stage: Str, in detail: Slice[u8]) eff [
     write_sidecar(in out_wasm, in ".err.txt", in msg.as_slice());
 }
 
+fn write_policy_diagnostic(problem: PolicyFailure, inout msg: ChunkSeq[u8]) {
+    if problem.kind == PolicyFailureKind::Access {
+        msg.extend(in "E0143: sugar rule exceeds the caller's place access".as_bytes());
+    } else if problem.kind == PolicyFailureKind::Effect {
+        msg.extend(in "E0144: sugar rule introduces an effect outside its emits row".as_bytes());
+    } else {
+        match problem.origin {
+            Option::Some(_) => msg.extend(
+                in "cannot verify the policy for an operation introduced by this sugar".as_bytes()
+            ),
+            Option::None => msg.extend(in INVALID_SUGAR_POLICY.as_bytes()),
+        }
+    }
+    match problem.origin {
+        Option::Some(origin) => {
+            msg.extend(in " (caller file ".as_bytes());
+            push_decimal(inout msg, origin.call.file);
+            msg.extend(in " bytes ".as_bytes());
+            push_decimal(inout msg, origin.call.start);
+            msg.extend(in "..".as_bytes());
+            push_decimal(inout msg, origin.call.end);
+            msg.extend(in "; author module ".as_bytes());
+            push_decimal(inout msg, origin.author_module);
+            msg.extend(in " rule bytes ".as_bytes());
+            push_decimal(inout msg, origin.rule_start);
+            msg.extend(in "..".as_bytes());
+            push_decimal(inout msg, origin.rule_end);
+            msg.push(41);
+        },
+        Option::None => {},
+    }
+}
+
 fn move_front_to_perm(
     sink ir_ast0: IrAst,
     sink names0: Names,
     sink types0: Types,
     sink world0: World,
+    sink sugar0: PolicyInputs,
     front_perm: u64,
     m_front: u64
-) -> (IrAst, Names, Types, World, u64, bool) {
+) -> (IrAst, Names, Types, World, PolicyInputs, u64, bool) {
     if m_front == 0 || front_perm >= m_front {
-        return (ir_ast0, names0, types0, world0, 0, false);
+        return (ir_ast0, names0, types0, world0, sugar0, 0, false);
     }
     let s_front = stage2_heap_swap(front_perm);
     let ir_c = ir_ast0.deep_clone_in_heap();
     let names_c = names0.deep_clone_in_heap();
     let types_c = types0.deep_clone_in_heap();
     let world_c = world0.deep_clone_in_heap();
+    let sugar_c = copy_inputs(in sugar0);
     let front_after = stage2_heap_mark();
     let _ = stage2_heap_swap(s_front);
     let used = wrapping_sub(front_after, front_perm);
     if front_after < m_front {
-        (ir_c, names_c, types_c, world_c, used, true)
+        (ir_c, names_c, types_c, world_c, sugar_c, used, true)
     } else {
-        (ir_ast0, names0, types0, world0, used, false)
+        (ir_ast0, names0, types0, world0, sugar0, used, false)
     }
 }
 
@@ -266,25 +348,45 @@ fn stage2_compile_dir_impl(
             Option::None => break,
         }
     }
+    let mut policy_problem: Option[PolicyFailure] = Option::None;
+    let mut sugar0 = match policy_inputs(in a, in mods, inout policy_problem) {
+        Option::Some(sugar) => sugar,
+        Option::None => {
+            let mut detail = ChunkSeq::new[u8]();
+            match policy_problem {
+                Option::Some(problem) => write_policy_diagnostic(problem, inout detail),
+                Option::None => detail.extend(in INVALID_SUGAR_POLICY.as_bytes()),
+            }
+            write_err_header(in out_wasm, in "assembly", in detail.as_slice());
+            return (2, detail.len());
+        },
+    };
+    write_stage(want_syms, in out_wasm, in "collect_program", inout stage_log);
+    let collected = collect_program(in mods);
+    write_stage(want_syms, in out_wasm, in "build_ir_ast", inout stage_log);
+    let (ir_ast0, names_seed, types_seed, world0_in) = build_ir_ast_for_entry(
+        sink collected,
+        in mods,
+        in entry_name
+    );
+    let mut names0_in = names_seed;
+    let mut types0_in = types_seed;
+    if !resolve_rows(inout sugar0, inout a, inout names0_in, inout types0_in) {
+        write_err_header(in out_wasm, in "assembly", in INVALID_SUGAR_POLICY.as_bytes());
+        return (2, INVALID_SUGAR_POLICY.len());
+    }
     let meta = assembly_metadata(sink a);
     if meta.diagnostics.len() > 0 {
         write_err_header(in out_wasm, in "assembly", in meta.diagnostics.as_slice());
         return (2, meta.diagnostics.len());
     }
-    write_stage(want_syms, in out_wasm, in "collect_program", inout stage_log);
-    let collected = collect_program(in mods);
-    write_stage(want_syms, in out_wasm, in "build_ir_ast", inout stage_log);
-    let (ir_ast0, names0_in, types0_in, world0_in) = build_ir_ast_for_entry(
-        sink collected,
-        in mods,
-        in entry_name
-    );
     write_stage(want_syms, in out_wasm, in "front_clone", inout stage_log);
-    let (ir_ast, names0, types0, world0, front_used, front_ok) = move_front_to_perm(
+    let (ir_ast, names0, types0, world0, sugar, front_used, front_ok) = move_front_to_perm(
         sink ir_ast0,
         sink names0_in,
         sink types0_in,
         sink world0_in,
+        sink sugar0,
         front_perm,
         m_front
     );
@@ -306,12 +408,22 @@ fn stage2_compile_dir_impl(
     } else {
         write_stage(want_syms, in out_wasm, in "typecheck_ast", inout stage_log);
     }
-    let (names, types, world, call_rows, call_pairs) = typecheck_ast(
+    let (names, types, world, call_rows, call_pairs, bad_sugar) = typecheck_ast(
         in ir_ast,
         sink names0,
         sink types0,
-        sink world0
+        sink world0,
+        sink sugar
     );
+    match bad_sugar {
+        Option::Some(problem) => {
+            let mut detail = ChunkSeq::new[u8]();
+            write_policy_diagnostic(problem, inout detail);
+            write_err_header(in out_wasm, in "typecheck", in detail.as_slice());
+            return (2, detail.len());
+        },
+        Option::None => {},
+    }
     let mut c = Ctx {
         names: names,
         types: types,

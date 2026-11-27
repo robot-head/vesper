@@ -112,6 +112,8 @@ pub struct St {
     file_display: ChunkSeq[u32],
     file_base: ChunkSeq[u64],
     source_segments: ChunkSeq[SourceSegment],
+    sugar_policy_words: ChunkSeq[u64],
+    sugar_policy_truncated: bool,
     // Modules, in load order: package, module path (segments in `segments`),
     // file, and the source's byte range in the input.
     mod_pkg: ChunkSeq[u32],
@@ -290,6 +292,8 @@ pub fn st_new() -> St {
         file_display: ChunkSeq::new[u32](),
         file_base: ChunkSeq::new[u64](),
         source_segments: ChunkSeq::new[SourceSegment](),
+        sugar_policy_words: ChunkSeq::new[u64](),
+        sugar_policy_truncated: false,
         mod_pkg: ChunkSeq::new[u32](),
         mod_file: ChunkSeq::new[u32](),
         mod_seg_first: ChunkSeq::new[u32](),

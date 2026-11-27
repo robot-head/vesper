@@ -39,6 +39,7 @@ use @vesper/codegen-export::directives::{directives_text};
 use @vesper/stage2::collect::{CollectedProgram, FnInfo, ParamInfo, collect_program};
 use @vesper/vsys::{parse_and_encode};
 use @vesper/vsys::lexer::{VsysError};
+use @vesper/stage2::{sugar_policy_exports_valid};
 use @vesper/stage2::loader::{load_package_graph_bytes, package_graph_vsys_paths};
 use @vesper-std/fs::{IoError, read_path};
 use @vesper-std/intern::{symbol_from_id};
@@ -1560,6 +1561,9 @@ pub fn export_plan_input(
         }
     }
     if assembly_parse_errors(in a) != 0 {
+        return declined(DECLINE_DIAGNOSTICS);
+    }
+    if !sugar_policy_exports_valid(inout a, in mods) {
         return declined(DECLINE_DIAGNOSTICS);
     }
     let meta = assembly_metadata(sink a);

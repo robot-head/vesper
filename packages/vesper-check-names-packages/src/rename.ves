@@ -263,7 +263,7 @@ fn effect_at(in ast: Ast, effect_id: u32) -> EffectNode {
     )
 }
 
-fn effects(inout loader: St, inout ast: Ast, effects_id: u32, start: u32, end: u32) {
+pub fn effects(inout loader: St, inout ast: Ast, effects_id: u32, start: u32, end: u32) {
     if effects_id == ast_none() {
         return;
     }
