@@ -107,6 +107,9 @@ const IEX_SDIV: u64 = 5;
 const IEX_SREM: u64 = 6;
 const IEX_UDIV: u64 = 7;
 const IEX_UREM: u64 = 8;
+const IEX_SHL: u64 = 9;
+const IEX_USHR: u64 = 10;
+const IEX_SSHR: u64 = 11;
 
 // Sub-operations of `INST_WRITE_OP`.
 const WOP_IADD: u64 = 1;
@@ -1045,6 +1048,27 @@ impl Body {
                 let lhs = operand(inout b, lv, k0, self.optimize);
                 let rhs = operand(inout b, rv, k1, self.optimize);
                 let raw = ins_urem(inout b, lhs, rhs);
+                coerce(inout b, raw, rk, self.optimize)
+            } else if iex == IEX_SHL {
+                let lv = temp(inout b, x);
+                let rv = temp(inout b, y);
+                let lhs = operand(inout b, lv, k0, self.optimize);
+                let rhs = operand(inout b, rv, k1, self.optimize);
+                let raw = ins_ishl(inout b, lhs, rhs);
+                coerce(inout b, raw, rk, self.optimize)
+            } else if iex == IEX_USHR {
+                let lv = temp(inout b, x);
+                let rv = temp(inout b, y);
+                let lhs = operand(inout b, lv, k0, self.optimize);
+                let rhs = operand(inout b, rv, k1, self.optimize);
+                let raw = ins_ushr(inout b, lhs, rhs);
+                coerce(inout b, raw, rk, self.optimize)
+            } else if iex == IEX_SSHR {
+                let lv = temp(inout b, x);
+                let rv = temp(inout b, y);
+                let lhs = operand(inout b, lv, k0, self.optimize);
+                let rhs = operand(inout b, rv, k1, self.optimize);
+                let raw = ins_sshr(inout b, lhs, rhs);
                 coerce(inout b, raw, rk, self.optimize)
             } else {
                 return false;

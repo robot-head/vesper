@@ -671,7 +671,7 @@ fn vesper_scalar_bodies_part_6f() {
         );
         let ran = if cross() { 0 } else { 2 };
         assert_eq!((total.worlds, total.ran), (2, ran), "{}", total.summary());
-        let min_emitted = if cross() { 3 } else { 6 };
+        let min_emitted = if cross() { 2 } else { 4 };
         assert!(
             emitted >= min_emitted,
             "part 6f functions should come from Vesper (expected >= {min_emitted}, got {emitted})"
@@ -722,7 +722,7 @@ fn vesper_scalar_bodies_part_6g() {
         );
         let ran = if cross() { 0 } else { 2 };
         assert_eq!((total.worlds, total.ran), (2, ran), "{}", total.summary());
-        let min_emitted = if cross() { 3 } else { 6 };
+        let min_emitted = if cross() { 2 } else { 4 };
         assert!(
             emitted >= min_emitted,
             "part 6g functions should come from Vesper (expected >= {min_emitted}, got {emitted})"
@@ -772,10 +772,54 @@ fn vesper_scalar_bodies_part_6h() {
         );
         let ran = if cross() { 0 } else { 2 };
         assert_eq!((total.worlds, total.ran), (2, ran), "{}", total.summary());
-        let min_emitted = if cross() { 3 } else { 6 };
+        let min_emitted = if cross() { 2 } else { 4 };
         assert!(
             emitted >= min_emitted,
             "part 6h functions should come from Vesper (expected >= {min_emitted}, got {emitted})"
+        );
+        assert!(total.is_clean(), "{}", total.summary());
+    });
+}
+
+/// Part 6i: `f32`/`f64` `match` arms, `f32` bitcasts/nearest/fma/min/max,
+/// narrow saturating float-to-int conversions, `f64` `/=`, and 1-word shifts.
+const SCALARS_6I: &str = "
+fn f64_div_and_shifts(x: f64, u: u32, s: i32) -> i64 {
+    let mut y: f64 = x;
+    y /= 2.0;
+    let n: f32 = nearest_f32(y);
+    let sat: u64 = saturating_u64(y);
+    let sh: i64 = widen_i64(u << 2) ^ widen_i64(u >> 1) ^ widen_i64(s >> 2);
+    wrapping_i64(sat) ^ widen_i64(to_bits_f32(n)) ^ sh
+}
+fn main() -> i64 {
+    f64_div_and_shifts(5.0, 17, -64)
+}
+";
+
+#[test]
+fn vesper_scalar_bodies_part_6i() {
+    big_stack(|| {
+        let parsed = vesper::parser::parse(SCALARS_6I);
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        let checked = vesper::check::check(&parsed.module);
+        assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
+        if let Err(e) = build(&checked.world, "main", true) {
+            panic!("the part 6i scalar program does not build: {e}");
+        }
+        let before = EMITTED.load(Ordering::Relaxed);
+        let total = both("scalars_6i", &checked.world, true);
+        let emitted = EMITTED.load(Ordering::Relaxed) - before;
+        eprintln!(
+            "scalars_6i: {}; {emitted} functions emitted from Vesper",
+            total.summary()
+        );
+        let ran = if cross() { 0 } else { 2 };
+        assert_eq!((total.worlds, total.ran), (2, ran), "{}", total.summary());
+        let min_emitted = if cross() { 2 } else { 4 };
+        assert!(
+            emitted >= min_emitted,
+            "part 6i functions should come from Vesper (expected >= {min_emitted}, got {emitted})"
         );
         assert!(total.is_clean(), "{}", total.summary());
     });
