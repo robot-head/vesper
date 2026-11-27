@@ -1024,6 +1024,61 @@ fn send(writer: &mut impl Write, message: Envelope, limits: ProtocolLimits) -> R
     writer.flush().map_err(|e| e.to_string())
 }
 
+/// A macro preview snapshot of `snapshot_text` in its own database, for the
+/// Vesper port's differential test (macro_preview.ves): Rust's rendering of
+/// a document against it, and the words the port reads for the same call.
+#[doc(hidden)]
+pub struct MacroPreviewForPort {
+    db: crate::database::Database,
+    file: crate::database::SourceFile,
+}
+
+#[doc(hidden)]
+impl MacroPreviewForPort {
+    pub fn new(snapshot_text: &str) -> Self {
+        let db = crate::database::Database::default();
+        let file = crate::database::SourceFile::new(&db, snapshot_text.to_owned());
+        let _ = crate::database::macro_preview::preview(&db, file);
+        Self { db, file }
+    }
+
+    /// `E <error>`, or the rendered value as JSON, after `rounds` renders.
+    pub fn render(
+        &self,
+        uri: &str,
+        version: i32,
+        text: &str,
+        limits: macro_preview::Limits,
+        rounds: u64,
+    ) -> String {
+        let snapshot = crate::database::macro_preview::preview(&self.db, self.file);
+        let mut out = String::new();
+        for _ in 0..rounds {
+            out = match macro_preview::Document::new(uri, version, text, snapshot)
+                .and_then(|d| macro_preview::render(&d, limits))
+            {
+                Ok(value) => serde_json::to_string(&value).unwrap_or_default(),
+                Err(e) => format!("E {e}"),
+            };
+        }
+        out
+    }
+
+    pub fn words(
+        &self,
+        uri: &str,
+        version: i32,
+        text: &str,
+        limits: macro_preview::Limits,
+        host_digest: bool,
+        rounds: u64,
+    ) -> Vec<u8> {
+        let snapshot = crate::database::macro_preview::preview(&self.db, self.file);
+        let digest = host_digest.then(|| *blake3::hash(text.as_bytes()).as_bytes());
+        macro_preview::port_words(uri, version, text, snapshot, limits, digest, rounds)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1080,60 +1135,5 @@ mod tests {
             .is_err()
         );
         assert!(wire.is_empty());
-    }
-}
-
-/// A macro preview snapshot of `snapshot_text` in its own database, for the
-/// Vesper port's differential test (macro_preview.ves): Rust's rendering of
-/// a document against it, and the words the port reads for the same call.
-#[doc(hidden)]
-pub struct MacroPreviewForPort {
-    db: crate::database::Database,
-    file: crate::database::SourceFile,
-}
-
-#[doc(hidden)]
-impl MacroPreviewForPort {
-    pub fn new(snapshot_text: &str) -> Self {
-        let db = crate::database::Database::default();
-        let file = crate::database::SourceFile::new(&db, snapshot_text.to_owned());
-        let _ = crate::database::macro_preview::preview(&db, file);
-        Self { db, file }
-    }
-
-    /// `E <error>`, or the rendered value as JSON, after `rounds` renders.
-    pub fn render(
-        &self,
-        uri: &str,
-        version: i32,
-        text: &str,
-        limits: macro_preview::Limits,
-        rounds: u64,
-    ) -> String {
-        let snapshot = crate::database::macro_preview::preview(&self.db, self.file);
-        let mut out = String::new();
-        for _ in 0..rounds {
-            out = match macro_preview::Document::new(uri, version, text, snapshot)
-                .and_then(|d| macro_preview::render(&d, limits))
-            {
-                Ok(value) => serde_json::to_string(&value).unwrap_or_default(),
-                Err(e) => format!("E {e}"),
-            };
-        }
-        out
-    }
-
-    pub fn words(
-        &self,
-        uri: &str,
-        version: i32,
-        text: &str,
-        limits: macro_preview::Limits,
-        host_digest: bool,
-        rounds: u64,
-    ) -> Vec<u8> {
-        let snapshot = crate::database::macro_preview::preview(&self.db, self.file);
-        let digest = host_digest.then(|| *blake3::hash(text.as_bytes()).as_bytes());
-        macro_preview::port_words(uri, version, text, snapshot, limits, digest, rounds)
     }
 }
