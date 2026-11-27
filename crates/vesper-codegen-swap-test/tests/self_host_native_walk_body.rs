@@ -1250,3 +1250,68 @@ fn vesper_scalar_bodies_part_6m() {
         assert!(total.is_clean(), "{}", total.summary());
     });
 }
+
+/// Part 6n: nested `loop`s with `break`/`continue`, early `return` from a
+/// nested loop, and `f64` compound writes inside loops across both optimized
+/// and unoptimized builds.
+const SCALARS_6N: &str = "
+fn nested_loops(rows: u32, cols: u32, stop: i64) -> i64 {
+    let mut sum: i64 = 0;
+    let mut acc: f64 = 1.0;
+    let mut r: u32 = 0;
+    loop {
+        if r >= rows {
+            break;
+        }
+        let mut c: u32 = 0;
+        loop {
+            if c >= cols {
+                break;
+            }
+            c = wrapping_add(c, 1);
+            if c == 2 {
+                continue;
+            }
+            sum = wrapping_add(sum, widen_i64(wrapping_add(r, c)));
+            acc += 0.25;
+            if sum > stop {
+                return sum ^ saturating_i64(acc);
+            }
+        }
+        acc *= 1.5;
+        r = wrapping_add(r, 1);
+    }
+    sum ^ saturating_i64(acc)
+}
+fn main() -> i64 {
+    nested_loops(4, 5, 100) ^ nested_loops(4, 5, 12)
+}
+";
+
+#[test]
+fn vesper_scalar_bodies_part_6n() {
+    big_stack(|| {
+        let parsed = vesper::parser::parse(SCALARS_6N);
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        let checked = vesper::check::check(&parsed.module);
+        assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
+        if let Err(e) = build(&checked.world, "main", true) {
+            panic!("the part 6n scalar program does not build: {e}");
+        }
+        let before = EMITTED.load(Ordering::Relaxed);
+        let total = both("scalars_6n", &checked.world, true);
+        let emitted = EMITTED.load(Ordering::Relaxed) - before;
+        eprintln!(
+            "scalars_6n: {}; {emitted} functions emitted from Vesper",
+            total.summary()
+        );
+        let ran = if cross() { 0 } else { 2 };
+        assert_eq!((total.worlds, total.ran), (2, ran), "{}", total.summary());
+        let min_emitted = if cross() { 4 } else { 8 };
+        assert!(
+            emitted >= min_emitted,
+            "part 6n functions should come from Vesper (expected >= {min_emitted}, got {emitted})"
+        );
+        assert!(total.is_clean(), "{}", total.summary());
+    });
+}
