@@ -1033,3 +1033,231 @@ pub fn migrate_safe_idents_underscores(
     }
     k
 }
+
+// ---------------------------------------------------------------------------
+// Borrow-summary mode classifier and FieldTree antichain filter (`lift.rs`).
+
+const BYTE_DOT: u8 = 46;
+const LIFT_MODE_SINK_NO_FP: u8 = 0;
+const LIFT_MODE_INOUT_NO_FP: u8 = 1;
+const LIFT_MODE_IN_NO_FP: u8 = 2;
+const LIFT_MODE_INOUT_ALL_FP: u8 = 3;
+const LIFT_MODE_IN_READ_FP: u8 = 4;
+
+pub fn migrate_lift_mode(
+    is_owned_move: bool,
+    is_unique_borrow: bool,
+    whole_value_access: bool,
+    has_reads: bool,
+    has_muts: bool,
+) -> u8 {
+    if is_owned_move {
+        return LIFT_MODE_SINK_NO_FP;
+    }
+    if whole_value_access {
+        if is_unique_borrow {
+            return LIFT_MODE_INOUT_NO_FP;
+        }
+        return LIFT_MODE_IN_NO_FP;
+    }
+    if has_muts {
+        return LIFT_MODE_INOUT_ALL_FP;
+    }
+    if !has_reads {
+        return LIFT_MODE_IN_NO_FP;
+    }
+    LIFT_MODE_IN_READ_FP
+}
+
+fn path_cmp(
+    in buf: Slice[u8],
+    a_start: u64,
+    a_len: u64,
+    b_start: u64,
+    b_len: u64,
+) -> u8 {
+    let min_len = if a_len < b_len { a_len } else { b_len };
+    let mut i: u64 = 0;
+    loop {
+        if i >= min_len {
+            break;
+        }
+        let ca = match buf.try_get(wrapping_add(a_start, i)) {
+            Some(v) => v,
+            None => return 1
+        };
+        let cb = match buf.try_get(wrapping_add(b_start, i)) {
+            Some(v) => v,
+            None => return 1
+        };
+        if ca < cb {
+            return 0;
+        }
+        if ca > cb {
+            return 2;
+        }
+        i = wrapping_add(i, 1);
+    }
+    if a_len < b_len {
+        return 0;
+    }
+    if a_len > b_len {
+        return 2;
+    }
+    1
+}
+
+fn path_covered_by(
+    in buf: Slice[u8],
+    p_start: u64,
+    p_len: u64,
+    q_start: u64,
+    q_len: u64,
+) -> bool {
+    if p_len <= q_len {
+        return false;
+    }
+    let dot = match buf.try_get(wrapping_add(p_start, q_len)) {
+        Some(v) => v,
+        None => return false
+    };
+    if dot != BYTE_DOT {
+        return false;
+    }
+    let mut i: u64 = 0;
+    loop {
+        if i >= q_len {
+            break;
+        }
+        let cp = match buf.try_get(wrapping_add(p_start, i)) {
+            Some(v) => v,
+            None => return false
+        };
+        let cq = match buf.try_get(wrapping_add(q_start, i)) {
+            Some(v) => v,
+            None => return false
+        };
+        if cp != cq {
+            return false;
+        }
+        i = wrapping_add(i, 1);
+    }
+    true
+}
+
+pub fn migrate_sorted_paths_antichain(
+    in buf: Slice[u8],
+    in starts: Slice[u64],
+    in lens: Slice[u64],
+    inout out_indices: Slice[u64],
+) -> u64 {
+    let k = starts.len();
+    if lens.len() != k || out_indices.len() < k {
+        return 0;
+    }
+    let mut i: u64 = 0;
+    loop {
+        if i >= k {
+            break;
+        }
+        let _ = out_indices.try_set(i, i);
+        i = wrapping_add(i, 1);
+    }
+    // Insertion sort out_indices[0..k] by lexicographical path order.
+    i = 1;
+    loop {
+        if i >= k {
+            break;
+        }
+        let key = match out_indices.try_get(i) {
+            Some(v) => v,
+            None => return 0
+        };
+        let key_start = match starts.try_get(key) {
+            Some(v) => v,
+            None => return 0
+        };
+        let key_len = match lens.try_get(key) {
+            Some(v) => v,
+            None => return 0
+        };
+        let mut j = i;
+        loop {
+            if j == 0 {
+                break;
+            }
+            let prev_idx = wrapping_sub(j, 1);
+            let prev = match out_indices.try_get(prev_idx) {
+                Some(v) => v,
+                None => break
+            };
+            let prev_start = match starts.try_get(prev) {
+                Some(v) => v,
+                None => break
+            };
+            let prev_len = match lens.try_get(prev) {
+                Some(v) => v,
+                None => break
+            };
+            if path_cmp(in buf, prev_start, prev_len, key_start, key_len) != 2 {
+                break;
+            }
+            let _ = out_indices.try_set(j, prev);
+            j = prev_idx;
+        }
+        let _ = out_indices.try_set(j, key);
+        i = wrapping_add(i, 1);
+    }
+    // Deduplicate and drop paths subsumed by a shorter prefix + '.'.
+    let mut kept: u64 = 0;
+    i = 0;
+    loop {
+        if i >= k {
+            break;
+        }
+        let idx = match out_indices.try_get(i) {
+            Some(v) => v,
+            None => return kept
+        };
+        let p_start = match starts.try_get(idx) {
+            Some(v) => v,
+            None => return kept
+        };
+        let p_len = match lens.try_get(idx) {
+            Some(v) => v,
+            None => return kept
+        };
+        let mut skip = false;
+        let mut q: u64 = 0;
+        loop {
+            if q >= kept {
+                break;
+            }
+            let q_idx = match out_indices.try_get(q) {
+                Some(v) => v,
+                None => break
+            };
+            let q_start = match starts.try_get(q_idx) {
+                Some(v) => v,
+                None => break
+            };
+            let q_len = match lens.try_get(q_idx) {
+                Some(v) => v,
+                None => break
+            };
+            if path_cmp(in buf, p_start, p_len, q_start, q_len) == 1
+                || path_covered_by(in buf, p_start, p_len, q_start, q_len)
+            {
+                skip = true;
+                break;
+            }
+            q = wrapping_add(q, 1);
+        }
+        if !skip {
+            let _ = out_indices.try_set(kept, idx);
+            kept = wrapping_add(kept, 1);
+        }
+        i = wrapping_add(i, 1);
+    }
+    kept
+}
