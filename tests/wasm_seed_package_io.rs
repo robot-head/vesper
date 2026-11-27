@@ -909,6 +909,147 @@ pub fn main() -> u64 eff [Ffi[StdFs]] {{
 }
 
 #[test]
+fn std_fs_list_dir_and_walk_work_under_wasi() {
+    if !runs_on_shard(0) {
+        return;
+    }
+
+    let pkg = fresh("std-fs-walk-wasi");
+    std::fs::create_dir(pkg.join("src")).unwrap();
+    let work = pkg.join("work");
+    std::fs::create_dir_all(work.join("root/b")).unwrap();
+    std::fs::write(work.join("root/z.txt"), b"z").unwrap();
+    std::fs::write(work.join("root/a.txt"), b"a").unwrap();
+    std::fs::write(work.join("root/b/c.txt"), b"c").unwrap();
+    let fs_dep = std::fs::canonicalize("packages/vesper-std/fs").unwrap();
+    std::fs::write(
+        pkg.join("Loom.toml"),
+        format!(
+            r#"[package]
+name = "@wasm-seed/std-fs-walk-wasi"
+version = "0.1.0"
+edition = "2026"
+capability_ceiling = ["Alloc", "Fail", "Ffi[StdFs]"]
+
+[dependencies]
+"@vesper-std/fs" = {{ version = "^0.1", path = {fs_dep:?} }}
+"#
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        pkg.join("src/main.ves"),
+        r#"use @vesper-std/fs::{IoError, kind_dir, kind_file, not_found};
+use @vesper-std/fs::walk::{entry_count, entry_join, entry_kind, entry_path, list_dir, walk};
+
+fn eq_bytes(in a: Slice[u8], in b: Slice[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    for i in 0..a.len() {
+        let ba = match a.try_get(i) {
+            Option::Some(v) => v,
+            Option::None => 0,
+        };
+        let bb = match b.try_get(i) {
+            Option::Some(v) => v,
+            Option::None => 1,
+        };
+        if ba != bb {
+            return false;
+        }
+    }
+    true
+}
+
+fn path_is(in opt: Option[String], in want: Str) -> bool {
+    match opt {
+        Option::Some(s) => eq_bytes(in s.as_bytes(), in want.as_bytes()),
+        Option::None => false,
+    }
+}
+
+fn run_ops() -> u64 eff [Ffi[StdFs], Fail[IoError]] {
+    let entries = list_dir(in "/work/root");
+    if entry_count(in entries) != 3 {
+        return 1;
+    }
+    if !path_is(in entry_path(in entries, 0), in "a.txt") || entry_kind(in entries, 0) != kind_file() {
+        return 2;
+    }
+    if !path_is(in entry_path(in entries, 1), in "b") || entry_kind(in entries, 1) != kind_dir() {
+        return 3;
+    }
+    if !path_is(in entry_path(in entries, 2), in "z.txt") || entry_kind(in entries, 2) != kind_file() {
+        return 4;
+    }
+
+    let walked = walk(in "/work/root");
+    if entry_count(in walked) != 4 {
+        return 5;
+    }
+    if !path_is(in entry_path(in walked, 0), in "a.txt") {
+        return 6;
+    }
+    if !path_is(in entry_path(in walked, 1), in "b") {
+        return 7;
+    }
+    if !path_is(in entry_path(in walked, 2), in "b/c.txt") {
+        return 8;
+    }
+    if !path_is(in entry_path(in walked, 3), in "z.txt") {
+        return 9;
+    }
+    let joined = entry_join(in "/work/root".as_bytes(), in walked, 2);
+    if !eq_bytes(in joined.as_slice(), in "/work/root/b/c.txt".as_bytes()) {
+        return 10;
+    }
+
+    let missing = handle Fail[IoError] in {
+        let _ = list_dir(in "/work/does-not-exist");
+        0
+    } with {
+        return v => v,
+        raise(e, _k) => if e.kind == not_found() { 1 } else { 2 },
+    };
+    if missing != 1 {
+        return 11;
+    }
+    42
+}
+
+pub fn main() -> u64 eff [Ffi[StdFs]] {
+    handle Fail[IoError] in {
+        run_ops()
+    } with {
+        return v => v,
+        raise(e, _k) => wrapping_add(1_000_000, widen_u64(e.kind)),
+    }
+}
+"#,
+    )
+    .unwrap();
+
+    let assembled =
+        vesper::packages::load_for_target(&pkg, Some(vesper::wasm_backend::TARGET), false).unwrap();
+    assert!(
+        assembled.ok(),
+        "{:?} {:?}",
+        assembled.diagnostics,
+        assembled.manifest_errors
+    );
+    let checked = vesper::ffi_lowering::check_module(&assembled.module, &imports())
+        .unwrap_or_else(|e| panic!("{e}: {:?}", e.diagnostics));
+    let wasm = port(&checked, &options(false)).expect("compile std_fs walk probe");
+    let ctx = Ctx {
+        dirs: vec![(work.clone(), "/work".to_string())],
+        ..Ctx::default()
+    };
+    let got = run(&wasm, &ctx).expect("run std_fs walk probe");
+    assert_eq!(got, 42);
+}
+
+#[test]
 fn std_fs_high_level_ops_work_under_wasi() {
     if !runs_on_shard(0) {
         return;

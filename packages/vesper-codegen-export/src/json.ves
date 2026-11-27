@@ -97,10 +97,12 @@ impl Json {
     }
 
     fn num(inout self, v: u64) {
-        if v >= 10 {
-            self.num(v / 10);
+        let q = v / 10;
+        if q != 0 {
+            self.num(q);
         }
-        self.out.push(wrapping_u8(wrapping_add(v % 10, widen_u64(DIGIT_ZERO))));
+        let rem = wrapping_sub(v, wrapping_mul(q, 10));
+        self.out.push(wrapping_u8(wrapping_add(rem, widen_u64(DIGIT_ZERO))));
     }
 
     fn boolean(inout self, b: bool) {

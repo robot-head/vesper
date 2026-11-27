@@ -677,26 +677,59 @@ pub fn sys_spec(m: &Migration, options: &SysSpecOptions) -> Result<SysSpec, Migr
                     if let SysValue::Enum(e) = v {
                         used_enums.insert(e.clone());
                     }
-                    format!("{n}: {}", sys_value(v))
+                    let ty = sys_value(v);
+                    #[cfg(feature = "vesper-port")]
+                    {
+                        let mut buf = vec![0u8; n.len() + ty.len() + 8];
+                        let len = crate::binding::migrate_render_vsys_param(
+                            0,
+                            &[],
+                            n.as_bytes(),
+                            ty.as_bytes(),
+                            &mut buf,
+                        ) as usize;
+                        buf.truncate(len);
+                        String::from_utf8(buf).unwrap_or_default()
+                    }
+                    #[cfg(not(feature = "vesper-port"))]
+                    format!("{n}: {ty}")
                 }
                 SysParam::Slice { .. } | SysParam::ElementSlice { .. } => {
                     let (element, access, nullable) = p.slice_parts().expect("slice");
                     if let SysPointee::Struct(st) = &element {
                         used_structs.insert(st.clone());
                     }
-                    let slice = format!("CSlice[{}]", element.name());
-                    format!(
-                        "nocapture {} {n}: {}",
-                        match access {
-                            Access::In => "in",
-                            Access::Inout => "inout",
-                        },
-                        if nullable {
-                            format!("Option[{slice}]")
-                        } else {
-                            slice
-                        }
-                    )
+                    let acc = match access {
+                        Access::In => "in",
+                        Access::Inout => "inout",
+                    };
+                    #[cfg(feature = "vesper-port")]
+                    {
+                        let kind = if nullable { 2u8 } else { 1u8 };
+                        let ty = element.name();
+                        let mut buf = vec![0u8; acc.len() + n.len() + ty.len() + 32];
+                        let len = crate::binding::migrate_render_vsys_param(
+                            kind,
+                            acc.as_bytes(),
+                            n.as_bytes(),
+                            ty.as_bytes(),
+                            &mut buf,
+                        ) as usize;
+                        buf.truncate(len);
+                        String::from_utf8(buf).unwrap_or_default()
+                    }
+                    #[cfg(not(feature = "vesper-port"))]
+                    {
+                        let slice = format!("CSlice[{}]", element.name());
+                        format!(
+                            "nocapture {acc} {n}: {}",
+                            if nullable {
+                                format!("Option[{slice}]")
+                            } else {
+                                slice
+                            }
+                        )
+                    }
                 }
                 SysParam::Pointer {
                     pointee,
@@ -706,6 +739,23 @@ pub fn sys_spec(m: &Migration, options: &SysSpecOptions) -> Result<SysSpec, Migr
                     if let SysPointee::Struct(st) = pointee {
                         used_structs.insert(st.clone());
                     }
+                    #[cfg(feature = "vesper-port")]
+                    {
+                        let kind = if *nullable { 4u8 } else { 3u8 };
+                        let acc = access.keyword();
+                        let ty = pointee.name();
+                        let mut buf = vec![0u8; acc.len() + n.len() + ty.len() + 32];
+                        let len = crate::binding::migrate_render_vsys_param(
+                            kind,
+                            acc.as_bytes(),
+                            n.as_bytes(),
+                            ty.as_bytes(),
+                            &mut buf,
+                        ) as usize;
+                        buf.truncate(len);
+                        String::from_utf8(buf).unwrap_or_default()
+                    }
+                    #[cfg(not(feature = "vesper-port"))]
                     if *nullable {
                         format!(
                             "nocapture {} {n}: Option[{}]",
@@ -721,31 +771,89 @@ pub fn sys_spec(m: &Migration, options: &SysSpecOptions) -> Result<SysSpec, Migr
         if let SysValue::Enum(e) = &sig.result {
             used_enums.insert(e.clone());
         }
-        let _ = writeln!(
-            fns,
-            "    fn {}({}) -> ForeignVal[{}];",
-            f.name,
-            params.join(", "),
-            sys_value(&sig.result)
-        );
+        #[cfg(feature = "vesper-port")]
+        {
+            let res = sys_value(&sig.result);
+            let mut pbuf = Vec::new();
+            let mut pstarts = Vec::with_capacity(params.len());
+            let mut plens = Vec::with_capacity(params.len());
+            for p in &params {
+                pstarts.push(pbuf.len() as u64);
+                plens.push(p.len() as u64);
+                pbuf.extend_from_slice(p.as_bytes());
+            }
+            let cap =
+                32 + f.name.len() + pbuf.len() + params.len().saturating_sub(1) * 2 + res.len();
+            let mut line = vec![0u8; cap];
+            let ln = crate::binding::migrate_render_vsys_fn(
+                f.name.as_bytes(),
+                &pbuf,
+                &pstarts,
+                &plens,
+                res.as_bytes(),
+                &mut line,
+            ) as usize;
+            fns.push_str(std::str::from_utf8(&line[..ln]).unwrap_or_default());
+        }
+        #[cfg(not(feature = "vesper-port"))]
+        {
+            let _ = writeln!(
+                fns,
+                "    fn {}({}) -> ForeignVal[{}];",
+                f.name,
+                params.join(", "),
+                sys_value(&sig.result)
+            );
+        }
     }
     for e in &m.enums {
         let Ok(carrier) = &e.carrier else { continue };
         if !used_enums.contains(&e.name) {
             continue;
         }
-        let vs: Vec<String> = e
-            .variants
-            .iter()
-            .map(|(n, v)| format!("{n} = {v}"))
-            .collect();
-        let _ = writeln!(
-            out,
-            "    enum {}: {} {{ {} }}",
-            e.name,
-            carrier.name(),
-            vs.join(", ")
-        );
+        #[cfg(feature = "vesper-port")]
+        {
+            let mut vbuf = Vec::new();
+            let mut vstarts = Vec::with_capacity(e.variants.len());
+            let mut vlens = Vec::with_capacity(e.variants.len());
+            for (vn, vv) in &e.variants {
+                let item = format!("{vn} = {vv}");
+                vstarts.push(vbuf.len() as u64);
+                vlens.push(item.len() as u64);
+                vbuf.extend_from_slice(item.as_bytes());
+            }
+            let cname = carrier.name();
+            let cap = 24
+                + e.name.len()
+                + cname.len()
+                + vbuf.len()
+                + e.variants.len().saturating_sub(1) * 2;
+            let mut line = vec![0u8; cap];
+            let ln = crate::binding::migrate_render_vsys_enum(
+                e.name.as_bytes(),
+                cname.as_bytes(),
+                &vbuf,
+                &vstarts,
+                &vlens,
+                &mut line,
+            ) as usize;
+            out.push_str(std::str::from_utf8(&line[..ln]).unwrap_or_default());
+        }
+        #[cfg(not(feature = "vesper-port"))]
+        {
+            let vs: Vec<String> = e
+                .variants
+                .iter()
+                .map(|(n, v)| format!("{n} = {v}"))
+                .collect();
+            let _ = writeln!(
+                out,
+                "    enum {}: {} {{ {} }}",
+                e.name,
+                carrier.name(),
+                vs.join(", ")
+            );
+        }
     }
     // Wire struct pointees and, transitively, the structs they contain.
     let decls: std::collections::BTreeMap<&str, &Declaration> = m
@@ -772,12 +880,37 @@ pub fn sys_spec(m: &Migration, options: &SysSpecOptions) -> Result<SysSpec, Migr
                 "pointee struct `{n}` has no wire layout; run check_pointer_pointees"
             )));
         };
-        let fields: Vec<String> = d
-            .fields
-            .iter()
-            .map(|f| format!("{}: {}", f.name, wire_field(&f.ty)))
-            .collect();
-        let _ = writeln!(out, "    wire struct {n} {{ {} }}", fields.join(", "));
+        #[cfg(feature = "vesper-port")]
+        {
+            let mut fbuf = Vec::new();
+            let mut fstarts = Vec::with_capacity(d.fields.len());
+            let mut flens = Vec::with_capacity(d.fields.len());
+            for f in &d.fields {
+                let item = format!("{}: {}", f.name, wire_field(&f.ty));
+                fstarts.push(fbuf.len() as u64);
+                flens.push(item.len() as u64);
+                fbuf.extend_from_slice(item.as_bytes());
+            }
+            let cap = 28 + n.len() + fbuf.len() + d.fields.len().saturating_sub(1) * 2;
+            let mut line = vec![0u8; cap];
+            let ln = crate::binding::migrate_render_vsys_wire_struct(
+                n.as_bytes(),
+                &fbuf,
+                &fstarts,
+                &flens,
+                &mut line,
+            ) as usize;
+            out.push_str(std::str::from_utf8(&line[..ln]).unwrap_or_default());
+        }
+        #[cfg(not(feature = "vesper-port"))]
+        {
+            let fields: Vec<String> = d
+                .fields
+                .iter()
+                .map(|f| format!("{}: {}", f.name, wire_field(&f.ty)))
+                .collect();
+            let _ = writeln!(out, "    wire struct {n} {{ {} }}", fields.join(", "));
+        }
     }
     out.push_str(&fns);
     out.push_str("}\n");

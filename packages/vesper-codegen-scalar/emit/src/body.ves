@@ -13,10 +13,13 @@
 // callee's word carries FAIL_CALL, and STATUS_CALL when it returns its
 // status in a register), or NO_CALLEE (allowed for builtin calls, declines
 // otherwise). After the callees come the result pointer's value
-// (`NO_VALUE` for a function that returns in registers) and the values
+// (`NO_VALUE` for a function that returns a scalar) and the values
 // whose home is that pointer (`aggregates::plan`'s `Home::Result`, #2411):
 // a struct built there is written in place, and any other struct result
-// is copied to it on return.
+// is copied to it on return. A function that returns its result in
+// registers (#2581) builds it the same way in a local buffer, whose words
+// it then returns: its `sret` word carries their count at
+// RESULT_WORDS_SHIFT.
 //
 // A `fail_only` function (#2425) raises through its record
 // (`Codegen::fail_exit`): the instance's tag, stored in the record unless
@@ -58,7 +61,9 @@ const LANE_I64: u64 = 1;
 const LANE_F32: u64 = 2;
 const LANE_F64: u64 = 3;
 const LANE_I128: u64 = 4;
+const LANE_PRODUCT: u64 = 5;
 const LOCAL_PARAM: u64 = 16;
+const LOCAL_PARAM_PRODUCT: u64 = 65536;
 
 // Instruction kinds (`body.ves`).
 const INST_PLANNED: u64 = 1;
@@ -102,6 +107,7 @@ const INST_ICONST: u64 = 16;
 const INST_F64CONST: u64 = 17;
 const INST_DATA: u64 = 32;
 const INST_PROJECT: u64 = 33;
+const INST_READ_FIELD: u64 = 34;
 
 // Sub-operations of `INST_FLOAT_UNARY` and `CB_FLOAT_UNARY`.
 const FUN_FNEG: u64 = 1;
@@ -250,6 +256,9 @@ const TERM_UNREACHABLE: u64 = 4;
 const TERM_RETURN_SRET: u64 = 32;
 // `codegen_swap::body::NO_VALUE`: no result pointer.
 const NO_VALUE: u64 = 18446744073709551615;
+// `codegen_swap::body::RESULT_WORDS_SHIFT` (#2581): a register result's
+// word count above its buffer's value in the `sret` word.
+const RESULT_WORDS_SHIFT: u64 = 32;
 
 // Argument positions.
 const ARG_OPTIMIZE: u64 = 0;
@@ -828,10 +837,12 @@ struct Body {
     // returns (#2425)
     record: Value,
     fail_lane: u64,
-    // The result pointer (invalid when the result is in registers), and
-    // the values built in it.
+    // The result pointer (invalid when the result is a scalar), the values
+    // built in it, and the words returned from it when it is a register
+    // result's buffer (0 for a caller's result pointer).
     sret: u32,
     homes: ChunkSeq[u64],
+    result_words: u64,
 }
 
 impl Body {
@@ -1685,6 +1696,16 @@ impl Body {
             let base = use_var(inout b, base_var);
             let ptr = ins_iadd_imm(inout b, base, wrapping_i64(off));
             ins_load(inout b, lane_type(flane), PLAIN, ptr, 0)
+        } else if kind == INST_READ_FIELD {
+            let k = w.next();
+            let flane = w.next();
+            let nsteps = w.next();
+            let mut ptr = self.use_local(inout b, k);
+            for _ in 0..nsteps {
+                let off = w.next();
+                ptr = ins_iadd_imm(inout b, ptr, wrapping_i64(off));
+            }
+            ins_load(inout b, lane_type(flane), PLAIN, ptr, 0)
         } else {
             return false;
         };
@@ -1734,8 +1755,20 @@ impl Body {
                     offset = wrapping_add(offset, widen_u64(WORD_BYTES));
                 }
             }
+            // The walk's zero, then a register result's words loaded from
+            // its buffer (`Codegen::return_value`).
             let zero = ins_iconst(inout b, ty_i64(), 0);
-            self.emit_return_value(inout b, zero);
+            if self.result_words != 0 {
+                let buffer = Value { id: self.sret };
+                let mut out: ChunkSeq[u32] = ChunkSeq::new[u32]();
+                for k in 0..self.result_words {
+                    let offset = wrapping_mul(k, widen_u64(WORD_BYTES));
+                    out.push(ins_load(inout b, ty_i64(), PLAIN, buffer, wrapping_i32(offset)).id);
+                }
+                ins_return(inout b, in out.as_slice());
+            } else {
+                self.emit_return_value(inout b, zero);
+            }
             return true;
         }
         if code == TERM_JUMP {
@@ -1852,7 +1885,12 @@ pub fn emit_body_words(
     let sret = if sret_word == NO_VALUE {
         invalid()
     } else {
-        wrapping_u32(sret_word)
+        wrapping_u32(sret_word & CALLEE_ID_MASK)
+    };
+    let result_words = if sret_word == NO_VALUE {
+        0
+    } else {
+        sret_word >> RESULT_WORDS_SHIFT
     };
     let nh = w.next();
     let mut homes: ChunkSeq[u64] = ChunkSeq::new[u64]();
@@ -1907,6 +1945,7 @@ pub fn emit_body_words(
         fail_lane: fail_lane,
         sret: sret,
         homes: homes,
+        result_words: result_words,
     };
     // The graph's blocks: the entry is the current block.
     s.blocks.push(current_block(inout b).id);
@@ -1919,14 +1958,22 @@ pub fn emit_body_words(
         let entry = w.next();
         s.kinds.push(w.next());
         s.addresses.push(invalid());
-        if entry >= LOCAL_PARAM {
+        if entry >= LOCAL_PARAM_PRODUCT {
+            let p = wrapping_sub(entry, LOCAL_PARAM_PRODUCT);
+            s.locals.push(wrapping_u32(w.arg(wrapping_add(wrapping_add(ARG_PARAMS, 1), p))));
+        } else if entry >= LOCAL_PARAM {
             let p = wrapping_sub(entry, LOCAL_PARAM);
             s.locals.push(wrapping_u32(w.arg(wrapping_add(wrapping_add(ARG_PARAMS, 1), p))));
+            if !optimize {
+                s.spill(inout b, in m, k);
+            }
+        } else if entry == LANE_PRODUCT {
+            s.locals.push(zeroed(inout b, LANE_I64));
         } else {
             s.locals.push(zeroed(inout b, entry));
-        }
-        if !optimize {
-            s.spill(inout b, in m, k);
+            if !optimize {
+                s.spill(inout b, in m, k);
+            }
         }
     }
     // Each value's register.

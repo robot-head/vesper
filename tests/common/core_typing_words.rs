@@ -38,6 +38,7 @@ pub const E_BREAK: u64 = 20;
 pub const E_CONTINUE: u64 = 21;
 pub const E_HANDLE: u64 = 22;
 pub const E_TRY: u64 = 23;
+pub const E_CLOSURE: u64 = 24;
 pub const E_INDEX: u64 = 40;
 
 // Literal pattern kinds (`LIT_*` in exprs.ves).
@@ -353,6 +354,50 @@ fn encode_expr(w: &World, e: &mut Enc, x: &Expr, out: &mut Vec<u64>) {
                 }
                 encode_expr(w, e, &c.body, out);
             }
+        }
+        // A closure infers its effect row from its body, which needs the
+        // checked world's partial and overflow operations: before
+        // inference (no inferred results yet) it is not encoded.
+        ExprKind::Closure {
+            params,
+            mode,
+            result,
+            effects,
+            infer_effects,
+            body,
+        } if !w.function_results.is_empty() => {
+            out.extend([E_CLOSURE, s, t, params.len() as u64]);
+            for p in params {
+                out.push(pass_code(p.pass));
+                out.push(e.name(&p.name));
+                out.push(e.ty(&p.ty));
+                out.push(p.projections.len() as u64);
+                out.extend([p.span.start as u64, p.span.end as u64]);
+            }
+            out.push(mode.map_or(0, |m| mode_word(m) + 1));
+            out.push(e.ty(result));
+            out.push(effects.instances.len() as u64);
+            for inst in &effects.instances {
+                out.push(e.name(&inst.name));
+                out.push(e.opt_name(&inst.label));
+                out.push(inst.args.len() as u64);
+                for a in &inst.args {
+                    out.push(e.ty(a));
+                }
+            }
+            out.push(e.opt_name(&effects.tail));
+            out.push(*infer_effects as u64);
+            // The names the body may capture (`free_names`, less the
+            // parameters).
+            let mut free = vesper::check::free_names(body);
+            for p in params {
+                free.remove(&p.name);
+            }
+            out.push(free.len() as u64);
+            for n in &free {
+                out.push(e.name(n));
+            }
+            encode_expr(w, e, body, out);
         }
         ExprKind::Try(value) => {
             out.extend([E_TRY, s, t]);
