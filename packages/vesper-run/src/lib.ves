@@ -21,8 +21,11 @@
 // values: their element operations and fixed-width byte access. Slice 5
 // adds closures without effects: their captures and lowered bodies. Slice 6
 // adds `String` and `Str`: byte access, views, comparison and updates,
-// which write a new string back to the receiver's place. A program
-// reaching anything else (effectful closures, floats, 128-bit integers,
+// which write a new string back to the receiver's place. Slice 7 adds
+// effect evidence: a closure performs to the handlers it was made under,
+// and a callable passed to an effectful function parameter (or typed with a
+// `$cap` handler) to the handlers bound there (evidence frames). A program
+// reaching anything else (user-labelled effects, floats, 128-bit integers,
 // vector, tiled and `Box` operations) is declined before it runs (`scan`);
 // a continuation resumed outside its handler's activation, or a result
 // with a non-ASCII string, is declined when it is reached. The caller then
