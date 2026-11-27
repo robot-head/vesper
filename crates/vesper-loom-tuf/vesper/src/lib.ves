@@ -3,6 +3,7 @@
 // Ed25519 role quorum verifier (Rust-exit SH6 lane 16, #1411 / #2295).
 //
 // @export abi 4 options
+use self::checkpoint::parse_checkpoint_json as parse_checkpoint_json_impl;
 use @vesper/crypto::{CryptoError, HashAlg, ed25519_verify, hash};
 
 // ---------------------------------------------------------------------------
@@ -1220,4 +1221,22 @@ pub fn tuf_state_checksum(
     buf.push(BYTE_RBRACE);
 
     tuf_sha256_hex(in buf)
+}
+
+pub fn tuf_parse_checkpoint_json(
+    in b: Slice[u8],
+    inout out: Slice[u64],
+    inout roots_flat: Slice[u8],
+    inout root_lens: Slice[u64],
+    inout role_spans: Slice[u64],
+    inout role_vers: Slice[u64]
+) -> u64 {
+    parse_checkpoint_json_impl(
+        in b,
+        inout out,
+        inout roots_flat,
+        inout root_lens,
+        inout role_spans,
+        inout role_vers
+    )
 }
