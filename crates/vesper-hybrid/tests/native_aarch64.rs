@@ -76,6 +76,10 @@ const ATOMIC_SUB: u64 = 103;
 const ATOMIC_EXCHANGE: u64 = 104;
 const FENCE: u64 = 105;
 const BYTE_SWAP: u64 = 106;
+const LEADING_ZEROS: u64 = 107;
+const TRAILING_ZEROS: u64 = 108;
+const POPULATION_COUNT: u64 = 109;
+const REVERSE_BITS: u64 = 110;
 const EQUAL: u64 = 0;
 const SIGNED_LESS: u64 = 2;
 const UNSIGNED_LESS: u64 = 6;
@@ -186,6 +190,49 @@ fn aarch64_atomic_retry_loops_preserve_operands_and_unused_effects() {
     );
     assert!(binding::aarch64_integer_leaf(&[2, 2, ATOMIC_ADD, 0, 1, u128::BITS.into()]).is_empty());
     assert!(binding::aarch64_integer_leaf(&[0, 0, FENCE, 0, 0, 0]).is_empty());
+}
+
+#[test]
+fn aarch64_bit_operations_use_the_declared_width() {
+    const CLZ_X0_X0: u32 = 0xdac0_1000;
+    const ORR_W16_W0_BYTE_SENTINEL: u32 = 0x3218_0010;
+    const RBIT_W16_W16: u32 = 0x5ac0_0210;
+    const CLZ_W0_W16: u32 = 0x5ac0_1200;
+    const FMOV_D16_X0: u32 = 0x9e67_0010;
+    const CNT_V16_8B: u32 = 0x0e20_5a10;
+    const ADDV_B16_V16_8B: u32 = 0x0e31_ba10;
+    const UMOV_W0_V16_LOW_BYTE: u32 = 0x0e01_3e00;
+    const RBIT_W0_W0: u32 = 0x5ac0_0000;
+    const LSR_W0_WORD: u32 = 0x5310_7c00;
+    for (op, width, instructions) in [
+        (LEADING_ZEROS, CELL_BITS, &[CLZ_X0_X0, RET][..]),
+        (
+            TRAILING_ZEROS,
+            BYTE_BITS,
+            &[ORR_W16_W0_BYTE_SENTINEL, RBIT_W16_W16, CLZ_W0_W16, RET][..],
+        ),
+        (
+            POPULATION_COUNT,
+            CELL_BITS,
+            &[
+                FMOV_D16_X0,
+                CNT_V16_8B,
+                ADDV_B16_V16_8B,
+                UMOV_W0_V16_LOW_BYTE,
+                RET,
+            ][..],
+        ),
+        (REVERSE_BITS, WORD_BITS, &[RBIT_W0_W0, LSR_W0_WORD, RET][..]),
+    ] {
+        let packet = [1, 1, op, 0, 0, width];
+        let expected: Vec<_> = instructions
+            .iter()
+            .copied()
+            .flat_map(u32::to_le_bytes)
+            .collect();
+        assert_eq!(binding::aarch64_integer_leaf(&packet), expected);
+        assert!(binding::aarch64_integer_leaf(&[1, 1, op, 0, 0, u128::BITS.into()]).is_empty());
+    }
 }
 
 #[test]

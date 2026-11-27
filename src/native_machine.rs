@@ -126,6 +126,20 @@ enum IntegerOp {
     AtomicExchange = 104,
     Fence = 105,
     ByteSwap = 106,
+    LeadingZeros = 107,
+    TrailingZeros = 108,
+    PopulationCount = 109,
+    ReverseBits = 110,
+}
+
+fn integer_bit_op(op: Opcode) -> Option<IntegerOp> {
+    Some(match op {
+        Opcode::Clz => IntegerOp::LeadingZeros,
+        Opcode::Ctz => IntegerOp::TrailingZeros,
+        Opcode::Popcnt => IntegerOp::PopulationCount,
+        Opcode::Bitrev => IntegerOp::ReverseBits,
+        _ => return None,
+    })
 }
 
 type Encoder = fn(&[u64]) -> Option<Vec<u8>>;
@@ -804,14 +818,43 @@ impl IntegerBlocks<'_> {
                 ]
             }
             InstructionData::Unary {
-                opcode: Opcode::Bswap,
+                opcode: opcode @ (Opcode::Bswap | Opcode::Bitrev),
                 arg,
-            } if output == types::I128 => {
+            } if output == types::I128 && (opcode == Opcode::Bswap || self.aarch64) => {
                 let [low, high] = pair(arg)?;
+                let op = if opcode == Opcode::Bswap {
+                    IntegerOp::ByteSwap
+                } else {
+                    IntegerOp::ReverseBits
+                };
                 [
-                    self.append(IntegerOp::ByteSwap, [high, 0, INTEGER_CELL_BITS]),
-                    self.append(IntegerOp::ByteSwap, [low, 0, INTEGER_CELL_BITS]),
+                    self.append(op, [high, 0, INTEGER_CELL_BITS]),
+                    self.append(op, [low, 0, INTEGER_CELL_BITS]),
                 ]
+            }
+            InstructionData::Unary {
+                opcode: opcode @ (Opcode::Clz | Opcode::Ctz | Opcode::Popcnt),
+                arg,
+            } if output == types::I128 && self.aarch64 => {
+                let [low, high] = pair(arg)?;
+                let (first, second) = if opcode == Opcode::Clz {
+                    (high, low)
+                } else {
+                    (low, high)
+                };
+                let op = integer_bit_op(opcode)?;
+                let head = self.append(op, [first, 0, INTEGER_CELL_BITS]);
+                let tail = self.append(op, [second, 0, INTEGER_CELL_BITS]);
+                let count = if opcode == Opcode::Popcnt {
+                    self.append(IntegerOp::Add, [head, tail, INTEGER_CELL_BITS])
+                } else {
+                    let extended = self.append(
+                        IntegerOp::AddImmediate,
+                        [tail, INTEGER_CELL_BITS, INTEGER_CELL_BITS],
+                    );
+                    self.append(IntegerOp::Select, [first, head, extended])
+                };
+                [count, self.append(IntegerOp::Constant, [0; 3])]
             }
             InstructionData::Unary {
                 opcode: opcode @ (Opcode::Uextend | Opcode::Sextend),
@@ -1163,6 +1206,12 @@ impl IntegerBlocks<'_> {
                     arg,
                 } if ty(arg) == output && output != types::I8 => {
                     (IntegerOp::ByteSwap, [input(arg)?, 0, width])
+                }
+                InstructionData::Unary {
+                    opcode: opcode @ (Opcode::Clz | Opcode::Ctz | Opcode::Popcnt | Opcode::Bitrev),
+                    arg,
+                } if self.aarch64 && ty(arg) == output => {
+                    (integer_bit_op(opcode)?, [input(arg)?, 0, width])
                 }
                 InstructionData::UnaryGlobalValue {
                     opcode: Opcode::GlobalValue | Opcode::SymbolValue,

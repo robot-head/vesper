@@ -24,7 +24,7 @@ use self::scalar::{
     FLOAT_SUB, FLOAT_MUL, FLOAT_DIV, FLOAT_SQRT, FLOAT_NEG, FLOAT_ABS, FLOAT_COMPARE64, FLOAT_LOAD,
     FLOAT_STORE32, FLOAT_STORE64, BITS_TO_FLOAT, FLOAT_TO_BITS, FLOAT_SELECT, FLOAT_STACK_LOAD,
     FLOAT_STACK_STORE32, FLOAT_STACK_STORE64, FLOAT_COPY_SIGN, is_float_binary, is_float_compare,
-    float_value, valid_float_operands
+    float_value, valid_float_operands, LEADING_ZEROS, TRAILING_ZEROS, POPULATION_COUNT, REVERSE_BITS
 };
 use self::x86_64::{
     BYTE_BITS, WORD_BITS, DWORD_BITS, QWORD_BITS, FLOAT_ORDERED, FLOAT_UNORDERED, FLOAT_EQUAL,
@@ -119,6 +119,11 @@ const ASR_REG: u32 = 0x9ac02800;
 const REV16_W: u32 = 0x5ac00400;
 const REV_W: u32 = 0x5ac00800;
 const REV_X: u32 = 0xdac00c00;
+const CLZ_REG: u32 = 0xdac01000;
+const RBIT_REG: u32 = 0xdac00000;
+const CNT_8B: u32 = 0x0e205800;
+const ADDV_8B: u32 = 0x0e31b800;
+const UMOV_LOW_BYTE: u32 = 0x0e013c00;
 const ADD_IMM: u32 = 0x91000000;
 const SUB_IMM: u32 = 0xd1000000;
 const AND_IMM: u32 = 0x92000000;
@@ -863,6 +868,11 @@ fn operands(in r: Record, returns: u64) -> Option[u64] {
         } else {
             Option::None
         },
+        LEADING_ZEROS | TRAILING_ZEROS | POPULATION_COUNT | REVERSE_BITS => if r.right == 0 {
+            Option::Some(1)
+        } else {
+            Option::None
+        },
         ADD_IMMEDIATE
             | SUB_IMMEDIATE
             | MUL_IMMEDIATE
@@ -1072,6 +1082,47 @@ fn emit_float_instruction(
     }
 }
 
+fn emit_bit_operation(inout out: ChunkSeq[u8], in r: Record, dest: u32, source: u32) {
+    let narrow = r.extra < DWORD_BITS;
+    let wide = r.extra == QWORD_BITS;
+    let reg_mask: u32 = if wide { ~0 } else { ~REG64 };
+    let mut source = source;
+    if r.op == TRAILING_ZEROS {
+        if narrow {
+            // Put a sentinel above the input so an all-zero value counts to its width.
+            let rotate = sh(wrapping_u32(wrapping_sub(DWORD_BITS, r.extra)), IMMR_SHIFT);
+            push32(inout out, (ORR_IMM & reg_mask) | rotate | sh(source, RN_SHIFT) | SCRATCH);
+            source = SCRATCH;
+        }
+        push32(inout out, (RBIT_REG & reg_mask) | sh(source, RN_SHIFT) | SCRATCH);
+        push32(inout out, (CLZ_REG & reg_mask) | sh(SCRATCH, RN_SHIFT) | dest);
+    } else if r.op == REVERSE_BITS {
+        push32(inout out, (RBIT_REG & reg_mask) | sh(source, RN_SHIFT) | dest);
+        if narrow {
+            let shift = wrapping_sub(DWORD_BITS, r.extra);
+            bitfield(inout out, UBFM & ~BITFIELD64, dest, dest, shift, DWORD_BITS - 1);
+        }
+    } else {
+        if narrow {
+            bitfield(inout out, UBFM & ~BITFIELD64, SCRATCH, source, 0, wrapping_sub(r.extra, 1));
+            source = SCRATCH;
+        }
+        if r.op == POPULATION_COUNT {
+            let move_width = if wide { FP_DOUBLE | REG64 } else { 0 };
+            push32(inout out, FMOV_FROM_GP | move_width | sh(source, RN_SHIFT) | FP_LEFT);
+            push32(inout out, CNT_8B | sh(FP_LEFT, RN_SHIFT) | FP_LEFT);
+            push32(inout out, ADDV_8B | sh(FP_LEFT, RN_SHIFT) | FP_LEFT);
+            push32(inout out, UMOV_LOW_BYTE | sh(FP_LEFT, RN_SHIFT) | dest);
+        } else {
+            push32(inout out, (CLZ_REG & reg_mask) | sh(source, RN_SHIFT) | dest);
+            if narrow {
+                let excess = sh(wrapping_u32(wrapping_sub(DWORD_BITS, r.extra)), IMM12_SHIFT);
+                push32(inout out, (SUB_IMM & reg_mask) | excess | sh(dest, RN_SHIFT) | dest);
+            }
+        }
+    }
+}
+
 fn emit_instruction(
     inout out: ChunkSeq[u8],
     in r: Record,
@@ -1084,6 +1135,8 @@ fn emit_instruction(
         immediate(inout out, dest, r.left);
     } else if r.op >= FLOAT_CONSTANT && r.op <= FLOAT_COPY_SIGN {
         emit_float_instruction(inout out, in r, dest, lhs, rhs, third);
+    } else if r.op >= LEADING_ZEROS && r.op <= REVERSE_BITS {
+        emit_bit_operation(inout out, in r, dest, lhs);
     } else if r.op == BYTE_SWAP {
         let op = match r.extra {
             WORD_BITS => REV16_W,
