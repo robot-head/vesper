@@ -1,4 +1,4 @@
-// AAPCS64 integer leaves. The input is the shared scalar
+// AAPCS64 register-only integer functions. The input is the shared scalar
 // machine tape. Unsupported operations or oversized frames decline before a
 // function is defined.
 use @vesper/codegen-freestanding::util::{push16, push32};
@@ -15,7 +15,7 @@ use self::scalar::{
     UNSIGNED_GREATER_EQUAL, UNSIGNED_GREATER, UNSIGNED_LESS_EQUAL, BLOCK_LABEL, EDGE_LABEL,
     JUMP_LABEL, BRANCH_LABEL, BLOCK_RETURN, BRANCH_BLOCK, BRANCH_TABLE, BRANCH_TABLE_TARGET,
     TableFixup, ARGUMENT_COUNT, RETURN_VALUE, HEADER_WORDS, RECORD_WORDS, NEVER_READ, NO_VALUE,
-    DISP32_MASK
+    DISP32_MASK, CALL, CALL_ARGUMENT, CALL_VOID, LIBCALL_TARGET_BASE, MEMCPY_LIBCALL
 };
 use self::x86_64::{BYTE_BITS, WORD_BITS, DWORD_BITS, QWORD_BITS};
 
@@ -34,13 +34,18 @@ const SCRATCH: u32 = 16;
 const COMPARE_LEFT_SCRATCH: u32 = 17;
 const ZERO: u32 = 31;
 const SP: u32 = 31;
+const LINK_REGISTER: u32 = 30;
 const STACK_ALIGNMENT: u64 = 16;
 const HOME_WORD_BYTES: u64 = QWORD_BITS / BYTE_BITS;
 const HOME_REGISTERS: u64 = 8;
+const CALL_SAVE_REGISTERS: u64 = 16;
+const ARM64_CALL: u64 = 4;
+const ARM64_LIBCALL: u64 = 5;
 // Larger frames need to probe the stack at least once per base page.
 const MAX_FRAME_BYTES: u64 = 4096;
 const RETURN: u32 = 0xd65f03c0;
 const JUMP: u32 = 0x14000000;
+const BRANCH_AND_LINK: u32 = 0x94000000;
 const BRANCH_IF_ZERO: u32 = 0xb4000000;
 const BRANCH_IF_CONDITION: u32 = 0x54000000;
 const BRANCH_REGISTER: u32 = 0xd61f0000;
@@ -490,6 +495,24 @@ fn operands(in r: Record) -> Option[u64] {
             Option::None
         };
     }
+    if r.op == CALL || r.op == CALL_VOID {
+        return if r.right <= ARGUMENT_REGISTERS
+            && r.extra == 0
+            && (r.left < LIBCALL_TARGET_BASE
+                || wrapping_sub(r.left, LIBCALL_TARGET_BASE) <= MEMCPY_LIBCALL)
+        {
+            Option::Some(0)
+        } else {
+            Option::None
+        };
+    }
+    if r.op == CALL_ARGUMENT {
+        return if r.right == 0 && r.extra == 0 {
+            Option::Some(1)
+        } else {
+            Option::None
+        };
+    }
     if comparison_width(r.op) != 0 {
         if r.extra > UNSIGNED_LESS_EQUAL {
             return Option::None;
@@ -764,6 +787,8 @@ fn no_result(op: u64) -> bool {
         || (op >= BLOCK_LABEL && op <= BRANCH_BLOCK)
         || op == BRANCH_TABLE
         || op == BRANCH_TABLE_TARGET
+        || op == CALL_VOID
+        || op == CALL_ARGUMENT
 }
 
 fn stack_adjust(opcode: u32, adjustment: u32) -> u32 {
@@ -775,10 +800,14 @@ fn emit_return(
     reg: u32,
     adjustment: u32,
     spill_mode: bool,
+    link_slot: u64,
     inout restores: ChunkSeq[u64]
 ) {
     if reg != UNASSIGNED && reg != 0 {
         rrr(inout output, ORR_REG, 0, ZERO, reg);
+    }
+    if link_slot != NO_VALUE {
+        memory(inout output, true, QWORD_BITS, SP, LINK_REGISTER, link_slot);
     }
     if spill_mode {
         restores.push(output.len());
@@ -787,6 +816,86 @@ fn emit_return(
         push32(inout output, stack_adjust(ADD_IMM, adjustment));
     }
     push32(inout output, RETURN);
+}
+
+fn call_frame_bytes() -> u64 {
+    align_up(wrapping_mul(wrapping_add(CALL_SAVE_REGISTERS, 1), HOME_WORD_BYTES), STACK_ALIGNMENT)
+}
+
+fn call_save_slot(frame_bytes: u64, register: u64) -> u64 {
+    wrapping_add(
+        wrapping_sub(frame_bytes, call_frame_bytes()),
+        wrapping_mul(wrapping_add(register, 1), HOME_WORD_BYTES)
+    )
+}
+
+fn emit_call(
+    inout out: ChunkSeq[u8],
+    in words: Slice[u64],
+    in locations: ChunkSeq[u32],
+    in record: Record,
+    index: u64,
+    used: u32,
+    frame_bytes: u64,
+    keep_result: bool,
+    inout relocations: ChunkSeq[u64]
+) -> bool {
+    let start = wrapping_sub(index, record.right);
+    let mut save = used;
+    for arg in 0..record.right {
+        let source = location(in locations, read_record(in words, wrapping_add(start, arg)).left);
+        if source == UNASSIGNED {
+            return false;
+        }
+        // Arguments are assigned in increasing register order. Save sources
+        // whose register may be overwritten before its value is copied.
+        if widen_u64(source) < arg {
+            save = save | sh(1, source);
+        }
+    }
+    for register in 0..CALL_SAVE_REGISTERS {
+        let reg = wrapping_u32(register);
+        if (save & sh(1, reg)) != 0 {
+            memory(inout out, false, QWORD_BITS, SP, reg, call_save_slot(frame_bytes, register));
+        }
+    }
+    for arg in 0..record.right {
+        let source = location(in locations, read_record(in words, wrapping_add(start, arg)).left);
+        let dest = wrapping_u32(arg);
+        if source >= SPILL_BASE {
+            let _ = materialize(inout out, source, dest, frame_bytes);
+        } else if source < dest {
+            memory(
+                inout out,
+                true,
+                QWORD_BITS,
+                SP,
+                dest,
+                call_save_slot(frame_bytes, widen_u64(source))
+            );
+        } else if source != dest {
+            rrr(inout out, ORR_REG, dest, ZERO, source);
+        }
+    }
+    relocations.push(out.len());
+    if record.left < LIBCALL_TARGET_BASE {
+        relocations.push(ARM64_CALL);
+        relocations.push(record.left);
+    } else {
+        relocations.push(ARM64_LIBCALL);
+        relocations.push(wrapping_sub(record.left, LIBCALL_TARGET_BASE));
+    }
+    push32(inout out, BRANCH_AND_LINK);
+    if keep_result {
+        rrr(inout out, ORR_REG, SCRATCH, ZERO, 0);
+    }
+    for register in 0..CALL_SAVE_REGISTERS {
+        let reg = wrapping_u32(register);
+        if (used & sh(1, reg)) != 0 {
+            memory(inout out, true, QWORD_BITS, SP, reg, call_save_slot(frame_bytes, register));
+        }
+    }
+    true
 }
 
 fn write_instruction(inout output: ChunkSeq[u8], offset: u64, instruction: u32) {
@@ -875,25 +984,49 @@ fn patch_table_entry(
 }
 
 pub fn encode_leaf(in words: Slice[u64]) -> ChunkSeq[u8] {
+    let mut relocations = ChunkSeq::new[u64]();
+    encode(in words, false, inout relocations)
+}
+
+pub fn encode(
+    in words: Slice[u64],
+    allow_calls: bool,
+    inout relocations: ChunkSeq[u64]
+) -> ChunkSeq[u8] {
     let mut allocation = Allocation::RegisterHomes;
     let mut long_tables = false;
     for attempt in 0..ENCODING_ATTEMPTS {
         let mut retry: Option[Retry] = Option::None;
-        let code = encode_leaf_pass(in words, allocation, long_tables, inout retry);
+        let mut references = ChunkSeq::new[u64]();
+        let code = encode_pass(
+            in words,
+            allocation,
+            long_tables,
+            allow_calls,
+            inout retry,
+            inout references
+        );
         match retry {
             Option::Some(Retry::Allocate(next)) => allocation = next,
             Option::Some(Retry::LongTables) => long_tables = true,
-            Option::None => return code,
+            Option::None => {
+                if code.len() != 0 {
+                    relocations.extend(in references.as_slice());
+                }
+                return code;
+            },
         };
     }
     ChunkSeq::new[u8]()
 }
 
-fn encode_leaf_pass(
+fn encode_pass(
     in words: Slice[u64],
     allocation: Allocation,
     long_tables: bool,
-    inout retry: Option[Retry]
+    allow_calls: bool,
+    inout retry: Option[Retry],
+    inout relocations: ChunkSeq[u64]
 ) -> ChunkSeq[u8] {
     let mut out = ChunkSeq::new[u8]();
     if words.len() < HEADER_WORDS {
@@ -957,10 +1090,30 @@ fn encode_leaf_pass(
     let mut depth: u64 = 0;
     let mut block_end = values;
     let mut entry_end = values;
+    let mut call_end = NEVER_READ;
+    let mut pending_arguments: u64 = 0;
+    let mut has_calls = false;
     for reverse in 0..count {
         let index = wrapping_sub(wrapping_sub(count, 1), reverse);
         let value = wrapping_add(args, index);
         let r = read_record(in words, index);
+        if r.op == CALL_ARGUMENT {
+            if pending_arguments == 0 {
+                return out;
+            }
+            pending_arguments = wrapping_sub(pending_arguments, 1);
+        } else if pending_arguments != 0 {
+            return out;
+        }
+        if r.op == CALL || r.op == CALL_VOID {
+            if !allow_calls || r.right > index {
+                return out;
+            }
+            pending_arguments = r.right;
+            call_end = value;
+            has_calls = true;
+            register_home = false;
+        }
         let n = match operands(in r) {
             Option::Some(n) => n,
             Option::None => return out,
@@ -1053,7 +1206,12 @@ fn encode_leaf_pass(
             continue;
         }
         if n >= 1 && last_read(in ends, r.left) == NEVER_READ {
-            let _ = ends.try_set(r.left, value);
+            let end = if r.op == CALL_ARGUMENT {
+                call_end
+            } else {
+                value
+            };
+            let _ = ends.try_set(r.left, end);
         }
         if n >= 2 && last_read(in ends, r.right) == NEVER_READ {
             let _ = ends.try_set(r.right, value);
@@ -1062,7 +1220,7 @@ fn encode_leaf_pass(
             let _ = ends.try_set(r.extra, value);
         }
     }
-    if depth != 0 {
+    if depth != 0 || pending_arguments != 0 {
         return out;
     }
 
@@ -1071,14 +1229,26 @@ fn encode_leaf_pass(
         Allocation::Spills => true,
         _ => false,
     };
-    let frame_bytes = if frame_used && home_mask == 0 {
+    let local_bytes = if frame_used && home_mask == 0 {
         frame.size
     } else {
         0
     };
+    let link_slot = if has_calls { local_bytes } else { NO_VALUE };
+    let frame_bytes = if has_calls {
+        wrapping_add(local_bytes, call_frame_bytes())
+    } else {
+        local_bytes
+    };
+    if frame_bytes > MAX_FRAME_BYTES {
+        return out;
+    }
     let adjustment = arithmetic_immediate(frame_bytes).unwrap_or(0);
     if spill_mode || adjustment != 0 {
         push32(inout out, stack_adjust(SUB_IMM, adjustment));
+    }
+    if has_calls {
+        memory(inout out, false, QWORD_BITS, SP, LINK_REGISTER, link_slot);
     }
     let register_mask = if spill_mode {
         SPILL_REGISTER_MASK
@@ -1114,12 +1284,39 @@ fn encode_leaf_pass(
         let value = wrapping_add(args, index);
         let r = read_record(in words, index);
         let stored = store_width(r.op);
+        let live = last_read(in ends, value) != NEVER_READ;
         if r.op == STACK_SLOT
             || r.op == BRANCH_TABLE_TARGET
-            || (!no_result(r.op) && last_read(in ends, value) == NEVER_READ)
+            || r.op == CALL_ARGUMENT
+            || (r.op != CALL && !no_result(r.op) && !live)
         {
             locations.push(UNASSIGNED);
             continue;
+        }
+        let direct_call = r.op == CALL || r.op == CALL_VOID;
+        if direct_call {
+            let start = wrapping_sub(index, r.right);
+            for arg in 0..r.right {
+                let source = read_record(in words, wrapping_add(start, arg)).left;
+                used = expire(used, in ends, source, value, location(in locations, source));
+            }
+            if !emit_call(
+                inout out,
+                in words,
+                in locations,
+                in r,
+                index,
+                used,
+                frame_bytes,
+                live,
+                inout relocations
+            ) {
+                return ChunkSeq::new[u8]();
+            }
+            if !live {
+                locations.push(UNASSIGNED);
+                continue;
+            }
         }
         if r.op == BLOCK_LABEL || r.op == EDGE_LABEL {
             let old = labels.try_get(r.left).unwrap_or(Label { address: 0, block: false });
@@ -1223,7 +1420,7 @@ fn encode_leaf_pass(
             continue;
         }
         if r.op == EARLY_RETURN {
-            emit_return(inout out, lhs, adjustment, spill_mode, inout restores);
+            emit_return(inout out, lhs, adjustment, spill_mode, link_slot, inout restores);
             depth = wrapping_sub(depth, 1);
             let target = out.len();
             match branches.try_get(depth) {
@@ -1236,7 +1433,7 @@ fn encode_leaf_pass(
             continue;
         }
         if r.op == BLOCK_RETURN {
-            emit_return(inout out, lhs, adjustment, spill_mode, inout restores);
+            emit_return(inout out, lhs, adjustment, spill_mode, link_slot, inout restores);
             locations.push(UNASSIGNED);
             continue;
         }
@@ -1304,7 +1501,9 @@ fn encode_leaf_pass(
         } else {
             assigned
         };
-        if r.op == STACK_ADDRESS || r.op == STACK_LOAD {
+        if direct_call {
+            rrr(inout out, ORR_REG, dest, ZERO, SCRATCH);
+        } else if r.op == STACK_ADDRESS || r.op == STACK_LOAD {
             let displacement = stack_displacement(in frame, in r).unwrap_or(0);
             if r.op == STACK_ADDRESS {
                 let encoded = arithmetic_immediate(displacement).unwrap_or(0);
@@ -1365,7 +1564,7 @@ fn encode_leaf_pass(
         }
     } else {
         let reg = materialize(inout out, location(in locations, result), SPILL_LEFT, frame_bytes);
-        emit_return(inout out, reg, adjustment, spill_mode, inout restores);
+        emit_return(inout out, reg, adjustment, spill_mode, link_slot, inout restores);
     }
     if spill_mode {
         let size = align_up(

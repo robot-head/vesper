@@ -1,6 +1,6 @@
 // @export abi 4
 
-use self::aarch64::{encode_leaf};
+use self::aarch64::{encode as encode_aarch64, encode_leaf};
 use self::coff::{write_coff};
 use self::scalar::{encode_block};
 use self::elf::{write_elf};
@@ -22,6 +22,16 @@ pub fn x86_64_integer_block(in words: Slice[u64]) -> ChunkSeq[u8] {
 pub fn x86_64_relocatable_block(in words: Slice[u64]) -> ChunkSeq[u8] {
     let mut relocations = ChunkSeq::new[u64]();
     let code = encode_block(in words, true, inout relocations);
+    relocation_packet(in code, in relocations)
+}
+
+pub fn aarch64_relocatable_block(in words: Slice[u64]) -> ChunkSeq[u8] {
+    let mut relocations = ChunkSeq::new[u64]();
+    let code = encode_aarch64(in words, true, inout relocations);
+    relocation_packet(in code, in relocations)
+}
+
+fn relocation_packet(in code: ChunkSeq[u8], in relocations: ChunkSeq[u64]) -> ChunkSeq[u8] {
     let mut packet = ChunkSeq::new[u8]();
     if code.len() != 0 {
         push64(inout packet, code.len());

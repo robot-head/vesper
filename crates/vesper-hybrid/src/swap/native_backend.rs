@@ -11,13 +11,13 @@ use super::{Registry, Swap, must, on, open};
 use vesper::native::{elf, machine};
 
 static ENCODED: AtomicU64 = AtomicU64::new(0);
-static AARCH64_LEAVES: AtomicU64 = AtomicU64::new(0);
+static AARCH64_BLOCKS: AtomicU64 = AtomicU64::new(0);
 static ELF_OBJECTS: AtomicU64 = AtomicU64::new(0);
 
 pub(super) const SWAPS: &[Swap] = &[
     open(
         "native_backend",
-        "experimental x86-64 blocks and AArch64 integer leaves, requires VESPER_HYBRID_NATIVE_BACKEND=1",
+        "experimental x86-64 blocks and AArch64 integer blocks, requires VESPER_HYBRID_NATIVE_BACKEND=1",
     ),
     open(
         "native_elf",
@@ -46,11 +46,11 @@ pub(super) fn register(_r: &mut Registry) {
             Some(packet)
         }));
         must(machine::install_aarch64_encoder(|words| {
-            let bytes = binding::aarch64_integer_leaf(words);
+            let bytes = binding::aarch64_relocatable_block(words);
             if bytes.is_empty() {
                 return None;
             }
-            AARCH64_LEAVES.fetch_add(1, Relaxed);
+            AARCH64_BLOCKS.fetch_add(1, Relaxed);
             Some(bytes)
         }));
     }
@@ -74,8 +74,8 @@ pub(super) fn report() {
         ENCODED.load(Relaxed),
     );
     eprintln!(
-        "vesper-hybrid: native_backend emitted {} AArch64 integer leaves",
-        AARCH64_LEAVES.load(Relaxed),
+        "vesper-hybrid: native_backend emitted {} AArch64 integer blocks",
+        AARCH64_BLOCKS.load(Relaxed),
     );
     eprintln!(
         "vesper-hybrid: native_elf wrote {} x86-64 ELF objects",

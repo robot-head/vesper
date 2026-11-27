@@ -143,7 +143,7 @@ pub fn install_relocation_encoder(encode: Encoder) -> Result<(), Encoder> {
     RELOCATION_ENCODER.set(encode)
 }
 
-/// Installs the AArch64 integer leaf encoder for ordinary native objects.
+/// Installs the AArch64 encoder for ordinary native objects, including relocation packets.
 pub fn install_aarch64_encoder(encode: Encoder) -> Result<(), Encoder> {
     AARCH64_ENCODER.set(encode)
 }
@@ -174,6 +174,8 @@ const PLT_CALL: u64 = 0;
 const RELATIVE_DATA: u64 = 1;
 const GOT_DATA: u64 = 2;
 const PLT_LIBCALL: u64 = 3;
+const ARM64_CALL: u64 = 4;
+const ARM64_LIBCALL: u64 = 5;
 const LIBCALL_TARGET_BASE: u64 = u32::MAX as u64 + 1;
 const MEMMOVE_LIBCALL: u32 = 0;
 const MEMCPY_LIBCALL: u32 = 1;
@@ -420,6 +422,7 @@ struct IntegerBlocks<'a> {
     needs_cfg: bool,
     allow_hardware_faults: bool,
     canonicalize_nans: bool,
+    aarch64: bool,
     declarations: Option<&'a ModuleDeclarations>,
 }
 
@@ -541,7 +544,10 @@ impl IntegerBlocks<'_> {
         let dfg = &self.function.dfg;
         let signature = &dfg.signatures[callee.signature];
         let args = dfg.inst_args(inst);
-        if signature.call_conv != CallConv::SystemV || signature.params.len() != args.len() {
+        if signature.call_conv != self.function.signature.call_conv
+            || signature.params.len() != args.len()
+            || (self.aarch64 && !aarch64_register_signature(&signature.params, &signature.returns))
+        {
             return None;
         }
         let target = match callee.name {
@@ -553,7 +559,7 @@ impl IntegerBlocks<'_> {
                 u64::from(name.index)
             }
             ExternalName::LibCall(call @ (LibCall::Memmove | LibCall::Memcpy)) => {
-                if *signature != call.signature(CallConv::SystemV, types::I64) {
+                if *signature != call.signature(signature.call_conv, types::I64) {
                     return None;
                 }
                 let libcall = if call == LibCall::Memmove {
@@ -1849,28 +1855,45 @@ impl IntegerBlocks<'_> {
 /// The entry label's right word identifies the private home slot plus one,
 /// or zero when the function needs no cross-block storage.
 pub fn integer_block_words(function: &Function) -> Option<Vec<u64>> {
-    integer_program(function, false, false, None, CallConv::SystemV)
+    integer_program(function, false, false, None, CallConv::SystemV, false)
         .map(|(primary, _)| primary.words)
 }
 
 /// Packs an AAPCS64 function with ordinary register integer parameters.
 pub fn aarch64_leaf_words(function: &Function) -> Option<Vec<u64>> {
+    let (program, _) = aarch64_program(function, None)?;
+    (!program.relocations).then_some(program.words)
+}
+
+fn aarch64_register_signature(params: &[AbiParam], returns: &[AbiParam]) -> bool {
+    params.len() <= AARCH64_GP_ARGUMENTS
+        && returns.len() <= 1
+        && params
+            .iter()
+            .chain(returns)
+            .all(|param| *param == AbiParam::new(types::I64))
+}
+
+fn aarch64_program(
+    function: &Function,
+    declarations: Option<&ModuleDeclarations>,
+) -> Option<(IntegerProgram, Option<IntegerProgram>)> {
     let signature = &function.signature;
     if !matches!(
         signature.call_conv,
         CallConv::SystemV | CallConv::AppleAarch64
-    ) || signature.params.len() > AARCH64_GP_ARGUMENTS
-        || signature.returns.len() > 1
-        || signature
-            .params
-            .iter()
-            .chain(&signature.returns)
-            .any(|param| *param != AbiParam::new(types::I64))
+    ) || !aarch64_register_signature(&signature.params, &signature.returns)
     {
         return None;
     }
-    let (program, _) = integer_program(function, false, false, None, signature.call_conv)?;
-    (!program.relocations).then_some(program.words)
+    integer_program(
+        function,
+        false,
+        false,
+        declarations,
+        signature.call_conv,
+        true,
+    )
 }
 
 struct IntegerProgram {
@@ -1884,6 +1907,7 @@ fn integer_program(
     canonicalize_nans: bool,
     declarations: Option<&ModuleDeclarations>,
     call_conv: CallConv,
+    aarch64: bool,
 ) -> Option<(IntegerProgram, Option<IntegerProgram>)> {
     let signature = &function.signature;
     if signature.call_conv != call_conv || !function.dynamic_stack_slots.is_empty() {
@@ -1911,6 +1935,7 @@ fn integer_program(
         needs_cfg: false,
         allow_hardware_faults,
         canonicalize_nans,
+        aarch64,
         declarations,
     };
     for slot in function.sized_stack_slots.values() {
@@ -1995,7 +2020,8 @@ fn decode_relocatable(packet: &[u8]) -> Option<MachineCode> {
         };
         let offset = u32::try_from(u64::from_le_bytes(*offset)).ok()?;
         let target = u32::try_from(u64::from_le_bytes(*target)).ok()?;
-        let (kind, name) = match u64::from_le_bytes(*kind) {
+        let packet_kind = u64::from_le_bytes(*kind);
+        let (kind, name) = match packet_kind {
             PLT_CALL => (
                 Reloc::X86CallPLTRel4,
                 ModuleRelocTarget::user(FUNCTION_NAMESPACE, target),
@@ -2008,13 +2034,22 @@ fn decode_relocatable(packet: &[u8]) -> Option<MachineCode> {
                 Reloc::X86GOTPCRel4,
                 ModuleRelocTarget::user(DATA_NAMESPACE, target),
             ),
-            PLT_LIBCALL => {
+            ARM64_CALL => (
+                Reloc::Arm64Call,
+                ModuleRelocTarget::user(FUNCTION_NAMESPACE, target),
+            ),
+            PLT_LIBCALL | ARM64_LIBCALL => {
                 let call = match target {
                     MEMMOVE_LIBCALL => LibCall::Memmove,
                     MEMCPY_LIBCALL => LibCall::Memcpy,
                     _ => return None,
                 };
-                (Reloc::X86CallPLTRel4, ModuleRelocTarget::LibCall(call))
+                let kind = if packet_kind == ARM64_LIBCALL {
+                    Reloc::Arm64Call
+                } else {
+                    Reloc::X86CallPLTRel4
+                };
+                (kind, ModuleRelocTarget::LibCall(call))
             }
             _ => return None,
         };
@@ -2025,7 +2060,11 @@ fn decode_relocatable(packet: &[u8]) -> Option<MachineCode> {
             offset,
             kind,
             name,
-            addend: -REL32_BYTES,
+            addend: if kind == Reloc::Arm64Call {
+                0
+            } else {
+                -REL32_BYTES
+            },
         });
     }
     Some(MachineCode {
@@ -2064,10 +2103,9 @@ fn encode_integer_block(
         {
             return None;
         }
-        return Some(MachineCode {
-            bytes: encode(&aarch64_leaf_words(function)?)?,
-            relocations: Vec::new(),
-        });
+        let (primary, fallback) = aarch64_program(function, declarations)?;
+        let emit = |program: IntegerProgram| decode_relocatable(&encode(&program.words)?);
+        return emit(primary).or_else(|| fallback.and_then(emit));
     }
     if triple.architecture != Architecture::X86_64
         || triple.operating_system != OperatingSystem::Linux
@@ -2083,6 +2121,7 @@ fn encode_integer_block(
         isa.flags().enable_nan_canonicalization(),
         declarations,
         CallConv::SystemV,
+        false,
     )?;
     let emit = |program: IntegerProgram| {
         if program.relocations {

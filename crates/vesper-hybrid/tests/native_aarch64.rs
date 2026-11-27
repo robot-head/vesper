@@ -31,6 +31,8 @@ const STACK_SLOT: u64 = 30;
 const STACK_LOAD: u64 = 32;
 const STACK_STORE_QWORD: u64 = 36;
 const CALL: u64 = 38;
+const CALL_ARGUMENT: u64 = 39;
+const CALL_VOID: u64 = 40;
 const SIGNED_MUL_HIGH: u64 = 50;
 const UNSIGNED_MUL_HIGH: u64 = 51;
 const ADD_IMMEDIATE: u64 = 52;
@@ -69,6 +71,49 @@ fn aarch64_leaf_encodings_and_operand_validation() {
     assert!(binding::aarch64_integer_leaf(&[2, 2, ADD, 0, 2, CELL_BITS]).is_empty());
     assert!(binding::aarch64_integer_leaf(&[2, 2, ADD, 0, 1, u128::BITS as u64]).is_empty());
     assert!(binding::aarch64_integer_leaf(&[0, 0, CALL, 0, 0, 0]).is_empty());
+}
+
+#[test]
+fn aarch64_call_packet_keeps_void_calls_and_rejects_malformed_arguments() {
+    const BRANCH_AND_LINK: u32 = 0x9400_0000;
+    const ARM64_CALL: u64 = 4;
+    let packet = binding::aarch64_relocatable_block(&[
+        2,
+        0,
+        CALL_ARGUMENT,
+        1,
+        0,
+        0,
+        CALL_ARGUMENT,
+        0,
+        0,
+        0,
+        CALL_VOID,
+        17,
+        2,
+        0,
+    ]);
+    let (length, body) = packet.split_first_chunk::<{ size_of::<u64>() }>().unwrap();
+    let (code, reference) = body.split_at(u64::from_le_bytes(*length) as usize);
+    let (reference, remainder) = reference.as_chunks::<{ size_of::<u64>() }>();
+    assert!(remainder.is_empty());
+    let reference: Vec<_> = reference.iter().copied().map(u64::from_le_bytes).collect();
+    let [offset, ARM64_CALL, 17] = reference.as_slice() else {
+        panic!("unexpected relocation: {reference:?}");
+    };
+    assert_eq!(
+        &code[*offset as usize..][..size_of::<u32>()],
+        &BRANCH_AND_LINK.to_le_bytes(),
+    );
+    assert!(code.ends_with(&RET.to_le_bytes()));
+    for malformed in [
+        &[1, 0, CALL_ARGUMENT, 0, 0, 0][..],
+        &[0, 0, CALL, 17, 1, 0],
+        &[1, 2, CALL_ARGUMENT, 1, 0, 0, CALL, 17, 1, 0],
+        &[1, 2, CALL_ARGUMENT, 0, 0, 0, CALL, 17, 1, 1],
+    ] {
+        assert!(binding::aarch64_relocatable_block(malformed).is_empty());
+    }
 }
 
 #[test]
@@ -657,18 +702,28 @@ fn aarch64_uses_short_immediate_encodings() {
 }
 
 #[test]
-fn aarch64_leaves_reach_elf_and_macho_object_emission() {
+fn aarch64_integer_functions_reach_elf_and_macho_object_emission() {
     const LEAF: &str = "
         fn main(a: u64, b: u64, c: u64, d: u64, e: u64, f: u64, g: u64, h: u64) -> u64 {
             wrapping_add(wrapping_mul(a, h), b ^ c ^ d ^ e ^ f ^ g)
         }
     ";
     const FLOAT: &str = "fn main(x: f64) -> f64 { x + x }";
+    const CALLER: &str = "
+        fn mix(a: u64, b: u64, c: u64, d: u64, e: u64, f: u64, g: u64, h: u64) -> u64 {
+            wrapping_add(wrapping_mul(a, h), b ^ c ^ d ^ e ^ f ^ g)
+        }
+        fn main(a: u64, b: u64, c: u64, d: u64, e: u64, f: u64, g: u64, h: u64) -> u64 {
+            let first = mix(h, g, f, e, d, c, b, a);
+            wrapping_add(mix(a, c, b, d, h, f, g, e), first ^ a)
+        }
+    ";
     const TRIPLES: [(&str, BinaryFormat); 2] = [
         ("aarch64-unknown-linux-gnu", BinaryFormat::Elf),
         ("aarch64-apple-darwin", BinaryFormat::MachO),
     ];
     static SELECTED: AtomicUsize = AtomicUsize::new(0);
+    static NONLEAVES: AtomicUsize = AtomicUsize::new(0);
     let checked = |source| {
         let parsed = parser::parse(source);
         assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
@@ -678,25 +733,38 @@ fn aarch64_leaves_reach_elf_and_macho_object_emission() {
     };
     let leaf = checked(LEAF);
     let float = checked(FLOAT);
+    let caller = checked(CALLER);
     let compile = |checked: &check::Checked, triple| {
-        native::object_with_options(&checked.world, "main", Some(triple), true)
+        native::object_with_options(&checked.world, "main", Some(triple), false)
             .unwrap()
             .0
     };
-    let baselines = TRIPLES.map(|(triple, _)| (compile(&leaf, triple), compile(&float, triple)));
+    let baselines = TRIPLES.map(|(triple, _)| {
+        (
+            compile(&leaf, triple),
+            compile(&float, triple),
+            compile(&caller, triple),
+        )
+    });
     assert!(
         native::machine::install_aarch64_encoder(|words| {
-            let bytes = binding::aarch64_integer_leaf(words);
+            let bytes = binding::aarch64_relocatable_block(words);
             if bytes.is_empty() {
                 None
             } else {
                 SELECTED.fetch_add(1, Relaxed);
+                let (length, body) = bytes.split_first_chunk::<{ size_of::<u64>() }>().unwrap();
+                if body.len() > u64::from_le_bytes(*length) as usize {
+                    NONLEAVES.fetch_add(1, Relaxed);
+                }
                 Some(bytes)
             }
         })
         .is_ok()
     );
-    for ((triple, format), (baseline, float_baseline)) in TRIPLES.into_iter().zip(baselines) {
+    for ((triple, format), (baseline, float_baseline, call_baseline)) in
+        TRIPLES.into_iter().zip(baselines)
+    {
         let bytes = compile(&leaf, triple);
         assert!(
             bytes != baseline,
@@ -715,6 +783,20 @@ fn aarch64_leaves_reach_elf_and_macho_object_emission() {
             .find(|section| section.kind() == SectionKind::Text)
             .unwrap();
         assert!(text.data().unwrap().ends_with(&RET.to_le_bytes()));
+
+        let caller_bytes = compile(&caller, triple);
+        let call_relocations = |bytes: &[u8]| {
+            let file = object::File::parse(bytes).unwrap();
+            file.sections()
+                .filter(|section| section.kind() == SectionKind::Text)
+                .flat_map(|section| section.relocations())
+                .map(|(_, reloc)| (reloc.flags(), reloc.addend()))
+                .collect::<Vec<_>>()
+        };
+        let expected = call_relocations(&call_baseline);
+        assert_eq!(expected.len(), 2, "{triple}");
+        assert_eq!(call_relocations(&caller_bytes), expected, "{triple}");
     }
-    assert_eq!(SELECTED.load(Relaxed), TRIPLES.len());
+    assert_eq!(NONLEAVES.load(Relaxed), TRIPLES.len());
+    assert_eq!(SELECTED.load(Relaxed), 3 * TRIPLES.len());
 }
