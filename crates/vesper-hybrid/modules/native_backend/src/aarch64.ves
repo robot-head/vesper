@@ -29,7 +29,8 @@ use self::scalar::{
     FUNNEL_RIGHT, AND_NOT, OR_NOT, XOR_NOT, ABS, ATOMIC_LOAD, ATOMIC_STORE, ATOMIC_CAS_BYTE,
     ATOMIC_CAS_WORD, ATOMIC_CAS_DWORD, ATOMIC_CAS_QWORD, ATOMIC_SUB, ATOMIC_AND, ATOMIC_NAND,
     ATOMIC_OR, ATOMIC_XOR, ATOMIC_UNSIGNED_MIN, ATOMIC_UNSIGNED_MAX, ATOMIC_SIGNED_MIN,
-    ATOMIC_SIGNED_MAX, FLOAT_ARGUMENT, FLOAT_RETURN, FLOAT_RETURN_LAYOUT, CALL_FLOAT, CALL_FLOAT32
+    ATOMIC_SIGNED_MAX, FLOAT_ARGUMENT, FLOAT_RETURN, FLOAT_RETURN_LAYOUT, CALL_FLOAT, CALL_FLOAT32,
+    FLOAT_PROMOTE, FLOAT_DEMOTE, SIGNED_TO_FLOAT, UNSIGNED_TO_FLOAT, is_float_conversion
 };
 use self::x86_64::{
     BYTE_BITS, WORD_BITS, DWORD_BITS, QWORD_BITS, FLOAT_ORDERED, FLOAT_UNORDERED, FLOAT_EQUAL,
@@ -172,6 +173,10 @@ const FMUL: u32 = 0x1e200800;
 const FDIV: u32 = 0x1e201800;
 const FSQRT: u32 = 0x1e21c000;
 const FCMP: u32 = 0x1e202000;
+const FCVT_TO_DOUBLE: u32 = 0x1e22c000;
+const FCVT_TO_SINGLE: u32 = 0x1e624000;
+const SCVTF: u32 = 0x1e220000;
+const UCVTF: u32 = 0x1e230000;
 const EOR_F32_SIGN: u32 = 0x52010000;
 const EOR_F64_SIGN: u32 = 0xd2410000;
 const MOVN: u32 = 0x92800000;
@@ -789,6 +794,21 @@ fn float_operands(in r: Record) -> Option[u64] {
         } else {
             Option::None
         },
+        FLOAT_PROMOTE => if r.right == DWORD_BITS && r.extra == QWORD_BITS {
+            Option::Some(1)
+        } else {
+            Option::None
+        },
+        FLOAT_DEMOTE => if r.right == QWORD_BITS && r.extra == DWORD_BITS {
+            Option::Some(1)
+        } else {
+            Option::None
+        },
+        SIGNED_TO_FLOAT | UNSIGNED_TO_FLOAT => if scalar_width(r.right) {
+            Option::Some(1)
+        } else {
+            Option::None
+        },
         FLOAT_NEG | FLOAT_ABS | FLOAT_SQRT | BITS_TO_FLOAT | FLOAT_TO_BITS => if r.right == 0 {
             Option::Some(1)
         } else {
@@ -824,7 +844,9 @@ fn operands(in r: Record, returns: u64) -> Option[u64] {
             Option::None
         };
     }
-    if r.op >= FLOAT_CONSTANT && r.op <= FLOAT_COPY_SIGN && !float_call(r.op) {
+    if (r.op >= FLOAT_CONSTANT && r.op <= FLOAT_COPY_SIGN && !float_call(r.op))
+        || is_float_conversion(r.op)
+    {
         return float_operands(in r);
     }
     if is_symbol(r.op) {
@@ -1351,6 +1373,37 @@ fn emit_float_instruction(
     }
 }
 
+fn emit_float_conversion(inout out: ChunkSeq[u8], in r: Record, dest: u32, lhs: u32) {
+    let precision = if r.extra == QWORD_BITS { FP_DOUBLE } else { 0 };
+    let result_width = if r.extra == QWORD_BITS { REG64 } else { 0 };
+    if r.op == FLOAT_PROMOTE || r.op == FLOAT_DEMOTE {
+        let source_width = if r.op == FLOAT_DEMOTE {
+            FP_DOUBLE | REG64
+        } else {
+            0
+        };
+        push32(inout out, FMOV_FROM_GP | source_width | sh(lhs, RN_SHIFT) | FP_LEFT);
+        let op = if r.op == FLOAT_PROMOTE {
+            FCVT_TO_DOUBLE
+        } else {
+            FCVT_TO_SINGLE
+        };
+        push32(inout out, op | sh(FP_LEFT, RN_SHIFT) | FP_LEFT);
+    } else {
+        let signed = r.op == SIGNED_TO_FLOAT;
+        let source_width = if r.right == QWORD_BITS { REG64 } else { 0 };
+        let mut source = lhs;
+        if r.right < DWORD_BITS {
+            let extend = if signed { SBFM } else { UBFM };
+            bitfield(inout out, extend & ~BITFIELD64, SCRATCH, lhs, 0, wrapping_sub(r.right, 1));
+            source = SCRATCH;
+        }
+        let op = if signed { SCVTF } else { UCVTF };
+        push32(inout out, op | source_width | precision | sh(source, RN_SHIFT) | FP_LEFT);
+    }
+    push32(inout out, FMOV_TO_GP | result_width | precision | sh(FP_LEFT, RN_SHIFT) | dest);
+}
+
 fn emit_bit_operation(inout out: ChunkSeq[u8], in r: Record, dest: u32, source: u32) {
     let narrow = r.extra < DWORD_BITS;
     let wide = r.extra == QWORD_BITS;
@@ -1528,6 +1581,8 @@ fn emit_instruction(
 ) {
     if r.op == CONSTANT {
         immediate(inout out, dest, r.left);
+    } else if is_float_conversion(r.op) {
+        emit_float_conversion(inout out, in r, dest, lhs);
     } else if r.op >= FLOAT_ARGUMENT && r.op <= FLOAT_COPY_SIGN {
         emit_float_instruction(inout out, in r, dest, lhs, rhs, third);
     } else if r.op >= LEADING_ZEROS && r.op <= LEADING_SIGN_BITS {
@@ -2276,7 +2331,8 @@ fn encode_pass(
         let r = read_record(in words, index);
         has_float = has_float
             || (r.op >= FLOAT_ARGUMENT && r.op <= FLOAT_COPY_SIGN)
-            || r.op == CALL_FLOAT32;
+            || r.op == CALL_FLOAT32
+            || is_float_conversion(r.op);
         if register_home && r.op == BLOCK_RETURN && r.left != TRAP_VALUE {
             normal_returns = wrapping_add(normal_returns, 1);
         }

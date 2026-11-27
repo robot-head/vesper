@@ -73,6 +73,7 @@ const ADD_CARRY: u64 = 77;
 const SUB_BORROW: u64 = 78;
 const FLOAT_ARGUMENT: u64 = 79;
 const FLOAT_ADD: u64 = 81;
+const FLOAT_COMPARE32: u64 = 88;
 const FLOAT_COMPARE64: u64 = 89;
 const BITS_TO_FLOAT: u64 = 93;
 const FLOAT_TO_BITS: u64 = 94;
@@ -105,6 +106,10 @@ const ATOMIC_NAND: u64 = 127;
 const ATOMIC_UNSIGNED_MIN: u64 = 130;
 const ATOMIC_SIGNED_MAX: u64 = 133;
 const CALL_FLOAT32: u64 = 134;
+const FLOAT_PROMOTE: u64 = 135;
+const FLOAT_DEMOTE: u64 = 136;
+const SIGNED_TO_FLOAT: u64 = 137;
+const UNSIGNED_TO_FLOAT: u64 = 138;
 const EQUAL: u64 = 0;
 const NOT_EQUAL: u64 = 1;
 const SIGNED_LESS: u64 = 2;
@@ -157,6 +162,67 @@ fn aarch64_internal_floats_cross_the_register_bank_only_for_arithmetic() {
     );
     assert!(binding::aarch64_integer_leaf(&[1, 1, BITS_TO_FLOAT, 0, 0, CELL_BITS]).is_empty());
     assert!(binding::aarch64_integer_leaf(&[2, 2, FLOAT_ADD, 0, 1, CELL_BITS]).is_empty());
+}
+
+#[test]
+fn aarch64_scalar_float_conversions_use_the_declared_widths() {
+    const SXTB_W16_W0: u32 = 0x1300_1c10;
+    const SCVTF_D16_W16: u32 = 0x1e62_0210;
+    const UCVTF_S16_X0: u32 = 0x9e23_0010;
+    const FMOV_W0_S0: u32 = 0x1e26_0000;
+    const FMOV_X0_D0: u32 = 0x9e66_0000;
+    const FMOV_S16_W0: u32 = 0x1e27_0010;
+    const FMOV_D16_X0: u32 = 0x9e67_0010;
+    const FCVT_D16_S16: u32 = 0x1e22_c210;
+    const FCVT_S16_D16: u32 = 0x1e62_4210;
+    const FMOV_W0_S16: u32 = 0x1e26_0200;
+    const FMOV_X0_D16: u32 = 0x9e66_0200;
+    const FMOV_D0_X0: u32 = 0x9e67_0000;
+
+    #[rustfmt::skip]
+    let cases: &[(&[u64], &[u32])] = &[
+        (
+            &[1, 2, SIGNED_TO_FLOAT, 0, BYTE_BITS, CELL_BITS, FLOAT_TO_BITS, 1, 0, CELL_BITS],
+            &[SXTB_W16_W0, SCVTF_D16_W16, FMOV_X0_D16, RET],
+        ),
+        (
+            &[1, 1, UNSIGNED_TO_FLOAT, 0, CELL_BITS, DWORD_BITS, FLOAT_RETURN, 0, 0, 0],
+            &[UCVTF_S16_X0, FMOV_W0_S16, FMOV_D0_X0, RET],
+        ),
+        (
+            &[0, 1, FLOAT_ARGUMENT, 0, 0, DWORD_BITS,
+              FLOAT_PROMOTE, 0, DWORD_BITS, CELL_BITS, FLOAT_RETURN, 0, 0, 0],
+            &[FMOV_W0_S0, FMOV_S16_W0, FCVT_D16_S16, FMOV_X0_D16, FMOV_D0_X0, RET],
+        ),
+        (
+            &[0, 1, FLOAT_ARGUMENT, 0, 0, CELL_BITS,
+              FLOAT_DEMOTE, 0, CELL_BITS, DWORD_BITS, FLOAT_RETURN, 0, 0, 0],
+            &[FMOV_X0_D0, FMOV_D16_X0, FCVT_S16_D16, FMOV_W0_S16, FMOV_D0_X0, RET],
+        ),
+    ];
+    for &(tape, expected) in cases {
+        let expected: Vec<_> = expected
+            .iter()
+            .copied()
+            .flat_map(u32::to_le_bytes)
+            .collect();
+        assert_eq!(binding::aarch64_integer_leaf(tape), expected);
+    }
+    assert!(
+        binding::aarch64_integer_leaf(&[
+            1,
+            1,
+            FLOAT_PROMOTE,
+            0,
+            DWORD_BITS,
+            CELL_BITS,
+            FLOAT_RETURN,
+            0,
+            0,
+            0
+        ])
+        .is_empty()
+    );
 }
 
 #[test]
@@ -2176,7 +2242,10 @@ fn aarch64_scalar_functions_reach_elf_and_macho_object_emission() {
             wrapping_add(wrapping_mul(a, h), b ^ c ^ d ^ e ^ f ^ g)
         }
     ";
-    const FLOAT: &str = "fn main(x: f64) -> f64 { x + x }";
+    const FLOAT: &str = "
+        fn detfloat(x: f64) -> f64 eff [DetFloat] { x }
+        fn main(x: f64) -> f64 { widen_f64(nearest_f32(x)) + x }
+    ";
     const TEXT: &str = r#"fn main() -> String { "vesper-aarch64-got" }"#;
     const CALLER: &str = "
         fn mix(a: u64, b: u64, c: u64, d: u64, e: u64, f: u64, g: u64, h: u64) -> u64 {
@@ -2191,6 +2260,8 @@ fn aarch64_scalar_functions_reach_elf_and_macho_object_emission() {
         ("aarch64-unknown-linux-gnu", BinaryFormat::Elf),
         ("aarch64-apple-darwin", BinaryFormat::MachO),
     ];
+    const TAPE_HEADER_WORDS: usize = 2;
+    const TAPE_RECORD_WORDS: usize = 4;
     static SELECTED: AtomicUsize = AtomicUsize::new(0);
     static RELOCATED: AtomicUsize = AtomicUsize::new(0);
     let checked = |source| {
@@ -2219,6 +2290,12 @@ fn aarch64_scalar_functions_reach_elf_and_macho_object_emission() {
     });
     assert!(
         native::machine::install_aarch64_encoder(|words| {
+            let records = words[TAPE_HEADER_WORDS..]
+                .as_chunks::<TAPE_RECORD_WORDS>()
+                .0;
+            if records.iter().any(|record| record[0] == FLOAT_DEMOTE) {
+                assert!(records.iter().any(|record| record[0] == FLOAT_COMPARE32));
+            }
             let bytes = binding::aarch64_relocatable_block(words);
             if bytes.is_empty() {
                 None

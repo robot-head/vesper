@@ -154,6 +154,10 @@ enum IntegerOp {
     AtomicSignedMin = 132,
     AtomicSignedMax = 133,
     CallFloat32 = 134,
+    FloatPromote = 135,
+    FloatDemote = 136,
+    SignedToFloat = 137,
+    UnsignedToFloat = 138,
 }
 
 fn integer_bit_op(op: Opcode) -> Option<IntegerOp> {
@@ -1293,6 +1297,25 @@ impl IntegerBlocks<'_> {
                 };
                 (op, [input(arg)?, 0, float_width(output)?])
             }
+            InstructionData::Unary { opcode, arg } if self.aarch64 => {
+                let source = ty(arg);
+                let (op, source_width) = match (opcode, source, output) {
+                    (Opcode::Fpromote, types::F32, types::F64) => {
+                        (IntegerOp::FloatPromote, float_width(source)?)
+                    }
+                    (Opcode::Fdemote, types::F64, types::F32) => {
+                        (IntegerOp::FloatDemote, float_width(source)?)
+                    }
+                    (Opcode::FcvtFromSint, _, _) => {
+                        (IntegerOp::SignedToFloat, integer_width(source)?)
+                    }
+                    (Opcode::FcvtFromUint, _, _) => {
+                        (IntegerOp::UnsignedToFloat, integer_width(source)?)
+                    }
+                    _ => return None,
+                };
+                (op, [input(arg)?, source_width, float_width(output)?])
+            }
             InstructionData::FloatCompare {
                 opcode: Opcode::Fcmp,
                 cond,
@@ -1374,6 +1397,8 @@ impl IntegerBlocks<'_> {
                     | IntegerOp::FloatMul
                     | IntegerOp::FloatDiv
                     | IntegerOp::FloatSqrt
+                    | IntegerOp::FloatPromote
+                    | IntegerOp::FloatDemote
             )
         {
             let (compare, bits) = match output {
@@ -2361,7 +2386,7 @@ pub fn integer_block_words(function: &Function) -> Option<Vec<u64>> {
 
 /// Packs an AAPCS64 function with ordinary register scalar parameters.
 pub fn aarch64_leaf_words(function: &Function) -> Option<Vec<u64>> {
-    let (program, _) = aarch64_program(function, None, false)?;
+    let (program, _) = aarch64_program(function, None, false, false)?;
     (!program.relocations).then_some(program.words)
 }
 
@@ -2369,6 +2394,7 @@ fn aarch64_program(
     function: &Function,
     declarations: Option<&ModuleDeclarations>,
     allow_hardware_faults: bool,
+    canonicalize_nans: bool,
 ) -> Option<(IntegerProgram, Option<IntegerProgram>)> {
     let signature = &function.signature;
     if !matches!(
@@ -2380,7 +2406,7 @@ fn aarch64_program(
     integer_program(
         function,
         allow_hardware_faults,
-        false,
+        canonicalize_nans,
         declarations,
         signature.call_conv,
         true,
@@ -2603,7 +2629,12 @@ fn encode_integer_block(
             return None;
         }
         // Hosted objects use CPU memory faults directly, with no trap table.
-        let (primary, fallback) = aarch64_program(function, declarations, true)?;
+        let (primary, fallback) = aarch64_program(
+            function,
+            declarations,
+            true,
+            isa.flags().enable_nan_canonicalization(),
+        )?;
         let emit = |program: IntegerProgram| decode_relocatable(&encode(&program.words)?);
         return emit(primary).or_else(|| fallback.and_then(emit));
     }

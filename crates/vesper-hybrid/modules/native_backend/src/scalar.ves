@@ -148,6 +148,10 @@ pub const ATOMIC_UNSIGNED_MAX: u64 = 131;
 pub const ATOMIC_SIGNED_MIN: u64 = 132;
 pub const ATOMIC_SIGNED_MAX: u64 = 133;
 pub const CALL_FLOAT32: u64 = 134;
+pub const FLOAT_PROMOTE: u64 = 135;
+pub const FLOAT_DEMOTE: u64 = 136;
+pub const SIGNED_TO_FLOAT: u64 = 137;
+pub const UNSIGNED_TO_FLOAT: u64 = 138;
 const XMM_ARGUMENTS: u64 = 8;
 pub const CHECKED_ARITHMETIC_RECORDS: u64 = 2;
 
@@ -764,6 +768,10 @@ pub fn is_float_compare(op: u64) -> bool {
     op == FLOAT_COMPARE32 || op == FLOAT_COMPARE64
 }
 
+pub fn is_float_conversion(op: u64) -> bool {
+    op >= FLOAT_PROMOTE && op <= UNSIGNED_TO_FLOAT
+}
+
 fn is_float_result(op: u64) -> bool {
     (op >= FLOAT_ARGUMENT && op <= FLOAT_ABS)
         || op == FLOAT_LOAD
@@ -773,6 +781,7 @@ fn is_float_result(op: u64) -> bool {
         || op == CALL_FLOAT32
         || op == FLOAT_STACK_LOAD
         || op == FLOAT_COPY_SIGN
+        || is_float_conversion(op)
 }
 
 pub fn float_value(in words: Slice[u64], arguments: u64, value: u64) -> bool {
@@ -785,6 +794,8 @@ fn float_left(op: u64) -> bool {
         || op == FLOAT_STACK_STORE32
         || op == FLOAT_STACK_STORE64
         || op == FLOAT_COPY_SIGN
+        || op == FLOAT_PROMOTE
+        || op == FLOAT_DEMOTE
 }
 
 fn float_right(op: u64) -> bool {
