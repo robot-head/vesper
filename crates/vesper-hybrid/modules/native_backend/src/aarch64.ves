@@ -39,7 +39,8 @@ use self::scalar::{
     VECTOR_UNSIGNED_SAT_ADD, VECTOR_SIGNED_SAT_SUB, VECTOR_UNSIGNED_SAT_SUB, VECTOR_ROUNDED_AVERAGE,
     VECTOR_PROMOTE_LOW, VECTOR_DEMOTE, VECTOR_PAIRWISE_ADD, VECTOR_SWIZZLE, VECTOR_INSERT,
     VECTOR_EXTRACT, VECTOR_ANY_TRUE, VECTOR_ALL_TRUE, VECTOR_HIGH_BITS, VECTOR_LANE_INDEX_SHIFT,
-    VECTOR_LANE_WIDTH_MASK, is_vector_binary, uses_vector_left, vector_value
+    VECTOR_LANE_WIDTH_MASK, is_vector_binary, uses_vector_left, vector_value, TAIL_CALL,
+    AARCH64_TAIL_RESERVED_GP
 };
 use self::x86_64::{
     BYTE_BITS, WORD_BITS, DWORD_BITS, QWORD_BITS, FLOAT_ORDERED, FLOAT_UNORDERED, FLOAT_EQUAL,
@@ -1056,6 +1057,17 @@ fn is_atomic_update(op: u64) -> bool {
 }
 
 fn operands(in r: Record, returns: u64) -> Option[u64] {
+    if r.op == TAIL_CALL {
+        return if r.extra <= FP_ARGUMENT_REGISTERS
+            && r.right >= wrapping_add(r.extra, AARCH64_TAIL_RESERVED_GP)
+            && wrapping_sub(r.right, r.extra) <= ARGUMENT_REGISTERS
+            && r.left <= DISP32_MASK
+        {
+            Option::Some(0)
+        } else {
+            Option::None
+        };
+    }
     if r.op >= VECTOR_CONSTANT && r.op <= VECTOR_HIGH_BITS {
         return match r.op {
             VECTOR_CONSTANT => if r.extra == 0 {
@@ -2324,6 +2336,7 @@ fn no_result(op: u64) -> bool {
         || op == FENCE
         || op == ATOMIC_STORE
         || op == VECTOR_STORE
+        || op == TAIL_CALL
 }
 
 fn stack_adjust(opcode: u32, adjustment: u32) -> u32 {
@@ -2362,6 +2375,18 @@ fn emit_return(
             rrr(inout output, ORR_REG, SECOND_RESULT, ZERO, high);
         }
     }
+    emit_epilogue(inout output, adjustment, spill_mode, link_slot, in callee, inout restores);
+    push32(inout output, RETURN);
+}
+
+fn emit_epilogue(
+    inout output: ChunkSeq[u8],
+    adjustment: u32,
+    spill_mode: bool,
+    link_slot: u64,
+    in callee: SavedRegisters,
+    inout restores: ChunkSeq[u64]
+) {
     if link_slot != NO_VALUE {
         memory(inout output, true, QWORD_BITS, SP, LINK_REGISTER, link_slot);
     }
@@ -2372,7 +2397,6 @@ fn emit_return(
     if spill_mode || adjustment != 0 {
         push32(inout output, stack_adjust(ADD_IMM, adjustment));
     }
-    push32(inout output, RETURN);
 }
 
 fn call_frame_bytes() -> u64 {
@@ -2415,6 +2439,83 @@ fn frame_registers(inout out: ChunkSeq[u8], in saved: SavedRegisters, load: bool
             remaining = remaining & ~sh(1, next);
         } else {
             memory(inout out, load, QWORD_BITS, SP, first, offset);
+        }
+    }
+}
+
+fn emit_tail_arguments(
+    inout out: ChunkSeq[u8],
+    in words: Slice[u64],
+    in locations: ChunkSeq[u32],
+    in record: Record,
+    index: u64,
+    frame_bytes: u64
+) -> bool {
+    let start = wrapping_sub(index, record.right);
+    let gp = wrapping_sub(record.right, record.extra);
+    let mut sources = ChunkSeq::with_capacity[u32](gp);
+    for target in 0..gp {
+        let arg = read_record(in words, wrapping_add(start, target)).left;
+        let source = location(in locations, arg);
+        if arg != NO_VALUE && source == UNASSIGNED {
+            return false;
+        }
+        sources.push(
+            if source == wrapping_u32(target) {
+                UNASSIGNED
+            } else {
+                source
+            }
+        );
+    }
+    // Float arguments live in GP cells until they reach the call boundary.
+    for arg in 0..record.extra {
+        let slot = wrapping_add(wrapping_add(start, gp), arg);
+        let source = location(in locations, read_record(in words, slot).left);
+        if source == UNASSIGNED {
+            return false;
+        }
+        let reg = materialize(inout out, source, SCRATCH, frame_bytes);
+        push32(inout out, FMOV_FROM_GP | FP_DOUBLE | REG64 | sh(reg, RN_SHIFT) | wrapping_u32(arg));
+    }
+    loop {
+        let mut pending = NO_VALUE;
+        let mut ready = NO_VALUE;
+        for target in AARCH64_TAIL_RESERVED_GP..gp {
+            if sources.try_get(target).unwrap_or(UNASSIGNED) == UNASSIGNED {
+                continue;
+            }
+            pending = target;
+            let mut needed = false;
+            for other in AARCH64_TAIL_RESERVED_GP..gp {
+                needed = needed
+                    || sources.try_get(other).unwrap_or(UNASSIGNED) == wrapping_u32(target);
+            }
+            if !needed {
+                ready = target;
+                break;
+            }
+        }
+        if pending == NO_VALUE {
+            return true;
+        }
+        if ready != NO_VALUE {
+            let target = wrapping_u32(ready);
+            let source = sources.try_get(ready).unwrap_or(UNASSIGNED);
+            let reg = materialize(inout out, source, target, frame_bytes);
+            if reg != target {
+                rrr(inout out, ORR_REG, target, ZERO, reg);
+            }
+            let _ = sources.try_set(ready, UNASSIGNED);
+        } else {
+            // Preserve one cyclic source in the register reserved for veneers.
+            let source = wrapping_u32(pending);
+            rrr(inout out, ORR_REG, SECOND_SCRATCH, ZERO, source);
+            for target in AARCH64_TAIL_RESERVED_GP..gp {
+                if sources.try_get(target).unwrap_or(UNASSIGNED) == source {
+                    let _ = sources.try_set(target, SECOND_SCRATCH);
+                }
+            }
         }
     }
 }
@@ -2726,6 +2827,10 @@ fn encode_pass(
         return out;
     }
     let terminal_trap = !labeled && count != 0 && tail.op == TRAP;
+    let terminal_call = !labeled && count != 0 && tail.op == TAIL_CALL;
+    if terminal_call && (result != NO_VALUE || !allow_relocations) {
+        return out;
+    }
     if terminal_trap
         && (result != NO_VALUE || tail.left > PAIRED_RESULTS || tail.right != 0 || tail.extra != 0)
     {
@@ -2849,6 +2954,8 @@ fn encode_pass(
             || ((r.op == FLOAT_ARGUMENT || incoming_stack_argument(r.op))
                 && (index < arguments_start || index >= arguments_end))
             || (r.op == TRAP && (!terminal_trap || index != last_index))
+            || (r.op == TAIL_CALL && (!terminal_call || index != last_index))
+            || (terminal_call && (r.op == BRANCH_ZERO || r.op == EARLY_RETURN))
             || (is_symbol(r.op) && !allow_relocations)
         {
             return out;
@@ -2885,9 +2992,18 @@ fn encode_pass(
         }
         let calls = is_call(r.op);
         let indirect = calls && indirect_call(r.extra);
-        if calls {
+        if calls || r.op == TAIL_CALL {
             if (!indirect && !allow_relocations) || r.right > index {
                 return out;
+            }
+            if r.op == TAIL_CALL {
+                let start = wrapping_sub(index, r.right);
+                for reserved in 0..AARCH64_TAIL_RESERVED_GP {
+                    let argument = read_record(in words, wrapping_add(start, reserved));
+                    if argument.op != CALL_ARGUMENT || argument.left != NO_VALUE {
+                        return out;
+                    }
+                }
             }
             if indirect
                 && (r.left >= wrapping_sub(value, r.right) || float_value(in words, args, r.left))
@@ -3249,6 +3365,18 @@ fn encode_pass(
         }
         if r.op == SPECTRE_BARRIER {
             push32(inout out, CSDB);
+            locations.push(UNASSIGNED);
+            continue;
+        }
+        if r.op == TAIL_CALL {
+            if !emit_tail_arguments(inout out, in words, in locations, in r, index, frame_bytes) {
+                return ChunkSeq::new[u8]();
+            }
+            emit_epilogue(inout out, adjustment, spill_mode, link_slot, in callee, inout restores);
+            relocations.push(out.len());
+            relocations.push(ARM64_CALL);
+            relocations.push(r.left);
+            push32(inout out, JUMP);
             locations.push(UNASSIGNED);
             continue;
         }
@@ -3839,7 +3967,7 @@ fn encode_pass(
         }
     } else if terminal_trap {
         push32(inout out, TRAP_INSTRUCTION);
-    } else {
+    } else if !terminal_call {
         let low = materialize(inout out, location(in locations, result), SPILL_LEFT, frame_bytes);
         let high = materialize(inout out, location(in locations, second), SPILL_RIGHT, frame_bytes);
         emit_return(

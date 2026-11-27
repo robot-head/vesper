@@ -200,6 +200,7 @@ enum IntegerOp {
     VectorAnyTrue = 178,
     VectorAllTrue = 179,
     VectorHighBits = 180,
+    TailCall = 181,
 }
 
 fn integer_bit_op(op: Opcode) -> Option<IntegerOp> {
@@ -258,6 +259,7 @@ const NO_VALUE: u64 = u64::MAX;
 const TRAP_VALUE: u64 = NO_VALUE - 1;
 const GP_REGISTER_ARGUMENTS: usize = 6;
 const AARCH64_GP_ARGUMENTS: usize = 8;
+const AARCH64_TAIL_RESERVED_GP: usize = 2;
 const XMM_REGISTER_ARGUMENTS: usize = 8;
 const AARCH64_FP_ARGUMENTS: usize = 8;
 const AARCH64_CALL_FLOAT_BITS: u32 = 4;
@@ -389,7 +391,11 @@ struct Aarch64Arguments {
 fn aarch64_arguments(params: &[AbiParam], convention: CallConv) -> Option<Aarch64Arguments> {
     let mut args = Aarch64Arguments {
         locations: Vec::with_capacity(params.len()),
-        gp: 0,
+        gp: if convention == CallConv::Tail {
+            AARCH64_TAIL_RESERVED_GP
+        } else {
+            0
+        },
         fp: 0,
     };
     let mut stack: usize = 0;
@@ -403,7 +409,7 @@ fn aarch64_arguments(params: &[AbiParam], convention: CallConv) -> Option<Aarch6
         }
         let register = if wide {
             // AAPCS64 aligns pairs to an even register. Apple packs them.
-            let first = if convention == CallConv::SystemV {
+            let first = if convention != CallConv::AppleAarch64 {
                 args.gp.next_multiple_of(WIDE_INTEGER_CELLS)
             } else {
                 args.gp
@@ -872,6 +878,34 @@ impl IntegerBlocks<'_> {
             }
             _ => return None,
         };
+        if dfg.insts[inst].opcode() == Opcode::ReturnCall {
+            if !self.aarch64
+                || signature.call_conv != CallConv::Tail
+                || signature.returns != self.function.signature.returns
+                || signature.params.len() != dfg.inst_args(inst).len()
+                || target > u64::from(u32::MAX)
+            {
+                return None;
+            }
+            let layout = aarch64_arguments(&signature.params, signature.call_conv)?;
+            if layout.locations.iter().any(|arg| {
+                matches!(
+                    arg,
+                    Aarch64Argument::Stack(_) | Aarch64Argument::StackPair(_)
+                )
+            }) {
+                return None;
+            }
+            let [count, floats] = self.aarch64_call_arguments(
+                dfg.inst_args(inst),
+                &signature.params,
+                values,
+                &layout,
+            )?;
+            self.relocations = true;
+            self.append(IntegerOp::TailCall, [target, count, floats]);
+            return Some(());
+        }
         self.call(
             inst,
             signature,
@@ -891,6 +925,7 @@ impl IntegerBlocks<'_> {
     ) -> Option<()> {
         let dfg = &self.function.dfg;
         if signature.call_conv != self.function.signature.call_conv
+            || signature.call_conv == CallConv::Tail
             || signature.params.len() != args.len()
         {
             return None;
@@ -3226,7 +3261,7 @@ fn aarch64_program(
     let signature = &function.signature;
     if !matches!(
         signature.call_conv,
-        CallConv::SystemV | CallConv::AppleAarch64
+        CallConv::SystemV | CallConv::AppleAarch64 | CallConv::Tail
     ) {
         return None;
     }
@@ -3257,8 +3292,23 @@ fn integer_program(
     if signature.call_conv != call_conv || !function.dynamic_stack_slots.is_empty() {
         return None;
     }
+    let tail = call_conv == CallConv::Tail;
+    if tail && !aarch64 {
+        return None;
+    }
     let aarch64_entry = if aarch64 {
-        Some(aarch64_arguments(&signature.params, call_conv)?)
+        let layout = aarch64_arguments(&signature.params, call_conv)?;
+        if tail
+            && layout.locations.iter().any(|arg| {
+                matches!(
+                    arg,
+                    Aarch64Argument::Stack(_) | Aarch64Argument::StackPair(_)
+                )
+            })
+        {
+            return None;
+        }
+        Some(layout)
     } else {
         None
     };
@@ -3274,6 +3324,9 @@ fn integer_program(
         integer_return_cells(&signature.returns)?
     };
     let block = function.layout.blocks().next()?;
+    if tail && function.layout.blocks().nth(1).is_some() {
+        return None;
+    }
 
     let mut blocks = IntegerBlocks {
         function,
@@ -3301,7 +3354,27 @@ fn integer_program(
     }
     blocks.words[ARGUMENT_COUNT] = arity as u64;
     let prefix = blocks.words.len();
-    let values = entry_values(&mut blocks, block)?;
+    let mut values = entry_values(&mut blocks, block)?;
+    if tail {
+        let terminator = blocks.emit_block(block, &mut values)?;
+        let InstructionData::Call {
+            opcode: Opcode::ReturnCall,
+            func_ref,
+            ..
+        } = function.dfg.insts[terminator]
+        else {
+            return None;
+        };
+        blocks.direct_call(terminator, &function.dfg.ext_funcs[func_ref], &mut values)?;
+        blocks.words[RETURN_VALUE] = NO_VALUE;
+        return Some((
+            IntegerProgram {
+                words: blocks.words,
+                relocations: true,
+            },
+            None,
+        ));
+    }
     match blocks.path_exit(block, values, SecondaryMap::new()) {
         Some(PathExit::Return(low, high)) => {
             blocks.words[RETURN_VALUE] = low;
@@ -3469,7 +3542,8 @@ fn encode_integer_block(
     {
         const AARCH64_ENTRY_EXIT_FLAGS: [&str; 2] = ["use_bti", "sign_return_address"];
         let encode = AARCH64_ENCODER.get()?;
-        if function.signature.call_conv != isa.default_call_conv()
+        if (function.signature.call_conv != isa.default_call_conv()
+            && function.signature.call_conv != CallConv::Tail)
             || isa.flags().enable_pinned_reg()
             || isa.isa_flags().iter().any(|flag| {
                 AARCH64_ENTRY_EXIT_FLAGS.contains(&flag.name) && flag.as_bool() == Some(true)

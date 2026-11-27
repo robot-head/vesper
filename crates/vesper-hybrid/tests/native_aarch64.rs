@@ -126,6 +126,7 @@ const VECTOR_STORE: u64 = 161;
 const VECTOR_SIGNED_SAT_ADD: u64 = 167;
 const VECTOR_EXTRACT: u64 = 177;
 const VECTOR_HIGH_BITS: u64 = 180;
+const TAIL_CALL: u64 = 181;
 const CALL_STACK_COUNT_SHIFT: u32 = 4;
 const INDIRECT_CALL: u64 = 1 << (u64::BITS - 1);
 const EQUAL: u64 = 0;
@@ -267,6 +268,45 @@ fn aarch64_simd_extracts_lanes_and_packs_sign_bits() {
         code.iter()
             .any(|word| word & !REGISTER_FIELDS == ADDV_WORD_LANES)
     );
+}
+
+#[test]
+fn aarch64_direct_tail_call_shuffles_arguments_and_branches_without_linking() {
+    const TARGET: u64 = 22;
+    const ARM64_CALL: u64 = 4;
+    const MOV_X17_X3: u32 = 0xaa03_03f1;
+    const MOV_X3_X2: u32 = 0xaa02_03e3;
+    const MOV_X2_X17: u32 = 0xaa11_03e2;
+    const B: u32 = 0x1400_0000;
+    #[rustfmt::skip]
+    let packet = [
+        4, NO_VALUE,
+        CALL_ARGUMENT, NO_VALUE, 0, 0,
+        CALL_ARGUMENT, NO_VALUE, 0, 0,
+        CALL_ARGUMENT, 3, 0, 0,
+        CALL_ARGUMENT, 2, 0, 0,
+        TAIL_CALL, TARGET, 4, 0,
+    ];
+    let encoded = binding::aarch64_relocatable_block(&packet);
+    let (length, payload) = encoded.split_first_chunk::<{ size_of::<u64>() }>().unwrap();
+    let (bytes, relocations) = payload.split_at(u64::from_le_bytes(*length) as usize);
+    let instructions = [MOV_X17_X3, MOV_X3_X2, MOV_X2_X17, B];
+    let expected: Vec<_> = instructions
+        .into_iter()
+        .flat_map(u32::to_le_bytes)
+        .collect();
+    assert_eq!(bytes, expected);
+    let branch_offset = (instructions.len() - 1) * size_of::<u32>();
+    let expected: Vec<_> = [branch_offset as u64, ARM64_CALL, TARGET]
+        .into_iter()
+        .flat_map(u64::to_le_bytes)
+        .collect();
+    assert_eq!(relocations, expected);
+    assert!(binding::aarch64_integer_leaf(&packet).is_empty());
+    let mut invalid = packet;
+    const FIRST_TAIL_ARGUMENT: usize = 3;
+    invalid[FIRST_TAIL_ARGUMENT] = 0;
+    assert!(binding::aarch64_relocatable_block(&invalid).is_empty());
 }
 
 #[test]
