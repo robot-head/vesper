@@ -555,3 +555,48 @@ Next (6b and later): the other per-graph plans `ir_graph_at` makes before
 it dispatches instructions (split sources, homes, early binds, placed
 writes). After those, the emission skeleton with Vesper driving each graph,
 then the JIT and object driver steps (G3).
+
+## Parts 6b and 6c: direct calls and unoptimized bodies (#2094)
+
+The `body` hook (`codegen_swap::body`) lets @vesper/codegen-scalar-emit
+emit a whole plain function. Part 6b (#2253) adds direct calls. For each
+`Op::Call`, the walk passes the `FuncId` it would call with a single
+`call` instruction (`Codegen::plain_call`), or `NO_CALLEE`, which makes
+the hook decline the body.
+
+Part 6c opens the hook to unoptimized builds, which are the largest group
+the frame gate turned away. Over half the corpus, in both modes:
+
+| Gate reason | Functions |
+|---|---|
+| unoptimized | 217 |
+| struct result through a result pointer | about 120 |
+| failure record with capabilities | 62 |
+| generic instance | 36 |
+| small register results | about 30 |
+
+On that path `ir_graph_at` keeps no local in a register. The emitter
+follows it:
+
+- Every local, parameters included, gets its value stored to a fresh,
+  zeroed one-word stack slot right after its variable is declared. The
+  slot's address goes in a variable.
+- A read loads through that address.
+- A bind stores once, and an assignment stores twice, the second time
+  after `coerce` to the local's kind (`def_local`, then `store`). Each
+  local's kind is now in the plan, after its entry.
+- A graph of at most `FULL_REFRESH_VALUES` (256) values reads every value
+  from its register before each instruction and each terminator, not just
+  the operands.
+
+crates/vesper-codegen-swap-test/tests/self_host_native_walk_body.rs, full
+corpus (`CODEGEN_SCALAR_STEP=1`):
+
+| Check | Result |
+|---|---|
+| CLIF, objects and JIT runs | 0 differences over 952 functions (306 worlds, both modes, 82 runs) |
+| Functions emitted from Vesper | 249, up from 123; 71 of them make 101 direct calls |
+
+**Rust lines deleted:** 0. Next is 6d, struct results through a result
+pointer (1,350 functions in the port libraries), then failure records
+(1,215), pointer locals (509) and generics.

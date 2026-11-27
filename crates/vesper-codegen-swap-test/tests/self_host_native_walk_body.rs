@@ -17,8 +17,9 @@
 //! The glue here ([`body`]) only joins them: it plans the lent program
 //! once, looks the function up by name and passes its words with the
 //! optimizer flag, the status flag and the parameter variables the entry
-//! block bound. The Rust walk asks only for a plain frame (the optimize
-//! path), so optimize off is compared too but emits nothing from Vesper.
+//! block bound. The Rust walk asks only for a plain frame, and compares
+//! both optimizer settings: since part 6c the unoptimized path, which
+//! keeps every local in a stack slot, is emitted from Vesper too.
 //! `CODEGEN_SCALAR_STEP=n` compares every n-th corpus world (default 4).
 #[path = "../../../tests/common/check_harness.rs"]
 mod check_harness;

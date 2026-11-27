@@ -18,10 +18,12 @@
 //
 // The Rust side asks only for a function whose frame is plain (no trace,
 // Fail record, caller slot or result buffer, no `inout` or function
-// parameters, the optimize path, not `@fip`), so
-// such a function's locals are all kept in registers
-// (`native::register_locals`: with no calls but pure ones, every scalar
-// local is) and nothing but the walk and its direct calls emits code.
+// parameters, not `@fip`), so nothing but the walk and its direct calls
+// emits code. On the optimize path such a function's locals are all kept
+// in registers (`native::register_locals`: with no calls but pure ones,
+// every scalar local is); part 6c adds the unoptimized path, where every
+// local lives in a zeroed stack slot and each instruction first reads
+// every value of a small graph (`FULL_REFRESH_VALUES`).
 
 use @vesper/check-data::util::{add, inc, n32, u64_at};
 use @vesper/check-data::types::{TyKind, default_type};
@@ -524,7 +526,7 @@ impl Gen {
         o.push(f.bc);
         o.push(h.params.len());
         // `ir_graph_at`'s locals, in name order: a parameter has its
-        // variable; every other local gets a zeroed one.
+        // variable; every other local gets a zeroed one. Each has its kind.
         o.push(h.lname.len());
         for k in 0..h.lname.len() {
             let t = n32(u64_at(in h.lty, k));
@@ -538,10 +540,14 @@ impl Gen {
                     entry = add(LOCAL_PARAM, j);
                 }
             }
-            if entry == 0 {
+            // The kind its stores coerce to, on the unoptimized path that
+            // keeps every local in a stack slot.
+            let kind = self.body_kind(t);
+            if entry == 0 || kind == NONE64 {
                 return;
             }
             o.push(entry);
+            o.push(kind);
         }
         // Each value's register.
         o.push(h.vty.len());

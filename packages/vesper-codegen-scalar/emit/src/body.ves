@@ -15,7 +15,8 @@
 //
 // - the block count and the parameter count;
 // - the locals, in name order: a lane code for a local the body declares
-//   and zeroes, `LOCAL_PARAM` plus the index for a parameter;
+//   and zeroes, `LOCAL_PARAM` plus the index for a parameter, then the
+//   narrow kind its stores coerce to;
 // - the values, a lane code each: each gets a zeroed register variable;
 // - each block's parameters (a count, then value indexes);
 // - the lowering order, a block and its seal flag per position;
@@ -32,12 +33,21 @@
 // stands for a `Never` value (0: none) for `return`; a target block and
 // that pair per argument for `jump`; a condition and two blocks for
 // `branch`; nothing for `unreachable`.
+//
+// On the unoptimized path (part 6c) every local lives in a stack slot, as
+// `ir_graph_at` keeps one with no register: right after its variable it
+// gets a zeroed slot that its value is stored to, and an address
+// variable. A read loads through the address, and a definition also
+// stores. A graph of at most `FULL_REFRESH_VALUES` values reads every
+// value from its register before each instruction and terminator, not
+// only the operands.
 
 use @vesper/cranelift::{
     Block, FuncId, Ty, Value, Var, append_block_param, call_arg, call_arg_count, create_block,
     current_block, declare_var, def_var, import_function, inst_result, ins_brif0, ins_call,
-    ins_f32const, ins_f64const, ins_iconst, ins_jump, ins_return, ins_trap, invalid, is_invalid,
-    seal_block, set_srcloc, switch_to_block, trap_user, ty_f32, ty_f64, ty_i64, use_var, value_type
+    create_stack_slot, ins_f32const, ins_f64const, ins_iconst, ins_jump, ins_load, ins_return,
+    ins_stack_addr, ins_store, ins_trap, invalid, is_invalid, module_pointer_type, seal_block,
+    set_srcloc, switch_to_block, trap_user, ty_f32, ty_f64, ty_i64, use_var, value_type
 };
 use super::{BODY_ERROR, DECLINED, HANDLED, coerce, planned};
 
@@ -67,6 +77,16 @@ const ARG_PARAMS: u64 = 3;
 
 // An instruction with no span keeps the location before it.
 const NO_LOCATION: u64 = 18446744073709551615;
+
+// `native::FULL_REFRESH_VALUES`: the most values an unoptimized graph
+// reads before every instruction.
+const FULL_REFRESH_VALUES: u64 = 256;
+
+// A local's stack slot (`Codegen::alloc` of a one-word scalar): one word,
+// word aligned, zeroed by one store at offset 0, with plain memory flags.
+const SLOT_BYTES: u32 = 8;
+const SLOT_ALIGN_SHIFT: u32 = 3;
+const PLAIN: u32 = 0;
 
 // A reader over the request's words.
 struct Words {
@@ -130,10 +150,15 @@ fn zeroed(inout b: Builder, lane: u64) -> u32 eff [Ffi[Cranelift]] {
 struct Body {
     optimize: bool,
     locations: bool,
+    // Every value read before each instruction (the unoptimized path).
+    refresh_all: bool,
     // block index -> its Cranelift block
     blocks: ChunkSeq[u32],
-    // local index -> its variable
+    // local index -> its variable, the kind its stores coerce to, and its
+    // slot's address variable (invalid on the optimize path)
     locals: ChunkSeq[u32],
+    kinds: ChunkSeq[u64],
+    addresses: ChunkSeq[u32],
     // value index -> its register variable, its block parameter (if
     // any), and the Cranelift value the walk last read it as
     registers: ChunkSeq[u32],
@@ -158,6 +183,72 @@ impl Body {
         let ok = self.values.try_set(i, v.id);
     }
 
+    // The reads before an instruction or terminator: every value's when
+    // the graph refreshes all of them, else only its operands' (`ops`).
+    fn read_operands(inout self, inout b: Builder, in ops: ChunkSeq[u64]) eff [Ffi[Cranelift]] {
+        if self.refresh_all {
+            for i in 0..self.registers.len() {
+                self.read(inout b, i);
+            }
+        } else {
+            for k in 0..ops.len() {
+                self.read(inout b, at64(in ops, k));
+            }
+        }
+    }
+
+    // `Codegen::use_var` of local `l`: its variable, then a load through
+    // its slot's address when it has one.
+    fn use_local(inout self, inout b: Builder, l: u64) -> Value eff [Ffi[Cranelift]] {
+        let raw = use_var(inout b, var_at(in self.locals, l));
+        let address = at32(in self.addresses, l);
+        if address == invalid() {
+            return raw;
+        }
+        let pointer = use_var(inout b, Var { id: address });
+        let ty = value_type(inout b, raw);
+        ins_load(inout b, ty, PLAIN, pointer, 0)
+    }
+
+    // `Codegen::def_var` of local `l`: its variable, then a store through
+    // its slot's address when it has one.
+    fn def_local(inout self, inout b: Builder, l: u64, v: Value) eff [Ffi[Cranelift]] {
+        def_var(inout b, var_at(in self.locals, l), v);
+        let address = at32(in self.addresses, l);
+        if address != invalid() {
+            let pointer = use_var(inout b, Var { id: address });
+            ins_store(inout b, PLAIN, v, pointer, 0);
+        }
+    }
+
+    // `Codegen::store` of `v` into local `l`'s slot (after its
+    // assignment): the value coerced to the local's kind, stored again.
+    fn store_local(inout self, inout b: Builder, l: u64, v: Value) eff [Ffi[Cranelift]] {
+        let address = at32(in self.addresses, l);
+        if address != invalid() {
+            let pointer = use_var(inout b, Var { id: address });
+            let value = coerce(inout b, v, at64(in self.kinds, l), self.optimize);
+            ins_store(inout b, PLAIN, value, pointer, 0);
+        }
+    }
+
+    // `ir_graph_at`'s home of a local with no register on the unoptimized
+    // path: its value stored to a fresh zeroed slot (`Codegen::alloc`,
+    // `store`) whose address `set_pointer` keeps in a variable.
+    fn spill(inout self, inout b: Builder, in m: Module, l: u64) eff [Ffi[Cranelift]] {
+        let value = use_var(inout b, var_at(in self.locals, l));
+        let slot = create_stack_slot(inout b, SLOT_BYTES, SLOT_ALIGN_SHIFT);
+        let ptr = ins_stack_addr(inout b, module_pointer_type(in m), slot, 0);
+        let zero = ins_iconst(inout b, ty_i64(), 0);
+        ins_store(inout b, PLAIN, zero, ptr, 0);
+        let stored = coerce(inout b, value, at64(in self.kinds, l), self.optimize);
+        ins_store(inout b, PLAIN, stored, ptr, 0);
+        let pointer_ty = value_type(inout b, ptr);
+        let address = declare_var(inout b, pointer_ty);
+        def_var(inout b, address, ptr);
+        let ok = self.addresses.try_set(l, address.id);
+    }
+
     // One instruction (`ir_graph_at`'s instruction loop): its operands
     // read from their registers, its arm, the `coerce` to its type and the
     // definition of its register. False on a word the plan never writes.
@@ -174,10 +265,9 @@ impl Body {
         let n = w.next();
         let mut ops: ChunkSeq[u64] = ChunkSeq::new[u64]();
         for k in 0..n {
-            let op = w.next();
-            ops.push(op);
-            self.read(inout b, op);
+            ops.push(w.next());
         }
+        self.read_operands(inout b, in ops);
         // `set_location`, after the operands' reads; the arm's own
         // `expr_located` sets and restores the same location.
         if self.locations && location != NO_LOCATION {
@@ -206,20 +296,21 @@ impl Body {
         } else if kind == INST_READ {
             // `expr_at`'s read of a local: `use_var`, then `coerce` to the
             // local's type.
-            let local = var_at(in self.locals, w.next());
+            let local = w.next();
             let read = w.next();
-            let raw = use_var(inout b, local);
+            let raw = self.use_local(inout b, local);
             coerce(inout b, raw, read, self.optimize)
         } else if kind == INST_BIND {
             let local = w.next();
             if local != NO_LOCAL {
-                def_var(inout b, var_at(in self.locals, local), x);
+                self.def_local(inout b, local, x);
             }
             ins_iconst(inout b, ty_i64(), 0)
         } else if kind == INST_WRITE {
             // `ir_temp` of the value, then the assignment: the temporary
-            // read back, the local defined, and the statement's zero.
-            let local = var_at(in self.locals, w.next());
+            // read back, the local defined (and stored to its slot), and
+            // the statement's zero.
+            let local = w.next();
             let temp = w.next();
             let stated = w.next();
             let lane = value_type(inout b, x);
@@ -227,7 +318,8 @@ impl Body {
             def_var(inout b, t, x);
             let back = use_var(inout b, t);
             let value = coerce(inout b, back, temp, self.optimize);
-            def_var(inout b, local, value);
+            self.def_local(inout b, local, value);
+            self.store_local(inout b, local, value);
             let zero = ins_iconst(inout b, ty_i64(), 0);
             coerce(inout b, zero, stated, self.optimize)
         } else if kind == INST_CALL {
@@ -276,10 +368,12 @@ impl Body {
         status: bool
     ) -> bool eff [Ffi[Cranelift]] {
         let code = w.next();
+        let mut ops: ChunkSeq[u64] = ChunkSeq::new[u64]();
         if code == TERM_RETURN {
             let i = w.next();
             let default = w.next();
-            self.read(inout b, i);
+            ops.push(i);
+            self.read_operands(inout b, in ops);
             let v = if default != 0 {
                 zero_of(inout b, default)
             } else {
@@ -303,8 +397,9 @@ impl Body {
                 let i = w.next();
                 args.push(i);
                 args.push(w.next());
-                self.read(inout b, i);
+                ops.push(i);
             }
+            self.read_operands(inout b, in ops);
             let mut out: ChunkSeq[u32] = ChunkSeq::new[u32]();
             for k in 0..n {
                 let i = at64(in args, wrapping_mul(k, 2));
@@ -323,11 +418,13 @@ impl Body {
             let c = w.next();
             let yes = w.next();
             let no = w.next();
-            self.read(inout b, c);
+            ops.push(c);
+            self.read_operands(inout b, in ops);
             ins_brif0(inout b, self.value(c), self.block(yes), self.block(no));
             return true;
         }
         if code == TERM_UNREACHABLE {
+            self.read_operands(inout b, in ops);
             ins_trap(inout b, trap_user(1));
             return true;
         }
@@ -361,11 +458,15 @@ pub fn emit_body(call: u64, inout b: Builder, inout m: Module) -> u64 eff [Ffi[C
     if w.next() != np || nb == 0 {
         return BODY_ERROR;
     }
+    let optimize = call_arg(call, ARG_OPTIMIZE) != 0;
     let mut s = Body {
-        optimize: call_arg(call, ARG_OPTIMIZE) != 0,
+        optimize: optimize,
         locations: call_arg(call, ARG_LOCATIONS) != 0,
+        refresh_all: false,
         blocks: ChunkSeq::new[u32](),
         locals: ChunkSeq::new[u32](),
+        kinds: ChunkSeq::new[u64](),
+        addresses: ChunkSeq::new[u32](),
         registers: ChunkSeq::new[u32](),
         params: ChunkSeq::new[u32](),
         values: ChunkSeq::new[u32](),
@@ -377,16 +478,21 @@ pub fn emit_body(call: u64, inout b: Builder, inout m: Module) -> u64 eff [Ffi[C
     for k in 1..nb {
         s.blocks.push(create_block(inout b).id);
     }
-    // Locals, in name order.
+    // Locals, in name order; on the unoptimized path each one's slot.
     let nl = w.next();
     for k in 0..nl {
         let entry = w.next();
+        s.kinds.push(w.next());
+        s.addresses.push(invalid());
         if entry >= LOCAL_PARAM {
             let p = wrapping_sub(entry, LOCAL_PARAM);
             s.locals
                 .push(wrapping_u32(call_arg(call, wrapping_add(wrapping_add(ARG_PARAMS, 1), p))));
         } else {
             s.locals.push(zeroed(inout b, entry));
+        }
+        if !optimize {
+            s.spill(inout b, in m, k);
         }
     }
     // Each value's register.
@@ -399,6 +505,7 @@ pub fn emit_body(call: u64, inout b: Builder, inout m: Module) -> u64 eff [Ffi[C
         s.params.push(invalid());
         s.values.push(invalid());
     }
+    s.refresh_all = !optimize && nv <= FULL_REFRESH_VALUES;
     // Block parameters, and where each block's list is.
     let mut starts: ChunkSeq[u64] = ChunkSeq::new[u64]();
     for bi in 0..nb {
