@@ -508,14 +508,6 @@ fn origin_text(o: &Origin) -> String {
     }
 }
 
-#[cfg(feature = "vesper-port")]
-fn hex(bytes: &[u8]) -> String {
-    let mut out = vec![0u8; bytes.len() * 2];
-    let written = crate::binding::migrate_hex_encode(bytes, &mut out) as usize;
-    out.truncate(written);
-    String::from_utf8(out).unwrap_or_default()
-}
-
 #[cfg(not(feature = "vesper-port"))]
 fn hex(bytes: &[u8]) -> String {
     bytes
@@ -570,45 +562,98 @@ pub fn sys_spec(m: &Migration, options: &SysSpecOptions) -> Result<SysSpec, Migr
                 .into(),
         ));
     }
-    let mut out = String::new();
-    let _ = writeln!(
-        out,
-        "// {}: synthesized by vesper migrate from {}.",
-        crate::SCHEMA,
-        origin_text(&m.origin)
-    );
-    let _ = writeln!(
-        out,
-        "// Review every `assumed:` line; finite shadow tests do not prove equivalence."
-    );
-    let _ = writeln!(out, "sys library {} (", options.library);
-    let _ = writeln!(
-        out,
-        "    target = \"{}\", abi = \"{}\",",
-        options.target.triple(),
-        options.target.convention().name()
-    );
-    let _ = writeln!(
-        out,
-        "    link = \"{}\", name = \"{}\",",
-        match options.link {
-            LinkMode::Static => "static",
-            LinkMode::Dynamic => "dynamic",
-        },
-        options.link_name
-    );
-    let _ = write!(
-        out,
-        "    artifact = \"blake3:{}\"",
-        hex(&options.artifact_blake3)
-    );
-    if let Some(h) = &options.header {
-        let _ = write!(out, ",\n    header = \"{h}\"");
-    }
-    if let Some(p) = &options.pkg_config {
-        let _ = write!(out, ",\n    pkg_config = \"{p}\"");
-    }
-    out.push_str("\n) {\n");
+    #[cfg(feature = "vesper-port")]
+    let mut out = {
+        let origin = origin_text(&m.origin);
+        let triple = options.target.triple();
+        let abi = options.target.convention().name();
+        let header = options.header.as_deref().unwrap_or("");
+        let pkg_config = options.pkg_config.as_deref().unwrap_or("");
+        let mut pbuf = vec![
+            0u8;
+            256 + crate::SCHEMA.len()
+                + origin.len()
+                + options.library.len()
+                + triple.len()
+                + abi.len()
+        ];
+        let pn = crate::binding::migrate_render_vsys_preamble(
+            crate::SCHEMA.as_bytes(),
+            origin.as_bytes(),
+            options.library.as_bytes(),
+            triple.as_bytes(),
+            abi.as_bytes(),
+            &mut pbuf,
+        ) as usize;
+        let flags = if matches!(options.link, LinkMode::Static) {
+            1u8
+        } else {
+            0
+        } | if options.header.is_some() { 2u8 } else { 0 }
+            | if options.pkg_config.is_some() { 4u8 } else { 0 };
+        let mut lbuf = vec![
+            0u8;
+            128 + options.link_name.len()
+                + options.artifact_blake3.len() * 2
+                + header.len()
+                + pkg_config.len()
+        ];
+        let ln = crate::binding::migrate_render_vsys_link_block(
+            flags,
+            options.link_name.as_bytes(),
+            &options.artifact_blake3,
+            header.as_bytes(),
+            pkg_config.as_bytes(),
+            &mut lbuf,
+        ) as usize;
+        let mut s = String::with_capacity(pn + ln);
+        s.push_str(std::str::from_utf8(&pbuf[..pn]).unwrap_or_default());
+        s.push_str(std::str::from_utf8(&lbuf[..ln]).unwrap_or_default());
+        s
+    };
+    #[cfg(not(feature = "vesper-port"))]
+    let mut out = {
+        let mut out = String::new();
+        let _ = writeln!(
+            out,
+            "// {}: synthesized by vesper migrate from {}.",
+            crate::SCHEMA,
+            origin_text(&m.origin)
+        );
+        let _ = writeln!(
+            out,
+            "// Review every `assumed:` line; finite shadow tests do not prove equivalence."
+        );
+        let _ = writeln!(out, "sys library {} (", options.library);
+        let _ = writeln!(
+            out,
+            "    target = \"{}\", abi = \"{}\",",
+            options.target.triple(),
+            options.target.convention().name()
+        );
+        let _ = writeln!(
+            out,
+            "    link = \"{}\", name = \"{}\",",
+            match options.link {
+                LinkMode::Static => "static",
+                LinkMode::Dynamic => "dynamic",
+            },
+            options.link_name
+        );
+        let _ = write!(
+            out,
+            "    artifact = \"blake3:{}\"",
+            hex(&options.artifact_blake3)
+        );
+        if let Some(h) = &options.header {
+            let _ = write!(out, ",\n    header = \"{h}\"");
+        }
+        if let Some(p) = &options.pkg_config {
+            let _ = write!(out, ",\n    pkg_config = \"{p}\"");
+        }
+        out.push_str("\n) {\n");
+        out
+    };
     let mut used_enums = std::collections::BTreeSet::new();
     let mut used_structs = std::collections::BTreeSet::new();
     let mut omitted = vec![];
