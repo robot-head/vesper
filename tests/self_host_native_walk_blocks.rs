@@ -294,6 +294,26 @@ fn block_plan_speed() {
     }
     let graphs = corpus_graphs();
     let _ = entry();
+    if std::env::var_os("FLIP_GATE").is_some() {
+        check_harness::abba(
+            "block-plans",
+            &mut || {
+                time(|| {
+                    for t in graphs {
+                        std::hint::black_box(block_plan(t));
+                    }
+                })
+            },
+            &mut || {
+                time(|| {
+                    for t in graphs {
+                        std::hint::black_box(vesper_plan(t));
+                    }
+                })
+            },
+        );
+        return;
+    }
     abba_ci(
         "block plans",
         20,
