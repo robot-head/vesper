@@ -598,3 +598,181 @@ pub fn migrate_splitmix64_bytes(
     let _ = state_buf.try_set(0, st);
     capped
 }
+
+// ---------------------------------------------------------------------------
+// C typedef redefinition scanner (`c.rs::redefines`) and pointer aliasing
+// detector (`synth.rs::aliasing_pair`).
+
+const BYTE_SEMI: u8 = 59;
+const ALIAS_NONE: u64 = 18446744073709551615;
+const ALIAS_FLAG_PRESENT: u8 = 1;
+const ALIAS_FLAG_WRITES: u8 = 2;
+const ALIAS_FLAG_SINGLE: u8 = 4;
+
+fn is_c_ws(b: u8) -> bool {
+    is_ws(b) || b == BYTE_LF
+}
+
+fn slice_starts_with_str(in s: Slice[u8], start: u64, end: u64, in prefix: Str) -> bool {
+    let plen = prefix.len();
+    if wrapping_sub(end, start) < plen {
+        return false;
+    }
+    slice_eq_str(in s, start, plen, in prefix)
+}
+
+fn slice_eq_slice(in a: Slice[u8], a_start: u64, a_len: u64, in b: Slice[u8]) -> bool {
+    if a_len != b.len() {
+        return false;
+    }
+    let mut i: u64 = 0;
+    loop {
+        if i >= a_len {
+            break;
+        }
+        let x = match a.try_get(wrapping_add(a_start, i)) {
+            Some(v) => v,
+            None => return false
+        };
+        let y = match b.try_get(i) {
+            Some(v) => v,
+            None => return false
+        };
+        if x != y {
+            return false;
+        }
+        i = wrapping_add(i, 1);
+    }
+    true
+}
+
+// Whether `text` contains a `;`-separated statement starting with `typedef`
+// whose trailing identifier token equals `name`.
+pub fn migrate_redefines(in text: Slice[u8], in name: Slice[u8]) -> bool {
+    let n = text.len();
+    let mut pos: u64 = 0;
+    loop {
+        let stmt_start = pos;
+        loop {
+            if pos >= n {
+                break;
+            }
+            let c = match text.try_get(pos) {
+                Some(v) => v,
+                None => break
+            };
+            if c == BYTE_SEMI {
+                break;
+            }
+            pos = wrapping_add(pos, 1);
+        }
+        let stmt_end = pos;
+        let has_more = pos < n;
+        if has_more {
+            pos = wrapping_add(pos, 1);
+        }
+
+        let mut s_start = stmt_start;
+        loop {
+            if s_start >= stmt_end {
+                break;
+            }
+            let c = match text.try_get(s_start) {
+                Some(v) => v,
+                None => break
+            };
+            if !is_c_ws(c) {
+                break;
+            }
+            s_start = wrapping_add(s_start, 1);
+        }
+        let mut s_end = stmt_end;
+        loop {
+            if s_end <= s_start {
+                break;
+            }
+            let c = match text.try_get(wrapping_sub(s_end, 1)) {
+                Some(v) => v,
+                None => break
+            };
+            if !is_c_ws(c) {
+                break;
+            }
+            s_end = wrapping_sub(s_end, 1);
+        }
+
+        if slice_starts_with_str(in text, s_start, s_end, in "typedef") {
+            let mut tok_start = s_end;
+            loop {
+                if tok_start <= s_start {
+                    break;
+                }
+                let c = match text.try_get(wrapping_sub(tok_start, 1)) {
+                    Some(v) => v,
+                    None => break
+                };
+                if !is_ident_cont(c) {
+                    break;
+                }
+                tok_start = wrapping_sub(tok_start, 1);
+            }
+            if slice_eq_slice(in text, tok_start, wrapping_sub(s_end, tok_start), in name) {
+                return true;
+            }
+        }
+
+        if !has_more {
+            break;
+        }
+    }
+    false
+}
+
+// Finds the first pair `(i, j)` (`i < j`) of pointer/slice parameters sharing
+// the same `class_id` where at least one writes and at least one is a single
+// pointer. Returns `(i << 32) | j`, or `ALIAS_NONE` (`u64::MAX`) if none.
+pub fn migrate_aliasing_pair(in classes: Slice[u64], in flags: Slice[u8]) -> u64 {
+    let n = classes.len();
+    let mut i: u64 = 0;
+    loop {
+        if i >= n {
+            break;
+        }
+        let fa = match flags.try_get(i) {
+            Some(v) => v,
+            None => 0
+        };
+        if (fa & ALIAS_FLAG_PRESENT) != 0 {
+            let ca = match classes.try_get(i) {
+                Some(v) => v,
+                None => 0
+            };
+            let wa = (fa & ALIAS_FLAG_WRITES) != 0;
+            let sa = (fa & ALIAS_FLAG_SINGLE) != 0;
+            let mut j = wrapping_add(i, 1);
+            loop {
+                if j >= n {
+                    break;
+                }
+                let fb = match flags.try_get(j) {
+                    Some(v) => v,
+                    None => 0
+                };
+                if (fb & ALIAS_FLAG_PRESENT) != 0 {
+                    let cb = match classes.try_get(j) {
+                        Some(v) => v,
+                        None => 0
+                    };
+                    let wb = (fb & ALIAS_FLAG_WRITES) != 0;
+                    let sb = (fb & ALIAS_FLAG_SINGLE) != 0;
+                    if ca == cb && (wa || wb) && (sa || sb) {
+                        return (i << STATUS_SHIFT) | j;
+                    }
+                }
+                j = wrapping_add(j, 1);
+            }
+        }
+        i = wrapping_add(i, 1);
+    }
+    ALIAS_NONE
+}

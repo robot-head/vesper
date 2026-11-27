@@ -28,10 +28,96 @@ enum AliasClass {
     Struct(String),
 }
 
+#[cfg(feature = "vesper-port")]
+const ALIAS_NONE: u64 = u64::MAX;
+#[cfg(feature = "vesper-port")]
+const ALIAS_SHIFT: u32 = 32;
+#[cfg(feature = "vesper-port")]
+const ALIAS_MASK: u64 = 0xffff_ffff;
+#[cfg(feature = "vesper-port")]
+const ALIAS_FLAG_PRESENT: u8 = 1;
+#[cfg(feature = "vesper-port")]
+const ALIAS_FLAG_WRITES: u8 = 2;
+#[cfg(feature = "vesper-port")]
+const ALIAS_FLAG_SINGLE: u8 = 4;
+
 /// The first pair of pointer parameters to the same pointee type where at
 /// least one is a *single* pointer and at least one is written. Slice/slice pairs keep the
 /// earlier behaviour (an `assumed:` line, plus the Bridge's call-time overlap
 /// check in `prepare_call`).
+#[cfg(feature = "vesper-port")]
+pub fn aliasing_pair(params: &[(String, SysParam)]) -> Option<String> {
+    let mut class_map: Vec<AliasClass> = Vec::new();
+    let mut classes = Vec::with_capacity(params.len());
+    let mut flags = Vec::with_capacity(params.len());
+    for (_, p) in params {
+        let entry = match p {
+            SysParam::Slice { .. } | SysParam::ElementSlice { .. } => {
+                p.slice_parts().map(|(element, access, _)| {
+                    (
+                        match element {
+                            SysPointee::Scalar(s) => AliasClass::Scalar(s),
+                            SysPointee::Struct(n) => AliasClass::Struct(n),
+                        },
+                        access == Access::Inout,
+                        false,
+                    )
+                })
+            }
+            SysParam::Pointer {
+                pointee, access, ..
+            } => Some((
+                match pointee {
+                    SysPointee::Scalar(s) => AliasClass::Scalar(*s),
+                    SysPointee::Struct(n) => AliasClass::Struct(n.clone()),
+                },
+                access.writes(),
+                true,
+            )),
+            SysParam::Value(_) => None,
+        };
+        if let Some((cls, writes, single)) = entry {
+            let id = match class_map.iter().position(|c| c == &cls) {
+                Some(idx) => idx as u64,
+                None => {
+                    let idx = class_map.len() as u64;
+                    class_map.push(cls);
+                    idx
+                }
+            };
+            let mut f = ALIAS_FLAG_PRESENT;
+            if writes {
+                f |= ALIAS_FLAG_WRITES;
+            }
+            if single {
+                f |= ALIAS_FLAG_SINGLE;
+            }
+            classes.push(id);
+            flags.push(f);
+        } else {
+            classes.push(0);
+            flags.push(0);
+        }
+    }
+    let packed = crate::binding::migrate_aliasing_pair(&classes, &flags);
+    if packed == ALIAS_NONE {
+        None
+    } else {
+        let i = (packed >> ALIAS_SHIFT) as usize;
+        let j = (packed & ALIAS_MASK) as usize;
+        let a = &params[i].0;
+        let b = &params[j].0;
+        Some(format!(
+            "`{a}` and `{b}` point to the same type and one is written; a signature cannot show they are distinct objects"
+        ))
+    }
+}
+
+/// The first pair of pointer parameters to the same pointee type where at
+/// least one is a *single* pointer and at least one is written. Slice/slice pairs keep the
+/// earlier behaviour (an `assumed:` line, plus the Bridge's call-time overlap
+/// check in `prepare_call`).
+#[cfg(not(feature = "vesper-port"))]
 pub fn aliasing_pair(params: &[(String, SysParam)]) -> Option<String> {
     let class = |p: &SysParam| match p {
         SysParam::Slice { .. } | SysParam::ElementSlice { .. } => {
