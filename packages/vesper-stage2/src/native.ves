@@ -1,6 +1,6 @@
 use @vesper/check-data::types::{TyKind, TyMode, TyPass};
 use @vesper/check-data::util::{add, inc, n32, u32_at, w};
-use @vesper/check-data::world::{Variant, set_by_symbol};
+use @vesper/check-data::world::{Adt, Variant, set_by_symbol};
 use @vesper/hybrid-native-backend::elf::{x86_text_object};
 use @vesper/hybrid-native-backend::scalar::{
     ADD, AND, BLOCK_LABEL, BLOCK_RETURN, BRANCH_BLOCK, CALL, CALL_ARGUMENT, CALL_FLOAT, COMPARE,
@@ -59,7 +59,13 @@ const READ_PASS: u64 = 2;
 const READ_PROJECTIONS: u64 = 3;
 const BIND_PATTERN: u64 = 1;
 const PATTERN_HEADER_WORDS: u64 = 3;
+const CONSTRUCTOR_PATTERN_NAME: u64 = PATTERN_HEADER_WORDS;
+const CONSTRUCTOR_PATTERN_COUNT: u64 = 5;
+const CONSTRUCTOR_PATTERN_FIELDS: u64 = 6;
 const BIND_NAME: u64 = BIND_PATTERN + PATTERN_HEADER_WORDS;
+const ENUM_TAG_CELLS: u64 = 1;
+const PATH_SEPARATOR: u8 = 58;
+const PATH_SEPARATOR_BYTES: u64 = 2;
 const WRITE_WORDS: u64 = 3;
 const WRITE_OPERATOR: u64 = 1;
 const WRITE_VALUE: u64 = 2;
@@ -133,6 +139,7 @@ enum ScalarKind: _ {
     F64 = 14,
     Tuple = 15,
     Struct = 16,
+    Enum = 17,
 }
 
 enum Assignment: _ {
@@ -634,7 +641,9 @@ fn scalar_kind(in low: L, ty: u32) -> u8 {
         ScalarKind::F64
     } else {
         let adt = low.ctx.world.adt(low.ctx.world.lookup(node.name));
-        if adt.vn == 1 && adt.gn == 0 && !adt.is_enum && adt.mode == TyMode::Copy {
+        if adt.is_enum && adt.vn != 0 && adt.gn == 0 && adt.mode != TyMode::Linear {
+            ScalarKind::Enum
+        } else if adt.vn == 1 && adt.gn == 0 && !adt.is_enum && adt.mode == TyMode::Copy {
             ScalarKind::Struct
         } else {
             ScalarKind::Unsupported
@@ -643,7 +652,7 @@ fn scalar_kind(in low: L, ty: u32) -> u8 {
 }
 
 fn is_aggregate(kind: u8) -> bool {
-    kind == ScalarKind::Tuple || kind == ScalarKind::Struct
+    kind == ScalarKind::Tuple || kind == ScalarKind::Struct || kind == ScalarKind::Enum
 }
 
 fn sysv_signature(in low: L, f: FnR) -> bool {
@@ -685,15 +694,78 @@ fn argument_value(in low: L, f: FnR, root: u32) -> u64 {
 }
 
 fn struct_variant(in low: L, ty: u32) -> Variant {
+    low.ctx.world.variant(w(product_adt(in low, ty).va))
+}
+
+fn product_adt(in low: L, ty: u32) -> Adt {
     let node = low.ctx.types.node(ty);
-    let adt = low.ctx.world.adt(low.ctx.world.lookup(node.name));
-    low.ctx.world.variant(w(adt.va))
+    low.ctx.world.adt(low.ctx.world.lookup(node.name))
+}
+
+copy struct EnumVariant {
+    ordinal: u64,
+    variant: Variant,
+}
+
+fn constructor_name(in low: L, name: u32, short: u32) -> bool {
+    let size = low.ctx.names.size(name);
+    let suffix = low.ctx.names.size(short);
+    if size < suffix {
+        return false;
+    }
+    let start = wrapping_sub(size, suffix);
+    if start != 0
+        && (start <= PATH_SEPARATOR_BYTES
+            || low.ctx.names.byte(name, wrapping_sub(start, 1)) != PATH_SEPARATOR
+            || low.ctx.names.byte(name, wrapping_sub(start, PATH_SEPARATOR_BYTES))
+                != PATH_SEPARATOR)
+    {
+        return false;
+    }
+    for i in 0..suffix {
+        if low.ctx.names.byte(name, add(start, i)) != low.ctx.names.byte(short, i) {
+            return false;
+        }
+    }
+    true
+}
+
+fn enum_variant(in low: L, ty: u32, name: u32) -> Option[EnumVariant] {
+    let adt = product_adt(in low, ty);
+    for ordinal in 0..w(adt.vn) {
+        let variant = low.ctx.world.variant(add(w(adt.va), ordinal));
+        if constructor_name(in low, name, variant.name) {
+            return Option::Some(EnumVariant { ordinal: ordinal, variant: variant });
+        }
+    }
+    Option::None
+}
+
+// The native enum layout is one tag word and enough cells for its largest payload.
+fn enum_cells(in low: L, ty: u32) -> u64 {
+    let adt = product_adt(in low, ty);
+    let mut payload: u64 = 0;
+    for i in 0..w(adt.vn) {
+        let variant = low.ctx.world.variant(add(w(adt.va), i));
+        for field in 0..w(variant.fc) {
+            let kind = scalar_kind(in low, low.ctx.world.field(add(w(variant.fa), field)).ty);
+            if abi_width(kind) == 0 && kind != ScalarKind::Unit {
+                return 0;
+            }
+        }
+        if w(variant.fc) > payload {
+            payload = w(variant.fc);
+        }
+    }
+    add(ENUM_TAG_CELLS, payload)
 }
 
 fn product_count(in low: L, ty: u32) -> u64 {
     let node = low.ctx.types.node(ty);
     if node.kind == TyKind::Tuple {
         w(node.n)
+    } else if product_adt(in low, ty).is_enum {
+        enum_cells(in low, ty)
     } else {
         w(struct_variant(in low, ty).fc)
     }
@@ -782,6 +854,27 @@ fn supported_struct(in low: L, inst: InstRow, in m: Function) -> bool {
     true
 }
 
+fn enum_data_variant(in low: L, inst: InstRow, in m: Function) -> Option[EnumVariant] {
+    let shape = match enum_variant(in low, inst.ty, n32(low.program.op(inst.a))) {
+        Option::Some(shape) => shape,
+        Option::None => return Option::None,
+    };
+    let count = w(shape.variant.fc);
+    if low.program.op(add(inst.a, DATA_FIELD_COUNT)) != count
+        || inst.n != add(DATA_HEADER_WORDS, wrapping_mul(count, DATA_FIELD_WORDS))
+    {
+        return Option::None;
+    }
+    for i in 0..count {
+        let field = low.ctx.world.field(add(w(shape.variant.fa), i));
+        let value = struct_member(in low, inst, field.name);
+        if value == NO_VALUE || m.kind(value) != scalar_kind(in low, field.ty) {
+            return Option::None;
+        }
+    }
+    Option::Some(shape)
+}
+
 copy struct EqualityPair {
     left: u64,
     right: u64,
@@ -794,7 +887,10 @@ fn queue_equality(
     inout leaves: ChunkSeq[EqualityPair]
 ) -> bool {
     let kind = m.value_kind(pair.left);
-    if kind == ScalarKind::Unsupported || kind != m.value_kind(pair.right) {
+    if kind == ScalarKind::Unsupported
+        || kind == ScalarKind::Enum
+        || kind != m.value_kind(pair.right)
+    {
         return false;
     }
     if is_aggregate(kind) {
@@ -978,8 +1074,8 @@ fn collect_binding(in low: L, inst: InstRow, inout m: Function) -> bool {
                 inout m
             );
     }
-    // Tuple fields are available only after their source products are planned.
-    pattern == Pat::Tuple
+    // Product fields are available only after their source values are planned.
+    pattern == Pat::Tuple || pattern == Pat::Constructor
 }
 fn collect_mutating_place(in low: L, f: FnR, name: u32, inout m: Function) -> bool {
     if m.is_inout(argument_value(in low, f, name)) {
@@ -1113,6 +1209,9 @@ fn lower_local_store(
     let at = inst.a;
     if inst.op == Op::Bind {
         let pattern = low.program.op(add(at, BIND_PATTERN));
+        if pattern == Pat::Constructor {
+            return lower_enum_binding(in low, inst, block, inout m);
+        }
         if pattern == Pat::Tuple {
             return true;
         }
@@ -1435,6 +1534,7 @@ fn pattern_payload(in low: L, at: u64, end: u64) -> u64 {
         Pat::Wild => 0,
         Pat::Bind | Pat::Tuple => 1,
         Pat::Literal => LITERAL_WORDS,
+        Pat::Constructor => wrapping_sub(CONSTRUCTOR_PATTERN_FIELDS, PATTERN_HEADER_WORDS),
         _ => return NO_VALUE,
     };
     let next = add(add(at, PATTERN_HEADER_WORDS), extra);
@@ -1446,8 +1546,55 @@ copy struct MatchArm {
     tests: u64,
 }
 
+fn enum_pattern_child(in low: L, field: u64, end: u64) -> u64 {
+    if field >= end || low.program.tag(field) != Tag::Name {
+        return NO_VALUE;
+    }
+    let at = inc(field);
+    let next = pattern_payload(in low, at, end);
+    if next == NO_VALUE {
+        return NO_VALUE;
+    }
+    let kind = low.program.op(at);
+    if kind == Pat::Constructor
+        || (kind == Pat::Tuple && low.program.op(add(at, PATTERN_HEADER_WORDS)) != 0)
+    {
+        NO_VALUE
+    } else {
+        next
+    }
+}
+
+fn enum_match_arm(in low: L, pattern: u64, end: u64) -> MatchArm {
+    let invalid = MatchArm { target: NO_VALUE, tests: 0 };
+    let mut field = pattern_payload(in low, pattern, end);
+    if field == NO_VALUE {
+        return invalid;
+    }
+    let count = low.program.op(add(pattern, CONSTRUCTOR_PATTERN_COUNT));
+    let mut tests: u64 = 1;
+    for _ in 0..count {
+        let next = enum_pattern_child(in low, field, end);
+        if next == NO_VALUE {
+            return invalid;
+        }
+        if low.program.op(inc(field)) == Pat::Literal {
+            tests = inc(tests);
+        }
+        field = next;
+    }
+    if field >= end || low.program.tag(field) != Tag::Block {
+        invalid
+    } else {
+        MatchArm { target: field, tests: tests }
+    }
+}
+
 fn match_arm(in low: L, pattern: u64, end: u64) -> MatchArm {
     let invalid = MatchArm { target: NO_VALUE, tests: 0 };
+    if pattern < end && low.program.op(pattern) == Pat::Constructor {
+        return enum_match_arm(in low, pattern, end);
+    }
     let mut at = pattern;
     let mut pending: u64 = 1;
     let mut tests: u64 = 0;
@@ -1461,6 +1608,9 @@ fn match_arm(in low: L, pattern: u64, end: u64) -> MatchArm {
         }
         pending = wrapping_sub(pending, 1);
         let kind = low.program.op(at);
+        if kind == Pat::Constructor {
+            return invalid;
+        }
         if kind == Pat::Tuple {
             let fields = low.program.op(add(at, PATTERN_HEADER_WORDS));
             if fields > wrapping_sub(end, next) / PATTERN_HEADER_WORDS {
@@ -1484,6 +1634,60 @@ copy struct PatternLeaf {
     value: u64,
     operand: u64,
     kind: u8,
+}
+
+copy struct EnumPatternField {
+    value: u64,
+    kind: u8,
+    pattern: u64,
+}
+
+fn enum_pattern_fields(
+    in low: L,
+    product: Product,
+    pattern: u64,
+    end: u64,
+    inout children: ChunkSeq[EnumPatternField]
+) -> Option[u64] {
+    if scalar_kind(in low, product.ty) != ScalarKind::Enum
+        || low.program.op(pattern) != Pat::Constructor
+    {
+        return Option::None;
+    }
+    let constructor = n32(low.program.op(add(pattern, CONSTRUCTOR_PATTERN_NAME)));
+    let shape = match enum_variant(in low, product.ty, constructor) {
+        Option::Some(shape) => shape,
+        Option::None => return Option::None,
+    };
+    let mut field = pattern_payload(in low, pattern, end);
+    let count = low.program.op(add(pattern, CONSTRUCTOR_PATTERN_COUNT));
+    if field == NO_VALUE || count > w(shape.variant.fc) {
+        return Option::None;
+    }
+    for _ in 0..count {
+        let next = enum_pattern_child(in low, field, end);
+        if next == NO_VALUE {
+            return Option::None;
+        }
+        let index = low.ctx.world.find_field(shape.variant, n32(low.program.op(field)));
+        let position = wrapping_sub(w(index), w(shape.variant.fa));
+        if position >= w(shape.variant.fc) {
+            return Option::None;
+        }
+        let kind = scalar_kind(in low, low.ctx.world.field(w(index)).ty);
+        let child = inc(field);
+        if low.program.op(child) == Pat::Tuple && kind != ScalarKind::Unit {
+            return Option::None;
+        }
+        let value = add(add(product.first_child, ENUM_TAG_CELLS), position);
+        children.push(EnumPatternField { value: value, kind: kind, pattern: child });
+        field = next;
+    }
+    if field == end {
+        Option::Some(shape.ordinal)
+    } else {
+        Option::None
+    }
 }
 
 fn pattern_leaves(
@@ -1550,7 +1754,8 @@ fn pattern_leaves(
                 };
                 leaves.push(PatternLeaf { value: value, operand: bits, kind: Pat::Literal });
             },
-            _ => (),
+            Pat::Wild => (),
+            _ => return false,
         };
         at = next;
     }
@@ -1688,8 +1893,10 @@ fn plan_product(in low: L, root: PendingProduct, block: u64, inout m: Function) 
             Option::None => break,
         };
         let count = product_count(in low, node.ty);
+        let enum_value = scalar_kind(in low, node.ty) == ScalarKind::Enum;
         let first = m.values.len();
-        if add(wrapping_sub(first, start), count) > MAX_RESULT_CELLS
+        if (enum_value && count == 0)
+            || add(wrapping_sub(first, start), count) > MAX_RESULT_CELLS
             || !m.product_indices.try_set(node.value, m.products.len())
         {
             return 0;
@@ -1699,16 +1906,22 @@ fn plan_product(in low: L, root: PendingProduct, block: u64, inout m: Function) 
             cells = inc(cells);
         }
         for i in 0..count {
-            let ty = product_field_type(in low, node.ty, i);
-            let kind = scalar_kind(in low, ty);
-            if kind == ScalarKind::Unsupported {
-                return 0;
-            }
-            if is_aggregate(kind) {
-                pending.push(PendingProduct { value: m.values.len(), ty: ty });
-            } else {
+            let kind = if enum_value {
                 cells = inc(cells);
-            }
+                ScalarKind::U64
+            } else {
+                let ty = product_field_type(in low, node.ty, i);
+                let kind = scalar_kind(in low, ty);
+                if kind == ScalarKind::Unsupported {
+                    return 0;
+                }
+                if is_aggregate(kind) {
+                    pending.push(PendingProduct { value: m.values.len(), ty: ty });
+                } else {
+                    cells = inc(cells);
+                }
+                kind
+            };
             m.kinds.push(kind);
             m.values.push(value_new(block));
             m.product_indices.push(NO_VALUE);
@@ -1778,6 +1991,86 @@ fn plan_tuple_binding(in low: L, inst: InstRow, matched: bool, inout m: Function
     true
 }
 
+fn enum_binding_fields(
+    in low: L,
+    inst: InstRow,
+    in m: Function,
+    inout fields: ChunkSeq[EnumPatternField]
+) -> bool {
+    let source = add(m.arguments, low.program.op(inst.a));
+    let product = match m.product(source) {
+        Option::Some(product) => product,
+        Option::None => return false,
+    };
+    enum_pattern_fields(
+        in low,
+        product,
+        add(inst.a, BIND_PATTERN),
+        add(inst.a, inst.n),
+        inout fields
+    )
+        .is_some()
+}
+
+fn plan_enum_binding(in low: L, inst: InstRow, block: u64, inout m: Function) -> bool {
+    let mut fields = ChunkSeq::new[EnumPatternField]();
+    if !enum_binding_fields(in low, inst, in m, inout fields) {
+        return false;
+    }
+    for i in 0..fields.len() {
+        let field = match fields.try_get(i) {
+            Option::Some(field) => field,
+            Option::None => return false,
+        };
+        if low.program.op(field.pattern) == Pat::Bind {
+            let at = add(field.pattern, PATTERN_HEADER_WORDS);
+            if low.program.tag(at) != Tag::Name
+                || !record_binding(n32(low.program.op(at)), m.values.len(), inout m)
+            {
+                return false;
+            }
+            m.kinds.push(field.kind);
+            m.values.push(value_new(block));
+            m.product_indices.push(NO_VALUE);
+        }
+    }
+    true
+}
+
+fn lower_enum_binding(in low: L, inst: InstRow, block: u64, inout m: Function) -> bool {
+    let mut fields = ChunkSeq::new[EnumPatternField]();
+    if !enum_binding_fields(in low, inst, in m, inout fields) {
+        return false;
+    }
+    for i in 0..fields.len() {
+        let field = match fields.try_get(i) {
+            Option::Some(field) => field,
+            Option::None => return false,
+        };
+        if low.program.op(field.pattern) != Pat::Bind || field.kind == ScalarKind::Unit {
+            continue;
+        }
+        let name = n32(low.program.op(add(field.pattern, PATTERN_HEADER_WORDS)));
+        let dest = wrapping_sub(w(u32_at(in m.bindings, w(name))), 1);
+        let raw = m.read(field.value, block);
+        if dest == NO_VALUE || raw == NO_VALUE {
+            return false;
+        }
+        let width = abi_width(field.kind);
+        let value = if is_float(field.kind) {
+            m.record(BITS_TO_FLOAT, raw, 0, width)
+        } else if width < QWORD_BITS {
+            m.record(TRUNCATE, raw, QWORD_BITS, width)
+        } else {
+            raw
+        };
+        if !m.define(dest, block, value) {
+            return false;
+        }
+    }
+    true
+}
+
 // Cache the product behind each aggregate SSA value.
 fn plan_aggregates(in low: L, f: FnR, row: FnRow, inout m: Function) -> bool {
     m.product_indices.resize(m.values.len(), NO_VALUE);
@@ -1800,6 +2093,23 @@ fn plan_aggregates(in low: L, f: FnR, row: FnRow, inout m: Function) -> bool {
             if inst.op == Op::Bind && low.program.op(add(inst.a, BIND_PATTERN)) == Pat::Tuple {
                 let matched = is_match_binding(in low, row, b, index, inst);
                 if !plan_tuple_binding(in low, inst, matched, inout m) {
+                    return false;
+                }
+                continue;
+            }
+            if inst.op == Op::Bind
+                && low.program.op(add(inst.a, BIND_PATTERN)) == Pat::Constructor
+            {
+                if !is_match_binding(in low, row, b, index, inst)
+                    || !plan_enum_binding(in low, inst, block, inout m)
+                {
+                    return false;
+                }
+                continue;
+            }
+            if inst.op == Op::Data && m.value_kind(value) == ScalarKind::Enum {
+                let root = PendingProduct { value: value, ty: inst.ty };
+                if plan_product(in low, root, block, inout m) == 0 {
                     return false;
                 }
                 continue;
@@ -1969,6 +2279,53 @@ fn plan_tuple_match(in low: L, b: BlockRow, source: u64, block: u64, inout m: Fu
     false
 }
 
+fn plan_match_operand(inout m: Function, value: u64, arm: u64, block: u64) -> bool {
+    if arm == 0 {
+        m.use_in(value, block)
+    } else {
+        m.home(value, block)
+    }
+}
+
+fn plan_enum_match(in low: L, b: BlockRow, source: u64, block: u64, inout m: Function) -> bool {
+    let product = match m.product(source) {
+        Option::Some(product) => product,
+        Option::None => return false,
+    };
+    let end = add(b.ta, b.tn);
+    let count = low.program.op(add(b.ta, MATCH_ARM_COUNT));
+    let mut pattern = add(b.ta, MATCH_FIRST_ARM);
+    for arm in 0..count {
+        let shape = match_arm(in low, pattern, end);
+        if shape.target == NO_VALUE {
+            return false;
+        }
+        let kind = low.program.op(pattern);
+        if kind == Pat::Bind || kind == Pat::Wild {
+            return true;
+        }
+        let mut fields = ChunkSeq::new[EnumPatternField]();
+        if !enum_pattern_fields(in low, product, pattern, shape.target, inout fields).is_some()
+            || !plan_match_operand(inout m, product.first_child, arm, block)
+        {
+            return false;
+        }
+        for i in 0..fields.len() {
+            let field = match fields.try_get(i) {
+                Option::Some(field) => field,
+                Option::None => return false,
+            };
+            if low.program.op(field.pattern) == Pat::Literal
+                && !plan_match_operand(inout m, field.value, arm, block)
+            {
+                return false;
+            }
+        }
+        pattern = inc(shape.target);
+    }
+    true
+}
+
 // Stack homes hold branch results and the values read outside their defining block.
 fn plan_homes(in low: L, f: FnR, row: FnRow, inout m: Function) -> bool {
     let mut value_count: u64 = 0;
@@ -1995,7 +2352,8 @@ fn plan_homes(in low: L, f: FnR, row: FnRow, inout m: Function) -> bool {
                     || (inst.op == Op::Tuple && inst.n > EMPTY_TUPLE_WORDS)
                     || inst.op == Op::Data
                     || (inst.op == Op::Bind
-                        && low.program.op(add(inst.a, BIND_PATTERN)) == Pat::Tuple)
+                        && (low.program.op(add(inst.a, BIND_PATTERN)) == Pat::Tuple
+                            || low.program.op(add(inst.a, BIND_PATTERN)) == Pat::Constructor))
                     || (inst.op == Op::Call && is_aggregate(scalar_kind(in low, inst.ty)));
                 if inst.op == Op::Bind
                     && !is_match_literal_binding(in low, row, b, index, inst)
@@ -2094,6 +2452,25 @@ fn plan_homes(in low: L, f: FnR, row: FnRow, inout m: Function) -> bool {
                 {
                     return false;
                 }
+            } else if inst.op == Op::Bind
+                && low.program.op(add(at, BIND_PATTERN)) == Pat::Constructor
+            {
+                let mut fields = ChunkSeq::new[EnumPatternField]();
+                if !enum_binding_fields(in low, inst, in m, inout fields) {
+                    return false;
+                }
+                for i in 0..fields.len() {
+                    let field = match fields.try_get(i) {
+                        Option::Some(field) => field,
+                        Option::None => return false,
+                    };
+                    if low.program.op(field.pattern) == Pat::Bind
+                        && field.kind != ScalarKind::Unit
+                        && !m.use_in(field.value, block)
+                    {
+                        return false;
+                    }
+                }
             } else if inst.op == Op::Binary {
                 let lhs = add(f.param_count, low.program.op(add(at, BINARY_LHS)));
                 let rhs = add(f.param_count, low.program.op(add(at, BINARY_RHS)));
@@ -2120,6 +2497,20 @@ fn plan_homes(in low: L, f: FnR, row: FnRow, inout m: Function) -> bool {
             } else if inst.op == Op::Unary {
                 if !m.use_in(add(f.param_count, low.program.op(add(at, UNARY_VALUE))), block) {
                     return false;
+                }
+            } else if inst.op == Op::Data && m.kind(w(inst.dest)) == ScalarKind::Enum {
+                let shape = match enum_data_variant(in low, inst, in m) {
+                    Option::Some(shape) => shape,
+                    Option::None => return false,
+                };
+                for i in 0..w(shape.variant.fc) {
+                    let field = low.ctx.world.field(add(w(shape.variant.fa), i));
+                    let value = struct_member(in low, inst, field.name);
+                    if m.kind(value) != ScalarKind::Unit
+                        && !m.use_in(add(m.arguments, value), block)
+                    {
+                        return false;
+                    }
                 }
             } else if inst.op == Op::Exit {
                 if !plan_value(in low, low.program.op(at), block, inout m) {
@@ -2154,6 +2545,12 @@ fn plan_homes(in low: L, f: FnR, row: FnRow, inout m: Function) -> bool {
         } else if b.term == Term::Branch || b.term == Term::Match {
             let id = low.program.op(b.ta);
             let source = add(f.param_count, id);
+            if b.term == Term::Match && m.kind(id) == ScalarKind::Enum {
+                if !plan_enum_match(in low, b, source, block, inout m) {
+                    return false;
+                }
+                continue;
+            }
             if b.term == Term::Match
                 && (m.kind(id) == ScalarKind::Tuple || m.kind(id) == ScalarKind::Unit)
             {
@@ -3231,6 +3628,52 @@ fn lower_float_binary(
     m.record(op, lhs, rhs, abi_width(kind))
 }
 
+fn lower_enum_data(in low: L, inst: InstRow, block: u64, inout m: Function) -> bool {
+    let shape = match enum_data_variant(in low, inst, in m) {
+        Option::Some(shape) => shape,
+        Option::None => return false,
+    };
+    let product = match m.product(add(m.arguments, w(inst.dest))) {
+        Option::Some(product) => product,
+        Option::None => return false,
+    };
+    let tag = m.record(CONSTANT, shape.ordinal, 0, 0);
+    if !m.define(product.first_child, block, tag) {
+        return false;
+    }
+    let count = enum_cells(in low, product.ty);
+    for i in ENUM_TAG_CELLS..count {
+        let position = wrapping_sub(i, ENUM_TAG_CELLS);
+        let raw = if position >= w(shape.variant.fc) {
+            m.record(CONSTANT, 0, 0, 0)
+        } else {
+            let field = low.ctx.world.field(add(w(shape.variant.fa), position));
+            let source = struct_member(in low, inst, field.name);
+            let kind = m.kind(source);
+            if kind == ScalarKind::Unit {
+                m.record(CONSTANT, 0, 0, 0)
+            } else {
+                let value = m.read(add(m.arguments, source), block);
+                if value == NO_VALUE {
+                    return false;
+                }
+                let width = abi_width(kind);
+                if is_float(kind) {
+                    m.record(FLOAT_TO_BITS, value, 0, width)
+                } else if is_signed(kind) && width < QWORD_BITS {
+                    m.record(SIGN_EXTEND, value, width, QWORD_BITS)
+                } else {
+                    value
+                }
+            }
+        };
+        if !m.define(add(product.first_child, i), block, raw) {
+            return false;
+        }
+    }
+    true
+}
+
 fn lower_block(
     in low: L,
     f: FnR,
@@ -3284,7 +3727,12 @@ fn lower_block(
             continue;
         }
         if inst.op == Op::Data {
-            if kind != ScalarKind::Struct || !supported_struct(in low, inst, in m) {
+            let supported = if kind == ScalarKind::Enum {
+                lower_enum_data(in low, inst, block, inout m)
+            } else {
+                kind == ScalarKind::Struct && supported_struct(in low, inst, in m)
+            };
+            if !supported {
                 return false;
             }
             continue;
@@ -3464,6 +3912,96 @@ fn match_branch(condition: u64, label: u64, inout m: Function) {
     let _ = m.record(BLOCK_LABEL, next_test, 0, returns);
 }
 
+fn lower_enum_match(
+    in low: L,
+    row: FnRow,
+    b: BlockRow,
+    source: u64,
+    block: u64,
+    inout m: Function
+) -> bool {
+    let product = match m.product(source) {
+        Option::Some(product) => product,
+        Option::None => return false,
+    };
+    let variants = w(product_adt(in low, product.ty).vn);
+    let mut seen = ChunkSeq::new[bool]();
+    seen.resize(variants, false);
+    let mut covered: u64 = 0;
+    let end = add(b.ta, b.tn);
+    let count = low.program.op(add(b.ta, MATCH_ARM_COUNT));
+    let mut pattern = add(b.ta, MATCH_FIRST_ARM);
+    for arm in 0..count {
+        let shape = match_arm(in low, pattern, end);
+        if shape.target == NO_VALUE {
+            return false;
+        }
+        let label = match_label(in low, row, shape.target, in m);
+        if label == NO_VALUE {
+            return false;
+        }
+        let kind = low.program.op(pattern);
+        if kind == Pat::Bind || kind == Pat::Wild {
+            let _ = m.record(JUMP_LABEL, label, 0, 0);
+            return true;
+        }
+        let mut fields = ChunkSeq::new[EnumPatternField]();
+        let ordinal = match enum_pattern_fields(
+            in low,
+            product,
+            pattern,
+            shape.target,
+            inout fields
+        ) {
+            Option::Some(ordinal) => ordinal,
+            Option::None => return false,
+        };
+        if shape.tests == 1 && !seen.try_get(ordinal).unwrap_or(false) {
+            let _ = seen.try_set(ordinal, true);
+            covered = inc(covered);
+            if covered == variants {
+                let _ = m.record(JUMP_LABEL, label, 0, 0);
+                return true;
+            }
+        }
+        if inc(arm) == count {
+            return false;
+        }
+        let tag = match_value(inout m, product.first_child, arm, block);
+        if tag == NO_VALUE {
+            return false;
+        }
+        let mut condition = m.record(COMPARE_IMMEDIATE, tag, ordinal, NOT_EQUAL);
+        for i in 0..fields.len() {
+            let field = match fields.try_get(i) {
+                Option::Some(field) => field,
+                Option::None => return false,
+            };
+            if low.program.op(field.pattern) != Pat::Literal {
+                continue;
+            }
+            let bits = match literal_bits(
+                in low,
+                add(field.pattern, PATTERN_HEADER_WORDS),
+                field.kind
+            ) {
+                Option::Some(bits) => bits,
+                Option::None => return false,
+            };
+            let raw = match_value(inout m, field.value, arm, block);
+            if raw == NO_VALUE {
+                return false;
+            }
+            let literal = m.record(CONSTANT, bits, 0, 0);
+            let test = m.record(comparison_operation(field.kind), raw, literal, NOT_EQUAL);
+            condition = m.record(OR, condition, test, BYTE_BITS);
+        }
+        match_branch(condition, label, inout m);
+        pattern = inc(shape.target);
+    }
+    false
+}
+
 fn lower_tuple_match(
     in low: L,
     row: FnRow,
@@ -3545,6 +4083,9 @@ fn lower_match(in low: L, row: FnRow, b: BlockRow, block: u64, inout m: Function
     let id = low.program.op(b.ta);
     let kind = m.kind(id);
     let source = add(m.arguments, id);
+    if kind == ScalarKind::Enum {
+        return lower_enum_match(in low, row, b, source, block, inout m);
+    }
     if kind == ScalarKind::Tuple || kind == ScalarKind::Unit {
         return lower_tuple_match(in low, row, b, source, block, inout m);
     }

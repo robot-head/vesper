@@ -2615,10 +2615,26 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
                  _ => { let (_, (n, _)) = pair; wrapping_add(1000, widen_u64(n)) },\n\
              }\n\
          }\n\
-         copy enum UnsupportedMatch { Empty, HasValue(u64) }\n\
+         copy enum NativeChoice { Empty, Number(i8, bool), Sample { raw: f32, count: u64 } }\n\
+         pub fn enum_packer(pick: u64, tag: i8, raw: f32, ready: bool) -> NativeChoice {\n\
+             if pick == 0 { return NativeChoice::Number(tag, ready); };\n\
+             if pick == 1 { return NativeChoice::Sample { count: 9, raw: raw }; };\n\
+             NativeChoice::Empty\n\
+         }\n\
+         pub fn enum_reader(value: NativeChoice) -> u64 {\n\
+             match value {\n\
+                 NativeChoice::Number(-1, true) => 100,\n\
+                 NativeChoice::Number(tag, ready) => if ready { wrapping_u64(tag) } else { 200 },\n\
+                 NativeChoice::Sample { count: n, raw: x } => wrapping_add(n, widen_u64(to_bits_f32(x))),\n\
+                 NativeChoice::Empty => 300,\n\
+             }\n\
+         }\n\
+         pub fn enum_pipeline(pick: u64, tag: i8, raw: f32, ready: bool) -> u64 {\n\
+             enum_reader(enum_packer(pick, tag, raw, ready))\n\
+         }\n\
          fn unsupported(x: u64) -> u64 {\n\
-             let value = UnsupportedMatch::HasValue(x);\n\
-             match value { UnsupportedMatch::Empty => 7, _ => 9 }\n\
+             let value = Option::Some(x);\n\
+             match value { Option::Some(n) => n, _ => 9 }\n\
          }\n\
          pub fn decline(x: u64) -> u64 { unsupported(x) }\n",
     )
@@ -2948,6 +2964,14 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
         "{:?}",
         read_stage2_sidecar_notes(&object)
     );
+    let tuple_match_object = dir.join("native-tuple-match.o");
+    std::fs::rename(&object, &tuple_match_object).unwrap();
+    assert_eq!(
+        compile("enum_pipeline"),
+        0,
+        "{:?}",
+        read_stage2_sidecar_notes(&object)
+    );
 
     let caller = dir.join("native-scalar-caller.c");
     let binary = dir.join("native-scalar-caller");
@@ -2992,6 +3016,7 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
          extern uint64_t product_caller(uint64_t *, int64_t, float, bool);\n\
          extern uint64_t compound_values(uint64_t *, double, double, float, bool);\n\
          extern uint64_t tuple_match_native(int8_t, uint16_t, bool);\n\
+         extern uint64_t enum_pipeline(uint64_t, int8_t, float, bool);\n\
          int main(void) {\n\
              if (mix(10, 4) != 65 || mix(UINT64_MAX, UINT64_MAX) != UINT64_MAX - 16) return 1;\n\
              if (choose(0, 4) != 8 || choose(2, 4) != 8 || choose(4, 1) != 10\n\
@@ -3127,9 +3152,14 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
              if (compound_values(compound, 7.5, 2.0, 3.5f, false) != 0\n\
                  || compound[0] != UINT64_C(0x3ff8000000000000) || compound[1] != UINT64_C(0x40500000)\n\
                  || compound[2] != 2 || compound[3] != UINT64_MAX || compound[4] != UINT64_MAX) return 40;\n\
-             return tuple_match_native(-1, 0, true) != 100 || tuple_match_native(-2, 1, false) != 100\n\
+             if (tuple_match_native(-1, 0, true) != 100 || tuple_match_native(-2, 1, false) != 100\n\
                  || tuple_match_native(0, UINT16_MAX, true) != 65735 || tuple_match_native(1, 9, false) != 209\n\
-                 || tuple_match_native(-1, 1, false) != 1 || tuple_match_native(127, 0, true) != 1000;\n\
+                 || tuple_match_native(-1, 1, false) != 1 || tuple_match_native(127, 0, true) != 1000) return 41;\n\
+             return enum_pipeline(0, -1, 0.0f, true) != 100\n\
+                 || enum_pipeline(0, -128, 1.25f, true) != UINT64_MAX - 127\n\
+                 || enum_pipeline(0, -1, 0.0f, false) != 200\n\
+                 || enum_pipeline(1, 0, -0.0f, false) != UINT64_C(0x80000009)\n\
+                 || enum_pipeline(2, 0, 0.0f, false) != 300;\n\
          }\n",
     )
     .unwrap();
@@ -3169,6 +3199,7 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
             &product_inputs_object,
             &product_caller_object,
             &compound_object,
+            &tuple_match_object,
             &object,
         ])
         .arg("-lm")
