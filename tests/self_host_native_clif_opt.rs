@@ -35,6 +35,9 @@ const PORTED: &[(&str, u64)] = &[
     ("thread_decided_branches", 34),
     ("thread_constant_param_jumps", 35),
     ("propagate_branch_conditions", 36),
+    ("canonicalize_imm_ops", 37),
+    ("fold_load_store_offsets", 38),
+    ("cse_dom_pure", 39),
 ];
 
 /// The package's answer word for a step it ran.

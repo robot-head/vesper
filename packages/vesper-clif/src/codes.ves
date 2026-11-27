@@ -74,6 +74,16 @@ pub const OP_VCONST: u64 = 66;
 pub const OP_SYMBOL_VALUE: u64 = 67;
 pub const OP_FUNC_ADDR: u64 = 68;
 pub const OP_FADD: u64 = 69;
+// The fold steps of #2423.
+pub const OP_SSHR: u64 = 70;
+pub const OP_SSHR_IMM: u64 = 71;
+pub const OP_INEG: u64 = 72;
+pub const OP_ULOAD16: u64 = 73;
+pub const OP_SLOAD16: u64 = 74;
+pub const OP_ULOAD32: u64 = 75;
+pub const OP_SLOAD32: u64 = 76;
+pub const OP_ISTORE8: u64 = 77;
+pub const OP_ISTORE16: u64 = 78;
 
 // Types.
 pub const TY_OTHER: u64 = 0;
@@ -167,6 +177,9 @@ pub const E_SET_DEST: u64 = 65;
 pub const E_BRIF: u64 = 66;
 pub const E_DETACH_RESULTS: u64 = 67;
 pub const E_ICONST: u64 = 68;
+pub const E_REPLACE_IMM: u64 = 69;
+pub const E_REPLACE_ICMP_IMM: u64 = 70;
+pub const E_MEM_ADDR: u64 = 71;
 
 // A sized stack slot's kind.
 pub const S_EXPLICIT: u64 = 0;

@@ -15,14 +15,15 @@
 //   clif_words.rs.
 
 use self::codes::{
-    E_APPEND_DEST_ARG, E_BRIF, E_DETACH_RESULTS, E_ICONST, E_SET_DEST, E_ARGS, E_BLOCK, E_CLONE,
-    E_END, E_FCONST, E_INS, E_JUMP, E_PARAM, E_PLACE, E_REMOVE_BLOCK, E_REMOVE_INST, E_RETARGET,
-    E_SLOT_SIZE, E_ALIAS, E_INS_BEFORE, E_MOVE_INST, E_REMOVE_DEST_ARG, E_REMOVE_PARAM, F_BRANCH,
-    F_CALL, F_RETURN, F_SIDE_EFFECTS, F_STACK_SLOT, F_TERMINATOR, F_TRAP, F_TRAP_CODE, H_NO_OUTLINE,
-    H_SIMD, NONE, NONE64, OP_BITCAST, OP_BRIF, OP_CALL, OP_F32CONST, OP_F64CONST, OP_FCVT_FROM_SINT,
-    OP_ICMP, OP_ICMP_IMM, OP_ICONST, OP_JUMP, OP_LOAD, OP_RETURN, OP_SCALAR_TO_VECTOR, OP_SPLAT,
-    OP_STACK_ADDR, OP_STORE, OP_SWIDEN_HIGH, OP_SWIDEN_LOW, OP_TRAP, OP_UADD_OVERFLOW, S_OTHER,
-    TY_F32, TY_I16X8, TY_I32X4, TY_I64X2, TY_I8, TY_I8X16, TY_OTHER, V_ALIAS, V_PARAM, V_RESULT
+    E_MEM_ADDR, E_REPLACE_ICMP_IMM, E_REPLACE_IMM, E_APPEND_DEST_ARG, E_BRIF, E_DETACH_RESULTS,
+    E_ICONST, E_SET_DEST, E_ARGS, E_BLOCK, E_CLONE, E_END, E_FCONST, E_INS, E_JUMP, E_PARAM,
+    E_PLACE, E_REMOVE_BLOCK, E_REMOVE_INST, E_RETARGET, E_SLOT_SIZE, E_ALIAS, E_INS_BEFORE,
+    E_MOVE_INST, E_REMOVE_DEST_ARG, E_REMOVE_PARAM, F_BRANCH, F_CALL, F_RETURN, F_SIDE_EFFECTS,
+    F_STACK_SLOT, F_TERMINATOR, F_TRAP, F_TRAP_CODE, H_NO_OUTLINE, H_SIMD, NONE, NONE64, OP_BITCAST,
+    OP_BRIF, OP_CALL, OP_F32CONST, OP_F64CONST, OP_FCVT_FROM_SINT, OP_ICMP, OP_ICMP_IMM, OP_ICONST,
+    OP_JUMP, OP_LOAD, OP_RETURN, OP_SCALAR_TO_VECTOR, OP_SPLAT, OP_STACK_ADDR, OP_STORE,
+    OP_SWIDEN_HIGH, OP_SWIDEN_LOW, OP_TRAP, OP_UADD_OVERFLOW, S_OTHER, TY_F32, TY_I16X8, TY_I32X4,
+    TY_I64X2, TY_I8, TY_I8X16, TY_OTHER, V_ALIAS, V_PARAM, V_RESULT
 };
 
 pub copy struct Val {
@@ -1252,6 +1253,70 @@ impl Func {
         self.out.push(w(i));
         self.out.push(ty);
         self.out.push(imm);
+    }
+
+    // `dfg.replace(i)` as the one-argument immediate opcode `op`
+    // (`iadd_imm` and the like): its result stays. Written as
+    // `E_REPLACE_IMM`.
+    pub fn replace_imm(inout self, i: u32, op: u64, arg: u32, imm: u64) {
+        let mut x = self.inst(w(i));
+        x.op = op;
+        x.eff = 0;
+        x.cond = 0;
+        x.imm = imm;
+        x.off = 0;
+        x.mem = 0;
+        x.a0 = n32(self.args.len());
+        x.an = 1;
+        self.args.push(arg);
+        x.dn = 0;
+        self.put_inst(w(i), x);
+        self.out.push(E_REPLACE_IMM);
+        self.out.push(w(i));
+        self.out.push(op);
+        self.out.push(w(arg));
+        self.out.push(imm);
+    }
+
+    // `dfg.replace(i).icmp_imm(cond, arg, imm)`, written as
+    // `E_REPLACE_ICMP_IMM`.
+    pub fn replace_icmp_imm(inout self, i: u32, cond: u64, arg: u32, imm: u64) {
+        let mut x = self.inst(w(i));
+        x.op = OP_ICMP_IMM;
+        x.eff = 0;
+        x.cond = cond;
+        x.imm = imm;
+        x.off = 0;
+        x.mem = 0;
+        x.a0 = n32(self.args.len());
+        x.an = 1;
+        self.args.push(arg);
+        x.dn = 0;
+        self.put_inst(w(i), x);
+        self.out.push(E_REPLACE_ICMP_IMM);
+        self.out.push(w(i));
+        self.out.push(cond);
+        self.out.push(w(arg));
+        self.out.push(imm);
+    }
+
+    // The address (argument `at`: 0 for a load, 1 for a store) and offset
+    // of a memory access, written as `E_MEM_ADDR`.
+    pub fn set_mem_addr(inout self, i: u32, at: u64, addr: u32, off: u64) {
+        let mut x = self.inst(w(i));
+        let mut vals = ChunkSeq::new[u32]();
+        for k in 0..w(x.an) {
+            let v = u32_at(in self.args, wrapping_add(w(x.a0), k));
+            vals.push(if k == at { addr } else { v });
+        }
+        x.a0 = n32(self.args.len());
+        self.args.extend(in vals.as_slice());
+        x.off = off;
+        self.put_inst(w(i), x);
+        self.out.push(E_MEM_ADDR);
+        self.out.push(w(i));
+        self.out.push(w(addr));
+        self.out.push(off);
     }
 
     // The edit script, ended.

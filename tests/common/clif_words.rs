@@ -67,7 +67,12 @@
 //! - [`E_BRIF`] `inst cond then n args... else n args...`:
 //!   `dfg.replace(inst).brif`;
 //! - [`E_DETACH_RESULTS`] `inst`: `dfg.detach_inst_results`;
-//! - [`E_ICONST`] `inst type imm`: `dfg.replace(inst).iconst`.
+//! - [`E_ICONST`] `inst type imm`: `dfg.replace(inst).iconst`;
+//! - [`E_REPLACE_IMM`] `inst opcode arg imm`: `dfg.replace(inst)` as the
+//!   `BinaryImm64` opcode (`iadd_imm` and the like);
+//! - [`E_REPLACE_ICMP_IMM`] `inst cond arg imm`: `dfg.replace(inst).icmp_imm`;
+//! - [`E_MEM_ADDR`] `inst addr offset`: a load's or store's address and
+//!   offset.
 #![allow(dead_code)]
 
 use cranelift_codegen::cursor::{Cursor as _, FuncCursor};
@@ -113,6 +118,9 @@ pub const E_SET_DEST: u64 = 65;
 pub const E_BRIF: u64 = 66;
 pub const E_DETACH_RESULTS: u64 = 67;
 pub const E_ICONST: u64 = 68;
+pub const E_REPLACE_IMM: u64 = 69;
+pub const E_REPLACE_ICMP_IMM: u64 = 70;
+pub const E_MEM_ADDR: u64 = 71;
 
 /// Memory flag bits of the `mem` word.
 pub const M_READONLY: u64 = 1;
@@ -218,6 +226,15 @@ pub const OPCODES: &[Opcode] = &[
     Opcode::SymbolValue,
     Opcode::FuncAddr,
     Opcode::Fadd,
+    Opcode::Sshr,
+    Opcode::SshrImm,
+    Opcode::Ineg,
+    Opcode::Uload16,
+    Opcode::Sload16,
+    Opcode::Uload32,
+    Opcode::Sload32,
+    Opcode::Istore8,
+    Opcode::Istore16,
 ];
 
 /// Type codes, 1 up (0 is any other type).
@@ -283,6 +300,13 @@ pub fn type_code(t: Type) -> u64 {
         types::F64X2 => 15,
         _ => 0,
     }
+}
+
+fn opcode_of(code: u64) -> Result<Opcode, String> {
+    OPCODES
+        .get((code as usize).wrapping_sub(1))
+        .copied()
+        .ok_or_else(|| format!("opcode code {code}"))
 }
 
 fn type_of(code: u64) -> Result<Type, String> {
@@ -762,6 +786,48 @@ pub fn apply(func: &mut ir::Function, words: &[u64]) -> Result<(), String> {
                 let imm = s.next()? as i64;
                 func.dfg.replace(inst).iconst(ty, imm);
             }
+            E_REPLACE_IMM => {
+                let inst = Inst::from_u32(s.next()? as u32);
+                let code = s.next()?;
+                let arg = s.value()?;
+                let imm = s.next()? as i64;
+                let op = opcode_of(code)?;
+                let r = func.dfg.replace(inst);
+                match op {
+                    Opcode::IaddImm => r.iadd_imm(arg, imm),
+                    Opcode::ImulImm => r.imul_imm(arg, imm),
+                    Opcode::BandImm => r.band_imm(arg, imm),
+                    Opcode::BorImm => r.bor_imm(arg, imm),
+                    Opcode::BxorImm => r.bxor_imm(arg, imm),
+                    Opcode::IshlImm => r.ishl_imm(arg, imm),
+                    Opcode::UshrImm => r.ushr_imm(arg, imm),
+                    Opcode::SshrImm => r.sshr_imm(arg, imm),
+                    _ => return Err(format!("no immediate replacement as {op}")),
+                };
+            }
+            E_REPLACE_ICMP_IMM => {
+                let inst = Inst::from_u32(s.next()? as u32);
+                let cond = cond_of(s.next()?)?;
+                let arg = s.value()?;
+                let imm = s.next()? as i64;
+                func.dfg.replace(inst).icmp_imm(cond, arg, imm);
+            }
+            E_MEM_ADDR => {
+                let inst = Inst::from_u32(s.next()? as u32);
+                let addr = s.value()?;
+                let off = ir::immediates::Offset32::new(s.next()? as i64 as i32);
+                match &mut func.dfg.insts[inst] {
+                    InstructionData::Load { arg, offset, .. } => {
+                        *arg = addr;
+                        *offset = off;
+                    }
+                    InstructionData::Store { args, offset, .. } => {
+                        args[1] = addr;
+                        *offset = off;
+                    }
+                    _ => return Err(format!("{inst}: no address to fold into")),
+                }
+            }
             E_SLOT_SIZE => {
                 let slot = ir::StackSlot::from_u32(s.next()? as u32);
                 let size = u32::try_from(s.next()?).map_err(|e| e.to_string())?;
@@ -808,9 +874,7 @@ fn build(func: &mut ir::Function, place: Place, s: &mut Script) -> Result<Inst, 
         let b = s.block()?;
         dests.push((b, s.values()?));
     }
-    let op = *OPCODES
-        .get((code as usize).wrapping_sub(1))
-        .ok_or_else(|| format!("opcode code {code}"))?;
+    let op = opcode_of(code)?;
     let arity = |n: usize| -> Result<(), String> {
         if args.len() == n {
             Ok(())

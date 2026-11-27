@@ -70,7 +70,7 @@ fn values_of(in f: Func, i: u32) -> ChunkSeq[u32] {
 }
 
 // How often each value is used by an instruction in the layout.
-fn use_counts(in f: Func) -> ChunkSeq[u32] {
+pub fn use_counts(in f: Func) -> ChunkSeq[u32] {
     let mut uses = ChunkSeq::new[u32]();
     uses.resize(f.nvalues(), 0);
     let all = layout_insts(in f);
@@ -84,7 +84,7 @@ fn use_counts(in f: Func) -> ChunkSeq[u32] {
     uses
 }
 
-fn use_count(in uses: ChunkSeq[u32], v: u32) -> u32 {
+pub fn use_count(in uses: ChunkSeq[u32], v: u32) -> u32 {
     uses.try_get(w(v)).unwrap_or(0)
 }
 
@@ -114,7 +114,7 @@ fn inst_block(in f: Func, i: u32) -> u32 {
 
 // `ControlFlowGraph`: the predecessors of block `b` are the branches
 // `inst[at[b]..at[b + 1]]`, each once, in instruction number order.
-struct Cfg {
+pub struct Cfg {
     at: ChunkSeq[u64],
     inst: ChunkSeq[u32],
 }
@@ -138,7 +138,7 @@ fn first_dest_at(in f: Func, i: u32, d: u64) -> bool {
     true
 }
 
-fn cfg_of(in f: Func) -> Cfg {
+pub fn cfg_of(in f: Func) -> Cfg {
     let nb = f.nblocks();
     let ni = f.ninsts();
     let mut at = ChunkSeq::new[u64]();
@@ -268,12 +268,12 @@ fn constant_with(in f: Func, kv: u32, kc: u64, v0: u32, depth: u64) -> Konst {
     none()
 }
 
-fn constant(in f: Func, v: u32, depth: u64) -> Konst {
+pub fn constant(in f: Func, v: u32, depth: u64) -> Konst {
     constant_with(in f, NONE, 0, v, depth)
 }
 
 // A value of `bits` bits (8, 16 or 32) sign-extended to 64.
-fn sext(x: u64, bits: u64) -> u64 {
+pub fn sext(x: u64, bits: u64) -> u64 {
     let sign = wrapping_shl_u64(1, wrapping_u32(wrapping_sub(bits, 1)));
     let low = low_bits(x, bits);
     wrapping_sub(low ^ sign, sign)
@@ -1075,7 +1075,7 @@ pub fn thread_constant_param_jumps(inout f: Func) {
 // walk from the entry block that pushes the successors of the last
 // instruction in reverse, skipping blocks already entered) and the
 // immediate dominators.
-struct Dom {
+pub struct Dom {
     post: ChunkSeq[u32],
     idom: ChunkSeq[u32],
 }
@@ -1087,7 +1087,7 @@ copy struct Walk {
     block: u32,
 }
 
-fn dom_of(in f: Func, in cfg: Cfg) -> Dom {
+pub fn dom_of(in f: Func, in cfg: Cfg) -> Dom {
     let nb = f.nblocks();
     let mut d = Dom { post: ChunkSeq::new[u32](), idom: ChunkSeq::new[u32]() };
     d.idom.resize(nb, NONE);
@@ -1172,6 +1172,41 @@ fn dom_of(in f: Func, in cfg: Cfg) -> Dom {
         }
     }
     d
+}
+
+// The dominator tree's children of each block in reverse postorder, as
+// lists: `first[b]`, then `next[child]`.
+pub struct Kids {
+    first: ChunkSeq[u32],
+    next: ChunkSeq[u32],
+}
+
+pub fn dom_kids(in dom: Dom, nb: u64) -> Kids {
+    let mut kids = Kids { first: ChunkSeq::new[u32](), next: ChunkSeq::new[u32]() };
+    kids.first.resize(nb, NONE);
+    kids.next.resize(nb, NONE);
+    let mut last = ChunkSeq::new[u32]();
+    last.resize(nb, NONE);
+    let mut k = dom.post.len();
+    loop {
+        if k == 0 {
+            break;
+        }
+        k = wrapping_sub(k, 1);
+        let b = u32_at(in dom.post, k);
+        let p = u32_at(in dom.idom, w(b));
+        if p == NONE || p == b {
+            continue;
+        }
+        let tail = u32_at(in last, w(p));
+        if tail == NONE {
+            let ok = kids.first.try_set(w(p), b);
+        } else {
+            let ok = kids.next.try_set(w(tail), b);
+        }
+        let ok2 = last.try_set(w(p), b);
+    }
+    kids
 }
 
 fn intersect(in idom: ChunkSeq[u32], in po: ChunkSeq[u64], a0: u32, b0: u32) -> u32 {
@@ -1292,32 +1327,7 @@ pub fn propagate_branch_conditions(inout f: Func) {
         return;
     }
     let nb = f.nblocks();
-    // Dominator children in reverse postorder, as linked lists.
-    let mut first_child = ChunkSeq::new[u32]();
-    first_child.resize(nb, NONE);
-    let mut last_child = ChunkSeq::new[u32]();
-    last_child.resize(nb, NONE);
-    let mut next_sib = ChunkSeq::new[u32]();
-    next_sib.resize(nb, NONE);
-    let mut k = dom.post.len();
-    loop {
-        if k == 0 {
-            break;
-        }
-        k = wrapping_sub(k, 1);
-        let b = u32_at(in dom.post, k);
-        let p = u32_at(in dom.idom, w(b));
-        if p == NONE || p == b {
-            continue;
-        }
-        let tail = u32_at(in last_child, w(p));
-        if tail == NONE {
-            let ok = first_child.try_set(w(p), b);
-        } else {
-            let ok = next_sib.try_set(w(tail), b);
-        }
-        let ok2 = last_child.try_set(w(p), b);
-    }
+    let kids = dom_kids(in dom, nb);
     let nv = f.nvalues();
     let mut known = Known {
         flag: ChunkSeq::new[u8](),
@@ -1509,19 +1519,19 @@ pub fn propagate_branch_conditions(inout f: Func) {
             }
         }
         let hi = facts.len();
-        let mut c = u32_at(in first_child, w(block));
+        let mut c = u32_at(in kids.first, w(block));
         loop {
             if c == NONE {
                 break;
             }
             work.push(Visit { visit: true, block: c, lo: lo, hi: hi, mark: 0 });
-            c = u32_at(in next_sib, w(c));
+            c = u32_at(in kids.next, w(c));
         }
     }
 }
 
 // The instructions of `b` in layout order.
-fn block_insts(in f: Func, b: u32) -> ChunkSeq[u32] {
+pub fn block_insts(in f: Func, b: u32) -> ChunkSeq[u32] {
     let mut out = ChunkSeq::new[u32]();
     let mut i = f.first_inst(b);
     loop {

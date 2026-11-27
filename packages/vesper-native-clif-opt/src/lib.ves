@@ -10,8 +10,10 @@
 //
 // Part 1: remove_unreachable, float_constants, fold_constant_branches,
 // shrink_unused_slots. Part 2: merge_blocks, remove_constant_params.
-// branches.ves (#2423): the branch-threading steps.
+// branches.ves (#2423): the branch-threading steps. folds.ves (#2423):
+// canonicalize_imm_ops, fold_load_store_offsets, cse_dom_pure.
 
+use self::folds::{canonicalize_imm_ops, cse_dom_pure, fold_load_store_offsets};
 use self::branches::{
     propagate_branch_conditions, sink_compares, thread_branches, thread_constant_param_jumps,
     thread_decided_branches
@@ -37,6 +39,10 @@ pub const STEP_THREAD_BRANCHES: u64 = 33;
 pub const STEP_THREAD_DECIDED_BRANCHES: u64 = 34;
 pub const STEP_THREAD_CONSTANT_PARAM_JUMPS: u64 = 35;
 pub const STEP_PROPAGATE_BRANCH_CONDITIONS: u64 = 36;
+// The fold steps of #2423 (folds.ves).
+pub const STEP_CANONICALIZE_IMM_OPS: u64 = 37;
+pub const STEP_FOLD_LOAD_STORE_OFFSETS: u64 = 38;
+pub const STEP_CSE_DOM_PURE: u64 = 39;
 
 // The answer's first word.
 pub const PORTED: u64 = 1;
@@ -635,7 +641,10 @@ pub fn clif_opt_words(in input: Str) -> ChunkSeq[u64] {
         || step == STEP_THREAD_BRANCHES
         || step == STEP_THREAD_DECIDED_BRANCHES
         || step == STEP_THREAD_CONSTANT_PARAM_JUMPS
-        || step == STEP_PROPAGATE_BRANCH_CONDITIONS;
+        || step == STEP_PROPAGATE_BRANCH_CONDITIONS
+        || step == STEP_CANONICALIZE_IMM_OPS
+        || step == STEP_FOLD_LOAD_STORE_OFFSETS
+        || step == STEP_CSE_DOM_PURE;
     if !ported || bytes.len() < STEP_BYTES {
         out.push(NOT_PORTED);
         return out;
@@ -663,6 +672,12 @@ pub fn clif_opt_words(in input: Str) -> ChunkSeq[u64] {
         thread_constant_param_jumps(inout f);
     } else if step == STEP_PROPAGATE_BRANCH_CONDITIONS {
         propagate_branch_conditions(inout f);
+    } else if step == STEP_CANONICALIZE_IMM_OPS {
+        canonicalize_imm_ops(inout f);
+    } else if step == STEP_FOLD_LOAD_STORE_OFFSETS {
+        fold_load_store_offsets(inout f);
+    } else if step == STEP_CSE_DOM_PURE {
+        cse_dom_pure(inout f);
     } else {
         remove_constant_params(inout f);
     }
