@@ -95,6 +95,8 @@ const PUNPCKLWD: u8 = 0x61;
 const PUNPCKLDQ: u8 = 0x62;
 const PUNPCKLQDQ: u8 = 0x6c;
 const PUNPCKHBW: u8 = 0x68;
+const PUNPCKHWD: u8 = 0x69;
+const PUNPCKHDQ: u8 = 0x6a;
 const PMULLW: u8 = 0xd5;
 const PMULUDQ: u8 = 0xf4;
 const PMULLD: u8 = 0x40;
@@ -136,6 +138,14 @@ const PMOVMSKB: u8 = 0xd7;
 const MOVMSK: u8 = 0x50;
 const PACKSSWB: u8 = 0x63;
 const PACKUSWB: u8 = 0x67;
+const PACKSSDW: u8 = 0x6b;
+const PACKUSDW: u8 = 0x2b;
+const PMOVSXBW: u8 = 0x20;
+const PMOVSXWD: u8 = 0x23;
+const PMOVSXDQ: u8 = 0x25;
+const PMOVZXBW: u8 = 0x30;
+const PMOVZXWD: u8 = 0x33;
+const PMOVZXDQ: u8 = 0x35;
 const PSHUFB: u8 = 0x00;
 const PHADDW: u8 = 0x01;
 const PHADDD: u8 = 0x02;
@@ -401,6 +411,8 @@ pub copy enum Instruction {
     VectorIntegerCompare(u8, u8, u8, u64, PackedRelation, bool),
     VectorMultiply(u8, u8, u8, u64, bool),
     VectorIntegerMinMax(u8, u8, u8, u64, bool, bool),
+    VectorWiden(u8, u8, u64, bool, bool, bool),
+    VectorNarrow(u8, u8, u8, u64, bool),
     VectorShift(u8, u8, u64, u64, bool, PackedShift),
     BitOperation(u8, u8, u64, BitOperation),
     ComplementedBitwise(u8, u8, u8, u64),
@@ -1821,6 +1833,92 @@ fn vector_integer_min_max(
     };
 }
 
+fn vector_widen(
+    inout out: ChunkSeq[u8],
+    dest: u8,
+    source: u8,
+    width: u64,
+    signed: bool,
+    high: bool,
+    sse41: bool
+) {
+    if sse41 {
+        let opcode = match (width, signed) {
+            (BYTE_BITS, true) => PMOVSXBW,
+            (WORD_BITS, true) => PMOVSXWD,
+            (DWORD_BITS, true) => PMOVSXDQ,
+            (BYTE_BITS, false) => PMOVZXBW,
+            (WORD_BITS, false) => PMOVZXWD,
+            _ => PMOVZXDQ,
+        };
+        let input = if high {
+            packed_shuffle(inout out, dest, source, HIGH_QWORD_TO_LOW);
+            dest
+        } else {
+            source
+        };
+        packed_38(inout out, opcode, dest, input);
+        return;
+    }
+    let unpack = match (width, high) {
+        (BYTE_BITS, false) => PUNPCKLBW,
+        (BYTE_BITS, true) => PUNPCKHBW,
+        (WORD_BITS, false) => PUNPCKLWD,
+        (WORD_BITS, true) => PUNPCKHWD,
+        (DWORD_BITS, false) => PUNPCKLDQ,
+        _ => PUNPCKHDQ,
+    };
+    float_move(inout out, dest, source);
+    if signed && width != DWORD_BITS {
+        packed_binary(inout out, unpack, dest, dest);
+        packed_shift(
+            inout out,
+            dest,
+            PACKED_SHIFT_ARITHMETIC_RIGHT,
+            wrapping_add(width, width),
+            wrapping_u8(width)
+        );
+    } else {
+        let upper = XMM_AUX_SCRATCH;
+        if signed {
+            float_move(inout out, upper, source);
+            packed_shift(
+                inout out,
+                upper,
+                PACKED_SHIFT_ARITHMETIC_RIGHT,
+                DWORD_BITS,
+                wrapping_u8(DWORD_BITS - 1)
+            );
+        } else {
+            packed_binary(inout out, PXOR, upper, upper);
+        }
+        packed_binary(inout out, unpack, dest, upper);
+    }
+}
+
+fn vector_narrow(inout out: ChunkSeq[u8], dest: u8, left: u8, right: u8, width: u64, signed: bool) {
+    if width == QWORD_BITS {
+        // The selector has already clamped each 64-bit lane.
+        packed_shuffle(inout out, XMM_RIGHT_SCRATCH, right, GATHER_EVEN_DWORDS);
+        packed_shuffle(inout out, dest, left, GATHER_EVEN_DWORDS);
+        packed_binary(inout out, PUNPCKLQDQ, dest, XMM_RIGHT_SCRATCH);
+        return;
+    }
+    let rhs = if dest == right && left != right {
+        float_move(inout out, XMM_RIGHT_SCRATCH, right);
+        XMM_RIGHT_SCRATCH
+    } else {
+        right
+    };
+    float_move(inout out, dest, left);
+    match (width, signed) {
+        (WORD_BITS, true) => packed_binary(inout out, PACKSSWB, dest, rhs),
+        (WORD_BITS, false) => packed_binary(inout out, PACKUSWB, dest, rhs),
+        (DWORD_BITS, true) => packed_binary(inout out, PACKSSDW, dest, rhs),
+        _ => packed_38(inout out, PACKUSDW, dest, rhs),
+    };
+}
+
 fn vector_multiply(
     inout out: ChunkSeq[u8],
     dest: u8,
@@ -2644,6 +2742,23 @@ pub fn emit(inout out: ChunkSeq[u8], in instruction: Instruction) {
             signed,
             min
         ) => vector_integer_min_max(inout out, destination, left, right, width, signed, min),
+        Instruction::VectorWiden(destination, source, width, signed, high, sse41) => vector_widen(
+            inout out,
+            destination,
+            source,
+            width,
+            signed,
+            high,
+            sse41
+        ),
+        Instruction::VectorNarrow(destination, left, right, width, signed) => vector_narrow(
+            inout out,
+            destination,
+            left,
+            right,
+            width,
+            signed
+        ),
         Instruction::VectorConvert(destination, source, demote) => {
             if demote {
                 out.push(OPERAND_SIZE_OVERRIDE);

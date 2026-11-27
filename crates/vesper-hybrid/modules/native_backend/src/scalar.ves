@@ -224,6 +224,8 @@ pub const VECTOR_SHL: u64 = 203;
 pub const VECTOR_SHR: u64 = 204;
 pub const VECTOR_SAR: u64 = 205;
 pub const VECTOR_INTEGER_MIN_MAX: u64 = 206;
+pub const VECTOR_WIDEN: u64 = 207;
+pub const VECTOR_NARROW: u64 = 208;
 const POWER_SHIFT_MASK: u64 = QWORD_BITS - 1;
 const POWER_SIGNED: u64 = 0x40;
 const POWER_NEGATIVE: u64 = 0x80;
@@ -236,6 +238,10 @@ const X86_VECTOR_MUL_SSE41: u64 = 0x100;
 pub const VECTOR_SHIFT_IMMEDIATE: u64 = 0x100;
 pub const VECTOR_MINMAX_SIGNED: u64 = 0x100;
 pub const VECTOR_MINMAX_MINIMUM: u64 = 0x200;
+pub const VECTOR_CONVERSION_SIGNED: u64 = 0x100;
+pub const VECTOR_WIDEN_HIGH: u64 = 0x200;
+const X86_VECTOR_WIDEN_SSE41: u64 = 0x400;
+pub const VECTOR_NARROW_UNSIGNED_INPUT: u64 = 0x200;
 const X86_SWIZZLE_ZERO_HIGH: u64 = 1;
 const X86_HARDWARE_POPCOUNT: u64 = 1;
 const XMM_ARGUMENTS: u64 = 8;
@@ -1063,6 +1069,7 @@ pub fn is_vector_binary(op: u64) -> bool {
         || op == VECTOR_FLOAT_COPY_SIGN
         || op == VECTOR_MUL
         || op == VECTOR_INTEGER_MIN_MAX
+        || op == VECTOR_NARROW
         || is_vector_float_min_max(op)
         || is_vector_float_fma(op)
         || is_vector_float_binary(op)
@@ -1083,6 +1090,19 @@ pub fn valid_vector_shift(in record: Record) -> bool {
 pub fn valid_vector_min_max(mode: u64) -> bool {
     valid_width(mode & VECTOR_LANE_WIDTH_MASK)
         && (mode & ~(VECTOR_LANE_WIDTH_MASK | VECTOR_MINMAX_SIGNED | VECTOR_MINMAX_MINIMUM)) == 0
+}
+
+pub fn valid_vector_widen(mode: u64) -> bool {
+    let width = mode & VECTOR_LANE_WIDTH_MASK;
+    (width == BYTE_BITS || width == WORD_BITS || width == DWORD_BITS)
+        && (mode & ~(VECTOR_LANE_WIDTH_MASK | VECTOR_CONVERSION_SIGNED | VECTOR_WIDEN_HIGH)) == 0
+}
+
+pub fn valid_vector_narrow(mode: u64) -> bool {
+    let width = mode & VECTOR_LANE_WIDTH_MASK;
+    let kind = mode & ~VECTOR_LANE_WIDTH_MASK;
+    (width == WORD_BITS || width == DWORD_BITS || width == QWORD_BITS)
+        && (kind == 0 || kind == VECTOR_CONVERSION_SIGNED || kind == VECTOR_NARROW_UNSIGNED_INPUT)
 }
 
 fn is_vector_float_binary(op: u64) -> bool {
@@ -1118,6 +1138,7 @@ pub fn uses_vector_left(op: u64) -> bool {
         || is_vector_convert(op)
         || is_vector_float_unary(op)
         || is_vector_shift(op)
+        || op == VECTOR_WIDEN
         || op >= VECTOR_INSERT && op <= VECTOR_HIGH_BITS
 }
 
@@ -1150,7 +1171,7 @@ fn vector_binary_opcode(op: u64, width: u64) -> u8 {
 pub fn is_vector_result(op: u64) -> bool {
     (op >= VECTOR_CONSTANT && op <= VECTOR_INSERT && op != VECTOR_STORE)
         || op == VECTOR_INTEGER_COMPARE
-        || (op >= VECTOR_FLOAT_ADD && op <= VECTOR_INTEGER_MIN_MAX)
+        || (op >= VECTOR_FLOAT_ADD && op <= VECTOR_NARROW)
 }
 
 pub fn vector_value(in words: Slice[u64], arguments: u64, value: u64) -> bool {
@@ -1509,6 +1530,12 @@ fn find_last_reads(
                 VECTOR_SHL | VECTOR_SHR | VECTOR_SAR => valid_vector_shift(in record),
                 VECTOR_INTEGER_MIN_MAX => valid_vector_min_max(record.extra)
                     && (record.extra & VECTOR_LANE_WIDTH_MASK) != QWORD_BITS,
+                VECTOR_WIDEN => record.right == 0
+                    && valid_vector_widen(record.extra & ~X86_VECTOR_WIDEN_SSE41),
+                VECTOR_NARROW => valid_vector_narrow(record.extra)
+                    && (record.extra & VECTOR_NARROW_UNSIGNED_INPUT) == 0
+                    && ((record.extra & VECTOR_LANE_WIDTH_MASK) != QWORD_BITS
+                        || record.extra == QWORD_BITS),
                 VECTOR_MUL => {
                     let width = record.extra & VECTOR_LANE_WIDTH_MASK;
                     valid_width(width)
@@ -1558,6 +1585,10 @@ fn find_last_reads(
             frame.vectors = true;
             frame.xmm_aux = frame.xmm_aux
                 || record.op == VECTOR_INTEGER_COMPARE
+                || (record.op == VECTOR_WIDEN
+                    && (record.extra & X86_VECTOR_WIDEN_SSE41) == 0
+                    && ((record.extra & VECTOR_CONVERSION_SIGNED) == 0
+                        || (record.extra & VECTOR_LANE_WIDTH_MASK) == DWORD_BITS))
                 || is_vector_float_min_max(record.op)
                 || (record.op == VECTOR_FLOAT_COMPARE
                     && packed_float_compare_needs_temp(record.extra))
@@ -2962,6 +2993,21 @@ fn emit_vector_instruction(
             record.extra & VECTOR_LANE_WIDTH_MASK,
             (record.extra & VECTOR_MINMAX_SIGNED) != 0,
             (record.extra & VECTOR_MINMAX_MINIMUM) != 0
+        ),
+        VECTOR_WIDEN => Instruction::VectorWiden(
+            destination,
+            left,
+            record.extra & VECTOR_LANE_WIDTH_MASK,
+            (record.extra & VECTOR_CONVERSION_SIGNED) != 0,
+            (record.extra & VECTOR_WIDEN_HIGH) != 0,
+            (record.extra & X86_VECTOR_WIDEN_SSE41) != 0
+        ),
+        VECTOR_NARROW => Instruction::VectorNarrow(
+            destination,
+            left,
+            right,
+            record.extra & VECTOR_LANE_WIDTH_MASK,
+            (record.extra & VECTOR_CONVERSION_SIGNED) != 0
         ),
         VECTOR_SHL | VECTOR_SHR | VECTOR_SAR => {
             let immediate = (record.extra & VECTOR_SHIFT_IMMEDIATE) != 0;

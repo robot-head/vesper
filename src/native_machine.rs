@@ -224,6 +224,8 @@ enum IntegerOp {
     VectorShiftRightLogical = 204,
     VectorShiftRightArithmetic = 205,
     VectorIntegerMinMax = 206,
+    VectorWiden = 207,
+    VectorNarrow = 208,
 }
 
 fn integer_bit_op(op: Opcode) -> Option<IntegerOp> {
@@ -301,6 +303,10 @@ const X86_VECTOR_MUL_SSE41: u64 = 1 << SIMD_LANE_INDEX_SHIFT;
 const VECTOR_SHIFT_IMMEDIATE: u64 = 1 << SIMD_LANE_INDEX_SHIFT;
 const VECTOR_MINMAX_SIGNED: u64 = 1 << SIMD_CONDITION_SHIFT;
 const VECTOR_MINMAX_MINIMUM: u64 = VECTOR_MINMAX_SIGNED << 1;
+const VECTOR_CONVERSION_SIGNED: u64 = 1 << SIMD_CONDITION_SHIFT;
+const VECTOR_WIDEN_HIGH: u64 = VECTOR_CONVERSION_SIGNED << 1;
+const X86_VECTOR_WIDEN_SSE41: u64 = VECTOR_WIDEN_HIGH << 1;
+const VECTOR_NARROW_UNSIGNED_INPUT: u64 = VECTOR_CONVERSION_SIGNED << 1;
 const X86_HARDWARE_POPCOUNT: u64 = 1;
 const X86_SWIZZLE_ZERO_HIGH: u64 = 1;
 const X86_SWIZZLE_ZERO_INDEX: u8 = 0x80;
@@ -2066,6 +2072,90 @@ impl IntegerBlocks<'_> {
         Some(self.vector_bitselect(mask, yes, no))
     }
 
+    fn vector_integer_splat(&mut self, lane: Type, value: u64) -> Option<u64> {
+        let bytes = value.to_le_bytes();
+        let lane_bytes = lane.bytes() as usize;
+        let vector: [u8; SIMD_BYTES as usize] = std::array::from_fn(|i| bytes[i % lane_bytes]);
+        self.vector_constant(&vector)
+    }
+
+    fn vector_narrow(
+        &mut self,
+        opcode: Opcode,
+        lane: Type,
+        mut left: u64,
+        mut right: u64,
+    ) -> Option<u64> {
+        let width = integer_width(lane)?;
+        let narrow_width = width / 2;
+        let signed = opcode == Opcode::Snarrow;
+        let unsigned_input = opcode == Opcode::Uunarrow;
+        if self.aarch64 {
+            let mode = width
+                | if signed { VECTOR_CONVERSION_SIGNED } else { 0 }
+                | if unsigned_input {
+                    VECTOR_NARROW_UNSIGNED_INPUT
+                } else {
+                    0
+                };
+            return Some(self.append(IntegerOp::VectorNarrow, [left, right, mode]));
+        }
+        if unsigned_input || lane == types::I64 {
+            let signed_limit = (1 << (narrow_width - 1)) - 1;
+            let max = self.vector_integer_splat(
+                lane,
+                if signed {
+                    signed_limit
+                } else {
+                    (1 << narrow_width) - 1
+                },
+            )?;
+            let min_op = if unsigned_input {
+                Opcode::Umin
+            } else {
+                Opcode::Smin
+            };
+            left = self.vector_integer_min_max(min_op, lane, left, max)?;
+            right = self.vector_integer_min_max(min_op, lane, right, max)?;
+            if lane == types::I64 && !unsigned_input {
+                let min =
+                    self.vector_integer_splat(lane, if signed { !signed_limit } else { 0 })?;
+                left = self.vector_integer_min_max(Opcode::Smax, lane, left, min)?;
+                right = self.vector_integer_min_max(Opcode::Smax, lane, right, min)?;
+            }
+            if lane == types::I64 {
+                return Some(self.append(IntegerOp::VectorNarrow, [left, right, width]));
+            }
+        }
+        if !signed && lane == types::I32 && !self.has_x86_sse41() {
+            // Bias nonnegative lanes into the range of SSE2's signed pack.
+            // Clamping negatives first also prevents wraparound on subtraction.
+            if !unsigned_input {
+                let zero = self.vector_integer_splat(lane, 0)?;
+                let positive =
+                    width | (condition(IntCC::SignedGreaterThan) << SIMD_CONDITION_SHIFT);
+                let left_mask =
+                    self.append(IntegerOp::VectorIntegerCompare, [left, zero, positive]);
+                left = self.append(IntegerOp::VectorAnd, [left, left_mask, 0]);
+                let right_mask =
+                    self.append(IntegerOp::VectorIntegerCompare, [right, zero, positive]);
+                right = self.append(IntegerOp::VectorAnd, [right, right_mask, 0]);
+            }
+            let bias = 1 << (narrow_width - 1);
+            let wide_bias = self.vector_integer_splat(lane, bias)?;
+            let narrow_bias = self.vector_integer_splat(types::I16, bias)?;
+            let left = self.append(IntegerOp::VectorSub, [left, wide_bias, width]);
+            let right = self.append(IntegerOp::VectorSub, [right, wide_bias, width]);
+            let packed = self.append(
+                IntegerOp::VectorNarrow,
+                [left, right, width | VECTOR_CONVERSION_SIGNED],
+            );
+            return Some(self.append(IntegerOp::VectorXor, [packed, narrow_bias, 0]));
+        }
+        let mode = width | if signed { VECTOR_CONVERSION_SIGNED } else { 0 };
+        Some(self.append(IntegerOp::VectorNarrow, [left, right, mode]))
+    }
+
     fn vector_shuffle(&mut self, mask: &[u8], left: u64, right: u64) -> Option<u64> {
         const LANES: u8 = SIMD_BYTES as u8;
         let mask: &[u8; SIMD_BYTES as usize] = mask.try_into().ok()?;
@@ -2155,6 +2245,40 @@ impl IntegerBlocks<'_> {
                     integer_width(lane)?
                 };
                 (IntegerOp::VectorSplat, [source, 0, width])
+            }
+            InstructionData::Unary { opcode, arg }
+                if matches!(
+                    opcode,
+                    Opcode::SwidenLow | Opcode::SwidenHigh | Opcode::UwidenLow | Opcode::UwidenHigh
+                ) && vector_type(ty(arg))
+                    && ty(arg).merge_lanes() == Some(output) =>
+            {
+                let width = integer_width(ty(arg).lane_type())?;
+                let signed = matches!(opcode, Opcode::SwidenLow | Opcode::SwidenHigh);
+                let high = matches!(opcode, Opcode::SwidenHigh | Opcode::UwidenHigh);
+                let mode = width
+                    | if signed { VECTOR_CONVERSION_SIGNED } else { 0 }
+                    | if high { VECTOR_WIDEN_HIGH } else { 0 }
+                    | if self.has_x86_sse41() && (!high || (signed && ty(arg) == types::I32X4)) {
+                        X86_VECTOR_WIDEN_SSE41
+                    } else {
+                        0
+                    };
+                (IntegerOp::VectorWiden, [input(arg)?, 0, mode])
+            }
+            InstructionData::Binary {
+                opcode: opcode @ (Opcode::Snarrow | Opcode::Unarrow | Opcode::Uunarrow),
+                args: [left, right],
+            } if vector_type(ty(left))
+                && ty(left) == ty(right)
+                && ty(left).split_lanes() == Some(output) =>
+            {
+                return self.vector_narrow(
+                    opcode,
+                    ty(left).lane_type(),
+                    input(left)?,
+                    input(right)?,
+                );
             }
             InstructionData::Binary {
                 opcode: opcode @ (Opcode::Ishl | Opcode::Ushr | Opcode::Sshr),

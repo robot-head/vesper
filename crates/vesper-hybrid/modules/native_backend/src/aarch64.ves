@@ -48,7 +48,8 @@ use self::scalar::{
     VECTOR_FLOAT_FLOOR, VECTOR_FLOAT_TRUNC, VECTOR_FLOAT_NEAREST, VECTOR_FLOAT_MIN,
     VECTOR_FLOAT_MAX, VECTOR_MUL, VECTOR_SHL, VECTOR_SHR, VECTOR_SAR, VECTOR_SHIFT_IMMEDIATE,
     valid_vector_shift, VECTOR_INTEGER_MIN_MAX, VECTOR_MINMAX_SIGNED, VECTOR_MINMAX_MINIMUM,
-    valid_vector_min_max
+    VECTOR_WIDEN, VECTOR_NARROW, VECTOR_CONVERSION_SIGNED, VECTOR_WIDEN_HIGH,
+    VECTOR_NARROW_UNSIGNED_INPUT, valid_vector_widen, valid_vector_narrow, valid_vector_min_max
 };
 use self::x86_64::{
     BYTE_BITS, WORD_BITS, DWORD_BITS, QWORD_BITS, FLOAT_ORDERED, FLOAT_UNORDERED, FLOAT_EQUAL,
@@ -124,7 +125,7 @@ const VECTOR_ZERO: u32 = 0x4f00e400;
 const VECTOR_DUP: u32 = 0x4e000c00;
 const VECTOR_INSERT_GP: u32 = 0x4e001c00;
 const VECTOR_EXTRACT_GP: u32 = 0x0e003c00;
-const VECTOR_EXTRACT_QWORD: u32 = 0x40000000;
+const VECTOR_Q: u32 = 0x40000000;
 const VECTOR_LANE_IMM5_SHIFT: u32 = 16;
 const VECTOR_SIZE_SHIFT: u32 = 22;
 const VECTOR_DWORD_SIZE: u32 = 2 << VECTOR_SIZE_SHIFT;
@@ -141,6 +142,11 @@ const VECTOR_UMAX_REG: u32 = 0x6e206400;
 const VECTOR_MUL_REG: u32 = 0x4e209c00;
 const VECTOR_REVERSE_DWORDS: u32 = 0x4ea00800;
 const VECTOR_NARROW_QWORDS: u32 = 0x0ea12800;
+const VECTOR_SQXTN: u32 = 0x0e214800;
+const VECTOR_SQXTUN: u32 = 0x2e212800;
+const VECTOR_UQXTN: u32 = 0x2e214800;
+const VECTOR_SSHLL: u32 = 0x0f00a400;
+const VECTOR_USHLL: u32 = 0x2f00a400;
 const VECTOR_SHIFT_LONG_DWORDS: u32 = 0x2ea13800;
 const VECTOR_UMLAL_DWORDS: u32 = 0x2ea08000;
 const VECTOR_SIGNED_SAT_ADD_REG: u32 = 0x4e200c00;
@@ -1004,6 +1010,42 @@ fn vector_lane_immediate(lane: u64, width: u64) -> u32 {
     sh(bytes | wrapping_mul(wrapping_mul(wrapping_u32(lane), bytes), 2), VECTOR_LANE_IMM5_SHIFT)
 }
 
+fn vector_widen(inout out: ChunkSeq[u8], mode: u64, dest: u32, source: u32) {
+    let opcode = if (mode & VECTOR_CONVERSION_SIGNED) != 0 {
+        VECTOR_SSHLL
+    } else {
+        VECTOR_USHLL
+    };
+    let half = if (mode & VECTOR_WIDEN_HIGH) != 0 {
+        VECTOR_Q
+    } else {
+        0
+    };
+    let width = wrapping_u32(mode & VECTOR_LANE_WIDTH_MASK);
+    push32(
+        inout out,
+        opcode | half | sh(width, VECTOR_SHIFT_IMM_OFFSET) | sh(source, RN_SHIFT) | dest
+    );
+}
+
+fn vector_narrow(inout out: ChunkSeq[u8], mode: u64, dest: u32, left: u32, right: u32) {
+    let opcode = match mode & ~VECTOR_LANE_WIDTH_MASK {
+        VECTOR_CONVERSION_SIGNED => VECTOR_SQXTN,
+        VECTOR_NARROW_UNSIGNED_INPUT => VECTOR_UQXTN,
+        _ => VECTOR_SQXTUN,
+    };
+    let width = (mode & VECTOR_LANE_WIDTH_MASK) / 2;
+    let size = sh(trailing_zeros_u64(width / BYTE_BITS), VECTOR_SIZE_SHIFT);
+    let rhs = if dest == right {
+        rrr(inout out, VECTOR_OR_REG, FP_LEFT, right, right);
+        FP_LEFT
+    } else {
+        right
+    };
+    push32(inout out, opcode | size | sh(left, RN_SHIFT) | dest);
+    push32(inout out, opcode | VECTOR_Q | size | sh(rhs, RN_SHIFT) | dest);
+}
+
 fn vector_integer_min_max(inout out: ChunkSeq[u8], in r: Record, dest: u32, left: u32, right: u32) {
     let width = r.extra & VECTOR_LANE_WIDTH_MASK;
     let signed = (r.extra & VECTOR_MINMAX_SIGNED) != 0;
@@ -1072,11 +1114,7 @@ fn vector_integer_compare(inout out: ChunkSeq[u8], in r: Record, dest: u32, left
 }
 
 fn vector_extract(inout out: ChunkSeq[u8], dest: u32, source: u32, lane: u64, width: u64) {
-    let wide = if width == QWORD_BITS {
-        VECTOR_EXTRACT_QWORD
-    } else {
-        0
-    };
+    let wide = if width == QWORD_BITS { VECTOR_Q } else { 0 };
     push32(
         inout out,
         VECTOR_EXTRACT_GP | wide | vector_lane_immediate(lane, width) | sh(source, RN_SHIFT) | dest
@@ -1379,6 +1417,16 @@ fn operands(in r: Record, returns: u64) -> Option[u64] {
                 Option::None
             },
             VECTOR_INTEGER_MIN_MAX => if valid_vector_min_max(r.extra) {
+                Option::Some(2)
+            } else {
+                Option::None
+            },
+            VECTOR_WIDEN => if r.right == 0 && valid_vector_widen(r.extra) {
+                Option::Some(1)
+            } else {
+                Option::None
+            },
+            VECTOR_NARROW => if valid_vector_narrow(r.extra) {
                 Option::Some(2)
             } else {
                 Option::None
@@ -3874,6 +3922,8 @@ fn encode_pass(
                 VECTOR_LOAD => memory(inout out, true, VECTOR_BITS, lhs, dest, r.right),
                 VECTOR_INTEGER_COMPARE => vector_integer_compare(inout out, in r, dest, lhs, rhs),
                 VECTOR_INTEGER_MIN_MAX => vector_integer_min_max(inout out, in r, dest, lhs, rhs),
+                VECTOR_WIDEN => vector_widen(inout out, r.extra, dest, lhs),
+                VECTOR_NARROW => vector_narrow(inout out, r.extra, dest, lhs, rhs),
                 VECTOR_SHL | VECTOR_SHR | VECTOR_SAR => {
                     let count = if (r.extra & VECTOR_SHIFT_IMMEDIATE) != 0 {
                         UNASSIGNED

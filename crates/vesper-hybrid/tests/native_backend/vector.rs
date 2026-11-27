@@ -586,6 +586,182 @@ fn packed_integer_min_max_matches_cranelift_across_features() {
 }
 
 #[test]
+fn packed_integer_conversions_match_cranelift_across_features() {
+    const LIVE_VECTORS: u8 = 21;
+    type Entry = unsafe extern "C" fn(*const u8, *const u8, *mut u8);
+    for sse41 in [false, true] {
+        if sse41 && !std::is_x86_feature_detected!("sse4.1") {
+            continue;
+        }
+        let mut isa = cranelift_native::builder_with_options(false).unwrap();
+        if sse41 {
+            isa.enable(SSE41_FLAG).unwrap();
+        }
+        let isa = isa
+            .finish(settings::Flags::new(settings::builder()))
+            .unwrap();
+        let mut module = JITModule::new(JITBuilder::with_isa(
+            isa,
+            cranelift_module::default_libcall_names(),
+        ));
+        for (narrow, wide) in [
+            (types::I8X16, types::I16X8),
+            (types::I16X8, types::I32X4),
+            (types::I32X4, types::I64X2),
+        ] {
+            let wide_sign = 1u64 << (wide.lane_bits() - 1);
+            let unsigned_max = (1u64 << narrow.lane_bits()) - 1;
+            let signed_max = unsigned_max >> 1;
+            let signed_min = !signed_max;
+            let edges = [
+                0,
+                1,
+                wide_sign - 1,
+                wide_sign,
+                u64::MAX,
+                signed_min - 1,
+                signed_min,
+                signed_min + 1,
+                signed_max - 1,
+                signed_max,
+                signed_max + 1,
+                unsigned_max - 1,
+                unsigned_max,
+                unsigned_max + 1,
+                0x0000_0001_0023_4567,
+                0xfedc_ba98_7654_3210,
+            ];
+            for opcode in [
+                Opcode::SwidenLow,
+                Opcode::SwidenHigh,
+                Opcode::UwidenLow,
+                Opcode::UwidenHigh,
+                Opcode::Snarrow,
+                Opcode::Unarrow,
+                Opcode::Uunarrow,
+            ] {
+                let packing =
+                    matches!(opcode, Opcode::Snarrow | Opcode::Unarrow | Opcode::Uunarrow);
+                let input_ty = if packing { wide } else { narrow };
+                let lane_bytes = input_ty.lane_type().bytes() as usize;
+                let lanes = |first: usize| -> [u8; VECTOR_BYTES] {
+                    std::array::from_fn(|i| {
+                        edges[(first + i / lane_bytes) % edges.len()].to_le_bytes()[i % lane_bytes]
+                    })
+                };
+                for (keep_left, spills) in [(false, false), (true, false), (false, true)] {
+                    let build = |module: &JITModule, scalar_reference| {
+                        let mut context = module.make_context();
+                        context.func.signature.params = vec![AbiParam::new(types::I64); 3];
+                        let mut state = FunctionBuilderContext::new();
+                        let mut b = FunctionBuilder::new(&mut context.func, &mut state);
+                        let entry = b.create_block();
+                        b.append_block_params_for_function_params(entry);
+                        b.switch_to_block(entry);
+                        let [left, right, output] = *b.block_params(entry) else {
+                            unreachable!()
+                        };
+                        let flags = MemFlags::new().with_notrap();
+                        let live: Vec<_> = if spills {
+                            (1..=LIVE_VECTORS)
+                                .map(|byte| {
+                                    let bits = b
+                                        .func
+                                        .dfg
+                                        .constants
+                                        .insert(ConstantData::from(vec![byte; VECTOR_BYTES]));
+                                    b.ins().vconst(wide, bits)
+                                })
+                                .collect()
+                        } else {
+                            Vec::new()
+                        };
+                        let l = b.ins().load(input_ty, flags, left, 0);
+                        let r = packing.then(|| b.ins().load(input_ty, flags, right, 0));
+                        let result = if scalar_reference {
+                            // Cranelift x86-64 lacks these packed forms. Use its scalar saturation.
+                            let zero = b.ins().iconst(narrow.lane_type(), 0);
+                            let mut packed = b.ins().splat(narrow, zero);
+                            for (half, value) in [l, r.unwrap()].into_iter().enumerate() {
+                                for lane in 0..wide.lane_count() as u8 {
+                                    let value = b.ins().extractlane(value, lane);
+                                    let limit = if opcode == Opcode::Snarrow {
+                                        signed_max
+                                    } else {
+                                        unsigned_max
+                                    };
+                                    let limit = b.ins().iconst(wide.lane_type(), limit as i64);
+                                    let clipped = if opcode == Opcode::Uunarrow {
+                                        b.ins().umin(value, limit)
+                                    } else {
+                                        let floor = if opcode == Opcode::Snarrow {
+                                            signed_min
+                                        } else {
+                                            0
+                                        };
+                                        let floor = b.ins().iconst(wide.lane_type(), floor as i64);
+                                        let value = b.ins().smax(value, floor);
+                                        b.ins().smin(value, limit)
+                                    };
+                                    let lane_value = b.ins().ireduce(narrow.lane_type(), clipped);
+                                    let index = half as u8 * wide.lane_count() as u8 + lane;
+                                    packed = b.ins().insertlane(packed, lane_value, index);
+                                }
+                            }
+                            packed
+                        } else {
+                            match opcode {
+                                Opcode::SwidenLow => b.ins().swiden_low(l),
+                                Opcode::SwidenHigh => b.ins().swiden_high(l),
+                                Opcode::UwidenLow => b.ins().uwiden_low(l),
+                                Opcode::UwidenHigh => b.ins().uwiden_high(l),
+                                Opcode::Snarrow => b.ins().snarrow(l, r.unwrap()),
+                                Opcode::Unarrow => b.ins().unarrow(l, r.unwrap()),
+                                _ => b.ins().uunarrow(l, r.unwrap()),
+                            }
+                        };
+                        b.ins().store(flags, result, output, 0);
+                        if keep_left {
+                            b.ins().store(flags, l, output, VECTOR_BYTES as i32);
+                        }
+                        if let Some(sum) = live.into_iter().reduce(|a, c| b.ins().bxor(a, c)) {
+                            b.ins().store(flags, sum, output, VECTOR_BYTES as i32);
+                        }
+                        b.ins().return_(&[]);
+                        b.seal_all_blocks();
+                        b.finalize();
+                        context
+                    };
+                    let mut candidate = build(&module, false);
+                    let mut reference = (packing
+                        && (wide == types::I64X2 || opcode == Opcode::Uunarrow))
+                        .then(|| build(&module, true));
+                    let functions =
+                        compile_with_reference(&mut module, &mut candidate, reference.as_mut())
+                            .map(|ptr| unsafe { std::mem::transmute::<*const u8, Entry>(ptr) });
+                    let partners = if packing { edges.len() } else { 1 };
+                    for i in 0..edges.len() {
+                        for j in 0..partners {
+                            let (left, right) = (lanes(i), lanes(j));
+                            let [reference, candidate] = functions.map(|run| {
+                                let mut out = [0xcc; VECTOR_BYTES * 2];
+                                unsafe { run(left.as_ptr(), right.as_ptr(), out.as_mut_ptr()) };
+                                out
+                            });
+                            assert_eq!(
+                                candidate, reference,
+                                "{opcode} {input_ty} {sse41} {keep_left} {spills} {i} {j}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        unsafe { module.free_memory() };
+    }
+}
+
+#[test]
 fn packed_shifts_match_cranelift_with_modulo_counts() {
     const LIVE_VECTORS: u8 = 21;
     type Entry = unsafe extern "C" fn(*const u8, u64, *mut u8);
