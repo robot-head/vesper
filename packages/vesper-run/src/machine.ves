@@ -171,6 +171,13 @@ copy struct Sl {
     len: u64,
 }
 
+// A string (`Value::String`, also a view): bytes `str_bytes[at..at + len]`,
+// never changed (an update makes a new string).
+copy struct Sr {
+    at: u64,
+    len: u64,
+}
+
 // A captured continuation (`Continuation`): the frames from its handler
 // up, and the arena entries above the handler's levels, in the `k_*`
 // stores at `*_start`; the levels when it was captured; the handler's
@@ -264,6 +271,10 @@ pub struct M {
     seqs: ChunkSeq[Sq],
     seq_items: ChunkSeq[Val],
     slices: ChunkSeq[Sl],
+    // Strings and their bytes; per literal symbol its string + 1, or 0.
+    strs: ChunkSeq[Sr],
+    str_bytes: ChunkSeq[u8],
+    lit_strs: ChunkSeq[u64],
     some_sym: u32,
     none_sym: u32,
     fail_sym: u32,
@@ -357,6 +368,9 @@ pub fn machine_new(sink ctx: Ctx, sink program: Program, fuel: u64) -> M {
         seqs: ChunkSeq::new[Sq](),
         seq_items: ChunkSeq::new[Val](),
         slices: ChunkSeq::new[Sl](),
+        strs: ChunkSeq::new[Sr](),
+        str_bytes: ChunkSeq::new[u8](),
+        lit_strs: ChunkSeq::new[u64](),
         some_sym: 0,
         none_sym: 0,
         fail_sym: 0,
@@ -1757,7 +1771,8 @@ fn pat_end(in machine: M, at: u64) -> u64 {
 }
 
 // Declines a literal the machine has no value for (a float, a 128-bit
-// integer, a non-ASCII string, whose `Debug` text needs Unicode tables).
+// integer). `run` declines a non-ASCII string in the result, whose `Debug`
+// text needs Unicode tables.
 fn scan_literal(inout machine: M, at: u64) {
     let kind = machine.program.op(at);
     let lo = machine.program.op(inc(at));
@@ -1767,16 +1782,7 @@ fn scan_literal(inout machine: M, at: u64) {
         if !(hi == 0 || neg) {
             decline(inout machine, "a 128-bit integer literal", NONE32);
         }
-    } else if kind == widen_u64(Lit::String) {
-        let sym = n32(lo);
-        let text_start = machine.ctx.names.start(sym);
-        let text_end = machine.ctx.names.end(sym);
-        for i in text_start..text_end {
-            if u8_at(in machine.ctx.names.text, i) >= 128 {
-                decline(inout machine, "a non-ASCII string literal", NONE32);
-            }
-        }
-    } else if kind != widen_u64(Lit::Bool) {
+    } else if kind != widen_u64(Lit::String) && kind != widen_u64(Lit::Bool) {
         decline(inout machine, "a float or wide literal", NONE32);
     }
 }
@@ -2121,7 +2127,8 @@ fn display(in machine: M, value: Val, inout out: ChunkSeq[u8], depth: u64) {
             put(inout out, "false");
         }
     } else if value.tag == T_STR {
-        debug_str(inout out, in machine.ctx.names, n32(value.payload));
+        let text = str_at(in machine, value.payload);
+        debug_str(inout out, in machine.str_bytes, text.at, add(text.at, text.len));
     } else if value.tag == T_FN {
         put(inout out, "<fn ");
         put_sym(inout out, in machine.ctx.names, n32(value.payload));
@@ -2232,13 +2239,12 @@ fn hex(digit: u64) -> u8 {
     }
 }
 
-// Rust's `{:?}` of an ASCII string (`scan` declines the others).
-fn debug_str(inout out: ChunkSeq[u8], in names: Names, sym: u32) {
+// Rust's `{:?}` of an ASCII string `bytes[text_start..text_end]`. Other
+// bytes are copied, and `run` declines a result whose text has one.
+fn debug_str(inout out: ChunkSeq[u8], in bytes: ChunkSeq[u8], text_start: u64, text_end: u64) {
     out.push(34);
-    let text_start = names.start(sym);
-    let text_end = names.end(sym);
     for i in text_start..text_end {
-        let byte = u8_at(in names.text, i);
+        let byte = u8_at(in bytes, i);
         if byte == 34 {
             out.push(92);
             out.push(34);
@@ -2274,7 +2280,10 @@ fn debug_str(inout out: ChunkSeq[u8], in names: Names, sym: u32) {
 
 // `equal`.
 fn equal(in machine: M, lhs: Val, rhs: Val) -> bool {
-    if lhs.tag <= K_I32 || lhs.tag == T_BOOL || lhs.tag == T_STR {
+    if lhs.tag == T_STR {
+        return rhs.tag == T_STR && text_order(in machine, lhs, rhs) == ORDER_EQUAL;
+    }
+    if lhs.tag <= K_I32 || lhs.tag == T_BOOL {
         return lhs.tag == rhs.tag && lhs.payload == rhs.payload;
     }
     if lhs.tag == T_TUPLE && rhs.tag == T_TUPLE {
@@ -2519,7 +2528,7 @@ fn literal_matches(in machine: M, at: u64, value: Val) -> bool {
         return value.tag == T_BOOL && value.payload == lo;
     }
     if kind == widen_u64(Lit::String) {
-        return value.tag == T_STR && value.payload == lo;
+        return value.tag == T_STR && text_spells(in machine, value, n32(lo));
     }
     false
 }
@@ -2693,20 +2702,19 @@ fn binary(inout machine: M, code: u64, lhs: Val, rhs: Val, inout failure: u8) ->
         return undef();
     }
     if lhs.tag == T_STR && rhs.tag == T_STR {
-        let lhs_sym = n32(lhs.payload);
-        let rhs_sym = n32(rhs.payload);
+        let order = text_order(in machine, lhs, rhs);
         if op == B_EQ {
-            return bool_val(lhs_sym == rhs_sym);
+            return bool_val(order == ORDER_EQUAL);
         } else if op == B_NE {
-            return bool_val(lhs_sym != rhs_sym);
+            return bool_val(order != ORDER_EQUAL);
         } else if op == B_LT {
-            return bool_val(sym_less(in machine, lhs_sym, rhs_sym));
+            return bool_val(order == ORDER_LESS);
         } else if op == B_LE {
-            return bool_val(!sym_less(in machine, rhs_sym, lhs_sym));
+            return bool_val(order != ORDER_GREATER);
         } else if op == B_GT {
-            return bool_val(sym_less(in machine, rhs_sym, lhs_sym));
+            return bool_val(order == ORDER_GREATER);
         } else if op == B_GE {
-            return bool_val(!sym_less(in machine, lhs_sym, rhs_sym));
+            return bool_val(order != ORDER_LESS);
         }
         fail(inout machine, "invalid string operator");
         return undef();
@@ -3009,7 +3017,7 @@ fn step(inout machine: M) {
         } else if kind == widen_u64(Lit::Bool) {
             result = bool_val(lo != 0);
         } else {
-            result = Val { tag: T_STR, payload: lo };
+            result = lit_str(inout machine, n32(lo));
         }
     } else if op == Op::Read {
         let root = n32(machine.program.op(operand_at));
@@ -3431,6 +3439,13 @@ pub fn drive(inout machine: M) {
     let value = machine.ret_value;
     let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
     display(in machine, value, inout out, 0);
+    // Every other value's text is ASCII: a byte past it came from a string.
+    for i in 0..out.len() {
+        if u8_at(in out, i) >= NON_ASCII {
+            decline(inout machine, "a non-ASCII string in the result", NONE32);
+            return;
+        }
+    }
     machine.message = out;
 }
 
@@ -3487,6 +3502,40 @@ const SQ_FILL: u64 = 19;
 const SQ_COPY_FROM: u64 = 20;
 const SQ_TRY_COPY_FROM: u64 = 21;
 const SQ_EXTEND_REVERSED: u64 = 22;
+// String primitives (`SeqOp::Str`), below `SQ_WIDE`.
+const SQ_STR_LEN: u64 = 101;
+const SQ_STR_BYTE_AT: u64 = 102;
+const SQ_STR_TRY_BYTE_AT: u64 = 103;
+const SQ_STR_AS_STR: u64 = 104;
+const SQ_STR_AS_BYTES: u64 = 105;
+const SQ_STR_SUB_STR: u64 = 106;
+const SQ_STR_PUSH_STR: u64 = 107;
+const SQ_STR_PUSH_CHAR: u64 = 108;
+const SQ_STR_CLEAR: u64 = 109;
+const SQ_STR_RESERVE: u64 = 110;
+// UTF-8 (`char::from_u32`, `String::push`): the largest scalar value and
+// the surrogates; a continuation byte's tag, payload bits and mask; the
+// lead byte tags, continuation counts and first scalars of the 2-, 3- and
+// 4-byte encodings; and a char boundary's test (`str::is_char_boundary`).
+const CHAR_MAX: u64 = 1114111;
+const SURROGATE_LO: u64 = 55296;
+const SURROGATE_HI: u64 = 57343;
+const UTF8_CONT_TAG: u64 = 128;
+const UTF8_CONT_SHIFT: u32 = 6;
+const UTF8_CONT_MASK: u64 = 63;
+const UTF8_LEAD2: u64 = 192;
+const UTF8_LEAD3: u64 = 224;
+const UTF8_LEAD4: u64 = 240;
+const UTF8_CONTS2: u32 = 1;
+const UTF8_CONTS3: u32 = 2;
+const UTF8_CONTS4: u32 = 3;
+const UTF8_FIRST2: u64 = 128;
+const UTF8_FIRST3: u64 = 2048;
+const UTF8_FIRST4: u64 = 65536;
+const UTF8_TAG_MASK: u8 = 192;
+const UTF8_CONT_BYTE: u8 = 128;
+// The first non-ASCII byte.
+const NON_ASCII: u8 = 128;
 // A `SeqOp::Hoisted` access adds this to its checked access's code.
 const SQ_HOISTED: u64 = 1000;
 // A fixed-width byte access (`SeqOp::Wide`): this plus bytes * 8, then 4
@@ -3556,6 +3605,26 @@ fn seq_code(in machine: M, sym: u32) -> u64 {
         SQ_TRY_COPY_FROM
     } else if spells(in machine, sym, "ExtendReversed") {
         SQ_EXTEND_REVERSED
+    } else if spells(in machine, sym, "Str(Len)") {
+        SQ_STR_LEN
+    } else if spells(in machine, sym, "Str(ByteAt)") {
+        SQ_STR_BYTE_AT
+    } else if spells(in machine, sym, "Str(TryByteAt)") {
+        SQ_STR_TRY_BYTE_AT
+    } else if spells(in machine, sym, "Str(AsStr)") {
+        SQ_STR_AS_STR
+    } else if spells(in machine, sym, "Str(AsBytes)") {
+        SQ_STR_AS_BYTES
+    } else if spells(in machine, sym, "Str(SubStr)") {
+        SQ_STR_SUB_STR
+    } else if spells(in machine, sym, "Str(PushStr)") {
+        SQ_STR_PUSH_STR
+    } else if spells(in machine, sym, "Str(PushChar)") {
+        SQ_STR_PUSH_CHAR
+    } else if spells(in machine, sym, "Str(Clear)") {
+        SQ_STR_CLEAR
+    } else if spells(in machine, sym, "Str(Reserve)") {
+        SQ_STR_RESERVE
     } else if spells(in machine, sym, "Hoisted(Get)") {
         add(SQ_HOISTED, SQ_GET)
     } else if spells(in machine, sym, "Hoisted(Set)") {
@@ -3690,6 +3759,277 @@ fn u64_val(n: u64) -> Val {
     Val { tag: K_U64, payload: n }
 }
 
+// ----- strings -----------------------------------------------------------------
+
+// `Ordering` of two strings' bytes.
+const ORDER_LESS: u8 = 0;
+const ORDER_EQUAL: u8 = 1;
+const ORDER_GREATER: u8 = 2;
+
+fn str_at(in machine: M, id: u64) -> Sr {
+    match machine.strs.try_get(id) {
+        Option::Some(found) => found,
+        Option::None => Sr { at: 0, len: 0 },
+    }
+}
+
+// A string of the bytes `str_bytes[at..]` pushed since `at`.
+fn new_str(inout machine: M, at: u64) -> Val {
+    let id = machine.strs.len();
+    machine.strs.push(Sr { at: at, len: wrapping_sub(machine.str_bytes.len(), at) });
+    Val { tag: T_STR, payload: id }
+}
+
+// Appends the bytes of string value `text` to `str_bytes`.
+fn push_text(inout machine: M, text: Val) {
+    let range = str_at(in machine, text.payload);
+    for i in 0..range.len {
+        let byte = u8_at(in machine.str_bytes, add(range.at, i));
+        machine.str_bytes.push(byte);
+    }
+}
+
+// The string of literal `sym`, made once: strings never change.
+fn lit_str(inout machine: M, sym: u32) -> Val {
+    let index = w(sym);
+    let cached = u64_at(in machine.lit_strs, index);
+    if cached != 0 {
+        return Val { tag: T_STR, payload: wrapping_sub(cached, 1) };
+    }
+    let at = machine.str_bytes.len();
+    let text_start = machine.ctx.names.start(sym);
+    let text_end = machine.ctx.names.end(sym);
+    for i in text_start..text_end {
+        machine.str_bytes.push(u8_at(in machine.ctx.names.text, i));
+    }
+    let value = new_str(inout machine, at);
+    for i in machine.lit_strs.len()..inc(index) {
+        machine.lit_strs.push(0);
+    }
+    let ok = machine.lit_strs.try_set(index, inc(value.payload));
+    value
+}
+
+// `Ord` of `String`: bytewise, then by length.
+fn text_order(in machine: M, lhs: Val, rhs: Val) -> u8 {
+    let lhs_range = str_at(in machine, lhs.payload);
+    let rhs_range = str_at(in machine, rhs.payload);
+    let common_len = if lhs_range.len < rhs_range.len {
+        lhs_range.len
+    } else {
+        rhs_range.len
+    };
+    for i in 0..common_len {
+        let lhs_byte = u8_at(in machine.str_bytes, add(lhs_range.at, i));
+        let rhs_byte = u8_at(in machine.str_bytes, add(rhs_range.at, i));
+        if lhs_byte != rhs_byte {
+            return if lhs_byte < rhs_byte {
+                ORDER_LESS
+            } else {
+                ORDER_GREATER
+            };
+        }
+    }
+    if lhs_range.len < rhs_range.len {
+        ORDER_LESS
+    } else if lhs_range.len > rhs_range.len {
+        ORDER_GREATER
+    } else {
+        ORDER_EQUAL
+    }
+}
+
+// Whether string value `text` holds the text of symbol `sym`.
+fn text_spells(in machine: M, text: Val, sym: u32) -> bool {
+    let range = str_at(in machine, text.payload);
+    let text_start = machine.ctx.names.start(sym);
+    if wrapping_sub(machine.ctx.names.end(sym), text_start) != range.len {
+        return false;
+    }
+    for i in 0..range.len {
+        let byte = u8_at(in machine.str_bytes, add(range.at, i));
+        if byte != u8_at(in machine.ctx.names.text, add(text_start, i)) {
+            return false;
+        }
+    }
+    true
+}
+
+// `str::is_char_boundary` of byte `i` of string `range`.
+fn char_boundary(in machine: M, range: Sr, i: u64) -> bool {
+    if i == 0 || i == range.len {
+        return true;
+    }
+    if i > range.len {
+        return false;
+    }
+    (u8_at(in machine.str_bytes, add(range.at, i)) & UTF8_TAG_MASK) != UTF8_CONT_BYTE
+}
+
+// A string update writes the new string back to the receiver's place
+// (argument 0; `inout` parameters share it).
+fn write_receiver(inout machine: M, updated: Val) {
+    let root = u64_at(in machine.arg_roots, 0);
+    if root == 0 {
+        fail(inout machine, "string update requires a place");
+        return;
+    }
+    let bound_index = binding(in machine, n32(wrapping_sub(root, 1)));
+    if bound_index == NONE64 {
+        fail(inout machine, "undefined string receiver place");
+        return;
+    }
+    let env_entry = entry(in machine, bound_index);
+    slot_path(inout machine, env_entry);
+    let path = u64_at(in machine.arg_paths, 0);
+    for j in 0..machine.program.path(path).n {
+        machine.path.push(machine.program.path_name(path, j));
+    }
+    write_path(inout machine, env_entry.cell, updated);
+}
+
+// Pushes a lead byte `lead_tag | c >> (6 * conts)`, then `conts`
+// continuation bytes of scalar value `c`, high bits first.
+fn push_encoded(inout machine: M, c: u64, lead_tag: u64, conts: u32) {
+    let lead = wrapping_shr_u64(c, wrapping_mul(conts, UTF8_CONT_SHIFT));
+    machine.str_bytes.push(wrapping_u8(lead_tag | lead));
+    for i in 0..conts {
+        let k = wrapping_sub(wrapping_sub(conts, 1), i);
+        let payload = wrapping_shr_u64(c, wrapping_mul(k, UTF8_CONT_SHIFT)) & UTF8_CONT_MASK;
+        machine.str_bytes.push(wrapping_u8(UTF8_CONT_TAG | payload));
+    }
+}
+
+// `String::push` of scalar value `c` onto the bytes being built.
+fn push_utf8(inout machine: M, c: u64) {
+    if c < UTF8_FIRST2 {
+        machine.str_bytes.push(wrapping_u8(c));
+    } else if c < UTF8_FIRST3 {
+        push_encoded(inout machine, c, UTF8_LEAD2, UTF8_CONTS2);
+    } else if c < UTF8_FIRST4 {
+        push_encoded(inout machine, c, UTF8_LEAD3, UTF8_CONTS3);
+    } else {
+        push_encoded(inout machine, c, UTF8_LEAD4, UTF8_CONTS4);
+    }
+}
+
+// `str_op`: a string primitive on the collected arguments. A string and a
+// view are both a string value; an update makes a new string and writes
+// it to the receiver's place.
+fn str_op(inout machine: M, code: u64, inout oob: bool) -> Val {
+    let arg0 = val_at(in machine.arg_vals, 0);
+    let arg1 = val_at(in machine.arg_vals, 1);
+    let arg2 = val_at(in machine.arg_vals, 2);
+    if arg0.tag != T_STR {
+        fail(inout machine, "String operation expects a string operand");
+        return unit();
+    }
+    let range = str_at(in machine, arg0.payload);
+    if code == SQ_STR_LEN {
+        return u64_val(range.len);
+    }
+    if code == SQ_STR_BYTE_AT || code == SQ_STR_TRY_BYTE_AT {
+        let i = seq_index(inout machine, arg1);
+        if machine.failed {
+            return unit();
+        }
+        let inside = i < range.len;
+        let byte = if inside {
+            Val { tag: K_U8, payload: widen_u64(u8_at(in machine.str_bytes, add(range.at, i))) }
+        } else {
+            unit()
+        };
+        if code == SQ_STR_TRY_BYTE_AT {
+            return option_val(inout machine, inside, byte);
+        }
+        if !inside {
+            oob = true;
+        }
+        return byte;
+    }
+    if code == SQ_STR_AS_STR {
+        return arg0;
+    }
+    if code == SQ_STR_AS_BYTES {
+        let bytes = new_seq(inout machine);
+        for i in 0..range.len {
+            let byte = widen_u64(u8_at(in machine.str_bytes, add(range.at, i)));
+            push_item(inout machine, bytes.payload, Val { tag: K_U8, payload: byte });
+        }
+        return new_slice(inout machine, Sl { seq: bytes.payload, start: 0, len: range.len });
+    }
+    if code == SQ_STR_SUB_STR {
+        let lo = seq_index(inout machine, arg1);
+        let hi = seq_index(inout machine, arg2);
+        if machine.failed {
+            return unit();
+        }
+        if lo > hi || hi > range.len {
+            fail(inout machine, "");
+            machine.message.clear();
+            put(inout machine.message, "String fault: interval ");
+            push_decimal(inout machine.message, lo);
+            put(inout machine.message, "..");
+            push_decimal(inout machine.message, hi);
+            put(inout machine.message, " is out of bounds of length ");
+            push_decimal(inout machine.message, range.len);
+            return unit();
+        }
+        if !char_boundary(in machine, range, lo) || !char_boundary(in machine, range, hi) {
+            fail(inout machine, "");
+            machine.message.clear();
+            put(inout machine.message, "String fault: interval ");
+            push_decimal(inout machine.message, lo);
+            put(inout machine.message, "..");
+            push_decimal(inout machine.message, hi);
+            put(inout machine.message, " is not on char boundaries");
+            return unit();
+        }
+        let id = machine.strs.len();
+        machine.strs.push(Sr { at: add(range.at, lo), len: wrapping_sub(hi, lo) });
+        return Val { tag: T_STR, payload: id };
+    }
+    if code == SQ_STR_PUSH_STR {
+        if arg1.tag != T_STR {
+            fail(inout machine, "String operation expects a string operand");
+            return unit();
+        }
+        let at = machine.str_bytes.len();
+        push_text(inout machine, arg0);
+        push_text(inout machine, arg1);
+        let updated = new_str(inout machine, at);
+        write_receiver(inout machine, updated);
+        return unit();
+    }
+    if code == SQ_STR_PUSH_CHAR {
+        let c = seq_index(inout machine, arg1);
+        if machine.failed {
+            return unit();
+        }
+        if c > CHAR_MAX || (c >= SURROGATE_LO && c <= SURROGATE_HI) {
+            return bool_val(false);
+        }
+        let at = machine.str_bytes.len();
+        push_text(inout machine, arg0);
+        push_utf8(inout machine, c);
+        let updated = new_str(inout machine, at);
+        write_receiver(inout machine, updated);
+        return bool_val(true);
+    }
+    if code == SQ_STR_CLEAR {
+        let updated = new_str(inout machine, machine.str_bytes.len());
+        write_receiver(inout machine, updated);
+        return unit();
+    }
+    // `SQ_STR_RESERVE`: capacity is not observable.
+    let n = seq_index(inout machine, arg1);
+    if n > SEQ_CAPACITY_LIMIT {
+        decline(inout machine, "a large String capacity", NONE32);
+    }
+    write_receiver(inout machine, arg0);
+    unit()
+}
+
 // `seq_op` of operation `code` on `arg_vals`: its value, or `oob` for the
 // `IndexOutOfBounds` the caller raises.
 fn seq_op(inout machine: M, code: u64, inout oob: bool) -> Val {
@@ -3707,6 +4047,9 @@ fn seq_op(inout machine: M, code: u64, inout oob: bool) -> Val {
     }
     if code > SQ_WIDE {
         return wide_op(inout machine, wrapping_sub(code, SQ_WIDE), inout oob);
+    }
+    if code >= SQ_STR_LEN && code <= SQ_STR_RESERVE {
+        return str_op(inout machine, code, inout oob);
     }
     if code == SQ_NEW {
         return new_seq(inout machine);
@@ -3836,8 +4179,7 @@ fn seq_op(inout machine: M, code: u64, inout oob: bool) -> Val {
     }
     if code == SQ_SUB_SLICE {
         if arg0.tag == T_STR {
-            decline(inout machine, "a string slice", NONE32);
-            return unit();
+            return str_op(inout machine, SQ_STR_SUB_STR, inout oob);
         }
         let view = seq_view(inout machine, arg0);
         let lo = seq_index(inout machine, arg1);
