@@ -135,6 +135,10 @@ const IEX_UREM: u64 = 8;
 const IEX_SHL: u64 = 9;
 const IEX_USHR: u64 = 10;
 const IEX_SSHR: u64 = 11;
+const IEX_WORD_CONVERT: u64 = 12;
+const IEX_WRAPPING_ADD: u64 = 13;
+const IEX_WRAPPING_SUB: u64 = 14;
+const IEX_WRAPPING_MUL: u64 = 15;
 
 // Sub-operations of `INST_WRITE_OP`.
 const WOP_IADD: u64 = 1;
@@ -678,22 +682,30 @@ impl Gen {
             let to_ik = conv & TABLE_KIND_MASK;
             let from_ik = self.kind_of(op_def);
             if from_ik != 0
-                && (kind_wide(from_ik) || kind_wide(to_ik))
                 && !((conv >> TABLE_OP_SHIFT) == CONV_NARROW
                     && self.ctx.world.may_overflow(i.s0, i.s1))
             {
-                kind = INST_WIDE_UNARY;
-                extra.push(WUN_CONVERT);
-                extra.push(widen_u64(from_ik));
-                extra.push(
-                    if kind_narrow(to_ik) || kind_wide(to_ik) {
-                        widen_u64(to_ik)
-                    } else {
-                        0
-                    }
-                );
-                extra.push(op_kind);
-                extra.push(res_kind);
+                let to_kind = if kind_narrow(to_ik) || kind_wide(to_ik) {
+                    widen_u64(to_ik)
+                } else {
+                    0
+                };
+                if kind_wide(from_ik) || kind_wide(to_ik) {
+                    kind = INST_WIDE_UNARY;
+                    extra.push(WUN_CONVERT);
+                    extra.push(widen_u64(from_ik));
+                    extra.push(to_kind);
+                    extra.push(op_kind);
+                    extra.push(res_kind);
+                } else {
+                    kind = INST_INT_EXTRA;
+                    extra.push(IEX_WORD_CONVERT);
+                    extra.push(to_kind);
+                    extra.push(0);
+                    extra.push(op_kind);
+                    extra.push(0);
+                    extra.push(res_kind);
+                }
                 return true;
             }
         }
@@ -986,6 +998,23 @@ impl Gen {
                 IEX_USHR
             } else {
                 IEX_SSHR
+            };
+            kind = INST_INT_EXTRA;
+            extra.push(sub_iex);
+            extra.push(0);
+            extra.push(0);
+            extra.push(k0);
+            extra.push(k1);
+            extra.push(rk);
+            return true;
+        }
+        if op == ops_s.wrapping_add || op == ops_s.wrapping_sub || op == ops_s.wrapping_mul {
+            let sub_iex = if op == ops_s.wrapping_add {
+                IEX_WRAPPING_ADD
+            } else if op == ops_s.wrapping_sub {
+                IEX_WRAPPING_SUB
+            } else {
+                IEX_WRAPPING_MUL
             };
             kind = INST_INT_EXTRA;
             extra.push(sub_iex);

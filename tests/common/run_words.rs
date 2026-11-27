@@ -110,7 +110,7 @@ const PAT_PAIR: u64 = u64::MAX - 1;
 ///            free-count free-name... body-fn+1
 ///            ret-fn+1 ret-pattern ret-first ret-second
 ///            op-count (op clause-fn+1 pattern-count pattern...)...
-///   effect call: effect op instance-key+1
+///   effect call: effect op instance-key+1 label+1
 ///   try:     instance-key+1
 ///   closure: coerce free-count free-name... body-fn+1 param-count
 /// ```
@@ -230,14 +230,12 @@ fn sites(world: &World, program: &Program, t: &mut Tables) -> Vec<u64> {
                         let Some((effect, op)) = callee.split_once("::") else {
                             continue;
                         };
-                        if capability.is_some() {
-                            // A labelled operation: its `$label:` key.
-                            continue;
-                        }
                         let key = instance_key(effect, types).map_or(0, |k| t.enc.name(&k) + 1);
+                        // A labelled operation looks up its `$label:` key first.
+                        let label = t.enc.opt_name(capability);
                         let effect = t.enc.name(effect);
                         let op = t.enc.name(op);
-                        rows.push(vec![at, SITE_EFFECT_CALL, effect, op, key]);
+                        rows.push(vec![at, SITE_EFFECT_CALL, effect, op, key, label]);
                     }
                     Op::Closure { expr, .. } => {
                         let ExprKind::Closure { params, body, .. } = &expr.kind else {

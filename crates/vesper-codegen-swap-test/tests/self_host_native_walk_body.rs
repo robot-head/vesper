@@ -825,6 +825,51 @@ fn vesper_scalar_bodies_part_6i() {
     });
 }
 
+/// Part 6j: narrow `u8`/`i8`/`u16`/`i16`/`u32`/`i32` wrapping arithmetic and
+/// bit builtins across both optimized and unoptimized builds.
+const SCALARS_6J: &str = "
+fn narrow_wrap_and_bits(a: u8, b: u16, c: i16) -> i64 {
+    let x: u8 = wrapping_add(a, 200);
+    let y: u16 = wrapping_mul(b, 300);
+    let z: i16 = wrapping_sub(c, 500);
+    let n: i16 = wrapping_neg_i16(z);
+    let b8: u32 = leading_zeros_u8(x) ^ trailing_zeros_u8(x) ^ count_ones_u8(x);
+    let b16: u32 = leading_zeros_u16(y) ^ trailing_zeros_u16(y) ^ count_ones_u16(y);
+    widen_i64(x) ^ widen_i64(y) ^ widen_i64(n) ^ widen_i64(b8) ^ widen_i64(b16)
+}
+fn main() -> i64 {
+    narrow_wrap_and_bits(77, 1234, -321)
+}
+";
+
+#[test]
+fn vesper_scalar_bodies_part_6j() {
+    big_stack(|| {
+        let parsed = vesper::parser::parse(SCALARS_6J);
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        let checked = vesper::check::check(&parsed.module);
+        assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
+        if let Err(e) = build(&checked.world, "main", true) {
+            panic!("the part 6j scalar program does not build: {e}");
+        }
+        let before = EMITTED.load(Ordering::Relaxed);
+        let total = both("scalars_6j", &checked.world, true);
+        let emitted = EMITTED.load(Ordering::Relaxed) - before;
+        eprintln!(
+            "scalars_6j: {}; {emitted} functions emitted from Vesper",
+            total.summary()
+        );
+        let ran = if cross() { 0 } else { 2 };
+        assert_eq!((total.worlds, total.ran), (2, ran), "{}", total.summary());
+        let min_emitted = if cross() { 4 } else { 8 };
+        assert!(
+            emitted >= min_emitted,
+            "part 6j functions should come from Vesper (expected >= {min_emitted}, got {emitted})"
+        );
+        assert!(total.is_clean(), "{}", total.summary());
+    });
+}
+
 /// Failure records (#2425): `fail_only` functions, which take a trailing
 /// failure-record pointer (and, optimized, return a status word): checked
 /// arithmetic on narrow and word kinds raising `ArithOverflow`, partial `/`
