@@ -107,6 +107,9 @@ fn compile_with_facts_core(
         let n_mask = lowerer.ctx.names.mask_val();
         let n_tmask = lowerer.ctx.types.t_mask();
         let n_rmask = lowerer.ctx.types.r_mask();
+        let n_tnodes = lowerer.ctx.types.nodes.len();
+        let n_trows = lowerer.ctx.types.rows.len();
+        let n_teffs = lowerer.ctx.types.effs_len();
         let n_eqp = lowerer.eq_pending.len();
         let n_btypes = lowerer.builder.types.len();
         let n_bvals = lowerer.builder.vals.len();
@@ -120,16 +123,20 @@ fn compile_with_facts_core(
         if d_perm_end != 0 && d_perm >= d_perm_end {
             Fail::raise(werr_syms(K_LIMIT, 0, 93, inst.key, 0));
         }
-        if lowerer.can_rewind_define(
-            in reserve_limits,
-            n_mask,
-            n_tmask,
-            n_rmask,
-            n_eqp,
-            n_btypes,
-            n_bvals,
-            n_bfuncs
-        ) {
+        if lowerer.ctx.types.nodes.len() == n_tnodes
+            && lowerer.ctx.types.rows.len() == n_trows
+            && lowerer.ctx.types.effs_len() == n_teffs
+            && lowerer.can_rewind_define(
+                in reserve_limits,
+                n_mask,
+                n_tmask,
+                n_rmask,
+                n_eqp,
+                n_btypes,
+                n_bvals,
+                n_bfuncs
+            )
+        {
             let mut old_lowerer = dummy_l(lowerer.ctx.known, lowerer.ctx.syms);
             swap(inout lowerer, inout old_lowerer);
             let (rebuilt, next_perm) = rebuild_l(old_lowerer, d_mark, d_perm);
