@@ -11,6 +11,8 @@ use self::util::{finite_bits};
 // The 16-byte wire record: sample offset and node id (u16), then param
 // id, target bits and ramp samples (u32), little-endian.
 const EVENT_BYTES: u64 = 16;
+const EVENT_BYTES_MASK: u64 = 15;
+const EVENT_BYTES_SHIFT: u32 = 4;
 
 enum At: _ {
     SampleOffset = 0,
@@ -23,28 +25,31 @@ enum At: _ {
 // The node id's shift in the first word.
 const NODE_ID_SHIFT: u32 = 16;
 
-fn byte(in b: Slice[u8], i: u64) -> u32 eff [Fail[RuntimeError], Fail[ArithOverflow]] {
+fn byte(in b: Slice[u8], i: u64) -> u32 eff [Fail[RuntimeError]] {
     widen_u32(b[i])
 }
 
-fn le16(in b: Slice[u8], i: u64) -> u16 eff [Fail[RuntimeError], Fail[ArithOverflow]] {
-    narrow_u16(byte(in b, i) | (byte(in b, i + 1) << 8))
+fn le16(in b: Slice[u8], i: u64) -> u16 eff [Fail[RuntimeError]] {
+    wrapping_u16(byte(in b, i) | wrapping_shl_u32(byte(in b, wrapping_add(i, 1)), 8))
 }
 
-fn le32(in b: Slice[u8], i: u64) -> u32 eff [Fail[RuntimeError], Fail[ArithOverflow]] {
-    byte(in b, i) | (byte(in b, i + 1) << 8) | (byte(in b, i + 2) << 16) | (byte(in b, i + 3) << 24)
+fn le32(in b: Slice[u8], i: u64) -> u32 eff [Fail[RuntimeError]] {
+    byte(in b, i)
+        | wrapping_shl_u32(byte(in b, wrapping_add(i, 1)), 8)
+        | wrapping_shl_u32(byte(in b, wrapping_add(i, 2)), 16)
+        | wrapping_shl_u32(byte(in b, wrapping_add(i, 3)), 24)
 }
 
-fn put32(inout b: Slice[u8], i: u64, v: u32) eff [Fail[RuntimeError], Fail[ArithOverflow]] {
-    b.set(i, narrow_u8(v & 255));
-    b.set(i + 1, narrow_u8((v >> 8) & 255));
-    b.set(i + 2, narrow_u8((v >> 16) & 255));
-    b.set(i + 3, narrow_u8(v >> 24));
+fn put32(inout b: Slice[u8], i: u64, v: u32) eff [Fail[RuntimeError]] {
+    b.set(i, wrapping_u8(v));
+    b.set(wrapping_add(i, 1), wrapping_u8(wrapping_shr_u32(v, 8)));
+    b.set(wrapping_add(i, 2), wrapping_u8(wrapping_shr_u32(v, 16)));
+    b.set(wrapping_add(i, 3), wrapping_u8(wrapping_shr_u32(v, 24)));
 }
 
 // `RtParamEvent::encode` into the first EVENT_BYTES bytes of `out`.
 pub fn e_encode(in w: Wire, inout out: Slice[u8]) eff [Fail[RuntimeError], Fail[ArithOverflow]] {
-    let head = widen_u32(w.sample_offset) | (widen_u32(w.node_id) << NODE_ID_SHIFT);
+    let head = widen_u32(w.sample_offset) | wrapping_shl_u32(widen_u32(w.node_id), NODE_ID_SHIFT);
     put32(inout out, At::SampleOffset, head);
     put32(inout out, At::ParamId, w.param_id);
     put32(inout out, At::Target, w.target);
@@ -56,16 +61,16 @@ pub fn e_decode(
     in b: Slice[u8],
     at: u64
 ) -> Wire eff [Fail[RuntimeError], Fail[ArithOverflow], Fail[EventFault]] {
-    let target = le32(in b, at + At::Target);
+    let target = le32(in b, wrapping_add(at, At::Target));
     if !finite_bits(target) {
         Fail::raise(EventFault::NonFiniteTarget);
     }
     Wire {
-        sample_offset: le16(in b, at + At::SampleOffset),
-        node_id: le16(in b, at + At::NodeId),
-        param_id: le32(in b, at + At::ParamId),
+        sample_offset: le16(in b, wrapping_add(at, At::SampleOffset)),
+        node_id: le16(in b, wrapping_add(at, At::NodeId)),
+        param_id: le32(in b, wrapping_add(at, At::ParamId)),
         target: target,
-        ramp_samples: le32(in b, at + At::RampSamples)
+        ramp_samples: le32(in b, wrapping_add(at, At::RampSamples))
     }
 }
 
@@ -75,10 +80,11 @@ pub fn e_frames(
     len: u64,
     budget: u64
 ) -> u64 eff [Fail[RuntimeError], Fail[ArithOverflow], Fail[EventFault]] {
-    if len % EVENT_BYTES != 0 {
-        Fail::raise(EventFault::TrailingBytes(len % EVENT_BYTES));
+    let rem = len & EVENT_BYTES_MASK;
+    if rem != 0 {
+        Fail::raise(EventFault::TrailingBytes(rem));
     }
-    let n = len / EVENT_BYTES;
+    let n = wrapping_shr_u64(len, EVENT_BYTES_SHIFT);
     if n > budget {
         Fail::raise(EventFault::OverBudget(budget));
     }
@@ -117,7 +123,7 @@ pub fn e_ramp_set(inout r: Ramp, target: u32, samples: u32) {
 // `ParamRamp::next_value`.
 pub fn e_ramp_next(inout r: Ramp) -> u32 eff [Fail[ArithOverflow]] {
     if r.remaining > 0 {
-        r.remaining = r.remaining - 1;
+        r.remaining = wrapping_sub(r.remaining, 1);
         if r.remaining == 0 {
             r.current = r.target;
         } else {
@@ -159,7 +165,7 @@ pub fn e_tile_advance(
 ) -> u32 eff [Fail[RuntimeError], Fail[ArithOverflow]] {
     let rem = remaining[lane];
     if rem > 0 {
-        let next = rem - 1;
+        let next = wrapping_sub(rem, 1);
         remaining.set(lane, next);
         if next == 0 {
             current.set(lane, target[lane]);
