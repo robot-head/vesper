@@ -152,6 +152,12 @@ pub const FLOAT_PROMOTE: u64 = 135;
 pub const FLOAT_DEMOTE: u64 = 136;
 pub const SIGNED_TO_FLOAT: u64 = 137;
 pub const UNSIGNED_TO_FLOAT: u64 = 138;
+pub const FLOAT_TO_SIGNED_SAT: u64 = 139;
+pub const FLOAT_TO_UNSIGNED_SAT: u64 = 140;
+pub const FLOAT_CEIL: u64 = 141;
+pub const FLOAT_FLOOR: u64 = 142;
+pub const FLOAT_TRUNC: u64 = 143;
+pub const FLOAT_NEAREST: u64 = 144;
 const XMM_ARGUMENTS: u64 = 8;
 pub const CHECKED_ARITHMETIC_RECORDS: u64 = 2;
 
@@ -772,6 +778,14 @@ pub fn is_float_conversion(op: u64) -> bool {
     op >= FLOAT_PROMOTE && op <= UNSIGNED_TO_FLOAT
 }
 
+pub fn is_float_to_integer(op: u64) -> bool {
+    op == FLOAT_TO_SIGNED_SAT || op == FLOAT_TO_UNSIGNED_SAT
+}
+
+pub fn is_float_rounding(op: u64) -> bool {
+    op >= FLOAT_CEIL && op <= FLOAT_NEAREST
+}
+
 fn is_float_result(op: u64) -> bool {
     (op >= FLOAT_ARGUMENT && op <= FLOAT_ABS)
         || op == FLOAT_LOAD
@@ -782,6 +796,7 @@ fn is_float_result(op: u64) -> bool {
         || op == FLOAT_STACK_LOAD
         || op == FLOAT_COPY_SIGN
         || is_float_conversion(op)
+        || is_float_rounding(op)
 }
 
 pub fn float_value(in words: Slice[u64], arguments: u64, value: u64) -> bool {
@@ -796,6 +811,8 @@ fn float_left(op: u64) -> bool {
         || op == FLOAT_COPY_SIGN
         || op == FLOAT_PROMOTE
         || op == FLOAT_DEMOTE
+        || is_float_to_integer(op)
+        || is_float_rounding(op)
 }
 
 fn float_right(op: u64) -> bool {

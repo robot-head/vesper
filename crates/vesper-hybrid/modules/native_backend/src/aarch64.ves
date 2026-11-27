@@ -30,7 +30,9 @@ use self::scalar::{
     ATOMIC_CAS_WORD, ATOMIC_CAS_DWORD, ATOMIC_CAS_QWORD, ATOMIC_SUB, ATOMIC_AND, ATOMIC_NAND,
     ATOMIC_OR, ATOMIC_XOR, ATOMIC_UNSIGNED_MIN, ATOMIC_UNSIGNED_MAX, ATOMIC_SIGNED_MIN,
     ATOMIC_SIGNED_MAX, FLOAT_ARGUMENT, FLOAT_RETURN, FLOAT_RETURN_LAYOUT, CALL_FLOAT, CALL_FLOAT32,
-    FLOAT_PROMOTE, FLOAT_DEMOTE, SIGNED_TO_FLOAT, UNSIGNED_TO_FLOAT, is_float_conversion
+    FLOAT_PROMOTE, FLOAT_DEMOTE, SIGNED_TO_FLOAT, UNSIGNED_TO_FLOAT, is_float_conversion,
+    FLOAT_TO_SIGNED_SAT, is_float_to_integer, FLOAT_CEIL, FLOAT_FLOOR, FLOAT_TRUNC, FLOAT_NEAREST,
+    is_float_rounding
 };
 use self::x86_64::{
     BYTE_BITS, WORD_BITS, DWORD_BITS, QWORD_BITS, FLOAT_ORDERED, FLOAT_UNORDERED, FLOAT_EQUAL,
@@ -177,6 +179,12 @@ const FCVT_TO_DOUBLE: u32 = 0x1e22c000;
 const FCVT_TO_SINGLE: u32 = 0x1e624000;
 const SCVTF: u32 = 0x1e220000;
 const UCVTF: u32 = 0x1e230000;
+const FCVTZS: u32 = 0x1e380000;
+const FCVTZU: u32 = 0x1e390000;
+const FRINTP: u32 = 0x1e24c000;
+const FRINTM: u32 = 0x1e254000;
+const FRINTZ: u32 = 0x1e25c000;
+const FRINTN: u32 = 0x1e244000;
 const EOR_F32_SIGN: u32 = 0x52010000;
 const EOR_F64_SIGN: u32 = 0xd2410000;
 const MOVN: u32 = 0x92800000;
@@ -776,6 +784,13 @@ fn float_operands(in r: Record) -> Option[u64] {
             Option::None
         };
     }
+    if is_float_to_integer(r.op) {
+        return if float_width(r.right) && scalar_width(r.extra) {
+            Option::Some(1)
+        } else {
+            Option::None
+        };
+    }
     if !float_width(r.extra) {
         return Option::None;
     }
@@ -809,7 +824,17 @@ fn float_operands(in r: Record) -> Option[u64] {
         } else {
             Option::None
         },
-        FLOAT_NEG | FLOAT_ABS | FLOAT_SQRT | BITS_TO_FLOAT | FLOAT_TO_BITS => if r.right == 0 {
+        FLOAT_NEG
+            | FLOAT_ABS
+            | FLOAT_SQRT
+            | BITS_TO_FLOAT
+            | FLOAT_TO_BITS
+            | FLOAT_CEIL
+            | FLOAT_FLOOR
+            | FLOAT_TRUNC
+            | FLOAT_NEAREST => if r.right
+            == 0
+        {
             Option::Some(1)
         } else {
             Option::None
@@ -846,6 +871,8 @@ fn operands(in r: Record, returns: u64) -> Option[u64] {
     }
     if (r.op >= FLOAT_CONSTANT && r.op <= FLOAT_COPY_SIGN && !float_call(r.op))
         || is_float_conversion(r.op)
+        || is_float_to_integer(r.op)
+        || is_float_rounding(r.op)
     {
         return float_operands(in r);
     }
@@ -1300,8 +1327,16 @@ fn emit_float_alu(inout out: ChunkSeq[u8], in r: Record, dest: u32, lhs: u32, rh
     let move_width = if double { FP_DOUBLE | REG64 } else { 0 };
     let to_fp = FMOV_FROM_GP | move_width;
     push32(inout out, to_fp | sh(lhs, RN_SHIFT) | FP_LEFT);
-    if r.op == FLOAT_SQRT {
-        push32(inout out, FSQRT | precision | sh(FP_LEFT, RN_SHIFT) | FP_LEFT);
+    let unary = match r.op {
+        FLOAT_SQRT => FSQRT,
+        FLOAT_CEIL => FRINTP,
+        FLOAT_FLOOR => FRINTM,
+        FLOAT_TRUNC => FRINTZ,
+        FLOAT_NEAREST => FRINTN,
+        _ => 0,
+    };
+    if unary != 0 {
+        push32(inout out, unary | precision | sh(FP_LEFT, RN_SHIFT) | FP_LEFT);
     } else {
         push32(inout out, to_fp | sh(rhs, RN_SHIFT) | FP_RIGHT);
         if compare {
@@ -1402,6 +1437,35 @@ fn emit_float_conversion(inout out: ChunkSeq[u8], in r: Record, dest: u32, lhs: 
         push32(inout out, op | source_width | precision | sh(source, RN_SHIFT) | FP_LEFT);
     }
     push32(inout out, FMOV_TO_GP | result_width | precision | sh(FP_LEFT, RN_SHIFT) | dest);
+}
+
+fn emit_float_to_integer(inout out: ChunkSeq[u8], in r: Record, dest: u32, lhs: u32) {
+    let signed = r.op == FLOAT_TO_SIGNED_SAT;
+    let precision = if r.right == QWORD_BITS { FP_DOUBLE } else { 0 };
+    let move_width = if r.right == QWORD_BITS { REG64 } else { 0 };
+    let result_width = if r.extra == QWORD_BITS { REG64 } else { 0 };
+    push32(inout out, FMOV_FROM_GP | move_width | precision | sh(lhs, RN_SHIFT) | FP_LEFT);
+    let op = if signed { FCVTZS } else { FCVTZU };
+    // The architectural conversion saturates to its register width and maps NaN to zero.
+    push32(inout out, op | result_width | precision | sh(FP_LEFT, RN_SHIFT) | dest);
+    if r.extra < DWORD_BITS {
+        let width = if signed {
+            wrapping_sub(r.extra, 1)
+        } else {
+            r.extra
+        };
+        let max = low_bits(~0, width);
+        let upper = if signed { LE } else { LS };
+        immediate(inout out, SCRATCH, max);
+        rrr(inout out, SUBS_REG & ~REG64, ZERO, dest, SCRATCH);
+        rrr(inout out, (CSEL & ~REG64) | sh(upper, CONDITION_SHIFT), dest, dest, SCRATCH);
+        if signed {
+            immediate(inout out, SCRATCH, ~max);
+            rrr(inout out, SUBS_REG & ~REG64, ZERO, dest, SCRATCH);
+            rrr(inout out, (CSEL & ~REG64) | sh(GE, CONDITION_SHIFT), dest, dest, SCRATCH);
+            normalize(inout out, dest, r.extra);
+        }
+    }
 }
 
 fn emit_bit_operation(inout out: ChunkSeq[u8], in r: Record, dest: u32, source: u32) {
@@ -1583,7 +1647,9 @@ fn emit_instruction(
         immediate(inout out, dest, r.left);
     } else if is_float_conversion(r.op) {
         emit_float_conversion(inout out, in r, dest, lhs);
-    } else if r.op >= FLOAT_ARGUMENT && r.op <= FLOAT_COPY_SIGN {
+    } else if is_float_to_integer(r.op) {
+        emit_float_to_integer(inout out, in r, dest, lhs);
+    } else if (r.op >= FLOAT_ARGUMENT && r.op <= FLOAT_COPY_SIGN) || is_float_rounding(r.op) {
         emit_float_instruction(inout out, in r, dest, lhs, rhs, third);
     } else if r.op >= LEADING_ZEROS && r.op <= LEADING_SIGN_BITS {
         emit_bit_operation(inout out, in r, dest, lhs);
@@ -2332,7 +2398,9 @@ fn encode_pass(
         has_float = has_float
             || (r.op >= FLOAT_ARGUMENT && r.op <= FLOAT_COPY_SIGN)
             || r.op == CALL_FLOAT32
-            || is_float_conversion(r.op);
+            || is_float_conversion(r.op)
+            || is_float_to_integer(r.op)
+            || is_float_rounding(r.op);
         if register_home && r.op == BLOCK_RETURN && r.left != TRAP_VALUE {
             normal_returns = wrapping_add(normal_returns, 1);
         }

@@ -110,6 +110,9 @@ const FLOAT_PROMOTE: u64 = 135;
 const FLOAT_DEMOTE: u64 = 136;
 const SIGNED_TO_FLOAT: u64 = 137;
 const UNSIGNED_TO_FLOAT: u64 = 138;
+const FLOAT_TO_SIGNED_SAT: u64 = 139;
+const FLOAT_TO_UNSIGNED_SAT: u64 = 140;
+const FLOAT_FLOOR: u64 = 142;
 const EQUAL: u64 = 0;
 const NOT_EQUAL: u64 = 1;
 const SIGNED_LESS: u64 = 2;
@@ -222,6 +225,54 @@ fn aarch64_scalar_float_conversions_use_the_declared_widths() {
             0
         ])
         .is_empty()
+    );
+}
+
+#[test]
+fn aarch64_float_rounding_and_saturation_use_scalar_encodings() {
+    const FMOV_W0_S0: u32 = 0x1e26_0000;
+    const FMOV_X0_D0: u32 = 0x9e66_0000;
+    const FMOV_S16_W0: u32 = 0x1e27_0010;
+    const FMOV_D16_X0: u32 = 0x9e67_0010;
+    const FCVTZS_X0_D16: u32 = 0x9e78_0200;
+    const FCVTZU_W0_S16: u32 = 0x1e39_0200;
+    const MOV_X16_255: u32 = 0xd280_1ff0;
+    const CMP_W0_W16: u32 = 0x6b10_001f;
+    const CSEL_W0_W0_W16_LS: u32 = 0x1a90_9000;
+    const FRINTM_D16_D16: u32 = 0x1e65_4210;
+    const FMOV_X0_D16: u32 = 0x9e66_0200;
+    const FMOV_D0_X0: u32 = 0x9e67_0000;
+
+    #[rustfmt::skip]
+    let cases: &[(&[u64], &[u32])] = &[
+        (
+            &[0, 1, FLOAT_ARGUMENT, 0, 0, CELL_BITS,
+              FLOAT_TO_SIGNED_SAT, 0, CELL_BITS, CELL_BITS],
+            &[FMOV_X0_D0, FMOV_D16_X0, FCVTZS_X0_D16, RET],
+        ),
+        (
+            &[0, 1, FLOAT_ARGUMENT, 0, 0, DWORD_BITS,
+              FLOAT_TO_UNSIGNED_SAT, 0, DWORD_BITS, BYTE_BITS],
+            &[FMOV_W0_S0, FMOV_S16_W0, FCVTZU_W0_S16, MOV_X16_255,
+              CMP_W0_W16, CSEL_W0_W0_W16_LS, RET],
+        ),
+        (
+            &[0, 1, FLOAT_ARGUMENT, 0, 0, CELL_BITS,
+              FLOAT_FLOOR, 0, 0, CELL_BITS, FLOAT_RETURN, 0, 0, 0],
+            &[FMOV_X0_D0, FMOV_D16_X0, FRINTM_D16_D16, FMOV_X0_D16, FMOV_D0_X0, RET],
+        ),
+    ];
+    for &(tape, expected) in cases {
+        let expected: Vec<_> = expected
+            .iter()
+            .copied()
+            .flat_map(u32::to_le_bytes)
+            .collect();
+        assert_eq!(binding::aarch64_integer_leaf(tape), expected);
+    }
+    assert!(
+        binding::aarch64_integer_leaf(&[1, 1, FLOAT_TO_SIGNED_SAT, 0, CELL_BITS, WORD_BITS])
+            .is_empty()
     );
 }
 
@@ -2244,7 +2295,10 @@ fn aarch64_scalar_functions_reach_elf_and_macho_object_emission() {
     ";
     const FLOAT: &str = "
         fn detfloat(x: f64) -> f64 eff [DetFloat] { x }
-        fn main(x: f64) -> f64 { widen_f64(nearest_f32(x)) + x }
+        fn main(x: f64) -> f64 {
+            let n = saturating_i16(floor(widen_f64(nearest_f32(x))));
+            widen_f64(n) + x
+        }
     ";
     const TEXT: &str = r#"fn main() -> String { "vesper-aarch64-got" }"#;
     const CALLER: &str = "

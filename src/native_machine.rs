@@ -158,6 +158,12 @@ enum IntegerOp {
     FloatDemote = 136,
     SignedToFloat = 137,
     UnsignedToFloat = 138,
+    FloatToSignedSat = 139,
+    FloatToUnsignedSat = 140,
+    FloatCeil = 141,
+    FloatFloor = 142,
+    FloatTrunc = 143,
+    FloatNearest = 144,
 }
 
 fn integer_bit_op(op: Opcode) -> Option<IntegerOp> {
@@ -1293,28 +1299,50 @@ impl IntegerBlocks<'_> {
                     Opcode::Sqrt => IntegerOp::FloatSqrt,
                     Opcode::Fneg => IntegerOp::FloatNeg,
                     Opcode::Fabs => IntegerOp::FloatAbs,
+                    Opcode::Ceil if self.aarch64 => IntegerOp::FloatCeil,
+                    Opcode::Floor if self.aarch64 => IntegerOp::FloatFloor,
+                    Opcode::Trunc if self.aarch64 => IntegerOp::FloatTrunc,
+                    Opcode::Nearest if self.aarch64 => IntegerOp::FloatNearest,
                     _ => return None,
                 };
                 (op, [input(arg)?, 0, float_width(output)?])
             }
             InstructionData::Unary { opcode, arg } if self.aarch64 => {
                 let source = ty(arg);
-                let (op, source_width) = match (opcode, source, output) {
-                    (Opcode::Fpromote, types::F32, types::F64) => {
-                        (IntegerOp::FloatPromote, float_width(source)?)
-                    }
-                    (Opcode::Fdemote, types::F64, types::F32) => {
-                        (IntegerOp::FloatDemote, float_width(source)?)
-                    }
-                    (Opcode::FcvtFromSint, _, _) => {
-                        (IntegerOp::SignedToFloat, integer_width(source)?)
-                    }
-                    (Opcode::FcvtFromUint, _, _) => {
-                        (IntegerOp::UnsignedToFloat, integer_width(source)?)
-                    }
+                let (op, source_width, result_width) = match (opcode, source, output) {
+                    (Opcode::Fpromote, types::F32, types::F64) => (
+                        IntegerOp::FloatPromote,
+                        float_width(source)?,
+                        float_width(output)?,
+                    ),
+                    (Opcode::Fdemote, types::F64, types::F32) => (
+                        IntegerOp::FloatDemote,
+                        float_width(source)?,
+                        float_width(output)?,
+                    ),
+                    (Opcode::FcvtFromSint, _, _) => (
+                        IntegerOp::SignedToFloat,
+                        integer_width(source)?,
+                        float_width(output)?,
+                    ),
+                    (Opcode::FcvtFromUint, _, _) => (
+                        IntegerOp::UnsignedToFloat,
+                        integer_width(source)?,
+                        float_width(output)?,
+                    ),
+                    (Opcode::FcvtToSintSat, _, _) => (
+                        IntegerOp::FloatToSignedSat,
+                        float_width(source)?,
+                        integer_width(output)?,
+                    ),
+                    (Opcode::FcvtToUintSat, _, _) => (
+                        IntegerOp::FloatToUnsignedSat,
+                        float_width(source)?,
+                        integer_width(output)?,
+                    ),
                     _ => return None,
                 };
-                (op, [input(arg)?, source_width, float_width(output)?])
+                (op, [input(arg)?, source_width, result_width])
             }
             InstructionData::FloatCompare {
                 opcode: Opcode::Fcmp,
@@ -1399,6 +1427,10 @@ impl IntegerBlocks<'_> {
                     | IntegerOp::FloatSqrt
                     | IntegerOp::FloatPromote
                     | IntegerOp::FloatDemote
+                    | IntegerOp::FloatCeil
+                    | IntegerOp::FloatFloor
+                    | IntegerOp::FloatTrunc
+                    | IntegerOp::FloatNearest
             )
         {
             let (compare, bits) = match output {
