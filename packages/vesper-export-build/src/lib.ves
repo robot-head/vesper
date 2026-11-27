@@ -93,6 +93,9 @@ const HANDLE_FIELD: Str = "$handle";
 const HANDLE_WORD: Str = "u64";
 const MODE_AFFINE: u8 = 1;
 const MODE_LINEAR: u8 = 2;
+// `Field.modality` for a field that inherits its component kind
+// (`@vesper/check-data` stores mode + 1 otherwise).
+const FIELD_INHERITS_MODE: u8 = 0;
 const C_NAMED: u64 = 9;
 
 // A layout's `kind` word: scalar, product, enum.
@@ -1205,7 +1208,7 @@ fn add_box_prelude(
     world.fields.push(Field {
         name: names.intern(in BOX_FIELD.as_bytes()),
         ty: types.named0(t_gen),
-        modality: 0
+        modality: FIELD_INHERITS_MODE
     });
     let va = n32(world.variants.len());
     world.variants.push(Variant { name: box_sym, fa: fa, fc: 1, named: false });
@@ -1398,7 +1401,7 @@ fn add_handle_types(
         }
         let mode = modes.try_get(h).unwrap_or(MODE_COPY);
         let fa = n32(world.fields.len());
-        world.fields.push(Field { name: handle_field, ty: word, modality: 0 });
+        world.fields.push(Field { name: handle_field, ty: word, modality: FIELD_INHERITS_MODE });
         let va = n32(world.variants.len());
         world.variants.push(Variant { name: sym, fa: fa, fc: 1, named: true });
         let idx = n32(world.adts.len());
