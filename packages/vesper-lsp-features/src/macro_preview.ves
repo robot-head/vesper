@@ -270,7 +270,7 @@ fn variant(inout t: Tree, in name: Str, value: u64) -> u64 {
     object(inout t, in p)
 }
 
-// `OperationKind` (tags 0 `Use`, 1 `Handler`, 2 `IndirectCall`).
+// `OperationKind` tags (`port_words`' `OP_*`); the rest are `IndirectCall`.
 const OP_USE: u64 = 0;
 const OP_HANDLER: u64 = 1;
 
@@ -295,7 +295,7 @@ fn read_operation(inout t: Tree, in b: Slice[u8], inout r: Reader) -> u64 {
     lit(inout t, in "IndirectCall")
 }
 
-// `AuthorityArg` (tags 0 `Def`, 1 `Text`, 2 `Int`).
+// `AuthorityArg` tags (`port_words`' `ARG_*`); the rest are `Int`.
 const ARG_DEF: u64 = 0;
 const ARG_TEXT: u64 = 1;
 

@@ -394,6 +394,15 @@ pub fn port_words(
     w.0
 }
 
+// The `port_words` tags of `OperationKind` and `AuthorityArg` variants
+// (macro_preview.ves reads the same values).
+const OP_USE: u64 = 0;
+const OP_HANDLER: u64 = 1;
+const OP_INDIRECT_CALL: u64 = 2;
+const ARG_DEF: u64 = 0;
+const ARG_TEXT: u64 = 1;
+const ARG_INT: u64 = 2;
+
 struct PortWords(Vec<u8>);
 impl PortWords {
     fn word(&mut self, x: u64) {
@@ -430,15 +439,15 @@ impl PortWords {
         use vesper_forge::OperationKind;
         match op {
             OperationKind::Use { def } => {
-                self.word(0);
+                self.word(OP_USE);
                 self.def(def);
             }
             OperationKind::Handler { effect, handler } => {
-                self.word(1);
+                self.word(OP_HANDLER);
                 self.def(effect);
                 self.def(handler);
             }
-            OperationKind::IndirectCall => self.word(2),
+            OperationKind::IndirectCall => self.word(OP_INDIRECT_CALL),
         }
     }
     fn authority(&mut self, a: &vesper_forge::Authority) {
@@ -449,15 +458,15 @@ impl PortWords {
         for arg in &a.args {
             match arg {
                 AuthorityArg::Def(d) => {
-                    self.word(0);
+                    self.word(ARG_DEF);
                     self.def(d);
                 }
                 AuthorityArg::Text(s) => {
-                    self.word(1);
+                    self.word(ARG_TEXT);
                     self.text(s);
                 }
                 AuthorityArg::Int(n) => {
-                    self.word(2);
+                    self.word(ARG_INT);
                     self.word(*n);
                 }
             }
