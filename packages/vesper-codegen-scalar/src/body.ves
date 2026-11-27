@@ -54,6 +54,7 @@ pub const LANE_PRODUCT: u64 = 5;
 // A local's entry: a lane code for a local the body declares, or
 // `LOCAL_PARAM` plus the parameter's index for one of the parameters.
 pub const LOCAL_PARAM: u64 = 16;
+pub const LOCAL_PARAM_PRODUCT: u64 = 65536;
 
 // The instruction kinds of the plan.
 pub const INST_PLANNED: u64 = 1;
@@ -99,6 +100,7 @@ pub const INST_F64CONST: u64 = 17;
 // `Codegen::data_into`), #2411.
 pub const INST_DATA: u64 = 32;
 pub const INST_PROJECT: u64 = 33;
+pub const INST_READ_FIELD: u64 = 34;
 
 // Sub-operations of `INST_FLOAT_UNARY` and 1-arg `CB_FLOAT_UNARY`.
 const FUN_FNEG: u64 = 1;
@@ -1928,20 +1930,76 @@ impl Gen {
                 return false;
             }
         } else if i.op == Op::Read {
-            kind = INST_READ;
             let root = self.program.op(i.a);
-            let path = self.program.path(self.program.op(inc(i.a)));
+            let path_id = self.program.op(inc(i.a));
+            let path = self.program.path(path_id);
             let nproj = self.program.op(add(i.a, 3));
             let k = self.body_local(in h, root);
-            if k == NONE64 || path.n != 0 || nproj != 0 {
+            if k == NONE64 || nproj != 0 {
                 return false;
             }
-            let read = self.body_kind(self.body_local_type(in h, k));
-            if read == NONE64 {
-                return false;
+            if path.n == 0 {
+                let local_ty = self.body_local_type(in h, k);
+                if self.body_lane(local_ty) == LANE_PRODUCT {
+                    return false;
+                }
+                let read = self.body_kind(local_ty);
+                if read == NONE64 {
+                    return false;
+                }
+                kind = INST_READ;
+                extra.push(k);
+                extra.push(read);
+            } else {
+                let res_lane = self.body_lane(i.ty);
+                if res_lane == 0 || res_lane == LANE_PRODUCT || post != 0 {
+                    return false;
+                }
+                let mut cur_ty = self.body_local_type(in h, k);
+                let mut offs: ChunkSeq[u64] = ChunkSeq::new[u64]();
+                let mut ok = true;
+                for s in 0..path.n {
+                    let field_sym = self.program.path_name(path_id, s);
+                    let mark = self.layouts.mark();
+                    let d = default_type(inout self.ctx.types, cur_ty);
+                    let l = layout_of(
+                        inout self.layouts,
+                        inout self.ctx.types,
+                        inout self.ctx.names,
+                        in self.ctx.world,
+                        d
+                    );
+                    let mut found = false;
+                    let mut off: u64 = 0;
+                    let mut next_ty: u32 = NONE32;
+                    if l != NONE32 && self.layouts.node(l).kind == L_PRODUCT {
+                        let node = self.layouts.node(l);
+                        for fi in 0..widen_u64(node.n) {
+                            let lf = self.layouts.lfield(add(widen_u64(node.a), fi));
+                            if lf.name == field_sym {
+                                off = wrapping_u64(widen_i64(lf.offset));
+                                next_ty = lf.ty;
+                                found = true;
+                            }
+                        }
+                    }
+                    self.layouts.reset(mark);
+                    if !found {
+                        ok = false;
+                        break;
+                    }
+                    offs.push(off);
+                    cur_ty = next_ty;
+                }
+                if !ok {
+                    return false;
+                }
+                kind = INST_READ_FIELD;
+                extra.push(k);
+                extra.push(res_lane);
+                extra.push(offs.len());
+                extra.extend(in offs.as_slice());
             }
-            extra.push(k);
-            extra.push(read);
         } else if i.op == Op::Bind {
             kind = INST_BIND;
             if !self.body_operand(in h, i.a, inout ops) {
@@ -2301,15 +2359,21 @@ impl Gen {
         graph_words.push(h.lname.len());
         for k in 0..h.lname.len() {
             let t = n32(u64_at(in h.lty, k));
-            if !self.body_register(t) {
-                return;
-            }
             let name = u64_at(in h.lname, k);
+            let mut is_param = false;
             let mut entry = self.body_lane(t);
             for j in 0..h.params.len() {
                 if u64_at(in h.params, j) == name {
-                    entry = add(LOCAL_PARAM, j);
+                    entry = if self.body_lane(t) == LANE_PRODUCT {
+                        add(LOCAL_PARAM_PRODUCT, j)
+                    } else {
+                        add(LOCAL_PARAM, j)
+                    };
+                    is_param = true;
                 }
+            }
+            if !self.body_register(t) && !(is_param && self.body_lane(t) == LANE_PRODUCT) {
+                return;
             }
             if entry == 0 {
                 return;

@@ -1589,3 +1589,55 @@ fn vesper_scalar_bodies_part_6s() {
         assert!(total.is_clean(), "{}", total.summary());
     });
 }
+
+/// Part 6t: `LANE_PRODUCT` `in` parameters and `Op::Read` scalar field paths
+/// (`INST_READ_FIELD`), including single-step and nested field reads.
+const SCALARS_6T: &str = "
+struct Vec2 {
+    x: i64,
+    y: f64,
+}
+struct Nested {
+    a: Vec2,
+    z: i64,
+}
+fn read_vec(v: Vec2) -> i64 {
+    wrapping_add(v.x, saturating_i64(v.y))
+}
+fn read_nested(n: Nested) -> i64 {
+    wrapping_add(n.a.x, n.z) ^ saturating_i64(n.a.y)
+}
+fn main() -> i64 {
+    let v: Vec2 = Vec2 { x: 40, y: 2.5 };
+    let n: Nested = Nested { a: Vec2 { x: 100, y: 7.5 }, z: 23 };
+    read_vec(v) ^ read_nested(n)
+}
+";
+
+#[test]
+fn vesper_scalar_bodies_part_6t() {
+    big_stack(|| {
+        let parsed = vesper::parser::parse(SCALARS_6T);
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        let checked = vesper::check::check(&parsed.module);
+        assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
+        if let Err(e) = build(&checked.world, "main", true) {
+            panic!("the part 6t scalar program does not build: {e}");
+        }
+        let before = EMITTED.load(Ordering::Relaxed);
+        let total = both("scalars_6t", &checked.world, true);
+        let emitted = EMITTED.load(Ordering::Relaxed) - before;
+        eprintln!(
+            "scalars_6t: {}; {emitted} functions emitted from Vesper",
+            total.summary()
+        );
+        let ran = if cross() { 0 } else { 2 };
+        assert_eq!((total.worlds, total.ran), (2, ran), "{}", total.summary());
+        let min_emitted = if cross() { 2 } else { 4 };
+        assert!(
+            emitted >= min_emitted,
+            "part 6t functions should come from Vesper (expected >= {min_emitted}, got {emitted})"
+        );
+        assert!(total.is_clean(), "{}", total.summary());
+    });
+}
