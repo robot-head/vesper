@@ -345,7 +345,8 @@ fn stage2_compile_dir_impl(
         in ir_ast,
         sink names0,
         sink types0,
-        sink world0
+        sink world0,
+        native_elf
     );
     let mut c = Ctx {
         names: names,

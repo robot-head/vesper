@@ -56,6 +56,7 @@ struct Tc {
     i64_ty: u32,
     u64_ty: u32,
     f64_ty: u32,
+    native_float_literals: bool,
     str_ty: u32,
     never_ty: u32,
     calls: ChunkSeq[CallRow],
@@ -63,7 +64,12 @@ struct Tc {
     scratch1: ChunkSeq[u32],
 }
 
-fn tc_new(sink names: Names, sink types: Types, sink world: World) -> Tc {
+fn tc_new(
+    sink names: Names,
+    sink types: Types,
+    sink world: World,
+    native_float_literals: bool
+) -> Tc {
     let empty = ChunkSeq::new[u32]();
     let empty_p = ChunkSeq::new[u8]();
     let mut t = types;
@@ -90,6 +96,7 @@ fn tc_new(sink names: Names, sink types: Types, sink world: World) -> Tc {
         i64_ty: i64_ty,
         u64_ty: u64_ty,
         f64_ty: f64_ty,
+        native_float_literals: native_float_literals,
         str_ty: str_ty,
         never_ty: never_ty,
         calls: ChunkSeq::new[CallRow](),
@@ -511,6 +518,40 @@ fn check_fn_call(inout tc: Tc, in a: Ast, f: FnR, receiver_ty: u32, e: Ex, ce: E
     rty
 }
 
+fn float_literal_tree(in tc: Tc, in a: Ast, eid: u64) -> bool {
+    let e = a.ex(eid);
+    if e.kind == X_LITERAL {
+        return e.a == Lit::Float;
+    }
+    let op = n32(e.a);
+    if e.kind == X_UNARY {
+        return is_op(in tc, op, in "-") && float_literal_tree(in tc, in a, e.b);
+    }
+    e.kind == X_BINARY
+        && (is_op(in tc, op, in "+")
+            || is_op(in tc, op, in "-")
+            || is_op(in tc, op, in "*")
+            || is_op(in tc, op, in "/")
+            || is_op(in tc, op, in "%"))
+        && float_literal_tree(in tc, in a, e.b)
+        && float_literal_tree(in tc, in a, e.c)
+}
+
+fn check_operands(inout tc: Tc, in a: Ast, left: u64, right: u64, expected: u32) -> (u32, u32) {
+    if tc.native_float_literals
+        && tc.types.kind(expected) == TyKind::Infer
+        && float_literal_tree(in tc, in a, left)
+    {
+        // A typed right operand supplies the kind for a literal tree on the left.
+        let rt = check_expr(inout tc, in a, right, expected);
+        let lt = check_expr(inout tc, in a, left, rt);
+        return (lt, rt);
+    }
+    let lt = check_expr(inout tc, in a, left, expected);
+    let rt = check_expr(inout tc, in a, right, lt);
+    (lt, rt)
+}
+
 fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
     if eid == NONE64 {
         return tc.unit_ty;
@@ -523,7 +564,14 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
         if e.a == Lit::Bool {
             tc.bool_ty
         } else if e.a == Lit::Float {
-            tc.f64_ty
+            if tc.native_float_literals
+                && tc.types.kind(expected) == TyKind::Named
+                && tc.types.name(expected) == tc.world.k.f32_
+            {
+                expected
+            } else {
+                tc.f64_ty
+            }
         } else if e.a == Lit::String {
             if expected == tc.types.named0(tc.world.k.string) {
                 expected
@@ -648,12 +696,10 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
             || is_op(in tc, op, in "&&")
             || is_op(in tc, op, in "||")
         {
-            let lt = check_expr(inout tc, in a, e.b, tc.infer_ty);
-            let _rt = check_expr(inout tc, in a, e.c, lt);
+            let _ = check_operands(inout tc, in a, e.b, e.c, tc.infer_ty);
             tc.bool_ty
         } else {
-            let lt = check_expr(inout tc, in a, e.b, expected);
-            let rt = check_expr(inout tc, in a, e.c, lt);
+            let (lt, rt) = check_operands(inout tc, in a, e.b, e.c, expected);
             if tc.types.kind(lt) == TyKind::Infer {
                 rt
             } else {
@@ -1252,6 +1298,7 @@ fn dummy_tc(k: Known) -> Tc {
         i64_ty: 0,
         u64_ty: 0,
         f64_ty: 0,
+        native_float_literals: false,
         str_ty: 0,
         never_ty: 0,
         calls: ChunkSeq::new[CallRow](),
@@ -1286,6 +1333,7 @@ fn rebuild_tc(
         i64_ty: tc_i64,
         u64_ty: tc_u64,
         f64_ty: tc_f64,
+        native_float_literals: tc_native_float_literals,
         str_ty: tc_str,
         never_ty: tc_never,
         calls: tc_calls_in,
@@ -1363,6 +1411,7 @@ fn rebuild_tc(
         i64_ty: tc_i64,
         u64_ty: tc_u64,
         f64_ty: tc_f64,
+        native_float_literals: tc_native_float_literals,
         str_ty: tc_str,
         never_ty: tc_never,
         calls: tc_calls,
@@ -1380,9 +1429,10 @@ pub fn typecheck_ast(
     in a: Ast,
     sink names: Names,
     sink types: Types,
-    sink world: World
+    sink world: World,
+    native_float_literals: bool
 ) -> (Names, Types, World, ChunkSeq[CallRow], ChunkSeq[Pair]) {
-    let mut tc = tc_new(sink names, sink types, sink world);
+    let mut tc = tc_new(sink names, sink types, sink world, native_float_literals);
     let mut max_spans = 262144;
     let mut max_calls = 131072;
     let mut max_pairs = 131072;

@@ -2477,6 +2477,17 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
              if flag { return (wrapping_add(wrapping_add(e, f), b), state, (), wrapping_sub(a, 3)); };\n\
              (twist(c, d), state, (), wrapping_add(a, 7))\n\
          }\n\
+         fn literal_shift(value: f32) -> f32 { value + 0.25 }\n\
+         pub fn float_literals(flag: bool) -> (f32, f32, f32, f32, f32, f32, f32) {\n\
+             let even: f32 = 1.000000059604644775390625;\n\
+             let odd: f32 = 1.000000178813934326171875;\n\
+             let subnormal: f32 = 1.401298464324817e-45;\n\
+             let underflow: f32 = -1.0e-50;\n\
+             let finite: f32 = 3.4028234663852886e38;\n\
+             let overflow: f32 = 3.4028236692093846e38;\n\
+             let x: f32 = if flag { 1.5 } else { 1.75 };\n\
+             (even, odd, subnormal, underflow, finite, overflow, literal_shift(x))\n\
+         }\n\
          fn unsupported(x: u64) -> u64 { match (x, x) { (0, _) => 7, _ => 9 } }\n\
          pub fn decline(x: u64) -> u64 { unsupported(x) }\n",
     )
@@ -2688,6 +2699,14 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
         "{:?}",
         read_stage2_sidecar_notes(&object)
     );
+    let result_object = dir.join("native-result.o");
+    std::fs::rename(&object, &result_object).unwrap();
+    assert_eq!(
+        compile("float_literals"),
+        0,
+        "{:?}",
+        read_stage2_sidecar_notes(&object)
+    );
     let bytes = std::fs::read(&object).unwrap();
     assert_ne!(compile("decline"), 0);
     assert!(read_stage2_sidecar_notes(&object).contains("unsupported x86-64 ELF entry"));
@@ -2724,6 +2743,7 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
          extern bool product_equality(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);\n\
          extern uint64_t result_value(uint64_t *, int64_t, uint64_t, uint64_t, uint64_t,\n\
                                       uint64_t, uint64_t, bool, float, double);\n\
+         extern uint64_t float_literals(uint64_t *, bool);\n\
          int main(void) {\n\
              if (mix(10, 4) != 65 || mix(UINT64_MAX, UINT64_MAX) != UINT64_MAX - 16) return 1;\n\
              if (choose(0, 4) != 8 || choose(2, 4) != 8 || choose(4, 1) != 10\n\
@@ -2783,10 +2803,16 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
                  || cells[0] != 19 || cells[1] != UINT64_MAX - 1\n\
                  || cells[2] != UINT64_C(0x12345678c0200000) || cells[3] != UINT64_C(0x4008000000000000)\n\
                  || cells[4] != 0 || cells[5] != UINT64_MAX - 4 || cells[6] != 123) return 24;\n\
-             return result_value(cells, -2, 4, 9, 6, 7, 8, false, 0.0f, -0.0) != 0\n\
+             if (result_value(cells, -2, 4, 9, 6, 7, 8, false, 0.0f, -0.0) != 0\n\
                  || cells[0] != 84 || cells[1] != UINT64_MAX - 1\n\
                  || cells[2] != UINT64_C(0x1234567800000000) || cells[3] != UINT64_C(0x8000000000000000)\n\
-                 || cells[4] != 0 || cells[5] != 5 || cells[6] != 123;\n\
+                 || cells[4] != 0 || cells[5] != 5 || cells[6] != 123) return 25;\n\
+             uint64_t literals[7] = {0};\n\
+             if (float_literals(literals, true) != 0 || literals[0] != UINT64_C(0x3f800000)\n\
+                 || literals[1] != UINT64_C(0x3f800002) || literals[2] != 1\n\
+                 || literals[3] != UINT64_C(0x80000000) || literals[4] != UINT64_C(0x7f7fffff)\n\
+                 || literals[5] != UINT64_C(0x7f800000) || literals[6] != UINT64_C(0x3fe00000)) return 26;\n\
+             return float_literals(literals, false) != 0 || literals[6] != UINT64_C(0x40000000);\n\
          }\n",
     )
     .unwrap();
@@ -2815,6 +2841,7 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
             &inout_object,
             &nested_object,
             &equality_object,
+            &result_object,
             &object,
         ])
         .arg("-o")

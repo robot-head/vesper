@@ -92,6 +92,20 @@ const WRAPPING_CONVERSION_PREFIX: Str = "wrapping_";
 const WIDEN_CONVERSION_PREFIX: Str = "widen_";
 const NARROW_CONVERSION_PREFIX: Str = "narrow_";
 const INTEGER_BOUND_DEPTH: u64 = 3;
+const F64_FRACTION_BITS: u64 = 52;
+const F32_FRACTION_BITS: u64 = 23;
+const F64_EXPONENT_MASK: u64 = 2047;
+const F32_EXPONENT_MASK: u64 = 255;
+const F64_EXPONENT_BIAS: u64 = 1023;
+const F32_EXPONENT_BIAS: u64 = 127;
+const F64_TO_F32_BIAS: u64 = F64_EXPONENT_BIAS - F32_EXPONENT_BIAS;
+// Binary64 biased exponents at binary32's normal, half-subnormal, and overflow boundaries.
+const F32_MIN_NORMAL_F64_EXPONENT: u64 = 897;
+const F32_HALF_SUBNORMAL_F64_EXPONENT: u64 = 873;
+const F32_OVERFLOW_F64_EXPONENT: u64 = 1151;
+const F32_DISCARDED_BITS: u64 = F64_FRACTION_BITS - F32_FRACTION_BITS;
+const F32_INFINITY_BITS: u64 = F32_EXPONENT_MASK << F32_FRACTION_BITS;
+const F32_NAN_QUIET_BIT: u64 = 1 << (F32_FRACTION_BITS - 1);
 
 enum ScalarKind: _ {
     Unsupported = 0,
@@ -1796,12 +1810,55 @@ fn literal_bits(in low: L, at: u64, kind: u8) -> Option[u64] {
     Option::Some(bits & mask)
 }
 
+// Place IR stores the parsed binary64 bits. Round those bits to binary32
+// without depending on floating-point instructions in the bootstrap compiler.
+fn binary32_literal_bits(bits: u64) -> u64 {
+    let sign = (bits >> (QWORD_BITS - 1)) << (DWORD_BITS - 1);
+    let exponent = (bits >> F64_FRACTION_BITS) & F64_EXPONENT_MASK;
+    let fraction = bits & low_bits_mask(F64_FRACTION_BITS);
+    if exponent == F64_EXPONENT_MASK && fraction != 0 {
+        let payload = wrapping_shr_u64(fraction, wrapping_u32(F32_DISCARDED_BITS));
+        return sign | F32_INFINITY_BITS | F32_NAN_QUIET_BIT | payload;
+    }
+    if exponent >= F32_OVERFLOW_F64_EXPONENT {
+        return sign | F32_INFINITY_BITS;
+    }
+    if exponent < F32_HALF_SUBNORMAL_F64_EXPONENT {
+        return sign;
+    }
+    let (base, significand, shift) = if exponent >= F32_MIN_NORMAL_F64_EXPONENT {
+        (wrapping_sub(exponent, F64_TO_F32_BIAS) << F32_FRACTION_BITS, fraction, F32_DISCARDED_BITS)
+    } else {
+        (
+            0,
+            fraction | (1 << F64_FRACTION_BITS),
+            add(F32_DISCARDED_BITS, wrapping_sub(F32_MIN_NORMAL_F64_EXPONENT, exponent))
+        )
+    };
+    let kept = wrapping_shr_u64(significand, wrapping_u32(shift));
+    let discarded = significand & low_bits_mask(shift);
+    let half = sign_bit(shift);
+    let rounded = if discarded > half || (discarded == half && (kept & 1) != 0) {
+        inc(kept)
+    } else {
+        kept
+    };
+    // Carry out of the fraction rounds into the adjacent exponent.
+    sign | add(base, rounded)
+}
+
 fn lower_literal(in low: L, at: u64, kind: u8, inout m: Function) -> u64 {
-    if kind == ScalarKind::F64
+    if is_float(kind)
         && low.program.op(at) == Lit::Float
         && low.program.op(add(at, LITERAL_HIGH)) == 0
     {
-        return m.record(FLOAT_CONSTANT, low.program.op(add(at, LITERAL_LOW)), 0, QWORD_BITS);
+        let bits = low.program.op(add(at, LITERAL_LOW));
+        let native = if kind == ScalarKind::F32 {
+            binary32_literal_bits(bits)
+        } else {
+            bits
+        };
+        return m.record(FLOAT_CONSTANT, native, 0, abi_width(kind));
     }
     match literal_bits(in low, at, kind) {
         Option::Some(bits) => m.record(CONSTANT, bits, 0, 0),
