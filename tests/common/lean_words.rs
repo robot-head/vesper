@@ -212,9 +212,6 @@ pub fn cfg_input_with(world: &World, structured: bool) -> Option<Vec<u8>> {
 /// ([`effect_task`]): the input of `extract_module`.
 pub fn cfg_input_full(world: &World, structured: bool, effects: bool) -> Option<Vec<u8>> {
     let l = lift(world);
-    if !ir_words::encodable(&l.world, &l.program) {
-        return None;
-    }
     let mut t = ir_words::Tables::of(&l.program);
     t.label_names();
     let mut tail = t.section();
@@ -280,6 +277,7 @@ pub fn cfg_input_full(world: &World, structured: bool, effects: bool) -> Option<
             pat_count: 0,
             exprs: vec![],
             expr_count: 0,
+            bufs: vec![],
         };
         tail.extend(a.section());
     }
@@ -340,6 +338,11 @@ pub fn cfg_input_full(world: &World, structured: bool, effects: bool) -> Option<
     }
     let enc = &mut t.enc;
     let w = enc.world(&l.world);
+    // A literal type past 64 bits cannot be encoded (`ir_words::encodable`,
+    // checked here on what was interned, not by a walk of its own).
+    if enc.unfit {
+        return None;
+    }
     Some(enc.finish(&w, &tail))
 }
 
@@ -400,6 +403,35 @@ pub struct Ast<'a> {
     pat_count: u64,
     exprs: Vec<u64>,
     expr_count: u64,
+    /// Row buffers for reuse: a node fills one while its children (which
+    /// take their own) are written, so each depth keeps one allocation.
+    bufs: Vec<Vec<u64>>,
+}
+
+/// Whether `t` holds an integer literal type, the only part
+/// `numeric::default_type` changes.
+fn has_int_literal(t: &Type) -> bool {
+    let row = |e: &Effects| {
+        e.instances
+            .iter()
+            .any(|i| i.args.iter().any(has_int_literal))
+    };
+    match t {
+        Type::IntLiteral(_) => true,
+        Type::Named(_, a) | Type::Tuple(a) => a.iter().any(has_int_literal),
+        Type::Function {
+            params,
+            result,
+            effects,
+            ..
+        } => {
+            params.iter().any(|(_, t)| has_int_literal(t))
+                || has_int_literal(result)
+                || row(effects)
+        }
+        Type::Row(e) => row(e),
+        Type::Infer => false,
+    }
 }
 
 // Sequence operation codes (`Q_*` in ast.ves).
@@ -443,6 +475,17 @@ impl Ast<'_> {
             .map(vesper::numeric::default_type)
     }
 
+    /// [`Ast::type_of`]'s type word, or NONE. A type with no literal is its
+    /// own default, so only those with one are copied.
+    fn type_word(&mut self, e: &vesper::ast::Expr) -> u64 {
+        let world = self.world;
+        match world.types.get(&(e.span.start, e.span.end)) {
+            None => NONE,
+            Some(t) if has_int_literal(t) => self.ty(&vesper::numeric::default_type(t)),
+            Some(t) => self.ty(t),
+        }
+    }
+
     fn literal(&mut self, l: &vesper::ast::Literal, out: &mut Vec<u64>) {
         use vesper::ast::Literal;
         match l {
@@ -460,7 +503,7 @@ impl Ast<'_> {
 
     fn pattern(&mut self, p: &vesper::ast::Pattern) -> u64 {
         use vesper::ast::PatternKind;
-        let mut w = vec![];
+        let mut w = self.bufs.pop().unwrap_or_default();
         let head = |kind: u64, w: &mut Vec<u64>| {
             w.extend([
                 kind,
@@ -506,7 +549,9 @@ impl Ast<'_> {
                 }
             }
         }
-        self.pats.extend(w);
+        self.pats.extend_from_slice(&w);
+        w.clear();
+        self.bufs.push(w);
         self.pat_count += 1;
         self.pat_count - 1
     }
@@ -679,7 +724,7 @@ impl Ast<'_> {
     /// Calls end with the `instance_key` of an `E::op` callee or NONE.
     fn expr(&mut self, e: &vesper::ast::Expr) -> u64 {
         use vesper::ast::{ExprKind, Statement};
-        let mut w: Vec<u64> = vec![];
+        let mut w = self.bufs.pop().unwrap_or_default();
         let kind = match &e.kind {
             ExprKind::Literal(l) => {
                 self.literal(l, &mut w);
@@ -912,10 +957,12 @@ impl Ast<'_> {
                 X_HANDLE
             }
         };
-        let ty = self.type_of(e).map_or(NONE, |t| self.ty(&t));
+        let ty = self.type_word(e);
         self.exprs
             .extend([kind, e.span.start as u64, e.span.end as u64, ty]);
-        self.exprs.extend(w);
+        self.exprs.extend_from_slice(&w);
+        w.clear();
+        self.bufs.push(w);
         self.expr_count += 1;
         self.expr_count - 1
     }

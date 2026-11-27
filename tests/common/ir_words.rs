@@ -149,6 +149,11 @@ impl Pool {
 
 // ------------------------------------------------------------------ tables
 
+/// Operand words reserved per instruction ([`Tables::of`]): about the
+/// corpus average (13.9) with headers and terminators, so the tables
+/// rarely grow.
+const OPS_PER_INST: usize = 14;
+
 #[derive(Debug, Clone, Copy, Default)]
 pub struct FnRow {
     pub name: u64,
@@ -196,6 +201,9 @@ pub struct InstRow {
 pub struct Tables {
     pub enc: Enc,
     pub types: BTreeMap<u64, Type>,
+    /// Which type indices `types` holds already, so a repeat costs no
+    /// map lookup.
+    typed: Vec<bool>,
     pub pool: Pool,
     pub paths: Vec<Vec<u64>>,
     path_ids: BTreeMap<Vec<String>, u64>,
@@ -243,8 +251,20 @@ impl Tables {
 
     fn ty(&mut self, t: &Type) {
         let i = self.enc.ty(t);
-        self.types.entry(i).or_insert_with(|| t.clone());
+        self.keep_type(i, t);
         self.put(i, T_TYPE);
+    }
+
+    /// Records `t` as the type of index `i` the first time `i` is seen.
+    fn keep_type(&mut self, i: u64, t: &Type) {
+        let k = i as usize;
+        if k >= self.typed.len() {
+            self.typed.resize(k + 1, false);
+        }
+        if !self.typed[k] {
+            self.typed[k] = true;
+            self.types.insert(i, t.clone());
+        }
     }
 
     fn path(&mut self, p: &[String]) {
@@ -718,7 +738,7 @@ impl Tables {
 
     fn instruction(&mut self, i: &Instruction) {
         let ty = self.enc.ty(&i.ty);
-        self.types.entry(ty).or_insert_with(|| i.ty.clone());
+        self.keep_type(ty, &i.ty);
         let (tin, tout) = i.token.unwrap_or((0, 0));
         let a = self.ops.len();
         self.op(&i.op);
@@ -764,6 +784,19 @@ impl Tables {
     /// The tables of `program`.
     pub fn of(program: &Program) -> Self {
         let mut t = Self::new();
+        // Sized up front: growing the tables was a tenth of the encoding.
+        let blocks: usize = program.functions.values().map(|f| f.blocks.len()).sum();
+        let insts: usize = program
+            .functions
+            .values()
+            .flat_map(|f| &f.blocks)
+            .map(|b| b.instructions.len())
+            .sum();
+        t.fns.reserve(program.functions.len());
+        t.blocks.reserve(blocks);
+        t.insts.reserve(insts);
+        t.ops.reserve(OPS_PER_INST * insts);
+        t.tags.reserve(OPS_PER_INST * insts);
         for f in program.functions.values() {
             t.function(f);
         }
