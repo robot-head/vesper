@@ -28,6 +28,9 @@ const READ_PASS: u64 = 2;
 const READ_PROJECTIONS: u64 = 3;
 const BIND_PATTERN: u64 = 1;
 const BIND_NAME: u64 = 4;
+const WRITE_WORDS: u64 = 3;
+const WRITE_OPERATOR: u64 = 1;
+const WRITE_VALUE: u64 = 2;
 const BLOCK_HEADER_WORDS: u64 = 4;
 const BLOCK_INCOMING_COUNT: u64 = 1;
 const BLOCK_INCOMING_WORDS: u64 = 2;
@@ -55,6 +58,7 @@ enum ScalarKind: _ {
     Unsigned = 1,
     Signed = 2,
     Bool = 3,
+    Unit = 4,
 }
 
 struct CallGraph {
@@ -92,6 +96,8 @@ struct Function {
     values: ChunkSeq[Value],
     kinds: ChunkSeq[u8],
     bindings: ChunkSeq[u32],
+    mutable_slots: ChunkSeq[u32],
+    mutable_bytes: u64,
     home_bytes: u64,
 }
 
@@ -106,6 +112,16 @@ fn block_bit(block: u64) -> u64 {
 impl Function {
     fn kind(in self, id: u64) -> u8 {
         self.kinds.try_get(id).unwrap_or(ScalarKind::Unsupported)
+    }
+
+    fn mutable_offset(in self, name: u32) -> u64 {
+        // Keep mutable cells after the packed, live-range-based SSA homes.
+        let slot = u32_at(in self.mutable_slots, w(name));
+        if slot == 0 {
+            NO_VALUE
+        } else {
+            add(self.home_bytes, wrapping_mul(wrapping_sub(w(slot), 1), HOME_BYTES))
+        }
     }
 
     fn record(inout self, op: u64, lhs: u64, rhs: u64, extra: u64) -> u64 {
@@ -219,6 +235,9 @@ fn is_integer(kind: u8) -> bool {
 }
 
 fn scalar_kind(in low: L, ty: u32) -> u8 {
+    if ty == low.ctx.types.unit {
+        return ScalarKind::Unit;
+    }
     let node = low.ctx.types.node(ty);
     if node.kind != TyKind::Named || node.n != 0 {
         return ScalarKind::Unsupported;
@@ -229,6 +248,8 @@ fn scalar_kind(in low: L, ty: u32) -> u8 {
         ScalarKind::Signed
     } else if node.name == low.ctx.world.k.bool_ {
         ScalarKind::Bool
+    } else if node.name == low.ctx.types.s_unit {
+        ScalarKind::Unit
     } else {
         ScalarKind::Unsupported
     }
@@ -279,13 +300,79 @@ fn collect_binding(in low: L, inst: InstRow, inout m: Function) -> bool {
     if pattern != Pat::Bind || inst.n != inc(BIND_NAME) {
         return false;
     }
-    // Place IR gives shadowed bindings distinct names. Writes and inout
-    // arguments are declined, so a place read can reuse the bound SSA value.
+    // Place IR gives shadowed bindings distinct names. A binding with no
+    // writes can reuse its initial SSA value.
     let name = n32(low.program.op(add(inst.a, BIND_NAME)));
     if u32_at(in m.bindings, w(name)) != 0 {
         return false;
     }
     set_by_symbol(inout m.bindings, name, n32(inc(low.program.op(inst.a))));
+    true
+}
+
+fn collect_mutable_slots(in low: L, row: FnRow, inout m: Function) -> bool {
+    let mut count: u32 = 0;
+    for block in 0..row.bc {
+        let b = low.program.block(add(row.b0, block));
+        for index in b.i0..add(b.i0, b.ic) {
+            let inst = low.program.inst(index);
+            if inst.op != Op::Write {
+                continue;
+            }
+            let name = n32(low.program.op(inst.a));
+            let op = n32(low.program.op(add(inst.a, WRITE_OPERATOR)));
+            if inst.n != WRITE_WORDS
+                || inst.fallible != 0
+                || !low.ctx.names.spells(op, in "=".as_bytes())
+                || u32_at(in m.bindings, w(name)) == 0
+            {
+                return false;
+            }
+            if u32_at(in m.mutable_slots, w(name)) == 0 {
+                count = wrapping_add(count, 1);
+                set_by_symbol(inout m.mutable_slots, name, count);
+            }
+        }
+    }
+    m.mutable_bytes = wrapping_mul(w(count), HOME_BYTES);
+    true
+}
+
+fn lower_local_store(in low: L, inst: InstRow, block: u64, inout m: Function) -> bool {
+    let at = inst.a;
+    if inst.op == Op::Bind && inst.n == BIND_NAME {
+        return m.kind(low.program.op(at)) != ScalarKind::Unsupported;
+    }
+    let name_at = if inst.op == Op::Bind {
+        add(at, BIND_NAME)
+    } else {
+        at
+    };
+    let name = n32(low.program.op(name_at));
+    let offset = m.mutable_offset(name);
+    let source_at = if inst.op == Op::Bind {
+        at
+    } else {
+        add(at, WRITE_VALUE)
+    };
+    let source = low.program.op(source_at);
+    let kind = m.kind(source);
+    if offset == NO_VALUE {
+        return inst.op == Op::Bind && kind != ScalarKind::Unsupported;
+    }
+    let initial = u32_at(in m.bindings, w(name));
+    if initial == 0
+        || kind == ScalarKind::Unsupported
+        || kind == ScalarKind::Unit
+        || kind != m.kind(wrapping_sub(w(initial), 1))
+    {
+        return false;
+    }
+    let value = m.read(add(m.arguments, source), block);
+    if value == NO_VALUE {
+        return false;
+    }
+    let _ = m.record(STACK_STORE_QWORD, value, HOME_SLOT, offset);
     true
 }
 
@@ -460,6 +547,7 @@ fn pack_homes(in low: L, row: FnRow, inout m: Function) {
 // Stack homes hold branch results and the values read outside their defining block.
 fn plan_homes(in low: L, f: FnR, row: FnRow, inout m: Function) -> bool {
     let mut value_count: u64 = 0;
+    let mut has_writes = false;
     for block in 0..row.bc {
         let b = low.program.block(add(row.b0, block));
         let param = block_parameter(in low, b);
@@ -475,9 +563,15 @@ fn plan_homes(in low: L, f: FnR, row: FnRow, inout m: Function) -> bool {
             if inst.op == Op::Bind && !collect_binding(in low, inst, inout m) {
                 return false;
             }
+            has_writes = has_writes || inst.op == Op::Write;
         }
     }
     m.values.resize(add(f.param_count, value_count), value_new(NO_VALUE));
+    if !plan_types(in low, row, inout m)
+        || (has_writes && !collect_mutable_slots(in low, row, inout m))
+    {
+        return false;
+    }
     if row.bc == 1 {
         return block_parameter(in low, low.program.block(row.b0)) == NO_VALUE;
     }
@@ -489,7 +583,9 @@ fn plan_homes(in low: L, f: FnR, row: FnRow, inout m: Function) -> bool {
         let param = block_parameter(in low, b);
         if param != NO_VALUE {
             let id = add(f.param_count, param);
-            if !m.values.try_set(id, value_new(block)) || !m.home(id, block) {
+            if !m.values.try_set(id, value_new(block))
+                || (m.kind(param) != ScalarKind::Unit && !m.home(id, block))
+            {
                 return false;
             }
         }
@@ -506,8 +602,20 @@ fn plan_homes(in low: L, f: FnR, row: FnRow, inout m: Function) -> bool {
             let inst = low.program.inst(index);
             let at = inst.a;
             if inst.op == Op::Read {
-                let value = place_value(in low, f, n32(low.program.op(at)), in m);
-                if !m.use_in(value, block) {
+                let name = n32(low.program.op(at));
+                let value = place_value(in low, f, name, in m);
+                if m.mutable_offset(name) == NO_VALUE && !m.use_in(value, block) {
+                    return false;
+                }
+            } else if inst.op == Op::Write {
+                if !m.use_in(add(f.param_count, low.program.op(add(at, WRITE_VALUE))), block) {
+                    return false;
+                }
+            } else if inst.op == Op::Bind && inst.n == inc(BIND_NAME) {
+                let name = n32(low.program.op(add(at, BIND_NAME)));
+                if m.mutable_offset(name) != NO_VALUE
+                    && !m.use_in(add(f.param_count, low.program.op(at)), block)
+                {
                     return false;
                 }
             } else if inst.op == Op::Binary {
@@ -538,7 +646,8 @@ fn plan_homes(in low: L, f: FnR, row: FnRow, inout m: Function) -> bool {
                 return false;
             }
         } else if b.term == Term::Jump && b.tn == inc(JUMP_ARGUMENT) {
-            if !m.use_in(add(f.param_count, low.program.op(add(b.ta, JUMP_ARGUMENT))), block) {
+            let id = low.program.op(add(b.ta, JUMP_ARGUMENT));
+            if m.kind(id) != ScalarKind::Unit && !m.use_in(add(f.param_count, id), block) {
                 return false;
             }
         }
@@ -630,14 +739,17 @@ fn lower_block(
     for index in b.i0..add(b.i0, b.ic) {
         let inst = low.program.inst(index);
         let at = inst.a;
-        if inst.op == Op::Bind {
-            if m.kind(low.program.op(at)) == ScalarKind::Unsupported {
+        if inst.op == Op::Bind || inst.op == Op::Write {
+            if !lower_local_store(in low, inst, block, inout m) {
                 return false;
             }
             continue;
         }
+        if inst.op == Op::Unit {
+            continue;
+        }
         let kind = scalar_kind(in low, inst.ty);
-        if inst.fallible != 0 || kind == ScalarKind::Unsupported {
+        if inst.fallible != 0 || kind == ScalarKind::Unsupported || kind == ScalarKind::Unit {
             return false;
         }
         let value = if inst.op == Op::Const && inst.n == LITERAL_WORDS {
@@ -648,7 +760,8 @@ fn lower_block(
             && low.program.op(add(at, READ_PASS)) != TyPass::Inout
             && low.program.op(add(at, READ_PROJECTIONS)) == 0
         {
-            let source = place_value(in low, f, n32(low.program.op(at)), in m);
+            let name = n32(low.program.op(at));
+            let source = place_value(in low, f, name, in m);
             if source == NO_VALUE {
                 return false;
             }
@@ -660,7 +773,12 @@ fn lower_block(
             if source_kind != kind {
                 return false;
             }
-            m.read(source, block)
+            let offset = m.mutable_offset(name);
+            if offset == NO_VALUE {
+                m.read(source, block)
+            } else {
+                m.record(STACK_LOAD, HOME_SLOT, offset, QWORD_BITS)
+            }
         } else if inst.op == Op::Unary && inst.n == UNARY_WORDS {
             lower_unary(in low, at, kind, block, inout m)
         } else if inst.op == Op::Binary && inst.n == BINARY_WORDS {
@@ -710,6 +828,10 @@ fn lower_terminator(in low: L, row: FnRow, b: BlockRow, block: u64, inout m: Fun
             let kind = m.kind(param);
             if kind == ScalarKind::Unsupported || kind != m.kind(argument) {
                 return false;
+            }
+            if kind == ScalarKind::Unit {
+                let _ = m.record(JUMP_LABEL, target, 0, 0);
+                return true;
             }
             let source = add(m.arguments, argument);
             let home = m.values
@@ -771,19 +893,22 @@ fn lower_function(
         values: ChunkSeq::new[Value](),
         kinds: ChunkSeq::new[u8](),
         bindings: ChunkSeq::new[u32](),
+        mutable_slots: ChunkSeq::new[u32](),
+        mutable_bytes: 0,
         home_bytes: 0
     };
-    if !plan_homes(in low, f, row, inout m) || !plan_types(in low, row, inout m) {
+    if !plan_homes(in low, f, row, inout m) {
         return ChunkSeq::new[u8]();
     }
     m.words.push(f.param_count);
     m.words.push(NO_VALUE);
-    if m.home_bytes != 0 {
-        let _ = m.record(STACK_SLOT, m.home_bytes, HOME_BYTES, 0);
+    let frame_bytes = add(m.home_bytes, m.mutable_bytes);
+    if frame_bytes != 0 {
+        let _ = m.record(STACK_SLOT, frame_bytes, HOME_BYTES, 0);
     }
     for block in 0..row.bc {
         if row.bc > 1 {
-            let home = if block == 0 && m.home_bytes != 0 {
+            let home = if block == 0 && frame_bytes != 0 {
                 inc(HOME_SLOT)
             } else {
                 0
