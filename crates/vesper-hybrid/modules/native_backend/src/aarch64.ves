@@ -1,7 +1,7 @@
 // AAPCS64 integer leaves. The input is the shared scalar
 // machine tape. Unsupported operations or oversized frames decline before a
 // function is defined.
-use @vesper/codegen-freestanding::util::{push32};
+use @vesper/codegen-freestanding::util::{push16, push32};
 use self::scalar::{
     Record, FrameSlot, Label, align_up, word_at, read_record, valid_block_layout, CONSTANT, ADD,
     SUB, MUL, AND, OR, XOR, NEG, NOT, SHL, SHR, SAR, COMPARE, COMPARE_BYTE, COMPARE_WORD,
@@ -13,8 +13,9 @@ use self::scalar::{
     COMPARE_BYTE_IMMEDIATE, COMPARE_WORD_IMMEDIATE, COMPARE_DWORD_IMMEDIATE, EQUAL, NOT_EQUAL,
     SIGNED_LESS, SIGNED_GREATER_EQUAL, SIGNED_GREATER, SIGNED_LESS_EQUAL, UNSIGNED_LESS,
     UNSIGNED_GREATER_EQUAL, UNSIGNED_GREATER, UNSIGNED_LESS_EQUAL, BLOCK_LABEL, EDGE_LABEL,
-    JUMP_LABEL, BRANCH_LABEL, BLOCK_RETURN, BRANCH_BLOCK, ARGUMENT_COUNT, RETURN_VALUE,
-    HEADER_WORDS, RECORD_WORDS, NEVER_READ, NO_VALUE, DISP32_MASK
+    JUMP_LABEL, BRANCH_LABEL, BLOCK_RETURN, BRANCH_BLOCK, BRANCH_TABLE, BRANCH_TABLE_TARGET,
+    TableFixup, ARGUMENT_COUNT, RETURN_VALUE, HEADER_WORDS, RECORD_WORDS, NEVER_READ, NO_VALUE,
+    DISP32_MASK
 };
 use self::x86_64::{BYTE_BITS, WORD_BITS, DWORD_BITS, QWORD_BITS};
 
@@ -28,7 +29,7 @@ const SPILL_RESULT: u32 = 12;
 const SPILL_LEFT: u32 = 13;
 const SPILL_RIGHT: u32 = 14;
 const SPILL_THIRD: u32 = 15;
-const ALLOCATION_ATTEMPTS: u64 = 3;
+const ENCODING_ATTEMPTS: u64 = 4;
 const SCRATCH: u32 = 16;
 const COMPARE_LEFT_SCRATCH: u32 = 17;
 const ZERO: u32 = 31;
@@ -42,6 +43,16 @@ const RETURN: u32 = 0xd65f03c0;
 const JUMP: u32 = 0x14000000;
 const BRANCH_IF_ZERO: u32 = 0xb4000000;
 const BRANCH_IF_CONDITION: u32 = 0x54000000;
+const BRANCH_REGISTER: u32 = 0xd61f0000;
+const CSDB: u32 = 0xd503229f;
+// ADR points past itself and the three remaining dispatch instructions.
+const ADR_TABLE: u32 = 0x10000080;
+const LDRSH_UXTW_SCALED: u32 = 0x78a05800;
+const LDRSW_UXTW_SCALED: u32 = 0xb8a05800;
+const ADD_INSTRUCTION_SCALE: u32 = 0x800;
+const SHORT_TABLE_REACH: i64 = 0x8000;
+const LONG_TABLE_REACH: i64 = 0x80000000;
+const SHORT_ENTRIES_PER_INSTRUCTION: u64 = 2;
 const BRANCH_IMM19_SHIFT: u32 = 5;
 const BRANCH_IMM19_REACH: i64 = 0x40000;
 const BRANCH_IMM26_REACH: i64 = 0x2000000;
@@ -139,6 +150,11 @@ copy enum Allocation {
     RegisterHomes,
     StackHomes,
     Spills,
+}
+
+copy enum Retry {
+    Allocate(Allocation),
+    LongTables,
 }
 
 fn sh(value: u32, amount: u32) -> u32 {
@@ -464,6 +480,16 @@ fn operands(in r: Record) -> Option[u64] {
             Option::None
         };
     }
+    if r.op == BRANCH_TABLE {
+        return Option::Some(1);
+    }
+    if r.op == BRANCH_TABLE_TARGET {
+        return if r.right == 0 && r.extra == 0 {
+            Option::Some(0)
+        } else {
+            Option::None
+        };
+    }
     if comparison_width(r.op) != 0 {
         if r.extra > UNSIGNED_LESS_EQUAL {
             return Option::None;
@@ -736,6 +762,8 @@ fn no_result(op: u64) -> bool {
         || op == STACK_SLOT
         || store_width(op) != 0
         || (op >= BLOCK_LABEL && op <= BRANCH_BLOCK)
+        || op == BRANCH_TABLE
+        || op == BRANCH_TABLE_TARGET
 }
 
 fn stack_adjust(opcode: u32, adjustment: u32) -> u32 {
@@ -787,13 +815,74 @@ fn patch_branch(inout output: ChunkSeq[u8], in branch: Branch, target: u64) -> b
     true
 }
 
+fn compare_table_index(inout output: ChunkSeq[u8], index: u32, cases: u64) {
+    // The bounds check and the table address both use the low 32 bits.
+    match arithmetic_immediate(cases) {
+        Option::Some(encoded) => {
+            push32(inout output, (CMP_IMM & ~REG64) | encoded | sh(index, RN_SHIFT));
+        },
+        Option::None => {
+            immediate(inout output, SCRATCH, cases);
+            rrr(inout output, SUBS_REG & ~REG64, ZERO, index, SCRATCH);
+        },
+    };
+}
+
+fn emit_table_lookup(inout output: ChunkSeq[u8], index: u32, long_tables: bool) {
+    // Mask a speculatively out-of-range index before it can reach the load.
+    let select = (CSEL & ~REG64) | sh(HS, CONDITION_SHIFT);
+    rrr(inout output, select, COMPARE_LEFT_SCRATCH, ZERO, index);
+    push32(inout output, CSDB);
+    push32(inout output, ADR_TABLE | SCRATCH);
+    let load = if long_tables {
+        LDRSW_UXTW_SCALED
+    } else {
+        LDRSH_UXTW_SCALED
+    };
+    rrr(inout output, load, COMPARE_LEFT_SCRATCH, SCRATCH, COMPARE_LEFT_SCRATCH);
+    let add = if long_tables {
+        ADD_REG
+    } else {
+        ADD_REG | ADD_INSTRUCTION_SCALE
+    };
+    rrr(inout output, add, COMPARE_LEFT_SCRATCH, SCRATCH, COMPARE_LEFT_SCRATCH);
+    push32(inout output, BRANCH_REGISTER | sh(COMPARE_LEFT_SCRATCH, RN_SHIFT));
+}
+
+fn patch_table_entry(
+    inout output: ChunkSeq[u8],
+    in entry: TableFixup,
+    target: u64,
+    long_tables: bool
+) -> bool {
+    let delta = wrapping_i64(wrapping_sub(target, entry.base));
+    if long_tables {
+        if delta < wrapping_sub(0, LONG_TABLE_REACH) || delta >= LONG_TABLE_REACH {
+            return false;
+        }
+        write_instruction(inout output, entry.offset, wrapping_u32(delta));
+    } else {
+        let distance = wrapping_shr_i64(delta, INSTRUCTION_SHIFT);
+        if distance < wrapping_sub(0, SHORT_TABLE_REACH) || distance >= SHORT_TABLE_REACH {
+            return false;
+        }
+        let distance = wrapping_u32(distance);
+        let _ = output.try_set(entry.offset, wrapping_u8(distance));
+        let high = wrapping_u8(wrapping_shr_u32(distance, wrapping_u32(BYTE_BITS)));
+        let _ = output.try_set(wrapping_add(entry.offset, 1), high);
+    }
+    true
+}
+
 pub fn encode_leaf(in words: Slice[u64]) -> ChunkSeq[u8] {
     let mut allocation = Allocation::RegisterHomes;
-    for attempt in 0..ALLOCATION_ATTEMPTS {
-        let mut retry: Option[Allocation] = Option::None;
-        let code = encode_leaf_pass(in words, allocation, inout retry);
+    let mut long_tables = false;
+    for attempt in 0..ENCODING_ATTEMPTS {
+        let mut retry: Option[Retry] = Option::None;
+        let code = encode_leaf_pass(in words, allocation, long_tables, inout retry);
         match retry {
-            Option::Some(next) => allocation = next,
+            Option::Some(Retry::Allocate(next)) => allocation = next,
+            Option::Some(Retry::LongTables) => long_tables = true,
             Option::None => return code,
         };
     }
@@ -803,7 +892,8 @@ pub fn encode_leaf(in words: Slice[u64]) -> ChunkSeq[u8] {
 fn encode_leaf_pass(
     in words: Slice[u64],
     allocation: Allocation,
-    inout retry: Option[Allocation]
+    long_tables: bool,
+    inout retry: Option[Retry]
 ) -> ChunkSeq[u8] {
     let mut out = ChunkSeq::new[u8]();
     if words.len() < HEADER_WORDS {
@@ -892,7 +982,10 @@ fn encode_leaf_pass(
                 // Values crossing a block boundary must use stack homes.
                 return out;
             }
-        } else if r.op >= BLOCK_LABEL && r.op <= BRANCH_BLOCK {
+        } else if (r.op >= BLOCK_LABEL && r.op <= BRANCH_BLOCK)
+            || r.op == BRANCH_TABLE
+            || r.op == BRANCH_TABLE_TARGET
+        {
             return out;
         }
         if r.op == STACK_SLOT && index >= frame.slots.len() {
@@ -1000,6 +1093,7 @@ fn encode_leaf_pass(
     let mut branches = ChunkSeq::new[Branch]();
     let mut labels = ChunkSeq::new[Label]();
     let mut fixups = ChunkSeq::new[LabelBranch]();
+    let mut table_fixups = ChunkSeq::new[TableFixup]();
     if labeled {
         for index in 0..count {
             labels.push(Label { address: NO_VALUE, block: false });
@@ -1020,7 +1114,10 @@ fn encode_leaf_pass(
         let value = wrapping_add(args, index);
         let r = read_record(in words, index);
         let stored = store_width(r.op);
-        if r.op == STACK_SLOT || (!no_result(r.op) && last_read(in ends, value) == NEVER_READ) {
+        if r.op == STACK_SLOT
+            || r.op == BRANCH_TABLE_TARGET
+            || (!no_result(r.op) && last_read(in ends, value) == NEVER_READ)
+        {
             locations.push(UNASSIGNED);
             continue;
         }
@@ -1076,6 +1173,30 @@ fn encode_leaf_pass(
         let lhs = materialize(inout out, left, SPILL_LEFT, frame_bytes);
         let rhs = materialize(inout out, right, SPILL_RIGHT, frame_bytes);
         let third = materialize(inout out, extra, SPILL_THIRD, frame_bytes);
+        if r.op == BRANCH_TABLE {
+            compare_table_index(inout out, lhs, r.right);
+            let instruction = BRANCH_IF_CONDITION | HS;
+            let default = Branch { offset: out.len(), instruction: instruction };
+            fixups.push(LabelBranch { branch: default, target: r.extra, block: true });
+            push32(inout out, instruction);
+            emit_table_lookup(inout out, lhs, long_tables);
+            let base = out.len();
+            for case in 0..r.right {
+                let target = read_record(in words, wrapping_add(wrapping_add(index, 1), case));
+                table_fixups
+                    .push(TableFixup { target: target.left, offset: out.len(), base: base });
+                if long_tables {
+                    push32(inout out, 0);
+                } else {
+                    push16(inout out, 0);
+                }
+            }
+            if !long_tables && r.right % SHORT_ENTRIES_PER_INSTRUCTION != 0 {
+                push16(inout out, 0);
+            }
+            locations.push(UNASSIGNED);
+            continue;
+        }
         if conditional_branch(r.op) {
             let instruction = match flags_for_next {
                 Option::Some(cc) => BRANCH_IF_CONDITION | (cc ^ 1),
@@ -1169,13 +1290,12 @@ fn encode_leaf_pass(
                 Option::None => return ChunkSeq::new[u8](),
             }
         } else {
-            retry = Option::Some(
-                if home_mask != 0 {
-                    Allocation::StackHomes
-                } else {
-                    Allocation::Spills
-                }
-            );
+            let next = if home_mask != 0 {
+                Allocation::StackHomes
+            } else {
+                Allocation::Spills
+            };
+            retry = Option::Some(Retry::Allocate(next));
             return ChunkSeq::new[u8]();
         };
         locations.push(assigned);
@@ -1223,6 +1343,25 @@ fn encode_leaf_pass(
                 },
                 Option::None => return ChunkSeq::new[u8](),
             };
+        }
+        for index in 0..table_fixups.len() {
+            let entry = match table_fixups.try_get(index) {
+                Option::Some(entry) => entry,
+                Option::None => return ChunkSeq::new[u8](),
+            };
+            let label = match labels.try_get(entry.target) {
+                Option::Some(label) => label,
+                Option::None => return ChunkSeq::new[u8](),
+            };
+            if label.address == NO_VALUE || !label.block {
+                return ChunkSeq::new[u8]();
+            }
+            if !patch_table_entry(inout out, in entry, label.address, long_tables) {
+                if !long_tables {
+                    retry = Option::Some(Retry::LongTables);
+                }
+                return ChunkSeq::new[u8]();
+            }
         }
     } else {
         let reg = materialize(inout out, location(in locations, result), SPILL_LEFT, frame_bytes);

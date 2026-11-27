@@ -43,6 +43,8 @@ const BLOCK_LABEL: u64 = 62;
 const JUMP_LABEL: u64 = 64;
 const BLOCK_RETURN: u64 = 66;
 const BRANCH_BLOCK: u64 = 67;
+const BRANCH_TABLE: u64 = 75;
+const BRANCH_TABLE_TARGET: u64 = 76;
 const EQUAL: u64 = 0;
 const SIGNED_LESS: u64 = 2;
 const UNSIGNED_LESS: u64 = 6;
@@ -509,6 +511,113 @@ fn aarch64_spills_live_values_and_limits_the_combined_frame() {
     assert!(words.contains(&STR_X12_SP));
     assert!(words.contains(&LDR_X14_SP));
     assert!(binding::aarch64_integer_leaf(&packet(FULL_FRAME_BYTES)).is_empty());
+}
+
+#[test]
+fn aarch64_jump_tables_use_bounded_signed_halfword_offsets() {
+    const CMP_W0_3: u32 = 0x7100_0c1f;
+    const B_HS_DEFAULT: u32 = 0x5400_01e2;
+    const CSEL_W17_ZERO_W0_HS: u32 = 0x1a80_23f1;
+    const CSDB: u32 = 0xd503_229f;
+    const ADR_X16_TABLE: u32 = 0x1000_0090;
+    const LDRSH_X17_X16_W17: u32 = 0x78b1_5a11;
+    const ADD_X17_X16_X17_SCALED: u32 = 0x8b11_0a11;
+    const BR_X17: u32 = 0xd61f_0220;
+    const FIRST_TWO_ENTRIES: u32 = 0x0002_0006;
+    const LAST_ENTRY_AND_PAD: u32 = 4;
+    const MOV_X0_17: u32 = 0xd280_0220;
+    const MOV_X0_29: u32 = 0xd280_03a0;
+    const MOV_X0_41: u32 = 0xd280_0520;
+    const MOV_X0_99: u32 = 0xd280_0c60;
+    const FIRST_TARGET_WORD: usize = 11;
+    #[rustfmt::skip]
+    let packet = [
+        1, NO_VALUE,
+        BLOCK_LABEL, 0, 0, 1,
+        BRANCH_TABLE, 0, 3, 4,
+        BRANCH_TABLE_TARGET, 3, 0, 0,
+        BRANCH_TABLE_TARGET, 1, 0, 0,
+        BRANCH_TABLE_TARGET, 2, 0, 0,
+        BLOCK_LABEL, 1, 0, 1,
+        CONSTANT, 17, 0, 0,
+        BLOCK_RETURN, 7, 0, 0,
+        BLOCK_LABEL, 2, 0, 1,
+        CONSTANT, 29, 0, 0,
+        BLOCK_RETURN, 10, 0, 0,
+        BLOCK_LABEL, 3, 0, 1,
+        CONSTANT, 41, 0, 0,
+        BLOCK_RETURN, 13, 0, 0,
+        BLOCK_LABEL, 4, 0, 1,
+        CONSTANT, 99, 0, 0,
+        BLOCK_RETURN, 16, 0, 0,
+    ];
+    let code = binding::aarch64_integer_leaf(&packet);
+    let expected: Vec<_> = [
+        CMP_W0_3,
+        B_HS_DEFAULT,
+        CSEL_W17_ZERO_W0_HS,
+        CSDB,
+        ADR_X16_TABLE,
+        LDRSH_X17_X16_W17,
+        ADD_X17_X16_X17_SCALED,
+        BR_X17,
+        FIRST_TWO_ENTRIES,
+        LAST_ENTRY_AND_PAD,
+        MOV_X0_17,
+        RET,
+        MOV_X0_29,
+        RET,
+        MOV_X0_41,
+        RET,
+        MOV_X0_99,
+        RET,
+    ]
+    .into_iter()
+    .flat_map(u32::to_le_bytes)
+    .collect();
+    assert_eq!(code, expected);
+
+    let mut unknown = packet;
+    unknown[FIRST_TARGET_WORD] = 9;
+    assert!(binding::aarch64_integer_leaf(&unknown).is_empty());
+}
+
+#[test]
+fn aarch64_jump_tables_retry_with_full_offsets_for_distant_blocks() {
+    const ARGUMENTS: u64 = 1;
+    const SHORT_REACH_INSTRUCTIONS: usize = 1 << 15;
+    const LDRSW_X17_X16_W17: u32 = 0xb8b1_5a11;
+    const TABLE_LOAD_WORD: usize = 5;
+    const FIRST_ENTRY_WORD: usize = 8;
+    let mut records = vec![
+        [BLOCK_LABEL, 0, 0, 1],
+        [BRANCH_TABLE, 0, 1, 1],
+        [BRANCH_TABLE_TARGET, 2, 0, 0],
+        [BLOCK_LABEL, 1, 0, 1],
+        [CONSTANT, 0, 0, 0],
+    ];
+    let mut value = ARGUMENTS + records.len() as u64 - 1;
+    for _ in 0..SHORT_REACH_INSTRUCTIONS {
+        let next = ARGUMENTS + records.len() as u64;
+        records.push([ADD_IMMEDIATE, value, 1, CELL_BITS]);
+        value = next;
+    }
+    records.push([BLOCK_RETURN, value, 0, 0]);
+    records.push([BLOCK_LABEL, 2, 0, 1]);
+    let result = ARGUMENTS + records.len() as u64;
+    records.push([CONSTANT, 7, 0, 0]);
+    records.push([BLOCK_RETURN, result, 0, 0]);
+
+    let packet: Vec<_> = [ARGUMENTS, NO_VALUE]
+        .into_iter()
+        .chain(records.into_iter().flatten())
+        .collect();
+    let code = binding::aarch64_integer_leaf(&packet);
+    let (words, remainder) = code.as_chunks::<{ size_of::<u32>() }>();
+    assert!(remainder.is_empty());
+    assert_eq!(words[TABLE_LOAD_WORD], LDRSW_X17_X16_W17.to_le_bytes());
+    let distance = (SHORT_REACH_INSTRUCTIONS + 3) * size_of::<u32>();
+    assert_eq!(words[FIRST_ENTRY_WORD], (distance as u32).to_le_bytes());
 }
 
 #[test]

@@ -88,8 +88,8 @@ const SIGNED_SUB_OVERFLOW: u64 = 71;
 const UNSIGNED_MUL_OVERFLOW: u64 = 72;
 const SIGNED_MUL_OVERFLOW: u64 = 73;
 const OVERFLOW_FLAG: u64 = 74;
-const BRANCH_TABLE: u64 = 75;
-const BRANCH_TABLE_TARGET: u64 = 76;
+pub const BRANCH_TABLE: u64 = 75;
+pub const BRANCH_TABLE_TARGET: u64 = 76;
 const ADD_CARRY: u64 = 77;
 const SUB_BORROW: u64 = 78;
 const FLOAT_ARGUMENT: u64 = 79;
@@ -208,7 +208,7 @@ copy struct Fixup {
     block: bool,
 }
 
-copy struct TableFixup {
+pub copy struct TableFixup {
     target: u64,
     offset: u64,
     base: u64,
