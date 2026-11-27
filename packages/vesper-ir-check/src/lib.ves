@@ -750,7 +750,7 @@ fn sorted_contains(in sorted: ChunkSeq[u32], value: u32) -> bool {
         if lo >= hi {
             return false;
         }
-        let mid = wrapping_add(lo, hi) / 2;
+        let mid = wrapping_shr_u64(wrapping_add(lo, hi), 1);
         let mid_value = u32_at(in sorted, mid);
         if mid_value == value {
             return true;
@@ -770,7 +770,7 @@ fn set_insert(inout set: ChunkSeq[u32], value: u32) -> bool {
         if lo >= hi {
             break;
         }
-        let mid = wrapping_add(lo, hi) / 2;
+        let mid = wrapping_shr_u64(wrapping_add(lo, hi), 1);
         let mid_value = u32_at(in set, mid);
         if mid_value == value {
             return false;
@@ -985,7 +985,7 @@ impl State {
             if lo >= hi {
                 break;
             }
-            let mid = wrapping_add(lo, hi) / 2;
+            let mid = wrapping_shr_u64(wrapping_add(lo, hi), 1);
             let mid_rank = self.slot_at(mid).rank;
             if mid_rank == rank {
                 return mid;
@@ -1006,7 +1006,7 @@ impl State {
             if lo >= hi {
                 break;
             }
-            let mid = wrapping_add(lo, hi) / 2;
+            let mid = wrapping_shr_u64(wrapping_add(lo, hi), 1);
             let mid_id = self.val_at(mid).id;
             if mid_id == id {
                 return mid;
@@ -1074,7 +1074,7 @@ impl State {
             if lo >= hi {
                 break;
             }
-            let mid = wrapping_add(lo, hi) / 2;
+            let mid = wrapping_shr_u64(wrapping_add(lo, hi), 1);
             if u64_at(in self.moved, mid) < first_key {
                 lo = inc(mid);
             } else {
@@ -1786,7 +1786,7 @@ impl Flow {
             if lo >= hi {
                 return false;
             }
-            let mid = wrapping_add(lo, hi) / 2;
+            let mid = wrapping_shr_u64(wrapping_add(lo, hi), 1);
             let mid_id = u32_at(in self.reservable, mid);
             if mid_id == id {
                 return true;
@@ -3380,7 +3380,11 @@ pub fn check_ir_parts(in input: Str) -> ChunkSeq[u64] {
         for j in 0..answer.len() {
             out.push(u64_at(in answer, j));
         }
-        reader.pos = wrapping_add(start, wrapping_mul(wrapping_add(len, 7) / 8, 8));
+        reader
+            .pos = wrapping_add(
+                start,
+                wrapping_shl_u64(wrapping_shr_u64(wrapping_add(len, 7), 3), 3)
+            );
     }
     out
 }
