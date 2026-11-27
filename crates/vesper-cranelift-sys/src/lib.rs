@@ -64,8 +64,8 @@ pub use lend::{
     vcl_call_return_builder, vcl_call_return_module,
 };
 pub use seam::{
-    vcl_apply_edits, vcl_builder_finalize, vcl_cold_helper_func, vcl_function_words,
-    vcl_outline_cold, vcl_take_cold_helper,
+    vcl_apply_edits, vcl_builder_finalize, vcl_cold_helper_func, vcl_define_with_cold_helpers,
+    vcl_function_words, vcl_outline_cold, vcl_take_cold_helper,
 };
 pub use seq_extras::{
     vcl_call_memmove, vcl_call_memset, vcl_declare_anonymous_data, vcl_has_x86_pshufb_lowering,
@@ -2668,5 +2668,6 @@ pub fn symbols() -> Vec<(&'static str, *const u8)> {
         vcl_outline_cold,
         vcl_take_cold_helper,
         vcl_cold_helper_func,
+        vcl_define_with_cold_helpers,
     ]
 }

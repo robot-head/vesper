@@ -209,3 +209,32 @@ pub unsafe extern "C" fn vcl_cold_helper_func(b: *const Builder) -> u32 {
         .and_then(|b| b.cold_func)
         .unwrap_or(crate::INVALID)
 }
+
+/// Define `func` in `m` from builder `b` (as `vcl_define_function`), then
+/// each cold helper `vcl_outline_cold` left on `b`, in outline order, as
+/// src/native.rs does: the object bytes depend on that order, and a Vesper
+/// caller cannot hold a list of linear helper builders. Returns 0, or 1
+/// with the module's error set (helpers not yet defined are dropped).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vcl_define_with_cold_helpers(
+    m: *mut crate::Module,
+    func: u32,
+    b: *mut Builder,
+) -> u32 {
+    // SAFETY: the `.vsys` contract: a live handle or null.
+    let cold = unsafe { b.as_mut() }
+        .map(|b| std::mem::take(&mut b.cold))
+        .unwrap_or_default();
+    // SAFETY: as above; `b` is consumed here.
+    if unsafe { crate::vcl_define_function(m, func, b) } != 0 {
+        return 1;
+    }
+    for (helper_func, helper) in cold {
+        let helper = Box::into_raw(Builder::finalized(helper, helper_func));
+        // SAFETY: `helper` is a fresh owned handle.
+        if unsafe { crate::vcl_define_function(m, helper_func, helper) } != 0 {
+            return 1;
+        }
+    }
+    0
+}

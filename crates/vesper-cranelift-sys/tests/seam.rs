@@ -197,7 +197,15 @@ fn vesper_reaches_the_seam() {
     assert_ne!(id, 0, "the fixture failed");
     let outlined = jit(&checked, "seam_outline");
     assert_ne!(outlined, 0, "the outlining fixture failed");
-    assert!(take_published(outlined).is_some_and(|o| !o.is_empty()));
+    let together = jit(&checked, "seam_outline_together");
+    assert_ne!(together, 0, "the one-call outlining fixture failed");
+    let outlined = take_published(outlined).expect("published");
+    assert!(!outlined.is_empty());
+    assert_eq!(
+        take_published(together),
+        Some(outlined),
+        "one call, same object"
+    );
     assert_eq!(live_handles(), before, "the fixture leaked a handle");
     assert!(take_published(id).is_some_and(|o| !o.is_empty()));
 }
@@ -296,6 +304,45 @@ fn outlining_nothing_leaves_the_function_be() {
         assert_eq!(after, before);
         assert!(vcl_take_cold_helper(b).is_null());
         assert_eq!(vcl_define_function(m, func, b), 0);
+        vcl_module_free(m);
+    }
+}
+
+/// The bytes of object `o`, which is freed.
+unsafe fn object_bytes(o: *mut vesper_cranelift_sys::Object) -> Vec<u8> {
+    assert!(!o.is_null());
+    // SAFETY: `o` is a live object handle, read and then freed once.
+    unsafe {
+        let mut bytes = vec![0; vcl_object_len(o) as usize];
+        vcl_object_read(o, 0, bytes.as_mut_ptr(), bytes.len());
+        vcl_object_free(o);
+        bytes
+    }
+}
+
+#[test]
+fn define_with_cold_helpers_matches_defining_each() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    // SAFETY: handles from `build`, each consumed once.
+    unsafe {
+        let script = &OUTLINE_ELSE;
+        let (m, func, b) = build();
+        assert_eq!(vcl_outline_cold(b, m, script.as_ptr(), script.len()), 1);
+        let helper = vcl_take_cold_helper(b);
+        let helper_func = vcl_cold_helper_func(helper);
+        assert_eq!(vcl_define_function(m, func, b), 0);
+        assert_eq!(vcl_define_function(m, helper_func, helper), 0);
+        let each = object_bytes(vcl_module_finish(m));
+
+        let (m, func, b) = build();
+        assert_eq!(vcl_outline_cold(b, m, script.as_ptr(), script.len()), 1);
+        assert_eq!(vcl_define_with_cold_helpers(m, func, b), 0);
+        let together = object_bytes(vcl_module_finish(m));
+        assert_eq!(together, each);
+
+        // Without helpers it is `vcl_define_function`.
+        let (m, func, b) = build();
+        assert_eq!(vcl_define_with_cold_helpers(m, func, b), 0);
         vcl_module_free(m);
     }
 }
