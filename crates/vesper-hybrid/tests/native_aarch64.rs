@@ -468,6 +468,50 @@ fn aarch64_register_homes_preserve_snapshots_and_retry_on_stack() {
 }
 
 #[test]
+fn aarch64_spills_live_values_and_limits_the_combined_frame() {
+    const LIVE_VALUES: u64 = 20;
+    const FULL_FRAME_BYTES: u64 = 4096;
+    const SLOT_ALIGNMENT: u64 = 16;
+    const SUB_SP_64: u32 = 0xd101_03ff;
+    const ADD_SP_64: u32 = 0x9101_03ff;
+    const STR_X12_SP: u32 = 0xf900_03ec;
+    const LDR_X14_SP: u32 = 0xf940_03ee;
+
+    let packet = |explicit_frame| {
+        let mut records = Vec::new();
+        if explicit_frame != 0 {
+            records.push([STACK_SLOT, explicit_frame, SLOT_ALIGNMENT, 0]);
+        }
+        let start = records.len() as u64;
+        for value in 0..LIVE_VALUES {
+            records.push([CONSTANT, value, 0, 0]);
+        }
+        if explicit_frame != 0 {
+            records.push([STACK_STORE_QWORD, start, 0, 0]);
+        }
+        let mut sum = start;
+        for value in start + 1..start + LIVE_VALUES {
+            let next = records.len() as u64;
+            records.push([ADD, sum, value, CELL_BITS]);
+            sum = next;
+        }
+        [0, sum]
+            .into_iter()
+            .chain(records.into_iter().flatten())
+            .collect::<Vec<_>>()
+    };
+    let code = binding::aarch64_integer_leaf(&packet(0));
+    let (words, remainder) = code.as_chunks::<{ size_of::<u32>() }>();
+    assert!(remainder.is_empty());
+    let words: Vec<_> = words.iter().copied().map(u32::from_le_bytes).collect();
+    assert_eq!(words.first(), Some(&SUB_SP_64));
+    assert!(words.ends_with(&[ADD_SP_64, RET]));
+    assert!(words.contains(&STR_X12_SP));
+    assert!(words.contains(&LDR_X14_SP));
+    assert!(binding::aarch64_integer_leaf(&packet(FULL_FRAME_BYTES)).is_empty());
+}
+
+#[test]
 fn aarch64_uses_short_immediate_encodings() {
     const ADD_X0_X0_4096: u32 = 0x9140_0400;
     const SUB_X0_X0_16773120: u32 = 0xd17f_fc00;

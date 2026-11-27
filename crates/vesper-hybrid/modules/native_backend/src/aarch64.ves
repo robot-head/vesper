@@ -1,6 +1,6 @@
 // AAPCS64 integer leaves. The input is the shared scalar
-// machine tape. Unsupported operations or register pressure decline before
-// a function is defined.
+// machine tape. Unsupported operations or oversized frames decline before a
+// function is defined.
 use @vesper/codegen-freestanding::util::{push32};
 use self::scalar::{
     Record, FrameSlot, Label, align_up, word_at, read_record, valid_block_layout, CONSTANT, ADD,
@@ -22,6 +22,13 @@ const ARGUMENT_REGISTERS: u64 = 8;
 // Keep x16 and x17 out of allocation for architectural scratch uses.
 const CALLER_REGISTER_MASK: u32 = 0xffff;
 const UNASSIGNED: u32 = 32;
+const SPILL_BASE: u32 = UNASSIGNED + 1;
+const SPILL_REGISTER_MASK: u32 = 0x0fff;
+const SPILL_RESULT: u32 = 12;
+const SPILL_LEFT: u32 = 13;
+const SPILL_RIGHT: u32 = 14;
+const SPILL_THIRD: u32 = 15;
+const ALLOCATION_ATTEMPTS: u64 = 3;
 const SCRATCH: u32 = 16;
 const COMPARE_LEFT_SCRATCH: u32 = 17;
 const ZERO: u32 = 31;
@@ -126,6 +133,12 @@ copy struct LabelBranch {
 struct FrameLayout {
     slots: ChunkSeq[FrameSlot],
     size: u64,
+}
+
+copy enum Allocation {
+    RegisterHomes,
+    StackHomes,
+    Spills,
 }
 
 fn sh(value: u32, amount: u32) -> u32 {
@@ -671,15 +684,49 @@ fn last_read(in ends: ChunkSeq[u64], value: u64) -> u64 {
     ends.try_get(value).unwrap_or(NEVER_READ)
 }
 
-fn register(in regs: ChunkSeq[u32], id: u64) -> u32 {
-    regs.try_get(id).unwrap_or(UNASSIGNED)
+fn location(in locations: ChunkSeq[u32], id: u64) -> u32 {
+    locations.try_get(id).unwrap_or(UNASSIGNED)
 }
 
-fn expire(used: u32, in ends: ChunkSeq[u64], value: u64, current: u64, reg: u32) -> u32 {
-    if reg != UNASSIGNED && last_read(in ends, value) == current {
-        used & ~sh(1, reg)
+fn expire(used: u32, in ends: ChunkSeq[u64], value: u64, current: u64, assigned: u32) -> u32 {
+    if assigned < UNASSIGNED && last_read(in ends, value) == current {
+        used & ~sh(1, assigned)
     } else {
         used
+    }
+}
+
+fn spill_offset(frame_bytes: u64, assigned: u32) -> u64 {
+    let slot = widen_u64(wrapping_sub(assigned, SPILL_BASE));
+    wrapping_add(frame_bytes, wrapping_mul(slot, HOME_WORD_BYTES))
+}
+
+fn allocate_spill(
+    inout spills: ChunkSeq[u64],
+    frame_bytes: u64,
+    value: u64,
+    last: u64
+) -> Option[u32] {
+    for slot in 0..spills.len() {
+        if spills.try_get(slot).unwrap_or(NO_VALUE) <= value {
+            let _ = spills.try_set(slot, last);
+            return Option::Some(wrapping_add(SPILL_BASE, wrapping_u32(slot)));
+        }
+    }
+    let assigned = wrapping_add(SPILL_BASE, wrapping_u32(spills.len()));
+    if wrapping_add(spill_offset(frame_bytes, assigned), HOME_WORD_BYTES) > MAX_FRAME_BYTES {
+        return Option::None;
+    }
+    spills.push(last);
+    Option::Some(assigned)
+}
+
+fn materialize(inout output: ChunkSeq[u8], assigned: u32, scratch: u32, frame_bytes: u64) -> u32 {
+    if assigned >= SPILL_BASE {
+        memory(inout output, true, QWORD_BITS, SP, scratch, spill_offset(frame_bytes, assigned));
+        scratch
+    } else {
+        assigned
     }
 }
 
@@ -691,18 +738,35 @@ fn no_result(op: u64) -> bool {
         || (op >= BLOCK_LABEL && op <= BRANCH_BLOCK)
 }
 
-fn emit_stack_adjust(inout output: ChunkSeq[u8], opcode: u32, adjustment: u32) {
-    if adjustment != 0 {
-        push32(inout output, opcode | adjustment | sh(SP, RN_SHIFT) | SP);
-    }
+fn stack_adjust(opcode: u32, adjustment: u32) -> u32 {
+    opcode | adjustment | sh(SP, RN_SHIFT) | SP
 }
 
-fn emit_return(inout output: ChunkSeq[u8], reg: u32, adjustment: u32) {
+fn emit_return(
+    inout output: ChunkSeq[u8],
+    reg: u32,
+    adjustment: u32,
+    spill_mode: bool,
+    inout restores: ChunkSeq[u64]
+) {
     if reg != UNASSIGNED && reg != 0 {
         rrr(inout output, ORR_REG, 0, ZERO, reg);
     }
-    emit_stack_adjust(inout output, ADD_IMM, adjustment);
+    if spill_mode {
+        restores.push(output.len());
+    }
+    if spill_mode || adjustment != 0 {
+        push32(inout output, stack_adjust(ADD_IMM, adjustment));
+    }
     push32(inout output, RETURN);
+}
+
+fn write_instruction(inout output: ChunkSeq[u8], offset: u64, instruction: u32) {
+    for index in 0..INSTRUCTION_BYTES {
+        let shift = wrapping_u32(wrapping_mul(index, BYTE_BITS));
+        let byte = wrapping_u8(wrapping_shr_u32(instruction, shift));
+        let _ = output.try_set(wrapping_add(offset, index), byte);
+    }
 }
 
 fn patch_branch(inout output: ChunkSeq[u8], in branch: Branch, target: u64) -> bool {
@@ -719,28 +783,27 @@ fn patch_branch(inout output: ChunkSeq[u8], in branch: Branch, target: u64) -> b
     }
     let mask = wrapping_sub(sh(wrapping_u32(reach), 1), 1);
     let instruction = branch.instruction | sh(wrapping_u32(distance) & mask, shift);
-    for index in 0..INSTRUCTION_BYTES {
-        let shift = wrapping_u32(wrapping_mul(index, BYTE_BITS));
-        let byte = wrapping_u8(wrapping_shr_u32(instruction, shift));
-        let _ = output.try_set(wrapping_add(branch.offset, index), byte);
-    }
+    write_instruction(inout output, branch.offset, instruction);
     true
 }
 
 pub fn encode_leaf(in words: Slice[u64]) -> ChunkSeq[u8] {
-    let mut retry_on_stack = false;
-    let fast = encode_leaf_pass(in words, true, inout retry_on_stack);
-    if retry_on_stack {
-        encode_leaf_pass(in words, false, inout retry_on_stack)
-    } else {
-        fast
+    let mut allocation = Allocation::RegisterHomes;
+    for attempt in 0..ALLOCATION_ATTEMPTS {
+        let mut retry: Option[Allocation] = Option::None;
+        let code = encode_leaf_pass(in words, allocation, inout retry);
+        match retry {
+            Option::Some(next) => allocation = next,
+            Option::None => return code,
+        };
     }
+    ChunkSeq::new[u8]()
 }
 
 fn encode_leaf_pass(
     in words: Slice[u64],
-    allow_register_homes: bool,
-    inout retry_on_stack: bool
+    allocation: Allocation,
+    inout retry: Option[Allocation]
 ) -> ChunkSeq[u8] {
     let mut out = ChunkSeq::new[u8]();
     if words.len() < HEADER_WORDS {
@@ -771,7 +834,12 @@ fn encode_leaf_pass(
     {
         return out;
     }
-    let mut register_home = allow_register_homes
+    let mut register_home = (
+        match allocation {
+            Allocation::RegisterHomes => true,
+            _ => false,
+        }
+    )
         && labeled
         && entry.right == 1
         && frame.slots.len() == 1
@@ -906,13 +974,27 @@ fn encode_leaf_pass(
     }
 
     let home_mask = if register_home { home_mask } else { 0 };
-    let adjustment = if frame_used && home_mask == 0 {
-        arithmetic_immediate(frame.size).unwrap_or(0)
+    let spill_mode = match allocation {
+        Allocation::Spills => true,
+        _ => false,
+    };
+    let frame_bytes = if frame_used && home_mask == 0 {
+        frame.size
     } else {
         0
     };
-    emit_stack_adjust(inout out, SUB_IMM, adjustment);
-    let mut regs = ChunkSeq::with_capacity[u32](values);
+    let adjustment = arithmetic_immediate(frame_bytes).unwrap_or(0);
+    if spill_mode || adjustment != 0 {
+        push32(inout out, stack_adjust(SUB_IMM, adjustment));
+    }
+    let register_mask = if spill_mode {
+        SPILL_REGISTER_MASK
+    } else {
+        CALLER_REGISTER_MASK
+    };
+    let mut spills = ChunkSeq::new[u64]();
+    let mut restores = ChunkSeq::new[u64]();
+    let mut locations = ChunkSeq::with_capacity[u32](values);
     let mut used: u32 = 0;
     let mut flags_for_next: Option[u32] = Option::None;
     let mut branches = ChunkSeq::new[Branch]();
@@ -925,7 +1007,7 @@ fn encode_leaf_pass(
     }
     for arg in 0..args {
         let reg = wrapping_u32(arg);
-        regs.push(reg);
+        locations.push(reg);
         let last = last_read(in ends, arg);
         if last != NEVER_READ {
             if labeled && last >= entry_end {
@@ -939,7 +1021,7 @@ fn encode_leaf_pass(
         let r = read_record(in words, index);
         let stored = store_width(r.op);
         if r.op == STACK_SLOT || (!no_result(r.op) && last_read(in ends, value) == NEVER_READ) {
-            regs.push(UNASSIGNED);
+            locations.push(UNASSIGNED);
             continue;
         }
         if r.op == BLOCK_LABEL || r.op == EDGE_LABEL {
@@ -949,7 +1031,7 @@ fn encode_leaf_pass(
             }
             let _ = labels
                 .try_set(r.left, Label { address: out.len(), block: r.op == BLOCK_LABEL });
-            regs.push(UNASSIGNED);
+            locations.push(UNASSIGNED);
             continue;
         }
         if r.op == JUMP_LABEL {
@@ -963,34 +1045,37 @@ fn encode_leaf_pass(
                 fixups.push(LabelBranch { branch: branch, target: r.left, block: true });
                 push32(inout out, JUMP);
             }
-            regs.push(UNASSIGNED);
+            locations.push(UNASSIGNED);
             continue;
         }
         let n = operands(in r).unwrap_or(0);
-        let lhs = if n >= 1 {
-            register(in regs, r.left)
+        let left = if n >= 1 {
+            location(in locations, r.left)
         } else {
             UNASSIGNED
         };
-        let rhs = if n >= 2 {
-            register(in regs, r.right)
+        let right = if n >= 2 {
+            location(in locations, r.right)
         } else {
             UNASSIGNED
         };
-        let third = if n == 3 {
-            register(in regs, r.extra)
+        let extra = if n == 3 {
+            location(in locations, r.extra)
         } else {
             UNASSIGNED
         };
         if n >= 1 {
-            used = expire(used, in ends, r.left, value, lhs);
+            used = expire(used, in ends, r.left, value, left);
         }
         if n >= 2 {
-            used = expire(used, in ends, r.right, value, rhs);
+            used = expire(used, in ends, r.right, value, right);
         }
         if n == 3 {
-            used = expire(used, in ends, r.extra, value, third);
+            used = expire(used, in ends, r.extra, value, extra);
         }
+        let lhs = materialize(inout out, left, SPILL_LEFT, frame_bytes);
+        let rhs = materialize(inout out, right, SPILL_RIGHT, frame_bytes);
+        let third = materialize(inout out, extra, SPILL_THIRD, frame_bytes);
         if conditional_branch(r.op) {
             let instruction = match flags_for_next {
                 Option::Some(cc) => BRANCH_IF_CONDITION | (cc ^ 1),
@@ -1013,11 +1098,11 @@ fn encode_leaf_pass(
                 depth = wrapping_add(depth, 1);
             }
             push32(inout out, instruction);
-            regs.push(UNASSIGNED);
+            locations.push(UNASSIGNED);
             continue;
         }
         if r.op == EARLY_RETURN {
-            emit_return(inout out, lhs, adjustment);
+            emit_return(inout out, lhs, adjustment, spill_mode, inout restores);
             depth = wrapping_sub(depth, 1);
             let target = out.len();
             match branches.try_get(depth) {
@@ -1026,12 +1111,12 @@ fn encode_leaf_pass(
                 },
                 Option::None => return ChunkSeq::new[u8](),
             };
-            regs.push(UNASSIGNED);
+            locations.push(UNASSIGNED);
             continue;
         }
         if r.op == BLOCK_RETURN {
-            emit_return(inout out, lhs, adjustment);
-            regs.push(UNASSIGNED);
+            emit_return(inout out, lhs, adjustment, spill_mode, inout restores);
+            locations.push(UNASSIGNED);
             continue;
         }
         if stored != 0 {
@@ -1048,7 +1133,7 @@ fn encode_leaf_pass(
             } else {
                 memory(inout out, false, stored, lhs, rhs, r.extra);
             }
-            regs.push(UNASSIGNED);
+            locations.push(UNASSIGNED);
             continue;
         }
         if comparison_width(r.op) != 0
@@ -1062,25 +1147,43 @@ fn encode_leaf_pass(
             {
                 compare(inout out, in r, lhs, rhs);
                 flags_for_next = Option::Some(condition(r.extra));
-                regs.push(UNASSIGNED);
+                locations.push(UNASSIGNED);
                 continue;
             }
         }
         if home_mask != 0 && r.op == STACK_LOAD {
             let register = home_aliases.try_get(index).unwrap_or(UNASSIGNED);
             if register != UNASSIGNED {
-                regs.push(register);
+                locations.push(register);
                 continue;
             }
         }
-        let available = CALLER_REGISTER_MASK & ~used & ~home_mask;
-        if available == 0 {
-            retry_on_stack = home_mask != 0;
+        let available = register_mask & ~used & ~home_mask;
+        let assigned = if available != 0 {
+            let reg = trailing_zeros_u64(widen_u64(available));
+            used = used | sh(1, reg);
+            reg
+        } else if spill_mode {
+            match allocate_spill(inout spills, frame_bytes, value, last_read(in ends, value)) {
+                Option::Some(spill) => spill,
+                Option::None => return ChunkSeq::new[u8](),
+            }
+        } else {
+            retry = Option::Some(
+                if home_mask != 0 {
+                    Allocation::StackHomes
+                } else {
+                    Allocation::Spills
+                }
+            );
             return ChunkSeq::new[u8]();
-        }
-        let dest = wrapping_u32(trailing_zeros_u64(widen_u64(available)));
-        used = used | sh(1, dest);
-        regs.push(dest);
+        };
+        locations.push(assigned);
+        let dest = if assigned >= SPILL_BASE {
+            SPILL_RESULT
+        } else {
+            assigned
+        };
         if r.op == STACK_ADDRESS || r.op == STACK_LOAD {
             let displacement = stack_displacement(in frame, in r).unwrap_or(0);
             if r.op == STACK_ADDRESS {
@@ -1091,15 +1194,18 @@ fn encode_leaf_pass(
             } else {
                 memory(inout out, true, r.extra, SP, dest, displacement);
             }
-            continue;
+        } else {
+            match flags_for_next {
+                Option::Some(cc) => {
+                    rrr(inout out, CSEL | sh(cc, CONDITION_SHIFT), dest, rhs, third);
+                    flags_for_next = Option::None;
+                },
+                Option::None => emit_instruction(inout out, in r, dest, lhs, rhs, third),
+            };
         }
-        match flags_for_next {
-            Option::Some(cc) => {
-                rrr(inout out, CSEL | sh(cc, CONDITION_SHIFT), dest, rhs, third);
-                flags_for_next = Option::None;
-            },
-            Option::None => emit_instruction(inout out, in r, dest, lhs, rhs, third),
-        };
+        if assigned >= SPILL_BASE {
+            memory(inout out, false, QWORD_BITS, SP, dest, spill_offset(frame_bytes, assigned));
+        }
     }
     if labeled {
         for index in 0..fixups.len() {
@@ -1119,7 +1225,26 @@ fn encode_leaf_pass(
             };
         }
     } else {
-        emit_return(inout out, register(in regs, result), adjustment);
+        let reg = materialize(inout out, location(in locations, result), SPILL_LEFT, frame_bytes);
+        emit_return(inout out, reg, adjustment, spill_mode, inout restores);
+    }
+    if spill_mode {
+        let size = align_up(
+            wrapping_add(frame_bytes, wrapping_mul(spills.len(), HOME_WORD_BYTES)),
+            STACK_ALIGNMENT
+        );
+        let adjusted = arithmetic_immediate(size).unwrap_or(0);
+        write_instruction(inout out, 0, stack_adjust(SUB_IMM, adjusted));
+        for index in 0..restores.len() {
+            match restores.try_get(index) {
+                Option::Some(offset) => write_instruction(
+                    inout out,
+                    offset,
+                    stack_adjust(ADD_IMM, adjusted)
+                ),
+                Option::None => return ChunkSeq::new[u8](),
+            };
+        }
     }
     out
 }
