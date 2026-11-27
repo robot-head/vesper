@@ -1,0 +1,742 @@
+// @vesper/export-build: `vesper build --lib`'s interface planning from
+// Stage 2's front end (bootstrap switch slice 1b, #2270).
+//
+// The Rust CLI encodes the planner's input (`plan_input` in
+// tests/self_host_codegen_export/plan_words.rs) from its checked world.
+// Here the same words come from what Stage 2 holds: the package graph
+// (@vesper/stage2's loader), the assembled modules
+// (@vesper/check-names-packages), the collected declarations
+// (@vesper/stage2's collect, as @vesper/check-data tables), modes
+// (`mode_of`) and layouts (@vesper/check-layout). The planner, the interface
+// file and the Rust binding then run in @vesper/codegen-export.
+//
+// The input lists only the root module's public functions in name order:
+// the planner skips every other function (generated, private, or qualified
+// with `::`), so they add nothing to its answer.
+//
+// Not yet covered, and declined (the caller builds with the Rust CLI):
+// `.vsys` imports (a package's `[package] vsys` or `// @export vsys`, whose
+// descriptors are parsed in Rust), generic instances (`// @export
+// instance`), `Box` types and `fip` functions (the caller slot).
+
+use @vesper/check-data::names::{Names};
+use @vesper/check-data::types::{TyKind, Types, display};
+use @vesper/check-data::util::{add, inc, inc32, n32, put_text_words, u32_at, u64_at, u8_at, w};
+use @vesper/check-data::world::{
+    Adt, Field, Generic, Variant, World, bounds_new, mode_of, set_by_symbol
+};
+use @vesper/check-layout::{L_ENUM, L_PRODUCT, L_SCALAR, Layouts, layout_of, layouts_new};
+use @vesper/check-names-packages::{
+    AssembledModule, assemble_next_bytes, assembly_begin_bytes, assembly_metadata,
+    assembly_parse_errors
+};
+use @vesper/codegen-export::{export_files_of_plan, export_plan_bytes};
+use @vesper/codegen-export::directives::{directives_text};
+use @vesper/stage2::collect::{FnInfo, ParamInfo, collect_program};
+use @vesper/stage2::loader::{load_package_graph_bytes, package_graph_vsys_count};
+use @vesper-std/fs::{IoError, read_path};
+use @vesper-std/intern::{symbol_from_id};
+
+const NONE32: u32 = 4294967295;
+const NO_ADT: u32 = 4294967295;
+
+// Why the input was not built (`PlanInput.declined`).
+pub const DECLINE_NONE: u8 = 0;
+// The package graph or its root module did not load.
+pub const DECLINE_LOAD: u8 = 1;
+// The graph imports `.vsys` libraries.
+pub const DECLINE_VSYS: u8 = 2;
+// The directives name instances or `.vsys` imports, or do not parse.
+pub const DECLINE_DIRECTIVES: u8 = 3;
+// The program names a `Box` type.
+pub const DECLINE_BOX: u8 = 4;
+// A public function is `fip`.
+pub const DECLINE_FIP: u8 = 5;
+// The planner refused the library (`ExportFiles` only).
+pub const DECLINE_REFUSED: u8 = 6;
+// The package has syntax or assembly errors.
+pub const DECLINE_DIAGNOSTICS: u8 = 7;
+
+// A little-endian word of the planner's input: its bytes, and a byte's bits.
+const WORD_BYTES: u64 = 8;
+const BYTE_BITS: u64 = 8;
+
+// The type classes of the input (plan_words.rs `C_*`).
+const C_OTHER: u64 = 0;
+const C_TUPLE: u64 = 1;
+const C_SCALAR: u64 = 2;
+const C_WIDE: u64 = 3;
+const C_SEQ: u64 = 4;
+const C_SLICE: u64 = 5;
+const C_STRING: u64 = 6;
+const C_STR: u64 = 7;
+const C_NAMED: u64 = 9;
+
+// A layout's `kind` word: scalar, product, enum.
+const LK_SCALAR: u64 = 0;
+const LK_PRODUCT: u64 = 1;
+const LK_ENUM: u64 = 2;
+
+// The layout word before a layout (built) or its reason (failed).
+const LAYOUT_BUILT: u64 = 0;
+const LAYOUT_FAILED: u64 = 1;
+
+// `ffi_lowering::effect_name("")`: the prefix of a `.vsys` library's effect.
+const EFFECT_PREFIX: Str = "Ffi$";
+
+// The builtin declarations of the Rust checker (src/check.rs), whose
+// variant order the planner holds a library to.
+const OPTION: Str = "Option";
+const NONE_VARIANT: Str = "None";
+const SOME_VARIANT: Str = "Some";
+const RUNTIME_ERROR: Str = "RuntimeError";
+const DIVISION_BY_ZERO: Str = "DivisionByZero";
+const INDEX_OUT_OF_BOUNDS: Str = "IndexOutOfBounds";
+const ARITH_OVERFLOW: Str = "ArithOverflow";
+const TYPE_PARAM: Str = "T";
+const TUPLE_FIELD: Str = "0";
+const MODE_COPY: u8 = 0;
+
+// The root module, whose `// @export` lines are the directives.
+const ROOT_MODULE: Str = "/src/lib.ves";
+
+// The lines of a directives dump with no instance or `.vsys` import.
+const DUMP_ABI: Str = "abi ";
+const DUMP_ABI_NONE: Str = "none";
+const DUMP_OPTIONS: Str = "options ";
+const DUMP_LINES: u64 = 2;
+const NEWLINE: u8 = 10;
+const DIGIT_ZERO: u8 = 48;
+const DIGIT_NINE: u8 = 57;
+const DECIMAL: u64 = 10;
+const OPTIONS_ON: u8 = 49;
+
+pub struct PlanInput {
+    declined: u8,
+    // `plan_words` input bytes (little-endian words) when not declined.
+    bytes: ChunkSeq[u8],
+}
+
+pub struct ExportFiles {
+    declined: u8,
+    // `--interface` JSON and `--rust-binding` text when not declined.
+    interface: ChunkSeq[u8],
+    binding: ChunkSeq[u8],
+}
+
+fn declined(why: u8) -> PlanInput {
+    PlanInput { declined: why, bytes: ChunkSeq::new[u8]() }
+}
+
+// The type table under construction: per type id its row index + 1, and
+// each row's words, finished once all its parts have indices.
+struct Enc {
+    names: Names,
+    types: Types,
+    world: World,
+    ls: Layouts,
+    ids: ChunkSeq[u32],
+    words: ChunkSeq[u64],
+    starts: ChunkSeq[u64],
+    lens: ChunkSeq[u64],
+    declined: u8,
+}
+
+fn put_empty(inout out: ChunkSeq[u64]) {
+    out.push(0);
+}
+
+impl Enc {
+    fn put_name(in self, sym: u32, inout out: ChunkSeq[u64]) {
+        if sym == NONE32 {
+            put_empty(inout out);
+        } else {
+            self.names.put_words(sym, inout out);
+        }
+    }
+
+    // The row index of type `t`, encoding it (and what it reaches) on
+    // first use.
+    fn ty(inout self, t: u32) -> u64 {
+        let key = w(t);
+        if key < self.ids.len() {
+            let seen = u32_at(in self.ids, key);
+            if seen != 0 {
+                return wrapping_sub(w(seen), 1);
+            }
+        }
+        loop {
+            if self.ids.len() > key {
+                break;
+            }
+            self.ids.push(0);
+        }
+        let i = self.starts.len();
+        let _ = self.ids.try_set(key, inc32(n32(i)));
+        self.starts.push(0);
+        self.lens.push(0);
+        let node = self.types.node(t);
+        let k = self.world.k;
+        let mut class = C_OTHER;
+        let mut name = NONE32;
+        let mut parts = ChunkSeq::new[u32]();
+        if node.kind == TyKind::Named {
+            let n = node.name;
+            let arity = w(node.n);
+            if arity == 0 && k.is_wide(n) {
+                class = C_WIDE;
+                name = n;
+            } else if arity == 0 && k.is_scalar(n) && n != k.never {
+                class = C_SCALAR;
+                name = n;
+            } else if arity == 1 && (n == k.chunk_seq || n == k.slice) {
+                class = if n == k.chunk_seq { C_SEQ } else { C_SLICE };
+                parts.push(self.types.arg(t, 0));
+            } else if arity == 0 && n == k.string {
+                class = C_STRING;
+            } else if arity == 0 && n == k.str_ {
+                class = C_STR;
+            } else {
+                class = C_NAMED;
+                name = n;
+                for a in 0..arity {
+                    parts.push(self.types.arg(t, a));
+                }
+            }
+        } else if node.kind == TyKind::Tuple {
+            class = C_TUPLE;
+            for a in 0..w(node.n) {
+                parts.push(self.types.arg(t, a));
+            }
+        }
+        let mut ids = ChunkSeq::new[u64]();
+        for p in 0..parts.len() {
+            let id = self.ty(u32_at(in parts, p));
+            ids.push(id);
+        }
+        let mut row = ChunkSeq::new[u64]();
+        let mut shown = ChunkSeq::new[u8]();
+        display(in self.types, in self.names, t, inout shown);
+        put_text_words(inout row, in shown.as_slice());
+        row.push(class);
+        self.put_name(name, inout row);
+        // The flag is a boxed object's, and boxes are declined.
+        row.push(0);
+        let mode = if class == C_OTHER {
+            0
+        } else {
+            widen_u64(mode_of(inout self.types, in self.names, in self.world, t, in bounds_new()))
+        };
+        row.push(mode);
+        row.push(ids.len());
+        row.extend(in ids.as_slice());
+        let adt_index = if class == C_NAMED {
+            self.world.lookup(name)
+        } else {
+            NO_ADT
+        };
+        if adt_index == NO_ADT {
+            row.push(0);
+        } else {
+            let adt = self.world.adt(adt_index);
+            row.push(1);
+            row.push(w(adt.gn));
+            row.push(if adt.tile != 0 { 1 } else { 0 });
+            row.push(if adt.is_enum { 1 } else { 0 });
+            row.push(w(adt.vn));
+            for v in 0..w(adt.vn) {
+                let variant = self.world.variant(add(w(adt.va), v));
+                self.put_name(variant.name, inout row);
+            }
+        }
+        if class == C_OTHER {
+            row.push(LAYOUT_FAILED);
+            put_empty(inout row);
+        } else {
+            self.layout(t, inout row);
+        }
+        let _ = self.starts.try_set(i, self.words.len());
+        let _ = self.lens.try_set(i, row.len());
+        self.words.extend(in row.as_slice());
+        i
+    }
+
+    // `Layout::of(world, t)` as words: built (size, aggregate, kind, the
+    // variants and their fields) or failed (the reason).
+    fn layout(inout self, t: u32, inout row: ChunkSeq[u64]) {
+        let l = layout_of(inout self.ls, inout self.types, inout self.names, in self.world, t);
+        if l == NONE32 {
+            row.push(LAYOUT_FAILED);
+            put_text_words(inout row, in self.ls.err.as_slice());
+            return;
+        }
+        let node = self.ls.node(l);
+        row.push(LAYOUT_BUILT);
+        row.push(w(node.size));
+        row.push(if self.ls.aggregate(l) { 1 } else { 0 });
+        if node.kind == L_SCALAR {
+            row.push(LK_SCALAR);
+            row.push(0);
+        } else if node.kind == L_PRODUCT {
+            row.push(LK_PRODUCT);
+            row.push(1);
+            put_empty(inout row);
+            self.fields(w(node.a), w(node.n), inout row);
+        } else {
+            row.push(LK_ENUM);
+            row.push(w(node.n));
+            for v in 0..w(node.n) {
+                let variant = self.ls.lvariant(add(w(node.a), v));
+                self.put_name(variant.name, inout row);
+                self.fields(w(variant.fa), w(variant.fc), inout row);
+            }
+        }
+    }
+
+    fn fields(inout self, a: u64, n: u64, inout row: ChunkSeq[u64]) {
+        row.push(n);
+        for f in 0..n {
+            let field = self.ls.lfield(add(a, f));
+            self.put_name(field.name, inout row);
+            let id = self.ty(field.ty);
+            row.push(id);
+            row.push(wrapping_u64(widen_i64(field.offset)));
+        }
+    }
+}
+
+fn unit_variant(inout names: Names, inout world: World, in name: Str, named: bool) {
+    world
+        .variants
+        .push(Variant { name: names.intern(in name.as_bytes()), fa: 0, fc: 0, named: named });
+}
+
+fn declare(
+    inout names: Names,
+    inout world: World,
+    in name: Str,
+    ga: u32,
+    gn: u32,
+    va: u32,
+    is_enum: bool
+) {
+    let sym = names.intern(in name.as_bytes());
+    let vn = wrapping_sub(n32(world.variants.len()), va);
+    let index = n32(world.adts.len());
+    world.adts.push(Adt {
+        name: sym,
+        mode: MODE_COPY,
+        ga: ga,
+        gn: gn,
+        va: va,
+        vn: vn,
+        is_enum: is_enum,
+        tile: 0,
+        span_zero: false
+    });
+    set_by_symbol(inout world.by_name, sym, inc32(index));
+}
+
+// Replace Stage 2's builtin `Option`, `RuntimeError` and `ArithOverflow`
+// (collect.ves: `Some, None`; `ArithOverflow, IndexOutOfBounds,
+// DivisionByZero`; none) with the Rust checker's: `copy enum Option[T] {
+// None, Some(T) }`, `copy enum RuntimeError { DivisionByZero,
+// IndexOutOfBounds }` and `copy struct ArithOverflow {}`.
+fn rust_builtins(inout names: Names, inout types: Types, inout world: World) {
+    let t = names.intern(in TYPE_PARAM.as_bytes());
+    let ga = n32(world.generics.len());
+    world.generics.push(Generic { name: t, bound: 0, row: false });
+    let va = n32(world.variants.len());
+    unit_variant(inout names, inout world, NONE_VARIANT, false);
+    let fa = n32(world.fields.len());
+    world.fields.push(Field {
+        name: names.intern(in TUPLE_FIELD.as_bytes()),
+        ty: types.named0(t),
+        modality: 0
+    });
+    world.variants.push(Variant {
+        name: names.intern(in SOME_VARIANT.as_bytes()),
+        fa: fa,
+        fc: 1,
+        named: false
+    });
+    declare(inout names, inout world, OPTION, ga, 1, va, true);
+    let rva = n32(world.variants.len());
+    unit_variant(inout names, inout world, DIVISION_BY_ZERO, false);
+    unit_variant(inout names, inout world, INDEX_OUT_OF_BOUNDS, false);
+    declare(inout names, inout world, RUNTIME_ERROR, 0, 0, rva, true);
+    let ova = n32(world.variants.len());
+    unit_variant(inout names, inout world, ARITH_OVERFLOW, true);
+    declare(inout names, inout world, ARITH_OVERFLOW, 0, 0, ova, false);
+}
+
+// Whether name `a` sorts before name `b` (byte order, as Rust's
+// `BTreeMap<String, _>`).
+fn name_before(in names: Names, a: u32, b: u32) -> bool {
+    let la = names.size(a);
+    let lb = names.size(b);
+    let n = if la < lb { la } else { lb };
+    for i in 0..n {
+        let x = names.byte(a, i);
+        let y = names.byte(b, i);
+        if x != y {
+            return x < y;
+        }
+    }
+    la < lb
+}
+
+fn starts_with_at(in s: ChunkSeq[u8], at: u64, in p: Str) -> bool {
+    let pb = p.as_bytes();
+    if add(at, pb.len()) > s.len() {
+        return false;
+    }
+    for i in 0..pb.len() {
+        let c = match pb.try_get(i) {
+            Option::Some(c) => c,
+            Option::None => 0,
+        };
+        if u8_at(in s, add(at, i)) != c {
+            return false;
+        }
+    }
+    true
+}
+
+fn str_len(in s: Str) -> u64 {
+    s.as_bytes().len()
+}
+
+fn line_end(in s: ChunkSeq[u8], at: u64) -> u64 {
+    let mut i = at;
+    loop {
+        if i >= s.len() || u8_at(in s, i) == NEWLINE {
+            return i;
+        }
+        i = inc(i);
+    }
+}
+
+// The abi and option words of a directives dump that names no instance and
+// no `.vsys` import, or None.
+fn plain_directives(in dump: ChunkSeq[u8]) -> Option[(u64, u64)] {
+    if !starts_with_at(in dump, 0, DUMP_ABI) {
+        return Option::None;
+    }
+    let abi_start = str_len(DUMP_ABI);
+    let abi_end = line_end(in dump, abi_start);
+    let mut abi: u64 = 0;
+    if !starts_with_at(in dump, abi_start, DUMP_ABI_NONE) {
+        for i in abi_start..abi_end {
+            let c = u8_at(in dump, i);
+            if c < DIGIT_ZERO || c > DIGIT_NINE {
+                return Option::None;
+            }
+            abi = add(wrapping_mul(abi, DECIMAL), widen_u64(wrapping_sub(c, DIGIT_ZERO)));
+        }
+    }
+    let options_start = inc(abi_end);
+    if !starts_with_at(in dump, options_start, DUMP_OPTIONS) {
+        return Option::None;
+    }
+    let flag_at = add(options_start, str_len(DUMP_OPTIONS));
+    let options: u64 = if u8_at(in dump, flag_at) == OPTIONS_ON {
+        1
+    } else {
+        0
+    };
+    let end = line_end(in dump, flag_at);
+    let mut lines: u64 = 0;
+    for i in 0..dump.len() {
+        if u8_at(in dump, i) == NEWLINE {
+            lines = inc(lines);
+        }
+    }
+    if lines != DUMP_LINES || inc(end) != dump.len() {
+        return Option::None;
+    }
+    Option::Some((abi, options))
+}
+
+fn read_file(in path: Slice[u8]) -> Option[ChunkSeq[u8]] eff [Ffi[StdFs]] {
+    handle Fail[IoError] in {
+        Option::Some(read_path(in path))
+    } with {
+        return v => v,
+        raise(_e, _k) => Option::None,
+    }
+}
+
+// `plan_input(world, public, library, directives)` for the package at
+// `root_dir`, built by Stage 2's front end, or why it was declined.
+pub fn export_plan_input(
+    in root_dir: Slice[u8],
+    in library: Slice[u8]
+) -> PlanInput eff [Ffi[StdFs]] {
+    match package_graph_vsys_count(in root_dir) {
+        Option::Some(0) => {},
+        Option::Some(_) => {
+            return declined(DECLINE_VSYS);
+        },
+        Option::None => {
+            return declined(DECLINE_LOAD);
+        },
+    }
+    let mut root_path = ChunkSeq::new[u8]();
+    root_path.extend(in root_dir);
+    root_path.extend(in ROOT_MODULE.as_bytes());
+    let source = match read_file(in root_path.as_slice()) {
+        Option::Some(s) => s,
+        Option::None => {
+            return declined(DECLINE_LOAD);
+        },
+    };
+    let none = ChunkSeq::new[u8]();
+    let dump = directives_text(in source, in none, in none, in none);
+    let (abi, options) = match plain_directives(in dump) {
+        Option::Some(d) => d,
+        Option::None => {
+            return declined(DECLINE_DIRECTIVES);
+        },
+    };
+    let encoded = match load_package_graph_bytes(in root_dir) {
+        Option::Some(b) => b,
+        Option::None => {
+            return declined(DECLINE_LOAD);
+        },
+    };
+    let mut a = assembly_begin_bytes(in encoded.as_slice());
+    let mut mods = ChunkSeq::new[AssembledModule]();
+    loop {
+        match assemble_next_bytes(inout a, in encoded.as_slice()) {
+            Option::Some(m) => mods.push(sink m),
+            Option::None => break,
+        }
+    }
+    if assembly_parse_errors(in a) != 0 {
+        return declined(DECLINE_DIAGNOSTICS);
+    }
+    let meta = assembly_metadata(sink a);
+    // The Rust CLI rejects a package with syntax or assembly errors.
+    if meta.diagnostics.len() > 0 {
+        return declined(DECLINE_DIAGNOSTICS);
+    }
+    let cp = collect_program(in mods);
+    // The root module's public names (not qualified), as collected symbols.
+    let mut public = ChunkSeq::new[bool]();
+    for i in 0..meta.public_items.len() {
+        let item = u32_at(in meta.public_items, i);
+        if meta.qualified.contains_key(item) {
+            continue;
+        }
+        let mut text = String::new();
+        if !meta.names.resolve_into(symbol_from_id(item), inout text) {
+            continue;
+        }
+        let sym = cp.names.lookup(in text.as_bytes());
+        if sym == NONE32 {
+            continue;
+        }
+        loop {
+            if public.len() > w(sym) {
+                break;
+            }
+            public.push(false);
+        }
+        let _ = public.try_set(w(sym), true);
+    }
+    let mut exported = ChunkSeq::new[u64]();
+    for fi in 0..cp.fns.len() {
+        let f = match cp.fns.try_get(fi) {
+            Option::Some(f) => f,
+            Option::None => continue,
+        };
+        if public.try_get(w(f.name)) != Option::Some(true) {
+            continue;
+        }
+        let mut dup = false;
+        for j in 0..exported.len() {
+            match cp.fns.try_get(u64_at(in exported, j)) {
+                Option::Some(g) => {
+                    if g.name == f.name {
+                        dup = true;
+                    }
+                },
+                Option::None => {},
+            }
+        }
+        if dup {
+            continue;
+        }
+        if f.fip {
+            return declined(DECLINE_FIP);
+        }
+        // Insertion in name order.
+        exported.push(fi);
+        let mut at = wrapping_sub(exported.len(), 1);
+        loop {
+            if at == 0 {
+                break;
+            }
+            let prev = match cp.fns.try_get(u64_at(in exported, wrapping_sub(at, 1))) {
+                Option::Some(p) => p.name,
+                Option::None => 0,
+            };
+            if !name_before(in cp.names, f.name, prev) {
+                break;
+            }
+            let _ = exported.try_set(at, u64_at(in exported, wrapping_sub(at, 1)));
+            at = wrapping_sub(at, 1);
+            let _ = exported.try_set(at, fi);
+        }
+    }
+    let fns = cp.fns;
+    let params = cp.params;
+    let mut names = cp.names;
+    let mut types = cp.types;
+    let mut world = cp.world;
+    // Stage 2 declares no `Box` (fip.rs `box_prelude`), so a layout that
+    // holds one would differ from Rust's.
+    for ti in 0..types.nodes.len() {
+        let node = types.node(n32(ti));
+        if node.kind == TyKind::Named && node.name == world.k.box_ {
+            return declined(DECLINE_BOX);
+        }
+    }
+    rust_builtins(inout names, inout types, inout world);
+    let mut e = Enc {
+        names: names,
+        types: types,
+        world: world,
+        ls: layouts_new(),
+        ids: ChunkSeq::new[u32](),
+        words: ChunkSeq::new[u64](),
+        starts: ChunkSeq::new[u64](),
+        lens: ChunkSeq::new[u64](),
+        declined: DECLINE_NONE,
+    };
+    let mut head = ChunkSeq::new[u64]();
+    put_text_words(inout head, in library);
+    put_text_words(inout head, in EFFECT_PREFIX.as_bytes());
+    head.push(abi);
+    head.push(options);
+    // No `.vsys` imports and no instances.
+    head.push(0);
+    head.push(0);
+    let mut funcs = ChunkSeq::new[u64]();
+    funcs.push(exported.len());
+    for x in 0..exported.len() {
+        let f = match fns.try_get(u64_at(in exported, x)) {
+            Option::Some(f) => f,
+            Option::None => continue,
+        };
+        e.put_name(f.name, inout funcs);
+        // Not generated, public.
+        funcs.push(0);
+        funcs.push(1);
+        funcs.push(if f.gn != 0 { 1 } else { 0 });
+        // No `dyn` parameter.
+        funcs.push(0);
+        let row = e.types.row(f.effects);
+        if row.tail == 0 {
+            funcs.push(0);
+        } else {
+            funcs.push(1);
+            e.put_name(wrapping_sub(row.tail, 1), inout funcs);
+        }
+        funcs.push(w(row.n));
+        for ei in 0..w(row.n) {
+            let eff = e.types.effect_at(add(w(row.a), ei));
+            e.put_name(eff.name, inout funcs);
+            funcs.push(if eff.label != 0 { 1 } else { 0 });
+            funcs.push(w(eff.n));
+            for ai in 0..w(eff.n) {
+                let arg = u32_at(in e.types.items, add(w(eff.a), ai));
+                let id = e.ty(arg);
+                funcs.push(id);
+            }
+        }
+        // No caller slot: `fip` functions are declined.
+        funcs.push(0);
+        funcs.push(w(f.pn));
+        for pi in 0..w(f.pn) {
+            let p = match params.try_get(add(w(f.pa), pi)) {
+                Option::Some(p) => p,
+                Option::None => ParamInfo { name: NONE32, pass: 0, ty: 0 },
+            };
+            e.put_name(p.name, inout funcs);
+            funcs.push(widen_u64(p.pass));
+            let id = e.ty(p.ty);
+            funcs.push(id);
+        }
+        let id = e.ty(f.result);
+        funcs.push(id);
+    }
+    if e.declined != DECLINE_NONE {
+        return declined(e.declined);
+    }
+    let mut out = head;
+    out.push(e.starts.len());
+    for r in 0..e.starts.len() {
+        let s = u64_at(in e.starts, r);
+        for j in 0..u64_at(in e.lens, r) {
+            out.push(u64_at(in e.words, add(s, j)));
+        }
+    }
+    out.extend(in funcs.as_slice());
+    let mut bytes = ChunkSeq::with_capacity[u8](wrapping_mul(out.len(), WORD_BYTES));
+    for i in 0..out.len() {
+        let word = u64_at(in out, i);
+        for b in 0..WORD_BYTES {
+            bytes.push(wrapping_u8(wrapping_shr_u64(
+                word,
+                wrapping_u32(wrapping_mul(b, BYTE_BITS))
+            )));
+        }
+    }
+    PlanInput { declined: DECLINE_NONE, bytes: bytes }
+}
+
+// The planner's answer (plan.ves `write_plan`) for the package at
+// `root_dir`, or why it was declined.
+pub fn export_plan_dir(
+    in root_dir: Slice[u8],
+    in library: Slice[u8]
+) -> (u8, ChunkSeq[u64]) eff [Ffi[StdFs]] {
+    let input = export_plan_input(in root_dir, in library);
+    if input.declined != DECLINE_NONE {
+        return (input.declined, ChunkSeq::new[u64]());
+    }
+    (DECLINE_NONE, export_plan_bytes(in input.bytes.as_slice()))
+}
+
+// `vesper build --lib`'s `--interface` and `--rust-binding` outputs for the
+// package at `root_dir`, with the optional `--rust-types` path, or why they
+// were declined.
+pub fn export_files_dir(
+    in root_dir: Slice[u8],
+    in library: Slice[u8],
+    has_types_path: bool,
+    in types_path: Slice[u8]
+) -> ExportFiles eff [Ffi[StdFs]] {
+    let (why, answer) = export_plan_dir(in root_dir, in library);
+    if why != DECLINE_NONE {
+        return ExportFiles {
+            declined: why,
+            interface: ChunkSeq::new[u8](),
+            binding: ChunkSeq::new[u8]()
+        };
+    }
+    match export_files_of_plan(in answer, has_types_path, in types_path) {
+        Option::Some((interface, binding)) => ExportFiles {
+            declined: DECLINE_NONE,
+            interface: interface,
+            binding: binding
+        },
+        Option::None => ExportFiles {
+            declined: DECLINE_REFUSED,
+            interface: ChunkSeq::new[u8](),
+            binding: ChunkSeq::new[u8]()
+        },
+    }
+}

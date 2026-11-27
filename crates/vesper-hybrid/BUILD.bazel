@@ -29,6 +29,10 @@ vesper_hybrid(
             "edit_src": "modules/doc/src/lib.ves",
             "edits": {"(sink page: ChunkSeq[u8]) -> ChunkSeq[u8] {\n    page\n": "(sink page: ChunkSeq[u8]) -> ChunkSeq[u8] {\n    let mut p = page;\n    p.push(32);\n    p\n"},
         },
+        "hybrid_driver": {
+            "edit_src": "modules/driver/src/lib.ves",
+            "edits": {"        write_path(in path.as_slice(), in bytes.as_slice());\n": "        write_path(in path.as_slice(), in b[0..0]);\n"},
+        },
         "hybrid_ir_check": {
             "edit_src": "modules/ir_check/src/lib.ves",
             "edits": {

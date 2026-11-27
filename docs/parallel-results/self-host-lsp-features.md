@@ -1090,3 +1090,68 @@ As with the proof models, the portable BLAKE3 is most of the difference,
 so the hybrid wiring must hash through hash-sys. Rust lines deleted: 0.
 The preview is not wired: Rust stays the default until the hybrid wiring
 part.
+
+# Part 12a: the recovery gate (#1828)
+
+`analyze` in `src/tooling/recovery.rs` gives diagnostics for a document
+with syntax errors by checking its complete components alone. Before it
+parses any complete item, it runs a gate over the recovery syntax:
+
+- the limits, the source bound and the work budget;
+- the source identity (its BLAKE3 against the snapshot's);
+- the bound on the syntax diagnostics;
+- the declaration census (spans, names, duplicates, reserved names,
+  declaration kinds and statuses);
+- the recovery sites, and every original token's coverage by a
+  declaration.
+
+The gate either refuses, blocks the whole document (every component
+unavailable, with a reason), or opens it for the component check with the
+budget left. Part 12a ports that gate as `lsp_recovery_gate`
+(`recovery.ves` in `@vesper/lsp-features`). The component check after it
+parses and type checks items with the Rust checker, so it waits for the
+checker in Vesper.
+
+## What changed
+
+- `src/tooling/recovery.rs`: the gate is split out of `analyze` as `gate`
+  (behaviour unchanged), with the hidden `gate_answer` (Rust's answer as
+  text), `gate_words` (the encoder the hybrid wiring will use) and
+  `gate_tags`. The token loop's trivia and identifier classes moved to
+  `token_class`, which the encoder shares.
+- `packages/vesper-lsp-features/src/recovery.ves` (new) and the entry
+  `lsp_recovery_gate` in lib.ves.
+- `tests/self_host_lsp_features.rs`: `recovery_gate_matches_rust` and the
+  ignored `recovery_gate_speed`.
+
+## Differential
+
+330 recovery snapshots: eight hand-written programs of the accepted
+declaration kinds and 40 package sources, each cut at a quarter, half and
+three quarters, with a damaged function, a macro call, a stray token, a
+trait, a long identifier or one brace fewer, and as it is (those that
+parse under the default syntax limits). Each gets 24 limit sets: the
+defaults, work allowances swept across the gate's own charges, small
+identifier, diagnostic, function and context limits, a source limit one
+byte short and three invalid limit sets.
+
+7,920 cases, 0 diffs, with the portable BLAKE3 and with the host's
+digest: 303 open, 2,626 blocked and 4,991 refused, covering every refusal
+the gate can reach from a real snapshot (the source mismatch needs a
+forged snapshot hash).
+
+## Numbers
+
+Default limits, 8 gates per call, best of five ABBA rounds per snapshot,
+release build. The recovery syntax is parsed and encoded outside the
+timing. Rust's time includes walking the rowan tree's tokens, which the
+encoder hands the port as a flat list; the host digest is computed inside
+the timing on every gate.
+
+| Source hashed by | Rust | Vesper | Ratio |
+|---|--:|--:|--:|
+| the host's C BLAKE3 (`@vesper-std/hash-sys`) | 73.1 µs | 21.9 µs | **0.30x** |
+| the portable Vesper BLAKE3 | 73.1 µs | 57.0 µs | 0.78x |
+
+Rust lines deleted: 0. The gate is not wired, and the rest of `analyze`
+stays in Rust until the checker runs in Vesper.
