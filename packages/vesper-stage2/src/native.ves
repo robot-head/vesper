@@ -240,7 +240,8 @@ copy struct Value {
 
 copy struct Product {
     ty: u32,
-    // A constructor instruction, or a range of synthetic children for a call.
+    // The originating constructor when known, and the base of synthetic
+    // children for an enum or a product arriving from an edge or call.
     instruction: u64,
     first_child: u64,
 }
@@ -1986,7 +1987,13 @@ copy struct PendingProduct {
 
 // Reserve scalar SSA values for a product arriving from another block or
 // through the native ABI.
-fn plan_product(in low: L, root: PendingProduct, block: u64, inout m: Function) -> u64 {
+fn plan_product(
+    in low: L,
+    root: PendingProduct,
+    block: u64,
+    constructor: u64,
+    inout m: Function
+) -> u64 {
     let mut pending = ChunkSeq::new[PendingProduct]();
     pending.push(root);
     let start = m.values.len();
@@ -2005,7 +2012,12 @@ fn plan_product(in low: L, root: PendingProduct, block: u64, inout m: Function) 
         {
             return 0;
         }
-        m.products.push(Product { ty: node.ty, instruction: NO_VALUE, first_child: first });
+        let instruction = if node.value == root.value {
+            constructor
+        } else {
+            NO_VALUE
+        };
+        m.products.push(Product { ty: node.ty, instruction: instruction, first_child: first });
         if count == 0 {
             cells = inc(cells);
         }
@@ -2187,7 +2199,7 @@ fn plan_aggregates(in low: L, f: FnR, row: FnRow, inout m: Function) -> bool {
         if is_aggregate(m.value_kind(arg)) {
             let ty = low.ast.param(add(f.param_start, arg)).ty;
             let root = PendingProduct { value: arg, ty: ty };
-            if plan_product(in low, root, 0, inout m) == 0 {
+            if plan_product(in low, root, 0, NO_VALUE, inout m) == 0 {
                 return false;
             }
         }
@@ -2203,7 +2215,7 @@ fn plan_aggregates(in low: L, f: FnR, row: FnRow, inout m: Function) -> bool {
             };
             let value = add(m.arguments, param);
             let root = PendingProduct { value: value, ty: ty };
-            if plan_product(in low, root, block, inout m) == 0 {
+            if plan_product(in low, root, block, NO_VALUE, inout m) == 0 {
                 return false;
             }
             let mut fields = ChunkSeq::new[u64]();
@@ -2244,7 +2256,7 @@ fn plan_aggregates(in low: L, f: FnR, row: FnRow, inout m: Function) -> bool {
             }
             if inst.op == Op::Data && m.value_kind(value) == ScalarKind::Enum {
                 let root = PendingProduct { value: value, ty: inst.ty };
-                if plan_product(in low, root, block, inout m) == 0 {
+                if plan_product(in low, root, block, index, inout m) == 0 {
                     return false;
                 }
                 continue;
@@ -2255,7 +2267,7 @@ fn plan_aggregates(in low: L, f: FnR, row: FnRow, inout m: Function) -> bool {
                 }
                 if aggregate {
                     let root = PendingProduct { value: value, ty: inst.ty };
-                    let bytes = plan_product(in low, root, block, inout m);
+                    let bytes = plan_product(in low, root, block, NO_VALUE, inout m);
                     if bytes == 0 {
                         return false;
                     }
@@ -2445,10 +2457,65 @@ impl EnumCoverage {
     }
 }
 
+fn known_enum_variant(in low: L, product: Product) -> Option[EnumVariant] {
+    if product.instruction == NO_VALUE || scalar_kind(in low, product.ty) != ScalarKind::Enum {
+        return Option::None;
+    }
+    let inst = low.program.inst(product.instruction);
+    enum_variant(in low, product.ty, n32(low.program.op(inst.a)))
+}
+
+// Return an arm's target operand if knowing the tag alone decides the
+// match. A prior arm that tests this variant's payload still has priority.
+fn enum_target_for_tag(in low: L, b: BlockRow, product: Product, tag: u64) -> u64 {
+    let end = add(b.ta, b.tn);
+    let count = low.program.op(add(b.ta, MATCH_ARM_COUNT));
+    let mut pattern = add(b.ta, MATCH_FIRST_ARM);
+    let mut fields = ChunkSeq::new[EnumPatternField]();
+    for _ in 0..count {
+        let shape = match_arm(in low, pattern, end);
+        if shape.target == NO_VALUE {
+            return NO_VALUE;
+        }
+        let kind = low.program.op(pattern);
+        if kind == Pat::Bind || kind == Pat::Wild {
+            return shape.target;
+        }
+        let ordinal = match enum_pattern_fields(
+            in low,
+            product,
+            pattern,
+            shape.target,
+            inout fields
+        ) {
+            Option::Some(ordinal) => ordinal,
+            Option::None => return NO_VALUE,
+        };
+        if ordinal == tag {
+            return if shape.tests == 1 {
+                shape.target
+            } else {
+                NO_VALUE
+            };
+        }
+        fields.clear();
+        pattern = inc(shape.target);
+    }
+    NO_VALUE
+}
+
 fn plan_enum_match(in low: L, b: BlockRow, source: u64, block: u64, inout m: Function) -> bool {
     let product = match m.product(source) {
         Option::Some(product) => product,
         Option::None => return false,
+    };
+    match known_enum_variant(in low, product) {
+        Option::Some(variant) => if enum_target_for_tag(in low, b, product, variant.ordinal)
+            != NO_VALUE
+        {
+            return true;
+        },
+        Option::None => {},
     };
     let mut coverage = enum_coverage(w(product_adt(in low, product.ty).vn));
     let end = add(b.ta, b.tn);
@@ -4097,6 +4164,20 @@ fn lower_enum_match(
         Option::Some(product) => product,
         Option::None => return false,
     };
+    match known_enum_variant(in low, product) {
+        Option::Some(variant) => {
+            let target = enum_target_for_tag(in low, b, product, variant.ordinal);
+            if target != NO_VALUE {
+                let label = match_label(in low, row, target, in m);
+                if label == NO_VALUE {
+                    return false;
+                }
+                let _ = m.record(JUMP_LABEL, label, 0, 0);
+                return true;
+            }
+        },
+        Option::None => {},
+    };
     let mut coverage = enum_coverage(w(product_adt(in low, product.ty).vn));
     let end = add(b.ta, b.tn);
     let count = low.program.op(add(b.ta, MATCH_ARM_COUNT));
@@ -4361,6 +4442,100 @@ fn copy_product_to_block(in low: L, source: u64, dest: u64, block: u64, inout m:
     true
 }
 
+// The edge still copies the block parameter into its planned homes. Bypass
+// the destination's test only when its instructions are aliases of that
+// parameter and the incoming tag determines the arm.
+fn enum_edge_label(
+    in low: L,
+    row: FnRow,
+    join: BlockRow,
+    source: u64,
+    dest: u64,
+    in m: Function
+) -> u64 {
+    if join.term != Term::Match || m.value_kind(dest) != ScalarKind::Enum {
+        return NO_VALUE;
+    }
+    let product_index = m.product_index(dest);
+    if product_index == NO_VALUE
+        || product_index != m.product_index(add(m.arguments, low.program.op(join.ta)))
+    {
+        return NO_VALUE;
+    }
+    let product = match m.product(source) {
+        Option::Some(product) => product,
+        Option::None => return NO_VALUE,
+    };
+    let variant = match known_enum_variant(in low, product) {
+        Option::Some(variant) => variant,
+        Option::None => return NO_VALUE,
+    };
+    for i in join.i0..add(join.i0, join.ic) {
+        let inst = low.program.inst(i);
+        let alias = if inst.op == Op::Bind
+            && inst.n == inc(BIND_NAME)
+            && low.program.op(add(inst.a, BIND_PATTERN)) == Pat::Bind
+        {
+            let name = n32(low.program.op(add(inst.a, BIND_NAME)));
+            m.mutable_offset(name) == NO_VALUE
+                && m.product_index(add(m.arguments, low.program.op(inst.a))) == product_index
+        } else if inst.op == Op::Read && inst.n == PLAIN_READ_WORDS {
+            m.product_index(add(m.arguments, w(inst.dest))) == product_index
+        } else {
+            false
+        };
+        if !alias || inst.fallible != 0 {
+            return NO_VALUE;
+        }
+    }
+    let target = enum_target_for_tag(in low, join, product, variant.ordinal);
+    if target == NO_VALUE {
+        NO_VALUE
+    } else {
+        match_label(in low, row, target, in m)
+    }
+}
+
+fn enum_join_is_bypassed(
+    in low: L,
+    row: FnRow,
+    join: BlockRow,
+    block: u64,
+    in m: Function
+) -> bool {
+    if block == 0 || join.term != Term::Match {
+        return false;
+    }
+    let param = block_parameter(in low, join);
+    if m.kind(param) != ScalarKind::Enum {
+        return false;
+    }
+    let dest = add(m.arguments, param);
+    let count_at = add(join.ha, BLOCK_INCOMING_COUNT);
+    let mut bypassed = false;
+    for i in 0..low.program.op(count_at) {
+        let at = add(inc(count_at), wrapping_mul(i, BLOCK_INCOMING_WORDS));
+        let pred = low.program.op(at);
+        if m.label(pred) == NO_VALUE {
+            continue;
+        }
+        let from = low.program.block(add(row.b0, pred));
+        if from.term != Term::Jump
+            || from.tn != inc(JUMP_ARGUMENT)
+            || low.program.op(from.ta) != block
+            || low.program.op(add(from.ta, JUMP_ARGUMENT_COUNT)) != 1
+        {
+            return false;
+        }
+        let source = add(m.arguments, low.program.op(add(from.ta, JUMP_ARGUMENT)));
+        if enum_edge_label(in low, row, join, source, dest, in m) == NO_VALUE {
+            return false;
+        }
+        bypassed = true;
+    }
+    bypassed
+}
+
 fn lower_terminator(in low: L, row: FnRow, b: BlockRow, block: u64, inout m: Function) -> bool {
     if b.term == Term::Return && b.tn == 1 {
         return lower_return(in low, low.program.op(b.ta), block, inout m);
@@ -4374,7 +4549,8 @@ fn lower_terminator(in low: L, row: FnRow, b: BlockRow, block: u64, inout m: Fun
         if label == 0 || label == NO_VALUE {
             return false;
         }
-        let param = block_parameter(in low, low.program.block(add(row.b0, target)));
+        let join = low.program.block(add(row.b0, target));
+        let param = block_parameter(in low, join);
         let count = low.program.op(add(b.ta, JUMP_ARGUMENT_COUNT));
         if param == NO_VALUE {
             if count != 0 || b.tn != JUMP_ARGUMENT {
@@ -4399,7 +4575,8 @@ fn lower_terminator(in low: L, row: FnRow, b: BlockRow, block: u64, inout m: Fun
                 if !copy_product_to_block(in low, source, dest, block, inout m) {
                     return false;
                 }
-                let _ = m.record(JUMP_LABEL, label, 0, 0);
+                let arm = enum_edge_label(in low, row, join, source, dest, in m);
+                let _ = m.record(JUMP_LABEL, if arm == NO_VALUE { label } else { arm }, 0, 0);
                 return true;
             }
             let home = m.values.try_get(dest).unwrap_or(value_new(NO_VALUE)).home;
@@ -4580,6 +4757,10 @@ fn lower_function(
     }
     for layout in 0..m.blocks.len() {
         let block = m.blocks.try_get(layout).unwrap_or(0);
+        let b = low.program.block(add(row.b0, block));
+        if enum_join_is_bypassed(in low, row, b, block, in m) {
+            continue;
+        }
         // Mark the private frame slot even for a single block when forwarding.
         // The encoder can then discard result reloads with no scalar users.
         if m.labeled() {
@@ -4594,7 +4775,6 @@ fn lower_function(
         if block == 0 && !lower_entry(in low, inout m) {
             return ChunkSeq::new[u8]();
         }
-        let b = low.program.block(add(row.b0, block));
         if !lower_block(in low, f, b, block, inout m, inout graph) {
             return ChunkSeq::new[u8]();
         }

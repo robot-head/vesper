@@ -2679,6 +2679,30 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
              let (c, marker) = result;\n\
              (a, b, c, marker)\n\
          }\n\
+         fn enum_plain_route(present: bool, tag: i8) -> u64 {\n\
+             let option: Option[i8] = if present { Option::Some(tag) } else { Option::None };\n\
+             match option { Option::None => 17, Option::Some(n) => wrapping_u64(n) }\n\
+         }\n\
+         fn enum_literal_route(present: bool, tag: i8) -> u64 {\n\
+             let option: Option[i8] = if present { Option::Some(tag) } else { Option::None };\n\
+             match option {\n\
+                 Option::Some(-1) => 23,\n\
+                 Option::Some(n) => wrapping_u64(n),\n\
+                 Option::None => 29,\n\
+             }\n\
+         }\n\
+         fn enum_observed_route(inout seen: u64, present: bool, tag: i8) -> u64 {\n\
+             let observed: Option[i8] = if present { Option::Some(tag) } else { Option::None };\n\
+             seen = wrapping_add(seen, 1);\n\
+             match observed { Option::None => 39, Option::Some(n) => wrapping_u64(n) }\n\
+         }\n\
+         fn enum_direct_route(tag: i8) -> u64 {\n\
+             match Option::Some(tag) { Option::None => 31, Option::Some(n) => wrapping_u64(n) }\n\
+         }\n\
+         pub fn enum_routes(inout seen: u64, present: bool, tag: i8) -> (u64, u64, u64, u64) {\n\
+             (enum_direct_route(tag), enum_plain_route(present, tag),\n\
+              enum_literal_route(present, tag), enum_observed_route(inout seen, present, tag))\n\
+         }\n\
          fn unsupported(x: u64) -> u64 {\n\
              let value: Option[(u64, u64)] = Option::Some((x, x));\n\
              match value { Option::Some(_) => 7, _ => 9 }\n\
@@ -3043,6 +3067,14 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
         "{:?}",
         read_stage2_sidecar_notes(&object)
     );
+    let aggregate_join_object = dir.join("native-aggregate-join.o");
+    std::fs::rename(&object, &aggregate_join_object).unwrap();
+    assert_eq!(
+        compile("enum_routes"),
+        0,
+        "{:?}",
+        read_stage2_sidecar_notes(&object)
+    );
 
     let caller = dir.join("native-scalar-caller.c");
     let binary = dir.join("native-scalar-caller");
@@ -3091,6 +3123,7 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
          extern uint64_t forwarded_results(uint64_t *, int8_t, float);\n\
          extern uint64_t generic_enum_pipeline(bool, float, int8_t);\n\
          extern uint64_t aggregate_join(uint64_t *, bool, int16_t, int16_t, float);\n\
+         extern uint64_t enum_routes(uint64_t *, uint64_t *, bool, int8_t);\n\
          int main(void) {\n\
              if (mix(10, 4) != 65 || mix(UINT64_MAX, UINT64_MAX) != UINT64_MAX - 16) return 1;\n\
              if (choose(0, 4) != 8 || choose(2, 4) != 8 || choose(4, 1) != 10\n\
@@ -3252,9 +3285,19 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
              if (aggregate_join(joined, false, -32768, 32767, 1.0f) != 0\n\
                  || (int64_t)joined[0] != -32768 || joined[2] != 32767\n\
                  || joined[1] != UINT64_C(0x3f800000) || joined[3] != 17 || joined[4] != UINT64_MAX) return 46;\n\
-             return aggregate_join(joined, false, -32768, 32767, -0.0f) != 0\n\
+             if (aggregate_join(joined, false, -32768, 32767, -0.0f) != 0\n\
                  || (int64_t)joined[0] != -32768 || joined[2] != 0\n\
-                 || joined[1] != UINT64_C(0x80000000) || joined[3] != 9 || joined[4] != UINT64_MAX;\n\
+                 || joined[1] != UINT64_C(0x80000000) || joined[3] != 9 || joined[4] != UINT64_MAX) return 47;\n\
+             uint64_t seen = UINT64_MAX;\n\
+             uint64_t routes[4];\n\
+             if (enum_routes(routes, &seen, true, -1) != 0 || seen != 0\n\
+                 || routes[0] != UINT64_MAX || routes[1] != UINT64_MAX\n\
+                 || routes[2] != 23 || routes[3] != UINT64_MAX) return 48;\n\
+             if (enum_routes(routes, &seen, false, -1) != 0 || seen != 1\n\
+                 || routes[0] != UINT64_MAX || routes[1] != 17 || routes[2] != 29 || routes[3] != 39) return 49;\n\
+             return enum_routes(routes, &seen, true, -128) != 0 || seen != 2\n\
+                 || routes[0] != UINT64_MAX - 127 || routes[1] != UINT64_MAX - 127\n\
+                 || routes[2] != UINT64_MAX - 127 || routes[3] != UINT64_MAX - 127;\n\
          }\n",
     )
     .unwrap();
@@ -3298,6 +3341,7 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
             &enum_object,
             &forwarded_object,
             &generic_enum_object,
+            &aggregate_join_object,
             &object,
         ])
         .arg("-lm")
