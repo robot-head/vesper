@@ -119,7 +119,7 @@ const ATOMIC_ADD: u64 = 102;
 const ATOMIC_SUB: u64 = 103;
 const ATOMIC_EXCHANGE: u64 = 104;
 const FENCE: u64 = 105;
-const BYTE_SWAP: u64 = 106;
+pub const BYTE_SWAP: u64 = 106;
 const XMM_ARGUMENTS: u64 = 8;
 pub const CHECKED_ARITHMETIC_RECORDS: u64 = 2;
 

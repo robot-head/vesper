@@ -11,6 +11,7 @@ use vesper::{check, native, parser};
 
 const RET: u32 = 0xd65f_03c0;
 const BYTE_BITS: u64 = u8::BITS as u64;
+const WORD_BITS: u64 = u16::BITS as u64;
 const DWORD_BITS: u64 = u32::BITS as u64;
 const CELL_BITS: u64 = u64::BITS as u64;
 const NO_VALUE: u64 = u64::MAX;
@@ -65,9 +66,35 @@ const BRANCH_TABLE: u64 = 75;
 const BRANCH_TABLE_TARGET: u64 = 76;
 const ADD_CARRY: u64 = 77;
 const SUB_BORROW: u64 = 78;
+const BYTE_SWAP: u64 = 106;
 const EQUAL: u64 = 0;
 const SIGNED_LESS: u64 = 2;
 const UNSIGNED_LESS: u64 = 6;
+
+#[test]
+fn aarch64_byte_swap_encodes_each_scalar_width() {
+    // Adapted from Cranelift's isa/aarch64/bswap.clif at
+    // https://github.com/bytecodealliance/wasmtime/tree/4c22e15bade0a8590d8272f5be85426cb134601b/cranelift/filetests/filetests/isa/aarch64
+    const REV16_W0_W0: u32 = 0x5ac0_0400;
+    const REV_W0_W0: u32 = 0x5ac0_0800;
+    const REV_X0_X0: u32 = 0xdac0_0c00;
+    const UBFX_X0_LOW_WORD: u32 = 0xd340_3c00;
+    let packet = |width| [1, 1, BYTE_SWAP, 0, 0, width];
+    for (width, expected) in [
+        (WORD_BITS, &[REV16_W0_W0, UBFX_X0_LOW_WORD, RET][..]),
+        (DWORD_BITS, &[REV_W0_W0, RET][..]),
+        (CELL_BITS, &[REV_X0_X0, RET][..]),
+    ] {
+        let code: Vec<_> = expected
+            .iter()
+            .copied()
+            .flat_map(u32::to_le_bytes)
+            .collect();
+        assert_eq!(binding::aarch64_integer_leaf(&packet(width)), code);
+    }
+    assert!(binding::aarch64_integer_leaf(&packet(BYTE_BITS)).is_empty());
+    assert!(binding::aarch64_integer_leaf(&packet(u128::BITS.into())).is_empty());
+}
 
 #[test]
 fn aarch64_checked_integer_packets_materialize_results_and_flags() {

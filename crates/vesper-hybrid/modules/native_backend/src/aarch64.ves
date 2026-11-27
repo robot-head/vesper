@@ -19,7 +19,7 @@ use self::scalar::{
     LIBCALL_TARGET_BASE, MEMCPY_LIBCALL, SIGNED_DIV, UNSIGNED_DIV, SIGNED_REM, UNSIGNED_REM,
     is_integer_division, TRAP, TRAP_VALUE, is_symbol, UNSIGNED_ADD_OVERFLOW, SIGNED_ADD_OVERFLOW,
     UNSIGNED_SUB_OVERFLOW, SIGNED_SUB_OVERFLOW, SIGNED_MUL_OVERFLOW, OVERFLOW_FLAG, ADD_CARRY,
-    CHECKED_ARITHMETIC_RECORDS, is_checked_arithmetic, live_overflow_flag, consumes_carry
+    CHECKED_ARITHMETIC_RECORDS, is_checked_arithmetic, live_overflow_flag, consumes_carry, BYTE_SWAP
 };
 use self::x86_64::{BYTE_BITS, WORD_BITS, DWORD_BITS, QWORD_BITS};
 
@@ -102,6 +102,9 @@ const ORN_REG: u32 = 0xaa200000;
 const LSL_REG: u32 = 0x9ac02000;
 const LSR_REG: u32 = 0x9ac02400;
 const ASR_REG: u32 = 0x9ac02800;
+const REV16_W: u32 = 0x5ac00400;
+const REV_W: u32 = 0x5ac00800;
+const REV_X: u32 = 0xdac00c00;
 const ADD_IMM: u32 = 0x91000000;
 const SUB_IMM: u32 = 0xd1000000;
 const AND_IMM: u32 = 0x92000000;
@@ -723,6 +726,11 @@ fn operands(in r: Record, returns: u64) -> Option[u64] {
             Option::None
         },
         NEG | NOT | SHL | SHR | SAR => Option::Some(1),
+        BYTE_SWAP => if r.extra >= WORD_BITS {
+            Option::Some(1)
+        } else {
+            Option::None
+        },
         ADD_IMMEDIATE
             | SUB_IMMEDIATE
             | MUL_IMMEDIATE
@@ -815,6 +823,17 @@ fn emit_instruction(
 ) {
     if r.op == CONSTANT {
         immediate(inout out, dest, r.left);
+    } else if r.op == BYTE_SWAP {
+        let op = match r.extra {
+            WORD_BITS => REV16_W,
+            DWORD_BITS => REV_W,
+            _ => REV_X,
+        };
+        push32(inout out, op | sh(lhs, RN_SHIFT) | dest);
+        if r.extra == WORD_BITS {
+            // REV16 also swaps the high halfword. Keep the result zero-extended.
+            normalize(inout out, dest, WORD_BITS);
+        }
     } else if consumes_carry(r.op) {
         let op = if r.op == ADD_CARRY { ADC_REG } else { SBC_REG };
         rrr(inout out, op, dest, lhs, rhs);
