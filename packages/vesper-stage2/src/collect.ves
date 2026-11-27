@@ -1399,6 +1399,24 @@ pub fn collect_program(in mods: ChunkSeq[AssembledModule]) -> CollectedProgram {
         in t_rm,
         u64_t
     );
+    add_ffi_op(
+        inout names,
+        inout params,
+        inout eff_ops,
+        in "vstd_fs_write_stdout",
+        in p_rm,
+        in t_rm,
+        u64_t
+    );
+    add_ffi_op(
+        inout names,
+        inout params,
+        inout eff_ops,
+        in "vstd_fs_write_stderr",
+        in p_rm,
+        in t_rm,
+        u64_t
+    );
     let mut t_dir = ChunkSeq::new[u32]();
     t_dir.push(slice_u8_t);
     t_dir.push(bool_t);
@@ -1473,7 +1491,14 @@ pub fn collect_program(in mods: ChunkSeq[AssembledModule]) -> CollectedProgram {
         in t_dc,
         unit_t
     );
-    eff_decls.push(EffDeclInfo { name: fs_sym, linear: false, ga: 0, gn: 0, oa: fs_oa, on: 17 });
+    eff_decls.push(EffDeclInfo {
+        name: fs_sym,
+        linear: false,
+        ga: 0,
+        gn: 0,
+        oa: fs_oa,
+        on: wrapping_sub(n32(eff_ops.len()), fs_oa)
+    });
 
     // Only a program that names the library declares it, so every other
     // program collects as before.
