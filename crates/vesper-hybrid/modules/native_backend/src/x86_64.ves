@@ -94,6 +94,7 @@ const PUNPCKLBW: u8 = 0x60;
 const PUNPCKLWD: u8 = 0x61;
 const PUNPCKLDQ: u8 = 0x62;
 const PUNPCKLQDQ: u8 = 0x6c;
+const PUNPCKHBW: u8 = 0x68;
 const PMULLW: u8 = 0xd5;
 const PMULUDQ: u8 = 0xf4;
 const PMULLD: u8 = 0x40;
@@ -169,6 +170,13 @@ const XORPS: u8 = 0x57;
 const PACKED_SHIFT_WORD: u8 = 0x71;
 const PACKED_SHIFT_DWORD: u8 = 0x72;
 const PACKED_SHIFT_QWORD: u8 = 0x73;
+const PACKED_LEFT_WORD_REG: u8 = 0xf1;
+const PACKED_LOGICAL_RIGHT_WORD_REG: u8 = 0xd1;
+const PACKED_ARITHMETIC_RIGHT_WORD_REG: u8 = 0xe1;
+const PACKED_DWORD_SHIFT_OPCODE_OFFSET: u8 = 1;
+const PACKED_QWORD_SHIFT_OPCODE_OFFSET: u8 = 2;
+const PACKED_SHIFT_ARITHMETIC_RIGHT: u8 = 4;
+const DUPLICATE_HIGH_DWORDS: u8 = 0xf5;
 const PACKED_SHIFT_RIGHT: u8 = 2;
 const PACKED_SHIFT_LEFT: u8 = 6;
 const F32_SIGN: u64 = 0x80000000;
@@ -332,6 +340,12 @@ pub copy enum PackedRelation {
     UnsignedGreater,
 }
 
+pub copy enum PackedShift {
+    Left,
+    LogicalRight,
+    ArithmeticRight,
+}
+
 pub copy enum Rounding {
     Nearest,
     Floor,
@@ -374,6 +388,7 @@ pub copy enum Instruction {
     VectorSwizzle(u8, u8, u8, bool),
     VectorIntegerCompare(u8, u8, u8, u64, PackedRelation, bool),
     VectorMultiply(u8, u8, u8, u64, bool),
+    VectorShift(u8, u8, u64, u64, bool, PackedShift),
     BitOperation(u8, u8, u64, BitOperation),
     ComplementedBitwise(u8, u8, u8, u64),
     FunnelRight(u8, u8, u8),
@@ -1815,6 +1830,144 @@ fn vector_multiply(
     }
 }
 
+fn apply_vector_shift(
+    inout out: ChunkSeq[u8],
+    dest: u8,
+    count: u8,
+    width: u64,
+    immediate: bool,
+    in mode: PackedShift
+) {
+    if immediate {
+        let extension = match mode {
+            PackedShift::Left => PACKED_SHIFT_LEFT,
+            PackedShift::LogicalRight => PACKED_SHIFT_RIGHT,
+            PackedShift::ArithmeticRight => PACKED_SHIFT_ARITHMETIC_RIGHT,
+        };
+        packed_shift(inout out, dest, extension, width, count);
+    } else {
+        let word = match mode {
+            PackedShift::Left => PACKED_LEFT_WORD_REG,
+            PackedShift::LogicalRight => PACKED_LOGICAL_RIGHT_WORD_REG,
+            PackedShift::ArithmeticRight => PACKED_ARITHMETIC_RIGHT_WORD_REG,
+        };
+        let offset = match width {
+            DWORD_BITS => PACKED_DWORD_SHIFT_OPCODE_OFFSET,
+            QWORD_BITS => PACKED_QWORD_SHIFT_OPCODE_OFFSET,
+            _ => 0,
+        };
+        packed_binary(inout out, wrapping_add(word, offset), dest, count);
+    }
+}
+
+fn vector_shift_bytes(
+    inout out: ChunkSeq[u8],
+    dest: u8,
+    count: u8,
+    immediate: bool,
+    in mode: PackedShift
+) {
+    let temp = XMM_RIGHT_SCRATCH;
+    let byte = wrapping_u8(BYTE_BITS);
+    match mode {
+        PackedShift::ArithmeticRight => {
+            // Duplicate each byte into a word. A shift by 8 plus the count sign-extends
+            // the byte and leaves a result that fits the final signed pack.
+            float_move(inout out, temp, dest);
+            packed_binary(inout out, PUNPCKLBW, dest, dest);
+            packed_binary(inout out, PUNPCKHBW, temp, temp);
+            apply_vector_shift(inout out, dest, count, WORD_BITS, immediate, in mode);
+            apply_vector_shift(inout out, temp, count, WORD_BITS, immediate, in mode);
+            packed_binary(inout out, PACKSSWB, dest, temp);
+            return;
+        },
+        _ => (),
+    };
+    // Mask away the bits that a word shift carries across byte lanes.
+    apply_vector_shift(inout out, dest, count, WORD_BITS, immediate, in mode);
+    packed_binary(inout out, PCMPEQD, temp, temp);
+    match mode {
+        PackedShift::Left => {
+            apply_vector_shift(inout out, temp, count, WORD_BITS, immediate, in mode);
+            packed_shift(inout out, temp, PACKED_SHIFT_LEFT, WORD_BITS, byte);
+            packed_shift(inout out, temp, PACKED_SHIFT_RIGHT, WORD_BITS, byte);
+        },
+        _ => {
+            packed_shift(inout out, temp, PACKED_SHIFT_RIGHT, WORD_BITS, byte);
+            apply_vector_shift(inout out, temp, count, WORD_BITS, immediate, in mode);
+        },
+    };
+    packed_binary(inout out, PACKUSWB, temp, temp);
+    packed_binary(inout out, PAND, dest, temp);
+}
+
+fn vector_shift(
+    inout out: ChunkSeq[u8],
+    dest: u8,
+    source: u8,
+    amount: u64,
+    width: u64,
+    immediate: bool,
+    in mode: PackedShift
+) {
+    float_move(inout out, dest, source);
+    if immediate && amount == 0 {
+        return;
+    }
+    let offset = match mode {
+        PackedShift::ArithmeticRight => if width == BYTE_BITS { BYTE_BITS } else { 0 },
+        _ => 0,
+    };
+    let count = if immediate {
+        wrapping_u8(wrapping_add(amount, offset))
+    } else {
+        gp_move(inout out, R11, wrapping_u8(amount));
+        alu_immediate(
+            inout out,
+            ALU_AND_EXTENSION,
+            R11,
+            wrapping_u32(wrapping_sub(width, 1)),
+            DWORD_BITS
+        );
+        if offset != 0 {
+            alu_immediate(inout out, ALU_ADD_EXTENSION, R11, wrapping_u32(offset), DWORD_BITS);
+        }
+        float_bits(inout out, XMM_AUX_SCRATCH, R11, DWORD_BITS);
+        XMM_AUX_SCRATCH
+    };
+    if width == BYTE_BITS {
+        vector_shift_bytes(inout out, dest, count, immediate, in mode);
+        return;
+    }
+    match mode {
+        PackedShift::ArithmeticRight => if width == QWORD_BITS {
+            // XOR with the sign mask before and after a logical shift to preserve the sign.
+            let sign = XMM_RIGHT_SCRATCH;
+            packed_shuffle(inout out, sign, dest, DUPLICATE_HIGH_DWORDS);
+            packed_shift(
+                inout out,
+                sign,
+                PACKED_SHIFT_ARITHMETIC_RIGHT,
+                DWORD_BITS,
+                wrapping_u8(DWORD_BITS - 1)
+            );
+            packed_binary(inout out, PXOR, dest, sign);
+            apply_vector_shift(
+                inout out,
+                dest,
+                count,
+                width,
+                immediate,
+                in PackedShift::LogicalRight
+            );
+            packed_binary(inout out, PXOR, dest, sign);
+            return;
+        },
+        _ => (),
+    };
+    apply_vector_shift(inout out, dest, count, width, immediate, in mode);
+}
+
 fn vector_float_sign(inout out: ChunkSeq[u8], dest: u8, source: u8, absolute: bool, width: u64) {
     let mask = XMM_RIGHT_SCRATCH;
     float_move(inout out, dest, source);
@@ -2418,6 +2571,14 @@ pub fn emit(inout out: ChunkSeq[u8], in instruction: Instruction) {
             width,
             sse41
         ),
+        Instruction::VectorShift(
+            destination,
+            source,
+            count,
+            width,
+            immediate,
+            mode
+        ) => vector_shift(inout out, destination, source, count, width, immediate, in mode),
         Instruction::VectorConvert(destination, source, demote) => {
             if demote {
                 out.push(OPERAND_SIZE_OVERRIDE);

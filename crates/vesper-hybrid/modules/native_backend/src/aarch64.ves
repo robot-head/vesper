@@ -46,7 +46,8 @@ use self::scalar::{
     VECTOR_FLOAT_COPY_SIGN, VECTOR_FLOAT_FMA32, VECTOR_FLOAT_FMA64, vector_float_width,
     is_vector_float_unary, is_vector_float_fma, valid_vector_float_condition, VECTOR_FLOAT_CEIL,
     VECTOR_FLOAT_FLOOR, VECTOR_FLOAT_TRUNC, VECTOR_FLOAT_NEAREST, VECTOR_FLOAT_MIN,
-    VECTOR_FLOAT_MAX, VECTOR_MUL
+    VECTOR_FLOAT_MAX, VECTOR_MUL, VECTOR_SHL, VECTOR_SHR, VECTOR_SAR, VECTOR_SHIFT_IMMEDIATE,
+    valid_vector_shift
 };
 use self::x86_64::{
     BYTE_BITS, WORD_BITS, DWORD_BITS, QWORD_BITS, FLOAT_ORDERED, FLOAT_UNORDERED, FLOAT_EQUAL,
@@ -174,7 +175,12 @@ const VECTOR_TABLE: u32 = 0x4e000000;
 const VECTOR_UNSIGNED_MAX: u32 = 0x6e30a800;
 const VECTOR_UNSIGNED_MIN: u32 = 0x6e31a800;
 const VECTOR_QWORDS_EQUAL_ZERO: u32 = 0x4ee09800;
-const VECTOR_SIGN_BITS: u32 = 0x4f000400;
+const VECTOR_SSHR_IMM: u32 = 0x4f000400;
+const VECTOR_USHR_IMM: u32 = 0x6f000400;
+const VECTOR_SHL_IMM: u32 = 0x4f005400;
+const VECTOR_SSHL_REG: u32 = 0x4e204400;
+const VECTOR_USHL_REG: u32 = 0x6e204400;
+const VECTOR_SHIFT_IMM_OFFSET: u32 = 16;
 const VECTOR_EXTRACT_BYTES: u32 = 0x6e000000;
 const VECTOR_EXTRACT_BYTE_SHIFT: u32 = 11;
 const VECTOR_INTERLEAVE_LOW_BYTES: u32 = 0x4e003800;
@@ -796,6 +802,43 @@ fn vector_constant(inout out: ChunkSeq[u8], destination: u32, low: u64, high: u6
     }
 }
 
+fn vector_shift(inout out: ChunkSeq[u8], in r: Record, dest: u32, source: u32, count: u32) {
+    let width = r.extra & VECTOR_LANE_WIDTH_MASK;
+    if (r.extra & VECTOR_SHIFT_IMMEDIATE) != 0 {
+        if r.right == 0 {
+            if dest != source {
+                rrr(inout out, VECTOR_OR_REG, dest, source, source);
+            }
+            return;
+        }
+        let (op, shift) = match r.op {
+            VECTOR_SHL => (VECTOR_SHL_IMM, wrapping_add(width, r.right)),
+            VECTOR_SAR => (VECTOR_SSHR_IMM, wrapping_sub(wrapping_add(width, width), r.right)),
+            _ => (VECTOR_USHR_IMM, wrapping_sub(wrapping_add(width, width), r.right)),
+        };
+        push32(
+            inout out,
+            op | sh(wrapping_u32(shift), VECTOR_SHIFT_IMM_OFFSET) | sh(source, RN_SHIFT) | dest
+        );
+        return;
+    }
+    // Every valid lane width leaves a contiguous mask of low bits.
+    let mask = bitmask_immediate(wrapping_sub(width, 1)).unwrap_or(0);
+    push32(inout out, AND_IMM | mask | sh(count, RN_SHIFT) | SCRATCH);
+    if r.op != VECTOR_SHL {
+        // A negative per-lane count shifts right on Advanced SIMD.
+        rrr(inout out, SUB_REG, SCRATCH, ZERO, SCRATCH);
+    }
+    vector_splat(inout out, FP_LEFT, SCRATCH, width);
+    let op = if r.op == VECTOR_SAR {
+        VECTOR_SSHL_REG
+    } else {
+        VECTOR_USHL_REG
+    };
+    let size = sh(trailing_zeros_u64(width / BYTE_BITS), VECTOR_SIZE_SHIFT);
+    rrr(inout out, op | size, dest, source, FP_LEFT);
+}
+
 fn vector_multiply_qwords(inout out: ChunkSeq[u8], dest: u32, left: u32, right: u32) {
     let cross = FP_LEFT;
     let left_low = FP_RIGHT;
@@ -1028,7 +1071,7 @@ fn vector_high_bits(inout out: ChunkSeq[u8], dest: u32, source: u32, width: u64)
     // The arithmetic shift replicates the sign, and each lane then keeps
     // its own bit in the final mask.
     let shift = sh(wrapping_u32(wrapping_add(width, 1)), VECTOR_LANE_IMM5_SHIFT);
-    push32(inout out, VECTOR_SIGN_BITS | shift | sh(source, RN_SHIFT) | VECTOR_LEFT);
+    push32(inout out, VECTOR_SSHR_IMM | shift | sh(source, RN_SHIFT) | VECTOR_LEFT);
     vector_constant(inout out, VECTOR_RIGHT, low, high);
     rrr(inout out, VECTOR_AND_REG, VECTOR_LEFT, VECTOR_LEFT, VECTOR_RIGHT);
     let width = if width == BYTE_BITS {
@@ -1288,6 +1331,13 @@ fn operands(in r: Record, returns: u64) -> Option[u64] {
                 Option::Some(2)
             } else {
                 Option::None
+            },
+            VECTOR_SHL | VECTOR_SHR | VECTOR_SAR => if !valid_vector_shift(in r) {
+                Option::None
+            } else if (r.extra & VECTOR_SHIFT_IMMEDIATE) != 0 {
+                Option::Some(1)
+            } else {
+                Option::Some(2)
             },
             VECTOR_FLOAT_ADD
                 | VECTOR_FLOAT_SUB
@@ -3772,6 +3822,14 @@ fn encode_pass(
                 VECTOR_SPLAT => vector_splat(inout out, dest, lhs, r.extra),
                 VECTOR_LOAD => memory(inout out, true, VECTOR_BITS, lhs, dest, r.right),
                 VECTOR_INTEGER_COMPARE => vector_integer_compare(inout out, in r, dest, lhs, rhs),
+                VECTOR_SHL | VECTOR_SHR | VECTOR_SAR => {
+                    let count = if (r.extra & VECTOR_SHIFT_IMMEDIATE) != 0 {
+                        UNASSIGNED
+                    } else {
+                        materialize(inout out, right, SPILL_RIGHT, frame_bytes)
+                    };
+                    vector_shift(inout out, in r, dest, lhs, count);
+                },
                 VECTOR_FLOAT_COMPARE => vector_float_compare(inout out, in r, dest, lhs, rhs),
                 VECTOR_FLOAT_FMA32 | VECTOR_FLOAT_FMA64 => {
                     let addend = materialize_vector(inout out, extra, FP_LEFT, frame_bytes);

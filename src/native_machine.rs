@@ -220,6 +220,9 @@ enum IntegerOp {
     VectorFloatMin = 200,
     VectorFloatMax = 201,
     VectorMul = 202,
+    VectorShiftLeft = 203,
+    VectorShiftRightLogical = 204,
+    VectorShiftRightArithmetic = 205,
 }
 
 fn integer_bit_op(op: Opcode) -> Option<IntegerOp> {
@@ -294,6 +297,7 @@ const SIMD_BYTES: u32 = 2 * size_of::<u64>() as u32;
 const SIMD_LANE_INDEX_SHIFT: u32 = 8;
 const SIMD_CONDITION_SHIFT: u32 = 8;
 const X86_VECTOR_MUL_SSE41: u64 = 1 << SIMD_LANE_INDEX_SHIFT;
+const VECTOR_SHIFT_IMMEDIATE: u64 = 1 << SIMD_LANE_INDEX_SHIFT;
 const X86_HARDWARE_POPCOUNT: u64 = 1;
 const X86_SWIZZLE_ZERO_HIGH: u64 = 1;
 const X86_SWIZZLE_ZERO_INDEX: u8 = 0x80;
@@ -372,6 +376,15 @@ fn float_width(ty: Type) -> Option<u64> {
 
 fn vector_type(ty: Type) -> bool {
     ty.is_vector() && ty.bytes() == SIMD_BYTES
+}
+
+fn vector_shift_op(opcode: Opcode) -> Option<IntegerOp> {
+    match opcode {
+        Opcode::Ishl | Opcode::IshlImm => Some(IntegerOp::VectorShiftLeft),
+        Opcode::Ushr | Opcode::UshrImm => Some(IntegerOp::VectorShiftRightLogical),
+        Opcode::Sshr | Opcode::SshrImm => Some(IntegerOp::VectorShiftRightArithmetic),
+        _ => None,
+    }
 }
 
 fn float_condition(cond: FloatCC) -> u64 {
@@ -2087,6 +2100,33 @@ impl IntegerBlocks<'_> {
                     integer_width(lane)?
                 };
                 (IntegerOp::VectorSplat, [source, 0, width])
+            }
+            InstructionData::Binary {
+                opcode: opcode @ (Opcode::Ishl | Opcode::Ushr | Opcode::Sshr),
+                args: [value, count],
+            } if ty(value) == output && integer_width(ty(count)).is_some() => {
+                let width = integer_width(output.lane_type())?;
+                let (count, mode) = if let Some(bits) = self.constant_bits(count) {
+                    ((bits as u64) & (width - 1), width | VECTOR_SHIFT_IMMEDIATE)
+                } else {
+                    (input(count)?, width)
+                };
+                (vector_shift_op(opcode)?, [input(value)?, count, mode])
+            }
+            InstructionData::BinaryImm64 {
+                opcode: opcode @ (Opcode::IshlImm | Opcode::UshrImm | Opcode::SshrImm),
+                arg,
+                imm,
+            } if ty(arg) == output => {
+                let width = integer_width(output.lane_type())?;
+                (
+                    vector_shift_op(opcode)?,
+                    [
+                        input(arg)?,
+                        imm.bits() as u64 & (width - 1),
+                        width | VECTOR_SHIFT_IMMEDIATE,
+                    ],
+                )
             }
             InstructionData::Binary {
                 opcode,

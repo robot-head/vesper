@@ -13,7 +13,7 @@ use self::x86_64::{
     patch_relative_branch, patch_relative_offset, register_bit, home_register, xmm_home_register,
     HOME_REGISTERS, cheap_immediate, move_constant, store_immediate, store_immediate_fits,
     VECTOR_BITS, PAND, POR, PXOR, PackedInteger, PackedRelation, packed_integer_opcode,
-    BitOperation, Rounding, ROL_EXTENSION, ROR_EXTENSION
+    BitOperation, Rounding, PackedShift, ROL_EXTENSION, ROR_EXTENSION
 };
 
 // Integer block opcodes shared with src/native_machine.rs.
@@ -220,6 +220,9 @@ pub const VECTOR_FLOAT_NEAREST: u64 = 199;
 pub const VECTOR_FLOAT_MIN: u64 = 200;
 pub const VECTOR_FLOAT_MAX: u64 = 201;
 pub const VECTOR_MUL: u64 = 202;
+pub const VECTOR_SHL: u64 = 203;
+pub const VECTOR_SHR: u64 = 204;
+pub const VECTOR_SAR: u64 = 205;
 const POWER_SHIFT_MASK: u64 = QWORD_BITS - 1;
 const POWER_SIGNED: u64 = 0x40;
 const POWER_NEGATIVE: u64 = 0x80;
@@ -229,6 +232,7 @@ pub const AARCH64_TAIL_RESERVED_GP: u64 = 2;
 pub const VECTOR_LANE_INDEX_SHIFT: u32 = 8;
 pub const VECTOR_LANE_WIDTH_MASK: u64 = 0xff;
 const X86_VECTOR_MUL_SSE41: u64 = 0x100;
+pub const VECTOR_SHIFT_IMMEDIATE: u64 = 0x100;
 const X86_SWIZZLE_ZERO_HIGH: u64 = 1;
 const X86_HARDWARE_POPCOUNT: u64 = 1;
 const XMM_ARGUMENTS: u64 = 8;
@@ -992,6 +996,7 @@ fn reads_right(in record: Record, paired: bool) -> bool {
         || op == FLOAT_SELECT
         || is_float_binary(op)
         || is_vector_binary(op)
+        || (is_vector_shift(op) && (record.extra & VECTOR_SHIFT_IMMEDIATE) == 0)
         || op == VECTOR_INSERT
         || is_float_fma(op)
         || is_float_compare(op)
@@ -1059,6 +1064,18 @@ pub fn is_vector_binary(op: u64) -> bool {
         || is_vector_float_binary(op)
 }
 
+pub fn is_vector_shift(op: u64) -> bool {
+    op >= VECTOR_SHL && op <= VECTOR_SAR
+}
+
+pub fn valid_vector_shift(in record: Record) -> bool {
+    let width = record.extra & VECTOR_LANE_WIDTH_MASK;
+    let immediate = (record.extra & VECTOR_SHIFT_IMMEDIATE) != 0;
+    valid_width(width)
+        && (record.extra & ~(VECTOR_LANE_WIDTH_MASK | VECTOR_SHIFT_IMMEDIATE)) == 0
+        && (!immediate || record.right < width)
+}
+
 fn is_vector_float_binary(op: u64) -> bool {
     op >= VECTOR_FLOAT_ADD && op <= VECTOR_FLOAT_DIV
 }
@@ -1091,6 +1108,7 @@ pub fn uses_vector_left(op: u64) -> bool {
     is_vector_binary(op)
         || is_vector_convert(op)
         || is_vector_float_unary(op)
+        || is_vector_shift(op)
         || op >= VECTOR_INSERT && op <= VECTOR_HIGH_BITS
 }
 
@@ -1123,7 +1141,7 @@ fn vector_binary_opcode(op: u64, width: u64) -> u8 {
 pub fn is_vector_result(op: u64) -> bool {
     (op >= VECTOR_CONSTANT && op <= VECTOR_INSERT && op != VECTOR_STORE)
         || op == VECTOR_INTEGER_COMPARE
-        || (op >= VECTOR_FLOAT_ADD && op <= VECTOR_MUL)
+        || (op >= VECTOR_FLOAT_ADD && op <= VECTOR_SAR)
 }
 
 pub fn vector_value(in words: Slice[u64], arguments: u64, value: u64) -> bool {
@@ -1479,6 +1497,7 @@ fn find_last_reads(
                 VECTOR_STORE => record.extra <= DISP32_MASK,
                 VECTOR_SPLAT => record.right == 0 && valid_width(record.extra),
                 VECTOR_ADD | VECTOR_SUB => valid_width(record.extra),
+                VECTOR_SHL | VECTOR_SHR | VECTOR_SAR => valid_vector_shift(in record),
                 VECTOR_MUL => {
                     let width = record.extra & VECTOR_LANE_WIDTH_MASK;
                     valid_width(width)
@@ -1544,6 +1563,9 @@ fn find_last_reads(
                         | register_bit(R11);
                 }
             }
+        }
+        if is_vector_shift(record.op) {
+            frame.xmm_aux = frame.xmm_aux || (record.extra & VECTOR_SHIFT_IMMEDIATE) == 0;
         }
         if is_conditional_trap(record.op) && (record.right != 0 || record.extra != 0) {
             return Option::None;
@@ -2922,6 +2944,26 @@ fn emit_vector_instruction(
             record.extra & VECTOR_LANE_WIDTH_MASK,
             (record.extra & X86_VECTOR_MUL_SSE41) != 0
         ),
+        VECTOR_SHL | VECTOR_SHR | VECTOR_SAR => {
+            let immediate = (record.extra & VECTOR_SHIFT_IMMEDIATE) != 0;
+            let mode = match record.op {
+                VECTOR_SHL => PackedShift::Left,
+                VECTOR_SAR => PackedShift::ArithmeticRight,
+                _ => PackedShift::LogicalRight,
+            };
+            Instruction::VectorShift(
+                destination,
+                left,
+                if immediate {
+                    record.right
+                } else {
+                    widen_u64(right)
+                },
+                record.extra & VECTOR_LANE_WIDTH_MASK,
+                immediate,
+                mode
+            )
+        },
         VECTOR_INTEGER_COMPARE => {
             let condition = wrapping_shr_u64(record.extra, VECTOR_CONDITION_SHIFT);
             let reverse = condition == SIGNED_LESS

@@ -462,6 +462,110 @@ fn packed_integer_multiply_wraps_on_sse2_and_sse41() {
 }
 
 #[test]
+fn packed_shifts_match_cranelift_with_modulo_counts() {
+    const LIVE_VECTORS: u8 = 21;
+    type Entry = unsafe extern "C" fn(*const u8, u64, *mut u8);
+    let mut module = module();
+    for ty in [types::I8X16, types::I16X8, types::I32X4, types::I64X2] {
+        let width = ty.lane_bits();
+        let lane_bytes = ty.lane_type().bytes() as usize;
+        let sign = 1u64 << (width - 1);
+        let edges = [
+            0,
+            1,
+            sign - 1,
+            sign,
+            sign + 1,
+            u64::MAX,
+            0x8712_34ab_cdef_5678,
+        ];
+        let counts = [
+            0,
+            1,
+            u64::from(width - 1),
+            u64::from(width),
+            u64::from(width + 1),
+            u64::MAX,
+            0x1_0000_0021,
+        ];
+        for opcode in [Opcode::Ishl, Opcode::Ushr, Opcode::Sshr] {
+            for (constant, spills) in [(None, false), (None, true)]
+                .into_iter()
+                .chain(counts.map(|count| (Some(count), false)))
+            {
+                let mut context = module.make_context();
+                context.func.signature.params = vec![AbiParam::new(types::I64); 3];
+                let mut state = FunctionBuilderContext::new();
+                let mut b = FunctionBuilder::new(&mut context.func, &mut state);
+                let entry = b.create_block();
+                b.append_block_params_for_function_params(entry);
+                b.switch_to_block(entry);
+                let [source, count, destination] = *b.block_params(entry) else {
+                    unreachable!()
+                };
+                let live = if spills {
+                    (1..=LIVE_VECTORS)
+                        .map(|byte| {
+                            let constant = b
+                                .func
+                                .dfg
+                                .constants
+                                .insert(ConstantData::from(vec![byte; VECTOR_BYTES]));
+                            b.ins().vconst(ty, constant)
+                        })
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+                let flags = MemFlags::new().with_notrap();
+                let value = b.ins().load(ty, flags, source, 0);
+                let result = match (opcode, constant) {
+                    (Opcode::Ishl, Some(imm)) => b.ins().ishl_imm(value, imm as i64),
+                    (Opcode::Ushr, Some(imm)) => b.ins().ushr_imm(value, imm as i64),
+                    (Opcode::Sshr, Some(imm)) => b.ins().sshr_imm(value, imm as i64),
+                    (Opcode::Ishl, None) => b.ins().ishl(value, count),
+                    (Opcode::Ushr, None) => b.ins().ushr(value, count),
+                    _ => b.ins().sshr(value, count),
+                };
+                b.ins().store(flags, result, destination, 0);
+                let other = live
+                    .into_iter()
+                    .reduce(|a, b_value| b.ins().bxor(a, b_value))
+                    .unwrap_or(value);
+                b.ins()
+                    .store(flags, other, destination, VECTOR_BYTES as i32);
+                b.ins()
+                    .store(flags, count, destination, (VECTOR_BYTES * 2) as i32);
+                b.ins().return_(&[]);
+                b.seal_all_blocks();
+                b.finalize();
+                let functions = compile(&mut module, &mut context)
+                    .map(|ptr| unsafe { std::mem::transmute::<*const u8, Entry>(ptr) });
+                let amounts = constant.as_slice();
+                let amounts = if amounts.is_empty() { &counts } else { amounts };
+                for first in 0..edges.len() {
+                    let input: [u8; VECTOR_BYTES] = std::array::from_fn(|i| {
+                        edges[(first + i / lane_bytes) % edges.len()].to_le_bytes()[i % lane_bytes]
+                    });
+                    for &count in amounts {
+                        let [reference, candidate] = functions.map(|run| {
+                            let mut out = [0xcc; VECTOR_BYTES * 2 + size_of::<u64>()];
+                            unsafe { run(input.as_ptr(), count, out.as_mut_ptr()) };
+                            out
+                        });
+                        assert_eq!(
+                            candidate, reference,
+                            "{opcode} {ty} {constant:?} {spills} {first} {count:#x}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+    unsafe { module.free_memory() };
+}
+
+#[test]
 fn packed_float_precision_conversions_match_cranelift() {
     let mut module = module();
     for demote in [false, true] {
