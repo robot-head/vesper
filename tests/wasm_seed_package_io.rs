@@ -2541,6 +2541,22 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
              (widen_i64(bit_shr(x, n)), widen_u64(flags), widen_u64(rotate_left(y, rotation)),\n\
               widen_u64(rotate_right(tag, 33)), widen_i64(!x))\n\
          }\n\
+         copy struct NestedCallMarker {}\n\
+         copy struct NestedCallBits { measurement: (f32, f64), tag: i8, marker: NestedCallMarker }\n\
+         copy struct NestedCallRow { data: NestedCallBits, ready: bool }\n\
+         fn nested_result(x: i64, y: f32, ready: bool) -> (NestedCallRow, ((), i16)) {\n\
+             let data = NestedCallBits { tag: wrapping_i8(x), marker: NestedCallMarker {}, measurement: (y, widen_f64(y) + 0.5) };\n\
+             if ready { return (NestedCallRow { ready: true, data: data }, ((), wrapping_i16(x))); };\n\
+             (NestedCallRow { ready: false, data: data }, ((), wrapping_i16(wrapping_add(x, 1))))\n\
+         }\n\
+         pub fn nested_call_entry(x: i64, y: f32, ready: bool) -> (NestedCallRow, ((), i16), bool, i64) {\n\
+             let (earlier, payload) = nested_result(x, y, ready);\n\
+             let later = nested_result(wrapping_add(x, 1), y + 1.0, !ready);\n\
+             let (later_row, _) = later;\n\
+             let equal = earlier.data == later_row.data;\n\
+             if earlier.ready { return (earlier, payload, equal, widen_i64(earlier.data.tag)); };\n\
+             (earlier, payload, equal, widen_i64(later_row.data.tag))\n\
+         }\n\
          fn unsupported(x: u64) -> u64 { match (x, x) { (0, _) => 7, _ => 9 } }\n\
          pub fn decline(x: u64) -> u64 { unsupported(x) }\n",
     )
@@ -2826,6 +2842,14 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
         "{:?}",
         read_stage2_sidecar_notes(&object)
     );
+    let bits_object = dir.join("native-integer-bits.o");
+    std::fs::rename(&object, &bits_object).unwrap();
+    assert_eq!(
+        compile("nested_call_entry"),
+        0,
+        "{:?}",
+        read_stage2_sidecar_notes(&object)
+    );
 
     let caller = dir.join("native-scalar-caller.c");
     let binary = dir.join("native-scalar-caller");
@@ -2865,6 +2889,7 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
          extern uint64_t floating_math(uint64_t *, double, float);\n\
          extern uint64_t float_conversions(uint64_t *, int16_t, uint64_t, float, double);\n\
          extern uint64_t integer_bits(uint64_t *, int8_t, int8_t, uint16_t, uint16_t, int64_t);\n\
+         extern uint64_t nested_call_entry(uint64_t *, int64_t, float, bool);\n\
          int main(void) {\n\
              if (mix(10, 4) != 65 || mix(UINT64_MAX, UINT64_MAX) != UINT64_MAX - 16) return 1;\n\
              if (choose(0, 4) != 8 || choose(2, 4) != 8 || choose(4, 1) != 10\n\
@@ -2959,9 +2984,21 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
                  || conversions[4] != INT8_MAX || conversions[5] != 0\n\
                  || conversions[6] != 0 || conversions[7] != UINT64_MAX) return 33;\n\
              uint64_t bits[5] = {0};\n\
-             return integer_bits(bits, -80, -7, 0x8001, 17, -3) != 0\n\
+             if (integer_bits(bits, -80, -7, 0x8001, 17, -3) != 0\n\
                  || (int64_t)bits[0] != -40 || bits[1] != 257 || bits[2] != 0x3000\n\
-                 || bits[3] != UINT64_C(0xc0000000) || bits[4] != 79;\n\
+                 || bits[3] != UINT64_C(0xc0000000) || bits[4] != 79) return 34;\n\
+             uint64_t nested[10] = {0};\n\
+             nested[3] = nested[9] = UINT64_MAX;\n\
+             if (nested_call_entry(nested, 127, 1.25f, true) != 0\n\
+                 || nested[0] != UINT64_C(0x3fa00000) || nested[1] != UINT64_C(0x3ffc000000000000)\n\
+                 || nested[2] != 127 || nested[3] != 0 || nested[4] != 1 || nested[5] != 0\n\
+                 || nested[6] != 127 || nested[7] != 0 || nested[8] != 127 || nested[9] != UINT64_MAX) return 35;\n\
+             nested[3] = UINT64_MAX;\n\
+             return nested_call_entry(nested, -2, 0.25f, false) != 0\n\
+                 || nested[0] != UINT64_C(0x3e800000) || nested[1] != UINT64_C(0x3fe8000000000000)\n\
+                 || (int64_t)nested[2] != -2 || nested[3] != 0 || nested[4] != 0\n\
+                 || nested[5] != 0 || nested[6] != UINT64_MAX || nested[7] != 0 || nested[8] != UINT64_MAX\n\
+                 || nested[9] != UINT64_MAX;\n\
          }\n",
     )
     .unwrap();
@@ -2996,6 +3033,7 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
             &remainder_object,
             &math_object,
             &conversions_object,
+            &bits_object,
             &object,
         ])
         .arg("-lm")

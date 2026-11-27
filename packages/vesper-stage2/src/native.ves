@@ -82,6 +82,7 @@ const HOME_SLOT: u64 = 0;
 const LITERAL_HOME: u64 = NO_VALUE - 1;
 const RESULT_ADDRESS: u64 = 0;
 const MAX_RESULT_OFFSET: u64 = DISP32_MASK >> 1;
+const MAX_RESULT_CELLS: u64 = MAX_RESULT_OFFSET / HOME_BYTES;
 const SCALAR_RESULTS: u64 = 1;
 const CALL_COUNT: u64 = 1;
 const CALL_ARGUMENTS: u64 = 2;
@@ -218,6 +219,13 @@ copy struct Value {
     machine: u64,
 }
 
+copy struct Product {
+    ty: u32,
+    // A constructor instruction, or a range of synthetic children for a call.
+    instruction: u64,
+    first_child: u64,
+}
+
 struct Function {
     arguments: u64,
     gp_arguments: u64,
@@ -232,8 +240,8 @@ struct Function {
     next_label: u64,
     bindings: ChunkSeq[u32],
     binding_fields: ChunkSeq[u32],
-    aggregate_instructions: ChunkSeq[u64],
-    call_result_values: ChunkSeq[u64],
+    product_indices: ChunkSeq[u64],
+    products: ChunkSeq[Product],
     call_result_bytes: u64,
     mutable_slots: ChunkSeq[u32],
     addressed_locals: ChunkSeq[u32],
@@ -262,8 +270,12 @@ impl Function {
         }
     }
 
-    fn aggregate_definition(in self, id: u64) -> u64 {
-        self.aggregate_instructions.try_get(wrapping_sub(id, self.arguments)).unwrap_or(NO_VALUE)
+    fn product_index(in self, id: u64) -> u64 {
+        self.product_indices.try_get(wrapping_sub(id, self.arguments)).unwrap_or(NO_VALUE)
+    }
+
+    fn product(in self, id: u64) -> Option[Product] {
+        self.products.try_get(self.product_index(id))
     }
 
     fn is_inout(in self, id: u64) -> bool {
@@ -657,19 +669,15 @@ fn struct_member(in low: L, inst: InstRow, name: u32) -> u64 {
     NO_VALUE
 }
 
-fn product_field(in low: L, inst: InstRow, field: u64, in m: Function) -> u64 {
-    let count = product_count(in low, inst.ty);
+fn product_field(in low: L, product: Product, field: u64, in m: Function) -> u64 {
+    let count = product_count(in low, product.ty);
     if field >= count {
         return NO_VALUE;
     }
-    if inst.op == Op::Call {
-        let first = m.call_result_values.try_get(w(inst.dest)).unwrap_or(NO_VALUE);
-        return if first == NO_VALUE {
-            NO_VALUE
-        } else {
-            add(first, field)
-        };
+    if product.first_child != NO_VALUE {
+        return add(product.first_child, field);
     }
+    let inst = low.program.inst(product.instruction);
     if inst.op == Op::Tuple && inst.n == inc(count) && low.program.op(inst.a) == count {
         return add(m.arguments, low.program.op(add(inc(inst.a), field)));
     }
@@ -687,11 +695,13 @@ fn product_field(in low: L, inst: InstRow, field: u64, in m: Function) -> u64 {
 }
 
 fn tuple_member(in low: L, value: u64, field: u64, in m: Function) -> u64 {
-    let def = m.aggregate_definition(value);
-    if def == NO_VALUE || m.value_kind(value) != ScalarKind::Tuple {
+    if m.value_kind(value) != ScalarKind::Tuple {
         return NO_VALUE;
     }
-    product_field(in low, low.program.inst(def), field, in m)
+    match m.product(value) {
+        Option::Some(product) => product_field(in low, product, field, in m),
+        Option::None => NO_VALUE,
+    }
 }
 
 fn supported_struct(in low: L, inst: InstRow, in m: Function) -> bool {
@@ -762,13 +772,14 @@ fn equality_leaves(
             Option::Some(pair) => pair,
             Option::None => return true,
         };
-        let a = m.aggregate_definition(pair.left);
-        let b = m.aggregate_definition(pair.right);
-        if a == NO_VALUE || b == NO_VALUE {
-            return false;
-        }
-        let left = low.program.inst(a);
-        let right = low.program.inst(b);
+        let left = match m.product(pair.left) {
+            Option::Some(product) => product,
+            Option::None => return false,
+        };
+        let right = match m.product(pair.right) {
+            Option::Some(product) => product,
+            Option::None => return false,
+        };
         if left.ty != right.ty {
             return false;
         }
@@ -802,22 +813,13 @@ fn place_value(in low: L, f: FnR, root: u32, in m: Function) -> u64 {
 fn aggregate_member(in low: L, source: u64, member: u32, in m: Function) -> u64 {
     let kind = m.value_kind(source);
     if kind == ScalarKind::Struct {
-        let def = m.aggregate_definition(source);
-        if def == NO_VALUE {
-            return NO_VALUE;
-        }
-        let inst = low.program.inst(def);
-        if inst.op == Op::Call {
-            let variant = struct_variant(in low, inst.ty);
-            let field = low.ctx.world.find_field(variant, member);
-            return product_field(in low, inst, wrapping_sub(w(field), w(variant.fa)), in m);
-        }
-        let field = struct_member(in low, inst, member);
-        return if field == NO_VALUE {
-            NO_VALUE
-        } else {
-            add(m.arguments, field)
+        let product = match m.product(source) {
+            Option::Some(product) => product,
+            Option::None => return NO_VALUE,
         };
+        let variant = struct_variant(in low, product.ty);
+        let field = low.ctx.world.find_field(variant, member);
+        return product_field(in low, product, wrapping_sub(w(field), w(variant.fa)), in m);
     }
     if kind != ScalarKind::Tuple {
         return NO_VALUE;
@@ -880,24 +882,23 @@ fn result_fields(in low: L, root: u64, in m: Function, inout fields: ChunkSeq[u6
             fields.push(value);
             continue;
         }
-        let definition = m.aggregate_definition(value);
-        if definition == NO_VALUE {
-            return false;
-        }
-        let inst = low.program.inst(definition);
-        let count = product_count(in low, inst.ty);
+        let product = match m.product(value) {
+            Option::Some(product) => product,
+            Option::None => return false,
+        };
+        let count = product_count(in low, product.ty);
         if count == 0 {
-            // An empty struct occupies one padding cell without a value.
+            // An empty struct occupies one zero-filled cell without a value.
             fields.push(NO_VALUE);
         }
         for i in 0..count {
-            let member = product_field(in low, inst, wrapping_sub(count, inc(i)), in m);
+            let member = product_field(in low, product, wrapping_sub(count, inc(i)), in m);
             if member == NO_VALUE {
                 return false;
             }
             pending.push(member);
         }
-        if add(pending.len(), fields.len()) > MAX_RESULT_OFFSET / HOME_BYTES {
+        if add(pending.len(), fields.len()) > MAX_RESULT_CELLS {
             return false;
         }
     }
@@ -1014,11 +1015,12 @@ fn lower_local_store(in low: L, f: FnR, inst: InstRow, block: u64, inout m: Func
         let pattern = low.program.op(add(at, BIND_PATTERN));
         if pattern == Pat::Tuple {
             let source = add(m.arguments, low.program.op(at));
-            let def = m.aggregate_definition(source);
-            return def != NO_VALUE
-                && m.value_kind(source) == ScalarKind::Tuple
-                && product_count(in low, low.program.inst(def).ty)
-                    == low.program.op(add(at, TUPLE_PATTERN_COUNT));
+            return match m.product(source) {
+                Option::Some(product) => m.value_kind(source) == ScalarKind::Tuple
+                    && product_count(in low, product.ty)
+                        == low.program.op(add(at, TUPLE_PATTERN_COUNT)),
+                Option::None => false,
+            };
         }
         if pattern == Pat::Wild || pattern == Pat::Literal {
             // Planning confirms that literal binds belong to match arms.
@@ -1242,14 +1244,14 @@ fn lower_call(
     let call = m.record(op, target, add(args.len(), floats.len()), floats.len());
     if aggregate {
         // Take the scalar fields out before another call can reuse this buffer.
-        let first = m.call_result_values.try_get(w(inst.dest)).unwrap_or(NO_VALUE);
-        if first == NO_VALUE {
+        let mut fields = ChunkSeq::new[u64]();
+        if !result_fields(in low, add(m.arguments, w(inst.dest)), in m, inout fields) {
             return NO_VALUE;
         }
-        for i in 0..product_count(in low, inst.ty) {
-            let field = add(first, i);
+        for i in 0..fields.len() {
+            let field = fields.try_get(i).unwrap_or(NO_VALUE);
             let kind = m.value_kind(field);
-            if kind == ScalarKind::Unit {
+            if field == NO_VALUE || kind == ScalarKind::Unit {
                 continue;
             }
             let offset = add(buffer, wrapping_mul(i, HOME_BYTES));
@@ -1406,39 +1408,58 @@ fn plan_types(in low: L, row: FnRow, inout m: Function) -> bool {
     true
 }
 
+copy struct PendingProduct {
+    index: u64,
+    ty: u32,
+}
+
 fn plan_call_result(in low: L, inst: InstRow, block: u64, inout m: Function) -> bool {
-    let count = product_count(in low, inst.ty);
-    if count > MAX_RESULT_OFFSET / HOME_BYTES {
-        return false;
-    }
-    if m.call_result_values.len() == 0 {
-        m.call_result_values.resize(m.aggregate_instructions.len(), NO_VALUE);
-    }
-    if !m.call_result_values.try_set(w(inst.dest), m.values.len()) {
-        return false;
-    }
-    for i in 0..count {
-        let kind = scalar_kind(in low, product_field_type(in low, inst.ty, i));
-        if abi_width(kind) == 0 && kind != ScalarKind::Unit {
+    let mut pending = ChunkSeq::new[PendingProduct]();
+    pending.push(PendingProduct { index: w(inst.dest), ty: inst.ty });
+    let start = m.values.len();
+    let mut cells: u64 = 0;
+    loop {
+        let node = match pending.pop() {
+            Option::Some(node) => node,
+            Option::None => break,
+        };
+        let count = product_count(in low, node.ty);
+        let first = m.values.len();
+        if add(wrapping_sub(first, start), count) > MAX_RESULT_CELLS
+            || !m.product_indices.try_set(node.index, m.products.len())
+        {
             return false;
         }
-        m.kinds.push(kind);
-        m.values.push(value_new(block));
+        m.products.push(Product { ty: node.ty, instruction: NO_VALUE, first_child: first });
+        if count == 0 {
+            cells = inc(cells);
+        }
+        for i in 0..count {
+            let ty = product_field_type(in low, node.ty, i);
+            let kind = scalar_kind(in low, ty);
+            if kind == ScalarKind::Unsupported {
+                return false;
+            }
+            if is_aggregate(kind) {
+                pending.push(PendingProduct { index: m.kinds.len(), ty: ty });
+            } else {
+                cells = inc(cells);
+            }
+            m.kinds.push(kind);
+            m.values.push(value_new(block));
+            m.product_indices.push(NO_VALUE);
+        }
     }
-    let bytes = if count == 0 {
-        HOME_BYTES
-    } else {
-        wrapping_mul(count, HOME_BYTES)
-    };
+    let bytes = wrapping_mul(cells, HOME_BYTES);
     if bytes > m.call_result_bytes {
         m.call_result_bytes = bytes;
     }
     true
 }
 
-// Cache the constructor or call behind each aggregate SSA value.
+// Cache the product behind each aggregate SSA value.
 fn plan_aggregates(in low: L, f: FnR, row: FnRow, inout m: Function) -> bool {
-    m.aggregate_instructions.resize(m.kinds.len(), NO_VALUE);
+    m.product_indices.resize(m.kinds.len(), NO_VALUE);
     for layout in 0..m.blocks.len() {
         let block = m.blocks.try_get(layout).unwrap_or(0);
         let b = low.program.block(add(row.b0, block));
@@ -1449,27 +1470,30 @@ fn plan_aggregates(in low: L, f: FnR, row: FnRow, inout m: Function) -> bool {
                 continue;
             }
             let at = inst.a;
-            let definition = if inst.op == Op::Tuple || inst.op == Op::Data {
-                index
-            } else if inst.op == Op::Call {
+            if inst.op == Op::Call {
                 if !plan_call_result(in low, inst, block, inout m) {
                     return false;
                 }
-                index
+                continue;
+            }
+            let product = if inst.op == Op::Tuple || inst.op == Op::Data {
+                let product = m.products.len();
+                m.products.push(Product { ty: inst.ty, instruction: index, first_child: NO_VALUE });
+                product
             } else if inst.op == Op::Read
                 && inst.n == PLAIN_READ_WORDS
                 && low.program.op(add(at, READ_PROJECTIONS)) == 0
                 && low.program.op(add(at, READ_PASS)) != TyPass::Inout
                 && m.mutable_offset(n32(low.program.op(at))) == NO_VALUE
             {
-                m.aggregate_definition(read_source(in low, f, at, in m))
+                m.product_index(read_source(in low, f, at, in m))
             } else if inst.op == Op::Project && inst.n == PROJECT_WORDS {
-                m.aggregate_definition(project_source(in low, at, in m))
+                m.product_index(project_source(in low, at, in m))
             } else {
                 NO_VALUE
             };
-            if definition != NO_VALUE {
-                let _ = m.aggregate_instructions.try_set(value, definition);
+            if product != NO_VALUE {
+                let _ = m.product_indices.try_set(value, product);
             }
         }
     }
@@ -2830,7 +2854,7 @@ fn lower_block(
                 continue;
             }
             if is_aggregate(kind) {
-                if m.aggregate_definition(add(m.arguments, w(inst.dest))) == NO_VALUE {
+                if m.product_index(add(m.arguments, w(inst.dest))) == NO_VALUE {
                     return false;
                 }
                 continue;
@@ -2902,10 +2926,11 @@ fn store_result(in low: L, source: u64, block: u64, inout m: Function) -> bool {
     };
     for index in 0..fields.len() {
         let field = fields.try_get(index).unwrap_or(NO_VALUE);
-        if field == NO_VALUE {
-            continue;
-        }
-        let kind = m.value_kind(field);
+        let kind = if field == NO_VALUE {
+            ScalarKind::Unit
+        } else {
+            m.value_kind(field)
+        };
         let value = if kind == ScalarKind::Unit {
             m.record(CONSTANT, 0, 0, 0)
         } else {
@@ -3173,8 +3198,8 @@ fn lower_function(
         next_label: 0,
         bindings: ChunkSeq::new[u32](),
         binding_fields: ChunkSeq::new[u32](),
-        aggregate_instructions: ChunkSeq::new[u64](),
-        call_result_values: ChunkSeq::new[u64](),
+        product_indices: ChunkSeq::new[u64](),
+        products: ChunkSeq::new[Product](),
         call_result_bytes: 0,
         mutable_slots: ChunkSeq::new[u32](),
         addressed_locals: ChunkSeq::new[u32](),
