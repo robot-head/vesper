@@ -42,6 +42,11 @@ const OK: u64 = 0;
 const FAILED: u64 = 1;
 // A request flag word that is set.
 const SET: u64 = 1;
+// The bytes of one request or answer word.
+const WORD_BYTES: u64 = 8;
+// Decimal digits of a number in an error, from ASCII `0`.
+const DECIMAL_BASE: u64 = 10;
+const DIGIT_ZERO: u64 = 48;
 // A callee the walk does not call directly (`codegen_swap::body::NO_CALLEE`).
 const NO_CALLEE: u64 = 18446744073709551615;
 const MALFORMED: Str = "malformed native-lib request";
@@ -59,7 +64,7 @@ impl Reader {
     fn word(inout self, in req: Slice[u8]) -> u64 {
         match req.try_read_u64_le(self.pos) {
             Option::Some(v) => {
-                self.pos = wrapping_add(self.pos, 8);
+                self.pos = wrapping_add(self.pos, WORD_BYTES);
                 v
             }
             Option::None => {
@@ -87,7 +92,7 @@ impl Reader {
 
 fn push64(inout out: ChunkSeq[u8], value: u64) {
     let at = out.len();
-    out.resize(wrapping_add(at, 8), 0);
+    out.resize(wrapping_add(at, WORD_BYTES), 0);
     let ok = out.try_write_u64_le(at, value);
 }
 
@@ -231,10 +236,10 @@ fn define_one(
 }
 
 fn push_dec(inout out: ChunkSeq[u8], value: u64) {
-    if value >= 10 {
-        push_dec(inout out, value / 10);
+    if value >= DECIMAL_BASE {
+        push_dec(inout out, value / DECIMAL_BASE);
     }
-    out.push(wrapping_u8(wrapping_add(value % 10, 48)));
+    out.push(wrapping_u8(wrapping_add(value % DECIMAL_BASE, DIGIT_ZERO)));
 }
 
 // The library object of one request (see the top of this file).
@@ -262,6 +267,10 @@ pub fn library_object(in req: Slice[u8]) -> ChunkSeq[u8] eff [Ffi[Cranelift]] {
         return failure(in MALFORMED.as_bytes());
     }
     let nd = r.word(in req);
+    if r.bad {
+        module_free(m);
+        return failure(in MALFORMED.as_bytes());
+    }
     for _ in 0..nd {
         let err = define_one(inout m, in req, inout r, in d);
         if err.len() != 0 {

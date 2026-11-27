@@ -465,7 +465,20 @@ fn vesper_library_objects_match_vesper_build_lib() {
 /// A request that does not read is an error answer, not a crash.
 #[test]
 fn malformed_requests_are_refused() {
-    let answer = call(&[1, 2, 3]);
-    let mut at = 0;
-    assert_ne!(read_word(&answer, &mut at), BUILT);
+    let refused = |request: &[u8]| {
+        let answer = call(request);
+        read_word(&answer, &mut 0) != BUILT
+    };
+    assert!(refused(&[1, 2, 3]), "a request shorter than its first word");
+    // A whole header and an empty declaration list, then no definition
+    // count.
+    let mut q = Request::default();
+    q.bytes(TRIPLE.as_bytes());
+    q.bytes(FLAGS.as_bytes());
+    q.bytes(MODULE_NAME.as_bytes());
+    q.word(0);
+    q.word(0);
+    assert!(refused(&q.0), "a request without its definition count");
+    q.word(0);
+    assert!(!refused(&q.0), "an empty library is an empty object");
 }
