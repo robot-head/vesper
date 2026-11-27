@@ -95,6 +95,8 @@ struct Function {
     words: ChunkSeq[u64],
     values: ChunkSeq[Value],
     kinds: ChunkSeq[u8],
+    labels: ChunkSeq[u64],
+    blocks: ChunkSeq[u64],
     bindings: ChunkSeq[u32],
     mutable_slots: ChunkSeq[u32],
     mutable_bytes: u64,
@@ -112,6 +114,10 @@ fn block_bit(block: u64) -> u64 {
 impl Function {
     fn kind(in self, id: u64) -> u8 {
         self.kinds.try_get(id).unwrap_or(ScalarKind::Unsupported)
+    }
+
+    fn label(in self, block: u64) -> u64 {
+        self.labels.try_get(block).unwrap_or(NO_VALUE)
     }
 
     fn mutable_offset(in self, name: u32) -> u64 {
@@ -312,7 +318,8 @@ fn collect_binding(in low: L, inst: InstRow, inout m: Function) -> bool {
 
 fn collect_mutable_slots(in low: L, row: FnRow, inout m: Function) -> bool {
     let mut count: u32 = 0;
-    for block in 0..row.bc {
+    for layout in 0..m.blocks.len() {
+        let block = m.blocks.try_get(layout).unwrap_or(0);
         let b = low.program.block(add(row.b0, block));
         for index in b.i0..add(b.i0, b.ic) {
             let inst = low.program.inst(index);
@@ -453,6 +460,57 @@ fn block_parameter(in low: L, b: BlockRow) -> u64 {
     }
 }
 
+fn queue_block(inout labels: ChunkSeq[u64], inout pending: ChunkSeq[u64], target: u64) -> bool {
+    if target >= labels.len() {
+        return false;
+    }
+    if labels.try_get(target).unwrap_or(NO_VALUE) == NO_VALUE {
+        let _ = labels.try_set(target, 0);
+        pending.push(target);
+    }
+    true
+}
+
+// A `break` or `continue` can be followed by synthetic blocks with no
+// reachable predecessor. Assign labels only to reachable blocks, keeping
+// their original layout order so the encoder can retain fallthroughs.
+fn plan_blocks(in low: L, row: FnRow, inout m: Function) -> bool {
+    m.labels.resize(row.bc, NO_VALUE);
+    let mut pending = ChunkSeq::new[u64]();
+    if !queue_block(inout m.labels, inout pending, 0) {
+        return false;
+    }
+    let mut index: u64 = 0;
+    loop {
+        let block = match pending.try_get(index) {
+            Option::Some(found) => found,
+            Option::None => break,
+        };
+        let b = low.program.block(add(row.b0, block));
+        if b.term == Term::Jump {
+            if !queue_block(inout m.labels, inout pending, low.program.op(b.ta)) {
+                return false;
+            }
+        } else if b.term == Term::Branch {
+            let yes = low.program.op(add(b.ta, BRANCH_TRUE));
+            let no = low.program.op(add(b.ta, BRANCH_FALSE));
+            if !queue_block(inout m.labels, inout pending, yes)
+                || !queue_block(inout m.labels, inout pending, no)
+            {
+                return false;
+            }
+        }
+        index = inc(index);
+    }
+    for block in 0..row.bc {
+        if m.label(block) != NO_VALUE {
+            let _ = m.labels.try_set(block, m.blocks.len());
+            m.blocks.push(block);
+        }
+    }
+    true
+}
+
 fn plan_types(in low: L, row: FnRow, inout m: Function) -> bool {
     // After the parameters come the result, effects, bound count and capture
     // count, then the table of (value ID, type ID) pairs.
@@ -511,7 +569,10 @@ fn pack_homes(in low: L, row: FnRow, inout m: Function) {
         let mut mask: u64 = 0;
         for edge in 0..low.program.op(count_at) {
             let source = add(inc(count_at), wrapping_mul(edge, BLOCK_INCOMING_WORDS));
-            mask = mask | block_bit(low.program.op(source));
+            let pred = low.program.op(source);
+            if m.label(pred) != NO_VALUE {
+                mask = mask | block_bit(pred);
+            }
         }
         predecessors.push(mask);
     }
@@ -550,6 +611,7 @@ fn plan_homes(in low: L, f: FnR, row: FnRow, inout m: Function) -> bool {
     let mut has_writes = false;
     for block in 0..row.bc {
         let b = low.program.block(add(row.b0, block));
+        let reachable = m.label(block) != NO_VALUE;
         let param = block_parameter(in low, b);
         if param != NO_VALUE && param >= value_count {
             value_count = inc(param);
@@ -560,10 +622,12 @@ fn plan_homes(in low: L, f: FnR, row: FnRow, inout m: Function) -> bool {
             if dest >= value_count {
                 value_count = inc(dest);
             }
-            if inst.op == Op::Bind && !collect_binding(in low, inst, inout m) {
-                return false;
+            if reachable {
+                if inst.op == Op::Bind && !collect_binding(in low, inst, inout m) {
+                    return false;
+                }
+                has_writes = has_writes || inst.op == Op::Write;
             }
-            has_writes = has_writes || inst.op == Op::Write;
         }
     }
     m.values.resize(add(f.param_count, value_count), value_new(NO_VALUE));
@@ -572,13 +636,14 @@ fn plan_homes(in low: L, f: FnR, row: FnRow, inout m: Function) -> bool {
     {
         return false;
     }
-    if row.bc == 1 {
+    if m.blocks.len() == 1 {
         return block_parameter(in low, low.program.block(row.b0)) == NO_VALUE;
     }
     for arg in 0..f.param_count {
         let _ = m.values.try_set(arg, value_new(0));
     }
-    for block in 0..row.bc {
+    for layout in 0..m.blocks.len() {
+        let block = m.blocks.try_get(layout).unwrap_or(0);
         let b = low.program.block(add(row.b0, block));
         let param = block_parameter(in low, b);
         if param != NO_VALUE {
@@ -596,7 +661,8 @@ fn plan_homes(in low: L, f: FnR, row: FnRow, inout m: Function) -> bool {
             }
         }
     }
-    for block in 0..row.bc {
+    for layout in 0..m.blocks.len() {
+        let block = m.blocks.try_get(layout).unwrap_or(0);
         let b = low.program.block(add(row.b0, block));
         for index in b.i0..add(b.i0, b.ic) {
             let inst = low.program.inst(index);
@@ -745,7 +811,7 @@ fn lower_block(
             }
             continue;
         }
-        if inst.op == Op::Unit {
+        if (inst.op == Op::Unit || inst.op == Op::Loop) && inst.n == 0 {
             continue;
         }
         let kind = scalar_kind(in low, inst.ty);
@@ -805,13 +871,14 @@ fn lower_terminator(in low: L, row: FnRow, b: BlockRow, block: u64, inout m: Fun
         if value == NO_VALUE {
             return false;
         }
-        if row.bc == 1 {
+        if m.blocks.len() == 1 {
             return m.words.try_set(RETURN_VALUE, value);
         }
         let _ = m.record(BLOCK_RETURN, value, 0, 0);
     } else if b.term == Term::Jump {
         let target = low.program.op(b.ta);
-        if target == 0 || target >= row.bc {
+        let label = m.label(target);
+        if label == 0 || label == NO_VALUE {
             return false;
         }
         let param = block_parameter(in low, low.program.block(add(row.b0, target)));
@@ -830,7 +897,7 @@ fn lower_terminator(in low: L, row: FnRow, b: BlockRow, block: u64, inout m: Fun
                 return false;
             }
             if kind == ScalarKind::Unit {
-                let _ = m.record(JUMP_LABEL, target, 0, 0);
+                let _ = m.record(JUMP_LABEL, label, 0, 0);
                 return true;
             }
             let source = add(m.arguments, argument);
@@ -849,7 +916,7 @@ fn lower_terminator(in low: L, row: FnRow, b: BlockRow, block: u64, inout m: Fun
                 let _ = m.record(STACK_STORE_QWORD, value, HOME_SLOT, home);
             }
         }
-        let _ = m.record(JUMP_LABEL, target, 0, 0);
+        let _ = m.record(JUMP_LABEL, label, 0, 0);
     } else if b.term == Term::Branch && b.tn == BRANCH_WORDS {
         let id = low.program.op(b.ta);
         if m.kind(id) != ScalarKind::Bool {
@@ -858,18 +925,20 @@ fn lower_terminator(in low: L, row: FnRow, b: BlockRow, block: u64, inout m: Fun
         let condition = m.read(add(m.arguments, id), block);
         let yes = low.program.op(add(b.ta, BRANCH_TRUE));
         let no = low.program.op(add(b.ta, BRANCH_FALSE));
+        let yes_label = m.label(yes);
+        let no_label = m.label(no);
         if condition == NO_VALUE
-            || yes == 0
-            || no == 0
-            || yes >= row.bc
-            || no >= row.bc
+            || yes_label == 0
+            || no_label == 0
+            || yes_label == NO_VALUE
+            || no_label == NO_VALUE
             || block_parameter(in low, low.program.block(add(row.b0, yes))) != NO_VALUE
             || block_parameter(in low, low.program.block(add(row.b0, no))) != NO_VALUE
         {
             return false;
         }
-        let _ = m.record(BRANCH_BLOCK, condition, no, 0);
-        let _ = m.record(JUMP_LABEL, yes, 0, 0);
+        let _ = m.record(BRANCH_BLOCK, condition, no_label, 0);
+        let _ = m.record(JUMP_LABEL, yes_label, 0, 0);
     } else {
         return false;
     }
@@ -892,12 +961,14 @@ fn lower_function(
         words: ChunkSeq::new[u64](),
         values: ChunkSeq::new[Value](),
         kinds: ChunkSeq::new[u8](),
+        labels: ChunkSeq::new[u64](),
+        blocks: ChunkSeq::new[u64](),
         bindings: ChunkSeq::new[u32](),
         mutable_slots: ChunkSeq::new[u32](),
         mutable_bytes: 0,
         home_bytes: 0
     };
-    if !plan_homes(in low, f, row, inout m) {
+    if !plan_blocks(in low, row, inout m) || !plan_homes(in low, f, row, inout m) {
         return ChunkSeq::new[u8]();
     }
     m.words.push(f.param_count);
@@ -906,14 +977,15 @@ fn lower_function(
     if frame_bytes != 0 {
         let _ = m.record(STACK_SLOT, frame_bytes, HOME_BYTES, 0);
     }
-    for block in 0..row.bc {
-        if row.bc > 1 {
+    for layout in 0..m.blocks.len() {
+        let block = m.blocks.try_get(layout).unwrap_or(0);
+        if m.blocks.len() > 1 {
             let home = if block == 0 && frame_bytes != 0 {
                 inc(HOME_SLOT)
             } else {
                 0
             };
-            let _ = m.record(BLOCK_LABEL, block, home, SCALAR_RESULTS);
+            let _ = m.record(BLOCK_LABEL, layout, home, SCALAR_RESULTS);
         }
         if block == 0 {
             for arg in 0..f.param_count {

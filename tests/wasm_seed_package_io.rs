@@ -2317,6 +2317,16 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
              x = offset(y, x);\n\
              wrapping_sub(x, original)\n\
          }\n\
+         pub fn sum_odd(n: u64, seed: u64) -> u64 {\n\
+             let mut i = n & 31;\n\
+             let mut acc = seed;\n\
+             loop {\n\
+                 if i == 0 { break acc; };\n\
+                 i = wrapping_sub(i, 1);\n\
+                 if (i & 1) == 0 { continue; };\n\
+                 acc = wrapping_add(acc, i);\n\
+             }\n\
+         }\n\
          fn unsupported(x: u64) -> u64 { match x { 0 => 7, _ => 9 } }\n\
          pub fn decline(x: u64) -> u64 { unsupported(x) }\n",
     )
@@ -2392,6 +2402,14 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
         "{:?}",
         read_stage2_sidecar_notes(&object)
     );
+    let mutable = dir.join("native-mutable.o");
+    std::fs::rename(&object, &mutable).unwrap();
+    assert_eq!(
+        compile("sum_odd"),
+        0,
+        "{:?}",
+        read_stage2_sidecar_notes(&object)
+    );
     let bytes = std::fs::read(&object).unwrap();
     assert_ne!(compile("decline"), 0);
     assert!(read_stage2_sidecar_notes(&object).contains("unsupported x86-64 ELF entry"));
@@ -2409,6 +2427,7 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
                                     uint64_t, uint64_t, uint64_t, uint64_t);\n\
          extern int64_t select_signed(int64_t, uint64_t);\n\
          extern int64_t mutate(int64_t, int64_t);\n\
+         extern uint64_t sum_odd(uint64_t, uint64_t);\n\
          int main(void) {\n\
              if (mix(10, 4) != 65 || mix(UINT64_MAX, UINT64_MAX) != UINT64_MAX - 16) return 1;\n\
              if (choose(0, 4) != 8 || choose(2, 4) != 8 || choose(4, 1) != 10\n\
@@ -2419,12 +2438,16 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
                  || stack_args(8, 7, 6, 5, 4, 3, 2, 1) != 62) return 4;\n\
              if (select_signed(-5, 3) != -12 || select_signed(5, UINT64_MAX) != -6\n\
                  || select_signed(INT64_MIN, 0) != INT64_MAX - 6) return 5;\n\
-             return mutate(7, -2) != 2 || mutate(7, 2) != 11 || mutate(7, 0) != -16;\n\
+             if (mutate(7, -2) != 2 || mutate(7, 2) != 11 || mutate(7, 0) != -16) return 6;\n\
+             return sum_odd(11, 5) != 30 || sum_odd(32, 42) != 42\n\
+                 || sum_odd(31, UINT64_MAX) != 224;\n\
          }\n",
     )
     .unwrap();
     let link = std::process::Command::new("cc")
-        .args([&caller, &leaf, &branch, &calls, &stack, &signed, &object])
+        .args([
+            &caller, &leaf, &branch, &calls, &stack, &signed, &mutable, &object,
+        ])
         .arg("-o")
         .arg(&binary)
         .output()
