@@ -159,8 +159,8 @@ to.
    first: the native walk and the CLIF passes (`native`, `native_clif_opt`,
    `native_cold_outline`, `native_vectorize`; #1509, #1829); the front-end
    modules not yet swapped (`check`, `trace_effects`, `dyn_*`, `regions`,
-   `pact_frontend`, `forge_frontend`); `loops` and `atomics` (2.31x) and
-   `stack_bound` (2.54x), above the bar; `lsp`, `tooling`, `database`
+   `pact_frontend`, `forge_frontend`); `loops` and `atomics` (0.69x,
+   not yet swapped); `lsp`, `tooling`, `database`
    (#1828); `test_runner`, `anvil_*`, `doctest`; `lean*`,
    `verify_commands`, `proof_commands` (#1341); `ffi_lowering`, `tiled`,
    `vector`, `native_vector` (#1830); `native_session`, `native_aggregates`;
@@ -317,3 +317,4 @@ the Rust lines deleted.
 | `test-mutants` (PASS; compiler module, `src/test_mutants.rs` goes at the retirement) | SH5-14 | 0 differences; tests 1/1 pass | sites 0.53x [0.53x, 0.54x] n=12 | 0 (283 at the retirement) | #2207 |
 | `sugar` (PASS; compiler module, `crates/vesper-syntax/src/sugar_expand*.rs` goes at the retirement) | SH1-14 | 0 differences on 3,872 cases; tests 1/1 pass | expand 1.33x [1.28x, 1.36x] n=12 | 0 (3,282 at the retirement) | #1157 part 7 |
 | `verified-codegen` (PASS; compiler module, `src/verified_codegen` goes at the retirement) | SH6-2 | 0 differences on 4,724 cases; tests 1/1 pass | compile 1.02x [0.97x, 1.05x] n=12 | 0 (9,760 at the retirement) | #1886 |
+| `stack-bound` (PASS; compiler module, `src/stack_bound.rs` goes at the retirement) | SH2-10 | 0 differences; tests 6/6 pass | hybrid path 1.20x [1.18x, 1.26x] n=12 | 0 (at the retirement) | #2359 |
