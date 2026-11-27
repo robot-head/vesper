@@ -3235,6 +3235,11 @@ fn exit_to(inout machine: M, owner: u32) {
             machine.frame = frame;
             return;
         }
+        if frame.kind == FR_HANDLER {
+            // Its captures, as `clause_frame` releases them.
+            machine.hcap_names.truncate(frame.block);
+            machine.hcap_vals.truncate(frame.block);
+        }
     }
 }
 
