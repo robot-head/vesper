@@ -163,7 +163,7 @@ the retirement.
   `.exe`) defaults to `gated`, like a `gated-default` build. Started as
   `vesper-hybrid`, as the port lanes and their tests run it, it still
   defaults to `all`. The variables override both.
-- **`//crates/vesper-hybrid:vesper`**: the hybrid binary copied under the
+- **`//:vesper_shipped`**: the hybrid binary copied under the
   shipped name (`shipped/vesper`, `shipped/vesper.exe` on Windows), so
   Bazel has the gated compiler without a second build of the crate. The
   Rust `//:bin/vesper` is unchanged: it still builds the port objects and
@@ -175,19 +175,73 @@ the retirement.
 
 **Rust lines deleted:** 0.
 
+## Part 5c: the acceptance tasks run the gated `vesper` (piece S4)
+
+### What changed
+
+- **`.aspect/lib/bazel_exec.axl`**: one constant, `VESPER =
+  "//:vesper_shipped"`, names the compiler the tasks run as `vesper`.
+  Every acceptance task that ran `//:bin/vesper` (native acceptance,
+  diagnostics, fmt, editor, recovery, source tooling and macros, format
+  proof, canonical protocols, doc links, Logos CI) now runs it, and
+  `aspect ci prebuild-acceptance` builds it. These are the tasks of the
+  required `Native and acceptance scripts` check.
+- **`//:vesper_shipped`** moved from `crates/vesper-hybrid` to the root
+  package, at `<bin>/shipped/vesper`, with the CLI tools as data. The
+  tool lookup searches `<exedir>/../crates/vesper-tools/bin/`, so the
+  shipped binary finds `vesper-grammar` and the other tools the same way
+  the Rust `//:bin/vesper` does.
+- The Rust `//:bin/vesper` is unchanged and still builds the port objects
+  (`vesper_port.bzl`, the hybrid's `build.rs`).
+
+The task self-tests (`aspect ci tests` for format-proof, native-cli,
+diagnostics, doc-links, source-tooling, the fixture suites and bazel-cli)
+pass locally.
+
+**Rust lines deleted:** 0.
+
+## Part 5d: docs and the default-CLI check name the shipped `vesper` (piece S5)
+
+### What changed
+
+- **README, `docs/bazel.md` and the website's setup tabs** build and run
+  the shipped compiler: `bazel build //:vesper_shipped` and
+  `bazel-bin/shipped/vesper`, or with Cargo
+  `cargo build --locked -p vesper-hybrid --features gated-default`. The
+  README says what the hybrid is and that `//:bin/vesper` is the Rust
+  compiler that builds the ported parts.
+- **`aspect ci check-default-cli-dependencies`** checks the normal
+  dependency graph of both packages whose binary is the default `vesper`
+  (`vesper` and `vesper-hybrid`) for Wasmtime and the Loom sandbox; the
+  hybrid has none today. Its self-test covers a forbidden dependency that
+  only the hybrid has.
+- Release validation runs no `vesper` binary of its own, so it needs no
+  change.
+- S3 (the Cargo rename) moves to the retirement PR; see the pieces list
+  below.
+
+**Rust lines deleted:** 0.
+
 ## The default switch, in pieces
 
 Plan of 2026-11-26. The default `vesper` switches to the gated hybrid
 in pieces, each of which keeps the Rust binary and changes no output:
 
 - S1: the `gated-default` build (part 5a).
-- S2: Bazel's `//crates/vesper-hybrid:vesper`, the gated hybrid under the
+- S2: Bazel's `//:vesper_shipped`, the gated hybrid under the
   shipped name (part 5b); the Rust binary stays the boot compiler of the
   port rules.
 - S3: the same for Cargo: the root package's binary is renamed and the
-  hybrid crate's binary becomes `vesper`.
-- S4: the required checks run their CLI tests against the gated hybrid.
-- S5: docs, release validation and the default-CLI dependency check.
+  hybrid crate's binary becomes `vesper`. Deferred to the retirement PR
+  (part 5d): the rename touches every root test that runs
+  `CARGO_BIN_EXE_vesper` (180 files), the port harness's nested build and
+  every lane's local recipe, while the Rust binary still has to exist to
+  build the ports. Until then Cargo builds the shipped compiler with
+  `-p vesper-hybrid --features gated-default`.
+- S4: the required checks run their CLI tests against the gated hybrid
+  (part 5c).
+- S5: docs, release validation and the default-CLI dependency check
+  (part 5d).
 
 That switch alone deletes no Rust: the ports are still compiled by the
 Rust compiler. A flipped module's Rust can go one PR at a time once Stage 2
@@ -227,7 +281,7 @@ Besides the compiler rows that have not passed the gate (checklist item
   once the complete compiler builds to wasm; the no-Rust CI check.
 - Part 3: `bootstrap/stage2.lock` for the complete compiler and the CI
   gate on it.
-- Part 5c onward: pieces S3 to S5 of the default switch, then the
+- Part 5e onward: piece S3 (with the retirement) of the default switch, then the
   retirement PR (the plan's checklist).
 - Census: lane 2's rows (`codegen_swap`, `ir_swap`, `swap_input`,
   `compiler_modules`, `vesper-hybrid`) change only at the retirement.

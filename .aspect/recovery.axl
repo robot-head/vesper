@@ -1,7 +1,7 @@
 """Exercise syntax-only recovery and independent diagnostics on the real compiler."""
 
 load("./bounded-stdio.axl", "bounded_run", "utf8")
-load("./lib/bazel_exec.axl", "executable")
+load("./lib/bazel_exec.axl", "executable", "VESPER")
 load("./lib/lsp-fixture.axl", "changed", "document", "error", "notice", "opened", "position", "request", "result", "session")
 load("./lib/process.axl", "root_path", "scratch_dir")
 load("./lib/source-macro-fixtures.axl", "byte_index", "digest", "equal", "no_fields", "require", raw_span = "source_range")
@@ -331,7 +331,7 @@ def _check(ctx):
 
 def _suite(ctx):
     root = ctx.std.env.aspect_root_dir()
-    compiler = ctx.std.env.var("VESPER_RECOVERY_BINARY") or executable(ctx, root, "//:bin/vesper")
+    compiler = ctx.std.env.var("VESPER_RECOVERY_BINARY") or executable(ctx, root, VESPER)
     return _run(ctx, root, compiler)
 
 check_recovery = task(

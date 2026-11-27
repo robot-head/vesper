@@ -205,6 +205,14 @@ const PROGRAMS: &[(&str, &str)] = &[
          handle Fail[RuntimeError] in { get(in s.as_slice(), 0) } with { return v => v, raise(e, k) => 78 }) }",
     ),
     (
+        "closures",
+        "fn apply(f: fn(i64) -> i64, x: i64) -> i64 { f(x) } \
+         fn adder(n: i64) -> fn(i64) -> i64 { |x: i64| wrapping_add(x, n) } \
+         fn main() -> (i64, i64, fn(i64) -> i64) { let k = 10; let mut s = 0; \
+         for i in 0..5 { s = wrapping_add(s, apply(|x: i64| wrapping_mul(x, k), i)); } \
+         let add3 = adder(3); (s, apply(|x: i64| wrapping_add(x, 1), 4), add3) }",
+    ),
+    (
         "unhandled_in_clause",
         "fn d(a: u64, b: u64) -> u64 eff [Fail[RuntimeError]] { a / b } \
          fn main() -> u64 { handle Fail[RuntimeError] in { \

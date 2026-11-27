@@ -651,6 +651,72 @@ pub struct AssemblyMetadata {
     diagnostic_text: ChunkSeq[u8]
 }
 
+// A package-loader expansion plan consumes the same relative module IDs
+// as the assembly graph. Names are owned so the resolver can be dropped
+// before the expansion pass starts.
+pub struct ResolvedSugarImport {
+    pub caller_module: u32,
+    pub local_name: String,
+    pub definition_module: u32,
+    pub definition_name: String,
+}
+
+// Resolve sugar imports before executable bodies are lowered. The input is
+// the regular graph envelope with import-only module text and the sugar
+// declaration suffix. Keep visibility and public re-export rules identical
+// to full assembly; unresolved ordinary imports are not reported until the
+// expanded graph is actually assembled.
+pub fn resolve_sugar_imports_bytes(in input: Slice[u8]) -> ChunkSeq[ResolvedSugarImport] {
+    let mut loader = st_new();
+    decode_bytes(inout loader, in input);
+    collect_all_bytes(inout loader, in input);
+    reexports(inout loader);
+    let mut resolved = ChunkSeq::new[ResolvedSugarImport]();
+    let mut shown = String::new();
+    for module in 0..loader.mod_pkg.len() {
+        let use_first = w(at32(in loader.mod_use_first, module));
+        let use_count = w(at32(in loader.mod_use_len, module));
+        for use_index in 0..use_count {
+            let use_row = wrapping_add(use_first, use_index);
+            let target = use_module(inout loader, n32(module), n32(use_row), inout shown);
+            loader.err_code = 0;
+            if target == none() {
+                continue;
+            }
+            let names_first = w(at32(in loader.use_names_first, use_row));
+            let names_count = w(at32(in loader.use_names_len, use_row));
+            for index in 0..names_count {
+                let name_row = wrapping_add(names_first, index);
+                let (key, kind) = lookup(
+                    inout loader,
+                    target,
+                    at32(in loader.import_name, name_row),
+                    target == n32(module),
+                    in shown,
+                    at32(in loader.import_start, name_row),
+                    at32(in loader.import_end, name_row)
+                );
+                loader.err_code = 0;
+                if key != no_key() && kind == kind_sugar() {
+                    let mut local_name = String::new();
+                    push_sym(in loader, local_of(in loader, name_row), inout local_name);
+                    let mut definition_name = String::new();
+                    push_sym(in loader, lo(key), inout definition_name);
+                    resolved.push(
+                        sink ResolvedSugarImport {
+                            caller_module: n32(module),
+                            local_name: local_name,
+                            definition_module: hi(key),
+                            definition_name: definition_name
+                        }
+                    );
+                }
+            }
+        }
+    }
+    resolved
+}
+
 pub fn assembly_begin(in input: Str) -> Assembly {
     assembly_begin_bytes(in input.as_bytes())
 }

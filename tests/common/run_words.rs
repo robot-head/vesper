@@ -79,6 +79,7 @@ pub fn run_input(world: &World, program: &Program, entry: &str, fuel: u64) -> Op
 const SITE_HANDLE: u64 = 1;
 const SITE_EFFECT_CALL: u64 = 2;
 const SITE_TRY: u64 = 3;
+const SITE_CLOSURE: u64 = 4;
 // Handle flags: the expression has a type (a `Frame::Coerce`); a state;
 // the state initializer (a `$handler_init` name at span 0..0) has a type.
 const FLAG_COERCE: u64 = 1;
@@ -104,6 +105,7 @@ const PAT_PAIR: u64 = u64::MAX - 1;
 ///            op-count (op clause-fn+1 pattern-count pattern...)...
 ///   effect call: effect op instance-key+1
 ///   try:     instance-key+1
+///   closure: coerce free-count free-name... body-fn+1 param-count
 /// ```
 ///
 /// A pattern word is 0 for `_`, name + 1 for a binding, or `u64::MAX` for
@@ -229,6 +231,32 @@ fn sites(world: &World, program: &Program, t: &mut Tables) -> Vec<u64> {
                         let effect = t.enc.name(effect);
                         let op = t.enc.name(op);
                         rows.push(vec![at, SITE_EFFECT_CALL, effect, op, key]);
+                    }
+                    Op::Closure { expr, .. } => {
+                        let ExprKind::Closure { params, body, .. } = &expr.kind else {
+                            continue;
+                        };
+                        // `Control::Eval` of the closure: its `Frame::Coerce` when
+                        // typed, the captured free names (not its parameters),
+                        // and the lowered body `Runtime` calls.
+                        let coerce = world.types.contains_key(&(expr.span.start, expr.span.end));
+                        let mut row = vec![at, SITE_CLOSURE, u64::from(coerce)];
+                        let free: Vec<_> = vesper::check::free_names(body)
+                            .into_iter()
+                            .filter(|n| !params.iter().any(|p| &p.name == n))
+                            .collect();
+                        row.push(free.len() as u64);
+                        for n in &free {
+                            row.push(t.enc.name(n));
+                        }
+                        let name = vesper::ir::nested_name("closure", &body.span);
+                        row.push(if program.functions.contains_key(&name) {
+                            t.enc.name(&name) + 1
+                        } else {
+                            0
+                        });
+                        row.push(params.len() as u64);
+                        rows.push(row);
                     }
                     Op::Try(v) => {
                         let error = f.values.get(v).and_then(|ty| match ty {

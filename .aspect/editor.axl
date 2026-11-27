@@ -1,7 +1,7 @@
 """Exercise actual framed editor operations and their rejection boundaries."""
 
 load("./bounded-stdio.axl", "bounded_run")
-load("./lib/bazel_exec.axl", "executable", "run_target")
+load("./lib/bazel_exec.axl", "executable", "run_target", "VESPER")
 load("./lib/lsp-fixture.axl", "apply_edits", "changed", "decode_frames", "document", "error", "file_uri", "frame", "notice", "opened", "position", "request", "result")
 load("./lib/process.axl", "root_path", "scratch_dir")
 load("./lib/source-macro-fixtures.axl", "digest", "equal", "require")
@@ -242,7 +242,7 @@ def _check(ctx):
 
 def _suite(ctx):
     root = ctx.std.env.aspect_root_dir()
-    _run(ctx, root, executable(ctx, root, "//:bin/vesper"))
+    _run(ctx, root, executable(ctx, root, VESPER))
     for label in ["//crates/vesper-span:example/source_edits", "//crates/vesper-lsp:example/protocol_documents"]:
         run_target(ctx, root, label)
     return 0

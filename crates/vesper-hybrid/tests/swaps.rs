@@ -224,7 +224,7 @@ fn gated_default_builds_run_the_gated_set() {
 }
 
 /// Started as `vesper` (how the default compiler ships it: Bazel's
-/// `//crates/vesper-hybrid:vesper`), the hybrid runs the gated set with no
+/// `//:vesper_shipped`), the hybrid runs the gated set with no
 /// variable; `VESPER_HYBRID_SWAPS=all` still turns every swap on.
 #[test]
 fn the_shipped_name_runs_the_gated_set() {
