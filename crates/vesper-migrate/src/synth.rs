@@ -199,6 +199,57 @@ pub fn check_pointer_pointees(m: &mut Migration) {
     }
 }
 
+#[cfg(feature = "vesper-port")]
+fn wire_field(t: &WireType) -> String {
+    match t {
+        WireType::Integer(i) => {
+            let endian = match i.endian {
+                Endian::Native => 0u8,
+                Endian::Little => 1u8,
+                Endian::Big => 2u8,
+            };
+            let mut out = vec![0u8; 32];
+            let len = crate::binding::migrate_render_wire_field(
+                0,
+                i.signed,
+                endian,
+                i.bits as u64,
+                &[],
+                &mut out,
+            ) as usize;
+            out.truncate(len);
+            String::from_utf8(out).unwrap_or_default()
+        }
+        WireType::ByteArray(n) => {
+            let mut out = vec![0u8; 40];
+            let len =
+                crate::binding::migrate_render_wire_field(1, false, 0, *n as u64, &[], &mut out)
+                    as usize;
+            out.truncate(len);
+            String::from_utf8(out).unwrap_or_default()
+        }
+        WireType::ZeroPad(n) => {
+            let mut out = vec![0u8; 40];
+            let len =
+                crate::binding::migrate_render_wire_field(2, false, 0, *n as u64, &[], &mut out)
+                    as usize;
+            out.truncate(len);
+            String::from_utf8(out).unwrap_or_default()
+        }
+        WireType::Struct(n) => {
+            let mut out = vec![0u8; n.len()];
+            let len =
+                crate::binding::migrate_render_wire_field(3, false, 0, 0, n.as_bytes(), &mut out)
+                    as usize;
+            out.truncate(len);
+            String::from_utf8(out).unwrap_or_default()
+        }
+        // Not reachable for a declaration that compiled.
+        other => format!("{other:?}"),
+    }
+}
+
+#[cfg(not(feature = "vesper-port"))]
 fn wire_field(t: &WireType) -> String {
     match t {
         WireType::Integer(i) => format!(
@@ -397,6 +448,29 @@ pub struct SysSpec {
     pub omitted: Vec<Refusal>,
 }
 
+#[cfg(feature = "vesper-port")]
+fn sys_value(v: &SysValue) -> String {
+    let (kind, payload): (u8, &str) = match v {
+        SysValue::Unit => (0, ""),
+        SysValue::Bool => (1, ""),
+        SysValue::Scalar(s) => (2, s.name()),
+        SysValue::Enum(n) => (2, n.as_str()),
+        SysValue::Address {
+            pointee,
+            nullable: false,
+        } => (3, pointee.name()),
+        SysValue::Address {
+            pointee,
+            nullable: true,
+        } => (4, pointee.name()),
+    };
+    let mut out = vec![0u8; payload.len() + 16];
+    let len = crate::binding::migrate_render_sys_value(kind, payload.as_bytes(), &mut out) as usize;
+    out.truncate(len);
+    String::from_utf8(out).unwrap_or_default()
+}
+
+#[cfg(not(feature = "vesper-port"))]
 fn sys_value(v: &SysValue) -> String {
     match v {
         SysValue::Unit => "Unit".into(),
@@ -414,6 +488,19 @@ fn sys_value(v: &SysValue) -> String {
     }
 }
 
+#[cfg(feature = "vesper-port")]
+fn origin_text(o: &Origin) -> String {
+    let (is_c, name) = match o {
+        Origin::CHeader { header } => (true, header.as_str()),
+        Origin::RustCrate { name } => (false, name.as_str()),
+    };
+    let mut out = vec![0u8; name.len() + 16];
+    let len = crate::binding::migrate_render_origin(is_c, name.as_bytes(), &mut out) as usize;
+    out.truncate(len);
+    String::from_utf8(out).unwrap_or_default()
+}
+
+#[cfg(not(feature = "vesper-port"))]
 fn origin_text(o: &Origin) -> String {
     match o {
         Origin::CHeader { header } => format!("C header `{header}`"),
