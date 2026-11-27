@@ -142,6 +142,47 @@ fn sorted_paths<'a>(paths: impl Iterator<Item = &'a String>) -> Vec<String> {
 }
 
 /// Render one lifted parameter as Vesper source text.
+#[cfg(feature = "vesper-port")]
+pub fn render_param(param: &LiftedParam) -> String {
+    let kw = param.mode.keyword().unwrap_or("");
+    let (has_fp, fp_buf, fp_starts, fp_lens, fp_extra) = match &param.footprint {
+        Some(paths) => {
+            let total: usize = paths.iter().map(|p| p.len()).sum();
+            let mut buf = Vec::with_capacity(total);
+            let mut starts = Vec::with_capacity(paths.len());
+            let mut lens = Vec::with_capacity(paths.len());
+            for p in paths {
+                starts.push(buf.len() as u64);
+                lens.push(p.len() as u64);
+                buf.extend_from_slice(p.as_bytes());
+            }
+            let sep = paths.len().saturating_sub(1) * 2;
+            (true, buf, starts, lens, 3 + total + sep)
+        }
+        None => (false, Vec::new(), Vec::new(), Vec::new(), 0),
+    };
+    let cap = (if kw.is_empty() { 0 } else { kw.len() + 1 })
+        + param.name.len()
+        + fp_extra
+        + 2
+        + param.ty.len();
+    let mut out = vec![0u8; cap];
+    let written = crate::binding::migrate_render_param(
+        kw.as_bytes(),
+        param.name.as_bytes(),
+        has_fp,
+        &fp_buf,
+        &fp_starts,
+        &fp_lens,
+        param.ty.as_bytes(),
+        &mut out,
+    ) as usize;
+    out.truncate(written);
+    String::from_utf8(out).unwrap_or_default()
+}
+
+/// Render one lifted parameter as Vesper source text.
+#[cfg(not(feature = "vesper-port"))]
 pub fn render_param(param: &LiftedParam) -> String {
     let mut out = String::new();
     if let Some(k) = param.mode.keyword() {

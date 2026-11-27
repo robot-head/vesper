@@ -1119,6 +1119,15 @@ vesper_crate(
         "test/self_host_native_walk": [
             "resources:memory:8192",
         ],
+        # Peaks at 8.9 GiB locally (eight test threads). Under the 6 GiB
+        # self-host default the kernel killed it on #2418 and #2448.
+        "test/self_host_verified_codegen": [
+            "resources:memory:9216",
+        ],
+        # Peaks at 7.5 GiB locally (eight test threads).
+        "test/self_host_wasm_backend": [
+            "resources:memory:8192",
+        ],
         # Compiles export-build-driver alongside multi-threaded corpus() (#2286).
         "test/self_host_codegen_export": [
             "resources:memory:6144",

@@ -65,6 +65,10 @@
     {
       "workload": "appraise_cca",
       "run": ["aspect", "crate", "aegis", "bench-abba", "--", "flip-gate", "appraise_cca"]
+    },
+    {
+      "workload": "der_cert",
+      "run": ["cargo", "run", "--locked", "--release", "-p", "vesper-aegis", "--example", "abba", "--", "flip-gate-inproc", "der_cert"]
     }
   ]
 }

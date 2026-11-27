@@ -5,8 +5,9 @@
 use @vesper/check-data::util::{stage2_heap_mark, stage2_heap_reset};
 use @vesper/check-names-packages::{resolve_sugar_imports_bytes};
 use @vesper/sugar::driver::{
-    PackageSugarBinding, PackageSugarDefinition, expand_bootstrap_module, inspect_module_sugars,
-    may_declare_sugar, plan_bootstrap_sugars
+    BootstrapSugarOutput, FREE_NAME_WORDS, Imports, PackageSugarBinding, PackageSugarDefinition,
+    expand_bootstrap_module, expand_module, inspect_module_sugars, may_declare_sugar,
+    plan_bootstrap_definitions, plan_bootstrap_sugars
 };
 
 use @vesper-std/fs::{IoError, kind_dir, kind_file, kind_symlink, read_path};
@@ -205,6 +206,55 @@ struct Manifest {
     deps: ChunkSeq[DepSpec],
     // `[package] vsys`: the `.vsys` files the package names (§16.3).
     vsys: ChunkSeq[ChunkSeq[u8]],
+}
+
+// Whether `a` sorts before `b` byte by byte (a prefix sorts first), the
+// order of the Rust loader's `BTreeMap<PackageName, _>`.
+fn bytes_before(in a: Slice[u8], in b: Slice[u8]) -> bool {
+    let n = if a.len() < b.len() { a.len() } else { b.len() };
+    for i in 0..n {
+        let x = byte_at(in a, i);
+        let y = byte_at(in b, i);
+        if x != y {
+            return x < y;
+        }
+    }
+    a.len() < b.len()
+}
+
+// The indices of `deps` sorted by package name: the Rust loader visits a
+// manifest's dependencies in that order, which fixes the package, file
+// and `.vsys` library order.
+fn dependency_order(in deps: ChunkSeq[DepSpec]) -> ChunkSeq[u64] {
+    let mut order = ChunkSeq::new[u64]();
+    for i in 0..deps.len() {
+        order.push(i);
+        let mut at = i;
+        loop {
+            if at == 0 {
+                break;
+            }
+            let prev = order.try_get(wrapping_sub(at, 1)).unwrap_or(0);
+            if !dep_before(in deps, i, prev) {
+                break;
+            }
+            order.try_set(at, prev);
+            at = wrapping_sub(at, 1);
+        }
+        order.try_set(at, i);
+    }
+    order
+}
+
+// Whether dependency `i` of `deps` sorts before dependency `j` by name.
+fn dep_before(in deps: ChunkSeq[DepSpec], i: u64, j: u64) -> bool {
+    match deps.try_get(i) {
+        Option::Some(a) => match deps.try_get(j) {
+            Option::Some(b) => bytes_before(in a.name.as_slice(), in b.name.as_slice()),
+            Option::None => false,
+        },
+        Option::None => false,
+    }
 }
 
 fn parse_manifest(in text: Slice[u8]) -> Manifest {
@@ -581,7 +631,9 @@ fn load_pkg_graph(
     );
     let mut dep_names = ChunkSeq::new[ChunkSeq[u8]]();
     let mut dep_indices = ChunkSeq::new[u64]();
-    for i in 0..manifest.deps.len() {
+    let order = dependency_order(in manifest.deps);
+    for k in 0..order.len() {
+        let i = order.try_get(k).unwrap_or(0);
         match manifest.deps.try_get(i) {
             Option::Some(d) => {
                 let ddir = normalize_dir(in dir_copy.as_slice(), in d.path.as_slice());
@@ -2263,6 +2315,119 @@ fn copy_bootstrap_mappings(
     }
 }
 
+// Whether `word` occurs as a whole identifier in `text` outside the sugar
+// declarations of module `module` (a superset of the names the module
+// declares or imports).
+fn word_outside_sugar(
+    in text: Slice[u8],
+    in word: Slice[u8],
+    module: u64,
+    in spans: ChunkSeq[BootstrapDeclarationRange]
+) -> bool {
+    for start in 0..text.len() {
+        let end = wrapping_add(start, word.len());
+        if end > text.len() {
+            break;
+        }
+        if (start == 0 || !is_ident_byte(byte_at(in text, wrapping_sub(start, 1))))
+            && (end == text.len() || !is_ident_byte(byte_at(in text, end)))
+            && eq_bytes(in text[start..end], in word)
+        {
+            let mut declared = false;
+            for i in 0..spans.len() {
+                match spans.try_get(i) {
+                    Option::Some(row) => {
+                        if row.module_index == module && row.start <= start && end <= row.end {
+                            declared = true;
+                        }
+                    },
+                    Option::None => {},
+                }
+            }
+            if !declared {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+// Whether module `module` binds `word`, by `word_outside_sugar` over its
+// text.
+fn module_mentions(
+    in mods: ChunkSeq[ModEntry],
+    module: u64,
+    in word: Slice[u8],
+    in spans: ChunkSeq[BootstrapDeclarationRange]
+) -> bool {
+    match mods.try_get(module) {
+        Option::Some(entry) => word_outside_sugar(
+            in entry.text.as_slice(),
+            in word,
+            module,
+            in spans
+        ),
+        // An unknown module may bind anything.
+        Option::None => true,
+    }
+}
+
+// Module `module`'s text and mappings after sugar expansion with `plan`:
+// the bootstrap path, else the full expander (a call that is not a tagged
+// literal, or a rule with a repetition or a `block` or `pat` fragment), as
+// the Rust loader runs it. `Option::None` when neither expands it as the
+// Rust loader would: the full expander's text carries no definition-site
+// scope, so a free name of an imported template that the author or the
+// caller module may bind (the Rust loader resolves it at the author, or
+// reports it) declines the graph.
+fn expand_graph_module(
+    module: u64,
+    in plan: Imports,
+    in mods: ChunkSeq[ModEntry],
+    in bindings: ChunkSeq[PackageSugarBinding],
+    in catalogue: ChunkSeq[PackageSugarDefinition],
+    in spans: ChunkSeq[BootstrapDeclarationRange]
+) -> Option[BootstrapSugarOutput] {
+    let expanded = match mods.try_get(module) {
+        Option::Some(source) => {
+            match expand_bootstrap_module(in source.text, in plan) {
+                Result::Ok(expanded) => return Option::Some(expanded),
+                Result::Err(_) => {},
+            }
+            match expand_module(in source.text, in plan) {
+                Result::Ok(expanded) => expanded,
+                Result::Err(_) => return Option::None,
+            }
+        },
+        Option::None => return Option::None,
+    };
+    let authors = plan_bootstrap_definitions(module, in bindings);
+    for row in 0..(expanded.free.len() / FREE_NAME_WORDS) {
+        let at = wrapping_mul(row, FREE_NAME_WORDS);
+        let import = expanded.free.try_get(at).unwrap_or(0);
+        let start = expanded.free.try_get(wrapping_add(at, 1)).unwrap_or(0);
+        let end = expanded.free.try_get(wrapping_add(at, 2)).unwrap_or(0);
+        if end > expanded.source.len() || start > end {
+            return Option::None;
+        }
+        let mut word = ChunkSeq::new[u8]();
+        word.extend(in expanded.source[start..end]);
+        let author = match authors.try_get(import) {
+            Option::Some(definition) => match catalogue.try_get(definition) {
+                Option::Some(entry) => entry.module_index,
+                Option::None => return Option::None,
+            },
+            Option::None => return Option::None,
+        };
+        if module_mentions(in mods, module, in word.as_slice(), in spans)
+            || module_mentions(in mods, author, in word.as_slice(), in spans)
+        {
+            return Option::None;
+        }
+    }
+    Option::Some(BootstrapSugarOutput { source: expanded.source, mappings: expanded.mappings })
+}
+
 fn has_bootstrap_sugar_candidate(in source: ChunkSeq[u8]) -> bool {
     if !contains_word(in source.as_slice(), in "sugar") {
         return false;
@@ -2333,6 +2498,8 @@ fn prepare_sugar_graph_in_scratch(
     let mut public = ChunkSeq::new[bool]();
     let mut imports = ChunkSeq::new[ChunkSeq[u8]]();
     let mut surface_modules = ChunkSeq::new[bool]();
+    // Modules calling a sugar they declare: expanded with no imports.
+    let mut local_callers = ChunkSeq::new[bool]();
     let mut shadowed_modules = ChunkSeq::new[bool]();
     let mut declaration_spans = ChunkSeq::new[BootstrapDeclarationRange]();
     let mut source_segments = ChunkSeq::new[BootstrapSourceSegment]();
@@ -2341,6 +2508,7 @@ fn prepare_sugar_graph_in_scratch(
             let mut import_text = ChunkSeq::new[u8]();
             let mut has_surface_sugar = false;
             let mut shadows_prelude = false;
+            let mut calls_own_sugar = false;
             match mods.try_get(module) {
                 Option::Some(source) => {
                     if contains_word(in source.text.as_slice(), in "sugar")
@@ -2350,6 +2518,8 @@ fn prepare_sugar_graph_in_scratch(
                         match inspect_module_sugars(in source.text, false) {
                             Option::Some(surface) => {
                                 has_surface_sugar = surface.has_sugar;
+                                calls_own_sugar = surface.has_calls
+                                    && surface.declarations.len() != 0;
                                 shadows_prelude = surface.shadows_bootstrap_prelude;
                                 for i in 0..surface.declarations.len() {
                                     match surface.declarations.try_get(i) {
@@ -2400,6 +2570,7 @@ fn prepare_sugar_graph_in_scratch(
             }
             imports.push(sink import_text);
             surface_modules.push(has_surface_sugar);
+            local_callers.push(calls_own_sugar);
             shadowed_modules.push(shadows_prelude);
         }
         if catalogue.len() != 0 {
@@ -2417,8 +2588,8 @@ fn prepare_sugar_graph_in_scratch(
             let mut bindings = ChunkSeq::new[PackageSugarBinding]();
             let empty = ChunkSeq::new[bool]();
             let mut imported = empty;
-            for _module in 0..mods.len() {
-                imported.push(false);
+            for module in 0..mods.len() {
+                imported.push(local_callers.try_get(module) == Option::Some(true));
             }
             for i in 0..resolved.len() {
                 match resolved.try_get(i) {
@@ -2478,19 +2649,25 @@ fn prepare_sugar_graph_in_scratch(
                         Option::Some(plan) => plan,
                         Option::None => return Option::None,
                     };
+                    let expanded = match expand_graph_module(
+                        module,
+                        in plan,
+                        in mods,
+                        in bindings,
+                        in catalogue,
+                        in declaration_spans
+                    ) {
+                        Option::Some(expanded) => expanded,
+                        Option::None => return Option::None,
+                    };
                     match mods.try_get_mut(module) {
                         Option::Some(source) => {
-                            match expand_bootstrap_module(in source.text, in plan) {
-                                Result::Ok(expanded) => {
-                                    copy_bootstrap_mappings(
-                                        source.file,
-                                        in expanded.mappings,
-                                        inout source_segments
-                                    );
-                                    source.text = expanded.source;
-                                },
-                                Result::Err(_) => return Option::None,
-                            }
+                            copy_bootstrap_mappings(
+                                source.file,
+                                in expanded.mappings,
+                                inout source_segments
+                            );
+                            source.text = expanded.source;
                         },
                         Option::None => return Option::None,
                     }
@@ -2746,6 +2923,60 @@ test {
             }
         );
         prepare_sugar_graph(in pkgs, inout files, inout mods)
+    }
+
+    fn test_full_expansion_declines_a_template_calling_author_sugar() -> bool {
+        match fixture_graph_calling(
+            in "use @fixture/dep::outer; pub fn main() -> u64 { let x: u64 = 1; outer x {} }",
+            in "sugar inner: expr { rule (inner $n:ident $b:block) => { { $b; $n } } } pub sugar outer: expr { rule (outer $n:ident $b:block) => { { $b; inner $n {} } } }"
+        ) {
+            Option::None => true,
+            Option::Some(_) => false,
+        }
+    }
+
+    fn test_full_expansion_declines_an_author_free_helper() -> bool {
+        match fixture_graph_calling(
+            in "use @fixture/dep::twice; pub fn main() -> u64 { let x: u64 = 1; twice x {} }",
+            in "fn hidden(n: u64) -> u64 { n } pub sugar twice: expr { rule (twice $n:ident $b:block) => { { $b; hidden($n) } } }"
+        ) {
+            Option::None => true,
+            Option::Some(_) => false,
+        }
+    }
+
+    fn test_full_expansion_declines_a_free_name_the_caller_binds() -> bool {
+        match fixture_graph_calling(
+            in "use @fixture/dep::twice; fn helper(n: u64) -> u64 { n } pub fn main() -> u64 { let x: u64 = 1; twice x {} }",
+            in "pub sugar twice: expr { rule (twice $n:ident $b:block) => { { $b; helper($n) } } }"
+        ) {
+            Option::None => true,
+            Option::Some(_) => false,
+        }
+    }
+
+    fn test_full_expansion_keeps_a_closed_imported_template() -> bool {
+        let bytes = match fixture_graph_calling(
+            in "use @fixture/dep::twice; pub fn main() -> u64 { let x: u64 = 21; twice x {} }",
+            in "pub sugar twice: expr { rule (twice $n:ident $b:block) => { { $b; wrapping_add($n, $n) } } }"
+        ) {
+            Option::Some(bytes) => bytes,
+            Option::None => return false,
+        };
+        let assembly = assembly_begin_bytes(in bytes.as_slice());
+        assembly_parse_errors(in assembly) == 0
+    }
+
+    fn test_full_expansion_expands_a_module_calling_its_own_sugar() -> bool {
+        let bytes = match fixture_graph_calling(
+            in "sugar twice: expr { rule (twice $n:ident $b:block) => { { $b; wrapping_add($n, $n) } } } pub fn main() -> u64 { let x: u64 = 21; twice x {} }",
+            in "pub fn unused() -> u64 { 0 }"
+        ) {
+            Option::Some(bytes) => bytes,
+            Option::None => return false,
+        };
+        let assembly = assembly_begin_bytes(in bytes.as_slice());
+        assembly_parse_errors(in assembly) == 0
     }
 
     fn test_imported_scalar_tag_reaches_stage2_assembly() -> bool {

@@ -15,14 +15,15 @@
 //   clif_words.rs.
 
 use self::codes::{
-    E_ARGS, E_BLOCK, E_CLONE, E_END, E_FCONST, E_INS, E_JUMP, E_PARAM, E_PLACE, E_REMOVE_BLOCK,
-    E_REMOVE_INST, E_RETARGET, E_SLOT_SIZE, E_ALIAS, E_INS_BEFORE, E_MOVE_INST, E_REMOVE_DEST_ARG,
-    E_REMOVE_PARAM, F_BRANCH, F_CALL, F_RETURN, F_SIDE_EFFECTS, F_STACK_SLOT, F_TERMINATOR, F_TRAP,
-    F_TRAP_CODE, H_NO_OUTLINE, H_SIMD, NONE, NONE64, OP_BITCAST, OP_BRIF, OP_CALL, OP_F32CONST,
-    OP_F64CONST, OP_FCVT_FROM_SINT, OP_ICMP, OP_ICMP_IMM, OP_ICONST, OP_JUMP, OP_LOAD, OP_RETURN,
-    OP_SCALAR_TO_VECTOR, OP_SPLAT, OP_STACK_ADDR, OP_STORE, OP_SWIDEN_HIGH, OP_SWIDEN_LOW, OP_TRAP,
-    OP_UADD_OVERFLOW, S_OTHER, TY_F32, TY_I16X8, TY_I32X4, TY_I64X2, TY_I8, TY_I8X16, TY_OTHER,
-    V_ALIAS, V_PARAM, V_RESULT
+    E_MEM_ADDR, E_REPLACE_ICMP_IMM, E_REPLACE_IMM, E_APPEND_DEST_ARG, E_BRIF, E_DETACH_RESULTS,
+    E_ICONST, E_SET_DEST, E_ARGS, E_BLOCK, E_CLONE, E_END, E_FCONST, E_INS, E_JUMP, E_PARAM,
+    E_PLACE, E_REMOVE_BLOCK, E_REMOVE_INST, E_RETARGET, E_SLOT_SIZE, E_ALIAS, E_INS_BEFORE,
+    E_MOVE_INST, E_REMOVE_DEST_ARG, E_REMOVE_PARAM, F_BRANCH, F_CALL, F_RETURN, F_SIDE_EFFECTS,
+    F_STACK_SLOT, F_TERMINATOR, F_TRAP, F_TRAP_CODE, H_NO_OUTLINE, H_SIMD, NONE, NONE64, OP_BITCAST,
+    OP_BRIF, OP_CALL, OP_F32CONST, OP_F64CONST, OP_FCVT_FROM_SINT, OP_ICMP, OP_ICMP_IMM, OP_ICONST,
+    OP_JUMP, OP_LOAD, OP_RETURN, OP_SCALAR_TO_VECTOR, OP_SPLAT, OP_STACK_ADDR, OP_STORE,
+    OP_SWIDEN_HIGH, OP_SWIDEN_LOW, OP_TRAP, OP_UADD_OVERFLOW, S_OTHER, TY_F32, TY_I16X8, TY_I32X4,
+    TY_I64X2, TY_I8, TY_I8X16, TY_OTHER, V_ALIAS, V_PARAM, V_RESULT
 };
 
 pub copy struct Val {
@@ -1132,6 +1133,190 @@ impl Func {
         set_u64(inout self.out, at, E_INS_BEFORE);
         set_u64(inout self.out, inc(at), w(before));
         new
+    }
+
+    // ----- the branch and fold steps' edits (#2423) --------------------------
+
+    // `v` appended to the arguments of destination `k` of `i`, written as
+    // `E_APPEND_DEST_ARG`.
+    pub fn append_dest_arg(inout self, i: u32, k: u64, v: u32) {
+        let row = self.inst(w(i));
+        if k >= w(row.dn) {
+            return;
+        }
+        let d = wrapping_add(w(row.d0), k);
+        let mut x = self.dest_row(d);
+        let a0 = n32(self.args.len());
+        for q in 0..w(x.an) {
+            let old = u32_at(in self.args, wrapping_add(w(x.a0), q));
+            self.args.push(old);
+        }
+        self.args.push(v);
+        x.a0 = a0;
+        x.an = wrapping_add(x.an, 1);
+        let ok = self.dests.try_set(d, x);
+        self.out.push(E_APPEND_DEST_ARG);
+        self.out.push(w(i));
+        self.out.push(k);
+        self.out.push(w(v));
+    }
+
+    // A new destination row for `to` with `args`.
+    fn push_dest(inout self, to: u32, in args: ChunkSeq[u32]) {
+        let a0 = n32(self.args.len());
+        self.args.extend(in args.as_slice());
+        self.dests.push(Dst { block: to, a0: a0, an: n32(args.len()) });
+    }
+
+    fn put_values(inout self, in vals: ChunkSeq[u32]) {
+        self.out.push(vals.len());
+        for k in 0..vals.len() {
+            self.out.push(w(u32_at(in vals, k)));
+        }
+    }
+
+    // Destination `k` of `i` becomes `to` with `args`
+    // (`dfg.block_call`), written as `E_SET_DEST`.
+    pub fn set_dest(inout self, i: u32, k: u64, to: u32, in args: ChunkSeq[u32]) {
+        let row = self.inst(w(i));
+        if k >= w(row.dn) {
+            return;
+        }
+        let d = wrapping_add(w(row.d0), k);
+        let a0 = n32(self.args.len());
+        self.args.extend(in args.as_slice());
+        let ok = self.dests.try_set(d, Dst { block: to, a0: a0, an: n32(args.len()) });
+        self.out.push(E_SET_DEST);
+        self.out.push(w(i));
+        self.out.push(k);
+        self.out.push(w(to));
+        self.put_values(in args);
+    }
+
+    // `dfg.replace(i).brif(cond, t, ta, e, ea)`, written as `E_BRIF`.
+    pub fn replace_brif(
+        inout self,
+        i: u32,
+        cond: u32,
+        t: u32,
+        in ta: ChunkSeq[u32],
+        e: u32,
+        in ea: ChunkSeq[u32]
+    ) {
+        let mut x = self.inst(w(i));
+        x.op = OP_BRIF;
+        x.eff = F_TERMINATOR | F_BRANCH;
+        x.cond = 0;
+        x.imm = 0;
+        x.off = 0;
+        x.mem = 0;
+        x.a0 = n32(self.args.len());
+        x.an = 1;
+        self.args.push(cond);
+        x.d0 = n32(self.dests.len());
+        x.dn = 2;
+        self.push_dest(t, in ta);
+        self.push_dest(e, in ea);
+        self.put_inst(w(i), x);
+        self.out.push(E_BRIF);
+        self.out.push(w(i));
+        self.out.push(w(cond));
+        self.out.push(w(t));
+        self.put_values(in ta);
+        self.out.push(w(e));
+        self.put_values(in ea);
+    }
+
+    // `dfg.detach_inst_results(i)`, written as `E_DETACH_RESULTS`.
+    pub fn detach_results(inout self, i: u32) {
+        let mut x = self.inst(w(i));
+        x.rn = 0;
+        self.put_inst(w(i), x);
+        self.out.push(E_DETACH_RESULTS);
+        self.out.push(w(i));
+    }
+
+    // `dfg.replace(i).iconst(ty, imm)`: its result stays. Written as
+    // `E_ICONST`.
+    pub fn replace_iconst(inout self, i: u32, ty: u64, imm: u64) {
+        let mut x = self.inst(w(i));
+        x.op = OP_ICONST;
+        x.eff = 0;
+        x.cond = 0;
+        x.imm = imm;
+        x.off = 0;
+        x.mem = 0;
+        x.an = 0;
+        x.dn = 0;
+        self.put_inst(w(i), x);
+        self.out.push(E_ICONST);
+        self.out.push(w(i));
+        self.out.push(ty);
+        self.out.push(imm);
+    }
+
+    // `dfg.replace(i)` as the one-argument immediate opcode `op`
+    // (`iadd_imm` and the like): its result stays. Written as
+    // `E_REPLACE_IMM`.
+    pub fn replace_imm(inout self, i: u32, op: u64, arg: u32, imm: u64) {
+        let mut x = self.inst(w(i));
+        x.op = op;
+        x.eff = 0;
+        x.cond = 0;
+        x.imm = imm;
+        x.off = 0;
+        x.mem = 0;
+        x.a0 = n32(self.args.len());
+        x.an = 1;
+        self.args.push(arg);
+        x.dn = 0;
+        self.put_inst(w(i), x);
+        self.out.push(E_REPLACE_IMM);
+        self.out.push(w(i));
+        self.out.push(op);
+        self.out.push(w(arg));
+        self.out.push(imm);
+    }
+
+    // `dfg.replace(i).icmp_imm(cond, arg, imm)`, written as
+    // `E_REPLACE_ICMP_IMM`.
+    pub fn replace_icmp_imm(inout self, i: u32, cond: u64, arg: u32, imm: u64) {
+        let mut x = self.inst(w(i));
+        x.op = OP_ICMP_IMM;
+        x.eff = 0;
+        x.cond = cond;
+        x.imm = imm;
+        x.off = 0;
+        x.mem = 0;
+        x.a0 = n32(self.args.len());
+        x.an = 1;
+        self.args.push(arg);
+        x.dn = 0;
+        self.put_inst(w(i), x);
+        self.out.push(E_REPLACE_ICMP_IMM);
+        self.out.push(w(i));
+        self.out.push(cond);
+        self.out.push(w(arg));
+        self.out.push(imm);
+    }
+
+    // The address (argument `at`: 0 for a load, 1 for a store) and offset
+    // of a memory access, written as `E_MEM_ADDR`.
+    pub fn set_mem_addr(inout self, i: u32, at: u64, addr: u32, off: u64) {
+        let mut x = self.inst(w(i));
+        let mut vals = ChunkSeq::new[u32]();
+        for k in 0..w(x.an) {
+            let v = u32_at(in self.args, wrapping_add(w(x.a0), k));
+            vals.push(if k == at { addr } else { v });
+        }
+        x.a0 = n32(self.args.len());
+        self.args.extend(in vals.as_slice());
+        x.off = off;
+        self.put_inst(w(i), x);
+        self.out.push(E_MEM_ADDR);
+        self.out.push(w(i));
+        self.out.push(w(addr));
+        self.out.push(off);
     }
 
     // The edit script, ended.

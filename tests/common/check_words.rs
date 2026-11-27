@@ -35,7 +35,7 @@ use vesper::layout::{Layout, LayoutField, LayoutKind, LayoutVariant};
 /// types are interned as they are first written, types in post-order.
 #[derive(Default)]
 pub struct Enc {
-    pub names: BTreeMap<String, u64>,
+    pub names: HashMap<String, u64, std::hash::BuildHasherDefault<Fx>>,
     pub name_list: Vec<String>,
     /// Interned types by structural hash ([`type_hash`]), each bucket the
     /// types and their indices. Interning by `format!("{t:?}")` was most of
@@ -236,26 +236,28 @@ impl Enc {
 
     /// The whole input: names, types, the world section, then `tail`.
     pub fn finish(&self, world: &[u64], tail: &[u64]) -> Vec<u8> {
-        let mut out: Vec<u8> =
-            Vec::with_capacity(8 * (world.len() + tail.len() + self.type_words.len() + 1));
-        let put = |out: &mut Vec<u8>, x: u64| out.extend(x.to_le_bytes());
+        let names: usize = self
+            .name_list
+            .iter()
+            .map(|n| 8 + n.len().next_multiple_of(8))
+            .sum();
+        let words = 2 + self.type_words.len() + world.len() + tail.len();
+        let mut out: Vec<u8> = Vec::with_capacity(names + 8 * words);
+        let put = |out: &mut Vec<u8>, x: u64| out.extend_from_slice(&x.to_le_bytes());
         put(&mut out, self.name_list.len() as u64);
         for n in &self.name_list {
             put(&mut out, n.len() as u64);
-            out.extend(n.as_bytes());
-            while !out.len().is_multiple_of(8) {
-                out.push(0);
-            }
+            out.extend_from_slice(n.as_bytes());
+            out.resize(out.len().next_multiple_of(8), 0);
         }
         put(&mut out, self.type_count);
-        for x in &self.type_words {
-            put(&mut out, *x);
-        }
-        for x in world {
-            put(&mut out, *x);
-        }
-        for x in tail {
-            put(&mut out, *x);
+        for part in [&self.type_words[..], world, tail] {
+            // Little-endian words, a whole slice at a time.
+            let at = out.len();
+            out.resize(at + 8 * part.len(), 0);
+            for (b, x) in out[at..].as_chunks_mut::<8>().0.iter_mut().zip(part) {
+                b.copy_from_slice(&x.to_le_bytes());
+            }
         }
         out
     }

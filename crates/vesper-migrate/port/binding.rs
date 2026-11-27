@@ -18,7 +18,13 @@ unsafe extern "C" {
     fn vesper_migrate_migrate_filter_directives(src: *mut u64, out: *mut u64) -> i64;
     fn vesper_migrate_migrate_hex_encode(src: *mut u64, out: *mut u64) -> i64;
     fn vesper_migrate_migrate_lift_mode(is_owned_move: i64, is_unique_borrow: i64, whole_value_access: i64, has_reads: i64, has_muts: i64) -> i64;
+    fn vesper_migrate_migrate_package_name(manifest: *mut u64, out: *mut u64) -> i64;
+    fn vesper_migrate_migrate_parse_annotation_line(line: *mut u64, out_spans: *mut u64) -> i64;
     fn vesper_migrate_migrate_redefines(text: *mut u64, name: *mut u64) -> i64;
+    fn vesper_migrate_migrate_render_origin(is_c_header: i64, name: *mut u64, out: *mut u64) -> i64;
+    fn vesper_migrate_migrate_render_param(kw: *mut u64, name: *mut u64, has_footprint: i64, fp_buf: *mut u64, fp_starts: *mut u64, fp_lens: *mut u64, ty: *mut u64, out: *mut u64) -> i64;
+    fn vesper_migrate_migrate_render_sys_value(kind: i64, payload: *mut u64, out: *mut u64) -> i64;
+    fn vesper_migrate_migrate_render_wire_field(kind: i64, signed: i64, endian: i64, num: i64, name: *mut u64, out: *mut u64) -> i64;
     fn vesper_migrate_migrate_safe_idents_underscores(buf: *mut u64, starts: *mut u64, lens: *mut u64, out_underscores: *mut u64) -> i64;
     fn vesper_migrate_migrate_sorted_paths_antichain(buf: *mut u64, starts: *mut u64, lens: *mut u64, out_indices: *mut u64) -> i64;
     fn vesper_migrate_migrate_splitmix64_bytes(state_buf: *mut u64, max_len: i64, prefix: *mut u64, out: *mut u64) -> i64;
@@ -82,6 +88,24 @@ pub fn migrate_lift_mode(is_owned_move: bool, is_unique_borrow: bool, whole_valu
     raw as u8
 }
 
+/// Calls `migrate_package_name` of the Vesper library `migrate` (`vesper_migrate_migrate_package_name`).
+pub fn migrate_package_name(manifest: &[u8], out: &mut [u8]) -> u64 {
+    // SAFETY: `vesper_migrate_migrate_package_name` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(manifest, |view_manifest| vesper_port_abi::with_slice_mut(out, |view_out| unsafe { vesper_migrate_migrate_package_name(view_manifest, view_out) }));
+    raw as u64
+}
+
+/// Calls `migrate_parse_annotation_line` of the Vesper library `migrate` (`vesper_migrate_migrate_parse_annotation_line`).
+pub fn migrate_parse_annotation_line(line: &[u8], out_spans: &mut [u64]) -> u64 {
+    // SAFETY: `vesper_migrate_migrate_parse_annotation_line` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(line, |view_line| vesper_port_abi::with_slice_mut(out_spans, |view_out_spans| unsafe { vesper_migrate_migrate_parse_annotation_line(view_line, view_out_spans) }));
+    raw as u64
+}
+
 /// Calls `migrate_redefines` of the Vesper library `migrate` (`vesper_migrate_migrate_redefines`).
 pub fn migrate_redefines(text: &[u8], name: &[u8]) -> bool {
     // SAFETY: `vesper_migrate_migrate_redefines` has exactly this signature in the export ABI; every
@@ -89,6 +113,42 @@ pub fn migrate_redefines(text: &[u8], name: &[u8]) -> bool {
     // every handle passed is owned or borrowed as its mode requires.
     let raw = vesper_port_abi::with_slice(text, |view_text| vesper_port_abi::with_slice(name, |view_name| unsafe { vesper_migrate_migrate_redefines(view_text, view_name) }));
     raw != 0
+}
+
+/// Calls `migrate_render_origin` of the Vesper library `migrate` (`vesper_migrate_migrate_render_origin`).
+pub fn migrate_render_origin(is_c_header: bool, name: &[u8], out: &mut [u8]) -> u64 {
+    // SAFETY: `vesper_migrate_migrate_render_origin` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(name, |view_name| vesper_port_abi::with_slice_mut(out, |view_out| unsafe { vesper_migrate_migrate_render_origin(is_c_header as i64, view_name, view_out) }));
+    raw as u64
+}
+
+/// Calls `migrate_render_param` of the Vesper library `migrate` (`vesper_migrate_migrate_render_param`).
+pub fn migrate_render_param(kw: &[u8], name: &[u8], has_footprint: bool, fp_buf: &[u8], fp_starts: &[u64], fp_lens: &[u64], ty: &[u8], out: &mut [u8]) -> u64 {
+    // SAFETY: `vesper_migrate_migrate_render_param` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(kw, |view_kw| vesper_port_abi::with_slice(name, |view_name| vesper_port_abi::with_slice(fp_buf, |view_fp_buf| vesper_port_abi::with_slice(fp_starts, |view_fp_starts| vesper_port_abi::with_slice(fp_lens, |view_fp_lens| vesper_port_abi::with_slice(ty, |view_ty| vesper_port_abi::with_slice_mut(out, |view_out| unsafe { vesper_migrate_migrate_render_param(view_kw, view_name, has_footprint as i64, view_fp_buf, view_fp_starts, view_fp_lens, view_ty, view_out) })))))));
+    raw as u64
+}
+
+/// Calls `migrate_render_sys_value` of the Vesper library `migrate` (`vesper_migrate_migrate_render_sys_value`).
+pub fn migrate_render_sys_value(kind: u8, payload: &[u8], out: &mut [u8]) -> u64 {
+    // SAFETY: `vesper_migrate_migrate_render_sys_value` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(payload, |view_payload| vesper_port_abi::with_slice_mut(out, |view_out| unsafe { vesper_migrate_migrate_render_sys_value(kind as i64, view_payload, view_out) }));
+    raw as u64
+}
+
+/// Calls `migrate_render_wire_field` of the Vesper library `migrate` (`vesper_migrate_migrate_render_wire_field`).
+pub fn migrate_render_wire_field(kind: u8, signed: bool, endian: u8, num: u64, name: &[u8], out: &mut [u8]) -> u64 {
+    // SAFETY: `vesper_migrate_migrate_render_wire_field` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(name, |view_name| vesper_port_abi::with_slice_mut(out, |view_out| unsafe { vesper_migrate_migrate_render_wire_field(kind as i64, signed as i64, endian as i64, num as i64, view_name, view_out) }));
+    raw as u64
 }
 
 /// Calls `migrate_safe_idents_underscores` of the Vesper library `migrate` (`vesper_migrate_migrate_safe_idents_underscores`).

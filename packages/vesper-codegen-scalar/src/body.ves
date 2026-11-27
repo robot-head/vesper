@@ -27,12 +27,16 @@ use super::{
     kind_unsigned
 };
 use super::blocks::{layout};
+use @vesper/check-layout::{L_PRODUCT, layout_of};
 
 // The plan's lane codes (`native::scalar` of a value's type).
 pub const LANE_I64: u64 = 1;
 pub const LANE_F32: u64 = 2;
 pub const LANE_F64: u64 = 3;
 pub const LANE_I128: u64 = 4;
+// A struct or tuple of scalar fields (#2411): its register holds a
+// pointer to its storage, a word on the 64-bit targets.
+pub const LANE_PRODUCT: u64 = 5;
 
 // A local's entry: a lane code for a local the body declares, or
 // `LOCAL_PARAM` plus the parameter's index for one of the parameters.
@@ -54,6 +58,9 @@ pub const INST_CALL_BUILTIN: u64 = 12;
 pub const INST_WIDE_CONST: u64 = 13;
 pub const INST_WIDE_UNARY: u64 = 14;
 pub const INST_WIDE_BINARY: u64 = 15;
+// A struct or tuple built from scalar fields (`Op::Data`, `Op::Tuple`;
+// `Codegen::data_into`), #2411.
+pub const INST_DATA: u64 = 32;
 
 // Sub-operations of `INST_FLOAT_UNARY` and 1-arg `CB_FLOAT_UNARY`.
 const FUN_FNEG: u64 = 1;
@@ -100,6 +107,17 @@ const IEX_UREM: u64 = 8;
 const IEX_SHL: u64 = 9;
 const IEX_USHR: u64 = 10;
 const IEX_SSHR: u64 = 11;
+const IEX_WORD_CONVERT: u64 = 12;
+const IEX_WRAPPING_ADD: u64 = 13;
+const IEX_WRAPPING_SUB: u64 = 14;
+const IEX_WRAPPING_MUL: u64 = 15;
+const IEX_BNOT: u64 = 16;
+const IEX_INEG: u64 = 17;
+const IEX_LNOT: u64 = 18;
+const IEX_BAND: u64 = 19;
+const IEX_BOR: u64 = 20;
+const IEX_BXOR: u64 = 21;
+const IEX_WORD_BIN: u64 = 22;
 
 // Sub-operations of `INST_WRITE_OP`.
 const WOP_IADD: u64 = 1;
@@ -189,6 +207,16 @@ const TERM_JUMP: u64 = 1;
 const TERM_BRANCH: u64 = 2;
 const TERM_MATCH: u64 = 3;
 const TERM_UNREACHABLE: u64 = 4;
+// `return` of a struct result through the result pointer (#2411).
+const TERM_RETURN_SRET: u64 = 32;
+
+// `Codegen::data_into`'s word step, and its smallest storage.
+const WORD_BYTES: u64 = 8;
+
+// `Op::Data`'s operands: a header of name and count, then one
+// (field name, value) pair per field.
+const DATA_HEADER_WORDS: u64 = 2;
+const DATA_PAIR_WORDS: u64 = 2;
 
 // Pattern word counts and table bitfields.
 const PAT_WILD_WORDS: u64 = 3;
@@ -282,6 +310,9 @@ impl Gen {
         if n.kind == TyKind::Tuple && n.n == 0 {
             return LANE_I64;
         }
+        if n.kind == TyKind::Tuple {
+            return self.body_product_lane(d);
+        }
         if n.kind != TyKind::Named || n.n != 0 {
             return 0;
         }
@@ -299,8 +330,165 @@ impl Gen {
                 LANE_I64
             }
         } else {
-            0
+            self.body_product_lane(d)
         }
+    }
+
+    // LANE_PRODUCT for a struct or tuple whose fields are all scalars
+    // (`Layout::of` a product with no aggregate field), else 0.
+    fn body_product_lane(inout self, d: u32) -> u64 {
+        let mark = self.layouts.mark();
+        let l = layout_of(
+            inout self.layouts,
+            inout self.ctx.types,
+            inout self.ctx.names,
+            in self.ctx.world,
+            d
+        );
+        let mut lane: u64 = 0;
+        if l != NONE32 && self.layouts.node(l).kind == L_PRODUCT {
+            let node = self.layouts.node(l);
+            lane = LANE_PRODUCT;
+            for k in 0..widen_u64(node.n) {
+                let field = self.layouts.lfield(add(widen_u64(node.a), k));
+                if self.layouts.aggregate(field.layout) {
+                    lane = 0;
+                }
+            }
+        }
+        self.layouts.reset(mark);
+        lane
+    }
+
+    // `Codegen::data_into` of a product (#2411): the fields' values in
+    // `ops`, then in `extra` the storage size, the words to zero first on
+    // the optimize path (those no field overwrites whole; an `f32` field
+    // writes only its low half), and per field its offset, its value's
+    // read kind and the kind its store coerces to. False for anything
+    // else.
+    fn body_data(
+        inout self,
+        in h: Header,
+        i: InstRow,
+        inout ops: ChunkSeq[u64],
+        inout extra: ChunkSeq[u64]
+    ) -> bool {
+        if self.body_lane(i.ty) != LANE_PRODUCT {
+            return false;
+        }
+        let mark = self.layouts.mark();
+        let d = default_type(inout self.ctx.types, i.ty);
+        let l = layout_of(
+            inout self.layouts,
+            inout self.ctx.types,
+            inout self.ctx.names,
+            in self.ctx.world,
+            d
+        );
+        let node = self.layouts.node(l);
+        // `Op::Data`: name, count, (field, value) pairs; `Op::Tuple`:
+        // count, values.
+        let data = i.op == Op::Data;
+        let n = if data {
+            self.program.op(inc(i.a))
+        } else {
+            self.program.op(i.a)
+        };
+        let mut fields: ChunkSeq[u64] = ChunkSeq::new[u64]();
+        let mut covered: ChunkSeq[u64] = ChunkSeq::new[u64]();
+        let mut ok = true;
+        for k in 0..n {
+            let (field, at) = if data {
+                let pair = add(add(i.a, DATA_HEADER_WORDS), wrapping_mul(k, DATA_PAIR_WORDS));
+                (self.layouts.field_named(l, n32(self.program.op(pair))), inc(pair))
+            } else {
+                (wrapping_u32(k), add(inc(i.a), k))
+            };
+            if field == NONE32
+                || widen_u64(field) >= widen_u64(node.n)
+                || !self.body_operand(in h, at, inout ops)
+            {
+                ok = false;
+                break;
+            }
+            let lf = self.layouts.lfield(add(widen_u64(node.a), widen_u64(field)));
+            let start = wrapping_u64(widen_i64(lf.offset));
+            let size = widen_u64(self.layouts.node(lf.layout).size);
+            let vt = n32(u64_at(in h.vty, u64_at(in ops, k)));
+            if self.body_lane(vt) == LANE_PRODUCT {
+                ok = false;
+                break;
+            }
+            let ft = default_type(inout self.ctx.types, lf.ty);
+            let fnode = self.ctx.types.node(ft);
+            let half = fnode.kind == TyKind::Named
+                && fnode.n == 0
+                && fnode.name == self.ctx.world.k.f32_;
+            if !half {
+                let mut off = start;
+                loop {
+                    if off >= add(start, size) {
+                        break;
+                    }
+                    covered.push(off);
+                    off = add(off, WORD_BYTES);
+                }
+            }
+            fields.push(start);
+            let vd = default_type(inout self.ctx.types, vt);
+            let read = self.body_kind(vd);
+            let store = self.body_kind(ft);
+            fields.push(read);
+            fields.push(store);
+        }
+        let size = widen_u64(node.size);
+        self.layouts.reset(mark);
+        if !ok {
+            return false;
+        }
+        extra.push(size);
+        let end = if size < WORD_BYTES { WORD_BYTES } else { size };
+        let mut zeroed: ChunkSeq[u64] = ChunkSeq::new[u64]();
+        let mut off: u64 = 0;
+        loop {
+            if off >= end {
+                break;
+            }
+            let mut hit = false;
+            for c in 0..covered.len() {
+                if u64_at(in covered, c) == off {
+                    hit = true;
+                }
+            }
+            if !hit {
+                zeroed.push(off);
+            }
+            off = add(off, WORD_BYTES);
+        }
+        extra.push(zeroed.len());
+        extra.extend(in zeroed.as_slice());
+        extra.extend(in fields.as_slice());
+        true
+    }
+
+    // The storage size of a product type (`Layout::of(..).size`).
+    fn body_product_size(inout self, t: u32) -> u64 {
+        let mark = self.layouts.mark();
+        let d = default_type(inout self.ctx.types, t);
+        let l = layout_of(
+            inout self.layouts,
+            inout self.ctx.types,
+            inout self.ctx.names,
+            in self.ctx.world,
+            d
+        );
+        let size = if l == NONE32 {
+            0
+        } else {
+            widen_u64(self.layouts.node(l).size)
+        };
+        self.layouts.reset(mark);
+        size
     }
 
     // `Gen::is_register_scalar` of @vesper/native-walk: an integer, float
@@ -633,22 +821,30 @@ impl Gen {
             let to_ik = conv & TABLE_KIND_MASK;
             let from_ik = self.kind_of(op_def);
             if from_ik != 0
-                && (kind_wide(from_ik) || kind_wide(to_ik))
                 && !((conv >> TABLE_OP_SHIFT) == CONV_NARROW
                     && self.ctx.world.may_overflow(i.s0, i.s1))
             {
-                kind = INST_WIDE_UNARY;
-                extra.push(WUN_CONVERT);
-                extra.push(widen_u64(from_ik));
-                extra.push(
-                    if kind_narrow(to_ik) || kind_wide(to_ik) {
-                        widen_u64(to_ik)
-                    } else {
-                        0
-                    }
-                );
-                extra.push(op_kind);
-                extra.push(res_kind);
+                let to_kind = if kind_narrow(to_ik) || kind_wide(to_ik) {
+                    widen_u64(to_ik)
+                } else {
+                    0
+                };
+                if kind_wide(from_ik) || kind_wide(to_ik) {
+                    kind = INST_WIDE_UNARY;
+                    extra.push(WUN_CONVERT);
+                    extra.push(widen_u64(from_ik));
+                    extra.push(to_kind);
+                    extra.push(op_kind);
+                    extra.push(res_kind);
+                } else {
+                    kind = INST_INT_EXTRA;
+                    extra.push(IEX_WORD_CONVERT);
+                    extra.push(to_kind);
+                    extra.push(0);
+                    extra.push(op_kind);
+                    extra.push(0);
+                    extra.push(res_kind);
+                }
                 return true;
             }
         }
@@ -668,6 +864,27 @@ impl Gen {
                 extra.push(0);
                 extra.push(0);
                 extra.push(op_kind);
+                extra.push(res_kind);
+                return true;
+            }
+        }
+        if op_lane == LANE_I64 {
+            let sub_iex = if op == self.ops.tilde {
+                IEX_BNOT
+            } else if op == self.ops.minus && !self.ctx.world.may_overflow(i.s0, i.s1) {
+                IEX_INEG
+            } else if op == self.ops.bang {
+                IEX_LNOT
+            } else {
+                0
+            };
+            if sub_iex != 0 {
+                kind = INST_INT_EXTRA;
+                extra.push(sub_iex);
+                extra.push(0);
+                extra.push(0);
+                extra.push(op_kind);
+                extra.push(0);
                 extra.push(res_kind);
                 return true;
             }
@@ -921,6 +1138,71 @@ impl Gen {
             extra.push(k1);
             extra.push(rk);
             return true;
+        }
+        if op == ops_s.wrapping_add
+            || op == ops_s.wrapping_sub
+            || op == ops_s.wrapping_mul
+            || op == ops_s.amp
+            || op == ops_s.pipe
+            || op == ops_s.caret
+        {
+            let sub_iex = if op == ops_s.wrapping_add {
+                IEX_WRAPPING_ADD
+            } else if op == ops_s.wrapping_sub {
+                IEX_WRAPPING_SUB
+            } else if op == ops_s.wrapping_mul {
+                IEX_WRAPPING_MUL
+            } else if op == ops_s.amp {
+                IEX_BAND
+            } else if op == ops_s.pipe {
+                IEX_BOR
+            } else {
+                IEX_BXOR
+            };
+            kind = INST_INT_EXTRA;
+            extra.push(sub_iex);
+            extra.push(0);
+            extra.push(0);
+            extra.push(k0);
+            extra.push(k1);
+            extra.push(rk);
+            return true;
+        }
+        let ik = self.kind_of(d0);
+        if ik != 0 && !kind_wide(ik) {
+            let unsigned = kind_unsigned(ik);
+            let overflow = self.ctx.world.may_overflow(i.s0, i.s1);
+            let wb = if op == ops_s.plus && !overflow {
+                WBIN_IADD
+            } else if op == ops_s.minus && !overflow {
+                WBIN_ISUB
+            } else if op == ops_s.star && !overflow {
+                WBIN_IMUL
+            } else if op == ops_s.eq {
+                WBIN_EQ
+            } else if op == ops_s.ne {
+                WBIN_NE
+            } else if op == ops_s.lt {
+                if unsigned { WBIN_ULT } else { WBIN_SLT }
+            } else if op == ops_s.le {
+                if unsigned { WBIN_ULE } else { WBIN_SLE }
+            } else if op == ops_s.gt {
+                if unsigned { WBIN_UGT } else { WBIN_SGT }
+            } else if op == ops_s.ge {
+                if unsigned { WBIN_UGE } else { WBIN_SGE }
+            } else {
+                0
+            };
+            if wb != 0 {
+                kind = INST_INT_EXTRA;
+                extra.push(IEX_WORD_BIN);
+                extra.push(wb);
+                extra.push(0);
+                extra.push(k0);
+                extra.push(k1);
+                extra.push(rk);
+                return true;
+            }
         }
         false
     }
@@ -1393,6 +1675,11 @@ impl Gen {
             if !self.body_write(in h, i, inout ops, inout kind, inout extra) {
                 return false;
             }
+        } else if i.op == Op::Data || i.op == Op::Tuple {
+            kind = INST_DATA;
+            if !self.body_data(in h, i, inout ops, inout extra) {
+                return false;
+            }
         } else if i.op == Op::Call {
             let mut bops: ChunkSeq[u64] = ChunkSeq::new[u64]();
             if self.body_call_builtin(
@@ -1424,6 +1711,18 @@ impl Gen {
             }
         } else {
             return false;
+        }
+        // A product is only built (INST_DATA) and returned: any other
+        // instruction that makes or reads one is left to the walk.
+        if kind != INST_DATA {
+            if self.body_lane(i.ty) == LANE_PRODUCT {
+                return false;
+            }
+            for k in 0..ops.len() {
+                if self.body_lane(n32(u64_at(in h.vty, u64_at(in ops, k)))) == LANE_PRODUCT {
+                    return false;
+                }
+            }
         }
         o.push(kind);
         o.push(dest);
@@ -1479,7 +1778,18 @@ impl Gen {
             if v == NONE64 {
                 return false;
             }
-            let d = self.body_default(n32(u64_at(in h.vty, v)), h.result);
+            let vt = n32(u64_at(in h.vty, v));
+            let d = self.body_default(vt, h.result);
+            if self.body_lane(h.result) == LANE_PRODUCT {
+                // Copied to the result pointer unless built in it.
+                if d != 0 || self.body_lane(vt) != LANE_PRODUCT {
+                    return false;
+                }
+                o.push(TERM_RETURN_SRET);
+                o.push(v);
+                o.push(self.body_product_size(h.result));
+                return true;
+            }
             o.push(TERM_RETURN);
             o.push(v);
             o.push(d);
@@ -1495,7 +1805,10 @@ impl Gen {
             for k in 0..n {
                 let v = self.body_value(in h, self.program.op(add(add(ta, 2), k)));
                 let param = self.body_block_param(in h, trow.ha, k);
-                if v == NONE64 || param == NONE64 {
+                if v == NONE64
+                    || param == NONE64
+                    || self.body_lane(n32(u64_at(in h.vty, v))) == LANE_PRODUCT
+                {
                     return false;
                 }
                 o.push(v);
@@ -1521,7 +1834,7 @@ impl Gen {
             }
             let vty = n32(u64_at(in h.vty, v));
             let vlane = self.body_lane(vty);
-            if vlane == 0 {
+            if vlane == 0 || vlane == LANE_PRODUCT {
                 return false;
             }
             let narms = self.program.op(inc(ta));
@@ -1671,7 +1984,9 @@ impl Gen {
             graph_words.push(np);
             for k in 0..np {
                 let v = self.body_value(in h, self.program.op(add(inc(pa), k)));
-                if v == NONE64 {
+                // A product joined at a block parameter has a home of its
+                // own (`aggregates::plan`), left to the walk.
+                if v == NONE64 || self.body_lane(n32(u64_at(in h.vty, v))) == LANE_PRODUCT {
                     return;
                 }
                 graph_words.push(v);

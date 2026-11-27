@@ -9,6 +9,8 @@
 //!
 //! `TEST_RUNNER_SPEED=1` runs the ABBA timing of the ignored test.
 
+#[path = "common/flip_gate.rs"]
+mod flip_gate;
 #[path = "common/test_runner_words.rs"]
 mod words;
 
@@ -457,6 +459,12 @@ fn discovery_speed() {
             }
         })
     };
+    if flip_gate::on() {
+        let mut rust = rust;
+        let mut vesper = vesper;
+        flip_gate::pairs("test-discovery", &mut rust, &mut vesper);
+        return;
+    }
     let mut rs: Vec<Duration> = vec![];
     let mut vs: Vec<Duration> = vec![];
     for _ in 0..3 {

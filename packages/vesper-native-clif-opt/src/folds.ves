@@ -1,0 +1,613 @@
+// The fold steps of src/native_clif_opt.rs in Vesper (#2423, part of
+// #2362): canonicalize_imm_ops, fold_load_store_offsets and cse_dom_pure.
+
+use @vesper/clif::{Func, u32_at, w};
+use @vesper/clif::codes::{
+    CC_EQ, CC_NE, NONE, OP_BAND, OP_BAND_IMM, OP_BNOT, OP_BOR, OP_BOR_IMM, OP_BXOR, OP_BXOR_IMM,
+    OP_CALL, OP_CALL_INDIRECT, OP_IADD, OP_IADD_IMM, OP_ICMP, OP_ICMP_IMM, OP_IMUL, OP_IMUL_IMM,
+    OP_INEG, OP_IREDUCE, OP_ISHL, OP_ISHL_IMM, OP_ISTORE16, OP_ISTORE32, OP_ISTORE8, OP_ISUB,
+    OP_LOAD, OP_SEXTEND, OP_SLOAD16, OP_SLOAD32, OP_SLOAD8, OP_SSHR, OP_SSHR_IMM, OP_STACK_ADDR,
+    OP_STORE, OP_UEXTEND, OP_ULOAD16, OP_ULOAD32, OP_ULOAD8, OP_USHR, OP_USHR_IMM, TY_I16, TY_I32,
+    TY_I64, TY_I8
+};
+use super::{layout_insts, type_bits};
+use super::branches::{block_insts, cfg_of, constant, dom_kids, dom_of, sext, use_count, use_counts};
+
+// `canonicalize_imm_ops` stops after this many rounds.
+const MAX_IMM_CANON_ROUNDS: u64 = 4;
+// The depth the fold steps ask `constant` from.
+const FOLD_CONST_DEPTH: u64 = 1;
+
+// Bit widths an immediate is sign-extended from.
+const BITS_8: u64 = 8;
+const BITS_16: u64 = 16;
+const BITS_32: u64 = 32;
+const BITS_64: u64 = 64;
+
+// The i32 range of a load or store offset, as i64 words.
+const I32_MIN_WORD: u64 = 18446744071562067968;
+const I32_MAX_WORD: u64 = 2147483647;
+// The sign bit of an i64.
+const SIGN_BIT: u64 = 9223372036854775808;
+
+// A memory access's address argument: a load's first, a store's second.
+const LOAD_ADDR_ARG: u64 = 0;
+const STORE_ADDR_ARG: u64 = 1;
+
+// An immediate of `ty` sign-extended from its width (`sign_extend_imm`);
+// `ok` false for a type that is not 8, 16, 32 or 64 bits.
+copy struct Imm {
+    ok: bool,
+    v: u64,
+}
+
+fn sign_extend_imm(ty: u64, c: u64) -> Imm {
+    let bits = type_bits(ty);
+    if bits == BITS_64 {
+        return Imm { ok: true, v: c };
+    }
+    if bits == BITS_8 || bits == BITS_16 || bits == BITS_32 {
+        return Imm { ok: true, v: sext(c, bits) };
+    }
+    Imm { ok: false, v: 0 }
+}
+
+fn is_int_scalar(ty: u64) -> bool {
+    ty == TY_I8 || ty == TY_I16 || ty == TY_I32 || ty == TY_I64
+}
+
+fn is_commutative(op: u64) -> bool {
+    op == OP_IADD || op == OP_IMUL || op == OP_BAND || op == OP_BOR || op == OP_BXOR
+}
+
+// The immediate form of a binary opcode, or 0.
+fn imm_form(op: u64) -> u64 {
+    if op == OP_IADD {
+        OP_IADD_IMM
+    } else if op == OP_IMUL {
+        OP_IMUL_IMM
+    } else if op == OP_BAND {
+        OP_BAND_IMM
+    } else if op == OP_BOR {
+        OP_BOR_IMM
+    } else if op == OP_BXOR {
+        OP_BXOR_IMM
+    } else if op == OP_ISHL {
+        OP_ISHL_IMM
+    } else if op == OP_USHR {
+        OP_USHR_IMM
+    } else if op == OP_SSHR {
+        OP_SSHR_IMM
+    } else {
+        0
+    }
+}
+
+fn is_shift(op: u64) -> bool {
+    op == OP_ISHL || op == OP_USHR || op == OP_SSHR
+}
+
+// `iadd_imm_parts`: when `v` is used once and is result 0 of an
+// `iadd_imm`, that instruction (its argument and immediate are read off
+// it); NONE otherwise.
+fn iadd_imm_parts(in f: Func, in uses: ChunkSeq[u32], v: u32) -> u32 {
+    if use_count(in uses, v) != 1 {
+        return NONE;
+    }
+    let d = f.def_inst(v);
+    if d == NONE || f.def_num(v) != 0 || f.op(d) != OP_IADD_IMM {
+        return NONE;
+    }
+    d
+}
+
+// An `iadd` of `a` and `b` just before `i`, which becomes `iadd_imm` of
+// it and `sc`.
+fn add_then_imm(inout f: Func, i: u32, a: u32, b: u32, sc: u64) {
+    let mut args = ChunkSeq::new[u32]();
+    args.push(a);
+    args.push(b);
+    let none_dests = ChunkSeq::new[u32]();
+    let sum = f.ins_before(i, OP_IADD, 0, 0, 0, 0, 0, in args, in none_dests);
+    let s = f.result(sum, 0);
+    f.replace_imm(i, OP_IADD_IMM, s, sc);
+}
+
+// `canonicalize_imm_ops`: a binary integer operation with a constant
+// operand takes it as an immediate, `iadd`s of single-use `iadd_imm`s
+// gather the immediates, `icmp eq/ne` against a nonzero constant becomes
+// `icmp_imm`, and chains of one immediate operation combine.
+pub fn canonicalize_imm_ops(inout f: Func) {
+    for _ in 0..MAX_IMM_CANON_ROUNDS {
+        let uses = use_counts(in f);
+        let mut changed = false;
+        let all = layout_insts(in f);
+        for q in 0..all.len() {
+            let inst = u32_at(in all, q);
+            let op = f.op(inst);
+            let row = f.inst(w(inst));
+            let form = imm_form(op);
+            if form != 0 {
+                let lhs = f.resolve(f.arg(inst, 0));
+                let rhs = f.resolve(f.arg(inst, 1));
+                let ty = f.value_type(f.result(inst, 0));
+                if !is_int_scalar(ty) {
+                    continue;
+                }
+                let rc = constant(in f, rhs, FOLD_CONST_DEPTH);
+                let mut var = NONE;
+                let mut c: u64 = 0;
+                if rc.some {
+                    var = lhs;
+                    c = rc.v;
+                } else if is_commutative(op) {
+                    let lc = constant(in f, lhs, FOLD_CONST_DEPTH);
+                    if lc.some {
+                        var = rhs;
+                        c = lc.v;
+                    }
+                }
+                if var == NONE {
+                    if op != OP_IADD {
+                        continue;
+                    }
+                    let li = iadd_imm_parts(in f, in uses, lhs);
+                    let ri = iadd_imm_parts(in f, in uses, rhs);
+                    if li != NONE && ri != NONE {
+                        let ld = f.inst(w(li)).imm;
+                        let rd = f.inst(w(ri)).imm;
+                        let sc = sign_extend_imm(ty, wrapping_add(ld, rd));
+                        if sc.ok {
+                            let lx = f.resolve(f.arg(li, 0));
+                            let rx = f.resolve(f.arg(ri, 0));
+                            add_then_imm(inout f, inst, lx, rx, sc.v);
+                            changed = true;
+                        }
+                    } else if li != NONE {
+                        let sc = sign_extend_imm(ty, f.inst(w(li)).imm);
+                        if sc.ok {
+                            let lx = f.resolve(f.arg(li, 0));
+                            add_then_imm(inout f, inst, lx, rhs, sc.v);
+                            changed = true;
+                        }
+                    } else if ri != NONE {
+                        let sc = sign_extend_imm(ty, f.inst(w(ri)).imm);
+                        if sc.ok {
+                            let rx = f.resolve(f.arg(ri, 0));
+                            add_then_imm(inout f, inst, lhs, rx, sc.v);
+                            changed = true;
+                        }
+                    }
+                    continue;
+                }
+                if is_shift(op) {
+                    f.replace_imm(inst, form, var, c);
+                    changed = true;
+                } else {
+                    let sc = sign_extend_imm(ty, c);
+                    if sc.ok {
+                        f.replace_imm(inst, form, var, sc.v);
+                        changed = true;
+                    }
+                }
+            } else if op == OP_ICMP && (row.cond == CC_EQ || row.cond == CC_NE) {
+                let lhs = f.resolve(f.arg(inst, 0));
+                let rhs = f.resolve(f.arg(inst, 1));
+                let ty = f.value_type(lhs);
+                let rc = constant(in f, rhs, FOLD_CONST_DEPTH);
+                let rs = sign_extend_imm(ty, rc.v);
+                if rc.some && rc.v != 0 && rs.ok {
+                    f.replace_icmp_imm(inst, row.cond, lhs, rs.v);
+                    changed = true;
+                } else {
+                    let lc = constant(in f, lhs, FOLD_CONST_DEPTH);
+                    let ls = sign_extend_imm(ty, lc.v);
+                    if lc.some && lc.v != 0 && ls.ok {
+                        f.replace_icmp_imm(inst, row.cond, rhs, ls.v);
+                        changed = true;
+                    }
+                }
+            } else if op == OP_IADD_IMM
+                || op == OP_IMUL_IMM
+                || op == OP_BAND_IMM
+                || op == OP_BOR_IMM
+                || op == OP_BXOR_IMM
+            {
+                let arg = f.resolve(f.arg(inst, 0));
+                let ty = f.value_type(f.result(inst, 0));
+                let def = f.def_inst(arg);
+                if def == NONE || f.def_num(arg) != 0 {
+                    continue;
+                }
+                let inner = f.inst(w(def));
+                if inner.op != op {
+                    if op == OP_IMUL_IMM
+                        && inner.op == OP_IADD_IMM
+                        && use_count(in uses, arg) == 1
+                    {
+                        let inner_arg = f.resolve(f.arg(def, 0));
+                        let k = row.imm;
+                        let sk = sign_extend_imm(ty, k);
+                        let sdisp = sign_extend_imm(ty, wrapping_mul(inner.imm, k));
+                        if sk.ok && sdisp.ok {
+                            let mut args = ChunkSeq::new[u32]();
+                            args.push(inner_arg);
+                            let none_dests = ChunkSeq::new[u32]();
+                            let scaled = f.ins_before(
+                                inst,
+                                OP_IMUL_IMM,
+                                0,
+                                0,
+                                sk.v,
+                                0,
+                                0,
+                                in args,
+                                in none_dests
+                            );
+                            let s = f.result(scaled, 0);
+                            f.replace_imm(inst, OP_IADD_IMM, s, sdisp.v);
+                            changed = true;
+                        }
+                    }
+                    continue;
+                }
+                let inner_arg = f.resolve(f.arg(def, 0));
+                let c1 = inner.imm;
+                let c2 = row.imm;
+                let combined = if op == OP_IADD_IMM {
+                    wrapping_add(c1, c2)
+                } else if op == OP_IMUL_IMM {
+                    wrapping_mul(c1, c2)
+                } else if op == OP_BAND_IMM {
+                    c1 & c2
+                } else if op == OP_BOR_IMM {
+                    c1 | c2
+                } else {
+                    c1 ^ c2
+                };
+                let sc = sign_extend_imm(ty, combined);
+                if !sc.ok {
+                    continue;
+                }
+                f.replace_imm(inst, op, inner_arg, sc.v);
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+}
+
+// ----- fold_load_store_offsets ---------------------------------------------
+
+fn is_load(op: u64) -> bool {
+    op == OP_LOAD
+        || op == OP_ULOAD8
+        || op == OP_SLOAD8
+        || op == OP_ULOAD16
+        || op == OP_SLOAD16
+        || op == OP_ULOAD32
+        || op == OP_SLOAD32
+}
+
+fn is_store(op: u64) -> bool {
+    op == OP_STORE || op == OP_ISTORE8 || op == OP_ISTORE16 || op == OP_ISTORE32
+}
+
+// `a + b` as i64s when it does not overflow and fits an i32.
+copy struct Off {
+    ok: bool,
+    v: u64,
+}
+
+fn add_offset(a: u64, b: u64) -> Off {
+    let sum = wrapping_add(a, b);
+    // Signed overflow: both operands have one sign and the sum the other.
+    let overflow = ((a ^ sum) & (b ^ sum) & SIGN_BIT) != 0;
+    let fits = (sum ^ SIGN_BIT) >= (I32_MIN_WORD ^ SIGN_BIT)
+        && (sum ^ SIGN_BIT) <= (I32_MAX_WORD ^ SIGN_BIT);
+    Off { ok: !overflow && fits, v: sum }
+}
+
+// `fold_load_store_offsets`: a load's or store's address that is
+// `iadd_imm(base, d)` becomes `base` with `d` added to the offset when the
+// sum fits an i32.
+pub fn fold_load_store_offsets(inout f: Func) {
+    let all = layout_insts(in f);
+    for q in 0..all.len() {
+        let inst = u32_at(in all, q);
+        let op = f.op(inst);
+        if !is_load(op) && !is_store(op) {
+            continue;
+        }
+        let at = if is_load(op) {
+            LOAD_ADDR_ARG
+        } else {
+            STORE_ADDR_ARG
+        };
+        if f.nargs(inst) <= at {
+            continue;
+        }
+        let addr = f.resolve(f.arg(inst, at));
+        let def = f.def_inst(addr);
+        if def == NONE || f.def_num(addr) != 0 || f.op(def) != OP_IADD_IMM {
+            continue;
+        }
+        let o = add_offset(f.inst(w(inst)).off, f.inst(w(def)).imm);
+        if !o.ok {
+            continue;
+        }
+        let base = f.resolve(f.arg(def, 0));
+        f.set_mem_addr(inst, at, base, o.v);
+    }
+}
+
+// ----- cse_dom_pure --------------------------------------------------------
+
+// The kinds of `PureKey`.
+const KEY_STACK_ADDR: u64 = 1;
+const KEY_UNARY: u64 = 2;
+const KEY_BINARY: u64 = 3;
+const KEY_BINARY_IMM: u64 = 4;
+const KEY_ICMP: u64 = 5;
+const KEY_ICMP_IMM: u64 = 6;
+
+// The buckets of the key table: a power of two.
+const KEY_BUCKETS: u64 = 4096;
+const KEY_BUCKET_MASK: u64 = 4095;
+// Multipliers that spread a key's words over the buckets.
+const HASH_MUL: u64 = 11400714819323198485;
+const HASH_SHIFT: u64 = 52;
+
+// `PureKey`: the kind, then up to four words.
+copy struct Key {
+    kind: u64,
+    a: u64,
+    b: u64,
+    c: u64,
+    d: u64,
+}
+
+fn no_key() -> Key {
+    Key { kind: 0, a: 0, b: 0, c: 0, d: 0 }
+}
+
+fn same_key(x: Key, y: Key) -> bool {
+    x.kind == y.kind && x.a == y.a && x.b == y.b && x.c == y.c && x.d == y.d
+}
+
+fn key_bucket(k: Key) -> u64 {
+    let mut h = k.kind;
+    h = wrapping_mul(h ^ k.a, HASH_MUL);
+    h = wrapping_mul(h ^ k.b, HASH_MUL);
+    h = wrapping_mul(h ^ k.c, HASH_MUL);
+    h = wrapping_mul(h ^ k.d, HASH_MUL);
+    (h >> HASH_SHIFT) & KEY_BUCKET_MASK
+}
+
+fn is_unary_key(op: u64) -> bool {
+    op == OP_UEXTEND || op == OP_SEXTEND || op == OP_IREDUCE || op == OP_BNOT || op == OP_INEG
+}
+
+fn is_binary_key(op: u64) -> bool {
+    op == OP_IADD
+        || op == OP_ISUB
+        || op == OP_IMUL
+        || op == OP_BAND
+        || op == OP_BOR
+        || op == OP_BXOR
+        || op == OP_ISHL
+        || op == OP_USHR
+        || op == OP_SSHR
+}
+
+fn is_binary_imm_key(op: u64) -> bool {
+    op == OP_IADD_IMM
+        || op == OP_IMUL_IMM
+        || op == OP_BAND_IMM
+        || op == OP_BOR_IMM
+        || op == OP_BXOR_IMM
+        || op == OP_ISHL_IMM
+        || op == OP_USHR_IMM
+        || op == OP_SSHR_IMM
+}
+
+// The `PureKey` of `inst` with result `dest`, or kind 0.
+fn pure_key(in f: Func, inst: u32, dest: u32) -> Key {
+    let op = f.op(inst);
+    let row = f.inst(w(inst));
+    let ty = f.value_type(dest);
+    if op == OP_STACK_ADDR {
+        return Key { kind: KEY_STACK_ADDR, a: row.imm, b: row.off, c: ty, d: 0 };
+    }
+    if is_unary_key(op) {
+        return Key { kind: KEY_UNARY, a: op, b: w(f.resolve(f.arg(inst, 0))), c: ty, d: 0 };
+    }
+    if is_binary_key(op) {
+        let a = f.resolve(f.arg(inst, 0));
+        let b = f.resolve(f.arg(inst, 1));
+        let swap = is_commutative(op) && a > b;
+        let lo = if swap { b } else { a };
+        let hi = if swap { a } else { b };
+        return Key { kind: KEY_BINARY, a: op, b: w(lo), c: w(hi), d: ty };
+    }
+    if is_binary_imm_key(op) {
+        return Key {
+            kind: KEY_BINARY_IMM,
+            a: op,
+            b: w(f.resolve(f.arg(inst, 0))),
+            c: row.imm,
+            d: ty
+        };
+    }
+    if op == OP_ICMP {
+        let a = f.resolve(f.arg(inst, 0));
+        let b = f.resolve(f.arg(inst, 1));
+        let swap = (row.cond == CC_EQ || row.cond == CC_NE) && a > b;
+        let lo = if swap { b } else { a };
+        let hi = if swap { a } else { b };
+        return Key { kind: KEY_ICMP, a: row.cond, b: w(lo), c: w(hi), d: 0 };
+    }
+    if op == OP_ICMP_IMM {
+        return Key {
+            kind: KEY_ICMP_IMM,
+            a: row.cond,
+            b: w(f.resolve(f.arg(inst, 0))),
+            c: row.imm,
+            d: 0
+        };
+    }
+    no_key()
+}
+
+// The keys seen on the dominator-tree path: a log of entries chained per
+// bucket (newest first), and the log positions of the calls that cleared
+// it. An entry counts only after the last clear.
+struct Seen {
+    head: ChunkSeq[u64],
+    keys: ChunkSeq[Key],
+    vals: ChunkSeq[u32],
+    next: ChunkSeq[u64],
+    clears: ChunkSeq[u64],
+}
+
+// No entry: the end of a bucket's chain.
+const NO_ENTRY: u64 = 18446744073709551615;
+
+fn seen_find(in s: Seen, k: Key) -> u32 {
+    let n = s.clears.len();
+    let floor = if n == 0 {
+        0
+    } else {
+        s.clears.try_get(wrapping_sub(n, 1)).unwrap_or(0)
+    };
+    let mut e = s.head.try_get(key_bucket(k)).unwrap_or(NO_ENTRY);
+    loop {
+        if e == NO_ENTRY || e < floor {
+            return NONE;
+        }
+        let x = match s.keys.try_get(e) {
+            Option::Some(y) => y,
+            Option::None => return NONE,
+        };
+        if same_key(x, k) {
+            return u32_at(in s.vals, e);
+        }
+        e = s.next.try_get(e).unwrap_or(NO_ENTRY);
+    }
+}
+
+fn seen_put(inout s: Seen, k: Key, v: u32) {
+    let b = key_bucket(k);
+    let e = s.keys.len();
+    s.next.push(s.head.try_get(b).unwrap_or(NO_ENTRY));
+    s.keys.push(k);
+    s.vals.push(v);
+    let ok = s.head.try_set(b, e);
+}
+
+// Back to `mark` entries and `clears` clears.
+fn seen_undo(inout s: Seen, mark: u64, clears: u64) {
+    loop {
+        if s.keys.len() <= mark {
+            break;
+        }
+        let k = match s.keys.pop() {
+            Option::Some(x) => x,
+            Option::None => break,
+        };
+        let v = s.vals.pop();
+        let n = match s.next.pop() {
+            Option::Some(x) => x,
+            Option::None => NO_ENTRY,
+        };
+        let ok = s.head.try_set(key_bucket(k), n);
+    }
+    loop {
+        if s.clears.len() <= clears {
+            break;
+        }
+        let c = s.clears.pop();
+    }
+}
+
+// A dominator-tree walk item: visit `block`, or undo back to `mark`
+// entries and `clears` clears.
+copy struct Step {
+    visit: bool,
+    block: u32,
+    mark: u64,
+    clears: u64,
+}
+
+// `cse_dom_pure`: walking the dominator tree, a pure integer operation (or
+// `stack_addr`) equal to one a dominating block already computed, with no
+// call between, becomes an alias of it.
+pub fn cse_dom_pure(inout f: Func) {
+    let entry = f.first_block();
+    if entry == NONE {
+        return;
+    }
+    let cfg = cfg_of(in f);
+    let dom = dom_of(in f, in cfg);
+    let kids = dom_kids(in dom, f.nblocks());
+    let mut seen = Seen {
+        head: ChunkSeq::new[u64](),
+        keys: ChunkSeq::new[Key](),
+        vals: ChunkSeq::new[u32](),
+        next: ChunkSeq::new[u64](),
+        clears: ChunkSeq::new[u64]()
+    };
+    seen.head.resize(KEY_BUCKETS, NO_ENTRY);
+    let mut work = ChunkSeq::new[Step]();
+    work.push(Step { visit: true, block: entry, mark: 0, clears: 0 });
+    loop {
+        let item = match work.pop() {
+            Option::Some(x) => x,
+            Option::None => break,
+        };
+        if !item.visit {
+            seen_undo(inout seen, item.mark, item.clears);
+            continue;
+        }
+        let block = item.block;
+        let mark = seen.keys.len();
+        let clears = seen.clears.len();
+        work.push(Step { visit: false, block: block, mark: mark, clears: clears });
+        let body = block_insts(in f, block);
+        for q in 0..body.len() {
+            let inst = u32_at(in body, q);
+            let op = f.op(inst);
+            if op == OP_CALL || op == OP_CALL_INDIRECT {
+                let at = seen.keys.len();
+                seen.clears.push(at);
+                continue;
+            }
+            if f.nresults(inst) != 1 {
+                continue;
+            }
+            let dest = f.result(inst, 0);
+            let k = pure_key(in f, inst, dest);
+            if k.kind == 0 {
+                continue;
+            }
+            let prev = seen_find(in seen, k);
+            if prev != NONE {
+                f.detach_results(inst);
+                f.remove_inst(inst);
+                f.alias(dest, prev);
+            } else {
+                seen_put(inout seen, k, dest);
+            }
+        }
+        let mut c = u32_at(in kids.first, w(block));
+        loop {
+            if c == NONE {
+                break;
+            }
+            work.push(Step { visit: true, block: c, mark: 0, clears: 0 });
+            c = u32_at(in kids.next, w(c));
+        }
+    }
+}

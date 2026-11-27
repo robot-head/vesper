@@ -307,8 +307,6 @@ the Rust lines deleted.
 | `effects` (PASS; compiler module, `src/capability_effects.rs` goes at the retirement) | SH2-8 | 0 differences; tests 1/1 pass | effects-with-encoding 0.32x [0.31x, 0.33x] n=12 | 0 (2,535 at the retirement) | #2207 |
 | `ebpf` (PASS; compiler module, `src/ebpf_backend*` goes at the retirement) | SH4-16 | 0 differences; tests 1/1 pass | ebpf-with-encoding 1.09x [1.03x, 1.16x] n=12 | 0 (2,336 at the retirement) | #2207 |
 | `doc` (PASS; compiler module, the renderers of `crates/vesper-doc` go at the retirement) | SH5-15 | 0 differences; tests 1/1 pass | render 0.94x [0.93x, 0.97x] n=12 | 0 (1,969 at the retirement) | #2207 |
-| `inline` (PASS; compiler module, `src/ir_inline.rs` goes at the retirement) | SH3-11 | 0 differences; tests 1/1 pass | inline-program 0.62x [0.59x, 0.63x] n=12 | 0 (2,097 at the retirement) | #2289 |
-| `ir-opt` (PASS; compiler module, `src/ir_opt.rs` and `src/ir_opt_policy.rs` go at the retirement) | SH3-9 | 0 differences; tests 1/1 pass | ir-opt-with-encoding 0.03x [0.02x, 0.03x] n=12 | 0 (1,475 at the retirement) | #2289 |
 | `tensor-check` (PASS; compiler module: the swap answers the diagnostics, while `analyze` for an accepted module and `wire::check` still run in Rust; `src/tensor_types` goes at the retirement) | SH2-14 | 0 differences on 1,518 cases; tests 1/1 pass | all 0.99x [0.96x, 1.08x] n=12; tensor 0.88x [0.81x, 0.91x] n=12 | 0 (5,084 at the retirement) | #2289 |
 | `wit-component` (PASS; compiler module, `src/wasm_backend/component.rs` and the wit-component dependency go at the retirement) | SH5-11 | 0 differences on 1,383 cases; tests 1/1 pass | wrap 0.05x [0.05x, 0.05x] n=12; build 0.67x [0.65x, 0.68x] n=12 | 0 (933 at the retirement) | #1334 flip |
 | `vesper-aether` virtqueue walks (PASS) | SH6-14 | 0 differences; tests 2/2 pass | virtqueue 1.44x [1.36x, 1.47x] n=30 | 331 (now the tests' reference) | #1494 |
@@ -322,3 +320,4 @@ the Rust lines deleted.
 | `verified-codegen` (PASS; compiler module, `src/verified_codegen` goes at the retirement) | SH6-2 | 0 differences on 4,724 cases; tests 1/1 pass | compile 1.02x [0.97x, 1.05x] n=12 | 0 (9,760 at the retirement) | #1886 |
 | `stack-bound` (PASS; compiler module, `src/stack_bound.rs` goes at the retirement) | SH2-10 | 0 differences; tests 6/6 pass | hybrid path 1.20x [1.18x, 1.26x] n=12 | 0 (at the retirement) | #2359 |
 | `parse` (PASS; compiler module, `crates/vesper-syntax/src/parser.rs` goes at the retirement) | SH1-12 | 0 differences; tests pass | parse 0.23x n=12 | 0 (at the retirement) | #2389 |
+| `test-discovery` (PASS; compiler module, `src/test_discovery.rs` goes at the retirement) | SH5-14 | 0 differences; tests pass | test-discovery 1.26x n=12 | 0 (at the retirement) | #2453 |

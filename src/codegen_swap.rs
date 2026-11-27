@@ -1258,8 +1258,15 @@ pub mod body {
     /// (`CodegenOptions::source_locations`), the variables in parameter
     /// order, and for each `Op::Call` of the body in instruction order the
     /// `FuncId` the walk would call directly with nothing else around the
-    /// call (part 6b), or [`NO_CALLEE`]. No result.
+    /// call (part 6b), or [`NO_CALLEE`]; then `sret, h, h values`: the
+    /// result pointer's value word, or [`NO_VALUE`] for a function that
+    /// returns its value, and the values (by index in the graph's values)
+    /// that `aggregates::plan` builds in it (#2411). No result.
     pub const FUNCTION: u32 = 1;
+
+    /// A [`FUNCTION`] request's `sret` word when the function has no result
+    /// pointer.
+    pub const NO_VALUE: u64 = u64::MAX;
 
     /// A call [`FUNCTION`]'s hook cannot emit as one direct `call`: the
     /// hook declines the body.
@@ -1273,12 +1280,23 @@ pub mod body {
     /// parameters and the callee count), or `None` when the arguments do
     /// not have that layout.
     pub fn callees(args: &[u64]) -> Option<&[u64]> {
+        layout(args).map(|(callees, _, _)| callees)
+    }
+
+    /// A [`FUNCTION`] request's callees, `sret` word and result homes, or
+    /// `None` when the arguments do not have that layout.
+    pub fn layout(args: &[u64]) -> Option<(&[u64], u64, &[u64])> {
         let params = usize::try_from(*args.get(FLAGS)?).ok()?;
         // The parameter count, then the parameter variables.
         let count_at = FLAGS + 1 + params;
         let count = usize::try_from(*args.get(count_at)?).ok()?;
-        args.get(count_at + 1..)
-            .filter(|callees| callees.len() == count)
+        let sret_at = count_at + 1 + count;
+        let callees = args.get(count_at + 1..sret_at)?;
+        let sret = *args.get(sret_at)?;
+        let homes = usize::try_from(*args.get(sret_at + 1)?).ok()?;
+        args.get(sret_at + 2..)
+            .filter(|rest| rest.len() == homes)
+            .map(|rest| (callees, sret, rest))
     }
 }
 
