@@ -37,6 +37,7 @@ pub const E_LOOP: u64 = 19;
 pub const E_BREAK: u64 = 20;
 pub const E_CONTINUE: u64 = 21;
 pub const E_HANDLE: u64 = 22;
+pub const E_TRY: u64 = 23;
 pub const E_INDEX: u64 = 40;
 
 // Literal pattern kinds (`LIT_*` in exprs.ves).
@@ -323,6 +324,20 @@ fn encode_expr(w: &World, e: &mut Enc, x: &Expr, out: &mut Vec<u64>) {
             for a in &effect.args {
                 out.push(e.ty(a));
             }
+            // The handler's inferred effects (its continuation's row), as
+            // the row of an empty function type + 1; 0 before inference.
+            out.push(
+                w.handler_effects
+                    .get(&(x.span.start, x.span.end))
+                    .map_or(0, |effects| {
+                        e.ty(&vesper::ast::Type::Function {
+                            params: vec![],
+                            result: Box::new(vesper::ast::Type::unit()),
+                            effects: effects.clone(),
+                            mode: vesper::ast::Mode::Copy,
+                        }) + 1
+                    }),
+            );
             out.push(state.is_some() as u64);
             if let Some((p, value)) = state {
                 encode_pattern(e, p, out);
@@ -338,6 +353,10 @@ fn encode_expr(w: &World, e: &mut Enc, x: &Expr, out: &mut Vec<u64>) {
                 }
                 encode_expr(w, e, &c.body, out);
             }
+        }
+        ExprKind::Try(value) => {
+            out.extend([E_TRY, s, t]);
+            encode_expr(w, e, value, out);
         }
         ExprKind::Return(value) => {
             out.extend([E_RETURN, s, t, value.is_some() as u64]);
