@@ -1088,7 +1088,7 @@ pub fn expect_type(inout ck: Ck, expected: u32, actual: u32, start: u64, end: u6
     }
 }
 
-fn join(inout ck: Ck, a: u32, b: u32, start: u64, end: u64) -> u32 {
+pub fn join(inout ck: Ck, a: u32, b: u32, start: u64, end: u64) -> u32 {
     let mut errors: u64 = 0;
     let known = ck.ctx.world.k;
     let joined = join_types(inout ck.ctx.types, known, a, b, inout errors);
@@ -1099,7 +1099,7 @@ fn join(inout ck: Ck, a: u32, b: u32, start: u64, end: u64) -> u32 {
 }
 
 // `check::integer(t)`.
-fn integer(in ck: Ck, ty: u32) -> bool {
+pub fn integer(in ck: Ck, ty: u32) -> bool {
     let node = ck.ctx.types.node(ty);
     if node.kind == TyKind::Lit || node.kind == TyKind::Infer {
         return true;
