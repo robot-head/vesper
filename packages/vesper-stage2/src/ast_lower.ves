@@ -270,8 +270,12 @@ fn lower_pat(inout lc: LowerCtx, in ast: SurfAst, mod_idx: u64, pat_id: u32) -> 
 }
 
 const I_WRAPPING: u64 = 1;
+const I_BIT: u64 = 2;
 const I_CONVERSION: u64 = 4;
 const I_ROTATE: u64 = 8;
+const I_FLOAT: u64 = 16;
+// A float math intrinsic of arity other than one (`fma`, `min`, `max`).
+const I_FLOAT_NOT_UNARY: u64 = 32;
 
 fn name_eq(in names: Names, sym: u32, in lit: Str) -> bool {
     let b = lit.as_bytes();
@@ -284,6 +288,25 @@ fn name_eq(in names: Names, sym: u32, in lit: Str) -> bool {
             Option::None => 0,
         };
         if names.byte(sym, i) != c {
+            return false;
+        }
+    }
+    true
+}
+
+fn name_ends(in names: Names, sym: u32, in sfx: Str) -> bool {
+    let b = sfx.as_bytes();
+    let n = names.size(sym);
+    if n < b.len() {
+        return false;
+    }
+    let start = wrapping_sub(n, b.len());
+    for i in 0..b.len() {
+        let c = match b.try_get(i) {
+            Option::Some(v) => v,
+            Option::None => 0,
+        };
+        if names.byte(sym, wrapping_add(start, i)) != c {
             return false;
         }
     }
@@ -318,6 +341,41 @@ fn intrinsic_class(in names: Names, sym: u32) -> u64 {
     }
     if name_eq(in names, sym, in "rotate_left") || name_eq(in names, sym, in "rotate_right") {
         return I_ROTATE;
+    }
+    if name_eq(in names, sym, in "bit_and")
+        || name_eq(in names, sym, in "bit_or")
+        || name_eq(in names, sym, in "bit_xor")
+        || name_eq(in names, sym, in "bit_shl")
+        || name_eq(in names, sym, in "bit_shr")
+    {
+        return I_BIT;
+    }
+    if name_eq(in names, sym, in "min")
+        || name_eq(in names, sym, in "max")
+        || name_eq(in names, sym, in "fma")
+    {
+        return I_FLOAT | I_FLOAT_NOT_UNARY;
+    }
+    let float_kind = name_ends(in names, sym, in "_f32") || name_ends(in names, sym, in "_f64");
+    let float_conversion = float_kind
+        && (name_starts(in names, sym, in "widen_")
+            || name_starts(in names, sym, in "nearest_")
+            || name_starts(in names, sym, in "to_bits_")
+            || name_starts(in names, sym, in "from_bits_"));
+    if float_conversion {
+        // `widen_<f>` is both a conversion and a float intrinsic: unary
+        // either way.
+        return I_FLOAT;
+    }
+    if name_eq(in names, sym, in "sqrt")
+        || name_eq(in names, sym, in "abs")
+        || name_eq(in names, sym, in "floor")
+        || name_eq(in names, sym, in "ceil")
+        || name_eq(in names, sym, in "round")
+        || name_eq(in names, sym, in "trunc")
+        || name_starts(in names, sym, in "saturating_")
+    {
+        return I_FLOAT;
     }
     if name_starts(in names, sym, in "widen_")
         || name_starts(in names, sym, in "narrow_")

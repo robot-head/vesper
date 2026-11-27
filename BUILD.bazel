@@ -581,6 +581,13 @@ vesper_crate(
             "packages/**",
             "tests/fixtures/**",
         ]),
+        # #2362: @vesper/native-clif-opt against the steps of
+        # src/native_clif_opt.rs on the optimized CLIF of the corpus mains.
+        "test/self_host_native_clif_opt": glob([
+            "examples/**",
+            "packages/**",
+            "tests/fixtures/**",
+        ]),
         # #1829: @vesper/native-vectorize against src/native_vectorize.rs on
         # the optimized CLIF of the corpus mains.
         "test/self_host_native_vectorize": glob([
@@ -1450,6 +1457,7 @@ vesper_crate(
         # The pass differential lowers, hoists and IR-checks each sampled
         # program (~20 min debug); the JIT test runs two children.
         "test/self_host_bounds_hoist_pass": "eternal",
+        "test/self_host_native_clif_opt": "eternal",
         "test/self_host_native_vectorize": "eternal",
         "test/self_host_native_cold_outline": "eternal",
         # #1886: the verified backend lowers every corpus main.

@@ -38,7 +38,6 @@ const U_INOUT_EFFECT_ARGUMENT: u8 = 8;
 const U_FIRST_CLASS_CONTINUATION: u8 = 9;
 const U_EXTERNAL_FUNCTION: u8 = 11;
 const U_INTEGER_WIDTH: u8 = 14;
-const U_FLOAT32: u8 = 15;
 
 // Shapes (`layout::Shape`) and scalars (`layout::Scalar`).
 pub const SH_SCALAR: u8 = 0;
@@ -60,6 +59,8 @@ pub const SC_U16: u8 = 8;
 pub const SC_I32: u8 = 9;
 pub const SC_I16: u8 = 10;
 pub const SC_I8: u8 = 11;
+// An `f32`: its binary32 bits in the low half of a word (src/floats.ves).
+pub const SC_F32: u8 = 12;
 
 // Clause modes (`analysis::HandlerMode`). A clause that resumes other
 // than in tail position runs on a WasmFX continuation or in CPS, which
@@ -330,7 +331,7 @@ impl Cx {
                 return shape_of(SH_STR, 0, NO_ADT, ty);
             }
             if name == syms.f32_ {
-                Fail::raise(werr(K_UNSUPPORTED, U_FLOAT32, 10));
+                return shape_of(SH_SCALAR, SC_F32, NO_ADT, ty);
             }
             if name == syms.u128_ || name == syms.i128_ {
                 // the tuple (low word, high word): src/wide.ves

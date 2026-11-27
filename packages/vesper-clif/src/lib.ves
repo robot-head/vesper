@@ -15,12 +15,14 @@
 //   clif_words.rs.
 
 use self::codes::{
-    E_BLOCK, E_CLONE, E_END, E_INS, E_PARAM, E_PLACE, E_RETARGET, F_CALL, F_RETURN, F_SIDE_EFFECTS,
-    F_STACK_SLOT, F_TERMINATOR, F_TRAP, F_TRAP_CODE, H_NO_OUTLINE, H_SIMD, NONE, NONE64, OP_BITCAST,
-    OP_BRIF, OP_CALL, OP_FCVT_FROM_SINT, OP_ICMP, OP_ICMP_IMM, OP_ICONST, OP_JUMP, OP_LOAD,
-    OP_RETURN, OP_SCALAR_TO_VECTOR, OP_SPLAT, OP_STACK_ADDR, OP_STORE, OP_SWIDEN_HIGH,
-    OP_SWIDEN_LOW, OP_TRAP, OP_UADD_OVERFLOW, TY_I16X8, TY_I32X4, TY_I64X2, TY_I8, TY_I8X16,
-    TY_OTHER, V_ALIAS, V_PARAM, V_RESULT
+    E_ARGS, E_BLOCK, E_CLONE, E_END, E_FCONST, E_INS, E_JUMP, E_PARAM, E_PLACE, E_REMOVE_BLOCK,
+    E_REMOVE_INST, E_RETARGET, E_SLOT_SIZE, E_ALIAS, E_INS_BEFORE, E_MOVE_INST, E_REMOVE_DEST_ARG,
+    E_REMOVE_PARAM, F_BRANCH, F_CALL, F_RETURN, F_SIDE_EFFECTS, F_STACK_SLOT, F_TERMINATOR, F_TRAP,
+    F_TRAP_CODE, H_NO_OUTLINE, H_SIMD, NONE, NONE64, OP_BITCAST, OP_BRIF, OP_CALL, OP_F32CONST,
+    OP_F64CONST, OP_FCVT_FROM_SINT, OP_ICMP, OP_ICMP_IMM, OP_ICONST, OP_JUMP, OP_LOAD, OP_RETURN,
+    OP_SCALAR_TO_VECTOR, OP_SPLAT, OP_STACK_ADDR, OP_STORE, OP_SWIDEN_HIGH, OP_SWIDEN_LOW, OP_TRAP,
+    OP_UADD_OVERFLOW, S_OTHER, TY_F32, TY_I16X8, TY_I32X4, TY_I64X2, TY_I8, TY_I8X16, TY_OTHER,
+    V_ALIAS, V_PARAM, V_RESULT
 };
 
 pub copy struct Val {
@@ -68,6 +70,13 @@ pub copy struct Dst {
     an: u32,
 }
 
+// A sized stack slot.
+pub copy struct Slot {
+    kind: u64,
+    size: u64,
+    align_shift: u64,
+}
+
 pub struct Func {
     simd: bool,
     // dynamic stack slots, exception tables or a special signature purpose
@@ -76,6 +85,8 @@ pub struct Func {
     ptr_ty: u64,
     // the signature's return types
     returns: ChunkSeq[u64],
+    // the sized stack slots, by number
+    slots: ChunkSeq[Slot],
     vals: ChunkSeq[Val],
     blks: ChunkSeq[Blk],
     insts: ChunkSeq[Ins],
@@ -188,11 +199,20 @@ pub fn read_func(in b: Slice[u8]) -> Func {
     for k in 0..nr {
         rets.push(r.word(in b));
     }
+    let ns = r.word(in b);
+    let mut slots = ChunkSeq::with_capacity[Slot](ns);
+    for k in 0..ns {
+        let kind = r.word(in b);
+        let size = r.word(in b);
+        let align_shift = r.word(in b);
+        slots.push(Slot { kind: kind, size: size, align_shift: align_shift });
+    }
     let mut f = Func {
         simd: (flags & H_SIMD) != 0,
         no_outline: (flags & H_NO_OUTLINE) != 0,
         ptr_ty: ptr,
         returns: rets,
+        slots: slots,
         vals: ChunkSeq::with_capacity[Val](nv),
         blks: ChunkSeq::with_capacity[Blk](nb),
         insts: ChunkSeq::with_capacity[Ins](ni),
@@ -328,14 +348,17 @@ impl Func {
         let ok = self.insts.try_set(i, row);
     }
 
-    // `resolve_aliases`.
-    pub fn resolve(in self, v: u32) -> u32 {
-        let x = self.val(w(v));
-        if x.kind == V_ALIAS && x.a != NONE {
-            x.a
-        } else {
-            v
+    // `resolve_aliases`: an alias the passes make may name another.
+    pub fn resolve(in self, v0: u32) -> u32 {
+        let mut v = v0;
+        for _ in 0..self.vals.len() {
+            let x = self.val(w(v));
+            if x.kind != V_ALIAS || x.a == NONE {
+                return v;
+            }
+            v = x.a;
         }
+        v
     }
 
     pub fn value_type(in self, v: u32) -> u64 {
@@ -864,6 +887,251 @@ impl Func {
     fn result_of(inout self, i: u32, k: u32, ty: u64) {
         let v = self.new_value(V_RESULT, i, k, ty);
         self.results.push(v);
+    }
+
+    // `layout.remove_inst(i)`, written as `E_REMOVE_INST`.
+    pub fn remove_inst(inout self, i: u32) {
+        self.unlink_inst(i);
+        self.out.push(E_REMOVE_INST);
+        self.out.push(w(i));
+    }
+
+    // `i` out of the layout, in the tables only.
+    fn unlink_inst(inout self, i: u32) {
+        let mut x = self.inst(w(i));
+        if x.block != NONE {
+            let mut row = self.blk(w(x.block));
+            if x.prev == NONE {
+                row.first = x.next;
+            } else {
+                let mut p = self.inst(w(x.prev));
+                p.next = x.next;
+                self.put_inst(w(x.prev), p);
+            }
+            if x.next == NONE {
+                row.last = x.prev;
+            } else {
+                let mut n = self.inst(w(x.next));
+                n.prev = x.prev;
+                self.put_inst(w(x.next), n);
+            }
+            self.put_blk(w(x.block), row);
+        }
+        x.block = NONE;
+        x.prev = NONE;
+        x.next = NONE;
+        self.put_inst(w(i), x);
+    }
+
+    // `layout.remove_block(b)` of an emptied block, written as
+    // `E_REMOVE_BLOCK`.
+    pub fn remove_block_edit(inout self, b: u32) {
+        self.remove_block(b);
+        self.out.push(E_REMOVE_BLOCK);
+        self.out.push(w(b));
+    }
+
+    // `dfg.replace(i).jump(to, args)`, written as `E_JUMP`.
+    pub fn replace_jump(inout self, i: u32, to: u32, in args: ChunkSeq[u32]) {
+        let mut x = self.inst(w(i));
+        x.op = OP_JUMP;
+        x.eff = F_TERMINATOR | F_BRANCH;
+        x.cond = 0;
+        x.imm = 0;
+        x.off = 0;
+        x.mem = 0;
+        x.a0 = n32(self.args.len());
+        x.an = 0;
+        let a0 = n32(self.args.len());
+        self.args.extend(in args.as_slice());
+        x.d0 = n32(self.dests.len());
+        x.dn = 1;
+        self.dests.push(Dst { block: to, a0: a0, an: n32(args.len()) });
+        self.put_inst(w(i), x);
+        self.out.push(E_JUMP);
+        self.out.push(w(i));
+        self.out.push(w(to));
+        self.out.push(args.len());
+        for k in 0..args.len() {
+            self.out.push(w(u32_at(in args, k)));
+        }
+    }
+
+    // `dfg.replace(i).f64const(bits)` (or `f32const` for `TY_F32`), written
+    // as `E_FCONST`.
+    pub fn replace_fconst(inout self, i: u32, ty: u64, bits: u64) {
+        let mut x = self.inst(w(i));
+        x.op = if ty == TY_F32 {
+            OP_F32CONST
+        } else {
+            OP_F64CONST
+        };
+        x.eff = 0;
+        x.cond = 0;
+        x.imm = bits;
+        x.off = 0;
+        x.mem = 0;
+        x.an = 0;
+        self.put_inst(w(i), x);
+        self.out.push(E_FCONST);
+        self.out.push(w(i));
+        self.out.push(ty);
+        self.out.push(bits);
+    }
+
+    // The fixed arguments of `i` replaced by `vals`, written as `E_ARGS`.
+    pub fn set_args(inout self, i: u32, in vals: ChunkSeq[u32]) {
+        let mut x = self.inst(w(i));
+        x.a0 = n32(self.args.len());
+        x.an = n32(vals.len());
+        self.args.extend(in vals.as_slice());
+        self.put_inst(w(i), x);
+        self.out.push(E_ARGS);
+        self.out.push(w(i));
+        self.out.push(vals.len());
+        for k in 0..vals.len() {
+            self.out.push(w(u32_at(in vals, k)));
+        }
+    }
+
+    pub fn nslots(in self) -> u64 {
+        self.slots.len()
+    }
+
+    pub fn slot(in self, s: u64) -> Slot {
+        match self.slots.try_get(s) {
+            Option::Some(x) => x,
+            Option::None => Slot { kind: S_OTHER, size: 0, align_shift: 0 },
+        }
+    }
+
+    // A sized slot's size, written as `E_SLOT_SIZE`.
+    pub fn set_slot_size(inout self, s: u64, size: u64) {
+        let mut x = self.slot(s);
+        x.size = size;
+        let ok = self.slots.try_set(s, x);
+        self.out.push(E_SLOT_SIZE);
+        self.out.push(s);
+        self.out.push(size);
+    }
+
+    // `dfg.remove_block_param(p)`: the later parameters of its block move
+    // down one. Written as `E_REMOVE_PARAM`.
+    pub fn remove_param(inout self, p: u32) {
+        let x = self.val(w(p));
+        let b = x.a;
+        let mut row = self.blk(w(b));
+        let p0 = n32(self.params.len());
+        let mut n: u32 = 0;
+        for k in 0..w(row.pn) {
+            let q = u32_at(in self.params, wrapping_add(w(row.p0), k));
+            if q == p {
+                continue;
+            }
+            let mut y = self.val(w(q));
+            y.b = n;
+            let ok = self.vals.try_set(w(q), y);
+            self.params.push(q);
+            n = wrapping_add(n, 1);
+        }
+        row.p0 = p0;
+        row.pn = n;
+        self.put_blk(w(b), row);
+        self.out.push(E_REMOVE_PARAM);
+        self.out.push(w(p));
+    }
+
+    // `dfg.change_to_alias(dest, src)`, written as `E_ALIAS`.
+    pub fn alias(inout self, dest: u32, src: u32) {
+        let to = self.resolve(src);
+        let mut x = self.val(w(dest));
+        x.kind = V_ALIAS;
+        x.a = to;
+        x.b = 0;
+        let ok = self.vals.try_set(w(dest), x);
+        self.out.push(E_ALIAS);
+        self.out.push(w(dest));
+        self.out.push(w(src));
+    }
+
+    // `layout.remove_inst(i)` then `layout.append_inst(i, b)`, written as
+    // `E_MOVE_INST`.
+    pub fn move_to_bottom(inout self, i: u32, b: u32) {
+        self.unlink_inst(i);
+        self.append_inst(b, i);
+        self.out.push(E_MOVE_INST);
+        self.out.push(w(i));
+        self.out.push(w(b));
+    }
+
+    // Argument `a` of destination `k` of `i` removed, written as
+    // `E_REMOVE_DEST_ARG`.
+    pub fn remove_dest_arg(inout self, i: u32, k: u64, a: u64) {
+        let row = self.inst(w(i));
+        if k >= w(row.dn) {
+            return;
+        }
+        let d = wrapping_add(w(row.d0), k);
+        let mut x = self.dest_row(d);
+        let a0 = n32(self.args.len());
+        for q in 0..w(x.an) {
+            if q != a {
+                let v = u32_at(in self.args, wrapping_add(w(x.a0), q));
+                self.args.push(v);
+            }
+        }
+        x.an = n32(wrapping_sub(self.args.len(), w(a0)));
+        x.a0 = a0;
+        let ok = self.dests.try_set(d, x);
+        self.out.push(E_REMOVE_DEST_ARG);
+        self.out.push(w(i));
+        self.out.push(k);
+        self.out.push(a);
+    }
+
+    // `i` put back in the layout just before `before`, in the tables only.
+    fn place_before(inout self, i: u32, before: u32) {
+        let mut at = self.inst(w(before));
+        let mut row = self.inst(w(i));
+        row.block = at.block;
+        row.prev = at.prev;
+        row.next = before;
+        if at.prev == NONE {
+            let mut br = self.blk(w(at.block));
+            br.first = i;
+            self.put_blk(w(at.block), br);
+        } else {
+            let mut p = self.inst(w(at.prev));
+            p.next = i;
+            self.put_inst(w(at.prev), p);
+        }
+        at.prev = i;
+        self.put_inst(w(before), at);
+        self.put_inst(w(i), row);
+    }
+
+    // [`ins`] just before the instruction `before` (a cursor `at_inst`),
+    // written as `E_INS_BEFORE` with `before` in place of the block.
+    pub fn ins_before(
+        inout self,
+        before: u32,
+        op: u64,
+        ty: u64,
+        cond: u64,
+        imm: u64,
+        off: u64,
+        mem: u64,
+        in a: ChunkSeq[u32],
+        in dws: ChunkSeq[u32]
+    ) -> u32 {
+        let b = self.inst(w(before)).block;
+        let at = self.out.len();
+        let new = self.ins(b, op, ty, cond, imm, off, mem, in a, in dws);
+        self.unlink_inst(new);
+        self.place_before(new, before);
+        set_u64(inout self.out, at, E_INS_BEFORE);
+        set_u64(inout self.out, inc(at), w(before));
+        new
     }
 
     // The edit script, ended.

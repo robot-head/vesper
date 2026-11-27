@@ -64,11 +64,6 @@ impl Clock for VirtualClock {
     }
 }
 
-// The Rust build (the frozen reference) or the Vesper build (forwarding the
-// checks to the Vesper port in vesper/src/). Either adds `advance_to` and `advance_by`.
-#[cfg(not(feature = "vesper-port"))]
-#[path = "reference/clock.rs"]
-mod imp;
-#[cfg(feature = "vesper-port")]
+// The Vesper build (forwarding the checks to the Vesper port in vesper/src/).
 #[path = "port/clock.rs"]
 mod imp;

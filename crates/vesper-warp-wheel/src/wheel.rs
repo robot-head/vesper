@@ -266,20 +266,9 @@ pub struct Expired<T> {
     pub payload: T,
 }
 
-// The Rust build (the frozen reference) or the Vesper build (a thin wrapper
-// over the Vesper port in vesper/src/: token slab, sink adaptor).
-#[cfg(not(feature = "vesper-port"))]
-#[path = "reference/wheel.rs"]
-mod imp;
-#[cfg(feature = "vesper-port")]
+// The Vesper build (a thin wrapper over the Vesper port in vesper/src/:
+// token slab, sink adaptor).
 #[path = "port/wheel.rs"]
 mod imp;
 
 pub use imp::Wheel;
-
-/// The Rust build, compiled beside the Vesper build only so that
-/// `tests/abba.rs` can compare the two in one process. Not part of the API.
-#[cfg(feature = "vesper-port")]
-#[doc(hidden)]
-#[path = "reference/wheel.rs"]
-pub mod rust_reference;

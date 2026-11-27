@@ -17,8 +17,10 @@ unsafe extern "C" {
     fn vesper_migrate_migrate_c_builtin_tag(name: *mut u64) -> i64;
     fn vesper_migrate_migrate_filter_directives(src: *mut u64, out: *mut u64) -> i64;
     fn vesper_migrate_migrate_hex_encode(src: *mut u64, out: *mut u64) -> i64;
+    fn vesper_migrate_migrate_lift_mode(is_owned_move: i64, is_unique_borrow: i64, whole_value_access: i64, has_reads: i64, has_muts: i64) -> i64;
     fn vesper_migrate_migrate_redefines(text: *mut u64, name: *mut u64) -> i64;
     fn vesper_migrate_migrate_safe_idents_underscores(buf: *mut u64, starts: *mut u64, lens: *mut u64, out_underscores: *mut u64) -> i64;
+    fn vesper_migrate_migrate_sorted_paths_antichain(buf: *mut u64, starts: *mut u64, lens: *mut u64, out_indices: *mut u64) -> i64;
     fn vesper_migrate_migrate_splitmix64_bytes(state_buf: *mut u64, max_len: i64, prefix: *mut u64, out: *mut u64) -> i64;
     fn vesper_migrate_migrate_strip_comments(src: *mut u64, out: *mut u64) -> i64;
 }
@@ -71,6 +73,15 @@ pub fn migrate_hex_encode(src: &[u8], out: &mut [u8]) -> u64 {
     raw as u64
 }
 
+/// Calls `migrate_lift_mode` of the Vesper library `migrate` (`vesper_migrate_migrate_lift_mode`).
+pub fn migrate_lift_mode(is_owned_move: bool, is_unique_borrow: bool, whole_value_access: bool, has_reads: bool, has_muts: bool) -> u8 {
+    // SAFETY: `vesper_migrate_migrate_lift_mode` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_migrate_migrate_lift_mode(is_owned_move as i64, is_unique_borrow as i64, whole_value_access as i64, has_reads as i64, has_muts as i64) };
+    raw as u8
+}
+
 /// Calls `migrate_redefines` of the Vesper library `migrate` (`vesper_migrate_migrate_redefines`).
 pub fn migrate_redefines(text: &[u8], name: &[u8]) -> bool {
     // SAFETY: `vesper_migrate_migrate_redefines` has exactly this signature in the export ABI; every
@@ -86,6 +97,15 @@ pub fn migrate_safe_idents_underscores(buf: &[u8], starts: &[u64], lens: &[u64],
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
     let raw = vesper_port_abi::with_slice(buf, |view_buf| vesper_port_abi::with_slice(starts, |view_starts| vesper_port_abi::with_slice(lens, |view_lens| vesper_port_abi::with_slice_mut(out_underscores, |view_out_underscores| unsafe { vesper_migrate_migrate_safe_idents_underscores(view_buf, view_starts, view_lens, view_out_underscores) }))));
+    raw as u64
+}
+
+/// Calls `migrate_sorted_paths_antichain` of the Vesper library `migrate` (`vesper_migrate_migrate_sorted_paths_antichain`).
+pub fn migrate_sorted_paths_antichain(buf: &[u8], starts: &[u64], lens: &[u64], out_indices: &mut [u64]) -> u64 {
+    // SAFETY: `vesper_migrate_migrate_sorted_paths_antichain` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(buf, |view_buf| vesper_port_abi::with_slice(starts, |view_starts| vesper_port_abi::with_slice(lens, |view_lens| vesper_port_abi::with_slice_mut(out_indices, |view_out_indices| unsafe { vesper_migrate_migrate_sorted_paths_antichain(view_buf, view_starts, view_lens, view_out_indices) }))));
     raw as u64
 }
 
