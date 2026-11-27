@@ -909,6 +909,88 @@ pub fn main() -> u64 eff [Ffi[StdFs]] {{
 }
 
 #[test]
+fn remove_dir_all_deletes_nested_tree_under_wasi() {
+    if !runs_on_shard(0) {
+        return;
+    }
+
+    let pkg = fresh("remove-dir-all-wasi");
+    std::fs::create_dir(pkg.join("src")).unwrap();
+    let work = pkg.join("work");
+    std::fs::create_dir_all(work.join("tree/a/b")).unwrap();
+    std::fs::create_dir_all(work.join("tree/empty_sub")).unwrap();
+    std::fs::write(work.join("tree/root.txt"), b"root").unwrap();
+    std::fs::write(work.join("tree/a/b/file.txt"), b"nested").unwrap();
+    let fs_dep = std::fs::canonicalize("packages/vesper-std/fs").unwrap();
+    std::fs::write(
+        pkg.join("Loom.toml"),
+        format!(
+            r#"[package]
+name = "@wasm-seed/remove-dir-all-wasi"
+version = "0.1.0"
+edition = "2026"
+capability_ceiling = ["Alloc", "Fail", "Ffi[StdFs]"]
+
+[dependencies]
+"@vesper-std/fs" = {{ version = "^0.1", path = {fs_dep:?} }}
+"#
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        pkg.join("src/main.ves"),
+        r#"use @vesper-std/fs::{ IoError, exists, not_found, remove_dir_all };
+
+fn run_remove(in path: Str) -> u64 eff [Ffi[StdFs]] {
+    handle Fail[IoError] in {
+        remove_dir_all(in path);
+        0
+    } with {
+        return v => v,
+        raise(e, _k) => wrapping_add(1_000_000, widen_u64(e.kind)),
+    }
+}
+
+pub fn main() -> u64 eff [Ffi[StdFs]] {
+    let ok = run_remove(in "/work/tree");
+    if ok != 0 {
+        return ok;
+    }
+    if exists(in "/work/tree") {
+        return 2;
+    }
+    let missing = run_remove(in "/work/missing");
+    if missing == wrapping_add(1_000_000, widen_u64(not_found())) {
+        42
+    } else {
+        missing
+    }
+}
+"#,
+    )
+    .unwrap();
+
+    let assembled =
+        vesper::packages::load_for_target(&pkg, Some(vesper::wasm_backend::TARGET), false).unwrap();
+    assert!(
+        assembled.ok(),
+        "{:?} {:?}",
+        assembled.diagnostics,
+        assembled.manifest_errors
+    );
+    let checked = vesper::ffi_lowering::check_module(&assembled.module, &imports())
+        .unwrap_or_else(|e| panic!("{e}: {:?}", e.diagnostics));
+    let wasm = port(&checked, &options(false)).expect("compile remove_dir_all probe");
+    let ctx = Ctx {
+        dirs: vec![(work.clone(), "/work".to_string())],
+        ..Ctx::default()
+    };
+    let got = run(&wasm, &ctx).expect("run remove_dir_all probe");
+    assert_eq!(got, 42);
+    assert!(!work.join("tree").exists());
+}
+
+#[test]
 fn write_stdout_and_write_stderr_emit_to_wasi_streams() {
     if !runs_on_shard(0) {
         return;
