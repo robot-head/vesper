@@ -363,6 +363,18 @@ const PROGRAMS: &[(&str, &str)] = &[
          let raw = from_bits_f64(9221120237041090561); (nan(raw), flush(1.0, 1.0), 1e-310 * 1.0) }",
     ),
     (
+        // Inside a generic function the payload's size comes from its value:
+        // generic data binds what its fields determine, the rest is a word.
+        "region_generic_payloads",
+        "copy struct W[T: mod copy] { a: T, b: i64 } \
+         fn put[T: mod copy](v: T) -> RegionBox[r, T] eff [r: Region] { r.box(v) } \
+         fn main() -> (u64, u64, u64, u64, u64) { region r { let a = put((1, true)); \
+         let s0 = r.used(); let b = put(W { a: (2, 3), b: 4 }); let s1 = r.used(); \
+         let n: Option[(i64, i64, i64)] = Option::None; let c = put(n); let s2 = r.used(); \
+         let x: u8 = 1; let d = put(Option::Some((x, x))); let s3 = r.used(); let e = put(2.5); \
+         (s0, s1, s2, s3, r.used()) } }",
+    ),
+    (
         "region_first_chunk",
         "fn main() -> i64 { region r(8) { let x = r.box((1, 2)); 0 } }",
     ),

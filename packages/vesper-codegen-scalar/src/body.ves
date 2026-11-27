@@ -2095,9 +2095,11 @@ impl Gen {
             if self.body_lane(i.ty) == LANE_PRODUCT {
                 return false;
             }
-            for k in 0..ops.len() {
-                if self.body_lane(n32(u64_at(in h.vty, u64_at(in ops, k)))) == LANE_PRODUCT {
-                    return false;
+            if kind != INST_PROJECT {
+                for k in 0..ops.len() {
+                    if self.body_lane(n32(u64_at(in h.vty, u64_at(in ops, k)))) == LANE_PRODUCT {
+                        return false;
+                    }
                 }
             }
         }

@@ -265,6 +265,28 @@ const OPTION_SETS: &[&[&str]] = &[
 #[cfg(unix)]
 const FALSE_LINKER: &[&str] = &["build", "-o", "{out}", "--linker", "false"];
 
+/// How many times [`spawn_output`] tries a compiler that is busy.
+const BUSY_TRIES: u32 = 50;
+/// How long [`spawn_output`] waits between those tries.
+const BUSY_WAIT: Duration = Duration::from_millis(20);
+
+/// `command.output()`, tried again while the executable is busy. A
+/// compiler copied for this test (`session_steps_match_the_default_compiler`)
+/// can fail with ETXTBSY: another test thread that forks while the copy's
+/// write handle is open holds that handle until its child execs.
+fn spawn_output(command: &mut Command) -> std::io::Result<Output> {
+    let mut tries = 1;
+    loop {
+        match command.output() {
+            Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy && tries < BUSY_TRIES => {
+                tries += 1;
+                std::thread::sleep(BUSY_WAIT);
+            }
+            other => return other,
+        }
+    }
+}
+
 struct Run {
     output: Output,
     written: Option<Vec<u8>>,
@@ -274,12 +296,13 @@ struct Run {
 fn run(compiler: &Path, cwd: &Path, args: &[String], out: &Path) -> Run {
     let _ = std::fs::remove_file(out);
     let start = Instant::now();
-    let output = Command::new(compiler)
-        .current_dir(cwd)
-        .env_remove("VESPER_HYBRID_STATS")
-        .args(args)
-        .output()
-        .unwrap_or_else(|e| panic!("{}: {e}", compiler.display()));
+    let output = spawn_output(
+        Command::new(compiler)
+            .current_dir(cwd)
+            .env_remove("VESPER_HYBRID_STATS")
+            .args(args),
+    )
+    .unwrap_or_else(|e| panic!("{}: {e}", compiler.display()));
     let time = start.elapsed();
     let written = std::fs::read(out).ok();
     let _ = std::fs::remove_file(out);
