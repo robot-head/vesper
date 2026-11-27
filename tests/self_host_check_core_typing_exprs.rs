@@ -174,12 +174,22 @@ fn fits_literal(n: i128) -> bool {
     n.unsigned_abs() <= u64::MAX as u128
 }
 
+/// Whether an integer literal at `span` is an array's `len()` that
+/// `arrays::lower_world` wrote after checking: the checker typed the call,
+/// whose array receiver it recorded inside the span. Such a literal is
+/// encoded as `E_OTHER`, so its function is skipped.
+fn lowered_len(w: &World, span: &vesper::ast::Span) -> bool {
+    w.types
+        .range((span.start, span.start)..(span.start, span.end))
+        .any(|(_, ty)| vesper::arrays::element(ty).is_some())
+}
+
 /// An expression in pre-order: kind, start, end, then the payload. Kinds
 /// the Vesper checker does not cover yet are `E_OTHER` with no payload.
 fn encode_expr(w: &World, e: &mut Enc, x: &Expr, out: &mut Vec<u64>) {
     let (s, t) = (x.span.start as u64, x.span.end as u64);
     match &x.kind {
-        ExprKind::Literal(Literal::Int(n)) if fits_literal(*n) => {
+        ExprKind::Literal(Literal::Int(n)) if fits_literal(*n) && !lowered_len(w, &x.span) => {
             out.extend([E_INT, s, t, (*n < 0) as u64, n.unsigned_abs() as u64]);
         }
         ExprKind::Literal(Literal::Float(_)) => out.extend([E_FLOAT, s, t]),
