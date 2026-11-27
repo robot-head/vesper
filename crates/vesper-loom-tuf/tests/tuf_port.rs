@@ -646,4 +646,76 @@ fn abba_tuf() {
         ck_pairs.push(format!("{}:{}", a1 + a2, b1 + b2));
     }
     println!("flip-gate pairs checkpoint_json {}", ck_pairs.join(" "));
+
+    // 5. Checkpoint::to_json vs serde_json::to_vec.
+    #[derive(serde::Serialize)]
+    struct WireRef<'a> {
+        state: &'a StateSerRef<'a>,
+        checksum: &'a str,
+    }
+    #[derive(serde::Serialize)]
+    struct StateSerRef<'a> {
+        schema_version: u32,
+        repository_id: &'a str,
+        bootstrap_sha256: &'a str,
+        roots: &'a [Vec<u8>],
+        timestamp_version: u64,
+        snapshot_version: u64,
+        role_versions: &'a BTreeMap<String, u64>,
+        verified_at: &'a str,
+    }
+    let ser_state = StateSerRef {
+        schema_version: ck_ref.state.schema_version,
+        repository_id: &ck_ref.state.repository_id,
+        bootstrap_sha256: &ck_ref.state.bootstrap_sha256,
+        roots: &ck_ref.state.roots,
+        timestamp_version: ck_ref.state.timestamp_version,
+        snapshot_version: ck_ref.state.snapshot_version,
+        role_versions: &ck_ref.state.role_versions,
+        verified_at: &ck_ref.state.verified_at,
+    };
+    let ser_wire = WireRef {
+        state: &ser_state,
+        checksum: &ck_ref.checksum,
+    };
+    // Differential sanity check: exact byte-for-byte match!
+    assert_eq!(
+        ck_port.to_json().unwrap(),
+        serde_json::to_vec(&ser_wire).unwrap()
+    );
+
+    const ABBA_ENCODE_OPS: usize = 2_000;
+    let run_rust_enc = || {
+        for _ in 0..ABBA_ENCODE_OPS {
+            black_box(serde_json::to_vec(black_box(&ser_wire)).unwrap());
+        }
+    };
+    let run_vesper_enc = || {
+        for _ in 0..ABBA_ENCODE_OPS {
+            black_box(black_box(&ck_port).to_json().unwrap());
+        }
+    };
+    for _ in 0..ABBA_WARMUP_EPOCHS {
+        run_rust_enc();
+        run_vesper_enc();
+        run_vesper_enc();
+        run_rust_enc();
+    }
+    let mut enc_pairs = Vec::with_capacity(ABBA_EPOCHS);
+    for _ in 0..ABBA_EPOCHS {
+        let t0 = Instant::now();
+        run_rust_enc();
+        let a1 = t0.elapsed().as_nanos().max(1);
+        let t1 = Instant::now();
+        run_vesper_enc();
+        let b1 = t1.elapsed().as_nanos().max(1);
+        let t2 = Instant::now();
+        run_vesper_enc();
+        let b2 = t2.elapsed().as_nanos().max(1);
+        let t3 = Instant::now();
+        run_rust_enc();
+        let a2 = t3.elapsed().as_nanos().max(1);
+        enc_pairs.push(format!("{}:{}", a1 + a2, b1 + b2));
+    }
+    println!("flip-gate pairs checkpoint_encode {}", enc_pairs.join(" "));
 }
