@@ -11,6 +11,7 @@ lands in several PRs; this is what has been ported so far.
 | `src/relations.ves` | `compatible`, `effects_include`, `refine_annotation`, `unresolved`, `union_effects`, `join_types`, `infer` | same names (`union_effects` is `union_rows`) |
 | `src/patterns.ves` | `is_uninhabited`, `matrix_covered`, `Checker::irrefutable`, `Checker::coverage` | `Pats` (flat pattern table), `Matrix`, `is_uninhabited`, `matrix_covered`, `irrefutable`, `arms_cover` |
 | `src/exprs.ves` | `Checker::{expr, expr_expected, call, apply, apply_args, construct, field_path, bind_mode}` and the block, `if`, `match`, unary and binary rules | `Ck` (checker state over a pre-order expression table), `check_exprs` |
+| `src/methods.ves` | `strings::check` (`string_method_call`, `string_comparison`, `text_receiver_type`), `seq::check` (`seq_method_call` for `len`, `push`, `pop`, `get`, `set`, `try_get`, `last`, `try_set`, `clear`, `truncate`, `reserve`; `seq_call` for `ChunkSeq::new` and `with_capacity`), `Checker::{receiver_type, peek_type}`, string literal types | `string_method`, `seq_method`, `seq_new`, `receiver_type` |
 | `src/lib.ves` | | the differential's tasks |
 
 Types are ids of the check-data arena: Rust's `clone` of a type is a copy
@@ -22,8 +23,9 @@ typing (`src/integer_widths/literal_typing.rs`) comes in a later part, on
 the `i128` support from SH2 lane 2 (#1219).
 
 The expression checker skips a function whose body uses a construct it
-does not have yet (loops, closures, methods, handlers, regions, sequences,
-strings and other foreign types, effectful callees, intrinsics).
+does not have yet (loops, closures, trait methods, sequence views and bulk
+or byte operations, handlers, regions, tiled sequences, vectors and other
+foreign types, effectful callees, intrinsics).
 
 ## Tests
 
