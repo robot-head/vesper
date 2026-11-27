@@ -13,29 +13,31 @@
 //
 // Slice 2a-1 covers functions whose frames the body hook takes (plain
 // scalar parameters and results, no failure record, sret, pointers or
-// capabilities). The request names everything the Rust driver decides
-// before the walk: the target and flags, the symbols, linkages and
-// signatures, and each definition's flags, callees and body plan.
+// capabilities). Slice 2a-2a (declare.ves) makes the instances and their
+// declarations in Vesper from the calls input; the request still names
+// what the walk decides: each definition's flags, callees and body plan.
 //
 // Request (little-endian words; a string is its length, then its bytes):
 //
 //     triple, flags, module name, keep CLIF (0 or 1),
-//     n functions, each: symbol, linkage, call conv, n params, param
-//         types, n returns, return types,
-//     n definitions, each: function index, optimize, status, source
-//         locations, n callees, callee function indexes (or NO_CALLEE),
+//     n exports, each: instance key, symbol,
+//     the calls input (a string: @vesper/codegen-calls' input, whose
+//         first library task names the exports as its roots),
+//     n definitions, each: instance index, optimize, status, source
+//         locations, n callees, callee instance indexes (or NO_CALLEE),
 //         n plan words, the plan words.
 //
 // Answer: 0, the object, the CLIF text of the definitions (empty unless
 // kept); or 1 and the error.
 use @vesper/cranelift::{
-    FuncId, SigId, Ty, append_block_params_for_function_params, block_param, builder_free,
-    builder_new, create_block, declare_function, declare_var, def_var, define_function, module_clif,
-    module_error_text, module_finish, module_free, module_keep_clif, module_new, new_error_text,
-    object_bytes, seal_all_blocks, sig_new, sig_param, sig_return, switch_to_block, value_type
+    FuncId, SigId, append_block_params_for_function_params, block_param, builder_free, builder_new,
+    create_block, declare_var, def_var, define_function, module_clif, module_error_text,
+    module_finish, module_free, module_keep_clif, module_new, new_error_text, object_bytes,
+    seal_all_blocks, switch_to_block, value_type
 };
 use @vesper/codegen-scalar-emit::{HANDLED};
 use @vesper/codegen-scalar-emit::body::{emit_body_words};
+use self::declare::{Declared, declare_library, declared_new, exports_new};
 
 // The answer's status words.
 const OK: u64 = 0;
@@ -118,38 +120,6 @@ fn at64(in s: ChunkSeq[u64], i: u64) -> u64 {
     match s.try_get(i) {
         Option::Some(v) => v,
         Option::None => NO_CALLEE,
-    }
-}
-
-// The declared functions, by request index.
-struct Declared {
-    ids: ChunkSeq[u64],
-    sigs: ChunkSeq[u64],
-}
-
-fn declare_all(inout m: Module, in req: Slice[u8], inout r: Reader, inout d: Declared) eff [
-    Ffi[Cranelift]
-] {
-    let nf = r.word(in req);
-    for _ in 0..nf {
-        let symbol = r.bytes(in req);
-        let linkage = wrapping_u32(r.word(in req));
-        let conv = wrapping_u32(r.word(in req));
-        let sig = sig_new(inout m, conv);
-        let np = r.word(in req);
-        for _ in 0..np {
-            sig_param(inout m, sig, Ty { code: wrapping_u32(r.word(in req)) });
-        }
-        let nr = r.word(in req);
-        for _ in 0..nr {
-            sig_return(inout m, sig, Ty { code: wrapping_u32(r.word(in req)) });
-        }
-        if r.bad {
-            return;
-        }
-        let id = declare_function(inout m, in symbol.as_slice(), linkage, sig);
-        d.ids.push(widen_u64(id.id));
-        d.sigs.push(widen_u64(sig.id));
     }
 }
 
@@ -268,11 +238,23 @@ pub fn library_object(in req: Slice[u8]) -> ChunkSeq[u8] eff [Ffi[Cranelift]] {
         }
     };
     module_keep_clif(inout m, keep);
-    let mut d = Declared { ids: ChunkSeq::new[u64](), sigs: ChunkSeq::new[u64]() };
-    declare_all(inout m, in req, inout r, inout d);
+    let ne = r.word(in req);
+    let mut exports = exports_new();
+    for _ in 0..ne {
+        let key = r.bytes(in req);
+        let symbol = r.bytes(in req);
+        exports.push(in key.as_slice(), in symbol.as_slice());
+    }
+    let calls = r.bytes(in req);
     if r.bad {
         module_free(m);
         return failure(in MALFORMED.as_bytes());
+    }
+    let mut d = declared_new();
+    let declare_err = declare_library(inout m, in calls.as_slice(), in exports, inout d);
+    if declare_err.len() != 0 {
+        module_free(m);
+        return failure(in declare_err.as_slice());
     }
     let nd = r.word(in req);
     if r.bad {

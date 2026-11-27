@@ -549,7 +549,7 @@ pub fn declare_roots(
 // characters of the instance key, each outside `[A-Za-z0-9_]` as `_`. A
 // UTF-8 continuation byte belongs to the character before it, so it adds
 // nothing.
-fn push_symbol_key(in names: Names, key: u32, inout out: ChunkSeq[u8]) {
+pub fn push_symbol_key(in names: Names, key: u32, inout out: ChunkSeq[u8]) {
     let n = names.size(key);
     let mut chars: u64 = 0;
     let mut i: u64 = 0;

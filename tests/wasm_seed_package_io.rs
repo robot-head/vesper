@@ -3272,6 +3272,12 @@ const STAGE2_CRANELIFT_PACKAGES: &[(&str, &str, &str, &str)] = &[
         "packages/vesper-codegen-numeric",
         "use @vesper/codegen-numeric::numeric_hook;\npub fn main() -> u64 eff [Ffi[Cranelift]] { numeric_hook(0) }\n",
     ),
+    (
+        "native-lib",
+        "@vesper/native-lib",
+        "packages/vesper-native-lib",
+        "use @vesper/native-lib::library_object;\npub fn main() -> u64 eff [Ffi[Cranelift]] { let req: ChunkSeq[u8] = ChunkSeq::new[u8](); library_object(in req.as_slice()).len() }\n",
+    ),
 ];
 
 /// Compiler packages over the WASI host libraries (StdFs, StdEnv,
@@ -3315,10 +3321,6 @@ const STAGE2_PACKAGES_COVERED_ELSEWHERE: &[(&str, &str)] = &[
     (
         "vesper-export-build",
         "`vesper build --lib`'s interface and binding from Stage 2's front end (#2270) as a native executable beside the Rust CLI (tests/self_host_codegen_export.rs); it is @vesper/stage2 plus the export packages, built under Stage 2 as one program in bootstrap switch slice 3",
-    ),
-    (
-        "vesper-native-lib",
-        "a library's native object built in Vesper over @vesper/cranelift (bootstrap switch slice 2a, #2349), compared with `vesper build --lib` in the JIT (crates/vesper-codegen-swap-test/tests/self_host_native_lib.rs); built under Stage 2 with the Cranelift component in bootstrap switch slice 3",
     ),
     (
         "vesper-stage2",
