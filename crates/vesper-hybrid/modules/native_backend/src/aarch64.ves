@@ -38,6 +38,7 @@ const ARGUMENT_REGISTERS: u64 = 8;
 const CALLER_REGISTER_MASK: u32 = 0xffff;
 const UNASSIGNED: u32 = 32;
 const SPILL_BASE: u32 = UNASSIGNED + 1;
+const REMATERIALIZED_ZERO: u32 = 0xffffffff;
 const SPILL_REGISTER_MASK: u32 = 0x0fff;
 const SPILL_RESULT: u32 = 12;
 const SPILL_LEFT: u32 = 13;
@@ -1269,10 +1270,30 @@ fn allocate_spill(
 
 fn materialize(inout output: ChunkSeq[u8], assigned: u32, scratch: u32, frame_bytes: u64) -> u32 {
     if assigned >= SPILL_BASE {
-        memory(inout output, true, QWORD_BITS, SP, scratch, spill_offset(frame_bytes, assigned));
+        if assigned == REMATERIALIZED_ZERO {
+            // Register 31 encodes SP in address and some arithmetic operands.
+            rrr(inout output, ORR_REG, scratch, ZERO, ZERO);
+        } else {
+            memory(
+                inout output,
+                true,
+                QWORD_BITS,
+                SP,
+                scratch,
+                spill_offset(frame_bytes, assigned)
+            );
+        }
         scratch
     } else {
         assigned
+    }
+}
+
+fn store_source(inout output: ChunkSeq[u8], assigned: u32, scratch: u32, frame_bytes: u64) -> u32 {
+    if assigned == REMATERIALIZED_ZERO {
+        ZERO
+    } else {
+        materialize(inout output, assigned, scratch, frame_bytes)
     }
 }
 
@@ -2121,6 +2142,28 @@ fn encode_pass(
         if n == 3 {
             used = expire(used, in ends, r.extra, value, extra);
         }
+        if stored != 0 {
+            if is_stack_store(r.op) {
+                let source = store_source(inout out, left, SPILL_LEFT, frame_bytes);
+                let displacement = stack_displacement(in frame, in r).unwrap_or(0);
+                let home = if homes != 0 {
+                    home_register(home_first, home_cell(in r, home_slot), homes)
+                } else {
+                    UNASSIGNED
+                };
+                if home != UNASSIGNED {
+                    write_home(inout out, home, source, stored);
+                } else {
+                    memory(inout out, false, stored, SP, source, displacement);
+                }
+            } else {
+                let address = materialize(inout out, left, SPILL_LEFT, frame_bytes);
+                let source = store_source(inout out, right, SPILL_RIGHT, frame_bytes);
+                memory(inout out, false, stored, address, source, r.extra);
+            }
+            locations.push(UNASSIGNED);
+            continue;
+        }
         let lhs = materialize(inout out, left, SPILL_LEFT, frame_bytes);
         let rhs = materialize(inout out, right, SPILL_RIGHT, frame_bytes);
         let third = if consumes_carry(r.op) {
@@ -2222,25 +2265,6 @@ fn encode_pass(
             locations.push(UNASSIGNED);
             continue;
         }
-        if stored != 0 {
-            if is_stack_store(r.op) {
-                let displacement = stack_displacement(in frame, in r).unwrap_or(0);
-                let home = if homes != 0 {
-                    home_register(home_first, home_cell(in r, home_slot), homes)
-                } else {
-                    UNASSIGNED
-                };
-                if home != UNASSIGNED {
-                    write_home(inout out, home, lhs, stored);
-                } else {
-                    memory(inout out, false, stored, SP, lhs, displacement);
-                }
-            } else {
-                memory(inout out, false, stored, lhs, rhs, r.extra);
-            }
-            locations.push(UNASSIGNED);
-            continue;
-        }
         let overflow_cc = if r.op == OVERFLOW_FLAG {
             Option::Some(overflow_condition(read_record(in words, wrapping_sub(index, 1)).op))
         } else {
@@ -2310,6 +2334,10 @@ fn encode_pass(
             used = used | sh(1, reg);
             reg
         } else if spill_mode {
+            if (r.op == CONSTANT || r.op == FLOAT_CONSTANT) && r.left == 0 {
+                locations.push(REMATERIALIZED_ZERO);
+                continue;
+            }
             match allocate_spill(inout spills, frame_bytes, value, last) {
                 Option::Some(spill) => spill,
                 Option::None => {

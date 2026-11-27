@@ -27,6 +27,7 @@ const SIGN_EXTEND: u64 = 17;
 const LOAD: u64 = 23;
 const STORE_BYTE: u64 = 24;
 const STORE_WORD: u64 = 25;
+const STORE_QWORD: u64 = 27;
 const BRANCH_ZERO: u64 = 28;
 const EARLY_RETURN: u64 = 29;
 const STACK_SLOT: u64 = 30;
@@ -1299,6 +1300,41 @@ fn aarch64_spilling_keeps_profitable_callee_saved_block_homes() {
     assert!(remainder.is_empty());
     assert!(words.contains(&MOV_X19_X0.to_le_bytes()));
     assert!(words.contains(&LDR_X19_SP.to_le_bytes()));
+}
+
+#[test]
+fn aarch64_recreates_spilled_zero_as_a_store_source_and_arithmetic_operand() {
+    const LIVE_CONSTANTS: u64 = 20;
+    const STR_XZR_X0: u32 = 0xf900_001f;
+    const MOV_X13_XZR: u32 = 0xaa1f_03ed;
+    const ADD_X0_X13_5: u32 = 0x9100_15a0;
+
+    let mut records = Vec::new();
+    for value in 1..=LIVE_CONSTANTS {
+        records.push([CONSTANT, value, 0, 0]);
+    }
+    let zero = records.len() as u64 + 1;
+    records.push([CONSTANT, 0, 0, 0]);
+    records.push([STORE_QWORD, 0, zero, 0]);
+    let mut sum = records.len() as u64 + 1;
+    records.push([ADD_IMMEDIATE, zero, 5, CELL_BITS]);
+    for value in 1..=LIVE_CONSTANTS {
+        let next = records.len() as u64 + 1;
+        records.push([ADD, sum, value, CELL_BITS]);
+        sum = next;
+    }
+    let tape: Vec<_> = [1, sum]
+        .into_iter()
+        .chain(records.into_iter().flatten())
+        .collect();
+    let code = binding::aarch64_integer_leaf(&tape);
+    let (words, remainder) = code.as_chunks::<{ size_of::<u32>() }>();
+    assert!(remainder.is_empty());
+    assert!(
+        words.windows(3).any(|window| {
+            window == [STR_XZR_X0, MOV_X13_XZR, ADD_X0_X13_5].map(u32::to_le_bytes)
+        })
+    );
 }
 
 #[test]
