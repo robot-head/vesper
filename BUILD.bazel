@@ -444,6 +444,8 @@ vesper_crate(
             "//bootstrap:files",
             # @vesper/run keeps region books in @vesper/alloc (#2053).
             "//crates/vesper-alloc:files",
+            # @vesper/lsp-publish renders through @vesper/diagnostics (#1828).
+            "//crates/vesper-diagnostics:files",
             "//crates/vesper-ebpf:files",
             # @vesper/driver-commands formats through @vesper/fmt (#1996).
             "//crates/vesper-fmt:files",
