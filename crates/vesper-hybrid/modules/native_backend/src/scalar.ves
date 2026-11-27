@@ -124,6 +124,11 @@ pub const LEADING_ZEROS: u64 = 107;
 pub const TRAILING_ZEROS: u64 = 108;
 pub const POPULATION_COUNT: u64 = 109;
 pub const REVERSE_BITS: u64 = 110;
+pub const LEADING_SIGN_BITS: u64 = 111;
+pub const ROTATE_RIGHT: u64 = 112;
+pub const ROTATE_RIGHT_REGISTER: u64 = 113;
+pub const ROTATE_LEFT_REGISTER: u64 = 114;
+pub const FUNNEL_RIGHT: u64 = 115;
 const XMM_ARGUMENTS: u64 = 8;
 pub const CHECKED_ARITHMETIC_RECORDS: u64 = 2;
 

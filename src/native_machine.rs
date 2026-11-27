@@ -130,6 +130,11 @@ enum IntegerOp {
     TrailingZeros = 108,
     PopulationCount = 109,
     ReverseBits = 110,
+    LeadingSignBits = 111,
+    RotateRight = 112,
+    RotateRightRegister = 113,
+    RotateLeftRegister = 114,
+    FunnelRight = 115,
 }
 
 fn integer_bit_op(op: Opcode) -> Option<IntegerOp> {
@@ -138,8 +143,26 @@ fn integer_bit_op(op: Opcode) -> Option<IntegerOp> {
         Opcode::Ctz => IntegerOp::TrailingZeros,
         Opcode::Popcnt => IntegerOp::PopulationCount,
         Opcode::Bitrev => IntegerOp::ReverseBits,
+        Opcode::Cls => IntegerOp::LeadingSignBits,
         _ => return None,
     })
+}
+
+fn right_rotation_count(op: Opcode, count: i64) -> u64 {
+    let count = count as u64;
+    if matches!(op, Opcode::Rotl | Opcode::RotlImm) {
+        count.wrapping_neg()
+    } else {
+        count
+    }
+}
+
+fn rotate_register_op(op: Opcode) -> IntegerOp {
+    if op == Opcode::Rotl {
+        IntegerOp::RotateLeftRegister
+    } else {
+        IntegerOp::RotateRightRegister
+    }
 }
 
 type Encoder = fn(&[u64]) -> Option<Vec<u8>>;
@@ -731,6 +754,37 @@ impl IntegerBlocks<'_> {
         self.append(IntegerOp::Select, [high_equal, low_order, high_order])
     }
 
+    fn wide_rotate_immediate(&mut self, [mut low, mut high]: [u64; 2], amount: u64) -> [u64; 2] {
+        if amount & INTEGER_CELL_BITS != 0 {
+            std::mem::swap(&mut low, &mut high);
+        }
+        let shift = amount & (INTEGER_CELL_BITS - 1);
+        if shift == 0 {
+            return [low, high];
+        }
+        [
+            self.append(IntegerOp::FunnelRight, [low, high, shift]),
+            self.append(IntegerOp::FunnelRight, [high, low, shift]),
+        ]
+    }
+
+    fn wide_rotate_register(&mut self, [low, high]: [u64; 2], amount: u64) -> [u64; 2] {
+        let width = INTEGER_CELL_BITS;
+        let other_shift = self.append(IntegerOp::Not, [amount, 0, width]);
+        let rotated = [(low, high), (high, low)].map(|(limb, other)| {
+            let right = self.append(IntegerOp::ShiftRightLogicalRegister, [limb, amount, width]);
+            // Split the complementary left shift so it yields zero when the count is 0 mod 64.
+            let left = self.append(IntegerOp::ShiftLeft, [other, 1, width]);
+            let left = self.append(IntegerOp::ShiftLeftRegister, [left, other_shift, width]);
+            self.append(IntegerOp::Or, [right, left, width])
+        });
+        let swap = self.append(IntegerOp::AndImmediate, [amount, width, width]);
+        [
+            self.append(IntegerOp::Select, [swap, rotated[1], rotated[0]]),
+            self.append(IntegerOp::Select, [swap, rotated[0], rotated[1]]),
+        ]
+    }
+
     fn wide_instruction(&mut self, inst: Inst, values: &mut Values) -> Option<()> {
         let dfg = &self.function.dfg;
         let resolve = |value| dfg.resolve_aliases(value);
@@ -760,12 +814,54 @@ impl IntegerBlocks<'_> {
             return None;
         };
         let output = ty(result);
+        if self.aarch64
+            && let Some(width) = integer_width(output)
+            && let InstructionData::Binary {
+                opcode: opcode @ (Opcode::Rotl | Opcode::Rotr),
+                args: [value, amount],
+            } = dfg.insts[inst]
+            && ty(value) == output
+            && ty(amount) == types::I128
+        {
+            values.low[result] = Some(self.append(
+                rotate_register_op(opcode),
+                [low(value)?, low(amount)?, width],
+            ));
+            return Some(());
+        }
         let [lo, hi] = match dfg.insts[inst] {
             InstructionData::Binary {
                 opcode: Opcode::Iconcat,
                 args: [a, b],
             } if output == types::I128 && ty(a) == types::I64 && ty(b) == types::I64 => {
                 [low(a)?, low(b)?]
+            }
+            InstructionData::Binary {
+                opcode: opcode @ (Opcode::Rotl | Opcode::Rotr),
+                args: [value, amount],
+            } if self.aarch64
+                && output == types::I128
+                && (integer_width(ty(amount)).is_some() || ty(amount) == types::I128) =>
+            {
+                let value = pair(value)?;
+                if let Some(count) = self.constant_bits(amount) {
+                    self.wide_rotate_immediate(value, right_rotation_count(opcode, count))
+                } else {
+                    let amount = low(amount)?;
+                    let amount = if opcode == Opcode::Rotl {
+                        self.append(IntegerOp::Neg, [amount, 0, INTEGER_CELL_BITS])
+                    } else {
+                        amount
+                    };
+                    self.wide_rotate_register(value, amount)
+                }
+            }
+            InstructionData::BinaryImm64 {
+                opcode: opcode @ (Opcode::RotlImm | Opcode::RotrImm),
+                arg,
+                imm,
+            } if self.aarch64 && output == types::I128 => {
+                self.wide_rotate_immediate(pair(arg)?, right_rotation_count(opcode, imm.bits()))
             }
             InstructionData::Binary {
                 opcode,
@@ -831,6 +927,25 @@ impl IntegerBlocks<'_> {
                     self.append(op, [high, 0, INTEGER_CELL_BITS]),
                     self.append(op, [low, 0, INTEGER_CELL_BITS]),
                 ]
+            }
+            InstructionData::Unary {
+                opcode: Opcode::Cls,
+                arg,
+            } if output == types::I128 && self.aarch64 => {
+                let [low, high] = pair(arg)?;
+                let width = INTEGER_CELL_BITS;
+                let sign_bits = width - 1;
+                let head = self.append(IntegerOp::LeadingSignBits, [high, 0, width]);
+                let sign = self.append(IntegerOp::ShiftRightArithmetic, [high, sign_bits, width]);
+                let unsigned_tail = self.append(IntegerOp::Xor, [low, sign, width]);
+                let tail = self.append(IntegerOp::LeadingZeros, [unsigned_tail, 0, width]);
+                let extended = self.append(IntegerOp::AddImmediate, [tail, sign_bits, width]);
+                let all_sign = self.append(
+                    IntegerOp::CompareImmediate,
+                    [head, sign_bits, condition(IntCC::Equal)],
+                );
+                let count = self.append(IntegerOp::Select, [all_sign, extended, head]);
+                [count, self.append(IntegerOp::Constant, [0; 3])]
             }
             InstructionData::Unary {
                 opcode: opcode @ (Opcode::Clz | Opcode::Ctz | Opcode::Popcnt),
@@ -1208,7 +1323,12 @@ impl IntegerBlocks<'_> {
                     (IntegerOp::ByteSwap, [input(arg)?, 0, width])
                 }
                 InstructionData::Unary {
-                    opcode: opcode @ (Opcode::Clz | Opcode::Ctz | Opcode::Popcnt | Opcode::Bitrev),
+                    opcode:
+                        opcode @ (Opcode::Clz
+                        | Opcode::Ctz
+                        | Opcode::Popcnt
+                        | Opcode::Bitrev
+                        | Opcode::Cls),
                     arg,
                 } if self.aarch64 && ty(arg) == output => {
                     (integer_bit_op(opcode)?, [input(arg)?, 0, width])
@@ -1338,6 +1458,20 @@ impl IntegerBlocks<'_> {
                     (IntegerOp::Select, [input(cond)?, input(yes)?, input(no)?])
                 }
                 InstructionData::Binary {
+                    opcode: opcode @ (Opcode::Rotl | Opcode::Rotr),
+                    args: [value, amount],
+                } if self.aarch64 && ty(value) == output && integer_width(ty(amount)).is_some() => {
+                    let value = input(value)?;
+                    if let Some(count) = self.constant_bits(amount) {
+                        (
+                            IntegerOp::RotateRight,
+                            [value, right_rotation_count(opcode, count), width],
+                        )
+                    } else {
+                        (rotate_register_op(opcode), [value, input(amount)?, width])
+                    }
+                }
+                InstructionData::Binary {
                     opcode: opcode @ (Opcode::Ishl | Opcode::Ushr | Opcode::Sshr),
                     args: [left, right],
                 } if matches!(output, types::I32 | types::I64)
@@ -1405,6 +1539,10 @@ impl IntegerBlocks<'_> {
                         Opcode::IshlImm => (IntegerOp::ShiftLeft, [left, bits, width]),
                         Opcode::UshrImm => (IntegerOp::ShiftRightLogical, [left, bits, width]),
                         Opcode::SshrImm => (IntegerOp::ShiftRightArithmetic, [left, bits, width]),
+                        Opcode::RotlImm | Opcode::RotrImm if self.aarch64 => (
+                            IntegerOp::RotateRight,
+                            [left, right_rotation_count(opcode, imm.bits()), width],
+                        ),
                         _ => {
                             let op = binary_op(opcode)?;
                             if let Some(bits) = sign_extended_immediate(imm.bits(), output) {

@@ -80,6 +80,11 @@ const LEADING_ZEROS: u64 = 107;
 const TRAILING_ZEROS: u64 = 108;
 const POPULATION_COUNT: u64 = 109;
 const REVERSE_BITS: u64 = 110;
+const LEADING_SIGN_BITS: u64 = 111;
+const ROTATE_RIGHT: u64 = 112;
+const ROTATE_RIGHT_REGISTER: u64 = 113;
+const ROTATE_LEFT_REGISTER: u64 = 114;
+const FUNNEL_RIGHT: u64 = 115;
 const EQUAL: u64 = 0;
 const SIGNED_LESS: u64 = 2;
 const UNSIGNED_LESS: u64 = 6;
@@ -233,6 +238,60 @@ fn aarch64_bit_operations_use_the_declared_width() {
         assert_eq!(binding::aarch64_integer_leaf(&packet), expected);
         assert!(binding::aarch64_integer_leaf(&[1, 1, op, 0, 0, u128::BITS.into()]).is_empty());
     }
+}
+
+#[test]
+fn aarch64_sign_counts_and_rotates_encode_narrow_and_wide_operands() {
+    // Narrow sign and oversized rotate cases follow Cranelift's runtests/{cls,rotl,rotr}.clif.
+    const CLS_X0_X0: u32 = 0xdac0_1400;
+    const SXTB_W16_W0: u32 = 0x1300_1c10;
+    const CLS_W0_W16: u32 = 0x5ac0_1600;
+    const SUB_W0_BYTE_EXCESS: u32 = 0x5100_6000;
+    const ROR_W0_DWORD_MINUS_ONE: u32 = 0x1380_7c00;
+    const ROR_X0_X0_X1: u32 = 0x9ac1_2c00;
+    const NEG_X17_X1: u32 = 0xcb01_03f1;
+    const ROR_X0_X0_X17: u32 = 0x9ad1_2c00;
+    const EXTR_X0_X1_X0_17: u32 = 0x93c0_4420;
+    const UXTH_W16_W0: u32 = 0x5300_3c10;
+    const ORR_W16_REPEATED_WORD: u32 = 0x2a10_4210;
+    const UBFX_W0_W16_15_16: u32 = 0x530f_7a00;
+
+    for (packet, instructions) in [
+        (
+            [1, 1, LEADING_SIGN_BITS, 0, 0, CELL_BITS],
+            &[CLS_X0_X0, RET][..],
+        ),
+        (
+            [1, 1, LEADING_SIGN_BITS, 0, 0, BYTE_BITS],
+            &[SXTB_W16_W0, CLS_W0_W16, SUB_W0_BYTE_EXCESS, RET],
+        ),
+        (
+            [1, 1, ROTATE_RIGHT, 0, u64::MAX, DWORD_BITS],
+            &[ROR_W0_DWORD_MINUS_ONE, RET],
+        ),
+        (
+            [1, 1, ROTATE_RIGHT, 0, WORD_BITS - 1, WORD_BITS],
+            &[UXTH_W16_W0, ORR_W16_REPEATED_WORD, UBFX_W0_W16_15_16, RET],
+        ),
+        (
+            [2, 2, ROTATE_RIGHT_REGISTER, 0, 1, CELL_BITS],
+            &[ROR_X0_X0_X1, RET],
+        ),
+        (
+            [2, 2, ROTATE_LEFT_REGISTER, 0, 1, CELL_BITS],
+            &[NEG_X17_X1, ROR_X0_X0_X17, RET],
+        ),
+        ([2, 2, FUNNEL_RIGHT, 0, 1, 17], &[EXTR_X0_X1_X0_17, RET]),
+    ] {
+        let expected: Vec<_> = instructions
+            .iter()
+            .copied()
+            .flat_map(u32::to_le_bytes)
+            .collect();
+        assert_eq!(binding::aarch64_integer_leaf(&packet), expected);
+    }
+    assert!(binding::aarch64_integer_leaf(&[1, 1, LEADING_SIGN_BITS, 0, 1, CELL_BITS]).is_empty());
+    assert!(binding::aarch64_integer_leaf(&[2, 2, FUNNEL_RIGHT, 0, 1, CELL_BITS]).is_empty());
 }
 
 #[test]
