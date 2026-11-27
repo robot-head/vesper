@@ -217,6 +217,8 @@ pub const VECTOR_FLOAT_CEIL: u64 = 196;
 pub const VECTOR_FLOAT_FLOOR: u64 = 197;
 pub const VECTOR_FLOAT_TRUNC: u64 = 198;
 pub const VECTOR_FLOAT_NEAREST: u64 = 199;
+pub const VECTOR_FLOAT_MIN: u64 = 200;
+pub const VECTOR_FLOAT_MAX: u64 = 201;
 const POWER_SHIFT_MASK: u64 = QWORD_BITS - 1;
 const POWER_SIGNED: u64 = 0x40;
 const POWER_NEGATIVE: u64 = 0x80;
@@ -1049,12 +1051,17 @@ pub fn is_vector_binary(op: u64) -> bool {
         || op == VECTOR_INTEGER_COMPARE
         || op == VECTOR_FLOAT_COMPARE
         || op == VECTOR_FLOAT_COPY_SIGN
+        || is_vector_float_min_max(op)
         || is_vector_float_fma(op)
         || is_vector_float_binary(op)
 }
 
 fn is_vector_float_binary(op: u64) -> bool {
     op >= VECTOR_FLOAT_ADD && op <= VECTOR_FLOAT_DIV
+}
+
+fn is_vector_float_min_max(op: u64) -> bool {
+    op == VECTOR_FLOAT_MIN || op == VECTOR_FLOAT_MAX
 }
 
 pub fn is_vector_float_unary(op: u64) -> bool {
@@ -1113,7 +1120,7 @@ fn vector_binary_opcode(op: u64, width: u64) -> u8 {
 pub fn is_vector_result(op: u64) -> bool {
     (op >= VECTOR_CONSTANT && op <= VECTOR_INSERT && op != VECTOR_STORE)
         || op == VECTOR_INTEGER_COMPARE
-        || (op >= VECTOR_FLOAT_ADD && op <= VECTOR_FLOAT_NEAREST)
+        || (op >= VECTOR_FLOAT_ADD && op <= VECTOR_FLOAT_MAX)
 }
 
 pub fn vector_value(in words: Slice[u64], arguments: u64, value: u64) -> bool {
@@ -1473,7 +1480,9 @@ fn find_last_reads(
                     | VECTOR_FLOAT_SUB
                     | VECTOR_FLOAT_MUL
                     | VECTOR_FLOAT_DIV
-                    | VECTOR_FLOAT_COPY_SIGN => vector_float_width(record.extra),
+                    | VECTOR_FLOAT_COPY_SIGN
+                    | VECTOR_FLOAT_MIN
+                    | VECTOR_FLOAT_MAX => vector_float_width(record.extra),
                 VECTOR_FLOAT_SQRT
                     | VECTOR_FLOAT_NEG
                     | VECTOR_FLOAT_ABS
@@ -1510,6 +1519,7 @@ fn find_last_reads(
             frame.vectors = true;
             frame.xmm_aux = frame.xmm_aux
                 || record.op == VECTOR_INTEGER_COMPARE
+                || is_vector_float_min_max(record.op)
                 || (record.op == VECTOR_FLOAT_COMPARE
                     && packed_float_compare_needs_temp(record.extra))
                 || (record.op == VECTOR_PAIRWISE_ADD && record.extra == BYTE_BITS)
@@ -2824,6 +2834,14 @@ fn emit_vector_instruction(
             Instruction::VectorFloat(opcode, destination, right, record.extra)
         },
         VECTOR_FLOAT_SQRT => Instruction::VectorFloat(SSE_SQRT, destination, left, record.extra),
+        VECTOR_FLOAT_MIN
+            | VECTOR_FLOAT_MAX => Instruction::VectorFloatMinMax(
+                destination,
+                left,
+                right,
+                record.op == VECTOR_FLOAT_MIN,
+                record.extra
+            ),
         VECTOR_FLOAT_CEIL
             | VECTOR_FLOAT_FLOOR
             | VECTOR_FLOAT_TRUNC

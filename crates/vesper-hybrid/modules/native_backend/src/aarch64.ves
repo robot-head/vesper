@@ -45,7 +45,7 @@ use self::scalar::{
     VECTOR_FLOAT_DIV, VECTOR_FLOAT_SQRT, VECTOR_FLOAT_COMPARE, VECTOR_FLOAT_NEG, VECTOR_FLOAT_ABS,
     VECTOR_FLOAT_COPY_SIGN, VECTOR_FLOAT_FMA32, VECTOR_FLOAT_FMA64, vector_float_width,
     is_vector_float_unary, is_vector_float_fma, valid_vector_float_condition, VECTOR_FLOAT_CEIL,
-    VECTOR_FLOAT_FLOOR, VECTOR_FLOAT_TRUNC, VECTOR_FLOAT_NEAREST
+    VECTOR_FLOAT_FLOOR, VECTOR_FLOAT_TRUNC, VECTOR_FLOAT_NEAREST, VECTOR_FLOAT_MIN, VECTOR_FLOAT_MAX
 };
 use self::x86_64::{
     BYTE_BITS, WORD_BITS, DWORD_BITS, QWORD_BITS, FLOAT_ORDERED, FLOAT_UNORDERED, FLOAT_EQUAL,
@@ -141,6 +141,8 @@ const VECTOR_FADD: u32 = 0x4e20d400;
 const VECTOR_FSUB: u32 = 0x4ea0d400;
 const VECTOR_FMUL: u32 = 0x6e20dc00;
 const VECTOR_FDIV: u32 = 0x6e20fc00;
+const VECTOR_FMIN: u32 = 0x4ea0f400;
+const VECTOR_FMAX: u32 = 0x4e20f400;
 const VECTOR_FSQRT: u32 = 0x6ea1f800;
 const VECTOR_FRINTP: u32 = 0x4ea18800;
 const VECTOR_FRINTM: u32 = 0x4e219800;
@@ -817,6 +819,8 @@ fn vector_float(inout out: ChunkSeq[u8], in r: Record, dest: u32, left: u32, rig
         VECTOR_FLOAT_SUB => VECTOR_FSUB,
         VECTOR_FLOAT_MUL => VECTOR_FMUL,
         VECTOR_FLOAT_DIV => VECTOR_FDIV,
+        VECTOR_FLOAT_MIN => VECTOR_FMIN,
+        VECTOR_FLOAT_MAX => VECTOR_FMAX,
         VECTOR_FLOAT_NEG => VECTOR_FNEG,
         VECTOR_FLOAT_ABS => VECTOR_FABS,
         VECTOR_FLOAT_CEIL => VECTOR_FRINTP,
@@ -1263,7 +1267,9 @@ fn operands(in r: Record, returns: u64) -> Option[u64] {
                 | VECTOR_FLOAT_SUB
                 | VECTOR_FLOAT_MUL
                 | VECTOR_FLOAT_DIV
-                | VECTOR_FLOAT_COPY_SIGN => if vector_float_width(r.extra)
+                | VECTOR_FLOAT_COPY_SIGN
+                | VECTOR_FLOAT_MIN
+                | VECTOR_FLOAT_MAX => if vector_float_width(r.extra)
             {
                 Option::Some(2)
             } else {
@@ -3762,7 +3768,9 @@ fn encode_pass(
                     | VECTOR_FLOAT_CEIL
                     | VECTOR_FLOAT_FLOOR
                     | VECTOR_FLOAT_TRUNC
-                    | VECTOR_FLOAT_NEAREST => vector_float(inout out, in r, dest, lhs, rhs),
+                    | VECTOR_FLOAT_NEAREST
+                    | VECTOR_FLOAT_MIN
+                    | VECTOR_FLOAT_MAX => vector_float(inout out, in r, dest, lhs, rhs),
                 VECTOR_INSERT => {
                     let lane = wrapping_shr_u64(r.extra, VECTOR_LANE_INDEX_SHIFT);
                     let width = r.extra & VECTOR_LANE_WIDTH_MASK;

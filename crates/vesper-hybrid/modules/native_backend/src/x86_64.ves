@@ -149,6 +149,7 @@ const GPR_TO_XMM: u8 = 0x6e;
 const XMM_TO_GPR: u8 = 0x7e;
 const UCOMIS: u8 = 0x2e;
 const ANDPS: u8 = 0x54;
+const ANDNPS: u8 = 0x55;
 const ORPS: u8 = 0x56;
 const CMP_PACKED: u8 = 0xc2;
 const CMP_PACKED_EQ: u8 = 0;
@@ -171,6 +172,8 @@ const F32_EXPONENT_BIAS: u64 = 127;
 const F64_EXPONENT_BIAS: u64 = 1023;
 const F32_EXPONENT_SHIFT: u32 = 23;
 const F64_EXPONENT_SHIFT: u32 = 52;
+const F32_NAN_PAYLOAD_MASK_SHIFT: u8 = 10;
+const F64_NAN_PAYLOAD_MASK_SHIFT: u8 = 13;
 pub const ALL_REGISTER_BITS: u64 = 0xffffffffffffffff;
 pub const SSE_ADD: u8 = 0x58;
 pub const SSE_SUB: u8 = 0x5c;
@@ -360,6 +363,7 @@ pub copy enum Instruction {
     VectorBinary(u8, u8, u8),
     VectorFloat(u8, u8, u8, u64),
     VectorFloatSign(u8, u8, bool, u64),
+    VectorFloatMinMax(u8, u8, u8, bool, u64),
     VectorFloatCompare(u8, u8, u8, u64, u64),
     VectorPairwiseAdd(u8, u8, u8, u64),
     VectorSwizzle(u8, u8, u8, bool),
@@ -1290,6 +1294,13 @@ fn compare_float_registers(inout out: ChunkSeq[u8], left: u8, right: u8, width: 
     xmm_binary(inout out, UCOMIS, left, right);
 }
 
+fn packed_float_binary(inout out: ChunkSeq[u8], op: u8, dest: u8, source: u8, width: u64) {
+    if width == QWORD_BITS {
+        out.push(OPERAND_SIZE_OVERRIDE);
+    }
+    xmm_binary(inout out, op, dest, source);
+}
+
 fn compare_packed(
     inout out: ChunkSeq[u8],
     dest: u8,
@@ -1308,12 +1319,46 @@ fn compare_packed(
         dest
     };
     float_move(inout out, result, left);
-    if width == QWORD_BITS {
-        out.push(OPERAND_SIZE_OVERRIDE);
-    }
-    xmm_binary(inout out, CMP_PACKED, result, right);
+    packed_float_binary(inout out, CMP_PACKED, result, right, width);
     out.push(predicate);
     float_move(inout out, dest, result);
+}
+
+fn vector_float_min_max(
+    inout out: ChunkSeq[u8],
+    dest: u8,
+    left: u8,
+    right: u8,
+    min: bool,
+    width: u64
+) {
+    let first = XMM_AUX_SCRATCH;
+    let second = XMM_RIGHT_SCRATCH;
+    let op = if min { SSE_MIN } else { SSE_MAX };
+    // Legacy min/max selects its second operand on a tie or a NaN. Compute both orders.
+    float_move(inout out, first, left);
+    packed_float_binary(inout out, op, first, right, width);
+    float_move(inout out, second, right);
+    packed_float_binary(inout out, op, second, left, width);
+    if min {
+        // OR preserves a negative zero and the exponent and fraction of either NaN.
+        xmm_binary(inout out, ORPS, first, second);
+        compare_packed(inout out, dest, first, second, width, CMP_PACKED_UNORDERED);
+        xmm_binary(inout out, ORPS, first, dest);
+    } else {
+        // Subtracting the differing sign converts a mixed-sign zero pair to +0.
+        xmm_binary(inout out, XORPS, second, first);
+        xmm_binary(inout out, ORPS, first, second);
+        compare_packed(inout out, dest, first, first, width, CMP_PACKED_UNORDERED);
+        packed_float_binary(inout out, SSE_SUB, first, second, width);
+    }
+    let shift = if width == DWORD_BITS {
+        F32_NAN_PAYLOAD_MASK_SHIFT
+    } else {
+        F64_NAN_PAYLOAD_MASK_SHIFT
+    };
+    packed_shift(inout out, dest, PACKED_SHIFT_RIGHT, width, shift);
+    xmm_binary(inout out, ANDNPS, dest, first);
 }
 
 fn vector_float_compare(
@@ -2232,12 +2277,20 @@ pub fn emit(inout out: ChunkSeq[u8], in instruction: Instruction) {
             destination,
             source
         ),
-        Instruction::VectorFloat(opcode, destination, source, width) => {
-            if width == QWORD_BITS {
-                out.push(OPERAND_SIZE_OVERRIDE);
-            }
-            xmm_binary(inout out, opcode, destination, source);
-        },
+        Instruction::VectorFloat(opcode, destination, source, width) => packed_float_binary(
+            inout out,
+            opcode,
+            destination,
+            source,
+            width
+        ),
+        Instruction::VectorFloatMinMax(
+            destination,
+            left,
+            right,
+            min,
+            width
+        ) => vector_float_min_max(inout out, destination, left, right, min, width),
         Instruction::VectorFloatSign(destination, source, absolute, width) => vector_float_sign(
             inout out,
             destination,

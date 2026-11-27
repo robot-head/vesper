@@ -217,6 +217,8 @@ enum IntegerOp {
     VectorFloatFloor = 197,
     VectorFloatTrunc = 198,
     VectorFloatNearest = 199,
+    VectorFloatMin = 200,
+    VectorFloatMax = 201,
 }
 
 fn integer_bit_op(op: Opcode) -> Option<IntegerOp> {
@@ -2087,6 +2089,14 @@ impl IntegerBlocks<'_> {
                     Opcode::Iadd => (IntegerOp::VectorAdd, integer_width(lane)?),
                     Opcode::Isub => (IntegerOp::VectorSub, integer_width(lane)?),
                     Opcode::Fcopysign => (IntegerOp::VectorFloatCopySign, float_width(lane)?),
+                    Opcode::Fmin | Opcode::Fmax if !self.canonicalize_nans => (
+                        if opcode == Opcode::Fmin {
+                            IntegerOp::VectorFloatMin
+                        } else {
+                            IntegerOp::VectorFloatMax
+                        },
+                        float_width(lane)?,
+                    ),
                     Opcode::Fadd | Opcode::Fsub | Opcode::Fmul | Opcode::Fdiv
                         if !self.canonicalize_nans =>
                     {

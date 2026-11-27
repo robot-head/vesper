@@ -380,11 +380,14 @@ fn packed_float_precision_conversions_match_cranelift() {
 
 #[test]
 fn packed_float_arithmetic_matches_cranelift() {
+    const LIVE_VECTORS: u8 = 21;
     const ARM_ADD: u32 = 0x4e20_d400;
     const ARM_SUB: u32 = 0x4ea0_d400;
     const ARM_MUL: u32 = 0x6e20_dc00;
     const ARM_DIV: u32 = 0x6e20_fc00;
     const ARM_SQRT: u32 = 0x6ea1_f800;
+    const ARM_MIN: u32 = 0x4ea0_f400;
+    const ARM_MAX: u32 = 0x4e20_f400;
     const ARM_DOUBLE: u32 = 0x0040_0000;
     const ARM_RN_RD: u32 = 0x3ff;
     const ARM_RM: u32 = 0x1f_0000;
@@ -435,8 +438,14 @@ fn packed_float_arithmetic_matches_cranelift() {
             (Opcode::Fmul, ARM_MUL),
             (Opcode::Fdiv, ARM_DIV),
             (Opcode::Sqrt, ARM_SQRT),
+            (Opcode::Fmin, ARM_MIN),
+            (Opcode::Fmax, ARM_MAX),
         ] {
-            for keep_left in [false, true] {
+            let min_max = matches!(opcode, Opcode::Fmin | Opcode::Fmax);
+            for (keep_left, spills) in [(false, false), (true, false), (false, true)] {
+                if spills && !min_max {
+                    continue;
+                }
                 let mut context = module.make_context();
                 context.func.signature.params = vec![AbiParam::new(types::I64); 3];
                 let mut state = FunctionBuilderContext::new();
@@ -447,6 +456,20 @@ fn packed_float_arithmetic_matches_cranelift() {
                 let [left, right, destination] = *b.block_params(entry) else {
                     unreachable!()
                 };
+                let live = if spills {
+                    (1..=LIVE_VECTORS)
+                        .map(|byte| {
+                            let constant = b
+                                .func
+                                .dfg
+                                .constants
+                                .insert(ConstantData::from(vec![byte; VECTOR_BYTES]));
+                            b.ins().vconst(ty.as_int(), constant)
+                        })
+                        .collect()
+                } else {
+                    Vec::new()
+                };
                 let flags = MemFlags::new().with_notrap();
                 let left = b.ins().load(ty, flags, left, 0);
                 let right = b.ins().load(ty, flags, right, 0);
@@ -455,11 +478,20 @@ fn packed_float_arithmetic_matches_cranelift() {
                     Opcode::Fsub => b.ins().fsub(left, right),
                     Opcode::Fmul => b.ins().fmul(left, right),
                     Opcode::Fdiv => b.ins().fdiv(left, right),
+                    Opcode::Fmin => b.ins().fmin(left, right),
+                    Opcode::Fmax => b.ins().fmax(left, right),
                     _ => b.ins().sqrt(left),
                 };
                 b.ins().store(flags, result, destination, 0);
                 if keep_left {
                     b.ins().store(flags, left, destination, VECTOR_BYTES as i32);
+                }
+                if let Some(checksum) = live
+                    .into_iter()
+                    .reduce(|a, b_value| b.ins().bxor(a, b_value))
+                {
+                    b.ins()
+                        .store(flags, checksum, destination, VECTOR_BYTES as i32);
                 }
                 b.ins().return_(&[]);
                 b.seal_all_blocks();
@@ -496,8 +528,8 @@ fn packed_float_arithmetic_matches_cranelift() {
                             .zip(reference[..VECTOR_BYTES].chunks_exact(width))
                         {
                             assert!(
-                                equal_float_lane(ty, got, want),
-                                "{opcode} {ty} {keep_left} {i} {j} {got:x?} {want:x?}"
+                                got == want || (!min_max && equal_float_lane(ty, got, want)),
+                                "{opcode} {ty} {keep_left} {spills} {i} {j} {got:x?} {want:x?}"
                             );
                         }
                     }
