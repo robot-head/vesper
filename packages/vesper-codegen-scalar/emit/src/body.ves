@@ -64,6 +64,7 @@ const LANE_I128: u64 = 4;
 const LANE_PRODUCT: u64 = 5;
 const LOCAL_PARAM: u64 = 16;
 const LOCAL_PARAM_PRODUCT: u64 = 65536;
+const STORE_AGGREGATE: u64 = 65536;
 
 // Instruction kinds (`body.ves`).
 const INST_PLANNED: u64 = 1;
@@ -108,6 +109,7 @@ const INST_F64CONST: u64 = 17;
 const INST_DATA: u64 = 32;
 const INST_PROJECT: u64 = 33;
 const INST_READ_FIELD: u64 = 34;
+const INST_READ_COPY: u64 = 35;
 
 // Sub-operations of `INST_FLOAT_UNARY` and `CB_FLOAT_UNARY`.
 const FUN_FNEG: u64 = 1;
@@ -1685,8 +1687,21 @@ impl Body {
                 let tv = Var { id: at32(in temps, k) };
                 let value = body_operand(inout b, tv, read, self.optimize);
                 let field = ins_iadd_imm(inout b, ptr, wrapping_i64(offset));
-                let stored = body_coerce(inout b, value, store, self.optimize);
-                ins_store(inout b, PLAIN, stored, field, 0);
+                if store >= STORE_AGGREGATE {
+                    let fsize = wrapping_sub(store, STORE_AGGREGATE);
+                    let mut foff: u64 = 0;
+                    loop {
+                        if foff >= fsize {
+                            break;
+                        }
+                        let word = ins_load(inout b, ty_i64(), PLAIN, value, wrapping_i32(foff));
+                        ins_store(inout b, PLAIN, word, field, wrapping_i32(foff));
+                        foff = wrapping_add(foff, widen_u64(WORD_BYTES));
+                    }
+                } else {
+                    let stored = body_coerce(inout b, value, store, self.optimize);
+                    ins_store(inout b, PLAIN, stored, field, 0);
+                }
             }
             ptr
         } else if kind == INST_PROJECT {
@@ -1706,6 +1721,21 @@ impl Body {
                 ptr = ins_iadd_imm(inout b, ptr, wrapping_i64(off));
             }
             ins_load(inout b, lane_type(flane), PLAIN, ptr, 0)
+        } else if kind == INST_READ_COPY {
+            let local = w.next();
+            let size = w.next();
+            let from = self.use_local(inout b, local);
+            let to = self.storage(inout b, in m, size);
+            let mut off: u64 = 0;
+            loop {
+                if off >= size {
+                    break;
+                }
+                let word = ins_load(inout b, ty_i64(), PLAIN, from, wrapping_i32(off));
+                ins_store(inout b, PLAIN, word, to, wrapping_i32(off));
+                off = wrapping_add(off, widen_u64(WORD_BYTES));
+            }
+            to
         } else {
             return false;
         };
