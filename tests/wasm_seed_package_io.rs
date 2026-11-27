@@ -2755,6 +2755,13 @@ const COMPILER_PACKAGES: &[(&str, &str, &str, &str, CompilerExecCheck)] = &[
         "wit_component_wrap(in \"\").len()",
         CompilerExecCheck::CompileOnly,
     ),
+    (
+        "run",
+        "@vesper/run",
+        "packages/vesper-run",
+        "run_words(in \"\".as_bytes()).len()",
+        CompilerExecCheck::CompileOnly,
+    ),
 ];
 
 /// Compiler packages over `Ffi[Cranelift]` (native Cranelift glue over
