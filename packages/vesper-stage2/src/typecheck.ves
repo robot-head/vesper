@@ -649,8 +649,7 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
     } else if e.kind == X_UNARY {
         let op = n32(e.a);
         if is_op(in tc, op, in "!") {
-            let _t = check_expr(inout tc, in a, e.b, tc.bool_ty);
-            tc.bool_ty
+            check_expr(inout tc, in a, e.b, expected)
         } else {
             let conv_t = conv_target_type(inout tc, op);
             if conv_t != NONE32 {
