@@ -38,6 +38,7 @@ const SCALAR_RESULTS: u64 = 1;
 copy struct Value {
     owner: u64,
     home: u64,
+    live: u64,
     block: u64,
     machine: u64,
 }
@@ -50,7 +51,11 @@ struct Function {
 }
 
 fn value_new(owner: u64) -> Value {
-    Value { owner: owner, home: NO_VALUE, block: NO_VALUE, machine: NO_VALUE }
+    Value { owner: owner, home: NO_VALUE, live: 0, block: NO_VALUE, machine: NO_VALUE }
+}
+
+fn block_bit(block: u64) -> u64 {
+    wrapping_shl_u64(1, wrapping_u32(block))
 }
 
 impl Function {
@@ -66,7 +71,7 @@ impl Function {
         value
     }
 
-    fn home(inout self, id: u64) -> bool {
+    fn home(inout self, id: u64, block: u64) -> bool {
         let mut value = self.values.try_get(id).unwrap_or(value_new(NO_VALUE));
         if value.owner == NO_VALUE {
             return false;
@@ -74,14 +79,14 @@ impl Function {
         if value.home == NO_VALUE {
             value.home = self.home_bytes;
             self.home_bytes = add(self.home_bytes, HOME_BYTES);
-            return self.values.try_set(id, value);
         }
-        true
+        value.live = value.live | block_bit(block);
+        self.values.try_set(id, value)
     }
 
     fn use_in(inout self, id: u64, block: u64) -> bool {
         let v = self.values.try_get(id).unwrap_or(value_new(NO_VALUE));
-        v.owner == block || self.home(id)
+        v.owner == block || self.home(id, block)
     }
 
     fn define(inout self, id: u64, block: u64, machine: u64) -> bool {
@@ -188,6 +193,68 @@ fn block_parameter(in low: L, b: BlockRow) -> u64 {
     }
 }
 
+// Walk backward from each use to its definition. Jump operands are read
+// before the destination parameter is written, so those two lifetimes may
+// share a home at the edge. A block in both sets keeps distinct homes.
+fn home_liveness(in predecessors: ChunkSeq[u64], v: Value) -> u64 {
+    let mut live = block_bit(v.owner);
+    let mut pending = v.live & ~live;
+    loop {
+        if pending == 0 {
+            return live;
+        }
+        let block = w(trailing_zeros_u64(pending));
+        let bit = block_bit(block);
+        live = live | bit;
+        pending = (pending | predecessors.try_get(block).unwrap_or(0)) & ~live;
+    }
+}
+
+fn pack_homes(in low: L, row: FnRow, inout m: Function) {
+    // Each bit denotes a block. Large functions retain the initial unique slots.
+    if m.home_bytes == 0 || row.bc > QWORD_BITS {
+        return;
+    }
+    let mut predecessors = ChunkSeq::new[u64]();
+    for block in 0..row.bc {
+        let b = low.program.block(add(row.b0, block));
+        let count_at = add(b.ha, BLOCK_INCOMING_COUNT);
+        let mut mask: u64 = 0;
+        for edge in 0..low.program.op(count_at) {
+            let source = add(inc(count_at), wrapping_mul(edge, BLOCK_INCOMING_WORDS));
+            mask = mask | block_bit(low.program.op(source));
+        }
+        predecessors.push(mask);
+    }
+    let mut occupied = ChunkSeq::new[u64]();
+    for id in 0..m.values.len() {
+        let mut value = m.values.try_get(id).unwrap_or(value_new(NO_VALUE));
+        if value.home == NO_VALUE {
+            continue;
+        }
+        let live = home_liveness(in predecessors, value);
+        let mut cell: u64 = 0;
+        loop {
+            match occupied.try_get(cell) {
+                Option::Some(other) => {
+                    if (live & other) == 0 {
+                        let _ = occupied.try_set(cell, live | other);
+                        break;
+                    }
+                },
+                Option::None => {
+                    occupied.push(live);
+                    break;
+                },
+            }
+            cell = inc(cell);
+        }
+        value.home = wrapping_mul(cell, HOME_BYTES);
+        let _ = m.values.try_set(id, value);
+    }
+    m.home_bytes = wrapping_mul(occupied.len(), HOME_BYTES);
+}
+
 // Stack homes hold branch results and the values read outside their defining block.
 fn plan_homes(in low: L, f: FnR, row: FnRow, inout m: Function) -> bool {
     let mut value_count = row.bc;
@@ -195,6 +262,9 @@ fn plan_homes(in low: L, f: FnR, row: FnRow, inout m: Function) -> bool {
         value_count = add(value_count, low.program.block(add(row.b0, block)).ic);
     }
     m.values.resize(add(f.param_count, value_count), value_new(NO_VALUE));
+    if row.bc == 1 {
+        return block_parameter(in low, low.program.block(row.b0)) == NO_VALUE;
+    }
     for arg in 0..f.param_count {
         let _ = m.values.try_set(arg, value_new(0));
     }
@@ -203,7 +273,7 @@ fn plan_homes(in low: L, f: FnR, row: FnRow, inout m: Function) -> bool {
         let param = block_parameter(in low, b);
         if param != NO_VALUE {
             let id = add(f.param_count, param);
-            if !m.values.try_set(id, value_new(block)) || !m.home(id) {
+            if !m.values.try_set(id, value_new(block)) || !m.home(id, block) {
                 return false;
             }
         }
@@ -242,6 +312,7 @@ fn plan_homes(in low: L, f: FnR, row: FnRow, inout m: Function) -> bool {
             }
         }
     }
+    pack_homes(in low, row, inout m);
     true
 }
 
@@ -327,15 +398,21 @@ fn lower_terminator(in low: L, row: FnRow, b: BlockRow, block: u64, inout m: Fun
             if count != 1 || b.tn != inc(JUMP_ARGUMENT) {
                 return false;
             }
-            let value = m.read(add(m.arguments, low.program.op(add(b.ta, JUMP_ARGUMENT))), block);
+            let source = add(m.arguments, low.program.op(add(b.ta, JUMP_ARGUMENT)));
             let home = m.values
                 .try_get(add(m.arguments, param))
                 .unwrap_or(value_new(NO_VALUE))
                 .home;
-            if value == NO_VALUE || home == NO_VALUE {
+            if home == NO_VALUE {
                 return false;
             }
-            let _ = m.record(STACK_STORE_QWORD, value, HOME_SLOT, home);
+            if m.values.try_get(source).unwrap_or(value_new(NO_VALUE)).home != home {
+                let value = m.read(source, block);
+                if value == NO_VALUE {
+                    return false;
+                }
+                let _ = m.record(STACK_STORE_QWORD, value, HOME_SLOT, home);
+            }
         }
         let _ = m.record(JUMP_LABEL, target, 0, 0);
     } else if b.term == Term::Branch && b.tn == BRANCH_WORDS {
@@ -361,6 +438,9 @@ fn lower_terminator(in low: L, row: FnRow, b: BlockRow, block: u64, inout m: Fun
 }
 
 fn lower_function(in low: L, f: FnR, row: FnRow) -> ChunkSeq[u8] {
+    if row.bc == 0 {
+        return ChunkSeq::new[u8]();
+    }
     let mut m = Function {
         arguments: f.param_count,
         words: ChunkSeq::new[u64](),
