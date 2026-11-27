@@ -121,6 +121,8 @@ const CB_WIDE_BIT: u64 = 6;
 const CB_BITWISE: u64 = 7;
 const CB_WIDE_CONVERT: u64 = 8;
 const CB_WIDEN_U64: u64 = 9;
+const CB_WORD_CONVERT: u64 = 10;
+const CB_WRAPPING_BIN: u64 = 11;
 
 const BIT_INTR_AND: u32 = 1;
 const BIT_INTR_OR: u32 = 2;
@@ -1122,6 +1124,34 @@ impl Gen {
             }
             return true;
         }
+        let ops_s = self.ops;
+        if nargs == 2
+            && (callee == ops_s.wrapping_add
+                || callee == ops_s.wrapping_sub
+                || callee == ops_s.wrapping_mul)
+        {
+            let l0 = u64_at(in arg_lanes, 0);
+            let l1 = u64_at(in arg_lanes, 1);
+            if l0 == l1 && (l0 == LANE_I64 || l0 == LANE_I128) {
+                let wb = if callee == ops_s.wrapping_add {
+                    WBIN_IADD
+                } else if callee == ops_s.wrapping_sub {
+                    WBIN_ISUB
+                } else {
+                    WBIN_IMUL
+                };
+                kind = INST_CALL_BUILTIN;
+                builtin_calls.push(call);
+                extra.push(CB_WRAPPING_BIN);
+                extra.push(wb);
+                extra.push(0);
+                extra.push(0);
+                for m in 0..nargs {
+                    extra.push(u64_at(in arg_kinds, m));
+                }
+                return true;
+            }
+        }
         let conv = get(in self.tables.conversions, callee);
         if conv != 0 && nargs == 1 {
             let l0 = u64_at(in arg_lanes, 0);
@@ -1133,22 +1163,27 @@ impl Gen {
                 let to_ik = conv & TABLE_KIND_MASK;
                 let from_ik = self.kind_of(op_def);
                 if from_ik != 0
-                    && (kind_wide(from_ik) || kind_wide(to_ik))
                     && !((conv >> TABLE_OP_SHIFT) == CONV_NARROW
                         && self.ctx.world.may_overflow(i.s0, i.s1))
                 {
+                    let to_kind = if kind_narrow(to_ik) || kind_wide(to_ik) {
+                        widen_u64(to_ik)
+                    } else {
+                        0
+                    };
                     kind = INST_CALL_BUILTIN;
                     builtin_calls.push(call);
-                    extra.push(CB_WIDE_CONVERT);
-                    extra.push(widen_u64(from_ik));
-                    extra.push(
-                        if kind_narrow(to_ik) || kind_wide(to_ik) {
-                            widen_u64(to_ik)
-                        } else {
-                            0
-                        }
-                    );
-                    extra.push(0);
+                    if kind_wide(from_ik) || kind_wide(to_ik) {
+                        extra.push(CB_WIDE_CONVERT);
+                        extra.push(widen_u64(from_ik));
+                        extra.push(to_kind);
+                        extra.push(0);
+                    } else {
+                        extra.push(CB_WORD_CONVERT);
+                        extra.push(to_kind);
+                        extra.push(0);
+                        extra.push(0);
+                    }
                     extra.push(u64_at(in arg_kinds, 0));
                     return true;
                 }
