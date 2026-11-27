@@ -16,7 +16,8 @@
 // capabilities). Slice 2a-2a (declare.ves) makes the instances and their
 // declarations in Vesper from the calls input; the request still names
 // what the walk decides: each definition's flags, callees and body plan.
-// Slice 2a-4 runs the CLIF passes of an optimized definition.
+// Slice 2a-4 runs the CLIF passes of an optimized definition, and outlines
+// its cold paths into helpers.
 //
 // Request (little-endian words; a string is its length, then its bytes):
 //
@@ -24,7 +25,8 @@
 //     n exports, each: instance key, symbol,
 //     the calls input (a string: @vesper/codegen-calls' input, whose
 //         first library task names the exports as its roots),
-//     n definitions, each: instance index, optimize, status, source
+//     n definitions, each: instance index, flags (OPTIMIZE_FLAG,
+//         CONST_TIME_FLAG), status, source
 //         locations, n callees, callee instance indexes (or NO_CALLEE),
 //         n plan words, the plan words,
 //     then the 128-bit export entries and the v2 section (exports.ves).
@@ -37,15 +39,16 @@
 use @vesper/cranelift::{
     Builder, FuncId, Module, SigId, append_block_params_for_function_params, apply_edits,
     arch_aarch64, arch_x86_64, block_param, builder_finalize, builder_free, builder_new,
-    create_block, declare_var, def_var, define_function, function_words, isa_triple_arch,
-    module_clif, module_error_text, module_finish, module_free, module_keep_clif, module_new,
-    new_error_text, object_bytes, seal_all_blocks, switch_to_block, value_type, words_shapes,
-    words_simd
+    create_block, declare_var, def_var, define_with_cold_helpers, function_words, invalid,
+    isa_triple_arch, module_clif, module_error_text, module_finish, module_free, module_keep_clif,
+    module_new, new_error_text, object_bytes, outline_cold, seal_all_blocks, switch_to_block,
+    ty_i64, value_type, words_shapes, words_simd
 };
 use @vesper/codegen-scalar-emit::{HANDLED};
 use @vesper/codegen-scalar-emit::body::{emit_body_words};
 use @vesper/native-clif-opt::{STEP_MERGE_TAILS, is_ported, pass_steps, run_steps};
 use @vesper/native-vectorize::{vectorize_script};
+use @vesper/native-cold-outline::{outline_script};
 use self::declare::{Declared, declare_library, declared_new, exports_new};
 
 // The answer's status words.
@@ -73,6 +76,10 @@ const DECLINED_BODY: Str = "the body hook declined a definition: ";
 const DEFINE_FAILED: Str = "defining a function failed";
 const PASS_FAILED: Str = "a CLIF pass failed on a definition: ";
 const STEP_NOT_PORTED: Str = "a native_clif_opt step is not ported";
+// A definition's flags word: optimized (the word the body hook takes),
+// and constant-time (no cold outlining).
+const OPTIMIZE_FLAG: u64 = 1;
+const CONST_TIME_FLAG: u64 = 2;
 // The function words carry no pointer type (`function_words`'s 0).
 const NO_POINTER_TYPE: u32 = 0;
 
@@ -147,7 +154,9 @@ fn define_one(
 ) -> ChunkSeq[u8] eff [Ffi[Cranelift]] {
     let mut err: ChunkSeq[u8] = ChunkSeq::new[u8]();
     let index = r.word(in req);
-    let optimize = r.word(in req);
+    let flags = r.word(in req);
+    let optimize = flags & OPTIMIZE_FLAG;
+    let const_time = flags & CONST_TIME_FLAG != 0;
     let status = r.word(in req);
     let locations = r.word(in req);
     let nc = r.word(in req);
@@ -225,7 +234,20 @@ fn define_one(
         }
     }
     let func = FuncId { id: wrapping_u32(id) };
-    if !define_function(inout m, func, b) {
+    // `native.rs` outlines the cold paths of a deferred (optimized)
+    // definition unless it is constant-time, then defines it and its
+    // helpers in outline order.
+    if optimize == SET && !const_time {
+        let words = function_words(inout b, 0, ty_i64().code);
+        let script = outline_script(in words.as_slice());
+        if words.len() == 0 || outline_cold(inout b, inout m, in script.as_slice()) == invalid() {
+            builder_free(b);
+            err.extend(in PASS_FAILED.as_bytes());
+            push_dec(inout err, index);
+            return err;
+        }
+    }
+    if !define_with_cold_helpers(inout m, func, b) {
         let message = module_error_text(in m);
         err.extend(in message.as_slice());
         if err.len() == 0 {
