@@ -46,7 +46,7 @@ pub(super) fn register(_r: &mut Registry) {
             Some(packet)
         }));
         must(machine::install_windows_encoder(|words| {
-            let packet = binding::x86_64_windows_leaf(words);
+            let packet = binding::x86_64_windows_function(words);
             if packet.is_empty() {
                 return None;
             }

@@ -251,6 +251,7 @@ pub const CHECKED_ARITHMETIC_RECORDS: u64 = 2;
 
 // Relocation kinds shared with src/native_machine.rs.
 const PLT_CALL: u64 = 0;
+const WIN64_CALL: u64 = 11;
 const RELATIVE_DATA: u64 = 1;
 const GOT_DATA: u64 = 2;
 const X86_FUNCTION_GOT: u64 = 10;
@@ -284,8 +285,8 @@ pub const FLOAT_RETURN_LAYOUT: u64 = PAIRED_RESULTS + 1;
 pub const DISP32_MASK: u64 = 0xffffffff;
 pub const LIBCALL_TARGET_BASE: u64 = DISP32_MASK + 1;
 pub const INDIRECT_CALL: u64 = 0x8000000000000000;
-// The high bit of the argument count requests a Win64 frameless leaf.
-const WINDOWS_LEAF: u64 = 0x8000000000000000;
+// The high bit of the argument count selects the Win64 calling convention.
+const WINDOWS_ABI: u64 = 0x8000000000000000;
 pub const MEMCPY_LIBCALL: u64 = 1;
 const MEMORY_COPY_ARGUMENTS: u64 = 3;
 const STACK_ALIGNMENT: u64 = 16;
@@ -391,6 +392,11 @@ copy struct Win64Save {
     code_end: u8,
     register: u8,
     stack_slot: u16,
+}
+
+copy enum CallRegisters {
+    SystemV(bool),
+    Windows,
 }
 
 pub fn word_at(in words: Slice[u64], position: u64) -> u64 {
@@ -1420,6 +1426,119 @@ fn flags_feed_branch(in reads: ChunkSeq[u64], value: u64, in branch: Record) -> 
         && last_read(in reads, value) == wrapping_add(value, 1)
 }
 
+fn prepare_win64_call(
+    in words: Slice[u64],
+    in record: Record,
+    index: u64,
+    arguments: u64,
+    inout reads: ChunkSeq[u64],
+    inout frame: FrameLayout
+) -> bool {
+    if record.extra != 0
+        || record.left > DISP32_MASK
+        || record.right > index
+        || record.right > MAX_ARGUMENTS
+    {
+        return false;
+    }
+    let slots = if record.right > WIN64_ARGUMENTS {
+        record.right
+    } else {
+        WIN64_ARGUMENTS
+    };
+    let bytes = align_up(wrapping_mul(slots, SPILL_SLOT_BYTES), STACK_ALIGNMENT);
+    if bytes > frame.outgoing {
+        frame.outgoing = bytes;
+    }
+    let start = wrapping_sub(index, record.right);
+    let limit = wrapping_add(arguments, start);
+    let call = wrapping_add(arguments, index);
+    for i in 0..record.right {
+        let argument = read_record(in words, wrapping_add(start, i));
+        let floating = vector_float_width(argument.extra);
+        if argument.op != CALL_ARGUMENT
+            || argument.left >= limit
+            || argument.right != 0
+            || (!floating && argument.extra != 0)
+            || float_value(in words, arguments, argument.left) != floating
+            || vector_value(in words, arguments, argument.left)
+        {
+            return false;
+        }
+        frame.floating = frame.floating || floating;
+        first_read_backwards(inout reads, argument.left, call);
+    }
+    true
+}
+
+fn prepare_sysv_call(
+    in words: Slice[u64],
+    in record: Record,
+    index: u64,
+    arguments: u64,
+    count: u64,
+    allow_relocations: bool,
+    inout reads: ChunkSeq[u64],
+    inout frame: FrameLayout
+) -> bool {
+    let tail_call = record.op == TAIL_CALL;
+    let value = wrapping_add(arguments, index);
+    let indirect = indirect_call(record.extra);
+    let fp_arguments = record.extra & ~INDIRECT_CALL;
+    let gp_arguments = wrapping_sub(record.right, fp_arguments);
+    if (!indirect && !allow_relocations)
+        || fp_arguments > XMM_ARGUMENTS
+        || fp_arguments > record.right
+        || gp_arguments > MAX_ARGUMENTS
+        || (tail_call && (indirect || gp_arguments > ARGUMENTS))
+        || record.right > index
+        || (!indirect
+            && record.left >= LIBCALL_TARGET_BASE
+            && (record.op != CALL
+                || wrapping_sub(record.left, LIBCALL_TARGET_BASE) > MEMCPY_LIBCALL
+                || record.right != MEMORY_COPY_ARGUMENTS
+                || fp_arguments != 0))
+    {
+        return false;
+    }
+    if record.op == CALL_PAIR
+        && (wrapping_add(index, 1) == count
+            || read_record(in words, wrapping_add(index, 1)).op != CALL_HIGH)
+    {
+        return false;
+    }
+    frame.floating = frame.floating || fp_arguments != 0;
+    frame.indirect_calls = frame.indirect_calls || indirect;
+    if gp_arguments > ARGUMENTS {
+        let slots = wrapping_sub(gp_arguments, ARGUMENTS);
+        // Keep the explicit slots aligned after the outgoing area.
+        let bytes = align_up(wrapping_mul(slots, SPILL_SLOT_BYTES), STACK_ALIGNMENT);
+        if bytes > frame.outgoing {
+            frame.outgoing = bytes;
+        }
+    }
+    let start = wrapping_sub(index, record.right);
+    let limit = wrapping_add(arguments, start);
+    if indirect {
+        if record.left >= limit || float_value(in words, arguments, record.left) {
+            return false;
+        }
+        first_read_backwards(inout reads, record.left, value);
+    }
+    for i in 0..record.right {
+        let argument = read_record(in words, wrapping_add(start, i));
+        if argument.op != CALL_ARGUMENT
+            || argument.left >= limit
+            || float_value(in words, arguments, argument.left) != (i >= gp_arguments)
+            || vector_value(in words, arguments, argument.left)
+        {
+            return false;
+        }
+        first_read_backwards(inout reads, argument.left, value);
+    }
+    true
+}
+
 // Walk backwards to discard dead arithmetic while keeping memory operations
 // and their inputs in program order.
 fn find_last_reads(
@@ -1431,7 +1550,7 @@ fn find_last_reads(
     return_arity: u64,
     allow_relocations: bool,
     labeled: bool,
-    windows_leaf: bool,
+    windows_abi: bool,
     inout frame: FrameLayout
 ) -> Option[ChunkSeq[u64]] {
     let values = wrapping_add(arguments, count);
@@ -1469,7 +1588,7 @@ fn find_last_reads(
             && !is_conditional_trap(record.op)
             && !is_float_conversion(record.op)
             && !(record.op >= FLOAT_CEIL && record.op <= FLOAT_FMA64)
-            && !(windows_leaf && record.op == FLOAT_STACK_ARGUMENT)
+            && !(windows_abi && record.op == FLOAT_STACK_ARGUMENT)
             && !tail_call
             && !bit_operation
             && !bit_mix
@@ -1482,7 +1601,7 @@ fn find_last_reads(
             || (record.op == RETURN_PAIR && (reverse_index != 0 || record.left >= value))
             || (record.op == TRAP && (reverse_index != 0 || result != NO_VALUE))
             || (record.op == FLOAT_RETURN && (reverse_index != 0 || result == NO_VALUE))
-            || (windows_leaf && (is_call(record.op) || tail_call))
+            || (windows_abi && (tail_call || record.op == CALL_PAIR || record.op == CALL_FLOAT32))
             || (tail_call
                 && (reverse_index != 0 || labeled || result != NO_VALUE || arguments > ARGUMENTS))
         {
@@ -1492,7 +1611,7 @@ fn find_last_reads(
             frame.floating = true;
             let entry_start = wrapping_add(frame.slots.len(), if labeled { 1 } else { 0 });
             if record.op == FLOAT_ARGUMENT {
-                let valid = if windows_leaf {
+                let valid = if windows_abi {
                     // Floating argument registers are allowed to have gaps in Win64.
                     let previous = read_record(in words, wrapping_sub(index, 1));
                     record.right == 0
@@ -1780,6 +1899,7 @@ fn find_last_reads(
         }
         if is_symbol(record.op)
             && (!allow_relocations
+                || windows_abi
                 || record.left > DISP32_MASK
                 || record.right != 0
                 || record.extra != 0)
@@ -1877,60 +1997,32 @@ fn find_last_reads(
             return Option::None;
         }
         if is_call(record.op) || tail_call {
+            let valid = if windows_abi {
+                allow_relocations
+                    && prepare_win64_call(
+                        in words,
+                        in record,
+                        index,
+                        arguments,
+                        inout reads,
+                        inout frame
+                    )
+            } else {
+                prepare_sysv_call(
+                    in words,
+                    in record,
+                    index,
+                    arguments,
+                    count,
+                    allow_relocations,
+                    inout reads,
+                    inout frame
+                )
+            };
+            if !valid {
+                return Option::None;
+            }
             has_calls = has_calls || !tail_call;
-            let indirect = indirect_call(record.extra);
-            let fp_arguments = record.extra & ~INDIRECT_CALL;
-            let gp_arguments = wrapping_sub(record.right, fp_arguments);
-            if (!indirect && !allow_relocations)
-                || fp_arguments > XMM_ARGUMENTS
-                || fp_arguments > record.right
-                || gp_arguments > MAX_ARGUMENTS
-                || (tail_call && (indirect || gp_arguments > ARGUMENTS))
-                || record.right > index
-                || (!indirect
-                    && record.left >= LIBCALL_TARGET_BASE
-                    && (record.op != CALL
-                        || wrapping_sub(record.left, LIBCALL_TARGET_BASE) > MEMCPY_LIBCALL
-                        || record.right != MEMORY_COPY_ARGUMENTS
-                        || fp_arguments != 0))
-            {
-                return Option::None;
-            }
-            if record.op == CALL_PAIR
-                && (wrapping_add(index, 1) == count
-                    || read_record(in words, wrapping_add(index, 1)).op != CALL_HIGH)
-            {
-                return Option::None;
-            }
-            frame.floating = frame.floating || fp_arguments != 0;
-            frame.indirect_calls = frame.indirect_calls || indirect;
-            if gp_arguments > ARGUMENTS {
-                let slots = wrapping_sub(gp_arguments, ARGUMENTS);
-                // Keep the explicit slots aligned after the outgoing area.
-                let bytes = align_up(wrapping_mul(slots, SPILL_SLOT_BYTES), STACK_ALIGNMENT);
-                if bytes > frame.outgoing {
-                    frame.outgoing = bytes;
-                }
-            }
-            let start = wrapping_sub(index, record.right);
-            let limit = wrapping_add(arguments, start);
-            if indirect {
-                if record.left >= limit || float_value(in words, arguments, record.left) {
-                    return Option::None;
-                }
-                first_read_backwards(inout reads, record.left, value);
-            }
-            for i in 0..record.right {
-                let argument = read_record(in words, wrapping_add(start, i));
-                if argument.op != CALL_ARGUMENT
-                    || argument.left >= limit
-                    || float_value(in words, arguments, argument.left) != (i >= gp_arguments)
-                    || vector_value(in words, arguments, argument.left)
-                {
-                    return Option::None;
-                }
-                first_read_backwards(inout reads, argument.left, value);
-            }
             pending_arguments = record.right;
         }
         let has_left = reads_left(in record);
@@ -2068,12 +2160,12 @@ fn allocate(
     in frame: FrameLayout,
     paired: bool,
     spills: bool,
-    windows_leaf: bool
+    windows_abi: bool
 ) -> Option[Allocation] {
     let mut locations = ChunkSeq::with_capacity[Location](wrapping_add(arguments, count));
     // Incoming stack arguments materialize through the same scratch bank
     // as allocator spills, even when every result fits in a register.
-    let register_arguments = if windows_leaf {
+    let register_arguments = if windows_abi {
         WIN64_ARGUMENTS
     } else {
         ARGUMENTS
@@ -2096,7 +2188,7 @@ fn allocate(
     if frame.xmm_aux {
         reserved = reserved | register_bit(XMM_AUX_SCRATCH);
     }
-    if windows_leaf {
+    if windows_abi {
         reserved = reserved | win64_reserved_registers();
     }
     let mut callee_save_mask: u32 = 0;
@@ -2131,7 +2223,7 @@ fn allocate(
     let mut has_calls = false;
     for argument in 0..arguments {
         if argument < register_arguments {
-            let reg = if windows_leaf {
+            let reg = if windows_abi {
                 win64_arg_register(argument)
             } else {
                 arg_register(argument)
@@ -2289,7 +2381,7 @@ fn allocate(
                 }
             }
             Location::Register(register)
-        } else if !spills || (windows_leaf && floating) {
+        } else if !spills || (windows_abi && floating) {
             return Option::None;
         } else if !result_live {
             // A retained load can finish in a scratch register.
@@ -2369,7 +2461,7 @@ fn allocate(
     }
     for argument in register_arguments..arguments {
         let slot = wrapping_sub(argument, register_arguments);
-        let incoming = if windows_leaf {
+        let incoming = if windows_abi {
             win64_stack_argument_offset(argument)
         } else {
             wrapping_add(RETURN_ADDRESS_BYTES, wrapping_mul(slot, SPILL_SLOT_BYTES))
@@ -2553,19 +2645,38 @@ fn call_register(index: u64, floating: bool) -> u8 {
     }
 }
 
+fn call_destination(
+    in words: Slice[u64],
+    start: u64,
+    index: u64,
+    in registers: CallRegisters
+) -> u8 {
+    match registers {
+        CallRegisters::SystemV(floating) => call_register(index, floating),
+        CallRegisters::Windows => {
+            let argument = read_record(in words, wrapping_add(start, index));
+            if argument.extra != 0 {
+                wrapping_add(XMM0, wrapping_u8(index))
+            } else {
+                win64_arg_register(index)
+            }
+        },
+    }
+}
+
 fn move_call_arguments(
     inout out: ChunkSeq[u8],
     in words: Slice[u64],
     in locations: ChunkSeq[Location],
     start: u64,
     arguments: u64,
-    floating: bool
+    in registers: CallRegisters
 ) {
     let mut homes = ChunkSeq::with_capacity[Location](arguments);
     for i in 0..arguments {
         let home = assigned(in locations, call_argument(in words, start, i));
         homes.push(
-            if in_register(in home, call_register(i, floating)) {
+            if in_register(in home, call_destination(in words, start, i, in registers)) {
                 Location::Absent
             } else {
                 home
@@ -2597,7 +2708,7 @@ fn move_call_arguments(
                 Location::Absent => continue,
                 _ => {},
             };
-            let destination = call_register(i, floating);
+            let destination = call_destination(in words, start, i, in registers);
             if in_register(in home, destination) || (needed & register_bit(destination)) == 0 {
                 ready = i;
                 break;
@@ -2605,20 +2716,25 @@ fn move_call_arguments(
         }
         if ready < arguments {
             let home = assigned(in homes, ready);
-            move_return(inout out, in home, call_register(ready, floating));
+            move_return(inout out, in home, call_destination(in words, start, ready, in registers));
             let _ = homes.try_set(ready, Location::Absent);
         } else {
             // Every pending destination is still needed, so these moves
             // form register cycles. Preserve the displaced destination.
-            let destination = call_register(first, floating);
+            let destination = call_destination(in words, start, first, in registers);
+            let floating = is_xmm(destination);
             let source = match assigned(in homes, first) {
                 Location::Register(reg) => reg,
                 _ => return,
             };
             let displaced = if floating {
-                emit(inout out, in Instruction::Move(XMM_RIGHT_SCRATCH, destination));
+                let scratch = match registers {
+                    CallRegisters::Windows => WIN64_XMM_RIGHT_SCRATCH,
+                    _ => XMM_RIGHT_SCRATCH,
+                };
+                emit(inout out, in Instruction::Move(scratch, destination));
                 emit(inout out, in Instruction::Move(destination, source));
-                XMM_RIGHT_SCRATCH
+                scratch
             } else {
                 emit(inout out, in Instruction::Exchange(destination, source));
                 source
@@ -2646,14 +2762,21 @@ fn emit_tail_call(
 ) {
     let start = wrapping_sub(index, record.right);
     let gp = wrapping_sub(record.right, record.extra);
-    move_call_arguments(inout output, in words, in allocation.locations, start, gp, false);
+    move_call_arguments(
+        inout output,
+        in words,
+        in allocation.locations,
+        start,
+        gp,
+        in CallRegisters::SystemV(false)
+    );
     move_call_arguments(
         inout output,
         in words,
         in allocation.locations,
         wrapping_add(start, gp),
         record.extra,
-        true
+        in CallRegisters::SystemV(true)
     );
     emit_frame_leave(inout output, in allocation);
     let offset = emit_direct_jump(inout output);
@@ -2955,7 +3078,7 @@ fn emit_call(
             in allocation.locations,
             start,
             register_arguments,
-            false
+            in CallRegisters::SystemV(false)
         );
     }
     if fp_arguments != 0 {
@@ -2966,7 +3089,7 @@ fn emit_call(
             in allocation.locations,
             float_start,
             fp_arguments,
-            true
+            in CallRegisters::SystemV(true)
         );
     }
     let reference = if indirect {
@@ -2992,6 +3115,90 @@ fn emit_call(
     reference
 }
 
+fn emit_win64_call(
+    inout out: ChunkSeq[u8],
+    in words: Slice[u64],
+    in allocation: Allocation,
+    start: u64,
+    in record: Record,
+    in result: Location
+) -> u64 {
+    let registers = if record.right < WIN64_ARGUMENTS {
+        record.right
+    } else {
+        WIN64_ARGUMENTS
+    };
+    for i in registers..record.right {
+        let argument = read_record(in words, wrapping_add(start, i));
+        let home = assigned(in allocation.locations, argument.left);
+        let (scratch, width) = if argument.extra == 0 {
+            (THIRD_SCRATCH, QWORD_BITS)
+        } else {
+            (WIN64_XMM_RIGHT_SCRATCH, argument.extra)
+        };
+        let source = materialize_width(inout out, in home, scratch, width);
+        let offset = wrapping_u32(wrapping_mul(i, SPILL_SLOT_BYTES));
+        emit(inout out, in Instruction::Store(source, RSP, offset, width));
+    }
+    move_call_arguments(
+        inout out,
+        in words,
+        in allocation.locations,
+        start,
+        registers,
+        in CallRegisters::Windows
+    );
+    let offset = emit_direct_call(inout out);
+    save_result(inout out, in result, if record.op == CALL_FLOAT { XMM0 } else { RAX });
+    offset
+}
+
+fn emit_call_relocation(
+    inout out: ChunkSeq[u8],
+    in words: Slice[u64],
+    in allocation: Allocation,
+    index: u64,
+    value: u64,
+    in record: Record,
+    in result: Location,
+    windows_abi: bool,
+    inout relocations: ChunkSeq[u64]
+) {
+    let start = wrapping_sub(index, record.right);
+    if windows_abi {
+        let offset = emit_win64_call(
+            inout out,
+            in words,
+            in allocation,
+            start,
+            in record,
+            in result
+        );
+        relocations.push(offset);
+        relocations.push(WIN64_CALL);
+        relocations.push(record.left);
+        return;
+    }
+    let high = if record.op == CALL_PAIR {
+        assigned(in allocation.locations, wrapping_add(value, 1))
+    } else {
+        Location::Absent
+    };
+    match emit_call(inout out, in words, in allocation, start, in record, in result, in high) {
+        Option::Some(offset) => {
+            relocations.push(offset);
+            if record.left >= LIBCALL_TARGET_BASE {
+                relocations.push(PLT_LIBCALL);
+                relocations.push(wrapping_sub(record.left, LIBCALL_TARGET_BASE));
+            } else {
+                relocations.push(PLT_CALL);
+                relocations.push(record.left);
+            }
+        },
+        Option::None => (),
+    };
+}
+
 pub fn encode_block(
     in words: Slice[u64],
     allow_relocations: bool,
@@ -3001,12 +3208,15 @@ pub fn encode_block(
     encode_block_pass(in words, allow_relocations, inout relocations, true, false, inout unwind)
 }
 
-pub fn encode_windows_leaf(in words: Slice[u64], inout unwind: ChunkSeq[u8]) -> ChunkSeq[u8] {
-    if (word_at(in words, ARGUMENT_COUNT) & WINDOWS_LEAF) == 0 {
+pub fn encode_windows_function(
+    in words: Slice[u64],
+    inout relocations: ChunkSeq[u64],
+    inout unwind: ChunkSeq[u8]
+) -> ChunkSeq[u8] {
+    if (word_at(in words, ARGUMENT_COUNT) & WINDOWS_ABI) == 0 {
         return ChunkSeq::new[u8]();
     }
-    let mut relocations = ChunkSeq::new[u64]();
-    encode_block_pass(in words, false, inout relocations, true, true, inout unwind)
+    encode_block_pass(in words, true, inout relocations, true, true, inout unwind)
 }
 
 fn packed_float_compare_needs_temp(mode: u64) -> bool {
@@ -3304,10 +3514,10 @@ fn emit_scalar_fp(
     left: u8,
     right: u8,
     third: u8,
-    windows_leaf: bool
+    windows_abi: bool
 ) {
     let width = record.extra;
-    let (left_scratch, right_scratch) = if windows_leaf {
+    let (left_scratch, right_scratch) = if windows_abi {
         (WIN64_XMM_LEFT_SCRATCH, WIN64_XMM_RIGHT_SCRATCH)
     } else {
         (XMM_LEFT_SCRATCH, XMM_RIGHT_SCRATCH)
@@ -3428,12 +3638,12 @@ fn encode_block_pass(
     let body_words = wrapping_sub(words.len(), HEADER_WORDS);
     let count = body_words / RECORD_WORDS;
     let argument_word = word_at(in words, ARGUMENT_COUNT);
-    let windows_leaf = (argument_word & WINDOWS_LEAF) != 0;
-    let arguments = argument_word & ~WINDOWS_LEAF;
+    let windows_abi = (argument_word & WINDOWS_ABI) != 0;
+    let arguments = argument_word & ~WINDOWS_ABI;
     let result = word_at(in words, RETURN_VALUE);
     if wrapping_mul(count, RECORD_WORDS) != body_words
         || arguments > MAX_ARGUMENTS
-        || (windows_leaf && allow_relocations)
+        || (windows_abi && allow_relocations && !windows_frames)
         || (result != NO_VALUE && result >= wrapping_add(arguments, count))
     {
         return ChunkSeq::new[u8]();
@@ -3452,7 +3662,7 @@ fn encode_block_pass(
         let home = frame.slots.try_get(frame.home_slot).unwrap_or(FrameSlot { offset: 0, size: 0 });
         let count = home.size / SPILL_SLOT_BYTES;
         // Windows keeps CFG homes on the stack until the encoder can save XMM homes.
-        frame.promoted = if windows_leaf {
+        frame.promoted = if windows_abi {
             0
         } else if count < HOME_REGISTERS {
             count
@@ -3507,13 +3717,13 @@ fn encode_block_pass(
         return_arity,
         allow_relocations,
         labeled,
-        windows_leaf,
+        windows_abi,
         inout frame
     ) {
         Option::Some(last) => last,
         Option::None => return ChunkSeq::new[u8](),
     };
-    if windows_leaf && (frame.vectors || paired || (!windows_frames && frame.slots.len() != 0)) {
+    if windows_abi && (frame.vectors || paired || (!windows_frames && frame.slots.len() != 0)) {
         return ChunkSeq::new[u8]();
     }
     if frame.floating
@@ -3557,11 +3767,11 @@ fn encode_block_pass(
         in frame,
         paired,
         false,
-        windows_leaf
+        windows_abi
     ) {
         Option::Some(result) => result,
         Option::None => {
-            if windows_leaf && !windows_frames {
+            if windows_abi && !windows_frames {
                 return ChunkSeq::new[u8]();
             }
             match allocate(
@@ -3572,7 +3782,7 @@ fn encode_block_pass(
                 in frame,
                 paired,
                 true,
-                windows_leaf
+                windows_abi
             ) {
                 Option::Some(result) => result,
                 Option::None => return ChunkSeq::new[u8](),
@@ -3580,12 +3790,12 @@ fn encode_block_pass(
         },
     };
     let frame_size = allocation.frame_size;
-    if windows_leaf && !windows_frames && (frame_size != 0 || allocation.callee_save_mask != 0) {
+    if windows_abi && !windows_frames && (frame_size != 0 || allocation.callee_save_mask != 0) {
         return ChunkSeq::new[u8]();
     }
 
     let mut output = ChunkSeq::new[u8]();
-    if windows_leaf && windows_frames {
+    if windows_abi && windows_frames {
         if !emit_win64_prologue(inout output, in allocation, inout unwind) {
             return ChunkSeq::new[u8]();
         }
@@ -3776,34 +3986,17 @@ fn encode_block_pass(
             };
             preserve_registers(inout output, saved, allocation.save_frame, slot_bytes, false);
             if call {
-                let high = if record.op == CALL_PAIR {
-                    assigned(in allocation.locations, wrapping_add(value, 1))
-                } else {
-                    Location::Absent
-                };
-                let start = wrapping_sub(index, record.right);
-                let offset = emit_call(
+                emit_call_relocation(
                     inout output,
                     in words,
                     in allocation,
-                    start,
+                    index,
+                    value,
                     in record,
                     in home,
-                    in high
+                    windows_abi,
+                    inout relocations
                 );
-                match offset {
-                    Option::Some(offset) => {
-                        relocations.push(offset);
-                        if record.left >= LIBCALL_TARGET_BASE {
-                            relocations.push(PLT_LIBCALL);
-                            relocations.push(wrapping_sub(record.left, LIBCALL_TARGET_BASE));
-                        } else {
-                            relocations.push(PLT_CALL);
-                            relocations.push(record.left);
-                        }
-                    },
-                    Option::None => (),
-                };
             } else if is_atomic_cas(record.op) {
                 emit_atomic_cas(inout output, in allocation, in record, in home);
             } else if atomic_uses_retry(record.op) {
@@ -3987,7 +4180,7 @@ fn encode_block_pass(
                 )
             );
         } else if is_scalar_fp_instruction(record.op) {
-            emit_scalar_fp(inout output, in record, destination, left, right, third, windows_leaf);
+            emit_scalar_fp(inout output, in record, destination, left, right, third, windows_abi);
         } else if is_vector_operation(record.op) {
             emit_vector_instruction(inout output, in record, destination, left, right, third);
         } else if is_scalar_bit_operation(record.op) {

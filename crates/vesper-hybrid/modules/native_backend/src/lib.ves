@@ -2,7 +2,7 @@
 
 use self::aarch64::{encode as encode_aarch64, encode_leaf};
 use self::coff::{write_coff};
-use self::scalar::{encode_block, encode_windows_leaf};
+use self::scalar::{encode_block, encode_windows_function};
 use self::elf::{write_elf};
 use self::macho::{write_macho};
 use @vesper/codegen-freestanding::util::{push64};
@@ -25,15 +25,18 @@ pub fn x86_64_relocatable_block(in words: Slice[u64]) -> ChunkSeq[u8] {
     relocation_packet(in code, in relocations)
 }
 
-// Length-prefixed code followed by a Windows UNWIND_INFO record for framed leaves.
-pub fn x86_64_windows_leaf(in words: Slice[u64]) -> ChunkSeq[u8] {
+// Length-prefixed code and Windows UNWIND_INFO, followed by relocation records.
+pub fn x86_64_windows_function(in words: Slice[u64]) -> ChunkSeq[u8] {
     let mut unwind = ChunkSeq::new[u8]();
-    let code = encode_windows_leaf(in words, inout unwind);
+    let mut relocations = ChunkSeq::new[u64]();
+    let code = encode_windows_function(in words, inout relocations, inout unwind);
     let mut packet = ChunkSeq::new[u8]();
     if code.len() != 0 {
         push64(inout packet, code.len());
         packet.extend(in code.as_slice());
+        push64(inout packet, unwind.len());
         packet.extend(in unwind.as_slice());
+        append_relocations(inout packet, in relocations);
     }
     packet
 }
@@ -49,11 +52,15 @@ fn relocation_packet(in code: ChunkSeq[u8], in relocations: ChunkSeq[u64]) -> Ch
     if code.len() != 0 {
         push64(inout packet, code.len());
         packet.extend(in code.as_slice());
-        for index in 0..relocations.len() {
-            push64(inout packet, relocations.try_get(index).unwrap_or(0));
-        }
+        append_relocations(inout packet, in relocations);
     }
     packet
+}
+
+fn append_relocations(inout packet: ChunkSeq[u8], in relocations: ChunkSeq[u64]) {
+    for index in 0..relocations.len() {
+        push64(inout packet, relocations.try_get(index).unwrap_or(0));
+    }
 }
 
 // An empty result declines the object request.

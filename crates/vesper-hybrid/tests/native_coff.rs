@@ -12,6 +12,7 @@ use object::{
 use std::collections::HashMap;
 
 const RELOC_COUNT: usize = 2;
+const MACHINE_WORD_BYTES: usize = size_of::<u64>();
 const RAW_SYMBOL_BYTES: usize = pe::IMAGE_SIZEOF_SYMBOL;
 pub(crate) const TARGET: &str = "x86_64-pc-windows-msvc";
 
@@ -110,9 +111,12 @@ pub(crate) fn fixture(source: &str, optimize: bool) -> Vec<u8> {
         .0
 }
 
-fn windows_leaf_packet(packet: &[u8]) -> (&[u8], &[u8]) {
-    let (length, body) = packet.split_first_chunk::<{ size_of::<u64>() }>().unwrap();
-    body.split_at(u64::from_le_bytes(*length) as usize)
+fn windows_packet(packet: &[u8]) -> (&[u8], &[u8], &[u8]) {
+    let (length, body) = packet.split_first_chunk::<MACHINE_WORD_BYTES>().unwrap();
+    let (code, rest) = body.split_at(u64::from_le_bytes(*length) as usize);
+    let (length, body) = rest.split_first_chunk::<MACHINE_WORD_BYTES>().unwrap();
+    let (unwind, relocations) = body.split_at(u64::from_le_bytes(*length) as usize);
+    (code, unwind, relocations)
 }
 
 #[test]
@@ -136,26 +140,32 @@ fn main() -> u64 { wrapping_add(sum(7), 1) }
 ";
 
     thread_local! {
-        static ACTIVE_CODE: Cell<Option<Vec<u8>>> = const { Cell::new(None) };
+        static ACTIVE_CODE: Cell<Option<(Vec<u8>, bool)>> = const { Cell::new(None) };
     }
     vesper::native::machine::install_windows_encoder(|words| {
-        let previous = ACTIVE_CODE.with(Cell::take)?;
-        let packet = binding::x86_64_windows_leaf(words);
+        let (mut leaf, mut called) = ACTIVE_CODE.with(Cell::take)?;
+        let packet = binding::x86_64_windows_function(words);
         if packet.is_empty() {
-            ACTIVE_CODE.with(|capture| capture.set(Some(previous)));
+            ACTIVE_CODE.with(|capture| capture.set(Some((leaf, called))));
             return None;
         }
-        ACTIVE_CODE.with(|capture| capture.set(Some(packet.clone())));
+        if windows_packet(&packet).2.is_empty() {
+            leaf.clone_from(&packet);
+        } else {
+            called = true;
+        }
+        ACTIVE_CODE.with(|capture| capture.set(Some((leaf, called))));
         Some(packet)
     })
     .unwrap();
 
     for optimize in [true, false] {
         let baseline = fixture(PROGRAM, optimize);
-        ACTIVE_CODE.with(|capture| capture.set(Some(Vec::new())));
+        ACTIVE_CODE.with(|capture| capture.set(Some((Vec::new(), false))));
         let swapped = fixture(PROGRAM, optimize);
-        let emitted = ACTIVE_CODE.with(Cell::take).unwrap();
+        let (emitted, called) = ACTIVE_CODE.with(Cell::take).unwrap();
         assert!(!emitted.is_empty());
+        assert!(called);
         for (bytes, packet) in [(baseline, None), (swapped, Some(emitted))] {
             let file = object::File::parse(bytes.as_slice()).unwrap();
             let leaf = file
@@ -178,12 +188,18 @@ fn main() -> u64 { wrapping_add(sum(7), 1) }
                 .collect();
             assert!(starts.contains_key(CALLER), "{starts:?}");
             let Some(packet) = packet else { continue };
-            let (code, unwind) = windows_leaf_packet(&packet);
+            let (code, unwind, _) = windows_packet(&packet);
             let section = file
                 .section_by_index(leaf.section_index().unwrap())
                 .unwrap();
             let start = (leaf.address() - section.address()) as usize;
             assert_eq!(&section.data().unwrap()[start..start + code.len()], code);
+            assert!(section.relocations().any(|(_, relocation)| {
+                relocation.flags()
+                    == object::RelocationFlags::Coff {
+                        typ: pe::IMAGE_REL_AMD64_REL32,
+                    }
+            }));
             let row = starts.get(leaf.name().unwrap()).copied();
             if optimize {
                 assert!(row.is_none());
@@ -209,8 +225,12 @@ fn win64_function_pair(
     jit: &mut cranelift_jit::JITModule,
     context: &mut cranelift_codegen::Context,
 ) -> ([*const u8; 2], Vec<u8>) {
-    use cranelift_codegen::{isa, settings};
-    use cranelift_module::Module;
+    use cranelift_codegen::{binemit::Reloc, isa, settings};
+    use cranelift_module::{Module, ModuleReloc, ModuleRelocTarget};
+
+    const FUNCTION_NAMESPACE: u32 = 0;
+    const REL32_ADDEND: i64 = -(size_of::<u32>() as i64);
+    const WIN64_CALL: u64 = 11;
 
     let windows = isa::lookup(TARGET.parse().unwrap())
         .unwrap()
@@ -218,9 +238,29 @@ fn win64_function_pair(
         .unwrap();
     let tape =
         vesper::native::machine::x86_64_block_words(&context.func, windows.as_ref()).unwrap();
-    let packet = binding::x86_64_windows_leaf(&tape);
+    let packet = binding::x86_64_windows_function(&tape);
     assert!(!packet.is_empty(), "{tape:?}");
-    let (code, _) = windows_leaf_packet(&packet);
+    let (code, _, relocations) = windows_packet(&packet);
+    let (entries, rest) = relocations.as_chunks::<{ 3 * MACHINE_WORD_BYTES }>();
+    assert!(rest.is_empty());
+    let relocations: Vec<_> = entries
+        .iter()
+        .map(|entry| {
+            let ([offset, kind, target], _) = entry.as_chunks::<MACHINE_WORD_BYTES>() else {
+                unreachable!()
+            };
+            assert_eq!(u64::from_le_bytes(*kind), WIN64_CALL);
+            ModuleReloc {
+                offset: u64::from_le_bytes(*offset) as u32,
+                kind: Reloc::X86CallPCRel4,
+                name: ModuleRelocTarget::user(
+                    FUNCTION_NAMESPACE,
+                    u64::from_le_bytes(*target) as u32,
+                ),
+                addend: REL32_ADDEND,
+            }
+        })
+        .collect();
     let candidate = jit
         .declare_anonymous_function(&context.func.signature)
         .unwrap();
@@ -228,7 +268,7 @@ fn win64_function_pair(
         .declare_anonymous_function(&context.func.signature)
         .unwrap();
     let alignment = u64::from(jit.isa().function_alignment().minimum);
-    jit.define_function_bytes(candidate, alignment, code, &[])
+    jit.define_function_bytes(candidate, alignment, code, &relocations)
         .unwrap();
     jit.define_function(reference, context).unwrap();
     jit.finalize_definitions().unwrap();
@@ -290,7 +330,7 @@ fn win64_leaf_integer_registers_and_stack_match_cranelift() {
     builder.seal_all_blocks();
     builder.finalize();
     let (functions, packet) = win64_function_pair(&mut jit, &mut context);
-    assert!(windows_leaf_packet(&packet).1.is_empty());
+    assert!(windows_packet(&packet).1.is_empty());
     let [candidate, reference] =
         functions.map(|function| unsafe { std::mem::transmute::<*const u8, Entry>(function) });
     let inputs = [0, 1, 0x8512_34ab_cdef_5678, 1u64 << 63, u64::MAX];
@@ -391,7 +431,7 @@ fn win64_leaf_mixed_registers_and_stack_match_cranelift() {
         b.seal_all_blocks();
         b.finalize();
         let (functions, packet) = win64_function_pair(&mut jit, &mut context);
-        assert!(windows_leaf_packet(&packet).1.is_empty());
+        assert!(windows_packet(&packet).1.is_empty());
         for (i, &x) in inputs.iter().enumerate() {
             for (j, &y) in inputs.iter().enumerate() {
                 let a = i as u8;
@@ -420,6 +460,100 @@ fn win64_leaf_mixed_registers_and_stack_match_cranelift() {
                     );
                 }
             }
+        }
+    }
+    unsafe { jit.free_memory() };
+}
+
+#[cfg(all(target_arch = "x86_64", target_os = "linux"))]
+#[test]
+fn win64_direct_calls_match_cranelift_with_register_cycles_and_stack_arguments() {
+    use cranelift_codegen::{
+        ir::{AbiParam, InstBuilder, types},
+        isa::CallConv,
+    };
+    use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
+    use cranelift_jit::{JITBuilder, JITModule};
+    use cranelift_module::Module;
+
+    type Entry = unsafe extern "win64" fn(u64, f64, u64, f64, u64, f32, f64) -> f64;
+    let mut jit =
+        JITModule::new(JITBuilder::new(cranelift_module::default_libcall_names()).unwrap());
+    let mut signature = jit.make_signature();
+    signature.call_conv = CallConv::WindowsFastcall;
+    signature.params = [
+        types::I64,
+        types::F64,
+        types::I64,
+        types::F64,
+        types::I64,
+        types::F32,
+        types::F64,
+    ]
+    .map(AbiParam::new)
+    .to_vec();
+    signature.returns.push(AbiParam::new(types::F64));
+    let callee = jit.declare_anonymous_function(&signature).unwrap();
+    let mut callee_ctx = jit.make_context();
+    callee_ctx.func.signature = signature.clone();
+    let mut frontend = FunctionBuilderContext::new();
+    let mut b = FunctionBuilder::new(&mut callee_ctx.func, &mut frontend);
+    let entry = b.create_block();
+    b.append_block_params_for_function_params(entry);
+    b.switch_to_block(entry);
+    let [a, x, c, y, e, z, w] = *b.block_params(entry) else {
+        unreachable!()
+    };
+    let xy = b.ins().fsub(x, y);
+    let z = b.ins().fpromote(types::F64, z);
+    let zw = b.ins().fsub(z, w);
+    let floats = b.ins().fadd(xy, zw);
+    let diff = b.ins().isub(a, c);
+    let integers = b.ins().iadd(diff, e);
+    let integers = b.ins().fcvt_from_uint(types::F64, integers);
+    let result = b.ins().fadd(floats, integers);
+    b.ins().return_(&[result]);
+    b.seal_all_blocks();
+    b.finalize();
+    jit.define_function(callee, &mut callee_ctx).unwrap();
+
+    let mut caller_ctx = jit.make_context();
+    caller_ctx.func.signature = signature;
+    let callee_ref = jit.declare_func_in_func(callee, &mut caller_ctx.func);
+    let mut frontend = FunctionBuilderContext::new();
+    let mut b = FunctionBuilder::new(&mut caller_ctx.func, &mut frontend);
+    let entry = b.create_block();
+    b.append_block_params_for_function_params(entry);
+    b.switch_to_block(entry);
+    let [a, x, c, y, e, z, w] = *b.block_params(entry) else {
+        unreachable!()
+    };
+    let call = b.ins().call(callee_ref, &[c, y, a, x, e, z, w]);
+    let result = b.inst_results(call)[0];
+    // These two values must survive the GP and XMM argument permutations.
+    let across_call = b.ins().fcvt_from_uint(types::F64, a);
+    let result = b.ins().fadd(result, x);
+    let result = b.ins().fadd(result, across_call);
+    b.ins().return_(&[result]);
+    b.seal_all_blocks();
+    b.finalize();
+
+    let (functions, packet) = win64_function_pair(&mut jit, &mut caller_ctx);
+    let (code, unwind, relocations) = windows_packet(&packet);
+    assert!(!unwind.is_empty());
+    let ([offset, _, symbol], rest) = relocations.as_chunks::<MACHINE_WORD_BYTES>() else {
+        panic!("expected one Windows call relocation");
+    };
+    assert!(rest.is_empty());
+    assert_eq!(u64::from_le_bytes(*symbol), u64::from(callee.as_u32()));
+    const CALL_REL32: u8 = 0xe8;
+    assert_eq!(code[u64::from_le_bytes(*offset) as usize - 1], CALL_REL32);
+    let [candidate, reference] =
+        functions.map(|pointer| unsafe { std::mem::transmute::<*const u8, Entry>(pointer) });
+    for a in [0, 3, 17, u64::MAX] {
+        for (x, y, z, w) in [(3.5, -1.75, 0.0, 7.0), (-0.0, 1.0, 123.25, -512.0)] {
+            let run = |f: Entry| unsafe { f(a, x, a / 2, y, 71, z, w) }.to_bits();
+            assert_eq!(run(candidate), run(reference));
         }
     }
     unsafe { jit.free_memory() };
@@ -508,7 +642,7 @@ fn win64_framed_leaves_match_cranelift_and_describe_the_prologue() {
         b.finalize();
 
         let (functions, packet) = win64_function_pair(&mut jit, &mut context);
-        let (code, unwind) = windows_leaf_packet(&packet);
+        let (code, unwind, _) = windows_packet(&packet);
         let [version, prologue, nodes, frame_register] = *unwind.first_chunk::<4>().unwrap();
         assert_eq!(version, UNWIND_VERSION);
         assert_eq!(frame_register, 0);

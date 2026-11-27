@@ -179,7 +179,7 @@ struct Unwound {
 pub(super) struct UnwindModule {
     inner: ObjectModule,
     functions: Vec<Unwound>,
-    use_machine_leaves: bool,
+    use_machine: bool,
 }
 
 impl Module for UnwindModule {
@@ -224,12 +224,20 @@ impl Module for UnwindModule {
             .get_function_decl(func)
             .linkage_name(func)
             .into_owned();
-        if self.use_machine_leaves
-            && let Some(code) = super::machine::encode_windows_leaf(self.inner.isa(), &ctx.func)
+        if self.use_machine
+            && let Some(code) = super::machine::encode_windows_function(
+                self.inner.isa(),
+                &ctx.func,
+                self.inner.declarations(),
+            )
         {
             let alignment = u64::from(self.inner.isa().function_alignment().minimum);
-            self.inner
-                .define_function_bytes(func, alignment, &code.bytes, &[])?;
+            self.inner.define_function_bytes(
+                func,
+                alignment,
+                &code.code.bytes,
+                &code.code.relocations,
+            )?;
             self.functions.push(Unwound {
                 id: func,
                 name,
@@ -386,7 +394,7 @@ pub(super) fn object(
     options: CodegenOptions,
 ) -> Result<(Vec<u8>, String), String> {
     emit_with(isa, "vesper", |m| {
-        m.use_machine_leaves = observer.is_none() && instrument.is_none();
+        m.use_machine = observer.is_none() && instrument.is_none();
         Ok(super::compile(m, world, entry, optimize, observer, instrument, options)?.1)
     })
 }
@@ -406,7 +414,7 @@ pub(super) fn emit_with(
     let mut m = UnwindModule {
         inner: ObjectModule::new(builder),
         functions: Vec::new(),
-        use_machine_leaves: false,
+        use_machine: false,
     };
     let clif = compile(&mut m)?;
     let UnwindModule {

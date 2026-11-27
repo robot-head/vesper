@@ -295,7 +295,7 @@ const XMM_REGISTER_ARGUMENTS: usize = 8;
 const AARCH64_FP_ARGUMENTS: usize = 8;
 const AARCH64_CALL_FLOAT_BITS: u32 = 4;
 const INDIRECT_CALL: u64 = 1 << (u64::BITS - 1);
-const WINDOWS_LEAF: u64 = 1 << (u64::BITS - 1);
+const WINDOWS_ABI: u64 = 1 << (u64::BITS - 1);
 const WINDOWS_REGISTER_ARGUMENTS: usize = 4;
 const STACK_PROBE_INTERVAL: usize = 4096;
 const CFG_HOME_BYTES: u64 = size_of::<u64>() as u64;
@@ -335,6 +335,7 @@ const ARM64_GOT_LOAD: u64 = 7;
 const ARM64_FUNCTION_GOT_PAGE: u64 = 8;
 const ARM64_FUNCTION_GOT_LOAD: u64 = 9;
 const X86_FUNCTION_GOT: u64 = 10;
+const WIN64_CALL: u64 = 11;
 const LIBCALL_TARGET_BASE: u64 = u32::MAX as u64 + 1;
 const MEMMOVE_LIBCALL: u32 = 0;
 const MEMCPY_LIBCALL: u32 = 1;
@@ -389,6 +390,11 @@ fn integer_width(ty: Type) -> Option<u64> {
 
 fn float_width(ty: Type) -> Option<u64> {
     matches!(ty, types::F32 | types::F64).then(|| u64::from(ty.bits()))
+}
+
+fn windows_scalar(param: &AbiParam) -> bool {
+    (integer_width(param.value_type).is_some() || float_width(param.value_type).is_some())
+        && *param == AbiParam::new(param.value_type)
 }
 
 fn vector_type(ty: Type) -> bool {
@@ -988,6 +994,16 @@ impl IntegerBlocks<'_> {
             }
             _ => return None,
         };
+        // Non-colocated Windows calls can require COFF reference pointers.
+        if signature.call_conv == CallConv::WindowsFastcall
+            && (!callee.colocated
+                || target > u64::from(u32::MAX)
+                || self.declarations.is_some_and(|declarations| {
+                    target as usize >= declarations.get_functions().size_hint().0
+                }))
+        {
+            return None;
+        }
         if dfg.insts[inst].opcode() == Opcode::ReturnCall {
             if signature.call_conv != CallConv::Tail
                 || signature.returns != self.function.signature.returns
@@ -1070,12 +1086,32 @@ impl IntegerBlocks<'_> {
             GP_RESULTS => IntegerOp::CallPair,
             _ => return None,
         };
-        let [argument_records, float_and_stack] = if self.aarch64 {
-            let layout = aarch64_arguments(&signature.params, signature.call_conv)?;
-            self.aarch64_call_arguments(args, &signature.params, values, &layout)?
-        } else {
-            self.x86_call_arguments(args, &signature.params, values, MAX_GP_ARGUMENTS)?
-        };
+        let [argument_records, float_and_stack] =
+            if signature.call_conv == CallConv::WindowsFastcall {
+                if !matches!(target, CallTarget::Direct(_)) || !windows_signature(signature) {
+                    return None;
+                }
+                for (&arg, param) in args.iter().zip(&signature.params) {
+                    let arg = dfg.resolve_aliases(arg);
+                    if dfg.value_type(arg) != param.value_type {
+                        return None;
+                    }
+                    self.append(
+                        IntegerOp::CallArgument,
+                        [
+                            values.low[arg]?,
+                            0,
+                            float_width(param.value_type).unwrap_or(0),
+                        ],
+                    );
+                }
+                [args.len() as u64, 0]
+            } else if self.aarch64 {
+                let layout = aarch64_arguments(&signature.params, signature.call_conv)?;
+                self.aarch64_call_arguments(args, &signature.params, values, &layout)?
+            } else {
+                self.x86_call_arguments(args, &signature.params, values, MAX_GP_ARGUMENTS)?
+            };
         let (target, layout) = match target {
             CallTarget::Direct(target) => {
                 self.relocations = true;
@@ -3664,9 +3700,11 @@ impl IntegerBlocks<'_> {
 /// right operand a second result ID as well.
 /// Leading StackSlot records declare frame slots by size and alignment.
 /// Stack addresses and accesses use a slot ordinal and an offset within the slot.
-/// Each call is preceded by its CallArgument records, integer arguments first,
-/// then floating-point registers. AArch64 places CallStackArgument records before
+/// Each call is preceded by its CallArgument records. SysV on x86-64 groups
+/// integer arguments before floating-point arguments. AArch64 places CallStackArgument records before
 /// both register groups. These carry the value ID, stack offset, and width.
+/// Win64 instead keeps CallArgument records in signature order, with a zero
+/// extra for an integer argument or the floating-point width.
 /// The call's left operand is the function ID and its right operand is the total
 /// argument record count. The extra operand encodes the float register count in
 /// the low bits and the AArch64 stack argument count in the high bits.
@@ -3719,7 +3757,7 @@ pub fn integer_block_words(function: &Function) -> Option<Vec<u64>> {
 pub fn x86_64_block_words(function: &Function, isa: &dyn TargetIsa) -> Option<Vec<u64>> {
     let call_conv = function.signature.call_conv;
     if call_conv == CallConv::WindowsFastcall {
-        return windows_leaf_program(function, isa).map(|(primary, _)| primary.words);
+        return windows_program(function, isa, None).map(|(primary, _)| primary.words);
     }
     if isa.triple().architecture != target_lexicon::Architecture::X86_64
         || !matches!(call_conv, CallConv::SystemV | CallConv::Tail)
@@ -3738,25 +3776,26 @@ pub fn x86_64_block_words(function: &Function, isa: &dyn TargetIsa) -> Option<Ve
     .map(|(primary, _)| primary.words)
 }
 
-fn windows_leaf_program(
-    function: &Function,
-    isa: &dyn TargetIsa,
-) -> Option<(IntegerProgram, Option<IntegerProgram>)> {
-    let signature = &function.signature;
-    let plain_scalar = |param: &AbiParam| {
-        (integer_width(param.value_type).is_some() || float_width(param.value_type).is_some())
-            && *param == AbiParam::new(param.value_type)
-    };
-    if super::windows::check_target(isa.triple()).is_err()
-        || isa.flags().preserve_frame_pointers()
-        || isa.flags().enable_pinned_reg()
-        || signature.params.len() > MAX_GP_ARGUMENTS
-        || signature.returns.len() > 1
-        || !signature
+fn windows_signature(signature: &Signature) -> bool {
+    signature.params.len() <= MAX_GP_ARGUMENTS
+        && signature.returns.len() <= 1
+        && signature
             .params
             .iter()
             .chain(&signature.returns)
-            .all(plain_scalar)
+            .all(windows_scalar)
+}
+
+fn windows_program(
+    function: &Function,
+    isa: &dyn TargetIsa,
+    declarations: Option<&ModuleDeclarations>,
+) -> Option<(IntegerProgram, Option<IntegerProgram>)> {
+    let signature = &function.signature;
+    if super::windows::check_target(isa.triple()).is_err()
+        || isa.flags().preserve_frame_pointers()
+        || isa.flags().enable_pinned_reg()
+        || !windows_signature(signature)
     {
         return None;
     }
@@ -3764,53 +3803,63 @@ fn windows_leaf_program(
         function,
         false,
         isa.flags().enable_nan_canonicalization(),
-        None,
+        declarations,
         CallConv::WindowsFastcall,
         false,
         Some(isa),
     )?;
-    primary.words[ARGUMENT_COUNT] |= WINDOWS_LEAF;
+    primary.words[ARGUMENT_COUNT] |= WINDOWS_ABI;
     if let Some(linear) = &mut fallback {
-        linear.words[ARGUMENT_COUNT] |= WINDOWS_LEAF;
+        linear.words[ARGUMENT_COUNT] |= WINDOWS_ABI;
     }
     Some((primary, fallback))
 }
 
-pub(super) struct WindowsLeaf {
-    pub bytes: Vec<u8>,
+pub(super) struct WindowsCode {
+    pub code: MachineCode,
     pub unwind: Option<Vec<u8>>,
 }
 
-/// Windows leaves include a Vesper unwind record when they need a stack frame.
-pub(super) fn encode_windows_leaf(isa: &dyn TargetIsa, function: &Function) -> Option<WindowsLeaf> {
+/// Windows functions include their relocations and an unwind record for any frame.
+pub(super) fn encode_windows_function(
+    isa: &dyn TargetIsa,
+    function: &Function,
+    declarations: &ModuleDeclarations,
+) -> Option<WindowsCode> {
     let encode = WINDOWS_ENCODER.get()?;
-    let (primary, fallback) = windows_leaf_program(function, isa)?;
+    let (primary, fallback) = windows_program(function, isa, Some(declarations))?;
     let emit = |program: IntegerProgram| {
-        if program.relocations {
-            None
-        } else {
-            let packet = encode(&program.words)?;
-            let (bytes, unwind) = split_machine_packet(&packet)?;
-            if !unwind.is_empty() {
-                const UNWIND_VERSION_NO_FLAGS: u8 = 1;
-                let ([version_flags, prologue, nodes, frame_register], codes) =
-                    unwind.split_first_chunk::<4>()?;
-                let nodes = usize::from(*nodes);
-                if *version_flags != UNWIND_VERSION_NO_FLAGS
-                    || *frame_register != 0
-                    || *prologue == 0
-                    || usize::from(*prologue) >= bytes.len()
-                    || nodes == 0
-                    || codes.len() != nodes.next_multiple_of(2) * size_of::<u16>()
-                {
-                    return None;
-                }
+        let packet = encode(&program.words)?;
+        let (bytes, rest) = split_length_prefixed(&packet)?;
+        let (unwind, records) = split_length_prefixed(rest)?;
+        if !unwind.is_empty() {
+            const UNWIND_VERSION_NO_FLAGS: u8 = 1;
+            let ([version_flags, prologue, nodes, frame_register], codes) =
+                unwind.split_first_chunk::<4>()?;
+            let nodes = usize::from(*nodes);
+            if *version_flags != UNWIND_VERSION_NO_FLAGS
+                || *frame_register != 0
+                || *prologue == 0
+                || usize::from(*prologue) >= bytes.len()
+                || nodes == 0
+                || codes.len() != nodes.next_multiple_of(2) * size_of::<u16>()
+            {
+                return None;
             }
-            Some(WindowsLeaf {
-                bytes: bytes.to_vec(),
-                unwind: (!unwind.is_empty()).then(|| unwind.to_vec()),
-            })
         }
+        let code = decode_machine_code(bytes, records)?;
+        if (program.relocations && (code.relocations.is_empty() || unwind.is_empty()))
+            || code
+                .relocations
+                .iter()
+                .any(|entry| entry.kind != Reloc::X86CallPCRel4)
+        {
+            return None;
+        }
+        Some(WindowsCode {
+            code,
+            unwind: (!unwind.is_empty()).then(|| unwind.to_vec()),
+        })
     };
     emit(primary).or_else(|| fallback.and_then(emit))
 }
@@ -4001,24 +4050,25 @@ fn integer_program(
     Some((linear, None))
 }
 
-struct MachineCode {
-    bytes: Vec<u8>,
-    relocations: Vec<ModuleReloc>,
+pub(super) struct MachineCode {
+    pub bytes: Vec<u8>,
+    pub relocations: Vec<ModuleReloc>,
 }
 
-fn split_machine_packet(packet: &[u8]) -> Option<(&[u8], &[u8])> {
+fn split_length_prefixed(packet: &[u8]) -> Option<(&[u8], &[u8])> {
     let (length, body) = packet.split_first_chunk::<{ size_of::<u64>() }>()?;
     let length = usize::try_from(u64::from_le_bytes(*length)).ok()?;
-    if length == 0 {
-        return None;
-    }
     body.split_at_checked(length)
 }
 
 fn decode_relocatable(packet: &[u8]) -> Option<MachineCode> {
-    let (bytes, records) = split_machine_packet(packet)?;
+    let (bytes, records) = split_length_prefixed(packet)?;
+    decode_machine_code(bytes, records)
+}
+
+fn decode_machine_code(bytes: &[u8], records: &[u8]) -> Option<MachineCode> {
     let (records, remainder) = records.as_chunks::<{ 3 * size_of::<u64>() }>();
-    if !remainder.is_empty() {
+    if bytes.is_empty() || !remainder.is_empty() {
         return None;
     }
     let mut relocations = Vec::with_capacity(records.len());
@@ -4032,6 +4082,10 @@ fn decode_relocatable(packet: &[u8]) -> Option<MachineCode> {
         let (kind, name) = match packet_kind {
             PLT_CALL => (
                 Reloc::X86CallPLTRel4,
+                ModuleRelocTarget::user(FUNCTION_NAMESPACE, target),
+            ),
+            WIN64_CALL => (
+                Reloc::X86CallPCRel4,
                 ModuleRelocTarget::user(FUNCTION_NAMESPACE, target),
             ),
             RELATIVE_DATA => (
@@ -4089,7 +4143,10 @@ fn decode_relocatable(packet: &[u8]) -> Option<MachineCode> {
             kind,
             name,
             addend: match kind {
-                Reloc::X86CallPLTRel4 | Reloc::X86PCRel4 | Reloc::X86GOTPCRel4 => -REL32_BYTES,
+                Reloc::X86CallPCRel4
+                | Reloc::X86CallPLTRel4
+                | Reloc::X86PCRel4
+                | Reloc::X86GOTPCRel4 => -REL32_BYTES,
                 _ => 0,
             },
         });
