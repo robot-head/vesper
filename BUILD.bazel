@@ -2159,13 +2159,16 @@ filegroup(
 
 vesper_package(
     name = "std_hash_sys_package",
-    srcs = glob(["packages/vesper-std/hash/sys/src/**/*.ves"]),
+    srcs = glob([
+        "packages/vesper-std/hash/sys/src/**/*.ves",
+        "packages/vesper-std/hash/sys/src-wasip2/**/*.ves",
+    ]),
     manifest = "packages/vesper-std/hash/sys/Loom.toml",
     # The BLAKE3 C implementation and the wrappers its `[package] objects`
     # name; the port harness compiles them into a port's archive.
     objects = glob(["packages/vesper-std/hash/sys/c/**"]),
     visibility = ["//visibility:public"],
-    vsys = ["packages/vesper-std/hash/sys/blake3.vsys"],
+    vsys = glob(["packages/vesper-std/hash/sys/blake3-*.vsys"]),
     deps = [":std_hash_package"],
 )
 

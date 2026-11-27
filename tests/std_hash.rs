@@ -702,7 +702,7 @@ fn host_target() -> Option<(&'static str, &'static str)> {
 
 /// The `.vsys` library hash-sys's manifest names.
 fn sys_vsys(target: (&str, &str)) -> String {
-    fs::read_to_string("packages/vesper-std/hash/sys/blake3.vsys")
+    fs::read_to_string("packages/vesper-std/hash/sys/blake3-linux.vsys")
         .unwrap()
         .replace("@TARGET@", target.0)
         .replace("@ABI@", target.1)
