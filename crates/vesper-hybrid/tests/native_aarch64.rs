@@ -117,6 +117,60 @@ fn aarch64_call_packet_keeps_void_calls_and_rejects_malformed_arguments() {
 }
 
 #[test]
+fn aarch64_calls_pair_adjacent_saves_and_keep_unclobbered_results_in_x0() {
+    const STP_X0_X1_SP_8: u32 = 0xa900_87e0;
+    const LDP_X0_X1_SP_8: u32 = 0xa940_87e0;
+    const PAIR_OPCODE_MASK: u32 = 0xffc0_0000;
+    const PAIR_OPCODE: u32 = 0xa900_0000;
+    const LOAD_BIT: u32 = 0x0040_0000;
+    const CALL_AND_FRAME_INSTRUCTIONS: usize = 6;
+    let code = |tape: &[u64]| {
+        let packet = binding::aarch64_relocatable_block(tape);
+        let (length, body) = packet.split_first_chunk::<{ size_of::<u64>() }>().unwrap();
+        let code = &body[..u64::from_le_bytes(*length) as usize];
+        let (words, remainder) = code.as_chunks::<{ size_of::<u32>() }>();
+        assert!(remainder.is_empty());
+        words
+            .iter()
+            .copied()
+            .map(u32::from_le_bytes)
+            .collect::<Vec<_>>()
+    };
+    let paired = code(&[2, 3, CALL_VOID, 17, 0, 0, ADD, 0, 1, CELL_BITS]);
+    assert!(paired.contains(&STP_X0_X1_SP_8));
+    assert!(paired.contains(&LDP_X0_X1_SP_8));
+
+    let distant = code(&[
+        2,
+        5,
+        STACK_SLOT,
+        512,
+        8,
+        0,
+        STACK_STORE_QWORD,
+        0,
+        0,
+        0,
+        CALL_VOID,
+        17,
+        0,
+        0,
+        ADD,
+        0,
+        1,
+        CELL_BITS,
+    ]);
+    assert!(
+        distant
+            .iter()
+            .all(|word| { (word & (PAIR_OPCODE_MASK & !LOAD_BIT)) != PAIR_OPCODE })
+    );
+
+    let result_in_x0 = code(&[0, 0, CALL, 17, 0, 0]);
+    assert_eq!(result_in_x0.len(), CALL_AND_FRAME_INSTRUCTIONS);
+}
+
+#[test]
 fn aarch64_narrow_arithmetic_and_extension() {
     const ADD_W0_W0_W1: u32 = 0x0b01_0000;
     const TRUNCATE_X0_TO_BYTE: u32 = 0xd340_1c00;

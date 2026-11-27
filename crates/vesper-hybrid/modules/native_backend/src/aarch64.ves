@@ -93,6 +93,7 @@ const MOVN: u32 = 0x92800000;
 const MOVZ: u32 = 0xd2800000;
 const MOVK: u32 = 0xf2800000;
 const MEMORY_SCALED: u32 = 0x39000000;
+const MEMORY_PAIR: u32 = 0xa9000000;
 const MEMORY_UNSCALED: u32 = 0x38000000;
 const MEMORY_REGISTER: u32 = 0x38206800;
 const MEMORY_LOAD: u32 = 0x00400000;
@@ -101,6 +102,9 @@ const MEMORY_IMM9_SHIFT: u32 = 12;
 const MEMORY_IMM9_MASK: u32 = 0x1ff;
 const MEMORY_IMM9_MIN: i64 = -256;
 const MEMORY_IMM9_MAX: i64 = 255;
+const PAIR_IMM7_SHIFT: u32 = 15;
+const PAIR_IMM7_MAX: u64 = 63;
+const PAIR_SECOND_REGISTER_SHIFT: u32 = 10;
 const RM_SHIFT: u32 = 16;
 const RN_SHIFT: u32 = 5;
 const CONDITION_SHIFT: u32 = 12;
@@ -829,6 +833,38 @@ fn call_save_slot(frame_bytes: u64, register: u64) -> u64 {
     )
 }
 
+fn call_saved_registers(inout out: ChunkSeq[u8], mask: u32, frame_bytes: u64, load: bool) {
+    let mut remaining = mask;
+    loop {
+        if remaining == 0 {
+            break;
+        }
+        let first = trailing_zeros_u64(widen_u64(remaining));
+        remaining = remaining & ~sh(1, first);
+        let next = wrapping_add(first, 1);
+        let offset = call_save_slot(frame_bytes, widen_u64(first));
+        let scaled = offset / HOME_WORD_BYTES;
+        if (remaining & sh(1, next)) != 0 && scaled <= PAIR_IMM7_MAX {
+            let opcode = if load {
+                MEMORY_PAIR | MEMORY_LOAD
+            } else {
+                MEMORY_PAIR
+            };
+            push32(
+                inout out,
+                opcode
+                    | sh(wrapping_u32(scaled), PAIR_IMM7_SHIFT)
+                    | sh(next, PAIR_SECOND_REGISTER_SHIFT)
+                    | sh(SP, RN_SHIFT)
+                    | first
+            );
+            remaining = remaining & ~sh(1, next);
+        } else {
+            memory(inout out, load, QWORD_BITS, SP, first, offset);
+        }
+    }
+}
+
 fn emit_call(
     inout out: ChunkSeq[u8],
     in words: Slice[u64],
@@ -839,13 +875,13 @@ fn emit_call(
     frame_bytes: u64,
     keep_result: bool,
     inout relocations: ChunkSeq[u64]
-) -> bool {
+) -> Option[u32] {
     let start = wrapping_sub(index, record.right);
     let mut save = used;
     for arg in 0..record.right {
         let source = location(in locations, read_record(in words, wrapping_add(start, arg)).left);
         if source == UNASSIGNED {
-            return false;
+            return Option::None;
         }
         // Arguments are assigned in increasing register order. Save sources
         // whose register may be overwritten before its value is copied.
@@ -853,12 +889,7 @@ fn emit_call(
             save = save | sh(1, source);
         }
     }
-    for register in 0..CALL_SAVE_REGISTERS {
-        let reg = wrapping_u32(register);
-        if (save & sh(1, reg)) != 0 {
-            memory(inout out, false, QWORD_BITS, SP, reg, call_save_slot(frame_bytes, register));
-        }
-    }
+    call_saved_registers(inout out, save, frame_bytes, false);
     for arg in 0..record.right {
         let source = location(in locations, read_record(in words, wrapping_add(start, arg)).left);
         let dest = wrapping_u32(arg);
@@ -886,16 +917,15 @@ fn emit_call(
         relocations.push(wrapping_sub(record.left, LIBCALL_TARGET_BASE));
     }
     push32(inout out, BRANCH_AND_LINK);
-    if keep_result {
+    let result = if keep_result && (used & 1) != 0 {
+        // The restore below writes x0 when its incoming contents are live.
         rrr(inout out, ORR_REG, SCRATCH, ZERO, 0);
-    }
-    for register in 0..CALL_SAVE_REGISTERS {
-        let reg = wrapping_u32(register);
-        if (used & sh(1, reg)) != 0 {
-            memory(inout out, true, QWORD_BITS, SP, reg, call_save_slot(frame_bytes, register));
-        }
-    }
-    true
+        SCRATCH
+    } else {
+        0
+    };
+    call_saved_registers(inout out, used, frame_bytes, true);
+    Option::Some(result)
 }
 
 fn write_instruction(inout output: ChunkSeq[u8], offset: u64, instruction: u32) {
@@ -1294,13 +1324,13 @@ fn encode_pass(
             continue;
         }
         let direct_call = r.op == CALL || r.op == CALL_VOID;
-        if direct_call {
+        let call_result = if direct_call {
             let start = wrapping_sub(index, r.right);
             for arg in 0..r.right {
                 let source = read_record(in words, wrapping_add(start, arg)).left;
                 used = expire(used, in ends, source, value, location(in locations, source));
             }
-            if !emit_call(
+            let reg = match emit_call(
                 inout out,
                 in words,
                 in locations,
@@ -1311,13 +1341,17 @@ fn encode_pass(
                 live,
                 inout relocations
             ) {
-                return ChunkSeq::new[u8]();
-            }
+                Option::Some(reg) => reg,
+                Option::None => return ChunkSeq::new[u8](),
+            };
             if !live {
                 locations.push(UNASSIGNED);
                 continue;
             }
-        }
+            reg
+        } else {
+            UNASSIGNED
+        };
         if r.op == BLOCK_LABEL || r.op == EDGE_LABEL {
             let old = labels.try_get(r.left).unwrap_or(Label { address: 0, block: false });
             if old.address != NO_VALUE {
@@ -1502,7 +1536,9 @@ fn encode_pass(
             assigned
         };
         if direct_call {
-            rrr(inout out, ORR_REG, dest, ZERO, SCRATCH);
+            if dest != call_result {
+                rrr(inout out, ORR_REG, dest, ZERO, call_result);
+            }
         } else if r.op == STACK_ADDRESS || r.op == STACK_LOAD {
             let displacement = stack_displacement(in frame, in r).unwrap_or(0);
             if r.op == STACK_ADDRESS {
