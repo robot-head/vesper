@@ -442,6 +442,8 @@ vesper_crate(
             "//packages/vesper-cranelift:files",
             "//packages/vesper-crypto:files",
             "//bootstrap:files",
+            # @vesper/run keeps region books in @vesper/alloc (#2053).
+            "//crates/vesper-alloc:files",
             "//crates/vesper-ebpf:files",
             # @vesper/driver-commands formats through @vesper/fmt (#1996).
             "//crates/vesper-fmt:files",
@@ -502,7 +504,10 @@ vesper_crate(
             "examples/**",
             "packages/**",
             "tests/fixtures/**",
-        ]) + ["//crates/vesper-serde:files"],
+        ]) + [
+            "//crates/vesper-alloc:files",
+            "//crates/vesper-serde:files",
+        ],
         # SH3 lane 13 (#1252): @vesper/place-ir-lower against
         # `ir::lower_world` over the same corpus.
         "test/self_host_ir_lower": glob([
@@ -1118,6 +1123,11 @@ vesper_crate(
         # (exit 37) on "Self-host codegen differentials".
         "test/self_host_native_walk": [
             "resources:memory:8192",
+        ],
+        # Peaks at 8.9 GiB locally (eight test threads). Under the 6 GiB
+        # self-host default the kernel killed it on #2418 and #2448.
+        "test/self_host_verified_codegen": [
+            "resources:memory:9216",
         ],
         # Peaks at 7.5 GiB locally (eight test threads).
         "test/self_host_wasm_backend": [
@@ -1931,10 +1941,12 @@ vesper_package(
     srcs = glob(["packages/vesper-run/src/**/*.ves"]),
     manifest = "packages/vesper-run/Loom.toml",
     visibility = ["//visibility:public"],
-    # Float display takes @vesper/serde's shortest digits.
+    # Float display takes @vesper/serde's shortest digits; region blocks
+    # keep @vesper/alloc books.
     deps = [
         ":check_data_package",
         ":place_ir_package",
+        "//crates/vesper-alloc:port_package",
         "//crates/vesper-serde:port_package",
     ],
 )

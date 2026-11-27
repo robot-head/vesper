@@ -72,8 +72,8 @@ filegroup(
     for module, old, new in [
         (
             "histogram",
-            "            + ((value >> (octave - SUB_BITS)) - OCTAVE_BINS)",
-            "            + ((value >> (octave - SUB_BITS)) - (OCTAVE_BINS - 1))",
+            "    let sub = wrapping_sub(wrapping_shr_u64(value, shift), OCTAVE_BINS);",
+            "    let sub = wrapping_sub(wrapping_shr_u64(value, shift), wrapping_sub(OCTAVE_BINS, 1));",
         ),
         (
             "exponential",

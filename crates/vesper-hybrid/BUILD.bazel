@@ -328,6 +328,7 @@ vesper_hybrid(
             "//:check_data_package",
             "//:place_ir_package",
             "//:run_package",
+            "//crates/vesper-alloc:port_package",
             "//crates/vesper-serde:port_package",
         ],
         # The stack-bound swap (#1182) builds on @vesper/check-loops-atomics.

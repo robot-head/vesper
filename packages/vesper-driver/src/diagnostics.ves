@@ -259,11 +259,139 @@ fn pack_bytes(in bytes: Slice[u8]) -> ChunkSeq[u64] {
     words
 }
 
+// Compact JSON array matching `package_diagnostics(..., json = true)` in
+// `src/main.rs`: `serde_json::to_value(d)` + `v["file"] = file`, so keys are
+// emitted in alphabetical `BTreeMap` order (`code`, `file`, optional `help`,
+// `message`, optional `related`, `span` with `end` then `start`).
+// Stream layout: `count: u64`, then per entry: `file`, `code`, `message`,
+// `span_start`, `span_end`, `related_count`, `related...`, `has_help`, `help?`.
+pub fn package_diagnostics_json(in stream: Slice[u8]) -> ChunkSeq[u8] {
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut at: u64 = 0;
+    let count = read_u64(in stream, inout at);
+    push_str(inout out, in "[");
+    for idx in 0..count {
+        if idx > 0 {
+            push_str(inout out, in ",");
+        }
+        let file_r = read_span_slice(in stream, inout at);
+        let code_r = read_span_slice(in stream, inout at);
+        let msg_r = read_span_slice(in stream, inout at);
+        let span_start = read_u64(in stream, inout at);
+        let span_end = read_u64(in stream, inout at);
+        let rel_count = read_u64(in stream, inout at);
+        let rel_start_at = at;
+        for _r_idx in 0..rel_count {
+            let _r_start = read_u64(in stream, inout at);
+            let _r_end = read_u64(in stream, inout at);
+            let _r_msg = read_span_slice(in stream, inout at);
+        }
+        let has_help = read_u64(in stream, inout at);
+        let help_r = if has_help != 0 {
+            read_span_slice(in stream, inout at)
+        } else {
+            ByteSpan { start: 0, end: 0 }
+        };
+
+        push_str(inout out, in "{\"code\":");
+        push_json_string(inout out, in stream[code_r.start..code_r.end]);
+        push_str(inout out, in ",\"file\":");
+        push_json_string(inout out, in stream[file_r.start..file_r.end]);
+        if has_help != 0 {
+            push_str(inout out, in ",\"help\":");
+            push_json_string(inout out, in stream[help_r.start..help_r.end]);
+        }
+        push_str(inout out, in ",\"message\":");
+        push_json_string(inout out, in stream[msg_r.start..msg_r.end]);
+        if rel_count > 0 {
+            push_str(inout out, in ",\"related\":[");
+            let mut r_at = rel_start_at;
+            for r_idx in 0..rel_count {
+                if r_idx > 0 {
+                    push_str(inout out, in ",");
+                }
+                let r_start = read_u64(in stream, inout r_at);
+                let r_end = read_u64(in stream, inout r_at);
+                let r_msg = read_span_slice(in stream, inout r_at);
+                push_str(inout out, in "{\"message\":");
+                push_json_string(inout out, in stream[r_msg.start..r_msg.end]);
+                push_str(inout out, in ",\"span\":{\"end\":");
+                push_u64(inout out, r_end);
+                push_str(inout out, in ",\"start\":");
+                push_u64(inout out, r_start);
+                push_str(inout out, in "}}");
+            }
+            push_str(inout out, in "]");
+        }
+        push_str(inout out, in ",\"span\":{\"end\":");
+        push_u64(inout out, span_end);
+        push_str(inout out, in ",\"start\":");
+        push_u64(inout out, span_start);
+        push_str(inout out, in "}}");
+    }
+    push_str(inout out, in "]");
+    out
+}
+
+// `error[<code>]: <message> (<file>)\n` (`package_diagnostics` manifest error).
+pub fn format_manifest_error(
+    in file: Slice[u8],
+    in code: Slice[u8],
+    in message: Slice[u8]
+) -> ChunkSeq[u8] {
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    push_str(inout out, in "error[");
+    push_bytes(inout out, in code);
+    push_str(inout out, in "]: ");
+    push_bytes(inout out, in message);
+    push_str(inout out, in " (");
+    push_bytes(inout out, in file);
+    push_str(inout out, in ")\n");
+    out
+}
+
+// `error[<code>]: <message>\n` (`package_diagnostics` unlocated error).
+pub fn format_unlocated_error(in code: Slice[u8], in message: Slice[u8]) -> ChunkSeq[u8] {
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    push_str(inout out, in "error[");
+    push_bytes(inout out, in code);
+    push_str(inout out, in "]: ");
+    push_bytes(inout out, in message);
+    push_str(inout out, in "\n");
+    out
+}
+
 // JIT test entrypoint: `stream` -> packed JSON bytes.
 pub fn diagnostics_json_words(in stream: Str) -> ChunkSeq[u64] {
     let b = stream.as_bytes();
     let out = diagnostics_json(in b);
     pack_bytes(in out.as_slice())
+}
+
+// JIT test entrypoint: `stream` -> packed package-diagnostic JSON bytes.
+pub fn package_diagnostics_json_words(in stream: Str) -> ChunkSeq[u64] {
+    let b = stream.as_bytes();
+    let out = package_diagnostics_json(in b);
+    pack_bytes(in out.as_slice())
+}
+
+// JIT test entrypoint: `[file, code, message]` -> packed manifest & unlocated error lines.
+pub fn package_error_lines_words(in input: Str) -> ChunkSeq[u64] {
+    let b = input.as_bytes();
+    let mut at: u64 = 0;
+    let file_r = read_span_slice(in b, inout at);
+    let code_r = read_span_slice(in b, inout at);
+    let msg_r = read_span_slice(in b, inout at);
+    let m = format_manifest_error(
+        in b[file_r.start..file_r.end],
+        in b[code_r.start..code_r.end],
+        in b[msg_r.start..msg_r.end]
+    );
+    let u = format_unlocated_error(in b[code_r.start..code_r.end], in b[msg_r.start..msg_r.end]);
+    let mut combined: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    push_bytes(inout combined, in m.as_slice());
+    push_bytes(inout combined, in u.as_slice());
+    pack_bytes(in combined.as_slice())
 }
 
 // JIT test entrypoint: `[reason_len: u64, reason_bytes, stream_bytes...]` -> packed raw stderr bytes.

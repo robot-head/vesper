@@ -1143,6 +1143,9 @@ pub fn plan(inout ctx: Cx) -> Plan eff [Fail[WErr]] {
         let n_mask = ctx.names.mask_val();
         let n_tmask = ctx.types.t_mask();
         let n_rmask = ctx.types.r_mask();
+        let n_nodes = ctx.types.nodes.len();
+        let n_rows = ctx.types.rows.len();
+        let n_effs = ctx.types.effs_len();
         set_by_symbol(inout seen, queued.key, 1);
         if p_insts.len() >= ctx.facts.max_functions {
             Fail::raise(werr(K_LIMIT, 0, 40));
@@ -1408,7 +1411,14 @@ pub fn plan(inout ctx: Cx) -> Plan eff [Fail[WErr]] {
         {
             let mut old_cx = dummy_cx(ctx.known, ctx.syms);
             swap(inout ctx, inout old_cx);
-            let (rebuilt, next_perm) = rebuild_cx(sink old_cx, scratch_mark, perm);
+            let (rebuilt, next_perm) = rebuild_cx(
+                sink old_cx,
+                scratch_mark,
+                perm,
+                n_nodes,
+                n_rows,
+                n_effs
+            );
             let mut new_cx = rebuilt;
             perm = next_perm;
             swap(inout ctx, inout new_cx);
@@ -1450,7 +1460,18 @@ fn dummy_cx(known: Known, syms: Syms) -> Cx {
     }
 }
 
-fn rebuild_cx(sink old_cx: Cx, d_mark: u64, d_perm: u64) -> (Cx, u64) {
+// Rewinds the planning scratch to `d_mark`. A sequence of structs keeps each
+// element in its own heap block, so the type nodes, rows and effects this
+// instance added (past `n_nodes`, `n_rows` and `n_effs`) live in scratch:
+// they are copied into the kept region first, as Stage 2's `rebuild_tc` does.
+fn rebuild_cx(
+    sink old_cx: Cx,
+    d_mark: u64,
+    d_perm: u64,
+    n_nodes: u64,
+    n_rows: u64,
+    n_effs: u64
+) -> (Cx, u64) {
     let Cx {
         names,
         types,
@@ -1464,7 +1485,7 @@ fn rebuild_cx(sink old_cx: Cx, d_mark: u64, d_perm: u64) -> (Cx, u64) {
     let scratch_at_rebuild = stage2_heap_swap(d_perm);
     let fresh = Cx {
         names: names.clone_in_heap(),
-        types: types.clone_in_heap(),
+        types: types.clone_tail_in_heap(n_nodes, n_rows, n_effs),
         world: world,
         known: known,
         facts: facts,

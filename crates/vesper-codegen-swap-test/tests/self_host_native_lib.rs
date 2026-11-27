@@ -251,9 +251,18 @@ fn record(lent: &mut Lent<'_, '_>) -> Result<bool, String> {
         };
         let args = lent.args;
         let np = args[2] as usize;
-        let callees = codegen_swap::body::callees(args)
-            .unwrap_or_default()
-            .to_vec();
+        let Some((callees, sret, homes)) = codegen_swap::body::layout(args) else {
+            r.refused = Some(format!("{function}: a body request without its callees"));
+            return;
+        };
+        // The module's signatures carry no result pointer, so a struct
+        // result stays with the walk.
+        if sret != codegen_swap::body::NO_VALUE {
+            r.refused = Some(format!("{function}: returns through a result pointer"));
+            return;
+        }
+        let homes = homes.len();
+        let callees = callees.to_vec();
         if module_has_data(&*lent.module) {
             r.refused = Some("the module declares data".into());
             return;
@@ -261,7 +270,7 @@ fn record(lent: &mut Lent<'_, '_>) -> Result<bool, String> {
         // The walk declares and defines the instances in the same order,
         // so the n-th definition is function n.
         let func = r.defined.len() as u64;
-        debug_assert_eq!(args.len(), 4 + np + callees.len());
+        debug_assert_eq!(args.len(), 6 + np + callees.len() + homes);
         r.defined.push(Defined {
             func,
             optimize: lent.optimize,

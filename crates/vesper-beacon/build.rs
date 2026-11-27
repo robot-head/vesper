@@ -22,8 +22,8 @@ fn main() {
 const EDITS: &[(&str, &str)] = &[
     // histogram.rs: the last bin of each octave lands in the next octave.
     (
-        "            + ((value >> (octave - SUB_BITS)) - OCTAVE_BINS)",
-        "            + ((value >> (octave - SUB_BITS)) - (OCTAVE_BINS - 1))",
+        "    let sub = wrapping_sub(wrapping_shr_u64(value, shift), OCTAVE_BINS);",
+        "    let sub = wrapping_sub(wrapping_shr_u64(value, shift), wrapping_sub(OCTAVE_BINS, 1));",
     ),
     // exponential.rs: the window keeps only half the buckets it may.
     (

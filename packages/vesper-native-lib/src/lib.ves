@@ -52,6 +52,9 @@ const NO_CALLEE: u64 = 18446744073709551615;
 // The function index bits of a callee word; the bits above it are the
 // call's flags (`codegen_swap::body::FAIL_CALL`, `STATUS_CALL`), kept.
 const CALLEE_INDEX_MASK: u64 = 4294967295;
+// A function that returns in registers: no result pointer and no values
+// built in it (`codegen_swap::body::NO_VALUE`).
+const NO_VALUE: u64 = 18446744073709551615;
 const MALFORMED: Str = "malformed native-lib request";
 const UNKNOWN_FUNCTION: Str = "a definition names an unknown function";
 const NO_BUILDER: Str = "the function builder could not be made";
@@ -216,6 +219,8 @@ fn define_one(
     }
     args.push(nc);
     args.extend(in callees.as_slice());
+    args.push(NO_VALUE);
+    args.push(0);
     args.extend(in plan.as_slice());
     let answer = emit_body_words(args, inout b, inout m);
     if answer != HANDLED {

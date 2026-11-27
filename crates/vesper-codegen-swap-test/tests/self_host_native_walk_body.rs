@@ -86,6 +86,9 @@ static UNPLANNED: AtomicU64 = AtomicU64::new(0);
 static WITH_CALLS: AtomicU64 = AtomicU64::new(0);
 static CALLS: AtomicU64 = AtomicU64::new(0);
 static CALL_DECLINED: AtomicU64 = AtomicU64::new(0);
+/// Of the functions emitted from Vesper, those that return a struct or
+/// tuple through the result pointer (#2411).
+static SRET: AtomicU64 = AtomicU64::new(0);
 
 /// Identifies a lent program for the cache: its address, function count
 /// and instruction count (a later compile may reuse the address).
@@ -145,8 +148,8 @@ fn body(lent: &mut Lent<'_, '_>) -> Result<bool, String> {
     };
     // `[status, source locations, n, n parameter variables, m, m callees]`
     // from the walk, forwarded after the optimizer flag.
-    let callees =
-        codegen_swap::body::callees(lent.args).ok_or("a body request without its callees")?;
+    let (callees, sret, _) =
+        codegen_swap::body::layout(lent.args).ok_or("a body request without its callees")?;
     let mut args = vec![u64::from(lent.optimize)];
     args.extend_from_slice(lent.args);
     args.extend(words);
@@ -174,6 +177,9 @@ fn body(lent: &mut Lent<'_, '_>) -> Result<bool, String> {
     match answer {
         HANDLED => {
             EMITTED.fetch_add(1, Ordering::Relaxed);
+            if sret != codegen_swap::body::NO_VALUE {
+                SRET.fetch_add(1, Ordering::Relaxed);
+            }
             if !callees.is_empty() {
                 WITH_CALLS.fetch_add(1, Ordering::Relaxed);
                 CALLS.fetch_add(callees.len() as u64, Ordering::Relaxed);
@@ -244,7 +250,14 @@ fn both(name: &str, world: &vesper::check::World, run: bool) -> Diff {
 #[test]
 fn vesper_scalar_bodies_match_the_rust_walk() {
     big_stack(|| {
-        let counters = [&EMITTED, &UNPLANNED, &WITH_CALLS, &CALLS, &CALL_DECLINED];
+        let counters = [
+            &EMITTED,
+            &UNPLANNED,
+            &WITH_CALLS,
+            &CALLS,
+            &CALL_DECLINED,
+            &SRET,
+        ];
         let before = counters.map(|c| c.load(Ordering::Relaxed));
         let worlds: Vec<_> = check_harness::corpus()
             .iter()
@@ -256,12 +269,12 @@ fn vesper_scalar_bodies_match_the_rust_walk() {
             total.add(both(&case.name, &case.world, runs(i, case)));
         }
         let after = counters.map(|c| c.load(Ordering::Relaxed));
-        let [emitted, unplanned, with_calls, calls, call_declined] =
-            [0, 1, 2, 3, 4].map(|i| after[i] - before[i]);
+        let [emitted, unplanned, with_calls, calls, call_declined, sret] =
+            [0, 1, 2, 3, 4, 5].map(|i| after[i] - before[i]);
         eprintln!(
             "native walk bodies: {}; {emitted} functions emitted from Vesper \
-             ({with_calls} with {calls} direct calls), {unplanned} left to Rust, \
-             {call_declined} declined for a call",
+             ({with_calls} with {calls} direct calls, {sret} with a struct result), \
+             {unplanned} left to Rust, {call_declined} declined for a call",
             total.summary()
         );
         assert!(total.worlds > 0, "no corpus world compiled");
@@ -1007,6 +1020,81 @@ fn vesper_fail_record_bodies_match() {
     });
 }
 
+/// Struct and tuple results through the result pointer (#2411): structs of
+/// word, narrow, `bool` and float fields (an `f32` field leaves its word
+/// to be zeroed), a tuple, a one-field struct smaller than a word, and a
+/// struct built from parameters and arithmetic. Each is built in the
+/// result pointer on the optimize path and copied to it otherwise; `main`
+/// reads the fields, so it stays with the walk.
+const SRET_SOURCE: &str = "
+struct Pair {
+    a: i64,
+    b: u32,
+}
+struct Mixed {
+    flag: bool,
+    half: f32,
+    whole: f64,
+    small: i8,
+}
+struct Tiny {
+    x: u16,
+}
+fn pair(x: i64) -> Pair {
+    Pair { a: wrapping_mul(x, 3), b: wrapping_u32(x) ^ 5 }
+}
+fn mixed(x: f64, c: bool) -> Mixed {
+    let s: i8 = if c { -3 } else { 4 };
+    Mixed { flag: !c, half: 1.5, whole: x * 2.0, small: s }
+}
+fn split(x: u64) -> (u64, f64) {
+    (x >> 1, 0.25)
+}
+fn tiny(x: u16) -> Tiny {
+    Tiny { x: x | 1 }
+}
+fn main() -> i64 {
+    let p: Pair = pair(7);
+    let m: Mixed = mixed(1.25, true);
+    let (q, f) = split(40);
+    let t: Tiny = tiny(8);
+    let g: i64 = if m.flag || m.whole > 2.0 { 64 } else { 0 };
+    let h: i64 = if f < 1.0 && m.half > 1.0 { 128 } else { 0 };
+    p.a ^ widen_i64(p.b) ^ widen_i64(m.small) ^ wrapping_i64(q) ^ widen_i64(t.x) ^ g ^ h
+}
+";
+
+#[test]
+fn vesper_struct_results_match() {
+    big_stack(|| {
+        let parsed = vesper::parser::parse(SRET_SOURCE);
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        let checked = vesper::check::check(&parsed.module);
+        assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
+        if let Err(e) = build(&checked.world, "main", true) {
+            panic!("the struct result program does not build: {e}");
+        }
+        let before = SRET.load(Ordering::Relaxed);
+        let total = both("struct_results", &checked.world, true);
+        let sret = SRET.load(Ordering::Relaxed) - before;
+        eprintln!(
+            "struct_results: {}; {sret} struct results emitted from Vesper",
+            total.summary()
+        );
+        let ran = if cross() { 0 } else { 2 };
+        assert_eq!((total.worlds, total.ran), (2, ran), "{}", total.summary());
+        // 4 functions, each with both optimizer settings. A cross target's
+        // calling convention returns some of them differently (on Windows
+        // x64 only 5 bodies take a result pointer).
+        let min_sret = if cross() { 4 } else { 8 };
+        assert!(
+            sret >= min_sret,
+            "only {sret} of the struct results came from Vesper (expected >= {min_sret})"
+        );
+        assert!(total.is_clean(), "{}", total.summary());
+    });
+}
+
 /// Part 6k: 1-word unary (`~`, `-`, `!`), bitwise (`&`, `|`, `^`),
 /// `wrapping_neg_i8`/`i32`/`i64`, and `u64` bit builtins across both
 /// optimized and unoptimized builds.
@@ -1053,6 +1141,63 @@ fn vesper_scalar_bodies_part_6k() {
         assert!(
             emitted >= min_emitted,
             "part 6k functions should come from Vesper (expected >= {min_emitted}, got {emitted})"
+        );
+        assert!(total.is_clean(), "{}", total.summary());
+    });
+}
+
+/// Part 6l: signed and unsigned integer comparisons across narrow & 64-bit
+/// types plus range-proven `+`, `-`, `*` across both optimized and unoptimized
+/// builds.
+const SCALARS_6L: &str = "
+fn cmp_matrix(a: i8, b: u8, c: i32, d: u32, e: i64, f: u64) -> i64 {
+    let mut acc: i64 = 0;
+    if a < 10 && a >= -20 {
+        acc = wrapping_add(acc, 1);
+    }
+    if b <= 200 && b > 50 {
+        acc = wrapping_add(acc, 2);
+    }
+    if c != 0 && c <= 1000 {
+        acc = wrapping_add(acc, 4);
+    }
+    if d >= 10 && d < 500 {
+        acc = wrapping_add(acc, 8);
+    }
+    if e > -100 && e < 100 && f >= 1 && f <= 1000 {
+        let s: i64 = wrapping_sub(wrapping_mul(wrapping_add(e, 10), 2), 3);
+        acc = wrapping_add(acc, s);
+    }
+    acc
+}
+fn main() -> i64 {
+    cmp_matrix(-5, 120, 42, 99, 25, 500) ^ cmp_matrix(50, 10, 0, 600, 200, 0)
+}
+";
+
+#[test]
+fn vesper_scalar_bodies_part_6l() {
+    big_stack(|| {
+        let parsed = vesper::parser::parse(SCALARS_6L);
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        let checked = vesper::check::check(&parsed.module);
+        assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
+        if let Err(e) = build(&checked.world, "main", true) {
+            panic!("the part 6l scalar program does not build: {e}");
+        }
+        let before = EMITTED.load(Ordering::Relaxed);
+        let total = both("scalars_6l", &checked.world, true);
+        let emitted = EMITTED.load(Ordering::Relaxed) - before;
+        eprintln!(
+            "scalars_6l: {}; {emitted} functions emitted from Vesper",
+            total.summary()
+        );
+        let ran = if cross() { 0 } else { 2 };
+        assert_eq!((total.worlds, total.ran), (2, ran), "{}", total.summary());
+        let min_emitted = if cross() { 4 } else { 8 };
+        assert!(
+            emitted >= min_emitted,
+            "part 6l functions should come from Vesper (expected >= {min_emitted}, got {emitted})"
         );
         assert!(total.is_clean(), "{}", total.summary());
     });

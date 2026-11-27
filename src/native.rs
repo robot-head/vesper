@@ -4138,14 +4138,23 @@ impl<M: Module> Codegen<'_, '_, M> {
         body: &crate::ir::FunctionIr,
         sret: Option<ir::Value>,
     ) -> Result<bool, String> {
-        let plain = matches!(frame.result, FrameResult::Value)
+        // A struct result is built in, or copied to, the result pointer
+        // (`sret`, #2411).
+        let result_ok = match frame.result {
+            FrameResult::Value => sret.is_none(),
+            FrameResult::Sret => sret.is_some(),
+            FrameResult::Buffer(_) | FrameResult::Words(_) => false,
+        };
+        // A failure exit returns a scalar zero beside its tag, so a
+        // `fail_only` function with a struct result stays with the walk.
+        let plain = result_ok
+            && !(sret.is_some() && self.fail_record.is_some())
             && self.denorm.is_empty()
             && self.session.is_none()
             && self.generic_vars.is_empty()
             && !self.in_fip_fn
             && self.trace_fail.is_none()
             && self.caller_slot.is_none()
-            && sret.is_none()
             && self.result_buffer.is_none()
             && self.own_abi.result_words.is_none()
             && frame.function_args.is_empty()
@@ -4209,6 +4218,38 @@ impl<M: Module> Codegen<'_, '_, M> {
             .collect::<Vec<_>>();
         args.push(calls.len() as u64);
         args.extend(calls);
+        // The result pointer, and the values `aggregates::plan` builds in it
+        // (by their index in the graph's values). Any other home (a field of
+        // a parent, a written place) or split local leaves the body to the
+        // walk.
+        let mut result_homes = vec![];
+        if self.operands_only {
+            if !aggregates::split_locals(self.world, body, &self.generic_vars).is_empty() {
+                return Ok(false);
+            }
+            let homes = aggregates::plan(
+                self.world,
+                body,
+                &self.generic_vars,
+                false,
+                &BTreeMap::new(),
+            );
+            for (id, home) in &homes {
+                if *home != aggregates::Home::Result || sret.is_none() {
+                    return Ok(false);
+                }
+                let Some(index) = body.values.keys().position(|v| v == id) else {
+                    return Ok(false);
+                };
+                result_homes.push(index as u64);
+            }
+        }
+        args.push(sret.map_or(
+            crate::codegen_swap::body::NO_VALUE,
+            crate::codegen_swap::word,
+        ));
+        args.push(result_homes.len() as u64);
+        args.extend(result_homes);
         crate::codegen_swap::body_request(
             &mut self.b,
             &mut *self.m,
