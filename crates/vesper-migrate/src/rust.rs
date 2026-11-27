@@ -94,6 +94,58 @@ enum RTy {
 }
 
 impl RTy {
+    #[cfg(feature = "vesper-port")]
+    fn vesper(&self) -> String {
+        let mut args_buf = Vec::new();
+        let mut args_starts = Vec::new();
+        let mut args_lens = Vec::new();
+        let mut pack_args = |items: &[RTy]| -> usize {
+            let mut total = 0usize;
+            for item in items {
+                let s = item.vesper();
+                args_starts.push(args_buf.len() as u64);
+                args_lens.push(s.len() as u64);
+                args_buf.extend_from_slice(s.as_bytes());
+                total += s.len();
+            }
+            total + items.len().saturating_sub(1) * 2
+        };
+        let (kind, array_len, head, extra): (u8, u64, String, usize) = match self {
+            Self::Unit => (0, 0, String::new(), 4),
+            Self::Bool => (1, 0, String::new(), 4),
+            Self::Str => (2, 0, String::new(), 3),
+            Self::Slice(e) if **e == Self::Scalar(Scalar::U8) => (3, 0, String::new(), 9),
+            Self::Scalar(s) => (4, 0, s.name().to_owned(), 0),
+            Self::Prim(p, _) => (4, 0, p.clone(), 0),
+            Self::Named(n) => (4, 0, n.clone(), 0),
+            Self::Ref { inner, .. } | Self::Raw { inner, .. } => return inner.vesper(),
+            Self::Slice(e) => (5, 0, e.vesper(), 7),
+            Self::Array(e, n) => (6, *n, e.vesper(), 32),
+            Self::Std(n, args) if args.is_empty() => (4, 0, n.clone(), 0),
+            Self::Std(n, args) => {
+                let joined = pack_args(args);
+                (7, 0, n.clone(), joined + 2)
+            }
+            Self::Tuple(ts) => {
+                let joined = pack_args(ts);
+                (8, 0, String::new(), joined + 2)
+            }
+        };
+        let mut out = vec![0u8; head.len() + extra];
+        let written = crate::binding::migrate_render_rty_vesper(
+            kind,
+            array_len,
+            head.as_bytes(),
+            &args_buf,
+            &args_starts,
+            &args_lens,
+            &mut out,
+        ) as usize;
+        out.truncate(written);
+        String::from_utf8(out).unwrap_or_default()
+    }
+
+    #[cfg(not(feature = "vesper-port"))]
     fn vesper(&self) -> String {
         match self {
             Self::Unit => "Unit".into(),
