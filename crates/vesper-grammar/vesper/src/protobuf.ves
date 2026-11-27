@@ -315,7 +315,7 @@ fn lookup(
             fail(18, at);
         }
         b.remaining = wrapping_sub(b.remaining, 1);
-        let mid = wrapping_add(lo, wrapping_sub(hi, lo) / 2);
+        let mid = wrapping_add(lo, wrapping_shr_u64(wrapping_sub(hi, lo), 1));
         let f = field_at(in schema, id, mid);
         let v = sw(in schema, f);
         if v == number {
@@ -337,7 +337,7 @@ fn find(in schema: Slice[u64], id: u64, number: u64) -> u64 {
         if lo >= hi {
             return 0;
         }
-        let mid = wrapping_add(lo, wrapping_sub(hi, lo) / 2);
+        let mid = wrapping_add(lo, wrapping_shr_u64(wrapping_sub(hi, lo), 1));
         let f = field_at(in schema, id, mid);
         let v = sw(in schema, f);
         if v == number {

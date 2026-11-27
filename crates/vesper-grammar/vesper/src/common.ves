@@ -90,26 +90,18 @@ pub fn sw(in s: Slice[u64], i: u64) -> u64 {
 // `x << s`, 0 when `s >= 64` (bits shifted out are lost).
 pub fn shl(x: u64, s: u64) -> u64 {
     if s >= 64 {
-        return 0;
-    }
-    handle Fail[ArithOverflow] in {
-        x << s
-    } with {
-        return v => v,
-        raise(e, k) => 0
+        0
+    } else {
+        wrapping_shl_u64(x, wrapping_u32(s))
     }
 }
 
 // `x >> s`, 0 when `s >= 64`.
 pub fn shr(x: u64, s: u64) -> u64 {
     if s >= 64 {
-        return 0;
-    }
-    handle Fail[ArithOverflow] in {
-        x >> s
-    } with {
-        return v => v,
-        raise(e, k) => 0
+        0
+    } else {
+        wrapping_shr_u64(x, wrapping_u32(s))
     }
 }
 
