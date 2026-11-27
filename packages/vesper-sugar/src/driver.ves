@@ -612,6 +612,39 @@ pub struct SugarModuleSurface {
     pub imports: ChunkSeq[SugarImportSpan],
 }
 
+// A cheap rejection test for graphs that use the word "sugar" in comments,
+// strings or package paths but contain no declarations. Only the surface
+// parser can confirm a declaration and report its exact span.
+pub fn may_declare_sugar(in source: ChunkSeq[u8]) -> bool {
+    let mut diags = diags_new();
+    let tokens = lex_sugar_raw_with_limits(
+        in source.as_slice(),
+        inout diags,
+        MAX_BYTES,
+        HARD_TOKENS,
+        max_diagnostics()
+    );
+    if tokens.rejected || tokens.limited || diags.code.len() != 0 {
+        return true;
+    }
+    let mut keyword = false;
+    let mut name = false;
+    for i in 0..tokens.kind.len() {
+        let kind = b8(in tokens.kind, i);
+        if trivia_kind(kind) {
+            continue;
+        }
+        if name && kind == k_colon() {
+            return true;
+        }
+        name = keyword;
+        let start = w32(in tokens.start, i);
+        let end = token_end(in tokens, i);
+        keyword = kind == k_lower() && range_is(in source, start, end, in "sugar".as_bytes());
+    }
+    false
+}
+
 fn next_surface_leaf(in cst: Cst, first: u64, end: u64) -> u64 {
     for leaf in first..end {
         if !trivia(in cst, leaf) {
@@ -621,14 +654,41 @@ fn next_surface_leaf(in cst: Cst, first: u64, end: u64) -> u64 {
     end
 }
 
+const BOOTSTRAP_WORD_SEPARATOR: u8 = 32;
+
+// Check an exact token against a space-delimited set. The scan keeps
+// the lists as data instead of adding string comparisons to the boot code.
+fn bootstrap_word_in(in source: ChunkSeq[u8], start: u64, end: u64, in words: Str) -> bool {
+    let list = words.as_bytes();
+    let mut first: u64 = 0;
+    loop {
+        if first >= list.len() {
+            break;
+        }
+        let last = match list[first..list.len()].find_byte(BOOTSTRAP_WORD_SEPARATOR) {
+            Option::Some(offset) => add(first, offset),
+            Option::None => list.len(),
+        };
+        if range_is(in source, start, end, in list[first..last]) {
+            return true;
+        }
+        first = inc(last);
+    }
+    false
+}
+
+fn bootstrap_intrinsic_name(in source: ChunkSeq[u8], start: u64, end: u64) -> bool {
+    bootstrap_word_in(
+        in source,
+        start,
+        end,
+        in "wrapping_u32 wrapping_sub wrapping_shl_u64 wrapping_shr_u64"
+    )
+}
+
 fn bootstrap_reserved_name(in source: ChunkSeq[u8], start: u64, end: u64) -> bool {
-    range_is(in source, start, end, in "Option".as_bytes())
-        || range_is(in source, start, end, in "None".as_bytes())
-        || range_is(in source, start, end, in "Some".as_bytes())
-        || range_is(in source, start, end, in "wrapping_u32".as_bytes())
-        || range_is(in source, start, end, in "wrapping_sub".as_bytes())
-        || range_is(in source, start, end, in "wrapping_shl_u64".as_bytes())
-        || range_is(in source, start, end, in "wrapping_shr_u64".as_bytes())
+    bootstrap_word_in(in source, start, end, in "Option None Some")
+        || bootstrap_intrinsic_name(in source, start, end)
 }
 
 pub fn inspect_module_sugars(
@@ -3962,132 +4022,21 @@ pub struct BootstrapSugarOutput {
 struct BootstrapState {
     src: ChunkSeq[u8],
     mark: ChunkSeq[u8],
-    maps: ChunkSeq[u64],
-    holes: ChunkSeq[u64]
+    maps: ChunkSeq[u64]
 }
 
-fn starts_generated(in state: BootstrapState, start: u64, end: u64) -> bool {
-    if sub(end, start) <= state.mark.len() {
-        return false;
-    }
-    for i in 0.. state.mark.len() {
-        if b8(in state.src, add(start, i)) != b8(in state.mark, i) {
-            return false;
-        }
-    }
-    true
-}
-
-fn bootstrap_template_word(in state: BootstrapState, start: u64, end: u64) -> bool {
-    if starts_generated(in state, start, end) {
-        return true;
-    }
-    range_is(in state.src, start, end, in "let".as_bytes())
-        || range_is(in state.src, start, end, in "mut".as_bytes())
-        || range_is(in state.src, start, end, in "if".as_bytes())
-        || range_is(in state.src, start, end, in "else".as_bytes())
-        || range_is(in state.src, start, end, in "bool".as_bytes())
-        || range_is(in state.src, start, end, in "true".as_bytes())
-        || range_is(in state.src, start, end, in "false".as_bytes())
-        || range_is(in state.src, start, end, in "u32".as_bytes())
-        || range_is(in state.src, start, end, in "u64".as_bytes())
-        || bootstrap_reserved_name(in state.src, start, end)
-}
-
-// Every captured operand in the bootstrap subset is used as the RHS
-// of a fresh scalar binding. Do not accept implicit transfers of a
-// non-copy value through a constructor or a hidden inout operation.
-fn bootstrap_template_punctuation(in state: BootstrapState, start: u64, end: u64) -> bool {
+fn bootstrap_template_token(in source: ChunkSeq[u8], start: u64, end: u64) -> bool {
+    let first = b8(in source, start);
     // Checked arithmetic, indexing, dotted dispatch and foreign/effect
     // syntax are intentionally not part of the bootstrap language.
-    range_is(in state.src, start, end, in "(".as_bytes())
-        || range_is(in state.src, start, end, in ")".as_bytes())
-        || range_is(in state.src, start, end, in "{".as_bytes())
-        || range_is(in state.src, start, end, in "}".as_bytes())
-        || range_is(in state.src, start, end, in ":".as_bytes())
-        || range_is(in state.src, start, end, in "::".as_bytes())
-        || range_is(in state.src, start, end, in ";".as_bytes())
-        || range_is(in state.src, start, end, in ",".as_bytes())
-        || range_is(in state.src, start, end, in "=".as_bytes())
-        || range_is(in state.src, start, end, in "==".as_bytes())
-        || range_is(in state.src, start, end, in "!=".as_bytes())
-        || range_is(in state.src, start, end, in ">=".as_bytes())
-        || range_is(in state.src, start, end, in ">".as_bytes())
-        || range_is(in state.src, start, end, in "<=".as_bytes())
-        || range_is(in state.src, start, end, in "<".as_bytes())
-        || range_is(in state.src, start, end, in "!".as_bytes())
-        || range_is(in state.src, start, end, in "&&".as_bytes())
-        || range_is(in state.src, start, end, in "||".as_bytes())
-        || range_is(in state.src, start, end, in "&".as_bytes())
-        || range_is(in state.src, start, end, in "|".as_bytes())
-        || range_is(in state.src, start, end, in "^".as_bytes())
-}
-
-fn bootstrap_scalar_hole(
-    in state: BootstrapState,
-    in significant: ChunkSeq[u64],
-    start: u64,
-    inout cursor: u64
-) -> bool {
-    let pair_width: u64 = 2;
-    let mut next = cursor;
-    loop {
-        if next >= significant.len() || w64(in significant, next) >= start {
-            break;
-        }
-        next = add(next, pair_width);
-    }
-    cursor = next;
-    if next >= pair_width {
-        let prior = sub(next, pair_width);
-        if range_is(
-            in state.src,
-            w64(in significant, prior),
-            w64(in significant, inc(prior)),
-            in "(".as_bytes()
-        ) {
-            next = prior;
-        }
-    }
-    // Five tokens precede the operand: let, fresh-name, colon, type, equals.
-    let scalar_prefix_tokens: u64 = 5;
-    let prefix_width = wrapping_mul(pair_width, scalar_prefix_tokens);
-    if next < prefix_width {
-        return false;
-    }
-    let base = sub(next, prefix_width);
-    let binding = add(base, pair_width);
-    let colon = add(binding, pair_width);
-    let ty = add(colon, pair_width);
-    let assignment = add(ty, pair_width);
-    let type_start = w64(in significant, ty);
-    let type_end = w64(in significant, inc(ty));
-    range_is(
-        in state.src,
-        w64(in significant, base),
-        w64(in significant, inc(base)),
-        in "let".as_bytes()
-    )
-        && starts_generated(
-            in state,
-            w64(in significant, binding),
-            w64(in significant, inc(binding))
+    (first >= 48 && first <= 57)
+        || bootstrap_word_in(
+            in source,
+            start,
+            end,
+            in "let mut if else bool true false u32 u64 ( ) { } : :: ; , = == != >= > <= < ! && || & | ^"
         )
-        && range_is(
-            in state.src,
-            w64(in significant, colon),
-            w64(in significant, inc(colon)),
-            in ":".as_bytes()
-        )
-        && (range_is(in state.src, type_start, type_end, in "u64".as_bytes())
-            || range_is(in state.src, type_start, type_end, in "u32".as_bytes())
-            || range_is(in state.src, type_start, type_end, in "bool".as_bytes()))
-        && range_is(
-            in state.src,
-            w64(in significant, assignment),
-            w64(in significant, inc(assignment)),
-            in "=".as_bytes()
-        )
+        || bootstrap_reserved_name(in source, start, end)
 }
 
 // A capture is inserted under the template's generated binders only.
@@ -4103,11 +4052,7 @@ fn bootstrap_caller_clear(in source: ChunkSeq[u8], in cst: Cst) -> bool {
         }
         let start = w64(in cst.token_starts, token);
         let end = w64(in cst.token_ends, token);
-        let intrinsic = kind == k_lower()
-            && (range_is(in source, start, end, in "wrapping_u32".as_bytes())
-                || range_is(in source, start, end, in "wrapping_sub".as_bytes())
-                || range_is(in source, start, end, in "wrapping_shl_u64".as_bytes())
-                || range_is(in source, start, end, in "wrapping_shr_u64".as_bytes()));
+        let intrinsic = kind == k_lower() && bootstrap_intrinsic_name(in source, start, end);
         if intrinsic {
             let mut next = inc(token);
             loop {
@@ -4130,74 +4075,6 @@ fn bootstrap_caller_clear(in source: ChunkSeq[u8], in cst: Cst) -> bool {
             }
         }
         prior = token;
-    }
-    true
-}
-
-fn bootstrap_template_safe(in state: BootstrapState) -> bool {
-    let mut diags = diags_new();
-    let lexed = lex_sugar_raw_with_limits(
-        in state.src.as_slice(),
-        inout diags,
-        MAX_BYTES,
-        HARD_TOKENS,
-        max_diagnostics()
-    );
-    if lexed.rejected || diags.code.len() != 0 {
-        return false;
-    }
-    let mut significant = ChunkSeq::new[u64]();
-    for token in 0..lexed.kind.len() {
-        if !trivia_kind(b8(in lexed.kind, token)) {
-            significant.push(w32(in lexed.start, token));
-            significant.push(token_end(in lexed, token));
-        }
-    }
-    let mut significant_cursor: u64 = 0;
-    for hole in 0..(state.holes.len() >> 1) {
-        if !bootstrap_scalar_hole(
-            in state,
-            in significant,
-            w64(in state.holes, hole << 1),
-            inout significant_cursor
-        ) {
-            return false;
-        }
-    }
-    let mut map: u64 = 0;
-    let maps = state.maps.len() / MAP_WORDS;
-    for token in 0..lexed.kind.len() {
-        let start = w32(in lexed.start, token);
-        let end = token_end(in lexed, token);
-        // Bootstrap map rows and token offsets are in source order.
-        loop {
-            if map >= maps || start < w64(in state.maps, add(wrapping_mul(map, MAP_WORDS), 1)) {
-                break;
-            }
-            map = inc(map);
-        }
-        if map < maps && w64(in state.maps, add(wrapping_mul(map, MAP_WORDS), 4)) == 1 {
-            continue;
-        }
-        let first = b8(in state.src, start);
-        let kind = b8(in lexed.kind, token);
-        let name = kind == k_lower()
-            || kind == k_upper()
-            || (first >= 65 && first <= 90)
-            || (first >= 97 && first <= 122)
-            || first == 95;
-        if trivia_kind(kind) || start == end {
-            continue;
-        }
-        if name {
-            if !bootstrap_template_word(in state, start, end) {
-                return false;
-            }
-        } else if !(first >= 48 && first <= 57)
-            && !bootstrap_template_punctuation(in state, start, end)
-        {
-            return false;
-        }
     }
     true
 }
@@ -4226,7 +4103,7 @@ fn bootstrap_capture(in caps: Caps, in template: ChunkSeq[u8], start: u64, end: 
 
 fn bootstrap_append_mapping(
     inout state: BootstrapState,
-    in from: ChunkSeq[u8],
+    in from: Slice[u8],
     start: u64,
     end: u64,
     source_start: u64,
@@ -4241,7 +4118,7 @@ fn bootstrap_append_mapping(
         return false;
     }
     let first = state.src.len();
-    cat_range(inout state.src, in from, start, end);
+    state.src.extend(in from[start..end]);
     if first != state.src.len() {
         state.maps.push(first);
         state.maps.push(state.src.len());
@@ -4399,32 +4276,68 @@ fn bootstrap_remember_locals(
     Option::Some(locals)
 }
 
-// Whether the template's tokens are one `{ ... }` block. A block is
-// already a primary expression, and leaving it bare keeps a tag in
-// statement position a block statement.
-fn bootstrap_single_block(in template: ChunkSeq[u8], in ranges: ChunkSeq[u64]) -> bool {
-    let count = ranges.len() >> 1;
-    if count == 0
-        || !range_is(in template, w64(in ranges, 0), w64(in ranges, 1), in "{".as_bytes())
-    {
+fn bootstrap_token_is(
+    in source: ChunkSeq[u8],
+    in ranges: ChunkSeq[u64],
+    token: u64,
+    in text: Str
+) -> bool {
+    range_is(
+        in source,
+        w64(in ranges, token << 1),
+        w64(in ranges, inc(token << 1)),
+        in text.as_bytes()
+    )
+}
+
+// Require `let name: scalar = $capture` using the template tokens the
+// renderer already has. The renderer makes the binder fresh and groups
+// the caller's expression; no source token can collide with it.
+fn bootstrap_scalar_binding(
+    in source: ChunkSeq[u8],
+    in tokens: ChunkSeq[u64],
+    in locals: ChunkSeq[u64],
+    capture: u64
+) -> bool {
+    let prefix_tokens: u64 = 5;
+    if capture < prefix_tokens {
         return false;
     }
-    let mut depth: u64 = 0;
-    for token in 0..count {
-        let start = w64(in ranges, token << 1);
-        let end = w64(in ranges, inc(token << 1));
-        if range_is(in template, start, end, in "{".as_bytes())
-            || range_is(in template, start, end, in "(".as_bytes())
-            || range_is(in template, start, end, in "[".as_bytes())
-        {
+    let kw = sub(capture, prefix_tokens);
+    let binder = inc(kw);
+    let colon = inc(binder);
+    let ty = inc(colon);
+    let assign = inc(ty);
+    bootstrap_token_is(in source, in tokens, kw, in "let")
+        && bootstrap_local_index(
+            in source,
+            in locals,
+            w64(in tokens, binder << 1),
+            w64(in tokens, inc(binder << 1))
+        )
+            != NONE
+        && bootstrap_token_is(in source, in tokens, colon, in ":")
+        && bootstrap_word_in(
+            in source,
+            w64(in tokens, ty << 1),
+            w64(in tokens, inc(ty << 1)),
+            in "u64 u32 bool"
+        )
+        && bootstrap_token_is(in source, in tokens, assign, in "=")
+}
+
+// A bare block is already a primary expression. Keep it bare so a tag
+// used as a block statement does not acquire a semicolon requirement.
+fn bootstrap_single_block(in source: ChunkSeq[u8], in ranges: ChunkSeq[u64]) -> bool {
+    if !bootstrap_token_is(in source, in ranges, 0, in "{") {
+        return false;
+    }
+    let count = ranges.len() >> 1;
+    let mut depth: u64 = 1;
+    for token in 1..count {
+        if bootstrap_token_is(in source, in ranges, token, in "{") {
             depth = inc(depth);
-        } else if range_is(in template, start, end, in "}".as_bytes())
-            || range_is(in template, start, end, in ")".as_bytes())
-            || range_is(in template, start, end, in "]".as_bytes())
-        {
-            if depth == 0 {
-                return false;
-            }
+        } else if bootstrap_token_is(in source, in ranges, token, in "}") {
             depth = sub(depth, 1);
             if depth == 0 {
                 return inc(token) == count;
@@ -4432,18 +4345,6 @@ fn bootstrap_single_block(in template: ChunkSeq[u8], in ranges: ChunkSeq[u64]) -
         }
     }
     false
-}
-
-// Appends one grouping parenthesis that maps to the whole invocation.
-fn bootstrap_append_group(
-    inout state: BootstrapState,
-    in text: Str,
-    call_start: u64,
-    call_end: u64
-) -> bool {
-    let mut parenthesis = ChunkSeq::new[u8]();
-    cat(inout parenthesis, in text);
-    bootstrap_append_mapping(inout state, in parenthesis, 0, 1, call_start, call_end, false)
 }
 
 fn bootstrap_render(
@@ -4463,10 +4364,18 @@ fn bootstrap_render(
         Option::Some(locals) => locals,
         Option::None => return false,
     };
-    // The expansion keeps the tag's precedence: `yes{} && false` with
-    // a template `true || false` must not become `true || false && false`.
     let grouped = !bootstrap_single_block(in template, in ranges);
-    if grouped && !bootstrap_append_group(inout state, in "(", call_start, call_end) {
+    if grouped
+        && !bootstrap_append_mapping(
+            inout state,
+            in "(".as_bytes(),
+            0,
+            1,
+            call_start,
+            call_end,
+            false
+        )
+    {
         return false;
     }
     let mut used = ChunkSeq::new[bool]();
@@ -4491,6 +4400,7 @@ fn bootstrap_render(
                 || used.try_get(cap) != Option::Some(false)
                 || !sort_in(in matched, cap, in "expr".as_bytes())
                 || cap_at(in matched, cap, 4) != 1
+                || !bootstrap_scalar_binding(in template, in ranges, in locals, token)
             {
                 return false;
             }
@@ -4506,7 +4416,7 @@ fn bootstrap_render(
             }
             if !bootstrap_append_mapping(
                 inout state,
-                in template,
+                in template.as_slice(),
                 cursor,
                 start,
                 call_start,
@@ -4515,12 +4425,9 @@ fn bootstrap_render(
             ) {
                 return false;
             }
-            let hole_start = state.src.len();
-            let mut parenthesis = ChunkSeq::new[u8]();
-            cat(inout parenthesis, in "(");
             if !bootstrap_append_mapping(
                 inout state,
-                in parenthesis,
+                in "(".as_bytes(),
                 0,
                 1,
                 call_start,
@@ -4531,7 +4438,7 @@ fn bootstrap_render(
             }
             if !bootstrap_append_mapping(
                 inout state,
-                in source,
+                in source.as_slice(),
                 value_start,
                 value_end,
                 value_start,
@@ -4540,11 +4447,9 @@ fn bootstrap_render(
             ) {
                 return false;
             }
-            parenthesis.clear();
-            cat(inout parenthesis, in ")");
             if !bootstrap_append_mapping(
                 inout state,
-                in parenthesis,
+                in ")".as_bytes(),
                 0,
                 1,
                 call_start,
@@ -4553,14 +4458,12 @@ fn bootstrap_render(
             ) {
                 return false;
             }
-            state.holes.push(hole_start);
-            state.holes.push(state.src.len());
             cursor = name_end;
             token = inc(next);
         } else if local != NONE {
             if !bootstrap_append_mapping(
                 inout state,
-                in template,
+                in template.as_slice(),
                 cursor,
                 start,
                 call_start,
@@ -4576,7 +4479,7 @@ fn bootstrap_render(
             push_decimal(inout fresh, local);
             if !bootstrap_append_mapping(
                 inout state,
-                in fresh,
+                in fresh.as_slice(),
                 0,
                 fresh.len(),
                 call_start,
@@ -4588,19 +4491,31 @@ fn bootstrap_render(
             cursor = end;
             token = inc(token);
         } else {
+            if !bootstrap_template_token(in template, start, end) {
+                return false;
+            }
             token = inc(token);
         }
     }
     bootstrap_append_mapping(
         inout state,
-        in template,
+        in template.as_slice(),
         cursor,
         template.len(),
         call_start,
         call_end,
         false
     )
-        && (!grouped || bootstrap_append_group(inout state, in ")", call_start, call_end))
+        && (!grouped
+            || bootstrap_append_mapping(
+                inout state,
+                in ")".as_bytes(),
+                0,
+                1,
+                call_start,
+                call_end,
+                false
+            ))
 }
 
 fn bootstrap_expand_raw(
@@ -4618,8 +4533,7 @@ fn bootstrap_expand_raw(
     let mut state = BootstrapState {
         src: ChunkSeq::new[u8](),
         mark: fresh_prefix(in source, in imports),
-        maps: ChunkSeq::new[u64](),
-        holes: ChunkSeq::new[u64]()
+        maps: ChunkSeq::new[u64]()
     };
     if source.len() > MAX_BYTES || n_imports(in imports) > MAX_STEPS {
         return Result::Err(limit(0, 0));
@@ -4666,14 +4580,20 @@ fn bootstrap_expand_raw(
         if start < cursor || end < start || serial >= MAX_STEPS {
             return Result::Err(diag(in "nested or excessive bootstrap sugar uses", start, end));
         }
-        if !bootstrap_append_mapping(inout state, in source, cursor, start, cursor, start, true) {
+        if !bootstrap_append_mapping(
+            inout state,
+            in source.as_slice(),
+            cursor,
+            start,
+            cursor,
+            start,
+            true
+        ) {
             return Result::Err(limit(start, end));
         }
         cursor = end;
         if kind == N_SUGAR_DECL {
-            let mut space = ChunkSeq::new[u8]();
-            space.push(32);
-            if !bootstrap_append_mapping(inout state, in space, 0, 1, start, end, false) {
+            if !bootstrap_append_mapping(inout state, in " ".as_bytes(), 0, 1, start, end, false) {
                 return Result::Err(limit(start, end));
             }
             continue;
@@ -4745,7 +4665,7 @@ fn bootstrap_expand_raw(
     }
     if !bootstrap_append_mapping(
         inout state,
-        in source,
+        in source.as_slice(),
         cursor,
         source.len(),
         cursor,
@@ -4765,14 +4685,38 @@ pub fn expand_bootstrap_module(
         Result::Ok(state) => state,
         Result::Err(problem) => return Result::Err(problem),
     };
-    if !bootstrap_template_safe(in expanded) {
-        return Result::Err(diag(
-            in "this sugar needs Stage 2 definition-site, effect or place metadata",
-            0,
-            0
-        ));
-    }
     Result::Ok(BootstrapSugarOutput { source: expanded.src, mappings: expanded.maps })
+}
+
+test {
+    fn test_bootstrap_tag_keeps_its_expression_precedence() -> bool {
+        let mut source = ChunkSeq::new[u8]();
+        cat(
+            inout source,
+            in "sugar yes: tag { rule (yes{}) => {true || false} } pub fn sample() -> bool { yes{} && false }"
+        );
+        let expanded = match expand_bootstrap_module(in source, in imports_none()) {
+            Result::Ok(output) => output,
+            Result::Err(_) => return false,
+        };
+        let suffix = "(true || false) && false }".as_bytes();
+        let end = expanded.source.len();
+        end >= suffix.len() && range_is(in expanded.source, sub(end, suffix.len()), end, in suffix)
+    }
+    fn test_bootstrap_single_block_is_not_parenthesized() -> bool {
+        let mut source = ChunkSeq::new[u8]();
+        cat(
+            inout source,
+            in "sugar word: tag { rule (word{}) => {{ if true {42} else {0} }} } pub fn sample() -> u64 { word{} }"
+        );
+        let expanded = match expand_bootstrap_module(in source, in imports_none()) {
+            Result::Ok(output) => output,
+            Result::Err(_) => return false,
+        };
+        let suffix = "{ if true {42} else {0} } }".as_bytes();
+        let end = expanded.source.len();
+        end >= suffix.len() && range_is(in expanded.source, sub(end, suffix.len()), end, in suffix)
+    }
 }
 
 // ---------------------------------------------------------------- words
