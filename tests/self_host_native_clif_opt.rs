@@ -35,6 +35,9 @@ const PORTED: &[(&str, u64)] = &[
 /// The package's answer word for a step it ran.
 const ANSWER_PORTED: u64 = 1;
 
+/// How many differing functions the differential prints.
+const MAX_REPORTED: usize = 6;
+
 /// Each step the package has ported must change at least this many
 /// functions over the corpus.
 const MIN_CHANGES_PER_STEP: usize = 1;
@@ -124,7 +127,7 @@ fn corpus_matches_native_clif_opt_steps() {
             compare_steps(f, &mut runs, &mut bad);
             if !bad.is_empty() {
                 bad_funcs += 1;
-                if bad_funcs <= 6 {
+                if bad_funcs <= MAX_REPORTED {
                     eprintln!("native clif opt: {} function {n}: {}", case.name, bad[0]);
                 }
             }
