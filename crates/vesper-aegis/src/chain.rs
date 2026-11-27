@@ -505,23 +505,54 @@ fn leaf_ec_key(leaf: &[u8], curve: Curve) -> Result<EcPublicKey, AttestError> {
     )
 }
 
+const PEM_PUBKEY_STACK_DER: usize = 256;
+
 /// Decode a PEM `PUBLIC KEY` holding an uncompressed P-256 or P-384 point.
 pub fn ec_public_key_from_pem(pem: &str) -> Result<EcPublicKey, AttestError> {
-    use rustls_pki_types::SubjectPublicKeyInfoDer;
-    use rustls_pki_types::pem::PemObject;
-    let der = SubjectPublicKeyInfoDer::from_pem_slice(pem.as_bytes()).map_err(|_| {
-        AttestError::UnexpectedKeyType {
-            what: "PKIX public key is not a PEM PUBLIC KEY",
+    let pem_bytes = pem.as_bytes();
+    let mut stack_der = [0u8; PEM_PUBKEY_STACK_DER];
+    let mut heap_der;
+    let res;
+    let der_slice: &[u8] = {
+        let r = crate::port::vesper::decode_pem_public_key(pem_bytes, &mut stack_der);
+        if (r & PEM_STATUS_MASK) == PEM_STATUS_TOO_SMALL {
+            heap_der = vec![0u8; (pem_bytes.len() * PEM_B64_NUM) / PEM_B64_DEN + PEM_B64_PAD];
+            res = crate::port::vesper::decode_pem_public_key(pem_bytes, &mut heap_der);
+            &heap_der
+        } else {
+            res = r;
+            &stack_der
         }
-    })?;
+    };
+    if (res & PEM_STATUS_MASK) != PEM_STATUS_OK {
+        return Err(AttestError::UnexpectedKeyType {
+            what: "PKIX public key is not a PEM PUBLIC KEY",
+        });
+    }
+    let der_len = (res >> PEM_STATUS_SHIFT) as usize;
     ec_key_from_spki(
-        der.as_ref(),
+        &der_slice[..der_len],
         None,
         "PKIX public key DER",
         "PKIX public key is not an EC key",
         "PKIX public key curve (P-256 or P-384 only)",
         "PKIX public key bit string",
     )
+}
+
+/// Benchmark entry point for `examples/abba.rs` (`pem_pubkey` workload).
+#[doc(hidden)]
+pub fn decode_pem_public_key_for_bench(pem: &str) -> Result<Vec<u8>, AttestError> {
+    let pem_bytes = pem.as_bytes();
+    let mut stack_der = [0u8; PEM_PUBKEY_STACK_DER];
+    let res = crate::port::vesper::decode_pem_public_key(pem_bytes, &mut stack_der);
+    if (res & PEM_STATUS_MASK) != PEM_STATUS_OK {
+        return Err(AttestError::UnexpectedKeyType {
+            what: "PKIX public key is not a PEM PUBLIC KEY",
+        });
+    }
+    let der_len = (res >> PEM_STATUS_SHIFT) as usize;
+    Ok(stack_der[..der_len].to_vec())
 }
 
 const PEM_STATUS_MASK: u64 = 7;
