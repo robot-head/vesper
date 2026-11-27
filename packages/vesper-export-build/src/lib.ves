@@ -22,9 +22,7 @@
 use @vesper/check-data::names::{Names};
 use @vesper/check-data::types::{TyKind, Types, display};
 use @vesper/check-data::util::{add, inc, inc32, n32, put_text_words, u32_at, u64_at, u8_at, w};
-use @vesper/check-data::world::{
-    Adt, Field, Generic, Variant, World, bounds_new, mode_of, set_by_symbol
-};
+use @vesper/check-data::world::{World, bounds_new, mode_of};
 use @vesper/check-layout::{L_ENUM, L_PRODUCT, L_SCALAR, Layouts, layout_of, layouts_new};
 use @vesper/check-names-packages::{
     AssembledModule, assemble_next_bytes, assembly_begin_bytes, assembly_metadata,
@@ -83,19 +81,6 @@ const LAYOUT_FAILED: u64 = 1;
 
 // `ffi_lowering::effect_name("")`: the prefix of a `.vsys` library's effect.
 const EFFECT_PREFIX: Str = "Ffi$";
-
-// The builtin declarations of the Rust checker (src/check.rs), whose
-// variant order the planner holds a library to.
-const OPTION: Str = "Option";
-const NONE_VARIANT: Str = "None";
-const SOME_VARIANT: Str = "Some";
-const RUNTIME_ERROR: Str = "RuntimeError";
-const DIVISION_BY_ZERO: Str = "DivisionByZero";
-const INDEX_OUT_OF_BOUNDS: Str = "IndexOutOfBounds";
-const ARITH_OVERFLOW: Str = "ArithOverflow";
-const TYPE_PARAM: Str = "T";
-const TUPLE_FIELD: Str = "0";
-const MODE_COPY: u8 = 0;
 
 // The root module, whose `// @export` lines are the directives.
 const ROOT_MODULE: Str = "/src/lib.ves";
@@ -303,71 +288,6 @@ impl Enc {
             row.push(wrapping_u64(widen_i64(field.offset)));
         }
     }
-}
-
-fn unit_variant(inout names: Names, inout world: World, in name: Str, named: bool) {
-    world
-        .variants
-        .push(Variant { name: names.intern(in name.as_bytes()), fa: 0, fc: 0, named: named });
-}
-
-fn declare(
-    inout names: Names,
-    inout world: World,
-    in name: Str,
-    ga: u32,
-    gn: u32,
-    va: u32,
-    is_enum: bool
-) {
-    let sym = names.intern(in name.as_bytes());
-    let vn = wrapping_sub(n32(world.variants.len()), va);
-    let index = n32(world.adts.len());
-    world.adts.push(Adt {
-        name: sym,
-        mode: MODE_COPY,
-        ga: ga,
-        gn: gn,
-        va: va,
-        vn: vn,
-        is_enum: is_enum,
-        tile: 0,
-        span_zero: false
-    });
-    set_by_symbol(inout world.by_name, sym, inc32(index));
-}
-
-// Replace Stage 2's builtin `Option`, `RuntimeError` and `ArithOverflow`
-// (collect.ves: `Some, None`; `ArithOverflow, IndexOutOfBounds,
-// DivisionByZero`; none) with the Rust checker's: `copy enum Option[T] {
-// None, Some(T) }`, `copy enum RuntimeError { DivisionByZero,
-// IndexOutOfBounds }` and `copy struct ArithOverflow {}`.
-fn rust_builtins(inout names: Names, inout types: Types, inout world: World) {
-    let t = names.intern(in TYPE_PARAM.as_bytes());
-    let ga = n32(world.generics.len());
-    world.generics.push(Generic { name: t, bound: 0, row: false });
-    let va = n32(world.variants.len());
-    unit_variant(inout names, inout world, NONE_VARIANT, false);
-    let fa = n32(world.fields.len());
-    world.fields.push(Field {
-        name: names.intern(in TUPLE_FIELD.as_bytes()),
-        ty: types.named0(t),
-        modality: 0
-    });
-    world.variants.push(Variant {
-        name: names.intern(in SOME_VARIANT.as_bytes()),
-        fa: fa,
-        fc: 1,
-        named: false
-    });
-    declare(inout names, inout world, OPTION, ga, 1, va, true);
-    let rva = n32(world.variants.len());
-    unit_variant(inout names, inout world, DIVISION_BY_ZERO, false);
-    unit_variant(inout names, inout world, INDEX_OUT_OF_BOUNDS, false);
-    declare(inout names, inout world, RUNTIME_ERROR, 0, 0, rva, true);
-    let ova = n32(world.variants.len());
-    unit_variant(inout names, inout world, ARITH_OVERFLOW, true);
-    declare(inout names, inout world, ARITH_OVERFLOW, 0, 0, ova, false);
 }
 
 // Whether name `a` sorts before name `b` (byte order, as Rust's
@@ -592,9 +512,9 @@ pub fn export_plan_input(
     }
     let fns = cp.fns;
     let params = cp.params;
-    let mut names = cp.names;
-    let mut types = cp.types;
-    let mut world = cp.world;
+    let names = cp.names;
+    let types = cp.types;
+    let world = cp.world;
     // Stage 2 declares no `Box` (fip.rs `box_prelude`), so a layout that
     // holds one would differ from Rust's.
     for ti in 0..types.nodes.len() {
@@ -603,7 +523,6 @@ pub fn export_plan_input(
             return declined(DECLINE_BOX);
         }
     }
-    rust_builtins(inout names, inout types, inout world);
     let mut e = Enc {
         names: names,
         types: types,
