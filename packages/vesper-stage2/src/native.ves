@@ -5,9 +5,9 @@ use @vesper/hybrid-native-backend::elf::{x86_text_object};
 use @vesper/hybrid-native-backend::scalar::{
     ADD, AND, BLOCK_LABEL, BLOCK_RETURN, BRANCH_BLOCK, CALL, CALL_ARGUMENT, COMPARE,
     COMPARE_IMMEDIATE, CONSTANT, EQUAL, HEADER_WORDS, JUMP_LABEL, MAX_ARGUMENTS, MUL, NOT_EQUAL,
-    NO_VALUE, OR, RECORD_WORDS, RETURN_VALUE, SIGNED_GREATER, SIGNED_GREATER_EQUAL, SIGNED_LESS,
-    SIGNED_LESS_EQUAL, STACK_LOAD, STACK_SLOT, STACK_STORE_QWORD, SUB, UNSIGNED_GREATER,
-    UNSIGNED_GREATER_EQUAL, UNSIGNED_LESS, UNSIGNED_LESS_EQUAL, XOR, encode_block
+    NO_VALUE, NOT, OR, RECORD_WORDS, RETURN_VALUE, SIGNED_GREATER, SIGNED_GREATER_EQUAL,
+    SIGNED_LESS, SIGNED_LESS_EQUAL, STACK_LOAD, STACK_SLOT, STACK_STORE_QWORD, SUB, TRUNCATE,
+    UNSIGNED_GREATER, UNSIGNED_GREATER_EQUAL, UNSIGNED_LESS, UNSIGNED_LESS_EQUAL, XOR, encode_block
 };
 use @vesper/hybrid-native-backend::x86_64::{BYTE_BITS, QWORD_BITS};
 use @vesper/place-ir::{BlockRow, FnRow, InstRow, Lit, Op, Pat, Tag, Term};
@@ -244,6 +244,10 @@ fn is_integer(kind: u8) -> bool {
     kind == ScalarKind::Signed || kind == ScalarKind::Unsigned
 }
 
+fn is_abi_scalar(kind: u8) -> bool {
+    is_integer(kind) || kind == ScalarKind::Bool
+}
+
 fn scalar_kind(in low: L, ty: u32) -> u8 {
     if ty == low.ctx.types.unit {
         return ScalarKind::Unit;
@@ -270,14 +274,17 @@ fn sysv_signature(in low: L, f: FnR) -> bool {
         || f.generic_count != 0
         || f.ext_count != 0
         || f.param_count > MAX_ARGUMENTS
-        || !is_integer(scalar_kind(in low, f.result))
+        || !is_abi_scalar(scalar_kind(in low, f.result))
         || f.effects != low.ctx.types.empty_row
     {
         return false;
     }
     for index in 0..f.param_count {
         let p = low.ast.param(add(f.param_start, index));
-        if p.proj_count != 0 || p.pass == TyPass::Inout || !is_integer(scalar_kind(in low, p.ty)) {
+        if p.proj_count != 0
+            || p.pass == TyPass::Inout
+            || !is_abi_scalar(scalar_kind(in low, p.ty))
+        {
             return false;
         }
     }
@@ -763,6 +770,11 @@ fn lower_unary(in low: L, at: u64, kind: u8, block: u64, inout m: Function) -> u
         && low.ctx.names.spells(symbol, in "!".as_bytes())
     {
         m.record(COMPARE_IMMEDIATE, value, 0, EQUAL)
+    } else if is_integer(kind)
+        && kind == operand_kind
+        && low.ctx.names.spells(symbol, in "~".as_bytes())
+    {
+        m.record(NOT, value, 0, QWORD_BITS)
     } else if is_integer(operand_kind)
         && ((kind == ScalarKind::Signed
             && low.ctx.names.spells(symbol, in "wrapping_i64".as_bytes()))
@@ -833,7 +845,7 @@ fn lower_binary(
         if compare != NO_VALUE {
             return m.record(COMPARE, lhs, rhs, compare);
         }
-    } else if kind == operand_kind {
+    } else if is_integer(kind) && kind == operand_kind {
         let op = if range_step {
             ADD
         } else {
@@ -909,7 +921,7 @@ fn lower_block(
             lower_unary(in low, at, kind, block, inout m)
         } else if inst.op == Op::Binary && inst.n == BINARY_WORDS {
             lower_binary(in low, at, kind, block, range_increment(in low, b, index, inst), inout m)
-        } else if inst.op == Op::Call && is_integer(kind) {
+        } else if inst.op == Op::Call && is_abi_scalar(kind) {
             lower_call(in low, inst, block, inout m, inout graph)
         } else {
             return false;
@@ -1057,7 +1069,15 @@ fn lower_function(
         }
         if block == 0 {
             for arg in 0..f.param_count {
-                if !m.define(arg, block, arg) {
+                let param = low.ast.param(add(f.param_start, arg));
+                // SysV specifies the low byte of a Boolean argument. Consumers
+                // of machine words must ignore the unspecified upper bits.
+                let value = if scalar_kind(in low, param.ty) == ScalarKind::Bool {
+                    m.record(TRUNCATE, arg, QWORD_BITS, BYTE_BITS)
+                } else {
+                    arg
+                };
+                if !m.define(arg, block, value) {
                     return ChunkSeq::new[u8]();
                 }
             }
