@@ -1,4 +1,4 @@
-use @vesper/check-data::types::{TyKind, TyPass};
+use @vesper/check-data::types::{TyKind, TyMode, TyPass};
 use @vesper/check-data::util::{add, inc, n32, u32_at, w};
 use @vesper/check-data::world::{set_by_symbol};
 use @vesper/hybrid-native-backend::elf::{x86_text_object};
@@ -30,6 +30,9 @@ const LITERAL_WORDS: u64 = 3;
 const BINARY_WORDS: u64 = 3;
 const UNARY_WORDS: u64 = 2;
 const EMPTY_TUPLE_WORDS: u64 = 1;
+const DATA_FIELD_COUNT: u64 = 1;
+const DATA_HEADER_WORDS: u64 = 2;
+const DATA_FIELD_WORDS: u64 = 2;
 const TUPLE_PATTERN_COUNT: u64 = BIND_NAME;
 const ASCII_ZERO: u8 = 48;
 const DECIMAL_BASE: u64 = 10;
@@ -99,6 +102,7 @@ enum ScalarKind: _ {
     F32 = 13,
     F64 = 14,
     Tuple = 15,
+    Struct = 16,
 }
 
 struct CallGraph {
@@ -143,7 +147,7 @@ struct Function {
     next_label: u64,
     bindings: ChunkSeq[u32],
     binding_fields: ChunkSeq[u32],
-    tuple_instructions: ChunkSeq[u64],
+    aggregate_instructions: ChunkSeq[u64],
     mutable_slots: ChunkSeq[u32],
     mutable_bytes: u64,
     home_bytes: u64,
@@ -426,8 +430,17 @@ fn scalar_kind(in low: L, ty: u32) -> u8 {
     } else if node.name == k.f64_ {
         ScalarKind::F64
     } else {
-        ScalarKind::Unsupported
+        let adt = low.ctx.world.adt(low.ctx.world.lookup(node.name));
+        if adt.vn == 1 && adt.gn == 0 && !adt.is_enum && adt.mode == TyMode::Copy {
+            ScalarKind::Struct
+        } else {
+            ScalarKind::Unsupported
+        }
     }
+}
+
+fn is_aggregate(kind: u8) -> bool {
+    kind == ScalarKind::Tuple || kind == ScalarKind::Struct
 }
 
 fn sysv_signature(in low: L, f: FnR) -> bool {
@@ -473,18 +486,18 @@ fn argument_value(in low: L, f: FnR, root: u32) -> u64 {
     NO_VALUE
 }
 
-// A flat local tuple is a collection of SSA values. Follow whole-value reads
+// A flat local aggregate is a collection of SSA values. Follow whole-value reads
 // back to the construction so a field needs only its own scalar home.
-fn tuple_operands(in low: L, id: u64, in m: Function) -> u64 {
+fn aggregate_definition(in low: L, id: u64, in m: Function) -> u64 {
     let mut value = id;
     loop {
-        let definition = m.tuple_instructions.try_get(value).unwrap_or(NO_VALUE);
+        let definition = m.aggregate_instructions.try_get(value).unwrap_or(NO_VALUE);
         if definition == NO_VALUE {
             return NO_VALUE;
         }
         let inst = low.program.inst(definition);
-        if inst.op == Op::Tuple && inst.n == inc(low.program.op(inst.a)) {
-            return inst.a;
+        if inst.op == Op::Tuple || inst.op == Op::Data {
+            return definition;
         }
         if inst.op != Op::Read
             || inst.n != PLAIN_READ_WORDS
@@ -510,12 +523,66 @@ fn tuple_operands(in low: L, id: u64, in m: Function) -> u64 {
     }
 }
 
+fn tuple_operands(in low: L, value: u64, in m: Function) -> u64 {
+    let def = aggregate_definition(in low, value, in m);
+    if def == NO_VALUE {
+        return NO_VALUE;
+    }
+    let inst = low.program.inst(def);
+    if inst.op != Op::Tuple || inst.n != inc(low.program.op(inst.a)) {
+        return NO_VALUE;
+    }
+    inst.a
+}
+
 fn tuple_member(in low: L, value: u64, field: u64, in m: Function) -> u64 {
     let at = tuple_operands(in low, value, in m);
     if at == NO_VALUE || field >= low.program.op(at) {
         return NO_VALUE;
     }
     add(m.arguments, low.program.op(add(inc(at), field)))
+}
+
+fn struct_member(in low: L, inst: InstRow, name: u32) -> u64 {
+    let count = low.program.op(add(inst.a, DATA_FIELD_COUNT));
+    if inst.op != Op::Data
+        || inst.n != add(DATA_HEADER_WORDS, wrapping_mul(count, DATA_FIELD_WORDS))
+    {
+        return NO_VALUE;
+    }
+    let mut at = add(inst.a, DATA_HEADER_WORDS);
+    for _ in 0..count {
+        if n32(low.program.op(at)) == name {
+            return low.program.op(inc(at));
+        }
+        at = add(at, DATA_FIELD_WORDS);
+    }
+    NO_VALUE
+}
+
+fn flat_struct(in low: L, inst: InstRow, in m: Function) -> bool {
+    let node = low.ctx.types.node(inst.ty);
+    let adt = low.ctx.world.adt(low.ctx.world.lookup(node.name));
+    let variant = low.ctx.world.variant(w(adt.va));
+    let count = w(variant.fc);
+    if n32(low.program.op(inst.a)) != adt.name
+        || low.program.op(add(inst.a, DATA_FIELD_COUNT)) != count
+        || inst.n != add(DATA_HEADER_WORDS, wrapping_mul(count, DATA_FIELD_WORDS))
+    {
+        return false;
+    }
+    for i in 0..count {
+        let field = low.ctx.world.field(add(w(variant.fa), i));
+        let kind = scalar_kind(in low, field.ty);
+        let value = struct_member(in low, inst, field.name);
+        if (abi_width(kind) == 0 && kind != ScalarKind::Unit)
+            || value == NO_VALUE
+            || m.kind(value) != kind
+        {
+            return false;
+        }
+    }
+    true
 }
 
 fn place_value(in low: L, f: FnR, root: u32, in m: Function) -> u64 {
@@ -540,14 +607,28 @@ fn read_source(in low: L, f: FnR, at: u64, in m: Function) -> u64 {
     if count == 0 {
         return source;
     }
+    let kind = m.value_kind(source);
     if count != 1
-        || m.value_kind(source) != ScalarKind::Tuple
+        || !is_aggregate(kind)
         || m.mutable_offset(name) != NO_VALUE
         || low.program.op(add(at, READ_PASS)) == TyPass::Inout
     {
         return NO_VALUE;
     }
     let member = low.program.path_name(path, 0);
+    let value = wrapping_sub(source, m.arguments);
+    if kind == ScalarKind::Struct {
+        let def = aggregate_definition(in low, value, in m);
+        if def == NO_VALUE {
+            return NO_VALUE;
+        }
+        let field = struct_member(in low, low.program.inst(def), member);
+        return if field == NO_VALUE {
+            NO_VALUE
+        } else {
+            add(m.arguments, field)
+        };
+    }
     let length = low.ctx.names.size(member);
     if length == 0 {
         return NO_VALUE;
@@ -560,7 +641,7 @@ fn read_source(in low: L, f: FnR, at: u64, in m: Function) -> u64 {
         }
         field = add(wrapping_mul(field, DECIMAL_BASE), digit);
     }
-    tuple_member(in low, wrapping_sub(source, m.arguments), field, in m)
+    tuple_member(in low, value, field, in m)
 }
 
 fn record_binding(name: u32, value: u64, inout m: Function) -> bool {
@@ -995,16 +1076,16 @@ fn plan_types(in low: L, row: FnRow, inout m: Function) -> bool {
     true
 }
 
-fn plan_tuples(in low: L, row: FnRow, inout m: Function) {
-    m.tuple_instructions.resize(m.kinds.len(), NO_VALUE);
+fn plan_aggregates(in low: L, row: FnRow, inout m: Function) {
+    m.aggregate_instructions.resize(m.kinds.len(), NO_VALUE);
     for layout in 0..m.blocks.len() {
         let block = m.blocks.try_get(layout).unwrap_or(0);
         let b = low.program.block(add(row.b0, block));
         for index in b.i0..add(b.i0, b.ic) {
             let inst = low.program.inst(index);
             let value = w(inst.dest);
-            if m.kind(value) == ScalarKind::Tuple {
-                let _ = m.tuple_instructions.try_set(value, index);
+            if is_aggregate(m.kind(value)) {
+                let _ = m.aggregate_instructions.try_set(value, index);
             }
         }
     }
@@ -1079,7 +1160,7 @@ fn pack_homes(in low: L, row: FnRow, inout m: Function) {
 fn plan_homes(in low: L, f: FnR, row: FnRow, inout m: Function) -> bool {
     let mut value_count: u64 = 0;
     let mut has_place_actions = false;
-    let mut has_tuples = false;
+    let mut has_aggregates = false;
     for block in 0..row.bc {
         let b = low.program.block(add(row.b0, block));
         let reachable = m.label(block) != NO_VALUE;
@@ -1094,7 +1175,9 @@ fn plan_homes(in low: L, f: FnR, row: FnRow, inout m: Function) -> bool {
                 value_count = inc(dest);
             }
             if reachable {
-                has_tuples = has_tuples || (inst.op == Op::Tuple && inst.n > EMPTY_TUPLE_WORDS);
+                has_aggregates = has_aggregates
+                    || (inst.op == Op::Tuple && inst.n > EMPTY_TUPLE_WORDS)
+                    || inst.op == Op::Data;
                 if inst.op == Op::Bind
                     && !is_match_literal_binding(in low, row, b, index, inst)
                     && !collect_binding(in low, inst, inout m)
@@ -1113,8 +1196,8 @@ fn plan_homes(in low: L, f: FnR, row: FnRow, inout m: Function) -> bool {
     {
         return false;
     }
-    if has_tuples {
-        plan_tuples(in low, row, inout m);
+    if has_aggregates {
+        plan_aggregates(in low, row, inout m);
     }
     if m.blocks.len() == 1 {
         return block_parameter(in low, low.program.block(row.b0)) == NO_VALUE;
@@ -1127,7 +1210,7 @@ fn plan_homes(in low: L, f: FnR, row: FnRow, inout m: Function) -> bool {
         let b = low.program.block(add(row.b0, block));
         let param = block_parameter(in low, b);
         if param != NO_VALUE {
-            if m.kind(param) == ScalarKind::Tuple {
+            if is_aggregate(m.kind(param)) {
                 return false;
             }
             let id = add(f.param_count, param);
@@ -1156,7 +1239,7 @@ fn plan_homes(in low: L, f: FnR, row: FnRow, inout m: Function) -> bool {
                 let kind = m.value_kind(value);
                 if m.mutable_offset(name) == NO_VALUE
                     && kind != ScalarKind::Unit
-                    && kind != ScalarKind::Tuple
+                    && !is_aggregate(kind)
                     && !m.use_in(value, block)
                 {
                     return false;
@@ -1968,6 +2051,12 @@ fn lower_block(
             }
             continue;
         }
+        if inst.op == Op::Data {
+            if kind != ScalarKind::Struct || !flat_struct(in low, inst, in m) {
+                return false;
+            }
+            continue;
+        }
         let value = if inst.op == Op::Const && inst.n == LITERAL_WORDS {
             lower_literal(in low, at, kind, inout m)
         } else if inst.op == Op::Read
@@ -1990,8 +2079,8 @@ fn lower_block(
             if kind == ScalarKind::Unit {
                 continue;
             }
-            if kind == ScalarKind::Tuple {
-                if tuple_operands(in low, w(inst.dest), in m) == NO_VALUE {
+            if is_aggregate(kind) {
+                if aggregate_definition(in low, w(inst.dest), in m) == NO_VALUE {
                     return false;
                 }
                 continue;
@@ -2262,7 +2351,7 @@ fn lower_function(
         next_label: 0,
         bindings: ChunkSeq::new[u32](),
         binding_fields: ChunkSeq::new[u32](),
-        tuple_instructions: ChunkSeq::new[u64](),
+        aggregate_instructions: ChunkSeq::new[u64](),
         mutable_slots: ChunkSeq::new[u32](),
         mutable_bytes: 0,
         home_bytes: 0
