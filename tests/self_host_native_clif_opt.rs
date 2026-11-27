@@ -15,11 +15,13 @@
 mod check_harness;
 #[path = "common/clif_words.rs"]
 mod clif_words;
+#[path = "common/vector_programs.rs"]
+mod vector_programs;
 
 use check_harness::*;
 use cranelift_codegen::ir;
 use std::sync::OnceLock;
-use vesper::{native, native_clif_opt};
+use vesper::{check, native, native_clif_opt, parser};
 
 /// The step codes of the package (`STEP_*`), by `STEPS` name; 0 for a step
 /// not ported yet.
@@ -34,6 +36,9 @@ const PORTED: &[(&str, u64)] = &[
     ("fold_trivial_arith_and_bool_extends", 8),
     ("split_join_slots", 9),
     ("promote_slots", 10),
+    ("vector_registers", 11),
+    ("remove_dead", 12),
+    ("sink_slot_inits", 13),
     ("sink_compares", 32),
     ("thread_branches", 33),
     ("thread_decided_branches", 34),
@@ -116,6 +121,23 @@ fn compare_steps(f: &ir::Function, runs: &mut Runs, bad: &mut Vec<String>) {
     }
 }
 
+/// The vector programs added to the corpus, by name.
+const VECTOR_PROGRAMS: &[(&str, &str)] = &[
+    ("vector acc4", vector_programs::ACC4),
+    ("vector tick", vector_programs::TICK),
+    ("vector ramp", vector_programs::RAMP),
+    ("vector sums", vector_programs::SUMS),
+];
+
+/// The checked world of a vector program.
+fn vector_world(source: &str) -> check::World {
+    let p = parser::parse(source);
+    assert!(p.diagnostics.is_empty(), "{:?}", p.diagnostics);
+    let c = check::check(&p.module);
+    assert!(c.diagnostics.is_empty(), "{:#?}", c.diagnostics);
+    c.world
+}
+
 fn stride() -> usize {
     std::env::var("NATIVE_CLIF_OPT_STRIDE")
         .ok()
@@ -132,10 +154,19 @@ fn corpus_matches_native_clif_opt_steps() {
         ran: vec![0; PORTED.len()],
         changed: vec![0; PORTED.len()],
     };
-    for case in cases.iter().step_by(stride()) {
-        let (_, captured) = native_clif_opt::capture(|| {
-            native::object_with_options(&case.world, "main", None, true)
-        });
+    // The corpus mains have no vector slots; the vector programs do.
+    let vectors: Vec<(String, check::World)> = VECTOR_PROGRAMS
+        .iter()
+        .map(|&(name, source)| (name.to_string(), vector_world(source)))
+        .collect();
+    let worlds = cases
+        .iter()
+        .step_by(stride())
+        .map(|case| (case.name.as_str(), &case.world))
+        .chain(vectors.iter().map(|(name, world)| (name.as_str(), world)));
+    for (name, world) in worlds {
+        let (_, captured) =
+            native_clif_opt::capture(|| native::object_with_options(world, "main", None, true));
         for (n, f) in captured.iter().enumerate() {
             funcs += 1;
             let mut bad = Vec::new();
@@ -143,7 +174,7 @@ fn corpus_matches_native_clif_opt_steps() {
             if !bad.is_empty() {
                 bad_funcs += 1;
                 if bad_funcs <= MAX_REPORTED {
-                    eprintln!("native clif opt: {} function {n}: {}", case.name, bad[0]);
+                    eprintln!("native clif opt: {name} function {n}: {}", bad[0]);
                 }
             }
         }
@@ -151,7 +182,7 @@ fn corpus_matches_native_clif_opt_steps() {
     eprintln!(
         "native clif opt corpus: {bad_funcs} differ over {funcs} functions of {} worlds; \
          steps ran {:?}, changed {:?}; {:.1?}",
-        cases.len().div_ceil(stride()),
+        cases.len().div_ceil(stride()) + VECTOR_PROGRAMS.len(),
         runs.ran,
         runs.changed,
         start.elapsed()

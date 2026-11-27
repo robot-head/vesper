@@ -13,9 +13,12 @@
 // branches.ves (#2423): the branch-threading steps. folds.ves (#2423):
 // canonicalize_imm_ops, fold_load_store_offsets, cse_dom_pure. Part 3:
 // extends.ves, fold_narrow_extends and fold_trivial_arith_and_bool_extends;
-// slots.ves, split_join_slots and promote_slots.
+// slots.ves, split_join_slots and promote_slots. Part 4: vector.ves,
+// vector_registers; cleanup.ves, remove_dead and sink_slot_inits.
 
 use self::extends::{fold_narrow_extends, fold_trivial_arith_and_bool_extends};
+use self::vector::{vector_registers};
+use self::cleanup::{remove_dead, sink_slot_inits};
 use self::slots::{promote_slots, split_join_slots};
 use self::folds::{canonicalize_imm_ops, cse_dom_pure, fold_load_store_offsets};
 use self::branches::{
@@ -41,6 +44,9 @@ pub const STEP_FOLD_NARROW_EXTENDS: u64 = 7;
 pub const STEP_FOLD_TRIVIAL_ARITH_AND_BOOL_EXTENDS: u64 = 8;
 pub const STEP_SPLIT_JOIN_SLOTS: u64 = 9;
 pub const STEP_PROMOTE_SLOTS: u64 = 10;
+pub const STEP_VECTOR_REGISTERS: u64 = 11;
+pub const STEP_REMOVE_DEAD: u64 = 12;
+pub const STEP_SINK_SLOT_INITS: u64 = 13;
 // 32 up: the branch-threading steps of #2423 (branches.ves).
 pub const STEP_SINK_COMPARES: u64 = 32;
 pub const STEP_THREAD_BRANCHES: u64 = 33;
@@ -649,6 +655,9 @@ pub fn clif_opt_words(in input: Str) -> ChunkSeq[u64] {
         || step == STEP_FOLD_TRIVIAL_ARITH_AND_BOOL_EXTENDS
         || step == STEP_SPLIT_JOIN_SLOTS
         || step == STEP_PROMOTE_SLOTS
+        || step == STEP_VECTOR_REGISTERS
+        || step == STEP_REMOVE_DEAD
+        || step == STEP_SINK_SLOT_INITS
         || step == STEP_SINK_COMPARES
         || step == STEP_THREAD_BRANCHES
         || step == STEP_THREAD_DECIDED_BRANCHES
@@ -682,6 +691,12 @@ pub fn clif_opt_words(in input: Str) -> ChunkSeq[u64] {
         split_join_slots(inout f);
     } else if step == STEP_PROMOTE_SLOTS {
         promote_slots(inout f);
+    } else if step == STEP_VECTOR_REGISTERS {
+        vector_registers(inout f);
+    } else if step == STEP_REMOVE_DEAD {
+        remove_dead(inout f);
+    } else if step == STEP_SINK_SLOT_INITS {
+        sink_slot_inits(inout f);
     } else if step == STEP_SINK_COMPARES {
         sink_compares(inout f);
     } else if step == STEP_THREAD_BRANCHES {

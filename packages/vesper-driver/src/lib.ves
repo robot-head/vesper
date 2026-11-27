@@ -1029,9 +1029,10 @@ pub use self::windows_link::{
 pub use self::diagnostics::{
     LineCol, demangle_text, diagnostics_json, diagnostics_json_words, format_manifest_error,
     format_raw_diagnostics, format_raw_diagnostics_words, format_unlocated_error, line_col_at,
-    package_diagnostics_json, package_diagnostics_json_words, package_error_lines_words,
-    remap_diagnostic_span, remap_diagnostics_json_words, remap_diagnostics_stream,
-    source_map_file_at, source_map_helpers_words
+    localize_diagnostics_json_words, localize_diagnostics_stream, package_diagnostics_json,
+    package_diagnostics_json_words, package_error_lines_words, remap_diagnostic_span,
+    remap_diagnostics_json_words, remap_diagnostics_stream, source_map_file_at,
+    source_map_helpers_words
 };
 
 pub fn record_format() -> u64 {
