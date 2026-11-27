@@ -763,20 +763,11 @@ impl Session {
         };
         // Validation covers every supplied span before optional presentation
         // fields are filtered for the client's publication capabilities.
-        for diagnostic in &mut diagnostics {
-            if let Some(object) = diagnostic.as_object_mut() {
-                if !self.diagnostic_related {
-                    object.remove("relatedInformation");
-                }
-                if !self.diagnostic_help_data
-                    && object
-                        .get("data")
-                        .is_some_and(|data| data.get("help").is_some())
-                {
-                    object.remove("data");
-                }
-            }
-        }
+        publication_filter(
+            &mut diagnostics,
+            self.diagnostic_related,
+            self.diagnostic_help_data,
+        );
         let mut metadata = json!({"status":status,"kind":kind,
             "source_blake3":hash_text(analysis.source_identity().blake3())});
         if let Some(recovery) = recovery {
@@ -1081,6 +1072,139 @@ fn diagnostic_payload(
             ))
         }
     }
+}
+/// Removes the optional fields of published diagnostics that the client
+/// did not negotiate: related information, and `data` carrying help.
+fn publication_filter(diagnostics: &mut [Value], related: bool, help_data: bool) {
+    for diagnostic in diagnostics {
+        if let Some(object) = diagnostic.as_object_mut() {
+            if !related {
+                object.remove("relatedInformation");
+            }
+            if !help_data
+                && object
+                    .get("data")
+                    .is_some_and(|data| data.get("help").is_some())
+            {
+                object.remove("data");
+            }
+        }
+    }
+}
+/// The tags of `diagnostic_payload_words`' failure kinds.
+#[doc(hidden)]
+pub mod payload_tags {
+    pub const PARSE: u64 = 0;
+    pub const SEMANTIC: u64 = 1;
+    pub const RESOURCE: u64 = 2;
+    pub const UNSUPPORTED: u64 = 3;
+}
+/// `diagnostic_payload` and the publication filter as the Vesper port
+/// answers them (#1828 part 13b, `@vesper/lsp-publish`), `rounds` times: the JSON object
+/// `{"diagnostics":[..],"status":..,"kind":..}`, or `E <message>`.
+#[doc(hidden)]
+pub fn diagnostic_payload_answer(
+    uri: &str,
+    index: &vesper_span::LineIndex,
+    failure: &AnalysisFailure,
+    related: bool,
+    help_data: bool,
+    rounds: u64,
+) -> String {
+    let mut answer = String::new();
+    for _ in 0..rounds {
+        answer = match diagnostic_payload(uri, index, failure) {
+            Ok((mut diagnostics, status, kind)) => {
+                publication_filter(&mut diagnostics, related, help_data);
+                json!({"diagnostics":diagnostics,"status":status,"kind":kind}).to_string()
+            }
+            Err(error) => format!("E {}", error.message),
+        };
+    }
+    answer
+}
+/// The words the port's `lsp_diagnostic_payload` reads: `rounds`; the
+/// diagnostics limits; the record sizes the budgets charge; the publication flags; the URI and source
+/// text; then the failure: its tag (`payload_tags`) and either the reason
+/// or the diagnostics (code, message, help presence and text, primary
+/// span, then each related label's span and message).
+#[doc(hidden)]
+pub fn diagnostic_payload_words(
+    uri: &str,
+    text: &str,
+    failure: &AnalysisFailure,
+    related: bool,
+    help_data: bool,
+    rounds: u64,
+) -> Vec<u8> {
+    fn word(out: &mut Vec<u8>, w: usize) {
+        out.extend((w as u64).to_le_bytes());
+    }
+    fn text_of(out: &mut Vec<u8>, s: &str) {
+        word(out, s.len());
+        out.extend(s.as_bytes());
+    }
+    fn span_limits(out: &mut Vec<u8>, l: vesper_span::Limits) {
+        for w in [
+            l.max_source_bytes,
+            l.max_lines,
+            l.max_metadata_bytes,
+            l.max_work,
+            l.max_edits,
+            l.max_output_bytes,
+            l.max_diagnostics,
+            l.max_labels,
+            l.max_fixes,
+            l.max_text_bytes,
+        ] {
+            word(out, w);
+        }
+    }
+    let mut out = rounds.to_le_bytes().to_vec();
+    let limits = vesper_diagnostics::Limits::default();
+    span_limits(&mut out, limits.span);
+    word(&mut out, limits.max_name_bytes);
+    for size in [
+        size_of::<vesper_span::DiagnosticData>(),
+        size_of::<vesper_span::Label>(),
+        size_of::<Value>(),
+    ] {
+        word(&mut out, size);
+    }
+    word(&mut out, usize::from(related));
+    word(&mut out, usize::from(help_data));
+    text_of(&mut out, uri);
+    text_of(&mut out, text);
+    let tag = match failure {
+        AnalysisFailure::Parse { .. } => payload_tags::PARSE,
+        AnalysisFailure::Semantic { .. } => payload_tags::SEMANTIC,
+        AnalysisFailure::Resource { .. } => payload_tags::RESOURCE,
+        AnalysisFailure::Unsupported { .. } => payload_tags::UNSUPPORTED,
+    };
+    out.extend(tag.to_le_bytes());
+    match failure {
+        AnalysisFailure::Resource { reason } | AnalysisFailure::Unsupported { reason } => {
+            text_of(&mut out, reason);
+        }
+        AnalysisFailure::Parse { diagnostics } | AnalysisFailure::Semantic { diagnostics } => {
+            word(&mut out, diagnostics.len());
+            for d in diagnostics {
+                text_of(&mut out, &d.code);
+                text_of(&mut out, &d.message);
+                word(&mut out, usize::from(d.help.is_some()));
+                text_of(&mut out, d.help.as_deref().unwrap_or(""));
+                word(&mut out, d.span.start);
+                word(&mut out, d.span.end);
+                word(&mut out, d.related.len());
+                for label in &d.related {
+                    word(&mut out, label.span.start);
+                    word(&mut out, label.span.end);
+                    text_of(&mut out, &label.message);
+                }
+            }
+        }
+    }
+    out
 }
 fn unavailable_warning(
     index: &vesper_span::LineIndex,

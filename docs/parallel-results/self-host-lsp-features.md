@@ -1260,3 +1260,60 @@ build, source words written outside the timing.
 | 35.8 µs | 39.7 µs | **1.11x** |
 
 Rust lines deleted: 0; the lint driver still lexes in Rust.
+
+# Part 13b: the publishDiagnostics payload (#1828)
+
+`Session::diagnostics` in `src/lsp/session.rs` publishes a failed analysis
+through `diagnostic_payload`. A parse or semantic failure is rendered with
+vesper-diagnostics (`prepare`, then `to_lsp`). A rendering error, or a
+resource or unsupported failure, becomes one analysis-unavailable warning
+at the origin. The fields the client did not negotiate are then removed.
+Part 13b ports all of this as `lsp_diagnostic_payload` in a new package,
+`@vesper/lsp-publish` (`packages/vesper-lsp-publish`), over the Vesper
+port of vesper-diagnostics. It is its own package because
+`@vesper/diagnostics` and `@vesper/span` both declare the `Resource`
+variants, and enum variants share one namespace across packages.
+
+## What changed
+
+- `src/lsp/session.rs`: the publication filter is the free function
+  `publication_filter`. The hidden `diagnostic_payload_answer`
+  (Rust's payload as JSON), `diagnostic_payload_words` (the failure as the
+  port reads it) and `payload_tags` are added and re-exported from
+  `src/lsp.rs`.
+- `packages/vesper-lsp-publish` (new): `payload.ves` (encodings, error
+  texts, warning, filter) and `json.ves` (string escapes, packing).
+- `tests/self_host_lsp_features.rs`: `diagnostic_payload_matches_rust` and
+  the ignored `diagnostic_payload_speed`.
+- `tests/wasm_seed_package_io.rs`: the package is in `COMPILER_PACKAGES`.
+- `BUILD.bazel`: the test's data includes the package and the
+  vesper-diagnostics crate files.
+
+## Differential
+
+161 failures, each under all four combinations of the two publication
+capabilities (644 answers), compared as parsed JSON. The failures come
+from the corpus analyses (51 parse and 19 semantic payloads, 61 resource
+and 7 unsupported refusals) and from hand-built failures that reach every
+rendering refusal: spans out of bounds, reversed, inside a character or a
+CRLF, empty codes and messages, the diagnostic, label and text budgets,
+help with escapes, related labels, empty, control-character and long URIs
+(11 `diagnostic_metadata` and 12 `invalid_compiler_span` warnings).
+0 diffs.
+
+## Numbers
+
+8 payloads per call with both capabilities off, so the filter runs. Best
+of five ABBA rounds per failure, release build. The words are written
+outside the timing. The port's JSON is parsed into a serde `Value` inside
+the timing, as the session would.
+
+| Rust | Vesper | Ratio |
+|--:|--:|--:|
+| 16.0 µs | 5.1 µs | **0.32x** |
+
+The first version ran at 4.79x. It copied the source into a `String` each
+round and filtered byte by byte. Lending the source as a `Str` slice of the
+input, and skipping strings with `find_either` while copying runs as
+slices, brought it to 0.32x. Rust lines deleted: 0; the session does not
+call the port yet.

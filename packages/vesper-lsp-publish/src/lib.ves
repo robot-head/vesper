@@ -1,0 +1,19 @@
+// @vesper/lsp-publish: the textDocument/publishDiagnostics payload of
+// `vesper lsp` for a failed analysis (src/lsp/session.rs
+// `diagnostic_payload` and the publication filter), #1828 part 13b.
+use self::payload::{diagnostic_payload};
+use self::json::{pack};
+
+const WORD_BYTES: u64 = 8;
+
+// `session::diagnostic_payload_answer`, `rounds` times over the words of
+// `session::diagnostic_payload_words`.
+pub fn lsp_diagnostic_payload(in input: Str) -> ChunkSeq[u64] {
+    let b = input.as_bytes();
+    let rounds = b.try_read_u64_le(0).unwrap_or(0);
+    let mut out = ChunkSeq::new[u8]();
+    for k in 0..rounds {
+        diagnostic_payload(inout out, in input, WORD_BYTES);
+    }
+    pack(in out.as_slice())
+}

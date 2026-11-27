@@ -2384,6 +2384,13 @@ const COMPILER_PACKAGES: &[(&str, &str, &str, &str, CompilerExecCheck)] = &[
         CompilerExecCheck::Exact(1),
     ),
     (
+        "lsp-publish",
+        "@vesper/lsp-publish",
+        "packages/vesper-lsp-publish",
+        "lsp_diagnostic_payload(in zero_input().as_str()).len()",
+        CompilerExecCheck::Exact(1),
+    ),
+    (
         "front",
         "@vesper/front",
         "packages/vesper-front",

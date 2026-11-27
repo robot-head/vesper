@@ -956,6 +956,7 @@ vesper_crate(
             "src/lsp/fixtures/**",
             "packages/vesper-lsp-features/**",
             "packages/vesper-lsp-format/**",
+            "packages/vesper-lsp-publish/**",
             # The macro preview's Forge programs (part 11c).
             "tests/forge_*.rs",
             "packages/vesper-ast/**",
@@ -963,6 +964,7 @@ vesper_crate(
             "packages/vesper-front/**",
             "packages/vesper-std/**",
         ]) + [
+            "//crates/vesper-diagnostics:files",
             "//crates/vesper-fmt:files",
             "//crates/vesper-span:files",
         ],

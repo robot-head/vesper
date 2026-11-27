@@ -1,0 +1,12 @@
+[package]
+name = "@vesper/lsp-publish"
+version = "0.1.0"
+edition = "2026"
+# The publishDiagnostics payload only computes over the words the caller
+# lends it. It is its own package because @vesper/diagnostics and
+# @vesper/span both declare the variants of `Resource`, and enum variants
+# share one namespace across a program's packages.
+capability_ceiling = ["Fail", "Alloc"]
+
+[dependencies]
+"@vesper/diagnostics" = { version = "^0.1", path = "../../crates/vesper-diagnostics/vesper" }
