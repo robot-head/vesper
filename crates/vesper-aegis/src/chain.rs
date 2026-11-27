@@ -92,23 +92,13 @@ const P256_SCALAR_LEN: usize = 32;
 const P384_SCALAR_LEN: usize = 48;
 /// SEC 1 §2.3.3: an uncompressed point starts with `0x04`.
 pub(crate) const SEC1_UNCOMPRESSED: u8 = 0x04;
-/// X.509 `TBSCertificate` field positions after the optional `[0]
-/// version` (RFC 5280 §4.1): serialNumber 0, signature 1, issuer 2,
-/// validity 3, subject 4, subjectPublicKeyInfo 5.
-const TBS_ISSUER: usize = 2;
-const TBS_SUBJECT: usize = 4;
-const TBS_SPKI: usize = 5;
 
-/// The DER (ITU-T X.690) bytes `tlv` and `RawCert::parse` read: identifier
-/// octets, the short and long length forms (this reader takes at most four
-/// length octets).
+/// The DER (ITU-T X.690) bytes `sequence_contents` reads: identifier octets
+/// and short/long length forms.
 mod der {
-    pub(super) const BIT_STRING: u8 = 0x03;
     pub(super) const SEQUENCE: u8 = 0x30;
-    pub(super) const CONTEXT_0: u8 = 0xa0;
     pub(super) const LONG_FORM: u8 = 0x80;
     pub(super) const LENGTH_OCTETS_MASK: u8 = 0x7f;
-    pub(super) const MAX_LENGTH_OCTETS: usize = 4;
     /// A tag octet and a short-form length octet.
     pub(super) const SHORT_HEADER: usize = 2;
 }
@@ -384,71 +374,41 @@ struct RawCert<'a> {
     spki_alg: &'a [u8],
 }
 
+const RAW_CERT_OUT_LEN: usize = 14;
+const RAW_CERT_ERR_OUTER: u64 = 1;
+const RAW_CERT_ERR_TRAILING: u64 = 2;
+const RAW_CERT_ERR_TBS: u64 = 3;
+const RAW_CERT_ERR_SIG_ALG: u64 = 4;
+const RAW_CERT_ERR_SIG_VAL: u64 = 5;
+const RAW_CERT_ERR_SIG_UNUSED: u64 = 6;
+const RAW_CERT_ERR_TBS_FIELD: u64 = 7;
+const RAW_CERT_ERR_SPKI: u64 = 8;
+
 impl<'a> RawCert<'a> {
     fn parse(der: &'a [u8]) -> Result<Self, AttestError> {
         let bad = |what: &str| AttestError::CertificateChain(format!("certificate DER: {what}"));
-        let (outer, rest) = tlv(der).ok_or_else(|| bad("outer"))?;
-        if !rest.is_empty() {
-            return Err(bad("trailing bytes"));
+        let mut out = [0u64; RAW_CERT_OUT_LEN];
+        match crate::port::vesper::parse_raw_cert(der, &mut out) {
+            0 => Ok(RawCert {
+                tbs: &der[out[0] as usize..out[1] as usize],
+                signature_alg: &der[out[2] as usize..out[3] as usize],
+                signature: &der[out[4] as usize..out[5] as usize],
+                issuer: &der[out[6] as usize..out[7] as usize],
+                subject: &der[out[8] as usize..out[9] as usize],
+                spki: &der[out[10] as usize..out[11] as usize],
+                spki_alg: &der[out[12] as usize..out[13] as usize],
+            }),
+            RAW_CERT_ERR_OUTER => Err(bad("outer")),
+            RAW_CERT_ERR_TRAILING => Err(bad("trailing bytes")),
+            RAW_CERT_ERR_TBS => Err(bad("tbs")),
+            RAW_CERT_ERR_SIG_ALG => Err(bad("signatureAlgorithm")),
+            RAW_CERT_ERR_SIG_VAL => Err(bad("signatureValue")),
+            RAW_CERT_ERR_SIG_UNUSED => Err(bad("signatureValue unused bits")),
+            RAW_CERT_ERR_TBS_FIELD => Err(bad("tbs field")),
+            RAW_CERT_ERR_SPKI => Err(bad("spki")),
+            _ => Err(bad("outer")),
         }
-        let body = contents(outer).ok_or_else(|| bad("outer"))?;
-        let (tbs, body) = tlv(body).ok_or_else(|| bad("tbs"))?;
-        let (signature_alg, body) = tlv(body).ok_or_else(|| bad("signatureAlgorithm"))?;
-        let (sig, body) = tlv(body).ok_or_else(|| bad("signatureValue"))?;
-        if !body.is_empty() || sig[0] != der::BIT_STRING {
-            return Err(bad("signatureValue"));
-        }
-        let sig = contents(sig).ok_or_else(|| bad("signatureValue"))?;
-        let (&unused, signature) = sig.split_first().ok_or_else(|| bad("signatureValue"))?;
-        if unused != 0 {
-            return Err(bad("signatureValue unused bits"));
-        }
-        let mut t = contents(tbs).ok_or_else(|| bad("tbs"))?;
-        let mut fields = Vec::with_capacity(8);
-        while !t.is_empty() {
-            let (f, rest) = tlv(t).ok_or_else(|| bad("tbs field"))?;
-            fields.push(f);
-            t = rest;
-        }
-        // [0] version present (v3) shifts the fixed fields by one.
-        let o = usize::from(fields.first().is_some_and(|f| f[0] == der::CONTEXT_0));
-        let field = |i: usize| fields.get(o + i).copied().ok_or_else(|| bad("tbs field"));
-        let spki = field(TBS_SPKI)?;
-        let (spki_alg, _) =
-            tlv(contents(spki).ok_or_else(|| bad("spki"))?).ok_or_else(|| bad("spki"))?;
-        Ok(RawCert {
-            tbs,
-            signature_alg,
-            signature,
-            issuer: field(TBS_ISSUER)?,
-            subject: field(TBS_SUBJECT)?,
-            spki,
-            spki_alg,
-        })
     }
-}
-
-/// Split one DER TLV (definite length, single-byte tag) off `b`.
-fn tlv(b: &[u8]) -> Option<(&[u8], &[u8])> {
-    let first_len = *b.get(1)?;
-    let (len, header) = if first_len < der::LONG_FORM {
-        (usize::from(first_len), der::SHORT_HEADER)
-    } else {
-        let n = usize::from(first_len & der::LENGTH_OCTETS_MASK);
-        if n == 0 || n > der::MAX_LENGTH_OCTETS {
-            return None;
-        }
-        let mut len = 0usize;
-        for &x in b.get(der::SHORT_HEADER..der::SHORT_HEADER + n)? {
-            len = (len << 8) | usize::from(x);
-        }
-        (len, der::SHORT_HEADER + n)
-    };
-    let end = header.checked_add(len)?;
-    if end > b.len() {
-        return None;
-    }
-    Some(b.split_at(end))
 }
 
 fn contents(t: &[u8]) -> Option<&[u8]> {
@@ -551,4 +511,27 @@ pub fn pem_certificates(pem: &[u8]) -> Result<Vec<Vec<u8>>, ParseError> {
         return Err(ParseError::Pem("no certificates"));
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod der_cert_tests {
+    use super::*;
+
+    #[test]
+    fn raw_cert_parse_handles_valid_and_truncated() {
+        let cert = rcgen::generate_simple_self_signed(vec!["vesper.test".to_string()]).unwrap();
+        let der = cert.cert.der().as_ref();
+        let parsed = RawCert::parse(der).expect("valid self-signed cert");
+        assert!(!parsed.tbs.is_empty());
+        assert!(!parsed.signature.is_empty());
+        assert_eq!(parsed.issuer, parsed.subject);
+        assert!(!parsed.spki_alg.is_empty());
+
+        for cut in 0..der.len() {
+            assert!(RawCert::parse(&der[..cut]).is_err(), "accepted cut={cut}");
+        }
+        let mut trailing = der.to_vec();
+        trailing.push(0);
+        assert!(RawCert::parse(&trailing).is_err());
+    }
 }

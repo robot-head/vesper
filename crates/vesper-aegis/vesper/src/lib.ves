@@ -16,6 +16,7 @@
 // index, `field` an index into the field-name table of src/port.rs
 // (FIELDS), and `a`, `b` the variant's numbers.
 use self::cbor::decode as cbor_decode_impl;
+use self::der_cert::parse_raw_cert as parse_raw_cert_impl;
 use self::cca::{
     cca_token_parse as cca_token_parse_impl, platform_claims, platform_profile, realm_claims,
     realm_profile
@@ -312,4 +313,8 @@ pub fn host_unmap(
     len: u64
 ) -> u64 {
     host_unmap_impl(inout iv, count, win_start, win_end, addr, len)
+}
+
+pub fn parse_raw_cert(in der: Slice[u8], inout out: Slice[u64]) -> u64 {
+    parse_raw_cert_impl(in der, inout out)
 }
