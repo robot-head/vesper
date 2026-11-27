@@ -69,6 +69,10 @@
     {
       "workload": "der_cert",
       "run": ["cargo", "run", "--locked", "--release", "-p", "vesper-aegis", "--example", "abba", "--", "flip-gate-inproc", "der_cert"]
+    },
+    {
+      "workload": "pem",
+      "run": ["cargo", "run", "--locked", "--release", "-p", "vesper-aegis", "--example", "abba", "--", "flip-gate-inproc", "pem"]
     }
   ]
 }

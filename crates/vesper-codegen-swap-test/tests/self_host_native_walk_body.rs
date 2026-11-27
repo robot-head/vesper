@@ -1202,3 +1202,51 @@ fn vesper_scalar_bodies_part_6l() {
         assert!(total.is_clean(), "{}", total.summary());
     });
 }
+
+/// Part 6m: `()` unit-returning helpers, scalar constants, and recursive
+/// scalar calls across both optimized and unoptimized builds.
+const SCALARS_6M: &str = "
+fn noop(x: i64) -> () {
+    let _ = x;
+    ()
+}
+fn fib(n: i64) -> i64 {
+    if n <= 1 {
+        n
+    } else {
+        wrapping_add(fib(wrapping_sub(n, 1)), fib(wrapping_sub(n, 2)))
+    }
+}
+fn main() -> i64 {
+    noop(42);
+    fib(10)
+}
+";
+
+#[test]
+fn vesper_scalar_bodies_part_6m() {
+    big_stack(|| {
+        let parsed = vesper::parser::parse(SCALARS_6M);
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        let checked = vesper::check::check(&parsed.module);
+        assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
+        if let Err(e) = build(&checked.world, "main", true) {
+            panic!("the part 6m scalar program does not build: {e}");
+        }
+        let before = EMITTED.load(Ordering::Relaxed);
+        let total = both("scalars_6m", &checked.world, true);
+        let emitted = EMITTED.load(Ordering::Relaxed) - before;
+        eprintln!(
+            "scalars_6m: {}; {emitted} functions emitted from Vesper",
+            total.summary()
+        );
+        let ran = if cross() { 0 } else { 2 };
+        assert_eq!((total.worlds, total.ran), (2, ran), "{}", total.summary());
+        let min_emitted = if cross() { 3 } else { 6 };
+        assert!(
+            emitted >= min_emitted,
+            "part 6m functions should come from Vesper (expected >= {min_emitted}, got {emitted})"
+        );
+        assert!(total.is_clean(), "{}", total.summary());
+    });
+}
