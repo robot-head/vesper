@@ -159,7 +159,7 @@ const VESPER_TEST_REPORT: vesper::test_report::TestReportTable =
 
 /// The flip-gate rows of this file's swaps (`swaps::on`).
 pub(super) const SWAPS: &[Swap] = &[
-    open("test_discovery", "no flip-gate configuration"),
+    pass("test_discovery", "test-discovery", "#2453"),
     pass("doctest_extract", "doctest-extract", "#2207"),
     pass("test_mutants", "test-mutants", "#2207"),
     pass("doctest_guard", "doctest-guard", "#2207"),
