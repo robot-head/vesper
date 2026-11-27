@@ -219,6 +219,7 @@ enum IntegerOp {
     VectorFloatNearest = 199,
     VectorFloatMin = 200,
     VectorFloatMax = 201,
+    VectorMul = 202,
 }
 
 fn integer_bit_op(op: Opcode) -> Option<IntegerOp> {
@@ -292,6 +293,7 @@ const INTEGER_CELL_BITS: u64 = u64::BITS as u64;
 const SIMD_BYTES: u32 = 2 * size_of::<u64>() as u32;
 const SIMD_LANE_INDEX_SHIFT: u32 = 8;
 const SIMD_CONDITION_SHIFT: u32 = 8;
+const X86_VECTOR_MUL_SSE41: u64 = 1 << SIMD_LANE_INDEX_SHIFT;
 const X86_HARDWARE_POPCOUNT: u64 = 1;
 const X86_SWIZZLE_ZERO_HIGH: u64 = 1;
 const X86_SWIZZLE_ZERO_INDEX: u8 = 0x80;
@@ -723,6 +725,15 @@ struct IntegerBlocks<'a> {
 impl IntegerBlocks<'_> {
     fn has_x86_shuffle(&self) -> bool {
         self.x86_isa.is_some_and(TargetIsa::has_x86_pshufb_lowering)
+    }
+
+    fn has_x86_sse41(&self) -> bool {
+        const SSE41_FLAG: &str = "has_sse41";
+        self.x86_isa.is_some_and(|isa| {
+            isa.isa_flags()
+                .iter()
+                .any(|flag| flag.name == SSE41_FLAG && flag.as_bool() == Some(true))
+        })
     }
 
     fn has_x86_fma(&self) -> bool {
@@ -2088,6 +2099,15 @@ impl IntegerBlocks<'_> {
                     Opcode::Bxor => (IntegerOp::VectorXor, 0),
                     Opcode::Iadd => (IntegerOp::VectorAdd, integer_width(lane)?),
                     Opcode::Isub => (IntegerOp::VectorSub, integer_width(lane)?),
+                    Opcode::Imul => {
+                        let mode =
+                            if matches!(lane, types::I32 | types::I64) && self.has_x86_sse41() {
+                                X86_VECTOR_MUL_SSE41
+                            } else {
+                                0
+                            };
+                        (IntegerOp::VectorMul, integer_width(lane)? | mode)
+                    }
                     Opcode::Fcopysign => (IntegerOp::VectorFloatCopySign, float_width(lane)?),
                     Opcode::Fmin | Opcode::Fmax if !self.canonicalize_nans => (
                         if opcode == Opcode::Fmin {

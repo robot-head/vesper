@@ -219,6 +219,7 @@ pub const VECTOR_FLOAT_TRUNC: u64 = 198;
 pub const VECTOR_FLOAT_NEAREST: u64 = 199;
 pub const VECTOR_FLOAT_MIN: u64 = 200;
 pub const VECTOR_FLOAT_MAX: u64 = 201;
+pub const VECTOR_MUL: u64 = 202;
 const POWER_SHIFT_MASK: u64 = QWORD_BITS - 1;
 const POWER_SIGNED: u64 = 0x40;
 const POWER_NEGATIVE: u64 = 0x80;
@@ -227,6 +228,7 @@ pub const VECTOR_CONDITION_SHIFT: u32 = 8;
 pub const AARCH64_TAIL_RESERVED_GP: u64 = 2;
 pub const VECTOR_LANE_INDEX_SHIFT: u32 = 8;
 pub const VECTOR_LANE_WIDTH_MASK: u64 = 0xff;
+const X86_VECTOR_MUL_SSE41: u64 = 0x100;
 const X86_SWIZZLE_ZERO_HIGH: u64 = 1;
 const X86_HARDWARE_POPCOUNT: u64 = 1;
 const XMM_ARGUMENTS: u64 = 8;
@@ -1051,6 +1053,7 @@ pub fn is_vector_binary(op: u64) -> bool {
         || op == VECTOR_INTEGER_COMPARE
         || op == VECTOR_FLOAT_COMPARE
         || op == VECTOR_FLOAT_COPY_SIGN
+        || op == VECTOR_MUL
         || is_vector_float_min_max(op)
         || is_vector_float_fma(op)
         || is_vector_float_binary(op)
@@ -1120,7 +1123,7 @@ fn vector_binary_opcode(op: u64, width: u64) -> u8 {
 pub fn is_vector_result(op: u64) -> bool {
     (op >= VECTOR_CONSTANT && op <= VECTOR_INSERT && op != VECTOR_STORE)
         || op == VECTOR_INTEGER_COMPARE
-        || (op >= VECTOR_FLOAT_ADD && op <= VECTOR_FLOAT_MAX)
+        || (op >= VECTOR_FLOAT_ADD && op <= VECTOR_MUL)
 }
 
 pub fn vector_value(in words: Slice[u64], arguments: u64, value: u64) -> bool {
@@ -1476,6 +1479,12 @@ fn find_last_reads(
                 VECTOR_STORE => record.extra <= DISP32_MASK,
                 VECTOR_SPLAT => record.right == 0 && valid_width(record.extra),
                 VECTOR_ADD | VECTOR_SUB => valid_width(record.extra),
+                VECTOR_MUL => {
+                    let width = record.extra & VECTOR_LANE_WIDTH_MASK;
+                    valid_width(width)
+                        && (record.extra & ~(VECTOR_LANE_WIDTH_MASK | X86_VECTOR_MUL_SSE41)) == 0
+                        && ((record.extra & X86_VECTOR_MUL_SSE41) == 0 || width >= DWORD_BITS)
+                },
                 VECTOR_FLOAT_ADD
                     | VECTOR_FLOAT_SUB
                     | VECTOR_FLOAT_MUL
@@ -1524,6 +1533,17 @@ fn find_last_reads(
                     && packed_float_compare_needs_temp(record.extra))
                 || (record.op == VECTOR_PAIRWISE_ADD && record.extra == BYTE_BITS)
                 || (record.op == VECTOR_SWIZZLE && record.extra == 0);
+            if record.op == VECTOR_MUL {
+                let width = record.extra & VECTOR_LANE_WIDTH_MASK;
+                let hardware = (record.extra & X86_VECTOR_MUL_SSE41) != 0;
+                frame.xmm_aux = frame.xmm_aux
+                    || (width != WORD_BITS && !(hardware && width == DWORD_BITS));
+                if width == QWORD_BITS && !hardware {
+                    frame.temporary_registers = frame.temporary_registers
+                        | register_bit(R10)
+                        | register_bit(R11);
+                }
+            }
         }
         if is_conditional_trap(record.op) && (record.right != 0 || record.extra != 0) {
             return Option::None;
@@ -2894,6 +2914,13 @@ fn emit_vector_instruction(
             left,
             right,
             record.extra == X86_SWIZZLE_ZERO_HIGH
+        ),
+        VECTOR_MUL => Instruction::VectorMultiply(
+            destination,
+            left,
+            right,
+            record.extra & VECTOR_LANE_WIDTH_MASK,
+            (record.extra & X86_VECTOR_MUL_SSE41) != 0
         ),
         VECTOR_INTEGER_COMPARE => {
             let condition = wrapping_shr_u64(record.extra, VECTOR_CONDITION_SHIFT);

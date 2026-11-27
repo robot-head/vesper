@@ -332,6 +332,136 @@ fn packed_integer_arithmetic_matches_cranelift_at_lane_boundaries() {
 }
 
 #[test]
+fn packed_integer_multiply_wraps_on_sse2_and_sse41() {
+    const SSE41_FLAG: &str = "has_sse41";
+    const PMULLD_OPCODE: [u8; 3] = [0x0f, 0x38, 0x40];
+    const LIVE_VECTORS: u8 = 21;
+    type Entry = unsafe extern "C" fn(*const u8, *const u8, *mut u8);
+    for sse41 in [false, true] {
+        if sse41 && !std::is_x86_feature_detected!("sse4.1") {
+            continue;
+        }
+        let mut isa = cranelift_native::builder_with_options(false).unwrap();
+        if sse41 {
+            isa.enable(SSE41_FLAG).unwrap();
+        }
+        let isa = isa
+            .finish(settings::Flags::new(settings::builder()))
+            .unwrap();
+        let mut module = JITModule::new(JITBuilder::with_isa(
+            isa,
+            cranelift_module::default_libcall_names(),
+        ));
+        for ty in [types::I8X16, types::I16X8, types::I32X4, types::I64X2] {
+            let width = ty.lane_type().bytes() as usize;
+            let mask = u64::MAX >> (u64::BITS - ty.lane_bits());
+            let sign = 1u64 << (ty.lane_bits() - 1);
+            let edges = [
+                0,
+                1,
+                sign - 1,
+                sign,
+                sign + 1,
+                mask - 1,
+                mask,
+                0x793a_a0b1_f543_6789,
+            ];
+            let lanes = |first: usize| -> [u8; VECTOR_BYTES] {
+                std::array::from_fn(|i| {
+                    edges[(first + i / width) % edges.len()].to_le_bytes()[i % width]
+                })
+            };
+            for (keep_left, spills) in [(false, false), (true, false), (false, true)] {
+                let build = |module: &JITModule, scalar_byte_reference| {
+                    let mut context = module.make_context();
+                    context.func.signature.params = vec![AbiParam::new(types::I64); 3];
+                    let mut state = FunctionBuilderContext::new();
+                    let mut b = FunctionBuilder::new(&mut context.func, &mut state);
+                    let entry = b.create_block();
+                    b.append_block_params_for_function_params(entry);
+                    b.switch_to_block(entry);
+                    let [left, right, destination] = *b.block_params(entry) else {
+                        unreachable!()
+                    };
+                    let live = if spills {
+                        (1..=LIVE_VECTORS)
+                            .map(|byte| {
+                                let constant = b
+                                    .func
+                                    .dfg
+                                    .constants
+                                    .insert(ConstantData::from(vec![byte; VECTOR_BYTES]));
+                                b.ins().vconst(ty, constant)
+                            })
+                            .collect()
+                    } else {
+                        Vec::new()
+                    };
+                    let flags = MemFlags::new().with_notrap();
+                    let left = b.ins().load(ty, flags, left, 0);
+                    let right = b.ins().load(ty, flags, right, 0);
+                    let result = if scalar_byte_reference {
+                        let mut value = left;
+                        for lane in 0..ty.lane_count() as u8 {
+                            let lhs = b.ins().extractlane(left, lane);
+                            let rhs = b.ins().extractlane(right, lane);
+                            let product = b.ins().imul(lhs, rhs);
+                            value = b.ins().insertlane(value, product, lane);
+                        }
+                        value
+                    } else {
+                        b.ins().imul(left, right)
+                    };
+                    b.ins().store(flags, result, destination, 0);
+                    if keep_left {
+                        b.ins().store(flags, left, destination, VECTOR_BYTES as i32);
+                    }
+                    if let Some(sum) = live
+                        .into_iter()
+                        .reduce(|a, b_value| b.ins().bxor(a, b_value))
+                    {
+                        b.ins().store(flags, sum, destination, VECTOR_BYTES as i32);
+                    }
+                    b.ins().return_(&[]);
+                    b.seal_all_blocks();
+                    b.finalize();
+                    context
+                };
+                let mut context = build(&module, false);
+                // Scalar Cranelift multiplies provide the reference for packed byte multiplication.
+                let mut reference = (ty == types::I8X16).then(|| build(&module, true));
+                let words = x86_64_block_words(&context.func, module.isa()).unwrap();
+                let bytes = binding::x86_64_integer_block(&words);
+                assert_eq!(
+                    bytes
+                        .windows(PMULLD_OPCODE.len())
+                        .any(|op| op == PMULLD_OPCODE),
+                    sse41 && matches!(ty, types::I32X4 | types::I64X2)
+                );
+                let functions =
+                    compile_with_reference(&mut module, &mut context, reference.as_mut())
+                        .map(|ptr| unsafe { std::mem::transmute::<*const u8, Entry>(ptr) });
+                for i in 0..edges.len() {
+                    for j in 0..edges.len() {
+                        let (left, right) = (lanes(i), lanes(j));
+                        let [reference, candidate] = functions.map(|run| {
+                            let mut out = [0xcc; VECTOR_BYTES * 2];
+                            unsafe { run(left.as_ptr(), right.as_ptr(), out.as_mut_ptr()) };
+                            out
+                        });
+                        assert_eq!(
+                            candidate, reference,
+                            "{ty} {sse41} {keep_left} {spills} {i} {j}"
+                        );
+                    }
+                }
+            }
+        }
+        unsafe { module.free_memory() };
+    }
+}
+
+#[test]
 fn packed_float_precision_conversions_match_cranelift() {
     let mut module = module();
     for demote in [false, true] {

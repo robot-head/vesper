@@ -45,7 +45,8 @@ use self::scalar::{
     VECTOR_FLOAT_DIV, VECTOR_FLOAT_SQRT, VECTOR_FLOAT_COMPARE, VECTOR_FLOAT_NEG, VECTOR_FLOAT_ABS,
     VECTOR_FLOAT_COPY_SIGN, VECTOR_FLOAT_FMA32, VECTOR_FLOAT_FMA64, vector_float_width,
     is_vector_float_unary, is_vector_float_fma, valid_vector_float_condition, VECTOR_FLOAT_CEIL,
-    VECTOR_FLOAT_FLOOR, VECTOR_FLOAT_TRUNC, VECTOR_FLOAT_NEAREST, VECTOR_FLOAT_MIN, VECTOR_FLOAT_MAX
+    VECTOR_FLOAT_FLOOR, VECTOR_FLOAT_TRUNC, VECTOR_FLOAT_NEAREST, VECTOR_FLOAT_MIN,
+    VECTOR_FLOAT_MAX, VECTOR_MUL
 };
 use self::x86_64::{
     BYTE_BITS, WORD_BITS, DWORD_BITS, QWORD_BITS, FLOAT_ORDERED, FLOAT_UNORDERED, FLOAT_EQUAL,
@@ -124,12 +125,18 @@ const VECTOR_EXTRACT_GP: u32 = 0x0e003c00;
 const VECTOR_EXTRACT_QWORD: u32 = 0x40000000;
 const VECTOR_LANE_IMM5_SHIFT: u32 = 16;
 const VECTOR_SIZE_SHIFT: u32 = 22;
+const VECTOR_DWORD_SIZE: u32 = 2 << VECTOR_SIZE_SHIFT;
 const VECTOR_MEMORY_FLAGS: u32 = 0x04800000;
 const VECTOR_AND_REG: u32 = 0x4e201c00;
 const VECTOR_OR_REG: u32 = 0x4ea01c00;
 const VECTOR_XOR_REG: u32 = 0x6e201c00;
 const VECTOR_ADD_REG: u32 = 0x4e208400;
 const VECTOR_SUB_REG: u32 = 0x6e208400;
+const VECTOR_MUL_REG: u32 = 0x4e209c00;
+const VECTOR_REVERSE_DWORDS: u32 = 0x4ea00800;
+const VECTOR_NARROW_QWORDS: u32 = 0x0ea12800;
+const VECTOR_SHIFT_LONG_DWORDS: u32 = 0x2ea13800;
+const VECTOR_UMLAL_DWORDS: u32 = 0x2ea08000;
 const VECTOR_SIGNED_SAT_ADD_REG: u32 = 0x4e200c00;
 const VECTOR_UNSIGNED_SAT_ADD_REG: u32 = 0x6e200c00;
 const VECTOR_SIGNED_SAT_SUB_REG: u32 = 0x4e202c00;
@@ -789,13 +796,32 @@ fn vector_constant(inout out: ChunkSeq[u8], destination: u32, low: u64, high: u6
     }
 }
 
+fn vector_multiply_qwords(inout out: ChunkSeq[u8], dest: u32, left: u32, right: u32) {
+    let cross = FP_LEFT;
+    let left_low = FP_RIGHT;
+    let right_low = FP_ADDEND;
+    // Cross products contribute to the upper dwords. The product of the two high dwords wraps out.
+    push32(inout out, VECTOR_REVERSE_DWORDS | sh(right, RN_SHIFT) | cross);
+    rrr(inout out, VECTOR_MUL_REG | VECTOR_DWORD_SIZE, cross, cross, left);
+    rrr(inout out, VECTOR_PAIRWISE_ADD_REG | VECTOR_DWORD_SIZE, cross, cross, cross);
+    push32(inout out, VECTOR_NARROW_QWORDS | sh(left, RN_SHIFT) | left_low);
+    push32(inout out, VECTOR_NARROW_QWORDS | sh(right, RN_SHIFT) | right_low);
+    push32(inout out, VECTOR_SHIFT_LONG_DWORDS | sh(cross, RN_SHIFT) | dest);
+    rrr(inout out, VECTOR_UMLAL_DWORDS, dest, left_low, right_low);
+}
+
 fn vector_binary(inout out: ChunkSeq[u8], in r: Record, dest: u32, left: u32, right: u32) {
+    if r.op == VECTOR_MUL && r.extra == QWORD_BITS {
+        vector_multiply_qwords(inout out, dest, left, right);
+        return;
+    }
     let opcode = match r.op {
         VECTOR_AND => VECTOR_AND_REG,
         VECTOR_OR => VECTOR_OR_REG,
         VECTOR_XOR => VECTOR_XOR_REG,
         VECTOR_ADD => VECTOR_ADD_REG,
         VECTOR_SUB => VECTOR_SUB_REG,
+        VECTOR_MUL => VECTOR_MUL_REG,
         VECTOR_SIGNED_SAT_ADD => VECTOR_SIGNED_SAT_ADD_REG,
         VECTOR_UNSIGNED_SAT_ADD => VECTOR_UNSIGNED_SAT_ADD_REG,
         VECTOR_SIGNED_SAT_SUB => VECTOR_SIGNED_SAT_SUB_REG,

@@ -92,7 +92,11 @@ pub const POR: u8 = 0xeb;
 pub const PXOR: u8 = 0xef;
 const PUNPCKLBW: u8 = 0x60;
 const PUNPCKLWD: u8 = 0x61;
+const PUNPCKLDQ: u8 = 0x62;
 const PUNPCKLQDQ: u8 = 0x6c;
+const PMULLW: u8 = 0xd5;
+const PMULUDQ: u8 = 0xf4;
+const PMULLD: u8 = 0x40;
 const PSHUFD: u8 = 0x70;
 const PADDB: u8 = 0xfc;
 const PADDW: u8 = 0xfd;
@@ -138,6 +142,7 @@ const WORD_SIGN_BITS: u64 = 0x8000800080008000;
 const DWORD_SIGN_BITS: u64 = 0x8000000080000000;
 const LOW_DWORD_SIGN_BIT: u64 = 0x80000000;
 const HIGH_QWORD_TO_LOW: u8 = 0x0e;
+const GATHER_EVEN_DWORDS: u8 = 0x88;
 const LOW_BYTE_MASK: u32 = 0xff;
 const ALL_BYTE_SIGN_BITS: u32 = 0xffff;
 const BYTE_LANES_PER_WORD: u64 = WORD_BITS / BYTE_BITS;
@@ -368,6 +373,7 @@ pub copy enum Instruction {
     VectorPairwiseAdd(u8, u8, u8, u64),
     VectorSwizzle(u8, u8, u8, bool),
     VectorIntegerCompare(u8, u8, u8, u64, PackedRelation, bool),
+    VectorMultiply(u8, u8, u8, u64, bool),
     BitOperation(u8, u8, u64, BitOperation),
     ComplementedBitwise(u8, u8, u8, u64),
     FunnelRight(u8, u8, u8),
@@ -1702,13 +1708,7 @@ fn packed_binary(inout out: ChunkSeq[u8], opcode: u8, destination: u8, source: u
 }
 
 fn packed_word_shift_right(inout out: ChunkSeq[u8], destination: u8, count: u8) {
-    let destination = xmm_code(destination);
-    out.push(OPERAND_SIZE_OVERRIDE);
-    emit_rex(inout out, 0, destination, false, false);
-    out.push(TWO_BYTE_OPCODE);
-    out.push(PACKED_SHIFT_WORD);
-    out.push(modrm(PACKED_SHIFT_RIGHT, destination));
-    out.push(count);
+    packed_shift(inout out, destination, PACKED_SHIFT_RIGHT, WORD_BITS, count);
 }
 
 fn packed_shift(inout out: ChunkSeq[u8], destination: u8, extension: u8, width: u64, count: u8) {
@@ -1716,15 +1716,103 @@ fn packed_shift(inout out: ChunkSeq[u8], destination: u8, extension: u8, width: 
     out.push(OPERAND_SIZE_OVERRIDE);
     emit_rex(inout out, 0, destination, false, false);
     out.push(TWO_BYTE_OPCODE);
-    out.push(
-        if width == DWORD_BITS {
-            PACKED_SHIFT_DWORD
-        } else {
-            PACKED_SHIFT_QWORD
-        }
-    );
+    out.push(match width {
+        WORD_BITS => PACKED_SHIFT_WORD,
+        DWORD_BITS => PACKED_SHIFT_DWORD,
+        _ => PACKED_SHIFT_QWORD,
+    });
     out.push(modrm(extension, destination));
     out.push(count);
+}
+
+fn gp_multiply(inout out: ChunkSeq[u8], dest: u8, source: u8, width: u64) {
+    emit_rex(inout out, dest, source, width == QWORD_BITS, false);
+    out.push(TWO_BYTE_OPCODE);
+    out.push(IMUL_R64_RM64);
+    out.push(modrm(dest, source));
+    normalize_small_result(inout out, dest, width);
+}
+
+fn scalarized_multiply_qwords(inout out: ChunkSeq[u8], dest: u8, left: u8, right: u8) {
+    let high = XMM_AUX_SCRATCH;
+    packed_shuffle(inout out, high, left, HIGH_QWORD_TO_LOW);
+    float_bits(inout out, R10, high, QWORD_BITS);
+    packed_shuffle(inout out, high, right, HIGH_QWORD_TO_LOW);
+    float_bits(inout out, R11, high, QWORD_BITS);
+    gp_multiply(inout out, R10, R11, QWORD_BITS);
+    float_bits(inout out, high, R10, QWORD_BITS);
+
+    float_bits(inout out, R10, left, QWORD_BITS);
+    float_bits(inout out, R11, right, QWORD_BITS);
+    gp_multiply(inout out, R10, R11, QWORD_BITS);
+    float_bits(inout out, dest, R10, QWORD_BITS);
+    packed_binary(inout out, PUNPCKLQDQ, dest, high);
+}
+
+fn vector_multiply(
+    inout out: ChunkSeq[u8],
+    dest: u8,
+    left: u8,
+    right: u8,
+    width: u64,
+    sse41: bool
+) {
+    if width == WORD_BITS || (width == DWORD_BITS && sse41) {
+        let (a, b) = if dest == right {
+            (right, left)
+        } else {
+            (left, right)
+        };
+        float_move(inout out, dest, a);
+        if width == WORD_BITS {
+            packed_binary(inout out, PMULLW, dest, b);
+        } else {
+            packed_38(inout out, PMULLD, dest, b);
+        }
+        return;
+    }
+    if width == QWORD_BITS && !sse41 {
+        scalarized_multiply_qwords(inout out, dest, left, right);
+        return;
+    }
+
+    let even = XMM_AUX_SCRATCH;
+    let rhs = XMM_RIGHT_SCRATCH;
+    let op = if width == BYTE_BITS { PMULLW } else { PMULUDQ };
+    float_move(inout out, even, left);
+    packed_binary(inout out, op, even, right);
+    if width == QWORD_BITS {
+        // Multiply crossed dwords, add each pair, and accumulate above the low product.
+        packed_shuffle(inout out, rhs, right, SWAP_ADJACENT_DWORDS);
+        float_move(inout out, dest, left);
+        packed_38(inout out, PMULLD, dest, rhs);
+        packed_shuffle(inout out, rhs, dest, SWAP_ADJACENT_DWORDS);
+        packed_binary(inout out, PADDD, dest, rhs);
+        packed_shift(inout out, dest, PACKED_SHIFT_LEFT, QWORD_BITS, wrapping_u8(DWORD_BITS));
+        packed_binary(inout out, PADDQ, dest, even);
+        return;
+    }
+
+    // Bring the odd bytes or dwords into the low halves used by the multiply.
+    float_move(inout out, rhs, right);
+    float_move(inout out, dest, left);
+    let group = wrapping_mul(width, 2);
+    let shift = wrapping_u8(width);
+    packed_shift(inout out, rhs, PACKED_SHIFT_RIGHT, group, shift);
+    packed_shift(inout out, dest, PACKED_SHIFT_RIGHT, group, shift);
+    packed_binary(inout out, op, dest, rhs);
+    if width == BYTE_BITS {
+        packed_shift(inout out, dest, PACKED_SHIFT_LEFT, WORD_BITS, shift);
+        packed_binary(inout out, PCMPEQD, rhs, rhs);
+        packed_shift(inout out, rhs, PACKED_SHIFT_RIGHT, WORD_BITS, shift);
+        packed_binary(inout out, PAND, even, rhs);
+        packed_binary(inout out, POR, dest, even);
+    } else {
+        packed_shuffle(inout out, even, even, GATHER_EVEN_DWORDS);
+        packed_shuffle(inout out, dest, dest, GATHER_EVEN_DWORDS);
+        packed_binary(inout out, PUNPCKLDQ, even, dest);
+        float_move(inout out, dest, even);
+    }
 }
 
 fn vector_float_sign(inout out: ChunkSeq[u8], dest: u8, source: u8, absolute: bool, width: u64) {
@@ -2322,6 +2410,14 @@ pub fn emit(inout out: ChunkSeq[u8], in instruction: Instruction) {
         Instruction::VectorIntegerCompare(destination, left, right, width, relation, invert) => {
             vector_integer_compare(inout out, destination, left, right, width, in relation, invert);
         },
+        Instruction::VectorMultiply(destination, left, right, width, sse41) => vector_multiply(
+            inout out,
+            destination,
+            left,
+            right,
+            width,
+            sse41
+        ),
         Instruction::VectorConvert(destination, source, demote) => {
             if demote {
                 out.push(OPERAND_SIZE_OVERRIDE);
@@ -2424,13 +2520,12 @@ pub fn emit(inout out: ChunkSeq[u8], in instruction: Instruction) {
             // preserves those zero upper bits.
             alu_immediate(inout out, extension, destination, bits, width);
         },
-        Instruction::Multiply(destination, source, width) => {
-            emit_rex(inout out, destination, source, width == QWORD_BITS, false);
-            out.push(TWO_BYTE_OPCODE);
-            out.push(IMUL_R64_RM64);
-            out.push(modrm(destination, source));
-            normalize_small_result(inout out, destination, width);
-        },
+        Instruction::Multiply(destination, source, width) => gp_multiply(
+            inout out,
+            destination,
+            source,
+            width
+        ),
         Instruction::MultiplyImmediate(destination, source, bits, width) => {
             let short = fits_signed_byte(bits);
             emit_rex(inout out, destination, source, width == QWORD_BITS, false);
