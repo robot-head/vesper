@@ -1942,9 +1942,11 @@ vesper_package(
     manifest = "packages/vesper-run/Loom.toml",
     visibility = ["//visibility:public"],
     # Float display takes @vesper/serde's shortest digits; region blocks
-    # keep @vesper/alloc books.
+    # keep @vesper/alloc books and size generic payloads with
+    # @vesper/check-layout.
     deps = [
         ":check_data_package",
+        ":check_layout_package",
         ":place_ir_package",
         "//crates/vesper-alloc:port_package",
         "//crates/vesper-serde:port_package",

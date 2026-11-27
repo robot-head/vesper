@@ -35,13 +35,14 @@
 // allocations, so `used()` and exhaustion match the Rust store. Slice 11
 // adds the float modes: a DetFloat program's arithmetic and `f32`/`f64`
 // conversions return the canonical NaN, and `eff [ConstDenorm]` code
-// flushes subnormal operands and results. A program
+// flushes subnormal operands and results. Slice 12 sizes a region payload
+// whose call type does not fix it (inside a generic function) from its
+// value's type, through @vesper/check-layout. A program
 // reaching anything else (labelled function types, float math
 // intrinsics, 128-bit integers, vector and tiled operations) is declined before
 // it runs (`scan`); a continuation resumed outside its handler's
-// activation, a float-to-integer conversion, a region payload whose call
-// type does not fix its size (inside a generic function), or a result with
-// a non-ASCII string, is declined when it is reached. The caller then
+// activation, a float-to-integer conversion, or a result with a non-ASCII
+// string, is declined when it is reached. The caller then
 // runs the Rust evaluator instead.
 //
 // The input (tests/common/run_words.rs `run_input`): check-data's names,
