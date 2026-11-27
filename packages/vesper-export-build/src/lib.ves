@@ -14,9 +14,12 @@
 // the planner skips every other function (generated, private, or qualified
 // with `::`), so they add nothing to its answer.
 //
+// A package's `.vsys` libraries (`[package] vsys`) are read for the target
+// and scanned for their name and linked symbols, and `// @export vsys
+// <Library>` links name their handlers and Rust paths.
+//
 // Not yet covered, and declined (the caller builds with the Rust CLI):
-// `.vsys` imports (a package's `[package] vsys` or `// @export vsys`, whose
-// descriptors are parsed in Rust), generic instances (`// @export
+// inline `// @export vsys direct` bodies, generic instances (`// @export
 // instance`), `Box` types and `fip` functions (the caller slot).
 
 use @vesper/check-data::names::{Names};
@@ -31,7 +34,7 @@ use @vesper/check-names-packages::{
 use @vesper/codegen-export::{export_files_of_plan, export_plan_bytes};
 use @vesper/codegen-export::directives::{directives_text};
 use @vesper/stage2::collect::{FnInfo, ParamInfo, collect_program};
-use @vesper/stage2::loader::{load_package_graph_bytes, package_graph_vsys_count};
+use @vesper/stage2::loader::{load_package_graph_bytes, package_graph_vsys_paths};
 use @vesper-std/fs::{IoError, read_path};
 use @vesper-std/intern::{symbol_from_id};
 
@@ -42,9 +45,10 @@ const NO_ADT: u32 = 4294967295;
 pub const DECLINE_NONE: u8 = 0;
 // The package graph or its root module did not load.
 pub const DECLINE_LOAD: u8 = 1;
-// The graph imports `.vsys` libraries.
+// A `.vsys` library of the graph does not read or scan.
 pub const DECLINE_VSYS: u8 = 2;
-// The directives name instances or `.vsys` imports, or do not parse.
+// The directives name instances or inline `.vsys` bodies, link a library
+// the graph does not import, or do not parse.
 pub const DECLINE_DIRECTIVES: u8 = 3;
 // The program names a `Box` type.
 pub const DECLINE_BOX: u8 = 4;
@@ -54,6 +58,8 @@ pub const DECLINE_FIP: u8 = 5;
 pub const DECLINE_REFUSED: u8 = 6;
 // The package has syntax or assembly errors.
 pub const DECLINE_DIAGNOSTICS: u8 = 7;
+// The target has no `.vsys` support.
+pub const DECLINE_TARGET: u8 = 8;
 
 // A little-endian word of the planner's input: its bytes, and a byte's bits.
 const WORD_BYTES: u64 = 8;
@@ -89,12 +95,56 @@ const ROOT_MODULE: Str = "/src/lib.ves";
 const DUMP_ABI: Str = "abi ";
 const DUMP_ABI_NONE: Str = "none";
 const DUMP_OPTIONS: Str = "options ";
-const DUMP_LINES: u64 = 2;
 const NEWLINE: u8 = 10;
 const DIGIT_ZERO: u8 = 48;
 const DIGIT_NINE: u8 = 57;
 const DECIMAL: u64 = 10;
 const OPTIONS_ON: u8 = 49;
+const DUMP_LINK: Str = "link ";
+const DUMP_NONE: Str = "-";
+
+// A `.vsys` link's handler (directives.ves `HANDLER_*`) and its names.
+const HANDLER_NONE: u8 = 0;
+const HANDLER_DIRECT: u8 = 1;
+const HANDLER_ISOLATED: u8 = 2;
+const DIRECT_HANDLER: Str = "direct";
+const ISOLATED_HANDLER: Str = "isolated(mpk)";
+
+// The descriptor tokens the scan reads, and the bytes it splits on.
+const SYS_WORD: Str = "sys";
+const LIBRARY_WORD: Str = "library";
+const FN_WORD: Str = "fn";
+const LINK_NAME_WORD: Str = "link_name";
+const HASH: Str = "#";
+const OPEN_BRACKET_TOKEN: Str = "[";
+const EQUALS_TOKEN: Str = "=";
+const SPACE: u8 = 32;
+const TAB: u8 = 9;
+const CARRIAGE_RETURN: u8 = 13;
+const SLASH: u8 = 47;
+const QUOTE: u8 = 34;
+const BACKSLASH: u8 = 92;
+const UNDERSCORE: u8 = 95;
+const DOLLAR: u8 = 36;
+const UPPER_A: u8 = 65;
+const UPPER_Z: u8 = 90;
+const LOWER_A: u8 = 97;
+const LOWER_Z: u8 = 122;
+
+// The per-target tokens of a manifest `.vsys` path, and the targets
+// (Rust `VSYS_TARGETS`).
+const TARGET_TOKEN: Str = "@TARGET@";
+const OS_TOKEN: Str = "@OS@";
+const ARCH_TOKEN: Str = "@ARCH@";
+const LINUX_X86_64: Str = "x86_64-unknown-linux-gnu";
+const LINUX_AARCH64: Str = "aarch64-unknown-linux-gnu";
+const MACOS_AARCH64: Str = "aarch64-apple-darwin";
+const WINDOWS_X86_64: Str = "x86_64-pc-windows-msvc";
+const OS_LINUX: Str = "linux";
+const OS_MACOS: Str = "macos";
+const OS_WINDOWS: Str = "windows";
+const ARCH_X86_64: Str = "x86_64";
+const ARCH_AARCH64: Str = "aarch64";
 
 pub struct PlanInput {
     declined: u8,
@@ -337,9 +387,80 @@ fn line_end(in s: ChunkSeq[u8], at: u64) -> u64 {
     }
 }
 
-// The abi and option words of a directives dump that names no instance and
-// no `.vsys` import, or None.
-fn plain_directives(in dump: ChunkSeq[u8]) -> Option[(u64, u64)] {
+// A `// @export vsys <Library> ..` link: its handler and Rust path.
+struct Link {
+    library: ChunkSeq[u8],
+    handler: u8,
+    rust: ChunkSeq[u8],
+    has_rust: bool,
+}
+
+// The directives the planner reads, when they name no instance and no
+// inline `.vsys` body.
+struct Plain {
+    abi: u64,
+    options: u64,
+    links: ChunkSeq[Link],
+}
+
+fn sub_bytes(in s: ChunkSeq[u8], a: u64, e: u64) -> ChunkSeq[u8] {
+    let mut o = ChunkSeq::new[u8]();
+    for i in a..e {
+        o.push(u8_at(in s, i));
+    }
+    o
+}
+
+fn find_space(in s: ChunkSeq[u8], a: u64, e: u64) -> u64 {
+    let mut i = a;
+    loop {
+        if i >= e || u8_at(in s, i) == SPACE {
+            return i;
+        }
+        i = inc(i);
+    }
+}
+
+// One `link <library> <handler> <rust path>` line of the dump (`-` for none).
+fn link_line(in dump: ChunkSeq[u8], a: u64, e: u64) -> Option[Link] {
+    let lib_start = add(a, str_len(DUMP_LINK));
+    let lib_end = find_space(in dump, lib_start, e);
+    let handler_start = inc(lib_end);
+    let handler_end = find_space(in dump, handler_start, e);
+    let rust_start = inc(handler_end);
+    if rust_start > e {
+        return Option::None;
+    }
+    let handler = sub_bytes(in dump, handler_start, handler_end);
+    let mut h = HANDLER_NONE;
+    if same_bytes(in handler, DIRECT_HANDLER) {
+        h = HANDLER_DIRECT;
+    } else if same_bytes(in handler, ISOLATED_HANDLER) {
+        h = HANDLER_ISOLATED;
+    } else if !same_bytes(in handler, DUMP_NONE) {
+        return Option::None;
+    }
+    let rust = sub_bytes(in dump, rust_start, e);
+    let has_rust = !same_bytes(in rust, DUMP_NONE);
+    Option::Some(Link {
+        library: sub_bytes(in dump, lib_start, lib_end),
+        handler: h,
+        rust: rust,
+        has_rust: has_rust
+    })
+}
+
+fn same_bytes(in a: ChunkSeq[u8], in b: Str) -> bool {
+    let bb = b.as_bytes();
+    if a.len() != bb.len() {
+        return false;
+    }
+    starts_with_at(in a, 0, b)
+}
+
+// The abi, option words and links of a directives dump that names no
+// instance and no inline `.vsys` body, or None.
+fn plain_directives(in dump: ChunkSeq[u8]) -> Option[Plain] {
     if !starts_with_at(in dump, 0, DUMP_ABI) {
         return Option::None;
     }
@@ -365,17 +486,343 @@ fn plain_directives(in dump: ChunkSeq[u8]) -> Option[(u64, u64)] {
     } else {
         0
     };
-    let end = line_end(in dump, flag_at);
-    let mut lines: u64 = 0;
-    for i in 0..dump.len() {
-        if u8_at(in dump, i) == NEWLINE {
-            lines = inc(lines);
+    let mut links = ChunkSeq::new[Link]();
+    let mut at = inc(line_end(in dump, flag_at));
+    loop {
+        if at >= dump.len() {
+            break;
+        }
+        let e = line_end(in dump, at);
+        if !starts_with_at(in dump, at, DUMP_LINK) {
+            return Option::None;
+        }
+        match link_line(in dump, at, e) {
+            Option::Some(l) => links.push(sink l),
+            Option::None => {
+                return Option::None;
+            },
+        }
+        at = inc(e);
+    }
+    Option::Some(Plain { abi: abi, options: options, links: links })
+}
+
+// A `.vsys` descriptor's library name and the C symbols its direct calls
+// import, once each in descriptor order (Rust `linked_symbols`): a
+// `#[link_name = ".."]` names the symbol of the `fn` after it, and a
+// `callback` type's call imports none. A token scan that skips comments.
+struct Descriptor {
+    name: ChunkSeq[u8],
+    symbols: ChunkSeq[ChunkSeq[u8]],
+}
+
+fn is_word_byte(c: u8) -> bool {
+    (c >= DIGIT_ZERO && c <= DIGIT_NINE)
+        || (c >= UPPER_A && c <= UPPER_Z)
+        || (c >= LOWER_A && c <= LOWER_Z)
+        || c == UNDERSCORE
+        || c == DOLLAR
+}
+
+fn is_space_byte(c: u8) -> bool {
+    c == SPACE || c == NEWLINE || c == TAB || c == CARRIAGE_RETURN
+}
+
+// The tokens of a descriptor: words, string literals (with their quotes)
+// and single punctuation bytes.
+fn tokens(in src: ChunkSeq[u8]) -> ChunkSeq[ChunkSeq[u8]] {
+    let mut out = ChunkSeq::new[ChunkSeq[u8]]();
+    let n = src.len();
+    let mut i: u64 = 0;
+    loop {
+        if i >= n {
+            break;
+        }
+        let c = u8_at(in src, i);
+        if is_space_byte(c) {
+            i = inc(i);
+        } else if c == SLASH && inc(i) < n && u8_at(in src, inc(i)) == SLASH {
+            i = line_end(in src, i);
+        } else if c == QUOTE {
+            let mut j = inc(i);
+            loop {
+                if j >= n || u8_at(in src, j) == QUOTE {
+                    break;
+                }
+                if u8_at(in src, j) == BACKSLASH {
+                    j = inc(j);
+                }
+                j = inc(j);
+            }
+            let end = if j < n { inc(j) } else { n };
+            out.push(sub_bytes(in src, i, end));
+            i = end;
+        } else if is_word_byte(c) {
+            let mut j = i;
+            loop {
+                if j >= n || !is_word_byte(u8_at(in src, j)) {
+                    break;
+                }
+                j = inc(j);
+            }
+            out.push(sub_bytes(in src, i, j));
+            i = j;
+        } else {
+            out.push(sub_bytes(in src, i, inc(i)));
+            i = inc(i);
         }
     }
-    if lines != DUMP_LINES || inc(end) != dump.len() {
+    out
+}
+
+fn token(in ts: ChunkSeq[ChunkSeq[u8]], i: u64) -> ChunkSeq[u8] {
+    let mut o = ChunkSeq::new[u8]();
+    match ts.try_get(i) {
+        Option::Some(t) => o.extend(in t.as_slice()),
+        Option::None => {},
+    }
+    o
+}
+
+fn same_seq(in a: ChunkSeq[u8], in b: ChunkSeq[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    for i in 0..a.len() {
+        if u8_at(in a, i) != u8_at(in b, i) {
+            return false;
+        }
+    }
+    true
+}
+
+// Whether `a` sorts before `b` (byte order).
+fn bytes_before(in a: ChunkSeq[u8], in b: ChunkSeq[u8]) -> bool {
+    let n = if a.len() < b.len() { a.len() } else { b.len() };
+    for i in 0..n {
+        let x = u8_at(in a, i);
+        let y = u8_at(in b, i);
+        if x != y {
+            return x < y;
+        }
+    }
+    a.len() < b.len()
+}
+
+// Whether function `a` comes after function `b` in (name, source index)
+// order.
+fn after(in names: ChunkSeq[ChunkSeq[u8]], a: u64, b: u64) -> bool {
+    let x = token(in names, a);
+    let y = token(in names, b);
+    if bytes_before(in y, in x) {
+        return true;
+    }
+    ! bytes_before(in x, in y) && a > b
+}
+
+fn scan_descriptor(in src: ChunkSeq[u8]) -> Option[Descriptor] {
+    let ts = tokens(in src);
+    let mut name = ChunkSeq::new[u8]();
+    let mut named = false;
+    let mut symbols = ChunkSeq::new[ChunkSeq[u8]]();
+    // The functions' names and link symbols, in source order.
+    let mut fn_names = ChunkSeq::new[ChunkSeq[u8]]();
+    let mut links = ChunkSeq::new[ChunkSeq[u8]]();
+    let mut pending = ChunkSeq::new[u8]();
+    let mut has_pending = false;
+    let mut i: u64 = 0;
+    loop {
+        if i >= ts.len() {
+            break;
+        }
+        let t = token(in ts, i);
+        if !named
+            && same_bytes(in t, SYS_WORD)
+            && same_bytes(in token(in ts, inc(i)), LIBRARY_WORD)
+        {
+            name = token(in ts, add(i, 2));
+            named = true;
+            i = add(i, 3);
+            continue;
+        }
+        if same_bytes(in t, HASH)
+            && same_bytes(in token(in ts, inc(i)), OPEN_BRACKET_TOKEN)
+            && same_bytes(in token(in ts, add(i, 2)), LINK_NAME_WORD)
+            && same_bytes(in token(in ts, add(i, 3)), EQUALS_TOKEN)
+        {
+            let lit = token(in ts, add(i, 4));
+            if lit.len() < 2 {
+                return Option::None;
+            }
+            pending.clear();
+            let inner = sub_bytes(in lit, 1, wrapping_sub(lit.len(), 1));
+            pending.extend(in inner.as_slice());
+            has_pending = true;
+            i = add(i, 5);
+            continue;
+        }
+        if same_bytes(in t, FN_WORD) {
+            let f = token(in ts, inc(i));
+            if f.len() > 0 && is_word_byte(u8_at(in f, 0)) {
+                let mut symbol = ChunkSeq::new[u8]();
+                if has_pending {
+                    symbol.extend(in pending.as_slice());
+                } else {
+                    symbol.extend(in f.as_slice());
+                }
+                pending.clear();
+                has_pending = false;
+                fn_names.push(sink f);
+                links.push(sink symbol);
+            }
+        }
+        i = inc(i);
+    }
+    if !named || name.len() == 0 {
         return Option::None;
     }
-    Option::Some((abi, options))
+    // Visit the functions in name order, keeping source order among equal
+    // names (the parser stable-sorts its functions by name).
+    let n = links.len();
+    let mut prev = n;
+    for _ in 0..n {
+        let mut best = n;
+        for j in 0..n {
+            if prev != n && !after(in fn_names, j, prev) {
+                continue;
+            }
+            if best == n || after(in fn_names, best, j) {
+                best = j;
+            }
+        }
+        prev = best;
+        let symbol = token(in links, best);
+        let mut seen = false;
+        for j in 0..symbols.len() {
+            if same_seq(in token(in symbols, j), in symbol) {
+                seen = true;
+            }
+        }
+        if !seen {
+            symbols.push(sink symbol);
+        }
+    }
+    Option::Some(Descriptor { name: name, symbols: symbols })
+}
+
+// A manifest `.vsys` path with `@TARGET@`, `@OS@` and `@ARCH@` replaced
+// (Rust `expand_vsys_path`).
+fn expand_path(in path: ChunkSeq[u8], in t: Target) -> ChunkSeq[u8] {
+    let mut out = ChunkSeq::new[u8]();
+    let mut i: u64 = 0;
+    loop {
+        if i >= path.len() {
+            break;
+        }
+        if starts_with_at(in path, i, TARGET_TOKEN) {
+            out.extend(in t.triple.as_slice());
+            i = add(i, str_len(TARGET_TOKEN));
+        } else if starts_with_at(in path, i, OS_TOKEN) {
+            out.extend(in t.os.as_slice());
+            i = add(i, str_len(OS_TOKEN));
+        } else if starts_with_at(in path, i, ARCH_TOKEN) {
+            out.extend(in t.arch.as_slice());
+            i = add(i, str_len(ARCH_TOKEN));
+        } else {
+            out.push(u8_at(in path, i));
+            i = inc(i);
+        }
+    }
+    out
+}
+
+// An object target `.vsys` libraries support (Rust `VSYS_TARGETS`).
+struct Target {
+    triple: ChunkSeq[u8],
+    os: ChunkSeq[u8],
+    arch: ChunkSeq[u8],
+}
+
+fn text_of(in s: Str) -> ChunkSeq[u8] {
+    let mut o = ChunkSeq::new[u8]();
+    o.extend(in s.as_bytes());
+    o
+}
+
+fn target_of(in triple: Slice[u8]) -> Option[Target] {
+    let mut t = ChunkSeq::new[u8]();
+    t.extend(in triple);
+    if same_bytes(in t, LINUX_X86_64) {
+        return Option::Some(Target {
+            triple: t,
+            os: text_of(OS_LINUX),
+            arch: text_of(ARCH_X86_64)
+        });
+    }
+    if same_bytes(in t, LINUX_AARCH64) {
+        return Option::Some(Target {
+            triple: t,
+            os: text_of(OS_LINUX),
+            arch: text_of(ARCH_AARCH64)
+        });
+    }
+    if same_bytes(in t, MACOS_AARCH64) {
+        return Option::Some(Target {
+            triple: t,
+            os: text_of(OS_MACOS),
+            arch: text_of(ARCH_AARCH64)
+        });
+    }
+    if same_bytes(in t, WINDOWS_X86_64) {
+        return Option::Some(Target {
+            triple: t,
+            os: text_of(OS_WINDOWS),
+            arch: text_of(ARCH_X86_64)
+        });
+    }
+    Option::None
+}
+
+// One `.vsys` import of the planner's input: library, handler, symbols and
+// Rust path, as `Directives::add_packages` builds it.
+fn put_import(inout head: ChunkSeq[u64], in d: Descriptor, in links: ChunkSeq[Link]) {
+    put_text_words(inout head, in d.name.as_slice());
+    let mut handler = HANDLER_DIRECT;
+    let mut rust = ChunkSeq::new[u8]();
+    let mut has_rust = false;
+    for i in 0..links.len() {
+        match links.try_get(i) {
+            Option::Some(l) => {
+                if same_seq(in l.library, in d.name) {
+                    if l.handler != HANDLER_NONE {
+                        handler = l.handler;
+                    }
+                    if l.has_rust {
+                        rust.clear();
+                        rust.extend(in l.rust.as_slice());
+                        has_rust = true;
+                    }
+                }
+            },
+            Option::None => {},
+        }
+    }
+    if handler == HANDLER_ISOLATED {
+        put_text_words(inout head, in ISOLATED_HANDLER.as_bytes());
+    } else {
+        put_text_words(inout head, in DIRECT_HANDLER.as_bytes());
+    }
+    head.push(d.symbols.len());
+    for i in 0..d.symbols.len() {
+        let symbol = token(in d.symbols, i);
+        put_text_words(inout head, in symbol.as_slice());
+    }
+    if has_rust {
+        head.push(1);
+        put_text_words(inout head, in rust.as_slice());
+    } else {
+        head.push(0);
+    }
 }
 
 fn read_file(in path: Slice[u8]) -> Option[ChunkSeq[u8]] eff [Ffi[StdFs]] {
@@ -391,16 +838,48 @@ fn read_file(in path: Slice[u8]) -> Option[ChunkSeq[u8]] eff [Ffi[StdFs]] {
 // `root_dir`, built by Stage 2's front end, or why it was declined.
 pub fn export_plan_input(
     in root_dir: Slice[u8],
-    in library: Slice[u8]
+    in library: Slice[u8],
+    in triple: Slice[u8]
 ) -> PlanInput eff [Ffi[StdFs]] {
-    match package_graph_vsys_count(in root_dir) {
-        Option::Some(0) => {},
-        Option::Some(_) => {
-            return declined(DECLINE_VSYS);
+    let target = match target_of(in triple) {
+        Option::Some(t) => t,
+        Option::None => {
+            return declined(DECLINE_TARGET);
         },
+    };
+    let vsys_paths = match package_graph_vsys_paths(in root_dir) {
+        Option::Some(v) => v,
         Option::None => {
             return declined(DECLINE_LOAD);
         },
+    };
+    let mut imports = ChunkSeq::new[Descriptor]();
+    for vi in 0..vsys_paths.len() {
+        let path = expand_path(in token(in vsys_paths, vi), in target);
+        let text = match read_file(in path.as_slice()) {
+            Option::Some(t) => t,
+            Option::None => {
+                return declined(DECLINE_VSYS);
+            },
+        };
+        let d = match scan_descriptor(in text) {
+            Option::Some(d) => d,
+            Option::None => {
+                return declined(DECLINE_VSYS);
+            },
+        };
+        // Rust refuses a library imported twice.
+        for k in 0..imports.len() {
+            match imports.try_get(k) {
+                Option::Some(other) => {
+                    if same_seq(in other.name, in d.name) {
+                        return declined(DECLINE_VSYS);
+                    }
+                },
+                Option::None => {},
+            }
+        }
+        imports.push(sink d);
     }
     let mut root_path = ChunkSeq::new[u8]();
     root_path.extend(in root_dir);
@@ -413,12 +892,34 @@ pub fn export_plan_input(
     };
     let none = ChunkSeq::new[u8]();
     let dump = directives_text(in source, in none, in none, in none);
-    let (abi, options) = match plain_directives(in dump) {
+    let plain = match plain_directives(in dump) {
         Option::Some(d) => d,
         Option::None => {
             return declined(DECLINE_DIRECTIVES);
         },
     };
+    // Rust refuses a link that names no imported library.
+    for li in 0..plain.links.len() {
+        match plain.links.try_get(li) {
+            Option::Some(l) => {
+                let mut found = false;
+                for k in 0..imports.len() {
+                    match imports.try_get(k) {
+                        Option::Some(d) => {
+                            if same_seq(in d.name, in l.library) {
+                                found = true;
+                            }
+                        },
+                        Option::None => {},
+                    }
+                }
+                if !found {
+                    return declined(DECLINE_DIRECTIVES);
+                }
+            },
+            Option::None => {},
+        }
+    }
     let encoded = match load_package_graph_bytes(in root_dir) {
         Option::Some(b) => b,
         Option::None => {
@@ -537,10 +1038,16 @@ pub fn export_plan_input(
     let mut head = ChunkSeq::new[u64]();
     put_text_words(inout head, in library);
     put_text_words(inout head, in EFFECT_PREFIX.as_bytes());
-    head.push(abi);
-    head.push(options);
-    // No `.vsys` imports and no instances.
-    head.push(0);
+    head.push(plain.abi);
+    head.push(plain.options);
+    head.push(imports.len());
+    for k in 0..imports.len() {
+        match imports.try_get(k) {
+            Option::Some(d) => put_import(inout head, in d, in plain.links),
+            Option::None => {},
+        }
+    }
+    // No instances.
     head.push(0);
     let mut funcs = ChunkSeq::new[u64]();
     funcs.push(exported.len());
@@ -620,9 +1127,10 @@ pub fn export_plan_input(
 // `root_dir`, or why it was declined.
 pub fn export_plan_dir(
     in root_dir: Slice[u8],
-    in library: Slice[u8]
+    in library: Slice[u8],
+    in triple: Slice[u8]
 ) -> (u8, ChunkSeq[u64]) eff [Ffi[StdFs]] {
-    let input = export_plan_input(in root_dir, in library);
+    let input = export_plan_input(in root_dir, in library, in triple);
     if input.declined != DECLINE_NONE {
         return (input.declined, ChunkSeq::new[u64]());
     }
@@ -630,15 +1138,17 @@ pub fn export_plan_dir(
 }
 
 // `vesper build --lib`'s `--interface` and `--rust-binding` outputs for the
-// package at `root_dir`, with the optional `--rust-types` path, or why they
+// package at `root_dir` and target `triple` (the `.vsys` files a manifest
+// names per target), with the optional `--rust-types` path, or why they
 // were declined.
 pub fn export_files_dir(
     in root_dir: Slice[u8],
     in library: Slice[u8],
+    in triple: Slice[u8],
     has_types_path: bool,
     in types_path: Slice[u8]
 ) -> ExportFiles eff [Ffi[StdFs]] {
-    let (why, answer) = export_plan_dir(in root_dir, in library);
+    let (why, answer) = export_plan_dir(in root_dir, in library, in triple);
     if why != DECLINE_NONE {
         return ExportFiles {
             declined: why,
