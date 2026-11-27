@@ -2728,6 +2728,13 @@ const COMPILER_PACKAGES: &[(&str, &str, &str, &str, CompilerExecCheck)] = &[
         CompilerExecCheck::Exact(4),
     ),
     (
+        "native-clif-opt",
+        "@vesper/native-clif-opt",
+        "packages/vesper-native-clif-opt",
+        "clif_opt_words(in \"\").len()",
+        CompilerExecCheck::Exact(1),
+    ),
+    (
         "native-cold-outline",
         "@vesper/native-cold-outline",
         "packages/vesper-native-cold-outline",
@@ -2835,10 +2842,6 @@ const STAGE2_PACKAGES_COVERED_ELSEWHERE: &[(&str, &str)] = &[
     (
         "vesper-export-build",
         "`vesper build --lib`'s interface and binding from Stage 2's front end (#2270) as a native executable beside the Rust CLI (tests/self_host_codegen_export.rs); it is @vesper/stage2 plus the export packages, built under Stage 2 as one program in bootstrap switch slice 3",
-    ),
-    (
-        "vesper-native-clif-opt",
-        "the native_clif_opt steps in Vesper (#2362), compared step by step with src/native_clif_opt.rs in the JIT (tests/self_host_native_clif_opt.rs); building it under Stage 2 traps in the Wasm backend (__alloc asked for ~256 GiB from check-data default_type, under plan::instance_key for an overflow raise), so it waits on that backend fix",
     ),
     (
         "vesper-native-lib",
