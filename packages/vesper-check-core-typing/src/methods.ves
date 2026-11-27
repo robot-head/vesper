@@ -13,10 +13,12 @@ use @vesper/check-data::util::{add, u32_at, w};
 use @vesper/check-data::types::{default_type, substitute, vars_new, TyKind, TyMode};
 use self::exprs::{
     Arg, Ck, Ex, actual_arg, mode, note, binding, error, expect_type, expr, expr_expected,
-    field_path, fn_index, fn_generics, is_named, lookup, named, place_of, record, constrain_literals
+    field_path, fn_index, fn_generics, is_named, lookup, named, place_of, record,
+    constrain_literals, literal_unconstrained, trait_method
 };
 use self::relations::{infer, lit_of, mk_lit};
 use self::ints::{Lit, default_of, fits, int_bits, int_unsigned};
+use self::floats::{float_to_integer};
 
 const NONE32: u32 = 4294967295;
 
@@ -218,6 +220,10 @@ pub fn receiver_type(inout ck: Ck, e: u32) -> u32 {
         return hole;
     }
     let index = inherent_index(inout ck, base_ty, callee.y);
+    if index == NONE32 && !trait_method(in ck, callee.y) {
+        // No trait declares the method: `traits.resolve` finds none.
+        return hole;
+    }
     if index == NONE32 {
         // A trait method (`traits.resolve`): not ported.
         ck.skip = true;
@@ -1169,7 +1175,7 @@ fn widens_to(in ck: Ck, from: u32, to: u32) -> bool {
 }
 
 // `Checker::conversion_call`: one integer operand converted to `conv.to`.
-// A float operand (`float_to_integer`) skips the function.
+// A float operand is `float_to_integer`'s.
 pub fn conversion_call(inout ck: Ck, ex: Ex, conv: Conv) -> u32 {
     let hole = ck.ctx.types.infer;
     let known = ck.ctx.world.k;
@@ -1207,10 +1213,13 @@ pub fn conversion_call(inout ck: Ck, ex: Ex, conv: Conv) -> u32 {
     } else {
         raw
     };
+    // A conversion accepts any kind: it does not type an open literal
+    // binding.
+    literal_unconstrained(inout ck, arg.expr);
     let node = ck.ctx.types.node(ty);
     if node.kind == TyKind::Named && (node.name == known.f64_ || node.name == known.f32_) {
-        ck.skip = true;
-        return hole;
+        float_to_integer(inout ck, ex, conv.family == CONV_NARROW, conv.to, arg.expr);
+        return to_ty;
     }
     if node.kind != TyKind::Named || !known.is_integer(node.name) {
         if ty != hole {

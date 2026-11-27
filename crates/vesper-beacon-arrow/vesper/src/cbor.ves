@@ -1,0 +1,400 @@
+// @vesper/beacon-arrow::cbor: RFC 8949 CBOR structural pre-scanner for OTAP
+// serialized attribute cells (Rust-exit SH6 lane 18, #1413 / #2311).
+//
+// Walks every CBOR item header with zero heap allocations, enforcing
+// `max_depth` and charging `node_weight + string_bytes` against `budget`.
+
+// Return status codes.
+pub const SCAN_OK: u64 = 0;
+pub const SCAN_BAD_VALUE: u64 = 1;
+pub const SCAN_TOO_LARGE: u64 = 2;
+const SCAN_BREAK: u64 = 3;
+
+// CBOR header masks and shifts.
+const MAJOR_SHIFT: u8 = 5;
+const INFO_MASK: u8 = 31;
+
+// CBOR major types.
+const MAJOR_UINT: u8 = 0;
+const MAJOR_NINT: u8 = 1;
+const MAJOR_BYTES: u8 = 2;
+const MAJOR_TEXT: u8 = 3;
+const MAJOR_ARRAY: u8 = 4;
+const MAJOR_MAP: u8 = 5;
+const MAJOR_SIMPLE_FLOAT: u8 = 7;
+
+// CBOR additional info thresholds.
+const INFO_INLINE_MAX: u8 = 23;
+const INFO_U8: u8 = 24;
+const INFO_U16: u8 = 25;
+const INFO_U32: u8 = 26;
+const INFO_U64: u8 = 27;
+const INFO_INDEF: u8 = 31;
+
+// CBOR simple values and floats (major 7).
+const SIMPLE_FALSE: u8 = 20;
+const SIMPLE_NULL: u8 = 22;
+const FLOAT_16: u8 = 25;
+const FLOAT_32: u8 = 26;
+const FLOAT_64: u8 = 27;
+const BREAK_BYTE: u8 = 255;
+
+const BYTE_SHIFT: u64 = 8;
+const MAX_U64: u64 = 18446744073709551615;
+const HALF_MAX_U64: u64 = 9223372036854775807;
+
+fn read_be_u64(in bytes: Slice[u8], pos: u64, width: u64) -> u64 {
+    let mut v: u64 = 0;
+    let mut i: u64 = 0;
+    loop {
+        if i >= width {
+            break;
+        }
+        let b = match bytes.try_get(wrapping_add(pos, i)) {
+            Some(x) => widen_u64(x),
+            None => 0
+        };
+        v = (v << BYTE_SHIFT) | b;
+        i = wrapping_add(i, 1);
+    }
+    v
+}
+
+fn scan_item(
+    in bytes: Slice[u8],
+    n: u64,
+    inout pos: u64,
+    inout left: u64,
+    node_weight: u64,
+    max_depth: u64,
+    depth: u64
+) -> u64 {
+    if depth > max_depth || pos >= n {
+        return SCAN_BAD_VALUE;
+    }
+    let b = match bytes.try_get(pos) {
+        Some(x) => x,
+        None => return SCAN_BAD_VALUE
+    };
+    pos = wrapping_add(pos, 1);
+    let major = b >> MAJOR_SHIFT;
+    let info = b & INFO_MASK;
+
+    if major <= MAJOR_NINT {
+        let w: u64 = if info <= INFO_INLINE_MAX {
+            0
+        } else if info == INFO_U8 {
+            1
+        } else if info == INFO_U16 {
+            2
+        } else if info == INFO_U32 {
+            4
+        } else if info == INFO_U64 {
+            8
+        } else {
+            return SCAN_BAD_VALUE;
+        };
+        if w > wrapping_sub(n, pos) {
+            return SCAN_BAD_VALUE;
+        }
+        pos = wrapping_add(pos, w);
+        if left < node_weight {
+            return SCAN_TOO_LARGE;
+        }
+        left = wrapping_sub(left, node_weight);
+        return SCAN_OK;
+    }
+
+    if major <= MAJOR_TEXT {
+        if info == INFO_INDEF {
+            let mut total: u64 = 0;
+            loop {
+                if pos >= n {
+                    return SCAN_BAD_VALUE;
+                }
+                let c = match bytes.try_get(pos) {
+                    Some(x) => x,
+                    None => return SCAN_BAD_VALUE
+                };
+                pos = wrapping_add(pos, 1);
+                if c == BREAK_BYTE {
+                    break;
+                }
+                if (c >> MAJOR_SHIFT) != major {
+                    return SCAN_BAD_VALUE;
+                }
+                let cinfo = c & INFO_MASK;
+                let clen: u64 = if cinfo <= INFO_INLINE_MAX {
+                    widen_u64(cinfo)
+                } else {
+                    let cw: u64 = if cinfo == INFO_U8 {
+                        1
+                    } else if cinfo == INFO_U16 {
+                        2
+                    } else if cinfo == INFO_U32 {
+                        4
+                    } else if cinfo == INFO_U64 {
+                        8
+                    } else {
+                        return SCAN_BAD_VALUE;
+                    };
+                    if cw > wrapping_sub(n, pos) {
+                        return SCAN_BAD_VALUE;
+                    }
+                    let v = read_be_u64(in bytes, pos, cw);
+                    pos = wrapping_add(pos, cw);
+                    v
+                };
+                if clen > wrapping_sub(n, pos) {
+                    return SCAN_BAD_VALUE;
+                }
+                pos = wrapping_add(pos, clen);
+                if total > wrapping_sub(MAX_U64, clen) {
+                    total = MAX_U64;
+                } else {
+                    total = wrapping_add(total, clen);
+                }
+            }
+            let cost = if total > wrapping_sub(MAX_U64, node_weight) {
+                MAX_U64
+            } else {
+                wrapping_add(total, node_weight)
+            };
+            if left < cost {
+                return SCAN_TOO_LARGE;
+            }
+            left = wrapping_sub(left, cost);
+            return SCAN_OK;
+        }
+        let len: u64 = if info <= INFO_INLINE_MAX {
+            widen_u64(info)
+        } else {
+            let w: u64 = if info == INFO_U8 {
+                1
+            } else if info == INFO_U16 {
+                2
+            } else if info == INFO_U32 {
+                4
+            } else if info == INFO_U64 {
+                8
+            } else {
+                return SCAN_BAD_VALUE;
+            };
+            if w > wrapping_sub(n, pos) {
+                return SCAN_BAD_VALUE;
+            }
+            let v = read_be_u64(in bytes, pos, w);
+            pos = wrapping_add(pos, w);
+            v
+        };
+        if len > wrapping_sub(n, pos) {
+            return SCAN_BAD_VALUE;
+        }
+        pos = wrapping_add(pos, len);
+        let cost = if len > wrapping_sub(MAX_U64, node_weight) {
+            MAX_U64
+        } else {
+            wrapping_add(len, node_weight)
+        };
+        if left < cost {
+            return SCAN_TOO_LARGE;
+        }
+        left = wrapping_sub(left, cost);
+        return SCAN_OK;
+    }
+
+    if major <= MAJOR_MAP {
+        if left < node_weight {
+            return SCAN_TOO_LARGE;
+        }
+        left = wrapping_sub(left, node_weight);
+        let next_depth = wrapping_add(depth, 1);
+        if info == INFO_INDEF {
+            loop {
+                let r = scan_item(
+                    in bytes,
+                    n,
+                    inout pos,
+                    inout left,
+                    node_weight,
+                    max_depth,
+                    next_depth
+                );
+                if r == SCAN_BREAK {
+                    return SCAN_OK;
+                }
+                if r != SCAN_OK {
+                    return r;
+                }
+                if major == MAJOR_MAP {
+                    let r2 = scan_item(
+                        in bytes,
+                        n,
+                        inout pos,
+                        inout left,
+                        node_weight,
+                        max_depth,
+                        next_depth
+                    );
+                    if r2 != SCAN_OK {
+                        if r2 == SCAN_BREAK {
+                            return SCAN_BAD_VALUE;
+                        }
+                        return r2;
+                    }
+                }
+            }
+        }
+        let count: u64 = if info <= INFO_INLINE_MAX {
+            widen_u64(info)
+        } else {
+            let w: u64 = if info == INFO_U8 {
+                1
+            } else if info == INFO_U16 {
+                2
+            } else if info == INFO_U32 {
+                4
+            } else if info == INFO_U64 {
+                8
+            } else {
+                return SCAN_BAD_VALUE;
+            };
+            if w > wrapping_sub(n, pos) {
+                return SCAN_BAD_VALUE;
+            }
+            let v = read_be_u64(in bytes, pos, w);
+            pos = wrapping_add(pos, w);
+            v
+        };
+        let items = if major == MAJOR_MAP {
+            if count > HALF_MAX_U64 {
+                return SCAN_BAD_VALUE;
+            }
+            wrapping_mul(count, 2)
+        } else {
+            count
+        };
+        if items > 0 && next_depth > max_depth {
+            return SCAN_BAD_VALUE;
+        }
+        let mut i: u64 = 0;
+        loop {
+            if i >= items {
+                break;
+            }
+            if pos >= n {
+                return SCAN_BAD_VALUE;
+            }
+            // Fast path for inline primitive items (avoids recursive call overhead).
+            let cb = match bytes.try_get(pos) {
+                Some(x) => x,
+                None => return SCAN_BAD_VALUE
+            };
+            let cm = cb >> MAJOR_SHIFT;
+            let ci = cb & INFO_MASK;
+            if cm <= MAJOR_NINT && ci <= INFO_U8 {
+                let step: u64 = if ci <= INFO_INLINE_MAX { 1 } else { 2 };
+                if step > wrapping_sub(n, pos) {
+                    return SCAN_BAD_VALUE;
+                }
+                if left < node_weight {
+                    return SCAN_TOO_LARGE;
+                }
+                pos = wrapping_add(pos, step);
+                left = wrapping_sub(left, node_weight);
+            } else if (cm == MAJOR_BYTES || cm == MAJOR_TEXT) && ci <= INFO_INLINE_MAX {
+                let slen = widen_u64(ci);
+                let step = wrapping_add(1, slen);
+                if step > wrapping_sub(n, pos) {
+                    return SCAN_BAD_VALUE;
+                }
+                let cost = wrapping_add(slen, node_weight);
+                if left < cost {
+                    return SCAN_TOO_LARGE;
+                }
+                pos = wrapping_add(pos, step);
+                left = wrapping_sub(left, cost);
+            } else if cm == MAJOR_SIMPLE_FLOAT && ci >= SIMPLE_FALSE && ci <= SIMPLE_NULL {
+                if left < node_weight {
+                    return SCAN_TOO_LARGE;
+                }
+                pos = wrapping_add(pos, 1);
+                left = wrapping_sub(left, node_weight);
+            } else if cm == MAJOR_SIMPLE_FLOAT && ci == FLOAT_64 {
+                if 9 > wrapping_sub(n, pos) {
+                    return SCAN_BAD_VALUE;
+                }
+                if left < node_weight {
+                    return SCAN_TOO_LARGE;
+                }
+                pos = wrapping_add(pos, 9);
+                left = wrapping_sub(left, node_weight);
+            } else {
+                let r = scan_item(
+                    in bytes,
+                    n,
+                    inout pos,
+                    inout left,
+                    node_weight,
+                    max_depth,
+                    next_depth
+                );
+                if r != SCAN_OK {
+                    if r == SCAN_BREAK {
+                        return SCAN_BAD_VALUE;
+                    }
+                    return r;
+                }
+            }
+            i = wrapping_add(i, 1);
+        }
+        return SCAN_OK;
+    }
+
+    if major == MAJOR_SIMPLE_FLOAT {
+        if info == INFO_INDEF {
+            return SCAN_BREAK;
+        }
+        if info >= SIMPLE_FALSE && info <= SIMPLE_NULL {
+            if left < node_weight {
+                return SCAN_TOO_LARGE;
+            }
+            left = wrapping_sub(left, node_weight);
+            return SCAN_OK;
+        }
+        if info >= FLOAT_16 && info <= FLOAT_64 {
+            let skip_len: u64 = if info == FLOAT_16 {
+                2
+            } else if info == FLOAT_32 {
+                4
+            } else {
+                8
+            };
+            if skip_len > wrapping_sub(n, pos) {
+                return SCAN_BAD_VALUE;
+            }
+            pos = wrapping_add(pos, skip_len);
+            if left < node_weight {
+                return SCAN_TOO_LARGE;
+            }
+            left = wrapping_sub(left, node_weight);
+            return SCAN_OK;
+        }
+    }
+
+    SCAN_BAD_VALUE
+}
+
+pub fn scan_cbor_cell(in bytes: Slice[u8], budget: u64, node_weight: u64, max_depth: u64) -> u64 {
+    let n = bytes.len();
+    let mut pos: u64 = 0;
+    let mut left = budget;
+    let r = scan_item(in bytes, n, inout pos, inout left, node_weight, max_depth, 1);
+    if r == SCAN_OK && pos == n {
+        SCAN_OK
+    } else if r == SCAN_TOO_LARGE {
+        SCAN_TOO_LARGE
+    } else {
+        SCAN_BAD_VALUE
+    }
+}

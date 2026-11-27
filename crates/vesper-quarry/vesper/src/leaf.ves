@@ -354,3 +354,255 @@ pub fn check(
     }
     0
 }
+
+const OFF_COUNT: u64 = 20;
+const OFF_FREE_OFFSET: u64 = 22;
+const DIR_STRIDE: u64 = 2;
+const KEY_STRIDE: u64 = 16;
+const KEY_TS_OFF: u64 = 8;
+const VAR_CELL_STRIDE: u64 = 4;
+const VAR_LEN_OFF: u64 = 2;
+const VAR_COL_PAIR: u64 = 2;
+const SHIFT_BYTE: u64 = 8;
+const BYTE_MASK: u64 = 255;
+
+fn wr16(inout b: Slice[u8], at: u64, v: u64) {
+    b.try_set(at, wrapping_u8(v & BYTE_MASK));
+    b.try_set(wrapping_add(at, 1), wrapping_u8((v >> SHIFT_BYTE) & BYTE_MASK));
+}
+
+// Binary search over the key-ordered directory.
+// Returns `(pos << 1) | 1` if found, or `(ins_pos << 1)` if absent.
+pub fn search(in b: Slice[u8], dir: u64, keys: u64, rowid: u64, inv_ts: u64) -> u64 {
+    let mut lo: u64 = 0;
+    let mut hi: u64 = rd16(in b, OFF_COUNT);
+    loop {
+        if lo >= hi {
+            break;
+        }
+        let mid = wrapping_add(lo, hi) >> 1;
+        let slot = rd16(in b, wrapping_add(dir, wrapping_mul(DIR_STRIDE, mid)));
+        let kbase = wrapping_add(keys, wrapping_mul(KEY_STRIDE, slot));
+        let krow = rd64(in b, kbase);
+        let kts = rd64(in b, wrapping_add(kbase, KEY_TS_OFF));
+        if krow < rowid || (krow == rowid && kts < inv_ts) {
+            lo = wrapping_add(mid, 1);
+        } else if krow > rowid || (krow == rowid && kts > inv_ts) {
+            hi = mid;
+        } else {
+            return (mid << 1) | 1;
+        }
+    }
+    lo << 1
+}
+
+// Heap bytes held by removed versions (`PAGE_SIZE - heap_start - heap_live`).
+pub fn garbage(in b: Slice[u8], dir: u64, in var_cols: Slice[u64]) -> u64 {
+    let n = rd16(in b, OFF_COUNT);
+    let nvar = var_cols.len() >> 1;
+    let mut live: u64 = 0;
+    let mut pos: u64 = 0;
+    loop {
+        if pos >= n {
+            break;
+        }
+        let slot = rd16(in b, wrapping_add(dir, wrapping_mul(DIR_STRIDE, pos)));
+        let mut vc: u64 = 0;
+        loop {
+            if vc >= nvar {
+                break;
+            }
+            let base = wrapping_mul(vc, VAR_COL_PAIR);
+            let nulls = g64(in var_cols, base);
+            if !bit(in b, nulls, slot) {
+                let data = g64(in var_cols, wrapping_add(base, 1));
+                let cell = wrapping_add(data, wrapping_mul(VAR_CELL_STRIDE, slot));
+                live = wrapping_add(live, rd16(in b, wrapping_add(cell, VAR_LEN_OFF)));
+            }
+            vc = wrapping_add(vc, 1);
+        }
+        pos = wrapping_add(pos, 1);
+    }
+    let hstart = rd16(in b, OFF_FREE_OFFSET);
+    wrapping_sub(wrapping_sub(PAGE_SIZE, hstart), live)
+}
+
+// Rewrites the heap without holes left by removed versions, using `scratch`
+// (`PAGE_SIZE` bytes) so zero per-cell allocations occur.
+pub fn compact(
+    inout b: Slice[u8],
+    dir: u64,
+    end_off: u64,
+    in var_cols: Slice[u64],
+    inout scratch: Slice[u8]
+) {
+    let n = rd16(in b, OFF_COUNT);
+    let nvar = var_cols.len() >> 1;
+    let mut top: u64 = PAGE_SIZE;
+    let mut pos: u64 = 0;
+    loop {
+        if pos >= n {
+            break;
+        }
+        let slot = rd16(in b, wrapping_add(dir, wrapping_mul(DIR_STRIDE, pos)));
+        let mut vc: u64 = 0;
+        loop {
+            if vc >= nvar {
+                break;
+            }
+            let base = wrapping_mul(vc, VAR_COL_PAIR);
+            let nulls = g64(in var_cols, base);
+            if !bit(in b, nulls, slot) {
+                let data = g64(in var_cols, wrapping_add(base, 1));
+                let cell = wrapping_add(data, wrapping_mul(VAR_CELL_STRIDE, slot));
+                let off = rd16(in b, cell);
+                let len = rd16(in b, wrapping_add(cell, VAR_LEN_OFF));
+                if len == 0 {
+                    wr16(inout b, cell, 0);
+                } else {
+                    top = wrapping_sub(top, len);
+                    let _ = scratch.try_copy_from(top, in b[off..wrapping_add(off, len)]);
+                    wr16(inout b, cell, top);
+                }
+            }
+            vc = wrapping_add(vc, 1);
+        }
+        pos = wrapping_add(pos, 1);
+    }
+    let _ = b.try_copy_from(end_off, in scratch[end_off..PAGE_SIZE]);
+    wr16(inout b, OFF_FREE_OFFSET, top);
+}
+
+const LEAF_HEADER_FIXED: u64 = 34;
+const LEAF_MAX_CAP_HI: u64 = 4096;
+const BITMAP_ROUND: u64 = 7;
+const BITMAP_SHIFT: u64 = 3;
+const BIT_MASK_7: u64 = 7;
+const COL_TRIPLE: u64 = 3;
+const COL_DATA_OFF: u64 = 1;
+const COL_WIDTH_OFF: u64 = 2;
+const FIXED_U64_WIDTH: u64 = 8;
+const FIXED_U32_WIDTH: u64 = 4;
+
+fn layout_end(in type_tags: Slice[u8], c: u64) -> u64 {
+    let ncols = type_tags.len();
+    let mut at = wrapping_add(LEAF_HEADER_FIXED, ncols);
+    at = wrapping_add(at, at & 1);
+    let bm = wrapping_add(c, BITMAP_ROUND) >> BITMAP_SHIFT;
+    at = wrapping_add(at, wrapping_mul(DIR_STRIDE, c));
+    at = wrapping_add(at, bm);
+    at = wrapping_add(at, wrapping_mul(KEY_STRIDE, c));
+    at = wrapping_add(at, c);
+    let mut i: u64 = 0;
+    loop {
+        if i >= ncols {
+            break;
+        }
+        at = wrapping_add(at, bm);
+        let w = width(widen_u64(g8(in type_tags, i)));
+        at = wrapping_add(at, wrapping_mul(c, w));
+        i = wrapping_add(i, 1);
+    }
+    at
+}
+
+pub fn max_capacity(in type_tags: Slice[u8]) -> u64 {
+    let mut lo: u64 = 1;
+    let mut hi: u64 = LEAF_MAX_CAP_HI;
+    loop {
+        if lo >= hi {
+            break;
+        }
+        let mid = wrapping_add(wrapping_add(lo, hi), 1) >> 1;
+        if layout_end(in type_tags, mid) <= PAGE_SIZE {
+            lo = mid;
+        } else {
+            hi = wrapping_sub(mid, 1);
+        }
+    }
+    lo
+}
+
+fn clear_bit(inout b: Slice[u8], base: u64, i: u64) {
+    let idx = wrapping_add(base, i >> BITMAP_SHIFT);
+    let one: u64 = 1;
+    let mask = wrapping_shl_u64(one, wrapping_u32(i & BIT_MASK_7));
+    let cur = get(in b, idx);
+    b.try_set(idx, wrapping_u8(cur & (BYTE_MASK ^ mask)));
+}
+
+// Removes the entry at directory position `pos`: zeroes its key, tombstone,
+// column nulls/values, clears its occupancy bit, shifts the directory down,
+// and resets the heap when the leaf becomes empty.
+// `cols` has 3 u64s per column: `(nulls_off, data_off, width)`.
+pub fn remove(
+    inout b: Slice[u8],
+    dir: u64,
+    used: u64,
+    keys: u64,
+    tomb: u64,
+    end_off: u64,
+    in cols: Slice[u64],
+    pos: u64
+) {
+    let n = rd16(in b, OFF_COUNT);
+    let s = rd16(in b, wrapping_add(dir, wrapping_mul(DIR_STRIDE, pos)));
+    let kbase = wrapping_add(keys, wrapping_mul(KEY_STRIDE, s));
+    let _ = b.try_write_u64_le(kbase, 0);
+    let _ = b.try_write_u64_le(wrapping_add(kbase, KEY_TS_OFF), 0);
+    b.try_set(wrapping_add(tomb, s), 0);
+
+    let ncols = cols.len() / COL_TRIPLE;
+    let mut c: u64 = 0;
+    loop {
+        if c >= ncols {
+            break;
+        }
+        let cb = wrapping_mul(c, COL_TRIPLE);
+        let nulls = g64(in cols, cb);
+        let data = g64(in cols, wrapping_add(cb, COL_DATA_OFF));
+        let w = g64(in cols, wrapping_add(cb, COL_WIDTH_OFF));
+        clear_bit(inout b, nulls, s);
+        let at = wrapping_add(data, wrapping_mul(w, s));
+        if w == FIXED_U64_WIDTH {
+            let _ = b.try_write_u64_le(at, 0);
+        } else if w == FIXED_U32_WIDTH {
+            let _ = b.try_write_u32_le(at, 0);
+        } else {
+            b.try_set(at, 0);
+        }
+        c = wrapping_add(c, 1);
+    }
+
+    clear_bit(inout b, used, s);
+    let last = wrapping_sub(n, 1);
+    let mut k = pos;
+    loop {
+        if k >= last {
+            break;
+        }
+        let next_slot = rd16(in b, wrapping_add(dir, wrapping_mul(DIR_STRIDE, wrapping_add(k, 1))));
+        wr16(inout b, wrapping_add(dir, wrapping_mul(DIR_STRIDE, k)), next_slot);
+        k = wrapping_add(k, 1);
+    }
+    wr16(inout b, wrapping_add(dir, wrapping_mul(DIR_STRIDE, last)), 0);
+    wr16(inout b, OFF_COUNT, last);
+    if last == 0 {
+        let mut z = end_off;
+        loop {
+            if wrapping_add(z, FIXED_U64_WIDTH) > PAGE_SIZE {
+                break;
+            }
+            let _ = b.try_write_u64_le(z, 0);
+            z = wrapping_add(z, FIXED_U64_WIDTH);
+        }
+        loop {
+            if z >= PAGE_SIZE {
+                break;
+            }
+            b.try_set(z, 0);
+            z = wrapping_add(z, 1);
+        }
+        wr16(inout b, OFF_FREE_OFFSET, PAGE_SIZE);
+    }
+}

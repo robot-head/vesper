@@ -184,38 +184,68 @@ pub(crate) fn tag_type(t: u8) -> Option<ScalarType> {
     })
 }
 
-struct Cursor<'a> {
-    b: &'a [u8],
-    at: usize,
-}
-impl Cursor<'_> {
-    fn take(&mut self, n: usize) -> StoreResult<&[u8]> {
-        let end = self.at.checked_add(n).filter(|&e| e <= self.b.len());
-        let end = end.ok_or_else(|| corrupt("meta page overrun"))?;
-        let s = &self.b[self.at..end];
-        self.at = end;
-        Ok(s)
-    }
-    fn u8(&mut self) -> StoreResult<u8> {
-        Ok(self.take(1)?[0])
-    }
-    fn u16(&mut self) -> StoreResult<u16> {
-        Ok(rd16(self.take(2)?, 0))
-    }
-    fn u32(&mut self) -> StoreResult<u32> {
-        Ok(rd32(self.take(4)?, 0))
-    }
-    fn u64(&mut self) -> StoreResult<u64> {
-        Ok(rd64(self.take(8)?, 0))
-    }
-    fn name(&mut self) -> StoreResult<String> {
-        let n = self.u8()? as usize;
-        let s = std::str::from_utf8(self.take(n)?).map_err(|_| corrupt("meta name"))?;
-        crate::identifier(s)
-            .ok()
-            .filter(|x| x == s)
-            .ok_or_else(|| corrupt("meta name is not a normalized identifier"))
-    }
+const META_HDR_LEN: usize = 7;
+const META_HDR_LAST_TS: usize = 0;
+const META_HDR_PAGE_COUNT: usize = 1;
+const META_HDR_CATALOG_REV: usize = 2;
+const META_HDR_NEXT_TABLE_ID: usize = 3;
+const META_HDR_NTABLES: usize = 4;
+const META_HDR_NCOLS: usize = 5;
+const META_HDR_NINDEXES: usize = 6;
+
+const META_TABLE_STRIDE: usize = 7;
+const META_TABLE_NAME_OFF: usize = 0;
+const META_TABLE_NAME_LEN: usize = 1;
+const META_TABLE_ID: usize = 2;
+const META_TABLE_ROOT: usize = 3;
+const META_TABLE_NEXT_ROWID: usize = 4;
+const META_TABLE_COL_START: usize = 5;
+const META_TABLE_NCOLS: usize = 6;
+
+const META_COL_STRIDE: usize = 4;
+const META_COL_NAME_OFF: usize = 0;
+const META_COL_NAME_LEN: usize = 1;
+const META_COL_TYPE_TAG: usize = 2;
+const META_COL_NULLABLE: usize = 3;
+
+const META_INDEX_STRIDE: usize = 7;
+const META_INDEX_NAME_OFF: usize = 0;
+const META_INDEX_NAME_LEN: usize = 1;
+const META_INDEX_ID: usize = 2;
+const META_INDEX_TNAME_OFF: usize = 3;
+const META_INDEX_TNAME_LEN: usize = 4;
+const META_INDEX_COLUMN: usize = 5;
+const META_INDEX_ROOT: usize = 6;
+
+const META_STACK_TABLES: usize = 16;
+const META_STACK_COLS: usize = 64;
+const META_STACK_INDEXES: usize = 16;
+
+const META_STATUS_OK: u64 = 0;
+const META_STATUS_GROW: u64 = 14;
+const META_ERRORS: [&str; 13] = [
+    "meta page kind",
+    "meta page length",
+    "meta page overrun",
+    "meta page magic or format",
+    "meta name is not a normalized identifier",
+    "meta column type",
+    "meta nullability",
+    "duplicate meta column",
+    "meta table entry",
+    "duplicate meta table",
+    "meta index entry",
+    "duplicate meta index",
+    "meta page trailer",
+];
+
+fn meta_slice_str(b: &[u8], off: u64, len: u64) -> String {
+    let start = off as usize;
+    let end = start + len as usize;
+    // Validated as ASCII normalized identifier by `@vesper/quarry::meta`.
+    std::str::from_utf8(&b[start..end])
+        .expect("validated ASCII identifier")
+        .to_string()
 }
 
 impl Meta {
@@ -273,116 +303,139 @@ impl Meta {
         Ok(())
     }
     pub fn decode(b: &[u8]) -> StoreResult<Self> {
-        if kind(b) != KIND_META || level(b) != 0 {
-            return Err(corrupt("meta page kind"));
-        }
-        let len = rd32(b, 32) as usize;
-        if 36 + len > PAGE_SIZE || b[36 + len..].iter().any(|&x| x != 0) {
-            return Err(corrupt("meta page length"));
-        }
-        let mut c = Cursor {
-            b: &b[36..36 + len],
-            at: 0,
+        let mut hdr = [0u64; META_HDR_LEN];
+        let mut s_tables = [0u64; META_STACK_TABLES * META_TABLE_STRIDE];
+        let mut s_cols = [0u64; META_STACK_COLS * META_COL_STRIDE];
+        let mut s_indexes = [0u64; META_STACK_INDEXES * META_INDEX_STRIDE];
+
+        let mut h_tables = Vec::new();
+        let mut h_cols = Vec::new();
+        let mut h_indexes = Vec::new();
+
+        let status = loop {
+            let tables_buf: &mut [u64] = if h_tables.is_empty() {
+                &mut s_tables
+            } else {
+                &mut h_tables
+            };
+            let cols_buf: &mut [u64] = if h_cols.is_empty() {
+                &mut s_cols
+            } else {
+                &mut h_cols
+            };
+            let indexes_buf: &mut [u64] = if h_indexes.is_empty() {
+                &mut s_indexes
+            } else {
+                &mut h_indexes
+            };
+            let st =
+                crate::port::binding::meta_decode(b, &mut hdr, tables_buf, cols_buf, indexes_buf);
+            if st != META_STATUS_GROW {
+                break st;
+            }
+            let need_t = (hdr[META_HDR_NTABLES] as usize) * META_TABLE_STRIDE;
+            if need_t > tables_buf.len() {
+                h_tables.resize(need_t, 0);
+            }
+            let need_c = (hdr[META_HDR_NCOLS] as usize) * META_COL_STRIDE;
+            if need_c > cols_buf.len() {
+                h_cols.resize(need_c, 0);
+            }
+            let need_i = (hdr[META_HDR_NINDEXES] as usize) * META_INDEX_STRIDE;
+            if need_i > indexes_buf.len() {
+                h_indexes.resize(need_i, 0);
+            }
         };
-        if c.take(8)? != META_MAGIC || c.u32()? != META_FORMAT {
-            return Err(corrupt("meta page magic or format"));
+
+        if status != META_STATUS_OK {
+            let msg = META_ERRORS
+                .get((status as usize).saturating_sub(1))
+                .copied()
+                .unwrap_or("meta page corrupt");
+            return Err(corrupt(msg));
         }
-        let last_ts = c.u64()?;
-        let page_count = c.u64()?;
-        let catalog_revision = c.u64()?;
-        let next_table_id = c.u32()?;
-        let n = c.u16()? as usize;
+
+        let tables_buf: &[u64] = if h_tables.is_empty() {
+            &s_tables
+        } else {
+            &h_tables
+        };
+        let cols_buf: &[u64] = if h_cols.is_empty() { &s_cols } else { &h_cols };
+        let indexes_buf: &[u64] = if h_indexes.is_empty() {
+            &s_indexes
+        } else {
+            &h_indexes
+        };
+
+        let ntables = hdr[META_HDR_NTABLES] as usize;
         let mut tables = BTreeMap::new();
-        let mut ids = BTreeSet::new();
-        for _ in 0..n {
-            let name = c.name()?;
-            let id = c.u32()?;
-            let root = c.u64()?;
-            let next_rowid = c.u64()?;
-            let ncols = c.u16()? as usize;
-            let mut columns = Vec::with_capacity(ncols.min(128));
-            let mut names = BTreeSet::new();
-            for _ in 0..ncols {
-                let cname = c.name()?;
-                let ty = tag_type(c.u8()?).ok_or_else(|| corrupt("meta column type"))?;
-                let nullable = match c.u8()? {
-                    0 => false,
-                    1 => true,
-                    _ => return Err(corrupt("meta nullability")),
-                };
-                if !names.insert(cname.clone()) {
-                    return Err(corrupt("duplicate meta column"));
-                }
+        for ti in 0..ntables {
+            let tb = ti * META_TABLE_STRIDE;
+            let name = meta_slice_str(
+                b,
+                tables_buf[tb + META_TABLE_NAME_OFF],
+                tables_buf[tb + META_TABLE_NAME_LEN],
+            );
+            let col_start = tables_buf[tb + META_TABLE_COL_START] as usize;
+            let ncols = tables_buf[tb + META_TABLE_NCOLS] as usize;
+            let mut columns = Vec::with_capacity(ncols);
+            for ci in 0..ncols {
+                let cb = (col_start + ci) * META_COL_STRIDE;
+                let cname = meta_slice_str(
+                    b,
+                    cols_buf[cb + META_COL_NAME_OFF],
+                    cols_buf[cb + META_COL_NAME_LEN],
+                );
+                let ty = tag_type(cols_buf[cb + META_COL_TYPE_TAG] as u8)
+                    .expect("validated column type");
+                let nullable = cols_buf[cb + META_COL_NULLABLE] != 0;
                 columns.push(ColumnDef {
                     name: cname,
                     ty,
                     nullable,
                 });
             }
-            if id == 0
-                || id >= next_table_id
-                || !ids.insert(id)
-                || root <= FSM_PAGE
-                || root >= page_count
-                || next_rowid == 0
-                || columns.is_empty()
-            {
-                return Err(corrupt("meta table entry"));
-            }
-            if tables
-                .insert(
-                    name,
-                    TableMeta {
-                        id,
-                        root,
-                        next_rowid,
-                        columns,
-                    },
-                )
-                .is_some()
-            {
-                return Err(corrupt("duplicate meta table"));
-            }
+            tables.insert(
+                name,
+                TableMeta {
+                    id: tables_buf[tb + META_TABLE_ID] as u32,
+                    root: tables_buf[tb + META_TABLE_ROOT],
+                    next_rowid: tables_buf[tb + META_TABLE_NEXT_ROWID],
+                    columns,
+                },
+            );
         }
-        let ni = c.u16()? as usize;
+
+        let nindexes = hdr[META_HDR_NINDEXES] as usize;
         let mut indexes = BTreeMap::new();
-        for _ in 0..ni {
-            let name = c.name()?;
-            let id = c.u32()?;
-            let table = c.name()?;
-            let column = c.u16()? as usize;
-            let root = c.u64()?;
-            let ok = tables
-                .get(&table)
-                .is_some_and(|t: &TableMeta| column < t.columns.len());
-            if !ok
-                || id == 0
-                || id >= next_table_id
-                || !ids.insert(id)
-                || root <= FSM_PAGE
-                || root >= page_count
-                || tables.contains_key(&name)
-            {
-                return Err(corrupt("meta index entry"));
-            }
-            let ix = IndexMeta {
-                id,
-                table,
-                column,
-                root,
-            };
-            if indexes.insert(name, ix).is_some() {
-                return Err(corrupt("duplicate meta index"));
-            }
+        for ii in 0..nindexes {
+            let ib = ii * META_INDEX_STRIDE;
+            let name = meta_slice_str(
+                b,
+                indexes_buf[ib + META_INDEX_NAME_OFF],
+                indexes_buf[ib + META_INDEX_NAME_LEN],
+            );
+            let table = meta_slice_str(
+                b,
+                indexes_buf[ib + META_INDEX_TNAME_OFF],
+                indexes_buf[ib + META_INDEX_TNAME_LEN],
+            );
+            indexes.insert(
+                name,
+                IndexMeta {
+                    id: indexes_buf[ib + META_INDEX_ID] as u32,
+                    table,
+                    column: indexes_buf[ib + META_INDEX_COLUMN] as usize,
+                    root: indexes_buf[ib + META_INDEX_ROOT],
+                },
+            );
         }
-        if c.at != len || page_count < 2 || count(b) != n {
-            return Err(corrupt("meta page trailer"));
-        }
+
         Ok(Self {
-            last_ts,
-            page_count,
-            catalog_revision,
-            next_table_id,
+            last_ts: hdr[META_HDR_LAST_TS],
+            page_count: hdr[META_HDR_PAGE_COUNT],
+            catalog_revision: hdr[META_HDR_CATALOG_REV],
+            next_table_id: hdr[META_HDR_NEXT_TABLE_ID] as u32,
             tables,
             indexes,
         })
@@ -391,30 +444,44 @@ impl Meta {
 
 // ---- free-space map ------------------------------------------------------
 
+const FSM_STACK_PAGES: usize = 256;
+const FSM_STATUS_OK: u64 = 0;
+const FSM_STATUS_KIND: u64 = 1;
+const FSM_STATUS_FIXED: u64 = 2;
+const FSM_STATUS_GROW: u64 = 3;
+
 pub(crate) fn encode_fsm(b: &mut [u8], free: &BTreeSet<u64>) {
-    b[32..].fill(0);
-    for &p in free {
-        let bit = p as usize;
-        b[32 + bit / 8] |= 1 << (bit % 8);
+    let mut stack = [0u64; FSM_STACK_PAGES];
+    if free.len() <= FSM_STACK_PAGES {
+        for (slot, &p) in stack.iter_mut().zip(free.iter()) {
+            *slot = p;
+        }
+        crate::port::binding::fsm_encode(b, &stack[..free.len()]);
+    } else {
+        let pages: Vec<u64> = free.iter().copied().collect();
+        crate::port::binding::fsm_encode(b, &pages);
     }
-    set_count(b, free.len().min(u16::MAX as usize));
 }
 pub(crate) fn decode_fsm(b: &[u8]) -> StoreResult<BTreeSet<u64>> {
-    if kind(b) != KIND_FSM || level(b) != 0 {
-        return Err(corrupt("free-space map kind"));
-    }
-    let mut free = BTreeSet::new();
-    for (i, &byte) in b[32..].iter().enumerate() {
-        for bit in 0..8 {
-            if byte & (1 << bit) != 0 {
-                free.insert((i * 8 + bit) as u64);
+    let mut stack = [0u64; FSM_STACK_PAGES];
+    let mut heap = Vec::new();
+    let mut count = [0u64; 1];
+    let st = crate::port::binding::fsm_decode(b, &mut stack, &mut count);
+    let pages: &[u64] = match st {
+        FSM_STATUS_OK => &stack[..count[0] as usize],
+        FSM_STATUS_GROW => {
+            heap.resize(count[0] as usize, 0);
+            let st2 = crate::port::binding::fsm_decode(b, &mut heap, &mut count);
+            if st2 != FSM_STATUS_OK {
+                return Err(corrupt("free-space map"));
             }
+            &heap[..count[0] as usize]
         }
-    }
-    if free.contains(&META_PAGE) || free.contains(&FSM_PAGE) {
-        return Err(corrupt("free-space map frees a fixed page"));
-    }
-    Ok(free)
+        FSM_STATUS_KIND => return Err(corrupt("free-space map kind")),
+        FSM_STATUS_FIXED => return Err(corrupt("free-space map frees a fixed page")),
+        _ => return Err(corrupt("free-space map")),
+    };
+    Ok(pages.iter().copied().collect())
 }
 
 // ---- keys and entries ----------------------------------------------------
@@ -612,18 +679,18 @@ pub(crate) fn leaf_layout(types: &[ScalarType], c: usize) -> LeafLayout {
         end: at,
     }
 }
+const LEAF_MAX_COLS: usize = 128;
+const LEAF_COL_TRIPLE: usize = 3;
+const LEAF_VAR_WIDTH: u64 = 4;
+
 /// Largest physical capacity whose fixed area fits a page.
 pub(crate) fn max_capacity(types: &[ScalarType]) -> usize {
-    let (mut lo, mut hi) = (1usize, 4096usize);
-    while lo < hi {
-        let mid = (lo + hi).div_ceil(2);
-        if leaf_layout(types, mid).end <= PAGE_SIZE {
-            lo = mid;
-        } else {
-            hi = mid - 1;
-        }
+    let mut tags = [0u8; LEAF_MAX_COLS];
+    let n = types.len();
+    for (slot, &t) in tags[..n].iter_mut().zip(types.iter()) {
+        *slot = type_tag(t);
     }
-    lo
+    crate::port::binding::leaf_max_capacity(&tags[..n]) as usize
 }
 /// Variable-width payload bytes of an entry.
 pub(crate) fn var_bytes(e: &Entry) -> usize {
@@ -686,18 +753,25 @@ pub(crate) fn leaf_slot(b: &[u8], lay: &LeafLayout, pos: usize) -> usize {
 pub(crate) fn leaf_key(b: &[u8], lay: &LeafLayout, pos: usize) -> Key {
     Key::read(b, lay.keys + 16 * leaf_slot(b, lay, pos))
 }
+const LEAF_SEARCH_FOUND_BIT: u64 = 1;
+const LEAF_MAX_VAR_COLS: usize = 128;
+const LEAF_VAR_COL_PAIR: usize = 2;
+
 /// Binary search over the key-ordered directory.
 pub(crate) fn leaf_search(b: &[u8], lay: &LeafLayout, key: Key) -> Result<usize, usize> {
-    let (mut lo, mut hi) = (0, count(b));
-    while lo < hi {
-        let mid = (lo + hi) / 2;
-        match leaf_key(b, lay, mid).cmp(&key) {
-            std::cmp::Ordering::Less => lo = mid + 1,
-            std::cmp::Ordering::Greater => hi = mid,
-            std::cmp::Ordering::Equal => return Ok(mid),
-        }
+    let encoded = crate::port::binding::leaf_search(
+        b,
+        lay.dir as u64,
+        lay.keys as u64,
+        key.rowid,
+        key.inv_ts,
+    );
+    let idx = (encoded >> 1) as usize;
+    if (encoded & LEAF_SEARCH_FOUND_BIT) != 0 {
+        Ok(idx)
+    } else {
+        Err(idx)
     }
-    Err(lo)
 }
 fn read_value(b: &[u8], lay: &LeafLayout, col: usize, slot: usize) -> StoreResult<Value> {
     let (nulls, data, s) = lay.cols[col];
@@ -815,45 +889,39 @@ fn slot_is_zero(b: &[u8], lay: &LeafLayout, s: usize) -> bool {
             !bit(b, nulls, s) && b[data + w * s..data + w * (s + 1)].iter().all(|&x| x == 0)
         })
 }
-/// Live variable-width bytes in the heap.
-fn heap_live(b: &[u8], lay: &LeafLayout) -> usize {
-    let mut live = 0;
-    for pos in 0..count(b) {
-        let s = leaf_slot(b, lay, pos);
-        for &(nulls, data, st) in &lay.cols {
-            if st == Store::Var && !bit(b, nulls, s) {
-                live += rd16(b, data + 4 * s + 2) as usize;
-            }
+fn pack_var_cols(
+    lay: &LeafLayout,
+    buf: &mut [u64; LEAF_MAX_VAR_COLS * LEAF_VAR_COL_PAIR],
+) -> usize {
+    let mut n = 0;
+    for &(nulls, data, st) in &lay.cols {
+        if st == Store::Var {
+            buf[n] = nulls as u64;
+            buf[n + 1] = data as u64;
+            n += LEAF_VAR_COL_PAIR;
         }
     }
-    live
+    n
 }
+
 /// Rewrites the heap without holes left by removed versions.
 pub(crate) fn leaf_compact(b: &mut [u8], lay: &LeafLayout) {
-    let mut values: Vec<(usize, usize, Vec<u8>)> = Vec::new(); // (slot, col data base, bytes)
-    for pos in 0..count(b) {
-        let s = leaf_slot(b, lay, pos);
-        for &(nulls, data, st) in &lay.cols {
-            if st == Store::Var && !bit(b, nulls, s) {
-                let off = rd16(b, data + 4 * s) as usize;
-                let len = rd16(b, data + 4 * s + 2) as usize;
-                values.push((s, data, b[off..off + len].to_vec()));
-            }
-        }
-    }
-    b[lay.end..].fill(0);
-    let mut top = PAGE_SIZE;
-    for (s, data, bytes) in values {
-        top -= bytes.len();
-        b[top..top + bytes.len()].copy_from_slice(&bytes);
-        let off = if bytes.is_empty() { 0 } else { top as u16 };
-        wr16(b, data + 4 * s, off);
-    }
-    set_free_offset(b, top);
+    let mut var_cols = [0u64; LEAF_MAX_VAR_COLS * LEAF_VAR_COL_PAIR];
+    let nvar = pack_var_cols(lay, &mut var_cols);
+    let mut scratch = [0u8; PAGE_SIZE];
+    crate::port::binding::leaf_compact(
+        b,
+        lay.dir as u64,
+        lay.end as u64,
+        &var_cols[..nvar],
+        &mut scratch,
+    );
 }
 /// Heap bytes held by removed versions (reclaimed by [`leaf_compact`]).
 pub(crate) fn leaf_garbage(b: &[u8], lay: &LeafLayout) -> usize {
-    PAGE_SIZE - heap_start(b) - heap_live(b, lay)
+    let mut var_cols = [0u64; LEAF_MAX_VAR_COLS * LEAF_VAR_COL_PAIR];
+    let nvar = pack_var_cols(lay, &mut var_cols);
+    crate::port::binding::leaf_garbage(b, lay.dir as u64, &var_cols[..nvar]) as usize
 }
 fn write_entry(b: &mut [u8], lay: &LeafLayout, slot: usize, e: &Entry, top: &mut usize) {
     e.key.write(b, lay.keys + 16 * slot);
@@ -885,18 +953,6 @@ fn write_entry(b: &mut [u8], lay: &LeafLayout, slot: usize, e: &Entry, top: &mut
             }
             _ => unreachable!("rows are validated against the schema before storage"),
         }
-    }
-}
-fn clear_slot(b: &mut [u8], lay: &LeafLayout, s: usize) {
-    b[lay.keys + 16 * s..lay.keys + 16 * s + 16].fill(0);
-    b[lay.tomb + s] = 0;
-    for &(nulls, data, st) in &lay.cols {
-        set_bit(b, nulls, s, false);
-        let w = match st {
-            Store::Fixed(w) => w,
-            Store::Var => 4,
-        };
-        b[data + w * s..data + w * (s + 1)].fill(0);
     }
 }
 /// Builds a leaf holding `entries` (sorted). Chooses a physical capacity
@@ -971,18 +1027,27 @@ pub(crate) fn leaf_insert(b: &mut [u8], lay: &LeafLayout, pos: usize, e: &Entry)
 /// Removes the entry at directory position `pos`; its heap bytes become a
 /// hole and its physical slot is zeroed for reuse.
 pub(crate) fn leaf_remove(b: &mut [u8], lay: &LeafLayout, pos: usize) {
-    let n = count(b);
-    let s = leaf_slot(b, lay, pos);
-    clear_slot(b, lay, s);
-    set_bit(b, lay.used, s, false);
-    b.copy_within(lay.dir + 2 * (pos + 1)..lay.dir + 2 * n, lay.dir + 2 * pos);
-    wr16(b, lay.dir + 2 * (n - 1), 0);
-    set_count(b, n - 1);
-    if count(b) == 0 {
-        // An empty heap needs no holes.
-        b[lay.end..].fill(0);
-        set_free_offset(b, PAGE_SIZE);
+    let mut cols = [0u64; LEAF_MAX_COLS * LEAF_COL_TRIPLE];
+    let n = lay.cols.len();
+    for (i, &(nulls, data, st)) in lay.cols.iter().enumerate() {
+        let base = i * LEAF_COL_TRIPLE;
+        cols[base] = nulls as u64;
+        cols[base + 1] = data as u64;
+        cols[base + 2] = match st {
+            Store::Fixed(w) => w as u64,
+            Store::Var => LEAF_VAR_WIDTH,
+        };
     }
+    crate::port::binding::leaf_remove(
+        b,
+        lay.dir as u64,
+        lay.used as u64,
+        lay.keys as u64,
+        lay.tomb as u64,
+        lay.end as u64,
+        &cols[..n * LEAF_COL_TRIPLE],
+        pos as u64,
+    );
 }
 
 #[cfg(test)]
@@ -1201,5 +1266,864 @@ mod leaf_differential {
                 assert_eq!(got, want, "bits {bits:#x}, slot {slot}");
             }
         }
+    }
+
+    struct RefCursor<'a> {
+        b: &'a [u8],
+        at: usize,
+    }
+    impl RefCursor<'_> {
+        fn take(&mut self, n: usize) -> StoreResult<&[u8]> {
+            let end = self.at.checked_add(n).filter(|&e| e <= self.b.len());
+            let end = end.ok_or_else(|| corrupt("meta page overrun"))?;
+            let s = &self.b[self.at..end];
+            self.at = end;
+            Ok(s)
+        }
+        fn u8(&mut self) -> StoreResult<u8> {
+            Ok(self.take(1)?[0])
+        }
+        fn u16(&mut self) -> StoreResult<u16> {
+            Ok(rd16(self.take(2)?, 0))
+        }
+        fn u32(&mut self) -> StoreResult<u32> {
+            Ok(rd32(self.take(4)?, 0))
+        }
+        fn u64(&mut self) -> StoreResult<u64> {
+            Ok(rd64(self.take(8)?, 0))
+        }
+        fn name(&mut self) -> StoreResult<String> {
+            let n = self.u8()? as usize;
+            let s = std::str::from_utf8(self.take(n)?).map_err(|_| corrupt("meta name"))?;
+            crate::identifier(s)
+                .ok()
+                .filter(|x| x == s)
+                .ok_or_else(|| corrupt("meta name is not a normalized identifier"))
+        }
+    }
+
+    fn meta_decode_reference(b: &[u8]) -> StoreResult<Meta> {
+        if kind(b) != KIND_META || level(b) != 0 {
+            return Err(corrupt("meta page kind"));
+        }
+        let len = rd32(b, 32) as usize;
+        if 36 + len > PAGE_SIZE || b[36 + len..].iter().any(|&x| x != 0) {
+            return Err(corrupt("meta page length"));
+        }
+        let mut c = RefCursor {
+            b: &b[36..36 + len],
+            at: 0,
+        };
+        if c.take(8)? != META_MAGIC || c.u32()? != META_FORMAT {
+            return Err(corrupt("meta page magic or format"));
+        }
+        let last_ts = c.u64()?;
+        let page_count = c.u64()?;
+        let catalog_revision = c.u64()?;
+        let next_table_id = c.u32()?;
+        let n = c.u16()? as usize;
+        let mut tables = BTreeMap::new();
+        let mut ids = BTreeSet::new();
+        for _ in 0..n {
+            let name = c.name()?;
+            let id = c.u32()?;
+            let root = c.u64()?;
+            let next_rowid = c.u64()?;
+            let ncols = c.u16()? as usize;
+            let mut columns = Vec::with_capacity(ncols.min(128));
+            let mut names = BTreeSet::new();
+            for _ in 0..ncols {
+                let cname = c.name()?;
+                let ty = tag_type(c.u8()?).ok_or_else(|| corrupt("meta column type"))?;
+                let nullable = match c.u8()? {
+                    0 => false,
+                    1 => true,
+                    _ => return Err(corrupt("meta nullability")),
+                };
+                if !names.insert(cname.clone()) {
+                    return Err(corrupt("duplicate meta column"));
+                }
+                columns.push(ColumnDef {
+                    name: cname,
+                    ty,
+                    nullable,
+                });
+            }
+            if id == 0
+                || id >= next_table_id
+                || !ids.insert(id)
+                || root <= FSM_PAGE
+                || root >= page_count
+                || next_rowid == 0
+                || columns.is_empty()
+            {
+                return Err(corrupt("meta table entry"));
+            }
+            if tables
+                .insert(
+                    name,
+                    TableMeta {
+                        id,
+                        root,
+                        next_rowid,
+                        columns,
+                    },
+                )
+                .is_some()
+            {
+                return Err(corrupt("duplicate meta table"));
+            }
+        }
+        let ni = c.u16()? as usize;
+        let mut indexes = BTreeMap::new();
+        for _ in 0..ni {
+            let name = c.name()?;
+            let id = c.u32()?;
+            let table = c.name()?;
+            let column = c.u16()? as usize;
+            let root = c.u64()?;
+            let ok = tables
+                .get(&table)
+                .is_some_and(|t: &TableMeta| column < t.columns.len());
+            if !ok
+                || id == 0
+                || id >= next_table_id
+                || !ids.insert(id)
+                || root <= FSM_PAGE
+                || root >= page_count
+                || tables.contains_key(&name)
+            {
+                return Err(corrupt("meta index entry"));
+            }
+            let ix = IndexMeta {
+                id,
+                table,
+                column,
+                root,
+            };
+            if indexes.insert(name, ix).is_some() {
+                return Err(corrupt("duplicate meta index"));
+            }
+        }
+        if c.at != len || page_count < 2 || count(b) != n {
+            return Err(corrupt("meta page trailer"));
+        }
+        Ok(Meta {
+            last_ts,
+            page_count,
+            catalog_revision,
+            next_table_id,
+            tables,
+            indexes,
+        })
+    }
+
+    fn sample_meta(ntables: usize, nindexes: usize) -> Meta {
+        let mut m = Meta::new();
+        m.last_ts = 42;
+        m.page_count = 1000;
+        m.catalog_revision = 7;
+        let mut next_id = 1u32;
+        for t in 0..ntables {
+            let id = next_id;
+            next_id += 1;
+            let tname = format!("tbl_{t}");
+            m.tables.insert(
+                tname,
+                TableMeta {
+                    id,
+                    root: 2 + t as u64,
+                    next_rowid: 10 + t as u64,
+                    columns: vec![
+                        ColumnDef {
+                            name: "id".to_string(),
+                            ty: ScalarType::U64,
+                            nullable: false,
+                        },
+                        ColumnDef {
+                            name: "val".to_string(),
+                            ty: ScalarType::Text,
+                            nullable: true,
+                        },
+                        ColumnDef {
+                            name: "score".to_string(),
+                            ty: ScalarType::F64,
+                            nullable: true,
+                        },
+                    ],
+                },
+            );
+        }
+        for ix in 0..nindexes {
+            let id = next_id;
+            next_id += 1;
+            let tname = format!("tbl_{}", ix % ntables.max(1));
+            m.indexes.insert(
+                format!("idx_{ix}"),
+                IndexMeta {
+                    id,
+                    table: tname,
+                    column: ix % 3,
+                    root: 500 + ix as u64,
+                },
+            );
+        }
+        m.next_table_id = next_id;
+        m
+    }
+
+    #[test]
+    fn meta_decode_matches_reference() {
+        const DIFF_CASES: usize = 512;
+        let mut state: u64 = 0x6d65_7461_cafe_babe;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1);
+            state >> 32
+        };
+
+        let mut ok_count = 0usize;
+        let mut err_count = 0usize;
+        for case in 0..DIFF_CASES {
+            let ntables = if case == 0 {
+                20
+            } else {
+                1 + (next() % 5) as usize
+            };
+            let nindexes = if case == 0 { 20 } else { (next() % 4) as usize };
+            let meta = sample_meta(ntables, nindexes);
+            let mut b = new_page();
+            format(&mut b[..], META_PAGE, KIND_META, 0);
+            meta.encode(&mut b[..]).unwrap();
+
+            if case >= 16 {
+                let len = rd32(&b[..], 32) as usize;
+                let mutations = 1 + (next() % 3) as usize;
+                for _ in 0..mutations {
+                    let at = match next() % 3 {
+                        0 => 20 + (next() % 20) as usize,
+                        1 => 36 + (next() % len.max(1) as u64) as usize,
+                        _ => (next() % PAGE_SIZE as u64) as usize,
+                    };
+                    if next() % 2 == 0 {
+                        b[at] ^= 1 << (next() % 8);
+                    } else {
+                        b[at] = next() as u8;
+                    }
+                }
+            }
+            let got = Meta::decode(&b[..]);
+            let want = meta_decode_reference(&b[..]);
+            match (&got, &want) {
+                (Ok(gm), Ok(wm)) => {
+                    assert_eq!(gm, wm, "case {case}");
+                    ok_count += 1;
+                }
+                (Err(_), Err(_)) => {
+                    err_count += 1;
+                }
+                _ => panic!("case {case}: port {got:?}, Rust {want:?}"),
+            }
+        }
+        assert!(ok_count >= 16 && err_count >= 100);
+    }
+
+    #[test]
+    #[ignore = "ABBA benchmark; run in release with --ignored --nocapture"]
+    fn abba_meta_decode() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        const ABBA_EPOCHS: usize = 30;
+        const ABBA_WARMUP: usize = 2;
+        const ABBA_ITERS: usize = 200;
+        const SIGN_ALPHA_HALF: f64 = 0.025;
+        const FLIP_LIMIT: f64 = 1.50;
+
+        let meta = sample_meta(6, 4);
+        let mut b = new_page();
+        format(&mut b[..], META_PAGE, KIND_META, 0);
+        meta.encode(&mut b[..]).unwrap();
+
+        let mut ratios = Vec::with_capacity(ABBA_EPOCHS);
+        for epoch in 0..(ABBA_WARMUP + ABBA_EPOCHS) {
+            let t0 = Instant::now();
+            for _ in 0..ABBA_ITERS {
+                black_box(meta_decode_reference(black_box(&b[..])).unwrap());
+            }
+            let r1 = t0.elapsed().as_nanos();
+
+            let t1 = Instant::now();
+            for _ in 0..ABBA_ITERS {
+                black_box(Meta::decode(black_box(&b[..])).unwrap());
+            }
+            let p1 = t1.elapsed().as_nanos();
+
+            let t2 = Instant::now();
+            for _ in 0..ABBA_ITERS {
+                black_box(Meta::decode(black_box(&b[..])).unwrap());
+            }
+            let p2 = t2.elapsed().as_nanos();
+
+            let t3 = Instant::now();
+            for _ in 0..ABBA_ITERS {
+                black_box(meta_decode_reference(black_box(&b[..])).unwrap());
+            }
+            let r2 = t3.elapsed().as_nanos();
+
+            if epoch >= ABBA_WARMUP {
+                ratios.push((p1 + p2) as f64 / (r1 + r2) as f64);
+            }
+        }
+        ratios.sort_by(f64::total_cmp);
+        let mid = ratios.len() / 2;
+        let mut cdf = 0.0;
+        let mut choose = 1.0;
+        let mut k = 0usize;
+        for j in 0..ratios.len() {
+            cdf += choose * 0.5f64.powi(ratios.len() as i32);
+            if cdf > SIGN_ALPHA_HALF {
+                break;
+            }
+            k = j + 1;
+            choose = choose * (ratios.len() - j) as f64 / (j + 1) as f64;
+        }
+        let i = k.saturating_sub(1).min(mid);
+        let (ci_lo, ci_hi) = (ratios[i], ratios[ratios.len() - 1 - i]);
+        println!(
+            "ABBA meta_decode: median {:.3}x [{ci_lo:.3}x, {ci_hi:.3}x]",
+            ratios[mid]
+        );
+        assert!(
+            ci_hi <= FLIP_LIMIT,
+            "ABBA 95% upper bound {ci_hi:.3}x exceeds {FLIP_LIMIT:.2}x"
+        );
+    }
+
+    fn leaf_search_reference(b: &[u8], lay: &LeafLayout, key: Key) -> Result<usize, usize> {
+        let (mut lo, mut hi) = (0, count(b));
+        while lo < hi {
+            let mid = (lo + hi) / 2;
+            match leaf_key(b, lay, mid).cmp(&key) {
+                std::cmp::Ordering::Less => lo = mid + 1,
+                std::cmp::Ordering::Greater => hi = mid,
+                std::cmp::Ordering::Equal => return Ok(mid),
+            }
+        }
+        Err(lo)
+    }
+
+    fn leaf_garbage_reference(b: &[u8], lay: &LeafLayout) -> usize {
+        let mut live = 0;
+        for pos in 0..count(b) {
+            let s = leaf_slot(b, lay, pos);
+            for &(nulls, data, st) in &lay.cols {
+                if st == Store::Var && !bit(b, nulls, s) {
+                    live += rd16(b, data + 4 * s + 2) as usize;
+                }
+            }
+        }
+        PAGE_SIZE - heap_start(b) - live
+    }
+
+    fn leaf_compact_reference(b: &mut [u8], lay: &LeafLayout) {
+        let mut values: Vec<(usize, usize, Vec<u8>)> = Vec::new();
+        for pos in 0..count(b) {
+            let s = leaf_slot(b, lay, pos);
+            for &(nulls, data, st) in &lay.cols {
+                if st == Store::Var && !bit(b, nulls, s) {
+                    let off = rd16(b, data + 4 * s) as usize;
+                    let len = rd16(b, data + 4 * s + 2) as usize;
+                    values.push((s, data, b[off..off + len].to_vec()));
+                }
+            }
+        }
+        b[lay.end..].fill(0);
+        let mut top = PAGE_SIZE;
+        for (s, data, bytes) in values {
+            top -= bytes.len();
+            b[top..top + bytes.len()].copy_from_slice(&bytes);
+            let off = if bytes.is_empty() { 0 } else { top as u16 };
+            wr16(b, data + 4 * s, off);
+        }
+        set_free_offset(b, top);
+    }
+
+    fn sample_fragmented_leaf(seed: u64) -> (Box<Page>, LeafLayout, Vec<Key>) {
+        let mut state = seed;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1);
+            state >> 32
+        };
+        let types = [
+            ScalarType::U64,
+            ScalarType::Text,
+            ScalarType::Bytes,
+            ScalarType::Bool,
+        ];
+        let mut entries = Vec::new();
+        let n = 16 + (next() % 24) as usize;
+        for i in 0..n {
+            let key = Key::version((i as u64) * 2 + 1, 10 + (next() % 5));
+            let tomb = next() % 7 == 0;
+            let values = if tomb {
+                Vec::new()
+            } else {
+                let text = if next() % 5 == 0 {
+                    Value::Null
+                } else {
+                    let len = (next() % 48) as usize;
+                    Value::Text("a".repeat(len))
+                };
+                let bytes = if next() % 4 == 0 {
+                    Value::Null
+                } else {
+                    let len = (next() % 32) as usize;
+                    Value::Bytes(vec![(i as u8).wrapping_add(1); len])
+                };
+                vec![
+                    Value::U64(i as u64),
+                    text,
+                    bytes,
+                    Value::Bool(next() % 2 == 0),
+                ]
+            };
+            entries.push(Entry { key, tomb, values });
+        }
+        let mut b = new_page();
+        assert!(leaf_build(&mut b[..], 7, &types, &entries, 4096));
+        let lay = layout_of(&b[..]).unwrap();
+        // Remove every 3rd entry to create heap fragmentation.
+        let mut kept_keys = Vec::new();
+        for (idx, e) in entries.iter().enumerate() {
+            if idx % 3 == 0 {
+                let pos = leaf_search(&b[..], &lay, e.key).unwrap();
+                leaf_remove(&mut b[..], &lay, pos);
+            } else {
+                kept_keys.push(e.key);
+            }
+        }
+        (b, lay, kept_keys)
+    }
+
+    #[test]
+    fn leaf_ops_match_reference() {
+        const LEAF_DIFF_CASES: u64 = 128;
+        for case in 0..LEAF_DIFF_CASES {
+            let (b0, lay, keys) = sample_fragmented_leaf(0x6c65_6166_0000 + case);
+            // Check leaf_search on both present and absent keys.
+            for &k in &keys {
+                assert_eq!(
+                    leaf_search(&b0[..], &lay, k),
+                    leaf_search_reference(&b0[..], &lay, k),
+                    "case {case} present"
+                );
+                let miss = Key {
+                    rowid: k.rowid + 1,
+                    inv_ts: k.inv_ts,
+                };
+                assert_eq!(
+                    leaf_search(&b0[..], &lay, miss),
+                    leaf_search_reference(&b0[..], &lay, miss),
+                    "case {case} miss"
+                );
+            }
+            // Check leaf_garbage.
+            assert_eq!(
+                leaf_garbage(&b0[..], &lay),
+                leaf_garbage_reference(&b0[..], &lay),
+                "case {case} garbage"
+            );
+            // Check leaf_compact byte-for-byte.
+            let mut bp = b0.clone();
+            let mut br = b0;
+            leaf_compact(&mut bp[..], &lay);
+            leaf_compact_reference(&mut br[..], &lay);
+            assert_eq!(&bp[..], &br[..], "case {case} compact");
+            assert_eq!(leaf_garbage(&bp[..], &lay), 0, "case {case} post-compact");
+        }
+    }
+
+    #[test]
+    #[ignore = "ABBA benchmark; run in release with --ignored --nocapture"]
+    fn abba_leaf_compact() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        const ABBA_EPOCHS: usize = 30;
+        const ABBA_WARMUP: usize = 2;
+        const ABBA_ITERS: usize = 100;
+        const SIGN_ALPHA_HALF: f64 = 0.025;
+        const FLIP_LIMIT: f64 = 1.50;
+
+        let (b0, lay, _) = sample_fragmented_leaf(0x6c65_6166_abba);
+        let mut bp = b0.clone();
+        let mut br = b0.clone();
+
+        let mut ratios = Vec::with_capacity(ABBA_EPOCHS);
+        for epoch in 0..(ABBA_WARMUP + ABBA_EPOCHS) {
+            let t0 = Instant::now();
+            for _ in 0..ABBA_ITERS {
+                br.copy_from_slice(&b0[..]);
+                leaf_compact_reference(black_box(&mut br[..]), &lay);
+                black_box(br[22]);
+            }
+            let r1 = t0.elapsed().as_nanos();
+
+            let t1 = Instant::now();
+            for _ in 0..ABBA_ITERS {
+                bp.copy_from_slice(&b0[..]);
+                leaf_compact(black_box(&mut bp[..]), &lay);
+                black_box(bp[22]);
+            }
+            let p1 = t1.elapsed().as_nanos();
+
+            let t2 = Instant::now();
+            for _ in 0..ABBA_ITERS {
+                bp.copy_from_slice(&b0[..]);
+                leaf_compact(black_box(&mut bp[..]), &lay);
+                black_box(bp[22]);
+            }
+            let p2 = t2.elapsed().as_nanos();
+
+            let t3 = Instant::now();
+            for _ in 0..ABBA_ITERS {
+                br.copy_from_slice(&b0[..]);
+                leaf_compact_reference(black_box(&mut br[..]), &lay);
+                black_box(br[22]);
+            }
+            let r2 = t3.elapsed().as_nanos();
+
+            if epoch >= ABBA_WARMUP {
+                ratios.push((p1 + p2) as f64 / (r1 + r2) as f64);
+            }
+        }
+        ratios.sort_by(f64::total_cmp);
+        let mid = ratios.len() / 2;
+        let mut cdf = 0.0;
+        let mut choose = 1.0;
+        let mut k = 0usize;
+        for j in 0..ratios.len() {
+            cdf += choose * 0.5f64.powi(ratios.len() as i32);
+            if cdf > SIGN_ALPHA_HALF {
+                break;
+            }
+            k = j + 1;
+            choose = choose * (ratios.len() - j) as f64 / (j + 1) as f64;
+        }
+        let i = k.saturating_sub(1).min(mid);
+        let (ci_lo, ci_hi) = (ratios[i], ratios[ratios.len() - 1 - i]);
+        println!(
+            "ABBA leaf_compact: median {:.3}x [{ci_lo:.3}x, {ci_hi:.3}x]",
+            ratios[mid]
+        );
+        assert!(
+            ci_hi <= FLIP_LIMIT,
+            "ABBA 95% upper bound {ci_hi:.3}x exceeds {FLIP_LIMIT:.2}x"
+        );
+    }
+
+    fn encode_fsm_reference(b: &mut [u8], free: &BTreeSet<u64>) {
+        b[32..].fill(0);
+        for &p in free {
+            let bit = p as usize;
+            b[32 + bit / 8] |= 1 << (bit % 8);
+        }
+        set_count(b, free.len().min(u16::MAX as usize));
+    }
+
+    fn decode_fsm_reference(b: &[u8]) -> StoreResult<BTreeSet<u64>> {
+        if kind(b) != KIND_FSM || level(b) != 0 {
+            return Err(corrupt("free-space map kind"));
+        }
+        let mut free = BTreeSet::new();
+        for (i, &byte) in b[32..].iter().enumerate() {
+            for bit in 0..8 {
+                if byte & (1 << bit) != 0 {
+                    free.insert((i * 8 + bit) as u64);
+                }
+            }
+        }
+        if free.contains(&META_PAGE) || free.contains(&FSM_PAGE) {
+            return Err(corrupt("free-space map frees a fixed page"));
+        }
+        Ok(free)
+    }
+
+    #[test]
+    fn fsm_matches_reference() {
+        const FSM_DIFF_CASES: usize = 64;
+        let mut state: u64 = 0x6673_6d5f_dead_beef;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1);
+            state >> 32
+        };
+        for case in 0..FSM_DIFF_CASES {
+            let mut set = BTreeSet::new();
+            let count = if case == 0 {
+                400
+            } else {
+                (next() % 120) as usize
+            };
+            for _ in 0..count {
+                set.insert(2 + (next() % (FSM_CAPACITY - 2)));
+            }
+            let mut bp = new_page();
+            let mut br = new_page();
+            format(&mut bp[..], FSM_PAGE, KIND_FSM, 0);
+            format(&mut br[..], FSM_PAGE, KIND_FSM, 0);
+            encode_fsm(&mut bp[..], &set);
+            encode_fsm_reference(&mut br[..], &set);
+            assert_eq!(&bp[..], &br[..], "case {case} encode");
+            assert_eq!(
+                decode_fsm(&bp[..]).unwrap(),
+                decode_fsm_reference(&br[..]).unwrap(),
+                "case {case} decode"
+            );
+        }
+        // Corrupt kind + fixed page bits.
+        let mut bad = new_page();
+        format(&mut bad[..], FSM_PAGE, KIND_META, 0);
+        assert_eq!(
+            decode_fsm(&bad[..]).unwrap_err().to_string(),
+            decode_fsm_reference(&bad[..]).unwrap_err().to_string()
+        );
+        format(&mut bad[..], FSM_PAGE, KIND_FSM, 0);
+        bad[32] = 1;
+        assert_eq!(
+            decode_fsm(&bad[..]).unwrap_err().to_string(),
+            decode_fsm_reference(&bad[..]).unwrap_err().to_string()
+        );
+        bad[32] = 2;
+        assert_eq!(
+            decode_fsm(&bad[..]).unwrap_err().to_string(),
+            decode_fsm_reference(&bad[..]).unwrap_err().to_string()
+        );
+    }
+
+    #[test]
+    #[ignore = "ABBA benchmark; run in release with --ignored --nocapture"]
+    fn abba_fsm_decode() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        const ABBA_EPOCHS: usize = 30;
+        const ABBA_WARMUP: usize = 2;
+        const ABBA_ITERS: usize = 200;
+        const SIGN_ALPHA_HALF: f64 = 0.025;
+        const FLIP_LIMIT: f64 = 1.50;
+
+        let mut set = BTreeSet::new();
+        for i in 0..64u64 {
+            set.insert(2 + i * 97);
+        }
+        let mut b = new_page();
+        format(&mut b[..], FSM_PAGE, KIND_FSM, 0);
+        encode_fsm(&mut b[..], &set);
+
+        let mut ratios = Vec::with_capacity(ABBA_EPOCHS);
+        for epoch in 0..(ABBA_WARMUP + ABBA_EPOCHS) {
+            let t0 = Instant::now();
+            for _ in 0..ABBA_ITERS {
+                black_box(decode_fsm_reference(black_box(&b[..])).unwrap());
+            }
+            let r1 = t0.elapsed().as_nanos();
+
+            let t1 = Instant::now();
+            for _ in 0..ABBA_ITERS {
+                black_box(decode_fsm(black_box(&b[..])).unwrap());
+            }
+            let p1 = t1.elapsed().as_nanos();
+
+            let t2 = Instant::now();
+            for _ in 0..ABBA_ITERS {
+                black_box(decode_fsm(black_box(&b[..])).unwrap());
+            }
+            let p2 = t2.elapsed().as_nanos();
+
+            let t3 = Instant::now();
+            for _ in 0..ABBA_ITERS {
+                black_box(decode_fsm_reference(black_box(&b[..])).unwrap());
+            }
+            let r2 = t3.elapsed().as_nanos();
+
+            if epoch >= ABBA_WARMUP {
+                ratios.push((p1 + p2) as f64 / (r1 + r2) as f64);
+            }
+        }
+        ratios.sort_by(f64::total_cmp);
+        let mid = ratios.len() / 2;
+        let mut cdf = 0.0;
+        let mut choose = 1.0;
+        let mut k = 0usize;
+        for j in 0..ratios.len() {
+            cdf += choose * 0.5f64.powi(ratios.len() as i32);
+            if cdf > SIGN_ALPHA_HALF {
+                break;
+            }
+            k = j + 1;
+            choose = choose * (ratios.len() - j) as f64 / (j + 1) as f64;
+        }
+        let i = k.saturating_sub(1).min(mid);
+        let (ci_lo, ci_hi) = (ratios[i], ratios[ratios.len() - 1 - i]);
+        println!(
+            "ABBA fsm_decode: median {:.3}x [{ci_lo:.3}x, {ci_hi:.3}x]",
+            ratios[mid]
+        );
+        assert!(
+            ci_hi <= FLIP_LIMIT,
+            "ABBA 95% upper bound {ci_hi:.3}x exceeds {FLIP_LIMIT:.2}x"
+        );
+    }
+
+    fn max_capacity_reference(types: &[ScalarType]) -> usize {
+        let (mut lo, mut hi) = (1usize, 4096usize);
+        while lo < hi {
+            let mid = (lo + hi).div_ceil(2);
+            if leaf_layout(types, mid).end <= PAGE_SIZE {
+                lo = mid;
+            } else {
+                hi = mid - 1;
+            }
+        }
+        lo
+    }
+
+    fn leaf_remove_reference(b: &mut [u8], lay: &LeafLayout, pos: usize) {
+        let n = count(b);
+        let s = leaf_slot(b, lay, pos);
+        b[lay.keys + 16 * s..lay.keys + 16 * s + 16].fill(0);
+        b[lay.tomb + s] = 0;
+        for &(nulls, data, st) in &lay.cols {
+            set_bit(b, nulls, s, false);
+            let w = match st {
+                Store::Fixed(w) => w,
+                Store::Var => 4,
+            };
+            b[data + w * s..data + w * (s + 1)].fill(0);
+        }
+        set_bit(b, lay.used, s, false);
+        b.copy_within(lay.dir + 2 * (pos + 1)..lay.dir + 2 * n, lay.dir + 2 * pos);
+        wr16(b, lay.dir + 2 * (n - 1), 0);
+        set_count(b, n - 1);
+        if count(b) == 0 {
+            b[lay.end..].fill(0);
+            set_free_offset(b, PAGE_SIZE);
+        }
+    }
+
+    #[test]
+    fn leaf_max_capacity_and_remove_match_reference() {
+        let all_types = [
+            ScalarType::U64,
+            ScalarType::I64,
+            ScalarType::F64,
+            ScalarType::Bool,
+            ScalarType::Text,
+            ScalarType::Bytes,
+        ];
+        for ncols in 1..=32usize {
+            let schema: Vec<ScalarType> = (0..ncols)
+                .map(|i| all_types[(i * 7 + ncols) % all_types.len()])
+                .collect();
+            assert_eq!(
+                max_capacity(&schema),
+                max_capacity_reference(&schema),
+                "ncols {ncols}"
+            );
+        }
+
+        let (b0, lay, _) = sample_fragmented_leaf(0x7265_6d6f_0001);
+        let mut bp = b0.clone();
+        let mut br = b0;
+        while count(&bp[..]) > 0 {
+            let pos = count(&bp[..]) / 2;
+            leaf_remove(&mut bp[..], &lay, pos);
+            leaf_remove_reference(&mut br[..], &lay, pos);
+            assert_eq!(&bp[..], &br[..], "remaining {}", count(&bp[..]));
+        }
+    }
+
+    #[test]
+    #[ignore = "ABBA benchmark; run in release with --ignored --nocapture"]
+    fn abba_leaf_max_capacity() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        const ABBA_EPOCHS: usize = 30;
+        const ABBA_WARMUP: usize = 2;
+        const ABBA_ITERS: usize = 2_000;
+        const SIGN_ALPHA_HALF: f64 = 0.025;
+        const FLIP_LIMIT: f64 = 1.50;
+
+        let schema = [
+            ScalarType::U64,
+            ScalarType::I64,
+            ScalarType::F64,
+            ScalarType::Bool,
+            ScalarType::Text,
+            ScalarType::Bytes,
+            ScalarType::U64,
+            ScalarType::Text,
+        ];
+
+        let mut ratios = Vec::with_capacity(ABBA_EPOCHS);
+        for epoch in 0..(ABBA_WARMUP + ABBA_EPOCHS) {
+            let t0 = Instant::now();
+            for _ in 0..ABBA_ITERS {
+                black_box(max_capacity_reference(black_box(&schema)));
+            }
+            let r1 = t0.elapsed().as_nanos();
+
+            let t1 = Instant::now();
+            for _ in 0..ABBA_ITERS {
+                black_box(max_capacity(black_box(&schema)));
+            }
+            let p1 = t1.elapsed().as_nanos();
+
+            let t2 = Instant::now();
+            for _ in 0..ABBA_ITERS {
+                black_box(max_capacity(black_box(&schema)));
+            }
+            let p2 = t2.elapsed().as_nanos();
+
+            let t3 = Instant::now();
+            for _ in 0..ABBA_ITERS {
+                black_box(max_capacity_reference(black_box(&schema)));
+            }
+            let r2 = t3.elapsed().as_nanos();
+
+            if epoch >= ABBA_WARMUP {
+                ratios.push((p1 + p2) as f64 / (r1 + r2) as f64);
+            }
+        }
+        ratios.sort_by(f64::total_cmp);
+        let mid = ratios.len() / 2;
+        let mut cdf = 0.0;
+        let mut choose = 1.0;
+        let mut k = 0usize;
+        for j in 0..ratios.len() {
+            cdf += choose * 0.5f64.powi(ratios.len() as i32);
+            if cdf > SIGN_ALPHA_HALF {
+                break;
+            }
+            k = j + 1;
+            choose = choose * (ratios.len() - j) as f64 / (j + 1) as f64;
+        }
+        let i = k.saturating_sub(1).min(mid);
+        let (ci_lo, ci_hi) = (ratios[i], ratios[ratios.len() - 1 - i]);
+        println!(
+            "ABBA leaf_max_capacity: median {:.3}x [{ci_lo:.3}x, {ci_hi:.3}x]",
+            ratios[mid]
+        );
+        assert!(
+            ci_hi <= FLIP_LIMIT,
+            "ABBA 95% upper bound {ci_hi:.3}x exceeds {FLIP_LIMIT:.2}x"
+        );
     }
 }

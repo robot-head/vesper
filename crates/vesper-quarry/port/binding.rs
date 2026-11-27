@@ -741,6 +741,7 @@ impl repr::Tok {
     }
 }
 
+const _: () = assert!(<() as Abi>::WORDS == 1);
 const _: () = assert!(<BCol as Abi>::WORDS == 8);
 const _: () = assert!(<Bind as Abi>::WORDS == 6);
 const _: () = assert!(<CCol as Abi>::WORDS == 5);
@@ -761,9 +762,17 @@ unsafe extern "C" {
     fn vesper_quarry_access_paths(result: *mut u64, prog: *mut u64, text: *mut u64) -> i64;
     fn vesper_quarry_ddl_apply(result: *mut u64, meta: *mut u64, text: *mut u64, revision: i64, sql: *mut u64, limits: *mut u64) -> i64;
     fn vesper_quarry_execute(result: *mut u64, prog: *mut u64, text: *mut u64) -> i64;
+    fn vesper_quarry_fsm_decode(b: *mut u64, out_pages: *mut u64, out_count: *mut u64) -> i64;
+    fn vesper_quarry_fsm_encode(b: *mut u64, pages: *mut u64) -> i64;
     fn vesper_quarry_internal_check(b: *mut u64) -> i64;
     fn vesper_quarry_internal_route(b: *mut u64, rowid: i64, inv_ts: i64) -> i64;
     fn vesper_quarry_leaf_check(b: *mut u64, seen: *mut u64, mask: *mut u64, cols: *mut u64) -> i64;
+    fn vesper_quarry_leaf_compact(b: *mut u64, dir: i64, end_off: i64, var_cols: *mut u64, scratch: *mut u64) -> i64;
+    fn vesper_quarry_leaf_garbage(b: *mut u64, dir: i64, var_cols: *mut u64) -> i64;
+    fn vesper_quarry_leaf_max_capacity(type_tags: *mut u64) -> i64;
+    fn vesper_quarry_leaf_remove(b: *mut u64, dir: i64, used: i64, keys: i64, tomb: i64, end_off: i64, cols: *mut u64, pos: i64) -> i64;
+    fn vesper_quarry_leaf_search(b: *mut u64, dir: i64, keys: i64, rowid: i64, inv_ts: i64) -> i64;
+    fn vesper_quarry_meta_decode(b: *mut u64, out_hdr: *mut u64, out_tables: *mut u64, out_cols: *mut u64, out_indexes: *mut u64) -> i64;
     fn vesper_quarry_optimize(result: *mut u64, plan: *mut u64) -> i64;
     fn vesper_quarry_page_insert(b: *mut u64, record: *mut u64) -> i64;
     fn vesper_quarry_page_update(b: *mut u64, slot: i64, record: *mut u64, scratch: *mut u64) -> i64;
@@ -771,6 +780,8 @@ unsafe extern "C" {
     fn vesper_quarry_page_validate(b: *mut u64, seen: *mut u64) -> i64;
     fn vesper_quarry_prepare(result: *mut u64, tabs: *mut u64, cols: *mut u64, meta: *mut u64, text: *mut u64, sql: *mut u64, limits: *mut u64) -> i64;
     fn vesper_quarry_set_rows(result: *mut u64, prog: *mut u64, text: *mut u64) -> i64;
+    fn vesper_quarry_store_log_header_decode(h: *mut u64, out_fields: *mut u64) -> i64;
+    fn vesper_quarry_store_log_header_encode(fields: *mut u64, out: *mut u64) -> i64;
     fn vesper_quarry_store_log_record_decode(payload: *mut u64, out_hdr: *mut u64, out_ranges: *mut u64) -> i64;
     fn vesper_quarry_vaggregate_rows(result: *mut u64, prog: *mut u64, text: *mut u64) -> i64;
     fn vesper_quarry_vexecute(result: *mut u64, prog: *mut u64, text: *mut u64, extra: *mut u64) -> i64;
@@ -821,6 +832,24 @@ pub fn execute(prog: &[u64], text: &[u8]) -> Q {
     unsafe { Q::from_words(&result[0..]) }
 }
 
+/// Calls `fsm_decode` of the Vesper library `quarry` (`vesper_quarry_fsm_decode`).
+pub fn fsm_decode(b: &[u8], out_pages: &mut [u64], out_count: &mut [u64]) -> u64 {
+    // SAFETY: `vesper_quarry_fsm_decode` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(b, |view_b| vesper_port_abi::with_slice_mut(out_pages, |view_out_pages| vesper_port_abi::with_slice_mut(out_count, |view_out_count| unsafe { vesper_quarry_fsm_decode(view_b, view_out_pages, view_out_count) })));
+    raw as u64
+}
+
+/// Calls `fsm_encode` of the Vesper library `quarry` (`vesper_quarry_fsm_encode`).
+pub fn fsm_encode(b: &mut [u8], pages: &[u64]) -> () {
+    // SAFETY: `vesper_quarry_fsm_encode` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice_mut(b, |view_b| vesper_port_abi::with_slice(pages, |view_pages| unsafe { vesper_quarry_fsm_encode(view_b, view_pages) }));
+    { let _ = raw; }
+}
+
 /// Calls `internal_check` of the Vesper library `quarry` (`vesper_quarry_internal_check`).
 pub fn internal_check(b: &[u8]) -> u64 {
     // SAFETY: `vesper_quarry_internal_check` has exactly this signature in the export ABI; every
@@ -845,6 +874,60 @@ pub fn leaf_check(b: &[u8], seen: &mut [u8], mask: &mut [u64], cols: &mut [u64])
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
     let raw = vesper_port_abi::with_slice(b, |view_b| vesper_port_abi::with_slice_mut(seen, |view_seen| vesper_port_abi::with_slice_mut(mask, |view_mask| vesper_port_abi::with_slice_mut(cols, |view_cols| unsafe { vesper_quarry_leaf_check(view_b, view_seen, view_mask, view_cols) }))));
+    raw as u64
+}
+
+/// Calls `leaf_compact` of the Vesper library `quarry` (`vesper_quarry_leaf_compact`).
+pub fn leaf_compact(b: &mut [u8], dir: u64, end_off: u64, var_cols: &[u64], scratch: &mut [u8]) -> () {
+    // SAFETY: `vesper_quarry_leaf_compact` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice_mut(b, |view_b| vesper_port_abi::with_slice(var_cols, |view_var_cols| vesper_port_abi::with_slice_mut(scratch, |view_scratch| unsafe { vesper_quarry_leaf_compact(view_b, dir as i64, end_off as i64, view_var_cols, view_scratch) })));
+    { let _ = raw; }
+}
+
+/// Calls `leaf_garbage` of the Vesper library `quarry` (`vesper_quarry_leaf_garbage`).
+pub fn leaf_garbage(b: &[u8], dir: u64, var_cols: &[u64]) -> u64 {
+    // SAFETY: `vesper_quarry_leaf_garbage` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(b, |view_b| vesper_port_abi::with_slice(var_cols, |view_var_cols| unsafe { vesper_quarry_leaf_garbage(view_b, dir as i64, view_var_cols) }));
+    raw as u64
+}
+
+/// Calls `leaf_max_capacity` of the Vesper library `quarry` (`vesper_quarry_leaf_max_capacity`).
+pub fn leaf_max_capacity(type_tags: &[u8]) -> u64 {
+    // SAFETY: `vesper_quarry_leaf_max_capacity` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(type_tags, |view_type_tags| unsafe { vesper_quarry_leaf_max_capacity(view_type_tags) });
+    raw as u64
+}
+
+/// Calls `leaf_remove` of the Vesper library `quarry` (`vesper_quarry_leaf_remove`).
+pub fn leaf_remove(b: &mut [u8], dir: u64, used: u64, keys: u64, tomb: u64, end_off: u64, cols: &[u64], pos: u64) -> () {
+    // SAFETY: `vesper_quarry_leaf_remove` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice_mut(b, |view_b| vesper_port_abi::with_slice(cols, |view_cols| unsafe { vesper_quarry_leaf_remove(view_b, dir as i64, used as i64, keys as i64, tomb as i64, end_off as i64, view_cols, pos as i64) }));
+    { let _ = raw; }
+}
+
+/// Calls `leaf_search` of the Vesper library `quarry` (`vesper_quarry_leaf_search`).
+pub fn leaf_search(b: &[u8], dir: u64, keys: u64, rowid: u64, inv_ts: u64) -> u64 {
+    // SAFETY: `vesper_quarry_leaf_search` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(b, |view_b| unsafe { vesper_quarry_leaf_search(view_b, dir as i64, keys as i64, rowid as i64, inv_ts as i64) });
+    raw as u64
+}
+
+/// Calls `meta_decode` of the Vesper library `quarry` (`vesper_quarry_meta_decode`).
+pub fn meta_decode(b: &[u8], out_hdr: &mut [u64], out_tables: &mut [u64], out_cols: &mut [u64], out_indexes: &mut [u64]) -> u64 {
+    // SAFETY: `vesper_quarry_meta_decode` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(b, |view_b| vesper_port_abi::with_slice_mut(out_hdr, |view_out_hdr| vesper_port_abi::with_slice_mut(out_tables, |view_out_tables| vesper_port_abi::with_slice_mut(out_cols, |view_out_cols| vesper_port_abi::with_slice_mut(out_indexes, |view_out_indexes| unsafe { vesper_quarry_meta_decode(view_b, view_out_hdr, view_out_tables, view_out_cols, view_out_indexes) })))));
     raw as u64
 }
 
@@ -912,6 +995,24 @@ pub fn set_rows(prog: &[u64], text: &[u8]) -> Q {
     // every handle passed is owned or borrowed as its mode requires.
     let raw = vesper_port_abi::with_slice(prog, |view_prog| vesper_port_abi::with_slice(text, |view_text| unsafe { vesper_quarry_set_rows(result.as_mut_ptr(), view_prog, view_text) }));
     unsafe { Q::from_words(&result[0..]) }
+}
+
+/// Calls `store_log_header_decode` of the Vesper library `quarry` (`vesper_quarry_store_log_header_decode`).
+pub fn store_log_header_decode(h: &[u8], out_fields: &mut [u64]) -> u64 {
+    // SAFETY: `vesper_quarry_store_log_header_decode` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(h, |view_h| vesper_port_abi::with_slice_mut(out_fields, |view_out_fields| unsafe { vesper_quarry_store_log_header_decode(view_h, view_out_fields) }));
+    raw as u64
+}
+
+/// Calls `store_log_header_encode` of the Vesper library `quarry` (`vesper_quarry_store_log_header_encode`).
+pub fn store_log_header_encode(fields: &[u64], out: &mut [u8]) -> () {
+    // SAFETY: `vesper_quarry_store_log_header_encode` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(fields, |view_fields| vesper_port_abi::with_slice_mut(out, |view_out| unsafe { vesper_quarry_store_log_header_encode(view_fields, view_out) }));
+    { let _ = raw; }
 }
 
 /// Calls `store_log_record_decode` of the Vesper library `quarry` (`vesper_quarry_store_log_record_decode`).
