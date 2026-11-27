@@ -28,6 +28,7 @@ use self::anvil::{anvil_actions};
 use self::macro_preview::{macro_preview, tree_new};
 use self::recovery::{recovery_gate};
 use self::signature::{signature};
+use self::lint_preflight::{lint_preflight};
 use self::hover::{Facts, facts_new, fact_function, fact_param, hover_answer};
 use self::nav::{
     Ix, MAX_DOCUMENTS, MAX_OUTPUT_BYTES, MAX_QUERY_BYTES, MAX_SYMBOLS, MAX_URI_BYTES, ERR_NONE,
@@ -659,6 +660,19 @@ pub fn lsp_signature(in input: Str) -> ChunkSeq[u64] {
     let mut keys = ChunkSeq::new[u64]();
     for k in 0..rounds {
         signature(inout out, inout headers, inout keys, in b, r.pos);
+    }
+    pack(in out.as_slice())
+}
+
+// `lint::preflight_answer`: the lexical budgets of `vesper lint` (#1828
+// part 13a), `rounds` times over the words of `lint::preflight_words`.
+pub fn lsp_lint_preflight(in input: Str) -> ChunkSeq[u64] {
+    let b = input.as_bytes();
+    let mut r = Reader { pos: 0 };
+    let rounds = word(in b, inout r);
+    let mut out = ChunkSeq::new[u8]();
+    for k in 0..rounds {
+        lint_preflight(inout out, in b, r.pos);
     }
     pack(in out.as_slice())
 }
