@@ -1,5 +1,11 @@
 load("//tools/bazel:vesper_hybrid.bzl", "vesper_hybrid")
 
+filegroup(
+    name = "native_backend_package",
+    srcs = glob(["modules/native_backend/**"]),
+    visibility = ["//:__pkg__"],
+)
+
 # The hybrid Stage 2 compiler (self-hosting SH0 lane 1, #1123): the default
 # CLI with swapped modules linked from Vesper objects that //:bin/vesper
 # builds. It is never the default compiler. Every directory of modules/

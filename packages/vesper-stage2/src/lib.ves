@@ -25,7 +25,12 @@ use @vesper-std/fs::{IoError, write_path};
 use self::ast_lower::{build_ir_ast_for_entry};
 use self::collect::{collect_program};
 use self::loader::{load_package_graph_bytes};
+use self::native::{compile_x86_64_elf};
 use self::typecheck::{typecheck_ast};
+
+const OUTPUT_WRITE_FAILED: u64 = 4;
+const NATIVE_UNSUPPORTED: u64 = 7;
+const ASCII_ONE: u8 = 49;
 
 /// Load, assemble, and collect declarations of a Loom package from `root_dir`
 /// via `@vesper-std/fs`, returning `(module_count, fn_count, adt_count, diagnostic_bytes)`.
@@ -218,14 +223,44 @@ pub fn stage2_compile_dir(
     in out_wasm: Str,
     in entry_name: Str
 ) -> (u64, u64) eff [Ffi[StdFs]] {
-    stage2_compile_dir_impl(in root_dir, in out_wasm, in entry_name, false)
+    stage2_compile_dir_impl(in root_dir, in out_wasm, in entry_name, false, false)
+}
+
+fn write_native_object(
+    in low: L,
+    entry: u32,
+    in entry_name: Str,
+    in output: Str
+) -> (u64, u64) eff [Ffi[StdFs]] {
+    let bytes = compile_x86_64_elf(in low, entry, in entry_name.as_bytes());
+    if bytes.len() == 0 {
+        write_err_header(
+            in output,
+            in "native_backend",
+            in "unsupported x86-64 ELF entry".as_bytes()
+        );
+        return (NATIVE_UNSUPPORTED, 0);
+    }
+    let wrote = handle Fail[IoError] in {
+        write_path(in output.as_bytes(), in bytes.as_slice());
+        true
+    } with {
+        return v => v,
+        raise(_e, _k) => false,
+    };
+    if !wrote {
+        write_err_header(in output, in "write_object", in output.as_bytes());
+        return (OUTPUT_WRITE_FAILED, 0);
+    }
+    (0, bytes.len())
 }
 
 fn stage2_compile_dir_impl(
     in root_dir: Str,
     in out_wasm: Str,
     in entry_name: Str,
-    want_syms: bool
+    want_syms: bool,
+    native_elf: bool
 ) -> (u64, u64) eff [Ffi[StdFs]] {
     let mut stage_log = ChunkSeq::new[u8]();
     stage_log.reserve(4096);
@@ -326,6 +361,10 @@ fn stage2_compile_dir_impl(
     write_stage(want_syms, in out_wasm, in "lower_all", inout stage_log);
     let mut low = l_new(sink c, sink ir_ast);
     lower_all(inout low);
+    if native_elf {
+        write_stage(want_syms, in out_wasm, in "native_backend", inout stage_log);
+        return write_native_object(in low, entry_sym, in entry_name, in out_wasm);
+    }
     mark_mut_element_views(inout low);
     for fi in 0..low.ast.fns.len() {
         match low.ast.fns.try_get(fi) {
@@ -600,12 +639,13 @@ fn stage2_compile_dir_impl(
         d.extend(in "IoError writing ".as_bytes());
         d.extend(in out_wasm.as_bytes());
         write_err_header(in out_wasm, in "write_wasm", in d.as_slice());
-        return (4, 0);
+        return (OUTPUT_WRITE_FAILED, 0);
     }
     (0, clen)
 }
 
 /// CLI entry point for standalone Stage 2 Wasm execution (`vwasm stage2.wasm -- <pkg_dir> <out_wasm> [entry]`).
+/// `VESPER_STAGE2_X86_64_ELF=1` requests a SysV x86-64 object for the entry.
 pub fn main() -> u64 eff [Ffi[StdEnv], Ffi[StdFs]] {
     let n = arg_count();
     if n < 3 {
@@ -627,23 +667,36 @@ pub fn main() -> u64 eff [Ffi[StdEnv], Ffi[StdFs]] {
         Option::Some(v) => v.as_bytes().len() > 0,
         Option::None => false,
     };
+    let native_elf = match var(in "VESPER_STAGE2_X86_64_ELF") {
+        Option::Some(value) => value.as_bytes().len() == 1
+            && value.as_bytes().try_get(0).unwrap_or(0) == ASCII_ONE,
+        Option::None => false,
+    };
     let (code, val) = if n >= 4 {
         match arg(3) {
             Option::Some(s) => stage2_compile_dir_impl(
                 in root_dir.as_str(),
                 in out_wasm.as_str(),
                 in s.as_str(),
-                want_syms
+                want_syms,
+                native_elf
             ),
             Option::None => stage2_compile_dir_impl(
                 in root_dir.as_str(),
                 in out_wasm.as_str(),
                 in "main",
-                want_syms
+                want_syms,
+                native_elf
             ),
         }
     } else {
-        stage2_compile_dir_impl(in root_dir.as_str(), in out_wasm.as_str(), in "main", want_syms)
+        stage2_compile_dir_impl(
+            in root_dir.as_str(),
+            in out_wasm.as_str(),
+            in "main",
+            want_syms,
+            native_elf
+        )
     };
     if code == 0 {
         0

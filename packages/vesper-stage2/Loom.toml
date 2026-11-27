@@ -9,6 +9,7 @@ license = "MIT OR Apache-2.0"
 "@vesper/check-data" = { version = "^0.1", path = "../vesper-check-data" }
 "@vesper/check-names-packages" = { version = "^0.1", path = "../vesper-check-names-packages" }
 "@vesper/check-core-typing" = { version = "^0.1", path = "../vesper-check-core-typing" }
+"@vesper/hybrid-native-backend" = { version = "^0.1", path = "../../crates/vesper-hybrid/modules/native_backend" }
 "@vesper/place-ir" = { version = "^0.1", path = "../vesper-place-ir" }
 "@vesper/place-ir-lower" = { version = "^0.1", path = "../vesper-place-ir-lower" }
 "@vesper/wasm-backend" = { version = "^0.1", path = "../vesper-wasm-backend" }

@@ -64,6 +64,30 @@ const ELF_WORD_ALIGNMENT: u64 = 8;
 const STT_OBJECT: u8 = 1;
 const MAX_STRING_OFFSET: u64 = 0xffffffff;
 
+pub fn write_x86_64_leaf(in code: Slice[u8], in name: Slice[u8]) -> ChunkSeq[u8] {
+    if code.len() == 0 {
+        return ChunkSeq::new[u8]();
+    }
+    let mut words = ChunkSeq::new[u64]();
+    words.push(1);
+    words.push(code.len());
+    words.push(1);
+    for section in RODATA..SECTION_COUNT {
+        words.push(0);
+        words.push(0);
+    }
+    words.push(code.len());
+    words.push(name.len());
+    words.push(0);
+    words.push(code.len());
+    words.push(EXPORTED);
+    words.push(TEXT);
+    let mut bytes = ChunkSeq::new[u8]();
+    bytes.extend(in code);
+    bytes.extend(in name);
+    write_elf(in words.as_slice(), in bytes.as_slice(), false)
+}
+
 copy struct Layout {
     index: u64,
     size: u64,

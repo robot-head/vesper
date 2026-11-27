@@ -90,13 +90,15 @@ fn options(optimize: bool) -> WasmOptions {
 
 /// Stage 2's own compile limits (`packages/vesper-stage2/src/lib.ves`
 /// `empty_facts`): the boot compile of @vesper/stage2 outgrows the CLI's
-/// default instruction budget, which Stage 2 never applies to itself.
+/// default compilation budget.
 const STAGE2_MAX_MEMORY_PAGES: u32 = 65535;
+const STAGE2_MAX_FUNCTIONS: usize = 65_536;
 const STAGE2_MAX_INSTRUCTIONS: usize = 50_000_000;
 
 fn stage2_boot_options() -> WasmOptions {
     WasmOptions {
         max_memory_pages: STAGE2_MAX_MEMORY_PAGES,
+        max_functions: STAGE2_MAX_FUNCTIONS,
         max_instructions: STAGE2_MAX_INSTRUCTIONS,
         ..options(false)
     }
@@ -2244,6 +2246,8 @@ fn stage2_self_compilation_fixed_point_impl() {
     }
 
     let stage2 = PreparedComponent::new(&stage2_bytes).expect("prepare stage2.wasm");
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    check_stage2_native_object(&stage2, &dir);
     check_compiler_packages_fixed_point(
         &dir,
         &boot,
@@ -2258,6 +2262,76 @@ fn stage2_self_compilation_fixed_point_impl() {
     remove_stage2_sidecars(&stage3_path);
     let _ = std::fs::remove_file(&boot_syms_path);
     std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
+    let package = dir.join("native-leaf");
+    std::fs::create_dir_all(package.join("src")).unwrap();
+    std::fs::write(
+        package.join("Loom.toml"),
+        "[package]\nname = \"@vesper-test/native-leaf\"\nversion = \"0.1.0\"\nedition = \"2026\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("src/lib.ves"),
+        "pub fn mix(x: u64, y: u64) -> u64 { wrapping_add(wrapping_mul(x, 5), y ^ 11) }\n\
+         pub fn decline(x: u64) -> u64 { if x == 0 { 7 } else { 9 } }\n",
+    )
+    .unwrap();
+    let object = dir.join("native-leaf.o");
+    let compile = |entry| {
+        stage2
+            .run(&Ctx {
+                args: vec!["stage2", "native-leaf", "/out/native-leaf.o", entry],
+                env: vec![("VESPER_STAGE2_X86_64_ELF", "1")],
+                dirs: vec![(dir.into(), ".".into()), (dir.into(), "/out".into())],
+                fuel: Some(u64::MAX),
+                diag_base: Some(object.clone()),
+                ..Ctx::default()
+            })
+            .expect("Stage 2 native object request")
+    };
+    assert_eq!(
+        compile("mix"),
+        0,
+        "{:?}",
+        read_stage2_sidecar_notes(&object)
+    );
+    let bytes = std::fs::read(&object).unwrap();
+    assert!(bytes.starts_with(b"\x7fELF"));
+    assert_ne!(compile("decline"), 0);
+    assert!(read_stage2_sidecar_notes(&object).contains("unsupported x86-64 ELF entry"));
+    assert_eq!(std::fs::read(&object).unwrap(), bytes);
+
+    let caller = dir.join("native-leaf-caller.c");
+    let binary = dir.join("native-leaf-caller");
+    std::fs::write(
+        &caller,
+        "#include <stdint.h>\n\
+         extern uint64_t mix(uint64_t, uint64_t);\n\
+         int main(void) {\n\
+             return mix(10, 4) != 65 || mix(UINT64_MAX, UINT64_MAX) != UINT64_MAX - 16;\n\
+         }\n",
+    )
+    .unwrap();
+    let link = std::process::Command::new("cc")
+        .args([&caller, &object])
+        .arg("-o")
+        .arg(&binary)
+        .output()
+        .expect("link native object");
+    assert!(
+        link.status.success(),
+        "{}",
+        String::from_utf8_lossy(&link.stderr)
+    );
+    assert!(
+        std::process::Command::new(binary)
+            .status()
+            .unwrap()
+            .success()
+    );
 }
 
 #[test]

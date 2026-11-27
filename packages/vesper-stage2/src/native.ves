@@ -1,0 +1,155 @@
+use @vesper/check-data::types::{TyKind, TyPass};
+use @vesper/check-data::util::{add, inc, n32, w};
+use @vesper/hybrid-native-backend::{x86_64_integer_block};
+use @vesper/hybrid-native-backend::elf::{write_x86_64_leaf};
+use @vesper/hybrid-native-backend::scalar::{
+    ADD, AND, CONSTANT, HEADER_WORDS, MUL, NO_VALUE, OR, RECORD_WORDS, RETURN_VALUE, SUB, XOR
+};
+use @vesper/hybrid-native-backend::x86_64::{ARGUMENTS, QWORD_BITS};
+use @vesper/place-ir::{BlockRow, Lit, Op, Term};
+use @vesper/place-ir-lower::ast::{FnR};
+use @vesper/place-ir-lower::lower::{L};
+
+const LITERAL_WORDS: u64 = 3;
+const BINARY_WORDS: u64 = 3;
+const PLAIN_READ_WORDS: u64 = 4;
+const LITERAL_LOW: u64 = 1;
+const LITERAL_HIGH: u64 = 2;
+const BINARY_LHS: u64 = 1;
+const BINARY_RHS: u64 = 2;
+const READ_PATH: u64 = 1;
+const READ_PASS: u64 = 2;
+const READ_PROJECTIONS: u64 = 3;
+
+fn lower_operator(in low: L, symbol: u32) -> u64 {
+    if low.ctx.names.spells(symbol, in "wrapping_add".as_bytes()) {
+        ADD
+    } else if low.ctx.names.spells(symbol, in "wrapping_sub".as_bytes()) {
+        SUB
+    } else if low.ctx.names.spells(symbol, in "wrapping_mul".as_bytes()) {
+        MUL
+    } else if low.ctx.names.spells(symbol, in "&".as_bytes()) {
+        AND
+    } else if low.ctx.names.spells(symbol, in "|".as_bytes()) {
+        OR
+    } else if low.ctx.names.spells(symbol, in "^".as_bytes()) {
+        XOR
+    } else {
+        NO_VALUE
+    }
+}
+
+fn is_u64(in low: L, ty: u32) -> bool {
+    let node = low.ctx.types.node(ty);
+    node.kind == TyKind::Named && node.name == low.ctx.types.s_u64 && node.n == 0
+}
+
+fn sysv_signature(in low: L, f: FnR) -> bool {
+    if !f.has_body
+        || f.generic_count != 0
+        || f.ext_count != 0
+        || f.param_count > ARGUMENTS
+        || !is_u64(in low, f.result)
+        || f.effects != low.ctx.types.empty_row
+    {
+        return false;
+    }
+    for index in 0..f.param_count {
+        let p = low.ast.param(add(f.param_start, index));
+        if p.proj_count != 0 || p.pass == TyPass::Inout || !is_u64(in low, p.ty) {
+            return false;
+        }
+    }
+    true
+}
+
+fn argument_value(in low: L, f: FnR, root: u32) -> u64 {
+    for index in 0..f.param_count {
+        if low.ast.param(add(f.param_start, index)).name == root {
+            return index;
+        }
+    }
+    NO_VALUE
+}
+
+fn append_record(inout words: ChunkSeq[u64], op: u64, lhs: u64, rhs: u64, extra: u64) {
+    words.push(op);
+    words.push(lhs);
+    words.push(rhs);
+    words.push(extra);
+}
+
+fn lower_leaf(in low: L, f: FnR, b: BlockRow, inout words: ChunkSeq[u64]) -> bool {
+    if b.term != Term::Return || b.tn != 1 {
+        return false;
+    }
+    let mut values = ChunkSeq::new[u64]();
+    values.resize(b.ic, NO_VALUE);
+    words.push(f.param_count);
+    words.push(NO_VALUE);
+    for index in b.i0..add(b.i0, b.ic) {
+        let inst = low.program.inst(index);
+        let at = inst.a;
+        if inst.fallible != 0 || !is_u64(in low, inst.ty) {
+            return false;
+        }
+        let next = add(f.param_count, wrapping_sub(words.len(), HEADER_WORDS) / RECORD_WORDS);
+        let value = if inst.op == Op::Const
+            && inst.n == LITERAL_WORDS
+            && low.program.op(at) == Lit::Int
+            && low.program.op(add(at, LITERAL_HIGH)) == 0
+        {
+            append_record(inout words, CONSTANT, low.program.op(add(at, LITERAL_LOW)), 0, 0);
+            next
+        } else if inst.op == Op::Read
+            && inst.n == PLAIN_READ_WORDS
+            && low.program.path(low.program.op(add(at, READ_PATH))).n == 0
+            && low.program.op(add(at, READ_PASS)) != TyPass::Inout
+            && low.program.op(add(at, READ_PROJECTIONS)) == 0
+        {
+            argument_value(in low, f, n32(low.program.op(at)))
+        } else if inst.op == Op::Binary && inst.n == BINARY_WORDS {
+            let op = lower_operator(in low, n32(low.program.op(at)));
+            let lhs = values.try_get(low.program.op(add(at, BINARY_LHS))).unwrap_or(NO_VALUE);
+            let rhs = values.try_get(low.program.op(add(at, BINARY_RHS))).unwrap_or(NO_VALUE);
+            if op == NO_VALUE || lhs == NO_VALUE || rhs == NO_VALUE {
+                return false;
+            }
+            append_record(inout words, op, lhs, rhs, QWORD_BITS);
+            next
+        } else {
+            return false;
+        };
+        if value == NO_VALUE || !values.try_set(w(inst.dest), value) {
+            return false;
+        }
+    }
+    let result = values.try_get(low.program.op(b.ta)).unwrap_or(NO_VALUE);
+    result != NO_VALUE && words.try_set(RETURN_VALUE, result)
+}
+
+// Lower one effect-free SysV function whose values need no layout beyond u64.
+// The caller publishes the object only after the entire request succeeds.
+pub fn compile_x86_64_elf(in low: L, entry: u32, in name: Slice[u8]) -> ChunkSeq[u8] {
+    let index = low.ast.fn_index(entry);
+    if index >= low.ast.fns.len() {
+        return ChunkSeq::new[u8]();
+    }
+    let f = low.ast.function(index);
+    if !sysv_signature(in low, f) {
+        return ChunkSeq::new[u8]();
+    }
+    for row_index in 0..low.program.fns.len() {
+        let row = low.program.function(row_index);
+        if row.name != entry {
+            continue;
+        }
+        let mut words = ChunkSeq::new[u64]();
+        if row.bc != 1 || !lower_leaf(in low, f, low.program.block(row.b0), inout words) {
+            return ChunkSeq::new[u8]();
+        }
+        let code = x86_64_integer_block(in words.as_slice());
+        return write_x86_64_leaf(in code.as_slice(), in name);
+    }
+    ChunkSeq::new[u8]()
+}
