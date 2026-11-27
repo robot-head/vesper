@@ -66,6 +66,10 @@ const BRANCH_TABLE: u64 = 75;
 const BRANCH_TABLE_TARGET: u64 = 76;
 const ADD_CARRY: u64 = 77;
 const SUB_BORROW: u64 = 78;
+const FLOAT_ADD: u64 = 81;
+const FLOAT_COMPARE64: u64 = 89;
+const BITS_TO_FLOAT: u64 = 93;
+const FLOAT_TO_BITS: u64 = 94;
 const ATOMIC_ADD: u64 = 102;
 const ATOMIC_SUB: u64 = 103;
 const ATOMIC_EXCHANGE: u64 = 104;
@@ -74,6 +78,55 @@ const BYTE_SWAP: u64 = 106;
 const EQUAL: u64 = 0;
 const SIGNED_LESS: u64 = 2;
 const UNSIGNED_LESS: u64 = 6;
+const FLOAT_UNORDERED_OR_EQUAL: u64 = 5;
+
+#[test]
+fn aarch64_internal_floats_cross_the_register_bank_only_for_arithmetic() {
+    const FMOV_D16_X0: u32 = 0x9e67_0010;
+    const FMOV_D17_X1: u32 = 0x9e67_0031;
+    const FADD_D16_D16_D17: u32 = 0x1e71_2a10;
+    const FMOV_X0_D16: u32 = 0x9e66_0200;
+    const FCMP_D16_D17: u32 = 0x1e71_2200;
+    const CSET_X0_EQ: u32 = 0x9a9f_17e0;
+    const CSINC_X0_X0_XZR_VC: u32 = 0x9a9f_7400;
+
+    #[rustfmt::skip]
+    let sum = [
+        2, 5,
+        BITS_TO_FLOAT, 0, 0, CELL_BITS,
+        BITS_TO_FLOAT, 1, 0, CELL_BITS,
+        FLOAT_ADD, 2, 3, CELL_BITS,
+        FLOAT_TO_BITS, 4, 0, CELL_BITS,
+    ];
+    assert_eq!(
+        binding::aarch64_integer_leaf(&sum),
+        [FMOV_D16_X0, FMOV_D17_X1, FADD_D16_D16_D17, FMOV_X0_D16, RET]
+            .map(u32::to_le_bytes)
+            .concat()
+    );
+    #[rustfmt::skip]
+    let compare = [
+        2, 4,
+        BITS_TO_FLOAT, 0, 0, CELL_BITS,
+        BITS_TO_FLOAT, 1, 0, CELL_BITS,
+        FLOAT_COMPARE64, 2, 3, FLOAT_UNORDERED_OR_EQUAL,
+    ];
+    assert_eq!(
+        binding::aarch64_integer_leaf(&compare),
+        [
+            FMOV_D16_X0,
+            FMOV_D17_X1,
+            FCMP_D16_D17,
+            CSET_X0_EQ,
+            CSINC_X0_X0_XZR_VC,
+            RET
+        ]
+        .map(u32::to_le_bytes)
+        .concat()
+    );
+    assert!(binding::aarch64_integer_leaf(&[1, 1, BITS_TO_FLOAT, 0, 0, CELL_BITS]).is_empty());
+    assert!(binding::aarch64_integer_leaf(&[2, 2, FLOAT_ADD, 0, 1, CELL_BITS]).is_empty());
+}
 
 #[test]
 fn aarch64_atomic_retry_loops_preserve_operands_and_unused_effects() {

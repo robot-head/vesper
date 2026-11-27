@@ -1,4 +1,4 @@
-// AAPCS64 register-only integer functions. The input is the shared scalar
+// AAPCS64 functions with register-only integer signatures. The input is the shared scalar
 // machine tape. Unsupported operations or oversized frames decline before a
 // function is defined.
 use @vesper/codegen-freestanding::util::{push16, push32};
@@ -20,9 +20,18 @@ use self::scalar::{
     is_integer_division, TRAP, TRAP_VALUE, is_symbol, UNSIGNED_ADD_OVERFLOW, SIGNED_ADD_OVERFLOW,
     UNSIGNED_SUB_OVERFLOW, SIGNED_SUB_OVERFLOW, SIGNED_MUL_OVERFLOW, OVERFLOW_FLAG, ADD_CARRY,
     CHECKED_ARITHMETIC_RECORDS, is_checked_arithmetic, live_overflow_flag, consumes_carry,
-    BYTE_SWAP, ATOMIC_ADD, ATOMIC_EXCHANGE, FENCE, is_atomic_rmw
+    BYTE_SWAP, ATOMIC_ADD, ATOMIC_EXCHANGE, FENCE, is_atomic_rmw, FLOAT_CONSTANT, FLOAT_ADD,
+    FLOAT_SUB, FLOAT_MUL, FLOAT_DIV, FLOAT_SQRT, FLOAT_NEG, FLOAT_ABS, FLOAT_COMPARE64, FLOAT_LOAD,
+    FLOAT_STORE32, FLOAT_STORE64, BITS_TO_FLOAT, FLOAT_TO_BITS, FLOAT_SELECT, FLOAT_STACK_LOAD,
+    FLOAT_STACK_STORE32, FLOAT_STACK_STORE64, FLOAT_COPY_SIGN, is_float_binary, is_float_compare,
+    float_value, valid_float_operands
 };
-use self::x86_64::{BYTE_BITS, WORD_BITS, DWORD_BITS, QWORD_BITS};
+use self::x86_64::{
+    BYTE_BITS, WORD_BITS, DWORD_BITS, QWORD_BITS, FLOAT_ORDERED, FLOAT_UNORDERED, FLOAT_EQUAL,
+    FLOAT_NOT_EQUAL, FLOAT_ORDERED_NOT_EQUAL, FLOAT_UNORDERED_OR_EQUAL, FLOAT_LESS,
+    FLOAT_LESS_EQUAL, FLOAT_GREATER, FLOAT_GREATER_EQUAL, FLOAT_UNORDERED_OR_LESS,
+    FLOAT_UNORDERED_OR_LESS_EQUAL, FLOAT_UNORDERED_OR_GREATER, FLOAT_UNORDERED_OR_GREATER_EQUAL
+};
 
 const ARGUMENT_REGISTERS: u64 = 8;
 // Keep x16 and x17 out of allocation for architectural scratch uses.
@@ -37,6 +46,8 @@ const SPILL_THIRD: u32 = 15;
 const ENCODING_ATTEMPTS: u64 = 5;
 const SCRATCH: u32 = 16;
 const SECOND_SCRATCH: u32 = 17;
+const FP_LEFT: u32 = 16;
+const FP_RIGHT: u32 = 17;
 // x18 is reserved on Darwin. Keep x29 available for a frame pointer.
 const FIRST_CALLEE_REGISTER: u32 = 19;
 const CALLEE_REGISTERS: u64 = 10;
@@ -121,10 +132,23 @@ const SUBS_SXTW: u32 = 0xeb20c000;
 const SUBS_ASR_SIGN: u32 = 0xeb80fc00;
 const UBFM: u32 = 0xd3400000;
 const SBFM: u32 = 0x93400000;
+const BFM: u32 = 0xb3400000;
 const REG64: u32 = 0x80000000;
 const BITFIELD64: u32 = 0x80400000;
 const CSET: u32 = 0x9a9f07e0;
 const CSEL: u32 = 0x9a800000;
+const CSINC: u32 = 0x9a800400;
+const FMOV_FROM_GP: u32 = 0x1e270000;
+const FMOV_TO_GP: u32 = 0x1e260000;
+const FP_DOUBLE: u32 = 0x00400000;
+const FADD: u32 = 0x1e202800;
+const FSUB: u32 = 0x1e203800;
+const FMUL: u32 = 0x1e200800;
+const FDIV: u32 = 0x1e201800;
+const FSQRT: u32 = 0x1e21c000;
+const FCMP: u32 = 0x1e202000;
+const EOR_F32_SIGN: u32 = 0x52010000;
+const EOR_F64_SIGN: u32 = 0xd2410000;
 const MOVN: u32 = 0x92800000;
 const MOVZ: u32 = 0xd2800000;
 const MOVK: u32 = 0xf2800000;
@@ -243,6 +267,10 @@ fn bitfield(inout out: ChunkSeq[u8], op: u32, dest: u32, source: u32, rotate: u6
 
 fn scalar_width(width: u64) -> bool {
     width == BYTE_BITS || width == WORD_BITS || width == DWORD_BITS || width == QWORD_BITS
+}
+
+fn float_width(width: u64) -> bool {
+    width == DWORD_BITS || width == QWORD_BITS
 }
 
 fn scalar_opcode_mask(width: u64) -> u32 {
@@ -435,14 +463,20 @@ fn store_width(op: u64) -> u64 {
     match op {
         STORE_BYTE | STACK_STORE_BYTE => BYTE_BITS,
         STORE_WORD | STACK_STORE_WORD => WORD_BITS,
-        STORE_DWORD | STACK_STORE_DWORD => DWORD_BITS,
-        STORE_QWORD | STACK_STORE_QWORD => QWORD_BITS,
+        STORE_DWORD | STACK_STORE_DWORD | FLOAT_STORE32 | FLOAT_STACK_STORE32 => DWORD_BITS,
+        STORE_QWORD | STACK_STORE_QWORD | FLOAT_STORE64 | FLOAT_STACK_STORE64 => QWORD_BITS,
         _ => 0,
     }
 }
 
 fn is_stack_store(op: u64) -> bool {
-    op >= STACK_STORE_BYTE && op <= STACK_STORE_QWORD
+    (op >= STACK_STORE_BYTE && op <= STACK_STORE_QWORD)
+        || op == FLOAT_STACK_STORE32
+        || op == FLOAT_STACK_STORE64
+}
+
+fn is_stack_load(op: u64) -> bool {
+    op == STACK_LOAD || op == FLOAT_STACK_LOAD
 }
 
 fn frame_layout(in words: Slice[u64], count: u64) -> Option[FrameLayout] {
@@ -570,6 +604,13 @@ fn operands(in r: Record, returns: u64) -> Option[u64] {
     if r.op == CONSTANT || r.op == STACK_SLOT || r.op == BLOCK_LABEL {
         return Option::Some(0);
     }
+    if r.op == FLOAT_CONSTANT {
+        return if r.right == 0 && float_width(r.extra) {
+            Option::Some(0)
+        } else {
+            Option::None
+        };
+    }
     if is_symbol(r.op) {
         return if r.left <= DISP32_MASK && r.right == 0 && r.extra == 0 {
             Option::Some(0)
@@ -652,7 +693,14 @@ fn operands(in r: Record, returns: u64) -> Option[u64] {
         }
         return Option::None;
     }
-    if r.op == SELECT {
+    if is_float_compare(r.op) {
+        return if r.extra <= FLOAT_UNORDERED_OR_GREATER_EQUAL {
+            Option::Some(2)
+        } else {
+            Option::None
+        };
+    }
+    if r.op == SELECT || r.op == FLOAT_SELECT {
         return Option::Some(3);
     }
     if conditional_branch(r.op) {
@@ -677,8 +725,9 @@ fn operands(in r: Record, returns: u64) -> Option[u64] {
         }
         return Option::Some(returns);
     }
-    if r.op == STACK_LOAD || r.op == STACK_ADDRESS {
+    if is_stack_load(r.op) || r.op == STACK_ADDRESS {
         if (r.op == STACK_LOAD && scalar_width(r.extra))
+            || (r.op == FLOAT_STACK_LOAD && float_width(r.extra))
             || (r.op == STACK_ADDRESS && r.extra == 0)
         {
             return Option::Some(0);
@@ -700,8 +749,27 @@ fn operands(in r: Record, returns: u64) -> Option[u64] {
     if is_atomic_rmw(r.op) {
         return Option::Some(2);
     }
+    if is_float_binary(r.op) {
+        return if float_width(r.extra) {
+            Option::Some(2)
+        } else {
+            Option::None
+        };
+    }
     match r.op {
         LOAD => if r.right <= DISP32_MASK {
+            Option::Some(1)
+        } else {
+            Option::None
+        },
+        FLOAT_LOAD => if r.right <= DISP32_MASK && float_width(r.extra) {
+            Option::Some(1)
+        } else {
+            Option::None
+        },
+        FLOAT_NEG | FLOAT_ABS | FLOAT_SQRT | BITS_TO_FLOAT | FLOAT_TO_BITS => if r.right == 0
+            && float_width(r.extra)
+        {
             Option::Some(1)
         } else {
             Option::None
@@ -844,6 +912,66 @@ fn emit_atomic(inout out: ChunkSeq[u8], in r: Record, old: u32, address: u32, op
     push32(inout out, (BRANCH_IF_NOT_ZERO & ~REG64) | retry | SECOND_SCRATCH);
 }
 
+fn emit_float_predicate(inout out: ChunkSeq[u8], predicate: u64, dest: u32) {
+    // FCMP sets C for equal, greater and unordered, and V only for unordered.
+    let (first, second) = match predicate {
+        FLOAT_ORDERED => (VC, Option::None),
+        FLOAT_UNORDERED => (VS, Option::None),
+        FLOAT_EQUAL => (EQ, Option::None),
+        FLOAT_NOT_EQUAL => (NE, Option::None),
+        FLOAT_ORDERED_NOT_EQUAL => (LO, Option::Some(GT)),
+        FLOAT_UNORDERED_OR_EQUAL => (EQ, Option::Some(VS)),
+        FLOAT_LESS => (LO, Option::None),
+        FLOAT_LESS_EQUAL => (LS, Option::None),
+        FLOAT_GREATER => (GT, Option::None),
+        FLOAT_GREATER_EQUAL => (GE, Option::None),
+        FLOAT_UNORDERED_OR_LESS => (LT, Option::None),
+        FLOAT_UNORDERED_OR_LESS_EQUAL => (LE, Option::None),
+        FLOAT_UNORDERED_OR_GREATER => (HI, Option::None),
+        _ => (HS, Option::None),
+    };
+    push32(inout out, CSET | sh(first ^ 1, CONDITION_SHIFT) | dest);
+    match second {
+        Option::Some(cc) => {
+            rrr(inout out, CSINC | sh(cc ^ 1, CONDITION_SHIFT), dest, dest, ZERO);
+        },
+        Option::None => (),
+    }
+}
+
+fn emit_float_alu(inout out: ChunkSeq[u8], in r: Record, dest: u32, lhs: u32, rhs: u32) {
+    // Keep the bits in the ordinary allocator. The FP temporaries never live
+    // across an instruction boundary, spill, or call.
+    let compare = is_float_compare(r.op);
+    let double = if compare {
+        r.op == FLOAT_COMPARE64
+    } else {
+        r.extra == QWORD_BITS
+    };
+    let precision = if double { FP_DOUBLE } else { 0 };
+    let move_width = if double { FP_DOUBLE | REG64 } else { 0 };
+    let to_fp = FMOV_FROM_GP | move_width;
+    push32(inout out, to_fp | sh(lhs, RN_SHIFT) | FP_LEFT);
+    if r.op == FLOAT_SQRT {
+        push32(inout out, FSQRT | precision | sh(FP_LEFT, RN_SHIFT) | FP_LEFT);
+    } else {
+        push32(inout out, to_fp | sh(rhs, RN_SHIFT) | FP_RIGHT);
+        if compare {
+            rrr(inout out, FCMP | precision, 0, FP_LEFT, FP_RIGHT);
+            emit_float_predicate(inout out, r.extra, dest);
+            return;
+        }
+        let op = match r.op {
+            FLOAT_ADD => FADD,
+            FLOAT_SUB => FSUB,
+            FLOAT_MUL => FMUL,
+            _ => FDIV,
+        };
+        rrr(inout out, op | precision, FP_LEFT, FP_LEFT, FP_RIGHT);
+    }
+    push32(inout out, FMOV_TO_GP | move_width | sh(FP_LEFT, RN_SHIFT) | dest);
+}
+
 fn emit_instruction(
     inout out: ChunkSeq[u8],
     in r: Record,
@@ -854,6 +982,36 @@ fn emit_instruction(
 ) {
     if r.op == CONSTANT {
         immediate(inout out, dest, r.left);
+    } else if r.op == FLOAT_CONSTANT {
+        immediate(inout out, dest, low_bits(r.left, r.extra));
+    } else if r.op == BITS_TO_FLOAT || r.op == FLOAT_TO_BITS {
+        if dest != lhs || r.extra == DWORD_BITS {
+            rrr(inout out, ORR_REG & scalar_opcode_mask(r.extra), dest, ZERO, lhs);
+        }
+    } else if r.op == FLOAT_NEG {
+        let op = if r.extra == DWORD_BITS {
+            EOR_F32_SIGN
+        } else {
+            EOR_F64_SIGN
+        };
+        push32(inout out, op | sh(lhs, RN_SHIFT) | dest);
+    } else if r.op == FLOAT_ABS {
+        let op = if r.extra == DWORD_BITS {
+            UBFM & ~BITFIELD64
+        } else {
+            UBFM
+        };
+        let sign = wrapping_sub(r.extra, 1);
+        bitfield(inout out, op, dest, lhs, 0, wrapping_sub(sign, 1));
+    } else if r.op == FLOAT_COPY_SIGN {
+        let sign = wrapping_sub(r.extra, 1);
+        bitfield(inout out, UBFM, SCRATCH, rhs, sign, sign);
+        if dest != lhs {
+            rrr(inout out, ORR_REG, dest, ZERO, lhs);
+        }
+        bitfield(inout out, BFM, dest, SCRATCH, wrapping_sub(0, sign) & SHIFT_MASK, 0);
+    } else if is_float_binary(r.op) || is_float_compare(r.op) || r.op == FLOAT_SQRT {
+        emit_float_alu(inout out, in r, dest, lhs, rhs);
     } else if r.op == BYTE_SWAP {
         let op = match r.extra {
             WORD_BITS => REV16_W,
@@ -882,7 +1040,7 @@ fn emit_instruction(
             let multiply_subtract = (MSUB_REG & reg_mask) | sh(lhs, ACCUMULATOR_SHIFT);
             rrr(inout out, multiply_subtract, dest, quotient, rhs);
         }
-    } else if r.op == LOAD {
+    } else if r.op == LOAD || r.op == FLOAT_LOAD {
         memory(inout out, true, r.extra, lhs, dest, r.right);
     } else if r.op == TRUNCATE || r.op == ZERO_EXTEND || r.op == SIGN_EXTEND {
         if r.op == SIGN_EXTEND {
@@ -936,7 +1094,7 @@ fn emit_instruction(
         if r.op == SAR && r.extra < DWORD_BITS {
             normalize(inout out, dest, r.extra);
         }
-    } else if r.op == SELECT {
+    } else if r.op == SELECT || r.op == FLOAT_SELECT {
         rrr(inout out, SUBS_REG, ZERO, lhs, ZERO);
         rrr(inout out, CSEL | sh(NE, CONDITION_SHIFT), dest, rhs, third);
     } else if comparison_width(r.op) != 0 {
@@ -1470,12 +1628,14 @@ fn encode_pass(
     let mut pending_arguments: u64 = 0;
     let mut needs_call_pair = false;
     let mut needs_checked = false;
+    let mut has_float = false;
     let mut call_sites = ChunkSeq::new[u64]();
     let mut max_live_across_calls: u64 = 0;
     for reverse in 0..count {
         let index = wrapping_sub(wrapping_sub(count, 1), reverse);
         let value = wrapping_add(args, index);
         let r = read_record(in words, index);
+        has_float = has_float || (r.op >= FLOAT_CONSTANT && r.op <= FLOAT_COPY_SIGN);
         if needs_call_pair != (r.op == CALL_PAIR)
             || needs_checked != is_checked_arithmetic(r.op)
             || (r.op == RETURN_PAIR && (labeled || index != last_index))
@@ -1528,6 +1688,9 @@ fn encode_pass(
         {
             return out;
         }
+        if r.op == CALL_ARGUMENT && float_value(in words, args, r.left) {
+            return out;
+        }
         let last = last_read(in ends, value);
         if last != NEVER_READ {
             live_values = wrapping_sub(live_values, 1);
@@ -1555,7 +1718,7 @@ fn encode_pass(
         if r.op == STACK_SLOT && index >= frame.slots.len() {
             return out;
         }
-        if r.op == STACK_LOAD || r.op == STACK_ADDRESS || is_stack_store(r.op) {
+        if is_stack_load(r.op) || r.op == STACK_ADDRESS || is_stack_store(r.op) {
             if stack_displacement(in frame, in r).is_none() {
                 return out;
             }
@@ -1650,6 +1813,13 @@ fn encode_pass(
         }
     }
     if depth != 0 || pending_arguments != 0 || needs_call_pair || needs_checked {
+        return out;
+    }
+    if has_float
+        && ((result != NO_VALUE && float_value(in words, args, result))
+            || (second != NO_VALUE && float_value(in words, args, second))
+            || !valid_float_operands(in words, args, count, returns == PAIRED_RESULTS, false))
+    {
         return out;
     }
 
@@ -2016,7 +2186,9 @@ fn encode_pass(
             }
             if next.left == value
                 && (conditional_branch(next.op)
-                    || (next.op == SELECT && next.right != value && next.extra != value))
+                    || ((next.op == SELECT || next.op == FLOAT_SELECT)
+                        && next.right != value
+                        && next.extra != value))
             {
                 flags_for_next = match overflow_cc {
                     Option::Some(cc) => Option::Some(cc),
@@ -2029,7 +2201,7 @@ fn encode_pass(
                 continue;
             }
         }
-        let home = if homes != 0 && r.op == STACK_LOAD {
+        let home = if homes != 0 && is_stack_load(r.op) {
             home_register(home_first, home_cell(in r, home_slot), homes)
         } else {
             UNASSIGNED
@@ -2107,7 +2279,7 @@ fn encode_pass(
             relocations.push(ARM64_GOT_LOAD);
             relocations.push(r.left);
             memory(inout out, true, QWORD_BITS, dest, dest, 0);
-        } else if r.op == STACK_ADDRESS || r.op == STACK_LOAD {
+        } else if r.op == STACK_ADDRESS || is_stack_load(r.op) {
             let displacement = stack_displacement(in frame, in r).unwrap_or(0);
             if r.op == STACK_ADDRESS {
                 let encoded = arithmetic_immediate(displacement).unwrap_or(0);

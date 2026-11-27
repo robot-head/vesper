@@ -93,28 +93,28 @@ pub const BRANCH_TABLE_TARGET: u64 = 76;
 pub const ADD_CARRY: u64 = 77;
 const SUB_BORROW: u64 = 78;
 const FLOAT_ARGUMENT: u64 = 79;
-const FLOAT_CONSTANT: u64 = 80;
-const FLOAT_ADD: u64 = 81;
-const FLOAT_SUB: u64 = 82;
-const FLOAT_MUL: u64 = 83;
-const FLOAT_DIV: u64 = 84;
-const FLOAT_SQRT: u64 = 85;
-const FLOAT_NEG: u64 = 86;
-const FLOAT_ABS: u64 = 87;
-const FLOAT_COMPARE32: u64 = 88;
-const FLOAT_COMPARE64: u64 = 89;
-const FLOAT_LOAD: u64 = 90;
-const FLOAT_STORE32: u64 = 91;
-const FLOAT_STORE64: u64 = 92;
-const BITS_TO_FLOAT: u64 = 93;
-const FLOAT_TO_BITS: u64 = 94;
-const FLOAT_SELECT: u64 = 95;
+pub const FLOAT_CONSTANT: u64 = 80;
+pub const FLOAT_ADD: u64 = 81;
+pub const FLOAT_SUB: u64 = 82;
+pub const FLOAT_MUL: u64 = 83;
+pub const FLOAT_DIV: u64 = 84;
+pub const FLOAT_SQRT: u64 = 85;
+pub const FLOAT_NEG: u64 = 86;
+pub const FLOAT_ABS: u64 = 87;
+pub const FLOAT_COMPARE32: u64 = 88;
+pub const FLOAT_COMPARE64: u64 = 89;
+pub const FLOAT_LOAD: u64 = 90;
+pub const FLOAT_STORE32: u64 = 91;
+pub const FLOAT_STORE64: u64 = 92;
+pub const BITS_TO_FLOAT: u64 = 93;
+pub const FLOAT_TO_BITS: u64 = 94;
+pub const FLOAT_SELECT: u64 = 95;
 const FLOAT_RETURN: u64 = 96;
 const CALL_FLOAT: u64 = 97;
-const FLOAT_STACK_LOAD: u64 = 98;
-const FLOAT_STACK_STORE32: u64 = 99;
-const FLOAT_STACK_STORE64: u64 = 100;
-const FLOAT_COPY_SIGN: u64 = 101;
+pub const FLOAT_STACK_LOAD: u64 = 98;
+pub const FLOAT_STACK_STORE32: u64 = 99;
+pub const FLOAT_STACK_STORE64: u64 = 100;
+pub const FLOAT_COPY_SIGN: u64 = 101;
 pub const ATOMIC_ADD: u64 = 102;
 const ATOMIC_SUB: u64 = 103;
 pub const ATOMIC_EXCHANGE: u64 = 104;
@@ -728,11 +728,11 @@ fn reads_right(in record: Record, paired: bool) -> bool {
         || (is_branch_return(op) && paired && record.left != TRAP_VALUE)
 }
 
-fn is_float_binary(op: u64) -> bool {
+pub fn is_float_binary(op: u64) -> bool {
     (op >= FLOAT_ADD && op <= FLOAT_DIV) || op == FLOAT_COPY_SIGN
 }
 
-fn is_float_compare(op: u64) -> bool {
+pub fn is_float_compare(op: u64) -> bool {
     op == FLOAT_COMPARE32 || op == FLOAT_COMPARE64
 }
 
@@ -746,7 +746,7 @@ fn is_float_result(op: u64) -> bool {
         || op == FLOAT_COPY_SIGN
 }
 
-fn float_value(in words: Slice[u64], arguments: u64, value: u64) -> bool {
+pub fn float_value(in words: Slice[u64], arguments: u64, value: u64) -> bool {
     value >= arguments && is_float_result(read_record(in words, wrapping_sub(value, arguments)).op)
 }
 
@@ -766,7 +766,7 @@ fn float_right(op: u64) -> bool {
         || op == FLOAT_STORE64
 }
 
-fn valid_float_operands(
+pub fn valid_float_operands(
     in words: Slice[u64],
     arguments: u64,
     count: u64,
