@@ -13,6 +13,7 @@ const RET: u32 = 0xd65f_03c0;
 const BYTE_BITS: u64 = u8::BITS as u64;
 const DWORD_BITS: u64 = u32::BITS as u64;
 const CELL_BITS: u64 = u64::BITS as u64;
+const NO_VALUE: u64 = u64::MAX;
 const CONSTANT: u64 = 0;
 const ADD: u64 = 1;
 const SHL: u64 = 9;
@@ -21,6 +22,9 @@ const SELECT: u64 = 14;
 const TRUNCATE: u64 = 15;
 const ZERO_EXTEND: u64 = 16;
 const SIGN_EXTEND: u64 = 17;
+const LOAD: u64 = 23;
+const STORE_BYTE: u64 = 24;
+const STORE_WORD: u64 = 25;
 const CALL: u64 = 38;
 const SIGNED_MUL_HIGH: u64 = 50;
 const UNSIGNED_MUL_HIGH: u64 = 51;
@@ -129,6 +133,42 @@ fn aarch64_compares_narrow_signed_and_unsigned_immediates() {
             .collect();
         assert_eq!(binding::aarch64_integer_leaf(&packet), expected);
     }
+}
+
+#[test]
+fn aarch64_memory_addressing_and_store_liveness() {
+    const LDR_X0_X0_32760: u32 = 0xf97f_fc00;
+    const LDUR_W0_X0_NEG256: u32 = 0xb850_0000;
+    const MOV_X16_32768: u32 = 0xd290_0010;
+    const LDR_W0_X0_X16: u32 = 0xb870_6800;
+    const STURB_W1_X0_NEG1: u32 = 0x381f_f001;
+    const STRH_W1_X0_2: u32 = 0x7900_0401;
+    for (packet, instructions) in [
+        ([1, 1, LOAD, 0, 32760, CELL_BITS], vec![LDR_X0_X0_32760]),
+        (
+            [1, 1, LOAD, 0, u64::from(-256_i32 as u32), DWORD_BITS],
+            vec![LDUR_W0_X0_NEG256],
+        ),
+        (
+            [1, 1, LOAD, 0, 32768, DWORD_BITS],
+            vec![MOV_X16_32768, LDR_W0_X0_X16],
+        ),
+        (
+            [2, NO_VALUE, STORE_BYTE, 0, 1, u64::from(u32::MAX)],
+            vec![STURB_W1_X0_NEG1],
+        ),
+        ([2, NO_VALUE, STORE_WORD, 0, 1, 2], vec![STRH_W1_X0_2]),
+        ([1, NO_VALUE, LOAD, 0, 0, CELL_BITS], vec![]),
+    ] {
+        let expected: Vec<_> = instructions
+            .into_iter()
+            .chain([RET])
+            .flat_map(u32::to_le_bytes)
+            .collect();
+        assert_eq!(binding::aarch64_integer_leaf(&packet), expected);
+    }
+    assert!(binding::aarch64_integer_leaf(&[2, 2, STORE_BYTE, 0, 1, 0]).is_empty());
+    assert!(binding::aarch64_integer_leaf(&[1, 1, LOAD, 0, NO_VALUE, CELL_BITS]).is_empty());
 }
 
 #[test]

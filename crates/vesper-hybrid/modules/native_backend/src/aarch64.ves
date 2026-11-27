@@ -1,16 +1,17 @@
-// Register-only AAPCS64 integer leaves. The input is the shared scalar
+// Frameless AAPCS64 integer leaves. The input is the shared scalar
 // machine tape. Unsupported operations or register pressure decline before
 // a function is defined.
 use @vesper/codegen-freestanding::util::{push32};
 use self::scalar::{
     Record, word_at, read_record, CONSTANT, ADD, SUB, MUL, AND, OR, XOR, NEG, NOT, SHL, SHR, SAR,
     COMPARE, COMPARE_BYTE, COMPARE_WORD, COMPARE_DWORD, SELECT, TRUNCATE, ZERO_EXTEND, SIGN_EXTEND,
-    SHL_REGISTER, SHR_REGISTER, SAR_REGISTER, SIGNED_MUL_HIGH, UNSIGNED_MUL_HIGH, ADD_IMMEDIATE,
-    SUB_IMMEDIATE, MUL_IMMEDIATE, AND_IMMEDIATE, OR_IMMEDIATE, XOR_IMMEDIATE, COMPARE_IMMEDIATE,
-    COMPARE_BYTE_IMMEDIATE, COMPARE_WORD_IMMEDIATE, COMPARE_DWORD_IMMEDIATE, EQUAL, NOT_EQUAL,
-    SIGNED_LESS, SIGNED_GREATER_EQUAL, SIGNED_GREATER, SIGNED_LESS_EQUAL, UNSIGNED_LESS,
-    UNSIGNED_GREATER_EQUAL, UNSIGNED_GREATER, UNSIGNED_LESS_EQUAL, ARGUMENT_COUNT, RETURN_VALUE,
-    HEADER_WORDS, RECORD_WORDS, NEVER_READ, NO_VALUE, DISP32_MASK
+    SHL_REGISTER, SHR_REGISTER, SAR_REGISTER, LOAD, STORE_BYTE, STORE_WORD, STORE_DWORD,
+    STORE_QWORD, SIGNED_MUL_HIGH, UNSIGNED_MUL_HIGH, ADD_IMMEDIATE, SUB_IMMEDIATE, MUL_IMMEDIATE,
+    AND_IMMEDIATE, OR_IMMEDIATE, XOR_IMMEDIATE, COMPARE_IMMEDIATE, COMPARE_BYTE_IMMEDIATE,
+    COMPARE_WORD_IMMEDIATE, COMPARE_DWORD_IMMEDIATE, EQUAL, NOT_EQUAL, SIGNED_LESS,
+    SIGNED_GREATER_EQUAL, SIGNED_GREATER, SIGNED_LESS_EQUAL, UNSIGNED_LESS, UNSIGNED_GREATER_EQUAL,
+    UNSIGNED_GREATER, UNSIGNED_LESS_EQUAL, ARGUMENT_COUNT, RETURN_VALUE, HEADER_WORDS, RECORD_WORDS,
+    NEVER_READ, NO_VALUE, DISP32_MASK
 };
 use self::x86_64::{BYTE_BITS, WORD_BITS, DWORD_BITS, QWORD_BITS};
 
@@ -51,6 +52,15 @@ const CSEL: u32 = 0x9a800000;
 const MOVN: u32 = 0x92800000;
 const MOVZ: u32 = 0xd2800000;
 const MOVK: u32 = 0xf2800000;
+const MEMORY_SCALED: u32 = 0x39000000;
+const MEMORY_UNSCALED: u32 = 0x38000000;
+const MEMORY_REGISTER: u32 = 0x38206800;
+const MEMORY_LOAD: u32 = 0x00400000;
+const MEMORY_SIZE_SHIFT: u32 = 30;
+const MEMORY_IMM9_SHIFT: u32 = 12;
+const MEMORY_IMM9_MASK: u32 = 0x1ff;
+const MEMORY_IMM9_MIN: i64 = -256;
+const MEMORY_IMM9_MAX: i64 = 255;
 const RM_SHIFT: u32 = 16;
 const RN_SHIFT: u32 = 5;
 const CONDITION_SHIFT: u32 = 12;
@@ -289,6 +299,52 @@ fn compare(inout out: ChunkSeq[u8], in r: Record, lhs: u32, rhs: u32) {
     }
 }
 
+fn store_width(op: u64) -> u64 {
+    match op {
+        STORE_BYTE => BYTE_BITS,
+        STORE_WORD => WORD_BITS,
+        STORE_DWORD => DWORD_BITS,
+        STORE_QWORD => QWORD_BITS,
+        _ => 0,
+    }
+}
+
+fn memory(
+    inout out: ChunkSeq[u8],
+    load: bool,
+    width: u64,
+    address: u32,
+    data: u32,
+    displacement: u64
+) {
+    let bytes = width / BYTE_BITS;
+    let scale = trailing_zeros_u64(bytes);
+    let size = sh(scale, MEMORY_SIZE_SHIFT);
+    let opcode = size | (if load { MEMORY_LOAD } else { 0 });
+    let offset = widen_i64(wrapping_i32(displacement));
+    let unsigned = wrapping_u64(offset);
+    let scaled = wrapping_shr_u64(unsigned, scale);
+    if offset >= 0 && (unsigned & wrapping_sub(bytes, 1)) == 0 && scaled <= IMM12_MASK {
+        push32(
+            inout out,
+            MEMORY_SCALED
+                | opcode
+                | sh(wrapping_u32(scaled), IMM12_SHIFT)
+                | sh(address, RN_SHIFT)
+                | data
+        );
+    } else if offset >= MEMORY_IMM9_MIN && offset <= MEMORY_IMM9_MAX {
+        let imm = wrapping_u32(offset) & MEMORY_IMM9_MASK;
+        push32(
+            inout out,
+            MEMORY_UNSCALED | opcode | sh(imm, MEMORY_IMM9_SHIFT) | sh(address, RN_SHIFT) | data
+        );
+    } else {
+        immediate(inout out, SCRATCH, unsigned);
+        rrr(inout out, MEMORY_REGISTER | opcode, data, address, SCRATCH);
+    }
+}
+
 fn operands(in r: Record) -> Option[u64] {
     if r.op == CONSTANT {
         return Option::Some(0);
@@ -308,10 +364,21 @@ fn operands(in r: Record) -> Option[u64] {
     if r.op == SELECT {
         return Option::Some(3);
     }
+    if store_width(r.op) != 0 {
+        if r.extra <= DISP32_MASK {
+            return Option::Some(2);
+        }
+        return Option::None;
+    }
     if !scalar_width(r.extra) {
         return Option::None;
     }
     match r.op {
+        LOAD => if r.right <= DISP32_MASK {
+            Option::Some(1)
+        } else {
+            Option::None
+        },
         ADD | SUB | MUL | AND | OR | XOR => Option::Some(2),
         SHL_REGISTER | SHR_REGISTER | SAR_REGISTER => if r.extra >= DWORD_BITS {
             Option::Some(2)
@@ -360,6 +427,8 @@ fn emit_instruction(
 ) {
     if r.op == CONSTANT {
         immediate(inout out, dest, r.left);
+    } else if r.op == LOAD {
+        memory(inout out, true, r.extra, lhs, dest, r.right);
     } else if r.op == TRUNCATE || r.op == ZERO_EXTEND || r.op == SIGN_EXTEND {
         if r.op == SIGN_EXTEND {
             let op = if r.extra == DWORD_BITS {
@@ -526,7 +595,12 @@ pub fn encode_leaf(in words: Slice[u64]) -> ChunkSeq[u8] {
         {
             return out;
         }
-        if last_read(in ends, value) == NEVER_READ {
+        let has_read = last_read(in ends, value) != NEVER_READ;
+        if store_width(r.op) != 0 {
+            if has_read {
+                return out;
+            }
+        } else if !has_read {
             continue;
         }
         if n >= 1 && last_read(in ends, r.left) == NEVER_READ {
@@ -552,11 +626,12 @@ pub fn encode_leaf(in words: Slice[u64]) -> ChunkSeq[u8] {
     }
     for index in 0..count {
         let value = wrapping_add(args, index);
-        if last_read(in ends, value) == NEVER_READ {
+        let r = read_record(in words, index);
+        let stored = store_width(r.op);
+        if stored == 0 && last_read(in ends, value) == NEVER_READ {
             regs.push(UNASSIGNED);
             continue;
         }
-        let r = read_record(in words, index);
         let n = operands(in r).unwrap_or(0);
         let lhs = if n >= 1 {
             register(in regs, r.left)
@@ -581,6 +656,11 @@ pub fn encode_leaf(in words: Slice[u64]) -> ChunkSeq[u8] {
         }
         if n == 3 {
             used = expire(used, in ends, r.extra, value, third);
+        }
+        if stored != 0 {
+            memory(inout out, false, stored, lhs, rhs, r.extra);
+            regs.push(UNASSIGNED);
+            continue;
         }
         if comparison_width(r.op) != 0
             && wrapping_add(index, 1) < count
