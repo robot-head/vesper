@@ -2367,7 +2367,6 @@ fn stage2_compiles_package_under_seed_runner_impl() {
 }
 
 enum CompilerExecCheck {
-    CompileOnly,
     Exact(u64),
     NonZero,
 }
@@ -2381,8 +2380,8 @@ const COMPILER_PACKAGES: &[(&str, &str, &str, &str, CompilerExecCheck)] = &[
         "lsp-format",
         "@vesper/lsp-format",
         "packages/vesper-lsp-format",
-        "lsp_formatting(in \"\").len()",
-        CompilerExecCheck::CompileOnly,
+        "lsp_formatting(in zero_input().as_str()).len()",
+        CompilerExecCheck::Exact(1),
     ),
     (
         "front",
@@ -2458,8 +2457,8 @@ const COMPILER_PACKAGES: &[(&str, &str, &str, &str, CompilerExecCheck)] = &[
         "check-tensor-types",
         "@vesper/check-tensor-types",
         "packages/vesper-check-tensor-types",
-        "check_tensor_types(in \"\").len()",
-        CompilerExecCheck::CompileOnly,
+        "check_tensor_types(in zero_input().as_str()).len()",
+        CompilerExecCheck::Exact(3),
     ),
     (
         "codegen-aggregates",
@@ -2486,8 +2485,8 @@ const COMPILER_PACKAGES: &[(&str, &str, &str, &str, CompilerExecCheck)] = &[
         "codegen-export",
         "@vesper/codegen-export",
         "packages/vesper-codegen-export",
-        "export_plan(in \"\").len()",
-        CompilerExecCheck::CompileOnly,
+        "export_plan(in zero_input().as_str()).len()",
+        CompilerExecCheck::Exact(4),
     ),
     (
         "codegen-freestanding",
@@ -2591,15 +2590,15 @@ const COMPILER_PACKAGES: &[(&str, &str, &str, &str, CompilerExecCheck)] = &[
         "lsp",
         "@vesper/lsp",
         "packages/vesper-lsp",
-        "lsp_frames(in \"\").len()",
-        CompilerExecCheck::CompileOnly,
+        "lsp_frames(in zero_input().as_str()).len()",
+        CompilerExecCheck::Exact(3),
     ),
     (
         "lsp-features",
         "@vesper/lsp-features",
         "packages/vesper-lsp-features",
-        "lsp_document_symbols(in \"\").len()",
-        CompilerExecCheck::CompileOnly,
+        "lsp_document_symbols(in zero_input().as_str()).len()",
+        CompilerExecCheck::Exact(8),
     ),
     (
         "lsp-proof-run",
@@ -2619,8 +2618,8 @@ const COMPILER_PACKAGES: &[(&str, &str, &str, &str, CompilerExecCheck)] = &[
         "test-runner",
         "@vesper/test-runner",
         "packages/vesper-test-runner",
-        "case_rows_words(in \"\".as_bytes()).len()",
-        CompilerExecCheck::CompileOnly,
+        "format()",
+        CompilerExecCheck::NonZero,
     ),
     (
         "lean-extract",
@@ -2918,7 +2917,12 @@ fn compiler_package_probe(
     } else {
         format!("use {pkg_name}::{fn_name};")
     };
-    let lib_src = format!("{use_line}\npub fn main() -> u64 {{ {expr} }}\n");
+    let helper = if expr.contains("zero_input()") {
+        "fn zero_input() -> String { let mut z = String::new(); for _ in 0..256 { z.push_char(0); } z }\n"
+    } else {
+        ""
+    };
+    let lib_src = format!("{use_line}\n{helper}pub fn main() -> u64 {{ {expr} }}\n");
     (manifest, lib_src)
 }
 
@@ -3317,7 +3321,6 @@ fn stage2_compiles_compiler_packages() {
                 bytes.len()
             );
             match exec_check {
-                CompilerExecCheck::CompileOnly => {}
                 CompilerExecCheck::Exact(expected) => match run(&bytes, &Ctx::default()) {
                     Ok(got) if got == *expected => {}
                     Ok(got) => {
