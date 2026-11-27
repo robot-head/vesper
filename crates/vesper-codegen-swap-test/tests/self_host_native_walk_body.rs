@@ -1648,25 +1648,30 @@ fn vesper_inout_scalar_parameters_match() {
         );
         let ran = if cross() { 0 } else { 2 };
         assert_eq!((total.worlds, total.ran), (2, ran), "{}", total.summary());
+        // A cross target runs nothing, so each body is counted once per
+        // optimizer setting instead of twice.
+        let runs = if cross() { 1 } else { 2 };
+        let min_inout = MIN_INOUT_BODIES * runs;
+        let min_program = MIN_INOUT_PROGRAM_BODIES * runs;
         assert!(
-            pointers >= MIN_INOUT_BODIES,
-            "only {pointers} inout bodies came from Vesper (expected >= {MIN_INOUT_BODIES})"
+            pointers >= min_inout,
+            "only {pointers} inout bodies came from Vesper (expected >= {min_inout})"
         );
         // Every function, `twice` and `main` too (their locals lent
         // through scratch words on the optimize path).
         assert!(
-            emitted >= MIN_INOUT_PROGRAM_BODIES,
-            "only {emitted} bodies came from Vesper (expected >= {MIN_INOUT_PROGRAM_BODIES})"
+            emitted >= min_program,
+            "only {emitted} bodies came from Vesper (expected >= {min_program})"
         );
         assert!(total.is_clean(), "{}", total.summary());
     });
 }
 
-/// Every body of `INOUT_SOURCE`'s six functions, counted as
-/// `MIN_INOUT_BODIES` is.
-const MIN_INOUT_PROGRAM_BODIES: u64 = 24;
+/// Every body of `INOUT_SOURCE`'s six functions at both optimizer
+/// settings, counted once per comparison as `MIN_INOUT_BODIES` is.
+const MIN_INOUT_PROGRAM_BODIES: u64 = 12;
 
 /// The bodies of `INOUT_SOURCE` with an `inout` parameter that must come
-/// from Vesper: `bump`, `narrow` and `scale` at both optimizer settings
-/// (each counted by both comparisons of a setting).
-const MIN_INOUT_BODIES: u64 = 12;
+/// from Vesper: `bump`, `narrow` and `scale` at both optimizer settings,
+/// once per comparison (a JIT-running host compares each setting twice).
+const MIN_INOUT_BODIES: u64 = 6;
