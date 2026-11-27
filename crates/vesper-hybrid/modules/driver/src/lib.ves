@@ -58,10 +58,10 @@ use @vesper/driver-commands::{
 };
 // Target triples (#1896).
 use @vesper/driver::triple::{is_windows as triple_is_windows};
-// Diagnostic JSON and stderr fallback rendering (#2458, #2473, #2519, #1893).
+// Diagnostic JSON and stderr fallback rendering (#2458, #2473, #2519, #2577, #1893).
 use @vesper/driver::{
     diagnostics_json, format_manifest_error, format_raw_diagnostics, format_unlocated_error,
-    package_diagnostics_json, remap_diagnostics_stream
+    localize_diagnostics_stream, package_diagnostics_json, remap_diagnostics_stream
 };
 // Place IR JSON rendering for `vesper emit --format ir` (#2245, #1894).
 use @vesper/place-ir::{place_ir_json_bytes};
@@ -1559,6 +1559,7 @@ const DIAG_CHUNK_MANIFEST: u8 = 2;
 const DIAG_CHUNK_UNLOCATED: u8 = 3;
 const DIAG_WORD_BYTES: u64 = 8;
 const DIAG_BYTE_BITS: u64 = 8;
+const DIAG_BYTE_MASK: u64 = 255;
 const DIAG_MAP_SEG_WORDS: u64 = 5;
 const CH_LF: u8 = 10;
 
@@ -1651,7 +1652,43 @@ fn emit_diagnostics(in s: Session) eff [Ffi[HybridDriver]] {
         return ();
     }
     let mut json = if tag == DIAG_JSON_PACKAGE {
-        package_diagnostics_json(in slice[1..slice.len()])
+        let mut at: u64 = 1;
+        let m_len = diag_read_u64(in slice, inout at);
+        let m_start = at;
+        let m_end = wrapping_add(at, m_len);
+        at = m_end;
+        let f_len = diag_read_u64(in slice, inout at);
+        let f_start = at;
+        let f_end = wrapping_add(at, f_len);
+        at = f_end;
+        let p_len = diag_read_u64(in slice, inout at);
+        let p_start = at;
+        let p_end = wrapping_add(at, p_len);
+        at = p_end;
+
+        let localized = localize_diagnostics_stream(
+            in slice[f_start..f_end],
+            in slice[p_start..p_end],
+            in slice[at..slice.len()]
+        );
+        let mut m_at: u64 = m_start;
+        let m_count = diag_read_u64(in slice, inout m_at);
+        if m_count == 0 {
+            package_diagnostics_json(in localized.as_slice())
+        } else {
+            let loc_slice = localized.as_slice();
+            let mut l_at: u64 = 0;
+            let l_count = diag_read_u64(in loc_slice, inout l_at);
+            let total = wrapping_add(m_count, l_count);
+            let mut combined: ChunkSeq[u8] = ChunkSeq::new[u8]();
+            for i in 0..DIAG_WORD_BYTES {
+                let shift = wrapping_u32(wrapping_mul(i, DIAG_BYTE_BITS));
+                combined.push(wrapping_u8(wrapping_shr_u64(total, shift) & DIAG_BYTE_MASK));
+            }
+            combined.extend(in slice[m_at..m_end]);
+            combined.extend(in loc_slice[l_at..loc_slice.len()]);
+            package_diagnostics_json(in combined.as_slice())
+        }
     } else {
         let mut at: u64 = 1;
         let segs = diag_read_u64(in slice, inout at);

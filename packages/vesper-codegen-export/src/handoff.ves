@@ -70,22 +70,28 @@ fn at(in a: ChunkSeq[u64], p: u64) -> u64 {
     u64_at(in a, p)
 }
 
+const WORD_BYTES_SHIFT: u32 = 3;
+const WORD_BYTES_MASK: u64 = 7;
+const BYTE_BITS_SHIFT: u32 = 3;
+
 // The word after the string at `p` (its length, then its words).
 fn str_end(in a: ChunkSeq[u64], p: u64) -> u64 {
     let len = at(in a, p);
-    wrapping_add(inc(p), wrapping_add(len, WORD_ROUND_UP) / WORD_BYTES)
+    wrapping_add(inc(p), wrapping_shr_u64(wrapping_add(len, WORD_ROUND_UP), WORD_BYTES_SHIFT))
 }
 
 fn str_byte(in a: ChunkSeq[u64], p: u64, i: u64) -> u8 {
-    let word = at(in a, wrapping_add(inc(p), i / WORD_BYTES));
+    let word = at(in a, wrapping_add(inc(p), wrapping_shr_u64(i, WORD_BYTES_SHIFT)));
     wrapping_u8(
-        wrapping_shr_u64(word, wrapping_u32(wrapping_mul(i % WORD_BYTES, BYTE_BITS))) & BYTE_MASK
+        wrapping_shr_u64(word, wrapping_u32(wrapping_shl_u64(i & WORD_BYTES_MASK, BYTE_BITS_SHIFT)))
+            & BYTE_MASK
     )
 }
 
 fn str_bytes(in a: ChunkSeq[u64], p: u64) -> ChunkSeq[u8] {
-    let mut o = ChunkSeq::new[u8]();
-    for i in 0..at(in a, p) {
+    let len = at(in a, p);
+    let mut o = ChunkSeq::with_capacity[u8](len);
+    for i in 0..len {
         o.push(str_byte(in a, p, i));
     }
     o
@@ -579,7 +585,7 @@ pub fn binding_input_of_plan(
         put_word_bytes(inout o, text.len());
         o.extend(in text.as_slice());
         loop {
-            if o.len() % WORD_BYTES == 0 {
+            if (o.len() & WORD_BYTES_MASK) == 0 {
                 break;
             }
             o.push(0);

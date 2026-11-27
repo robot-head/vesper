@@ -180,11 +180,11 @@ pub fn cfg_of(in f: Func) -> Cfg {
     Cfg { at: at, inst: insts }
 }
 
-fn pred_lo(in c: Cfg, b: u32) -> u64 {
+pub fn pred_lo(in c: Cfg, b: u32) -> u64 {
     c.at.try_get(w(b)).unwrap_or(0)
 }
 
-fn pred_hi(in c: Cfg, b: u32) -> u64 {
+pub fn pred_hi(in c: Cfg, b: u32) -> u64 {
     c.at.try_get(inc(w(b))).unwrap_or(0)
 }
 

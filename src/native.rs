@@ -4157,11 +4157,12 @@ impl<M: Module> Codegen<'_, '_, M> {
         sret: Option<ir::Value>,
     ) -> Result<bool, String> {
         // A struct result is built in, or copied to, the result pointer
-        // (`sret`, #2411).
+        // (`sret`, #2411); a register result (#2581) the same way in the
+        // local buffer the entry made, whose words the function returns.
         let result_ok = match frame.result {
             FrameResult::Value => sret.is_none(),
-            FrameResult::Sret => sret.is_some(),
-            FrameResult::Buffer(_) | FrameResult::Words(_) => false,
+            FrameResult::Sret | FrameResult::Buffer(_) => sret.is_some(),
+            FrameResult::Words(_) => false,
         };
         // A failure exit returns a scalar zero beside its tag, so a
         // `fail_only` function with a struct result stays with the walk.
@@ -4173,8 +4174,6 @@ impl<M: Module> Codegen<'_, '_, M> {
             && !self.in_fip_fn
             && self.trace_fail.is_none()
             && self.caller_slot.is_none()
-            && self.result_buffer.is_none()
-            && self.own_abi.result_words.is_none()
             && frame.function_args.is_empty()
             // A `fail_only` frame's capabilities are its failure exits
             // (#2425): the record pointer goes in the request after the
@@ -4261,10 +4260,16 @@ impl<M: Module> Codegen<'_, '_, M> {
                 result_homes.push(index as u64);
             }
         }
-        args.push(sret.map_or(
-            crate::codegen_swap::body::NO_VALUE,
-            crate::codegen_swap::word,
-        ));
+        // A register result's word count rides above the buffer's value
+        // (`codegen_swap::body::RESULT_WORDS_SHIFT`).
+        let result_words = match frame.result {
+            FrameResult::Buffer(words) => u64::from(words),
+            _ => 0,
+        };
+        args.push(sret.map_or(crate::codegen_swap::body::NO_VALUE, |v| {
+            crate::codegen_swap::word(v)
+                | result_words << crate::codegen_swap::body::RESULT_WORDS_SHIFT
+        }));
         args.push(result_homes.len() as u64);
         args.extend(result_homes);
         // Each parameter's address variable: an `inout` scalar is loaded

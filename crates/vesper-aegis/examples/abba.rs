@@ -972,6 +972,153 @@ fn flip_gate_sgx_tcb_info() {
     println!("flip-gate pairs sgx_tcb_info {}", pairs.join(" "));
 }
 
+const TDX_TCB_INFO_PASSES: usize = 2_000;
+
+fn flip_gate_tdx_tcb_info() {
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct TcbInfoJson {
+        id: String,
+        version: u32,
+        issue_date: String,
+        next_update: String,
+        fmspc: String,
+        pce_id: String,
+        tcb_type: u32,
+        tcb_evaluation_data_number: u32,
+        tdx_module: Option<ModuleJson>,
+        #[serde(default)]
+        tdx_module_identities: Vec<ModuleIdentityJson>,
+        tcb_levels: Vec<TcbLevelJson>,
+    }
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct ModuleJson {
+        mrsigner: String,
+        attributes: String,
+        attributes_mask: String,
+    }
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct ModuleIdentityJson {
+        id: String,
+        mrsigner: String,
+        attributes: String,
+        attributes_mask: String,
+        tcb_levels: Vec<IsvLevelJson>,
+    }
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct TcbLevelJson {
+        tcb: TcbJson,
+        tcb_date: String,
+        tcb_status: String,
+        #[serde(rename = "advisoryIDs", default)]
+        advisory_ids: Vec<String>,
+    }
+    #[derive(serde::Deserialize)]
+    struct TcbJson {
+        sgxtcbcomponents: Vec<ComponentJson>,
+        pcesvn: u16,
+        tdxtcbcomponents: Vec<ComponentJson>,
+    }
+    #[derive(serde::Deserialize)]
+    struct ComponentJson {
+        svn: u8,
+    }
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct IsvLevelJson {
+        tcb: IsvSvnJson,
+        tcb_date: String,
+        tcb_status: String,
+        #[serde(rename = "advisoryIDs", default)]
+        advisory_ids: Vec<String>,
+    }
+    #[derive(serde::Deserialize)]
+    struct IsvSvnJson {
+        isvsvn: u16,
+    }
+
+    let response = data("tdx-go-tdx-guest/sample_tcbInfo_response");
+    let signed = port::intel::SignedCollateral::from_pcs_response(&response, "tcbInfo").unwrap();
+    let body = signed.body;
+
+    let rust_parse = |json: &[u8]| -> TcbInfoJson {
+        let j: TcbInfoJson = serde_json::from_slice(json).unwrap();
+        assert_eq!(j.id, "TDX");
+        assert_eq!(j.version, 3);
+        assert_eq!(j.tcb_type, 0);
+        let _ = (
+            &j.issue_date,
+            &j.next_update,
+            &j.fmspc,
+            &j.pce_id,
+            j.tcb_evaluation_data_number,
+        );
+        if let Some(m) = &j.tdx_module {
+            let _ = (&m.mrsigner, &m.attributes, &m.attributes_mask);
+        }
+        for m in &j.tdx_module_identities {
+            let _ = (&m.id, &m.mrsigner, &m.attributes, &m.attributes_mask);
+            for l in &m.tcb_levels {
+                let _ = (l.tcb.isvsvn, &l.tcb_date, &l.tcb_status, &l.advisory_ids);
+            }
+        }
+        for l in &j.tcb_levels {
+            let _ = (
+                l.tcb.sgxtcbcomponents.iter().map(|c| c.svn).sum::<u8>(),
+                l.tcb.pcesvn,
+                l.tcb.tdxtcbcomponents.iter().map(|c| c.svn).sum::<u8>(),
+                &l.tcb_date,
+                &l.tcb_status,
+                &l.advisory_ids,
+            );
+        }
+        j
+    };
+
+    // Differential check: Vesper port matches serde_json::from_slice.
+    let expected = rust_parse(&body);
+    let actual = port::intel::TdxTcbInfo::parse(&body).unwrap();
+    assert_eq!(
+        actual.tcb_evaluation_data_number,
+        expected.tcb_evaluation_data_number
+    );
+    assert_eq!(actual.levels.len(), expected.tcb_levels.len());
+    assert_eq!(
+        actual.tdx_module_identities.len(),
+        expected.tdx_module_identities.len()
+    );
+
+    let run_rust = || -> u64 {
+        let t = Instant::now();
+        for _ in 0..TDX_TCB_INFO_PASSES {
+            black_box(rust_parse(black_box(&body)));
+        }
+        t.elapsed().as_nanos() as u64
+    };
+    let run_port = || -> u64 {
+        let t = Instant::now();
+        for _ in 0..TDX_TCB_INFO_PASSES {
+            black_box(port::intel::TdxTcbInfo::parse(black_box(&body)).unwrap());
+        }
+        t.elapsed().as_nanos() as u64
+    };
+    black_box(run_rust());
+    black_box(run_port());
+    let pairs: Vec<String> = (0..FLIP_GATE_EPOCHS)
+        .map(|_| {
+            let a1 = run_rust();
+            let b1 = run_port();
+            let b2 = run_port();
+            let a2 = run_rust();
+            format!("{}:{}", a1 + a2, b1 + b2)
+        })
+        .collect();
+    println!("flip-gate pairs tdx_tcb_info {}", pairs.join(" "));
+}
+
 fn main() {
     assert_eq!(port::IMPLEMENTATION, "vesper");
     let args: Vec<String> = std::env::args().collect();
@@ -1014,6 +1161,10 @@ fn main() {
         }
         if args.get(2).map(String::as_str) == Some("sgx_tcb_info") {
             flip_gate_sgx_tcb_info();
+            return;
+        }
+        if args.get(2).map(String::as_str) == Some("tdx_tcb_info") {
+            flip_gate_tdx_tcb_info();
             return;
         }
     }

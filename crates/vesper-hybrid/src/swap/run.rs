@@ -19,7 +19,7 @@ mod run_binding;
 mod run_words;
 
 // The word encoders read the shared ones through `super::`.
-use super::{Registry, Swap, env_off, ir_words, on, open};
+use super::{Registry, Swap, env_off, ir_words, on, pass};
 
 /// Programs the Vesper machine evaluated.
 static RUN_CALLS: AtomicU64 = AtomicU64::new(0);
@@ -27,10 +27,7 @@ static RUN_CALLS: AtomicU64 = AtomicU64::new(0);
 static RUN_DECLINED: AtomicU64 = AtomicU64::new(0);
 
 /// The flip-gate rows of this file's swaps (`swaps::on`).
-pub(super) const SWAPS: &[Swap] = &[open(
-    "run",
-    "0.212x over 195 programs (tests/self_host_run.rs); no flip-gate configuration",
-)];
+pub(super) const SWAPS: &[Swap] = &[pass("run", "run", "#2053")];
 
 /// The driver's hook, not a registry slot.
 pub(super) fn register(_: &mut Registry) {}
