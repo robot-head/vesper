@@ -1192,6 +1192,82 @@ fn vesper_register_results_match() {
 /// (once on a cross target).
 const MIN_REGISTER_RESULTS: u64 = 6;
 
+/// Struct results of functions that can fail (#2581): `fail_only`
+/// functions returning a struct or tuple through the result pointer, built
+/// from checked arithmetic, partial division and a re-raised call. A
+/// failure exit returns the word 0 beside its tag, as any return of a
+/// result-pointer function does. The handler in `main` stays with the
+/// walk.
+const FAIL_SRET_SOURCE: &str = "
+struct Sum {
+    total: i64,
+    count: u32,
+}
+fn sum(a: i64, b: i64) -> Sum eff [Fail[ArithOverflow]] {
+    Sum { total: a + b, count: 2 }
+}
+fn ratio(a: u64, b: u64) -> (u64, u64) eff [Fail[RuntimeError]] {
+    (a / b, a % b)
+}
+fn scaled(a: i64, k: i64) -> Sum eff [Fail[ArithOverflow]] {
+    let t: i64 = add_one(a) * k;
+    Sum { total: t, count: 1 }
+}
+fn add_one(x: i64) -> i64 eff [Fail[ArithOverflow]] {
+    x + 1
+}
+fn main() -> i64 {
+    handle Fail[ArithOverflow] in {
+        handle Fail[RuntimeError] in {
+            let s: Sum = sum(4, 5);
+            let (q, r) = ratio(17, 5);
+            let k: Sum = scaled(6, 3);
+            s.total ^ widen_i64(s.count) ^ wrapping_i64(q) ^ wrapping_i64(r) ^ k.total
+        } with {
+            return value => value,
+            raise(error, resume) => 99,
+        }
+    } with {
+        return value => value,
+        raise(error, resume) => 98,
+    }
+}
+";
+
+#[test]
+fn vesper_fail_struct_results_match() {
+    big_stack(|| {
+        let parsed = vesper::parser::parse(FAIL_SRET_SOURCE);
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        let checked = vesper::check::check(&parsed.module);
+        assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
+        if let Err(e) = build(&checked.world, "main", true) {
+            panic!("the failing struct result program does not build: {e}");
+        }
+        let before = SRET.load(Ordering::Relaxed);
+        let total = both("fail_struct_results", &checked.world, true);
+        let sret = SRET.load(Ordering::Relaxed) - before;
+        eprintln!(
+            "fail_struct_results: {}; {sret} struct results emitted from Vesper",
+            total.summary()
+        );
+        let ran = if cross() { 0 } else { 2 };
+        assert_eq!((total.worlds, total.ran), (2, ran), "{}", total.summary());
+        assert!(
+            sret >= MIN_FAIL_STRUCT_RESULTS,
+            "only {sret} of the failing struct results came from Vesper \
+             (expected >= {MIN_FAIL_STRUCT_RESULTS})"
+        );
+        assert!(total.is_clean(), "{}", total.summary());
+    });
+}
+
+/// Failing struct-result bodies `vesper_fail_struct_results_match` must
+/// see emitted from Vesper: `sum`, `ratio` and `scaled`, in each build at
+/// least once (off-cross each is compiled for its CLIF text and again for
+/// the object, so 12 are emitted).
+const MIN_FAIL_STRUCT_RESULTS: u64 = 6;
+
 /// Part 6k: 1-word unary (`~`, `-`, `!`), bitwise (`&`, `|`, `^`),
 /// `wrapping_neg_i8`/`i32`/`i64`, and `u64` bit builtins across both
 /// optimized and unoptimized builds.
@@ -1778,6 +1854,51 @@ fn vesper_scalar_bodies_part_6u() {
         assert!(
             emitted >= min_emitted,
             "part 6u functions should come from Vesper (expected >= {min_emitted}, got {emitted})"
+        );
+        assert!(total.is_clean(), "{}", total.summary());
+    });
+}
+
+/// Part 6v: `PASS_SINK` `Op::Read` of `copy` `LANE_PRODUCT` values and
+/// `Op::Data` with nested `LANE_PRODUCT` fields (`STORE_AGGREGATE`).
+const SCALARS_6V: &str = "
+copy struct Inner {
+    x: i64,
+    y: f64,
+}
+fn copy_and_read(a: i64, b: f64) -> i64 {
+    let p: Inner = Inner { x: a, y: b };
+    let q: Inner = p;
+    wrapping_add(q.x, saturating_i64(q.y))
+}
+fn main() -> i64 {
+    copy_and_read(100, 12.5) ^ copy_and_read(-30, 4.5)
+}
+";
+
+#[test]
+fn vesper_scalar_bodies_part_6v() {
+    big_stack(|| {
+        let parsed = vesper::parser::parse(SCALARS_6V);
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        let checked = vesper::check::check(&parsed.module);
+        assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
+        if let Err(e) = build(&checked.world, "main", true) {
+            panic!("the part 6v scalar program does not build: {e}");
+        }
+        let before = EMITTED.load(Ordering::Relaxed);
+        let total = both("scalars_6v", &checked.world, true);
+        let emitted = EMITTED.load(Ordering::Relaxed) - before;
+        eprintln!(
+            "scalars_6v: {}; {emitted} functions emitted from Vesper",
+            total.summary()
+        );
+        let ran = if cross() { 0 } else { 2 };
+        assert_eq!((total.worlds, total.ran), (2, ran), "{}", total.summary());
+        let min_emitted = if cross() { 2 } else { 4 };
+        assert!(
+            emitted >= min_emitted,
+            "part 6v functions should come from Vesper (expected >= {min_emitted}, got {emitted})"
         );
         assert!(total.is_clean(), "{}", total.summary());
     });

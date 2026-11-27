@@ -101,6 +101,7 @@ pub const INST_F64CONST: u64 = 17;
 pub const INST_DATA: u64 = 32;
 pub const INST_PROJECT: u64 = 33;
 pub const INST_READ_FIELD: u64 = 34;
+pub const INST_READ_COPY: u64 = 35;
 
 // Sub-operations of `INST_FLOAT_UNARY` and 1-arg `CB_FLOAT_UNARY`.
 const FUN_FNEG: u64 = 1;
@@ -234,6 +235,7 @@ const CALL_ARGS: u64 = 2;
 const CALL_ARG_WORDS: u64 = 4;
 const CALL_ARG_ROOT_OFFSET: u64 = 2;
 const PASS_IN: u64 = 0;
+const PASS_SINK: u64 = 2;
 
 // A `Bind` of the wildcard pattern binds no local.
 pub const NO_LOCAL: u64 = 18446744073709551615;
@@ -252,6 +254,7 @@ const TERM_RETURN_SRET: u64 = 32;
 
 // `Codegen::data_into`'s word step, and its smallest storage.
 const WORD_BYTES: u64 = 8;
+pub const STORE_AGGREGATE: u64 = 65536;
 
 // `Op::Data`'s operands: a header of name and count, then one
 // (field name, value) pair per field.
@@ -380,6 +383,22 @@ impl Gen {
 
     // LANE_PRODUCT for a struct or tuple whose fields are all scalars
     // (`Layout::of` a product with no aggregate field), else 0.
+    fn body_product_layout_ok(in self, l: u32) -> bool {
+        if l == NONE32 || self.layouts.node(l).kind != L_PRODUCT {
+            return false;
+        }
+        let node = self.layouts.node(l);
+        for k in 0..widen_u64(node.n) {
+            let field = self.layouts.lfield(add(widen_u64(node.a), k));
+            if self.layouts.aggregate(field.layout) {
+                if !self.body_product_layout_ok(field.layout) {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
     fn body_product_lane(inout self, d: u32) -> u64 {
         let mark = self.layouts.mark();
         let l = layout_of(
@@ -389,17 +408,11 @@ impl Gen {
             in self.ctx.world,
             d
         );
-        let mut lane: u64 = 0;
-        if l != NONE32 && self.layouts.node(l).kind == L_PRODUCT {
-            let node = self.layouts.node(l);
-            lane = LANE_PRODUCT;
-            for k in 0..widen_u64(node.n) {
-                let field = self.layouts.lfield(add(widen_u64(node.a), k));
-                if self.layouts.aggregate(field.layout) {
-                    lane = 0;
-                }
-            }
-        }
+        let lane: u64 = if self.body_product_layout_ok(l) {
+            LANE_PRODUCT
+        } else {
+            0
+        };
         self.layouts.reset(mark);
         lane
     }
@@ -460,8 +473,22 @@ impl Gen {
             let size = widen_u64(self.layouts.node(lf.layout).size);
             let vt = n32(u64_at(in h.vty, u64_at(in ops, k)));
             if self.body_lane(vt) == LANE_PRODUCT {
-                ok = false;
-                break;
+                if size % WORD_BYTES != 0 {
+                    ok = false;
+                    break;
+                }
+                let mut off = start;
+                loop {
+                    if off >= add(start, size) {
+                        break;
+                    }
+                    covered.push(off);
+                    off = add(off, WORD_BYTES);
+                }
+                fields.push(start);
+                fields.push(0);
+                fields.push(add(STORE_AGGREGATE, size));
+                continue;
             }
             let ft = default_type(inout self.ctx.types, lf.ty);
             let fnode = self.ctx.types.node(ft);
@@ -1941,12 +1968,22 @@ impl Gen {
             if path.n == 0 {
                 let local_ty = self.body_local_type(in h, k);
                 if self.body_lane(local_ty) == LANE_PRODUCT {
-                    if self.program.op(add(i.a, 2)) != PASS_IN {
+                    let pass = self.program.op(add(i.a, 2));
+                    if pass == PASS_IN {
+                        kind = INST_READ;
+                        extra.push(k);
+                        extra.push(0);
+                    } else if pass == PASS_SINK {
+                        let size = self.body_product_size(local_ty);
+                        if size == 0 || size % WORD_BYTES != 0 {
+                            return false;
+                        }
+                        kind = INST_READ_COPY;
+                        extra.push(k);
+                        extra.push(size);
+                    } else {
                         return false;
                     }
-                    kind = INST_READ;
-                    extra.push(k);
-                    extra.push(0);
                 } else {
                     let read = self.body_kind(local_ty);
                     if read == NONE64 {
@@ -2129,7 +2166,7 @@ impl Gen {
         // A product is only built (INST_DATA) and returned: any other
         // instruction that makes or reads one is left to the walk.
         if kind != INST_DATA {
-            if self.body_lane(i.ty) == LANE_PRODUCT && kind != INST_READ {
+            if self.body_lane(i.ty) == LANE_PRODUCT && kind != INST_READ && kind != INST_READ_COPY {
                 return false;
             }
             if kind != INST_PROJECT && kind != INST_BIND && kind != INST_CALL {
@@ -2499,10 +2536,13 @@ impl Gen {
         o.push(builtin_calls.len());
         o.extend(in builtin_calls.as_slice());
         // The failure header: the row's `Fail` count, then (when there is
-        // one) the lane of the result a failure exit returns a zero of.
+        // one) the lane of the result a failure exit returns a zero of: a
+        // struct result's function returns the word 0 beside its result
+        // pointer (#2581).
         o.push(nfail);
         if nfail != 0 {
-            o.push(self.body_lane(h.result));
+            let lane = self.body_lane(h.result);
+            o.push(if lane == LANE_PRODUCT { LANE_I64 } else { lane });
         }
         o.extend(in graph_words.as_slice());
         o.extend(in block_words.as_slice());
