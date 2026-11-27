@@ -276,6 +276,11 @@ pub copy enum AtomicMemory {
     Subtract,
 }
 
+pub copy enum AtomicUpdate {
+    Bitwise(u8, bool),
+    MinMax(u8),
+}
+
 pub copy enum PackedRelation {
     Equal,
     SignedGreater,
@@ -323,6 +328,7 @@ pub copy enum Instruction {
     MultiplyImmediate(u8, u8, u32, u64),
     Fixed(FixedArithmetic, u8, u64),
     Atomic(AtomicMemory, u8, u8, u64),
+    AtomicUpdate(AtomicUpdate, u8, u64),
     Fence,
     ByteSwap(u8, u64),
     Unary(u8, u8, u64),
@@ -821,6 +827,38 @@ fn atomic_memory(inout out: ChunkSeq[u8], in op: AtomicMemory, register: u8, bas
         AtomicMemory::Subtract => out.push(if byte { SUB_RM_R8 } else { SUB_RM_R64 }),
     };
     memory_operand(inout out, register, base, 0);
+}
+
+fn atomic_update(inout out: ChunkSeq[u8], in op: AtomicUpdate, base: u8, width: u64) {
+    load_memory(inout out, RAX, base, 0, width);
+    let retry = out.len();
+    gp_move(inout out, R10, RAX);
+    match op {
+        AtomicUpdate::Bitwise(opcode, invert) => {
+            binary(inout out, opcode, R10, RDX, width == QWORD_BITS);
+            if invert {
+                let machine_width = if width == QWORD_BITS {
+                    QWORD_BITS
+                } else {
+                    DWORD_BITS
+                };
+                gp_unary(inout out, NOT_EXTENSION, R10, machine_width);
+            }
+        },
+        AtomicUpdate::MinMax(cc) => {
+            compare_registers(inout out, RAX, RDX, width);
+            emit_rex(inout out, R10, RDX, width == QWORD_BITS, false);
+            out.push(TWO_BYTE_OPCODE);
+            out.push(CMOVCC | cc);
+            out.push(modrm(R10, RDX));
+        },
+    };
+    atomic_memory(inout out, in AtomicMemory::CompareExchange, R10, base, width);
+    // Compare-exchange refreshes RAX on failure. The short branch spans only
+    // the fixed instruction sequence above.
+    out.push(JCC_SHORT | CC_NE);
+    let end = wrapping_add(out.len(), 1);
+    out.push(wrapping_u8(wrapping_sub(retry, end)));
 }
 
 fn rotate_word_bytes(inout out: ChunkSeq[u8], register: u8) {
@@ -1601,6 +1639,7 @@ pub fn emit(inout out: ChunkSeq[u8], in instruction: Instruction) {
             base,
             width
         ),
+        Instruction::AtomicUpdate(op, base, width) => atomic_update(inout out, in op, base, width),
         Instruction::Fence => {
             out.push(TWO_BYTE_OPCODE);
             out.push(FENCE_GROUP);

@@ -20,7 +20,7 @@ use self::scalar::{
     is_integer_division, TRAP, TRAP_VALUE, is_symbol, UNSIGNED_ADD_OVERFLOW, SIGNED_ADD_OVERFLOW,
     UNSIGNED_SUB_OVERFLOW, SIGNED_SUB_OVERFLOW, SIGNED_MUL_OVERFLOW, OVERFLOW_FLAG, ADD_CARRY,
     CHECKED_ARITHMETIC_RECORDS, is_checked_arithmetic, live_overflow_flag, consumes_carry,
-    BYTE_SWAP, ATOMIC_ADD, ATOMIC_EXCHANGE, FENCE, is_atomic_rmw, FLOAT_CONSTANT, FLOAT_ADD,
+    BYTE_SWAP, ATOMIC_ADD, ATOMIC_EXCHANGE, FENCE, is_atomic_update, FLOAT_CONSTANT, FLOAT_ADD,
     FLOAT_SUB, FLOAT_MUL, FLOAT_DIV, FLOAT_SQRT, FLOAT_NEG, FLOAT_ABS, FLOAT_COMPARE64, FLOAT_LOAD,
     FLOAT_STORE32, FLOAT_STORE64, BITS_TO_FLOAT, FLOAT_TO_BITS, FLOAT_SELECT, FLOAT_STACK_LOAD,
     FLOAT_STACK_STORE32, FLOAT_STACK_STORE64, FLOAT_COPY_SIGN, is_float_binary, is_float_compare,
@@ -1079,10 +1079,6 @@ fn float_operands(in r: Record) -> Option[u64] {
         },
         _ => Option::None,
     }
-}
-
-fn is_atomic_update(op: u64) -> bool {
-    is_atomic_rmw(op) || (op >= ATOMIC_AND && op <= ATOMIC_SIGNED_MAX)
 }
 
 fn operands(in r: Record, returns: u64) -> Option[u64] {

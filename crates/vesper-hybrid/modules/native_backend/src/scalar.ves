@@ -3,16 +3,16 @@ use self::x86_64::{
     SSE_SQRT, FLOAT_UNORDERED_OR_GREATER_EQUAL, is_xmm, find_float_register, ADC_RM_R64, ADD_RM_R64,
     ALU_ADD_EXTENSION, ALU_AND_EXTENSION, ALU_OR_EXTENSION, ALU_SUB_EXTENSION, ALU_XOR_EXTENSION,
     AND_RM_R64, ARGUMENTS, BYTE_BITS, DWORD_BITS, QWORD_BITS, WORD_BITS, CC_A, CC_AE, CC_B, CC_BE,
-    CC_E, CC_G, CC_GE, CC_L, CC_LE, CC_NE, CC_O, AtomicMemory, FixedArithmetic, Instruction,
-    NEG_EXTENSION, NOT_EXTENSION, OR_RM_R64, R10, R11, RAX, RDX, RSP, SAR_EXTENSION, SHL_EXTENSION,
-    SHR_EXTENSION, SBB_RM_R64, SUB_RM_R64, UNASSIGNED, XOR_RM_R64, ALL_REGISTER_CODES,
-    REGISTER_CODES, arg_register, emit, emit_direct_call, emit_direct_jump, emit_indirect_call,
-    emit_jump_table, emit_jump_table_entry, emit_symbol_address, callee_saved_registers,
-    find_callee_saved_register, find_register, fits_signed_byte, patch_forward_branch,
-    patch_relative_branch, patch_relative_offset, register_bit, home_register, xmm_home_register,
-    HOME_REGISTERS, cheap_immediate, move_constant, store_immediate, store_immediate_fits,
-    VECTOR_BITS, PAND, POR, PXOR, PackedInteger, PackedRelation, packed_integer_opcode,
-    BitOperation, ROL_EXTENSION, ROR_EXTENSION
+    CC_E, CC_G, CC_GE, CC_L, CC_LE, CC_NE, CC_O, AtomicMemory, AtomicUpdate, FixedArithmetic,
+    Instruction, NEG_EXTENSION, NOT_EXTENSION, OR_RM_R64, R10, R11, RAX, RDX, RSP, SAR_EXTENSION,
+    SHL_EXTENSION, SHR_EXTENSION, SBB_RM_R64, SUB_RM_R64, UNASSIGNED, XOR_RM_R64,
+    ALL_REGISTER_CODES, REGISTER_CODES, arg_register, emit, emit_direct_call, emit_direct_jump,
+    emit_indirect_call, emit_jump_table, emit_jump_table_entry, emit_symbol_address,
+    callee_saved_registers, find_callee_saved_register, find_register, fits_signed_byte,
+    patch_forward_branch, patch_relative_branch, patch_relative_offset, register_bit, home_register,
+    xmm_home_register, HOME_REGISTERS, cheap_immediate, move_constant, store_immediate,
+    store_immediate_fits, VECTOR_BITS, PAND, POR, PXOR, PackedInteger, PackedRelation,
+    packed_integer_opcode, BitOperation, ROL_EXTENSION, ROR_EXTENSION
 };
 
 // Integer block opcodes shared with src/native_machine.rs.
@@ -683,6 +683,14 @@ pub fn is_atomic_rmw(op: u64) -> bool {
     op >= ATOMIC_ADD && op <= ATOMIC_EXCHANGE
 }
 
+fn atomic_uses_retry(op: u64) -> bool {
+    op >= ATOMIC_AND && op <= ATOMIC_SIGNED_MAX
+}
+
+pub fn is_atomic_update(op: u64) -> bool {
+    is_atomic_rmw(op) || atomic_uses_retry(op)
+}
+
 pub fn is_atomic_cas(op: u64) -> bool {
     op >= ATOMIC_CAS_BYTE && op <= ATOMIC_CAS_QWORD
 }
@@ -694,7 +702,7 @@ fn is_fixed_arithmetic(op: u64) -> bool {
 }
 
 fn uses_fixed_registers(op: u64) -> bool {
-    is_fixed_arithmetic(op) || is_atomic_cas(op)
+    is_fixed_arithmetic(op) || is_atomic_cas(op) || atomic_uses_retry(op)
 }
 
 fn is_scalar_bit_operation(op: u64) -> bool {
@@ -714,6 +722,8 @@ fn fixed_result(op: u64) -> u8 {
         || op == UNSIGNED_DIV
         || op == UNSIGNED_MUL_OVERFLOW
         || op == SIGNED_MUL_OVERFLOW
+        || is_atomic_cas(op)
+        || atomic_uses_retry(op)
     {
         RAX
     } else {
@@ -901,7 +911,7 @@ fn reads_right(in record: Record, paired: bool) -> bool {
         || (is_bit_mix(op) && op != ROTATE_RIGHT)
         || is_fixed_arithmetic(op)
         || is_checked_arithmetic(op)
-        || is_atomic_rmw(op)
+        || is_atomic_update(op)
         || is_atomic_cas(op)
         || consumes_carry(op)
         || is_store(op)
@@ -1241,6 +1251,7 @@ fn find_last_reads(
         let bit_operation = is_scalar_bit_operation(record.op);
         let bit_mix = is_bit_mix(record.op);
         let cas = is_atomic_cas(record.op);
+        let atomic_retry = atomic_uses_retry(record.op);
         if (record.op > BYTE_SWAP
             && record.op != FUNCTION_GOT
             && record.op != STACK_POINTER
@@ -1250,6 +1261,7 @@ fn find_last_reads(
             && !bit_operation
             && !bit_mix
             && !cas
+            && !atomic_retry
             && !is_vector_operation(record.op))
             || (!labeled && is_cfg_record(record.op))
             || (record.op == STACK_SLOT && index >= frame.slots.len())
@@ -1368,8 +1380,8 @@ fn find_last_reads(
             }
             frame.floating = true;
         }
-        let atomic = is_atomic_rmw(record.op);
-        if cas {
+        let atomic = is_atomic_update(record.op);
+        if cas || atomic_retry {
             frame.fixed = true;
             frame.temporary_registers = frame.temporary_registers
                 | register_bit(RIGHT_SCRATCH)
@@ -1676,7 +1688,7 @@ fn emits_instruction(in record: Record, result_live: bool, home_slot: u64) -> bo
             || ((op == STACK_LOAD || op == FLOAT_STACK_LOAD)
                 && !is_home_reload(in record, home_slot))
             || is_call(op)
-            || is_atomic_rmw(op)
+            || is_atomic_update(op)
             || is_atomic_cas(op)
             || is_integer_division(op)
             || has_no_result(op))
@@ -2444,6 +2456,34 @@ fn emit_atomic_cas(
     save_result(inout out, in result, RAX);
 }
 
+fn emit_atomic_update(
+    inout out: ChunkSeq[u8],
+    in allocation: Allocation,
+    in record: Record,
+    in result: Location
+) {
+    let address = assigned(in allocation.locations, record.left);
+    let input = assigned(in allocation.locations, record.right);
+    let mut base = materialize(inout out, in address, THIRD_SCRATCH);
+    if base == RAX || base == RDX {
+        emit(inout out, in Instruction::Move(THIRD_SCRATCH, base));
+        base = THIRD_SCRATCH;
+    }
+    move_return(inout out, in input, RDX);
+    let op = match record.op {
+        ATOMIC_AND => AtomicUpdate::Bitwise(AND_RM_R64, false),
+        ATOMIC_NAND => AtomicUpdate::Bitwise(AND_RM_R64, true),
+        ATOMIC_OR => AtomicUpdate::Bitwise(OR_RM_R64, false),
+        ATOMIC_XOR => AtomicUpdate::Bitwise(XOR_RM_R64, false),
+        ATOMIC_UNSIGNED_MIN => AtomicUpdate::MinMax(CC_A),
+        ATOMIC_UNSIGNED_MAX => AtomicUpdate::MinMax(CC_B),
+        ATOMIC_SIGNED_MIN => AtomicUpdate::MinMax(CC_G),
+        _ => AtomicUpdate::MinMax(CC_L),
+    };
+    emit(inout out, in Instruction::AtomicUpdate(op, base, record.extra));
+    save_result(inout out, in result, RAX);
+}
+
 fn emit_call(
     inout out: ChunkSeq[u8],
     in words: Slice[u64],
@@ -3044,6 +3084,8 @@ fn encode_block_pass(
                 };
             } else if is_atomic_cas(record.op) {
                 emit_atomic_cas(inout output, in allocation, in record, in home);
+            } else if atomic_uses_retry(record.op) {
+                emit_atomic_update(inout output, in allocation, in record, in home);
             } else {
                 emit_fixed_arithmetic(inout output, in allocation, in record, in home);
             }

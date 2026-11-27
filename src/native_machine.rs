@@ -2484,7 +2484,6 @@ impl IntegerBlocks<'_> {
                         AtomicRmwOp::Add => IntegerOp::AtomicAdd,
                         AtomicRmwOp::Sub => IntegerOp::AtomicSub,
                         AtomicRmwOp::Xchg => IntegerOp::AtomicExchange,
-                        _ if !self.aarch64 => return None,
                         AtomicRmwOp::And => IntegerOp::AtomicAnd,
                         AtomicRmwOp::Nand => IntegerOp::AtomicNand,
                         AtomicRmwOp::Or => IntegerOp::AtomicOr,
