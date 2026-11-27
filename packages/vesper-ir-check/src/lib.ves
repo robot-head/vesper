@@ -31,6 +31,8 @@ use @vesper/check-data::input::{Ctx, Reader, ctx_new, extend_ctx, read_ctx};
 // copies equal check-data's.
 const NONE32: u32 = 4294967295;
 const NO_ADT: u32 = 4294967295;
+// A `Flow::modes` entry not yet asked (modes are 0 to 2).
+const MODE_UNKNOWN: u8 = 255;
 
 // Input name index -> symbol (`sym` of check-data's input.ves).
 fn sym(in name_map: ChunkSeq[u32], index: u64) -> u32 {
@@ -1434,8 +1436,8 @@ pub struct Flow {
     witness_touched: ChunkSeq[u32],
     diags: Diags,
     message: ChunkSeq[u8],
-    // `World::mode` per type index under this function's bounds, 255 when
-    // not yet asked. Joins ask it for every slot again.
+    // `World::mode` per type index under this function's bounds, or
+    // MODE_UNKNOWN. Joins ask it for every slot again.
     modes: ChunkSeq[u8],
 }
 
@@ -1504,13 +1506,13 @@ impl Flow {
         let at = w(ty);
         if at < self.modes.len() {
             let known = u8_at(in self.modes, at);
-            if known != 255 {
+            if known != MODE_UNKNOWN {
                 return known;
             }
         }
         let mode = mode_of(inout types, in names, in world, ty, in self.bounds);
         for _ in self.modes.len()..inc(at) {
-            self.modes.push(255);
+            self.modes.push(MODE_UNKNOWN);
         }
         let ok = self.modes.try_set(at, mode);
         mode
