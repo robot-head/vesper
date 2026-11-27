@@ -110,6 +110,7 @@ const IEX_LNOT: u64 = 18;
 const IEX_BAND: u64 = 19;
 const IEX_BOR: u64 = 20;
 const IEX_BXOR: u64 = 21;
+const IEX_WORD_BIN: u64 = 22;
 
 // Sub-operations of `INST_WRITE_OP`.
 const WOP_IADD: u64 = 1;
@@ -989,6 +990,42 @@ impl Gen {
             extra.push(k1);
             extra.push(rk);
             return true;
+        }
+        let ik = self.kind_of(d0);
+        if ik != 0 && !kind_wide(ik) {
+            let unsigned = kind_unsigned(ik);
+            let overflow = self.ctx.world.may_overflow(i.s0, i.s1);
+            let wb = if op == ops_s.plus && !overflow {
+                WBIN_IADD
+            } else if op == ops_s.minus && !overflow {
+                WBIN_ISUB
+            } else if op == ops_s.star && !overflow {
+                WBIN_IMUL
+            } else if op == ops_s.eq {
+                WBIN_EQ
+            } else if op == ops_s.ne {
+                WBIN_NE
+            } else if op == ops_s.lt {
+                if unsigned { WBIN_ULT } else { WBIN_SLT }
+            } else if op == ops_s.le {
+                if unsigned { WBIN_ULE } else { WBIN_SLE }
+            } else if op == ops_s.gt {
+                if unsigned { WBIN_UGT } else { WBIN_SGT }
+            } else if op == ops_s.ge {
+                if unsigned { WBIN_UGE } else { WBIN_SGE }
+            } else {
+                0
+            };
+            if wb != 0 {
+                kind = INST_INT_EXTRA;
+                extra.push(IEX_WORD_BIN);
+                extra.push(wb);
+                extra.push(0);
+                extra.push(k0);
+                extra.push(k1);
+                extra.push(rk);
+                return true;
+            }
         }
         false
     }
