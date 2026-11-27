@@ -322,3 +322,5 @@ the Rust lines deleted.
 | `stack-bound` (PASS; compiler module, `src/stack_bound.rs` goes at the retirement) | SH2-10 | 0 differences; tests 6/6 pass | hybrid path 1.20x [1.18x, 1.26x] n=12 | 0 (at the retirement) | #2359 |
 | `parse` (PASS; compiler module, `crates/vesper-syntax/src/parser.rs` goes at the retirement) | SH1-12 | 0 differences; tests pass | parse 0.23x n=12 | 0 (at the retirement) | #2389 |
 | `test-discovery` (PASS; compiler module, `src/test_discovery.rs` goes at the retirement) | SH5-14 | 0 differences; tests pass | test-discovery 1.26x n=12 | 0 (at the retirement) | #2453 |
+| `freestanding` (PASS; compiler module, `src/native_freestanding.rs` goes at the retirement) | SH4-14 | 0 differences; tests pass | freestanding-link 1.23x n=12 | 0 (at the retirement) | #2517 |
+| `pact-declarations` (PASS; compiler module, `src/pact_frontend.rs` goes at the retirement) | SH2-11 | 0 differences; tests pass | declarations-swap-point-with-encode-and-decode 0.02x n=12 | 0 (at the retirement) | #2517 |
