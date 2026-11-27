@@ -152,7 +152,7 @@ fn put_name(inout o: ChunkSeq[u8], in a: Ast, sym: u32) {
 }
 
 // Whether `sym` spells `lit`.
-fn name_is(in a: Ast, sym: u32, in lit: Str) -> bool {
+pub fn name_is(in a: Ast, sym: u32, in lit: Str) -> bool {
     if sym == none() {
         return false;
     }
@@ -179,7 +179,7 @@ fn name_is(in a: Ast, sym: u32, in lit: Str) -> bool {
 
 // An entry of a world table: the item in the base (`src` 0) or the module
 // (1), and for an `impl` method its block (else `none()`).
-copy struct Entry {
+pub copy struct Entry {
     src: u8,
     node: u32,
     imp: u32
@@ -187,7 +187,7 @@ copy struct Entry {
 
 // A table keyed by name, the last insert of a key winning (a `BTreeMap`):
 // `keys` interns the names, `entries` is indexed by key symbol.
-struct Table {
+pub struct Table {
     keys: Interner,
     entries: ChunkSeq[Entry],
     present: ChunkSeq[bool]
@@ -218,12 +218,12 @@ fn insert(inout t: Table, in key: String, e: Entry) -> bool {
 }
 
 // The key symbols of `t` in byte order of their names.
-fn sorted_keys(in t: Table) -> ChunkSeq[u32] {
+pub fn sorted_keys(in t: Table) -> ChunkSeq[u32] {
     sorted_symbols(in t.keys)
 }
 
 // The world's tables while collecting.
-struct Collect {
+pub struct Collect {
     adts: Table,
     effects: Table,
     functions: Table,
@@ -233,7 +233,7 @@ struct Collect {
     region_prelude: bool
 }
 
-fn name_text(in a: Ast, sym: u32) -> String {
+pub fn name_text(in a: Ast, sym: u32) -> String {
     let mut s = String::new();
     let ok = a.names.resolve_into(symbol_from_id(sym), inout s);
     s
@@ -564,7 +564,7 @@ fn put_type(inout o: ChunkSeq[u8], in a: Ast, t: u32) {
 // `TiledSeq[T, r]` with `r` one of the function's `r: Region` effect labels
 // print as the capability row `row{$fncap:<key>:<i>:Region|-}`
 // (`regions::normalize`, `function_capability`).
-struct Norm {
+pub struct Norm {
     active: bool,
     key: String,
     // The function's effect instances: the label of each `Region` one,
@@ -576,7 +576,7 @@ fn norm_off() -> Norm {
     Norm { active: false, key: String::new(), labels: ChunkSeq::new[u32]() }
 }
 
-fn norm_of(in a: Ast, f: u32, in key: String, active: bool) -> Norm {
+pub fn norm_of(in a: Ast, f: u32, in key: String, active: bool) -> Norm {
     let mut labels = ChunkSeq::new[u32]();
     let e = fn_node(in a, f).effects;
     if active && e != none() {
@@ -596,7 +596,7 @@ fn norm_of(in a: Ast, f: u32, in key: String, active: bool) -> Norm {
 }
 
 // `regions::source_name`: a bare name, or a row of only a tail.
-fn source_name(in a: Ast, t: u32) -> u32 {
+pub fn source_name(in a: Ast, t: u32) -> u32 {
     if t == none() {
         return none();
     }
@@ -616,7 +616,7 @@ fn source_name(in a: Ast, t: u32) -> u32 {
 }
 
 // The index of the last `Region` instance labelled `label`, or `none()`.
-fn label_index(in a: Ast, in nm: Norm, label: u32) -> u32 {
+pub fn label_index(in a: Ast, in nm: Norm, label: u32) -> u32 {
     let mut found = none();
     if label == none() {
         return found;
@@ -851,7 +851,7 @@ fn put_effect(inout o: ChunkSeq[u8], in a: Ast, x: u32, shift: u32) {
     }
 }
 
-fn entry_at(in t: Table, id: u32) -> Entry {
+pub fn entry_at(in t: Table, id: u32) -> Entry {
     match t.entries.try_get(widen_u64(id)) {
         Option::Some(e) => e,
         Option::None => Entry { src: 0, node: none(), imp: none() },
@@ -872,7 +872,7 @@ fn put_key(inout o: ChunkSeq[u8], in t: Table, id: u32) {
 // The sources of a world: the builtins (`src` 0), the module (1) and the
 // preludes after it, strings (2) and options (3), each with the shift of
 // its spans (an absent prelude is the empty module).
-struct Srcs {
+pub struct Srcs {
     base: Ast,
     module: Ast,
     strings: Ast,
@@ -890,7 +890,7 @@ struct Srcs {
     o_shift: u32
 }
 
-fn shift_of(in s: Srcs, src: u8) -> u32 {
+pub fn shift_of(in s: Srcs, src: u8) -> u32 {
     if src == 2 {
         s.s_shift
     } else if src == 3 {
@@ -1042,7 +1042,7 @@ fn dump_function(inout o: ChunkSeq[u8], in s: Srcs, e: Entry, in key: String, ac
 }
 
 // `regions::active`: the world's `Region` effect is the built-in one.
-fn region_active(in c: Collect, in s: Srcs) -> bool {
+pub fn region_active(in c: Collect, in s: Srcs) -> bool {
     let e = match c.effects.keys.lookup(in "Region") {
         Option::Some(sym) => entry_at(in c.effects, sym.id()),
         Option::None => return false,
@@ -1082,7 +1082,7 @@ fn dump(in c: Collect, in s: Srcs, inout o: ChunkSeq[u8]) {
     o.extend(in c.diags.as_slice());
 }
 
-fn word32(in s: ChunkSeq[u32], i: u64) -> u32 {
+pub fn word32(in s: ChunkSeq[u32], i: u64) -> u32 {
     match s.try_get(i) {
         Option::Some(v) => v,
         Option::None => 0,
@@ -1117,14 +1117,14 @@ fn max32(a: u32, b: u32) -> u32 {
 }
 
 // A collected world: its tables and the sources their entries index.
-struct Collected {
+pub struct Collected {
     c: Collect,
     s: Srcs
 }
 
 // `World::collect` over `source`: the builtins, the module, then the
 // preludes it brings in.
-fn collected(in source: Str) -> Collected {
+pub fn collected(in source: Str) -> Collected {
     let module = lower_source(in source).ast;
     let uses = uses_of(in module);
     let with_region = needs_region(in module);
@@ -1811,7 +1811,7 @@ fn box_mode(in w: Collected, in args: ChunkSeq[u8], inout seen: Seen) -> u8 {
 
 // `Exporter::nominal_mode`: the ADT applied to its own generics, each
 // bounded `copy`.
-fn nominal_mode(in w: Collected, in a: Ast, x: u32, in key: Str) -> u8 {
+pub fn nominal_mode(in w: Collected, in a: Ast, x: u32, in key: Str) -> u8 {
     let n = adt_node(in a, x);
     let mut b = bounds_none();
     let gn = list_len(in a, n.generics);
@@ -1929,7 +1929,7 @@ fn has_text(in hay: Slice[u8], in needle: Str) -> bool {
 // Whether `check::check` elaborates `a` (of `source`) before collecting
 // it, so that its world is not `World::collect`'s. Conservative: any name,
 // type or item that could start an elaboration declines.
-fn declined(in source: Str, in a: Ast) -> bool {
+pub fn declined(in source: Str, in a: Ast) -> bool {
     // Trait bounds and `use model` scopes (`has_frontend_syntax`).
     if a.m_model_uses.len() > 0 || a.m_bounds.len() > 0 {
         return true;
@@ -2152,7 +2152,7 @@ fn w_fn_entry(inout o: ChunkSeq[u8], in s: Srcs, e: Entry, in key: String, activ
     }
 }
 
-fn key_text(in t: Table, id: u32) -> String {
+pub fn key_text(in t: Table, id: u32) -> String {
     let mut k = String::new();
     let ok = t.keys.resolve_into(symbol_from_id(id), inout k);
     k

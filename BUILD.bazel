@@ -689,6 +689,13 @@ vesper_crate(
             "packages/**",
             "tests/fixtures/**",
         ]),
+        # #2024 slice 3: the core typing input built in Vesper, on the same
+        # corpus.
+        "test/self_host_check_world": glob([
+            "examples/**",
+            "packages/**",
+            "tests/fixtures/**",
+        ]),
         # SH2 lane 8 (#1180): @vesper/check-effects against capability_effects.
         "test/self_host_check_effects": glob([
             "examples/**",
@@ -1024,6 +1031,7 @@ vesper_crate(
         "test/hybrid_ir_check": {"CHECK_HARNESS_STRIDE": "4"},
         "test/self_host_ast": {"VESPER_AST_FUZZ": "1000"},
         "test/self_host_check_core_typing_exprs": {"CHECK_HARNESS_STRIDE": "4"},
+        "test/self_host_check_world": {"CHECK_HARNESS_STRIDE": "4"},
         "test/self_host_check_loops_atomics": {"CHECK_HARNESS_STRIDE": "4"},
         "test/self_host_check_pact": {"RUST_TEST_THREADS": "1"},
         "test/self_host_check_regions_seqs": {"CHECK_HARNESS_STRIDE": "4"},
@@ -1456,6 +1464,8 @@ vesper_crate(
         # The core typing differential (#1179) checks every corpus world.
         "test/self_host_check_core_typing": "long",
         "test/self_host_check_core_typing_exprs": "long",
+        # The checked world differential (#2024 slice 3) checks every corpus file.
+        "test/self_host_check_world": "long",
         # The capability-effect differential (#1180): corpus, fixtures, mutants.
         "test/self_host_check_effects": "long",
         "test/self_host_check_fip": "long",

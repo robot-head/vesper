@@ -2637,6 +2637,13 @@ const COMPILER_PACKAGES: &[(&str, &str, &str, &str, CompilerExecCheck)] = &[
         CompilerExecCheck::CompileOnly,
     ),
     (
+        "check-world",
+        "@vesper/check-world",
+        "packages/vesper-check-world",
+        "typing_input_words(in \"\").len()",
+        CompilerExecCheck::CompileOnly,
+    ),
+    (
         "preludes",
         "@vesper/preludes",
         "packages/vesper-preludes",
