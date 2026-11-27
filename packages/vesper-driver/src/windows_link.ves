@@ -17,13 +17,17 @@ const CH_VT: u8 = 11;
 const CH_FF: u8 = 12;
 const CH_CR: u8 = 13;
 const CH_SPACE: u8 = 32;
+const CH_QUOTE: u8 = 34;
 const CH_MINUS: u8 = 45;
 const CH_DOT: u8 = 46;
 const CH_SLASH: u8 = 47;
 const CH_ZERO: u8 = 48;
+const CH_COLON: u8 = 58;
+const CH_SEMICOLON: u8 = 59;
 const CH_UPPER_A: u8 = 65;
 const CH_UPPER_Z: u8 = 90;
 const CH_BACKSLASH: u8 = 92;
+const CH_LOWER_W: u8 = 119;
 const ASCII_CASE_DELTA: u8 = 32;
 const DECIMAL_RADIX: u64 = 10;
 const SIGN_BIT_64: u64 = 9223372036854775808;
@@ -276,5 +280,98 @@ pub fn windows_link_check(in input: Str) -> ChunkSeq[u64] {
     pack_bytes(inout words, in args.as_slice());
     pack_bytes(inout words, in err_with.as_slice());
     pack_bytes(inout words, in err_none.as_slice());
+    words
+}
+
+// Exact `WindowsNativeError::LinkerNotFound` message (`src/native_windows.rs`).
+pub fn windows_linker_not_found_message() -> Str {
+    "install the Visual Studio C++ build tools (x64), put lld-link on PATH, or pass --linker <path>"
+}
+
+fn push_joined_candidate(
+    inout out: ChunkSeq[u8],
+    in dir: Slice[u8],
+    in name: Slice[u8],
+    windows_host: bool
+) {
+    if out.len() > 0 {
+        out.push(CH_NUL);
+    }
+    if dir.len() > 0 {
+        out.extend(in dir);
+        let last = at_byte(in dir, wrapping_sub(dir.len(), 1));
+        if windows_host {
+            if last != CH_BACKSLASH && last != CH_SLASH {
+                out.push(CH_BACKSLASH);
+            }
+        } else if last != CH_SLASH {
+            out.push(CH_SLASH);
+        }
+    }
+    out.extend(in name);
+}
+
+fn append_path_candidates_for_name(
+    inout out: ChunkSeq[u8],
+    in path_env: Slice[u8],
+    in name: Slice[u8],
+    windows_host: bool
+) {
+    let n = path_env.len();
+    if windows_host {
+        let mut entry: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        let mut in_quotes = false;
+        for i in 0..n {
+            let b = at_byte(in path_env, i);
+            if b == CH_QUOTE {
+                in_quotes = !in_quotes;
+            } else if b == CH_SEMICOLON && !in_quotes {
+                if entry.len() > 0 {
+                    push_joined_candidate(inout out, in entry.as_slice(), in name, true);
+                    entry = ChunkSeq::new[u8]();
+                }
+            } else {
+                entry.push(b);
+            }
+        }
+        if entry.len() > 0 {
+            push_joined_candidate(inout out, in entry.as_slice(), in name, true);
+        }
+    } else {
+        let mut start: u64 = 0;
+        for i in 0..wrapping_add(n, 1) {
+            if i == n || at_byte(in path_env, i) == CH_COLON {
+                push_joined_candidate(inout out, in path_env[start..i], in name, false);
+                start = wrapping_add(i, 1);
+            }
+        }
+    }
+}
+
+// NUL-separated `lld-link` and `lld-link.exe` candidate paths from `PATH`,
+// matching `Linker::find`'s `find_on_path` order in `src/native_windows.rs`.
+pub fn windows_lld_link_candidates_nul(in path_env: Slice[u8], windows_host: bool) -> ChunkSeq[u8] {
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    append_path_candidates_for_name(inout out, in path_env, in "lld-link".as_bytes(), windows_host);
+    append_path_candidates_for_name(
+        inout out,
+        in path_env,
+        in "lld-link.exe".as_bytes(),
+        windows_host
+    );
+    out
+}
+
+// JIT test entrypoint: first byte `'w'` for Windows host or `'u'` for Unix,
+// rest is `PATH` -> packed NUL-separated candidates + packed not-found message.
+pub fn windows_lld_link_candidates_words(in input: Str) -> ChunkSeq[u64] {
+    let b = input.as_bytes();
+    let windows_host = at_byte(in b, 0) == CH_LOWER_W;
+    let start: u64 = if b.len() > 0 { 1 } else { 0 };
+    let cands = windows_lld_link_candidates_nul(in b[start..b.len()], windows_host);
+    let msg = windows_linker_not_found_message();
+    let mut words: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    pack_bytes(inout words, in cands.as_slice());
+    pack_bytes(inout words, in msg.as_bytes());
     words
 }
