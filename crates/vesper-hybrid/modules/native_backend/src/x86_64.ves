@@ -652,7 +652,17 @@ fn load_constant(inout out: ChunkSeq[u8], destination: u8, bits: u64) {
         emit_rex(inout out, destination, destination, false, false);
         out.push(XOR_RM_R64);
         out.push(modrm(destination, destination));
-    } else if bits <= U32_MAX_BITS {
+    } else {
+        move_constant(inout out, destination, bits);
+    }
+}
+
+pub fn cheap_immediate(bits: u64) -> bool {
+    bits <= U32_MAX_BITS || bits >= I32_MIN_BITS
+}
+
+pub fn move_constant(inout out: ChunkSeq[u8], destination: u8, bits: u64) {
+    if bits <= U32_MAX_BITS {
         emit_rex(inout out, 0, destination, false, false);
         out.push(MOV_REGISTER_IMMEDIATE | (destination & LOW_REGISTER_MASK));
         immediate(inout out, bits, IMM32_BYTES);

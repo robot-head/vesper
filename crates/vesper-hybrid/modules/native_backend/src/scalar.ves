@@ -9,7 +9,8 @@ use self::x86_64::{
     REGISTER_CODES, arg_register, emit, emit_direct_call, emit_indirect_call, emit_jump_table,
     emit_jump_table_entry, emit_symbol_address, callee_saved_registers, find_callee_saved_register,
     find_register, fits_signed_byte, patch_forward_branch, patch_relative_branch,
-    patch_relative_offset, register_bit, home_register, xmm_home_register, HOME_REGISTERS
+    patch_relative_offset, register_bit, home_register, xmm_home_register, HOME_REGISTERS,
+    cheap_immediate, move_constant
 };
 
 // Integer block opcodes shared with src/native_machine.rs.
@@ -281,6 +282,7 @@ copy enum Location {
     Absent,
     Register(u8),
     Spill(u32),
+    Rematerialized(u64),
 }
 
 struct Allocation {
@@ -1563,6 +1565,16 @@ fn allocate(
         } else {
             find_register(used)
         };
+        if register == UNASSIGNED
+            && spills
+            && record.op == CONSTANT
+            && cheap_immediate(record.left)
+        {
+            // A short immediate is cheaper than storing and reloading a spill.
+            locations.push(Location::Rematerialized(record.left));
+            used = survivors;
+            continue;
+        }
         // The retry uses unused nonvolatile GPRs before spilling. Save
         // each register once in the prologue, including any CFG homes.
         let register = if register == UNASSIGNED && spills && !floating && result_live {
@@ -1688,6 +1700,11 @@ fn materialize(inout output: ChunkSeq[u8], in location: Location, scratch: u8) -
         Location::Register(reg) => reg,
         Location::Spill(offset) => {
             emit(inout output, in Instruction::Load(scratch, RSP, offset, QWORD_BITS));
+            scratch
+        },
+        Location::Rematerialized(bits) => {
+            // A reload may happen between instructions that share condition flags.
+            move_constant(inout output, scratch, bits);
             scratch
         },
         Location::Absent => UNASSIGNED,
@@ -1827,7 +1844,7 @@ fn move_call_arguments(
                 Location::Register(reg) => {
                     needed = needed | register_bit(reg);
                 },
-                Location::Spill(_) => {},
+                Location::Spill(_) | Location::Rematerialized(_) => {},
             };
             if first == arguments {
                 first = i;
@@ -1889,7 +1906,7 @@ fn save_result(inout out: ChunkSeq[u8], in result: Location, source: u8) {
             inout out,
             in Instruction::Store(source, RSP, offset, QWORD_BITS)
         ),
-        Location::Absent => {},
+        Location::Absent | Location::Rematerialized(_) => {},
     };
 }
 
@@ -2234,6 +2251,10 @@ fn encode_block_pass(
         let value = wrapping_add(arguments, index);
         let record = read_record(in words, index);
         let result_live = last_read(in reads, value) != NEVER_READ;
+        match assigned(in allocation.locations, value) {
+            Location::Rematerialized(_) => continue,
+            _ => (),
+        };
         if record.op == CALL_HIGH
             || record.op == FLOAT_ARGUMENT
             || record.op == BRANCH_TABLE_TARGET
@@ -2495,7 +2516,7 @@ fn encode_block_pass(
             } else {
                 LEFT_SCRATCH
             },
-            Location::Absent => UNASSIGNED,
+            Location::Absent | Location::Rematerialized(_) => UNASSIGNED,
         };
         if is_store(record.op) {
             emit(

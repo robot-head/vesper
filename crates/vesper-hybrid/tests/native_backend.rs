@@ -114,6 +114,36 @@ fn branch_table(builder: &mut FunctionBuilder<'_>, index: Value, default: Block,
 }
 
 #[test]
+fn register_pressure_recreates_cheap_constants_without_stack_slots() {
+    const LIVE_CONSTANTS: u64 = 18;
+    const CONSTANT: u64 = 0;
+    const ADD: u64 = 1;
+    const CELL_BITS: u64 = u64::BITS as u64;
+    const MOV_R10D_ZERO: [u8; 6] = [0x41, 0xba, 0, 0, 0, 0];
+    const SUB_RSP_IMM8: [u8; 3] = [0x48, 0x83, 0xec];
+    const SUB_RSP_IMM32: [u8; 3] = [0x48, 0x81, 0xec];
+
+    let mut records: Vec<_> = (1..LIVE_CONSTANTS).map(|n| [CONSTANT, n, 0, 0]).collect();
+    records.push([CONSTANT, 0, 0, 0]);
+    let mut result = 0;
+    for value in 1..=LIVE_CONSTANTS {
+        let next = records.len() as u64 + 1;
+        records.push([ADD, result, value, CELL_BITS]);
+        result = next;
+    }
+    let tape: Vec<_> = [1, result]
+        .into_iter()
+        .chain(records.into_iter().flatten())
+        .collect();
+    let code = binding::x86_64_integer_block(&tape);
+    assert!(!code.starts_with(&SUB_RSP_IMM8) && !code.starts_with(&SUB_RSP_IMM32));
+    assert!(
+        code.windows(MOV_R10D_ZERO.len())
+            .any(|op| op == MOV_R10D_ZERO)
+    );
+}
+
+#[test]
 fn integer_backend_matches_cranelift_results() {
     // Reject a truncated header and a return value outside the value space.
     assert!(binding::x86_64_integer_block(&[1]).is_empty());
