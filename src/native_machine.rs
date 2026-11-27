@@ -1474,10 +1474,13 @@ impl IntegerBlocks<'_> {
             if ty != dfg.value_type(arg) {
                 return None;
             }
-            if arg == param {
+            let destination = homes[param]?;
+            // All homed definitions have been saved before the edge, and no
+            // other parameter of the target can have this same destination.
+            if homes[arg] == Some(destination) {
                 continue;
             }
-            self.store_cfg_value(ty, arg, values, slot, homes[param]?)?;
+            self.store_cfg_value(ty, arg, values, slot, destination)?;
         }
         self.append(IntegerOp::JumpLabel, [labels[target]?, 0, 0]);
         Some(())
@@ -1511,6 +1514,7 @@ impl IntegerBlocks<'_> {
         let dfg = &function.dfg;
         let layout = &function.layout;
         let mut labels = SecondaryMap::new();
+        let mut predecessors = SecondaryMap::<Block, Vec<Block>>::new();
         let mut order = vec![entry];
         labels[entry] = Some(0);
         let mut index = 0;
@@ -1528,6 +1532,7 @@ impl IntegerBlocks<'_> {
                 if target == entry || !layout.is_block_inserted(target) {
                     return None;
                 }
+                predecessors[target].push(block);
                 if labels[target].is_none() {
                     labels[target] = Some(order.len() as u64);
                     order.push(target);
@@ -1536,51 +1541,107 @@ impl IntegerBlocks<'_> {
             index += 1;
         }
 
-        let mut homes: SecondaryMap<Value, Option<u64>> = SecondaryMap::new();
-        let mut home_bytes = 0;
-        let mut incoming: SecondaryMap<Block, BTreeSet<Value>> = SecondaryMap::new();
-        let mut home = |value| {
+        // A jump into a block with one predecessor can keep its SSA values
+        // in the same machine block. Conditional edges and joins start a
+        // separate block and still use the home protocol.
+        let mut groups = SecondaryMap::<Block, Option<Block>>::new();
+        let mut continuation = SecondaryMap::<Block, Option<Block>>::new();
+        let mut label_count = 0;
+        for &block in &order {
+            if let &[predecessor] = predecessors[block].as_slice()
+                && dfg.insts[layout.last_inst(predecessor)?].opcode() == Opcode::Jump
+            {
+                groups[block] = groups[predecessor];
+                labels[block] = None;
+                continuation[predecessor] = Some(block);
+            } else {
+                groups[block] = Some(block);
+                labels[block] = Some(label_count);
+                label_count += 1;
+            }
+        }
+
+        let mut home_values = Vec::new();
+        let mut needs_home = SecondaryMap::<Value, bool>::new();
+        let mut uses = SecondaryMap::<Value, Vec<Block>>::new();
+        let mut incoming = SecondaryMap::<Block, BTreeSet<Value>>::new();
+        let owner = |value| match dfg.value_def(value) {
+            ValueDef::Result(inst, _) => layout.inst_block(inst),
+            ValueDef::Param(block, _) => Some(block),
+            ValueDef::Union(_, _) => None,
+        };
+        let mut mark_home = |value| {
+            if !needs_home[value] {
+                needs_home[value] = true;
+                home_values.push(value);
+            }
+        };
+        for &block in &order {
+            let group = groups[block]?;
+            if block == group && block != entry {
+                for &param in dfg.block_params(block) {
+                    mark_home(param);
+                }
+            }
+            for inst in layout.block_insts(block) {
+                for arg in dfg.inst_values(inst) {
+                    let arg = dfg.resolve_aliases(arg);
+                    let owner = owner(arg)?;
+                    let parameter = matches!(dfg.value_def(arg), ValueDef::Param(..));
+                    if (groups[owner]? != group || (parameter && owner == group && group != entry))
+                        && incoming[group].insert(arg)
+                    {
+                        mark_home(arg);
+                        uses[arg].push(group);
+                    }
+                }
+            }
+        }
+
+        let mut homes = SecondaryMap::<Value, Option<u64>>::new();
+        let mut cells: Vec<(Type, BTreeSet<Block>)> = Vec::new();
+        for value in home_values {
             let ty = dfg.value_type(value);
-            let cells = if ty == types::I128 {
-                WIDE_INTEGER_CELLS as u64
+            let width = if ty == types::I128 {
+                WIDE_INTEGER_CELLS
             } else {
                 integer_width(ty).or_else(|| float_width(ty))?;
                 1
             };
-            if homes[value].is_none() {
-                homes[value] = Some(home_bytes);
-                home_bytes += cells * CFG_HOME_BYTES;
-            }
-            Some(())
-        };
-        for &block in &order {
-            if block != entry {
-                for &param in dfg.block_params(block) {
-                    home(param)?;
+            // Walk backwards from loads to the definition. A parameter is
+            // written by each incoming edge, so its lifetime starts at the
+            // target block. Edge sources have already been loaded into SSA
+            // temporaries before their homes are overwritten.
+            let mut live = BTreeSet::from([groups[owner(value)?]?]);
+            let mut pending = std::mem::take(&mut uses[value]);
+            while let Some(block) = pending.pop() {
+                if live.insert(block) {
+                    for &predecessor in &predecessors[block] {
+                        pending.push(groups[predecessor]?);
+                    }
                 }
             }
-            let mut use_value = |operand| {
-                let operand = dfg.resolve_aliases(operand);
-                let (owner, param) = match dfg.value_def(operand) {
-                    ValueDef::Result(inst, _) => (layout.inst_block(inst)?, false),
-                    ValueDef::Param(block, _) => (block, true),
-                    ValueDef::Union(_, _) => return None,
-                };
-                if owner != block || (param && block != entry) {
-                    home(operand)?;
-                    incoming[block].insert(operand);
+            let start = cells
+                .windows(width)
+                .position(|slots| {
+                    slots
+                        .iter()
+                        .all(|(class, occupied)| *class == ty && occupied.is_disjoint(&live))
+                })
+                .unwrap_or(cells.len());
+            if start == cells.len() {
+                let max_cells = STACK_PROBE_INTERVAL as u64 / CFG_HOME_BYTES;
+                if (start + width) as u64 > max_cells {
+                    return None;
                 }
-                Some(())
-            };
-            for inst in layout.block_insts(block) {
-                for arg in dfg.inst_values(inst) {
-                    use_value(arg)?;
-                }
+                cells.extend((0..width).map(|_| (ty, BTreeSet::new())));
             }
+            for (_, occupied) in &mut cells[start..start + width] {
+                occupied.extend(live.iter().copied());
+            }
+            homes[value] = Some(start as u64 * CFG_HOME_BYTES);
         }
-        if home_bytes > STACK_PROBE_INTERVAL as u64 {
-            return None;
-        }
+        let home_bytes = cells.len() as u64 * CFG_HOME_BYTES;
         let slot = function.sized_stack_slots.len() as u64;
         if home_bytes != 0 {
             self.append(IntegerOp::StackSlot, [home_bytes, CFG_HOME_BYTES, 0]);
@@ -1590,8 +1651,11 @@ impl IntegerBlocks<'_> {
         } else {
             self.return_cells as u64
         };
-        let mut next_edge = order.len() as u64;
+        let mut next_edge = label_count;
         for block in order {
+            if groups[block] != Some(block) {
+                continue;
+            }
             let home_slot = if block == entry && home_bytes != 0 {
                 slot + 1
             } else {
@@ -1623,22 +1687,33 @@ impl IntegerBlocks<'_> {
                     );
                 }
             }
-            let end = self.emit_block(block, &mut values)?;
-            let definitions = dfg
-                .block_params(block)
-                .iter()
-                .copied()
-                .filter(|_| block == entry)
-                .chain(
-                    layout
-                        .block_insts(block)
-                        .flat_map(|inst| dfg.inst_results(inst).iter().copied()),
-                );
-            for value in definitions {
-                if let Some(offset) = homes[value] {
-                    self.store_cfg_value(dfg.value_type(value), value, &values, slot, offset)?;
+            let mut current = block;
+            let end = loop {
+                let end = self.emit_block(current, &mut values)?;
+                let definitions = dfg
+                    .block_params(current)
+                    .iter()
+                    .copied()
+                    .filter(|_| current != block || block == entry)
+                    .chain(
+                        layout
+                            .block_insts(current)
+                            .flat_map(|inst| dfg.inst_results(inst).iter().copied()),
+                    );
+                for value in definitions {
+                    if let Some(offset) = homes[value] {
+                        self.store_cfg_value(dfg.value_type(value), value, &values, slot, offset)?;
+                    }
                 }
-            }
+                let Some(next) = continuation[current] else {
+                    break end;
+                };
+                let InstructionData::Jump { destination, .. } = dfg.insts[end] else {
+                    return None;
+                };
+                current = self.edge(destination, &mut values)?;
+                debug_assert_eq!(current, next);
+            };
             match dfg.insts[end] {
                 InstructionData::Jump { destination, .. } => {
                     self.cfg_edge(destination, &labels, &homes, slot, &values)?;

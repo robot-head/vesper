@@ -1150,7 +1150,7 @@ fn dying_register(
 
 // Scan in instruction order. Expire a register at its last use. If the
 // register-only pass fills up, retry with three reload registers reserved
-// and give new values that cannot fit in registers their own stack homes.
+// and let spilled values with disjoint lifetimes share stack slots.
 fn allocate(
     in words: Slice[u64],
     in reads: ChunkSeq[u64],
@@ -1192,7 +1192,8 @@ fn allocate(
     } else {
         REGISTER_CODES
     };
-    let mut stack_end = wrapping_add(frame.outgoing, if frame.used { frame.size } else { 0 });
+    let spill_base = wrapping_add(frame.outgoing, if frame.used { frame.size } else { 0 });
+    let mut spill_ends = ChunkSeq::new[u64]();
     let mut saved_masks = ChunkSeq::new[u32]();
     let mut save_slots: u64 = 0;
     let mut has_calls = false;
@@ -1212,7 +1213,8 @@ fn allocate(
     for index in 0..count {
         let value = wrapping_add(arguments, index);
         let record = read_record(in words, index);
-        let result_live = last_read(in reads, value) != NEVER_READ;
+        let end = last_read(in reads, value);
+        let result_live = end != NEVER_READ;
         if !emits_instruction(
             record.op,
             result_live || live_overflow_flag(in reads, value, record.op)
@@ -1326,15 +1328,29 @@ fn allocate(
                 }
             )
         } else {
-            let offset = stack_end;
-            stack_end = wrapping_add(stack_end, SPILL_SLOT_BYTES);
-            if aligned_frame_size(stack_end) > STACK_PROBE_INTERVAL {
-                return Option::None;
+            let mut slot = spill_ends.len();
+            for candidate in 0..spill_ends.len() {
+                if spill_ends.try_get(candidate).unwrap_or(NEVER_READ) < value {
+                    slot = candidate;
+                    break;
+                }
+            }
+            let offset = wrapping_add(spill_base, wrapping_mul(slot, SPILL_SLOT_BYTES));
+            if slot == spill_ends.len() {
+                if aligned_frame_size(wrapping_add(offset, SPILL_SLOT_BYTES))
+                    > STACK_PROBE_INTERVAL
+                {
+                    return Option::None;
+                }
+                spill_ends.push(end);
+            } else {
+                let _ = spill_ends.try_set(slot, end);
             }
             Location::Spill(wrapping_u32(offset))
         };
         locations.push(location);
     }
+    let mut stack_end = wrapping_add(spill_base, wrapping_mul(spill_ends.len(), SPILL_SLOT_BYTES));
     let save_bytes = wrapping_mul(save_slots, SPILL_SLOT_BYTES);
     let home_save_bytes = wrapping_mul(gp_home_slots, SPILL_SLOT_BYTES);
     let mut local_frame = frame.outgoing;

@@ -59,6 +59,7 @@ enum Case {
     NestedBranches,
     SharedTail,
     LoopEdges,
+    ReusedCfgHomes { conditional: bool },
     BranchTable { empty: bool },
     BranchTableBackedge,
     ShiftCountInRcx,
@@ -73,6 +74,7 @@ enum Case {
     JoinedMemory,
     StackFrame(u32),
     SpilledValues { fixed_slot: bool },
+    ReusedSpills,
     CompareImmediate,
     Select,
     SelectKeepingArms,
@@ -184,6 +186,8 @@ fn integer_backend_matches_cranelift_results() {
         Case::NestedBranches,
         Case::SharedTail,
         Case::LoopEdges,
+        Case::ReusedCfgHomes { conditional: false },
+        Case::ReusedCfgHomes { conditional: true },
         Case::BranchTable { empty: false },
         Case::BranchTable { empty: true },
         Case::BranchTableBackedge,
@@ -202,6 +206,7 @@ fn integer_backend_matches_cranelift_results() {
         Case::StackFrame(256),
         Case::SpilledValues { fixed_slot: false },
         Case::SpilledValues { fixed_slot: true },
+        Case::ReusedSpills,
     ];
     let cases: Vec<_> =
         cases
@@ -823,6 +828,68 @@ fn integer_backend_matches_cranelift_results() {
                 let pair = builder.ins().iadd(left, middle);
                 let all = builder.ins().iadd(pair, right);
                 builder.ins().isub(all, shifted)
+            }
+            Case::ReusedSpills => {
+                const LOCAL_BYTES: u32 = 4000;
+                const PRESSURE_GROUPS: usize = 8;
+                const LIVE_TERMS: i64 = 12;
+                let slot = builder.create_sized_stack_slot(StackSlotData::new(
+                    StackSlotKind::ExplicitSlot,
+                    LOCAL_BYTES,
+                    0,
+                ));
+                // Each group spills, but releases all its temporaries before
+                // the next. Giving every spill a fresh slot exceeds one page.
+                let mut accumulator = a;
+                for _ in 0..PRESSURE_GROUPS {
+                    let terms: Vec<_> = (1..=LIVE_TERMS)
+                        .map(|n| builder.ins().iadd_imm(accumulator, n))
+                        .collect();
+                    accumulator = terms
+                        .into_iter()
+                        .fold(b, |sum, term| builder.ins().bxor(sum, term));
+                }
+                let offset = (LOCAL_BYTES - size_of::<u64>() as u32) as i32;
+                builder.ins().stack_store(accumulator, slot, offset);
+                builder.ins().stack_load(types::I64, slot, offset)
+            }
+            Case::ReusedCfgHomes { conditional } => {
+                const BLOCKS: usize = 532;
+                let header = builder.create_block();
+                let carry = builder.append_block_param(header, types::I64);
+                let remaining = builder.append_block_param(header, types::I64);
+                let exit = builder.create_block();
+                let initial_count = builder.ins().band_imm(a, 3);
+                builder
+                    .ins()
+                    .jump(header, &[b.into(), initial_count.into()]);
+                builder.switch_to_block(header);
+                let first = builder.create_block();
+                let mut step_value = builder.append_block_param(first, types::I64);
+                builder
+                    .ins()
+                    .brif(remaining, first, &[carry.into()], exit, &[]);
+                builder.switch_to_block(first);
+                for _ in 1..BLOCKS {
+                    let next = builder.create_block();
+                    let result = builder.ins().iadd(step_value, c);
+                    let parameter = builder.append_block_param(next, types::I64);
+                    if conditional {
+                        builder
+                            .ins()
+                            .brif(c, next, &[result.into()], next, &[step_value.into()]);
+                    } else {
+                        builder.ins().jump(next, &[result.into()]);
+                    }
+                    builder.switch_to_block(next);
+                    step_value = parameter;
+                }
+                let next_count = builder.ins().iadd_imm(remaining, -1);
+                builder
+                    .ins()
+                    .jump(header, &[step_value.into(), next_count.into()]);
+                builder.switch_to_block(exit);
+                builder.ins().bxor(carry, c)
             }
             Case::CompareImmediate => {
                 let byte = builder.ins().ireduce(types::I8, a);
