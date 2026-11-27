@@ -879,3 +879,136 @@ pub fn tuf_verify_ed25519_quorum(
     }
     QUORUM_INSUFFICIENT
 }
+
+// ---------------------------------------------------------------------------
+// TUF role-name percent-encoding/decoding and checkpoint structural invariants.
+
+const BYTE_PERCENT: u8 = 37;
+const HEX_UPPER_ALPHA_BASE: u8 = 55;
+const HEX_INVALID: u8 = 255;
+const SCHEMA_V1: u64 = 1;
+const SCHEMA_V2: u64 = 2;
+
+fn is_role_unreserved(b: u8) -> bool {
+    (b >= BYTE_LOWER_A && b <= BYTE_LOWER_Z)
+        || (b >= BYTE_UPPER_A && b <= BYTE_UPPER_Z)
+        || (b >= BYTE_ZERO && b <= BYTE_NINE)
+        || b == BYTE_UNDERSCORE
+        || b == BYTE_DOT
+        || b == BYTE_DASH
+        || b == BYTE_TILDE
+}
+
+fn upper_hex_nibble(v: u8) -> u8 {
+    if v < 10 {
+        wrapping_add(BYTE_ZERO, v)
+    } else {
+        wrapping_add(HEX_UPPER_ALPHA_BASE, v)
+    }
+}
+
+fn decode_hex_nibble(b: u8) -> u8 {
+    if b >= BYTE_ZERO && b <= BYTE_NINE {
+        wrapping_sub(b, BYTE_ZERO)
+    } else if b >= BYTE_LOWER_A && b <= BYTE_LOWER_F {
+        wrapping_sub(b, HEX_ALPHA_BASE)
+    } else if b >= BYTE_UPPER_A && b <= BYTE_UPPER_F {
+        wrapping_sub(b, HEX_UPPER_ALPHA_BASE)
+    } else {
+        HEX_INVALID
+    }
+}
+
+pub fn tuf_percent_encode_role(in name: Slice[u8]) -> ChunkSeq[u8] {
+    let n = name.len();
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut i: u64 = 0;
+    loop {
+        if i >= n {
+            break;
+        }
+        let b = match name.try_get(i) {
+            Some(v) => v,
+            None => 0
+        };
+        if is_role_unreserved(b) {
+            out.push(b);
+        } else {
+            out.push(BYTE_PERCENT);
+            out.push(upper_hex_nibble(b >> HEX_SHIFT));
+            out.push(upper_hex_nibble(b & HEX_NIBBLE_MASK));
+        }
+        i = wrapping_add(i, 1);
+    }
+    out
+}
+
+pub fn tuf_percent_decode_role(in encoded: Slice[u8]) -> ChunkSeq[u8] {
+    let n = encoded.len();
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut i: u64 = 0;
+    loop {
+        if i >= n {
+            break;
+        }
+        let b = match encoded.try_get(i) {
+            Some(v) => v,
+            None => 0
+        };
+        if b == BYTE_PERCENT && wrapping_add(i, 2) < n {
+            let h = decode_hex_nibble(match encoded.try_get(wrapping_add(i, 1)) {
+                Some(v) => v,
+                None => 0
+            });
+            let l = decode_hex_nibble(match encoded.try_get(wrapping_add(i, 2)) {
+                Some(v) => v,
+                None => 0
+            });
+            if h != HEX_INVALID && l != HEX_INVALID {
+                out.push((h << HEX_SHIFT) | l);
+                i = wrapping_add(i, 3);
+                continue;
+            }
+        }
+        out.push(b);
+        i = wrapping_add(i, 1);
+    }
+    out
+}
+
+pub fn tuf_check_checkpoint_invariants(
+    wire_len: u64,
+    max_checkpoint_bytes: u64,
+    schema_version: u64,
+    timestamp_version: u64,
+    snapshot_version: u64,
+    role_count: u64,
+    max_roles: u64,
+    has_zero_role: bool,
+    has_targets_role: bool
+) -> bool {
+    if wire_len > max_checkpoint_bytes {
+        return false;
+    }
+    if schema_version != SCHEMA_V1 && schema_version != SCHEMA_V2 {
+        return false;
+    }
+    if schema_version == SCHEMA_V1
+        && (timestamp_version == 0 || snapshot_version == 0 || role_count == 0)
+    {
+        return false;
+    }
+    if (timestamp_version == 0) != (snapshot_version == 0) {
+        return false;
+    }
+    if snapshot_version == 0 && role_count > 0 {
+        return false;
+    }
+    if role_count > max_roles || has_zero_role {
+        return false;
+    }
+    if role_count > 0 && !has_targets_role {
+        return false;
+    }
+    true
+}

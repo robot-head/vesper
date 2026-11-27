@@ -281,6 +281,17 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
     hash(bytes)
 }
 
+/// Percent-encodes a TUF delegated role name via `@vesper/loom-tuf`.
+pub fn percent_encode_role(role_name: &str) -> String {
+    String::from_utf8(binding::tuf_percent_encode_role(role_name.as_bytes())).unwrap_or_default()
+}
+
+/// Percent-decodes a TUF metadata filename stem via `@vesper/loom-tuf`.
+pub fn percent_decode_role(encoded: &str) -> Result<String, TufError> {
+    String::from_utf8(binding::tuf_percent_decode_role(encoded.as_bytes()))
+        .map_err(|_| TufError("invalid encoded metadata filename".into()))
+}
+
 /// Verify using real host time, safe expiry enforcement, and no network transport.
 /// Failed calls return no target bytes and no checkpoint advancement; persist successful checkpoints
 /// before using their bytes. Authenticated metadata preceding a later failure is NOT retained.
@@ -962,12 +973,7 @@ impl MetadataLengthCheck<'_> {
             .ok_or_else(|| TufError(format!("missing snapshot role pin: {key}")))?;
         if let Some(length) = pin.length {
             // Match Tough's role-name escaping while retaining escapes in the filesystem filename.
-            const ESCAPE: &percent_encoding::AsciiSet = &percent_encoding::NON_ALPHANUMERIC
-                .remove(b'_')
-                .remove(b'.')
-                .remove(b'-')
-                .remove(b'~');
-            let encoded = percent_encoding::utf8_percent_encode(role_name, ESCAPE);
+            let encoded = percent_encode_role(role_name);
             let filename = if self.consistent {
                 format!("{}.{encoded}.json", pin.version)
             } else {
@@ -1000,21 +1006,20 @@ fn validate_checkpoint(
     bootstrap: &[u8],
     limits: &Limits,
 ) -> Result<(), TufError> {
-    if old.to_json()?.len() > limits.checkpoint_bytes
-        || !matches!(old.state.schema_version, 1 | 2)
-        || old.state.repository_id != repository
+    let wire_len = old.to_json()?.len() as u64;
+    if !binding::tuf_check_checkpoint_invariants(
+        wire_len,
+        limits.checkpoint_bytes as u64,
+        u64::from(old.state.schema_version),
+        old.state.timestamp_version,
+        old.state.snapshot_version,
+        old.state.role_versions.len() as u64,
+        limits.roles as u64,
+        old.state.role_versions.values().any(|x| *x == 0),
+        old.state.role_versions.contains_key("targets.json"),
+    ) || old.state.repository_id != repository
         || old.state.bootstrap_sha256 != bootstrap_hash
         || old.checksum != state_checksum(&old.state)?
-        || (old.state.schema_version == 1
-            && (old.state.timestamp_version == 0
-                || old.state.snapshot_version == 0
-                || old.state.role_versions.is_empty()))
-        || ((old.state.timestamp_version == 0) != (old.state.snapshot_version == 0))
-        || (old.state.snapshot_version == 0 && !old.state.role_versions.is_empty())
-        || old.state.role_versions.len() > limits.roles
-        || old.state.role_versions.values().any(|x| *x == 0)
-        || (!old.state.role_versions.is_empty()
-            && !old.state.role_versions.contains_key("targets.json"))
     {
         return fail("corrupt or mismatched checkpoint");
     }
@@ -1283,15 +1288,8 @@ fn preflight_metadata(directory: &Path, limits: &Limits) -> Result<(), TufError>
             {
                 stems.push(name);
             }
-            let names: Result<Vec<_>, _> = stems
-                .into_iter()
-                .map(|stem| {
-                    percent_encoding::percent_decode_str(stem)
-                        .decode_utf8()
-                        .map(|name| name.into_owned())
-                })
-                .collect();
-            let names = names.map_err(|_| TufError("invalid encoded metadata filename".into()))?;
+            let names: Result<Vec<_>, _> = stems.into_iter().map(percent_decode_role).collect();
+            let names = names?;
             for role in delegations {
                 let child = role
                     .get("name")
