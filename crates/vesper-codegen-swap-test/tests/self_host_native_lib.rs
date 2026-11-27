@@ -14,10 +14,13 @@
 //! those records asks @vesper/native-lib for the same object, which must
 //! have the same bytes.
 //!
-//! The Rust side runs with the CLIF peephole pass and the vectorizer off
-//! (`VESPER_CLIF_OPT=off`, `VESPER_VECTORIZE=off`): the driver runs no CLIF
-//! passes yet (slice 2a-4), so this compares the objects the walk itself
-//! makes.
+//! Both sides run the CLIF passes of an optimized definition (slice 2a-4):
+//! the driver runs `native_clif_opt::STEPS` through
+//! @vesper/native-clif-opt and `native_vectorize::run` through
+//! @vesper/native-vectorize on the shim's function words. The Rust objects
+//! are also built with the passes off (`VESPER_CLIF_OPT=off`,
+//! `VESPER_VECTORIZE=off`), and the passes must change some of them, so
+//! the comparison covers them.
 #[path = "../../../tests/common/check_harness.rs"]
 mod check_harness;
 #[path = "../../../tests/common/check_words.rs"]
@@ -59,7 +62,9 @@ const WORD_BYTES: usize = 8;
 /// (packages/vesper-codegen-calls/src/data.ves).
 const LIBRARY_TASK: u64 = 4;
 const MORE_ROOTS_TASK: u64 = 8;
-/// The CLIF passes the walk's objects are compared without.
+/// The library objects the passes must change.
+const MIN_CHANGED_BY_PASSES: usize = 2;
+/// The CLIF passes that the objects with the passes off are built without.
 const PASSES_OFF: [(&str, &str); 2] = [("VESPER_CLIF_OPT", "off"), ("VESPER_VECTORIZE", "off")];
 
 fn repo() -> std::path::PathBuf {
@@ -541,18 +546,30 @@ pub fn count(inout b: Buf) -> u64 { 7 }",
     ),
 ];
 
-fn with_passes_off<R>(f: impl FnOnce() -> R) -> R {
+/// Serializes the Rust builds: the CLIF pass switches are process-wide
+/// variables, and the tests run in parallel threads.
+static BUILDS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// [`rust_build`] with the CLIF passes on, under [`BUILDS`].
+fn rust_build_passes_on(library: &str, source: &str) -> Result<(Vec<u8>, Record), String> {
+    let _held = BUILDS.lock().unwrap_or_else(|e| e.into_inner());
+    rust_build(library, source)
+}
+
+/// [`rust_build`] with the CLIF passes off, under [`BUILDS`].
+fn rust_build_passes_off(library: &str, source: &str) -> Result<(Vec<u8>, Record), String> {
+    let _held = BUILDS.lock().unwrap_or_else(|e| e.into_inner());
     let saved: Vec<_> = PASSES_OFF
         .iter()
         .map(|(k, v)| {
             let old = std::env::var_os(k);
-            // SAFETY: the test's only thread that reads these variables is
-            // this one, inside `f`.
+            // SAFETY: every thread that reads these variables builds under
+            // `BUILDS`, which this thread holds.
             unsafe { std::env::set_var(k, v) };
             (*k, old)
         })
         .collect();
-    let r = f();
+    let r = rust_build(library, source);
     for (k, old) in saved {
         // SAFETY: as above.
         unsafe {
@@ -573,9 +590,15 @@ fn vesper_library_objects_match_vesper_build_lib() {
     let mut wide_entries = 0;
     let mut v2_libraries = 0;
     let mut drop_glue = 0;
+    let mut changed_by_passes = 0;
     let mut failures = vec![];
     for (library, source) in LIBRARIES {
-        let (rust, record) = match with_passes_off(|| rust_build(library, source)) {
+        if let Ok((off, _)) = rust_build_passes_off(library, source)
+            && rust_build_passes_on(library, source).is_ok_and(|(on, _)| on != off)
+        {
+            changed_by_passes += 1;
+        }
+        let (rust, record) = match rust_build_passes_on(library, source) {
             Ok(built) => built,
             Err(why) => {
                 failures.push(format!("{library}: not a plain library: {why}"));
@@ -615,13 +638,17 @@ fn vesper_library_objects_match_vesper_build_lib() {
     eprintln!(
         "native-lib: {same} of {} library objects identical \
          ({wide_entries} 128-bit entries, {v2_libraries} v2 libraries, \
-         {drop_glue} drop functions)",
+         {drop_glue} drop functions); the CLIF passes change {changed_by_passes}",
         LIBRARIES.len()
     );
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));
     assert!(
         wide_entries > 0 && v2_libraries > 0 && drop_glue > 0,
         "the libraries no longer cover 128-bit entries, v2 glue and drop glue"
+    );
+    assert!(
+        changed_by_passes >= MIN_CHANGED_BY_PASSES,
+        "the CLIF passes changed only {changed_by_passes} library objects"
     );
 }
 
@@ -646,8 +673,8 @@ fn malformed_requests_are_refused() {
     assert!(refused(&q.0), "a calls input without a library task");
     // A whole library's request cut short in its trailing sections: the
     // v2 word, then the 128-bit entry count.
-    let (_, record) = with_passes_off(|| rust_build(LIBRARIES[0].0, LIBRARIES[0].1))
-        .expect("the first library builds");
+    let (_, record) =
+        rust_build_passes_on(LIBRARIES[0].0, LIBRARIES[0].1).expect("the first library builds");
     let whole = request(&record);
     assert!(!refused(&whole), "the whole request builds");
     for (cut, what) in [(1, "the v2 word"), (2, "the 128-bit entry count")] {

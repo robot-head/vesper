@@ -1503,7 +1503,13 @@ fn emit_widen(inout f: Func, in p: WidenPlan) {
 // `native_vectorize::run` on the function the input encodes: the number of
 // loops vectorized, then the edit script.
 pub fn vectorize_words(in input: Str) -> ChunkSeq[u64] {
-    let mut f = read_func(in input.as_bytes());
+    vectorize_script(in input.as_bytes())
+}
+
+// `vectorize_words` on function words already in bytes (the native-lib
+// driver reads them from the shim's `function_words`).
+pub fn vectorize_script(in words: Slice[u8]) -> ChunkSeq[u64] {
+    let mut f = read_func(in words);
     let mut done: u64 = 0;
     if f.simd {
         let mut headers = ChunkSeq::new[u32]();
