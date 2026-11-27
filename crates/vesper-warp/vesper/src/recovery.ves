@@ -111,7 +111,14 @@ fn min64(a: u64, b: u64) -> u64 {
 }
 
 fn rem(a: u64, b: u64) -> u64 {
-    if b == 0 { 0 } else { a % b }
+    if b == 0 {
+        0
+    } else if a < b {
+        a
+    } else {
+        let r = wrapping_sub(a, b);
+        if r < b { r } else { a % b }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -122,20 +129,20 @@ pub fn rtt_new(initial_rtt_ns: u64) -> Rtt {
         latest: 0,
         min: 0,
         smoothed: initial_rtt_ns,
-        rttvar: initial_rtt_ns / 2,
+        rttvar: wrapping_shr_u64(initial_rtt_ns, 1),
         has_sample: false
     }
 }
 
 // `(3a + b) / 4` and `(7a + b) / 8` exactly, without a wider type.
 fn three_quarters(a: u64, b: u64) -> u64 {
-    let lo = wrapping_add(wrapping_mul(a % 4, 3), b % 4) / 4;
-    wrapping_add(wrapping_add(wrapping_mul(a / 4, 3), b / 4), lo)
+    let lo = wrapping_shr_u64(wrapping_add(wrapping_mul(a & 3, 3), b & 3), 2);
+    wrapping_add(wrapping_add(wrapping_mul(wrapping_shr_u64(a, 2), 3), wrapping_shr_u64(b, 2)), lo)
 }
 
 fn seven_eighths(a: u64, b: u64) -> u64 {
-    let lo = wrapping_add(wrapping_mul(a % 8, 7), b % 8) / 8;
-    wrapping_add(wrapping_add(wrapping_mul(a / 8, 7), b / 8), lo)
+    let lo = wrapping_shr_u64(wrapping_add(wrapping_mul(a & 7, 7), b & 7), 3);
+    wrapping_add(wrapping_add(wrapping_mul(wrapping_shr_u64(a, 3), 7), wrapping_shr_u64(b, 3)), lo)
 }
 
 pub fn rtt_update(inout r: Rtt, latest_ns: u64, ack_delay_ns: u64) {
@@ -144,7 +151,7 @@ pub fn rtt_update(inout r: Rtt, latest_ns: u64, ack_delay_ns: u64) {
         r.has_sample = true;
         r.min = latest_ns;
         r.smoothed = latest_ns;
-        r.rttvar = latest_ns / 2;
+        r.rttvar = wrapping_shr_u64(latest_ns, 1);
         return;
     }
     r.min = min64(r.min, latest_ns);
@@ -169,7 +176,7 @@ pub fn rtt_pto_base_ns(in r: Rtt) -> u64 {
 // `max(9/8 · max(smoothed, latest), kGranularity)`; 9b/8 = b + b/8.
 pub fn rtt_loss_delay_ns(in r: Rtt) -> u64 {
     let base = max64(r.smoothed, r.latest);
-    max64(sat_add(base, base / 8), granularity_ns())
+    max64(sat_add(base, wrapping_shr_u64(base, 3)), granularity_ns())
 }
 
 // RFC 9000 §19.3: the encoded ACK Delay in nanoseconds, saturating.

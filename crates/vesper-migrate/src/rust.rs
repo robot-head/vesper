@@ -385,6 +385,18 @@ fn collect_items(
     Ok(())
 }
 
+#[cfg(feature = "vesper-port")]
+fn package_name(manifest: &str) -> Option<String> {
+    let mut out = vec![0u8; manifest.len()];
+    let len = crate::binding::migrate_package_name(manifest.as_bytes(), &mut out) as usize;
+    if len == 0 {
+        return None;
+    }
+    out.truncate(len);
+    String::from_utf8(out).ok()
+}
+
+#[cfg(not(feature = "vesper-port"))]
 fn package_name(manifest: &str) -> Option<String> {
     let mut in_package = false;
     for line in manifest.lines() {
@@ -886,6 +898,66 @@ struct PtrAnnotation {
     nullable: bool,
 }
 
+#[cfg(feature = "vesper-port")]
+fn annotations(
+    attrs: &[Attribute],
+    item: &str,
+) -> Result<BTreeMap<String, PtrAnnotation>, Refusal> {
+    let mut out = BTreeMap::new();
+    for line in doc_lines(attrs) {
+        let mut spans = [0u64; 6];
+        let status = crate::binding::migrate_parse_annotation_line(line.as_bytes(), &mut spans);
+        if status == 0 {
+            continue;
+        }
+        let bad = || {
+            Refusal::new(
+                item,
+                RefusalReason::BadAnnotation,
+                format!(
+                    "expected `vesper-migrate: <param> in|out|inout [len <param>] [nullable]`, got `{}`",
+                    line.trim()
+                ),
+            )
+        };
+        if status != 2 {
+            return Err(bad());
+        }
+        let p_s = spans[0] as usize;
+        let p_l = spans[1] as usize;
+        let param = &line[p_s..p_s + p_l];
+        let access = match spans[2] {
+            1 => PointerAccess::In,
+            2 => PointerAccess::Out,
+            3 => PointerAccess::Inout,
+            _ => return Err(bad()),
+        };
+        let nullable = spans[3] != 0;
+        let len = if spans[5] > 0 {
+            let l_s = spans[4] as usize;
+            let l_l = spans[5] as usize;
+            Some(line[l_s..l_s + l_l].to_string())
+        } else {
+            None
+        };
+        if out
+            .insert(
+                param.to_string(),
+                PtrAnnotation {
+                    access,
+                    len,
+                    nullable,
+                },
+            )
+            .is_some()
+        {
+            return Err(bad());
+        }
+    }
+    Ok(out)
+}
+
+#[cfg(not(feature = "vesper-port"))]
 fn annotations(
     attrs: &[Attribute],
     item: &str,
