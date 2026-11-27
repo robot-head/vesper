@@ -12,6 +12,115 @@ const DIAG_JSON_SINGLE: u8 = 0;
 /// Tag byte for `self.text` when `CheckReport` hands JSON diagnostics to
 /// `@vesper/driver::package_diagnostics_json` (package).
 const DIAG_JSON_PACKAGE: u8 = 1;
+/// Tag byte for `self.text` when `ReportSyntax` / `CheckReport` hands stderr
+/// diagnostic chunks to `modules/driver/src/lib.ves` (`emit_diagnostics`).
+const DIAG_TEXT_STREAM: u8 = 2;
+
+/// Chunk tags inside `DIAG_TEXT_STREAM`.
+const DIAG_CHUNK_LITERAL: u8 = 0;
+const DIAG_CHUNK_RAW: u8 = 1;
+const DIAG_CHUNK_MANIFEST: u8 = 2;
+const DIAG_CHUNK_UNLOCATED: u8 = 3;
+
+fn push_len_bytes(out: &mut Vec<u8>, bytes: &[u8]) {
+    out.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
+    out.extend_from_slice(bytes);
+}
+
+fn render_terminal_diagnostics(
+    file: &str,
+    source: &str,
+    ds: &[vesper::ast::Diagnostic],
+) -> Result<Vec<u8>, String> {
+    if source.len() > vesper_span::Limits::HARD.max_source_bytes {
+        return Err("source exceeds the 1 MiB diagnostic display profile".into());
+    }
+    let index =
+        vesper_span::LineIndex::new(std::sync::Arc::from(source), vesper_span::Limits::HARD)
+            .map_err(|error| error.to_string())?;
+    vesper_diagnostics::prepare(&index, ds, vesper_diagnostics::Limits::HARD)
+        .and_then(|prepared| prepared.terminal(file))
+        .map_err(|error| error.to_string())
+}
+
+fn push_single_text_chunk(
+    out: &mut Vec<u8>,
+    file: &str,
+    source: &str,
+    ds: &[vesper::ast::Diagnostic],
+) {
+    match render_terminal_diagnostics(file, source, ds) {
+        Ok(bytes) => {
+            out.push(DIAG_CHUNK_LITERAL);
+            push_len_bytes(out, &bytes);
+        }
+        Err(reason) => {
+            out.push(DIAG_CHUNK_RAW);
+            push_len_bytes(out, reason.as_bytes());
+            let mut stream = Vec::new();
+            stream.extend_from_slice(&(ds.len() as u64).to_le_bytes());
+            for d in ds {
+                push_diag_fields(&mut stream, d);
+            }
+            push_len_bytes(out, &stream);
+        }
+    }
+}
+
+fn encode_diagnostics_text_stream(
+    file: &str,
+    source: &str,
+    ds: &[vesper::ast::Diagnostic],
+    map: &[vesper::forge_frontend::SourceMapSegment],
+) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.push(DIAG_TEXT_STREAM);
+    out.extend_from_slice(&1u64.to_le_bytes());
+    if map.is_empty() {
+        push_single_text_chunk(&mut out, file, source, ds);
+    } else {
+        let mapped: Vec<_> = ds
+            .iter()
+            .cloned()
+            .map(|d| vesper::forge_frontend::original_diagnostic(map, d))
+            .collect();
+        push_single_text_chunk(&mut out, file, source, &mapped);
+    }
+    out
+}
+
+fn encode_package_diagnostics_text_stream(
+    package: &vesper::packages::Assembled,
+    ds: &[vesper::packages::PackageDiagnostic],
+) -> Vec<u8> {
+    let files = &package.sources.files;
+    let total = package.manifest_errors.len() + ds.len();
+    let mut out = Vec::new();
+    out.push(DIAG_TEXT_STREAM);
+    out.extend_from_slice(&(total as u64).to_le_bytes());
+    for (file, d) in &package.manifest_errors {
+        out.push(DIAG_CHUNK_MANIFEST);
+        push_len_bytes(&mut out, file.as_bytes());
+        push_len_bytes(&mut out, d.code.as_bytes());
+        push_len_bytes(&mut out, d.message.as_bytes());
+    }
+    for d in ds {
+        match d.file {
+            Some(f) => push_single_text_chunk(
+                &mut out,
+                &files[f].display,
+                &files[f].text,
+                std::slice::from_ref(&d.diagnostic),
+            ),
+            None => {
+                out.push(DIAG_CHUNK_UNLOCATED);
+                push_len_bytes(&mut out, d.diagnostic.code.as_bytes());
+                push_len_bytes(&mut out, d.diagnostic.message.as_bytes());
+            }
+        }
+    }
+    out
+}
 
 fn push_diag_fields(out: &mut Vec<u8>, d: &vesper::ast::Diagnostic) {
     let push_u64 = |buf: &mut Vec<u8>, v: u64| buf.extend_from_slice(&v.to_le_bytes());
@@ -136,19 +245,12 @@ impl Session {
                 Ok(0)
             }
             Step::ReportSyntax => {
-                if o.json {
-                    let ds = &self.parsed()?.diagnostics;
-                    self.text = encode_diagnostics_json_stream(ds, &self.source_map);
+                let ds = &self.parsed()?.diagnostics;
+                self.text = if o.json {
+                    encode_diagnostics_json_stream(ds, &self.source_map)
                 } else {
-                    let parsed = self.parsed()?;
-                    crate::compiler_diagnostics(
-                        o.input(),
-                        &self.original,
-                        &parsed.diagnostics,
-                        &self.source_map,
-                        false,
-                    );
-                }
+                    encode_diagnostics_text_stream(o.input(), &self.original, ds, &self.source_map)
+                };
                 Ok(0)
             }
             Step::Check => {
@@ -329,38 +431,33 @@ impl Session {
             return Ok(0);
         }
         let n = count(checked.diagnostics.len());
-        if o.json {
-            let bytes = match &self.loaded {
-                Some(p) => {
-                    let localized: Vec<_> = checked
-                        .diagnostics
-                        .iter()
-                        .map(|d| p.sources.localize(d))
-                        .collect();
-                    encode_package_diagnostics_json_stream(p, &localized)
-                }
-                None => encode_diagnostics_json_stream(&checked.diagnostics, &self.source_map),
-            };
-            self.text = bytes;
-            return Ok(n);
-        }
-        match &self.loaded {
+        let bytes = match &self.loaded {
             Some(p) => {
                 let localized: Vec<_> = checked
                     .diagnostics
                     .iter()
                     .map(|d| p.sources.localize(d))
                     .collect();
-                crate::package_diagnostics(p, &localized, false);
+                if o.json {
+                    encode_package_diagnostics_json_stream(p, &localized)
+                } else {
+                    encode_package_diagnostics_text_stream(p, &localized)
+                }
             }
-            None => crate::compiler_diagnostics(
-                o.input(),
-                &self.original,
-                &checked.diagnostics,
-                &self.source_map,
-                false,
-            ),
-        }
+            None => {
+                if o.json {
+                    encode_diagnostics_json_stream(&checked.diagnostics, &self.source_map)
+                } else {
+                    encode_diagnostics_text_stream(
+                        o.input(),
+                        &self.original,
+                        &checked.diagnostics,
+                        &self.source_map,
+                    )
+                }
+            }
+        };
+        self.text = bytes;
         Ok(n)
     }
 }
