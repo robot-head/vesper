@@ -27,7 +27,7 @@ use @vesper/place-ir-lower::ast::{FnR};
 use @vesper/place-ir-lower::lower::{L};
 use @vesper/hybrid-native-backend::scalar::{
     CALL_VOID, DISP32_MASK, FLOAT_LOAD, FLOAT_STORE32, FLOAT_STORE64, LOAD, STACK_ADDRESS,
-    STORE_QWORD
+    STORE_QWORD, ROTATE_LEFT_REGISTER, ROTATE_RIGHT, ROTATE_RIGHT_REGISTER
 };
 use self::float_math::{
     BINARY_FLOAT_ARGUMENTS, FUSED_FLOAT_ARGUMENTS, FloatMath, NEAREST_PREFIX, SATURATING_PREFIX,
@@ -442,11 +442,17 @@ fn lower_operator(in low: L, symbol: u32) -> u64 {
         SUB
     } else if low.ctx.names.spells(symbol, in "wrapping_mul".as_bytes()) {
         MUL
-    } else if low.ctx.names.spells(symbol, in "&".as_bytes()) {
+    } else if low.ctx.names.spells(symbol, in "&".as_bytes())
+        || low.ctx.names.spells(symbol, in "bit_and".as_bytes())
+    {
         AND
-    } else if low.ctx.names.spells(symbol, in "|".as_bytes()) {
+    } else if low.ctx.names.spells(symbol, in "|".as_bytes())
+        || low.ctx.names.spells(symbol, in "bit_or".as_bytes())
+    {
         OR
-    } else if low.ctx.names.spells(symbol, in "^".as_bytes()) {
+    } else if low.ctx.names.spells(symbol, in "^".as_bytes())
+        || low.ctx.names.spells(symbol, in "bit_xor".as_bytes())
+    {
         XOR
     } else {
         NO_VALUE
@@ -2283,7 +2289,8 @@ fn lower_unary(
         return m.record(COMPARE_IMMEDIATE, value, 0, EQUAL);
     } else if is_integer(kind)
         && kind == operand_kind
-        && low.ctx.names.spells(symbol, in "~".as_bytes())
+        && (low.ctx.names.spells(symbol, in "~".as_bytes())
+            || low.ctx.names.spells(symbol, in "!".as_bytes()))
     {
         return m.record(NOT, value, 0, abi_width(kind));
     }
@@ -2426,11 +2433,16 @@ fn lower_shift(
     width: u64,
     lhs: u64,
     rhs: u64,
-    count_kind: u8,
+    checked_kind: Option[u8],
     inout m: Function
 ) -> u64 {
     match m.constant(rhs) {
-        Option::Some(count) => {
+        Option::Some(bits) => {
+            let count = if checked_kind.is_some() {
+                bits
+            } else {
+                bits & wrapping_sub(width, 1)
+            };
             if count >= width {
                 return NO_VALUE;
             }
@@ -2448,12 +2460,27 @@ fn lower_shift(
         },
         Option::None => {},
     };
-    let count_signed = is_signed(count_kind);
-    let count_width = abi_width(count_kind);
-    let bounds = integer_bounds(in m, rhs, count_signed, count_width, INTEGER_BOUND_DEPTH);
-    if (count_signed && (bounds.min & sign_bit(count_width)) != 0) || bounds.max >= width {
-        return NO_VALUE;
-    }
+    let count = match checked_kind {
+        Option::Some(kind) => {
+            let count_signed = is_signed(kind);
+            let count_width = abi_width(kind);
+            let bounds = integer_bounds(in m, rhs, count_signed, count_width, INTEGER_BOUND_DEPTH);
+            if (count_signed && (bounds.min & sign_bit(count_width)) != 0) || bounds.max >= width {
+                return NO_VALUE;
+            }
+            rhs
+        },
+        Option::None => {
+            // x86 masks counts at the instruction width for 32 and 64 bits.
+            // The encoder widens narrow variable shifts, so mask those here.
+            if width < DWORD_BITS {
+                let mask = m.record(CONSTANT, wrapping_sub(width, 1), 0, 0);
+                m.record(AND, rhs, mask, DWORD_BITS)
+            } else {
+                rhs
+            }
+        },
+    };
     let op = if left {
         SHL_REGISTER
     } else if signed {
@@ -2462,15 +2489,37 @@ fn lower_shift(
         SHR_REGISTER
     };
     if width >= DWORD_BITS {
-        return m.record(op, lhs, rhs, width);
+        return m.record(op, lhs, count, width);
     }
     let value = if op == SAR_REGISTER {
         m.record(SIGN_EXTEND, lhs, width, DWORD_BITS)
     } else {
         lhs
     };
-    let result = m.record(op, value, rhs, DWORD_BITS);
+    let result = m.record(op, value, count, DWORD_BITS);
     m.record(TRUNCATE, result, DWORD_BITS, width)
+}
+
+fn lower_rotate(left: bool, width: u64, lhs: u64, rhs: u64, inout m: Function) -> u64 {
+    match m.constant(rhs) {
+        Option::Some(bits) => {
+            let right = if left { wrapping_sub(0, bits) } else { bits };
+            let count = right & wrapping_sub(width, 1);
+            if count == 0 {
+                lhs
+            } else {
+                m.record(ROTATE_RIGHT, lhs, count, width)
+            }
+        },
+        Option::None => {
+            let op = if left {
+                ROTATE_LEFT_REGISTER
+            } else {
+                ROTATE_RIGHT_REGISTER
+            };
+            m.record(op, lhs, rhs, width)
+        },
+    }
 }
 
 fn lower_division(
@@ -2606,6 +2655,10 @@ fn lower_binary(
             if op != NO_VALUE {
                 return m.record(op, lhs, rhs, width);
             }
+            let bit_left = low.ctx.names.spells(symbol, in "bit_shl".as_bytes());
+            if bit_left || low.ctx.names.spells(symbol, in "bit_shr".as_bytes()) {
+                return lower_shift(bit_left, signed, width, lhs, rhs, Option::None, inout m);
+            }
             let checked = if low.ctx.names.spells(symbol, in "+".as_bytes()) {
                 ADD
             } else if low.ctx.names.spells(symbol, in "-".as_bytes()) {
@@ -2625,7 +2678,19 @@ fn lower_binary(
         }
         let left_shift = low.ctx.names.spells(symbol, in "<<".as_bytes());
         if left_shift || low.ctx.names.spells(symbol, in ">>".as_bytes()) {
-            return lower_shift(left_shift, signed, width, lhs, rhs, right_kind, inout m);
+            return lower_shift(
+                left_shift,
+                signed,
+                width,
+                lhs,
+                rhs,
+                Option::Some(right_kind),
+                inout m
+            );
+        }
+        let left_rotate = low.ctx.names.spells(symbol, in "rotate_left".as_bytes());
+        if left_rotate || low.ctx.names.spells(symbol, in "rotate_right".as_bytes()) {
+            return lower_rotate(left_rotate, width, lhs, rhs, inout m);
         }
     }
     NO_VALUE
