@@ -101,6 +101,7 @@ const CALLEE_ID_MASK: u64 = 4294967295;
 const INST_ICONST: u64 = 16;
 const INST_F64CONST: u64 = 17;
 const INST_DATA: u64 = 32;
+const INST_PROJECT: u64 = 33;
 
 // Sub-operations of `INST_FLOAT_UNARY` and `CB_FLOAT_UNARY`.
 const FUN_FNEG: u64 = 1;
@@ -1677,6 +1678,17 @@ impl Body {
                 ins_store(inout b, PLAIN, stored, field, 0);
             }
             ptr
+        } else if kind == INST_PROJECT {
+            let off = w.next();
+            let flane = w.next();
+            let base_var = temp(inout b, x);
+            let base = use_var(inout b, base_var);
+            let ptr = if off == 0 {
+                base
+            } else {
+                ins_iadd_imm(inout b, base, wrapping_i64(off))
+            };
+            ins_load(inout b, lane_type(flane), PLAIN, ptr, 0)
         } else {
             return false;
         };
