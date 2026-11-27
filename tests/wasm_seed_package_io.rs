@@ -2350,7 +2350,20 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
              let z = wrapping_mul(c, widen_u32(x));\n\
              wrapping_add(wrapping_add(widen_i64(y), widen_i64(z)), widen_i64(narrow_call(x, e, f)))\n\
          }\n\
-         fn unsupported(x: u64) -> u64 { match x { 0 => 7, _ => 9 } }\n\
+         fn scale_reply(scale: bool, seed: i64) -> i64 {\n\
+             match scale { true => wrapping_mul(seed, 13), false => wrapping_add(seed, 21) }\n\
+         }\n\
+         pub fn match_score(x: i64, seed: i64, scale: bool) -> i64 {\n\
+             let value = match x {\n\
+                 -9223372036854775808 => return seed,\n\
+                 -9 | -8 => wrapping_add(seed, 3),\n\
+                 0 => 17,\n\
+                 9223372036854775807 => wrapping_add(seed, 5),\n\
+                 fallback => wrapping_sub(fallback, seed),\n\
+             };\n\
+             scale_reply(scale, value)\n\
+         }\n\
+         fn unsupported(x: u64) -> u64 { match (x, x) { (0, _) => 7, _ => 9 } }\n\
          pub fn decline(x: u64) -> u64 { unsupported(x) }\n",
     )
     .unwrap();
@@ -2457,6 +2470,14 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
         "{:?}",
         read_stage2_sidecar_notes(&object)
     );
+    let narrow_object = dir.join("native-narrow.o");
+    std::fs::rename(&object, &narrow_object).unwrap();
+    assert_eq!(
+        compile("match_score"),
+        0,
+        "{:?}",
+        read_stage2_sidecar_notes(&object)
+    );
     let bytes = std::fs::read(&object).unwrap();
     assert_ne!(compile("decline"), 0);
     assert!(read_stage2_sidecar_notes(&object).contains("unsupported x86-64 ELF entry"));
@@ -2479,6 +2500,7 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
          extern uint64_t range_score(uint64_t, uint64_t, uint64_t);\n\
          extern bool bit_truth(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, bool);\n\
          extern int64_t mixed_narrow(uint8_t, int16_t, uint32_t, uint8_t, uint8_t, uint8_t, int8_t);\n\
+         extern int64_t match_score(int64_t, int64_t, bool);\n\
          int main(void) {\n\
              if (mix(10, 4) != 65 || mix(UINT64_MAX, UINT64_MAX) != UINT64_MAX - 16) return 1;\n\
              if (choose(0, 4) != 8 || choose(2, 4) != 8 || choose(4, 1) != 10\n\
@@ -2497,8 +2519,11 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
              if (!bit_truth(0, UINT64_MAX, 0, 0, 0, 0, false)\n\
                  || bit_truth(UINT64_MAX, 0, 0, 0, 0, 0, true)\n\
                  || !bit_truth(9, 3, 0, 0, 0, 0, true)) return 9;\n\
-             return mixed_narrow(250, -500, UINT32_MAX, 20, 9, 5, -20) != UINT32_MAX + INT64_C(208)\n\
-                 || mixed_narrow(120, 300, 60, 20, 200, 5, -100) != 8484;\n\
+             if (mixed_narrow(250, -500, UINT32_MAX, 20, 9, 5, -20) != UINT32_MAX + INT64_C(208)\n\
+                 || mixed_narrow(120, 300, 60, 20, 200, 5, -100) != 8484) return 10;\n\
+             return match_score(INT64_MIN, -3, false) != -3 || match_score(-9, 4, true) != 91\n\
+                 || match_score(-8, 4, true) != 91 || match_score(0, 4, false) != 38\n\
+                 || match_score(INT64_MAX, 2, true) != 91 || match_score(10, 4, false) != 27;\n\
          }\n",
     )
     .unwrap();
@@ -2514,6 +2539,7 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
             &loop_object,
             &range_object,
             &bool_object,
+            &narrow_object,
             &object,
         ])
         .arg("-o")

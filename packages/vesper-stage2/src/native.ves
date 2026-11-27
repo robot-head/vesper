@@ -30,7 +30,8 @@ const READ_PATH: u64 = 1;
 const READ_PASS: u64 = 2;
 const READ_PROJECTIONS: u64 = 3;
 const BIND_PATTERN: u64 = 1;
-const BIND_NAME: u64 = 4;
+const PATTERN_HEADER_WORDS: u64 = 3;
+const BIND_NAME: u64 = BIND_PATTERN + PATTERN_HEADER_WORDS;
 const WRITE_WORDS: u64 = 3;
 const WRITE_OPERATOR: u64 = 1;
 const WRITE_VALUE: u64 = 2;
@@ -44,6 +45,10 @@ const BLOCK_INCOMING_WORDS: u64 = 2;
 const BRANCH_WORDS: u64 = 3;
 const BRANCH_TRUE: u64 = 1;
 const BRANCH_FALSE: u64 = 2;
+const MATCH_ARM_COUNT: u64 = 1;
+const MATCH_FIRST_ARM: u64 = 2;
+const DIRECT_MATCH_ARM_LIMIT: u64 = 2;
+const ALL_BOOL_PATTERNS: u64 = 3;
 const JUMP_ARGUMENT_COUNT: u64 = 1;
 const JUMP_ARGUMENT: u64 = 2;
 const HOME_BYTES: u64 = QWORD_BITS / BYTE_BITS;
@@ -113,6 +118,7 @@ struct Function {
     kinds: ChunkSeq[u8],
     labels: ChunkSeq[u64],
     blocks: ChunkSeq[u64],
+    next_label: u64,
     bindings: ChunkSeq[u32],
     mutable_slots: ChunkSeq[u32],
     mutable_bytes: u64,
@@ -401,8 +407,12 @@ fn collect_mutable_slots(in low: L, row: FnRow, inout m: Function) -> bool {
 
 fn lower_local_store(in low: L, inst: InstRow, block: u64, inout m: Function) -> bool {
     let at = inst.a;
-    if inst.op == Op::Bind && inst.n == BIND_NAME {
-        return m.kind(low.program.op(at)) != ScalarKind::Unsupported;
+    if inst.op == Op::Bind {
+        let pattern = low.program.op(add(at, BIND_PATTERN));
+        if pattern == Pat::Wild || pattern == Pat::Literal {
+            // Planning confirms that literal binds belong to match arms.
+            return m.kind(low.program.op(at)) != ScalarKind::Unsupported;
+        }
     }
     let name_at = if inst.op == Op::Bind {
         add(at, BIND_NAME)
@@ -514,6 +524,39 @@ fn block_parameter(in low: L, b: BlockRow) -> u64 {
     }
 }
 
+fn match_target_word(in low: L, pattern: u64, end: u64) -> u64 {
+    if pattern >= end {
+        return NO_VALUE;
+    }
+    let extra = match low.program.op(pattern) {
+        Pat::Wild => 0,
+        Pat::Bind => 1,
+        Pat::Literal => LITERAL_WORDS,
+        _ => return NO_VALUE,
+    };
+    let target = add(add(pattern, PATTERN_HEADER_WORDS), extra);
+    if target >= end || low.program.tag(target) != Tag::Block {
+        NO_VALUE
+    } else {
+        target
+    }
+}
+
+fn is_match_literal_binding(in low: L, row: FnRow, b: BlockRow, index: u64, inst: InstRow) -> bool {
+    if index != b.i0
+        || inst.n != add(BIND_NAME, LITERAL_WORDS)
+        || low.program.op(add(inst.a, BIND_PATTERN)) != Pat::Literal
+    {
+        return false;
+    }
+    let count = add(b.ha, BLOCK_INCOMING_COUNT);
+    if low.program.op(count) != 1 {
+        return false;
+    }
+    let pred = low.program.block(add(row.b0, low.program.op(inc(count))));
+    pred.term == Term::Match && low.program.op(pred.ta) == low.program.op(inst.a)
+}
+
 fn queue_block(inout labels: ChunkSeq[u64], inout pending: ChunkSeq[u64], target: u64) -> bool {
     if target >= labels.len() {
         return false;
@@ -553,6 +596,22 @@ fn plan_blocks(in low: L, row: FnRow, inout m: Function) -> bool {
             {
                 return false;
             }
+        } else if b.term == Term::Match {
+            let count = low.program.op(add(b.ta, MATCH_ARM_COUNT));
+            let end = add(b.ta, b.tn);
+            let mut pattern = add(b.ta, MATCH_FIRST_ARM);
+            for arm in 0..count {
+                let target = match_target_word(in low, pattern, end);
+                if target == NO_VALUE
+                    || !queue_block(inout m.labels, inout pending, low.program.op(target))
+                {
+                    return false;
+                }
+                if low.program.op(pattern) != Pat::Literal {
+                    break;
+                }
+                pattern = inc(target);
+            }
         }
         index = inc(index);
     }
@@ -562,6 +621,7 @@ fn plan_blocks(in low: L, row: FnRow, inout m: Function) -> bool {
             m.blocks.push(block);
         }
     }
+    m.next_label = m.blocks.len();
     true
 }
 
@@ -677,7 +737,10 @@ fn plan_homes(in low: L, f: FnR, row: FnRow, inout m: Function) -> bool {
                 value_count = inc(dest);
             }
             if reachable {
-                if inst.op == Op::Bind && !collect_binding(in low, inst, inout m) {
+                if inst.op == Op::Bind
+                    && !is_match_literal_binding(in low, row, b, index, inst)
+                    && !collect_binding(in low, inst, inout m)
+                {
                     return false;
                 }
                 has_writes = has_writes || inst.op == Op::Write;
@@ -765,8 +828,16 @@ fn plan_homes(in low: L, f: FnR, row: FnRow, inout m: Function) -> bool {
                 }
             }
         }
-        if b.term == Term::Branch || b.term == Term::Return {
-            if !m.use_in(add(f.param_count, low.program.op(b.ta)), block) {
+        if b.term == Term::Branch || b.term == Term::Return || b.term == Term::Match {
+            let source = add(f.param_count, low.program.op(b.ta));
+            if !m.use_in(source, block) {
+                return false;
+            }
+            if b.term == Term::Match
+                && low.program.op(add(b.ta, MATCH_ARM_COUNT)) > DIRECT_MATCH_ARM_LIMIT
+                && low.program.op(add(b.ta, MATCH_FIRST_ARM)) == Pat::Literal
+                && !m.home(source, block)
+            {
                 return false;
             }
         } else if b.term == Term::Jump && b.tn == inc(JUMP_ARGUMENT) {
@@ -780,15 +851,15 @@ fn plan_homes(in low: L, f: FnR, row: FnRow, inout m: Function) -> bool {
     true
 }
 
-fn lower_literal(in low: L, at: u64, kind: u8, inout m: Function) -> u64 {
+fn literal_bits(in low: L, at: u64, kind: u8) -> Option[u64] {
     let literal = low.program.op(at);
     let bits = low.program.op(add(at, LITERAL_LOW));
     let high = low.program.op(add(at, LITERAL_HIGH));
     if kind == ScalarKind::Bool && literal == Lit::Bool && bits <= 1 && high == 0 {
-        return m.record(CONSTANT, bits, 0, 0);
+        return Option::Some(bits);
     }
     if !is_integer(kind) || literal != Lit::Int {
-        return NO_VALUE;
+        return Option::None;
     }
     let width = abi_width(kind);
     let mask = wrapping_shr_u64(ALL_REGISTER_BITS, wrapping_u32(wrapping_sub(QWORD_BITS, width)));
@@ -800,9 +871,16 @@ fn lower_literal(in low: L, at: u64, kind: u8, inout m: Function) -> u64 {
         0
     };
     if high != fill || (bits & upper_mask) != (fill & upper_mask) {
-        return NO_VALUE;
+        return Option::None;
     }
-    m.record(CONSTANT, bits & mask, 0, 0)
+    Option::Some(bits & mask)
+}
+
+fn lower_literal(in low: L, at: u64, kind: u8, inout m: Function) -> u64 {
+    match literal_bits(in low, at, kind) {
+        Option::Some(bits) => m.record(CONSTANT, bits, 0, 0),
+        Option::None => NO_VALUE,
+    }
 }
 
 fn conversion_spells(in low: L, op: u32, target: u32, in prefix: Slice[u8]) -> bool {
@@ -900,6 +978,19 @@ fn range_increment(in low: L, b: BlockRow, index: u64, inst: InstRow) -> bool {
         && low.program.op(add(one.a, LITERAL_HIGH)) == 0
 }
 
+fn comparison_operation(kind: u8) -> u64 {
+    match abi_width(kind) {
+        BYTE_BITS => if kind == ScalarKind::Bool {
+            COMPARE
+        } else {
+            COMPARE_BYTE
+        },
+        WORD_BITS => COMPARE_WORD,
+        DWORD_BITS => COMPARE_DWORD,
+        _ => COMPARE,
+    }
+}
+
 fn lower_binary(
     in low: L,
     at: u64,
@@ -923,17 +1014,7 @@ fn lower_binary(
     if kind == ScalarKind::Bool {
         let compare = integer_comparison(in low, symbol, operand_kind);
         if compare != NO_VALUE {
-            let op = if operand_kind == ScalarKind::Bool {
-                COMPARE
-            } else {
-                match abi_width(operand_kind) {
-                    BYTE_BITS => COMPARE_BYTE,
-                    WORD_BITS => COMPARE_WORD,
-                    DWORD_BITS => COMPARE_DWORD,
-                    _ => COMPARE,
-                }
-            };
-            return m.record(op, lhs, rhs, compare);
+            return m.record(comparison_operation(operand_kind), lhs, rhs, compare);
         }
     } else if is_integer(kind) && kind == operand_kind {
         let op = if range_step {
@@ -1038,6 +1119,74 @@ fn lower_return(result: u64, block: u64, inout m: Function) -> bool {
     true
 }
 
+fn lower_match(in low: L, row: FnRow, b: BlockRow, block: u64, inout m: Function) -> bool {
+    let id = low.program.op(b.ta);
+    let kind = m.kind(id);
+    if abi_width(kind) == 0 {
+        return false;
+    }
+    let source = add(m.arguments, id);
+    let end = add(b.ta, b.tn);
+    let count = low.program.op(add(b.ta, MATCH_ARM_COUNT));
+    let mut seen_bools: u64 = 0;
+    let mut pattern = add(b.ta, MATCH_FIRST_ARM);
+    for arm in 0..count {
+        let target = match_target_word(in low, pattern, end);
+        if target == NO_VALUE {
+            return false;
+        }
+        let target_block = low.program.op(target);
+        let label = m.label(target_block);
+        if label == 0
+            || label == NO_VALUE
+            || block_parameter(in low, low.program.block(add(row.b0, target_block))) != NO_VALUE
+        {
+            return false;
+        }
+        if low.program.op(pattern) != Pat::Literal {
+            let _ = m.record(JUMP_LABEL, label, 0, 0);
+            return true;
+        }
+        let bits = match literal_bits(in low, add(pattern, PATTERN_HEADER_WORDS), kind) {
+            Option::Some(bits) => bits,
+            Option::None => return false,
+        };
+        if kind == ScalarKind::Bool {
+            seen_bools = seen_bools | block_bit(bits);
+            if seen_bools == ALL_BOOL_PATTERNS {
+                let _ = m.record(JUMP_LABEL, label, 0, 0);
+                return true;
+            }
+        }
+        if inc(arm) == count {
+            return false;
+        }
+        let value = if arm == 0 {
+            m.read(source, block)
+        } else {
+            // Each test is a machine block. Reload the scrutinee from its
+            // home so no register value crosses the synthetic edges.
+            let home = m.values.try_get(source).unwrap_or(value_new(NO_VALUE)).home;
+            if home == NO_VALUE {
+                return false;
+            }
+            m.record(STACK_LOAD, HOME_SLOT, home, QWORD_BITS)
+        };
+        if value == NO_VALUE {
+            return false;
+        }
+        let constant = m.record(CONSTANT, bits, 0, 0);
+        let condition = m.record(comparison_operation(kind), value, constant, NOT_EQUAL);
+        let next_test = m.next_label;
+        m.next_label = inc(next_test);
+        let _ = m.record(BRANCH_BLOCK, condition, label, 0);
+        let _ = m.record(JUMP_LABEL, next_test, 0, 0);
+        let _ = m.record(BLOCK_LABEL, next_test, 0, SCALAR_RESULTS);
+        pattern = inc(target);
+    }
+    false
+}
+
 fn lower_terminator(in low: L, row: FnRow, b: BlockRow, block: u64, inout m: Function) -> bool {
     if b.term == Term::Return && b.tn == 1 {
         return lower_return(low.program.op(b.ta), block, inout m);
@@ -1109,6 +1258,8 @@ fn lower_terminator(in low: L, row: FnRow, b: BlockRow, block: u64, inout m: Fun
         }
         let _ = m.record(BRANCH_BLOCK, condition, no_label, 0);
         let _ = m.record(JUMP_LABEL, yes_label, 0, 0);
+    } else if b.term == Term::Match {
+        return lower_match(in low, row, b, block, inout m);
     } else {
         return false;
     }
@@ -1133,6 +1284,7 @@ fn lower_function(
         kinds: ChunkSeq::new[u8](),
         labels: ChunkSeq::new[u64](),
         blocks: ChunkSeq::new[u64](),
+        next_label: 0,
         bindings: ChunkSeq::new[u32](),
         mutable_slots: ChunkSeq::new[u32](),
         mutable_bytes: 0,
