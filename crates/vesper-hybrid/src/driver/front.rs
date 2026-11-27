@@ -7,7 +7,7 @@
 use super::*;
 
 impl Session {
-    pub(super) fn front_step(&mut self, step: Step, arg: &[u8]) -> Result<i64, String> {
+    pub(super) fn front_step(&mut self, step: Step, _arg: &[u8]) -> Result<i64, String> {
         let o = &self.o;
         match step {
             Step::Parse => {
@@ -156,16 +156,6 @@ impl Session {
                 // The declarations themselves are the world the driver
                 // holds (`WorldDecls`, driver/world.rs, #2024).
                 self.text = package.as_str().as_bytes().to_vec();
-                Ok(0)
-            }
-            // The interface JSON (`arg`) to `-o`, written atomically, or
-            // to stdout.
-            Step::InterfaceWrite => {
-                if let Some(path) = o.output() {
-                    vesper::atomic_file::atomic_write(&path, arg)?;
-                } else {
-                    crate::write(None, arg)?;
-                }
                 Ok(0)
             }
             Step::EmitHir => {

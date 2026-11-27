@@ -102,6 +102,7 @@ pub copy struct Syms {
     ffi_env: u32,
     ffi_fs: u32,
     ffi_proc: u32,
+    ffi_blake3: u32,
     // `Ffi[Cranelift]` (packages/vesper-cranelift): component imports
     // (src/vcl_host.ves)
     ffi_cranelift: u32,
@@ -141,6 +142,7 @@ pub fn syms_new(inout n: Names) -> Syms {
         ffi_env: n.intern(in "Ffi$StdEnv".as_bytes()),
         ffi_fs: n.intern(in "Ffi$StdFs".as_bytes()),
         ffi_proc: n.intern(in "Ffi$StdProcess".as_bytes()),
+        ffi_blake3: n.intern(in "Ffi$Blake3".as_bytes()),
         ffi_cranelift: n.intern(in "Ffi$Cranelift".as_bytes()),
         eq: n.intern(in "=".as_bytes()),
         empty: n.intern(in "".as_bytes()),
@@ -918,6 +920,7 @@ fn capabilities(inout ctx: Cx, inout out: ChunkSeq[u8], entry: u32) eff [Fail[WE
             || effect.name == ctx.syms.ffi_fs
             || effect.name == ctx.syms.ffi_proc
             || effect.name == ctx.syms.ffi_cranelift
+            || effect.name == ctx.syms.ffi_blake3
         {
             let code: u8 = if effect.name == ctx.syms.ffi_env {
                 3
@@ -925,8 +928,10 @@ fn capabilities(inout ctx: Cx, inout out: ChunkSeq[u8], entry: u32) eff [Fail[WE
                 4
             } else if effect.name == ctx.syms.ffi_proc {
                 5
-            } else {
+            } else if effect.name == ctx.syms.ffi_cranelift {
                 6
+            } else {
+                7
             };
             let mut seen = false;
             for j in 0..out.len() {

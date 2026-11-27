@@ -1,0 +1,82 @@
+// @vesper-std/hash-sys on wasm32-wasip2 (#2323): delegates `Ffi[Blake3]`
+// to the portable Vesper implementation in `@vesper-std/hash::blake3`.
+//
+// The `Blake3` library of `blake3-wasip2.vsys` declares no functions; the
+// Wasm backend lowers `Ffi[Blake3]` to zero imports. Every public signature
+// and behavior (UTF-8 context validation, 32-byte key validation, linear
+// `Hasher` lifecycle, exact BLAKE3 digests and XOF) matches the native C
+// implementation in `src/lib.ves`.
+use @vesper-std/hash::blake3::{
+    Blake3 as PortableBlake3, Digest, blake3, blake3_new, blake3_new_derive_key, blake3_new_keyed
+};
+
+// A linear incremental BLAKE3 hasher, matching the native `linear extern type Hasher`.
+pub linear struct Hasher {
+    inner: PortableBlake3,
+}
+
+// The BLAKE3 digest of `data`.
+pub fn hash(in data: Slice[u8]) -> Digest eff [Ffi[Blake3]] {
+    blake3(in data)
+}
+
+// Append `n` bytes of the key-derivation hash of `data` under `context` to
+// `out`, in one call with no hasher handle; false (appending nothing) unless
+// `context` is UTF-8.
+pub fn derive_key_hash(
+    in context: Slice[u8],
+    in data: Slice[u8],
+    n: u64,
+    inout out: ChunkSeq[u8]
+) -> bool eff [Ffi[Blake3]] {
+    let ctx = match String::from_utf8(in context) {
+        Option::Some(s) => s,
+        Option::None => return false,
+    };
+    let mut h = blake3_new_derive_key(in ctx.as_str());
+    h.update(in data);
+    h.finalize_xof(n, inout out);
+    true
+}
+
+// A new unkeyed hasher.
+pub fn hasher_new() -> Option[Hasher] eff [Ffi[Blake3]] {
+    Option::Some(Hasher { inner: blake3_new() })
+}
+
+// A keyed hasher; `None` unless `key` is exactly 32 bytes.
+pub fn hasher_new_keyed(in key: Slice[u8]) -> Option[Hasher] eff [Ffi[Blake3]] {
+    match blake3_new_keyed(in key) {
+        Option::Some(inner) => Option::Some(Hasher { inner: inner }),
+        Option::None => Option::None,
+    }
+}
+
+// A key-derivation hasher for `context`; `None` unless `context` is UTF-8.
+pub fn hasher_new_derive_key(in context: Slice[u8]) -> Option[Hasher] eff [Ffi[Blake3]] {
+    match String::from_utf8(in context) {
+        Option::Some(ctx) => Option::Some(Hasher { inner: blake3_new_derive_key(in ctx.as_str()) }),
+        Option::None => Option::None,
+    }
+}
+
+// Absorb `data`.
+pub fn update(inout h: Hasher, in data: Slice[u8]) eff [Ffi[Blake3]] {
+    h.inner.update(in data);
+}
+
+// The digest of the input so far; `h` stays usable.
+pub fn finalize(in h: Hasher) -> Digest eff [Ffi[Blake3]] {
+    h.inner.finalize()
+}
+
+// Append `n` bytes of extendable output to `out`.
+pub fn finalize_xof(in h: Hasher, n: u64, inout out: ChunkSeq[u8]) eff [Ffi[Blake3]] {
+    h.inner.finalize_xof(n, inout out);
+}
+
+// Release `h`.
+pub fn hasher_free(sink h: Hasher) eff [Ffi[Blake3]] {
+    let Hasher { inner } = h;
+    let _ = inner;
+}

@@ -336,6 +336,10 @@ copy struct Ops {
     amp_eq: u32,
     pipe_eq: u32,
     caret_eq: u32,
+    const_time: u32,
+    realtime: u32,
+    det_float: u32,
+    isa: u32,
 }
 
 fn mark(inout table: ChunkSeq[u32], symbol: u32, flag: u32) {
@@ -484,6 +488,10 @@ fn ops_new(inout names: Names, inout tables: Tables) -> Ops {
         amp_eq: intern(inout names, in "&="),
         pipe_eq: intern(inout names, in "|="),
         caret_eq: intern(inout names, in "^="),
+        const_time: intern(inout names, in "ConstTime"),
+        realtime: intern(inout names, in "Realtime"),
+        det_float: intern(inout names, in "DetFloat"),
+        isa: intern(inout names, in "Isa"),
         amp: intern(inout names, in "&"),
         pipe: intern(inout names, in "|"),
         caret: intern(inout names, in "^"),

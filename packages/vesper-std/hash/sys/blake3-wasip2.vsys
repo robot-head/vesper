@@ -1,0 +1,12 @@
+// @vesper-std/hash-sys's import on wasm32-wasip2 (#2323): none.
+// src-wasip2/lib.ves delegates to portable `@vesper-std/hash::blake3`
+// and calls no C function of this library; it is here so that
+// `Ffi[Blake3]` names the same library on every target. A library
+// declares at least one item.
+sys library Blake3 (
+    target = "@TARGET@", abi = "@ABI@",
+    link = "static", name = "vesper_std_blake3",
+    artifact = "blake3:0000000000000000000000000000000000000000000000000000000000000000"
+) {
+    const PORTABLE: u32 = 1;
+}

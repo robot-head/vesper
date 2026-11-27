@@ -354,3 +354,121 @@ pub fn check(
     }
     0
 }
+
+const OFF_COUNT: u64 = 20;
+const OFF_FREE_OFFSET: u64 = 22;
+const DIR_STRIDE: u64 = 2;
+const KEY_STRIDE: u64 = 16;
+const KEY_TS_OFF: u64 = 8;
+const VAR_CELL_STRIDE: u64 = 4;
+const VAR_LEN_OFF: u64 = 2;
+const VAR_COL_PAIR: u64 = 2;
+const SHIFT_BYTE: u64 = 8;
+const BYTE_MASK: u64 = 255;
+
+fn wr16(inout b: Slice[u8], at: u64, v: u64) {
+    b.try_set(at, wrapping_u8(v & BYTE_MASK));
+    b.try_set(wrapping_add(at, 1), wrapping_u8((v >> SHIFT_BYTE) & BYTE_MASK));
+}
+
+// Binary search over the key-ordered directory.
+// Returns `(pos << 1) | 1` if found, or `(ins_pos << 1)` if absent.
+pub fn search(in b: Slice[u8], dir: u64, keys: u64, rowid: u64, inv_ts: u64) -> u64 {
+    let mut lo: u64 = 0;
+    let mut hi: u64 = rd16(in b, OFF_COUNT);
+    loop {
+        if lo >= hi {
+            break;
+        }
+        let mid = wrapping_add(lo, hi) >> 1;
+        let slot = rd16(in b, wrapping_add(dir, wrapping_mul(DIR_STRIDE, mid)));
+        let kbase = wrapping_add(keys, wrapping_mul(KEY_STRIDE, slot));
+        let krow = rd64(in b, kbase);
+        let kts = rd64(in b, wrapping_add(kbase, KEY_TS_OFF));
+        if krow < rowid || (krow == rowid && kts < inv_ts) {
+            lo = wrapping_add(mid, 1);
+        } else if krow > rowid || (krow == rowid && kts > inv_ts) {
+            hi = mid;
+        } else {
+            return (mid << 1) | 1;
+        }
+    }
+    lo << 1
+}
+
+// Heap bytes held by removed versions (`PAGE_SIZE - heap_start - heap_live`).
+pub fn garbage(in b: Slice[u8], dir: u64, in var_cols: Slice[u64]) -> u64 {
+    let n = rd16(in b, OFF_COUNT);
+    let nvar = var_cols.len() >> 1;
+    let mut live: u64 = 0;
+    let mut pos: u64 = 0;
+    loop {
+        if pos >= n {
+            break;
+        }
+        let slot = rd16(in b, wrapping_add(dir, wrapping_mul(DIR_STRIDE, pos)));
+        let mut vc: u64 = 0;
+        loop {
+            if vc >= nvar {
+                break;
+            }
+            let base = wrapping_mul(vc, VAR_COL_PAIR);
+            let nulls = g64(in var_cols, base);
+            if !bit(in b, nulls, slot) {
+                let data = g64(in var_cols, wrapping_add(base, 1));
+                let cell = wrapping_add(data, wrapping_mul(VAR_CELL_STRIDE, slot));
+                live = wrapping_add(live, rd16(in b, wrapping_add(cell, VAR_LEN_OFF)));
+            }
+            vc = wrapping_add(vc, 1);
+        }
+        pos = wrapping_add(pos, 1);
+    }
+    let hstart = rd16(in b, OFF_FREE_OFFSET);
+    wrapping_sub(wrapping_sub(PAGE_SIZE, hstart), live)
+}
+
+// Rewrites the heap without holes left by removed versions, using `scratch`
+// (`PAGE_SIZE` bytes) so zero per-cell allocations occur.
+pub fn compact(
+    inout b: Slice[u8],
+    dir: u64,
+    end_off: u64,
+    in var_cols: Slice[u64],
+    inout scratch: Slice[u8]
+) {
+    let n = rd16(in b, OFF_COUNT);
+    let nvar = var_cols.len() >> 1;
+    let mut top: u64 = PAGE_SIZE;
+    let mut pos: u64 = 0;
+    loop {
+        if pos >= n {
+            break;
+        }
+        let slot = rd16(in b, wrapping_add(dir, wrapping_mul(DIR_STRIDE, pos)));
+        let mut vc: u64 = 0;
+        loop {
+            if vc >= nvar {
+                break;
+            }
+            let base = wrapping_mul(vc, VAR_COL_PAIR);
+            let nulls = g64(in var_cols, base);
+            if !bit(in b, nulls, slot) {
+                let data = g64(in var_cols, wrapping_add(base, 1));
+                let cell = wrapping_add(data, wrapping_mul(VAR_CELL_STRIDE, slot));
+                let off = rd16(in b, cell);
+                let len = rd16(in b, wrapping_add(cell, VAR_LEN_OFF));
+                if len == 0 {
+                    wr16(inout b, cell, 0);
+                } else {
+                    top = wrapping_sub(top, len);
+                    let _ = scratch.try_copy_from(top, in b[off..wrapping_add(off, len)]);
+                    wr16(inout b, cell, top);
+                }
+            }
+            vc = wrapping_add(vc, 1);
+        }
+        pos = wrapping_add(pos, 1);
+    }
+    let _ = b.try_copy_from(end_off, in scratch[end_off..PAGE_SIZE]);
+    wr16(inout b, OFF_FREE_OFFSET, top);
+}

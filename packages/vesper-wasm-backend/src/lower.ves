@@ -210,6 +210,8 @@ const SQ_STR_RESERVE: u64 = 34;
 const SQ_RESIZE: u64 = 35;
 const SQ_FILL_RANGE: u64 = 39;
 const SQ_TRY_FILL: u64 = 40;
+const SQ_COPY_FROM: u64 = 41;
+const SQ_TRY_COPY_FROM: u64 = 42;
 const SQ_WIDE: u64 = 64;
 const SK_OTHER: u8 = 0;
 const SK_BUF: u8 = 1;
@@ -5038,6 +5040,12 @@ impl L {
         if self.ctx.names.spells(label, in "FillRange { total: true }".as_bytes()) {
             return wrapping_u8(SQ_TRY_FILL);
         }
+        if self.ctx.names.spells(label, in "CopyFrom { total: false }".as_bytes()) {
+            return wrapping_u8(SQ_COPY_FROM);
+        }
+        if self.ctx.names.spells(label, in "CopyFrom { total: true }".as_bytes()) {
+            return wrapping_u8(SQ_TRY_COPY_FROM);
+        }
         for k in 0..24 {
             let mut spelled = ChunkSeq::new[u8]();
             append_text(inout spelled, "Wide(Wide { bytes: ");
@@ -5636,30 +5644,22 @@ impl L {
             let lo = self.seq_val(args_at, 1);
             let hi = self.seq_val(args_at, 2);
             let val = self.seq_val(args_at, 3);
-            self.cur_fn.code.get(lo);
-            self.cur_fn.code.get(hi);
-            self.cur_fn.code.op(OP_I64_LE_U);
-            self.cur_fn.code.get(hi);
-            self.cur_fn.code.get(n);
-            self.cur_fn.code.op(OP_I64_LE_U);
-            self.cur_fn.code.op(OP_I32_AND);
-            if seq_op == SQ_TRY_FILL {
-                let dest = self.dest(dest_val);
-                self.cur_fn.code.op(OP_I64_EXTEND_I32_U);
-                self.cur_fn.code.tee(dest);
-                self.cur_fn.code.op(OP_I32_WRAP_I64);
-            }
-            self.cur_fn.code.open(OP_IF);
-            self.fill_elems(base, lo, hi, stride, val);
-            if seq_op == SQ_FILL_RANGE {
-                self.cur_fn.code.op(OP_ELSE);
-                let oob = self.ctx.syms.index_oob;
-                self.raise_runtime_error(oob);
-            }
-            self.cur_fn.code.op(OP_END);
-            if seq_op == SQ_FILL_RANGE {
-                self.unit_into(dest_val);
-            }
+            self.fill_range_seq(base, n, stride, lo, hi, val, seq_op == SQ_TRY_FILL, dest_val);
+        } else if seq_op == SQ_COPY_FROM || seq_op == SQ_TRY_COPY_FROM {
+            let at_idx = self.seq_val(args_at, 1);
+            let src = self.seq_val(args_at, 2);
+            let src_ty = self.seq_ty(args_at, 2);
+            let (src_addr, src_len) = self.parts(src, src_ty);
+            self.copy_from_seq(
+                base,
+                n,
+                stride,
+                at_idx,
+                src_addr,
+                src_len,
+                seq_op == SQ_TRY_COPY_FROM,
+                dest_val
+            );
         } else if seq_op == SQ_STR_PUSH_CHAR {
             let ch = self.seq_val(args_at, 1);
             let dest = self.dest(dest_val);

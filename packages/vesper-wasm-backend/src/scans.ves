@@ -12,16 +12,24 @@ const U_GENERIC_OPERATION: u8 = 5;
 const OP_BLOCK: u8 = 2;
 const OP_LOOP: u8 = 3;
 const OP_IF: u8 = 4;
+const OP_ELSE: u8 = 5;
 const OP_END: u8 = 11;
 const OP_SELECT: u8 = 27;
 const OP_I64_EQZ: u8 = 80;
 const OP_I64_EQ: u8 = 81;
 const OP_I64_LT_U: u8 = 84;
+const OP_I64_LE_U: u8 = 88;
 const OP_I64_GE_U: u8 = 90;
+const OP_I32_AND: u8 = 113;
 const OP_I32_OR: u8 = 114;
 const OP_I64_ADD: u8 = 124;
+const OP_I64_SUB: u8 = 125;
+const OP_I64_MUL: u8 = 126;
 const OP_I64_AND: u8 = 131;
+const OP_I64_SHL: u8 = 134;
 const OP_I64_SHR_U: u8 = 136;
+const OP_I32_WRAP_I64: u8 = 167;
+const OP_I64_EXTEND_I32_U: u8 = 173;
 const NONE32: u32 = 4294967295;
 // `seq_code` of the three scans (src/lower.ves)
 pub fn sq_find_byte() -> u64 {
@@ -120,5 +128,95 @@ impl L {
         self.cur_fn.code.op(OP_I64_SHR_U);
         self.cur_fn.code.i64_const(1);
         self.cur_fn.code.op(OP_I64_AND);
+    }
+
+    // `fill_range` / `try_fill` (`SeqOp::FillRange`).
+    pub fn fill_range_seq(
+        inout self,
+        base: u32,
+        n: u32,
+        stride: u64,
+        lo: u32,
+        hi: u32,
+        val: u32,
+        total: bool,
+        dest_val: u64
+    ) eff [Fail[WErr]] {
+        self.cur_fn.code.get(lo);
+        self.cur_fn.code.get(hi);
+        self.cur_fn.code.op(OP_I64_LE_U);
+        self.cur_fn.code.get(hi);
+        self.cur_fn.code.get(n);
+        self.cur_fn.code.op(OP_I64_LE_U);
+        self.cur_fn.code.op(OP_I32_AND);
+        if total {
+            let dest = self.dest(dest_val);
+            self.cur_fn.code.op(OP_I64_EXTEND_I32_U);
+            self.cur_fn.code.tee(dest);
+            self.cur_fn.code.op(OP_I32_WRAP_I64);
+        }
+        self.cur_fn.code.open(OP_IF);
+        self.fill_elems(base, lo, hi, stride, val);
+        if !total {
+            self.cur_fn.code.op(OP_ELSE);
+            let oob = self.ctx.syms.index_oob;
+            self.raise_runtime_error(oob);
+        }
+        self.cur_fn.code.op(OP_END);
+        if !total {
+            self.unit_into(dest_val);
+        }
+    }
+
+    // `copy_from` / `try_copy_from` (`SeqOp::CopyFrom`).
+    pub fn copy_from_seq(
+        inout self,
+        base: u32,
+        n: u32,
+        stride: u64,
+        at_idx: u32,
+        src_addr: u32,
+        src_len: u32,
+        total: bool,
+        dest_val: u64
+    ) eff [Fail[WErr]] {
+        self.cur_fn.code.get(at_idx);
+        self.cur_fn.code.get(n);
+        self.cur_fn.code.op(OP_I64_LE_U);
+        self.cur_fn.code.get(src_len);
+        self.cur_fn.code.get(n);
+        self.cur_fn.code.get(at_idx);
+        self.cur_fn.code.op(OP_I64_SUB);
+        self.cur_fn.code.op(OP_I64_LE_U);
+        self.cur_fn.code.op(OP_I32_AND);
+        if total {
+            let dest = self.dest(dest_val);
+            self.cur_fn.code.op(OP_I64_EXTEND_I32_U);
+            self.cur_fn.code.tee(dest);
+            self.cur_fn.code.op(OP_I32_WRAP_I64);
+        }
+        self.cur_fn.code.open(OP_IF);
+        self.elem_addr(base, at_idx, stride);
+        self.cur_fn.code.get(src_addr);
+        self.cur_fn.code.op(OP_I32_WRAP_I64);
+        self.cur_fn.code.get(src_len);
+        if stride == 8 {
+            self.cur_fn.code.i64_const(3);
+            self.cur_fn.code.op(OP_I64_SHL);
+        } else if stride != 1 {
+            self.cur_fn.code.u64_const(stride);
+            self.cur_fn.code.op(OP_I64_MUL);
+        }
+        self.cur_fn.code.op(OP_I32_WRAP_I64);
+        self.cur_fn.code.memory_copy();
+        if !total {
+            self.cur_fn.code.op(OP_ELSE);
+            let oob = self.ctx.syms.index_oob;
+            self.raise_runtime_error(oob);
+        }
+        self.cur_fn.code.op(OP_END);
+        if !total {
+            self.unit_into(dest_val);
+        }
     }
 }
