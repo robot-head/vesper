@@ -214,3 +214,136 @@ fn vector_loads_keep_both_halves_across_spills_and_calls() {
     }
     unsafe { module.free_memory() };
 }
+
+#[test]
+fn packed_integer_arithmetic_matches_cranelift_at_lane_boundaries() {
+    #[derive(Clone, Copy, Debug)]
+    enum Op {
+        Add,
+        Sub,
+        SignedAdd,
+        UnsignedAdd,
+        SignedSub,
+        UnsignedSub,
+        Average,
+    }
+    let saturated = [
+        Op::SignedAdd,
+        Op::UnsignedAdd,
+        Op::SignedSub,
+        Op::UnsignedSub,
+        Op::Average,
+    ];
+    let mut module = module();
+    for ty in [types::I8X16, types::I16X8, types::I32X4, types::I64X2] {
+        let lane = ty.lane_type();
+        let lane_bytes = lane.bytes() as usize;
+        let sign = 1u64 << (lane.bits() - 1);
+        let max = (sign - 1) | sign;
+        let edges = [0, 1, sign - 1, sign, sign + 1, max - 1, max];
+        let ops = [Op::Add, Op::Sub].into_iter().chain(
+            saturated
+                .into_iter()
+                .filter(|_| lane_bytes <= size_of::<u16>()),
+        );
+        for op in ops {
+            let mut context = module.make_context();
+            context.func.signature.params = vec![AbiParam::new(types::I64); 3];
+            let mut frontend = FunctionBuilderContext::new();
+            let mut builder = FunctionBuilder::new(&mut context.func, &mut frontend);
+            let entry = builder.create_block();
+            builder.append_block_params_for_function_params(entry);
+            builder.switch_to_block(entry);
+            let [left, right, destination] = *builder.block_params(entry) else {
+                unreachable!()
+            };
+            let flags = MemFlags::new().with_notrap();
+            let left = builder.ins().load(ty, flags, left, 0);
+            let right = builder.ins().load(ty, flags, right, 0);
+            let value = match op {
+                Op::Add => builder.ins().iadd(left, right),
+                Op::Sub => builder.ins().isub(left, right),
+                Op::SignedAdd => builder.ins().sadd_sat(left, right),
+                Op::UnsignedAdd => builder.ins().uadd_sat(left, right),
+                Op::SignedSub => builder.ins().ssub_sat(left, right),
+                Op::UnsignedSub => builder.ins().usub_sat(left, right),
+                Op::Average => builder.ins().avg_round(left, right),
+            };
+            builder.ins().store(flags, value, destination, 0);
+            builder.ins().return_(&[]);
+            builder.seal_all_blocks();
+            builder.finalize();
+            let functions = compile(&mut module, &mut context);
+            let lanes = VECTOR_BYTES / lane_bytes;
+            for i in 0..edges.len() {
+                for j in 0..edges.len() {
+                    let mut left = [0; VECTOR_BYTES];
+                    let mut right = [0; VECTOR_BYTES];
+                    for lane in 0..lanes {
+                        let range = lane * lane_bytes..(lane + 1) * lane_bytes;
+                        let a = edges[(i + lane) % edges.len()].to_le_bytes();
+                        let b = edges[(j + lane) % edges.len()].to_le_bytes();
+                        left[range.clone()].copy_from_slice(&a[..lane_bytes]);
+                        right[range].copy_from_slice(&b[..lane_bytes]);
+                    }
+                    type Entry = unsafe extern "C" fn(*const u8, *const u8, *mut u8);
+                    let [reference, candidate] = functions.map(|pointer| {
+                        let run = unsafe { std::mem::transmute::<*const u8, Entry>(pointer) };
+                        let mut output = [0; VECTOR_BYTES];
+                        unsafe { run(left.as_ptr(), right.as_ptr(), output.as_mut_ptr()) };
+                        output
+                    });
+                    assert_eq!(candidate, reference, "{ty} {op:?} {i} {j}");
+                }
+            }
+        }
+    }
+    unsafe { module.free_memory() };
+}
+
+#[test]
+fn packed_float_precision_conversions_match_cranelift() {
+    let mut module = module();
+    for demote in [false, true] {
+        let input_type = if demote { types::F64X2 } else { types::F32X4 };
+        let mut context = module.make_context();
+        context.func.signature.params = vec![AbiParam::new(types::I64); 2];
+        let mut frontend = FunctionBuilderContext::new();
+        let mut builder = FunctionBuilder::new(&mut context.func, &mut frontend);
+        let entry = builder.create_block();
+        builder.append_block_params_for_function_params(entry);
+        builder.switch_to_block(entry);
+        let [source, destination] = *builder.block_params(entry) else {
+            unreachable!()
+        };
+        let flags = MemFlags::new().with_notrap();
+        let source = builder.ins().load(input_type, flags, source, 0);
+        let result = if demote {
+            builder.ins().fvdemote(source)
+        } else {
+            builder.ins().fvpromote_low(source)
+        };
+        builder.ins().store(flags, result, destination, 0);
+        builder.ins().return_(&[]);
+        builder.seal_all_blocks();
+        builder.finalize();
+        let functions = compile(&mut module, &mut context);
+        for input in [
+            [0u64, 0],
+            [0x8000_0000_8000_0000, 0x7ff0_0000_7f80_0000],
+            [0x7ff0_0000_7f80_0042, 0x7ff8_0000_7fc0_0042],
+            [0x3ff0_0000_3f80_0000, 0xffef_ffff_ff7f_ffff],
+            [u64::MAX, u64::MAX],
+        ] {
+            type Entry = unsafe extern "C" fn(*const u64, *mut u64);
+            let [reference, candidate] = functions.map(|pointer| {
+                let run = unsafe { std::mem::transmute::<*const u8, Entry>(pointer) };
+                let mut output = [u64::MAX; 2];
+                unsafe { run(input.as_ptr(), output.as_mut_ptr()) };
+                output
+            });
+            assert_eq!(candidate, reference, "{input_type} {input:?}");
+        }
+    }
+    unsafe { module.free_memory() };
+}

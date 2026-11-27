@@ -184,6 +184,15 @@ enum IntegerOp {
     VectorAnd = 162,
     VectorOr = 163,
     VectorXor = 164,
+    VectorAdd = 165,
+    VectorSub = 166,
+    VectorSignedSatAdd = 167,
+    VectorUnsignedSatAdd = 168,
+    VectorSignedSatSub = 169,
+    VectorUnsignedSatSub = 170,
+    VectorRoundedAverage = 171,
+    VectorPromoteLow = 172,
+    VectorDemote = 173,
 }
 
 fn integer_bit_op(op: Opcode) -> Option<IntegerOp> {
@@ -1894,15 +1903,42 @@ impl IntegerBlocks<'_> {
                 (IntegerOp::VectorSplat, [source, 0, width])
             }
             InstructionData::Binary {
-                opcode: opcode @ (Opcode::Band | Opcode::Bor | Opcode::Bxor),
+                opcode,
                 args: [left, right],
             } if ty(left) == output && ty(right) == output => {
-                let op = match opcode {
-                    Opcode::Band => IntegerOp::VectorAnd,
-                    Opcode::Bor => IntegerOp::VectorOr,
-                    _ => IntegerOp::VectorXor,
+                let lane = output.lane_type();
+                let (op, width) = match opcode {
+                    Opcode::Band => (IntegerOp::VectorAnd, 0),
+                    Opcode::Bor => (IntegerOp::VectorOr, 0),
+                    Opcode::Bxor => (IntegerOp::VectorXor, 0),
+                    Opcode::Iadd => (IntegerOp::VectorAdd, integer_width(lane)?),
+                    Opcode::Isub => (IntegerOp::VectorSub, integer_width(lane)?),
+                    _ if matches!(lane, types::I8 | types::I16) => {
+                        let op = match opcode {
+                            Opcode::SaddSat => IntegerOp::VectorSignedSatAdd,
+                            Opcode::UaddSat => IntegerOp::VectorUnsignedSatAdd,
+                            Opcode::SsubSat => IntegerOp::VectorSignedSatSub,
+                            Opcode::UsubSat => IntegerOp::VectorUnsignedSatSub,
+                            Opcode::AvgRound => IntegerOp::VectorRoundedAverage,
+                            _ => return None,
+                        };
+                        (op, integer_width(lane)?)
+                    }
+                    _ => return None,
                 };
-                (op, [input(left)?, input(right)?, 0])
+                (op, [input(left)?, input(right)?, width])
+            }
+            InstructionData::Unary {
+                opcode: Opcode::FvpromoteLow,
+                arg,
+            } if !self.canonicalize_nans && ty(arg) == types::F32X4 && output == types::F64X2 => {
+                (IntegerOp::VectorPromoteLow, [input(arg)?, 0, 0])
+            }
+            InstructionData::Unary {
+                opcode: Opcode::Fvdemote,
+                arg,
+            } if !self.canonicalize_nans && ty(arg) == types::F64X2 && output == types::F32X4 => {
+                (IntegerOp::VectorDemote, [input(arg)?, 0, 0])
             }
             InstructionData::Ternary {
                 opcode: Opcode::Bitselect,

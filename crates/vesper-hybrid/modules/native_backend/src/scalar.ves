@@ -10,7 +10,8 @@ use self::x86_64::{
     emit_jump_table_entry, emit_symbol_address, callee_saved_registers, find_callee_saved_register,
     find_register, fits_signed_byte, patch_forward_branch, patch_relative_branch,
     patch_relative_offset, register_bit, home_register, xmm_home_register, HOME_REGISTERS,
-    cheap_immediate, move_constant, store_immediate, store_immediate_fits, XMM_BITS, PAND, POR, PXOR
+    cheap_immediate, move_constant, store_immediate, store_immediate_fits, XMM_BITS, PAND, POR,
+    PXOR, PackedInteger, packed_integer_opcode
 };
 
 // Integer block opcodes shared with src/native_machine.rs.
@@ -179,6 +180,15 @@ pub const VECTOR_STORE: u64 = 161;
 pub const VECTOR_AND: u64 = 162;
 pub const VECTOR_OR: u64 = 163;
 pub const VECTOR_XOR: u64 = 164;
+pub const VECTOR_ADD: u64 = 165;
+pub const VECTOR_SUB: u64 = 166;
+pub const VECTOR_SIGNED_SAT_ADD: u64 = 167;
+pub const VECTOR_UNSIGNED_SAT_ADD: u64 = 168;
+pub const VECTOR_SIGNED_SAT_SUB: u64 = 169;
+pub const VECTOR_UNSIGNED_SAT_SUB: u64 = 170;
+pub const VECTOR_ROUNDED_AVERAGE: u64 = 171;
+pub const VECTOR_PROMOTE_LOW: u64 = 172;
+pub const VECTOR_DEMOTE: u64 = 173;
 const XMM_ARGUMENTS: u64 = 8;
 pub const CHECKED_ARITHMETIC_RECORDS: u64 = 2;
 
@@ -881,11 +891,31 @@ pub fn is_float_to_integer(op: u64) -> bool {
 }
 
 fn is_vector_binary(op: u64) -> bool {
-    op >= VECTOR_AND && op <= VECTOR_XOR
+    op >= VECTOR_AND && op <= VECTOR_ROUNDED_AVERAGE
+}
+
+fn is_vector_convert(op: u64) -> bool {
+    op == VECTOR_PROMOTE_LOW || op == VECTOR_DEMOTE
+}
+
+fn vector_binary_opcode(op: u64, width: u64) -> u8 {
+    let packed = match op {
+        VECTOR_AND => return PAND,
+        VECTOR_OR => return POR,
+        VECTOR_XOR => return PXOR,
+        VECTOR_ADD => PackedInteger::Add,
+        VECTOR_SUB => PackedInteger::Subtract,
+        VECTOR_SIGNED_SAT_ADD => PackedInteger::SignedSaturatingAdd,
+        VECTOR_UNSIGNED_SAT_ADD => PackedInteger::UnsignedSaturatingAdd,
+        VECTOR_SIGNED_SAT_SUB => PackedInteger::SignedSaturatingSubtract,
+        VECTOR_UNSIGNED_SAT_SUB => PackedInteger::UnsignedSaturatingSubtract,
+        _ => PackedInteger::RoundedAverage,
+    };
+    packed_integer_opcode(in packed, width)
 }
 
 fn is_vector_result(op: u64) -> bool {
-    op == VECTOR_CONSTANT || op == VECTOR_SPLAT || op == VECTOR_LOAD || is_vector_binary(op)
+    op >= VECTOR_CONSTANT && op <= VECTOR_DEMOTE && op != VECTOR_STORE
 }
 
 fn vector_value(in words: Slice[u64], arguments: u64, value: u64) -> bool {
@@ -920,6 +950,7 @@ fn float_left(op: u64) -> bool {
         || op == FLOAT_DEMOTE
         || op == FLOAT_TO_INTEGER_TRUNC
         || is_vector_binary(op)
+        || is_vector_convert(op)
         || (op >= FLOAT_TO_SIGNED_SAT && op <= FLOAT_FMA64)
 }
 
@@ -962,7 +993,8 @@ fn valid_vector_operands(in words: Slice[u64], arguments: u64, count: u64, paire
         let record = read_record(in words, index);
         let vector_binary = is_vector_binary(record.op);
         if (reads_left(in record)
-            && vector_value(in words, arguments, record.left) != vector_binary)
+            && vector_value(in words, arguments, record.left)
+                != (vector_binary || is_vector_convert(record.op)))
             || (reads_right(in record, paired)
                 && vector_value(in words, arguments, record.right)
                     != (vector_binary || record.op == VECTOR_STORE))
@@ -1075,6 +1107,9 @@ fn can_reuse_right(op: u64) -> bool {
         && op != FLOAT_SUB
         && op != FLOAT_DIV
         && op != FLOAT_COPY_SIGN
+        && op != VECTOR_SUB
+        && op != VECTOR_SIGNED_SAT_SUB
+        && op != VECTOR_UNSIGNED_SAT_SUB
         && !is_register_shift(op)
 }
 
@@ -1143,7 +1178,7 @@ fn find_last_reads(
             && record.op != STACK_POINTER
             && record.op != FLOAT_TO_INTEGER_TRUNC
             && !is_conditional_trap(record.op)
-            && (record.op < VECTOR_CONSTANT || record.op > VECTOR_XOR))
+            && (record.op < VECTOR_CONSTANT || record.op > VECTOR_DEMOTE))
             || (!labeled && is_cfg_record(record.op))
             || (record.op == STACK_SLOT && index >= frame.slots.len())
             || (record.op == RETURN_PAIR && (reverse_index != 0 || record.left >= value))
@@ -1178,13 +1213,15 @@ fn find_last_reads(
         }
         let last = last_read(in reads, value);
         let live = last != NEVER_READ || live_overflow_flag(in reads, value, record.op);
-        if record.op >= VECTOR_CONSTANT && record.op <= VECTOR_XOR {
+        if record.op >= VECTOR_CONSTANT && record.op <= VECTOR_DEMOTE {
             let valid = match record.op {
                 VECTOR_CONSTANT | VECTOR_AND | VECTOR_OR | VECTOR_XOR => record.extra == 0,
                 VECTOR_LOAD => record.right <= DISP32_MASK && record.extra == 0,
                 VECTOR_STORE => record.extra <= DISP32_MASK,
                 VECTOR_SPLAT => record.right == 0 && valid_width(record.extra),
-                _ => false,
+                VECTOR_ADD | VECTOR_SUB => valid_width(record.extra),
+                VECTOR_PROMOTE_LOW | VECTOR_DEMOTE => record.right == 0 && record.extra == 0,
+                _ => record.extra == BYTE_BITS || record.extra == WORD_BITS,
             };
             if !valid {
                 return Option::None;
@@ -2729,7 +2766,11 @@ fn encode_block_pass(
         }
         let has_right = reads_right(in record, paired);
         let vector_binary = is_vector_binary(record.op);
-        let operand_width = if vector_binary { XMM_BITS } else { QWORD_BITS };
+        let operand_width = if vector_binary || is_vector_convert(record.op) {
+            XMM_BITS
+        } else {
+            QWORD_BITS
+        };
         let left = if reads_left(in record) {
             let location = assigned(in allocation.locations, record.left);
             materialize_width(
@@ -2806,18 +2847,19 @@ fn encode_block_pass(
                 in Instruction::Load(destination, left, wrapping_u32(record.right), XMM_BITS)
             );
         } else if vector_binary {
-            let (first, second) = if destination == right {
+            let (first, second) = if destination == right && can_reuse_right(record.op) {
                 (right, left)
             } else {
                 (left, right)
             };
-            let opcode = match record.op {
-                VECTOR_AND => PAND,
-                VECTOR_OR => POR,
-                _ => PXOR
-            };
+            let opcode = vector_binary_opcode(record.op, record.extra);
             emit(inout output, in Instruction::Move(destination, first));
             emit(inout output, in Instruction::VectorBinary(opcode, destination, second));
+        } else if is_vector_convert(record.op) {
+            emit(
+                inout output,
+                in Instruction::VectorConvert(destination, left, record.op == VECTOR_DEMOTE)
+            );
         } else if record.op == STACK_POINTER {
             emit(inout output, in Instruction::Move(destination, RSP));
         } else if record.op == FLOAT_CONSTANT {

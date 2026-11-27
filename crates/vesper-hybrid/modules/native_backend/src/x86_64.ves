@@ -81,6 +81,25 @@ const PUNPCKLBW: u8 = 0x60;
 const PUNPCKLWD: u8 = 0x61;
 const PUNPCKLQDQ: u8 = 0x6c;
 const PSHUFD: u8 = 0x70;
+const PADDB: u8 = 0xfc;
+const PADDW: u8 = 0xfd;
+const PADDD: u8 = 0xfe;
+const PADDQ: u8 = 0xd4;
+const PSUBB: u8 = 0xf8;
+const PSUBW: u8 = 0xf9;
+const PSUBD: u8 = 0xfa;
+const PSUBQ: u8 = 0xfb;
+const PADDSB: u8 = 0xec;
+const PADDSW: u8 = 0xed;
+const PADDUSB: u8 = 0xdc;
+const PADDUSW: u8 = 0xdd;
+const PSUBSB: u8 = 0xe8;
+const PSUBSW: u8 = 0xe9;
+const PSUBUSB: u8 = 0xd8;
+const PSUBUSW: u8 = 0xd9;
+const PAVGB: u8 = 0xe0;
+const PAVGW: u8 = 0xe3;
+const CONVERT_PACKED_PRECISION: u8 = 0x5a;
 const DUPLICATE_LOW_DWORD: u8 = 0x00;
 const DUPLICATE_LOW_QWORD: u8 = 0x44;
 const GPR_TO_XMM: u8 = 0x6e;
@@ -219,6 +238,7 @@ pub copy enum Instruction {
     VectorConstant(u8, u64, u64),
     VectorSplat(u8, u8, u64),
     VectorBinary(u8, u8, u8),
+    VectorConvert(u8, u8, bool),
     FloatCompare(u8, u8, u8, u64, u64),
     Move(u8, u8),
     Exchange(u8, u8),
@@ -252,6 +272,39 @@ pub copy enum Instruction {
     Trap,
     TrapIf(u8, bool),
     Return,
+}
+
+pub copy enum PackedInteger {
+    Add,
+    Subtract,
+    SignedSaturatingAdd,
+    UnsignedSaturatingAdd,
+    SignedSaturatingSubtract,
+    UnsignedSaturatingSubtract,
+    RoundedAverage,
+}
+
+pub fn packed_integer_opcode(in op: PackedInteger, width: u64) -> u8 {
+    let byte = width == BYTE_BITS;
+    match op {
+        PackedInteger::Add => match width {
+            BYTE_BITS => PADDB,
+            WORD_BITS => PADDW,
+            DWORD_BITS => PADDD,
+            _ => PADDQ,
+        },
+        PackedInteger::Subtract => match width {
+            BYTE_BITS => PSUBB,
+            WORD_BITS => PSUBW,
+            DWORD_BITS => PSUBD,
+            _ => PSUBQ,
+        },
+        PackedInteger::SignedSaturatingAdd => if byte { PADDSB } else { PADDSW },
+        PackedInteger::UnsignedSaturatingAdd => if byte { PADDUSB } else { PADDUSW },
+        PackedInteger::SignedSaturatingSubtract => if byte { PSUBSB } else { PSUBSW },
+        PackedInteger::UnsignedSaturatingSubtract => if byte { PSUBUSB } else { PSUBUSW },
+        PackedInteger::RoundedAverage => if byte { PAVGB } else { PAVGW },
+    }
 }
 
 pub fn is_xmm(register: u8) -> bool {
@@ -1091,6 +1144,12 @@ pub fn emit(inout out: ChunkSeq[u8], in instruction: Instruction) {
         Instruction::VectorBinary(opcode, destination, source) => {
             out.push(OPERAND_SIZE_OVERRIDE);
             xmm_binary(inout out, opcode, destination, source);
+        },
+        Instruction::VectorConvert(destination, source, demote) => {
+            if demote {
+                out.push(OPERAND_SIZE_OVERRIDE);
+            }
+            xmm_binary(inout out, CONVERT_PACKED_PRECISION, destination, source);
         },
         Instruction::FloatBits(destination, source, width) => float_bits(
             inout out,
