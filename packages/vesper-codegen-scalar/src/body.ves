@@ -104,6 +104,12 @@ const IEX_WORD_CONVERT: u64 = 12;
 const IEX_WRAPPING_ADD: u64 = 13;
 const IEX_WRAPPING_SUB: u64 = 14;
 const IEX_WRAPPING_MUL: u64 = 15;
+const IEX_BNOT: u64 = 16;
+const IEX_INEG: u64 = 17;
+const IEX_LNOT: u64 = 18;
+const IEX_BAND: u64 = 19;
+const IEX_BOR: u64 = 20;
+const IEX_BXOR: u64 = 21;
 
 // Sub-operations of `INST_WRITE_OP`.
 const WOP_IADD: u64 = 1;
@@ -684,6 +690,27 @@ impl Gen {
                 return true;
             }
         }
+        if op_lane == LANE_I64 {
+            let sub_iex = if op == self.ops.tilde {
+                IEX_BNOT
+            } else if op == self.ops.minus && !self.ctx.world.may_overflow(i.s0, i.s1) {
+                IEX_INEG
+            } else if op == self.ops.bang {
+                IEX_LNOT
+            } else {
+                0
+            };
+            if sub_iex != 0 {
+                kind = INST_INT_EXTRA;
+                extra.push(sub_iex);
+                extra.push(0);
+                extra.push(0);
+                extra.push(op_kind);
+                extra.push(0);
+                extra.push(res_kind);
+                return true;
+            }
+        }
         false
     }
 
@@ -934,13 +961,25 @@ impl Gen {
             extra.push(rk);
             return true;
         }
-        if op == ops_s.wrapping_add || op == ops_s.wrapping_sub || op == ops_s.wrapping_mul {
+        if op == ops_s.wrapping_add
+            || op == ops_s.wrapping_sub
+            || op == ops_s.wrapping_mul
+            || op == ops_s.amp
+            || op == ops_s.pipe
+            || op == ops_s.caret
+        {
             let sub_iex = if op == ops_s.wrapping_add {
                 IEX_WRAPPING_ADD
             } else if op == ops_s.wrapping_sub {
                 IEX_WRAPPING_SUB
-            } else {
+            } else if op == ops_s.wrapping_mul {
                 IEX_WRAPPING_MUL
+            } else if op == ops_s.amp {
+                IEX_BAND
+            } else if op == ops_s.pipe {
+                IEX_BOR
+            } else {
+                IEX_BXOR
             };
             kind = INST_INT_EXTRA;
             extra.push(sub_iex);
