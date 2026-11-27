@@ -124,7 +124,7 @@ pub(super) const SWAPS: &[Swap] = &[
     open("register_locals", "0 diffs; no flip-gate configuration"),
     pass("entry_plans", "native-walk", "#2056"),
     pass("export_plans", "native-walk", "#2056"),
-    open("block_plan", "0 diffs; no flip-gate configuration"),
+    pass("block_plan", "block-plan", "#2617"),
 ];
 
 pub(super) fn register(r: &mut Registry) {

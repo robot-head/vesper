@@ -327,3 +327,5 @@ the Rust lines deleted.
 | `freestanding` (PASS; compiler module, `src/native_freestanding.rs` goes at the retirement) | SH4-14 | 0 differences; tests pass | freestanding-link 1.23x n=12 | 0 (at the retirement) | #2517 |
 | `pact-declarations` (PASS; compiler module, `src/pact_frontend.rs` goes at the retirement) | SH2-11 | 0 differences; tests pass | declarations-swap-point-with-encode-and-decode 0.02x n=12 | 0 (at the retirement) | #2517 |
 | `codegen-calls` (PASS; compiler module, `src/native.rs` goes at the retirement) | SH4-5 | 0 differences; tests pass | discovery-entry 0.06x n=12 | 0 (at the retirement) | #2572 |
+| `block-plan` (PASS; compiler module, `src/native.rs` goes at the retirement) | SH4-11 | 0 differences; tests pass | block-plans 0.87x n=12 | 0 (at the retirement) | #2617 |
+| `ffi-lowering` (PASS; compiler module, `src/ffi_lowering.rs` goes at the retirement) | SH4-10 | 0 differences; tests pass | ffi-type-mapping 0.33x n=12 | 0 (at the retirement) | #2617 |
