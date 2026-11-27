@@ -148,6 +148,11 @@ const PACKED_SHIFT_RIGHT: u8 = 2;
 const PACKED_SHIFT_LEFT: u8 = 6;
 const F32_SIGN: u64 = 0x80000000;
 const F64_SIGN: u64 = 0x8000000000000000;
+const F32_EXPONENT_BIAS: u64 = 127;
+const F64_EXPONENT_BIAS: u64 = 1023;
+const F32_EXPONENT_SHIFT: u32 = 23;
+const F64_EXPONENT_SHIFT: u32 = 52;
+const ALL_REGISTER_BITS: u64 = 0xffffffffffffffff;
 pub const SSE_ADD: u8 = 0x58;
 pub const SSE_SUB: u8 = 0x5c;
 pub const SSE_MUL: u8 = 0x59;
@@ -323,6 +328,7 @@ pub copy enum Instruction {
     FloatCopySign(u8, u8, u64),
     FloatBits(u8, u8, u64),
     FloatToInteger(u8, u8, u64, u64),
+    FloatToIntegerSat(u8, u8, u64, u64, bool),
     FloatConvert(u8, u8, u64),
     FloatMinMax(u8, u8, u8, bool, u64),
     FloatRound(u8, u8, Rounding, u64),
@@ -1209,6 +1215,13 @@ fn xmm_binary(inout out: ChunkSeq[u8], opcode: u8, destination: u8, source: u8) 
     out.push(modrm(dst, src));
 }
 
+fn compare_float_registers(inout out: ChunkSeq[u8], left: u8, right: u8, width: u64) {
+    if width == QWORD_BITS {
+        out.push(OPERAND_SIZE_OVERRIDE);
+    }
+    xmm_binary(inout out, UCOMIS, left, right);
+}
+
 fn emit_short_branch(inout out: ChunkSeq[u8], opcode: u8) -> u64 {
     out.push(opcode);
     let displacement = out.len();
@@ -1229,10 +1242,7 @@ fn float_min_max(inout out: ChunkSeq[u8], dest: u8, left: u8, right: u8, min: bo
         dest
     };
     float_move(inout out, result, right);
-    if width == QWORD_BITS {
-        out.push(OPERAND_SIZE_OVERRIDE);
-    }
-    xmm_binary(inout out, UCOMIS, result, left);
+    compare_float_registers(inout out, result, left, width);
     let unequal = emit_short_branch(inout out, JCC_SHORT | CC_NE);
     let unordered = emit_short_branch(inout out, JCC_SHORT | CC_P);
 
@@ -1275,6 +1285,123 @@ fn float_round(inout out: ChunkSeq[u8], dest: u8, source: u8, in mode: Rounding,
         Rounding::Ceil => ROUND_UP,
         Rounding::Trunc => ROUND_TOWARD_ZERO,
     });
+}
+
+fn float_immediate(inout out: ChunkSeq[u8], destination: u8, bits: u64, width: u64) {
+    if bits == 0 {
+        xmm_binary(inout out, XORPS, destination, destination);
+    } else {
+        load_constant(inout out, R11, bits);
+        float_bits(inout out, destination, R11, width);
+    }
+}
+
+fn float_to_integer(inout out: ChunkSeq[u8], destination: u8, source: u8, from: u64, width: u64) {
+    let source = xmm_code(source);
+    out.push(float_prefix(from));
+    emit_rex(inout out, destination, source, width == QWORD_BITS, false);
+    out.push(TWO_BYTE_OPCODE);
+    out.push(SSE_FLOAT_TO_INTEGER_TRUNC);
+    out.push(modrm(destination, source));
+}
+
+fn float_power_of_two(exponent: u64, width: u64) -> u64 {
+    if width == DWORD_BITS {
+        wrapping_shl_u64(wrapping_add(exponent, F32_EXPONENT_BIAS), F32_EXPONENT_SHIFT)
+    } else {
+        wrapping_shl_u64(wrapping_add(exponent, F64_EXPONENT_BIAS), F64_EXPONENT_SHIFT)
+    }
+}
+
+fn float_to_unsigned_qword(inout out: ChunkSeq[u8], dest: u8, source: u8, from: u64) {
+    let cutoff = XMM_RIGHT_SCRATCH;
+    float_immediate(inout out, cutoff, float_power_of_two(QWORD_BITS - 1, from), from);
+    compare_float_registers(inout out, source, cutoff, from);
+    let direct = emit_short_branch(inout out, JCC_SHORT | CC_B);
+
+    // Values in the upper half fit a signed conversion after subtracting 2^63.
+    let reduced = XMM_LEFT_SCRATCH;
+    float_move(inout out, reduced, source);
+    out.push(float_prefix(from));
+    xmm_binary(inout out, SSE_SUB, reduced, cutoff);
+    float_to_integer(inout out, dest, reduced, from, QWORD_BITS);
+    move_constant(inout out, R11, wrapping_shl_u64(1, wrapping_u32(QWORD_BITS - 1)));
+    binary(inout out, OR_RM_R64, dest, R11, true);
+    let done = emit_short_branch(inout out, JMP_SHORT);
+
+    patch_short_forward(inout out, direct);
+    float_to_integer(inout out, dest, source, from, QWORD_BITS);
+    patch_short_forward(inout out, done);
+}
+
+fn float_to_integer_saturating(
+    inout out: ChunkSeq[u8],
+    dest: u8,
+    source: u8,
+    from: u64,
+    width: u64,
+    signed: bool
+) {
+    let limit = if signed {
+        wrapping_sub(width, 1)
+    } else {
+        width
+    };
+    let cutoff = XMM_RIGHT_SCRATCH;
+    compare_float_registers(inout out, source, source, from);
+    conditional_jump(inout out, CC_P);
+    let unordered = out.len();
+
+    let upper = float_power_of_two(limit, from);
+    let sign = if from == DWORD_BITS {
+        F32_SIGN
+    } else {
+        F64_SIGN
+    };
+    float_immediate(inout out, cutoff, if signed { upper | sign } else { 0 }, from);
+    compare_float_registers(inout out, source, cutoff, from);
+    conditional_jump(inout out, CC_BE);
+    let below = out.len();
+    float_immediate(inout out, cutoff, upper, from);
+    compare_float_registers(inout out, source, cutoff, from);
+    conditional_jump(inout out, CC_AE);
+    let above = out.len();
+
+    if !signed && width == QWORD_BITS {
+        float_to_unsigned_qword(inout out, dest, source, from);
+    } else {
+        let conversion = if width == QWORD_BITS || (!signed && width == DWORD_BITS) {
+            QWORD_BITS
+        } else {
+            DWORD_BITS
+        };
+        float_to_integer(inout out, dest, source, from, conversion);
+        normalize_small_result(inout out, dest, width);
+    }
+    let in_range_done = emit_short_branch(inout out, JMP_SHORT);
+
+    let _ = patch_forward_branch(inout out, below);
+    let minimum = if signed {
+        wrapping_shl_u64(1, wrapping_u32(limit))
+    } else {
+        0
+    };
+    load_constant(inout out, dest, minimum);
+    let below_done = emit_short_branch(inout out, JMP_SHORT);
+
+    let _ = patch_forward_branch(inout out, above);
+    load_constant(
+        inout out,
+        dest,
+        wrapping_shr_u64(ALL_REGISTER_BITS, wrapping_u32(wrapping_sub(QWORD_BITS, limit)))
+    );
+    let above_done = emit_short_branch(inout out, JMP_SHORT);
+
+    let _ = patch_forward_branch(inout out, unordered);
+    load_constant(inout out, dest, 0);
+    patch_short_forward(inout out, in_range_done);
+    patch_short_forward(inout out, below_done);
+    patch_short_forward(inout out, above_done);
 }
 
 fn cvtsi(inout out: ChunkSeq[u8], destination: u8, source: u8, wide: bool, width: u64) {
@@ -1739,13 +1866,10 @@ fn float_compare(
         || predicate == FLOAT_LESS_EQUAL
         || predicate == FLOAT_UNORDERED_OR_GREATER
         || predicate == FLOAT_UNORDERED_OR_GREATER_EQUAL;
-    if width == QWORD_BITS {
-        out.push(OPERAND_SIZE_OVERRIDE);
-    }
     if swap {
-        xmm_binary(inout out, UCOMIS, right, left);
+        compare_float_registers(inout out, right, left, width);
     } else {
-        xmm_binary(inout out, UCOMIS, left, right);
+        compare_float_registers(inout out, left, right, width);
     }
     let cc = match predicate {
         FLOAT_ORDERED => CC_NP,
@@ -1791,14 +1915,12 @@ pub fn emit(inout out: ChunkSeq[u8], in instruction: Instruction) {
             width == QWORD_BITS
         ),
         Instruction::Immediate(destination, bits) => load_constant(inout out, destination, bits),
-        Instruction::FloatImmediate(destination, bits, width) => {
-            if bits == 0 {
-                xmm_binary(inout out, XORPS, destination, destination);
-            } else {
-                load_constant(inout out, R11, bits);
-                float_bits(inout out, destination, R11, width);
-            }
-        },
+        Instruction::FloatImmediate(destination, bits, width) => float_immediate(
+            inout out,
+            destination,
+            bits,
+            width
+        ),
         Instruction::FloatBinary(op, destination, source, width) => {
             out.push(float_prefix(width));
             xmm_binary(inout out, op, destination, source);
@@ -1835,14 +1957,27 @@ pub fn emit(inout out: ChunkSeq[u8], in instruction: Instruction) {
             packed_shift(inout out, scratch, PACKED_SHIFT_LEFT, width);
             xmm_binary(inout out, XORPS, destination, scratch);
         },
-        Instruction::FloatToInteger(destination, source, source_width, width) => {
-            let source = xmm_code(source);
-            out.push(float_prefix(source_width));
-            emit_rex(inout out, destination, source, width == QWORD_BITS, false);
-            out.push(TWO_BYTE_OPCODE);
-            out.push(SSE_FLOAT_TO_INTEGER_TRUNC);
-            out.push(modrm(destination, source));
-        },
+        Instruction::FloatToInteger(destination, source, source_width, width) => float_to_integer(
+            inout out,
+            destination,
+            source,
+            source_width,
+            width
+        ),
+        Instruction::FloatToIntegerSat(
+            destination,
+            source,
+            source_width,
+            width,
+            signed
+        ) => float_to_integer_saturating(
+            inout out,
+            destination,
+            source,
+            source_width,
+            width,
+            signed
+        ),
         Instruction::VectorConstant(destination, low, high) => vector_constant(
             inout out,
             destination,

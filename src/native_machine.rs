@@ -1801,12 +1801,12 @@ impl IntegerBlocks<'_> {
                         integer_width(source)?,
                         float_width(output)?,
                     ),
-                    (Opcode::FcvtToSintSat, _, _) if self.aarch64 => (
+                    (Opcode::FcvtToSintSat, _, _) => (
                         IntegerOp::FloatToSignedSat,
                         float_width(source)?,
                         integer_width(output)?,
                     ),
-                    (Opcode::FcvtToUintSat, _, _) if self.aarch64 => (
+                    (Opcode::FcvtToUintSat, _, _) => (
                         IntegerOp::FloatToUnsignedSat,
                         float_width(source)?,
                         integer_width(output)?,

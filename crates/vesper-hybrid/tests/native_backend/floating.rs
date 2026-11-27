@@ -25,6 +25,14 @@ fn module() -> JITModule {
 }
 
 fn compile(module: &mut JITModule, context: &mut Context) -> (*const u8, *const u8) {
+    compile_with_reference(module, context, None)
+}
+
+fn compile_with_reference(
+    module: &mut JITModule,
+    context: &mut Context,
+    reference: Option<&mut Context>,
+) -> (*const u8, *const u8) {
     let request =
         x86_64_block_words(&context.func, module.isa()).expect("floating machine request");
     let code = binding::x86_64_integer_block(&request);
@@ -35,7 +43,9 @@ fn compile(module: &mut JITModule, context: &mut Context) -> (*const u8, *const 
     let candidate = module
         .declare_anonymous_function(&context.func.signature)
         .unwrap();
-    module.define_function(baseline, context).unwrap();
+    module
+        .define_function(baseline, reference.unwrap_or(context))
+        .unwrap();
     let alignment = u64::from(module.isa().function_alignment().minimum);
     module
         .define_function_bytes(candidate, alignment, &code, &[])
@@ -52,6 +62,15 @@ fn scalar_conversion(
     convert: impl FnOnce(&mut FunctionBuilder<'_>, Value) -> Value,
     output: Type,
 ) -> [unsafe extern "C" fn(u64) -> u64; 2] {
+    let mut context = scalar_conversion_context(module, convert, output);
+    conversion_entries(compile(module, &mut context))
+}
+
+fn scalar_conversion_context(
+    module: &JITModule,
+    convert: impl FnOnce(&mut FunctionBuilder<'_>, Value) -> Value,
+    output: Type,
+) -> Context {
     let mut context = module.make_context();
     context
         .func
@@ -70,10 +89,14 @@ fn scalar_conversion(
     builder.switch_to_block(entry);
     let input = builder.block_params(entry)[0];
     let value = convert(&mut builder, input);
-    let bits = builder
-        .ins()
-        .bitcast(output.as_int(), MemFlags::new(), value);
-    let result = if output == types::F32 {
+    let bits = if output.is_float() {
+        builder
+            .ins()
+            .bitcast(output.as_int(), MemFlags::new(), value)
+    } else {
+        value
+    };
+    let result = if output.bits() < u64::BITS {
         builder.ins().uextend(types::I64, bits)
     } else {
         bits
@@ -81,10 +104,128 @@ fn scalar_conversion(
     builder.ins().return_(&[result]);
     builder.seal_all_blocks();
     builder.finalize();
-    let (a, b) = compile(module, &mut context);
+    context
+}
+
+fn conversion_entries((a, b): (*const u8, *const u8)) -> [unsafe extern "C" fn(u64) -> u64; 2] {
     [a, b].map(|pointer| unsafe {
         std::mem::transmute::<*const u8, unsafe extern "C" fn(u64) -> u64>(pointer)
     })
+}
+
+#[test]
+fn sse2_saturating_float_to_integer_matches_cranelift() {
+    let mut module = module();
+    for from in [types::F32, types::F64] {
+        for output in [types::I8, types::I16, types::I32, types::I64] {
+            for signed in [false, true] {
+                let convert = |b: &mut FunctionBuilder<'_>, value, ty| {
+                    let value = if from == types::F32 {
+                        b.ins().ireduce(types::I32, value)
+                    } else {
+                        value
+                    };
+                    let float = b.ins().bitcast(from, MemFlags::new(), value);
+                    if signed {
+                        b.ins().fcvt_to_sint_sat(ty, float)
+                    } else {
+                        b.ins().fcvt_to_uint_sat(ty, float)
+                    }
+                };
+                let mut context = scalar_conversion_context(
+                    &module,
+                    |b, value| convert(b, value, output),
+                    output,
+                );
+                // Cranelift's x64 emitter needs a 32- or 64-bit conversion.
+                let mut reference = (output.bits() < u32::BITS).then(|| {
+                    scalar_conversion_context(
+                        &module,
+                        |b, value| {
+                            let wide = convert(b, value, types::I32);
+                            let edge = 1i64 << (output.bits() - u32::from(signed));
+                            let high = b.ins().iconst(types::I32, edge - 1);
+                            let clamped = if signed {
+                                let low = b.ins().iconst(types::I32, -edge);
+                                let lower = b.ins().smax(wide, low);
+                                b.ins().smin(lower, high)
+                            } else {
+                                b.ins().umin(wide, high)
+                            };
+                            b.ins().ireduce(output, clamped)
+                        },
+                        output,
+                    )
+                });
+                let functions = conversion_entries(compile_with_reference(
+                    &mut module,
+                    &mut context,
+                    reference.as_mut(),
+                ));
+                let edge = 2f64.powi((output.bits() - u32::from(signed)) as i32);
+                let signed_qword_edge = 2f64.powi((i64::BITS - 1) as i32);
+                let next_down = |input: f64| {
+                    if from == types::F32 {
+                        f64::from((input as f32).next_down())
+                    } else {
+                        input.next_down()
+                    }
+                };
+                let next_up = |input: f64| {
+                    if from == types::F32 {
+                        f64::from((input as f32).next_up())
+                    } else {
+                        input.next_up()
+                    }
+                };
+                for input in [
+                    f64::NAN,
+                    f64::NEG_INFINITY,
+                    next_down(-edge),
+                    -edge,
+                    next_up(-edge),
+                    -edge + 1.0,
+                    -1.75,
+                    -0.0,
+                    0.0,
+                    1.75,
+                    edge - 1.0,
+                    next_down(edge),
+                    edge,
+                    next_up(edge),
+                    next_down(signed_qword_edge),
+                    signed_qword_edge,
+                    next_up(signed_qword_edge),
+                    f64::INFINITY,
+                ] {
+                    let (bits, value) = if from == types::F32 {
+                        let single = input as f32;
+                        (u64::from(single.to_bits()), f64::from(single))
+                    } else {
+                        (input.to_bits(), input)
+                    };
+                    let expected = match (output, signed) {
+                        (types::I8, true) => u64::from(value as i8 as u8),
+                        (types::I8, false) => u64::from(value as u8),
+                        (types::I16, true) => u64::from(value as i16 as u16),
+                        (types::I16, false) => u64::from(value as u16),
+                        (types::I32, true) => u64::from(value as i32 as u32),
+                        (types::I32, false) => u64::from(value as u32),
+                        (_, true) => value as i64 as u64,
+                        (_, false) => value as u64,
+                    };
+                    for run in functions {
+                        assert_eq!(
+                            unsafe { run(bits) },
+                            expected,
+                            "{from} {output} {signed} {bits:#x}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+    unsafe { module.free_memory() };
 }
 
 #[test]

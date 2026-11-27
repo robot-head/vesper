@@ -1257,6 +1257,7 @@ fn find_last_reads(
             && record.op != FUNCTION_GOT
             && record.op != STACK_POINTER
             && record.op != FLOAT_TO_INTEGER_TRUNC
+            && !is_float_to_integer(record.op)
             && !is_conditional_trap(record.op)
             && !is_float_conversion(record.op)
             && !(record.op >= FLOAT_CEIL && record.op <= FLOAT_MAX)
@@ -1375,10 +1376,13 @@ fn find_last_reads(
                 frame.used = true;
             }
         }
-        if record.op == FLOAT_TO_INTEGER_TRUNC {
-            if (record.right != DWORD_BITS && record.right != QWORD_BITS)
-                || (record.extra != DWORD_BITS && record.extra != QWORD_BITS)
-            {
+        if record.op == FLOAT_TO_INTEGER_TRUNC || is_float_to_integer(record.op) {
+            let valid_width = if record.op == FLOAT_TO_INTEGER_TRUNC {
+                record.extra == DWORD_BITS || record.extra == QWORD_BITS
+            } else {
+                valid_width(record.extra)
+            };
+            if (record.right != DWORD_BITS && record.right != QWORD_BITS) || !valid_width {
                 return Option::None;
             }
             frame.floating = true;
@@ -2760,6 +2764,7 @@ fn is_scalar_fp_instruction(op: u64) -> bool {
         || op == BITS_TO_FLOAT
         || op == FLOAT_TO_BITS
         || op == FLOAT_TO_INTEGER_TRUNC
+        || is_float_to_integer(op)
         || is_float_conversion(op)
         || (op >= FLOAT_CEIL && op <= FLOAT_MAX)
 }
@@ -2828,6 +2833,14 @@ fn emit_scalar_fp(
             record.right,
             width
         ),
+        FLOAT_TO_SIGNED_SAT
+            | FLOAT_TO_UNSIGNED_SAT => Instruction::FloatToIntegerSat(
+                destination,
+                left,
+                record.right,
+                width,
+                record.op == FLOAT_TO_SIGNED_SAT
+            ),
         _ => {
             let reuse_right = destination == right && can_reuse_right(record.op);
             let (first, second) = if reuse_right {
