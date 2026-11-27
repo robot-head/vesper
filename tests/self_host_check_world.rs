@@ -187,7 +187,17 @@ fn typing_over_vesper_input_matches_rust() {
         over_vesper += checked.len();
         let (_, rust_checked, _) = vesper_types(&f.text(&exprs_input(&c.world, &c.module)));
         over_rust += rust_checked.len();
-        if let Some(d) = first_difference(&rust_types(&c.world, &checked), &v) {
+        // The same functions checked over both inputs, then the same types.
+        let difference = if checked != rust_checked {
+            Some(format!(
+                "checked functions: {} over the Vesper input, {} over the Rust input",
+                checked.len(),
+                rust_checked.len()
+            ))
+        } else {
+            first_difference(&rust_types(&c.world, &checked), &v)
+        };
+        if let Some(d) = difference {
             bad += 1;
             if shown < 8 {
                 shown += 1;

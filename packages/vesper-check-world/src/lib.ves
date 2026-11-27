@@ -126,6 +126,7 @@ const T_NAMED: u8 = 1;
 const T_TUPLE: u8 = 2;
 const T_FN: u8 = 3;
 const T_ROW: u8 = 4;
+const T_INFER: u8 = 5;
 
 // @vesper/ast statement kind of a `let`.
 const ST_LET: u8 = 1;
@@ -148,7 +149,35 @@ const MODE_LINEAR: u64 = 2;
 // A field without a modality (`Field.modality`, 3 in @vesper/ast).
 const NO_MODALITY: u8 = 3;
 
+// Operator codes of the stream (`unary_code` and `binary_code` of the
+// harness); 0 is an operator not ported, written as `E_OTHER`.
+const OP_NONE: u64 = 0;
+const OP_NOT: u64 = 1;
+const OP_NEGATE: u64 = 2;
+const OP_COMPLEMENT: u64 = 3;
+const OP_ADD: u64 = 1;
+const OP_SUB: u64 = 2;
+const OP_MUL: u64 = 3;
+const OP_DIV: u64 = 4;
+const OP_REM: u64 = 5;
+const OP_EQ: u64 = 6;
+const OP_NE: u64 = 7;
+const OP_LT: u64 = 8;
+const OP_LE: u64 = 9;
+const OP_GT: u64 = 10;
+const OP_GE: u64 = 11;
+const OP_AND: u64 = 12;
+const OP_OR: u64 = 13;
+const OP_BIT_AND: u64 = 14;
+const OP_BIT_OR: u64 = 15;
+const OP_BIT_XOR: u64 = 16;
+const OP_SHL: u64 = 17;
+const OP_SHR: u64 = 18;
+
 // Bytes of names.
+const OPEN_BRACKET: u8 = 91;
+const CLOSE_BRACKET: u8 = 93;
+const WRITE_PREFIX_LEN: u64 = 2;
 const COLON: u8 = 58;
 const DIGIT_ZERO: u64 = 48;
 const KEY_SEPARATOR: u32 = 44;
@@ -621,7 +650,7 @@ fn param_words(
 ) {
     out.push(widen_u64(p.pass));
     out.push(ast_name(inout e, in a, p.name));
-    let infer = p.ty == none() || type_at(in a, p.ty).kind == 5;
+    let infer = p.ty == none() || type_at(in a, p.ty).kind == T_INFER;
     if self_ty != none() && infer && name_is(in a, p.name, "self") {
         out.push(ty(inout e, in a, self_ty, in nm));
     } else {
@@ -914,56 +943,56 @@ fn pattern(inout e: Enc, in a: Ast, p: u32, shift: u32, inout out: ChunkSeq[u64]
 
 fn unary_code(in a: Ast, op: u32) -> u64 {
     if name_is(in a, op, "!") {
-        1
+        OP_NOT
     } else if name_is(in a, op, "-") {
-        2
+        OP_NEGATE
     } else if name_is(in a, op, "~") {
-        3
+        OP_COMPLEMENT
     } else {
-        0
+        OP_NONE
     }
 }
 
 fn binary_code(in a: Ast, op: u32) -> u64 {
     let t = name_text(in a, op);
     if t == "+" {
-        1
+        OP_ADD
     } else if t == "-" {
-        2
+        OP_SUB
     } else if t == "*" {
-        3
+        OP_MUL
     } else if t == "/" {
-        4
+        OP_DIV
     } else if t == "%" {
-        5
+        OP_REM
     } else if t == "==" {
-        6
+        OP_EQ
     } else if t == "!=" {
-        7
+        OP_NE
     } else if t == "<" {
-        8
+        OP_LT
     } else if t == "<=" {
-        9
+        OP_LE
     } else if t == ">" {
-        10
+        OP_GT
     } else if t == ">=" {
-        11
+        OP_GE
     } else if t == "&&" {
-        12
+        OP_AND
     } else if t == "||" {
-        13
+        OP_OR
     } else if t == "&" {
-        14
+        OP_BIT_AND
     } else if t == "|" {
-        15
+        OP_BIT_OR
     } else if t == "^" {
-        16
+        OP_BIT_XOR
     } else if t == "<<" {
-        17
+        OP_SHL
     } else if t == ">>" {
-        18
+        OP_SHR
     } else {
-        0
+        OP_NONE
     }
 }
 
@@ -979,7 +1008,9 @@ fn special_call(in a: Ast, sym: u32, fip: bool) -> bool {
 // An element write `a[i] = v` the arrays lowering spells `[]=`.
 fn element_write(in a: Ast, op: u32) -> bool {
     let t = name_text(in a, op);
-    t.len() >= 2 && bytes_at(in t, 0) == 91 && bytes_at(in t, 1) == 93
+    t.len() >= WRITE_PREFIX_LEN
+        && bytes_at(in t, 0) == OPEN_BRACKET
+        && bytes_at(in t, 1) == CLOSE_BRACKET
 }
 
 fn head(out: u64, s: u64, t: u64, inout o: ChunkSeq[u64]) {
@@ -1078,11 +1109,11 @@ fn expr(inout e: Enc, in a: Ast, x: u32, shift: u32, fip: bool, inout out: Chunk
         head(E_FIELD, s, t, inout out);
         out.push(ast_name(inout e, in a, n.b));
         expr(inout e, in a, n.a, shift, fip, inout out);
-    } else if n.kind == X_UNARY && unary_code(in a, n.a) != 0 {
+    } else if n.kind == X_UNARY && unary_code(in a, n.a) != OP_NONE {
         head(E_UNARY, s, t, inout out);
         out.push(unary_code(in a, n.a));
         expr(inout e, in a, n.b, shift, fip, inout out);
-    } else if n.kind == X_BINARY && binary_code(in a, n.a) != 0 {
+    } else if n.kind == X_BINARY && binary_code(in a, n.a) != OP_NONE {
         head(E_BINARY, s, t, inout out);
         out.push(binary_code(in a, n.a));
         expr(inout e, in a, n.b, shift, fip, inout out);
