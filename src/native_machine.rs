@@ -708,6 +708,17 @@ impl IntegerBlocks<'_> {
         self.x86_isa.is_some_and(TargetIsa::has_x86_pshufb_lowering)
     }
 
+    fn has_x86_fma(&self) -> bool {
+        const AVX_FLAG: &str = "has_avx";
+        self.x86_isa.is_some_and(|isa| {
+            isa.has_native_fma()
+                && isa
+                    .isa_flags()
+                    .iter()
+                    .any(|flag| flag.name == AVX_FLAG && flag.as_bool() == Some(true))
+        })
+    }
+
     fn bit_operation_mode(&self, opcode: Opcode) -> u64 {
         const POPCNT_FLAG: &str = "has_popcnt";
         if opcode == Opcode::Popcnt
@@ -1830,7 +1841,7 @@ impl IntegerBlocks<'_> {
             InstructionData::Ternary {
                 opcode: Opcode::Fma,
                 args: [left, right, addend],
-            } if self.aarch64
+            } if (self.aarch64 || self.has_x86_fma())
                 && ty(left) == output
                 && ty(right) == output
                 && ty(addend) == output =>

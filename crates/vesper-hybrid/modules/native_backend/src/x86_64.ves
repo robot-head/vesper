@@ -65,6 +65,15 @@ const ALU_CMP_EXTENSION: u8 = 7;
 const TWO_BYTE_OPCODE: u8 = 0x0f;
 const THREE_BYTE_38_MAP: u8 = 0x38;
 const THREE_BYTE_3A_MAP: u8 = 0x3a;
+const THREE_BYTE_VEX: u8 = 0xc4;
+const VEX_R_INVERTED: u8 = 0x80;
+const VEX_X_INVERTED: u8 = 0x40;
+const VEX_B_INVERTED: u8 = 0x20;
+const VEX_0F38_MAP: u8 = 0x02;
+const VEX_W: u8 = 0x80;
+const VEX_SOURCE_SHIFT: u32 = 3;
+const VEX_66_PREFIX: u8 = 0x01;
+const VFMADD213_SCALAR: u8 = 0xa9;
 const UD2_OPCODE: u8 = 0x0b;
 const IMUL_R64_RM64: u8 = 0xaf;
 const IMUL_R64_RM64_IMM8: u8 = 0x6b;
@@ -332,6 +341,7 @@ pub copy enum Instruction {
     FloatConvert(u8, u8, u64),
     FloatMinMax(u8, u8, u8, bool, u64),
     FloatRound(u8, u8, Rounding, u64),
+    FloatFma(u8, u8, u8, u8, u64),
     IntegerToFloat(u8, u8, u64, u64, bool),
     VectorConstant(u8, u64, u64),
     VectorSplat(u8, u8, u64),
@@ -1222,6 +1232,37 @@ fn compare_float_registers(inout out: ChunkSeq[u8], left: u8, right: u8, width: 
     xmm_binary(inout out, UCOMIS, left, right);
 }
 
+fn float_fma(inout out: ChunkSeq[u8], dest: u8, left: u8, right: u8, addend: u8, width: u64) {
+    // Keep the CLIF source order for NaN payload selection.
+    let result = if dest != left && (dest == right || dest == addend) {
+        XMM_LEFT_SCRATCH
+    } else {
+        dest
+    };
+    float_move(inout out, result, left);
+    let reg = xmm_code(result);
+    let source = xmm_code(right);
+    let rm = xmm_code(addend);
+    let r = if reg < HIGH_REGISTER {
+        VEX_R_INVERTED
+    } else {
+        0
+    };
+    let b = if rm < HIGH_REGISTER {
+        VEX_B_INVERTED
+    } else {
+        0
+    };
+    let w = if width == QWORD_BITS { VEX_W } else { 0 };
+    let inverted_source = wrapping_sub(wrapping_u8(REGISTER_CODES - 1), source);
+    out.push(THREE_BYTE_VEX);
+    out.push(r | VEX_X_INVERTED | b | VEX_0F38_MAP);
+    out.push(w | wrapping_shl_u8(inverted_source, VEX_SOURCE_SHIFT) | VEX_66_PREFIX);
+    out.push(VFMADD213_SCALAR);
+    out.push(modrm(reg, rm));
+    float_move(inout out, dest, result);
+}
+
 fn emit_short_branch(inout out: ChunkSeq[u8], opcode: u8) -> u64 {
     out.push(opcode);
     let displacement = out.len();
@@ -1977,6 +2018,14 @@ pub fn emit(inout out: ChunkSeq[u8], in instruction: Instruction) {
             source_width,
             width,
             signed
+        ),
+        Instruction::FloatFma(destination, left, right, addend, width) => float_fma(
+            inout out,
+            destination,
+            left,
+            right,
+            addend,
+            width
         ),
         Instruction::VectorConstant(destination, low, high) => vector_constant(
             inout out,

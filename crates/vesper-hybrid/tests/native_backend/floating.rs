@@ -6,7 +6,8 @@ use cranelift_codegen::{
         condcodes::{FloatCC, IntCC},
         types,
     },
-    settings,
+    isa::CallConv,
+    settings::{self, Configurable},
 };
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift_jit::{JITBuilder, JITModule};
@@ -407,6 +408,136 @@ fn scalar_rounding_declines_x86_targets_without_sse41() {
     b.seal_all_blocks();
     b.finalize();
     assert!(x86_64_block_words(&context.func, isa.as_ref()).is_none());
+}
+
+fn fma_context(width: Type, keep_left: bool, with_spills: bool) -> Context {
+    const LIVE_FP_VALUES: u8 = 16;
+    let mut context = Context::new();
+    context.func.signature.call_conv = CallConv::SystemV;
+    context.func.signature.params = vec![AbiParam::new(types::I64); 3];
+    context.func.signature.returns = vec![AbiParam::new(types::I64)];
+    let mut state = FunctionBuilderContext::new();
+    let mut b = FunctionBuilder::new(&mut context.func, &mut state);
+    let entry = b.create_block();
+    b.append_block_params_for_function_params(entry);
+    b.switch_to_block(entry);
+    let [left, right, addend] = *b.block_params(entry) else {
+        unreachable!()
+    };
+    let live = if with_spills {
+        (1..=LIVE_FP_VALUES)
+            .map(|value| {
+                if width == types::F32 {
+                    b.ins().f32const(f32::from(value))
+                } else {
+                    b.ins().f64const(f64::from(value))
+                }
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let int = width.as_int();
+    let [left, right, addend] = [left, right, addend].map(|value| {
+        let value = if width == types::F32 {
+            b.ins().ireduce(int, value)
+        } else {
+            value
+        };
+        b.ins().bitcast(width, MemFlags::new(), value)
+    });
+    let fused = b.ins().fma(left, right, addend);
+    let result = b.ins().bitcast(int, MemFlags::new(), fused);
+    let mut result = if keep_left {
+        let left = b.ins().bitcast(int, MemFlags::new(), left);
+        b.ins().bxor(result, left)
+    } else {
+        result
+    };
+    for value in live {
+        let bits = b.ins().bitcast(int, MemFlags::new(), value);
+        result = b.ins().bxor(result, bits);
+    }
+    let result = if width == types::F32 {
+        b.ins().uextend(types::I64, result)
+    } else {
+        result
+    };
+    b.ins().return_(&[result]);
+    b.seal_all_blocks();
+    b.finalize();
+    context
+}
+
+#[test]
+fn avx_fma_matches_cranelift_for_fused_rounding_and_nan_payloads() {
+    if !std::is_x86_feature_detected!("avx") || !std::is_x86_feature_detected!("fma") {
+        return;
+    }
+    type Entry = unsafe extern "C" fn(u64, u64, u64) -> u64;
+    let mut module = module();
+    for width in [types::F32, types::F64] {
+        let values = if width == types::F32 {
+            [
+                0,
+                u64::from((-0.0f32).to_bits()),
+                u64::from(1.0f32.next_up().to_bits()),
+                u64::from((1.0 - f32::EPSILON).to_bits()),
+                u64::from((-1.0f32).to_bits()),
+                u64::from(f32::INFINITY.to_bits()),
+                0x7fc0_0003,
+                0xffc0_0005,
+                0x7f80_0007,
+            ]
+        } else {
+            [
+                0,
+                (-0.0f64).to_bits(),
+                1.0f64.next_up().to_bits(),
+                (1.0 - f64::EPSILON).to_bits(),
+                (-1.0f64).to_bits(),
+                f64::INFINITY.to_bits(),
+                0x7ff8_0000_0000_0003,
+                0xfff8_0000_0000_0005,
+                0x7ff0_0000_0000_0007,
+            ]
+        };
+        for (keep_left, with_spills) in [(false, false), (true, false), (false, true)] {
+            let mut context = fma_context(width, keep_left, with_spills);
+            let (baseline, candidate) = compile(&mut module, &mut context);
+            let [reference, candidate] = [baseline, candidate]
+                .map(|ptr| unsafe { std::mem::transmute::<*const u8, Entry>(ptr) });
+            for left in values {
+                for right in values {
+                    for addend in values {
+                        assert_eq!(
+                            unsafe { candidate(left, right, addend) },
+                            unsafe { reference(left, right, addend) },
+                            "{width} keep left={keep_left} spills={with_spills} {left:#x} {right:#x} {addend:#x}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+    unsafe { module.free_memory() };
+}
+
+#[test]
+fn fma_requires_both_avx_and_fma_target_features() {
+    const AVX_FLAG: &str = "has_avx";
+    const FMA_FLAG: &str = "has_fma";
+    for features in [None, Some(AVX_FLAG), Some(FMA_FLAG)] {
+        let mut builder = cranelift_native::builder_with_options(false).unwrap();
+        if let Some(feature) = features {
+            builder.enable(feature).unwrap();
+        }
+        let isa = builder
+            .finish(settings::Flags::new(settings::builder()))
+            .unwrap();
+        let context = fma_context(types::F64, false, false);
+        assert!(x86_64_block_words(&context.func, isa.as_ref()).is_none());
+    }
 }
 
 #[test]

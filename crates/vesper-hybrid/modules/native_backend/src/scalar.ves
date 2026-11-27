@@ -310,7 +310,7 @@ struct FrameLayout {
     fixed: bool,
     floating: bool,
     vectors: bool,
-    vector_aux: bool,
+    xmm_aux: bool,
     temporary_registers: u32,
     indirect_calls: bool,
     home_slot: u64,
@@ -548,7 +548,7 @@ fn frame_layout(in words: Slice[u64], count: u64) -> Option[FrameLayout] {
         fixed: false,
         floating: false,
         vectors: false,
-        vector_aux: false,
+        xmm_aux: false,
         temporary_registers: 0,
         indirect_calls: false,
         home_slot: NO_VALUE,
@@ -930,6 +930,14 @@ pub fn is_float_fma(op: u64) -> bool {
     op == FLOAT_FMA32 || op == FLOAT_FMA64
 }
 
+fn reads_third(op: u64) -> bool {
+    op == SELECT
+        || op == FLOAT_SELECT
+        || is_float_fma(op)
+        || consumes_carry(op)
+        || is_atomic_cas(op)
+}
+
 pub fn is_float_compare(op: u64) -> bool {
     op == FLOAT_COMPARE32 || op == FLOAT_COMPARE64
 }
@@ -1069,7 +1077,8 @@ fn valid_vector_operands(in words: Slice[u64], arguments: u64, count: u64, paire
             || (reads_right(in record, paired)
                 && vector_value(in words, arguments, record.right)
                     != (vector_binary || record.op == VECTOR_STORE))
-            || (record.op == FLOAT_SELECT && vector_value(in words, arguments, record.extra))
+            || ((record.op == FLOAT_SELECT || is_float_fma(record.op))
+                && vector_value(in words, arguments, record.extra))
         {
             return false;
         }
@@ -1260,7 +1269,7 @@ fn find_last_reads(
             && !is_float_to_integer(record.op)
             && !is_conditional_trap(record.op)
             && !is_float_conversion(record.op)
-            && !(record.op >= FLOAT_CEIL && record.op <= FLOAT_MAX)
+            && !(record.op >= FLOAT_CEIL && record.op <= FLOAT_FMA64)
             && !tail_call
             && !bit_operation
             && !bit_mix
@@ -1359,7 +1368,7 @@ fn find_last_reads(
             }
             frame.floating = true;
             frame.vectors = true;
-            frame.vector_aux = frame.vector_aux
+            frame.xmm_aux = frame.xmm_aux
                 || record.op == VECTOR_INTEGER_COMPARE
                 || (record.op == VECTOR_PAIRWISE_ADD && record.extra == BYTE_BITS)
                 || (record.op == VECTOR_SWIZZLE && record.extra == 0);
@@ -1406,6 +1415,10 @@ fn find_last_reads(
                 return Option::None;
             }
             frame.floating = true;
+        }
+        if is_float_fma(record.op) {
+            frame.floating = true;
+            frame.xmm_aux = true;
         }
         let atomic = is_atomic_update(record.op);
         if cas || atomic_retry {
@@ -1627,7 +1640,7 @@ fn find_last_reads(
         }
         let has_left = reads_left(in record);
         let has_right = reads_right(in record, paired);
-        let has_third = record.op == SELECT || record.op == FLOAT_SELECT || carry || cas;
+        let has_third = reads_third(record.op);
         if (has_left && record.left >= value)
             || (has_right && record.right >= value)
             || (has_third && record.extra >= value)
@@ -1774,7 +1787,7 @@ fn allocate(
     } else {
         gp_reserved | frame.temporary_registers
     };
-    if frame.vector_aux {
+    if frame.xmm_aux {
         reserved = reserved | register_bit(XMM_AUX_SCRATCH);
     }
     let mut callee_save_mask: u32 = 0;
@@ -1863,11 +1876,7 @@ fn allocate(
         } else {
             UNASSIGNED
         };
-        let third = if record.op == SELECT
-            || record.op == FLOAT_SELECT
-            || consumes_carry(record.op)
-            || is_atomic_cas(record.op)
-        {
+        let third = if reads_third(record.op) {
             dying_register(in reads, in locations, record.extra, value)
         } else {
             UNASSIGNED
@@ -1919,6 +1928,8 @@ fn allocate(
             && right != UNASSIGNED
         {
             right
+        } else if is_float_fma(record.op) && left != UNASSIGNED {
+            left
         } else if third != UNASSIGNED {
             third
         } else if left != UNASSIGNED {
@@ -2766,7 +2777,7 @@ fn is_scalar_fp_instruction(op: u64) -> bool {
         || op == FLOAT_TO_INTEGER_TRUNC
         || is_float_to_integer(op)
         || is_float_conversion(op)
-        || (op >= FLOAT_CEIL && op <= FLOAT_MAX)
+        || (op >= FLOAT_CEIL && op <= FLOAT_FMA64)
 }
 
 fn emit_scalar_fp(
@@ -2774,7 +2785,8 @@ fn emit_scalar_fp(
     in record: Record,
     destination: u8,
     left: u8,
-    right: u8
+    right: u8,
+    third: u8
 ) {
     let width = record.extra;
     let instruction = match record.op {
@@ -2811,6 +2823,18 @@ fn emit_scalar_fp(
                 right,
                 record.op == FLOAT_MIN,
                 width
+            ),
+        FLOAT_FMA32
+            | FLOAT_FMA64 => Instruction::FloatFma(
+                destination,
+                left,
+                right,
+                third,
+                if record.op == FLOAT_FMA64 {
+                    QWORD_BITS
+                } else {
+                    DWORD_BITS
+                }
             ),
         FLOAT_CEIL | FLOAT_FLOOR | FLOAT_TRUNC | FLOAT_NEAREST => {
             let mode = match record.op {
@@ -3345,12 +3369,15 @@ fn encode_block_pass(
             UNASSIGNED
         };
         let conditional = record.op == SELECT || record.op == FLOAT_SELECT;
-        let third = if conditional {
+        let fma = is_float_fma(record.op);
+        let third = if conditional || fma {
             let location = assigned(in allocation.locations, record.extra);
             materialize(
                 inout output,
                 in location,
-                if record.op == FLOAT_SELECT {
+                if fma {
+                    XMM_AUX_SCRATCH
+                } else if record.op == FLOAT_SELECT {
                     XMM_RIGHT_SCRATCH
                 } else {
                     THIRD_SCRATCH
@@ -3376,7 +3403,7 @@ fn encode_block_pass(
         if record.op == CONSTANT {
             emit(inout output, in Instruction::Immediate(destination, record.left));
         } else if is_scalar_fp_instruction(record.op) {
-            emit_scalar_fp(inout output, in record, destination, left, right);
+            emit_scalar_fp(inout output, in record, destination, left, right, third);
         } else if is_vector_operation(record.op) {
             emit_vector_instruction(inout output, in record, destination, left, right);
         } else if is_scalar_bit_operation(record.op) {
