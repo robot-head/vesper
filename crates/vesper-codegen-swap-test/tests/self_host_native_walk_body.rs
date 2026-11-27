@@ -512,3 +512,74 @@ fn vesper_scalar_bodies_part_6c() {
         assert!(total.is_clean(), "{}", total.summary());
     });
 }
+
+/// Part 6d: erased capability-only effect rows (`ConstTime`, `Realtime`,
+/// `DetFloat`) and 128-bit integer (`i128` / `u128`) scalar bodies.
+const SCALARS_6D: &str = "
+fn ct_mix(a: u64, b: u64) -> u64 eff [ConstTime] {
+    (a ^ b) | (a & 255)
+}
+fn rt_step(x: i64) -> i64 eff [Realtime] {
+    wrapping_add(x, 7)
+}
+fn df_add(a: f64, b: f64) -> f64 eff [DetFloat] {
+    a + b
+}
+fn wide_arith(a: i128, b: i128) -> i128 {
+    let mut s: i128 = wrapping_add(a, b);
+    s = wrapping_sub(s, wrapping_mul(a, 3));
+    let n: i128 = ~s;
+    let m: i128 = wrapping_neg_i128(n);
+    let sh: i128 = wrapping_shr_i128(m, 2);
+    if sh < a || sh >= b {
+        sh ^ a
+    } else {
+        sh | b
+    }
+}
+fn wide_bits_and_match(x: u128, y: u128) -> u64 {
+    let z: u128 = wrapping_shl_u128(x & y, 5) ^ wrapping_shr_u128(x | y, 3);
+    let c: u32 = leading_zeros_u128(z) ^ trailing_zeros_u128(z) ^ count_ones_u128(z);
+    let tag: u64 = match z {
+        0 => 11,
+        1 => 22,
+        _ => 33,
+    };
+    wrapping_u64(z) ^ widen_u64(c) ^ tag
+}
+fn main() -> i64 {
+    let a: i128 = widen_i128(rt_step(19));
+    let b: i128 = widen_i128(wrapping_i64(ct_mix(13, 29)));
+    let w: i128 = wide_arith(a, b);
+    let u: u64 = wide_bits_and_match(widen_u128(100), widen_u128(200));
+    let f: i64 = saturating_i64(df_add(1.5, 2.5));
+    wrapping_i64(w) ^ wrapping_i64(u) ^ f
+}
+";
+
+#[test]
+fn vesper_scalar_bodies_part_6d() {
+    big_stack(|| {
+        let parsed = vesper::parser::parse(SCALARS_6D);
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        let checked = vesper::check::check(&parsed.module);
+        assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
+        if let Err(e) = build(&checked.world, "main", true) {
+            panic!("the part 6d scalar program does not build: {e}");
+        }
+        let before = EMITTED.load(Ordering::Relaxed);
+        let total = both("scalars_6d", &checked.world, true);
+        let emitted = EMITTED.load(Ordering::Relaxed) - before;
+        eprintln!(
+            "scalars_6d: {}; {emitted} functions emitted from Vesper",
+            total.summary()
+        );
+        let ran = if cross() { 0 } else { 2 };
+        assert_eq!((total.worlds, total.ran), (2, ran), "{}", total.summary());
+        assert!(
+            emitted >= 10,
+            "all 5 non-DetFloat part 6d functions x 2 builds should come from Vesper, got {emitted}"
+        );
+        assert!(total.is_clean(), "{}", total.summary());
+    });
+}
