@@ -1426,12 +1426,18 @@ impl Gen {
 
 // The planner over the input's program and world.
 fn read_gen(in bytes: Slice[u8]) -> Gen {
+    read_gen_with(in bytes, true)
+}
+
+// `read_gen`, reading what follows the program as `scalar_enums` facts
+// only when `facts` is set (a calls input has its calls section there).
+fn read_gen_with(in bytes: Slice[u8], facts: bool) -> Gen {
     let mut reader = Reader { pos: 0 };
     let mut ctx = read_ctx(inout reader, in bytes);
     let mut program = read_program(inout reader, in bytes, in ctx);
     // `scalar_enums` facts after the program (the optimize path's body
     // plans): the graphs as the walk lowers them, small enums as words.
-    let enums = if reader.pos < bytes.len() {
+    let enums = if facts && reader.pos < bytes.len() {
         scalar_enum_words(inout ctx, inout program, inout reader, in bytes)
     } else {
         enum_words_none()
@@ -1495,7 +1501,18 @@ pub fn codegen_scalar_plan_bytes(in bytes: Slice[u8]) -> ChunkSeq[u64] {
 // @vesper/codegen-scalar-emit's `body_hook` emits whole, over the same
 // input as `codegen_scalar_plan`.
 pub fn codegen_scalar_body_plan_bytes(in bytes: Slice[u8]) -> ChunkSeq[u64] {
-    let mut codegen = read_gen(in bytes);
+    body_plans(read_gen(in bytes))
+}
+
+// `codegen_scalar_body_plan_bytes` of the context and program at the
+// start of `bytes`, whatever follows them (@vesper/native-lib's calls
+// input, bootstrap switch slice 3a of #2349).
+pub fn codegen_scalar_body_plan_prefix(in bytes: Slice[u8]) -> ChunkSeq[u64] {
+    body_plans(read_gen_with(in bytes, false))
+}
+
+fn body_plans(sink codegen: Gen) -> ChunkSeq[u64] {
+    let mut codegen = codegen;
     let mut out: ChunkSeq[u64] = ChunkSeq::new[u64]();
     for func_index in 0..codegen.program.fn_count() {
         let from = codegen.plan.len();
