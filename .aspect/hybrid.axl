@@ -11,8 +11,13 @@ def _cli_suites(ctx: TaskContext) -> int:
             suites.append(name)
     if not suites:
         ctx.std.process.exit(2, "No CLI test suites selected")
-    for package in [["-p", "vesper", "--bin", "vesper"], ["-p", "vesper-tools"], ["-p", "vesper-hybrid"]]:
+    for package in [["-p", "vesper", "--bin", "vesper"], ["-p", "vesper-tools"]]:
         check(ctx, "cargo", ["build", "--locked"] + package, root)
+    # The hybrid through its test build (#2395): `cargo build` resolves its
+    # features without the dev-dependencies, so it reran the build script
+    # that compiles every Vesper module (57 minutes on Windows) after the
+    # crate's tests had built the same binary.
+    check(ctx, "cargo", ["test", "--locked", "--no-run", "-p", "vesper-hybrid"], root)
     filters = []
     for name in sorted(suites):
         filters.extend(["--test", name])
