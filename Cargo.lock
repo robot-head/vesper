@@ -6547,6 +6547,8 @@ dependencies = [
  "quote",
  "syn 2.0.119",
  "vesper-ffi",
+ "vesper-port-abi",
+ "vesper-port-harness",
 ]
 
 [[package]]
