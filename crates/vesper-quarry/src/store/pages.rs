@@ -739,18 +739,25 @@ pub(crate) fn leaf_slot(b: &[u8], lay: &LeafLayout, pos: usize) -> usize {
 pub(crate) fn leaf_key(b: &[u8], lay: &LeafLayout, pos: usize) -> Key {
     Key::read(b, lay.keys + 16 * leaf_slot(b, lay, pos))
 }
+const LEAF_SEARCH_FOUND_BIT: u64 = 1;
+const LEAF_MAX_VAR_COLS: usize = 128;
+const LEAF_VAR_COL_PAIR: usize = 2;
+
 /// Binary search over the key-ordered directory.
 pub(crate) fn leaf_search(b: &[u8], lay: &LeafLayout, key: Key) -> Result<usize, usize> {
-    let (mut lo, mut hi) = (0, count(b));
-    while lo < hi {
-        let mid = (lo + hi) / 2;
-        match leaf_key(b, lay, mid).cmp(&key) {
-            std::cmp::Ordering::Less => lo = mid + 1,
-            std::cmp::Ordering::Greater => hi = mid,
-            std::cmp::Ordering::Equal => return Ok(mid),
-        }
+    let encoded = crate::port::binding::leaf_search(
+        b,
+        lay.dir as u64,
+        lay.keys as u64,
+        key.rowid,
+        key.inv_ts,
+    );
+    let idx = (encoded >> 1) as usize;
+    if (encoded & LEAF_SEARCH_FOUND_BIT) != 0 {
+        Ok(idx)
+    } else {
+        Err(idx)
     }
-    Err(lo)
 }
 fn read_value(b: &[u8], lay: &LeafLayout, col: usize, slot: usize) -> StoreResult<Value> {
     let (nulls, data, s) = lay.cols[col];
@@ -868,45 +875,39 @@ fn slot_is_zero(b: &[u8], lay: &LeafLayout, s: usize) -> bool {
             !bit(b, nulls, s) && b[data + w * s..data + w * (s + 1)].iter().all(|&x| x == 0)
         })
 }
-/// Live variable-width bytes in the heap.
-fn heap_live(b: &[u8], lay: &LeafLayout) -> usize {
-    let mut live = 0;
-    for pos in 0..count(b) {
-        let s = leaf_slot(b, lay, pos);
-        for &(nulls, data, st) in &lay.cols {
-            if st == Store::Var && !bit(b, nulls, s) {
-                live += rd16(b, data + 4 * s + 2) as usize;
-            }
+fn pack_var_cols(
+    lay: &LeafLayout,
+    buf: &mut [u64; LEAF_MAX_VAR_COLS * LEAF_VAR_COL_PAIR],
+) -> usize {
+    let mut n = 0;
+    for &(nulls, data, st) in &lay.cols {
+        if st == Store::Var {
+            buf[n] = nulls as u64;
+            buf[n + 1] = data as u64;
+            n += LEAF_VAR_COL_PAIR;
         }
     }
-    live
+    n
 }
+
 /// Rewrites the heap without holes left by removed versions.
 pub(crate) fn leaf_compact(b: &mut [u8], lay: &LeafLayout) {
-    let mut values: Vec<(usize, usize, Vec<u8>)> = Vec::new(); // (slot, col data base, bytes)
-    for pos in 0..count(b) {
-        let s = leaf_slot(b, lay, pos);
-        for &(nulls, data, st) in &lay.cols {
-            if st == Store::Var && !bit(b, nulls, s) {
-                let off = rd16(b, data + 4 * s) as usize;
-                let len = rd16(b, data + 4 * s + 2) as usize;
-                values.push((s, data, b[off..off + len].to_vec()));
-            }
-        }
-    }
-    b[lay.end..].fill(0);
-    let mut top = PAGE_SIZE;
-    for (s, data, bytes) in values {
-        top -= bytes.len();
-        b[top..top + bytes.len()].copy_from_slice(&bytes);
-        let off = if bytes.is_empty() { 0 } else { top as u16 };
-        wr16(b, data + 4 * s, off);
-    }
-    set_free_offset(b, top);
+    let mut var_cols = [0u64; LEAF_MAX_VAR_COLS * LEAF_VAR_COL_PAIR];
+    let nvar = pack_var_cols(lay, &mut var_cols);
+    let mut scratch = [0u8; PAGE_SIZE];
+    crate::port::binding::leaf_compact(
+        b,
+        lay.dir as u64,
+        lay.end as u64,
+        &var_cols[..nvar],
+        &mut scratch,
+    );
 }
 /// Heap bytes held by removed versions (reclaimed by [`leaf_compact`]).
 pub(crate) fn leaf_garbage(b: &[u8], lay: &LeafLayout) -> usize {
-    PAGE_SIZE - heap_start(b) - heap_live(b, lay)
+    let mut var_cols = [0u64; LEAF_MAX_VAR_COLS * LEAF_VAR_COL_PAIR];
+    let nvar = pack_var_cols(lay, &mut var_cols);
+    crate::port::binding::leaf_garbage(b, lay.dir as u64, &var_cols[..nvar]) as usize
 }
 fn write_entry(b: &mut [u8], lay: &LeafLayout, slot: usize, e: &Entry, top: &mut usize) {
     e.key.write(b, lay.keys + 16 * slot);
@@ -1581,6 +1582,231 @@ mod leaf_differential {
         let (ci_lo, ci_hi) = (ratios[i], ratios[ratios.len() - 1 - i]);
         println!(
             "ABBA meta_decode: median {:.3}x [{ci_lo:.3}x, {ci_hi:.3}x]",
+            ratios[mid]
+        );
+        assert!(
+            ci_hi <= FLIP_LIMIT,
+            "ABBA 95% upper bound {ci_hi:.3}x exceeds {FLIP_LIMIT:.2}x"
+        );
+    }
+
+    fn leaf_search_reference(b: &[u8], lay: &LeafLayout, key: Key) -> Result<usize, usize> {
+        let (mut lo, mut hi) = (0, count(b));
+        while lo < hi {
+            let mid = (lo + hi) / 2;
+            match leaf_key(b, lay, mid).cmp(&key) {
+                std::cmp::Ordering::Less => lo = mid + 1,
+                std::cmp::Ordering::Greater => hi = mid,
+                std::cmp::Ordering::Equal => return Ok(mid),
+            }
+        }
+        Err(lo)
+    }
+
+    fn leaf_garbage_reference(b: &[u8], lay: &LeafLayout) -> usize {
+        let mut live = 0;
+        for pos in 0..count(b) {
+            let s = leaf_slot(b, lay, pos);
+            for &(nulls, data, st) in &lay.cols {
+                if st == Store::Var && !bit(b, nulls, s) {
+                    live += rd16(b, data + 4 * s + 2) as usize;
+                }
+            }
+        }
+        PAGE_SIZE - heap_start(b) - live
+    }
+
+    fn leaf_compact_reference(b: &mut [u8], lay: &LeafLayout) {
+        let mut values: Vec<(usize, usize, Vec<u8>)> = Vec::new();
+        for pos in 0..count(b) {
+            let s = leaf_slot(b, lay, pos);
+            for &(nulls, data, st) in &lay.cols {
+                if st == Store::Var && !bit(b, nulls, s) {
+                    let off = rd16(b, data + 4 * s) as usize;
+                    let len = rd16(b, data + 4 * s + 2) as usize;
+                    values.push((s, data, b[off..off + len].to_vec()));
+                }
+            }
+        }
+        b[lay.end..].fill(0);
+        let mut top = PAGE_SIZE;
+        for (s, data, bytes) in values {
+            top -= bytes.len();
+            b[top..top + bytes.len()].copy_from_slice(&bytes);
+            let off = if bytes.is_empty() { 0 } else { top as u16 };
+            wr16(b, data + 4 * s, off);
+        }
+        set_free_offset(b, top);
+    }
+
+    fn sample_fragmented_leaf(seed: u64) -> (Box<Page>, LeafLayout, Vec<Key>) {
+        let mut state = seed;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1);
+            state >> 32
+        };
+        let types = [
+            ScalarType::U64,
+            ScalarType::Text,
+            ScalarType::Bytes,
+            ScalarType::Bool,
+        ];
+        let mut entries = Vec::new();
+        let n = 16 + (next() % 24) as usize;
+        for i in 0..n {
+            let key = Key::version((i as u64) * 2 + 1, 10 + (next() % 5));
+            let tomb = next() % 7 == 0;
+            let values = if tomb {
+                Vec::new()
+            } else {
+                let text = if next() % 5 == 0 {
+                    Value::Null
+                } else {
+                    let len = (next() % 48) as usize;
+                    Value::Text("a".repeat(len))
+                };
+                let bytes = if next() % 4 == 0 {
+                    Value::Null
+                } else {
+                    let len = (next() % 32) as usize;
+                    Value::Bytes(vec![(i as u8).wrapping_add(1); len])
+                };
+                vec![
+                    Value::U64(i as u64),
+                    text,
+                    bytes,
+                    Value::Bool(next() % 2 == 0),
+                ]
+            };
+            entries.push(Entry { key, tomb, values });
+        }
+        let mut b = new_page();
+        assert!(leaf_build(&mut b[..], 7, &types, &entries, 4096));
+        let lay = layout_of(&b[..]).unwrap();
+        // Remove every 3rd entry to create heap fragmentation.
+        let mut kept_keys = Vec::new();
+        for (idx, e) in entries.iter().enumerate() {
+            if idx % 3 == 0 {
+                let pos = leaf_search(&b[..], &lay, e.key).unwrap();
+                leaf_remove(&mut b[..], &lay, pos);
+            } else {
+                kept_keys.push(e.key);
+            }
+        }
+        (b, lay, kept_keys)
+    }
+
+    #[test]
+    fn leaf_ops_match_reference() {
+        const LEAF_DIFF_CASES: u64 = 128;
+        for case in 0..LEAF_DIFF_CASES {
+            let (b0, lay, keys) = sample_fragmented_leaf(0x6c65_6166_0000 + case);
+            // Check leaf_search on both present and absent keys.
+            for &k in &keys {
+                assert_eq!(
+                    leaf_search(&b0[..], &lay, k),
+                    leaf_search_reference(&b0[..], &lay, k),
+                    "case {case} present"
+                );
+                let miss = Key {
+                    rowid: k.rowid + 1,
+                    inv_ts: k.inv_ts,
+                };
+                assert_eq!(
+                    leaf_search(&b0[..], &lay, miss),
+                    leaf_search_reference(&b0[..], &lay, miss),
+                    "case {case} miss"
+                );
+            }
+            // Check leaf_garbage.
+            assert_eq!(
+                leaf_garbage(&b0[..], &lay),
+                leaf_garbage_reference(&b0[..], &lay),
+                "case {case} garbage"
+            );
+            // Check leaf_compact byte-for-byte.
+            let mut bp = b0.clone();
+            let mut br = b0;
+            leaf_compact(&mut bp[..], &lay);
+            leaf_compact_reference(&mut br[..], &lay);
+            assert_eq!(&bp[..], &br[..], "case {case} compact");
+            assert_eq!(leaf_garbage(&bp[..], &lay), 0, "case {case} post-compact");
+        }
+    }
+
+    #[test]
+    #[ignore = "ABBA benchmark; run in release with --ignored --nocapture"]
+    fn abba_leaf_compact() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        const ABBA_EPOCHS: usize = 30;
+        const ABBA_WARMUP: usize = 2;
+        const ABBA_ITERS: usize = 100;
+        const SIGN_ALPHA_HALF: f64 = 0.025;
+        const FLIP_LIMIT: f64 = 1.50;
+
+        let (b0, lay, _) = sample_fragmented_leaf(0x6c65_6166_abba);
+        let mut bp = b0.clone();
+        let mut br = b0.clone();
+
+        let mut ratios = Vec::with_capacity(ABBA_EPOCHS);
+        for epoch in 0..(ABBA_WARMUP + ABBA_EPOCHS) {
+            let t0 = Instant::now();
+            for _ in 0..ABBA_ITERS {
+                br.copy_from_slice(&b0[..]);
+                leaf_compact_reference(black_box(&mut br[..]), &lay);
+                black_box(br[22]);
+            }
+            let r1 = t0.elapsed().as_nanos();
+
+            let t1 = Instant::now();
+            for _ in 0..ABBA_ITERS {
+                bp.copy_from_slice(&b0[..]);
+                leaf_compact(black_box(&mut bp[..]), &lay);
+                black_box(bp[22]);
+            }
+            let p1 = t1.elapsed().as_nanos();
+
+            let t2 = Instant::now();
+            for _ in 0..ABBA_ITERS {
+                bp.copy_from_slice(&b0[..]);
+                leaf_compact(black_box(&mut bp[..]), &lay);
+                black_box(bp[22]);
+            }
+            let p2 = t2.elapsed().as_nanos();
+
+            let t3 = Instant::now();
+            for _ in 0..ABBA_ITERS {
+                br.copy_from_slice(&b0[..]);
+                leaf_compact_reference(black_box(&mut br[..]), &lay);
+                black_box(br[22]);
+            }
+            let r2 = t3.elapsed().as_nanos();
+
+            if epoch >= ABBA_WARMUP {
+                ratios.push((p1 + p2) as f64 / (r1 + r2) as f64);
+            }
+        }
+        ratios.sort_by(f64::total_cmp);
+        let mid = ratios.len() / 2;
+        let mut cdf = 0.0;
+        let mut choose = 1.0;
+        let mut k = 0usize;
+        for j in 0..ratios.len() {
+            cdf += choose * 0.5f64.powi(ratios.len() as i32);
+            if cdf > SIGN_ALPHA_HALF {
+                break;
+            }
+            k = j + 1;
+            choose = choose * (ratios.len() - j) as f64 / (j + 1) as f64;
+        }
+        let i = k.saturating_sub(1).min(mid);
+        let (ci_lo, ci_hi) = (ratios[i], ratios[ratios.len() - 1 - i]);
+        println!(
+            "ABBA leaf_compact: median {:.3}x [{ci_lo:.3}x, {ci_hi:.3}x]",
             ratios[mid]
         );
         assert!(
