@@ -946,10 +946,13 @@ fn vesper_struct_results_match() {
         );
         let ran = if cross() { 0 } else { 2 };
         assert_eq!((total.worlds, total.ran), (2, ran), "{}", total.summary());
-        // 4 functions, each with both optimizer settings.
+        // 4 functions, each with both optimizer settings. A cross target's
+        // calling convention returns some of them differently (on Windows
+        // x64 only 5 bodies take a result pointer).
+        let min_sret = if cross() { 4 } else { 8 };
         assert!(
-            sret >= 8,
-            "only {sret} of the struct results came from Vesper"
+            sret >= min_sret,
+            "only {sret} of the struct results came from Vesper (expected >= {min_sret})"
         );
         assert!(total.is_clean(), "{}", total.summary());
     });
