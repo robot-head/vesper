@@ -2,6 +2,13 @@
 // the package graph into the word stream expected by
 // `@vesper/check-names-packages::assembly_begin`.
 
+use @vesper/check-names-packages::{resolve_sugar_imports_bytes};
+use @vesper/sugar::driver::{
+    PackageSugarBinding, PackageSugarDefinition, expand_bootstrap_module, inspect_module_sugars,
+    plan_bootstrap_sugars
+};
+
+use @vesper/check-data::util::{stage2_heap_mark, stage2_heap_reset, stage2_heap_swap};
 use @vesper-std/fs::{IoError, kind_dir, kind_file, kind_symlink, read_path};
 use @vesper-std/fs::walk::{Entries, entry_count, entry_join, entry_kind, entry_path, list_dir_path};
 
@@ -55,6 +62,23 @@ fn eq_bytes(in a: Slice[u8], in b: Slice[u8]) -> bool {
         }
     }
     true
+}
+
+fn contains_word(in source: Slice[u8], in word: Str) -> bool {
+    let bytes = word.as_bytes();
+    for start in 0..source.len() {
+        let end = wrapping_add(start, bytes.len());
+        if end > source.len() {
+            break;
+        }
+        if (start == 0 || !is_ident_byte(byte_at(in source, wrapping_sub(start, 1))))
+            && (end == source.len() || !is_ident_byte(byte_at(in source, end)))
+            && eq_bytes(in source[start..end], in bytes)
+        {
+            return true;
+        }
+    }
+    false
 }
 
 fn try_read_file(in path: Slice[u8]) -> Option[ChunkSeq[u8]] eff [Ffi[StdFs]] {
@@ -2137,6 +2161,348 @@ pub fn load_package_graph_bytes(in root_dir: Slice[u8]) -> Option[ChunkSeq[u8]] 
         inout files,
         inout mods
     );
+    prepare_sugar_graph(in pkgs, inout files, inout mods)
+}
+
+copy struct BootstrapDeclarationRange {
+    module_index: u64,
+    start: u64,
+    end: u64,
+}
+
+const BOOTSTRAP_SOURCE_MAP_WORDS: u64 = 5;
+
+copy struct BootstrapSourceSegment {
+    file: u64,
+    generated_start: u64,
+    generated_end: u64,
+    source_start: u64,
+    source_end: u64,
+    copied: u64,
+}
+
+fn copy_bootstrap_mappings(
+    file: u64,
+    in mappings: ChunkSeq[u64],
+    inout output: ChunkSeq[BootstrapSourceSegment]
+) {
+    for segment in 0..(mappings.len() / BOOTSTRAP_SOURCE_MAP_WORDS) {
+        let row = wrapping_mul(segment, BOOTSTRAP_SOURCE_MAP_WORDS);
+        output.push(BootstrapSourceSegment {
+            file: file,
+            generated_start: mappings.try_get(row).unwrap_or(0),
+            generated_end: mappings.try_get(wrapping_add(row, 1)).unwrap_or(0),
+            source_start: mappings.try_get(wrapping_add(row, 2)).unwrap_or(0),
+            source_end: mappings.try_get(wrapping_add(row, 3)).unwrap_or(0),
+            copied: mappings.try_get(wrapping_add(row, 4)).unwrap_or(0)
+        });
+    }
+}
+
+// Head room for the expanded graph's envelope (package names, paths,
+// file and segment rows) on top of twice the module text.
+const SUGAR_GRAPH_RESERVE_SLACK_BYTES: u64 = 16777216;
+
+// Plain package graphs take their existing path. The byte prefilter
+// cannot recognize a declaration; only the surface CST does that.
+fn graph_mentions_sugar(in mods: ChunkSeq[ModEntry]) -> bool {
+    for module in 0..mods.len() {
+        match mods.try_get(module) {
+            Option::Some(source) => {
+                if contains_word(in source.text.as_slice(), in "sugar") {
+                    return true;
+                }
+            },
+            Option::None => {},
+        }
+    }
+    false
+}
+
+// Stage 2's heap is a bump region: the surface CSTs, the import resolver
+// and the expansions of a sugar pass would stay live under every later
+// stage. Run the pass above a block reserved for its one result, the
+// encoded graph, then copy the result into the block and drop the rest.
+fn prepare_sugar_graph(
+    in pkgs: ChunkSeq[PkgNode],
+    inout files: ChunkSeq[FileEntry],
+    inout mods: ChunkSeq[ModEntry]
+) -> Option[ChunkSeq[u8]] {
+    let has_heap = stage2_heap_mark() != 0;
+    if !has_heap || !graph_mentions_sugar(in mods) {
+        return prepare_sugar_graph_in_scratch(in pkgs, inout files, inout mods);
+    }
+    let mut source_bytes: u64 = 0;
+    for module in 0..mods.len() {
+        match mods.try_get(module) {
+            Option::Some(source) => source_bytes = wrapping_add(source_bytes, source.text.len()),
+            Option::None => {},
+        }
+    }
+    let reserve = wrapping_add(wrapping_mul(source_bytes, 2), SUGAR_GRAPH_RESERVE_SLACK_BYTES);
+    let mut kept_buf = ChunkSeq::new[u8]();
+    kept_buf.reserve(reserve);
+    let kept_end = stage2_heap_mark();
+    let encoded = match prepare_sugar_graph_in_scratch(in pkgs, inout files, inout mods) {
+        Option::Some(encoded) => encoded,
+        Option::None => {
+            stage2_heap_reset(kept_end);
+            return Option::None;
+        },
+    };
+    // The copy must fit in the block: past its end lies the scratch it
+    // reads from. A graph that outgrew the block keeps its scratch.
+    if wrapping_add(encoded.len(), SUGAR_GRAPH_RESERVE_SLACK_BYTES) > reserve {
+        return Option::Some(encoded);
+    }
+    let scratch_top = stage2_heap_swap(wrapping_sub(kept_end, reserve));
+    let mut kept = ChunkSeq::new[u8]();
+    kept.reserve(encoded.len());
+    kept.extend(in encoded.as_slice());
+    let _ = stage2_heap_swap(scratch_top);
+    // `files` and `mods` may now hold expanded texts in the dropped
+    // scratch; the caller only returns the encoded graph.
+    stage2_heap_reset(kept_end);
+    Option::Some(kept)
+}
+
+fn prepare_sugar_graph_in_scratch(
+    in pkgs: ChunkSeq[PkgNode],
+    inout files: ChunkSeq[FileEntry],
+    inout mods: ChunkSeq[ModEntry]
+) -> Option[ChunkSeq[u8]] {
+    let mut catalogue = ChunkSeq::new[PackageSugarDefinition]();
+    let mut public = ChunkSeq::new[bool]();
+    let mut imports = ChunkSeq::new[ChunkSeq[u8]]();
+    let mut surface_modules = ChunkSeq::new[bool]();
+    let mut shadowed_modules = ChunkSeq::new[bool]();
+    let mut declaration_spans = ChunkSeq::new[BootstrapDeclarationRange]();
+    let mut source_segments = ChunkSeq::new[BootstrapSourceSegment]();
+    if graph_mentions_sugar(in mods) {
+        for module in 0..mods.len() {
+            let mut import_text = ChunkSeq::new[u8]();
+            let mut has_surface_sugar = false;
+            let mut shadows_prelude = false;
+            match mods.try_get(module) {
+                Option::Some(source) => {
+                    if contains_word(in source.text.as_slice(), in "sugar")
+                        || contains_word(in source.text.as_slice(), in "use")
+                        || contains_word(in source.text.as_slice(), in "Option")
+                    {
+                        match inspect_module_sugars(in source.text, false) {
+                            Option::Some(surface) => {
+                                has_surface_sugar = surface.has_sugar;
+                                shadows_prelude = surface.shadows_bootstrap_prelude;
+                                for i in 0..surface.declarations.len() {
+                                    match surface.declarations.try_get(i) {
+                                        Option::Some(row) => {
+                                            let mut name = ChunkSeq::new[u8]();
+                                            name.extend(
+                                                in source.text[row.name_start..row.name_end]
+                                            );
+                                            let mut declaration = ChunkSeq::new[u8]();
+                                            declaration.extend(
+                                                in source
+                                                    .text[
+                                                        row.declaration_start..row.declaration_end
+                                                    ]
+                                            );
+                                            public.push(row.public);
+                                            declaration_spans.push(BootstrapDeclarationRange {
+                                                module_index: module,
+                                                start: row.declaration_start,
+                                                end: row.declaration_end
+                                            });
+                                            catalogue.push(
+                                                sink PackageSugarDefinition {
+                                                    module_index: module,
+                                                    name: name,
+                                                    declaration: declaration
+                                                }
+                                            );
+                                        },
+                                        Option::None => {},
+                                    }
+                                }
+                                for i in 0..surface.imports.len() {
+                                    match surface.imports.try_get(i) {
+                                        Option::Some(row) => {
+                                            import_text.extend(in source.text[row.start..row.end]);
+                                            import_text.push(10);
+                                        },
+                                        Option::None => {},
+                                    }
+                                }
+                            },
+                            Option::None => {},
+                        }
+                    }
+                },
+                Option::None => {},
+            }
+            imports.push(sink import_text);
+            surface_modules.push(has_surface_sugar);
+            shadowed_modules.push(shadows_prelude);
+        }
+        if catalogue.len() != 0 {
+            let index = encode_package_graph(
+                in pkgs,
+                in files,
+                in mods,
+                true,
+                in imports,
+                in catalogue,
+                in public,
+                in source_segments
+            );
+            let resolved = resolve_sugar_imports_bytes(in index.as_slice());
+            let mut bindings = ChunkSeq::new[PackageSugarBinding]();
+            let empty = ChunkSeq::new[bool]();
+            let mut imported = empty;
+            for _module in 0..mods.len() {
+                imported.push(false);
+            }
+            for i in 0..resolved.len() {
+                match resolved.try_get(i) {
+                    Option::Some(edge) => {
+                        let author = widen_u64(edge.definition_module);
+                        let caller = widen_u64(edge.caller_module);
+                        if shadowed_modules.try_get(caller) == Option::Some(true)
+                            || shadowed_modules.try_get(author) == Option::Some(true)
+                        {
+                            return Option::None;
+                        }
+                        let mut definition_index = catalogue.len();
+                        // The last row of a repeated definition is the
+                        // ordinary resolver's choice; expansion rejects
+                        // duplicate rules in the defining module itself.
+                        for j in 0..catalogue.len() {
+                            match catalogue.try_get(j) {
+                                Option::Some(definition) => {
+                                    if definition.module_index == author
+                                        && eq_bytes(
+                                            in definition.name.as_slice(),
+                                            in edge.definition_name.as_bytes()
+                                        )
+                                    {
+                                        definition_index = j;
+                                    }
+                                },
+                                Option::None => {},
+                            }
+                        }
+                        if definition_index < catalogue.len() {
+                            let mut alias = ChunkSeq::new[u8]();
+                            alias.extend(in edge.local_name.as_bytes());
+                            bindings.push(
+                                sink PackageSugarBinding {
+                                    module_index: caller,
+                                    alias: alias,
+                                    definition: definition_index
+                                }
+                            );
+                            imported.try_set(caller, true);
+                        }
+                    },
+                    Option::None => {},
+                }
+            }
+            for module in 0..mods.len() {
+                if surface_modules.try_get(module) == Option::Some(true)
+                    && imported.try_get(module) == Option::Some(true)
+                {
+                    let plan = match plan_bootstrap_sugars(
+                        module,
+                        mods.len(),
+                        in catalogue,
+                        in bindings
+                    ) {
+                        Option::Some(plan) => plan,
+                        Option::None => return Option::None,
+                    };
+                    match mods.try_get_mut(module) {
+                        Option::Some(source) => {
+                            match expand_bootstrap_module(in source.text, in plan) {
+                                Result::Ok(expanded) => {
+                                    copy_bootstrap_mappings(
+                                        source.file,
+                                        in expanded.mappings,
+                                        inout source_segments
+                                    );
+                                    source.text = expanded.source;
+                                },
+                                Result::Err(_) => return Option::None,
+                            }
+                        },
+                        Option::None => return Option::None,
+                    }
+                }
+            }
+            // A declaration-only dependency still has ordinary functions.
+            // Remove its sugar declarations in place before the core parse,
+            // preserving every original byte offset and line break.
+            for index in 0..declaration_spans.len() {
+                let row = match declaration_spans.try_get(index) {
+                    Option::Some(row) => row,
+                    Option::None => continue,
+                };
+                if surface_modules.try_get(row.module_index) == Option::Some(true)
+                    && imported.try_get(row.module_index) == Option::Some(true)
+                {
+                    continue;
+                }
+                match mods.try_get_mut(row.module_index) {
+                    Option::Some(source) => {
+                        for position in row.start..row.end {
+                            if source.text.try_get(position) != Option::Some(10)
+                                && source.text.try_get(position) != Option::Some(13)
+                            {
+                                source.text.try_set(position, 32);
+                            }
+                        }
+                    },
+                    Option::None => {},
+                }
+            }
+            // File bases must follow the executable text, not overlap when
+            // a new template is longer than the original source.
+            let mut next_base: u64 = 0;
+            for module in 0..mods.len() {
+                match mods.try_get(module) {
+                    Option::Some(source) => {
+                        match files.try_get_mut(source.file) {
+                            Option::Some(file) => file.base = next_base,
+                            Option::None => {},
+                        }
+                        next_base = wrapping_add(next_base, wrapping_add(source.text.len(), 1));
+                    },
+                    Option::None => {},
+                }
+            }
+        }
+    }
+    Option::Some(encode_package_graph(
+        in pkgs,
+        in files,
+        in mods,
+        false,
+        in imports,
+        in catalogue,
+        in public,
+        in source_segments
+    ))
+}
+
+fn encode_package_graph(
+    in pkgs: ChunkSeq[PkgNode],
+    in files: ChunkSeq[FileEntry],
+    in mods: ChunkSeq[ModEntry],
+    import_only: bool,
+    in import_texts: ChunkSeq[ChunkSeq[u8]],
+    in catalogue: ChunkSeq[PackageSugarDefinition],
+    in public: ChunkSeq[bool],
+    in source_segments: ChunkSeq[BootstrapSourceSegment]
+) -> ChunkSeq[u8] {
     let mut out = ChunkSeq::new[u8]();
     put_u64(inout out, pkgs.len());
     for pi in 0..pkgs.len() {
@@ -2184,7 +2550,14 @@ pub fn load_package_graph_bytes(in root_dir: Slice[u8]) -> Option[ChunkSeq[u8]] 
                     }
                 }
                 put_u64(inout out, m.file);
-                put_str(inout out, in m.text.as_slice());
+                if import_only {
+                    match import_texts.try_get(mi) {
+                        Option::Some(imports) => put_str(inout out, in imports.as_slice()),
+                        Option::None => put_str(inout out, in "".as_bytes()),
+                    }
+                } else {
+                    put_str(inout out, in m.text.as_slice());
+                }
             },
             Option::None => {},
         }
@@ -2214,10 +2587,185 @@ pub fn load_package_graph_bytes(in root_dir: Slice[u8]) -> Option[ChunkSeq[u8]] 
             Option::None => {},
         }
     }
-    Option::Some(out)
+    if catalogue.len() != 0 {
+        put_u64(inout out, catalogue.len());
+        for i in 0..catalogue.len() {
+            match catalogue.try_get(i) {
+                Option::Some(definition) => {
+                    put_u64(inout out, definition.module_index);
+                    put_str(inout out, in definition.name.as_slice());
+                    put_u64(
+                        inout out,
+                        if public.try_get(i) == Option::Some(true) {
+                            1
+                        } else {
+                            0
+                        }
+                    );
+                },
+                Option::None => {},
+            }
+        }
+    }
+    if source_segments.len() != 0 {
+        put_u64(inout out, source_segments.len());
+        for i in 0..source_segments.len() {
+            match source_segments.try_get(i) {
+                Option::Some(row) => {
+                    put_u64(inout out, row.file);
+                    put_u64(inout out, row.generated_start);
+                    put_u64(inout out, row.generated_end);
+                    put_u64(inout out, row.source_start);
+                    put_u64(inout out, row.source_end);
+                    put_u64(inout out, row.copied);
+                },
+                Option::None => {},
+            }
+        }
+    }
+    out
 }
 
 test {
+    use @vesper/check-names-packages::{
+        assembly_begin_bytes, assemble_next_bytes, assembly_metadata, assembly_parse_errors
+    };
+    use @vesper/ast::{lit_at};
+
+    fn fixture_bytes(in text: Str) -> ChunkSeq[u8] {
+        let mut source = ChunkSeq::new[u8]();
+        source.extend(in text.as_bytes());
+        source
+    }
+
+    fn fixture_package(in name: Str) -> PkgNode {
+        PkgNode {
+            name: fixture_bytes(in name),
+            dir: ChunkSeq::new[u8](),
+            dep_names: ChunkSeq::new[ChunkSeq[u8]](),
+            dep_indices: ChunkSeq::new[u64](),
+            vsys_types: ChunkSeq::new[ChunkSeq[u8]]()
+        }
+    }
+
+    fn fixture_graph(in declaration: Str, shadow_intrinsic: bool) -> Option[ChunkSeq[u8]] {
+        fixture_graph_calling(
+            in if shadow_intrinsic {
+                "use @fixture/dep::word as renamed; pub fn main() -> u64 { let wrapping_shr_u64: u64 = 0; renamed{ from 0x2a00; width 8 } }"
+            } else {
+                "use @fixture/dep::word as renamed; pub fn main() -> u64 { renamed{ from 0x2a00; width 8 } }"
+            },
+            in declaration
+        )
+    }
+
+    fn fixture_graph_calling(in caller_text: Str, in declaration: Str) -> Option[ChunkSeq[u8]] {
+        let mut pkgs = ChunkSeq::new[PkgNode]();
+        let mut caller = fixture_package(in "@fixture/caller");
+        caller.dep_names.push(sink fixture_bytes(in "@fixture/dep"));
+        caller.dep_indices.push(1);
+        pkgs.push(sink caller);
+        pkgs.push(sink fixture_package(in "@fixture/dep"));
+        let mut files = ChunkSeq::new[FileEntry]();
+        files.push(sink FileEntry { display: fixture_bytes(in "caller.ves"), base: 0 });
+        files.push(sink FileEntry { display: fixture_bytes(in "dependency.ves"), base: 128 });
+        let mut mods = ChunkSeq::new[ModEntry]();
+        mods.push(
+            sink ModEntry {
+                pkg: 0,
+                file: 0,
+                segs: ChunkSeq::new[ChunkSeq[u8]](),
+                text: fixture_bytes(in caller_text)
+            }
+        );
+        mods.push(
+            sink ModEntry {
+                pkg: 1,
+                file: 1,
+                segs: ChunkSeq::new[ChunkSeq[u8]](),
+                text: fixture_bytes(in declaration)
+            }
+        );
+        prepare_sugar_graph(in pkgs, inout files, inout mods)
+    }
+
+    fn test_imported_scalar_tag_reaches_stage2_assembly() -> bool {
+        let bytes = match fixture_graph(
+            in "pub sugar word: tag { rule (word{ from $n:expr; width $w:expr }) => { { let out: u64 = $n; let width: u64 = $w; let answer = wrapping_shr_u64(out, wrapping_u32(width)); if answer == 42 { answer } else { 0 } } } }",
+            false
+        ) {
+            Option::Some(bytes) => bytes,
+            Option::None => return false,
+        };
+        let mut assembly = assembly_begin_bytes(in bytes.as_slice());
+        let parse_clean = assembly_parse_errors(in assembly) == 0;
+        let first = assemble_next_bytes(inout assembly, in bytes.as_slice());
+        let second = assemble_next_bytes(inout assembly, in bytes.as_slice());
+        let meta = assembly_metadata(sink assembly);
+        if !parse_clean || meta.diagnostics.len() != 0 {
+            return false;
+        }
+        match (first, second) {
+            (Option::Some(caller), Option::Some(_)) => {
+                for i in 0..caller.ast.lits.len() {
+                    if lit_at(in caller.ast, wrapping_u32(i)).bits == 42 {
+                        return true;
+                    }
+                }
+                false
+            },
+            _ => false,
+        }
+    }
+
+    fn test_imported_scalar_tag_keeps_its_precedence() -> bool {
+        let bytes = match fixture_graph_calling(
+            in "use @fixture/dep::yes as renamed; pub fn main() -> bool { renamed{} && false }",
+            in "pub sugar yes: tag { rule (yes{}) => { true || false } }"
+        ) {
+            Option::Some(bytes) => bytes,
+            Option::None => return false,
+        };
+        // The expanded caller without spaces: `(true||false)&&false`.
+        let space: u8 = 32;
+        let mut packed = ChunkSeq::new[u8]();
+        for i in 0..bytes.len() {
+            let byte = bytes.try_get(i).unwrap_or(0);
+            if byte != space {
+                packed.push(byte);
+            }
+        }
+        let grouped = "(true||false)&&false".as_bytes();
+        let text = packed.as_slice();
+        for start in 0..text.len() {
+            let end = wrapping_add(start, grouped.len());
+            if end <= text.len() && eq_bytes(in text[start..end], in grouped) {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn test_bootstrap_rejects_a_definition_site_free_helper() -> bool {
+        match fixture_graph(
+            in "fn hidden(n: u64) -> u64 { n } pub sugar word: tag { rule (word{ from $n:expr; width $w:expr }) => { { let out: u64 = $n; let width: u64 = $w; hidden(out) } } }",
+            false
+        ) {
+            Option::None => true,
+            Option::Some(_) => false,
+        }
+    }
+
+    fn test_bootstrap_rejects_intrinsics_shadowed_by_caller() -> bool {
+        match fixture_graph(
+            in "pub sugar word: tag { rule (word{ from $n:expr; width $w:expr }) => { { let out: u64 = $n; let width: u64 = $w; wrapping_shr_u64(out, wrapping_u32(width)) } } }",
+            true
+        ) {
+            Option::None => true,
+            Option::Some(_) => false,
+        }
+    }
+
     // Which of `is_some`, `is_none`, `unwrap_or` and `or` `src` calls and
     // which it defines, each as four decimal digits, 1 for yes.
     fn option_scan(in src: Slice[u8]) -> (u64, u64) {

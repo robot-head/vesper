@@ -938,3 +938,56 @@ rounds per case, timed ABBA.
 
 Rust lines deleted: 0. The action is not wired: Rust stays the default
 until the hybrid wiring part.
+
+# Part 11b (#1828): the Vesper Anvil code actions
+
+`anvil_code_actions` (src/lsp/anvil_actions.rs) now runs in
+`@vesper/lsp-features` (`anvil.ves`, entry `lsp_anvil_actions`), with 0
+diffs, at 0.85x Rust's time:
+
+- the `vesper.anvilRun` command action for one `@test` function;
+- with failing arguments, the quickfix that inserts
+  `@test_case(<args>)` above the function. The arguments are trimmed with
+  `str::trim`, which removes Unicode white space. The insertion line is
+  clamped to the number of `str::lines`. The indent is copied from the
+  leading spaces and tabs of that line.
+
+The JSON is written with sorted keys, as serde_json writes `json!` maps.
+
+## What changed
+
+- No Rust changes. The test calls `anvil_code_actions` directly.
+- `packages/vesper-lsp-features/src/anvil.ves` (new) and the entry
+  `lsp_anvil_actions` in lib.ves.
+- `tests/self_host_lsp_features.rs` adds `anvil_actions_match_rust` and
+  the ignored `anvil_actions_speed`.
+
+## Differential
+
+1,809 cases, 1,448 of them with failing arguments. They cover:
+
+- every fifth package `.ves` file, at up to six lines that start an
+  `@test` or a function, the first and last lines, and one and two lines
+  past the end;
+- 15 hand-written sources: empty, newline-only, CRLF, tab and mixed
+  indents, NBSP and ideographic indents (not copied), a lone `\r`, and
+  multi-byte text;
+- at lines 0 to 3, 99 and `u32::MAX`, each with 10 kinds of arguments:
+  none, empty, blank, Unicode white space at both ends (U+3000, U+2028,
+  U+0085, U+00A0, U+2000 to U+200A, and U+200B, which is not trimmed),
+  quotes, backslashes, control bytes and emoji;
+- URIs and names with escapes, control bytes and spaces, and empty ones.
+
+All 1,809 cases matched.
+
+## Numbers
+
+Both sides build the actions and write their JSON on every round, 16
+rounds per case, timed ABBA.
+
+| Cases | Rust | Vesper | Ratio |
+|---|--:|--:|--:|
+| All 1,809 | 6.60 µs | 5.64 µs | **0.85x** |
+
+Rust lines deleted: 0. The actions are not wired: Rust stays the default
+until the hybrid wiring part.
