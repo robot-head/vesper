@@ -35,8 +35,6 @@ use crate::error::AttestError;
 use crate::tdx::{QeReportBody, TdxQuote};
 use crate::time::{iso8601_utc_to_unix, unix_seconds};
 use serde::Deserialize;
-use x509_parser::der_parser::ber::BerObject;
-use x509_parser::der_parser::der::parse_der;
 
 /// Intel SGX extension in PCK certificates.
 pub const SGX_EXTENSION_OID: &str = "1.2.840.113741.1.13.1";
@@ -653,57 +651,72 @@ fn ext_err(reason: &str) -> AttestError {
     collateral("PCK SGX extension", reason.into())
 }
 
-fn seq<'a, 'b>(o: &'b BerObject<'a>) -> Result<&'b Vec<BerObject<'a>>, AttestError> {
-    o.as_sequence().map_err(|_| ext_err("expected SEQUENCE"))
-}
+const PCK_OUT_FLAGS: usize = 0;
+const PCK_OUT_PCE_SVN: usize = 1;
+const PCK_OUT_SGX_TYPE: usize = 2;
+const PCK_OUT_CN_START: usize = 3;
+const PCK_OUT_CN_END: usize = 4;
+const PCK_OUT_PPID_START: usize = 5;
+const PCK_OUT_PPID_END: usize = 6;
+const PCK_OUT_PCEID_START: usize = 7;
+const PCK_OUT_PCEID_END: usize = 8;
+const PCK_OUT_FMSPC_START: usize = 9;
+const PCK_OUT_FMSPC_END: usize = 10;
+const PCK_OUT_CPUSVN_START: usize = 11;
+const PCK_OUT_CPUSVN_END: usize = 12;
+const PCK_OUT_INST_START: usize = 13;
+const PCK_OUT_INST_END: usize = 14;
+const PCK_OUT_LEN: usize = 15;
 
-fn entry<'a, 'b>(o: &'b BerObject<'a>) -> Result<(String, &'b BerObject<'a>), AttestError> {
-    let s = seq(o)?;
-    if s.len() != 2 {
-        return Err(ext_err("entry is not (OID, value)"));
-    }
-    let oid = s[0].as_oid().map_err(|_| ext_err("entry OID"))?;
-    Ok((oid.to_id_string(), &s[1]))
-}
+const PCK_FLAG_PPID: u64 = 1;
+const PCK_FLAG_TCB: u64 = 2;
+const PCK_FLAG_PCE_ID: u64 = 4;
+const PCK_FLAG_FMSPC: u64 = 8;
+const PCK_FLAG_SGX_TYPE: u64 = 16;
+const PCK_FLAG_INSTANCE_ID: u64 = 32;
+const PCK_FLAG_CONFIG: u64 = 64;
+const PCK_FLAG_DYN_SET: u64 = 128;
+const PCK_FLAG_DYN_VAL: u64 = 256;
+const PCK_FLAG_CACHED_SET: u64 = 512;
+const PCK_FLAG_CACHED_VAL: u64 = 1024;
+const PCK_FLAG_SMT_SET: u64 = 2048;
+const PCK_FLAG_SMT_VAL: u64 = 4096;
 
-fn octets<const N: usize>(o: &BerObject<'_>, what: &str) -> Result<[u8; N], AttestError> {
-    let b = o.as_slice().map_err(|_| ext_err(what))?;
-    b.try_into().map_err(|_| ext_err(what))
-}
+const PCK_ERR_OK: u64 = 0;
+const PCK_ERR_TRAILING: u64 = 2;
+const PCK_ERR_MISSING_EXT: u64 = 3;
+const PCK_ERR_DUP_EXT: u64 = 4;
+const PCK_ERR_BAD_EXT: u64 = 5;
+const PCK_ERR_NO_CN: u64 = 6;
 
-fn small_int(o: &BerObject<'_>, max: u32, what: &str) -> Result<u32, AttestError> {
-    let v = o.as_u32().map_err(|_| ext_err(what))?;
-    if v > max {
-        return Err(ext_err(what));
-    }
-    Ok(v)
+fn copy_span<const N: usize>(der: &[u8], start: u64, end: u64) -> [u8; N] {
+    let mut out = [0u8; N];
+    out.copy_from_slice(&der[start as usize..end as usize]);
+    out
 }
 
 /// Parse the SGX extension of a PCK certificate (DER).
 pub fn parse_pck_extensions(cert_der: &[u8]) -> Result<PckExtensions, AttestError> {
-    let (rest, cert) = x509_parser::parse_x509_certificate(cert_der)
-        .map_err(|e| collateral("PCK certificate", e.to_string()))?;
-    if !rest.is_empty() {
-        return Err(collateral("PCK certificate", "trailing bytes".into()));
+    let mut out = [0u64; PCK_OUT_LEN];
+    let mut sgx_components = [0u8; TCB_COMPONENTS];
+    match crate::port::vesper::parse_pck_ext(cert_der, &mut out, &mut sgx_components) {
+        PCK_ERR_OK => {}
+        PCK_ERR_TRAILING => return Err(collateral("PCK certificate", "trailing bytes".into())),
+        PCK_ERR_MISSING_EXT => return Err(ext_err("missing")),
+        PCK_ERR_DUP_EXT => return Err(ext_err("duplicated")),
+        PCK_ERR_BAD_EXT => return Err(ext_err("malformed DER")),
+        PCK_ERR_NO_CN => {
+            return Err(collateral(
+                "PCK certificate",
+                "issuer has no common name".into(),
+            ));
+        }
+        _ => return Err(collateral("PCK certificate", "malformed DER".into())),
     }
-    let mut found = cert
-        .extensions()
-        .iter()
-        .filter(|e| e.oid.to_id_string() == SGX_EXTENSION_OID);
-    let ext = found.next().ok_or_else(|| ext_err("missing"))?;
-    if found.next().is_some() {
-        return Err(ext_err("duplicated"));
-    }
-    let (rest, top) = parse_der(ext.value).map_err(|_| ext_err("malformed DER"))?;
-    if !rest.is_empty() {
-        return Err(ext_err("trailing bytes"));
-    }
-    let issuer_cn = cert
-        .issuer()
-        .iter_common_name()
-        .next()
-        .and_then(|cn| cn.as_str().ok())
-        .ok_or_else(|| collateral("PCK certificate", "issuer has no common name".into()))?;
+    let issuer_cn = std::str::from_utf8(
+        &cert_der[out[PCK_OUT_CN_START] as usize..out[PCK_OUT_CN_END] as usize],
+    )
+    .map_err(|_| collateral("PCK certificate", "issuer has no common name".into()))?;
     let issuer = match issuer_cn {
         "Intel SGX PCK Processor CA" => PckIssuer::Processor,
         "Intel SGX PCK Platform CA" => PckIssuer::Platform,
@@ -714,36 +727,43 @@ pub fn parse_pck_extensions(cert_der: &[u8]) -> Result<PckExtensions, AttestErro
             ));
         }
     };
-    let base = SGX_EXTENSION_OID;
-    let mut ppid = None;
-    let mut instance_id = None;
-    let mut configuration = None;
-    let mut tcb = None;
-    let mut pce_id = None;
-    let mut fmspc = None;
-    let mut sgx_type = None;
-    for item in seq(&top)? {
-        let (oid, value) = entry(item)?;
-        let Some(suffix) = oid.strip_prefix(base).and_then(|s| s.strip_prefix('.')) else {
-            return Err(ext_err("entry outside the SGX arc"));
-        };
-        let slot_taken = match suffix {
-            "1" => ppid.replace(octets::<16>(value, "PPID")?).is_some(),
-            "2" => tcb.replace(parse_tcb(value)?).is_some(),
-            "3" => pce_id.replace(octets::<2>(value, "PCE-ID")?).is_some(),
-            "4" => fmspc.replace(octets::<6>(value, "FMSPC")?).is_some(),
-            "5" => sgx_type.replace(small_int(value, 2, "SGX type")?).is_some(),
-            "6" => instance_id
-                .replace(octets::<16>(value, "PlatformInstanceID")?)
-                .is_some(),
-            "7" => configuration.replace(parse_configuration(value)?).is_some(),
-            _ => return Err(ext_err("unknown entry")),
-        };
-        if slot_taken {
-            return Err(ext_err("duplicated entry"));
-        }
+    let flags = out[PCK_OUT_FLAGS];
+    if (flags & PCK_FLAG_TCB) == 0 {
+        return Err(ext_err("missing TCB"));
     }
-    let (sgx_components, pce_svn, cpu_svn) = tcb.ok_or_else(|| ext_err("missing TCB"))?;
+    if (flags & PCK_FLAG_PPID) == 0 {
+        return Err(ext_err("missing PPID"));
+    }
+    if (flags & PCK_FLAG_PCE_ID) == 0 {
+        return Err(ext_err("missing PCE-ID"));
+    }
+    if (flags & PCK_FLAG_FMSPC) == 0 {
+        return Err(ext_err("missing FMSPC"));
+    }
+    if (flags & PCK_FLAG_SGX_TYPE) == 0 {
+        return Err(ext_err("missing SGX type"));
+    }
+    let instance_id = if (flags & PCK_FLAG_INSTANCE_ID) != 0 {
+        Some(copy_span::<16>(
+            cert_der,
+            out[PCK_OUT_INST_START],
+            out[PCK_OUT_INST_END],
+        ))
+    } else {
+        None
+    };
+    let configuration = if (flags & PCK_FLAG_CONFIG) != 0 {
+        Some(PckPlatformConfiguration {
+            dynamic_platform: ((flags & PCK_FLAG_DYN_SET) != 0)
+                .then_some((flags & PCK_FLAG_DYN_VAL) != 0),
+            cached_keys: ((flags & PCK_FLAG_CACHED_SET) != 0)
+                .then_some((flags & PCK_FLAG_CACHED_VAL) != 0),
+            smt_enabled: ((flags & PCK_FLAG_SMT_SET) != 0)
+                .then_some((flags & PCK_FLAG_SMT_VAL) != 0),
+        })
+    } else {
+        None
+    };
     let platform_instance = match (issuer, instance_id, configuration) {
         (PckIssuer::Platform, Some(platform_instance_id), configuration) => {
             Some(PckPlatformInstance {
@@ -766,71 +786,14 @@ pub fn parse_pck_extensions(cert_der: &[u8]) -> Result<PckExtensions, AttestErro
     Ok(PckExtensions {
         issuer,
         platform_instance,
-        ppid: ppid.ok_or_else(|| ext_err("missing PPID"))?,
+        ppid: copy_span::<16>(cert_der, out[PCK_OUT_PPID_START], out[PCK_OUT_PPID_END]),
         sgx_components,
-        pce_svn,
-        cpu_svn,
-        pce_id: pce_id.ok_or_else(|| ext_err("missing PCE-ID"))?,
-        fmspc: fmspc.ok_or_else(|| ext_err("missing FMSPC"))?,
-        sgx_type: sgx_type.ok_or_else(|| ext_err("missing SGX type"))?,
+        pce_svn: out[PCK_OUT_PCE_SVN] as u16,
+        cpu_svn: copy_span::<16>(cert_der, out[PCK_OUT_CPUSVN_START], out[PCK_OUT_CPUSVN_END]),
+        pce_id: copy_span::<2>(cert_der, out[PCK_OUT_PCEID_START], out[PCK_OUT_PCEID_END]),
+        fmspc: copy_span::<6>(cert_der, out[PCK_OUT_FMSPC_START], out[PCK_OUT_FMSPC_END]),
+        sgx_type: out[PCK_OUT_SGX_TYPE] as u32,
     })
-}
-
-fn parse_configuration(o: &BerObject<'_>) -> Result<PckPlatformConfiguration, AttestError> {
-    let prefix = format!("{SGX_EXTENSION_OID}.7.");
-    let mut c = PckPlatformConfiguration::default();
-    for item in seq(o)? {
-        let (oid, value) = entry(item)?;
-        let flag = value
-            .as_bool()
-            .map_err(|_| ext_err("Configuration entry is not BOOLEAN"))?;
-        let slot = match oid.strip_prefix(&prefix) {
-            Some("1") => &mut c.dynamic_platform,
-            Some("2") => &mut c.cached_keys,
-            Some("3") => &mut c.smt_enabled,
-            _ => return Err(ext_err("unknown Configuration entry")),
-        };
-        if slot.replace(flag).is_some() {
-            return Err(ext_err("duplicated Configuration entry"));
-        }
-    }
-    Ok(c)
-}
-
-fn parse_tcb(o: &BerObject<'_>) -> Result<([u8; 16], u16, [u8; 16]), AttestError> {
-    let prefix = format!("{SGX_EXTENSION_OID}.2.");
-    let mut comps = [None::<u8>; TCB_COMPONENTS];
-    let mut pce_svn = None;
-    let mut cpu_svn = None;
-    for item in seq(o)? {
-        let (oid, value) = entry(item)?;
-        let n: u32 = oid
-            .strip_prefix(&prefix)
-            .and_then(|s| s.parse().ok())
-            .ok_or_else(|| ext_err("TCB entry OID"))?;
-        let dup = match n {
-            1..=16 => comps[(n - 1) as usize]
-                .replace(small_int(value, 255, "TCB component")? as u8)
-                .is_some(),
-            17 => pce_svn
-                .replace(small_int(value, 65535, "PCESVN")? as u16)
-                .is_some(),
-            18 => cpu_svn.replace(octets::<16>(value, "CPUSVN")?).is_some(),
-            _ => return Err(ext_err("unknown TCB entry")),
-        };
-        if dup {
-            return Err(ext_err("duplicated TCB entry"));
-        }
-    }
-    let mut out = [0u8; 16];
-    for (o, c) in out.iter_mut().zip(comps) {
-        *o = c.ok_or_else(|| ext_err("missing TCB component"))?;
-    }
-    Ok((
-        out,
-        pce_svn.ok_or_else(|| ext_err("missing PCESVN"))?,
-        cpu_svn.ok_or_else(|| ext_err("missing CPUSVN"))?,
-    ))
 }
 
 // ---------------------------------------------------------- evaluation --

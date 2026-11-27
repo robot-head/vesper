@@ -20,6 +20,7 @@ use self::der_cert::{
     parse_amd_cert_ext as parse_amd_cert_ext_impl,
     parse_crl_this_update as parse_crl_this_update_impl, parse_raw_cert as parse_raw_cert_impl
 };
+use self::pck_ext::parse_pck_ext as parse_pck_ext_impl;
 use self::pem::{
     decode_pem_certificates as decode_pem_certificates_impl,
     decode_pem_public_key as decode_pem_public_key_impl
@@ -332,6 +333,10 @@ pub fn parse_crl_this_update(in der: Slice[u8]) -> (u64, u64) {
 
 pub fn parse_amd_cert_ext(in der: Slice[u8], want_hwid_len: u64, inout out: Slice[u64]) -> u64 {
     parse_amd_cert_ext_impl(in der, want_hwid_len, inout out)
+}
+
+pub fn parse_pck_ext(in der: Slice[u8], inout out: Slice[u64], inout sgx_comps: Slice[u8]) -> u64 {
+    parse_pck_ext_impl(in der, inout out, inout sgx_comps)
 }
 
 pub fn decode_pem_certificates(

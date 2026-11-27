@@ -621,6 +621,51 @@ fn flip_gate_amd_cert_ext() {
     println!("flip-gate pairs amd_cert_ext {}", pairs.join(" "));
 }
 
+const PCK_EXT_PASSES: usize = 5_000;
+
+fn flip_gate_pck_ext() {
+    let quote_bytes = std::fs::read(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/data/vendor/tdx-dcap-qvl/tdx_quote"),
+    )
+    .unwrap();
+    let quote = port::tdx::TdxQuote::parse_prefix(&quote_bytes).unwrap().0;
+    let certs = port::chain::pem_certificates(&quote.pck_chain_pem).unwrap();
+    let der = certs[0].clone();
+    let rust_parse = |b: &[u8]| -> usize {
+        let (rest, cert) = x509_parser::parse_x509_certificate(b).unwrap();
+        assert!(rest.is_empty());
+        cert.extensions().len()
+    };
+    let parsed = port::intel::parse_pck_extensions(&der).unwrap();
+    assert_eq!(parsed.pce_id.len(), 2);
+    let run_rust = || -> u64 {
+        let t = Instant::now();
+        for _ in 0..PCK_EXT_PASSES {
+            black_box(rust_parse(black_box(&der)));
+        }
+        t.elapsed().as_nanos() as u64
+    };
+    let run_port = || -> u64 {
+        let t = Instant::now();
+        for _ in 0..PCK_EXT_PASSES {
+            black_box(port::intel::parse_pck_extensions(black_box(&der)).unwrap());
+        }
+        t.elapsed().as_nanos() as u64
+    };
+    black_box(run_rust());
+    black_box(run_port());
+    let pairs: Vec<String> = (0..FLIP_GATE_EPOCHS)
+        .map(|_| {
+            let a1 = run_rust();
+            let b1 = run_port();
+            let b2 = run_port();
+            let a2 = run_rust();
+            format!("{}:{}", a1 + a2, b1 + b2)
+        })
+        .collect();
+    println!("flip-gate pairs pck_ext {}", pairs.join(" "));
+}
+
 fn main() {
     assert_eq!(port::IMPLEMENTATION, "vesper");
     let args: Vec<String> = std::env::args().collect();
@@ -643,6 +688,10 @@ fn main() {
         }
         if args.get(2).map(String::as_str) == Some("amd_cert_ext") {
             flip_gate_amd_cert_ext();
+            return;
+        }
+        if args.get(2).map(String::as_str) == Some("pck_ext") {
+            flip_gate_pck_ext();
             return;
         }
     }
