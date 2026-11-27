@@ -57,16 +57,27 @@ fn div_wide_sat(hi: u64, lo: u64, d: u64) -> u64 {
     if hi >= d {
         return INFINITY;
     }
+    // Fast path for 32-bit divisors (covers Gain::Unit, Nanos::PerSec,
+    // pacing margin, and most RTT/interval divisors): 2 hardware 64-bit
+    // divisions instead of 64 iterations of bit-by-bit restoring division.
+    if d <= U32_MAX {
+        let hi32 = wrapping_shl_u64(hi, 32) | wrapping_shr_u64(lo, 32);
+        let q_hi = hi32 / d;
+        let r_hi = wrapping_sub(hi32, wrapping_mul(q_hi, d));
+        let lo32 = wrapping_shl_u64(r_hi, 32) | (lo & U32_MAX);
+        let q_lo = lo32 / d;
+        return wrapping_shl_u64(q_hi, 32) | q_lo;
+    }
     // Restoring long division: the remainder stays below d, and the bit
     // shifted out of it (`top`) stands for 2^64.
     let mut rem = hi;
     let mut rest = lo;
     let mut q: u64 = 0;
     for i in 0..64 {
-        let top = rem >> 63;
-        rem = (rem << 1) | (rest >> 63);
-        rest = rest << 1;
-        q = q << 1;
+        let top = wrapping_shr_u64(rem, 63);
+        rem = wrapping_shl_u64(rem, 1) | wrapping_shr_u64(rest, 63);
+        rest = wrapping_shl_u64(rest, 1);
+        q = wrapping_shl_u64(q, 1);
         if top == 1 || rem >= d {
             rem = wrapping_sub(rem, d);
             q = q | 1;
