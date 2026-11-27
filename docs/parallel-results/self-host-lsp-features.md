@@ -1219,3 +1219,44 @@ keys as one slice copy, and answering leaf types without a stack, brought
 it to 1.03x. The portable BLAKE3 is most of the remaining gap, so the
 wiring must hash through hash-sys. Rust lines deleted: 0; the query is
 not wired.
+
+# Part 13a: the lint preflight (#1828)
+
+`preflight` in `src/tooling/lint.rs` is the first step of `vesper lint`
+over a source: it refuses sources over 256 KiB, lexes them, refuses
+lexical errors with the `Debug` text of the lexer's diagnostics, and
+checks the token stream against the lint budgets (8,192 tokens, 256
+recursive-expression tokens, 128-byte identifiers, 64 conditionals,
+nesting 32, runs of 256 tokens between `;`, `{` and `}`) before any
+parse. Part 13a ports it as `lsp_lint_preflight` (`lint_preflight.ves`
+in `@vesper/lsp-features`), lexing with `@vesper/front`'s lexer.
+
+## What changed
+
+- `src/tooling/lint.rs`: the budgets are named constants, and the hidden
+  `preflight_answer` (Rust's answer as text) and `preflight_words` (the
+  source as the port reads it) are added.
+- `packages/vesper-lsp-features/src/lint_preflight.ves` (new) and the
+  entry `lsp_lint_preflight` in lib.ves.
+- `tests/self_host_lsp_features.rs`: `lint_preflight_matches_rust` and
+  the ignored `lint_preflight_speed`.
+
+## Differential
+
+254 sources: the recovery and signature programs, every fifth corpus
+`.ves` file whole and cut in half, and sources at and one past each
+budget, lexical errors (an unterminated comment and string, invalid
+characters, more than the lexer's 128 diagnostics and 65,536 tokens) and
+the 256 KiB limit. 123 admitted, 131 refused across every refusal, 0
+diffs.
+
+## Numbers
+
+8 preflights per call, best of five ABBA rounds per source, release
+build, source words written outside the timing.
+
+| Rust | Vesper | Ratio |
+|--:|--:|--:|
+| 35.8 µs | 39.7 µs | **1.11x** |
+
+Rust lines deleted: 0; the lint driver still lexes in Rust.
