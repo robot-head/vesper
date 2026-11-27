@@ -83,6 +83,12 @@ const LIT_BOOL: u8 = 2;
 const LIT_WIDE_INT: u8 = 3;
 const LIT_TYPED_INT: u8 = 4;
 const LIT_STRING: u8 = 5;
+// An extra type row (`Ck::extra_rows`): start, end, type.
+const EXTRA_ROW_START: u64 = 0;
+const EXTRA_ROW_END: u64 = 1;
+const EXTRA_ROW_TYPE: u64 = 2;
+const EXTRA_ROW_WIDTH: u64 = 3;
+
 // Unary operator codes.
 const U_NOT: u32 = 1;
 const U_NEG: u32 = 2;
@@ -1946,13 +1952,9 @@ fn for_expr(inout ck: Ck, ex: Ex) -> u32 {
     let range_ty = ck.ctx.types.named(ck.range_sym, in range_args);
     record(inout ck, ex.x, range_ty);
     // The lowered index test and increment sit at these zero-width spans.
-    ck.extra_rows.push(iter.start);
-    ck.extra_rows.push(iter.start);
-    ck.extra_rows.push(w(element));
-    ck.extra_rows.push(iter.end);
-    ck.extra_rows.push(iter.end);
+    extra_row(inout ck, iter.start, iter.start, element);
     let bool_ty = named(inout ck, known.bool_);
-    ck.extra_rows.push(w(bool_ty));
+    extra_row(inout ck, iter.end, iter.end, bool_ty);
     let pat_extra = ck.patx(ex.y);
     if !irrefutable(
         inout ck.ctx.types,
@@ -1969,6 +1971,28 @@ fn for_expr(inout ck: Ck, ex: Ex) -> u32 {
 }
 
 // `Checker::break_expr` in the innermost loop frame.
+// Records `ty` at a span that is not an expression, in the
+// `EXTRA_ROW_*` layout.
+fn extra_row(inout ck: Ck, start: u64, end: u64, ty: u32) {
+    ck.extra_rows.push(start);
+    ck.extra_rows.push(end);
+    ck.extra_rows.push(w(ty));
+}
+
+// The loop frame at `index` (a frame always exists there).
+fn loop_frame(in ck: Ck, index: u64) -> LoopF {
+    match ck.loops.try_get(index) {
+        Option::Some(f) => f,
+        Option::None => LoopF {
+            value: false,
+            expected: ck.ctx.types.infer,
+            result: NONE32,
+            exits: 0,
+            values_mark: 0
+        },
+    }
+}
+
 fn break_expr(inout ck: Ck, ex: Ex) -> u32 {
     let hole = ck.ctx.types.infer;
     let known = ck.ctx.world.k;
@@ -1979,34 +2003,27 @@ fn break_expr(inout ck: Ck, ex: Ex) -> u32 {
         return hole;
     }
     let index = wrapping_sub(depth, 1);
-    let mut frame = match ck.loops.try_get(index) {
-        Option::Some(f) => f,
-        Option::None => LoopF {
-            value: false,
-            expected: hole,
-            result: NONE32,
-            exits: 0,
-            values_mark: 0
-        },
-    };
+    let outer = loop_frame(in ck, index);
     let actual = if ex.y != 0 {
-        if !frame.value {
+        if !outer.value {
             let value_ex = ck.ex(ex.x);
             error(inout ck, "E0213", value_ex.start, value_ex.end);
         }
-        expr_expected(inout ck, ex.x, frame.expected)
+        expr_expected(inout ck, ex.x, outer.expected)
     } else {
         ck.ctx.types.unit
     };
     if ck.skip {
         return hole;
     }
-    if frame.expected != hole {
-        expect_type(inout ck, frame.expected, actual, ex.start, ex.end);
+    if outer.expected != hole {
+        expect_type(inout ck, outer.expected, actual, ex.start, ex.end);
     }
     if ex.y != 0 {
         ck.loop_values.push(ex.x);
     }
+    // The value may itself break out of this loop: read the frame again.
+    let mut frame = loop_frame(in ck, index);
     frame.exits = inc(frame.exits);
     frame.result = if !frame.value {
         ck.ctx.types.unit
@@ -2435,15 +2452,15 @@ pub fn check_function(inout ck: Ck, fname: u32, start: u64, end: u64, body: u32,
             ck.out.push(10);
         }
     }
-    let rows = ck.extra_rows.len() / 3;
+    let rows = ck.extra_rows.len() / EXTRA_ROW_WIDTH;
     for r in 0..rows {
-        let row = wrapping_mul(r, 3);
+        let row = wrapping_mul(r, EXTRA_ROW_WIDTH);
         put(inout ck.out, "T ");
-        put_u64(inout ck.out, u64_at(in ck.extra_rows, row));
+        put_u64(inout ck.out, u64_at(in ck.extra_rows, add(row, EXTRA_ROW_START)));
         ck.out.push(32);
-        put_u64(inout ck.out, u64_at(in ck.extra_rows, inc(row)));
+        put_u64(inout ck.out, u64_at(in ck.extra_rows, add(row, EXTRA_ROW_END)));
         ck.out.push(32);
-        let ty = n32(u64_at(in ck.extra_rows, add(row, 2)));
+        let ty = n32(u64_at(in ck.extra_rows, add(row, EXTRA_ROW_TYPE)));
         debug_type(in ck.ctx.types, in ck.ctx.names, ty, inout ck.out);
         ck.out.push(10);
     }

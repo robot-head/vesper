@@ -495,6 +495,22 @@ fn typed_constant_pattern_checks_the_scrutinee() {
     );
 }
 
+/// A `break` whose value breaks out of the same loop keeps the inner
+/// break's result: the frame is read again after the value is checked.
+#[test]
+fn nested_break_keeps_the_inner_result() {
+    let source = "fn f() -> u32 { loop { break { break 1u32; }; } }";
+    let checked = vesper::check::check(&vesper::parser::parse(source).module);
+    assert!(checked.diagnostics.is_empty());
+    let world = checked.world;
+    let text = package()
+        .entry("core_typing_exprs", true)
+        .text(&exprs_input(&world));
+    let (v, checked, skipped) = vesper_types(&text);
+    assert_eq!((checked.len(), skipped), (1, 0));
+    assert_eq!(first_difference(&rust_types(&world, &checked), &v), None);
+}
+
 #[test]
 fn expression_types_match_rust() {
     let f = package().entry("core_typing_exprs", true);
