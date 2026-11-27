@@ -75,12 +75,12 @@ pub const COMPARE_IMMEDIATE: u64 = 58;
 pub const COMPARE_BYTE_IMMEDIATE: u64 = 59;
 pub const COMPARE_WORD_IMMEDIATE: u64 = 60;
 pub const COMPARE_DWORD_IMMEDIATE: u64 = 61;
-const BLOCK_LABEL: u64 = 62;
-const EDGE_LABEL: u64 = 63;
-const JUMP_LABEL: u64 = 64;
-const BRANCH_LABEL: u64 = 65;
-const BLOCK_RETURN: u64 = 66;
-const BRANCH_BLOCK: u64 = 67;
+pub const BLOCK_LABEL: u64 = 62;
+pub const EDGE_LABEL: u64 = 63;
+pub const JUMP_LABEL: u64 = 64;
+pub const BRANCH_LABEL: u64 = 65;
+pub const BLOCK_RETURN: u64 = 66;
+pub const BRANCH_BLOCK: u64 = 67;
 const UNSIGNED_ADD_OVERFLOW: u64 = 68;
 const SIGNED_ADD_OVERFLOW: u64 = 69;
 const UNSIGNED_SUB_OVERFLOW: u64 = 70;
@@ -197,7 +197,7 @@ copy enum BlockPart {
     Table(u64),
 }
 
-copy struct Label {
+pub copy struct Label {
     address: u64,
     block: bool,
 }
@@ -792,7 +792,7 @@ fn is_branch_return(op: u64) -> bool {
     op == EARLY_RETURN || op == BLOCK_RETURN
 }
 
-fn valid_block_layout(in words: Slice[u64], start: u64, count: u64, returns: u64) -> bool {
+pub fn valid_block_layout(in words: Slice[u64], start: u64, count: u64, returns: u64) -> bool {
     let mut part = BlockPart::End;
     for index in start..count {
         let record = read_record(in words, index);

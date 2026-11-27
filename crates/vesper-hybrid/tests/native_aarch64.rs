@@ -39,6 +39,10 @@ const OR_IMMEDIATE: u64 = 56;
 const XOR_IMMEDIATE: u64 = 57;
 const COMPARE_IMMEDIATE: u64 = 58;
 const COMPARE_BYTE_IMMEDIATE: u64 = 59;
+const BLOCK_LABEL: u64 = 62;
+const JUMP_LABEL: u64 = 64;
+const BLOCK_RETURN: u64 = 66;
+const BRANCH_BLOCK: u64 = 67;
 const EQUAL: u64 = 0;
 const SIGNED_LESS: u64 = 2;
 const UNSIGNED_LESS: u64 = 6;
@@ -322,6 +326,80 @@ fn aarch64_fixed_frames_restore_sp_on_each_return() {
     );
     assert!(
         binding::aarch64_integer_leaf(&[0, NO_VALUE, STACK_SLOT, u64::MAX, SP_ALIGN, 0]).is_empty()
+    );
+}
+
+#[test]
+fn aarch64_labeled_control_flow_patches_backedges_and_checks_block_operands() {
+    const SP_ALIGN: u64 = 16;
+    const SUB_SP_16: u32 = 0xd100_43ff;
+    const STR_X0_SP: u32 = 0xf900_03e0;
+    const LDR_X0_SP: u32 = 0xf940_03e0;
+    const CBZ_X0_FORWARD_TWO: u32 = 0xb400_0040;
+    const B_BACK_TWO: u32 = 0x17ff_fffe;
+    const CBZ_X0_BACK_ONE: u32 = 0xb4ff_ffe0;
+    const MOV_X0_ONE: u32 = 0xd280_0020;
+    const ADD_SP_16: u32 = 0x9100_43ff;
+    const BRANCH_TARGET_WORD: usize = 28;
+    const RETURN_VALUE_WORD: usize = 43;
+    #[rustfmt::skip]
+    let packet = [
+        1, NO_VALUE,
+        STACK_SLOT, SP_ALIGN, SP_ALIGN, 0,
+        BLOCK_LABEL, 0, 1, 1,
+        STACK_STORE_QWORD, 0, 0, 0,
+        JUMP_LABEL, 1, 0, 0,
+        BLOCK_LABEL, 1, 0, 1,
+        STACK_LOAD, 0, 0, CELL_BITS,
+        BRANCH_BLOCK, 6, 2, 0,
+        JUMP_LABEL, 1, 0, 0,
+        BLOCK_LABEL, 2, 0, 1,
+        STACK_LOAD, 0, 0, CELL_BITS,
+        BLOCK_RETURN, 10, 0, 0,
+    ];
+    let expected: Vec<_> = [
+        SUB_SP_16,
+        STR_X0_SP,
+        LDR_X0_SP,
+        CBZ_X0_FORWARD_TWO,
+        B_BACK_TWO,
+        LDR_X0_SP,
+        ADD_SP_16,
+        RET,
+    ]
+    .into_iter()
+    .flat_map(u32::to_le_bytes)
+    .collect();
+    assert_eq!(binding::aarch64_integer_leaf(&packet), expected);
+
+    let mut crossed = packet;
+    crossed[RETURN_VALUE_WORD] = 0;
+    assert!(binding::aarch64_integer_leaf(&crossed).is_empty());
+    let mut unknown = packet;
+    unknown[BRANCH_TARGET_WORD] = 3;
+    assert!(binding::aarch64_integer_leaf(&unknown).is_empty());
+
+    #[rustfmt::skip]
+    let conditional_backedge = [
+        0, NO_VALUE,
+        BLOCK_LABEL, 0, 0, 0,
+        JUMP_LABEL, 1, 0, 0,
+        BLOCK_LABEL, 1, 0, 0,
+        JUMP_LABEL, 2, 0, 0,
+        BLOCK_LABEL, 2, 0, 0,
+        CONSTANT, 1, 0, 0,
+        BRANCH_BLOCK, 5, 1, 0,
+        JUMP_LABEL, 3, 0, 0,
+        BLOCK_LABEL, 3, 0, 0,
+        BLOCK_RETURN, NO_VALUE, 0, 0,
+    ];
+    let expected: Vec<_> = [MOV_X0_ONE, CBZ_X0_BACK_ONE, RET]
+        .into_iter()
+        .flat_map(u32::to_le_bytes)
+        .collect();
+    assert_eq!(
+        binding::aarch64_integer_leaf(&conditional_backedge),
+        expected
     );
 }
 

@@ -3,16 +3,18 @@
 // a function is defined.
 use @vesper/codegen-freestanding::util::{push32};
 use self::scalar::{
-    Record, FrameSlot, align_up, word_at, read_record, CONSTANT, ADD, SUB, MUL, AND, OR, XOR, NEG,
-    NOT, SHL, SHR, SAR, COMPARE, COMPARE_BYTE, COMPARE_WORD, COMPARE_DWORD, SELECT, TRUNCATE,
-    ZERO_EXTEND, SIGN_EXTEND, SHL_REGISTER, SHR_REGISTER, SAR_REGISTER, LOAD, STORE_BYTE,
-    STORE_WORD, STORE_DWORD, STORE_QWORD, BRANCH_ZERO, EARLY_RETURN, STACK_SLOT, STACK_ADDRESS,
-    STACK_LOAD, STACK_STORE_BYTE, STACK_STORE_WORD, STACK_STORE_DWORD, STACK_STORE_QWORD,
-    SIGNED_MUL_HIGH, UNSIGNED_MUL_HIGH, ADD_IMMEDIATE, SUB_IMMEDIATE, MUL_IMMEDIATE, AND_IMMEDIATE,
-    OR_IMMEDIATE, XOR_IMMEDIATE, COMPARE_IMMEDIATE, COMPARE_BYTE_IMMEDIATE, COMPARE_WORD_IMMEDIATE,
-    COMPARE_DWORD_IMMEDIATE, EQUAL, NOT_EQUAL, SIGNED_LESS, SIGNED_GREATER_EQUAL, SIGNED_GREATER,
-    SIGNED_LESS_EQUAL, UNSIGNED_LESS, UNSIGNED_GREATER_EQUAL, UNSIGNED_GREATER, UNSIGNED_LESS_EQUAL,
-    ARGUMENT_COUNT, RETURN_VALUE, HEADER_WORDS, RECORD_WORDS, NEVER_READ, NO_VALUE, DISP32_MASK
+    Record, FrameSlot, Label, align_up, word_at, read_record, valid_block_layout, CONSTANT, ADD,
+    SUB, MUL, AND, OR, XOR, NEG, NOT, SHL, SHR, SAR, COMPARE, COMPARE_BYTE, COMPARE_WORD,
+    COMPARE_DWORD, SELECT, TRUNCATE, ZERO_EXTEND, SIGN_EXTEND, SHL_REGISTER, SHR_REGISTER,
+    SAR_REGISTER, LOAD, STORE_BYTE, STORE_WORD, STORE_DWORD, STORE_QWORD, BRANCH_ZERO, EARLY_RETURN,
+    STACK_SLOT, STACK_ADDRESS, STACK_LOAD, STACK_STORE_BYTE, STACK_STORE_WORD, STACK_STORE_DWORD,
+    STACK_STORE_QWORD, SIGNED_MUL_HIGH, UNSIGNED_MUL_HIGH, ADD_IMMEDIATE, SUB_IMMEDIATE,
+    MUL_IMMEDIATE, AND_IMMEDIATE, OR_IMMEDIATE, XOR_IMMEDIATE, COMPARE_IMMEDIATE,
+    COMPARE_BYTE_IMMEDIATE, COMPARE_WORD_IMMEDIATE, COMPARE_DWORD_IMMEDIATE, EQUAL, NOT_EQUAL,
+    SIGNED_LESS, SIGNED_GREATER_EQUAL, SIGNED_GREATER, SIGNED_LESS_EQUAL, UNSIGNED_LESS,
+    UNSIGNED_GREATER_EQUAL, UNSIGNED_GREATER, UNSIGNED_LESS_EQUAL, BLOCK_LABEL, EDGE_LABEL,
+    JUMP_LABEL, BRANCH_LABEL, BLOCK_RETURN, BRANCH_BLOCK, ARGUMENT_COUNT, RETURN_VALUE,
+    HEADER_WORDS, RECORD_WORDS, NEVER_READ, NO_VALUE, DISP32_MASK
 };
 use self::x86_64::{BYTE_BITS, WORD_BITS, DWORD_BITS, QWORD_BITS};
 
@@ -28,11 +30,14 @@ const STACK_ALIGNMENT: u64 = 16;
 // Larger frames need to probe the stack at least once per base page.
 const MAX_FRAME_BYTES: u64 = 4096;
 const RETURN: u32 = 0xd65f03c0;
+const JUMP: u32 = 0x14000000;
 const BRANCH_IF_ZERO: u32 = 0xb4000000;
 const BRANCH_IF_CONDITION: u32 = 0x54000000;
 const BRANCH_IMM19_SHIFT: u32 = 5;
-const BRANCH_IMM19_FORWARD_MAX: u64 = 0x3ffff;
+const BRANCH_IMM19_REACH: i64 = 0x40000;
+const BRANCH_IMM26_REACH: i64 = 0x2000000;
 const INSTRUCTION_BYTES: u64 = 4;
+const INSTRUCTION_SHIFT: u32 = 2;
 const ADD_REG: u32 = 0x8b000000;
 const SUB_REG: u32 = 0xcb000000;
 const MUL_REG: u32 = 0x9b007c00;
@@ -105,9 +110,15 @@ copy struct BranchArm {
     end: u64,
 }
 
-copy struct ForwardBranch {
+copy struct Branch {
     offset: u64,
     instruction: u32,
+}
+
+copy struct LabelBranch {
+    branch: Branch,
+    target: u64,
+    block: bool,
 }
 
 struct FrameLayout {
@@ -418,9 +429,20 @@ fn memory(
     }
 }
 
+fn conditional_branch(op: u64) -> bool {
+    op == BRANCH_ZERO || op == BRANCH_BLOCK || op == BRANCH_LABEL
+}
+
 fn operands(in r: Record) -> Option[u64] {
-    if r.op == CONSTANT || r.op == STACK_SLOT {
+    if r.op == CONSTANT || r.op == STACK_SLOT || r.op == BLOCK_LABEL {
         return Option::Some(0);
+    }
+    if r.op == EDGE_LABEL || r.op == JUMP_LABEL {
+        return if r.right == 0 && r.extra == 0 {
+            Option::Some(0)
+        } else {
+            Option::None
+        };
     }
     if comparison_width(r.op) != 0 {
         if r.extra > UNSIGNED_LESS_EQUAL {
@@ -437,14 +459,14 @@ fn operands(in r: Record) -> Option[u64] {
     if r.op == SELECT {
         return Option::Some(3);
     }
-    if r.op == BRANCH_ZERO {
-        if r.right == 0 && r.extra == 0 {
+    if conditional_branch(r.op) {
+        if r.extra == 0 && (r.right == 0) == (r.op == BRANCH_ZERO) {
             return Option::Some(1);
         }
         return Option::None;
     }
-    if r.op == EARLY_RETURN {
-        if r.right != 0 {
+    if r.op == EARLY_RETURN || r.op == BLOCK_RETURN {
+        if r.right != 0 || (r.op == BLOCK_RETURN && r.extra != 0) {
             return Option::None;
         }
         return Option::Some(if r.left == NO_VALUE { 0 } else { 1 });
@@ -655,7 +677,11 @@ fn expire(used: u32, in ends: ChunkSeq[u64], value: u64, current: u64, reg: u32)
 }
 
 fn no_result(op: u64) -> bool {
-    op == BRANCH_ZERO || op == EARLY_RETURN || op == STACK_SLOT || store_width(op) != 0
+    op == BRANCH_ZERO
+        || op == EARLY_RETURN
+        || op == STACK_SLOT
+        || store_width(op) != 0
+        || (op >= BLOCK_LABEL && op <= BRANCH_BLOCK)
 }
 
 fn emit_stack_adjust(inout output: ChunkSeq[u8], opcode: u32, adjustment: u32) {
@@ -672,13 +698,20 @@ fn emit_return(inout output: ChunkSeq[u8], reg: u32, adjustment: u32) {
     push32(inout output, RETURN);
 }
 
-fn patch_forward_branch(inout output: ChunkSeq[u8], in branch: ForwardBranch) -> bool {
+fn patch_branch(inout output: ChunkSeq[u8], in branch: Branch, target: u64) -> bool {
     // AArch64 displacements count instructions from the branch itself.
-    let distance = wrapping_sub(output.len(), branch.offset) / INSTRUCTION_BYTES;
-    if distance > BRANCH_IMM19_FORWARD_MAX {
+    let delta = wrapping_i64(wrapping_sub(target, branch.offset));
+    let distance = wrapping_shr_i64(delta, INSTRUCTION_SHIFT);
+    let (reach, shift) = if branch.instruction == JUMP {
+        (BRANCH_IMM26_REACH, 0)
+    } else {
+        (BRANCH_IMM19_REACH, BRANCH_IMM19_SHIFT)
+    };
+    if distance < wrapping_sub(0, reach) || distance >= reach {
         return false;
     }
-    let instruction = branch.instruction | sh(wrapping_u32(distance), BRANCH_IMM19_SHIFT);
+    let mask = wrapping_sub(sh(wrapping_u32(reach), 1), 1);
+    let instruction = branch.instruction | sh(wrapping_u32(distance) & mask, shift);
     for index in 0..INSTRUCTION_BYTES {
         let shift = wrapping_u32(wrapping_mul(index, BYTE_BITS));
         let byte = wrapping_u8(wrapping_shr_u32(instruction, shift));
@@ -707,6 +740,16 @@ pub fn encode_leaf(in words: Slice[u64]) -> ChunkSeq[u8] {
         Option::Some(frame) => frame,
         Option::None => return out,
     };
+    let entry = read_record(in words, frame.slots.len());
+    let labeled = frame.slots.len() < count && entry.op == BLOCK_LABEL;
+    if labeled
+        && (result != NO_VALUE
+            || entry.extra > 1
+            || (entry.right != 0 && entry.right != frame.slots.len())
+            || !valid_block_layout(in words, frame.slots.len(), count, entry.extra))
+    {
+        return out;
+    }
     let mut frame_used = false;
     let mut ends = ChunkSeq::with_capacity[u64](values);
     for index in 0..values {
@@ -717,6 +760,8 @@ pub fn encode_leaf(in words: Slice[u64]) -> ChunkSeq[u8] {
     }
     let mut arms = ChunkSeq::new[BranchArm]();
     let mut depth: u64 = 0;
+    let mut block_end = values;
+    let mut entry_end = values;
     for reverse in 0..count {
         let index = wrapping_sub(wrapping_sub(count, 1), reverse);
         let value = wrapping_add(args, index);
@@ -732,6 +777,19 @@ pub fn encode_leaf(in words: Slice[u64]) -> ChunkSeq[u8] {
             return out;
         }
         let last = last_read(in ends, value);
+        if labeled {
+            if r.op == BLOCK_LABEL {
+                entry_end = block_end;
+                block_end = value;
+            } else if (last != NEVER_READ && last >= block_end)
+                || (r.op == BLOCK_RETURN && (r.left == NO_VALUE) != (entry.extra == 0))
+            {
+                // Values crossing a block boundary must use stack homes.
+                return out;
+            }
+        } else if r.op >= BLOCK_LABEL && r.op <= BRANCH_BLOCK {
+            return out;
+        }
         if r.op == STACK_SLOT && index >= frame.slots.len() {
             return out;
         }
@@ -798,11 +856,22 @@ pub fn encode_leaf(in words: Slice[u64]) -> ChunkSeq[u8] {
     let mut regs = ChunkSeq::with_capacity[u32](values);
     let mut used: u32 = 0;
     let mut flags_for_next: Option[u32] = Option::None;
-    let mut branches = ChunkSeq::new[ForwardBranch]();
+    let mut branches = ChunkSeq::new[Branch]();
+    let mut labels = ChunkSeq::new[Label]();
+    let mut fixups = ChunkSeq::new[LabelBranch]();
+    if labeled {
+        for index in 0..count {
+            labels.push(Label { address: NO_VALUE, block: false });
+        }
+    }
     for arg in 0..args {
         let reg = wrapping_u32(arg);
         regs.push(reg);
-        if last_read(in ends, arg) != NEVER_READ {
+        let last = last_read(in ends, arg);
+        if last != NEVER_READ {
+            if labeled && last >= entry_end {
+                return ChunkSeq::new[u8]();
+            }
             used = used | sh(1, reg);
         }
     }
@@ -811,6 +880,30 @@ pub fn encode_leaf(in words: Slice[u64]) -> ChunkSeq[u8] {
         let r = read_record(in words, index);
         let stored = store_width(r.op);
         if r.op == STACK_SLOT || (!no_result(r.op) && last_read(in ends, value) == NEVER_READ) {
+            regs.push(UNASSIGNED);
+            continue;
+        }
+        if r.op == BLOCK_LABEL || r.op == EDGE_LABEL {
+            let old = labels.try_get(r.left).unwrap_or(Label { address: 0, block: false });
+            if old.address != NO_VALUE {
+                return ChunkSeq::new[u8]();
+            }
+            let _ = labels
+                .try_set(r.left, Label { address: out.len(), block: r.op == BLOCK_LABEL });
+            regs.push(UNASSIGNED);
+            continue;
+        }
+        if r.op == JUMP_LABEL {
+            if r.left == 0 || r.left >= count {
+                return ChunkSeq::new[u8]();
+            }
+            let next_index = wrapping_add(index, 1);
+            let next = read_record(in words, next_index);
+            if next_index == count || next.op != BLOCK_LABEL || next.left != r.left {
+                let branch = Branch { offset: out.len(), instruction: JUMP };
+                fixups.push(LabelBranch { branch: branch, target: r.left, block: true });
+                push32(inout out, JUMP);
+            }
             regs.push(UNASSIGNED);
             continue;
         }
@@ -839,19 +932,27 @@ pub fn encode_leaf(in words: Slice[u64]) -> ChunkSeq[u8] {
         if n == 3 {
             used = expire(used, in ends, r.extra, value, third);
         }
-        if r.op == BRANCH_ZERO {
+        if conditional_branch(r.op) {
             let instruction = match flags_for_next {
                 Option::Some(cc) => BRANCH_IF_CONDITION | (cc ^ 1),
                 Option::None => BRANCH_IF_ZERO | lhs,
             };
             flags_for_next = Option::None;
-            let branch = ForwardBranch { offset: out.len(), instruction: instruction };
-            if depth == branches.len() {
-                branches.push(branch);
+            let branch = Branch { offset: out.len(), instruction: instruction };
+            if r.op != BRANCH_ZERO {
+                fixups.push(LabelBranch {
+                    branch: branch,
+                    target: r.right,
+                    block: r.op == BRANCH_BLOCK
+                });
             } else {
-                let _ = branches.try_set(depth, branch);
+                if depth == branches.len() {
+                    branches.push(branch);
+                } else {
+                    let _ = branches.try_set(depth, branch);
+                }
+                depth = wrapping_add(depth, 1);
             }
-            depth = wrapping_add(depth, 1);
             push32(inout out, instruction);
             regs.push(UNASSIGNED);
             continue;
@@ -859,12 +960,18 @@ pub fn encode_leaf(in words: Slice[u64]) -> ChunkSeq[u8] {
         if r.op == EARLY_RETURN {
             emit_return(inout out, lhs, adjustment);
             depth = wrapping_sub(depth, 1);
+            let target = out.len();
             match branches.try_get(depth) {
-                Option::Some(branch) => if !patch_forward_branch(inout out, in branch) {
+                Option::Some(branch) => if !patch_branch(inout out, in branch, target) {
                     return ChunkSeq::new[u8]();
                 },
                 Option::None => return ChunkSeq::new[u8](),
             };
+            regs.push(UNASSIGNED);
+            continue;
+        }
+        if r.op == BLOCK_RETURN {
+            emit_return(inout out, lhs, adjustment);
             regs.push(UNASSIGNED);
             continue;
         }
@@ -884,7 +991,7 @@ pub fn encode_leaf(in words: Slice[u64]) -> ChunkSeq[u8] {
         {
             let next = read_record(in words, wrapping_add(index, 1));
             if next.left == value
-                && (next.op == BRANCH_ZERO
+                && (conditional_branch(next.op)
                     || (next.op == SELECT && next.right != value && next.extra != value))
             {
                 compare(inout out, in r, lhs, rhs);
@@ -918,6 +1025,25 @@ pub fn encode_leaf(in words: Slice[u64]) -> ChunkSeq[u8] {
             Option::None => emit_instruction(inout out, in r, dest, lhs, rhs, third),
         };
     }
-    emit_return(inout out, register(in regs, result), adjustment);
+    if labeled {
+        for index in 0..fixups.len() {
+            match fixups.try_get(index) {
+                Option::Some(fixup) => match labels.try_get(fixup.target) {
+                    Option::Some(label) => {
+                        if label.address == NO_VALUE
+                            || label.block != fixup.block
+                            || !patch_branch(inout out, in fixup.branch, label.address)
+                        {
+                            return ChunkSeq::new[u8]();
+                        }
+                    },
+                    Option::None => return ChunkSeq::new[u8](),
+                },
+                Option::None => return ChunkSeq::new[u8](),
+            };
+        }
+    } else {
+        emit_return(inout out, register(in regs, result), adjustment);
+    }
     out
 }
