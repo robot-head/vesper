@@ -30,6 +30,17 @@ const UTF8_CONT_TAG: u8 = 128;
 const WORD_BYTES: u64 = 8;
 const WORD_ALIGN_MASK: u64 = 7;
 const BYTE_BITS: u64 = 8;
+const BYTE_MASK: u64 = 255;
+
+// `SourceMapSegment` flat word layout: `[exp_start, exp_end, orig_start, orig_end, kind]`.
+const MAP_SEG_WORDS: u64 = 5;
+const MAP_OFF_EXP_START: u64 = 0;
+const MAP_OFF_EXP_END: u64 = 1;
+const MAP_OFF_ORIG_START: u64 = 2;
+const MAP_OFF_ORIG_END: u64 = 3;
+const MAP_OFF_KIND: u64 = 4;
+const MAP_KIND_SOURCE: u64 = 0;
+const MAP_KIND_GENERATED: u64 = 1;
 
 fn at_byte(in s: Slice[u8], i: u64) -> u8 {
     match s.try_get(i) {
@@ -392,6 +403,201 @@ pub fn package_error_lines_words(in input: Str) -> ChunkSeq[u64] {
     push_bytes(inout combined, in m.as_slice());
     push_bytes(inout combined, in u.as_slice());
     pack_bytes(in combined.as_slice())
+}
+
+fn push_u64_le(inout out: ChunkSeq[u8], v: u64) {
+    for i in 0..WORD_BYTES {
+        let shift = wrapping_u32(wrapping_mul(i, BYTE_BITS));
+        out.push(wrapping_u8(wrapping_shr_u64(v, shift) & BYTE_MASK));
+    }
+}
+
+fn push_len_bytes(inout out: ChunkSeq[u8], in s: Slice[u8]) {
+    push_u64_le(inout out, s.len());
+    push_bytes(inout out, in s);
+}
+
+fn eq_bytes(in a: Slice[u8], in b: Slice[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    for i in 0..a.len() {
+        if at_byte(in a, i) != at_byte(in b, i) {
+            return false;
+        }
+    }
+    true
+}
+
+fn is_sugar_rejection_code(in code: Slice[u8]) -> bool {
+    eq_bytes(in code, in "E0143".as_bytes()) || eq_bytes(in code, in "E0144".as_bytes())
+}
+
+fn at_word(in w: Slice[u64], i: u64) -> u64 {
+    match w.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+// `vesper::forge_frontend::provenance::origin_of` span remapping.
+pub fn remap_diagnostic_span(in map_words: Slice[u64], start: u64, end: u64) -> ByteSpan {
+    let segs = map_words.len() / MAP_SEG_WORDS;
+    if segs == 0 {
+        return ByteSpan { start, end };
+    }
+    // 1. Overlapping `MapKind::Generated` segment takes priority.
+    for i in 0..segs {
+        let base = wrapping_mul(i, MAP_SEG_WORDS);
+        if at_word(in map_words, wrapping_add(base, MAP_OFF_KIND)) == MAP_KIND_GENERATED {
+            let a = at_word(in map_words, wrapping_add(base, MAP_OFF_EXP_START));
+            let b = at_word(in map_words, wrapping_add(base, MAP_OFF_EXP_END));
+            let overlaps = if start == end {
+                a <= start && start < b
+            } else {
+                a < end && start < b
+            };
+            if overlaps {
+                return ByteSpan {
+                    start: at_word(in map_words, wrapping_add(base, MAP_OFF_ORIG_START)),
+                    end: at_word(in map_words, wrapping_add(base, MAP_OFF_ORIG_END)),
+                };
+            }
+        }
+    }
+    // 2. Half-open `MapKind::Source` segment containing `start`.
+    for i in 0..segs {
+        let base = wrapping_mul(i, MAP_SEG_WORDS);
+        if at_word(in map_words, wrapping_add(base, MAP_OFF_KIND)) == MAP_KIND_SOURCE {
+            let exp_s = at_word(in map_words, wrapping_add(base, MAP_OFF_EXP_START));
+            let exp_e = at_word(in map_words, wrapping_add(base, MAP_OFF_EXP_END));
+            if exp_s <= start && start < exp_e {
+                let orig_s = at_word(in map_words, wrapping_add(base, MAP_OFF_ORIG_START));
+                let orig_e = at_word(in map_words, wrapping_add(base, MAP_OFF_ORIG_END));
+                let new_start = wrapping_add(orig_s, wrapping_sub(start, exp_s));
+                let len = if end > start {
+                    wrapping_sub(end, start)
+                } else {
+                    0
+                };
+                let raw_end = wrapping_add(new_start, len);
+                let clamped = if raw_end < orig_e { raw_end } else { orig_e };
+                let new_end = if clamped > new_start {
+                    clamped
+                } else {
+                    new_start
+                };
+                return ByteSpan {
+                    start: new_start,
+                    end: new_end,
+                };
+            }
+        }
+    }
+    // 3. EOF fallback: `MapKind::Source` segment ending at `start`.
+    for i in 0..segs {
+        let base = wrapping_mul(i, MAP_SEG_WORDS);
+        if at_word(in map_words, wrapping_add(base, MAP_OFF_KIND)) == MAP_KIND_SOURCE {
+            let exp_s = at_word(in map_words, wrapping_add(base, MAP_OFF_EXP_START));
+            let exp_e = at_word(in map_words, wrapping_add(base, MAP_OFF_EXP_END));
+            if exp_s <= start && start == exp_e {
+                let orig_s = at_word(in map_words, wrapping_add(base, MAP_OFF_ORIG_START));
+                let orig_e = at_word(in map_words, wrapping_add(base, MAP_OFF_ORIG_END));
+                let new_start = wrapping_add(orig_s, wrapping_sub(start, exp_s));
+                let len = if end > start {
+                    wrapping_sub(end, start)
+                } else {
+                    0
+                };
+                let raw_end = wrapping_add(new_start, len);
+                let clamped = if raw_end < orig_e { raw_end } else { orig_e };
+                let new_end = if clamped > new_start {
+                    clamped
+                } else {
+                    new_start
+                };
+                return ByteSpan {
+                    start: new_start,
+                    end: new_end,
+                };
+            }
+        }
+    }
+    ByteSpan { start, end }
+}
+
+// `vesper::forge_frontend::original_diagnostic` over a diagnostic stream.
+pub fn remap_diagnostics_stream(in map_words: Slice[u64], in stream: Slice[u8]) -> ChunkSeq[u8] {
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let has_map = map_words.len() >= MAP_SEG_WORDS;
+    let mut at: u64 = 0;
+    let count = read_u64(in stream, inout at);
+    push_u64_le(inout out, count);
+    for _idx in 0..count {
+        let code_r = read_span_slice(in stream, inout at);
+        let msg_r = read_span_slice(in stream, inout at);
+        let span_start = read_u64(in stream, inout at);
+        let span_end = read_u64(in stream, inout at);
+        let rel_count = read_u64(in stream, inout at);
+
+        let code = stream[code_r.start..code_r.end];
+        let do_remap = has_map && !is_sugar_rejection_code(in code);
+        let mapped_primary = if do_remap {
+            remap_diagnostic_span(in map_words, span_start, span_end)
+        } else {
+            ByteSpan {
+                start: span_start,
+                end: span_end,
+            }
+        };
+
+        push_len_bytes(inout out, in code);
+        push_len_bytes(inout out, in stream[msg_r.start..msg_r.end]);
+        push_u64_le(inout out, mapped_primary.start);
+        push_u64_le(inout out, mapped_primary.end);
+        push_u64_le(inout out, rel_count);
+
+        for _r_idx in 0..rel_count {
+            let r_start = read_u64(in stream, inout at);
+            let r_end = read_u64(in stream, inout at);
+            let r_msg = read_span_slice(in stream, inout at);
+            let mapped_rel = if do_remap {
+                remap_diagnostic_span(in map_words, r_start, r_end)
+            } else {
+                ByteSpan {
+                    start: r_start,
+                    end: r_end,
+                }
+            };
+            push_u64_le(inout out, mapped_rel.start);
+            push_u64_le(inout out, mapped_rel.end);
+            push_len_bytes(inout out, in stream[r_msg.start..r_msg.end]);
+        }
+
+        let has_help = read_u64(in stream, inout at);
+        push_u64_le(inout out, has_help);
+        if has_help != 0 {
+            let help_r = read_span_slice(in stream, inout at);
+            push_len_bytes(inout out, in stream[help_r.start..help_r.end]);
+        }
+    }
+    out
+}
+
+// JIT test entrypoint: `[map_seg_count: u64, map_words..., stream_bytes...]`
+// -> packed JSON bytes after remapping.
+pub fn remap_diagnostics_json_words(in input: Str) -> ChunkSeq[u64] {
+    let b = input.as_bytes();
+    let mut at: u64 = 0;
+    let segs = read_u64(in b, inout at);
+    let total_words = wrapping_mul(segs, MAP_SEG_WORDS);
+    let mut map_words: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    for _i in 0..total_words {
+        map_words.push(read_u64(in b, inout at));
+    }
+    let remapped = remap_diagnostics_stream(in map_words.as_slice(), in b[at..b.len()]);
+    let json = diagnostics_json(in remapped.as_slice());
+    pack_bytes(in json.as_slice())
 }
 
 // JIT test entrypoint: `[reason_len: u64, reason_bytes, stream_bytes...]` -> packed raw stderr bytes.
