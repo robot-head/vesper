@@ -39,6 +39,7 @@ pub const E_CONTINUE: u64 = 21;
 pub const E_HANDLE: u64 = 22;
 pub const E_TRY: u64 = 23;
 pub const E_CLOSURE: u64 = 24;
+pub const E_ARRAY_WRITE: u64 = 25;
 pub const E_INDEX: u64 = 40;
 
 // Literal pattern kinds (`LIT_*` in exprs.ves).
@@ -279,12 +280,19 @@ fn encode_expr(w: &World, e: &mut Enc, x: &Expr, out: &mut Vec<u64>) {
                 encode_expr(w, e, x, out);
             }
         }
-        // Element writes (`a[i] = v`, lowered to `"[]="`) belong to the
-        // arrays lane.
         ExprKind::Assign(op, place, value) if !op.starts_with(vesper::arrays::WRITE_PREFIX) => {
             out.extend([E_ASSIGN, s, t, (op != "=") as u64]);
             encode_expr(w, e, place, out);
             encode_expr(w, e, value, out);
+        }
+        // An element write `a[i] op= v` or `a.set(i, v)`, lowered to
+        // `Assign("[]op", a, (i, v))`: whether it is compound, the array,
+        // the operand pair.
+        ExprKind::Assign(op, array, operands) => {
+            let simple = op.strip_prefix(vesper::arrays::WRITE_PREFIX) == Some("=");
+            out.extend([E_ARRAY_WRITE, s, t, !simple as u64]);
+            encode_expr(w, e, array, out);
+            encode_expr(w, e, operands, out);
         }
         ExprKind::For { pat, iter, body } => {
             out.extend([E_FOR, s, t]);
@@ -339,6 +347,7 @@ fn encode_expr(w: &World, e: &mut Enc, x: &Expr, out: &mut Vec<u64>) {
                         }) + 1
                     }),
             );
+            out.push(e.opt_name(&effect.label));
             out.push(state.is_some() as u64);
             if let Some((p, value)) = state {
                 encode_pattern(e, p, out);

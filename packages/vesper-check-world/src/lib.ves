@@ -1175,6 +1175,7 @@ fn expr(inout e: Enc, in a: Ast, x: u32, shift: u32, fip: bool, inout out: Chunk
         }
         // The handler's inferred effects: not known before inference.
         out.push(0);
+        out.push(opt_ast_name(inout e, in a, eff.label));
         out.push(flag(n.b != none()));
         if n.b != none() {
             pattern(inout e, in a, n.b, shift, inout out);

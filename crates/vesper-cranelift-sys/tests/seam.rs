@@ -195,6 +195,107 @@ fn vesper_reaches_the_seam() {
     );
     let id = jit(&checked, "seam");
     assert_ne!(id, 0, "the fixture failed");
+    let outlined = jit(&checked, "seam_outline");
+    assert_ne!(outlined, 0, "the outlining fixture failed");
+    assert!(take_published(outlined).is_some_and(|o| !o.is_empty()));
     assert_eq!(live_handles(), before, "the fixture leaked a handle");
     assert!(take_published(id).is_some_and(|o| !o.is_empty()));
+}
+
+/// The cold outliner's answer for `build`'s function: block 2 (the `else`
+/// arm, `x * x` returned) becomes a helper taking `x` (value 0).
+const OUTLINE_ELSE: [u64; 15] = [
+    clif_words::E_OUTLINE,
+    0, // idx
+    2, // root
+    1,
+    2, // owned
+    0, // shared blocks
+    1, // has_return
+    0, // trap
+    1,
+    0, // live_ins
+    0, // remat
+    0, // shared slots
+    0, // exclusive slots
+    0, // ordered blocks
+    E_END,
+];
+
+#[test]
+fn outline_cold_matches_the_extraction_called_directly() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    use vesper_cranelift_sys::clif_outline::apply_outline;
+    use vesper_cranelift_sys::cranelift_module::{Linkage, Module as _, default_libcall_names};
+    use vesper_cranelift_sys::cranelift_object::{ObjectBuilder, ObjectModule};
+    // SAFETY: handles from `build`, each consumed once.
+    unsafe {
+        let (m, func, b) = build();
+        let mut want = finalized_function(b).expect("finalized");
+        let script = &OUTLINE_ELSE;
+        assert_eq!(
+            vcl_outline_cold(b, m, script.as_ptr(), script.len()),
+            1,
+            "{}",
+            error(b)
+        );
+        // The same replay on a module with the same declarations.
+        let isa = vesper_cranelift_sys::cranelift_native::builder()
+            .unwrap()
+            .finish(
+                vesper_cranelift_sys::cranelift_codegen::settings::Flags::new(
+                    vesper_cranelift_sys::cranelift_codegen::settings::builder(),
+                ),
+            )
+            .unwrap();
+        let mut direct =
+            ObjectModule::new(ObjectBuilder::new(isa, "seam", default_libcall_names()).unwrap());
+        direct
+            .declare_function("seam_f", Linkage::Export, &want.signature)
+            .unwrap();
+        let helpers = apply_outline(&mut direct, "outlined", &mut want, script).unwrap();
+        assert_eq!(helpers.len(), 1);
+        let parent = finalized_function(b).expect("still finalized");
+        assert_eq!(parent.display().to_string(), want.display().to_string());
+        let helper = vcl_take_cold_helper(b);
+        assert!(!helper.is_null());
+        assert!(vcl_take_cold_helper(b).is_null(), "one helper");
+        let got = finalized_function(helper).expect("a finalized helper");
+        assert_eq!(
+            got.display().to_string(),
+            helpers[0].2.display().to_string()
+        );
+        let helper_func = vcl_cold_helper_func(helper);
+        assert_ne!(helper_func, INVALID);
+        assert_eq!(vcl_cold_helper_func(b), INVALID, "the parent is no helper");
+        // Parent first, then the helper, as src/native.rs defines them.
+        assert_eq!(vcl_define_function(m, func, b), 0);
+        assert_eq!(vcl_define_function(m, helper_func, helper), 0);
+        let o = vcl_module_finish(m);
+        assert!(!o.is_null());
+        vcl_object_free(o);
+    }
+}
+
+#[test]
+fn outlining_nothing_leaves_the_function_be() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    // SAFETY: handles from `build`, each consumed once.
+    unsafe {
+        let (m, func, b) = build();
+        let before = finalized_function(b)
+            .expect("finalized")
+            .display()
+            .to_string();
+        let skip = [clif_words::E_SKIP, E_END];
+        assert_eq!(vcl_outline_cold(b, m, skip.as_ptr(), skip.len()), 0);
+        let after = finalized_function(b)
+            .expect("finalized")
+            .display()
+            .to_string();
+        assert_eq!(after, before);
+        assert!(vcl_take_cold_helper(b).is_null());
+        assert_eq!(vcl_define_function(m, func, b), 0);
+        vcl_module_free(m);
+    }
 }

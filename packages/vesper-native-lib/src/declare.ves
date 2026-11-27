@@ -20,7 +20,6 @@ use @vesper/codegen-calls::abi::{
 
 const NO_LIBRARY: Str = "the calls input has no library task";
 const NOT_STANDALONE: Str = " is not compiled as a standalone native function";
-const WIDE_EXPORT: Str = "a 128-bit export needs a wide entry, which is not built yet: ";
 const DECLARE_FAILED: Str = "declaring a function failed: ";
 // `local_symbol`'s prefix (src/native.rs, #1451): the instance index and
 // key follow.
@@ -91,14 +90,29 @@ impl Exports {
     }
 }
 
-// The declared functions, by instance index.
+// The declared functions, by instance index, with their signatures' type
+// codes: function `k`'s parameters are `types[params_at[k]..]`
+// (`params_n[k]` of them), its returns `types[returns_at[k]..]`.
 pub struct Declared {
-    ids: ChunkSeq[u64],
-    sigs: ChunkSeq[u64],
+    pub ids: ChunkSeq[u64],
+    pub sigs: ChunkSeq[u64],
+    pub types: ChunkSeq[u64],
+    pub params_at: ChunkSeq[u64],
+    pub params_n: ChunkSeq[u64],
+    pub returns_at: ChunkSeq[u64],
+    pub returns_n: ChunkSeq[u64],
 }
 
 pub fn declared_new() -> Declared {
-    Declared { ids: ChunkSeq::new[u64](), sigs: ChunkSeq::new[u64]() }
+    Declared {
+        ids: ChunkSeq::new[u64](),
+        sigs: ChunkSeq::new[u64](),
+        types: ChunkSeq::new[u64](),
+        params_at: ChunkSeq::new[u64](),
+        params_n: ChunkSeq::new[u64](),
+        returns_at: ChunkSeq::new[u64](),
+        returns_n: ChunkSeq::new[u64](),
+    }
 }
 
 fn ty_of(code: u8) -> Ty {
@@ -248,12 +262,10 @@ pub fn declare_library(
         c.names.write(inst.key, inout key);
         let e = exports.find(in key.as_slice());
         let mut symbol: ChunkSeq[u8] = ChunkSeq::new[u8]();
-        let linkage = if e < exports.count() {
-            if has_wide(in sig) {
-                err.extend(in WIDE_EXPORT.as_bytes());
-                err.extend(in key.as_slice());
-                return err;
-            }
+        // An export with a by-value 128-bit parameter or result is local
+        // under `local_symbol`; its `define_wide_entry` adapter takes the
+        // export symbol (exports.ves).
+        let linkage = if e < exports.count() && !has_wide(in sig) {
             exports.push_symbol(e, inout symbol);
             linkage_export()
         } else {
@@ -264,11 +276,19 @@ pub fn declare_library(
             linkage_local()
         };
         let s = sig_new(inout m, call_conv_default());
+        d.params_at.push(d.types.len());
+        d.params_n.push(sig.params.len());
         for j in 0..sig.params.len() {
-            sig_param(inout m, s, ty_of(sig.params.try_get(j).unwrap_or(0)));
+            let t = ty_of(sig.params.try_get(j).unwrap_or(0));
+            d.types.push(widen_u64(t.code));
+            sig_param(inout m, s, t);
         }
+        d.returns_at.push(d.types.len());
+        d.returns_n.push(sig.returns.len());
         for j in 0..sig.returns.len() {
-            sig_return(inout m, s, ty_of(sig.returns.try_get(j).unwrap_or(0)));
+            let t = ty_of(sig.returns.try_get(j).unwrap_or(0));
+            d.types.push(widen_u64(t.code));
+            sig_return(inout m, s, t);
         }
         let id = declare_function(inout m, in symbol.as_slice(), linkage, s);
         d.ids.push(widen_u64(id.id));

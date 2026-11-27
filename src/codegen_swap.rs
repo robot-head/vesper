@@ -1265,12 +1265,18 @@ pub mod body {
     /// that `aggregates::plan` builds in it (#2411). A function that
     /// returns its result in registers (`FnAbi::result_words`, #2581)
     /// builds it in a local buffer: its `sret` word is the buffer's value
-    /// with the result's word count at [`RESULT_WORDS_SHIFT`]. Then `p, p
-    /// words`: for each of the function's `p` declared parameters the
-    /// variable holding its address, or [`NO_VALUE`] (#2563: an `inout`
-    /// scalar parameter is loaded at entry and stored through its address
-    /// at every definition). No result.
+    /// with the result's word count at [`RESULT_WORDS_SHIFT`]; one that
+    /// returns a small enum's words (`FrameResult::Words`) has
+    /// [`NO_POINTER`] below its word count. Then `p, p words`: for each of
+    /// the function's `p` declared parameters the variable holding its
+    /// address, or [`NO_VALUE`] (#2563: an `inout` scalar parameter is
+    /// loaded at entry and stored through its address at every
+    /// definition). No result.
     pub const FUNCTION: u32 = 1;
+
+    /// The low word of a [`FUNCTION`] request's `sret` word when a small
+    /// enum result returns as words with no result pointer (#2581).
+    pub const NO_POINTER: u64 = u32::MAX as u64;
 
     /// Where a [`FUNCTION`] request's `sret` word carries the number of
     /// words a register result returns from its buffer (0 for a result
@@ -1293,6 +1299,10 @@ pub mod body {
     /// With [`FAIL_CALL`]: the callee returns its status word in a register
     /// (`FnAbi::status`) instead of storing a tag in the record.
     pub const STATUS_CALL: u64 = 1 << 33;
+
+    /// A callee word's flag for a callee that returns its small enum result
+    /// as words in registers (#2581, `FnAbi::result_words`).
+    pub const WORDS_CALL: u64 = 1 << 34;
 
     /// [`FUNCTION`]'s leading flags, `status` and `locations`: the words
     /// before the parameter count.

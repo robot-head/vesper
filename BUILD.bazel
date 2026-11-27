@@ -112,7 +112,9 @@ vesper_crate(
         "//crates/vesper-port-pilot:files",
         # tests/common/wasm_words.rs embeds the Cranelift component's WIT (#2210).
         "//crates/vesper-cranelift-component:wit/vcl.wit",
-        # The CLIF pass differentials include the shim's clif_words.rs (#2606).
+        # The CLIF pass differentials include the shim's clif_words.rs (#2606)
+        # and clif_outline.rs (#2634).
+        "//crates/vesper-cranelift-sys:src/clif_outline.rs",
         "//crates/vesper-cranelift-sys:src/clif_words.rs",
     ],
     extra_test_data = [
@@ -1969,6 +1971,7 @@ vesper_package(
     deps = [
         ":check_data_package",
         ":check_layout_package",
+        ":codegen_aggregates_package",
         ":place_ir_package",
     ],
 )

@@ -15,11 +15,11 @@
 //! - `CHECK_HARNESS_SPEED=1` runs the ABBA timing (release build).
 #[path = "common/check_harness.rs"]
 mod check_harness;
-#[path = "common/clif_outline.rs"]
+// The Cranelift shim's extraction (#2634), function words and edit replay
+// (#2606), included by path: the root crate cannot depend on
+// vesper-cranelift-sys (a Bazel dev-dependency cycle).
+#[path = "../crates/vesper-cranelift-sys/src/clif_outline.rs"]
 mod clif_outline;
-// The Cranelift shim's function words and edit replay (#2606), included
-// by path: the root crate cannot depend on vesper-cranelift-sys (a Bazel
-// dev-dependency cycle).
 #[path = "../crates/vesper-cranelift-sys/src/clif_words.rs"]
 mod clif_words;
 

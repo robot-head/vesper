@@ -32,7 +32,12 @@ use self::floats::{float_call, retype_float_literal};
 use self::methods::{
     inherent_index, is_qualified, is_str, is_string, peek_type, receiver_type, seq_method, seq_new,
     view_place, index_expr, string_comparison, string_literal, string_method, text_operand,
-    conversion_call, conversion_of, is_conversion, element_view_scrutinee
+    conversion_call, conversion_of, is_conversion, element_view_scrutinee, seq_finish
+};
+use self::vectors::{vector_call};
+use self::regions::{
+    contains_capability, region_active, region_annotation, region_capability, region_cross,
+    region_op, row_label
 };
 
 const NONE32: u32 = 4294967295;
@@ -94,6 +99,10 @@ const E_TRY: u8 = 23;
 // (`closure_free`), m = the declared mode + 1 (0 for none), y = whether the
 // row is inferred, x = body.
 const E_CLOSURE: u8 = 24;
+// An element write lowered by `arrays::lower_world`, `Assign("[]op", a,
+// (i, v))`: y = whether it is compound, x = the array, z = the operand
+// pair (spanning `a[i]`, or `a.set` for `a.set(i, v)`).
+const E_ARRAY_WRITE: u8 = 25;
 const NO_MODE: u32 = 0;
 // `latent_capability`'s closure origin `c<start>`.
 const CLOSURE_ORIGIN: u8 = 99;
@@ -140,6 +149,8 @@ const TABLE_PREFIX: Str = "$table$";
 // and their operand count.
 const SWAP: Str = "swap";
 const REPLACE: Str = "replace";
+// `ChunkSeq::finish(s)`: consumes an empty sequence.
+const SEQ_FINISH: Str = "ChunkSeq::finish";
 const PLACE_PRIMITIVE_OPERANDS: u32 = 2;
 
 // The length of `::` in an `Eff::op` name.
@@ -147,6 +158,10 @@ const PATH_SEPARATOR_LEN: u64 = 2;
 
 // `regions::REGION_EFFECT`: a handler of it is a region block.
 const REGION_EFFECT: Str = "Region";
+// A `Region::op` path.
+const REGION_PATH: Str = "Region::";
+// `regions::REGION_MARKER`: the return-clause binder of a region block.
+const REGION_MARKER: Str = "$region";
 
 // Pattern kinds (patterns.ves).
 const P_WILD: u8 = 0;
@@ -367,6 +382,10 @@ pub struct Ck {
     // Handler capabilities in scope, innermost last (`Checker::caps` past
     // the function's own), and how many handlers enclose the expression.
     handler_caps: ChunkSeq[Inst],
+    // `Checker::cap_aliases`: source capability labels and the capability
+    // labels they name (both symbol + 1), innermost last.
+    alias_from: ChunkSeq[u32],
+    alias_to: ChunkSeq[u32],
     handlers: u64,
     // Loops entered before the innermost handler: a `break` or `continue`
     // that would leave a handler is not ported.
@@ -389,7 +408,6 @@ pub struct Ck {
     // checked, or NO_ELEMENT_VIEW (`Checker::element_view`).
     element_view: u8,
     out: ChunkSeq[u8],
-    atomic_sym: u32,
     // The function being checked returns `Str`: string literals are static
     // text (`Checker::static_text`).
     static_text: bool,
@@ -476,6 +494,8 @@ pub fn ck_new(sink ctx: Ctx) -> Ck {
         clauses: ChunkSeq::new[ClauseX](),
         clause_pats: ChunkSeq::new[u32](),
         handler_caps: ChunkSeq::new[Inst](),
+        alias_from: ChunkSeq::new[u32](),
+        alias_to: ChunkSeq::new[u32](),
         handlers: 0,
         loop_floor: 0,
         env: ChunkSeq::new[Bind](),
@@ -488,7 +508,6 @@ pub fn ck_new(sink ctx: Ctx) -> Ck {
         lent_closure: NONE64,
         element_view: NO_ELEMENT_VIEW,
         out: ChunkSeq::new[u8](),
-        atomic_sym: 0,
         static_text: false,
         fn_result: NONE32,
         returned: NONE32,
@@ -506,8 +525,6 @@ pub fn ck_new(sink ctx: Ctx) -> Ck {
     };
     let pats = pats_new(inout ck.ctx.names);
     ck.pats = pats;
-    let atomic = ck.ctx.names.intern(in "Atomic".as_bytes());
-    ck.atomic_sym = atomic;
     let range = ck.ctx.names.intern(in "Range".as_bytes());
     ck.range_sym = range;
     // Pattern 0, the wildcard, has no extras.
@@ -805,6 +822,10 @@ fn read_expr(inout reader: Reader, in bytes: Slice[u8], inout ck: Ck) -> u32 {
         if ex.y != 0 {
             ex.x = read_expr(inout reader, in bytes, inout ck);
         }
+    } else if kind == E_ARRAY_WRITE {
+        ex.y = n32(reader.word(in bytes));
+        ex.x = read_expr(inout reader, in bytes, inout ck);
+        ex.z = read_expr(inout reader, in bytes, inout ck);
     } else if kind == E_ASSIGN {
         // Whether it is compound (`+=` and the rest), the place, the value.
         ex.y = n32(reader.word(in bytes));
@@ -907,6 +928,9 @@ fn read_expr(inout reader: Reader, in bytes: Slice[u8], inout ck: Ck) -> u32 {
             let row_ty = tyw(in ck.ctx, wrapping_sub(effects_word, 1));
             ex.mag = w(inc32w(row_ty)) << HANDLER_ROW_SHIFT;
         }
+        // The handler's label (symbol + 1, or 0) follows its type
+        // arguments in `targs` (`handler_label`).
+        ck.targs.push(qual_word(in ck.ctx, reader.word(in bytes)));
         if reader.word(in bytes) != 0 {
             ex.mag = ex.mag | w(read_xpat(inout reader, in bytes, inout ck));
             ex.z = read_expr(inout reader, in bytes, inout ck);
@@ -1125,7 +1149,8 @@ pub fn error(inout ck: Ck, in code: Str, start: u64, end: u64) {
 fn foreign(in ck: Ck, ty: u32) -> bool {
     let node = ck.ctx.types.node(ty);
     if node.kind == TyKind::Row {
-        return true;
+        // Only a region argument (`eff [label: Region]`) is typed here.
+        return row_label(in ck, ty) == 0;
     }
     if node.kind == TyKind::Fn {
         if foreign(in ck, node.r) {
@@ -1144,14 +1169,7 @@ fn foreign(in ck: Ck, ty: u32) -> bool {
     if node.kind == TyKind::Named {
         let known = ck.ctx.world.k;
         let name = node.name;
-        if name == known.tiled_seq
-            || name == known.vec
-            || name == known.mask
-            || name == known.box_
-            || name == known.region_box
-            || name == known.dyn_
-            || name == ck.atomic_sym
-        {
+        if name == known.tiled_seq || name == known.box_ || name == known.dyn_ {
             return true;
         }
     }
@@ -1222,7 +1240,11 @@ pub fn is_named(in ck: Ck, ty: u32, name: u32) -> bool {
 
 pub fn expect_type(inout ck: Ck, expected: u32, actual: u32, start: u64, end: u64) {
     if !compatible(in ck.ctx.types, ck.ctx.world.k, expected, actual) {
-        error(inout ck, "E0200", start, end);
+        if region_cross(in ck, expected, actual) {
+            error(inout ck, "E0792", start, end);
+        } else {
+            error(inout ck, "E0200", start, end);
+        }
     }
 }
 
@@ -1343,6 +1365,8 @@ pub fn expr_expected(inout ck: Ck, e: u32, expected: u32) -> u32 {
         return_expr(inout ck, ex)
     } else if ex.kind == E_ASSIGN {
         assign_expr(inout ck, ex)
+    } else if ex.kind == E_ARRAY_WRITE {
+        array_write(inout ck, ex)
     } else if ex.kind == E_LOOP {
         let ty = loop_body(inout ck, ex.x, expected, true, NONE32, hole);
         ty
@@ -1643,7 +1667,7 @@ fn open_type(in ck: Ck, ty: u32) -> bool {
 
 // The `i`th capability in scope from the innermost: the handlers' (last
 // first), then the current function's own, last first (`caps.iter().rev()`).
-fn cap_at(in ck: Ck, i: u64) -> Inst {
+pub fn cap_at(in ck: Ck, i: u64) -> Inst {
     let handlers = ck.handler_caps.len();
     if i < handlers {
         return match ck.handler_caps.try_get(wrapping_sub(wrapping_sub(handlers, 1), i)) {
@@ -1657,7 +1681,7 @@ fn cap_at(in ck: Ck, i: u64) -> Inst {
     ck.inst(add(w(current.inst_start), index))
 }
 
-fn cap_label(inout ck: Ck, i: u64) -> u32 {
+pub fn cap_label(inout ck: Ck, i: u64) -> u32 {
     let handlers = ck.handler_caps.len();
     if i < handlers {
         return cap_at(in ck, i).label;
@@ -1668,6 +1692,46 @@ fn cap_label(inout ck: Ck, i: u64) -> u32 {
     function_capability(inout ck, current.name, index)
 }
 
+// The number of capabilities in scope: handlers' and the function's.
+pub fn total_caps(in ck: Ck) -> u64 {
+    add(ck.handler_caps.len(), w(ck.fsig(ck.current).inst_count))
+}
+
+// The capability label a source label (symbol + 1) is an alias of, or 0.
+pub fn lookup_alias(in ck: Ck, label: u32) -> u32 {
+    let mut i = ck.alias_from.len();
+    loop {
+        if i == 0 {
+            break;
+        }
+        i = wrapping_sub(i, 1);
+        if u32_at(in ck.alias_from, i) == label {
+            return u32_at(in ck.alias_to, i);
+        }
+    }
+    0
+}
+
+// The capability label a labeled request names: its own `$` label, or
+// the label its source label is an alias of; 0 (and a skip) for a latent
+// label or a source label without an alias.
+fn request_label(inout ck: Ck, label: u32) -> u32 {
+    let mut text = ChunkSeq::new[u8]();
+    ck.ctx.names.write(wrapping_sub(label, 1), inout text);
+    if starts_with(in text, LATENT_PREFIX) {
+        ck.skip = true;
+        return 0;
+    }
+    if u8_at(in text, 0) == DOLLAR {
+        return label;
+    }
+    let alias = lookup_alias(in ck, label);
+    if alias == 0 {
+        ck.skip = true;
+    }
+    alias
+}
+
 // `resolve_effect(e).label` for the unlabeled instance `inst` of a callee
 // (arguments in `args`): the innermost capability of its effect, with
 // exactly its arguments when they are concrete; 0 for none. Labeled
@@ -1675,6 +1739,15 @@ fn cap_label(inout ck: Ck, i: u64) -> u32 {
 // not ported: they skip.
 fn resolve_label(inout ck: Ck, inst: Inst, in args: ChunkSeq[u32]) -> u32 {
     if inst.label != 0 {
+        let target = request_label(inout ck, inst.label);
+        if ck.skip {
+            return 0;
+        }
+        for i in 0..total_caps(in ck) {
+            if cap_at(in ck, i).name == inst.name && cap_label(inout ck, i) == target {
+                return target;
+            }
+        }
         ck.skip = true;
         return 0;
     }
@@ -1784,7 +1857,7 @@ fn same_effect_args(in ck: Ck, a: EffNode, b: EffNode) -> bool {
 fn capability_target(inout ck: Ck, sig: FnSig, param_ty: u32, in context: Vars) -> u32 {
     let bound = bind_capabilities(inout ck, param_ty, sig);
     let substituted = substitute(inout ck.ctx.types, bound, in context);
-    if sig.inst_count == 0 || bound == param_ty {
+    if sig.inst_count == 0 || (bound == param_ty && !has_row_type(in ck, param_ty)) {
         return substituted;
     }
     let mut from: ChunkSeq[u32] = ChunkSeq::new[u32]();
@@ -1808,6 +1881,33 @@ fn capability_target(inout ck: Ck, sig: FnSig, param_ty: u32, in context: Vars) 
         to.push(label);
     }
     relabel(inout ck, substituted, sig, RELABEL_RENAME, in from, in to)
+}
+
+// `rename_capabilities(ty, region_labels)`: each of `sig`'s capabilities
+// becomes the caller's capability for its instance (`resolve_effect`).
+fn region_target(inout ck: Ck, sig: FnSig, ty: u32) -> u32 {
+    let mut from: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let mut to: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    for i in 0..w(sig.inst_count) {
+        let inst = ck.inst(add(w(sig.inst_start), i));
+        let mut args: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        for j in 0..w(inst.arg_count) {
+            args.push(u32_at(in ck.inst_args, add(w(inst.arg_start), j)));
+        }
+        let request = Inst {
+            name: inst.name,
+            label: inst.label,
+            arg_start: 0,
+            arg_count: inst.arg_count
+        };
+        let label = resolve_label(inout ck, request, in args);
+        if ck.skip {
+            return ty;
+        }
+        from.push(function_capability(inout ck, sig.name, i));
+        to.push(label);
+    }
+    relabel(inout ck, ty, sig, RELABEL_RENAME, in from, in to)
 }
 
 // `bind_signature_capabilities(t, f)`: the function types in `t` take
@@ -2170,7 +2270,12 @@ fn block_expr(inout ck: Ck, ex: Ex, expected: u32) -> u32 {
             } else {
                 NONE32
             };
-            let ann = if hinted != NONE32 { hinted } else { stmt.ty };
+            let written = if hinted != NONE32 { hinted } else { stmt.ty };
+            let ann = if region_active(inout ck) {
+                region_annotation(inout ck, written)
+            } else {
+                written
+            };
             note(inout ck, ann);
             let actual = expr_expected(inout ck, stmt.value, ann);
             if ck.skip {
@@ -3060,7 +3165,7 @@ fn callee_effects(inout ck: Ck, sig: FnSig, in vars: Vars) {
 // `Checker::require_effect` inside a closure: the resolved effect (or the
 // request) joins the closure's observed row unless a capability of the
 // closure itself (or one inside it) provides it.
-fn require_effect(inout ck: Ck, request: Inst) {
+pub fn require_effect(inout ck: Ck, request: Inst) {
     let frame = match ck.frames.try_get(wrapping_sub(ck.frames.len(), 1)) {
         Option::Some(f) => f,
         Option::None => return,
@@ -3125,14 +3230,11 @@ fn active_cap(inout ck: Ck, request: Inst) -> u64 {
     let total = add(ck.handler_caps.len(), w(ck.fsig(ck.current).inst_count));
     let mut label = 0;
     if request.label != 0 {
-        let mut text = ChunkSeq::new[u8]();
-        ck.ctx.names.write(wrapping_sub(request.label, 1), inout text);
-        if starts_with(in text, LATENT_PREFIX) || u8_at(in text, 0) != DOLLAR {
-            // `required_label` of a latent label, and aliases: not ported.
-            ck.skip = true;
+        // `required_label` of a latent label: not ported.
+        label = request_label(inout ck, request.label);
+        if ck.skip {
             return NONE64;
         }
-        label = request.label;
     }
     let mut typed = label == 0 && request.arg_count != 0;
     for i in 0..w(request.arg_count) {
@@ -3388,7 +3490,7 @@ pub fn constrain_literals(inout ck: Ck, e: u32, target: u32) {
 
 // ----- handlers ----------------------------------------------------------------
 
-fn effect_decl(in ck: Ck, name: u32) -> EffDecl {
+pub fn effect_decl(in ck: Ck, name: u32) -> EffDecl {
     for i in 0..ck.effect_decls.len() {
         match ck.effect_decls.try_get(i) {
             Option::Some(d) => {
@@ -3431,6 +3533,37 @@ fn holds_wide(in ck: Ck, ty: u32) -> bool {
 // against the handler's type with its arguments, the state and the
 // continuation bound. Region blocks, capability effects and labels are
 // not ported (their effects are foreign or unknown here).
+// The label (symbol + 1, or 0) of the handler `ex`, stored after its type
+// arguments.
+fn handler_label(in ck: Ck, ex: Ex) -> u32 {
+    u32_at(in ck.targs, add(w(ex.b), w(ex.m)))
+}
+
+// `regions::block_capacity(effect, ret).is_some()`: the return clause
+// binds the parser's region marker (`$region` or `$region:<bytes>`).
+fn region_block(inout ck: Ck, ex: Ex) -> bool {
+    let ret = clause_at(in ck, w(ex.a));
+    if ret.pat_count != 1 {
+        return false;
+    }
+    let pat = u32_at(in ck.clause_pats, w(ret.pat_start));
+    if ck.pats.pat(pat).kind != P_BIND {
+        return false;
+    }
+    let mut text = ChunkSeq::new[u8]();
+    ck.ctx.names.write(ck.patx(pat).name, inout text);
+    if !starts_with(in text, REGION_MARKER) {
+        return false;
+    }
+    let marker_len = len_of(REGION_MARKER);
+    text.len() == marker_len || u8_at(in text, marker_len) == COLON
+}
+
+fn len_of(in text: Str) -> u64 {
+    let bytes = text.as_bytes();
+    bytes.len()
+}
+
 fn handle_expr(inout ck: Ck, ex: Ex, expected: u32) -> u32 {
     let hole = ck.ctx.types.infer;
     let known = ck.ctx.world.k;
@@ -3444,9 +3577,18 @@ fn handle_expr(inout ck: Ck, ex: Ex, expected: u32) -> u32 {
             handler_row = NONE32;
         }
     }
+    // `Checker::region_block`: a parser-produced block of the built-in
+    // `Region` effect; a hand-written handler of it is refused.
+    let mut region = false;
+    if is_qualified(in ck, ex.y, REGION_EFFECT) && region_active(inout ck) {
+        if !region_block(inout ck, ex) {
+            error(inout ck, "E0797", ex.start, ex.end);
+            return hole;
+        }
+        region = true;
+    }
     let decl = effect_decl(in ck, ex.y);
-    // A region block (`regions::region_block`) is lane 12's.
-    if decl.name == NONE32 || is_qualified(in ck, ex.y, REGION_EFFECT) {
+    if decl.name == NONE32 {
         ck.skip = true;
         return hole;
     }
@@ -3479,11 +3621,26 @@ fn handle_expr(inout ck: Ck, ex: Ex, expected: u32) -> u32 {
     let cap_label = inc32w(ck.ctx.names.intern(in cap_text.as_slice()));
     ck.handler_caps
         .push(Inst { name: ex.y, label: cap_label, arg_start: arg_start, arg_count: ex.m });
+    let aliases = ck.alias_from.len();
+    let label = handler_label(in ck, ex);
+    if label != 0 {
+        ck.alias_from.push(label);
+        ck.alias_to.push(cap_label);
+    }
     let body_ty = expr(inout ck, ex.x);
     ck.handler_caps.truncate(wrapping_sub(ck.handler_caps.len(), 1));
+    ck.alias_from.truncate(aliases);
+    ck.alias_to.truncate(aliases);
     ck.env.truncate(env_mark);
     if ck.skip {
         return hole;
+    }
+    if contains_capability(in ck, body_ty, cap_label) {
+        if region {
+            error(inout ck, "E0791", ex.start, ex.end);
+        } else {
+            error(inout ck, "E0403", ex.start, ex.end);
+        }
     }
     let return_ty = if ex.z != NONE32 {
         let mut parts: ChunkSeq[u32] = ChunkSeq::new[u32]();
@@ -3619,6 +3776,9 @@ fn handle_expr(inout ck: Ck, ex: Ex, expected: u32) -> u32 {
         }
     }
     for i in 0..w(decl.op_count) {
+        if region {
+            break;
+        }
         let sig = ck.fsig(n32(add(w(decl.op_start), i)));
         let short = op_short_name(inout ck, sig.name, decl.name);
         let mut handled = false;
@@ -3937,6 +4097,87 @@ fn assign_expr(inout ck: Ck, ex: Ex) -> u32 {
     if ex.y != 0 && !numeric(in ck, expected) {
         error(inout ck, "E0200", target_ex.start, target_ex.end);
     }
+    ck.ctx.types.unit
+}
+
+// `Checker::array_assign` and `array_method_call`'s `set`, as
+// `arrays::lower_world` leaves them: the array place is recorded, the
+// index checked (`u64` for `set`), the value checked against the element
+// type, and the operand pair typed `(index, element)` (`pair`).
+fn array_write(inout ck: Ck, ex: Ex) -> u32 {
+    let hole = ck.ctx.types.infer;
+    let known = ck.ctx.world.k;
+    let operands = ck.ex(ex.z);
+    if operands.kind != E_TUPLE || operands.n != 2 {
+        ck.skip = true;
+        return hole;
+    }
+    let index = ck.kid(w(operands.a));
+    let value = ck.kid(add(w(operands.a), 1));
+    let mut path: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let root = place_of(in ck, ex.x, inout path);
+    let bind_index = if root == NONE32 {
+        NONE32
+    } else {
+        lookup(in ck, root)
+    };
+    if bind_index == NONE32 {
+        // E1540 (no array place): not ported.
+        ck.skip = true;
+        return hole;
+    }
+    let root_ty = binding(in ck, bind_index).ty;
+    note(inout ck, root_ty);
+    let array_ty = field_path(inout ck, root_ty, in path);
+    if ck.skip || array_ty == NONE32 || ck.ctx.types.kind(array_ty) != TyKind::Tuple {
+        ck.skip = true;
+        return hole;
+    }
+    let array_node = ck.ctx.types.node(array_ty);
+    if array_node.n == 0 {
+        ck.skip = true;
+        return hole;
+    }
+    let element = item(in ck.ctx.types, w(array_node.a));
+    record(inout ck, ex.x, array_ty);
+    let index_ex = ck.ex(index);
+    // `a.set(i, v)`: the pair spans the callee `a.set`, before `i`.
+    let set_form = operands.end <= index_ex.start;
+    let index_ty = if set_form {
+        let u64_ty = named(inout ck, known.u64_);
+        let t = expr_expected(inout ck, index, u64_ty);
+        expect_type(inout ck, u64_ty, t, index_ex.start, index_ex.end);
+        t
+    } else {
+        let t = expr(inout ck, index);
+        if !ck.skip && !integer(in ck, t) {
+            error(inout ck, "E0200", index_ex.start, index_ex.end);
+        }
+        t
+    };
+    let actual = expr_expected(inout ck, value, element);
+    if ck.skip {
+        return hole;
+    }
+    let value_ex = ck.ex(value);
+    expect_type(inout ck, element, actual, value_ex.start, value_ex.end);
+    if mode(inout ck, element) != TyMode::Copy {
+        error(inout ck, "E0311", value_ex.start, value_ex.end);
+    }
+    if ex.y != 0 && !numeric(in ck, element) {
+        error(inout ck, "E0200", ex.start, ex.end);
+    }
+    let recorded_index = u32_at(in ck.ex_types, w(index));
+    let pair_index = if recorded_index == NONE32 {
+        named(inout ck, known.u64_)
+    } else {
+        default_type(inout ck.ctx.types, recorded_index)
+    };
+    let mut parts: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    parts.push(pair_index);
+    parts.push(element);
+    let pair = ck.ctx.types.tuple(in parts);
+    record(inout ck, ex.z, pair);
     ck.ctx.types.unit
 }
 
@@ -4283,6 +4524,13 @@ fn place_primitive(inout ck: Ck, ex: Ex, swap: bool) -> u32 {
     if swap { ck.ctx.types.unit } else { first }
 }
 
+// Whether the path `name` has `REGION_EFFECT` before its first `::`.
+fn is_region_path(inout ck: Ck, name: u32) -> bool {
+    let mut text = ChunkSeq::new[u8]();
+    ck.ctx.names.write(name, inout text);
+    starts_with(in text, REGION_PATH)
+}
+
 fn call_expr(inout ck: Ck, ex: Ex, expected: u32) -> u32 {
     let hole = ck.ctx.types.infer;
     let callee = ck.ex(ex.x);
@@ -4353,6 +4601,15 @@ fn call_expr(inout ck: Ck, ex: Ex, expected: u32) -> u32 {
     if callee_index == NONE32 && is_qualified(in ck, callee.x, "ChunkSeq::with_capacity") {
         return seq_new(inout ck, ex, true, expected);
     }
+    if callee_index == NONE32 && is_qualified(in ck, callee.x, SEQ_FINISH) {
+        return seq_finish(inout ck, ex);
+    }
+    if callee_index == NONE32 {
+        let vector_ty = vector_call(inout ck, ex, callee.x, expected);
+        if vector_ty != NONE32 {
+            return vector_ty;
+        }
+    }
     if callee_index == NONE32 {
         // A constant table read (`arrays::lower_world`) is a call of its
         // constant function, as the checker saw it before lowering.
@@ -4382,6 +4639,15 @@ fn call_expr(inout ck: Ck, ex: Ex, expected: u32) -> u32 {
         if float_ty != NONE32 {
             return float_ty;
         }
+        if is_region_path(inout ck, callee.x) && region_active(inout ck) {
+            // Region operations go through their capability (`r.box(v)`).
+            error(inout ck, "E0790", ex.start, ex.end);
+            for i in 0..w(ex.n) {
+                let arg = actual_arg(in ck, ex, i);
+                let t = expr(inout ck, arg.expr);
+            }
+            return hole;
+        }
         let op = op_index(in ck, callee.x);
         if op != NONE32 {
             return op_call(inout ck, ex, ck.fsig(op));
@@ -4407,7 +4673,14 @@ fn method_call(inout ck: Ck, ex: Ex, callee: Ex, expected: u32) -> u32 {
     let mut path: ChunkSeq[u32] = ChunkSeq::new[u32]();
     let root = place_of(in ck, callee.x, inout path);
     if root != NONE32 && lookup(in ck, root) == NONE32 {
-        // A region or effect capability, or a qualified name.
+        let base = ck.ex(callee.x);
+        if base.kind == E_NAME && path.len() == 0 {
+            let cap = region_capability(inout ck, root);
+            if cap != 0 {
+                return region_op(inout ck, cap, callee.y, ex, expected);
+            }
+        }
+        // An effect capability, or a qualified name.
         ck.skip = true;
         return hole;
     }
@@ -4481,7 +4754,55 @@ fn apply(inout ck: Ck, sig: FnSig, ex: Ex, receiver: u32, expected: u32) -> u32 
     if ck.frames.len() != 0 {
         callee_effects(inout ck, sig, in vars);
     }
-    substitute(inout ck.ctx.types, sig.inferred, in vars)
+    let substituted = substitute(inout ck.ctx.types, sig.inferred, in vars);
+    if sig.inst_count == 0 || !has_row_type(in ck, substituted) {
+        return substituted;
+    }
+    // `rename_capabilities(result, labels)`: the callee's capabilities in a
+    // region type become the caller's capabilities for them.
+    let mut from: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let mut to: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let mut args: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    for i in 0..w(sig.inst_count) {
+        let inst = ck.inst(add(w(sig.inst_start), i));
+        let start = n32(args.len());
+        for j in 0..w(inst.arg_count) {
+            let t = u32_at(in ck.inst_args, add(w(inst.arg_start), j));
+            args.push(substitute(inout ck.ctx.types, t, in vars));
+        }
+        let request = Inst {
+            name: inst.name,
+            label: inst.label,
+            arg_start: start,
+            arg_count: inst.arg_count
+        };
+        let label = resolve_label(inout ck, request, in args);
+        if ck.skip {
+            return hole;
+        }
+        from.push(function_capability(inout ck, sig.name, i));
+        to.push(label);
+    }
+    relabel(inout ck, substituted, sig, RELABEL_RENAME, in from, in to)
+}
+
+// Whether `ty` holds a capability row type (a region argument).
+fn has_row_type(in ck: Ck, ty: u32) -> bool {
+    let node = ck.ctx.types.node(ty);
+    if node.kind == TyKind::Row {
+        return true;
+    }
+    if node.kind == TyKind::Fn && has_row_type(in ck, node.r) {
+        return true;
+    }
+    if node.kind == TyKind::Named || node.kind == TyKind::Tuple || node.kind == TyKind::Fn {
+        for i in 0..w(node.n) {
+            if has_row_type(in ck, item(in ck.ctx.types, add(w(node.a), i))) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 // The call's written type arguments.
@@ -4711,7 +5032,11 @@ fn apply_args(
         }
         infer(inout ck.ctx.types, known, param.ty, actual, in generics, inout vars);
         actuals.push(actual);
-        let want = substitute(inout ck.ctx.types, param.ty, in vars);
+        let want = if has_row_type(in ck, param.ty) {
+            capability_target(inout ck, sig, param.ty, in vars)
+        } else {
+            substitute(inout ck.ctx.types, param.ty, in vars)
+        };
         expect_type(inout ck, want, actual, arg_ex.start, arg_ex.end);
     }
     for i in 0..vars.vals.len() {
@@ -4722,7 +5047,17 @@ fn apply_args(
         let arg = actual_at(in call_args, i);
         let param = ck.param(add(w(sig.param_start), i));
         let arg_ex = ck.ex(arg.expr);
-        let target = substitute(inout ck.ctx.types, param.ty, in vars);
+        let substituted = substitute(inout ck.ctx.types, param.ty, in vars);
+        // Region arguments of parameter types name the callee's
+        // capabilities; they are instantiated like its row.
+        let target = if has_row_type(in ck, substituted) {
+            region_target(inout ck, sig, substituted)
+        } else {
+            substituted
+        };
+        if ck.skip {
+            return hole;
+        }
         expect_type(inout ck, target, u32_at(in actuals, i), arg_ex.start, arg_ex.end);
         constrain_literals(inout ck, arg.expr, target);
     }
@@ -4803,6 +5138,18 @@ pub fn check_function(inout ck: Ck, fname: u32, start: u64, end: u64, body: u32,
     let sig_index = fn_index(in ck, fname);
     ck.current = sig_index;
     let sig = ck.fsig(sig_index);
+    // `cap_aliases`: each labeled instance names the function's own
+    // capability.
+    ck.alias_from.truncate(0);
+    ck.alias_to.truncate(0);
+    for i in 0..w(sig.inst_count) {
+        let inst = ck.inst(add(w(sig.inst_start), i));
+        if inst.label != 0 {
+            let cap = function_capability(inout ck, sig.name, i);
+            ck.alias_from.push(inst.label);
+            ck.alias_to.push(cap);
+        }
+    }
     ck.bounds = bounds_of(in ck, sig);
     ck.static_text = is_str(in ck, sig.result);
     let mark = ck.out.len();

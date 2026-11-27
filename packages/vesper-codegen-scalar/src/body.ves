@@ -56,6 +56,10 @@ pub const LANE_I128: u64 = 4;
 // A struct or tuple of scalar fields (#2411): its register holds a
 // pointer to its storage, a word on the 64-bit targets.
 pub const LANE_PRODUCT: u64 = 5;
+// A small enum the optimize path keeps as words (#2581,
+// `aggregates::scalar_enums`): its own register holds a word the walk
+// never reads; its words are values of their own.
+pub const LANE_WORDS: u64 = 6;
 
 // A local's entry: a lane code for a local the body declares, or
 // `LOCAL_PARAM` plus the parameter's index for one of the parameters.
@@ -86,6 +90,9 @@ pub const INST_FAIL_CALL: u64 = 41;
 // A direct call of a pure function that borrows scalar locals `inout`
 // (#2563); codes from 48 leave room for the failure-record slice.
 pub const INST_INOUT_CALL: u64 = 48;
+// A direct call whose small enum result comes back as words in registers
+// (#2581); codes from 56 leave room for the other body slices.
+pub const INST_WORDS_CALL: u64 = 56;
 
 // A failure record's tag word, and the word its payload is rounded to
 // (`fail_record_size`).
@@ -265,6 +272,8 @@ const TERM_MATCH: u64 = 3;
 const TERM_UNREACHABLE: u64 = 4;
 // `return` of a struct result through the result pointer (#2411).
 const TERM_RETURN_SRET: u64 = 32;
+// `return` of a small enum's words in registers (#2581).
+const TERM_RETURN_WORDS: u64 = 33;
 
 // `Codegen::data_into`'s word step, and its smallest storage.
 const WORD_BYTES: u64 = 8;
@@ -339,8 +348,9 @@ struct Header {
     // parameter names, in order
     params: ChunkSeq[u64],
     result: u32,
-    // value id -> its index + 1 (0: not a value of the graph)
+    // value id -> its index + 1 (0: not a value of the graph), and back
     index: ChunkSeq[u64],
+    vid: ChunkSeq[u64],
     // value index -> its type
     vty: ChunkSeq[u64],
     // local index -> its name and type
@@ -622,6 +632,7 @@ impl Gen {
             params: ChunkSeq::new[u64](),
             result: NONE32,
             index: ChunkSeq::new[u64](),
+            vid: ChunkSeq::new[u64](),
             vty: ChunkSeq::new[u64](),
             lname: ChunkSeq::new[u64](),
             lty: ChunkSeq::new[u64](),
@@ -675,6 +686,7 @@ impl Gen {
         i = inc(i);
         for k in 0..nv {
             set(inout h.index, self.program.op(i), inc(k));
+            h.vid.push(self.program.op(i));
             h.vty.push(self.program.op(inc(i)));
             i = add(i, 2);
         }
@@ -686,6 +698,21 @@ impl Gen {
             i = add(i, 2);
         }
         h
+    }
+
+    // How many words value index `v` of the function being planned is kept
+    // as (#2581), 0 when it is not.
+    fn body_words(in self, in h: Header, v: u64) -> u64 {
+        if v >= h.vid.len() {
+            return 0;
+        }
+        self.enums.count(self.fi, u64_at(in h.vid, v))
+    }
+
+    // The index of the `k`-th word value of kept value index `v`, or
+    // NONE64.
+    fn body_word(in self, in h: Header, v: u64, k: u64) -> u64 {
+        self.body_value(in h, self.enums.word(self.fi, u64_at(in h.vid, v), k))
     }
 
     // The index of value `v`, or NONE64.
@@ -1902,7 +1929,9 @@ impl Gen {
         }
         let ty = default_type(inout self.ctx.types, i.ty);
         let post = self.body_kind(ty);
-        if post == NONE64 || self.body_lane(i.ty) == 0 {
+        // A small enum kept as words is only made by a call (#2581).
+        let kept = self.body_words(in h, dest);
+        if post == NONE64 || (self.body_lane(i.ty) == 0 && !(kept != 0 && i.op == Op::Call)) {
             return false;
         }
         // `ir_inline::operands`, which the walk reads before the arm.
@@ -2150,11 +2179,16 @@ impl Gen {
                     let ch = self.body_header(self.program.function(callee));
                     callee_fails = ch.fails;
                 }
-                kind = if callee_fails.len() == 0 {
-                    INST_CALL
-                } else {
+                kind = if callee_fails.len() != 0 {
                     INST_FAIL_CALL
+                } else if kept != 0 {
+                    INST_WORDS_CALL
+                } else {
+                    INST_CALL
                 };
+                if kind == INST_FAIL_CALL && kept != 0 {
+                    return false;
+                }
                 extra.push(call);
                 let mut n = self.program.op(inc(i.a));
                 if self.body_has_inout(i, n) {
@@ -2186,13 +2220,36 @@ impl Gen {
                 {
                     return false;
                 }
+                // The result's words (`Codegen::scalar_call_words`): each
+                // word value and the kind it is coerced to.
+                if kind == INST_WORDS_CALL {
+                    extra.push(kept);
+                    for k in 0..kept {
+                        let word = self.body_word(in h, dest, k);
+                        if word == NONE64 {
+                            return false;
+                        }
+                        extra.push(word);
+                        extra.push(self.body_kind(n32(u64_at(in h.vty, word))));
+                    }
+                }
             }
         } else {
             return false;
         }
+        // A kept enum is only made by a call and returned: any other
+        // instruction that names one is left to the walk.
+        if kept != 0 && kind != INST_WORDS_CALL {
+            return false;
+        }
+        for k in 0..ops.len() {
+            if self.body_words(in h, u64_at(in ops, k)) != 0 {
+                return false;
+            }
+        }
         // A product is only built (INST_DATA) and returned: any other
         // instruction that makes or reads one is left to the walk.
-        if kind != INST_DATA {
+        if kind != INST_DATA && kind != INST_WORDS_CALL {
             if self.body_lane(i.ty) == LANE_PRODUCT && kind != INST_READ && kind != INST_READ_COPY {
                 return false;
             }
@@ -2258,6 +2315,27 @@ impl Gen {
             if v == NONE64 {
                 return false;
             }
+            // A small enum result returned as words (#2581): each word's
+            // register; any other return of such a function reads its words
+            // from memory, which the walk does.
+            let returned = self.enums.returns(self.fi);
+            let kept = self.body_words(in h, v);
+            if returned != 0 || kept != 0 {
+                if kept != returned {
+                    return false;
+                }
+                o.push(TERM_RETURN_WORDS);
+                o.push(v);
+                o.push(kept);
+                for k in 0..kept {
+                    let word = self.body_word(in h, v, k);
+                    if word == NONE64 {
+                        return false;
+                    }
+                    o.push(word);
+                }
+                return true;
+            }
             let vt = n32(u64_at(in h.vty, v));
             let d = self.body_default(vt, h.result);
             if self.body_lane(h.result) == LANE_PRODUCT {
@@ -2288,6 +2366,7 @@ impl Gen {
                 if v == NONE64
                     || param == NONE64
                     || self.body_lane(n32(u64_at(in h.vty, v))) == LANE_PRODUCT
+                    || self.body_words(in h, v) != 0
                 {
                     return false;
                 }
@@ -2482,9 +2561,14 @@ impl Gen {
     // The body plan of function `fi`, whose instruction plan records start
     // at `from` in `self.plan`, appended to `out` as `[fi, n, n words]`.
     pub fn body(inout self, fi: u64, from: u64, inout out: ChunkSeq[u64]) {
+        self.fi = fi;
         let f = self.program.function(fi);
         let h = self.body_header(f);
-        if !h.plain || f.bc == 0 || !self.body_no_trailer(f) || self.body_lane(h.result) == 0 {
+        if !h.plain
+            || f.bc == 0
+            || !self.body_no_trailer(f)
+            || (self.body_lane(h.result) == 0 && self.enums.returns(fi) == 0)
+        {
             return;
         }
         let mut graph_words: ChunkSeq[u64] = ChunkSeq::new[u64]();
@@ -2520,7 +2604,10 @@ impl Gen {
         // Each value's register.
         graph_words.push(h.vty.len());
         for k in 0..h.vty.len() {
-            let lane = self.body_lane(n32(u64_at(in h.vty, k)));
+            let mut lane = self.body_lane(n32(u64_at(in h.vty, k)));
+            if lane == 0 && self.body_words(in h, k) != 0 {
+                lane = LANE_WORDS;
+            }
             if lane == 0 {
                 return;
             }
@@ -2536,7 +2623,10 @@ impl Gen {
                 let v = self.body_value(in h, self.program.op(add(inc(pa), k)));
                 // A product joined at a block parameter has a home of its
                 // own (`aggregates::plan`), left to the walk.
-                if v == NONE64 || self.body_lane(n32(u64_at(in h.vty, v))) == LANE_PRODUCT {
+                if v == NONE64
+                    || self.body_lane(n32(u64_at(in h.vty, v))) == LANE_PRODUCT
+                    || self.body_words(in h, v) != 0
+                {
                     return;
                 }
                 graph_words.push(v);
@@ -2635,6 +2725,9 @@ impl Gen {
             let lane = self.body_lane(h.result);
             o.push(if lane == LANE_PRODUCT { LANE_I64 } else { lane });
         }
+        // The words a small enum result is returned as (#2581), 0 for any
+        // other result: the request's frame must agree.
+        o.push(self.enums.returns(fi));
         o.extend(in graph_words.as_slice());
         o.extend(in block_words.as_slice());
         out.push(fi);

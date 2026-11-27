@@ -4111,16 +4111,24 @@ impl<M: Module> Codegen<'_, '_, M> {
                 && scalar(t, &[]).is_ok()
         };
         let f = concrete(self.world, callee, &BTreeMap::new()).ok()?;
+        // A small enum result the callee returns as words in registers
+        // (#2581): `aggregates::enum_shape`'s words, as many as its ABI
+        // returns.
+        let key = instance_key(callee, &BTreeMap::new());
+        let words_result =
+            aggregates::enum_shape(self.world, &crate::numeric::default_type(&f.result))
+                .is_some_and(|shape| {
+                    self.abi.of(&key).result_words == Some(shape.words.len() as u32)
+                });
         if specialized_function(self.world, &f)
             || fail_only(self.world, &f) != fails
             || crate::fip::uses_caller_slot(self.world, &f)
             || function_value_instance(self.world, source)
-            || !scalar_type(&f.result)
+            || !(scalar_type(&f.result) || words_result)
             || !f.params.iter().all(|p| scalar_type(&p.ty))
         {
             return None;
         }
-        let key = instance_key(callee, &BTreeMap::new());
         let trace_entry = self.trace_entry.as_ref().map(|(e, _)| e.as_str());
         if trace_entry == Some(key.as_str())
             || uses_trace_fail(
@@ -4134,11 +4142,13 @@ impl<M: Module> Codegen<'_, '_, M> {
             return None;
         }
         let abi = self.abi.of(&key);
-        if abi.result_words.is_some() || (abi.status && !fails) {
+        if (abi.result_words.is_some() && !words_result) || (abi.status && !fails) {
             return None;
         }
         let id = u64::from(self.ids.get(&key)?.as_u32());
-        Some(if !fails {
+        Some(if words_result {
+            id | crate::codegen_swap::body::WORDS_CALL
+        } else if !fails {
             id
         } else if abi.status {
             id | crate::codegen_swap::body::FAIL_CALL | crate::codegen_swap::body::STATUS_CALL
@@ -4159,10 +4169,10 @@ impl<M: Module> Codegen<'_, '_, M> {
         // A struct result is built in, or copied to, the result pointer
         // (`sret`, #2411); a register result (#2581) the same way in the
         // local buffer the entry made, whose words the function returns.
+        // A small enum result (#2581) returns its words in registers.
         let result_ok = match frame.result {
-            FrameResult::Value => sret.is_none(),
+            FrameResult::Value | FrameResult::Words(_) => sret.is_none(),
             FrameResult::Sret | FrameResult::Buffer(_) => sret.is_some(),
-            FrameResult::Words(_) => false,
         };
         let plain = result_ok
             && self.denorm.is_empty()
@@ -4237,12 +4247,17 @@ impl<M: Module> Codegen<'_, '_, M> {
         // walk.
         let mut result_homes = vec![];
         if self.operands_only {
-            if !aggregates::split_locals(self.world, body, &self.generic_vars).is_empty() {
+            // The graph `ir_graph_at` lowers: small enums kept as words
+            // (#2581).
+            let join = self.own_scalar_join(body);
+            let scalar_graph = self.scalar_graph(body, join.as_ref());
+            let graph = scalar_graph.as_ref().map_or(body, |s| &s.f);
+            if !aggregates::split_locals(self.world, graph, &self.generic_vars).is_empty() {
                 return Ok(false);
             }
             let homes = aggregates::plan(
                 self.world,
-                body,
+                graph,
                 &self.generic_vars,
                 false,
                 &BTreeMap::new(),
@@ -4251,22 +4266,30 @@ impl<M: Module> Codegen<'_, '_, M> {
                 if *home != aggregates::Home::Result || sret.is_none() {
                     return Ok(false);
                 }
-                let Some(index) = body.values.keys().position(|v| v == id) else {
+                let Some(index) = graph.values.keys().position(|v| v == id) else {
                     return Ok(false);
                 };
                 result_homes.push(index as u64);
             }
         }
         // A register result's word count rides above the buffer's value
-        // (`codegen_swap::body::RESULT_WORDS_SHIFT`).
+        // (`codegen_swap::body::RESULT_WORDS_SHIFT`), or above NO_POINTER
+        // for a small enum returned as words.
         let result_words = match frame.result {
-            FrameResult::Buffer(words) => u64::from(words),
+            FrameResult::Buffer(words) | FrameResult::Words(words) => u64::from(words),
             _ => 0,
         };
-        args.push(sret.map_or(crate::codegen_swap::body::NO_VALUE, |v| {
-            crate::codegen_swap::word(v)
-                | result_words << crate::codegen_swap::body::RESULT_WORDS_SHIFT
-        }));
+        args.push(match sret {
+            None if result_words == 0 => crate::codegen_swap::body::NO_VALUE,
+            None => {
+                crate::codegen_swap::body::NO_POINTER
+                    | result_words << crate::codegen_swap::body::RESULT_WORDS_SHIFT
+            }
+            Some(v) => {
+                crate::codegen_swap::word(v)
+                    | result_words << crate::codegen_swap::body::RESULT_WORDS_SHIFT
+            }
+        });
         args.push(result_homes.len() as u64);
         args.extend(result_homes);
         // Each parameter's address variable: an `inout` scalar is loaded
@@ -4289,6 +4312,65 @@ impl<M: Module> Codegen<'_, '_, M> {
             self.program,
             name,
             &args,
+        )
+    }
+    /// The enum shape a top-level graph `f` returns as words: the
+    /// function's own register-result ABI when its result is a small enum
+    /// of that many words (#1330).
+    fn own_scalar_join(&self, f: &crate::ir::FunctionIr) -> Option<aggregates::EnumShape> {
+        if !self.operands_only || self.in_fip_fn {
+            return None;
+        }
+        self.own_abi.result_words.and_then(|words| {
+            let ty = crate::numeric::default_type(&substitute(&f.result, &self.generic_vars));
+            let shape = aggregates::enum_shape(self.world, &ty)?;
+            (shape.words.len() as u32 == words).then_some(shape)
+        })
+    }
+    /// Graph `f` with its small enum values kept as words
+    /// (`aggregates::scalar_enums`, #1330) on the optimize path, `join`
+    /// the shape it returns as words; `None` when it keeps them in memory.
+    fn scalar_graph(
+        &self,
+        f: &crate::ir::FunctionIr,
+        join: Option<&aggregates::EnumShape>,
+    ) -> Option<aggregates::ScalarEnums> {
+        if !self.operands_only || self.in_fip_fn {
+            return None;
+        }
+        let world = self.world;
+        let shared: BTreeSet<String> = f
+            .locals
+            .keys()
+            .filter(|n| self.vars.contains_key(*n))
+            .cloned()
+            .collect();
+        aggregates::scalar_enums(
+            world,
+            f,
+            &self.generic_vars,
+            join,
+            &|callee, types, shape| {
+                let Some(g) = world.functions.get(callee) else {
+                    return false;
+                };
+                if specialized_function(world, g) {
+                    return true;
+                }
+                if world.dyn_objects.stubs.contains_key(callee) {
+                    return false;
+                }
+                let mut vars = BTreeMap::new();
+                for (p, t) in g.generics.iter().zip(types) {
+                    vars.insert(
+                        p.name.clone(),
+                        crate::numeric::default_type(&substitute(t, &self.generic_vars)),
+                    );
+                }
+                let key = instance_key(callee, &vars);
+                self.abi.of(&key).result_words == Some(shape.words.len() as u32)
+            },
+            &shared,
         )
     }
     fn ir_function(
@@ -4329,55 +4411,13 @@ impl<M: Module> Codegen<'_, '_, M> {
         // Small enum values kept as words (#1330): the graph is rewritten
         // so that their tags and fields are scalar values and locals.
         let scalar_join = self.scalar_enums.join.take().or_else(|| {
-            if return_to.is_none() && self.operands_only && !self.in_fip_fn {
-                self.own_abi.result_words.and_then(|words| {
-                    let ty =
-                        crate::numeric::default_type(&substitute(&f.result, &self.generic_vars));
-                    let shape = aggregates::enum_shape(self.world, &ty)?;
-                    (shape.words.len() as u32 == words).then_some(shape)
-                })
+            if return_to.is_none() {
+                self.own_scalar_join(f)
             } else {
                 None
             }
         });
-        let scalar_graph = if self.operands_only && !self.in_fip_fn {
-            let world = self.world;
-            let shared: BTreeSet<String> = f
-                .locals
-                .keys()
-                .filter(|n| self.vars.contains_key(*n))
-                .cloned()
-                .collect();
-            aggregates::scalar_enums(
-                world,
-                f,
-                &self.generic_vars,
-                scalar_join.as_ref(),
-                &|callee, types, shape| {
-                    let Some(g) = world.functions.get(callee) else {
-                        return false;
-                    };
-                    if specialized_function(world, g) {
-                        return true;
-                    }
-                    if world.dyn_objects.stubs.contains_key(callee) {
-                        return false;
-                    }
-                    let mut vars = BTreeMap::new();
-                    for (p, t) in g.generics.iter().zip(types) {
-                        vars.insert(
-                            p.name.clone(),
-                            crate::numeric::default_type(&substitute(t, &self.generic_vars)),
-                        );
-                    }
-                    let key = instance_key(callee, &vars);
-                    self.abi.of(&key).result_words == Some(shape.words.len() as u32)
-                },
-                &shared,
-            )
-        } else {
-            None
-        };
+        let scalar_graph = self.scalar_graph(f, scalar_join.as_ref());
         let no_words = BTreeMap::new();
         let (f, scalar_calls, scalar_returns) = match &scalar_graph {
             Some(s) => (&s.f, &s.calls, &s.returns),
