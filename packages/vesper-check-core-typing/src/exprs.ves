@@ -91,6 +91,12 @@ const ROTATE_RIGHT: Str = "rotate_right";
 // The operand count of a rotation.
 const ROTATE_OPERANDS: u32 = 2;
 
+// Entries of the literal-typing pair tables (`lt_uses`, `lt_hints`).
+const LT_PAIR: u64 = 2;
+
+// `literal_typing::PROBE_ROUNDS`: probe runs that may refine the hints.
+const PROBE_ROUNDS: u64 = 4;
+
 // The length of `::` in an `Eff::op` name.
 const PATH_SEPARATOR_LEN: u64 = 2;
 
@@ -257,6 +263,8 @@ pub copy struct Bind {
     name: u32,
     ty: u32,
     pass: u8,
+    // The binding's pattern (NONE32 for a parameter or a continuation).
+    pat: u32,
 }
 
 // A loop frame (`ControlFrame::Loop`): whether `break` takes a value, the
@@ -321,6 +329,13 @@ pub struct Ck {
     // open literal binding (`LiteralTyping::open`).
     errors: u64,
     open_literal: bool,
+    // `LiteralTyping`: the open bindings' patterns, their uses (use
+    // expression, binding pattern), the hinted kinds (pattern, type) and
+    // whether this is a probe run.
+    lt_open: ChunkSeq[u32],
+    lt_uses: ChunkSeq[u32],
+    lt_hints: ChunkSeq[u32],
+    lt_probe: bool,
     loops: ChunkSeq[LoopF],
     loop_values: ChunkSeq[u32],
     // Types the checker records at spans that are not expressions (a
@@ -402,6 +417,10 @@ pub fn ck_new(sink ctx: Ctx) -> Ck {
         returned: NONE32,
         errors: 0,
         open_literal: false,
+        lt_open: ChunkSeq::new[u32](),
+        lt_uses: ChunkSeq::new[u32](),
+        lt_hints: ChunkSeq::new[u32](),
+        lt_probe: false,
         loops: ChunkSeq::new[LoopF](),
         loop_values: ChunkSeq::new[u32](),
         extra_rows: ChunkSeq::new[u64](),
@@ -1020,13 +1039,13 @@ pub fn lookup(in ck: Ck, name: u32) -> u32 {
 pub fn binding(in ck: Ck, i: u32) -> Bind {
     match ck.env.try_get(w(i)) {
         Option::Some(x) => x,
-        Option::None => Bind { name: 0, ty: 0, pass: 0 },
+        Option::None => Bind { name: 0, ty: 0, pass: 0, pat: NONE32 },
     }
 }
 
-fn bind_name(inout ck: Ck, name: u32, ty: u32, pass: u8) {
+fn bind_name(inout ck: Ck, name: u32, ty: u32, pass: u8, pat: u32) {
     note(inout ck, ty);
-    ck.env.push(Bind { name: name, ty: ty, pass: pass });
+    ck.env.push(Bind { name: name, ty: ty, pass: pass, pat: pat });
 }
 
 pub fn named(inout ck: Ck, name: u32) -> u32 {
@@ -1128,7 +1147,7 @@ pub fn expr_expected(inout ck: Ck, e: u32, expected: u32) -> u32 {
         let known = ck.ctx.world.k;
         named(inout ck, known.bool_)
     } else if ex.kind == E_NAME {
-        name_expr(inout ck, ex, expected)
+        name_expr(inout ck, e, ex, expected)
     } else if ex.kind == E_TUPLE {
         tuple_expr(inout ck, ex, expected)
     } else if ex.kind == E_STRUCT {
@@ -1229,18 +1248,18 @@ fn infer_args(inout ck: Ck, adt: Adt) -> ChunkSeq[u32] {
     args
 }
 
-fn name_expr(inout ck: Ck, ex: Ex, expected: u32) -> u32 {
+fn name_expr(inout ck: Ck, e: u32, ex: Ex, expected: u32) -> u32 {
     let hole = ck.ctx.types.infer;
     let bind_index = lookup(in ck, ex.x);
     if bind_index != NONE32 {
         // `place` on the whole binding (modes and moves: part 3). A
         // handler's continuation has a function type: not ported.
-        let ty = binding(in ck, bind_index).ty;
-        if foreign(in ck, ty) {
+        let bound = binding(in ck, bind_index);
+        if foreign(in ck, bound.ty) {
             ck.skip = true;
             return hole;
         }
-        return ty;
+        return literal_use(inout ck, e, bound, expected);
     }
     if fn_index(in ck, ex.x) != NONE32 {
         // A function value has a function type.
@@ -1508,21 +1527,34 @@ fn block_expr(inout ck: Ck, ex: Ex, expected: u32) -> u32 {
         }
         let stmt = ck.stmt(add(w(ex.a), i));
         if stmt.is_let {
-            note(inout ck, stmt.ty);
-            let actual = expr_expected(inout ck, stmt.value, stmt.ty);
+            // An unannotated `let` takes the hinted kinds as an annotation.
+            let hinted = if stmt.ty == hole {
+                literal_annotation(inout ck, stmt.pat)
+            } else {
+                NONE32
+            };
+            let ann = if hinted != NONE32 { hinted } else { stmt.ty };
+            note(inout ck, ann);
+            let actual = expr_expected(inout ck, stmt.value, ann);
             if ck.skip {
                 return hole;
             }
             let value_ex = ck.ex(stmt.value);
-            expect_type(inout ck, stmt.ty, actual, value_ex.start, value_ex.end);
-            if stmt.ty == hole {
+            expect_type(inout ck, ann, actual, value_ex.start, value_ex.end);
+            let let_ty = if ann == hole {
+                default_type(inout ck.ctx.types, actual)
+            } else if hinted != NONE32 {
+                // The value has the binding's type.
+                let refined = refine_annotation(inout ck.ctx.types, ann, actual);
+                let settled = default_type(inout ck.ctx.types, refined);
+                record(inout ck, stmt.value, settled);
+                settled
+            } else {
+                refine_annotation(inout ck.ctx.types, ann, actual)
+            };
+            if ann == hole {
                 open_literal_bindings(inout ck, stmt.pat, actual);
             }
-            let let_ty = if stmt.ty == hole {
-                default_type(inout ck.ctx.types, actual)
-            } else {
-                refine_annotation(inout ck.ctx.types, stmt.ty, actual)
-            };
             if unresolved(in ck.ctx.types, let_ty) {
                 error(inout ck, "E0208", value_ex.start, value_ex.end);
             }
@@ -1559,6 +1591,176 @@ fn block_expr(inout ck: Ck, ex: Ex, expected: u32) -> u32 {
     result
 }
 
+// Whether the pattern `pat` is an open binding.
+fn is_open(in ck: Ck, pat: u32) -> bool {
+    if pat == NONE32 {
+        return false;
+    }
+    for i in 0..ck.lt_open.len() {
+        if u32_at(in ck.lt_open, i) == pat {
+            return true;
+        }
+    }
+    false
+}
+
+// The hinted kind of the binding pattern `pat`, or NONE32.
+fn hint_of(in ck: Ck, pat: u32) -> u32 {
+    let pairs = ck.lt_hints.len() / LT_PAIR;
+    for i in 0..pairs {
+        let at = wrapping_mul(i, LT_PAIR);
+        if u32_at(in ck.lt_hints, at) == pat {
+            return u32_at(in ck.lt_hints, add(at, 1));
+        }
+    }
+    NONE32
+}
+
+// `Checker::literal_annotation`: the annotation the hints give an
+// unannotated `let` pattern, or NONE32.
+fn literal_annotation(inout ck: Ck, pat_id: u32) -> u32 {
+    if ck.lt_hints.len() == 0 {
+        return NONE32;
+    }
+    let pat = ck.pats.pat(pat_id);
+    if pat.kind == P_BIND {
+        return hint_of(in ck, pat_id);
+    }
+    if pat.kind != P_TUPLE {
+        return NONE32;
+    }
+    let hole = ck.ctx.types.infer;
+    let mut parts: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let mut any = false;
+    for i in 0..w(pat.kid_count) {
+        let kid = ck.pats.kid(add(w(pat.kid_start), i));
+        let part = literal_annotation(inout ck, kid);
+        if part != NONE32 {
+            any = true;
+            parts.push(part);
+        } else {
+            parts.push(hole);
+        }
+    }
+    if !any {
+        return NONE32;
+    }
+    ck.ctx.types.tuple(in parts)
+}
+
+// `Checker::literal_element`: the hinted kind of a `for` binding, or
+// NONE32.
+fn literal_element(in ck: Ck, pat_id: u32) -> u32 {
+    if ck.pats.pat(pat_id).kind != P_BIND {
+        return NONE32;
+    }
+    hint_of(in ck, pat_id)
+}
+
+// `Checker::literal_use`: in a probe run, a use of an open integer
+// binding reads as a literal (or as the expected integer kind).
+fn literal_use(inout ck: Ck, e: u32, bound: Bind, expected: u32) -> u32 {
+    if !ck.lt_probe || !is_open(in ck, bound.pat) || !integer_named(in ck, bound.ty) {
+        return bound.ty;
+    }
+    ck.lt_uses.push(e);
+    ck.lt_uses.push(bound.pat);
+    if integer_named(in ck, expected) {
+        expected
+    } else {
+        mk_lit(inout ck.ctx.types, Lit { neg: false, mag: 0 })
+    }
+}
+
+// `Checker::literal_assignment`: in a probe run, a value assigned to an
+// open binding is one of its uses, typed from its own operands.
+fn literal_assignment(
+    inout ck: Ck,
+    bind_index: u32,
+    whole: bool,
+    value: u32,
+    expected: u32
+) -> u32 {
+    let pat = binding(in ck, bind_index).pat;
+    if !ck.lt_probe || !whole || !is_open(in ck, pat) {
+        return expected;
+    }
+    ck.lt_uses.push(value);
+    ck.lt_uses.push(pat);
+    ck.ctx.types.infer
+}
+
+// `Checker::literal_unconstrained`: a use at `e` accepts any kind (a
+// conversion's operand).
+pub fn literal_unconstrained(inout ck: Ck, e: u32) {
+    if !ck.lt_probe {
+        return;
+    }
+    let mut kept: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let pairs = ck.lt_uses.len() / LT_PAIR;
+    for i in 0..pairs {
+        let at = wrapping_mul(i, LT_PAIR);
+        let use_expr = u32_at(in ck.lt_uses, at);
+        if use_expr != e {
+            kept.push(use_expr);
+            kept.push(u32_at(in ck.lt_uses, add(at, 1)));
+        }
+    }
+    ck.lt_uses = kept;
+}
+
+// `LiteralTyping::settled_kinds`, merged into `hints` (`or_insert`): the
+// one kind other than `i64` each open binding's uses settled to.
+fn settle_hints(inout ck: Ck, in hints: ChunkSeq[u32]) -> ChunkSeq[u32] {
+    let known = ck.ctx.world.k;
+    let mut next: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    next.extend(in hints.as_slice());
+    // binding, kind (NONE32 once two kinds disagree), in first-use order
+    let mut kinds: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let pairs = ck.lt_uses.len() / LT_PAIR;
+    for i in 0..pairs {
+        let at = wrapping_mul(i, LT_PAIR);
+        let t = u32_at(in ck.ex_types, w(u32_at(in ck.lt_uses, at)));
+        let pat = u32_at(in ck.lt_uses, add(at, 1));
+        let settled = t != NONE32 && integer_named(in ck, t) && !is_named(in ck, t, known.i64_);
+        if settled {
+            let mut found = false;
+            let seen = kinds.len() / LT_PAIR;
+            for j in 0..seen {
+                let k = wrapping_mul(j, LT_PAIR);
+                if u32_at(in kinds, k) == pat {
+                    found = true;
+                    if u32_at(in kinds, add(k, 1)) != t {
+                        let ok = kinds.try_set(add(k, 1), NONE32);
+                    }
+                }
+            }
+            if !found {
+                kinds.push(pat);
+                kinds.push(t);
+            }
+        }
+    }
+    let seen = kinds.len() / LT_PAIR;
+    for j in 0..seen {
+        let k = wrapping_mul(j, LT_PAIR);
+        let pat = u32_at(in kinds, k);
+        let t = u32_at(in kinds, add(k, 1));
+        let mut present = false;
+        let held = hints.len() / LT_PAIR;
+        for h in 0..held {
+            if u32_at(in hints, wrapping_mul(h, LT_PAIR)) == pat {
+                present = true;
+            }
+        }
+        if t != NONE32 && !present {
+            next.push(pat);
+            next.push(t);
+        }
+    }
+    next
+}
+
 // `LiteralTyping::open_literal_bindings`: whether an unannotated `let`
 // binds a name to an integer literal type (directly or in a tuple).
 fn open_literal_bindings(inout ck: Ck, pat_id: u32, actual: u32) {
@@ -1566,6 +1768,7 @@ fn open_literal_bindings(inout ck: Ck, pat_id: u32, actual: u32) {
     let node = ck.ctx.types.node(actual);
     if pat.kind == P_BIND && node.kind == TyKind::Lit {
         ck.open_literal = true;
+        ck.lt_open.push(pat_id);
     } else if pat.kind == P_TUPLE && node.kind == TyKind::Tuple {
         let mut count = w(pat.kid_count);
         if w(node.n) < count {
@@ -1587,7 +1790,7 @@ fn bind_mode(inout ck: Ck, pat_id: u32, ty: u32, pass: u8) {
         return;
     }
     if pat.kind == P_BIND {
-        bind_name(inout ck, extra.name, ty, pass);
+        bind_name(inout ck, extra.name, ty, pass, pat_id);
         return;
     }
     if pat.kind == P_TRUE || pat.kind == P_FALSE || pat.kind == P_LIT {
@@ -2280,7 +2483,7 @@ fn bind_continuation(inout ck: Ck, pat: u32, ty: u32) {
     let p = ck.pats.pat(pat);
     if p.kind == P_BIND {
         let extra = ck.patx(pat);
-        ck.env.push(Bind { name: extra.name, ty: ty, pass: P_SINK });
+        ck.env.push(Bind { name: extra.name, ty: ty, pass: P_SINK, pat: NONE32 });
     } else if p.kind != P_WILD {
         ck.skip = true;
     }
@@ -2404,12 +2607,16 @@ fn for_expr(inout ck: Ck, ex: Ex) -> u32 {
         ck.skip = true;
         return hole;
     }
-    let a = expr_expected(inout ck, iter.x, hole);
+    // A range of unsuffixed literals takes the kind of the loop
+    // variable's uses (`literal_element`).
+    let hinted = literal_element(in ck, ex.y);
+    let goal = if hinted != NONE32 { hinted } else { hole };
+    let a = expr_expected(inout ck, iter.x, goal);
     if ck.skip {
         return hole;
     }
-    let end_goal = if ck.ctx.types.kind(a) == TyKind::Lit {
-        hole
+    let end_goal = if hinted != NONE32 || ck.ctx.types.kind(a) == TyKind::Lit {
+        goal
     } else {
         a
     };
@@ -2418,8 +2625,14 @@ fn for_expr(inout ck: Ck, ex: Ex) -> u32 {
         return hole;
     }
     let joined = join(inout ck, a, b, iter.start, iter.end);
-    open_literal_bindings(inout ck, ex.y, joined);
-    let element = default_type(inout ck.ctx.types, joined);
+    if hinted == NONE32 {
+        open_literal_bindings(inout ck, ex.y, joined);
+    }
+    let element = if hinted != NONE32 {
+        hinted
+    } else {
+        default_type(inout ck.ctx.types, joined)
+    };
     let element_node = ck.ctx.types.node(element);
     if element_node.kind == TyKind::Named && known.is_integer(element_node.name) {
         let start_ex = ck.ex(iter.x);
@@ -2546,7 +2759,8 @@ fn assign_expr(inout ck: Ck, ex: Ex) -> u32 {
         return hole;
     }
     record(inout ck, ex.x, expected);
-    let actual = expr_expected(inout ck, ex.z, expected);
+    let goal = literal_assignment(inout ck, bind_index, path.len() == 0, ex.z, expected);
+    let actual = expr_expected(inout ck, ex.z, goal);
     if ck.skip {
         return hole;
     }
@@ -3100,17 +3314,69 @@ fn apply_args(
 
 // ----- functions -------------------------------------------------------------
 
+// One run of `Checker::function_body` over a fresh function state: the
+// parameters bound, the body checked against the declared result. `hints`
+// are the literal-typing annotations; a probe run reads uses of open
+// bindings as literals.
+fn run_body(
+    inout ck: Ck,
+    sig_index: u32,
+    body: u32,
+    first: u32,
+    body_mark: u64,
+    in hints: ChunkSeq[u32],
+    probe: bool
+) {
+    ck.skip = sig_index == NONE32;
+    ck.env.truncate(0);
+    ck.out.truncate(body_mark);
+    for e in w(first)..ck.ex_types.len() {
+        let ok = ck.ex_types.try_set(e, NONE32);
+    }
+    let sig = ck.fsig(sig_index);
+    for i in 0..w(sig.param_count) {
+        let param = ck.param(add(w(sig.param_start), i));
+        bind_name(inout ck, param.name, param.ty, param.pass, NONE32);
+    }
+    note(inout ck, sig.result);
+    ck.fn_result = sig.result;
+    ck.returned = NONE32;
+    ck.errors = 0;
+    ck.open_literal = false;
+    ck.lt_open.truncate(0);
+    ck.lt_uses.truncate(0);
+    ck.lt_hints.truncate(0);
+    ck.lt_hints.extend(in hints.as_slice());
+    ck.lt_probe = probe;
+    ck.loops.truncate(0);
+    ck.loop_values.truncate(0);
+    ck.extra_rows.truncate(0);
+    ck.handler_caps.truncate(0);
+    ck.handlers = 0;
+    ck.loop_floor = 0;
+    if ck.skip {
+        return;
+    }
+    let body_actual = expr_expected(inout ck, body, sig.result);
+    if ck.skip {
+        return;
+    }
+    let body_ex = ck.ex(body);
+    // `leave_function`: the body joins every `return` value.
+    let actual = if ck.returned == NONE32 {
+        body_actual
+    } else {
+        join(inout ck, body_actual, ck.returned, body_ex.start, body_ex.end)
+    };
+    expect_type(inout ck, sig.result, actual, body_ex.start, body_ex.end);
+}
+
 // `Checker::function_body` for the expression types: the parameters bound,
 // the body checked against the declared result. Writes `F start end` and a
 // `T start end type` row per recorded expression, or `S start end`.
 pub fn check_function(inout ck: Ck, fname: u32, start: u64, end: u64, body: u32, first: u32) {
-    ck.skip = false;
-    ck.env.truncate(0);
     let sig_index = fn_index(in ck, fname);
     ck.current = sig_index;
-    if sig_index == NONE32 {
-        ck.skip = true;
-    }
     let sig = ck.fsig(sig_index);
     ck.bounds = bounds_of(in ck, sig);
     ck.static_text = is_str(in ck, sig.result);
@@ -3120,37 +3386,34 @@ pub fn check_function(inout ck: Ck, fname: u32, start: u64, end: u64, body: u32,
     ck.out.push(32);
     put_u64(inout ck.out, end);
     ck.out.push(10);
-    for i in 0..w(sig.param_count) {
-        let param = ck.param(add(w(sig.param_start), i));
-        bind_name(inout ck, param.name, param.ty, param.pass);
-    }
-    note(inout ck, sig.result);
-    ck.fn_result = sig.result;
-    ck.returned = NONE32;
-    ck.errors = 0;
-    ck.open_literal = false;
-    ck.loops.truncate(0);
-    ck.loop_values.truncate(0);
-    ck.extra_rows.truncate(0);
-    ck.handler_caps.truncate(0);
-    ck.handlers = 0;
-    ck.loop_floor = 0;
-    if !ck.skip {
-        let body_actual = expr_expected(inout ck, body, sig.result);
+    let body_mark = ck.out.len();
+    let mut no_hints: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    run_body(inout ck, sig_index, body, first, body_mark, in no_hints, false);
+    // `function_with_literal_typing`: a failing function with an open
+    // literal binding is checked again, its open bindings annotated with
+    // the kinds probe runs find for their uses.
+    if !ck.skip && ck.errors != 0 && ck.open_literal {
+        let first_errors = ck.errors;
+        let mut hints: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        for round in 0..PROBE_ROUNDS {
+            if !ck.skip {
+                run_body(inout ck, sig_index, body, first, body_mark, in hints, true);
+                let next = settle_hints(inout ck, in hints);
+                let same = next.len() == hints.len();
+                hints = next;
+                if same {
+                    break;
+                }
+            }
+        }
         if !ck.skip {
-            let body_ex = ck.ex(body);
-            // `leave_function`: the body joins every `return` value.
-            let actual = if ck.returned == NONE32 {
-                body_actual
-            } else {
-                join(inout ck, body_actual, ck.returned, body_ex.start, body_ex.end)
-            };
-            expect_type(inout ck, sig.result, actual, body_ex.start, body_ex.end);
-            // A failing function with an open literal binding is checked
-            // again with literal typing (`function_with_literal_typing`),
-            // which is not ported yet.
-            if ck.errors != 0 && ck.open_literal {
-                ck.skip = true;
+            let mut better = false;
+            if hints.len() != 0 {
+                run_body(inout ck, sig_index, body, first, body_mark, in hints, false);
+                better = ck.errors < first_errors;
+            }
+            if !ck.skip && !better {
+                run_body(inout ck, sig_index, body, first, body_mark, in no_hints, false);
             }
         }
     }
