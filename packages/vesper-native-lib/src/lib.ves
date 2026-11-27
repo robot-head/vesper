@@ -221,6 +221,12 @@ fn define_one(
     args.extend(in callees.as_slice());
     args.push(NO_VALUE);
     args.push(0);
+    // No parameter has an address: every one is its block parameter
+    // (`codegen_swap::body::NO_VALUE` per parameter, #2563).
+    args.push(widen_u64(np));
+    for k in 0..np {
+        args.push(NO_VALUE);
+    }
     args.extend(in plan.as_slice());
     let answer = emit_body_words(args, inout b, inout m);
     if answer != HANDLED {

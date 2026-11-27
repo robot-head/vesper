@@ -89,6 +89,9 @@ static CALL_DECLINED: AtomicU64 = AtomicU64::new(0);
 /// Of the functions emitted from Vesper, those that return a struct or
 /// tuple through the result pointer (#2411).
 static SRET: AtomicU64 = AtomicU64::new(0);
+/// Of the functions emitted from Vesper, those with an `inout` scalar
+/// parameter stored through its address (#2563).
+static POINTERS: AtomicU64 = AtomicU64::new(0);
 
 /// Identifies a lent program for the cache: its address, function count
 /// and instruction count (a later compile may reuse the address).
@@ -180,6 +183,11 @@ fn body(lent: &mut Lent<'_, '_>) -> Result<bool, String> {
             if sret != codegen_swap::body::NO_VALUE {
                 SRET.fetch_add(1, Ordering::Relaxed);
             }
+            if codegen_swap::body::pointers(lent.args)
+                .is_some_and(|p| p.iter().any(|a| *a != codegen_swap::body::NO_VALUE))
+            {
+                POINTERS.fetch_add(1, Ordering::Relaxed);
+            }
             if !callees.is_empty() {
                 WITH_CALLS.fetch_add(1, Ordering::Relaxed);
                 CALLS.fetch_add(callees.len() as u64, Ordering::Relaxed);
@@ -257,6 +265,7 @@ fn vesper_scalar_bodies_match_the_rust_walk() {
             &CALLS,
             &CALL_DECLINED,
             &SRET,
+            &POINTERS,
         ];
         let before = counters.map(|c| c.load(Ordering::Relaxed));
         let worlds: Vec<_> = check_harness::corpus()
@@ -269,11 +278,19 @@ fn vesper_scalar_bodies_match_the_rust_walk() {
             total.add(both(&case.name, &case.world, runs(i, case)));
         }
         let after = counters.map(|c| c.load(Ordering::Relaxed));
-        let [emitted, unplanned, with_calls, calls, call_declined, sret] =
-            [0, 1, 2, 3, 4, 5].map(|i| after[i] - before[i]);
+        let [
+            emitted,
+            unplanned,
+            with_calls,
+            calls,
+            call_declined,
+            sret,
+            pointers,
+        ] = [0, 1, 2, 3, 4, 5, 6].map(|i| after[i] - before[i]);
         eprintln!(
             "native walk bodies: {}; {emitted} functions emitted from Vesper \
-             ({with_calls} with {calls} direct calls, {sret} with a struct result), \
+             ({with_calls} with {calls} direct calls, {sret} with a struct result, \
+             {pointers} with inout scalars), \
              {unplanned} left to Rust, {call_declined} declined for a call",
             total.summary()
         );
@@ -1491,3 +1508,115 @@ fn vesper_scalar_bodies_part_6q() {
         assert!(total.is_clean(), "{}", total.summary());
     });
 }
+
+/// `inout` scalar parameters (#2563): each is loaded at entry, read through
+/// its address and stored through it at every definition, with a loop, a
+/// narrow integer, a `bool`, a float and a compound write. `bump` and
+/// `narrow` lend their own `inout` parameters on to themselves, and `twice`
+/// and `main` lend register locals (a scratch word on the optimize path);
+/// recursion keeps each callee a call through `ir_inline`.
+const INOUT_SOURCE: &str = "
+fn steps(n: u64) -> i64 {
+    if n == 0 {
+        return 0;
+    }
+    wrapping_add(steps(wrapping_sub(n, 1)), 1)
+}
+fn bump(inout x: i64, by: i64, n: u64) -> i64 {
+    if n == 0 {
+        return x;
+    }
+    let mut i: i64 = 0;
+    loop {
+        if i >= by {
+            break;
+        }
+        x = wrapping_add(x, i);
+        if x > 100 {
+            x = wrapping_sub(x, 7);
+        }
+        i = wrapping_add(i, 1);
+    }
+    x = x ^ 5;
+    bump(inout x, by, wrapping_sub(n, 1))
+}
+fn narrow(inout b: u8, inout flag: bool, n: u64) -> u8 {
+    if n == 0 {
+        return b;
+    }
+    b = b | 1;
+    b = b & 127;
+    flag = !flag;
+    narrow(inout b, inout flag, wrapping_sub(n, 1))
+}
+fn scale(inout f: f64, k: f64, n: u64) -> f64 {
+    if n == 0 {
+        return f;
+    }
+    f = f * k + 0.5;
+    f *= 0.75;
+    if steps(n) > 3 { f } else { k }
+}
+fn twice(v: i64) -> i64 {
+    let mut t: i64 = v;
+    let r: i64 = bump(inout t, 2, 2);
+    wrapping_add(r, t)
+}
+fn main() -> i64 {
+    let mut x: i64 = 3;
+    let mut b: u8 = 4;
+    let mut flag: bool = false;
+    let mut f: f64 = 1.5;
+    let r: i64 = bump(inout x, 9, 3);
+    let c: u8 = narrow(inout b, inout flag, 3);
+    let g: f64 = scale(inout f, 1.25, 4);
+    let h: i64 = if flag && g > 2.0 { 64 } else { 0 };
+    r ^ x ^ widen_i64(c) ^ widen_i64(b) ^ h ^ twice(11)
+}
+";
+
+#[test]
+fn vesper_inout_scalar_parameters_match() {
+    big_stack(|| {
+        let parsed = vesper::parser::parse(INOUT_SOURCE);
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        let checked = vesper::check::check(&parsed.module);
+        assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
+        if let Err(e) = build(&checked.world, "main", true) {
+            panic!("the inout program does not build: {e}");
+        }
+        let (pointers_before, emitted_before) = (
+            POINTERS.load(Ordering::Relaxed),
+            EMITTED.load(Ordering::Relaxed),
+        );
+        let total = both("inout_scalars", &checked.world, true);
+        let pointers = POINTERS.load(Ordering::Relaxed) - pointers_before;
+        let emitted = EMITTED.load(Ordering::Relaxed) - emitted_before;
+        eprintln!(
+            "inout_scalars: {}; {pointers} bodies with inout scalars emitted from Vesper",
+            total.summary()
+        );
+        let ran = if cross() { 0 } else { 2 };
+        assert_eq!((total.worlds, total.ran), (2, ran), "{}", total.summary());
+        assert!(
+            pointers >= MIN_INOUT_BODIES,
+            "only {pointers} inout bodies came from Vesper (expected >= {MIN_INOUT_BODIES})"
+        );
+        // Every function, `twice` and `main` too (their locals lent
+        // through scratch words on the optimize path).
+        assert!(
+            emitted >= MIN_INOUT_PROGRAM_BODIES,
+            "only {emitted} bodies came from Vesper (expected >= {MIN_INOUT_PROGRAM_BODIES})"
+        );
+        assert!(total.is_clean(), "{}", total.summary());
+    });
+}
+
+/// Every body of `INOUT_SOURCE`'s six functions, counted as
+/// `MIN_INOUT_BODIES` is.
+const MIN_INOUT_PROGRAM_BODIES: u64 = 24;
+
+/// The bodies of `INOUT_SOURCE` with an `inout` parameter that must come
+/// from Vesper: `bump`, `narrow` and `scale` at both optimizer settings
+/// (each counted by both comparisons of a setting).
+const MIN_INOUT_BODIES: u64 = 12;

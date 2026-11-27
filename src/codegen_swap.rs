@@ -1262,7 +1262,11 @@ pub mod body {
     /// call (part 6b), or [`NO_CALLEE`]; then `sret, h, h values`: the
     /// result pointer's value word, or [`NO_VALUE`] for a function that
     /// returns its value, and the values (by index in the graph's values)
-    /// that `aggregates::plan` builds in it (#2411). No result.
+    /// that `aggregates::plan` builds in it (#2411); then `p, p words`:
+    /// for each of the function's `p` declared parameters the variable
+    /// holding its address, or [`NO_VALUE`] (#2563: an `inout` scalar
+    /// parameter is loaded at entry and stored through its address at
+    /// every definition). No result.
     pub const FUNCTION: u32 = 1;
 
     /// A [`FUNCTION`] request's `sret` word when the function has no result
@@ -1296,6 +1300,19 @@ pub mod body {
     /// A [`FUNCTION`] request's callees, `sret` word and result homes, or
     /// `None` when the arguments do not have that layout.
     pub fn layout(args: &[u64]) -> Option<(&[u64], u64, &[u64])> {
+        full(args).map(|(callees, sret, homes, _)| (callees, sret, homes))
+    }
+
+    /// A [`FUNCTION`] request's parameter address words (#2563), or `None`
+    /// when the arguments do not have that layout.
+    pub fn pointers(args: &[u64]) -> Option<&[u64]> {
+        full(args).map(|(_, _, _, pointers)| pointers)
+    }
+
+    /// A [`FUNCTION`] request's callees, `sret` word, result homes and
+    /// parameter addresses.
+    #[allow(clippy::type_complexity)]
+    fn full(args: &[u64]) -> Option<(&[u64], u64, &[u64], &[u64])> {
         let params = usize::try_from(*args.get(FLAGS)?).ok()?;
         // The parameter count, then the parameter variables.
         let count_at = FLAGS + 1 + params;
@@ -1304,9 +1321,12 @@ pub mod body {
         let callees = args.get(count_at + 1..sret_at)?;
         let sret = *args.get(sret_at)?;
         let homes = usize::try_from(*args.get(sret_at + 1)?).ok()?;
-        args.get(sret_at + 2..)
-            .filter(|rest| rest.len() == homes)
-            .map(|rest| (callees, sret, rest))
+        let pointers_at = sret_at + 2 + homes;
+        let result_homes = args.get(sret_at + 2..pointers_at)?;
+        let pointers = usize::try_from(*args.get(pointers_at)?).ok()?;
+        args.get(pointers_at + 1..)
+            .filter(|rest| rest.len() == pointers)
+            .map(|rest| (callees, sret, result_homes, rest))
     }
 }
 

@@ -93,6 +93,11 @@ const RECORD_PAYLOAD: i64 = 8;
 // A re-raised error copied by words (`/codegen-scalar`).
 const AGGREGATE_ERROR: u64 = 18446744073709551615;
 const INST_FAIL_CALL: u64 = 41;
+// A direct call that borrows scalar locals `inout` (#2563), and its
+// argument tags.
+const INST_INOUT_CALL: u64 = 48;
+const ARG_IN: u64 = 0;
+const ARG_INOUT: u64 = 1;
 // `codegen_swap::body::FAIL_CALL` and `STATUS_CALL`, the flags of a callee
 // word above its 32-bit `FuncId`.
 const FAIL_CALL: u64 = 4294967296;
@@ -1274,6 +1279,92 @@ impl Body {
                 self.reraise(inout b, inout w, record, tag);
                 result
             }
+        } else if kind == INST_INOUT_CALL {
+            // A pure callee that borrows scalar locals `inout` (#2563):
+            // `ir_temp` of each `in` argument, then in argument order each
+            // `in` one read back and each `inout` one's address
+            // (`Codegen::address`: its own, or a scratch word holding the
+            // register's value) with the value stored to it again
+            // (`call_function_into`); the call; then each borrowed local
+            // loaded back and defined (`restores`).
+            let call_idx = w.next();
+            if call_idx >= self.callees.len() {
+                return false;
+            }
+            let word = at64(in self.callees, call_idx);
+            if (word & FAIL_CALL) != 0 {
+                return false;
+            }
+            let callee = FuncId { id: wrapping_u32(word & CALLEE_ID_MASK) };
+            let mut temps: ChunkSeq[u32] = ChunkSeq::new[u32]();
+            for k in 0..n {
+                temps.push(temp(inout b, self.value(at64(in ops, k))).id);
+            }
+            let nargs = w.next();
+            let mut args: ChunkSeq[u32] = ChunkSeq::new[u32]();
+            let mut lent: ChunkSeq[u64] = ChunkSeq::new[u64]();
+            let mut lent_ptrs: ChunkSeq[u32] = ChunkSeq::new[u32]();
+            let mut lent_lanes: ChunkSeq[u64] = ChunkSeq::new[u64]();
+            let mut ti: u64 = 0;
+            for k in 0..nargs {
+                let tag = w.next();
+                if tag == ARG_IN {
+                    let read = w.next();
+                    if ti >= n {
+                        return false;
+                    }
+                    let tv = Var { id: at32(in temps, ti) };
+                    ti = wrapping_add(ti, 1);
+                    args.push(body_operand(inout b, tv, read, self.optimize).id);
+                } else if tag == ARG_INOUT {
+                    let l = w.next();
+                    let lane = w.next();
+                    if l >= self.locals.len() {
+                        return false;
+                    }
+                    let address = at32(in self.addresses, l);
+                    let ptr = if address != invalid() {
+                        use_var(inout b, Var { id: address })
+                    } else {
+                        let value = self.use_local(inout b, l);
+                        let bytes = if lane == LANE_I128 {
+                            WIDE_BYTES
+                        } else {
+                            WORD_BYTES
+                        };
+                        let slot = create_stack_slot(inout b, bytes, SLOT_ALIGN_SHIFT);
+                        let scratch = ins_stack_addr(inout b, module_pointer_type(in m), slot, 0);
+                        ins_store(inout b, PLAIN, value, scratch, 0);
+                        scratch
+                    };
+                    let value = self.use_local(inout b, l);
+                    ins_store(inout b, PLAIN, value, ptr, 0);
+                    lent.push(l);
+                    lent_ptrs.push(ptr.id);
+                    lent_lanes.push(lane);
+                    args.push(ptr.id);
+                } else {
+                    return false;
+                }
+            }
+            if ti != n {
+                return false;
+            }
+            let fun = import_function(inout b, inout m, callee);
+            let _ = ins_call(inout b, fun, in args.as_slice());
+            let result = inst_result(inout b, 0);
+            for k in 0..lent.len() {
+                let l = at64(in lent, k);
+                let ptr = Value { id: at32(in lent_ptrs, k) };
+                let value = ins_load(inout b, lane_type(at64(in lent_lanes, k)), PLAIN, ptr, 0);
+                self.def_local(inout b, l, value);
+                let address = at32(in self.addresses, l);
+                if address != invalid() {
+                    let destination = use_var(inout b, Var { id: address });
+                    ins_store(inout b, PLAIN, value, destination, 0);
+                }
+            }
+            result
         } else if kind == INST_CHECKED {
             // `expr_at`'s general `Binary` arm (#2425): both operands named
             // by temporaries and read back, the divisor test of a partial
@@ -1851,6 +1942,27 @@ pub fn emit_body_words(
     for k in 0..nh {
         homes.push(w.next());
     }
+    // Each declared parameter's address variable, or `NO_VALUE` (#2563):
+    // an `inout` scalar is loaded at entry and stored through its address
+    // at every definition, as a spilled local is.
+    if count < wrapping_add(w.at, 1) {
+        return BODY_ERROR;
+    }
+    let npointers = w.next();
+    if count < wrapping_add(w.at, npointers) {
+        return BODY_ERROR;
+    }
+    let mut pointers: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    for k in 0..npointers {
+        let word = w.next();
+        pointers.push(
+            if word == NO_VALUE {
+                invalid()
+            } else {
+                wrapping_u32(word)
+            }
+        );
+    }
     if count < wrapping_add(w.at, 3) {
         return BODY_ERROR;
     }
@@ -1910,14 +2022,19 @@ pub fn emit_body_words(
     for k in 0..nl {
         let entry = w.next();
         s.kinds.push(w.next());
-        s.addresses.push(invalid());
+        let mut address = invalid();
         if entry >= LOCAL_PARAM {
             let p = wrapping_sub(entry, LOCAL_PARAM);
             s.locals.push(wrapping_u32(w.arg(wrapping_add(wrapping_add(ARG_PARAMS, 1), p))));
+            if p < npointers {
+                address = at32(in pointers, p);
+            }
         } else {
             s.locals.push(zeroed(inout b, entry));
         }
-        if !optimize {
+        s.addresses.push(address);
+        // A parameter with an address has no slot or register of its own.
+        if !optimize && address == invalid() {
             s.spill(inout b, in m, k);
         }
     }

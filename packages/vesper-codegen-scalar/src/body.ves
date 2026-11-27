@@ -16,6 +16,12 @@
 // a stack slot, so each local's entry carries the kind its stores coerce
 // to.
 //
+// `inout` scalar parameters (#2563) arrive with their addresses in the
+// request, so the emitter loads and stores them as it does a spilled
+// local. A direct call of a pure function may borrow whole scalar locals
+// `inout` (`INST_INOUT_CALL`): each is passed by its address, a scratch
+// word for a register, and loaded back after the call.
+//
 // Failure records (#2425): a `fail_only` function (`Fail[E]` instances and
 // erased capabilities only) takes its failure record as one more
 // parameter. Its plan names the row's `Fail` count and the result lane a
@@ -76,6 +82,9 @@ pub const INST_WIDE_BINARY: u64 = 15;
 pub const INST_CHECKED: u64 = 40;
 // A direct call of a `fail_only` function, whose failure is raised again.
 pub const INST_FAIL_CALL: u64 = 41;
+// A direct call of a pure function that borrows scalar locals `inout`
+// (#2563); codes from 48 leave room for the failure-record slice.
+pub const INST_INOUT_CALL: u64 = 48;
 
 // A failure record's tag word, and the word its payload is rounded to
 // (`fail_record_size`).
@@ -230,7 +239,12 @@ const PAT_LIT_HI_OFFSET: u64 = 5;
 const CALL_ARGS: u64 = 2;
 const CALL_ARG_WORDS: u64 = 4;
 const CALL_ARG_ROOT_OFFSET: u64 = 2;
+const CALL_ARG_PATH_OFFSET: u64 = 3;
 const PASS_IN: u64 = 0;
+const PASS_INOUT: u64 = 1;
+// `INST_INOUT_CALL`'s argument tags.
+pub const ARG_IN: u64 = 0;
+pub const ARG_INOUT: u64 = 1;
 
 // A `Bind` of the wildcard pattern binds no local.
 pub const NO_LOCAL: u64 = 18446744073709551615;
@@ -1999,7 +2013,20 @@ impl Gen {
                     INST_FAIL_CALL
                 };
                 extra.push(call);
-                let n = self.program.op(inc(i.a));
+                let mut n = self.program.op(inc(i.a));
+                if self.body_has_inout(i, n) {
+                    // A pure callee that borrows scalar locals `inout`
+                    // (#2563): the `In` arguments are operands; each
+                    // `inout` one names its local and lane.
+                    if kind != INST_CALL {
+                        return false;
+                    }
+                    kind = INST_INOUT_CALL;
+                    if !self.body_inout_args(in h, i, n, inout ops, inout extra) {
+                        return false;
+                    }
+                    n = 0;
+                }
                 for k in 0..n {
                     let at = add(add(i.a, CALL_ARGS), wrapping_mul(k, CALL_ARG_WORDS));
                     if !self.body_operand(in h, inc(at), inout ops) {
@@ -2215,6 +2242,70 @@ impl Gen {
             return true;
         }
         false
+    }
+
+    // Whether one of call `i`'s `n` arguments is not passed `in`.
+    fn body_has_inout(in self, i: InstRow, n: u64) -> bool {
+        for k in 0..n {
+            let at = add(add(i.a, CALL_ARGS), wrapping_mul(k, CALL_ARG_WORDS));
+            if self.program.op(at) != PASS_IN {
+                return true;
+            }
+        }
+        false
+    }
+
+    // The arguments of a direct call with `inout` scalar locals (#2563),
+    // after the argument count: `[ARG_IN, kind]` for an `in` argument
+    // (whose value joins `ops`), `[ARG_INOUT, local, lane]` for a local
+    // lent `inout` (`Codegen::address`, restored after the call).
+    fn body_inout_args(
+        inout self,
+        in h: Header,
+        i: InstRow,
+        n: u64,
+        inout ops: ChunkSeq[u64],
+        inout extra: ChunkSeq[u64]
+    ) -> bool {
+        extra.push(n);
+        for k in 0..n {
+            let at = add(add(i.a, CALL_ARGS), wrapping_mul(k, CALL_ARG_WORDS));
+            let pass = self.program.op(at);
+            if pass == PASS_IN {
+                if !self.body_operand(in h, inc(at), inout ops) {
+                    return false;
+                }
+                let read = self.body_kind(n32(u64_at(
+                    in h.vty,
+                    u64_at(in ops, wrapping_sub(ops.len(), 1))
+                )));
+                if read == NONE64 {
+                    return false;
+                }
+                extra.push(ARG_IN);
+                extra.push(read);
+            } else if pass == PASS_INOUT {
+                let root = self.program.op(add(at, CALL_ARG_ROOT_OFFSET));
+                let path = self.program.path(self.program.op(add(at, CALL_ARG_PATH_OFFSET)));
+                if root == 0 || path.n != 0 {
+                    return false;
+                }
+                let l = self.body_local(in h, wrapping_sub(root, 1));
+                if l == NONE64 {
+                    return false;
+                }
+                let lane = self.body_lane(self.body_local_type(in h, l));
+                if lane == 0 || lane == LANE_PRODUCT {
+                    return false;
+                }
+                extra.push(ARG_INOUT);
+                extra.push(l);
+                extra.push(lane);
+            } else {
+                return false;
+            }
+        }
+        true
     }
 
     // The start of a block's parameter words (place-ir `read_block`:
