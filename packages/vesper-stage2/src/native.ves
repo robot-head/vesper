@@ -558,6 +558,102 @@ fn supported_struct(in low: L, inst: InstRow, in m: Function) -> bool {
     true
 }
 
+copy struct EqualityPair {
+    left: u64,
+    right: u64,
+}
+
+fn queue_equality(
+    pair: EqualityPair,
+    in m: Function,
+    inout aggregates: ChunkSeq[EqualityPair],
+    inout leaves: ChunkSeq[EqualityPair]
+) -> bool {
+    let kind = m.value_kind(pair.left);
+    if kind == ScalarKind::Unsupported || kind != m.value_kind(pair.right) {
+        return false;
+    }
+    if is_aggregate(kind) {
+        // Several fields can refer to the same subproduct. Expand it once.
+        for i in 0..aggregates.len() {
+            let queued = aggregates.try_get(i).unwrap_or(pair);
+            if queued.left == pair.left && queued.right == pair.right {
+                return true;
+            }
+        }
+        aggregates.push(pair);
+    } else if kind != ScalarKind::Unit && (pair.left != pair.right || is_float(kind)) {
+        leaves.push(pair);
+    }
+    true
+}
+
+fn equality_leaves(
+    in low: L,
+    pair: EqualityPair,
+    in m: Function,
+    inout leaves: ChunkSeq[EqualityPair]
+) -> bool {
+    let mut aggregates = ChunkSeq::new[EqualityPair]();
+    if !queue_equality(pair, in m, inout aggregates, inout leaves) {
+        return false;
+    }
+    let mut index: u64 = 0;
+    loop {
+        let pair = match aggregates.try_get(index) {
+            Option::Some(pair) => pair,
+            Option::None => return true,
+        };
+        let a = m.aggregate_definition(pair.left);
+        let b = m.aggregate_definition(pair.right);
+        if a == NO_VALUE || b == NO_VALUE {
+            return false;
+        }
+        let left = low.program.inst(a);
+        let right = low.program.inst(b);
+        if left.op != right.op || left.ty != right.ty {
+            return false;
+        }
+        if left.op == Op::Tuple {
+            let count = low.program.op(left.a);
+            if left.n != inc(count) || right.n != left.n || low.program.op(right.a) != count {
+                return false;
+            }
+            for field in 0..count {
+                let x = low.program.op(add(inc(left.a), field));
+                let y = low.program.op(add(inc(right.a), field));
+                let child = EqualityPair { left: add(m.arguments, x), right: add(m.arguments, y) };
+                if !queue_equality(child, in m, inout aggregates, inout leaves) {
+                    return false;
+                }
+            }
+        } else if left.op == Op::Data {
+            let count = low.program.op(add(left.a, DATA_FIELD_COUNT));
+            if left.n != add(DATA_HEADER_WORDS, wrapping_mul(count, DATA_FIELD_WORDS))
+                || right.n != left.n
+            {
+                return false;
+            }
+            let mut field = add(left.a, DATA_HEADER_WORDS);
+            for _ in 0..count {
+                let x = low.program.op(inc(field));
+                let y = struct_member(in low, right, n32(low.program.op(field)));
+                if y == NO_VALUE {
+                    return false;
+                }
+                let child = EqualityPair { left: add(m.arguments, x), right: add(m.arguments, y) };
+                if !queue_equality(child, in m, inout aggregates, inout leaves) {
+                    return false;
+                }
+                field = add(field, DATA_FIELD_WORDS);
+            }
+        } else {
+            return false;
+        }
+        index = inc(index);
+    }
+}
+
 fn place_value(in low: L, f: FnR, root: u32, in m: Function) -> u64 {
     let binding = u32_at(in m.bindings, w(root));
     if binding == 0 {
@@ -1304,7 +1400,24 @@ fn plan_homes(in low: L, f: FnR, row: FnRow, inout m: Function) -> bool {
             } else if inst.op == Op::Binary {
                 let lhs = add(f.param_count, low.program.op(add(at, BINARY_LHS)));
                 let rhs = add(f.param_count, low.program.op(add(at, BINARY_RHS)));
-                if !m.use_in(lhs, block) || !m.use_in(rhs, block) {
+                let kind = m.value_kind(lhs);
+                if is_aggregate(kind) {
+                    let mut leaves = ChunkSeq::new[EqualityPair]();
+                    let pair = EqualityPair { left: lhs, right: rhs };
+                    if !equality_leaves(in low, pair, in m, inout leaves) {
+                        return false;
+                    }
+                    for i in 0..leaves.len() {
+                        let pair = leaves
+                            .try_get(i)
+                            .unwrap_or(EqualityPair { left: NO_VALUE, right: NO_VALUE });
+                        if !m.use_in(pair.left, block) || !m.use_in(pair.right, block) {
+                            return false;
+                        }
+                    }
+                } else if kind != ScalarKind::Unit
+                    && (!m.use_in(lhs, block) || !m.use_in(rhs, block))
+                {
                     return false;
                 }
             } else if inst.op == Op::Unary {
@@ -1796,6 +1909,54 @@ fn comparison_operation(kind: u8) -> u64 {
     }
 }
 
+fn lower_product_equality(
+    in low: L,
+    pair: EqualityPair,
+    compare: u64,
+    block: u64,
+    inout m: Function
+) -> u64 {
+    if compare != EQUAL && compare != NOT_EQUAL {
+        return NO_VALUE;
+    }
+    let mut leaves = ChunkSeq::new[EqualityPair]();
+    if !equality_leaves(in low, pair, in m, inout leaves) {
+        return NO_VALUE;
+    }
+    let equal = compare == EQUAL;
+    let combine = if equal { AND } else { OR };
+    let mut result = NO_VALUE;
+    for i in 0..leaves.len() {
+        let field = leaves.try_get(i).unwrap_or(EqualityPair { left: NO_VALUE, right: NO_VALUE });
+        let kind = m.value_kind(field.left);
+        let lhs = m.read(field.left, block);
+        let rhs = m.read(field.right, block);
+        if lhs == NO_VALUE || rhs == NO_VALUE {
+            return NO_VALUE;
+        }
+        let test = if is_float(kind) {
+            let op = if kind == ScalarKind::F32 {
+                FLOAT_COMPARE32
+            } else {
+                FLOAT_COMPARE64
+            };
+            m.record(op, lhs, rhs, if equal { FLOAT_EQUAL } else { FLOAT_NOT_EQUAL })
+        } else {
+            m.record(comparison_operation(kind), lhs, rhs, compare)
+        };
+        result = if result == NO_VALUE {
+            test
+        } else {
+            m.record(combine, result, test, BYTE_BITS)
+        };
+    }
+    if result == NO_VALUE {
+        m.record(CONSTANT, if equal { 1 } else { 0 }, 0, 0)
+    } else {
+        result
+    }
+}
+
 fn lower_shift(
     left: bool,
     signed: bool,
@@ -1937,6 +2098,13 @@ fn lower_binary(
     let right = low.program.op(add(at, BINARY_RHS));
     let operand_kind = m.kind(left);
     let right_kind = m.kind(right);
+    if kind == ScalarKind::Bool
+        && (is_aggregate(operand_kind) || operand_kind == ScalarKind::Unit)
+    {
+        let pair = EqualityPair { left: add(m.arguments, left), right: add(m.arguments, right) };
+        let compare = integer_comparison(in low, symbol, operand_kind);
+        return lower_product_equality(in low, pair, compare, block, inout m);
+    }
     if abi_width(operand_kind) == 0 || abi_width(right_kind) == 0 {
         return NO_VALUE;
     }
