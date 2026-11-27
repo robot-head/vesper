@@ -2386,6 +2386,12 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
              let low: i64 = -128;\n\
              narrow_i8(low + ((wrapping_add(shifted, remainder) & 31) * 4))\n\
          }\n\
+         fn magnitude(a: f32, b: f32) -> f32 { sqrt(a * a + b * b) }\n\
+         pub fn floating_call(scale: f64, mode: i64, a: f32, b: f32) -> f64 {\n\
+             let mut result: f64 = widen_f64(magnitude(a, b));\n\
+             if mode < 0 { result = result / scale; } else { result = result * scale; };\n\
+             result + 2.5\n\
+         }\n\
          fn unsupported(x: u64) -> u64 { match (x, x) { (0, _) => 7, _ => 9 } }\n\
          pub fn decline(x: u64) -> u64 { unsupported(x) }\n",
     )
@@ -2525,6 +2531,14 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
         "{:?}",
         read_stage2_sidecar_notes(&object)
     );
+    let bounds_object = dir.join("native-bounds.o");
+    std::fs::rename(&object, &bounds_object).unwrap();
+    assert_eq!(
+        compile("floating_call"),
+        0,
+        "{:?}",
+        read_stage2_sidecar_notes(&object)
+    );
     let bytes = std::fs::read(&object).unwrap();
     assert_ne!(compile("decline"), 0);
     assert!(read_stage2_sidecar_notes(&object).contains("unsupported x86-64 ELF entry"));
@@ -2551,6 +2565,7 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
          extern int16_t integer_ops(int16_t, uint64_t);\n\
          extern int64_t proven_arithmetic(int8_t);\n\
          extern int8_t factored_bounds(int64_t, int64_t);\n\
+         extern double floating_call(double, int64_t, float, float);\n\
          int main(void) {\n\
              if (mix(10, 4) != 65 || mix(UINT64_MAX, UINT64_MAX) != UINT64_MAX - 16) return 1;\n\
              if (choose(0, 4) != 8 || choose(2, 4) != 8 || choose(4, 1) != 10\n\
@@ -2577,7 +2592,9 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
              if (integer_ops(INT16_MIN, 63) != 6552 || integer_ops(7, 0) != -16385) return 12;\n\
              if (proven_arithmetic(3) != -109 || proven_arithmetic(6) != 16\n\
                  || proven_arithmetic(-1) != -121) return 13;\n\
-             return factored_bounds(63, 0) != -120 || factored_bounds(-128, 3) != -4;\n\
+             if (factored_bounds(63, 0) != -120 || factored_bounds(-128, 3) != -4) return 14;\n\
+             return floating_call(2.0, -1, 3.0f, 4.0f) != 5.0\n\
+                 || floating_call(2.0, 1, 3.0f, 4.0f) != 12.5;\n\
          }\n",
     )
     .unwrap();
@@ -2597,6 +2614,7 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
             &match_object,
             &integer_object,
             &arithmetic_object,
+            &bounds_object,
             &object,
         ])
         .arg("-o")

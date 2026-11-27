@@ -247,7 +247,7 @@ const X86_VECTOR_WIDEN_SSE41: u64 = 0x400;
 pub const VECTOR_NARROW_UNSIGNED_INPUT: u64 = 0x200;
 const X86_SWIZZLE_ZERO_HIGH: u64 = 1;
 const X86_HARDWARE_POPCOUNT: u64 = 1;
-const XMM_ARGUMENTS: u64 = 8;
+pub const XMM_ARGUMENTS: u64 = 8;
 pub const CHECKED_ARITHMETIC_RECORDS: u64 = 2;
 
 // Relocation kinds shared with src/native_machine.rs.

@@ -3,17 +3,23 @@ use @vesper/check-data::util::{add, inc, n32, u32_at, w};
 use @vesper/check-data::world::{set_by_symbol};
 use @vesper/hybrid-native-backend::elf::{x86_text_object};
 use @vesper/hybrid-native-backend::scalar::{
-    ADD, AND, BLOCK_LABEL, BLOCK_RETURN, BRANCH_BLOCK, CALL, CALL_ARGUMENT, COMPARE, COMPARE_BYTE,
-    COMPARE_DWORD, COMPARE_IMMEDIATE, COMPARE_WORD, CONSTANT, EQUAL, HEADER_WORDS, JUMP_LABEL,
-    MAX_ARGUMENTS, MUL, NEG, NOT_EQUAL, NO_VALUE, NOT, OR, RECORD_WORDS, RETURN_VALUE, Record, SAR,
-    SAR_REGISTER, SHL, SHL_REGISTER, SHR, SHR_REGISTER, SIGNED_DIV, SIGNED_GREATER,
-    SIGNED_GREATER_EQUAL, SIGNED_LESS, SIGNED_LESS_EQUAL, SIGNED_REM, SIGN_EXTEND, STACK_LOAD,
-    STACK_SLOT, STACK_STORE_QWORD, SUB, TRUNCATE, UNSIGNED_DIV, UNSIGNED_GREATER,
-    UNSIGNED_GREATER_EQUAL, UNSIGNED_LESS, UNSIGNED_LESS_EQUAL, UNSIGNED_REM, XOR, encode_block,
-    read_record
+    ADD, AND, BLOCK_LABEL, BLOCK_RETURN, BRANCH_BLOCK, CALL, CALL_ARGUMENT, CALL_FLOAT, COMPARE,
+    COMPARE_BYTE, COMPARE_DWORD, COMPARE_IMMEDIATE, COMPARE_WORD, CONSTANT, EQUAL, FLOAT_ABS,
+    FLOAT_ADD, FLOAT_ARGUMENT, FLOAT_COMPARE32, FLOAT_COMPARE64, FLOAT_CONSTANT, FLOAT_DIV,
+    FLOAT_MUL, FLOAT_NEG, FLOAT_RETURN, FLOAT_RETURN_LAYOUT, FLOAT_SQRT, FLOAT_STACK_LOAD,
+    FLOAT_STACK_STORE32, FLOAT_STACK_STORE64, FLOAT_SUB, HEADER_WORDS, JUMP_LABEL, MAX_ARGUMENTS,
+    MUL, NEG, NOT_EQUAL, NO_VALUE, NOT, OR, RECORD_WORDS, RETURN_VALUE, Record, SAR, SAR_REGISTER,
+    SHL, SHL_REGISTER, SHR, SHR_REGISTER, SIGNED_DIV, SIGNED_GREATER, SIGNED_GREATER_EQUAL,
+    SIGNED_LESS, SIGNED_LESS_EQUAL, SIGNED_REM, SIGN_EXTEND, STACK_LOAD, STACK_SLOT,
+    STACK_STORE_QWORD, SUB, TRUNCATE, UNSIGNED_DIV, UNSIGNED_GREATER, UNSIGNED_GREATER_EQUAL,
+    UNSIGNED_LESS, UNSIGNED_LESS_EQUAL, UNSIGNED_REM, XMM_ARGUMENTS, XOR, encode_block, read_record
+};
+use @vesper/hybrid-native-backend::scalar::{
+    BITS_TO_FLOAT, FLOAT_DEMOTE, FLOAT_PROMOTE, FLOAT_TO_BITS
 };
 use @vesper/hybrid-native-backend::x86_64::{
-    ALL_REGISTER_BITS, BYTE_BITS, DWORD_BITS, QWORD_BITS, WORD_BITS
+    ALL_REGISTER_BITS, BYTE_BITS, DWORD_BITS, FLOAT_EQUAL, FLOAT_GREATER, FLOAT_GREATER_EQUAL,
+    FLOAT_LESS, FLOAT_LESS_EQUAL, FLOAT_NOT_EQUAL, QWORD_BITS, WORD_BITS
 };
 use @vesper/place-ir::{BlockRow, FnRow, InstRow, Lit, Op, Pat, Tag, Term};
 use @vesper/place-ir-lower::ast::{FnR};
@@ -84,6 +90,8 @@ enum ScalarKind: _ {
     I32 = 10,
     Usize = 11,
     Isize = 12,
+    F32 = 13,
+    F64 = 14,
 }
 
 struct CallGraph {
@@ -116,10 +124,12 @@ copy struct Value {
 
 struct Function {
     arguments: u64,
+    gp_arguments: u64,
     result: u8,
     words: ChunkSeq[u64],
     values: ChunkSeq[Value],
     kinds: ChunkSeq[u8],
+    parameters: ChunkSeq[u8],
     labels: ChunkSeq[u64],
     blocks: ChunkSeq[u64],
     next_label: u64,
@@ -142,6 +152,39 @@ impl Function {
         self.kinds.try_get(id).unwrap_or(ScalarKind::Unsupported)
     }
 
+    fn value_kind(in self, id: u64) -> u8 {
+        if id < self.arguments {
+            self.parameters.try_get(id).unwrap_or(ScalarKind::Unsupported)
+        } else {
+            self.kind(wrapping_sub(id, self.arguments))
+        }
+    }
+
+    fn return_layout(in self) -> u64 {
+        if is_float(self.result) {
+            FLOAT_RETURN_LAYOUT
+        } else {
+            SCALAR_RESULTS
+        }
+    }
+
+    fn store_cell(inout self, machine: u64, offset: u64, kind: u8) {
+        let op = match kind {
+            ScalarKind::F32 => FLOAT_STACK_STORE32,
+            ScalarKind::F64 => FLOAT_STACK_STORE64,
+            _ => STACK_STORE_QWORD,
+        };
+        let _ = self.record(op, machine, HOME_SLOT, offset);
+    }
+
+    fn load_cell(inout self, offset: u64, kind: u8) -> u64 {
+        if is_float(kind) {
+            self.record(FLOAT_STACK_LOAD, HOME_SLOT, offset, abi_width(kind))
+        } else {
+            self.record(STACK_LOAD, HOME_SLOT, offset, QWORD_BITS)
+        }
+    }
+
     fn label(in self, block: u64) -> u64 {
         self.labels.try_get(block).unwrap_or(NO_VALUE)
     }
@@ -158,7 +201,7 @@ impl Function {
 
     fn record(inout self, op: u64, lhs: u64, rhs: u64, extra: u64) -> u64 {
         let value = add(
-            self.arguments,
+            self.gp_arguments,
             wrapping_sub(self.words.len(), HEADER_WORDS) / RECORD_WORDS
         );
         self.words.push(op);
@@ -169,10 +212,13 @@ impl Function {
     }
 
     fn definition(in self, value: u64) -> Option[Record] {
-        if value < self.arguments || value == NO_VALUE {
+        if value < self.gp_arguments || value == NO_VALUE {
             Option::None
         } else {
-            Option::Some(read_record(in self.words.as_slice(), wrapping_sub(value, self.arguments)))
+            Option::Some(read_record(
+                in self.words.as_slice(),
+                wrapping_sub(value, self.gp_arguments)
+            ))
         }
     }
 
@@ -210,7 +256,8 @@ impl Function {
         value.block = block;
         value.machine = machine;
         if value.home != NO_VALUE {
-            let _ = self.record(STACK_STORE_QWORD, machine, HOME_SLOT, value.home);
+            let kind = self.value_kind(id);
+            self.store_cell(machine, value.home, kind);
         }
         self.values.try_set(id, value)
     }
@@ -223,7 +270,8 @@ impl Function {
         if value.home == NO_VALUE {
             return NO_VALUE;
         }
-        value.machine = self.record(STACK_LOAD, HOME_SLOT, value.home, QWORD_BITS);
+        let kind = self.value_kind(id);
+        value.machine = self.load_cell(value.home, kind);
         value.block = block;
         let _ = self.values.try_set(id, value);
         value.machine
@@ -282,7 +330,11 @@ fn integer_comparison(in low: L, symbol: u32, kind: u8) -> u64 {
 }
 
 fn is_integer(kind: u8) -> bool {
-    kind != ScalarKind::Bool && abi_width(kind) != 0
+    kind != ScalarKind::Bool && !is_float(kind) && abi_width(kind) != 0
+}
+
+fn is_float(kind: u8) -> bool {
+    kind == ScalarKind::F32 || kind == ScalarKind::F64
 }
 
 fn is_signed(kind: u8) -> bool {
@@ -297,8 +349,12 @@ fn abi_width(kind: u8) -> u64 {
     match kind {
         ScalarKind::Bool | ScalarKind::U8 | ScalarKind::I8 => BYTE_BITS,
         ScalarKind::U16 | ScalarKind::I16 => WORD_BITS,
-        ScalarKind::U32 | ScalarKind::I32 => DWORD_BITS,
-        ScalarKind::U64 | ScalarKind::I64 | ScalarKind::Usize | ScalarKind::Isize => QWORD_BITS,
+        ScalarKind::U32 | ScalarKind::I32 | ScalarKind::F32 => DWORD_BITS,
+        ScalarKind::U64
+            | ScalarKind::I64
+            | ScalarKind::Usize
+            | ScalarKind::Isize
+            | ScalarKind::F64 => QWORD_BITS,
         _ => 0,
     }
 }
@@ -336,6 +392,10 @@ fn scalar_kind(in low: L, ty: u32) -> u8 {
         ScalarKind::Usize
     } else if node.name == k.isize_ {
         ScalarKind::Isize
+    } else if node.name == k.f32_ {
+        ScalarKind::F32
+    } else if node.name == k.f64_ {
+        ScalarKind::F64
     } else {
         ScalarKind::Unsupported
     }
@@ -351,16 +411,18 @@ fn sysv_signature(in low: L, f: FnR) -> bool {
     {
         return false;
     }
+    let mut floats: u64 = 0;
     for index in 0..f.param_count {
         let p = low.ast.param(add(f.param_start, index));
-        if p.proj_count != 0
-            || p.pass == TyPass::Inout
-            || abi_width(scalar_kind(in low, p.ty)) == 0
-        {
+        let kind = scalar_kind(in low, p.ty);
+        if p.proj_count != 0 || p.pass == TyPass::Inout || abi_width(kind) == 0 {
             return false;
         }
+        if is_float(kind) {
+            floats = inc(floats);
+        }
     }
-    true
+    floats <= XMM_ARGUMENTS
 }
 
 fn argument_value(in low: L, f: FnR, root: u32) -> u64 {
@@ -466,7 +528,7 @@ fn lower_local_store(in low: L, inst: InstRow, block: u64, inout m: Function) ->
     if value == NO_VALUE {
         return false;
     }
-    let _ = m.record(STACK_STORE_QWORD, value, HOME_SLOT, offset);
+    m.store_cell(value, offset, kind);
     true
 }
 
@@ -499,8 +561,34 @@ fn lower_call(
 ) -> u64 {
     let index = low.ast.fn_index(n32(low.program.op(inst.a)));
     let count = call_arity(in low, inst);
-    if count == NO_VALUE || index >= low.ast.fns.len() {
+    if count == NO_VALUE {
         return NO_VALUE;
+    }
+    if index >= low.ast.fns.len() {
+        if count != 1 {
+            return NO_VALUE;
+        }
+        let at = call_argument(inst.a, 0);
+        if low.program.op(at) == TyPass::Inout
+            || low.program.path(low.program.op(add(at, ARGUMENT_PATH))).n != 0
+        {
+            return NO_VALUE;
+        }
+        let arg = low.program.op(add(at, ARGUMENT_VALUE));
+        let source_kind = m.kind(arg);
+        let result_kind = scalar_kind(in low, inst.ty);
+        let value = m.read(add(m.arguments, arg), block);
+        if value == NO_VALUE {
+            return NO_VALUE;
+        }
+        return lower_float_unary(
+            in low,
+            n32(low.program.op(inst.a)),
+            result_kind,
+            source_kind,
+            value,
+            inout m
+        );
     }
     let callee = low.ast.function(index);
     if count != callee.param_count
@@ -510,13 +598,15 @@ fn lower_call(
         return NO_VALUE;
     }
     let mut args = ChunkSeq::new[u64]();
+    let mut floats = ChunkSeq::new[u64]();
     for i in 0..count {
         let at = call_argument(inst.a, i);
         let operand = low.program.op(add(at, ARGUMENT_VALUE));
         let param = low.ast.param(add(callee.param_start, i));
+        let kind = m.kind(operand);
         if low.program.op(at) == TyPass::Inout
             || low.program.path(low.program.op(add(at, ARGUMENT_PATH))).n != 0
-            || m.kind(operand) != scalar_kind(in low, param.ty)
+            || kind != scalar_kind(in low, param.ty)
         {
             return NO_VALUE;
         }
@@ -524,17 +614,29 @@ fn lower_call(
         if value == NO_VALUE {
             return NO_VALUE;
         }
-        args.push(value);
+        if is_float(kind) {
+            floats.push(value);
+        } else {
+            args.push(value);
+        }
     }
     let target = graph.discover(index);
     if target == NO_VALUE {
         return NO_VALUE;
     }
     // Operand loads must precede the contiguous call argument records.
-    for i in 0..count {
+    for i in 0..args.len() {
         let _ = m.record(CALL_ARGUMENT, args.try_get(i).unwrap_or(NO_VALUE), 0, 0);
     }
-    m.record(CALL, target, count, 0)
+    for i in 0..floats.len() {
+        let _ = m.record(CALL_ARGUMENT, floats.try_get(i).unwrap_or(NO_VALUE), 0, 0);
+    }
+    let op = if is_float(scalar_kind(in low, inst.ty)) {
+        CALL_FLOAT
+    } else {
+        CALL
+    };
+    m.record(op, target, count, floats.len())
 }
 
 fn block_parameter(in low: L, b: BlockRow) -> u64 {
@@ -1103,6 +1205,12 @@ fn literal_bits(in low: L, at: u64, kind: u8) -> Option[u64] {
 }
 
 fn lower_literal(in low: L, at: u64, kind: u8, inout m: Function) -> u64 {
+    if kind == ScalarKind::F64
+        && low.program.op(at) == Lit::Float
+        && low.program.op(add(at, LITERAL_HIGH)) == 0
+    {
+        return m.record(FLOAT_CONSTANT, low.program.op(add(at, LITERAL_LOW)), 0, QWORD_BITS);
+    }
     match literal_bits(in low, at, kind) {
         Option::Some(bits) => m.record(CONSTANT, bits, 0, 0),
         Option::None => NO_VALUE,
@@ -1138,6 +1246,60 @@ fn conversion_fits(bits: u64, signed: bool, from: u64, target_signed: bool, to: 
     }
 }
 
+fn lower_float_unary(
+    in low: L,
+    symbol: u32,
+    kind: u8,
+    operand: u8,
+    value: u64,
+    inout m: Function
+) -> u64 {
+    if is_float(kind) && kind == operand {
+        let op = if low.ctx.names.spells(symbol, in "-".as_bytes()) {
+            FLOAT_NEG
+        } else if low.ctx.names.spells(symbol, in "sqrt".as_bytes()) {
+            FLOAT_SQRT
+        } else if low.ctx.names.spells(symbol, in "abs".as_bytes()) {
+            FLOAT_ABS
+        } else {
+            return NO_VALUE;
+        };
+        return m.record(op, value, 0, abi_width(kind));
+    }
+    if kind == ScalarKind::F64
+        && operand == ScalarKind::F32
+        && (low.ctx.names.spells(symbol, in "widen_f64".as_bytes())
+            || low.ctx.names.spells(symbol, in "nearest_f64".as_bytes()))
+    {
+        return m.record(FLOAT_PROMOTE, value, DWORD_BITS, QWORD_BITS);
+    }
+    if kind == ScalarKind::F32
+        && operand == ScalarKind::F64
+        && low.ctx.names.spells(symbol, in "nearest_f32".as_bytes())
+    {
+        return m.record(FLOAT_DEMOTE, value, QWORD_BITS, DWORD_BITS);
+    }
+    if (kind == ScalarKind::U32
+        && operand == ScalarKind::F32
+        && low.ctx.names.spells(symbol, in "to_bits_f32".as_bytes()))
+        || (kind == ScalarKind::U64
+            && operand == ScalarKind::F64
+            && low.ctx.names.spells(symbol, in "to_bits_f64".as_bytes()))
+    {
+        return m.record(FLOAT_TO_BITS, value, 0, abi_width(kind));
+    }
+    if (kind == ScalarKind::F32
+        && operand == ScalarKind::U32
+        && low.ctx.names.spells(symbol, in "from_bits_f32".as_bytes()))
+        || (kind == ScalarKind::F64
+            && operand == ScalarKind::U64
+            && low.ctx.names.spells(symbol, in "from_bits_f64".as_bytes()))
+    {
+        return m.record(BITS_TO_FLOAT, value, 0, abi_width(kind));
+    }
+    NO_VALUE
+}
+
 fn lower_unary(in low: L, inst: InstRow, kind: u8, block: u64, inout m: Function) -> u64 {
     let at = inst.a;
     let symbol = n32(low.program.op(at));
@@ -1146,6 +1308,9 @@ fn lower_unary(in low: L, inst: InstRow, kind: u8, block: u64, inout m: Function
     let value = m.read(add(m.arguments, operand), block);
     if value == NO_VALUE {
         return NO_VALUE;
+    }
+    if is_float(kind) || is_float(operand_kind) {
+        return lower_float_unary(in low, symbol, kind, operand_kind, value, inout m);
     }
     if kind == ScalarKind::Bool
         && operand_kind == ScalarKind::Bool
@@ -1392,6 +1557,9 @@ fn lower_binary(
     if lhs == NO_VALUE || rhs == NO_VALUE {
         return NO_VALUE;
     }
+    if is_float(operand_kind) && operand_kind == right_kind {
+        return lower_float_binary(in low, symbol, kind, operand_kind, lhs, rhs, inout m);
+    }
     if kind == ScalarKind::Bool && operand_kind == right_kind {
         let compare = integer_comparison(in low, symbol, operand_kind);
         if compare != NO_VALUE {
@@ -1432,6 +1600,55 @@ fn lower_binary(
         }
     }
     NO_VALUE
+}
+
+fn lower_float_binary(
+    in low: L,
+    symbol: u32,
+    kind: u8,
+    operands: u8,
+    lhs: u64,
+    rhs: u64,
+    inout m: Function
+) -> u64 {
+    if kind == ScalarKind::Bool {
+        let condition = if low.ctx.names.spells(symbol, in "==".as_bytes()) {
+            FLOAT_EQUAL
+        } else if low.ctx.names.spells(symbol, in "!=".as_bytes()) {
+            FLOAT_NOT_EQUAL
+        } else if low.ctx.names.spells(symbol, in "<".as_bytes()) {
+            FLOAT_LESS
+        } else if low.ctx.names.spells(symbol, in "<=".as_bytes()) {
+            FLOAT_LESS_EQUAL
+        } else if low.ctx.names.spells(symbol, in ">".as_bytes()) {
+            FLOAT_GREATER
+        } else if low.ctx.names.spells(symbol, in ">=".as_bytes()) {
+            FLOAT_GREATER_EQUAL
+        } else {
+            return NO_VALUE;
+        };
+        let op = if operands == ScalarKind::F32 {
+            FLOAT_COMPARE32
+        } else {
+            FLOAT_COMPARE64
+        };
+        return m.record(op, lhs, rhs, condition);
+    }
+    if kind != operands {
+        return NO_VALUE;
+    }
+    let op = if low.ctx.names.spells(symbol, in "+".as_bytes()) {
+        FLOAT_ADD
+    } else if low.ctx.names.spells(symbol, in "-".as_bytes()) {
+        FLOAT_SUB
+    } else if low.ctx.names.spells(symbol, in "*".as_bytes()) {
+        FLOAT_MUL
+    } else if low.ctx.names.spells(symbol, in "/".as_bytes()) {
+        FLOAT_DIV
+    } else {
+        return NO_VALUE;
+    };
+    m.record(op, lhs, rhs, abi_width(kind))
 }
 
 fn lower_block(
@@ -1479,19 +1696,14 @@ fn lower_block(
             if source == NO_VALUE {
                 return false;
             }
-            let source_kind = if source < m.arguments {
-                scalar_kind(in low, low.ast.param(add(f.param_start, source)).ty)
-            } else {
-                m.kind(wrapping_sub(source, m.arguments))
-            };
-            if source_kind != kind {
+            if m.value_kind(source) != kind {
                 return false;
             }
             let offset = m.mutable_offset(name);
             if offset == NO_VALUE {
                 m.read(source, block)
             } else {
-                m.record(STACK_LOAD, HOME_SLOT, offset, QWORD_BITS)
+                m.load_cell(offset, kind)
             }
         } else if inst.op == Op::Unary && inst.n == UNARY_WORDS {
             lower_unary(in low, inst, kind, block, inout m)
@@ -1518,6 +1730,9 @@ fn lower_return(result: u64, block: u64, inout m: Function) -> bool {
         return false;
     }
     if m.blocks.len() == 1 {
+        if is_float(m.result) {
+            let _ = m.record(FLOAT_RETURN, 0, 0, 0);
+        }
         return m.words.try_set(RETURN_VALUE, value);
     }
     let _ = m.record(BLOCK_RETURN, value, 0, 0);
@@ -1527,7 +1742,7 @@ fn lower_return(result: u64, block: u64, inout m: Function) -> bool {
 fn lower_match(in low: L, row: FnRow, b: BlockRow, block: u64, inout m: Function) -> bool {
     let id = low.program.op(b.ta);
     let kind = m.kind(id);
-    if abi_width(kind) == 0 {
+    if abi_width(kind) == 0 || is_float(kind) {
         return false;
     }
     let source = add(m.arguments, id);
@@ -1586,7 +1801,8 @@ fn lower_match(in low: L, row: FnRow, b: BlockRow, block: u64, inout m: Function
         m.next_label = inc(next_test);
         let _ = m.record(BRANCH_BLOCK, condition, label, 0);
         let _ = m.record(JUMP_LABEL, next_test, 0, 0);
-        let _ = m.record(BLOCK_LABEL, next_test, 0, SCALAR_RESULTS);
+        let returns = m.return_layout();
+        let _ = m.record(BLOCK_LABEL, next_test, 0, returns);
         pattern = inc(target);
     }
     false
@@ -1637,7 +1853,7 @@ fn lower_terminator(in low: L, row: FnRow, b: BlockRow, block: u64, inout m: Fun
                 if value == NO_VALUE {
                     return false;
                 }
-                let _ = m.record(STACK_STORE_QWORD, value, HOME_SLOT, home);
+                m.store_cell(value, home, kind);
             }
         }
         let _ = m.record(JUMP_LABEL, label, 0, 0);
@@ -1671,6 +1887,46 @@ fn lower_terminator(in low: L, row: FnRow, b: BlockRow, block: u64, inout m: Fun
     true
 }
 
+fn lower_entry(inout m: Function) -> bool {
+    // The encoder expects all floating argument records before ordinary SSA.
+    let mut float_start = NO_VALUE;
+    let mut fp: u64 = 0;
+    for arg in 0..m.arguments {
+        let kind = m.value_kind(arg);
+        if is_float(kind) {
+            let value = m.record(FLOAT_ARGUMENT, fp, 0, abi_width(kind));
+            if fp == 0 {
+                float_start = value;
+            }
+            fp = inc(fp);
+        }
+    }
+    let mut gp: u64 = 0;
+    let mut float_value = float_start;
+    for arg in 0..m.arguments {
+        let kind = m.value_kind(arg);
+        let width = abi_width(kind);
+        let value = if is_float(kind) {
+            let value = float_value;
+            float_value = inc(float_value);
+            value
+        } else {
+            // SysV leaves unused bits of narrow integer arguments unspecified.
+            let value = if width < QWORD_BITS {
+                m.record(TRUNCATE, gp, QWORD_BITS, width)
+            } else {
+                gp
+            };
+            gp = inc(gp);
+            value
+        };
+        if !m.define(arg, 0, value) {
+            return false;
+        }
+    }
+    true
+}
+
 fn lower_function(
     in low: L,
     f: FnR,
@@ -1683,10 +1939,12 @@ fn lower_function(
     }
     let mut m = Function {
         arguments: f.param_count,
+        gp_arguments: 0,
         result: scalar_kind(in low, f.result),
         words: ChunkSeq::new[u64](),
         values: ChunkSeq::new[Value](),
         kinds: ChunkSeq::new[u8](),
+        parameters: ChunkSeq::new[u8](),
         labels: ChunkSeq::new[u64](),
         blocks: ChunkSeq::new[u64](),
         next_label: 0,
@@ -1695,10 +1953,18 @@ fn lower_function(
         mutable_bytes: 0,
         home_bytes: 0
     };
+    for arg in 0..f.param_count {
+        let param = low.ast.param(add(f.param_start, arg));
+        let kind = scalar_kind(in low, param.ty);
+        m.parameters.push(kind);
+        if !is_float(kind) {
+            m.gp_arguments = inc(m.gp_arguments);
+        }
+    }
     if !plan_blocks(in low, row, inout m) || !plan_homes(in low, f, row, inout m) {
         return ChunkSeq::new[u8]();
     }
-    m.words.push(f.param_count);
+    m.words.push(m.gp_arguments);
     m.words.push(NO_VALUE);
     let frame_bytes = add(m.home_bytes, m.mutable_bytes);
     if frame_bytes != 0 {
@@ -1712,23 +1978,11 @@ fn lower_function(
             } else {
                 0
             };
-            let _ = m.record(BLOCK_LABEL, layout, home, SCALAR_RESULTS);
+            let returns = m.return_layout();
+            let _ = m.record(BLOCK_LABEL, layout, home, returns);
         }
-        if block == 0 {
-            for arg in 0..f.param_count {
-                let param = low.ast.param(add(f.param_start, arg));
-                // Machine values carry narrow scalars in their low bits.
-                // SysV leaves the unused argument bits unspecified.
-                let width = abi_width(scalar_kind(in low, param.ty));
-                let value = if width < QWORD_BITS {
-                    m.record(TRUNCATE, arg, QWORD_BITS, width)
-                } else {
-                    arg
-                };
-                if !m.define(arg, block, value) {
-                    return ChunkSeq::new[u8]();
-                }
-            }
+        if block == 0 && !lower_entry(inout m) {
+            return ChunkSeq::new[u8]();
         }
         let b = low.program.block(add(row.b0, block));
         if !lower_block(in low, f, b, block, inout m, inout graph)
