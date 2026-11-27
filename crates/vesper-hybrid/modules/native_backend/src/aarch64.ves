@@ -878,15 +878,23 @@ fn emit_call(
 ) -> Option[u32] {
     let start = wrapping_sub(index, record.right);
     let mut save = used;
+    let mut overwritten: u32 = 0;
+    let mut reload: u32 = 0;
     for arg in 0..record.right {
         let source = location(in locations, read_record(in words, wrapping_add(start, arg)).left);
         if source == UNASSIGNED {
             return Option::None;
         }
-        // Arguments are assigned in increasing register order. Save sources
-        // whose register may be overwritten before its value is copied.
-        if widen_u64(source) < arg {
-            save = save | sh(1, source);
+        let dest = wrapping_u32(arg);
+        if source != dest {
+            let dest_bit = sh(1, dest);
+            // An argument left in its own register still holds the initial
+            // value when a later argument reads from it.
+            if source < dest && (overwritten & sh(1, source)) != 0 {
+                save = save | sh(1, source);
+                reload = reload | dest_bit;
+            }
+            overwritten = overwritten | dest_bit;
         }
     }
     call_saved_registers(inout out, save, frame_bytes, false);
@@ -895,7 +903,7 @@ fn emit_call(
         let dest = wrapping_u32(arg);
         if source >= SPILL_BASE {
             let _ = materialize(inout out, source, dest, frame_bytes);
-        } else if source < dest {
+        } else if (reload & sh(1, dest)) != 0 {
             memory(
                 inout out,
                 true,

@@ -171,6 +171,34 @@ fn aarch64_calls_pair_adjacent_saves_and_keep_unclobbered_results_in_x0() {
 }
 
 #[test]
+fn aarch64_call_reuses_unmodified_argument_registers() {
+    const MOV_X1_X0: u32 = 0xaa00_03e1;
+    const BRANCH_AND_LINK: u32 = 0x9400_0000;
+    const CALL_AND_FRAME_WITH_MOVE: usize = 7;
+    let packet = binding::aarch64_relocatable_block(&[
+        2,
+        4,
+        CALL_ARGUMENT,
+        0,
+        0,
+        0,
+        CALL_ARGUMENT,
+        0,
+        0,
+        0,
+        CALL,
+        17,
+        2,
+        0,
+    ]);
+    let (length, body) = packet.split_first_chunk::<{ size_of::<u64>() }>().unwrap();
+    let code = &body[..u64::from_le_bytes(*length) as usize];
+    let expected = [MOV_X1_X0, BRANCH_AND_LINK].map(u32::to_le_bytes).concat();
+    assert_eq!(code.len(), CALL_AND_FRAME_WITH_MOVE * size_of::<u32>());
+    assert!(code.windows(expected.len()).any(|bytes| bytes == expected));
+}
+
+#[test]
 fn aarch64_narrow_arithmetic_and_extension() {
     const ADD_W0_W0_W1: u32 = 0x0b01_0000;
     const TRUNCATE_X0_TO_BYTE: u32 = 0xd340_1c00;
