@@ -285,7 +285,7 @@ const ARG_A: u64 = 0;
 const ARG_B: u64 = 1;
 
 // The ranks (reverse postorder numbers) of the reachable blocks.
-fn ranks(in f: Func, in dom: Dom) -> ChunkSeq[u64] {
+pub fn ranks(in f: Func, in dom: Dom) -> ChunkSeq[u64] {
     let mut rank = ChunkSeq::new[u64]();
     rank.resize(f.nblocks(), NO_RANK);
     let np = dom.post.len();
@@ -298,7 +298,7 @@ fn ranks(in f: Func, in dom: Dom) -> ChunkSeq[u64] {
 
 // `DominatorTree::block_dominates(a, b)` for a reachable `b`: false when
 // either block is unreachable.
-fn dominates(in dom: Dom, in rank: ChunkSeq[u64], a: u32, b: u32) -> bool {
+pub fn dominates(in dom: Dom, in rank: ChunkSeq[u64], a: u32, b: u32) -> bool {
     let ra = g64(in rank, w(a));
     if ra == NO_RANK || g64(in rank, w(b)) == NO_RANK {
         return false;
@@ -317,21 +317,21 @@ fn dominates(in dom: Dom, in rank: ChunkSeq[u64], a: u32, b: u32) -> bool {
 
 // `LoopAnalysis`: loops by number, with their headers and parents, and
 // each block's innermost loop (NONE for none).
-struct Loops {
+pub struct Loops {
     header: ChunkSeq[u32],
     parent: ChunkSeq[u32],
     innermost: ChunkSeq[u32],
 }
 
 // The block of predecessor branch `k` of the CFG.
-fn pred_block(in f: Func, in cfg: Cfg, k: u64) -> u32 {
+pub fn pred_block(in f: Func, in cfg: Cfg, k: u64) -> u32 {
     f.inst(w(u32_at(in cfg.inst, k))).block
 }
 
 // `LoopAnalysis::compute`: headers in reverse postorder (a block that
 // dominates one of its predecessors), then each loop's blocks found
 // backwards from its back edges, the last loop first.
-fn loops_of(in f: Func, in cfg: Cfg, in dom: Dom, in rank: ChunkSeq[u64]) -> Loops {
+pub fn loops_of(in f: Func, in cfg: Cfg, in dom: Dom, in rank: ChunkSeq[u64]) -> Loops {
     let mut l = Loops {
         header: ChunkSeq::new[u32](),
         parent: ChunkSeq::new[u32](),
@@ -400,7 +400,7 @@ fn loops_of(in f: Func, in cfg: Cfg, in dom: Dom, in rank: ChunkSeq[u64]) -> Loo
     l
 }
 
-fn has(in s: ChunkSeq[u32], x: u32) -> bool {
+pub fn has(in s: ChunkSeq[u32], x: u32) -> bool {
     for k in 0..s.len() {
         if u32_at(in s, k) == x {
             return true;
@@ -410,7 +410,7 @@ fn has(in s: ChunkSeq[u32], x: u32) -> bool {
 }
 
 // Whether block `b` is in loop `lp` or one of its inner loops.
-fn in_loop(in l: Loops, b: u32, lp: u32) -> bool {
+pub fn in_loop(in l: Loops, b: u32, lp: u32) -> bool {
     if b == NONE {
         return false;
     }
@@ -424,6 +424,29 @@ fn in_loop(in l: Loops, b: u32, lp: u32) -> bool {
         }
         cur = u32_at(in l.parent, w(cur));
     }
+}
+
+// The loops in the order the layout's blocks first name them, walking
+// from each block's innermost loop out.
+pub fn loops_found(in f: Func, in l: Loops) -> ChunkSeq[u32] {
+    let mut seen = ChunkSeq::new[u8]();
+    seen.resize(l.header.len(), 0);
+    let mut found = ChunkSeq::new[u32]();
+    let blocks = layout_blocks(in f);
+    for q in 0..blocks.len() {
+        let mut cur = u32_at(in l.innermost, w(u32_at(in blocks, q)));
+        loop {
+            if cur == NONE {
+                break;
+            }
+            if g8(in seen, w(cur)) == 0 {
+                let ok = seen.try_set(w(cur), 1);
+                found.push(cur);
+            }
+            cur = u32_at(in l.parent, w(cur));
+        }
+    }
+    found
 }
 
 // The loops in the order `hoist_loop_invariants` visits them: deepest

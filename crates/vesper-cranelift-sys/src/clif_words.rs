@@ -163,8 +163,13 @@ pub const M_ENDIAN: u64 = 4;
 pub const M_LITTLE: u64 = 8;
 pub const M_NOTRAP: u64 = 16;
 pub const M_ALIGNED: u64 = 32;
-/// The alias region plus one (0: none), at this shift of the `mem` word.
+/// The alias region (0: none, then heap, table, vmctx), at this shift of
+/// the `mem` word.
 pub const M_REGION_SHIFT: u64 = 6;
+pub const M_REGION_MASK: u64 = 3 << M_REGION_SHIFT;
+const REGION_HEAP: u64 = 1;
+const REGION_TABLE: u64 = 2;
+const REGION_VMCTX: u64 = 3;
 
 /// Effect bits of the `effects` word.
 pub const F_TERMINATOR: u64 = 1;
@@ -391,25 +396,46 @@ fn mem_word(f: MemFlags) -> u64 {
     if f.aligned() {
         m |= M_ALIGNED;
     }
-    if let Some(r) = f.alias_region() {
-        m |= (r as u64 + 1) << M_REGION_SHIFT;
-    }
+    m |= region_bits(f.alias_region()) << M_REGION_SHIFT;
     m
 }
 
-/// The flags of a builder-made access: `MemFlags::new()`, or with an
-/// explicit endianness.
+fn region_bits(r: Option<ir::AliasRegion>) -> u64 {
+    match r {
+        None => 0,
+        Some(ir::AliasRegion::Heap) => REGION_HEAP,
+        Some(ir::AliasRegion::Table) => REGION_TABLE,
+        Some(ir::AliasRegion::Vmctx) => REGION_VMCTX,
+    }
+}
+
+/// The flags of a builder-made access: `MemFlags::new()` with the flags
+/// of the `mem` word.
 fn mem_flags(m: u64) -> Result<MemFlags, String> {
-    if m & !(M_ENDIAN | M_LITTLE | M_NOTRAP | M_ALIGNED) != 0 {
+    let known =
+        M_READONLY | M_CAN_MOVE | M_ENDIAN | M_LITTLE | M_NOTRAP | M_ALIGNED | M_REGION_MASK;
+    if m & !known != 0 {
         return Err(format!("memory flags {m:#x} on a new instruction"));
     }
     let mut f = MemFlags::new();
+    if m & M_READONLY != 0 {
+        f = f.with_readonly();
+    }
+    if m & M_CAN_MOVE != 0 {
+        f = f.with_can_move();
+    }
     if m & M_NOTRAP != 0 {
         f = f.with_notrap();
     }
     if m & M_ALIGNED != 0 {
         f = f.with_aligned();
     }
+    f = f.with_alias_region(match (m & M_REGION_MASK) >> M_REGION_SHIFT {
+        REGION_HEAP => Some(ir::AliasRegion::Heap),
+        REGION_TABLE => Some(ir::AliasRegion::Table),
+        REGION_VMCTX => Some(ir::AliasRegion::Vmctx),
+        _ => None,
+    });
     Ok(if m & M_ENDIAN == 0 {
         f
     } else if m & M_LITTLE != 0 {
