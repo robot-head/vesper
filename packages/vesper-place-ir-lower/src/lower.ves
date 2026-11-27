@@ -29,7 +29,7 @@ use @vesper/place-ir::{BlockRow, FnRow, InstRow, PoolRow, Program, program_new};
 use self::ast::{Ast, Ex, FnR, Gn, Pm, Pt, ast_empty};
 use self::ops::{
     SeqRes, TiledRes, VecRes, is_seq_type, is_slice_type, resolve_seq_call, resolve_tiled,
-    resolve_vector
+    resolve_vector, seq_arg_pass
 };
 
 const NONE32: u32 = 4294967295;
@@ -1248,22 +1248,6 @@ fn callee_params(inout l: L, name: u32) -> u64 {
         }
     }
     0
-}
-
-fn seq_arg_pass(mode: u8, i: u64) -> u8 {
-    if mode == 1 {
-        TyPass::In
-    } else if mode == 2 {
-        TyPass::Inout
-    } else if mode == 3 && i == 0 {
-        TyPass::Inout
-    } else if mode == 4 && i == 0 {
-        TyPass::In
-    } else if mode == 5 && i == 1 {
-        TyPass::In
-    } else {
-        TyPass::Sink
-    }
 }
 
 fn lower_seq_call(inout l: L, ex: Ex, recv_id: u64, seq_res: SeqRes) -> u32 {

@@ -2386,7 +2386,8 @@ fn expand_graph_module(
     in mods: ChunkSeq[ModEntry],
     in bindings: ChunkSeq[PackageSugarBinding],
     in catalogue: ChunkSeq[PackageSugarDefinition],
-    in spans: ChunkSeq[BootstrapDeclarationRange]
+    in spans: ChunkSeq[BootstrapDeclarationRange],
+    inout sugar_policy_words: ChunkSeq[u64]
 ) -> Option[BootstrapSugarOutput] {
     let expanded = match mods.try_get(module) {
         Option::Some(source) => {
@@ -2424,6 +2425,31 @@ fn expand_graph_module(
         {
             return Option::None;
         }
+    }
+    if expanded.policy_words.try_get(0).unwrap_or(0) != 0 {
+        let file = match mods.try_get(module) {
+            Option::Some(source) => source.file,
+            Option::None => return Option::None,
+        };
+        // Preserve the module that owns the rule as well as the file
+        // that contains its expanded call. Imported policy rows use the
+        // same import numbering as the full expander.
+        sugar_policy_words.push(file);
+        sugar_policy_words
+            .push(wrapping_add(expanded.policy_words.len(), wrapping_add(2, authors.len())));
+        sugar_policy_words.push(module);
+        sugar_policy_words.push(authors.len());
+        for i in 0..authors.len() {
+            let definition = match authors.try_get(i) {
+                Option::Some(definition) => definition,
+                Option::None => return Option::None,
+            };
+            match catalogue.try_get(definition) {
+                Option::Some(entry) => sugar_policy_words.push(entry.module_index),
+                Option::None => return Option::None,
+            }
+        }
+        sugar_policy_words.extend(in expanded.policy_words.as_slice());
     }
     Option::Some(BootstrapSugarOutput { source: expanded.source, mappings: expanded.mappings })
 }
@@ -2503,6 +2529,7 @@ fn prepare_sugar_graph_in_scratch(
     let mut shadowed_modules = ChunkSeq::new[bool]();
     let mut declaration_spans = ChunkSeq::new[BootstrapDeclarationRange]();
     let mut source_segments = ChunkSeq::new[BootstrapSourceSegment]();
+    let mut sugar_policy_words = ChunkSeq::new[u64]();
     if possible_sugar {
         for module in 0..mods.len() {
             let mut import_text = ChunkSeq::new[u8]();
@@ -2582,7 +2609,8 @@ fn prepare_sugar_graph_in_scratch(
                 in imports,
                 in catalogue,
                 in public,
-                in source_segments
+                in source_segments,
+                in sugar_policy_words
             );
             let resolved = resolve_sugar_imports_bytes(in index.as_slice());
             let mut bindings = ChunkSeq::new[PackageSugarBinding]();
@@ -2655,7 +2683,8 @@ fn prepare_sugar_graph_in_scratch(
                         in mods,
                         in bindings,
                         in catalogue,
-                        in declaration_spans
+                        in declaration_spans,
+                        inout sugar_policy_words
                     ) {
                         Option::Some(expanded) => expanded,
                         Option::None => return Option::None,
@@ -2724,7 +2753,8 @@ fn prepare_sugar_graph_in_scratch(
         in imports,
         in catalogue,
         in public,
-        in source_segments
+        in source_segments,
+        in sugar_policy_words
     ))
 }
 
@@ -2736,7 +2766,8 @@ fn encode_package_graph(
     in import_texts: ChunkSeq[ChunkSeq[u8]],
     in catalogue: ChunkSeq[PackageSugarDefinition],
     in public: ChunkSeq[bool],
-    in source_segments: ChunkSeq[BootstrapSourceSegment]
+    in source_segments: ChunkSeq[BootstrapSourceSegment],
+    in sugar_policy_words: ChunkSeq[u64]
 ) -> ChunkSeq[u8] {
     let mut out = ChunkSeq::new[u8]();
     put_u64(inout out, pkgs.len());
@@ -2842,7 +2873,7 @@ fn encode_package_graph(
             }
         }
     }
-    if source_segments.len() != 0 {
+    if source_segments.len() != 0 || sugar_policy_words.len() != 0 {
         put_u64(inout out, source_segments.len());
         for i in 0..source_segments.len() {
             match source_segments.try_get(i) {
@@ -2858,14 +2889,25 @@ fn encode_package_graph(
             }
         }
     }
+    if sugar_policy_words.len() != 0 {
+        put_u64(inout out, sugar_policy_words.len());
+        for i in 0..sugar_policy_words.len() {
+            put_u64(inout out, sugar_policy_words.try_get(i).unwrap_or(0));
+        }
+    }
     out
 }
 
 test {
     use @vesper/check-names-packages::{
-        assembly_begin_bytes, assemble_next_bytes, assembly_metadata, assembly_parse_errors
+        assembly_begin_bytes, assemble_next_bytes, assembly_metadata, assembly_parse_errors,
+        resolve_sugar_effect_row
     };
-    use @vesper/ast::{lit_at};
+    use @vesper/ast::{EffectNode, EffectsNode, FnNode, list_at, lit_at};
+    use @vesper/ast::lower::{lower_source};
+    use @vesper-std/arena::{idx_from_raw};
+    use @vesper-std/intern::{symbol_from_id};
+    use self::sugar_policy::{decode};
 
     fn fixture_bytes(in text: Str) -> ChunkSeq[u8] {
         let mut source = ChunkSeq::new[u8]();
@@ -2956,7 +2998,7 @@ test {
     }
 
     fn test_full_expansion_keeps_a_closed_imported_template() -> bool {
-        let bytes = match fixture_graph_calling(
+        let mut bytes = match fixture_graph_calling(
             in "use @fixture/dep::twice; pub fn main() -> u64 { let x: u64 = 21; twice x {} }",
             in "pub sugar twice: expr { rule (twice $n:ident $b:block) => { { $b; wrapping_add($n, $n) } } }"
         ) {
@@ -2964,7 +3006,32 @@ test {
             Option::None => return false,
         };
         let assembly = assembly_begin_bytes(in bytes.as_slice());
-        assembly_parse_errors(in assembly) == 0
+        let parse_clean = assembly_parse_errors(in assembly) == 0;
+        let meta = assembly_metadata(sink assembly);
+        let words = meta.sugar_policy_words.len();
+        if !parse_clean
+            || meta.sugar_policy_truncated
+            || words < 3
+            || meta.sugar_policy_words.try_get(0) != Option::Some(0)
+            || meta.sugar_policy_words.try_get(1) != Option::Some(wrapping_sub(words, 2))
+            || meta.sugar_policy_words.try_get(2) != Option::Some(0)
+        {
+            return false;
+        }
+        let policies = match decode(
+            in meta.sugar_policy_words.as_slice(),
+            meta.file_base.len(),
+            2
+        ) {
+            Option::Some(policies) => policies,
+            Option::None => return false,
+        };
+        if policies.regions.len() != 1 {
+            return false;
+        }
+        bytes.truncate(wrapping_sub(bytes.len(), 1));
+        let truncated = assembly_metadata(sink assembly_begin_bytes(in bytes.as_slice()));
+        truncated.sugar_policy_truncated && truncated.sugar_policy_words.len() == 0
     }
 
     fn test_full_expansion_expands_a_module_calling_its_own_sugar() -> bool {
@@ -2977,6 +3044,73 @@ test {
         };
         let assembly = assembly_begin_bytes(in bytes.as_slice());
         assembly_parse_errors(in assembly) == 0
+    }
+
+    fn test_policy_resolves_effect_names_in_the_author_module() -> bool {
+        // Keep this scope regression below the unit evaluator's budget:
+        // the expansion wire is exercised by the imported-template test.
+        let bytes = match fixture_graph_calling(
+            in "linear effect Audit { fn from_caller(); }",
+            in "linear effect Audit { fn from_author(); }"
+        ) {
+            Option::Some(bytes) => bytes,
+            Option::None => return false,
+        };
+        let mut assembly = assembly_begin_bytes(in bytes.as_slice());
+        if assembly_parse_errors(in assembly) != 0 {
+            return false;
+        }
+        let first = assemble_next_bytes(inout assembly, in bytes.as_slice());
+        let second = assemble_next_bytes(inout assembly, in bytes.as_slice());
+        match (first, second) {
+            (Option::Some(_), Option::Some(_)) => {},
+            _ => return false,
+        };
+        let caller = policy_fixture_effect_name(inout assembly, 0);
+        let author = policy_fixture_effect_name(inout assembly, 1);
+        match (caller, author) {
+            (Option::Some(caller), Option::Some(author)) => {
+                let meta = assembly_metadata(sink assembly);
+                meta.diagnostics.len() == 0
+                    && fixture_same_name(in caller.as_str(), in "Audit")
+                    && !fixture_same_name(in author.as_str(), in caller.as_str())
+            },
+            _ => false,
+        }
+    }
+
+    fn fixture_same_name(in left: Str, in right: Str) -> bool {
+        left == right
+    }
+
+    fn policy_fixture_effect_name(
+        inout assembly: @vesper/check-names-packages::Assembly,
+        module: u64
+    ) -> Option[String] {
+        let source = lower_source(in "fn __fixture() eff [Audit] {}");
+        let mut ast = source.ast;
+        let f = match ast.fns.get(idx_from_raw[FnNode](0)) {
+            Option::Some(f) => f,
+            Option::None => return Option::None,
+        };
+        if !resolve_sugar_effect_row(inout assembly, module, inout ast, f.effects) {
+            return Option::None;
+        }
+        let row = match ast.effects.get(idx_from_raw[EffectsNode](f.effects)) {
+            Option::Some(row) => row,
+            Option::None => return Option::None,
+        };
+        let item = list_at(in ast, row.instances, 0);
+        let effect = match ast.effect_nodes.get(idx_from_raw[EffectNode](item)) {
+            Option::Some(effect) => effect,
+            Option::None => return Option::None,
+        };
+        let mut name = String::new();
+        if ast.names.resolve_into(symbol_from_id(effect.name), inout name) {
+            Option::Some(name)
+        } else {
+            Option::None
+        }
     }
 
     fn test_imported_scalar_tag_reaches_stage2_assembly() -> bool {

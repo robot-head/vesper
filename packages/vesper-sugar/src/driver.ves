@@ -4859,6 +4859,8 @@ pub struct ModuleSugarOutput {
     // Rust loader resolves them at the defining module, so the caller
     // keeps the expansion only when neither module binds one.
     pub free: ChunkSeq[u64],
+    // The checker policy records, in the same shape as expand_words.
+    pub policy_words: ChunkSeq[u64],
 }
 
 // `expand` for a module the bootstrap path refuses (a rule with a
@@ -4882,10 +4884,13 @@ pub fn expand_module(
             source.len()
         )),
     };
+    let mut policy_words = ChunkSeq::new[u64]();
+    write_policy_regions(inout policy_words, in expanded.state, in expanded.registry);
     Result::Ok(ModuleSugarOutput {
         source: expanded.state.src,
         mappings: expanded.state.maps,
-        free: free
+        free: free,
+        policy_words: policy_words
     })
 }
 
@@ -4929,6 +4934,40 @@ fn push_text(inout out: ChunkSeq[u64], in bytes: ChunkSeq[u8]) {
     }
 }
 
+fn write_policy_regions(inout out: ChunkSeq[u64], in state: St, in registry: Reg) {
+    let n = nregs(in state);
+    out.push(n);
+    for region in 0..n {
+        out.push(rg(in state, region, 0));
+        out.push(rg(in state, region, 1));
+        let hole_first = rg(in state, region, 2);
+        let hole_count = rg(in state, region, 3);
+        out.push(hole_count);
+        for hole in hole_first..add(hole_first, hole_count) {
+            out.push(w64(in state.holes, hole << 1));
+            out.push(w64(in state.holes, inc(hole << 1)));
+        }
+        let place_first = rg(in state, region, 4);
+        let place_count = rg(in state, region, 5);
+        out.push(place_count);
+        for place in place_first..add(place_first, place_count) {
+            for k in 0..3 {
+                out.push(w64(in state.places, add(wrapping_mul(place, 3), k)));
+            }
+        }
+        let def = rg(in state, region, 6);
+        let emits_first = df(in registry, def, 7);
+        if emits_first == NONE {
+            out.push(0);
+        } else {
+            push_text(inout out, in pool_text(in registry, emits_first, df(in registry, def, 8)));
+        }
+        for k in 7..12 {
+            out.push(rg(in state, region, k));
+        }
+    }
+}
+
 // The words of `expand`: [2, code, message, start, end, labels, (start,
 // end, message)*] for a diagnostic (texts as a length and bytes), [0] for
 // nothing to expand, else [1, source, fresh prefix, regions, (expanded
@@ -4966,40 +5005,7 @@ pub fn expand_words(
     out.push(1);
     push_text(inout out, in expanded.state.src);
     push_text(inout out, in expanded.state.mark);
-    let n = nregs(in expanded.state);
-    out.push(n);
-    for region in 0..n {
-        out.push(rg(in expanded.state, region, 0));
-        out.push(rg(in expanded.state, region, 1));
-        let hole_first = rg(in expanded.state, region, 2);
-        let hole_count = rg(in expanded.state, region, 3);
-        out.push(hole_count);
-        for hole in hole_first..add(hole_first, hole_count) {
-            out.push(w64(in expanded.state.holes, hole << 1));
-            out.push(w64(in expanded.state.holes, inc(hole << 1)));
-        }
-        let place_first = rg(in expanded.state, region, 4);
-        let place_count = rg(in expanded.state, region, 5);
-        out.push(place_count);
-        for place in place_first..add(place_first, place_count) {
-            for k in 0..3 {
-                out.push(w64(in expanded.state.places, add(wrapping_mul(place, 3), k)));
-            }
-        }
-        let def = rg(in expanded.state, region, 6);
-        let emits_first = df(in expanded.registry, def, 7);
-        if emits_first == NONE {
-            out.push(0);
-        } else {
-            push_text(
-                inout out,
-                in pool_text(in expanded.registry, emits_first, df(in expanded.registry, def, 8))
-            );
-        }
-        for k in 7..12 {
-            out.push(rg(in expanded.state, region, k));
-        }
-    }
+    write_policy_regions(inout out, in expanded.state, in expanded.registry);
     let map_count = nmaps(in expanded.state);
     out.push(map_count);
     for i in 0..map_count {
