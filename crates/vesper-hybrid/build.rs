@@ -146,6 +146,15 @@ const DIVERGENT_VERIFIED_CODEGEN_EDIT: (&str, &str) = (
     "(sink words: ChunkSeq[u64]) -> ChunkSeq[u64] {\n    let mut t = words;\n    let _ = t.try_set(0, 0);\n    t\n",
 );
 
+/// The same divergence on the driver's verified build step (#2102,
+/// #2285): the step writes an empty executable, so every built
+/// executable's bytes differ from Rust's (mirrored in BUILD.bazel).
+#[cfg(feature = "divergent-verified-codegen")]
+const DIVERGENT_DRIVER_VERIFIED_EDIT: (&str, &str) = (
+    "        write_path(in path.as_slice(), in bytes.as_slice());\n",
+    "        write_path(in path.as_slice(), in b[0..0]);\n",
+);
+
 /// The sugar expansion module's divergence check: every source reads back
 /// as having no sugar (mirrored in BUILD.bazel).
 #[cfg(feature = "divergent-sugar")]
@@ -350,6 +359,15 @@ fn main() {
             port.edit(
                 DIVERGENT_VERIFIED_CODEGEN_EDIT.0,
                 DIVERGENT_VERIFIED_CODEGEN_EDIT.1,
+            )
+        } else {
+            port
+        };
+        #[cfg(feature = "divergent-verified-codegen")]
+        let port = if library == "hybrid_driver" {
+            port.edit(
+                DIVERGENT_DRIVER_VERIFIED_EDIT.0,
+                DIVERGENT_DRIVER_VERIFIED_EDIT.1,
             )
         } else {
             port

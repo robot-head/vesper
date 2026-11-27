@@ -6523,6 +6523,9 @@ dependencies = [
  "tokio",
  "tough",
  "url",
+ "vesper-crypto-sys",
+ "vesper-port-abi",
+ "vesper-port-harness",
 ]
 
 [[package]]

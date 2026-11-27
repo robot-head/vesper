@@ -38,6 +38,13 @@ const E_UNARY: u64 = 11;
 const E_BINARY: u64 = 12;
 const E_IF: u64 = 13;
 const E_MATCH: u64 = 14;
+const E_RETURN: u64 = 15;
+const E_ASSIGN: u64 = 16;
+const E_FOR: u64 = 17;
+const E_RANGE: u64 = 18;
+const E_LOOP: u64 = 19;
+const E_BREAK: u64 = 20;
+const E_CONTINUE: u64 = 21;
 const E_INDEX: u64 = 40;
 
 // Literal pattern kinds (`LIT_*` in exprs.ves).
@@ -52,6 +59,7 @@ fn unary_code(op: &str) -> u64 {
     match op {
         "!" => 1,
         "-" => 2,
+        "~" => 3,
         _ => 0,
     }
 }
@@ -71,6 +79,11 @@ fn binary_code(op: &str) -> u64 {
         ">=" => 11,
         "&&" => 12,
         "||" => 13,
+        "&" => 14,
+        "|" => 15,
+        "^" => 16,
+        "<<" => 17,
+        ">>" => 18,
         _ => 0,
     }
 }
@@ -262,6 +275,45 @@ fn encode_expr(w: &World, e: &mut Enc, x: &Expr, out: &mut Vec<u64>) {
                 encode_expr(w, e, x, out);
             }
         }
+        // Element writes (`a[i] = v`, lowered to `"[]="`) belong to the
+        // arrays lane.
+        ExprKind::Assign(op, place, value) if !op.starts_with(vesper::arrays::WRITE_PREFIX) => {
+            out.extend([E_ASSIGN, s, t, (op != "=") as u64]);
+            encode_expr(w, e, place, out);
+            encode_expr(w, e, value, out);
+        }
+        ExprKind::For { pat, iter, body } => {
+            out.extend([E_FOR, s, t]);
+            encode_pattern(e, pat, out);
+            encode_expr(w, e, iter, out);
+            encode_expr(w, e, body, out);
+        }
+        ExprKind::Range {
+            start,
+            end,
+            inclusive,
+        } => {
+            out.extend([E_RANGE, s, t, *inclusive as u64]);
+            encode_expr(w, e, start, out);
+            encode_expr(w, e, end, out);
+        }
+        ExprKind::Loop(body) => {
+            out.extend([E_LOOP, s, t]);
+            encode_expr(w, e, body, out);
+        }
+        ExprKind::Break(value) => {
+            out.extend([E_BREAK, s, t, value.is_some() as u64]);
+            if let Some(x) = value {
+                encode_expr(w, e, x, out);
+            }
+        }
+        ExprKind::Continue => out.extend([E_CONTINUE, s, t]),
+        ExprKind::Return(value) => {
+            out.extend([E_RETURN, s, t, value.is_some() as u64]);
+            if let Some(x) = value {
+                encode_expr(w, e, x, out);
+            }
+        }
         ExprKind::Match { value, arms } => {
             out.extend([E_MATCH, s, t]);
             encode_expr(w, e, value, out);
@@ -375,8 +427,12 @@ fn vesper_types(text: &str) -> (String, Vec<(usize, usize)>, usize) {
     let flush = |out: &mut String, cur: Option<(usize, usize)>, rows: &mut BTreeMap<_, _>| {
         if let Some((a, b)) = cur {
             out.push_str(&format!("F {a} {b}\n"));
+            // Only rows inside the function's span, as `rust_types` reads
+            // them: sugar-lowered code keeps its prelude spans.
             for ((s, t), ty) in std::mem::take(rows) {
-                out.push_str(&format!("T {s} {t} {ty}\n"));
+                if (a..=b).contains(&s) && t <= b {
+                    out.push_str(&format!("T {s} {t} {ty}\n"));
+                }
             }
         }
     };
@@ -437,6 +493,22 @@ fn typed_constant_pattern_checks_the_scrutinee() {
             .collect::<Vec<_>>(),
         [want]
     );
+}
+
+/// A `break` whose value breaks out of the same loop keeps the inner
+/// break's result: the frame is read again after the value is checked.
+#[test]
+fn nested_break_keeps_the_inner_result() {
+    let source = "fn f() -> u32 { loop { break { break 1u32; }; } }";
+    let checked = vesper::check::check(&vesper::parser::parse(source).module);
+    assert!(checked.diagnostics.is_empty());
+    let world = checked.world;
+    let text = package()
+        .entry("core_typing_exprs", true)
+        .text(&exprs_input(&world));
+    let (v, checked, skipped) = vesper_types(&text);
+    assert_eq!((checked.len(), skipped), (1, 0));
+    assert_eq!(first_difference(&rust_types(&world, &checked), &v), None);
 }
 
 #[test]

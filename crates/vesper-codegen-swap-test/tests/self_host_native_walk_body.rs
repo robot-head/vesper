@@ -441,3 +441,74 @@ fn vesper_bodies_with_direct_calls_match() {
         assert!(total.is_clean(), "{}", total.summary());
     });
 }
+
+/// Part 6c scalar features: f32/f64 constants, unary/binary float ops and
+/// intrinsics, float<->int conversions, bit builtins, compound local writes,
+/// early `return` (`Op::Exit`), and scalar `match`.
+const SCALARS_6C: &str = "
+fn float_ops(a: f32, b: f32) -> f64 {
+    let mut x: f32 = 1.5;
+    x += a;
+    x -= b;
+    x *= 2.0;
+    let y: f64 = widen_f64(-x);
+    let m: f64 = fma(y, 0.5, min(abs(y), max(floor(y), ceil(y))));
+    let r: f64 = round(trunc(m) + 0.25);
+    let bits: u64 = to_bits_f64(r);
+    from_bits_f64(bits)
+}
+fn bit_ops(x: u32, y: u32) -> i64 {
+    let mut acc: u32 = x;
+    acc = acc & 65535;
+    acc = acc | y;
+    acc = acc ^ wrapping_shl_u32(y, 3);
+    let c: u32 = leading_zeros_u32(acc) ^ trailing_zeros_u32(acc) ^ count_ones_u32(acc);
+    let b: u32 = bit_xor(bit_or(bit_and(acc, 255), c), wrapping_shr_u32(acc, 2));
+    widen_i64(b)
+}
+fn classify(n: i64) -> i64 {
+    if n < 0 {
+        return -10;
+    }
+    match n {
+        0 => 1,
+        1 => 2,
+        7 => 99,
+        other => other ^ 3,
+    }
+}
+fn main() -> i64 {
+    let f: f64 = float_ops(2.25, 0.75);
+    let i: i64 = saturating_i64(f);
+    let b: i64 = bit_ops(17, 5);
+    let c: i64 = classify(7) ^ classify(-2) ^ classify(4);
+    i ^ b ^ c
+}
+";
+
+#[test]
+fn vesper_scalar_bodies_part_6c() {
+    big_stack(|| {
+        let parsed = vesper::parser::parse(SCALARS_6C);
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        let checked = vesper::check::check(&parsed.module);
+        assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
+        if let Err(e) = build(&checked.world, "main", true) {
+            panic!("the part 6c scalar program does not build: {e}");
+        }
+        let before = EMITTED.load(Ordering::Relaxed);
+        let total = both("scalars_6c", &checked.world, true);
+        let emitted = EMITTED.load(Ordering::Relaxed) - before;
+        eprintln!(
+            "scalars_6c: {}; {emitted} functions emitted from Vesper",
+            total.summary()
+        );
+        let ran = if cross() { 0 } else { 2 };
+        assert_eq!((total.worlds, total.ran), (2, ran), "{}", total.summary());
+        assert!(
+            emitted >= 8,
+            "all 4 part 6c functions x 2 builds should come from Vesper, got {emitted}"
+        );
+        assert!(total.is_clean(), "{}", total.summary());
+    });
+}

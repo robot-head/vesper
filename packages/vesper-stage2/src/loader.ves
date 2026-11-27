@@ -411,6 +411,8 @@ struct PkgNode {
     dep_indices: ChunkSeq[u64],
     // The type names the package's `.vsys` libraries declare.
     vsys_types: ChunkSeq[ChunkSeq[u8]],
+    // How many `.vsys` libraries the manifest names (`[package] vsys`).
+    vsys_count: u64,
 }
 
 // `path` with `@TARGET@`, `@OS@` and `@ARCH@` replaced for wasm32-wasip2,
@@ -545,6 +547,7 @@ fn load_pkg_graph(
         },
     };
     let manifest = parse_manifest(in mbytes.as_slice());
+    let vsys_count = manifest.vsys.len();
     let mut vsys_types = ChunkSeq::new[ChunkSeq[u8]]();
     for vi in 0..manifest.vsys.len() {
         match manifest.vsys.try_get(vi) {
@@ -570,7 +573,8 @@ fn load_pkg_graph(
             dir: norm,
             dep_names: ChunkSeq::new[ChunkSeq[u8]](),
             dep_indices: ChunkSeq::new[u64](),
-            vsys_types: ChunkSeq::new[ChunkSeq[u8]]()
+            vsys_types: ChunkSeq::new[ChunkSeq[u8]](),
+            vsys_count: 0
         }
     );
     let mut dep_names = ChunkSeq::new[ChunkSeq[u8]]();
@@ -599,7 +603,8 @@ fn load_pkg_graph(
             dir: dir_copy,
             dep_names: dep_names,
             dep_indices: dep_indices,
-            vsys_types: vsys_types
+            vsys_types: vsys_types,
+            vsys_count: vsys_count
         }
     );
     Option::Some(idx)
@@ -2058,6 +2063,26 @@ fn scan_dir_mods(
     }
 }
 
+// How many `.vsys` libraries the manifests of the package graph at
+// `root_dir` name (Rust `Assembled::vsys`), or None when it does not load.
+pub fn package_graph_vsys_count(in root_dir: Slice[u8]) -> Option[u64] eff [Ffi[StdFs]] {
+    let mut pkgs = ChunkSeq::new[PkgNode]();
+    match load_pkg_graph(in root_dir, inout pkgs) {
+        Option::Some(_) => {},
+        Option::None => {
+            return Option::None;
+        },
+    }
+    let mut count: u64 = 0;
+    for pi in 0..pkgs.len() {
+        match pkgs.try_get(pi) {
+            Option::Some(p) => count = wrapping_add(count, p.vsys_count),
+            Option::None => {},
+        }
+    }
+    Option::Some(count)
+}
+
 pub fn load_package_graph_bytes(in root_dir: Slice[u8]) -> Option[ChunkSeq[u8]] eff [Ffi[StdFs]] {
     let mut pkgs = ChunkSeq::new[PkgNode]();
     match load_pkg_graph(in root_dir, inout pkgs) {
@@ -2638,7 +2663,8 @@ test {
             dir: ChunkSeq::new[u8](),
             dep_names: ChunkSeq::new[ChunkSeq[u8]](),
             dep_indices: ChunkSeq::new[u64](),
-            vsys_types: ChunkSeq::new[ChunkSeq[u8]]()
+            vsys_types: ChunkSeq::new[ChunkSeq[u8]](),
+            vsys_count: 0
         }
     }
 

@@ -1920,8 +1920,9 @@ fn stage2_collects_package_under_wasi_impl() {
     )
     .expect("run @vesper/stage2 under WASI");
     // 3 modules (prelude + `lib.ves` + `sub.ves`), 19 functions (17 prelude + `main` + `helper`),
-    // 4 ADTs (2 prelude + `Pair` + `Flag`), 0 diagnostic bytes => 3190400.
-    assert_eq!(got, 3190400);
+    // 5 ADTs (3 prelude: `Option`, `RuntimeError`, `ArithOverflow`; + `Pair` + `Flag`),
+    // 0 diagnostic bytes => 3190500.
+    assert_eq!(got, 3190500);
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -2806,6 +2807,10 @@ const STAGE2_PACKAGES_COVERED_ELSEWHERE: &[(&str, &str)] = &[
         "Stage 1 front end, checked as one unit; bootstrap/stage1.lock (tests/stage2_seed_runner.rs)",
     ),
     (
+        "vesper-export-build",
+        "`vesper build --lib`'s interface and binding from Stage 2's front end (#2270) as a native executable beside the Rust CLI (tests/self_host_codegen_export.rs); it is @vesper/stage2 plus the export packages, built under Stage 2 as one program in bootstrap switch slice 3",
+    ),
+    (
         "vesper-lsp-format",
         "the formatting action of `vesper lsp` (#1828 part 11a) in the JIT beside Rust's (tests/self_host_lsp_features.rs); it calls @vesper/fmt, which hashes with C BLAKE3 (@vesper-std/hash-sys), which a Wasm entry does not have",
     ),
@@ -3296,6 +3301,33 @@ pub fn main() -> u64 {
                 && err_note.contains("unknown_host_fn"),
             "expected werr_syms symbol details in diagnostic note, got:\n{err_note}"
         );
+        remove_stage2_sidecars(&host_wasm);
+
+        // Verify unsuffixed LHS integer literals infer their type from the RHS
+        // in binary operators and same-integer builtins (e.g. `wrapping_sub(0, i128)`).
+        let lhs_lit_manifest = "[package]\nname = \"@vesper-test/stage2-lhs-int-lit\"\nversion = \"0.1.0\"\nedition = \"2026\"\n";
+        let lhs_lit_src = "\
+fn neg_i128(x: i128) -> u64 {
+    let n = wrapping_sub(0, x);
+    let shifted = 10 + n;
+    let bonus = if 0 < shifted { 1 } else { 0 };
+    wrapping_add(wrapping_u64(shifted), bonus)
+}
+pub fn main() -> u64 {
+    let neg: i128 = -5;
+    let wide: u128 = 20;
+    let sum = 2 + wide;
+    wrapping_add(neg_i128(neg), wrapping_u64(sum))
+}
+";
+        let lhs_lit_code =
+            compile_wrap(lhs_lit_manifest, lhs_lit_src).expect("compile lhs int lit smoke");
+        let lhs_lit_note = read_stage2_sidecar_notes(&host_wasm);
+        assert_eq!(lhs_lit_code, 0, "lhs int lit smoke failed: {lhs_lit_note}");
+        let lhs_lit_bytes = std::fs::read(&host_wasm).unwrap_or_default();
+        assert!(lhs_lit_bytes.starts_with(b"\0asm\x0d\x00\x01\x00"));
+        let lhs_lit_got = run(&lhs_lit_bytes, &Ctx::default()).expect("run lhs int lit smoke");
+        assert_eq!(lhs_lit_got, 38);
         remove_stage2_sidecars(&host_wasm);
 
         let _ = std::fs::remove_file(&syms_path);

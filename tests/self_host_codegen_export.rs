@@ -45,6 +45,10 @@ struct Built {
     rust_types: Option<&'static str>,
     binding: &'static str,
     interface: LibraryInterface,
+    /// The `--interface` file as the CLI wrote it.
+    json: String,
+    /// The port entry, to build it again another way.
+    port: &'static Port,
 }
 
 fn selected(library: &str) -> bool {
@@ -54,7 +58,7 @@ fn selected(library: &str) -> bool {
     }
 }
 
-fn build(port: &Port, scratch: &Path) -> Result<Built, String> {
+fn build(port: &'static Port, scratch: &Path) -> Result<Built, String> {
     let (krate, library, _, rust_types, binding) = *port;
     let dir = repo().join("crates").join(krate);
     let input = port_input(port, &repo(), scratch)?;
@@ -82,6 +86,8 @@ fn build(port: &Port, scratch: &Path) -> Result<Built, String> {
         rust_types,
         binding,
         interface,
+        json: text,
+        port,
     })
 }
 
@@ -92,7 +98,7 @@ fn corpus() -> &'static [Built] {
         let scratch =
             std::env::temp_dir().join(format!("vesper-codegen-export-{}", std::process::id()));
         std::fs::create_dir_all(&scratch).expect("scratch directory");
-        let ports: Vec<&Port> = PORTS.iter().filter(|p| selected(p.1)).collect();
+        let ports: Vec<&'static Port> = PORTS.iter().filter(|p| selected(p.1)).collect();
         let next = std::sync::atomic::AtomicUsize::new(0);
         let results = std::sync::Mutex::new(vec![]);
         std::thread::scope(|s| {
@@ -587,7 +593,10 @@ const PLAN_CASES: &[(&str, &str)] = &[
 /// The planner cases, then every selected single-file port's source, as
 /// (library, source).
 fn plan_sources() -> Vec<(String, String)> {
-    let scratch = std::env::temp_dir().join(format!("vesper-plan-{}", std::process::id()));
+    // Tests call this in parallel: each call writes its own joined sources.
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let call = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let scratch = std::env::temp_dir().join(format!("vesper-plan-{}-{call}", std::process::id()));
     std::fs::create_dir_all(&scratch).expect("scratch directory");
     let mut sources: Vec<(String, String)> = PLAN_CASES
         .iter()
@@ -640,14 +649,14 @@ fn vesper_plans_match_rust() {
     assert_eq!(bad, 0);
 }
 
-/// The planner's answer handed to the binding generator in Vesper
-/// (handoff.ves, #2270) against Rust's `binding_input(decode_plan(answer))`,
-/// for every plan of [`plan_sources`] and every binding-options variant.
 /// A word of the harness's inputs and answers, in bytes.
 const WORD_BYTES: usize = 8;
 /// `plan_binding_input`'s status word when the planner exported.
 const HANDOFF_OK: u64 = 1;
 
+/// The planner's answer handed to the binding generator in Vesper
+/// (handoff.ves, #2270) against Rust's `binding_input(decode_plan(answer))`,
+/// for every plan of [`plan_sources`] and every binding-options variant.
 #[test]
 fn vesper_binding_inputs_match_rust() {
     let plan = package().entry("export_plan", true);
@@ -741,4 +750,173 @@ fn vesper_interface_json_matches_rust() {
         interfaces.len()
     );
     assert_eq!(bad, 0);
+}
+
+// ------------------------------------------------- Stage 2 front end (1b)
+
+/// The driver of `@vesper/export-build` (bootstrap switch slice 1b, #2270):
+/// `driver <package> <library> <interface out> <binding out> [types path]`
+/// writes both files from Stage 2's front end and exits 0, or exits with
+/// the reason it declined (`DECLINE_*` in packages/vesper-export-build).
+const EXPORT_BUILD_DRIVER: &str = r#"use @vesper/export-build::{export_files_dir};
+use @vesper-std/env::{arg_bytes, arg_count};
+use @vesper-std/fs::{IoError, write_path};
+
+fn arg(i: u64) -> ChunkSeq[u8] eff [Ffi[StdEnv]] {
+    match arg_bytes(i) {
+        Option::Some(a) => a,
+        Option::None => ChunkSeq::new[u8](),
+    }
+}
+
+pub fn main() -> u64 eff [Ffi[StdFs], Ffi[StdEnv]] {
+    let root = arg(1);
+    let library = arg(2);
+    let interface = arg(3);
+    let binding = arg(4);
+    let types = arg(5);
+    let files = export_files_dir(in root.as_slice(), in library.as_slice(), arg_count() > 5, in types.as_slice());
+    if files.declined != 0 {
+        return widen_u64(files.declined);
+    }
+    handle Fail[IoError] in {
+        write_path(in interface.as_slice(), in files.interface.as_slice());
+        write_path(in binding.as_slice(), in files.binding.as_slice());
+    } with {
+        return v => v,
+        raise(_e, _k) => {},
+    }
+    0
+}
+"#;
+
+/// The reasons `@vesper/export-build` declines a library, by exit status.
+const DECLINE_REASONS: &[&str] = &[
+    "",
+    "the package graph does not load in Stage 2",
+    ".vsys imports",
+    "instance or .vsys directives",
+    "Box types",
+    "fip functions",
+    "the planner refused it",
+    "syntax or assembly errors",
+];
+
+/// The libraries Stage 2's front end must build byte-identically today, so
+/// a regression that declines more of them fails.
+const MIN_STAGE2_EXPORTS: usize = 41;
+
+fn build_export_driver(dir: &Path) -> PathBuf {
+    let package = dir.join("driver");
+    std::fs::create_dir_all(package.join("src")).unwrap();
+    let path = |p: &str| serde_json::to_string(repo().join(p).to_str().unwrap()).unwrap();
+    std::fs::write(
+        package.join("Loom.toml"),
+        format!(
+            "[package]\nname = \"@test/export-build-driver\"\nversion = \"0.1.0\"\nedition = \"2026\"\n\n\
+             [dependencies]\n\
+             \"@vesper/export-build\" = {{ version = \"^0.1\", path = {} }}\n\
+             \"@vesper-std/env\" = {{ version = \"^0.1\", path = {} }}\n\
+             \"@vesper-std/fs\" = {{ version = \"^0.1\", path = {} }}\n",
+            path("packages/vesper-export-build"),
+            path("packages/vesper-std/env"),
+            path("packages/vesper-std/fs"),
+        ),
+    )
+    .unwrap();
+    std::fs::write(package.join("src/main.ves"), EXPORT_BUILD_DRIVER).unwrap();
+    let binary = dir.join("export-build-driver");
+    let out = Command::new(env!("CARGO_BIN_EXE_vesper"))
+        .arg("build")
+        .arg(&package)
+        .arg("-o")
+        .arg(&binary)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    binary
+}
+
+/// `vesper build --lib`'s `--interface` and `--rust-binding` files built
+/// from Stage 2's front end (@vesper/export-build: loader, assembly,
+/// collect, `mode_of`, check-layout, then @vesper/codegen-export's planner,
+/// handoff, interface file and binding) against the Rust CLI's, for every
+/// library of the corpus. A single-file library is built as a package
+/// whose `src/lib.ves` is the file.
+#[cfg(unix)]
+#[test]
+fn stage2_export_files_match_rust() {
+    let scratch = std::env::temp_dir().join(format!("vesper-export-build-{}", std::process::id()));
+    std::fs::create_dir_all(&scratch).unwrap();
+    let driver = build_export_driver(&scratch);
+    let (mut same, mut bad) = (0, 0);
+    let mut declined: Vec<(&str, &str)> = vec![];
+    for b in corpus() {
+        let input = port_input(b.port, &repo(), &scratch).unwrap();
+        let root = if input.is_dir() {
+            input
+        } else {
+            let package = scratch.join(format!("pkg-{}", b.library));
+            std::fs::create_dir_all(package.join("src")).unwrap();
+            std::fs::write(
+                package.join("Loom.toml"),
+                format!(
+                    "[package]\nname = \"@port/{}\"\nversion = \"0.1.0\"\nedition = \"2026\"\n",
+                    b.library.replace('_', "-")
+                ),
+            )
+            .unwrap();
+            std::fs::copy(&input, package.join("src/lib.ves")).unwrap();
+            package
+        };
+        let json = scratch.join(format!("{}.stage2.json", b.library));
+        let rs = scratch.join(format!("{}.stage2.rs", b.library));
+        let mut run = Command::new(&driver);
+        run.arg(&root).arg(b.library).arg(&json).arg(&rs);
+        if let Some(t) = b.rust_types {
+            run.arg(t);
+        }
+        let status = run.status().unwrap();
+        match status.code() {
+            Some(0) => {}
+            Some(c) => {
+                let why = DECLINE_REASONS.get(c as usize).copied().unwrap_or("?");
+                declined.push((b.library, why));
+                continue;
+            }
+            None => panic!("{}: the driver was killed", b.library),
+        }
+        let rust_binding = rust_binding(&b.interface, &options(b));
+        let vesper_json = std::fs::read_to_string(&json).unwrap();
+        let vesper_binding = std::fs::read_to_string(&rs).unwrap();
+        if vesper_json == b.json && vesper_binding == rust_binding {
+            same += 1;
+        } else {
+            bad += 1;
+            if bad <= 5 {
+                let d = first_difference(&b.json, &vesper_json)
+                    .or_else(|| first_difference(&rust_binding, &vesper_binding))
+                    .unwrap_or_else(|| "in the line endings".into());
+                eprintln!("stage2 export: {} differs {d}", b.library);
+            }
+        }
+    }
+    let _ = std::fs::remove_dir_all(&scratch);
+    for (library, why) in &declined {
+        eprintln!("stage2 export: {library} declined: {why}");
+    }
+    eprintln!(
+        "stage2 export files: {same} identical, {bad} differ, {} declined of {}",
+        declined.len(),
+        corpus().len()
+    );
+    assert_eq!(bad, 0);
+    if corpus().len() == PORTS.len() {
+        assert!(same >= MIN_STAGE2_EXPORTS, "only {same} libraries built");
+    }
 }

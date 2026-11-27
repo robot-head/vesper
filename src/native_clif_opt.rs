@@ -84,6 +84,7 @@ pub fn run(func: &mut ir::Function) {
     fold_trivial_arith_and_bool_extends(func);
     fold_constant_branches(func);
     merge_blocks(func);
+    canonicalize_imm_ops(func);
     dense_icmp_chains_to_br_table(func);
     remove_dead(func);
     sink_slot_inits(func);
@@ -5076,6 +5077,205 @@ fn reuse_seq_header_loads(func: &mut ir::Function) {
             changed = true;
         }
 
+        if !changed {
+            break;
+        }
+    }
+}
+
+const MAX_IMM_CANON_ROUNDS: usize = 3;
+
+/// Canonicalizes integer `Binary` and `Icmp` instructions with a constant
+/// operand into `BinaryImm64` / `IcmpImm`, and folds associative `BinaryImm64`
+/// chains (`iadd_imm`, `imul_imm`, `band_imm`, `bor_imm`, `bxor_imm`).
+fn canonicalize_imm_ops(func: &mut ir::Function) {
+    use cranelift_codegen::ir::condcodes::CondCode as _;
+    let sign_extend_imm = |ty: Type, c: i64| -> Option<i64> {
+        let bits = ty.bits();
+        if !matches!(bits, 8 | 16 | 32 | 64) {
+            return None;
+        }
+        let shift = 64 - bits;
+        Some(((c as u64) << shift) as i64 >> shift)
+    };
+    for _ in 0..MAX_IMM_CANON_ROUNDS {
+        let mut changed = false;
+        for (_, inst) in insts(func) {
+            match func.dfg.insts[inst] {
+                InstructionData::Binary {
+                    opcode: op,
+                    args: [lhs, rhs],
+                } if matches!(
+                    op,
+                    Opcode::Iadd
+                        | Opcode::Imul
+                        | Opcode::Band
+                        | Opcode::Bor
+                        | Opcode::Bxor
+                        | Opcode::Ishl
+                        | Opcode::Ushr
+                        | Opcode::Sshr
+                ) =>
+                {
+                    let lhs = func.dfg.resolve_aliases(lhs);
+                    let rhs = func.dfg.resolve_aliases(rhs);
+                    let dest = func.dfg.first_result(inst);
+                    let ty = func.dfg.value_type(dest);
+                    if !matches!(ty, types::I8 | types::I16 | types::I32 | types::I64) {
+                        continue;
+                    }
+                    let rc = constant(func, rhs, 1);
+                    let lc = if matches!(
+                        op,
+                        Opcode::Iadd | Opcode::Imul | Opcode::Band | Opcode::Bor | Opcode::Bxor
+                    ) {
+                        constant(func, lhs, 1)
+                    } else {
+                        None
+                    };
+                    let Some((var, c)) = rc.map(|c| (lhs, c)).or_else(|| lc.map(|c| (rhs, c)))
+                    else {
+                        continue;
+                    };
+                    match op {
+                        Opcode::Iadd => {
+                            if let Some(sc) = sign_extend_imm(ty, c) {
+                                func.dfg.replace(inst).iadd_imm(var, sc);
+                                changed = true;
+                            }
+                        }
+                        Opcode::Imul => {
+                            if let Some(sc) = sign_extend_imm(ty, c) {
+                                func.dfg.replace(inst).imul_imm(var, sc);
+                                changed = true;
+                            }
+                        }
+                        Opcode::Band => {
+                            if let Some(sc) = sign_extend_imm(ty, c) {
+                                func.dfg.replace(inst).band_imm(var, sc);
+                                changed = true;
+                            }
+                        }
+                        Opcode::Bor => {
+                            if let Some(sc) = sign_extend_imm(ty, c) {
+                                func.dfg.replace(inst).bor_imm(var, sc);
+                                changed = true;
+                            }
+                        }
+                        Opcode::Bxor => {
+                            if let Some(sc) = sign_extend_imm(ty, c) {
+                                func.dfg.replace(inst).bxor_imm(var, sc);
+                                changed = true;
+                            }
+                        }
+                        Opcode::Ishl => {
+                            func.dfg.replace(inst).ishl_imm(var, c);
+                            changed = true;
+                        }
+                        Opcode::Ushr => {
+                            func.dfg.replace(inst).ushr_imm(var, c);
+                            changed = true;
+                        }
+                        Opcode::Sshr => {
+                            func.dfg.replace(inst).sshr_imm(var, c);
+                            changed = true;
+                        }
+                        _ => {}
+                    }
+                }
+                InstructionData::IntCompare {
+                    opcode: Opcode::Icmp,
+                    cond,
+                    args: [lhs, rhs],
+                } if matches!(
+                    cond,
+                    ir::condcodes::IntCC::Equal | ir::condcodes::IntCC::NotEqual
+                ) =>
+                {
+                    let lhs = func.dfg.resolve_aliases(lhs);
+                    let rhs = func.dfg.resolve_aliases(rhs);
+                    let ty = func.dfg.value_type(lhs);
+                    if let Some(rc) = constant(func, rhs, 1)
+                        && rc != 0
+                        && let Some(sc) = sign_extend_imm(ty, rc)
+                    {
+                        func.dfg.replace(inst).icmp_imm(cond, lhs, sc);
+                        changed = true;
+                    } else if let Some(lc) = constant(func, lhs, 1)
+                        && lc != 0
+                        && let Some(sc) = sign_extend_imm(ty, lc)
+                    {
+                        func.dfg.replace(inst).icmp_imm(cond.swap_args(), rhs, sc);
+                        changed = true;
+                    }
+                }
+                InstructionData::BinaryImm64 {
+                    opcode: op,
+                    arg,
+                    imm,
+                } if matches!(
+                    op,
+                    Opcode::IaddImm
+                        | Opcode::ImulImm
+                        | Opcode::BandImm
+                        | Opcode::BorImm
+                        | Opcode::BxorImm
+                ) =>
+                {
+                    let arg = func.dfg.resolve_aliases(arg);
+                    let dest = func.dfg.first_result(inst);
+                    let ty = func.dfg.value_type(dest);
+                    let ir::ValueDef::Result(def, 0) = func.dfg.value_def(arg) else {
+                        continue;
+                    };
+                    let InstructionData::BinaryImm64 {
+                        opcode: inner_op,
+                        arg: inner_arg,
+                        imm: inner_imm,
+                    } = func.dfg.insts[def]
+                    else {
+                        continue;
+                    };
+                    if inner_op != op {
+                        continue;
+                    }
+                    let inner_arg = func.dfg.resolve_aliases(inner_arg);
+                    let c1 = inner_imm.bits();
+                    let c2 = imm.bits();
+                    let combined = match op {
+                        Opcode::IaddImm => c1.wrapping_add(c2),
+                        Opcode::ImulImm => c1.wrapping_mul(c2),
+                        Opcode::BandImm => c1 & c2,
+                        Opcode::BorImm => c1 | c2,
+                        Opcode::BxorImm => c1 ^ c2,
+                        _ => continue,
+                    };
+                    let Some(sc) = sign_extend_imm(ty, combined) else {
+                        continue;
+                    };
+                    match op {
+                        Opcode::IaddImm => {
+                            func.dfg.replace(inst).iadd_imm(inner_arg, sc);
+                        }
+                        Opcode::ImulImm => {
+                            func.dfg.replace(inst).imul_imm(inner_arg, sc);
+                        }
+                        Opcode::BandImm => {
+                            func.dfg.replace(inst).band_imm(inner_arg, sc);
+                        }
+                        Opcode::BorImm => {
+                            func.dfg.replace(inst).bor_imm(inner_arg, sc);
+                        }
+                        Opcode::BxorImm => {
+                            func.dfg.replace(inst).bxor_imm(inner_arg, sc);
+                        }
+                        _ => {}
+                    }
+                    changed = true;
+                }
+                _ => {}
+            }
+        }
         if !changed {
             break;
         }
