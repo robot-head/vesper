@@ -45,7 +45,7 @@ pub(crate) struct In<'a> {
     pub(crate) at: usize,
 }
 
-impl<'a> In<'a> {
+impl In<'_> {
     pub(crate) fn n(&mut self) -> Result<u64, String> {
         let w = self
             .b
@@ -56,15 +56,6 @@ impl<'a> In<'a> {
     }
     pub(crate) fn count(&mut self) -> Result<usize, String> {
         usize::try_from(self.n()?).map_err(|_| "driver: load stream count".to_owned())
-    }
-    pub(crate) fn s(&mut self) -> Result<&'a str, String> {
-        let len = self.count()?;
-        let bytes = self
-            .b
-            .get(self.at..self.at + len)
-            .ok_or("driver: short load stream text")?;
-        self.at += len.next_multiple_of(8);
-        std::str::from_utf8(bytes).map_err(|e| format!("driver: load stream text: {e}"))
     }
 }
 
