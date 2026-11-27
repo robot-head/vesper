@@ -473,6 +473,51 @@ fn flip_gate_pem() {
     println!("flip-gate pairs pem {}", pairs.join(" "));
 }
 
+const PEM_PUBKEY_PASSES: usize = 20_000;
+
+fn flip_gate_pem_pubkey() {
+    use rustls_pki_types::SubjectPublicKeyInfoDer;
+    use rustls_pki_types::pem::PemObject;
+    let cert = rcgen::generate_simple_self_signed(vec!["pk.vesper.test".to_string()]).unwrap();
+    let pem = cert.signing_key.public_key_pem();
+    let rust_decode = |s: &str| -> Vec<u8> {
+        SubjectPublicKeyInfoDer::from_pem_slice(s.as_bytes())
+            .unwrap()
+            .as_ref()
+            .to_vec()
+    };
+    assert_eq!(
+        rust_decode(&pem),
+        port::chain::decode_pem_public_key_for_bench(&pem).unwrap()
+    );
+    let run_rust = || -> u64 {
+        let t = Instant::now();
+        for _ in 0..PEM_PUBKEY_PASSES {
+            black_box(rust_decode(black_box(&pem)));
+        }
+        t.elapsed().as_nanos() as u64
+    };
+    let run_port = || -> u64 {
+        let t = Instant::now();
+        for _ in 0..PEM_PUBKEY_PASSES {
+            black_box(port::chain::decode_pem_public_key_for_bench(black_box(&pem)).unwrap());
+        }
+        t.elapsed().as_nanos() as u64
+    };
+    black_box(run_rust());
+    black_box(run_port());
+    let pairs: Vec<String> = (0..FLIP_GATE_EPOCHS)
+        .map(|_| {
+            let a1 = run_rust();
+            let b1 = run_port();
+            let b2 = run_port();
+            let a2 = run_rust();
+            format!("{}:{}", a1 + a2, b1 + b2)
+        })
+        .collect();
+    println!("flip-gate pairs pem_pubkey {}", pairs.join(" "));
+}
+
 fn main() {
     assert_eq!(port::IMPLEMENTATION, "vesper");
     let args: Vec<String> = std::env::args().collect();
@@ -483,6 +528,10 @@ fn main() {
         }
         if args.get(2).map(String::as_str) == Some("pem") {
             flip_gate_pem();
+            return;
+        }
+        if args.get(2).map(String::as_str) == Some("pem_pubkey") {
+            flip_gate_pem_pubkey();
             return;
         }
     }
