@@ -24,7 +24,7 @@ use self::der_cert::{
 use self::pck_ext::parse_pck_ext as parse_pck_ext_impl;
 use self::pcs_json::{
     parse_pcs_envelope as parse_pcs_envelope_impl, parse_qe_identity as parse_qe_identity_impl,
-    parse_sgx_tcb_info as parse_sgx_tcb_info_impl
+    parse_sgx_tcb_info as parse_sgx_tcb_info_impl, parse_tdx_tcb_info as parse_tdx_tcb_info_impl
 };
 use self::pem::{
     decode_pem_certificates as decode_pem_certificates_impl,
@@ -397,6 +397,30 @@ pub fn parse_sgx_tcb_info(
         inout bytes_out,
         inout levels_out,
         inout comps_out,
+        inout adv_out
+    )
+}
+
+pub fn parse_tdx_tcb_info(
+    in b: Slice[u8],
+    inout out: Slice[u64],
+    inout bytes_out: Slice[u8],
+    inout levels_out: Slice[u64],
+    inout comps_out: Slice[u8],
+    inout mods_out: Slice[u64],
+    inout mod_bytes_out: Slice[u8],
+    inout mod_lvls_out: Slice[u64],
+    inout adv_out: Slice[u64]
+) -> u64 {
+    parse_tdx_tcb_info_impl(
+        in b,
+        inout out,
+        inout bytes_out,
+        inout levels_out,
+        inout comps_out,
+        inout mods_out,
+        inout mod_bytes_out,
+        inout mod_lvls_out,
         inout adv_out
     )
 }
