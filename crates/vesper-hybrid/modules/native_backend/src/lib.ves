@@ -3,6 +3,7 @@
 use self::aarch64::{encode_leaf};
 use self::scalar::{encode_block};
 use self::elf::{write_elf};
+use self::macho::{write_macho};
 use @vesper/codegen-freestanding::util::{push64};
 
 pub fn aarch64_integer_leaf(in words: Slice[u64]) -> ChunkSeq[u8] {
@@ -34,4 +35,9 @@ pub fn x86_64_relocatable_block(in words: Slice[u64]) -> ChunkSeq[u8] {
 // An empty result declines the object request.
 pub fn x86_64_elf_object(in words: Slice[u64], in bytes: Slice[u8]) -> ChunkSeq[u8] {
     write_elf(in words, in bytes)
+}
+
+// An empty result declines the Mach-O object request.
+pub fn macho_object(in words: Slice[u64], in bytes: Slice[u8]) -> ChunkSeq[u8] {
+    write_macho(in words, in bytes)
 }
