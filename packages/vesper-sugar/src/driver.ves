@@ -607,6 +607,8 @@ pub copy struct SugarImportSpan {
 
 pub struct SugarModuleSurface {
     pub has_sugar: bool,
+    // A sugar call (any `call_node`), not only declarations.
+    pub has_calls: bool,
     pub shadows_bootstrap_prelude: bool,
     pub declarations: ChunkSeq[SugarDeclarationSpan],
     pub imports: ChunkSeq[SugarImportSpan],
@@ -701,6 +703,7 @@ pub fn inspect_module_sugars(
     };
     let mut surface = SugarModuleSurface {
         has_sugar: false,
+        has_calls: false,
         shadows_bootstrap_prelude: false,
         declarations: ChunkSeq::new[SugarDeclarationSpan](),
         imports: ChunkSeq::new[SugarImportSpan](),
@@ -709,6 +712,9 @@ pub fn inspect_module_sugars(
         let node = node_at(in cst, node_index);
         if node.kind == NodeKind::SugarDecl || call_node(node.kind) {
             surface.has_sugar = true;
+        }
+        if call_node(node.kind) {
+            surface.has_calls = true;
         }
         if node.kind != NodeKind::Item
             || node_at(in cst, widen_u64(node.parent)).kind != NodeKind::Module
@@ -4572,6 +4578,15 @@ fn bootstrap_expand_raw(
     let mut serial: u64 = 0;
     for node in 0..cst.nodes.len() {
         let kind = node_at(in cst, node).kind;
+        // Only tagged literals expand here; a statement, expression, item,
+        // pattern, dotted or pipe call goes to the full expander (`expand`).
+        if call_node(kind) && kind != N_TAGGED_LITERAL {
+            return Result::Err(diag(
+                in "a sugar call the bootstrap path leaves to the full expander",
+                sig_start(in cst, node),
+                n_end(in cst, node)
+            ));
+        }
         if kind != N_TAGGED_LITERAL && kind != N_SUGAR_DECL {
             continue;
         }
@@ -4686,6 +4701,21 @@ pub fn expand_bootstrap_module(
         Result::Err(problem) => return Result::Err(problem),
     };
     Result::Ok(BootstrapSugarOutput { source: expanded.src, mappings: expanded.maps })
+}
+
+// `expand` for a module the bootstrap path refuses (a rule with a
+// repetition or a fragment sort other than `expr`, which
+// `match_bootstrap_scalar_encoded` leaves to the full matcher): the
+// expanded source and its mappings, in the bootstrap path's shape.
+pub fn expand_module(
+    in source: ChunkSeq[u8],
+    in imports: Imports
+) -> Result[BootstrapSugarOutput, Dg] {
+    let expanded = expand(in source, in imports, false);
+    if expanded.diag.failed {
+        return Result::Err(expanded.diag);
+    }
+    Result::Ok(BootstrapSugarOutput { source: expanded.state.src, mappings: expanded.state.maps })
 }
 
 test {

@@ -5,8 +5,8 @@
 use @vesper/check-data::util::{stage2_heap_mark, stage2_heap_reset};
 use @vesper/check-names-packages::{resolve_sugar_imports_bytes};
 use @vesper/sugar::driver::{
-    PackageSugarBinding, PackageSugarDefinition, expand_bootstrap_module, inspect_module_sugars,
-    may_declare_sugar, plan_bootstrap_sugars
+    PackageSugarBinding, PackageSugarDefinition, expand_bootstrap_module, expand_module,
+    inspect_module_sugars, may_declare_sugar, plan_bootstrap_sugars
 };
 
 use @vesper-std/fs::{IoError, kind_dir, kind_file, kind_symlink, read_path};
@@ -205,6 +205,55 @@ struct Manifest {
     deps: ChunkSeq[DepSpec],
     // `[package] vsys`: the `.vsys` files the package names (§16.3).
     vsys: ChunkSeq[ChunkSeq[u8]],
+}
+
+// Whether `a` sorts before `b` byte by byte (a prefix sorts first), the
+// order of the Rust loader's `BTreeMap<PackageName, _>`.
+fn bytes_before(in a: Slice[u8], in b: Slice[u8]) -> bool {
+    let n = if a.len() < b.len() { a.len() } else { b.len() };
+    for i in 0..n {
+        let x = byte_at(in a, i);
+        let y = byte_at(in b, i);
+        if x != y {
+            return x < y;
+        }
+    }
+    a.len() < b.len()
+}
+
+// The indices of `deps` sorted by package name: the Rust loader visits a
+// manifest's dependencies in that order, which fixes the package, file
+// and `.vsys` library order.
+fn dependency_order(in deps: ChunkSeq[DepSpec]) -> ChunkSeq[u64] {
+    let mut order = ChunkSeq::new[u64]();
+    for i in 0..deps.len() {
+        order.push(i);
+        let mut at = i;
+        loop {
+            if at == 0 {
+                break;
+            }
+            let prev = order.try_get(wrapping_sub(at, 1)).unwrap_or(0);
+            if !dep_before(in deps, i, prev) {
+                break;
+            }
+            order.try_set(at, prev);
+            at = wrapping_sub(at, 1);
+        }
+        order.try_set(at, i);
+    }
+    order
+}
+
+// Whether dependency `i` of `deps` sorts before dependency `j` by name.
+fn dep_before(in deps: ChunkSeq[DepSpec], i: u64, j: u64) -> bool {
+    match deps.try_get(i) {
+        Option::Some(a) => match deps.try_get(j) {
+            Option::Some(b) => bytes_before(in a.name.as_slice(), in b.name.as_slice()),
+            Option::None => false,
+        },
+        Option::None => false,
+    }
 }
 
 fn parse_manifest(in text: Slice[u8]) -> Manifest {
@@ -581,7 +630,9 @@ fn load_pkg_graph(
     );
     let mut dep_names = ChunkSeq::new[ChunkSeq[u8]]();
     let mut dep_indices = ChunkSeq::new[u64]();
-    for i in 0..manifest.deps.len() {
+    let order = dependency_order(in manifest.deps);
+    for k in 0..order.len() {
+        let i = order.try_get(k).unwrap_or(0);
         match manifest.deps.try_get(i) {
             Option::Some(d) => {
                 let ddir = normalize_dir(in dir_copy.as_slice(), in d.path.as_slice());
@@ -2311,6 +2362,8 @@ fn prepare_sugar_graph_in_scratch(
     let mut public = ChunkSeq::new[bool]();
     let mut imports = ChunkSeq::new[ChunkSeq[u8]]();
     let mut surface_modules = ChunkSeq::new[bool]();
+    // Modules calling a sugar they declare: expanded with no imports.
+    let mut local_callers = ChunkSeq::new[bool]();
     let mut shadowed_modules = ChunkSeq::new[bool]();
     let mut declaration_spans = ChunkSeq::new[BootstrapDeclarationRange]();
     let mut source_segments = ChunkSeq::new[BootstrapSourceSegment]();
@@ -2319,6 +2372,7 @@ fn prepare_sugar_graph_in_scratch(
             let mut import_text = ChunkSeq::new[u8]();
             let mut has_surface_sugar = false;
             let mut shadows_prelude = false;
+            let mut calls_own_sugar = false;
             match mods.try_get(module) {
                 Option::Some(source) => {
                     if contains_word(in source.text.as_slice(), in "sugar")
@@ -2328,6 +2382,8 @@ fn prepare_sugar_graph_in_scratch(
                         match inspect_module_sugars(in source.text, false) {
                             Option::Some(surface) => {
                                 has_surface_sugar = surface.has_sugar;
+                                calls_own_sugar = surface.has_calls
+                                    && surface.declarations.len() != 0;
                                 shadows_prelude = surface.shadows_bootstrap_prelude;
                                 for i in 0..surface.declarations.len() {
                                     match surface.declarations.try_get(i) {
@@ -2378,6 +2434,7 @@ fn prepare_sugar_graph_in_scratch(
             }
             imports.push(sink import_text);
             surface_modules.push(has_surface_sugar);
+            local_callers.push(calls_own_sugar);
             shadowed_modules.push(shadows_prelude);
         }
         if catalogue.len() != 0 {
@@ -2395,8 +2452,8 @@ fn prepare_sugar_graph_in_scratch(
             let mut bindings = ChunkSeq::new[PackageSugarBinding]();
             let empty = ChunkSeq::new[bool]();
             let mut imported = empty;
-            for _module in 0..mods.len() {
-                imported.push(false);
+            for module in 0..mods.len() {
+                imported.push(local_callers.try_get(module) == Option::Some(true));
             }
             for i in 0..resolved.len() {
                 match resolved.try_get(i) {
@@ -2467,7 +2524,24 @@ fn prepare_sugar_graph_in_scratch(
                                     );
                                     source.text = expanded.source;
                                 },
-                                Result::Err(_) => return Option::None,
+                                // A call the bootstrap path leaves to
+                                // the full expander (not a tagged
+                                // literal, or a rule with a repetition
+                                // or a `block` or `pat` fragment), as
+                                // the Rust loader runs it.
+                                Result::Err(_) => {
+                                    match expand_module(in source.text, in plan) {
+                                        Result::Ok(expanded) => {
+                                            copy_bootstrap_mappings(
+                                                source.file,
+                                                in expanded.mappings,
+                                                inout source_segments
+                                            );
+                                            source.text = expanded.source;
+                                        },
+                                        Result::Err(_) => return Option::None,
+                                    }
+                                },
                             }
                         },
                         Option::None => return Option::None,
