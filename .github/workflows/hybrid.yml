@@ -14,7 +14,11 @@ name: Hybrid compiler
 # Those divergent rebuilds check the harnesses, which are the same code on
 # every host, so they run on Linux only, in four jobs of their own (#2147,
 # #2174): the crate's own tests take about two hours on each host, and each
-# rebuild about 48 minutes, so three rebuilds share a job. It
+# rebuild about 48 minutes, so three rebuilds share a job. The corpus
+# sweeps of the crate's tests are the same comparison on every host, so
+# Linux runs them whole and macOS and Windows run every 8th input
+# (`sample`, #2395): enough to run the hybrid built for that target over
+# its own paths, files and processes, which only that host can do. It
 # runs on pushes to main, nightly and manual dispatch only, not on pull
 # requests (#1479): it is not a required check, and Bazel (Test all targets)
 # builds the crate and runs the same tests on Linux for every pull request.
@@ -96,11 +100,13 @@ jobs:
           - name: macOS AArch64
             os: macos-latest
             compiler: vesper
+            sample: 8
           - name: Windows x86_64 MSVC
             os: windows-latest
             compiler: vesper.exe
+            sample: 8
     runs-on: ${{ matrix.os }}
-    # The crate tests alone take about two hours on each host (#2147).
+    # Run whole, the crate tests take about two hours on a host (#2147).
     timeout-minutes: 240
     env:
       VESPER_PORT_COMPILER: ${{ github.workspace }}/target/debug/${{ matrix.compiler }}
@@ -116,6 +122,18 @@ jobs:
         run: cargo build --locked --bin vesper
       - name: Build and test the hybrid compiler
         if: ${{ !matrix.divergent }}
+        # Each corpus sweep checks every `sample`th input; Linux has no
+        # `sample` and checks them all.
+        env:
+          VESPER_DRIVER_PACKAGES_STRIDE: ${{ matrix.sample || 1 }}
+          VESPER_DRIVER_FRONT_STRIDE: ${{ matrix.sample || 1 }}
+          VESPER_DRIVER_INTERFACE_STRIDE: ${{ matrix.sample || 1 }}
+          VESPER_GATED_STRIDE: ${{ matrix.sample || 1 }}
+          VESPER_DOC_STRIDE: ${{ matrix.sample || 1 }}
+          VESPER_LEAN_STRIDE: ${{ matrix.sample || 1 }}
+          VESPER_VERIFIED_STRIDE: ${{ matrix.sample || 1 }}
+          VESPER_WASM_STRIDE: ${{ matrix.sample || 1 }}
+          VESPER_EBPF_STRIDE: ${{ matrix.sample || 1 }}
         run: cargo test --locked -p vesper-hybrid -- --nocapture
       - name: The CLI suites on the hybrid (its main is the Vesper driver)
         # SH5 lane 12 (#1335): every tests/*cli*.rs suite of the root package

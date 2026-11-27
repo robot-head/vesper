@@ -530,3 +530,91 @@ pub fn meta_decode(
     su(inout out_hdr, HDR_NINDEXES, nindexes);
     STATUS_OK
 }
+
+const KIND_FSM: u8 = 17;
+const FSM_BODY_START: u64 = 32;
+const FSM_FIXED_MASK: u8 = 3;
+const FSM_STATUS_OK: u64 = 0;
+const FSM_STATUS_KIND: u64 = 1;
+const FSM_STATUS_FIXED: u64 = 2;
+const FSM_STATUS_GROW: u64 = 3;
+const FSM_WORD_BYTES: u64 = 8;
+const FSM_WORD_BITS: u64 = 64;
+const FSM_BYTE_BITS_SHIFT: u64 = 3;
+const FSM_BIT_MASK: u64 = 7;
+const FSM_MAX_COUNT: u64 = 65535;
+const FSM_BYTE_MASK: u64 = 255;
+
+pub fn fsm_encode(inout b: Slice[u8], in pages: Slice[u64]) {
+    let mut at: u64 = FSM_BODY_START;
+    loop {
+        if at >= PAGE_SIZE {
+            break;
+        }
+        let _ = b.try_write_u64_le(at, 0);
+        at = wrapping_add(at, FSM_WORD_BYTES);
+    }
+    let n = pages.len();
+    let mut i: u64 = 0;
+    loop {
+        if i >= n {
+            break;
+        }
+        let p = gu(in pages, i);
+        let idx = wrapping_add(FSM_BODY_START, p >> FSM_BYTE_BITS_SHIFT);
+        let one: u64 = 1;
+        let bit = wrapping_u8(wrapping_shl_u64(one, wrapping_u32(p & FSM_BIT_MASK)));
+        b.try_set(idx, gb(in b, idx) | bit);
+        i = wrapping_add(i, 1);
+    }
+    let cnt = if n > FSM_MAX_COUNT { FSM_MAX_COUNT } else { n };
+    b.try_set(OFF_COUNT, wrapping_u8(cnt & FSM_BYTE_MASK));
+    b.try_set(wrapping_add(OFF_COUNT, 1), wrapping_u8((cnt >> SHIFT_8) & FSM_BYTE_MASK));
+}
+
+pub fn fsm_decode(
+    in b: Slice[u8],
+    inout out_pages: Slice[u64],
+    inout out_count: Slice[u64]
+) -> u64 {
+    if b.len() != PAGE_SIZE || gb(in b, OFF_KIND) != KIND_FSM || gb(in b, OFF_LEVEL) != 0 {
+        return FSM_STATUS_KIND;
+    }
+    if (gb(in b, FSM_BODY_START) & FSM_FIXED_MASK) != 0 {
+        return FSM_STATUS_FIXED;
+    }
+    let cap = out_pages.len();
+    let mut count: u64 = 0;
+    let mut at: u64 = FSM_BODY_START;
+    let mut base_bit: u64 = 0;
+    loop {
+        if at >= PAGE_SIZE {
+            break;
+        }
+        let w = match b.try_read_u64_le(at) {
+            Option::Some(v) => v,
+            Option::None => 0,
+        };
+        if w != 0 {
+            let mut rem = w;
+            loop {
+                if rem == 0 {
+                    break;
+                }
+                let tz = widen_u64(trailing_zeros_u64(rem));
+                if count < cap {
+                    su(inout out_pages, count, wrapping_add(base_bit, tz));
+                }
+                count = wrapping_add(count, 1);
+                rem = rem & wrapping_sub(rem, 1);
+            }
+        }
+        at = wrapping_add(at, FSM_WORD_BYTES);
+        base_bit = wrapping_add(base_bit, FSM_WORD_BITS);
+    }
+    su(inout out_count, 0, count);
+    if count > cap {
+        return FSM_STATUS_GROW;
+    }
+    FSM_STATUS_OK
+}

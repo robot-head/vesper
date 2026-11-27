@@ -295,7 +295,10 @@ fn ir_check_speed() {
         return;
     }
     let f = package().entry("check_ir_words", true);
-    let cases = ir_cases(IR_MUTANTS);
+    // Every fourth world (`HYBRID_IR_CHECK_STEP`): the whole corpus with its
+    // mutants does not fit a 16 GB host.
+    let step = step(4);
+    let cases = ir_cases_where(IR_MUTANTS, |i| i % step == 0);
     let cases: Vec<_> = cases.into_iter().filter(|c| input(c).is_some()).collect();
     let inputs: Vec<Vec<u8>> = cases.iter().filter_map(input).collect();
     abba(

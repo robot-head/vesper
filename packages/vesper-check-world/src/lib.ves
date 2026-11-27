@@ -1,0 +1,1371 @@
+// @vesper/check-world: the checked world in Vesper (#2024 slice 3, the
+// producer switch). The Vesper checker ports read their inputs as word
+// streams the Rust harness encodes from the Rust checked world; this
+// package builds those streams from the Vesper parse (@vesper/ast) and the
+// collected world (@vesper/check-collect) instead.
+//
+// Part 1 builds the input of @vesper/check-core-typing (`exprs_input` of
+// tests/self_host_check_core_typing_exprs.rs): the names and types,
+// interned in the Rust encoder's order, the world section (`fip::active`,
+// the ADTs and effects, no expression types), the function table with the
+// declared results, the effect operations and the bodies of the checked
+// functions. A module the checker elaborates before collecting is declined
+// (`declined` of @vesper/check-collect).
+//
+// tests/self_host_check_world.rs compares the stream with the Rust encoding
+// of `World::collect`'s world, and the types core typing gives over it with
+// the Rust checker's.
+
+use @vesper/ast::{
+    AdtNode, ArgNode, Ast, ClauseNode, EffectDeclNode, EffectNode, EffectsNode, FieldNode, FnNode,
+    GenericNode, ImplNode, Lit, ParamNode, StmtNode, VariantNode, expr_at, list_at, list_len,
+    lit_at, none, pat_at, type_at
+};
+use @vesper/ast::lower::{lower_source};
+use @vesper/check-collect::{
+    Collected, Entry, Norm, Srcs, collected, declined, entry_at, key_text, label_index, name_is,
+    name_text, norm_of, region_active, shift_of, sorted_keys, source_name, word32
+};
+use @vesper/check-data::util::{put_text_words};
+use @vesper-std/arena::{idx_from_raw};
+use @vesper-std/intern::{Interner, interner_new, symbol_from_id};
+
+const NONE64: u64 = 18446744073709551615;
+
+// Expression kinds of the stream (`E_*` of check-core-typing's exprs.ves).
+const E_OTHER: u64 = 0;
+const E_INT: u64 = 1;
+const E_FLOAT: u64 = 2;
+const E_BOOL: u64 = 3;
+const E_STRING: u64 = 4;
+const E_NAME: u64 = 5;
+const E_TUPLE: u64 = 6;
+const E_STRUCT: u64 = 7;
+const E_BLOCK: u64 = 8;
+const E_CALL: u64 = 9;
+const E_FIELD: u64 = 10;
+const E_UNARY: u64 = 11;
+const E_BINARY: u64 = 12;
+const E_IF: u64 = 13;
+const E_MATCH: u64 = 14;
+const E_RETURN: u64 = 15;
+const E_ASSIGN: u64 = 16;
+const E_FOR: u64 = 17;
+const E_RANGE: u64 = 18;
+const E_LOOP: u64 = 19;
+const E_BREAK: u64 = 20;
+const E_CONTINUE: u64 = 21;
+const E_HANDLE: u64 = 22;
+const E_INDEX: u64 = 40;
+
+// Statement kinds of the stream.
+const S_LET: u64 = 0;
+const S_EXPR: u64 = 1;
+
+// Pattern kinds of the stream.
+const P_WILD: u64 = 0;
+const P_BIND: u64 = 1;
+const P_TRUE: u64 = 2;
+const P_FALSE: u64 = 3;
+const P_LITERAL: u64 = 4;
+const P_TUPLE: u64 = 5;
+const P_CTOR: u64 = 6;
+
+// Literal pattern classes (`LIT_*` of exprs.ves).
+const LIT_INT: u64 = 0;
+const LIT_FLOAT: u64 = 1;
+const LIT_BOOL: u64 = 2;
+const LIT_WIDE_INT: u64 = 3;
+const LIT_TYPED_INT: u64 = 4;
+const LIT_STRING: u64 = 5;
+
+// Type kinds of the stream (`Enc::ty`).
+const TY_NAMED: u64 = 1;
+const TY_TUPLE: u64 = 2;
+const TY_FN: u64 = 3;
+const TY_ROW: u64 = 4;
+const TY_INFER: u64 = 5;
+
+// @vesper/ast expression kinds.
+const X_LITERAL: u8 = 1;
+const X_NAME: u8 = 2;
+const X_TUPLE: u8 = 3;
+const X_STRUCT: u8 = 4;
+const X_BLOCK: u8 = 5;
+const X_CALL: u8 = 6;
+const X_FIELD: u8 = 7;
+const X_INDEX: u8 = 8;
+const X_UNARY: u8 = 10;
+const X_BINARY: u8 = 11;
+const X_ASSIGN: u8 = 12;
+const X_IF: u8 = 13;
+const X_MATCH: u8 = 14;
+const X_HANDLE: u8 = 16;
+const X_LOOP: u8 = 17;
+const X_FOR: u8 = 18;
+const X_RANGE: u8 = 19;
+const X_BREAK: u8 = 20;
+const X_RETURN: u8 = 21;
+const X_CONTINUE: u8 = 22;
+
+// @vesper/ast literal kinds.
+const L_INT: u8 = 1;
+const L_FLOAT: u8 = 2;
+const L_BOOL: u8 = 3;
+const L_STRING: u8 = 4;
+
+// @vesper/ast pattern kinds.
+const AP_WILD: u8 = 1;
+const AP_BIND: u8 = 2;
+const AP_LITERAL: u8 = 3;
+const AP_TUPLE: u8 = 4;
+const AP_CTOR: u8 = 5;
+
+// @vesper/ast type kinds.
+const T_NAMED: u8 = 1;
+const T_TUPLE: u8 = 2;
+const T_FN: u8 = 3;
+const T_ROW: u8 = 4;
+const T_INFER: u8 = 5;
+
+// @vesper/ast statement kind of a `let`.
+const ST_LET: u8 = 1;
+
+// World table sources (`Entry.src` of check-collect).
+const SRC_BASE: u8 = 0;
+const SRC_MODULE: u8 = 1;
+const SRC_STRINGS: u8 = 2;
+const SRC_WIDTH: u8 = 4;
+const SRC_BOX: u8 = 5;
+const SRC_ATOMICS: u8 = 6;
+const SRC_FLOATS: u8 = 7;
+const SRC_SECRET: u8 = 8;
+const SRC_REGION: u8 = 9;
+
+// Modes and the hand-built `Box[T]` (`fip::box_adt`): affine, its `T`
+// bounded linear.
+const MODE_AFFINE: u64 = 1;
+const MODE_LINEAR: u64 = 2;
+// A field without a modality (`Field.modality`, 3 in @vesper/ast).
+const NO_MODALITY: u8 = 3;
+
+// Operator codes of the stream (`unary_code` and `binary_code` of the
+// harness); 0 is an operator not ported, written as `E_OTHER`.
+const OP_NONE: u64 = 0;
+const OP_NOT: u64 = 1;
+const OP_NEGATE: u64 = 2;
+const OP_COMPLEMENT: u64 = 3;
+const OP_ADD: u64 = 1;
+const OP_SUB: u64 = 2;
+const OP_MUL: u64 = 3;
+const OP_DIV: u64 = 4;
+const OP_REM: u64 = 5;
+const OP_EQ: u64 = 6;
+const OP_NE: u64 = 7;
+const OP_LT: u64 = 8;
+const OP_LE: u64 = 9;
+const OP_GT: u64 = 10;
+const OP_GE: u64 = 11;
+const OP_AND: u64 = 12;
+const OP_OR: u64 = 13;
+const OP_BIT_AND: u64 = 14;
+const OP_BIT_OR: u64 = 15;
+const OP_BIT_XOR: u64 = 16;
+const OP_SHL: u64 = 17;
+const OP_SHR: u64 = 18;
+
+// Bytes of names.
+const OPEN_BRACKET: u8 = 91;
+const CLOSE_BRACKET: u8 = 93;
+const WRITE_PREFIX_LEN: u64 = 2;
+const COLON: u8 = 58;
+const DIGIT_ZERO: u64 = 48;
+const KEY_SEPARATOR: u32 = 44;
+const DECIMAL: u64 = 10;
+
+// ---------------------------------------------------------------- the encoder
+
+// The harness encoder (`Enc` of tests/common/check_harness.rs): names and
+// types interned as they are first written, a type after its parts.
+struct Enc {
+    names: Interner,
+    // A type's words as decimal text -> its index.
+    types: Interner,
+    type_words: ChunkSeq[u64]
+}
+
+fn enc_new() -> Enc {
+    Enc { names: interner_new(), types: interner_new(), type_words: ChunkSeq::new[u64]() }
+}
+
+fn name_of(inout e: Enc, in s: Str) -> u64 {
+    widen_u64(e.names.intern(in s).id())
+}
+
+fn ast_name(inout e: Enc, in a: Ast, sym: u32) -> u64 {
+    let t = name_text(in a, sym);
+    name_of(inout e, in t.as_str())
+}
+
+fn opt_ast_name(inout e: Enc, in a: Ast, sym: u32) -> u64 {
+    if sym == none() {
+        0
+    } else {
+        wrapping_add(ast_name(inout e, in a, sym), 1)
+    }
+}
+
+fn push_decimal(inout key: String, v: u64) {
+    if v >= DECIMAL {
+        push_decimal(inout key, v / DECIMAL);
+    }
+    let ok = key.push_char(wrapping_u32(wrapping_add(DIGIT_ZERO, v % DECIMAL)));
+}
+
+// The index of the type whose words are `words` (its parts already
+// interned, so the words identify it).
+fn intern_type(inout e: Enc, in words: ChunkSeq[u64]) -> u64 {
+    let mut key = String::new();
+    for i in 0..words.len() {
+        let v = match words.try_get(i) {
+            Option::Some(v) => v,
+            Option::None => 0,
+        };
+        push_decimal(inout key, v);
+        let ok = key.push_char(KEY_SEPARATOR);
+    }
+    let before = e.types.len();
+    let id = widen_u64(e.types.intern(in key.as_str()).id());
+    if id == before {
+        e.type_words.extend(in words.as_slice());
+    }
+    id
+}
+
+fn infer_type(inout e: Enc) -> u64 {
+    let mut words = ChunkSeq::new[u64]();
+    words.push(TY_INFER);
+    intern_type(inout e, in words)
+}
+
+// An effect row (`Enc::row`): each instance's arguments before its names.
+fn row(inout e: Enc, in a: Ast, effects: u32, inout words: ChunkSeq[u64]) {
+    if effects == none() {
+        words.push(0);
+        words.push(0);
+        return;
+    }
+    let n = effects_node(in a, effects);
+    let k = list_len(in a, n.instances);
+    words.push(k);
+    for i in 0..k {
+        let x = effect_node(in a, list_at(in a, n.instances, i));
+        let m = list_len(in a, x.args);
+        let mut args = ChunkSeq::new[u64]();
+        for j in 0..m {
+            args.push(ty(inout e, in a, list_at(in a, x.args, j), in off()));
+        }
+        words.push(opt_ast_name(inout e, in a, x.label));
+        words.push(ast_name(inout e, in a, x.name));
+        words.push(m);
+        words.extend(in args.as_slice());
+    }
+    words.push(opt_ast_name(inout e, in a, n.tail));
+}
+
+// The capability row a normalized region label becomes
+// (`row{$fncap:<key>:<i>:Region|-}`).
+fn capability_row(inout e: Enc, in nm: Norm, index: u32) -> u64 {
+    let mut label = String::new();
+    label.push_str(in "$fncap:");
+    label.push_str(in nm.key.as_str());
+    let ok = label.push_char(widen_u32(COLON));
+    push_decimal(inout label, widen_u64(index));
+    let mut words = ChunkSeq::new[u64]();
+    words.push(TY_ROW);
+    words.push(1);
+    words.push(wrapping_add(name_of(inout e, in label.as_str()), 1));
+    words.push(name_of(inout e, in "Region"));
+    words.push(0);
+    words.push(0);
+    intern_type(inout e, in words)
+}
+
+fn off() -> Norm {
+    Norm { active: false, key: String::new(), labels: ChunkSeq::new[u32]() }
+}
+
+// The index of `t` (`Enc::ty`), normalized by `nm` as check-collect's
+// `w_ty` writes it.
+fn ty(inout e: Enc, in a: Ast, t: u32, in nm: Norm) -> u64 {
+    if t == none() {
+        return infer_type(inout e);
+    }
+    let n = type_at(in a, t);
+    let mut words = ChunkSeq::new[u64]();
+    if n.kind == T_NAMED {
+        let count = list_len(in a, n.b);
+        let at = if !nm.active {
+            count
+        } else if name_is(in a, n.a, "RegionBox") || name_is(in a, n.a, "Watermark") {
+            0
+        } else if name_is(in a, n.a, "TiledSeq") && count == 2 {
+            1
+        } else {
+            count
+        };
+        let mut args = ChunkSeq::new[u64]();
+        for i in 0..count {
+            let arg = list_at(in a, n.b, i);
+            let idx = if i == at {
+                label_index(in a, in nm, source_name(in a, arg))
+            } else {
+                none()
+            };
+            if idx != none() {
+                args.push(capability_row(inout e, in nm, idx));
+            } else {
+                args.push(ty(inout e, in a, arg, in nm));
+            }
+        }
+        words.push(TY_NAMED);
+        words.push(ast_name(inout e, in a, n.a));
+        words.push(count);
+        words.extend(in args.as_slice());
+    } else if n.kind == T_TUPLE {
+        let count = list_len(in a, n.a);
+        let mut args = ChunkSeq::new[u64]();
+        for i in 0..count {
+            args.push(ty(inout e, in a, list_at(in a, n.a, i), in nm));
+        }
+        words.push(TY_TUPLE);
+        words.push(count);
+        words.extend(in args.as_slice());
+    } else if n.kind == T_FN {
+        let pairs = list_len(in a, n.a) / 2;
+        let mut ps = ChunkSeq::new[u64]();
+        for i in 0..pairs {
+            ps.push(widen_u64(list_at(in a, n.a, wrapping_mul(i, 2))));
+            ps.push(ty(
+                inout e,
+                in a,
+                list_at(in a, n.a, wrapping_add(wrapping_mul(i, 2), 1)),
+                in nm
+            ));
+        }
+        let r = ty(inout e, in a, n.b, in nm);
+        words.push(TY_FN);
+        words.push(pairs);
+        words.extend(in ps.as_slice());
+        words.push(r);
+        row(inout e, in a, n.c, inout words);
+        words.push(widen_u64(n.d));
+    } else if n.kind == T_ROW {
+        words.push(TY_ROW);
+        row(inout e, in a, n.a, inout words);
+    } else {
+        words.push(TY_INFER);
+    }
+    intern_type(inout e, in words)
+}
+
+// ---------------------------------------------------------------- nodes
+
+fn fn_node(in a: Ast, i: u32) -> FnNode {
+    a.fns.get_or(
+        idx_from_raw[FnNode](i),
+        FnNode {
+            name: none(),
+            fip: false,
+            generics: none(),
+            params: none(),
+            result: none(),
+            effects: none(),
+            body: none(),
+            start: 0,
+            end: 0
+        }
+    )
+}
+
+fn adt_node(in a: Ast, i: u32) -> AdtNode {
+    a.adts.get_or(
+        idx_from_raw[AdtNode](i),
+        AdtNode {
+            name: none(),
+            mode: 0,
+            generics: none(),
+            variants: none(),
+            is_enum: false,
+            tiled: false,
+            tile_width: 0,
+            start: 0,
+            end: 0
+        }
+    )
+}
+
+fn effect_decl_node(in a: Ast, i: u32) -> EffectDeclNode {
+    a.effect_decls.get_or(
+        idx_from_raw[EffectDeclNode](i),
+        EffectDeclNode {
+            name: none(),
+            linear: false,
+            generics: none(),
+            ops: none(),
+            start: 0,
+            end: 0
+        }
+    )
+}
+
+fn impl_node(in a: Ast, i: u32) -> ImplNode {
+    a.impls.get_or(
+        idx_from_raw[ImplNode](i),
+        ImplNode { ty: none(), generics: none(), methods: none() }
+    )
+}
+
+fn param_node(in a: Ast, i: u32) -> ParamNode {
+    a.params.get_or(
+        idx_from_raw[ParamNode](i),
+        ParamNode { name: none(), pass: 0, projections: none(), ty: none(), start: 0, end: 0 }
+    )
+}
+
+fn generic_node(in a: Ast, i: u32) -> GenericNode {
+    a.generics
+        .get_or(idx_from_raw[GenericNode](i), GenericNode { name: none(), bound: 0, row: false })
+}
+
+fn variant_node(in a: Ast, i: u32) -> VariantNode {
+    a.variants.get_or(
+        idx_from_raw[VariantNode](i),
+        VariantNode { name: none(), fields: none(), named: false }
+    )
+}
+
+fn field_node(in a: Ast, i: u32) -> FieldNode {
+    a.fields.get_or(
+        idx_from_raw[FieldNode](i),
+        FieldNode { name: none(), ty: none(), modality: NO_MODALITY, temperature: 0 }
+    )
+}
+
+fn effects_node(in a: Ast, i: u32) -> EffectsNode {
+    a.effects.get_or(idx_from_raw[EffectsNode](i), EffectsNode { instances: none(), tail: none() })
+}
+
+fn effect_node(in a: Ast, i: u32) -> EffectNode {
+    a.effect_nodes.get_or(
+        idx_from_raw[EffectNode](i),
+        EffectNode { label: none(), name: none(), args: none() }
+    )
+}
+
+fn stmt_node(in a: Ast, i: u32) -> StmtNode {
+    a.stmts.get_or(
+        idx_from_raw[StmtNode](i),
+        StmtNode { kind: 0, pat: none(), ty: none(), value: none(), mutable: false }
+    )
+}
+
+fn arg_node(in a: Ast, i: u32) -> ArgNode {
+    a.args.get_or(idx_from_raw[ArgNode](i), ArgNode { pass: 0, explicit: false, expr: none() })
+}
+
+fn clause_node(in a: Ast, i: u32) -> ClauseNode {
+    a.clauses.get_or(
+        idx_from_raw[ClauseNode](i),
+        ClauseNode { name: none(), pats: none(), body: none() }
+    )
+}
+
+// ---------------------------------------------------------------- the world section
+
+fn generics(inout e: Enc, in a: Ast, list: u32, inout out: ChunkSeq[u64]) {
+    for i in 0..list_len(in a, list) {
+        let g = generic_node(in a, list_at(in a, list, i));
+        out.push(ast_name(inout e, in a, g.name));
+        out.push(widen_u64(g.bound));
+        if g.row {
+            out.push(1);
+        } else {
+            out.push(0);
+        }
+    }
+}
+
+fn flag(b: bool) -> u64 {
+    if b { 1 } else { 0 }
+}
+
+// One ADT of `Enc::world` after its name.
+fn adt_words(inout e: Enc, in a: Ast, x: u32, shift: u32, inout out: ChunkSeq[u64]) {
+    let n = adt_node(in a, x);
+    out.push(widen_u64(n.mode));
+    out.push(list_len(in a, n.generics));
+    generics(inout e, in a, n.generics, inout out);
+    out.push(flag(n.is_enum));
+    if n.tiled {
+        out.push(wrapping_add(widen_u64(n.tile_width), 1));
+    } else {
+        out.push(0);
+    }
+    out.push(flag(wrapping_add(n.start, shift) == 0 && wrapping_add(n.end, shift) == 0));
+    let vn = list_len(in a, n.variants);
+    out.push(vn);
+    for i in 0..vn {
+        let v = variant_node(in a, list_at(in a, n.variants, i));
+        out.push(ast_name(inout e, in a, v.name));
+        out.push(flag(v.named));
+        let fc = list_len(in a, v.fields);
+        out.push(fc);
+        for j in 0..fc {
+            let f = field_node(in a, list_at(in a, v.fields, j));
+            out.push(ast_name(inout e, in a, f.name));
+            out.push(ty(inout e, in a, f.ty, in off()));
+            if f.modality == NO_MODALITY {
+                out.push(0);
+            } else {
+                out.push(wrapping_add(widen_u64(f.modality), 1));
+            }
+        }
+    }
+}
+
+// The hand-built `Box[T]` (`fip::box_adt`).
+fn box_words(inout e: Enc, inout out: ChunkSeq[u64]) {
+    out.push(MODE_AFFINE);
+    out.push(1);
+    out.push(name_of(inout e, in "T"));
+    out.push(MODE_LINEAR);
+    out.push(0);
+    out.push(0);
+    out.push(0);
+    out.push(1);
+    out.push(1);
+    out.push(name_of(inout e, in "Box"));
+    out.push(0);
+    out.push(1);
+    out.push(name_of(inout e, in "0"));
+    let mut words = ChunkSeq::new[u64]();
+    words.push(TY_NAMED);
+    words.push(name_of(inout e, in "T"));
+    words.push(0);
+    out.push(intern_type(inout e, in words));
+    out.push(0);
+}
+
+fn adt_entry(inout e: Enc, in s: Srcs, x: Entry, inout out: ChunkSeq[u64]) {
+    let sh = shift_of(in s, x.src);
+    if x.src == SRC_BOX {
+        box_words(inout e, inout out);
+    } else if x.src == SRC_BASE {
+        adt_words(inout e, in s.base, x.node, sh, inout out);
+    } else if x.src == SRC_MODULE {
+        adt_words(inout e, in s.module, x.node, sh, inout out);
+    } else if x.src == SRC_STRINGS {
+        adt_words(inout e, in s.strings, x.node, sh, inout out);
+    } else if x.src == SRC_WIDTH {
+        adt_words(inout e, in s.width, x.node, sh, inout out);
+    } else if x.src == SRC_ATOMICS {
+        adt_words(inout e, in s.atomics, x.node, sh, inout out);
+    } else if x.src == SRC_FLOATS {
+        adt_words(inout e, in s.floats, x.node, sh, inout out);
+    } else if x.src == SRC_SECRET {
+        adt_words(inout e, in s.secret, x.node, sh, inout out);
+    } else if x.src == SRC_REGION {
+        adt_words(inout e, in s.region, x.node, sh, inout out);
+    } else {
+        adt_words(inout e, in s.option, x.node, sh, inout out);
+    }
+}
+
+fn effect_linear(in s: Srcs, x: Entry) -> bool {
+    if x.src == SRC_BASE {
+        effect_decl_node(in s.base, x.node).linear
+    } else if x.src == SRC_MODULE {
+        effect_decl_node(in s.module, x.node).linear
+    } else if x.src == SRC_STRINGS {
+        effect_decl_node(in s.strings, x.node).linear
+    } else if x.src == SRC_WIDTH {
+        effect_decl_node(in s.width, x.node).linear
+    } else if x.src == SRC_ATOMICS {
+        effect_decl_node(in s.atomics, x.node).linear
+    } else if x.src == SRC_FLOATS {
+        effect_decl_node(in s.floats, x.node).linear
+    } else if x.src == SRC_SECRET {
+        effect_decl_node(in s.secret, x.node).linear
+    } else if x.src == SRC_REGION {
+        effect_decl_node(in s.region, x.node).linear
+    } else {
+        effect_decl_node(in s.option, x.node).linear
+    }
+}
+
+fn fip_active(in w: Collected) -> bool {
+    match w.c.adts.keys.lookup(in "Box") {
+        Option::Some(sym) => entry_at(in w.c.adts, sym.id()).src == SRC_BOX,
+        Option::None => false,
+    }
+}
+
+// `Enc::world`: `fip::active`, the ADTs, the effects, then the empty
+// expression type and operation tables.
+fn world_section(inout e: Enc, in w: Collected, inout out: ChunkSeq[u64]) {
+    out.push(flag(fip_active(in w)));
+    let adts = sorted_keys(in w.c.adts);
+    out.push(adts.len());
+    for i in 0..adts.len() {
+        let id = word32(in adts, i);
+        let key = key_text(in w.c.adts, id);
+        out.push(name_of(inout e, in key.as_str()));
+        adt_entry(inout e, in w.s, entry_at(in w.c.adts, id), inout out);
+    }
+    let effects = sorted_keys(in w.c.effects);
+    out.push(effects.len());
+    for i in 0..effects.len() {
+        let id = word32(in effects, i);
+        let key = key_text(in w.c.effects, id);
+        out.push(name_of(inout e, in key.as_str()));
+        out.push(flag(effect_linear(in w.s, entry_at(in w.c.effects, id))));
+    }
+    // `world.types`, `partial_ops`, `overflow_ops`.
+    out.push(0);
+    out.push(0);
+    out.push(0);
+}
+
+// ---------------------------------------------------------------- the function table
+
+fn param_words(
+    inout e: Enc,
+    in a: Ast,
+    p: ParamNode,
+    self_ty: u32,
+    shift: u32,
+    in nm: Norm,
+    inout out: ChunkSeq[u64]
+) {
+    out.push(widen_u64(p.pass));
+    out.push(ast_name(inout e, in a, p.name));
+    let infer = p.ty == none() || type_at(in a, p.ty).kind == T_INFER;
+    if self_ty != none() && infer && name_is(in a, p.name, "self") {
+        out.push(ty(inout e, in a, self_ty, in nm));
+    } else {
+        out.push(ty(inout e, in a, p.ty, in nm));
+    }
+    out.push(list_len(in a, p.projections));
+    out.push(widen_u64(wrapping_add(p.start, shift)));
+    out.push(widen_u64(wrapping_add(p.end, shift)));
+}
+
+// One function of the table: name, generics (an `impl` block's first),
+// parameters, result, effects, the result again (no inferred results
+// yet).
+fn fn_words(
+    inout e: Enc,
+    in a: Ast,
+    x: Entry,
+    in key: String,
+    active: bool,
+    shift: u32,
+    inout out: ChunkSeq[u64]
+) {
+    let n = fn_node(in a, x.node);
+    let nm = norm_of(in a, x.node, in key, active);
+    out.push(name_of(inout e, in key.as_str()));
+    let mut count = list_len(in a, n.generics);
+    let mut self_ty = none();
+    if x.imp != none() {
+        let b = impl_node(in a, x.imp);
+        count = wrapping_add(count, list_len(in a, b.generics));
+        self_ty = b.ty;
+    }
+    out.push(count);
+    if x.imp != none() {
+        generics(inout e, in a, impl_node(in a, x.imp).generics, inout out);
+    }
+    generics(inout e, in a, n.generics, inout out);
+    let k = list_len(in a, n.params);
+    out.push(k);
+    for i in 0..k {
+        param_words(
+            inout e,
+            in a,
+            param_node(in a, list_at(in a, n.params, i)),
+            self_ty,
+            shift,
+            in nm,
+            inout out
+        );
+    }
+    let result = ty(inout e, in a, n.result, in nm);
+    out.push(result);
+    if n.effects == none() {
+        out.push(0);
+        out.push(0);
+    } else {
+        let effs = effects_node(in a, n.effects);
+        let m = list_len(in a, effs.instances);
+        out.push(flag(m > 0 || effs.tail != none()));
+        out.push(m);
+        for i in 0..m {
+            let inst = effect_node(in a, list_at(in a, effs.instances, i));
+            out.push(ast_name(inout e, in a, inst.name));
+            let c = list_len(in a, inst.args);
+            out.push(c);
+            for j in 0..c {
+                out.push(ty(inout e, in a, list_at(in a, inst.args, j), in off()));
+            }
+        }
+    }
+    out.push(result);
+}
+
+fn fn_entry(
+    inout e: Enc,
+    in s: Srcs,
+    x: Entry,
+    in key: String,
+    active: bool,
+    inout out: ChunkSeq[u64]
+) {
+    let sh = shift_of(in s, x.src);
+    if x.src == SRC_BASE {
+        fn_words(inout e, in s.base, x, in key, active, sh, inout out);
+    } else if x.src == SRC_MODULE {
+        fn_words(inout e, in s.module, x, in key, active, sh, inout out);
+    } else if x.src == SRC_STRINGS {
+        fn_words(inout e, in s.strings, x, in key, active, sh, inout out);
+    } else if x.src == SRC_WIDTH {
+        fn_words(inout e, in s.width, x, in key, active, sh, inout out);
+    } else if x.src == SRC_ATOMICS {
+        fn_words(inout e, in s.atomics, x, in key, active, sh, inout out);
+    } else if x.src == SRC_FLOATS {
+        fn_words(inout e, in s.floats, x, in key, active, sh, inout out);
+    } else if x.src == SRC_SECRET {
+        fn_words(inout e, in s.secret, x, in key, active, sh, inout out);
+    } else if x.src == SRC_REGION {
+        fn_words(inout e, in s.region, x, in key, active, sh, inout out);
+    } else {
+        fn_words(inout e, in s.option, x, in key, active, sh, inout out);
+    }
+}
+
+// One effect declaration: name, generics, then each operation under its
+// `Eff::op` name.
+fn effect_words(
+    inout e: Enc,
+    in a: Ast,
+    x: u32,
+    in key: String,
+    shift: u32,
+    inout out: ChunkSeq[u64]
+) {
+    let n = effect_decl_node(in a, x);
+    out.push(name_of(inout e, in key.as_str()));
+    out.push(list_len(in a, n.generics));
+    generics(inout e, in a, n.generics, inout out);
+    let k = list_len(in a, n.ops);
+    out.push(k);
+    for i in 0..k {
+        let op = fn_node(in a, list_at(in a, n.ops, i));
+        let mut full = String::new();
+        full.push_str(in key.as_str());
+        full.push_str(in "::");
+        full.push_str(in name_text(in a, op.name).as_str());
+        out.push(name_of(inout e, in full.as_str()));
+        out.push(list_len(in a, op.generics));
+        generics(inout e, in a, op.generics, inout out);
+        let pn = list_len(in a, op.params);
+        out.push(pn);
+        for j in 0..pn {
+            param_words(
+                inout e,
+                in a,
+                param_node(in a, list_at(in a, op.params, j)),
+                none(),
+                shift,
+                in off(),
+                inout out
+            );
+        }
+        out.push(ty(inout e, in a, op.result, in off()));
+    }
+}
+
+fn effect_entry(inout e: Enc, in s: Srcs, x: Entry, in key: String, inout out: ChunkSeq[u64]) {
+    let sh = shift_of(in s, x.src);
+    if x.src == SRC_BASE {
+        effect_words(inout e, in s.base, x.node, in key, sh, inout out);
+    } else if x.src == SRC_MODULE {
+        effect_words(inout e, in s.module, x.node, in key, sh, inout out);
+    } else if x.src == SRC_STRINGS {
+        effect_words(inout e, in s.strings, x.node, in key, sh, inout out);
+    } else if x.src == SRC_WIDTH {
+        effect_words(inout e, in s.width, x.node, in key, sh, inout out);
+    } else if x.src == SRC_ATOMICS {
+        effect_words(inout e, in s.atomics, x.node, in key, sh, inout out);
+    } else if x.src == SRC_FLOATS {
+        effect_words(inout e, in s.floats, x.node, in key, sh, inout out);
+    } else if x.src == SRC_SECRET {
+        effect_words(inout e, in s.secret, x.node, in key, sh, inout out);
+    } else if x.src == SRC_REGION {
+        effect_words(inout e, in s.region, x.node, in key, sh, inout out);
+    } else {
+        effect_words(inout e, in s.option, x.node, in key, sh, inout out);
+    }
+}
+
+// ---------------------------------------------------------------- bodies
+
+fn bytes_at(in t: String, i: u64) -> u8 {
+    match t.as_bytes().try_get(i) {
+        Option::Some(b) => b,
+        Option::None => 0,
+    }
+}
+
+// A name and its constructor reading (`name_words`): the full name, the
+// qualifier + 1 (0 unqualified, NONE for a path of three or more), the
+// last segment.
+fn name_words(inout e: Enc, in a: Ast, sym: u32, inout out: ChunkSeq[u64]) {
+    let t = name_text(in a, sym);
+    out.push(name_of(inout e, in t.as_str()));
+    let n = t.len();
+    let mut seps: u64 = 0;
+    let mut last: u64 = NONE64;
+    let mut i: u64 = 0;
+    loop {
+        if wrapping_add(i, 1) >= n {
+            break;
+        }
+        if bytes_at(in t, i) == COLON && bytes_at(in t, wrapping_add(i, 1)) == COLON {
+            seps = wrapping_add(seps, 1);
+            last = i;
+            i = wrapping_add(i, 2);
+        } else {
+            i = wrapping_add(i, 1);
+        }
+    }
+    if seps > 1 {
+        out.push(NONE64);
+    } else if seps == 1 {
+        out.push(wrapping_add(name_of(inout e, in t[0..last]), 1));
+    } else {
+        out.push(0);
+    }
+    if seps == 0 {
+        out.push(name_of(inout e, in t.as_str()));
+    } else {
+        out.push(name_of(inout e, in t[wrapping_add(last, 2)..n]));
+    }
+}
+
+fn fits(l: Lit) -> bool {
+    l.hi == 0
+}
+
+fn pattern(inout e: Enc, in a: Ast, p: u32, shift: u32, inout out: ChunkSeq[u64]) {
+    let n = pat_at(in a, p);
+    let s = widen_u64(wrapping_add(n.start, shift));
+    let t = widen_u64(wrapping_add(n.end, shift));
+    if n.kind == AP_WILD {
+        out.push(P_WILD);
+        out.push(s);
+        out.push(t);
+    } else if n.kind == AP_BIND {
+        out.push(P_BIND);
+        out.push(s);
+        out.push(t);
+        out.push(ast_name(inout e, in a, n.a));
+    } else if n.kind == AP_LITERAL {
+        let l = lit_at(in a, n.a);
+        if l.kind == L_BOOL {
+            if l.bits != 0 {
+                out.push(P_TRUE);
+            } else {
+                out.push(P_FALSE);
+            }
+            out.push(s);
+            out.push(t);
+            return;
+        }
+        out.push(P_LITERAL);
+        out.push(s);
+        out.push(t);
+        if n.b != none() {
+            out.push(LIT_TYPED_INT);
+            out.push(ast_name(inout e, in a, n.b));
+            return;
+        }
+        if l.kind == L_INT && fits(l) {
+            out.push(LIT_INT);
+            out.push(flag(l.neg));
+            out.push(l.bits);
+        } else if l.kind == L_FLOAT {
+            out.push(LIT_FLOAT);
+        } else if l.kind == L_STRING {
+            out.push(LIT_STRING);
+        } else {
+            out.push(LIT_WIDE_INT);
+        }
+    } else if n.kind == AP_TUPLE {
+        let k = list_len(in a, n.a);
+        out.push(P_TUPLE);
+        out.push(s);
+        out.push(t);
+        out.push(k);
+        for i in 0..k {
+            pattern(inout e, in a, list_at(in a, n.a, i), shift, inout out);
+        }
+    } else {
+        out.push(P_CTOR);
+        out.push(s);
+        out.push(t);
+        name_words(inout e, in a, n.a, inout out);
+        let k = list_len(in a, n.b) / 2;
+        out.push(k);
+        for i in 0..k {
+            out.push(ast_name(inout e, in a, list_at(in a, n.b, wrapping_mul(i, 2))));
+            pattern(
+                inout e,
+                in a,
+                list_at(in a, n.b, wrapping_add(wrapping_mul(i, 2), 1)),
+                shift,
+                inout out
+            );
+        }
+    }
+}
+
+fn unary_code(in a: Ast, op: u32) -> u64 {
+    if name_is(in a, op, "!") {
+        OP_NOT
+    } else if name_is(in a, op, "-") {
+        OP_NEGATE
+    } else if name_is(in a, op, "~") {
+        OP_COMPLEMENT
+    } else {
+        OP_NONE
+    }
+}
+
+fn binary_code(in a: Ast, op: u32) -> u64 {
+    let t = name_text(in a, op);
+    if t == "+" {
+        OP_ADD
+    } else if t == "-" {
+        OP_SUB
+    } else if t == "*" {
+        OP_MUL
+    } else if t == "/" {
+        OP_DIV
+    } else if t == "%" {
+        OP_REM
+    } else if t == "==" {
+        OP_EQ
+    } else if t == "!=" {
+        OP_NE
+    } else if t == "<" {
+        OP_LT
+    } else if t == "<=" {
+        OP_LE
+    } else if t == ">" {
+        OP_GT
+    } else if t == ">=" {
+        OP_GE
+    } else if t == "&&" {
+        OP_AND
+    } else if t == "||" {
+        OP_OR
+    } else if t == "&" {
+        OP_BIT_AND
+    } else if t == "|" {
+        OP_BIT_OR
+    } else if t == "^" {
+        OP_BIT_XOR
+    } else if t == "<<" {
+        OP_SHL
+    } else if t == ">>" {
+        OP_SHR
+    } else {
+        OP_NONE
+    }
+}
+
+// Whether `call` routes a call of the name `sym` elsewhere before it looks
+// up constructors and functions (`special_call`).
+fn special_call(in a: Ast, sym: u32, fip: bool) -> bool {
+    name_is(in a, sym, "wrapping_add")
+        || name_is(in a, sym, "wrapping_sub")
+        || name_is(in a, sym, "wrapping_mul")
+        || (fip && (name_is(in a, sym, "Box::new") || name_is(in a, sym, "Box::new_in_caller")))
+}
+
+// An element write `a[i] = v` the arrays lowering spells `[]=`.
+fn element_write(in a: Ast, op: u32) -> bool {
+    let t = name_text(in a, op);
+    t.len() >= WRITE_PREFIX_LEN
+        && bytes_at(in t, 0) == OPEN_BRACKET
+        && bytes_at(in t, 1) == CLOSE_BRACKET
+}
+
+fn head(out: u64, s: u64, t: u64, inout o: ChunkSeq[u64]) {
+    o.push(out);
+    o.push(s);
+    o.push(t);
+}
+
+// An expression in pre-order (`encode_expr`): kind, start, end, payload.
+fn expr(inout e: Enc, in a: Ast, x: u32, shift: u32, fip: bool, inout out: ChunkSeq[u64]) {
+    let n = expr_at(in a, x);
+    let s = widen_u64(wrapping_add(n.start, shift));
+    let t = widen_u64(wrapping_add(n.end, shift));
+    if n.kind == X_LITERAL {
+        let l = lit_at(in a, n.a);
+        if l.kind == L_INT && fits(l) {
+            head(E_INT, s, t, inout out);
+            out.push(flag(l.neg));
+            out.push(l.bits);
+        } else if l.kind == L_FLOAT {
+            head(E_FLOAT, s, t, inout out);
+        } else if l.kind == L_BOOL {
+            head(E_BOOL, s, t, inout out);
+            out.push(flag(l.bits != 0));
+        } else if l.kind == L_STRING {
+            head(E_STRING, s, t, inout out);
+        } else {
+            head(E_OTHER, s, t, inout out);
+        }
+    } else if n.kind == X_NAME {
+        head(E_NAME, s, t, inout out);
+        name_words(inout e, in a, n.a, inout out);
+    } else if n.kind == X_TUPLE {
+        let k = list_len(in a, n.a);
+        head(E_TUPLE, s, t, inout out);
+        out.push(k);
+        for i in 0..k {
+            expr(inout e, in a, list_at(in a, n.a, i), shift, fip, inout out);
+        }
+    } else if n.kind == X_STRUCT {
+        head(E_STRUCT, s, t, inout out);
+        name_words(inout e, in a, n.a, inout out);
+        let k = list_len(in a, n.b) / 2;
+        out.push(k);
+        for i in 0..k {
+            out.push(ast_name(inout e, in a, list_at(in a, n.b, wrapping_mul(i, 2))));
+            expr(
+                inout e,
+                in a,
+                list_at(in a, n.b, wrapping_add(wrapping_mul(i, 2), 1)),
+                shift,
+                fip,
+                inout out
+            );
+        }
+    } else if n.kind == X_BLOCK {
+        let k = list_len(in a, n.a);
+        head(E_BLOCK, s, t, inout out);
+        out.push(k);
+        for i in 0..k {
+            let st = stmt_node(in a, list_at(in a, n.a, i));
+            if st.kind == ST_LET {
+                out.push(S_LET);
+                pattern(inout e, in a, st.pat, shift, inout out);
+                out.push(ty(inout e, in a, st.ty, in off()));
+                out.push(flag(st.mutable));
+                expr(inout e, in a, st.value, shift, fip, inout out);
+            } else {
+                out.push(S_EXPR);
+                expr(inout e, in a, st.value, shift, fip, inout out);
+            }
+        }
+        out.push(flag(n.b != none()));
+        if n.b != none() {
+            expr(inout e, in a, n.b, shift, fip, inout out);
+        }
+    } else if n.kind == X_CALL {
+        head(E_CALL, s, t, inout out);
+        let callee = expr_at(in a, n.a);
+        out.push(flag(callee.kind == X_NAME && special_call(in a, callee.a, fip)));
+        expr(inout e, in a, n.a, shift, fip, inout out);
+        let k = list_len(in a, n.b);
+        out.push(k);
+        for i in 0..k {
+            out.push(ty(inout e, in a, list_at(in a, n.b, i), in off()));
+        }
+        let m = list_len(in a, n.c);
+        out.push(m);
+        for i in 0..m {
+            let arg = arg_node(in a, list_at(in a, n.c, i));
+            out.push(widen_u64(arg.pass));
+            out.push(flag(arg.explicit));
+            expr(inout e, in a, arg.expr, shift, fip, inout out);
+        }
+    } else if n.kind == X_FIELD {
+        head(E_FIELD, s, t, inout out);
+        out.push(ast_name(inout e, in a, n.b));
+        expr(inout e, in a, n.a, shift, fip, inout out);
+    } else if n.kind == X_UNARY && unary_code(in a, n.a) != OP_NONE {
+        head(E_UNARY, s, t, inout out);
+        out.push(unary_code(in a, n.a));
+        expr(inout e, in a, n.b, shift, fip, inout out);
+    } else if n.kind == X_BINARY && binary_code(in a, n.a) != OP_NONE {
+        head(E_BINARY, s, t, inout out);
+        out.push(binary_code(in a, n.a));
+        expr(inout e, in a, n.b, shift, fip, inout out);
+        expr(inout e, in a, n.c, shift, fip, inout out);
+    } else if n.kind == X_IF {
+        head(E_IF, s, t, inout out);
+        expr(inout e, in a, n.a, shift, fip, inout out);
+        expr(inout e, in a, n.b, shift, fip, inout out);
+        out.push(flag(n.c != none()));
+        if n.c != none() {
+            expr(inout e, in a, n.c, shift, fip, inout out);
+        }
+    } else if n.kind == X_ASSIGN && !element_write(in a, n.a) {
+        head(E_ASSIGN, s, t, inout out);
+        out.push(flag(!name_is(in a, n.a, "=")));
+        expr(inout e, in a, n.b, shift, fip, inout out);
+        expr(inout e, in a, n.c, shift, fip, inout out);
+    } else if n.kind == X_FOR {
+        head(E_FOR, s, t, inout out);
+        pattern(inout e, in a, n.a, shift, inout out);
+        expr(inout e, in a, n.b, shift, fip, inout out);
+        expr(inout e, in a, n.c, shift, fip, inout out);
+    } else if n.kind == X_RANGE {
+        head(E_RANGE, s, t, inout out);
+        out.push(widen_u64(n.c));
+        expr(inout e, in a, n.a, shift, fip, inout out);
+        expr(inout e, in a, n.b, shift, fip, inout out);
+    } else if n.kind == X_LOOP {
+        head(E_LOOP, s, t, inout out);
+        expr(inout e, in a, n.a, shift, fip, inout out);
+    } else if n.kind == X_BREAK || n.kind == X_RETURN {
+        if n.kind == X_BREAK {
+            head(E_BREAK, s, t, inout out);
+        } else {
+            head(E_RETURN, s, t, inout out);
+        }
+        out.push(flag(n.a != none()));
+        if n.a != none() {
+            expr(inout e, in a, n.a, shift, fip, inout out);
+        }
+    } else if n.kind == X_CONTINUE {
+        head(E_CONTINUE, s, t, inout out);
+    } else if n.kind == X_HANDLE {
+        head(E_HANDLE, s, t, inout out);
+        let eff = effect_node(in a, n.a);
+        out.push(ast_name(inout e, in a, eff.name));
+        let k = list_len(in a, eff.args);
+        out.push(k);
+        for i in 0..k {
+            out.push(ty(inout e, in a, list_at(in a, eff.args, i), in off()));
+        }
+        out.push(flag(n.b != none()));
+        if n.b != none() {
+            pattern(inout e, in a, n.b, shift, inout out);
+            expr(inout e, in a, n.c, shift, fip, inout out);
+        }
+        expr(inout e, in a, n.d, shift, fip, inout out);
+        let m = list_len(in a, n.e);
+        out.push(m);
+        for i in 0..m {
+            let c = clause_node(in a, list_at(in a, n.e, i));
+            out.push(ast_name(inout e, in a, c.name));
+            let pk = list_len(in a, c.pats);
+            out.push(pk);
+            for j in 0..pk {
+                pattern(inout e, in a, list_at(in a, c.pats, j), shift, inout out);
+            }
+            expr(inout e, in a, c.body, shift, fip, inout out);
+        }
+    } else if n.kind == X_MATCH {
+        head(E_MATCH, s, t, inout out);
+        expr(inout e, in a, n.a, shift, fip, inout out);
+        let k = list_len(in a, n.b) / 2;
+        out.push(k);
+        for i in 0..k {
+            pattern(inout e, in a, list_at(in a, n.b, wrapping_mul(i, 2)), shift, inout out);
+            expr(
+                inout e,
+                in a,
+                list_at(in a, n.b, wrapping_add(wrapping_mul(i, 2), 1)),
+                shift,
+                fip,
+                inout out
+            );
+        }
+    } else if n.kind == X_INDEX {
+        head(E_INDEX, s, t, inout out);
+        expr(inout e, in a, n.a, shift, fip, inout out);
+        let index = expr_at(in a, n.b);
+        if index.kind == X_BINARY && name_is(in a, index.a, "..") {
+            out.push(1);
+            expr(inout e, in a, index.b, shift, fip, inout out);
+            expr(inout e, in a, index.c, shift, fip, inout out);
+        } else {
+            out.push(0);
+            expr(inout e, in a, n.b, shift, fip, inout out);
+        }
+    } else {
+        head(E_OTHER, s, t, inout out);
+    }
+}
+
+// A function's span in the checker's coordinates.
+fn fn_span(in s: Srcs, x: Entry) -> (u64, u64) {
+    let sh = shift_of(in s, x.src);
+    let n = if x.src == SRC_BASE {
+        fn_node(in s.base, x.node)
+    } else if x.src == SRC_MODULE {
+        fn_node(in s.module, x.node)
+    } else if x.src == SRC_STRINGS {
+        fn_node(in s.strings, x.node)
+    } else if x.src == SRC_WIDTH {
+        fn_node(in s.width, x.node)
+    } else if x.src == SRC_ATOMICS {
+        fn_node(in s.atomics, x.node)
+    } else if x.src == SRC_FLOATS {
+        fn_node(in s.floats, x.node)
+    } else if x.src == SRC_SECRET {
+        fn_node(in s.secret, x.node)
+    } else if x.src == SRC_REGION {
+        fn_node(in s.region, x.node)
+    } else {
+        fn_node(in s.option, x.node)
+    };
+    if n.body == none() {
+        return (NONE64, NONE64);
+    }
+    (widen_u64(wrapping_add(n.start, sh)), widen_u64(wrapping_add(n.end, sh)))
+}
+
+fn body_words(inout e: Enc, in a: Ast, x: Entry, shift: u32, fip: bool, inout out: ChunkSeq[u64]) {
+    expr(inout e, in a, fn_node(in a, x.node).body, shift, fip, inout out);
+}
+
+fn body_entry(inout e: Enc, in s: Srcs, x: Entry, fip: bool, inout out: ChunkSeq[u64]) {
+    let sh = shift_of(in s, x.src);
+    if x.src == SRC_BASE {
+        body_words(inout e, in s.base, x, sh, fip, inout out);
+    } else if x.src == SRC_MODULE {
+        body_words(inout e, in s.module, x, sh, fip, inout out);
+    } else if x.src == SRC_STRINGS {
+        body_words(inout e, in s.strings, x, sh, fip, inout out);
+    } else if x.src == SRC_WIDTH {
+        body_words(inout e, in s.width, x, sh, fip, inout out);
+    } else if x.src == SRC_ATOMICS {
+        body_words(inout e, in s.atomics, x, sh, fip, inout out);
+    } else if x.src == SRC_FLOATS {
+        body_words(inout e, in s.floats, x, sh, fip, inout out);
+    } else if x.src == SRC_SECRET {
+        body_words(inout e, in s.secret, x, sh, fip, inout out);
+    } else if x.src == SRC_REGION {
+        body_words(inout e, in s.region, x, sh, fip, inout out);
+    } else {
+        body_words(inout e, in s.option, x, sh, fip, inout out);
+    }
+}
+
+// The function table, the effect operations, the trait method names
+// (none: traits are declined) and the checked functions' bodies: those
+// with a body and a non-empty span no other function shares.
+fn tail_section(inout e: Enc, in w: Collected, inout out: ChunkSeq[u64]) {
+    let functions = sorted_keys(in w.c.functions);
+    let active = region_active(in w.c, in w.s);
+    out.push(functions.len());
+    let mut starts = ChunkSeq::new[u64]();
+    let mut ends = ChunkSeq::new[u64]();
+    for i in 0..functions.len() {
+        let id = word32(in functions, i);
+        let x = entry_at(in w.c.functions, id);
+        let key = key_text(in w.c.functions, id);
+        fn_entry(inout e, in w.s, x, in key, active, inout out);
+        let (s, t) = fn_span(in w.s, x);
+        starts.push(s);
+        ends.push(t);
+    }
+    let effects = sorted_keys(in w.c.effects);
+    out.push(effects.len());
+    for i in 0..effects.len() {
+        let id = word32(in effects, i);
+        let key = key_text(in w.c.effects, id);
+        effect_entry(inout e, in w.s, entry_at(in w.c.effects, id), in key, inout out);
+    }
+    out.push(0);
+    let mut checked = ChunkSeq::new[u64]();
+    for i in 0..functions.len() {
+        let s = u64_of(in starts, i);
+        let t = u64_of(in ends, i);
+        if s == NONE64 || s >= t {
+            continue;
+        }
+        let mut shared = false;
+        for j in 0..functions.len() {
+            if j != i && u64_of(in starts, j) == s && u64_of(in ends, j) == t {
+                shared = true;
+                break;
+            }
+        }
+        if !shared {
+            checked.push(i);
+        }
+    }
+    out.push(checked.len());
+    let fip = fip_active(in w);
+    for k in 0..checked.len() {
+        let i = u64_of(in checked, k);
+        let id = word32(in functions, i);
+        let key = key_text(in w.c.functions, id);
+        out.push(name_of(inout e, in key.as_str()));
+        out.push(u64_of(in starts, i));
+        out.push(u64_of(in ends, i));
+        body_entry(inout e, in w.s, entry_at(in w.c.functions, id), fip, inout out);
+    }
+}
+
+fn u64_of(in s: ChunkSeq[u64], i: u64) -> u64 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+// `Enc::finish`: the names, the types, the world section, then the tail.
+fn finish(in e: Enc, in world: ChunkSeq[u64], in tail: ChunkSeq[u64], inout out: ChunkSeq[u64]) {
+    let count = e.names.len();
+    out.push(count);
+    for i in 0..count {
+        let mut t = String::new();
+        let ok = e.names.resolve_into(symbol_from_id(wrapping_u32(i)), inout t);
+        put_text_words(inout out, in t.as_bytes());
+    }
+    out.push(e.types.len());
+    out.extend(in e.type_words.as_slice());
+    out.extend(in world.as_slice());
+    out.extend(in tail.as_slice());
+}
+
+// The core typing input of `source` as words, after a 1; or a 0 when the
+// checker elaborates the module before collecting.
+pub fn typing_input_words(in source: Str) -> ChunkSeq[u64] {
+    let mut out = ChunkSeq::new[u64]();
+    let probe = lower_source(in source).ast;
+    if declined(in source, in probe) {
+        out.push(0);
+        return out;
+    }
+    out.push(1);
+    let w = collected(in source);
+    let mut e = enc_new();
+    let mut world = ChunkSeq::new[u64]();
+    world_section(inout e, in w, inout world);
+    let mut tail = ChunkSeq::new[u64]();
+    tail_section(inout e, in w, inout tail);
+    finish(in e, in world, in tail, inout out);
+    out
+}

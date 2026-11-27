@@ -19,7 +19,11 @@ try {
 
     Invoke-Build @('-p', 'vesper', '--bin', 'vesper')
     Invoke-Build @('-p', 'vesper-tools')
-    Invoke-Build @('-p', 'vesper-hybrid')
+    # The hybrid through its test build (#2395): `cargo build` resolves its
+    # features without the dev-dependencies, so it reran the build script
+    # that compiles every Vesper module after the crate's tests.
+    & cargo test --locked --no-run -p vesper-hybrid
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     $messages = & cargo test --locked -p vesper --no-run --message-format=json-render-diagnostics @filters
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     $executables = @($messages | ConvertFrom-Json | Where-Object {

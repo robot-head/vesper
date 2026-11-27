@@ -755,8 +755,8 @@ fn vesper_interface_json_matches_rust() {
 // ------------------------------------------------- Stage 2 front end (1b)
 
 /// The driver of `@vesper/export-build` (bootstrap switch slice 1b, #2270):
-/// `driver <package> <library> <interface out> <binding out> [types path]`
-/// writes both files from Stage 2's front end and exits 0, or exits with
+/// `driver <package> <library> <triple> <interface out> <binding out>
+/// [types path]` writes both files for target `triple` from Stage 2's front end and exits 0, or exits with
 /// the reason it declined (`DECLINE_*` in packages/vesper-export-build).
 const EXPORT_BUILD_DRIVER: &str = r#"use @vesper/export-build::{export_files_dir};
 use @vesper-std/env::{arg_bytes, arg_count};
@@ -772,10 +772,17 @@ fn arg(i: u64) -> ChunkSeq[u8] eff [Ffi[StdEnv]] {
 pub fn main() -> u64 eff [Ffi[StdFs], Ffi[StdEnv]] {
     let root = arg(1);
     let library = arg(2);
-    let interface = arg(3);
-    let binding = arg(4);
-    let types = arg(5);
-    let files = export_files_dir(in root.as_slice(), in library.as_slice(), arg_count() > 5, in types.as_slice());
+    let triple = arg(3);
+    let interface = arg(4);
+    let binding = arg(5);
+    let types = arg(6);
+    let files = export_files_dir(
+        in root.as_slice(),
+        in library.as_slice(),
+        in triple.as_slice(),
+        arg_count() > 6,
+        in types.as_slice()
+    );
     if files.declined != 0 {
         return widen_u64(files.declined);
     }
@@ -794,17 +801,18 @@ pub fn main() -> u64 eff [Ffi[StdFs], Ffi[StdEnv]] {
 const DECLINE_REASONS: &[&str] = &[
     "",
     "the package graph does not load in Stage 2",
-    ".vsys imports",
-    "instance or .vsys directives",
-    "Box types",
+    "a .vsys library does not read or scan",
+    "directives Stage 2 cannot follow (an instance Rust refuses, a link to no import, a body that does not parse)",
+    "a Box type Stage 2 does not declare",
     "fip functions",
     "the planner refused it",
     "syntax or assembly errors",
+    "a target without .vsys support",
 ];
 
 /// The libraries Stage 2's front end must build byte-identically today, so
 /// a regression that declines more of them fails.
-const MIN_STAGE2_EXPORTS: usize = 41;
+const MIN_STAGE2_EXPORTS: usize = 47;
 
 fn build_export_driver(dir: &Path) -> PathBuf {
     let package = dir.join("driver");
@@ -854,6 +862,7 @@ fn stage2_export_files_match_rust() {
     let scratch = std::env::temp_dir().join(format!("vesper-export-build-{}", std::process::id()));
     std::fs::create_dir_all(&scratch).unwrap();
     let driver = build_export_driver(&scratch);
+    let (triple, _) = vesper::packages::vsys_target(None).unwrap();
     let (mut same, mut bad) = (0, 0);
     let mut declined: Vec<(&str, &str)> = vec![];
     for b in corpus() {
@@ -877,7 +886,11 @@ fn stage2_export_files_match_rust() {
         let json = scratch.join(format!("{}.stage2.json", b.library));
         let rs = scratch.join(format!("{}.stage2.rs", b.library));
         let mut run = Command::new(&driver);
-        run.arg(&root).arg(b.library).arg(&json).arg(&rs);
+        run.arg(&root)
+            .arg(b.library)
+            .arg(triple)
+            .arg(&json)
+            .arg(&rs);
         if let Some(t) = b.rust_types {
             run.arg(t);
         }

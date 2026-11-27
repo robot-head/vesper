@@ -1,3 +1,42 @@
 load("//tools/bazel:defs.bzl", "vesper_crate")
+load("//tools/bazel:vesper_port.bzl", "VESPER_TARGET", "vesper_package", "vesper_port_object")
 
+# C header comment stripping and directive filtering are the Vesper port
+# (Rust-exit SH6 lane 18, #1413 / #2333).
+vesper_package(
+    name = "port_package",
+    srcs = glob(["vesper/src/**/*.ves"]),
+    manifest = "vesper/Loom.toml",
+)
+
+vesper_port_object(
+    name = "migrate_vesper",
+    library = "migrate",
+    package = ":port_package",
+    target = VESPER_TARGET,
+)
+
+filegroup(
+    name = "migrate_vesper_binding",
+    srcs = [":migrate_vesper"],
+    output_group = "rust_binding",
+)
+
+[
+    vesper_port_object(
+        name = "migrate_vesper_divergent_" + area,
+        edit_src = "vesper/src/lib.ves",
+        edits = {old: new},
+        library = "migrate",
+        package = ":port_package",
+        target = VESPER_TARGET,
+    )
+    for area, old, new in [
+        ("strip", "if wrapping_add(i, 1) >= n {", "if false && wrapping_add(i, 1) >= n {"),
+        ("filter", "if last == BYTE_BACKSLASH {", "if false && last == BYTE_BACKSLASH {"),
+    ]
+]
+
+# The build script does not take the object by default: //:bin/vesper depends
+# on //crates/vesper-tools:bin/vesper-migrate, which links this crate.
 vesper_crate()

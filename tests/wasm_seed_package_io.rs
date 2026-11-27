@@ -2378,6 +2378,13 @@ enum CompilerExecCheck {
 /// every package it depends on.
 const COMPILER_PACKAGES: &[(&str, &str, &str, &str, CompilerExecCheck)] = &[
     (
+        "lsp-format",
+        "@vesper/lsp-format",
+        "packages/vesper-lsp-format",
+        "lsp_formatting(in \"\").len()",
+        CompilerExecCheck::CompileOnly,
+    ),
+    (
         "front",
         "@vesper/front",
         "packages/vesper-front",
@@ -2630,6 +2637,13 @@ const COMPILER_PACKAGES: &[(&str, &str, &str, &str, CompilerExecCheck)] = &[
         CompilerExecCheck::CompileOnly,
     ),
     (
+        "check-world",
+        "@vesper/check-world",
+        "packages/vesper-check-world",
+        "typing_input_words(in \"\").len()",
+        CompilerExecCheck::CompileOnly,
+    ),
+    (
         "preludes",
         "@vesper/preludes",
         "packages/vesper-preludes",
@@ -2735,10 +2749,17 @@ const COMPILER_PACKAGES: &[(&str, &str, &str, &str, CompilerExecCheck)] = &[
         CompilerExecCheck::CompileOnly,
     ),
     (
-        "run",
-        "@vesper/run",
-        "packages/vesper-run",
-        "run_words(in \"\".as_bytes()).len()",
+        "proof-audit",
+        "@vesper/proof-audit",
+        "packages/vesper-proof-audit",
+        "HELP.len()",
+        CompilerExecCheck::NonZero,
+    ),
+    (
+        "verify",
+        "@vesper/verify",
+        "packages/vesper-verify",
+        "discover(in \"\".as_bytes()).err.len()",
         CompilerExecCheck::CompileOnly,
     ),
     (
@@ -2803,8 +2824,16 @@ const STAGE2_HOST_PACKAGES: &[(&str, &str, &str, &str, u64)] = &[(
 /// Compiler packages Stage 2 cannot build yet: (stem, package, path, probe
 /// `src/lib.ves`, reason). `stage2_self_compilation_fixed_point` checks that
 /// each one still fails, so a gap that closes moves into [`COMPILER_PACKAGES`]
-/// or [`STAGE2_HOST_PACKAGES`]. None is left since #1996.
-const STAGE2_PACKAGE_GAPS: &[(&str, &str, &str, &str, &str)] = &[];
+/// or [`STAGE2_HOST_PACKAGES`].
+const STAGE2_PACKAGE_GAPS: &[(&str, &str, &str, &str, &str)] = &[
+    (
+        "run",
+        "@vesper/run",
+        "packages/vesper-run",
+        "use @vesper/run::run_words;\npub fn main() -> u64 { run_words(in \"\".as_bytes()).len() }\n",
+        "the `vesper run` evaluator's floats (slice 8 of #2053) use `f32` and the float intrinsics (`nearest_f32`, `widen_f64`, `to_bits_*`, `from_bits_*`), which @vesper/wasm-backend does not lower yet (WErr Unsupported ExternalFunction nearest_f32 in machine::coerce)",
+    ),
+];
 
 /// Directories under `packages/` that are in none of [`COMPILER_PACKAGES`],
 /// [`STAGE2_CRANELIFT_PACKAGES`] and [`STAGE2_PACKAGE_GAPS`], with where they
@@ -2823,20 +2852,12 @@ const STAGE2_PACKAGES_COVERED_ELSEWHERE: &[(&str, &str)] = &[
         "`vesper build --lib`'s interface and binding from Stage 2's front end (#2270) as a native executable beside the Rust CLI (tests/self_host_codegen_export.rs); it is @vesper/stage2 plus the export packages, built under Stage 2 as one program in bootstrap switch slice 3",
     ),
     (
-        "vesper-lsp-format",
-        "the formatting action of `vesper lsp` (#1828 part 11a) in the JIT beside Rust's (tests/self_host_lsp_features.rs); it calls @vesper/fmt, which hashes with C BLAKE3 (@vesper-std/hash-sys), which a Wasm entry does not have",
-    ),
-    (
-        "vesper-proof-audit",
-        "`vesper proof-audit` as a native executable beside Rust's (tests/self_host_proof_audit.rs); it hashes with C BLAKE3 (@vesper-std/hash-sys) and runs Lean, neither of which a Wasm entry has",
+        "vesper-native-lib",
+        "a library's native object built in Vesper over @vesper/cranelift (bootstrap switch slice 2a, #2349), compared with `vesper build --lib` in the JIT (crates/vesper-codegen-swap-test/tests/self_host_native_lib.rs); built under Stage 2 with the Cranelift component in bootstrap switch slice 3",
     ),
     (
         "vesper-stage2",
         "Stage 2 itself: stage2.wasm == stage3.wasm",
-    ),
-    (
-        "vesper-verify",
-        "`vesper verify` pieces as a native executable beside Rust's (tests/self_host_verify.rs); it depends on @vesper/proof-audit, which hashes with C BLAKE3 (@vesper-std/hash-sys), which a Wasm entry does not have",
     ),
     (
         "vesper-std",

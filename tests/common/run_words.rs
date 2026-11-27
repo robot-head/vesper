@@ -30,7 +30,8 @@ pub enum Answer {
 /// the Rust evaluator reads from the world rather than the program: the
 /// atomic and scoped-worker preludes (`atomics::intercepted`), `dyn`
 /// objects (vtable stubs and hidden parameters), element views, source
-/// regions and the generated `Pinned[T]`. `None` when the program may run.
+/// regions, the generated `Pinned[T]` and the float modes. `None` when the
+/// program may run.
 pub fn world_declines(world: &World) -> Option<&'static str> {
     if world.atomic_prelude || world.workers_prelude {
         Some("the atomic prelude")
@@ -42,6 +43,12 @@ pub fn world_declines(world: &World) -> Option<&'static str> {
         Some("source regions")
     } else if world.adts.contains_key("Pinned") {
         Some("pinned buffers")
+    } else if vesper::native::needs_nan_canonicalization(world)
+        || !vesper::capability_effects::const_denorm_spans(world).is_empty()
+    {
+        // `FloatMode`: NaN canonicalisation (DetFloat) and flush-to-zero
+        // (`eff [ConstDenorm]`).
+        Some("a float mode")
     } else {
         None
     }

@@ -18,6 +18,9 @@ use std::sync::atomic::{AtomicIsize, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 use vesper::{check, native, packages};
 
+#[path = "common/flip_gate.rs"]
+mod flip_gate;
+
 struct Counting;
 static LIVE: AtomicIsize = AtomicIsize::new(0);
 static PEAK: AtomicIsize = AtomicIsize::new(0);
@@ -170,6 +173,22 @@ fn abba_against_the_rust_parser() {
     let nodes = run_vesper(&f, &corpus);
     assert_eq!(nodes as usize, run_rust(&corpus), "node counts");
     assert_eq!(tokens as usize, run_rust_lex(&corpus), "token counts");
+    if flip_gate::on() {
+        flip_gate::pairs(
+            "parse",
+            &mut || {
+                time(|| {
+                    std::hint::black_box(run_rust_parse_only(&corpus));
+                })
+            },
+            &mut || {
+                time(|| {
+                    std::hint::black_box(run_vesper(&f, &corpus));
+                })
+            },
+        );
+        return;
+    }
     let rounds = 7;
     let (mut ra, mut va, mut rl, mut vl, mut rp, mut vr) =
         (vec![], vec![], vec![], vec![], vec![], vec![]);

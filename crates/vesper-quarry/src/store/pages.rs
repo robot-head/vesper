@@ -444,30 +444,44 @@ impl Meta {
 
 // ---- free-space map ------------------------------------------------------
 
+const FSM_STACK_PAGES: usize = 256;
+const FSM_STATUS_OK: u64 = 0;
+const FSM_STATUS_KIND: u64 = 1;
+const FSM_STATUS_FIXED: u64 = 2;
+const FSM_STATUS_GROW: u64 = 3;
+
 pub(crate) fn encode_fsm(b: &mut [u8], free: &BTreeSet<u64>) {
-    b[32..].fill(0);
-    for &p in free {
-        let bit = p as usize;
-        b[32 + bit / 8] |= 1 << (bit % 8);
+    let mut stack = [0u64; FSM_STACK_PAGES];
+    if free.len() <= FSM_STACK_PAGES {
+        for (slot, &p) in stack.iter_mut().zip(free.iter()) {
+            *slot = p;
+        }
+        crate::port::binding::fsm_encode(b, &stack[..free.len()]);
+    } else {
+        let pages: Vec<u64> = free.iter().copied().collect();
+        crate::port::binding::fsm_encode(b, &pages);
     }
-    set_count(b, free.len().min(u16::MAX as usize));
 }
 pub(crate) fn decode_fsm(b: &[u8]) -> StoreResult<BTreeSet<u64>> {
-    if kind(b) != KIND_FSM || level(b) != 0 {
-        return Err(corrupt("free-space map kind"));
-    }
-    let mut free = BTreeSet::new();
-    for (i, &byte) in b[32..].iter().enumerate() {
-        for bit in 0..8 {
-            if byte & (1 << bit) != 0 {
-                free.insert((i * 8 + bit) as u64);
+    let mut stack = [0u64; FSM_STACK_PAGES];
+    let mut heap = Vec::new();
+    let mut count = [0u64; 1];
+    let st = crate::port::binding::fsm_decode(b, &mut stack, &mut count);
+    let pages: &[u64] = match st {
+        FSM_STATUS_OK => &stack[..count[0] as usize],
+        FSM_STATUS_GROW => {
+            heap.resize(count[0] as usize, 0);
+            let st2 = crate::port::binding::fsm_decode(b, &mut heap, &mut count);
+            if st2 != FSM_STATUS_OK {
+                return Err(corrupt("free-space map"));
             }
+            &heap[..count[0] as usize]
         }
-    }
-    if free.contains(&META_PAGE) || free.contains(&FSM_PAGE) {
-        return Err(corrupt("free-space map frees a fixed page"));
-    }
-    Ok(free)
+        FSM_STATUS_KIND => return Err(corrupt("free-space map kind")),
+        FSM_STATUS_FIXED => return Err(corrupt("free-space map frees a fixed page")),
+        _ => return Err(corrupt("free-space map")),
+    };
+    Ok(pages.iter().copied().collect())
 }
 
 // ---- keys and entries ----------------------------------------------------
@@ -665,18 +679,18 @@ pub(crate) fn leaf_layout(types: &[ScalarType], c: usize) -> LeafLayout {
         end: at,
     }
 }
+const LEAF_MAX_COLS: usize = 128;
+const LEAF_COL_TRIPLE: usize = 3;
+const LEAF_VAR_WIDTH: u64 = 4;
+
 /// Largest physical capacity whose fixed area fits a page.
 pub(crate) fn max_capacity(types: &[ScalarType]) -> usize {
-    let (mut lo, mut hi) = (1usize, 4096usize);
-    while lo < hi {
-        let mid = (lo + hi).div_ceil(2);
-        if leaf_layout(types, mid).end <= PAGE_SIZE {
-            lo = mid;
-        } else {
-            hi = mid - 1;
-        }
+    let mut tags = [0u8; LEAF_MAX_COLS];
+    let n = types.len();
+    for (slot, &t) in tags[..n].iter_mut().zip(types.iter()) {
+        *slot = type_tag(t);
     }
-    lo
+    crate::port::binding::leaf_max_capacity(&tags[..n]) as usize
 }
 /// Variable-width payload bytes of an entry.
 pub(crate) fn var_bytes(e: &Entry) -> usize {
@@ -941,18 +955,6 @@ fn write_entry(b: &mut [u8], lay: &LeafLayout, slot: usize, e: &Entry, top: &mut
         }
     }
 }
-fn clear_slot(b: &mut [u8], lay: &LeafLayout, s: usize) {
-    b[lay.keys + 16 * s..lay.keys + 16 * s + 16].fill(0);
-    b[lay.tomb + s] = 0;
-    for &(nulls, data, st) in &lay.cols {
-        set_bit(b, nulls, s, false);
-        let w = match st {
-            Store::Fixed(w) => w,
-            Store::Var => 4,
-        };
-        b[data + w * s..data + w * (s + 1)].fill(0);
-    }
-}
 /// Builds a leaf holding `entries` (sorted). Chooses a physical capacity
 /// with some free slots when room allows. `false` when they do not fit.
 /// A leaf keeps its right-sibling link; any other page starts without one.
@@ -1025,18 +1027,27 @@ pub(crate) fn leaf_insert(b: &mut [u8], lay: &LeafLayout, pos: usize, e: &Entry)
 /// Removes the entry at directory position `pos`; its heap bytes become a
 /// hole and its physical slot is zeroed for reuse.
 pub(crate) fn leaf_remove(b: &mut [u8], lay: &LeafLayout, pos: usize) {
-    let n = count(b);
-    let s = leaf_slot(b, lay, pos);
-    clear_slot(b, lay, s);
-    set_bit(b, lay.used, s, false);
-    b.copy_within(lay.dir + 2 * (pos + 1)..lay.dir + 2 * n, lay.dir + 2 * pos);
-    wr16(b, lay.dir + 2 * (n - 1), 0);
-    set_count(b, n - 1);
-    if count(b) == 0 {
-        // An empty heap needs no holes.
-        b[lay.end..].fill(0);
-        set_free_offset(b, PAGE_SIZE);
+    let mut cols = [0u64; LEAF_MAX_COLS * LEAF_COL_TRIPLE];
+    let n = lay.cols.len();
+    for (i, &(nulls, data, st)) in lay.cols.iter().enumerate() {
+        let base = i * LEAF_COL_TRIPLE;
+        cols[base] = nulls as u64;
+        cols[base + 1] = data as u64;
+        cols[base + 2] = match st {
+            Store::Fixed(w) => w as u64,
+            Store::Var => LEAF_VAR_WIDTH,
+        };
     }
+    crate::port::binding::leaf_remove(
+        b,
+        lay.dir as u64,
+        lay.used as u64,
+        lay.keys as u64,
+        lay.tomb as u64,
+        lay.end as u64,
+        &cols[..n * LEAF_COL_TRIPLE],
+        pos as u64,
+    );
 }
 
 #[cfg(test)]
@@ -1807,6 +1818,307 @@ mod leaf_differential {
         let (ci_lo, ci_hi) = (ratios[i], ratios[ratios.len() - 1 - i]);
         println!(
             "ABBA leaf_compact: median {:.3}x [{ci_lo:.3}x, {ci_hi:.3}x]",
+            ratios[mid]
+        );
+        assert!(
+            ci_hi <= FLIP_LIMIT,
+            "ABBA 95% upper bound {ci_hi:.3}x exceeds {FLIP_LIMIT:.2}x"
+        );
+    }
+
+    fn encode_fsm_reference(b: &mut [u8], free: &BTreeSet<u64>) {
+        b[32..].fill(0);
+        for &p in free {
+            let bit = p as usize;
+            b[32 + bit / 8] |= 1 << (bit % 8);
+        }
+        set_count(b, free.len().min(u16::MAX as usize));
+    }
+
+    fn decode_fsm_reference(b: &[u8]) -> StoreResult<BTreeSet<u64>> {
+        if kind(b) != KIND_FSM || level(b) != 0 {
+            return Err(corrupt("free-space map kind"));
+        }
+        let mut free = BTreeSet::new();
+        for (i, &byte) in b[32..].iter().enumerate() {
+            for bit in 0..8 {
+                if byte & (1 << bit) != 0 {
+                    free.insert((i * 8 + bit) as u64);
+                }
+            }
+        }
+        if free.contains(&META_PAGE) || free.contains(&FSM_PAGE) {
+            return Err(corrupt("free-space map frees a fixed page"));
+        }
+        Ok(free)
+    }
+
+    #[test]
+    fn fsm_matches_reference() {
+        const FSM_DIFF_CASES: usize = 64;
+        let mut state: u64 = 0x6673_6d5f_dead_beef;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1);
+            state >> 32
+        };
+        for case in 0..FSM_DIFF_CASES {
+            let mut set = BTreeSet::new();
+            let count = if case == 0 {
+                400
+            } else {
+                (next() % 120) as usize
+            };
+            for _ in 0..count {
+                set.insert(2 + (next() % (FSM_CAPACITY - 2)));
+            }
+            let mut bp = new_page();
+            let mut br = new_page();
+            format(&mut bp[..], FSM_PAGE, KIND_FSM, 0);
+            format(&mut br[..], FSM_PAGE, KIND_FSM, 0);
+            encode_fsm(&mut bp[..], &set);
+            encode_fsm_reference(&mut br[..], &set);
+            assert_eq!(&bp[..], &br[..], "case {case} encode");
+            assert_eq!(
+                decode_fsm(&bp[..]).unwrap(),
+                decode_fsm_reference(&br[..]).unwrap(),
+                "case {case} decode"
+            );
+        }
+        // Corrupt kind + fixed page bits.
+        let mut bad = new_page();
+        format(&mut bad[..], FSM_PAGE, KIND_META, 0);
+        assert_eq!(
+            decode_fsm(&bad[..]).unwrap_err().to_string(),
+            decode_fsm_reference(&bad[..]).unwrap_err().to_string()
+        );
+        format(&mut bad[..], FSM_PAGE, KIND_FSM, 0);
+        bad[32] = 1;
+        assert_eq!(
+            decode_fsm(&bad[..]).unwrap_err().to_string(),
+            decode_fsm_reference(&bad[..]).unwrap_err().to_string()
+        );
+        bad[32] = 2;
+        assert_eq!(
+            decode_fsm(&bad[..]).unwrap_err().to_string(),
+            decode_fsm_reference(&bad[..]).unwrap_err().to_string()
+        );
+    }
+
+    #[test]
+    #[ignore = "ABBA benchmark; run in release with --ignored --nocapture"]
+    fn abba_fsm_decode() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        const ABBA_EPOCHS: usize = 30;
+        const ABBA_WARMUP: usize = 2;
+        const ABBA_ITERS: usize = 200;
+        const SIGN_ALPHA_HALF: f64 = 0.025;
+        const FLIP_LIMIT: f64 = 1.50;
+
+        let mut set = BTreeSet::new();
+        for i in 0..64u64 {
+            set.insert(2 + i * 97);
+        }
+        let mut b = new_page();
+        format(&mut b[..], FSM_PAGE, KIND_FSM, 0);
+        encode_fsm(&mut b[..], &set);
+
+        let mut ratios = Vec::with_capacity(ABBA_EPOCHS);
+        for epoch in 0..(ABBA_WARMUP + ABBA_EPOCHS) {
+            let t0 = Instant::now();
+            for _ in 0..ABBA_ITERS {
+                black_box(decode_fsm_reference(black_box(&b[..])).unwrap());
+            }
+            let r1 = t0.elapsed().as_nanos();
+
+            let t1 = Instant::now();
+            for _ in 0..ABBA_ITERS {
+                black_box(decode_fsm(black_box(&b[..])).unwrap());
+            }
+            let p1 = t1.elapsed().as_nanos();
+
+            let t2 = Instant::now();
+            for _ in 0..ABBA_ITERS {
+                black_box(decode_fsm(black_box(&b[..])).unwrap());
+            }
+            let p2 = t2.elapsed().as_nanos();
+
+            let t3 = Instant::now();
+            for _ in 0..ABBA_ITERS {
+                black_box(decode_fsm_reference(black_box(&b[..])).unwrap());
+            }
+            let r2 = t3.elapsed().as_nanos();
+
+            if epoch >= ABBA_WARMUP {
+                ratios.push((p1 + p2) as f64 / (r1 + r2) as f64);
+            }
+        }
+        ratios.sort_by(f64::total_cmp);
+        let mid = ratios.len() / 2;
+        let mut cdf = 0.0;
+        let mut choose = 1.0;
+        let mut k = 0usize;
+        for j in 0..ratios.len() {
+            cdf += choose * 0.5f64.powi(ratios.len() as i32);
+            if cdf > SIGN_ALPHA_HALF {
+                break;
+            }
+            k = j + 1;
+            choose = choose * (ratios.len() - j) as f64 / (j + 1) as f64;
+        }
+        let i = k.saturating_sub(1).min(mid);
+        let (ci_lo, ci_hi) = (ratios[i], ratios[ratios.len() - 1 - i]);
+        println!(
+            "ABBA fsm_decode: median {:.3}x [{ci_lo:.3}x, {ci_hi:.3}x]",
+            ratios[mid]
+        );
+        assert!(
+            ci_hi <= FLIP_LIMIT,
+            "ABBA 95% upper bound {ci_hi:.3}x exceeds {FLIP_LIMIT:.2}x"
+        );
+    }
+
+    fn max_capacity_reference(types: &[ScalarType]) -> usize {
+        let (mut lo, mut hi) = (1usize, 4096usize);
+        while lo < hi {
+            let mid = (lo + hi).div_ceil(2);
+            if leaf_layout(types, mid).end <= PAGE_SIZE {
+                lo = mid;
+            } else {
+                hi = mid - 1;
+            }
+        }
+        lo
+    }
+
+    fn leaf_remove_reference(b: &mut [u8], lay: &LeafLayout, pos: usize) {
+        let n = count(b);
+        let s = leaf_slot(b, lay, pos);
+        b[lay.keys + 16 * s..lay.keys + 16 * s + 16].fill(0);
+        b[lay.tomb + s] = 0;
+        for &(nulls, data, st) in &lay.cols {
+            set_bit(b, nulls, s, false);
+            let w = match st {
+                Store::Fixed(w) => w,
+                Store::Var => 4,
+            };
+            b[data + w * s..data + w * (s + 1)].fill(0);
+        }
+        set_bit(b, lay.used, s, false);
+        b.copy_within(lay.dir + 2 * (pos + 1)..lay.dir + 2 * n, lay.dir + 2 * pos);
+        wr16(b, lay.dir + 2 * (n - 1), 0);
+        set_count(b, n - 1);
+        if count(b) == 0 {
+            b[lay.end..].fill(0);
+            set_free_offset(b, PAGE_SIZE);
+        }
+    }
+
+    #[test]
+    fn leaf_max_capacity_and_remove_match_reference() {
+        let all_types = [
+            ScalarType::U64,
+            ScalarType::I64,
+            ScalarType::F64,
+            ScalarType::Bool,
+            ScalarType::Text,
+            ScalarType::Bytes,
+        ];
+        for ncols in 1..=32usize {
+            let schema: Vec<ScalarType> = (0..ncols)
+                .map(|i| all_types[(i * 7 + ncols) % all_types.len()])
+                .collect();
+            assert_eq!(
+                max_capacity(&schema),
+                max_capacity_reference(&schema),
+                "ncols {ncols}"
+            );
+        }
+
+        let (b0, lay, _) = sample_fragmented_leaf(0x7265_6d6f_0001);
+        let mut bp = b0.clone();
+        let mut br = b0;
+        while count(&bp[..]) > 0 {
+            let pos = count(&bp[..]) / 2;
+            leaf_remove(&mut bp[..], &lay, pos);
+            leaf_remove_reference(&mut br[..], &lay, pos);
+            assert_eq!(&bp[..], &br[..], "remaining {}", count(&bp[..]));
+        }
+    }
+
+    #[test]
+    #[ignore = "ABBA benchmark; run in release with --ignored --nocapture"]
+    fn abba_leaf_max_capacity() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        const ABBA_EPOCHS: usize = 30;
+        const ABBA_WARMUP: usize = 2;
+        const ABBA_ITERS: usize = 2_000;
+        const SIGN_ALPHA_HALF: f64 = 0.025;
+        const FLIP_LIMIT: f64 = 1.50;
+
+        let schema = [
+            ScalarType::U64,
+            ScalarType::I64,
+            ScalarType::F64,
+            ScalarType::Bool,
+            ScalarType::Text,
+            ScalarType::Bytes,
+            ScalarType::U64,
+            ScalarType::Text,
+        ];
+
+        let mut ratios = Vec::with_capacity(ABBA_EPOCHS);
+        for epoch in 0..(ABBA_WARMUP + ABBA_EPOCHS) {
+            let t0 = Instant::now();
+            for _ in 0..ABBA_ITERS {
+                black_box(max_capacity_reference(black_box(&schema)));
+            }
+            let r1 = t0.elapsed().as_nanos();
+
+            let t1 = Instant::now();
+            for _ in 0..ABBA_ITERS {
+                black_box(max_capacity(black_box(&schema)));
+            }
+            let p1 = t1.elapsed().as_nanos();
+
+            let t2 = Instant::now();
+            for _ in 0..ABBA_ITERS {
+                black_box(max_capacity(black_box(&schema)));
+            }
+            let p2 = t2.elapsed().as_nanos();
+
+            let t3 = Instant::now();
+            for _ in 0..ABBA_ITERS {
+                black_box(max_capacity_reference(black_box(&schema)));
+            }
+            let r2 = t3.elapsed().as_nanos();
+
+            if epoch >= ABBA_WARMUP {
+                ratios.push((p1 + p2) as f64 / (r1 + r2) as f64);
+            }
+        }
+        ratios.sort_by(f64::total_cmp);
+        let mid = ratios.len() / 2;
+        let mut cdf = 0.0;
+        let mut choose = 1.0;
+        let mut k = 0usize;
+        for j in 0..ratios.len() {
+            cdf += choose * 0.5f64.powi(ratios.len() as i32);
+            if cdf > SIGN_ALPHA_HALF {
+                break;
+            }
+            k = j + 1;
+            choose = choose * (ratios.len() - j) as f64 / (j + 1) as f64;
+        }
+        let i = k.saturating_sub(1).min(mid);
+        let (ci_lo, ci_hi) = (ratios[i], ratios[ratios.len() - 1 - i]);
+        println!(
+            "ABBA leaf_max_capacity: median {:.3}x [{ci_lo:.3}x, {ci_hi:.3}x]",
             ratios[mid]
         );
         assert!(

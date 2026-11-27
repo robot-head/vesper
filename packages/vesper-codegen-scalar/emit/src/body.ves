@@ -13,16 +13,16 @@
 
 use @vesper/cranelift::codes::{Bin, Cv, FloatCc, Ternary, TyCode, Un};
 use @vesper/cranelift::{
-    Block, FuncId, Ty, Value, Var, append_block_param, call_arg, call_arg_count, cc_eq, cc_ne,
-    cc_sge, cc_sgt, cc_sle, cc_slt, cc_uge, cc_ugt, cc_ule, cc_ult, create_block, current_block,
-    declare_var, def_var, import_function, ins_band, ins_band_imm, ins_binary, ins_bitcast,
-    ins_bnot, ins_bor, ins_brif0, ins_bxor, ins_call, ins_clz, ins_convert, ins_ctz, ins_f32const,
-    ins_f64const, ins_fadd, ins_fcmp, ins_fdiv, ins_fmul, ins_fneg, ins_fsub, ins_iadd, ins_icmp,
-    ins_icmp_imm, ins_iconcat, ins_iconst, ins_imul, ins_ineg, ins_ireduce, ins_ishl, ins_isub,
-    ins_jump, ins_popcnt, ins_return, ins_sdiv, ins_select, ins_sextend, ins_srem, ins_sshr,
-    ins_trap, ins_udiv, ins_uextend, ins_unary, ins_urem, ins_ushr, inst_result, invalid,
-    is_invalid, seal_block, set_srcloc, switch_to_block, trap_user, ty_f32, ty_f64, ty_i128, ty_i32,
-    ty_i64, ty_i8, use_var, vals1, value_type
+    Block, FuncId, Ty, Value, Var, append_block_param, call_args, cc_eq, cc_ne, cc_sge, cc_sgt,
+    cc_sle, cc_slt, cc_uge, cc_ugt, cc_ule, cc_ult, create_block, current_block, declare_var,
+    def_var, import_function, ins_band, ins_band_imm, ins_binary, ins_bitcast, ins_bnot, ins_bor,
+    ins_brif0, ins_bxor, ins_call, ins_clz, ins_convert, ins_ctz, ins_f32const, ins_f64const,
+    ins_fadd, ins_fcmp, ins_fdiv, ins_fmul, ins_fneg, ins_fsub, ins_iadd, ins_icmp, ins_icmp_imm,
+    ins_iconcat, ins_iconst, ins_imul, ins_ineg, ins_ireduce, ins_ishl, ins_isub, ins_jump,
+    ins_popcnt, ins_return, ins_sdiv, ins_select, ins_sextend, ins_srem, ins_sshr, ins_trap,
+    ins_udiv, ins_uextend, ins_unary, ins_urem, ins_ushr, inst_result, invalid, is_invalid,
+    seal_block, set_srcloc, switch_to_block, trap_user, ty_f32, ty_f64, ty_i128, ty_i32, ty_i64,
+    ty_i8, use_var, vals1, value_type
 };
 use super::{
     BODY_ERROR, DECLINED, HANDLED, coerce, kind_max_imm, kind_min_imm, kind_unsigned, narrow_type,
@@ -92,6 +92,9 @@ const IEX_BIT_UNARY: u64 = 2;
 const IEX_BIT_BINARY: u64 = 3;
 const IEX_BITWISE: u64 = 4;
 const IEX_SDIV: u64 = 5;
+const IEX_SREM: u64 = 6;
+const IEX_UDIV: u64 = 7;
+const IEX_UREM: u64 = 8;
 
 // Sub-operations of `INST_WRITE_OP`.
 const WOP_IADD: u64 = 1;
@@ -115,6 +118,12 @@ const CB_FMA: u64 = 2;
 const CB_FMIN: u64 = 3;
 const CB_FMAX: u64 = 4;
 const CB_FLOAT_UNARY: u64 = 5;
+const CB_WIDE_BIT: u64 = 6;
+const CB_BITWISE: u64 = 7;
+const CB_WIDE_CONVERT: u64 = 8;
+const CB_WIDEN_U64: u64 = 9;
+const CB_WORD_CONVERT: u64 = 10;
+const CB_WRAPPING_BIN: u64 = 11;
 
 // Bit builtin and bitwise intrinsic codes.
 const BIT_OP_CLZ: u64 = 1;
@@ -127,6 +136,7 @@ const BIT_INTR_AND: u64 = 1;
 const BIT_INTR_OR: u64 = 2;
 const BIT_INTR_XOR: u64 = 3;
 const BIT_INTR_SHL: u64 = 4;
+const BIT_INTR_SHR: u64 = 5;
 
 // Match arm condition kinds (`TERM_MATCH`).
 const MATCH_TRUE: u64 = 1;
@@ -198,17 +208,23 @@ const F64_ONE_BITS: u64 = 4607182418800017408;
 const I64_MIN_IMM: i64 = -9223372036854775807 - 1;
 const UNREACHABLE_TRAP: u32 = 1;
 
-// A reader over the request's words.
+// A reader over the request's words (0 past the end, as `call_arg`).
 struct Words {
-    call: u64,
+    args: ChunkSeq[u64],
     at: u64,
 }
 
 impl Words {
-    fn next(inout self) -> u64 eff [Ffi[Cranelift]] {
-        let w = call_arg(self.call, self.at);
+    fn next(inout self) -> u64 {
+        let w = self.arg(self.at);
         self.at = wrapping_add(self.at, 1);
         w
+    }
+    fn arg(in self, i: u64) -> u64 {
+        match self.args.try_get(i) {
+            Option::Some(w) => w,
+            Option::None => 0,
+        }
     }
 }
 
@@ -904,6 +920,27 @@ impl Body {
                 let rhs = operand(inout b, rv, k1, self.optimize);
                 let raw = emit_sdiv_guarded(inout b, lhs, rhs);
                 coerce(inout b, raw, rk, self.optimize)
+            } else if iex == IEX_SREM {
+                let lv = temp(inout b, x);
+                let rv = temp(inout b, y);
+                let lhs = operand(inout b, lv, k0, self.optimize);
+                let rhs = operand(inout b, rv, k1, self.optimize);
+                let raw = ins_srem(inout b, lhs, rhs);
+                coerce(inout b, raw, rk, self.optimize)
+            } else if iex == IEX_UDIV {
+                let lv = temp(inout b, x);
+                let rv = temp(inout b, y);
+                let lhs = operand(inout b, lv, k0, self.optimize);
+                let rhs = operand(inout b, rv, k1, self.optimize);
+                let raw = ins_udiv(inout b, lhs, rhs);
+                coerce(inout b, raw, rk, self.optimize)
+            } else if iex == IEX_UREM {
+                let lv = temp(inout b, x);
+                let rv = temp(inout b, y);
+                let lhs = operand(inout b, lv, k0, self.optimize);
+                let rhs = operand(inout b, rv, k1, self.optimize);
+                let raw = ins_urem(inout b, lhs, rhs);
+                coerce(inout b, raw, rk, self.optimize)
             } else {
                 return false;
             }
@@ -914,16 +951,16 @@ impl Body {
             let local_kind = w.next();
             let stated = w.next();
             let t = temp(inout b, x);
-            let rhs = operand(inout b, t, temp_kind, self.optimize);
+            let rhs = body_operand(inout b, t, temp_kind, self.optimize);
             let old = use_var(inout b, local);
             let raw = emit_write_op(inout b, wop, old, rhs);
             if is_invalid(raw) {
                 return false;
             }
-            let updated = coerce(inout b, raw, local_kind, self.optimize);
+            let updated = body_coerce(inout b, raw, local_kind, self.optimize);
             def_var(inout b, local, updated);
             let zero = ins_iconst(inout b, ty_i64(), 0);
-            coerce(inout b, zero, stated, self.optimize)
+            body_coerce(inout b, zero, stated, self.optimize)
         } else if kind == INST_EXIT {
             let default_lane = w.next();
             let out_val = if default_lane != 0 {
@@ -948,13 +985,40 @@ impl Body {
             for k in 0..n {
                 let ak = w.next();
                 let tv = Var { id: at32(in tvars, k) };
-                avals.push(operand(inout b, tv, ak, self.optimize).id);
+                avals.push(body_operand(inout b, tv, ak, self.optimize).id);
             }
             let a0 = Value { id: at32(in avals, 0) };
             let a1 = Value { id: at32(in avals, 1) };
             let a2 = Value { id: at32(in avals, 2) };
             if cb == CB_BIT {
                 emit_bit_builtin(inout b, sub, meta, a0, a1)
+            } else if cb == CB_WIDE_BIT {
+                let raw = if sub == BIT_OP_WRAPPING_SHL {
+                    ins_ishl(inout b, a0, a1)
+                } else if sub == BIT_OP_WRAPPING_SHR {
+                    if kind_unsigned(meta) {
+                        ins_ushr(inout b, a0, a1)
+                    } else {
+                        ins_sshr(inout b, a0, a1)
+                    }
+                } else {
+                    emit_wide_unary(inout b, WUN_BIT, sub, meta, a0, self.optimize)
+                };
+                if is_invalid(raw) {
+                    return false;
+                }
+                raw
+            } else if cb == CB_BITWISE {
+                let raw = emit_bitwise(inout b, sub, meta, a0, a1);
+                coerce(inout b, raw, site_kind, self.optimize)
+            } else if cb == CB_WIDE_CONVERT {
+                emit_wide_unary(inout b, WUN_CONVERT, sub, meta, a0, self.optimize)
+            } else if cb == CB_WIDEN_U64 {
+                a0
+            } else if cb == CB_WORD_CONVERT {
+                coerce(inout b, a0, sub, self.optimize)
+            } else if cb == CB_WRAPPING_BIN {
+                emit_wide_binary(inout b, sub, a0, a1)
             } else if cb == CB_FMA {
                 Value { id: Cranelift::vcl_ternary(inout b, Ternary::Fma, a0.id, a1.id, a2.id) }
             } else if cb == CB_FMIN {
@@ -1106,9 +1170,23 @@ impl Body {
 // call is not one the walk makes directly, or BODY_ERROR when the words are
 // not a body plan (nothing is declined once emission starts).
 pub fn emit_body(call: u64, inout b: Builder, inout m: Module) -> u64 eff [Ffi[Cranelift]] {
-    let np = call_arg(call, ARG_PARAMS);
-    let mut w = Words { call: call, at: wrapping_add(wrapping_add(ARG_PARAMS, 1), np) };
-    if call_arg_count(call) < wrapping_add(w.at, 3) {
+    emit_body_words(call_args(call), inout b, inout m)
+}
+
+// `emit_body` over the request's words themselves: `[optimize, status,
+// source locations, n, n parameter variables, m, m callees]` then the
+// function's body plan. A driver that builds the function itself
+// (@vesper/native-lib) calls this with the entry block current.
+pub fn emit_body_words(
+    sink args: ChunkSeq[u64],
+    inout b: Builder,
+    inout m: Module
+) -> u64 eff [Ffi[Cranelift]] {
+    let count = args.len();
+    let mut w = Words { args: args, at: 0 };
+    let np = w.arg(ARG_PARAMS);
+    w.at = wrapping_add(wrapping_add(ARG_PARAMS, 1), np);
+    if count < wrapping_add(w.at, 3) {
         return BODY_ERROR;
     }
     let nc = w.next();
@@ -1116,7 +1194,7 @@ pub fn emit_body(call: u64, inout b: Builder, inout m: Module) -> u64 eff [Ffi[C
     for k in 0..nc {
         callees.push(w.next());
     }
-    if call_arg_count(call) < wrapping_add(w.at, 3) {
+    if count < wrapping_add(w.at, 3) {
         return BODY_ERROR;
     }
     let nb = w.next();
@@ -1134,9 +1212,9 @@ pub fn emit_body(call: u64, inout b: Builder, inout m: Module) -> u64 eff [Ffi[C
         }
     }
     let mut s = Body {
-        optimize: call_arg(call, ARG_OPTIMIZE) != 0,
-        status: call_arg(call, ARG_STATUS) != 0,
-        locations: call_arg(call, ARG_LOCATIONS) != 0,
+        optimize: w.arg(ARG_OPTIMIZE) != 0,
+        status: w.arg(ARG_STATUS) != 0,
+        locations: w.arg(ARG_LOCATIONS) != 0,
         blocks: ChunkSeq::new[u32](),
         locals: ChunkSeq::new[u32](),
         registers: ChunkSeq::new[u32](),
@@ -1155,8 +1233,7 @@ pub fn emit_body(call: u64, inout b: Builder, inout m: Module) -> u64 eff [Ffi[C
         let entry = w.next();
         if entry >= LOCAL_PARAM {
             let p = wrapping_sub(entry, LOCAL_PARAM);
-            s.locals
-                .push(wrapping_u32(call_arg(call, wrapping_add(wrapping_add(ARG_PARAMS, 1), p))));
+            s.locals.push(wrapping_u32(w.arg(wrapping_add(wrapping_add(ARG_PARAMS, 1), p))));
         } else {
             s.locals.push(zeroed(inout b, entry));
         }
@@ -1199,10 +1276,11 @@ pub fn emit_body(call: u64, inout b: Builder, inout m: Module) -> u64 eff [Ffi[C
             seal_block(inout b, blk);
         }
         // The block's parameters define their registers.
-        let mut pw = Words { call: call, at: at64(in starts, bi) };
-        let n = pw.next();
+        let mut pa = at64(in starts, bi);
+        let n = w.arg(pa);
         for j in 0..n {
-            let i = pw.next();
+            pa = wrapping_add(pa, 1);
+            let i = w.arg(pa);
             let p = Value { id: at32(in s.params, i) };
             def_var(inout b, var_at(in s.registers, i), p);
             let ok = s.values.try_set(i, p.id);

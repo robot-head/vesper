@@ -22,8 +22,8 @@ use @vesper/check-data::input::{NamesCtx, Reader, read_ctx, read_names_ctx};
 use self::ast::{exprs_new, read_fns};
 use self::control::{check_bodies, control_new};
 use self::atomics::{
-    atomics_new, check_program, check_world, needs_prelude, needs_workers, read_items, read_ir,
-    syms_new
+    any_atomic_name, atomics_new, check_program, check_world, needs_prelude, needs_workers,
+    read_items, read_ir, syms_new
 };
 use self::stack::{read_graph, report_words, write_report};
 use self::out::{put};
@@ -52,28 +52,59 @@ pub fn check_atomics(in input: Str) -> ChunkSeq[u64] {
     let mut ctx = read_ctx(inout reader, in bytes);
     let atomic = reader.word(in bytes) != 0;
     let workers = reader.word(in bytes) != 0;
+    let before_syms = ctx.names.len();
+    let syms = syms_new(inout ctx.names);
+    let maybe_prelude = any_atomic_name(in ctx.names, in syms, before_syms);
+    let maybe_workers = widen_u64(syms.parallel_for) < before_syms;
+    if !atomic && !workers && !maybe_prelude && !maybe_workers {
+        let mut output = ChunkSeq::new[u8]();
+        put(inout output, "prelude 0 workers 0\n");
+        return pack_text(in output);
+    }
     let mut exprs = exprs_new();
     read_fns(inout reader, in bytes, inout exprs, in ctx.nmap, in ctx.tmap);
-    let items = read_items(inout reader, in bytes, in ctx.nmap, in ctx.tmap, exprs_new());
-    let ir = read_ir(inout reader, in bytes, in ctx.nmap, in ctx.tmap);
-    let syms = syms_new(inout ctx.names);
+    let mut prelude_needed = false;
+    let mut workers_needed = false;
+    if maybe_prelude || maybe_workers {
+        let items = read_items(inout reader, in bytes, in ctx.nmap, in ctx.tmap, exprs_new());
+        if maybe_prelude {
+            prelude_needed = needs_prelude(in ctx.names, in ctx.types, in items, in syms);
+        }
+        if maybe_workers {
+            workers_needed = needs_workers(in items, in syms);
+        }
+    } else if atomic {
+        let _items = read_items(inout reader, in bytes, in ctx.nmap, in ctx.tmap, exprs_new());
+    }
     let mut output = ChunkSeq::new[u8]();
     put(inout output, "prelude ");
-    if needs_prelude(in ctx.names, in ctx.types, in items, in syms) {
+    if prelude_needed {
         output.push(49);
     } else {
         output.push(48);
     }
     put(inout output, " workers ");
-    if needs_workers(in items, in syms) {
+    if workers_needed {
         output.push(49);
     } else {
         output.push(48);
     }
     output.push(10);
     let atomics = atomics_new(syms, atomic, workers);
-    check_world(inout output, inout ctx.types, in ctx.names, in ctx.world, in exprs, in atomics);
-    check_program(inout output, in ctx.names, in ctx.types, in ir, in atomics);
+    if atomic || workers {
+        check_world(
+            inout output,
+            inout ctx.types,
+            in ctx.names,
+            in ctx.world,
+            in exprs,
+            in atomics
+        );
+    }
+    if atomic {
+        let ir = read_ir(inout reader, in bytes, in ctx.nmap, in ctx.tmap);
+        check_program(inout output, in ctx.names, in ctx.types, in ir, in atomics);
+    }
     pack_text(in output)
 }
 

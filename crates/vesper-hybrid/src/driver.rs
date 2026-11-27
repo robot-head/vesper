@@ -289,9 +289,6 @@ pub struct Session {
     /// The package graph `LoadPackage` read for the Vesper driver to
     /// assemble (`hd_assembled`, #1986).
     loading: Option<packages::Loading<'static>>,
-    /// The manifests the Vesper driver's own read of the package graph
-    /// decoded so far (`Manifest`, #1986 slice 2), by index.
-    manifests: Vec<packages::driver_host::DriverManifest>,
     /// The package graph the Vesper driver read itself (`Graph`), for
     /// `hd_assembled`.
     graph: Option<crate::vesper_hybrid::DriverGraph>,
@@ -380,8 +377,6 @@ enum Step {
     // The Vesper driver's own read of the package graph (#1986 slice 2,
     // driver/load.rs).
     LoadBegin = 71,
-    Manifest = 72,
-    VersionMatches = 73,
     VsysNames = 74,
     Graph = 75,
     /// The checked world's declarations, for the Vesper driver to hold.
@@ -391,7 +386,7 @@ enum Step {
     WorldBegin = 81,
 }
 
-const STEPS: [Step; 38] = [
+const STEPS: [Step; 36] = [
     Step::Load,
     Step::EbpfBuild,
     Step::Parse,
@@ -424,8 +419,6 @@ const STEPS: [Step; 38] = [
     Step::VerifiedInput,
     Step::LoadPackage,
     Step::LoadBegin,
-    Step::Manifest,
-    Step::VersionMatches,
     Step::VsysNames,
     Step::Graph,
     Step::WorldDecls,
@@ -478,7 +471,6 @@ impl Session {
                 if self.reading {
                     // The Vesper driver's read handed the graph back.
                     self.reading = false;
-                    self.manifests.clear();
                     crate::vesper_hybrid::driver_read_fallback();
                 }
                 let timer = crate::vesper_hybrid::driver_load_timer();
@@ -555,11 +547,7 @@ impl Session {
             | Step::WasmInput
             | Step::EbpfInput
             | Step::VerifiedInput => self.backends_step(step, arg),
-            Step::LoadBegin
-            | Step::Manifest
-            | Step::VersionMatches
-            | Step::VsysNames
-            | Step::Graph => self.load_step(step, arg),
+            Step::LoadBegin | Step::VsysNames | Step::Graph => self.load_step(step, arg),
             Step::WorldDecls | Step::WorldBegin => self.world_step(step, arg),
         }
     }
@@ -641,7 +629,6 @@ pub mod host {
                     o,
                     loaded: None,
                     loading: None,
-                    manifests: Vec::new(),
                     graph: None,
                     reading: false,
                     original: String::new(),

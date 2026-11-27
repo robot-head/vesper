@@ -14,7 +14,7 @@ mod ir_inline_binding;
 mod inline_words;
 
 use super::place_ir::round_trip_after_pass;
-use super::{Registry, Swap, on, open};
+use super::{Registry, Swap, on, pass};
 
 /// Programs inlined by the Vesper inliner module.
 static IR_INLINE_CALLS: AtomicU64 = AtomicU64::new(0);
@@ -37,7 +37,7 @@ fn vesper_inline(
 }
 
 /// The flip-gate rows of this file's swaps (`swaps::on`).
-pub(super) const SWAPS: &[Swap] = &[open("inline", "0.76x; no flip-gate configuration")];
+pub(super) const SWAPS: &[Swap] = &[pass("inline", "inline", "#2289")];
 
 pub(super) fn register(r: &mut Registry) {
     if on("inline") {

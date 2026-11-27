@@ -358,6 +358,28 @@ fn inline_speed() {
             })
         },
     );
+    // What the hybrid's `inline` hook runs: the input encoded, the inlined
+    // program written by the package (`MODE_PROGRAM`) and decoded back into
+    // an `ir::Program` (#2207). The flip gate's workload.
+    abba(
+        "inline program",
+        &mut || {
+            time(|| {
+                for c in cases {
+                    std::hint::black_box(rust_inline(c));
+                }
+            })
+        },
+        &mut || {
+            time(|| {
+                for c in cases {
+                    let input = inline_input(c.world, &c.program, &Budget::default());
+                    let words = entry.words(&with_mode(MODE_PROGRAM, &input.bytes));
+                    std::hint::black_box(decode_program(&words, &input.tables, &c.program));
+                }
+            })
+        },
+    );
 }
 
 /// How long the package's entries take to compile (JIT, optimizer on and

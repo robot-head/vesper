@@ -1,0 +1,296 @@
+// @vesper/native-lib: a library's native object built in Vesper over
+// @vesper/cranelift (bootstrap switch slice 2a of #1397, claim #2349).
+//
+// `vesper build --lib` (src/native_export.rs `compile_exports`) declares
+// every function of the library, defines each one through the native walk
+// (src/native.rs `define_instances_observed_with_trace`) and finishes the
+// object. This package does the same steps itself: it creates the module,
+// declares the functions, and for each definition builds the entry block
+// (`append_block_params_for_function_params`), binds each parameter to a
+// fresh variable of its value's type, emits the body from its
+// @vesper/codegen-scalar body plan (`emit_body_words`), defines it, and
+// finishes the object.
+//
+// Slice 2a-1 covers functions whose frames the body hook takes (plain
+// scalar parameters and results, no failure record, sret, pointers or
+// capabilities). The request names everything the Rust driver decides
+// before the walk: the target and flags, the symbols, linkages and
+// signatures, and each definition's flags, callees and body plan.
+//
+// Request (little-endian words; a string is its length, then its bytes):
+//
+//     triple, flags, module name, keep CLIF (0 or 1),
+//     n functions, each: symbol, linkage, call conv, n params, param
+//         types, n returns, return types,
+//     n definitions, each: function index, optimize, status, source
+//         locations, n callees, callee function indexes (or NO_CALLEE),
+//         n plan words, the plan words.
+//
+// Answer: 0, the object, the CLIF text of the definitions (empty unless
+// kept); or 1 and the error.
+use @vesper/cranelift::{
+    FuncId, SigId, Ty, append_block_params_for_function_params, block_param, builder_free,
+    builder_new, create_block, declare_function, declare_var, def_var, define_function, module_clif,
+    module_error_text, module_finish, module_free, module_keep_clif, module_new, new_error_text,
+    object_bytes, seal_all_blocks, sig_new, sig_param, sig_return, switch_to_block, value_type
+};
+use @vesper/codegen-scalar-emit::{HANDLED};
+use @vesper/codegen-scalar-emit::body::{emit_body_words};
+
+// The answer's status words.
+const OK: u64 = 0;
+const FAILED: u64 = 1;
+// A request flag word that is set.
+const SET: u64 = 1;
+// The bytes of one request or answer word.
+const WORD_BYTES: u64 = 8;
+// Decimal digits of a number in an error, from ASCII `0`.
+const DECIMAL_BASE: u64 = 10;
+const DIGIT_ZERO: u64 = 48;
+// A callee the walk does not call directly (`codegen_swap::body::NO_CALLEE`).
+const NO_CALLEE: u64 = 18446744073709551615;
+const MALFORMED: Str = "malformed native-lib request";
+const UNKNOWN_FUNCTION: Str = "a definition names an unknown function";
+const NO_BUILDER: Str = "the function builder could not be made";
+const DECLINED_BODY: Str = "the body hook declined a definition: ";
+const DEFINE_FAILED: Str = "defining a function failed";
+
+struct Reader {
+    pos: u64,
+    bad: bool,
+}
+
+impl Reader {
+    fn word(inout self, in req: Slice[u8]) -> u64 {
+        match req.try_read_u64_le(self.pos) {
+            Option::Some(v) => {
+                self.pos = wrapping_add(self.pos, WORD_BYTES);
+                v
+            }
+            Option::None => {
+                self.bad = true;
+                0
+            }
+        }
+    }
+
+    // The next string's bytes, copied.
+    fn bytes(inout self, in req: Slice[u8]) -> ChunkSeq[u8] {
+        let len = self.word(in req);
+        let start = self.pos;
+        let end = wrapping_add(start, len);
+        let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        if end < start || end > req.len() {
+            self.bad = true;
+            return out;
+        }
+        out.extend(in req[start..end]);
+        self.pos = end;
+        out
+    }
+}
+
+fn push64(inout out: ChunkSeq[u8], value: u64) {
+    let at = out.len();
+    out.resize(wrapping_add(at, WORD_BYTES), 0);
+    let ok = out.try_write_u64_le(at, value);
+}
+
+fn put_str(inout out: ChunkSeq[u8], in bytes: Slice[u8]) {
+    push64(inout out, bytes.len());
+    out.extend(in bytes);
+}
+
+fn failure(in message: Slice[u8]) -> ChunkSeq[u8] {
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    push64(inout out, FAILED);
+    put_str(inout out, in message);
+    out
+}
+
+fn at64(in s: ChunkSeq[u64], i: u64) -> u64 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => NO_CALLEE,
+    }
+}
+
+// The declared functions, by request index.
+struct Declared {
+    ids: ChunkSeq[u64],
+    sigs: ChunkSeq[u64],
+}
+
+fn declare_all(inout m: Module, in req: Slice[u8], inout r: Reader, inout d: Declared) eff [
+    Ffi[Cranelift]
+] {
+    let nf = r.word(in req);
+    for _ in 0..nf {
+        let symbol = r.bytes(in req);
+        let linkage = wrapping_u32(r.word(in req));
+        let conv = wrapping_u32(r.word(in req));
+        let sig = sig_new(inout m, conv);
+        let np = r.word(in req);
+        for _ in 0..np {
+            sig_param(inout m, sig, Ty { code: wrapping_u32(r.word(in req)) });
+        }
+        let nr = r.word(in req);
+        for _ in 0..nr {
+            sig_return(inout m, sig, Ty { code: wrapping_u32(r.word(in req)) });
+        }
+        if r.bad {
+            return;
+        }
+        let id = declare_function(inout m, in symbol.as_slice(), linkage, sig);
+        d.ids.push(widen_u64(id.id));
+        d.sigs.push(widen_u64(sig.id));
+    }
+}
+
+// One definition: the entry block with the parameters bound to variables
+// (as `define_instances_observed_with_trace` binds them for a plain
+// frame), then the body. Empty on success, else the error.
+fn define_one(
+    inout m: Module,
+    in req: Slice[u8],
+    inout r: Reader,
+    in d: Declared
+) -> ChunkSeq[u8] eff [Ffi[Cranelift]] {
+    let mut err: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let index = r.word(in req);
+    let optimize = r.word(in req);
+    let status = r.word(in req);
+    let locations = r.word(in req);
+    let nc = r.word(in req);
+    let mut callees: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    for _ in 0..nc {
+        let c = r.word(in req);
+        callees.push(
+            if c == NO_CALLEE {
+                NO_CALLEE
+            } else {
+                at64(in d.ids, c)
+            }
+        );
+    }
+    let nplan = r.word(in req);
+    let mut plan: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    for _ in 0..nplan {
+        plan.push(r.word(in req));
+    }
+    if r.bad {
+        err.extend(in MALFORMED.as_bytes());
+        return err;
+    }
+    let id = at64(in d.ids, index);
+    let sig = at64(in d.sigs, index);
+    if id == NO_CALLEE || sig == NO_CALLEE {
+        err.extend(in UNKNOWN_FUNCTION.as_bytes());
+        return err;
+    }
+    let sig_id = SigId { id: wrapping_u32(sig) };
+    let mut b = match builder_new(in m, sig_id) {
+        Option::Some(b) => b,
+        Option::None => {
+            err.extend(in NO_BUILDER.as_bytes());
+            return err;
+        }
+    };
+    let entry = create_block(inout b);
+    let np = append_block_params_for_function_params(inout b, entry);
+    switch_to_block(inout b, entry);
+    let mut args: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    args.push(optimize);
+    args.push(status);
+    args.push(locations);
+    args.push(widen_u64(np));
+    for k in 0..np {
+        let v = block_param(inout b, entry, k);
+        let ty = value_type(inout b, v);
+        let var = declare_var(inout b, ty);
+        def_var(inout b, var, v);
+        args.push(widen_u64(var.id));
+    }
+    args.push(nc);
+    args.extend(in callees.as_slice());
+    args.extend(in plan.as_slice());
+    let answer = emit_body_words(args, inout b, inout m);
+    if answer != HANDLED {
+        builder_free(b);
+        err.extend(in DECLINED_BODY.as_bytes());
+        push_dec(inout err, index);
+        return err;
+    }
+    // `define_instances_observed_with_trace` seals what the walk left
+    // open before it finalizes.
+    seal_all_blocks(inout b);
+    let func = FuncId { id: wrapping_u32(id) };
+    if !define_function(inout m, func, b) {
+        let message = module_error_text(in m);
+        err.extend(in message.as_slice());
+        if err.len() == 0 {
+            err.extend(in DEFINE_FAILED.as_bytes());
+        }
+    }
+    err
+}
+
+fn push_dec(inout out: ChunkSeq[u8], value: u64) {
+    if value >= DECIMAL_BASE {
+        push_dec(inout out, value / DECIMAL_BASE);
+    }
+    out.push(wrapping_u8(wrapping_add(value % DECIMAL_BASE, DIGIT_ZERO)));
+}
+
+// The library object of one request (see the top of this file).
+pub fn library_object(in req: Slice[u8]) -> ChunkSeq[u8] eff [Ffi[Cranelift]] {
+    let mut r = Reader { pos: 0, bad: false };
+    let triple = r.bytes(in req);
+    let flags = r.bytes(in req);
+    let name = r.bytes(in req);
+    let keep = r.word(in req) == SET;
+    if r.bad {
+        return failure(in MALFORMED.as_bytes());
+    }
+    let mut m = match module_new(in triple.as_slice(), in flags.as_slice(), in name.as_slice()) {
+        Option::Some(m) => m,
+        Option::None => {
+            let message = new_error_text();
+            return failure(in message.as_slice());
+        }
+    };
+    module_keep_clif(inout m, keep);
+    let mut d = Declared { ids: ChunkSeq::new[u64](), sigs: ChunkSeq::new[u64]() };
+    declare_all(inout m, in req, inout r, inout d);
+    if r.bad {
+        module_free(m);
+        return failure(in MALFORMED.as_bytes());
+    }
+    let nd = r.word(in req);
+    if r.bad {
+        module_free(m);
+        return failure(in MALFORMED.as_bytes());
+    }
+    for _ in 0..nd {
+        let err = define_one(inout m, in req, inout r, in d);
+        if err.len() != 0 {
+            module_free(m);
+            return failure(in err.as_slice());
+        }
+    }
+    let clif = module_clif(in m);
+    match module_finish(m) {
+        Option::Some(product) => {
+            let object = object_bytes(product);
+            let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+            push64(inout out, OK);
+            put_str(inout out, in object.as_slice());
+            put_str(inout out, in clif.as_slice());
+            out
+        }
+        Option::None => {
+            let message = new_error_text();
+            failure(in message.as_slice())
+        }
+    }
+}
