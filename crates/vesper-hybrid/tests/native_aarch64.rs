@@ -30,6 +30,7 @@ const BRANCH_ZERO: u64 = 28;
 const EARLY_RETURN: u64 = 29;
 const STACK_SLOT: u64 = 30;
 const STACK_LOAD: u64 = 32;
+const STACK_STORE_BYTE: u64 = 33;
 const STACK_STORE_QWORD: u64 = 36;
 const RETURN_PAIR: u64 = 37;
 const CALL: u64 = 38;
@@ -887,6 +888,82 @@ fn aarch64_register_homes_preserve_snapshots_and_retry_on_stack() {
         .chain(records.into_iter().flatten())
         .collect();
     assert!(binding::aarch64_integer_leaf(&packet).starts_with(&SUB_SP_64.to_le_bytes()));
+}
+
+#[test]
+fn aarch64_promotes_narrow_cfg_cells_alongside_explicit_slots() {
+    const CELL_BYTES: u64 = CELL_BITS / BYTE_BITS;
+    const SLOT_BYTES: u64 = 10 * CELL_BYTES;
+    const SUB_SP_96: u32 = 0xd101_83ff;
+    const STR_X0_SP: u32 = 0xf900_03e0;
+    const UXTB_W8_W0: u32 = 0x5300_1c08;
+    const MOV_X0_X8: u32 = 0xaa08_03e0;
+    const LDRB_W0_SP_16: u32 = 0x3940_43e0;
+    const STR_X0_SP_16: u32 = 0xf900_0be0;
+    const ADD_SP_96: u32 = 0x9101_83ff;
+
+    #[rustfmt::skip]
+    let packet = |op| [
+        1, NO_VALUE,
+        STACK_SLOT, CELL_BYTES, CELL_BYTES, 0,
+        STACK_SLOT, SLOT_BYTES, 2 * CELL_BYTES, 0,
+        BLOCK_LABEL, 0, 2, 1,
+        STACK_STORE_QWORD, 0, 0, 0,
+        op, 0, 1, 0,
+        STACK_LOAD, 1, 0, BYTE_BITS,
+        BLOCK_RETURN, 6, 0, 0,
+    ];
+    let expected = [SUB_SP_96, STR_X0_SP, UXTB_W8_W0, MOV_X0_X8, ADD_SP_96, RET];
+    assert_eq!(
+        binding::aarch64_integer_leaf(&packet(STACK_STORE_BYTE)),
+        expected.map(u32::to_le_bytes).concat()
+    );
+    let mixed = [
+        SUB_SP_96,
+        STR_X0_SP,
+        STR_X0_SP_16,
+        LDRB_W0_SP_16,
+        ADD_SP_96,
+        RET,
+    ];
+    assert_eq!(
+        binding::aarch64_integer_leaf(&packet(STACK_STORE_QWORD)),
+        mixed.map(u32::to_le_bytes).concat()
+    );
+}
+
+#[test]
+fn aarch64_cfg_homes_survive_calls_in_callee_saved_registers() {
+    const CELL_BYTES: u64 = CELL_BITS / BYTE_BITS;
+    const STR_X19_SP: u32 = 0xf900_03f3;
+    const LDR_X19_SP: u32 = 0xf940_03f3;
+    const MOV_X19_X0: u32 = 0xaa00_03f3;
+    const MOV_X0_X19: u32 = 0xaa13_03e0;
+    const BL: u32 = 0x9400_0000;
+    const CALL_TARGET: u64 = 17;
+    #[rustfmt::skip]
+    let tape = [
+        1, NO_VALUE,
+        STACK_SLOT, CELL_BYTES, CELL_BYTES, 0,
+        BLOCK_LABEL, 0, 1, 1,
+        STACK_STORE_QWORD, 0, 0, 0,
+        CALL_VOID, CALL_TARGET, 0, 0,
+        STACK_LOAD, 0, 0, CELL_BITS,
+        BLOCK_RETURN, 5, 0, 0,
+    ];
+    let packet = binding::aarch64_relocatable_block(&tape);
+    let (length, body) = packet.split_first_chunk::<{ size_of::<u64>() }>().unwrap();
+    let code = &body[..u64::from_le_bytes(*length) as usize];
+    assert!(code.windows(4 * size_of::<u32>()).any(|window| {
+        window
+            == [STR_X19_SP, MOV_X19_X0, BL, MOV_X0_X19]
+                .map(u32::to_le_bytes)
+                .concat()
+    }));
+    assert!(
+        code.windows(size_of::<u32>())
+            .any(|window| window == LDR_X19_SP.to_le_bytes())
+    );
 }
 
 #[test]

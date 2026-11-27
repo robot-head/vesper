@@ -184,6 +184,11 @@ copy struct SavedRegisters {
     offset: u64,
 }
 
+copy struct HomeCell {
+    width: u64,
+    next_store: u64,
+}
+
 copy enum Allocation {
     RegisterHomes,
     StackHomes,
@@ -463,9 +468,37 @@ fn stack_displacement(in frame: FrameLayout, in r: Record) -> Option[u64] {
     }
 }
 
-fn home_register(offset: u64) -> u32 {
-    // x8 through x15 are caller-saved and follow the incoming argument bank.
-    wrapping_u32(wrapping_add(ARGUMENT_REGISTERS, offset / HOME_WORD_BYTES))
+fn home_register(first: u32, cell: u32, mask: u32) -> u32 {
+    if cell < wrapping_u32(HOME_REGISTERS) && (mask & sh(1, cell)) != 0 {
+        wrapping_add(first, cell)
+    } else {
+        UNASSIGNED
+    }
+}
+
+fn home_cell(in r: Record, home_slot: u64) -> u32 {
+    let (slot, offset) = if is_stack_store(r.op) {
+        (r.right, r.extra)
+    } else {
+        (r.left, r.right)
+    };
+    if slot == home_slot && offset % HOME_WORD_BYTES == 0 {
+        wrapping_u32(offset / HOME_WORD_BYTES)
+    } else {
+        UNASSIGNED
+    }
+}
+
+fn write_home(inout out: ChunkSeq[u8], home: u32, source: u32, width: u64) {
+    if width == QWORD_BITS {
+        if home != source {
+            rrr(inout out, ORR_REG, home, ZERO, source);
+        }
+    } else if width == DWORD_BITS {
+        rrr(inout out, ORR_REG & ~REG64, home, ZERO, source);
+    } else {
+        bitfield(inout out, UBFM & ~BITFIELD64, home, source, 0, wrapping_sub(width, 1));
+    }
 }
 
 fn memory(
@@ -1265,25 +1298,29 @@ fn encode_pass(
     } else {
         0
     };
-    let mut register_home = (
+    let register_home = (
         match allocation {
             Allocation::RegisterHomes => true,
             _ => false,
         }
     )
         && labeled
-        && entry.right == 1
-        && frame.slots.len() == 1
-        && frame.size / HOME_WORD_BYTES <= HOME_REGISTERS;
-    let mut home_mask: u32 = 0;
-    let mut next_home_store = ChunkSeq::new[u64]();
-    let mut home_aliases = ChunkSeq::new[u32]();
+        && entry.right != 0;
+    let home_slot = if register_home {
+        wrapping_sub(entry.right, 1)
+    } else {
+        NO_VALUE
+    };
+    let mut home_candidates: u32 = 0;
+    let mut unpromotable_homes: u32 = 0;
+    let mut home_cells = ChunkSeq::new[HomeCell]();
+    let mut home_aliases = ChunkSeq::new[bool]();
     if register_home {
         for index in 0..HOME_REGISTERS {
-            next_home_store.push(values);
+            home_cells.push(HomeCell { width: 0, next_store: values });
         }
         for index in 0..count {
-            home_aliases.push(UNASSIGNED);
+            home_aliases.push(false);
         }
     }
     let mut frame_used = false;
@@ -1336,7 +1373,6 @@ fn encode_pass(
             }
             pending_arguments = r.right;
             call_end = value;
-            register_home = false;
         }
         let n = match operands(in r, returns) {
             Option::Some(n) => n,
@@ -1376,30 +1412,41 @@ fn encode_pass(
             return out;
         }
         if r.op == STACK_LOAD || r.op == STACK_ADDRESS || is_stack_store(r.op) {
-            let offset = match stack_displacement(in frame, in r) {
-                Option::Some(offset) => offset,
-                Option::None => return out,
-            };
+            if stack_displacement(in frame, in r).is_none() {
+                return out;
+            }
             if last != NEVER_READ || is_stack_store(r.op) {
-                frame_used = true;
                 if register_home {
-                    // Only whole cells in the private slot can live in registers.
-                    // Any addressable or overlapping narrow access needs the frame.
-                    if (r.op == STACK_STORE_QWORD || (r.op == STACK_LOAD && r.extra == QWORD_BITS))
-                        && offset % HOME_WORD_BYTES == 0
+                    // An address or an unaligned access prevents independent cell promotion.
+                    let store = is_stack_store(r.op);
+                    let slot = if store { r.right } else { r.left };
+                    let offset = if store { r.extra } else { r.right };
+                    if slot == home_slot
+                        && (r.op == STACK_ADDRESS || offset % HOME_WORD_BYTES != 0)
                     {
-                        let register = home_register(offset);
-                        let cell = offset / HOME_WORD_BYTES;
-                        home_mask = home_mask | sh(1, register);
-                        if r.op == STACK_STORE_QWORD {
-                            let _ = next_home_store.try_set(cell, value);
-                        } else if last <= next_home_store.try_get(cell).unwrap_or(0) {
-                            // Until the next store, the home itself holds this SSA value.
-                            let _ = home_aliases.try_set(index, register);
-                        }
-                    } else {
-                        register_home = false;
+                        unpromotable_homes = ~0;
                     }
+                    let cell = widen_u64(home_cell(in r, home_slot));
+                    match home_cells.try_get(cell) {
+                        Option::Some(previous) => {
+                            let width = if store { store_width(r.op) } else { r.extra };
+                            let bit = sh(1, wrapping_u32(cell));
+                            if previous.width != 0 && previous.width != width {
+                                unpromotable_homes = unpromotable_homes | bit;
+                            }
+                            home_candidates = home_candidates | bit;
+                            let next_store = if store { value } else { previous.next_store };
+                            let _ = home_cells
+                                .try_set(cell, HomeCell { width: width, next_store: next_store });
+                            if !store && last <= next_store {
+                                // Until the next store, the home itself holds this SSA value.
+                                let _ = home_aliases.try_set(index, true);
+                            }
+                        },
+                        Option::None => frame_used = true,
+                    };
+                } else {
+                    frame_used = true;
                 }
             }
         }
@@ -1454,16 +1501,6 @@ fn encode_pass(
         return out;
     }
 
-    let home_mask = if register_home { home_mask } else { 0 };
-    let spill_mode = match allocation {
-        Allocation::Spills => true,
-        _ => false,
-    };
-    let local_bytes = if frame_used && home_mask == 0 {
-        frame.size
-    } else {
-        0
-    };
     let has_calls = call_sites.len() != 0;
     let callee_count = if use_callee_registers && call_sites.len() >= CALLS_FOR_CALLEE_REGISTERS {
         if max_live_across_calls < CALLEE_REGISTERS {
@@ -1474,13 +1511,50 @@ fn encode_pass(
     } else {
         0
     };
-    let callee_mask = sh(wrapping_sub(sh(1, wrapping_u32(callee_count)), 1), FIRST_CALLEE_REGISTER);
+    // Keep the registers used by temporaries live across calls available.
+    let (home_first, home_limit) = if has_calls {
+        let remaining = if use_callee_registers {
+            wrapping_sub(CALLEE_REGISTERS, callee_count)
+        } else {
+            0
+        };
+        (wrapping_add(FIRST_CALLEE_REGISTER, wrapping_u32(callee_count)), remaining)
+    } else {
+        (wrapping_u32(ARGUMENT_REGISTERS), HOME_REGISTERS)
+    };
+    let home_range = wrapping_sub(sh(1, wrapping_u32(home_limit)), 1);
+    let homes = home_candidates & ~unpromotable_homes & home_range;
+    let home_mask = sh(homes, home_first);
+    let spill_mode = match allocation {
+        Allocation::Spills => true,
+        _ => false,
+    };
+    let local_bytes = if frame_used || homes != home_candidates {
+        frame.size
+    } else {
+        0
+    };
+    let mut callee_mask = sh(
+        wrapping_sub(sh(1, wrapping_u32(callee_count)), 1),
+        FIRST_CALLEE_REGISTER
+    );
+    if has_calls {
+        callee_mask = callee_mask | home_mask;
+    }
     let callee = SavedRegisters {
         mask: callee_mask,
         first: FIRST_CALLEE_REGISTER,
         offset: local_bytes
     };
-    let callee_bytes = align_up(wrapping_mul(callee_count, HOME_WORD_BYTES), STACK_ALIGNMENT);
+    let callee_slots = if callee_mask == 0 {
+        0
+    } else {
+        widen_u64(wrapping_sub(
+            wrapping_sub(UNASSIGNED, leading_zeros_u32(callee_mask)),
+            FIRST_CALLEE_REGISTER
+        ))
+    };
+    let callee_bytes = align_up(wrapping_mul(callee_slots, HOME_WORD_BYTES), STACK_ALIGNMENT);
     let call_base = wrapping_add(local_bytes, callee_bytes);
     let link_slot = if has_calls { call_base } else { NO_VALUE };
     let frame_bytes = if has_calls {
@@ -1531,7 +1605,7 @@ fn encode_pass(
             if labeled && last >= entry_end {
                 return ChunkSeq::new[u8]();
             }
-            let available = callee_mask & ~used;
+            let available = callee_mask & ~used & ~home_mask;
             if available != 0 && last > next_call {
                 assigned = trailing_zeros_u64(widen_u64(available));
                 rrr(inout out, ORR_REG, assigned, ZERO, reg);
@@ -1729,11 +1803,13 @@ fn encode_pass(
         if stored != 0 {
             if is_stack_store(r.op) {
                 let displacement = stack_displacement(in frame, in r).unwrap_or(0);
-                if home_mask != 0 {
-                    let register = home_register(displacement);
-                    if register != lhs {
-                        rrr(inout out, ORR_REG, register, ZERO, lhs);
-                    }
+                let home = if homes != 0 {
+                    home_register(home_first, home_cell(in r, home_slot), homes)
+                } else {
+                    UNASSIGNED
+                };
+                if home != UNASSIGNED {
+                    write_home(inout out, home, lhs, stored);
                 } else {
                     memory(inout out, false, stored, SP, lhs, displacement);
                 }
@@ -1758,16 +1834,18 @@ fn encode_pass(
                 continue;
             }
         }
-        if home_mask != 0 && r.op == STACK_LOAD {
-            let register = home_aliases.try_get(index).unwrap_or(UNASSIGNED);
-            if register != UNASSIGNED {
-                locations.push(register);
-                continue;
-            }
+        let home = if homes != 0 && r.op == STACK_LOAD {
+            home_register(home_first, home_cell(in r, home_slot), homes)
+        } else {
+            UNASSIGNED
+        };
+        if home != UNASSIGNED && home_aliases.try_get(index).unwrap_or(false) {
+            locations.push(home);
+            continue;
         }
         let last = last_read(in ends, value);
         let preserved = if last > next_call {
-            callee_mask & ~used
+            callee_mask & ~used & ~home_mask
         } else {
             0
         };
@@ -1825,8 +1903,8 @@ fn encode_pass(
             if r.op == STACK_ADDRESS {
                 let encoded = arithmetic_immediate(displacement).unwrap_or(0);
                 push32(inout out, ADD_IMM | encoded | sh(SP, RN_SHIFT) | dest);
-            } else if home_mask != 0 {
-                rrr(inout out, ORR_REG, dest, ZERO, home_register(displacement));
+            } else if home != UNASSIGNED {
+                rrr(inout out, ORR_REG, dest, ZERO, home);
             } else {
                 memory(inout out, true, r.extra, SP, dest, displacement);
             }
