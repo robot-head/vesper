@@ -1615,3 +1615,129 @@ pub fn migrate_render_param(
     pos = copy_range(in ty, 0, ty.len(), inout out, pos);
     pos
 }
+
+// ---------------------------------------------------------------------------
+// Synth renderers (`synth.rs::origin_text`, `sys_value`, `wire_field`).
+
+const BYTE_BACKTICK: u8 = 96;
+const BYTE_RBRACKET: u8 = 93;
+const BYTE_LOWER_I: u8 = 105;
+const BYTE_LOWER_U: u8 = 117;
+const DECIMAL_BASE: u64 = 10;
+
+const SYS_VAL_UNIT: u8 = 0;
+const SYS_VAL_BOOL: u8 = 1;
+const SYS_VAL_PASSTHROUGH: u8 = 2;
+const SYS_VAL_PTR: u8 = 3;
+const SYS_VAL_NULLABLE_PTR: u8 = 4;
+
+const WIRE_KIND_INT: u8 = 0;
+const WIRE_KIND_BYTE_ARRAY: u8 = 1;
+const WIRE_KIND_ZERO_PAD: u8 = 2;
+const WIRE_KIND_STRUCT: u8 = 3;
+
+const WIRE_ENDIAN_NATIVE: u8 = 0;
+const WIRE_ENDIAN_LITTLE: u8 = 1;
+const WIRE_ENDIAN_BIG: u8 = 2;
+
+fn copy_str(in s: Str, inout dst: Slice[u8], dst_pos: u64) -> u64 {
+    let bytes = s.as_bytes();
+    copy_range(in bytes, 0, bytes.len(), inout dst, dst_pos)
+}
+
+fn write_u64_dec(val: u64, inout dst: Slice[u8], dst_pos: u64) -> u64 {
+    if val == 0 {
+        let _ = dst.try_set(dst_pos, HEX_ASCII_ZERO);
+        return wrapping_add(dst_pos, 1);
+    }
+    let mut n = val;
+    let mut count: u64 = 0;
+    let mut tmp = val;
+    loop {
+        if tmp == 0 {
+            break;
+        }
+        tmp = tmp / 10;
+        count = wrapping_add(count, 1);
+    }
+    let end = wrapping_add(dst_pos, count);
+    let mut p = end;
+    loop {
+        if n == 0 {
+            break;
+        }
+        p = wrapping_sub(p, 1);
+        let d = n % 10;
+        let _ = dst.try_set(p, wrapping_u8(wrapping_add(widen_u64(HEX_ASCII_ZERO), d)));
+        n = n / 10;
+    }
+    end
+}
+
+pub fn migrate_render_origin(is_c_header: bool, in name: Slice[u8], inout out: Slice[u8]) -> u64 {
+    let mut pos: u64 = 0;
+    if is_c_header {
+        pos = copy_str(in "C header `", inout out, pos);
+    } else {
+        pos = copy_str(in "Rust crate `", inout out, pos);
+    }
+    pos = copy_range(in name, 0, name.len(), inout out, pos);
+    let _ = out.try_set(pos, BYTE_BACKTICK);
+    wrapping_add(pos, 1)
+}
+
+pub fn migrate_render_sys_value(kind: u8, in payload: Slice[u8], inout out: Slice[u8]) -> u64 {
+    if kind == SYS_VAL_UNIT {
+        return copy_str(in "Unit", inout out, 0);
+    }
+    if kind == SYS_VAL_BOOL {
+        return copy_str(in "bool", inout out, 0);
+    }
+    if kind == SYS_VAL_PASSTHROUGH {
+        return copy_range(in payload, 0, payload.len(), inout out, 0);
+    }
+    let mut pos = if kind == SYS_VAL_NULLABLE_PTR {
+        copy_str(in "NullablePtr[", inout out, 0)
+    } else {
+        copy_str(in "Ptr[", inout out, 0)
+    };
+    pos = copy_range(in payload, 0, payload.len(), inout out, pos);
+    let _ = out.try_set(pos, BYTE_RBRACKET);
+    wrapping_add(pos, 1)
+}
+
+pub fn migrate_render_wire_field(
+    kind: u8,
+    signed: bool,
+    endian: u8,
+    num: u64,
+    in name: Slice[u8],
+    inout out: Slice[u8],
+) -> u64 {
+    if kind == WIRE_KIND_INT {
+        let mut pos: u64 = 0;
+        let prefix = if signed { BYTE_LOWER_I } else { BYTE_LOWER_U };
+        let _ = out.try_set(pos, prefix);
+        pos = wrapping_add(pos, 1);
+        pos = write_u64_dec(num, inout out, pos);
+        if endian == WIRE_ENDIAN_LITTLE {
+            pos = copy_str(in "le", inout out, pos);
+        } else if endian == WIRE_ENDIAN_BIG {
+            pos = copy_str(in "be", inout out, pos);
+        }
+        return pos;
+    }
+    if kind == WIRE_KIND_BYTE_ARRAY {
+        let mut pos = copy_str(in "ByteArray[", inout out, 0);
+        pos = write_u64_dec(num, inout out, pos);
+        let _ = out.try_set(pos, BYTE_RBRACKET);
+        return wrapping_add(pos, 1);
+    }
+    if kind == WIRE_KIND_ZERO_PAD {
+        let mut pos = copy_str(in "ZeroPad[", inout out, 0);
+        pos = write_u64_dec(num, inout out, pos);
+        let _ = out.try_set(pos, BYTE_RBRACKET);
+        return wrapping_add(pos, 1);
+    }
+    copy_range(in name, 0, name.len(), inout out, 0)
+}
