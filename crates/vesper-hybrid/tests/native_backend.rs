@@ -72,6 +72,7 @@ enum Case {
     WideningLoads,
     RetainedLoad,
     MemoryStores,
+    FoldedMemoryAddresses,
     GuardedMemory,
     JoinedMemory,
     StackFrame(u32),
@@ -202,6 +203,7 @@ fn integer_backend_matches_cranelift_results() {
         Case::RetainedLoad,
         Case::AtomicIncrement,
         Case::MemoryStores,
+        Case::FoldedMemoryAddresses,
         Case::GuardedMemory,
         Case::JoinedMemory,
         Case::StackFrame(16),
@@ -712,6 +714,16 @@ fn integer_backend_matches_cranelift_results() {
                 let diff = builder.ins().bxor(new, old);
                 builder.ins().bxor(diff, overlapping)
             }
+            Case::FoldedMemoryAddresses => {
+                let flags = MemFlags::trusted();
+                let read = builder.ins().iadd_imm(a, -31);
+                let old = builder.ins().load(types::I64, flags, read, 29);
+                let write = builder.ins().iadd_imm(e, 129);
+                builder.ins().store(flags, b, write, -125);
+                let read = builder.ins().iadd_imm(e, -125);
+                let updated = builder.ins().load(types::I64, flags, read, 129);
+                builder.ins().bxor(old, updated)
+            }
             Case::GuardedMemory => {
                 let flags = MemFlags::new().with_notrap();
                 let yes = builder.create_block();
@@ -1119,7 +1131,7 @@ fn integer_backend_matches_cranelift_results() {
             }
             continue;
         }
-        if matches!(case, Case::MemoryStores) {
+        if matches!(case, Case::MemoryStores | Case::FoldedMemoryAddresses) {
             for (first, second) in [(256, 257), (257, 256)] {
                 let mut reference_memory = memory;
                 let mut generated_memory = memory;
@@ -1204,6 +1216,67 @@ fn labeled_blocks_reject_unknown_jumps_and_register_values_from_other_blocks() {
         1, NO_VALUE, 62, 0, 0, 1, 64, 1, 0, 0, 62, 1, 0, 1, 66, 0, 0, 0,
     ];
     assert!(binding::x86_64_integer_block(&other_block).is_empty());
+}
+
+#[test]
+fn memory_address_folding_requires_a_signed_displacement() {
+    const ADD_IMMEDIATE: u64 = 52;
+    const SUB_IMMEDIATE: u64 = 53;
+    const LOAD: u64 = 23;
+    const QWORD_BITS: u64 = u64::BITS as u64;
+    let with_add = |op, immediate, offset| {
+        binding::x86_64_integer_block(&[
+            1, 2, op, 0, immediate, QWORD_BITS, LOAD, 1, offset, QWORD_BITS,
+        ])
+    };
+    let direct = |offset| binding::x86_64_integer_block(&[1, 1, LOAD, 0, offset, QWORD_BITS]);
+    let negative = u64::from(-144_i32 as u32);
+    let expected = direct(negative);
+    assert!(!expected.is_empty());
+    assert_eq!(
+        with_add(
+            ADD_IMMEDIATE,
+            u64::from(-128_i32 as u32),
+            u64::from(-16_i32 as u32)
+        ),
+        expected
+    );
+    assert_eq!(
+        with_add(SUB_IMMEDIATE, 128, u64::from(-16_i32 as u32)),
+        expected
+    );
+    let beyond_signed = with_add(ADD_IMMEDIATE, i32::MAX as u64, 1);
+    assert!(beyond_signed.len() > direct(u64::from(i32::MIN as u32)).len());
+}
+
+#[test]
+fn unused_cfg_home_reloads_do_not_reserve_a_frame() {
+    const CONSTANT: u64 = 0;
+    const STACK_SLOT: u64 = 30;
+    const STACK_LOAD: u64 = 32;
+    const FLOAT_STACK_LOAD: u64 = 98;
+    const JUMP_LABEL: u64 = 64;
+    const BLOCK_RETURN: u64 = 66;
+    const WORD_BYTES: u64 = size_of::<u64>() as u64;
+    const WORD_BITS: u64 = u64::BITS as u64;
+    const NO_VALUE: u64 = u64::MAX;
+    let expected = binding::x86_64_integer_block(&[0, 0, CONSTANT, 42, 0, 0]);
+    assert!(!expected.is_empty());
+    for op in [STACK_LOAD, FLOAT_STACK_LOAD] {
+        #[rustfmt::skip]
+        let words = |offset| [
+            0, NO_VALUE,
+            STACK_SLOT, WORD_BYTES, WORD_BYTES, 0,
+            MACHINE_BLOCK_LABEL, 0, 1, 1,
+            JUMP_LABEL, 1, 0, 0,
+            MACHINE_BLOCK_LABEL, 1, 0, 1,
+            op, 0, offset, WORD_BITS,
+            CONSTANT, 42, 0, 0,
+            BLOCK_RETURN, 5, 0, 0,
+        ];
+        assert_eq!(binding::x86_64_integer_block(&words(0)), expected);
+        assert!(binding::x86_64_integer_block(&words(WORD_BYTES)).is_empty());
+    }
 }
 
 #[test]

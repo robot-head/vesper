@@ -269,9 +269,52 @@ fn write_record(inout words: ChunkSeq[u64], index: u64, in record: Record) {
     let _ = words.try_set(wrapping_add(start, EXTRA), record.extra);
 }
 
-// A wrapping add chain can become one multiply and one add. Keep the
-// original record IDs so branches, returns and relocations remain valid.
-fn fold_add_chains(
+fn fold_memory_address(
+    in words: Slice[u64],
+    in reads: ChunkSeq[u64],
+    arguments: u64,
+    index: u64,
+    in memory: Record
+) -> Option[Record] {
+    let store = is_store(memory.op);
+    if index == 0 || (!store && memory.op != LOAD && memory.op != FLOAT_LOAD) {
+        return Option::None;
+    }
+    let address_index = wrapping_sub(index, 1);
+    let address_value = wrapping_add(arguments, address_index);
+    if memory.left != address_value
+        || (store && memory.right == address_value)
+        || last_read(in reads, address_value) != wrapping_add(address_value, 1)
+    {
+        return Option::None;
+    }
+    let address = read_record(in words, address_index);
+    if address.extra != QWORD_BITS || (address.op != ADD_IMMEDIATE && address.op != SUB_IMMEDIATE) {
+        return Option::None;
+    }
+    let displacement = widen_i64(wrapping_i32(if store { memory.extra } else { memory.right }));
+    let immediate = widen_i64(wrapping_i32(address.right));
+    let combined = if address.op == ADD_IMMEDIATE {
+        wrapping_add(displacement, immediate)
+    } else {
+        wrapping_sub(displacement, immediate)
+    };
+    let encoded = wrapping_i32(combined);
+    if widen_i64(encoded) != combined {
+        return Option::None;
+    }
+    let bits = widen_u64(wrapping_u32(encoded));
+    Option::Some(Record {
+        op: memory.op,
+        left: address.left,
+        right: if store { memory.right } else { bits },
+        extra: if store { bits } else { memory.extra }
+    })
+}
+
+// Keep original record IDs when rewriting inputs. The second analysis
+// discards dead arithmetic and computes the new operand lifetimes.
+fn optimize_scalar_block(
     in words: Slice[u64],
     in reads: ChunkSeq[u64],
     arguments: u64,
@@ -285,8 +328,18 @@ fn fold_add_chains(
         }
         let first = read_record(in words, index);
         if first.op != ADD || (first.extra != DWORD_BITS && first.extra != QWORD_BITS) {
+            match fold_memory_address(in words, in reads, arguments, index, in first) {
+                Option::Some(memory) => {
+                    if folded.len() == 0 {
+                        folded.extend(in words);
+                    }
+                    write_record(inout folded, index, in memory);
+                },
+                Option::None => {},
+            };
             continue;
         }
+        // A wrapping add chain can become one multiply and one add.
         let mut base = first.left;
         let mut term = first.right;
         let mut end = index;
@@ -471,6 +524,10 @@ fn is_stack_operation(op: u64) -> bool {
 
 fn is_float_stack_operation(op: u64) -> bool {
     op == FLOAT_STACK_LOAD || op == FLOAT_STACK_STORE32 || op == FLOAT_STACK_STORE64
+}
+
+fn is_home_reload(in record: Record, home_slot: u64) -> bool {
+    (record.op == STACK_LOAD || record.op == FLOAT_STACK_LOAD) && record.left == home_slot
 }
 
 fn stack_slot(in record: Record) -> u64 {
@@ -1007,8 +1064,12 @@ fn find_last_reads(
                 Option::Some(_) => {},
                 Option::None => return Option::None,
             };
-            track_home(inout frame, in record);
-            frame.used = frame.used || record.op != STACK_ADDRESS || last != NEVER_READ;
+            // Validate even dead reloads. A private home read inside the
+            // allocated frame has no effect once its result is unused.
+            if live || !is_home_reload(in record, frame.home_slot) {
+                track_home(inout frame, in record);
+                frame.used = frame.used || record.op != STACK_ADDRESS || live;
+            }
         }
         if record.op >= ADD && record.op <= SAR && !valid_width(record.extra) {
             return Option::None;
@@ -1196,7 +1257,8 @@ fn without_register(used: u32, register: u8) -> u32 {
     used ^ (used & register_bit(register))
 }
 
-fn emits_instruction(op: u64, result_live: bool) -> bool {
+fn emits_instruction(in record: Record, result_live: bool, home_slot: u64) -> bool {
+    let op = record.op;
     op != STACK_SLOT
         && op != RETURN_PAIR
         && op != CALL_ARGUMENT
@@ -1204,8 +1266,8 @@ fn emits_instruction(op: u64, result_live: bool) -> bool {
         && (result_live
             || op == LOAD
             || op == FLOAT_LOAD
-            || op == STACK_LOAD
-            || op == FLOAT_STACK_LOAD
+            || ((op == STACK_LOAD || op == FLOAT_STACK_LOAD)
+                && !is_home_reload(in record, home_slot))
             || is_call(op)
             || is_atomic_rmw(op)
             || is_integer_division(op)
@@ -1306,8 +1368,9 @@ fn allocate(
         let end = last_read(in reads, value);
         let result_live = end != NEVER_READ;
         if !emits_instruction(
-            record.op,
-            result_live || live_overflow_flag(in reads, value, record.op)
+            in record,
+            result_live || live_overflow_flag(in reads, value, record.op),
+            frame.home_slot
         ) {
             locations.push(Location::Absent);
             continue;
@@ -1897,7 +1960,7 @@ fn encode_block_pass(
     in words: Slice[u64],
     allow_relocations: bool,
     inout relocations: ChunkSeq[u64],
-    fold_adds: bool
+    optimize: bool
 ) -> ChunkSeq[u8] {
     if words.len() < HEADER_WORDS {
         return ChunkSeq::new[u8]();
@@ -1990,8 +2053,8 @@ fn encode_block_pass(
     {
         return ChunkSeq::new[u8]();
     }
-    if fold_adds {
-        let folded = fold_add_chains(in words, in reads, arguments, count);
+    if optimize {
+        let folded = optimize_scalar_block(in words, in reads, arguments, count);
         if folded.len() != 0 {
             let mut folded_relocations = ChunkSeq::new[u64]();
             let output = encode_block_pass(
@@ -2049,8 +2112,9 @@ fn encode_block_pass(
             || record.op == FLOAT_ARGUMENT
             || record.op == BRANCH_TABLE_TARGET
             || !emits_instruction(
-                record.op,
-                result_live || live_overflow_flag(in reads, value, record.op)
+                in record,
+                result_live || live_overflow_flag(in reads, value, record.op),
+                frame.home_slot
             )
         {
             continue;
