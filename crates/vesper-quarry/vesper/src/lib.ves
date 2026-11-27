@@ -35,7 +35,10 @@
 use self::meta::{
     fsm_decode as fsm_decode_impl, fsm_encode as fsm_encode_impl, meta_decode as meta_decode_impl
 };
-use self::store_log::record_decode as sl_record_decode;
+use self::store_log::{
+    header_decode as sl_header_decode, header_encode as sl_header_encode,
+    record_decode as sl_record_decode
+};
 use self::util::{ex, lim, raw};
 use self::ddl::{ddl_apply_q};
 use self::plan::{optimize_q, prepare_q};
@@ -443,6 +446,14 @@ pub fn store_log_record_decode(
     inout out_ranges: Slice[u64]
 ) -> u64 {
     sl_record_decode(in payload, inout out_hdr, inout out_ranges)
+}
+
+pub fn store_log_header_encode(in fields: Slice[u64], inout out: Slice[u8]) {
+    sl_header_encode(in fields, inout out)
+}
+
+pub fn store_log_header_decode(in h: Slice[u8], inout out_fields: Slice[u64]) -> u64 {
+    sl_header_decode(in h, inout out_fields)
 }
 
 pub fn meta_decode(
