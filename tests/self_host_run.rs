@@ -350,6 +350,19 @@ const PROGRAMS: &[(&str, &str)] = &[
          (a == b, a == c, u, before, wrapping_add(wrapping_add(r.get(c), r.get(d)), v), n) } }",
     ),
     (
+        // DetFloat canonicalises NaN results program-wide; `eff
+        // [ConstDenorm]` code flushes subnormal operands and results, but
+        // not bit reinterpretations.
+        "float_modes",
+        "fn nan(x: f64) -> (u64, u64, u32, f64) eff [DetFloat] { \
+         let n = from_bits_f64(9221120237041090561); let m = x * 1.0; \
+         (to_bits_f64(n + 1.0), to_bits_f64(m), to_bits_f32(nearest_f32(n)), -n) } \
+         fn flush(x: f64, y: f32) -> (f64, f32, f64, u64) eff [ConstDenorm] { \
+         let tiny = from_bits_f64(1); (x * 1e-310, y * 1e-40, tiny + 0.0, to_bits_f64(tiny)) } \
+         fn main() -> ((u64, u64, u32, f64), (f64, f32, f64, u64), f64) { \
+         let raw = from_bits_f64(9221120237041090561); (nan(raw), flush(1.0, 1.0), 1e-310 * 1.0) }",
+    ),
+    (
         "region_first_chunk",
         "fn main() -> i64 { region r(8) { let x = r.box((1, 2)); 0 } }",
     ),

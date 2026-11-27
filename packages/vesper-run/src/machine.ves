@@ -91,6 +91,10 @@ const F32_EXPONENT: u64 = 2139095040;
 const F32_FRACTION: u64 = 8388607;
 // The bits of a binary32 (`f32::from_bits` of the low half).
 const F32_BITS: u64 = 4294967295;
+// The canonical quiet NaNs a DetFloat program's canonicalising operations
+// return (`canonical_value`).
+const F64_CANONICAL_NAN: u64 = 9221120237041090560;
+const F32_CANONICAL_NAN: u64 = 2143289344;
 
 // Frame kinds (`Frame::IrResume`, `Frame::Try`).
 const FR_IR: u8 = 0;
@@ -359,6 +363,12 @@ pub struct M {
     rmarks: ChunkSeq[Rm],
     region_sym: u32,
     index_field_sym: u32,
+    // The float modes (`FloatMode`): DetFloat NaN canonicalisation, and per
+    // instruction whether it is `eff [ConstDenorm]` code (flushes
+    // subnormals); `float_modes` when either applies anywhere.
+    canonical_nans: bool,
+    flushes: ChunkSeq[bool],
+    float_modes: bool,
 }
 
 fn fr_zero() -> Fr {
@@ -464,6 +474,9 @@ pub fn machine_new(sink ctx: Ctx, sink program: Program, fuel: u64) -> M {
         rmarks: ChunkSeq::new[Rm](),
         region_sym: 0,
         index_field_sym: 0,
+        canonical_nans: false,
+        flushes: ChunkSeq::new[bool](),
+        float_modes: false,
     }
 }
 
@@ -713,6 +726,13 @@ pub fn read_sites(inout machine: M, inout reader: Reader, in bytes: Slice[u8]) {
             machine.sites.push(reader.word(in bytes));
         }
     }
+    machine.canonical_nans = reader.word(in bytes) != 0;
+    machine.flushes.resize(machine.program.insts.len(), false);
+    let flush_count = reader.word(in bytes);
+    for i in 0..flush_count {
+        let ok = machine.flushes.try_set(reader.word(in bytes), true);
+    }
+    machine.float_modes = machine.canonical_nans || flush_count != 0;
 }
 
 // The site of instruction `inst_id` of kind `kind`, or NONE64.
@@ -3014,6 +3034,103 @@ fn binary(inout machine: M, code: u64, lhs: Val, rhs: Val, inout failure: u8) ->
     undef()
 }
 
+// ----- float modes -------------------------------------------------------------
+
+// `flush_value`: in `eff [ConstDenorm]` code (instruction `inst_id`), a
+// subnormal float becomes a zero of the same sign.
+fn flush_val(in machine: M, inst_id: u64, value: Val) -> Val {
+    let flushes = match machine.flushes.try_get(inst_id) {
+        Option::Some(found) => found,
+        Option::None => false,
+    };
+    if !flushes {
+        return value;
+    }
+    if value.tag == T_F64
+        && value.payload & F64_EXPONENT == 0
+        && value.payload & F64_FRACTION != 0
+    {
+        return Val { tag: T_F64, payload: value.payload & F64_SIGN };
+    }
+    if value.tag == T_F32
+        && value.payload & F32_EXPONENT == 0
+        && value.payload & F32_FRACTION != 0
+    {
+        return Val { tag: T_F32, payload: value.payload & F32_SIGN };
+    }
+    value
+}
+
+// `canonical_value` of a canonicalising operation's result: a NaN becomes
+// the canonical NaN of its kind in a DetFloat program.
+fn canonical_val(in machine: M, value: Val) -> Val {
+    if !machine.canonical_nans {
+        return value;
+    }
+    if value.tag == T_F64
+        && value.payload & F64_EXPONENT == F64_EXPONENT
+        && value.payload & F64_FRACTION != 0
+    {
+        return Val { tag: T_F64, payload: F64_CANONICAL_NAN };
+    }
+    if value.tag == T_F32
+        && value.payload & F32_EXPONENT == F32_EXPONENT
+        && value.payload & F32_FRACTION != 0
+    {
+        return Val { tag: T_F32, payload: F32_CANONICAL_NAN };
+    }
+    value
+}
+
+// `binary_at`: `binary` under instruction `inst_id`'s float mode. The
+// arithmetic operators canonicalise; `%` (a library call) does not.
+fn binary_at(
+    inout machine: M,
+    inst_id: u64,
+    code: u64,
+    lhs: Val,
+    rhs: Val,
+    inout failure: u8
+) -> Val {
+    if !machine.float_modes {
+        return binary(inout machine, code, lhs, rhs, inout failure);
+    }
+    let a = flush_val(in machine, inst_id, lhs);
+    let b = flush_val(in machine, inst_id, rhs);
+    let mut result = binary(inout machine, code, a, b, inout failure);
+    let op = wrapping_u8(code);
+    if is_float(a) && (op == B_ADD || op == B_SUB || op == B_MUL || op == B_DIV) {
+        result = canonical_val(in machine, result);
+    }
+    flush_val(in machine, inst_id, result)
+}
+
+// `unary_at`: `unary` under instruction `inst_id`'s float mode. A bit
+// reinterpretation is exact; a conversion between `f32` and `f64`
+// canonicalises; `-x` is a sign-bit operation.
+fn unary_at(inout machine: M, inst_id: u64, code: u64, value: Val, inout failure: u8) -> Val {
+    if !machine.float_modes {
+        return unary(inout machine, code, value, inout failure);
+    }
+    let conversion = if code >= U_FLOAT {
+        wrapping_sub(code, U_FLOAT) / FLOAT_KINDS
+    } else {
+        NONE64
+    };
+    if conversion == FC_TO_BITS || conversion == FC_FROM_BITS {
+        return unary(inout machine, code, value, inout failure);
+    }
+    let operand = flush_val(in machine, inst_id, value);
+    let mut result = unary(inout machine, code, operand, inout failure);
+    if conversion == FC_WIDEN || conversion == FC_NEAREST {
+        let kind = wrapping_sub(code, U_FLOAT) % FLOAT_KINDS;
+        if (operand.tag == T_F32 && kind == FK_F64) || (operand.tag == T_F64 && kind == FK_F32) {
+            result = canonical_val(in machine, result);
+        }
+    }
+    flush_val(in machine, inst_id, result)
+}
+
 // `binary` of two `f64` values.
 fn f64_binary(inout machine: M, op: u8, a: f64, b: f64) -> Val {
     if op == B_ADD {
@@ -3547,7 +3664,7 @@ fn step(inout machine: M) {
             if machine.failed {
                 return;
             }
-            new = binary(inout machine, write_row.code, old, value, inout failure);
+            new = binary_at(inout machine, inst_id, write_row.code, old, value, inout failure);
             if failure != F_OK {
                 suspend(inout machine, inst.dest, inst.ty);
                 raise(inout machine, failure);
@@ -3564,14 +3681,27 @@ fn step(inout machine: M) {
         if machine.failed {
             return;
         }
-        result = unary(inout machine, u64_at(in machine.aux, inst_id), value, inout failure);
+        result = unary_at(
+            inout machine,
+            inst_id,
+            u64_at(in machine.aux, inst_id),
+            value,
+            inout failure
+        );
     } else if op == Op::Binary {
         let lhs = get(inout machine, machine.program.op(inc(operand_at)));
         let rhs = get(inout machine, machine.program.op(add(operand_at, 2)));
         if machine.failed {
             return;
         }
-        result = binary(inout machine, u64_at(in machine.aux, inst_id), lhs, rhs, inout failure);
+        result = binary_at(
+            inout machine,
+            inst_id,
+            u64_at(in machine.aux, inst_id),
+            lhs,
+            rhs,
+            inout failure
+        );
     } else if op == Op::Tuple {
         let n = machine.program.op(operand_at);
         let kid_start = machine.kids.len();
