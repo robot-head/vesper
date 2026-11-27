@@ -92,7 +92,7 @@ CRATES = {
     "vesper-loom-sandbox": ("c-api", "", "", "wasmtime: use the wasmtime C API", "16"),
     "vesper-nexus": ("c-api", "", "", "wasmtime C API; wit-parser ports (SH5-11 has a WIT reader)", "16"),
     "vesper-forge-runner": ("c-api", "", "", "wasmtime C API", "16"),
-    "vesper-loom-tuf": ("rust-lib", "", "", "tough/tokio: TUF metadata on the Vesper JSON port + crypto shim", "16"),
+    "vesper-loom-tuf": ("partial", "in crate", "bound_json 0.16x, delegation_graph 0.07x, ed25519_quorum 0.29x (flipped)", "target/path/limit validation, streaming bounded JSON, delegation graph cycle/depth check, SHA-256 hex, and Ed25519 quorum verification in Vesper (#1411, #2295); tough/tokio offline updater & Unix CheckpointStore remain Rust", "16"),
     "vesper-fusion": ("partial", "in crate (engine, witness)", "witness_check 0.49x, witness_parse 0.85x (flipped)", "saturation engine and independent witness checker in Vesper (#1413, #2239); tensor/dsp graph builders and evaluators stay Rust", "18"),
     "vesper-beacon-arrow": ("rust-lib", "", "", "arrow-rs, tonic, prost: Arrow IPC and gRPC on Prism", "18"),
     "vesper-migrate": ("rust-lib", "", "", "out of the compiler's closure (#1398); lang-c, syn: C and Rust readers in Vesper", "18"),

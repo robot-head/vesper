@@ -1,3 +1,52 @@
 load("//tools/bazel:defs.bzl", "vesper_crate")
+load("//tools/bazel:vesper_port.bzl", "VESPER_TARGET", "vesper_package", "vesper_port_object")
 
-vesper_crate()
+# Bounded validation, streaming JSON limiter, delegation graph checker, SHA-256
+# hex digest, and Ed25519 role quorum verifier are the Vesper port (Rust-exit
+# SH6 lane 16, #1411 / #2295).
+vesper_package(
+    name = "port_package",
+    srcs = glob(["vesper/src/**/*.ves"]),
+    manifest = "vesper/Loom.toml",
+    deps = ["//packages/vesper-crypto:crypto_package"],
+)
+
+vesper_port_object(
+    name = "loom_tuf_vesper",
+    library = "loom_tuf",
+    package = ":port_package",
+    target = VESPER_TARGET,
+)
+
+filegroup(
+    name = "loom_tuf_vesper_binding",
+    srcs = [":loom_tuf_vesper"],
+    output_group = "rust_binding",
+)
+
+[
+    vesper_port_object(
+        name = "loom_tuf_vesper_divergent_" + area,
+        edit_src = "vesper/src/lib.ves",
+        edits = {old: new},
+        library = "loom_tuf",
+        package = ":port_package",
+        target = VESPER_TARGET,
+    )
+    for area, old, new in [
+        ("json", "            if depth > max_depth || nodes > max_nodes {", "            if false && (depth > max_depth || nodes > max_nodes) {"),
+        ("graph", "                    if at_u8(in visit, child) == VISIT_ON_PATH {", "                    if false && at_u8(in visit, child) == VISIT_ON_PATH {"),
+        ("quorum", "                    if valid_count >= threshold {", "                    if valid_count > threshold {"),
+    ]
+]
+
+vesper_crate(
+    build_script_data = [
+        ":loom_tuf_vesper",
+        ":loom_tuf_vesper_binding",
+    ],
+    build_script_env = {
+        "VESPER_PORT_OBJECT": "$(execpath :loom_tuf_vesper)",
+        "VESPER_PORT_GENERATED_BINDING": "$(execpath :loom_tuf_vesper_binding)",
+    },
+)
