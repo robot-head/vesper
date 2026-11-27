@@ -1,0 +1,434 @@
+// The region rules of the core checker (src/regions/check.rs and
+// src/regions.rs, design §15.2): region types (`RegionBox[r, T]`,
+// `Watermark[r]` over a capability row), the region operations
+// `r.op(args)` ([T-RegionAlloc] and the access rules), annotations
+// normalized to capability labels, and the region-specific mismatch code.
+// The post-check flow rule (`regions::check_world`, E0796) is outside core
+// typing.
+
+use @vesper/check-data::util::{add, n32, u32_at, w};
+use @vesper/check-data::types::{EffNode, default_type, TyKind, TyMode};
+use self::exprs::{
+    Ck, Ex, Inst, actual_arg, cap_at, cap_label, effect_decl, error, expect_type, expr,
+    expr_expected, lookup_alias, mode, named, require_effect, total_caps
+};
+use self::relations::{item, refine_annotation, unresolved};
+
+const NONE32: u32 = 4294967295;
+
+// Argument passing (keep equal to exprs.ves).
+const P_INOUT: u8 = 1;
+
+// `regions::REGION_EFFECT`, `regions::BOX_TYPE` and
+// `regions::WATERMARK_TYPE`.
+const REGION_EFFECT: Str = "Region";
+const WATERMARK_TYPE: Str = "Watermark";
+
+// `regions::OPERATIONS`: the built-in effect's operations.
+const REGION_OPERATIONS: u32 = 8;
+const OP_BOX: Str = "box";
+const OP_GET: Str = "get";
+const OP_SET: Str = "set";
+const OP_TAKE: Str = "take";
+const OP_CHECKPOINT: Str = "checkpoint";
+const OP_REWIND: Str = "rewind";
+const OP_COMMIT: Str = "commit";
+const OP_USED: Str = "used";
+
+// Operand counts of the region operations.
+const NULLARY: u64 = 0;
+const UNARY: u64 = 1;
+const BINARY: u64 = 2;
+const UNKNOWN_ARITY: u64 = 18446744073709551615;
+
+fn region_sym(inout ck: Ck) -> u32 {
+    ck.ctx.names.intern(in REGION_EFFECT.as_bytes())
+}
+
+fn watermark_sym(inout ck: Ck) -> u32 {
+    ck.ctx.names.intern(in WATERMARK_TYPE.as_bytes())
+}
+
+fn is_op(in ck: Ck, op: u32, in name: Str) -> bool {
+    ck.ctx.names.lookup(in name.as_bytes()) == op
+}
+
+// `regions::active`: the World's `Region` effect is the built-in one.
+pub fn region_active(inout ck: Ck) -> bool {
+    let name = region_sym(inout ck);
+    let decl = effect_decl(in ck, name);
+    if decl.name == NONE32 || decl.generic_count != 0 || decl.op_count != REGION_OPERATIONS {
+        return false;
+    }
+    let index = ck.ctx.world.effect_index(name);
+    index != NONE32 && ck.ctx.world.effect_row(index).linear
+}
+
+// `regions::region_row(label)`: the row `eff [label: Region]` as a type.
+pub fn region_row(inout ck: Ck, label: u32) -> u32 {
+    let mut effs: ChunkSeq[EffNode] = ChunkSeq::new[EffNode]();
+    let args: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    effs.push(EffNode { label: label, name: region_sym(inout ck), a: 0, n: 0 });
+    let row = ck.ctx.types.mk_row(in effs, in args, 0);
+    ck.ctx.types.row_type(row)
+}
+
+// `regions::row_label`: the label (symbol + 1) of a normalized region
+// argument, or 0.
+pub fn row_label(in ck: Ck, ty: u32) -> u32 {
+    let node = ck.ctx.types.node(ty);
+    if node.kind != TyKind::Row {
+        return 0;
+    }
+    let row = ck.ctx.types.row(node.r2);
+    if row.tail != 0 || row.n != 1 {
+        return 0;
+    }
+    let eff = ck.ctx.types.effect_at(w(row.a));
+    if eff.n != 0 || ck.ctx.names.lookup(in REGION_EFFECT.as_bytes()) != eff.name {
+        return 0;
+    }
+    eff.label
+}
+
+fn box_type(inout ck: Ck, label: u32, payload: u32) -> u32 {
+    let mut targs: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    targs.push(region_row(inout ck, label));
+    targs.push(payload);
+    let box_sym = ck.ctx.world.k.region_box;
+    ck.ctx.types.named(box_sym, in targs)
+}
+
+fn watermark_type(inout ck: Ck, label: u32) -> u32 {
+    let mut targs: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    targs.push(region_row(inout ck, label));
+    let mark_sym = watermark_sym(inout ck);
+    ck.ctx.types.named(mark_sym, in targs)
+}
+
+// `regions::box_parts`: the region label of a normalized `RegionBox`, or 0.
+fn box_label(in ck: Ck, ty: u32) -> u32 {
+    let node = ck.ctx.types.node(ty);
+    if node.kind != TyKind::Named || node.name != ck.ctx.world.k.region_box || node.n != 2 {
+        return 0;
+    }
+    row_label(in ck, item(in ck.ctx.types, w(node.a)))
+}
+
+// The payload of a `RegionBox` whose `box_label` is not 0.
+fn box_payload(in ck: Ck, ty: u32) -> u32 {
+    ck.ctx.types.arg(ty, 1)
+}
+
+// `regions::watermark_label`, or 0.
+fn watermark_label(in ck: Ck, ty: u32) -> u32 {
+    let node = ck.ctx.types.node(ty);
+    if node.kind != TyKind::Named
+        || node.n != 1
+        || ck.ctx.names.lookup(in WATERMARK_TYPE.as_bytes()) != node.name
+    {
+        return 0;
+    }
+    row_label(in ck, item(in ck.ctx.types, w(node.a)))
+}
+
+// `regions::mismatch` chooses E0792 over E0200: both sides are boxes or
+// watermarks of different regions.
+pub fn region_cross(in ck: Ck, expected: u32, actual: u32) -> bool {
+    let a = box_label(in ck, expected);
+    let b = box_label(in ck, actual);
+    if a != 0 && b != 0 && a != b {
+        return true;
+    }
+    let c = watermark_label(in ck, expected);
+    let d = watermark_label(in ck, actual);
+    c != 0 && d != 0 && c != d
+}
+
+// The source label (symbol + 1) a region argument spells: a plain name
+// `r`, or the parser's row variable `r`; 0 for another type.
+fn source_label(in ck: Ck, ty: u32) -> u32 {
+    let node = ck.ctx.types.node(ty);
+    if node.kind == TyKind::Named && node.n == 0 {
+        return wrapping_add(node.name, 1);
+    }
+    if node.kind == TyKind::Row {
+        let row = ck.ctx.types.row(node.r2);
+        if row.n == 0 {
+            return row.tail;
+        }
+    }
+    0
+}
+
+// `Checker::region_annotation` (`regions::normalize` with the capability
+// aliases): source region labels in `ty` become capability rows.
+pub fn region_annotation(inout ck: Ck, ty: u32) -> u32 {
+    let node = ck.ctx.types.node(ty);
+    if node.kind == TyKind::Named && node.n != 0 {
+        let mut args: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        for i in 0..w(node.n) {
+            let t = item(in ck.ctx.types, add(w(node.a), i));
+            args.push(region_annotation(inout ck, t));
+        }
+        let handle = node.name == ck.ctx.world.k.region_box
+            || ck.ctx.names.lookup(in WATERMARK_TYPE.as_bytes()) == node.name;
+        if handle {
+            let source = source_label(in ck, u32_at(in args, 0));
+            let cap = if source == 0 {
+                0
+            } else {
+                lookup_alias(in ck, source)
+            };
+            if cap != 0 {
+                let row = region_row(inout ck, cap);
+                let ok = args.try_set(0, row);
+            }
+        }
+        return ck.ctx.types.named(node.name, in args);
+    }
+    if node.kind == TyKind::Tuple {
+        let mut parts: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        for i in 0..w(node.n) {
+            let t = item(in ck.ctx.types, add(w(node.a), i));
+            parts.push(region_annotation(inout ck, t));
+        }
+        return ck.ctx.types.tuple(in parts);
+    }
+    if node.kind == TyKind::Fn {
+        let mut params: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        let mut passes: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        for i in 0..w(node.n) {
+            let t = item(in ck.ctx.types, add(w(node.a), i));
+            params.push(region_annotation(inout ck, t));
+            passes.push(ck.ctx.types.param_pass(ty, i));
+        }
+        let result = region_annotation(inout ck, node.r);
+        return ck.ctx.types.mk_with(
+            TyKind::Fn,
+            node.mode,
+            node.name,
+            in params,
+            in passes,
+            result,
+            node.r2,
+            node.lit
+        );
+    }
+    ty
+}
+
+// `contains_capability(t, cap)`: `ty` mentions the capability `label`.
+pub fn contains_capability(in ck: Ck, ty: u32, label: u32) -> bool {
+    let node = ck.ctx.types.node(ty);
+    if node.kind == TyKind::Row || node.kind == TyKind::Fn {
+        let row = ck.ctx.types.row(node.r2);
+        for i in 0..w(row.n) {
+            let eff = ck.ctx.types.effect_at(add(w(row.a), i));
+            if eff.label == label {
+                return true;
+            }
+            if node.kind == TyKind::Row {
+                for j in 0..w(eff.n) {
+                    if contains_capability(in ck, item(in ck.ctx.types, add(w(eff.a), j)), label) {
+                        return true;
+                    }
+                }
+            }
+        }
+        if node.kind == TyKind::Row {
+            return false;
+        }
+        if contains_capability(in ck, node.r, label) {
+            return true;
+        }
+    }
+    if node.kind == TyKind::Named || node.kind == TyKind::Tuple || node.kind == TyKind::Fn {
+        for i in 0..w(node.n) {
+            if contains_capability(in ck, item(in ck.ctx.types, add(w(node.a), i)), label) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+// `Checker::region_capability`: the label of the region capability a
+// source label names (through the capability aliases), or 0.
+pub fn region_capability(inout ck: Ck, name: u32) -> u32 {
+    if !region_active(inout ck) {
+        return 0;
+    }
+    let source = wrapping_add(name, 1);
+    let alias = lookup_alias(in ck, source);
+    let target = if alias != 0 { alias } else { source };
+    let region = region_sym(inout ck);
+    let total = total_caps(in ck);
+    for i in 0..total {
+        let label = cap_label(inout ck, i);
+        if label == target {
+            if cap_at(in ck, i).name == region {
+                return label;
+            }
+            return 0;
+        }
+    }
+    0
+}
+
+fn region_arity(in ck: Ck, op: u32) -> u64 {
+    if is_op(in ck, op, OP_CHECKPOINT) || is_op(in ck, op, OP_USED) {
+        NULLARY
+    } else if is_op(in ck, op, OP_BOX)
+        || is_op(in ck, op, OP_GET)
+        || is_op(in ck, op, OP_TAKE)
+        || is_op(in ck, op, OP_REWIND)
+        || is_op(in ck, op, OP_COMMIT)
+    {
+        UNARY
+    } else if is_op(in ck, op, OP_SET) {
+        BINARY
+    } else {
+        UNKNOWN_ARITY
+    }
+}
+
+fn region_request(inout ck: Ck, cap: u32) -> Inst {
+    let start = ck.inst_args.len();
+    Inst { name: region_sym(inout ck), label: cap, arg_start: n32(start), arg_count: 0 }
+}
+
+fn rest_exprs(inout ck: Ck, ex: Ex, from: u64) {
+    for i in from..w(ex.n) {
+        let arg = actual_arg(in ck, ex, i);
+        let t = expr(inout ck, arg.expr);
+    }
+}
+
+// Whether a live binding holds a box of the region `cap` whose payload is
+// linear (`rewind`'s E0795). This checker does not track moves, so such a
+// binding skips the function.
+fn live_linear_box(inout ck: Ck, cap: u32) -> bool {
+    for i in 0..ck.env.len() {
+        let b = match ck.env.try_get(i) {
+            Option::Some(b) => b,
+            Option::None => continue,
+        };
+        if box_label(in ck, b.ty) == cap
+            && mode(inout ck, box_payload(in ck, b.ty)) == TyMode::Linear
+        {
+            return true;
+        }
+    }
+    false
+}
+
+// `Checker::region_op`: types `r.op(args)` for the region capability `cap`.
+pub fn region_op(inout ck: Ck, cap: u32, op: u32, ex: Ex, expected: u32) -> u32 {
+    let hole = ck.ctx.types.infer;
+    let known = ck.ctx.world.k;
+    let arity = region_arity(in ck, op);
+    if w(ex.n) != arity {
+        error(inout ck, "E0790", ex.start, ex.end);
+        rest_exprs(inout ck, ex, 0);
+        return hole;
+    }
+    for i in 0..w(ex.n) {
+        let arg = actual_arg(in ck, ex, i);
+        if arg.explicit && arg.pass == P_INOUT {
+            let arg_ex = ck.ex(arg.expr);
+            error(inout ck, "E0308", arg_ex.start, arg_ex.end);
+        }
+    }
+    let mut result = hole;
+    if is_op(in ck, op, OP_BOX) {
+        let arg = actual_arg(in ck, ex, 0);
+        let arg_ex = ck.ex(arg.expr);
+        let hint = if box_label(in ck, expected) != 0 {
+            box_payload(in ck, expected)
+        } else {
+            hole
+        };
+        let actual = expr_expected(inout ck, arg.expr, hint);
+        if ck.skip {
+            return hole;
+        }
+        if hint != hole {
+            expect_type(inout ck, hint, actual, arg_ex.start, arg_ex.end);
+        }
+        let payload = if hint == hole {
+            default_type(inout ck.ctx.types, actual)
+        } else {
+            refine_annotation(inout ck.ctx.types, hint, actual)
+        };
+        if unresolved(in ck.ctx.types, payload) || ck.ctx.types.name(payload) == known.never {
+            error(inout ck, "E0208", arg_ex.start, arg_ex.end);
+        }
+        result = box_type(inout ck, cap, payload);
+    } else if is_op(in ck, op, OP_GET) || is_op(in ck, op, OP_SET) || is_op(in ck, op, OP_TAKE) {
+        let arg = actual_arg(in ck, ex, 0);
+        let arg_ex = ck.ex(arg.expr);
+        let boxed = expr(inout ck, arg.expr);
+        if ck.skip {
+            return hole;
+        }
+        let label = box_label(in ck, boxed);
+        if label == 0 {
+            if boxed != hole {
+                error(inout ck, "E0798", arg_ex.start, arg_ex.end);
+            }
+            rest_exprs(inout ck, ex, 1);
+            let request = region_request(inout ck, cap);
+            require_effect(inout ck, request);
+            return hole;
+        }
+        let payload = box_payload(in ck, boxed);
+        if label != cap {
+            error(inout ck, "E0792", arg_ex.start, arg_ex.end);
+        }
+        let payload_mode = mode(inout ck, payload);
+        let take = is_op(in ck, op, OP_TAKE);
+        if !take && payload_mode != TyMode::Copy {
+            error(inout ck, "E0793", arg_ex.start, arg_ex.end);
+        } else if take && payload_mode == TyMode::Copy {
+            error(inout ck, "E0794", arg_ex.start, arg_ex.end);
+        }
+        if is_op(in ck, op, OP_SET) {
+            let value = actual_arg(in ck, ex, 1);
+            let value_ex = ck.ex(value.expr);
+            let t = expr_expected(inout ck, value.expr, payload);
+            if ck.skip {
+                return hole;
+            }
+            expect_type(inout ck, payload, t, value_ex.start, value_ex.end);
+            result = ck.ctx.types.unit;
+        } else {
+            result = payload;
+        }
+    } else if is_op(in ck, op, OP_CHECKPOINT) {
+        result = watermark_type(inout ck, cap);
+    } else if is_op(in ck, op, OP_REWIND) || is_op(in ck, op, OP_COMMIT) {
+        let arg = actual_arg(in ck, ex, 0);
+        let arg_ex = ck.ex(arg.expr);
+        let mark = expr(inout ck, arg.expr);
+        if ck.skip {
+            return hole;
+        }
+        let label = watermark_label(in ck, mark);
+        if label != 0 && label != cap {
+            error(inout ck, "E0792", arg_ex.start, arg_ex.end);
+        } else if label == 0 && mark != hole {
+            error(inout ck, "E0798", arg_ex.start, arg_ex.end);
+        }
+        if is_op(in ck, op, OP_REWIND) && live_linear_box(inout ck, cap) {
+            ck.skip = true;
+            return hole;
+        }
+        result = ck.ctx.types.unit;
+    } else {
+        result = named(inout ck, known.u64_);
+    }
+    let request = region_request(inout ck, cap);
+    require_effect(inout ck, request);
+    result
+}
