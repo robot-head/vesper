@@ -571,6 +571,56 @@ fn flip_gate_crl_this_update() {
     println!("flip-gate pairs crl_this_update {}", pairs.join(" "));
 }
 
+const AMD_EXT_PASSES: usize = 5_000;
+
+fn flip_gate_amd_cert_ext() {
+    let der = std::fs::read(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/data/vendor/snp-virtee-sev/vcek_milan.der"),
+    )
+    .unwrap();
+    let rust_parse = |b: &[u8]| -> usize {
+        let (rest, cert) = x509_parser::parse_x509_certificate(b).unwrap();
+        assert!(rest.is_empty());
+        cert.extensions().len()
+    };
+    let parsed =
+        port::amd::parse_amd_cert_extensions(&der, port::roots::AmdProduct::Milan).unwrap();
+    assert_eq!(parsed.product_name.split('-').next(), Some("Milan"));
+    let run_rust = || -> u64 {
+        let t = Instant::now();
+        for _ in 0..AMD_EXT_PASSES {
+            black_box(rust_parse(black_box(&der)));
+        }
+        t.elapsed().as_nanos() as u64
+    };
+    let run_port = || -> u64 {
+        let t = Instant::now();
+        for _ in 0..AMD_EXT_PASSES {
+            black_box(
+                port::amd::parse_amd_cert_extensions(
+                    black_box(&der),
+                    port::roots::AmdProduct::Milan,
+                )
+                .unwrap(),
+            );
+        }
+        t.elapsed().as_nanos() as u64
+    };
+    black_box(run_rust());
+    black_box(run_port());
+    let pairs: Vec<String> = (0..FLIP_GATE_EPOCHS)
+        .map(|_| {
+            let a1 = run_rust();
+            let b1 = run_port();
+            let b2 = run_port();
+            let a2 = run_rust();
+            format!("{}:{}", a1 + a2, b1 + b2)
+        })
+        .collect();
+    println!("flip-gate pairs amd_cert_ext {}", pairs.join(" "));
+}
+
 fn main() {
     assert_eq!(port::IMPLEMENTATION, "vesper");
     let args: Vec<String> = std::env::args().collect();
@@ -589,6 +639,10 @@ fn main() {
         }
         if args.get(2).map(String::as_str) == Some("crl_this_update") {
             flip_gate_crl_this_update();
+            return;
+        }
+        if args.get(2).map(String::as_str) == Some("amd_cert_ext") {
+            flip_gate_amd_cert_ext();
             return;
         }
     }

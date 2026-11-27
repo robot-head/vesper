@@ -81,6 +81,10 @@
     {
       "workload": "crl_this_update",
       "run": ["cargo", "run", "--locked", "--release", "-p", "vesper-aegis", "--example", "abba", "--", "flip-gate-inproc", "crl_this_update"]
+    },
+    {
+      "workload": "amd_cert_ext",
+      "run": ["cargo", "run", "--locked", "--release", "-p", "vesper-aegis", "--example", "abba", "--", "flip-gate-inproc", "amd_cert_ext"]
     }
   ]
 }
