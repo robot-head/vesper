@@ -15,7 +15,7 @@ use self::x86_64::{
     store_immediate_fits, VECTOR_BITS, PAND, POR, PXOR, PackedInteger, PackedRelation,
     packed_integer_opcode, BitOperation, Rounding, PackedShift, ROL_EXTENSION, ROR_EXTENSION,
     WIN64_ARGUMENTS, win64_arg_register, win64_reserved_registers, WIN64_XMM_LEFT_SCRATCH,
-    WIN64_XMM_RIGHT_SCRATCH
+    WIN64_XMM_RIGHT_SCRATCH, WIN64_NONVOLATILE_XMM_MASK
 };
 use @vesper/codegen-freestanding::util::{push16};
 
@@ -298,6 +298,7 @@ const WIN64_UNWIND_VERSION: u8 = 1;
 const WIN64_UNWIND_ALLOC_LARGE: u8 = 1;
 const WIN64_UNWIND_ALLOC_SMALL: u8 = 2;
 const WIN64_UNWIND_SAVE_NONVOL: u8 = 4;
+const WIN64_UNWIND_SAVE_XMM128: u8 = 8;
 const WIN64_UNWIND_INFO_SHIFT: u32 = 4;
 const WIN64_UNWIND_SMALL_LIMIT: u64 = 128;
 const WIN64_UNWIND_MAX_PROLOGUE: u64 = 255;
@@ -387,12 +388,13 @@ struct Allocation {
     local_frame: u64,
     save_frame: u64,
     callee_save_frame: u64,
+    callee_save_xmm_frame: u64,
     callee_save_mask: u32,
 }
 
 copy struct Win64Save {
     code_end: u8,
-    register: u8,
+    operation: u8,
     stack_slot: u16,
 }
 
@@ -2161,6 +2163,15 @@ fn win64_stack_argument_offset(position: u64) -> u64 {
     wrapping_add(RETURN_ADDRESS_BYTES, wrapping_mul(position, SPILL_SLOT_BYTES))
 }
 
+fn callee_save_end(start: u64, gp_bytes: u64, xmm_bytes: u64) -> u64 {
+    let gp_end = wrapping_add(start, gp_bytes);
+    if xmm_bytes == 0 {
+        gp_end
+    } else {
+        wrapping_add(align_up(gp_end, VECTOR_SLOT_BYTES), xmm_bytes)
+    }
+}
+
 // Scan in instruction order. Expire a register at its last use. If the
 // register-only pass fills up, retry with three reload registers reserved
 // and let spilled values with disjoint lifetimes share stack slots.
@@ -2189,35 +2200,34 @@ fn allocate(
     } else {
         0
     };
-    let mut reserved = if frame.floating {
-        gp_reserved
-            | frame.temporary_registers
-            | register_bit(XMM_LEFT_SCRATCH)
-            | register_bit(XMM_RIGHT_SCRATCH)
-    } else {
-        gp_reserved | frame.temporary_registers
-    };
-    if frame.xmm_aux {
-        reserved = reserved | register_bit(XMM_AUX_SCRATCH);
-    }
+    let mut reserved = gp_reserved | frame.temporary_registers;
     if windows_abi {
-        reserved = reserved | win64_reserved_registers();
+        reserved = reserved | win64_reserved_registers(spills);
+    } else {
+        if frame.floating {
+            reserved = reserved | register_bit(XMM_LEFT_SCRATCH) | register_bit(XMM_RIGHT_SCRATCH);
+        }
+        if frame.xmm_aux {
+            reserved = reserved | register_bit(XMM_AUX_SCRATCH);
+        }
     }
     let mut callee_save_mask: u32 = 0;
-    let mut callee_save_slots: u64 = 0;
     let xmm_homes = frame.single_homes | frame.double_homes;
     for home in 0..frame.promoted {
         let bit = register_bit(wrapping_u8(home));
         if (frame.gp_homes & bit) != 0 {
             callee_save_mask = callee_save_mask | register_bit(home_register(home));
-            callee_save_slots = wrapping_add(callee_save_slots, 1);
         }
         if (xmm_homes & bit) != 0 {
             reserved = reserved | register_bit(xmm_home_register(home));
         }
     }
     let mut used = reserved | callee_save_mask;
-    let callee_saved = callee_saved_registers();
+    let callee_saved = callee_saved_registers() | if windows_abi {
+        WIN64_NONVOLATILE_XMM_MASK
+    } else {
+        0
+    };
     let register_codes = if frame.floating {
         ALL_REGISTER_CODES
     } else {
@@ -2373,8 +2383,7 @@ fn allocate(
                 continue;
             }
         }
-        // The retry uses unused nonvolatile GPRs before spilling. Save
-        // each register once in the prologue, including any CFG homes.
+        // The retry can use unused nonvolatile registers before spilling.
         let register = if register == UNASSIGNED && spills && !floating && result_live {
             find_callee_saved_register(used)
         } else {
@@ -2384,14 +2393,12 @@ fn allocate(
         let location = if has_no_result(record.op) || ((call || fixed || atomic) && !result_live) {
             Location::Absent
         } else if register != UNASSIGNED {
+            let bit = register_bit(register);
             if result_live {
-                let bit = register_bit(register);
                 used = used | bit;
-                if (callee_saved & bit) != 0 && (callee_save_mask & bit) == 0 {
-                    callee_save_mask = callee_save_mask | bit;
-                    callee_save_slots = wrapping_add(callee_save_slots, 1);
-                }
             }
+            // Retained loads can write a nonvolatile register even if their result is dead.
+            callee_save_mask = callee_save_mask | (callee_saved & bit);
             Location::Register(register)
         } else if !spills || (windows_abi && floating) {
             return Option::None;
@@ -2427,7 +2434,16 @@ fn allocate(
     }
     let mut stack_end = wrapping_add(spill_base, wrapping_mul(spill_ends.len(), slot_bytes));
     let save_bytes = wrapping_mul(save_slots, slot_bytes);
-    let callee_save_bytes = wrapping_mul(callee_save_slots, SPILL_SLOT_BYTES);
+    let xmm_saves = callee_save_mask & WIN64_NONVOLATILE_XMM_MASK;
+    let gp_saves = callee_save_mask & ~xmm_saves;
+    let callee_gp_bytes = wrapping_mul(
+        widen_u64(count_ones_u64(widen_u64(gp_saves))),
+        SPILL_SLOT_BYTES
+    );
+    let callee_xmm_bytes = wrapping_mul(
+        widen_u64(count_ones_u64(widen_u64(xmm_saves))),
+        VECTOR_SLOT_BYTES
+    );
     let mut local_frame = frame.outgoing;
     let mut save_frame = stack_end;
     let mut callee_save_frame = wrapping_add(stack_end, save_bytes);
@@ -2443,7 +2459,11 @@ fn allocate(
         );
         let shift = wrapping_sub(shifted_local_frame, frame.outgoing);
         let shifted_callee_save = wrapping_add(stack_end, shift);
-        if aligned_frame_size(wrapping_add(shifted_callee_save, callee_save_bytes))
+        if aligned_frame_size(callee_save_end(
+            shifted_callee_save,
+            callee_gp_bytes,
+            callee_xmm_bytes
+        ))
             <= STACK_PROBE_INTERVAL
         {
             local_frame = shifted_local_frame;
@@ -2462,7 +2482,11 @@ fn allocate(
             }
         }
     }
-    stack_end = wrapping_add(callee_save_frame, callee_save_bytes);
+    let callee_save_xmm_frame = align_up(
+        wrapping_add(callee_save_frame, callee_gp_bytes),
+        VECTOR_SLOT_BYTES
+    );
+    stack_end = callee_save_end(callee_save_frame, callee_gp_bytes, callee_xmm_bytes);
     let size = if stack_end == 0 && !has_calls {
         0
     } else {
@@ -2488,6 +2512,7 @@ fn allocate(
         local_frame: local_frame,
         save_frame: save_frame,
         callee_save_frame: callee_save_frame,
+        callee_save_xmm_frame: callee_save_xmm_frame,
         callee_save_mask: callee_save_mask
     })
 }
@@ -2639,11 +2664,19 @@ fn emit_return(
 }
 
 fn emit_frame_leave(inout output: ChunkSeq[u8], in allocation: Allocation) {
+    let xmm_saves = allocation.callee_save_mask & WIN64_NONVOLATILE_XMM_MASK;
     preserve_registers(
         inout output,
-        allocation.callee_save_mask,
+        allocation.callee_save_mask & ~xmm_saves,
         allocation.callee_save_frame,
         SPILL_SLOT_BYTES,
+        true
+    );
+    preserve_registers(
+        inout output,
+        xmm_saves,
+        allocation.callee_save_xmm_frame,
+        VECTOR_SLOT_BYTES,
         true
     );
     emit(inout output, in Instruction::FrameLeave(allocation.frame_size));
@@ -2925,24 +2958,39 @@ fn emit_win64_prologue(
     }
     if size % SPILL_SLOT_BYTES != 0
         || allocation.callee_save_frame % SPILL_SLOT_BYTES != 0
-        || (saved & ~callee_saved_registers()) != 0
+        || (saved & ~(callee_saved_registers() | WIN64_NONVOLATILE_XMM_MASK)) != 0
     {
         return false;
     }
     emit(inout out, in Instruction::FrameEnter(allocation.frame_size));
     let stack_end = wrapping_u8(out.len());
     let mut saves = ChunkSeq::new[Win64Save]();
-    let mut slot = allocation.callee_save_frame;
-    for code in 0..REGISTER_CODES {
+    let mut gp_slot = allocation.callee_save_frame;
+    let mut xmm_slot = allocation.callee_save_xmm_frame;
+    for code in 0..ALL_REGISTER_CODES {
         let reg = wrapping_u8(code);
         if (saved & register_bit(reg)) != 0 {
-            emit(inout out, in Instruction::Store(reg, RSP, wrapping_u32(slot), QWORD_BITS));
+            let (slot, slot_index, width, opcode, register) = if is_xmm(reg) {
+                let slot = xmm_slot;
+                xmm_slot = wrapping_add(xmm_slot, VECTOR_SLOT_BYTES);
+                (
+                    slot,
+                    wrapping_shr_u64(slot, trailing_zeros_u64(VECTOR_SLOT_BYTES)),
+                    VECTOR_BITS,
+                    WIN64_UNWIND_SAVE_XMM128,
+                    wrapping_sub(reg, XMM0)
+                )
+            } else {
+                let slot = gp_slot;
+                gp_slot = wrapping_add(gp_slot, SPILL_SLOT_BYTES);
+                (slot, slot / SPILL_SLOT_BYTES, QWORD_BITS, WIN64_UNWIND_SAVE_NONVOL, reg)
+            };
+            emit(inout out, in Instruction::Store(reg, RSP, wrapping_u32(slot), width));
             saves.push(Win64Save {
                 code_end: wrapping_u8(out.len()),
-                register: reg,
-                stack_slot: wrapping_u16(slot / SPILL_SLOT_BYTES)
+                operation: wrapping_shl_u8(register, WIN64_UNWIND_INFO_SHIFT) | opcode,
+                stack_slot: wrapping_u16(slot_index)
             });
-            slot = wrapping_add(slot, SPILL_SLOT_BYTES);
         }
     }
     if out.len() > WIN64_UNWIND_MAX_PROLOGUE {
@@ -2961,9 +3009,7 @@ fn emit_win64_prologue(
             Option::None => return false,
         };
         unwind.push(save.code_end);
-        unwind.push(
-            wrapping_shl_u8(save.register, WIN64_UNWIND_INFO_SHIFT) | WIN64_UNWIND_SAVE_NONVOL
-        );
+        unwind.push(save.operation);
         push16(inout unwind, save.stack_slot);
     }
     unwind.push(stack_end);

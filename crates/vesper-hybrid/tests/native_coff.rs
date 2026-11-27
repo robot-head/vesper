@@ -717,6 +717,142 @@ fn win64_calls_match_cranelift_with_register_cycles_and_stack_arguments() {
 
 #[cfg(all(target_arch = "x86_64", target_os = "linux"))]
 #[test]
+fn win64_float_pressure_preserves_nonvolatile_xmm_lanes() {
+    use cranelift_codegen::{
+        ir::{AbiParam, InstBuilder, MemFlags, Signature, types},
+        isa::CallConv,
+    };
+    use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
+    use cranelift_jit::{JITBuilder, JITModule};
+    use cranelift_module::Module;
+    use std::arch::asm;
+
+    const VALUES: usize = 14;
+    const NONVOLATILE_XMMS: usize = 10;
+    const UNWIND_HEADER_BYTES: usize = 4;
+    const SAVE_XMM128: u8 = 8;
+    const LAST_XMM: u8 = 15;
+    const UNWIND_INFO_SHIFT: u8 = 4;
+    const SAVE_CODE_BYTES: usize = 4;
+    const SHADOW_BYTES: usize = 32;
+    const XMM_BYTES: usize = size_of::<[u64; 2]>();
+    type Entry = unsafe extern "win64" fn(*const f64, extern "win64" fn()) -> f64;
+
+    extern "win64" fn clobber_volatile_floats() {
+        unsafe {
+            asm!(
+                "pxor xmm0, xmm0", "pxor xmm1, xmm1", "pxor xmm2, xmm2", "pxor xmm3, xmm3",
+                out("xmm0") _, out("xmm1") _, out("xmm2") _, out("xmm3") _,
+                options(nostack, nomem, preserves_flags)
+            );
+        }
+    }
+
+    let mut jit =
+        JITModule::new(JITBuilder::new(cranelift_module::default_libcall_names()).unwrap());
+    let mut context = jit.make_context();
+    context.func.signature.call_conv = CallConv::WindowsFastcall;
+    context.func.signature.params = vec![AbiParam::new(types::I64); 2];
+    context
+        .func
+        .signature
+        .returns
+        .push(AbiParam::new(types::F64));
+    let call_signature = context
+        .func
+        .import_signature(Signature::new(CallConv::WindowsFastcall));
+    let mut frontend = FunctionBuilderContext::new();
+    let mut b = FunctionBuilder::new(&mut context.func, &mut frontend);
+    let entry = b.create_block();
+    b.append_block_params_for_function_params(entry);
+    b.switch_to_block(entry);
+    let [source, callee] = *b.block_params(entry) else {
+        unreachable!()
+    };
+    let inputs: Vec<_> = (0..VALUES)
+        .map(|i| {
+            b.ins().load(
+                types::F64,
+                MemFlags::new().with_notrap(),
+                source,
+                (i * size_of::<f64>()) as i32,
+            )
+        })
+        .collect();
+    b.ins().call_indirect(call_signature, callee, &[]);
+    let result = inputs
+        .into_iter()
+        .reduce(|lhs, rhs| b.ins().fadd(lhs, rhs))
+        .unwrap();
+    b.ins().return_(&[result]);
+    b.seal_all_blocks();
+    b.finalize();
+
+    let (functions, packet) = win64_function_pair(&mut jit, &mut context);
+    let (code, unwind, relocations) = windows_packet(&packet);
+    assert!(relocations.is_empty());
+    let prologue = usize::from(unwind[1]);
+    let (records, _) = unwind[UNWIND_HEADER_BYTES..].as_chunks::<SAVE_CODE_BYTES>();
+    for (i, &[end, operation, offset_low, offset_high]) in
+        records[..NONVOLATILE_XMMS].iter().enumerate()
+    {
+        assert_eq!(
+            operation,
+            ((LAST_XMM - i as u8) << UNWIND_INFO_SHIFT) | SAVE_XMM128
+        );
+        assert!(usize::from(end) <= prologue);
+        let offset = usize::from(u16::from_le_bytes([offset_low, offset_high])) * XMM_BYTES;
+        assert!(offset >= SHADOW_BYTES);
+        if offset <= i8::MAX as usize {
+            assert_eq!(code[usize::from(end) - 1], offset as u8);
+        } else {
+            assert_eq!(
+                code[usize::from(end) - size_of::<u32>()..usize::from(end)],
+                (offset as u32).to_le_bytes()
+            );
+        }
+    }
+    let values = std::array::from_fn::<_, VALUES, _>(|i| i as f64 + 0.25);
+    let [candidate, reference] =
+        functions.map(|pointer| unsafe { std::mem::transmute::<*const u8, Entry>(pointer) });
+    assert_eq!(
+        unsafe { candidate(values.as_ptr(), clobber_volatile_floats) },
+        unsafe { reference(values.as_ptr(), clobber_volatile_floats) }
+    );
+
+    let before: [u64; 4] = [
+        0x1234_5678_abcd_ef01,
+        0x1616_1616_1616_1616,
+        0xdead_beef,
+        u64::MAX,
+    ];
+    let mut after = [0u64; 4];
+    unsafe {
+        asm!(
+            "movdqu xmm6, [r12]",
+            "movdqu xmm15, [r12 + {stride}]",
+            "sub rsp, {shadow}",
+            "call {candidate}",
+            "add rsp, {shadow}",
+            "movdqu [r13], xmm6",
+            "movdqu [r13 + {stride}], xmm15",
+            stride = const XMM_BYTES,
+            shadow = const SHADOW_BYTES,
+            candidate = in(reg) candidate as *const (),
+            in("rcx") values.as_ptr(),
+            in("rdx") clobber_volatile_floats as *const (),
+            in("r12") before.as_ptr(),
+            in("r13") after.as_mut_ptr(),
+            lateout("xmm6") _, lateout("xmm15") _,
+            clobber_abi("win64"),
+        );
+    }
+    assert_eq!(after, before);
+    unsafe { jit.free_memory() };
+}
+
+#[cfg(all(target_arch = "x86_64", target_os = "linux"))]
+#[test]
 fn win64_framed_leaves_match_cranelift_and_describe_the_prologue() {
     use cranelift_codegen::{
         ir::{AbiParam, InstBuilder, StackSlotData, StackSlotKind, types},
