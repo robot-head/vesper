@@ -777,9 +777,6 @@ impl IntegerBlocks<'_> {
         left: Value,
         right: Value,
     ) -> Option<(IntegerOp, Value, Value)> {
-        if !self.aarch64 {
-            return None;
-        }
         let op = match opcode {
             Opcode::BandNot | Opcode::Band => IntegerOp::AndNot,
             Opcode::BorNot | Opcode::Bor => IntegerOp::OrNot,
@@ -1468,8 +1465,7 @@ impl IntegerBlocks<'_> {
             return None;
         };
         let output = ty(result);
-        if self.aarch64
-            && let Some(width) = integer_width(output)
+        if let Some(width) = integer_width(output)
             && let InstructionData::Binary {
                 opcode: opcode @ (Opcode::Rotl | Opcode::Rotr),
                 args: [value, amount],
@@ -1493,8 +1489,7 @@ impl IntegerBlocks<'_> {
             InstructionData::Binary {
                 opcode: opcode @ (Opcode::Rotl | Opcode::Rotr),
                 args: [value, amount],
-            } if self.aarch64
-                && output == types::I128
+            } if output == types::I128
                 && (integer_width(ty(amount)).is_some() || ty(amount) == types::I128) =>
             {
                 let value = pair(value)?;
@@ -1514,7 +1509,7 @@ impl IntegerBlocks<'_> {
                 opcode: opcode @ (Opcode::RotlImm | Opcode::RotrImm),
                 arg,
                 imm,
-            } if self.aarch64 && output == types::I128 => {
+            } if output == types::I128 => {
                 self.wide_rotate_immediate(pair(arg)?, right_rotation_count(opcode, imm.bits()))
             }
             InstructionData::BinaryImm64 {
@@ -1540,7 +1535,7 @@ impl IntegerBlocks<'_> {
                     Opcode::Iadd | Opcode::Isub => {
                         self.wrapping_wide(opcode == Opcode::Isub, [a_low, a_high], [b_low, b_high])
                     }
-                    Opcode::Smin | Opcode::Smax | Opcode::Umin | Opcode::Umax if self.aarch64 => {
+                    Opcode::Smin | Opcode::Smax | Opcode::Umin | Opcode::Umax => {
                         let choose_left = self.compare_wide(
                             minmax_condition(opcode)?,
                             [a_low, a_high],
@@ -2695,7 +2690,7 @@ impl IntegerBlocks<'_> {
                 InstructionData::Binary {
                     opcode: opcode @ (Opcode::Rotl | Opcode::Rotr),
                     args: [value, amount],
-                } if self.aarch64 && ty(value) == output && integer_width(ty(amount)).is_some() => {
+                } if ty(value) == output && integer_width(ty(amount)).is_some() => {
                     let value = input(value)?;
                     if let Some(count) = self.constant_bits(amount) {
                         (
@@ -2754,9 +2749,7 @@ impl IntegerBlocks<'_> {
                     opcode,
                     args: [left, right],
                 } if ty(left) == output && ty(right) == output => {
-                    if self.aarch64
-                        && let Some(cond) = minmax_condition(opcode)
-                    {
+                    if let Some(cond) = minmax_condition(opcode) {
                         let left = input(left)?;
                         let right = input(right)?;
                         let choose_left =
@@ -2807,7 +2800,7 @@ impl IntegerBlocks<'_> {
                         {
                             self.division_immediate(division_op(opcode)?, left, bits, width)
                         }
-                        Opcode::RotlImm | Opcode::RotrImm if self.aarch64 => (
+                        Opcode::RotlImm | Opcode::RotrImm => (
                             IntegerOp::RotateRight,
                             [left, right_rotation_count(opcode, imm.bits()), width],
                         ),

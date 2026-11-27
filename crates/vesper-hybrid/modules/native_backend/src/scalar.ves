@@ -11,7 +11,8 @@ use self::x86_64::{
     find_callee_saved_register, find_register, fits_signed_byte, patch_forward_branch,
     patch_relative_branch, patch_relative_offset, register_bit, home_register, xmm_home_register,
     HOME_REGISTERS, cheap_immediate, move_constant, store_immediate, store_immediate_fits,
-    VECTOR_BITS, PAND, POR, PXOR, PackedInteger, PackedRelation, packed_integer_opcode, BitOperation
+    VECTOR_BITS, PAND, POR, PXOR, PackedInteger, PackedRelation, packed_integer_opcode,
+    BitOperation, ROL_EXTENSION, ROR_EXTENSION
 };
 
 // Integer block opcodes shared with src/native_machine.rs.
@@ -692,6 +693,10 @@ fn is_scalar_bit_operation(op: u64) -> bool {
     (op >= LEADING_ZEROS && op <= LEADING_SIGN_BITS) || op == ABS
 }
 
+fn is_bit_mix(op: u64) -> bool {
+    op >= ROTATE_RIGHT && op <= XOR_NOT
+}
+
 pub fn is_integer_division(op: u64) -> bool {
     op >= SIGNED_DIV && op <= UNSIGNED_REM
 }
@@ -885,6 +890,7 @@ fn reads_right(in record: Record, paired: bool) -> bool {
         || is_float_fma(op)
         || is_float_compare(op)
         || is_register_shift(op)
+        || (is_bit_mix(op) && op != ROTATE_RIGHT)
         || is_fixed_arithmetic(op)
         || is_checked_arithmetic(op)
         || is_atomic_rmw(op)
@@ -1155,6 +1161,7 @@ fn can_reuse_right(op: u64) -> bool {
         && op != VECTOR_PAIRWISE_ADD
         && op != VECTOR_SWIZZLE
         && op != VECTOR_INTEGER_COMPARE
+        && !is_bit_mix(op)
         && !is_register_shift(op)
 }
 
@@ -1220,6 +1227,7 @@ fn find_last_reads(
         let record = read_record(in words, index);
         let tail_call = record.op == TAIL_CALL;
         let bit_operation = is_scalar_bit_operation(record.op);
+        let bit_mix = is_bit_mix(record.op);
         if (record.op > BYTE_SWAP
             && record.op != FUNCTION_GOT
             && record.op != STACK_POINTER
@@ -1227,6 +1235,7 @@ fn find_last_reads(
             && !is_conditional_trap(record.op)
             && !tail_call
             && !bit_operation
+            && !bit_mix
             && !is_vector_operation(record.op))
             || (!labeled && is_cfg_record(record.op))
             || (record.op == STACK_SLOT && index >= frame.slots.len())
@@ -1274,6 +1283,19 @@ fn find_last_reads(
                 if record.op == POPULATION_COUNT || record.op == REVERSE_BITS {
                     frame.bit_temporaries = frame.bit_temporaries | register_bit(RIGHT_SCRATCH);
                 }
+            }
+        }
+        if bit_mix {
+            let valid = if record.op == FUNNEL_RIGHT {
+                record.extra < QWORD_BITS
+            } else {
+                valid_width(record.extra)
+            };
+            if !valid {
+                return Option::None;
+            }
+            if live && record.op >= AND_NOT {
+                frame.bit_temporaries = frame.bit_temporaries | register_bit(THIRD_SCRATCH);
             }
         }
         if is_vector_operation(record.op) {
@@ -2573,6 +2595,43 @@ fn emit_bit_operation(inout output: ChunkSeq[u8], in record: Record, destination
     emit(inout output, in Instruction::BitOperation(destination, source, record.extra, op));
 }
 
+fn emit_bit_mix(
+    inout output: ChunkSeq[u8],
+    in record: Record,
+    destination: u8,
+    left: u8,
+    right: u8
+) {
+    emit(inout output, in Instruction::Move(destination, left));
+    let width = record.extra;
+    let instruction = match record.op {
+        ROTATE_RIGHT => {
+            let amount = record.right & wrapping_sub(width, 1);
+            if amount == 0 {
+                return;
+            }
+            Instruction::Shift(ROR_EXTENSION, destination, wrapping_u8(amount), width)
+        },
+        ROTATE_RIGHT_REGISTER => Instruction::ShiftRegister(
+            ROR_EXTENSION,
+            destination,
+            right,
+            width
+        ),
+        ROTATE_LEFT_REGISTER => Instruction::ShiftRegister(
+            ROL_EXTENSION,
+            destination,
+            right,
+            width
+        ),
+        FUNNEL_RIGHT => Instruction::FunnelRight(destination, right, wrapping_u8(record.extra)),
+        AND_NOT => Instruction::ComplementedBitwise(AND_RM_R64, destination, right, width),
+        OR_NOT => Instruction::ComplementedBitwise(OR_RM_R64, destination, right, width),
+        _ => Instruction::ComplementedBitwise(XOR_RM_R64, destination, right, width),
+    };
+    emit(inout output, in instruction);
+}
+
 fn encode_block_pass(
     in words: Slice[u64],
     allow_relocations: bool,
@@ -3087,6 +3146,8 @@ fn encode_block_pass(
             emit_vector_instruction(inout output, in record, destination, left, right);
         } else if is_scalar_bit_operation(record.op) {
             emit_bit_operation(inout output, in record, destination, left);
+        } else if is_bit_mix(record.op) {
+            emit_bit_mix(inout output, in record, destination, left, right);
         } else if record.op == STACK_POINTER {
             emit(inout output, in Instruction::Move(destination, RSP));
         } else if record.op == FLOAT_CONSTANT {

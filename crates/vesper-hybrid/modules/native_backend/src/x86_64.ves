@@ -154,6 +154,8 @@ pub const SSE_SQRT: u8 = 0x51;
 const SSE_FLOAT_TO_INTEGER_TRUNC: u8 = 0x2c;
 const SHIFT_GROUP_IMM8: u8 = 0xc1;
 const SHIFT_GROUP_CL: u8 = 0xd3;
+const SHIFT_BYTE_GROUP_CL: u8 = 0xd2;
+const SHRD_IMMEDIATE: u8 = 0xac;
 const XCHG_RM_R64: u8 = 0x87;
 const XCHG_RM_R8: u8 = 0x86;
 const LOCK_PREFIX: u8 = 0xf0;
@@ -174,7 +176,8 @@ const SWAR_NIBBLES: u64 = 0x0f0f0f0f0f0f0f0f;
 const SWAR_BYTE_SUM: u64 = 0x0101010101010101;
 const PAIR_BITS: u64 = 2;
 const NIBBLE_BITS: u64 = BYTE_BITS / 2;
-const ROR_EXTENSION: u8 = 1;
+pub const ROL_EXTENSION: u8 = 0;
+pub const ROR_EXTENSION: u8 = 1;
 const CMP_RM_R8: u8 = 0x38;
 const CMP_RM_R64: u8 = 0x39;
 const SETCC: u8 = 0x90;
@@ -301,6 +304,8 @@ pub copy enum Instruction {
     VectorSwizzle(u8, u8, u8, bool),
     VectorIntegerCompare(u8, u8, u8, u64, PackedRelation, bool),
     BitOperation(u8, u8, u64, BitOperation),
+    ComplementedBitwise(u8, u8, u8, u64),
+    FunnelRight(u8, u8, u8),
     VectorConvert(u8, u8, bool),
     VectorExtract(u8, u8, u64, u64),
     VectorInsert(u8, u8, u64, u64),
@@ -1729,6 +1734,21 @@ pub fn emit(inout out: ChunkSeq[u8], in instruction: Instruction) {
             width,
             in op
         ),
+        Instruction::ComplementedBitwise(opcode, destination, source, width) => {
+            gp_move(inout out, R11, source);
+            gp_unary(inout out, NOT_EXTENSION, R11, QWORD_BITS);
+            binary(inout out, opcode, destination, R11, width == QWORD_BITS);
+            if opcode != AND_RM_R64 {
+                normalize_small_result(inout out, destination, width);
+            }
+        },
+        Instruction::FunnelRight(destination, source, amount) => {
+            emit_rex(inout out, source, destination, true, false);
+            out.push(TWO_BYTE_OPCODE);
+            out.push(SHRD_IMMEDIATE);
+            out.push(modrm(source, destination));
+            out.push(amount);
+        },
         Instruction::FloatBits(destination, source, width) => float_bits(
             inout out,
             destination,
@@ -1812,8 +1832,23 @@ pub fn emit(inout out: ChunkSeq[u8], in instruction: Instruction) {
                     destination
                 }
             };
-            emit_rex(inout out, 0, shifted, width == QWORD_BITS, false);
-            out.push(SHIFT_GROUP_CL);
+            if width == WORD_BITS {
+                out.push(OPERAND_SIZE_OVERRIDE);
+            }
+            emit_rex(
+                inout out,
+                0,
+                shifted,
+                width == QWORD_BITS,
+                width == BYTE_BITS && byte_register_needs_rex(shifted)
+            );
+            out.push(
+                if width == BYTE_BITS {
+                    SHIFT_BYTE_GROUP_CL
+                } else {
+                    SHIFT_GROUP_CL
+                }
+            );
             out.push(modrm(extension, shifted));
             if count != RCX {
                 binary(inout out, XCHG_RM_R64, RCX, count, true);
