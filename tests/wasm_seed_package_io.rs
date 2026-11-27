@@ -2340,6 +2340,16 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
              let equal = ~a == b;\n\
              if flip { invert_truth(equal) } else { equal }\n\
          }\n\
+         fn narrow_call(x: u8, a: u8, b: u8) -> i32 {\n\
+             if a < x { widen_i32(~wrapping_add(a, b)) } else { widen_i32(wrapping_i8(x)) }\n\
+         }\n\
+         pub fn mixed_narrow(a: u8, b: i16, c: u32, d: u8, e: u8, f: u8, g: i8) -> i64 {\n\
+             let x = wrapping_add(a, d);\n\
+             let mut y = widen_i16(g);\n\
+             if y < b { y = wrapping_add(y, b); };\n\
+             let z = wrapping_mul(c, widen_u32(x));\n\
+             wrapping_add(wrapping_add(widen_i64(y), widen_i64(z)), widen_i64(narrow_call(x, e, f)))\n\
+         }\n\
          fn unsupported(x: u64) -> u64 { match x { 0 => 7, _ => 9 } }\n\
          pub fn decline(x: u64) -> u64 { unsupported(x) }\n",
     )
@@ -2439,6 +2449,14 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
         "{:?}",
         read_stage2_sidecar_notes(&object)
     );
+    let bool_object = dir.join("native-bool.o");
+    std::fs::rename(&object, &bool_object).unwrap();
+    assert_eq!(
+        compile("mixed_narrow"),
+        0,
+        "{:?}",
+        read_stage2_sidecar_notes(&object)
+    );
     let bytes = std::fs::read(&object).unwrap();
     assert_ne!(compile("decline"), 0);
     assert!(read_stage2_sidecar_notes(&object).contains("unsupported x86-64 ELF entry"));
@@ -2460,6 +2478,7 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
          extern uint64_t sum_odd(uint64_t, uint64_t);\n\
          extern uint64_t range_score(uint64_t, uint64_t, uint64_t);\n\
          extern bool bit_truth(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, bool);\n\
+         extern int64_t mixed_narrow(uint8_t, int16_t, uint32_t, uint8_t, uint8_t, uint8_t, int8_t);\n\
          int main(void) {\n\
              if (mix(10, 4) != 65 || mix(UINT64_MAX, UINT64_MAX) != UINT64_MAX - 16) return 1;\n\
              if (choose(0, 4) != 8 || choose(2, 4) != 8 || choose(4, 1) != 10\n\
@@ -2475,9 +2494,11 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
                  || sum_odd(31, UINT64_MAX) != 224) return 7;\n\
              if (range_score(7, 4, 1) != 0 || range_score(1, 8, 4) != 6\n\
                  || range_score(UINT64_MAX - 1, UINT64_MAX, 0) != UINT64_MAX - 2) return 8;\n\
-             return !bit_truth(0, UINT64_MAX, 0, 0, 0, 0, false)\n\
+             if (!bit_truth(0, UINT64_MAX, 0, 0, 0, 0, false)\n\
                  || bit_truth(UINT64_MAX, 0, 0, 0, 0, 0, true)\n\
-                 || !bit_truth(9, 3, 0, 0, 0, 0, true);\n\
+                 || !bit_truth(9, 3, 0, 0, 0, 0, true)) return 9;\n\
+             return mixed_narrow(250, -500, UINT32_MAX, 20, 9, 5, -20) != UINT32_MAX + INT64_C(208)\n\
+                 || mixed_narrow(120, 300, 60, 20, 200, 5, -100) != 8484;\n\
          }\n",
     )
     .unwrap();
@@ -2492,6 +2513,7 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
             &mutable,
             &loop_object,
             &range_object,
+            &bool_object,
             &object,
         ])
         .arg("-o")

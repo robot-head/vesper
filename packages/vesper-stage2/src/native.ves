@@ -3,13 +3,16 @@ use @vesper/check-data::util::{add, inc, n32, u32_at, w};
 use @vesper/check-data::world::{set_by_symbol};
 use @vesper/hybrid-native-backend::elf::{x86_text_object};
 use @vesper/hybrid-native-backend::scalar::{
-    ADD, AND, BLOCK_LABEL, BLOCK_RETURN, BRANCH_BLOCK, CALL, CALL_ARGUMENT, COMPARE,
-    COMPARE_IMMEDIATE, CONSTANT, EQUAL, HEADER_WORDS, JUMP_LABEL, MAX_ARGUMENTS, MUL, NOT_EQUAL,
-    NO_VALUE, NOT, OR, RECORD_WORDS, RETURN_VALUE, SIGNED_GREATER, SIGNED_GREATER_EQUAL,
-    SIGNED_LESS, SIGNED_LESS_EQUAL, STACK_LOAD, STACK_SLOT, STACK_STORE_QWORD, SUB, TRUNCATE,
-    UNSIGNED_GREATER, UNSIGNED_GREATER_EQUAL, UNSIGNED_LESS, UNSIGNED_LESS_EQUAL, XOR, encode_block
+    ADD, AND, BLOCK_LABEL, BLOCK_RETURN, BRANCH_BLOCK, CALL, CALL_ARGUMENT, COMPARE, COMPARE_BYTE,
+    COMPARE_DWORD, COMPARE_IMMEDIATE, COMPARE_WORD, CONSTANT, EQUAL, HEADER_WORDS, JUMP_LABEL,
+    MAX_ARGUMENTS, MUL, NOT_EQUAL, NO_VALUE, NOT, OR, RECORD_WORDS, RETURN_VALUE, SIGNED_GREATER,
+    SIGNED_GREATER_EQUAL, SIGNED_LESS, SIGNED_LESS_EQUAL, SIGN_EXTEND, STACK_LOAD, STACK_SLOT,
+    STACK_STORE_QWORD, SUB, TRUNCATE, UNSIGNED_GREATER, UNSIGNED_GREATER_EQUAL, UNSIGNED_LESS,
+    UNSIGNED_LESS_EQUAL, XOR, encode_block
 };
-use @vesper/hybrid-native-backend::x86_64::{BYTE_BITS, QWORD_BITS};
+use @vesper/hybrid-native-backend::x86_64::{
+    ALL_REGISTER_BITS, BYTE_BITS, DWORD_BITS, QWORD_BITS, WORD_BITS
+};
 use @vesper/place-ir::{BlockRow, FnRow, InstRow, Lit, Op, Pat, Tag, Term};
 use @vesper/place-ir-lower::ast::{FnR};
 use @vesper/place-ir-lower::lower::{L};
@@ -55,14 +58,23 @@ const ARGUMENT_PATH: u64 = 3;
 const PARAMETER_WORDS: u64 = 6;
 const VALUE_TYPES_COUNT: u64 = 4;
 const VALUE_TYPE_WORDS: u64 = 2;
-const SIGN_BIT: u64 = 0x8000000000000000;
+const WRAPPING_CONVERSION_PREFIX: Str = "wrapping_";
+const WIDEN_CONVERSION_PREFIX: Str = "widen_";
 
 enum ScalarKind: _ {
     Unsupported = 0,
-    Unsigned = 1,
-    Signed = 2,
+    U64 = 1,
+    I64 = 2,
     Bool = 3,
     Unit = 4,
+    U8 = 5,
+    I8 = 6,
+    U16 = 7,
+    I16 = 8,
+    U32 = 9,
+    I32 = 10,
+    Usize = 11,
+    Isize = 12,
 }
 
 struct CallGraph {
@@ -208,7 +220,7 @@ fn lower_operator(in low: L, symbol: u32) -> u64 {
 }
 
 fn integer_comparison(in low: L, symbol: u32, kind: u8) -> u64 {
-    let signed = kind == ScalarKind::Signed;
+    let signed = is_signed(kind);
     if low.ctx.names.spells(symbol, in "==".as_bytes()) {
         EQUAL
     } else if low.ctx.names.spells(symbol, in "!=".as_bytes()) {
@@ -241,11 +253,25 @@ fn integer_comparison(in low: L, symbol: u32, kind: u8) -> u64 {
 }
 
 fn is_integer(kind: u8) -> bool {
-    kind == ScalarKind::Signed || kind == ScalarKind::Unsigned
+    kind != ScalarKind::Bool && abi_width(kind) != 0
 }
 
-fn is_abi_scalar(kind: u8) -> bool {
-    is_integer(kind) || kind == ScalarKind::Bool
+fn is_signed(kind: u8) -> bool {
+    kind == ScalarKind::I8
+        || kind == ScalarKind::I16
+        || kind == ScalarKind::I32
+        || kind == ScalarKind::I64
+        || kind == ScalarKind::Isize
+}
+
+fn abi_width(kind: u8) -> u64 {
+    match kind {
+        ScalarKind::Bool | ScalarKind::U8 | ScalarKind::I8 => BYTE_BITS,
+        ScalarKind::U16 | ScalarKind::I16 => WORD_BITS,
+        ScalarKind::U32 | ScalarKind::I32 => DWORD_BITS,
+        ScalarKind::U64 | ScalarKind::I64 | ScalarKind::Usize | ScalarKind::Isize => QWORD_BITS,
+        _ => 0,
+    }
 }
 
 fn scalar_kind(in low: L, ty: u32) -> u8 {
@@ -256,14 +282,31 @@ fn scalar_kind(in low: L, ty: u32) -> u8 {
     if node.kind != TyKind::Named || node.n != 0 {
         return ScalarKind::Unsupported;
     }
-    if node.name == low.ctx.types.s_u64 {
-        ScalarKind::Unsigned
-    } else if node.name == low.ctx.types.s_i64 {
-        ScalarKind::Signed
-    } else if node.name == low.ctx.world.k.bool_ {
+    let k = low.ctx.world.k;
+    if node.name == k.u64_ {
+        ScalarKind::U64
+    } else if node.name == k.i64_ {
+        ScalarKind::I64
+    } else if node.name == k.bool_ {
         ScalarKind::Bool
-    } else if node.name == low.ctx.types.s_unit {
+    } else if node.name == k.unit {
         ScalarKind::Unit
+    } else if node.name == k.u8_ {
+        ScalarKind::U8
+    } else if node.name == k.i8_ {
+        ScalarKind::I8
+    } else if node.name == k.u16_ {
+        ScalarKind::U16
+    } else if node.name == k.i16_ {
+        ScalarKind::I16
+    } else if node.name == k.u32_ {
+        ScalarKind::U32
+    } else if node.name == k.i32_ {
+        ScalarKind::I32
+    } else if node.name == k.usize_ {
+        ScalarKind::Usize
+    } else if node.name == k.isize_ {
+        ScalarKind::Isize
     } else {
         ScalarKind::Unsupported
     }
@@ -274,7 +317,7 @@ fn sysv_signature(in low: L, f: FnR) -> bool {
         || f.generic_count != 0
         || f.ext_count != 0
         || f.param_count > MAX_ARGUMENTS
-        || !is_abi_scalar(scalar_kind(in low, f.result))
+        || abi_width(scalar_kind(in low, f.result)) == 0
         || f.effects != low.ctx.types.empty_row
     {
         return false;
@@ -283,7 +326,7 @@ fn sysv_signature(in low: L, f: FnR) -> bool {
         let p = low.ast.param(add(f.param_start, index));
         if p.proj_count != 0
             || p.pass == TyPass::Inout
-            || !is_abi_scalar(scalar_kind(in low, p.ty))
+            || abi_width(scalar_kind(in low, p.ty)) == 0
         {
             return false;
         }
@@ -740,24 +783,45 @@ fn plan_homes(in low: L, f: FnR, row: FnRow, inout m: Function) -> bool {
 fn lower_literal(in low: L, at: u64, kind: u8, inout m: Function) -> u64 {
     let literal = low.program.op(at);
     let bits = low.program.op(add(at, LITERAL_LOW));
-    let high = if kind == ScalarKind::Signed && (bits & SIGN_BIT) != 0 {
-        NO_VALUE
+    let high = low.program.op(add(at, LITERAL_HIGH));
+    if kind == ScalarKind::Bool && literal == Lit::Bool && bits <= 1 && high == 0 {
+        return m.record(CONSTANT, bits, 0, 0);
+    }
+    if !is_integer(kind) || literal != Lit::Int {
+        return NO_VALUE;
+    }
+    let width = abi_width(kind);
+    let mask = wrapping_shr_u64(ALL_REGISTER_BITS, wrapping_u32(wrapping_sub(QWORD_BITS, width)));
+    let upper_mask = mask ^ ALL_REGISTER_BITS;
+    let sign = wrapping_shl_u64(1, wrapping_u32(wrapping_sub(width, 1)));
+    let fill = if is_signed(kind) && (bits & sign) != 0 {
+        ALL_REGISTER_BITS
     } else {
         0
     };
-    if low.program.op(add(at, LITERAL_HIGH)) != high {
+    if high != fill || (bits & upper_mask) != (fill & upper_mask) {
         return NO_VALUE;
     }
-    if (is_integer(kind) && literal == Lit::Int)
-        || (kind == ScalarKind::Bool && literal == Lit::Bool && bits <= 1)
-    {
-        m.record(CONSTANT, bits, 0, 0)
-    } else {
-        NO_VALUE
-    }
+    m.record(CONSTANT, bits & mask, 0, 0)
 }
 
-fn lower_unary(in low: L, at: u64, kind: u8, block: u64, inout m: Function) -> u64 {
+fn conversion_spells(in low: L, op: u32, target: u32, in prefix: Slice[u8]) -> bool {
+    let count = low.ctx.names.size(target);
+    if low.ctx.names.size(op) != add(prefix.len(), count)
+        || !low.ctx.names.has_prefix(op, in prefix)
+    {
+        return false;
+    }
+    for i in 0..count {
+        if low.ctx.names.byte(op, add(prefix.len(), i)) != low.ctx.names.byte(target, i) {
+            return false;
+        }
+    }
+    true
+}
+
+fn lower_unary(in low: L, inst: InstRow, kind: u8, block: u64, inout m: Function) -> u64 {
+    let at = inst.a;
     let symbol = n32(low.program.op(at));
     let operand = low.program.op(add(at, UNARY_VALUE));
     let operand_kind = m.kind(operand);
@@ -769,21 +833,37 @@ fn lower_unary(in low: L, at: u64, kind: u8, block: u64, inout m: Function) -> u
         && operand_kind == ScalarKind::Bool
         && low.ctx.names.spells(symbol, in "!".as_bytes())
     {
-        m.record(COMPARE_IMMEDIATE, value, 0, EQUAL)
+        return m.record(COMPARE_IMMEDIATE, value, 0, EQUAL);
     } else if is_integer(kind)
         && kind == operand_kind
         && low.ctx.names.spells(symbol, in "~".as_bytes())
     {
-        m.record(NOT, value, 0, QWORD_BITS)
-    } else if is_integer(operand_kind)
-        && ((kind == ScalarKind::Signed
-            && low.ctx.names.spells(symbol, in "wrapping_i64".as_bytes()))
-            || (kind == ScalarKind::Unsigned
-                && low.ctx.names.spells(symbol, in "wrapping_u64".as_bytes())))
-    {
-        value
+        return m.record(NOT, value, 0, abi_width(kind));
+    }
+    if !is_integer(operand_kind) || !is_integer(kind) {
+        return NO_VALUE;
+    }
+    let from = abi_width(operand_kind);
+    let to = abi_width(kind);
+    let signed = is_signed(operand_kind);
+    let target = low.ctx.types.node(inst.ty).name;
+    let lossless = if signed == is_signed(kind) {
+        from <= to
     } else {
-        NO_VALUE
+        !signed && from < to
+    };
+    if !conversion_spells(in low, symbol, target, in WRAPPING_CONVERSION_PREFIX.as_bytes())
+        && !(lossless
+            && conversion_spells(in low, symbol, target, in WIDEN_CONVERSION_PREFIX.as_bytes()))
+    {
+        return NO_VALUE;
+    }
+    if to < from {
+        m.record(TRUNCATE, value, from, to)
+    } else if to > from && signed {
+        m.record(SIGN_EXTEND, value, from, to)
+    } else {
+        value
     }
 }
 
@@ -843,7 +923,17 @@ fn lower_binary(
     if kind == ScalarKind::Bool {
         let compare = integer_comparison(in low, symbol, operand_kind);
         if compare != NO_VALUE {
-            return m.record(COMPARE, lhs, rhs, compare);
+            let op = if operand_kind == ScalarKind::Bool {
+                COMPARE
+            } else {
+                match abi_width(operand_kind) {
+                    BYTE_BITS => COMPARE_BYTE,
+                    WORD_BITS => COMPARE_WORD,
+                    DWORD_BITS => COMPARE_DWORD,
+                    _ => COMPARE,
+                }
+            };
+            return m.record(op, lhs, rhs, compare);
         }
     } else if is_integer(kind) && kind == operand_kind {
         let op = if range_step {
@@ -852,7 +942,7 @@ fn lower_binary(
             lower_operator(in low, symbol)
         };
         if op != NO_VALUE {
-            return m.record(op, lhs, rhs, QWORD_BITS);
+            return m.record(op, lhs, rhs, abi_width(kind));
         }
     }
     NO_VALUE
@@ -918,10 +1008,10 @@ fn lower_block(
                 m.record(STACK_LOAD, HOME_SLOT, offset, QWORD_BITS)
             }
         } else if inst.op == Op::Unary && inst.n == UNARY_WORDS {
-            lower_unary(in low, at, kind, block, inout m)
+            lower_unary(in low, inst, kind, block, inout m)
         } else if inst.op == Op::Binary && inst.n == BINARY_WORDS {
             lower_binary(in low, at, kind, block, range_increment(in low, b, index, inst), inout m)
-        } else if inst.op == Op::Call && is_abi_scalar(kind) {
+        } else if inst.op == Op::Call {
             lower_call(in low, inst, block, inout m, inout graph)
         } else {
             return false;
@@ -1070,10 +1160,11 @@ fn lower_function(
         if block == 0 {
             for arg in 0..f.param_count {
                 let param = low.ast.param(add(f.param_start, arg));
-                // SysV specifies the low byte of a Boolean argument. Consumers
-                // of machine words must ignore the unspecified upper bits.
-                let value = if scalar_kind(in low, param.ty) == ScalarKind::Bool {
-                    m.record(TRUNCATE, arg, QWORD_BITS, BYTE_BITS)
+                // Machine values carry narrow scalars in their low bits.
+                // SysV leaves the unused argument bits unspecified.
+                let width = abi_width(scalar_kind(in low, param.ty));
+                let value = if width < QWORD_BITS {
+                    m.record(TRUNCATE, arg, QWORD_BITS, width)
                 } else {
                     arg
                 };
