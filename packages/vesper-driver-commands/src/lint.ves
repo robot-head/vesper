@@ -1,7 +1,8 @@
 // `vesper lint`: CLI option parsing, `--help`, and `invalid` JSON reporting
 // in Vesper, delegating package discovery, policy loading, checked lint
 // analysis, and bounded atomic fix replacement (`src/lint_commands.rs`) to
-// `HybridCommands::hc_lint_run`.
+// `@vesper/driver-engines::lint_run`.
+use @vesper/driver-engines::{lint_run};
 use @vesper/driver::{Args, args_count, eq};
 use super::{PrintFailed, arg, byte_at, print, fail, stdout_stream};
 
@@ -102,7 +103,7 @@ pub fn run_lint(in args: Args) -> i64 eff [Ffi[StdFs], Ffi[HybridCommands], Fail
         }
         i = wrapping_add(i, 1);
     }
-    let err_len = HybridCommands::hc_lint_run(
+    let err = lint_run(
         has_path,
         in path.as_slice(),
         fix,
@@ -111,17 +112,8 @@ pub fn run_lint(in args: Args) -> i64 eff [Ffi[StdFs], Ffi[HybridCommands], Fail
         has_config,
         in config.as_slice()
     );
-    if err_len == 0 {
+    if err.len() == 0 {
         return 0;
-    }
-    let mut err: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    err.resize(err_len, 0);
-    let actual = HybridCommands::hc_lint_err(inout err.as_slice_mut());
-    if actual > err.len() {
-        err.resize(actual, 0);
-        let _got = HybridCommands::hc_lint_err(inout err.as_slice_mut());
-    } else {
-        err.truncate(actual);
     }
     fail(in err.as_slice())
 }

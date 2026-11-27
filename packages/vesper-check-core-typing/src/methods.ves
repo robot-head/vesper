@@ -13,10 +13,12 @@ use @vesper/check-data::util::{add, u32_at, w};
 use @vesper/check-data::types::{default_type, substitute, vars_new, TyKind, TyMode};
 use self::exprs::{
     Arg, Ck, Ex, actual_arg, mode, note, binding, error, expect_type, expr, expr_expected,
-    field_path, fn_index, fn_generics, is_named, lookup, named, place_of, record, constrain_literals
+    field_path, fn_index, fn_generics, is_named, lookup, named, place_of, record,
+    constrain_literals, literal_unconstrained, trait_method, join, integer
 };
-use self::relations::{infer, lit_of, mk_lit};
+use self::relations::{compatible, infer, item, lit_of, mk_lit};
 use self::ints::{Lit, default_of, fits, int_bits, int_unsigned};
+use self::floats::{float_to_integer};
 
 const NONE32: u32 = 4294967295;
 
@@ -218,6 +220,10 @@ pub fn receiver_type(inout ck: Ck, e: u32) -> u32 {
         return hole;
     }
     let index = inherent_index(inout ck, base_ty, callee.y);
+    if index == NONE32 && !trait_method(in ck, callee.y) {
+        // No trait declares the method: `traits.resolve` finds none.
+        return hole;
+    }
     if index == NONE32 {
         // A trait method (`traits.resolve`): not ported.
         ck.skip = true;
@@ -971,6 +977,68 @@ fn slice_view(inout ck: Ck, base: u32, lo: u32, hi: u32) -> u32 {
     slice_of(inout ck, elem_ty)
 }
 
+// The `Index` arm of `Checker::expr` for other bases: an array (a tuple)
+// indexed dynamically has its homogeneous copy elements' joined type, or
+// a literal index's element type. A non-literal index into elements of
+// different types reads a constant fact: not ported.
+fn tuple_index(inout ck: Ck, ex: Ex) -> u32 {
+    let hole = ck.ctx.types.infer;
+    let known = ck.ctx.world.k;
+    let base_ty = expr(inout ck, ex.x);
+    let index_ty = expr(inout ck, ex.z);
+    if ck.skip {
+        return hole;
+    }
+    let index_ex = ck.ex(ex.z);
+    if !integer(in ck, index_ty) {
+        error(inout ck, "E0200", index_ex.start, index_ex.end);
+    }
+    let node = ck.ctx.types.node(base_ty);
+    if node.kind != TyKind::Tuple {
+        let base_ex = ck.ex(ex.x);
+        error(inout ck, "E0200", base_ex.start, base_ex.end);
+        return hole;
+    }
+    if node.n == 0 {
+        error(inout ck, "E0200", ex.start, ex.end);
+    }
+    let mut ty = hole;
+    let mut uniform = true;
+    for i in 0..w(node.n) {
+        let t = item(in ck.ctx.types, add(w(node.a), i));
+        if t != item(in ck.ctx.types, w(node.a)) {
+            uniform = false;
+        }
+        ty = join(inout ck, ty, t, ex.start, ex.end);
+    }
+    let mut homogeneous = mode(inout ck, ty) == TyMode::Copy;
+    for i in 0..w(node.n) {
+        let t = item(in ck.ctx.types, add(w(node.a), i));
+        if !compatible(in ck.ctx.types, known, ty, t) {
+            homogeneous = false;
+        }
+    }
+    if !homogeneous {
+        error(inout ck, "E0311", ex.start, ex.end);
+    }
+    let mut elems: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    for i in 0..w(node.n) {
+        let t = item(in ck.ctx.types, add(w(node.a), i));
+        expect_type(inout ck, ty, t, ex.start, ex.end);
+        elems.push(ty);
+    }
+    let array_ty = ck.ctx.types.tuple(in elems);
+    constrain_literals(inout ck, ex.x, array_ty);
+    if index_ex.kind == E_INT && !index_ex.neg && index_ex.mag < widen_u64(node.n) {
+        return item(in ck.ctx.types, add(w(node.a), index_ex.mag));
+    }
+    if !uniform {
+        ck.skip = true;
+        return hole;
+    }
+    ty
+}
+
 // `base[index]` and `base[lo..hi]`: `Checker::string_interval`,
 // `Checker::seq_index` and `slice_view`. Indexing tuples and arrays is not
 // ported and skips the function.
@@ -1008,8 +1076,7 @@ pub fn index_expr(inout ck: Ck, ex: Ex) -> u32 {
     }
     let base_ty = peek_type(inout ck, base);
     if !is_seq_or_slice(in ck, base_ty) {
-        ck.skip = true;
-        return hole;
+        return tuple_index(inout ck, ex);
     }
     let elem_ty = seq_elem(in ck, base_ty);
     if elem_ty != hole && mode(inout ck, elem_ty) != TyMode::Copy {
@@ -1169,7 +1236,7 @@ fn widens_to(in ck: Ck, from: u32, to: u32) -> bool {
 }
 
 // `Checker::conversion_call`: one integer operand converted to `conv.to`.
-// A float operand (`float_to_integer`) skips the function.
+// A float operand is `float_to_integer`'s.
 pub fn conversion_call(inout ck: Ck, ex: Ex, conv: Conv) -> u32 {
     let hole = ck.ctx.types.infer;
     let known = ck.ctx.world.k;
@@ -1207,10 +1274,13 @@ pub fn conversion_call(inout ck: Ck, ex: Ex, conv: Conv) -> u32 {
     } else {
         raw
     };
+    // A conversion accepts any kind: it does not type an open literal
+    // binding.
+    literal_unconstrained(inout ck, arg.expr);
     let node = ck.ctx.types.node(ty);
     if node.kind == TyKind::Named && (node.name == known.f64_ || node.name == known.f32_) {
-        ck.skip = true;
-        return hole;
+        float_to_integer(inout ck, ex, conv.family == CONV_NARROW, conv.to, arg.expr);
+        return to_ty;
     }
     if node.kind != TyKind::Named || !known.is_integer(node.name) {
         if ty != hole {

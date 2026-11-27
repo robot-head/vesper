@@ -1647,6 +1647,18 @@ fn stack_bound_speed() {
             }
         })
     };
+    if std::env::var_os("FLIP_GATE").is_some() {
+        let f = stack_words_entry();
+        abba("stack bound (hybrid path)", rust, &mut || {
+            time(|| {
+                for (g, p) in &cases {
+                    let words = f.words(&stack_words::stack_input(g, p));
+                    std::hint::black_box(stack_words::decode_stack_report(g.origin, &words).ok());
+                }
+            })
+        });
+        return;
+    }
     let inputs: Vec<Vec<u8>> = cases.iter().map(|(g, p)| stack_input(g, p)).collect();
     let f = stack_entry();
     abba("stack bound (text entry)", rust, &mut || {

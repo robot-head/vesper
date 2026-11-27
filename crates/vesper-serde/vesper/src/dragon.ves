@@ -30,8 +30,13 @@ const HIDDEN_BIT: u64 = 0x0010000000000000;
 const SIGN_SHIFT: u64 = 63;
 // `integer_decode`: the exponent bias 1023 plus the 52 mantissa bits.
 const EXPONENT_OFFSET: i64 = 1075;
-// The exponent `integer_decode` gives a subnormal (biased exponent 0).
-const SUBNORMAL_EXPONENT: i64 = -1075;
+// IEEE 754 binary32, for `shortest_f32`: bias 127 plus 23 fraction bits.
+const F32_MANTISSA_BITS: u64 = 23;
+const F32_EXPONENT_MASK: u64 = 0xff;
+const F32_MANTISSA_MASK: u64 = 0x7fffff;
+const F32_HIDDEN_BIT: u64 = 0x800000;
+const F32_SIGN_SHIFT: u64 = 31;
+const F32_EXPONENT_OFFSET: i64 = 150;
 // At most 17 shortest digits, plus slack.
 const DIGIT_CAPACITY: u64 = 20;
 // The digit value of an ASCII digit (u64 arithmetic).
@@ -346,15 +351,32 @@ pub fn shortest(bits: u64) -> Shortest {
     let neg = bits >> SIGN_SHIFT == 1;
     let biased = (bits >> MANTISSA_BITS) & EXPONENT_MASK;
     let frac = bits & MANTISSA_MASK;
+    decoded_shortest(neg, biased, frac, HIDDEN_BIT, EXPONENT_OFFSET)
+}
+
+// Rust's `{}` for a finite binary32 (an `f32`), before layout: its own
+// shortest digits, not those of the `f64` it widens to.
+pub fn shortest_f32(bits: u64) -> Shortest {
+    let neg = (bits >> F32_SIGN_SHIFT) & 1 == 1;
+    let biased = (bits >> F32_MANTISSA_BITS) & F32_EXPONENT_MASK;
+    let frac = bits & F32_MANTISSA_MASK;
+    decoded_shortest(neg, biased, frac, F32_HIDDEN_BIT, F32_EXPONENT_OFFSET)
+}
+
+// `integer_decode` and `flt2dec::decode` of a float with biased exponent
+// `biased` and fraction `frac` (`hidden` its implicit bit, `offset` its
+// bias plus its fraction bits), then the shortest digits.
+fn decoded_shortest(neg: bool, biased: u64, frac: u64, hidden: u64, offset: i64) -> Shortest {
     if biased == 0 && frac == 0 {
         return Shortest { neg: neg, digits: 0, n: 0, k: 0 };
     }
-    // `integer_decode` then `flt2dec::decode`: (mant, minus, plus, exp).
+    // `integer_decode` then `flt2dec::decode`: (mant, minus, plus, exp). A
+    // subnormal keeps the exponent of biased exponent 0.
     let mut mant = frac;
-    let mut exp: i64 = SUBNORMAL_EXPONENT;
+    let mut exp: i64 = wrapping_sub(0, offset);
     if biased != 0 {
-        mant = frac | HIDDEN_BIT;
-        exp = wrapping_sub(wrapping_i64(biased), EXPONENT_OFFSET);
+        mant = frac | hidden;
+        exp = wrapping_sub(wrapping_i64(biased), offset);
     } else {
         mant = frac << 1;
     }
@@ -362,7 +384,7 @@ pub fn shortest(bits: u64) -> Shortest {
     let mut minus: u64 = 1;
     let mut plus: u64 = 1;
     if biased != 0 {
-        if mant == HIDDEN_BIT {
+        if mant == hidden {
             mant = mant << 2;
             plus = 2;
             exp = wrapping_sub(exp, 2);

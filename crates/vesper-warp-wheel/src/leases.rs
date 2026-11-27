@@ -135,12 +135,7 @@ impl From<HandleError> for LeaseError {
     }
 }
 
-// The Rust build (the frozen reference) or the Vesper build (a thin wrapper
-// over the Vesper port in vesper/src/).
-#[cfg(not(feature = "vesper-port"))]
-#[path = "reference/leases.rs"]
-mod imp;
-#[cfg(feature = "vesper-port")]
+// The Vesper build (a thin wrapper over the Vesper port in vesper/src/).
 #[path = "port/leases.rs"]
 mod imp;
 

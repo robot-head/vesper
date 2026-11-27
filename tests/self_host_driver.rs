@@ -633,3 +633,281 @@ fn triples_parse_like_target_lexicon() {
         differ[..differ.len().min(40)].join("\n")
     );
 }
+
+#[test]
+fn windows_link_matches_rust() {
+    use vesper::native::windows::{Linker, LinkerFlavor, WindowsNativeError, link_args};
+
+    let entry = driver().entry("windows_link_check", true);
+    let linkers = [
+        ("link.exe", 0u64, false),
+        (
+            "C:\\Program Files\\MSVC\\bin\\HostX64\\x64\\LINK.EXE",
+            0u64,
+            true,
+        ),
+        ("/usr/bin/lld-link", 1u64, false),
+        ("C:\\LLVM\\bin\\LLD-LINK.exe", 1u64, true),
+        ("rust-lld", 2u64, false),
+        ("/toolchain/bin/RUST-LLD.EXE", 2u64, false),
+        ("custom-ld.exe", 0u64, false),
+    ];
+    let object_sets: &[&[&str]] = &[&["a.obj"], &["a.obj", "b.obj", "dir/c.obj"]];
+    for (linker_path, expected_flavor, windows_backslash) in linkers {
+        for objs in object_sets {
+            let output = "out/app.exe";
+            let mut input = Vec::new();
+            input.extend_from_slice(linker_path.as_bytes());
+            input.push(0);
+            input.extend_from_slice(output.as_bytes());
+            input.push(0);
+            for (idx, obj) in objs.iter().enumerate() {
+                if idx > 0 {
+                    input.push(0);
+                }
+                input.extend_from_slice(obj.as_bytes());
+            }
+
+            let words = entry.words(&input);
+            let mut at = 1;
+            let got_flavor = words[0];
+            let got_args = String::from_utf8(unpack(&words, &mut at)).unwrap();
+            let got_err_with = String::from_utf8(unpack(&words, &mut at)).unwrap();
+            let got_err_none = String::from_utf8(unpack(&words, &mut at)).unwrap();
+            assert_eq!(at, words.len());
+
+            assert_eq!(got_flavor, expected_flavor, "flavor for {linker_path}");
+            // `std::path::Path::file_stem` treats `\` as a separator only on Windows.
+            if !windows_backslash || cfg!(windows) {
+                let rust_linker = Linker::explicit(Path::new(linker_path));
+                let want_flavor = match rust_linker.flavor {
+                    LinkerFlavor::Msvc => 0,
+                    LinkerFlavor::LldLink => 1,
+                    LinkerFlavor::RustLld => 2,
+                };
+                assert_eq!(got_flavor, want_flavor, "rust flavor for {linker_path}");
+            }
+
+            let obj_paths: Vec<PathBuf> = objs.iter().map(PathBuf::from).collect();
+            let mut want_args: Vec<String> = Vec::new();
+            if expected_flavor == 2 {
+                want_args.push("-flavor".into());
+                want_args.push("link".into());
+            }
+            want_args.extend(
+                link_args(&obj_paths, Path::new(output))
+                    .into_iter()
+                    .map(|s| s.to_string_lossy().into_owned()),
+            );
+            assert_eq!(got_args, want_args.join("\0"), "args for {linker_path}");
+
+            let want_err_with = WindowsNativeError::LinkerFailed {
+                linker: linker_path.into(),
+                status: Some(1120),
+                output: "LNK1120: unresolved\r\n  ".into(),
+            }
+            .to_string();
+            let want_err_none = WindowsNativeError::LinkerFailed {
+                linker: linker_path.into(),
+                status: None,
+                output: "   \n\t ".into(),
+            }
+            .to_string();
+            assert_eq!(got_err_with, want_err_with);
+            assert_eq!(got_err_none, want_err_none);
+        }
+    }
+}
+
+fn encode_diagnostics_stream(ds: &[vesper::ast::Diagnostic]) -> Vec<u8> {
+    let mut out = Vec::new();
+    let push_u64 = |buf: &mut Vec<u8>, v: u64| buf.extend_from_slice(&v.to_le_bytes());
+    let push_str = |buf: &mut Vec<u8>, s: &str| {
+        buf.extend_from_slice(&(s.len() as u64).to_le_bytes());
+        buf.extend_from_slice(s.as_bytes());
+    };
+    push_u64(&mut out, ds.len() as u64);
+    for d in ds {
+        push_str(&mut out, &d.code);
+        push_str(&mut out, &d.message);
+        push_u64(&mut out, d.span.start as u64);
+        push_u64(&mut out, d.span.end as u64);
+        push_u64(&mut out, d.related.len() as u64);
+        for r in &d.related {
+            push_u64(&mut out, r.span.start as u64);
+            push_u64(&mut out, r.span.end as u64);
+            push_str(&mut out, &r.message);
+        }
+        match &d.help {
+            Some(h) => {
+                push_u64(&mut out, 1);
+                push_str(&mut out, h);
+            }
+            None => push_u64(&mut out, 0),
+        }
+    }
+    out
+}
+
+fn rust_raw_diagnostics(reason: &str, ds: &[vesper::ast::Diagnostic]) -> String {
+    const MAX_RAW_DIAGNOSTICS: usize = 128;
+    const MAX_RAW_CODE_CHARS: usize = 128;
+    const MAX_RAW_MESSAGE_CHARS: usize = 4096;
+    let mut out = format!("diagnostic source rendering unavailable: {reason}\n");
+    for d in ds.iter().take(MAX_RAW_DIAGNOSTICS) {
+        let code: String = d.code.chars().take(MAX_RAW_CODE_CHARS).collect();
+        let message: String = d.message.chars().take(MAX_RAW_MESSAGE_CHARS).collect();
+        out.push_str(&format!(
+            "{code}: {message} (UTF-8 bytes {}..{})\n",
+            d.span.start, d.span.end
+        ));
+    }
+    if ds.len() > MAX_RAW_DIAGNOSTICS {
+        out.push_str(&format!(
+            "{} additional compiler errors exceed the display profile\n",
+            ds.len() - MAX_RAW_DIAGNOSTICS
+        ));
+    }
+    out
+}
+
+#[test]
+fn diagnostics_format_matches_rust() {
+    use vesper::ast::Diagnostic;
+
+    let json_entry = driver().entry("diagnostics_json_words", true);
+    let raw_entry = driver().entry("format_raw_diagnostics_words", true);
+
+    let cases: Vec<(&str, Vec<Diagnostic>)> = vec![
+        ("empty", vec![]),
+        (
+            "escapes-and-fields",
+            vec![
+                Diagnostic::new(
+                    "E0001",
+                    "bad \"quote\" \\slash\n\r\t\u{0008}\u{000c}\u{0000}\u{001f} λ🚀",
+                    0..42,
+                )
+                .with_related(5..10, "first \"note\"")
+                .with_related(12..18, "second\nnote")
+                .with_help("try `let x = 1;`"),
+                Diagnostic::new("E0002", "plain", 100..200),
+            ],
+        ),
+        (
+            "utf8-truncation-and-overflow",
+            (0..135usize)
+                .map(|i| {
+                    if i == 0 {
+                        let long_code = "é".repeat(150);
+                        let long_msg = "🚀".repeat(4120);
+                        Diagnostic::new(&long_code, long_msg, 1..999)
+                    } else {
+                        Diagnostic::new(&format!("E{i:04}"), format!("msg {i}"), i..i + 3)
+                    }
+                })
+                .collect(),
+        ),
+    ];
+
+    for (name, ds) in &cases {
+        let stream = encode_diagnostics_stream(ds);
+
+        let json_words = json_entry.words(&stream);
+        let mut at = 0;
+        let got_json = String::from_utf8(unpack(&json_words, &mut at)).unwrap();
+        assert_eq!(at, json_words.len(), "{name}: json words");
+        let want_json = serde_json::to_string(ds).unwrap();
+        assert_eq!(got_json, want_json, "{name}: json mismatch");
+
+        let reason = "source exceeds the 1 MiB diagnostic display profile";
+        let mut raw_input = Vec::new();
+        raw_input.extend_from_slice(&(reason.len() as u64).to_le_bytes());
+        raw_input.extend_from_slice(reason.as_bytes());
+        raw_input.extend_from_slice(&stream);
+        let raw_words = raw_entry.words(&raw_input);
+        let mut at = 0;
+        let got_raw = String::from_utf8(unpack(&raw_words, &mut at)).unwrap();
+        assert_eq!(at, raw_words.len(), "{name}: raw words");
+        let want_raw = rust_raw_diagnostics(reason, ds);
+        assert_eq!(got_raw, want_raw, "{name}: raw mismatch");
+    }
+}
+
+#[test]
+fn package_diagnostics_format_matches_rust() {
+    use vesper::ast::Diagnostic;
+
+    let pkg_json_entry = driver().entry("package_diagnostics_json_words", true);
+    let err_lines_entry = driver().entry("package_error_lines_words", true);
+
+    let entries: Vec<(&str, Diagnostic)> = vec![
+        (
+            "Loom.toml",
+            Diagnostic::new("E0901", "bad manifest \"field\"\nline 2", 0..12),
+        ),
+        (
+            "src/lib.ves",
+            Diagnostic::new("E0201", "unknown name 'x'", 10..11)
+                .with_related(1..4, "defined here")
+                .with_help("did you mean 'y'?"),
+        ),
+    ];
+
+    let mut stream = Vec::new();
+    let push_u64 = |buf: &mut Vec<u8>, v: u64| buf.extend_from_slice(&v.to_le_bytes());
+    let push_str = |buf: &mut Vec<u8>, s: &str| {
+        buf.extend_from_slice(&(s.len() as u64).to_le_bytes());
+        buf.extend_from_slice(s.as_bytes());
+    };
+    push_u64(&mut stream, entries.len() as u64);
+    for (file, d) in &entries {
+        push_str(&mut stream, file);
+        push_str(&mut stream, &d.code);
+        push_str(&mut stream, &d.message);
+        push_u64(&mut stream, d.span.start as u64);
+        push_u64(&mut stream, d.span.end as u64);
+        push_u64(&mut stream, d.related.len() as u64);
+        for r in &d.related {
+            push_u64(&mut stream, r.span.start as u64);
+            push_u64(&mut stream, r.span.end as u64);
+            push_str(&mut stream, &r.message);
+        }
+        match &d.help {
+            Some(h) => {
+                push_u64(&mut stream, 1);
+                push_str(&mut stream, h);
+            }
+            None => push_u64(&mut stream, 0),
+        }
+    }
+
+    let words = pkg_json_entry.words(&stream);
+    let mut at = 0;
+    let got_json = String::from_utf8(unpack(&words, &mut at)).unwrap();
+    assert_eq!(at, words.len());
+
+    let want_arr: Vec<serde_json::Value> = entries
+        .iter()
+        .map(|(file, d)| {
+            let mut v = serde_json::to_value(d).unwrap();
+            v["file"] = serde_json::Value::String((*file).to_owned());
+            v
+        })
+        .collect();
+    let want_json = serde_json::Value::Array(want_arr).to_string();
+    assert_eq!(got_json, want_json);
+
+    let mut lines_in = Vec::new();
+    push_str(&mut lines_in, "Loom.toml");
+    push_str(&mut lines_in, "E0901");
+    push_str(&mut lines_in, "invalid version");
+    let lwords = err_lines_entry.words(&lines_in);
+    let mut lat = 0;
+    let got_lines = String::from_utf8(unpack(&lwords, &mut lat)).unwrap();
+    assert_eq!(lat, lwords.len());
+    assert_eq!(
+        got_lines,
+        "error[E0901]: invalid version (Loom.toml)\nerror[E0901]: invalid version\n"
+    );
+}

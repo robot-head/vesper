@@ -73,6 +73,9 @@ PORT_DIVERGENT = {
     "leaf": ("vesper/src/leaf.ves", {
         "        if x < 128 {": "        if x < 32 {",
     }),
+    "meta": ("vesper/src/meta.ves", {
+        "if !magic_ok || fmt != META_FORMAT {": "if true {",
+    }),
     "vector": ("vesper/src/vector.ves", {
         "let pick_x = lt_bit(x, y) ^ or_bit;": "let pick_x = lt_bit(y, x) ^ or_bit;",
     }),
@@ -148,6 +151,7 @@ PORT_TEST_DATA = glob(["tests/fixtures/planner/**"])
             ("internal", "store"),
             ("store_log", "store"),
             ("leaf", "store_ssi"),
+            ("meta", "store"),
             ("vector", "vector"),
         ]
     ]

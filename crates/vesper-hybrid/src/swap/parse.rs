@@ -12,7 +12,7 @@ mod parse_binding;
 #[path = "../parse_words.rs"]
 pub(super) mod parse_words;
 
-use super::{Registry, Swap, must, on, open, stats};
+use super::{Registry, Swap, must, on, pass, stats};
 
 /// Sources parsed by the Vesper parse module.
 static PARSE_CALLS: AtomicU64 = AtomicU64::new(0);
@@ -79,7 +79,7 @@ pub(crate) fn driver_parse(source: &str, words: &[u64]) -> vesper_syntax::parser
 }
 
 /// The flip-gate rows of this file's swaps (`swaps::on`).
-pub(super) const SWAPS: &[Swap] = &[open("parse", "0 diffs; no flip-gate configuration")];
+pub(super) const SWAPS: &[Swap] = &[pass("parse", "parse", "#2389")];
 
 pub(super) fn register(_r: &mut Registry) {
     if on("parse") {

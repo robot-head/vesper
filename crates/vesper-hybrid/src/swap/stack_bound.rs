@@ -12,7 +12,7 @@ mod stack_bound_binding;
 #[path = "../../../../tests/common/stack_words.rs"]
 mod stack_words;
 
-use super::{Registry, Swap, must, on, open};
+use super::{Registry, Swap, must, on, pass};
 
 /// Reports made by the Vesper stack-bound module.
 static STACK_BOUND_CALLS: AtomicU64 = AtomicU64::new(0);
@@ -33,7 +33,7 @@ const VESPER_STACK_BOUND: vesper::stack_bound::StackBoundTable =
     };
 
 /// The flip-gate rows of this file's swaps (`swaps::on`).
-pub(super) const SWAPS: &[Swap] = &[open("stack_bound", "2.54x, above the bar")];
+pub(super) const SWAPS: &[Swap] = &[pass("stack_bound", "stack-bound", "#2359")];
 
 pub(super) fn register(_r: &mut Registry) {
     if on("stack_bound") {

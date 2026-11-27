@@ -2,12 +2,6 @@ load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
 load("//tools/bazel:defs.bzl", "vesper_crate")
 load("//tools/bazel:vesper_port.bzl", "VESPER_TARGET", "vesper_port_object")
 
-# The Rust build (default features), with its tests.
-vesper_crate()
-
-# The Vesper build (port wave P1 lane 3, #900): the same API forwarding to
-# the port in vesper/src/ through the committed binding, and the crate's tests run
-# unchanged against it.
 # The port's files joined in order, as build.rs does (PARTS).
 WHEEL_PARTS = [
     "vesper/src/types.ves",
@@ -31,7 +25,26 @@ vesper_port_object(
     name = "wheel_vesper",
     src = ":wheel_source",
     library = "wheel",
+    rust_types = "crate",
     target = VESPER_TARGET,
+)
+
+filegroup(
+    name = "wheel_vesper_binding",
+    srcs = [":wheel_vesper"],
+    output_group = "rust_binding",
+)
+
+# All modules (wheel, leases, edt, clock) are unconditionally Vesper.
+vesper_crate(
+    build_script_data = [
+        ":wheel_vesper",
+        ":wheel_vesper_binding",
+    ],
+    build_script_env = {
+        "VESPER_PORT_OBJECT": "$(execpath :wheel_vesper)",
+        "VESPER_PORT_GENERATED_BINDING": "$(execpath :wheel_vesper_binding)",
+    },
 )
 
 # The divergence check: one bug per ported module, the DIVERGENT_EDITS of

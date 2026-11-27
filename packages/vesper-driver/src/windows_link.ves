@@ -1,0 +1,280 @@
+// Pure Windows MSVC linker planning and diagnostic formatting
+// (`src/native_windows.rs`: `Linker::explicit`, `LinkerFlavor`, `link_args`,
+// and `WindowsNativeError::LinkerFailed` `Display`), #2358 (part of #1894).
+
+// `LinkerFlavor` of `src/native_windows.rs`.
+pub enum WindowsLinkerFlavor: _ {
+    Msvc = 0,
+    LldLink = 1,
+    RustLld = 2,
+}
+
+// Named ASCII byte constants.
+const CH_NUL: u8 = 0;
+const CH_TAB: u8 = 9;
+const CH_LF: u8 = 10;
+const CH_VT: u8 = 11;
+const CH_FF: u8 = 12;
+const CH_CR: u8 = 13;
+const CH_SPACE: u8 = 32;
+const CH_MINUS: u8 = 45;
+const CH_DOT: u8 = 46;
+const CH_SLASH: u8 = 47;
+const CH_ZERO: u8 = 48;
+const CH_UPPER_A: u8 = 65;
+const CH_UPPER_Z: u8 = 90;
+const CH_BACKSLASH: u8 = 92;
+const ASCII_CASE_DELTA: u8 = 32;
+const DECIMAL_RADIX: u64 = 10;
+const SIGN_BIT_64: u64 = 9223372036854775808;
+const WORD_BYTES: u64 = 8;
+const WORD_ALIGN_MASK: u64 = 7;
+const BYTE_BITS: u64 = 8;
+const BYTE_MASK: u64 = 255;
+
+fn at_byte(in s: Slice[u8], i: u64) -> u8 {
+    match s.try_get(i) {
+        Option::Some(b) => b,
+        Option::None => 0,
+    }
+}
+
+fn to_ascii_lower(c: u8) -> u8 {
+    if c >= CH_UPPER_A && c <= CH_UPPER_Z {
+        wrapping_add(c, ASCII_CASE_DELTA)
+    } else {
+        c
+    }
+}
+
+fn eq_ignore_ascii_case(in a: Slice[u8], in b: Slice[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    for i in 0..a.len() {
+        if to_ascii_lower(at_byte(in a, i)) != to_ascii_lower(at_byte(in b, i)) {
+            return false;
+        }
+    }
+    true
+}
+
+fn is_path_sep(c: u8) -> bool {
+    c == CH_SLASH || c == CH_BACKSLASH
+}
+
+// `Path::file_stem` over UTF-8 bytes (accepts both `/` and `\` separators).
+// Returns `(start, end)` of the stem inside `path`.
+fn file_stem_bounds(in path: Slice[u8]) -> (u64, u64) {
+    let mut end = path.len();
+    loop {
+        if end == 0 {
+            return (0, 0);
+        }
+        if !is_path_sep(at_byte(in path, wrapping_sub(end, 1))) {
+            break;
+        }
+        end = wrapping_sub(end, 1);
+    }
+    let mut start = end;
+    loop {
+        if start == 0 {
+            break;
+        }
+        if is_path_sep(at_byte(in path, wrapping_sub(start, 1))) {
+            break;
+        }
+        start = wrapping_sub(start, 1);
+    }
+    // Strip the final `.ext` if there is a dot strictly after `start`.
+    let mut dot = end;
+    let mut i = end;
+    loop {
+        if i <= start {
+            break;
+        }
+        i = wrapping_sub(i, 1);
+        if at_byte(in path, i) == CH_DOT {
+            if i > start {
+                dot = i;
+            }
+            break;
+        }
+    }
+    (start, dot)
+}
+
+// `Linker::explicit` flavor classification from a linker path.
+pub fn windows_linker_flavor(in program: Slice[u8]) -> u8 {
+    let (start, end) = file_stem_bounds(in program);
+    let stem = program[start..end];
+    if eq_ignore_ascii_case(in stem, in "lld-link".as_bytes()) {
+        return WindowsLinkerFlavor::LldLink;
+    }
+    if eq_ignore_ascii_case(in stem, in "rust-lld".as_bytes()) {
+        return WindowsLinkerFlavor::RustLld;
+    }
+    WindowsLinkerFlavor::Msvc
+}
+
+fn push_arg(inout out: ChunkSeq[u8], in arg: Slice[u8]) {
+    if out.len() > 0 {
+        out.push(CH_NUL);
+    }
+    out.extend(in arg);
+}
+
+// Builds the NUL-delimited argument list of `Linker::command` / `link_args`:
+// optional `-flavor` `link` for `RustLld`, then `/NOLOGO`, `/SUBSYSTEM:CONSOLE`,
+// `/MACHINE:X64`, `/DEBUG:NONE`, `/OUT:<output>`, each NUL-delimited object in
+// `objects_nul`, and `RUNTIME_LIBRARIES`.
+pub fn windows_link_args_nul(
+    flavor: u8,
+    in output: Slice[u8],
+    in objects_nul: Slice[u8]
+) -> ChunkSeq[u8] {
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    if flavor == WindowsLinkerFlavor::RustLld {
+        push_arg(inout out, in "-flavor".as_bytes());
+        push_arg(inout out, in "link".as_bytes());
+    }
+    push_arg(inout out, in "/NOLOGO".as_bytes());
+    push_arg(inout out, in "/SUBSYSTEM:CONSOLE".as_bytes());
+    push_arg(inout out, in "/MACHINE:X64".as_bytes());
+    push_arg(inout out, in "/DEBUG:NONE".as_bytes());
+    let mut out_flag: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    out_flag.extend(in "/OUT:".as_bytes());
+    out_flag.extend(in output);
+    push_arg(inout out, in out_flag.as_slice());
+    if objects_nul.len() > 0 {
+        let mut start: u64 = 0;
+        for i in 0..objects_nul.len() {
+            if at_byte(in objects_nul, i) == CH_NUL {
+                push_arg(inout out, in objects_nul[start..i]);
+                start = wrapping_add(i, 1);
+            }
+        }
+        push_arg(inout out, in objects_nul[start..objects_nul.len()]);
+    }
+    push_arg(inout out, in "libcmt.lib".as_bytes());
+    push_arg(inout out, in "libucrt.lib".as_bytes());
+    push_arg(inout out, in "libvcruntime.lib".as_bytes());
+    push_arg(inout out, in "kernel32.lib".as_bytes());
+    out
+}
+
+fn is_ascii_ws(c: u8) -> bool {
+    c == CH_SPACE || c == CH_TAB || c == CH_LF || c == CH_CR || c == CH_FF || c == CH_VT
+}
+
+fn push_u64_decimal(inout out: ChunkSeq[u8], v: u64) {
+    if v >= DECIMAL_RADIX {
+        push_u64_decimal(inout out, v / DECIMAL_RADIX);
+    }
+    out.push(wrapping_u8(wrapping_add(v % DECIMAL_RADIX, widen_u64(CH_ZERO))));
+}
+
+fn push_i64_decimal(inout out: ChunkSeq[u8], v: i64) {
+    let bits = wrapping_u64(v);
+    if (bits & SIGN_BIT_64) != 0 {
+        out.push(CH_MINUS);
+        push_u64_decimal(inout out, wrapping_sub(0, bits));
+    } else {
+        push_u64_decimal(inout out, bits);
+    }
+}
+
+// `WindowsNativeError::LinkerFailed` `Display` (`src/native_windows.rs`).
+pub fn format_windows_linker_failed(
+    in linker: Slice[u8],
+    has_code: bool,
+    code: i64,
+    in output: Slice[u8]
+) -> ChunkSeq[u8] {
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    out.extend(in "native linker '".as_bytes());
+    out.extend(in linker);
+    out.extend(in "' failed".as_bytes());
+    if has_code {
+        out.extend(in " with exit code ".as_bytes());
+        push_i64_decimal(inout out, code);
+    }
+    let mut trim_end = output.len();
+    loop {
+        if trim_end == 0 {
+            break;
+        }
+        if !is_ascii_ws(at_byte(in output, wrapping_sub(trim_end, 1))) {
+            break;
+        }
+        trim_end = wrapping_sub(trim_end, 1);
+    }
+    if trim_end > 0 {
+        out.extend(in ":\n".as_bytes());
+        out.extend(in output[0..trim_end]);
+    }
+    out
+}
+
+fn pack_bytes(inout words: ChunkSeq[u64], in bytes: Slice[u8]) {
+    words.push(bytes.len());
+    let n = wrapping_add(bytes.len(), WORD_ALIGN_MASK) / WORD_BYTES;
+    for i in 0..n {
+        let mut w: u64 = 0;
+        for k in 0..WORD_BYTES {
+            let idx = wrapping_add(wrapping_mul(i, WORD_BYTES), k);
+            if idx < bytes.len() {
+                let b = widen_u64(at_byte(in bytes, idx));
+                w = w | wrapping_shl_u64(b, wrapping_u32(wrapping_mul(k, BYTE_BITS)));
+            }
+        }
+        words.push(w);
+    }
+}
+
+// Harness entry (`tests/self_host_driver.rs`):
+// Input: `<program>\0<output>\0<objects_nul...>` (objects separated by `\x1f`).
+// Returns: `[flavor, packed(args_nul), packed(failed_with_code), packed(failed_no_code)]`.
+pub fn windows_link_check(in input: Str) -> ChunkSeq[u64] {
+    let b = input.as_bytes();
+    let mut first_nul = b.len();
+    let mut second_nul = b.len();
+    for i in 0..b.len() {
+        if at_byte(in b, i) == CH_NUL {
+            if first_nul == b.len() {
+                first_nul = i;
+            } else if second_nul == b.len() {
+                second_nul = i;
+                break;
+            }
+        }
+    }
+    let program = b[0..first_nul];
+    let out_start = if first_nul < b.len() {
+        wrapping_add(first_nul, 1)
+    } else {
+        b.len()
+    };
+    let output = b[out_start..second_nul];
+    let obj_start = if second_nul < b.len() {
+        wrapping_add(second_nul, 1)
+    } else {
+        b.len()
+    };
+    let objs = b[obj_start..b.len()];
+    let flavor = windows_linker_flavor(in program);
+    let args = windows_link_args_nul(flavor, in output, in objs);
+    let err_with = format_windows_linker_failed(
+        in program,
+        true,
+        1120,
+        in "LNK1120: unresolved\r\n  ".as_bytes()
+    );
+    let err_none = format_windows_linker_failed(in program, false, 0, in "   \n\t ".as_bytes());
+    let mut words: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    words.push(widen_u64(flavor));
+    pack_bytes(inout words, in args.as_slice());
+    pack_bytes(inout words, in err_with.as_slice());
+    pack_bytes(inout words, in err_none.as_slice());
+    words
+}

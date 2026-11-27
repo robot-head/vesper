@@ -51,7 +51,7 @@ fn decode(words: &[u64]) -> Result<String, String> {
 /// The flip-gate rows of this file's swaps (`swaps::on`).
 pub(super) const SWAPS: &[Swap] = &[open(
     "lean_extract",
-    "0 diffs, 1.11x without the word encoding; no flip-gate configuration",
+    "flip gate FAIL 1.68x with encoding, 0 diffs (scripts/ci/flip-gate/lean-extract.json, #2289)",
 )];
 
 pub(super) fn register(_r: &mut Registry) {

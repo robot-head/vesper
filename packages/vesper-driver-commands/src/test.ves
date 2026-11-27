@@ -1,8 +1,13 @@
 // `vesper test`: CLI option parsing, validation, and `--help` in Vesper,
 // delegating doctest (`src/doctest_commands.rs`) and unit/mutation test
-// execution (`src/test_runner.rs`) to `HybridCommands::hc_test_run`.
+// execution (`src/test_runner.rs`) to `@vesper/driver-engines::test_run`.
+use @vesper/driver-engines::{test_run};
 use @vesper/driver::{Args, args_count, eq};
-use super::{PrintFailed, arg, byte_at, print, fail, stdout_stream};
+use super::{PrintFailed, arg, byte_at, print, fail, stdout_stream, lossy, json_key, json_string};
+
+const LEFT_BRACE: u8 = 123;
+const RIGHT_BRACE: u8 = 125;
+const LINE_FEED: u8 = 10;
 
 fn print_test_help() eff [Ffi[StdFs], Fail[PrintFailed]] {
     print(
@@ -48,7 +53,19 @@ fn fail_test(
     in message: Slice[u8]
 ) -> i64 eff [Ffi[StdFs], Ffi[HybridCommands], Fail[PrintFailed]] {
     if has_json {
-        HybridCommands::hc_test_json_err(in message);
+        // `println!("{}", json!({"passed": false, "error": msg}))` over
+        // `String::from_utf8_lossy(message)`: serde_json writes the keys
+        // sorted.
+        let text = lossy(in message);
+        let mut line: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        line.push(LEFT_BRACE);
+        json_key(inout line, in "error", true);
+        json_string(inout line, in text.as_slice());
+        json_key(inout line, in "passed", false);
+        line.extend(in "false".as_bytes());
+        line.push(RIGHT_BRACE);
+        line.push(LINE_FEED);
+        print(stdout_stream(), in line.as_slice());
     }
     fail(in message)
 }
@@ -81,18 +98,9 @@ fn run_packed(
     n: u64
 ) -> i64 eff [Ffi[StdFs], Ffi[HybridCommands], Fail[PrintFailed]] {
     let packed = pack_args(in args, n);
-    let err_len = HybridCommands::hc_test_run(in packed.as_slice());
-    if err_len == 0 {
+    let err = test_run(in packed.as_slice());
+    if err.len() == 0 {
         return 0;
-    }
-    let mut err: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    err.resize(err_len, 0);
-    let actual = HybridCommands::hc_test_err(inout err.as_slice_mut());
-    if actual > err.len() {
-        err.resize(actual, 0);
-        let _got = HybridCommands::hc_test_err(inout err.as_slice_mut());
-    } else {
-        err.truncate(actual);
     }
     fail(in err.as_slice())
 }

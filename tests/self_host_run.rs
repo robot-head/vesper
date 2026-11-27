@@ -138,6 +138,68 @@ const PROGRAMS: &[(&str, &str)] = &[
          handle Fail[String] in { h() } with { return v => v, raise(e, k) => 98 }) }",
     ),
     (
+        // A closure performs to the handler it was made under, a function
+        // value to the caller's handler where it is passed, and an open row
+        // takes all of the caller's evidence.
+        "evidence_binding",
+        "effect Ask { fn ask() -> i64; } \
+         fn twice(f: fn() -> i64 eff [Ask]) -> i64 eff [Ask] { handle Ask in \
+         { wrapping_add(f(), Ask::ask()) } with { return x => x, ask(k) => k(100), } } \
+         fn open[e: eff](f: fn() -> i64 eff [e]) -> i64 eff [e] { handle Ask in { f() } \
+         with { return x => x, ask(k) => k(1000), } } \
+         fn asked() -> i64 eff [Ask] { wrapping_add(Ask::ask(), 1) } \
+         fn main() -> (i64, i64, i64, i64, i64) { handle Ask in { \
+         let a = twice(|| Ask::ask()); let b = twice(asked); \
+         let d = handle Ask in { twice(|| wrapping_mul(Ask::ask(), 2)) } \
+         with { return x => x, ask(k) => k(7), }; \
+         let e = open(asked); let g = open(|| Ask::ask()); (a, b, d, e, g) } \
+         with { return x => x, ask(k) => k(3), } }",
+    ),
+    (
+        // Float display (shortest digits, no exponent, `-0`, `NaN`, `inf`),
+        // binary32 rounding, `%`, conversions, bits and literal patterns.
+        "float_values",
+        "fn kind(x: f64) -> i64 { match x { 0.5 => 1, 2.0 => 2, _ => 3 } } \
+         fn kind32(x: f32) -> i64 { match x { 0.1 => 1, _ => 2 } } \
+         fn main() -> (f64, f64, f64, f64, f32, f32, f64, f64, f64, (f64, f32, u64, u32, f32), \
+         (i64, i64, i64, i64, bool, bool)) { \
+         let tenth: f32 = 0.1; let third: f32 = 1.0; let z: f64 = 0.0; \
+         (0.1 + 0.2, 1e300, 1.5e-7, -z, tenth * 3.0, third / 3.0, 7.5 % 2.0, z / z, -1.0 / z, \
+         (widen_f64(tenth), nearest_f32(16777217.0), to_bits_f64(1.0), to_bits_f32(tenth), \
+         from_bits_f32(1)), (kind(0.5), kind(2.0), kind(z), kind32(tenth), z == -z, z / z == z / z)) }",
+    ),
+    (
+        // A labelled operation goes to the handler with its label, past an
+        // inner unlabelled one of the same effect.
+        "labelled_raise",
+        "fn pick(n: u64) -> u64 eff [stop: Fail[u64]] { \
+         let inner = handle Fail[u64] in { if n > 5 { stop.raise(n) } else { n } } \
+         with { return v => v, raise(e, k) => wrapping_add(e, 100), }; wrapping_add(inner, 1) } \
+         fn main() -> (u64, u64) { let a = handle stop: Fail[u64] in { pick(3) } \
+         with { return v => v, raise(e, k) => wrapping_mul(e, 10), }; \
+         let b = handle stop: Fail[u64] in { pick(7) } \
+         with { return v => v, raise(e, k) => wrapping_mul(e, 10), }; (a, b) }",
+    ),
+    (
+        // `Box::new` makes a `Box` data value that `Box(x)` patterns open.
+        "box_values",
+        "enum T { Leaf, Node { v: i64, next: Box[T] } } \
+         fn sum(sink t: T) -> i64 { match t { T::Leaf => 0, \
+         T::Node { v, next } => match next { Box(rest) => wrapping_add(v, sum(rest)) } } } \
+         fn main() -> (i64, Box[i64]) { \
+         let t = T::Node { v: 1, next: Box::new(T::Node { v: 2, next: Box::new(T::Leaf) }) }; \
+         (sum(t), Box::new(5)) }",
+    ),
+    (
+        // `return` in a handled body leaves the function, skipping the
+        // return clause and the rest of the caller's body.
+        "nested_return",
+        "effect Ask { fn ask() -> i64; } \
+         fn early(x: i64) -> i64 { let r = handle Ask in { if x > 0 { return wrapping_add(x, 1000); } \
+         Ask::ask() } with { return v => wrapping_mul(v, 2), ask(k) => k(5), }; wrapping_add(r, 1) } \
+         fn main() -> (i64, i64) { (early(1), early(0)) }",
+    ),
+    (
         // An effectful function value binds the incoming capability
         // (`bind_callable_evidence`): the outer handler answers.
         "bound_evidence",
@@ -277,6 +339,19 @@ const PROGRAMS: &[(&str, &str)] = &[
         "options",
         "fn pick(b: bool) -> Option[i64] { if b { Option::Some(3) } else { Option::None } } \
          fn main() -> (Option[i64], Option[i64], bool) { (pick(true), pick(false), pick(true) == pick(true)) }",
+    ),
+    (
+        "region_ops",
+        "linear struct T { v: i64 } \
+         fn main() -> (bool, bool, u64, u64, i64, u64) { region r { let a = r.box(1); let b = a; \
+         let c = r.box(2); let m = r.checkpoint(); let d = r.box(3); r.commit(m); let u = r.used(); \
+         r.set(c, 5); let t = r.box(T { v: 4 }); let before = r.used(); let T { v } = r.take(t); \
+         let n = region q(16) { let x = q.box(7); q.used() }; \
+         (a == b, a == c, u, before, wrapping_add(wrapping_add(r.get(c), r.get(d)), v), n) } }",
+    ),
+    (
+        "region_first_chunk",
+        "fn main() -> i64 { region r(8) { let x = r.box((1, 2)); 0 } }",
     ),
 ];
 

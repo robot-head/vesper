@@ -1,0 +1,531 @@
+// @vesper/aegis::pem: PEM CERTIFICATE block scanner and RFC 4648 Base64 decoder (`src/chain.rs`).
+
+const STATUS_OK: u64 = 0;
+const STATUS_MALFORMED: u64 = 1;
+const STATUS_EMPTY: u64 = 2;
+const STATUS_TOO_SMALL: u64 = 3;
+const STATUS_SHIFT: u64 = 3;
+
+const BYTE_DASH: u64 = 45;
+const BYTE_LF: u64 = 10;
+const BYTE_CR: u64 = 13;
+const BYTE_SPACE: u64 = 32;
+const BYTE_TAB: u64 = 9;
+const BYTE_EQ: u64 = 61;
+const BYTE_PLUS: u64 = 43;
+const BYTE_SLASH: u64 = 47;
+const BYTE_0: u64 = 48;
+const BYTE_9: u64 = 57;
+const BYTE_A: u64 = 65;
+const BYTE_Z: u64 = 90;
+const BYTE_A_LO: u64 = 97;
+const BYTE_Z_LO: u64 = 122;
+
+const B64_LOWER_OFFSET: u64 = 26;
+const B64_DIGIT_OFFSET: u64 = 52;
+const B64_PLUS_VAL: u64 = 62;
+const B64_SLASH_VAL: u64 = 63;
+const B64_INVALID: u64 = 255;
+
+const BEGIN_LEN: u64 = 27;
+const END_LEN: u64 = 25;
+const PUBKEY_BEGIN_LEN: u64 = 26;
+const PUBKEY_END_LEN: u64 = 24;
+const SPAN_STRIDE: u64 = 2;
+const BYTE_MASK: u64 = 255;
+const SHIFT_B0: u64 = 16;
+const SHIFT_B1: u64 = 8;
+const SHIFT_Q0: u64 = 18;
+const SHIFT_Q1: u64 = 12;
+const SHIFT_Q: u64 = 6;
+const QUANTUM_LEN: u64 = 4;
+const QUANTUM_OUT_BYTES: u64 = 3;
+
+fn byte_at(in b: Slice[u8], i: u64) -> u64 {
+    match b.try_get(i) {
+        Option::Some(v) => widen_u64(v),
+        Option::None => 0,
+    }
+}
+
+fn is_ws(c: u64) -> bool {
+    c == BYTE_LF || c == BYTE_CR || c == BYTE_SPACE || c == BYTE_TAB
+}
+
+fn b64_val(c: u64) -> u64 {
+    if c >= BYTE_A && c <= BYTE_Z {
+        return wrapping_sub(c, BYTE_A);
+    }
+    if c >= BYTE_A_LO && c <= BYTE_Z_LO {
+        return wrapping_add(wrapping_sub(c, BYTE_A_LO), B64_LOWER_OFFSET);
+    }
+    if c >= BYTE_0 && c <= BYTE_9 {
+        return wrapping_add(wrapping_sub(c, BYTE_0), B64_DIGIT_OFFSET);
+    }
+    if c == BYTE_PLUS {
+        return B64_PLUS_VAL;
+    }
+    if c == BYTE_SLASH {
+        return B64_SLASH_VAL;
+    }
+    B64_INVALID
+}
+
+// Match "-----BEGIN CERTIFICATE-----" (27 bytes) at `pos`.
+fn match_begin(in b: Slice[u8], pos: u64) -> bool {
+    if wrapping_add(pos, BEGIN_LEN) > b.len() {
+        return false;
+    }
+    byte_at(in b, pos) == BYTE_DASH
+        && byte_at(in b, wrapping_add(pos, 1)) == BYTE_DASH
+        && byte_at(in b, wrapping_add(pos, 2)) == BYTE_DASH
+        && byte_at(in b, wrapping_add(pos, 3)) == BYTE_DASH
+        && byte_at(in b, wrapping_add(pos, 4)) == BYTE_DASH
+        && byte_at(in b, wrapping_add(pos, 5)) == 66
+        && byte_at(in b, wrapping_add(pos, 6)) == 69
+        && byte_at(in b, wrapping_add(pos, 7)) == 71
+        && byte_at(in b, wrapping_add(pos, 8)) == 73
+        && byte_at(in b, wrapping_add(pos, 9)) == 78
+        && byte_at(in b, wrapping_add(pos, 10)) == BYTE_SPACE
+        && byte_at(in b, wrapping_add(pos, 11)) == 67
+        && byte_at(in b, wrapping_add(pos, 12)) == 69
+        && byte_at(in b, wrapping_add(pos, 13)) == 82
+        && byte_at(in b, wrapping_add(pos, 14)) == 84
+        && byte_at(in b, wrapping_add(pos, 15)) == 73
+        && byte_at(in b, wrapping_add(pos, 16)) == 70
+        && byte_at(in b, wrapping_add(pos, 17)) == 73
+        && byte_at(in b, wrapping_add(pos, 18)) == 67
+        && byte_at(in b, wrapping_add(pos, 19)) == 65
+        && byte_at(in b, wrapping_add(pos, 20)) == 84
+        && byte_at(in b, wrapping_add(pos, 21)) == 69
+        && byte_at(in b, wrapping_add(pos, 22)) == BYTE_DASH
+        && byte_at(in b, wrapping_add(pos, 23)) == BYTE_DASH
+        && byte_at(in b, wrapping_add(pos, 24)) == BYTE_DASH
+        && byte_at(in b, wrapping_add(pos, 25)) == BYTE_DASH
+        && byte_at(in b, wrapping_add(pos, 26)) == BYTE_DASH
+}
+
+// Match "-----END CERTIFICATE-----" (25 bytes) at `pos`.
+fn match_end(in b: Slice[u8], pos: u64) -> bool {
+    if wrapping_add(pos, END_LEN) > b.len() {
+        return false;
+    }
+    byte_at(in b, pos) == BYTE_DASH
+        && byte_at(in b, wrapping_add(pos, 1)) == BYTE_DASH
+        && byte_at(in b, wrapping_add(pos, 2)) == BYTE_DASH
+        && byte_at(in b, wrapping_add(pos, 3)) == BYTE_DASH
+        && byte_at(in b, wrapping_add(pos, 4)) == BYTE_DASH
+        && byte_at(in b, wrapping_add(pos, 5)) == 69
+        && byte_at(in b, wrapping_add(pos, 6)) == 78
+        && byte_at(in b, wrapping_add(pos, 7)) == 68
+        && byte_at(in b, wrapping_add(pos, 8)) == BYTE_SPACE
+        && byte_at(in b, wrapping_add(pos, 9)) == 67
+        && byte_at(in b, wrapping_add(pos, 10)) == 69
+        && byte_at(in b, wrapping_add(pos, 11)) == 82
+        && byte_at(in b, wrapping_add(pos, 12)) == 84
+        && byte_at(in b, wrapping_add(pos, 13)) == 73
+        && byte_at(in b, wrapping_add(pos, 14)) == 70
+        && byte_at(in b, wrapping_add(pos, 15)) == 73
+        && byte_at(in b, wrapping_add(pos, 16)) == 67
+        && byte_at(in b, wrapping_add(pos, 17)) == 65
+        && byte_at(in b, wrapping_add(pos, 18)) == 84
+        && byte_at(in b, wrapping_add(pos, 19)) == 69
+        && byte_at(in b, wrapping_add(pos, 20)) == BYTE_DASH
+        && byte_at(in b, wrapping_add(pos, 21)) == BYTE_DASH
+        && byte_at(in b, wrapping_add(pos, 22)) == BYTE_DASH
+        && byte_at(in b, wrapping_add(pos, 23)) == BYTE_DASH
+        && byte_at(in b, wrapping_add(pos, 24)) == BYTE_DASH
+}
+
+fn skip_to_next_line(in b: Slice[u8], pos: u64) -> u64 {
+    let n = b.len();
+    let mut i = pos;
+    loop {
+        if i >= n {
+            return n;
+        }
+        let c = byte_at(in b, i);
+        i = wrapping_add(i, 1);
+        if c == BYTE_LF {
+            return i;
+        }
+    }
+}
+
+pub fn decode_pem_certificates(
+    in pem: Slice[u8],
+    inout der_out: Slice[u8],
+    inout spans: Slice[u64]
+) -> u64 {
+    let n = pem.len();
+    let out_cap = der_out.len();
+    let span_cap = spans.len();
+    let mut pos: u64 = 0;
+    let mut out_pos: u64 = 0;
+    let mut count: u64 = 0;
+
+    loop {
+        if pos >= n {
+            break;
+        }
+        if !match_begin(in pem, pos) {
+            pos = skip_to_next_line(in pem, pos);
+            continue;
+        }
+        // Advance past BEGIN line
+        pos = wrapping_add(pos, BEGIN_LEN);
+        loop {
+            if pos >= n {
+                break;
+            }
+            let c = byte_at(in pem, pos);
+            if c == BYTE_SPACE || c == BYTE_TAB || c == BYTE_CR {
+                pos = wrapping_add(pos, 1);
+                continue;
+            }
+            if c == BYTE_LF {
+                pos = wrapping_add(pos, 1);
+                break;
+            }
+            return STATUS_MALFORMED;
+        }
+
+        let cert_start = out_pos;
+        let mut acc: u64 = 0;
+        let mut q_len: u64 = 0;
+        let mut pad: u64 = 0;
+        let mut found_end = false;
+
+        loop {
+            if pos >= n {
+                break;
+            }
+            let c = byte_at(in pem, pos);
+            if c == BYTE_DASH && match_end(in pem, pos) {
+                pos = skip_to_next_line(in pem, wrapping_add(pos, END_LEN));
+                found_end = true;
+                break;
+            }
+            // Fast path: 4-byte Base64 quantum when q_len == 0 and no whitespace/padding.
+            if q_len == 0 && pad == 0 && wrapping_add(pos, QUANTUM_LEN) <= n {
+                let v0 = b64_val(c);
+                let v1 = b64_val(byte_at(in pem, wrapping_add(pos, 1)));
+                let v2 = b64_val(byte_at(in pem, wrapping_add(pos, 2)));
+                let v3 = b64_val(byte_at(in pem, wrapping_add(pos, 3)));
+                if (v0 | v1 | v2 | v3) < B64_INVALID {
+                    if wrapping_add(out_pos, QUANTUM_OUT_BYTES) > out_cap {
+                        return STATUS_TOO_SMALL;
+                    }
+                    let q = (v0 << SHIFT_Q0) | (v1 << SHIFT_Q1) | (v2 << SHIFT_Q) | v3;
+                    der_out.try_set(out_pos, wrapping_u8((q >> SHIFT_B0) & BYTE_MASK));
+                    der_out.try_set(
+                        wrapping_add(out_pos, 1),
+                        wrapping_u8((q >> SHIFT_B1) & BYTE_MASK)
+                    );
+                    der_out.try_set(wrapping_add(out_pos, 2), wrapping_u8(q & BYTE_MASK));
+                    out_pos = wrapping_add(out_pos, QUANTUM_OUT_BYTES);
+                    pos = wrapping_add(pos, QUANTUM_LEN);
+                    continue;
+                }
+            }
+            pos = wrapping_add(pos, 1);
+            if is_ws(c) {
+                continue;
+            }
+            if c == BYTE_EQ {
+                if q_len < 2 {
+                    return STATUS_MALFORMED;
+                }
+                pad = wrapping_add(pad, 1);
+                acc = acc << SHIFT_Q;
+                q_len = wrapping_add(q_len, 1);
+                if q_len == QUANTUM_LEN {
+                    if pad == 1 {
+                        if wrapping_add(out_pos, 2) > out_cap {
+                            return STATUS_TOO_SMALL;
+                        }
+                        der_out.try_set(out_pos, wrapping_u8((acc >> SHIFT_B0) & BYTE_MASK));
+                        der_out.try_set(
+                            wrapping_add(out_pos, 1),
+                            wrapping_u8((acc >> SHIFT_B1) & BYTE_MASK)
+                        );
+                        out_pos = wrapping_add(out_pos, 2);
+                    } else if pad == 2 {
+                        if wrapping_add(out_pos, 1) > out_cap {
+                            return STATUS_TOO_SMALL;
+                        }
+                        der_out.try_set(out_pos, wrapping_u8((acc >> SHIFT_B0) & BYTE_MASK));
+                        out_pos = wrapping_add(out_pos, 1);
+                    } else {
+                        return STATUS_MALFORMED;
+                    }
+                    acc = 0;
+                    q_len = 0;
+                    // After padding, only whitespace allowed until END line
+                    loop {
+                        if pos >= n {
+                            break;
+                        }
+                        if match_end(in pem, pos) {
+                            pos = skip_to_next_line(in pem, wrapping_add(pos, END_LEN));
+                            found_end = true;
+                            break;
+                        }
+                        let w = byte_at(in pem, pos);
+                        if !is_ws(w) {
+                            return STATUS_MALFORMED;
+                        }
+                        pos = wrapping_add(pos, 1);
+                    }
+                    break;
+                }
+                continue;
+            }
+            if pad != 0 {
+                return STATUS_MALFORMED;
+            }
+            let v = b64_val(c);
+            if v == B64_INVALID {
+                return STATUS_MALFORMED;
+            }
+            acc = (acc << SHIFT_Q) | v;
+            q_len = wrapping_add(q_len, 1);
+            if q_len == QUANTUM_LEN {
+                if wrapping_add(out_pos, 3) > out_cap {
+                    return STATUS_TOO_SMALL;
+                }
+                der_out.try_set(out_pos, wrapping_u8((acc >> SHIFT_B0) & BYTE_MASK));
+                der_out
+                    .try_set(wrapping_add(out_pos, 1), wrapping_u8((acc >> SHIFT_B1) & BYTE_MASK));
+                der_out.try_set(wrapping_add(out_pos, 2), wrapping_u8(acc & BYTE_MASK));
+                out_pos = wrapping_add(out_pos, 3);
+                acc = 0;
+                q_len = 0;
+            }
+        }
+
+        if !found_end || q_len != 0 {
+            return STATUS_MALFORMED;
+        }
+        let span_idx = wrapping_mul(count, SPAN_STRIDE);
+        if wrapping_add(span_idx, SPAN_STRIDE) > span_cap {
+            return STATUS_TOO_SMALL;
+        }
+        spans.try_set(span_idx, cert_start);
+        spans.try_set(wrapping_add(span_idx, 1), out_pos);
+        count = wrapping_add(count, 1);
+    }
+
+    if count == 0 {
+        return STATUS_EMPTY;
+    }
+    (count << STATUS_SHIFT) | STATUS_OK
+}
+
+// Match "-----BEGIN PUBLIC KEY-----" (26 bytes) at `pos`.
+fn match_pubkey_begin(in b: Slice[u8], pos: u64) -> bool {
+    if wrapping_add(pos, PUBKEY_BEGIN_LEN) > b.len() {
+        return false;
+    }
+    byte_at(in b, pos) == BYTE_DASH
+        && byte_at(in b, wrapping_add(pos, 1)) == BYTE_DASH
+        && byte_at(in b, wrapping_add(pos, 2)) == BYTE_DASH
+        && byte_at(in b, wrapping_add(pos, 3)) == BYTE_DASH
+        && byte_at(in b, wrapping_add(pos, 4)) == BYTE_DASH
+        && byte_at(in b, wrapping_add(pos, 5)) == 66
+        && byte_at(in b, wrapping_add(pos, 6)) == 69
+        && byte_at(in b, wrapping_add(pos, 7)) == 71
+        && byte_at(in b, wrapping_add(pos, 8)) == 73
+        && byte_at(in b, wrapping_add(pos, 9)) == 78
+        && byte_at(in b, wrapping_add(pos, 10)) == BYTE_SPACE
+        && byte_at(in b, wrapping_add(pos, 11)) == 80
+        && byte_at(in b, wrapping_add(pos, 12)) == 85
+        && byte_at(in b, wrapping_add(pos, 13)) == 66
+        && byte_at(in b, wrapping_add(pos, 14)) == 76
+        && byte_at(in b, wrapping_add(pos, 15)) == 73
+        && byte_at(in b, wrapping_add(pos, 16)) == 67
+        && byte_at(in b, wrapping_add(pos, 17)) == BYTE_SPACE
+        && byte_at(in b, wrapping_add(pos, 18)) == 75
+        && byte_at(in b, wrapping_add(pos, 19)) == 69
+        && byte_at(in b, wrapping_add(pos, 20)) == 89
+        && byte_at(in b, wrapping_add(pos, 21)) == BYTE_DASH
+        && byte_at(in b, wrapping_add(pos, 22)) == BYTE_DASH
+        && byte_at(in b, wrapping_add(pos, 23)) == BYTE_DASH
+        && byte_at(in b, wrapping_add(pos, 24)) == BYTE_DASH
+        && byte_at(in b, wrapping_add(pos, 25)) == BYTE_DASH
+}
+
+// Match "-----END PUBLIC KEY-----" (24 bytes) at `pos`.
+fn match_pubkey_end(in b: Slice[u8], pos: u64) -> bool {
+    if wrapping_add(pos, PUBKEY_END_LEN) > b.len() {
+        return false;
+    }
+    byte_at(in b, pos) == BYTE_DASH
+        && byte_at(in b, wrapping_add(pos, 1)) == BYTE_DASH
+        && byte_at(in b, wrapping_add(pos, 2)) == BYTE_DASH
+        && byte_at(in b, wrapping_add(pos, 3)) == BYTE_DASH
+        && byte_at(in b, wrapping_add(pos, 4)) == BYTE_DASH
+        && byte_at(in b, wrapping_add(pos, 5)) == 69
+        && byte_at(in b, wrapping_add(pos, 6)) == 78
+        && byte_at(in b, wrapping_add(pos, 7)) == 68
+        && byte_at(in b, wrapping_add(pos, 8)) == BYTE_SPACE
+        && byte_at(in b, wrapping_add(pos, 9)) == 80
+        && byte_at(in b, wrapping_add(pos, 10)) == 85
+        && byte_at(in b, wrapping_add(pos, 11)) == 66
+        && byte_at(in b, wrapping_add(pos, 12)) == 76
+        && byte_at(in b, wrapping_add(pos, 13)) == 73
+        && byte_at(in b, wrapping_add(pos, 14)) == 67
+        && byte_at(in b, wrapping_add(pos, 15)) == BYTE_SPACE
+        && byte_at(in b, wrapping_add(pos, 16)) == 75
+        && byte_at(in b, wrapping_add(pos, 17)) == 69
+        && byte_at(in b, wrapping_add(pos, 18)) == 89
+        && byte_at(in b, wrapping_add(pos, 19)) == BYTE_DASH
+        && byte_at(in b, wrapping_add(pos, 20)) == BYTE_DASH
+        && byte_at(in b, wrapping_add(pos, 21)) == BYTE_DASH
+        && byte_at(in b, wrapping_add(pos, 22)) == BYTE_DASH
+        && byte_at(in b, wrapping_add(pos, 23)) == BYTE_DASH
+}
+
+pub fn decode_pem_public_key(in pem: Slice[u8], inout der_out: Slice[u8]) -> u64 {
+    let n = pem.len();
+    let out_cap = der_out.len();
+    let mut pos: u64 = 0;
+
+    loop {
+        if pos >= n {
+            return STATUS_EMPTY;
+        }
+        if match_pubkey_begin(in pem, pos) {
+            break;
+        }
+        pos = skip_to_next_line(in pem, pos);
+    }
+
+    pos = wrapping_add(pos, PUBKEY_BEGIN_LEN);
+    loop {
+        if pos >= n {
+            break;
+        }
+        let c = byte_at(in pem, pos);
+        if c == BYTE_SPACE || c == BYTE_TAB || c == BYTE_CR {
+            pos = wrapping_add(pos, 1);
+            continue;
+        }
+        if c == BYTE_LF {
+            pos = wrapping_add(pos, 1);
+            break;
+        }
+        return STATUS_MALFORMED;
+    }
+
+    let mut out_pos: u64 = 0;
+    let mut acc: u64 = 0;
+    let mut q_len: u64 = 0;
+    let mut pad: u64 = 0;
+    let mut found_end = false;
+
+    loop {
+        if pos >= n {
+            break;
+        }
+        let c = byte_at(in pem, pos);
+        if c == BYTE_DASH && match_pubkey_end(in pem, pos) {
+            found_end = true;
+            break;
+        }
+        if q_len == 0 && pad == 0 && wrapping_add(pos, QUANTUM_LEN) <= n {
+            let v0 = b64_val(c);
+            let v1 = b64_val(byte_at(in pem, wrapping_add(pos, 1)));
+            let v2 = b64_val(byte_at(in pem, wrapping_add(pos, 2)));
+            let v3 = b64_val(byte_at(in pem, wrapping_add(pos, 3)));
+            if (v0 | v1 | v2 | v3) < B64_INVALID {
+                if wrapping_add(out_pos, QUANTUM_OUT_BYTES) > out_cap {
+                    return STATUS_TOO_SMALL;
+                }
+                let q = (v0 << SHIFT_Q0) | (v1 << SHIFT_Q1) | (v2 << SHIFT_Q) | v3;
+                der_out.try_set(out_pos, wrapping_u8((q >> SHIFT_B0) & BYTE_MASK));
+                der_out.try_set(wrapping_add(out_pos, 1), wrapping_u8((q >> SHIFT_B1) & BYTE_MASK));
+                der_out.try_set(wrapping_add(out_pos, 2), wrapping_u8(q & BYTE_MASK));
+                out_pos = wrapping_add(out_pos, QUANTUM_OUT_BYTES);
+                pos = wrapping_add(pos, QUANTUM_LEN);
+                continue;
+            }
+        }
+        pos = wrapping_add(pos, 1);
+        if is_ws(c) {
+            continue;
+        }
+        if c == BYTE_EQ {
+            if q_len < 2 {
+                return STATUS_MALFORMED;
+            }
+            pad = wrapping_add(pad, 1);
+            acc = acc << SHIFT_Q;
+            q_len = wrapping_add(q_len, 1);
+            if q_len == QUANTUM_LEN {
+                if pad == 1 {
+                    if wrapping_add(out_pos, 2) > out_cap {
+                        return STATUS_TOO_SMALL;
+                    }
+                    der_out.try_set(out_pos, wrapping_u8((acc >> SHIFT_B0) & BYTE_MASK));
+                    der_out.try_set(
+                        wrapping_add(out_pos, 1),
+                        wrapping_u8((acc >> SHIFT_B1) & BYTE_MASK)
+                    );
+                    out_pos = wrapping_add(out_pos, 2);
+                } else if pad == 2 {
+                    if wrapping_add(out_pos, 1) > out_cap {
+                        return STATUS_TOO_SMALL;
+                    }
+                    der_out.try_set(out_pos, wrapping_u8((acc >> SHIFT_B0) & BYTE_MASK));
+                    out_pos = wrapping_add(out_pos, 1);
+                } else {
+                    return STATUS_MALFORMED;
+                }
+                acc = 0;
+                q_len = 0;
+                loop {
+                    if pos >= n {
+                        break;
+                    }
+                    if match_pubkey_end(in pem, pos) {
+                        found_end = true;
+                        break;
+                    }
+                    let w = byte_at(in pem, pos);
+                    if !is_ws(w) {
+                        return STATUS_MALFORMED;
+                    }
+                    pos = wrapping_add(pos, 1);
+                }
+                break;
+            }
+            continue;
+        }
+        if pad != 0 {
+            return STATUS_MALFORMED;
+        }
+        let v = b64_val(c);
+        if v == B64_INVALID {
+            return STATUS_MALFORMED;
+        }
+        acc = (acc << SHIFT_Q) | v;
+        q_len = wrapping_add(q_len, 1);
+        if q_len == QUANTUM_LEN {
+            if wrapping_add(out_pos, QUANTUM_OUT_BYTES) > out_cap {
+                return STATUS_TOO_SMALL;
+            }
+            der_out.try_set(out_pos, wrapping_u8((acc >> SHIFT_B0) & BYTE_MASK));
+            der_out.try_set(wrapping_add(out_pos, 1), wrapping_u8((acc >> SHIFT_B1) & BYTE_MASK));
+            der_out.try_set(wrapping_add(out_pos, 2), wrapping_u8(acc & BYTE_MASK));
+            out_pos = wrapping_add(out_pos, QUANTUM_OUT_BYTES);
+            acc = 0;
+            q_len = 0;
+        }
+    }
+
+    if !found_end || q_len != 0 {
+        return STATUS_MALFORMED;
+    }
+    (out_pos << STATUS_SHIFT) | STATUS_OK
+}

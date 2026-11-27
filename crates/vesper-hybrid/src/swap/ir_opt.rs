@@ -42,7 +42,10 @@ fn vesper_optimize(
 }
 
 /// The flip-gate rows of this file's swaps (`swaps::on`).
-pub(super) const SWAPS: &[Swap] = &[open("ir_opt", "0.0036x; no flip-gate configuration")];
+pub(super) const SWAPS: &[Swap] = &[open(
+    "ir_opt",
+    "re-gate against ir_opt_policy::optimize (the default Rust path) over the whole corpus, #2289",
+)];
 
 pub(super) fn register(r: &mut Registry) {
     if on("ir_opt") {

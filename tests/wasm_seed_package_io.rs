@@ -1922,8 +1922,9 @@ fn stage2_collects_package_under_wasi_impl() {
     )
     .expect("run @vesper/stage2 under WASI");
     // 3 modules (prelude + `lib.ves` + `sub.ves`), 19 functions (17 prelude + `main` + `helper`),
-    // 4 ADTs (2 prelude + `Pair` + `Flag`), 0 diagnostic bytes => 3190400.
-    assert_eq!(got, 3190400);
+    // 5 ADTs (3 prelude: `Option`, `RuntimeError`, `ArithOverflow`; + `Pair` + `Flag`),
+    // 0 diagnostic bytes => 3190500.
+    assert_eq!(got, 3190500);
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -2978,6 +2979,13 @@ enum CompilerExecCheck {
 /// every package it depends on.
 const COMPILER_PACKAGES: &[(&str, &str, &str, &str, CompilerExecCheck)] = &[
     (
+        "lsp-format",
+        "@vesper/lsp-format",
+        "packages/vesper-lsp-format",
+        "lsp_formatting(in \"\").len()",
+        CompilerExecCheck::CompileOnly,
+    ),
+    (
         "front",
         "@vesper/front",
         "packages/vesper-front",
@@ -2996,56 +3004,56 @@ const COMPILER_PACKAGES: &[(&str, &str, &str, &str, CompilerExecCheck)] = &[
         "@vesper/backend-checks",
         "packages/vesper-backend-checks",
         "backend_verify_count(in \"\")",
-        CompilerExecCheck::CompileOnly,
+        CompilerExecCheck::Exact(0),
     ),
     (
         "bounds-hoist",
         "@vesper/bounds-hoist",
         "packages/vesper-bounds-hoist",
         "decide_text(in \"\").len()",
-        CompilerExecCheck::CompileOnly,
+        CompilerExecCheck::Exact(1),
     ),
     (
         "check-dyn",
         "@vesper/check-dyn",
         "packages/vesper-check-dyn",
         "check_dyn_count(in \"\", 0, 0)",
-        CompilerExecCheck::CompileOnly,
+        CompilerExecCheck::Exact(0),
     ),
     (
         "check-effects",
         "@vesper/check-effects",
         "packages/vesper-check-effects",
         "check_effects(in \"\").len()",
-        CompilerExecCheck::CompileOnly,
+        CompilerExecCheck::Exact(1),
     ),
     (
         "check-fip",
         "@vesper/check-fip",
         "packages/vesper-check-fip",
         "check_fip_count(in \"\")",
-        CompilerExecCheck::CompileOnly,
+        CompilerExecCheck::Exact(0),
     ),
     (
         "check-loops-atomics",
         "@vesper/check-loops-atomics",
         "packages/vesper-check-loops-atomics",
         "check_loops_control(in \"\").len()",
-        CompilerExecCheck::CompileOnly,
+        CompilerExecCheck::Exact(1),
     ),
     (
         "check-pact",
         "@vesper/check-pact",
         "packages/vesper-check-pact",
         "check_pact_mono_plan(in \"\").len()",
-        CompilerExecCheck::CompileOnly,
+        CompilerExecCheck::Exact(12),
     ),
     (
         "check-regions-seqs",
         "@vesper/check-regions-seqs",
         "packages/vesper-check-regions-seqs",
         "regions_seqs_types(in \"\").len()",
-        CompilerExecCheck::CompileOnly,
+        CompilerExecCheck::Exact(1),
     ),
     (
         "check-tensor-types",
@@ -3059,21 +3067,21 @@ const COMPILER_PACKAGES: &[(&str, &str, &str, &str, CompilerExecCheck)] = &[
         "@vesper/codegen-aggregates",
         "packages/vesper-codegen-aggregates",
         "aggregate_decisions(in \"\").len()",
-        CompilerExecCheck::CompileOnly,
+        CompilerExecCheck::Exact(1),
     ),
     (
         "codegen-calls",
         "@vesper/codegen-calls",
         "packages/vesper-codegen-calls",
         "codegen_calls_text(in \"\").len()",
-        CompilerExecCheck::CompileOnly,
+        CompilerExecCheck::Exact(1),
     ),
     (
         "codegen-control",
         "@vesper/codegen-control",
         "packages/vesper-codegen-control",
         "control_session_plans(in \"\").len()",
-        CompilerExecCheck::CompileOnly,
+        CompilerExecCheck::Exact(1),
     ),
     (
         "codegen-export",
@@ -3087,28 +3095,28 @@ const COMPILER_PACKAGES: &[(&str, &str, &str, &str, CompilerExecCheck)] = &[
         "@vesper/codegen-freestanding",
         "packages/vesper-codegen-freestanding",
         "freestanding_constants()",
-        CompilerExecCheck::CompileOnly,
+        CompilerExecCheck::NonZero,
     ),
     (
         "codegen-scalar",
         "@vesper/codegen-scalar",
         "packages/vesper-codegen-scalar",
         "codegen_scalar_decisions(in \"\").len()",
-        CompilerExecCheck::CompileOnly,
+        CompilerExecCheck::Exact(1),
     ),
     (
         "codegen-seq",
         "@vesper/codegen-seq",
         "packages/vesper-codegen-seq",
         "codegen_seq_decisions(in \"\").len()",
-        CompilerExecCheck::CompileOnly,
+        CompilerExecCheck::Exact(1),
     ),
     (
         "codegen-walk",
         "@vesper/codegen-walk",
         "packages/vesper-codegen-walk",
         "native_walk_decisions(in \"\").len()",
-        CompilerExecCheck::CompileOnly,
+        CompilerExecCheck::Exact(1),
     ),
     (
         "driver",
@@ -3122,7 +3130,7 @@ const COMPILER_PACKAGES: &[(&str, &str, &str, &str, CompilerExecCheck)] = &[
         "@vesper/ebpf-backend",
         "packages/vesper-ebpf-backend",
         "ebpf_backend_words(in \"\").len()",
-        CompilerExecCheck::CompileOnly,
+        CompilerExecCheck::Exact(11),
     ),
     (
         "egraph",
@@ -3150,28 +3158,28 @@ const COMPILER_PACKAGES: &[(&str, &str, &str, &str, CompilerExecCheck)] = &[
         "@vesper/ir-inline",
         "packages/vesper-ir-inline",
         "inline_program_words(in \"\".as_bytes()).len()",
-        CompilerExecCheck::CompileOnly,
+        CompilerExecCheck::NonZero,
     ),
     (
         "ir-opt",
         "@vesper/ir-opt",
         "packages/vesper-ir-opt",
         "ir_opt_words(in \"\".as_bytes()).len()",
-        CompilerExecCheck::CompileOnly,
+        CompilerExecCheck::NonZero,
     ),
     (
         "ir-opt-policy",
         "@vesper/ir-opt-policy",
         "packages/vesper-ir-opt-policy",
         "ir_opt_policy_entry(in \"\").len()",
-        CompilerExecCheck::CompileOnly,
+        CompilerExecCheck::NonZero,
     ),
     (
         "optimize",
         "@vesper/optimize",
         "packages/vesper-optimize",
         "optimize_verify(in \"\").len()",
-        CompilerExecCheck::CompileOnly,
+        CompilerExecCheck::Exact(1),
     ),
     (
         "doc",
@@ -3199,7 +3207,7 @@ const COMPILER_PACKAGES: &[(&str, &str, &str, &str, CompilerExecCheck)] = &[
         "@vesper/lsp-proof-run",
         "packages/vesper-lsp-proof-run",
         "job_obligations(in \"\".as_bytes())",
-        CompilerExecCheck::CompileOnly,
+        CompilerExecCheck::Exact(0),
     ),
     (
         "memo",
@@ -3220,14 +3228,21 @@ const COMPILER_PACKAGES: &[(&str, &str, &str, &str, CompilerExecCheck)] = &[
         "@vesper/lean-extract",
         "packages/vesper-lean-extract",
         "extract_head_words(in \"\")",
-        CompilerExecCheck::CompileOnly,
+        CompilerExecCheck::NonZero,
     ),
     (
         "check-collect",
         "@vesper/check-collect",
         "packages/vesper-check-collect",
         "collect_text(in \"\").len()",
-        CompilerExecCheck::CompileOnly,
+        CompilerExecCheck::NonZero,
+    ),
+    (
+        "check-world",
+        "@vesper/check-world",
+        "packages/vesper-check-world",
+        "typing_input_words(in \"\").len()",
+        CompilerExecCheck::NonZero,
     ),
     (
         "preludes",
@@ -3241,7 +3256,7 @@ const COMPILER_PACKAGES: &[(&str, &str, &str, &str, CompilerExecCheck)] = &[
         "@vesper/check-data",
         "packages/vesper-check-data",
         "check_data_sizes(in \"\").len()",
-        CompilerExecCheck::CompileOnly,
+        CompilerExecCheck::Exact(10),
     ),
     (
         "ast",
@@ -3255,14 +3270,14 @@ const COMPILER_PACKAGES: &[(&str, &str, &str, &str, CompilerExecCheck)] = &[
         "@vesper/check-layout",
         "packages/vesper-check-layout",
         "check_layout_words(in \"\").len()",
-        CompilerExecCheck::CompileOnly,
+        CompilerExecCheck::Exact(8),
     ),
     (
         "check-core-typing",
         "@vesper/check-core-typing",
         "packages/vesper-check-core-typing",
         "core_typing_exprs(in \"\").len()",
-        CompilerExecCheck::CompileOnly,
+        CompilerExecCheck::Exact(1),
     ),
     (
         "check-names-packages",
@@ -3276,21 +3291,21 @@ const COMPILER_PACKAGES: &[(&str, &str, &str, &str, CompilerExecCheck)] = &[
         "@vesper/place-ir",
         "packages/vesper-place-ir",
         "place_ir_words(in \"\").len()",
-        CompilerExecCheck::CompileOnly,
+        CompilerExecCheck::NonZero,
     ),
     (
         "place-ir-lower",
         "@vesper/place-ir-lower",
         "packages/vesper-place-ir-lower",
         "ir_lower_words(in \"\").len()",
-        CompilerExecCheck::CompileOnly,
+        CompilerExecCheck::NonZero,
     ),
     (
         "vsys",
         "@vesper/vsys",
         "packages/vesper-vsys",
         "run_vsys_check(in \"\").len()",
-        CompilerExecCheck::CompileOnly,
+        CompilerExecCheck::Exact(2),
     ),
     (
         "clif",
@@ -3314,39 +3329,67 @@ const COMPILER_PACKAGES: &[(&str, &str, &str, &str, CompilerExecCheck)] = &[
         CompilerExecCheck::Exact(4),
     ),
     (
+        "native-clif-opt",
+        "@vesper/native-clif-opt",
+        "packages/vesper-native-clif-opt",
+        "clif_opt_words(in \"\").len()",
+        CompilerExecCheck::Exact(1),
+    ),
+    (
         "native-cold-outline",
         "@vesper/native-cold-outline",
         "packages/vesper-native-cold-outline",
         "outline_words(in \"\").len()",
-        CompilerExecCheck::CompileOnly,
+        CompilerExecCheck::Exact(1),
     ),
     (
         "native-vectorize",
         "@vesper/native-vectorize",
         "packages/vesper-native-vectorize",
         "vectorize_words(in \"\").len()",
-        CompilerExecCheck::CompileOnly,
+        CompilerExecCheck::Exact(2),
     ),
     (
         "verified-codegen",
         "@vesper/verified-codegen",
         "packages/vesper-verified-codegen",
         "select_text(in \"\").len()",
-        CompilerExecCheck::CompileOnly,
+        CompilerExecCheck::Exact(1),
+    ),
+    (
+        "proof-audit",
+        "@vesper/proof-audit",
+        "packages/vesper-proof-audit",
+        "HELP.len()",
+        CompilerExecCheck::NonZero,
+    ),
+    (
+        "run",
+        "@vesper/run",
+        "packages/vesper-run",
+        "run_words(in \"\".as_bytes()).len()",
+        CompilerExecCheck::Exact(6),
+    ),
+    (
+        "verify",
+        "@vesper/verify",
+        "packages/vesper-verify",
+        "discover(in \"\".as_bytes()).err.len()",
+        CompilerExecCheck::Exact(0),
     ),
     (
         "wasm-backend",
         "@vesper/wasm-backend",
         "packages/vesper-wasm-backend",
         "wasm_backend_compile(in \"\").len()",
-        CompilerExecCheck::CompileOnly,
+        CompilerExecCheck::Exact(4),
     ),
     (
         "wit-component",
         "@vesper/wit-component",
         "packages/vesper-wit-component",
         "wit_component_wrap(in \"\").len()",
-        CompilerExecCheck::CompileOnly,
+        CompilerExecCheck::Exact(2),
     ),
 ];
 
@@ -3378,25 +3421,32 @@ const STAGE2_CRANELIFT_PACKAGES: &[(&str, &str, &str, &str)] = &[
     ),
 ];
 
+/// Compiler packages over the WASI host libraries (StdFs, StdEnv,
+/// StdProcess, Blake3 and HybridCommands, whose wasm32-wasip2 sources import
+/// nothing or WASI calls): (stem, package, path, probe `src/lib.ves`, the
+/// probe's exit code). Both Stage 2 compilers must build each one to the same
+/// bytes, and the probe must run to that code. @vesper/driver-commands left
+/// the gaps when its engine calls moved to @vesper/driver-engines (#1996):
+/// `vesper lsp` there is refused, and printing the refusal fails because
+/// @vesper-std/fs has no standard streams on wasm32-wasip2, so the probe ends
+/// as Rust's print panic does ([`DRIVER_PRINT_PANIC_EXIT`]).
+const STAGE2_HOST_PACKAGES: &[(&str, &str, &str, &str, u64)] = &[(
+    "driver-commands",
+    "@vesper/driver-commands",
+    "packages/vesper-driver-commands",
+    "use @vesper/driver-commands::run;\nuse @vesper/driver::{args_new, args_push};\npub fn main() -> u64 eff [Ffi[StdFs], Ffi[StdEnv], Ffi[StdProcess], Ffi[Blake3], Ffi[HybridCommands]] { let mut a = args_new(); args_push(inout a, in \"lsp\".as_bytes()); wrapping_u64(run(in a)) }\n",
+    DRIVER_PRINT_PANIC_EXIT,
+)];
+
+/// The exit code of @vesper/driver-commands when a print fails (`PANIC_EXIT`,
+/// Rust's 101 for a panic).
+const DRIVER_PRINT_PANIC_EXIT: u64 = 101;
+
 /// Compiler packages Stage 2 cannot build yet: (stem, package, path, probe
 /// `src/lib.ves`, reason). `stage2_self_compilation_fixed_point` checks that
-/// each one still fails, so a gap that closes moves into [`COMPILER_PACKAGES`].
-const STAGE2_PACKAGE_GAPS: &[(&str, &str, &str, &str, &str)] = &[
-    (
-        "driver-commands",
-        "@vesper/driver-commands",
-        "packages/vesper-driver-commands",
-        "use @vesper/driver-commands::run;\nuse @vesper/driver::args_new;\npub fn main() -> u64 eff [Ffi[StdFs], Ffi[StdEnv], Ffi[StdProcess], Ffi[HybridCommands]] { let a = args_new(); wrapping_u64(run(in a)) }\n",
-        "its printing and help go through the HybridCommands import, which only the hybrid compiler's Rust implements (crates/vesper-hybrid/src/commands.rs): the Wasm entry cannot carry Ffi[HybridCommands] (WErr Entry). Formatting calls @vesper/fmt (crates/vesper-fmt/vesper), which hashes with C BLAKE3 (@vesper-std/hash-sys). @vesper-std/process builds for WASI (src-wasip2, #1928)",
-    ),
-    (
-        "run",
-        "@vesper/run",
-        "packages/vesper-run",
-        "use @vesper/run::run_words;\npub fn main() -> u64 { run_words(in \"\".as_bytes()).len() }\n",
-        "the `vesper run` evaluator (#2053) divides under local Fail handlers (packages/vesper-run/src/arith.ves), which the Wasm backend does not lower yet (WErr Unsupported GenericEffectInstance)",
-    ),
-];
+/// each one still fails, so a gap that closes moves into [`COMPILER_PACKAGES`]
+/// or [`STAGE2_HOST_PACKAGES`]. None is left since #1996.
+const STAGE2_PACKAGE_GAPS: &[(&str, &str, &str, &str, &str)] = &[];
 
 /// Directories under `packages/` that are in none of [`COMPILER_PACKAGES`],
 /// [`STAGE2_CRANELIFT_PACKAGES`] and [`STAGE2_PACKAGE_GAPS`], with where they
@@ -3407,24 +3457,20 @@ const STAGE2_PACKAGES_COVERED_ELSEWHERE: &[(&str, &str)] = &[
         "Stage 1 front end, checked as one unit; bootstrap/stage1.lock (tests/stage2_seed_runner.rs)",
     ),
     (
+        "vesper-driver-engines",
+        "the command engines still in Rust (#1996), built under Stage 2 as a dependency of the @vesper/driver-commands probe in STAGE2_HOST_PACKAGES (src-wasip2 refuses each engine)",
+    ),
+    (
         "vesper-export-build",
         "`vesper build --lib`'s interface and binding from Stage 2's front end (#2270) as a native executable beside the Rust CLI (tests/self_host_codegen_export.rs); it is @vesper/stage2 plus the export packages, built under Stage 2 as one program in bootstrap switch slice 3",
     ),
     (
-        "vesper-lsp-format",
-        "the formatting action of `vesper lsp` (#1828 part 11a) in the JIT beside Rust's (tests/self_host_lsp_features.rs); it calls @vesper/fmt, which hashes with C BLAKE3 (@vesper-std/hash-sys), which a Wasm entry does not have",
-    ),
-    (
-        "vesper-proof-audit",
-        "`vesper proof-audit` as a native executable beside Rust's (tests/self_host_proof_audit.rs); it hashes with C BLAKE3 (@vesper-std/hash-sys) and runs Lean, neither of which a Wasm entry has",
+        "vesper-native-lib",
+        "a library's native object built in Vesper over @vesper/cranelift (bootstrap switch slice 2a, #2349), compared with `vesper build --lib` in the JIT (crates/vesper-codegen-swap-test/tests/self_host_native_lib.rs); built under Stage 2 with the Cranelift component in bootstrap switch slice 3",
     ),
     (
         "vesper-stage2",
         "Stage 2 itself: stage2.wasm == stage3.wasm",
-    ),
-    (
-        "vesper-verify",
-        "`vesper verify` pieces as a native executable beside Rust's (tests/self_host_verify.rs); it depends on @vesper/proof-audit, which hashes with C BLAKE3 (@vesper-std/hash-sys), which a Wasm entry does not have",
     ),
     (
         "vesper-std",
@@ -3442,6 +3488,7 @@ fn stage2_fixed_point_lists_every_package() {
         .map(|(_, _, rel, _, _)| *rel)
         .chain(STAGE2_PACKAGE_GAPS.iter().map(|(_, _, rel, _, _)| *rel))
         .chain(STAGE2_CRANELIFT_PACKAGES.iter().map(|(_, _, rel, _)| *rel))
+        .chain(STAGE2_HOST_PACKAGES.iter().map(|(_, _, rel, _, _)| *rel))
         .map(|rel| rel.trim_start_matches("packages/").to_string())
         .chain(
             STAGE2_PACKAGES_COVERED_ELSEWHERE
@@ -3465,7 +3512,7 @@ fn stage2_fixed_point_lists_every_package() {
     on_disk.sort();
     assert_eq!(
         listed, on_disk,
-        "every directory under packages/ must be in COMPILER_PACKAGES, STAGE2_CRANELIFT_PACKAGES, STAGE2_PACKAGE_GAPS or STAGE2_PACKAGES_COVERED_ELSEWHERE"
+        "every directory under packages/ must be in COMPILER_PACKAGES, STAGE2_CRANELIFT_PACKAGES, STAGE2_HOST_PACKAGES, STAGE2_PACKAGE_GAPS or STAGE2_PACKAGES_COVERED_ELSEWHERE"
     );
 }
 
@@ -3606,7 +3653,8 @@ fn write_probe(wrap_dir: &Path, manifest: &str, lib_src: &str) {
 /// pinned wasmtime CLI (always present under Bazel), the precompiled
 /// `stage2.cwasm` rebuilds every package again and must match too.
 ///
-/// Each package in [`STAGE2_CRANELIFT_PACKAGES`] is built the same way. Each
+/// Each package in [`STAGE2_CRANELIFT_PACKAGES`] and [`STAGE2_HOST_PACKAGES`]
+/// is built the same way (a host package's probe also runs). Each
 /// package in [`STAGE2_PACKAGE_GAPS`] must still fail to build, so a gap that
 /// closes is moved into [`COMPILER_PACKAGES`] instead of going unnoticed.
 fn check_compiler_packages_fixed_point(
@@ -3685,6 +3733,35 @@ fn check_compiler_packages_fixed_point(
             }
         }
     }
+    for (stem, pkg_name, pkg_rel, lib_src, code) in STAGE2_HOST_PACKAGES.iter() {
+        write_probe(
+            &wrap_dir,
+            &source_probe_manifest(stem, pkg_name, pkg_rel, lib_src),
+            lib_src,
+        );
+        let by_boot = match build_compiler_package_probe(boot, boot_syms, dir, "boot stage2") {
+            Ok(b) => b,
+            Err(e) => {
+                failures.push(format!("{pkg_name}: {e}"));
+                continue;
+            }
+        };
+        match build_compiler_package_probe(stage2, stage2_syms, dir, "stage2.wasm") {
+            Ok(b) if b == by_boot => {}
+            Ok(b) => failures.push(format!(
+                "{pkg_name}: boot stage2 built {} bytes, stage2.wasm built {} different bytes",
+                by_boot.len(),
+                b.len()
+            )),
+            Err(e) => failures.push(format!("{pkg_name}: {e}")),
+        }
+        match run(&by_boot, &Ctx::default()) {
+            Ok(got) if got == *code => {}
+            other => failures.push(format!(
+                "{pkg_name}: expected the probe to exit with {code}, got {other:?}"
+            )),
+        }
+    }
     for (stem, pkg_name, pkg_rel, lib_src, why) in STAGE2_PACKAGE_GAPS.iter() {
         write_probe(
             &wrap_dir,
@@ -3746,13 +3823,81 @@ fn check_compiler_packages_fixed_point(
             b.err()
         )),
     }
+    // @vesper-std/hash-sys on WASI (src-wasip2, #2323): delegates Ffi[Blake3]
+    // to portable @vesper-std/hash::blake3 with zero Wasm imports, built the
+    // same by both Stage 2 compilers.
+    let hash_manifest = "[package]\nname = \"@vesper-test/probe-hash-sys-wasi\"\nversion = \"0.1.0\"\nedition = \"2026\"\n\n[dependencies]\n\"@vesper-std/hash-sys\" = { version = \"^0.1\", path = \"/repo/packages/vesper-std/hash/sys\" }\n";
+    let hash_src = "use @vesper-std/hash-sys::{hash, derive_key_hash, hasher_new, hasher_new_keyed, hasher_new_derive_key, update, finalize, finalize_xof, hasher_free};\n\
+        pub fn main() -> u64 eff [Ffi[Blake3]] {\n\
+            let d0 = hash(in \"\".as_bytes());\n\
+            let d1 = match hasher_new() {\n\
+                Option::Some(h0) => {\n\
+                    let mut h = h0;\n\
+                    update(inout h, in \"\".as_bytes());\n\
+                    let mut xof = ChunkSeq::new[u8]();\n\
+                    finalize_xof(in h, 4, inout xof);\n\
+                    let d = finalize(in h);\n\
+                    hasher_free(h);\n\
+                    if xof.len() != 4 { return 1; }\n\
+                    d\n\
+                },\n\
+                Option::None => return 2,\n\
+            };\n\
+            if d0.w0 != d1.w0 || d0.w1 != d1.w1 || d0.w2 != d1.w2 || d0.w3 != d1.w3 { return 3; }\n\
+            let bad_key = match hasher_new_keyed(in \"short\".as_bytes()) {\n\
+                Option::Some(h) => { hasher_free(h); false },\n\
+                Option::None => true,\n\
+            };\n\
+            if !bad_key { return 4; }\n\
+            let mut bad_utf8 = ChunkSeq::new[u8]();\n\
+            bad_utf8.push(255);\n\
+            let mut dk_out = ChunkSeq::new[u8]();\n\
+            if derive_key_hash(in bad_utf8.as_slice(), in \"x\".as_bytes(), 8, inout dk_out) { return 5; }\n\
+            if !derive_key_hash(in \"ctx\".as_bytes(), in \"x\".as_bytes(), 8, inout dk_out) { return 6; }\n\
+            if dk_out.len() != 8 { return 7; }\n\
+            let ok_dk = match hasher_new_derive_key(in \"ctx\".as_bytes()) {\n\
+                Option::Some(h) => { hasher_free(h); true },\n\
+                Option::None => false,\n\
+            };\n\
+            if !ok_dk { return 8; }\n\
+            d0.w0 & 255\n\
+        }\n";
+    write_probe(&wrap_dir, hash_manifest, hash_src);
+    match (
+        build_compiler_package_probe(boot, boot_syms, dir, "boot stage2"),
+        build_compiler_package_probe(stage2, stage2_syms, dir, "stage2.wasm"),
+    ) {
+        (Ok(a), Ok(b)) => {
+            if a != b {
+                failures.push(format!(
+                    "@vesper-std/hash-sys (WASI probe): boot stage2 built {} bytes, stage2.wasm built {} different bytes",
+                    a.len(),
+                    b.len()
+                ));
+            }
+            match run(&b, &Ctx::default()) {
+                Ok(175) => {}
+                other => failures.push(format!(
+                    "@vesper-std/hash-sys (WASI probe): expected BLAKE3(\"\")[0] (175 / 0xaf), got {other:?}"
+                )),
+            }
+        }
+        (a, b) => failures.push(format!(
+            "@vesper-std/hash-sys (WASI probe): {:?} / {:?}",
+            a.err(),
+            b.err()
+        )),
+    }
     remove_stage2_sidecars(&out_wasm);
     let _ = std::fs::remove_dir_all(&wrap_dir);
     assert!(
         failures.is_empty(),
         "Stage 2 package fixed point broken for {} of {} packages:\n{}",
         failures.len(),
-        COMPILER_PACKAGES.len() + STAGE2_CRANELIFT_PACKAGES.len() + STAGE2_PACKAGE_GAPS.len(),
+        COMPILER_PACKAGES.len()
+            + STAGE2_CRANELIFT_PACKAGES.len()
+            + STAGE2_HOST_PACKAGES.len()
+            + STAGE2_PACKAGE_GAPS.len(),
         failures.join("\n")
     );
 }
@@ -3803,6 +3948,7 @@ fn stage2_compiles_compiler_packages() {
             })
         };
 
+        let mut exec_failures = Vec::new();
         for (stem, pkg_name, pkg_rel, expr, exec_check) in specs.iter() {
             let (manifest, lib_src) = compiler_package_probe(stem, pkg_name, pkg_rel, expr);
             let exit_code = compile_wrap(&manifest, &lib_src)
@@ -3827,22 +3973,26 @@ fn stage2_compiles_compiler_packages() {
             );
             match exec_check {
                 CompilerExecCheck::CompileOnly => {}
-                CompilerExecCheck::Exact(expected) => {
-                    let got = run(&bytes, &Ctx::default())
-                        .unwrap_or_else(|e| panic!("run {stem} component: {e}"));
-                    assert_eq!(got, *expected, "unexpected return value running {stem}");
-                }
-                CompilerExecCheck::NonZero => {
-                    let got = run(&bytes, &Ctx::default())
-                        .unwrap_or_else(|e| panic!("run {stem} component: {e}"));
-                    assert!(
-                        got > 0,
-                        "expected positive return running {stem}, got {got}"
-                    );
-                }
+                CompilerExecCheck::Exact(expected) => match run(&bytes, &Ctx::default()) {
+                    Ok(got) if got == *expected => {}
+                    Ok(got) => {
+                        exec_failures.push(format!("{stem}: expected {expected}, got {got}"))
+                    }
+                    Err(e) => exec_failures.push(format!("{stem}: trap {e}")),
+                },
+                CompilerExecCheck::NonZero => match run(&bytes, &Ctx::default()) {
+                    Ok(got) if got > 0 => {}
+                    Ok(got) => exec_failures.push(format!("{stem}: expected > 0, got {got}")),
+                    Err(e) => exec_failures.push(format!("{stem}: trap {e}")),
+                },
             }
             remove_stage2_sidecars(&host_wasm);
         }
+        assert!(
+            exec_failures.is_empty(),
+            "unexpected compiler package execution results:\n{}",
+            exec_failures.join("\n")
+        );
 
         // Verify Stage 2 lowering & Wasmtime execution for fixed-array writes,
         // on-demand `Result` ADTs, integer intrinsics/conversions, and `usize`/`isize`.
@@ -3903,7 +4053,114 @@ pub fn main() -> u64 {
         );
         remove_stage2_sidecars(&host_wasm);
 
+        // Verify unsuffixed LHS integer literals infer their type from the RHS
+        // in binary operators and same-integer builtins (e.g. `wrapping_sub(0, i128)`).
+        let lhs_lit_manifest = "[package]\nname = \"@vesper-test/stage2-lhs-int-lit\"\nversion = \"0.1.0\"\nedition = \"2026\"\n";
+        let lhs_lit_src = "\
+fn neg_i128(x: i128) -> u64 {
+    let n = wrapping_sub(0, x);
+    let shifted = 10 + n;
+    let bonus = if 0 < shifted { 1 } else { 0 };
+    wrapping_add(wrapping_u64(shifted), bonus)
+}
+pub fn main() -> u64 {
+    let neg: i128 = -5;
+    let wide: u128 = 20;
+    let sum = 2 + wide;
+    wrapping_add(neg_i128(neg), wrapping_u64(sum))
+}
+";
+        let lhs_lit_code =
+            compile_wrap(lhs_lit_manifest, lhs_lit_src).expect("compile lhs int lit smoke");
+        let lhs_lit_note = read_stage2_sidecar_notes(&host_wasm);
+        assert_eq!(lhs_lit_code, 0, "lhs int lit smoke failed: {lhs_lit_note}");
+        let lhs_lit_bytes = std::fs::read(&host_wasm).unwrap_or_default();
+        assert!(lhs_lit_bytes.starts_with(b"\0asm\x0d\x00\x01\x00"));
+        let lhs_lit_got = run(&lhs_lit_bytes, &Ctx::default()).expect("run lhs int lit smoke");
+        assert_eq!(lhs_lit_got, 38);
+        remove_stage2_sidecars(&host_wasm);
+
+        // Verify `f32` values, the float conversions and bit
+        // reinterpretations, and the bitwise intrinsics (#2375) against the
+        // evaluator.
+        let float_manifest = "[package]\nname = \"@vesper-test/stage2-floats\"\nversion = \"0.1.0\"\nedition = \"2026\"\n";
+        let float_code =
+            compile_wrap(float_manifest, STAGE2_FLOAT_SMOKE).expect("compile float smoke");
+        let float_note = read_stage2_sidecar_notes(&host_wasm);
+        assert_eq!(float_code, 0, "float smoke failed: {float_note}");
+        let float_bytes = std::fs::read(&host_wasm).unwrap_or_default();
+        assert!(float_bytes.starts_with(b"\0asm\x0d\x00\x01\x00"));
+        let float_got = run(&float_bytes, &Ctx::default()).expect("run float smoke");
+        let float_expected = evaluate(check(STAGE2_FLOAT_SMOKE).world());
+        assert_eq!(
+            float_got.to_string(),
+            float_expected,
+            "float smoke vs the evaluator"
+        );
+        remove_stage2_sidecars(&host_wasm);
+
         let _ = std::fs::remove_file(&syms_path);
         std::fs::remove_dir_all(dir).unwrap();
     });
 }
+
+/// `f32` arithmetic, comparisons, `%` and negation, `f32` literals (also on
+/// the left of an operator, and as a bits operand) and literal patterns, `widen_f64`, `nearest_f32`/`nearest_f64` from floats
+/// and integers, `to_bits_*`/`from_bits_*`, and `bit_*` on several kinds
+/// (#2375), folded into one word.
+const STAGE2_FLOAT_SMOKE: &str = "\
+fn mix(acc: u64, x: u64) -> u64 { wrapping_add(wrapping_mul(acc, 1000003), x) }
+fn b32(x: f32) -> u64 { widen_u64(to_bits_f32(x)) }
+fn b64(x: f64) -> u64 { to_bits_f64(x) }
+fn is_half(x: f32) -> u64 { match x { 0.5 => 1, _ => 0 } }
+fn eq32(a: f32, b: f32) -> u64 { if a == b { 1 } else { 0 } }
+pub fn main() -> u64 {
+    let a: f32 = 1.1;
+    let b: f32 = 3.0;
+    let tiny = from_bits_f32(1);
+    let nan = from_bits_f32(2143289344);
+    let neg_zero: f32 = -0.0;
+    let mut h: u64 = 7;
+    h = mix(h, b32(a + b));
+    h = mix(h, b32(a - b));
+    h = mix(h, b32(a * b));
+    h = mix(h, b32(a / b));
+    h = mix(h, b32(b % a));
+    h = mix(h, b32(-a));
+    h = mix(h, b32(tiny * b));
+    h = mix(h, if a < b { 1 } else { 2 });
+    h = mix(h, if a >= b { 3 } else { 4 });
+    h = mix(h, eq32(nan, nan));
+    h = mix(h, eq32(neg_zero, 0.0));
+    h = mix(h, is_half(0.5));
+    h = mix(h, is_half(a));
+    h = mix(h, b64(widen_f64(a)));
+    h = mix(h, if 0.5 == from_bits_f32(1056964608) { 5 } else { 6 });
+    h = mix(h, b32(2.0 * b));
+    h = mix(h, b32(-1.5 + a));
+    h = mix(h, widen_u64(to_bits_f32(1.0)));
+    h = mix(h, b64(from_bits_f64(4607182418800017408) + 1.0));
+    h = mix(h, b32(nearest_f32(0.1)));
+    h = mix(h, b32(nearest_f32(16777217)));
+    let big: u64 = 18446744073709551615;
+    let neg: i64 = -9007199254740993;
+    h = mix(h, b32(nearest_f32(big)));
+    h = mix(h, b64(nearest_f64(big)));
+    h = mix(h, b64(nearest_f64(neg)));
+    h = mix(h, b32(nearest_f32(neg)));
+    h = mix(h, b64(from_bits_f64(4614253070214989087) * 2.0));
+    let x: u32 = 2863311530;
+    let y: u32 = 4042322160;
+    h = mix(h, widen_u64(bit_and(x, y)));
+    h = mix(h, widen_u64(bit_or(x, y)));
+    h = mix(h, widen_u64(bit_xor(x, y)));
+    h = mix(h, widen_u64(bit_shl(x, 36)));
+    h = mix(h, widen_u64(bit_shr(x, 33)));
+    let s: i64 = -12345;
+    h = mix(h, wrapping_u64(bit_shr(s, 65)));
+    h = mix(h, wrapping_u64(bit_shl(s, 3)));
+    let k: u8 = 200;
+    h = mix(h, widen_u64(bit_shl(k, 9)));
+    h
+}
+";

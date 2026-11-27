@@ -22,6 +22,10 @@ const PASS_INOUT: u8 = 1;
 const PASS_SINK: u8 = 2;
 // `]`, closing a `CSlice[..]` or `Option[..]` type argument.
 const TY_ARG_CLOSE_BYTES: u64 = 1;
+// The `StdFs` wire struct of `fs-wasip2-wasm32.vsys` (#1996).
+const FS_META: Str = "FsMeta";
+// `TyMode::Copy`: a wire struct is a copy struct.
+const MODE_COPY: u8 = 0;
 use @vesper/check-data::world::{
     Adt, EffectRow, Field, Generic, Known, Variant, World, known_new, set_by_symbol, world_new
 };
@@ -647,6 +651,50 @@ fn add_vcl_ops(
     }
 }
 
+// Declares `wire struct FsMeta { size: u64, mtime_s: i64, mtime_ns: u32,
+// kind: u32 }` of `fs-wasip2-wasm32.vsys` as a struct, the struct Rust's
+// FFI lowering appends (`Generated::append`), so the Wasm backend can build
+// and read it (#1996). The loader only lists a `.vsys` file's type names.
+fn add_fs_meta_adt(inout names: Names, inout types: Types, inout world: World, sym: u32) {
+    let k = world.k;
+    let fa = n32(world.fields.len());
+    world.fields.push(Field {
+        name: names.intern(in "size".as_bytes()),
+        ty: types.named0(k.u64_),
+        modality: 0
+    });
+    world.fields.push(Field {
+        name: names.intern(in "mtime_s".as_bytes()),
+        ty: types.named0(k.i64_),
+        modality: 0
+    });
+    world.fields.push(Field {
+        name: names.intern(in "mtime_ns".as_bytes()),
+        ty: types.named0(k.u32_),
+        modality: 0
+    });
+    world.fields.push(Field {
+        name: names.intern(in "kind".as_bytes()),
+        ty: types.named0(k.u32_),
+        modality: 0
+    });
+    let va = n32(world.variants.len());
+    world.variants.push(Variant { name: sym, fa: fa, fc: 4, named: true });
+    let idx = n32(world.adts.len());
+    world.adts.push(Adt {
+        name: sym,
+        mode: MODE_COPY,
+        ga: 0,
+        gn: 0,
+        va: va,
+        vn: 1,
+        is_enum: false,
+        tile: 0,
+        span_zero: false
+    });
+    set_by_symbol(inout world.by_name, sym, inc32(idx));
+}
+
 pub fn collect_program(in mods: ChunkSeq[AssembledModule]) -> CollectedProgram {
     let mut names = names_new();
     let mut types = types_new(inout names);
@@ -937,17 +985,20 @@ pub fn collect_program(in mods: ChunkSeq[AssembledModule]) -> CollectedProgram {
             ty: types.named0(t_gen),
             modality: 0
         });
+        // Rust's prelude order (`enum Option[T] { None, Some(T) }`), which
+        // vesper-port-abi hard-codes: objects Stage 2 builds share Rust's
+        // tags (#2290).
         let ova = n32(world.variants.len());
-        world.variants.push(Variant {
-            name: names.intern(in "Some".as_bytes()),
-            fa: ofa,
-            fc: 1,
-            named: false
-        });
         world.variants.push(Variant {
             name: names.intern(in "None".as_bytes()),
             fa: 0,
             fc: 0,
+            named: false
+        });
+        world.variants.push(Variant {
+            name: names.intern(in "Some".as_bytes()),
+            fa: ofa,
+            fc: 1,
             named: false
         });
         let oidx = n32(world.adts.len());
@@ -1024,21 +1075,17 @@ pub fn collect_program(in mods: ChunkSeq[AssembledModule]) -> CollectedProgram {
         Option::None => false,
     };
     if !has_re {
+        // Rust's prelude: `copy enum RuntimeError { DivisionByZero,
+        // IndexOutOfBounds }` (#2290).
         let rva = n32(world.variants.len());
         world.variants.push(Variant {
-            name: names.intern(in "ArithOverflow".as_bytes()),
+            name: names.intern(in "DivisionByZero".as_bytes()),
             fa: 0,
             fc: 0,
             named: false
         });
         world.variants.push(Variant {
             name: names.intern(in "IndexOutOfBounds".as_bytes()),
-            fa: 0,
-            fc: 0,
-            named: false
-        });
-        world.variants.push(Variant {
-            name: names.intern(in "DivisionByZero".as_bytes()),
             fa: 0,
             fc: 0,
             named: false
@@ -1050,12 +1097,36 @@ pub fn collect_program(in mods: ChunkSeq[AssembledModule]) -> CollectedProgram {
             ga: 0,
             gn: 0,
             va: rva,
-            vn: 3,
+            vn: 2,
             is_enum: true,
             tile: 0,
             span_zero: false
         });
         set_by_symbol(inout world.by_name, re_sym, inc32(ridx));
+    }
+    let ao_sym = names.intern(in "ArithOverflow".as_bytes());
+    let has_ao = match world.by_name.try_get(w(ao_sym)) {
+        Option::Some(v) => v != 0,
+        Option::None => false,
+    };
+    if !has_ao {
+        // Rust's prelude: `copy struct ArithOverflow {}`, the error checked
+        // arithmetic raises (#2290).
+        let ava = n32(world.variants.len());
+        world.variants.push(Variant { name: ao_sym, fa: 0, fc: 0, named: true });
+        let aidx = n32(world.adts.len());
+        world.adts.push(Adt {
+            name: ao_sym,
+            mode: 0,
+            ga: 0,
+            gn: 0,
+            va: ava,
+            vn: 1,
+            is_enum: false,
+            tile: 0,
+            span_zero: false
+        });
+        set_by_symbol(inout world.by_name, ao_sym, inc32(aidx));
     }
     let fail_sym = names.intern(in "Fail".as_bytes());
     let has_fail = match world.effect_by_name.try_get(w(fail_sym)) {
@@ -1095,7 +1166,11 @@ pub fn collect_program(in mods: ChunkSeq[AssembledModule]) -> CollectedProgram {
     let slice_u8_t = types.named(names.intern(in "Slice".as_bytes()), in sl_args);
     let fs_file_t = types.named0(names.intern(in "FsFile".as_bytes()));
     let fs_dir_t = types.named0(names.intern(in "FsDir".as_bytes()));
-    let fs_meta_t = types.named0(names.intern(in "FsMeta".as_bytes()));
+    let fs_meta_sym = names.intern(in FS_META.as_bytes());
+    let fs_meta_t = types.named0(fs_meta_sym);
+    if mod_asts_mention(in mods, in FS_META) && world.lookup(fs_meta_sym) == NONE32 {
+        add_fs_meta_adt(inout names, inout types, inout world, fs_meta_sym);
+    }
     let mut of_args = ChunkSeq::new[u32]();
     of_args.push(fs_file_t);
     let opt_fs_file_t = types.named(opt_sym, in of_args);

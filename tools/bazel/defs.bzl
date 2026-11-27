@@ -304,11 +304,14 @@ def vesper_crate(
             self_host.append("self_host_codegen")
         elif self_host and test_name[len("self_host_"):].startswith(_SELF_HOST_PART2):
             self_host.append("self_host_part2")
-        if self_host and "self_host_codegen" not in self_host and not [tag for tag in label_tags if tag.startswith("resources:memory:")]:
+        if self_host and not [tag for tag in label_tags if tag.startswith("resources:memory:")]:
             # Four of these at once outgrew the 22 GB runner: the kernel killed
             # the Bazel server mid-run ("Server terminated abruptly", no JVM
             # error) on main at 2ed400d8 and on #1372. Reserving 6 GiB of the
-            # 18 GiB --local_resources budget runs three at a time.
+            # 18 GiB --local_resources budget runs three at a time. The codegen
+            # differentials get it too: unreserved, four at a time (6.3-7.5 GiB
+            # each) filled the 28GB VM and the kernel killed
+            # self_host_wasm_backend and self_host_codegen_scalar on #2431/#2435.
             self_host.append(_SELF_HOST_MEMORY)
         return label_tags + self_host + ([] if "*" in remote_tests or label in remote_tests else ["no-remote-exec"])
 

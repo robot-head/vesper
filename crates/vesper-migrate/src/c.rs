@@ -54,6 +54,24 @@ const PRELUDE: &[(&str, &str)] = &[
     ("bool", "_Bool"),
 ];
 
+#[cfg(feature = "vesper-port")]
+fn builtin(name: &str) -> Option<CType> {
+    match crate::binding::migrate_c_builtin_tag(name.as_bytes()) {
+        1 => Some(CType::Scalar(Scalar::U8)),
+        2 => Some(CType::Scalar(Scalar::I8)),
+        3 => Some(CType::Scalar(Scalar::U16)),
+        4 => Some(CType::Scalar(Scalar::I16)),
+        5 => Some(CType::Scalar(Scalar::U32)),
+        6 => Some(CType::Scalar(Scalar::I32)),
+        7 => Some(CType::Scalar(Scalar::U64)),
+        8 => Some(CType::Scalar(Scalar::I64)),
+        9 => Some(CType::Scalar(Scalar::Usize)),
+        10 => Some(CType::CBool),
+        _ => None,
+    }
+}
+
+#[cfg(not(feature = "vesper-port"))]
 fn builtin(name: &str) -> Option<CType> {
     Some(match name {
         "uint8_t" => CType::Scalar(Scalar::U8),
@@ -189,7 +207,121 @@ impl CType {
 }
 
 /// Strip comments, keeping newlines so line numbers stay correct.
-fn strip_comments(src: &str) -> Result<String, MigrateError> {
+#[cfg(feature = "vesper-port")]
+const STATUS_SHIFT: u32 = 32;
+#[cfg(feature = "vesper-port")]
+const PAYLOAD_MASK: u64 = 0xffff_ffff;
+
+#[cfg(feature = "vesper-port")]
+const STRIP_OK: u64 = 0;
+#[cfg(feature = "vesper-port")]
+const STRIP_UNTERMINATED_BLOCK: u64 = 1;
+#[cfg(feature = "vesper-port")]
+const STRIP_UNTERMINATED_LIT: u64 = 2;
+
+#[cfg(feature = "vesper-port")]
+const FILTER_OK: u64 = 0;
+#[cfg(feature = "vesper-port")]
+const FILTER_LINE_CONTINUATION: u64 = 1;
+#[cfg(feature = "vesper-port")]
+const FILTER_BAD_INCLUDE: u64 = 2;
+#[cfg(feature = "vesper-port")]
+const FILTER_BAD_DEFINE: u64 = 3;
+#[cfg(feature = "vesper-port")]
+const FILTER_UNMATCHED_ENDIF: u64 = 4;
+#[cfg(feature = "vesper-port")]
+const FILTER_UNSUPPORTED_DIRECTIVE: u64 = 5;
+#[cfg(feature = "vesper-port")]
+const FILTER_UNTERMINATED_COND: u64 = 6;
+
+/// Strips `//` and `/* ... */` comments from a C header via `@vesper/migrate`.
+#[cfg(feature = "vesper-port")]
+pub fn strip_comments(src: &str) -> Result<String, MigrateError> {
+    let bytes = src.as_bytes();
+    let mut out = vec![0u8; bytes.len()];
+    let packed = crate::binding::migrate_strip_comments(bytes, &mut out);
+    let status = packed >> STATUS_SHIFT;
+    let payload = (packed & PAYLOAD_MASK) as usize;
+    match status {
+        STRIP_OK => {
+            out.truncate(payload);
+            String::from_utf8(out)
+                .map_err(|_| MigrateError::new(ErrorKind::Syntax, None, "header is not UTF-8"))
+        }
+        STRIP_UNTERMINATED_BLOCK => Err(MigrateError::new(
+            ErrorKind::Syntax,
+            Some(payload),
+            "unterminated block comment",
+        )),
+        STRIP_UNTERMINATED_LIT => Err(MigrateError::new(
+            ErrorKind::Syntax,
+            Some(payload),
+            "unterminated literal",
+        )),
+        _ => Err(MigrateError::new(
+            ErrorKind::Syntax,
+            None,
+            "unexpected comment stripper status",
+        )),
+    }
+}
+
+/// Blank every accepted directive (and skipped `__cplusplus` blocks) and
+/// reject the rest via `@vesper/migrate`.
+#[cfg(feature = "vesper-port")]
+pub fn filter_directives(src: &str) -> Result<String, MigrateError> {
+    let bytes = src.as_bytes();
+    let mut out = vec![0u8; bytes.len()];
+    let packed = crate::binding::migrate_filter_directives(bytes, &mut out);
+    let status = packed >> STATUS_SHIFT;
+    let payload = (packed & PAYLOAD_MASK) as usize;
+    match status {
+        FILTER_OK => {
+            out.truncate(payload);
+            String::from_utf8(out)
+                .map_err(|_| MigrateError::new(ErrorKind::Syntax, None, "header is not UTF-8"))
+        }
+        FILTER_LINE_CONTINUATION => Err(MigrateError::new(
+            ErrorKind::Preprocessor,
+            Some(payload),
+            "line continuations are outside the supported subset",
+        )),
+        FILTER_BAD_INCLUDE => Err(MigrateError::new(
+            ErrorKind::Preprocessor,
+            Some(payload),
+            "only <stdint.h>, <stddef.h> and <stdbool.h> may be included; inline other headers",
+        )),
+        FILTER_BAD_DEFINE => Err(MigrateError::new(
+            ErrorKind::Preprocessor,
+            Some(payload),
+            "macros are outside the supported subset (only include guards)",
+        )),
+        FILTER_UNMATCHED_ENDIF => Err(MigrateError::new(
+            ErrorKind::Preprocessor,
+            Some(payload),
+            "#endif without a matching conditional",
+        )),
+        FILTER_UNSUPPORTED_DIRECTIVE => Err(MigrateError::new(
+            ErrorKind::Preprocessor,
+            Some(payload),
+            "preprocessor directive outside the supported subset",
+        )),
+        FILTER_UNTERMINATED_COND => Err(MigrateError::new(
+            ErrorKind::Preprocessor,
+            None,
+            "unterminated conditional",
+        )),
+        _ => Err(MigrateError::new(
+            ErrorKind::Preprocessor,
+            None,
+            "unexpected directive filter status",
+        )),
+    }
+}
+
+/// Strips `//` and `/* ... */` comments from a C header.
+#[cfg(not(feature = "vesper-port"))]
+pub fn strip_comments(src: &str) -> Result<String, MigrateError> {
     let b = src.as_bytes();
     let mut out = Vec::with_capacity(b.len());
     let mut i = 0;
@@ -256,11 +388,11 @@ fn strip_comments(src: &str) -> Result<String, MigrateError> {
             }
         }
     }
-    // Only ASCII-delimited bytes were removed, so this stays valid UTF-8.
     String::from_utf8(out)
         .map_err(|_| MigrateError::new(ErrorKind::Syntax, None, "header is not UTF-8"))
 }
 
+#[cfg(not(feature = "vesper-port"))]
 fn is_ident(s: &str) -> bool {
     let mut chars = s.chars();
     chars
@@ -269,6 +401,7 @@ fn is_ident(s: &str) -> bool {
         && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
+#[cfg(not(feature = "vesper-port"))]
 #[derive(PartialEq)]
 enum Cond {
     Guard,
@@ -277,7 +410,8 @@ enum Cond {
 
 /// Blank every accepted directive (and skipped `__cplusplus` blocks) and
 /// reject the rest.
-fn filter_directives(src: &str) -> Result<String, MigrateError> {
+#[cfg(not(feature = "vesper-port"))]
+pub fn filter_directives(src: &str) -> Result<String, MigrateError> {
     let mut out = String::with_capacity(src.len());
     let mut stack: Vec<Cond> = vec![];
     let mut skip_depth = 0usize;
@@ -1414,6 +1548,13 @@ pub fn analyze_header(
 }
 
 /// Whether `text` contains a typedef whose declared name is `name`.
+#[cfg(feature = "vesper-port")]
+fn redefines(text: &str, name: &str) -> bool {
+    crate::binding::migrate_redefines(text.as_bytes(), name.as_bytes())
+}
+
+/// Whether `text` contains a typedef whose declared name is `name`.
+#[cfg(not(feature = "vesper-port"))]
 fn redefines(text: &str, name: &str) -> bool {
     text.split(';').any(|stmt| {
         let s = stmt.trim();

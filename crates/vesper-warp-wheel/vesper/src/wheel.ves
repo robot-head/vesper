@@ -152,10 +152,10 @@ impl WheelCore {
 
     fn clear_occupied(inout self, list: u64) {
         if list < self.overflow_list() {
-            let level = div(list, self.slots);
+            let level = wrapping_shr_u64(list, wrapping_u32(self.slot_bits));
             let slot = list & self.slot_mask();
             let bits = at(in self.occupied, level);
-            self.occupied.try_set(level, bits & ~shl(1, slot));
+            self.occupied.try_set(level, bits & ~wrapping_shl_u64(1, wrapping_u32(slot)));
         }
     }
 }
@@ -192,7 +192,7 @@ impl WheelCore {
         self.e.try_set(ix(index, 2), seq);
         let generation = at(in self.e, ix(index, 3));
         self.len = wrapping_add(self.len, 1);
-        self.place(index);
+        self.place_tick(index, tick);
         Result::Ok((index, generation))
     }
 
@@ -218,6 +218,9 @@ impl WheelCore {
             return Option::Some(AdvanceError::OutOfRange);
         }
         self.now_ns = now_ns;
+        if now_ns < saturating_mul(self.cursor, self.tick_ns) {
+            return Option::None;
+        }
         let target = div(now_ns, self.tick_ns);
         loop {
             if self.cursor > target {
@@ -244,7 +247,8 @@ impl WheelCore {
 
     // The earliest due entry, as `(deadline, index)`, released.
     fn pop_due(inout self) -> Option[(u64, u64)] {
-        let head = self.head_of(self.ready_list());
+        let ready = self.ready_list();
+        let head = self.head_of(ready);
         if head == nil() {
             return Option::None;
         }
@@ -252,7 +256,13 @@ impl WheelCore {
         if deadline > self.now_ns {
             return Option::None;
         }
-        self.unlink(head);
+        let next = self.next_of(head);
+        self.l.try_set(lx(ready, 0), next);
+        if next == nil() {
+            self.l.try_set(lx(ready, 1), nil());
+        } else {
+            self.e.try_set(ix(next, 4), nil());
+        }
         self.release(head);
         Option::Some((deadline, head))
     }

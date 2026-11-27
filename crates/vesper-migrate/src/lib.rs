@@ -24,7 +24,13 @@
 //! The lifted modes are summaries of what a *signature and body scan* show.
 //! They are not an implementation of the Vesper source typing rules, and Rust
 //! ownership in this crate is not evidence that those rules hold.
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
+
+#[cfg(feature = "vesper-port")]
+#[allow(unsafe_code)]
+#[rustfmt::skip]
+#[path = "../port/binding.rs"]
+pub(crate) mod binding;
 
 pub mod c;
 pub mod lift;

@@ -14,17 +14,21 @@
 // the planner skips every other function (generated, private, or qualified
 // with `::`), so they add nothing to its answer.
 //
+// A package's `.vsys` libraries (`[package] vsys`) are read for the target
+// and scanned for their name and linked symbols, and `// @export vsys
+// <Library>` links name their handlers and Rust paths.
+//
 // Not yet covered, and declined (the caller builds with the Rust CLI):
-// `.vsys` imports (a package's `[package] vsys` or `// @export vsys`, whose
-// descriptors are parsed in Rust), generic instances (`// @export
+// inline `// @export vsys direct` bodies, generic instances (`// @export
 // instance`), `Box` types and `fip` functions (the caller slot).
 
 use @vesper/check-data::names::{Names};
-use @vesper/check-data::types::{TyKind, Types, display};
+use @vesper/check-data::types::{TyKind, Types, display, substitute, substitute_row, vars_new};
 use @vesper/check-data::util::{add, inc, inc32, n32, put_text_words, u32_at, u64_at, u8_at, w};
 use @vesper/check-data::world::{
     Adt, Field, Generic, Variant, World, bounds_new, mode_of, set_by_symbol
 };
+use @vesper/check-collect::boxes::{needs_box};
 use @vesper/check-layout::{L_ENUM, L_PRODUCT, L_SCALAR, Layouts, layout_of, layouts_new};
 use @vesper/check-names-packages::{
     AssembledModule, assemble_next_bytes, assembly_begin_bytes, assembly_metadata,
@@ -32,8 +36,10 @@ use @vesper/check-names-packages::{
 };
 use @vesper/codegen-export::{export_files_of_plan, export_plan_bytes};
 use @vesper/codegen-export::directives::{directives_text};
-use @vesper/stage2::collect::{FnInfo, ParamInfo, collect_program};
-use @vesper/stage2::loader::{load_package_graph_bytes, package_graph_vsys_count};
+use @vesper/stage2::collect::{CollectedProgram, FnInfo, ParamInfo, collect_program};
+use @vesper/vsys::{parse_and_encode};
+use @vesper/vsys::lexer::{VsysError};
+use @vesper/stage2::loader::{load_package_graph_bytes, package_graph_vsys_paths};
 use @vesper-std/fs::{IoError, read_path};
 use @vesper-std/intern::{symbol_from_id};
 
@@ -44,11 +50,12 @@ const NO_ADT: u32 = 4294967295;
 pub const DECLINE_NONE: u8 = 0;
 // The package graph or its root module did not load.
 pub const DECLINE_LOAD: u8 = 1;
-// The graph imports `.vsys` libraries.
+// A `.vsys` library of the graph does not read or scan.
 pub const DECLINE_VSYS: u8 = 2;
-// The directives name instances or `.vsys` imports, or do not parse.
+// The directives name instances, hold an inline `.vsys` body that does not
+// scan, link a library the graph does not import, or do not parse.
 pub const DECLINE_DIRECTIVES: u8 = 3;
-// The program names a `Box` type.
+// The program names a `Box` type that Stage 2 does not declare.
 pub const DECLINE_BOX: u8 = 4;
 // A public function is `fip`.
 pub const DECLINE_FIP: u8 = 5;
@@ -56,6 +63,8 @@ pub const DECLINE_FIP: u8 = 5;
 pub const DECLINE_REFUSED: u8 = 6;
 // The package has syntax or assembly errors.
 pub const DECLINE_DIAGNOSTICS: u8 = 7;
+// The target has no `.vsys` support.
+pub const DECLINE_TARGET: u8 = 8;
 
 // A little-endian word of the planner's input: its bytes, and a byte's bits.
 const WORD_BYTES: u64 = 8;
@@ -70,6 +79,23 @@ const C_SEQ: u64 = 4;
 const C_SLICE: u64 = 5;
 const C_STRING: u64 = 6;
 const C_STR: u64 = 7;
+const C_BOX: u64 = 8;
+const C_EXTERN: u64 = 10;
+const C_CALLBACK: u64 = 11;
+
+// The `Box[T]` prelude: its generic, its field, and the modes (`TyMode`)
+// of the ADT (affine) and of its generic's bound (linear).
+const BOX_GENERIC: Str = "T";
+const BOX_FIELD: Str = "0";
+const MODE_COPY: u8 = 0;
+// A `.vsys` handle's one field (`ffi_lowering::HANDLE_FIELD`) and its type.
+const HANDLE_FIELD: Str = "$handle";
+const HANDLE_WORD: Str = "u64";
+const MODE_AFFINE: u8 = 1;
+const MODE_LINEAR: u8 = 2;
+// `Field.modality` for a field that inherits its component kind
+// (`@vesper/check-data` stores mode + 1 otherwise).
+const FIELD_INHERITS_MODE: u8 = 0;
 const C_NAMED: u64 = 9;
 
 // A layout's `kind` word: scalar, product, enum.
@@ -84,19 +110,6 @@ const LAYOUT_FAILED: u64 = 1;
 // `ffi_lowering::effect_name("")`: the prefix of a `.vsys` library's effect.
 const EFFECT_PREFIX: Str = "Ffi$";
 
-// The builtin declarations of the Rust checker (src/check.rs), whose
-// variant order the planner holds a library to.
-const OPTION: Str = "Option";
-const NONE_VARIANT: Str = "None";
-const SOME_VARIANT: Str = "Some";
-const RUNTIME_ERROR: Str = "RuntimeError";
-const DIVISION_BY_ZERO: Str = "DivisionByZero";
-const INDEX_OUT_OF_BOUNDS: Str = "IndexOutOfBounds";
-const ARITH_OVERFLOW: Str = "ArithOverflow";
-const TYPE_PARAM: Str = "T";
-const TUPLE_FIELD: Str = "0";
-const MODE_COPY: u8 = 0;
-
 // The root module, whose `// @export` lines are the directives.
 const ROOT_MODULE: Str = "/src/lib.ves";
 
@@ -104,12 +117,72 @@ const ROOT_MODULE: Str = "/src/lib.ves";
 const DUMP_ABI: Str = "abi ";
 const DUMP_ABI_NONE: Str = "none";
 const DUMP_OPTIONS: Str = "options ";
-const DUMP_LINES: u64 = 2;
 const NEWLINE: u8 = 10;
 const DIGIT_ZERO: u8 = 48;
 const DIGIT_NINE: u8 = 57;
 const DECIMAL: u64 = 10;
 const OPTIONS_ON: u8 = 49;
+const DUMP_LINK: Str = "link ";
+const DUMP_VSYS: Str = "vsys ";
+const DUMP_INSTANCE: Str = "instance ";
+const DUMP_NONE: Str = "-";
+
+// A `.vsys` link's handler (directives.ves `HANDLER_*`) and its names.
+const HANDLER_NONE: u8 = 0;
+const HANDLER_DIRECT: u8 = 1;
+const HANDLER_ISOLATED: u8 = 2;
+const DIRECT_HANDLER: Str = "direct";
+const ISOLATED_HANDLER: Str = "isolated(mpk)";
+
+// The descriptor tokens the scan reads, and the bytes it splits on.
+const SYS_WORD: Str = "sys";
+const LIBRARY_WORD: Str = "library";
+const FN_WORD: Str = "fn";
+const CALLBACK_WORD: Str = "callback";
+const LINEAR_WORD: Str = "linear";
+const AFFINE_WORD: Str = "affine";
+const EXTERN_WORD: Str = "extern";
+const TYPE_WORD: Str = "type";
+const LINK_NAME_WORD: Str = "link_name";
+const HASH: Str = "#";
+const OPEN_BRACKET_TOKEN: Str = "[";
+const EQUALS_TOKEN: Str = "=";
+const SPACE: u8 = 32;
+const COMMA: u8 = 44;
+const OPEN_BRACKET: u8 = 91;
+const CLOSE_BRACKET: u8 = 93;
+const TAB: u8 = 9;
+const CARRIAGE_RETURN: u8 = 13;
+const SLASH: u8 = 47;
+const QUOTE: u8 = 34;
+const BACKSLASH: u8 = 92;
+const UNDERSCORE: u8 = 95;
+const DOLLAR: u8 = 36;
+const UPPER_A: u8 = 65;
+const UPPER_Z: u8 = 90;
+const LOWER_A: u8 = 97;
+const LOWER_Z: u8 = 122;
+
+// The per-target tokens of a manifest `.vsys` path, and the targets
+// (Rust `VSYS_TARGETS`).
+const TARGET_TOKEN: Str = "@TARGET@";
+const ABI_TOKEN: Str = "@ABI@";
+const OS_TOKEN: Str = "@OS@";
+const ARCH_TOKEN: Str = "@ARCH@";
+const LINUX_X86_64: Str = "x86_64-unknown-linux-gnu";
+const LINUX_AARCH64: Str = "aarch64-unknown-linux-gnu";
+const MACOS_AARCH64: Str = "aarch64-apple-darwin";
+const WINDOWS_X86_64: Str = "x86_64-pc-windows-msvc";
+const OS_LINUX: Str = "linux";
+const OS_MACOS: Str = "macos";
+const OS_WINDOWS: Str = "windows";
+const ARCH_X86_64: Str = "x86_64";
+const ARCH_AARCH64: Str = "aarch64";
+// The calling conventions `@ABI@` stands for in an inline `.vsys` body.
+const ABI_SYSV64: Str = "sysv64";
+const ABI_AAPCS64: Str = "aapcs64";
+const ABI_DARWIN64: Str = "darwin64";
+const ABI_WIN64: Str = "win64";
 
 pub struct PlanInput {
     declined: u8,
@@ -180,10 +253,20 @@ impl Enc {
         let mut class = C_OTHER;
         let mut name = NONE32;
         let mut parts = ChunkSeq::new[u32]();
+        let mut boxed_object = NONE32;
         if node.kind == TyKind::Named {
             let n = node.name;
             let arity = w(node.n);
-            if arity == 0 && k.is_wide(n) {
+            if arity == 0 && is_handle_adt(in self.world, in self.names, n) {
+                // A `.vsys` callback type is a copy handle.
+                let adt = self.world.adt(self.world.lookup(n));
+                class = if adt.mode == MODE_COPY {
+                    C_CALLBACK
+                } else {
+                    C_EXTERN
+                };
+                name = n;
+            } else if arity == 0 && k.is_wide(n) {
                 class = C_WIDE;
                 name = n;
             } else if arity == 0 && k.is_scalar(n) && n != k.never {
@@ -196,6 +279,19 @@ impl Enc {
                 class = C_STRING;
             } else if arity == 0 && n == k.str_ {
                 class = C_STR;
+            } else if arity == 1 && n == k.box_ && self.world.box_active {
+                class = C_BOX;
+                let inner = self.types.arg(t, 0);
+                let inner_node = self.types.node(inner);
+                if inner_node.kind == TyKind::Named
+                    && inner_node.name == k.dyn_
+                    && inner_node.n == 1
+                {
+                    // A boxed object is opaque: only its display is used.
+                    boxed_object = inner;
+                } else {
+                    parts.push(inner);
+                }
             } else {
                 class = C_NAMED;
                 name = n;
@@ -220,8 +316,15 @@ impl Enc {
         put_text_words(inout row, in shown.as_slice());
         row.push(class);
         self.put_name(name, inout row);
-        // The flag is a boxed object's, and boxes are declined.
-        row.push(0);
+        // The flag marks a boxed object, followed by its display.
+        if boxed_object == NONE32 {
+            row.push(0);
+        } else {
+            row.push(1);
+            let mut object = ChunkSeq::new[u8]();
+            display(in self.types, in self.names, boxed_object, inout object);
+            put_text_words(inout row, in object.as_slice());
+        }
         let mode = if class == C_OTHER {
             0
         } else {
@@ -305,71 +408,6 @@ impl Enc {
     }
 }
 
-fn unit_variant(inout names: Names, inout world: World, in name: Str, named: bool) {
-    world
-        .variants
-        .push(Variant { name: names.intern(in name.as_bytes()), fa: 0, fc: 0, named: named });
-}
-
-fn declare(
-    inout names: Names,
-    inout world: World,
-    in name: Str,
-    ga: u32,
-    gn: u32,
-    va: u32,
-    is_enum: bool
-) {
-    let sym = names.intern(in name.as_bytes());
-    let vn = wrapping_sub(n32(world.variants.len()), va);
-    let index = n32(world.adts.len());
-    world.adts.push(Adt {
-        name: sym,
-        mode: MODE_COPY,
-        ga: ga,
-        gn: gn,
-        va: va,
-        vn: vn,
-        is_enum: is_enum,
-        tile: 0,
-        span_zero: false
-    });
-    set_by_symbol(inout world.by_name, sym, inc32(index));
-}
-
-// Replace Stage 2's builtin `Option`, `RuntimeError` and `ArithOverflow`
-// (collect.ves: `Some, None`; `ArithOverflow, IndexOutOfBounds,
-// DivisionByZero`; none) with the Rust checker's: `copy enum Option[T] {
-// None, Some(T) }`, `copy enum RuntimeError { DivisionByZero,
-// IndexOutOfBounds }` and `copy struct ArithOverflow {}`.
-fn rust_builtins(inout names: Names, inout types: Types, inout world: World) {
-    let t = names.intern(in TYPE_PARAM.as_bytes());
-    let ga = n32(world.generics.len());
-    world.generics.push(Generic { name: t, bound: 0, row: false });
-    let va = n32(world.variants.len());
-    unit_variant(inout names, inout world, NONE_VARIANT, false);
-    let fa = n32(world.fields.len());
-    world.fields.push(Field {
-        name: names.intern(in TUPLE_FIELD.as_bytes()),
-        ty: types.named0(t),
-        modality: 0
-    });
-    world.variants.push(Variant {
-        name: names.intern(in SOME_VARIANT.as_bytes()),
-        fa: fa,
-        fc: 1,
-        named: false
-    });
-    declare(inout names, inout world, OPTION, ga, 1, va, true);
-    let rva = n32(world.variants.len());
-    unit_variant(inout names, inout world, DIVISION_BY_ZERO, false);
-    unit_variant(inout names, inout world, INDEX_OUT_OF_BOUNDS, false);
-    declare(inout names, inout world, RUNTIME_ERROR, 0, 0, rva, true);
-    let ova = n32(world.variants.len());
-    unit_variant(inout names, inout world, ARITH_OVERFLOW, true);
-    declare(inout names, inout world, ARITH_OVERFLOW, 0, 0, ova, false);
-}
-
 // Whether name `a` sorts before name `b` (byte order, as Rust's
 // `BTreeMap<String, _>`).
 fn name_before(in names: Names, a: u32, b: u32) -> bool {
@@ -417,9 +455,215 @@ fn line_end(in s: ChunkSeq[u8], at: u64) -> u64 {
     }
 }
 
-// The abi and option words of a directives dump that names no instance and
-// no `.vsys` import, or None.
-fn plain_directives(in dump: ChunkSeq[u8]) -> Option[(u64, u64)] {
+// A `// @export vsys <Library> ..` link: its handler and Rust path.
+struct Link {
+    library: ChunkSeq[u8],
+    handler: u8,
+    rust: ChunkSeq[u8],
+    has_rust: bool,
+}
+
+// An inline `// @export vsys <handler>` body: its handler, Rust path and
+// descriptor text with `@TARGET@` and `@ABI@` filled in.
+struct Inline {
+    handler: u8,
+    rust: ChunkSeq[u8],
+    has_rust: bool,
+    body: ChunkSeq[u8],
+}
+
+// An `// @export instance` directive: the generic function, its export
+// name, its spelling `f[T, ..]` and its type arguments (each a bare type
+// name; anything else declines).
+struct Inst {
+    function: ChunkSeq[u8],
+    alias: ChunkSeq[u8],
+    spelling: ChunkSeq[u8],
+    args: ChunkSeq[ChunkSeq[u8]],
+}
+
+// The directives the planner reads.
+struct Plain {
+    abi: u64,
+    options: u64,
+    instances: ChunkSeq[Inst],
+    links: ChunkSeq[Link],
+    inline: ChunkSeq[Inline],
+}
+
+fn sub_bytes(in s: ChunkSeq[u8], a: u64, e: u64) -> ChunkSeq[u8] {
+    let mut o = ChunkSeq::new[u8]();
+    for i in a..e {
+        o.push(u8_at(in s, i));
+    }
+    o
+}
+
+fn find_space(in s: ChunkSeq[u8], a: u64, e: u64) -> u64 {
+    let mut i = a;
+    loop {
+        if i >= e || u8_at(in s, i) == SPACE {
+            return i;
+        }
+        i = inc(i);
+    }
+}
+
+// A dumped handler word (`-` for none).
+fn handler_of(in word: ChunkSeq[u8]) -> Option[u8] {
+    if same_bytes(in word, DIRECT_HANDLER) {
+        return Option::Some(HANDLER_DIRECT);
+    }
+    if same_bytes(in word, ISOLATED_HANDLER) {
+        return Option::Some(HANDLER_ISOLATED);
+    }
+    if same_bytes(in word, DUMP_NONE) {
+        return Option::Some(HANDLER_NONE);
+    }
+    Option::None
+}
+
+// One `vsys <handler> <rust path> <length>` line of the dump at `a..e`
+// and the body that follows it; the body and the index after it.
+fn vsys_section(in dump: ChunkSeq[u8], a: u64, e: u64) -> Option[(Inline, u64)] {
+    let handler_start = add(a, str_len(DUMP_VSYS));
+    let handler_end = find_space(in dump, handler_start, e);
+    let rust_start = inc(handler_end);
+    let rust_end = find_space(in dump, rust_start, e);
+    let len_start = inc(rust_end);
+    if len_start > e {
+        return Option::None;
+    }
+    let h = match handler_of(in sub_bytes(in dump, handler_start, handler_end)) {
+        Option::Some(h) => h,
+        Option::None => {
+            return Option::None;
+        },
+    };
+    let mut len: u64 = 0;
+    for i in len_start..e {
+        let c = u8_at(in dump, i);
+        if c < DIGIT_ZERO || c > DIGIT_NINE {
+            return Option::None;
+        }
+        len = add(wrapping_mul(len, DECIMAL), widen_u64(wrapping_sub(c, DIGIT_ZERO)));
+    }
+    let body_start = inc(e);
+    let body_end = add(body_start, len);
+    if body_end > dump.len() {
+        return Option::None;
+    }
+    let rust = sub_bytes(in dump, rust_start, rust_end);
+    let has_rust = !same_bytes(in rust, DUMP_NONE);
+    Option::Some(
+        (
+            Inline {
+                handler: h,
+                rust: rust,
+                has_rust: has_rust,
+                body: sub_bytes(in dump, body_start, body_end)
+            },
+            body_end
+        )
+    )
+}
+
+// One `instance <name|-> <function> <spelling> <alias>` line of the dump at
+// `a..e` (the spelling holds `, ` between its arguments), or None when an
+// argument is not a bare type name.
+fn instance_line(in dump: ChunkSeq[u8], a: u64, e: u64) -> Option[Inst] {
+    let name_start = add(a, str_len(DUMP_INSTANCE));
+    let name_end = find_space(in dump, name_start, e);
+    let function_start = inc(name_end);
+    let function_end = find_space(in dump, function_start, e);
+    let spelling_start = inc(function_end);
+    // The alias is the last word.
+    let mut alias_start = e;
+    loop {
+        if alias_start <= spelling_start || u8_at(in dump, wrapping_sub(alias_start, 1)) == SPACE {
+            break;
+        }
+        alias_start = wrapping_sub(alias_start, 1);
+    }
+    if alias_start <= spelling_start {
+        return Option::None;
+    }
+    let spelling_end = wrapping_sub(alias_start, 1);
+    let open = add(spelling_start, wrapping_sub(function_end, function_start));
+    if spelling_end <= inc(open)
+        || u8_at(in dump, open) != OPEN_BRACKET
+        || u8_at(in dump, wrapping_sub(spelling_end, 1)) != CLOSE_BRACKET
+    {
+        return Option::None;
+    }
+    let mut args = ChunkSeq::new[ChunkSeq[u8]]();
+    let mut arg = ChunkSeq::new[u8]();
+    for i in inc(open)..wrapping_sub(spelling_end, 1) {
+        let c = u8_at(in dump, i);
+        if c == COMMA {
+            let mut done = ChunkSeq::new[u8]();
+            done.extend(in arg.as_slice());
+            args.push(sink done);
+            arg.clear();
+        } else if c != SPACE {
+            if !is_word_byte(c) {
+                return Option::None;
+            }
+            arg.push(c);
+        }
+    }
+    args.push(arg);
+    for k in 0..args.len() {
+        let a = token(in args, k);
+        if a.len() == 0 {
+            return Option::None;
+        }
+    }
+    Option::Some(Inst {
+        function: sub_bytes(in dump, function_start, function_end),
+        alias: sub_bytes(in dump, alias_start, e),
+        spelling: sub_bytes(in dump, spelling_start, spelling_end),
+        args: args
+    })
+}
+
+// One `link <library> <handler> <rust path>` line of the dump (`-` for none).
+fn link_line(in dump: ChunkSeq[u8], a: u64, e: u64) -> Option[Link] {
+    let lib_start = add(a, str_len(DUMP_LINK));
+    let lib_end = find_space(in dump, lib_start, e);
+    let handler_start = inc(lib_end);
+    let handler_end = find_space(in dump, handler_start, e);
+    let rust_start = inc(handler_end);
+    if rust_start > e {
+        return Option::None;
+    }
+    let h = match handler_of(in sub_bytes(in dump, handler_start, handler_end)) {
+        Option::Some(h) => h,
+        Option::None => {
+            return Option::None;
+        },
+    };
+    let rust = sub_bytes(in dump, rust_start, e);
+    let has_rust = !same_bytes(in rust, DUMP_NONE);
+    Option::Some(Link {
+        library: sub_bytes(in dump, lib_start, lib_end),
+        handler: h,
+        rust: rust,
+        has_rust: has_rust
+    })
+}
+
+fn same_bytes(in a: ChunkSeq[u8], in b: Str) -> bool {
+    let bb = b.as_bytes();
+    if a.len() != bb.len() {
+        return false;
+    }
+    starts_with_at(in a, 0, b)
+}
+
+// The abi, option words, instances, links and inline `.vsys` bodies of a
+// directives dump, or None.
+fn plain_directives(in dump: ChunkSeq[u8]) -> Option[Plain] {
     if !starts_with_at(in dump, 0, DUMP_ABI) {
         return Option::None;
     }
@@ -445,17 +689,479 @@ fn plain_directives(in dump: ChunkSeq[u8]) -> Option[(u64, u64)] {
     } else {
         0
     };
-    let end = line_end(in dump, flag_at);
-    let mut lines: u64 = 0;
-    for i in 0..dump.len() {
-        if u8_at(in dump, i) == NEWLINE {
-            lines = inc(lines);
+    let mut instances = ChunkSeq::new[Inst]();
+    let mut links = ChunkSeq::new[Link]();
+    let mut inline = ChunkSeq::new[Inline]();
+    let mut at = inc(line_end(in dump, flag_at));
+    loop {
+        if at >= dump.len() {
+            break;
+        }
+        let e = line_end(in dump, at);
+        if starts_with_at(in dump, at, DUMP_INSTANCE) {
+            match instance_line(in dump, at, e) {
+                Option::Some(i) => instances.push(sink i),
+                Option::None => {
+                    return Option::None;
+                },
+            }
+            at = inc(e);
+        } else if starts_with_at(in dump, at, DUMP_LINK) {
+            match link_line(in dump, at, e) {
+                Option::Some(l) => links.push(sink l),
+                Option::None => {
+                    return Option::None;
+                },
+            }
+            at = inc(e);
+        } else if starts_with_at(in dump, at, DUMP_VSYS) {
+            match vsys_section(in dump, at, e) {
+                Option::Some((body, next)) => {
+                    inline.push(sink body);
+                    at = next;
+                },
+                Option::None => {
+                    return Option::None;
+                },
+            }
+        } else {
+            return Option::None;
         }
     }
-    if lines != DUMP_LINES || inc(end) != dump.len() {
+    Option::Some(Plain {
+        abi: abi,
+        options: options,
+        instances: instances,
+        links: links,
+        inline: inline
+    })
+}
+
+// A `.vsys` descriptor's library name and the C symbols its direct calls
+// import, once each in descriptor order (Rust `linked_symbols`): a
+// `#[link_name = ".."]` names the symbol of the `fn` after it, and a
+// `callback` type's call imports none. A token scan that skips comments.
+struct Descriptor {
+    name: ChunkSeq[u8],
+    symbols: ChunkSeq[ChunkSeq[u8]],
+    // The handle types it declares (`callback` types and `extern type`s)
+    // and each one's mode (`TyMode`).
+    handles: ChunkSeq[ChunkSeq[u8]],
+    handle_modes: ChunkSeq[u8],
+}
+
+fn is_word_byte(c: u8) -> bool {
+    (c >= DIGIT_ZERO && c <= DIGIT_NINE)
+        || (c >= UPPER_A && c <= UPPER_Z)
+        || (c >= LOWER_A && c <= LOWER_Z)
+        || c == UNDERSCORE
+        || c == DOLLAR
+}
+
+fn is_space_byte(c: u8) -> bool {
+    c == SPACE || c == NEWLINE || c == TAB || c == CARRIAGE_RETURN
+}
+
+// The tokens of a descriptor: words, string literals (with their quotes)
+// and single punctuation bytes.
+fn tokens(in src: ChunkSeq[u8]) -> ChunkSeq[ChunkSeq[u8]] {
+    let mut out = ChunkSeq::new[ChunkSeq[u8]]();
+    let n = src.len();
+    let mut i: u64 = 0;
+    loop {
+        if i >= n {
+            break;
+        }
+        let c = u8_at(in src, i);
+        if is_space_byte(c) {
+            i = inc(i);
+        } else if c == SLASH && inc(i) < n && u8_at(in src, inc(i)) == SLASH {
+            i = line_end(in src, i);
+        } else if c == QUOTE {
+            let mut j = inc(i);
+            loop {
+                if j >= n || u8_at(in src, j) == QUOTE {
+                    break;
+                }
+                if u8_at(in src, j) == BACKSLASH {
+                    j = inc(j);
+                }
+                j = inc(j);
+            }
+            let end = if j < n { inc(j) } else { n };
+            out.push(sub_bytes(in src, i, end));
+            i = end;
+        } else if is_word_byte(c) {
+            let mut j = i;
+            loop {
+                if j >= n || !is_word_byte(u8_at(in src, j)) {
+                    break;
+                }
+                j = inc(j);
+            }
+            out.push(sub_bytes(in src, i, j));
+            i = j;
+        } else {
+            out.push(sub_bytes(in src, i, inc(i)));
+            i = inc(i);
+        }
+    }
+    out
+}
+
+fn token(in ts: ChunkSeq[ChunkSeq[u8]], i: u64) -> ChunkSeq[u8] {
+    let mut o = ChunkSeq::new[u8]();
+    match ts.try_get(i) {
+        Option::Some(t) => o.extend(in t.as_slice()),
+        Option::None => {},
+    }
+    o
+}
+
+fn same_seq(in a: ChunkSeq[u8], in b: ChunkSeq[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    for i in 0..a.len() {
+        if u8_at(in a, i) != u8_at(in b, i) {
+            return false;
+        }
+    }
+    true
+}
+
+// Whether `a` sorts before `b` (byte order).
+fn bytes_before(in a: ChunkSeq[u8], in b: ChunkSeq[u8]) -> bool {
+    let n = if a.len() < b.len() { a.len() } else { b.len() };
+    for i in 0..n {
+        let x = u8_at(in a, i);
+        let y = u8_at(in b, i);
+        if x != y {
+            return x < y;
+        }
+    }
+    a.len() < b.len()
+}
+
+// Whether function `a` comes after function `b` in (name, source index)
+// order.
+fn after(in names: ChunkSeq[ChunkSeq[u8]], a: u64, b: u64) -> bool {
+    let x = token(in names, a);
+    let y = token(in names, b);
+    if bytes_before(in y, in x) {
+        return true;
+    }
+    ! bytes_before(in x, in y) && a > b
+}
+
+// Token offsets of the descriptor's shapes, from their first token:
+// `sys library <Name>`, `# [ link_name = "<symbol>" ]` (the scan resumes
+// after the literal) and `fn <name>`; a literal's quotes are a byte each.
+const HEADER_LIBRARY_AT: u64 = 1;
+const HEADER_NAME_AT: u64 = 2;
+const HEADER_TOKENS: u64 = 3;
+const ATTR_OPEN_AT: u64 = 1;
+const ATTR_NAME_AT: u64 = 2;
+const ATTR_EQUALS_AT: u64 = 3;
+const ATTR_LITERAL_AT: u64 = 4;
+const ATTR_TOKENS: u64 = 5;
+const FN_NAME_AT: u64 = 1;
+// `callback <Name>` and `<linear|affine> extern type <Name>`.
+const CALLBACK_NAME_AT: u64 = 1;
+const EXTERN_AT: u64 = 1;
+const EXTERN_TYPE_AT: u64 = 2;
+const EXTERN_NAME_AT: u64 = 3;
+const QUOTE_BYTES: u64 = 1;
+
+// Whether `text` is a valid `.vsys` descriptor (`vesper_ffi::sys::parse`,
+// as @vesper/vsys ports it).
+fn valid_descriptor(in text: ChunkSeq[u8]) -> bool {
+    handle Fail[VsysError] in {
+        let _ = parse_and_encode(in text.as_slice());
+        true
+    } with {
+        return v => v,
+        raise(_e, _k) => false,
+    }
+}
+
+// The descriptor's name and linked symbols, or None when it is not a
+// valid descriptor.
+fn scan_descriptor(in src: ChunkSeq[u8]) -> Option[Descriptor] {
+    if !valid_descriptor(in src) {
         return Option::None;
     }
-    Option::Some((abi, options))
+    let ts = tokens(in src);
+    let mut name = ChunkSeq::new[u8]();
+    let mut named = false;
+    let mut symbols = ChunkSeq::new[ChunkSeq[u8]]();
+    // The functions' names and link symbols, in source order.
+    let mut fn_names = ChunkSeq::new[ChunkSeq[u8]]();
+    let mut links = ChunkSeq::new[ChunkSeq[u8]]();
+    let mut pending = ChunkSeq::new[u8]();
+    let mut has_pending = false;
+    let mut handles = ChunkSeq::new[ChunkSeq[u8]]();
+    let mut handle_modes = ChunkSeq::new[u8]();
+    let mut i: u64 = 0;
+    loop {
+        if i >= ts.len() {
+            break;
+        }
+        let t = token(in ts, i);
+        if !named
+            && same_bytes(in t, SYS_WORD)
+            && same_bytes(in token(in ts, add(i, HEADER_LIBRARY_AT)), LIBRARY_WORD)
+        {
+            name = token(in ts, add(i, HEADER_NAME_AT));
+            named = true;
+            i = add(i, HEADER_TOKENS);
+            continue;
+        }
+        if same_bytes(in t, HASH)
+            && same_bytes(in token(in ts, add(i, ATTR_OPEN_AT)), OPEN_BRACKET_TOKEN)
+            && same_bytes(in token(in ts, add(i, ATTR_NAME_AT)), LINK_NAME_WORD)
+            && same_bytes(in token(in ts, add(i, ATTR_EQUALS_AT)), EQUALS_TOKEN)
+        {
+            let lit = token(in ts, add(i, ATTR_LITERAL_AT));
+            if lit.len() < add(QUOTE_BYTES, QUOTE_BYTES) {
+                return Option::None;
+            }
+            pending.clear();
+            let inner = sub_bytes(in lit, QUOTE_BYTES, wrapping_sub(lit.len(), QUOTE_BYTES));
+            pending.extend(in inner.as_slice());
+            has_pending = true;
+            i = add(i, ATTR_TOKENS);
+            continue;
+        }
+        // `callback <Name>(..)`: a copy handle; `<linear|affine> extern
+        // type <Name>;`: a handle of that mode.
+        if same_bytes(in t, CALLBACK_WORD) {
+            handles.push(token(in ts, add(i, CALLBACK_NAME_AT)));
+            handle_modes.push(MODE_COPY);
+            i = add(i, CALLBACK_NAME_AT);
+            continue;
+        }
+        if (same_bytes(in t, LINEAR_WORD) || same_bytes(in t, AFFINE_WORD))
+            && same_bytes(in token(in ts, add(i, EXTERN_AT)), EXTERN_WORD)
+            && same_bytes(in token(in ts, add(i, EXTERN_TYPE_AT)), TYPE_WORD)
+        {
+            handles.push(token(in ts, add(i, EXTERN_NAME_AT)));
+            handle_modes.push(
+                if same_bytes(in t, LINEAR_WORD) {
+                    MODE_LINEAR
+                } else {
+                    MODE_AFFINE
+                }
+            );
+            i = add(i, EXTERN_NAME_AT);
+            continue;
+        }
+        if same_bytes(in t, FN_WORD) {
+            let f = token(in ts, add(i, FN_NAME_AT));
+            if f.len() > 0 && is_word_byte(u8_at(in f, 0)) {
+                let mut symbol = ChunkSeq::new[u8]();
+                if has_pending {
+                    symbol.extend(in pending.as_slice());
+                } else {
+                    symbol.extend(in f.as_slice());
+                }
+                pending.clear();
+                has_pending = false;
+                fn_names.push(sink f);
+                links.push(sink symbol);
+            }
+        }
+        i = inc(i);
+    }
+    if !named || name.len() == 0 {
+        return Option::None;
+    }
+    // Visit the functions in name order, keeping source order among equal
+    // names (the parser stable-sorts its functions by name).
+    let n = links.len();
+    let mut prev = n;
+    for _ in 0..n {
+        let mut best = n;
+        for j in 0..n {
+            if prev != n && !after(in fn_names, j, prev) {
+                continue;
+            }
+            if best == n || after(in fn_names, best, j) {
+                best = j;
+            }
+        }
+        prev = best;
+        let symbol = token(in links, best);
+        let mut seen = false;
+        for j in 0..symbols.len() {
+            if same_seq(in token(in symbols, j), in symbol) {
+                seen = true;
+            }
+        }
+        if !seen {
+            symbols.push(sink symbol);
+        }
+    }
+    Option::Some(Descriptor {
+        name: name,
+        symbols: symbols,
+        handles: handles,
+        handle_modes: handle_modes
+    })
+}
+
+// A manifest `.vsys` path with `@TARGET@`, `@OS@` and `@ARCH@` replaced
+// (Rust `expand_vsys_path`).
+fn expand_path(in path: ChunkSeq[u8], in t: Target) -> ChunkSeq[u8] {
+    let mut out = ChunkSeq::new[u8]();
+    let mut i: u64 = 0;
+    loop {
+        if i >= path.len() {
+            break;
+        }
+        if starts_with_at(in path, i, TARGET_TOKEN) {
+            out.extend(in t.triple.as_slice());
+            i = add(i, str_len(TARGET_TOKEN));
+        } else if starts_with_at(in path, i, OS_TOKEN) {
+            out.extend(in t.os.as_slice());
+            i = add(i, str_len(OS_TOKEN));
+        } else if starts_with_at(in path, i, ARCH_TOKEN) {
+            out.extend(in t.arch.as_slice());
+            i = add(i, str_len(ARCH_TOKEN));
+        } else {
+            out.push(u8_at(in path, i));
+            i = inc(i);
+        }
+    }
+    out
+}
+
+// A package `.vsys` file's text with `@TARGET@` and `@ABI@` replaced
+// (Rust `PackageVsys::source_for`).
+fn fill_descriptor(in text: ChunkSeq[u8], in t: Target) -> ChunkSeq[u8] {
+    let mut out = ChunkSeq::new[u8]();
+    let mut i: u64 = 0;
+    loop {
+        if i >= text.len() {
+            break;
+        }
+        if starts_with_at(in text, i, TARGET_TOKEN) {
+            out.extend(in t.triple.as_slice());
+            i = add(i, str_len(TARGET_TOKEN));
+        } else if starts_with_at(in text, i, ABI_TOKEN) {
+            out.extend(in t.abi.as_slice());
+            i = add(i, str_len(ABI_TOKEN));
+        } else {
+            out.push(u8_at(in text, i));
+            i = inc(i);
+        }
+    }
+    out
+}
+
+// An object target `.vsys` libraries support (Rust `VSYS_TARGETS`).
+struct Target {
+    triple: ChunkSeq[u8],
+    abi: ChunkSeq[u8],
+    os: ChunkSeq[u8],
+    arch: ChunkSeq[u8],
+}
+
+fn text_of(in s: Str) -> ChunkSeq[u8] {
+    let mut o = ChunkSeq::new[u8]();
+    o.extend(in s.as_bytes());
+    o
+}
+
+fn target_of(in triple: Slice[u8]) -> Option[Target] {
+    let mut t = ChunkSeq::new[u8]();
+    t.extend(in triple);
+    if same_bytes(in t, LINUX_X86_64) {
+        return Option::Some(Target {
+            triple: t,
+            abi: text_of(ABI_SYSV64),
+            os: text_of(OS_LINUX),
+            arch: text_of(ARCH_X86_64)
+        });
+    }
+    if same_bytes(in t, LINUX_AARCH64) {
+        return Option::Some(Target {
+            triple: t,
+            abi: text_of(ABI_AAPCS64),
+            os: text_of(OS_LINUX),
+            arch: text_of(ARCH_AARCH64)
+        });
+    }
+    if same_bytes(in t, MACOS_AARCH64) {
+        return Option::Some(Target {
+            triple: t,
+            abi: text_of(ABI_DARWIN64),
+            os: text_of(OS_MACOS),
+            arch: text_of(ARCH_AARCH64)
+        });
+    }
+    if same_bytes(in t, WINDOWS_X86_64) {
+        return Option::Some(Target {
+            triple: t,
+            abi: text_of(ABI_WIN64),
+            os: text_of(OS_WINDOWS),
+            arch: text_of(ARCH_X86_64)
+        });
+    }
+    Option::None
+}
+
+// One `.vsys` import of the planner's input: library, handler, symbols and
+// Rust path, as `Directives::add_packages` builds it.
+fn put_import(inout head: ChunkSeq[u64], in d: Descriptor, in links: ChunkSeq[Link]) {
+    let mut handler = HANDLER_DIRECT;
+    let mut rust = ChunkSeq::new[u8]();
+    let mut has_rust = false;
+    for i in 0..links.len() {
+        match links.try_get(i) {
+            Option::Some(l) => {
+                if same_seq(in l.library, in d.name) {
+                    if l.handler != HANDLER_NONE {
+                        handler = l.handler;
+                    }
+                    if l.has_rust {
+                        rust.clear();
+                        rust.extend(in l.rust.as_slice());
+                        has_rust = true;
+                    }
+                }
+            },
+            Option::None => {},
+        }
+    }
+    put_import_as(inout head, in d, handler, in rust, has_rust);
+}
+
+// One `.vsys` import with its handler and Rust path.
+fn put_import_as(
+    inout head: ChunkSeq[u64],
+    in d: Descriptor,
+    handler: u8,
+    in rust: ChunkSeq[u8],
+    has_rust: bool
+) {
+    put_text_words(inout head, in d.name.as_slice());
+    if handler == HANDLER_ISOLATED {
+        put_text_words(inout head, in ISOLATED_HANDLER.as_bytes());
+    } else {
+        put_text_words(inout head, in DIRECT_HANDLER.as_bytes());
+    }
+    head.push(d.symbols.len());
+    for i in 0..d.symbols.len() {
+        let symbol = token(in d.symbols, i);
+        put_text_words(inout head, in symbol.as_slice());
+    }
+    if has_rust {
+        head.push(1);
+        put_text_words(inout head, in rust.as_slice());
+    } else {
+        head.push(0);
+    }
 }
 
 fn read_file(in path: Slice[u8]) -> Option[ChunkSeq[u8]] eff [Ffi[StdFs]] {
@@ -467,21 +1173,290 @@ fn read_file(in path: Slice[u8]) -> Option[ChunkSeq[u8]] eff [Ffi[StdFs]] {
     }
 }
 
+// Rust's `Box[T]` prelude (`fip::needs_prelude`, `fip::prelude`), which
+// Stage 2's collect does not declare: when a module uses `Box` (or `@fip`)
+// and no module declares a `Box`, the affine `struct Box[T: mod linear](T)`
+// with span 0..0, which makes `Box` a pointer word (`fip::active`).
+fn add_box_prelude(
+    inout world: World,
+    inout names: Names,
+    inout types: Types,
+    in mods: ChunkSeq[AssembledModule]
+) {
+    let box_sym = world.k.box_;
+    if world.lookup(box_sym) != NO_ADT {
+        return;
+    }
+    let mut needed = false;
+    for mi in 0..mods.len() {
+        match mods.try_get(mi) {
+            Option::Some(m) => {
+                if needs_box(in m.ast) {
+                    needed = true;
+                }
+            },
+            Option::None => {},
+        }
+    }
+    if !needed {
+        return;
+    }
+    let t_gen = names.intern(in BOX_GENERIC.as_bytes());
+    let ga = n32(world.generics.len());
+    world.generics.push(Generic { name: t_gen, bound: MODE_LINEAR, row: false });
+    let fa = n32(world.fields.len());
+    world.fields.push(Field {
+        name: names.intern(in BOX_FIELD.as_bytes()),
+        ty: types.named0(t_gen),
+        modality: FIELD_INHERITS_MODE
+    });
+    let va = n32(world.variants.len());
+    world.variants.push(Variant { name: box_sym, fa: fa, fc: 1, named: false });
+    let idx = n32(world.adts.len());
+    world.adts.push(Adt {
+        name: box_sym,
+        mode: MODE_AFFINE,
+        ga: ga,
+        gn: 1,
+        va: va,
+        vn: 1,
+        is_enum: false,
+        tile: 0,
+        span_zero: true
+    });
+    set_by_symbol(inout world.by_name, box_sym, inc32(idx));
+    world.box_active = true;
+}
+
+// Inserts function `fi` into `exported`, which is in name order.
+fn insert_by_name(
+    inout exported: ChunkSeq[u64],
+    in fns: ChunkSeq[FnInfo],
+    in names: Names,
+    fi: u64
+) {
+    let name = match fns.try_get(fi) {
+        Option::Some(f) => f.name,
+        Option::None => 0,
+    };
+    exported.push(fi);
+    let mut at = wrapping_sub(exported.len(), 1);
+    loop {
+        if at == 0 {
+            break;
+        }
+        let prev = match fns.try_get(u64_at(in exported, wrapping_sub(at, 1))) {
+            Option::Some(p) => p.name,
+            Option::None => 0,
+        };
+        if !name_before(in names, name, prev) {
+            break;
+        }
+        let _ = exported.try_set(at, u64_at(in exported, wrapping_sub(at, 1)));
+        at = wrapping_sub(at, 1);
+        let _ = exported.try_set(at, fi);
+    }
+}
+
+// Whether `t` is a type an instance wrapper can spell (Rust
+// `instance_wrappers`' `plain`): named types and tuples all the way down,
+// and not a 1-tuple.
+fn is_plain(in types: Types, t: u32, top: bool) -> bool {
+    let node = types.node(t);
+    if node.kind != TyKind::Named && node.kind != TyKind::Tuple {
+        return false;
+    }
+    if top && node.kind == TyKind::Tuple && node.n == 1 {
+        return false;
+    }
+    for i in 0..w(node.n) {
+        if !is_plain(in types, types.arg(t, i), false) {
+            return false;
+        }
+    }
+    true
+}
+
+// Adds instance `ins`'s wrapper to the collected functions and to
+// `exported` (Rust `instance_wrappers`), or false where Rust refuses it.
+fn add_instance(
+    inout cp: CollectedProgram,
+    in public: ChunkSeq[bool],
+    inout exported: ChunkSeq[u64],
+    in ins: Inst
+) -> bool {
+    let fsym = cp.names.lookup(in ins.function.as_slice());
+    if fsym == NONE32 || public.try_get(w(fsym)) != Option::Some(true) {
+        return false;
+    }
+    let mut generic = cp.fns.len();
+    for j in 0..exported.len() {
+        let fi = u64_at(in exported, j);
+        match cp.fns.try_get(fi) {
+            Option::Some(f) => {
+                if f.name == fsym {
+                    generic = fi;
+                }
+            },
+            Option::None => {},
+        }
+    }
+    let f = match cp.fns.try_get(generic) {
+        Option::Some(f) => f,
+        Option::None => {
+            return false;
+        },
+    };
+    if w(f.gn) != ins.args.len() {
+        return false;
+    }
+    let alias = cp.names.intern(in ins.alias.as_slice());
+    if public.try_get(w(alias)) == Option::Some(true) {
+        return false;
+    }
+    let mut vars = vars_new();
+    for gi in 0..w(f.gn) {
+        let g = match cp.fn_generics.try_get(add(w(f.ga), gi)) {
+            Option::Some(g) => g,
+            Option::None => {
+                return false;
+            },
+        };
+        if g.row {
+            return false;
+        }
+        let arg_text = token(in ins.args, gi);
+        let arg_name = cp.names.intern(in arg_text.as_slice());
+        let arg = cp.types.named0(arg_name);
+        vars.set(g.name, arg);
+    }
+    let pa = n32(cp.params.len());
+    for pi in 0..w(f.pn) {
+        let p = match cp.params.try_get(add(w(f.pa), pi)) {
+            Option::Some(p) => p,
+            Option::None => {
+                return false;
+            },
+        };
+        let ty = substitute(inout cp.types, p.ty, in vars);
+        if !is_plain(in cp.types, ty, true) {
+            return false;
+        }
+        cp.params.push(ParamInfo { name: p.name, pass: p.pass, ty: ty });
+    }
+    let result = substitute(inout cp.types, f.result, in vars);
+    if !is_plain(in cp.types, result, true) {
+        return false;
+    }
+    let effects = substitute_row(inout cp.types, f.effects, in vars);
+    if cp.types.row(effects).tail != 0 {
+        return false;
+    }
+    let wrapper = n32(cp.fns.len());
+    cp.fns.push(FnInfo {
+        name: alias,
+        fip: false,
+        ga: 0,
+        gn: 0,
+        pa: pa,
+        pn: f.pn,
+        result: result,
+        effects: effects,
+        mod_idx: f.mod_idx,
+        body: NONE32
+    });
+    insert_by_name(inout exported, in cp.fns, in cp.names, w(wrapper));
+    true
+}
+
+// The handle types the imported `.vsys` libraries declare, as the FFI
+// lowering appends them (`types::Generated`): `struct <Name> { $handle: u64 }`
+// with the declared mode (copy for a `callback` type), span 0..0.
+fn add_handle_types(
+    inout world: World,
+    inout names: Names,
+    inout types: Types,
+    in imports: ChunkSeq[Descriptor]
+) {
+    let handle_field = names.intern(in HANDLE_FIELD.as_bytes());
+    let word = types.named0(names.intern(in HANDLE_WORD.as_bytes()));
+    let mut handles = ChunkSeq::new[ChunkSeq[u8]]();
+    let mut modes = ChunkSeq::new[u8]();
+    for k in 0..imports.len() {
+        match imports.try_get(k) {
+            Option::Some(d) => {
+                for h in 0..d.handles.len() {
+                    handles.push(token(in d.handles, h));
+                    modes.push(d.handle_modes.try_get(h).unwrap_or(MODE_COPY));
+                }
+            },
+            Option::None => {},
+        }
+    }
+    for h in 0..handles.len() {
+        let text = token(in handles, h);
+        let sym = names.intern(in text.as_slice());
+        if world.lookup(sym) != NO_ADT {
+            continue;
+        }
+        let mode = modes.try_get(h).unwrap_or(MODE_COPY);
+        let fa = n32(world.fields.len());
+        world.fields.push(Field { name: handle_field, ty: word, modality: FIELD_INHERITS_MODE });
+        let va = n32(world.variants.len());
+        world.variants.push(Variant { name: sym, fa: fa, fc: 1, named: true });
+        let idx = n32(world.adts.len());
+        world.adts.push(Adt {
+            name: sym,
+            mode: mode,
+            ga: 0,
+            gn: 0,
+            va: va,
+            vn: 1,
+            is_enum: false,
+            tile: 0,
+            span_zero: true
+        });
+        set_by_symbol(inout world.by_name, sym, inc32(idx));
+    }
+}
+
+// Whether named type `n` (no arguments) is a `.vsys` handle: an ADT with a
+// `$handle` field (plan_words.rs `is_extern_handle`).
+fn is_handle_adt(in world: World, in names: Names, n: u32) -> bool {
+    let ai = world.lookup(n);
+    if ai == NO_ADT {
+        return false;
+    }
+    let handle_field = names.lookup(in HANDLE_FIELD.as_bytes());
+    if handle_field == NONE32 {
+        return false;
+    }
+    let adt = world.adt(ai);
+    for v in 0..w(adt.vn) {
+        let variant = world.variant(add(w(adt.va), v));
+        for f in 0..w(variant.fc) {
+            let field = world.field(add(w(variant.fa), f));
+            if field.name == handle_field {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 // `plan_input(world, public, library, directives)` for the package at
 // `root_dir`, built by Stage 2's front end, or why it was declined.
 pub fn export_plan_input(
     in root_dir: Slice[u8],
-    in library: Slice[u8]
+    in library: Slice[u8],
+    in triple: Slice[u8]
 ) -> PlanInput eff [Ffi[StdFs]] {
-    match package_graph_vsys_count(in root_dir) {
-        Option::Some(0) => {},
-        Option::Some(_) => {
-            return declined(DECLINE_VSYS);
-        },
+    let target = match target_of(in triple) {
+        Option::Some(t) => t,
         Option::None => {
-            return declined(DECLINE_LOAD);
+            return declined(DECLINE_TARGET);
         },
-    }
+    };
     let mut root_path = ChunkSeq::new[u8]();
     root_path.extend(in root_dir);
     root_path.extend(in ROOT_MODULE.as_bytes());
@@ -492,13 +1467,84 @@ pub fn export_plan_input(
         },
     };
     let none = ChunkSeq::new[u8]();
-    let dump = directives_text(in source, in none, in none, in none);
-    let (abi, options) = match plain_directives(in dump) {
+    let dump = directives_text(in source, in target.triple, in target.abi, in none);
+    let plain = match plain_directives(in dump) {
         Option::Some(d) => d,
         Option::None => {
             return declined(DECLINE_DIRECTIVES);
         },
     };
+    // The inline bodies come first, as `Directives::parse` lists them.
+    let mut imports = ChunkSeq::new[Descriptor]();
+    for ii in 0..plain.inline.len() {
+        match plain.inline.try_get(ii) {
+            Option::Some(body) => {
+                match scan_descriptor(in body.body) {
+                    Option::Some(d) => imports.push(sink d),
+                    Option::None => {
+                        return declined(DECLINE_DIRECTIVES);
+                    },
+                }
+            },
+            Option::None => {},
+        }
+    }
+    let vsys_paths = match package_graph_vsys_paths(in root_dir) {
+        Option::Some(v) => v,
+        Option::None => {
+            return declined(DECLINE_LOAD);
+        },
+    };
+    for vi in 0..vsys_paths.len() {
+        let path = expand_path(in token(in vsys_paths, vi), in target);
+        let text = match read_file(in path.as_slice()) {
+            Option::Some(t) => t,
+            Option::None => {
+                return declined(DECLINE_VSYS);
+            },
+        };
+        let filled = fill_descriptor(in text, in target);
+        let d = match scan_descriptor(in filled) {
+            Option::Some(d) => d,
+            Option::None => {
+                return declined(DECLINE_VSYS);
+            },
+        };
+        // Rust refuses a library imported twice.
+        for k in 0..imports.len() {
+            match imports.try_get(k) {
+                Option::Some(other) => {
+                    if same_seq(in other.name, in d.name) {
+                        return declined(DECLINE_VSYS);
+                    }
+                },
+                Option::None => {},
+            }
+        }
+        imports.push(sink d);
+    }
+    // Rust refuses a link that names no imported library.
+    for li in 0..plain.links.len() {
+        match plain.links.try_get(li) {
+            Option::Some(l) => {
+                let mut found = false;
+                for k in 0..imports.len() {
+                    match imports.try_get(k) {
+                        Option::Some(d) => {
+                            if same_seq(in d.name, in l.library) {
+                                found = true;
+                            }
+                        },
+                        Option::None => {},
+                    }
+                }
+                if !found {
+                    return declined(DECLINE_DIRECTIVES);
+                }
+            },
+            Option::None => {},
+        }
+    }
     let encoded = match load_package_graph_bytes(in root_dir) {
         Option::Some(b) => b,
         Option::None => {
@@ -521,7 +1567,9 @@ pub fn export_plan_input(
     if meta.diagnostics.len() > 0 {
         return declined(DECLINE_DIAGNOSTICS);
     }
-    let cp = collect_program(in mods);
+    let mut cp = collect_program(in mods);
+    add_box_prelude(inout cp.world, inout cp.names, inout cp.types, in mods);
+    add_handle_types(inout cp.world, inout cp.names, inout cp.types, in imports);
     // The root module's public names (not qualified), as collected symbols.
     let mut public = ChunkSeq::new[bool]();
     for i in 0..meta.public_items.len() {
@@ -571,39 +1619,35 @@ pub fn export_plan_input(
         if f.fip {
             return declined(DECLINE_FIP);
         }
-        // Insertion in name order.
-        exported.push(fi);
-        let mut at = wrapping_sub(exported.len(), 1);
-        loop {
-            if at == 0 {
-                break;
-            }
-            let prev = match cp.fns.try_get(u64_at(in exported, wrapping_sub(at, 1))) {
-                Option::Some(p) => p.name,
-                Option::None => 0,
-            };
-            if !name_before(in cp.names, f.name, prev) {
-                break;
-            }
-            let _ = exported.try_set(at, u64_at(in exported, wrapping_sub(at, 1)));
-            at = wrapping_sub(at, 1);
-            let _ = exported.try_set(at, fi);
+        insert_by_name(inout exported, in cp.fns, in cp.names, fi);
+    }
+    // Each instance is a generated monomorphic `pub fn <alias>` calling the
+    // generic at its type arguments (Rust `instance_wrappers`).
+    for ii in 0..plain.instances.len() {
+        let added = match plain.instances.try_get(ii) {
+            Option::Some(ins) => add_instance(inout cp, in public, inout exported, in ins),
+            Option::None => false,
+        };
+        if !added {
+            return declined(DECLINE_DIRECTIVES);
         }
     }
     let fns = cp.fns;
     let params = cp.params;
-    let mut names = cp.names;
-    let mut types = cp.types;
-    let mut world = cp.world;
-    // Stage 2 declares no `Box` (fip.rs `box_prelude`), so a layout that
-    // holds one would differ from Rust's.
+    let names = cp.names;
+    let types = cp.types;
+    let world = cp.world;
+    // A `Box` with neither the built-in prelude (`fip::prelude`) nor a
+    // declaration would lay out unlike Rust's.
     for ti in 0..types.nodes.len() {
         let node = types.node(n32(ti));
-        if node.kind == TyKind::Named && node.name == world.k.box_ {
+        if node.kind == TyKind::Named
+            && node.name == world.k.box_
+            && world.lookup(world.k.box_) == NO_ADT
+        {
             return declined(DECLINE_BOX);
         }
     }
-    rust_builtins(inout names, inout types, inout world);
     let mut e = Enc {
         names: names,
         types: types,
@@ -618,11 +1662,37 @@ pub fn export_plan_input(
     let mut head = ChunkSeq::new[u64]();
     put_text_words(inout head, in library);
     put_text_words(inout head, in EFFECT_PREFIX.as_bytes());
-    head.push(abi);
-    head.push(options);
-    // No `.vsys` imports and no instances.
-    head.push(0);
-    head.push(0);
+    head.push(plain.abi);
+    head.push(plain.options);
+    head.push(imports.len());
+    for k in 0..imports.len() {
+        match imports.try_get(k) {
+            Option::Some(d) => {
+                match plain.inline.try_get(k) {
+                    Option::Some(body) => put_import_as(
+                        inout head,
+                        in d,
+                        body.handler,
+                        in body.rust,
+                        body.has_rust
+                    ),
+                    Option::None => put_import(inout head, in d, in plain.links),
+                }
+            },
+            Option::None => {},
+        }
+    }
+    head.push(plain.instances.len());
+    for ii in 0..plain.instances.len() {
+        match plain.instances.try_get(ii) {
+            Option::Some(ins) => {
+                put_text_words(inout head, in ins.function.as_slice());
+                put_text_words(inout head, in ins.alias.as_slice());
+                put_text_words(inout head, in ins.spelling.as_slice());
+            },
+            Option::None => {},
+        }
+    }
     let mut funcs = ChunkSeq::new[u64]();
     funcs.push(exported.len());
     for x in 0..exported.len() {
@@ -701,9 +1771,10 @@ pub fn export_plan_input(
 // `root_dir`, or why it was declined.
 pub fn export_plan_dir(
     in root_dir: Slice[u8],
-    in library: Slice[u8]
+    in library: Slice[u8],
+    in triple: Slice[u8]
 ) -> (u8, ChunkSeq[u64]) eff [Ffi[StdFs]] {
-    let input = export_plan_input(in root_dir, in library);
+    let input = export_plan_input(in root_dir, in library, in triple);
     if input.declined != DECLINE_NONE {
         return (input.declined, ChunkSeq::new[u64]());
     }
@@ -711,15 +1782,17 @@ pub fn export_plan_dir(
 }
 
 // `vesper build --lib`'s `--interface` and `--rust-binding` outputs for the
-// package at `root_dir`, with the optional `--rust-types` path, or why they
+// package at `root_dir` and target `triple` (the `.vsys` files a manifest
+// names per target), with the optional `--rust-types` path, or why they
 // were declined.
 pub fn export_files_dir(
     in root_dir: Slice[u8],
     in library: Slice[u8],
+    in triple: Slice[u8],
     has_types_path: bool,
     in types_path: Slice[u8]
 ) -> ExportFiles eff [Ffi[StdFs]] {
-    let (why, answer) = export_plan_dir(in root_dir, in library);
+    let (why, answer) = export_plan_dir(in root_dir, in library, in triple);
     if why != DECLINE_NONE {
         return ExportFiles {
             declined: why,

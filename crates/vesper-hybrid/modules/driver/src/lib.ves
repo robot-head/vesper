@@ -33,11 +33,12 @@
 use @vesper/driver::{
     Args, Options, Parsed, args_new, args_push, parse, parsed_ok, parsed_help, command_code,
     cmd_none, cmd_check, cmd_run, cmd_jit, cmd_build, cmd_emit, slot_input, slot_output,
-    slot_format, slot_entry, slot_target, slot_linker, slot_codegen, slot_policy, has, is,
-    value_start, value_end, lib_mode, exclusive, package_checks, lib_job_checks, record,
-    record_format as driver_record_format, with_extension
+    slot_format, slot_entry, slot_target, slot_linker, slot_codegen, slot_policy, slot_package, has,
+    is, value_start, value_end, lib_mode, exclusive, package_checks, lib_job_checks, record,
+    record_format as driver_record_format, with_extension, windows_linker_flavor,
+    windows_link_args_nul
 };
-use @vesper-std/env::{arg_count, arg_bytes, os, os_windows};
+use @vesper-std/env::{arg_count, arg_bytes, var_bytes, os, os_windows};
 use @vesper-std/process::{command_path, arg_bytes as proc_arg, spawn, wait, release, success};
 use @vesper-std/fs::{
     IoError, is_dir_path, is_file_path, read_path, write_path, replace_path, remove_file,
@@ -57,6 +58,12 @@ use @vesper/driver-commands::{
 };
 // Target triples (#1896).
 use @vesper/driver::triple::{is_windows as triple_is_windows};
+// Diagnostic JSON rendering for `--json` (#2458, #2473, #1893).
+use @vesper/driver::{diagnostics_json, package_diagnostics_json};
+// Place IR JSON rendering for `vesper emit --format ir` (#2245, #1894).
+use @vesper/place-ir::{place_ir_json_bytes};
+// `--package` validation for `vesper emit --emit interface` (#2339, #1893).
+use @vesper/loom-calculus::{lock_graph_focus_error};
 // The package assembly of the package load (#1986).
 use self::assemble::{assembled_words};
 // The package graph read of the package load (#1986 slice 2).
@@ -127,10 +134,6 @@ fn step_emit_interface() -> u32 {
 
 fn step_optimize() -> u32 {
     12
-}
-
-fn step_interface_write() -> u32 {
-    40
 }
 
 fn step_run() -> u32 {
@@ -505,12 +508,15 @@ fn drive(
         return pass_failed(in s, r);
     }
     if emit_cst_format {
-        return pass(inout s, step_emit_cst());
+        return emit_text(inout s, in o, step_emit_cst(), in "".as_bytes());
     }
     if r > 0 {
         let q = step(inout s, step_report_syntax());
         if is_failure(q) {
             return pass_failed(in s, q);
+        }
+        if o.json {
+            emit_diagnostics_json(in s);
         }
         return count_error(r, in "syntax error(s)");
     }
@@ -527,6 +533,9 @@ fn drive(
         return pass_failed(in s, r);
     }
     if r > 0 {
+        if o.json {
+            emit_diagnostics_json(in s);
+        }
         return count_error(r, in "semantic error(s)");
     }
     if lib {
@@ -553,13 +562,23 @@ fn drive(
         return 0;
     }
     if c == cmd_emit() && is(in o, slot_format(), in "interface") {
-        // The session hands over the world's declarations; the export and
-        // its JSON are Vesper's (interface.ves).
-        let r = step(inout s, step_emit_interface());
-        if is_failure(r) {
-            return pass_failed(in s, r);
-        }
-        let package = text(in s);
+        // Explicit `--package` is validated in Vesper (`@vesper/loom-calculus`);
+        // a package directory without `--package` reads its manifest name via
+        // `Step::EmitInterface`.
+        let package = if has(in o, slot_package()) {
+            let pkg = value(in o, slot_package());
+            let err = lock_graph_focus_error(in pkg.as_slice());
+            if err.pool.len() > 0 {
+                return error(in err.pool.as_slice());
+            }
+            pkg
+        } else {
+            let r = step(inout s, step_emit_interface());
+            if is_failure(r) {
+                return pass_failed(in s, r);
+            }
+            text(in s)
+        };
         let r = world_decls(inout s, in source.as_slice(), held);
         if is_failure(r) {
             return pass_failed(in s, r);
@@ -567,7 +586,7 @@ fn drive(
         let world = world_of(text(in s));
         let input = interface_stream(in world, in package.as_slice());
         let json = interface_json(in input.as_slice());
-        return pass_with(inout s, step_interface_write(), in json.as_slice());
+        return write_atomic_output(inout s, in o, in json.as_slice());
     }
     if o.ast_optimize {
         let r = step(inout s, step_optimize());
@@ -628,6 +647,35 @@ fn write_output(
     let path = value(in o, slot_output());
     let failed = handle Fail[IoError] in {
         write_path(in path.as_slice(), in bytes);
+        0
+    } with {
+        return v => v,
+        raise(e, _) => error_word(e),
+    };
+    if failed == 0 {
+        return 0;
+    }
+    let m = io_error_text(wrapping_sub(failed, 2));
+    error(in m.as_slice())
+}
+
+// Atomic output write (`vesper::atomic_file::atomic_write` to `-o`, or
+// `HybridDriver::hd_write` to stdout): 0, or the exit code of the error.
+fn write_atomic_output(
+    inout s: Session,
+    in o: Options,
+    in bytes: Slice[u8]
+) -> i64 eff [Ffi[StdFs], Ffi[HybridDriver]] {
+    if !has(in o, slot_output()) {
+        let r = HybridDriver::hd_write(inout s, in bytes);
+        if is_failure(r) {
+            return pass_failed(in s, r);
+        }
+        return 0;
+    }
+    let path = value(in o, slot_output());
+    let failed = handle Fail[IoError] in {
+        replace_path(in path.as_slice(), in bytes);
         0
     } with {
         return v => v,
@@ -709,15 +757,29 @@ fn build(
         return r;
     }
     // Windows targets link with link.exe/lld-link (lane 24, #347); the
-    // default `cc` there means "find the MSVC linker".
+    // default `cc` there means "find the MSVC linker". When `--linker` is
+    // explicit and `LIB` is already set, run the linker directly in Vesper
+    // via `@vesper/driver::windows_link` (#2416, #1894).
     let mut built = path;
     if is_windows_target(in o) {
-        let request = windows_link_request(in object.as_slice(), in built.as_slice(), in o);
-        let q = step_with(inout s, step_windows_link(), in request.as_slice());
-        if is_failure(q) {
-            return pass_failed(in s, q);
+        if has(in o, slot_linker()) && has_lib_env() {
+            let linker = value(in o, slot_linker());
+            let failed = windows_link_explicit(
+                in linker.as_slice(),
+                in object.as_slice(),
+                in built.as_slice()
+            );
+            if failed != 0 {
+                return link_failed(in linker.as_slice(), failed);
+            }
+        } else {
+            let request = windows_link_request(in object.as_slice(), in built.as_slice(), in o);
+            let q = step_with(inout s, step_windows_link(), in request.as_slice());
+            if is_failure(q) {
+                return pass_failed(in s, q);
+            }
+            built = text(in s);
         }
-        built = text(in s);
     } else {
         let linker = value(in o, slot_linker());
         let failed = link(in linker.as_slice(), in object.as_slice(), in built.as_slice());
@@ -740,6 +802,52 @@ fn build(
         return measure_tee(in built.as_slice());
     }
     0
+}
+
+// Whether the caller already has `LIB` set (no VS discovery needed).
+fn has_lib_env() -> bool eff [Ffi[StdEnv]] {
+    match var_bytes(in "LIB") {
+        Option::Some(_) => true,
+        Option::None => false,
+    }
+}
+
+// Run an explicit Windows linker (`link.exe`, `lld-link`, or `rust-lld`)
+// using `@vesper/driver::windows_link_args_nul`.
+fn windows_link_explicit(
+    in linker: Slice[u8],
+    in object: Slice[u8],
+    in path: Slice[u8]
+) -> u64 eff [Ffi[StdProcess]] {
+    let flavor = windows_linker_flavor(in linker);
+    let args = windows_link_args_nul(flavor, in path, in object);
+    let mut c = command_path(in linker);
+    let mut start: u64 = 0;
+    for i in 0..args.len() {
+        let b = match args.try_get(i) {
+            Option::Some(v) => v,
+            Option::None => 0,
+        };
+        if b == 0 {
+            proc_arg(inout c, in args[start..i]);
+            start = wrapping_add(i, 1);
+        }
+    }
+    if start < args.len() {
+        proc_arg(inout c, in args[start..args.len()]);
+    }
+    let mut ch = match spawn(c) {
+        Result::Ok(ch) => ch,
+        Result::Err(e) => return error_word(e),
+    };
+    let waited = wait(inout ch);
+    release(ch);
+    match waited {
+        Result::Ok(st) => {
+            if success(st) { 0 } else { 1 }
+        },
+        Result::Err(e) => error_word(e),
+    }
 }
 
 // Run `<linker> <object> -o <path> -lm` with the CLI's stdio: 0 when it
@@ -1243,7 +1351,7 @@ fn native_code(
 
 fn emit(inout s: Session, in o: Options) -> i64 eff [Ffi[StdFs], Ffi[HybridDriver]] {
     if is(in o, slot_format(), in "hir") {
-        return pass(inout s, step_emit_hir());
+        return emit_text(inout s, in o, step_emit_hir(), in "".as_bytes());
     }
     if is(in o, slot_format(), in "ir") {
         let mut flags: ChunkSeq[u8] = ChunkSeq::new[u8]();
@@ -1252,7 +1360,16 @@ fn emit(inout s: Session, in o: Options) -> i64 eff [Ffi[StdFs], Ffi[HybridDrive
         } else {
             flags.push(0);
         }
-        return emit_text(inout s, in o, step_emit_ir(), in flags.as_slice());
+        let r = step_with(inout s, step_emit_ir(), in flags.as_slice());
+        if is_failure(r) {
+            return pass_failed(in s, r);
+        }
+        let payload = text(in s);
+        if r == emit_ir_encoded() {
+            let rendered = place_ir_json_bytes(in payload.as_slice());
+            return write_output(inout s, in o, in rendered.as_slice());
+        }
+        return write_output(inout s, in o, in payload.as_slice());
     }
     if is(in o, slot_format(), in "lean") {
         return emit_text(inout s, in o, step_emit_lean(), in "".as_bytes());
@@ -1282,6 +1399,12 @@ fn emit(inout s: Session, in o: Options) -> i64 eff [Ffi[StdFs], Ffi[HybridDrive
 
 // `EmitIr`'s flag bit (`EMIT_OPTIMIZE` in src/driver/native.rs): run the IR optimizer.
 fn emit_optimize() -> u8 {
+    1
+}
+
+// `EmitIr`'s return code when `text(in s)` holds `ir_words::program_json_input`
+// for `@vesper/place-ir::place_ir_json_bytes` (0 = Rust fallback JSON).
+fn emit_ir_encoded() -> i64 {
     1
 }
 
@@ -1429,6 +1552,30 @@ fn part(inout s: Session, which: u32) -> i64 eff [Ffi[HybridDriver]] {
 //    Beacon rules (§22) and the `use`-outside-a-package diagnostics.
 // 4. The diagnostics are printed unless the library export path reports
 //    them.
+const DIAG_JSON_PACKAGE: u8 = 1;
+const CH_LF: u8 = 10;
+
+// Emit `--json` diagnostics encoded in `s`'s text buffer by `ReportSyntax` or
+// `CheckReport` (tag 0 = single file, tag 1 = package).
+fn emit_diagnostics_json(in s: Session) eff [Ffi[HybridDriver]] {
+    let raw = text(in s);
+    let slice = raw.as_slice();
+    if slice.len() == 0 {
+        return ();
+    }
+    let tag = match slice.try_get(0) {
+        Option::Some(b) => b,
+        Option::None => 0,
+    };
+    let mut json = if tag == DIAG_JSON_PACKAGE {
+        package_diagnostics_json(in slice[1..slice.len()])
+    } else {
+        diagnostics_json(in slice[1..slice.len()])
+    };
+    json.push(CH_LF);
+    print(stdout_stream(), in json.as_slice());
+}
+
 fn check(inout s: Session) -> i64 eff [Ffi[HybridDriver]] {
     loop {
         let r = part(inout s, part_untyped());

@@ -1,8 +1,9 @@
 // The `vesper run` evaluator (Stage 2 retirement, #1397; claim #2053), from
 // `modules/run`, behind the Vesper driver's `Run` step
 // (`driver/native.rs`). A program the Vesper machine declines (it runs
-// integers, data, calls, patterns, `?` and handlers that do not resume,
-// not closures, resumed continuations, sequences or floats) runs on Rust's `Runtime`, the default compiler's
+// integers, floats, strings, data, sequences, calls, patterns, closures,
+// handlers and one-shot continuations; packages/vesper-run/src/lib.ves
+// lists what it declines) runs on Rust's `Runtime`, the default compiler's
 // path.
 
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
@@ -28,7 +29,7 @@ static RUN_DECLINED: AtomicU64 = AtomicU64::new(0);
 /// The flip-gate rows of this file's swaps (`swaps::on`).
 pub(super) const SWAPS: &[Swap] = &[open(
     "run",
-    "0.194x over 150 programs (tests/self_host_run.rs); no flip-gate configuration",
+    "0.261x over 187 programs (tests/self_host_run.rs); no flip-gate configuration",
 )];
 
 /// The driver's hook, not a registry slot.

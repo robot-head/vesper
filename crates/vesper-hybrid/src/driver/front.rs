@@ -6,8 +6,81 @@
 
 use super::*;
 
+/// Tag byte for `self.text` when `ReportSyntax` / `CheckReport` hands JSON
+/// diagnostics to `@vesper/driver::diagnostics_json` (single file).
+const DIAG_JSON_SINGLE: u8 = 0;
+/// Tag byte for `self.text` when `CheckReport` hands JSON diagnostics to
+/// `@vesper/driver::package_diagnostics_json` (package).
+const DIAG_JSON_PACKAGE: u8 = 1;
+
+fn push_diag_fields(out: &mut Vec<u8>, d: &vesper::ast::Diagnostic) {
+    let push_u64 = |buf: &mut Vec<u8>, v: u64| buf.extend_from_slice(&v.to_le_bytes());
+    let push_str = |buf: &mut Vec<u8>, s: &str| {
+        buf.extend_from_slice(&(s.len() as u64).to_le_bytes());
+        buf.extend_from_slice(s.as_bytes());
+    };
+    push_str(out, &d.code);
+    push_str(out, &d.message);
+    push_u64(out, d.span.start as u64);
+    push_u64(out, d.span.end as u64);
+    push_u64(out, d.related.len() as u64);
+    for r in &d.related {
+        push_u64(out, r.span.start as u64);
+        push_u64(out, r.span.end as u64);
+        push_str(out, &r.message);
+    }
+    match &d.help {
+        Some(h) => {
+            push_u64(out, 1);
+            push_str(out, h);
+        }
+        None => push_u64(out, 0),
+    }
+}
+
+fn encode_diagnostics_json_stream(
+    ds: &[vesper::ast::Diagnostic],
+    map: &[vesper::forge_frontend::SourceMapSegment],
+) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.push(DIAG_JSON_SINGLE);
+    out.extend_from_slice(&(ds.len() as u64).to_le_bytes());
+    for d in ds {
+        if map.is_empty() {
+            push_diag_fields(&mut out, d);
+        } else {
+            let mapped = vesper::forge_frontend::original_diagnostic(map, d.clone());
+            push_diag_fields(&mut out, &mapped);
+        }
+    }
+    out
+}
+
+fn encode_package_diagnostics_json_stream(
+    package: &vesper::packages::Assembled,
+    ds: &[vesper::packages::PackageDiagnostic],
+) -> Vec<u8> {
+    let files = &package.sources.files;
+    let total = package.manifest_errors.len() + ds.len();
+    let mut out = Vec::new();
+    out.push(DIAG_JSON_PACKAGE);
+    out.extend_from_slice(&(total as u64).to_le_bytes());
+    for (file, d) in &package.manifest_errors {
+        out.extend_from_slice(&(file.len() as u64).to_le_bytes());
+        out.extend_from_slice(file.as_bytes());
+        push_diag_fields(&mut out, d);
+    }
+    for d in ds {
+        let file = d.file.map_or("Loom.toml", |f| files[f].display.as_str());
+        out.extend_from_slice(&(file.len() as u64).to_le_bytes());
+        out.extend_from_slice(file.as_bytes());
+        push_diag_fields(&mut out, &d.diagnostic);
+    }
+    out
+}
+
 impl Session {
-    pub(super) fn front_step(&mut self, step: Step, arg: &[u8]) -> Result<i64, String> {
+    pub(super) fn front_step(&mut self, step: Step, _arg: &[u8]) -> Result<i64, String> {
         let o = &self.o;
         match step {
             Step::Parse => {
@@ -59,18 +132,23 @@ impl Session {
                     crate::diagnostics(o.input(), original, &core.diagnostics, o.json);
                     core.syntax()
                 };
-                crate::write(o.output(), format!("{syntax:#?}\n").as_bytes())?;
+                self.text = format!("{syntax:#?}\n").into_bytes();
                 Ok(0)
             }
             Step::ReportSyntax => {
-                let parsed = self.parsed()?;
-                crate::compiler_diagnostics(
-                    o.input(),
-                    &self.original,
-                    &parsed.diagnostics,
-                    &self.source_map,
-                    o.json,
-                );
+                if o.json {
+                    let ds = &self.parsed()?.diagnostics;
+                    self.text = encode_diagnostics_json_stream(ds, &self.source_map);
+                } else {
+                    let parsed = self.parsed()?;
+                    crate::compiler_diagnostics(
+                        o.input(),
+                        &self.original,
+                        &parsed.diagnostics,
+                        &self.source_map,
+                        false,
+                    );
+                }
                 Ok(0)
             }
             Step::Check => {
@@ -158,23 +236,10 @@ impl Session {
                 self.text = package.as_str().as_bytes().to_vec();
                 Ok(0)
             }
-            // The interface JSON (`arg`) to `-o`, written atomically, or
-            // to stdout.
-            Step::InterfaceWrite => {
-                if let Some(path) = o.output() {
-                    vesper::atomic_file::atomic_write(&path, arg)?;
-                } else {
-                    crate::write(None, arg)?;
-                }
-                Ok(0)
-            }
             Step::EmitHir => {
-                crate::write(
-                    o.output(),
-                    serde_json::to_string_pretty(&self.parsed()?.module)
-                        .map_err(|e| e.to_string())?
-                        .as_bytes(),
-                )?;
+                self.text = serde_json::to_string_pretty(&self.parsed()?.module)
+                    .map_err(|e| e.to_string())?
+                    .into_bytes();
                 Ok(0)
             }
             _ => Err(format!("driver: step {} is not a front step", step as u32)),
@@ -249,7 +314,7 @@ impl Session {
     /// Prints the check's diagnostics unless the export path reports them
     /// (a library whose `.vsys` imports check only through the Bridge
     /// lowering); their count when printed, else 0.
-    fn report_check(&self) -> Result<i64, String> {
+    fn report_check(&mut self) -> Result<i64, String> {
         let o = &self.o;
         let checked = self.checked()?;
         let lib = o.lib_flags()?;
@@ -263,6 +328,22 @@ impl Session {
         {
             return Ok(0);
         }
+        let n = count(checked.diagnostics.len());
+        if o.json {
+            let bytes = match &self.loaded {
+                Some(p) => {
+                    let localized: Vec<_> = checked
+                        .diagnostics
+                        .iter()
+                        .map(|d| p.sources.localize(d))
+                        .collect();
+                    encode_package_diagnostics_json_stream(p, &localized)
+                }
+                None => encode_diagnostics_json_stream(&checked.diagnostics, &self.source_map),
+            };
+            self.text = bytes;
+            return Ok(n);
+        }
         match &self.loaded {
             Some(p) => {
                 let localized: Vec<_> = checked
@@ -270,16 +351,16 @@ impl Session {
                     .iter()
                     .map(|d| p.sources.localize(d))
                     .collect();
-                crate::package_diagnostics(p, &localized, o.json);
+                crate::package_diagnostics(p, &localized, false);
             }
             None => crate::compiler_diagnostics(
                 o.input(),
                 &self.original,
                 &checked.diagnostics,
                 &self.source_map,
-                o.json,
+                false,
             ),
         }
-        Ok(count(checked.diagnostics.len()))
+        Ok(n)
     }
 }

@@ -23,6 +23,11 @@ use @vesper/check-data::world::{constructor};
 use @vesper/check-data::input::{Ctx, Reader};
 use @vesper/place-ir::codes::{Lit, Op, Pat, Term};
 use @vesper/place-ir::{BlockRow, FnRow, InstRow, Program};
+use @vesper/alloc::{
+    Book, Cfg, Fault, Placed, book_alloc, book_checkpoint, book_commit, book_new, book_release,
+    book_rewind, book_stats, book_view
+};
+use @vesper/serde::dragon::{Shortest, put_shortest, shortest, shortest_f32, shortest_len};
 use self::arith::{
     B_ADD, B_AND, B_BAND, B_BOR, B_BSHL, B_BSHR, B_BXOR, B_DIV, B_EQ, B_GE, B_GT, B_LAND, B_LE,
     B_LOR, B_LT, B_MUL, B_NE, B_OR, B_REM, B_ROTL, B_ROTR, B_SHL, B_SHR, B_SUB, B_WADD, B_WMUL,
@@ -48,16 +53,44 @@ pub const T_SEQ: u8 = 14;
 pub const T_SLICE: u8 = 15;
 // A closure (`Value::Closure`): its `closures` index.
 pub const T_CLOS: u8 = 16;
+// A function value with bound evidence (`Value::Bound`): its `bounds` index.
+pub const T_BOUND: u8 = 17;
+// `Value::Float` and `Value::Float32`: the bit pattern (an `f32`'s in the
+// low half).
+pub const T_F64: u8 = 18;
+pub const T_F32: u8 = 19;
 pub const T_UNDEF: u8 = 255;
 
-// Unary codes; a conversion is U_CONV + family * 16 + target kind.
+// Unary codes; a conversion is U_CONV + family * CONV_STRIDE + target kind.
 const U_NEG: u64 = 1;
 const U_NOT: u64 = 2;
 const U_INV: u64 = 3;
 const U_CONV: u64 = 16;
+// The codes of one conversion family: one per integer kind.
+const CONV_STRIDE: u64 = 16;
 const C_WIDEN: u64 = 0;
 const C_NARROW: u64 = 1;
 const C_WRAPPING: u64 = 2;
+// A float intrinsic is U_FLOAT + operation * 2 + float kind.
+const U_FLOAT: u64 = 128;
+const FC_WIDEN: u64 = 0;
+const FC_NEAREST: u64 = 1;
+const FC_TO_BITS: u64 = 2;
+const FC_FROM_BITS: u64 = 3;
+const FK_F32: u64 = 0;
+const FK_F64: u64 = 1;
+const FLOAT_KINDS: u64 = 2;
+// The sign bits of a binary64 and a binary32, which `-x` flips.
+const F64_SIGN: u64 = 9223372036854775808;
+const F32_SIGN: u64 = 2147483648;
+// The exponent bits of a binary64 and a binary32: all ones is a NaN or an
+// infinity (an infinity when the fraction is zero).
+const F64_EXPONENT: u64 = 9218868437227405312;
+const F64_FRACTION: u64 = 4503599627370495;
+const F32_EXPONENT: u64 = 2139095040;
+const F32_FRACTION: u64 = 8388607;
+// The bits of a binary32 (`f32::from_bits` of the low half).
+const F32_BITS: u64 = 4294967295;
 
 // Frame kinds (`Frame::IrResume`, `Frame::Try`).
 const FR_IR: u8 = 0;
@@ -70,6 +103,10 @@ const FR_HANDLER: u8 = 2;
 const HANDLER_STATE: u32 = 1;
 // `Frame::Coerce`: the returned value takes type `ty`.
 const FR_COERCE: u8 = 3;
+// Evidence a bound callable or closure carries into its call
+// (`evidence_environment(caller)` extended by its own): `block` and `ip`
+// the start and count of its entries in `evs`. Free to pop.
+const FR_EVIDENCE: u8 = 4;
 
 // What `drive` holds (`Control::Ir`, `Control::Return`).
 const C_IR: u8 = 0;
@@ -114,6 +151,8 @@ copy struct Fr {
     dest: u32,
     ty: u32,
     kind: u8,
+    // A handler's identity (`Handler::id`), 0 for other frames.
+    serial: u64,
 }
 
 copy struct En {
@@ -137,6 +176,7 @@ copy struct Fi {
 copy struct Pm {
     name: u32,
     pass: u64,
+    ty: u32,
 }
 
 // A `Write` place split at its dots: root, segments
@@ -149,12 +189,31 @@ copy struct Wr {
     code: u64,
 }
 
+// An evidence entry: handler `serial` (installed at effect-table site
+// `site`) for every key it provides, or for `$effect:<effect>` only.
+copy struct Ev {
+    serial: u64,
+    site: u64,
+    effect: u32,
+}
+const EV_ALL_KEYS: u32 = 4294967295;
+
+// A bound function value: function `callee` and its evidence.
+copy struct Bd {
+    callee: u32,
+    ev_start: u64,
+    ev_count: u64,
+}
+
 // A closure: its effect-table site and captures
 // `clos_*[cap_start..cap_start + cap_count]`.
 copy struct Cl {
     site: u64,
     cap_start: u64,
     cap_count: u64,
+    // its evidence `evs[ev_start..ev_start + ev_count]`
+    ev_start: u64,
+    ev_count: u64,
 }
 
 // A sequence: its elements `seq_items[at..at + len]`, with room for `cap`.
@@ -267,6 +326,10 @@ pub struct M {
     closures: ChunkSeq[Cl],
     clos_names: ChunkSeq[u32],
     clos_vals: ChunkSeq[Val],
+    // Evidence entries, bound function values and the last handler serial.
+    evs: ChunkSeq[Ev],
+    bounds: ChunkSeq[Bd],
+    h_serial: u64,
     // Sequences, their elements and slice views.
     seqs: ChunkSeq[Sq],
     seq_items: ChunkSeq[Val],
@@ -287,6 +350,15 @@ pub struct M {
     err_sym: u32,
     zero_sym: u32,
     dot_sym: u32,
+    // Open region blocks (`Regions`): each one's allocator book, with the
+    // handler serial that keys it at the same index in `book_ids`; the box
+    // and watermark tables of every block, and the handle field symbols.
+    books: ChunkSeq[Book],
+    book_ids: ChunkSeq[u64],
+    rboxes: ChunkSeq[Rb],
+    rmarks: ChunkSeq[Rm],
+    region_sym: u32,
+    index_field_sym: u32,
 }
 
 fn fr_zero() -> Fr {
@@ -300,7 +372,8 @@ fn fr_zero() -> Fr {
         seg_base: 0,
         dest: 0,
         ty: 0,
-        kind: FR_IR
+        kind: FR_IR,
+        serial: 0
     }
 }
 
@@ -365,6 +438,9 @@ pub fn machine_new(sink ctx: Ctx, sink program: Program, fuel: u64) -> M {
         closures: ChunkSeq::new[Cl](),
         clos_names: ChunkSeq::new[u32](),
         clos_vals: ChunkSeq::new[Val](),
+        evs: ChunkSeq::new[Ev](),
+        bounds: ChunkSeq::new[Bd](),
+        h_serial: 0,
         seqs: ChunkSeq::new[Sq](),
         seq_items: ChunkSeq::new[Val](),
         slices: ChunkSeq::new[Sl](),
@@ -382,6 +458,12 @@ pub fn machine_new(sink ctx: Ctx, sink program: Program, fuel: u64) -> M {
         err_sym: 0,
         zero_sym: 0,
         dot_sym: 0,
+        books: ChunkSeq::new[Book](),
+        book_ids: ChunkSeq::new[u64](),
+        rboxes: ChunkSeq::new[Rb](),
+        rmarks: ChunkSeq::new[Rm](),
+        region_sym: 0,
+        index_field_sym: 0,
     }
 }
 
@@ -443,14 +525,17 @@ fn decline(inout machine: M, in reason: Str, sym: u32) {
 // Word offsets in a site (`sites` in run_words.rs), from its first word.
 const SITE_INST: u64 = 0;
 const SITE_KIND: u64 = 1;
-// handle: effect, label + 1, instance key + 1, flags, static key, then the
-// captured names (count, names), then `HandleTail`.
+// handle: effect, label + 1, instance key + 1, flags, static key, a region
+// block's capacity (0 for any other handler), then the captured names
+// (count, names), then `HandleTail`.
 const HS_EFFECT: u64 = 2;
 const HS_LABEL: u64 = 3;
 const HS_KEY: u64 = 4;
 const HS_FLAGS: u64 = 5;
-const HS_FREE_COUNT: u64 = 7;
-const HS_FREE: u64 = 8;
+const HS_STATIC: u64 = 6;
+const HS_REGION: u64 = 7;
+const HS_FREE_COUNT: u64 = 8;
+const HS_FREE: u64 = 9;
 // After the captured names: body fn + 1, return clause fn + 1, return
 // pattern and a pair's two patterns, operation clause count, then per
 // clause: operation, fn + 1, pattern count, patterns.
@@ -465,10 +550,16 @@ const CL_OP: u64 = 0;
 const CL_FN: u64 = 1;
 const CL_PAT_COUNT: u64 = 2;
 const CL_PATS: u64 = 3;
-// effect call: effect, operation, instance key + 1.
+// effect call: effect, operation, instance key + 1, label + 1.
 const EC_EFFECT: u64 = 2;
 const EC_OP: u64 = 3;
 const EC_KEY: u64 = 4;
+// A labelled operation's capability label + 1 (`stop.raise(x)`), or 0.
+const EC_LABEL: u64 = 5;
+// A region operation's `RO_*` code, or 0; a `box`'s payload layout size + 1
+// from the call's `RegionBox[r, T]` type, or 0 when the type does not fix it.
+const EC_REGION: u64 = 6;
+const EC_PAYLOAD: u64 = 7;
 // try: instance key + 1.
 const TRY_KEY: u64 = 2;
 // closure: coerce flag, captured names (count, names), body fn + 1, then
@@ -564,6 +655,7 @@ pub fn read_sites(inout machine: M, inout reader: Reader, in bytes: Slice[u8]) {
             machine.sites.push(reader.word(in bytes));
             let static_key = name_word(in machine, reader.word(in bytes));
             machine.sites.push(static_key);
+            machine.sites.push(reader.word(in bytes));
             let free_count = reader.word(in bytes);
             machine.sites.push(free_count);
             for j in 0..free_count {
@@ -601,6 +693,10 @@ pub fn read_sites(inout machine: M, inout reader: Reader, in bytes: Slice[u8]) {
             machine.sites.push(op_name);
             let key = opt_name_word(in machine, reader.word(in bytes));
             machine.sites.push(key);
+            let label = opt_name_word(in machine, reader.word(in bytes));
+            machine.sites.push(label);
+            machine.sites.push(reader.word(in bytes));
+            machine.sites.push(reader.word(in bytes));
         } else if kind == SITE_TRY {
             let key = opt_name_word(in machine, reader.word(in bytes));
             machine.sites.push(key);
@@ -785,6 +881,8 @@ fn install(inout machine: M) {
     let mut handler_frame = machine.frame;
     handler_frame.kind = FR_HANDLER;
     handler_frame.func_index = at;
+    machine.h_serial = inc(machine.h_serial);
+    handler_frame.serial = machine.h_serial;
     handler_frame.block = hcap_start;
     handler_frame.ip = wrapping_sub(machine.hcap_names.len(), hcap_start);
     if stateful {
@@ -822,7 +920,8 @@ fn install(inout machine: M) {
             seg_base: seg_base,
             dest: 0,
             ty: 0,
-            kind: FR_IR
+            kind: FR_IR,
+            serial: 0
         };
     machine.control = C_IR;
 }
@@ -863,7 +962,8 @@ fn clause_frame(inout machine: M, handler: Fr, func_index: u64) {
             seg_base: handler.seg_base,
             dest: 0,
             ty: 0,
-            kind: FR_IR
+            kind: FR_IR,
+            serial: 0
         };
     machine.control = C_IR;
 }
@@ -923,32 +1023,10 @@ fn handler_state(in machine: M, handler: Fr) -> Val {
 // `perform` of `effect::op` on `arg_vals`, with the instance key `key`
 // (symbol + 1, or 0) the raising activation's evidence names: the
 // innermost handler with that key, else the innermost of the effect.
-fn perform(inout machine: M, effect: u32, op_name: u32, key: u64) {
-    let mut found = NONE64;
-    let mut i = machine.stack.len();
-    loop {
-        if i == 0 || key == 0 {
-            break;
-        }
-        i = wrapping_sub(i, 1);
-        let frame = stack_at(in machine, i);
-        if frame.kind == FR_HANDLER && site_word(in machine, add(frame.func_index, HS_KEY)) == key {
-            found = i;
-            break;
-        }
-    }
-    i = machine.stack.len();
-    loop {
-        if i == 0 || found != NONE64 {
-            break;
-        }
-        i = wrapping_sub(i, 1);
-        let frame = stack_at(in machine, i);
-        if frame.kind == FR_HANDLER
-            && site_word(in machine, add(frame.func_index, HS_EFFECT)) == w(effect)
-        {
-            found = i;
-        }
+fn perform(inout machine: M, effect: u32, op_name: u32, key: u64, label: u64) {
+    let found = find_target(inout machine, effect, key, label);
+    if machine.declined {
+        return;
     }
     if found == NONE64 {
         if !machine.failed {
@@ -1017,6 +1095,24 @@ fn perform(inout machine: M, effect: u32, op_name: u32, key: u64) {
             bind_new(inout machine, n32(wrapping_sub(pat, 1)), value);
         }
     }
+}
+
+// The stack index of the handler an operation of `effect` with instance
+// key `key` and label `label` (each symbol + 1, or 0) reaches (`target` of
+// `Value::EffectOp`), or NONE64.
+fn find_target(inout machine: M, effect: u32, key: u64, label: u64) -> u64 {
+    let mut found = NONE64;
+    if label != 0 {
+        // `$label:<label>` first, then the instance as unlabelled.
+        found = find_labelled(inout machine, label);
+    }
+    if found == NONE64 && key != 0 {
+        found = find_handler(inout machine, key, effect);
+    }
+    if found == NONE64 {
+        found = find_handler(inout machine, 0, effect);
+    }
+    found
 }
 
 fn stack_at(in machine: M, index: u64) -> Fr {
@@ -1281,7 +1377,7 @@ fn raise(inout machine: M, failure: u8) {
     let payload = make(inout machine, T_DATA, ctor, machine.kids.len());
     machine.arg_vals.clear();
     machine.arg_vals.push(payload);
-    perform(inout machine, machine.fail_sym, machine.raise_sym, key);
+    perform(inout machine, machine.fail_sym, machine.raise_sym, key, 0);
 }
 
 // ----- symbols -----------------------------------------------------------------
@@ -1445,6 +1541,18 @@ fn int_kind(inout machine: M, ty: u32) -> u8 {
 
 // `coerce_value`: an integer takes the kind of an integer type.
 fn coerce(inout machine: M, value: Val, ty: u32) -> Val {
+    if value.tag == T_FN || value.tag == T_CLOS || value.tag == T_BOUND {
+        // `qualify_value` without ambient evidence: `$cap` instances only.
+        return bind_evidence(inout machine, value, ty, false);
+    }
+    if value.tag == T_F64 {
+        // An unsuffixed float literal checked as an `f32` takes its `f32`
+        // value.
+        if is_f32(in machine, ty) {
+            return f32_val(nearest_f32(f64_of(value)));
+        }
+        return value;
+    }
     if value.tag > K_I32 {
         return value;
     }
@@ -1455,26 +1563,50 @@ fn coerce(inout machine: M, value: Val, ty: u32) -> Val {
     Val { tag: kind, payload: wrap(kind, exact(value.tag, value.payload)) }
 }
 
+// Whether `ty` is `f32` (`FloatKind::from_type`).
+fn is_f32(in machine: M, ty: u32) -> bool {
+    machine.ctx.types.kind(ty) == TyKind::Named
+        && machine.ctx.types.arity(ty) == 0
+        && machine.ctx.types.name(ty) == machine.ctx.world.k.f32_
+}
+
+fn f64_val(x: f64) -> Val {
+    Val { tag: T_F64, payload: to_bits_f64(x) }
+}
+
+fn f32_val(x: f32) -> Val {
+    Val { tag: T_F32, payload: widen_u64(to_bits_f32(x)) }
+}
+
+fn f64_of(value: Val) -> f64 {
+    from_bits_f64(value.payload)
+}
+
+fn f32_of(value: Val) -> f32 {
+    from_bits_f32(wrapping_u32(value.payload))
+}
+
+fn is_float(value: Val) -> bool {
+    value.tag == T_F64 || value.tag == T_F32
+}
+
+// How deep `type_ok` and `inner_effects` follow a type.
+const TYPE_DEPTH_LIMIT: u64 = 64;
+
 // Whether the machine runs values of type `ty` (`scan`).
 fn type_ok(in machine: M, ty: u32, depth: u64) -> bool {
-    if depth > 64 {
+    if depth > TYPE_DEPTH_LIMIT {
         return false;
     }
     let node = machine.ctx.types.node(ty);
     if node.kind == TyKind::Named {
         let name = node.name;
         let known = machine.ctx.world.k;
-        if name == known.f32_
-            || name == known.f64_
-            || name == known.i128_
+        if name == known.i128_
             || name == known.u128_
             || name == known.tiled_seq
-            || name == known.box_
             || name == known.vec
             || name == known.mask
-            || name == known.region
-            || name == known.region_box
-            || name == known.watermark
             || name == known.dyn_
             || spells(in machine, name, "Atomic")
         {
@@ -1482,12 +1614,19 @@ fn type_ok(in machine: M, ty: u32, depth: u64) -> bool {
         }
     }
     if node.kind == TyKind::Fn {
-        // A function value with effects may carry bound evidence
-        // (`bind_callable_evidence`), which the machine does not keep; only
-        // a clause's continuation is let through (`cont_names`).
+        // A function value with effects carries evidence (`evs`); the
+        // machine keys it by effect name, so a user label (`$label:` keys) declines;
+        // a latent label keys by name, a `$cap` or `$fncap:` one by its handler's
+        // `$static:` key.
         let row = machine.ctx.types.row(node.r2);
-        if row.n != 0 || row.tail != 0 {
-            return false;
+        for i in 0..w(row.n) {
+            let label = machine.ctx.types.effect_at(add(w(row.a), i)).label;
+            if label != 0
+                && !has_prefix(in machine, wrapping_sub(label, 1), "$latent:")
+                && !bound_label(in machine, wrapping_sub(label, 1))
+            {
+                return false;
+            }
         }
         if !type_ok(in machine, node.r, inc(depth)) {
             return false;
@@ -1501,6 +1640,30 @@ fn type_ok(in machine: M, ty: u32, depth: u64) -> bool {
         }
     }
     true
+}
+
+// Whether a function type with effects appears inside type `ty` below its
+// top: a call binds evidence to a parameter's own function value only,
+// not to one inside a tuple or data value (`qualify_value`).
+fn inner_effects(in machine: M, ty: u32, depth: u64) -> bool {
+    if depth > TYPE_DEPTH_LIMIT {
+        return true;
+    }
+    let node = machine.ctx.types.node(ty);
+    if node.kind == TyKind::Fn && depth > 0 {
+        let row = machine.ctx.types.row(node.r2);
+        if row.n != 0 || row.tail != 0 {
+            return true;
+        }
+    }
+    if node.kind == TyKind::Named || node.kind == TyKind::Tuple {
+        for i in 0..w(node.n) {
+            if inner_effects(in machine, machine.ctx.types.arg(ty, i), inc(depth)) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 // ----- loading -----------------------------------------------------------------
@@ -1621,6 +1784,10 @@ fn unary_code(in machine: M, sym: u32) -> u64 {
     if spells(in machine, sym, "~") {
         return U_INV;
     }
+    let float_code = float_unary_code(in machine, sym);
+    if float_code != 0 {
+        return float_code;
+    }
     let text_start = machine.ctx.names.start(sym);
     let text_end = machine.ctx.names.end(sym);
     let mut family = NONE64;
@@ -1642,7 +1809,45 @@ fn unary_code(in machine: M, sym: u32) -> u64 {
     if kind == TK_NONE {
         return 0;
     }
-    add(add(U_CONV, wrapping_mul(family, 16)), widen_u64(kind))
+    add(add(U_CONV, wrapping_mul(family, CONV_STRIDE)), widen_u64(kind))
+}
+
+// The float conversions and bit reinterpretations (`float_conversion`,
+// `bits_intrinsic`): U_FLOAT + operation * 2 + kind, or 0. The math
+// intrinsics and saturating conversions are not codes: the machine
+// declines them.
+fn float_unary_code(in machine: M, sym: u32) -> u64 {
+    let mut op = NONE64;
+    let mut kind = NONE64;
+    if spells(in machine, sym, "widen_f32") {
+        op = FC_WIDEN;
+        kind = FK_F32;
+    } else if spells(in machine, sym, "widen_f64") {
+        op = FC_WIDEN;
+        kind = FK_F64;
+    } else if spells(in machine, sym, "nearest_f32") {
+        op = FC_NEAREST;
+        kind = FK_F32;
+    } else if spells(in machine, sym, "nearest_f64") {
+        op = FC_NEAREST;
+        kind = FK_F64;
+    } else if spells(in machine, sym, "to_bits_f32") {
+        op = FC_TO_BITS;
+        kind = FK_F32;
+    } else if spells(in machine, sym, "to_bits_f64") {
+        op = FC_TO_BITS;
+        kind = FK_F64;
+    } else if spells(in machine, sym, "from_bits_f32") {
+        op = FC_FROM_BITS;
+        kind = FK_F32;
+    } else if spells(in machine, sym, "from_bits_f64") {
+        op = FC_FROM_BITS;
+        kind = FK_F64;
+    }
+    if op == NONE64 {
+        return 0;
+    }
+    add(U_FLOAT, add(wrapping_mul(op, FLOAT_KINDS), kind))
 }
 
 // Reads every function's header: parameters, value count, first block.
@@ -1658,6 +1863,8 @@ pub fn load(inout machine: M, entry_index: u64) {
     machine.overflow_sym = machine.ctx.names.intern(in "ArithOverflow".as_bytes());
     machine.div_zero_sym = machine.ctx.names.intern(in "DivisionByZero".as_bytes());
     machine.index_sym = machine.ctx.names.intern(in "IndexOutOfBounds".as_bytes());
+    machine.region_sym = machine.ctx.names.intern(in "region".as_bytes());
+    machine.index_field_sym = machine.ctx.names.intern(in "index".as_bytes());
     let entry_sym = u32_at(in machine.ctx.nmap, entry_index);
     machine.aux.resize(machine.program.insts.len(), 0);
     machine.block_params.resize(machine.program.blocks.len(), 0);
@@ -1673,8 +1880,9 @@ pub fn load(inout machine: M, entry_index: u64) {
             let path_count = machine.program.op(add(cursor, 2));
             cursor = add(cursor, add(3, path_count));
             // type, span start, end
+            let param_ty = n32(machine.program.op(cursor));
             cursor = add(cursor, 3);
-            machine.params.push(Pm { name: name, pass: pass });
+            machine.params.push(Pm { name: name, pass: pass, ty: param_ty });
         }
         // result, effects
         cursor = add(cursor, 2);
@@ -1770,8 +1978,7 @@ fn pat_end(in machine: M, at: u64) -> u64 {
     }
 }
 
-// Declines a literal the machine has no value for (a float, a 128-bit
-// integer). `run` declines a non-ASCII string in the result, whose `Debug`
+// Declines a literal the machine has no value for (a 128-bit integer). `run` declines a non-ASCII string in the result, whose `Debug`
 // text needs Unicode tables.
 fn scan_literal(inout machine: M, at: u64) {
     let kind = machine.program.op(at);
@@ -1782,8 +1989,11 @@ fn scan_literal(inout machine: M, at: u64) {
         if !(hi == 0 || neg) {
             decline(inout machine, "a 128-bit integer literal", NONE32);
         }
-    } else if kind != widen_u64(Lit::String) && kind != widen_u64(Lit::Bool) {
-        decline(inout machine, "a float or wide literal", NONE32);
+    } else if kind != widen_u64(Lit::String)
+        && kind != widen_u64(Lit::Bool)
+        && kind != widen_u64(Lit::Float)
+    {
+        decline(inout machine, "a wide literal", NONE32);
     }
 }
 
@@ -1890,6 +2100,12 @@ pub fn scan(inout machine: M) {
                 cont_type = wrapping_add(param_type, 1);
             } else if !type_ok(in machine, param_type, 0) {
                 decline(inout machine, "a parameter type of ", fn_info.name);
+            } else if inner_effects(in machine, param_type, 0) {
+                decline(
+                    inout machine,
+                    "an effectful function inside a parameter of ",
+                    fn_info.name
+                );
             }
             cursor = add(cursor, 3);
         }
@@ -1990,11 +2206,8 @@ pub fn scan(inout machine: M) {
                         reach(inout machine, callee_index, inout work);
                         let ok = machine.aux.try_set(inst_id, callee_index);
                     }
-                } else if op == Op::Exit {
-                    if n32(machine.program.op(inc(operand_at))) != fn_info.name {
-                        decline(inout machine, "a `return` out of a nested body", NONE32);
-                    }
                 } else if op == Op::Tuple
+                    || op == Op::Exit
                     || op == Op::Unit
                     || op == Op::Project
                     || op == Op::Index
@@ -2033,8 +2246,10 @@ pub fn scan(inout machine: M) {
                     if code == 0 {
                         decline(inout machine, "a sequence operation in ", fn_info.name);
                     }
+                } else if op == Op::Fip {
+                    // `Box::new` and its reuse forms: a `Box` data value.
                 } else {
-                    decline(inout machine, "a vector, tiled or Box operation in ", fn_info.name);
+                    decline(inout machine, "a vector or tiled operation in ", fn_info.name);
                 }
             }
             if block.term == Term::Match {
@@ -2120,6 +2335,24 @@ fn display(in machine: M, value: Val, inout out: ChunkSeq[u8], depth: u64) {
         } else {
             push_decimal(inout out, value.payload);
         }
+    } else if value.tag == T_F64 {
+        put_float(
+            inout out,
+            value.payload,
+            F64_SIGN,
+            F64_EXPONENT,
+            F64_FRACTION,
+            shortest(value.payload)
+        );
+    } else if value.tag == T_F32 {
+        put_float(
+            inout out,
+            value.payload,
+            F32_SIGN,
+            F32_EXPONENT,
+            F32_FRACTION,
+            shortest_f32(value.payload)
+        );
     } else if value.tag == T_BOOL {
         if value.payload != 0 {
             put(inout out, "true");
@@ -2132,6 +2365,10 @@ fn display(in machine: M, value: Val, inout out: ChunkSeq[u8], depth: u64) {
     } else if value.tag == T_FN {
         put(inout out, "<fn ");
         put_sym(inout out, in machine.ctx.names, n32(value.payload));
+        put(inout out, ">");
+    } else if value.tag == T_BOUND {
+        put(inout out, "<fn ");
+        put_sym(inout out, in machine.ctx.names, bd_at(in machine, value.payload).callee);
         put(inout out, ">");
     } else if value.tag == T_CONT {
         put(inout out, "<one-shot continuation>");
@@ -2231,6 +2468,36 @@ fn display(in machine: M, value: Val, inout out: ChunkSeq[u8], depth: u64) {
     }
 }
 
+// Rust's `{}` of a float with bit pattern `bits` (fields `sign`,
+// `exponent`, `fraction`) and shortest digits `digits`: `NaN`, `inf`,
+// `-inf`, or the shortest round-trip decimal without an exponent.
+fn put_float(
+    inout out: ChunkSeq[u8],
+    bits: u64,
+    sign: u64,
+    exponent: u64,
+    fraction: u64,
+    digits: Shortest
+) {
+    if bits & exponent == exponent {
+        if bits & fraction != 0 {
+            put(inout out, "NaN");
+        } else if bits & sign != 0 {
+            put(inout out, "-inf");
+        } else {
+            put(inout out, "inf");
+        }
+        return;
+    }
+    let len = shortest_len(digits);
+    let mut text: ChunkSeq[u8] = ChunkSeq::with_capacity(len);
+    for _i in 0..len {
+        text.push(0);
+    }
+    put_shortest(inout text.as_slice_mut(), 0, digits);
+    out.extend(in text.as_slice());
+}
+
 fn hex(digit: u64) -> u8 {
     if digit < 10 {
         wrapping_u8(add(digit, 48))
@@ -2285,6 +2552,13 @@ fn equal(in machine: M, lhs: Val, rhs: Val) -> bool {
     }
     if lhs.tag <= K_I32 || lhs.tag == T_BOOL {
         return lhs.tag == rhs.tag && lhs.payload == rhs.payload;
+    }
+    // IEEE 754 equality: a NaN equals nothing, and -0 equals 0.
+    if lhs.tag == T_F64 {
+        return rhs.tag == T_F64 && f64_of(lhs) == f64_of(rhs);
+    }
+    if lhs.tag == T_F32 {
+        return rhs.tag == T_F32 && f32_of(lhs) == f32_of(rhs);
     }
     if lhs.tag == T_TUPLE && rhs.tag == T_TUPLE {
         let lhs_agg = agg(in machine, lhs);
@@ -2527,6 +2801,12 @@ fn literal_matches(in machine: M, at: u64, value: Val) -> bool {
     if kind == widen_u64(Lit::Bool) {
         return value.tag == T_BOOL && value.payload == lo;
     }
+    if kind == widen_u64(Lit::Float) {
+        if value.tag == T_F64 {
+            return from_bits_f64(lo) == f64_of(value);
+        }
+        return value.tag == T_F32 && nearest_f32(from_bits_f64(lo)) == f32_of(value);
+    }
     if kind == widen_u64(Lit::String) {
         return value.tag == T_STR && text_spells(in machine, value, n32(lo));
     }
@@ -2688,6 +2968,12 @@ fn binary(inout machine: M, code: u64, lhs: Val, rhs: Val, inout failure: u8) ->
         fail(inout machine, "invalid integer operator");
         return undef();
     }
+    if lhs.tag == T_F64 && rhs.tag == T_F64 {
+        return f64_binary(inout machine, op, f64_of(lhs), f64_of(rhs));
+    }
+    if lhs.tag == T_F32 && rhs.tag == T_F32 {
+        return f32_binary(inout machine, op, f32_of(lhs), f32_of(rhs));
+    }
     if lhs.tag == T_BOOL && rhs.tag == T_BOOL {
         if op == B_LAND {
             return bool_val(lhs.payload != 0 && rhs.payload != 0);
@@ -2728,14 +3014,153 @@ fn binary(inout machine: M, code: u64, lhs: Val, rhs: Val, inout failure: u8) ->
     undef()
 }
 
-// `unary` (without floats and 128-bit integers).
+// `binary` of two `f64` values.
+fn f64_binary(inout machine: M, op: u8, a: f64, b: f64) -> Val {
+    if op == B_ADD {
+        return f64_val(a + b);
+    } else if op == B_SUB {
+        return f64_val(a - b);
+    } else if op == B_MUL {
+        return f64_val(a * b);
+    } else if op == B_DIV {
+        return f64_val(a / b);
+    } else if op == B_REM {
+        return f64_val(a % b);
+    } else if op == B_EQ {
+        return bool_val(a == b);
+    } else if op == B_NE {
+        return bool_val(a != b);
+    } else if op == B_LT {
+        return bool_val(a < b);
+    } else if op == B_LE {
+        return bool_val(a <= b);
+    } else if op == B_GT {
+        return bool_val(a > b);
+    } else if op == B_GE {
+        return bool_val(a >= b);
+    }
+    fail(inout machine, "invalid float operator");
+    undef()
+}
+
+// `binary` of two `f32` values.
+fn f32_binary(inout machine: M, op: u8, a: f32, b: f32) -> Val {
+    if op == B_ADD {
+        return f32_val(a + b);
+    } else if op == B_SUB {
+        return f32_val(a - b);
+    } else if op == B_MUL {
+        return f32_val(a * b);
+    } else if op == B_DIV {
+        return f32_val(a / b);
+    } else if op == B_REM {
+        return f32_val(a % b);
+    } else if op == B_EQ {
+        return bool_val(a == b);
+    } else if op == B_NE {
+        return bool_val(a != b);
+    } else if op == B_LT {
+        return bool_val(a < b);
+    } else if op == B_LE {
+        return bool_val(a <= b);
+    } else if op == B_GT {
+        return bool_val(a > b);
+    } else if op == B_GE {
+        return bool_val(a >= b);
+    }
+    fail(inout machine, "invalid float operator");
+    undef()
+}
+
+// A float conversion or bit reinterpretation (`float_unary`); `code` is
+// at least U_FLOAT.
+fn float_unary(inout machine: M, code: u64, value: Val) -> Val {
+    let op = wrapping_sub(code, U_FLOAT) / FLOAT_KINDS;
+    let kind = wrapping_sub(code, U_FLOAT) % FLOAT_KINDS;
+    if op == FC_WIDEN || op == FC_NEAREST {
+        // `nearest_float`: an `f32` widens exactly, an `f64` rounds to the
+        // nearest `f32`; `integer_to_float` rounds an integer once.
+        if value.tag == T_F64 {
+            return if kind == FK_F32 {
+                f32_val(nearest_f32(f64_of(value)))
+            } else {
+                value
+            };
+        }
+        if value.tag == T_F32 {
+            return if kind == FK_F64 {
+                f64_val(widen_f64(f32_of(value)))
+            } else {
+                value
+            };
+        }
+        if value.tag > K_I32 {
+            fail(inout machine, "invalid float conversion operand");
+            return undef();
+        }
+        let n = exact(value.tag, value.payload);
+        if n < 0 {
+            let signed = wrapping_i64(n);
+            return if kind == FK_F32 {
+                f32_val(nearest_f32(signed))
+            } else {
+                f64_val(nearest_f64(signed))
+            };
+        }
+        let unsigned = wrapping_u64(n);
+        return if kind == FK_F32 {
+            f32_val(nearest_f32(unsigned))
+        } else {
+            f64_val(nearest_f64(unsigned))
+        };
+    }
+    if op == FC_TO_BITS {
+        // The operand's own bits as the kind's bits integer (u32, u64).
+        if value.tag == T_F64 && kind == FK_F64 {
+            return Val { tag: K_U64, payload: value.payload };
+        }
+        if value.tag == T_F32 && kind == FK_F32 {
+            return Val { tag: K_U32, payload: value.payload };
+        }
+        if is_float(value) {
+            decline(inout machine, "a mismatched float bit reinterpretation", NONE32);
+            return undef();
+        }
+        fail(inout machine, "invalid to_bits operand");
+        return undef();
+    }
+    if value.tag > K_I32 {
+        fail(inout machine, "invalid from_bits operand");
+        return undef();
+    }
+    if kind == FK_F32 {
+        return Val { tag: T_F32, payload: value.payload & F32_BITS };
+    }
+    Val { tag: T_F64, payload: value.payload }
+}
+
+// `unary` (without 128-bit integers).
 fn unary(inout machine: M, code: u64, value: Val, inout failure: u8) -> Val {
     if code == U_NOT && value.tag == T_BOOL {
         return bool_val(value.payload == 0);
     }
+    if code >= U_FLOAT {
+        return float_unary(inout machine, code, value);
+    }
+    if code == U_NEG && value.tag == T_F64 {
+        return Val { tag: T_F64, payload: value.payload ^ F64_SIGN };
+    }
+    if code == U_NEG && value.tag == T_F32 {
+        return Val { tag: T_F32, payload: value.payload ^ F32_SIGN };
+    }
+    if code >= U_CONV && is_float(value) && wrapping_sub(code, U_CONV) / CONV_STRIDE == C_NARROW {
+        // A checked float-to-integer conversion (`float_to_integer_checked`).
+        decline(inout machine, "a float-to-integer conversion", NONE32);
+        return undef();
+    }
     if code >= U_CONV {
-        let family = wrapping_sub(code, U_CONV) / 16;
-        let target_kind = wrapping_u8(wrapping_sub(code, U_CONV) % 16);
+        let family = wrapping_sub(code, U_CONV) / CONV_STRIDE;
+        let target_kind = wrapping_u8(wrapping_sub(code, U_CONV) % CONV_STRIDE);
         if value.tag > K_I32 {
             fail(inout machine, "invalid conversion operand");
             return undef();
@@ -2814,7 +3239,7 @@ fn func(in machine: M, func_index: u64) -> Fi {
 fn param(in machine: M, index: u64) -> Pm {
     match machine.params.try_get(index) {
         Option::Some(found) => found,
-        Option::None => Pm { name: 0, pass: 0 },
+        Option::None => Pm { name: 0, pass: 0, ty: 0 },
     }
 }
 
@@ -2827,6 +3252,30 @@ fn leave(inout machine: M, value: Val) {
     machine.segs.truncate(frame.seg_base);
     machine.ret_value = value;
     machine.control = C_RET;
+}
+
+// `exit_to` of a `return` in a nested body (a handler body or clause):
+// abandons every frame up to the suspended activation of `owner`, which
+// becomes the current one for `leave`.
+fn exit_to(inout machine: M, owner: u32) {
+    loop {
+        let frame = match machine.stack.pop() {
+            Option::Some(popped) => popped,
+            Option::None => {
+                fail_sym(inout machine, "'return' target '", owner, "' is not active");
+                return;
+            },
+        };
+        if frame.kind == FR_IR && func(in machine, frame.func_index).name == owner {
+            machine.frame = frame;
+            return;
+        }
+        if frame.kind == FR_HANDLER {
+            // Its captures, as `clause_frame` releases them.
+            machine.hcap_names.truncate(frame.block);
+            machine.hcap_vals.truncate(frame.block);
+        }
+    }
 }
 
 // Suspends the current activation for a call or `?` (`Frame::IrResume`).
@@ -2918,13 +3367,16 @@ fn invoke_with(inout machine: M, func_index: u64, cap_start: u64, cap_count: u64
                 return;
             }
         } else {
+            let mut value = val_at(in machine.arg_vals, i);
+            // `qualify_value` with the caller's evidence.
+            value = bind_evidence(inout machine, value, param_row.ty, true);
             let cell = machine.cells.len();
-            machine.cells.push(match machine.arg_vals.try_get(i) {
-                Option::Some(value) => value,
-                Option::None => undef(),
-            });
+            machine.cells.push(value);
             slots.push(En { name: param_row.name, cell: cell, seg_start: 0, seg_count: 0 });
         }
+    }
+    if machine.declined {
+        return;
     }
     // `snapshot_environment`: the captures, by value.
     for i in 0..cap_count {
@@ -2955,7 +3407,8 @@ fn invoke_with(inout machine: M, func_index: u64, cap_start: u64, cap_count: u64
             seg_base: seg_base,
             dest: 0,
             ty: 0,
-            kind: FR_IR
+            kind: FR_IR,
+            serial: 0
         };
 }
 
@@ -2967,6 +3420,17 @@ fn call_value(inout machine: M, callee: Val) {
     }
     if callee.tag == T_CLOS {
         call_closure(inout machine, callee);
+        return;
+    }
+    if callee.tag == T_BOUND {
+        let bound = bd_at(in machine, callee.payload);
+        let func_index = fn_index(in machine, bound.callee);
+        if func_index == NONE64 {
+            fail_sym(inout machine, "unknown function '", bound.callee, "'");
+            return;
+        }
+        push_evidence_frame(inout machine, bound.ev_start, bound.ev_count);
+        invoke(inout machine, func_index);
         return;
     }
     if callee.tag == T_FN {
@@ -3002,6 +3466,13 @@ fn step(inout machine: M) {
         if machine.failed {
             return;
         }
+        let owner = n32(machine.program.op(inc(operand_at)));
+        if owner != func(in machine, machine.frame.func_index).name {
+            exit_to(inout machine, owner);
+            if machine.failed {
+                return;
+            }
+        }
         leave(inout machine, value);
         return;
     } else if op == Op::Const {
@@ -3016,6 +3487,8 @@ fn step(inout machine: M) {
             };
         } else if kind == widen_u64(Lit::Bool) {
             result = bool_val(lo != 0);
+        } else if kind == widen_u64(Lit::Float) {
+            result = Val { tag: T_F64, payload: lo };
         } else {
             result = lit_str(inout machine, n32(lo));
         }
@@ -3159,6 +3632,20 @@ fn step(inout machine: M) {
     } else if op == Op::Closure {
         make_closure(inout machine, inst_id, inst);
         return;
+    } else if op == Op::Fip {
+        // `Op::Fip` (a non-`dyn` box): `Data { Box, 0: inner }`.
+        let n = collect_args(inout machine, inc(operand_at));
+        if machine.failed {
+            return;
+        }
+        if n == 0 {
+            fail(inout machine, "Box constructor requires 1 argument");
+            return;
+        }
+        let inner = val_at(in machine.arg_vals, 0);
+        let kid_start = machine.kids.len();
+        push_kid(inout machine, machine.zero_sym, inner);
+        result = make(inout machine, T_DATA, machine.ctx.world.k.box_, kid_start);
     } else if op == Op::Seq {
         let n = collect_args(inout machine, inc(operand_at));
         if machine.failed {
@@ -3209,11 +3696,17 @@ fn step(inout machine: M) {
         if callee_index == NONE64 {
             // An effect operation (`Value::EffectOp`).
             let at = site(in machine, inst_id, SITE_EFFECT_CALL);
+            let region_code = site_word(in machine, add(at, EC_REGION));
+            if region_code != 0 {
+                region_perform(inout machine, at, region_code);
+                return;
+            }
             perform(
                 inout machine,
                 n32(site_word(in machine, add(at, EC_EFFECT))),
                 n32(site_word(in machine, add(at, EC_OP))),
-                site_word(in machine, add(at, EC_KEY))
+                site_word(in machine, add(at, EC_KEY)),
+                site_word(in machine, add(at, EC_LABEL))
             );
             return;
         }
@@ -3357,12 +3850,24 @@ fn terminate(inout machine: M, block: BlockRow) {
 // A returned value meets the top frame (`Control::Return` in `drive`);
 // false when the run is complete.
 fn resume(inout machine: M) -> bool {
-    let frame = match machine.stack.pop() {
+    let mut frame = match machine.stack.pop() {
         Option::Some(popped) => popped,
         Option::None => {
             return false;
         },
     };
+    // An evidence frame is no `Frame`: popping it takes no step.
+    loop {
+        if frame.kind != FR_EVIDENCE {
+            break;
+        }
+        frame = match machine.stack.pop() {
+            Option::Some(popped) => popped,
+            Option::None => {
+                return false;
+            },
+        };
+    }
     if frame.kind == FR_TRY {
         let value = machine.ret_value;
         if value.tag == T_DATA {
@@ -3384,7 +3889,7 @@ fn resume(inout machine: M) -> bool {
                 let payload = kid(in machine, add(aggregate.kid_start, payload_index));
                 machine.arg_vals.clear();
                 machine.arg_vals.push(payload);
-                perform(inout machine, machine.fail_sym, machine.raise_sym, w(frame.dest));
+                perform(inout machine, machine.fail_sym, machine.raise_sym, w(frame.dest), 0);
                 return true;
             }
         }
@@ -3398,6 +3903,7 @@ fn resume(inout machine: M) -> bool {
     }
     if frame.kind == FR_HANDLER {
         let value = machine.ret_value;
+        region_end(inout machine, frame);
         handler_return(inout machine, frame, value);
         return true;
     }
@@ -4348,10 +4854,310 @@ fn closure_tail(in machine: M, at: u64) -> u64 {
     add(add(at, CS_FREE), site_word(in machine, add(at, CS_FREE_COUNT)))
 }
 
+// ----- evidence ----------------------------------------------------------------
+
+// Whether evidence entry `ev` provides instance key `key` (when `key` is
+// not 0) or effect `effect` by name.
+fn ev_provides(in machine: M, ev: Ev, key: u64, effect: u32) -> bool {
+    if key != 0 {
+        return ev.effect == EV_ALL_KEYS && site_word(in machine, add(ev.site, HS_KEY)) == key;
+    }
+    if ev.effect == EV_ALL_KEYS {
+        return site_word(in machine, add(ev.site, HS_EFFECT)) == w(effect);
+    }
+    ev.effect == effect
+}
+
+// The stack index of the live handler with serial `serial`, or NONE64.
+fn live_handler(in machine: M, serial: u64) -> u64 {
+    let mut i = machine.stack.len();
+    loop {
+        if i == 0 {
+            return NONE64;
+        }
+        i = wrapping_sub(i, 1);
+        let frame = stack_at(in machine, i);
+        if frame.kind == FR_HANDLER && frame.serial == serial {
+            return i;
+        }
+    }
+}
+
+// `capability` of instance key `key` (when not 0) or `$effect:<effect>` in
+// the evidence of the top of the stack: the innermost handler providing
+// it, where an evidence frame's entries come before the frames below it.
+// NONE64 when there is none; a handler an entry names that is no longer
+// installed declines.
+fn find_handler(inout machine: M, key: u64, effect: u32) -> u64 {
+    let mut i = machine.stack.len();
+    loop {
+        if i == 0 {
+            return NONE64;
+        }
+        i = wrapping_sub(i, 1);
+        let frame = stack_at(in machine, i);
+        if frame.kind == FR_HANDLER {
+            let provides = if key != 0 {
+                site_word(in machine, add(frame.func_index, HS_KEY)) == key
+            } else {
+                site_word(in machine, add(frame.func_index, HS_EFFECT)) == w(effect)
+            };
+            if provides {
+                return i;
+            }
+        } else if frame.kind == FR_EVIDENCE {
+            for j in frame.block..add(frame.block, frame.ip) {
+                let ev = ev_at(in machine, j);
+                if ev_provides(in machine, ev, key, effect) {
+                    let found = live_handler(in machine, ev.serial);
+                    if found == NONE64 {
+                        decline(inout machine, "evidence of a handler no longer installed", NONE32);
+                    }
+                    return found;
+                }
+            }
+        }
+    }
+}
+
+// `capability` of `$label:<label>` (`label` is the label + 1): the
+// innermost handler installed with that label, where an evidence frame's
+// whole-handler entries come before the frames below it. NONE64 when there
+// is none.
+fn find_labelled(inout machine: M, label: u64) -> u64 {
+    let mut i = machine.stack.len();
+    loop {
+        if i == 0 {
+            return NONE64;
+        }
+        i = wrapping_sub(i, 1);
+        let frame = stack_at(in machine, i);
+        if frame.kind == FR_HANDLER {
+            if site_word(in machine, add(frame.func_index, HS_LABEL)) == label {
+                return i;
+            }
+        } else if frame.kind == FR_EVIDENCE {
+            for j in frame.block..add(frame.block, frame.ip) {
+                let ev = ev_at(in machine, j);
+                if ev.effect == EV_ALL_KEYS
+                    && site_word(in machine, add(ev.site, HS_LABEL)) == label
+                {
+                    let found = live_handler(in machine, ev.serial);
+                    if found == NONE64 {
+                        decline(inout machine, "evidence of a handler no longer installed", NONE32);
+                    }
+                    return found;
+                }
+            }
+        }
+    }
+}
+
+fn ev_at(in machine: M, index: u64) -> Ev {
+    match machine.evs.try_get(index) {
+        Option::Some(found) => found,
+        Option::None => Ev { serial: 0, site: 0, effect: 0 },
+    }
+}
+
+// `evidence_environment` of the top of the stack, appended to `evs`
+// innermost first: every installed handler, and the entries of each
+// evidence frame before the frames below it.
+fn push_evidence(inout machine: M) {
+    let mut i = machine.stack.len();
+    loop {
+        if i == 0 {
+            break;
+        }
+        i = wrapping_sub(i, 1);
+        let frame = stack_at(in machine, i);
+        if frame.kind == FR_HANDLER {
+            machine
+                .evs
+                .push(Ev { serial: frame.serial, site: frame.func_index, effect: EV_ALL_KEYS });
+        } else if frame.kind == FR_EVIDENCE {
+            for j in frame.block..add(frame.block, frame.ip) {
+                let ev = ev_at(in machine, j);
+                machine.evs.push(ev);
+            }
+        }
+    }
+}
+
+// Copies entries `evs[start..start + count]` to the end of `evs`.
+fn copy_evidence(inout machine: M, start: u64, count: u64) {
+    for j in start..add(start, count) {
+        let ev = ev_at(in machine, j);
+        machine.evs.push(ev);
+    }
+}
+
+// Whether label `sym` binds its instance to a lexical handler (`$cap`,
+// `$fncap:`): such an instance names the handler's `$static:` key.
+fn bound_label(in machine: M, sym: u32) -> bool {
+    has_prefix(in machine, sym, "$cap") || has_prefix(in machine, sym, "$fncap:")
+}
+
+// The symbol of `$static:<label>`, or NONE32 when no handler has it.
+fn static_key(in machine: M, label: u32) -> u32 {
+    let mut text: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    put(inout text, "$static:");
+    let text_start = machine.ctx.names.start(label);
+    for i in text_start..machine.ctx.names.end(label) {
+        text.push(u8_at(in machine.ctx.names.text, i));
+    }
+    machine.ctx.names.lookup(in text[0..text.len()])
+}
+
+// `capability` of `$static:` key `key`: the innermost handler with it,
+// through evidence frames as `find_handler`. NONE64 when there is none.
+fn find_static(inout machine: M, key: u32) -> u64 {
+    let mut i = machine.stack.len();
+    loop {
+        if i == 0 {
+            return NONE64;
+        }
+        i = wrapping_sub(i, 1);
+        let frame = stack_at(in machine, i);
+        if frame.kind == FR_HANDLER {
+            if site_word(in machine, add(frame.func_index, HS_STATIC)) == w(key) {
+                return i;
+            }
+        } else if frame.kind == FR_EVIDENCE {
+            for j in frame.block..add(frame.block, frame.ip) {
+                let ev = ev_at(in machine, j);
+                if site_word(in machine, add(ev.site, HS_STATIC)) == w(key) {
+                    let found = live_handler(in machine, ev.serial);
+                    if found == NONE64 {
+                        decline(inout machine, "evidence of a handler no longer installed", NONE32);
+                    }
+                    return found;
+                }
+            }
+        }
+    }
+}
+
+// Appends the evidence `bind_callable_evidence` gives a callable of
+// function type `ty`: per effect instance, its `$cap`/`$fncap:` handler,
+// and with `ambient` evidence (a call's parameter) the caller's handler
+// of each other instance, or all of them for an open row.
+fn push_bound(inout machine: M, ty: u32, ambient: bool) {
+    let node = machine.ctx.types.node(ty);
+    if node.kind != TyKind::Fn {
+        return;
+    }
+    let row = machine.ctx.types.row(node.r2);
+    for i in 0..w(row.n) {
+        let effect_node = machine.ctx.types.effect_at(add(w(row.a), i));
+        let bound = effect_node.label != 0
+            && bound_label(in machine, wrapping_sub(effect_node.label, 1));
+        let mut found = NONE64;
+        if bound {
+            let key = static_key(in machine, wrapping_sub(effect_node.label, 1));
+            if key != NONE32 {
+                found = find_static(inout machine, key);
+            }
+        } else if ambient {
+            found = find_handler(inout machine, 0, effect_node.name);
+        }
+        if found != NONE64 {
+            let handler = stack_at(in machine, found);
+            machine.evs.push(Ev {
+                serial: handler.serial,
+                site: handler.func_index,
+                effect: effect_node.name
+            });
+        }
+    }
+    if ambient && row.tail != 0 {
+        push_evidence(inout machine);
+    }
+}
+
+// `qualify_value` of a callable at function type `ty`: its evidence from
+// `push_bound`. A closure keeps the evidence it captured first, a bound
+// function its earlier evidence (`or_insert`, `extend`).
+fn bind_evidence(inout machine: M, value: Val, ty: u32, ambient: bool) -> Val {
+    if value.tag != T_FN && value.tag != T_CLOS && value.tag != T_BOUND {
+        return value;
+    }
+    let node = machine.ctx.types.node(ty);
+    if node.kind != TyKind::Fn {
+        return value;
+    }
+    let row = machine.ctx.types.row(node.r2);
+    if row.n == 0 && row.tail == 0 {
+        return value;
+    }
+    if !ambient {
+        let mut any_bound = false;
+        for i in 0..w(row.n) {
+            let label = machine.ctx.types.effect_at(add(w(row.a), i)).label;
+            if label != 0 && bound_label(in machine, wrapping_sub(label, 1)) {
+                any_bound = true;
+            }
+        }
+        if !any_bound {
+            return value;
+        }
+    }
+    let start = machine.evs.len();
+    let mut callee = n32(value.payload);
+    if value.tag == T_CLOS {
+        let closure = cl_at(in machine, value.payload);
+        copy_evidence(inout machine, closure.ev_start, closure.ev_count);
+    } else if value.tag == T_BOUND {
+        let bound = bd_at(in machine, value.payload);
+        callee = bound.callee;
+        copy_evidence(inout machine, bound.ev_start, bound.ev_count);
+    }
+    let fresh = machine.evs.len();
+    push_bound(inout machine, ty, ambient);
+    if machine.evs.len() == fresh {
+        machine.evs.truncate(start);
+        return value;
+    }
+    let count = wrapping_sub(machine.evs.len(), start);
+    if value.tag == T_CLOS {
+        let closure = cl_at(in machine, value.payload);
+        let id = machine.closures.len();
+        machine.closures.push(Cl {
+            site: closure.site,
+            cap_start: closure.cap_start,
+            cap_count: closure.cap_count,
+            ev_start: start,
+            ev_count: count
+        });
+        return Val { tag: T_CLOS, payload: id };
+    }
+    let id = machine.bounds.len();
+    machine.bounds.push(Bd { callee: callee, ev_start: start, ev_count: count });
+    Val { tag: T_BOUND, payload: id }
+}
+
+fn bd_at(in machine: M, id: u64) -> Bd {
+    match machine.bounds.try_get(id) {
+        Option::Some(found) => found,
+        Option::None => Bd { callee: 0, ev_start: 0, ev_count: 0 },
+    }
+}
+
+// Pushes an evidence frame over `evs[start..start + count]` for a call.
+fn push_evidence_frame(inout machine: M, start: u64, count: u64) {
+    if count == 0 {
+        return;
+    }
+    let mut frame = fr_zero();
+    frame.kind = FR_EVIDENCE;
+    frame.block = start;
+    frame.ip = count;
+    machine.stack.push(frame);
+}
 fn cl_at(in machine: M, id: u64) -> Cl {
     match machine.closures.try_get(id) {
         Option::Some(found) => found,
-        Option::None => Cl { site: 0, cap_start: 0, cap_count: 0 },
+        Option::None => Cl { site: 0, cap_start: 0, cap_count: 0, ev_start: 0, ev_count: 0 },
     }
 }
 
@@ -4393,11 +5199,18 @@ fn make_closure(inout machine: M, inst_id: u64, inst: InstRow) {
             }
         }
     }
+    // The evidence it was made under (`$effect:` keys of its environment),
+    // after the handler each `$cap` instance of its type names.
+    let ev_start = machine.evs.len();
+    push_bound(inout machine, inst.ty, false);
+    push_evidence(inout machine);
     let id = machine.closures.len();
     machine.closures.push(Cl {
         site: at,
         cap_start: cap_start,
-        cap_count: wrapping_sub(machine.clos_names.len(), cap_start)
+        cap_count: wrapping_sub(machine.clos_names.len(), cap_start),
+        ev_start: ev_start,
+        ev_count: wrapping_sub(machine.evs.len(), ev_start)
     });
     suspend(inout machine, inst.dest, inst.ty);
     machine.ret_value = Val { tag: T_CLOS, payload: id };
@@ -4414,5 +5227,443 @@ fn call_closure(inout machine: M, callee: Val) {
         return;
     }
     let body = site_fn(in machine, site_word(in machine, add(tail, CT_BODY)));
+    push_evidence_frame(inout machine, closure.ev_start, closure.ev_count);
     invoke_with(inout machine, body, closure.cap_start, closure.cap_count, true);
+}
+
+// ----- regions -----------------------------------------------------------------
+//
+// Region blocks (src/regions/eval.rs over src/regions/store.rs): a block's
+// region opens on its first operation, keyed by its handler's serial, and
+// closes when the handler returns. Each one is an @vesper/alloc `Book` of
+// one chunk bounded by the block's capacity, as `store::config` sets up
+// `vesper_alloc::Region`; payloads are machine values beside their byte
+// allocations (`vesper.region.accounting/1`).
+
+// `regions::OPERATIONS` codes (index + 1), as run_words.rs writes them.
+const RO_BOX: u64 = 1;
+const RO_GET: u64 = 2;
+const RO_SET: u64 = 3;
+const RO_TAKE: u64 = 4;
+const RO_CHECKPOINT: u64 = 5;
+const RO_REWIND: u64 = 6;
+const RO_COMMIT: u64 = 7;
+const RO_USED: u64 = 8;
+// `store::MAX_ALLOCATIONS`, `store::MAX_CHECKPOINTS` and `store::SLOT_ALIGN`.
+const REGION_MAX_ALLOCATIONS: u64 = 1048576;
+const REGION_MAX_CHECKPOINTS: u64 = 256;
+const SLOT_ALIGN: u64 = 8;
+// The book's slot kind of a byte allocation (`KIND_BYTES` in the crate).
+const KIND_BYTES: u64 = 0;
+// The address the book is given for a block's chunk: the machine keeps no
+// payload bytes, so any nonzero base aligned for every chunk will do.
+const REGION_CHUNK_BASE: u64 = 4096;
+
+// A box: its region, its book slot and serial, its payload and whether it
+// is still there (`Boxed` in a block's table).
+copy struct Rb {
+    region: u64,
+    slot: u64,
+    serial: u64,
+    value: Val,
+    present: bool,
+}
+
+// A watermark: its region, its book serial and whether it was not yet
+// rewound or committed.
+copy struct Rm {
+    region: u64,
+    serial: u64,
+    present: bool,
+}
+
+// `store::slot_bytes`: the bytes a payload of layout size `size` occupies.
+fn slot_bytes(size: u64) -> u64 {
+    let slots = add(size, wrapping_sub(SLOT_ALIGN, 1)) / SLOT_ALIGN;
+    wrapping_mul(if slots == 0 { 1 } else { slots }, SLOT_ALIGN)
+}
+
+// The index of region `id`'s book in `books`, or NONE64 when it is not open.
+fn book_of(in machine: M, id: u64) -> u64 {
+    for i in 0..machine.book_ids.len() {
+        if u64_at(in machine.book_ids, i) == id {
+            return i;
+        }
+    }
+    NONE64
+}
+
+// Moves book `index` (and its id) to the end of `books`.
+fn lift_book(inout machine: M, index: u64) {
+    let last = wrapping_sub(machine.books.len(), 1);
+    if index >= last {
+        return;
+    }
+    let mut above: ChunkSeq[Book] = ChunkSeq::new[Book]();
+    for i in index..last {
+        match machine.books.pop() {
+            Option::Some(book) => above.push(book),
+            Option::None => {},
+        }
+    }
+    let target = match machine.books.pop() {
+        Option::Some(book) => book,
+        Option::None => {
+            return;
+        },
+    };
+    loop {
+        match above.pop() {
+            Option::Some(book) => machine.books.push(book),
+            Option::None => {
+                break;
+            },
+        }
+    }
+    machine.books.push(target);
+    let id = u64_at(in machine.book_ids, index);
+    for i in index..last {
+        let ok = machine.book_ids.try_set(i, u64_at(in machine.book_ids, inc(i)));
+    }
+    let ok = machine.book_ids.try_set(last, id);
+}
+
+// `Regions::open`: the book of a block of `capacity` bytes (`store::config`).
+fn region_open(inout machine: M, id: u64, capacity: u64) {
+    machine.books.push(book_new(Cfg {
+        initial: capacity,
+        max_chunk: capacity,
+        max_reserved: capacity,
+        max_align: SLOT_ALIGN,
+        max_allocations: REGION_MAX_ALLOCATIONS,
+        max_checkpoints: REGION_MAX_CHECKPOINTS,
+        retained: capacity
+    }));
+    machine.book_ids.push(id);
+}
+
+// `region_end`: a region block's handler returned, so its region closes.
+fn region_end(inout machine: M, handler: Fr) {
+    if site_word(in machine, add(handler.func_index, HS_REGION)) == 0 {
+        return;
+    }
+    let index = book_of(in machine, handler.serial);
+    if index == NONE64 {
+        return;
+    }
+    lift_book(inout machine, index);
+    match machine.books.pop() {
+        Option::Some(book) => {},
+        Option::None => {},
+    }
+    machine.book_ids.truncate(wrapping_sub(machine.book_ids.len(), 1));
+}
+
+// `{e:?}` of the `AllocError` (or, from `checkpoint`, the `RegionError`) a
+// book fault stands for (`port::region_error`).
+fn put_fault(inout out: ChunkSeq[u8], f: Fault, from_checkpoint: bool) {
+    match f {
+        Fault::InvalidAlignment(align) => {
+            put(inout out, "InvalidAlignment { align: ");
+            push_decimal(inout out, align);
+            put(inout out, " }");
+        },
+        Fault::AlignmentTooLarge { align, max } => {
+            put(inout out, "AlignmentTooLarge { align: ");
+            push_decimal(inout out, align);
+            put(inout out, ", max: ");
+            push_decimal(inout out, max);
+            put(inout out, " }");
+        },
+        Fault::CapacityExceeded { requested, reserved, limit } => {
+            put(inout out, "CapacityExceeded { requested: ");
+            push_decimal(inout out, requested);
+            put(inout out, ", reserved: ");
+            push_decimal(inout out, reserved);
+            put(inout out, ", limit: ");
+            push_decimal(inout out, limit);
+            put(inout out, " }");
+        },
+        Fault::TooManyAllocations(limit) => {
+            put(inout out, "TooManyAllocations { limit: ");
+            push_decimal(inout out, limit);
+            put(inout out, " }");
+        },
+        Fault::TooManyCheckpoints(limit) => {
+            put(inout out, "TooManyCheckpoints { limit: ");
+            push_decimal(inout out, limit);
+            put(inout out, " }");
+        },
+        Fault::ExhaustedSerials => {
+            if from_checkpoint {
+                put(inout out, "Alloc(ExhaustedSerials)");
+            } else {
+                put(inout out, "ExhaustedSerials");
+            }
+        },
+        // `alloc_error` of any other fault.
+        _ => put(inout out, "SizeOverflow"),
+    }
+}
+
+// A region fault ends the run (`RegionFault` as an error string).
+fn region_fail(inout machine: M, in prefix: Str, f: Fault, from_checkpoint: bool) {
+    if machine.failed {
+        return;
+    }
+    machine.failed = true;
+    machine.message.clear();
+    put(inout machine.message, prefix);
+    put_fault(inout machine.message, f, from_checkpoint);
+}
+
+// A `RegionBox` or `Watermark` handle (`eval::handle`).
+fn region_handle(inout machine: M, ty: u32, id: u64, index: u64) -> Val {
+    let kid_start = machine.kids.len();
+    push_kid(inout machine, machine.index_field_sym, u64_val(index));
+    push_kid(inout machine, machine.region_sym, u64_val(id));
+    make(inout machine, T_DATA, ty, kid_start)
+}
+
+// `eval::handle_index`: the index a handle of type `ty` in region `id`
+// names, or NONE64 after failing.
+fn region_index(inout machine: M, value: Val, ty: u32, id: u64) -> u64 {
+    let aggregate = agg(in machine, value);
+    if value.tag != T_DATA || aggregate.ctor != ty {
+        fail(inout machine, "region operation expects a ");
+        put_sym(inout machine.message, in machine.ctx.names, ty);
+        return NONE64;
+    }
+    let region_at = field_index(in machine, aggregate, machine.region_sym);
+    let index_at = field_index(in machine, aggregate, machine.index_field_sym);
+    if region_at == NONE64 || index_at == NONE64 {
+        fail(inout machine, "malformed region handle");
+        return NONE64;
+    }
+    let region = kid(in machine, add(aggregate.kid_start, region_at));
+    let index = kid(in machine, add(aggregate.kid_start, index_at));
+    if region.tag != K_U64 || index.tag != K_U64 {
+        fail(inout machine, "malformed region handle");
+        return NONE64;
+    }
+    if region.payload != id {
+        fail(inout machine, "region handle belongs to another region");
+        return NONE64;
+    }
+    index.payload
+}
+
+fn rb_at(in machine: M, index: u64) -> Rb {
+    match machine.rboxes.try_get(index) {
+        Option::Some(found) => found,
+        Option::None => Rb { region: 0, slot: 0, serial: 0, value: undef(), present: false },
+    }
+}
+
+fn rm_at(in machine: M, index: u64) -> Rm {
+    match machine.rmarks.try_get(index) {
+        Option::Some(found) => found,
+        Option::None => Rm { region: 0, serial: 0, present: false },
+    }
+}
+
+// `Regions::boxed`: whether box `index` of region `id` still holds its
+// bytes, after failing with the fault when it does not.
+fn region_boxed(inout machine: M, in book: Book, id: u64, index: u64) -> bool {
+    let boxed = rb_at(in machine, index);
+    if index >= machine.rboxes.len() || boxed.region != id {
+        fail(inout machine, "region handle does not belong to this region");
+        return false;
+    }
+    let live = boxed.present && match book_view(in book, boxed.slot, boxed.serial, KIND_BYTES) {
+        Result::Ok(view) => true,
+        Result::Err(f) => false,
+    };
+    if !live {
+        fail(inout machine, "region handle is stale (rewound, reset or moved out)");
+    }
+    live
+}
+
+// `Regions::mark`: takes watermark `index` of region `id` out of its table;
+// its book serial, or NONE64 after failing.
+fn region_mark(inout machine: M, id: u64, index: u64) -> u64 {
+    let mark = rm_at(in machine, index);
+    if index >= machine.rmarks.len() || mark.region != id || !mark.present {
+        fail(inout machine, "region handle does not belong to this region");
+        return NONE64;
+    }
+    let mut taken = mark;
+    taken.present = false;
+    let ok = machine.rmarks.try_set(index, taken);
+    mark.serial
+}
+
+// `region_perform`: operation `code` of the region effect call at site
+// `at`, on the region block its capability names; the value returns to the
+// suspended caller.
+fn region_perform(inout machine: M, at: u64, code: u64) {
+    let found = find_target(
+        inout machine,
+        n32(site_word(in machine, add(at, EC_EFFECT))),
+        site_word(in machine, add(at, EC_KEY)),
+        site_word(in machine, add(at, EC_LABEL))
+    );
+    if machine.declined {
+        return;
+    }
+    if found == NONE64 {
+        fail(inout machine, "region capability is not active");
+        return;
+    }
+    let handler = stack_at(in machine, found);
+    let id = handler.serial;
+    let mut index = book_of(in machine, id);
+    if index == NONE64 {
+        let capacity = site_word(in machine, add(handler.func_index, HS_REGION));
+        if capacity == 0 {
+            fail(inout machine, "region capability is no longer active");
+            return;
+        }
+        region_open(inout machine, id, capacity);
+        index = wrapping_sub(machine.books.len(), 1);
+    }
+    lift_book(inout machine, index);
+    let mut book = match machine.books.pop() {
+        Option::Some(found_book) => found_book,
+        Option::None => {
+            fail(inout machine, "region capability is no longer active");
+            return;
+        },
+    };
+    let value = region_op(inout machine, inout book, at, code, id);
+    machine.books.push(book);
+    if machine.failed || machine.declined {
+        return;
+    }
+    machine.ret_value = value;
+    machine.control = C_RET;
+}
+
+fn region_op(inout machine: M, inout book: Book, at: u64, code: u64, id: u64) -> Val {
+    let arg = val_at(in machine.arg_vals, 0);
+    let box_sym = machine.ctx.world.k.region_box;
+    let mark_sym = machine.ctx.world.k.watermark;
+    if code == RO_BOX {
+        let payload = site_word(in machine, add(at, EC_PAYLOAD));
+        if payload == 0 {
+            decline(inout machine, "a region payload whose type does not fix its size", NONE32);
+            return unit();
+        }
+        let bytes = slot_bytes(wrapping_sub(payload, 1));
+        let mut placed = book_alloc(inout book, bytes, SLOT_ALIGN, KIND_BYTES, 0, false, 0, 0);
+        match placed {
+            Placed::Need { cap, align } => {
+                placed = book_alloc(
+                    inout book,
+                    bytes,
+                    SLOT_ALIGN,
+                    KIND_BYTES,
+                    0,
+                    false,
+                    REGION_CHUNK_BASE,
+                    cap
+                );
+            },
+            _ => {},
+        }
+        match placed {
+            Placed::Done { slot, serial, addr, pending } => {
+                let index = machine.rboxes.len();
+                machine.rboxes.push(Rb {
+                    region: id,
+                    slot: slot,
+                    serial: serial,
+                    value: arg,
+                    present: true
+                });
+                return region_handle(inout machine, box_sym, id, index);
+            },
+            // A second chunk request (`placed`'s `SizeOverflow`).
+            Placed::Need { cap, align } => region_fail(
+                inout machine,
+                "region bound exhausted: ",
+                Fault::SizeOverflow,
+                false
+            ),
+            Placed::Fail(f) => region_fail(inout machine, "region bound exhausted: ", f, false),
+        }
+        return unit();
+    }
+    if code == RO_GET || code == RO_SET || code == RO_TAKE {
+        let index = region_index(inout machine, arg, box_sym, id);
+        if index == NONE64 || !region_boxed(inout machine, in book, id, index) {
+            return unit();
+        }
+        let mut boxed = rb_at(in machine, index);
+        if code == RO_GET {
+            return boxed.value;
+        }
+        if code == RO_SET {
+            boxed.value = val_at(in machine.arg_vals, 1);
+            let ok = machine.rboxes.try_set(index, boxed);
+            return unit();
+        }
+        boxed.present = false;
+        let ok = machine.rboxes.try_set(index, boxed);
+        match book_release(inout book, boxed.slot, boxed.serial) {
+            Result::Ok(n) => {},
+            Result::Err(f) => fail(
+                inout machine,
+                "region handle is stale (rewound, reset or moved out)"
+            ),
+        }
+        return boxed.value;
+    }
+    if code == RO_CHECKPOINT {
+        match book_checkpoint(inout book) {
+            Result::Ok(serial) => {
+                let index = machine.rmarks.len();
+                machine.rmarks.push(Rm { region: id, serial: serial, present: true });
+                return region_handle(inout machine, mark_sym, id, index);
+            },
+            Result::Err(f) => region_fail(inout machine, "region bound exhausted: ", f, true),
+        }
+        return unit();
+    }
+    if code == RO_REWIND || code == RO_COMMIT {
+        let index = region_index(inout machine, arg, mark_sym, id);
+        if index == NONE64 {
+            return unit();
+        }
+        let serial = region_mark(inout machine, id, index);
+        if serial == NONE64 {
+            return unit();
+        }
+        let done = if code == RO_REWIND {
+            book_rewind(inout book, serial)
+        } else {
+            book_commit(inout book, serial)
+        };
+        match done {
+            Result::Ok(n) => {},
+            Result::Err(f) => match f {
+                Fault::Linear(count) => {
+                    if !machine.failed {
+                        machine.failed = true;
+                        machine.message.clear();
+                        push_decimal(inout machine.message, count);
+                        put(inout machine.message, " linear region payload(s) are still live");
+                    }
+                },
+                _ => fail(inout machine, "region handle is stale (rewound, reset or moved out)"),
+            },
+        }
+        return unit();
+    }
+    if code == RO_USED {
+        return u64_val(book_stats(in book).used);
+    }
+    fail(inout machine, "unknown region operation");
+    unit()
 }

@@ -1068,9 +1068,9 @@ fn modules_match_rust_on_test_sources() {
 /// ABBA timing of the whole module over the corpus (`CHECK_HARNESS_SPEED=1
 /// cargo test --release --test self_host_lean_extract abba_module --
 /// --ignored --nocapture`). Rust lowers the world and each lifted closure
-/// inside `extract_report`, so the Vesper side pays for [`lift`] too. The
-/// word encoding is the test harness's (a Vesper front end hands the words
-/// over directly), so it is timed and printed apart.
+/// inside `extract_report`, so the Vesper side pays for [`lift`] too, and
+/// for the word encoding, as the hybrid's `lean_extract` swap does; the
+/// parts are timed and printed apart as well.
 #[test]
 #[ignore]
 fn abba_module() {
@@ -1105,8 +1105,10 @@ fn abba_module() {
     eprintln!(
         "lean module: encoding {encode:?} (lowering and lifting {lifting:?}), extraction {run:?}"
     );
+    // The swap's whole path, the flip gate's workload: it lowers and lifts
+    // (inside `cfg_input_full`), encodes and runs the Vesper module.
     abba(
-        "lean module",
+        "lean module encoded",
         &mut || {
             time(|| {
                 for w in &worlds {
@@ -1116,9 +1118,9 @@ fn abba_module() {
         },
         &mut || {
             time(|| {
-                for (w, input) in worlds.iter().zip(&inputs) {
-                    std::hint::black_box(lift(w));
-                    std::hint::black_box(e.text(input));
+                for w in &worlds {
+                    let input = cfg_input_full(w, true, true).unwrap();
+                    std::hint::black_box(e.text(&input));
                 }
             })
         },

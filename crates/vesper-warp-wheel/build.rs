@@ -9,7 +9,6 @@
 //! file either: `vesper fmt` refuses sources over 8192 tokens.
 
 /// The files of the port, in order.
-#[cfg(feature = "vesper-port")]
 const PARTS: &[&str] = &[
     "types",
     "util",
@@ -23,27 +22,24 @@ const PARTS: &[&str] = &[
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
-    #[cfg(feature = "vesper-port")]
-    {
-        let mut source = String::new();
-        for part in PARTS {
-            let path = format!("vesper/src/{part}.ves");
-            println!("cargo:rerun-if-changed={path}");
-            source.push_str(&std::fs::read_to_string(&path).expect("read a port file"));
-            source.push('\n');
-        }
-        let out = std::path::PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR"));
-        let joined = out.join("wheel.ves");
-        std::fs::write(&joined, source).expect("write the joined port");
-        let port = vesper_port_harness::Port::new("wheel", &joined)
-            .binding("port/binding.rs")
-            .rust_types("crate");
-        #[cfg(feature = "vesper-port-divergent")]
-        let port = DIVERGENT_EDITS
-            .iter()
-            .fold(port, |port, (from, to)| port.edit(from, to));
-        port.build();
+    let mut source = String::new();
+    for part in PARTS {
+        let path = format!("vesper/src/{part}.ves");
+        println!("cargo:rerun-if-changed={path}");
+        source.push_str(&std::fs::read_to_string(&path).expect("read a port file"));
+        source.push('\n');
     }
+    let out = std::path::PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR"));
+    let joined = out.join("wheel.ves");
+    std::fs::write(&joined, source).expect("write the joined port");
+    let port = vesper_port_harness::Port::new("wheel", &joined)
+        .binding("port/binding.rs")
+        .rust_types("crate");
+    #[cfg(feature = "vesper-port-divergent")]
+    let port = DIVERGENT_EDITS
+        .iter()
+        .fold(port, |port, (from, to)| port.edit(from, to));
+    port.build();
 }
 
 /// One deliberate bug per ported module (mirrored in BUILD.bazel). Each

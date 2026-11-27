@@ -159,8 +159,8 @@ to.
    first: the native walk and the CLIF passes (`native`, `native_clif_opt`,
    `native_cold_outline`, `native_vectorize`; #1509, #1829); the front-end
    modules not yet swapped (`check`, `trace_effects`, `dyn_*`, `regions`,
-   `pact_frontend`, `forge_frontend`); `loops` and `atomics` (2.31x) and
-   `stack_bound` (2.54x), above the bar; `lsp`, `tooling`, `database`
+   `pact_frontend`, `forge_frontend`); `loops` and `atomics` (0.69x,
+   not yet swapped); `lsp`, `tooling`, `database`
    (#1828); `test_runner`, `anvil_*`, `doctest`; `lean*`,
    `verify_commands`, `proof_commands` (#1341); `ffi_lowering`, `tiled`,
    `vector`, `native_vector` (#1830); `native_session`, `native_aggregates`;
@@ -307,6 +307,7 @@ the Rust lines deleted.
 | `effects` (PASS; compiler module, `src/capability_effects.rs` goes at the retirement) | SH2-8 | 0 differences; tests 1/1 pass | effects-with-encoding 0.32x [0.31x, 0.33x] n=12 | 0 (2,535 at the retirement) | #2207 |
 | `ebpf` (PASS; compiler module, `src/ebpf_backend*` goes at the retirement) | SH4-16 | 0 differences; tests 1/1 pass | ebpf-with-encoding 1.09x [1.03x, 1.16x] n=12 | 0 (2,336 at the retirement) | #2207 |
 | `doc` (PASS; compiler module, the renderers of `crates/vesper-doc` go at the retirement) | SH5-15 | 0 differences; tests 1/1 pass | render 0.94x [0.93x, 0.97x] n=12 | 0 (1,969 at the retirement) | #2207 |
+| `tensor-check` (PASS; compiler module: the swap answers the diagnostics, while `analyze` for an accepted module and `wire::check` still run in Rust; `src/tensor_types` goes at the retirement) | SH2-14 | 0 differences on 1,518 cases; tests 1/1 pass | all 0.99x [0.96x, 1.08x] n=12; tensor 0.88x [0.81x, 0.91x] n=12 | 0 (5,084 at the retirement) | #2289 |
 | `wit-component` (PASS; compiler module, `src/wasm_backend/component.rs` and the wit-component dependency go at the retirement) | SH5-11 | 0 differences on 1,383 cases; tests 1/1 pass | wrap 0.05x [0.05x, 0.05x] n=12; build 0.67x [0.65x, 0.68x] n=12 | 0 (933 at the retirement) | #1334 flip |
 | `vesper-aether` virtqueue walks (PASS) | SH6-14 | 0 differences; tests 2/2 pass | virtqueue 1.44x [1.36x, 1.47x] n=30 | 331 (now the tests' reference) | #1494 |
 | `native-walk` (PASS; compiler module, the walk's planning in `src/native.rs` and `src/native_export.rs` goes at the retirement) | G1-11 | 0 differences on 978 cases; tests 1/1 pass | entries 1.00x [0.98x, 1.03x] n=12; exports 0.99x [0.93x, 1.03x] n=12 | 0 | #2056 |
@@ -317,3 +318,6 @@ the Rust lines deleted.
 | `test-mutants` (PASS; compiler module, `src/test_mutants.rs` goes at the retirement) | SH5-14 | 0 differences; tests 1/1 pass | sites 0.53x [0.53x, 0.54x] n=12 | 0 (283 at the retirement) | #2207 |
 | `sugar` (PASS; compiler module, `crates/vesper-syntax/src/sugar_expand*.rs` goes at the retirement) | SH1-14 | 0 differences on 3,872 cases; tests 1/1 pass | expand 1.33x [1.28x, 1.36x] n=12 | 0 (3,282 at the retirement) | #1157 part 7 |
 | `verified-codegen` (PASS; compiler module, `src/verified_codegen` goes at the retirement) | SH6-2 | 0 differences on 4,724 cases; tests 1/1 pass | compile 1.02x [0.97x, 1.05x] n=12 | 0 (9,760 at the retirement) | #1886 |
+| `stack-bound` (PASS; compiler module, `src/stack_bound.rs` goes at the retirement) | SH2-10 | 0 differences; tests 6/6 pass | hybrid path 1.20x [1.18x, 1.26x] n=12 | 0 (at the retirement) | #2359 |
+| `parse` (PASS; compiler module, `crates/vesper-syntax/src/parser.rs` goes at the retirement) | SH1-12 | 0 differences; tests pass | parse 0.23x n=12 | 0 (at the retirement) | #2389 |
+| `test-discovery` (PASS; compiler module, `src/test_discovery.rs` goes at the retirement) | SH5-14 | 0 differences; tests pass | test-discovery 1.26x n=12 | 0 (at the retirement) | #2453 |

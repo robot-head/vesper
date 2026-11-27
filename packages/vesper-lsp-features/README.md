@@ -52,7 +52,13 @@ under the 1.5x bar, and part 2 adds hover and the documentation links:
 - the recovery gate (`lsp_recovery_gate`, `recovery.ves`): the checks of
   `src/tooling/recovery.rs` `analyze` before any complete item is parsed
   (limits, source identity, syntax diagnostic bound, declaration, site and
-  token census), over the words of `recovery::gate_words`, part 12a (#1828).
+  token census), over the words of `recovery::gate_words`, part 12a (#1828);
+- the checked signature snapshot (`lsp_signature`, `signature.ves`):
+  `signature_snapshot` and `extract_signature` of `src/database.rs` over the
+  world headers of `database::signature_words`, part 12b (#1828);
+- the lint preflight (`lsp_lint_preflight`, `lint_preflight.ves`): the
+  lexical budgets of `src/tooling/lint.rs` `preflight` over the source
+  words of `lint::preflight_words`, part 13a (#1828).
 
 The session's parameter checks (`validate_input`, `cancel_params` and the
 `vesper.proofAudit` arguments, part 10b of #1828) read the JSON-RPC token

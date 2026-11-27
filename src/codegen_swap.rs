@@ -1256,14 +1256,31 @@ pub mod body {
     /// returns a status word beside its value (`FnAbi::status`),
     /// `locations` 1 when instructions carry their source locations
     /// (`CodegenOptions::source_locations`), the variables in parameter
-    /// order, and for each `Op::Call` of the body in instruction order the
+    /// order (a `fail_only` function's failure record last, counted in `n`),
+    /// and for each `Op::Call` of the body in instruction order the
     /// `FuncId` the walk would call directly with nothing else around the
-    /// call (part 6b), or [`NO_CALLEE`]. No result.
+    /// call (part 6b), or [`NO_CALLEE`]; then `sret, h, h values`: the
+    /// result pointer's value word, or [`NO_VALUE`] for a function that
+    /// returns its value, and the values (by index in the graph's values)
+    /// that `aggregates::plan` builds in it (#2411). No result.
     pub const FUNCTION: u32 = 1;
+
+    /// A [`FUNCTION`] request's `sret` word when the function has no result
+    /// pointer.
+    pub const NO_VALUE: u64 = u64::MAX;
 
     /// A call [`FUNCTION`]'s hook cannot emit as one direct `call`: the
     /// hook declines the body.
     pub const NO_CALLEE: u64 = u64::MAX;
+
+    /// A callee word's flag for a `fail_only` callee (#2425): the call
+    /// passes a failure record after the arguments and raises the
+    /// callee's failure again. The low 32 bits are the `FuncId`.
+    pub const FAIL_CALL: u64 = 1 << 32;
+
+    /// With [`FAIL_CALL`]: the callee returns its status word in a register
+    /// (`FnAbi::status`) instead of storing a tag in the record.
+    pub const STATUS_CALL: u64 = 1 << 33;
 
     /// [`FUNCTION`]'s leading flags, `status` and `locations`: the words
     /// before the parameter count.
@@ -1273,12 +1290,23 @@ pub mod body {
     /// parameters and the callee count), or `None` when the arguments do
     /// not have that layout.
     pub fn callees(args: &[u64]) -> Option<&[u64]> {
+        layout(args).map(|(callees, _, _)| callees)
+    }
+
+    /// A [`FUNCTION`] request's callees, `sret` word and result homes, or
+    /// `None` when the arguments do not have that layout.
+    pub fn layout(args: &[u64]) -> Option<(&[u64], u64, &[u64])> {
         let params = usize::try_from(*args.get(FLAGS)?).ok()?;
         // The parameter count, then the parameter variables.
         let count_at = FLAGS + 1 + params;
         let count = usize::try_from(*args.get(count_at)?).ok()?;
-        args.get(count_at + 1..)
-            .filter(|callees| callees.len() == count)
+        let sret_at = count_at + 1 + count;
+        let callees = args.get(count_at + 1..sret_at)?;
+        let sret = *args.get(sret_at)?;
+        let homes = usize::try_from(*args.get(sret_at + 1)?).ok()?;
+        args.get(sret_at + 2..)
+            .filter(|rest| rest.len() == homes)
+            .map(|rest| (callees, sret, rest))
     }
 }
 

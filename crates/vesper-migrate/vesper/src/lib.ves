@@ -1,0 +1,1743 @@
+// @vesper/migrate: C header comment stripper and preprocessor directive filter
+// for vesper-migrate (Rust-exit SH6 lane 18, #1413 / #2333).
+//
+// Both entry points operate over zero-copy `in src: Slice[u8]` and
+// `inout out: Slice[u8]` (caller provides `out.len() >= src.len()`), packing
+// `(status << 32) | payload` where `payload` is `out_len` on `STATUS_OK` or
+// the 1-based line number (0 for EOF) on error.
+
+const STATUS_SHIFT: u64 = 32;
+
+// Status codes for `migrate_strip_comments`.
+const STRIP_OK: u64 = 0;
+const STRIP_UNTERMINATED_BLOCK: u64 = 1;
+const STRIP_UNTERMINATED_LIT: u64 = 2;
+
+// Status codes for `migrate_filter_directives`.
+const FILTER_OK: u64 = 0;
+const FILTER_LINE_CONTINUATION: u64 = 1;
+const FILTER_BAD_INCLUDE: u64 = 2;
+const FILTER_BAD_DEFINE: u64 = 3;
+const FILTER_UNMATCHED_ENDIF: u64 = 4;
+const FILTER_UNSUPPORTED_DIRECTIVE: u64 = 5;
+const FILTER_UNTERMINATED_COND: u64 = 6;
+
+// ASCII byte constants.
+const BYTE_TAB: u8 = 9;
+const BYTE_LF: u8 = 10;
+const BYTE_VT: u8 = 11;
+const BYTE_FF: u8 = 12;
+const BYTE_CR: u8 = 13;
+const BYTE_SPACE: u8 = 32;
+const BYTE_QUOTE: u8 = 34;
+const BYTE_HASH: u8 = 35;
+const BYTE_APOS: u8 = 39;
+const BYTE_STAR: u8 = 42;
+const BYTE_SLASH: u8 = 47;
+const BYTE_ZERO: u8 = 48;
+const BYTE_NINE: u8 = 57;
+const BYTE_UPPER_A: u8 = 65;
+const BYTE_UPPER_Z: u8 = 90;
+const BYTE_BACKSLASH: u8 = 92;
+const BYTE_UNDERSCORE: u8 = 95;
+const BYTE_LOWER_A: u8 = 97;
+const BYTE_LOWER_Z: u8 = 122;
+
+// Conditional stack tags.
+const COND_GUARD: u8 = 1;
+const COND_CPLUSPLUS: u8 = 2;
+
+fn pack(status: u64, payload: u64) -> u64 {
+    (status << STATUS_SHIFT) | payload
+}
+
+fn is_ws(b: u8) -> bool {
+    b == BYTE_SPACE || b == BYTE_TAB || b == BYTE_CR || b == BYTE_VT || b == BYTE_FF
+}
+
+fn is_ident_start(b: u8) -> bool {
+    (b >= BYTE_LOWER_A && b <= BYTE_LOWER_Z)
+        || (b >= BYTE_UPPER_A && b <= BYTE_UPPER_Z)
+        || b == BYTE_UNDERSCORE
+}
+
+fn is_ident_cont(b: u8) -> bool {
+    is_ident_start(b) || (b >= BYTE_ZERO && b <= BYTE_NINE)
+}
+
+fn slice_is_ident(in s: Slice[u8], start: u64, len: u64) -> bool {
+    if len == 0 {
+        return false;
+    }
+    let b0 = match s.try_get(start) {
+        Some(v) => v,
+        None => return false
+    };
+    if !is_ident_start(b0) {
+        return false;
+    }
+    let mut i: u64 = 1;
+    loop {
+        if i >= len {
+            break;
+        }
+        let b = match s.try_get(wrapping_add(start, i)) {
+            Some(v) => v,
+            None => return false
+        };
+        if !is_ident_cont(b) {
+            return false;
+        }
+        i = wrapping_add(i, 1);
+    }
+    true
+}
+
+fn slice_eq_str(in s: Slice[u8], start: u64, len: u64, in target: Str) -> bool {
+    if len != target.len() {
+        return false;
+    }
+    let tb = target.as_bytes();
+    let mut i: u64 = 0;
+    loop {
+        if i >= len {
+            break;
+        }
+        let a = match s.try_get(wrapping_add(start, i)) {
+            Some(v) => v,
+            None => return false
+        };
+        let b = match tb.try_get(i) {
+            Some(v) => v,
+            None => return false
+        };
+        if a != b {
+            return false;
+        }
+        i = wrapping_add(i, 1);
+    }
+    true
+}
+
+pub fn migrate_strip_comments(in src: Slice[u8], inout out: Slice[u8]) -> u64 {
+    let n = src.len();
+    let mut i: u64 = 0;
+    let mut w: u64 = 0;
+    let mut line: u64 = 1;
+
+    loop {
+        if i >= n {
+            break;
+        }
+        let b = match src.try_get(i) {
+            Some(v) => v,
+            None => break
+        };
+        if b == BYTE_SLASH && wrapping_add(i, 1) < n {
+            let next = match src.try_get(wrapping_add(i, 1)) {
+                Some(v) => v,
+                None => 0
+            };
+            if next == BYTE_SLASH {
+                i = wrapping_add(i, 2);
+                loop {
+                    if i >= n {
+                        break;
+                    }
+                    let c = match src.try_get(i) {
+                        Some(v) => v,
+                        None => break
+                    };
+                    if c == BYTE_LF {
+                        break;
+                    }
+                    i = wrapping_add(i, 1);
+                }
+                continue;
+            }
+            if next == BYTE_STAR {
+                let start_line = line;
+                i = wrapping_add(i, 2);
+                loop {
+                    if wrapping_add(i, 1) >= n {
+                        return pack(STRIP_UNTERMINATED_BLOCK, start_line);
+                    }
+                    let c0 = match src.try_get(i) {
+                        Some(v) => v,
+                        None => 0
+                    };
+                    let c1 = match src.try_get(wrapping_add(i, 1)) {
+                        Some(v) => v,
+                        None => 0
+                    };
+                    if c0 == BYTE_STAR && c1 == BYTE_SLASH {
+                        i = wrapping_add(i, 2);
+                        let _ = out.try_set(w, BYTE_SPACE);
+                        w = wrapping_add(w, 1);
+                        break;
+                    }
+                    if c0 == BYTE_LF {
+                        line = wrapping_add(line, 1);
+                        let _ = out.try_set(w, BYTE_LF);
+                        w = wrapping_add(w, 1);
+                    }
+                    i = wrapping_add(i, 1);
+                }
+                continue;
+            }
+        }
+        if b == BYTE_QUOTE || b == BYTE_APOS {
+            let q = b;
+            let _ = out.try_set(w, q);
+            w = wrapping_add(w, 1);
+            i = wrapping_add(i, 1);
+            loop {
+                if i >= n {
+                    break;
+                }
+                let c = match src.try_get(i) {
+                    Some(v) => v,
+                    None => break
+                };
+                if c == q {
+                    let _ = out.try_set(w, q);
+                    w = wrapping_add(w, 1);
+                    i = wrapping_add(i, 1);
+                    break;
+                }
+                if c == BYTE_LF {
+                    return pack(STRIP_UNTERMINATED_LIT, line);
+                }
+                if c == BYTE_BACKSLASH && wrapping_add(i, 1) < n {
+                    let _ = out.try_set(w, c);
+                    w = wrapping_add(w, 1);
+                    i = wrapping_add(i, 1);
+                    let esc = match src.try_get(i) {
+                        Some(v) => v,
+                        None => 0
+                    };
+                    let _ = out.try_set(w, esc);
+                    w = wrapping_add(w, 1);
+                    i = wrapping_add(i, 1);
+                } else {
+                    let _ = out.try_set(w, c);
+                    w = wrapping_add(w, 1);
+                    i = wrapping_add(i, 1);
+                }
+            }
+            continue;
+        }
+        if b == BYTE_LF {
+            line = wrapping_add(line, 1);
+        }
+        let _ = out.try_set(w, b);
+        w = wrapping_add(w, 1);
+        i = wrapping_add(i, 1);
+    }
+
+    pack(STRIP_OK, w)
+}
+
+pub fn migrate_filter_directives(in src: Slice[u8], inout out: Slice[u8]) -> u64 {
+    let n = src.len();
+    let mut stack: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut skip_depth: u64 = 0;
+    let mut w: u64 = 0;
+    let mut pos: u64 = 0;
+    let mut line_no: u64 = 0;
+
+    loop {
+        line_no = wrapping_add(line_no, 1);
+        if line_no > 1 {
+            let _ = out.try_set(w, BYTE_LF);
+            w = wrapping_add(w, 1);
+        }
+        let line_start = pos;
+        loop {
+            if pos >= n {
+                break;
+            }
+            let c = match src.try_get(pos) {
+                Some(v) => v,
+                None => break
+            };
+            if c == BYTE_LF {
+                break;
+            }
+            pos = wrapping_add(pos, 1);
+        }
+        let line_end = pos;
+        let has_more = pos < n;
+        if has_more {
+            pos = wrapping_add(pos, 1);
+        }
+
+        // Trim ASCII whitespace at both ends of [line_start, line_end).
+        let mut t_start = line_start;
+        loop {
+            if t_start >= line_end {
+                break;
+            }
+            let c = match src.try_get(t_start) {
+                Some(v) => v,
+                None => break
+            };
+            if !is_ws(c) {
+                break;
+            }
+            t_start = wrapping_add(t_start, 1);
+        }
+        let mut t_end = line_end;
+        loop {
+            if t_end <= t_start {
+                break;
+            }
+            let c = match src.try_get(wrapping_sub(t_end, 1)) {
+                Some(v) => v,
+                None => break
+            };
+            if !is_ws(c) {
+                break;
+            }
+            t_end = wrapping_sub(t_end, 1);
+        }
+
+        if t_end > t_start {
+            let last = match src.try_get(wrapping_sub(t_end, 1)) {
+                Some(v) => v,
+                None => 0
+            };
+            if last == BYTE_BACKSLASH {
+                return pack(FILTER_LINE_CONTINUATION, line_no);
+            }
+        }
+
+        let is_directive = if t_start < t_end {
+            let first = match src.try_get(t_start) {
+                Some(v) => v,
+                None => 0
+            };
+            first == BYTE_HASH
+        } else {
+            false
+        };
+
+        if !is_directive {
+            if skip_depth == 0 {
+                let mut k = line_start;
+                loop {
+                    if k >= line_end {
+                        break;
+                    }
+                    let c = match src.try_get(k) {
+                        Some(v) => v,
+                        None => break
+                    };
+                    let _ = out.try_set(w, c);
+                    w = wrapping_add(w, 1);
+                    k = wrapping_add(k, 1);
+                }
+            }
+        } else {
+            // Parse directive name + up to 2 whitespace-separated args.
+            let mut p = wrapping_add(t_start, 1);
+            loop {
+                if p >= t_end {
+                    break;
+                }
+                let c = match src.try_get(p) {
+                    Some(v) => v,
+                    None => break
+                };
+                if !is_ws(c) {
+                    break;
+                }
+                p = wrapping_add(p, 1);
+            }
+            let name_start = p;
+            loop {
+                if p >= t_end {
+                    break;
+                }
+                let c = match src.try_get(p) {
+                    Some(v) => v,
+                    None => break
+                };
+                if is_ws(c) {
+                    break;
+                }
+                p = wrapping_add(p, 1);
+            }
+            let name_len = wrapping_sub(p, name_start);
+
+            loop {
+                if p >= t_end {
+                    break;
+                }
+                let c = match src.try_get(p) {
+                    Some(v) => v,
+                    None => break
+                };
+                if !is_ws(c) {
+                    break;
+                }
+                p = wrapping_add(p, 1);
+            }
+            let arg1_start = p;
+            loop {
+                if p >= t_end {
+                    break;
+                }
+                let c = match src.try_get(p) {
+                    Some(v) => v,
+                    None => break
+                };
+                if is_ws(c) {
+                    break;
+                }
+                p = wrapping_add(p, 1);
+            }
+            let arg1_len = wrapping_sub(p, arg1_start);
+
+            loop {
+                if p >= t_end {
+                    break;
+                }
+                let c = match src.try_get(p) {
+                    Some(v) => v,
+                    None => break
+                };
+                if !is_ws(c) {
+                    break;
+                }
+                p = wrapping_add(p, 1);
+            }
+            let has_arg2 = p < t_end;
+            let argc: u64 = if arg1_len == 0 {
+                0
+            } else if has_arg2 {
+                2
+            } else {
+                1
+            };
+
+            if skip_depth > 0 {
+                if slice_eq_str(in src, name_start, name_len, in "if")
+                    || slice_eq_str(in src, name_start, name_len, in "ifdef")
+                    || slice_eq_str(in src, name_start, name_len, in "ifndef")
+                {
+                    skip_depth = wrapping_add(skip_depth, 1);
+                } else if slice_eq_str(in src, name_start, name_len, in "endif") {
+                    skip_depth = wrapping_sub(skip_depth, 1);
+                    if skip_depth == 0 {
+                        let _ = stack.pop();
+                    }
+                }
+            } else if slice_eq_str(in src, name_start, name_len, in "include") {
+                if argc == 1
+                    && (slice_eq_str(in src, arg1_start, arg1_len, in "<stdint.h>")
+                        || slice_eq_str(in src, arg1_start, arg1_len, in "<stddef.h>")
+                        || slice_eq_str(in src, arg1_start, arg1_len, in "<stdbool.h>"))
+                {
+                    // Accepted standard header.
+                } else {
+                    return pack(FILTER_BAD_INCLUDE, line_no);
+                }
+            } else if slice_eq_str(in src, name_start, name_len, in "pragma")
+                && argc == 1
+                && slice_eq_str(in src, arg1_start, arg1_len, in "once")
+            {
+                // Accepted `#pragma once`.
+            } else if slice_eq_str(in src, name_start, name_len, in "ifndef")
+                && argc == 1
+                && slice_is_ident(in src, arg1_start, arg1_len)
+            {
+                stack.push(COND_GUARD);
+            } else if slice_eq_str(in src, name_start, name_len, in "define") {
+                let top_is_guard = if stack.len() > 0 {
+                    match stack.try_get(wrapping_sub(stack.len(), 1)) {
+                        Some(v) => v == COND_GUARD,
+                        None => false
+                    }
+                } else {
+                    false
+                };
+                if argc == 1 && slice_is_ident(in src, arg1_start, arg1_len) && top_is_guard {
+                    // Accepted include guard `#define`.
+                } else {
+                    return pack(FILTER_BAD_DEFINE, line_no);
+                }
+            } else if slice_eq_str(in src, name_start, name_len, in "ifdef")
+                && argc == 1
+                && slice_eq_str(in src, arg1_start, arg1_len, in "__cplusplus")
+            {
+                stack.push(COND_CPLUSPLUS);
+                skip_depth = 1;
+            } else if slice_eq_str(in src, name_start, name_len, in "endif") && argc == 0 {
+                if stack.len() == 0 {
+                    return pack(FILTER_UNMATCHED_ENDIF, line_no);
+                }
+                let _ = stack.pop();
+            } else {
+                return pack(FILTER_UNSUPPORTED_DIRECTIVE, line_no);
+            }
+        }
+
+        if !has_more {
+            break;
+        }
+    }
+
+    if stack.len() > 0 {
+        return pack(FILTER_UNTERMINATED_COND, 0);
+    }
+    pack(FILTER_OK, w)
+}
+
+// ---------------------------------------------------------------------------
+// Deterministic SplitMix64 shadow input generator (`src/shadow.rs`).
+
+const SM64_GAMMA: u64 = 11400714819323198485;
+const SM64_MIX1: u64 = 13787848793156543929;
+const SM64_MIX2: u64 = 10723151780598845931;
+const SM64_SHIFT1: u64 = 30;
+const SM64_SHIFT2: u64 = 27;
+const SM64_SHIFT3: u64 = 31;
+const SM64_TOP_BYTE_SHIFT: u64 = 56;
+const SM64_PREFIX_MASK: u64 = 3;
+const SM64_MAX_U64: u64 = 18446744073709551615;
+
+fn sm64_mix(state: u64) -> u64 {
+    let z1 = wrapping_mul(state ^ (state >> SM64_SHIFT1), SM64_MIX1);
+    let z2 = wrapping_mul(z1 ^ (z1 >> SM64_SHIFT2), SM64_MIX2);
+    z2 ^ (z2 >> SM64_SHIFT3)
+}
+
+fn u64_rem(val: u64, modulus: u64) -> u64 {
+    let mut rem = val;
+    let mut bit: u64 = 64;
+    let mut r: u64 = 0;
+    loop {
+        if bit == 0 {
+            break;
+        }
+        bit = wrapping_sub(bit, 1);
+        let shift_bit = bit;
+        // Branchless-free exact modulo via restoring division is avoided when
+        // modulus is small; here we use restoring division with fixed shifts.
+        let _ = shift_bit;
+        break;
+    }
+    // Exact binary long division for `rem % modulus` without dynamic shifts.
+    let mut d = modulus;
+    let mut count: u64 = 0;
+    loop {
+        if d > (rem >> 1) {
+            break;
+        }
+        d = d << 1;
+        count = wrapping_add(count, 1);
+    }
+    loop {
+        if rem >= d {
+            rem = wrapping_sub(rem, d);
+        }
+        if count == 0 {
+            break;
+        }
+        d = d >> 1;
+        count = wrapping_sub(count, 1);
+    }
+    let _ = r;
+    rem
+}
+
+// Generates a SplitMix64 byte vector of length `0..=max_len` into `out`,
+// reading and updating `state_buf[0]`, and returns the generated length.
+pub fn migrate_splitmix64_bytes(
+    inout state_buf: Slice[u64],
+    max_len: u64,
+    in prefix: Slice[u8],
+    inout out: Slice[u8]
+) -> u64 {
+    let mut st = match state_buf.try_get(0) {
+        Some(v) => v,
+        None => 0
+    };
+    st = wrapping_add(st, SM64_GAMMA);
+    let draw_len = sm64_mix(st);
+    let len = if max_len == SM64_MAX_U64 {
+        draw_len
+    } else {
+        u64_rem(draw_len, wrapping_add(max_len, 1))
+    };
+    let capped = if len > out.len() { out.len() } else { len };
+
+    st = wrapping_add(st, SM64_GAMMA);
+    let keep_prefix = (sm64_mix(st) & SM64_PREFIX_MASK) == 0;
+    let p_len = prefix.len();
+
+    let mut i: u64 = 0;
+    loop {
+        if i >= capped {
+            break;
+        }
+        let b: u8 = if keep_prefix && i < p_len {
+            match prefix.try_get(i) {
+                Some(v) => v,
+                None => 0
+            }
+        } else {
+            st = wrapping_add(st, SM64_GAMMA);
+            wrapping_u8(sm64_mix(st) >> SM64_TOP_BYTE_SHIFT)
+        };
+        let _ = out.try_set(i, b);
+        i = wrapping_add(i, 1);
+    }
+
+    let _ = state_buf.try_set(0, st);
+    capped
+}
+
+// ---------------------------------------------------------------------------
+// C typedef redefinition scanner (`c.rs::redefines`) and pointer aliasing
+// detector (`synth.rs::aliasing_pair`).
+
+const BYTE_SEMI: u8 = 59;
+const ALIAS_NONE: u64 = 18446744073709551615;
+const ALIAS_FLAG_PRESENT: u8 = 1;
+const ALIAS_FLAG_WRITES: u8 = 2;
+const ALIAS_FLAG_SINGLE: u8 = 4;
+
+fn is_c_ws(b: u8) -> bool {
+    is_ws(b) || b == BYTE_LF
+}
+
+fn slice_starts_with_str(in s: Slice[u8], start: u64, end: u64, in prefix: Str) -> bool {
+    let plen = prefix.len();
+    if wrapping_sub(end, start) < plen {
+        return false;
+    }
+    slice_eq_str(in s, start, plen, in prefix)
+}
+
+fn slice_eq_slice(in a: Slice[u8], a_start: u64, a_len: u64, in b: Slice[u8]) -> bool {
+    if a_len != b.len() {
+        return false;
+    }
+    let mut i: u64 = 0;
+    loop {
+        if i >= a_len {
+            break;
+        }
+        let x = match a.try_get(wrapping_add(a_start, i)) {
+            Some(v) => v,
+            None => return false
+        };
+        let y = match b.try_get(i) {
+            Some(v) => v,
+            None => return false
+        };
+        if x != y {
+            return false;
+        }
+        i = wrapping_add(i, 1);
+    }
+    true
+}
+
+// Whether `text` contains a `;`-separated statement starting with `typedef`
+// whose trailing identifier token equals `name`.
+pub fn migrate_redefines(in text: Slice[u8], in name: Slice[u8]) -> bool {
+    let n = text.len();
+    let mut pos: u64 = 0;
+    loop {
+        let stmt_start = pos;
+        loop {
+            if pos >= n {
+                break;
+            }
+            let c = match text.try_get(pos) {
+                Some(v) => v,
+                None => break
+            };
+            if c == BYTE_SEMI {
+                break;
+            }
+            pos = wrapping_add(pos, 1);
+        }
+        let stmt_end = pos;
+        let has_more = pos < n;
+        if has_more {
+            pos = wrapping_add(pos, 1);
+        }
+
+        let mut s_start = stmt_start;
+        loop {
+            if s_start >= stmt_end {
+                break;
+            }
+            let c = match text.try_get(s_start) {
+                Some(v) => v,
+                None => break
+            };
+            if !is_c_ws(c) {
+                break;
+            }
+            s_start = wrapping_add(s_start, 1);
+        }
+        let mut s_end = stmt_end;
+        loop {
+            if s_end <= s_start {
+                break;
+            }
+            let c = match text.try_get(wrapping_sub(s_end, 1)) {
+                Some(v) => v,
+                None => break
+            };
+            if !is_c_ws(c) {
+                break;
+            }
+            s_end = wrapping_sub(s_end, 1);
+        }
+
+        if slice_starts_with_str(in text, s_start, s_end, in "typedef") {
+            let mut tok_start = s_end;
+            loop {
+                if tok_start <= s_start {
+                    break;
+                }
+                let c = match text.try_get(wrapping_sub(tok_start, 1)) {
+                    Some(v) => v,
+                    None => break
+                };
+                if !is_ident_cont(c) {
+                    break;
+                }
+                tok_start = wrapping_sub(tok_start, 1);
+            }
+            if slice_eq_slice(in text, tok_start, wrapping_sub(s_end, tok_start), in name) {
+                return true;
+            }
+        }
+
+        if !has_more {
+            break;
+        }
+    }
+    false
+}
+
+// Finds the first pair `(i, j)` (`i < j`) of pointer/slice parameters sharing
+// the same `class_id` where at least one writes and at least one is a single
+// pointer. Returns `(i << 32) | j`, or `ALIAS_NONE` (`u64::MAX`) if none.
+pub fn migrate_aliasing_pair(in classes: Slice[u64], in flags: Slice[u8]) -> u64 {
+    let n = classes.len();
+    let mut i: u64 = 0;
+    loop {
+        if i >= n {
+            break;
+        }
+        let fa = match flags.try_get(i) {
+            Some(v) => v,
+            None => 0
+        };
+        if (fa & ALIAS_FLAG_PRESENT) != 0 {
+            let ca = match classes.try_get(i) {
+                Some(v) => v,
+                None => 0
+            };
+            let wa = (fa & ALIAS_FLAG_WRITES) != 0;
+            let sa = (fa & ALIAS_FLAG_SINGLE) != 0;
+            let mut j = wrapping_add(i, 1);
+            loop {
+                if j >= n {
+                    break;
+                }
+                let fb = match flags.try_get(j) {
+                    Some(v) => v,
+                    None => 0
+                };
+                if (fb & ALIAS_FLAG_PRESENT) != 0 {
+                    let cb = match classes.try_get(j) {
+                        Some(v) => v,
+                        None => 0
+                    };
+                    let wb = (fb & ALIAS_FLAG_WRITES) != 0;
+                    let sb = (fb & ALIAS_FLAG_SINGLE) != 0;
+                    if ca == cb && (wa || wb) && (sa || sb) {
+                        return (i << STATUS_SHIFT) | j;
+                    }
+                }
+                j = wrapping_add(j, 1);
+            }
+        }
+        i = wrapping_add(i, 1);
+    }
+    ALIAS_NONE
+}
+
+// ---------------------------------------------------------------------------
+// Lowercase hex encoder (`synth.rs::hex`), C builtin type classifier
+// (`c.rs::builtin`), and reserved-word / collision-safe identifier renamer
+// (`synth.rs::safe_idents`).
+
+const HEX_NIBBLE_MASK: u8 = 15;
+const HEX_NIBBLE_SHIFT: u8 = 4;
+const HEX_DECIMAL_LIMIT: u8 = 10;
+const HEX_ASCII_ZERO: u8 = 48;
+const HEX_ASCII_LOWER_A_MINUS_TEN: u8 = 87;
+
+const C_BUILTIN_NONE: u8 = 0;
+const C_BUILTIN_U8: u8 = 1;
+const C_BUILTIN_I8: u8 = 2;
+const C_BUILTIN_U16: u8 = 3;
+const C_BUILTIN_I16: u8 = 4;
+const C_BUILTIN_U32: u8 = 5;
+const C_BUILTIN_I32: u8 = 6;
+const C_BUILTIN_U64: u8 = 7;
+const C_BUILTIN_I64: u8 = 8;
+const C_BUILTIN_USIZE: u8 = 9;
+const C_BUILTIN_CBOOL: u8 = 10;
+
+fn hex_nibble_ascii(nibble: u8) -> u8 {
+    if nibble < HEX_DECIMAL_LIMIT {
+        return wrapping_u8(wrapping_add(widen_u64(HEX_ASCII_ZERO), widen_u64(nibble)));
+    }
+    wrapping_u8(wrapping_add(
+        widen_u64(HEX_ASCII_LOWER_A_MINUS_TEN),
+        widen_u64(nibble),
+    ))
+}
+
+pub fn migrate_hex_encode(in src: Slice[u8], inout out: Slice[u8]) -> u64 {
+    let n = src.len();
+    let needed = wrapping_add(n, n);
+    if out.len() < needed {
+        return 0;
+    }
+    let mut i: u64 = 0;
+    loop {
+        if i >= n {
+            break;
+        }
+        let b = match src.try_get(i) {
+            Some(v) => v,
+            None => return 0
+        };
+        let hi = wrapping_u8(widen_u64(b) >> 4) & HEX_NIBBLE_MASK;
+        let lo = b & HEX_NIBBLE_MASK;
+        let dst = wrapping_add(i, i);
+        let _ = out.try_set(dst, hex_nibble_ascii(hi));
+        let _ = out.try_set(wrapping_add(dst, 1), hex_nibble_ascii(lo));
+        i = wrapping_add(i, 1);
+    }
+    needed
+}
+
+pub fn migrate_c_builtin_tag(in name: Slice[u8]) -> u8 {
+    let n = name.len();
+    if slice_eq_str(in name, 0, n, in "uint8_t") {
+        return C_BUILTIN_U8;
+    }
+    if slice_eq_str(in name, 0, n, in "int8_t") {
+        return C_BUILTIN_I8;
+    }
+    if slice_eq_str(in name, 0, n, in "uint16_t") {
+        return C_BUILTIN_U16;
+    }
+    if slice_eq_str(in name, 0, n, in "int16_t") {
+        return C_BUILTIN_I16;
+    }
+    if slice_eq_str(in name, 0, n, in "uint32_t") {
+        return C_BUILTIN_U32;
+    }
+    if slice_eq_str(in name, 0, n, in "int32_t") {
+        return C_BUILTIN_I32;
+    }
+    if slice_eq_str(in name, 0, n, in "uint64_t") {
+        return C_BUILTIN_U64;
+    }
+    if slice_eq_str(in name, 0, n, in "int64_t") {
+        return C_BUILTIN_I64;
+    }
+    if slice_eq_str(in name, 0, n, in "size_t") || slice_eq_str(in name, 0, n, in "uintptr_t") {
+        return C_BUILTIN_USIZE;
+    }
+    if slice_eq_str(in name, 0, n, in "intptr_t") || slice_eq_str(in name, 0, n, in "ptrdiff_t") {
+        return C_BUILTIN_I64;
+    }
+    if slice_eq_str(in name, 0, n, in "bool") {
+        return C_BUILTIN_CBOOL;
+    }
+    C_BUILTIN_NONE
+}
+
+fn is_reserved_ident(in buf: Slice[u8], start: u64, len: u64) -> bool {
+    if slice_eq_str(in buf, start, len, in "in")
+        || slice_eq_str(in buf, start, len, in "inout")
+        || slice_eq_str(in buf, start, len, in "sink")
+        || slice_eq_str(in buf, start, len, in "nocapture")
+        || slice_eq_str(in buf, start, len, in "fn")
+        || slice_eq_str(in buf, start, len, in "let")
+        || slice_eq_str(in buf, start, len, in "mut")
+        || slice_eq_str(in buf, start, len, in "type")
+        || slice_eq_str(in buf, start, len, in "match")
+        || slice_eq_str(in buf, start, len, in "if")
+        || slice_eq_str(in buf, start, len, in "else")
+        || slice_eq_str(in buf, start, len, in "return")
+        || slice_eq_str(in buf, start, len, in "eff")
+    {
+        return true;
+    }
+    slice_eq_str(in buf, start, len, in "handle")
+        || slice_eq_str(in buf, start, len, in "with")
+        || slice_eq_str(in buf, start, len, in "struct")
+        || slice_eq_str(in buf, start, len, in "enum")
+        || slice_eq_str(in buf, start, len, in "sys")
+        || slice_eq_str(in buf, start, len, in "library")
+        || slice_eq_str(in buf, start, len, in "extern")
+        || slice_eq_str(in buf, start, len, in "self")
+        || slice_eq_str(in buf, start, len, in "Self")
+        || slice_eq_str(in buf, start, len, in "Unit")
+        || slice_eq_str(in buf, start, len, in "bool")
+        || slice_eq_str(in buf, start, len, in "true")
+        || slice_eq_str(in buf, start, len, in "false")
+}
+
+fn ident_plus_underscores_eq(
+    in buf: Slice[u8],
+    a_start: u64,
+    a_len: u64,
+    a_u: u64,
+    b_start: u64,
+    b_len: u64,
+    b_u: u64,
+) -> bool {
+    let a_total = wrapping_add(a_len, a_u);
+    let b_total = wrapping_add(b_len, b_u);
+    if a_total != b_total {
+        return false;
+    }
+    let mut p: u64 = 0;
+    loop {
+        if p >= a_total {
+            break;
+        }
+        let ca = if p < a_len {
+            match buf.try_get(wrapping_add(a_start, p)) {
+                Some(v) => v,
+                None => return false
+            }
+        } else {
+            BYTE_UNDERSCORE
+        };
+        let cb = if p < b_len {
+            match buf.try_get(wrapping_add(b_start, p)) {
+                Some(v) => v,
+                None => return false
+            }
+        } else {
+            BYTE_UNDERSCORE
+        };
+        if ca != cb {
+            return false;
+        }
+        p = wrapping_add(p, 1);
+    }
+    true
+}
+
+pub fn migrate_safe_idents_underscores(
+    in buf: Slice[u8],
+    in starts: Slice[u64],
+    in lens: Slice[u64],
+    inout out_underscores: Slice[u64],
+) -> u64 {
+    let k = starts.len();
+    if lens.len() != k || out_underscores.len() < k {
+        return 0;
+    }
+    let mut i: u64 = 0;
+    loop {
+        if i >= k {
+            break;
+        }
+        let _ = out_underscores.try_set(i, 0);
+        i = wrapping_add(i, 1);
+    }
+    i = 0;
+    loop {
+        if i >= k {
+            break;
+        }
+        let a_start = match starts.try_get(i) {
+            Some(v) => v,
+            None => return 0
+        };
+        let a_len = match lens.try_get(i) {
+            Some(v) => v,
+            None => return 0
+        };
+        if is_reserved_ident(in buf, a_start, a_len) {
+            let mut u: u64 = 1;
+            loop {
+                let mut collided = false;
+                let mut j: u64 = 0;
+                loop {
+                    if j >= k {
+                        break;
+                    }
+                    let b_start = match starts.try_get(j) {
+                        Some(v) => v,
+                        None => break
+                    };
+                    let b_len = match lens.try_get(j) {
+                        Some(v) => v,
+                        None => break
+                    };
+                    let b_reserved = is_reserved_ident(in buf, b_start, b_len);
+                    if !b_reserved {
+                        if ident_plus_underscores_eq(in buf, a_start, a_len, u, b_start, b_len, 0) {
+                            collided = true;
+                            break;
+                        }
+                    } else if j < i {
+                        let b_u = match out_underscores.try_get(j) {
+                            Some(v) => v,
+                            None => 0
+                        };
+                        if ident_plus_underscores_eq(
+                            in buf,
+                            a_start,
+                            a_len,
+                            u,
+                            b_start,
+                            b_len,
+                            b_u
+                        ) {
+                            collided = true;
+                            break;
+                        }
+                    }
+                    j = wrapping_add(j, 1);
+                }
+                if !collided {
+                    let _ = out_underscores.try_set(i, u);
+                    break;
+                }
+                u = wrapping_add(u, 1);
+            }
+        }
+        i = wrapping_add(i, 1);
+    }
+    k
+}
+
+// ---------------------------------------------------------------------------
+// Borrow-summary mode classifier and FieldTree antichain filter (`lift.rs`).
+
+const BYTE_DOT: u8 = 46;
+const LIFT_MODE_SINK_NO_FP: u8 = 0;
+const LIFT_MODE_INOUT_NO_FP: u8 = 1;
+const LIFT_MODE_IN_NO_FP: u8 = 2;
+const LIFT_MODE_INOUT_ALL_FP: u8 = 3;
+const LIFT_MODE_IN_READ_FP: u8 = 4;
+
+pub fn migrate_lift_mode(
+    is_owned_move: bool,
+    is_unique_borrow: bool,
+    whole_value_access: bool,
+    has_reads: bool,
+    has_muts: bool,
+) -> u8 {
+    if is_owned_move {
+        return LIFT_MODE_SINK_NO_FP;
+    }
+    if whole_value_access {
+        if is_unique_borrow {
+            return LIFT_MODE_INOUT_NO_FP;
+        }
+        return LIFT_MODE_IN_NO_FP;
+    }
+    if has_muts {
+        return LIFT_MODE_INOUT_ALL_FP;
+    }
+    if !has_reads {
+        return LIFT_MODE_IN_NO_FP;
+    }
+    LIFT_MODE_IN_READ_FP
+}
+
+fn path_cmp(
+    in buf: Slice[u8],
+    a_start: u64,
+    a_len: u64,
+    b_start: u64,
+    b_len: u64,
+) -> u8 {
+    let min_len = if a_len < b_len { a_len } else { b_len };
+    let mut i: u64 = 0;
+    loop {
+        if i >= min_len {
+            break;
+        }
+        let ca = match buf.try_get(wrapping_add(a_start, i)) {
+            Some(v) => v,
+            None => return 1
+        };
+        let cb = match buf.try_get(wrapping_add(b_start, i)) {
+            Some(v) => v,
+            None => return 1
+        };
+        if ca < cb {
+            return 0;
+        }
+        if ca > cb {
+            return 2;
+        }
+        i = wrapping_add(i, 1);
+    }
+    if a_len < b_len {
+        return 0;
+    }
+    if a_len > b_len {
+        return 2;
+    }
+    1
+}
+
+fn path_covered_by(
+    in buf: Slice[u8],
+    p_start: u64,
+    p_len: u64,
+    q_start: u64,
+    q_len: u64,
+) -> bool {
+    if p_len <= q_len {
+        return false;
+    }
+    let dot = match buf.try_get(wrapping_add(p_start, q_len)) {
+        Some(v) => v,
+        None => return false
+    };
+    if dot != BYTE_DOT {
+        return false;
+    }
+    let mut i: u64 = 0;
+    loop {
+        if i >= q_len {
+            break;
+        }
+        let cp = match buf.try_get(wrapping_add(p_start, i)) {
+            Some(v) => v,
+            None => return false
+        };
+        let cq = match buf.try_get(wrapping_add(q_start, i)) {
+            Some(v) => v,
+            None => return false
+        };
+        if cp != cq {
+            return false;
+        }
+        i = wrapping_add(i, 1);
+    }
+    true
+}
+
+pub fn migrate_sorted_paths_antichain(
+    in buf: Slice[u8],
+    in starts: Slice[u64],
+    in lens: Slice[u64],
+    inout out_indices: Slice[u64],
+) -> u64 {
+    let k = starts.len();
+    if lens.len() != k || out_indices.len() < k {
+        return 0;
+    }
+    let mut i: u64 = 0;
+    loop {
+        if i >= k {
+            break;
+        }
+        let _ = out_indices.try_set(i, i);
+        i = wrapping_add(i, 1);
+    }
+    // Insertion sort out_indices[0..k] by lexicographical path order.
+    i = 1;
+    loop {
+        if i >= k {
+            break;
+        }
+        let key = match out_indices.try_get(i) {
+            Some(v) => v,
+            None => return 0
+        };
+        let key_start = match starts.try_get(key) {
+            Some(v) => v,
+            None => return 0
+        };
+        let key_len = match lens.try_get(key) {
+            Some(v) => v,
+            None => return 0
+        };
+        let mut j = i;
+        loop {
+            if j == 0 {
+                break;
+            }
+            let prev_idx = wrapping_sub(j, 1);
+            let prev = match out_indices.try_get(prev_idx) {
+                Some(v) => v,
+                None => break
+            };
+            let prev_start = match starts.try_get(prev) {
+                Some(v) => v,
+                None => break
+            };
+            let prev_len = match lens.try_get(prev) {
+                Some(v) => v,
+                None => break
+            };
+            if path_cmp(in buf, prev_start, prev_len, key_start, key_len) != 2 {
+                break;
+            }
+            let _ = out_indices.try_set(j, prev);
+            j = prev_idx;
+        }
+        let _ = out_indices.try_set(j, key);
+        i = wrapping_add(i, 1);
+    }
+    // Deduplicate and drop paths subsumed by a shorter prefix + '.'.
+    let mut kept: u64 = 0;
+    i = 0;
+    loop {
+        if i >= k {
+            break;
+        }
+        let idx = match out_indices.try_get(i) {
+            Some(v) => v,
+            None => return kept
+        };
+        let p_start = match starts.try_get(idx) {
+            Some(v) => v,
+            None => return kept
+        };
+        let p_len = match lens.try_get(idx) {
+            Some(v) => v,
+            None => return kept
+        };
+        let mut skip = false;
+        let mut q: u64 = 0;
+        loop {
+            if q >= kept {
+                break;
+            }
+            let q_idx = match out_indices.try_get(q) {
+                Some(v) => v,
+                None => break
+            };
+            let q_start = match starts.try_get(q_idx) {
+                Some(v) => v,
+                None => break
+            };
+            let q_len = match lens.try_get(q_idx) {
+                Some(v) => v,
+                None => break
+            };
+            if path_cmp(in buf, p_start, p_len, q_start, q_len) == 1
+                || path_covered_by(in buf, p_start, p_len, q_start, q_len)
+            {
+                skip = true;
+                break;
+            }
+            q = wrapping_add(q, 1);
+        }
+        if !skip {
+            let _ = out_indices.try_set(kept, idx);
+            kept = wrapping_add(kept, 1);
+        }
+        i = wrapping_add(i, 1);
+    }
+    kept
+}
+
+// ---------------------------------------------------------------------------
+// Cargo manifest `package_name` parser and `vesper-migrate:` doc-comment
+// annotation line parser (`rust.rs`).
+
+const BYTE_LBRACKET: u8 = 91;
+const BYTE_EQUALS: u8 = 61;
+const BYTE_HYPHEN: u8 = 45;
+const BYTE_DQUOTE: u8 = 34;
+const ANNOT_SKIP: u64 = 0;
+const ANNOT_BAD: u64 = 1;
+const ANNOT_OK: u64 = 2;
+const ANNOT_ACCESS_IN: u64 = 1;
+const ANNOT_ACCESS_OUT: u64 = 2;
+const ANNOT_ACCESS_INOUT: u64 = 3;
+const ANNOT_SPANS_LEN: u64 = 6;
+
+fn is_pkg_name_byte(b: u8) -> bool {
+    is_ident_cont(b) || b == BYTE_HYPHEN
+}
+
+fn trim_start_ws(in s: Slice[u8], start: u64, end: u64) -> u64 {
+    let mut p = start;
+    loop {
+        if p >= end {
+            break;
+        }
+        let b = match s.try_get(p) {
+            Some(v) => v,
+            None => break
+        };
+        if !is_c_ws(b) {
+            break;
+        }
+        p = wrapping_add(p, 1);
+    }
+    p
+}
+
+fn trim_end_ws(in s: Slice[u8], start: u64, end: u64) -> u64 {
+    let mut p = end;
+    loop {
+        if p <= start {
+            break;
+        }
+        let prev = wrapping_sub(p, 1);
+        let b = match s.try_get(prev) {
+            Some(v) => v,
+            None => break
+        };
+        if !is_c_ws(b) {
+            break;
+        }
+        p = prev;
+    }
+    p
+}
+
+pub fn migrate_package_name(in manifest: Slice[u8], inout out: Slice[u8]) -> u64 {
+    let n = manifest.len();
+    let mut in_package = false;
+    let mut pos: u64 = 0;
+    loop {
+        if pos >= n {
+            break;
+        }
+        let line_start = pos;
+        loop {
+            if pos >= n {
+                break;
+            }
+            let c = match manifest.try_get(pos) {
+                Some(v) => v,
+                None => break
+            };
+            if c == BYTE_LF {
+                break;
+            }
+            pos = wrapping_add(pos, 1);
+        }
+        let line_end = pos;
+        if pos < n {
+            pos = wrapping_add(pos, 1);
+        }
+        let s = trim_start_ws(in manifest, line_start, line_end);
+        let e = trim_end_ws(in manifest, s, line_end);
+        if s >= e {
+            continue;
+        }
+        let first = match manifest.try_get(s) {
+            Some(v) => v,
+            None => continue
+        };
+        if first == BYTE_LBRACKET {
+            in_package = slice_eq_str(in manifest, s, wrapping_sub(e, s), in "[package]");
+            continue;
+        }
+        if in_package && slice_starts_with_str(in manifest, s, e, in "name") {
+            let after_name = trim_start_ws(in manifest, wrapping_add(s, 4), e);
+            if after_name >= e {
+                return 0;
+            }
+            let eq = match manifest.try_get(after_name) {
+                Some(v) => v,
+                None => return 0
+            };
+            if eq != BYTE_EQUALS {
+                return 0;
+            }
+            let mut vs = trim_start_ws(in manifest, wrapping_add(after_name, 1), e);
+            let mut ve = trim_end_ws(in manifest, vs, e);
+            loop {
+                if vs >= ve {
+                    break;
+                }
+                let b = match manifest.try_get(vs) {
+                    Some(v) => v,
+                    None => break
+                };
+                if b != BYTE_DQUOTE {
+                    break;
+                }
+                vs = wrapping_add(vs, 1);
+            }
+            loop {
+                if ve <= vs {
+                    break;
+                }
+                let prev = wrapping_sub(ve, 1);
+                let b = match manifest.try_get(prev) {
+                    Some(v) => v,
+                    None => break
+                };
+                if b != BYTE_DQUOTE {
+                    break;
+                }
+                ve = prev;
+            }
+            let vlen = wrapping_sub(ve, vs);
+            if vlen == 0 || out.len() < vlen {
+                return 0;
+            }
+            let mut i: u64 = 0;
+            loop {
+                if i >= vlen {
+                    break;
+                }
+                let b = match manifest.try_get(wrapping_add(vs, i)) {
+                    Some(v) => v,
+                    None => return 0
+                };
+                if !is_pkg_name_byte(b) {
+                    return 0;
+                }
+                let mapped = if b == BYTE_HYPHEN { BYTE_UNDERSCORE } else { b };
+                let _ = out.try_set(i, mapped);
+                i = wrapping_add(i, 1);
+            }
+            return vlen;
+        }
+    }
+    0
+}
+
+pub fn migrate_parse_annotation_line(in line: Slice[u8], inout out_spans: Slice[u64]) -> u64 {
+    if out_spans.len() < ANNOT_SPANS_LEN {
+        return ANNOT_BAD;
+    }
+    let n = line.len();
+    let s = trim_start_ws(in line, 0, n);
+    let e = trim_end_ws(in line, s, n);
+    if !slice_starts_with_str(in line, s, e, in "vesper-migrate:") {
+        return ANNOT_SKIP;
+    }
+    let mut p = wrapping_add(s, 15);
+    let mut w0_s: u64 = 0;
+    let mut w0_l: u64 = 0;
+    let mut w1_s: u64 = 0;
+    let mut w1_l: u64 = 0;
+    let mut w2_s: u64 = 0;
+    let mut w2_l: u64 = 0;
+    let mut w3_s: u64 = 0;
+    let mut w3_l: u64 = 0;
+    let mut w4_s: u64 = 0;
+    let mut w4_l: u64 = 0;
+    let mut count: u64 = 0;
+    loop {
+        p = trim_start_ws(in line, p, e);
+        if p >= e {
+            break;
+        }
+        let ws = p;
+        loop {
+            if p >= e {
+                break;
+            }
+            let b = match line.try_get(p) {
+                Some(v) => v,
+                None => break
+            };
+            if is_c_ws(b) {
+                break;
+            }
+            p = wrapping_add(p, 1);
+        }
+        let wl = wrapping_sub(p, ws);
+        if count == 0 {
+            w0_s = ws;
+            w0_l = wl;
+        } else if count == 1 {
+            w1_s = ws;
+            w1_l = wl;
+        } else if count == 2 {
+            w2_s = ws;
+            w2_l = wl;
+        } else if count == 3 {
+            w3_s = ws;
+            w3_l = wl;
+        } else if count == 4 {
+            w4_s = ws;
+            w4_l = wl;
+        } else {
+            return ANNOT_BAD;
+        }
+        count = wrapping_add(count, 1);
+    }
+    let mut nullable: u64 = 0;
+    if count == 3 && slice_eq_str(in line, w2_s, w2_l, in "nullable") {
+        nullable = 1;
+        count = 2;
+    } else if count == 5 && slice_eq_str(in line, w4_s, w4_l, in "nullable") {
+        nullable = 1;
+        count = 4;
+    }
+    let mut has_len = false;
+    let mut len_s: u64 = 0;
+    let mut len_l: u64 = 0;
+    if count == 2 {
+        has_len = false;
+    } else if count == 4 && slice_eq_str(in line, w2_s, w2_l, in "len") {
+        has_len = true;
+        len_s = w3_s;
+        len_l = w3_l;
+    } else {
+        return ANNOT_BAD;
+    }
+    let access = if slice_eq_str(in line, w1_s, w1_l, in "in") {
+        ANNOT_ACCESS_IN
+    } else if slice_eq_str(in line, w1_s, w1_l, in "out") {
+        ANNOT_ACCESS_OUT
+    } else if slice_eq_str(in line, w1_s, w1_l, in "inout") {
+        ANNOT_ACCESS_INOUT
+    } else {
+        return ANNOT_BAD;
+    };
+    if access == ANNOT_ACCESS_OUT && has_len {
+        return ANNOT_BAD;
+    }
+    let _ = out_spans.try_set(0, w0_s);
+    let _ = out_spans.try_set(1, w0_l);
+    let _ = out_spans.try_set(2, access);
+    let _ = out_spans.try_set(3, nullable);
+    let _ = out_spans.try_set(4, len_s);
+    let _ = out_spans.try_set(5, len_l);
+    ANNOT_OK
+}
+
+// ---------------------------------------------------------------------------
+// Lifted parameter renderer (`lift.rs::render_param`).
+
+const BYTE_LBRACE: u8 = 123;
+const BYTE_RBRACE: u8 = 125;
+const BYTE_COMMA: u8 = 44;
+const BYTE_COLON: u8 = 58;
+
+fn copy_range(
+    in src: Slice[u8],
+    src_start: u64,
+    src_len: u64,
+    inout dst: Slice[u8],
+    dst_pos: u64,
+) -> u64 {
+    let mut i: u64 = 0;
+    let mut pos = dst_pos;
+    loop {
+        if i >= src_len {
+            break;
+        }
+        let b = match src.try_get(wrapping_add(src_start, i)) {
+            Some(v) => v,
+            None => break
+        };
+        let _ = dst.try_set(pos, b);
+        pos = wrapping_add(pos, 1);
+        i = wrapping_add(i, 1);
+    }
+    pos
+}
+
+pub fn migrate_render_param(
+    in kw: Slice[u8],
+    in name: Slice[u8],
+    has_footprint: bool,
+    in fp_buf: Slice[u8],
+    in fp_starts: Slice[u64],
+    in fp_lens: Slice[u64],
+    in ty: Slice[u8],
+    inout out: Slice[u8],
+) -> u64 {
+    let mut pos: u64 = 0;
+    if kw.len() > 0 {
+        pos = copy_range(in kw, 0, kw.len(), inout out, pos);
+        let _ = out.try_set(pos, BYTE_SPACE);
+        pos = wrapping_add(pos, 1);
+    }
+    pos = copy_range(in name, 0, name.len(), inout out, pos);
+    if has_footprint {
+        let _ = out.try_set(pos, BYTE_DOT);
+        pos = wrapping_add(pos, 1);
+        let _ = out.try_set(pos, BYTE_LBRACE);
+        pos = wrapping_add(pos, 1);
+        let k = fp_starts.len();
+        let mut i: u64 = 0;
+        loop {
+            if i >= k {
+                break;
+            }
+            if i > 0 {
+                let _ = out.try_set(pos, BYTE_COMMA);
+                pos = wrapping_add(pos, 1);
+                let _ = out.try_set(pos, BYTE_SPACE);
+                pos = wrapping_add(pos, 1);
+            }
+            let ps = match fp_starts.try_get(i) {
+                Some(v) => v,
+                None => break
+            };
+            let pl = match fp_lens.try_get(i) {
+                Some(v) => v,
+                None => break
+            };
+            pos = copy_range(in fp_buf, ps, pl, inout out, pos);
+            i = wrapping_add(i, 1);
+        }
+        let _ = out.try_set(pos, BYTE_RBRACE);
+        pos = wrapping_add(pos, 1);
+    }
+    let _ = out.try_set(pos, BYTE_COLON);
+    pos = wrapping_add(pos, 1);
+    let _ = out.try_set(pos, BYTE_SPACE);
+    pos = wrapping_add(pos, 1);
+    pos = copy_range(in ty, 0, ty.len(), inout out, pos);
+    pos
+}
+
+// ---------------------------------------------------------------------------
+// Synth renderers (`synth.rs::origin_text`, `sys_value`, `wire_field`).
+
+const BYTE_BACKTICK: u8 = 96;
+const BYTE_RBRACKET: u8 = 93;
+const BYTE_LOWER_I: u8 = 105;
+const BYTE_LOWER_U: u8 = 117;
+const DECIMAL_BASE: u64 = 10;
+
+const SYS_VAL_UNIT: u8 = 0;
+const SYS_VAL_BOOL: u8 = 1;
+const SYS_VAL_PASSTHROUGH: u8 = 2;
+const SYS_VAL_PTR: u8 = 3;
+const SYS_VAL_NULLABLE_PTR: u8 = 4;
+
+const WIRE_KIND_INT: u8 = 0;
+const WIRE_KIND_BYTE_ARRAY: u8 = 1;
+const WIRE_KIND_ZERO_PAD: u8 = 2;
+const WIRE_KIND_STRUCT: u8 = 3;
+
+const WIRE_ENDIAN_NATIVE: u8 = 0;
+const WIRE_ENDIAN_LITTLE: u8 = 1;
+const WIRE_ENDIAN_BIG: u8 = 2;
+
+fn copy_str(in s: Str, inout dst: Slice[u8], dst_pos: u64) -> u64 {
+    let bytes = s.as_bytes();
+    copy_range(in bytes, 0, bytes.len(), inout dst, dst_pos)
+}
+
+fn write_u64_dec(val: u64, inout dst: Slice[u8], dst_pos: u64) -> u64 {
+    if val == 0 {
+        let _ = dst.try_set(dst_pos, HEX_ASCII_ZERO);
+        return wrapping_add(dst_pos, 1);
+    }
+    let mut n = val;
+    let mut count: u64 = 0;
+    let mut tmp = val;
+    loop {
+        if tmp == 0 {
+            break;
+        }
+        tmp = tmp / 10;
+        count = wrapping_add(count, 1);
+    }
+    let end = wrapping_add(dst_pos, count);
+    let mut p = end;
+    loop {
+        if n == 0 {
+            break;
+        }
+        p = wrapping_sub(p, 1);
+        let d = n % 10;
+        let _ = dst.try_set(p, wrapping_u8(wrapping_add(widen_u64(HEX_ASCII_ZERO), d)));
+        n = n / 10;
+    }
+    end
+}
+
+pub fn migrate_render_origin(is_c_header: bool, in name: Slice[u8], inout out: Slice[u8]) -> u64 {
+    let mut pos: u64 = 0;
+    if is_c_header {
+        pos = copy_str(in "C header `", inout out, pos);
+    } else {
+        pos = copy_str(in "Rust crate `", inout out, pos);
+    }
+    pos = copy_range(in name, 0, name.len(), inout out, pos);
+    let _ = out.try_set(pos, BYTE_BACKTICK);
+    wrapping_add(pos, 1)
+}
+
+pub fn migrate_render_sys_value(kind: u8, in payload: Slice[u8], inout out: Slice[u8]) -> u64 {
+    if kind == SYS_VAL_UNIT {
+        return copy_str(in "Unit", inout out, 0);
+    }
+    if kind == SYS_VAL_BOOL {
+        return copy_str(in "bool", inout out, 0);
+    }
+    if kind == SYS_VAL_PASSTHROUGH {
+        return copy_range(in payload, 0, payload.len(), inout out, 0);
+    }
+    let mut pos = if kind == SYS_VAL_NULLABLE_PTR {
+        copy_str(in "NullablePtr[", inout out, 0)
+    } else {
+        copy_str(in "Ptr[", inout out, 0)
+    };
+    pos = copy_range(in payload, 0, payload.len(), inout out, pos);
+    let _ = out.try_set(pos, BYTE_RBRACKET);
+    wrapping_add(pos, 1)
+}
+
+pub fn migrate_render_wire_field(
+    kind: u8,
+    signed: bool,
+    endian: u8,
+    num: u64,
+    in name: Slice[u8],
+    inout out: Slice[u8],
+) -> u64 {
+    if kind == WIRE_KIND_INT {
+        let mut pos: u64 = 0;
+        let prefix = if signed { BYTE_LOWER_I } else { BYTE_LOWER_U };
+        let _ = out.try_set(pos, prefix);
+        pos = wrapping_add(pos, 1);
+        pos = write_u64_dec(num, inout out, pos);
+        if endian == WIRE_ENDIAN_LITTLE {
+            pos = copy_str(in "le", inout out, pos);
+        } else if endian == WIRE_ENDIAN_BIG {
+            pos = copy_str(in "be", inout out, pos);
+        }
+        return pos;
+    }
+    if kind == WIRE_KIND_BYTE_ARRAY {
+        let mut pos = copy_str(in "ByteArray[", inout out, 0);
+        pos = write_u64_dec(num, inout out, pos);
+        let _ = out.try_set(pos, BYTE_RBRACKET);
+        return wrapping_add(pos, 1);
+    }
+    if kind == WIRE_KIND_ZERO_PAD {
+        let mut pos = copy_str(in "ZeroPad[", inout out, 0);
+        pos = write_u64_dec(num, inout out, pos);
+        let _ = out.try_set(pos, BYTE_RBRACKET);
+        return wrapping_add(pos, 1);
+    }
+    copy_range(in name, 0, name.len(), inout out, 0)
+}

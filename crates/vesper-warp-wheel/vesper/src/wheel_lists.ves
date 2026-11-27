@@ -5,6 +5,10 @@ impl WheelCore {
     // Place a detached entry relative to the cursor.
     fn place(inout self, index: u64) {
         let tick = at(in self.e, ix(index, 1));
+        self.place_tick(index, tick);
+    }
+
+    fn place_tick(inout self, index: u64, tick: u64) {
         if tick < self.cursor {
             self.insert_ready_sorted(index);
             return;
@@ -27,7 +31,7 @@ impl WheelCore {
             let slot = wrapping_shr_u64(tick, low) & self.slot_mask();
             let bits = at(in self.occupied, level);
             self.occupied.try_set(level, bits | wrapping_shl_u64(1, wrapping_u32(slot)));
-            wrapping_add(wrapping_mul(level, self.slots), slot)
+            wrapping_add(wrapping_shl_u64(level, wrapping_u32(self.slot_bits)), slot)
         };
         self.push_back(list, index);
     }

@@ -28,10 +28,96 @@ enum AliasClass {
     Struct(String),
 }
 
+#[cfg(feature = "vesper-port")]
+const ALIAS_NONE: u64 = u64::MAX;
+#[cfg(feature = "vesper-port")]
+const ALIAS_SHIFT: u32 = 32;
+#[cfg(feature = "vesper-port")]
+const ALIAS_MASK: u64 = 0xffff_ffff;
+#[cfg(feature = "vesper-port")]
+const ALIAS_FLAG_PRESENT: u8 = 1;
+#[cfg(feature = "vesper-port")]
+const ALIAS_FLAG_WRITES: u8 = 2;
+#[cfg(feature = "vesper-port")]
+const ALIAS_FLAG_SINGLE: u8 = 4;
+
 /// The first pair of pointer parameters to the same pointee type where at
 /// least one is a *single* pointer and at least one is written. Slice/slice pairs keep the
 /// earlier behaviour (an `assumed:` line, plus the Bridge's call-time overlap
 /// check in `prepare_call`).
+#[cfg(feature = "vesper-port")]
+pub fn aliasing_pair(params: &[(String, SysParam)]) -> Option<String> {
+    let mut class_map: Vec<AliasClass> = Vec::new();
+    let mut classes = Vec::with_capacity(params.len());
+    let mut flags = Vec::with_capacity(params.len());
+    for (_, p) in params {
+        let entry = match p {
+            SysParam::Slice { .. } | SysParam::ElementSlice { .. } => {
+                p.slice_parts().map(|(element, access, _)| {
+                    (
+                        match element {
+                            SysPointee::Scalar(s) => AliasClass::Scalar(s),
+                            SysPointee::Struct(n) => AliasClass::Struct(n),
+                        },
+                        access == Access::Inout,
+                        false,
+                    )
+                })
+            }
+            SysParam::Pointer {
+                pointee, access, ..
+            } => Some((
+                match pointee {
+                    SysPointee::Scalar(s) => AliasClass::Scalar(*s),
+                    SysPointee::Struct(n) => AliasClass::Struct(n.clone()),
+                },
+                access.writes(),
+                true,
+            )),
+            SysParam::Value(_) => None,
+        };
+        if let Some((cls, writes, single)) = entry {
+            let id = match class_map.iter().position(|c| c == &cls) {
+                Some(idx) => idx as u64,
+                None => {
+                    let idx = class_map.len() as u64;
+                    class_map.push(cls);
+                    idx
+                }
+            };
+            let mut f = ALIAS_FLAG_PRESENT;
+            if writes {
+                f |= ALIAS_FLAG_WRITES;
+            }
+            if single {
+                f |= ALIAS_FLAG_SINGLE;
+            }
+            classes.push(id);
+            flags.push(f);
+        } else {
+            classes.push(0);
+            flags.push(0);
+        }
+    }
+    let packed = crate::binding::migrate_aliasing_pair(&classes, &flags);
+    if packed == ALIAS_NONE {
+        None
+    } else {
+        let i = (packed >> ALIAS_SHIFT) as usize;
+        let j = (packed & ALIAS_MASK) as usize;
+        let a = &params[i].0;
+        let b = &params[j].0;
+        Some(format!(
+            "`{a}` and `{b}` point to the same type and one is written; a signature cannot show they are distinct objects"
+        ))
+    }
+}
+
+/// The first pair of pointer parameters to the same pointee type where at
+/// least one is a *single* pointer and at least one is written. Slice/slice pairs keep the
+/// earlier behaviour (an `assumed:` line, plus the Bridge's call-time overlap
+/// check in `prepare_call`).
+#[cfg(not(feature = "vesper-port"))]
 pub fn aliasing_pair(params: &[(String, SysParam)]) -> Option<String> {
     let class = |p: &SysParam| match p {
         SysParam::Slice { .. } | SysParam::ElementSlice { .. } => {
@@ -113,6 +199,57 @@ pub fn check_pointer_pointees(m: &mut Migration) {
     }
 }
 
+#[cfg(feature = "vesper-port")]
+fn wire_field(t: &WireType) -> String {
+    match t {
+        WireType::Integer(i) => {
+            let endian = match i.endian {
+                Endian::Native => 0u8,
+                Endian::Little => 1u8,
+                Endian::Big => 2u8,
+            };
+            let mut out = vec![0u8; 32];
+            let len = crate::binding::migrate_render_wire_field(
+                0,
+                i.signed,
+                endian,
+                i.bits as u64,
+                &[],
+                &mut out,
+            ) as usize;
+            out.truncate(len);
+            String::from_utf8(out).unwrap_or_default()
+        }
+        WireType::ByteArray(n) => {
+            let mut out = vec![0u8; 40];
+            let len =
+                crate::binding::migrate_render_wire_field(1, false, 0, *n as u64, &[], &mut out)
+                    as usize;
+            out.truncate(len);
+            String::from_utf8(out).unwrap_or_default()
+        }
+        WireType::ZeroPad(n) => {
+            let mut out = vec![0u8; 40];
+            let len =
+                crate::binding::migrate_render_wire_field(2, false, 0, *n as u64, &[], &mut out)
+                    as usize;
+            out.truncate(len);
+            String::from_utf8(out).unwrap_or_default()
+        }
+        WireType::Struct(n) => {
+            let mut out = vec![0u8; n.len()];
+            let len =
+                crate::binding::migrate_render_wire_field(3, false, 0, 0, n.as_bytes(), &mut out)
+                    as usize;
+            out.truncate(len);
+            String::from_utf8(out).unwrap_or_default()
+        }
+        // Not reachable for a declaration that compiled.
+        other => format!("{other:?}"),
+    }
+}
+
+#[cfg(not(feature = "vesper-port"))]
 fn wire_field(t: &WireType) -> String {
     match t {
         WireType::Integer(i) => format!(
@@ -134,6 +271,7 @@ fn wire_field(t: &WireType) -> String {
 }
 
 /// Words that cannot be parameter names in Vesper or `.vsys` text.
+#[cfg(not(feature = "vesper-port"))]
 const RESERVED: &[&str] = &[
     "in",
     "inout",
@@ -167,6 +305,39 @@ const RESERVED: &[&str] = &[
 /// within one signature: a reserved word, or a name already taken by another
 /// parameter, gets trailing underscores until it is free. Parameter names do
 /// not affect the C ABI.
+#[cfg(feature = "vesper-port")]
+pub fn safe_idents<'a>(names: impl IntoIterator<Item = &'a str>) -> Vec<String> {
+    let names: Vec<&str> = names.into_iter().collect();
+    let total_bytes: usize = names.iter().map(|n| n.len()).sum();
+    let mut buf = Vec::with_capacity(total_bytes);
+    let mut starts = Vec::with_capacity(names.len());
+    let mut lens = Vec::with_capacity(names.len());
+    for n in &names {
+        starts.push(buf.len() as u64);
+        lens.push(n.len() as u64);
+        buf.extend_from_slice(n.as_bytes());
+    }
+    let mut underscores = vec![0u64; names.len()];
+    let _ = crate::binding::migrate_safe_idents_underscores(&buf, &starts, &lens, &mut underscores);
+    names
+        .iter()
+        .zip(underscores)
+        .map(|(n, u)| {
+            let mut out = String::with_capacity(n.len() + u as usize);
+            out.push_str(n);
+            for _ in 0..u {
+                out.push('_');
+            }
+            out
+        })
+        .collect()
+}
+
+/// Parameter names that are safe in Vesper and `.vsys` text and distinct
+/// within one signature: a reserved word, or a name already taken by another
+/// parameter, gets trailing underscores until it is free. Parameter names do
+/// not affect the C ABI.
+#[cfg(not(feature = "vesper-port"))]
 pub fn safe_idents<'a>(names: impl IntoIterator<Item = &'a str>) -> Vec<String> {
     let names: Vec<&str> = names.into_iter().collect();
     let mut taken: std::collections::BTreeSet<String> = names
@@ -277,6 +448,29 @@ pub struct SysSpec {
     pub omitted: Vec<Refusal>,
 }
 
+#[cfg(feature = "vesper-port")]
+fn sys_value(v: &SysValue) -> String {
+    let (kind, payload): (u8, &str) = match v {
+        SysValue::Unit => (0, ""),
+        SysValue::Bool => (1, ""),
+        SysValue::Scalar(s) => (2, s.name()),
+        SysValue::Enum(n) => (2, n.as_str()),
+        SysValue::Address {
+            pointee,
+            nullable: false,
+        } => (3, pointee.name()),
+        SysValue::Address {
+            pointee,
+            nullable: true,
+        } => (4, pointee.name()),
+    };
+    let mut out = vec![0u8; payload.len() + 16];
+    let len = crate::binding::migrate_render_sys_value(kind, payload.as_bytes(), &mut out) as usize;
+    out.truncate(len);
+    String::from_utf8(out).unwrap_or_default()
+}
+
+#[cfg(not(feature = "vesper-port"))]
 fn sys_value(v: &SysValue) -> String {
     match v {
         SysValue::Unit => "Unit".into(),
@@ -294,6 +488,19 @@ fn sys_value(v: &SysValue) -> String {
     }
 }
 
+#[cfg(feature = "vesper-port")]
+fn origin_text(o: &Origin) -> String {
+    let (is_c, name) = match o {
+        Origin::CHeader { header } => (true, header.as_str()),
+        Origin::RustCrate { name } => (false, name.as_str()),
+    };
+    let mut out = vec![0u8; name.len() + 16];
+    let len = crate::binding::migrate_render_origin(is_c, name.as_bytes(), &mut out) as usize;
+    out.truncate(len);
+    String::from_utf8(out).unwrap_or_default()
+}
+
+#[cfg(not(feature = "vesper-port"))]
 fn origin_text(o: &Origin) -> String {
     match o {
         Origin::CHeader { header } => format!("C header `{header}`"),
@@ -301,6 +508,15 @@ fn origin_text(o: &Origin) -> String {
     }
 }
 
+#[cfg(feature = "vesper-port")]
+fn hex(bytes: &[u8]) -> String {
+    let mut out = vec![0u8; bytes.len() * 2];
+    let written = crate::binding::migrate_hex_encode(bytes, &mut out) as usize;
+    out.truncate(written);
+    String::from_utf8(out).unwrap_or_default()
+}
+
+#[cfg(not(feature = "vesper-port"))]
 fn hex(bytes: &[u8]) -> String {
     bytes
         .iter()

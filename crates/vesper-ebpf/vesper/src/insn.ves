@@ -377,40 +377,20 @@ fn is_dw(s: Size) -> bool {
 }
 
 fn jmp_from_code(op: u8) -> Option[JmpOp] {
-    if op == BpfJmp::Jeq {
-        return Option::Some(JmpOp::Eq);
+    match op >> 4 {
+        1 => Option::Some(JmpOp::Eq),
+        2 => Option::Some(JmpOp::Gt),
+        3 => Option::Some(JmpOp::Ge),
+        4 => Option::Some(JmpOp::Set),
+        5 => Option::Some(JmpOp::Ne),
+        6 => Option::Some(JmpOp::SGt),
+        7 => Option::Some(JmpOp::SGe),
+        10 => Option::Some(JmpOp::Lt),
+        11 => Option::Some(JmpOp::Le),
+        12 => Option::Some(JmpOp::SLt),
+        13 => Option::Some(JmpOp::SLe),
+        _ => Option::None,
     }
-    if op == BpfJmp::Jgt {
-        return Option::Some(JmpOp::Gt);
-    }
-    if op == BpfJmp::Jge {
-        return Option::Some(JmpOp::Ge);
-    }
-    if op == BpfJmp::Jset {
-        return Option::Some(JmpOp::Set);
-    }
-    if op == BpfJmp::Jne {
-        return Option::Some(JmpOp::Ne);
-    }
-    if op == BpfJmp::Jsgt {
-        return Option::Some(JmpOp::SGt);
-    }
-    if op == BpfJmp::Jsge {
-        return Option::Some(JmpOp::SGe);
-    }
-    if op == BpfJmp::Jlt {
-        return Option::Some(JmpOp::Lt);
-    }
-    if op == BpfJmp::Jle {
-        return Option::Some(JmpOp::Le);
-    }
-    if op == BpfJmp::Jslt {
-        return Option::Some(JmpOp::SLt);
-    }
-    if op == BpfJmp::Jsle {
-        return Option::Some(JmpOp::SLe);
-    }
-    Option::None
 }
 
 fn jmp_code(op: JmpOp) -> u8 {
@@ -494,46 +474,22 @@ fn atomic_imm(op: AtomicOp) -> i32 {
 // sign-extending forms), or None.
 fn alu_op(opc: u8, off: i16, wide: bool) -> Option[AluOp] {
     if off == 0 {
-        if opc == BpfAlu::Add {
-            return Option::Some(AluOp::Add);
-        }
-        if opc == BpfAlu::Sub {
-            return Option::Some(AluOp::Sub);
-        }
-        if opc == BpfAlu::Mul {
-            return Option::Some(AluOp::Mul);
-        }
-        if opc == BpfAlu::Div {
-            return Option::Some(AluOp::Div);
-        }
-        if opc == BpfAlu::Or {
-            return Option::Some(AluOp::Or);
-        }
-        if opc == BpfAlu::And {
-            return Option::Some(AluOp::And);
-        }
-        if opc == BpfAlu::Lsh {
-            return Option::Some(AluOp::Lsh);
-        }
-        if opc == BpfAlu::Rsh {
-            return Option::Some(AluOp::Rsh);
-        }
-        if opc == BpfAlu::Neg {
-            return Option::Some(AluOp::Neg);
-        }
-        if opc == BpfAlu::Mod {
-            return Option::Some(AluOp::Mod);
-        }
-        if opc == BpfAlu::Xor {
-            return Option::Some(AluOp::Xor);
-        }
-        if opc == BpfAlu::Mov {
-            return Option::Some(AluOp::Mov);
-        }
-        if opc == BpfAlu::Arsh {
-            return Option::Some(AluOp::Arsh);
-        }
-        return Option::None;
+        return match opc >> 4 {
+            0 => Option::Some(AluOp::Add),
+            1 => Option::Some(AluOp::Sub),
+            2 => Option::Some(AluOp::Mul),
+            3 => Option::Some(AluOp::Div),
+            4 => Option::Some(AluOp::Or),
+            5 => Option::Some(AluOp::And),
+            6 => Option::Some(AluOp::Lsh),
+            7 => Option::Some(AluOp::Rsh),
+            8 => Option::Some(AluOp::Neg),
+            9 => Option::Some(AluOp::Mod),
+            10 => Option::Some(AluOp::Xor),
+            11 => Option::Some(AluOp::Mov),
+            12 => Option::Some(AluOp::Arsh),
+            _ => Option::None,
+        };
     }
     if off == 1 && opc == BpfAlu::Div {
         return Option::Some(AluOp::SDiv);
@@ -771,15 +727,11 @@ pub fn decode(pc: usize, len: usize, lo: RawInsn, hi: RawInsn) -> Insn eff [Fail
 }
 
 fn decode_slot(pc: usize, r: RawInsn, has_hi: bool, hi: RawInsn) -> Insn eff [Fail[DecodeError]] {
-    let cls = r.code & BpfClass::Mask;
-    if cls == BpfClass::Alu || cls == BpfClass::Alu64 {
-        decode_alu(pc, r)
-    } else if cls == BpfClass::Jmp || cls == BpfClass::Jmp32 {
-        decode_jmp(pc, r)
-    } else if cls == BpfClass::Ld {
-        decode_ld(pc, r, has_hi, hi)
-    } else {
-        decode_mem(pc, r)
+    match r.code & BpfClass::Mask {
+        4 | 7 => decode_alu(pc, r),
+        5 | 6 => decode_jmp(pc, r),
+        0 => decode_ld(pc, r, has_hi, hi),
+        _ => decode_mem(pc, r),
     }
 }
 
@@ -808,9 +760,16 @@ pub fn decode_all(in slots: Slice[RawInsn]) -> ChunkSeq[Insn] eff [Fail[DecodeEr
             break;
         }
         let next = wrapping_add(pc, 1);
-        let i = decode_slot(pc, slot_at(in slots, pc), next < n, slot_at(in slots, next));
+        let lo = slot_at(in slots, pc);
+        let cls = lo.code & BpfClass::Mask;
+        let hi = if cls == BpfClass::Ld && next < n {
+            slot_at(in slots, next)
+        } else {
+            raw_zero()
+        };
+        let i = decode_slot(pc, lo, next < n, hi);
         out.push(i);
-        if is_ld_imm64(i) {
+        if cls == BpfClass::Ld && is_ld_imm64(i) {
             pc = wrapping_add(pc, 2);
         } else {
             pc = next;
@@ -833,10 +792,17 @@ pub fn decode_slots(
             break;
         }
         let next = wrapping_add(pc, 1);
-        let i = decode_slot(pc, slot_at(in slots, pc), next < n, slot_at(in slots, next));
+        let lo = slot_at(in slots, pc);
+        let cls = lo.code & BpfClass::Mask;
+        let hi = if cls == BpfClass::Ld && next < n {
+            slot_at(in slots, next)
+        } else {
+            raw_zero()
+        };
+        let i = decode_slot(pc, lo, next < n, hi);
         out.push(i);
         start.push(true);
-        if is_ld_imm64(i) {
+        if cls == BpfClass::Ld && is_ld_imm64(i) {
             out.push(Insn::Exit);
             start.push(false);
             pc = wrapping_add(pc, 2);
@@ -953,7 +919,7 @@ pub fn encode(i: Insn) -> Encoded {
 
 // Little-endian wire bytes of every slot (insn::slots_to_bytes).
 pub fn slots_to_bytes(in slots: Slice[RawInsn]) -> ChunkSeq[u8] {
-    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut out: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](slots.len() << 3);
     for i in 0..slots.len() {
         let r = slot_at(in slots, narrow_usize(i));
         let off = wrapping_u16(r.off);
@@ -970,13 +936,6 @@ pub fn slots_to_bytes(in slots: Slice[RawInsn]) -> ChunkSeq[u8] {
     out
 }
 
-fn byte(in b: Slice[u8], i: u64) -> u8 {
-    match b.try_get(i) {
-        Option::Some(v) => v,
-        Option::None => 0,
-    }
-}
-
 // Slots of `bytes`, whose length must be a multiple of eight
 // (insn::slots_from_bytes).
 pub fn slots_from_bytes(in bytes: Slice[u8]) -> ChunkSeq[RawInsn] eff [Fail[DecodeError]] {
@@ -984,20 +943,21 @@ pub fn slots_from_bytes(in bytes: Slice[u8]) -> ChunkSeq[RawInsn] eff [Fail[Deco
     if n & 7 != 0 {
         Fail::raise(DecodeError::TruncatedProgram { len: narrow_usize(n) });
     }
-    let mut out: ChunkSeq[RawInsn] = ChunkSeq::new[RawInsn]();
+    let mut out: ChunkSeq[RawInsn] = ChunkSeq::with_capacity[RawInsn](n >> 3);
     let mut at: u64 = 0;
     loop {
         if !(at < n) {
             break;
         }
-        let b1 = byte(in bytes, wrapping_add(at, 1));
-        let off = widen_u16(byte(in bytes, wrapping_add(at, 2)))
-            | (widen_u16(byte(in bytes, wrapping_add(at, 3))) << 8);
-        let imm = widen_u32(byte(in bytes, wrapping_add(at, 4)))
-            | (widen_u32(byte(in bytes, wrapping_add(at, 5))) << 8)
-            | (widen_u32(byte(in bytes, wrapping_add(at, 6))) << 16)
-            | (widen_u32(byte(in bytes, wrapping_add(at, 7))) << 24);
-        out.push(raw(byte(in bytes, at), b1 & 15, b1 >> 4, wrapping_i16(off), wrapping_i32(imm)));
+        let w = match bytes.try_read_u64_le(at) {
+            Option::Some(v) => v,
+            Option::None => 0,
+        };
+        let code = wrapping_u8(w);
+        let b1 = wrapping_u8(w >> 8);
+        let off = wrapping_i16(wrapping_u16(w >> 16));
+        let imm = wrapping_i32(wrapping_u32(w >> 32));
+        out.push(raw(code, b1 & REG_NIBBLE, b1 >> 4, off, imm));
         at = wrapping_add(at, 8);
     }
     out

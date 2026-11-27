@@ -37,7 +37,10 @@ fn vesper_inline(
 }
 
 /// The flip-gate rows of this file's swaps (`swaps::on`).
-pub(super) const SWAPS: &[Swap] = &[open("inline", "0.76x; no flip-gate configuration")];
+pub(super) const SWAPS: &[Swap] = &[open(
+    "inline",
+    "flip gate FAIL: 2 of 375 corpus programs differ with every world (SELF_HOST_IR_INLINE_STEP=1), #2289",
+)];
 
 pub(super) fn register(r: &mut Registry) {
     if on("inline") {

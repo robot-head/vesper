@@ -57,11 +57,14 @@ actions:
   # time, which is what the split is balanced on. All three, like "Test all
   # targets", build optimized test binaries (`--config=ci_opt` in .bazelrc),
   # with debug assertions and overflow checks still on.
+  # 28GB like the other two differential checks: at 25GB (26.84GB total) the
+  # VM reached 27.56GB and the kernel killed self_host_verified_codegen
+  # (#2418, #2448).
   - name: "Self-host differentials"
     container_image: "ubuntu-24.04"
     resource_requests:
       cpu: 8
-      memory: 25GB
+      memory: 28GB
       disk: 60GB
     timeout: 60m
     triggers:
@@ -82,12 +85,14 @@ actions:
       - *build_tools
       - run: ./.git/vesper-aspect/aspect ci bazel-tests -- --config=ci --config=rbe_build --config=ci_tests --config=ci_opt --remote_download_outputs=minimal --build_tests_only --test_summary=short --test_tag_filters=self_host,-self_host_codegen,-self_host_part2,-lean_replay //...
 
-  # The `self_host_part2` differentials (see above).
+  # The `self_host_part2` differentials (see above). 28GB like the codegen
+  # differentials (#2306): at 25GB the kernel killed self_host_check_pact and
+  # self_host_check_fip shards on runs that rebuilt the corpus (#2385).
   - name: "Self-host differentials 2"
     container_image: "ubuntu-24.04"
     resource_requests:
       cpu: 8
-      memory: 25GB
+      memory: 28GB
       disk: 60GB
     timeout: 60m
     triggers:
@@ -114,12 +119,14 @@ actions:
   # #1950 and #1970, before self_host_native_walk reserved its 8GiB (#1993).
   # It keeps ci_tests' 18GiB local test budget: at 20GiB (#2047), five
   # codegen differentials at once ran the VM out of memory and the kernel
-  # killed the Bazel server (exit 37) on #2040 and #2048.
+  # killed the Bazel server (exit 37) on #2040 and #2048. With the newer
+  # native_walk codegen differentials added under self_host_codegen, the 25GB
+  # VM (26.84GB total) reached 27.56GB used on #2299/#2300/#2304 (#2306).
   - name: "Self-host codegen differentials"
     container_image: "ubuntu-24.04"
     resource_requests:
       cpu: 8
-      memory: 25GB
+      memory: 28GB
       disk: 60GB
     timeout: 60m
     triggers:

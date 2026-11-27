@@ -85,6 +85,12 @@ impl Session {
                 Ok(0)
             }
             Step::EmitIr => {
+                // Return codes for `emit_ir` in `modules/driver/src/lib.ves`:
+                // 1 when `self.text` holds `ir_words::program_json_input` for
+                // `@vesper/place-ir::place_ir_json_bytes`, 0 for the Rust
+                // `serde_json` fallback (unencodable >64-bit literal types).
+                const EMIT_IR_FALLBACK: i64 = 0;
+                const EMIT_IR_ENCODED: i64 = 1;
                 // The flag byte: optimize, as the driver decided.
                 let [flag] = *arg else {
                     return Err("driver: bad emit request".into());
@@ -96,9 +102,17 @@ impl Session {
                     // for `@vesper/ir-opt` (`modules/ir_opt`).
                     vesper::ir_swap::optimize(&checked.world, &mut program)?;
                 }
+                if let Some(encoded) = crate::vesper_hybrid::ir_words::program_json_input(
+                    &program,
+                    |e| serde_json::to_string_pretty(e).ok(),
+                    |x| serde_json::to_string(&x).ok(),
+                ) {
+                    self.text = encoded;
+                    return Ok(EMIT_IR_ENCODED);
+                }
                 let text = serde_json::to_string_pretty(&program).map_err(|e| e.to_string())?;
                 self.text = text.into_bytes();
-                Ok(0)
+                Ok(EMIT_IR_FALLBACK)
             }
             Step::EmitLean => {
                 self.text = lean::extract(&self.checked()?.world)?.into_bytes();

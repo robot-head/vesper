@@ -532,6 +532,23 @@ fn path_mentions(in names: Names, in syms: Syms, name: u32) -> bool {
         || names.has_prefix(name, in "MemoryOrder::".as_bytes())
 }
 
+// Whether any symbol in `0..limit` mentions `Atomic` or `MemoryOrder`.
+pub fn any_atomic_name(in names: Names, in syms: Syms, limit: u64) -> bool {
+    if widen_u64(syms.atomic) < limit || widen_u64(syms.memory_order) < limit {
+        return true;
+    }
+    let mut sym: u32 = 0;
+    for _i in 0..limit {
+        if names.has_prefix(sym, in "Atomic::".as_bytes())
+            || names.has_prefix(sym, in "MemoryOrder::".as_bytes())
+        {
+            return true;
+        }
+        sym = wrapping_add(sym, 1);
+    }
+    false
+}
+
 // `type_mentions`.
 pub fn type_mentions(in types: Types, in syms: Syms, ty: u32) -> bool {
     if ty == NONE32 {

@@ -555,3 +555,100 @@ Next (6b and later): the other per-graph plans `ir_graph_at` makes before
 it dispatches instructions (split sources, homes, early binds, placed
 writes). After those, the emission skeleton with Vesper driving each graph,
 then the JIT and object driver steps (G3).
+
+## Unoptimized bodies in the `body` hook (#2094)
+
+The `body` hook (`codegen_swap::body`) lets @vesper/codegen-scalar-emit
+emit a whole plain function. Part 6b (#2253) added direct calls, and parts
+6c to 6g widened the plan's instructions. This change opens the hook to
+unoptimized builds, which are the largest group the frame gate turned
+away. Counted over half the corpus in both modes, at 6b:
+
+| Gate reason | Functions |
+|---|---|
+| unoptimized | 217 |
+| struct result through a result pointer | about 120 |
+| failure record with capabilities | 62 |
+| generic instance | 36 |
+| small register results | about 30 |
+
+On that path `ir_graph_at` keeps no local in a register. The emitter
+follows it:
+
+- Every local, parameters included, gets its value stored to a fresh,
+  zeroed stack slot (one word, two for `i128`) right after its variable is declared. The
+  slot's address goes in a variable.
+- A read loads through that address.
+- A bind stores once, and an assignment stores twice, the second time
+  after `coerce` to the local's kind (`def_local`, then `store`). Each
+  local's kind is now in the plan, after its entry.
+- A graph of at most `FULL_REFRESH_VALUES` (256) values reads every value
+  from its register before each instruction and each terminator, not just
+  the operands.
+
+crates/vesper-codegen-swap-test/tests/self_host_native_walk_body.rs, full
+corpus (`CODEGEN_SCALAR_STEP=1`):
+
+| Check | Result |
+|---|---|
+| CLIF, objects and JIT runs | 0 differences over 952 functions (306 worlds, both modes, 82 runs) |
+| Functions emitted from Vesper | 405, up from 140 on main; 96 of them make 172 direct calls |
+
+**Rust lines deleted:** 0. Next are struct results through a result
+pointer (1,350 functions in the port libraries), then failure records
+(1,215), pointer locals (509) and generics.
+
+## Struct results in the `body` hook (#2411)
+
+A function that returns a struct or tuple gets a result pointer (`sret`)
+as its first parameter. The frame gate turned every such function away.
+This change lets the `body` hook emit the ones whose result is a product
+of scalar fields.
+
+The Rust hook now appends two things to the request after the callees:
+
+- the result pointer's value, or `NO_VALUE` when the result is in
+  registers;
+- the values that `aggregates::plan` builds in that pointer
+  (`Home::Result`), by their index in the graph.
+
+On the optimize path, a body declines when any value has another home
+(a field of a parent or a written place) or a local is split.
+
+The plan (`body.ves` in @vesper/codegen-scalar) gives a struct or tuple
+whose fields are all scalars a lane of its own (`LANE_PRODUCT`), whose
+register holds a pointer. Such a value may only be built (`INST_DATA`,
+from `Op::Data` or `Op::Tuple`) and returned (`TERM_RETURN_SRET`). Any
+other instruction, block parameter, jump argument or match scrutinee of
+that lane leaves the body to the walk. So do nested aggregates and enums.
+
+The emitter follows `Codegen::data_into`:
+
+1. Every field's value goes in a temporary.
+2. The storage is chosen. A result home writes straight into the result
+   pointer. Otherwise the optimize path takes a fresh slot with no
+   zeroing (`alloc_uninit`), and the unoptimized path takes a slot zeroed
+   a word at a time (`alloc`).
+3. On the optimize path, the words that no field overwrites whole are
+   zeroed. An `f32` field writes only the low half of its word.
+4. Each field is read back, offset (`iadd_imm`, even at 0), coerced to
+   its type and stored.
+
+A struct result that was not built in the result pointer is copied there
+a word at a time on return. The function then returns the word 0.
+
+@vesper/native-lib declares no result pointer in its signatures, so its
+test refuses a library whose function returns a struct.
+
+crates/vesper-codegen-swap-test/tests/self_host_native_walk_body.rs, full
+corpus (`CODEGEN_SCALAR_STEP=1`):
+
+| Check | Result |
+|---|---|
+| CLIF, objects and JIT runs | 0 differences over 952 functions (306 worlds, both modes, 82 runs) |
+| Functions emitted from Vesper | 446; 21 of them return a struct, which the hook turned away before |
+| New `struct_results` test | 0 differences; 10 struct-result bodies from Vesper over both modes |
+
+**Rust lines deleted:** 0. The larger share of struct results reads
+struct parameters or fields, builds nested aggregates, or joins structs
+at block parameters. Those come next, then pointer locals and generics.

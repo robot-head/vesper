@@ -56,7 +56,6 @@ struct Tc {
     i64_ty: u32,
     u64_ty: u32,
     f64_ty: u32,
-    native_float_literals: bool,
     str_ty: u32,
     never_ty: u32,
     calls: ChunkSeq[CallRow],
@@ -64,12 +63,7 @@ struct Tc {
     scratch1: ChunkSeq[u32],
 }
 
-fn tc_new(
-    sink names: Names,
-    sink types: Types,
-    sink world: World,
-    native_float_literals: bool
-) -> Tc {
+fn tc_new(sink names: Names, sink types: Types, sink world: World) -> Tc {
     let empty = ChunkSeq::new[u32]();
     let empty_p = ChunkSeq::new[u8]();
     let mut t = types;
@@ -96,7 +90,6 @@ fn tc_new(
         i64_ty: i64_ty,
         u64_ty: u64_ty,
         f64_ty: f64_ty,
-        native_float_literals: native_float_literals,
         str_ty: str_ty,
         never_ty: never_ty,
         calls: ChunkSeq::new[CallRow](),
@@ -342,14 +335,61 @@ fn conv_prefix_len(in names: Names, sym: u32) -> u64 {
         7
     } else if names.has_prefix(sym, in "wrapping_".as_bytes()) {
         9
+    } else if names.has_prefix(sym, in NEAREST_PREFIX.as_bytes()) {
+        NEAREST_PREFIX_LEN
     } else {
         0
     }
 }
 
+// The float conversions and bit reinterpretations (#2375): `nearest_<f>`
+// rounds to the float kind `f`, `to_bits_<f>` gives `f`'s bits and
+// `from_bits_<f>` reads them.
+const NEAREST_PREFIX: Str = "nearest_";
+const NEAREST_PREFIX_LEN: u64 = 8;
+
+// The operand type of `to_bits_<f>` (`f`) or `from_bits_<f>` (`f`'s bits),
+// or `NONE32`: an unsuffixed literal operand takes it (`bits_call`).
+fn bits_operand_type(inout tc: Tc, sym: u32) -> u32 {
+    let k = tc.world.k;
+    let ksym = if is_op(in tc, sym, in "to_bits_f32") {
+        k.f32_
+    } else if is_op(in tc, sym, in "to_bits_f64") {
+        k.f64_
+    } else if is_op(in tc, sym, in "from_bits_f32") {
+        k.u32_
+    } else if is_op(in tc, sym, in "from_bits_f64") {
+        k.u64_
+    } else {
+        return NONE32;
+    };
+    tc.types.named0(ksym)
+}
+
+// The result type of `to_bits_<f>` or `from_bits_<f>`, or `NONE32`.
+fn bits_target_type(inout tc: Tc, sym: u32) -> u32 {
+    let k = tc.world.k;
+    let ksym = if is_op(in tc, sym, in "to_bits_f32") {
+        k.u32_
+    } else if is_op(in tc, sym, in "to_bits_f64") {
+        k.u64_
+    } else if is_op(in tc, sym, in "from_bits_f32") {
+        k.f32_
+    } else if is_op(in tc, sym, in "from_bits_f64") {
+        k.f64_
+    } else {
+        return NONE32;
+    };
+    tc.types.named0(ksym)
+}
+
 /// Returns the target scalar type for `widen_*`, `narrow_*`, or `wrapping_<int_kind>`,
 /// or `NONE32` if `sym` is not an integer-width conversion builtin.
 fn conv_target_type(inout tc: Tc, sym: u32) -> u32 {
+    let bits_ty = bits_target_type(inout tc, sym);
+    if bits_ty != NONE32 {
+        return bits_ty;
+    }
     let off = conv_prefix_len(in tc.names, sym);
     if off == 0 {
         return NONE32;
@@ -382,6 +422,10 @@ fn conv_target_type(inout tc: Tc, sym: u32) -> u32 {
         k.isize_
     } else if sym_slice_eq(in tc.names, sym, off, in "i128") {
         k.i128_
+    } else if sym_slice_eq(in tc.names, sym, off, in "f32") {
+        k.f32_
+    } else if sym_slice_eq(in tc.names, sym, off, in "f64") {
+        k.f64_
     } else {
         NONE32
     };
@@ -413,6 +457,11 @@ fn is_same_int_op(in tc: Tc, sym: u32) -> bool {
         || is_op(in tc, sym, in "rem")
         || is_op(in tc, sym, in "min_u64")
         || is_op(in tc, sym, in "max_u64")
+        || is_op(in tc, sym, in "bit_and")
+        || is_op(in tc, sym, in "bit_or")
+        || is_op(in tc, sym, in "bit_xor")
+        || is_op(in tc, sym, in "bit_shl")
+        || is_op(in tc, sym, in "bit_shr")
 }
 
 fn join_method_sym(inout names: Names, tname: u32, mname: u32) -> u32 {
@@ -518,38 +567,55 @@ fn check_fn_call(inout tc: Tc, in a: Ast, f: FnR, receiver_ty: u32, e: Ex, ce: E
     rty
 }
 
-fn float_literal_tree(in tc: Tc, in a: Ast, eid: u64) -> bool {
-    let e = a.ex(eid);
-    if e.kind == X_LITERAL {
-        return e.a == Lit::Float;
-    }
-    let op = n32(e.a);
-    if e.kind == X_UNARY {
-        return is_op(in tc, op, in "-") && float_literal_tree(in tc, in a, e.b);
-    }
-    e.kind == X_BINARY
-        && (is_op(in tc, op, in "+")
-            || is_op(in tc, op, in "-")
-            || is_op(in tc, op, in "*")
-            || is_op(in tc, op, in "/")
-            || is_op(in tc, op, in "%"))
-        && float_literal_tree(in tc, in a, e.b)
-        && float_literal_tree(in tc, in a, e.c)
+const CALL_ARG_STRIDE: u64 = 2;
+
+fn call_arg_expr(in a: Ast, e: Ex, ai: u64) -> u64 {
+    u64_at(in a.xs, wrapping_add(e.b, wrapping_add(wrapping_mul(ai, CALL_ARG_STRIDE), 1)))
 }
 
-fn check_operands(inout tc: Tc, in a: Ast, left: u64, right: u64, expected: u32) -> (u32, u32) {
-    if tc.native_float_literals
-        && tc.types.kind(expected) == TyKind::Infer
-        && float_literal_tree(in tc, in a, left)
-    {
-        // A typed right operand supplies the kind for a literal tree on the left.
-        let rt = check_expr(inout tc, in a, right, expected);
-        let lt = check_expr(inout tc, in a, left, rt);
-        return (lt, rt);
+fn is_int_lit_expr(in tc: Tc, in a: Ast, eid: u64) -> bool {
+    match a.exs.try_get(eid) {
+        Option::Some(ex) => {
+            if ex.kind == X_LITERAL {
+                ex.a == Lit::Int || ex.a == Lit::WideInt
+            } else if ex.kind == X_UNARY && is_op(in tc, n32(ex.a), in "-") {
+                is_int_lit_expr(in tc, in a, ex.b)
+            } else {
+                false
+            }
+        },
+        Option::None => false,
     }
-    let lt = check_expr(inout tc, in a, left, expected);
-    let rt = check_expr(inout tc, in a, right, lt);
-    (lt, rt)
+}
+
+// Whether `eid` is an integer or float literal tree:
+// on the left of a binary operator it takes the right operand's type, so
+// `0.5 == x` compares as `x`'s float kind.
+fn is_num_lit_expr(in tc: Tc, in a: Ast, eid: u64) -> bool {
+    is_int_lit_expr(in tc, in a, eid) || is_float_lit_expr(in tc, in a, eid)
+}
+
+fn is_float_lit_expr(in tc: Tc, in a: Ast, eid: u64) -> bool {
+    match a.exs.try_get(eid) {
+        Option::Some(ex) => {
+            let op = n32(ex.a);
+            if ex.kind == X_LITERAL {
+                ex.a == Lit::Float
+            } else if ex.kind == X_UNARY && is_op(in tc, op, in "-") {
+                is_float_lit_expr(in tc, in a, ex.b)
+            } else {
+                ex.kind == X_BINARY
+                    && (is_op(in tc, op, in "+")
+                        || is_op(in tc, op, in "-")
+                        || is_op(in tc, op, in "*")
+                        || is_op(in tc, op, in "/")
+                        || is_op(in tc, op, in "%"))
+                    && is_float_lit_expr(in tc, in a, ex.b)
+                    && is_float_lit_expr(in tc, in a, ex.c)
+            }
+        },
+        Option::None => false,
+    }
 }
 
 fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
@@ -564,10 +630,9 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
         if e.a == Lit::Bool {
             tc.bool_ty
         } else if e.a == Lit::Float {
-            if tc.native_float_literals
-                && tc.types.kind(expected) == TyKind::Named
-                && tc.types.name(expected) == tc.world.k.f32_
-            {
+            // An unsuffixed float literal checked as an `f32` is an `f32`
+            // (the nearest one to its `f64` value).
+            if expected == tc.types.named0(tc.world.k.f32_) {
                 expected
             } else {
                 tc.f64_ty
@@ -582,6 +647,8 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
             && tc.world.k.is_integer(tc.types.name(expected))
         {
             expected
+        } else if e.a == Lit::WideInt {
+            tc.types.named0(tc.world.k.u128_)
         } else if e.a == Lit::Int && e.b > 9223372036854775807 && e.c == 0 {
             tc.u64_ty
         } else {
@@ -674,8 +741,7 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
     } else if e.kind == X_UNARY {
         let op = n32(e.a);
         if is_op(in tc, op, in "!") {
-            let _t = check_expr(inout tc, in a, e.b, tc.bool_ty);
-            tc.bool_ty
+            check_expr(inout tc, in a, e.b, expected)
         } else {
             let conv_t = conv_target_type(inout tc, op);
             if conv_t != NONE32 {
@@ -687,19 +753,41 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
         }
     } else if e.kind == X_BINARY {
         let op = n32(e.a);
-        if is_op(in tc, op, in "==")
+        if is_op(in tc, op, in "&&") || is_op(in tc, op, in "||") {
+            let _lt = check_expr(inout tc, in a, e.b, tc.bool_ty);
+            let _rt = check_expr(inout tc, in a, e.c, tc.bool_ty);
+            tc.bool_ty
+        } else if is_op(in tc, op, in "==")
             || is_op(in tc, op, in "!=")
             || is_op(in tc, op, in "<")
             || is_op(in tc, op, in ">")
             || is_op(in tc, op, in "<=")
             || is_op(in tc, op, in ">=")
-            || is_op(in tc, op, in "&&")
-            || is_op(in tc, op, in "||")
         {
-            let _ = check_operands(inout tc, in a, e.b, e.c, tc.infer_ty);
+            if is_num_lit_expr(in tc, in a, e.b) && !is_num_lit_expr(in tc, in a, e.c) {
+                let rt = check_expr(inout tc, in a, e.c, tc.infer_ty);
+                let _lt = check_expr(inout tc, in a, e.b, rt);
+            } else {
+                let lt = check_expr(inout tc, in a, e.b, tc.infer_ty);
+                let _rt = check_expr(inout tc, in a, e.c, lt);
+            }
             tc.bool_ty
+        } else if tc.types.kind(expected) == TyKind::Infer
+            && !is_op(in tc, op, in "<<")
+            && !is_op(in tc, op, in ">>")
+            && is_num_lit_expr(in tc, in a, e.b)
+            && !is_num_lit_expr(in tc, in a, e.c)
+        {
+            let rt = check_expr(inout tc, in a, e.c, expected);
+            let lt = check_expr(inout tc, in a, e.b, rt);
+            if tc.types.kind(rt) == TyKind::Infer {
+                lt
+            } else {
+                rt
+            }
         } else {
-            let (lt, rt) = check_operands(inout tc, in a, e.b, e.c, expected);
+            let lt = check_expr(inout tc, in a, e.b, expected);
+            let rt = check_expr(inout tc, in a, e.c, lt);
             if tc.types.kind(lt) == TyKind::Infer {
                 rt
             } else {
@@ -911,45 +999,62 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
                             let mut arg0_ty = tc.infer_ty;
                             let is_rot = is_op(in tc, cname, in "rotate_left")
                                 || is_op(in tc, cname, in "rotate_right");
-                            for ai in 0..e.n {
-                                let av = u64_at(
-                                    in a.xs,
-                                    wrapping_add(e.b, wrapping_add(wrapping_mul(ai, 2), 1))
-                                );
-                                let mut pt = tc.infer_ty;
-                                let mut fty_raw = tc.infer_ty;
-                                if adt == NONE32 && same_int {
-                                    if is_rot && ai == 1 {
-                                        pt = tc.types.named0(tc.world.k.u32_);
-                                    } else if ai == 0 {
-                                        pt = expected;
-                                    } else if tc.types.kind(arg0_ty) != TyKind::Infer {
-                                        pt = arg0_ty;
-                                    } else {
-                                        pt = expected;
+                            let reverse_same_int = adt == NONE32
+                                && same_int
+                                && !is_rot
+                                && e.n == CALL_ARG_STRIDE
+                                && tc.types.kind(expected) == TyKind::Infer
+                                && is_int_lit_expr(in tc, in a, call_arg_expr(in a, e, 0))
+                                && !is_int_lit_expr(in tc, in a, call_arg_expr(in a, e, 1));
+                            if reverse_same_int {
+                                let av1 = call_arg_expr(in a, e, 1);
+                                let at1 = check_expr(inout tc, in a, av1, tc.infer_ty);
+                                let av0 = call_arg_expr(in a, e, 0);
+                                arg0_ty = check_expr(inout tc, in a, av0, at1);
+                            } else {
+                                for ai in 0..e.n {
+                                    let av = call_arg_expr(in a, e, ai);
+                                    let mut pt = tc.infer_ty;
+                                    let mut fty_raw = tc.infer_ty;
+                                    if adt == NONE32 && same_int {
+                                        if is_rot && ai == 1 {
+                                            pt = tc.types.named0(tc.world.k.u32_);
+                                        } else if ai == 0 {
+                                            pt = expected;
+                                        } else if tc.types.kind(arg0_ty) != TyKind::Infer {
+                                            pt = arg0_ty;
+                                        } else {
+                                            pt = expected;
+                                        }
                                     }
-                                }
-                                if adt != NONE32 {
-                                    let v = tc.world.variant(vi);
-                                    if ai < w(v.fc) {
-                                        let f = tc.world.field(wrapping_add(w(v.fa), ai));
-                                        fty_raw = f.ty;
-                                        pt = substitute(inout tc.types, f.ty, in vars);
+                                    if adt == NONE32 && !same_int {
+                                        let bits_pt = bits_operand_type(inout tc, cname);
+                                        if bits_pt != NONE32 {
+                                            pt = bits_pt;
+                                        }
                                     }
-                                }
-                                let at = check_expr(inout tc, in a, av, pt);
-                                if ai == 0 {
-                                    arg0_ty = at;
-                                }
-                                if adt != NONE32 && gnames.len() > 0 {
-                                    infer(
-                                        inout tc.types,
-                                        tc.world.k,
-                                        fty_raw,
-                                        at,
-                                        in gnames,
-                                        inout vars
-                                    );
+                                    if adt != NONE32 {
+                                        let v = tc.world.variant(vi);
+                                        if ai < w(v.fc) {
+                                            let f = tc.world.field(wrapping_add(w(v.fa), ai));
+                                            fty_raw = f.ty;
+                                            pt = substitute(inout tc.types, f.ty, in vars);
+                                        }
+                                    }
+                                    let at = check_expr(inout tc, in a, av, pt);
+                                    if ai == 0 {
+                                        arg0_ty = at;
+                                    }
+                                    if adt != NONE32 && gnames.len() > 0 {
+                                        infer(
+                                            inout tc.types,
+                                            tc.world.k,
+                                            fty_raw,
+                                            at,
+                                            in gnames,
+                                            inout vars
+                                        );
+                                    }
                                 }
                             }
                             let rty = if adt != NONE32 {
@@ -1081,6 +1186,11 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
                                 tc.types.arg(bt, 0)
                             } else if is_op(in tc, mname, in "byte_at") {
                                 tc.types.named0(tc.world.k.u8_)
+                            } else if is_op(in tc, mname, in "cmp")
+                                && tc.names.spells(tname, in "Slice".as_bytes())
+                            {
+                                // `Slice[u8]::cmp`: `Ordering as i32` (#1996).
+                                tc.types.named0(tc.world.k.i32_)
                             } else if is_op(in tc, mname, in "try_byte_at") {
                                 let u8t = tc.types.named0(tc.world.k.u8_);
                                 let opt_nm = tc.names.intern(in "Option".as_bytes());
@@ -1298,7 +1408,6 @@ fn dummy_tc(k: Known) -> Tc {
         i64_ty: 0,
         u64_ty: 0,
         f64_ty: 0,
-        native_float_literals: false,
         str_ty: 0,
         never_ty: 0,
         calls: ChunkSeq::new[CallRow](),
@@ -1333,7 +1442,6 @@ fn rebuild_tc(
         i64_ty: tc_i64,
         u64_ty: tc_u64,
         f64_ty: tc_f64,
-        native_float_literals: tc_native_float_literals,
         str_ty: tc_str,
         never_ty: tc_never,
         calls: tc_calls_in,
@@ -1411,7 +1519,6 @@ fn rebuild_tc(
         i64_ty: tc_i64,
         u64_ty: tc_u64,
         f64_ty: tc_f64,
-        native_float_literals: tc_native_float_literals,
         str_ty: tc_str,
         never_ty: tc_never,
         calls: tc_calls,
@@ -1421,6 +1528,8 @@ fn rebuild_tc(
     let next_perm = stage2_heap_swap(s_rb);
     if next_perm < tc_perm_end {
         stage2_heap_reset(m);
+    } else if next_perm > s_rb {
+        let _ = stage2_heap_swap(next_perm);
     }
     (fresh_tc, next_perm)
 }
@@ -1429,10 +1538,9 @@ pub fn typecheck_ast(
     in a: Ast,
     sink names: Names,
     sink types: Types,
-    sink world: World,
-    native_float_literals: bool
+    sink world: World
 ) -> (Names, Types, World, ChunkSeq[CallRow], ChunkSeq[Pair]) {
-    let mut tc = tc_new(sink names, sink types, sink world, native_float_literals);
+    let mut tc = tc_new(sink names, sink types, sink world);
     let mut max_spans = 262144;
     let mut max_calls = 131072;
     let mut max_pairs = 131072;
@@ -1548,6 +1656,9 @@ pub fn typecheck_ast(
             tc.types.reserve_types(max_nodes, max_items, max_rows, max_effs);
             if tc_perm < tc_perm_end {
                 tc_perm = stage2_heap_swap(s_pre);
+                if tc_perm > s_pre {
+                    let _ = stage2_heap_swap(tc_perm);
+                }
             }
             m = stage2_heap_mark();
         }

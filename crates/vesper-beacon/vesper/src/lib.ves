@@ -245,11 +245,10 @@ pub fn bucket_index(value: u64) -> usize eff [Fail[ArithOverflow]] {
         return widen_usize(value);
     }
     let octave = high_bit(value);
-    widen_usize(
-        LINEAR_BINS
-            + (octave - FIRST_OCTAVE) * OCTAVE_BINS
-            + ((value >> (octave - SUB_BITS)) - OCTAVE_BINS)
-    )
+    let shift = wrapping_u32(wrapping_sub(octave, SUB_BITS));
+    let sub = wrapping_sub(wrapping_shr_u64(value, shift), OCTAVE_BINS);
+    let base = wrapping_shl_u64(wrapping_sub(octave, FIRST_OCTAVE), wrapping_u32(SUB_BITS));
+    widen_usize(wrapping_add(LINEAR_BINS, wrapping_add(base, sub)))
 }
 
 pub fn bin_range(index: usize) -> Option[BinRange] eff [Fail[ArithOverflow]] {
@@ -284,9 +283,9 @@ pub fn histogram_record(
     if stats.total_count == MAX_U64 {
         raise_histogram(HistogramError::TotalOverflow);
     }
-    buckets.try_set(i, count + 1);
+    buckets.try_set(i, wrapping_add(count, 1));
     exemplars.try_set(i, span_id);
-    stats.total_count = stats.total_count + 1;
+    stats.total_count = wrapping_add(stats.total_count, 1);
     // At most u64::MAX observations of at most u64::MAX each: the 128-bit
     // sum cannot overflow.
     let lo = wrapping_add(stats.sum_lo, value);
@@ -311,18 +310,19 @@ pub fn histogram_record(
 // top bit of the high word of the full product.
 fn log2_fixed(v: u64, scale: i32) -> i64 eff [Fail[ArithOverflow]] {
     let k = high_bit(v);
-    let mut x = v << (63 - k);
-    let mut frac: i64 = 0;
-    for _ in 0..widen_u64(narrow_u32(scale)) {
+    let mut x = wrapping_shl_u64(v, wrapping_u32(wrapping_sub(63, k)));
+    let mut frac: u64 = 0;
+    let steps = widen_u64(wrapping_u32(scale));
+    for _ in 0..steps {
         let (lo, hi) = mul_wide(x, x);
         // Without a branch: bit 64 of the square is the next fraction bit,
         // and the mantissa is renormalised by that bit.
-        let top = hi >> 63;
-        let low = 1 - top;
-        frac = (frac << 1) | narrow_i64(top);
-        x = (hi << low) | wrapping_mul(lo >> 63, low);
+        let top = wrapping_shr_u64(hi, 63);
+        let low = wrapping_sub(1, top);
+        frac = wrapping_shl_u64(frac, 1) | top;
+        x = wrapping_shl_u64(hi, wrapping_u32(low)) | wrapping_mul(wrapping_shr_u64(lo, 63), low);
     }
-    (narrow_i64(k) << scale) + frac
+    narrow_i64(wrapping_add(wrapping_shl_u64(k, wrapping_u32(scale)), frac))
 }
 
 pub fn exp_bucket_index(v: u64, scale: i32) -> i32 eff [Fail[ArithOverflow]] {
@@ -335,9 +335,9 @@ pub fn exp_bucket_index(v: u64, scale: i32) -> i32 eff [Fail[ArithOverflow]] {
         };
         return (ceil - 1) >> (0 - scale);
     }
-    if v & (v - 1) == 0 {
-        let k = narrow_i32(high_bit(v));
-        return (k << scale) - 1;
+    if v & wrapping_sub(v, 1) == 0 {
+        let k = high_bit(v);
+        return wrapping_i32(wrapping_sub(wrapping_shl_u64(k, wrapping_u32(scale)), 1));
     }
     // No integer other than a power of two lies on a boundary, so
     // ceil(x) - 1 = floor(x).
