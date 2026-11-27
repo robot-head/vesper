@@ -1807,11 +1807,15 @@ fn aarch64_spilling_keeps_profitable_callee_saved_block_homes() {
 }
 
 #[test]
-fn aarch64_recreates_spilled_zero_as_a_store_source_and_arithmetic_operand() {
+fn aarch64_recreates_spilled_constants_with_one_instruction() {
     const LIVE_CONSTANTS: u64 = 20;
     const STR_XZR_X0: u32 = 0xf900_001f;
     const MOV_X13_XZR: u32 = 0xaa1f_03ed;
     const ADD_X0_X13_5: u32 = 0x9100_15a0;
+    const MOVZ_X14_SHIFTED: u32 = 0xd2c2_468e;
+    const MOVN_X14_SHIFTED: u32 = 0x92c2_468e;
+    const STR_X14_X0: u32 = 0xf900_000e;
+    const SHIFTED_HALFWORD: u64 = 0x1234_0000_0000;
 
     let mut records = Vec::new();
     for value in 1..=LIVE_CONSTANTS {
@@ -1819,6 +1823,11 @@ fn aarch64_recreates_spilled_zero_as_a_store_source_and_arithmetic_operand() {
     }
     let zero = records.len() as u64 + 1;
     records.push([CONSTANT, 0, 0, 0]);
+    for bits in [SHIFTED_HALFWORD, !SHIFTED_HALFWORD] {
+        let value = records.len() as u64 + 1;
+        records.push([CONSTANT, bits, 0, 0]);
+        records.push([STORE_QWORD, 0, value, 0]);
+    }
     records.push([STORE_QWORD, 0, zero, 0]);
     let mut sum = records.len() as u64 + 1;
     records.push([ADD_IMMEDIATE, zero, 5, CELL_BITS]);
@@ -1839,6 +1848,8 @@ fn aarch64_recreates_spilled_zero_as_a_store_source_and_arithmetic_operand() {
             window == [STR_XZR_X0, MOV_X13_XZR, ADD_X0_X13_5].map(u32::to_le_bytes)
         })
     );
+    let stores = [MOVZ_X14_SHIFTED, STR_X14_X0, MOVN_X14_SHIFTED, STR_X14_X0].map(u32::to_le_bytes);
+    assert!(words.windows(stores.len()).any(|window| window == stores));
 }
 
 #[test]
@@ -1850,6 +1861,7 @@ fn aarch64_spills_live_values_and_limits_the_combined_frame() {
     const ADD_SP_64: u32 = 0x9101_03ff;
     const STR_X12_SP: u32 = 0xf900_03ec;
     const LDR_X14_SP: u32 = 0xf940_03ee;
+    const MULTIWORD_CONSTANT: u64 = 0x1234_5678_9abc_def0;
 
     let packet = |explicit_frame| {
         let mut records = Vec::new();
@@ -1858,7 +1870,7 @@ fn aarch64_spills_live_values_and_limits_the_combined_frame() {
         }
         let start = records.len() as u64;
         for value in 0..LIVE_VALUES {
-            records.push([CONSTANT, value, 0, 0]);
+            records.push([CONSTANT, MULTIWORD_CONSTANT + value, 0, 0]);
         }
         if explicit_frame != 0 {
             records.push([STACK_STORE_QWORD, start, 0, 0]);

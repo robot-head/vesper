@@ -1628,11 +1628,44 @@ fn allocate_spill(
     Option::Some(assigned)
 }
 
+fn move_halfword(bits: u64, opcode: u32) -> Option[u32] {
+    if bits == 0 {
+        return Option::Some(opcode);
+    }
+    let index = widen_u64(trailing_zeros_u64(bits)) / HALFWORD_BITS;
+    let part = wrapping_shr_u64(bits, wrapping_u32(wrapping_mul(index, HALFWORD_BITS)));
+    if part <= HALFWORD_MASK {
+        Option::Some(
+            opcode | sh(wrapping_u32(index), HALFWORD_SHIFT) | sh(wrapping_u32(part), IMM16_SHIFT)
+        )
+    } else {
+        Option::None
+    }
+}
+
+fn rematerialized_constant(in r: Record) -> Option[u32] {
+    let bits = match r.op {
+        CONSTANT => r.left,
+        FLOAT_CONSTANT => low_bits(r.left, r.extra),
+        _ => return Option::None,
+    };
+    if bits == 0 {
+        return Option::Some(REMATERIALIZED_ZERO);
+    }
+    match move_halfword(bits, MOVZ) {
+        Option::Some(instruction) => Option::Some(instruction),
+        Option::None => move_halfword(~bits, MOVN),
+    }
+}
+
 fn materialize(inout output: ChunkSeq[u8], assigned: u32, scratch: u32, frame_bytes: u64) -> u32 {
     if assigned >= SPILL_BASE {
         if assigned == REMATERIALIZED_ZERO {
             // Register 31 encodes SP in address and some arithmetic operands.
             rrr(inout output, ORR_REG, scratch, ZERO, ZERO);
+        } else if assigned >= MOVN {
+            // MOVZ and MOVN encodings lie above every frame spill location.
+            push32(inout output, assigned | scratch);
         } else {
             memory(
                 inout output,
@@ -2777,10 +2810,13 @@ fn encode_pass(
             used = used | sh(1, reg);
             reg
         } else if spill_mode {
-            if (r.op == CONSTANT || r.op == FLOAT_CONSTANT) && r.left == 0 {
-                locations.push(REMATERIALIZED_ZERO);
-                continue;
-            }
+            match rematerialized_constant(in r) {
+                Option::Some(instruction) => {
+                    locations.push(instruction);
+                    continue;
+                },
+                Option::None => (),
+            };
             match allocate_spill(inout spills, frame_bytes, value, last) {
                 Option::Some(spill) => spill,
                 Option::None => {
