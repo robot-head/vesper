@@ -2378,6 +2378,13 @@ enum CompilerExecCheck {
 /// every package it depends on.
 const COMPILER_PACKAGES: &[(&str, &str, &str, &str, CompilerExecCheck)] = &[
     (
+        "lsp-format",
+        "@vesper/lsp-format",
+        "packages/vesper-lsp-format",
+        "lsp_formatting(in \"\").len()",
+        CompilerExecCheck::CompileOnly,
+    ),
+    (
         "front",
         "@vesper/front",
         "packages/vesper-front",
@@ -2809,13 +2816,6 @@ const STAGE2_PACKAGE_GAPS: &[(&str, &str, &str, &str, &str)] = &[
         "packages/vesper-driver-commands",
         "use @vesper/driver-commands::run;\nuse @vesper/driver::args_new;\npub fn main() -> u64 eff [Ffi[StdFs], Ffi[StdEnv], Ffi[StdProcess], Ffi[HybridCommands]] { let a = args_new(); wrapping_u64(run(in a)) }\n",
         "its printing and help go through the HybridCommands import, which only the hybrid compiler's Rust implements (crates/vesper-hybrid/src/commands.rs): the Wasm entry cannot carry Ffi[HybridCommands] (WErr Entry). Both @vesper-std/process (src-wasip2, #1928) and @vesper-std/hash-sys (src-wasip2, #2323) build for WASI",
-    ),
-    (
-        "lsp-format",
-        "@vesper/lsp-format",
-        "packages/vesper-lsp-format",
-        "use @vesper/lsp-format::lsp_formatting;\npub fn main() -> u64 { lsp_formatting(in \"\").len() }\n",
-        "C BLAKE3 (@vesper-std/hash-sys) now builds for WASI (#2323); remaining gap is an unsupported unary operation in @vesper/wasm-backend (WErr Unsupported Operation at site 194)",
     ),
 ];
 
