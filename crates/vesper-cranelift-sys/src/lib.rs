@@ -46,8 +46,10 @@ pub use {cranelift_codegen, cranelift_frontend, cranelift_module, cranelift_obje
 #[cfg(not(target_family = "wasm"))]
 pub use {cranelift_jit, cranelift_native};
 
+pub mod clif_words;
 pub mod extras;
 pub mod lend;
+pub mod seam;
 pub mod seq_extras;
 pub use extras::{
     vcl_define_function_bytes, vcl_module_data_at, vcl_module_data_count, vcl_module_data_linkage,
@@ -60,6 +62,7 @@ pub use lend::{
     vcl_call_args, vcl_call_builder, vcl_call_module, vcl_call_op, vcl_call_result,
     vcl_call_return_builder, vcl_call_return_module,
 };
+pub use seam::{vcl_apply_edits, vcl_builder_finalize, vcl_function_words};
 pub use seq_extras::{
     vcl_call_memmove, vcl_call_memset, vcl_declare_anonymous_data, vcl_has_x86_pshufb_lowering,
     vcl_isa_triple_arch,
@@ -281,6 +284,12 @@ pub struct Builder {
     fctx: Option<NonNull<FunctionBuilderContext>>,
     last: Option<ir::Inst>,
     error: Option<String>,
+    /// `vcl_builder_finalize` ran: `fb` is gone and `func` is the finished
+    /// function, which the CLIF seam (`seam.rs`) reads and edits until
+    /// `vcl_define_function` takes it.
+    finalized: bool,
+    /// The last `vcl_function_words` encoding, read in pieces by offset.
+    words: seam::Words,
 }
 
 /// A data object's contents and relocations.
@@ -343,6 +352,8 @@ impl Builder {
             fctx: Some(fctx),
             last: None,
             error: None,
+            finalized: false,
+            words: seam::Words::default(),
         })
     }
     /// Finalize the builder and hand back its function.
@@ -350,11 +361,19 @@ impl Builder {
         if let Some(e) = self.error.take() {
             return Err(e);
         }
-        let fb = self.fb.take().ok_or("builder already finished")?;
-        catch_unwind(AssertUnwindSafe(|| fb.finalize())).map_err(panic_message)?;
+        if !self.finalized {
+            self.finalize()?;
+        }
         let f = self.func.take().ok_or("builder already finished")?;
         // SAFETY: `fb` is gone, so the box is no longer borrowed.
         Ok(*unsafe { Box::from_raw(f.as_ptr()) })
+    }
+    /// End the function builder and keep the function (finalized state).
+    fn finalize(&mut self) -> Result<(), String> {
+        let fb = self.fb.take().ok_or("builder already finished")?;
+        catch_unwind(AssertUnwindSafe(|| fb.finalize())).map_err(panic_message)?;
+        self.finalized = true;
+        Ok(())
     }
     fn fb(&mut self) -> &mut FunctionBuilder<'static> {
         if let Some(lent) = &mut self.lent {
@@ -2616,5 +2635,8 @@ pub fn symbols() -> Vec<(&'static str, *const u8)> {
         vcl_call_memmove,
         vcl_isa_triple_arch,
         vcl_has_x86_pshufb_lowering,
+        vcl_builder_finalize,
+        vcl_function_words,
+        vcl_apply_edits,
     ]
 }

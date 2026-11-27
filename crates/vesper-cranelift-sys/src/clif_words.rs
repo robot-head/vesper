@@ -8,6 +8,11 @@
 //! and builder calls the Rust pass makes, in the same order, so the entity
 //! numbers come out the same and the two functions print the same.
 //!
+//! It lives in the Cranelift shim (#2606) so Stage 2, which has no Rust
+//! compiler, reaches it through `vcl_function_words` and `vcl_apply_edits`
+//! (`seam.rs`) and the Cranelift component. The root crate's differential
+//! tests include this file by path, so it uses only `cranelift_codegen`.
+//!
 //! # Function words
 //!
 //! All little-endian `u64`s:
@@ -697,25 +702,30 @@ pub fn encode_with(func: &ir::Function, simd: bool, ptr: Option<Type>) -> Vec<u8
     w.iter().flat_map(|x| x.to_le_bytes()).collect()
 }
 
-struct Script<'a> {
+/// A reader over edit-script words (the cold outliner's replay in
+/// tests/common/clif_outline.rs reads its ops with it too).
+pub struct Script<'a> {
     w: &'a [u64],
     at: usize,
 }
 
-impl Script<'_> {
-    fn next(&mut self) -> Result<u64, String> {
+impl<'a> Script<'a> {
+    pub fn new(w: &'a [u64]) -> Self {
+        Script { w, at: 0 }
+    }
+    pub fn word(&mut self) -> Result<u64, String> {
         let x = *self.w.get(self.at).ok_or("edit script ends early")?;
         self.at += 1;
         Ok(x)
     }
-    fn value(&mut self) -> Result<Value, String> {
-        Ok(Value::from_u32(self.next()? as u32))
+    pub fn value(&mut self) -> Result<Value, String> {
+        Ok(Value::from_u32(self.word()? as u32))
     }
-    fn block(&mut self) -> Result<Block, String> {
-        Ok(Block::from_u32(self.next()? as u32))
+    pub fn block(&mut self) -> Result<Block, String> {
+        Ok(Block::from_u32(self.word()? as u32))
     }
-    fn values(&mut self) -> Result<Vec<Value>, String> {
-        let n = self.next()?;
+    pub fn values(&mut self) -> Result<Vec<Value>, String> {
+        let n = self.word()?;
         (0..n).map(|_| self.value()).collect()
     }
 }
@@ -732,9 +742,9 @@ fn expect<T: PartialEq + std::fmt::Debug>(what: &str, got: T, want: T) -> Result
 
 /// Replays the edit script `words` (see the module comment) on `func`.
 pub fn apply(func: &mut ir::Function, words: &[u64]) -> Result<(), String> {
-    let mut s = Script { w: words, at: 0 };
+    let mut s = Script::new(words);
     loop {
-        match s.next()? {
+        match s.word()? {
             E_END => return Ok(()),
             E_BLOCK => {
                 let want = s.block()?;
@@ -742,7 +752,7 @@ pub fn apply(func: &mut ir::Function, words: &[u64]) -> Result<(), String> {
             }
             E_PARAM => {
                 let b = s.block()?;
-                let ty = type_of(s.next()?)?;
+                let ty = type_of(s.word()?)?;
                 let want = s.value()?;
                 expect("param", func.dfg.append_block_param(b, ty), want)?;
             }
@@ -752,7 +762,7 @@ pub fn apply(func: &mut ir::Function, words: &[u64]) -> Result<(), String> {
                 func.layout.insert_block(b, before);
             }
             E_RETARGET => {
-                let inst = Inst::from_u32(s.next()? as u32);
+                let inst = Inst::from_u32(s.word()? as u32);
                 let from = s.block()?;
                 let to = s.block()?;
                 let ir::DataFlowGraph {
@@ -770,8 +780,8 @@ pub fn apply(func: &mut ir::Function, words: &[u64]) -> Result<(), String> {
             }
             E_CLONE => {
                 let b = s.block()?;
-                let inst = Inst::from_u32(s.next()? as u32);
-                let want = Inst::from_u32(s.next()? as u32);
+                let inst = Inst::from_u32(s.word()? as u32);
+                let want = Inst::from_u32(s.word()? as u32);
                 let vals = s.values()?;
                 let new = func.dfg.clone_inst(inst);
                 expect("clone", new, want)?;
@@ -791,11 +801,11 @@ pub fn apply(func: &mut ir::Function, words: &[u64]) -> Result<(), String> {
             E_INS => {
                 let b = s.block()?;
                 let made = build(func, Place::Bottom(b), &mut s)?;
-                let want = Inst::from_u32(s.next()? as u32);
+                let want = Inst::from_u32(s.word()? as u32);
                 expect("instruction", made, want)?;
             }
             E_REMOVE_INST => {
-                let inst = Inst::from_u32(s.next()? as u32);
+                let inst = Inst::from_u32(s.word()? as u32);
                 func.layout.remove_inst(inst);
             }
             E_REMOVE_BLOCK => {
@@ -803,16 +813,16 @@ pub fn apply(func: &mut ir::Function, words: &[u64]) -> Result<(), String> {
                 func.layout.remove_block(b);
             }
             E_JUMP => {
-                let inst = Inst::from_u32(s.next()? as u32);
+                let inst = Inst::from_u32(s.word()? as u32);
                 let b = s.block()?;
                 let args: Vec<BlockArg> = s.values()?.into_iter().map(BlockArg::Value).collect();
                 func.dfg.replace(inst).jump(b, &args);
             }
             E_FCONST => {
                 use cranelift_codegen::ir::immediates::{Ieee32, Ieee64};
-                let inst = Inst::from_u32(s.next()? as u32);
-                let ty = type_of(s.next()?)?;
-                let bits = s.next()?;
+                let inst = Inst::from_u32(s.word()? as u32);
+                let ty = type_of(s.word()?)?;
+                let bits = s.word()?;
                 if ty == types::F64 {
                     func.dfg.replace(inst).f64const(Ieee64::with_bits(bits));
                 } else if ty == types::F32 {
@@ -824,7 +834,7 @@ pub fn apply(func: &mut ir::Function, words: &[u64]) -> Result<(), String> {
                 }
             }
             E_ARGS => {
-                let inst = Inst::from_u32(s.next()? as u32);
+                let inst = Inst::from_u32(s.word()? as u32);
                 let vals = s.values()?;
                 let args = func.dfg.inst_args_mut(inst);
                 if args.len() != vals.len() {
@@ -846,15 +856,15 @@ pub fn apply(func: &mut ir::Function, words: &[u64]) -> Result<(), String> {
                 func.dfg.change_to_alias(dest, src);
             }
             E_MOVE_INST => {
-                let inst = Inst::from_u32(s.next()? as u32);
+                let inst = Inst::from_u32(s.word()? as u32);
                 let b = s.block()?;
                 func.layout.remove_inst(inst);
                 func.layout.append_inst(inst, b);
             }
             E_REMOVE_DEST_ARG => {
-                let inst = Inst::from_u32(s.next()? as u32);
-                let k = s.next()? as usize;
-                let a = s.next()? as usize;
+                let inst = Inst::from_u32(s.word()? as u32);
+                let k = s.word()? as usize;
+                let a = s.word()? as usize;
                 let ir::DataFlowGraph {
                     insts,
                     jump_tables,
@@ -869,20 +879,20 @@ pub fn apply(func: &mut ir::Function, words: &[u64]) -> Result<(), String> {
                     .remove(a, value_lists);
             }
             E_INS_BEFORE => {
-                let before = Inst::from_u32(s.next()? as u32);
+                let before = Inst::from_u32(s.word()? as u32);
                 let made = build(func, Place::Before(before), &mut s)?;
-                let want = Inst::from_u32(s.next()? as u32);
+                let want = Inst::from_u32(s.word()? as u32);
                 expect("instruction", made, want)?;
             }
             E_SET_UNARY => {
-                let inst = Inst::from_u32(s.next()? as u32);
-                let opcode = opcode_of(s.next()?)?;
+                let inst = Inst::from_u32(s.word()? as u32);
+                let opcode = opcode_of(s.word()?)?;
                 let arg = s.value()?;
                 func.dfg.insts[inst] = InstructionData::Unary { opcode, arg };
             }
             E_SET_BINARY => {
-                let inst = Inst::from_u32(s.next()? as u32);
-                let opcode = opcode_of(s.next()?)?;
+                let inst = Inst::from_u32(s.word()? as u32);
+                let opcode = opcode_of(s.word()?)?;
                 let a = s.value()?;
                 let b = s.value()?;
                 func.dfg.insts[inst] = InstructionData::Binary {
@@ -891,9 +901,9 @@ pub fn apply(func: &mut ir::Function, words: &[u64]) -> Result<(), String> {
                 };
             }
             E_NEW_SLOT => {
-                let size = u32::try_from(s.next()?).map_err(|e| e.to_string())?;
-                let align = u8::try_from(s.next()?).map_err(|e| e.to_string())?;
-                let want = ir::StackSlot::from_u32(s.next()? as u32);
+                let size = u32::try_from(s.word()?).map_err(|e| e.to_string())?;
+                let align = u8::try_from(s.word()?).map_err(|e| e.to_string())?;
+                let want = ir::StackSlot::from_u32(s.word()? as u32);
                 let made = func.create_sized_stack_slot(ir::StackSlotData::new(
                     ir::StackSlotKind::ExplicitSlot,
                     size,
@@ -902,9 +912,9 @@ pub fn apply(func: &mut ir::Function, words: &[u64]) -> Result<(), String> {
                 expect("slot", made, want)?;
             }
             E_ZERO_BEFORE => {
-                let inst = Inst::from_u32(s.next()? as u32);
-                let ty = type_of(s.next()?)?;
-                let want = Inst::from_u32(s.next()? as u32);
+                let inst = Inst::from_u32(s.word()? as u32);
+                let ty = type_of(s.word()?)?;
+                let want = Inst::from_u32(s.word()? as u32);
                 if ty.is_vector() {
                     let zero = func.dfg.constants.insert(vec![0u8; 16].into());
                     FuncCursor::new(func).at_inst(inst).ins().vconst(ty, zero);
@@ -919,36 +929,36 @@ pub fn apply(func: &mut ir::Function, words: &[u64]) -> Result<(), String> {
                 expect("zero", made_inst(func, Place::Before(inst))?, want)?;
             }
             E_REPLACE_BITCAST => {
-                let inst = Inst::from_u32(s.next()? as u32);
-                let ty = type_of(s.next()?)?;
-                let flags = mem_flags(s.next()?)?;
+                let inst = Inst::from_u32(s.word()? as u32);
+                let ty = type_of(s.word()?)?;
+                let flags = mem_flags(s.word()?)?;
                 let arg = s.value()?;
                 func.dfg.replace(inst).bitcast(ty, flags, arg);
             }
             E_REPLACE_STORE => {
-                let inst = Inst::from_u32(s.next()? as u32);
-                let flags = mem_flags(s.next()?)?;
+                let inst = Inst::from_u32(s.word()? as u32);
+                let flags = mem_flags(s.word()?)?;
                 let value = s.value()?;
                 let addr = s.value()?;
-                let offset = s.next()? as i64 as i32;
+                let offset = s.word()? as i64 as i32;
                 func.dfg.replace(inst).store(flags, value, addr, offset);
             }
             E_MOVE_BEFORE => {
-                let inst = Inst::from_u32(s.next()? as u32);
-                let before = Inst::from_u32(s.next()? as u32);
+                let inst = Inst::from_u32(s.word()? as u32);
+                let before = Inst::from_u32(s.word()? as u32);
                 func.layout.remove_inst(inst);
                 func.layout.insert_inst(inst, before);
             }
             E_TRUST_LOAD => {
-                let inst = Inst::from_u32(s.next()? as u32);
+                let inst = Inst::from_u32(s.word()? as u32);
                 let InstructionData::Load { flags, .. } = &mut func.dfg.insts[inst] else {
                     return Err(format!("{inst}: trusted flags on a non-load"));
                 };
                 *flags = MemFlags::trusted().with_alias_region(flags.alias_region());
             }
             E_APPEND_DEST_ARG => {
-                let inst = Inst::from_u32(s.next()? as u32);
-                let k = s.next()? as usize;
+                let inst = Inst::from_u32(s.word()? as u32);
+                let k = s.word()? as usize;
                 let v = s.value()?;
                 let ir::DataFlowGraph {
                     insts,
@@ -964,8 +974,8 @@ pub fn apply(func: &mut ir::Function, words: &[u64]) -> Result<(), String> {
                     .append_argument(v, value_lists);
             }
             E_SET_DEST => {
-                let inst = Inst::from_u32(s.next()? as u32);
-                let k = s.next()? as usize;
+                let inst = Inst::from_u32(s.word()? as u32);
+                let k = s.word()? as usize;
                 let b = s.block()?;
                 let args = block_args(&mut s)?;
                 let new = func.dfg.block_call(b, &args);
@@ -981,7 +991,7 @@ pub fn apply(func: &mut ir::Function, words: &[u64]) -> Result<(), String> {
                     .ok_or_else(|| format!("{inst}: no destination {k}"))? = new;
             }
             E_BRIF => {
-                let inst = Inst::from_u32(s.next()? as u32);
+                let inst = Inst::from_u32(s.word()? as u32);
                 let cond = s.value()?;
                 let t = s.block()?;
                 let ta = block_args(&mut s)?;
@@ -990,20 +1000,20 @@ pub fn apply(func: &mut ir::Function, words: &[u64]) -> Result<(), String> {
                 func.dfg.replace(inst).brif(cond, t, &ta, e, &ea);
             }
             E_DETACH_RESULTS => {
-                let inst = Inst::from_u32(s.next()? as u32);
+                let inst = Inst::from_u32(s.word()? as u32);
                 func.dfg.detach_inst_results(inst);
             }
             E_ICONST => {
-                let inst = Inst::from_u32(s.next()? as u32);
-                let ty = type_of(s.next()?)?;
-                let imm = s.next()? as i64;
+                let inst = Inst::from_u32(s.word()? as u32);
+                let ty = type_of(s.word()?)?;
+                let imm = s.word()? as i64;
                 func.dfg.replace(inst).iconst(ty, imm);
             }
             E_REPLACE_IMM => {
-                let inst = Inst::from_u32(s.next()? as u32);
-                let code = s.next()?;
+                let inst = Inst::from_u32(s.word()? as u32);
+                let code = s.word()?;
                 let arg = s.value()?;
-                let imm = s.next()? as i64;
+                let imm = s.word()? as i64;
                 let op = opcode_of(code)?;
                 let r = func.dfg.replace(inst);
                 match op {
@@ -1019,16 +1029,16 @@ pub fn apply(func: &mut ir::Function, words: &[u64]) -> Result<(), String> {
                 };
             }
             E_REPLACE_ICMP_IMM => {
-                let inst = Inst::from_u32(s.next()? as u32);
-                let cond = cond_of(s.next()?)?;
+                let inst = Inst::from_u32(s.word()? as u32);
+                let cond = cond_of(s.word()?)?;
                 let arg = s.value()?;
-                let imm = s.next()? as i64;
+                let imm = s.word()? as i64;
                 func.dfg.replace(inst).icmp_imm(cond, arg, imm);
             }
             E_MEM_ADDR => {
-                let inst = Inst::from_u32(s.next()? as u32);
+                let inst = Inst::from_u32(s.word()? as u32);
                 let addr = s.value()?;
-                let off = ir::immediates::Offset32::new(s.next()? as i64 as i32);
+                let off = ir::immediates::Offset32::new(s.word()? as i64 as i32);
                 match &mut func.dfg.insts[inst] {
                     InstructionData::Load { arg, offset, .. } => {
                         *arg = addr;
@@ -1047,8 +1057,8 @@ pub fn apply(func: &mut ir::Function, words: &[u64]) -> Result<(), String> {
                 func.layout.insert_block_after(b, after);
             }
             E_SLOT_SIZE => {
-                let slot = ir::StackSlot::from_u32(s.next()? as u32);
-                let size = u32::try_from(s.next()?).map_err(|e| e.to_string())?;
+                let slot = ir::StackSlot::from_u32(s.word()? as u32);
+                let size = u32::try_from(s.word()?).map_err(|e| e.to_string())?;
                 func.sized_stack_slots[slot].size = size;
             }
             op => return Err(format!("edit op {op}")),
@@ -1059,9 +1069,9 @@ pub fn apply(func: &mut ir::Function, words: &[u64]) -> Result<(), String> {
 /// `n` then `n` values, as block arguments; a [`NONE`] (an argument that is
 /// not a value) has no block argument to stand for.
 fn block_args(s: &mut Script) -> Result<Vec<BlockArg>, String> {
-    let n = s.next()?;
+    let n = s.word()?;
     (0..n)
-        .map(|_| match s.next()? {
+        .map(|_| match s.word()? {
             v if v as u32 == u32::MAX => Err("a block argument that is not a value".into()),
             v => Ok(BlockArg::Value(Value::from_u32(v as u32))),
         })
@@ -1079,14 +1089,14 @@ enum Place {
 
 /// One builder call at `place`, as the Rust passes make it.
 fn build(func: &mut ir::Function, place: Place, s: &mut Script) -> Result<Inst, String> {
-    let code = s.next()?;
-    let ty_word = s.next()?;
-    let cond_word = s.next()?;
-    let imm = s.next()? as i64;
-    let offset = s.next()? as i64 as i32;
-    let mem = s.next()?;
+    let code = s.word()?;
+    let ty_word = s.word()?;
+    let cond_word = s.word()?;
+    let imm = s.word()? as i64;
+    let offset = s.word()? as i64 as i32;
+    let mem = s.word()?;
     let args = s.values()?;
-    let n_dests = s.next()?;
+    let n_dests = s.word()?;
     let mut dests: Vec<(Block, Vec<Value>)> = vec![];
     for _ in 0..n_dests {
         let b = s.block()?;
@@ -1265,68 +1275,7 @@ fn last_inst(func: &ir::Function, block: Block) -> Result<Inst, String> {
 /// has_return trap live_ins remat shared_slots exclusive_slots ordered`
 /// (lists as `n` then entries, `remat` as (value, inst) pairs, `trap` the
 /// trap code's byte or 0), or [`E_SKIP`] for a round whose region the
-/// analysis refused.
+/// analysis refused. `native_cold_outline::apply_extraction` builds each
+/// outlined helper (tests/common/clif_outline.rs replays them).
 pub const E_OUTLINE: u64 = 7;
 pub const E_SKIP: u64 = 8;
-
-/// Replays the cold outliner's script on `func`: each [`E_OUTLINE`] goes
-/// through `native_cold_outline::apply_extraction`, which builds the helper
-/// and the stub from the port's decisions. Returns the helpers.
-pub fn apply_outline<M: cranelift_module::Module>(
-    m: &mut M,
-    parent_key: &str,
-    func: &mut ir::Function,
-    words: &[u64],
-) -> Result<Vec<(cranelift_module::FuncId, String, ir::Function)>, String> {
-    use vesper::native_cold_outline::{Extraction, apply_extraction};
-    let mut s = Script { w: words, at: 0 };
-    let mut out = vec![];
-    let blocks = |s: &mut Script| -> Result<Vec<Block>, String> {
-        let n = s.next()?;
-        (0..n).map(|_| s.block()).collect()
-    };
-    let slots = |s: &mut Script| -> Result<Vec<ir::StackSlot>, String> {
-        let n = s.next()?;
-        (0..n)
-            .map(|_| Ok(ir::StackSlot::from_u32(s.next()? as u32)))
-            .collect()
-    };
-    loop {
-        match s.next()? {
-            E_END => return Ok(out),
-            E_SKIP => {}
-            E_OUTLINE => {
-                let idx = s.next()? as usize;
-                let root = s.block()?;
-                let owned = blocks(&mut s)?.into_iter().collect();
-                let _shared = blocks(&mut s)?;
-                let has_return = s.next()? != 0;
-                let trap = s.next()?;
-                let first_trap = std::num::NonZeroU8::new(trap as u8).map(ir::TrapCode::from_raw);
-                let live_ins = s.values()?;
-                let n = s.next()?;
-                let mut remat = vec![];
-                for _ in 0..n {
-                    let v = s.value()?;
-                    remat.push((v, Inst::from_u32(s.next()? as u32)));
-                }
-                let shared_slots = slots(&mut s)?;
-                let exclusive_slots = slots(&mut s)?;
-                let ordered_blocks = blocks(&mut s)?;
-                let plan = Extraction {
-                    root,
-                    owned,
-                    has_return,
-                    first_trap,
-                    live_ins,
-                    remat,
-                    shared_slots,
-                    exclusive_slots,
-                    ordered_blocks,
-                };
-                out.push(apply_extraction(m, parent_key, idx, func, &plan)?);
-            }
-            op => return Err(format!("outline op {op}")),
-        }
-    }
-}

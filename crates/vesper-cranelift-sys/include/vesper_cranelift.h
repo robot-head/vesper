@@ -201,6 +201,12 @@ void vcl_call_memmove(vcl_builder *b, const vcl_module *m, uint32_t dst, uint32_
 uint32_t vcl_isa_triple_arch(const vcl_module *m);
 uint32_t vcl_has_x86_pshufb_lowering(const vcl_module *m);
 
+/* The CLIF seam (#2606): a finalized builder's function as the words of
+   clif_words.rs, and edit scripts replayed on it. Flags: 1 simd, 2 shapes. */
+uint32_t vcl_builder_finalize(vcl_builder *b);
+uint64_t vcl_function_words(vcl_builder *b, uint32_t flags, uint32_t ptr_ty, uint64_t offset, uint8_t *out, size_t out_len);
+uint32_t vcl_apply_edits(vcl_builder *b, const uint64_t *edits, size_t edits_len);
+
 #ifdef __cplusplus
 }
 #endif

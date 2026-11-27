@@ -1,4 +1,5 @@
-// The codes of tests/common/clif_words.rs (`OPCODES`, `TYPES`, the
+// The codes of
+// crates/vesper-cranelift-sys/src/clif_words.rs (`OPCODES`, `TYPES`, the
 // condition codes, value kinds, memory and effect bits, edit ops). 0 is
 // "another one" for opcodes and types. Append only, in step with the
 // Rust tables.
