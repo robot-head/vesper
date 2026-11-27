@@ -372,7 +372,6 @@ enum Step {
     CheckUses = 31,
     CheckFinish = 32,
     CheckReport = 33,
-    InterfaceWrite = 40,
     WasmInput = 60,
     EbpfInput = 61,
     VerifiedInput = 62,
@@ -392,7 +391,7 @@ enum Step {
     WorldBegin = 81,
 }
 
-const STEPS: [Step; 39] = [
+const STEPS: [Step; 38] = [
     Step::Load,
     Step::EbpfBuild,
     Step::Parse,
@@ -420,7 +419,6 @@ const STEPS: [Step; 39] = [
     Step::CheckUses,
     Step::CheckFinish,
     Step::CheckReport,
-    Step::InterfaceWrite,
     Step::WasmInput,
     Step::EbpfInput,
     Step::VerifiedInput,
@@ -542,7 +540,6 @@ impl Session {
             | Step::CheckReport
             | Step::EmitHir
             | Step::EmitInterface
-            | Step::InterfaceWrite
             | Step::LibBuild => self.front_step(step, arg),
             Step::Optimize
             | Step::EmitIr
