@@ -16,7 +16,7 @@
 use @vesper/check-data::util::{add, inc, n32, u32_at, u64_at, u8_at, w};
 use @vesper/check-data::names::{Names};
 use @vesper/check-data::types::{
-    Types, Vars, debug_type, default_type, substitute, vars_new, TyKind, TyMode
+    EffNode, Types, Vars, debug_type, default_type, substitute, vars_new, TyKind, TyMode
 };
 use @vesper/check-data::world::{
     Adt, Bounds, Field, Generic, Known, Variant, World, bounds_new, constructor, field_step,
@@ -96,6 +96,10 @@ const LT_PAIR: u64 = 2;
 
 // `literal_typing::PROBE_ROUNDS`: probe runs that may refine the hints.
 const PROBE_ROUNDS: u64 = 4;
+
+// The `pat` of a handler continuation's binding, whose function type is
+// not ported (`Bind`).
+const CONTINUATION: u32 = 4294967294;
 
 // The length of `::` in an `Eff::op` name.
 const PATH_SEPARATOR_LEN: u64 = 2;
@@ -975,8 +979,20 @@ pub fn error(inout ck: Ck, in code: Str, start: u64, end: u64) {
 // vectors, boxes, regions, atomics, function types, effect rows).
 fn foreign(in ck: Ck, ty: u32) -> bool {
     let node = ck.ctx.types.node(ty);
-    if node.kind == TyKind::Fn || node.kind == TyKind::Row {
+    if node.kind == TyKind::Row {
         return true;
+    }
+    if node.kind == TyKind::Fn {
+        // An effectful function type is another lane's: its effects take
+        // the signature's capability labels (`bind_signature_capabilities`)
+        // and closures' latent ones (`instantiate_latent_effects`).
+        let row = ck.ctx.types.row(node.r2);
+        if row.n != 0 || row.tail != 0 {
+            return true;
+        }
+        if foreign(in ck, node.r) {
+            return true;
+        }
     }
     if node.kind == TyKind::Named {
         let known = ck.ctx.world.k;
@@ -992,7 +1008,7 @@ fn foreign(in ck: Ck, ty: u32) -> bool {
             return true;
         }
     }
-    if node.kind == TyKind::Named || node.kind == TyKind::Tuple {
+    if node.kind == TyKind::Named || node.kind == TyKind::Tuple || node.kind == TyKind::Fn {
         for i in 0..w(node.n) {
             if foreign(in ck, item(in ck.ctx.types, add(w(node.a), i))) {
                 return true;
@@ -1248,6 +1264,27 @@ fn infer_args(inout ck: Ck, adt: Adt) -> ChunkSeq[u32] {
     args
 }
 
+// `function_value_type`: a world function as a value is a `copy`
+// function type of its parameters and (inferred) result. An effectful
+// function's effects take latent capability labels: not ported.
+fn function_value(inout ck: Ck, sig: FnSig) -> u32 {
+    if sig.effectful {
+        ck.skip = true;
+        return ck.ctx.types.infer;
+    }
+    let mut params: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let mut passes: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    for i in 0..w(sig.param_count) {
+        let param = ck.param(add(w(sig.param_start), i));
+        params.push(param.ty);
+        passes.push(param.pass);
+    }
+    let no_effects: ChunkSeq[EffNode] = ChunkSeq::new[EffNode]();
+    let no_args: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let row = ck.ctx.types.mk_row(in no_effects, in no_args, 0);
+    ck.ctx.types.mk_with(TyKind::Fn, TyMode::Copy, 0, in params, in passes, sig.inferred, row, 0)
+}
+
 fn name_expr(inout ck: Ck, e: u32, ex: Ex, expected: u32) -> u32 {
     let hole = ck.ctx.types.infer;
     let bind_index = lookup(in ck, ex.x);
@@ -1255,16 +1292,15 @@ fn name_expr(inout ck: Ck, e: u32, ex: Ex, expected: u32) -> u32 {
         // `place` on the whole binding (modes and moves: part 3). A
         // handler's continuation has a function type: not ported.
         let bound = binding(in ck, bind_index);
-        if foreign(in ck, bound.ty) {
+        if foreign(in ck, bound.ty) || bound.pat == CONTINUATION {
             ck.skip = true;
             return hole;
         }
         return literal_use(inout ck, e, bound, expected);
     }
-    if fn_index(in ck, ex.x) != NONE32 {
-        // A function value has a function type.
-        ck.skip = true;
-        return hole;
+    let f_index = fn_index(in ck, ex.x);
+    if f_index != NONE32 {
+        return function_value(inout ck, ck.fsig(f_index));
     }
     let ctor = ctor_of(in ck, ex.y, ex.z);
     if ctor != NONE64 {
@@ -2483,7 +2519,7 @@ fn bind_continuation(inout ck: Ck, pat: u32, ty: u32) {
     let p = ck.pats.pat(pat);
     if p.kind == P_BIND {
         let extra = ck.patx(pat);
-        ck.env.push(Bind { name: extra.name, ty: ty, pass: P_SINK, pat: NONE32 });
+        ck.env.push(Bind { name: extra.name, ty: ty, pass: P_SINK, pat: CONTINUATION });
     } else if p.kind != P_WILD {
         ck.skip = true;
     }
@@ -2924,6 +2960,50 @@ fn rotate_call(inout ck: Ck, ex: Ex, expected: u32) -> u32 {
     ty
 }
 
+// The end of `Checker::call`: a callee of a function type (a function
+// parameter or binding) is applied as a function with its parameters, its
+// result and no generics.
+fn value_call(inout ck: Ck, ex: Ex, expected: u32) -> u32 {
+    let hole = ck.ctx.types.infer;
+    let t = expr(inout ck, ex.x);
+    if ck.skip {
+        return hole;
+    }
+    let node = ck.ctx.types.node(t);
+    if node.kind != TyKind::Fn {
+        error(inout ck, "E0206", ex.start, ex.end);
+        return hole;
+    }
+    let param_start = ck.params.len();
+    for i in 0..w(node.n) {
+        let at = add(w(node.a), i);
+        ck.params.push(ParamSig {
+            pass: ck.ctx.types.param_pass(t, i),
+            name: 0,
+            ty: item(in ck.ctx.types, at),
+            projections: 0,
+            start: ex.start,
+            end: ex.end
+        });
+    }
+    let sig = FnSig {
+        name: 0,
+        generic_start: 0,
+        generic_count: 0,
+        param_start: n32(param_start),
+        param_count: node.n,
+        result: node.r,
+        effectful: false,
+        inferred: node.r,
+        inst_start: 0,
+        inst_count: 0,
+        effect: NONE32
+    };
+    let result = apply(inout ck, sig, ex, NONE32, expected);
+    ck.params.truncate(param_start);
+    result
+}
+
 fn call_expr(inout ck: Ck, ex: Ex, expected: u32) -> u32 {
     let hole = ck.ctx.types.infer;
     let callee = ck.ex(ex.x);
@@ -2936,6 +3016,9 @@ fn call_expr(inout ck: Ck, ex: Ex, expected: u32) -> u32 {
         && is_wrapping(in ck, callee.x)
     {
         return wrapping_call(inout ck, ex, expected);
+    }
+    if callee.kind == E_NAME && lookup(in ck, callee.x) != NONE32 && ex.y == 0 {
+        return value_call(inout ck, ex, expected);
     }
     if callee.kind != E_NAME || lookup(in ck, callee.x) != NONE32 || ex.y != 0 {
         // Closures, function values and intrinsics: not ported yet.
