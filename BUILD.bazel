@@ -1104,6 +1104,11 @@ vesper_crate(
         "test/self_host_native_walk": [
             "resources:memory:8192",
         ],
+        # Compiles export-build-driver alongside multi-threaded corpus() (#2286).
+        "test/self_host_codegen_export": [
+            "resources:memory:6144",
+            "resources:cpu:4",
+        ],
         # The CLI audit subprocess permits Lean -M8192 and runs serially.
         "test/proof_audit_cli": [
             "resources:memory:9216",
