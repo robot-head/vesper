@@ -909,6 +909,130 @@ pub fn main() -> u64 eff [Ffi[StdFs]] {{
 }
 
 #[test]
+fn std_fs_high_level_ops_work_under_wasi() {
+    if !runs_on_shard(0) {
+        return;
+    }
+
+    let pkg = fresh("std-fs-high-level-wasi");
+    std::fs::create_dir(pkg.join("src")).unwrap();
+    let work = pkg.join("work");
+    std::fs::create_dir(&work).unwrap();
+    let fs_dep = std::fs::canonicalize("packages/vesper-std/fs").unwrap();
+    std::fs::write(
+        pkg.join("Loom.toml"),
+        format!(
+            r#"[package]
+name = "@wasm-seed/std-fs-high-level-wasi"
+version = "0.1.0"
+edition = "2026"
+capability_ceiling = ["Alloc", "Fail", "Ffi[StdFs]"]
+
+[dependencies]
+"@vesper-std/fs" = {{ version = "^0.1", path = {fs_dep:?} }}
+"#
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        pkg.join("src/main.ves"),
+        r#"use @vesper-std/fs::{
+    IoError, already_exists, append, copy, create_dir_all, create_new, exists, is_dir_path,
+    is_file_path, kind_dir, kind_file, metadata, read_string, rename, write,
+};
+
+fn run_ops() -> u64 eff [Ffi[StdFs], Fail[IoError]] {
+    create_dir_all(in "/work/a/b/c");
+    // Idempotent on existing directory.
+    create_dir_all(in "/work/a/b/c");
+    if !is_dir_path(in "/work/a/b/c".as_bytes()) {
+        return 1;
+    }
+
+    create_new(in "/work/a/b/c/log.txt", in "hi".as_bytes());
+    let dup = handle Fail[IoError] in {
+        create_new(in "/work/a/b/c/log.txt", in "dup".as_bytes());
+        0
+    } with {
+        return v => v,
+        raise(e, _k) => if e.kind == already_exists() { 1 } else { 2 },
+    };
+    if dup != 1 {
+        return 2;
+    }
+
+    append(in "/work/a/b/c/log.txt", in "!".as_bytes());
+    let text = read_string(in "/work/a/b/c/log.txt");
+    if text.as_bytes().len() != 3 {
+        return 3;
+    }
+
+    let copied = copy(in "/work/a/b/c/log.txt", in "/work/a/copy.txt");
+    if copied != 3 {
+        return 4;
+    }
+    rename(in "/work/a/copy.txt", in "/work/a/moved.txt");
+    if exists(in "/work/a/copy.txt") || !is_file_path(in "/work/a/moved.txt".as_bytes()) {
+        return 5;
+    }
+
+    let fm = metadata(in "/work/a/moved.txt");
+    if fm.kind != kind_file() || fm.size != 3 {
+        return 6;
+    }
+    let dm = metadata(in "/work/a/b");
+    if dm.kind != kind_dir() {
+        return 7;
+    }
+
+    write(in "/work/a/moved.txt", in "done".as_bytes());
+    let fm2 = metadata(in "/work/a/moved.txt");
+    if fm2.size != 4 {
+        return 8;
+    }
+    42
+}
+
+pub fn main() -> u64 eff [Ffi[StdFs]] {
+    handle Fail[IoError] in {
+        run_ops()
+    } with {
+        return v => v,
+        raise(e, _k) => wrapping_add(1_000_000, widen_u64(e.kind)),
+    }
+}
+"#,
+    )
+    .unwrap();
+
+    let assembled =
+        vesper::packages::load_for_target(&pkg, Some(vesper::wasm_backend::TARGET), false).unwrap();
+    assert!(
+        assembled.ok(),
+        "{:?} {:?}",
+        assembled.diagnostics,
+        assembled.manifest_errors
+    );
+    let checked = vesper::ffi_lowering::check_module(&assembled.module, &imports())
+        .unwrap_or_else(|e| panic!("{e}: {:?}", e.diagnostics));
+    let wasm = port(&checked, &options(false)).expect("compile std_fs high-level probe");
+    let ctx = Ctx {
+        dirs: vec![(work.clone(), "/work".to_string())],
+        ..Ctx::default()
+    };
+    let got = run(&wasm, &ctx).expect("run std_fs high-level probe");
+    assert_eq!(got, 42);
+    assert_eq!(
+        std::fs::read_to_string(work.join("a/b/c/log.txt")).unwrap(),
+        "hi!"
+    );
+    assert_eq!(
+        std::fs::read_to_string(work.join("a/moved.txt")).unwrap(),
+        "done"
+    );
+}
+
+#[test]
 fn remove_dir_all_deletes_nested_tree_under_wasi() {
     if !runs_on_shard(0) {
         return;
