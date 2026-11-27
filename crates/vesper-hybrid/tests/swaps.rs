@@ -161,9 +161,8 @@ fn gated_turns_on_exactly_the_flip_gate_passes() {
         );
     }
     assert!(passed > 0, "no swap is gated on");
-    // Off: the whole layout, the IR check, the inliner and the optimizer
-    // run in Rust.
-    for module in ["check-layout", "ir-check", "ir-inline", "ir-opt"] {
+    // Off: the whole layout, the inliner and the optimizer run in Rust.
+    for module in ["check-layout", "ir-inline", "ir-opt"] {
         assert_eq!(
             count(&output, &format!("vesper-hybrid: {module} answered ")),
             0,

@@ -64,36 +64,46 @@ fn differential_cases(
 ) -> (usize, usize, usize) {
     let (mut bad, mut diags, mut cases, mut rust_only) = (0, 0, 0, 0);
     let start = std::time::Instant::now();
-    for c in &ir_cases_where(mutants, |i| i % step == 0) {
-        let Some(input) = input(c) else {
-            rust_only += 1;
-            continue;
-        };
-        let rust = vesper::ir_check::validate(c.world, &c.program);
-        diags += rust.len();
-        cases += 1;
-        let r = diagnostics_text(&rust);
-        let mut differs = false;
-        if let Some(d) = first_difference(&r, &text.text(&input)) {
-            differs = true;
-            if bad < 5 {
-                eprintln!("ir check text: {} differs at {d}", c.name);
-            }
-        }
-        if let Some(words) = words {
-            let decoded = check_words::decode_diagnostics(&words.words(&input));
-            if decoded != rust {
+    // The sampled worlds in `HYBRID_IR_CHECK_CHUNKS` groups, lowered one
+    // group at a time: the whole corpus with its mutants held at once does
+    // not fit a 16 GB host, so the flip gate runs every world in chunks.
+    let chunks = std::env::var("HYBRID_IR_CHECK_CHUNKS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .filter(|n: &usize| *n > 0)
+        .unwrap_or(1);
+    for chunk in 0..chunks {
+        for c in &ir_cases_where(mutants, |i| i % step == 0 && (i / step) % chunks == chunk) {
+            let Some(input) = input(c) else {
+                rust_only += 1;
+                continue;
+            };
+            let rust = vesper::ir_check::validate(c.world, &c.program);
+            diags += rust.len();
+            cases += 1;
+            let r = diagnostics_text(&rust);
+            let mut differs = false;
+            if let Some(d) = first_difference(&r, &text.text(&input)) {
                 differs = true;
                 if bad < 5 {
-                    eprintln!(
-                        "ir check words: {}:\n  rust:   {r}\n  vesper: {}",
-                        c.name,
-                        diagnostics_text(&decoded)
-                    );
+                    eprintln!("ir check text: {} differs at {d}", c.name);
                 }
             }
+            if let Some(words) = words {
+                let decoded = check_words::decode_diagnostics(&words.words(&input));
+                if decoded != rust {
+                    differs = true;
+                    if bad < 5 {
+                        eprintln!(
+                            "ir check words: {}:\n  rust:   {r}\n  vesper: {}",
+                            c.name,
+                            diagnostics_text(&decoded)
+                        );
+                    }
+                }
+            }
+            bad += differs as usize;
         }
-        bad += differs as usize;
     }
     eprintln!(
         "ir check: {bad} of {cases} cases differ ({diags} Rust diagnostics, \
