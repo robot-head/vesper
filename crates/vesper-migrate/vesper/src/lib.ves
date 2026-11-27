@@ -493,3 +493,108 @@ pub fn migrate_filter_directives(in src: Slice[u8], inout out: Slice[u8]) -> u64
     }
     pack(FILTER_OK, w)
 }
+
+// ---------------------------------------------------------------------------
+// Deterministic SplitMix64 shadow input generator (`src/shadow.rs`).
+
+const SM64_GAMMA: u64 = 11400714819323198485;
+const SM64_MIX1: u64 = 13787848793156543929;
+const SM64_MIX2: u64 = 10723151780598845931;
+const SM64_SHIFT1: u64 = 30;
+const SM64_SHIFT2: u64 = 27;
+const SM64_SHIFT3: u64 = 31;
+const SM64_TOP_BYTE_SHIFT: u64 = 56;
+const SM64_PREFIX_MASK: u64 = 3;
+const SM64_MAX_U64: u64 = 18446744073709551615;
+
+fn sm64_mix(state: u64) -> u64 {
+    let z1 = wrapping_mul(state ^ (state >> SM64_SHIFT1), SM64_MIX1);
+    let z2 = wrapping_mul(z1 ^ (z1 >> SM64_SHIFT2), SM64_MIX2);
+    z2 ^ (z2 >> SM64_SHIFT3)
+}
+
+fn u64_rem(val: u64, modulus: u64) -> u64 {
+    let mut rem = val;
+    let mut bit: u64 = 64;
+    let mut r: u64 = 0;
+    loop {
+        if bit == 0 {
+            break;
+        }
+        bit = wrapping_sub(bit, 1);
+        let shift_bit = bit;
+        // Branchless-free exact modulo via restoring division is avoided when
+        // modulus is small; here we use restoring division with fixed shifts.
+        let _ = shift_bit;
+        break;
+    }
+    // Exact binary long division for `rem % modulus` without dynamic shifts.
+    let mut d = modulus;
+    let mut count: u64 = 0;
+    loop {
+        if d > (rem >> 1) {
+            break;
+        }
+        d = d << 1;
+        count = wrapping_add(count, 1);
+    }
+    loop {
+        if rem >= d {
+            rem = wrapping_sub(rem, d);
+        }
+        if count == 0 {
+            break;
+        }
+        d = d >> 1;
+        count = wrapping_sub(count, 1);
+    }
+    let _ = r;
+    rem
+}
+
+// Generates a SplitMix64 byte vector of length `0..=max_len` into `out`,
+// reading and updating `state_buf[0]`, and returns the generated length.
+pub fn migrate_splitmix64_bytes(
+    inout state_buf: Slice[u64],
+    max_len: u64,
+    in prefix: Slice[u8],
+    inout out: Slice[u8]
+) -> u64 {
+    let mut st = match state_buf.try_get(0) {
+        Some(v) => v,
+        None => 0
+    };
+    st = wrapping_add(st, SM64_GAMMA);
+    let draw_len = sm64_mix(st);
+    let len = if max_len == SM64_MAX_U64 {
+        draw_len
+    } else {
+        u64_rem(draw_len, wrapping_add(max_len, 1))
+    };
+    let capped = if len > out.len() { out.len() } else { len };
+
+    st = wrapping_add(st, SM64_GAMMA);
+    let keep_prefix = (sm64_mix(st) & SM64_PREFIX_MASK) == 0;
+    let p_len = prefix.len();
+
+    let mut i: u64 = 0;
+    loop {
+        if i >= capped {
+            break;
+        }
+        let b: u8 = if keep_prefix && i < p_len {
+            match prefix.try_get(i) {
+                Some(v) => v,
+                None => 0
+            }
+        } else {
+            st = wrapping_add(st, SM64_GAMMA);
+            wrapping_u8(sm64_mix(st) >> SM64_TOP_BYTE_SHIFT)
+        };
+        let _ = out.try_set(i, b);
+        i = wrapping_add(i, 1);
+    }
+
+    let _ = state_buf.try_set(0, st);
+    capped
+}
