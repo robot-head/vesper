@@ -471,18 +471,15 @@ impl Clone for PortProcessTable {
     }
 }
 
-#[cfg(feature = "vesper-port")]
 #[derive(Debug)]
 pub(crate) struct PortFailureTable(crate::port::FailureTable);
 
-#[cfg(feature = "vesper-port")]
 impl Clone for PortFailureTable {
     fn clone(&self) -> Self {
         Self(crate::port::sim_failure_table_clone(&self.0))
     }
 }
 
-#[cfg(feature = "vesper-port")]
 fn fail_op_code(op: FailOp) -> u64 {
     match op {
         FailOp::Append => 0,
@@ -503,11 +500,7 @@ pub(crate) struct ModelState {
     pub process_table: PortProcessTable,
     pub logs: BTreeMap<String, LogState>,
     pub networks: BTreeMap<String, NetState>,
-    #[cfg(not(feature = "vesper-port"))]
-    pub occurrences: BTreeMap<(String, FailOp), u64>,
-    #[cfg(feature = "vesper-port")]
     pub failure_targets: BTreeMap<String, u64>,
-    #[cfg(feature = "vesper-port")]
     pub failure_table: PortFailureTable,
     #[cfg(not(feature = "vesper-port"))]
     pub crashes: u32,
@@ -584,27 +577,14 @@ impl ModelState {
         target: &str,
         op: FailOp,
     ) -> (u64, Option<u32>) {
-        #[cfg(feature = "vesper-port")]
-        {
-            let _ = plan;
-            let target_id = self.failure_targets[target];
-            let (occ, has_code, code) = crate::port::sim_failure_table_next(
-                &mut self.failure_table.0,
-                target_id,
-                fail_op_code(op),
-            );
-            (occ, has_code.then_some(code as u32))
-        }
-        #[cfg(not(feature = "vesper-port"))]
-        {
-            let count = self.occurrences.entry((target.into(), op)).or_insert(0);
-            *count += 1;
-            let occurrence = *count;
-            (
-                occurrence,
-                plan.failures.get(&(target.into(), op, occurrence)).copied(),
-            )
-        }
+        let _ = plan;
+        let target_id = self.failure_targets[target];
+        let (occ, has_code, code) = crate::port::sim_failure_table_next(
+            &mut self.failure_table.0,
+            target_id,
+            fail_op_code(op),
+        );
+        (occ, has_code.then_some(code as u32))
     }
 
     pub fn new(plan: &ModelPlan, seed: u64) -> Self {
@@ -676,7 +656,6 @@ impl ModelState {
                 )
             })
             .collect();
-        #[cfg(feature = "vesper-port")]
         let failure_targets: BTreeMap<String, u64> = spec
             .logs
             .iter()
@@ -685,7 +664,6 @@ impl ModelState {
             .enumerate()
             .map(|(i, name)| (name, i as u64))
             .collect();
-        #[cfg(feature = "vesper-port")]
         let failure_table = {
             let mut rules = Vec::with_capacity(plan.failures.len() * 4);
             for ((target, op, occ), code) in &plan.failures {
@@ -703,11 +681,7 @@ impl ModelState {
             process_table,
             logs,
             networks,
-            #[cfg(not(feature = "vesper-port"))]
-            occurrences: BTreeMap::new(),
-            #[cfg(feature = "vesper-port")]
             failure_targets,
-            #[cfg(feature = "vesper-port")]
             failure_table,
             #[cfg(not(feature = "vesper-port"))]
             crashes: 0,
@@ -1116,4 +1090,67 @@ pub(crate) fn validate(
         process_index,
         failures,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const TARGET_COUNT: usize = 8;
+    const RULE_COUNT: usize = 20;
+    const RULE_OCCURRENCE_STEP: u64 = 5;
+    const RULE_CODE_BASE: u32 = 100;
+    const CALL_COUNT: usize = 500;
+
+    #[test]
+    fn failure_table_matches_rust_reference() {
+        let ops = [FailOp::Append, FailOp::Flush, FailOp::Send];
+        let target_names: Vec<String> = (0..TARGET_COUNT).map(|i| format!("target_{i}")).collect();
+        let mut plan_failures: BTreeMap<(String, FailOp, u64), u32> = BTreeMap::new();
+        let mut rules_flat = Vec::with_capacity(RULE_COUNT * 4);
+        for r in 0..RULE_COUNT {
+            let tid = r % TARGET_COUNT;
+            let op = ops[r % ops.len()];
+            let occ = (r as u64 + 1) * RULE_OCCURRENCE_STEP;
+            let code = (r as u32) + RULE_CODE_BASE;
+            plan_failures.insert((target_names[tid].clone(), op, occ), code);
+            rules_flat.extend_from_slice(&[tid as u64, fail_op_code(op), occ, u64::from(code)]);
+        }
+
+        let mut rust_occ: BTreeMap<(String, FailOp), u64> = BTreeMap::new();
+        let mut vesper_tbl = PortFailureTable(crate::port::sim_failure_table_new(&rules_flat));
+        let mut vesper_clone = vesper_tbl.clone();
+
+        for i in 0..CALL_COUNT {
+            let tid = i % TARGET_COUNT;
+            let op = ops[i % ops.len()];
+            let target = &target_names[tid];
+            let count = rust_occ.entry((target.clone(), op)).or_insert(0);
+            *count += 1;
+            let expected_occ = *count;
+            let expected_code = plan_failures
+                .get(&(target.clone(), op, expected_occ))
+                .copied();
+
+            let (occ, has_code, code) = crate::port::sim_failure_table_next(
+                &mut vesper_tbl.0,
+                tid as u64,
+                fail_op_code(op),
+            );
+            assert_eq!(
+                (occ, has_code.then_some(code as u32)),
+                (expected_occ, expected_code)
+            );
+
+            let (occ_c, has_code_c, code_c) = crate::port::sim_failure_table_next(
+                &mut vesper_clone.0,
+                tid as u64,
+                fail_op_code(op),
+            );
+            assert_eq!(
+                (occ_c, has_code_c.then_some(code_c as u32)),
+                (expected_occ, expected_code)
+            );
+        }
+    }
 }
