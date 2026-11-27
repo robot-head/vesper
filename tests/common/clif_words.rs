@@ -68,7 +68,13 @@
 //!   explicit slot (the slot steps);
 //! - [`E_ZERO_BEFORE`] `inst type new`: a zero of `type` just before `inst`,
 //!   as `promote_slots` makes it (`vconst` of a new 16-byte zero constant,
-//!   `f32const`, `f64const` or `iconst`).
+//!   `f32const`, `f64const` or `iconst`);
+//! - [`E_REPLACE_BITCAST`] `inst type mem arg`: `dfg.replace(inst).bitcast`
+//!   (`vector_registers`);
+//! - [`E_REPLACE_STORE`] `inst mem value addr offset`:
+//!   `dfg.replace(inst).store`;
+//! - [`E_MOVE_BEFORE`] `inst before`: `layout.remove_inst`, then
+//!   `layout.insert_inst` before `before` (`sink_slot_inits`).
 //! - [`E_APPEND_DEST_ARG`] `inst k value`: `append_argument` on destination
 //!   `k` of `inst` (the branch steps of #2423);
 //! - [`E_SET_DEST`] `inst k block n args...`: destination `k` of `inst`
@@ -125,6 +131,9 @@ pub const E_SET_UNARY: u64 = 20;
 pub const E_SET_BINARY: u64 = 21;
 pub const E_NEW_SLOT: u64 = 22;
 pub const E_ZERO_BEFORE: u64 = 23;
+pub const E_REPLACE_BITCAST: u64 = 24;
+pub const E_REPLACE_STORE: u64 = 25;
+pub const E_MOVE_BEFORE: u64 = 26;
 // 64 up: the branch and fold steps of #2423 (20 to 63 are #2362's).
 pub const E_APPEND_DEST_ARG: u64 = 64;
 pub const E_SET_DEST: u64 = 65;
@@ -795,6 +804,27 @@ pub fn apply(func: &mut ir::Function, words: &[u64]) -> Result<(), String> {
                     };
                 }
                 expect("zero", made_inst(func, Place::Before(inst))?, want)?;
+            }
+            E_REPLACE_BITCAST => {
+                let inst = Inst::from_u32(s.next()? as u32);
+                let ty = type_of(s.next()?)?;
+                let flags = mem_flags(s.next()?)?;
+                let arg = s.value()?;
+                func.dfg.replace(inst).bitcast(ty, flags, arg);
+            }
+            E_REPLACE_STORE => {
+                let inst = Inst::from_u32(s.next()? as u32);
+                let flags = mem_flags(s.next()?)?;
+                let value = s.value()?;
+                let addr = s.value()?;
+                let offset = s.next()? as i64 as i32;
+                func.dfg.replace(inst).store(flags, value, addr, offset);
+            }
+            E_MOVE_BEFORE => {
+                let inst = Inst::from_u32(s.next()? as u32);
+                let before = Inst::from_u32(s.next()? as u32);
+                func.layout.remove_inst(inst);
+                func.layout.insert_inst(inst, before);
             }
             E_APPEND_DEST_ARG => {
                 let inst = Inst::from_u32(s.next()? as u32);
