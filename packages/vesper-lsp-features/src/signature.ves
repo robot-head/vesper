@@ -383,13 +383,13 @@ fn put_u128(inout o: ChunkSeq[u8], hi: u64, lo: u64) {
         }
         // Long division of the four 32-bit limbs by ten.
         let mut r: u64 = 0;
-        let mut cur = wrapping_add(wrapping_shl_u64(r, HALF_WORD_BITS), h >> 32);
+        let mut cur = wrapping_add(wrapping_shl_u64(r, HALF_WORD_BITS), h >> HALF_WORD_BITS);
         let q3 = cur / DECIMAL;
         r = cur % DECIMAL;
         cur = wrapping_add(wrapping_shl_u64(r, HALF_WORD_BITS), h & HALF_WORD_MASK);
         let q2 = cur / DECIMAL;
         r = cur % DECIMAL;
-        cur = wrapping_add(wrapping_shl_u64(r, HALF_WORD_BITS), l >> 32);
+        cur = wrapping_add(wrapping_shl_u64(r, HALF_WORD_BITS), l >> HALF_WORD_BITS);
         let q1 = cur / DECIMAL;
         r = cur % DECIMAL;
         cur = wrapping_add(wrapping_shl_u64(r, HALF_WORD_BITS), l & HALF_WORD_MASK);

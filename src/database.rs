@@ -507,6 +507,11 @@ pub mod signature_tags {
     pub const PASS_SINK: u64 = 2;
     pub const TEMPERATURE_HOT: u64 = 0;
     pub const TEMPERATURE_COLD: u64 = 1;
+    /// Bytes per word, where a type writes its byte length (after its tag)
+    /// and the width of each half of a 128-bit integer literal.
+    pub const WORD_BYTES: usize = 8;
+    pub const TYPE_LENGTH_AT: usize = WORD_BYTES;
+    pub const LIMB_BITS: u32 = 64;
 }
 
 /// [`signature_snapshot`]'s extraction and digest over `checked` (`None`
@@ -597,7 +602,7 @@ impl SignatureWords {
             ast::Type::IntLiteral(n) => {
                 let bits = *n as u128;
                 self.word(bits as u64);
-                self.word((bits >> 64) as u64);
+                self.word((bits >> signature_tags::LIMB_BITS) as u64);
             }
             ast::Type::Named(name, args) => {
                 self.text(name);
@@ -627,7 +632,9 @@ impl SignatureWords {
             ast::Type::Infer => {}
         }
         let len = (self.0.len() - at) as u64;
-        self.0[at + 8..at + 16].copy_from_slice(&len.to_le_bytes());
+        let length_at = at + signature_tags::TYPE_LENGTH_AT;
+        self.0[length_at..length_at + signature_tags::WORD_BYTES]
+            .copy_from_slice(&len.to_le_bytes());
     }
     fn effects(&mut self, e: &ast::Effects) {
         self.word(e.instances.len() as u64);
@@ -672,8 +679,8 @@ impl SignatureWords {
         let at = self.0.len();
         self.word(0);
         build(self);
-        let len = (self.0.len() - at - 8) as u64;
-        self.0[at..at + 8].copy_from_slice(&len.to_le_bytes());
+        let len = (self.0.len() - at - signature_tags::WORD_BYTES) as u64;
+        self.0[at..at + signature_tags::WORD_BYTES].copy_from_slice(&len.to_le_bytes());
     }
 }
 
