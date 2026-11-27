@@ -5,10 +5,12 @@ use @vesper/hybrid-native-backend::elf::{x86_text_object};
 use @vesper/hybrid-native-backend::scalar::{
     ADD, AND, BLOCK_LABEL, BLOCK_RETURN, BRANCH_BLOCK, CALL, CALL_ARGUMENT, COMPARE, COMPARE_BYTE,
     COMPARE_DWORD, COMPARE_IMMEDIATE, COMPARE_WORD, CONSTANT, EQUAL, HEADER_WORDS, JUMP_LABEL,
-    MAX_ARGUMENTS, MUL, NOT_EQUAL, NO_VALUE, NOT, OR, RECORD_WORDS, RETURN_VALUE, SIGNED_GREATER,
-    SIGNED_GREATER_EQUAL, SIGNED_LESS, SIGNED_LESS_EQUAL, SIGN_EXTEND, STACK_LOAD, STACK_SLOT,
-    STACK_STORE_QWORD, SUB, TRUNCATE, UNSIGNED_GREATER, UNSIGNED_GREATER_EQUAL, UNSIGNED_LESS,
-    UNSIGNED_LESS_EQUAL, XOR, encode_block
+    MAX_ARGUMENTS, MUL, NEG, NOT_EQUAL, NO_VALUE, NOT, OR, RECORD_WORDS, RETURN_VALUE, Record, SAR,
+    SAR_REGISTER, SHL, SHL_REGISTER, SHR, SHR_REGISTER, SIGNED_DIV, SIGNED_GREATER,
+    SIGNED_GREATER_EQUAL, SIGNED_LESS, SIGNED_LESS_EQUAL, SIGNED_REM, SIGN_EXTEND, STACK_LOAD,
+    STACK_SLOT, STACK_STORE_QWORD, SUB, TRUNCATE, UNSIGNED_DIV, UNSIGNED_GREATER,
+    UNSIGNED_GREATER_EQUAL, UNSIGNED_LESS, UNSIGNED_LESS_EQUAL, UNSIGNED_REM, XOR, encode_block,
+    read_record
 };
 use @vesper/hybrid-native-backend::x86_64::{
     ALL_REGISTER_BITS, BYTE_BITS, DWORD_BITS, QWORD_BITS, WORD_BITS
@@ -162,6 +164,25 @@ impl Function {
         self.words.push(rhs);
         self.words.push(extra);
         value
+    }
+
+    fn definition(in self, value: u64) -> Option[Record] {
+        if value < self.arguments || value == NO_VALUE {
+            Option::None
+        } else {
+            Option::Some(read_record(in self.words.as_slice(), wrapping_sub(value, self.arguments)))
+        }
+    }
+
+    fn constant(in self, value: u64) -> Option[u64] {
+        match self.definition(value) {
+            Option::Some(record) => if record.op == CONSTANT {
+                Option::Some(record.left)
+            } else {
+                Option::None
+            },
+            Option::None => Option::None,
+        }
     }
 
     fn home(inout self, id: u64, block: u64) -> bool {
@@ -851,6 +872,14 @@ fn plan_homes(in low: L, f: FnR, row: FnRow, inout m: Function) -> bool {
     true
 }
 
+fn low_bits_mask(width: u64) -> u64 {
+    wrapping_shr_u64(ALL_REGISTER_BITS, wrapping_u32(wrapping_sub(QWORD_BITS, width)))
+}
+
+fn sign_bit(width: u64) -> u64 {
+    wrapping_shl_u64(1, wrapping_u32(wrapping_sub(width, 1)))
+}
+
 fn literal_bits(in low: L, at: u64, kind: u8) -> Option[u64] {
     let literal = low.program.op(at);
     let bits = low.program.op(add(at, LITERAL_LOW));
@@ -862,10 +891,9 @@ fn literal_bits(in low: L, at: u64, kind: u8) -> Option[u64] {
         return Option::None;
     }
     let width = abi_width(kind);
-    let mask = wrapping_shr_u64(ALL_REGISTER_BITS, wrapping_u32(wrapping_sub(QWORD_BITS, width)));
+    let mask = low_bits_mask(width);
     let upper_mask = mask ^ ALL_REGISTER_BITS;
-    let sign = wrapping_shl_u64(1, wrapping_u32(wrapping_sub(width, 1)));
-    let fill = if is_signed(kind) && (bits & sign) != 0 {
+    let fill = if is_signed(kind) && (bits & sign_bit(width)) != 0 {
         ALL_REGISTER_BITS
     } else {
         0
@@ -991,6 +1019,115 @@ fn comparison_operation(kind: u8) -> u64 {
     }
 }
 
+fn constant_below(in m: Function, value: u64, limit: u64) -> bool {
+    m.constant(value).unwrap_or(limit) < limit
+}
+
+fn lower_shift(left: bool, signed: bool, width: u64, lhs: u64, rhs: u64, inout m: Function) -> u64 {
+    match m.constant(rhs) {
+        Option::Some(count) => {
+            if count >= width {
+                return NO_VALUE;
+            }
+            if count == 0 {
+                return lhs;
+            }
+            let op = if left {
+                SHL
+            } else if signed {
+                SAR
+            } else {
+                SHR
+            };
+            return m.record(op, lhs, count, width);
+        },
+        Option::None => {},
+    };
+    // A mask smaller than the operand width also clears the amount's sign
+    // bit when needed, or bounds its raw pattern more tightly than the shift.
+    let mask = match m.definition(rhs) {
+        Option::Some(record) => record,
+        Option::None => return NO_VALUE,
+    };
+    if mask.op != AND
+        || !(constant_below(in m, mask.left, width) || constant_below(in m, mask.right, width))
+    {
+        return NO_VALUE;
+    }
+    let op = if left {
+        SHL_REGISTER
+    } else if signed {
+        SAR_REGISTER
+    } else {
+        SHR_REGISTER
+    };
+    if width >= DWORD_BITS {
+        return m.record(op, lhs, rhs, width);
+    }
+    let value = if op == SAR_REGISTER {
+        m.record(SIGN_EXTEND, lhs, width, DWORD_BITS)
+    } else {
+        lhs
+    };
+    let result = m.record(op, value, rhs, DWORD_BITS);
+    m.record(TRUNCATE, result, DWORD_BITS, width)
+}
+
+fn lower_division(
+    remainder: bool,
+    signed: bool,
+    width: u64,
+    lhs: u64,
+    rhs: u64,
+    inout m: Function
+) -> u64 {
+    let divisor = match m.constant(rhs) {
+        Option::Some(bits) => bits,
+        Option::None => return NO_VALUE,
+    };
+    if divisor == 0 {
+        return NO_VALUE;
+    }
+    let mask = low_bits_mask(width);
+    if remainder && (divisor == 1 || (signed && divisor == mask)) {
+        // MIN % -1 is zero, even though the hardware quotient overflows.
+        return m.record(CONSTANT, 0, 0, 0);
+    }
+    if divisor == 1 {
+        return lhs;
+    }
+    if signed && divisor == mask {
+        let minimum = sign_bit(width);
+        if m.constant(lhs).unwrap_or(minimum) == minimum {
+            return NO_VALUE;
+        }
+        return m.record(NEG, lhs, 0, width);
+    }
+    let op = if signed {
+        if remainder { SIGNED_REM } else { SIGNED_DIV }
+    } else if remainder {
+        UNSIGNED_REM
+    } else {
+        UNSIGNED_DIV
+    };
+    if width >= DWORD_BITS {
+        return m.record(op, lhs, rhs, width);
+    }
+    let dividend = if signed {
+        m.record(SIGN_EXTEND, lhs, width, DWORD_BITS)
+    } else {
+        lhs
+    };
+    let divisor_value = if signed && (divisor & sign_bit(width)) != 0 {
+        let extended = divisor | (low_bits_mask(DWORD_BITS) ^ mask);
+        m.record(CONSTANT, extended, 0, 0)
+    } else {
+        rhs
+    };
+    let result = m.record(op, dividend, divisor_value, DWORD_BITS);
+    m.record(TRUNCATE, result, DWORD_BITS, width)
+}
+
 fn lower_binary(
     in low: L,
     at: u64,
@@ -1003,7 +1140,8 @@ fn lower_binary(
     let left = low.program.op(add(at, BINARY_LHS));
     let right = low.program.op(add(at, BINARY_RHS));
     let operand_kind = m.kind(left);
-    if operand_kind == ScalarKind::Unsupported || operand_kind != m.kind(right) {
+    let right_kind = m.kind(right);
+    if abi_width(operand_kind) == 0 || abi_width(right_kind) == 0 {
         return NO_VALUE;
     }
     let lhs = m.read(add(m.arguments, left), block);
@@ -1011,19 +1149,31 @@ fn lower_binary(
     if lhs == NO_VALUE || rhs == NO_VALUE {
         return NO_VALUE;
     }
-    if kind == ScalarKind::Bool {
+    if kind == ScalarKind::Bool && operand_kind == right_kind {
         let compare = integer_comparison(in low, symbol, operand_kind);
         if compare != NO_VALUE {
             return m.record(comparison_operation(operand_kind), lhs, rhs, compare);
         }
-    } else if is_integer(kind) && kind == operand_kind {
-        let op = if range_step {
-            ADD
-        } else {
-            lower_operator(in low, symbol)
-        };
-        if op != NO_VALUE {
-            return m.record(op, lhs, rhs, abi_width(kind));
+    } else if is_integer(kind) && kind == operand_kind && is_integer(right_kind) {
+        let width = abi_width(kind);
+        let signed = is_signed(kind);
+        if operand_kind == right_kind {
+            let op = if range_step {
+                ADD
+            } else {
+                lower_operator(in low, symbol)
+            };
+            if op != NO_VALUE {
+                return m.record(op, lhs, rhs, width);
+            }
+            let remainder = low.ctx.names.spells(symbol, in "%".as_bytes());
+            if remainder || low.ctx.names.spells(symbol, in "/".as_bytes()) {
+                return lower_division(remainder, signed, width, lhs, rhs, inout m);
+            }
+        }
+        let left_shift = low.ctx.names.spells(symbol, in "<<".as_bytes());
+        if left_shift || low.ctx.names.spells(symbol, in ">>".as_bytes()) {
+            return lower_shift(left_shift, signed, width, lhs, rhs, inout m);
         }
     }
     NO_VALUE
