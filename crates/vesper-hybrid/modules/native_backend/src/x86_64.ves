@@ -16,6 +16,7 @@ const R14: u8 = 14;
 const R15: u8 = 15;
 
 pub const ARGUMENTS: u64 = 6;
+pub const WIN64_ARGUMENTS: u64 = 4;
 pub const REGISTER_CODES: u64 = 16;
 pub const ALL_REGISTER_CODES: u64 = REGISTER_CODES + REGISTER_CODES;
 pub const XMM0: u8 = 16;
@@ -516,6 +517,20 @@ pub fn arg_register(argument: u64) -> u8 {
         5 => R9,
         _ => UNASSIGNED,
     }
+}
+
+pub fn win64_arg_register(argument: u64) -> u8 {
+    match argument {
+        0 => RCX,
+        1 => RDX,
+        2 => R8,
+        3 => R9,
+        _ => UNASSIGNED,
+    }
+}
+
+pub fn win64_reserved_registers() -> u32 {
+    register_bit(RSI) | register_bit(RDI)
 }
 
 pub fn home_register(index: u64) -> u8 {

@@ -179,6 +179,7 @@ struct Unwound {
 pub(super) struct UnwindModule {
     inner: ObjectModule,
     functions: Vec<Unwound>,
+    use_machine_leaves: bool,
 }
 
 impl Module for UnwindModule {
@@ -217,6 +218,15 @@ impl Module for UnwindModule {
         ctx: &mut Context,
         ctrl_plane: &mut ControlPlane,
     ) -> ModuleResult<()> {
+        if self.use_machine_leaves
+            && let Some(code) = super::machine::encode_windows_leaf(self.inner.isa(), &ctx.func)
+        {
+            // The machine encoder guarantees a zero frame and only volatile registers.
+            let alignment = u64::from(self.inner.isa().function_alignment().minimum);
+            return self
+                .inner
+                .define_function_bytes(func, alignment, &code, &[]);
+        }
         self.inner
             .define_function_with_control_plane(func, ctx, ctrl_plane)?;
         let name = self
@@ -370,6 +380,7 @@ pub(super) fn object(
     options: CodegenOptions,
 ) -> Result<(Vec<u8>, String), String> {
     emit_with(isa, "vesper", |m| {
+        m.use_machine_leaves = observer.is_none() && instrument.is_none();
         Ok(super::compile(m, world, entry, optimize, observer, instrument, options)?.1)
     })
 }
@@ -389,9 +400,12 @@ pub(super) fn emit_with(
     let mut m = UnwindModule {
         inner: ObjectModule::new(builder),
         functions: Vec::new(),
+        use_machine_leaves: false,
     };
     let clif = compile(&mut m)?;
-    let UnwindModule { inner, functions } = m;
+    let UnwindModule {
+        inner, functions, ..
+    } = m;
     let mut product = inner.finish();
     write_unwind_tables(&mut product, &functions)?;
     let bytes = product.emit().map_err(|e| e.to_string())?;

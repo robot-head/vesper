@@ -13,7 +13,8 @@ use self::x86_64::{
     patch_relative_branch, patch_relative_offset, register_bit, home_register, xmm_home_register,
     HOME_REGISTERS, cheap_immediate, move_constant, store_immediate, store_immediate_fits,
     VECTOR_BITS, PAND, POR, PXOR, PackedInteger, PackedRelation, packed_integer_opcode,
-    BitOperation, Rounding, PackedShift, ROL_EXTENSION, ROR_EXTENSION
+    BitOperation, Rounding, PackedShift, ROL_EXTENSION, ROR_EXTENSION, WIN64_ARGUMENTS,
+    win64_arg_register, win64_reserved_registers
 };
 
 // Integer block opcodes shared with src/native_machine.rs.
@@ -282,11 +283,14 @@ pub const FLOAT_RETURN_LAYOUT: u64 = PAIRED_RESULTS + 1;
 pub const DISP32_MASK: u64 = 0xffffffff;
 pub const LIBCALL_TARGET_BASE: u64 = DISP32_MASK + 1;
 pub const INDIRECT_CALL: u64 = 0x8000000000000000;
+// The high bit of the argument count requests a Win64 frameless leaf.
+const WINDOWS_LEAF: u64 = 0x8000000000000000;
 pub const MEMCPY_LIBCALL: u64 = 1;
 const MEMORY_COPY_ARGUMENTS: u64 = 3;
 const STACK_ALIGNMENT: u64 = 16;
 const RETURN_ADDRESS_BYTES: u64 = 8;
 const SPILL_SLOT_BYTES: u64 = 8;
+const WIN64_SHADOW_BYTES: u64 = WIN64_ARGUMENTS * SPILL_SLOT_BYTES;
 const VECTOR_SLOT_BYTES: u64 = VECTOR_BITS / BYTE_BITS;
 const LEFT_SCRATCH: u8 = RAX;
 const RIGHT_SCRATCH: u8 = R10;
@@ -2019,12 +2023,18 @@ fn allocate(
     count: u64,
     in frame: FrameLayout,
     paired: bool,
-    spills: bool
+    spills: bool,
+    windows_leaf: bool
 ) -> Option[Allocation] {
     let mut locations = ChunkSeq::with_capacity[Location](wrapping_add(arguments, count));
     // Incoming stack arguments materialize through the same scratch bank
     // as allocator spills, even when every result fits in a register.
-    let gp_reserved = if spills || arguments > ARGUMENTS {
+    let register_arguments = if windows_leaf {
+        WIN64_ARGUMENTS
+    } else {
+        ARGUMENTS
+    };
+    let gp_reserved = if spills || arguments > register_arguments {
         register_bit(LEFT_SCRATCH) | register_bit(RIGHT_SCRATCH) | register_bit(THIRD_SCRATCH)
     } else if frame.outgoing != 0 || frame.fixed || frame.floating || frame.indirect_calls {
         register_bit(THIRD_SCRATCH)
@@ -2041,6 +2051,9 @@ fn allocate(
     };
     if frame.xmm_aux {
         reserved = reserved | register_bit(XMM_AUX_SCRATCH);
+    }
+    if windows_leaf {
+        reserved = reserved | win64_reserved_registers();
     }
     let mut callee_save_mask: u32 = 0;
     let mut callee_save_slots: u64 = 0;
@@ -2073,8 +2086,12 @@ fn allocate(
     let mut save_slots: u64 = 0;
     let mut has_calls = false;
     for argument in 0..arguments {
-        if argument < ARGUMENTS {
-            let reg = arg_register(argument);
+        if argument < register_arguments {
+            let reg = if windows_leaf {
+                win64_arg_register(argument)
+            } else {
+                arg_register(argument)
+            };
             locations.push(Location::Register(reg));
             if last_read(in reads, argument) != NEVER_READ {
                 used = used | register_bit(reg);
@@ -2306,13 +2323,13 @@ fn allocate(
     if size > STACK_PROBE_INTERVAL {
         return Option::None;
     }
-    for argument in ARGUMENTS..arguments {
-        let slot = wrapping_sub(argument, ARGUMENTS);
-        // The caller's first stack argument follows our return address.
-        let offset = wrapping_add(
-            wrapping_add(size, RETURN_ADDRESS_BYTES),
-            wrapping_mul(slot, SPILL_SLOT_BYTES)
-        );
+    let incoming = wrapping_add(
+        wrapping_add(size, RETURN_ADDRESS_BYTES),
+        if windows_leaf { WIN64_SHADOW_BYTES } else { 0 }
+    );
+    for argument in register_arguments..arguments {
+        let slot = wrapping_sub(argument, register_arguments);
+        let offset = wrapping_add(incoming, wrapping_mul(slot, SPILL_SLOT_BYTES));
         let _ = locations.try_set(argument, Location::Spill(wrapping_u32(offset)));
     }
     Option::Some(Allocation {
@@ -3275,10 +3292,13 @@ fn encode_block_pass(
     }
     let body_words = wrapping_sub(words.len(), HEADER_WORDS);
     let count = body_words / RECORD_WORDS;
-    let arguments = word_at(in words, ARGUMENT_COUNT);
+    let argument_word = word_at(in words, ARGUMENT_COUNT);
+    let windows_leaf = (argument_word & WINDOWS_LEAF) != 0;
+    let arguments = argument_word & ~WINDOWS_LEAF;
     let result = word_at(in words, RETURN_VALUE);
     if wrapping_mul(count, RECORD_WORDS) != body_words
         || arguments > MAX_ARGUMENTS
+        || (windows_leaf && allow_relocations)
         || (result != NO_VALUE && result >= wrapping_add(arguments, count))
     {
         return ChunkSeq::new[u8]();
@@ -3354,6 +3374,11 @@ fn encode_block_pass(
         Option::Some(last) => last,
         Option::None => return ChunkSeq::new[u8](),
     };
+    if windows_leaf
+        && (frame.floating || frame.slots.len() != 0 || paired || tail.op == TAIL_CALL)
+    {
+        return ChunkSeq::new[u8]();
+    }
     if frame.floating
         && ((result != NO_VALUE && float_value(in words, arguments, result) != float_return)
             || (second != NO_VALUE && float_value(in words, arguments, second))
@@ -3383,22 +3408,31 @@ fn encode_block_pass(
             }
         }
     }
-    let allocation = match allocate(in words, in reads, arguments, count, in frame, paired, false) {
+    let allocation = match allocate(
+        in words,
+        in reads,
+        arguments,
+        count,
+        in frame,
+        paired,
+        false,
+        windows_leaf
+    ) {
         Option::Some(result) => result,
-        Option::None => match allocate(
-            in words,
-            in reads,
-            arguments,
-            count,
-            in frame,
-            paired,
-            true
-        ) {
-            Option::Some(result) => result,
-            Option::None => return ChunkSeq::new[u8](),
+        Option::None => {
+            if windows_leaf {
+                return ChunkSeq::new[u8]();
+            }
+            match allocate(in words, in reads, arguments, count, in frame, paired, true, false) {
+                Option::Some(result) => result,
+                Option::None => return ChunkSeq::new[u8](),
+            }
         },
     };
     let frame_size = allocation.frame_size;
+    if windows_leaf && (frame_size != 0 || allocation.callee_save_mask != 0) {
+        return ChunkSeq::new[u8]();
+    }
 
     let mut output = ChunkSeq::new[u8]();
     emit(inout output, in Instruction::FrameEnter(frame_size));

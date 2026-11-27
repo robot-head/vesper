@@ -289,6 +289,7 @@ const XMM_REGISTER_ARGUMENTS: usize = 8;
 const AARCH64_FP_ARGUMENTS: usize = 8;
 const AARCH64_CALL_FLOAT_BITS: u32 = 4;
 const INDIRECT_CALL: u64 = 1 << (u64::BITS - 1);
+const WINDOWS_LEAF: u64 = 1 << (u64::BITS - 1);
 const STACK_PROBE_INTERVAL: usize = 4096;
 const CFG_HOME_BYTES: u64 = size_of::<u64>() as u64;
 const MAX_GP_ARGUMENTS: usize = GP_REGISTER_ARGUMENTS + STACK_PROBE_INTERVAL / size_of::<u64>() - 1;
@@ -3691,6 +3692,9 @@ pub fn integer_block_words(function: &Function) -> Option<Vec<u64>> {
 /// Packs an x86-64 function with the instruction set enabled by the target.
 pub fn x86_64_block_words(function: &Function, isa: &dyn TargetIsa) -> Option<Vec<u64>> {
     let call_conv = function.signature.call_conv;
+    if call_conv == CallConv::WindowsFastcall {
+        return windows_leaf_program(function, isa).map(|(primary, _)| primary.words);
+    }
     if isa.triple().architecture != target_lexicon::Architecture::X86_64
         || !matches!(call_conv, CallConv::SystemV | CallConv::Tail)
     {
@@ -3706,6 +3710,57 @@ pub fn x86_64_block_words(function: &Function, isa: &dyn TargetIsa) -> Option<Ve
         Some(isa),
     )
     .map(|(primary, _)| primary.words)
+}
+
+fn windows_leaf_program(
+    function: &Function,
+    isa: &dyn TargetIsa,
+) -> Option<(IntegerProgram, Option<IntegerProgram>)> {
+    let signature = &function.signature;
+    let plain_integer = |param: &AbiParam| {
+        integer_width(param.value_type).is_some() && *param == AbiParam::new(param.value_type)
+    };
+    if super::windows::check_target(isa.triple()).is_err()
+        || isa.flags().preserve_frame_pointers()
+        || isa.flags().enable_pinned_reg()
+        || !function.sized_stack_slots.is_empty()
+        || signature.returns.len() > 1
+        || !signature
+            .params
+            .iter()
+            .chain(&signature.returns)
+            .all(plain_integer)
+    {
+        return None;
+    }
+    let (mut primary, mut fallback) = integer_program(
+        function,
+        false,
+        isa.flags().enable_nan_canonicalization(),
+        None,
+        CallConv::WindowsFastcall,
+        false,
+        Some(isa),
+    )?;
+    primary.words[ARGUMENT_COUNT] |= WINDOWS_LEAF;
+    if let Some(linear) = &mut fallback {
+        linear.words[ARGUMENT_COUNT] |= WINDOWS_LEAF;
+    }
+    Some((primary, fallback))
+}
+
+/// Only the Vesper encoder can authorize omitting a Windows unwind row.
+pub(super) fn encode_windows_leaf(isa: &dyn TargetIsa, function: &Function) -> Option<Vec<u8>> {
+    let encode = ENCODER.get()?;
+    let (primary, fallback) = windows_leaf_program(function, isa)?;
+    let emit = |program: IntegerProgram| {
+        if program.relocations {
+            None
+        } else {
+            encode(&program.words)
+        }
+    };
+    emit(primary).or_else(|| fallback.and_then(emit))
 }
 
 /// Packs an AAPCS64 function with ordinary scalar parameters.
