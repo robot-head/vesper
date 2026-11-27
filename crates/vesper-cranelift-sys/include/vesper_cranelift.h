@@ -211,6 +211,7 @@ uint32_t vcl_apply_edits(vcl_builder *b, const uint64_t *edits, size_t edits_len
 uint32_t vcl_outline_cold(vcl_builder *b, vcl_module *m, const uint64_t *edits, size_t edits_len);
 vcl_builder *vcl_take_cold_helper(vcl_builder *b);
 uint32_t vcl_cold_helper_func(const vcl_builder *b);
+uint32_t vcl_define_with_cold_helpers(vcl_module *m, uint32_t func, vcl_builder *b);
 
 #ifdef __cplusplus
 }
