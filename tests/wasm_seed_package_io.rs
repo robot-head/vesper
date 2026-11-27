@@ -2648,9 +2648,25 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
              let updated = forwarded_update(alias);\n\
              forwarded_fields(updated, updated, prior)\n\
          }\n\
+         fn scalar_option(tag: i8, present: bool) -> Option[i8] {\n\
+             if present { return Option::Some(tag); }\n\
+             Option::None\n\
+         }\n\
+         fn scalar_result(sample: f32, tag: i8) -> Result[f32, i16] {\n\
+             if tag < 0 { return Result::Err(widen_i16(tag)); }\n\
+             Result::Ok(sample)\n\
+         }\n\
+         pub fn generic_enum_pipeline(outcome: bool, sample: f32, tag: i8) -> u64 {\n\
+             let option = scalar_option(tag, outcome);\n\
+             let value = match option { Option::Some(n) => n, Option::None => 1 };\n\
+             match scalar_result(sample, value) {\n\
+                 Result::Ok(x) => widen_u64(to_bits_f32(x)),\n\
+                 Result::Err(n) => wrapping_u64(n),\n\
+             }\n\
+         }\n\
          fn unsupported(x: u64) -> u64 {\n\
-             let value = Option::Some(x);\n\
-             match value { Option::Some(n) => n, _ => 9 }\n\
+             let value: Option[(u64, u64)] = Option::Some((x, x));\n\
+             match value { Option::Some(_) => 7, _ => 9 }\n\
          }\n\
          pub fn decline(x: u64) -> u64 { unsupported(x) }\n",
     )
@@ -2996,6 +3012,14 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
         "{:?}",
         read_stage2_sidecar_notes(&object)
     );
+    let forwarded_object = dir.join("native-forwarded-results.o");
+    std::fs::rename(&object, &forwarded_object).unwrap();
+    assert_eq!(
+        compile("generic_enum_pipeline"),
+        0,
+        "{:?}",
+        read_stage2_sidecar_notes(&object)
+    );
 
     let caller = dir.join("native-scalar-caller.c");
     let binary = dir.join("native-scalar-caller");
@@ -3042,6 +3066,7 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
          extern uint64_t tuple_match_native(int8_t, uint16_t, bool);\n\
          extern uint64_t enum_pipeline(uint64_t, int8_t, float, bool);\n\
          extern uint64_t forwarded_results(uint64_t *, int8_t, float);\n\
+         extern uint64_t generic_enum_pipeline(bool, float, int8_t);\n\
          int main(void) {\n\
              if (mix(10, 4) != 65 || mix(UINT64_MAX, UINT64_MAX) != UINT64_MAX - 16) return 1;\n\
              if (choose(0, 4) != 8 || choose(2, 4) != 8 || choose(4, 1) != 10\n\
@@ -3187,10 +3212,14 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
                  || enum_pipeline(2, 0, 0.0f, false) != 300) return 42;\n\
              uint64_t forwarded[6] = {0};\n\
              forwarded[5] = UINT64_MAX;\n\
-             return forwarded_results(forwarded, 127, -0.0f) != 0\n\
+             if (forwarded_results(forwarded, 127, -0.0f) != 0\n\
                  || (int64_t)forwarded[0] != -128 || forwarded[1] != UINT64_C(0x3f800000)\n\
                  || forwarded[2] != 127 || forwarded[3] != UINT64_C(0x80000000)\n\
-                 || forwarded[4] != 1 || forwarded[5] != UINT64_MAX;\n\
+                 || forwarded[4] != 1 || forwarded[5] != UINT64_MAX) return 43;\n\
+             return generic_enum_pipeline(true, 1.0f, -128) != UINT64_MAX - 127\n\
+                 || generic_enum_pipeline(true, 1.0f, -1) != UINT64_MAX\n\
+                 || generic_enum_pipeline(true, -0.0f, 0) != UINT64_C(0x80000000)\n\
+                 || generic_enum_pipeline(false, -0.0f, -128) != UINT64_C(0x80000000);\n\
          }\n",
     )
     .unwrap();
@@ -3232,6 +3261,7 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
             &compound_object,
             &tuple_match_object,
             &enum_object,
+            &forwarded_object,
             &object,
         ])
         .arg("-lm")

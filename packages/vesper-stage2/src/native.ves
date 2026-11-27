@@ -616,8 +616,16 @@ fn scalar_kind(in low: L, ty: u32) -> u8 {
             ScalarKind::Tuple
         };
     }
-    if node.kind != TyKind::Named || node.n != 0 {
+    if node.kind != TyKind::Named {
         return ScalarKind::Unsupported;
+    }
+    if node.n != 0 {
+        let adt = low.ctx.world.adt(low.ctx.world.lookup(node.name));
+        return if adt.is_enum && adt.vn != 0 && adt.gn == node.n && adt.mode != TyMode::Linear {
+            ScalarKind::Enum
+        } else {
+            ScalarKind::Unsupported
+        };
     }
     let k = low.ctx.world.k;
     if node.name == k.u64_ {
@@ -750,6 +758,24 @@ fn enum_variant(in low: L, ty: u32, name: u32) -> Option[EnumVariant] {
     Option::None
 }
 
+// Scalar payloads need only the direct type-parameter substitution. Composite
+// fields still fall back, so no new type nodes are needed here.
+fn enum_field_kind(in low: L, ty: u32, field: u32) -> u8 {
+    let adt = product_adt(in low, ty);
+    if adt.gn != 0 {
+        let node = low.ctx.types.node(field);
+        if node.kind == TyKind::Named && node.n == 0 {
+            for i in 0..w(adt.gn) {
+                let generic = low.ctx.world.generic(add(w(adt.ga), i));
+                if !generic.row && generic.name == node.name {
+                    return scalar_kind(in low, low.ctx.types.arg(ty, i));
+                }
+            }
+        }
+    }
+    scalar_kind(in low, field)
+}
+
 // The native enum layout is one tag word and enough cells for its largest payload.
 fn enum_cells(in low: L, ty: u32) -> u64 {
     let adt = product_adt(in low, ty);
@@ -757,7 +783,11 @@ fn enum_cells(in low: L, ty: u32) -> u64 {
     for i in 0..w(adt.vn) {
         let variant = low.ctx.world.variant(add(w(adt.va), i));
         for field in 0..w(variant.fc) {
-            let kind = scalar_kind(in low, low.ctx.world.field(add(w(variant.fa), field)).ty);
+            let kind = enum_field_kind(
+                in low,
+                ty,
+                low.ctx.world.field(add(w(variant.fa), field)).ty
+            );
             if abi_width(kind) == 0 && kind != ScalarKind::Unit {
                 return 0;
             }
@@ -877,7 +907,7 @@ fn enum_data_variant(in low: L, inst: InstRow, in m: Function) -> Option[EnumVar
     for i in 0..count {
         let field = low.ctx.world.field(add(w(shape.variant.fa), i));
         let value = struct_member(in low, inst, field.name);
-        if value == NO_VALUE || m.kind(value) != scalar_kind(in low, field.ty) {
+        if value == NO_VALUE || m.kind(value) != enum_field_kind(in low, inst.ty, field.ty) {
             return Option::None;
         }
     }
@@ -1694,7 +1724,7 @@ fn enum_pattern_fields(
         if position >= w(shape.variant.fc) {
             return Option::None;
         }
-        let kind = scalar_kind(in low, low.ctx.world.field(w(index)).ty);
+        let kind = enum_field_kind(in low, product.ty, low.ctx.world.field(w(index)).ty);
         let child = inc(field);
         if low.program.op(child) == Pat::Tuple && kind != ScalarKind::Unit {
             return Option::None;
