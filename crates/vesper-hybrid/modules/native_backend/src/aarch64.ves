@@ -1,17 +1,18 @@
-// Frameless AAPCS64 integer leaves. The input is the shared scalar
+// AAPCS64 integer leaves. The input is the shared scalar
 // machine tape. Unsupported operations or register pressure decline before
 // a function is defined.
 use @vesper/codegen-freestanding::util::{push32};
 use self::scalar::{
-    Record, word_at, read_record, CONSTANT, ADD, SUB, MUL, AND, OR, XOR, NEG, NOT, SHL, SHR, SAR,
-    COMPARE, COMPARE_BYTE, COMPARE_WORD, COMPARE_DWORD, SELECT, TRUNCATE, ZERO_EXTEND, SIGN_EXTEND,
-    SHL_REGISTER, SHR_REGISTER, SAR_REGISTER, LOAD, STORE_BYTE, STORE_WORD, STORE_DWORD,
-    STORE_QWORD, BRANCH_ZERO, EARLY_RETURN, SIGNED_MUL_HIGH, UNSIGNED_MUL_HIGH, ADD_IMMEDIATE,
-    SUB_IMMEDIATE, MUL_IMMEDIATE, AND_IMMEDIATE, OR_IMMEDIATE, XOR_IMMEDIATE, COMPARE_IMMEDIATE,
-    COMPARE_BYTE_IMMEDIATE, COMPARE_WORD_IMMEDIATE, COMPARE_DWORD_IMMEDIATE, EQUAL, NOT_EQUAL,
-    SIGNED_LESS, SIGNED_GREATER_EQUAL, SIGNED_GREATER, SIGNED_LESS_EQUAL, UNSIGNED_LESS,
-    UNSIGNED_GREATER_EQUAL, UNSIGNED_GREATER, UNSIGNED_LESS_EQUAL, ARGUMENT_COUNT, RETURN_VALUE,
-    HEADER_WORDS, RECORD_WORDS, NEVER_READ, NO_VALUE, DISP32_MASK
+    Record, FrameSlot, align_up, word_at, read_record, CONSTANT, ADD, SUB, MUL, AND, OR, XOR, NEG,
+    NOT, SHL, SHR, SAR, COMPARE, COMPARE_BYTE, COMPARE_WORD, COMPARE_DWORD, SELECT, TRUNCATE,
+    ZERO_EXTEND, SIGN_EXTEND, SHL_REGISTER, SHR_REGISTER, SAR_REGISTER, LOAD, STORE_BYTE,
+    STORE_WORD, STORE_DWORD, STORE_QWORD, BRANCH_ZERO, EARLY_RETURN, STACK_SLOT, STACK_ADDRESS,
+    STACK_LOAD, STACK_STORE_BYTE, STACK_STORE_WORD, STACK_STORE_DWORD, STACK_STORE_QWORD,
+    SIGNED_MUL_HIGH, UNSIGNED_MUL_HIGH, ADD_IMMEDIATE, SUB_IMMEDIATE, MUL_IMMEDIATE, AND_IMMEDIATE,
+    OR_IMMEDIATE, XOR_IMMEDIATE, COMPARE_IMMEDIATE, COMPARE_BYTE_IMMEDIATE, COMPARE_WORD_IMMEDIATE,
+    COMPARE_DWORD_IMMEDIATE, EQUAL, NOT_EQUAL, SIGNED_LESS, SIGNED_GREATER_EQUAL, SIGNED_GREATER,
+    SIGNED_LESS_EQUAL, UNSIGNED_LESS, UNSIGNED_GREATER_EQUAL, UNSIGNED_GREATER, UNSIGNED_LESS_EQUAL,
+    ARGUMENT_COUNT, RETURN_VALUE, HEADER_WORDS, RECORD_WORDS, NEVER_READ, NO_VALUE, DISP32_MASK
 };
 use self::x86_64::{BYTE_BITS, WORD_BITS, DWORD_BITS, QWORD_BITS};
 
@@ -22,6 +23,10 @@ const UNASSIGNED: u32 = 32;
 const SCRATCH: u32 = 16;
 const COMPARE_LEFT_SCRATCH: u32 = 17;
 const ZERO: u32 = 31;
+const SP: u32 = 31;
+const STACK_ALIGNMENT: u64 = 16;
+// Larger frames need to probe the stack at least once per base page.
+const MAX_FRAME_BYTES: u64 = 4096;
 const RETURN: u32 = 0xd65f03c0;
 const BRANCH_IF_ZERO: u32 = 0xb4000000;
 const BRANCH_IF_CONDITION: u32 = 0x54000000;
@@ -103,6 +108,11 @@ copy struct BranchArm {
 copy struct ForwardBranch {
     offset: u64,
     instruction: u32,
+}
+
+struct FrameLayout {
+    slots: ChunkSeq[FrameSlot],
+    size: u64,
 }
 
 fn sh(value: u32, amount: u32) -> u32 {
@@ -316,11 +326,59 @@ fn compare(inout out: ChunkSeq[u8], in r: Record, lhs: u32, rhs: u32) {
 
 fn store_width(op: u64) -> u64 {
     match op {
-        STORE_BYTE => BYTE_BITS,
-        STORE_WORD => WORD_BITS,
-        STORE_DWORD => DWORD_BITS,
-        STORE_QWORD => QWORD_BITS,
+        STORE_BYTE | STACK_STORE_BYTE => BYTE_BITS,
+        STORE_WORD | STACK_STORE_WORD => WORD_BITS,
+        STORE_DWORD | STACK_STORE_DWORD => DWORD_BITS,
+        STORE_QWORD | STACK_STORE_QWORD => QWORD_BITS,
         _ => 0,
+    }
+}
+
+fn is_stack_store(op: u64) -> bool {
+    op >= STACK_STORE_BYTE && op <= STACK_STORE_QWORD
+}
+
+fn frame_layout(in words: Slice[u64], count: u64) -> Option[FrameLayout] {
+    let mut slots = ChunkSeq::new[FrameSlot]();
+    let mut used: u64 = 0;
+    for index in 0..count {
+        let r = read_record(in words, index);
+        if r.op != STACK_SLOT {
+            break;
+        }
+        let alignment = r.right;
+        if alignment == 0
+            || alignment > STACK_ALIGNMENT
+            || (alignment & wrapping_sub(alignment, 1)) != 0
+            || r.left > MAX_FRAME_BYTES
+            || r.extra != 0
+        {
+            return Option::None;
+        }
+        let offset = align_up(used, alignment);
+        used = wrapping_add(offset, r.left);
+        if used > MAX_FRAME_BYTES {
+            return Option::None;
+        }
+        slots.push(FrameSlot { offset: offset, size: r.left });
+    }
+    Option::Some(FrameLayout { slots: slots, size: align_up(used, STACK_ALIGNMENT) })
+}
+
+fn stack_displacement(in frame: FrameLayout, in r: Record) -> Option[u64] {
+    let store = is_stack_store(r.op);
+    let index = if store { r.right } else { r.left };
+    let offset = if store { r.extra } else { r.right };
+    let width = if store { store_width(r.op) } else { r.extra };
+    match frame.slots.try_get(index) {
+        Option::Some(slot) => {
+            if offset <= slot.size && width / BYTE_BITS <= wrapping_sub(slot.size, offset) {
+                Option::Some(wrapping_add(slot.offset, offset))
+            } else {
+                Option::None
+            }
+        },
+        Option::None => Option::None,
     }
 }
 
@@ -361,7 +419,7 @@ fn memory(
 }
 
 fn operands(in r: Record) -> Option[u64] {
-    if r.op == CONSTANT {
+    if r.op == CONSTANT || r.op == STACK_SLOT {
         return Option::Some(0);
     }
     if comparison_width(r.op) != 0 {
@@ -390,6 +448,17 @@ fn operands(in r: Record) -> Option[u64] {
             return Option::None;
         }
         return Option::Some(if r.left == NO_VALUE { 0 } else { 1 });
+    }
+    if r.op == STACK_LOAD || r.op == STACK_ADDRESS {
+        if (r.op == STACK_LOAD && scalar_width(r.extra))
+            || (r.op == STACK_ADDRESS && r.extra == 0)
+        {
+            return Option::Some(0);
+        }
+        return Option::None;
+    }
+    if is_stack_store(r.op) {
+        return Option::Some(1);
     }
     if store_width(r.op) != 0 {
         if r.extra <= DISP32_MASK {
@@ -586,13 +655,20 @@ fn expire(used: u32, in ends: ChunkSeq[u64], value: u64, current: u64, reg: u32)
 }
 
 fn no_result(op: u64) -> bool {
-    op == BRANCH_ZERO || op == EARLY_RETURN || store_width(op) != 0
+    op == BRANCH_ZERO || op == EARLY_RETURN || op == STACK_SLOT || store_width(op) != 0
 }
 
-fn emit_return(inout output: ChunkSeq[u8], reg: u32) {
+fn emit_stack_adjust(inout output: ChunkSeq[u8], opcode: u32, adjustment: u32) {
+    if adjustment != 0 {
+        push32(inout output, opcode | adjustment | sh(SP, RN_SHIFT) | SP);
+    }
+}
+
+fn emit_return(inout output: ChunkSeq[u8], reg: u32, adjustment: u32) {
     if reg != UNASSIGNED && reg != 0 {
         rrr(inout output, ORR_REG, 0, ZERO, reg);
     }
+    emit_stack_adjust(inout output, ADD_IMM, adjustment);
     push32(inout output, RETURN);
 }
 
@@ -627,6 +703,11 @@ pub fn encode_leaf(in words: Slice[u64]) -> ChunkSeq[u8] {
     {
         return out;
     }
+    let frame = match frame_layout(in words, count) {
+        Option::Some(frame) => frame,
+        Option::None => return out,
+    };
+    let mut frame_used = false;
     let mut ends = ChunkSeq::with_capacity[u64](values);
     for index in 0..values {
         ends.push(NEVER_READ);
@@ -651,6 +732,16 @@ pub fn encode_leaf(in words: Slice[u64]) -> ChunkSeq[u8] {
             return out;
         }
         let last = last_read(in ends, value);
+        if r.op == STACK_SLOT && index >= frame.slots.len() {
+            return out;
+        }
+        if r.op == STACK_LOAD || r.op == STACK_ADDRESS || is_stack_store(r.op) {
+            match stack_displacement(in frame, in r) {
+                Option::Some(_) => {},
+                Option::None => return out,
+            };
+            frame_used = frame_used || last != NEVER_READ || is_stack_store(r.op);
+        }
         let arm = arms.try_get(wrapping_sub(depth, 1))
             .unwrap_or(BranchArm { start: NO_VALUE, end: values });
         if r.op == EARLY_RETURN {
@@ -698,6 +789,12 @@ pub fn encode_leaf(in words: Slice[u64]) -> ChunkSeq[u8] {
         return out;
     }
 
+    let adjustment = if frame_used {
+        arithmetic_immediate(frame.size).unwrap_or(0)
+    } else {
+        0
+    };
+    emit_stack_adjust(inout out, SUB_IMM, adjustment);
     let mut regs = ChunkSeq::with_capacity[u32](values);
     let mut used: u32 = 0;
     let mut flags_for_next: Option[u32] = Option::None;
@@ -713,7 +810,7 @@ pub fn encode_leaf(in words: Slice[u64]) -> ChunkSeq[u8] {
         let value = wrapping_add(args, index);
         let r = read_record(in words, index);
         let stored = store_width(r.op);
-        if !no_result(r.op) && last_read(in ends, value) == NEVER_READ {
+        if r.op == STACK_SLOT || (!no_result(r.op) && last_read(in ends, value) == NEVER_READ) {
             regs.push(UNASSIGNED);
             continue;
         }
@@ -760,7 +857,7 @@ pub fn encode_leaf(in words: Slice[u64]) -> ChunkSeq[u8] {
             continue;
         }
         if r.op == EARLY_RETURN {
-            emit_return(inout out, lhs);
+            emit_return(inout out, lhs, adjustment);
             depth = wrapping_sub(depth, 1);
             match branches.try_get(depth) {
                 Option::Some(branch) => if !patch_forward_branch(inout out, in branch) {
@@ -772,7 +869,12 @@ pub fn encode_leaf(in words: Slice[u64]) -> ChunkSeq[u8] {
             continue;
         }
         if stored != 0 {
-            memory(inout out, false, stored, lhs, rhs, r.extra);
+            if is_stack_store(r.op) {
+                let displacement = stack_displacement(in frame, in r).unwrap_or(0);
+                memory(inout out, false, stored, SP, lhs, displacement);
+            } else {
+                memory(inout out, false, stored, lhs, rhs, r.extra);
+            }
             regs.push(UNASSIGNED);
             continue;
         }
@@ -798,6 +900,16 @@ pub fn encode_leaf(in words: Slice[u64]) -> ChunkSeq[u8] {
         let dest = wrapping_u32(trailing_zeros_u64(widen_u64(available)));
         used = used | sh(1, dest);
         regs.push(dest);
+        if r.op == STACK_ADDRESS || r.op == STACK_LOAD {
+            let displacement = stack_displacement(in frame, in r).unwrap_or(0);
+            if r.op == STACK_ADDRESS {
+                let encoded = arithmetic_immediate(displacement).unwrap_or(0);
+                push32(inout out, ADD_IMM | encoded | sh(SP, RN_SHIFT) | dest);
+            } else {
+                memory(inout out, true, r.extra, SP, dest, displacement);
+            }
+            continue;
+        }
         match flags_for_next {
             Option::Some(cc) => {
                 rrr(inout out, CSEL | sh(cc, CONDITION_SHIFT), dest, rhs, third);
@@ -806,6 +918,6 @@ pub fn encode_leaf(in words: Slice[u64]) -> ChunkSeq[u8] {
             Option::None => emit_instruction(inout out, in r, dest, lhs, rhs, third),
         };
     }
-    emit_return(inout out, register(in regs, result));
+    emit_return(inout out, register(in regs, result), adjustment);
     out
 }

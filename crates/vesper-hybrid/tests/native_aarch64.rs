@@ -27,6 +27,9 @@ const STORE_BYTE: u64 = 24;
 const STORE_WORD: u64 = 25;
 const BRANCH_ZERO: u64 = 28;
 const EARLY_RETURN: u64 = 29;
+const STACK_SLOT: u64 = 30;
+const STACK_LOAD: u64 = 32;
+const STACK_STORE_QWORD: u64 = 36;
 const CALL: u64 = 38;
 const SIGNED_MUL_HIGH: u64 = 50;
 const UNSIGNED_MUL_HIGH: u64 = 51;
@@ -254,6 +257,71 @@ fn aarch64_branches_use_the_instruction_address_and_reject_escaping_values() {
     assert!(
         binding::aarch64_integer_leaf(&[1, 0, BRANCH_ZERO, 0, 0, 0, EARLY_RETURN, NO_VALUE, 0, 1])
             .is_empty()
+    );
+}
+
+#[test]
+fn aarch64_fixed_frames_restore_sp_on_each_return() {
+    const SP_ALIGN: u64 = 16;
+    const FRAME_SIZE: u64 = SP_ALIGN;
+    const QWORD_BYTES: u64 = CELL_BITS / BYTE_BITS;
+    const SUB_SP_16: u32 = 0xd100_43ff;
+    const CBZ_X0_FORWARD_FIVE: u32 = 0xb400_00a0;
+    const STR_X1_SP_8: u32 = 0xf900_07e1;
+    const LDR_X0_SP_8: u32 = 0xf940_07e0;
+    const ADD_SP_16: u32 = 0x9100_43ff;
+    const MOV_X0_X1: u32 = 0xaa01_03e0;
+    let packet = [
+        2,
+        1,
+        STACK_SLOT,
+        FRAME_SIZE,
+        SP_ALIGN,
+        0,
+        BRANCH_ZERO,
+        0,
+        0,
+        0,
+        STACK_STORE_QWORD,
+        1,
+        0,
+        QWORD_BYTES,
+        STACK_LOAD,
+        0,
+        QWORD_BYTES,
+        CELL_BITS,
+        EARLY_RETURN,
+        5,
+        0,
+        3,
+    ];
+    let expected: Vec<_> = [
+        SUB_SP_16,
+        CBZ_X0_FORWARD_FIVE,
+        STR_X1_SP_8,
+        LDR_X0_SP_8,
+        ADD_SP_16,
+        RET,
+        MOV_X0_X1,
+        ADD_SP_16,
+        RET,
+    ]
+    .into_iter()
+    .flat_map(u32::to_le_bytes)
+    .collect();
+    assert_eq!(binding::aarch64_integer_leaf(&packet), expected);
+    assert_eq!(
+        binding::aarch64_integer_leaf(&[0, NO_VALUE, STACK_SLOT, FRAME_SIZE, SP_ALIGN, 0]),
+        RET.to_le_bytes()
+    );
+    assert!(
+        binding::aarch64_integer_leaf(&[
+            0, 1, STACK_SLOT, FRAME_SIZE, SP_ALIGN, 0, STACK_LOAD, 0, FRAME_SIZE, CELL_BITS,
+        ])
+        .is_empty()
+    );
+    assert!(
+        binding::aarch64_integer_leaf(&[0, NO_VALUE, STACK_SLOT, u64::MAX, SP_ALIGN, 0]).is_empty()
     );
 }
 

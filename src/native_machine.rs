@@ -143,7 +143,7 @@ pub fn install_relocation_encoder(encode: Encoder) -> Result<(), Encoder> {
     RELOCATION_ENCODER.set(encode)
 }
 
-/// Installs the register-only AArch64 encoder for ordinary native objects.
+/// Installs the AArch64 integer leaf encoder for ordinary native objects.
 pub fn install_aarch64_encoder(encode: Encoder) -> Result<(), Encoder> {
     AARCH64_ENCODER.set(encode)
 }
