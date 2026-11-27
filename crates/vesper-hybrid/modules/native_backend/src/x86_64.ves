@@ -101,7 +101,7 @@ const PSUBUSB: u8 = 0xd8;
 const PSUBUSW: u8 = 0xd9;
 const PAVGB: u8 = 0xe0;
 const PAVGW: u8 = 0xe3;
-const CONVERT_PACKED_PRECISION: u8 = 0x5a;
+const SSE_CONVERT_PRECISION: u8 = 0x5a;
 const PEXTRW: u8 = 0xc5;
 const PINSRW: u8 = 0xc4;
 const PMOVMSKB: u8 = 0xd7;
@@ -152,6 +152,7 @@ pub const SSE_MUL: u8 = 0x59;
 pub const SSE_DIV: u8 = 0x5e;
 pub const SSE_SQRT: u8 = 0x51;
 const SSE_FLOAT_TO_INTEGER_TRUNC: u8 = 0x2c;
+const SSE_INTEGER_TO_FLOAT: u8 = 0x2a;
 const SHIFT_GROUP_IMM8: u8 = 0xc1;
 const SHIFT_GROUP_CL: u8 = 0xd3;
 const SHIFT_BYTE_GROUP_CL: u8 = 0xd2;
@@ -305,6 +306,8 @@ pub copy enum Instruction {
     FloatCopySign(u8, u8, u64),
     FloatBits(u8, u8, u64),
     FloatToInteger(u8, u8, u64, u64),
+    FloatConvert(u8, u8, u64),
+    IntegerToFloat(u8, u8, u64, u64, bool),
     VectorConstant(u8, u64, u64),
     VectorSplat(u8, u8, u64),
     VectorBinary(u8, u8, u8),
@@ -1187,6 +1190,54 @@ fn xmm_binary(inout out: ChunkSeq[u8], opcode: u8, destination: u8, source: u8) 
     out.push(modrm(dst, src));
 }
 
+fn cvtsi(inout out: ChunkSeq[u8], destination: u8, source: u8, wide: bool, width: u64) {
+    let dest = xmm_code(destination);
+    out.push(float_prefix(width));
+    emit_rex(inout out, dest, source, wide, false);
+    out.push(TWO_BYTE_OPCODE);
+    out.push(SSE_INTEGER_TO_FLOAT);
+    out.push(modrm(dest, source));
+}
+
+fn integer_to_float(
+    inout out: ChunkSeq[u8],
+    dest: u8,
+    source: u8,
+    from: u64,
+    width: u64,
+    signed: bool
+) {
+    if signed && from < DWORD_BITS {
+        sign_extend(inout out, R11, source, from, DWORD_BITS);
+        cvtsi(inout out, dest, R11, false, width);
+    } else if !signed && from == QWORD_BITS {
+        binary(inout out, TEST_RM_R64, source, source, true);
+        conditional_jump(inout out, CC_GE);
+        let direct = out.len();
+
+        // Fold the low bit into the shifted value before rounding, then
+        // double the float. This avoids double rounding above i64::MAX.
+        gp_move(inout out, R11, source);
+        shift_immediate(inout out, SHR_EXTENSION, R11, 1, QWORD_BITS);
+        conditional_jump(inout out, CC_AE);
+        let even = out.len();
+        alu_immediate(inout out, ALU_OR_EXTENSION, R11, 1, QWORD_BITS);
+        let _ = patch_forward_branch(inout out, even);
+        cvtsi(inout out, dest, R11, true, width);
+        out.push(float_prefix(width));
+        xmm_binary(inout out, SSE_ADD, dest, dest);
+
+        let _ = emit_direct_jump(inout out);
+        let done = out.len();
+        let _ = patch_forward_branch(inout out, direct);
+        cvtsi(inout out, dest, source, true, width);
+        let _ = patch_forward_branch(inout out, done);
+    } else {
+        let wide = from == QWORD_BITS || (!signed && from == DWORD_BITS);
+        cvtsi(inout out, dest, source, wide, width);
+    }
+}
+
 fn packed_38(inout out: ChunkSeq[u8], opcode: u8, destination: u8, source: u8) {
     let dst = xmm_code(destination);
     let src = xmm_code(source);
@@ -1744,7 +1795,14 @@ pub fn emit(inout out: ChunkSeq[u8], in instruction: Instruction) {
             if demote {
                 out.push(OPERAND_SIZE_OVERRIDE);
             }
-            xmm_binary(inout out, CONVERT_PACKED_PRECISION, destination, source);
+            xmm_binary(inout out, SSE_CONVERT_PRECISION, destination, source);
+        },
+        Instruction::FloatConvert(destination, source, source_width) => {
+            out.push(float_prefix(source_width));
+            xmm_binary(inout out, SSE_CONVERT_PRECISION, destination, source);
+        },
+        Instruction::IntegerToFloat(destination, source, from, width, signed) => {
+            integer_to_float(inout out, destination, source, from, width, signed);
         },
         Instruction::VectorExtract(destination, source, lane, width) => vector_extract(
             inout out,

@@ -1777,7 +1777,7 @@ impl IntegerBlocks<'_> {
                 };
                 (op, [input(arg)?, 0, float_width(output)?])
             }
-            InstructionData::Unary { opcode, arg } if self.aarch64 => {
+            InstructionData::Unary { opcode, arg } => {
                 let source = ty(arg);
                 let (op, source_width, result_width) = match (opcode, source, output) {
                     (Opcode::Fpromote, types::F32, types::F64) => (
@@ -1800,12 +1800,12 @@ impl IntegerBlocks<'_> {
                         integer_width(source)?,
                         float_width(output)?,
                     ),
-                    (Opcode::FcvtToSintSat, _, _) => (
+                    (Opcode::FcvtToSintSat, _, _) if self.aarch64 => (
                         IntegerOp::FloatToSignedSat,
                         float_width(source)?,
                         integer_width(output)?,
                     ),
-                    (Opcode::FcvtToUintSat, _, _) => (
+                    (Opcode::FcvtToUintSat, _, _) if self.aarch64 => (
                         IntegerOp::FloatToUnsignedSat,
                         float_width(source)?,
                         integer_width(output)?,

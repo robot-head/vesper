@@ -1257,6 +1257,7 @@ fn find_last_reads(
             && record.op != STACK_POINTER
             && record.op != FLOAT_TO_INTEGER_TRUNC
             && !is_conditional_trap(record.op)
+            && !is_float_conversion(record.op)
             && !tail_call
             && !bit_operation
             && !bit_mix
@@ -1376,6 +1377,18 @@ fn find_last_reads(
             if (record.right != DWORD_BITS && record.right != QWORD_BITS)
                 || (record.extra != DWORD_BITS && record.extra != QWORD_BITS)
             {
+                return Option::None;
+            }
+            frame.floating = true;
+        }
+        if is_float_conversion(record.op) {
+            let valid = match record.op {
+                FLOAT_PROMOTE => record.right == DWORD_BITS && record.extra == QWORD_BITS,
+                FLOAT_DEMOTE => record.right == QWORD_BITS && record.extra == DWORD_BITS,
+                _ => valid_width(record.right)
+                    && (record.extra == DWORD_BITS || record.extra == QWORD_BITS),
+            };
+            if !valid {
                 return Option::None;
             }
             frame.floating = true;
@@ -3243,6 +3256,19 @@ fn encode_block_pass(
         };
         if record.op == CONSTANT {
             emit(inout output, in Instruction::Immediate(destination, record.left));
+        } else if is_float_conversion(record.op) {
+            let instruction = if record.op == FLOAT_PROMOTE || record.op == FLOAT_DEMOTE {
+                Instruction::FloatConvert(destination, left, record.right)
+            } else {
+                Instruction::IntegerToFloat(
+                    destination,
+                    left,
+                    record.right,
+                    record.extra,
+                    record.op == SIGNED_TO_FLOAT
+                )
+            };
+            emit(inout output, in instruction);
         } else if is_vector_operation(record.op) {
             emit_vector_instruction(inout output, in record, destination, left, right);
         } else if is_scalar_bit_operation(record.op) {

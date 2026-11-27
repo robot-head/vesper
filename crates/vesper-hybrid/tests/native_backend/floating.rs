@@ -2,7 +2,7 @@ use super::{binding, integer_block_words};
 use cranelift_codegen::{
     Context,
     ir::{
-        AbiParam, BlockArg, InstBuilder, MemFlags, StackSlotData, StackSlotKind,
+        AbiParam, BlockArg, InstBuilder, MemFlags, StackSlotData, StackSlotKind, Type, Value,
         condcodes::{FloatCC, IntCC},
         types,
     },
@@ -43,6 +43,145 @@ fn compile(module: &mut JITModule, context: &mut Context) -> (*const u8, *const 
         module.get_finalized_function(baseline),
         module.get_finalized_function(candidate),
     )
+}
+
+fn scalar_conversion(
+    module: &mut JITModule,
+    convert: impl FnOnce(&mut FunctionBuilder<'_>, Value) -> Value,
+    output: Type,
+) -> [unsafe extern "C" fn(u64) -> u64; 2] {
+    let mut context = module.make_context();
+    context
+        .func
+        .signature
+        .params
+        .push(AbiParam::new(types::I64));
+    context
+        .func
+        .signature
+        .returns
+        .push(AbiParam::new(types::I64));
+    let mut state = FunctionBuilderContext::new();
+    let mut builder = FunctionBuilder::new(&mut context.func, &mut state);
+    let entry = builder.create_block();
+    builder.append_block_params_for_function_params(entry);
+    builder.switch_to_block(entry);
+    let input = builder.block_params(entry)[0];
+    let value = convert(&mut builder, input);
+    let bits = builder
+        .ins()
+        .bitcast(output.as_int(), MemFlags::new(), value);
+    let result = if output == types::F32 {
+        builder.ins().uextend(types::I64, bits)
+    } else {
+        bits
+    };
+    builder.ins().return_(&[result]);
+    builder.seal_all_blocks();
+    builder.finalize();
+    let (a, b) = compile(module, &mut context);
+    [a, b].map(|pointer| unsafe {
+        std::mem::transmute::<*const u8, unsafe extern "C" fn(u64) -> u64>(pointer)
+    })
+}
+
+#[test]
+fn sse2_integer_and_precision_conversions_match_cranelift() {
+    let mut module = module();
+    let convert_inputs = [
+        0,
+        1,
+        u64::MAX,
+        i64::MAX as u64,
+        i64::MIN as u64,
+        0x8000_0000_0000_0400,
+        0x8000_0000_0000_0401,
+        0xffff_ffff_ffff_fbff,
+        0x0080_0000_8080_8081,
+        0x7f00_0000_ffff_8001,
+    ];
+    for from in [types::I8, types::I16, types::I32, types::I64] {
+        for output in [types::F32, types::F64] {
+            for signed in [false, true] {
+                let functions = scalar_conversion(
+                    &mut module,
+                    |builder, input| {
+                        let input = if from == types::I64 {
+                            input
+                        } else {
+                            builder.ins().ireduce(from, input)
+                        };
+                        if signed {
+                            builder.ins().fcvt_from_sint(output, input)
+                        } else {
+                            builder.ins().fcvt_from_uint(output, input)
+                        }
+                    },
+                    output,
+                );
+                let padding = u64::BITS - from.bits();
+                for input in convert_inputs {
+                    let bits = input & (u64::MAX >> padding);
+                    let signed_bits = ((bits << padding) as i64) >> padding;
+                    let expected = match (output, signed) {
+                        (types::F32, true) => u64::from((signed_bits as f32).to_bits()),
+                        (types::F32, false) => u64::from((bits as f32).to_bits()),
+                        (_, true) => (signed_bits as f64).to_bits(),
+                        (_, false) => (bits as f64).to_bits(),
+                    };
+                    for run in functions {
+                        assert_eq!(
+                            unsafe { run(input) },
+                            expected,
+                            "{from} {output} {signed} {input:#x}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+    let promote = scalar_conversion(
+        &mut module,
+        |builder, input| {
+            let input = builder.ins().ireduce(types::I32, input);
+            let single = builder.ins().bitcast(types::F32, MemFlags::new(), input);
+            builder.ins().fpromote(types::F64, single)
+        },
+        types::F64,
+    );
+    for input in [
+        0.0f32,
+        -0.0,
+        f32::from_bits(1),
+        f32::MAX,
+        f32::INFINITY,
+        f32::NAN,
+    ] {
+        let bits = u64::from(input.to_bits());
+        let [reference, candidate] = promote.map(|run| unsafe { run(bits) });
+        assert_eq!(candidate, reference, "{bits:#x}");
+    }
+    let demote = scalar_conversion(
+        &mut module,
+        |builder, input| {
+            let double = builder.ins().bitcast(types::F64, MemFlags::new(), input);
+            builder.ins().fdemote(types::F32, double)
+        },
+        types::F32,
+    );
+    for input in [
+        0.0f64,
+        -0.0,
+        f64::from_bits(1),
+        f64::MAX,
+        f64::INFINITY,
+        f64::NAN,
+    ] {
+        let bits = input.to_bits();
+        let [reference, candidate] = demote.map(|run| unsafe { run(bits) });
+        assert_eq!(candidate, reference, "{bits:#x}");
+    }
+    unsafe { module.free_memory() };
 }
 
 #[test]
