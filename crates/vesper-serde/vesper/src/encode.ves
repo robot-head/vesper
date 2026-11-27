@@ -430,11 +430,10 @@ fn put_integer(inout out: Slice[u8], inout wr: W, n: u64) {
             break;
         }
         i = wrapping_sub(i, 1);
-        out.try_set(
-            wrapping_add(wr.pos, i),
-            wrapping_u8(wrapping_add(Ascii::Zero, x % DECIMAL_BASE))
-        );
-        x = x / DECIMAL_BASE;
+        let q = x / DECIMAL_BASE;
+        let rem = wrapping_sub(x, wrapping_mul(q, DECIMAL_BASE));
+        out.try_set(wrapping_add(wr.pos, i), wrapping_u8(wrapping_add(Ascii::Zero, rem)));
+        x = q;
     }
     wr.pos = wrapping_add(wr.pos, d);
 }

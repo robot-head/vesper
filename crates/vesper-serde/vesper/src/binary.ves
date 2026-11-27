@@ -46,6 +46,7 @@ const NODE_RESERVED_LAST: u64 = 28;
 // Relative pointers and child entries are 4-byte aligned i32s; a slice
 // field is pointer plus count.
 const REL_BYTES: u64 = 4;
+const REL_BYTES_MASK: u64 = 3;
 const REL_SLICE_BYTES: u64 = 8;
 const ALIGN_MASK: u64 = 0xfffffffffffffffc;
 // Words per flattened input node: id, label offset and length, children
@@ -248,6 +249,8 @@ pub fn vbyte_decode(
 // src/archive.rs `HEADER_LEN` and `NODE_LEN`.
 const HEADER_BYTES: u64 = 32;
 const NODE_BYTES: u64 = 32;
+const NODE_BYTES_SHIFT: u32 = 5;
+const NODE_BYTES_MASK: u64 = 31;
 
 fn header_len() -> u64 {
     HEADER_BYTES
@@ -275,7 +278,7 @@ fn is_power_of_two(n: u64) -> bool {
 }
 
 fn field(offset: u64, size: u64, len: u64) -> Unit eff [Fail[BinError]] {
-    if offset % REL_BYTES != 0 {
+    if (offset & REL_BYTES_MASK) != 0 {
         raise(BinErrorKind::BAlignment, offset);
     }
     if add(offset, size) > len {
@@ -727,7 +730,7 @@ pub fn archive_validate(in bytes: Slice[u8], lim: ArchiveLimits) -> u64 eff [Fai
                 );
                 if target.start < header_len()
                     || target.start >= range.end
-                    || wrapping_sub(target.start, header_len()) % NODE_BYTES != 0
+                    || (wrapping_sub(target.start, header_len()) & NODE_BYTES_MASK) != 0
                 {
                     raise(BinErrorKind::BTree, entry);
                 }
@@ -735,7 +738,7 @@ pub fn archive_validate(in bytes: Slice[u8], lim: ArchiveLimits) -> u64 eff [Fai
                     inout c,
                     inout meta,
                     i,
-                    wrapping_sub(target.start, header_len()) / NODE_BYTES
+                    wrapping_shr_u64(wrapping_sub(target.start, header_len()), NODE_BYTES_SHIFT)
                 );
                 entry = wrapping_add(entry, REL_BYTES);
             }
