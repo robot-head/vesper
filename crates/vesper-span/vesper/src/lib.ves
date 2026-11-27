@@ -489,19 +489,39 @@ fn check_edits(
         total_text = add(total_text, add(exp_len, rep_len, Resource::Text), Resource::Text);
         removed = add(removed, wrapping_sub(end, start), Resource::Output);
         inserted = add(inserted, rep_len, Resource::Output);
-        for j in 0..i {
-            work = charge(work, 1, cap);
-            let other = wrapping_add(from, wrapping_mul(j, Edit::Words));
-            let b_start = word(in edits, other);
-            let b_end = word(in edits, wrapping_add(other, Edit::End));
-            // Adjacent nonempty edits are allowed; insertions at a shared
-            // boundary are not.
-            if start == b_start
-                || (start < b_end && b_start < end)
-                || (start == end && start == b_end)
-                || (b_start == b_end && b_start == end)
-            {
-                Fail::raise(Error::OverlappingEdits);
+        let cap_u = u(cap);
+        let start_empty = start == end;
+        if work <= cap_u && wrapping_sub(cap_u, work) >= i {
+            work = wrapping_add(work, i);
+            let mut other = from;
+            for j in 0..i {
+                let b_start = word(in edits, other);
+                let b_end = word(in edits, wrapping_add(other, Edit::End));
+                // Adjacent nonempty edits are allowed; insertions at a shared
+                // boundary are not.
+                if start == b_start
+                    || (start < b_end && b_start < end)
+                    || (start_empty && start == b_end)
+                    || (b_start == b_end && b_start == end)
+                {
+                    Fail::raise(Error::OverlappingEdits);
+                }
+                other = wrapping_add(other, Edit::Words);
+            }
+        } else {
+            let mut other = from;
+            for j in 0..i {
+                work = charge(work, 1, cap);
+                let b_start = word(in edits, other);
+                let b_end = word(in edits, wrapping_add(other, Edit::End));
+                if start == b_start
+                    || (start < b_end && b_start < end)
+                    || (start_empty && start == b_end)
+                    || (b_start == b_end && b_start == end)
+                {
+                    Fail::raise(Error::OverlappingEdits);
+                }
+                other = wrapping_add(other, Edit::Words);
             }
         }
     }
