@@ -193,6 +193,13 @@ enum IntegerOp {
     VectorRoundedAverage = 171,
     VectorPromoteLow = 172,
     VectorDemote = 173,
+    VectorPairwiseAdd = 174,
+    VectorSwizzle = 175,
+    VectorInsert = 176,
+    VectorExtract = 177,
+    VectorAnyTrue = 178,
+    VectorAllTrue = 179,
+    VectorHighBits = 180,
 }
 
 fn integer_bit_op(op: Opcode) -> Option<IntegerOp> {
@@ -263,6 +270,7 @@ const FLOAT_RETURN_LAYOUT: u64 = GP_RESULTS as u64 + 1;
 const WIDE_INTEGER_CELLS: usize = 2;
 const INTEGER_CELL_BITS: u64 = u64::BITS as u64;
 const SIMD_BYTES: u32 = 2 * size_of::<u64>() as u32;
+const SIMD_LANE_INDEX_SHIFT: u32 = 8;
 const MAX_LINEARIZED_BRANCHES: usize = 32;
 // Keep small joins linear. Compare tape sizes once repeated bodies are substantial.
 const MIN_DUPLICATED_INSTRUCTIONS_FOR_CFG: usize = 32;
@@ -1866,6 +1874,41 @@ impl IntegerBlocks<'_> {
         Some(result)
     }
 
+    fn vector_constant(&mut self, bytes: &[u8]) -> Option<u64> {
+        let ([low, high], []) = bytes.as_chunks::<{ size_of::<u64>() }>() else {
+            return None;
+        };
+        Some(self.append(
+            IntegerOp::VectorConstant,
+            [u64::from_le_bytes(*low), u64::from_le_bytes(*high), 0],
+        ))
+    }
+
+    fn vector_shuffle(&mut self, mask: &[u8], left: u64, right: u64) -> Option<u64> {
+        const LANES: u8 = SIMD_BYTES as u8;
+        let mask: &[u8; SIMD_BYTES as usize] = mask.try_into().ok()?;
+        if mask.iter().any(|&index| index >= LANES * 2) {
+            return None;
+        }
+        let first = if mask.iter().any(|&index| index < LANES) {
+            let indices = self.vector_constant(mask)?;
+            Some(self.append(IntegerOp::VectorSwizzle, [left, indices, 0]))
+        } else {
+            None
+        };
+        if mask.iter().all(|&index| index < LANES) {
+            return first;
+        }
+        // The table lookup returns zero for wrapped indices in the other half.
+        let indices = self.vector_constant(&mask.map(|index| index.wrapping_sub(LANES)))?;
+        let second = self.append(IntegerOp::VectorSwizzle, [right, indices, 0]);
+        Some(if let Some(first) = first {
+            self.append(IntegerOp::VectorOr, [first, second, 0])
+        } else {
+            second
+        })
+    }
+
     fn vector_instruction(&mut self, inst: Inst, value: Value, values: &Values) -> Option<u64> {
         let dfg = &self.function.dfg;
         let input = |value| values.low[dfg.resolve_aliases(value)];
@@ -1879,14 +1922,7 @@ impl IntegerBlocks<'_> {
                 opcode: Opcode::Vconst,
                 constant_handle,
             } => {
-                let bytes = dfg.constants.get(constant_handle).as_slice();
-                let ([low, high], []) = bytes.as_chunks::<{ size_of::<u64>() }>() else {
-                    return None;
-                };
-                (
-                    IntegerOp::VectorConstant,
-                    [u64::from_le_bytes(*low), u64::from_le_bytes(*high), 0],
-                )
+                return self.vector_constant(dfg.constants.get(constant_handle).as_slice());
             }
             InstructionData::Unary {
                 opcode: Opcode::Splat,
@@ -1913,6 +1949,12 @@ impl IntegerBlocks<'_> {
                     Opcode::Bxor => (IntegerOp::VectorXor, 0),
                     Opcode::Iadd => (IntegerOp::VectorAdd, integer_width(lane)?),
                     Opcode::Isub => (IntegerOp::VectorSub, integer_width(lane)?),
+                    Opcode::IaddPairwise if self.aarch64 && lane != types::I64 => {
+                        (IntegerOp::VectorPairwiseAdd, integer_width(lane)?)
+                    }
+                    Opcode::Swizzle if self.aarch64 && output == types::I8X16 => {
+                        (IntegerOp::VectorSwizzle, 0)
+                    }
                     _ if self.aarch64 || matches!(lane, types::I8 | types::I16) => {
                         let op = match opcode {
                             Opcode::SaddSat => IntegerOp::VectorSignedSatAdd,
@@ -1929,6 +1971,47 @@ impl IntegerBlocks<'_> {
                     _ => return None,
                 };
                 (op, [input(left)?, input(right)?, width])
+            }
+            InstructionData::TernaryImm8 {
+                opcode: Opcode::Insertlane,
+                args: [vector, scalar],
+                imm,
+            } if self.aarch64 && ty(vector) == output && ty(scalar) == output.lane_type() => {
+                let lane = u64::from(imm);
+                if lane >= u64::from(output.lane_count()) {
+                    return None;
+                }
+                let scalar_ty = ty(scalar);
+                let mut scalar = input(scalar)?;
+                let width = if let Some(width) = float_width(scalar_ty) {
+                    scalar = self.append(IntegerOp::FloatToBits, [scalar, 0, width]);
+                    width
+                } else {
+                    integer_width(scalar_ty)?
+                };
+                (
+                    IntegerOp::VectorInsert,
+                    [
+                        input(vector)?,
+                        scalar,
+                        (lane << SIMD_LANE_INDEX_SHIFT) | width,
+                    ],
+                )
+            }
+            InstructionData::Shuffle {
+                opcode: Opcode::Shuffle,
+                args: [left, right],
+                imm,
+            } if self.aarch64
+                && output == types::I8X16
+                && ty(left) == output
+                && ty(right) == output =>
+            {
+                return self.vector_shuffle(
+                    dfg.immediates[imm].as_slice(),
+                    input(left)?,
+                    input(right)?,
+                );
             }
             InstructionData::Unary {
                 opcode: Opcode::FvpromoteLow,
@@ -1983,6 +2066,68 @@ impl IntegerBlocks<'_> {
             _ => return None,
         };
         Some(self.append(op, operands))
+    }
+
+    fn vector_scalar_instruction(
+        &mut self,
+        inst: Inst,
+        value: Value,
+        values: &Values,
+    ) -> Option<u64> {
+        let dfg = &self.function.dfg;
+        let input = |value| values.low[dfg.resolve_aliases(value)];
+        let output = self.value_type(value);
+        match dfg.insts[inst] {
+            InstructionData::BinaryImm8 {
+                opcode: Opcode::Extractlane,
+                arg,
+                imm,
+            } => {
+                let ty = self.value_type(arg);
+                let lane = u64::from(imm);
+                if !vector_type(ty)
+                    || output != ty.lane_type()
+                    || lane >= u64::from(ty.lane_count())
+                {
+                    return None;
+                }
+                let float = float_width(output);
+                let width = float.or_else(|| integer_width(output))?;
+                let result = self.append(IntegerOp::VectorExtract, [input(arg)?, lane, width]);
+                Some(if float.is_some() {
+                    self.append(IntegerOp::BitsToFloat, [result, 0, width])
+                } else {
+                    result
+                })
+            }
+            InstructionData::Unary { opcode, arg } => {
+                let ty = self.value_type(arg);
+                if !vector_type(ty) {
+                    return None;
+                }
+                let output_width = integer_width(output)?;
+                let (op, width) = match opcode {
+                    Opcode::VanyTrue => (IntegerOp::VectorAnyTrue, integer_width(ty.lane_type())?),
+                    Opcode::VallTrue => (IntegerOp::VectorAllTrue, integer_width(ty.lane_type())?),
+                    Opcode::VhighBits => {
+                        (IntegerOp::VectorHighBits, u64::from(ty.lane_type().bits()))
+                    }
+                    _ => return None,
+                };
+                let result = self.append(op, [input(arg)?, 0, width]);
+                Some(
+                    if opcode == Opcode::VhighBits && output_width < u64::from(ty.lane_count()) {
+                        self.append(
+                            IntegerOp::Truncate,
+                            [result, INTEGER_CELL_BITS, output_width],
+                        )
+                    } else {
+                        result
+                    },
+                )
+            }
+            _ => None,
+        }
     }
 
     // A block's arguments are already mapped by its incoming edge.
@@ -2166,6 +2311,15 @@ impl IntegerBlocks<'_> {
             };
             if vector_type(ty(value)) {
                 values.low[value] = Some(self.vector_instruction(inst, value, values)?);
+                continue;
+            }
+            if self.aarch64
+                && matches!(
+                    function.dfg.insts[inst].opcode(),
+                    Opcode::Extractlane | Opcode::VanyTrue | Opcode::VallTrue | Opcode::VhighBits
+                )
+            {
+                values.low[value] = Some(self.vector_scalar_instruction(inst, value, values)?);
                 continue;
             }
             if float_width(ty(value)).is_some()

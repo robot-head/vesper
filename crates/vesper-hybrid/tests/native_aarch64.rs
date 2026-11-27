@@ -124,6 +124,8 @@ const VECTOR_SPLAT: u64 = 159;
 const VECTOR_LOAD: u64 = 160;
 const VECTOR_STORE: u64 = 161;
 const VECTOR_SIGNED_SAT_ADD: u64 = 167;
+const VECTOR_EXTRACT: u64 = 177;
+const VECTOR_HIGH_BITS: u64 = 180;
 const CALL_STACK_COUNT_SHIFT: u32 = 4;
 const INDIRECT_CALL: u64 = 1 << (u64::BITS - 1);
 const EQUAL: u64 = 0;
@@ -216,6 +218,55 @@ fn aarch64_internal_floats_cross_the_register_bank_only_for_arithmetic() {
     );
     assert!(binding::aarch64_integer_leaf(&[1, 1, BITS_TO_FLOAT, 0, 0, CELL_BITS]).is_empty());
     assert!(binding::aarch64_integer_leaf(&[2, 2, FLOAT_ADD, 0, 1, CELL_BITS]).is_empty());
+}
+
+#[test]
+fn aarch64_simd_extracts_lanes_and_packs_sign_bits() {
+    const LAST_BYTE_LANE: u64 = 15;
+    const OUT_OF_RANGE_BYTE_LANE: u64 = LAST_BYTE_LANE + 1;
+    const LOAD_Q0_FROM_X0: u32 = 0x3dc0_0000;
+    const LAST_BYTE_OF_V0_TO_W0: u32 = 0x0e1f_3c00;
+    const ADDV_WORD_LANES: u32 = 0x4e71_b800;
+    const REGISTER_FIELDS: u32 = 0x0000_03ff;
+    let instructions = |packet: &[u64]| {
+        binding::aarch64_integer_leaf(packet)
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .copied()
+            .map(u32::from_le_bytes)
+            .collect::<Vec<_>>()
+    };
+    #[rustfmt::skip]
+    let extract = [
+        1, 2,
+        VECTOR_LOAD, 0, 0, 0,
+        VECTOR_EXTRACT, 1, LAST_BYTE_LANE, BYTE_BITS,
+    ];
+    assert_eq!(
+        instructions(&extract),
+        [LOAD_Q0_FROM_X0, LAST_BYTE_OF_V0_TO_W0, RET],
+    );
+    let mut invalid = extract;
+    invalid[extract.len() - 2] = OUT_OF_RANGE_BYTE_LANE;
+    assert!(instructions(&invalid).is_empty());
+    let mask = [
+        1,
+        2,
+        VECTOR_LOAD,
+        0,
+        0,
+        0,
+        VECTOR_HIGH_BITS,
+        1,
+        0,
+        BYTE_BITS,
+    ];
+    let code = instructions(&mask);
+    assert!(
+        code.iter()
+            .any(|word| word & !REGISTER_FIELDS == ADDV_WORD_LANES)
+    );
 }
 
 #[test]

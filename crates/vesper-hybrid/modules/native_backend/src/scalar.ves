@@ -189,6 +189,15 @@ pub const VECTOR_UNSIGNED_SAT_SUB: u64 = 170;
 pub const VECTOR_ROUNDED_AVERAGE: u64 = 171;
 pub const VECTOR_PROMOTE_LOW: u64 = 172;
 pub const VECTOR_DEMOTE: u64 = 173;
+pub const VECTOR_PAIRWISE_ADD: u64 = 174;
+pub const VECTOR_SWIZZLE: u64 = 175;
+pub const VECTOR_INSERT: u64 = 176;
+pub const VECTOR_EXTRACT: u64 = 177;
+pub const VECTOR_ANY_TRUE: u64 = 178;
+pub const VECTOR_ALL_TRUE: u64 = 179;
+pub const VECTOR_HIGH_BITS: u64 = 180;
+pub const VECTOR_LANE_INDEX_SHIFT: u32 = 8;
+pub const VECTOR_LANE_WIDTH_MASK: u64 = 0xff;
 const XMM_ARGUMENTS: u64 = 8;
 pub const CHECKED_ARITHMETIC_RECORDS: u64 = 2;
 
@@ -856,6 +865,7 @@ fn reads_right(in record: Record, paired: bool) -> bool {
         || op == FLOAT_SELECT
         || is_float_binary(op)
         || is_vector_binary(op)
+        || op == VECTOR_INSERT
         || is_float_fma(op)
         || is_float_compare(op)
         || is_register_shift(op)
@@ -891,11 +901,17 @@ pub fn is_float_to_integer(op: u64) -> bool {
 }
 
 pub fn is_vector_binary(op: u64) -> bool {
-    op >= VECTOR_AND && op <= VECTOR_ROUNDED_AVERAGE
+    (op >= VECTOR_AND && op <= VECTOR_ROUNDED_AVERAGE)
+        || op == VECTOR_PAIRWISE_ADD
+        || op == VECTOR_SWIZZLE
 }
 
-pub fn is_vector_convert(op: u64) -> bool {
+fn is_vector_convert(op: u64) -> bool {
     op == VECTOR_PROMOTE_LOW || op == VECTOR_DEMOTE
+}
+
+pub fn uses_vector_left(op: u64) -> bool {
+    is_vector_binary(op) || is_vector_convert(op) || op >= VECTOR_INSERT && op <= VECTOR_HIGH_BITS
 }
 
 fn vector_binary_opcode(op: u64, width: u64) -> u8 {
@@ -915,7 +931,7 @@ fn vector_binary_opcode(op: u64, width: u64) -> u8 {
 }
 
 fn is_vector_result(op: u64) -> bool {
-    op >= VECTOR_CONSTANT && op <= VECTOR_DEMOTE && op != VECTOR_STORE
+    op >= VECTOR_CONSTANT && op <= VECTOR_INSERT && op != VECTOR_STORE
 }
 
 pub fn vector_value(in words: Slice[u64], arguments: u64, value: u64) -> bool {
@@ -949,8 +965,7 @@ fn float_left(op: u64) -> bool {
         || op == FLOAT_PROMOTE
         || op == FLOAT_DEMOTE
         || op == FLOAT_TO_INTEGER_TRUNC
-        || is_vector_binary(op)
-        || is_vector_convert(op)
+        || uses_vector_left(op)
         || (op >= FLOAT_TO_SIGNED_SAT && op <= FLOAT_FMA64)
 }
 

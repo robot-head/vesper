@@ -37,7 +37,9 @@ use self::scalar::{
     STACK_POINTER, SPECTRE_BARRIER, is_conditional_trap, VECTOR_CONSTANT, VECTOR_SPLAT, VECTOR_LOAD,
     VECTOR_STORE, VECTOR_AND, VECTOR_OR, VECTOR_XOR, VECTOR_ADD, VECTOR_SUB, VECTOR_SIGNED_SAT_ADD,
     VECTOR_UNSIGNED_SAT_ADD, VECTOR_SIGNED_SAT_SUB, VECTOR_UNSIGNED_SAT_SUB, VECTOR_ROUNDED_AVERAGE,
-    VECTOR_PROMOTE_LOW, VECTOR_DEMOTE, is_vector_binary, is_vector_convert, vector_value
+    VECTOR_PROMOTE_LOW, VECTOR_DEMOTE, VECTOR_PAIRWISE_ADD, VECTOR_SWIZZLE, VECTOR_INSERT,
+    VECTOR_EXTRACT, VECTOR_ANY_TRUE, VECTOR_ALL_TRUE, VECTOR_HIGH_BITS, VECTOR_LANE_INDEX_SHIFT,
+    VECTOR_LANE_WIDTH_MASK, is_vector_binary, uses_vector_left, vector_value
 };
 use self::x86_64::{
     BYTE_BITS, WORD_BITS, DWORD_BITS, QWORD_BITS, FLOAT_ORDERED, FLOAT_UNORDERED, FLOAT_EQUAL,
@@ -111,7 +113,9 @@ const SIGNED_DIV_TRAP_DISPLACEMENT: u32 = 4;
 const CSDB: u32 = 0xd503229f;
 const VECTOR_ZERO: u32 = 0x4f00e400;
 const VECTOR_DUP: u32 = 0x4e000c00;
-const VECTOR_INSERT_HIGH: u32 = 0x4e181c00;
+const VECTOR_INSERT_GP: u32 = 0x4e001c00;
+const VECTOR_EXTRACT_GP: u32 = 0x0e003c00;
+const VECTOR_EXTRACT_QWORD: u32 = 0x40000000;
 const VECTOR_LANE_IMM5_SHIFT: u32 = 16;
 const VECTOR_SIZE_SHIFT: u32 = 22;
 const VECTOR_MEMORY_FLAGS: u32 = 0x04800000;
@@ -127,6 +131,22 @@ const VECTOR_UNSIGNED_SAT_SUB_REG: u32 = 0x6e202c00;
 const VECTOR_ROUNDED_AVERAGE_REG: u32 = 0x6e201400;
 const VECTOR_FLOAT_NARROW: u32 = 0x0e616800;
 const VECTOR_FLOAT_WIDEN: u32 = 0x0e617800;
+const VECTOR_PAIRWISE_ADD_REG: u32 = 0x4e20bc00;
+const VECTOR_TABLE: u32 = 0x4e000000;
+const VECTOR_UNSIGNED_MAX: u32 = 0x6e30a800;
+const VECTOR_UNSIGNED_MIN: u32 = 0x6e31a800;
+const VECTOR_QWORDS_EQUAL_ZERO: u32 = 0x4ee09800;
+const VECTOR_SIGN_BITS: u32 = 0x4f000400;
+const VECTOR_EXTRACT_BYTES: u32 = 0x6e000000;
+const VECTOR_EXTRACT_BYTE_SHIFT: u32 = 11;
+const VECTOR_INTERLEAVE_LOW_BYTES: u32 = 0x4e003800;
+const VECTOR_SUM_LANES: u32 = 0x4e31b800;
+const SHIFTED_REGISTER_AMOUNT: u32 = 10;
+const BYTE_SIGN_WEIGHTS: u64 = 0x8040201008040201;
+const WORD_SIGN_WEIGHTS_LOW: u64 = 0x0008000400020001;
+const WORD_SIGN_WEIGHTS_HIGH: u64 = 0x0080004000200010;
+const DWORD_SIGN_WEIGHTS_LOW: u64 = 0x0000000200000001;
+const DWORD_SIGN_WEIGHTS_HIGH: u64 = 0x0000000800000004;
 // ADR points past itself and the three remaining dispatch instructions.
 const ADR_TABLE: u32 = 0x10000080;
 const ADRP: u32 = 0x90000000;
@@ -732,7 +752,8 @@ fn vector_constant(inout out: ChunkSeq[u8], destination: u32, low: u64, high: u6
         push32(inout out, FMOV_FROM_GP | FP_DOUBLE | REG64 | sh(SCRATCH, RN_SHIFT) | destination);
         if high != 0 {
             immediate(inout out, SCRATCH, high);
-            push32(inout out, VECTOR_INSERT_HIGH | sh(SCRATCH, RN_SHIFT) | destination);
+            let lane = vector_lane_immediate(1, QWORD_BITS);
+            push32(inout out, VECTOR_INSERT_GP | lane | sh(SCRATCH, RN_SHIFT) | destination);
         }
     }
 }
@@ -748,6 +769,8 @@ fn vector_binary(inout out: ChunkSeq[u8], in r: Record, dest: u32, left: u32, ri
         VECTOR_UNSIGNED_SAT_ADD => VECTOR_UNSIGNED_SAT_ADD_REG,
         VECTOR_SIGNED_SAT_SUB => VECTOR_SIGNED_SAT_SUB_REG,
         VECTOR_UNSIGNED_SAT_SUB => VECTOR_UNSIGNED_SAT_SUB_REG,
+        VECTOR_PAIRWISE_ADD => VECTOR_PAIRWISE_ADD_REG,
+        VECTOR_SWIZZLE => VECTOR_TABLE,
         _ => VECTOR_ROUNDED_AVERAGE_REG,
     };
     let size = if r.extra != 0 {
@@ -756,6 +779,80 @@ fn vector_binary(inout out: ChunkSeq[u8], in r: Record, dest: u32, left: u32, ri
         0
     };
     rrr(inout out, opcode | size, dest, left, right);
+}
+
+fn vector_lane_immediate(lane: u64, width: u64) -> u32 {
+    let bytes = wrapping_u32(width / BYTE_BITS);
+    sh(bytes | wrapping_mul(wrapping_mul(wrapping_u32(lane), bytes), 2), VECTOR_LANE_IMM5_SHIFT)
+}
+
+fn vector_extract(inout out: ChunkSeq[u8], dest: u32, source: u32, lane: u64, width: u64) {
+    let wide = if width == QWORD_BITS {
+        VECTOR_EXTRACT_QWORD
+    } else {
+        0
+    };
+    push32(
+        inout out,
+        VECTOR_EXTRACT_GP | wide | vector_lane_immediate(lane, width) | sh(source, RN_SHIFT) | dest
+    );
+}
+
+fn vector_truth(inout out: ChunkSeq[u8], dest: u32, source: u32, all: bool, lane: u64) {
+    let (op, input, width, cc) = if all && lane == QWORD_BITS {
+        push32(inout out, VECTOR_QWORDS_EQUAL_ZERO | sh(source, RN_SHIFT) | VECTOR_LEFT);
+        (VECTOR_UNSIGNED_MAX, VECTOR_LEFT, BYTE_BITS, EQ)
+    } else if all {
+        let size = sh(trailing_zeros_u64(lane / BYTE_BITS), VECTOR_SIZE_SHIFT);
+        (VECTOR_UNSIGNED_MIN | size, source, lane, NE)
+    } else {
+        (VECTOR_UNSIGNED_MAX, source, BYTE_BITS, NE)
+    };
+    push32(inout out, op | sh(input, RN_SHIFT) | VECTOR_LEFT);
+    vector_extract(inout out, dest, VECTOR_LEFT, 0, width);
+    rrr(inout out, SUBS_REG, ZERO, dest, ZERO);
+    push32(inout out, CSET | sh(cc ^ 1, CONDITION_SHIFT) | dest);
+}
+
+fn vector_high_bits(inout out: ChunkSeq[u8], dest: u32, source: u32, width: u64) {
+    if width == QWORD_BITS {
+        vector_extract(inout out, dest, source, 0, width);
+        vector_extract(inout out, SCRATCH, source, 1, width);
+        let sign = wrapping_sub(width, 1);
+        bitfield(inout out, UBFM, dest, dest, sign, sign);
+        bitfield(inout out, UBFM, SCRATCH, SCRATCH, sign, sign);
+        rrr(inout out, ORR_REG | sh(1, SHIFTED_REGISTER_AMOUNT), dest, dest, SCRATCH);
+        return;
+    }
+    let (low, high) = match width {
+        BYTE_BITS => (BYTE_SIGN_WEIGHTS, BYTE_SIGN_WEIGHTS),
+        WORD_BITS => (WORD_SIGN_WEIGHTS_LOW, WORD_SIGN_WEIGHTS_HIGH),
+        _ => (DWORD_SIGN_WEIGHTS_LOW, DWORD_SIGN_WEIGHTS_HIGH),
+    };
+    // The arithmetic shift replicates the sign, and each lane then keeps
+    // its own bit in the final mask.
+    let shift = sh(wrapping_u32(wrapping_add(width, 1)), VECTOR_LANE_IMM5_SHIFT);
+    push32(inout out, VECTOR_SIGN_BITS | shift | sh(source, RN_SHIFT) | VECTOR_LEFT);
+    vector_constant(inout out, VECTOR_RIGHT, low, high);
+    rrr(inout out, VECTOR_AND_REG, VECTOR_LEFT, VECTOR_LEFT, VECTOR_RIGHT);
+    let width = if width == BYTE_BITS {
+        // Interleave the halves so the two byte masks sum into one word.
+        let half = QWORD_BITS / BYTE_BITS;
+        rrr(
+            inout out,
+            VECTOR_EXTRACT_BYTES | sh(wrapping_u32(half), VECTOR_EXTRACT_BYTE_SHIFT),
+            VECTOR_RIGHT,
+            VECTOR_LEFT,
+            VECTOR_LEFT
+        );
+        rrr(inout out, VECTOR_INTERLEAVE_LOW_BYTES, VECTOR_LEFT, VECTOR_LEFT, VECTOR_RIGHT);
+        WORD_BITS
+    } else {
+        width
+    };
+    let size = sh(trailing_zeros_u64(width / BYTE_BITS), VECTOR_SIZE_SHIFT);
+    push32(inout out, VECTOR_SUM_LANES | size | sh(VECTOR_LEFT, RN_SHIFT) | VECTOR_LEFT);
+    vector_extract(inout out, dest, VECTOR_LEFT, 0, width);
 }
 
 fn indexed_memory(
@@ -959,7 +1056,7 @@ fn is_atomic_update(op: u64) -> bool {
 }
 
 fn operands(in r: Record, returns: u64) -> Option[u64] {
-    if r.op >= VECTOR_CONSTANT && r.op <= VECTOR_DEMOTE {
+    if r.op >= VECTOR_CONSTANT && r.op <= VECTOR_HIGH_BITS {
         return match r.op {
             VECTOR_CONSTANT => if r.extra == 0 {
                 Option::Some(0)
@@ -981,12 +1078,32 @@ fn operands(in r: Record, returns: u64) -> Option[u64] {
             } else {
                 Option::None
             },
-            VECTOR_AND | VECTOR_OR | VECTOR_XOR => if r.extra == 0 {
+            VECTOR_AND | VECTOR_OR | VECTOR_XOR | VECTOR_SWIZZLE => if r.extra == 0 {
                 Option::Some(2)
             } else {
                 Option::None
             },
             VECTOR_PROMOTE_LOW | VECTOR_DEMOTE => if r.right == 0 && r.extra == 0 {
+                Option::Some(1)
+            } else {
+                Option::None
+            },
+            VECTOR_INSERT => if valid_vector_lane(
+                wrapping_shr_u64(r.extra, VECTOR_LANE_INDEX_SHIFT),
+                r.extra & VECTOR_LANE_WIDTH_MASK
+            ) {
+                Option::Some(2)
+            } else {
+                Option::None
+            },
+            VECTOR_EXTRACT => if valid_vector_lane(r.right, r.extra) {
+                Option::Some(1)
+            } else {
+                Option::None
+            },
+            VECTOR_ANY_TRUE | VECTOR_ALL_TRUE | VECTOR_HIGH_BITS => if r.right == 0
+                && scalar_width(r.extra)
+            {
                 Option::Some(1)
             } else {
                 Option::None
@@ -1264,14 +1381,20 @@ fn operands(in r: Record, returns: u64) -> Option[u64] {
     }
 }
 
+fn valid_vector_lane(index: u64, width: u64) -> bool {
+    scalar_width(width)
+        && index < VECTOR_BITS / BYTE_BITS
+        && wrapping_mul(index, width) < VECTOR_BITS
+}
+
 fn valid_vector_inputs(in words: Slice[u64], args: u64, count: u64, returns: u64) -> bool {
     for index in 0..count {
         let r = read_record(in words, index);
         // The backward pass has already validated these operand counts.
         let n = operands(in r, returns).unwrap_or(0);
-        let binary = is_vector_binary(r.op);
-        if (n >= 1 && vector_value(in words, args, r.left) != (binary || is_vector_convert(r.op)))
-            || (n >= 2 && vector_value(in words, args, r.right) != (binary || r.op == VECTOR_STORE))
+        let vector_rhs = is_vector_binary(r.op) || r.op == VECTOR_STORE;
+        if (n >= 1 && vector_value(in words, args, r.left) != uses_vector_left(r.op))
+            || (n >= 2 && vector_value(in words, args, r.right) != vector_rhs)
             || (n == 3 && vector_value(in words, args, r.extra))
         {
             return false;
@@ -1866,6 +1989,12 @@ fn emit_instruction(
 ) {
     if r.op == CONSTANT {
         immediate(inout out, dest, r.left);
+    } else if r.op == VECTOR_EXTRACT {
+        vector_extract(inout out, dest, lhs, r.right, r.extra);
+    } else if r.op == VECTOR_ANY_TRUE || r.op == VECTOR_ALL_TRUE {
+        vector_truth(inout out, dest, lhs, r.op == VECTOR_ALL_TRUE, r.extra);
+    } else if r.op == VECTOR_HIGH_BITS {
+        vector_high_bits(inout out, dest, lhs, r.extra);
     } else if float_opcode(r.op) {
         emit_float_instruction(inout out, in r, dest, lhs, rhs, third);
     } else if r.op >= LEADING_ZEROS && r.op <= LEADING_SIGN_BITS {
@@ -2708,7 +2837,7 @@ fn encode_pass(
         let index = wrapping_sub(wrapping_sub(count, 1), reverse);
         let value = wrapping_add(args, index);
         let r = read_record(in words, index);
-        has_vector = has_vector || (r.op >= VECTOR_CONSTANT && r.op <= VECTOR_DEMOTE);
+        has_vector = has_vector || (r.op >= VECTOR_CONSTANT && r.op <= VECTOR_HIGH_BITS);
         has_float = has_float || float_opcode(r.op);
         if register_home && r.op == BLOCK_RETURN && r.left != TRAP_VALUE {
             normal_returns = wrapping_add(normal_returns, 1);
@@ -3220,7 +3349,7 @@ fn encode_pass(
             UNASSIGNED
         };
         let vector = has_vector && r.op >= VECTOR_CONSTANT;
-        let vector_left = vector && (is_vector_binary(r.op) || is_vector_convert(r.op));
+        let vector_left = vector && uses_vector_left(r.op);
         let vector_right = vector && (is_vector_binary(r.op) || r.op == VECTOR_STORE);
         if vector_left {
             vector_used = expire(vector_used, in ends, r.left, value, left);
@@ -3235,7 +3364,7 @@ fn encode_pass(
         if n == 3 {
             used = expire(used, in ends, r.extra, value, extra);
         }
-        if vector {
+        if vector && r.op <= VECTOR_INSERT {
             let lhs = if vector_left {
                 materialize_vector(inout out, left, VECTOR_LEFT, frame_bytes)
             } else {
@@ -3284,6 +3413,21 @@ fn encode_pass(
                 VECTOR_CONSTANT => vector_constant(inout out, dest, r.left, r.right),
                 VECTOR_SPLAT => vector_splat(inout out, dest, lhs, r.extra),
                 VECTOR_LOAD => memory(inout out, true, VECTOR_BITS, lhs, dest, r.right),
+                VECTOR_INSERT => {
+                    let lane = wrapping_shr_u64(r.extra, VECTOR_LANE_INDEX_SHIFT);
+                    let width = r.extra & VECTOR_LANE_WIDTH_MASK;
+                    let value = materialize(inout out, right, SPILL_RIGHT, frame_bytes);
+                    if dest != lhs {
+                        rrr(inout out, VECTOR_OR_REG, dest, lhs, lhs);
+                    }
+                    push32(
+                        inout out,
+                        VECTOR_INSERT_GP
+                            | vector_lane_immediate(lane, width)
+                            | sh(value, RN_SHIFT)
+                            | dest
+                    );
+                },
                 VECTOR_PROMOTE_LOW | VECTOR_DEMOTE => {
                     let op = if r.op == VECTOR_DEMOTE {
                         VECTOR_FLOAT_NARROW
@@ -3341,7 +3485,11 @@ fn encode_pass(
             locations.push(UNASSIGNED);
             continue;
         }
-        let mut lhs = materialize(inout out, left, SPILL_LEFT, frame_bytes);
+        let mut lhs = if vector_left {
+            materialize_vector(inout out, left, VECTOR_LEFT, frame_bytes)
+        } else {
+            materialize(inout out, left, SPILL_LEFT, frame_bytes)
+        };
         let mut rhs = materialize(inout out, right, SPILL_RIGHT, frame_bytes);
         let third = if consumes_carry(r.op) {
             UNASSIGNED
