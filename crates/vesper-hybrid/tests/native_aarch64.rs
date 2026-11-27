@@ -68,10 +68,14 @@ const BRANCH_TABLE: u64 = 75;
 const BRANCH_TABLE_TARGET: u64 = 76;
 const ADD_CARRY: u64 = 77;
 const SUB_BORROW: u64 = 78;
+const FLOAT_ARGUMENT: u64 = 79;
 const FLOAT_ADD: u64 = 81;
 const FLOAT_COMPARE64: u64 = 89;
 const BITS_TO_FLOAT: u64 = 93;
 const FLOAT_TO_BITS: u64 = 94;
+const FLOAT_RETURN: u64 = 96;
+const CALL_FLOAT: u64 = 97;
+const FLOAT_RETURN_LAYOUT: u64 = 3;
 const ATOMIC_ADD: u64 = 102;
 const ATOMIC_SUB: u64 = 103;
 const ATOMIC_EXCHANGE: u64 = 104;
@@ -97,6 +101,7 @@ const ATOMIC_CAS_WORD: u64 = 123;
 const ATOMIC_NAND: u64 = 127;
 const ATOMIC_UNSIGNED_MIN: u64 = 130;
 const ATOMIC_SIGNED_MAX: u64 = 133;
+const CALL_FLOAT32: u64 = 134;
 const EQUAL: u64 = 0;
 const SIGNED_LESS: u64 = 2;
 const UNSIGNED_LESS: u64 = 6;
@@ -148,6 +153,68 @@ fn aarch64_internal_floats_cross_the_register_bank_only_for_arithmetic() {
     );
     assert!(binding::aarch64_integer_leaf(&[1, 1, BITS_TO_FLOAT, 0, 0, CELL_BITS]).is_empty());
     assert!(binding::aarch64_integer_leaf(&[2, 2, FLOAT_ADD, 0, 1, CELL_BITS]).is_empty());
+}
+
+#[test]
+fn aarch64_float_arguments_and_returns_support_linear_and_labeled_functions() {
+    const FMOV_W0_S0: u32 = 0x1e26_0000;
+    const FMOV_X0_D0: u32 = 0x9e66_0000;
+    const FMOV_D0_X0: u32 = 0x9e67_0000;
+    for (width, receive) in [(DWORD_BITS, FMOV_W0_S0), (CELL_BITS, FMOV_X0_D0)] {
+        let expected = [receive, FMOV_D0_X0, RET].map(u32::to_le_bytes).concat();
+        #[rustfmt::skip]
+        let linear = [
+            0, 0,
+            FLOAT_ARGUMENT, 0, 0, width,
+            FLOAT_RETURN, 0, 0, 0,
+        ];
+        #[rustfmt::skip]
+        let labeled = [
+            0, NO_VALUE,
+            BLOCK_LABEL, 0, 0, FLOAT_RETURN_LAYOUT,
+            FLOAT_ARGUMENT, 0, 0, width,
+            BLOCK_RETURN, 1, 0, 0,
+        ];
+        assert_eq!(binding::aarch64_integer_leaf(&linear), expected);
+        assert_eq!(binding::aarch64_integer_leaf(&labeled), expected);
+    }
+    assert!(binding::aarch64_integer_leaf(&[1, 0, FLOAT_RETURN, 0, 0, 0]).is_empty());
+    assert!(binding::aarch64_integer_leaf(&[0, 0, FLOAT_ARGUMENT, 1, 0, CELL_BITS]).is_empty());
+}
+
+#[test]
+fn aarch64_float_calls_move_arguments_before_gp_shuffle() {
+    // The float pass-through follows the call pattern in isa/aarch64/call.clif.
+    const FMOV_D0_X1: u32 = 0x9e67_0020;
+    const MOV_X1_X0: u32 = 0xaa00_03e1;
+    const BL: u32 = 0x9400_0000;
+    const FMOV_W16_S0: u32 = 0x1e26_0010;
+    const FMOV_X16_D0: u32 = 0x9e66_0010;
+    for (op, width, receive) in [
+        (CALL_FLOAT32, DWORD_BITS, FMOV_W16_S0),
+        (CALL_FLOAT, CELL_BITS, FMOV_X16_D0),
+    ] {
+        #[rustfmt::skip]
+        let words = [
+            1, 5,
+            FLOAT_ARGUMENT, 0, 0, width,
+            CALL_ARGUMENT, 0, 0, 0,
+            CALL_ARGUMENT, 0, 0, 0,
+            CALL_ARGUMENT, 1, 0, 0,
+            op, 17, 3, 1,
+            FLOAT_RETURN, 0, 0, 0,
+        ];
+        let packet = binding::aarch64_relocatable_block(&words);
+        let (length, body) = packet.split_first_chunk::<{ size_of::<u64>() }>().unwrap();
+        let (code, _) = body.split_at(u64::from_le_bytes(*length) as usize);
+        let sequence = [FMOV_D0_X1, MOV_X1_X0, BL, receive]
+            .map(u32::to_le_bytes)
+            .concat();
+        assert!(
+            code.windows(sequence.len())
+                .any(|window| window == sequence)
+        );
+    }
 }
 
 #[test]
@@ -1962,7 +2029,7 @@ fn aarch64_uses_short_immediate_encodings() {
 }
 
 #[test]
-fn aarch64_integer_functions_reach_elf_and_macho_object_emission() {
+fn aarch64_scalar_functions_reach_elf_and_macho_object_emission() {
     const LEAF: &str = "
         fn main(a: u64, b: u64, c: u64, d: u64, e: u64, f: u64, g: u64, h: u64) -> u64 {
             wrapping_add(wrapping_mul(a, h), b ^ c ^ d ^ e ^ f ^ g)
@@ -2034,8 +2101,8 @@ fn aarch64_integer_functions_reach_elf_and_macho_object_emission() {
             "{triple} did not select the machine emitter"
         );
         assert!(
-            compile(&float, triple) == float_baseline,
-            "{triple} changed the fallback object"
+            compile(&float, triple) != float_baseline,
+            "{triple} did not select the float machine emitter"
         );
 
         let file = object::File::parse(bytes.as_slice()).unwrap();
@@ -2069,5 +2136,5 @@ fn aarch64_integer_functions_reach_elf_and_macho_object_emission() {
         );
     }
     assert_eq!(RELOCATED.load(Relaxed), 2 * TRIPLES.len());
-    assert_eq!(SELECTED.load(Relaxed), 4 * TRIPLES.len());
+    assert_eq!(SELECTED.load(Relaxed), 5 * TRIPLES.len());
 }

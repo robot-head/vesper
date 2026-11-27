@@ -92,7 +92,7 @@ pub const BRANCH_TABLE: u64 = 75;
 pub const BRANCH_TABLE_TARGET: u64 = 76;
 pub const ADD_CARRY: u64 = 77;
 const SUB_BORROW: u64 = 78;
-const FLOAT_ARGUMENT: u64 = 79;
+pub const FLOAT_ARGUMENT: u64 = 79;
 pub const FLOAT_CONSTANT: u64 = 80;
 pub const FLOAT_ADD: u64 = 81;
 pub const FLOAT_SUB: u64 = 82;
@@ -109,8 +109,8 @@ pub const FLOAT_STORE64: u64 = 92;
 pub const BITS_TO_FLOAT: u64 = 93;
 pub const FLOAT_TO_BITS: u64 = 94;
 pub const FLOAT_SELECT: u64 = 95;
-const FLOAT_RETURN: u64 = 96;
-const CALL_FLOAT: u64 = 97;
+pub const FLOAT_RETURN: u64 = 96;
+pub const CALL_FLOAT: u64 = 97;
 pub const FLOAT_STACK_LOAD: u64 = 98;
 pub const FLOAT_STACK_STORE32: u64 = 99;
 pub const FLOAT_STACK_STORE64: u64 = 100;
@@ -147,6 +147,7 @@ pub const ATOMIC_UNSIGNED_MIN: u64 = 130;
 pub const ATOMIC_UNSIGNED_MAX: u64 = 131;
 pub const ATOMIC_SIGNED_MIN: u64 = 132;
 pub const ATOMIC_SIGNED_MAX: u64 = 133;
+pub const CALL_FLOAT32: u64 = 134;
 const XMM_ARGUMENTS: u64 = 8;
 pub const CHECKED_ARITHMETIC_RECORDS: u64 = 2;
 
@@ -180,7 +181,7 @@ pub const NEVER_READ: u64 = 0;
 pub const NO_VALUE: u64 = 0xffffffffffffffff;
 pub const TRAP_VALUE: u64 = NO_VALUE - 1;
 const PAIRED_RESULTS: u64 = 2;
-const FLOAT_RETURN_LAYOUT: u64 = PAIRED_RESULTS + 1;
+pub const FLOAT_RETURN_LAYOUT: u64 = PAIRED_RESULTS + 1;
 pub const DISP32_MASK: u64 = 0xffffffff;
 pub const LIBCALL_TARGET_BASE: u64 = DISP32_MASK + 1;
 pub const MEMCPY_LIBCALL: u64 = 1;
@@ -592,7 +593,7 @@ fn has_no_result(op: u64) -> bool {
 }
 
 fn is_call(op: u64) -> bool {
-    op == CALL || op == CALL_VOID || op == CALL_PAIR || op == CALL_FLOAT
+    op == CALL || op == CALL_VOID || op == CALL_PAIR || op == CALL_FLOAT || op == CALL_FLOAT32
 }
 
 pub fn is_atomic_rmw(op: u64) -> bool {
@@ -769,6 +770,7 @@ fn is_float_result(op: u64) -> bool {
         || op == BITS_TO_FLOAT
         || op == FLOAT_SELECT
         || op == CALL_FLOAT
+        || op == CALL_FLOAT32
         || op == FLOAT_STACK_LOAD
         || op == FLOAT_COPY_SIGN
 }

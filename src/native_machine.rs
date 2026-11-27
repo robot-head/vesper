@@ -153,6 +153,7 @@ enum IntegerOp {
     AtomicUnsignedMax = 131,
     AtomicSignedMin = 132,
     AtomicSignedMax = 133,
+    CallFloat32 = 134,
 }
 
 fn integer_bit_op(op: Opcode) -> Option<IntegerOp> {
@@ -333,8 +334,7 @@ fn argument_cells(params: &[AbiParam], aarch64: Option<CallConv>) -> Option<(usi
             if cells > register_limit {
                 return None;
             }
-        } else if aarch64.is_none()
-            && float_width(param.value_type).is_some()
+        } else if float_width(param.value_type).is_some()
             && *param == AbiParam::new(param.value_type)
         {
             floats += 1;
@@ -446,6 +446,11 @@ fn entry_values(blocks: &mut IntegerBlocks<'_>, block: Block) -> Option<Values> 
         if let Some(width) = float_width(ty) {
             values.low[value] = Some(blocks.append(IntegerOp::FloatArgument, [xmm, 0, width]));
             xmm += 1;
+        }
+    }
+    for &value in params {
+        let ty = function.dfg.value_type(value);
+        if float_width(ty).is_some() {
             continue;
         }
         next = argument_start(next, ty, aarch64);
@@ -709,9 +714,6 @@ impl IntegerBlocks<'_> {
         let aarch64 = self.aarch64.then_some(signature.call_conv);
         let (gp_arguments, float_arguments) = argument_cells(&signature.params, aarch64)?;
         let float_return = returns_float(&signature.returns);
-        if self.aarch64 && float_return {
-            return None;
-        }
         let return_cells = if float_return {
             1
         } else {
@@ -729,6 +731,9 @@ impl IntegerBlocks<'_> {
         }
         let op = match return_cells {
             0 => IntegerOp::CallVoid,
+            1 if self.aarch64 && float_return && signature.returns[0].value_type == types::F32 => {
+                IntegerOp::CallFloat32
+            }
             1 if float_return => IntegerOp::CallFloat,
             1 => IntegerOp::Call,
             GP_RESULTS => IntegerOp::CallPair,
@@ -2318,10 +2323,11 @@ impl IntegerBlocks<'_> {
 /// Leading StackSlot records declare frame slots by size and alignment.
 /// Stack addresses and accesses use a slot ordinal and an offset within the slot.
 /// Each call is preceded by its CallArgument records, integer cells first,
-/// then XMM cells. The call's left operand is the function ID, its right
-/// operand is the total cell count, and its extra operand is the XMM count.
+/// then floating-point cells. The call's left operand is the function ID, its
+/// right operand is the total cell count, and its extra operand is the float count.
 /// AAPCS64 uses a NO_VALUE argument for a register skipped before a pair.
-/// Argument records leave unreferenced slots. CallFloat returns through XMM0.
+/// Argument records leave unreferenced slots. CallFloat returns through the
+/// first floating-point result register. AArch64 uses CallFloat32 for f32.
 /// Call targets above the u32 symbol-ID range identify approved runtime libcalls.
 /// CallPair writes its low result and the immediately following CallHigh's
 /// slot holds its high result.
@@ -2334,13 +2340,13 @@ impl IntegerBlocks<'_> {
 /// Compare-and-swap records have a width-specific opcode and three operand IDs.
 /// AArch64 AtomicLoad and AtomicStore encode ordered accesses without an offset.
 /// The load remains live even when its result is unused.
-/// After the stack declarations, FloatArgument binds successive SysV XMM
-/// arguments. These use their own register bank and occupy normal value IDs.
-/// A trailing FloatReturn selects XMM0 for the single return value.
+/// After the stack declarations, FloatArgument binds successive registers
+/// from the ABI's floating-point argument bank and occupies a normal value ID.
+/// A trailing FloatReturn selects the ABI's single floating-point result.
 /// SymbolRelative and SymbolGot read the data symbol ID from the left operand.
 /// A labeled function starts with BlockLabel after the stack declarations
 /// and returns through BlockReturn records. The label's extra word describes
-/// the integer return arity or a single XMM result. Entry FloatArgument records
+/// the integer return arity or a single floating-point result. Entry FloatArgument records
 /// follow the first label. BranchLabel skips the taken edge
 /// transfers and its jump to the matching EdgeLabel. Cross-block operands
 /// reload from frame homes, and JumpLabel targets a non-entry BlockLabel.
@@ -2353,7 +2359,7 @@ pub fn integer_block_words(function: &Function) -> Option<Vec<u64>> {
         .map(|(primary, _)| primary.words)
 }
 
-/// Packs an AAPCS64 function with ordinary register integer parameters.
+/// Packs an AAPCS64 function with ordinary register scalar parameters.
 pub fn aarch64_leaf_words(function: &Function) -> Option<Vec<u64>> {
     let (program, _) = aarch64_program(function, None, false)?;
     (!program.relocations).then_some(program.words)
@@ -2400,9 +2406,6 @@ fn integer_program(
     }
     let (arity, _) = argument_cells(&signature.params, aarch64.then_some(call_conv))?;
     let float_return = returns_float(&signature.returns);
-    if aarch64 && float_return {
-        return None;
-    }
     let return_cells = if float_return {
         1
     } else {

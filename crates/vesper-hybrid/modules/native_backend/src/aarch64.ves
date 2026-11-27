@@ -1,4 +1,4 @@
-// AAPCS64 functions with register-only integer signatures. The input is the shared scalar
+// AAPCS64 functions with register-only scalar signatures. The input is the shared scalar
 // machine tape. Unsupported operations or oversized frames decline before a
 // function is defined.
 use @vesper/codegen-freestanding::util::{push16, push32};
@@ -29,7 +29,7 @@ use self::scalar::{
     FUNNEL_RIGHT, AND_NOT, OR_NOT, XOR_NOT, ABS, ATOMIC_LOAD, ATOMIC_STORE, ATOMIC_CAS_BYTE,
     ATOMIC_CAS_WORD, ATOMIC_CAS_DWORD, ATOMIC_CAS_QWORD, ATOMIC_SUB, ATOMIC_AND, ATOMIC_NAND,
     ATOMIC_OR, ATOMIC_XOR, ATOMIC_UNSIGNED_MIN, ATOMIC_UNSIGNED_MAX, ATOMIC_SIGNED_MIN,
-    ATOMIC_SIGNED_MAX
+    ATOMIC_SIGNED_MAX, FLOAT_ARGUMENT, FLOAT_RETURN, FLOAT_RETURN_LAYOUT, CALL_FLOAT, CALL_FLOAT32
 };
 use self::x86_64::{
     BYTE_BITS, WORD_BITS, DWORD_BITS, QWORD_BITS, FLOAT_ORDERED, FLOAT_UNORDERED, FLOAT_EQUAL,
@@ -39,6 +39,7 @@ use self::x86_64::{
 };
 
 const ARGUMENT_REGISTERS: u64 = 8;
+const FP_ARGUMENT_REGISTERS: u64 = 8;
 // Keep x16 and x17 out of allocation for architectural scratch uses.
 const CALLER_REGISTER_MASK: u32 = 0xffff;
 const UNASSIGNED: u32 = 32;
@@ -60,6 +61,7 @@ const CALLEE_REGISTERS: u64 = 10;
 const CALLS_FOR_CALLEE_REGISTERS: u64 = 2;
 const FIRST_RESULT: u32 = 0;
 const SECOND_RESULT: u32 = 1;
+const FP_RESULT: u32 = 0;
 const PAIRED_RESULTS: u64 = 2;
 const ZERO: u32 = 31;
 const SP: u32 = 31;
@@ -664,7 +666,11 @@ fn flags_survive_stack_stores(in words: Slice[u64], start: u64, end: u64, value:
 }
 
 fn direct_call(op: u64) -> bool {
-    op == CALL || op == CALL_VOID || op == CALL_PAIR
+    op == CALL || op == CALL_VOID || op == CALL_PAIR || float_call(op)
+}
+
+fn float_call(op: u64) -> bool {
+    op == CALL_FLOAT || op == CALL_FLOAT32
 }
 
 fn float_operands(in r: Record) -> Option[u64] {
@@ -727,7 +733,21 @@ fn operands(in r: Record, returns: u64) -> Option[u64] {
     if r.op == CONSTANT || r.op == STACK_SLOT || r.op == BLOCK_LABEL {
         return Option::Some(0);
     }
-    if r.op >= FLOAT_CONSTANT && r.op <= FLOAT_COPY_SIGN {
+    if r.op == FLOAT_ARGUMENT {
+        return if r.left < FP_ARGUMENT_REGISTERS && r.right == 0 && float_width(r.extra) {
+            Option::Some(0)
+        } else {
+            Option::None
+        };
+    }
+    if r.op == FLOAT_RETURN {
+        return if r.left == 0 && r.right == 0 && r.extra == 0 {
+            Option::Some(0)
+        } else {
+            Option::None
+        };
+    }
+    if r.op >= FLOAT_CONSTANT && r.op <= FLOAT_COPY_SIGN && !float_call(r.op) {
         return float_operands(in r);
     }
     if is_symbol(r.op) {
@@ -755,10 +775,13 @@ fn operands(in r: Record, returns: u64) -> Option[u64] {
         };
     }
     if direct_call(r.op) {
-        return if r.right <= ARGUMENT_REGISTERS
-            && r.extra == 0
+        return if r.extra <= FP_ARGUMENT_REGISTERS
+            && r.extra <= r.right
+            && wrapping_sub(r.right, r.extra) <= ARGUMENT_REGISTERS
             && (r.left < LIBCALL_TARGET_BASE
                 || (r.op != CALL_PAIR
+                    && !float_call(r.op)
+                    && r.extra == 0
                     && wrapping_sub(r.left, LIBCALL_TARGET_BASE) <= MEMCPY_LIBCALL))
         {
             Option::Some(0)
@@ -1206,7 +1229,14 @@ fn emit_float_instruction(
     rhs: u32,
     third: u32
 ) {
-    if r.op == FLOAT_CONSTANT {
+    if r.op == FLOAT_ARGUMENT {
+        let width = if r.extra == QWORD_BITS {
+            FP_DOUBLE | REG64
+        } else {
+            0
+        };
+        push32(inout out, FMOV_TO_GP | width | sh(wrapping_u32(r.left), RN_SHIFT) | dest);
+    } else if r.op == FLOAT_CONSTANT {
         immediate(inout out, dest, low_bits(r.left, r.extra));
     } else if r.op == BITS_TO_FLOAT || r.op == FLOAT_TO_BITS {
         if dest != lhs || r.extra == DWORD_BITS {
@@ -1392,7 +1422,7 @@ fn emit_instruction(
 ) {
     if r.op == CONSTANT {
         immediate(inout out, dest, r.left);
-    } else if r.op >= FLOAT_CONSTANT && r.op <= FLOAT_COPY_SIGN {
+    } else if r.op >= FLOAT_ARGUMENT && r.op <= FLOAT_COPY_SIGN {
         emit_float_instruction(inout out, in r, dest, lhs, rhs, third);
     } else if r.op >= LEADING_ZEROS && r.op <= LEADING_SIGN_BITS {
         emit_bit_operation(inout out, in r, dest, lhs);
@@ -1638,6 +1668,7 @@ fn no_result(op: u64) -> bool {
         || op == CALL_VOID
         || op == CALL_ARGUMENT
         || op == RETURN_PAIR
+        || op == FLOAT_RETURN
         || op == TRAP
         || op == FENCE
         || op == ATOMIC_STORE
@@ -1651,13 +1682,17 @@ fn emit_return(
     inout output: ChunkSeq[u8],
     low: u32,
     high: u32,
+    float_return: bool,
     adjustment: u32,
     spill_mode: bool,
     link_slot: u64,
     in callee: SavedRegisters,
     inout restores: ChunkSeq[u64]
 ) {
-    if high == FIRST_RESULT && low != FIRST_RESULT {
+    if float_return {
+        // The low lane holds the result for both scalar float widths.
+        push32(inout output, FMOV_FROM_GP | FP_DOUBLE | REG64 | sh(low, RN_SHIFT) | FP_RESULT);
+    } else if high == FIRST_RESULT && low != FIRST_RESULT {
         // Moving the first result would overwrite the second result.
         let source = if low == SECOND_RESULT {
             rrr(inout output, ORR_REG, SCRATCH, ZERO, low);
@@ -1745,10 +1780,11 @@ fn emit_call(
     inout relocations: ChunkSeq[u64]
 ) -> Option[u32] {
     let start = wrapping_sub(index, record.right);
+    let gp_arguments = wrapping_sub(record.right, record.extra);
     let mut save = used;
     let mut overwritten: u32 = 0;
     let mut reload: u32 = 0;
-    for arg in 0..record.right {
+    for arg in 0..gp_arguments {
         let value = read_record(in words, wrapping_add(start, arg)).left;
         if value == NO_VALUE {
             continue;
@@ -1775,7 +1811,18 @@ fn emit_call(
         in SavedRegisters { mask: save, first: 0, offset: save_base },
         false
     );
-    for arg in 0..record.right {
+    // Copy floating inputs before the GP argument shuffle changes their sources.
+    let float_start = wrapping_add(start, gp_arguments);
+    for arg in 0..record.extra {
+        let value = read_record(in words, wrapping_add(float_start, arg)).left;
+        let source = location(in locations, value);
+        if source == UNASSIGNED {
+            return Option::None;
+        }
+        let reg = materialize(inout out, source, SCRATCH, frame_bytes);
+        push32(inout out, FMOV_FROM_GP | FP_DOUBLE | REG64 | sh(reg, RN_SHIFT) | wrapping_u32(arg));
+    }
+    for arg in 0..gp_arguments {
         let value = read_record(in words, wrapping_add(start, arg)).left;
         if value == NO_VALUE {
             continue;
@@ -1806,7 +1853,15 @@ fn emit_call(
         relocations.push(wrapping_sub(record.left, LIBCALL_TARGET_BASE));
     }
     push32(inout out, BRANCH_AND_LINK);
-    let result = if keep_result && (used & sh(1, FIRST_RESULT)) != 0 {
+    let result = if keep_result && float_call(record.op) {
+        let width = if record.op == CALL_FLOAT {
+            FP_DOUBLE | REG64
+        } else {
+            0
+        };
+        push32(inout out, FMOV_TO_GP | width | sh(FP_RESULT, RN_SHIFT) | SCRATCH);
+        SCRATCH
+    } else if keep_result && (used & sh(1, FIRST_RESULT)) != 0 {
         // The restore below writes x0 when its incoming contents are live.
         rrr(inout out, ORR_REG, SCRATCH, ZERO, FIRST_RESULT);
         SCRATCH
@@ -1978,6 +2033,14 @@ fn encode_pass(
     let labeled = frame.slots.len() < count && entry.op == BLOCK_LABEL;
     let last_index = wrapping_sub(count, 1);
     let tail = read_record(in words, last_index);
+    let float_return = if labeled {
+        entry.extra == FLOAT_RETURN_LAYOUT
+    } else {
+        count != 0 && tail.op == FLOAT_RETURN
+    };
+    if !labeled && float_return && result == NO_VALUE {
+        return out;
+    }
     let terminal_trap = !labeled && count != 0 && tail.op == TRAP;
     if terminal_trap
         && (result != NO_VALUE || tail.left > PAIRED_RESULTS || tail.right != 0 || tail.extra != 0)
@@ -1997,13 +2060,15 @@ fn encode_pass(
     }
     if labeled
         && (result != NO_VALUE
-            || entry.extra > PAIRED_RESULTS
+            || entry.extra > FLOAT_RETURN_LAYOUT
             || (entry.right != 0 && entry.right != frame.slots.len())
             || !valid_block_layout(in words, frame.slots.len(), count, entry.extra))
     {
         return out;
     }
-    let returns = if labeled {
+    let returns = if float_return {
+        1
+    } else if labeled {
         entry.extra
     } else if terminal_trap {
         tail.left
@@ -2058,22 +2123,28 @@ fn encode_pass(
     let mut entry_end = values;
     let mut call_end = NEVER_READ;
     let mut pending_arguments: u64 = 0;
+    let mut pending_float_arguments: u64 = 0;
     let mut needs_call_pair = false;
     let mut needs_checked = false;
-    let mut has_float = false;
+    let mut has_float = float_return;
+    let float_args_start = wrapping_add(frame.slots.len(), if labeled { 1 } else { 0 });
     let mut call_sites = ChunkSeq::new[u64]();
     let mut max_live_across_calls: u64 = 0;
     for reverse in 0..count {
         let index = wrapping_sub(wrapping_sub(count, 1), reverse);
         let value = wrapping_add(args, index);
         let r = read_record(in words, index);
-        has_float = has_float || (r.op >= FLOAT_CONSTANT && r.op <= FLOAT_COPY_SIGN);
+        has_float = has_float
+            || (r.op >= FLOAT_ARGUMENT && r.op <= FLOAT_COPY_SIGN)
+            || r.op == CALL_FLOAT32;
         if register_home && r.op == BLOCK_RETURN && r.left != TRAP_VALUE {
             normal_returns = wrapping_add(normal_returns, 1);
         }
         if needs_call_pair != (r.op == CALL_PAIR)
             || needs_checked != is_checked_arithmetic(r.op)
             || (r.op == RETURN_PAIR && (labeled || index != last_index))
+            || (r.op == FLOAT_RETURN && (labeled || index != last_index))
+            || (r.op == FLOAT_ARGUMENT && wrapping_add(float_args_start, r.left) != index)
             || (r.op == TRAP && (!terminal_trap || index != last_index))
             || (is_symbol(r.op) && !allow_relocations)
         {
@@ -2111,6 +2182,7 @@ fn encode_pass(
                 return out;
             }
             pending_arguments = r.right;
+            pending_float_arguments = r.extra;
             call_end = value;
         }
         let n = match operands(in r, returns) {
@@ -2123,8 +2195,15 @@ fn encode_pass(
         {
             return out;
         }
-        if r.op == CALL_ARGUMENT && r.left != NO_VALUE && float_value(in words, args, r.left) {
-            return out;
+        if r.op == CALL_ARGUMENT {
+            let float_argument = pending_float_arguments != 0;
+            let is_float = r.left != NO_VALUE && float_value(in words, args, r.left);
+            if float_argument != is_float {
+                return out;
+            }
+            if float_argument {
+                pending_float_arguments = wrapping_sub(pending_float_arguments, 1);
+            }
         }
         let last = last_read(in ends, value);
         if last != NEVER_READ {
@@ -2253,9 +2332,15 @@ fn encode_pass(
         return out;
     }
     if has_float
-        && ((result != NO_VALUE && float_value(in words, args, result))
+        && ((result != NO_VALUE && float_value(in words, args, result) != float_return)
             || (second != NO_VALUE && float_value(in words, args, second))
-            || !valid_float_operands(in words, args, count, returns == PAIRED_RESULTS, false))
+            || !valid_float_operands(
+                in words,
+                args,
+                count,
+                returns == PAIRED_RESULTS,
+                float_return
+            ))
     {
         return out;
     }
@@ -2392,6 +2477,7 @@ fn encode_pass(
             || r.op == BRANCH_TABLE_TARGET
             || r.op == CALL_ARGUMENT
             || r.op == RETURN_PAIR
+            || r.op == FLOAT_RETURN
             || r.op == TRAP
             || (!calls && !division && !atomic && !no_result(r.op) && !live && !overflow_live)
         {
@@ -2597,6 +2683,7 @@ fn encode_pass(
                     inout out,
                     lhs,
                     rhs,
+                    float_return,
                     adjustment,
                     spill_mode,
                     link_slot,
@@ -2813,6 +2900,7 @@ fn encode_pass(
             inout out,
             low,
             high,
+            float_return,
             adjustment,
             spill_mode,
             link_slot,
