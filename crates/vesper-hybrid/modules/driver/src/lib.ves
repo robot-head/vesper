@@ -58,10 +58,10 @@ use @vesper/driver-commands::{
 };
 // Target triples (#1896).
 use @vesper/driver::triple::{is_windows as triple_is_windows};
-// Diagnostic JSON and stderr fallback rendering (#2458, #2473, #1893).
+// Diagnostic JSON and stderr fallback rendering (#2458, #2473, #2519, #1893).
 use @vesper/driver::{
     diagnostics_json, format_manifest_error, format_raw_diagnostics, format_unlocated_error,
-    package_diagnostics_json
+    package_diagnostics_json, remap_diagnostics_stream
 };
 // Place IR JSON rendering for `vesper emit --format ir` (#2245, #1894).
 use @vesper/place-ir::{place_ir_json_bytes};
@@ -1559,6 +1559,7 @@ const DIAG_CHUNK_MANIFEST: u8 = 2;
 const DIAG_CHUNK_UNLOCATED: u8 = 3;
 const DIAG_WORD_BYTES: u64 = 8;
 const DIAG_BYTE_BITS: u64 = 8;
+const DIAG_MAP_SEG_WORDS: u64 = 5;
 const CH_LF: u8 = 10;
 
 fn diag_byte(in s: Slice[u8], i: u64) -> u8 {
@@ -1652,7 +1653,22 @@ fn emit_diagnostics(in s: Session) eff [Ffi[HybridDriver]] {
     let mut json = if tag == DIAG_JSON_PACKAGE {
         package_diagnostics_json(in slice[1..slice.len()])
     } else {
-        diagnostics_json(in slice[1..slice.len()])
+        let mut at: u64 = 1;
+        let segs = diag_read_u64(in slice, inout at);
+        if segs == 0 {
+            diagnostics_json(in slice[at..slice.len()])
+        } else {
+            let mut map_words: ChunkSeq[u64] = ChunkSeq::new[u64]();
+            let total_words = wrapping_mul(segs, DIAG_MAP_SEG_WORDS);
+            for _i in 0..total_words {
+                map_words.push(diag_read_u64(in slice, inout at));
+            }
+            let remapped = remap_diagnostics_stream(
+                in map_words.as_slice(),
+                in slice[at..slice.len()]
+            );
+            diagnostics_json(in remapped.as_slice())
+        }
     };
     json.push(CH_LF);
     print(stdout_stream(), in json.as_slice());
