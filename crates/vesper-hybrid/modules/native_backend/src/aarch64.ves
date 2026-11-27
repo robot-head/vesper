@@ -600,16 +600,60 @@ fn direct_call(op: u64) -> bool {
     op == CALL || op == CALL_VOID || op == CALL_PAIR
 }
 
+fn float_operands(in r: Record) -> Option[u64] {
+    if is_float_compare(r.op) {
+        return if r.extra <= FLOAT_UNORDERED_OR_GREATER_EQUAL {
+            Option::Some(2)
+        } else {
+            Option::None
+        };
+    }
+    if r.op == FLOAT_SELECT {
+        return Option::Some(3);
+    }
+    if is_stack_store(r.op) {
+        return Option::Some(1);
+    }
+    if r.op == FLOAT_STORE32 || r.op == FLOAT_STORE64 {
+        return if r.extra <= DISP32_MASK {
+            Option::Some(2)
+        } else {
+            Option::None
+        };
+    }
+    if !float_width(r.extra) {
+        return Option::None;
+    }
+    if is_float_binary(r.op) {
+        return Option::Some(2);
+    }
+    match r.op {
+        FLOAT_CONSTANT => if r.right == 0 {
+            Option::Some(0)
+        } else {
+            Option::None
+        },
+        FLOAT_STACK_LOAD => Option::Some(0),
+        FLOAT_LOAD => if r.right <= DISP32_MASK {
+            Option::Some(1)
+        } else {
+            Option::None
+        },
+        FLOAT_NEG | FLOAT_ABS | FLOAT_SQRT | BITS_TO_FLOAT | FLOAT_TO_BITS => if r.right == 0 {
+            Option::Some(1)
+        } else {
+            Option::None
+        },
+        _ => Option::None,
+    }
+}
+
 fn operands(in r: Record, returns: u64) -> Option[u64] {
     if r.op == CONSTANT || r.op == STACK_SLOT || r.op == BLOCK_LABEL {
         return Option::Some(0);
     }
-    if r.op == FLOAT_CONSTANT {
-        return if r.right == 0 && float_width(r.extra) {
-            Option::Some(0)
-        } else {
-            Option::None
-        };
+    if r.op >= FLOAT_CONSTANT && r.op <= FLOAT_COPY_SIGN {
+        return float_operands(in r);
     }
     if is_symbol(r.op) {
         return if r.left <= DISP32_MASK && r.right == 0 && r.extra == 0 {
@@ -693,14 +737,7 @@ fn operands(in r: Record, returns: u64) -> Option[u64] {
         }
         return Option::None;
     }
-    if is_float_compare(r.op) {
-        return if r.extra <= FLOAT_UNORDERED_OR_GREATER_EQUAL {
-            Option::Some(2)
-        } else {
-            Option::None
-        };
-    }
-    if r.op == SELECT || r.op == FLOAT_SELECT {
+    if r.op == SELECT {
         return Option::Some(3);
     }
     if conditional_branch(r.op) {
@@ -725,9 +762,8 @@ fn operands(in r: Record, returns: u64) -> Option[u64] {
         }
         return Option::Some(returns);
     }
-    if is_stack_load(r.op) || r.op == STACK_ADDRESS {
+    if r.op == STACK_LOAD || r.op == STACK_ADDRESS {
         if (r.op == STACK_LOAD && scalar_width(r.extra))
-            || (r.op == FLOAT_STACK_LOAD && float_width(r.extra))
             || (r.op == STACK_ADDRESS && r.extra == 0)
         {
             return Option::Some(0);
@@ -749,27 +785,8 @@ fn operands(in r: Record, returns: u64) -> Option[u64] {
     if is_atomic_rmw(r.op) {
         return Option::Some(2);
     }
-    if is_float_binary(r.op) {
-        return if float_width(r.extra) {
-            Option::Some(2)
-        } else {
-            Option::None
-        };
-    }
     match r.op {
         LOAD => if r.right <= DISP32_MASK {
-            Option::Some(1)
-        } else {
-            Option::None
-        },
-        FLOAT_LOAD => if r.right <= DISP32_MASK && float_width(r.extra) {
-            Option::Some(1)
-        } else {
-            Option::None
-        },
-        FLOAT_NEG | FLOAT_ABS | FLOAT_SQRT | BITS_TO_FLOAT | FLOAT_TO_BITS => if r.right == 0
-            && float_width(r.extra)
-        {
             Option::Some(1)
         } else {
             Option::None
@@ -972,7 +989,7 @@ fn emit_float_alu(inout out: ChunkSeq[u8], in r: Record, dest: u32, lhs: u32, rh
     push32(inout out, FMOV_TO_GP | move_width | sh(FP_LEFT, RN_SHIFT) | dest);
 }
 
-fn emit_instruction(
+fn emit_float_instruction(
     inout out: ChunkSeq[u8],
     in r: Record,
     dest: u32,
@@ -980,9 +997,7 @@ fn emit_instruction(
     rhs: u32,
     third: u32
 ) {
-    if r.op == CONSTANT {
-        immediate(inout out, dest, r.left);
-    } else if r.op == FLOAT_CONSTANT {
+    if r.op == FLOAT_CONSTANT {
         immediate(inout out, dest, low_bits(r.left, r.extra));
     } else if r.op == BITS_TO_FLOAT || r.op == FLOAT_TO_BITS {
         if dest != lhs || r.extra == DWORD_BITS {
@@ -1010,8 +1025,28 @@ fn emit_instruction(
             rrr(inout out, ORR_REG, dest, ZERO, lhs);
         }
         bitfield(inout out, BFM, dest, SCRATCH, wrapping_sub(0, sign) & SHIFT_MASK, 0);
-    } else if is_float_binary(r.op) || is_float_compare(r.op) || r.op == FLOAT_SQRT {
+    } else if r.op == FLOAT_LOAD {
+        memory(inout out, true, r.extra, lhs, dest, r.right);
+    } else if r.op == FLOAT_SELECT {
+        rrr(inout out, SUBS_REG, ZERO, lhs, ZERO);
+        rrr(inout out, CSEL | sh(NE, CONDITION_SHIFT), dest, rhs, third);
+    } else {
         emit_float_alu(inout out, in r, dest, lhs, rhs);
+    }
+}
+
+fn emit_instruction(
+    inout out: ChunkSeq[u8],
+    in r: Record,
+    dest: u32,
+    lhs: u32,
+    rhs: u32,
+    third: u32
+) {
+    if r.op == CONSTANT {
+        immediate(inout out, dest, r.left);
+    } else if r.op >= FLOAT_CONSTANT && r.op <= FLOAT_COPY_SIGN {
+        emit_float_instruction(inout out, in r, dest, lhs, rhs, third);
     } else if r.op == BYTE_SWAP {
         let op = match r.extra {
             WORD_BITS => REV16_W,
@@ -1040,7 +1075,7 @@ fn emit_instruction(
             let multiply_subtract = (MSUB_REG & reg_mask) | sh(lhs, ACCUMULATOR_SHIFT);
             rrr(inout out, multiply_subtract, dest, quotient, rhs);
         }
-    } else if r.op == LOAD || r.op == FLOAT_LOAD {
+    } else if r.op == LOAD {
         memory(inout out, true, r.extra, lhs, dest, r.right);
     } else if r.op == TRUNCATE || r.op == ZERO_EXTEND || r.op == SIGN_EXTEND {
         if r.op == SIGN_EXTEND {
@@ -1094,7 +1129,7 @@ fn emit_instruction(
         if r.op == SAR && r.extra < DWORD_BITS {
             normalize(inout out, dest, r.extra);
         }
-    } else if r.op == SELECT || r.op == FLOAT_SELECT {
+    } else if r.op == SELECT {
         rrr(inout out, SUBS_REG, ZERO, lhs, ZERO);
         rrr(inout out, CSEL | sh(NE, CONDITION_SHIFT), dest, rhs, third);
     } else if comparison_width(r.op) != 0 {
