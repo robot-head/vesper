@@ -40,7 +40,8 @@ use self::scalar::{
     VECTOR_PROMOTE_LOW, VECTOR_DEMOTE, VECTOR_PAIRWISE_ADD, VECTOR_SWIZZLE, VECTOR_INSERT,
     VECTOR_EXTRACT, VECTOR_ANY_TRUE, VECTOR_ALL_TRUE, VECTOR_HIGH_BITS, VECTOR_LANE_INDEX_SHIFT,
     VECTOR_LANE_WIDTH_MASK, is_vector_binary, uses_vector_left, vector_value, TAIL_CALL,
-    AARCH64_TAIL_RESERVED_GP, valid_vector_lane
+    AARCH64_TAIL_RESERVED_GP, valid_vector_lane, VECTOR_INTEGER_COMPARE, VECTOR_CONDITION_SHIFT,
+    is_vector_operation, is_vector_result
 };
 use self::x86_64::{
     BYTE_BITS, WORD_BITS, DWORD_BITS, QWORD_BITS, FLOAT_ORDERED, FLOAT_UNORDERED, FLOAT_EQUAL,
@@ -133,6 +134,12 @@ const VECTOR_ROUNDED_AVERAGE_REG: u32 = 0x6e201400;
 const VECTOR_FLOAT_NARROW: u32 = 0x0e616800;
 const VECTOR_FLOAT_WIDEN: u32 = 0x0e617800;
 const VECTOR_PAIRWISE_ADD_REG: u32 = 0x4e20bc00;
+const VECTOR_COMPARE_EQUAL: u32 = 0x6e208c00;
+const VECTOR_COMPARE_SIGNED_GREATER: u32 = 0x4e203400;
+const VECTOR_COMPARE_SIGNED_GREATER_EQUAL: u32 = 0x4e203c00;
+const VECTOR_COMPARE_UNSIGNED_GREATER: u32 = 0x6e203400;
+const VECTOR_COMPARE_UNSIGNED_GREATER_EQUAL: u32 = 0x6e203c00;
+const VECTOR_NOT: u32 = 0x6e205800;
 const VECTOR_TABLE: u32 = 0x4e000000;
 const VECTOR_UNSIGNED_MAX: u32 = 0x6e30a800;
 const VECTOR_UNSIGNED_MIN: u32 = 0x6e31a800;
@@ -787,6 +794,32 @@ fn vector_lane_immediate(lane: u64, width: u64) -> u32 {
     sh(bytes | wrapping_mul(wrapping_mul(wrapping_u32(lane), bytes), 2), VECTOR_LANE_IMM5_SHIFT)
 }
 
+fn vector_integer_compare(inout out: ChunkSeq[u8], in r: Record, dest: u32, left: u32, right: u32) {
+    let condition = wrapping_shr_u64(r.extra, VECTOR_CONDITION_SHIFT);
+    let opcode = match condition {
+        EQUAL | NOT_EQUAL => VECTOR_COMPARE_EQUAL,
+        SIGNED_LESS | SIGNED_GREATER => VECTOR_COMPARE_SIGNED_GREATER,
+        SIGNED_GREATER_EQUAL | SIGNED_LESS_EQUAL => VECTOR_COMPARE_SIGNED_GREATER_EQUAL,
+        UNSIGNED_LESS | UNSIGNED_GREATER => VECTOR_COMPARE_UNSIGNED_GREATER,
+        _ => VECTOR_COMPARE_UNSIGNED_GREATER_EQUAL,
+    };
+    let reverse = condition == SIGNED_LESS
+        || condition == SIGNED_LESS_EQUAL
+        || condition == UNSIGNED_LESS
+        || condition == UNSIGNED_LESS_EQUAL;
+    let (first, second) = if reverse {
+        (right, left)
+    } else {
+        (left, right)
+    };
+    let width = r.extra & VECTOR_LANE_WIDTH_MASK;
+    let size = sh(trailing_zeros_u64(width / BYTE_BITS), VECTOR_SIZE_SHIFT);
+    rrr(inout out, opcode | size, dest, first, second);
+    if condition == NOT_EQUAL {
+        push32(inout out, VECTOR_NOT | sh(dest, RN_SHIFT) | dest);
+    }
+}
+
 fn vector_extract(inout out: ChunkSeq[u8], dest: u32, source: u32, lane: u64, width: u64) {
     let wide = if width == QWORD_BITS {
         VECTOR_EXTRACT_QWORD
@@ -1068,7 +1101,7 @@ fn operands(in r: Record, returns: u64) -> Option[u64] {
             Option::None
         };
     }
-    if r.op >= VECTOR_CONSTANT && r.op <= VECTOR_HIGH_BITS {
+    if is_vector_operation(r.op) {
         return match r.op {
             VECTOR_CONSTANT => if r.extra == 0 {
                 Option::Some(0)
@@ -1091,6 +1124,13 @@ fn operands(in r: Record, returns: u64) -> Option[u64] {
                 Option::None
             },
             VECTOR_AND | VECTOR_OR | VECTOR_XOR | VECTOR_SWIZZLE => if r.extra == 0 {
+                Option::Some(2)
+            } else {
+                Option::None
+            },
+            VECTOR_INTEGER_COMPARE => if scalar_width(r.extra & VECTOR_LANE_WIDTH_MASK)
+                && wrapping_shr_u64(r.extra, VECTOR_CONDITION_SHIFT) <= UNSIGNED_LESS_EQUAL
+            {
                 Option::Some(2)
             } else {
                 Option::None
@@ -2936,7 +2976,7 @@ fn encode_pass(
         let index = wrapping_sub(wrapping_sub(count, 1), reverse);
         let value = wrapping_add(args, index);
         let r = read_record(in words, index);
-        has_vector = has_vector || (r.op >= VECTOR_CONSTANT && r.op <= VECTOR_HIGH_BITS);
+        has_vector = has_vector || is_vector_operation(r.op);
         has_float = has_float || float_opcode(r.op);
         if register_home && r.op == BLOCK_RETURN && r.left != TRAP_VALUE {
             normal_returns = wrapping_add(normal_returns, 1);
@@ -3470,7 +3510,7 @@ fn encode_pass(
         } else {
             UNASSIGNED
         };
-        let vector = has_vector && r.op >= VECTOR_CONSTANT;
+        let vector = has_vector && is_vector_operation(r.op);
         let vector_left = vector && uses_vector_left(r.op);
         let vector_right = vector && (is_vector_binary(r.op) || r.op == VECTOR_STORE);
         if vector_left {
@@ -3486,7 +3526,7 @@ fn encode_pass(
         if n == 3 {
             used = expire(used, in ends, r.extra, value, extra);
         }
-        if vector && r.op <= VECTOR_INSERT {
+        if vector && (is_vector_result(r.op) || r.op == VECTOR_STORE) {
             let lhs = if vector_left {
                 materialize_vector(inout out, left, VECTOR_LEFT, frame_bytes)
             } else {
@@ -3535,6 +3575,7 @@ fn encode_pass(
                 VECTOR_CONSTANT => vector_constant(inout out, dest, r.left, r.right),
                 VECTOR_SPLAT => vector_splat(inout out, dest, lhs, r.extra),
                 VECTOR_LOAD => memory(inout out, true, VECTOR_BITS, lhs, dest, r.right),
+                VECTOR_INTEGER_COMPARE => vector_integer_compare(inout out, in r, dest, lhs, rhs),
                 VECTOR_INSERT => {
                     let lane = wrapping_shr_u64(r.extra, VECTOR_LANE_INDEX_SHIFT);
                     let width = r.extra & VECTOR_LANE_WIDTH_MASK;

@@ -618,3 +618,81 @@ fn vector_rearrangements_match_cranelift_with_ssse3() {
     }
     unsafe { module.free_memory() };
 }
+
+#[test]
+fn packed_integer_comparisons_match_cranelift_on_sign_and_half_boundaries() {
+    use cranelift_codegen::ir::condcodes::IntCC;
+
+    type Entry = unsafe extern "C" fn(*const u8, *const u8, *mut u8);
+    let mut module = module();
+    for ty in [types::I8X16, types::I16X8, types::I32X4, types::I64X2] {
+        let width = ty.lane_type().bytes() as usize;
+        let bits = ty.lane_type().bits();
+        let sign = 1u64 << (bits - 1);
+        let mask = u64::MAX >> (u64::BITS - bits);
+        let cases = [
+            (0, 0),
+            (mask, 0),
+            (0, mask),
+            (sign, sign - 1),
+            (sign - 1, sign),
+            (sign, sign),
+            (0x7fff_ffff, 0x8000_0000),
+            (0x0100_0000_0000_0000, 0x00ff_ffff_ffff_ffff),
+        ];
+        for &cc in IntCC::all() {
+            let mut context = module.make_context();
+            context.func.signature.params = vec![AbiParam::new(types::I64); 3];
+            let mut frontend = FunctionBuilderContext::new();
+            let mut builder = FunctionBuilder::new(&mut context.func, &mut frontend);
+            let entry = builder.create_block();
+            builder.append_block_params_for_function_params(entry);
+            builder.switch_to_block(entry);
+            let [a, b, output] = *builder.block_params(entry) else {
+                unreachable!()
+            };
+            let flags = MemFlags::new().with_notrap();
+            let lhs = builder.ins().load(ty, flags, a, 0);
+            let rhs = builder.ins().load(ty, flags, b, 0);
+            let result = builder.ins().icmp(cc, lhs, rhs);
+            builder.ins().store(flags, result, output, 0);
+            builder.ins().return_(&[]);
+            builder.seal_all_blocks();
+            builder.finalize();
+            let functions = compile(&mut module, &mut context);
+            for start in 0..cases.len() {
+                let mut a = [0; VECTOR_BYTES];
+                let mut b = [0; VECTOR_BYTES];
+                let mut expected = [0; VECTOR_BYTES];
+                for lane in 0..VECTOR_BYTES / width {
+                    let (x, y) = cases[(start + lane) % cases.len()];
+                    let (x, y) = (x & mask, y & mask);
+                    let (sx, sy) = (x ^ sign, y ^ sign);
+                    let value = match cc {
+                        IntCC::Equal => x == y,
+                        IntCC::NotEqual => x != y,
+                        IntCC::SignedLessThan => sx < sy,
+                        IntCC::SignedGreaterThanOrEqual => sx >= sy,
+                        IntCC::SignedGreaterThan => sx > sy,
+                        IntCC::SignedLessThanOrEqual => sx <= sy,
+                        IntCC::UnsignedLessThan => x < y,
+                        IntCC::UnsignedGreaterThanOrEqual => x >= y,
+                        IntCC::UnsignedGreaterThan => x > y,
+                        IntCC::UnsignedLessThanOrEqual => x <= y,
+                    };
+                    let range = lane * width..(lane + 1) * width;
+                    a[range.clone()].copy_from_slice(&x.to_le_bytes()[..width]);
+                    b[range.clone()].copy_from_slice(&y.to_le_bytes()[..width]);
+                    expected[range].fill(if value { u8::MAX } else { 0 });
+                }
+                for pointer in functions {
+                    let run = unsafe { std::mem::transmute::<*const u8, Entry>(pointer) };
+                    let mut result = [0; VECTOR_BYTES];
+                    unsafe { run(a.as_ptr(), b.as_ptr(), result.as_mut_ptr()) };
+                    assert_eq!(result, expected, "{ty} {cc:?} {start}");
+                }
+            }
+        }
+    }
+    unsafe { module.free_memory() };
+}

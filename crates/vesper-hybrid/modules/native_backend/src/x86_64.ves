@@ -116,7 +116,16 @@ const PABSB: u8 = 0x1c;
 const PCMPEQB: u8 = 0x74;
 const PCMPEQW: u8 = 0x75;
 const PCMPEQD: u8 = 0x76;
+const PCMPGTB: u8 = 0x64;
+const PCMPGTW: u8 = 0x65;
+const PCMPGTD: u8 = 0x66;
 const SWAP_ADJACENT_DWORDS: u8 = 0xb1;
+const DUPLICATE_EVEN_DWORDS: u8 = 0xa0;
+const DUPLICATE_ODD_DWORDS: u8 = 0xf5;
+const BYTE_SIGN_BITS: u64 = 0x8080808080808080;
+const WORD_SIGN_BITS: u64 = 0x8000800080008000;
+const DWORD_SIGN_BITS: u64 = 0x8000000080000000;
+const LOW_DWORD_SIGN_BIT: u64 = 0x80000000;
 const HIGH_QWORD_TO_LOW: u8 = 0x0e;
 const LOW_BYTE_MASK: u32 = 0xff;
 const ALL_BYTE_SIGN_BITS: u32 = 0xffff;
@@ -251,6 +260,12 @@ pub copy enum AtomicMemory {
     Subtract,
 }
 
+pub copy enum PackedRelation {
+    Equal,
+    SignedGreater,
+    UnsignedGreater,
+}
+
 pub copy enum Instruction {
     Immediate(u8, u64),
     FloatImmediate(u8, u64, u64),
@@ -264,6 +279,7 @@ pub copy enum Instruction {
     VectorBinary(u8, u8, u8),
     VectorPairwiseAdd(u8, u8, u8, u64),
     VectorSwizzle(u8, u8, u8, bool),
+    VectorIntegerCompare(u8, u8, u8, u64, PackedRelation, bool),
     VectorConvert(u8, u8, bool),
     VectorExtract(u8, u8, u64, u64),
     VectorInsert(u8, u8, u64, u64),
@@ -1090,6 +1106,106 @@ fn vector_splat(inout out: ChunkSeq[u8], destination: u8, source: u8, lane: u64)
     packed_shuffle(inout out, destination, destination, lanes);
 }
 
+fn vector_compare_inputs(inout out: ChunkSeq[u8], a: u8, b: u8) {
+    let left = XMM_LEFT_SCRATCH;
+    let right = XMM_RIGHT_SCRATCH;
+    if a == right && b == left {
+        float_move(inout out, XMM_AUX_SCRATCH, left);
+        float_move(inout out, left, right);
+        float_move(inout out, right, XMM_AUX_SCRATCH);
+    } else if a == right {
+        float_move(inout out, left, a);
+        float_move(inout out, right, b);
+    } else {
+        float_move(inout out, right, b);
+        float_move(inout out, left, a);
+    }
+}
+
+fn vector_bias(inout out: ChunkSeq[u8], pattern: u64) {
+    let mask = XMM_AUX_SCRATCH;
+    vector_constant(inout out, mask, pattern, pattern);
+    packed_binary(inout out, PXOR, XMM_LEFT_SCRATCH, mask);
+    packed_binary(inout out, PXOR, XMM_RIGHT_SCRATCH, mask);
+}
+
+fn vector_greater_qword(inout out: ChunkSeq[u8], unsigned: bool) {
+    let gt = XMM_LEFT_SCRATCH;
+    let low = XMM_RIGHT_SCRATCH;
+    let eq = XMM_AUX_SCRATCH;
+    // With equal high halves the low half determines the comparison, unsigned.
+    vector_bias(
+        inout out,
+        if unsigned {
+            DWORD_SIGN_BITS
+        } else {
+            LOW_DWORD_SIGN_BIT
+        }
+    );
+    float_move(inout out, eq, gt);
+    packed_binary(inout out, PCMPEQD, eq, low);
+    packed_binary(inout out, PCMPGTD, gt, low);
+    packed_shuffle(inout out, low, gt, DUPLICATE_EVEN_DWORDS);
+    packed_shuffle(inout out, gt, gt, DUPLICATE_ODD_DWORDS);
+    packed_shuffle(inout out, eq, eq, DUPLICATE_ODD_DWORDS);
+    packed_binary(inout out, PAND, low, eq);
+    packed_binary(inout out, POR, gt, low);
+}
+
+fn vector_integer_compare(
+    inout out: ChunkSeq[u8],
+    dest: u8,
+    a: u8,
+    b: u8,
+    width: u64,
+    in relation: PackedRelation,
+    invert: bool
+) {
+    let aux = XMM_AUX_SCRATCH;
+    let (equal, unsigned) = match relation {
+        PackedRelation::Equal => (true, false),
+        PackedRelation::SignedGreater => (false, false),
+        PackedRelation::UnsignedGreater => (false, true),
+    };
+    if unsigned || (!equal && width == QWORD_BITS) {
+        vector_compare_inputs(inout out, a, b);
+        if width == QWORD_BITS {
+            vector_greater_qword(inout out, unsigned);
+        } else {
+            let (mask, opcode) = match width {
+                BYTE_BITS => (BYTE_SIGN_BITS, PCMPGTB),
+                WORD_BITS => (WORD_SIGN_BITS, PCMPGTW),
+                _ => (DWORD_SIGN_BITS, PCMPGTD),
+            };
+            vector_bias(inout out, mask);
+            packed_binary(inout out, opcode, XMM_LEFT_SCRATCH, XMM_RIGHT_SCRATCH);
+        }
+        float_move(inout out, dest, XMM_LEFT_SCRATCH);
+    } else {
+        let rhs = if dest == b && a != b {
+            float_move(inout out, aux, b);
+            aux
+        } else {
+            b
+        };
+        float_move(inout out, dest, a);
+        let opcode = match width {
+            BYTE_BITS => if equal { PCMPEQB } else { PCMPGTB },
+            WORD_BITS => if equal { PCMPEQW } else { PCMPGTW },
+            _ => if equal { PCMPEQD } else { PCMPGTD },
+        };
+        packed_binary(inout out, opcode, dest, rhs);
+        if width == QWORD_BITS {
+            packed_shuffle(inout out, aux, dest, SWAP_ADJACENT_DWORDS);
+            packed_binary(inout out, PAND, dest, aux);
+        }
+    }
+    if invert {
+        packed_binary(inout out, PCMPEQB, aux, aux);
+        packed_binary(inout out, PXOR, dest, aux);
+    }
+}
+
 fn shift_right_lane(inout out: ChunkSeq[u8], destination: u8, shift: u64, wide: bool) {
     emit_rex(inout out, 0, destination, wide, false);
     out.push(SHIFT_GROUP_IMM8);
@@ -1396,6 +1512,9 @@ pub fn emit(inout out: ChunkSeq[u8], in instruction: Instruction) {
             right,
             zero_high
         ),
+        Instruction::VectorIntegerCompare(destination, left, right, width, relation, invert) => {
+            vector_integer_compare(inout out, destination, left, right, width, in relation, invert);
+        },
         Instruction::VectorConvert(destination, source, demote) => {
             if demote {
                 out.push(OPERAND_SIZE_OVERRIDE);

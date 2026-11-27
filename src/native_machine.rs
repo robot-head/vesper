@@ -201,6 +201,7 @@ enum IntegerOp {
     VectorAllTrue = 179,
     VectorHighBits = 180,
     TailCall = 181,
+    VectorIntegerCompare = 182,
 }
 
 fn integer_bit_op(op: Opcode) -> Option<IntegerOp> {
@@ -273,6 +274,7 @@ const WIDE_INTEGER_CELLS: usize = 2;
 const INTEGER_CELL_BITS: u64 = u64::BITS as u64;
 const SIMD_BYTES: u32 = 2 * size_of::<u64>() as u32;
 const SIMD_LANE_INDEX_SHIFT: u32 = 8;
+const SIMD_CONDITION_SHIFT: u32 = 8;
 const X86_SWIZZLE_ZERO_HIGH: u64 = 1;
 const X86_SWIZZLE_ZERO_INDEX: u8 = 0x80;
 const MAX_LINEARIZED_BRANCHES: usize = 32;
@@ -2081,6 +2083,18 @@ impl IntegerBlocks<'_> {
                     ],
                 )
             }
+            InstructionData::IntCompare {
+                opcode: Opcode::Icmp,
+                cond,
+                args: [left, right],
+            } if ty(left) == output && ty(right) == output => (
+                IntegerOp::VectorIntegerCompare,
+                [
+                    input(left)?,
+                    input(right)?,
+                    integer_width(output.lane_type())? | (condition(cond) << SIMD_CONDITION_SHIFT),
+                ],
+            ),
             InstructionData::Shuffle {
                 opcode: Opcode::Shuffle,
                 args: [left, right],

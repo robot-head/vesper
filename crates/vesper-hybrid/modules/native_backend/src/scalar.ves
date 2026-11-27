@@ -11,7 +11,7 @@ use self::x86_64::{
     find_callee_saved_register, find_register, fits_signed_byte, patch_forward_branch,
     patch_relative_branch, patch_relative_offset, register_bit, home_register, xmm_home_register,
     HOME_REGISTERS, cheap_immediate, move_constant, store_immediate, store_immediate_fits,
-    VECTOR_BITS, PAND, POR, PXOR, PackedInteger, packed_integer_opcode
+    VECTOR_BITS, PAND, POR, PXOR, PackedInteger, PackedRelation, packed_integer_opcode
 };
 
 // Integer block opcodes shared with src/native_machine.rs.
@@ -197,6 +197,8 @@ pub const VECTOR_ANY_TRUE: u64 = 178;
 pub const VECTOR_ALL_TRUE: u64 = 179;
 pub const VECTOR_HIGH_BITS: u64 = 180;
 pub const TAIL_CALL: u64 = 181;
+pub const VECTOR_INTEGER_COMPARE: u64 = 182;
+pub const VECTOR_CONDITION_SHIFT: u32 = 8;
 pub const AARCH64_TAIL_RESERVED_GP: u64 = 2;
 pub const VECTOR_LANE_INDEX_SHIFT: u32 = 8;
 pub const VECTOR_LANE_WIDTH_MASK: u64 = 0xff;
@@ -911,6 +913,7 @@ pub fn is_vector_binary(op: u64) -> bool {
     (op >= VECTOR_AND && op <= VECTOR_ROUNDED_AVERAGE)
         || op == VECTOR_PAIRWISE_ADD
         || op == VECTOR_SWIZZLE
+        || op == VECTOR_INTEGER_COMPARE
 }
 
 fn is_vector_convert(op: u64) -> bool {
@@ -921,8 +924,8 @@ pub fn uses_vector_left(op: u64) -> bool {
     is_vector_binary(op) || is_vector_convert(op) || op >= VECTOR_INSERT && op <= VECTOR_HIGH_BITS
 }
 
-fn x86_vector_opcode(op: u64) -> bool {
-    op >= VECTOR_CONSTANT && op <= VECTOR_HIGH_BITS
+pub fn is_vector_operation(op: u64) -> bool {
+    (op >= VECTOR_CONSTANT && op <= VECTOR_HIGH_BITS) || op == VECTOR_INTEGER_COMPARE
 }
 
 pub fn valid_vector_lane(index: u64, width: u64) -> bool {
@@ -947,8 +950,9 @@ fn vector_binary_opcode(op: u64, width: u64) -> u8 {
     packed_integer_opcode(in packed, width)
 }
 
-fn is_vector_result(op: u64) -> bool {
-    op >= VECTOR_CONSTANT && op <= VECTOR_INSERT && op != VECTOR_STORE
+pub fn is_vector_result(op: u64) -> bool {
+    (op >= VECTOR_CONSTANT && op <= VECTOR_INSERT && op != VECTOR_STORE)
+        || op == VECTOR_INTEGER_COMPARE
 }
 
 pub fn vector_value(in words: Slice[u64], arguments: u64, value: u64) -> bool {
@@ -1143,6 +1147,7 @@ fn can_reuse_right(op: u64) -> bool {
         && op != VECTOR_UNSIGNED_SAT_SUB
         && op != VECTOR_PAIRWISE_ADD
         && op != VECTOR_SWIZZLE
+        && op != VECTOR_INTEGER_COMPARE
         && !is_register_shift(op)
 }
 
@@ -1213,7 +1218,7 @@ fn find_last_reads(
             && record.op != FLOAT_TO_INTEGER_TRUNC
             && !is_conditional_trap(record.op)
             && !tail_call
-            && !x86_vector_opcode(record.op))
+            && !is_vector_operation(record.op))
             || (!labeled && is_cfg_record(record.op))
             || (record.op == STACK_SLOT && index >= frame.slots.len())
             || (record.op == RETURN_PAIR && (reverse_index != 0 || record.left >= value))
@@ -1250,7 +1255,7 @@ fn find_last_reads(
         }
         let last = last_read(in reads, value);
         let live = last != NEVER_READ || live_overflow_flag(in reads, value, record.op);
-        if x86_vector_opcode(record.op) {
+        if is_vector_operation(record.op) {
             let valid = match record.op {
                 VECTOR_CONSTANT | VECTOR_AND | VECTOR_OR | VECTOR_XOR => record.extra == 0,
                 VECTOR_LOAD => record.right <= DISP32_MASK && record.extra == 0,
@@ -1261,6 +1266,9 @@ fn find_last_reads(
                     || record.extra == WORD_BITS
                     || record.extra == DWORD_BITS,
                 VECTOR_SWIZZLE => record.extra == 0 || record.extra == X86_SWIZZLE_ZERO_HIGH,
+                VECTOR_INTEGER_COMPARE => valid_width(record.extra & VECTOR_LANE_WIDTH_MASK)
+                    && wrapping_shr_u64(record.extra, VECTOR_CONDITION_SHIFT)
+                        <= UNSIGNED_LESS_EQUAL,
                 VECTOR_PROMOTE_LOW | VECTOR_DEMOTE => record.right == 0 && record.extra == 0,
                 VECTOR_INSERT => valid_vector_lane(
                     wrapping_shr_u64(record.extra, VECTOR_LANE_INDEX_SHIFT),
@@ -1278,6 +1286,7 @@ fn find_last_reads(
             frame.floating = true;
             frame.vectors = true;
             frame.vector_aux = frame.vector_aux
+                || record.op == VECTOR_INTEGER_COMPARE
                 || (record.op == VECTOR_PAIRWISE_ADD && record.extra == BYTE_BITS)
                 || (record.op == VECTOR_SWIZZLE && record.extra == 0);
         }
@@ -2460,6 +2469,38 @@ fn emit_vector_instruction(
             right,
             record.extra == X86_SWIZZLE_ZERO_HIGH
         ),
+        VECTOR_INTEGER_COMPARE => {
+            let condition = wrapping_shr_u64(record.extra, VECTOR_CONDITION_SHIFT);
+            let reverse = condition == SIGNED_LESS
+                || condition == UNSIGNED_LESS
+                || condition == SIGNED_GREATER_EQUAL
+                || condition == UNSIGNED_GREATER_EQUAL;
+            let invert = condition == NOT_EQUAL
+                || condition == SIGNED_GREATER_EQUAL
+                || condition == SIGNED_LESS_EQUAL
+                || condition == UNSIGNED_GREATER_EQUAL
+                || condition == UNSIGNED_LESS_EQUAL;
+            let relation = if condition <= NOT_EQUAL {
+                PackedRelation::Equal
+            } else if condition < UNSIGNED_LESS {
+                PackedRelation::SignedGreater
+            } else {
+                PackedRelation::UnsignedGreater
+            };
+            let (a, b) = if reverse {
+                (right, left)
+            } else {
+                (left, right)
+            };
+            Instruction::VectorIntegerCompare(
+                destination,
+                a,
+                b,
+                record.extra & VECTOR_LANE_WIDTH_MASK,
+                relation,
+                invert
+            )
+        },
         VECTOR_INSERT => {
             let lane = wrapping_shr_u64(record.extra, VECTOR_LANE_INDEX_SHIFT);
             let width = record.extra & VECTOR_LANE_WIDTH_MASK;
@@ -3002,7 +3043,7 @@ fn encode_block_pass(
         };
         if record.op == CONSTANT {
             emit(inout output, in Instruction::Immediate(destination, record.left));
-        } else if x86_vector_opcode(record.op) {
+        } else if is_vector_operation(record.op) {
             emit_vector_instruction(inout output, in record, destination, left, right);
         } else if record.op == STACK_POINTER {
             emit(inout output, in Instruction::Move(destination, RSP));
