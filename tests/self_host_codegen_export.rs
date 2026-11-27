@@ -812,7 +812,7 @@ const DECLINE_REASONS: &[&str] = &[
 
 /// The libraries Stage 2's front end must build byte-identically today, so
 /// a regression that declines more of them fails.
-const MIN_STAGE2_EXPORTS: usize = 46;
+const MIN_STAGE2_EXPORTS: usize = 47;
 
 fn build_export_driver(dir: &Path) -> PathBuf {
     let package = dir.join("driver");
