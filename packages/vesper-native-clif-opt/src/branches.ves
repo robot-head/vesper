@@ -1,0 +1,1535 @@
+// The branch-threading steps of src/native_clif_opt.rs in Vesper (#2423,
+// part of #2362): sink_compares, thread_branches, thread_decided_branches,
+// thread_constant_param_jumps and propagate_branch_conditions.
+//
+// Maps of the Rust steps keyed by values or blocks are arrays indexed by
+// the entity number here. `ControlFlowGraph` predecessors come in
+// instruction order, as Cranelift's `pred_iter` gives them, and the
+// dominator tree's postorder follows `DominatorTree::compute`.
+
+use @vesper/clif::{Func, inc, n32, u32_at, u64_at, w};
+use @vesper/clif::codes::{
+    CC_EQ, CC_NE, CC_SGE, CC_SGT, CC_SLE, CC_SLT, CC_UGE, CC_UGT, CC_ULE, CC_ULT, NONE, OP_BAND,
+    OP_BOR, OP_BRIF, OP_BXOR, OP_IADD, OP_ICMP, OP_ICMP_IMM, OP_ICONST, OP_IREDUCE, OP_ISUB,
+    OP_JUMP, OP_SELECT, OP_SEXTEND, OP_UEXTEND, NONE64, TY_I16, TY_I32, TY_I8, TY_OTHER
+};
+use super::{
+    Konst, edges_of, layout_blocks, layout_insts, low_bits, none, params_of, remove_unreachable,
+    some, type_bits
+};
+
+// `thread_branches` stops after this many rounds.
+const MAX_THREAD_ROUNDS: u64 = 8;
+// `thread_constant_param_jumps` stops after this many rounds.
+const MAX_PARAM_JUMP_ROUNDS: u64 = 4;
+// `constant_with` and `is_flag` give up past this depth.
+const MAX_FACT_DEPTH: u64 = 8;
+// The depth `thread_constant_param_jumps` asks `constant` from.
+const PARAM_CONST_DEPTH: u64 = 2;
+// The depth `propagate_branch_conditions` asks `constant` from.
+const BRANCH_CONST_DEPTH: u64 = 1;
+
+// Bit widths `eval_icmp` and the extensions know.
+const BITS_8: u64 = 8;
+const BITS_16: u64 = 16;
+const BITS_32: u64 = 32;
+const BITS_64: u64 = 64;
+// The sign bit of an i64.
+const SIGN_BIT: u64 = 9223372036854775808;
+
+// A known flag (`propagate_branch_conditions`'s `known`): unknown, false,
+// true.
+const FLAG_UNKNOWN: u8 = 0;
+const FLAG_FALSE: u8 = 1;
+const FLAG_TRUE: u8 = 2;
+
+// A `brif`'s destinations: then, else.
+const BRIF_DESTS: u64 = 2;
+// The arguments of a `select`: condition, then, else.
+const SELECT_THEN_ARG: u64 = 1;
+const SELECT_ELSE_ARG: u64 = 2;
+
+// ----- shared helpers ------------------------------------------------------
+
+// `values_of`: the arguments of `i`, then every value argument of each of
+// its destinations, all resolved.
+fn values_of(in f: Func, i: u32) -> ChunkSeq[u32] {
+    let mut out = ChunkSeq::new[u32]();
+    for k in 0..f.nargs(i) {
+        out.push(f.resolve(f.arg(i, k)));
+    }
+    for d in 0..f.ndests(i) {
+        for a in 0..f.dest_nargs(i, d) {
+            let v = f.dest_arg(i, d, a);
+            if v != NONE {
+                out.push(f.resolve(v));
+            }
+        }
+    }
+    out
+}
+
+// How often each value is used by an instruction in the layout.
+fn use_counts(in f: Func) -> ChunkSeq[u32] {
+    let mut uses = ChunkSeq::new[u32]();
+    uses.resize(f.nvalues(), 0);
+    let all = layout_insts(in f);
+    for k in 0..all.len() {
+        let vals = values_of(in f, u32_at(in all, k));
+        for q in 0..vals.len() {
+            let v = w(u32_at(in vals, q));
+            let ok = uses.try_set(v, wrapping_add(uses.try_get(v).unwrap_or(0), 1));
+        }
+    }
+    uses
+}
+
+fn use_count(in uses: ChunkSeq[u32], v: u32) -> u32 {
+    uses.try_get(w(v)).unwrap_or(0)
+}
+
+fn contains(in s: ChunkSeq[u32], x: u32) -> bool {
+    for k in 0..s.len() {
+        if u32_at(in s, k) == x {
+            return true;
+        }
+    }
+    false
+}
+
+// The arguments of destination `k` of `i`, as they are (NONE for one that
+// is not a value).
+fn dest_args(in f: Func, i: u32, k: u64) -> ChunkSeq[u32] {
+    let mut out = ChunkSeq::new[u32]();
+    for a in 0..f.dest_nargs(i, k) {
+        out.push(f.dest_arg(i, k, a));
+    }
+    out
+}
+
+// The block of an instruction in the layout, or NONE.
+fn inst_block(in f: Func, i: u32) -> u32 {
+    f.inst(w(i)).block
+}
+
+// `ControlFlowGraph`: the predecessors of block `b` are the branches
+// `inst[at[b]..at[b + 1]]`, each once, in instruction number order.
+struct Cfg {
+    at: ChunkSeq[u64],
+    inst: ChunkSeq[u32],
+}
+
+// Whether `i` ends a block of the layout.
+fn is_terminator_in_layout(in f: Func, i: u32) -> bool {
+    let b = inst_block(in f, i);
+    b != NONE && f.blk(w(b)).placed && f.last_inst(b) == i
+}
+
+// Whether destination `d` of `i` is the first of `i`'s destinations at
+// its block (an instruction is one predecessor of a block however many of
+// its destinations go there).
+fn first_dest_at(in f: Func, i: u32, d: u64) -> bool {
+    let b = f.dest_block(i, d);
+    for e in 0..d {
+        if f.dest_block(i, e) == b {
+            return false;
+        }
+    }
+    true
+}
+
+fn cfg_of(in f: Func) -> Cfg {
+    let nb = f.nblocks();
+    let ni = f.ninsts();
+    let mut at = ChunkSeq::new[u64]();
+    at.resize(inc(nb), 0);
+    for i0 in 0..ni {
+        let i = n32(i0);
+        if !is_terminator_in_layout(in f, i) {
+            continue;
+        }
+        for d in 0..f.ndests(i) {
+            if first_dest_at(in f, i, d) {
+                let slot = inc(w(f.dest_block(i, d)));
+                let ok = at.try_set(slot, inc(at.try_get(slot).unwrap_or(0)));
+            }
+        }
+    }
+    for b in 0..nb {
+        let sum = wrapping_add(at.try_get(b).unwrap_or(0), at.try_get(inc(b)).unwrap_or(0));
+        let ok = at.try_set(inc(b), sum);
+    }
+    let mut fill = ChunkSeq::new[u64]();
+    fill.extend(in at.as_slice());
+    let mut insts = ChunkSeq::new[u32]();
+    insts.resize(at.try_get(nb).unwrap_or(0), NONE);
+    for i0 in 0..ni {
+        let i = n32(i0);
+        if !is_terminator_in_layout(in f, i) {
+            continue;
+        }
+        for d in 0..f.ndests(i) {
+            if first_dest_at(in f, i, d) {
+                let b = w(f.dest_block(i, d));
+                let slot = fill.try_get(b).unwrap_or(0);
+                let ok = insts.try_set(slot, i);
+                let ok2 = fill.try_set(b, inc(slot));
+            }
+        }
+    }
+    Cfg { at: at, inst: insts }
+}
+
+fn pred_lo(in c: Cfg, b: u32) -> u64 {
+    c.at.try_get(w(b)).unwrap_or(0)
+}
+
+fn pred_hi(in c: Cfg, b: u32) -> u64 {
+    c.at.try_get(inc(w(b))).unwrap_or(0)
+}
+
+fn pred_count(in c: Cfg, b: u32) -> u64 {
+    wrapping_sub(pred_hi(in c, b), pred_lo(in c, b))
+}
+
+// `constant_with` with `kv` (NONE for none) known to hold `kc`.
+fn constant_with(in f: Func, kv: u32, kc: u64, v0: u32, depth: u64) -> Konst {
+    if depth > MAX_FACT_DEPTH {
+        return none();
+    }
+    let v = f.resolve(v0);
+    if kv != NONE && v == kv {
+        return some(kc);
+    }
+    let i = f.def_inst(v);
+    if i == NONE {
+        return none();
+    }
+    let bits = type_bits(f.value_type(v));
+    let narrow = bits != 0 && bits < BITS_64;
+    let op = f.op(i);
+    let row = f.inst(w(i));
+    if op == OP_ICONST {
+        return some(
+            if narrow {
+                low_bits(row.imm, bits)
+            } else {
+                row.imm
+            }
+        );
+    }
+    let next = inc(depth);
+    if op == OP_UEXTEND || op == OP_IREDUCE {
+        let a = constant_with(in f, kv, kc, f.arg(i, 0), next);
+        if !a.some {
+            return a;
+        }
+        return some(if narrow { low_bits(a.v, bits) } else { a.v });
+    }
+    if op == OP_ICMP_IMM {
+        let arg = f.arg(i, 0);
+        let a = constant_with(in f, kv, kc, arg, next);
+        if !a.some {
+            return a;
+        }
+        let arg_bits = type_bits(f.value_type(f.resolve(arg)));
+        let b = if arg_bits == BITS_64 {
+            row.imm
+        } else {
+            low_bits(row.imm, arg_bits)
+        };
+        if row.cond == CC_EQ {
+            return some(if a.v == b { 1 } else { 0 });
+        }
+        if row.cond == CC_NE {
+            return some(if a.v != b { 1 } else { 0 });
+        }
+        return none();
+    }
+    if op == OP_BAND || op == OP_BOR || op == OP_BXOR {
+        let a = constant_with(in f, kv, kc, f.arg(i, 0), next);
+        if !a.some {
+            return a;
+        }
+        let b = constant_with(in f, kv, kc, f.arg(i, 1), next);
+        if !b.some {
+            return b;
+        }
+        return some(
+            if op == OP_BAND {
+                a.v & b.v
+            } else if op == OP_BOR {
+                a.v | b.v
+            } else {
+                a.v ^ b.v
+            }
+        );
+    }
+    none()
+}
+
+fn constant(in f: Func, v: u32, depth: u64) -> Konst {
+    constant_with(in f, NONE, 0, v, depth)
+}
+
+// A value of `bits` bits (8, 16 or 32) sign-extended to 64.
+fn sext(x: u64, bits: u64) -> u64 {
+    let sign = wrapping_shl_u64(1, wrapping_u32(wrapping_sub(bits, 1)));
+    let low = low_bits(x, bits);
+    wrapping_sub(low ^ sign, sign)
+}
+
+// `a < b` as i64s.
+fn slt(a: u64, b: u64) -> bool {
+    (a ^ SIGN_BIT) < (b ^ SIGN_BIT)
+}
+
+// An integer condition on two words, signed ones as i64s (`intcc`, and
+// `eval_icmp` after it masks and sign-extends). `cc` 0 is no condition.
+fn int_cond(cc: u64, ua: u64, ub: u64, sa: u64, sb: u64) -> Konst {
+    if cc == CC_EQ {
+        return truth(ua == ub);
+    }
+    if cc == CC_NE {
+        return truth(ua != ub);
+    }
+    if cc == CC_ULT {
+        return truth(ua < ub);
+    }
+    if cc == CC_ULE {
+        return truth(ua <= ub);
+    }
+    if cc == CC_UGT {
+        return truth(ua > ub);
+    }
+    if cc == CC_UGE {
+        return truth(ua >= ub);
+    }
+    if cc == CC_SLT {
+        return truth(slt(sa, sb));
+    }
+    if cc == CC_SLE {
+        return truth(!slt(sb, sa));
+    }
+    if cc == CC_SGT {
+        return truth(slt(sb, sa));
+    }
+    if cc == CC_SGE {
+        return truth(!slt(sa, sb));
+    }
+    none()
+}
+
+fn truth(b: bool) -> Konst {
+    some(if b { 1 } else { 0 })
+}
+
+// `eval_icmp`: `cc` on `a` and `b` as values of type `ty`.
+fn eval_icmp(cc: u64, ty: u64, a: u64, b: u64) -> Konst {
+    let bits = type_bits(ty);
+    if bits != BITS_8 && bits != BITS_16 && bits != BITS_32 && bits != BITS_64 {
+        return none();
+    }
+    if bits == BITS_64 {
+        return int_cond(cc, a, b, a, b);
+    }
+    let ua = low_bits(a, bits);
+    let ub = low_bits(b, bits);
+    int_cond(cc, ua, ub, sext(ua, bits), sext(ub, bits))
+}
+
+// ----- sink_compares ---------------------------------------------------------
+
+// `sink_compares`: a block that is only `icmp_imm` of a parameter used
+// nowhere else and a `brif` on it takes the comparison's result instead;
+// each incoming jump or `brif` compares its own argument.
+pub fn sink_compares(inout f: Func) {
+    let uses = use_counts(in f);
+    let e = edges_of(in f);
+    let nb = f.nblocks();
+    let mut table_target = ChunkSeq::new[u8]();
+    table_target.resize(nb, 0);
+    let all = layout_insts(in f);
+    for q in 0..all.len() {
+        let i = u32_at(in all, q);
+        let op = f.op(i);
+        if op == OP_JUMP || op == OP_BRIF {
+            continue;
+        }
+        for d in 0..f.ndests(i) {
+            let ok = table_target.try_set(w(f.dest_block(i, d)), 1);
+        }
+    }
+    let blocks = layout_blocks(in f);
+    for q in 0..blocks.len() {
+        let block = u32_at(in blocks, q);
+        if table_target.try_get(w(block)).unwrap_or(0) != 0 {
+            continue;
+        }
+        let cmp = f.first_inst(block);
+        if cmp == NONE {
+            continue;
+        }
+        let br = f.next_inst(cmp);
+        if br == NONE || f.next_inst(br) != NONE {
+            continue;
+        }
+        if f.op(cmp) != OP_ICMP_IMM || f.op(br) != OP_BRIF {
+            continue;
+        }
+        let flag = f.result(cmp, 0);
+        let p = f.resolve(f.arg(cmp, 0));
+        let np = f.nparams(block);
+        let mut pi = np;
+        for k in 0..np {
+            if pi == np && f.param(block, k) == p {
+                pi = k;
+            }
+        }
+        if pi == np {
+            continue;
+        }
+        if f.resolve(f.arg(br, 0)) != flag
+            || use_count(in uses, flag) != 1
+            || use_count(in uses, p) != 1
+        {
+            continue;
+        }
+        let lo = e.at.try_get(w(block)).unwrap_or(0);
+        let hi = e.at.try_get(inc(w(block))).unwrap_or(0);
+        if lo == hi {
+            continue;
+        }
+        let mut ok = true;
+        let mut values = ChunkSeq::new[u32]();
+        for x in lo..hi {
+            let inst = u32_at(in e.inst, x);
+            let k = e.dest.try_get(x).unwrap_or(0);
+            let v = if pi < f.dest_nargs(inst, k) {
+                f.dest_arg(inst, k, pi)
+            } else {
+                NONE
+            };
+            if v == NONE {
+                ok = false;
+            }
+            values.push(v);
+        }
+        if !ok {
+            continue;
+        }
+        let row = f.inst(w(cmp));
+        let new_param = f.append_param(block, f.value_type(flag));
+        let none_dests = ChunkSeq::new[u32]();
+        for x in lo..hi {
+            let inst = u32_at(in e.inst, x);
+            let k = e.dest.try_get(x).unwrap_or(0);
+            let mut a = ChunkSeq::new[u32]();
+            a.push(u32_at(in values, wrapping_sub(x, lo)));
+            let c = f.ins_before(
+                inst,
+                OP_ICMP_IMM,
+                TY_OTHER,
+                row.cond,
+                row.imm,
+                0,
+                0,
+                in a,
+                in none_dests
+            );
+            f.remove_dest_arg(inst, k, pi);
+            f.append_dest_arg(inst, k, f.result(c, 0));
+        }
+        f.remove_param(p);
+        f.remove_inst(cmp);
+        let mut a = ChunkSeq::new[u32]();
+        a.push(new_param);
+        f.set_args(br, in a);
+    }
+}
+
+// ----- thread_branches ---------------------------------------------------------
+
+// Destination `k` of `brif` with its arguments resolved and every
+// parameter of its block in `pk` replaced by the matching `pv`.
+fn remap_args(
+    in f: Func,
+    brif: u32,
+    k: u64,
+    in pk: ChunkSeq[u32],
+    in pv: ChunkSeq[u32]
+) -> ChunkSeq[u32] {
+    let mut out = ChunkSeq::new[u32]();
+    for a in 0..f.dest_nargs(brif, k) {
+        let x = f.dest_arg(brif, k, a);
+        if x == NONE {
+            out.push(NONE);
+            continue;
+        }
+        let v = f.resolve(x);
+        let mut m = v;
+        for j in 0..pk.len() {
+            if u32_at(in pk, j) == v {
+                m = u32_at(in pv, j);
+                break;
+            }
+        }
+        out.push(m);
+    }
+    out
+}
+
+// `thread_branches`: an edge into a block that is only a `brif` on one of
+// its parameters (used nowhere else) goes straight to the successor when
+// the condition is a constant there, and a jump there becomes the `brif`.
+pub fn thread_branches(inout f: Func) {
+    for _ in 0..MAX_THREAD_ROUNDS {
+        let uses = use_counts(in f);
+        let mut cand = ChunkSeq::new[u32]();
+        cand.resize(f.nblocks(), NONE);
+        let mut any = false;
+        let blocks = layout_blocks(in f);
+        for q in 0..blocks.len() {
+            let block = u32_at(in blocks, q);
+            let inst = f.first_inst(block);
+            if inst == NONE || f.last_inst(block) != inst || f.op(inst) != OP_BRIF {
+                continue;
+            }
+            let params = params_of(in f, block);
+            if !contains(in params, f.resolve(f.arg(inst, 0))) {
+                continue;
+            }
+            let vals = values_of(in f, inst);
+            let mut local: u64 = 0;
+            for k in 0..vals.len() {
+                if contains(in params, u32_at(in vals, k)) {
+                    local = inc(local);
+                }
+            }
+            let mut total: u64 = 0;
+            for k in 0..params.len() {
+                total = wrapping_add(total, w(use_count(in uses, u32_at(in params, k))));
+            }
+            if local != total {
+                continue;
+            }
+            let mut self_loop = false;
+            for d in 0..f.ndests(inst) {
+                if f.dest_block(inst, d) == block {
+                    self_loop = true;
+                }
+            }
+            if self_loop {
+                continue;
+            }
+            let ok = cand.try_set(w(block), inst);
+            any = true;
+        }
+        if !any {
+            return;
+        }
+        let mut changed = false;
+        let all = layout_insts(in f);
+        for q in 0..all.len() {
+            let inst = u32_at(in all, q);
+            let op = f.op(inst);
+            if op != OP_JUMP && op != OP_BRIF {
+                continue;
+            }
+            let nd = f.ndests(inst);
+            for k in 0..nd {
+                let target = f.dest_block(inst, k);
+                let brif = u32_at(in cand, w(target));
+                if brif == NONE || target == inst_block(in f, inst) {
+                    continue;
+                }
+                let pk = params_of(in f, target);
+                let pv = dest_args(in f, inst, k);
+                if pv.len() != pk.len() || contains(in pv, NONE) {
+                    continue;
+                }
+                let c0 = f.resolve(f.arg(brif, 0));
+                let mut cond = NONE;
+                for j in 0..pk.len() {
+                    if u32_at(in pk, j) == c0 {
+                        cond = u32_at(in pv, j);
+                    }
+                }
+                if cond == NONE {
+                    continue;
+                }
+                let then_block = f.dest_block(brif, 0);
+                let then_args = remap_args(in f, brif, 0, in pk, in pv);
+                let else_block = f.dest_block(brif, 1);
+                let else_args = remap_args(in f, brif, 1, in pk, in pv);
+                let c = constant(in f, cond, 0);
+                if c.some {
+                    if c.v != 0 {
+                        f.set_dest(inst, k, then_block, in then_args);
+                    } else {
+                        f.set_dest(inst, k, else_block, in else_args);
+                    }
+                    changed = true;
+                } else if op == OP_JUMP {
+                    f.replace_brif(inst, cond, then_block, in then_args, else_block, in else_args);
+                    changed = true;
+                    break;
+                }
+            }
+        }
+        if !changed {
+            return;
+        }
+    }
+}
+
+// ----- thread_decided_branches ---------------------------------------------------
+
+// `is_flag`: a 0/1 value, a comparison or bit operations and extensions
+// of them.
+fn is_flag(in f: Func, v0: u32, depth: u64) -> bool {
+    if depth > MAX_FACT_DEPTH {
+        return false;
+    }
+    let v = f.resolve(v0);
+    let i = f.def_inst(v);
+    if i == NONE {
+        return false;
+    }
+    let op = f.op(i);
+    if op == OP_ICMP || op == OP_ICMP_IMM {
+        return true;
+    }
+    if op == OP_ICONST {
+        let imm = f.inst(w(i)).imm;
+        return imm == 0 || imm == 1;
+    }
+    if op == OP_UEXTEND {
+        return is_flag(in f, f.arg(i, 0), inc(depth));
+    }
+    if op == OP_BAND || op == OP_BOR || op == OP_BXOR {
+        return is_flag(in f, f.arg(i, 0), inc(depth)) && is_flag(in f, f.arg(i, 1), inc(depth));
+    }
+    false
+}
+
+// What a branch says about its condition on an edge (`edge_fact`).
+copy struct Fact {
+    some: bool,
+    v: u32,
+    k: u64,
+}
+
+fn no_fact() -> Fact {
+    Fact { some: false, v: NONE, k: 0 }
+}
+
+fn edge_fact(in f: Func, pred: u32, k: u64) -> Fact {
+    if f.op(pred) != OP_BRIF || f.dest_block(pred, 0) == f.dest_block(pred, 1) {
+        return no_fact();
+    }
+    let arg = f.resolve(f.arg(pred, 0));
+    if k == 0 && is_flag(in f, arg, 0) {
+        return Fact { some: true, v: arg, k: 1 };
+    }
+    if k == 1 {
+        return Fact { some: true, v: arg, k: 0 };
+    }
+    no_fact()
+}
+
+// Whether `v` is the result of an instruction in `block`.
+fn local_to(in f: Func, v: u32, block: u32) -> bool {
+    let d = f.def_inst(v);
+    d != NONE && inst_block(in f, d) == block
+}
+
+fn pure_test_op(op: u64) -> bool {
+    op == OP_ICONST
+        || op == OP_UEXTEND
+        || op == OP_IREDUCE
+        || op == OP_ICMP_IMM
+        || op == OP_ICMP
+        || op == OP_BAND
+        || op == OP_BOR
+        || op == OP_BXOR
+}
+
+// `thread_decided_branches`: a block with no parameters that only computes
+// a test from values defined elsewhere and branches on it is skipped on
+// each incoming edge where a dominating branch already decided the test.
+pub fn thread_decided_branches(inout f: Func) {
+    let mut cfg = cfg_of(in f);
+    let mut outside = ChunkSeq::new[u8]();
+    outside.resize(f.nvalues(), 0);
+    let blocks = layout_blocks(in f);
+    for q in 0..blocks.len() {
+        let block = u32_at(in blocks, q);
+        let mut i = f.first_inst(block);
+        loop {
+            if i == NONE {
+                break;
+            }
+            let vals = values_of(in f, i);
+            for k in 0..vals.len() {
+                let v = u32_at(in vals, k);
+                let d = f.def_inst(v);
+                if d != NONE && inst_block(in f, d) != block {
+                    let ok = outside.try_set(w(v), 1);
+                }
+            }
+            i = f.next_inst(i);
+        }
+    }
+    for q in 0..blocks.len() {
+        let block = u32_at(in blocks, q);
+        if f.nparams(block) != 0 {
+            continue;
+        }
+        let brif = f.last_inst(block);
+        if brif == NONE || f.op(brif) != OP_BRIF {
+            continue;
+        }
+        let mut pure = true;
+        let mut i = f.first_inst(block);
+        loop {
+            if i == brif || i == NONE {
+                break;
+            }
+            if !pure_test_op(f.op(i)) {
+                pure = false;
+            }
+            for r in 0..f.nresults(i) {
+                if outside.try_get(w(f.result(i, r))).unwrap_or(0) != 0 {
+                    pure = false;
+                }
+            }
+            i = f.next_inst(i);
+        }
+        let mut outside_args = true;
+        for d in 0..BRIF_DESTS {
+            if f.dest_block(brif, d) == block {
+                outside_args = false;
+            }
+            for a in 0..f.dest_nargs(brif, d) {
+                let v = f.dest_arg(brif, d, a);
+                if v == NONE || local_to(in f, v, block) {
+                    outside_args = false;
+                }
+            }
+        }
+        if !pure || !outside_args {
+            continue;
+        }
+        let cond = f.arg(brif, 0);
+        let then_block = f.dest_block(brif, 0);
+        let then_args = dest_args(in f, brif, 0);
+        let else_block = f.dest_block(brif, 1);
+        let else_args = dest_args(in f, brif, 1);
+        let mut preds = ChunkSeq::new[u32]();
+        for x in pred_lo(in cfg, block)..pred_hi(in cfg, block) {
+            preds.push(u32_at(in cfg.inst, x));
+        }
+        let mut changed = false;
+        for pq in 0..preds.len() {
+            let pred = u32_at(in preds, pq);
+            let op = f.op(pred);
+            if op != OP_JUMP && op != OP_BRIF {
+                continue;
+            }
+            let nd = f.ndests(pred);
+            for k in 0..nd {
+                if f.dest_block(pred, k) != block {
+                    continue;
+                }
+                let mut fact = edge_fact(in f, pred, k);
+                if !fact.some && op == OP_JUMP {
+                    let pb = inst_block(in f, pred);
+                    if pb != NONE && pred_count(in cfg, pb) == 1 {
+                        let only = u32_at(in cfg.inst, pred_lo(in cfg, pb));
+                        let mut edge: u64 = 0;
+                        let mut n: u64 = 0;
+                        for x in 0..f.ndests(only) {
+                            if f.dest_block(only, x) == pb {
+                                edge = x;
+                                n = inc(n);
+                            }
+                        }
+                        if n == 1 {
+                            fact = edge_fact(in f, only, edge);
+                        }
+                    }
+                }
+                if !fact.some {
+                    continue;
+                }
+                let taken = constant_with(in f, fact.v, fact.k, cond, 0);
+                if !taken.some {
+                    continue;
+                }
+                if taken.v == 0 {
+                    f.set_dest(pred, k, else_block, in else_args);
+                } else {
+                    f.set_dest(pred, k, then_block, in then_args);
+                }
+                changed = true;
+            }
+        }
+        if changed {
+            cfg = cfg_of(in f);
+        }
+    }
+}
+
+// ----- thread_constant_param_jumps -------------------------------------------
+
+// A small map from values to words, the latest entry winning.
+struct Env {
+    keys: ChunkSeq[u32],
+    vals: ChunkSeq[u64],
+}
+
+fn env_new() -> Env {
+    Env { keys: ChunkSeq::new[u32](), vals: ChunkSeq::new[u64]() }
+}
+
+fn env_put(inout e: Env, k: u32, v: u64) {
+    e.keys.push(k);
+    e.vals.push(v);
+}
+
+fn env_get(in e: Env, k: u32) -> Konst {
+    let mut j = e.keys.len();
+    loop {
+        if j == 0 {
+            break;
+        }
+        j = wrapping_sub(j, 1);
+        if u32_at(in e.keys, j) == k {
+            return some(u64_at(in e.vals, j));
+        }
+    }
+    none()
+}
+
+// `val_of` of `eval_const_int_op`.
+fn val_of(in f: Func, in env: Env, v0: u32) -> Konst {
+    let v = f.resolve(v0);
+    let k = env_get(in env, v);
+    if k.some {
+        return k;
+    }
+    constant(in f, v, PARAM_CONST_DEPTH)
+}
+
+// `eval_const_int_op`: the value of `i`'s first result under `env`.
+fn eval_const_int_op(in f: Func, i: u32, in env: Env) -> Konst {
+    let op = f.op(i);
+    let row = f.inst(w(i));
+    if op == OP_ICONST {
+        return some(row.imm);
+    }
+    if op == OP_UEXTEND || op == OP_SEXTEND || op == OP_IREDUCE {
+        let arg = f.arg(i, 0);
+        let a = val_of(in f, in env, arg);
+        if !a.some {
+            return a;
+        }
+        let arg_ty = f.value_type(arg);
+        let res_ty = f.value_type(f.result(i, 0));
+        if op == OP_IREDUCE {
+            if res_ty == TY_I8 {
+                return some(sext(a.v, BITS_8));
+            }
+            if res_ty == TY_I16 {
+                return some(sext(a.v, BITS_16));
+            }
+            if res_ty == TY_I32 {
+                return some(sext(a.v, BITS_32));
+            }
+            return none();
+        }
+        let bits = if arg_ty == TY_I8 {
+            BITS_8
+        } else if arg_ty == TY_I16 {
+            BITS_16
+        } else if arg_ty == TY_I32 {
+            BITS_32
+        } else {
+            0
+        };
+        if bits == 0 {
+            return none();
+        }
+        if op == OP_UEXTEND {
+            return some(low_bits(a.v, bits));
+        }
+        return some(sext(a.v, bits));
+    }
+    if op == OP_ICMP_IMM {
+        let a = val_of(in f, in env, f.arg(i, 0));
+        if !a.some {
+            return a;
+        }
+        return int_cond(row.cond, a.v, row.imm, a.v, row.imm);
+    }
+    if op == OP_ICMP {
+        let a = val_of(in f, in env, f.arg(i, 0));
+        if !a.some {
+            return a;
+        }
+        let b = val_of(in f, in env, f.arg(i, 1));
+        if !b.some {
+            return b;
+        }
+        return int_cond(row.cond, a.v, b.v, a.v, b.v);
+    }
+    if op == OP_BAND || op == OP_BOR || op == OP_BXOR || op == OP_IADD || op == OP_ISUB {
+        let a = val_of(in f, in env, f.arg(i, 0));
+        if !a.some {
+            return a;
+        }
+        let b = val_of(in f, in env, f.arg(i, 1));
+        if !b.some {
+            return b;
+        }
+        return some(
+            if op == OP_BAND {
+                a.v & b.v
+            } else if op == OP_BOR {
+                a.v | b.v
+            } else if op == OP_BXOR {
+                a.v ^ b.v
+            } else if op == OP_IADD {
+                wrapping_add(a.v, b.v)
+            } else {
+                wrapping_sub(a.v, b.v)
+            }
+        );
+    }
+    none()
+}
+
+// The blocks using each value: the first one, and whether there is
+// another (`val_users`).
+struct Users {
+    first: ChunkSeq[u32],
+    many: ChunkSeq[u8],
+}
+
+fn users_of(in f: Func) -> Users {
+    let mut u = Users { first: ChunkSeq::new[u32](), many: ChunkSeq::new[u8]() };
+    u.first.resize(f.nvalues(), NONE);
+    u.many.resize(f.nvalues(), 0);
+    let blocks = layout_blocks(in f);
+    for q in 0..blocks.len() {
+        let b = u32_at(in blocks, q);
+        let mut i = f.first_inst(b);
+        loop {
+            if i == NONE {
+                break;
+            }
+            let vals = values_of(in f, i);
+            for k in 0..vals.len() {
+                let v = w(u32_at(in vals, k));
+                let at = u.first.try_get(v).unwrap_or(NONE);
+                if at == NONE {
+                    let ok = u.first.try_set(v, b);
+                } else if at != b {
+                    let ok = u.many.try_set(v, 1);
+                }
+            }
+            i = f.next_inst(i);
+        }
+    }
+    u
+}
+
+// Whether a block other than `b` uses `v`.
+fn used_outside(in u: Users, v: u32, b: u32) -> bool {
+    let at = u.first.try_get(w(v)).unwrap_or(NONE);
+    at != NONE && (at != b || u.many.try_get(w(v)).unwrap_or(0) != 0)
+}
+
+// `thread_constant_param_jumps`: a jump into a block whose `brif` folds to
+// a constant under the jump's arguments (and whose parameters and values
+// are used nowhere else) goes to the chosen successor instead.
+pub fn thread_constant_param_jumps(inout f: Func) {
+    for _ in 0..MAX_PARAM_JUMP_ROUNDS {
+        let users = users_of(in f);
+        let mut sites = ChunkSeq::new[u32]();
+        let blocks = layout_blocks(in f);
+        for q in 0..blocks.len() {
+            let last = f.last_inst(u32_at(in blocks, q));
+            if last != NONE && f.op(last) == OP_JUMP {
+                sites.push(last);
+            }
+        }
+        let mut changed = false;
+        for q in 0..sites.len() {
+            let jump = u32_at(in sites, q);
+            let pred_blk = inst_block(in f, jump);
+            let target = f.dest_block(jump, 0);
+            if target == pred_blk {
+                continue;
+            }
+            let n = f.dest_nargs(jump, 0);
+            let params = params_of(in f, target);
+            if n != params.len() {
+                continue;
+            }
+            let mut env = env_new();
+            let mut pv = ChunkSeq::new[u32]();
+            let mut plain = true;
+            for j in 0..n {
+                let a0 = f.dest_arg(jump, 0, j);
+                if a0 == NONE {
+                    plain = false;
+                    break;
+                }
+                let a = f.resolve(a0);
+                pv.push(a);
+                let c = constant(in f, a, PARAM_CONST_DEPTH);
+                if c.some {
+                    env_put(inout env, u32_at(in params, j), c.v);
+                }
+            }
+            if !plain || env.keys.len() == 0 {
+                continue;
+            }
+            let term = f.last_inst(target);
+            if term == NONE || f.op(term) != OP_BRIF {
+                continue;
+            }
+            let mut local_defs = ChunkSeq::new[u32]();
+            local_defs.extend(in params.as_slice());
+            let mut local_ok = true;
+            let mut i = f.first_inst(target);
+            loop {
+                if i == term || i == NONE {
+                    break;
+                }
+                let c = eval_const_int_op(in f, i, in env);
+                if !c.some {
+                    local_ok = false;
+                    break;
+                }
+                if f.nresults(i) != 0 {
+                    let r = f.result(i, 0);
+                    env_put(inout env, r, c.v);
+                    local_defs.push(r);
+                }
+                i = f.next_inst(i);
+            }
+            if !local_ok {
+                continue;
+            }
+            let cv = env_get(in env, f.resolve(f.arg(term, 0)));
+            if !cv.some {
+                continue;
+            }
+            let mut escapes = false;
+            for k in 0..local_defs.len() {
+                if used_outside(in users, u32_at(in local_defs, k), target) {
+                    escapes = true;
+                }
+            }
+            if escapes {
+                continue;
+            }
+            let chosen: u64 = if cv.v != 0 { 0 } else { 1 };
+            let next_blk = f.dest_block(term, chosen);
+            if next_blk == target || next_blk == pred_blk {
+                continue;
+            }
+            let args = remap_args(in f, term, chosen, in params, in pv);
+            let mut bad = false;
+            for k in 0..args.len() {
+                let a = u32_at(in args, k);
+                if a == NONE || contains(in local_defs, f.resolve(a)) {
+                    bad = true;
+                }
+            }
+            if bad {
+                continue;
+            }
+            let none_args = ChunkSeq::new[u32]();
+            let mut dws = ChunkSeq::new[u32]();
+            dws.push(next_blk);
+            dws.push(n32(args.len()));
+            dws.extend(in args.as_slice());
+            let made = f.ins_before(jump, OP_JUMP, 0, 0, 0, 0, 0, in none_args, in dws);
+            f.remove_inst(jump);
+            changed = true;
+        }
+        if !changed {
+            break;
+        }
+        remove_unreachable(inout f);
+    }
+}
+
+// ----- propagate_branch_conditions -------------------------------------------
+
+// The dominator tree's postorder (`DominatorTree::compute`: a depth-first
+// walk from the entry block that pushes the successors of the last
+// instruction in reverse, skipping blocks already entered) and the
+// immediate dominators.
+struct Dom {
+    post: ChunkSeq[u32],
+    idom: ChunkSeq[u32],
+}
+
+// A walk item: a block to enter (and the block it is entered from), or a
+// block to leave.
+copy struct Walk {
+    enter: bool,
+    block: u32,
+}
+
+fn dom_of(in f: Func, in cfg: Cfg) -> Dom {
+    let nb = f.nblocks();
+    let mut d = Dom { post: ChunkSeq::new[u32](), idom: ChunkSeq::new[u32]() };
+    d.idom.resize(nb, NONE);
+    let entry = f.first_block();
+    if entry == NONE {
+        return d;
+    }
+    let mut seen = ChunkSeq::new[u8]();
+    seen.resize(nb, 0);
+    let mut work = ChunkSeq::new[Walk]();
+    work.push(Walk { enter: true, block: entry });
+    loop {
+        let item = match work.pop() {
+            Option::Some(x) => x,
+            Option::None => break,
+        };
+        if !item.enter {
+            d.post.push(item.block);
+            continue;
+        }
+        if seen.try_get(w(item.block)).unwrap_or(1) != 0 {
+            continue;
+        }
+        let ok = seen.try_set(w(item.block), 1);
+        work.push(Walk { enter: false, block: item.block });
+        let last = f.last_inst(item.block);
+        if last != NONE {
+            let mut k = f.ndests(last);
+            loop {
+                if k == 0 {
+                    break;
+                }
+                k = wrapping_sub(k, 1);
+                let s = f.dest_block(last, k);
+                if seen.try_get(w(s)).unwrap_or(1) == 0 {
+                    work.push(Walk { enter: true, block: s });
+                }
+            }
+        }
+    }
+    // Immediate dominators by the iterative intersection over reverse
+    // postorder (dominators are unique, so any exact method agrees with
+    // Cranelift's Semi-NCA).
+    let mut po = ChunkSeq::new[u64]();
+    po.resize(nb, NONE64);
+    for k in 0..d.post.len() {
+        let ok = po.try_set(w(u32_at(in d.post, k)), k);
+    }
+    let ok = d.idom.try_set(w(entry), entry);
+    let mut changed = true;
+    loop {
+        if !changed {
+            break;
+        }
+        changed = false;
+        let mut k = d.post.len();
+        loop {
+            if k == 0 {
+                break;
+            }
+            k = wrapping_sub(k, 1);
+            let b = u32_at(in d.post, k);
+            if b == entry {
+                continue;
+            }
+            let mut new_idom = NONE;
+            for x in pred_lo(in cfg, b)..pred_hi(in cfg, b) {
+                let p = inst_block(in f, u32_at(in cfg.inst, x));
+                if p == NONE || u32_at(in d.idom, w(p)) == NONE {
+                    continue;
+                }
+                if new_idom == NONE {
+                    new_idom = p;
+                } else {
+                    new_idom = intersect(in d.idom, in po, p, new_idom);
+                }
+            }
+            if new_idom != NONE && u32_at(in d.idom, w(b)) != new_idom {
+                let ok2 = d.idom.try_set(w(b), new_idom);
+                changed = true;
+            }
+        }
+    }
+    d
+}
+
+fn intersect(in idom: ChunkSeq[u32], in po: ChunkSeq[u64], a0: u32, b0: u32) -> u32 {
+    let mut a = a0;
+    let mut b = b0;
+    loop {
+        if a == b {
+            return a;
+        }
+        let pa = u64_at(in po, w(a));
+        let pb = u64_at(in po, w(b));
+        if pa < pb {
+            a = u32_at(in idom, w(a));
+        } else {
+            b = u32_at(in idom, w(b));
+        }
+    }
+}
+
+// One change to the known facts, to undo when a dominator subtree is done.
+copy struct Undo {
+    v: u32,
+    is_const: bool,
+    old_flag: u8,
+    old_has: u8,
+    old_val: u64,
+}
+
+// The facts known at a block: flags and constants of values.
+struct Known {
+    flag: ChunkSeq[u8],
+    has: ChunkSeq[u8],
+    val: ChunkSeq[u64],
+    log: ChunkSeq[Undo],
+}
+
+fn set_flag(inout k: Known, v: u32, b: bool) {
+    let old = k.flag.try_get(w(v)).unwrap_or(FLAG_UNKNOWN);
+    k.log.push(Undo { v: v, is_const: false, old_flag: old, old_has: 0, old_val: 0 });
+    let ok = k.flag.try_set(w(v), if b { FLAG_TRUE } else { FLAG_FALSE });
+}
+
+fn set_const(inout k: Known, v: u32, c: u64) {
+    let old_has = k.has.try_get(w(v)).unwrap_or(0);
+    let old_val = k.val.try_get(w(v)).unwrap_or(0);
+    k.log.push(Undo { v: v, is_const: true, old_flag: 0, old_has: old_has, old_val: old_val });
+    let ok = k.has.try_set(w(v), 1);
+    let ok2 = k.val.try_set(w(v), c);
+}
+
+fn known_const(in k: Known, v: u32) -> Konst {
+    if k.has.try_get(w(v)).unwrap_or(0) != 0 {
+        some(k.val.try_get(w(v)).unwrap_or(0))
+    } else {
+        none()
+    }
+}
+
+fn undo_to(inout k: Known, mark: u64) {
+    loop {
+        if k.log.len() <= mark {
+            break;
+        }
+        let u = match k.log.pop() {
+            Option::Some(x) => x,
+            Option::None => break,
+        };
+        if u.is_const {
+            let ok = k.has.try_set(w(u.v), u.old_has);
+            let ok2 = k.val.try_set(w(u.v), u.old_val);
+        } else {
+            let ok = k.flag.try_set(w(u.v), u.old_flag);
+        }
+    }
+}
+
+// An edge fact for a child: `v` holds the flag `b` (`is_const` false) or
+// the constant `c`.
+copy struct EdgeFact {
+    block: u32,
+    v: u32,
+    is_const: bool,
+    b: bool,
+    c: u64,
+}
+
+// A dominator-tree walk item: visit `block` with the edge facts
+// `facts[lo..hi]`, or undo the facts back to `mark`.
+copy struct Visit {
+    visit: bool,
+    block: u32,
+    lo: u64,
+    hi: u64,
+    mark: u64,
+}
+
+// A jump to destination `k` of `i` just before `i`, then `i` removed.
+fn jump_instead(inout f: Func, i: u32, k: u64) {
+    let args = dest_args(in f, i, k);
+    let none_args = ChunkSeq::new[u32]();
+    let mut dws = ChunkSeq::new[u32]();
+    dws.push(f.dest_block(i, k));
+    dws.push(n32(args.len()));
+    dws.extend(in args.as_slice());
+    let made = f.ins_before(i, OP_JUMP, 0, 0, 0, 0, 0, in none_args, in dws);
+    f.remove_inst(i);
+}
+
+// `propagate_branch_conditions`: walking the dominator tree, a `brif` or
+// `select` on a flag a dominating branch decided (on an edge into a block
+// with one predecessor) folds, and so do comparisons of values such a
+// branch fixed.
+pub fn propagate_branch_conditions(inout f: Func) {
+    let cfg = cfg_of(in f);
+    let dom = dom_of(in f, in cfg);
+    let entry = f.first_block();
+    if entry == NONE {
+        return;
+    }
+    let nb = f.nblocks();
+    // Dominator children in reverse postorder, as linked lists.
+    let mut first_child = ChunkSeq::new[u32]();
+    first_child.resize(nb, NONE);
+    let mut last_child = ChunkSeq::new[u32]();
+    last_child.resize(nb, NONE);
+    let mut next_sib = ChunkSeq::new[u32]();
+    next_sib.resize(nb, NONE);
+    let mut k = dom.post.len();
+    loop {
+        if k == 0 {
+            break;
+        }
+        k = wrapping_sub(k, 1);
+        let b = u32_at(in dom.post, k);
+        let p = u32_at(in dom.idom, w(b));
+        if p == NONE || p == b {
+            continue;
+        }
+        let tail = u32_at(in last_child, w(p));
+        if tail == NONE {
+            let ok = first_child.try_set(w(p), b);
+        } else {
+            let ok = next_sib.try_set(w(tail), b);
+        }
+        let ok2 = last_child.try_set(w(p), b);
+    }
+    let nv = f.nvalues();
+    let mut known = Known {
+        flag: ChunkSeq::new[u8](),
+        has: ChunkSeq::new[u8](),
+        val: ChunkSeq::new[u64](),
+        log: ChunkSeq::new[Undo]()
+    };
+    known.flag.resize(nv, FLAG_UNKNOWN);
+    known.has.resize(nv, 0);
+    known.val.resize(nv, 0);
+    let mut facts = ChunkSeq::new[EdgeFact]();
+    let mut work = ChunkSeq::new[Visit]();
+    work.push(Visit { visit: true, block: entry, lo: 0, hi: 0, mark: 0 });
+    loop {
+        let item = match work.pop() {
+            Option::Some(x) => x,
+            Option::None => break,
+        };
+        if !item.visit {
+            undo_to(inout known, item.mark);
+            continue;
+        }
+        let block = item.block;
+        work.push(Visit { visit: false, block: block, lo: 0, hi: 0, mark: known.log.len() });
+        for x in item.lo..item.hi {
+            let fact = match facts.try_get(x) {
+                Option::Some(y) => y,
+                Option::None => continue,
+            };
+            if fact.block != block || fact.is_const {
+                continue;
+            }
+            set_flag(inout known, fact.v, fact.b);
+        }
+        for x in item.lo..item.hi {
+            let fact = match facts.try_get(x) {
+                Option::Some(y) => y,
+                Option::None => continue,
+            };
+            if fact.block != block || !fact.is_const {
+                continue;
+            }
+            set_const(inout known, fact.v, fact.c);
+        }
+        let body = block_insts(in f, block);
+        for q in 0..body.len() {
+            let inst = u32_at(in body, q);
+            let op = f.op(inst);
+            if op == OP_SELECT {
+                let c = f.resolve(f.arg(inst, 0));
+                let fl = known.flag.try_get(w(c)).unwrap_or(FLAG_UNKNOWN);
+                if fl != FLAG_UNKNOWN {
+                    let chosen = f.arg(
+                        inst,
+                        if fl == FLAG_TRUE {
+                            SELECT_THEN_ARG
+                        } else {
+                            SELECT_ELSE_ARG
+                        }
+                    );
+                    let res = f.result(inst, 0);
+                    f.detach_results(inst);
+                    f.remove_inst(inst);
+                    f.alias(res, chosen);
+                }
+            } else if op == OP_ICMP_IMM {
+                let arg = f.resolve(f.arg(inst, 0));
+                let kc = known_const(in known, arg);
+                if kc.some {
+                    let row = f.inst(w(inst));
+                    let r = eval_icmp(row.cond, f.value_type(arg), kc.v, row.imm);
+                    if r.some {
+                        let res = f.result(inst, 0);
+                        f.replace_iconst(inst, f.value_type(res), r.v);
+                        set_flag(inout known, res, r.v != 0);
+                    }
+                }
+            } else if op == OP_ICMP {
+                let lhs = f.resolve(f.arg(inst, 0));
+                let rhs = f.resolve(f.arg(inst, 1));
+                let mut lv = known_const(in known, lhs);
+                if !lv.some {
+                    lv = constant(in f, lhs, BRANCH_CONST_DEPTH);
+                }
+                let mut rv = known_const(in known, rhs);
+                if !rv.some {
+                    rv = constant(in f, rhs, BRANCH_CONST_DEPTH);
+                }
+                if lv.some && rv.some {
+                    let row = f.inst(w(inst));
+                    let r = eval_icmp(row.cond, f.value_type(lhs), lv.v, rv.v);
+                    if r.some {
+                        let res = f.result(inst, 0);
+                        f.replace_iconst(inst, f.value_type(res), r.v);
+                        set_flag(inout known, res, r.v != 0);
+                    }
+                }
+            }
+        }
+        let lo = facts.len();
+        let last = f.last_inst(block);
+        if last != NONE && f.op(last) == OP_BRIF {
+            let cond = f.resolve(f.arg(last, 0));
+            let fl = known.flag.try_get(w(cond)).unwrap_or(FLAG_UNKNOWN);
+            if fl != FLAG_UNKNOWN {
+                jump_instead(inout f, last, if fl == FLAG_TRUE { 0 } else { 1 });
+            } else {
+                let t_blk = f.dest_block(last, 0);
+                let f_blk = f.dest_block(last, 1);
+                if t_blk != f_blk {
+                    let t_single = pred_count(in cfg, t_blk) == 1;
+                    let f_single = pred_count(in cfg, f_blk) == 1;
+                    if t_single {
+                        facts.push(EdgeFact {
+                            block: t_blk,
+                            v: cond,
+                            is_const: false,
+                            b: true,
+                            c: 0
+                        });
+                    }
+                    if f_single {
+                        facts.push(EdgeFact {
+                            block: f_blk,
+                            v: cond,
+                            is_const: false,
+                            b: false,
+                            c: 0
+                        });
+                    }
+                    let cmp = f.def_inst(cond);
+                    if cmp != NONE {
+                        let row = f.inst(w(cmp));
+                        let cop = f.op(cmp);
+                        if cop == OP_ICMP_IMM && row.cond == CC_EQ && t_single {
+                            let v = f.resolve(f.arg(cmp, 0));
+                            facts.push(EdgeFact {
+                                block: t_blk,
+                                v: v,
+                                is_const: true,
+                                b: false,
+                                c: row.imm
+                            });
+                        } else if cop == OP_ICMP_IMM && row.cond == CC_NE && f_single {
+                            let v = f.resolve(f.arg(cmp, 0));
+                            facts.push(EdgeFact {
+                                block: f_blk,
+                                v: v,
+                                is_const: true,
+                                b: false,
+                                c: row.imm
+                            });
+                        } else if cop == OP_ICMP && (row.cond == CC_EQ || row.cond == CC_NE) {
+                            let eq_blk = if row.cond == CC_EQ && t_single {
+                                t_blk
+                            } else if row.cond == CC_NE && f_single {
+                                f_blk
+                            } else {
+                                NONE
+                            };
+                            if eq_blk != NONE {
+                                let lhs = f.arg(cmp, 0);
+                                let rhs = f.arg(cmp, 1);
+                                let rc = constant(in f, rhs, BRANCH_CONST_DEPTH);
+                                if rc.some {
+                                    facts.push(EdgeFact {
+                                        block: eq_blk,
+                                        v: f.resolve(lhs),
+                                        is_const: true,
+                                        b: false,
+                                        c: rc.v
+                                    });
+                                } else {
+                                    let lc = constant(in f, lhs, BRANCH_CONST_DEPTH);
+                                    if lc.some {
+                                        facts.push(EdgeFact {
+                                            block: eq_blk,
+                                            v: f.resolve(rhs),
+                                            is_const: true,
+                                            b: false,
+                                            c: lc.v
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let hi = facts.len();
+        let mut c = u32_at(in first_child, w(block));
+        loop {
+            if c == NONE {
+                break;
+            }
+            work.push(Visit { visit: true, block: c, lo: lo, hi: hi, mark: 0 });
+            c = u32_at(in next_sib, w(c));
+        }
+    }
+}
+
+// The instructions of `b` in layout order.
+fn block_insts(in f: Func, b: u32) -> ChunkSeq[u32] {
+    let mut out = ChunkSeq::new[u32]();
+    let mut i = f.first_inst(b);
+    loop {
+        if i == NONE {
+            break;
+        }
+        out.push(i);
+        i = f.next_inst(i);
+    }
+    out
+}
