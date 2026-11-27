@@ -2,23 +2,26 @@ use @vesper/check-data::types::{TyKind, TyPass};
 use @vesper/check-data::util::{add, inc, n32, w};
 use @vesper/hybrid-native-backend::elf::{x86_text_object};
 use @vesper/hybrid-native-backend::scalar::{
-    ADD, AND, BLOCK_LABEL, BLOCK_RETURN, BRANCH_BLOCK, CALL, CALL_ARGUMENT, COMPARE, CONSTANT,
-    EQUAL, HEADER_WORDS, JUMP_LABEL, MAX_ARGUMENTS, MUL, NOT_EQUAL, NO_VALUE, OR, RECORD_WORDS,
-    RETURN_VALUE, STACK_LOAD, STACK_SLOT, STACK_STORE_QWORD, SUB, UNSIGNED_GREATER,
+    ADD, AND, BLOCK_LABEL, BLOCK_RETURN, BRANCH_BLOCK, CALL, CALL_ARGUMENT, COMPARE,
+    COMPARE_IMMEDIATE, CONSTANT, EQUAL, HEADER_WORDS, JUMP_LABEL, MAX_ARGUMENTS, MUL, NOT_EQUAL,
+    NO_VALUE, OR, RECORD_WORDS, RETURN_VALUE, SIGNED_GREATER, SIGNED_GREATER_EQUAL, SIGNED_LESS,
+    SIGNED_LESS_EQUAL, STACK_LOAD, STACK_SLOT, STACK_STORE_QWORD, SUB, UNSIGNED_GREATER,
     UNSIGNED_GREATER_EQUAL, UNSIGNED_LESS, UNSIGNED_LESS_EQUAL, XOR, encode_block
 };
 use @vesper/hybrid-native-backend::x86_64::{BYTE_BITS, QWORD_BITS};
-use @vesper/place-ir::{BlockRow, FnRow, InstRow, Lit, Op, Term};
+use @vesper/place-ir::{BlockRow, FnRow, InstRow, Lit, Op, Tag, Term};
 use @vesper/place-ir-lower::ast::{FnR};
 use @vesper/place-ir-lower::lower::{L};
 
 const LITERAL_WORDS: u64 = 3;
 const BINARY_WORDS: u64 = 3;
+const UNARY_WORDS: u64 = 2;
 const PLAIN_READ_WORDS: u64 = 4;
 const LITERAL_LOW: u64 = 1;
 const LITERAL_HIGH: u64 = 2;
 const BINARY_LHS: u64 = 1;
 const BINARY_RHS: u64 = 2;
+const UNARY_VALUE: u64 = 1;
 const READ_PATH: u64 = 1;
 const READ_PASS: u64 = 2;
 const READ_PROJECTIONS: u64 = 3;
@@ -38,6 +41,18 @@ const CALL_ARGUMENTS: u64 = 2;
 const ARGUMENT_WORDS: u64 = 4;
 const ARGUMENT_VALUE: u64 = 1;
 const ARGUMENT_PATH: u64 = 3;
+// A supported function has no parameter projections, bounds, or captures.
+const PARAMETER_WORDS: u64 = 6;
+const VALUE_TYPES_COUNT: u64 = 4;
+const VALUE_TYPE_WORDS: u64 = 2;
+const SIGN_BIT: u64 = 0x8000000000000000;
+
+enum ScalarKind: _ {
+    Unsupported = 0,
+    Unsigned = 1,
+    Signed = 2,
+    Bool = 3,
+}
 
 struct CallGraph {
     indices: ChunkSeq[u64],
@@ -69,8 +84,10 @@ copy struct Value {
 
 struct Function {
     arguments: u64,
+    result: u8,
     words: ChunkSeq[u64],
     values: ChunkSeq[Value],
+    kinds: ChunkSeq[u8],
     home_bytes: u64,
 }
 
@@ -83,6 +100,10 @@ fn block_bit(block: u64) -> u64 {
 }
 
 impl Function {
+    fn kind(in self, id: u64) -> u8 {
+        self.kinds.try_get(id).unwrap_or(ScalarKind::Unsupported)
+    }
+
     fn record(inout self, op: u64, lhs: u64, rhs: u64, extra: u64) -> u64 {
         let value = add(
             self.arguments,
@@ -156,27 +177,57 @@ fn lower_operator(in low: L, symbol: u32) -> u64 {
     }
 }
 
-fn unsigned_comparison(in low: L, symbol: u32) -> u64 {
+fn integer_comparison(in low: L, symbol: u32, kind: u8) -> u64 {
+    let signed = kind == ScalarKind::Signed;
     if low.ctx.names.spells(symbol, in "==".as_bytes()) {
         EQUAL
     } else if low.ctx.names.spells(symbol, in "!=".as_bytes()) {
         NOT_EQUAL
+    } else if !is_integer(kind) {
+        NO_VALUE
     } else if low.ctx.names.spells(symbol, in "<".as_bytes()) {
-        UNSIGNED_LESS
+        if signed { SIGNED_LESS } else { UNSIGNED_LESS }
     } else if low.ctx.names.spells(symbol, in "<=".as_bytes()) {
-        UNSIGNED_LESS_EQUAL
+        if signed {
+            SIGNED_LESS_EQUAL
+        } else {
+            UNSIGNED_LESS_EQUAL
+        }
     } else if low.ctx.names.spells(symbol, in ">".as_bytes()) {
-        UNSIGNED_GREATER
+        if signed {
+            SIGNED_GREATER
+        } else {
+            UNSIGNED_GREATER
+        }
     } else if low.ctx.names.spells(symbol, in ">=".as_bytes()) {
-        UNSIGNED_GREATER_EQUAL
+        if signed {
+            SIGNED_GREATER_EQUAL
+        } else {
+            UNSIGNED_GREATER_EQUAL
+        }
     } else {
         NO_VALUE
     }
 }
 
-fn is_u64(in low: L, ty: u32) -> bool {
+fn is_integer(kind: u8) -> bool {
+    kind == ScalarKind::Signed || kind == ScalarKind::Unsigned
+}
+
+fn scalar_kind(in low: L, ty: u32) -> u8 {
     let node = low.ctx.types.node(ty);
-    node.kind == TyKind::Named && node.name == low.ctx.types.s_u64 && node.n == 0
+    if node.kind != TyKind::Named || node.n != 0 {
+        return ScalarKind::Unsupported;
+    }
+    if node.name == low.ctx.types.s_u64 {
+        ScalarKind::Unsigned
+    } else if node.name == low.ctx.types.s_i64 {
+        ScalarKind::Signed
+    } else if node.name == low.ctx.world.k.bool_ {
+        ScalarKind::Bool
+    } else {
+        ScalarKind::Unsupported
+    }
 }
 
 fn sysv_signature(in low: L, f: FnR) -> bool {
@@ -184,14 +235,14 @@ fn sysv_signature(in low: L, f: FnR) -> bool {
         || f.generic_count != 0
         || f.ext_count != 0
         || f.param_count > MAX_ARGUMENTS
-        || !is_u64(in low, f.result)
+        || !is_integer(scalar_kind(in low, f.result))
         || f.effects != low.ctx.types.empty_row
     {
         return false;
     }
     for index in 0..f.param_count {
         let p = low.ast.param(add(f.param_start, index));
-        if p.proj_count != 0 || p.pass == TyPass::Inout || !is_u64(in low, p.ty) {
+        if p.proj_count != 0 || p.pass == TyPass::Inout || !is_integer(scalar_kind(in low, p.ty)) {
             return false;
         }
     }
@@ -240,19 +291,24 @@ fn lower_call(
         return NO_VALUE;
     }
     let callee = low.ast.function(index);
-    if count != callee.param_count || !sysv_signature(in low, callee) {
+    if count != callee.param_count
+        || !sysv_signature(in low, callee)
+        || scalar_kind(in low, inst.ty) != scalar_kind(in low, callee.result)
+    {
         return NO_VALUE;
     }
     let mut args = ChunkSeq::new[u64]();
     for i in 0..count {
         let at = call_argument(inst.a, i);
+        let operand = low.program.op(add(at, ARGUMENT_VALUE));
+        let param = low.ast.param(add(callee.param_start, i));
         if low.program.op(at) == TyPass::Inout
             || low.program.path(low.program.op(add(at, ARGUMENT_PATH))).n != 0
+            || m.kind(operand) != scalar_kind(in low, param.ty)
         {
             return NO_VALUE;
         }
-        let id = add(m.arguments, low.program.op(add(at, ARGUMENT_VALUE)));
-        let value = m.read(id, block);
+        let value = m.read(add(m.arguments, operand), block);
         if value == NO_VALUE {
             return NO_VALUE;
         }
@@ -277,6 +333,35 @@ fn block_parameter(in low: L, b: BlockRow) -> u64 {
     } else {
         NO_VALUE
     }
+}
+
+fn plan_types(in low: L, row: FnRow, inout m: Function) -> bool {
+    // After the parameters come the result, effects, bound count and capture
+    // count, then the table of (value ID, type ID) pairs.
+    let after_parameters = inc(add(row.ha, wrapping_mul(m.arguments, PARAMETER_WORDS)));
+    let count_at = add(after_parameters, VALUE_TYPES_COUNT);
+    let end = add(row.ha, row.hn);
+    if count_at >= end {
+        return false;
+    }
+    let first = inc(count_at);
+    let count = low.program.op(count_at);
+    if count > wrapping_sub(end, first) / VALUE_TYPE_WORDS {
+        return false;
+    }
+    m.kinds.resize(wrapping_sub(m.values.len(), m.arguments), ScalarKind::Unsupported);
+    for i in 0..count {
+        let at = add(first, wrapping_mul(i, VALUE_TYPE_WORDS));
+        let ty_at = inc(at);
+        if low.program.tag(at) != Tag::Value || low.program.tag(ty_at) != Tag::Type {
+            return false;
+        }
+        let kind = scalar_kind(in low, n32(low.program.op(ty_at)));
+        if !m.kinds.try_set(low.program.op(at), kind) {
+            return false;
+        }
+    }
+    true
 }
 
 // Walk backward from each use to its definition. Jump operands are read
@@ -386,6 +471,10 @@ fn plan_homes(in low: L, f: FnR, row: FnRow, inout m: Function) -> bool {
                 if !m.use_in(lhs, block) || !m.use_in(rhs, block) {
                     return false;
                 }
+            } else if inst.op == Op::Unary {
+                if !m.use_in(add(f.param_count, low.program.op(add(at, UNARY_VALUE))), block) {
+                    return false;
+                }
             } else if inst.op == Op::Call {
                 let count = call_arity(in low, inst);
                 if count == NO_VALUE {
@@ -413,6 +502,78 @@ fn plan_homes(in low: L, f: FnR, row: FnRow, inout m: Function) -> bool {
     true
 }
 
+fn lower_literal(in low: L, at: u64, kind: u8, inout m: Function) -> u64 {
+    let literal = low.program.op(at);
+    let bits = low.program.op(add(at, LITERAL_LOW));
+    let high = if kind == ScalarKind::Signed && (bits & SIGN_BIT) != 0 {
+        NO_VALUE
+    } else {
+        0
+    };
+    if low.program.op(add(at, LITERAL_HIGH)) != high {
+        return NO_VALUE;
+    }
+    if (is_integer(kind) && literal == Lit::Int)
+        || (kind == ScalarKind::Bool && literal == Lit::Bool && bits <= 1)
+    {
+        m.record(CONSTANT, bits, 0, 0)
+    } else {
+        NO_VALUE
+    }
+}
+
+fn lower_unary(in low: L, at: u64, kind: u8, block: u64, inout m: Function) -> u64 {
+    let symbol = n32(low.program.op(at));
+    let operand = low.program.op(add(at, UNARY_VALUE));
+    let operand_kind = m.kind(operand);
+    let value = m.read(add(m.arguments, operand), block);
+    if value == NO_VALUE {
+        return NO_VALUE;
+    }
+    if kind == ScalarKind::Bool
+        && operand_kind == ScalarKind::Bool
+        && low.ctx.names.spells(symbol, in "!".as_bytes())
+    {
+        m.record(COMPARE_IMMEDIATE, value, 0, EQUAL)
+    } else if is_integer(operand_kind)
+        && ((kind == ScalarKind::Signed
+            && low.ctx.names.spells(symbol, in "wrapping_i64".as_bytes()))
+            || (kind == ScalarKind::Unsigned
+                && low.ctx.names.spells(symbol, in "wrapping_u64".as_bytes())))
+    {
+        value
+    } else {
+        NO_VALUE
+    }
+}
+
+fn lower_binary(in low: L, at: u64, kind: u8, block: u64, inout m: Function) -> u64 {
+    let symbol = n32(low.program.op(at));
+    let left = low.program.op(add(at, BINARY_LHS));
+    let right = low.program.op(add(at, BINARY_RHS));
+    let operand_kind = m.kind(left);
+    if operand_kind == ScalarKind::Unsupported || operand_kind != m.kind(right) {
+        return NO_VALUE;
+    }
+    let lhs = m.read(add(m.arguments, left), block);
+    let rhs = m.read(add(m.arguments, right), block);
+    if lhs == NO_VALUE || rhs == NO_VALUE {
+        return NO_VALUE;
+    }
+    if kind == ScalarKind::Bool {
+        let compare = integer_comparison(in low, symbol, operand_kind);
+        if compare != NO_VALUE {
+            return m.record(COMPARE, lhs, rhs, compare);
+        }
+    } else if kind == operand_kind {
+        let op = lower_operator(in low, symbol);
+        if op != NO_VALUE {
+            return m.record(op, lhs, rhs, QWORD_BITS);
+        }
+    }
+    NO_VALUE
+}
+
 fn lower_block(
     in low: L,
     f: FnR,
@@ -424,50 +585,30 @@ fn lower_block(
     for index in b.i0..add(b.i0, b.ic) {
         let inst = low.program.inst(index);
         let at = inst.a;
-        let wide = is_u64(in low, inst.ty);
-        let boolean = low.ctx.types.name(inst.ty) == low.ctx.world.k.bool_;
-        if inst.fallible != 0 || (!wide && !boolean) {
+        let kind = scalar_kind(in low, inst.ty);
+        if inst.fallible != 0 || kind == ScalarKind::Unsupported {
             return false;
         }
-        let value = if inst.op == Op::Const
-            && inst.n == LITERAL_WORDS
-            && low.program.op(add(at, LITERAL_HIGH)) == 0
-        {
-            let literal = low.program.op(at);
-            let bits = low.program.op(add(at, LITERAL_LOW));
-            if (wide && literal == Lit::Int) || (boolean && literal == Lit::Bool && bits <= 1) {
-                m.record(CONSTANT, bits, 0, 0)
-            } else {
-                return false;
-            }
+        let value = if inst.op == Op::Const && inst.n == LITERAL_WORDS {
+            lower_literal(in low, at, kind, inout m)
         } else if inst.op == Op::Read
             && inst.n == PLAIN_READ_WORDS
             && low.program.path(low.program.op(add(at, READ_PATH))).n == 0
             && low.program.op(add(at, READ_PASS)) != TyPass::Inout
             && low.program.op(add(at, READ_PROJECTIONS)) == 0
         {
-            m.read(argument_value(in low, f, n32(low.program.op(at))), block)
-        } else if inst.op == Op::Binary && inst.n == BINARY_WORDS {
-            let symbol = n32(low.program.op(at));
-            let lhs = m.read(add(f.param_count, low.program.op(add(at, BINARY_LHS))), block);
-            let rhs = m.read(add(f.param_count, low.program.op(add(at, BINARY_RHS))), block);
-            if lhs == NO_VALUE || rhs == NO_VALUE {
+            let arg = argument_value(in low, f, n32(low.program.op(at)));
+            if arg == NO_VALUE
+                || scalar_kind(in low, low.ast.param(add(f.param_start, arg)).ty) != kind
+            {
                 return false;
             }
-            if boolean {
-                let compare = unsigned_comparison(in low, symbol);
-                if compare == NO_VALUE {
-                    return false;
-                }
-                m.record(COMPARE, lhs, rhs, compare)
-            } else {
-                let op = lower_operator(in low, symbol);
-                if op == NO_VALUE {
-                    return false;
-                }
-                m.record(op, lhs, rhs, QWORD_BITS)
-            }
-        } else if inst.op == Op::Call && wide {
+            m.read(arg, block)
+        } else if inst.op == Op::Unary && inst.n == UNARY_WORDS {
+            lower_unary(in low, at, kind, block, inout m)
+        } else if inst.op == Op::Binary && inst.n == BINARY_WORDS {
+            lower_binary(in low, at, kind, block, inout m)
+        } else if inst.op == Op::Call && is_integer(kind) {
             lower_call(in low, inst, block, inout m, inout graph)
         } else {
             return false;
@@ -481,7 +622,11 @@ fn lower_block(
 
 fn lower_terminator(in low: L, row: FnRow, b: BlockRow, block: u64, inout m: Function) -> bool {
     if b.term == Term::Return && b.tn == 1 {
-        let value = m.read(add(m.arguments, low.program.op(b.ta)), block);
+        let result = low.program.op(b.ta);
+        if m.kind(result) != m.result {
+            return false;
+        }
+        let value = m.read(add(m.arguments, result), block);
         if value == NO_VALUE {
             return false;
         }
@@ -504,7 +649,12 @@ fn lower_terminator(in low: L, row: FnRow, b: BlockRow, block: u64, inout m: Fun
             if count != 1 || b.tn != inc(JUMP_ARGUMENT) {
                 return false;
             }
-            let source = add(m.arguments, low.program.op(add(b.ta, JUMP_ARGUMENT)));
+            let argument = low.program.op(add(b.ta, JUMP_ARGUMENT));
+            let kind = m.kind(param);
+            if kind == ScalarKind::Unsupported || kind != m.kind(argument) {
+                return false;
+            }
+            let source = add(m.arguments, argument);
             let home = m.values
                 .try_get(add(m.arguments, param))
                 .unwrap_or(value_new(NO_VALUE))
@@ -522,7 +672,11 @@ fn lower_terminator(in low: L, row: FnRow, b: BlockRow, block: u64, inout m: Fun
         }
         let _ = m.record(JUMP_LABEL, target, 0, 0);
     } else if b.term == Term::Branch && b.tn == BRANCH_WORDS {
-        let condition = m.read(add(m.arguments, low.program.op(b.ta)), block);
+        let id = low.program.op(b.ta);
+        if m.kind(id) != ScalarKind::Bool {
+            return false;
+        }
+        let condition = m.read(add(m.arguments, id), block);
         let yes = low.program.op(add(b.ta, BRANCH_TRUE));
         let no = low.program.op(add(b.ta, BRANCH_FALSE));
         if condition == NO_VALUE
@@ -555,11 +709,13 @@ fn lower_function(
     }
     let mut m = Function {
         arguments: f.param_count,
+        result: scalar_kind(in low, f.result),
         words: ChunkSeq::new[u64](),
         values: ChunkSeq::new[Value](),
+        kinds: ChunkSeq::new[u8](),
         home_bytes: 0
     };
-    if !plan_homes(in low, f, row, inout m) {
+    if !plan_homes(in low, f, row, inout m) || !plan_types(in low, row, inout m) {
         return ChunkSeq::new[u8]();
     }
     m.words.push(f.param_count);
