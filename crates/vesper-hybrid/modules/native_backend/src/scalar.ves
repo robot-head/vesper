@@ -81,16 +81,16 @@ pub const JUMP_LABEL: u64 = 64;
 pub const BRANCH_LABEL: u64 = 65;
 pub const BLOCK_RETURN: u64 = 66;
 pub const BRANCH_BLOCK: u64 = 67;
-const UNSIGNED_ADD_OVERFLOW: u64 = 68;
-const SIGNED_ADD_OVERFLOW: u64 = 69;
-const UNSIGNED_SUB_OVERFLOW: u64 = 70;
-const SIGNED_SUB_OVERFLOW: u64 = 71;
+pub const UNSIGNED_ADD_OVERFLOW: u64 = 68;
+pub const SIGNED_ADD_OVERFLOW: u64 = 69;
+pub const UNSIGNED_SUB_OVERFLOW: u64 = 70;
+pub const SIGNED_SUB_OVERFLOW: u64 = 71;
 const UNSIGNED_MUL_OVERFLOW: u64 = 72;
-const SIGNED_MUL_OVERFLOW: u64 = 73;
-const OVERFLOW_FLAG: u64 = 74;
+pub const SIGNED_MUL_OVERFLOW: u64 = 73;
+pub const OVERFLOW_FLAG: u64 = 74;
 pub const BRANCH_TABLE: u64 = 75;
 pub const BRANCH_TABLE_TARGET: u64 = 76;
-const ADD_CARRY: u64 = 77;
+pub const ADD_CARRY: u64 = 77;
 const SUB_BORROW: u64 = 78;
 const FLOAT_ARGUMENT: u64 = 79;
 const FLOAT_CONSTANT: u64 = 80;
@@ -121,7 +121,7 @@ const ATOMIC_EXCHANGE: u64 = 104;
 const FENCE: u64 = 105;
 const BYTE_SWAP: u64 = 106;
 const XMM_ARGUMENTS: u64 = 8;
-const CHECKED_ARITHMETIC_RECORDS: u64 = 2;
+pub const CHECKED_ARITHMETIC_RECORDS: u64 = 2;
 
 // Relocation kinds shared with src/native_machine.rs.
 const PLT_CALL: u64 = 0;
@@ -594,15 +594,15 @@ fn fixed_result(op: u64) -> u8 {
     }
 }
 
-fn is_checked_arithmetic(op: u64) -> bool {
+pub fn is_checked_arithmetic(op: u64) -> bool {
     op >= UNSIGNED_ADD_OVERFLOW && op <= SIGNED_MUL_OVERFLOW
 }
 
-fn consumes_carry(op: u64) -> bool {
+pub fn consumes_carry(op: u64) -> bool {
     op == ADD_CARRY || op == SUB_BORROW
 }
 
-fn live_overflow_flag(in reads: ChunkSeq[u64], value: u64, op: u64) -> bool {
+pub fn live_overflow_flag(in reads: ChunkSeq[u64], value: u64, op: u64) -> bool {
     is_checked_arithmetic(op) && last_read(in reads, wrapping_add(value, 1)) != NEVER_READ
 }
 

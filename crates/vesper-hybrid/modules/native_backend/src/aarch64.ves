@@ -17,7 +17,9 @@ use self::scalar::{
     TableFixup, ARGUMENT_COUNT, RETURN_VALUE, HEADER_WORDS, RECORD_WORDS, NEVER_READ, NO_VALUE,
     DISP32_MASK, RETURN_PAIR, CALL, CALL_ARGUMENT, CALL_VOID, CALL_PAIR, CALL_HIGH,
     LIBCALL_TARGET_BASE, MEMCPY_LIBCALL, SIGNED_DIV, UNSIGNED_DIV, SIGNED_REM, UNSIGNED_REM,
-    is_integer_division, TRAP, TRAP_VALUE, is_symbol
+    is_integer_division, TRAP, TRAP_VALUE, is_symbol, UNSIGNED_ADD_OVERFLOW, SIGNED_ADD_OVERFLOW,
+    UNSIGNED_SUB_OVERFLOW, SIGNED_SUB_OVERFLOW, SIGNED_MUL_OVERFLOW, OVERFLOW_FLAG, ADD_CARRY,
+    CHECKED_ARITHMETIC_RECORDS, is_checked_arithmetic, live_overflow_flag, consumes_carry
 };
 use self::x86_64::{BYTE_BITS, WORD_BITS, DWORD_BITS, QWORD_BITS};
 
@@ -82,12 +84,17 @@ const INSTRUCTION_BYTES: u64 = 4;
 const INSTRUCTION_SHIFT: u32 = 2;
 const ADD_REG: u32 = 0x8b000000;
 const SUB_REG: u32 = 0xcb000000;
+const ADDS_REG: u32 = 0xab000000;
+const ADC_REG: u32 = 0x9a000000;
+const SBC_REG: u32 = 0xda000000;
 const MUL_REG: u32 = 0x9b007c00;
 const MSUB_REG: u32 = 0x9b008000;
 const SDIV_REG: u32 = 0x9ac00c00;
 const UDIV_REG: u32 = 0x9ac00800;
 const SMULH_REG: u32 = 0x9b407c00;
 const UMULH_REG: u32 = 0x9bc07c00;
+const SMULL_REG: u32 = 0x9b207c00;
+const UMULL_REG: u32 = 0x9ba07c00;
 const AND_REG: u32 = 0x8a000000;
 const ORR_REG: u32 = 0xaa000000;
 const EOR_REG: u32 = 0xca000000;
@@ -104,6 +111,9 @@ const CMP_IMM: u32 = 0xf100001f;
 const CMN_IMM: u32 = 0xb100001f;
 const CCMP_IMM: u32 = 0xfa400800;
 const SUBS_REG: u32 = 0xeb000000;
+const SUBS_UXTW: u32 = 0xeb204000;
+const SUBS_SXTW: u32 = 0xeb20c000;
+const SUBS_ASR_SIGN: u32 = 0xeb80fc00;
 const UBFM: u32 = 0xd3400000;
 const SBFM: u32 = 0x93400000;
 const REG64: u32 = 0x80000000;
@@ -149,6 +159,7 @@ const EQ: u32 = 0;
 const NE: u32 = 1;
 const HS: u32 = 2;
 const LO: u32 = 3;
+const VS: u32 = 6;
 const VC: u32 = 7;
 const HI: u32 = 8;
 const LS: u32 = 9;
@@ -602,6 +613,23 @@ fn operands(in r: Record, returns: u64) -> Option[u64] {
     if r.op == RETURN_PAIR || r.op == TRAP {
         return Option::Some(0);
     }
+    if r.op == OVERFLOW_FLAG {
+        return if r.left == 0 && r.right == 0 && r.extra == 0 {
+            Option::Some(0)
+        } else {
+            Option::None
+        };
+    }
+    if consumes_carry(r.op) {
+        return Option::Some(3);
+    }
+    if is_checked_arithmetic(r.op) {
+        return if r.extra == DWORD_BITS || r.extra == QWORD_BITS {
+            Option::Some(2)
+        } else {
+            Option::None
+        };
+    }
     if comparison_width(r.op) != 0 {
         if r.extra > UNSIGNED_LESS_EQUAL {
             return Option::None;
@@ -732,6 +760,51 @@ fn division_checks(inout out: ChunkSeq[u8], in r: Record, lhs: u32, rhs: u32) {
     push32(inout out, TRAP_INSTRUCTION);
 }
 
+fn overflow_condition(op: u64) -> u32 {
+    match op {
+        UNSIGNED_ADD_OVERFLOW => HS,
+        UNSIGNED_SUB_OVERFLOW => LO,
+        SIGNED_ADD_OVERFLOW | SIGNED_SUB_OVERFLOW => VS,
+        _ => NE,
+    }
+}
+
+fn emit_checked(inout out: ChunkSeq[u8], in r: Record, dest: u32, lhs: u32, rhs: u32, flags: bool) {
+    let reg_mask = scalar_opcode_mask(r.extra);
+    let opcode = match r.op {
+        UNSIGNED_ADD_OVERFLOW | SIGNED_ADD_OVERFLOW => if flags { ADDS_REG } else { ADD_REG },
+        UNSIGNED_SUB_OVERFLOW | SIGNED_SUB_OVERFLOW => if flags { SUBS_REG } else { SUB_REG },
+        _ => MUL_REG,
+    };
+    if opcode != MUL_REG || !flags {
+        rrr(inout out, opcode & reg_mask, dest, lhs, rhs);
+        return;
+    }
+    let signed = r.op == SIGNED_MUL_OVERFLOW;
+    if r.extra == DWORD_BITS {
+        let long = if signed { SMULL_REG } else { UMULL_REG };
+        let narrow = if signed { SUBS_SXTW } else { SUBS_UXTW };
+        rrr(inout out, long, SCRATCH, lhs, rhs);
+        // The full product must equal its narrowed and re-extended value.
+        rrr(inout out, narrow, ZERO, SCRATCH, SCRATCH);
+        if dest != ZERO {
+            rrr(inout out, ORR_REG & ~REG64, dest, ZERO, SCRATCH);
+        }
+    } else if signed {
+        rrr(inout out, SMULH_REG, SCRATCH, lhs, rhs);
+        let low = if dest == ZERO { SECOND_SCRATCH } else { dest };
+        rrr(inout out, MUL_REG, low, lhs, rhs);
+        // The high half must be the sign extension of the low half.
+        rrr(inout out, SUBS_ASR_SIGN, ZERO, SCRATCH, low);
+    } else {
+        rrr(inout out, UMULH_REG, SCRATCH, lhs, rhs);
+        rrr(inout out, SUBS_REG, ZERO, SCRATCH, ZERO);
+        if dest != ZERO {
+            rrr(inout out, MUL_REG, dest, lhs, rhs);
+        }
+    }
+}
+
 fn emit_instruction(
     inout out: ChunkSeq[u8],
     in r: Record,
@@ -742,6 +815,9 @@ fn emit_instruction(
 ) {
     if r.op == CONSTANT {
         immediate(inout out, dest, r.left);
+    } else if consumes_carry(r.op) {
+        let op = if r.op == ADD_CARRY { ADC_REG } else { SBC_REG };
+        rrr(inout out, op, dest, lhs, rhs);
     } else if is_integer_division(r.op) {
         let divide = if r.op == SIGNED_DIV || r.op == SIGNED_REM {
             SDIV_REG
@@ -1342,6 +1418,7 @@ fn encode_pass(
     let mut call_end = NEVER_READ;
     let mut pending_arguments: u64 = 0;
     let mut needs_call_pair = false;
+    let mut needs_checked = false;
     let mut call_sites = ChunkSeq::new[u64]();
     let mut max_live_across_calls: u64 = 0;
     for reverse in 0..count {
@@ -1349,6 +1426,7 @@ fn encode_pass(
         let value = wrapping_add(args, index);
         let r = read_record(in words, index);
         if needs_call_pair != (r.op == CALL_PAIR)
+            || needs_checked != is_checked_arithmetic(r.op)
             || (r.op == RETURN_PAIR && (labeled || index != last_index))
             || (r.op == TRAP && (!terminal_trap || index != last_index))
             || (is_symbol(r.op) && !allow_relocations)
@@ -1356,6 +1434,24 @@ fn encode_pass(
             return out;
         }
         needs_call_pair = r.op == CALL_HIGH;
+        needs_checked = r.op == OVERFLOW_FLAG;
+        if consumes_carry(r.op) {
+            if index < CHECKED_ARITHMETIC_RECORDS
+                || r.extra != wrapping_sub(value, 1)
+                || read_record(in words, wrapping_sub(index, 1)).op != OVERFLOW_FLAG
+            {
+                return out;
+            }
+            let low = read_record(in words, wrapping_sub(index, CHECKED_ARITHMETIC_RECORDS));
+            let expected = if r.op == ADD_CARRY {
+                UNSIGNED_ADD_OVERFLOW
+            } else {
+                UNSIGNED_SUB_OVERFLOW
+            };
+            if low.op != expected || low.extra != QWORD_BITS {
+                return out;
+            }
+        }
         if r.op == CALL_ARGUMENT {
             if pending_arguments == 0 {
                 return out;
@@ -1477,7 +1573,10 @@ fn encode_pass(
             if last != NEVER_READ {
                 return out;
             }
-        } else if last == NEVER_READ && !is_integer_division(r.op) {
+        } else if last == NEVER_READ
+            && !is_integer_division(r.op)
+            && !live_overflow_flag(in ends, value, r.op)
+        {
             continue;
         }
         if n >= 1 && last_read(in ends, r.left) == NEVER_READ {
@@ -1498,7 +1597,7 @@ fn encode_pass(
             live_values = wrapping_add(live_values, 1);
         }
     }
-    if depth != 0 || pending_arguments != 0 || needs_call_pair {
+    if depth != 0 || pending_arguments != 0 || needs_call_pair || needs_checked {
         return out;
     }
 
@@ -1624,12 +1723,14 @@ fn encode_pass(
         let live = last_read(in ends, value) != NEVER_READ;
         let calls = direct_call(r.op);
         let division = is_integer_division(r.op);
+        let checked = is_checked_arithmetic(r.op);
+        let overflow_live = checked && last_read(in ends, wrapping_add(value, 1)) != NEVER_READ;
         if r.op == STACK_SLOT
             || r.op == BRANCH_TABLE_TARGET
             || r.op == CALL_ARGUMENT
             || r.op == RETURN_PAIR
             || r.op == TRAP
-            || (!calls && !division && !no_result(r.op) && !live)
+            || (!calls && !division && !no_result(r.op) && !live && !overflow_live)
         {
             locations.push(UNASSIGNED);
             continue;
@@ -1718,7 +1819,16 @@ fn encode_pass(
         }
         let lhs = materialize(inout out, left, SPILL_LEFT, frame_bytes);
         let rhs = materialize(inout out, right, SPILL_RIGHT, frame_bytes);
-        let third = materialize(inout out, extra, SPILL_THIRD, frame_bytes);
+        let third = if consumes_carry(r.op) {
+            UNASSIGNED
+        } else {
+            materialize(inout out, extra, SPILL_THIRD, frame_bytes)
+        };
+        if checked && !live {
+            emit_checked(inout out, in r, ZERO, lhs, rhs, overflow_live);
+            locations.push(UNASSIGNED);
+            continue;
+        }
         if division {
             division_checks(inout out, in r, lhs, rhs);
             if !live {
@@ -1822,17 +1932,36 @@ fn encode_pass(
             locations.push(UNASSIGNED);
             continue;
         }
-        if comparison_width(r.op) != 0
+        let overflow_cc = if r.op == OVERFLOW_FLAG {
+            Option::Some(overflow_condition(read_record(in words, wrapping_sub(index, 1)).op))
+        } else {
+            Option::None
+        };
+        if (comparison_width(r.op) != 0 || overflow_cc.is_some())
             && wrapping_add(index, 1) < count
             && last_read(in ends, value) == wrapping_add(value, 1)
         {
             let next = read_record(in words, wrapping_add(index, 1));
+            if overflow_cc.is_some()
+                && consumes_carry(next.op)
+                && next.left != value
+                && next.right != value
+            {
+                // The high operation reads carry directly from NZCV.
+                locations.push(UNASSIGNED);
+                continue;
+            }
             if next.left == value
                 && (conditional_branch(next.op)
                     || (next.op == SELECT && next.right != value && next.extra != value))
             {
-                compare(inout out, in r, lhs, rhs);
-                flags_for_next = Option::Some(condition(r.extra));
+                flags_for_next = match overflow_cc {
+                    Option::Some(cc) => Option::Some(cc),
+                    Option::None => {
+                        compare(inout out, in r, lhs, rhs);
+                        Option::Some(condition(r.extra))
+                    },
+                };
                 locations.push(UNASSIGNED);
                 continue;
             }
@@ -1894,6 +2023,11 @@ fn encode_pass(
             if dest != call_result {
                 rrr(inout out, ORR_REG, dest, ZERO, call_result);
             }
+        } else if checked {
+            emit_checked(inout out, in r, dest, lhs, rhs, overflow_live);
+        } else if r.op == OVERFLOW_FLAG {
+            let cc = overflow_cc.unwrap_or(EQ);
+            push32(inout out, CSET | sh(cc ^ 1, CONDITION_SHIFT) | dest);
         } else if is_symbol(r.op) {
             // The hosted object module supports GOT pairs on ELF and Mach-O,
             // including for data defined in this object.

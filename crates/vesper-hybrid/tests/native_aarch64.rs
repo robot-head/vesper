@@ -56,11 +56,114 @@ const BLOCK_LABEL: u64 = 62;
 const JUMP_LABEL: u64 = 64;
 const BLOCK_RETURN: u64 = 66;
 const BRANCH_BLOCK: u64 = 67;
+const UNSIGNED_ADD_OVERFLOW: u64 = 68;
+const SIGNED_ADD_OVERFLOW: u64 = 69;
+const UNSIGNED_SUB_OVERFLOW: u64 = 70;
+const SIGNED_MUL_OVERFLOW: u64 = 73;
+const OVERFLOW_FLAG: u64 = 74;
 const BRANCH_TABLE: u64 = 75;
 const BRANCH_TABLE_TARGET: u64 = 76;
+const ADD_CARRY: u64 = 77;
+const SUB_BORROW: u64 = 78;
 const EQUAL: u64 = 0;
 const SIGNED_LESS: u64 = 2;
 const UNSIGNED_LESS: u64 = 6;
+
+#[test]
+fn aarch64_checked_integer_packets_materialize_results_and_flags() {
+    const ADDS_X0_X0_X1: u32 = 0xab01_0000;
+    const ADDS_XZR_X0_X1: u32 = 0xab01_001f;
+    const SUB_X0_X0_X1: u32 = 0xcb01_0000;
+    const CSET_X1_HS: u32 = 0x9a9f_37e1;
+    const CSET_X0_HS: u32 = 0x9a9f_37e0;
+    const SMULL_X16_W0_W1: u32 = 0x9b21_7c10;
+    const CMP_X16_W16_SXTW: u32 = 0xeb30_c21f;
+    const MOV_W0_W16: u32 = 0x2a10_03e0;
+    const CSET_X1_NE: u32 = 0x9a9f_07e1;
+    #[rustfmt::skip]
+    let pair = |op, width| [
+        2, 2,
+        op, 0, 1, width,
+        OVERFLOW_FLAG, 0, 0, 0,
+        RETURN_PAIR, 3, 0, 0,
+    ];
+    assert_eq!(
+        binding::aarch64_integer_leaf(&pair(UNSIGNED_ADD_OVERFLOW, CELL_BITS)),
+        [ADDS_X0_X0_X1, CSET_X1_HS, RET]
+            .map(u32::to_le_bytes)
+            .concat()
+    );
+    assert_eq!(
+        binding::aarch64_integer_leaf(&pair(SIGNED_MUL_OVERFLOW, DWORD_BITS)),
+        [
+            SMULL_X16_W0_W1,
+            CMP_X16_W16_SXTW,
+            MOV_W0_W16,
+            CSET_X1_NE,
+            RET,
+        ]
+        .map(u32::to_le_bytes)
+        .concat()
+    );
+
+    #[rustfmt::skip]
+    let single = |op, result| [
+        2, result,
+        op, 0, 1, CELL_BITS,
+        OVERFLOW_FLAG, 0, 0, 0,
+    ];
+    assert_eq!(
+        binding::aarch64_integer_leaf(&single(UNSIGNED_ADD_OVERFLOW, 3)),
+        [ADDS_XZR_X0_X1, CSET_X0_HS, RET]
+            .map(u32::to_le_bytes)
+            .concat()
+    );
+    assert_eq!(
+        binding::aarch64_integer_leaf(&single(UNSIGNED_SUB_OVERFLOW, 2)),
+        [SUB_X0_X0_X1, RET].map(u32::to_le_bytes).concat()
+    );
+    assert!(binding::aarch64_integer_leaf(&[0, 0, OVERFLOW_FLAG, 0, 0, 0]).is_empty());
+    assert!(
+        binding::aarch64_integer_leaf(&[2, 2, UNSIGNED_ADD_OVERFLOW, 0, 1, CELL_BITS]).is_empty()
+    );
+}
+
+#[test]
+fn aarch64_multiword_arithmetic_reuses_processor_carry() {
+    const ADDS_X0_X0_X1: u32 = 0xab01_0000;
+    const SUBS_X0_X0_X1: u32 = 0xeb01_0000;
+    const ADC_X1_X2_X3: u32 = 0x9a03_0041;
+    const SBC_X1_X2_X3: u32 = 0xda03_0041;
+    #[rustfmt::skip]
+    let tape = |low, high, flags| [
+        4, 4,
+        low, 0, 1, CELL_BITS,
+        OVERFLOW_FLAG, 0, 0, 0,
+        high, 2, 3, flags,
+        RETURN_PAIR, 6, 0, 0,
+    ];
+    for (low, high, first, second) in [
+        (
+            UNSIGNED_ADD_OVERFLOW,
+            ADD_CARRY,
+            ADDS_X0_X0_X1,
+            ADC_X1_X2_X3,
+        ),
+        (
+            UNSIGNED_SUB_OVERFLOW,
+            SUB_BORROW,
+            SUBS_X0_X0_X1,
+            SBC_X1_X2_X3,
+        ),
+    ] {
+        assert_eq!(
+            binding::aarch64_integer_leaf(&tape(low, high, 5)),
+            [first, second, RET].map(u32::to_le_bytes).concat()
+        );
+        assert!(binding::aarch64_integer_leaf(&tape(low, high, 4)).is_empty());
+    }
+    assert!(binding::aarch64_integer_leaf(&tape(SIGNED_ADD_OVERFLOW, ADD_CARRY, 5)).is_empty());
+}
 
 #[test]
 fn aarch64_leaf_encodings_and_operand_validation() {
