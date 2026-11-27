@@ -77,6 +77,7 @@ fn entry(name: &'static str) -> &'static Entry {
             "lsp_macro_preview",
             "lsp_recovery_gate",
             "lsp_signature",
+            "lsp_lint_preflight",
         ]
         .into_iter()
         .map(|n| (n, features().entry(n, optimize())))
@@ -5252,5 +5253,133 @@ fn signature_speed() {
         totals[1].as_secs_f64() / totals[0].as_secs_f64(),
         totals[2] / per,
         totals[2].as_secs_f64() / totals[0].as_secs_f64()
+    );
+}
+
+// ------------------------------------------------------- lint preflight
+
+/// Sources over each lint preflight budget, at it and one past it, plus
+/// lexical errors and lexer limits.
+fn preflight_texts() -> Vec<String> {
+    let mut texts: Vec<String> = RECOVERY_PROGRAMS.map(str::to_owned).to_vec();
+    texts.extend(SIGNATURE_PROGRAMS.map(str::to_owned));
+    for t in formatting_corpus().into_iter().step_by(5) {
+        let mut at = t.len() / 2;
+        while !t.is_char_boundary(at) {
+            at -= 1;
+        }
+        texts.push(t[..at].to_owned());
+        texts.push(t);
+    }
+    for n in [255, 256, 257] {
+        texts.push(format!("fn f() -> u64 {{ {}0 }}", "1 + ".repeat(n / 2)));
+        texts.push(format!("fn f() {{ g({}); }}", "x, ".repeat(n / 2)));
+        texts.push(format!("fn f() {{ {} }}", "a.".repeat(n / 2)));
+    }
+    for n in [31, 32, 33] {
+        texts.push(format!("fn f() {}{}", "{".repeat(n), "}".repeat(n)));
+        texts.push(format!("fn f() {{ {}1{} }}", "(".repeat(n), ")".repeat(n)));
+        texts.push(format!("fn f() {{ {}1{} }}", "[".repeat(n), "]".repeat(n)));
+    }
+    for n in [63, 64, 65] {
+        texts.push(format!(
+            "fn f() {{ {} }}",
+            "if a { 1 } else ".repeat(n) + "{ 0 }"
+        ));
+    }
+    for n in [127, 128, 129] {
+        texts.push(format!("fn {}() {{}}", "a".repeat(n)));
+        texts.push(format!("struct {} {{}}", "B".repeat(n)));
+    }
+    for n in [8190, 8191, 8192, 8193] {
+        texts.push(format!("{};", ";".repeat(n - 2)));
+    }
+    texts.push(";".repeat(70_000));
+    texts.push("` ".repeat(200));
+    texts.push("fn f() { /* open".to_owned());
+    texts.push("fn f() { \"open".to_owned());
+    texts.push("fn \u{7f} f() { # }".to_owned());
+    texts.push("x".repeat(262_144));
+    texts.push("x".repeat(262_145));
+    texts.push(format!("fn f() {{ {} }}", "-".repeat(300)));
+    texts.push(format!("fn f() {{ {}; }}", "a ".repeat(300)));
+    texts
+}
+
+/// `lint::preflight_answer` against `lsp_lint_preflight`, answer for
+/// answer.
+#[test]
+fn lint_preflight_matches_rust() {
+    use vesper::tooling::lint::{preflight_answer, preflight_words};
+    let entry = entry("lsp_lint_preflight");
+    let mut differ = vec![];
+    let mut kinds = BTreeMap::<String, usize>::new();
+    let texts = preflight_texts();
+    for text in &texts {
+        let rust = preflight_answer(text, 1);
+        let kind = if rust.starts_with("E lexical errors") {
+            "E lexical errors".to_owned()
+        } else {
+            rust.split(" (").next().unwrap_or("").to_owned()
+        };
+        let kind = if kind.starts_with("O ") {
+            "O".to_owned()
+        } else {
+            kind
+        };
+        *kinds.entry(kind).or_default() += 1;
+        let vesper = entry.text(&preflight_words(text, 1));
+        if let Some(d) = first_difference(&rust, &vesper) {
+            differ.push(format!("{:?}: {d}", &text[..text.len().min(80)]));
+        }
+    }
+    eprintln!(
+        "lint preflight: {} sources ({kinds:?}), {} differ",
+        texts.len(),
+        differ.len()
+    );
+    assert!(differ.is_empty(), "{:#?}", &differ[..differ.len().min(8)]);
+}
+
+/// Rust against Vesper, `rounds` preflights per call, best of five ABBA
+/// pairs per source. The words are written outside the timing.
+#[test]
+#[ignore]
+fn lint_preflight_speed() {
+    use vesper::tooling::lint::{preflight_answer, preflight_words};
+    let entry = entry("lsp_lint_preflight");
+    let rounds = 8;
+    let mut totals = [Duration::ZERO; 2];
+    let texts = preflight_texts();
+    for text in &texts {
+        let words = preflight_words(text, rounds);
+        let time = |f: &dyn Fn()| {
+            let t = std::time::Instant::now();
+            f();
+            t.elapsed()
+        };
+        let rust = || {
+            std::hint::black_box(preflight_answer(text, rounds));
+        };
+        let port = || {
+            std::hint::black_box(entry.words(&words));
+        };
+        let mut best = [Duration::MAX; 2];
+        for _ in 0..5 {
+            best[0] = best[0].min(time(&rust));
+            best[1] = best[1].min(time(&port));
+            best[1] = best[1].min(time(&port));
+            best[0] = best[0].min(time(&rust));
+        }
+        totals[0] += best[0];
+        totals[1] += best[1];
+    }
+    let per = texts.len() as u32 * rounds as u32;
+    eprintln!(
+        "lint preflight ({} sources x {rounds}): rust {:?}; vesper {:?} (ratio {:.2})",
+        texts.len(),
+        totals[0] / per,
+        totals[1] / per,
+        totals[1].as_secs_f64() / totals[0].as_secs_f64()
     );
 }
