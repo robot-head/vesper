@@ -2489,6 +2489,30 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
              let x: f32 = if flag { 1.5 } else { 1.75 };\n\
              (even, odd, subnormal, underflow, finite, overflow, literal_shift(x))\n\
          }\n\
+         copy struct CallFields { tag: i8, sample: f32, active: bool }\n\
+         fn sample_cells(inout state: i64, step: i64, sample: f32, active: bool) -> CallFields {\n\
+             let prior = state;\n\
+             state = wrapping_add(state, step);\n\
+             CallFields { active: active, sample: sample, tag: wrapping_i8(prior) }\n\
+         }\n\
+         fn pair_cells(inout state: i64, step: i64) -> (i16, u64) {\n\
+             let prior = state;\n\
+             state = wrapping_add(state, step);\n\
+             (wrapping_i16(prior), wrapping_u64(state))\n\
+         }\n\
+         pub fn aggregate_calls(seed: i64, choose: bool, sample: f32) -> u64 {\n\
+             let mut state = seed;\n\
+             let first = sample_cells(state, 2, sample, choose);\n\
+             let (short, changed) = pair_cells(state, 5);\n\
+             let last = sample_cells(state, 19, sample, !choose);\n\
+             if first.active {\n\
+                 let bits: u32 = to_bits_f32(first.sample);\n\
+                 wrapping_add(widen_u64(bits), wrapping_u64(widen_i64(last.tag)))\n\
+             } else {\n\
+                 let tag_bits = wrapping_u64(widen_i64(first.tag));\n\
+                 wrapping_add(wrapping_add(tag_bits, wrapping_u64(widen_i64(short))), changed)\n\
+             }\n\
+         }\n\
          fn unsupported(x: u64) -> u64 { match (x, x) { (0, _) => 7, _ => 9 } }\n\
          pub fn decline(x: u64) -> u64 { unsupported(x) }\n",
     )
@@ -2708,6 +2732,14 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
         "{:?}",
         read_stage2_sidecar_notes(&object)
     );
+    let literals_object = dir.join("native-literals.o");
+    std::fs::rename(&object, &literals_object).unwrap();
+    assert_eq!(
+        compile("aggregate_calls"),
+        0,
+        "{:?}",
+        read_stage2_sidecar_notes(&object)
+    );
     let bytes = std::fs::read(&object).unwrap();
     assert_ne!(compile("decline"), 0);
     assert!(read_stage2_sidecar_notes(&object).contains("unsupported x86-64 ELF entry"));
@@ -2745,6 +2777,7 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
          extern uint64_t result_value(uint64_t *, int64_t, uint64_t, uint64_t, uint64_t,\n\
                                       uint64_t, uint64_t, bool, float, double);\n\
          extern uint64_t float_literals(uint64_t *, bool);\n\
+         extern uint64_t aggregate_calls(int64_t, bool, float);\n\
          int main(void) {\n\
              if (mix(10, 4) != 65 || mix(UINT64_MAX, UINT64_MAX) != UINT64_MAX - 16) return 1;\n\
              if (choose(0, 4) != 8 || choose(2, 4) != 8 || choose(4, 1) != 10\n\
@@ -2813,7 +2846,9 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
                  || literals[1] != UINT64_C(0x3f800002) || literals[2] != 1\n\
                  || literals[3] != UINT64_C(0x80000000) || literals[4] != UINT64_C(0x7f7fffff)\n\
                  || literals[5] != UINT64_C(0x7f800000) || literals[6] != UINT64_C(0x3fe00000)) return 26;\n\
-             return float_literals(literals, false) != 0 || literals[6] != UINT64_C(0x40000000);\n\
+             if (float_literals(literals, false) != 0 || literals[6] != UINT64_C(0x40000000)) return 27;\n\
+             return aggregate_calls(127, true, 1.5f) != UINT64_C(0x3fbfff86)\n\
+                 || aggregate_calls(127, false, 1.5f) != 390 || aggregate_calls(-2, false, 0.0f) != 3;\n\
          }\n",
     )
     .unwrap();
@@ -2843,6 +2878,7 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
             &nested_object,
             &equality_object,
             &result_object,
+            &literals_object,
             &object,
         ])
         .arg("-o")
