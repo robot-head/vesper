@@ -202,14 +202,34 @@ fn hash(bytes: &[u8]) -> String {
     String::from_utf8(binding::tuf_sha256_hex(bytes)).unwrap_or_default()
 }
 fn state_checksum(state: &State) -> Result<String, TufError> {
-    let mut bytes = Vec::new();
-    state
-        .serialize(&mut serde_json::Serializer::with_formatter(
-            &mut bytes,
-            olpc_cjson::CanonicalFormatter::new(),
-        ))
-        .map_err(|e| TufError(e.to_string()))?;
-    Ok(hash(&bytes))
+    let mut roots_flat = Vec::new();
+    let mut root_lens = Vec::with_capacity(state.roots.len());
+    for root in &state.roots {
+        roots_flat.extend_from_slice(root);
+        root_lens.push(root.len() as u64);
+    }
+    let mut role_names_flat = Vec::new();
+    let mut role_name_lens = Vec::with_capacity(state.role_versions.len());
+    let mut role_versions = Vec::with_capacity(state.role_versions.len());
+    for (name, &ver) in &state.role_versions {
+        role_names_flat.extend_from_slice(name.as_bytes());
+        role_name_lens.push(name.len() as u64);
+        role_versions.push(ver);
+    }
+    let digest = binding::tuf_state_checksum(
+        u64::from(state.schema_version),
+        state.timestamp_version,
+        state.snapshot_version,
+        state.repository_id.as_bytes(),
+        state.bootstrap_sha256.as_bytes(),
+        state.verified_at.as_bytes(),
+        &roots_flat,
+        &root_lens,
+        &role_names_flat,
+        &role_name_lens,
+        &role_versions,
+    );
+    String::from_utf8(digest).map_err(|e| TufError(e.to_string()))
 }
 fn parse_root(bytes: &[u8]) -> Result<Signed<Root>, TufError> {
     serde_json::from_slice(bytes).map_err(|e| TufError(format!("invalid root: {e}")))
