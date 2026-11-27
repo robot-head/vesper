@@ -58,6 +58,8 @@ use @vesper/driver-commands::{
 };
 // Target triples (#1896).
 use @vesper/driver::triple::{is_windows as triple_is_windows};
+// Diagnostic JSON rendering for `--json` (#2458, #2473, #1893).
+use @vesper/driver::{diagnostics_json, package_diagnostics_json};
 // Place IR JSON rendering for `vesper emit --format ir` (#2245, #1894).
 use @vesper/place-ir::{place_ir_json_bytes};
 // `--package` validation for `vesper emit --emit interface` (#2339, #1893).
@@ -513,6 +515,9 @@ fn drive(
         if is_failure(q) {
             return pass_failed(in s, q);
         }
+        if o.json {
+            emit_diagnostics_json(in s);
+        }
         return count_error(r, in "syntax error(s)");
     }
     let lib = lib_mode(in o);
@@ -528,6 +533,9 @@ fn drive(
         return pass_failed(in s, r);
     }
     if r > 0 {
+        if o.json {
+            emit_diagnostics_json(in s);
+        }
         return count_error(r, in "semantic error(s)");
     }
     if lib {
@@ -1544,6 +1552,30 @@ fn part(inout s: Session, which: u32) -> i64 eff [Ffi[HybridDriver]] {
 //    Beacon rules (§22) and the `use`-outside-a-package diagnostics.
 // 4. The diagnostics are printed unless the library export path reports
 //    them.
+const DIAG_JSON_PACKAGE: u8 = 1;
+const CH_LF: u8 = 10;
+
+// Emit `--json` diagnostics encoded in `s`'s text buffer by `ReportSyntax` or
+// `CheckReport` (tag 0 = single file, tag 1 = package).
+fn emit_diagnostics_json(in s: Session) eff [Ffi[HybridDriver]] {
+    let raw = text(in s);
+    let slice = raw.as_slice();
+    if slice.len() == 0 {
+        return ();
+    }
+    let tag = match slice.try_get(0) {
+        Option::Some(b) => b,
+        Option::None => 0,
+    };
+    let mut json = if tag == DIAG_JSON_PACKAGE {
+        package_diagnostics_json(in slice[1..slice.len()])
+    } else {
+        diagnostics_json(in slice[1..slice.len()])
+    };
+    json.push(CH_LF);
+    print(stdout_stream(), in json.as_slice());
+}
+
 fn check(inout s: Session) -> i64 eff [Ffi[HybridDriver]] {
     loop {
         let r = part(inout s, part_untyped());
