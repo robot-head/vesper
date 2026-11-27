@@ -26,6 +26,11 @@ use @vesper/front::kinds::{
 
 const NONE: u64 = 18446744073709551615;
 
+// Result tags shared by both encodings and their consumers.
+pub const MATCH_NONE: u64 = 0;
+pub const MATCH_FOUND: u64 = 1;
+pub const MATCH_REFUSED: u64 = 2;
+
 // Words per event record and per backtracking state.
 const REC: u64 = 8;
 const TD: u64 = 8;
@@ -944,7 +949,7 @@ fn collect(
         }
         order.try_set(slot, cap_index);
     }
-    out.push(1);
+    out.push(MATCH_FOUND);
     out.push(matcher.work);
     out.push(num_caps);
     for rank in 0..num_caps {
@@ -1069,7 +1074,7 @@ fn collect(
 
 fn refused(in matcher: Mx) -> ChunkSeq[u64] {
     let mut out = ChunkSeq::new[u64]();
-    out.push(2);
+    out.push(MATCH_REFUSED);
     out.push(matcher.work);
     out.push(matcher.msg.len());
     for j in 0..matcher.msg.len() {
@@ -1410,8 +1415,163 @@ pub fn match_rule_encoded(
             }
         }
     }
+    no_match(in matcher)
+}
+
+// Compile only unambiguous, delimiter-separated expr captures for the
+// bootstrap path. The host matcher still handles repetitions, other sorts
+// and ambiguous rule boundaries.
+pub fn match_bootstrap_scalar_encoded(
+    in pattern: ChunkSeq[u8],
+    in invocation: ChunkSeq[u8],
+    work: u64
+) -> ChunkSeq[u64] {
+    let mut matcher = mx_new(work);
+    if !spend(inout matcher, add(pattern.len(), invocation.len())) {
+        return refused(in matcher);
+    }
+    let mut p = toks_empty();
+    let mut target = toks_empty();
+    if !toks_new(in pattern, inout matcher, inout p)
+        || !toks_new(in invocation, inout matcher, inout target)
+    {
+        return refused(in matcher);
+    }
+    let mut i: u64 = 0;
+    let mut j: u64 = 0;
+    let mut names = ChunkSeq::new[u64]();
     let mut out = ChunkSeq::new[u64]();
+    out.push(MATCH_FOUND);
+    out.push(work);
     out.push(0);
-    out.push(matcher.work);
+    let mut previous_literal = false;
+    loop {
+        if i == len(in p) {
+            break;
+        }
+        if !spend(inout matcher, 1) {
+            return refused(in matcher);
+        }
+        if kind(in p, i) != k_dollar() {
+            if sugar_operator_end(in p, i) != 0 {
+                fail(inout matcher, in "unsupported bootstrap operator pattern".as_bytes());
+                return refused(in matcher);
+            }
+            if j >= len(in target) || !same_text(in pattern, in p, i, in invocation, in target, j) {
+                return no_match(in matcher);
+            }
+            if i > 0
+                && previous_literal
+                && head_kind(kind(in p, sub(i, 1)))
+                && (kind(in p, i) == k_l_brace() || kind(in p, i) == k_string())
+                && joined(in p, i) != joined(in target, j)
+            {
+                return no_match(in matcher);
+            }
+            previous_literal = true;
+            i = inc(i);
+            j = inc(j);
+            continue;
+        }
+        let name = inc(i);
+        let colon = inc(name);
+        let sort = inc(colon);
+        let separator = inc(sort);
+        let delimiter = kind(in p, separator);
+        if !(kind(in p, name) == k_lower() || kind(in p, name) == k_upper())
+            || kind(in p, colon) != k_colon()
+            || !text_is(in pattern, in p, sort, in "expr".as_bytes())
+            || !(delimiter == k_semi() || delimiter == k_comma() || closer(delimiter))
+            || (i > 0 && pass_code(in pattern, in p, sub(i, 1)) > 1)
+        {
+            fail(inout matcher, in "unsupported bootstrap capture pattern".as_bytes());
+            return refused(in matcher);
+        }
+        for n in 0..names.len() {
+            if !spend(inout matcher, 1) {
+                return refused(in matcher);
+            }
+            if same_text(in pattern, in p, name, in pattern, in p, w64(in names, n)) {
+                fail(inout matcher, in "duplicate bootstrap capture name".as_bytes());
+                return refused(in matcher);
+            }
+        }
+        names.push(name);
+        let begin = j;
+        loop {
+            if j >= len(in target) {
+                return no_match(in matcher);
+            }
+            if !spend(inout matcher, 1) {
+                return refused(in matcher);
+            }
+            let k = kind(in target, j);
+            if k == delimiter {
+                break;
+            }
+            if k == k_semi() || k == k_comma() || closer(k) {
+                return no_match(in matcher);
+            }
+            j = tree_end(in target, j);
+        }
+        if j == begin {
+            return no_match(in matcher);
+        }
+        let start = tok_s(in target, begin);
+        let end = tok_e(in target, sub(j, 1));
+        let open = "fn __f(){let __x = (".as_bytes();
+        let suffix = ");}".as_bytes();
+        if !spend(inout matcher, add(add(open.len(), sub(end, start)), suffix.len())) {
+            return refused(in matcher);
+        }
+        let mut wrapped = ChunkSeq::new[u8]();
+        wrapped.extend(in open);
+        for n in start..end {
+            wrapped.push(b8(in invocation, n));
+        }
+        wrapped.extend(in suffix);
+        let mut message = ChunkSeq::new[u8]();
+        let status = surface_fragment_status(in wrapped.as_slice(), inout message);
+        if status == 2 {
+            fail(inout matcher, in message.as_slice());
+            return refused(in matcher);
+        }
+        if status != 0 {
+            return no_match(in matcher);
+        }
+        push_text(inout out, in pattern, tok_s(in p, name), tok_e(in p, name));
+        push_text(inout out, in pattern, tok_s(in p, sort), tok_e(in p, sort));
+        out.push(
+            if i == 0 {
+                0
+            } else {
+                widen_u64(pass_code(in pattern, in p, sub(i, 1)))
+            }
+        );
+        out.push(1);
+        // One scalar fragment.
+        out.push(start);
+        out.push(end);
+        out.push(0);
+        // From the invocation, never a separate tail.
+        out.push(0);
+        // No repeat indices.
+        out.push(0);
+        // No repetition extents.
+        previous_literal = false;
+        i = separator;
+    }
+    if j != len(in target) {
+        return no_match(in matcher);
+    }
+    out.try_set(1, matcher.work);
+    out.try_set(2, names.len());
     out
+}
+
+fn no_match(in matcher: Mx) -> ChunkSeq[u64] {
+    let mut words = ChunkSeq::new[u64]();
+    words.push(MATCH_NONE);
+    words.push(matcher.work);
+    words
 }

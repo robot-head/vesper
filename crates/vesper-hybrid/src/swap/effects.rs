@@ -11,7 +11,7 @@ mod effects_binding;
 mod effects_words;
 
 // The word encoders read the shared ones through `super::`.
-use super::{Registry, Swap, check_words, on, open};
+use super::{Registry, Swap, check_words, on, pass};
 
 /// `capability_effects::check_world` from `modules/effects` (SH2 lane 8, `#1180`).
 const VESPER_EFFECTS_CHECK: vesper::capability_effects::EffectsCheckTable =
@@ -29,7 +29,7 @@ const VESPER_EFFECTS_CHECK: vesper::capability_effects::EffectsCheckTable =
     };
 
 /// The flip-gate rows of this file's swaps (`swaps::on`).
-pub(super) const SWAPS: &[Swap] = &[open("effects", "0.28x; no flip-gate configuration")];
+pub(super) const SWAPS: &[Swap] = &[pass("effects", "effects", "#2207")];
 
 pub(super) fn register(_r: &mut Registry) {
     if on("effects") {

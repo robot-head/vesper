@@ -1187,6 +1187,12 @@ vesper_crate(
         "test/self_host_swap_inputs": [
             "resources:memory:6144",
         ],
+        # Per shard, after lowering only the shard's worlds: 7.8-8.3 GiB peak
+        # RSS locally, most of it the checked corpus. Holding every world's
+        # IR and mutants (over 13 GiB) got shards killed on #2253 and #2267.
+        "test/self_host_ir_opt_policy": [
+            "resources:memory:9216",
+        ],
         # One thread, but it keeps every fixture world's check data and
         # machine arenas: 12.3 GiB peak RSS locally (782 runs, Nov 2026).
         # Unreserved, the kernel killed it in "Self-host differentials" on

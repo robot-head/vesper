@@ -1,0 +1,80 @@
+{
+  "notes": [
+    "Flip gate for `vesper doc`'s renderers (`vesper_doc::to_json`, `render_html`),",
+    "ported as @vesper/doc and installed as the hybrid's `doc` swap. The `render`",
+    "workload times both renderers of every 4th file's report against the swap's",
+    "path (compact serialization, request, the Vesper call, decode)."
+  ],
+  "name": "doc",
+  "lane": "SH5-15",
+  "rust": [
+    "crates/vesper-doc/src/lib.rs"
+  ],
+  "env": {
+    "CARGO_PROFILE_DEV_DEBUG": "0",
+    "CARGO_PROFILE_TEST_DEBUG": "0",
+    "CARGO_PROFILE_RELEASE_DEBUG": "0"
+  },
+  "build": [
+    [
+      "cargo",
+      "test",
+      "--locked",
+      "--release",
+      "--test",
+      "self_host_doc",
+      "--no-run"
+    ]
+  ],
+  "tests": [
+    {
+      "run": [
+        "cargo",
+        "test",
+        "--locked",
+        "--release",
+        "--test",
+        "self_host_doc"
+      ]
+    }
+  ],
+  "differential": {
+    "run": [
+      "cargo",
+      "test",
+      "--locked",
+      "--release",
+      "--test",
+      "self_host_doc",
+      "renderers_match_rust",
+      "--",
+      "--exact",
+      "--nocapture"
+    ]
+  },
+  "abba": [
+    {
+      "workload": "render",
+      "run": {
+        "argv": [
+          "cargo",
+          "test",
+          "--locked",
+          "--release",
+          "--test",
+          "self_host_doc",
+          "speed",
+          "--",
+          "--exact",
+          "--ignored",
+          "--nocapture"
+        ],
+        "env": {
+          "FLIP_GATE": "1",
+          "CHECK_HARNESS_SPEED": "1",
+          "VESPER_DOC_SPEED": "1"
+        }
+      }
+    }
+  ]
+}

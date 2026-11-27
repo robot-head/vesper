@@ -18,6 +18,9 @@
 //              (`Loader::expand_sugars`), so module texts hold no sugar;
 //              these are the names `Resolver::new` adds to the tables.
 //
+//   maps       (optional) count; file, generated start/end, source
+//              start/end and 1 if bytes were copied, per segment.
+//
 // Package 0 is the root package.
 
 use @vesper/ast::{
@@ -29,8 +32,8 @@ use @vesper/ast::lower::{L, lower_source, lower_source_perm};
 use @vesper-std/arena::{idx_from_raw};
 use @vesper-std/intern::{symbol_from_id};
 use self::state::{
-    St, at32, at8, const_of, const_prefix, sym_byte, sym_len, sym_slice, sym_starts, find_module,
-    inc, kind_both, kind_sugar, kind_type, kind_value, mod_hash, n32, none, pair, w
+    SourceSegment, St, at32, at8, const_of, const_prefix, sym_byte, sym_len, sym_slice, sym_starts,
+    find_module, inc, kind_both, kind_sugar, kind_type, kind_value, mod_hash, n32, none, pair, w
 };
 
 fn rd(in bytes: Slice[u8], inout pos: u64) -> u64 {
@@ -140,6 +143,35 @@ pub fn decode_bytes(inout loader: St, in input: Slice[u8]) {
         loader.sugar_name.push(name);
         // 1 when the declaration is `pub`.
         loader.sugar_public.push(wrapping_u8(rd(in input, inout pos)));
+    }
+    let map_row_bytes: u64 = 48;
+    let declared_mappings = rd(in input, inout pos);
+    let remaining = if pos < input.len() {
+        wrapping_sub(input.len(), pos)
+    } else {
+        0
+    };
+    let available_mappings = remaining / map_row_bytes;
+    let mapping_count = if declared_mappings < available_mappings {
+        declared_mappings
+    } else {
+        available_mappings
+    };
+    for _i in 0..mapping_count {
+        let file = n32(rd(in input, inout pos));
+        let generated_start = rd(in input, inout pos);
+        let generated_end = rd(in input, inout pos);
+        let source_start = rd(in input, inout pos);
+        let source_end = rd(in input, inout pos);
+        let copied = rd(in input, inout pos) != 0;
+        loader.source_segments.push(SourceSegment {
+            file: file,
+            generated_start: generated_start,
+            generated_end: generated_end,
+            source_start: source_start,
+            source_end: source_end,
+            copied: copied
+        });
     }
 }
 

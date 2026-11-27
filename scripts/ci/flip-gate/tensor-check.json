@@ -1,0 +1,112 @@
+{
+  "notes": [
+    "Flip gate for the tensor type checker's diagnostics (`tensor_types::check`),",
+    "ported as @vesper/check-tensor-types (SH2 lane 14, #1186) and installed as the",
+    "hybrid's `tensor_check` swap. crates/vesper-hybrid/tests/tensor_check.rs runs",
+    "`check` as the swap fills it (encode, `tensor_diags`, decode, Rust's `analyze`",
+    "for an accepted tensor module) against Rust's over every repository module."
+  ],
+  "name": "tensor-check",
+  "lane": "SH2-14",
+  "rust": [
+    "src/tensor_types.rs"
+  ],
+  "env": {
+    "CARGO_PROFILE_DEV_DEBUG": "0",
+    "CARGO_PROFILE_TEST_DEBUG": "0",
+    "CARGO_PROFILE_RELEASE_DEBUG": "0"
+  },
+  "build": [
+    [
+      "cargo",
+      "test",
+      "--locked",
+      "--release",
+      "-p",
+      "vesper-hybrid",
+      "--test",
+      "tensor_check",
+      "--no-run"
+    ]
+  ],
+  "tests": [
+    {
+      "run": [
+        "cargo",
+        "test",
+        "--locked",
+        "--release",
+        "-p",
+        "vesper-hybrid",
+        "--test",
+        "tensor_check"
+      ]
+    }
+  ],
+  "differential": {
+    "run": [
+      "cargo",
+      "test",
+      "--locked",
+      "--release",
+      "-p",
+      "vesper-hybrid",
+      "--test",
+      "tensor_check",
+      "tensor_swap_matches_rust_on_the_repository_sources",
+      "--",
+      "--exact",
+      "--nocapture"
+    ]
+  },
+  "abba": [
+    {
+      "workload": "all",
+      "run": {
+        "argv": [
+          "cargo",
+          "test",
+          "--locked",
+          "--release",
+          "-p",
+          "vesper-hybrid",
+          "--test",
+          "tensor_check",
+          "flip_gate",
+          "--",
+          "--exact",
+          "--ignored",
+          "--nocapture"
+        ],
+        "env": {
+          "FLIP_GATE": "1",
+          "CHECK_HARNESS_SPEED": "1"
+        }
+      }
+    },
+    {
+      "workload": "tensor",
+      "run": {
+        "argv": [
+          "cargo",
+          "test",
+          "--locked",
+          "--release",
+          "-p",
+          "vesper-hybrid",
+          "--test",
+          "tensor_check",
+          "flip_gate",
+          "--",
+          "--exact",
+          "--ignored",
+          "--nocapture"
+        ],
+        "env": {
+          "FLIP_GATE": "1",
+          "CHECK_HARNESS_SPEED": "1"
+        }
+      }
+    }
+  ]
+}

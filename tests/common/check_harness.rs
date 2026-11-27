@@ -23,6 +23,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
+
+#[path = "flip_gate.rs"]
+pub mod flip_gate;
 use vesper::ast::{Effects, Mode, Pass, Type};
 use vesper::check::World;
 use vesper::{check, ffi_lowering, native, packages};
@@ -843,11 +846,21 @@ pub fn ir_cases_where(mutants: usize, keep: impl Fn(usize) -> bool) -> Vec<IrCas
 
 /// ABBA timing, best of six runs per side; returns (rust, vesper). Wall
 /// clock on the cloud hosts moves by up to 30% between runs.
+///
+/// With `FLIP_GATE` set, it is the flip gate's harness instead (#2207):
+/// one warm-up of each side, then `FLIP_GATE_EPOCHS` rounds
+/// of rust, vesper, vesper, rust, printed as
+/// `flip-gate pairs <workload> <rust_ns>:<vesper_ns> ...` for
+/// `aspect ci flip-gate`. The workload is [`gate_workload`] of `label`.
+/// It returns the median round's two sides.
 pub fn abba(
     label: &str,
     rust: &mut dyn FnMut() -> Duration,
     vesper: &mut dyn FnMut() -> Duration,
 ) -> (Duration, Duration) {
+    if flip_gate::on() {
+        return gate_pairs(&gate_workload(label), rust, vesper);
+    }
     let mut rs = vec![];
     let mut vs = vec![];
     for _ in 0..3 {
@@ -863,6 +876,41 @@ pub fn abba(
         v.as_secs_f64() / r.as_secs_f64()
     );
     (r, v)
+}
+
+/// The flip-gate workload name of an [`abba`] label: lower case, every run
+/// of other characters than letters and digits one `-`, e.g.
+/// `"fip check (corpus)"` is `fip-check-corpus`.
+pub fn gate_workload(label: &str) -> String {
+    let mut out = String::new();
+    for c in label.chars() {
+        if c.is_ascii_alphanumeric() {
+            out.push(c.to_ascii_lowercase());
+        } else if !out.is_empty() && !out.ends_with('-') {
+            out.push('-');
+        }
+    }
+    out.trim_end_matches('-').to_owned()
+}
+
+/// The flip gate's ABBA rounds of [`abba`] under `FLIP_GATE`: the median
+/// round's two sides, halved.
+fn gate_pairs(
+    workload: &str,
+    rust: &mut dyn FnMut() -> Duration,
+    vesper: &mut dyn FnMut() -> Duration,
+) -> (Duration, Duration) {
+    let mut rounds = flip_gate::pairs(workload, rust, vesper);
+    rounds.sort_by(|a, b| {
+        (a.1.as_secs_f64() / a.0.as_secs_f64()).total_cmp(&(b.1.as_secs_f64() / b.0.as_secs_f64()))
+    });
+    let (r, v) = rounds[rounds.len() / 2];
+    eprintln!(
+        "flip gate {workload}: {} rounds, median round rust {r:?} vesper {v:?} ratio {:.2}",
+        rounds.len(),
+        v.as_secs_f64() / r.as_secs_f64()
+    );
+    (r / 2, v / 2)
 }
 
 /// ABBA timing for the flip gate: `rounds` paired rounds (rust, vesper,

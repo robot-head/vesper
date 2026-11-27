@@ -17,3 +17,4 @@ license = "MIT OR Apache-2.0"
 "@vesper-std/env" = { version = "^0.1", path = "../vesper-std/env" }
 "@vesper-std/fs" = { version = "^0.1", path = "../vesper-std/fs" }
 "@vesper-std/intern" = { version = "^0.1", path = "../vesper-std/intern" }
+"@vesper/sugar" = { version = "^0.1", path = "../vesper-sugar" }

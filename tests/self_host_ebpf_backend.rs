@@ -437,11 +437,9 @@ fn ebpf_backend_speed() {
         .map(|c| input(&c.world, c.source.as_deref(), &c.options).unwrap())
         .collect();
     let reps = 20;
+    eprintln!("ebpf timing: {} accepted programs x {reps}", accepted.len());
     abba(
-        &format!(
-            "{} accepted programs x {reps}, encoded input",
-            accepted.len()
-        ),
+        "ebpf encoded input",
         &mut || {
             time(|| {
                 for _ in 0..reps {
@@ -464,10 +462,7 @@ fn ebpf_backend_speed() {
         },
     );
     abba(
-        &format!(
-            "{} accepted programs x {reps}, with encoding",
-            accepted.len()
-        ),
+        "ebpf with encoding",
         &mut || {
             time(|| {
                 for _ in 0..reps {
