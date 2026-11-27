@@ -701,3 +701,198 @@ pub fn parse_amd_cert_ext(in der: Slice[u8], want_hwid_len: u64, inout out: Slic
     out.try_set(AMD_OUT_CSP_END, csp_e);
     AMD_ERR_OK
 }
+
+// ---------------------------------------------------------------------------
+// SubjectPublicKeyInfo (RFC 5280 §4.1.2.7) parsers for `src/chain.rs`
+// ---------------------------------------------------------------------------
+
+const SPKI_ERR_OK: u64 = 0;
+const SPKI_ERR_BAD_SPKI: u64 = 1;
+const SPKI_ERR_NOT_EC: u64 = 2;
+const SPKI_ERR_BAD_CURVE: u64 = 3;
+const SPKI_ERR_BAD_BITS: u64 = 4;
+
+const SPKI_CURVE_P256: u64 = 1;
+const SPKI_CURVE_P384: u64 = 2;
+
+const SPKI_BITS_OUT_START: u64 = 0;
+const SPKI_BITS_OUT_END: u64 = 1;
+const SPKI_BITS_OUT_LEN: u64 = 2;
+
+const SPKI_EC_OUT_CURVE: u64 = 0;
+const SPKI_EC_OUT_BITS_START: u64 = 1;
+const SPKI_EC_OUT_BITS_END: u64 = 2;
+const SPKI_EC_OUT_LEN: u64 = 3;
+
+// OID 1.2.840.10045.2.1 (id-ecPublicKey): 2a 86 48 ce 3d 02 01
+const OID_EC_PUB_LEN: u64 = 7;
+const OID_EC_B0: u64 = 0x2a;
+const OID_EC_B1: u64 = 0x86;
+const OID_EC_B2: u64 = 0x48;
+const OID_EC_B3: u64 = 0xce;
+const OID_EC_B4: u64 = 0x3d;
+const OID_EC_B5: u64 = 0x02;
+const OID_EC_B6: u64 = 0x01;
+
+// OID 1.2.840.10045.3.1.7 (secp256r1): 2a 86 48 ce 3d 03 01 07
+const OID_P256_LEN: u64 = 8;
+const OID_P256_B5: u64 = 0x03;
+const OID_P256_B6: u64 = 0x01;
+const OID_P256_B7: u64 = 0x07;
+
+// OID 1.3.132.0.34 (secp384r1): 2b 81 04 00 22
+const OID_P384_LEN: u64 = 5;
+const OID_P384_B0: u64 = 0x2b;
+const OID_P384_B1: u64 = 0x81;
+const OID_P384_B2: u64 = 0x04;
+const OID_P384_B3: u64 = 0x00;
+const OID_P384_B4: u64 = 0x22;
+
+const OID_IDX_2: u64 = 2;
+const OID_IDX_3: u64 = 3;
+const OID_IDX_4: u64 = 4;
+const OID_IDX_5: u64 = 5;
+const OID_IDX_6: u64 = 6;
+const OID_IDX_7: u64 = 7;
+
+fn is_oid_ec_public_key(in b: Slice[u8], s: u64, e: u64) -> bool {
+    if wrapping_sub(e, s) != OID_EC_PUB_LEN {
+        return false;
+    }
+    byte_at(in b, s) == OID_EC_B0
+        && byte_at(in b, wrapping_add(s, 1)) == OID_EC_B1
+        && byte_at(in b, wrapping_add(s, OID_IDX_2)) == OID_EC_B2
+        && byte_at(in b, wrapping_add(s, OID_IDX_3)) == OID_EC_B3
+        && byte_at(in b, wrapping_add(s, OID_IDX_4)) == OID_EC_B4
+        && byte_at(in b, wrapping_add(s, OID_IDX_5)) == OID_EC_B5
+        && byte_at(in b, wrapping_add(s, OID_IDX_6)) == OID_EC_B6
+}
+
+fn is_oid_secp256r1(in b: Slice[u8], s: u64, e: u64) -> bool {
+    if wrapping_sub(e, s) != OID_P256_LEN {
+        return false;
+    }
+    byte_at(in b, s) == OID_EC_B0
+        && byte_at(in b, wrapping_add(s, 1)) == OID_EC_B1
+        && byte_at(in b, wrapping_add(s, OID_IDX_2)) == OID_EC_B2
+        && byte_at(in b, wrapping_add(s, OID_IDX_3)) == OID_EC_B3
+        && byte_at(in b, wrapping_add(s, OID_IDX_4)) == OID_EC_B4
+        && byte_at(in b, wrapping_add(s, OID_IDX_5)) == OID_P256_B5
+        && byte_at(in b, wrapping_add(s, OID_IDX_6)) == OID_P256_B6
+        && byte_at(in b, wrapping_add(s, OID_IDX_7)) == OID_P256_B7
+}
+
+fn is_oid_secp384r1(in b: Slice[u8], s: u64, e: u64) -> bool {
+    if wrapping_sub(e, s) != OID_P384_LEN {
+        return false;
+    }
+    byte_at(in b, s) == OID_P384_B0
+        && byte_at(in b, wrapping_add(s, 1)) == OID_P384_B1
+        && byte_at(in b, wrapping_add(s, OID_IDX_2)) == OID_P384_B2
+        && byte_at(in b, wrapping_add(s, OID_IDX_3)) == OID_P384_B3
+        && byte_at(in b, wrapping_add(s, OID_IDX_4)) == OID_P384_B4
+}
+
+// Parse a DER SubjectPublicKeyInfo and return the byte range of its
+// `subjectPublicKey` BIT STRING (with 0 unused bits) in `out[0..2]`.
+pub fn parse_spki_key_bits(in spki: Slice[u8], inout out: Slice[u64]) -> u64 {
+    if out.len() < SPKI_BITS_OUT_LEN {
+        return SPKI_ERR_BAD_SPKI;
+    }
+    let n = spki.len();
+    let (ok0, body_s, body_e) = tlv_at(in spki, 0, n);
+    if !ok0 || byte_at(in spki, 0) != DER_SEQUENCE || body_e != n {
+        return SPKI_ERR_BAD_SPKI;
+    }
+    // AlgorithmIdentifier SEQUENCE
+    let (ok_alg, alg_s, alg_e) = tlv_at(in spki, body_s, body_e);
+    if !ok_alg || byte_at(in spki, body_s) != DER_SEQUENCE {
+        return SPKI_ERR_BAD_SPKI;
+    }
+    // AlgorithmIdentifier.algorithm OID
+    let (ok_oid, oid_s, oid_e) = tlv_at(in spki, alg_s, alg_e);
+    if !ok_oid || byte_at(in spki, alg_s) != DER_OID || oid_s == oid_e {
+        return SPKI_ERR_BAD_SPKI;
+    }
+    // Optional AlgorithmIdentifier.parameters (must consume rest of AlgorithmIdentifier)
+    if oid_e < alg_e {
+        let (ok_p, _, p_e) = tlv_at(in spki, oid_e, alg_e);
+        if !ok_p || p_e != alg_e {
+            return SPKI_ERR_BAD_SPKI;
+        }
+    }
+    // subjectPublicKey BIT STRING
+    let (ok_bs, bs_s, bs_e) = tlv_at(in spki, alg_e, body_e);
+    if !ok_bs || byte_at(in spki, alg_e) != DER_BIT_STRING || bs_e != body_e || bs_s >= bs_e {
+        return SPKI_ERR_BAD_SPKI;
+    }
+    if byte_at(in spki, bs_s) != 0 {
+        return SPKI_ERR_BAD_BITS;
+    }
+    out.try_set(SPKI_BITS_OUT_START, wrapping_add(bs_s, 1));
+    out.try_set(SPKI_BITS_OUT_END, bs_e);
+    SPKI_ERR_OK
+}
+
+// Parse a DER SubjectPublicKeyInfo for an EC P-256 or P-384 public key.
+// Writes `(curve_id, bits_start, bits_end)` to `out[0..3]`.
+pub fn parse_spki_ec_key(in spki: Slice[u8], inout out: Slice[u64]) -> u64 {
+    if out.len() < SPKI_EC_OUT_LEN {
+        return SPKI_ERR_BAD_SPKI;
+    }
+    let n = spki.len();
+    let (ok0, body_s, body_e) = tlv_at(in spki, 0, n);
+    if !ok0 || byte_at(in spki, 0) != DER_SEQUENCE || body_e != n {
+        return SPKI_ERR_BAD_SPKI;
+    }
+    // AlgorithmIdentifier SEQUENCE
+    let (ok_alg, alg_s, alg_e) = tlv_at(in spki, body_s, body_e);
+    if !ok_alg || byte_at(in spki, body_s) != DER_SEQUENCE {
+        return SPKI_ERR_BAD_SPKI;
+    }
+    // AlgorithmIdentifier.algorithm OID
+    let (ok_oid, oid_s, oid_e) = tlv_at(in spki, alg_s, alg_e);
+    if !ok_oid || byte_at(in spki, alg_s) != DER_OID || oid_s == oid_e {
+        return SPKI_ERR_BAD_SPKI;
+    }
+    // Optional AlgorithmIdentifier.parameters
+    let mut has_param_oid = false;
+    let mut param_s: u64 = 0;
+    let mut param_e: u64 = 0;
+    if oid_e < alg_e {
+        let (ok_p, ps, pe) = tlv_at(in spki, oid_e, alg_e);
+        if !ok_p || pe != alg_e {
+            return SPKI_ERR_BAD_SPKI;
+        }
+        if byte_at(in spki, oid_e) == DER_OID {
+            has_param_oid = true;
+            param_s = ps;
+            param_e = pe;
+        }
+    }
+    // subjectPublicKey BIT STRING
+    let (ok_bs, bs_s, bs_e) = tlv_at(in spki, alg_e, body_e);
+    if !ok_bs || byte_at(in spki, alg_e) != DER_BIT_STRING || bs_e != body_e || bs_s >= bs_e {
+        return SPKI_ERR_BAD_SPKI;
+    }
+    if !is_oid_ec_public_key(in spki, oid_s, oid_e) {
+        return SPKI_ERR_NOT_EC;
+    }
+    if !has_param_oid {
+        return SPKI_ERR_BAD_CURVE;
+    }
+    let curve = if is_oid_secp256r1(in spki, param_s, param_e) {
+        SPKI_CURVE_P256
+    } else if is_oid_secp384r1(in spki, param_s, param_e) {
+        SPKI_CURVE_P384
+    } else {
+        return SPKI_ERR_BAD_CURVE;
+    };
+    if byte_at(in spki, bs_s) != 0 {
+        return SPKI_ERR_BAD_BITS;
+    }
+    out.try_set(SPKI_EC_OUT_CURVE, curve);
+    out.try_set(SPKI_EC_OUT_BITS_START, wrapping_add(bs_s, 1));
+    out.try_set(SPKI_EC_OUT_BITS_END, bs_e);
+    SPKI_ERR_OK
+}

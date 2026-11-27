@@ -18,7 +18,8 @@
 use self::cbor::decode as cbor_decode_impl;
 use self::der_cert::{
     parse_amd_cert_ext as parse_amd_cert_ext_impl,
-    parse_crl_this_update as parse_crl_this_update_impl, parse_raw_cert as parse_raw_cert_impl
+    parse_crl_this_update as parse_crl_this_update_impl, parse_raw_cert as parse_raw_cert_impl,
+    parse_spki_ec_key as parse_spki_ec_key_impl, parse_spki_key_bits as parse_spki_key_bits_impl
 };
 use self::pck_ext::parse_pck_ext as parse_pck_ext_impl;
 use self::pem::{
@@ -349,4 +350,12 @@ pub fn decode_pem_certificates(
 
 pub fn decode_pem_public_key(in pem: Slice[u8], inout der_out: Slice[u8]) -> u64 {
     decode_pem_public_key_impl(in pem, inout der_out)
+}
+
+pub fn parse_spki_key_bits(in spki: Slice[u8], inout out: Slice[u64]) -> u64 {
+    parse_spki_key_bits_impl(in spki, inout out)
+}
+
+pub fn parse_spki_ec_key(in spki: Slice[u8], inout out: Slice[u64]) -> u64 {
+    parse_spki_ec_key_impl(in spki, inout out)
 }

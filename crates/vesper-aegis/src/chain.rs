@@ -7,12 +7,24 @@ use rustls_pki_types::{
     AlgorithmIdentifier, CertificateDer, InvalidSignature, SignatureVerificationAlgorithm,
     UnixTime, alg_id,
 };
-use spki::ObjectIdentifier;
 use std::time::Duration;
 
-const ID_EC_PUBLIC_KEY: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.10045.2.1");
-const SECP256R1: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.10045.3.1.7");
-const SECP384R1: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.3.132.0.34");
+const SPKI_ERR_OK: u64 = 0;
+const SPKI_ERR_NOT_EC: u64 = 2;
+const SPKI_ERR_BAD_CURVE: u64 = 3;
+const SPKI_ERR_BAD_BITS: u64 = 4;
+
+const SPKI_CURVE_P256: u64 = 1;
+const SPKI_CURVE_P384: u64 = 2;
+
+const SPKI_BITS_OUT_START: usize = 0;
+const SPKI_BITS_OUT_END: usize = 1;
+const SPKI_BITS_OUT_LEN: usize = 2;
+
+const SPKI_EC_OUT_CURVE: usize = 0;
+const SPKI_EC_OUT_BITS_START: usize = 1;
+const SPKI_EC_OUT_BITS_END: usize = 2;
+const SPKI_EC_OUT_LEN: usize = 3;
 
 /// Signature algorithms accepted on certificate paths and CRLs. RSA-PSS/
 /// SHA-384 appears twice: once in the DER form webpki knows, and once in the
@@ -344,8 +356,23 @@ pub fn verify_issued_by(child: &[u8], issuer: &[u8]) -> Result<(), AttestError> 
     if c.issuer != i.subject {
         return Err(AttestError::CertificateChain("issuer name mismatch".into()));
     }
-    let spki = spki::SubjectPublicKeyInfoRef::try_from(i.spki)
-        .map_err(|_| AttestError::CertificateChain("issuer SubjectPublicKeyInfo".into()))?;
+    let mut spki_out = [0u64; SPKI_BITS_OUT_LEN];
+    let spki_rc = crate::port::vesper::parse_spki_key_bits(i.spki, &mut spki_out);
+    let key = match spki_rc {
+        SPKI_ERR_OK => {
+            &i.spki[spki_out[SPKI_BITS_OUT_START] as usize..spki_out[SPKI_BITS_OUT_END] as usize]
+        }
+        SPKI_ERR_BAD_BITS => {
+            return Err(AttestError::CertificateChain(
+                "issuer key bit string".into(),
+            ));
+        }
+        _ => {
+            return Err(AttestError::CertificateChain(
+                "issuer SubjectPublicKeyInfo".into(),
+            ));
+        }
+    };
     let key_alg = sequence_contents(i.spki_alg)?;
     let sig_alg = sequence_contents(c.signature_alg)?;
     let alg = CHAIN_ALGS
@@ -357,10 +384,6 @@ pub fn verify_issued_by(child: &[u8], issuer: &[u8]) -> Result<(), AttestError> 
             what: "certificate signature algorithm",
             value: 0,
         })?;
-    let key = spki
-        .subject_public_key
-        .as_bytes()
-        .ok_or_else(|| AttestError::CertificateChain("issuer key bit string".into()))?;
     alg.verify_signature(key, c.tbs, c.signature)
         .map_err(|_| AttestError::BadSignature {
             what: "certificate signature",
@@ -476,23 +499,38 @@ fn ec_key_from_spki(
     what_curve: &'static str,
     what_bits: &'static str,
 ) -> Result<EcPublicKey, AttestError> {
-    let spki = spki::SubjectPublicKeyInfoRef::try_from(spki_der)
-        .map_err(|_| AttestError::UnexpectedKeyType { what: what_spki })?;
-    if spki.algorithm.oid != ID_EC_PUBLIC_KEY {
-        return Err(AttestError::UnexpectedKeyType { what: what_alg });
+    let mut out = [0u64; SPKI_EC_OUT_LEN];
+    match crate::port::vesper::parse_spki_ec_key(spki_der, &mut out) {
+        SPKI_ERR_OK => {}
+        SPKI_ERR_NOT_EC => return Err(AttestError::UnexpectedKeyType { what: what_alg }),
+        SPKI_ERR_BAD_CURVE => return Err(AttestError::UnexpectedKeyType { what: what_curve }),
+        SPKI_ERR_BAD_BITS => return Err(AttestError::UnexpectedKeyType { what: what_bits }),
+        _ => return Err(AttestError::UnexpectedKeyType { what: what_spki }),
     }
-    let curve = match (required_curve, spki.algorithm.parameters_oid()) {
-        (Some(Curve::P256), Ok(o)) if o == SECP256R1 => Curve::P256,
-        (Some(Curve::P384), Ok(o)) if o == SECP384R1 => Curve::P384,
-        (None, Ok(o)) if o == SECP256R1 => Curve::P256,
-        (None, Ok(o)) if o == SECP384R1 => Curve::P384,
+    let parsed_curve = match out[SPKI_EC_OUT_CURVE] {
+        SPKI_CURVE_P256 => Curve::P256,
+        SPKI_CURVE_P384 => Curve::P384,
         _ => return Err(AttestError::UnexpectedKeyType { what: what_curve }),
     };
-    let point = spki
-        .subject_public_key
-        .as_bytes()
-        .ok_or(AttestError::UnexpectedKeyType { what: what_bits })?;
+    let curve = match (required_curve, parsed_curve) {
+        (Some(req), got) if req == got => got,
+        (None, got) => got,
+        _ => return Err(AttestError::UnexpectedKeyType { what: what_curve }),
+    };
+    let point = &spki_der[out[SPKI_EC_OUT_BITS_START] as usize..out[SPKI_EC_OUT_BITS_END] as usize];
     EcPublicKey::from_sec1(curve, point)
+}
+
+/// Decode a DER `SubjectPublicKeyInfo` holding an uncompressed P-256 or P-384 point.
+pub fn parse_spki_ec_key(spki_der: &[u8]) -> Result<EcPublicKey, AttestError> {
+    ec_key_from_spki(
+        spki_der,
+        None,
+        "SubjectPublicKeyInfo",
+        "key is not id-ecPublicKey",
+        "key curve",
+        "key bit string",
+    )
 }
 
 fn leaf_ec_key(leaf: &[u8], curve: Curve) -> Result<EcPublicKey, AttestError> {

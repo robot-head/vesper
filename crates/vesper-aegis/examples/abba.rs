@@ -666,6 +666,63 @@ fn flip_gate_pck_ext() {
     println!("flip-gate pairs pck_ext {}", pairs.join(" "));
 }
 
+const SPKI_PASSES: usize = 500_000;
+
+fn flip_gate_spki() {
+    use spki::ObjectIdentifier;
+    const ID_EC_PUBLIC_KEY: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.10045.2.1");
+    const SECP256R1: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.10045.3.1.7");
+    const SECP384R1: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.3.132.0.34");
+
+    let cert_der = data("snp-oak/milan_vcek.der");
+    let (_, cert) = x509_parser::parse_x509_certificate(&cert_der).unwrap();
+    let spki_der = cert.public_key().raw.to_vec();
+
+    let rust_parse = |der: &[u8]| -> port::chain::EcPublicKey {
+        let info = spki::SubjectPublicKeyInfoRef::try_from(der).unwrap();
+        assert_eq!(info.algorithm.oid, ID_EC_PUBLIC_KEY);
+        let curve = match info.algorithm.parameters_oid().unwrap() {
+            o if o == SECP256R1 => port::chain::Curve::P256,
+            o if o == SECP384R1 => port::chain::Curve::P384,
+            _ => panic!("unexpected curve"),
+        };
+        let point = info.subject_public_key.as_bytes().unwrap();
+        port::chain::EcPublicKey::from_sec1(curve, point).unwrap()
+    };
+
+    // Differential check: Vesper port matches Rust `spki` crate.
+    let expected = rust_parse(&spki_der);
+    let actual = port::chain::parse_spki_ec_key(&spki_der).unwrap();
+    assert_eq!(actual, expected);
+
+    let run_rust = || -> u64 {
+        let t = Instant::now();
+        for _ in 0..SPKI_PASSES {
+            black_box(rust_parse(black_box(&spki_der)));
+        }
+        t.elapsed().as_nanos() as u64
+    };
+    let run_port = || -> u64 {
+        let t = Instant::now();
+        for _ in 0..SPKI_PASSES {
+            black_box(port::chain::parse_spki_ec_key(black_box(&spki_der)).unwrap());
+        }
+        t.elapsed().as_nanos() as u64
+    };
+    black_box(run_rust());
+    black_box(run_port());
+    let pairs: Vec<String> = (0..FLIP_GATE_EPOCHS)
+        .map(|_| {
+            let a1 = run_rust();
+            let b1 = run_port();
+            let b2 = run_port();
+            let a2 = run_rust();
+            format!("{}:{}", a1 + a2, b1 + b2)
+        })
+        .collect();
+    println!("flip-gate pairs spki {}", pairs.join(" "));
+}
+
 fn main() {
     assert_eq!(port::IMPLEMENTATION, "vesper");
     let args: Vec<String> = std::env::args().collect();
@@ -692,6 +749,10 @@ fn main() {
         }
         if args.get(2).map(String::as_str) == Some("pck_ext") {
             flip_gate_pck_ext();
+            return;
+        }
+        if args.get(2).map(String::as_str) == Some("spki") {
+            flip_gate_spki();
             return;
         }
     }
