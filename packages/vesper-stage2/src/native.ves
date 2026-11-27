@@ -25,7 +25,8 @@ use @vesper/place-ir::{BlockRow, FnRow, InstRow, Lit, Op, Pat, Tag, Term};
 use @vesper/place-ir-lower::ast::{FnR};
 use @vesper/place-ir-lower::lower::{L};
 use @vesper/hybrid-native-backend::scalar::{
-    CALL_VOID, FLOAT_LOAD, FLOAT_STORE32, FLOAT_STORE64, LOAD, STACK_ADDRESS, STORE_QWORD
+    CALL_VOID, DISP32_MASK, FLOAT_LOAD, FLOAT_STORE32, FLOAT_STORE64, LOAD, STACK_ADDRESS,
+    STORE_QWORD
 };
 
 const LITERAL_WORDS: u64 = 3;
@@ -74,6 +75,8 @@ const JUMP_ARGUMENT: u64 = 2;
 const HOME_BYTES: u64 = QWORD_BITS / BYTE_BITS;
 const HOME_SLOT: u64 = 0;
 const LITERAL_HOME: u64 = NO_VALUE - 1;
+const RESULT_ADDRESS: u64 = 0;
+const MAX_RESULT_OFFSET: u64 = DISP32_MASK >> 1;
 const SCALAR_RESULTS: u64 = 1;
 const CALL_COUNT: u64 = 1;
 const CALL_ARGUMENTS: u64 = 2;
@@ -220,6 +223,25 @@ impl Function {
         } else {
             self.record(STACK_LOAD, HOME_SLOT, offset, QWORD_BITS)
         }
+    }
+
+    fn store_addressed(inout self, address: u64, value: u64, kind: u8, offset: u64) {
+        let width = abi_width(kind);
+        let stored = if is_signed(kind) && width < QWORD_BITS {
+            self.record(SIGN_EXTEND, value, width, QWORD_BITS)
+        } else {
+            value
+        };
+        let op = match kind {
+            ScalarKind::F32 => FLOAT_STORE32,
+            ScalarKind::F64 => FLOAT_STORE64,
+            _ => STORE_QWORD,
+        };
+        let _ = self.record(op, address, stored, offset);
+    }
+
+    fn result_home(in self) -> u64 {
+        add(self.home_bytes, self.mutable_bytes)
     }
 
     fn label(in self, block: u64) -> u64 {
@@ -465,13 +487,15 @@ fn is_aggregate(kind: u8) -> bool {
     kind == ScalarKind::Tuple || kind == ScalarKind::Struct
 }
 
-fn sysv_signature(in low: L, f: FnR) -> bool {
+fn sysv_signature(in low: L, f: FnR, entry: bool) -> bool {
     let result = scalar_kind(in low, f.result);
+    let buffer = is_aggregate(result);
+    let arguments = add(f.param_count, if buffer { 1 } else { 0 });
     if !f.has_body
         || f.generic_count != 0
         || f.ext_count != 0
-        || f.param_count > MAX_ARGUMENTS
-        || (abi_width(result) == 0 && result != ScalarKind::Unit)
+        || arguments > MAX_ARGUMENTS
+        || (abi_width(result) == 0 && result != ScalarKind::Unit && !(buffer && entry))
         || f.effects != low.ctx.types.empty_row
     {
         return false;
@@ -725,6 +749,64 @@ fn project_source(in low: L, at: u64, in m: Function) -> u64 {
     aggregate_member(in low, source, n32(low.program.op(add(at, PROJECT_MEMBER))), in m)
 }
 
+// The native result buffer is a sequence of word cells. Struct fields use
+// declaration order even when initializers appeared in a different order.
+fn result_fields(in low: L, root: u64, in m: Function, inout fields: ChunkSeq[u64]) -> bool {
+    let mut pending = ChunkSeq::new[u64]();
+    pending.push(root);
+    loop {
+        let value = match pending.pop() {
+            Option::Some(value) => value,
+            Option::None => return true,
+        };
+        let kind = m.value_kind(value);
+        if kind == ScalarKind::Unsupported {
+            return false;
+        }
+        if !is_aggregate(kind) {
+            fields.push(value);
+            continue;
+        }
+        let definition = m.aggregate_definition(value);
+        if definition == NO_VALUE {
+            return false;
+        }
+        let inst = low.program.inst(definition);
+        if kind == ScalarKind::Tuple && inst.op == Op::Tuple {
+            let count = low.program.op(inst.a);
+            if inst.n != inc(count) {
+                return false;
+            }
+            for i in 0..count {
+                let field = wrapping_sub(count, inc(i));
+                pending.push(add(m.arguments, low.program.op(add(inc(inst.a), field))));
+            }
+        } else if kind == ScalarKind::Struct && inst.op == Op::Data {
+            let node = low.ctx.types.node(inst.ty);
+            let adt = low.ctx.world.adt(low.ctx.world.lookup(node.name));
+            let variant = low.ctx.world.variant(w(adt.va));
+            let count = w(variant.fc);
+            if count == 0 {
+                // An empty struct occupies one padding cell without a value.
+                fields.push(NO_VALUE);
+            }
+            for i in 0..count {
+                let field = low.ctx.world.field(add(w(variant.fa), wrapping_sub(count, inc(i))));
+                let member = struct_member(in low, inst, field.name);
+                if member == NO_VALUE {
+                    return false;
+                }
+                pending.push(add(m.arguments, member));
+            }
+        } else {
+            return false;
+        }
+        if add(pending.len(), fields.len()) > MAX_RESULT_OFFSET / HOME_BYTES {
+            return false;
+        }
+    }
+}
+
 fn record_binding(name: u32, value: u64, inout m: Function) -> bool {
     if u32_at(in m.bindings, w(name)) != 0 {
         return false;
@@ -870,18 +952,7 @@ fn lower_local_store(in low: L, f: FnR, inst: InstRow, block: u64, inout m: Func
             if address == NO_VALUE || value == NO_VALUE {
                 return false;
             }
-            // The native ABI stores narrow signed integers as sign-extended words.
-            let stored = if is_signed(kind) && width < QWORD_BITS {
-                m.record(SIGN_EXTEND, value, width, QWORD_BITS)
-            } else {
-                value
-            };
-            let op = match kind {
-                ScalarKind::F32 => FLOAT_STORE32,
-                ScalarKind::F64 => FLOAT_STORE64,
-                _ => STORE_QWORD,
-            };
-            let _ = m.record(op, address, stored, 0);
+            m.store_addressed(address, value, kind, 0);
             return true;
         }
     }
@@ -970,7 +1041,7 @@ fn lower_call(
     }
     let callee = low.ast.function(index);
     if count != callee.param_count
-        || !sysv_signature(in low, callee)
+        || !sysv_signature(in low, callee, false)
         || scalar_kind(in low, inst.ty) != scalar_kind(in low, callee.result)
     {
         return NO_VALUE;
@@ -1278,6 +1349,25 @@ fn pack_homes(in low: L, row: FnRow, inout m: Function) {
     m.home_bytes = wrapping_mul(occupied.len(), HOME_BYTES);
 }
 
+fn plan_return(in low: L, value: u64, block: u64, inout m: Function) -> bool {
+    let kind = m.kind(value);
+    let source = add(m.arguments, value);
+    if !is_aggregate(kind) {
+        return kind == ScalarKind::Unit || m.use_in(source, block);
+    }
+    let mut fields = ChunkSeq::new[u64]();
+    if !result_fields(in low, source, in m, inout fields) {
+        return false;
+    }
+    for i in 0..fields.len() {
+        let field = fields.try_get(i).unwrap_or(NO_VALUE);
+        if field != NO_VALUE && m.value_kind(field) != ScalarKind::Unit && !m.use_in(field, block) {
+            return false;
+        }
+    }
+    true
+}
+
 // Stack homes hold branch results and the values read outside their defining block.
 fn plan_homes(in low: L, f: FnR, row: FnRow, inout m: Function) -> bool {
     let mut value_count: u64 = 0;
@@ -1425,10 +1515,7 @@ fn plan_homes(in low: L, f: FnR, row: FnRow, inout m: Function) -> bool {
                     return false;
                 }
             } else if inst.op == Op::Exit {
-                let value = low.program.op(at);
-                if m.kind(value) != ScalarKind::Unit
-                    && !m.use_in(add(f.param_count, value), block)
-                {
+                if !plan_return(in low, low.program.op(at), block, inout m) {
                     return false;
                 }
             } else if inst.op == Op::Call {
@@ -1453,7 +1540,11 @@ fn plan_homes(in low: L, f: FnR, row: FnRow, inout m: Function) -> bool {
                 }
             }
         }
-        if b.term == Term::Branch || b.term == Term::Return || b.term == Term::Match {
+        if b.term == Term::Return {
+            if !plan_return(in low, low.program.op(b.ta), block, inout m) {
+                return false;
+            }
+        } else if b.term == Term::Branch || b.term == Term::Match {
             let id = low.program.op(b.ta);
             let source = add(f.param_count, id);
             if m.kind(id) != ScalarKind::Unit && !m.use_in(source, block) {
@@ -2336,16 +2427,50 @@ fn lower_block(
     true
 }
 
-fn lower_return(result: u64, block: u64, inout m: Function) -> bool {
+fn store_result(in low: L, source: u64, block: u64, inout m: Function) -> bool {
+    let mut fields = ChunkSeq::new[u64]();
+    if !result_fields(in low, source, in m, inout fields) {
+        return false;
+    }
+    let address = if block == 0 {
+        RESULT_ADDRESS
+    } else {
+        let home = m.result_home();
+        m.load_cell(home, ScalarKind::U64)
+    };
+    for index in 0..fields.len() {
+        let field = fields.try_get(index).unwrap_or(NO_VALUE);
+        if field == NO_VALUE {
+            continue;
+        }
+        let kind = m.value_kind(field);
+        let value = if kind == ScalarKind::Unit {
+            m.record(CONSTANT, 0, 0, 0)
+        } else {
+            m.read(field, block)
+        };
+        if value == NO_VALUE {
+            return false;
+        }
+        m.store_addressed(address, value, kind, wrapping_mul(index, HOME_BYTES));
+    }
+    true
+}
+
+fn lower_return(in low: L, result: u64, block: u64, inout m: Function) -> bool {
     if m.kind(result) != m.result {
         return false;
     }
-    // The native language ABI represents a Unit return with one zero word.
-    // Calls can discard that word, even when the callee has side effects.
-    let value = if m.result == ScalarKind::Unit {
+    let source = add(m.arguments, result);
+    let aggregate = is_aggregate(m.result);
+    if aggregate && !store_result(in low, source, block, inout m) {
+        return false;
+    }
+    // Unit and aggregate returns both return zero in the integer bank.
+    let value = if m.result == ScalarKind::Unit || aggregate {
         m.record(CONSTANT, 0, 0, 0)
     } else {
-        m.read(add(m.arguments, result), block)
+        m.read(source, block)
     };
     if value == NO_VALUE {
         return false;
@@ -2431,11 +2556,11 @@ fn lower_match(in low: L, row: FnRow, b: BlockRow, block: u64, inout m: Function
 
 fn lower_terminator(in low: L, row: FnRow, b: BlockRow, block: u64, inout m: Function) -> bool {
     if b.term == Term::Return && b.tn == 1 {
-        return lower_return(low.program.op(b.ta), block, inout m);
+        return lower_return(in low, low.program.op(b.ta), block, inout m);
     } else if b.term == Term::Unreachable && b.ic != 0 {
         // The block lowerer verifies the exit belongs to this function.
         let last = low.program.inst(wrapping_sub(add(b.i0, b.ic), 1));
-        return last.op == Op::Exit && lower_return(low.program.op(last.a), block, inout m);
+        return last.op == Op::Exit && lower_return(in low, low.program.op(last.a), block, inout m);
     } else if b.term == Term::Jump {
         let target = low.program.op(b.ta);
         let label = m.label(target);
@@ -2523,6 +2648,13 @@ fn lower_entry(inout m: Function) -> bool {
         }
     }
     let mut gp: u64 = 0;
+    if is_aggregate(m.result) {
+        if m.blocks.len() > 1 {
+            let home = m.result_home();
+            m.store_cell(RESULT_ADDRESS, home, ScalarKind::U64);
+        }
+        gp = inc(gp);
+    }
     let mut float_value = float_start;
     for arg in 0..m.arguments {
         let kind = m.value_kind(arg);
@@ -2563,10 +2695,12 @@ fn lower_function(
     if row.bc == 0 {
         return ChunkSeq::new[u8]();
     }
+    let result = scalar_kind(in low, f.result);
+    let aggregate = is_aggregate(result);
     let mut m = Function {
         arguments: f.param_count,
-        gp_arguments: 0,
-        result: scalar_kind(in low, f.result),
+        gp_arguments: if aggregate { 1 } else { 0 },
+        result: result,
         words: ChunkSeq::new[u64](),
         values: ChunkSeq::new[Value](),
         kinds: ChunkSeq::new[u8](),
@@ -2597,7 +2731,12 @@ fn lower_function(
     }
     m.words.push(m.gp_arguments);
     m.words.push(NO_VALUE);
-    let frame_bytes = add(m.home_bytes, m.mutable_bytes);
+    let result_bytes = if aggregate && m.blocks.len() > 1 {
+        HOME_BYTES
+    } else {
+        0
+    };
+    let frame_bytes = add(m.result_home(), result_bytes);
     if frame_bytes != 0 {
         let _ = m.record(STACK_SLOT, frame_bytes, HOME_BYTES, 0);
     }
@@ -2629,7 +2768,9 @@ fn lower_function(
 // the requested entry. Keep the object private until every definition passes.
 pub fn compile_x86_64_elf(in low: L, entry: u32, in name: Slice[u8]) -> ChunkSeq[u8] {
     let entry_index = low.ast.fn_index(entry);
-    if entry_index >= low.ast.fns.len() || !sysv_signature(in low, low.ast.function(entry_index)) {
+    if entry_index >= low.ast.fns.len()
+        || !sysv_signature(in low, low.ast.function(entry_index), true)
+    {
         return ChunkSeq::new[u8]();
     }
     let mut rows = ChunkSeq::new[u64]();

@@ -2471,6 +2471,12 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
              let right = (right, ((), 3));\n\
              if (flags & 1) != 0 { left == right } else { left != right }\n\
          }\n\
+         copy struct ResultFields { tag: i8, single: f32, wide: f64 }\n\
+         pub fn result_value(a: i64, b: u64, c: u64, d: u64, e: u64, f: u64, flag: bool, single: f32, wide: f64) -> (u64, ResultFields, (), i64) {\n\
+             let state = ResultFields { wide: wide, single: single, tag: wrapping_i8(a) };\n\
+             if flag { return (wrapping_add(wrapping_add(e, f), b), state, (), wrapping_sub(a, 3)); };\n\
+             (twist(c, d), state, (), wrapping_add(a, 7))\n\
+         }\n\
          fn unsupported(x: u64) -> u64 { match (x, x) { (0, _) => 7, _ => 9 } }\n\
          pub fn decline(x: u64) -> u64 { unsupported(x) }\n",
     )
@@ -2674,6 +2680,14 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
         "{:?}",
         read_stage2_sidecar_notes(&object)
     );
+    let equality_object = dir.join("native-equality.o");
+    std::fs::rename(&object, &equality_object).unwrap();
+    assert_eq!(
+        compile("result_value"),
+        0,
+        "{:?}",
+        read_stage2_sidecar_notes(&object)
+    );
     let bytes = std::fs::read(&object).unwrap();
     assert_ne!(compile("decline"), 0);
     assert!(read_stage2_sidecar_notes(&object).contains("unsupported x86-64 ELF entry"));
@@ -2708,6 +2722,8 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
          extern uint64_t scalar_inout(int64_t *, uint64_t *, float *, double *, float, double, bool);\n\
          extern int64_t nested_value(int64_t, int64_t, bool);\n\
          extern bool product_equality(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);\n\
+         extern uint64_t result_value(uint64_t *, int64_t, uint64_t, uint64_t, uint64_t,\n\
+                                      uint64_t, uint64_t, bool, float, double);\n\
          int main(void) {\n\
              if (mix(10, 4) != 65 || mix(UINT64_MAX, UINT64_MAX) != UINT64_MAX - 16) return 1;\n\
              if (choose(0, 4) != 8 || choose(2, 4) != 8 || choose(4, 1) != 10\n\
@@ -2759,9 +2775,18 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
              if (nested_value(5, -3, true) != 10 || nested_value(5, -3, false) != -6\n\
                  || nested_value(INT64_MIN, 0, true) != 0) return 22;\n\
              const uint64_t nan = UINT64_C(0x7ff8000000000042);\n\
-             return !product_equality(0, UINT64_C(0x8000000000000000), 255, 511, 3)\n\
+             if (!product_equality(0, UINT64_C(0x8000000000000000), 255, 511, 3)\n\
                  || product_equality(nan, nan, 1, 1, 3) || !product_equality(nan, nan, 1, 1, 2)\n\
-                 || product_equality(0, 0, 1, 2, 3) || product_equality(0, 0, 1, 1, 1);\n\
+                 || product_equality(0, 0, 1, 2, 3) || product_equality(0, 0, 1, 1, 1)) return 23;\n\
+             uint64_t cells[] = {0, 0, UINT64_C(0x1234567800000000), 0, 9, 0, 123};\n\
+             if (result_value(cells, -2, 4, 9, 6, 7, 8, true, -2.5f, 3.0) != 0\n\
+                 || cells[0] != 19 || cells[1] != UINT64_MAX - 1\n\
+                 || cells[2] != UINT64_C(0x12345678c0200000) || cells[3] != UINT64_C(0x4008000000000000)\n\
+                 || cells[4] != 0 || cells[5] != UINT64_MAX - 4 || cells[6] != 123) return 24;\n\
+             return result_value(cells, -2, 4, 9, 6, 7, 8, false, 0.0f, -0.0) != 0\n\
+                 || cells[0] != 84 || cells[1] != UINT64_MAX - 1\n\
+                 || cells[2] != UINT64_C(0x1234567800000000) || cells[3] != UINT64_C(0x8000000000000000)\n\
+                 || cells[4] != 0 || cells[5] != 5 || cells[6] != 123;\n\
          }\n",
     )
     .unwrap();
@@ -2789,6 +2814,7 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
             &constant_object,
             &inout_object,
             &nested_object,
+            &equality_object,
             &object,
         ])
         .arg("-o")
