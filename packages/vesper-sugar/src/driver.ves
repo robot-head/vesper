@@ -33,7 +33,7 @@ use @vesper/front::kinds::{
     k_amp, k_amp_eq, k_and, k_arrow, k_caret, k_colon, k_dot, k_eff, k_eq_eq, k_ge, k_gt, k_l_brace,
     k_l_paren, k_le, k_linear, k_lower, k_lt, k_minus, k_minus_eq, k_ne, k_or, k_percent,
     k_percent_eq, k_pipe, k_pipe_eq, k_plus, k_plus_eq, k_question, k_r_brace, k_shl, k_shr,
-    k_slash, k_slash_eq, k_star, k_star_eq, k_state, k_upper, k_with
+    k_slash, k_slash_eq, k_star, k_star_eq, k_state, k_upper, k_with, k_colon_colon
 };
 use self::flow::{Rd, arg_of, clause_of, fn_of, name_byte, name_len, param_of, render, stmt_of};
 use self::hygiene::{pattern_hygiene};
@@ -2070,6 +2070,45 @@ fn visible_plan_name(inout imports: Imports, in alias: ChunkSeq[u8], target: u64
         }
     }
     imports.visible.push(target);
+}
+
+// The catalogue definition behind each import row of
+// `plan_bootstrap_sugars(caller, ..)`, in row order (the import index a
+// `ModuleSugarOutput::free` row names).
+pub fn plan_bootstrap_definitions(
+    caller: u64,
+    in bindings: ChunkSeq[PackageSugarBinding]
+) -> ChunkSeq[u64] {
+    let mut rows = ChunkSeq::new[u64]();
+    let mut aliases = ChunkSeq::new[u64]();
+    for i in 0..bindings.len() {
+        match bindings.try_get(i) {
+            Option::Some(binding) => {
+                if binding.module_index != caller {
+                    continue;
+                }
+                let mut seen = false;
+                for row in 0..rows.len() {
+                    match bindings.try_get(w64(in aliases, row)) {
+                        Option::Some(other) => {
+                            if w64(in rows, row) == binding.definition
+                                && seq_eq(in other.alias, in binding.alias)
+                            {
+                                seen = true;
+                            }
+                        },
+                        Option::None => {},
+                    }
+                }
+                if !seen {
+                    rows.push(binding.definition);
+                    aliases.push(i);
+                }
+            },
+            Option::None => {},
+        }
+    }
+    rows
 }
 
 // Bootstrap supports no authored free helper or nested expansion. Index
@@ -4703,19 +4742,151 @@ pub fn expand_bootstrap_module(
     Result::Ok(BootstrapSugarOutput { source: expanded.src, mappings: expanded.maps })
 }
 
+// Words an imported template may use outside its holes that never name a
+// module's own item: contextual keywords and the prelude every module sees
+// alike. Any other free name is reported to the caller of `expand_module`.
+const SHARED_FREE_NAMES: Str = "mut loop break continue for while as where test use model Option Some None Result Ok Err Never Str ChunkSeq Slice bool u8 u16 u32 u64 i8 i16 i32 i64 f32 f64 _";
+// The prefix of the arithmetic intrinsics every module sees.
+const SHARED_INTRINSIC_PREFIX: Str = "wrapping_";
+// Words per `ModuleSugarOutput::free` row: import, start, end.
+pub const FREE_NAME_WORDS: u64 = 3;
+
+// Whether `src[start..end]` begins with `prefix`.
+fn range_starts_with(in src: ChunkSeq[u8], start: u64, end: u64, in prefix: Slice[u8]) -> bool {
+    sub(end, start) >= prefix.len() && range_is(in src, start, add(start, prefix.len()), in prefix)
+}
+
+// Whether `[start, end)` lies inside one of region `region`'s holes or
+// capture places (the caller's own bytes, resolved in the caller's scope).
+fn in_hole(in state: St, region: u64, start: u64, end: u64) -> bool {
+    let first = rg(in state, region, 2);
+    for hole in first..add(first, rg(in state, region, 3)) {
+        if w64(in state.holes, hole << 1) <= start && end <= w64(in state.holes, inc(hole << 1)) {
+            return true;
+        }
+    }
+    let place_first = rg(in state, region, 4);
+    for place in place_first..add(place_first, rg(in state, region, 5)) {
+        let row = wrapping_mul(place, 3);
+        if w64(in state.places, row) <= start && end <= w64(in state.places, inc(row)) {
+            return true;
+        }
+    }
+    false
+}
+
+// The free names of every expansion of an imported definition in `state`
+// as `FREE_NAME_WORDS` rows (import, start, end in `state.src`), or
+// `Option::None` when one expansion holds a sugar call of its own template
+// (outside its holes): the full expander resolves that call in the
+// caller's scope, while the Rust loader resolves it in the author's.
+fn imported_free_names(in state: St, in registry: Reg) -> Option[ChunkSeq[u64]] {
+    let mut diags = diags_new();
+    let lexed = lex_sugar_raw_with_limits(
+        in state.src.as_slice(),
+        inout diags,
+        MAX_BYTES,
+        HARD_TOKENS,
+        max_diagnostics()
+    );
+    if lexed.rejected {
+        return Option::None;
+    }
+    let mut free = ChunkSeq::new[u64]();
+    for region in 0..nregs(in state) {
+        let import = df(in registry, rg(in state, region, 6), 13);
+        if import == NONE {
+            continue;
+        }
+        let start = rg(in state, region, 0);
+        let end = rg(in state, region, 1);
+        // A call the caller wrote maps back to its own bytes, after this
+        // call's head; a call of the template maps back to the call's start.
+        for other in 0..nregs(in state) {
+            if other != region
+                && start <= rg(in state, other, 0)
+                && rg(in state, other, 1) <= end
+                && rg(in state, other, 7) <= rg(in state, region, 7)
+            {
+                return Option::None;
+            }
+        }
+        let mut prior: u8 = 0;
+        for i in 0..lexed.kind.len() {
+            let kind = b8(in lexed.kind, i);
+            if trivia_kind(kind) {
+                continue;
+            }
+            let token_start = w32(in lexed.start, i);
+            let token_stop = token_end(in lexed, i);
+            let after = prior;
+            prior = kind;
+            if token_start < start
+                || token_stop > end
+                || (kind != k_lower() && kind != k_upper())
+                || after == k_dot()
+                || after == k_colon_colon()
+                || in_hole(in state, region, token_start, token_stop)
+                || range_starts_with(
+                    in state.src,
+                    token_start,
+                    token_stop,
+                    in state.mark.as_slice()
+                )
+                || range_starts_with(
+                    in state.src,
+                    token_start,
+                    token_stop,
+                    in SHARED_INTRINSIC_PREFIX.as_bytes()
+                )
+                || bootstrap_word_in(in state.src, token_start, token_stop, in SHARED_FREE_NAMES)
+            {
+                continue;
+            }
+            free.push(import);
+            free.push(token_start);
+            free.push(token_stop);
+        }
+    }
+    Option::Some(free)
+}
+
+pub struct ModuleSugarOutput {
+    pub source: ChunkSeq[u8],
+    // Rows of (expanded start/end, original start/end, copied).
+    pub mappings: ChunkSeq[u64],
+    // The free names imported templates use (`imported_free_names`). The
+    // Rust loader resolves them at the defining module, so the caller
+    // keeps the expansion only when neither module binds one.
+    pub free: ChunkSeq[u64],
+}
+
 // `expand` for a module the bootstrap path refuses (a rule with a
 // repetition or a fragment sort other than `expr`, which
 // `match_bootstrap_scalar_encoded` leaves to the full matcher): the
-// expanded source and its mappings, in the bootstrap path's shape.
+// expanded source, its mappings and the free names of its imported
+// templates.
 pub fn expand_module(
     in source: ChunkSeq[u8],
     in imports: Imports
-) -> Result[BootstrapSugarOutput, Dg] {
+) -> Result[ModuleSugarOutput, Dg] {
     let expanded = expand(in source, in imports, false);
     if expanded.diag.failed {
         return Result::Err(expanded.diag);
     }
-    Result::Ok(BootstrapSugarOutput { source: expanded.state.src, mappings: expanded.state.maps })
+    let free = match imported_free_names(in expanded.state, in expanded.registry) {
+        Option::Some(free) => free,
+        Option::None => return Result::Err(diag(
+            in "an imported sugar template calls sugar in its defining module's scope",
+            0,
+            source.len()
+        )),
+    };
+    Result::Ok(ModuleSugarOutput {
+        source: expanded.state.src,
+        mappings: expanded.state.maps,
+        free: free
+    })
 }
 
 test {
