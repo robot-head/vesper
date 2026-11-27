@@ -1262,8 +1262,16 @@ pub mod body {
     /// call (part 6b), or [`NO_CALLEE`]; then `sret, h, h values`: the
     /// result pointer's value word, or [`NO_VALUE`] for a function that
     /// returns its value, and the values (by index in the graph's values)
-    /// that `aggregates::plan` builds in it (#2411). No result.
+    /// that `aggregates::plan` builds in it (#2411). A function that
+    /// returns its result in registers (`FnAbi::result_words`, #2581)
+    /// builds it in a local buffer: its `sret` word is the buffer's value
+    /// with the result's word count at [`RESULT_WORDS_SHIFT`]. No result.
     pub const FUNCTION: u32 = 1;
+
+    /// Where a [`FUNCTION`] request's `sret` word carries the number of
+    /// words a register result returns from its buffer (0 for a result
+    /// pointer); the value's own word is below it.
+    pub const RESULT_WORDS_SHIFT: u32 = 32;
 
     /// A [`FUNCTION`] request's `sret` word when the function has no result
     /// pointer.
