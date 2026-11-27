@@ -2113,7 +2113,9 @@ pub fn emit_body_words(
                 address = at32(in pointers, p);
             }
         } else if entry == LANE_PRODUCT {
+            // A product local's register holds its storage's address.
             s.locals.push(zeroed(inout b, LANE_I64));
+            spilled = false;
         } else {
             s.locals.push(zeroed(inout b, entry));
         }
