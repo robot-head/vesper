@@ -21,7 +21,7 @@ mod export_words;
 #[path = "../../../../tests/self_host_codegen_export/plan_words.rs"]
 mod plan_words;
 
-use super::{Registry, Swap, on, open};
+use super::{Registry, Swap, on, open, pass};
 
 /// Libraries whose v2 glue the Vesper export module emitted, and declined.
 static EXPORT_CALLS: AtomicU64 = AtomicU64::new(0);
@@ -103,7 +103,7 @@ fn vesper_export(
 
 /// The flip-gate rows of this file's swaps (`swaps::on`).
 pub(super) const SWAPS: &[Swap] = &[
-    open("export", "no flip-gate configuration"),
+    pass("export", "codegen-export", "#2647"),
     open("plan", "no flip-gate configuration"),
     open("interface_json", "no flip-gate configuration"),
 ];

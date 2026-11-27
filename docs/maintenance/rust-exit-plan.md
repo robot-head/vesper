@@ -329,3 +329,4 @@ the Rust lines deleted.
 | `codegen-calls` (PASS; compiler module, `src/native.rs` goes at the retirement) | SH4-5 | 0 differences; tests pass | discovery-entry 0.06x n=12 | 0 (at the retirement) | #2572 |
 | `block-plan` (PASS; compiler module, `src/native.rs` goes at the retirement) | SH4-11 | 0 differences; tests pass | block-plans 0.87x n=12 | 0 (at the retirement) | #2617 |
 | `ffi-lowering` (PASS; compiler module, `src/ffi_lowering.rs` goes at the retirement) | SH4-10 | 0 differences; tests pass | ffi-type-mapping 0.33x n=12 | 0 (at the retirement) | #2617 |
+| `codegen-export` (PASS; compiler module, `src/native_export.rs` goes at the retirement) | SH4-12 | 0 differences; tests pass | binding-generator-with-encode-and-unpack 1.45x n=12 | 0 (at the retirement) | #2647 |
