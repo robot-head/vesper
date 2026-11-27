@@ -1,10 +1,9 @@
-// @vesper/driver-commands's import (self-hosting SH5 lane 13, #1336): the
-// hybrid compiler's Rust, crates/vesper-hybrid/src/commands.rs (`host`):
-// the command engines the Vesper layers call (the routing in front of them
-// is over @vesper-std since #1996).
-// Text comes back with the copy-out protocol of @vesper-std: a call
-// returns the length `n` (negative for none) and copies only when `buf`
-// is big enough.
+// @vesper/driver-engines's import on native targets (self-hosting SH5 lane
+// 13, #1336, #1996): the hybrid compiler's Rust,
+// crates/vesper-hybrid/src/commands.rs (`host`), the command engines that
+// are not Vesper yet. Error text comes back with the copy-out protocol of
+// @vesper-std: a call returns the length `n` and copies only when `buf` is
+// big enough. The linux, macos and windows files are the same.
 sys library HybridCommands (
     target = "@TARGET@", abi = "@ABI@",
     link = "static", name = "vesper_hybrid",
@@ -23,10 +22,8 @@ sys library HybridCommands (
     fn hc_ebpf_check(nocapture in path: CSlice[u8], load: bool, disassemble: bool, budget: u64) -> ForeignVal[u64];
     fn hc_ebpf_err(nocapture inout buf: CSlice[u8]) -> ForeignVal[u64];
     fn hc_test_run(nocapture in packed: CSlice[u8]) -> ForeignVal[u64];
-    fn hc_test_json_err(nocapture in message: CSlice[u8]) -> ForeignVal[Unit];
     fn hc_test_err(nocapture inout buf: CSlice[u8]) -> ForeignVal[u64];
     fn hc_doc_run(nocapture in packed: CSlice[u8]) -> ForeignVal[u64];
-    fn hc_doc_json_err(nocapture in message: CSlice[u8]) -> ForeignVal[u64];
     fn hc_doc_err(nocapture inout buf: CSlice[u8]) -> ForeignVal[u64];
     fn hc_lint_run(
         has_path: bool,

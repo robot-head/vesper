@@ -1,0 +1,128 @@
+// @vesper/driver-engines on native targets (#1996): each command engine
+// `vesper` still runs in the Rust compiler, as one call. A call runs the
+// engine (which prints its own output) and returns its error text, empty
+// when it succeeded; the caller reports it as `vesper: <error>`.
+
+// Which engine's error `take_error` copies out.
+copy enum Engine {
+    Forge,
+    Ebpf,
+    Test,
+    Doc,
+    Lint,
+    Verify,
+    Lsp
+}
+
+// `vesper forge <check|expand|lean>` after argument parsing
+// (`src/forge_commands.rs`): `action` 0 check, 1 expand, 2 lean.
+pub fn forge_run(
+    action: u32,
+    in input: Slice[u8],
+    in package: Slice[u8],
+    has_policy: bool,
+    in policy: Slice[u8],
+    has_provenance: bool,
+    in provenance: Slice[u8]
+) -> ChunkSeq[u8] eff [Ffi[HybridCommands]] {
+    let n = HybridCommands::hc_forge_run(
+        action,
+        in input,
+        in package,
+        has_policy,
+        in policy,
+        has_provenance,
+        in provenance
+    );
+    take_error(Engine::Forge, n)
+}
+
+// `vesper ebpf check` on `path` (`src/ebpf_commands.rs`).
+pub fn ebpf_check(
+    in path: Slice[u8],
+    load: bool,
+    disassemble: bool,
+    budget: u64
+) -> ChunkSeq[u8] eff [Ffi[HybridCommands]] {
+    let n = HybridCommands::hc_ebpf_check(in path, load, disassemble, budget);
+    take_error(Engine::Ebpf, n)
+}
+
+// `vesper test` with its arguments, each ended by a NUL byte
+// (`src/doctest_commands.rs`).
+pub fn test_run(in packed: Slice[u8]) -> ChunkSeq[u8] eff [Ffi[HybridCommands]] {
+    let n = HybridCommands::hc_test_run(in packed);
+    take_error(Engine::Test, n)
+}
+
+// `vesper doc` with its arguments, each ended by a NUL byte
+// (`src/doc_commands.rs`).
+pub fn doc_run(in packed: Slice[u8]) -> ChunkSeq[u8] eff [Ffi[HybridCommands]] {
+    let n = HybridCommands::hc_doc_run(in packed);
+    take_error(Engine::Doc, n)
+}
+
+// `vesper lint` after argument parsing (`src/lint_commands.rs`).
+pub fn lint_run(
+    has_path: bool,
+    in path: Slice[u8],
+    fix: bool,
+    semver_safe: bool,
+    json: bool,
+    has_config: bool,
+    in config: Slice[u8]
+) -> ChunkSeq[u8] eff [Ffi[HybridCommands]] {
+    let n = HybridCommands::hc_lint_run(
+        has_path,
+        in path,
+        fix,
+        semver_safe,
+        json,
+        has_config,
+        in config
+    );
+    take_error(Engine::Lint, n)
+}
+
+// `vesper verify SOURCE --extract` with its arguments, each ended by a NUL
+// byte (`src/verify_commands.rs`).
+pub fn verify_run(in packed: Slice[u8]) -> ChunkSeq[u8] eff [Ffi[HybridCommands]] {
+    let n = HybridCommands::hc_verify_run(in packed);
+    take_error(Engine::Verify, n)
+}
+
+// `vesper lsp` over stdin and stdout (`src/lsp.rs::serve`).
+pub fn lsp_serve() -> ChunkSeq[u8] eff [Ffi[HybridCommands]] {
+    let n = HybridCommands::hc_lsp_serve();
+    take_error(Engine::Lsp, n)
+}
+
+// The error an engine call stored, `n` bytes long (none when `n` is 0),
+// copied out with the copy-out protocol: a second copy when the text grew.
+fn take_error(engine: Engine, n: u64) -> ChunkSeq[u8] eff [Ffi[HybridCommands]] {
+    let mut err: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    if n == 0 {
+        return err;
+    }
+    err.resize(n, 0);
+    let actual = copy_error(engine, inout err);
+    if actual > err.len() {
+        err.resize(actual, 0);
+        let _got = copy_error(engine, inout err);
+    } else {
+        err.truncate(actual);
+    }
+    err
+}
+
+fn copy_error(engine: Engine, inout err: ChunkSeq[u8]) -> u64 eff [Ffi[HybridCommands]] {
+    match engine {
+        Engine::Forge => HybridCommands::hc_forge_err(inout err.as_slice_mut()),
+        Engine::Ebpf => HybridCommands::hc_ebpf_err(inout err.as_slice_mut()),
+        Engine::Test => HybridCommands::hc_test_err(inout err.as_slice_mut()),
+        Engine::Doc => HybridCommands::hc_doc_err(inout err.as_slice_mut()),
+        Engine::Lint => HybridCommands::hc_lint_err(inout err.as_slice_mut()),
+        Engine::Verify => HybridCommands::hc_verify_err(inout err.as_slice_mut()),
+        Engine::Lsp => HybridCommands::hc_lsp_err(inout err.as_slice_mut()),
+    }
+}

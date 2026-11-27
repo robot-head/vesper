@@ -264,6 +264,8 @@ impl L {
             6
         } else if name == self.ctx.syms.ffi_blake3 {
             7
+        } else if name == self.ctx.syms.ffi_hybrid_commands {
+            8
         } else {
             return false;
         };

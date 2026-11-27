@@ -2228,15 +2228,28 @@ vesper_package(
     deps = [":std_fmt_package"],
 )
 
+# @vesper/driver-engines, the command engines `vesper` still runs in Rust,
+# with the `HybridCommands` import (refused on wasm32-wasip2, #1996).
+vesper_package(
+    name = "driver_engines_package",
+    srcs = glob([
+        "packages/vesper-driver-engines/src/**/*.ves",
+        "packages/vesper-driver-engines/src-wasip2/**/*.ves",
+    ]),
+    manifest = "packages/vesper-driver-engines/Loom.toml",
+    visibility = ["//visibility:public"],
+    vsys = glob(["packages/vesper-driver-engines/commands-*.vsys"]),
+)
+
 # @vesper/driver-commands, the command layers the hybrid's driver hands on
-# (self-hosting SH5 lane 13, #1336), with its `HybridCommands` import.
+# (self-hosting SH5 lane 13, #1336).
 vesper_package(
     name = "driver_commands_package",
     srcs = glob(["packages/vesper-driver-commands/src/**/*.ves"]),
     manifest = "packages/vesper-driver-commands/Loom.toml",
     visibility = ["//visibility:public"],
-    vsys = ["packages/vesper-driver-commands/commands.vsys"],
     deps = [
+        ":driver_engines_package",
         ":driver_package",
         ":proof_audit_package",
         ":std_env_package",

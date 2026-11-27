@@ -313,7 +313,7 @@ fn write_stream(stream: u32, in text: Slice[u8]) eff [Ffi[StdFs], Fail[PrintFail
 
 // `String::from_utf8_lossy`: each maximal ill-formed subpart of `bytes`
 // becomes U+FFFD (as `Utf8Chunks` splits it).
-fn lossy(in bytes: Slice[u8]) -> ChunkSeq[u8] {
+pub fn lossy(in bytes: Slice[u8]) -> ChunkSeq[u8] {
     let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
     let mut i: u64 = 0;
     loop {
@@ -1101,7 +1101,7 @@ fn hex_digit(nibble: u8) -> u8 {
 
 // A JSON string as serde_json writes it: `"` and `\` escaped, the control
 // bytes as `\b \f \n \r \t` or `\u00xx`, everything else as is.
-fn json_string(inout out: ChunkSeq[u8], in text: Slice[u8]) {
+pub fn json_string(inout out: ChunkSeq[u8], in text: Slice[u8]) {
     out.push(Ascii::DoubleQuote);
     for i in 0..text.len() {
         let byte = byte_at(in text, i);
@@ -1133,7 +1133,7 @@ fn json_string(inout out: ChunkSeq[u8], in text: Slice[u8]) {
 }
 
 // `"key":` (after a `,` unless it is the object's first key).
-fn json_key(inout out: ChunkSeq[u8], in key: Str, first: bool) {
+pub fn json_key(inout out: ChunkSeq[u8], in key: Str, first: bool) {
     if !first {
         out.push(44);
     }

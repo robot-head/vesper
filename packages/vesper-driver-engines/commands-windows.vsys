@@ -1,0 +1,42 @@
+// @vesper/driver-engines's import on native targets (self-hosting SH5 lane
+// 13, #1336, #1996): the hybrid compiler's Rust,
+// crates/vesper-hybrid/src/commands.rs (`host`), the command engines that
+// are not Vesper yet. Error text comes back with the copy-out protocol of
+// @vesper-std: a call returns the length `n` and copies only when `buf` is
+// big enough. The linux, macos and windows files are the same.
+sys library HybridCommands (
+    target = "@TARGET@", abi = "@ABI@",
+    link = "static", name = "vesper_hybrid",
+    artifact = "blake3:0000000000000000000000000000000000000000000000000000000000000000"
+) {
+    fn hc_forge_run(
+        action: u32,
+        nocapture in input: CSlice[u8],
+        nocapture in package: CSlice[u8],
+        has_policy: bool,
+        nocapture in policy: CSlice[u8],
+        has_provenance: bool,
+        nocapture in provenance: CSlice[u8]
+    ) -> ForeignVal[u64];
+    fn hc_forge_err(nocapture inout buf: CSlice[u8]) -> ForeignVal[u64];
+    fn hc_ebpf_check(nocapture in path: CSlice[u8], load: bool, disassemble: bool, budget: u64) -> ForeignVal[u64];
+    fn hc_ebpf_err(nocapture inout buf: CSlice[u8]) -> ForeignVal[u64];
+    fn hc_test_run(nocapture in packed: CSlice[u8]) -> ForeignVal[u64];
+    fn hc_test_err(nocapture inout buf: CSlice[u8]) -> ForeignVal[u64];
+    fn hc_doc_run(nocapture in packed: CSlice[u8]) -> ForeignVal[u64];
+    fn hc_doc_err(nocapture inout buf: CSlice[u8]) -> ForeignVal[u64];
+    fn hc_lint_run(
+        has_path: bool,
+        nocapture in path: CSlice[u8],
+        fix: bool,
+        semver_safe: bool,
+        json: bool,
+        has_config: bool,
+        nocapture in config: CSlice[u8]
+    ) -> ForeignVal[u64];
+    fn hc_lint_err(nocapture inout buf: CSlice[u8]) -> ForeignVal[u64];
+    fn hc_verify_run(nocapture in packed: CSlice[u8]) -> ForeignVal[u64];
+    fn hc_verify_err(nocapture inout buf: CSlice[u8]) -> ForeignVal[u64];
+    fn hc_lsp_serve() -> ForeignVal[u64];
+    fn hc_lsp_err(nocapture inout buf: CSlice[u8]) -> ForeignVal[u64];
+}

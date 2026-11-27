@@ -1,0 +1,68 @@
+// @vesper/driver-engines on wasm32-wasip2 (#1996): the same interface as
+// src/ with every engine refused. The engines are the Rust compiler's, and
+// a WASI component has no Rust compiler, so each call returns the error
+// `vesper` reports instead of running one. The `HybridCommands` library of
+// commands-wasip2.vsys declares no functions; the Wasm backend lowers
+// `Ffi[HybridCommands]` to nothing. An engine whose Vesper port lands
+// leaves both files.
+
+pub fn forge_run(
+    _action: u32,
+    in _input: Slice[u8],
+    in _package: Slice[u8],
+    _has_policy: bool,
+    in _policy: Slice[u8],
+    _has_provenance: bool,
+    in _provenance: Slice[u8]
+) -> ChunkSeq[u8] eff [Ffi[HybridCommands]] {
+    refused(in "forge")
+}
+
+pub fn ebpf_check(
+    in _path: Slice[u8],
+    _load: bool,
+    _disassemble: bool,
+    _budget: u64
+) -> ChunkSeq[u8] eff [Ffi[HybridCommands]] {
+    refused(in "ebpf check")
+}
+
+pub fn test_run(in _packed: Slice[u8]) -> ChunkSeq[u8] eff [Ffi[HybridCommands]] {
+    refused(in "test")
+}
+
+pub fn doc_run(in _packed: Slice[u8]) -> ChunkSeq[u8] eff [Ffi[HybridCommands]] {
+    refused(in "doc")
+}
+
+pub fn lint_run(
+    _has_path: bool,
+    in _path: Slice[u8],
+    _fix: bool,
+    _semver_safe: bool,
+    _json: bool,
+    _has_config: bool,
+    in _config: Slice[u8]
+) -> ChunkSeq[u8] eff [Ffi[HybridCommands]] {
+    refused(in "lint")
+}
+
+pub fn verify_run(in _packed: Slice[u8]) -> ChunkSeq[u8] eff [Ffi[HybridCommands]] {
+    refused(in "verify --extract")
+}
+
+pub fn lsp_serve() -> ChunkSeq[u8] eff [Ffi[HybridCommands]] {
+    refused(in "lsp")
+}
+
+// `vesper <command>` is not in this build: its engine is still Rust.
+fn refused(in command: Str) -> ChunkSeq[u8] {
+    let mut err: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    err.extend(in "`vesper ".as_bytes());
+    err.extend(in command.as_bytes());
+    err.extend(
+        in "` is not available in a wasm32-wasip2 build: its engine is still the Rust compiler's (#1996)"
+            .as_bytes()
+    );
+    err
+}

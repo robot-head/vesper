@@ -103,6 +103,9 @@ pub copy struct Syms {
     ffi_fs: u32,
     ffi_proc: u32,
     ffi_blake3: u32,
+    // `Ffi[HybridCommands]` (@vesper/driver-engines, #1996): no functions
+    // on WASI
+    ffi_hybrid_commands: u32,
     // `Ffi[Cranelift]` (packages/vesper-cranelift): component imports
     // (src/vcl_host.ves)
     ffi_cranelift: u32,
@@ -143,6 +146,7 @@ pub fn syms_new(inout n: Names) -> Syms {
         ffi_fs: n.intern(in "Ffi$StdFs".as_bytes()),
         ffi_proc: n.intern(in "Ffi$StdProcess".as_bytes()),
         ffi_blake3: n.intern(in "Ffi$Blake3".as_bytes()),
+        ffi_hybrid_commands: n.intern(in "Ffi$HybridCommands".as_bytes()),
         ffi_cranelift: n.intern(in "Ffi$Cranelift".as_bytes()),
         eq: n.intern(in "=".as_bytes()),
         empty: n.intern(in "".as_bytes()),
@@ -914,13 +918,16 @@ fn capabilities(inout ctx: Cx, inout out: ChunkSeq[u8], entry: u32) eff [Fail[WE
         }
         // The standard I/O libraries become WASI calls (src/host.ves).
         // StdProcess has no functions on WASI (@vesper-std/process's
-        // src-wasip2 refuses every start itself), so it imports nothing.
+        // src-wasip2 refuses every start itself), so it imports nothing;
+        // nor does HybridCommands (@vesper/driver-engines' src-wasip2
+        // refuses every engine, #1996).
         // Cranelift calls are imports of `vesper:cranelift/vcl` (#2210).
         if effect.name == ctx.syms.ffi_env
             || effect.name == ctx.syms.ffi_fs
             || effect.name == ctx.syms.ffi_proc
             || effect.name == ctx.syms.ffi_cranelift
             || effect.name == ctx.syms.ffi_blake3
+            || effect.name == ctx.syms.ffi_hybrid_commands
         {
             let code: u8 = if effect.name == ctx.syms.ffi_env {
                 3
@@ -930,8 +937,10 @@ fn capabilities(inout ctx: Cx, inout out: ChunkSeq[u8], entry: u32) eff [Fail[WE
                 5
             } else if effect.name == ctx.syms.ffi_cranelift {
                 6
-            } else {
+            } else if effect.name == ctx.syms.ffi_blake3 {
                 7
+            } else {
+                8
             };
             let mut seen = false;
             for j in 0..out.len() {

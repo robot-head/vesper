@@ -1,0 +1,13 @@
+// @vesper/driver-engines's import on wasm32-wasip2 (#1996): none. The
+// engines are the Rust compiler's, which a WASI component does not have,
+// so src-wasip2/lib.ves refuses each one itself and calls no function of
+// this library; it is here so that `Ffi[HybridCommands]` names the same
+// library on every target. A library declares at least one item: the
+// number of engines it still fronts on native targets.
+sys library HybridCommands (
+    target = "@TARGET@", abi = "@ABI@",
+    link = "static", name = "vesper_hybrid",
+    artifact = "blake3:0000000000000000000000000000000000000000000000000000000000000000"
+) {
+    const ENGINES: u32 = 7;
+}
