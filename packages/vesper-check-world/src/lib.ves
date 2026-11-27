@@ -56,6 +56,7 @@ const E_LOOP: u64 = 19;
 const E_BREAK: u64 = 20;
 const E_CONTINUE: u64 = 21;
 const E_HANDLE: u64 = 22;
+const E_TRY: u64 = 23;
 const E_INDEX: u64 = 40;
 
 // Statement kinds of the stream.
@@ -95,6 +96,7 @@ const X_BLOCK: u8 = 5;
 const X_CALL: u8 = 6;
 const X_FIELD: u8 = 7;
 const X_INDEX: u8 = 8;
+const X_TRY: u8 = 9;
 const X_UNARY: u8 = 10;
 const X_BINARY: u8 = 11;
 const X_ASSIGN: u8 = 12;
@@ -1157,6 +1159,9 @@ fn expr(inout e: Enc, in a: Ast, x: u32, shift: u32, fip: bool, inout out: Chunk
         if n.a != none() {
             expr(inout e, in a, n.a, shift, fip, inout out);
         }
+    } else if n.kind == X_TRY {
+        head(E_TRY, s, t, inout out);
+        expr(inout e, in a, n.a, shift, fip, inout out);
     } else if n.kind == X_CONTINUE {
         head(E_CONTINUE, s, t, inout out);
     } else if n.kind == X_HANDLE {
@@ -1168,6 +1173,8 @@ fn expr(inout e: Enc, in a: Ast, x: u32, shift: u32, fip: bool, inout out: Chunk
         for i in 0..k {
             out.push(ty(inout e, in a, list_at(in a, eff.args, i), in off()));
         }
+        // The handler's inferred effects: not known before inference.
+        out.push(0);
         out.push(flag(n.b != none()));
         if n.b != none() {
             pattern(inout e, in a, n.b, shift, inout out);

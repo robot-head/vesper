@@ -82,8 +82,15 @@ const E_BREAK: u8 = 20;
 const E_CONTINUE: u8 = 21;
 // `handle Eff[args] { body } with { return(p) => .., op(ps) => .. }`: y =
 // effect, b/m = its type arguments, z = state value (NONE32 without one,
-// its pattern in mag), x = body, a/n = clauses (the return clause first).
+// its pattern in mag's low half), x = body, a/n = clauses (the return
+// clause first); mag's high half is the row type of the handler's inferred
+// effects + 1, or 0 before inference.
 const E_HANDLE: u8 = 22;
+// `e?`: x = e.
+const E_TRY: u8 = 23;
+const OPTION_NAME: Str = "Option";
+const RESULT_NAME: Str = "Result";
+const HANDLER_ROW_SHIFT: u64 = 32;
 
 // `numeric::WRAPPING_INTRINSICS`.
 const WRAPPING_ADD: Str = "wrapping_add";
@@ -808,6 +815,8 @@ fn read_expr(inout reader: Reader, in bytes: Slice[u8], inout ck: Ck) -> u32 {
         if ex.y != 0 {
             ex.b = read_expr(inout reader, in bytes, inout ck);
         }
+    } else if kind == E_TRY {
+        ex.x = read_expr(inout reader, in bytes, inout ck);
     } else if kind == E_HANDLE {
         ex.y = sym(in ck.ctx, reader.word(in bytes));
         let targ_count = reader.word(in bytes);
@@ -816,8 +825,13 @@ fn read_expr(inout reader: Reader, in bytes: Slice[u8], inout ck: Ck) -> u32 {
         for i in 0..targ_count {
             ck.targs.push(tyw(in ck.ctx, reader.word(in bytes)));
         }
+        let effects_word = reader.word(in bytes);
+        if effects_word != 0 {
+            let row_ty = tyw(in ck.ctx, wrapping_sub(effects_word, 1));
+            ex.mag = w(inc32w(row_ty)) << HANDLER_ROW_SHIFT;
+        }
         if reader.word(in bytes) != 0 {
-            ex.mag = w(read_xpat(inout reader, in bytes, inout ck));
+            ex.mag = ex.mag | w(read_xpat(inout reader, in bytes, inout ck));
             ex.z = read_expr(inout reader, in bytes, inout ck);
         }
         ex.x = read_expr(inout reader, in bytes, inout ck);
@@ -1255,6 +1269,8 @@ pub fn expr_expected(inout ck: Ck, e: u32, expected: u32) -> u32 {
         for_expr(inout ck, ex)
     } else if ex.kind == E_BREAK {
         break_expr(inout ck, ex)
+    } else if ex.kind == E_TRY {
+        try_expr(inout ck, ex, expected)
     } else if ex.kind == E_CONTINUE {
         if ck.loops.len() <= ck.loop_floor {
             // E0213 outside a loop, or leaving a handler: not ported.
@@ -1787,7 +1803,7 @@ fn name_expr(inout ck: Ck, e: u32, ex: Ex, expected: u32) -> u32 {
     let bind_index = lookup(in ck, ex.x);
     if bind_index != NONE32 {
         // `place` on the whole binding (modes and moves: part 3). A
-        // handler's continuation has a function type: not ported.
+        // handler's continuation whose row is unknown skips.
         let bound = binding(in ck, bind_index);
         if foreign(in ck, bound.ty) || bound.pat == CONTINUATION {
             ck.skip = true;
@@ -2696,6 +2712,64 @@ fn match_expr(inout ck: Ck, ex: Ex, expected: u32) -> u32 {
     result
 }
 
+// `e?` (`ExprKind::Try`): on `Result[T, E]` it is `T` (it performs
+// `Fail[E]`, whose capability this checker does not resolve), `Unit` when
+// nothing gives `T`; on `Option[T]` it is `T` in a function returning
+// `Option` (`try_option`).
+fn try_expr(inout ck: Ck, ex: Ex, expected: u32) -> u32 {
+    let hole = ck.ctx.types.infer;
+    let result_sym = ck.ctx.names.intern(in RESULT_NAME.as_bytes());
+    let option_sym = ck.ctx.names.intern(in OPTION_NAME.as_bytes());
+    let target = if expected != hole {
+        let mut targs: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        targs.push(expected);
+        targs.push(hole);
+        ck.ctx.types.named(result_sym, in targs)
+    } else {
+        hole
+    };
+    let ty = expr_expected(inout ck, ex.x, target);
+    if ck.skip {
+        return hole;
+    }
+    let node = ck.ctx.types.node(ty);
+    if node.kind == TyKind::Named && node.name == option_sym && node.n == 1 {
+        return try_option(inout ck, ex, ck.ctx.types.arg(ty, 0));
+    }
+    if node.kind != TyKind::Named || node.name != result_sym || node.n != 2 {
+        error(inout ck, "E0200", ex.start, ex.end);
+        return hole;
+    }
+    let ok = ck.ctx.types.arg(ty, 0);
+    if ok != hole {
+        return ok;
+    }
+    // `Err(e)?`: the operand never succeeds, so its `Ok` payload is `Unit`.
+    let unit = ck.ctx.types.unit;
+    let mut targs: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    targs.push(unit);
+    targs.push(ck.ctx.types.arg(ty, 1));
+    let constrained = ck.ctx.types.named(result_sym, in targs);
+    constrain_literals(inout ck, ex.x, constrained);
+    unit
+}
+
+// `Checker::try_option`: the enclosing function must return `Option`.
+fn try_option(inout ck: Ck, ex: Ex, payload: u32) -> u32 {
+    let hole = ck.ctx.types.infer;
+    let option_sym = ck.ctx.names.intern(in OPTION_NAME.as_bytes());
+    let result = ck.fn_result;
+    let result_node = ck.ctx.types.node(result);
+    let returns_option = result_node.kind == TyKind::Named
+        && result_node.name == option_sym
+        && result_node.n == 1;
+    if !returns_option && result != hole {
+        error(inout ck, "E0200", ex.start, ex.end);
+        return hole;
+    }
+    payload
+}
+
 // `Checker::constrain_literals`.
 pub fn constrain_literals(inout ck: Ck, e: u32, target: u32) {
     let actual = u32_at(in ck.ex_types, w(e));
@@ -2844,6 +2918,16 @@ fn holds_wide(in ck: Ck, ty: u32) -> bool {
 fn handle_expr(inout ck: Ck, ex: Ex, expected: u32) -> u32 {
     let hole = ck.ctx.types.infer;
     let known = ck.ctx.world.k;
+    // The continuation's row is the effects observed so far joined with
+    // the inferred ones (`resume_effects`), whose order this checker does
+    // not track: a row of several instances is treated as unknown.
+    let mut handler_row = wrapping_sub(n32(ex.mag >> HANDLER_ROW_SHIFT), 1);
+    if handler_row != NONE32 {
+        let row_id = ck.ctx.types.node(handler_row).r2;
+        if ck.ctx.types.row(row_id).n > 1 {
+            handler_row = NONE32;
+        }
+    }
     let decl = effect_decl(in ck, ex.y);
     // A region block (`regions::region_block`) is lane 12's.
     if decl.name == NONE32 || is_qualified(in ck, ex.y, REGION_EFFECT) {
@@ -2953,11 +3037,32 @@ fn handle_expr(inout ck: Ck, ex: Ex, expected: u32) -> u32 {
             ts.push(state_ty);
             passes.push(P_SINK);
         }
-        // The continuation: a function type (not ported, so a clause that
-        // uses it skips at the use).
+        // The continuation: `fn(sink result, sink state) -> out` with the
+        // handler's inferred effects, linear for a linear effect. Before
+        // inference its row is unknown, so a clause that uses it skips at
+        // the use.
         let mut resume: ChunkSeq[u32] = ChunkSeq::new[u32]();
         resume.push(substitute(inout ck.ctx.types, sig.result, in vars));
-        let continuation = ck.ctx.types.mk(TyKind::Fn, 0, 0, in resume, out, 0, 0);
+        let continuation = if handler_row == NONE32 {
+            ck.ctx.types.mk(TyKind::Fn, 0, 0, in resume, out, 0, 0)
+        } else {
+            let mut resume_passes: ChunkSeq[u8] = ChunkSeq::new[u8]();
+            resume_passes.push(P_SINK);
+            if ex.z != NONE32 {
+                resume.push(state_ty);
+                resume_passes.push(P_SINK);
+            }
+            let effect_index = ck.ctx.world.effect_index(decl.name);
+            let resume_mode = if ck.ctx.world.effect_row(effect_index).linear {
+                TyMode::Linear
+            } else {
+                TyMode::Affine
+            };
+            let row = ck.ctx.types.node(handler_row).r2;
+            ck.ctx
+                .types
+                .mk_with(TyKind::Fn, resume_mode, 0, in resume, in resume_passes, out, row, 0)
+        };
         ts.push(continuation);
         passes.push(P_SINK);
         if w(clause.pat_count) != ts.len() {
@@ -2974,7 +3079,7 @@ fn handle_expr(inout ck: Ck, ex: Ex, expected: u32) -> u32 {
                 let extra = ck.patx(pat);
                 error(inout ck, "E0210", extra.start, extra.end);
             }
-            if ck.ctx.types.kind(ty) == TyKind::Fn {
+            if ck.ctx.types.kind(ty) == TyKind::Fn && handler_row == NONE32 {
                 bind_continuation(inout ck, pat, ty);
             } else {
                 let pass = match passes.try_get(i) {
@@ -3020,8 +3125,8 @@ fn clause_pattern(inout ck: Ck, pat: u32, ty: u32) -> bool {
     irrefutable(inout ck.ctx.types, inout ck.ctx.names, in ck.ctx.world, inout ck.pats, pat, ty)
 }
 
-// Binds a continuation pattern: a name gets the function type without
-// `note` (a use of it skips in `name_expr`).
+// Binds a continuation pattern whose row is unknown: a name gets the
+// function type without `note` (a use of it skips in `name_expr`).
 fn bind_continuation(inout ck: Ck, pat: u32, ty: u32) {
     let p = ck.pats.pat(pat);
     if p.kind == P_BIND {
