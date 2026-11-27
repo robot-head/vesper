@@ -207,6 +207,7 @@ enum IntegerOp {
     VectorFloatMul = 187,
     VectorFloatDiv = 188,
     VectorFloatSqrt = 189,
+    VectorFloatCompare = 190,
 }
 
 fn integer_bit_op(op: Opcode) -> Option<IntegerOp> {
@@ -2152,6 +2153,24 @@ impl IntegerBlocks<'_> {
                     integer_width(output.lane_type())? | (condition(cond) << SIMD_CONDITION_SHIFT),
                 ],
             ),
+            InstructionData::FloatCompare {
+                opcode: Opcode::Fcmp,
+                cond,
+                args: [left, right],
+            } if matches!(ty(left), types::F32X4 | types::F64X2)
+                && ty(right) == ty(left)
+                && output == ty(left).as_int() =>
+            {
+                (
+                    IntegerOp::VectorFloatCompare,
+                    [
+                        input(left)?,
+                        input(right)?,
+                        float_width(ty(left).lane_type())?
+                            | (float_condition(cond) << SIMD_CONDITION_SHIFT),
+                    ],
+                )
+            }
             InstructionData::Shuffle {
                 opcode: Opcode::Shuffle,
                 args: [left, right],

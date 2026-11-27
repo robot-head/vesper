@@ -1,18 +1,19 @@
 use self::x86_64::{
     XMM0, XMM_AUX_SCRATCH, XMM_LEFT_SCRATCH, XMM_RIGHT_SCRATCH, SSE_ADD, SSE_SUB, SSE_MUL, SSE_DIV,
-    SSE_SQRT, FLOAT_UNORDERED_OR_GREATER_EQUAL, is_xmm, find_float_register, ADC_RM_R64, ADD_RM_R64,
-    ALU_ADD_EXTENSION, ALU_AND_EXTENSION, ALU_OR_EXTENSION, ALU_SUB_EXTENSION, ALU_XOR_EXTENSION,
-    ALL_REGISTER_BITS, AND_RM_R64, ARGUMENTS, BYTE_BITS, DWORD_BITS, QWORD_BITS, WORD_BITS, CC_A,
-    CC_AE, CC_B, CC_BE, CC_E, CC_G, CC_GE, CC_L, CC_LE, CC_NE, CC_O, AtomicMemory, AtomicUpdate,
-    FixedArithmetic, Instruction, NEG_EXTENSION, NOT_EXTENSION, OR_RM_R64, R10, R11, RAX, RDX, RSP,
-    SAR_EXTENSION, SHL_EXTENSION, SHR_EXTENSION, SBB_RM_R64, SUB_RM_R64, UNASSIGNED, XOR_RM_R64,
-    ALL_REGISTER_CODES, REGISTER_CODES, arg_register, emit, emit_direct_call, emit_direct_jump,
-    emit_indirect_call, emit_jump_table, emit_jump_table_entry, emit_symbol_address,
-    callee_saved_registers, find_callee_saved_register, find_register, fits_signed_byte,
-    patch_forward_branch, patch_relative_branch, patch_relative_offset, register_bit, home_register,
-    xmm_home_register, HOME_REGISTERS, cheap_immediate, move_constant, store_immediate,
-    store_immediate_fits, VECTOR_BITS, PAND, POR, PXOR, PackedInteger, PackedRelation,
-    packed_integer_opcode, BitOperation, Rounding, ROL_EXTENSION, ROR_EXTENSION
+    SSE_SQRT, FLOAT_ORDERED_NOT_EQUAL, FLOAT_UNORDERED_OR_EQUAL, FLOAT_UNORDERED_OR_GREATER_EQUAL,
+    is_xmm, find_float_register, ADC_RM_R64, ADD_RM_R64, ALU_ADD_EXTENSION, ALU_AND_EXTENSION,
+    ALU_OR_EXTENSION, ALU_SUB_EXTENSION, ALU_XOR_EXTENSION, ALL_REGISTER_BITS, AND_RM_R64,
+    ARGUMENTS, BYTE_BITS, DWORD_BITS, QWORD_BITS, WORD_BITS, CC_A, CC_AE, CC_B, CC_BE, CC_E, CC_G,
+    CC_GE, CC_L, CC_LE, CC_NE, CC_O, AtomicMemory, AtomicUpdate, FixedArithmetic, Instruction,
+    NEG_EXTENSION, NOT_EXTENSION, OR_RM_R64, R10, R11, RAX, RDX, RSP, SAR_EXTENSION, SHL_EXTENSION,
+    SHR_EXTENSION, SBB_RM_R64, SUB_RM_R64, UNASSIGNED, XOR_RM_R64, ALL_REGISTER_CODES,
+    REGISTER_CODES, arg_register, emit, emit_direct_call, emit_direct_jump, emit_indirect_call,
+    emit_jump_table, emit_jump_table_entry, emit_symbol_address, callee_saved_registers,
+    find_callee_saved_register, find_register, fits_signed_byte, patch_forward_branch,
+    patch_relative_branch, patch_relative_offset, register_bit, home_register, xmm_home_register,
+    HOME_REGISTERS, cheap_immediate, move_constant, store_immediate, store_immediate_fits,
+    VECTOR_BITS, PAND, POR, PXOR, PackedInteger, PackedRelation, packed_integer_opcode,
+    BitOperation, Rounding, ROL_EXTENSION, ROR_EXTENSION
 };
 
 // Integer block opcodes shared with src/native_machine.rs.
@@ -206,6 +207,7 @@ pub const VECTOR_FLOAT_SUB: u64 = 186;
 pub const VECTOR_FLOAT_MUL: u64 = 187;
 pub const VECTOR_FLOAT_DIV: u64 = 188;
 pub const VECTOR_FLOAT_SQRT: u64 = 189;
+pub const VECTOR_FLOAT_COMPARE: u64 = 190;
 const POWER_SHIFT_MASK: u64 = QWORD_BITS - 1;
 const POWER_SIGNED: u64 = 0x40;
 const POWER_NEGATIVE: u64 = 0x80;
@@ -1028,6 +1030,7 @@ pub fn is_vector_binary(op: u64) -> bool {
         || op == VECTOR_PAIRWISE_ADD
         || op == VECTOR_SWIZZLE
         || op == VECTOR_INTEGER_COMPARE
+        || op == VECTOR_FLOAT_COMPARE
         || is_vector_float_binary(op)
 }
 
@@ -1037,6 +1040,11 @@ fn is_vector_float_binary(op: u64) -> bool {
 
 pub fn vector_float_width(width: u64) -> bool {
     width == DWORD_BITS || width == QWORD_BITS
+}
+
+pub fn valid_vector_float_condition(mode: u64) -> bool {
+    vector_float_width(mode & VECTOR_LANE_WIDTH_MASK)
+        && wrapping_shr_u64(mode, VECTOR_CONDITION_SHIFT) <= FLOAT_UNORDERED_OR_GREATER_EQUAL
 }
 
 fn is_vector_convert(op: u64) -> bool {
@@ -1079,7 +1087,7 @@ fn vector_binary_opcode(op: u64, width: u64) -> u8 {
 pub fn is_vector_result(op: u64) -> bool {
     (op >= VECTOR_CONSTANT && op <= VECTOR_INSERT && op != VECTOR_STORE)
         || op == VECTOR_INTEGER_COMPARE
-        || (op >= VECTOR_FLOAT_ADD && op <= VECTOR_FLOAT_SQRT)
+        || (op >= VECTOR_FLOAT_ADD && op <= VECTOR_FLOAT_COMPARE)
 }
 
 pub fn vector_value(in words: Slice[u64], arguments: u64, value: u64) -> bool {
@@ -1438,6 +1446,7 @@ fn find_last_reads(
                     | VECTOR_FLOAT_MUL
                     | VECTOR_FLOAT_DIV => vector_float_width(record.extra),
                 VECTOR_FLOAT_SQRT => record.right == 0 && vector_float_width(record.extra),
+                VECTOR_FLOAT_COMPARE => valid_vector_float_condition(record.extra),
                 VECTOR_PAIRWISE_ADD => record.extra == BYTE_BITS
                     || record.extra == WORD_BITS
                     || record.extra == DWORD_BITS,
@@ -1463,6 +1472,8 @@ fn find_last_reads(
             frame.vectors = true;
             frame.xmm_aux = frame.xmm_aux
                 || record.op == VECTOR_INTEGER_COMPARE
+                || (record.op == VECTOR_FLOAT_COMPARE
+                    && packed_float_compare_needs_temp(record.extra))
                 || (record.op == VECTOR_PAIRWISE_ADD && record.extra == BYTE_BITS)
                 || (record.op == VECTOR_SWIZZLE && record.extra == 0);
         }
@@ -2727,6 +2738,11 @@ pub fn encode_block(
     encode_block_pass(in words, allow_relocations, inout relocations, true)
 }
 
+fn packed_float_compare_needs_temp(mode: u64) -> bool {
+    let condition = wrapping_shr_u64(mode, VECTOR_CONDITION_SHIFT);
+    condition == FLOAT_ORDERED_NOT_EQUAL || condition == FLOAT_UNORDERED_OR_EQUAL
+}
+
 fn emit_vector_instruction(
     inout output: ChunkSeq[u8],
     in record: Record,
@@ -2760,6 +2776,13 @@ fn emit_vector_instruction(
             Instruction::VectorFloat(opcode, destination, right, record.extra)
         },
         VECTOR_FLOAT_SQRT => Instruction::VectorFloat(SSE_SQRT, destination, left, record.extra),
+        VECTOR_FLOAT_COMPARE => Instruction::VectorFloatCompare(
+            destination,
+            left,
+            right,
+            record.extra & VECTOR_LANE_WIDTH_MASK,
+            wrapping_shr_u64(record.extra, VECTOR_CONDITION_SHIFT)
+        ),
         VECTOR_PAIRWISE_ADD => Instruction::VectorPairwiseAdd(
             destination,
             left,

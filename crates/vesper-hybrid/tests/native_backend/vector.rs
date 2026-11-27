@@ -1,4 +1,5 @@
 use super::{aarch64_leaf_words, binding, integer_block_words};
+use cranelift_codegen::ir::condcodes::FloatCC;
 use cranelift_codegen::{
     Context,
     ir::{
@@ -26,6 +27,14 @@ fn module() -> JITModule {
 }
 
 fn compile(module: &mut JITModule, context: &mut Context) -> [*const u8; 2] {
+    compile_with_reference(module, context, None)
+}
+
+fn compile_with_reference(
+    module: &mut JITModule,
+    context: &mut Context,
+    baseline: Option<&mut Context>,
+) -> [*const u8; 2] {
     let arm = aarch64_leaf_words(&context.func).expect("AArch64 vector machine request");
     assert!(!binding::aarch64_integer_leaf(&arm).is_empty(), "{arm:?}");
     let words = x86_64_block_words(&context.func, module.isa()).expect("vector machine request");
@@ -37,7 +46,9 @@ fn compile(module: &mut JITModule, context: &mut Context) -> [*const u8; 2] {
     let candidate = module
         .declare_anonymous_function(&context.func.signature)
         .unwrap();
-    module.define_function(reference, context).unwrap();
+    module
+        .define_function(reference, baseline.unwrap_or(context))
+        .unwrap();
     let alignment = u64::from(module.isa().function_alignment().minimum);
     module
         .define_function_bytes(candidate, alignment, &bytes, &[])
@@ -484,6 +495,117 @@ fn packed_float_arithmetic_matches_cranelift() {
                                 "{opcode} {ty} {keep_left} {i} {j} {got:x?} {want:x?}"
                             );
                         }
+                    }
+                }
+            }
+        }
+    }
+    unsafe { module.free_memory() };
+}
+
+#[test]
+fn packed_float_comparisons_match_every_cranelift_predicate() {
+    const LIVE_VECTORS: u8 = 16;
+    type Entry = unsafe extern "C" fn(*const u64, *const u64, *mut u64);
+    let mut module = module();
+    for ty in [types::F32X4, types::F64X2] {
+        let inputs: [[u64; 2]; 6] = if ty == types::F32X4 {
+            [
+                [0x8000_0000_0000_0000, 0x0000_0001_8000_0001],
+                [0x4040_0000_bf00_0000, 0xbf00_0000_4040_0000],
+                [0x7f80_0000_ff80_0000, 0xff80_0000_7f80_0000],
+                [0x7fc0_0003_ffc0_0005, 0xffc0_0005_7fc0_0003],
+                [0x7f80_0007_4040_0000, 0x4040_0000_7f80_0007],
+                [0x7f7f_ffff_ff7f_ffff, 0x3f80_0000_bf80_0000],
+            ]
+        } else {
+            [
+                [0, 0x8000_0000_0000_0000],
+                [0x4008_0000_0000_0000, 0xbfe0_0000_0000_0000],
+                [0x7ff0_0000_0000_0000, 0xfff0_0000_0000_0000],
+                [0x7ff8_0000_0000_0003, 0xfff8_0000_0000_0005],
+                [0x7ff0_0000_0000_0007, 0x4008_0000_0000_0000],
+                [1, 0x8000_0000_0000_0001],
+            ]
+        };
+        for &predicate in FloatCC::all() {
+            for (keep_inputs, spills) in [(false, false), (true, false), (false, true)] {
+                let build = |module: &JITModule, compose| {
+                    let mut context = module.make_context();
+                    context.func.signature.params = vec![AbiParam::new(types::I64); 3];
+                    let mut state = FunctionBuilderContext::new();
+                    let mut b = FunctionBuilder::new(&mut context.func, &mut state);
+                    let entry = b.create_block();
+                    b.append_block_params_for_function_params(entry);
+                    b.switch_to_block(entry);
+                    let [left, right, destination] = *b.block_params(entry) else {
+                        unreachable!()
+                    };
+                    let live = if spills {
+                        (1..=LIVE_VECTORS)
+                            .map(|byte| {
+                                let bits = b
+                                    .func
+                                    .dfg
+                                    .constants
+                                    .insert(ConstantData::from(vec![byte; VECTOR_BYTES]));
+                                b.ins().vconst(ty.as_int(), bits)
+                            })
+                            .collect()
+                    } else {
+                        Vec::new()
+                    };
+                    let flags = MemFlags::new().with_notrap();
+                    let left = b.ins().load(ty, flags, left, 0);
+                    let right = b.ins().load(ty, flags, right, 0);
+                    let mut mask = if compose {
+                        let less = b.ins().fcmp(FloatCC::LessThan, left, right);
+                        let greater = b.ins().fcmp(FloatCC::GreaterThan, left, right);
+                        let unequal = b.ins().bor(less, greater);
+                        if predicate == FloatCC::UnorderedOrEqual {
+                            b.ins().bnot(unequal)
+                        } else {
+                            unequal
+                        }
+                    } else {
+                        b.ins().fcmp(predicate, left, right)
+                    };
+                    for value in live {
+                        mask = b.ins().bxor(mask, value);
+                    }
+                    b.ins().store(flags, mask, destination, 0);
+                    if keep_inputs {
+                        b.ins().store(flags, left, destination, VECTOR_BYTES as i32);
+                        b.ins()
+                            .store(flags, right, destination, (VECTOR_BYTES * 2) as i32);
+                    }
+                    b.ins().return_(&[]);
+                    b.seal_all_blocks();
+                    b.finalize();
+                    context
+                };
+                let mut context = build(&module, false);
+                // Pinned Cranelift x64 lacks direct vector instructions for these predicates.
+                let mut baseline = matches!(
+                    predicate,
+                    FloatCC::OrderedNotEqual | FloatCC::UnorderedOrEqual
+                )
+                .then(|| build(&module, true));
+                let functions =
+                    compile_with_reference(&mut module, &mut context, baseline.as_mut());
+                let functions = functions
+                    .map(|pointer| unsafe { std::mem::transmute::<*const u8, Entry>(pointer) });
+                for left in &inputs {
+                    for right in &inputs {
+                        let [reference, candidate] = functions.map(|run| {
+                            let mut out = [u64::MAX; 6];
+                            unsafe { run(left.as_ptr(), right.as_ptr(), out.as_mut_ptr()) };
+                            out
+                        });
+                        assert_eq!(
+                            candidate, reference,
+                            "{predicate:?} {ty} {keep_inputs} {spills} {left:x?} {right:x?}"
+                        );
                     }
                 }
             }

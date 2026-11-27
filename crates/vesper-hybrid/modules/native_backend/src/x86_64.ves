@@ -149,6 +149,15 @@ const XMM_TO_GPR: u8 = 0x7e;
 const UCOMIS: u8 = 0x2e;
 const ANDPS: u8 = 0x54;
 const ORPS: u8 = 0x56;
+const CMP_PACKED: u8 = 0xc2;
+const CMP_PACKED_EQ: u8 = 0;
+const CMP_PACKED_LT: u8 = 1;
+const CMP_PACKED_LE: u8 = 2;
+const CMP_PACKED_UNORDERED: u8 = 3;
+const CMP_PACKED_NE: u8 = 4;
+const CMP_PACKED_NOT_LT: u8 = 5;
+const CMP_PACKED_NOT_LE: u8 = 6;
+const CMP_PACKED_ORDERED: u8 = 7;
 const XORPS: u8 = 0x57;
 const PACKED_SHIFT_WORD: u8 = 0x71;
 const PACKED_SHIFT_DWORD: u8 = 0x72;
@@ -347,6 +356,7 @@ pub copy enum Instruction {
     VectorSplat(u8, u8, u64),
     VectorBinary(u8, u8, u8),
     VectorFloat(u8, u8, u8, u64),
+    VectorFloatCompare(u8, u8, u8, u64, u64),
     VectorPairwiseAdd(u8, u8, u8, u64),
     VectorSwizzle(u8, u8, u8, bool),
     VectorIntegerCompare(u8, u8, u8, u64, PackedRelation, bool),
@@ -1276,6 +1286,74 @@ fn compare_float_registers(inout out: ChunkSeq[u8], left: u8, right: u8, width: 
     xmm_binary(inout out, UCOMIS, left, right);
 }
 
+fn compare_packed(
+    inout out: ChunkSeq[u8],
+    dest: u8,
+    left: u8,
+    right: u8,
+    width: u64,
+    predicate: u8
+) {
+    let result = if dest != left && dest == right {
+        if right == XMM_LEFT_SCRATCH {
+            XMM_RIGHT_SCRATCH
+        } else {
+            XMM_LEFT_SCRATCH
+        }
+    } else {
+        dest
+    };
+    float_move(inout out, result, left);
+    if width == QWORD_BITS {
+        out.push(OPERAND_SIZE_OVERRIDE);
+    }
+    xmm_binary(inout out, CMP_PACKED, result, right);
+    out.push(predicate);
+    float_move(inout out, dest, result);
+}
+
+fn vector_float_compare(
+    inout out: ChunkSeq[u8],
+    dest: u8,
+    left: u8,
+    right: u8,
+    width: u64,
+    predicate: u64
+) {
+    if predicate == FLOAT_ORDERED_NOT_EQUAL {
+        compare_packed(inout out, XMM_AUX_SCRATCH, left, right, width, CMP_PACKED_NE);
+        compare_packed(inout out, dest, left, right, width, CMP_PACKED_ORDERED);
+        xmm_binary(inout out, ANDPS, dest, XMM_AUX_SCRATCH);
+        return;
+    }
+    if predicate == FLOAT_UNORDERED_OR_EQUAL {
+        compare_packed(inout out, XMM_AUX_SCRATCH, left, right, width, CMP_PACKED_EQ);
+        compare_packed(inout out, dest, left, right, width, CMP_PACKED_UNORDERED);
+        xmm_binary(inout out, ORPS, dest, XMM_AUX_SCRATCH);
+        return;
+    }
+    let (condition, reverse) = match predicate {
+        FLOAT_ORDERED => (CMP_PACKED_ORDERED, false),
+        FLOAT_UNORDERED => (CMP_PACKED_UNORDERED, false),
+        FLOAT_EQUAL => (CMP_PACKED_EQ, false),
+        FLOAT_NOT_EQUAL => (CMP_PACKED_NE, false),
+        FLOAT_LESS => (CMP_PACKED_LT, false),
+        FLOAT_LESS_EQUAL => (CMP_PACKED_LE, false),
+        FLOAT_GREATER => (CMP_PACKED_LT, true),
+        FLOAT_GREATER_EQUAL => (CMP_PACKED_LE, true),
+        FLOAT_UNORDERED_OR_LESS => (CMP_PACKED_NOT_LE, true),
+        FLOAT_UNORDERED_OR_LESS_EQUAL => (CMP_PACKED_NOT_LT, true),
+        FLOAT_UNORDERED_OR_GREATER => (CMP_PACKED_NOT_LE, false),
+        _ => (CMP_PACKED_NOT_LT, false),
+    };
+    let (lhs, rhs) = if reverse {
+        (right, left)
+    } else {
+        (left, right)
+    };
+    compare_packed(inout out, dest, lhs, rhs, width, condition);
+}
+
 fn float_fma(inout out: ChunkSeq[u8], dest: u8, left: u8, right: u8, addend: u8, width: u64) {
     // Keep the CLIF source order for NaN payload selection.
     let result = if dest != left && (dest == right || dest == addend) {
@@ -2115,6 +2193,13 @@ pub fn emit(inout out: ChunkSeq[u8], in instruction: Instruction) {
             }
             xmm_binary(inout out, opcode, destination, source);
         },
+        Instruction::VectorFloatCompare(
+            destination,
+            left,
+            right,
+            width,
+            predicate
+        ) => vector_float_compare(inout out, destination, left, right, width, predicate),
         Instruction::VectorPairwiseAdd(destination, left, right, width) => vector_pairwise_add(
             inout out,
             destination,
