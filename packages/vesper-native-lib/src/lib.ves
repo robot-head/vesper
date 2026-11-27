@@ -49,6 +49,9 @@ const DECIMAL_BASE: u64 = 10;
 const DIGIT_ZERO: u64 = 48;
 // A callee the walk does not call directly (`codegen_swap::body::NO_CALLEE`).
 const NO_CALLEE: u64 = 18446744073709551615;
+// The function index bits of a callee word; the bits above it are the
+// call's flags (`codegen_swap::body::FAIL_CALL`, `STATUS_CALL`), kept.
+const CALLEE_INDEX_MASK: u64 = 4294967295;
 const MALFORMED: Str = "malformed native-lib request";
 const UNKNOWN_FUNCTION: Str = "a definition names an unknown function";
 const NO_BUILDER: Str = "the function builder could not be made";
@@ -169,7 +172,7 @@ fn define_one(
             if c == NO_CALLEE {
                 NO_CALLEE
             } else {
-                at64(in d.ids, c)
+                at64(in d.ids, c & CALLEE_INDEX_MASK) | (c & ~CALLEE_INDEX_MASK)
             }
         );
     }

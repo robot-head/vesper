@@ -1256,7 +1256,8 @@ pub mod body {
     /// returns a status word beside its value (`FnAbi::status`),
     /// `locations` 1 when instructions carry their source locations
     /// (`CodegenOptions::source_locations`), the variables in parameter
-    /// order, and for each `Op::Call` of the body in instruction order the
+    /// order (a `fail_only` function's failure record last, counted in `n`),
+    /// and for each `Op::Call` of the body in instruction order the
     /// `FuncId` the walk would call directly with nothing else around the
     /// call (part 6b), or [`NO_CALLEE`]. No result.
     pub const FUNCTION: u32 = 1;
@@ -1264,6 +1265,15 @@ pub mod body {
     /// A call [`FUNCTION`]'s hook cannot emit as one direct `call`: the
     /// hook declines the body.
     pub const NO_CALLEE: u64 = u64::MAX;
+
+    /// A callee word's flag for a `fail_only` callee (#2425): the call
+    /// passes a failure record after the arguments and raises the
+    /// callee's failure again. The low 32 bits are the `FuncId`.
+    pub const FAIL_CALL: u64 = 1 << 32;
+
+    /// With [`FAIL_CALL`]: the callee returns its status word in a register
+    /// (`FnAbi::status`) instead of storing a tag in the record.
+    pub const STATUS_CALL: u64 = 1 << 33;
 
     /// [`FUNCTION`]'s leading flags, `status` and `locations`: the words
     /// before the parameter count.

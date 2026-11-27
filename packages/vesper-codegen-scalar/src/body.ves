@@ -15,9 +15,22 @@
 // planned alike. On the unoptimized path the emitter keeps every local in
 // a stack slot, so each local's entry carries the kind its stores coerce
 // to.
+//
+// Failure records (#2425): a `fail_only` function (`Fail[E]` instances and
+// erased capabilities only) takes its failure record as one more
+// parameter. Its plan names the row's `Fail` count and the result lane a
+// failure exit returns a zero of; one-word integer operators that may raise
+// (`INST_CHECKED`: the divisor test of a partial `/` or `%`, the overflow
+// test of `+`, `-`, `*`, `/`) carry the raise of `RuntimeError` or
+// `ArithOverflow` through the caller's instance of that type, and a direct
+// call of another `fail_only` function (`INST_FAIL_CALL`) carries its
+// record size and, per callee instance, the caller instance that raises it
+// again. A body with any other raise (`Fail::raise`, checked compound
+// writes, negations, narrowing or shifts) stays on the Rust walk.
 
-use @vesper/check-data::util::{add, inc, n32, u64_at};
+use @vesper/check-data::util::{add, inc, n32, u32_at, u64_at};
 use @vesper/check-data::types::{TyKind, default_type};
+use @vesper/check-layout::{L_ENUM, L_PRODUCT, layout_of};
 use @vesper/place-ir::{FnRow, InstRow};
 use @vesper/place-ir::codes::{Lit, Op, Pat, Term};
 use super::{
@@ -54,6 +67,28 @@ pub const INST_CALL_BUILTIN: u64 = 12;
 pub const INST_WIDE_CONST: u64 = 13;
 pub const INST_WIDE_UNARY: u64 = 14;
 pub const INST_WIDE_BINARY: u64 = 15;
+// A one-word integer operator that raises through the failure record
+// (#2425); codes from 40 leave room for the other body slices.
+pub const INST_CHECKED: u64 = 40;
+// A direct call of a `fail_only` function, whose failure is raised again.
+pub const INST_FAIL_CALL: u64 = 41;
+
+// A failure record's tag word, and the word its payload is rounded to
+// (`fail_record_size`).
+const RECORD_WORD: u64 = 8;
+// A re-raised error copied by words rather than stored as a scalar.
+const AGGREGATE_ERROR: u64 = 18446744073709551615;
+
+// `INST_CHECKED`'s operators, numbered as the emitter's overflow tests.
+const CK_ADD: u64 = 1;
+const CK_SUB: u64 = 2;
+const CK_MUL: u64 = 3;
+const CK_DIV: u64 = 4;
+const CK_REM: u64 = 5;
+
+// A raise descriptor's absence, and the tag word of a product (no tag).
+const NO_RAISE: u64 = 18446744073709551615;
+const NO_TAG: u64 = 18446744073709551614;
 
 // Sub-operations of `INST_FLOAT_UNARY` and 1-arg `CB_FLOAT_UNARY`.
 const FUN_FNEG: u64 = 1;
@@ -263,7 +298,11 @@ struct Header {
     lty: ChunkSeq[u64],
     // parameter types, in order
     pty: ChunkSeq[u64],
-    // the header names no bounds, captures or effects
+    // the defaulted error type of each `Fail` instance of a `fail_only`
+    // row, in row order (record tag `k + 1` is the `k`-th; #2425)
+    fails: ChunkSeq[u64],
+    // the header names no bounds, captures, or effects other than `Fail`
+    // instances and erased capabilities
     plain: bool,
 }
 
@@ -353,6 +392,7 @@ impl Gen {
             lname: ChunkSeq::new[u64](),
             lty: ChunkSeq::new[u64](),
             pty: ChunkSeq::new[u64](),
+            fails: ChunkSeq::new[u64](),
             plain: true
         };
         let mut i = f.ha;
@@ -373,9 +413,14 @@ impl Gen {
             h.plain = false;
         } else {
             for k in 0..widen_u64(row.n) {
-                let eff_name = self.ctx.types.effect_at(add(widen_u64(row.a), k)).name;
+                let eff = self.ctx.types.effect_at(add(widen_u64(row.a), k));
+                let eff_name = eff.name;
                 let ops_s = self.ops;
-                if eff_name != ops_s.const_time
+                if eff_name == ops_s.fail_ && eff.label == 0 && eff.n == 1 {
+                    // `native::fail_only`'s `Fail[E]`: a failure exit.
+                    let e = u32_at(in self.ctx.types.items, widen_u64(eff.a));
+                    h.fails.push(widen_u64(default_type(inout self.ctx.types, e)));
+                } else if eff_name != ops_s.const_time
                     && eff_name != ops_s.realtime
                     && eff_name != ops_s.det_float
                     && eff_name != ops_s.isa
@@ -872,6 +917,35 @@ impl Gen {
             extra.push(rk);
             return true;
         }
+        let partial = (op == ops_s.slash || op == ops_s.percent)
+            && self.ctx.world.is_partial(i.s0, i.s1);
+        let checked_op = if op == ops_s.plus {
+            CK_ADD
+        } else if op == ops_s.minus {
+            CK_SUB
+        } else if op == ops_s.star {
+            CK_MUL
+        } else if op == ops_s.slash {
+            CK_DIV
+        } else if op == ops_s.percent {
+            CK_REM
+        } else {
+            0
+        };
+        if checked_op != 0 && (partial || self.ctx.world.may_overflow(i.s0, i.s1)) {
+            return self.body_checked(
+                in h,
+                i,
+                checked_op,
+                partial,
+                d0,
+                k0,
+                k1,
+                rk,
+                inout kind,
+                inout extra
+            );
+        }
         if op == ops_s.slash || op == ops_s.percent {
             let ik = self.kind_of(d0);
             if ik == 0
@@ -923,6 +997,192 @@ impl Gen {
             return true;
         }
         false
+    }
+
+    // `expr_at`'s general `Binary` arm on one-word integers when it raises
+    // (#2425): the divisor test of a partial `/` or `%` (`check_divisor`),
+    // then `checked_arithmetic`'s overflow test, each raising through the
+    // function's failure record, then `binary`. Words: the operator, the
+    // integer kind, the operand and result kinds, then a raise descriptor
+    // for the divisor (or NO_RAISE) and one for the overflow (or NO_RAISE).
+    fn body_checked(
+        inout self,
+        in h: Header,
+        i: InstRow,
+        checked_op: u64,
+        partial: bool,
+        d0: u32,
+        k0: u64,
+        k1: u64,
+        rk: u64,
+        inout kind: u64,
+        inout extra: ChunkSeq[u64]
+    ) -> bool {
+        let ik = self.kind_of(d0);
+        if ik == 0 || kind_wide(ik) {
+            return false;
+        }
+        kind = INST_CHECKED;
+        extra.push(checked_op);
+        extra.push(widen_u64(ik));
+        extra.push(k0);
+        extra.push(k1);
+        extra.push(rk);
+        if partial {
+            let ops_s = self.ops;
+            if !self.body_raise(in h, ops_s.runtime_error, ops_s.division_by_zero, inout extra) {
+                return false;
+            }
+        } else {
+            extra.push(NO_RAISE);
+        }
+        if self.ctx.world.may_overflow(i.s0, i.s1) {
+            let ops_s = self.ops;
+            if !self.body_raise(in h, ops_s.arith_overflow, 0, inout extra) {
+                return false;
+            }
+        } else {
+            extra.push(NO_RAISE);
+        }
+        true
+    }
+
+    // The raise descriptor of a payload-free constructor of the named
+    // type `ty_name` (`variant` names the enum variant, 0 for a product):
+    // the `Fail` instance `perform_values` selects
+    // (`instance_capability_key`: the last instance of exactly that type),
+    // the type's size, and the variant's tag (NO_TAG for a product). False
+    // when the row has no such instance or the constructor has fields.
+    fn body_raise(
+        inout self,
+        in h: Header,
+        ty_name: u32,
+        variant: u32,
+        inout extra: ChunkSeq[u64]
+    ) -> bool {
+        let mut index = NONE64;
+        let mut ty = NONE32;
+        for k in 0..h.fails.len() {
+            let t = n32(u64_at(in h.fails, k));
+            let n = self.ctx.types.node(t);
+            if n.kind == TyKind::Named && n.n == 0 && n.name == ty_name {
+                index = k;
+                ty = t;
+            }
+        }
+        if index == NONE64 {
+            return false;
+        }
+        let mark = self.layouts.mark();
+        let l = layout_of(
+            inout self.layouts,
+            inout self.ctx.types,
+            inout self.ctx.names,
+            in self.ctx.world,
+            ty
+        );
+        if l == NONE32 {
+            self.layouts.reset(mark);
+            return false;
+        }
+        let node = self.layouts.node(l);
+        let variants = widen_u64(node.a);
+        let mut tag = NONE64;
+        if node.kind == L_ENUM {
+            for k in 0..widen_u64(node.n) {
+                let v = self.layouts.lvariant(add(variants, k));
+                if v.name == variant && v.fc == 0 {
+                    tag = k;
+                }
+            }
+        } else if node.kind == L_PRODUCT && node.n == 0 {
+            tag = NO_TAG;
+        }
+        self.layouts.reset(mark);
+        if tag == NONE64 {
+            return false;
+        }
+        extra.push(index);
+        extra.push(widen_u64(node.size));
+        extra.push(tag);
+        true
+    }
+
+    // The function named `name` (place-ir row index), or NONE64.
+    fn body_function(in self, name: u32) -> u64 {
+        for k in 0..self.program.fn_count() {
+            if self.program.function(k).name == name {
+                return k;
+            }
+        }
+        NONE64
+    }
+
+    // A `fail_only` callee's record and re-raise (`call_function_into`,
+    // `reraise_status`): the record's size (`fail_record_size`: a tag
+    // word and the largest payload), then for each of the callee's `Fail`
+    // instances the caller's instance raising it again (the last of the
+    // same type, as `instance_capability_key` selects), its error's size,
+    // and its scalar kind or AGGREGATE_ERROR when it is copied by words.
+    fn body_reraise(
+        inout self,
+        in h: Header,
+        in callee_fails: ChunkSeq[u64],
+        inout extra: ChunkSeq[u64]
+    ) -> bool {
+        let mut words: ChunkSeq[u64] = ChunkSeq::new[u64]();
+        let mut payload = RECORD_WORD;
+        for k in 0..callee_fails.len() {
+            let t = n32(u64_at(in callee_fails, k));
+            let mut index = NONE64;
+            for j in 0..h.fails.len() {
+                if n32(u64_at(in h.fails, j)) == t {
+                    index = j;
+                }
+            }
+            if index == NONE64 {
+                return false;
+            }
+            let mark = self.layouts.mark();
+            let l = layout_of(
+                inout self.layouts,
+                inout self.ctx.types,
+                inout self.ctx.names,
+                in self.ctx.world,
+                t
+            );
+            if l == NONE32 {
+                self.layouts.reset(mark);
+                return false;
+            }
+            let size = widen_u64(self.layouts.node(l).size);
+            let aggregate = self.layouts.aggregate(l);
+            self.layouts.reset(mark);
+            let scalar_kind = if aggregate {
+                AGGREGATE_ERROR
+            } else {
+                // A one-word integer or `bool` error: loaded as a word,
+                // stored after `coerce` to its kind.
+                if self.body_lane(t) != LANE_I64 {
+                    return false;
+                }
+                self.body_kind(t)
+            };
+            if size > payload {
+                payload = size;
+            }
+            words.push(index);
+            words.push(size);
+            words.push(scalar_kind);
+        }
+        let rounded = wrapping_mul(
+            wrapping_add(payload, wrapping_sub(RECORD_WORD, 1)) / RECORD_WORD,
+            RECORD_WORD
+        );
+        extra.push(add(RECORD_WORD, rounded));
+        extra.push(callee_fails.len());
+        extra.extend(in words.as_slice());
+        true
     }
 
     fn body_write(
@@ -1406,8 +1666,23 @@ impl Gen {
             ) {
                 ops.extend(in bops.as_slice());
             } else {
-                // Part 6b: a direct call (`Codegen::plain_call`).
-                kind = INST_CALL;
+                // Part 6b: a direct call (`Codegen::plain_call`); a
+                // `fail_only` callee's failures raised again (#2425).
+                let callee = if h.fails.len() == 0 {
+                    NONE64
+                } else {
+                    self.body_function(n32(self.program.op(i.a)))
+                };
+                let mut callee_fails: ChunkSeq[u64] = ChunkSeq::new[u64]();
+                if callee != NONE64 {
+                    let ch = self.body_header(self.program.function(callee));
+                    callee_fails = ch.fails;
+                }
+                kind = if callee_fails.len() == 0 {
+                    INST_CALL
+                } else {
+                    INST_FAIL_CALL
+                };
                 extra.push(call);
                 let n = self.program.op(inc(i.a));
                 for k in 0..n {
@@ -1420,6 +1695,11 @@ impl Gen {
                         return false;
                     }
                     extra.push(read);
+                }
+                if kind == INST_FAIL_CALL
+                    && !self.body_reraise(in h, in callee_fails, inout extra)
+                {
+                    return false;
                 }
             }
         } else {
@@ -1749,9 +2029,24 @@ impl Gen {
         }
         let mut o: ChunkSeq[u64] = ChunkSeq::new[u64]();
         o.push(f.bc);
-        o.push(h.params.len());
+        // A `fail_only` function takes its failure record after its
+        // parameters (#2425): the request binds it to one more variable.
+        let nfail = h.fails.len();
+        o.push(
+            if nfail == 0 {
+                h.params.len()
+            } else {
+                inc(h.params.len())
+            }
+        );
         o.push(builtin_calls.len());
         o.extend(in builtin_calls.as_slice());
+        // The failure header: the row's `Fail` count, then (when there is
+        // one) the lane of the result a failure exit returns a zero of.
+        o.push(nfail);
+        if nfail != 0 {
+            o.push(self.body_lane(h.result));
+        }
         o.extend(in graph_words.as_slice());
         o.extend(in block_words.as_slice());
         out.push(fi);
