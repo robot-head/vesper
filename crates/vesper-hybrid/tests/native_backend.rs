@@ -22,7 +22,7 @@ use cranelift_codegen::ir::{
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{Linkage, Module};
-use vesper::native::machine::integer_block_words;
+use vesper::native::machine::{aarch64_leaf_words, integer_block_words};
 
 const ABI_ARGS: usize = 6;
 const MACHINE_HEADER_WORDS: usize = 2;
@@ -80,6 +80,8 @@ enum Case {
     ReusedSpills,
     CompareImmediate,
     Select,
+    Bitselect(Type),
+    WideBitselect { high: bool },
     SelectKeepingArms,
     SelectKeepingTrue,
     ByteExtensions,
@@ -359,6 +361,18 @@ fn integer_backend_matches_cranelift_results() {
                     }),
             )
             .chain([types::I8, types::I16, types::I32].map(Case::NarrowArithmetic))
+            .chain(
+                [
+                    types::I8,
+                    types::I16,
+                    types::I32,
+                    types::I64,
+                    types::F32,
+                    types::F64,
+                ]
+                .map(Case::Bitselect),
+            )
+            .chain([false, true].map(|high| Case::WideBitselect { high }))
             .chain([types::I32, types::I64].into_iter().flat_map(|width| {
                 [false, true].map(move |keep_middle| Case::WrappingAddChain { width, keep_middle })
             }))
@@ -1102,6 +1116,46 @@ fn integer_backend_matches_cranelift_results() {
                 builder.ins().bxor(data, pred)
             }
             Case::Select => builder.ins().select(a, e, f),
+            Case::Bitselect(ty) => {
+                let bits = if ty == types::F32 {
+                    types::I32
+                } else if ty == types::F64 {
+                    types::I64
+                } else {
+                    ty
+                };
+                let [mask, yes, no] = [a, b, c].map(|arg| {
+                    let arg = if bits == types::I64 {
+                        arg
+                    } else {
+                        builder.ins().ireduce(bits, arg)
+                    };
+                    if ty.is_float() {
+                        builder.ins().bitcast(ty, MemFlags::new(), arg)
+                    } else {
+                        arg
+                    }
+                });
+                let result = builder.ins().bitselect(mask, yes, no);
+                let result = if ty.is_float() {
+                    builder.ins().bitcast(bits, MemFlags::new(), result)
+                } else {
+                    result
+                };
+                if bits == types::I64 {
+                    result
+                } else {
+                    builder.ins().uextend(types::I64, result)
+                }
+            }
+            Case::WideBitselect { high } => {
+                let mask = builder.ins().iconcat(a, b);
+                let yes = builder.ins().iconcat(c, d);
+                let no = builder.ins().iconcat(e, f);
+                let result = builder.ins().bitselect(mask, yes, no);
+                let (lo, hi) = builder.ins().isplit(result);
+                if high { hi } else { lo }
+            }
             Case::SelectKeepingArms => {
                 let predicate = builder.ins().icmp(IntCC::UnsignedGreaterThan, a, b);
                 let selected = builder.ins().select(predicate, e, f);
@@ -1127,6 +1181,13 @@ fn integer_backend_matches_cranelift_results() {
 
         let request =
             integer_block_words(&context.func).unwrap_or_else(|| panic!("declined {case:?}"));
+        if matches!(case, Case::Bitselect(_) | Case::WideBitselect { .. }) {
+            let aarch64 = aarch64_leaf_words(&context.func).expect("AArch64 bitselect request");
+            assert!(
+                !binding::aarch64_integer_leaf(&aarch64).is_empty(),
+                "{case:?}"
+            );
+        }
         let records = request[MACHINE_HEADER_WORDS..]
             .as_chunks::<MACHINE_RECORD_WORDS>()
             .0;
@@ -1309,6 +1370,15 @@ fn integer_backend_matches_cranelift_results() {
             [1 << 31, 2, 13, 17, 3, 5],
             [1 << 32, 3, 5, 7, 13, 17],
             [3, 5, 7, 11, 13, 17],
+            [
+                u64::MAX,
+                0x7ff0_0000_7f80_0042,
+                0x8000_0000_8000_0000,
+                0,
+                0,
+                0,
+            ],
+            [0, 0, 0x7ff8_0000_7fc0_0042, 0, 0, 0],
         ];
         let middle = memory[256..].as_ptr() as u64;
         let odd = memory[257..].as_ptr() as u64;

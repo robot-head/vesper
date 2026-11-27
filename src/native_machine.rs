@@ -1170,6 +1170,12 @@ impl IntegerBlocks<'_> {
         [low, high]
     }
 
+    fn bitselect(&mut self, mask: u64, yes: u64, no: u64, width: u64) -> u64 {
+        let difference = self.append(IntegerOp::Xor, [yes, no, width]);
+        let selected = self.append(IntegerOp::And, [mask, difference, width]);
+        self.append(IntegerOp::Xor, [no, selected, width])
+    }
+
     fn wide_rotate_register(&mut self, [low, high]: [u64; 2], amount: u64) -> [u64; 2] {
         let width = INTEGER_CELL_BITS;
         let other_shift = self.append(IntegerOp::Not, [amount, 0, width]);
@@ -1316,6 +1322,18 @@ impl IntegerBlocks<'_> {
                         ]
                     }
                 }
+            }
+            InstructionData::Ternary {
+                opcode: Opcode::Bitselect,
+                args: [mask, yes, no],
+            } if output == types::I128 => {
+                let mask = pair(mask)?;
+                let yes = pair(yes)?;
+                let no = pair(no)?;
+                [
+                    self.bitselect(mask[0], yes[0], no[0], INTEGER_CELL_BITS),
+                    self.bitselect(mask[1], yes[1], no[1], INTEGER_CELL_BITS),
+                ]
             }
             InstructionData::Ternary {
                 opcode: Opcode::Select,
@@ -1569,6 +1587,17 @@ impl IntegerBlocks<'_> {
                     _ => return None,
                 };
                 (op, [input(left)?, input(right)?, input(addend)?])
+            }
+            InstructionData::Ternary {
+                opcode: Opcode::Bitselect,
+                args: [mask, yes, no],
+            } if ty(mask) == output && ty(yes) == output && ty(no) == output => {
+                let width = float_width(output)?;
+                let mask = self.append(IntegerOp::FloatToBits, [input(mask)?, 0, width]);
+                let yes = self.append(IntegerOp::FloatToBits, [input(yes)?, 0, width]);
+                let no = self.append(IntegerOp::FloatToBits, [input(no)?, 0, width]);
+                let selected = self.bitselect(mask, yes, no, width);
+                (IntegerOp::BitsToFloat, [selected, 0, width])
             }
             InstructionData::Ternary {
                 opcode: Opcode::Select,
@@ -2033,6 +2062,14 @@ impl IntegerBlocks<'_> {
                         let right = self.append(IntegerOp::Constant, [bits, 0, 0]);
                         (compare_op(ty(arg), false)?, [left, right, condition(cond)])
                     }
+                }
+                InstructionData::Ternary {
+                    opcode: Opcode::Bitselect,
+                    args: [mask, yes, no],
+                } if ty(mask) == output && ty(yes) == output && ty(no) == output => {
+                    values.low[value] =
+                        Some(self.bitselect(input(mask)?, input(yes)?, input(no)?, width));
+                    continue;
                 }
                 InstructionData::Ternary {
                     opcode: Opcode::Select,
