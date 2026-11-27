@@ -13,7 +13,6 @@ mod tensor_types_binding;
 #[path = "../../../tests/common/flip_gate.rs"]
 mod flip_gate;
 
-#[allow(dead_code)]
 #[path = "../../../tests/common/tensor_words.rs"]
 mod tensor_words;
 

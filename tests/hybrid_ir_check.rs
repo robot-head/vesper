@@ -51,8 +51,9 @@ fn input(c: &IrCase) -> Option<Vec<u8>> {
     check_words::ir_input(c.world, &c.program)
 }
 
-/// Every case (each world's IR and `mutants` mutants of it, every `step`-th
-/// case): Rust's diagnostics against the Vesper text entry and, when
+/// Every case of every `step`-th world (its IR and `mutants` mutants of
+/// it; lowering only those worlds keeps the test's memory down, as
+/// `ir_cases_where`): Rust's diagnostics against the Vesper text entry and, when
 /// `words` is given, against the hybrid build's decoded word stream.
 /// Returns (differing cases, Rust diagnostics, cases).
 fn differential_cases(
@@ -63,7 +64,7 @@ fn differential_cases(
 ) -> (usize, usize, usize) {
     let (mut bad, mut diags, mut cases, mut rust_only) = (0, 0, 0, 0);
     let start = std::time::Instant::now();
-    for c in ir_cases(mutants).iter().step_by(step) {
+    for c in &ir_cases_where(mutants, |i| i % step == 0) {
         let Some(input) = input(c) else {
             rust_only += 1;
             continue;
@@ -122,8 +123,8 @@ fn step(default: usize) -> usize {
         .unwrap_or(default)
 }
 
-/// Text and the hybrid build's word stream, over every world and five
-/// mutants of each (every fifth case by default).
+/// Text and the hybrid build's word stream, over each world and five
+/// mutants of it (every fifth world by default).
 #[test]
 fn ir_check_matches_rust_with_mutants() {
     let text = package().entry("check_ir_text", true);
@@ -136,8 +137,7 @@ fn ir_check_matches_rust_with_mutants() {
     assert_eq!(bad, 0);
 }
 
-/// The optimizer off agrees with it on (every 29th case by default, a
-/// different slice from the optimized test's).
+/// The optimizer off agrees with it on (every 29th world by default).
 #[test]
 fn ir_check_unoptimized_matches_rust() {
     let text = package().entry("check_ir_text", false);
@@ -155,7 +155,7 @@ fn ir_check_origin_limits_match_rust() {
     let words = package().entry("check_ir_words", true);
     let long = |n: &str| format!("{n}_{}", "x".repeat(1100));
     let (mut bad, mut diags, mut unlabeled) = (0, 0, 0);
-    for c in ir_cases(2).iter().step_by(10) {
+    for c in &ir_cases_where(2, |i| i % 10 == 0) {
         let mut program = c.program.clone();
         for f in program.functions.values_mut() {
             let names: std::collections::BTreeSet<String> =

@@ -25,7 +25,7 @@ use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 #[path = "flip_gate.rs"]
-mod flip_gate;
+pub mod flip_gate;
 use vesper::ast::{Effects, Mode, Pass, Type};
 use vesper::check::World;
 use vesper::{check, ffi_lowering, native, packages};

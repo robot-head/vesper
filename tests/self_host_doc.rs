@@ -23,8 +23,7 @@
 
 #[path = "common/check_harness.rs"]
 mod check_harness;
-#[path = "common/flip_gate.rs"]
-mod flip_gate;
+use check_harness::flip_gate;
 
 use check_harness::{Package, repo};
 use serde::Serialize;
