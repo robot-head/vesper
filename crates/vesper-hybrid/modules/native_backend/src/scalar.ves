@@ -12,7 +12,7 @@ use self::x86_64::{
     patch_forward_branch, patch_relative_branch, patch_relative_offset, register_bit, home_register,
     xmm_home_register, HOME_REGISTERS, cheap_immediate, move_constant, store_immediate,
     store_immediate_fits, VECTOR_BITS, PAND, POR, PXOR, PackedInteger, PackedRelation,
-    packed_integer_opcode, BitOperation, ROL_EXTENSION, ROR_EXTENSION
+    packed_integer_opcode, BitOperation, Rounding, ROL_EXTENSION, ROR_EXTENSION
 };
 
 // Integer block opcodes shared with src/native_machine.rs.
@@ -919,10 +919,11 @@ fn reads_right(in record: Record, paired: bool) -> bool {
 }
 
 pub fn is_float_binary(op: u64) -> bool {
-    (op >= FLOAT_ADD && op <= FLOAT_DIV)
-        || op == FLOAT_COPY_SIGN
-        || op == FLOAT_MIN
-        || op == FLOAT_MAX
+    (op >= FLOAT_ADD && op <= FLOAT_DIV) || op == FLOAT_COPY_SIGN || is_float_min_max(op)
+}
+
+fn is_float_min_max(op: u64) -> bool {
+    op == FLOAT_MIN || op == FLOAT_MAX
 }
 
 pub fn is_float_fma(op: u64) -> bool {
@@ -1258,6 +1259,7 @@ fn find_last_reads(
             && record.op != FLOAT_TO_INTEGER_TRUNC
             && !is_conditional_trap(record.op)
             && !is_float_conversion(record.op)
+            && !(record.op >= FLOAT_CEIL && record.op <= FLOAT_MAX)
             && !tail_call
             && !bit_operation
             && !bit_mix
@@ -1389,6 +1391,14 @@ fn find_last_reads(
                     && (record.extra == DWORD_BITS || record.extra == QWORD_BITS),
             };
             if !valid {
+                return Option::None;
+            }
+            frame.floating = true;
+        }
+        if record.op >= FLOAT_CEIL && record.op <= FLOAT_MAX {
+            if (record.extra != DWORD_BITS && record.extra != QWORD_BITS)
+                || (!is_float_min_max(record.op) && record.right != 0)
+            {
                 return Option::None;
             }
             frame.floating = true;
@@ -1901,7 +1911,9 @@ fn allocate(
             && (survivors & register_bit(implicit_result)) == 0
         {
             implicit_result
-        } else if (record.op == SELECT || record.op == FLOAT_SELECT) && right != UNASSIGNED {
+        } else if (record.op == SELECT || record.op == FLOAT_SELECT || is_float_min_max(record.op))
+            && right != UNASSIGNED
+        {
             right
         } else if third != UNASSIGNED {
             third
@@ -2742,6 +2754,100 @@ fn emit_bit_mix(
     emit(inout output, in instruction);
 }
 
+fn is_scalar_fp_instruction(op: u64) -> bool {
+    (op >= FLOAT_CONSTANT && op <= FLOAT_COMPARE64)
+        || op == FLOAT_COPY_SIGN
+        || op == BITS_TO_FLOAT
+        || op == FLOAT_TO_BITS
+        || op == FLOAT_TO_INTEGER_TRUNC
+        || is_float_conversion(op)
+        || (op >= FLOAT_CEIL && op <= FLOAT_MAX)
+}
+
+fn emit_scalar_fp(
+    inout output: ChunkSeq[u8],
+    in record: Record,
+    destination: u8,
+    left: u8,
+    right: u8
+) {
+    let width = record.extra;
+    let instruction = match record.op {
+        FLOAT_CONSTANT => Instruction::FloatImmediate(destination, record.left, width),
+        FLOAT_PROMOTE | FLOAT_DEMOTE => Instruction::FloatConvert(destination, left, record.right),
+        SIGNED_TO_FLOAT
+            | UNSIGNED_TO_FLOAT => Instruction::IntegerToFloat(
+                destination,
+                left,
+                record.right,
+                width,
+                record.op == SIGNED_TO_FLOAT
+            ),
+        FLOAT_COMPARE32
+            | FLOAT_COMPARE64 => Instruction::FloatCompare(
+                destination,
+                left,
+                right,
+                record.extra,
+                if record.op == FLOAT_COMPARE32 {
+                    DWORD_BITS
+                } else {
+                    QWORD_BITS
+                }
+            ),
+        FLOAT_COPY_SIGN => {
+            emit(inout output, in Instruction::Move(destination, left));
+            Instruction::FloatCopySign(destination, right, width)
+        },
+        FLOAT_MIN
+            | FLOAT_MAX => Instruction::FloatMinMax(
+                destination,
+                left,
+                right,
+                record.op == FLOAT_MIN,
+                width
+            ),
+        FLOAT_CEIL | FLOAT_FLOOR | FLOAT_TRUNC | FLOAT_NEAREST => {
+            let mode = match record.op {
+                FLOAT_CEIL => Rounding::Ceil,
+                FLOAT_FLOOR => Rounding::Floor,
+                FLOAT_TRUNC => Rounding::Trunc,
+                _ => Rounding::Nearest,
+            };
+            Instruction::FloatRound(destination, left, mode, width)
+        },
+        FLOAT_SQRT => Instruction::FloatBinary(SSE_SQRT, destination, left, width),
+        FLOAT_NEG | FLOAT_ABS => {
+            emit(inout output, in Instruction::Move(destination, left));
+            Instruction::FloatSign(destination, record.op == FLOAT_ABS, width)
+        },
+        BITS_TO_FLOAT | FLOAT_TO_BITS => Instruction::FloatBits(destination, left, width),
+        FLOAT_TO_INTEGER_TRUNC => Instruction::FloatToInteger(
+            destination,
+            left,
+            record.right,
+            width
+        ),
+        _ => {
+            let reuse_right = destination == right && can_reuse_right(record.op);
+            let (first, second) = if reuse_right {
+                (right, left)
+            } else {
+                (left, right)
+            };
+            let op = match record.op {
+                FLOAT_ADD => SSE_ADD,
+                FLOAT_SUB => SSE_SUB,
+                FLOAT_MUL => SSE_MUL,
+                _ => SSE_DIV,
+            };
+            emit(inout output, in Instruction::Move(destination, first));
+            Instruction::FloatBinary(op, destination, second, width)
+        },
+    };
+    emit(inout output, in instruction);
+}
+
 fn encode_block_pass(
     in words: Slice[u64],
     allow_relocations: bool,
@@ -3256,19 +3362,8 @@ fn encode_block_pass(
         };
         if record.op == CONSTANT {
             emit(inout output, in Instruction::Immediate(destination, record.left));
-        } else if is_float_conversion(record.op) {
-            let instruction = if record.op == FLOAT_PROMOTE || record.op == FLOAT_DEMOTE {
-                Instruction::FloatConvert(destination, left, record.right)
-            } else {
-                Instruction::IntegerToFloat(
-                    destination,
-                    left,
-                    record.right,
-                    record.extra,
-                    record.op == SIGNED_TO_FLOAT
-                )
-            };
-            emit(inout output, in instruction);
+        } else if is_scalar_fp_instruction(record.op) {
+            emit_scalar_fp(inout output, in record, destination, left, right);
         } else if is_vector_operation(record.op) {
             emit_vector_instruction(inout output, in record, destination, left, right);
         } else if is_scalar_bit_operation(record.op) {
@@ -3277,11 +3372,6 @@ fn encode_block_pass(
             emit_bit_mix(inout output, in record, destination, left, right);
         } else if record.op == STACK_POINTER {
             emit(inout output, in Instruction::Move(destination, RSP));
-        } else if record.op == FLOAT_CONSTANT {
-            emit(
-                inout output,
-                in Instruction::FloatImmediate(destination, record.left, record.extra)
-            );
         } else if is_symbol(record.op) {
             let kind = match record.op {
                 FUNCTION_GOT => X86_FUNCTION_GOT,
@@ -3317,49 +3407,6 @@ fn encode_block_pass(
             } else {
                 emit(inout output, in Instruction::Select(destination, left, third, right, CC_NE));
             }
-        } else if is_float_compare(record.op) {
-            let width = if record.op == FLOAT_COMPARE32 {
-                DWORD_BITS
-            } else {
-                QWORD_BITS
-            };
-            emit(
-                inout output,
-                in Instruction::FloatCompare(destination, left, right, record.extra, width)
-            );
-        } else if record.op == FLOAT_COPY_SIGN {
-            emit(inout output, in Instruction::Move(destination, left));
-            emit(inout output, in Instruction::FloatCopySign(destination, right, record.extra));
-        } else if is_float_binary(record.op) {
-            let reuse_right = destination == right && can_reuse_right(record.op);
-            let first = if reuse_right { right } else { left };
-            let second = if reuse_right { left } else { right };
-            let op = match record.op {
-                FLOAT_ADD => SSE_ADD,
-                FLOAT_SUB => SSE_SUB,
-                FLOAT_MUL => SSE_MUL,
-                _ => SSE_DIV,
-            };
-            emit(inout output, in Instruction::Move(destination, first));
-            emit(inout output, in Instruction::FloatBinary(op, destination, second, record.extra));
-        } else if record.op == FLOAT_SQRT {
-            emit(
-                inout output,
-                in Instruction::FloatBinary(SSE_SQRT, destination, left, record.extra)
-            );
-        } else if record.op == FLOAT_NEG || record.op == FLOAT_ABS {
-            emit(inout output, in Instruction::Move(destination, left));
-            emit(
-                inout output,
-                in Instruction::FloatSign(destination, record.op == FLOAT_ABS, record.extra)
-            );
-        } else if record.op == BITS_TO_FLOAT || record.op == FLOAT_TO_BITS {
-            emit(inout output, in Instruction::FloatBits(destination, left, record.extra));
-        } else if record.op == FLOAT_TO_INTEGER_TRUNC {
-            emit(
-                inout output,
-                in Instruction::FloatToInteger(destination, left, record.right, record.extra)
-            );
         } else if is_comparison(record.op) {
             let cc = condition_code(record.extra);
             let width = comparison_width(record.op);

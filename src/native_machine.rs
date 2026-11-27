@@ -1758,21 +1758,22 @@ impl IntegerBlocks<'_> {
                     Opcode::Fmul => IntegerOp::FloatMul,
                     Opcode::Fdiv => IntegerOp::FloatDiv,
                     Opcode::Fcopysign => IntegerOp::FloatCopySign,
-                    Opcode::Fmin if self.aarch64 => IntegerOp::FloatMin,
-                    Opcode::Fmax if self.aarch64 => IntegerOp::FloatMax,
+                    Opcode::Fmin => IntegerOp::FloatMin,
+                    Opcode::Fmax => IntegerOp::FloatMax,
                     _ => return None,
                 };
                 (op, [input(left)?, input(right)?, float_width(output)?])
             }
             InstructionData::Unary { opcode, arg } if ty(arg) == output => {
+                let has_round = self.aarch64 || self.x86_isa.is_some_and(TargetIsa::has_round);
                 let op = match opcode {
                     Opcode::Sqrt => IntegerOp::FloatSqrt,
                     Opcode::Fneg => IntegerOp::FloatNeg,
                     Opcode::Fabs => IntegerOp::FloatAbs,
-                    Opcode::Ceil if self.aarch64 => IntegerOp::FloatCeil,
-                    Opcode::Floor if self.aarch64 => IntegerOp::FloatFloor,
-                    Opcode::Trunc if self.aarch64 => IntegerOp::FloatTrunc,
-                    Opcode::Nearest if self.aarch64 => IntegerOp::FloatNearest,
+                    Opcode::Ceil if has_round => IntegerOp::FloatCeil,
+                    Opcode::Floor if has_round => IntegerOp::FloatFloor,
+                    Opcode::Trunc if has_round => IntegerOp::FloatTrunc,
+                    Opcode::Nearest if has_round => IntegerOp::FloatNearest,
                     _ => return None,
                 };
                 (op, [input(arg)?, 0, float_width(output)?])

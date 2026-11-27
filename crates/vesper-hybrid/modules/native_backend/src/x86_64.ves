@@ -64,6 +64,7 @@ pub const ALU_XOR_EXTENSION: u8 = 6;
 const ALU_CMP_EXTENSION: u8 = 7;
 const TWO_BYTE_OPCODE: u8 = 0x0f;
 const THREE_BYTE_38_MAP: u8 = 0x38;
+const THREE_BYTE_3A_MAP: u8 = 0x3a;
 const UD2_OPCODE: u8 = 0x0b;
 const IMUL_R64_RM64: u8 = 0xaf;
 const IMUL_R64_RM64_IMM8: u8 = 0x6b;
@@ -138,6 +139,7 @@ const GPR_TO_XMM: u8 = 0x6e;
 const XMM_TO_GPR: u8 = 0x7e;
 const UCOMIS: u8 = 0x2e;
 const ANDPS: u8 = 0x54;
+const ORPS: u8 = 0x56;
 const XORPS: u8 = 0x57;
 const PACKED_SHIFT_WORD: u8 = 0x71;
 const PACKED_SHIFT_DWORD: u8 = 0x72;
@@ -153,6 +155,14 @@ pub const SSE_DIV: u8 = 0x5e;
 pub const SSE_SQRT: u8 = 0x51;
 const SSE_FLOAT_TO_INTEGER_TRUNC: u8 = 0x2c;
 const SSE_INTEGER_TO_FLOAT: u8 = 0x2a;
+const SSE_MIN: u8 = 0x5d;
+const SSE_MAX: u8 = 0x5f;
+const ROUNDSS: u8 = 0x0a;
+const ROUNDSD: u8 = 0x0b;
+const ROUND_NEAREST_EVEN: u8 = 0;
+const ROUND_DOWN: u8 = 1;
+const ROUND_UP: u8 = 2;
+const ROUND_TOWARD_ZERO: u8 = 3;
 const SHIFT_GROUP_IMM8: u8 = 0xc1;
 const SHIFT_GROUP_CL: u8 = 0xd3;
 const SHIFT_BYTE_GROUP_CL: u8 = 0xd2;
@@ -288,6 +298,13 @@ pub copy enum PackedRelation {
     UnsignedGreater,
 }
 
+pub copy enum Rounding {
+    Nearest,
+    Floor,
+    Ceil,
+    Trunc,
+}
+
 pub copy enum BitOperation {
     LeadingZeros,
     TrailingZeros,
@@ -307,6 +324,8 @@ pub copy enum Instruction {
     FloatBits(u8, u8, u64),
     FloatToInteger(u8, u8, u64, u64),
     FloatConvert(u8, u8, u64),
+    FloatMinMax(u8, u8, u8, bool, u64),
+    FloatRound(u8, u8, Rounding, u64),
     IntegerToFloat(u8, u8, u64, u64, bool),
     VectorConstant(u8, u64, u64),
     VectorSplat(u8, u8, u64),
@@ -1190,6 +1209,74 @@ fn xmm_binary(inout out: ChunkSeq[u8], opcode: u8, destination: u8, source: u8) 
     out.push(modrm(dst, src));
 }
 
+fn emit_short_branch(inout out: ChunkSeq[u8], opcode: u8) -> u64 {
+    out.push(opcode);
+    let displacement = out.len();
+    out.push(0);
+    displacement
+}
+
+fn patch_short_forward(inout out: ChunkSeq[u8], displacement: u64) {
+    // The caller keeps each forward target within its fixed instruction sequence.
+    let distance = wrapping_sub(out.len(), wrapping_add(displacement, 1));
+    let _ = out.try_set(displacement, wrapping_u8(distance));
+}
+
+fn float_min_max(inout out: ChunkSeq[u8], dest: u8, left: u8, right: u8, min: bool, width: u64) {
+    let result = if dest == left && left != right {
+        XMM_RIGHT_SCRATCH
+    } else {
+        dest
+    };
+    float_move(inout out, result, right);
+    if width == QWORD_BITS {
+        out.push(OPERAND_SIZE_OVERRIDE);
+    }
+    xmm_binary(inout out, UCOMIS, result, left);
+    let unequal = emit_short_branch(inout out, JCC_SHORT | CC_NE);
+    let unordered = emit_short_branch(inout out, JCC_SHORT | CC_P);
+
+    // Equal operands can differ in the sign of zero.
+    xmm_binary(inout out, if min { ORPS } else { ANDPS }, result, left);
+    let equal_done = emit_short_branch(inout out, JMP_SHORT);
+
+    // Addition quiets a signaling NaN and propagates its payload.
+    patch_short_forward(inout out, unordered);
+    out.push(float_prefix(width));
+    xmm_binary(inout out, SSE_ADD, result, left);
+    let unordered_done = emit_short_branch(inout out, JMP_SHORT);
+
+    patch_short_forward(inout out, unequal);
+    out.push(float_prefix(width));
+    xmm_binary(inout out, if min { SSE_MIN } else { SSE_MAX }, result, left);
+    patch_short_forward(inout out, equal_done);
+    patch_short_forward(inout out, unordered_done);
+    float_move(inout out, dest, result);
+}
+
+fn float_round(inout out: ChunkSeq[u8], dest: u8, source: u8, in mode: Rounding, width: u64) {
+    let dest = xmm_code(dest);
+    let source = xmm_code(source);
+    out.push(OPERAND_SIZE_OVERRIDE);
+    emit_rex(inout out, dest, source, false, false);
+    out.push(TWO_BYTE_OPCODE);
+    out.push(THREE_BYTE_3A_MAP);
+    out.push(
+        if width == DWORD_BITS {
+            ROUNDSS
+        } else {
+            ROUNDSD
+        }
+    );
+    out.push(modrm(dest, source));
+    out.push(match mode {
+        Rounding::Nearest => ROUND_NEAREST_EVEN,
+        Rounding::Floor => ROUND_DOWN,
+        Rounding::Ceil => ROUND_UP,
+        Rounding::Trunc => ROUND_TOWARD_ZERO,
+    });
+}
+
 fn cvtsi(inout out: ChunkSeq[u8], destination: u8, source: u8, wide: bool, width: u64) {
     let dest = xmm_code(destination);
     out.push(float_prefix(width));
@@ -1800,6 +1887,12 @@ pub fn emit(inout out: ChunkSeq[u8], in instruction: Instruction) {
         Instruction::FloatConvert(destination, source, source_width) => {
             out.push(float_prefix(source_width));
             xmm_binary(inout out, SSE_CONVERT_PRECISION, destination, source);
+        },
+        Instruction::FloatMinMax(destination, left, right, min, width) => {
+            float_min_max(inout out, destination, left, right, min, width);
+        },
+        Instruction::FloatRound(destination, source, mode, width) => {
+            float_round(inout out, destination, source, in mode, width);
         },
         Instruction::IntegerToFloat(destination, source, from, width, signed) => {
             integer_to_float(inout out, destination, source, from, width, signed);

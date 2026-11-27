@@ -1,4 +1,4 @@
-use super::{binding, integer_block_words};
+use super::binding;
 use cranelift_codegen::{
     Context,
     ir::{
@@ -11,6 +11,7 @@ use cranelift_codegen::{
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::Module;
+use vesper::native::machine::x86_64_block_words;
 
 fn module() -> JITModule {
     let isa = cranelift_native::builder()
@@ -24,7 +25,8 @@ fn module() -> JITModule {
 }
 
 fn compile(module: &mut JITModule, context: &mut Context) -> (*const u8, *const u8) {
-    let request = integer_block_words(&context.func).expect("floating machine request");
+    let request =
+        x86_64_block_words(&context.func, module.isa()).expect("floating machine request");
     let code = binding::x86_64_integer_block(&request);
     assert!(!code.is_empty(), "{}", context.func.display());
     let baseline = module
@@ -83,6 +85,187 @@ fn scalar_conversion(
     [a, b].map(|pointer| unsafe {
         std::mem::transmute::<*const u8, unsafe extern "C" fn(u64) -> u64>(pointer)
     })
+}
+
+#[test]
+fn sse2_min_max_matches_nan_payloads_and_signed_zero() {
+    type Entry = unsafe extern "C" fn(u64, u64) -> u64;
+    let mut module = module();
+    for width in [types::F32, types::F64] {
+        let int = width.as_int();
+        for min in [false, true] {
+            for keep_right in [false, true] {
+                let mut context = module.make_context();
+                context.func.signature.params = vec![AbiParam::new(types::I64); 2];
+                context
+                    .func
+                    .signature
+                    .returns
+                    .push(AbiParam::new(types::I64));
+                let mut state = FunctionBuilderContext::new();
+                let mut b = FunctionBuilder::new(&mut context.func, &mut state);
+                let entry = b.create_block();
+                b.append_block_params_for_function_params(entry);
+                b.switch_to_block(entry);
+                let [left, right] = *b.block_params(entry) else {
+                    unreachable!()
+                };
+                let (left, right) = if width == types::F32 {
+                    (b.ins().ireduce(int, left), b.ins().ireduce(int, right))
+                } else {
+                    (left, right)
+                };
+                let left = b.ins().bitcast(width, MemFlags::new(), left);
+                let right = b.ins().bitcast(width, MemFlags::new(), right);
+                let result = if min {
+                    b.ins().fmin(left, right)
+                } else {
+                    b.ins().fmax(left, right)
+                };
+                let mut bits = b.ins().bitcast(int, MemFlags::new(), result);
+                if keep_right {
+                    let rhs = b.ins().bitcast(int, MemFlags::new(), right);
+                    bits = b.ins().bxor(bits, rhs);
+                }
+                if width == types::F32 {
+                    bits = b.ins().uextend(types::I64, bits);
+                }
+                b.ins().return_(&[bits]);
+                b.seal_all_blocks();
+                b.finalize();
+                let (a, b) = compile(&mut module, &mut context);
+                let functions = [a, b]
+                    .map(|pointer| unsafe { std::mem::transmute::<*const u8, Entry>(pointer) });
+                let values = if width == types::F32 {
+                    [
+                        0,
+                        0x8000_0000,
+                        1,
+                        0x3f80_0000,
+                        0xc000_0000,
+                        0x7f80_0000,
+                        0xff80_0000,
+                        0x7fc0_0003,
+                        0xffc0_0005,
+                        0x7f80_0007,
+                    ]
+                } else {
+                    [
+                        0,
+                        0x8000_0000_0000_0000,
+                        1,
+                        0x3ff0_0000_0000_0000,
+                        0xc000_0000_0000_0000,
+                        0x7ff0_0000_0000_0000,
+                        0xfff0_0000_0000_0000,
+                        0x7ff8_0000_0000_0003,
+                        0xfff8_0000_0000_0005,
+                        0x7ff0_0000_0000_0007,
+                    ]
+                };
+                for x in values {
+                    for y in values {
+                        let [reference, candidate] = functions.map(|run| unsafe { run(x, y) });
+                        assert_eq!(
+                            candidate, reference,
+                            "{width} min={min} {keep_right} {x:#x} {y:#x}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+    unsafe { module.free_memory() };
+}
+
+#[test]
+fn sse41_rounding_matches_cranelift_at_ties_and_signed_zero() {
+    if !std::is_x86_feature_detected!("sse4.1") {
+        return;
+    }
+    #[derive(Clone, Copy, Debug)]
+    enum Round {
+        Floor,
+        Ceil,
+        Nearest,
+        Trunc,
+    }
+    let mut module = module();
+    for width in [types::F32, types::F64] {
+        for round in [Round::Floor, Round::Ceil, Round::Nearest, Round::Trunc] {
+            let functions = scalar_conversion(
+                &mut module,
+                |b, value| {
+                    let value = if width == types::F32 {
+                        b.ins().ireduce(types::I32, value)
+                    } else {
+                        value
+                    };
+                    let float = b.ins().bitcast(width, MemFlags::new(), value);
+                    match round {
+                        Round::Floor => b.ins().floor(float),
+                        Round::Ceil => b.ins().ceil(float),
+                        Round::Nearest => b.ins().nearest(float),
+                        Round::Trunc => b.ins().trunc(float),
+                    }
+                },
+                width,
+            );
+            for value in [
+                -3.5,
+                -2.5,
+                -0.5,
+                -0.0,
+                0.0,
+                0.5,
+                2.5,
+                3.5,
+                f64::INFINITY,
+                f64::NAN,
+            ] {
+                let bits = if width == types::F32 {
+                    u64::from((value as f32).to_bits())
+                } else {
+                    value.to_bits()
+                };
+                let [reference, candidate] = functions.map(|run| unsafe { run(bits) });
+                assert_eq!(candidate, reference, "{width} {round:?} {bits:#x}");
+            }
+        }
+    }
+    unsafe { module.free_memory() };
+}
+
+#[test]
+fn scalar_rounding_declines_x86_targets_without_sse41() {
+    let isa = cranelift_native::builder_with_options(false)
+        .unwrap()
+        .finish(settings::Flags::new(settings::builder()))
+        .unwrap();
+    assert!(!isa.has_round());
+    let mut context = Context::new();
+    context.func.signature.call_conv = isa.default_call_conv();
+    context
+        .func
+        .signature
+        .params
+        .push(AbiParam::new(types::F32));
+    context
+        .func
+        .signature
+        .returns
+        .push(AbiParam::new(types::F32));
+    let mut state = FunctionBuilderContext::new();
+    let mut b = FunctionBuilder::new(&mut context.func, &mut state);
+    let entry = b.create_block();
+    b.append_block_params_for_function_params(entry);
+    b.switch_to_block(entry);
+    let input = b.block_params(entry)[0];
+    let result = b.ins().nearest(input);
+    b.ins().return_(&[result]);
+    b.seal_all_blocks();
+    b.finalize();
+    assert!(x86_64_block_words(&context.func, isa.as_ref()).is_none());
 }
 
 #[test]
