@@ -718,16 +718,21 @@ fn track_home(inout frame: FrameLayout, in record: Record) {
         return;
     }
     let offset = stack_access_offset(in record);
-    let integer_qword = record.op == STACK_STORE_QWORD
-        || (record.op == STACK_LOAD && record.extra == QWORD_BITS);
-    let floating = is_float_stack_operation(record.op);
-    if offset % SPILL_SLOT_BYTES != 0 || (!integer_qword && !floating) {
-        // An addressable, overlapping or narrow integer access needs memory.
+    if record.op == STACK_ADDRESS || offset % SPILL_SLOT_BYTES != 0 {
+        // Escaping addresses and overlapping accesses can reach other cells.
         frame.promoted = 0;
         return;
     }
     let home = offset / SPILL_SLOT_BYTES;
     if home >= frame.promoted {
+        return;
+    }
+    let integer_qword = record.op == STACK_STORE_QWORD
+        || (record.op == STACK_LOAD && record.extra == QWORD_BITS);
+    let floating = is_float_stack_operation(record.op);
+    if !integer_qword && !floating {
+        // Narrow integer accesses within promotable cells still need memory.
+        frame.promoted = 0;
         return;
     }
     let bit = register_bit(wrapping_u8(home));

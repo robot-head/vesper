@@ -114,6 +114,53 @@ fn branch_table(builder: &mut FunctionBuilder<'_>, index: Value, default: Block,
 }
 
 #[test]
+fn narrow_accesses_beyond_register_homes_leave_the_prefix_promotable() {
+    const NO_VALUE: u64 = u64::MAX;
+    const STACK_SLOT: u64 = 30;
+    const STACK_ADDRESS: u64 = 31;
+    const STACK_LOAD: u64 = 32;
+    const STACK_STORE_BYTE: u64 = 33;
+    const STACK_STORE_QWORD: u64 = 36;
+    const STORE_QWORD: u64 = 27;
+    const BLOCK_RETURN: u64 = 66;
+    const CELL_BYTES: u64 = size_of::<u64>() as u64;
+    const CELL_BITS: u64 = u64::BITS as u64;
+    const MEMORY_HOME_OFFSET: u64 = 5 * CELL_BYTES;
+    const HOME_FRAME_BYTES: u64 = MEMORY_HOME_OFFSET + CELL_BYTES;
+    const MOV_RBX_RDI: [u8; 3] = [0x48, 0x89, 0xfb];
+
+    let encode = |offset, escaped| {
+        const ARGS: u64 = 2;
+        let mut records = vec![
+            [STACK_SLOT, HOME_FRAME_BYTES, CELL_BYTES, 0],
+            [MACHINE_BLOCK_LABEL, 0, 1, 1],
+            [STACK_STORE_QWORD, 0, 0, 0],
+            [STACK_STORE_BYTE, 1, 0, offset],
+        ];
+        if escaped {
+            let address = records.len() as u64 + ARGS;
+            records.push([STACK_ADDRESS, 0, MEMORY_HOME_OFFSET, 0]);
+            let displacement = u64::from((-(MEMORY_HOME_OFFSET as i32)) as u32);
+            records.push([STORE_QWORD, address, 1, displacement]);
+        }
+        let result = records.len() as u64 + ARGS;
+        records.push([STACK_LOAD, 0, 0, CELL_BITS]);
+        records.push([BLOCK_RETURN, result, 0, 0]);
+        let tape: Vec<_> = [ARGS, NO_VALUE]
+            .into_iter()
+            .chain(records.into_iter().flatten())
+            .collect();
+        let code = binding::x86_64_integer_block(&tape);
+        assert!(!code.is_empty());
+        code.windows(MOV_RBX_RDI.len())
+            .any(|instruction| instruction == MOV_RBX_RDI)
+    };
+    assert!(encode(MEMORY_HOME_OFFSET, false));
+    assert!(!encode(0, false));
+    assert!(!encode(MEMORY_HOME_OFFSET, true));
+}
+
+#[test]
 fn register_pressure_recreates_cheap_constants_without_stack_slots() {
     const LIVE_CONSTANTS: u64 = 18;
     const CONSTANT: u64 = 0;
