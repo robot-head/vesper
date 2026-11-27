@@ -1527,3 +1527,91 @@ pub fn migrate_parse_annotation_line(in line: Slice[u8], inout out_spans: Slice[
     let _ = out_spans.try_set(5, len_l);
     ANNOT_OK
 }
+
+// ---------------------------------------------------------------------------
+// Lifted parameter renderer (`lift.rs::render_param`).
+
+const BYTE_LBRACE: u8 = 123;
+const BYTE_RBRACE: u8 = 125;
+const BYTE_COMMA: u8 = 44;
+const BYTE_COLON: u8 = 58;
+
+fn copy_range(
+    in src: Slice[u8],
+    src_start: u64,
+    src_len: u64,
+    inout dst: Slice[u8],
+    dst_pos: u64,
+) -> u64 {
+    let mut i: u64 = 0;
+    let mut pos = dst_pos;
+    loop {
+        if i >= src_len {
+            break;
+        }
+        let b = match src.try_get(wrapping_add(src_start, i)) {
+            Some(v) => v,
+            None => break
+        };
+        let _ = dst.try_set(pos, b);
+        pos = wrapping_add(pos, 1);
+        i = wrapping_add(i, 1);
+    }
+    pos
+}
+
+pub fn migrate_render_param(
+    in kw: Slice[u8],
+    in name: Slice[u8],
+    has_footprint: bool,
+    in fp_buf: Slice[u8],
+    in fp_starts: Slice[u64],
+    in fp_lens: Slice[u64],
+    in ty: Slice[u8],
+    inout out: Slice[u8],
+) -> u64 {
+    let mut pos: u64 = 0;
+    if kw.len() > 0 {
+        pos = copy_range(in kw, 0, kw.len(), inout out, pos);
+        let _ = out.try_set(pos, BYTE_SPACE);
+        pos = wrapping_add(pos, 1);
+    }
+    pos = copy_range(in name, 0, name.len(), inout out, pos);
+    if has_footprint {
+        let _ = out.try_set(pos, BYTE_DOT);
+        pos = wrapping_add(pos, 1);
+        let _ = out.try_set(pos, BYTE_LBRACE);
+        pos = wrapping_add(pos, 1);
+        let k = fp_starts.len();
+        let mut i: u64 = 0;
+        loop {
+            if i >= k {
+                break;
+            }
+            if i > 0 {
+                let _ = out.try_set(pos, BYTE_COMMA);
+                pos = wrapping_add(pos, 1);
+                let _ = out.try_set(pos, BYTE_SPACE);
+                pos = wrapping_add(pos, 1);
+            }
+            let ps = match fp_starts.try_get(i) {
+                Some(v) => v,
+                None => break
+            };
+            let pl = match fp_lens.try_get(i) {
+                Some(v) => v,
+                None => break
+            };
+            pos = copy_range(in fp_buf, ps, pl, inout out, pos);
+            i = wrapping_add(i, 1);
+        }
+        let _ = out.try_set(pos, BYTE_RBRACE);
+        pos = wrapping_add(pos, 1);
+    }
+    let _ = out.try_set(pos, BYTE_COLON);
+    pos = wrapping_add(pos, 1);
+    let _ = out.try_set(pos, BYTE_SPACE);
+    pos = wrapping_add(pos, 1);
+    pos = copy_range(in ty, 0, ty.len(), inout out, pos);
+    pos
+}
