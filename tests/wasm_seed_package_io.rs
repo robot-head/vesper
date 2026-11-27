@@ -2742,13 +2742,6 @@ const COMPILER_PACKAGES: &[(&str, &str, &str, &str, CompilerExecCheck)] = &[
         CompilerExecCheck::NonZero,
     ),
     (
-        "run",
-        "@vesper/run",
-        "packages/vesper-run",
-        "run_words(in \"\".as_bytes()).len()",
-        CompilerExecCheck::CompileOnly,
-    ),
-    (
         "verify",
         "@vesper/verify",
         "packages/vesper-verify",
@@ -2803,6 +2796,13 @@ const STAGE2_CRANELIFT_PACKAGES: &[(&str, &str, &str, &str)] = &[
 /// `src/lib.ves`, reason). `stage2_self_compilation_fixed_point` checks that
 /// each one still fails, so a gap that closes moves into [`COMPILER_PACKAGES`].
 const STAGE2_PACKAGE_GAPS: &[(&str, &str, &str, &str, &str)] = &[
+    (
+        "run",
+        "@vesper/run",
+        "packages/vesper-run",
+        "use @vesper/run::run_words;\npub fn main() -> u64 { run_words(in \"\".as_bytes()).len() }\n",
+        "the `vesper run` evaluator's floats (slice 8 of #2053) use `f32` and the float intrinsics (`nearest_f32`, `widen_f64`, `to_bits_*`, `from_bits_*`), which @vesper/wasm-backend does not lower yet (WErr Unsupported ExternalFunction nearest_f32 in machine::coerce)",
+    ),
     (
         "driver-commands",
         "@vesper/driver-commands",
