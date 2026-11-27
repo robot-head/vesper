@@ -873,6 +873,105 @@ fn flip_gate_qe_identity() {
     println!("flip-gate pairs qe_identity {}", pairs.join(" "));
 }
 
+const SGX_TCB_INFO_PASSES: usize = 20_000;
+
+fn flip_gate_sgx_tcb_info() {
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase", deny_unknown_fields)]
+    struct SgxTcbInfoJson {
+        id: String,
+        version: u32,
+        issue_date: String,
+        next_update: String,
+        fmspc: String,
+        pce_id: String,
+        tcb_type: u32,
+        tcb_evaluation_data_number: u32,
+        tcb_levels: Vec<SgxTcbLevelJson>,
+    }
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase", deny_unknown_fields)]
+    struct SgxTcbLevelJson {
+        tcb: SgxTcbJson,
+        tcb_date: String,
+        tcb_status: String,
+        #[serde(rename = "advisoryIDs", default)]
+        advisory_ids: Vec<String>,
+    }
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct SgxTcbJson {
+        sgxtcbcomponents: Vec<ComponentJson>,
+        pcesvn: u16,
+    }
+    #[derive(serde::Deserialize)]
+    struct ComponentJson {
+        svn: u8,
+    }
+
+    let body = br#"{"id":"SGX","version":3,"issueDate":"2024-03-13T16:12:41Z","nextUpdate":"2024-04-12T16:12:41Z","fmspc":"00806F050000","pceId":"0000","tcbType":0,"tcbEvaluationDataNumber":17,"tcbLevels":[{"tcb":{"sgxtcbcomponents":[{"svn":4},{"svn":4},{"svn":2},{"svn":4},{"svn":2},{"svn":255},{"svn":0},{"svn":0},{"svn":0},{"svn":0},{"svn":0},{"svn":0},{"svn":0},{"svn":0},{"svn":0},{"svn":0}],"pcesvn":13},"tcbDate":"2024-03-13T00:00:00Z","tcbStatus":"UpToDate"},{"tcb":{"sgxtcbcomponents":[{"svn":2},{"svn":2},{"svn":2},{"svn":2},{"svn":2},{"svn":255},{"svn":0},{"svn":0},{"svn":0},{"svn":0},{"svn":0},{"svn":0},{"svn":0},{"svn":0},{"svn":0},{"svn":0}],"pcesvn":11},"tcbDate":"2023-08-09T00:00:00Z","tcbStatus":"OutOfDate","advisoryIDs":["INTEL-SA-00837","INTEL-SA-00950"]}]}"#;
+
+    let rust_parse = |json: &[u8]| -> SgxTcbInfoJson {
+        let j: SgxTcbInfoJson = serde_json::from_slice(json).unwrap();
+        assert_eq!(j.id, "SGX");
+        assert_eq!(j.version, 3);
+        assert_eq!(j.tcb_type, 0);
+        let _ = (
+            &j.issue_date,
+            &j.next_update,
+            &j.fmspc,
+            &j.pce_id,
+            j.tcb_evaluation_data_number,
+        );
+        for l in &j.tcb_levels {
+            let _ = (
+                l.tcb.sgxtcbcomponents.iter().map(|c| c.svn).sum::<u8>(),
+                l.tcb.pcesvn,
+                &l.tcb_date,
+                &l.tcb_status,
+                &l.advisory_ids,
+            );
+        }
+        j
+    };
+
+    // Differential check: Vesper port matches serde_json::from_slice.
+    let expected = rust_parse(body);
+    let actual = port::sgx::SgxTcbInfo::parse(body).unwrap();
+    assert_eq!(
+        actual.tcb_evaluation_data_number,
+        expected.tcb_evaluation_data_number
+    );
+    assert_eq!(actual.levels.len(), expected.tcb_levels.len());
+
+    let run_rust = || -> u64 {
+        let t = Instant::now();
+        for _ in 0..SGX_TCB_INFO_PASSES {
+            black_box(rust_parse(black_box(body)));
+        }
+        t.elapsed().as_nanos() as u64
+    };
+    let run_port = || -> u64 {
+        let t = Instant::now();
+        for _ in 0..SGX_TCB_INFO_PASSES {
+            black_box(port::sgx::SgxTcbInfo::parse(black_box(body)).unwrap());
+        }
+        t.elapsed().as_nanos() as u64
+    };
+    black_box(run_rust());
+    black_box(run_port());
+    let pairs: Vec<String> = (0..FLIP_GATE_EPOCHS)
+        .map(|_| {
+            let a1 = run_rust();
+            let b1 = run_port();
+            let b2 = run_port();
+            let a2 = run_rust();
+            format!("{}:{}", a1 + a2, b1 + b2)
+        })
+        .collect();
+    println!("flip-gate pairs sgx_tcb_info {}", pairs.join(" "));
+}
+
 fn main() {
     assert_eq!(port::IMPLEMENTATION, "vesper");
     let args: Vec<String> = std::env::args().collect();
@@ -911,6 +1010,10 @@ fn main() {
         }
         if args.get(2).map(String::as_str) == Some("qe_identity") {
             flip_gate_qe_identity();
+            return;
+        }
+        if args.get(2).map(String::as_str) == Some("sgx_tcb_info") {
+            flip_gate_sgx_tcb_info();
             return;
         }
     }

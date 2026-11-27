@@ -31,12 +31,11 @@ use crate::chain::{
 use crate::claims::ct_eq;
 use crate::error::{AttestError, ParseError};
 use crate::intel::{
-    ComponentJson, PckExtensions, QeIdentity, TCB_INFO_VERSION, TCB_TYPE, TcbStatus, TdxCollateral,
+    PckExtensions, QeIdentity, TCB_INFO_VERSION, TCB_TYPE, TcbStatus, TdxCollateral,
     TdxTcbEvaluation, all_ge, check_embedded_root, check_window, collateral, date, evaluate_qe,
-    hex_array, parse_pck_extensions, push_unique, svn16, verify_signed,
+    parse_pck_extensions, push_unique, verify_signed,
 };
 use crate::tdx::{QeReportBody, TdxQuote};
-use serde::Deserialize;
 
 pub const SGX_QUOTE_VERSION: u16 = 3;
 /// `sgx_attestation_algorithm_id_t`: ECDSA-256 with P-256.
@@ -226,78 +225,197 @@ pub struct SgxTcbInfo {
     pub levels: Vec<SgxTcbLevel>,
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct SgxTcbInfoJson {
-    id: String,
-    version: u32,
-    issue_date: String,
-    next_update: String,
-    fmspc: String,
-    pce_id: String,
-    tcb_type: u32,
-    tcb_evaluation_data_number: u32,
-    tcb_levels: Vec<SgxTcbLevelJson>,
-}
+const SGX_OUT_ID_START: usize = 0;
+const SGX_OUT_ID_END: usize = 1;
+const SGX_OUT_VERSION: usize = 2;
+const SGX_OUT_ISSUE_DATE_START: usize = 3;
+const SGX_OUT_ISSUE_DATE_END: usize = 4;
+const SGX_OUT_NEXT_UPDATE_START: usize = 5;
+const SGX_OUT_NEXT_UPDATE_END: usize = 6;
+const SGX_OUT_TCB_TYPE: usize = 7;
+const SGX_OUT_TCB_EVAL_NUM: usize = 8;
+const SGX_OUT_LEVEL_COUNT: usize = 9;
+const SGX_OUT_LEN: usize = 10;
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct SgxTcbLevelJson {
-    tcb: SgxTcbJson,
-    tcb_date: String,
-    tcb_status: String,
-    #[serde(rename = "advisoryIDs", default)]
-    advisory_ids: Vec<String>,
-}
+const SGX_BYTES_FMSPC_OFF: usize = 0;
+const SGX_BYTES_FMSPC_LEN: usize = 6;
+const SGX_BYTES_PCEID_OFF: usize = 6;
+const SGX_BYTES_PCEID_LEN: usize = 2;
+const SGX_BYTES_TOTAL: usize = 8;
+const SGX_COMPS_LEN: usize = 16;
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct SgxTcbJson {
-    sgxtcbcomponents: Vec<ComponentJson>,
-    pcesvn: u16,
-}
+const SGX_LVL_STRIDE: usize = 7;
+const SGX_LVL_PCESVN: usize = 0;
+const SGX_LVL_DATE_START: usize = 1;
+const SGX_LVL_DATE_END: usize = 2;
+const SGX_LVL_STATUS_START: usize = 3;
+const SGX_LVL_STATUS_END: usize = 4;
+const SGX_LVL_ADV_START: usize = 5;
+const SGX_LVL_ADV_COUNT: usize = 6;
+
+const SGX_ERR_OK: u64 = 0;
+const SGX_ERR_HEX: u64 = 2;
+const SGX_ERR_CAPACITY: u64 = 3;
+
+const SGX_STACK_MAX_LEVELS: usize = 32;
+const SGX_STACK_MAX_ADVS: usize = 128;
 
 impl SgxTcbInfo {
     /// Parse an SGX TCB info JSON body (the signed bytes). Only version 3
     /// with `id = "SGX"` and `tcbType = 0` is accepted; a TDX TCB info
     /// (`id = "TDX"`, `tdxModule` fields) is rejected.
     pub fn parse(json: &[u8]) -> Result<Self, AttestError> {
-        let j: SgxTcbInfoJson =
-            serde_json::from_slice(json).map_err(|e| collateral("tcbInfo", e.to_string()))?;
-        if j.id != "SGX" {
+        let mut out = [0u64; SGX_OUT_LEN];
+        let mut bytes = [0u8; SGX_BYTES_TOTAL];
+        let mut stack_levels = [0u64; SGX_STACK_MAX_LEVELS * SGX_LVL_STRIDE];
+        let mut stack_comps = [0u8; SGX_STACK_MAX_LEVELS * SGX_COMPS_LEN];
+        let mut stack_advs = [0u64; SGX_STACK_MAX_ADVS * 2];
+        let mut heap_levels = Vec::new();
+        let mut heap_comps = Vec::new();
+        let mut heap_advs = Vec::new();
+
+        let rc = crate::port::vesper::parse_sgx_tcb_info(
+            json,
+            &mut out,
+            &mut bytes,
+            &mut stack_levels,
+            &mut stack_comps,
+            &mut stack_advs,
+        );
+        let (levels_buf, comps_buf, advs_buf): (&[u64], &[u8], &[u64]) = if rc == SGX_ERR_CAPACITY {
+            let mut lvl_cap = SGX_STACK_MAX_LEVELS * 2;
+            let mut adv_cap = SGX_STACK_MAX_ADVS * 2;
+            loop {
+                heap_levels.resize(lvl_cap * SGX_LVL_STRIDE, 0);
+                heap_comps.resize(lvl_cap * SGX_COMPS_LEN, 0);
+                heap_advs.resize(adv_cap * 2, 0);
+                let retry_rc = crate::port::vesper::parse_sgx_tcb_info(
+                    json,
+                    &mut out,
+                    &mut bytes,
+                    &mut heap_levels,
+                    &mut heap_comps,
+                    &mut heap_advs,
+                );
+                if retry_rc == SGX_ERR_OK {
+                    break (&heap_levels, &heap_comps, &heap_advs);
+                }
+                if retry_rc != SGX_ERR_CAPACITY {
+                    return Err(collateral(
+                        "tcbInfo",
+                        if retry_rc == SGX_ERR_HEX {
+                            "invalid hex field".into()
+                        } else {
+                            "malformed JSON".into()
+                        },
+                    ));
+                }
+                lvl_cap *= 2;
+                adv_cap *= 2;
+            }
+        } else if rc == SGX_ERR_OK {
+            (&stack_levels, &stack_comps, &stack_advs)
+        } else {
             return Err(collateral(
-                "tcbInfo.id",
-                format!("{:?}, expected SGX", j.id),
+                "tcbInfo",
+                if rc == SGX_ERR_HEX {
+                    "invalid hex field".into()
+                } else {
+                    "malformed JSON".into()
+                },
             ));
+        };
+
+        let span_str = |s: u64, e: u64, what: &'static str| -> Result<&str, AttestError> {
+            std::str::from_utf8(&json[s as usize..e as usize])
+                .map_err(|err| collateral(what, err.to_string()))
+        };
+
+        let id = span_str(out[SGX_OUT_ID_START], out[SGX_OUT_ID_END], "tcbInfo.id")?;
+        if id != "SGX" {
+            return Err(collateral("tcbInfo.id", format!("{id:?}, expected SGX")));
         }
-        if j.version != TCB_INFO_VERSION {
+        let version = out[SGX_OUT_VERSION] as u32;
+        if version != TCB_INFO_VERSION {
             return Err(collateral(
                 "tcbInfo.version",
-                format!("{}, expected {TCB_INFO_VERSION}", j.version),
+                format!("{version}, expected {TCB_INFO_VERSION}"),
             ));
         }
-        if j.tcb_type != TCB_TYPE {
-            return Err(collateral("tcbInfo.tcbType", format!("{}", j.tcb_type)));
+        let tcb_type = out[SGX_OUT_TCB_TYPE] as u32;
+        if tcb_type != TCB_TYPE {
+            return Err(collateral("tcbInfo.tcbType", format!("{tcb_type}")));
         }
-        if j.tcb_levels.is_empty() {
+        let lvl_count = out[SGX_OUT_LEVEL_COUNT] as usize;
+        if lvl_count == 0 {
             return Err(collateral("tcbInfo.tcbLevels", "empty".into()));
         }
-        let mut levels = Vec::with_capacity(j.tcb_levels.len());
-        for l in &j.tcb_levels {
+
+        let mut levels = Vec::with_capacity(lvl_count);
+        for k in 0..lvl_count {
+            let base = k * SGX_LVL_STRIDE;
+            let cbase = k * SGX_COMPS_LEN;
+            let mut sgx_components = [0u8; SGX_COMPS_LEN];
+            sgx_components.copy_from_slice(&comps_buf[cbase..cbase + SGX_COMPS_LEN]);
+            let tcb_date = date(
+                span_str(
+                    levels_buf[base + SGX_LVL_DATE_START],
+                    levels_buf[base + SGX_LVL_DATE_END],
+                    "tcbLevels.tcbDate",
+                )?,
+                "tcbLevels.tcbDate",
+            )?;
+            let status = TcbStatus::parse(span_str(
+                levels_buf[base + SGX_LVL_STATUS_START],
+                levels_buf[base + SGX_LVL_STATUS_END],
+                "tcbStatus",
+            )?)?;
+            let adv_start = levels_buf[base + SGX_LVL_ADV_START] as usize;
+            let adv_count = levels_buf[base + SGX_LVL_ADV_COUNT] as usize;
+            let mut advisory_ids = Vec::with_capacity(adv_count);
+            for a in 0..adv_count {
+                let aoff = (adv_start + a) * 2;
+                advisory_ids
+                    .push(span_str(advs_buf[aoff], advs_buf[aoff + 1], "tcbLevels")?.to_owned());
+            }
             levels.push(SgxTcbLevel {
-                sgx_components: svn16(&l.tcb.sgxtcbcomponents, "sgxtcbcomponents")?,
-                pce_svn: l.tcb.pcesvn,
-                tcb_date: date(&l.tcb_date, "tcbLevels.tcbDate")?,
-                status: TcbStatus::parse(&l.tcb_status)?,
-                advisory_ids: l.advisory_ids.clone(),
+                sgx_components,
+                pce_svn: levels_buf[base + SGX_LVL_PCESVN] as u16,
+                tcb_date,
+                status,
+                advisory_ids,
             });
         }
+
+        let mut fmspc = [0u8; SGX_BYTES_FMSPC_LEN];
+        fmspc.copy_from_slice(
+            &bytes[SGX_BYTES_FMSPC_OFF..SGX_BYTES_FMSPC_OFF + SGX_BYTES_FMSPC_LEN],
+        );
+        let mut pce_id = [0u8; SGX_BYTES_PCEID_LEN];
+        pce_id.copy_from_slice(
+            &bytes[SGX_BYTES_PCEID_OFF..SGX_BYTES_PCEID_OFF + SGX_BYTES_PCEID_LEN],
+        );
+
         Ok(SgxTcbInfo {
-            fmspc: hex_array(&j.fmspc, "tcbInfo.fmspc")?,
-            pce_id: hex_array(&j.pce_id, "tcbInfo.pceId")?,
-            issue_date: date(&j.issue_date, "tcbInfo.issueDate")?,
-            next_update: date(&j.next_update, "tcbInfo.nextUpdate")?,
-            tcb_evaluation_data_number: j.tcb_evaluation_data_number,
+            fmspc,
+            pce_id,
+            issue_date: date(
+                span_str(
+                    out[SGX_OUT_ISSUE_DATE_START],
+                    out[SGX_OUT_ISSUE_DATE_END],
+                    "tcbInfo.issueDate",
+                )?,
+                "tcbInfo.issueDate",
+            )?,
+            next_update: date(
+                span_str(
+                    out[SGX_OUT_NEXT_UPDATE_START],
+                    out[SGX_OUT_NEXT_UPDATE_END],
+                    "tcbInfo.nextUpdate",
+                )?,
+                "tcbInfo.nextUpdate",
+            )?,
+            tcb_evaluation_data_number: out[SGX_OUT_TCB_EVAL_NUM] as u32,
             levels,
         })
     }
