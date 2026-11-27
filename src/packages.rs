@@ -3035,9 +3035,9 @@ impl Renamer<'_> {
 }
 
 /// The Rust pieces the Vesper driver's package loader still calls (#1986
-/// slice 2): it reads the package graph itself (modules/driver/src/load.ves)
-/// and asks for the manifest decode, the SemVer match and the `.vsys` type
-/// names here, through the driver's host steps.
+/// slice 2): it reads and decodes the package graph itself
+/// (modules/driver/src/load.ves) and asks for its settings (`LoadBegin`) and
+/// the `.vsys` type names (`VsysNames`) here.
 pub mod driver_host {
     use super::*;
 
@@ -3069,52 +3069,6 @@ pub mod driver_host {
     /// with a larger source to the Rust loader.
     pub fn max_source_bytes() -> usize {
         crate::parser::ParseLimits::default().max_source_bytes
-    }
-
-    /// A manifest as `Loader::package` decodes it.
-    pub struct DriverManifest(Manifest);
-
-    /// One `[dependencies]` entry, in name order.
-    pub struct DriverDependency<'a> {
-        pub name: &'a str,
-        pub optional: bool,
-        pub path: Option<&'a str>,
-    }
-
-    impl DriverManifest {
-        /// `vesper_loom_calculus::parse_manifest`, or `None` for a manifest
-        /// error (the Rust loader reports it).
-        pub fn parse(text: &str) -> Option<Self> {
-            vesper_loom_calculus::parse_manifest(text).ok().map(Self)
-        }
-        pub fn name(&self) -> &str {
-            self.0.package.name.as_str()
-        }
-        pub fn vsys(&self) -> &[String] {
-            &self.0.package.vsys
-        }
-        pub fn objects(&self) -> &[String] {
-            &self.0.package.objects
-        }
-        pub fn dependencies(&self) -> impl Iterator<Item = DriverDependency<'_>> {
-            self.0
-                .dependencies
-                .iter()
-                .map(|(name, d)| DriverDependency {
-                    name: name.as_str(),
-                    optional: d.optional,
-                    path: d.path.as_deref(),
-                })
-        }
-        /// Whether dependency `name`'s version requirement accepts
-        /// `found`'s version (`false` when there is no such dependency).
-        pub fn accepts(&self, name: &str, found: &DriverManifest) -> bool {
-            self.0
-                .dependencies
-                .iter()
-                .find(|(n, _)| n.as_str() == name)
-                .is_some_and(|(_, d)| d.version.matches(&found.0.package.version))
-        }
     }
 
     /// The `.vsys` library `text` for target `VSYS_TARGETS[target]`

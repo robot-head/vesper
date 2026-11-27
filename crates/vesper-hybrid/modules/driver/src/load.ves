@@ -9,10 +9,12 @@
 // (packages/vesper-check-names-packages/src/load.ves), so the graph never
 // crosses from Rust.
 //
-// What still runs over the Rust parsers are three host steps
-// (crates/vesper-hybrid/src/driver/load.rs): the manifest decode
-// (`Manifest`), a dependency's version match (`VersionMatches`) and a
-// `.vsys` library's type names and link mode (`VsysNames`). A graph with a
+// The manifest decode and validation and a dependency's version match are
+// @vesper/loom-calculus's (`loader`). A `.vsys` library's type names and
+// link mode are the one host step left (`VsysNames`,
+// crates/vesper-hybrid/src/driver/load.rs): @vesper/vsys does not check
+// everything `vesper_ffi::sys` does yet (the parser limits, linear handle
+// finalizers, drop import signatures). A graph with a
 // manifest error, an I/O error or anything else this reader does not
 // cover (an absolute dependency path, a UNC path, a name that is not
 // UTF-8, a source over the parser's byte budget) goes back to the Rust
@@ -30,18 +32,14 @@ use @vesper-std/fs::{
 };
 use @vesper-std/fs::walk::{Entries, entry_count, entry_start, entry_end, entry_kind, list_dir_path};
 use @vesper/driver-commands::{join};
+use @vesper/loom-calculus::loader::{
+    LoadedManifest, DEP_WORDS, DEP_NAME_START, DEP_NAME_END, DEP_REQ_START, DEP_REQ_END,
+    DEP_OPTIONAL, DEP_HAS_PATH, DEP_PATH_START, DEP_PATH_END, parse_manifest, version_matches
+};
 
 // The host steps (`Step` of crates/vesper-hybrid/src/driver.rs).
 fn step_load_begin() -> u32 {
     71
-}
-
-fn step_manifest() -> u32 {
-    72
-}
-
-fn step_version_matches() -> u32 {
-    73
 }
 
 fn step_vsys_names() -> u32 {
@@ -86,7 +84,7 @@ struct Ld {
     failed: bool,
     t: ChunkSeq[u8],
     // Per package: name (start, end), canonical directory (start, end),
-    // manifest index.
+    // version (start, end).
     pkgs: ChunkSeq[u64],
     // Dependencies (package, name start, name end, package index), in the
     // order they are added.
@@ -119,11 +117,12 @@ struct Ld {
 // The tables' record widths and field offsets (see `Ld`). A field
 // without an offset here is a record's first, at 0.
 const RANGE: u64 = 2;
-const PKG: u64 = 5;
+const PKG: u64 = 6;
 const PKG_NAME_END: u64 = 1;
 const PKG_CANON: u64 = 2;
 const PKG_CANON_END: u64 = 3;
-const PKG_MANIFEST: u64 = 4;
+const PKG_VERSION: u64 = 4;
+const PKG_VERSION_END: u64 = 5;
 const DEP: u64 = 4;
 const DEP_NAME: u64 = 1;
 const DEP_NAME_END: u64 = 2;
@@ -651,6 +650,57 @@ fn expand(in path: Slice[u8], t: u64) -> ChunkSeq[u8] {
     replace(in c.as_slice(), in "@ARCH@".as_bytes(), in target_arch(t).as_bytes())
 }
 
+// ---------------------------------------------------------- manifests
+
+fn word_at(in x: ChunkSeq[u64], i: u64) -> u64 {
+    match x.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+fn put_ranges(inout o: ChunkSeq[u8], in pool: Slice[u8], in ranges: ChunkSeq[u64]) {
+    let n = ranges.len() / RANGE;
+    put(inout o, n);
+    for k in 0..n {
+        let a = word_at(in ranges, wrapping_mul(k, RANGE));
+        let e = word_at(in ranges, inc(wrapping_mul(k, RANGE)));
+        put_str(inout o, in pool[a..e]);
+    }
+}
+
+// The manifest as one stream: name, n vsys paths, n object paths, n
+// dependencies (name, optional, has path, path, requirement), in name
+// order.
+fn manifest_stream(in m: LoadedManifest) -> ChunkSeq[u8] {
+    let pool = m.pool.as_slice();
+    let mut o: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    put_str(inout o, in pool[m.name_start..m.name_end]);
+    put_ranges(inout o, in pool, in m.vsys);
+    put_ranges(inout o, in pool, in m.objects);
+    let n = m.deps.len() / DEP_WORDS;
+    put(inout o, n);
+    for k in 0..n {
+        let at = wrapping_mul(k, DEP_WORDS);
+        let ns = word_at(in m.deps, wrapping_add(at, DEP_NAME_START));
+        let ne = word_at(in m.deps, wrapping_add(at, DEP_NAME_END));
+        put_str(inout o, in pool[ns..ne]);
+        put(inout o, word_at(in m.deps, wrapping_add(at, DEP_OPTIONAL)));
+        put(inout o, word_at(in m.deps, wrapping_add(at, DEP_HAS_PATH)));
+        let ps = word_at(in m.deps, wrapping_add(at, DEP_PATH_START));
+        let pe = word_at(in m.deps, wrapping_add(at, DEP_PATH_END));
+        put_str(inout o, in pool[ps..pe]);
+        let rs = word_at(in m.deps, wrapping_add(at, DEP_REQ_START));
+        let re = word_at(in m.deps, wrapping_add(at, DEP_REQ_END));
+        put_str(inout o, in pool[rs..re]);
+    }
+    o
+}
+
+fn inc(x: u64) -> u64 {
+    wrapping_add(x, 1)
+}
+
 // ---------------------------------------------------------- host steps
 
 // `VsysNames`: 0 when the library does not parse, 1, or 2 when it links
@@ -808,12 +858,12 @@ fn package(
     if l.failed {
         return 0;
     }
-    let mi = HybridDriver::hd_step(inout s, step_manifest(), in manifest_text.as_slice());
-    if mi <= 0 {
+    let lm = parse_manifest(in manifest_text.as_slice());
+    if !lm.ok {
         l.failed = true;
         return 0;
     }
-    let m = host_text(in s);
+    let m = manifest_stream(in lm);
     let ms = m.as_slice();
     let mut at: u64 = 0;
     let (na, ne) = rd_str(in ms, inout at);
@@ -1186,7 +1236,10 @@ fn package(
     l.pkgs.push(ne2);
     l.pkgs.push(cs);
     l.pkgs.push(ce);
-    l.pkgs.push(wrapping_sub(wrapping_u64(mi), 1));
+    let lp = lm.pool.as_slice();
+    let (vs0, ve0) = keep(inout l, in lp[lm.version_start..lm.version_end]);
+    l.pkgs.push(vs0);
+    l.pkgs.push(ve0);
     l.stack.push(index);
     // The dependencies, in name order; optional ones are not loaded.
     let ndep = rd(in ms, inout at);
@@ -1195,6 +1248,7 @@ fn package(
         let optional = rd(in ms, inout at) != 0;
         let has_path = rd(in ms, inout at) != 0;
         let (ps, pe) = rd_str(in ms, inout at);
+        let (qs, qe) = rd_str(in ms, inout at);
         let dep_seq = copy(in ms, ds, de);
         let dep_name = dep_seq.as_slice();
         if optional {
@@ -1234,11 +1288,12 @@ fn package(
             l.failed = true;
             return 0;
         }
-        let mut arg: ChunkSeq[u8] = ChunkSeq::new[u8]();
-        put(inout arg, wrapping_sub(wrapping_u64(mi), 1));
-        put(inout arg, w(in l.pkgs.as_slice(), wrapping_add(wrapping_mul(d, PKG), PKG_MANIFEST)));
-        put_str(inout arg, in dep_name);
-        if HybridDriver::hd_step(inout s, step_version_matches(), in arg.as_slice()) != 1 {
+        let found_seq = tx(
+            in l,
+            w(in l.pkgs.as_slice(), wrapping_add(wrapping_mul(d, PKG), PKG_VERSION)),
+            w(in l.pkgs.as_slice(), wrapping_add(wrapping_mul(d, PKG), PKG_VERSION_END))
+        );
+        if !version_matches(in ms[qs..qe], in found_seq.as_slice()) {
             l.failed = true;
             return 0;
         }
