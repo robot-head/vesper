@@ -11,7 +11,10 @@
 // operators, bit and float builtins, and direct calls of scalar arguments
 // (`Codegen::plain_call`), and whose blocks end in `return`, `jump`,
 // `branch`, scalar `match` or `unreachable`. Any other function is left out
-// of the plan, and the Rust walk emits it.
+// of the plan, and the Rust walk emits it. Both optimizer settings are
+// planned alike. On the unoptimized path the emitter keeps every local in
+// a stack slot, so each local's entry carries the kind its stores coerce
+// to.
 
 use @vesper/check-data::util::{add, inc, n32, u64_at};
 use @vesper/check-data::types::{TyKind, default_type};
@@ -94,6 +97,9 @@ const IEX_SDIV: u64 = 5;
 const IEX_SREM: u64 = 6;
 const IEX_UDIV: u64 = 7;
 const IEX_UREM: u64 = 8;
+const IEX_SHL: u64 = 9;
+const IEX_USHR: u64 = 10;
+const IEX_SSHR: u64 = 11;
 
 // Sub-operations of `INST_WRITE_OP`.
 const WOP_IADD: u64 = 1;
@@ -895,6 +901,27 @@ impl Gen {
             extra.push(rk);
             return true;
         }
+        if op == ops_s.shl || op == ops_s.shr {
+            let ik = self.kind_of(d0);
+            if ik == 0 || kind_wide(ik) || self.ctx.world.may_overflow(i.s0, i.s1) {
+                return false;
+            }
+            let sub_iex = if op == ops_s.shl {
+                IEX_SHL
+            } else if kind_unsigned(ik) {
+                IEX_USHR
+            } else {
+                IEX_SSHR
+            };
+            kind = INST_INT_EXTRA;
+            extra.push(sub_iex);
+            extra.push(0);
+            extra.push(0);
+            extra.push(k0);
+            extra.push(k1);
+            extra.push(rk);
+            return true;
+        }
         false
     }
 
@@ -1605,7 +1632,7 @@ impl Gen {
         }
         let mut graph_words: ChunkSeq[u64] = ChunkSeq::new[u64]();
         // `ir_graph_at`'s locals, in name order: a parameter has its
-        // variable; every other local gets a zeroed one.
+        // variable; every other local gets a zeroed one. Each has its kind.
         graph_words.push(h.lname.len());
         for k in 0..h.lname.len() {
             let t = n32(u64_at(in h.lty, k));
@@ -1623,6 +1650,9 @@ impl Gen {
                 return;
             }
             graph_words.push(entry);
+            // The kind its stores coerce to, on the unoptimized path that
+            // keeps every local in a stack slot.
+            graph_words.push(self.body_kind(t));
         }
         // Each value's register.
         graph_words.push(h.vty.len());

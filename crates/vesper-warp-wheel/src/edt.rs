@@ -75,12 +75,7 @@ pub struct Launch<P> {
     pub packet: P,
 }
 
-// The Rust build (the frozen reference) or the Vesper build (a thin wrapper
-// over the Vesper port in vesper/src/).
-#[cfg(not(feature = "vesper-port"))]
-#[path = "reference/edt.rs"]
-mod imp;
-#[cfg(feature = "vesper-port")]
+// The Vesper build (a thin wrapper over the Vesper port in vesper/src/).
 #[path = "port/edt.rs"]
 mod imp;
 

@@ -15,6 +15,8 @@
 //! - `VERSION`, flags ([`H_SIMD`]: the vectorizer's flag; [`H_NO_OUTLINE`]),
 //!   `n_values`, `n_insts`, `n_blocks`, the pointer type (0 when not
 //!   given), `n_returns`, the signature's return types;
+//! - the sized stack slots: `n`, then per slot `kind` ([`S_EXPLICIT`] or
+//!   [`S_OTHER`]), `size`, `align_shift`;
 //! - per value: `kind | type << 8`, `a`, `b` where kind is [`V_RESULT`]
 //!   (inst `a`, result `b`), [`V_PARAM`] (block `a`, param `b`), [`V_ALIAS`]
 //!   (of `a`, already resolved) or [`V_UNION`];
@@ -41,7 +43,23 @@
 //! - [`E_CLONE`] `block inst new n values...`: `clone_inst`, its values
 //!   (`inst_values` order) replaced, put at the bottom of `block`;
 //! - [`E_INS`] `block opcode type cond imm offset mem n args... n_dests
-//!   (block n args...)... new`: one builder call at the bottom of `block`.
+//!   (block n args...)... new`: one builder call at the bottom of `block`;
+//! - [`E_REMOVE_INST`] `inst`: `layout.remove_inst`;
+//! - [`E_REMOVE_BLOCK`] `block`: `layout.remove_block`;
+//! - [`E_JUMP`] `inst block n args...`: `dfg.replace(inst).jump`;
+//! - [`E_FCONST`] `inst type bits`: `dfg.replace(inst).f64const` or
+//!   `f32const`;
+//! - [`E_ARGS`] `inst n values...`: the instruction's fixed arguments;
+//! - [`E_SLOT_SIZE`] `slot size`: a sized slot's size (the CLIF clean-up
+//!   steps of #2362);
+//! - [`E_REMOVE_PARAM`] `value`: `dfg.remove_block_param`;
+//! - [`E_ALIAS`] `dest src`: `dfg.change_to_alias`;
+//! - [`E_MOVE_INST`] `inst block`: `layout.remove_inst`, then
+//!   `layout.append_inst` at the bottom of `block`;
+//! - [`E_REMOVE_DEST_ARG`] `inst k a`: argument `a` of destination `k` of
+//!   `inst` removed;
+//! - [`E_INS_BEFORE`] `inst opcode ...`: [`E_INS`] with a cursor at `inst`
+//!   in place of the block.
 #![allow(dead_code)]
 
 use cranelift_codegen::cursor::{Cursor as _, FuncCursor};
@@ -50,8 +68,12 @@ use cranelift_codegen::ir::{
     condcodes::IntCC, types,
 };
 
-pub const VERSION: u64 = 2;
+pub const VERSION: u64 = 3;
 pub const NONE: u64 = u64::MAX;
+
+/// A sized slot's kind.
+pub const S_EXPLICIT: u64 = 0;
+pub const S_OTHER: u64 = 1;
 
 pub const V_RESULT: u64 = 0;
 pub const V_PARAM: u64 = 1;
@@ -65,6 +87,18 @@ pub const E_PLACE: u64 = 3;
 pub const E_RETARGET: u64 = 4;
 pub const E_CLONE: u64 = 5;
 pub const E_INS: u64 = 6;
+// 7 and 8 are the cold outliner's ([`E_OUTLINE`], [`E_SKIP`]).
+pub const E_REMOVE_INST: u64 = 9;
+pub const E_REMOVE_BLOCK: u64 = 10;
+pub const E_JUMP: u64 = 11;
+pub const E_FCONST: u64 = 12;
+pub const E_ARGS: u64 = 13;
+pub const E_SLOT_SIZE: u64 = 14;
+pub const E_REMOVE_PARAM: u64 = 15;
+pub const E_ALIAS: u64 = 16;
+pub const E_MOVE_INST: u64 = 17;
+pub const E_REMOVE_DEST_ARG: u64 = 18;
+pub const E_INS_BEFORE: u64 = 19;
 
 /// Memory flag bits of the `mem` word.
 pub const M_READONLY: u64 = 1;
@@ -169,6 +203,7 @@ pub const OPCODES: &[Opcode] = &[
     Opcode::Vconst,
     Opcode::SymbolValue,
     Opcode::FuncAddr,
+    Opcode::Fadd,
 ];
 
 /// Type codes, 1 up (0 is any other type).
@@ -369,6 +404,14 @@ pub fn encode_with(func: &ir::Function, simd: bool, ptr: Option<Type>) -> Vec<u8
             .iter()
             .map(|r| type_code(r.value_type)),
     );
+    w.push(func.sized_stack_slots.len() as u64);
+    for (_, data) in func.sized_stack_slots.iter() {
+        let kind = match data.kind {
+            ir::StackSlotKind::ExplicitSlot => S_EXPLICIT,
+            _ => S_OTHER,
+        };
+        w.extend([kind, u64::from(data.size), u64::from(data.align_shift)]);
+    }
     for v in dfg.values() {
         let ty = type_code(dfg.value_type(v)) << 8;
         let r = dfg.resolve_aliases(v);
@@ -568,17 +611,111 @@ pub fn apply(func: &mut ir::Function, words: &[u64]) -> Result<(), String> {
             }
             E_INS => {
                 let b = s.block()?;
-                let made = build(func, b, &mut s)?;
+                let made = build(func, Place::Bottom(b), &mut s)?;
                 let want = Inst::from_u32(s.next()? as u32);
                 expect("instruction", made, want)?;
+            }
+            E_REMOVE_INST => {
+                let inst = Inst::from_u32(s.next()? as u32);
+                func.layout.remove_inst(inst);
+            }
+            E_REMOVE_BLOCK => {
+                let b = s.block()?;
+                func.layout.remove_block(b);
+            }
+            E_JUMP => {
+                let inst = Inst::from_u32(s.next()? as u32);
+                let b = s.block()?;
+                let args: Vec<BlockArg> = s.values()?.into_iter().map(BlockArg::Value).collect();
+                func.dfg.replace(inst).jump(b, &args);
+            }
+            E_FCONST => {
+                use cranelift_codegen::ir::immediates::{Ieee32, Ieee64};
+                let inst = Inst::from_u32(s.next()? as u32);
+                let ty = type_of(s.next()?)?;
+                let bits = s.next()?;
+                if ty == types::F64 {
+                    func.dfg.replace(inst).f64const(Ieee64::with_bits(bits));
+                } else if ty == types::F32 {
+                    func.dfg
+                        .replace(inst)
+                        .f32const(Ieee32::with_bits(bits as u32));
+                } else {
+                    return Err(format!("float constant of type {ty}"));
+                }
+            }
+            E_ARGS => {
+                let inst = Inst::from_u32(s.next()? as u32);
+                let vals = s.values()?;
+                let args = func.dfg.inst_args_mut(inst);
+                if args.len() != vals.len() {
+                    return Err(format!(
+                        "{inst}: {} arguments for {}",
+                        vals.len(),
+                        args.len()
+                    ));
+                }
+                args.copy_from_slice(&vals);
+            }
+            E_REMOVE_PARAM => {
+                let p = s.value()?;
+                func.dfg.remove_block_param(p);
+            }
+            E_ALIAS => {
+                let dest = s.value()?;
+                let src = s.value()?;
+                func.dfg.change_to_alias(dest, src);
+            }
+            E_MOVE_INST => {
+                let inst = Inst::from_u32(s.next()? as u32);
+                let b = s.block()?;
+                func.layout.remove_inst(inst);
+                func.layout.append_inst(inst, b);
+            }
+            E_REMOVE_DEST_ARG => {
+                let inst = Inst::from_u32(s.next()? as u32);
+                let k = s.next()? as usize;
+                let a = s.next()? as usize;
+                let ir::DataFlowGraph {
+                    insts,
+                    jump_tables,
+                    exception_tables,
+                    value_lists,
+                    ..
+                } = &mut func.dfg;
+                insts[inst]
+                    .branch_destination_mut(jump_tables, exception_tables)
+                    .get_mut(k)
+                    .ok_or_else(|| format!("{inst}: no destination {k}"))?
+                    .remove(a, value_lists);
+            }
+            E_INS_BEFORE => {
+                let before = Inst::from_u32(s.next()? as u32);
+                let made = build(func, Place::Before(before), &mut s)?;
+                let want = Inst::from_u32(s.next()? as u32);
+                expect("instruction", made, want)?;
+            }
+            E_SLOT_SIZE => {
+                let slot = ir::StackSlot::from_u32(s.next()? as u32);
+                let size = u32::try_from(s.next()?).map_err(|e| e.to_string())?;
+                func.sized_stack_slots[slot].size = size;
             }
             op => return Err(format!("edit op {op}")),
         }
     }
 }
 
-/// One builder call at the bottom of `block`, as the Rust passes make it.
-fn build(func: &mut ir::Function, block: Block, s: &mut Script) -> Result<Inst, String> {
+/// Where [`build`] puts its instruction.
+#[derive(Clone, Copy)]
+enum Place {
+    /// At the bottom of the block.
+    Bottom(Block),
+    /// Just before the instruction (a cursor `at_inst`).
+    Before(Inst),
+}
+
+/// One builder call at `place`, as the Rust passes make it.
+fn build(func: &mut ir::Function, place: Place, s: &mut Script) -> Result<Inst, String> {
     let code = s.next()?;
     let ty_word = s.next()?;
     let cond_word = s.next()?;
@@ -603,7 +740,10 @@ fn build(func: &mut ir::Function, block: Block, s: &mut Script) -> Result<Inst, 
         }
     };
     let a = |i: usize| args[i];
-    let mut pos = FuncCursor::new(func).at_bottom(block);
+    let mut pos = match place {
+        Place::Bottom(block) => FuncCursor::new(func).at_bottom(block),
+        Place::Before(inst) => FuncCursor::new(func).at_inst(inst),
+    };
     let ins = pos.ins();
     let made = match op {
         Opcode::Iconst => {
@@ -683,7 +823,7 @@ fn build(func: &mut ir::Function, block: Block, s: &mut Script) -> Result<Inst, 
         Opcode::Store => {
             arity(2)?;
             ins.store(mem_flags(mem)?, a(0), a(1), offset);
-            return last_inst(func, block);
+            return made_inst(func, place);
         }
         Opcode::Brif => {
             arity(1)?;
@@ -693,12 +833,23 @@ fn build(func: &mut ir::Function, block: Block, s: &mut Script) -> Result<Inst, 
             let ta: Vec<BlockArg> = ta.iter().map(|&v| BlockArg::Value(v)).collect();
             let ea: Vec<BlockArg> = ea.iter().map(|&v| BlockArg::Value(v)).collect();
             ins.brif(a(0), *t, &ta, *e, &ea);
-            return last_inst(func, block);
+            return made_inst(func, place);
         }
         _ => return Err(format!("no builder for {op}")),
     };
     let _ = made;
-    last_inst(func, block)
+    made_inst(func, place)
+}
+
+/// The instruction [`build`] just put at `place`.
+fn made_inst(func: &ir::Function, place: Place) -> Result<Inst, String> {
+    match place {
+        Place::Bottom(block) => last_inst(func, block),
+        Place::Before(inst) => func
+            .layout
+            .prev_inst(inst)
+            .ok_or_else(|| "nothing before the instruction after a build".into()),
+    }
 }
 
 fn last_inst(func: &ir::Function, block: Block) -> Result<Inst, String> {

@@ -73,6 +73,7 @@ pub const OP_F128CONST: u64 = 65;
 pub const OP_VCONST: u64 = 66;
 pub const OP_SYMBOL_VALUE: u64 = 67;
 pub const OP_FUNC_ADDR: u64 = 68;
+pub const OP_FADD: u64 = 69;
 
 // Types.
 pub const TY_OTHER: u64 = 0;
@@ -148,6 +149,22 @@ pub const E_INS: u64 = 6;
 // refused after its analysis.
 pub const E_OUTLINE: u64 = 7;
 pub const E_SKIP: u64 = 8;
+// The CLIF clean-up steps' edits (#2362).
+pub const E_REMOVE_INST: u64 = 9;
+pub const E_REMOVE_BLOCK: u64 = 10;
+pub const E_JUMP: u64 = 11;
+pub const E_FCONST: u64 = 12;
+pub const E_ARGS: u64 = 13;
+pub const E_SLOT_SIZE: u64 = 14;
+pub const E_REMOVE_PARAM: u64 = 15;
+pub const E_ALIAS: u64 = 16;
+pub const E_MOVE_INST: u64 = 17;
+pub const E_REMOVE_DEST_ARG: u64 = 18;
+pub const E_INS_BEFORE: u64 = 19;
+
+// A sized stack slot's kind.
+pub const S_EXPLICIT: u64 = 0;
+pub const S_OTHER: u64 = 1;
 
 // No entity (also a block argument that is not a value).
 pub const NONE: u32 = 4294967295;

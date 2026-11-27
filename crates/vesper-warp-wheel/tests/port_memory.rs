@@ -1,8 +1,6 @@
 //! The Vesper build frees what it allocates: building, using, draining and
 //! dropping every type many times leaves the Vesper heap where it was. The
 //! Rust build has nothing to check here.
-#![cfg(feature = "vesper-port")]
-
 use vesper_warp_wheel::{
     EdtLaunchQueue, PacketNumberSpace, RetransmitLeases, Wheel, WheelConfig, port_live_allocations,
 };

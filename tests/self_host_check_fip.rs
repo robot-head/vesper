@@ -127,28 +127,40 @@ fn mutant(world: &World, m: usize) -> World {
 /// Every (name, world) the differential runs: the corpus, the checker
 /// cases, and each one's mutants.
 fn all_cases(mutants: bool) -> Vec<(String, World)> {
-    let mut out = vec![];
-    let base: Vec<(String, &World)> = corpus()
-        .iter()
-        .map(|c| (c.name.clone(), &c.world))
-        .chain(checker_cases().iter().map(|(n, w)| (n.clone(), w)))
-        .collect();
-    for (name, w) in base {
-        out.push((name.clone(), w.clone()));
-        if mutants {
-            for m in 1..=MUTANTS {
-                out.push((format!("{name}#m{m}"), mutant(w, m)));
-            }
-        }
-    }
-    out
+    case_stream(mutants).collect()
 }
 
-fn run(label: &str, cases: &[(String, World)], optimize: bool) -> (usize, usize, Vec<String>) {
+/// [`all_cases`] one world at a time, so the differential holds a single
+/// clone or mutant beside the corpus instead of four copies of it.
+fn case_stream(mutants: bool) -> impl Iterator<Item = (String, World)> {
+    let extra = if mutants { MUTANTS } else { 0 };
+    corpus()
+        .iter()
+        .map(|c| (&c.name, &c.world))
+        .chain(checker_cases().iter().map(|(n, w)| (n, w)))
+        .flat_map(move |(name, w)| {
+            (0..=extra).map(move |m| {
+                if m == 0 {
+                    (name.clone(), w.clone())
+                } else {
+                    (format!("{name}#m{m}"), mutant(w, m))
+                }
+            })
+        })
+}
+
+fn run<W: std::borrow::Borrow<World>>(
+    label: &str,
+    cases: impl IntoIterator<Item = (String, W)>,
+    optimize: bool,
+) -> (usize, usize, Vec<String>) {
     let mut bad = 0;
+    let mut count = 0;
     let mut diags = 0;
     let mut codes = std::collections::BTreeMap::<String, usize>::new();
     for (name, w) in cases {
+        let w = w.borrow();
+        count += 1;
         let r = rust_text(w);
         let v = vesper_text(w, optimize);
         diags += r.lines().count();
@@ -164,10 +176,7 @@ fn run(label: &str, cases: &[(String, World)], optimize: bool) -> (usize, usize,
             }
         }
     }
-    eprintln!(
-        "{label}: {bad} of {} worlds differ ({diags} diagnostics: {codes:?})",
-        cases.len()
-    );
+    eprintln!("{label}: {bad} of {count} worlds differ ({diags} diagnostics: {codes:?})");
     (bad, diags, codes.keys().cloned().collect())
 }
 
@@ -181,7 +190,7 @@ fn checker_cases_match_rust() {
         "only {} checker cases parse",
         cases.len()
     );
-    let (bad, diags, codes) = run("fip cases", &cases, true);
+    let (bad, diags, codes) = run("fip cases", cases, true);
     assert_eq!(bad, 0);
     assert!(diags > 0);
     // Every diagnostic of the module fires.
@@ -194,8 +203,7 @@ fn checker_cases_match_rust() {
 
 #[test]
 fn corpus_and_mutants_match_rust() {
-    let cases = all_cases(true);
-    let (bad, diags, _) = run("fip corpus", &cases, true);
+    let (bad, diags, _) = run("fip corpus", case_stream(true), true);
     assert_eq!(bad, 0);
     assert!(diags > 0);
 }
@@ -210,7 +218,7 @@ fn unoptimized_jit_agrees() {
             cases.push((format!("{n}#m{m}"), mutant(w, m)));
         }
     }
-    let (bad, _, _) = run("fip unoptimized", &cases, false);
+    let (bad, _, _) = run("fip unoptimized", cases, false);
     assert_eq!(bad, 0);
 }
 
