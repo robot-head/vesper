@@ -518,6 +518,59 @@ fn flip_gate_pem_pubkey() {
     println!("flip-gate pairs pem_pubkey {}", pairs.join(" "));
 }
 
+const CRL_PASSES: usize = 20_000;
+
+fn flip_gate_crl_this_update() {
+    let key = rcgen::KeyPair::generate().unwrap();
+    let ca_params = rcgen::CertificateParams::new(vec!["ca.vesper.test".to_string()]).unwrap();
+    let issuer = rcgen::Issuer::new(ca_params, key);
+    let crl_params = rcgen::CertificateRevocationListParams {
+        this_update: rcgen::date_time_ymd(2026, 11, 27),
+        next_update: rcgen::date_time_ymd(2027, 11, 27),
+        crl_number: rcgen::SerialNumber::from(1u64),
+        issuing_distribution_point: None,
+        revoked_certs: Vec::new(),
+        key_identifier_method: rcgen::KeyIdMethod::Sha256,
+    };
+    let crl = crl_params.signed_by(&issuer).unwrap();
+    let der = crl.der().as_ref().to_vec();
+    let rust_parse = |b: &[u8]| -> u64 {
+        let (rest, parsed) = x509_parser::parse_x509_crl(b).unwrap();
+        assert!(rest.is_empty());
+        u64::try_from(parsed.last_update().timestamp()).unwrap()
+    };
+    assert_eq!(
+        rust_parse(&der),
+        port::chain::crl_this_update(&der).unwrap()
+    );
+    let run_rust = || -> u64 {
+        let t = Instant::now();
+        for _ in 0..CRL_PASSES {
+            black_box(rust_parse(black_box(&der)));
+        }
+        t.elapsed().as_nanos() as u64
+    };
+    let run_port = || -> u64 {
+        let t = Instant::now();
+        for _ in 0..CRL_PASSES {
+            black_box(port::chain::crl_this_update(black_box(&der)).unwrap());
+        }
+        t.elapsed().as_nanos() as u64
+    };
+    black_box(run_rust());
+    black_box(run_port());
+    let pairs: Vec<String> = (0..FLIP_GATE_EPOCHS)
+        .map(|_| {
+            let a1 = run_rust();
+            let b1 = run_port();
+            let b2 = run_port();
+            let a2 = run_rust();
+            format!("{}:{}", a1 + a2, b1 + b2)
+        })
+        .collect();
+    println!("flip-gate pairs crl_this_update {}", pairs.join(" "));
+}
+
 fn main() {
     assert_eq!(port::IMPLEMENTATION, "vesper");
     let args: Vec<String> = std::env::args().collect();
@@ -532,6 +585,10 @@ fn main() {
         }
         if args.get(2).map(String::as_str) == Some("pem_pubkey") {
             flip_gate_pem_pubkey();
+            return;
+        }
+        if args.get(2).map(String::as_str) == Some("crl_this_update") {
+            flip_gate_crl_this_update();
             return;
         }
     }

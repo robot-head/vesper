@@ -77,6 +77,10 @@
     {
       "workload": "pem_pubkey",
       "run": ["cargo", "run", "--locked", "--release", "-p", "vesper-aegis", "--example", "abba", "--", "flip-gate-inproc", "pem_pubkey"]
+    },
+    {
+      "workload": "crl_this_update",
+      "run": ["cargo", "run", "--locked", "--release", "-p", "vesper-aegis", "--example", "abba", "--", "flip-gate-inproc", "crl_this_update"]
     }
   ]
 }
