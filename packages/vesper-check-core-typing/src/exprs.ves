@@ -7,7 +7,7 @@
 //
 // The checker reports a function it cannot check yet as skipped: one that
 // reaches an expression kind not ported here, a type of another lane
-// (tiled sequences, vectors, boxes, regions, `f32`, function types and
+// (tiled sequences, vectors, boxes, regions, function types and
 // effect rows), an effectful callee or an intrinsic. String literals and
 // the string and sequence methods are methods.ves's. Modes, moves and
 // loans (part 3), effects (lane 8) and literal typing (part 4) are not
@@ -28,7 +28,7 @@ use self::relations::{
     compatible, infer, item, join_types, lit_of, mk_lit, refine_annotation, unresolved
 };
 use self::patterns::{Pats, arms_cover, irrefutable, pats_new};
-use self::floats::{float_call};
+use self::floats::{float_call, retype_float_literal};
 use self::methods::{
     inherent_index, is_qualified, is_str, is_string, peek_type, receiver_type, seq_method, seq_new,
     view_place, index_expr, string_comparison, string_literal, string_method, text_operand,
@@ -953,7 +953,7 @@ pub fn error(inout ck: Ck, in code: Str, start: u64, end: u64) {
 }
 
 // Whether `ty` belongs to another lane's rules (tiled sequences,
-// vectors, boxes, regions, atomics, `f32`, function types, effect rows).
+// vectors, boxes, regions, atomics, function types, effect rows).
 fn foreign(in ck: Ck, ty: u32) -> bool {
     let node = ck.ctx.types.node(ty);
     if node.kind == TyKind::Fn || node.kind == TyKind::Row {
@@ -967,7 +967,6 @@ fn foreign(in ck: Ck, ty: u32) -> bool {
             || name == known.mask
             || name == known.box_
             || name == known.region_box
-            || name == known.f32_
             || name == known.dyn_
             || name == ck.atomic_sym
         {
@@ -1118,11 +1117,13 @@ pub fn expr_expected(inout ck: Ck, e: u32, expected: u32) -> u32 {
     let ty = if ex.kind == E_INT {
         int_literal(inout ck, ex, expected)
     } else if ex.kind == E_FLOAT {
+        // An unsuffixed float literal in `f32` context is an `f32`.
         let known = ck.ctx.world.k;
         if is_named(in ck, expected, known.f32_) {
-            ck.skip = true;
+            expected
+        } else {
+            named(inout ck, known.f64_)
         }
-        named(inout ck, known.f64_)
     } else if ex.kind == E_BOOL {
         let known = ck.ctx.world.k;
         named(inout ck, known.bool_)
@@ -1596,9 +1597,10 @@ fn bind_mode(inout ck: Ck, pat_id: u32, ty: u32, pass: u8) {
             mk_lit(inout ck.ctx.types, Lit { neg: extra.neg, mag: extra.mag })
         } else if pat.kind == P_LIT && extra.lit_kind == LIT_FLOAT {
             if is_named(in ck, ty, known.f32_) {
-                ck.skip = true;
+                ty
+            } else {
+                named(inout ck, known.f64_)
             }
-            named(inout ck, known.f64_)
         } else if pat.kind == P_LIT && extra.lit_kind == LIT_WIDE_INT {
             // An integer past `u64::MAX` in magnitude: not ported yet.
             ck.skip = true;
@@ -1814,7 +1816,7 @@ fn binary_expr(inout ck: Ck, ex: Ex, expected: u32) -> u32 {
     } else {
         hole
     };
-    let left_ty = expr_expected(inout ck, ex.x, goal);
+    let left_raw = expr_expected(inout ck, ex.x, goal);
     if ck.skip {
         return hole;
     }
@@ -1822,13 +1824,19 @@ fn binary_expr(inout ck: Ck, ex: Ex, expected: u32) -> u32 {
         goal
     } else if float_literal_tree(in ck, ex.x) {
         hole
-    } else if ck.ctx.types.kind(left_ty) != TyKind::Lit {
-        left_ty
+    } else if ck.ctx.types.kind(left_raw) != TyKind::Lit {
+        left_raw
     } else {
         hole
     };
     // `&&` and `||` merge the environments of both paths (facts: part 3).
     let right_ty = expr_expected(inout ck, ex.z, right_goal);
+    if ck.skip {
+        return hole;
+    }
+    // A float literal left operand takes an `f32` right operand's kind
+    // (`2.0 * x`).
+    let left_ty = retype_float_literal(inout ck, ex.x, left_raw, right_ty);
     if ck.skip {
         return hole;
     }

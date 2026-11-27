@@ -176,7 +176,7 @@ fn by_value(inout ck: Ck, ex: Ex, n: u64) {
 
 // `Checker::retype_float_literal`: a literal tree that defaulted to `f64`
 // is checked again at an `f32` goal.
-fn retype(inout ck: Ck, e: u32, found: u32, goal: u32) -> u32 {
+pub fn retype_float_literal(inout ck: Ck, e: u32, found: u32, goal: u32) -> u32 {
     let known = ck.ctx.world.k;
     if is_named(in ck, goal, known.f32_)
         && is_named(in ck, found, known.f64_)
@@ -231,7 +231,7 @@ fn math_call(inout ck: Ck, ex: Ex, arity: u64, expected: u32) -> u32 {
     }
     for i in 0..w(ex.n) {
         let arg = actual_arg(in ck, ex, i);
-        let t = retype(inout ck, arg.expr, u32_at(in actual, i), common);
+        let t = retype_float_literal(inout ck, arg.expr, u32_at(in actual, i), common);
         if ck.skip {
             return hole;
         }
@@ -326,7 +326,7 @@ fn bits_call(inout ck: Ck, ex: Ex, to_bits: bool, kind: u32) -> u32 {
         if ck.skip {
             return hole;
         }
-        let t = retype(inout ck, arg.expr, found, operand);
+        let t = retype_float_literal(inout ck, arg.expr, found, operand);
         if ck.skip {
             return hole;
         }
