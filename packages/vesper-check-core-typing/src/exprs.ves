@@ -38,6 +38,16 @@ use self::methods::{
 const NONE32: u32 = 4294967295;
 const NONE64: u64 = 18446744073709551615;
 const P_IN: u8 = 0;
+// Capability label texts (`function_capability`, `latent_capability`).
+const FNCAP_PREFIX: Str = "$fncap:";
+const LATENT_PREFIX: Str = "$latent:";
+const HANDLER_CAP_PREFIX: Str = "$cap";
+const FUNCTION_ORIGIN: u8 = 102;
+const COLON: u8 = 58;
+const UNDERSCORE: u8 = 95;
+// `relabel` modes.
+const RELABEL_BIND: u8 = 0;
+const RELABEL_RENAME: u8 = 1;
 const P_INOUT: u8 = 1;
 const P_SINK: u8 = 2;
 
@@ -236,6 +246,8 @@ pub copy struct FnSig {
     inst_start: u32,
     inst_count: u32,
     effect: u32,
+    // The row's tail symbol + 1, or 0 (closed).
+    row_tail: u32,
 }
 
 // A handler clause: the operation name (the return clause's is ignored),
@@ -259,6 +271,8 @@ pub copy struct EffDecl {
 // One effect instance of a row: its name and type arguments.
 pub copy struct Inst {
     name: u32,
+    // The instance's label symbol + 1, or 0 (unlabeled, or a handler's).
+    label: u32,
     arg_start: u32,
     arg_count: u32,
 }
@@ -530,7 +544,8 @@ impl Ck {
                 inferred: 0,
                 inst_start: 0,
                 inst_count: 0,
-                effect: NONE32
+                effect: NONE32,
+                row_tail: 0
             },
         }
     }
@@ -538,7 +553,7 @@ impl Ck {
     pub fn inst(in self, i: u64) -> Inst {
         match self.insts.try_get(i) {
             Option::Some(x) => x,
-            Option::None => Inst { name: NONE32, arg_start: 0, arg_count: 0 },
+            Option::None => Inst { name: NONE32, label: 0, arg_start: 0, arg_count: 0 },
         }
     }
 
@@ -887,7 +902,8 @@ fn read_sig(inout reader: Reader, in bytes: Slice[u8], inout ck: Ck, name: u32) 
         inferred: result,
         inst_start: 0,
         inst_count: 0,
-        effect: NONE32
+        effect: NONE32,
+        row_tail: 0
     }
 }
 
@@ -902,16 +918,32 @@ pub fn read_fns(inout reader: Reader, in bytes: Slice[u8], inout ck: Ck) {
         let inst_count = reader.word(in bytes);
         for j in 0..inst_count {
             let inst_name = sym(in ck.ctx, reader.word(in bytes));
+            let label_word = reader.word(in bytes);
+            let inst_label = if label_word == 0 {
+                0
+            } else {
+                inc32w(sym(in ck.ctx, wrapping_sub(label_word, 1)))
+            };
             let arg_start = n32(ck.inst_args.len());
             let arg_count = reader.word(in bytes);
             for k in 0..arg_count {
                 let arg = tyw(in ck.ctx, reader.word(in bytes));
                 ck.inst_args.push(arg);
             }
-            ck.insts
-                .push(Inst { name: inst_name, arg_start: arg_start, arg_count: n32(arg_count) });
+            ck.insts.push(Inst {
+                name: inst_name,
+                label: inst_label,
+                arg_start: arg_start,
+                arg_count: n32(arg_count)
+            });
         }
         sig.inst_count = n32(inst_count);
+        let tail_word = reader.word(in bytes);
+        sig.row_tail = if tail_word == 0 {
+            0
+        } else {
+            inc32w(sym(in ck.ctx, wrapping_sub(tail_word, 1)))
+        };
         sig.inferred = tyw(in ck.ctx, reader.word(in bytes));
         let id = n32(ck.fns.len());
         ck.fns.push(sig);
@@ -992,15 +1024,17 @@ fn foreign(in ck: Ck, ty: u32) -> bool {
         return true;
     }
     if node.kind == TyKind::Fn {
-        // An effectful function type is another lane's: its effects take
-        // the signature's capability labels (`bind_signature_capabilities`)
-        // and closures' latent ones (`instantiate_latent_effects`).
-        let row = ck.ctx.types.row(node.r2);
-        if row.n != 0 || row.tail != 0 {
-            return true;
-        }
         if foreign(in ck, node.r) {
             return true;
+        }
+        let row = ck.ctx.types.row(node.r2);
+        for i in 0..w(row.n) {
+            let eff = ck.ctx.types.effect_at(add(w(row.a), i));
+            for j in 0..w(eff.n) {
+                if foreign(in ck, item(in ck.ctx.types, add(w(eff.a), j))) {
+                    return true;
+                }
+            }
         }
     }
     if node.kind == TyKind::Named {
@@ -1228,8 +1262,7 @@ pub fn expr_expected(inout ck: Ck, e: u32, expected: u32) -> u32 {
     if ck.skip {
         return hole;
     }
-    // `instantiate_latent_effects` changes only function types, which
-    // skip the function.
+    let ty = instantiate_latent(inout ck, ty, expected);
     if expected != hole {
         expect_type(inout ck, expected, ty, ex.start, ex.end);
     }
@@ -1273,14 +1306,443 @@ fn infer_args(inout ck: Ck, adt: Adt) -> ChunkSeq[u32] {
     args
 }
 
-// `function_value_type`: a world function as a value is a `copy`
-// function type of its parameters and (inferred) result. An effectful
-// function's effects take latent capability labels: not ported.
-fn function_value(inout ck: Ck, sig: FnSig) -> u32 {
-    if sig.effectful {
-        ck.skip = true;
-        return ck.ctx.types.infer;
+// The function's own capability label `$fncap:<name>:<index>`
+// (`function_capability`), as a label (symbol + 1).
+fn function_capability(inout ck: Ck, name: u32, index: u64) -> u32 {
+    let mut text = ChunkSeq::new[u8]();
+    put(inout text, FNCAP_PREFIX);
+    ck.ctx.names.write(name, inout text);
+    text.push(COLON);
+    put_u64(inout text, index);
+    inc32w(ck.ctx.names.intern(in text.as_slice()))
+}
+
+// `latent_capability(f<name>_<index>, e)` of an unlabeled-or-labeled
+// instance `effect` of the function `name`: `$latent:f<name with ':' as
+// '_'>_<index>:<label>:<effect>`, as a label.
+fn latent_capability(inout ck: Ck, name: u32, index: u64, inst: Inst) -> u32 {
+    let mut text = ChunkSeq::new[u8]();
+    put(inout text, LATENT_PREFIX);
+    text.push(FUNCTION_ORIGIN);
+    let mut fname = ChunkSeq::new[u8]();
+    ck.ctx.names.write(name, inout fname);
+    for i in 0..fname.len() {
+        let c = u8_at(in fname, i);
+        if c == COLON {
+            text.push(UNDERSCORE);
+        } else {
+            text.push(c);
+        }
     }
+    text.push(UNDERSCORE);
+    put_u64(inout text, index);
+    text.push(COLON);
+    if inst.label != 0 {
+        let mut label = ChunkSeq::new[u8]();
+        ck.ctx.names.write(wrapping_sub(inst.label, 1), inout label);
+        if starts_with(in label, LATENT_PREFIX) {
+            // `required_label`: the third `:`-separated field.
+            let mut field: u64 = 0;
+            for i in 0..label.len() {
+                let c = u8_at(in label, i);
+                if c == COLON {
+                    field = inc(field);
+                } else if field == 2 {
+                    text.push(c);
+                }
+            }
+        } else {
+            text.extend(in label.as_slice());
+        }
+    }
+    text.push(COLON);
+    ck.ctx.names.write(inst.name, inout text);
+    inc32w(ck.ctx.names.intern(in text.as_slice()))
+}
+
+fn starts_with(in text: ChunkSeq[u8], in prefix: Str) -> bool {
+    let p = prefix.as_bytes();
+    if text.len() < p.len() {
+        return false;
+    }
+    for i in 0..p.len() {
+        let c = match p.try_get(i) {
+            Option::Some(c) => c,
+            Option::None => 0,
+        };
+        if u8_at(in text, i) != c {
+            return false;
+        }
+    }
+    true
+}
+
+// Whether the row's effect `eff` and the instance `inst` name the same
+// effect with equal arguments.
+fn same_instance(in ck: Ck, eff: EffNode, inst: Inst) -> bool {
+    if eff.name != inst.name || eff.n != inst.arg_count {
+        return false;
+    }
+    for i in 0..w(eff.n) {
+        if item(in ck.ctx.types, add(w(eff.a), i))
+            != u32_at(in ck.inst_args, add(w(inst.arg_start), i))
+        {
+            return false;
+        }
+    }
+    true
+}
+
+// `ty` with every function type's effect rows relabeled by `relabel_row`
+// (mode `RELABEL_BIND`: `bind_signature_capabilities` for `sig`;
+// `RELABEL_RENAME`: `rename_capabilities` from `from` to `to`).
+fn relabel(
+    inout ck: Ck,
+    ty: u32,
+    sig: FnSig,
+    mode: u8,
+    in from: ChunkSeq[u32],
+    in to: ChunkSeq[u32]
+) -> u32 {
+    let node = ck.ctx.types.node(ty);
+    if node.kind != TyKind::Fn && node.kind != TyKind::Named && node.kind != TyKind::Tuple {
+        if node.kind == TyKind::Row && mode == RELABEL_RENAME {
+            let row = relabel_row(inout ck, node.r2, sig, mode, in from, in to);
+            let none_items: ChunkSeq[u32] = ChunkSeq::new[u32]();
+            let none_passes: ChunkSeq[u8] = ChunkSeq::new[u8]();
+            return ck.ctx.types.mk_with(
+                TyKind::Row,
+                node.mode,
+                node.name,
+                in none_items,
+                in none_passes,
+                node.r,
+                row,
+                node.lit
+            );
+        }
+        return ty;
+    }
+    let mut items: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let mut passes: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    for i in 0..w(node.n) {
+        let t = item(in ck.ctx.types, add(w(node.a), i));
+        items.push(relabel(inout ck, t, sig, mode, in from, in to));
+        if node.kind == TyKind::Fn {
+            passes.push(ck.ctx.types.param_pass(ty, i));
+        }
+    }
+    if node.kind != TyKind::Fn {
+        return ck.ctx.types.mk_with(
+            node.kind,
+            node.mode,
+            node.name,
+            in items,
+            in passes,
+            node.r,
+            node.r2,
+            node.lit
+        );
+    }
+    let result = relabel(inout ck, node.r, sig, mode, in from, in to);
+    let row = relabel_row(inout ck, node.r2, sig, mode, in from, in to);
+    ck.ctx
+        .types
+        .mk_with(TyKind::Fn, node.mode, node.name, in items, in passes, result, row, node.lit)
+}
+
+fn relabel_row(
+    inout ck: Ck,
+    row_id: u32,
+    sig: FnSig,
+    mode: u8,
+    in from: ChunkSeq[u32],
+    in to: ChunkSeq[u32]
+) -> u32 {
+    let row = ck.ctx.types.row(row_id);
+    if row.n == 0 {
+        return row_id;
+    }
+    let mut effs: ChunkSeq[EffNode] = ChunkSeq::new[EffNode]();
+    let mut args: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    for i in 0..w(row.n) {
+        let eff = ck.ctx.types.effect_at(add(w(row.a), i));
+        let arg_start = n32(args.len());
+        for j in 0..w(eff.n) {
+            let t = item(in ck.ctx.types, add(w(eff.a), j));
+            if mode == RELABEL_RENAME {
+                args.push(relabel(inout ck, t, sig, mode, in from, in to));
+            } else {
+                args.push(t);
+            }
+        }
+        let mut label = eff.label;
+        if mode == RELABEL_BIND {
+            for k in 0..w(sig.inst_count) {
+                let inst = ck.inst(add(w(sig.inst_start), k));
+                if same_instance(in ck, eff, inst) && (eff.label == 0 || eff.label == inst.label) {
+                    label = function_capability(inout ck, sig.name, k);
+                    break;
+                }
+            }
+        } else {
+            for k in 0..from.len() {
+                if label != 0 && u32_at(in from, k) == label {
+                    label = u32_at(in to, k);
+                    break;
+                }
+            }
+        }
+        effs.push(EffNode { label: label, name: eff.name, a: arg_start, n: eff.n });
+    }
+    ck.ctx.types.mk_row(in effs, in args, row.tail)
+}
+
+// Whether the instances' arguments are equal types after defaulting
+// (`instance_key`'s text compares `default_type`s).
+fn same_args(inout ck: Ck, a: Inst, in a_args: ChunkSeq[u32], b: Inst) -> bool {
+    if a.arg_count != b.arg_count {
+        return false;
+    }
+    for i in 0..w(a.arg_count) {
+        let x = default_type(inout ck.ctx.types, u32_at(in a_args, add(w(a.arg_start), i)));
+        let y = default_type(inout ck.ctx.types, u32_at(in ck.inst_args, add(w(b.arg_start), i)));
+        if x != y {
+            return false;
+        }
+    }
+    true
+}
+
+// `numeric::open`: a type holding an inference hole, a row or a function.
+fn open_type(in ck: Ck, ty: u32) -> bool {
+    let node = ck.ctx.types.node(ty);
+    if node.kind == TyKind::Infer || node.kind == TyKind::Row || node.kind == TyKind::Fn {
+        return true;
+    }
+    if node.kind == TyKind::Named || node.kind == TyKind::Tuple {
+        for i in 0..w(node.n) {
+            if open_type(in ck, item(in ck.ctx.types, add(w(node.a), i))) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+// The `i`th capability in scope from the innermost: the handlers' (last
+// first), then the current function's own, last first (`caps.iter().rev()`).
+fn cap_at(in ck: Ck, i: u64) -> Inst {
+    let handlers = ck.handler_caps.len();
+    if i < handlers {
+        return match ck.handler_caps.try_get(wrapping_sub(wrapping_sub(handlers, 1), i)) {
+            Option::Some(c) => c,
+            Option::None => Inst { name: NONE32, label: 0, arg_start: 0, arg_count: 0 },
+        };
+    }
+    let current = ck.fsig(ck.current);
+    let k = wrapping_sub(i, handlers);
+    let index = wrapping_sub(wrapping_sub(w(current.inst_count), 1), k);
+    ck.inst(add(w(current.inst_start), index))
+}
+
+fn cap_label(inout ck: Ck, i: u64) -> u32 {
+    let handlers = ck.handler_caps.len();
+    if i < handlers {
+        return cap_at(in ck, i).label;
+    }
+    let current = ck.fsig(ck.current);
+    let k = wrapping_sub(i, handlers);
+    let index = wrapping_sub(wrapping_sub(w(current.inst_count), 1), k);
+    function_capability(inout ck, current.name, index)
+}
+
+// `resolve_effect(e).label` for the unlabeled instance `inst` of a callee
+// (arguments in `args`): the innermost capability of its effect, with
+// exactly its arguments when they are concrete; 0 for none. Labeled
+// requests (capability aliases) and latent inference inside closures are
+// not ported: they skip.
+fn resolve_label(inout ck: Ck, inst: Inst, in args: ChunkSeq[u32]) -> u32 {
+    if inst.label != 0 {
+        ck.skip = true;
+        return 0;
+    }
+    let current = ck.fsig(ck.current);
+    let total = add(ck.handler_caps.len(), w(current.inst_count));
+    let mut typed = inst.arg_count != 0;
+    for i in 0..w(inst.arg_count) {
+        if open_type(in ck, u32_at(in args, add(w(inst.arg_start), i))) {
+            typed = false;
+        }
+    }
+    if typed {
+        for i in 0..total {
+            let cap = cap_at(in ck, i);
+            if cap.name == inst.name && same_args(inout ck, inst, in args, cap) {
+                return cap_label(inout ck, i);
+            }
+        }
+    }
+    for i in 0..total {
+        if cap_at(in ck, i).name == inst.name {
+            return cap_label(inout ck, i);
+        }
+    }
+    0
+}
+
+// `instantiate_latent_effects(actual, target)`: the latent labels of
+// `actual`'s function types take the labels `target` gives the same
+// effects (where `target`'s row is closed).
+fn instantiate_latent(inout ck: Ck, actual: u32, target: u32) -> u32 {
+    let mut from: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let mut to: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    latent_pairs(inout ck, actual, target, inout from, inout to);
+    if from.len() == 0 {
+        return actual;
+    }
+    let sig = ck.fsig(ck.current);
+    relabel(inout ck, actual, sig, RELABEL_RENAME, in from, in to)
+}
+
+fn latent_pairs(inout ck: Ck, a: u32, b: u32, inout from: ChunkSeq[u32], inout to: ChunkSeq[u32]) {
+    let an = ck.ctx.types.node(a);
+    let bn = ck.ctx.types.node(b);
+    if an.kind != TyKind::Fn || bn.kind != TyKind::Fn {
+        return;
+    }
+    let brow = ck.ctx.types.row(bn.r2);
+    if brow.tail == 0 {
+        let arow = ck.ctx.types.row(an.r2);
+        for i in 0..w(arow.n) {
+            let e = ck.ctx.types.effect_at(add(w(arow.a), i));
+            if e.label == 0 {
+                continue;
+            }
+            let mut text = ChunkSeq::new[u8]();
+            ck.ctx.names.write(wrapping_sub(e.label, 1), inout text);
+            if !starts_with(in text, LATENT_PREFIX) {
+                continue;
+            }
+            for j in 0..w(brow.n) {
+                let x = ck.ctx.types.effect_at(add(w(brow.a), j));
+                if x.name == e.name && same_effect_args(in ck, e, x) {
+                    if x.label != 0 {
+                        // `BTreeMap::insert`: a later pair replaces.
+                        let mut replaced = false;
+                        for k in 0..from.len() {
+                            if u32_at(in from, k) == e.label {
+                                let ok = to.try_set(k, x.label);
+                                replaced = true;
+                            }
+                        }
+                        if !replaced {
+                            from.push(e.label);
+                            to.push(x.label);
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+    }
+    let n = if an.n < bn.n { an.n } else { bn.n };
+    for i in 0..w(n) {
+        let pa = item(in ck.ctx.types, add(w(an.a), i));
+        let pb = item(in ck.ctx.types, add(w(bn.a), i));
+        latent_pairs(inout ck, pa, pb, inout from, inout to);
+    }
+    latent_pairs(inout ck, an.r, bn.r, inout from, inout to);
+}
+
+fn same_effect_args(in ck: Ck, a: EffNode, b: EffNode) -> bool {
+    if a.n != b.n {
+        return false;
+    }
+    for i in 0..w(a.n) {
+        if item(in ck.ctx.types, add(w(a.a), i)) != item(in ck.ctx.types, add(w(b.a), i)) {
+            return false;
+        }
+    }
+    true
+}
+
+// The argument target of a call of `sig`: `param_ty` with `sig`'s
+// capability labels, then each renamed to the caller's capability for
+// that effect (`cap_labels`).
+fn capability_target(inout ck: Ck, sig: FnSig, param_ty: u32, in context: Vars) -> u32 {
+    let bound = bind_capabilities(inout ck, param_ty, sig);
+    let substituted = substitute(inout ck.ctx.types, bound, in context);
+    if sig.inst_count == 0 || bound == param_ty {
+        return substituted;
+    }
+    let mut from: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let mut to: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let mut args: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    for i in 0..w(sig.inst_count) {
+        let inst = ck.inst(add(w(sig.inst_start), i));
+        let start = n32(args.len());
+        for j in 0..w(inst.arg_count) {
+            let t = u32_at(in ck.inst_args, add(w(inst.arg_start), j));
+            args.push(substitute(inout ck.ctx.types, t, in context));
+        }
+        let request = Inst {
+            name: inst.name,
+            label: inst.label,
+            arg_start: start,
+            arg_count: inst.arg_count
+        };
+        let label = resolve_label(inout ck, request, in args);
+        from.push(function_capability(inout ck, sig.name, i));
+        to.push(label);
+    }
+    relabel(inout ck, substituted, sig, RELABEL_RENAME, in from, in to)
+}
+
+// `bind_signature_capabilities(t, f)`: the function types in `t` take
+// `sig`'s own capability labels for the instances of its row.
+pub fn bind_capabilities(inout ck: Ck, ty: u32, sig: FnSig) -> u32 {
+    if sig.inst_count == 0 {
+        return ty;
+    }
+    let none: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    relabel(inout ck, ty, sig, RELABEL_BIND, in none, in none)
+}
+
+// Whether `ty` holds an effectful function type.
+fn has_effectful_fn(in ck: Ck, ty: u32) -> bool {
+    let node = ck.ctx.types.node(ty);
+    if node.kind == TyKind::Fn {
+        let row = ck.ctx.types.row(node.r2);
+        if row.n != 0 || row.tail != 0 || has_effectful_fn(in ck, node.r) {
+            return true;
+        }
+    }
+    if node.kind == TyKind::Named || node.kind == TyKind::Tuple || node.kind == TyKind::Fn {
+        for i in 0..w(node.n) {
+            if has_effectful_fn(in ck, item(in ck.ctx.types, add(w(node.a), i))) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+// A declared result holding an effectful function type is refined by the
+// body (`refine_annotation`: a returned closure's latent labels). An input
+// that gives no inferred result for it (the declared one, as
+// @vesper/check-world writes until results are inferred in Vesper) cannot
+// type the call: skip.
+fn unknown_result(inout ck: Ck, sig: FnSig) {
+    if sig.inferred == sig.result && has_effectful_fn(in ck, sig.result) {
+        ck.skip = true;
+    }
+}
+
+// `function_value_type`: a world function as a value is a `copy`
+// function type of its parameters and (inferred) result, its row's
+// instances labeled with latent capabilities.
+fn function_value(inout ck: Ck, sig: FnSig) -> u32 {
     let mut params: ChunkSeq[u32] = ChunkSeq::new[u32]();
     let mut passes: ChunkSeq[u8] = ChunkSeq::new[u8]();
     for i in 0..w(sig.param_count) {
@@ -1288,10 +1750,29 @@ fn function_value(inout ck: Ck, sig: FnSig) -> u32 {
         params.push(param.ty);
         passes.push(param.pass);
     }
-    let no_effects: ChunkSeq[EffNode] = ChunkSeq::new[EffNode]();
-    let no_args: ChunkSeq[u32] = ChunkSeq::new[u32]();
-    let row = ck.ctx.types.mk_row(in no_effects, in no_args, 0);
-    ck.ctx.types.mk_with(TyKind::Fn, TyMode::Copy, 0, in params, in passes, sig.inferred, row, 0)
+    let mut effs: ChunkSeq[EffNode] = ChunkSeq::new[EffNode]();
+    let mut args: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let mut from: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let mut to: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    for i in 0..w(sig.inst_count) {
+        let inst = ck.inst(add(w(sig.inst_start), i));
+        let latent = latent_capability(inout ck, sig.name, i, inst);
+        from.push(function_capability(inout ck, sig.name, i));
+        to.push(latent);
+        let arg_start = n32(args.len());
+        for j in 0..w(inst.arg_count) {
+            args.push(u32_at(in ck.inst_args, add(w(inst.arg_start), j)));
+        }
+        effs.push(EffNode { label: latent, name: inst.name, a: arg_start, n: inst.arg_count });
+    }
+    let row = ck.ctx.types.mk_row(in effs, in args, sig.row_tail);
+    unknown_result(inout ck, sig);
+    let result = if from.len() == 0 {
+        sig.inferred
+    } else {
+        relabel(inout ck, sig.inferred, sig, RELABEL_RENAME, in from, in to)
+    };
+    ck.ctx.types.mk_with(TyKind::Fn, TyMode::Copy, 0, in params, in passes, result, row, 0)
 }
 
 fn name_expr(inout ck: Ck, e: u32, ex: Ex, expected: u32) -> u32 {
@@ -2380,7 +2861,13 @@ fn handle_expr(inout ck: Ck, ex: Ex, expected: u32) -> u32 {
     for i in 0..w(ex.m) {
         ck.inst_args.push(u32_at(in ck.targs, add(w(ex.b), i)));
     }
-    ck.handler_caps.push(Inst { name: ex.y, arg_start: arg_start, arg_count: ex.m });
+    // The handler's capability `$cap<start>`.
+    let mut cap_text = ChunkSeq::new[u8]();
+    put(inout cap_text, HANDLER_CAP_PREFIX);
+    put_u64(inout cap_text, ex.start);
+    let cap_label = inc32w(ck.ctx.names.intern(in cap_text.as_slice()));
+    ck.handler_caps
+        .push(Inst { name: ex.y, label: cap_label, arg_start: arg_start, arg_count: ex.m });
     let body_ty = expr(inout ck, ex.x);
     ck.handler_caps.truncate(wrapping_sub(ck.handler_caps.len(), 1));
     ck.env.truncate(env_mark);
@@ -3006,7 +3493,8 @@ fn value_call(inout ck: Ck, ex: Ex, expected: u32) -> u32 {
         inferred: node.r,
         inst_start: 0,
         inst_count: 0,
-        effect: NONE32
+        effect: NONE32,
+        row_tail: 0
     };
     let result = apply(inout ck, sig, ex, NONE32, expected);
     ck.params.truncate(param_start);
@@ -3332,6 +3820,7 @@ fn apply(inout ck: Ck, sig: FnSig, ex: Ex, receiver: u32, expected: u32) -> u32 
     }
     let types = explicit_types(in ck, ex);
     let result_ty = apply_args(inout ck, sig, ex, receiver, in types, inout vars);
+    unknown_result(inout ck, sig);
     if ck.skip {
         return hole;
     }
@@ -3375,7 +3864,7 @@ fn context_args(in ck: Ck, effect: u32) -> ChunkSeq[u32] {
             .try_get(wrapping_sub(wrapping_sub(ck.handler_caps.len(), 1), i))
         {
             Option::Some(c) => c,
-            Option::None => Inst { name: NONE32, arg_start: 0, arg_count: 0 },
+            Option::None => Inst { name: NONE32, label: 0, arg_start: 0, arg_count: 0 },
         };
         if cap.name == effect {
             for j in 0..w(cap.arg_count) {
@@ -3496,7 +3985,7 @@ fn apply_args(
             error(inout ck, "E0300", arg_ex.start, arg_ex.end);
         }
         let context = with_infer(in ck, in vars, in generics);
-        let target = substitute(inout ck.ctx.types, param.ty, in context);
+        let target = capability_target(inout ck, sig, param.ty, in context);
         note(inout ck, target);
         let projected = param.projections != 0;
         if projected && place == 0 {
@@ -3579,7 +4068,8 @@ fn run_body(
     let sig = ck.fsig(sig_index);
     for i in 0..w(sig.param_count) {
         let param = ck.param(add(w(sig.param_start), i));
-        bind_name(inout ck, param.name, param.ty, param.pass, NONE32);
+        let ty = bind_capabilities(inout ck, param.ty, sig);
+        bind_name(inout ck, param.name, ty, param.pass, NONE32);
     }
     note(inout ck, sig.result);
     ck.fn_result = sig.result;

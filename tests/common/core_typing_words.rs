@@ -417,11 +417,13 @@ pub fn exprs_input(w: &World, module: &Module) -> Vec<u8> {
             tail.push(f.effects.instances.len() as u64);
             for inst in &f.effects.instances {
                 tail.push(e.name(&inst.name));
+                tail.push(e.opt_name(&inst.label));
                 tail.push(inst.args.len() as u64);
                 for a in &inst.args {
                     tail.push(e.ty(a));
                 }
             }
+            tail.push(e.opt_name(&f.effects.tail));
             let result = w.function_results.get(&f.name).unwrap_or(&f.result);
             tail.push(e.ty(result));
         }
