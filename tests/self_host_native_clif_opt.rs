@@ -13,6 +13,8 @@
 //! - `NATIVE_CLIF_OPT_STRIDE=n` keeps every n-th corpus world (default 1).
 #[path = "common/check_harness.rs"]
 mod check_harness;
+#[path = "common/clif_opt_programs.rs"]
+mod clif_opt_programs;
 #[path = "common/clif_words.rs"]
 mod clif_words;
 #[path = "common/vector_programs.rs"]
@@ -21,6 +23,7 @@ mod vector_programs;
 use check_harness::*;
 use cranelift_codegen::ir;
 use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 use vesper::{check, native, native_clif_opt, parser};
 
 /// The step codes of the package (`STEP_*`), by `STEPS` name; 0 for a step
@@ -39,6 +42,11 @@ const PORTED: &[(&str, u64)] = &[
     ("vector_registers", 11),
     ("remove_dead", 12),
     ("sink_slot_inits", 13),
+    ("share_invariant_loads", 14),
+    ("hoist_loop_invariants", 15),
+    ("merge_tails", 16),
+    ("eliminate_guarded_loop_add_overflows", 17),
+    ("reuse_seq_header_loads", 18),
     ("sink_compares", 32),
     ("thread_branches", 33),
     ("thread_decided_branches", 34),
@@ -51,6 +59,8 @@ const PORTED: &[(&str, u64)] = &[
 
 /// The package's answer word for a step it ran.
 const ANSWER_PORTED: u64 = 1;
+/// The step that reads the shapes section (`clif_words::shapes`).
+const MERGE_TAILS_CODE: u64 = 16;
 
 /// How many differing functions the differential prints.
 const MAX_REPORTED: usize = 6;
@@ -58,6 +68,106 @@ const MAX_REPORTED: usize = 6;
 /// Each step the package has ported must change at least this many
 /// functions over the corpus.
 const MIN_CHANGES_PER_STEP: usize = 1;
+
+/// The entry that runs several steps in one call (`clif_opt_run_words`).
+fn run_entry() -> &'static Entry {
+    static E: OnceLock<Entry> = OnceLock::new();
+    E.get_or_init(|| {
+        Package::load("packages/vesper-native-clif-opt").entry("clif_opt_run_words", true)
+    })
+}
+
+/// `native_clif_opt::run` on `f` with each run of ported steps in one
+/// Vesper call (a new call at `merge_tails`, whose shapes must be fresh),
+/// and the time spent in Vesper and in the Rust steps it replaces.
+fn whole_pass_vesper(f: &ir::Function) -> Result<(ir::Function, Duration), String> {
+    let mut g = f.clone();
+    let mut spent = Duration::ZERO;
+    let steps = native_clif_opt::STEPS;
+    let mut k = 0;
+    while k < steps.len() {
+        let (name, step) = steps[k];
+        if step_code(name).is_none() {
+            step(&mut g);
+            k += 1;
+            continue;
+        }
+        let mut codes = Vec::new();
+        while let Some(&(name, _)) = steps.get(k) {
+            let Some((_, code)) = step_code(name) else {
+                break;
+            };
+            if code == MERGE_TAILS_CODE && !codes.is_empty() {
+                break;
+            }
+            codes.push(code);
+            k += 1;
+        }
+        let clock = Instant::now();
+        let mut input = (codes.len() as u64).to_le_bytes().to_vec();
+        for c in &codes {
+            input.extend(c.to_le_bytes());
+        }
+        input.extend(clif_words::encode(&g, false));
+        if codes[0] == MERGE_TAILS_CODE {
+            input.extend(clif_words::shapes(&g));
+        }
+        let words = run_entry().words(&input);
+        let (&answer, script) = words.split_first().ok_or("no answer")?;
+        if answer != ANSWER_PORTED {
+            return Err(format!("steps {codes:?} are not ported"));
+        }
+        clif_words::apply(&mut g, script)?;
+        spent += clock.elapsed();
+    }
+    Ok((g, spent))
+}
+
+/// The whole-pass times: in Vesper (with encode and apply) and in
+/// `native_clif_opt::run`.
+#[derive(Default)]
+struct Whole {
+    vesper: Duration,
+    rust: Duration,
+}
+
+/// Compares the whole pass on `f`, pushing a difference on `bad`.
+fn compare_whole(f: &ir::Function, whole: &mut Whole, bad: &mut Vec<String>) {
+    let mut rust = f.clone();
+    let clock = Instant::now();
+    native_clif_opt::run(&mut rust);
+    whole.rust += clock.elapsed();
+    let diff = match whole_pass_vesper(f) {
+        Err(e) => Some(e),
+        Ok((g, spent)) => {
+            whole.vesper += spent;
+            first_difference(&rust.display().to_string(), &g.display().to_string())
+        }
+    };
+    if let Some(d) = diff {
+        bad.push(format!("whole pass: {d}"));
+    }
+}
+
+/// The package's `STEPS` by code (`pass_steps`), which a Vesper driver runs
+/// without the Rust list.
+#[test]
+fn pass_steps_follow_native_clif_opt_steps() {
+    let codes =
+        Package::load("packages/vesper-native-clif-opt").entry("clif_opt_pass_steps_words", true);
+    let codes = codes.words(&[]);
+    let steps = native_clif_opt::STEPS;
+    assert_eq!(codes.len(), steps.len(), "pass_steps has {codes:?}");
+    for (k, (&code, (name, _))) in codes.iter().zip(steps).enumerate() {
+        match step_code(name) {
+            Some((_, ported)) => assert_eq!(code, ported, "step {k} ({name})"),
+            None => assert!(
+                PORTED.iter().all(|&(_, c)| c != code),
+                "step {k} ({name}) has the code of a ported step"
+            ),
+        }
+    }
+}
 
 fn entry() -> &'static Entry {
     static E: OnceLock<Entry> = OnceLock::new();
@@ -76,6 +186,9 @@ fn step_code(name: &str) -> Option<(usize, u64)> {
 fn through_vesper(f: &ir::Function, code: u64) -> Result<ir::Function, String> {
     let mut input = code.to_le_bytes().to_vec();
     input.extend(clif_words::encode(f, false));
+    if code == MERGE_TAILS_CODE {
+        input.extend(clif_words::shapes(f));
+    }
     let words = entry().words(&input);
     let (&answer, script) = words.split_first().ok_or("no answer")?;
     if answer != ANSWER_PORTED {
@@ -121,16 +234,25 @@ fn compare_steps(f: &ir::Function, runs: &mut Runs, bad: &mut Vec<String>) {
     }
 }
 
-/// The vector programs added to the corpus, by name.
-const VECTOR_PROGRAMS: &[(&str, &str)] = &[
+/// The vector programs, and the programs of tests/native_clif_opt.rs that
+/// exercise particular steps, added to the corpus by name.
+const EXTRA_PROGRAMS: &[(&str, &str)] = &[
     ("vector acc4", vector_programs::ACC4),
     ("vector tick", vector_programs::TICK),
     ("vector ramp", vector_programs::RAMP),
     ("vector sums", vector_programs::SUMS),
+    ("guarded add", clif_opt_programs::GUARDED_ADD),
+    ("guarded add const", clif_opt_programs::GUARDED_ADD_CONST),
+    ("guarded join param", clif_opt_programs::GUARDED_JOIN_PARAM),
+    ("seq try_set", clif_opt_programs::SEQ_TRY_SET),
+    (
+        "seq try_get diamond",
+        clif_opt_programs::SEQ_TRY_GET_DIAMOND,
+    ),
 ];
 
-/// The checked world of a vector program.
-fn vector_world(source: &str) -> check::World {
+/// The checked world of an extra program.
+fn extra_world(source: &str) -> check::World {
     let p = parser::parse(source);
     assert!(p.diagnostics.is_empty(), "{:?}", p.diagnostics);
     let c = check::check(&p.module);
@@ -147,17 +269,21 @@ fn stride() -> usize {
 
 #[test]
 fn corpus_matches_native_clif_opt_steps() {
-    let start = std::time::Instant::now();
+    let start = Instant::now();
     let cases = corpus();
     let (mut funcs, mut bad_funcs) = (0, 0);
     let mut runs = Runs {
         ran: vec![0; PORTED.len()],
         changed: vec![0; PORTED.len()],
     };
-    // The corpus mains have no vector slots; the vector programs do.
-    let vectors: Vec<(String, check::World)> = VECTOR_PROGRAMS
+    let mut whole = Whole::default();
+    // Compile both entries before anything is timed.
+    let _ = (entry(), run_entry());
+    // The corpus mains have no vector slots or bounds-hoisted copy loops;
+    // the extra programs do.
+    let vectors: Vec<(String, check::World)> = EXTRA_PROGRAMS
         .iter()
-        .map(|&(name, source)| (name.to_string(), vector_world(source)))
+        .map(|&(name, source)| (name.to_string(), extra_world(source)))
         .collect();
     let worlds = cases
         .iter()
@@ -171,6 +297,7 @@ fn corpus_matches_native_clif_opt_steps() {
             funcs += 1;
             let mut bad = Vec::new();
             compare_steps(f, &mut runs, &mut bad);
+            compare_whole(f, &mut whole, &mut bad);
             if !bad.is_empty() {
                 bad_funcs += 1;
                 if bad_funcs <= MAX_REPORTED {
@@ -182,10 +309,14 @@ fn corpus_matches_native_clif_opt_steps() {
     eprintln!(
         "native clif opt corpus: {bad_funcs} differ over {funcs} functions of {} worlds; \
          steps ran {:?}, changed {:?}; {:.1?}",
-        cases.len().div_ceil(stride()) + VECTOR_PROGRAMS.len(),
+        cases.len().div_ceil(stride()) + EXTRA_PROGRAMS.len(),
         runs.ran,
         runs.changed,
         start.elapsed()
+    );
+    eprintln!(
+        "native clif opt whole pass: Vesper {:.1?} (with encode and apply) against Rust {:.1?}",
+        whole.vesper, whole.rust
     );
     println!("flip-gate differential differences={bad_funcs} cases={funcs}");
     assert_eq!(bad_funcs, 0);

@@ -23,6 +23,7 @@ unsafe extern "C" {
     fn vesper_loom_tuf_tuf_bound_json(data: i64, max_depth: i64, max_nodes: i64, max_collection: i64) -> i64;
     fn vesper_loom_tuf_tuf_check_checkpoint_invariants(wire_len: i64, max_checkpoint_bytes: i64, schema_version: i64, timestamp_version: i64, snapshot_version: i64, role_count: i64, max_roles: i64, has_zero_role: i64, has_targets_role: i64) -> i64;
     fn vesper_loom_tuf_tuf_check_graph_depth(adj_words: i64, max_depth: i64, budget_in: i64) -> i64;
+    fn vesper_loom_tuf_tuf_parse_checkpoint_json(b: *mut u64, out: *mut u64, roots_flat: *mut u64, root_lens: *mut u64, role_spans: *mut u64, role_vers: *mut u64) -> i64;
     fn vesper_loom_tuf_tuf_percent_decode_role(encoded: *mut u64) -> i64;
     fn vesper_loom_tuf_tuf_percent_encode_role(name: *mut u64) -> i64;
     fn vesper_loom_tuf_tuf_safe_component(part: *mut u64) -> i64;
@@ -69,6 +70,15 @@ pub fn tuf_check_graph_depth(adj_words: &[u64], max_depth: u64, budget_in: u64) 
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
     let raw = vesper_port_abi::with_seq(adj_words, |seq_adj_words| unsafe { vesper_loom_tuf_tuf_check_graph_depth(seq_adj_words as i64, max_depth as i64, budget_in as i64) });
+    raw as u64
+}
+
+/// Calls `tuf_parse_checkpoint_json` of the Vesper library `loom_tuf` (`vesper_loom_tuf_tuf_parse_checkpoint_json`).
+pub fn tuf_parse_checkpoint_json(b: &[u8], out: &mut [u64], roots_flat: &mut [u8], root_lens: &mut [u64], role_spans: &mut [u64], role_vers: &mut [u64]) -> u64 {
+    // SAFETY: `vesper_loom_tuf_tuf_parse_checkpoint_json` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(b, |view_b| vesper_port_abi::with_slice_mut(out, |view_out| vesper_port_abi::with_slice_mut(roots_flat, |view_roots_flat| vesper_port_abi::with_slice_mut(root_lens, |view_root_lens| vesper_port_abi::with_slice_mut(role_spans, |view_role_spans| vesper_port_abi::with_slice_mut(role_vers, |view_role_vers| unsafe { vesper_loom_tuf_tuf_parse_checkpoint_json(view_b, view_out, view_roots_flat, view_root_lens, view_role_spans, view_role_vers) }))))));
     raw as u64
 }
 

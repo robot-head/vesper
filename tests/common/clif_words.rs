@@ -25,7 +25,11 @@
 //! - per instruction (all of the dfg's, in order): `opcode`, `effects`,
 //!   `cond`, `imm`, `offset`, `mem`, `n_args`, args, `n_results`, results,
 //!   `n_dests`, then per destination `block`, `n`, block args ([`NONE`] for
-//!   an argument that is not a value).
+//!   an argument that is not a value);
+//! - optionally ([`shapes`], for `merge_tails`): `n_insts`, then per
+//!   instruction its shape number ([`NONE`] out of the layout). Two
+//!   instructions have the same number when `display_inst` prints them the
+//!   same once every value and block is written as `%`.
 //!
 //! Opcodes and types are this file's own codes ([`OPCODES`], [`TYPES`]),
 //! mirrored by packages/vesper-clif/src/codes.ves: 0 is "another one".
@@ -74,7 +78,9 @@
 //! - [`E_REPLACE_STORE`] `inst mem value addr offset`:
 //!   `dfg.replace(inst).store`;
 //! - [`E_MOVE_BEFORE`] `inst before`: `layout.remove_inst`, then
-//!   `layout.insert_inst` before `before` (`sink_slot_inits`).
+//!   `layout.insert_inst` before `before` (`sink_slot_inits`);
+//! - [`E_TRUST_LOAD`] `inst`: a load's flags become `MemFlags::trusted()`
+//!   with its alias region kept (`share_invariant_loads`).
 //! - [`E_APPEND_DEST_ARG`] `inst k value`: `append_argument` on destination
 //!   `k` of `inst` (the branch steps of #2423);
 //! - [`E_SET_DEST`] `inst k block n args...`: destination `k` of `inst`
@@ -134,6 +140,7 @@ pub const E_ZERO_BEFORE: u64 = 23;
 pub const E_REPLACE_BITCAST: u64 = 24;
 pub const E_REPLACE_STORE: u64 = 25;
 pub const E_MOVE_BEFORE: u64 = 26;
+pub const E_TRUST_LOAD: u64 = 27;
 // 64 up: the branch and fold steps of #2423 (20 to 63 are #2362's).
 pub const E_APPEND_DEST_ARG: u64 = 64;
 pub const E_SET_DEST: u64 = 65;
@@ -151,6 +158,13 @@ pub const M_ENDIAN: u64 = 4;
 pub const M_LITTLE: u64 = 8;
 pub const M_NOTRAP: u64 = 16;
 pub const M_ALIGNED: u64 = 32;
+/// The alias region (0: none, then heap, table, vmctx), at this shift of
+/// the `mem` word.
+pub const M_REGION_SHIFT: u64 = 6;
+pub const M_REGION_MASK: u64 = 3 << M_REGION_SHIFT;
+const REGION_HEAP: u64 = 1;
+const REGION_TABLE: u64 = 2;
+const REGION_VMCTX: u64 = 3;
 
 /// Effect bits of the `effects` word.
 pub const F_TERMINATOR: u64 = 1;
@@ -257,6 +271,11 @@ pub const OPCODES: &[Opcode] = &[
     Opcode::Sload32,
     Opcode::Istore8,
     Opcode::Istore16,
+    Opcode::Fsub,
+    Opcode::Fneg,
+    Opcode::Fabs,
+    Opcode::FcvtFromUint,
+    Opcode::Fcmp,
 ];
 
 /// Type codes, 1 up (0 is any other type).
@@ -372,22 +391,46 @@ fn mem_word(f: MemFlags) -> u64 {
     if f.aligned() {
         m |= M_ALIGNED;
     }
+    m |= region_bits(f.alias_region()) << M_REGION_SHIFT;
     m
 }
 
-/// The flags of a builder-made access: `MemFlags::new()`, or with an
-/// explicit endianness.
+fn region_bits(r: Option<ir::AliasRegion>) -> u64 {
+    match r {
+        None => 0,
+        Some(ir::AliasRegion::Heap) => REGION_HEAP,
+        Some(ir::AliasRegion::Table) => REGION_TABLE,
+        Some(ir::AliasRegion::Vmctx) => REGION_VMCTX,
+    }
+}
+
+/// The flags of a builder-made access: `MemFlags::new()` with the flags
+/// of the `mem` word.
 fn mem_flags(m: u64) -> Result<MemFlags, String> {
-    if m & !(M_ENDIAN | M_LITTLE | M_NOTRAP | M_ALIGNED) != 0 {
+    let known =
+        M_READONLY | M_CAN_MOVE | M_ENDIAN | M_LITTLE | M_NOTRAP | M_ALIGNED | M_REGION_MASK;
+    if m & !known != 0 {
         return Err(format!("memory flags {m:#x} on a new instruction"));
     }
     let mut f = MemFlags::new();
+    if m & M_READONLY != 0 {
+        f = f.with_readonly();
+    }
+    if m & M_CAN_MOVE != 0 {
+        f = f.with_can_move();
+    }
     if m & M_NOTRAP != 0 {
         f = f.with_notrap();
     }
     if m & M_ALIGNED != 0 {
         f = f.with_aligned();
     }
+    f = f.with_alias_region(match (m & M_REGION_MASK) >> M_REGION_SHIFT {
+        REGION_HEAP => Some(ir::AliasRegion::Heap),
+        REGION_TABLE => Some(ir::AliasRegion::Table),
+        REGION_VMCTX => Some(ir::AliasRegion::Vmctx),
+        _ => None,
+    });
     Ok(if m & M_ENDIAN == 0 {
         f
     } else if m & M_LITTLE != 0 {
@@ -448,6 +491,58 @@ fn no_outline(func: &ir::Function) -> bool {
 /// The words of `func` (see the module comment), as bytes.
 pub fn encode(func: &ir::Function, simd: bool) -> Vec<u8> {
     encode_with(func, simd, None)
+}
+
+/// The optional shapes section of the function words (see the module
+/// comment), numbered by first appearance.
+pub fn shapes(func: &ir::Function) -> Vec<u8> {
+    let n = func.dfg.num_insts();
+    let mut ids: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+    let mut w: Vec<u64> = Vec::with_capacity(n + 1);
+    w.push(n as u64);
+    for i in 0..n {
+        let inst = Inst::from_u32(i as u32);
+        // An instruction out of the layout may not print (detached results).
+        if func.layout.inst_block(inst).is_none() {
+            w.push(NONE);
+            continue;
+        }
+        let text = func.dfg.display_inst(inst).to_string();
+        let next = ids.len() as u64;
+        w.push(*ids.entry(blank_refs(&text)).or_insert(next));
+    }
+    w.iter().flat_map(|x| x.to_le_bytes()).collect()
+}
+
+/// The words a shape writes as `%` when they follow a character that is
+/// not alphanumeric and are followed by digits.
+const REF_PREFIXES: [&str; 2] = ["block", "v"];
+
+/// `text` with every value (`v12`) and block (`block3`) written as `%`.
+fn blank_refs(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = String::with_capacity(text.len());
+    let mut at = 0;
+    while at < bytes.len() {
+        let boundary = at == 0 || !bytes[at - 1].is_ascii_alphanumeric();
+        let prefix = REF_PREFIXES
+            .iter()
+            .find(|p| boundary && text[at..].starts_with(*p))
+            .map_or(0, |p| p.len());
+        let digits = bytes[at + prefix..]
+            .iter()
+            .take_while(|b| b.is_ascii_digit())
+            .count();
+        if prefix > 0 && digits > 0 {
+            out.push('%');
+            at += prefix + digits;
+        } else {
+            let c = text[at..].chars().next().unwrap_or_default();
+            out.push(c);
+            at += c.len_utf8().max(1);
+        }
+    }
+    out
 }
 
 /// [`encode`] with the module's pointer type (the cold outliner's).
@@ -825,6 +920,13 @@ pub fn apply(func: &mut ir::Function, words: &[u64]) -> Result<(), String> {
                 let before = Inst::from_u32(s.next()? as u32);
                 func.layout.remove_inst(inst);
                 func.layout.insert_inst(inst, before);
+            }
+            E_TRUST_LOAD => {
+                let inst = Inst::from_u32(s.next()? as u32);
+                let InstructionData::Load { flags, .. } = &mut func.dfg.insts[inst] else {
+                    return Err(format!("{inst}: trusted flags on a non-load"));
+                };
+                *flags = MemFlags::trusted().with_alias_region(flags.alias_region());
             }
             E_APPEND_DEST_ARG => {
                 let inst = Inst::from_u32(s.next()? as u32);

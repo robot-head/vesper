@@ -89,6 +89,9 @@ static CALL_DECLINED: AtomicU64 = AtomicU64::new(0);
 /// Of the functions emitted from Vesper, those that return a struct or
 /// tuple through the result pointer (#2411).
 static SRET: AtomicU64 = AtomicU64::new(0);
+/// Of the functions emitted from Vesper, those that build their result in
+/// a local buffer and return its words in registers (#2581).
+static REGISTER_RESULT: AtomicU64 = AtomicU64::new(0);
 
 /// Identifies a lent program for the cache: its address, function count
 /// and instruction count (a later compile may reuse the address).
@@ -178,7 +181,11 @@ fn body(lent: &mut Lent<'_, '_>) -> Result<bool, String> {
         HANDLED => {
             EMITTED.fetch_add(1, Ordering::Relaxed);
             if sret != codegen_swap::body::NO_VALUE {
-                SRET.fetch_add(1, Ordering::Relaxed);
+                if sret >> codegen_swap::body::RESULT_WORDS_SHIFT == 0 {
+                    SRET.fetch_add(1, Ordering::Relaxed);
+                } else {
+                    REGISTER_RESULT.fetch_add(1, Ordering::Relaxed);
+                }
             }
             if !callees.is_empty() {
                 WITH_CALLS.fetch_add(1, Ordering::Relaxed);
@@ -257,6 +264,7 @@ fn vesper_scalar_bodies_match_the_rust_walk() {
             &CALLS,
             &CALL_DECLINED,
             &SRET,
+            &REGISTER_RESULT,
         ];
         let before = counters.map(|c| c.load(Ordering::Relaxed));
         let worlds: Vec<_> = check_harness::corpus()
@@ -269,11 +277,19 @@ fn vesper_scalar_bodies_match_the_rust_walk() {
             total.add(both(&case.name, &case.world, runs(i, case)));
         }
         let after = counters.map(|c| c.load(Ordering::Relaxed));
-        let [emitted, unplanned, with_calls, calls, call_declined, sret] =
-            [0, 1, 2, 3, 4, 5].map(|i| after[i] - before[i]);
+        let [
+            emitted,
+            unplanned,
+            with_calls,
+            calls,
+            call_declined,
+            sret,
+            registers,
+        ] = [0, 1, 2, 3, 4, 5, 6].map(|i| after[i] - before[i]);
         eprintln!(
             "native walk bodies: {}; {emitted} functions emitted from Vesper \
-             ({with_calls} with {calls} direct calls, {sret} with a struct result), \
+             ({with_calls} with {calls} direct calls, {sret} with a struct result, \
+             {registers} returning it in registers), \
              {unplanned} left to Rust, {call_declined} declined for a call",
             total.summary()
         );
@@ -1095,6 +1111,87 @@ fn vesper_struct_results_match() {
     });
 }
 
+/// Register results (#2581): on the optimize path a function that cannot
+/// fail and returns a struct or tuple of at most two words builds it in a
+/// local buffer and returns its words in registers (`FnAbi::result_words`):
+/// a two-word struct, a one-word struct of narrow fields, a pair of words
+/// and a struct with a field chosen by a branch. Unoptimized, the same
+/// functions take a result pointer. `main` reads the fields, so it stays
+/// with the walk.
+const REGISTER_RESULT_SOURCE: &str = "
+struct Span {
+    start: i64,
+    len: u32,
+}
+struct Bits {
+    lo: u16,
+    hi: u8,
+    on: bool,
+}
+fn span(x: i64) -> Span {
+    Span { start: wrapping_add(x, 9), len: wrapping_u32(x) & 255 }
+}
+fn bits(x: u16, on: bool) -> Bits {
+    Bits { lo: x ^ 3, hi: 7, on: !on }
+}
+fn halves(x: u64) -> (u64, u64) {
+    (x >> 32, x & 4294967295)
+}
+fn wide(x: i64, c: bool) -> Span {
+    let n: u32 = if c { 2 } else { 3 };
+    Span { start: wrapping_mul(x, 2), len: n }
+}
+fn main() -> i64 {
+    let s: Span = span(5);
+    let b: Bits = bits(40, false);
+    let (hi, lo) = halves(77);
+    let k: Span = wide(6, true);
+    let on: i64 = if b.on { 256 } else { 0 };
+    s.start ^ widen_i64(s.len) ^ widen_i64(b.lo) ^ widen_i64(b.hi) ^ wrapping_i64(lo)
+        ^ wrapping_i64(hi) ^ k.start ^ widen_i64(k.len) ^ on
+}
+";
+
+#[test]
+fn vesper_register_results_match() {
+    big_stack(|| {
+        let parsed = vesper::parser::parse(REGISTER_RESULT_SOURCE);
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        let checked = vesper::check::check(&parsed.module);
+        assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
+        if let Err(e) = build(&checked.world, "main", true) {
+            panic!("the register result program does not build: {e}");
+        }
+        let before = REGISTER_RESULT.load(Ordering::Relaxed);
+        let total = both("register_results", &checked.world, true);
+        let registers = REGISTER_RESULT.load(Ordering::Relaxed) - before;
+        eprintln!(
+            "register_results: {}; {registers} register results emitted from Vesper",
+            total.summary()
+        );
+        let ran = if cross() { 0 } else { 2 };
+        assert_eq!((total.worlds, total.ran), (2, ran), "{}", total.summary());
+        // A cross target makes no JIT run, so each body is emitted once.
+        let min_registers = if cross() {
+            MIN_REGISTER_RESULTS / 2
+        } else {
+            MIN_REGISTER_RESULTS
+        };
+        assert!(
+            registers >= min_registers,
+            "only {registers} of the register results came from Vesper \
+             (expected >= {min_registers})"
+        );
+        assert!(total.is_clean(), "{}", total.summary());
+    });
+}
+
+/// Register-result bodies `vesper_register_results_match` must see
+/// emitted from Vesper: three of `REGISTER_RESULT_SOURCE`'s optimized
+/// functions, each compiled for its CLIF text and again for the JIT run
+/// (once on a cross target).
+const MIN_REGISTER_RESULTS: u64 = 6;
+
 /// Part 6k: 1-word unary (`~`, `-`, `!`), bitwise (`&`, `|`, `^`),
 /// `wrapping_neg_i8`/`i32`/`i64`, and `u64` bit builtins across both
 /// optimized and unoptimized builds.
@@ -1637,6 +1734,50 @@ fn vesper_scalar_bodies_part_6t() {
         assert!(
             emitted >= min_emitted,
             "part 6t functions should come from Vesper (expected >= {min_emitted}, got {emitted})"
+        );
+        assert!(total.is_clean(), "{}", total.summary());
+    });
+}
+
+/// Part 6u: `LANE_PRODUCT` local variables (`Op::Bind`), `Op::Read` scalar
+/// field paths on product locals, and `Pass::In` `Op::Read` of product locals.
+const SCALARS_6U: &str = "
+struct Vec2 {
+    x: i64,
+    y: f64,
+}
+fn local_product_fields(a: i64, b: f64) -> i64 {
+    let p: Vec2 = Vec2 { x: a, y: b };
+    wrapping_add(p.x, saturating_i64(p.y))
+}
+fn main() -> i64 {
+    local_product_fields(100, 12.5) ^ local_product_fields(-30, 4.5)
+}
+";
+
+#[test]
+fn vesper_scalar_bodies_part_6u() {
+    big_stack(|| {
+        let parsed = vesper::parser::parse(SCALARS_6U);
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        let checked = vesper::check::check(&parsed.module);
+        assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
+        if let Err(e) = build(&checked.world, "main", true) {
+            panic!("the part 6u scalar program does not build: {e}");
+        }
+        let before = EMITTED.load(Ordering::Relaxed);
+        let total = both("scalars_6u", &checked.world, true);
+        let emitted = EMITTED.load(Ordering::Relaxed) - before;
+        eprintln!(
+            "scalars_6u: {}; {emitted} functions emitted from Vesper",
+            total.summary()
+        );
+        let ran = if cross() { 0 } else { 2 };
+        assert_eq!((total.worlds, total.ran), (2, ran), "{}", total.summary());
+        let min_emitted = if cross() { 2 } else { 4 };
+        assert!(
+            emitted >= min_emitted,
+            "part 6u functions should come from Vesper (expected >= {min_emitted}, got {emitted})"
         );
         assert!(total.is_clean(), "{}", total.summary());
     });

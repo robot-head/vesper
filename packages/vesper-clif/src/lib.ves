@@ -15,17 +15,18 @@
 //   clif_words.rs.
 
 use self::codes::{
-    E_MOVE_BEFORE, E_REPLACE_BITCAST, E_REPLACE_STORE, E_NEW_SLOT, E_ZERO_BEFORE, E_SET_BINARY,
-    E_SET_UNARY, E_MEM_ADDR, E_REPLACE_ICMP_IMM, E_REPLACE_IMM, E_APPEND_DEST_ARG, E_BRIF,
-    E_DETACH_RESULTS, E_ICONST, E_SET_DEST, E_ARGS, E_BLOCK, E_CLONE, E_END, E_FCONST, E_INS,
-    E_JUMP, E_PARAM, E_PLACE, E_REMOVE_BLOCK, E_REMOVE_INST, E_RETARGET, E_SLOT_SIZE, E_ALIAS,
-    E_INS_BEFORE, E_MOVE_INST, E_REMOVE_DEST_ARG, E_REMOVE_PARAM, F_BRANCH, F_CALL, F_RETURN,
-    F_SIDE_EFFECTS, F_STACK_SLOT, F_TERMINATOR, F_TRAP, F_TRAP_CODE, H_NO_OUTLINE, H_SIMD, NONE,
-    NONE64, OP_BITCAST, OP_BRIF, OP_CALL, OP_F32CONST, OP_F64CONST, OP_FCVT_FROM_SINT, OP_ICMP,
-    OP_ICMP_IMM, OP_ICONST, OP_JUMP, OP_LOAD, OP_RETURN, OP_SCALAR_TO_VECTOR, OP_SPLAT,
-    OP_STACK_ADDR, OP_STORE, OP_VCONST, S_EXPLICIT, TY_F64, TY_F32X4, TY_F64X2, OP_SWIDEN_HIGH,
-    OP_SWIDEN_LOW, OP_TRAP, OP_UADD_OVERFLOW, S_OTHER, TY_F32, TY_I16X8, TY_I32X4, TY_I64X2, TY_I8,
-    TY_I8X16, TY_OTHER, V_ALIAS, V_PARAM, V_RESULT
+    E_TRUST_LOAD, M_ALIGNED, M_NOTRAP, M_REGION_MASK, E_MOVE_BEFORE, E_REPLACE_BITCAST,
+    E_REPLACE_STORE, E_NEW_SLOT, E_ZERO_BEFORE, E_SET_BINARY, E_SET_UNARY, E_MEM_ADDR,
+    E_REPLACE_ICMP_IMM, E_REPLACE_IMM, E_APPEND_DEST_ARG, E_BRIF, E_DETACH_RESULTS, E_ICONST,
+    E_SET_DEST, E_ARGS, E_BLOCK, E_CLONE, E_END, E_FCONST, E_INS, E_JUMP, E_PARAM, E_PLACE,
+    E_REMOVE_BLOCK, E_REMOVE_INST, E_RETARGET, E_SLOT_SIZE, E_ALIAS, E_INS_BEFORE, E_MOVE_INST,
+    E_REMOVE_DEST_ARG, E_REMOVE_PARAM, F_BRANCH, F_CALL, F_RETURN, F_SIDE_EFFECTS, F_STACK_SLOT,
+    F_TERMINATOR, F_TRAP, F_TRAP_CODE, H_NO_OUTLINE, H_SIMD, NONE, NONE64, OP_BITCAST, OP_BRIF,
+    OP_CALL, OP_F32CONST, OP_F64CONST, OP_FCVT_FROM_SINT, OP_ICMP, OP_ICMP_IMM, OP_ICONST, OP_JUMP,
+    OP_LOAD, OP_RETURN, OP_SCALAR_TO_VECTOR, OP_SPLAT, OP_STACK_ADDR, OP_STORE, OP_VCONST,
+    S_EXPLICIT, TY_F64, TY_F32X4, TY_F64X2, OP_SWIDEN_HIGH, OP_SWIDEN_LOW, OP_TRAP,
+    OP_UADD_OVERFLOW, S_OTHER, TY_F32, TY_I16X8, TY_I32X4, TY_I64X2, TY_I8, TY_I8X16, TY_OTHER,
+    V_ALIAS, V_PARAM, V_RESULT
 };
 
 pub copy struct Val {
@@ -101,6 +102,8 @@ pub struct Func {
     llast: u32,
     // the edit script so far
     out: ChunkSeq[u64],
+    // the shape number of each instruction, when the words have them
+    shapes: ChunkSeq[u64],
 }
 
 pub struct Reader {
@@ -225,7 +228,8 @@ pub fn read_func(in b: Slice[u8]) -> Func {
         dests: ChunkSeq::new[Dst](),
         lfirst: NONE,
         llast: NONE,
-        out: ChunkSeq::new[u64]()
+        out: ChunkSeq::new[u64](),
+        shapes: ChunkSeq::new[u64]()
     };
     for v in 0..nv {
         let k = r.word(in b);
@@ -299,12 +303,26 @@ pub fn read_func(in b: Slice[u8]) -> Func {
         }
         f.put_inst(i, row);
     }
+    // The optional shapes section (`clif_words::shapes`).
+    if r.pos < b.len() {
+        let n = r.word(in b);
+        for k in 0..n {
+            f.shapes.push(r.word(in b));
+        }
+    }
     f
 }
 
 impl Func {
     pub fn nvalues(in self) -> u64 {
         self.vals.len()
+    }
+
+    // The shape number of `i` (NONE when the words have none for it): two
+    // instructions with one number print the same but for their values
+    // and blocks.
+    pub fn shape(in self, i: u32) -> u64 {
+        self.shapes.try_get(w(i)).unwrap_or(NONE64)
     }
 
     pub fn ninsts(in self) -> u64 {
@@ -1467,6 +1485,16 @@ impl Func {
         self.out.push(E_MOVE_BEFORE);
         self.out.push(w(i));
         self.out.push(w(before));
+    }
+
+    // A load's flags become `MemFlags::trusted()` with its alias region
+    // kept, written as `E_TRUST_LOAD`.
+    pub fn trust_load(inout self, i: u32) {
+        let mut x = self.inst(w(i));
+        x.mem = M_NOTRAP | M_ALIGNED | (x.mem & M_REGION_MASK);
+        self.put_inst(w(i), x);
+        self.out.push(E_TRUST_LOAD);
+        self.out.push(w(i));
     }
 
     // The edit script, ended.
