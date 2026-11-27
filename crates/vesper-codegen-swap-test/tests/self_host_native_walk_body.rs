@@ -1641,3 +1641,47 @@ fn vesper_scalar_bodies_part_6t() {
         assert!(total.is_clean(), "{}", total.summary());
     });
 }
+
+/// Part 6u: `LANE_PRODUCT` local variables (`Op::Bind`), `Op::Read` scalar
+/// field paths on product locals, and `Pass::In` `Op::Read` of product locals.
+const SCALARS_6U: &str = "
+struct Vec2 {
+    x: i64,
+    y: f64,
+}
+fn local_product_fields(a: i64, b: f64) -> i64 {
+    let p: Vec2 = Vec2 { x: a, y: b };
+    wrapping_add(p.x, saturating_i64(p.y))
+}
+fn main() -> i64 {
+    local_product_fields(100, 12.5) ^ local_product_fields(-30, 4.5)
+}
+";
+
+#[test]
+fn vesper_scalar_bodies_part_6u() {
+    big_stack(|| {
+        let parsed = vesper::parser::parse(SCALARS_6U);
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        let checked = vesper::check::check(&parsed.module);
+        assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
+        if let Err(e) = build(&checked.world, "main", true) {
+            panic!("the part 6u scalar program does not build: {e}");
+        }
+        let before = EMITTED.load(Ordering::Relaxed);
+        let total = both("scalars_6u", &checked.world, true);
+        let emitted = EMITTED.load(Ordering::Relaxed) - before;
+        eprintln!(
+            "scalars_6u: {}; {emitted} functions emitted from Vesper",
+            total.summary()
+        );
+        let ran = if cross() { 0 } else { 2 };
+        assert_eq!((total.worlds, total.ran), (2, ran), "{}", total.summary());
+        let min_emitted = if cross() { 2 } else { 4 };
+        assert!(
+            emitted >= min_emitted,
+            "part 6u functions should come from Vesper (expected >= {min_emitted}, got {emitted})"
+        );
+        assert!(total.is_clean(), "{}", total.summary());
+    });
+}
