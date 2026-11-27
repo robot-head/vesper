@@ -233,7 +233,7 @@ const AARCH64_GP_ARGUMENTS: usize = 8;
 const XMM_REGISTER_ARGUMENTS: usize = 8;
 const AARCH64_FP_ARGUMENTS: usize = 8;
 const AARCH64_CALL_FLOAT_BITS: u32 = 4;
-const AARCH64_INDIRECT_CALL: u64 = 1 << (u64::BITS - 1);
+const INDIRECT_CALL: u64 = 1 << (u64::BITS - 1);
 const STACK_PROBE_INTERVAL: usize = 4096;
 const CFG_HOME_BYTES: u64 = size_of::<u64>() as u64;
 const MAX_GP_ARGUMENTS: usize = GP_REGISTER_ARGUMENTS + STACK_PROBE_INTERVAL / size_of::<u64>() - 1;
@@ -923,7 +923,7 @@ impl IntegerBlocks<'_> {
                 self.relocations = true;
                 (target, float_and_stack)
             }
-            CallTarget::Indirect(address) => (address, float_and_stack | AARCH64_INDIRECT_CALL),
+            CallTarget::Indirect(address) => (address, float_and_stack | INDIRECT_CALL),
         };
         let id = self.append(op, [target, argument_records, layout]);
         let high = (return_cells == GP_RESULTS).then(|| self.append(IntegerOp::CallHigh, [0; 3]));
@@ -1759,7 +1759,7 @@ impl IntegerBlocks<'_> {
             } = function.dfg.insts[inst]
             {
                 let (&address, args) = function.dfg.inst_args(inst).split_first()?;
-                if !self.aarch64 || ty(address) != types::I64 {
+                if ty(address) != types::I64 {
                     return None;
                 }
                 self.call(
@@ -2639,7 +2639,7 @@ impl IntegerBlocks<'_> {
 /// The call's left operand is the function ID and its right operand is the total
 /// argument record count. The extra operand encodes the float register count in
 /// the low bits and the AArch64 stack argument count in the high bits.
-/// The top bit marks an AArch64 indirect call, whose left operand is an address value ID.
+/// The top bit marks an indirect call, whose left operand is an address value ID.
 /// AAPCS64 uses a NO_VALUE argument for a register skipped before a pair.
 /// Argument records leave unreferenced slots. CallFloat returns through the
 /// first floating-point result register. AArch64 uses CallFloat32 for f32.

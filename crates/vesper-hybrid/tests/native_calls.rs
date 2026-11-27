@@ -1,4 +1,4 @@
-//! Execute direct calls emitted by the opt-in x86-64 machine backend.
+//! Execute calls emitted by the opt-in x86-64 machine backend.
 
 #![cfg(all(target_os = "linux", target_arch = "x86_64"))]
 
@@ -147,6 +147,81 @@ fn call_records_require_relocations_and_keep_discarded_calls() {
     assert!(!binding::x86_64_relocatable_block(&mixed).is_empty());
     mixed[CALL_XMM_COUNT] = 0;
     assert!(binding::x86_64_relocatable_block(&mixed).is_empty());
+}
+
+#[test]
+fn indirect_calls_preserve_targets_through_register_and_stack_arguments() {
+    type Entry = unsafe extern "C" fn(u64, u64, u64, u64, u64, u64, u64, u64, u64) -> u64;
+    const GP_INPUTS: usize = 8;
+
+    extern "C" fn mix(a: u64, b: u64, c: u64, d: u64, e: u64, f: u64, g: u64, h: u64) -> u64 {
+        [a, b, c, d, e, f, g, h]
+            .into_iter()
+            .fold(0u64, |acc, n| acc.rotate_left(7).wrapping_add(n))
+    }
+
+    let mut module = jit_module();
+    for target_index in [0, GP_INPUTS] {
+        let mut callee = module.make_signature();
+        callee.params = vec![AbiParam::new(types::I64); GP_INPUTS];
+        callee.returns.push(AbiParam::new(types::I64));
+        let mut signature = callee.clone();
+        signature.params.push(AbiParam::new(types::I64));
+        let mut context = module.make_context();
+        context.func.signature = signature.clone();
+        let callee = context.func.import_signature(callee);
+        let mut state = FunctionBuilderContext::new();
+        let mut b = FunctionBuilder::new(&mut context.func, &mut state);
+        let block = b.create_block();
+        b.append_block_params_for_function_params(block);
+        b.switch_to_block(block);
+        let mut operands = b.block_params(block).to_vec();
+        let target = operands.remove(target_index);
+        let [a, b_arg, c, d, e, f, g, h] = operands.try_into().unwrap();
+        let first = b
+            .ins()
+            .call_indirect(callee, target, &[h, c, b_arg, d, e, f, a, g]);
+        let first = b.inst_results(first)[0];
+        let second = b
+            .ins()
+            .call_indirect(callee, target, &[b_arg, a, c, f, e, d, h, g]);
+        let second = b.inst_results(second)[0];
+        let result = b.ins().bxor(first, second);
+        b.ins().return_(&[result]);
+        b.seal_all_blocks();
+        b.finalize();
+
+        let reference = module.declare_anonymous_function(&signature).unwrap();
+        let candidate = module.declare_anonymous_function(&signature).unwrap();
+        let words = native::machine::integer_block_words(&context.func).unwrap();
+        let code = binding::x86_64_integer_block(&words);
+        assert!(!code.is_empty());
+        let packet = binding::x86_64_relocatable_block(&words);
+        let (length, bytes) = packet.split_first_chunk::<{ size_of::<u64>() }>().unwrap();
+        assert_eq!(u64::from_le_bytes(*length) as usize, bytes.len());
+        assert_eq!(bytes, code);
+        let alignment = u64::from(module.isa().function_alignment().minimum);
+        module
+            .define_function_bytes(candidate, alignment, &code, &[])
+            .unwrap();
+        module.define_function(reference, &mut context).unwrap();
+        module.finalize_definitions().unwrap();
+
+        let entry = |id| unsafe {
+            std::mem::transmute::<*const u8, Entry>(module.get_finalized_function(id))
+        };
+        let reference = entry(reference);
+        let candidate = entry(candidate);
+        for inputs in [[1, 2, 3, 4, 5, 6, 7, 8], [9, u64::MAX, 0, 7, 2, 13, 5, 21]] {
+            let mut call = inputs.to_vec();
+            call.insert(target_index, mix as *const () as usize as u64);
+            let [a, b, c, d, e, f, g, h, i] = call.try_into().unwrap();
+            assert_eq!(unsafe { candidate(a, b, c, d, e, f, g, h, i) }, unsafe {
+                reference(a, b, c, d, e, f, g, h, i)
+            });
+        }
+    }
+    unsafe { module.free_memory() };
 }
 
 fn jit_module() -> JITModule {

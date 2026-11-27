@@ -33,7 +33,7 @@ use self::scalar::{
     FLOAT_PROMOTE, FLOAT_DEMOTE, SIGNED_TO_FLOAT, UNSIGNED_TO_FLOAT, is_float_conversion,
     FLOAT_TO_SIGNED_SAT, is_float_to_integer, FLOAT_CEIL, FLOAT_FLOOR, FLOAT_TRUNC, FLOAT_NEAREST,
     FLOAT_MIN, FLOAT_MAX, FLOAT_FMA64, is_float_fma, STACK_ARGUMENT, FLOAT_STACK_ARGUMENT,
-    CALL_STACK_ARGUMENT, FUNCTION_GOT, is_call
+    CALL_STACK_ARGUMENT, FUNCTION_GOT, INDIRECT_CALL, indirect_call, is_call
 };
 use self::x86_64::{
     BYTE_BITS, WORD_BITS, DWORD_BITS, QWORD_BITS, FLOAT_ORDERED, FLOAT_UNORDERED, FLOAT_EQUAL,
@@ -46,7 +46,6 @@ const ARGUMENT_REGISTERS: u64 = 8;
 const FP_ARGUMENT_REGISTERS: u64 = 8;
 const CALL_FLOAT_BITS: u32 = 4;
 const CALL_FLOAT_MASK: u64 = 0xf;
-const INDIRECT_CALL: u64 = 0x8000000000000000;
 // Keep x16 and x17 out of allocation for architectural scratch uses.
 const CALLER_REGISTER_MASK: u32 = 0xffff;
 const UNASSIGNED: u32 = 32;
@@ -764,10 +763,6 @@ fn flags_survive_stack_stores(in words: Slice[u64], start: u64, end: u64, value:
         }
     }
     true
-}
-
-fn indirect_call(layout: u64) -> bool {
-    (layout & INDIRECT_CALL) != 0
 }
 
 fn call_stack_count(layout: u64) -> u64 {

@@ -109,7 +109,7 @@ const JCC_NEAR: u8 = 0x80;
 const JCC_SHORT: u8 = 0x70;
 const JMP_SHORT: u8 = 0xeb;
 const JMP_REL32: u8 = 0xe9;
-const JMP_RM_GROUP: u8 = 0xff;
+const CALL_JUMP_RM_GROUP: u8 = 0xff;
 const JMP_RM_EXTENSION: u8 = 4;
 const SIGN_EXTEND_DIVIDEND: u8 = 0x99;
 const MUL_EXTENSION: u8 = 4;
@@ -129,6 +129,7 @@ const MOVSX_R64_RM16: u8 = 0xbf;
 const MOVSXD_R64_RM32: u8 = 0x63;
 const RET_NEAR: u8 = 0xc3;
 const CALL_REL32: u8 = 0xe8;
+const CALL_REGISTER_EXTENSION: u8 = 2;
 const U32_MAX_BITS: u64 = 0xffffffff;
 const I32_MIN_BITS: u64 = 0xffffffff80000000;
 const DISP8_MAX: u32 = 0x7f;
@@ -458,6 +459,12 @@ pub fn emit_direct_call(inout out: ChunkSeq[u8]) -> u64 {
     displacement
 }
 
+pub fn emit_indirect_call(inout out: ChunkSeq[u8], register: u8) {
+    emit_rex(inout out, 0, register, false, false);
+    out.push(CALL_JUMP_RM_GROUP);
+    out.push(modrm(CALL_REGISTER_EXTENSION, register));
+}
+
 pub fn emit_symbol_address(inout out: ChunkSeq[u8], destination: u8, got: bool) -> u64 {
     out.push(rex(destination, 0, true));
     out.push(if got { MOV_R64_RM } else { LEA });
@@ -486,7 +493,7 @@ pub fn emit_jump_table(inout out: ChunkSeq[u8], index: u8, case_count: u32) -> b
     out.push(SIB_SCALE_DWORD | modrm_fields(R10, R11));
     binary(inout out, ADD_RM_R64, R10, R11, true);
     out.push(rex(0, R10, false));
-    out.push(JMP_RM_GROUP);
+    out.push(CALL_JUMP_RM_GROUP);
     out.push(modrm(JMP_RM_EXTENSION, R10));
     patch_forward_branch(inout out, address_end)
 }

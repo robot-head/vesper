@@ -6,10 +6,10 @@ use self::x86_64::{
     CC_E, CC_G, CC_GE, CC_L, CC_LE, CC_NE, CC_O, AtomicMemory, FixedArithmetic, Instruction,
     NEG_EXTENSION, NOT_EXTENSION, OR_RM_R64, R10, R11, RAX, RDX, RSP, SAR_EXTENSION, SHL_EXTENSION,
     SHR_EXTENSION, SBB_RM_R64, SUB_RM_R64, UNASSIGNED, XOR_RM_R64, ALL_REGISTER_CODES,
-    REGISTER_CODES, arg_register, emit, emit_direct_call, emit_jump_table, emit_jump_table_entry,
-    emit_symbol_address, callee_saved_registers, find_callee_saved_register, find_register,
-    fits_signed_byte, patch_forward_branch, patch_relative_branch, patch_relative_offset,
-    register_bit, home_register, xmm_home_register, HOME_REGISTERS
+    REGISTER_CODES, arg_register, emit, emit_direct_call, emit_indirect_call, emit_jump_table,
+    emit_jump_table_entry, emit_symbol_address, callee_saved_registers, find_callee_saved_register,
+    find_register, fits_signed_byte, patch_forward_branch, patch_relative_branch,
+    patch_relative_offset, register_bit, home_register, xmm_home_register, HOME_REGISTERS
 };
 
 // Integer block opcodes shared with src/native_machine.rs.
@@ -202,6 +202,7 @@ const PAIRED_RESULTS: u64 = 2;
 pub const FLOAT_RETURN_LAYOUT: u64 = PAIRED_RESULTS + 1;
 pub const DISP32_MASK: u64 = 0xffffffff;
 pub const LIBCALL_TARGET_BASE: u64 = DISP32_MASK + 1;
+pub const INDIRECT_CALL: u64 = 0x8000000000000000;
 pub const MEMCPY_LIBCALL: u64 = 1;
 const MEMORY_COPY_ARGUMENTS: u64 = 3;
 const STACK_ALIGNMENT: u64 = 16;
@@ -267,6 +268,7 @@ struct FrameLayout {
     outgoing: u64,
     fixed: bool,
     floating: bool,
+    indirect_calls: bool,
     home_slot: u64,
     promoted: u64,
     gp_homes: u32,
@@ -500,6 +502,7 @@ fn frame_layout(in words: Slice[u64], count: u64) -> Option[FrameLayout] {
         outgoing: 0,
         fixed: false,
         floating: false,
+        indirect_calls: false,
         home_slot: NO_VALUE,
         promoted: 0,
         gp_homes: 0,
@@ -612,6 +615,10 @@ fn has_no_result(op: u64) -> bool {
 
 pub fn is_call(op: u64) -> bool {
     op == CALL || op == CALL_VOID || op == CALL_PAIR || op == CALL_FLOAT || op == CALL_FLOAT32
+}
+
+pub fn indirect_call(layout: u64) -> bool {
+    (layout & INDIRECT_CALL) != 0
 }
 
 pub fn is_atomic_rmw(op: u64) -> bool {
@@ -1213,17 +1220,20 @@ fn find_last_reads(
         }
         if is_call(record.op) {
             has_calls = true;
-            let gp_arguments = wrapping_sub(record.right, record.extra);
-            if !allow_relocations
-                || record.extra > XMM_ARGUMENTS
-                || record.extra > record.right
+            let indirect = indirect_call(record.extra);
+            let fp_arguments = record.extra & ~INDIRECT_CALL;
+            let gp_arguments = wrapping_sub(record.right, fp_arguments);
+            if (!indirect && !allow_relocations)
+                || fp_arguments > XMM_ARGUMENTS
+                || fp_arguments > record.right
                 || gp_arguments > MAX_ARGUMENTS
                 || record.right > index
-                || (record.left >= LIBCALL_TARGET_BASE
+                || (!indirect
+                    && record.left >= LIBCALL_TARGET_BASE
                     && (record.op != CALL
                         || wrapping_sub(record.left, LIBCALL_TARGET_BASE) > MEMCPY_LIBCALL
                         || record.right != MEMORY_COPY_ARGUMENTS
-                        || record.extra != 0))
+                        || fp_arguments != 0))
             {
                 return Option::None;
             }
@@ -1233,7 +1243,8 @@ fn find_last_reads(
             {
                 return Option::None;
             }
-            frame.floating = frame.floating || record.extra != 0;
+            frame.floating = frame.floating || fp_arguments != 0;
+            frame.indirect_calls = frame.indirect_calls || indirect;
             if gp_arguments > ARGUMENTS {
                 let slots = wrapping_sub(gp_arguments, ARGUMENTS);
                 // Keep the explicit slots aligned after the outgoing area.
@@ -1244,6 +1255,12 @@ fn find_last_reads(
             }
             let start = wrapping_sub(index, record.right);
             let limit = wrapping_add(arguments, start);
+            if indirect {
+                if record.left >= limit || float_value(in words, arguments, record.left) {
+                    return Option::None;
+                }
+                first_read_backwards(inout reads, record.left, value);
+            }
             for i in 0..record.right {
                 let argument = read_record(in words, wrapping_add(start, i));
                 if argument.op != CALL_ARGUMENT
@@ -1388,7 +1405,7 @@ fn allocate(
     // as allocator spills, even when every result fits in a register.
     let gp_reserved = if spills || arguments > ARGUMENTS {
         register_bit(LEFT_SCRATCH) | register_bit(RIGHT_SCRATCH) | register_bit(THIRD_SCRATCH)
-    } else if frame.outgoing != 0 || frame.fixed || frame.floating {
+    } else if frame.outgoing != 0 || frame.fixed || frame.floating || frame.indirect_calls {
         register_bit(THIRD_SCRATCH)
     } else {
         0
@@ -1454,6 +1471,12 @@ fn allocate(
         let atomic = is_atomic_rmw(record.op);
         if call {
             has_calls = true;
+            if indirect_call(record.extra) {
+                used = without_register(
+                    used,
+                    dying_register(in reads, in locations, record.left, value)
+                );
+            }
             let start = wrapping_sub(index, record.right);
             for i in 0..record.right {
                 let operand = call_argument(in words, start, i);
@@ -1968,8 +1991,10 @@ fn emit_call(
     in record: Record,
     in low: Location,
     in high: Location
-) -> u64 {
-    let arguments = wrapping_sub(record.right, record.extra);
+) -> Option[u64] {
+    let indirect = indirect_call(record.extra);
+    let fp_arguments = record.extra & ~INDIRECT_CALL;
+    let arguments = wrapping_sub(record.right, fp_arguments);
     let register_arguments = if arguments > ARGUMENTS {
         ARGUMENTS
     } else {
@@ -1983,6 +2008,23 @@ fn emit_call(
         let offset = wrapping_mul(wrapping_sub(i, register_arguments), SPILL_SLOT_BYTES);
         emit(inout out, in Instruction::Store(register, RSP, wrapping_u32(offset), QWORD_BITS));
     }
+    let mut target = UNASSIGNED;
+    if indirect {
+        let home = assigned(in allocation.locations, record.left);
+        target = materialize(inout out, in home, THIRD_SCRATCH);
+        // Stack argument copies are finished, so the GP shuffle can keep the
+        // target in R11 when it would overwrite the original register.
+        for i in 0..register_arguments {
+            if arg_register(i) == target {
+                let input = assigned(in allocation.locations, call_argument(in words, start, i));
+                if !in_register(in input, target) {
+                    emit(inout out, in Instruction::Move(THIRD_SCRATCH, target));
+                    target = THIRD_SCRATCH;
+                }
+                break;
+            }
+        }
+    }
     if register_arguments != 0 {
         move_call_arguments(
             inout out,
@@ -1993,18 +2035,23 @@ fn emit_call(
             false
         );
     }
-    if record.extra != 0 {
+    if fp_arguments != 0 {
         let float_start = wrapping_add(start, arguments);
         move_call_arguments(
             inout out,
             in words,
             in allocation.locations,
             float_start,
-            record.extra,
+            fp_arguments,
             true
         );
     }
-    let reference = emit_direct_call(inout out);
+    let reference = if indirect {
+        emit_indirect_call(inout out, target);
+        Option::None
+    } else {
+        Option::Some(emit_direct_call(inout out))
+    };
     // Copy both return registers before restoring the live caller registers.
     if record.op == CALL_FLOAT {
         save_result(inout out, in low, XMM0);
@@ -2338,14 +2385,19 @@ fn encode_block_pass(
                     in home,
                     in high
                 );
-                relocations.push(offset);
-                if record.left >= LIBCALL_TARGET_BASE {
-                    relocations.push(PLT_LIBCALL);
-                    relocations.push(wrapping_sub(record.left, LIBCALL_TARGET_BASE));
-                } else {
-                    relocations.push(PLT_CALL);
-                    relocations.push(record.left);
-                }
+                match offset {
+                    Option::Some(offset) => {
+                        relocations.push(offset);
+                        if record.left >= LIBCALL_TARGET_BASE {
+                            relocations.push(PLT_LIBCALL);
+                            relocations.push(wrapping_sub(record.left, LIBCALL_TARGET_BASE));
+                        } else {
+                            relocations.push(PLT_CALL);
+                            relocations.push(record.left);
+                        }
+                    },
+                    Option::None => (),
+                };
             } else {
                 emit_fixed_arithmetic(inout output, in allocation, in record, in home);
             }
