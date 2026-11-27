@@ -11,18 +11,23 @@
 // - binding.ves: the v1 generator and the shared pieces.
 // - binding_v2.ves: the v2 and v3 generator.
 // - binding_v4.ves: the v4 additions (trees, sequence views, lent handles).
+// - handoff.ves: the planner's answer as the binding generator's input
+//   (#2270), so plan, interface file and binding chain in Vesper.
 //
 // `binding_text` is the harness entry (tests/self_host_codegen_export.rs,
 // whose words.rs is the Rust half of the input).
 
 use @vesper/check-data::pack_text;
+use @vesper/check-data::input::Reader;
+use @vesper/check-data::util::{put_text_words};
+use self::handoff::{binding_input_of_plan};
 use self::iface::{Iface, read_iface};
 use self::binding::{Gen, binding_v1, gen_new};
 use self::binding_v2::{binding_v2};
 use self::directives::{parse_directives};
 use self::json::{interface_json};
 use self::plan::{plan_bytes, plan_words};
-use self::text::{TEXT_CAPACITY};
+use self::text::{TEXT_CAPACITY, WORD_BYTES, WORD_ROUND_UP};
 
 // `rust_binding(interface, options)`.
 pub fn rust_binding(sink i: Iface) -> ChunkSeq[u8] {
@@ -72,4 +77,57 @@ pub fn export_plan_bytes(in input: Slice[u8]) -> ChunkSeq[u64] {
 // a dump (directives.ves).
 pub fn directives_dump(in input: Str) -> ChunkSeq[u64] {
     parse_directives(in input)
+}
+
+// Harness entry: the binding generator's input for a planner answer
+// (handoff.ves). `input` is a types-path flag word, the types path (a
+// length word and its bytes, zero padded), then the answer's words. The
+// result is 1 and the input's bytes as `put_text_words` words, or 0 when
+// the planner refused.
+pub fn plan_binding_input(in input: Str) -> ChunkSeq[u64] {
+    let b = input.as_bytes();
+    let mut r = Reader { pos: 0 };
+    let has_types_path = r.word(in b) != 0;
+    let len = r.word(in b);
+    let start = r.pos;
+    let end = wrapping_add(start, len);
+    r.pos = wrapping_add(
+        start,
+        wrapping_mul(wrapping_add(len, WORD_ROUND_UP) / WORD_BYTES, WORD_BYTES)
+    );
+    let mut answer = ChunkSeq::new[u64]();
+    loop {
+        if r.pos >= b.len() {
+            break;
+        }
+        answer.push(r.word(in b));
+    }
+    let mut out = ChunkSeq::new[u64]();
+    match binding_input_of_plan(in answer, has_types_path, in b[start..end]) {
+        Option::Some(bytes) => {
+            out.push(1);
+            put_text_words(inout out, in bytes.as_slice());
+        },
+        Option::None => out.push(0),
+    }
+    out
+}
+
+// The interface file and the binding text of a planner answer, with the
+// optional types path, or None when the planner refused: `vesper build
+// --lib`'s `--interface` and `--rust-binding` outputs, in Vesper from the
+// plan on.
+pub fn export_files_of_plan(
+    in answer: ChunkSeq[u64],
+    has_types_path: bool,
+    in types_path: Slice[u8]
+) -> Option[(ChunkSeq[u8], ChunkSeq[u8])] {
+    match binding_input_of_plan(in answer, has_types_path, in types_path) {
+        Option::Some(bytes) => {
+            let json = interface_json(in read_iface(in bytes.as_slice()));
+            let binding = rust_binding(read_iface(in bytes.as_slice()));
+            Option::Some((json, binding))
+        },
+        Option::None => Option::None,
+    }
 }

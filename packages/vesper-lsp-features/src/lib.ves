@@ -25,6 +25,7 @@ use self::repair::{lens_repair};
 use self::proof_lenses::{proof_lenses};
 use self::lens_state::{lens_state};
 use self::anvil::{anvil_actions};
+use self::macro_preview::{macro_preview, tree_new};
 use self::hover::{Facts, facts_new, fact_function, fact_param, hover_answer};
 use self::nav::{
     Ix, MAX_DOCUMENTS, MAX_OUTPUT_BYTES, MAX_QUERY_BYTES, MAX_SYMBOLS, MAX_URI_BYTES, ERR_NONE,
@@ -611,6 +612,22 @@ pub fn lsp_anvil_actions(in input: Str) -> ChunkSeq[u64] {
             has_args,
             in b[args_at..args_end]
         );
+    }
+    pack(in out.as_slice())
+}
+
+// Task "macro preview": `vesper/macroPreview` (macro_preview.ves). The
+// input is the words of `lsp::macro_preview::port_words`: the rounds,
+// then one preview. The answer is computed `rounds` times; the result is
+// `E <error>` or the rendered JSON value.
+pub fn lsp_macro_preview(in input: Str) -> ChunkSeq[u64] {
+    let b = input.as_bytes();
+    let mut r = Reader { pos: 0 };
+    let rounds = word(in b, inout r);
+    let mut out = ChunkSeq::new[u8]();
+    let mut tree = tree_new();
+    for k in 0..rounds {
+        macro_preview(inout out, inout tree, in b, r.pos);
     }
     pack(in out.as_slice())
 }
