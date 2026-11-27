@@ -31,6 +31,10 @@ const BIND_NAME: u64 = 4;
 const WRITE_WORDS: u64 = 3;
 const WRITE_OPERATOR: u64 = 1;
 const WRITE_VALUE: u64 = 2;
+const EXIT_WORDS: u64 = 2;
+const EXIT_OWNER: u64 = 1;
+const RANGE_CURSOR_READ_DISTANCE: u64 = 2;
+const RANGE_CURSOR_PREFIX: Str = "$loop";
 const BLOCK_HEADER_WORDS: u64 = 4;
 const BLOCK_INCOMING_COUNT: u64 = 1;
 const BLOCK_INCOMING_WORDS: u64 = 2;
@@ -694,6 +698,10 @@ fn plan_homes(in low: L, f: FnR, row: FnRow, inout m: Function) -> bool {
                 if !m.use_in(add(f.param_count, low.program.op(add(at, UNARY_VALUE))), block) {
                     return false;
                 }
+            } else if inst.op == Op::Exit {
+                if !m.use_in(add(f.param_count, low.program.op(at)), block) {
+                    return false;
+                }
             } else if inst.op == Op::Call {
                 let count = call_arity(in low, inst);
                 if count == NO_VALUE {
@@ -767,7 +775,47 @@ fn lower_unary(in low: L, at: u64, kind: u8, block: u64, inout m: Function) -> u
     }
 }
 
-fn lower_binary(in low: L, at: u64, kind: u8, block: u64, inout m: Function) -> u64 {
+// A range latch reads the compiler-generated cursor, adds one, writes it
+// back, and jumps to the header. Its predecessor guards the increment even
+// for an inclusive range at the integer maximum.
+fn range_increment(in low: L, b: BlockRow, index: u64, inst: InstRow) -> bool {
+    let write_index = inc(index);
+    if b.term != Term::Jump
+        || b.tn != JUMP_ARGUMENT
+        || inst.s0 != inst.s1
+        || index < add(b.i0, RANGE_CURSOR_READ_DISTANCE)
+        || inc(write_index) != add(b.i0, b.ic)
+        || !low.ctx.names.spells(n32(low.program.op(inst.a)), in "+".as_bytes())
+    {
+        return false;
+    }
+    let read = low.program.inst(wrapping_sub(index, RANGE_CURSOR_READ_DISTANCE));
+    let one = low.program.inst(wrapping_sub(index, 1));
+    let write = low.program.inst(write_index);
+    let cursor = low.program.op(read.a);
+    read.op == Op::Read
+        && one.op == Op::Const
+        && one.n == LITERAL_WORDS
+        && write.op == Op::Write
+        && write.n == WRITE_WORDS
+        && low.ctx.names.has_prefix(n32(cursor), in RANGE_CURSOR_PREFIX.as_bytes())
+        && low.program.op(write.a) == cursor
+        && low.program.op(add(write.a, WRITE_VALUE)) == w(inst.dest)
+        && low.program.op(add(inst.a, BINARY_LHS)) == w(read.dest)
+        && low.program.op(add(inst.a, BINARY_RHS)) == w(one.dest)
+        && low.program.op(one.a) == Lit::Int
+        && low.program.op(add(one.a, LITERAL_LOW)) == 1
+        && low.program.op(add(one.a, LITERAL_HIGH)) == 0
+}
+
+fn lower_binary(
+    in low: L,
+    at: u64,
+    kind: u8,
+    block: u64,
+    range_step: bool,
+    inout m: Function
+) -> u64 {
     let symbol = n32(low.program.op(at));
     let left = low.program.op(add(at, BINARY_LHS));
     let right = low.program.op(add(at, BINARY_RHS));
@@ -786,7 +834,11 @@ fn lower_binary(in low: L, at: u64, kind: u8, block: u64, inout m: Function) -> 
             return m.record(COMPARE, lhs, rhs, compare);
         }
     } else if kind == operand_kind {
-        let op = lower_operator(in low, symbol);
+        let op = if range_step {
+            ADD
+        } else {
+            lower_operator(in low, symbol)
+        };
         if op != NO_VALUE {
             return m.record(op, lhs, rhs, QWORD_BITS);
         }
@@ -812,6 +864,14 @@ fn lower_block(
             continue;
         }
         if (inst.op == Op::Unit || inst.op == Op::Loop) && inst.n == 0 {
+            continue;
+        }
+        if inst.op == Op::Exit
+            && b.term == Term::Unreachable
+            && inc(index) == add(b.i0, b.ic)
+            && inst.n == EXIT_WORDS
+            && n32(low.program.op(add(at, EXIT_OWNER))) == f.name
+        {
             continue;
         }
         let kind = scalar_kind(in low, inst.ty);
@@ -848,7 +908,7 @@ fn lower_block(
         } else if inst.op == Op::Unary && inst.n == UNARY_WORDS {
             lower_unary(in low, at, kind, block, inout m)
         } else if inst.op == Op::Binary && inst.n == BINARY_WORDS {
-            lower_binary(in low, at, kind, block, inout m)
+            lower_binary(in low, at, kind, block, range_increment(in low, b, index, inst), inout m)
         } else if inst.op == Op::Call && is_integer(kind) {
             lower_call(in low, inst, block, inout m, inout graph)
         } else {
@@ -861,20 +921,28 @@ fn lower_block(
     true
 }
 
+fn lower_return(result: u64, block: u64, inout m: Function) -> bool {
+    if m.kind(result) != m.result {
+        return false;
+    }
+    let value = m.read(add(m.arguments, result), block);
+    if value == NO_VALUE {
+        return false;
+    }
+    if m.blocks.len() == 1 {
+        return m.words.try_set(RETURN_VALUE, value);
+    }
+    let _ = m.record(BLOCK_RETURN, value, 0, 0);
+    true
+}
+
 fn lower_terminator(in low: L, row: FnRow, b: BlockRow, block: u64, inout m: Function) -> bool {
     if b.term == Term::Return && b.tn == 1 {
-        let result = low.program.op(b.ta);
-        if m.kind(result) != m.result {
-            return false;
-        }
-        let value = m.read(add(m.arguments, result), block);
-        if value == NO_VALUE {
-            return false;
-        }
-        if m.blocks.len() == 1 {
-            return m.words.try_set(RETURN_VALUE, value);
-        }
-        let _ = m.record(BLOCK_RETURN, value, 0, 0);
+        return lower_return(low.program.op(b.ta), block, inout m);
+    } else if b.term == Term::Unreachable && b.ic != 0 {
+        // The block lowerer verifies the exit belongs to this function.
+        let last = low.program.inst(wrapping_sub(add(b.i0, b.ic), 1));
+        return last.op == Op::Exit && lower_return(low.program.op(last.a), block, inout m);
     } else if b.term == Term::Jump {
         let target = low.program.op(b.ta);
         let label = m.label(target);
