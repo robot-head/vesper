@@ -4,10 +4,19 @@ version = "0.1.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 description = "vesper migrate: C header and Rust crate signature lifting to Bridge sys-specs, Vesper externs and differential shadowing"
+build = "build.rs"
+
+[features]
+vesper-port = ["dep:vesper-port-abi"]
+vesper-port-divergent = ["vesper-port"]
 
 [dependencies]
 vesper-ffi = { path = "../vesper-ffi" }
+vesper-port-abi = { path = "../vesper-port-abi", optional = true }
 lang-c = "=0.15.1"
 syn = { version = "=2.0.119", default-features = false, features = ["full", "parsing", "printing", "visit", "clone-impls", "extra-traits"] }
 proc-macro2 = { version = "=1.0.107", default-features = false, features = ["span-locations"] }
 quote = { version = "=1.0.47", default-features = false }
+
+[build-dependencies]
+vesper-port-harness = { path = "../vesper-port-harness" }
