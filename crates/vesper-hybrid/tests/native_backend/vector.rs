@@ -1,8 +1,10 @@
 use super::{aarch64_leaf_words, binding, integer_block_words};
 use cranelift_codegen::{
     Context,
-    ir::{AbiParam, ConstantData, InstBuilder, MemFlags, StackSlotData, StackSlotKind, types},
-    settings,
+    ir::{
+        AbiParam, ConstantData, InstBuilder, MemFlags, Opcode, StackSlotData, StackSlotKind, types,
+    },
+    settings::{self, Configurable},
 };
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift_jit::{JITBuilder, JITModule};
@@ -346,6 +348,145 @@ fn packed_float_precision_conversions_match_cranelift() {
                 output
             });
             assert_eq!(candidate, reference, "{input_type} {input:?}");
+        }
+    }
+    unsafe { module.free_memory() };
+}
+
+#[test]
+fn packed_float_arithmetic_matches_cranelift() {
+    const ARM_ADD: u32 = 0x4e20_d400;
+    const ARM_SUB: u32 = 0x4ea0_d400;
+    const ARM_MUL: u32 = 0x6e20_dc00;
+    const ARM_DIV: u32 = 0x6e20_fc00;
+    const ARM_SQRT: u32 = 0x6ea1_f800;
+    const ARM_DOUBLE: u32 = 0x0040_0000;
+    const ARM_RN_RD: u32 = 0x3ff;
+    const ARM_RM: u32 = 0x1f_0000;
+    const NAN_CANONICALIZATION: &str = "enable_nan_canonicalization";
+    type Entry = unsafe extern "C" fn(*const u8, *const u8, *mut u8);
+    let mut module = module();
+    let mut flags = settings::builder();
+    flags.enable(NAN_CANONICALIZATION).unwrap();
+    let deterministic = cranelift_native::builder()
+        .unwrap()
+        .finish(settings::Flags::new(flags))
+        .unwrap();
+    for ty in [types::F32X4, types::F64X2] {
+        let width = ty.lane_type().bytes() as usize;
+        let values = if ty == types::F32X4 {
+            [
+                0,
+                0x8000_0000,
+                1,
+                0x4040_0000,
+                0xbf00_0000,
+                0x7f80_0000,
+                0x7fc0_0003,
+                0xffc0_0005,
+                0x7f80_0007,
+            ]
+        } else {
+            [
+                0,
+                0x8000_0000_0000_0000,
+                1,
+                0x4008_0000_0000_0000,
+                0xbfe0_0000_0000_0000,
+                0x7ff0_0000_0000_0000,
+                0x7ff8_0000_0000_0003,
+                0xfff8_0000_0000_0005,
+                0x7ff0_0000_0000_0007,
+            ]
+        };
+        let lanes = |first| -> [u8; VECTOR_BYTES] {
+            std::array::from_fn(|index| {
+                let lane: u64 = values[(first + index / width) % values.len()];
+                lane.to_le_bytes()[index % width]
+            })
+        };
+        for (opcode, arm) in [
+            (Opcode::Fadd, ARM_ADD),
+            (Opcode::Fsub, ARM_SUB),
+            (Opcode::Fmul, ARM_MUL),
+            (Opcode::Fdiv, ARM_DIV),
+            (Opcode::Sqrt, ARM_SQRT),
+        ] {
+            for keep_left in [false, true] {
+                let mut context = module.make_context();
+                context.func.signature.params = vec![AbiParam::new(types::I64); 3];
+                let mut state = FunctionBuilderContext::new();
+                let mut b = FunctionBuilder::new(&mut context.func, &mut state);
+                let entry = b.create_block();
+                b.append_block_params_for_function_params(entry);
+                b.switch_to_block(entry);
+                let [left, right, destination] = *b.block_params(entry) else {
+                    unreachable!()
+                };
+                let flags = MemFlags::new().with_notrap();
+                let left = b.ins().load(ty, flags, left, 0);
+                let right = b.ins().load(ty, flags, right, 0);
+                let result = match opcode {
+                    Opcode::Fadd => b.ins().fadd(left, right),
+                    Opcode::Fsub => b.ins().fsub(left, right),
+                    Opcode::Fmul => b.ins().fmul(left, right),
+                    Opcode::Fdiv => b.ins().fdiv(left, right),
+                    _ => b.ins().sqrt(left),
+                };
+                b.ins().store(flags, result, destination, 0);
+                if keep_left {
+                    b.ins().store(flags, left, destination, VECTOR_BYTES as i32);
+                }
+                b.ins().return_(&[]);
+                b.seal_all_blocks();
+                b.finalize();
+
+                assert!(x86_64_block_words(&context.func, deterministic.as_ref()).is_none());
+                let tape = aarch64_leaf_words(&context.func).unwrap();
+                let mask = !(ARM_RN_RD | if opcode == Opcode::Sqrt { 0 } else { ARM_RM });
+                let arm = arm | if ty == types::F64X2 { ARM_DOUBLE } else { 0 };
+                let arm_bytes = binding::aarch64_integer_leaf(&tape);
+                assert!(
+                    arm_bytes
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
+                        .any(|instruction| { u32::from_le_bytes(*instruction) & mask == arm }),
+                    "{opcode} {ty}"
+                );
+
+                let functions = compile(&mut module, &mut context);
+                let functions = functions
+                    .map(|pointer| unsafe { std::mem::transmute::<*const u8, Entry>(pointer) });
+                for i in 0..values.len() {
+                    for j in 0..values.len() {
+                        let (left, right) = (lanes(i), lanes(j));
+                        let [reference, candidate] = functions.map(|run| {
+                            let mut out = [0xcc; VECTOR_BYTES * 2];
+                            unsafe { run(left.as_ptr(), right.as_ptr(), out.as_mut_ptr()) };
+                            out
+                        });
+                        assert_eq!(candidate[VECTOR_BYTES..], reference[VECTOR_BYTES..]);
+                        for (got, want) in candidate[..VECTOR_BYTES]
+                            .chunks_exact(width)
+                            .zip(reference[..VECTOR_BYTES].chunks_exact(width))
+                        {
+                            // Ordinary floating-point arithmetic leaves the NaN bits unspecified.
+                            let is_nan = |lane: &[u8]| {
+                                if ty == types::F32X4 {
+                                    f32::from_le_bytes(lane.try_into().unwrap()).is_nan()
+                                } else {
+                                    f64::from_le_bytes(lane.try_into().unwrap()).is_nan()
+                                }
+                            };
+                            assert!(
+                                got == want || (is_nan(got) && is_nan(want)),
+                                "{opcode} {ty} {keep_left} {i} {j} {got:x?} {want:x?}"
+                            );
+                        }
+                    }
+                }
+            }
         }
     }
     unsafe { module.free_memory() };

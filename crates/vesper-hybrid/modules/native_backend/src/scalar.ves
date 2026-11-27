@@ -201,6 +201,11 @@ pub const TAIL_CALL: u64 = 181;
 pub const VECTOR_INTEGER_COMPARE: u64 = 182;
 const POWER_QUOTIENT: u64 = 183;
 const POWER_REMAINDER: u64 = 184;
+pub const VECTOR_FLOAT_ADD: u64 = 185;
+pub const VECTOR_FLOAT_SUB: u64 = 186;
+pub const VECTOR_FLOAT_MUL: u64 = 187;
+pub const VECTOR_FLOAT_DIV: u64 = 188;
+pub const VECTOR_FLOAT_SQRT: u64 = 189;
 const POWER_SHIFT_MASK: u64 = QWORD_BITS - 1;
 const POWER_SIGNED: u64 = 0x40;
 const POWER_NEGATIVE: u64 = 0x80;
@@ -1023,6 +1028,15 @@ pub fn is_vector_binary(op: u64) -> bool {
         || op == VECTOR_PAIRWISE_ADD
         || op == VECTOR_SWIZZLE
         || op == VECTOR_INTEGER_COMPARE
+        || is_vector_float_binary(op)
+}
+
+fn is_vector_float_binary(op: u64) -> bool {
+    op >= VECTOR_FLOAT_ADD && op <= VECTOR_FLOAT_DIV
+}
+
+pub fn vector_float_width(width: u64) -> bool {
+    width == DWORD_BITS || width == QWORD_BITS
 }
 
 fn is_vector_convert(op: u64) -> bool {
@@ -1030,11 +1044,14 @@ fn is_vector_convert(op: u64) -> bool {
 }
 
 pub fn uses_vector_left(op: u64) -> bool {
-    is_vector_binary(op) || is_vector_convert(op) || op >= VECTOR_INSERT && op <= VECTOR_HIGH_BITS
+    is_vector_binary(op)
+        || is_vector_convert(op)
+        || op == VECTOR_FLOAT_SQRT
+        || op >= VECTOR_INSERT && op <= VECTOR_HIGH_BITS
 }
 
 pub fn is_vector_operation(op: u64) -> bool {
-    (op >= VECTOR_CONSTANT && op <= VECTOR_HIGH_BITS) || op == VECTOR_INTEGER_COMPARE
+    is_vector_result(op) || op == VECTOR_STORE || (op >= VECTOR_EXTRACT && op <= VECTOR_HIGH_BITS)
 }
 
 pub fn valid_vector_lane(index: u64, width: u64) -> bool {
@@ -1062,6 +1079,7 @@ fn vector_binary_opcode(op: u64, width: u64) -> u8 {
 pub fn is_vector_result(op: u64) -> bool {
     (op >= VECTOR_CONSTANT && op <= VECTOR_INSERT && op != VECTOR_STORE)
         || op == VECTOR_INTEGER_COMPARE
+        || (op >= VECTOR_FLOAT_ADD && op <= VECTOR_FLOAT_SQRT)
 }
 
 pub fn vector_value(in words: Slice[u64], arguments: u64, value: u64) -> bool {
@@ -1261,6 +1279,7 @@ fn can_reuse_right(op: u64) -> bool {
         && op != VECTOR_PAIRWISE_ADD
         && op != VECTOR_SWIZZLE
         && op != VECTOR_INTEGER_COMPARE
+        && !is_vector_float_binary(op)
         && !is_bit_mix(op)
         && !is_register_shift(op)
 }
@@ -1414,6 +1433,11 @@ fn find_last_reads(
                 VECTOR_STORE => record.extra <= DISP32_MASK,
                 VECTOR_SPLAT => record.right == 0 && valid_width(record.extra),
                 VECTOR_ADD | VECTOR_SUB => valid_width(record.extra),
+                VECTOR_FLOAT_ADD
+                    | VECTOR_FLOAT_SUB
+                    | VECTOR_FLOAT_MUL
+                    | VECTOR_FLOAT_DIV => vector_float_width(record.extra),
+                VECTOR_FLOAT_SQRT => record.right == 0 && vector_float_width(record.extra),
                 VECTOR_PAIRWISE_ADD => record.extra == BYTE_BITS
                     || record.extra == WORD_BITS
                     || record.extra == DWORD_BITS,
@@ -2725,6 +2749,17 @@ fn emit_vector_instruction(
                 left,
                 record.op == VECTOR_DEMOTE
             ),
+        VECTOR_FLOAT_ADD | VECTOR_FLOAT_SUB | VECTOR_FLOAT_MUL | VECTOR_FLOAT_DIV => {
+            let opcode = match record.op {
+                VECTOR_FLOAT_ADD => SSE_ADD,
+                VECTOR_FLOAT_SUB => SSE_SUB,
+                VECTOR_FLOAT_MUL => SSE_MUL,
+                _ => SSE_DIV,
+            };
+            emit(inout output, in Instruction::Move(destination, left));
+            Instruction::VectorFloat(opcode, destination, right, record.extra)
+        },
+        VECTOR_FLOAT_SQRT => Instruction::VectorFloat(SSE_SQRT, destination, left, record.extra),
         VECTOR_PAIRWISE_ADD => Instruction::VectorPairwiseAdd(
             destination,
             left,

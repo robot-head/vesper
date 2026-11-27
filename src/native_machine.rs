@@ -202,6 +202,11 @@ enum IntegerOp {
     VectorHighBits = 180,
     TailCall = 181,
     VectorIntegerCompare = 182,
+    VectorFloatAdd = 185,
+    VectorFloatSub = 186,
+    VectorFloatMul = 187,
+    VectorFloatDiv = 188,
+    VectorFloatSqrt = 189,
 }
 
 fn integer_bit_op(op: Opcode) -> Option<IntegerOp> {
@@ -2071,6 +2076,17 @@ impl IntegerBlocks<'_> {
                     Opcode::Bxor => (IntegerOp::VectorXor, 0),
                     Opcode::Iadd => (IntegerOp::VectorAdd, integer_width(lane)?),
                     Opcode::Isub => (IntegerOp::VectorSub, integer_width(lane)?),
+                    Opcode::Fadd | Opcode::Fsub | Opcode::Fmul | Opcode::Fdiv
+                        if !self.canonicalize_nans =>
+                    {
+                        let op = match opcode {
+                            Opcode::Fadd => IntegerOp::VectorFloatAdd,
+                            Opcode::Fsub => IntegerOp::VectorFloatSub,
+                            Opcode::Fmul => IntegerOp::VectorFloatMul,
+                            _ => IntegerOp::VectorFloatDiv,
+                        };
+                        (op, float_width(lane)?)
+                    }
                     Opcode::IaddPairwise
                         if (self.aarch64 || self.has_x86_shuffle()) && lane != types::I64 =>
                     {
@@ -2147,6 +2163,13 @@ impl IntegerBlocks<'_> {
                     input(right)?,
                 );
             }
+            InstructionData::Unary {
+                opcode: Opcode::Sqrt,
+                arg,
+            } if !self.canonicalize_nans && ty(arg) == output => (
+                IntegerOp::VectorFloatSqrt,
+                [input(arg)?, 0, float_width(output.lane_type())?],
+            ),
             InstructionData::Unary {
                 opcode: Opcode::FvpromoteLow,
                 arg,

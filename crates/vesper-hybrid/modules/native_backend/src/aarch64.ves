@@ -41,7 +41,8 @@ use self::scalar::{
     VECTOR_EXTRACT, VECTOR_ANY_TRUE, VECTOR_ALL_TRUE, VECTOR_HIGH_BITS, VECTOR_LANE_INDEX_SHIFT,
     VECTOR_LANE_WIDTH_MASK, is_vector_binary, uses_vector_left, vector_value, TAIL_CALL,
     AARCH64_TAIL_RESERVED_GP, valid_vector_lane, VECTOR_INTEGER_COMPARE, VECTOR_CONDITION_SHIFT,
-    is_vector_operation, is_vector_result
+    is_vector_operation, is_vector_result, VECTOR_FLOAT_ADD, VECTOR_FLOAT_SUB, VECTOR_FLOAT_MUL,
+    VECTOR_FLOAT_DIV, VECTOR_FLOAT_SQRT, vector_float_width
 };
 use self::x86_64::{
     BYTE_BITS, WORD_BITS, DWORD_BITS, QWORD_BITS, FLOAT_ORDERED, FLOAT_UNORDERED, FLOAT_EQUAL,
@@ -133,6 +134,11 @@ const VECTOR_UNSIGNED_SAT_SUB_REG: u32 = 0x6e202c00;
 const VECTOR_ROUNDED_AVERAGE_REG: u32 = 0x6e201400;
 const VECTOR_FLOAT_NARROW: u32 = 0x0e616800;
 const VECTOR_FLOAT_WIDEN: u32 = 0x0e617800;
+const VECTOR_FADD: u32 = 0x4e20d400;
+const VECTOR_FSUB: u32 = 0x4ea0d400;
+const VECTOR_FMUL: u32 = 0x6e20dc00;
+const VECTOR_FDIV: u32 = 0x6e20fc00;
+const VECTOR_FSQRT: u32 = 0x6ea1f800;
 const VECTOR_PAIRWISE_ADD_REG: u32 = 0x4e20bc00;
 const VECTOR_COMPARE_EQUAL: u32 = 0x6e208c00;
 const VECTOR_COMPARE_SIGNED_GREATER: u32 = 0x4e203400;
@@ -789,6 +795,22 @@ fn vector_binary(inout out: ChunkSeq[u8], in r: Record, dest: u32, left: u32, ri
     rrr(inout out, opcode | size, dest, left, right);
 }
 
+fn vector_float(inout out: ChunkSeq[u8], in r: Record, dest: u32, left: u32, right: u32) {
+    let size = if r.extra == QWORD_BITS { FP_DOUBLE } else { 0 };
+    let opcode = match r.op {
+        VECTOR_FLOAT_ADD => VECTOR_FADD,
+        VECTOR_FLOAT_SUB => VECTOR_FSUB,
+        VECTOR_FLOAT_MUL => VECTOR_FMUL,
+        VECTOR_FLOAT_DIV => VECTOR_FDIV,
+        _ => VECTOR_FSQRT,
+    };
+    if r.op == VECTOR_FLOAT_SQRT {
+        push32(inout out, opcode | size | sh(left, RN_SHIFT) | dest);
+    } else {
+        rrr(inout out, opcode | size, dest, left, right);
+    }
+}
+
 fn vector_lane_immediate(lane: u64, width: u64) -> u32 {
     let bytes = wrapping_u32(width / BYTE_BITS);
     sh(bytes | wrapping_mul(wrapping_mul(wrapping_u32(lane), bytes), 2), VECTOR_LANE_IMM5_SHIFT)
@@ -1124,6 +1146,20 @@ fn operands(in r: Record, returns: u64) -> Option[u64] {
                 && wrapping_shr_u64(r.extra, VECTOR_CONDITION_SHIFT) <= UNSIGNED_LESS_EQUAL
             {
                 Option::Some(2)
+            } else {
+                Option::None
+            },
+            VECTOR_FLOAT_ADD
+                | VECTOR_FLOAT_SUB
+                | VECTOR_FLOAT_MUL
+                | VECTOR_FLOAT_DIV => if vector_float_width(r.extra)
+            {
+                Option::Some(2)
+            } else {
+                Option::None
+            },
+            VECTOR_FLOAT_SQRT => if r.right == 0 && vector_float_width(r.extra) {
+                Option::Some(1)
             } else {
                 Option::None
             },
@@ -3568,6 +3604,11 @@ fn encode_pass(
                 VECTOR_SPLAT => vector_splat(inout out, dest, lhs, r.extra),
                 VECTOR_LOAD => memory(inout out, true, VECTOR_BITS, lhs, dest, r.right),
                 VECTOR_INTEGER_COMPARE => vector_integer_compare(inout out, in r, dest, lhs, rhs),
+                VECTOR_FLOAT_ADD
+                    | VECTOR_FLOAT_SUB
+                    | VECTOR_FLOAT_MUL
+                    | VECTOR_FLOAT_DIV
+                    | VECTOR_FLOAT_SQRT => vector_float(inout out, in r, dest, lhs, rhs),
                 VECTOR_INSERT => {
                     let lane = wrapping_shr_u64(r.extra, VECTOR_LANE_INDEX_SHIFT);
                     let width = r.extra & VECTOR_LANE_WIDTH_MASK;

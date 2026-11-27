@@ -346,6 +346,7 @@ pub copy enum Instruction {
     VectorConstant(u8, u64, u64),
     VectorSplat(u8, u8, u64),
     VectorBinary(u8, u8, u8),
+    VectorFloat(u8, u8, u8, u64),
     VectorPairwiseAdd(u8, u8, u8, u64),
     VectorSwizzle(u8, u8, u8, bool),
     VectorIntegerCompare(u8, u8, u8, u64, PackedRelation, bool),
@@ -2108,6 +2109,12 @@ pub fn emit(inout out: ChunkSeq[u8], in instruction: Instruction) {
             destination,
             source
         ),
+        Instruction::VectorFloat(opcode, destination, source, width) => {
+            if width == QWORD_BITS {
+                out.push(OPERAND_SIZE_OVERRIDE);
+            }
+            xmm_binary(inout out, opcode, destination, source);
+        },
         Instruction::VectorPairwiseAdd(destination, left, right, width) => vector_pairwise_add(
             inout out,
             destination,
