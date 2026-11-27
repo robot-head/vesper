@@ -25,7 +25,10 @@
 use @vesper/check-data::names::{Names};
 use @vesper/check-data::types::{TyKind, Types, display};
 use @vesper/check-data::util::{add, inc, inc32, n32, put_text_words, u32_at, u64_at, u8_at, w};
-use @vesper/check-data::world::{World, bounds_new, mode_of};
+use @vesper/check-data::world::{
+    Adt, Field, Generic, Variant, World, bounds_new, mode_of, set_by_symbol
+};
+use @vesper/check-collect::boxes::{needs_box};
 use @vesper/check-layout::{L_ENUM, L_PRODUCT, L_SCALAR, Layouts, layout_of, layouts_new};
 use @vesper/check-names-packages::{
     AssembledModule, assemble_next_bytes, assembly_begin_bytes, assembly_metadata,
@@ -34,6 +37,8 @@ use @vesper/check-names-packages::{
 use @vesper/codegen-export::{export_files_of_plan, export_plan_bytes};
 use @vesper/codegen-export::directives::{directives_text};
 use @vesper/stage2::collect::{FnInfo, ParamInfo, collect_program};
+use @vesper/vsys::{parse_and_encode};
+use @vesper/vsys::lexer::{VsysError};
 use @vesper/stage2::loader::{load_package_graph_bytes, package_graph_vsys_paths};
 use @vesper-std/fs::{IoError, read_path};
 use @vesper-std/intern::{symbol_from_id};
@@ -47,10 +52,10 @@ pub const DECLINE_NONE: u8 = 0;
 pub const DECLINE_LOAD: u8 = 1;
 // A `.vsys` library of the graph does not read or scan.
 pub const DECLINE_VSYS: u8 = 2;
-// The directives name instances or inline `.vsys` bodies, link a library
-// the graph does not import, or do not parse.
+// The directives name instances, hold an inline `.vsys` body that does not
+// scan, link a library the graph does not import, or do not parse.
 pub const DECLINE_DIRECTIVES: u8 = 3;
-// The program names a `Box` type.
+// The program names a `Box` type that Stage 2 does not declare.
 pub const DECLINE_BOX: u8 = 4;
 // A public function is `fip`.
 pub const DECLINE_FIP: u8 = 5;
@@ -74,6 +79,14 @@ const C_SEQ: u64 = 4;
 const C_SLICE: u64 = 5;
 const C_STRING: u64 = 6;
 const C_STR: u64 = 7;
+const C_BOX: u64 = 8;
+
+// The `Box[T]` prelude: its generic, its field, and the modes (`TyMode`)
+// of the ADT (affine) and of its generic's bound (linear).
+const BOX_GENERIC: Str = "T";
+const BOX_FIELD: Str = "0";
+const MODE_AFFINE: u8 = 1;
+const MODE_LINEAR: u8 = 2;
 const C_NAMED: u64 = 9;
 
 // A layout's `kind` word: scalar, product, enum.
@@ -101,6 +114,7 @@ const DIGIT_NINE: u8 = 57;
 const DECIMAL: u64 = 10;
 const OPTIONS_ON: u8 = 49;
 const DUMP_LINK: Str = "link ";
+const DUMP_VSYS: Str = "vsys ";
 const DUMP_NONE: Str = "-";
 
 // A `.vsys` link's handler (directives.ves `HANDLER_*`) and its names.
@@ -134,6 +148,7 @@ const LOWER_Z: u8 = 122;
 // The per-target tokens of a manifest `.vsys` path, and the targets
 // (Rust `VSYS_TARGETS`).
 const TARGET_TOKEN: Str = "@TARGET@";
+const ABI_TOKEN: Str = "@ABI@";
 const OS_TOKEN: Str = "@OS@";
 const ARCH_TOKEN: Str = "@ARCH@";
 const LINUX_X86_64: Str = "x86_64-unknown-linux-gnu";
@@ -145,6 +160,11 @@ const OS_MACOS: Str = "macos";
 const OS_WINDOWS: Str = "windows";
 const ARCH_X86_64: Str = "x86_64";
 const ARCH_AARCH64: Str = "aarch64";
+// The calling conventions `@ABI@` stands for in an inline `.vsys` body.
+const ABI_SYSV64: Str = "sysv64";
+const ABI_AAPCS64: Str = "aapcs64";
+const ABI_DARWIN64: Str = "darwin64";
+const ABI_WIN64: Str = "win64";
 
 pub struct PlanInput {
     declined: u8,
@@ -215,6 +235,7 @@ impl Enc {
         let mut class = C_OTHER;
         let mut name = NONE32;
         let mut parts = ChunkSeq::new[u32]();
+        let mut boxed_object = NONE32;
         if node.kind == TyKind::Named {
             let n = node.name;
             let arity = w(node.n);
@@ -231,6 +252,19 @@ impl Enc {
                 class = C_STRING;
             } else if arity == 0 && n == k.str_ {
                 class = C_STR;
+            } else if arity == 1 && n == k.box_ && self.world.box_active {
+                class = C_BOX;
+                let inner = self.types.arg(t, 0);
+                let inner_node = self.types.node(inner);
+                if inner_node.kind == TyKind::Named
+                    && inner_node.name == k.dyn_
+                    && inner_node.n == 1
+                {
+                    // A boxed object is opaque: only its display is used.
+                    boxed_object = inner;
+                } else {
+                    parts.push(inner);
+                }
             } else {
                 class = C_NAMED;
                 name = n;
@@ -255,8 +289,15 @@ impl Enc {
         put_text_words(inout row, in shown.as_slice());
         row.push(class);
         self.put_name(name, inout row);
-        // The flag is a boxed object's, and boxes are declined.
-        row.push(0);
+        // The flag marks a boxed object, followed by its display.
+        if boxed_object == NONE32 {
+            row.push(0);
+        } else {
+            row.push(1);
+            let mut object = ChunkSeq::new[u8]();
+            display(in self.types, in self.names, boxed_object, inout object);
+            put_text_words(inout row, in object.as_slice());
+        }
         let mode = if class == C_OTHER {
             0
         } else {
@@ -395,12 +436,21 @@ struct Link {
     has_rust: bool,
 }
 
-// The directives the planner reads, when they name no instance and no
-// inline `.vsys` body.
+// An inline `// @export vsys <handler>` body: its handler, Rust path and
+// descriptor text with `@TARGET@` and `@ABI@` filled in.
+struct Inline {
+    handler: u8,
+    rust: ChunkSeq[u8],
+    has_rust: bool,
+    body: ChunkSeq[u8],
+}
+
+// The directives the planner reads, when they name no instance.
 struct Plain {
     abi: u64,
     options: u64,
     links: ChunkSeq[Link],
+    inline: ChunkSeq[Inline],
 }
 
 fn sub_bytes(in s: ChunkSeq[u8], a: u64, e: u64) -> ChunkSeq[u8] {
@@ -421,6 +471,65 @@ fn find_space(in s: ChunkSeq[u8], a: u64, e: u64) -> u64 {
     }
 }
 
+// A dumped handler word (`-` for none).
+fn handler_of(in word: ChunkSeq[u8]) -> Option[u8] {
+    if same_bytes(in word, DIRECT_HANDLER) {
+        return Option::Some(HANDLER_DIRECT);
+    }
+    if same_bytes(in word, ISOLATED_HANDLER) {
+        return Option::Some(HANDLER_ISOLATED);
+    }
+    if same_bytes(in word, DUMP_NONE) {
+        return Option::Some(HANDLER_NONE);
+    }
+    Option::None
+}
+
+// One `vsys <handler> <rust path> <length>` line of the dump at `a..e`
+// and the body that follows it; the body and the index after it.
+fn vsys_section(in dump: ChunkSeq[u8], a: u64, e: u64) -> Option[(Inline, u64)] {
+    let handler_start = add(a, str_len(DUMP_VSYS));
+    let handler_end = find_space(in dump, handler_start, e);
+    let rust_start = inc(handler_end);
+    let rust_end = find_space(in dump, rust_start, e);
+    let len_start = inc(rust_end);
+    if len_start > e {
+        return Option::None;
+    }
+    let h = match handler_of(in sub_bytes(in dump, handler_start, handler_end)) {
+        Option::Some(h) => h,
+        Option::None => {
+            return Option::None;
+        },
+    };
+    let mut len: u64 = 0;
+    for i in len_start..e {
+        let c = u8_at(in dump, i);
+        if c < DIGIT_ZERO || c > DIGIT_NINE {
+            return Option::None;
+        }
+        len = add(wrapping_mul(len, DECIMAL), widen_u64(wrapping_sub(c, DIGIT_ZERO)));
+    }
+    let body_start = inc(e);
+    let body_end = add(body_start, len);
+    if body_end > dump.len() {
+        return Option::None;
+    }
+    let rust = sub_bytes(in dump, rust_start, rust_end);
+    let has_rust = !same_bytes(in rust, DUMP_NONE);
+    Option::Some(
+        (
+            Inline {
+                handler: h,
+                rust: rust,
+                has_rust: has_rust,
+                body: sub_bytes(in dump, body_start, body_end)
+            },
+            body_end
+        )
+    )
+}
+
 // One `link <library> <handler> <rust path>` line of the dump (`-` for none).
 fn link_line(in dump: ChunkSeq[u8], a: u64, e: u64) -> Option[Link] {
     let lib_start = add(a, str_len(DUMP_LINK));
@@ -431,15 +540,12 @@ fn link_line(in dump: ChunkSeq[u8], a: u64, e: u64) -> Option[Link] {
     if rust_start > e {
         return Option::None;
     }
-    let handler = sub_bytes(in dump, handler_start, handler_end);
-    let mut h = HANDLER_NONE;
-    if same_bytes(in handler, DIRECT_HANDLER) {
-        h = HANDLER_DIRECT;
-    } else if same_bytes(in handler, ISOLATED_HANDLER) {
-        h = HANDLER_ISOLATED;
-    } else if !same_bytes(in handler, DUMP_NONE) {
-        return Option::None;
-    }
+    let h = match handler_of(in sub_bytes(in dump, handler_start, handler_end)) {
+        Option::Some(h) => h,
+        Option::None => {
+            return Option::None;
+        },
+    };
     let rust = sub_bytes(in dump, rust_start, e);
     let has_rust = !same_bytes(in rust, DUMP_NONE);
     Option::Some(Link {
@@ -458,8 +564,8 @@ fn same_bytes(in a: ChunkSeq[u8], in b: Str) -> bool {
     starts_with_at(in a, 0, b)
 }
 
-// The abi, option words and links of a directives dump that names no
-// instance and no inline `.vsys` body, or None.
+// The abi, option words, links and inline `.vsys` bodies of a directives
+// dump that names no instance, or None.
 fn plain_directives(in dump: ChunkSeq[u8]) -> Option[Plain] {
     if !starts_with_at(in dump, 0, DUMP_ABI) {
         return Option::None;
@@ -487,24 +593,36 @@ fn plain_directives(in dump: ChunkSeq[u8]) -> Option[Plain] {
         0
     };
     let mut links = ChunkSeq::new[Link]();
+    let mut inline = ChunkSeq::new[Inline]();
     let mut at = inc(line_end(in dump, flag_at));
     loop {
         if at >= dump.len() {
             break;
         }
         let e = line_end(in dump, at);
-        if !starts_with_at(in dump, at, DUMP_LINK) {
+        if starts_with_at(in dump, at, DUMP_LINK) {
+            match link_line(in dump, at, e) {
+                Option::Some(l) => links.push(sink l),
+                Option::None => {
+                    return Option::None;
+                },
+            }
+            at = inc(e);
+        } else if starts_with_at(in dump, at, DUMP_VSYS) {
+            match vsys_section(in dump, at, e) {
+                Option::Some((body, next)) => {
+                    inline.push(sink body);
+                    at = next;
+                },
+                Option::None => {
+                    return Option::None;
+                },
+            }
+        } else {
             return Option::None;
         }
-        match link_line(in dump, at, e) {
-            Option::Some(l) => links.push(sink l),
-            Option::None => {
-                return Option::None;
-            },
-        }
-        at = inc(e);
     }
-    Option::Some(Plain { abi: abi, options: options, links: links })
+    Option::Some(Plain { abi: abi, options: options, links: links, inline: inline })
 }
 
 // A `.vsys` descriptor's library name and the C symbols its direct calls
@@ -620,7 +738,38 @@ fn after(in names: ChunkSeq[ChunkSeq[u8]], a: u64, b: u64) -> bool {
     ! bytes_before(in x, in y) && a > b
 }
 
+// Token offsets of the descriptor's shapes, from their first token:
+// `sys library <Name>`, `# [ link_name = "<symbol>" ]` (the scan resumes
+// after the literal) and `fn <name>`; a literal's quotes are a byte each.
+const HEADER_LIBRARY_AT: u64 = 1;
+const HEADER_NAME_AT: u64 = 2;
+const HEADER_TOKENS: u64 = 3;
+const ATTR_OPEN_AT: u64 = 1;
+const ATTR_NAME_AT: u64 = 2;
+const ATTR_EQUALS_AT: u64 = 3;
+const ATTR_LITERAL_AT: u64 = 4;
+const ATTR_TOKENS: u64 = 5;
+const FN_NAME_AT: u64 = 1;
+const QUOTE_BYTES: u64 = 1;
+
+// Whether `text` is a valid `.vsys` descriptor (`vesper_ffi::sys::parse`,
+// as @vesper/vsys ports it).
+fn valid_descriptor(in text: ChunkSeq[u8]) -> bool {
+    handle Fail[VsysError] in {
+        let _ = parse_and_encode(in text.as_slice());
+        true
+    } with {
+        return v => v,
+        raise(_e, _k) => false,
+    }
+}
+
+// The descriptor's name and linked symbols, or None when it is not a
+// valid descriptor.
 fn scan_descriptor(in src: ChunkSeq[u8]) -> Option[Descriptor] {
+    if !valid_descriptor(in src) {
+        return Option::None;
+    }
     let ts = tokens(in src);
     let mut name = ChunkSeq::new[u8]();
     let mut named = false;
@@ -638,31 +787,31 @@ fn scan_descriptor(in src: ChunkSeq[u8]) -> Option[Descriptor] {
         let t = token(in ts, i);
         if !named
             && same_bytes(in t, SYS_WORD)
-            && same_bytes(in token(in ts, inc(i)), LIBRARY_WORD)
+            && same_bytes(in token(in ts, add(i, HEADER_LIBRARY_AT)), LIBRARY_WORD)
         {
-            name = token(in ts, add(i, 2));
+            name = token(in ts, add(i, HEADER_NAME_AT));
             named = true;
-            i = add(i, 3);
+            i = add(i, HEADER_TOKENS);
             continue;
         }
         if same_bytes(in t, HASH)
-            && same_bytes(in token(in ts, inc(i)), OPEN_BRACKET_TOKEN)
-            && same_bytes(in token(in ts, add(i, 2)), LINK_NAME_WORD)
-            && same_bytes(in token(in ts, add(i, 3)), EQUALS_TOKEN)
+            && same_bytes(in token(in ts, add(i, ATTR_OPEN_AT)), OPEN_BRACKET_TOKEN)
+            && same_bytes(in token(in ts, add(i, ATTR_NAME_AT)), LINK_NAME_WORD)
+            && same_bytes(in token(in ts, add(i, ATTR_EQUALS_AT)), EQUALS_TOKEN)
         {
-            let lit = token(in ts, add(i, 4));
-            if lit.len() < 2 {
+            let lit = token(in ts, add(i, ATTR_LITERAL_AT));
+            if lit.len() < add(QUOTE_BYTES, QUOTE_BYTES) {
                 return Option::None;
             }
             pending.clear();
-            let inner = sub_bytes(in lit, 1, wrapping_sub(lit.len(), 1));
+            let inner = sub_bytes(in lit, QUOTE_BYTES, wrapping_sub(lit.len(), QUOTE_BYTES));
             pending.extend(in inner.as_slice());
             has_pending = true;
-            i = add(i, 5);
+            i = add(i, ATTR_TOKENS);
             continue;
         }
         if same_bytes(in t, FN_WORD) {
-            let f = token(in ts, inc(i));
+            let f = token(in ts, add(i, FN_NAME_AT));
             if f.len() > 0 && is_word_byte(u8_at(in f, 0)) {
                 let mut symbol = ChunkSeq::new[u8]();
                 if has_pending {
@@ -736,9 +885,33 @@ fn expand_path(in path: ChunkSeq[u8], in t: Target) -> ChunkSeq[u8] {
     out
 }
 
+// A package `.vsys` file's text with `@TARGET@` and `@ABI@` replaced
+// (Rust `PackageVsys::source_for`).
+fn fill_descriptor(in text: ChunkSeq[u8], in t: Target) -> ChunkSeq[u8] {
+    let mut out = ChunkSeq::new[u8]();
+    let mut i: u64 = 0;
+    loop {
+        if i >= text.len() {
+            break;
+        }
+        if starts_with_at(in text, i, TARGET_TOKEN) {
+            out.extend(in t.triple.as_slice());
+            i = add(i, str_len(TARGET_TOKEN));
+        } else if starts_with_at(in text, i, ABI_TOKEN) {
+            out.extend(in t.abi.as_slice());
+            i = add(i, str_len(ABI_TOKEN));
+        } else {
+            out.push(u8_at(in text, i));
+            i = inc(i);
+        }
+    }
+    out
+}
+
 // An object target `.vsys` libraries support (Rust `VSYS_TARGETS`).
 struct Target {
     triple: ChunkSeq[u8],
+    abi: ChunkSeq[u8],
     os: ChunkSeq[u8],
     arch: ChunkSeq[u8],
 }
@@ -755,6 +928,7 @@ fn target_of(in triple: Slice[u8]) -> Option[Target] {
     if same_bytes(in t, LINUX_X86_64) {
         return Option::Some(Target {
             triple: t,
+            abi: text_of(ABI_SYSV64),
             os: text_of(OS_LINUX),
             arch: text_of(ARCH_X86_64)
         });
@@ -762,6 +936,7 @@ fn target_of(in triple: Slice[u8]) -> Option[Target] {
     if same_bytes(in t, LINUX_AARCH64) {
         return Option::Some(Target {
             triple: t,
+            abi: text_of(ABI_AAPCS64),
             os: text_of(OS_LINUX),
             arch: text_of(ARCH_AARCH64)
         });
@@ -769,6 +944,7 @@ fn target_of(in triple: Slice[u8]) -> Option[Target] {
     if same_bytes(in t, MACOS_AARCH64) {
         return Option::Some(Target {
             triple: t,
+            abi: text_of(ABI_DARWIN64),
             os: text_of(OS_MACOS),
             arch: text_of(ARCH_AARCH64)
         });
@@ -776,6 +952,7 @@ fn target_of(in triple: Slice[u8]) -> Option[Target] {
     if same_bytes(in t, WINDOWS_X86_64) {
         return Option::Some(Target {
             triple: t,
+            abi: text_of(ABI_WIN64),
             os: text_of(OS_WINDOWS),
             arch: text_of(ARCH_X86_64)
         });
@@ -786,7 +963,6 @@ fn target_of(in triple: Slice[u8]) -> Option[Target] {
 // One `.vsys` import of the planner's input: library, handler, symbols and
 // Rust path, as `Directives::add_packages` builds it.
 fn put_import(inout head: ChunkSeq[u64], in d: Descriptor, in links: ChunkSeq[Link]) {
-    put_text_words(inout head, in d.name.as_slice());
     let mut handler = HANDLER_DIRECT;
     let mut rust = ChunkSeq::new[u8]();
     let mut has_rust = false;
@@ -807,6 +983,18 @@ fn put_import(inout head: ChunkSeq[u64], in d: Descriptor, in links: ChunkSeq[Li
             Option::None => {},
         }
     }
+    put_import_as(inout head, in d, handler, in rust, has_rust);
+}
+
+// One `.vsys` import with its handler and Rust path.
+fn put_import_as(
+    inout head: ChunkSeq[u64],
+    in d: Descriptor,
+    handler: u8,
+    in rust: ChunkSeq[u8],
+    has_rust: bool
+) {
+    put_text_words(inout head, in d.name.as_slice());
     if handler == HANDLER_ISOLATED {
         put_text_words(inout head, in ISOLATED_HANDLER.as_bytes());
     } else {
@@ -834,6 +1022,61 @@ fn read_file(in path: Slice[u8]) -> Option[ChunkSeq[u8]] eff [Ffi[StdFs]] {
     }
 }
 
+// Rust's `Box[T]` prelude (`fip::needs_prelude`, `fip::prelude`), which
+// Stage 2's collect does not declare: when a module uses `Box` (or `@fip`)
+// and no module declares a `Box`, the affine `struct Box[T: mod linear](T)`
+// with span 0..0, which makes `Box` a pointer word (`fip::active`).
+fn add_box_prelude(
+    inout world: World,
+    inout names: Names,
+    inout types: Types,
+    in mods: ChunkSeq[AssembledModule]
+) {
+    let box_sym = world.k.box_;
+    if world.lookup(box_sym) != NO_ADT {
+        return;
+    }
+    let mut needed = false;
+    for mi in 0..mods.len() {
+        match mods.try_get(mi) {
+            Option::Some(m) => {
+                if needs_box(in m.ast) {
+                    needed = true;
+                }
+            },
+            Option::None => {},
+        }
+    }
+    if !needed {
+        return;
+    }
+    let t_gen = names.intern(in BOX_GENERIC.as_bytes());
+    let ga = n32(world.generics.len());
+    world.generics.push(Generic { name: t_gen, bound: MODE_LINEAR, row: false });
+    let fa = n32(world.fields.len());
+    world.fields.push(Field {
+        name: names.intern(in BOX_FIELD.as_bytes()),
+        ty: types.named0(t_gen),
+        modality: 0
+    });
+    let va = n32(world.variants.len());
+    world.variants.push(Variant { name: box_sym, fa: fa, fc: 1, named: false });
+    let idx = n32(world.adts.len());
+    world.adts.push(Adt {
+        name: box_sym,
+        mode: MODE_AFFINE,
+        ga: ga,
+        gn: 1,
+        va: va,
+        vn: 1,
+        is_enum: false,
+        tile: 0,
+        span_zero: true
+    });
+    set_by_symbol(inout world.by_name, box_sym, inc32(idx));
+    world.box_active = true;
+}
+
 // `plan_input(world, public, library, directives)` for the package at
 // `root_dir`, built by Stage 2's front end, or why it was declined.
 pub fn export_plan_input(
@@ -847,13 +1090,44 @@ pub fn export_plan_input(
             return declined(DECLINE_TARGET);
         },
     };
+    let mut root_path = ChunkSeq::new[u8]();
+    root_path.extend(in root_dir);
+    root_path.extend(in ROOT_MODULE.as_bytes());
+    let source = match read_file(in root_path.as_slice()) {
+        Option::Some(s) => s,
+        Option::None => {
+            return declined(DECLINE_LOAD);
+        },
+    };
+    let none = ChunkSeq::new[u8]();
+    let dump = directives_text(in source, in target.triple, in target.abi, in none);
+    let plain = match plain_directives(in dump) {
+        Option::Some(d) => d,
+        Option::None => {
+            return declined(DECLINE_DIRECTIVES);
+        },
+    };
+    // The inline bodies come first, as `Directives::parse` lists them.
+    let mut imports = ChunkSeq::new[Descriptor]();
+    for ii in 0..plain.inline.len() {
+        match plain.inline.try_get(ii) {
+            Option::Some(body) => {
+                match scan_descriptor(in body.body) {
+                    Option::Some(d) => imports.push(sink d),
+                    Option::None => {
+                        return declined(DECLINE_DIRECTIVES);
+                    },
+                }
+            },
+            Option::None => {},
+        }
+    }
     let vsys_paths = match package_graph_vsys_paths(in root_dir) {
         Option::Some(v) => v,
         Option::None => {
             return declined(DECLINE_LOAD);
         },
     };
-    let mut imports = ChunkSeq::new[Descriptor]();
     for vi in 0..vsys_paths.len() {
         let path = expand_path(in token(in vsys_paths, vi), in target);
         let text = match read_file(in path.as_slice()) {
@@ -862,7 +1136,8 @@ pub fn export_plan_input(
                 return declined(DECLINE_VSYS);
             },
         };
-        let d = match scan_descriptor(in text) {
+        let filled = fill_descriptor(in text, in target);
+        let d = match scan_descriptor(in filled) {
             Option::Some(d) => d,
             Option::None => {
                 return declined(DECLINE_VSYS);
@@ -881,23 +1156,6 @@ pub fn export_plan_input(
         }
         imports.push(sink d);
     }
-    let mut root_path = ChunkSeq::new[u8]();
-    root_path.extend(in root_dir);
-    root_path.extend(in ROOT_MODULE.as_bytes());
-    let source = match read_file(in root_path.as_slice()) {
-        Option::Some(s) => s,
-        Option::None => {
-            return declined(DECLINE_LOAD);
-        },
-    };
-    let none = ChunkSeq::new[u8]();
-    let dump = directives_text(in source, in none, in none, in none);
-    let plain = match plain_directives(in dump) {
-        Option::Some(d) => d,
-        Option::None => {
-            return declined(DECLINE_DIRECTIVES);
-        },
-    };
     // Rust refuses a link that names no imported library.
     for li in 0..plain.links.len() {
         match plain.links.try_get(li) {
@@ -942,7 +1200,8 @@ pub fn export_plan_input(
     if meta.diagnostics.len() > 0 {
         return declined(DECLINE_DIAGNOSTICS);
     }
-    let cp = collect_program(in mods);
+    let mut cp = collect_program(in mods);
+    add_box_prelude(inout cp.world, inout cp.names, inout cp.types, in mods);
     // The root module's public names (not qualified), as collected symbols.
     let mut public = ChunkSeq::new[bool]();
     for i in 0..meta.public_items.len() {
@@ -1016,11 +1275,14 @@ pub fn export_plan_input(
     let names = cp.names;
     let types = cp.types;
     let world = cp.world;
-    // Stage 2 declares no `Box` (fip.rs `box_prelude`), so a layout that
-    // holds one would differ from Rust's.
+    // A `Box` with neither the built-in prelude (`fip::prelude`) nor a
+    // declaration would lay out unlike Rust's.
     for ti in 0..types.nodes.len() {
         let node = types.node(n32(ti));
-        if node.kind == TyKind::Named && node.name == world.k.box_ {
+        if node.kind == TyKind::Named
+            && node.name == world.k.box_
+            && world.lookup(world.k.box_) == NO_ADT
+        {
             return declined(DECLINE_BOX);
         }
     }
@@ -1043,7 +1305,18 @@ pub fn export_plan_input(
     head.push(imports.len());
     for k in 0..imports.len() {
         match imports.try_get(k) {
-            Option::Some(d) => put_import(inout head, in d, in plain.links),
+            Option::Some(d) => {
+                match plain.inline.try_get(k) {
+                    Option::Some(body) => put_import_as(
+                        inout head,
+                        in d,
+                        body.handler,
+                        in body.rust,
+                        body.has_rust
+                    ),
+                    Option::None => put_import(inout head, in d, in plain.links),
+                }
+            },
             Option::None => {},
         }
     }
