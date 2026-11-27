@@ -8,16 +8,17 @@ publish = false
 build = "build.rs"
 
 [features]
-# Forward the public API to the Vesper build of the port in vesper/src/.
-vesper-port = ["dep:vesper-port-abi", "dep:vesper-port-harness"]
+# Kept as a no-op feature for callers/port-checks; the Vesper port is now the
+# only implementation.
+vesper-port = []
 # A deliberately wrong Vesper build: the port test run must fail.
-vesper-port-divergent = ["vesper-port"]
+vesper-port-divergent = []
 
 [dependencies]
-vesper-port-abi = { path = "../vesper-port-abi", optional = true }
+vesper-port-abi = { path = "../vesper-port-abi" }
 
 [dev-dependencies]
 vesper-bench = { path = "../vesper-bench" }
 
 [build-dependencies]
-vesper-port-harness = { path = "../vesper-port-harness", optional = true }
+vesper-port-harness = { path = "../vesper-port-harness" }

@@ -47,8 +47,7 @@
 //! timers, NIC launch-time (EDT/`SO_TXTIME`) offload or interrupt-free pacing.
 
 // The only unsafe code is the generated binding's FFI calls (Vesper build).
-#![cfg_attr(not(feature = "vesper-port"), forbid(unsafe_code))]
-#![cfg_attr(feature = "vesper-port", deny(unsafe_code))]
+#![deny(unsafe_code)]
 #![warn(missing_docs)]
 
 pub mod clock;
@@ -58,29 +57,22 @@ pub mod wheel;
 
 // Generated and committed, kept outside src/ so formatters never reflow it
 // (see docs/maintenance/porting-a-crate.md).
-#[cfg(feature = "vesper-port")]
 #[rustfmt::skip]
 #[allow(unsafe_code, missing_docs)]
 #[path = "../port/binding.rs"]
 mod binding;
-#[cfg(feature = "vesper-port")]
 #[path = "port/slab.rs"]
 mod slab;
 
 /// Live Vesper sequence and box allocations of the Vesper build (for leak
 /// tests; the Rust allocator never sees them).
-#[cfg(feature = "vesper-port")]
 #[doc(hidden)]
 pub fn port_live_allocations() -> i64 {
     binding::live_allocations()
 }
 
 /// Which implementation this build runs.
-pub const IMPLEMENTATION: &str = if cfg!(feature = "vesper-port") {
-    "vesper"
-} else {
-    "rust"
-};
+pub const IMPLEMENTATION: &str = "vesper";
 
 pub use clock::{Clock, ClockError, VirtualClock};
 pub use edt::{EdtLaunchQueue, Launch, SubmitError, SubmitErrorKind};
