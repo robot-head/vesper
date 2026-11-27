@@ -1,0 +1,374 @@
+// @vesper/native-clif-opt: src/native_clif_opt.rs (the CLIF peepholes of
+// the native optimize path) in Vesper (#2362), step by step.
+//
+// `native_clif_opt::STEPS` is the flattened sequence `run` applies. The
+// entry takes one step's code and one function in the words of
+// tests/common/clif_words.rs, runs that step on @vesper/clif tables and
+// answers with the edit script that `clif_words::apply` replays on the
+// Rust function. A step not ported yet answers `NOT_PORTED`, and the
+// caller runs Rust's.
+//
+// Part 1: remove_unreachable, float_constants, fold_constant_branches,
+// shrink_unused_slots.
+
+use @vesper/clif::{Func, n32, read_func, u32_at, w};
+use @vesper/clif::codes::{
+    CC_EQ, CC_NE, F_STACK_SLOT, NONE, OP_BAND, OP_BITCAST, OP_BOR, OP_BRIF, OP_BXOR, OP_F32CONST,
+    OP_F64CONST, OP_FADD, OP_FMUL, OP_ICMP_IMM, OP_ICONST, OP_IREDUCE, OP_UEXTEND, TY_F128, TY_F16,
+    TY_F32, TY_F64, TY_I128, TY_I16, TY_I32, TY_I64, TY_I8
+};
+
+// Step codes (the test maps `STEPS` names to them). 0 is a step not
+// ported yet.
+pub const STEP_REMOVE_UNREACHABLE: u64 = 1;
+pub const STEP_FLOAT_CONSTANTS: u64 = 2;
+pub const STEP_FOLD_CONSTANT_BRANCHES: u64 = 3;
+pub const STEP_SHRINK_UNUSED_SLOTS: u64 = 4;
+
+// The answer's first word.
+pub const PORTED: u64 = 1;
+pub const NOT_PORTED: u64 = 0;
+
+// The bytes of the step word ahead of the function words.
+const STEP_BYTES: u64 = 8;
+
+// `constant_with` gives up past this depth.
+const MAX_CONST_DEPTH: u64 = 8;
+
+// Bit widths of the scalar types.
+const BITS_8: u64 = 8;
+const BITS_16: u64 = 16;
+const BITS_32: u64 = 32;
+const BITS_64: u64 = 64;
+const BITS_128: u64 = 128;
+// The shift amounts of an i64 (`1i64 << bits` wraps modulo 64).
+const SHIFT_MASK: u64 = 63;
+
+// IEEE NaN tests: every exponent bit set and a nonzero fraction.
+const F64_EXP: u64 = 9218868437227405312;
+const F64_FRAC: u64 = 4503599627370495;
+const F32_EXP: u64 = 2139095040;
+const F32_FRAC: u64 = 8388607;
+
+// The bit width of a type code; 0 when the tables do not name it.
+fn type_bits(ty: u64) -> u64 {
+    if ty == TY_I8 {
+        BITS_8
+    } else if ty == TY_I16 || ty == TY_F16 {
+        BITS_16
+    } else if ty == TY_I32 || ty == TY_F32 {
+        BITS_32
+    } else if ty == TY_I64 || ty == TY_F64 {
+        BITS_64
+    } else if ty == TY_I128 || ty == TY_F128 {
+        BITS_128
+    } else {
+        0
+    }
+}
+
+// `x & ((1i64 << bits) - 1)`, the shift wrapping as Rust's release build's.
+fn low_bits(x: u64, bits: u64) -> u64 {
+    x & wrapping_sub(wrapping_shl_u64(1, wrapping_u32(bits & SHIFT_MASK)), 1)
+}
+
+// An optional constant: `some` false is `None`.
+copy struct Konst {
+    some: bool,
+    v: u64,
+}
+
+fn none() -> Konst {
+    Konst { some: false, v: 0 }
+}
+
+fn some(v: u64) -> Konst {
+    Konst { some: true, v: v }
+}
+
+// `constant` (`constant_with` with nothing known).
+fn constant(in f: Func, v0: u32, depth: u64) -> Konst {
+    if depth > MAX_CONST_DEPTH {
+        return none();
+    }
+    let v = f.resolve(v0);
+    let i = f.def_inst(v);
+    if i == NONE {
+        return none();
+    }
+    let bits = type_bits(f.value_type(v));
+    let narrow = bits != 0 && bits < BITS_64;
+    let op = f.op(i);
+    let row = f.inst(w(i));
+    if op == OP_ICONST {
+        return some(
+            if narrow {
+                low_bits(row.imm, bits)
+            } else {
+                row.imm
+            }
+        );
+    }
+    let next = wrapping_add(depth, 1);
+    if op == OP_UEXTEND || op == OP_IREDUCE {
+        let a = constant(in f, f.arg(i, 0), next);
+        if !a.some {
+            return a;
+        }
+        return some(if narrow { low_bits(a.v, bits) } else { a.v });
+    }
+    if op == OP_ICMP_IMM {
+        let arg = f.arg(i, 0);
+        let a = constant(in f, arg, next);
+        if !a.some {
+            return a;
+        }
+        let arg_bits = type_bits(f.value_type(f.resolve(arg)));
+        let b = if arg_bits == BITS_64 {
+            row.imm
+        } else {
+            low_bits(row.imm, arg_bits)
+        };
+        if row.cond == CC_EQ {
+            return some(if a.v == b { 1 } else { 0 });
+        }
+        if row.cond == CC_NE {
+            return some(if a.v != b { 1 } else { 0 });
+        }
+        return none();
+    }
+    if op == OP_BAND || op == OP_BOR || op == OP_BXOR {
+        let a = constant(in f, f.arg(i, 0), next);
+        if !a.some {
+            return a;
+        }
+        let b = constant(in f, f.arg(i, 1), next);
+        if !b.some {
+            return b;
+        }
+        return some(
+            if op == OP_BAND {
+                a.v & b.v
+            } else if op == OP_BOR {
+                a.v | b.v
+            } else {
+                a.v ^ b.v
+            }
+        );
+    }
+    none()
+}
+
+// Every instruction in layout order (`insts`).
+fn layout_insts(in f: Func) -> ChunkSeq[u32] {
+    let mut out = ChunkSeq::new[u32]();
+    let mut b = f.first_block();
+    loop {
+        if b == NONE {
+            break;
+        }
+        let mut i = f.first_inst(b);
+        loop {
+            if i == NONE {
+                break;
+            }
+            out.push(i);
+            i = f.next_inst(i);
+        }
+        b = f.next_block(b);
+    }
+    out
+}
+
+// `remove_unreachable`: blocks the entry block does not reach through the
+// destinations of block terminators lose their instructions, then leave
+// the layout.
+fn remove_unreachable(inout f: Func) {
+    let mut seen = ChunkSeq::new[u8]();
+    seen.resize(f.nblocks(), 0);
+    let mut work = ChunkSeq::new[u32]();
+    let entry = f.first_block();
+    if entry != NONE {
+        let ok = seen.try_set(w(entry), 1);
+        work.push(entry);
+    }
+    loop {
+        let b = match work.pop() {
+            Option::Some(b) => b,
+            Option::None => break,
+        };
+        let last = f.last_inst(b);
+        if last == NONE {
+            continue;
+        }
+        for k in 0..f.ndests(last) {
+            let d = f.dest_block(last, k);
+            if d != NONE && seen.try_get(w(d)).unwrap_or(1) == 0 {
+                let ok = seen.try_set(w(d), 1);
+                work.push(d);
+            }
+        }
+    }
+    let mut blocks = ChunkSeq::new[u32]();
+    let mut b = f.first_block();
+    loop {
+        if b == NONE {
+            break;
+        }
+        blocks.push(b);
+        b = f.next_block(b);
+    }
+    for k in 0..blocks.len() {
+        let b = u32_at(in blocks, k);
+        if seen.try_get(w(b)).unwrap_or(0) != 0 {
+            continue;
+        }
+        loop {
+            let i = f.first_inst(b);
+            if i == NONE {
+                break;
+            }
+            f.remove_inst(i);
+        }
+        f.remove_block_edit(b);
+    }
+}
+
+// `fold_constant_branches`: a `brif` on a constant becomes a jump to the
+// destination it takes, with that destination's arguments.
+fn fold_constant_branches(inout f: Func) {
+    let all = layout_insts(in f);
+    for k in 0..all.len() {
+        let i = u32_at(in all, k);
+        if f.op(i) != OP_BRIF {
+            continue;
+        }
+        let c = constant(in f, f.arg(i, 0), 0);
+        if !c.some {
+            continue;
+        }
+        let d: u64 = if c.v == 0 { 1 } else { 0 };
+        let to = f.dest_block(i, d);
+        let mut args = ChunkSeq::new[u32]();
+        for a in 0..f.dest_nargs(i, d) {
+            args.push(f.dest_arg(i, d, a));
+        }
+        f.replace_jump(i, to, in args);
+    }
+}
+
+fn is_nan_bits(ty: u64, bits: u64) -> bool {
+    if ty == TY_F64 {
+        (bits & F64_EXP) == F64_EXP && (bits & F64_FRAC) != 0
+    } else {
+        (bits & F32_EXP) == F32_EXP && (bits & F32_FRAC) != 0
+    }
+}
+
+// Whether `v` is result 0 of an `f64const` or `f32const` that is no NaN.
+fn non_nan_float_const(in f: Func, v: u32) -> bool {
+    let i = f.def_inst(v);
+    if i == NONE || f.def_num(v) != 0 {
+        return false;
+    }
+    let row = f.inst(w(i));
+    if row.op == OP_F64CONST {
+        return !is_nan_bits(TY_F64, row.imm);
+    }
+    if row.op == OP_F32CONST {
+        return !is_nan_bits(TY_F32, row.imm);
+    }
+    false
+}
+
+// `float_constants`: a float `bitcast` of an integer constant becomes the
+// float constant, then `fadd`/`fmul` put a constant left operand right.
+fn float_constants(inout f: Func) {
+    let all = layout_insts(in f);
+    for k in 0..all.len() {
+        let i = u32_at(in all, k);
+        if f.op(i) != OP_BITCAST {
+            continue;
+        }
+        let ty = f.value_type(f.result(i, 0));
+        if ty != TY_F64 && ty != TY_F32 {
+            continue;
+        }
+        let c = constant(in f, f.arg(i, 0), 0);
+        if !c.some {
+            continue;
+        }
+        let bits = if ty == TY_F64 {
+            c.v
+        } else {
+            low_bits(c.v, BITS_32)
+        };
+        f.replace_fconst(i, ty, bits);
+    }
+    for k in 0..all.len() {
+        let i = u32_at(in all, k);
+        let op = f.op(i);
+        if op != OP_FADD && op != OP_FMUL {
+            continue;
+        }
+        let lhs = f.arg(i, 0);
+        let rhs = f.arg(i, 1);
+        if non_nan_float_const(in f, lhs) && !non_nan_float_const(in f, rhs) {
+            let mut swapped = ChunkSeq::new[u32]();
+            swapped.push(rhs);
+            swapped.push(lhs);
+            f.set_args(i, in swapped);
+        }
+    }
+}
+
+// `shrink_unused_slots`: sized slots no `stack_load`, `stack_store` or
+// `stack_addr` in the layout names get size 0.
+fn shrink_unused_slots(inout f: Func) {
+    let mut used = ChunkSeq::new[u8]();
+    used.resize(f.nslots(), 0);
+    let all = layout_insts(in f);
+    for k in 0..all.len() {
+        let row = f.inst(w(u32_at(in all, k)));
+        if (row.eff & F_STACK_SLOT) != 0 {
+            let ok = used.try_set(row.imm, 1);
+        }
+    }
+    for s in 0..f.nslots() {
+        if used.try_get(s).unwrap_or(1) == 0 && f.slot(s).size != 0 {
+            f.set_slot_size(s, 0);
+        }
+    }
+}
+
+// One step on one function: the step code, then the function's words.
+// Answers `PORTED` and the edit script, or `NOT_PORTED`.
+pub fn clif_opt_words(in input: Str) -> ChunkSeq[u64] {
+    let bytes = input.as_bytes();
+    let step = bytes.try_read_u64_le(0).unwrap_or(NOT_PORTED);
+    let mut out = ChunkSeq::new[u64]();
+    let ported = step == STEP_REMOVE_UNREACHABLE
+        || step == STEP_FLOAT_CONSTANTS
+        || step == STEP_FOLD_CONSTANT_BRANCHES
+        || step == STEP_SHRINK_UNUSED_SLOTS;
+    if !ported || bytes.len() < STEP_BYTES {
+        out.push(NOT_PORTED);
+        return out;
+    }
+    let start = STEP_BYTES;
+    let end = bytes.len();
+    let mut f = read_func(in bytes[start..end]);
+    if step == STEP_REMOVE_UNREACHABLE {
+        remove_unreachable(inout f);
+    } else if step == STEP_FLOAT_CONSTANTS {
+        float_constants(inout f);
+    } else if step == STEP_FOLD_CONSTANT_BRANCHES {
+        fold_constant_branches(inout f);
+    } else {
+        shrink_unused_slots(inout f);
+    }
+    out.push(PORTED);
+    let script = f.script();
+    out.extend(in script.as_slice());
+    out
+}

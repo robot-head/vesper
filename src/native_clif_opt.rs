@@ -41,57 +41,106 @@ use cranelift_codegen::ir::{
 use cranelift_codegen::loop_analysis::{Loop, LoopAnalysis};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
+/// One step of [`run`]: its name and the function that does it.
+pub type Step = (&'static str, fn(&mut ir::Function));
+
+/// Every step of [`run`], in order. Each keeps the function valid CLIF on
+/// its own, so the Vesper port (#2362) is compared one step at a time:
+/// a step's input is a captured [`run`] input after the steps before it.
+pub const STEPS: &[Step] = &[
+    ("remove_unreachable", remove_unreachable),
+    ("merge_blocks", merge_blocks),
+    ("remove_constant_params", remove_constant_params),
+    ("float_constants", float_constants),
+    ("vector_registers", crate::native::vector_registers),
+    ("split_join_slots", split_join_slots),
+    ("promote_slots", promote_slots),
+    ("remove_constant_params", remove_constant_params),
+    ("fold_narrow_extends", fold_narrow_extends),
+    (
+        "fold_trivial_arith_and_bool_extends",
+        fold_trivial_arith_and_bool_extends,
+    ),
+    ("sink_compares", sink_compares),
+    ("thread_branches", thread_branches),
+    ("thread_decided_branches", thread_decided_branches),
+    ("merge_blocks", merge_blocks),
+    ("fold_constant_branches", fold_constant_branches),
+    ("remove_unreachable", remove_unreachable),
+    ("merge_blocks", merge_blocks),
+    ("fold_constant_branches", fold_constant_branches),
+    ("remove_unreachable", remove_unreachable),
+    ("merge_blocks", merge_blocks),
+    ("fold_constant_branches", fold_constant_branches),
+    ("remove_unreachable", remove_unreachable),
+    (
+        "eliminate_guarded_loop_add_overflows",
+        eliminate_guarded_loop_add_overflows,
+    ),
+    ("merge_blocks", merge_blocks),
+    ("fold_constant_branches", fold_constant_branches),
+    ("remove_unreachable", remove_unreachable),
+    ("merge_blocks", merge_blocks),
+    ("fold_constant_branches", fold_constant_branches),
+    ("remove_unreachable", remove_unreachable),
+    ("remove_dead", remove_dead),
+    ("hoist_loop_invariants", hoist_loop_invariants),
+    ("share_invariant_loads", share_invariant_loads),
+    ("hoist_loop_invariants", hoist_loop_invariants),
+    ("reuse_seq_header_loads", reuse_seq_header_loads),
+    ("if_convert_pure_diamonds", if_convert_pure_diamonds),
+    ("thread_constant_param_jumps", thread_constant_param_jumps),
+    ("propagate_branch_conditions", propagate_branch_conditions),
+    ("remove_constant_params", remove_constant_params),
+    ("fold_narrow_extends", fold_narrow_extends),
+    (
+        "fold_trivial_arith_and_bool_extends",
+        fold_trivial_arith_and_bool_extends,
+    ),
+    ("fold_constant_branches", fold_constant_branches),
+    ("merge_blocks", merge_blocks),
+    ("canonicalize_imm_ops", canonicalize_imm_ops),
+    ("fold_load_store_offsets", fold_load_store_offsets),
+    ("cse_local_pure", cse_local_pure),
+    (
+        "dense_icmp_chains_to_br_table",
+        dense_icmp_chains_to_br_table,
+    ),
+    ("remove_dead", remove_dead),
+    ("sink_slot_inits", sink_slot_inits),
+    ("merge_tails", merge_tails),
+    ("shrink_unused_slots", shrink_unused_slots),
+];
+
 /// Run every step on `func`.
 pub fn run(func: &mut ir::Function) {
     if std::env::var_os("VESPER_CLIF_OPT").is_some_and(|v| v == "off") {
         return;
     }
-    remove_unreachable(func);
-    merge_blocks(func);
-    remove_constant_params(func);
-    float_constants(func);
-    // Vector slots at one type per offset (#1500, src/native_vector.rs).
-    crate::native::vector_registers(func);
-    split_join_slots(func);
-    promote_slots(func);
-    remove_constant_params(func);
-    fold_narrow_extends(func);
-    fold_trivial_arith_and_bool_extends(func);
-    sink_compares(func);
-    thread_branches(func);
-    thread_decided_branches(func);
-    for _ in 0..3 {
-        merge_blocks(func);
-        fold_constant_branches(func);
-        remove_unreachable(func);
+    CAPTURED.with(|c| {
+        if let Some(c) = c.borrow_mut().as_mut() {
+            c.push(func.clone());
+        }
+    });
+    for (_, step) in STEPS {
+        step(func);
     }
-    eliminate_guarded_loop_add_overflows(func);
-    for _ in 0..2 {
-        merge_blocks(func);
-        fold_constant_branches(func);
-        remove_unreachable(func);
-    }
-    remove_dead(func);
-    hoist_loop_invariants(func);
-    share_invariant_loads(func);
-    hoist_loop_invariants(func);
-    reuse_seq_header_loads(func);
-    if_convert_pure_diamonds(func);
-    thread_constant_param_jumps(func);
-    propagate_branch_conditions(func);
-    remove_constant_params(func);
-    fold_narrow_extends(func);
-    fold_trivial_arith_and_bool_extends(func);
-    fold_constant_branches(func);
-    merge_blocks(func);
-    canonicalize_imm_ops(func);
-    fold_load_store_offsets(func);
-    cse_local_pure(func);
-    dense_icmp_chains_to_br_table(func);
-    remove_dead(func);
-    sink_slot_inits(func);
-    merge_tails(func);
-    shrink_unused_slots(func);
+}
+
+thread_local! {
+    static CAPTURED: std::cell::RefCell<Option<Vec<ir::Function>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Runs `f` and returns, with its result, a copy of every function [`run`]
+/// was given on this thread meanwhile (as it was before the first step).
+/// The `@vesper/native-clif-opt` differential (#2362) runs the steps on
+/// exactly these inputs.
+pub fn capture<R>(f: impl FnOnce() -> R) -> (R, Vec<ir::Function>) {
+    let outer = CAPTURED.with(|c| c.borrow_mut().replace(Vec::new()));
+    let r = f();
+    let got = CAPTURED.with(|c| std::mem::replace(&mut *c.borrow_mut(), outer));
+    (r, got.unwrap_or_default())
 }
 
 /// Cranelift lays out every declared slot, used or not: a promoted slot

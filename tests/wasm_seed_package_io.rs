@@ -2714,6 +2714,13 @@ const COMPILER_PACKAGES: &[(&str, &str, &str, &str, CompilerExecCheck)] = &[
         CompilerExecCheck::Exact(4),
     ),
     (
+        "native-clif-opt",
+        "@vesper/native-clif-opt",
+        "packages/vesper-native-clif-opt",
+        "clif_opt_words(in \"\").len()",
+        CompilerExecCheck::Exact(1),
+    ),
+    (
         "native-cold-outline",
         "@vesper/native-cold-outline",
         "packages/vesper-native-cold-outline",
