@@ -11,6 +11,20 @@ const TBS_ISSUER: u64 = 2;
 const TBS_SUBJECT: u64 = 4;
 const TBS_SPKI: u64 = 5;
 
+const OUT_TBS_START: u64 = 0;
+const OUT_TBS_END: u64 = 1;
+const OUT_SIG_ALG_START: u64 = 2;
+const OUT_SIG_ALG_END: u64 = 3;
+const OUT_SIG_START: u64 = 4;
+const OUT_SIG_END: u64 = 5;
+const OUT_ISSUER_START: u64 = 6;
+const OUT_ISSUER_END: u64 = 7;
+const OUT_SUBJECT_START: u64 = 8;
+const OUT_SUBJECT_END: u64 = 9;
+const OUT_SPKI_START: u64 = 10;
+const OUT_SPKI_END: u64 = 11;
+const OUT_SPKI_ALG_START: u64 = 12;
+const OUT_SPKI_ALG_END: u64 = 13;
 const OUT_LEN: u64 = 14;
 const BYTE_SHIFT: u64 = 8;
 
@@ -166,19 +180,19 @@ pub fn parse_raw_cert(in der: Slice[u8], inout out: Slice[u64]) -> u64 {
         return ERR_TBS_FIELD;
     }
 
-    out.try_set(0, body_start);
-    out.try_set(1, tbs_end);
-    out.try_set(2, tbs_end);
-    out.try_set(3, sa_end);
-    out.try_set(4, wrapping_add(sig_body_start, 1));
-    out.try_set(5, sig_end);
-    out.try_set(6, issuer_s);
-    out.try_set(7, issuer_e);
-    out.try_set(8, subj_s);
-    out.try_set(9, subj_e);
-    out.try_set(10, spki_s);
-    out.try_set(11, spki_e);
-    out.try_set(12, spki_body_s);
-    out.try_set(13, spki_alg_end);
+    out.try_set(OUT_TBS_START, body_start);
+    out.try_set(OUT_TBS_END, tbs_end);
+    out.try_set(OUT_SIG_ALG_START, tbs_end);
+    out.try_set(OUT_SIG_ALG_END, sa_end);
+    out.try_set(OUT_SIG_START, wrapping_add(sig_body_start, 1));
+    out.try_set(OUT_SIG_END, sig_end);
+    out.try_set(OUT_ISSUER_START, issuer_s);
+    out.try_set(OUT_ISSUER_END, issuer_e);
+    out.try_set(OUT_SUBJECT_START, subj_s);
+    out.try_set(OUT_SUBJECT_END, subj_e);
+    out.try_set(OUT_SPKI_START, spki_s);
+    out.try_set(OUT_SPKI_END, spki_e);
+    out.try_set(OUT_SPKI_ALG_START, spki_body_s);
+    out.try_set(OUT_SPKI_ALG_END, spki_alg_end);
     ERR_OK
 }

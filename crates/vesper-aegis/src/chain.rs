@@ -374,6 +374,20 @@ struct RawCert<'a> {
     spki_alg: &'a [u8],
 }
 
+const RAW_CERT_TBS_START: usize = 0;
+const RAW_CERT_TBS_END: usize = 1;
+const RAW_CERT_SIG_ALG_START: usize = 2;
+const RAW_CERT_SIG_ALG_END: usize = 3;
+const RAW_CERT_SIG_START: usize = 4;
+const RAW_CERT_SIG_END: usize = 5;
+const RAW_CERT_ISSUER_START: usize = 6;
+const RAW_CERT_ISSUER_END: usize = 7;
+const RAW_CERT_SUBJECT_START: usize = 8;
+const RAW_CERT_SUBJECT_END: usize = 9;
+const RAW_CERT_SPKI_START: usize = 10;
+const RAW_CERT_SPKI_END: usize = 11;
+const RAW_CERT_SPKI_ALG_START: usize = 12;
+const RAW_CERT_SPKI_ALG_END: usize = 13;
 const RAW_CERT_OUT_LEN: usize = 14;
 const RAW_CERT_ERR_OUTER: u64 = 1;
 const RAW_CERT_ERR_TRAILING: u64 = 2;
@@ -390,13 +404,17 @@ impl<'a> RawCert<'a> {
         let mut out = [0u64; RAW_CERT_OUT_LEN];
         match crate::port::vesper::parse_raw_cert(der, &mut out) {
             0 => Ok(RawCert {
-                tbs: &der[out[0] as usize..out[1] as usize],
-                signature_alg: &der[out[2] as usize..out[3] as usize],
-                signature: &der[out[4] as usize..out[5] as usize],
-                issuer: &der[out[6] as usize..out[7] as usize],
-                subject: &der[out[8] as usize..out[9] as usize],
-                spki: &der[out[10] as usize..out[11] as usize],
-                spki_alg: &der[out[12] as usize..out[13] as usize],
+                tbs: &der[out[RAW_CERT_TBS_START] as usize..out[RAW_CERT_TBS_END] as usize],
+                signature_alg: &der
+                    [out[RAW_CERT_SIG_ALG_START] as usize..out[RAW_CERT_SIG_ALG_END] as usize],
+                signature: &der[out[RAW_CERT_SIG_START] as usize..out[RAW_CERT_SIG_END] as usize],
+                issuer: &der
+                    [out[RAW_CERT_ISSUER_START] as usize..out[RAW_CERT_ISSUER_END] as usize],
+                subject: &der
+                    [out[RAW_CERT_SUBJECT_START] as usize..out[RAW_CERT_SUBJECT_END] as usize],
+                spki: &der[out[RAW_CERT_SPKI_START] as usize..out[RAW_CERT_SPKI_END] as usize],
+                spki_alg: &der
+                    [out[RAW_CERT_SPKI_ALG_START] as usize..out[RAW_CERT_SPKI_ALG_END] as usize],
             }),
             RAW_CERT_ERR_OUTER => Err(bad("outer")),
             RAW_CERT_ERR_TRAILING => Err(bad("trailing bytes")),
@@ -409,6 +427,13 @@ impl<'a> RawCert<'a> {
             _ => Err(bad("outer")),
         }
     }
+}
+
+/// Benchmark entry point for `examples/abba.rs` (`der_cert` workload).
+#[doc(hidden)]
+pub fn parse_raw_cert_for_bench(der: &[u8]) -> Result<(usize, usize), AttestError> {
+    let parsed = RawCert::parse(der)?;
+    Ok((parsed.tbs.len(), parsed.spki_alg.len()))
 }
 
 fn contents(t: &[u8]) -> Option<&[u8]> {
