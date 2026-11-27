@@ -342,11 +342,12 @@ fn aarch64_labeled_control_flow_patches_backedges_and_checks_block_operands() {
     const ADD_SP_16: u32 = 0x9100_43ff;
     const BRANCH_TARGET_WORD: usize = 28;
     const RETURN_VALUE_WORD: usize = 43;
+    const HOME_SLOT_WORD: usize = 8;
     #[rustfmt::skip]
     let packet = [
         1, NO_VALUE,
         STACK_SLOT, SP_ALIGN, SP_ALIGN, 0,
-        BLOCK_LABEL, 0, 1, 1,
+        BLOCK_LABEL, 0, 0, 1,
         STACK_STORE_QWORD, 0, 0, 0,
         JUMP_LABEL, 1, 0, 0,
         BLOCK_LABEL, 1, 0, 1,
@@ -379,6 +380,18 @@ fn aarch64_labeled_control_flow_patches_backedges_and_checks_block_operands() {
     unknown[BRANCH_TARGET_WORD] = 3;
     assert!(binding::aarch64_integer_leaf(&unknown).is_empty());
 
+    const MOV_X8_X0: u32 = 0xaa00_03e8;
+    const CBZ_X8_FORWARD_TWO: u32 = 0xb400_0048;
+    const B_BACK_ONE: u32 = 0x17ff_ffff;
+    const MOV_X0_X8: u32 = 0xaa08_03e0;
+    let mut promoted = packet;
+    promoted[HOME_SLOT_WORD] = 1;
+    let expected: Vec<_> = [MOV_X8_X0, CBZ_X8_FORWARD_TWO, B_BACK_ONE, MOV_X0_X8, RET]
+        .into_iter()
+        .flat_map(u32::to_le_bytes)
+        .collect();
+    assert_eq!(binding::aarch64_integer_leaf(&promoted), expected);
+
     #[rustfmt::skip]
     let conditional_backedge = [
         0, NO_VALUE,
@@ -401,6 +414,57 @@ fn aarch64_labeled_control_flow_patches_backedges_and_checks_block_operands() {
         binding::aarch64_integer_leaf(&conditional_backedge),
         expected
     );
+}
+
+#[test]
+fn aarch64_register_homes_preserve_snapshots_and_retry_on_stack() {
+    const MOV_X8_X0: u32 = 0xaa00_03e8;
+    const MOV_X0_X8: u32 = 0xaa08_03e0;
+    const MOV_X8_X1: u32 = 0xaa01_03e8;
+    const SUB_SP_64: u32 = 0xd101_03ff;
+    const SLOT_ALIGNMENT: u64 = 16;
+    const HOME_COUNT: u64 = 8;
+    const QWORD_BYTES: u64 = CELL_BITS / BYTE_BITS;
+    const FRAME_BYTES: u64 = HOME_COUNT * QWORD_BYTES;
+    #[rustfmt::skip]
+    let snapshot = [
+        2, NO_VALUE,
+        STACK_SLOT, FRAME_BYTES, SLOT_ALIGNMENT, 0,
+        BLOCK_LABEL, 0, 1, 1,
+        STACK_STORE_QWORD, 0, 0, 0,
+        STACK_LOAD, 0, 0, CELL_BITS,
+        STACK_STORE_QWORD, 1, 0, 0,
+        BLOCK_RETURN, 5, 0, 0,
+    ];
+    let expected: Vec<_> = [MOV_X8_X0, MOV_X0_X8, MOV_X8_X1, RET]
+        .into_iter()
+        .flat_map(u32::to_le_bytes)
+        .collect();
+    assert_eq!(binding::aarch64_integer_leaf(&snapshot), expected);
+
+    let mut records = vec![
+        [STACK_SLOT, FRAME_BYTES, SLOT_ALIGNMENT, 0],
+        [BLOCK_LABEL, 0, 1, 1],
+    ];
+    let start = records.len() as u64;
+    for constant in 0..=HOME_COUNT {
+        records.push([CONSTANT, constant, 0, 0]);
+    }
+    let mut sum = start;
+    for constant in start + 1..=start + HOME_COUNT {
+        let next = records.len() as u64;
+        records.push([ADD, sum, constant, CELL_BITS]);
+        sum = next;
+    }
+    for home in 0..HOME_COUNT {
+        records.push([STACK_STORE_QWORD, sum, 0, home * QWORD_BYTES]);
+    }
+    records.push([BLOCK_RETURN, sum, 0, 0]);
+    let packet: Vec<_> = [0, NO_VALUE]
+        .into_iter()
+        .chain(records.into_iter().flatten())
+        .collect();
+    assert!(binding::aarch64_integer_leaf(&packet).starts_with(&SUB_SP_64.to_le_bytes()));
 }
 
 #[test]

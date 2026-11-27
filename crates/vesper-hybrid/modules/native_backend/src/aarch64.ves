@@ -27,6 +27,8 @@ const COMPARE_LEFT_SCRATCH: u32 = 17;
 const ZERO: u32 = 31;
 const SP: u32 = 31;
 const STACK_ALIGNMENT: u64 = 16;
+const HOME_WORD_BYTES: u64 = QWORD_BITS / BYTE_BITS;
+const HOME_REGISTERS: u64 = 8;
 // Larger frames need to probe the stack at least once per base page.
 const MAX_FRAME_BYTES: u64 = 4096;
 const RETURN: u32 = 0xd65f03c0;
@@ -393,6 +395,11 @@ fn stack_displacement(in frame: FrameLayout, in r: Record) -> Option[u64] {
     }
 }
 
+fn home_register(offset: u64) -> u32 {
+    // x8 through x15 are caller-saved and follow the incoming argument bank.
+    wrapping_u32(wrapping_add(ARGUMENT_REGISTERS, offset / HOME_WORD_BYTES))
+}
+
 fn memory(
     inout out: ChunkSeq[u8],
     load: bool,
@@ -721,6 +728,20 @@ fn patch_branch(inout output: ChunkSeq[u8], in branch: Branch, target: u64) -> b
 }
 
 pub fn encode_leaf(in words: Slice[u64]) -> ChunkSeq[u8] {
+    let mut retry_on_stack = false;
+    let fast = encode_leaf_pass(in words, true, inout retry_on_stack);
+    if retry_on_stack {
+        encode_leaf_pass(in words, false, inout retry_on_stack)
+    } else {
+        fast
+    }
+}
+
+fn encode_leaf_pass(
+    in words: Slice[u64],
+    allow_register_homes: bool,
+    inout retry_on_stack: bool
+) -> ChunkSeq[u8] {
     let mut out = ChunkSeq::new[u8]();
     if words.len() < HEADER_WORDS {
         return out;
@@ -749,6 +770,22 @@ pub fn encode_leaf(in words: Slice[u64]) -> ChunkSeq[u8] {
             || !valid_block_layout(in words, frame.slots.len(), count, entry.extra))
     {
         return out;
+    }
+    let mut register_home = allow_register_homes
+        && labeled
+        && entry.right == 1
+        && frame.slots.len() == 1
+        && frame.size / HOME_WORD_BYTES <= HOME_REGISTERS;
+    let mut home_mask: u32 = 0;
+    let mut next_home_store = ChunkSeq::new[u64]();
+    let mut home_aliases = ChunkSeq::new[u32]();
+    if register_home {
+        for index in 0..HOME_REGISTERS {
+            next_home_store.push(values);
+        }
+        for index in 0..count {
+            home_aliases.push(UNASSIGNED);
+        }
     }
     let mut frame_used = false;
     let mut ends = ChunkSeq::with_capacity[u64](values);
@@ -794,11 +831,32 @@ pub fn encode_leaf(in words: Slice[u64]) -> ChunkSeq[u8] {
             return out;
         }
         if r.op == STACK_LOAD || r.op == STACK_ADDRESS || is_stack_store(r.op) {
-            match stack_displacement(in frame, in r) {
-                Option::Some(_) => {},
+            let offset = match stack_displacement(in frame, in r) {
+                Option::Some(offset) => offset,
                 Option::None => return out,
             };
-            frame_used = frame_used || last != NEVER_READ || is_stack_store(r.op);
+            if last != NEVER_READ || is_stack_store(r.op) {
+                frame_used = true;
+                if register_home {
+                    // Only whole cells in the private slot can live in registers.
+                    // Any addressable or overlapping narrow access needs the frame.
+                    if (r.op == STACK_STORE_QWORD || (r.op == STACK_LOAD && r.extra == QWORD_BITS))
+                        && offset % HOME_WORD_BYTES == 0
+                    {
+                        let register = home_register(offset);
+                        let cell = offset / HOME_WORD_BYTES;
+                        home_mask = home_mask | sh(1, register);
+                        if r.op == STACK_STORE_QWORD {
+                            let _ = next_home_store.try_set(cell, value);
+                        } else if last <= next_home_store.try_get(cell).unwrap_or(0) {
+                            // Until the next store, the home itself holds this SSA value.
+                            let _ = home_aliases.try_set(index, register);
+                        }
+                    } else {
+                        register_home = false;
+                    }
+                }
+            }
         }
         let arm = arms.try_get(wrapping_sub(depth, 1))
             .unwrap_or(BranchArm { start: NO_VALUE, end: values });
@@ -847,7 +905,8 @@ pub fn encode_leaf(in words: Slice[u64]) -> ChunkSeq[u8] {
         return out;
     }
 
-    let adjustment = if frame_used {
+    let home_mask = if register_home { home_mask } else { 0 };
+    let adjustment = if frame_used && home_mask == 0 {
         arithmetic_immediate(frame.size).unwrap_or(0)
     } else {
         0
@@ -978,7 +1037,14 @@ pub fn encode_leaf(in words: Slice[u64]) -> ChunkSeq[u8] {
         if stored != 0 {
             if is_stack_store(r.op) {
                 let displacement = stack_displacement(in frame, in r).unwrap_or(0);
-                memory(inout out, false, stored, SP, lhs, displacement);
+                if home_mask != 0 {
+                    let register = home_register(displacement);
+                    if register != lhs {
+                        rrr(inout out, ORR_REG, register, ZERO, lhs);
+                    }
+                } else {
+                    memory(inout out, false, stored, SP, lhs, displacement);
+                }
             } else {
                 memory(inout out, false, stored, lhs, rhs, r.extra);
             }
@@ -1000,8 +1066,16 @@ pub fn encode_leaf(in words: Slice[u64]) -> ChunkSeq[u8] {
                 continue;
             }
         }
-        let available = CALLER_REGISTER_MASK & ~used;
+        if home_mask != 0 && r.op == STACK_LOAD {
+            let register = home_aliases.try_get(index).unwrap_or(UNASSIGNED);
+            if register != UNASSIGNED {
+                regs.push(register);
+                continue;
+            }
+        }
+        let available = CALLER_REGISTER_MASK & ~used & ~home_mask;
         if available == 0 {
+            retry_on_stack = home_mask != 0;
             return ChunkSeq::new[u8]();
         }
         let dest = wrapping_u32(trailing_zeros_u64(widen_u64(available)));
@@ -1012,6 +1086,8 @@ pub fn encode_leaf(in words: Slice[u64]) -> ChunkSeq[u8] {
             if r.op == STACK_ADDRESS {
                 let encoded = arithmetic_immediate(displacement).unwrap_or(0);
                 push32(inout out, ADD_IMM | encoded | sh(SP, RN_SHIFT) | dest);
+            } else if home_mask != 0 {
+                rrr(inout out, ORR_REG, dest, ZERO, home_register(displacement));
             } else {
                 memory(inout out, true, r.extra, SP, dest, displacement);
             }
