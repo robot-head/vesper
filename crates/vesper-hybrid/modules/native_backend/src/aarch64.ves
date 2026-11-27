@@ -47,7 +47,8 @@ use self::scalar::{
     is_vector_float_unary, is_vector_float_fma, valid_vector_float_condition, VECTOR_FLOAT_CEIL,
     VECTOR_FLOAT_FLOOR, VECTOR_FLOAT_TRUNC, VECTOR_FLOAT_NEAREST, VECTOR_FLOAT_MIN,
     VECTOR_FLOAT_MAX, VECTOR_MUL, VECTOR_SHL, VECTOR_SHR, VECTOR_SAR, VECTOR_SHIFT_IMMEDIATE,
-    valid_vector_shift
+    valid_vector_shift, VECTOR_INTEGER_MIN_MAX, VECTOR_MINMAX_SIGNED, VECTOR_MINMAX_MINIMUM,
+    valid_vector_min_max
 };
 use self::x86_64::{
     BYTE_BITS, WORD_BITS, DWORD_BITS, QWORD_BITS, FLOAT_ORDERED, FLOAT_UNORDERED, FLOAT_EQUAL,
@@ -133,6 +134,10 @@ const VECTOR_OR_REG: u32 = 0x4ea01c00;
 const VECTOR_XOR_REG: u32 = 0x6e201c00;
 const VECTOR_ADD_REG: u32 = 0x4e208400;
 const VECTOR_SUB_REG: u32 = 0x6e208400;
+const VECTOR_SMIN_REG: u32 = 0x4e206c00;
+const VECTOR_SMAX_REG: u32 = 0x4e206400;
+const VECTOR_UMIN_REG: u32 = 0x6e206c00;
+const VECTOR_UMAX_REG: u32 = 0x6e206400;
 const VECTOR_MUL_REG: u32 = 0x4e209c00;
 const VECTOR_REVERSE_DWORDS: u32 = 0x4ea00800;
 const VECTOR_NARROW_QWORDS: u32 = 0x0ea12800;
@@ -999,6 +1004,47 @@ fn vector_lane_immediate(lane: u64, width: u64) -> u32 {
     sh(bytes | wrapping_mul(wrapping_mul(wrapping_u32(lane), bytes), 2), VECTOR_LANE_IMM5_SHIFT)
 }
 
+fn vector_integer_min_max(inout out: ChunkSeq[u8], in r: Record, dest: u32, left: u32, right: u32) {
+    let width = r.extra & VECTOR_LANE_WIDTH_MASK;
+    let signed = (r.extra & VECTOR_MINMAX_SIGNED) != 0;
+    let min = (r.extra & VECTOR_MINMAX_MINIMUM) != 0;
+    let size = sh(trailing_zeros_u64(width / BYTE_BITS), VECTOR_SIZE_SHIFT);
+    if width != QWORD_BITS {
+        let op = match (signed, min) {
+            (true, true) => VECTOR_SMIN_REG,
+            (true, false) => VECTOR_SMAX_REG,
+            (false, true) => VECTOR_UMIN_REG,
+            (false, false) => VECTOR_UMAX_REG,
+        };
+        rrr(inout out, op | size, dest, left, right);
+        return;
+    }
+
+    // Qwords use a greater-than mask. BIT can update an existing operand in place.
+    let (first, second) = if dest == right {
+        (right, left)
+    } else {
+        (left, right)
+    };
+    let mask = if dest == first { FP_LEFT } else { dest };
+    let (a, b) = if min {
+        (first, second)
+    } else {
+        (second, first)
+    };
+    let compare = if signed {
+        VECTOR_COMPARE_SIGNED_GREATER
+    } else {
+        VECTOR_COMPARE_UNSIGNED_GREATER
+    };
+    rrr(inout out, compare | size, mask, a, b);
+    if dest == first {
+        rrr(inout out, VECTOR_BIT_INSERT, dest, second, mask);
+    } else {
+        rrr(inout out, VECTOR_BIT_SELECT, dest, second, first);
+    }
+}
+
 fn vector_integer_compare(inout out: ChunkSeq[u8], in r: Record, dest: u32, left: u32, right: u32) {
     let condition = wrapping_shr_u64(r.extra, VECTOR_CONDITION_SHIFT);
     let opcode = match condition {
@@ -1328,6 +1374,11 @@ fn operands(in r: Record, returns: u64) -> Option[u64] {
             VECTOR_INTEGER_COMPARE => if scalar_width(r.extra & VECTOR_LANE_WIDTH_MASK)
                 && wrapping_shr_u64(r.extra, VECTOR_CONDITION_SHIFT) <= UNSIGNED_LESS_EQUAL
             {
+                Option::Some(2)
+            } else {
+                Option::None
+            },
+            VECTOR_INTEGER_MIN_MAX => if valid_vector_min_max(r.extra) {
                 Option::Some(2)
             } else {
                 Option::None
@@ -3822,6 +3873,7 @@ fn encode_pass(
                 VECTOR_SPLAT => vector_splat(inout out, dest, lhs, r.extra),
                 VECTOR_LOAD => memory(inout out, true, VECTOR_BITS, lhs, dest, r.right),
                 VECTOR_INTEGER_COMPARE => vector_integer_compare(inout out, in r, dest, lhs, rhs),
+                VECTOR_INTEGER_MIN_MAX => vector_integer_min_max(inout out, in r, dest, lhs, rhs),
                 VECTOR_SHL | VECTOR_SHR | VECTOR_SAR => {
                     let count = if (r.extra & VECTOR_SHIFT_IMMEDIATE) != 0 {
                         UNASSIGNED

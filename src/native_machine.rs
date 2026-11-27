@@ -223,6 +223,7 @@ enum IntegerOp {
     VectorShiftLeft = 203,
     VectorShiftRightLogical = 204,
     VectorShiftRightArithmetic = 205,
+    VectorIntegerMinMax = 206,
 }
 
 fn integer_bit_op(op: Opcode) -> Option<IntegerOp> {
@@ -298,6 +299,8 @@ const SIMD_LANE_INDEX_SHIFT: u32 = 8;
 const SIMD_CONDITION_SHIFT: u32 = 8;
 const X86_VECTOR_MUL_SSE41: u64 = 1 << SIMD_LANE_INDEX_SHIFT;
 const VECTOR_SHIFT_IMMEDIATE: u64 = 1 << SIMD_LANE_INDEX_SHIFT;
+const VECTOR_MINMAX_SIGNED: u64 = 1 << SIMD_CONDITION_SHIFT;
+const VECTOR_MINMAX_MINIMUM: u64 = VECTOR_MINMAX_SIGNED << 1;
 const X86_HARDWARE_POPCOUNT: u64 = 1;
 const X86_SWIZZLE_ZERO_HIGH: u64 = 1;
 const X86_SWIZZLE_ZERO_INDEX: u8 = 0x80;
@@ -2011,6 +2014,58 @@ impl IntegerBlocks<'_> {
         ))
     }
 
+    fn vector_bitselect(&mut self, mask: u64, yes: u64, no: u64) -> u64 {
+        let difference = self.append(IntegerOp::VectorXor, [yes, no, 0]);
+        let selected = self.append(IntegerOp::VectorAnd, [mask, difference, 0]);
+        self.append(IntegerOp::VectorXor, [no, selected, 0])
+    }
+
+    fn vector_integer_min_max(
+        &mut self,
+        opcode: Opcode,
+        lane: Type,
+        left: u64,
+        right: u64,
+    ) -> Option<u64> {
+        let width = integer_width(lane)?;
+        let signed = matches!(opcode, Opcode::Smin | Opcode::Smax);
+        let min = matches!(opcode, Opcode::Smin | Opcode::Umin);
+        if self.aarch64
+            || (lane != types::I64
+                && (matches!((lane, signed), (types::I8, false) | (types::I16, true))
+                    || self.has_x86_sse41()))
+        {
+            let mode = width
+                | if signed { VECTOR_MINMAX_SIGNED } else { 0 }
+                | if min { VECTOR_MINMAX_MINIMUM } else { 0 };
+            return Some(self.append(IntegerOp::VectorIntegerMinMax, [left, right, mode]));
+        }
+        if lane == types::I16 && !signed {
+            // A saturating difference is zero when left <= right.
+            let difference = self.append(IntegerOp::VectorUnsignedSatSub, [left, right, width]);
+            return Some(if min {
+                self.append(IntegerOp::VectorSub, [left, difference, width])
+            } else {
+                self.append(IntegerOp::VectorAdd, [right, difference, width])
+            });
+        }
+        let greater = if signed {
+            IntCC::SignedGreaterThan
+        } else {
+            IntCC::UnsignedGreaterThan
+        };
+        let mask = self.append(
+            IntegerOp::VectorIntegerCompare,
+            [
+                left,
+                right,
+                width | (condition(greater) << SIMD_CONDITION_SHIFT),
+            ],
+        );
+        let (yes, no) = if min { (right, left) } else { (left, right) };
+        Some(self.vector_bitselect(mask, yes, no))
+    }
+
     fn vector_shuffle(&mut self, mask: &[u8], left: u64, right: u64) -> Option<u64> {
         const LANES: u8 = SIMD_BYTES as u8;
         let mask: &[u8; SIMD_BYTES as usize] = mask.try_into().ok()?;
@@ -2139,6 +2194,14 @@ impl IntegerBlocks<'_> {
                     Opcode::Bxor => (IntegerOp::VectorXor, 0),
                     Opcode::Iadd => (IntegerOp::VectorAdd, integer_width(lane)?),
                     Opcode::Isub => (IntegerOp::VectorSub, integer_width(lane)?),
+                    Opcode::Smin | Opcode::Smax | Opcode::Umin | Opcode::Umax => {
+                        return self.vector_integer_min_max(
+                            opcode,
+                            lane,
+                            input(left)?,
+                            input(right)?,
+                        );
+                    }
                     Opcode::Imul => {
                         let mode =
                             if matches!(lane, types::I32 | types::I64) && self.has_x86_sse41() {
@@ -2327,10 +2390,7 @@ impl IntegerBlocks<'_> {
                 opcode: Opcode::Bitselect,
                 args: [mask, yes, no],
             } if ty(mask) == output && ty(yes) == output && ty(no) == output => {
-                let no = input(no)?;
-                let difference = self.append(IntegerOp::VectorXor, [input(yes)?, no, 0]);
-                let selected = self.append(IntegerOp::VectorAnd, [input(mask)?, difference, 0]);
-                (IntegerOp::VectorXor, [no, selected, 0])
+                return Some(self.vector_bitselect(input(mask)?, input(yes)?, input(no)?));
             }
             InstructionData::LoadNoOffset {
                 opcode: Opcode::Bitcast,

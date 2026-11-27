@@ -98,6 +98,18 @@ const PUNPCKHBW: u8 = 0x68;
 const PMULLW: u8 = 0xd5;
 const PMULUDQ: u8 = 0xf4;
 const PMULLD: u8 = 0x40;
+const PMINUB: u8 = 0xda;
+const PMAXUB: u8 = 0xde;
+const PMINSW: u8 = 0xea;
+const PMAXSW: u8 = 0xee;
+const PMINSB: u8 = 0x38;
+const PMINSD: u8 = 0x39;
+const PMINUW: u8 = 0x3a;
+const PMINUD: u8 = 0x3b;
+const PMAXSB: u8 = 0x3c;
+const PMAXSD: u8 = 0x3d;
+const PMAXUW: u8 = 0x3e;
+const PMAXUD: u8 = 0x3f;
 const PSHUFD: u8 = 0x70;
 const PADDB: u8 = 0xfc;
 const PADDW: u8 = 0xfd;
@@ -388,6 +400,7 @@ pub copy enum Instruction {
     VectorSwizzle(u8, u8, u8, bool),
     VectorIntegerCompare(u8, u8, u8, u64, PackedRelation, bool),
     VectorMultiply(u8, u8, u8, u64, bool),
+    VectorIntegerMinMax(u8, u8, u8, u64, bool, bool),
     VectorShift(u8, u8, u64, u64, bool, PackedShift),
     BitOperation(u8, u8, u64, BitOperation),
     ComplementedBitwise(u8, u8, u8, u64),
@@ -1764,6 +1777,50 @@ fn scalarized_multiply_qwords(inout out: ChunkSeq[u8], dest: u8, left: u8, right
     packed_binary(inout out, PUNPCKLQDQ, dest, high);
 }
 
+fn vector_integer_min_max(
+    inout out: ChunkSeq[u8],
+    dest: u8,
+    left: u8,
+    right: u8,
+    width: u64,
+    signed: bool,
+    min: bool
+) {
+    let (first, second) = if dest == right {
+        (right, left)
+    } else {
+        (left, right)
+    };
+    float_move(inout out, dest, first);
+    match (width, signed) {
+        (BYTE_BITS, false) => packed_binary(
+            inout out,
+            if min { PMINUB } else { PMAXUB },
+            dest,
+            second
+        ),
+        (WORD_BITS, true) => packed_binary(
+            inout out,
+            if min { PMINSW } else { PMAXSW },
+            dest,
+            second
+        ),
+        _ => {
+            let op = match (width, signed, min) {
+                (BYTE_BITS, true, true) => PMINSB,
+                (BYTE_BITS, true, false) => PMAXSB,
+                (WORD_BITS, false, true) => PMINUW,
+                (WORD_BITS, false, false) => PMAXUW,
+                (DWORD_BITS, true, true) => PMINSD,
+                (DWORD_BITS, true, false) => PMAXSD,
+                (_, false, true) => PMINUD,
+                _ => PMAXUD,
+            };
+            packed_38(inout out, op, dest, second);
+        },
+    };
+}
+
 fn vector_multiply(
     inout out: ChunkSeq[u8],
     dest: u8,
@@ -2579,6 +2636,14 @@ pub fn emit(inout out: ChunkSeq[u8], in instruction: Instruction) {
             immediate,
             mode
         ) => vector_shift(inout out, destination, source, count, width, immediate, in mode),
+        Instruction::VectorIntegerMinMax(
+            destination,
+            left,
+            right,
+            width,
+            signed,
+            min
+        ) => vector_integer_min_max(inout out, destination, left, right, width, signed, min),
         Instruction::VectorConvert(destination, source, demote) => {
             if demote {
                 out.push(OPERAND_SIZE_OVERRIDE);
