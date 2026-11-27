@@ -63,6 +63,18 @@ fn step() -> usize {
         .unwrap_or(24)
 }
 
+/// The checked worlds in `IR_OPT_CHUNKS` groups (default 1), lowered one
+/// group at a time: the flip gate runs every world (`IR_OPT_STEP=1`), and
+/// the whole corpus with its mutants lowered at once does not fit a 16 GB
+/// host.
+fn chunks() -> usize {
+    std::env::var("IR_OPT_CHUNKS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(1)
+}
+
 struct Input {
     name: String,
     world: &'static World,
@@ -108,36 +120,39 @@ fn screen_matches_rust() {
     let (mut done, mut bad, mut blocks, mut kept) = (0, 0, 0, 0);
     // Bazel shards the corpus worlds (BUILD.bazel `test_shards`).
     let shard = corpus_shard::Shard::from_environment();
-    for c in &inputs_where(&|i| shard.contains(i)) {
-        let Some(prep) = prepare(c.world, &c.program, MODE_OPTIMIZE) else {
-            continue;
-        };
-        done += 1;
-        let words = screen().words(&prep.input);
-        let rust: Vec<u64> = c
-            .program
-            .functions
-            .values()
-            .flat_map(|f| {
-                f.blocks
-                    .iter()
-                    .map(|b| u64::from(vesper::ir_opt_policy::block_can_improve(f, b)))
-            })
-            .collect();
-        blocks += rust.len();
-        kept += rust.iter().sum::<u64>();
-        let ours = &words[1..];
-        let ours: Vec<u64> = ours
-            .iter()
-            .copied()
-            .chain(std::iter::repeat(0))
-            .take(rust.len())
-            .collect();
-        if ours != rust || words[0] != rust.iter().sum::<u64>() {
-            bad += 1;
-            if bad <= 5 {
-                let at = rust.iter().zip(&ours).position(|(a, b)| a != b);
-                eprintln!("{} differs at block row {at:?}", c.name);
+    let chunks = chunks();
+    for chunk in 0..chunks {
+        for c in &inputs_where(&|i| shard.contains(i) && i % chunks == chunk) {
+            let Some(prep) = prepare(c.world, &c.program, MODE_OPTIMIZE) else {
+                continue;
+            };
+            done += 1;
+            let words = screen().words(&prep.input);
+            let rust: Vec<u64> = c
+                .program
+                .functions
+                .values()
+                .flat_map(|f| {
+                    f.blocks
+                        .iter()
+                        .map(|b| u64::from(vesper::ir_opt_policy::block_can_improve(f, b)))
+                })
+                .collect();
+            blocks += rust.len();
+            kept += rust.iter().sum::<u64>();
+            let ours = &words[1..];
+            let ours: Vec<u64> = ours
+                .iter()
+                .copied()
+                .chain(std::iter::repeat(0))
+                .take(rust.len())
+                .collect();
+            if ours != rust || words[0] != rust.iter().sum::<u64>() {
+                bad += 1;
+                if bad <= 5 {
+                    let at = rust.iter().zip(&ours).position(|(a, b)| a != b);
+                    eprintln!("{} differs at block row {at:?}", c.name);
+                }
             }
         }
     }
@@ -164,37 +179,40 @@ fn policy_matches_rust() {
     policy();
     let quiet = quiet_panics();
     let (mut done, mut bad, mut skipped) = (0, 0, 0);
-    let all = inputs();
-    for c in corpus_shard::Shard::from_environment().keep(&all) {
-        let rust = std::panic::catch_unwind(|| {
-            let mut p = c.program.clone();
-            let r = vesper::ir_opt_policy::optimize(c.world, &mut p);
-            (r, p)
-        });
-        let Ok((rr, rp)) = rust else {
-            skipped += 1;
-            continue;
-        };
-        let Some(prep) = prepare(c.world, &c.program, MODE_OPTIMIZE) else {
-            skipped += 1;
-            continue;
-        };
-        done += 1;
-        let words = policy().words(&prep.input);
-        let (vr, vp) = finish(c.world, &prep, &words, MODE_OPTIMIZE);
-        let mut diff = None;
-        if !same_result(&rr, &vr) {
-            diff = Some(format!("result rust {rr:?} vesper {vr:?}"));
-        } else if rr.is_ok()
-            && let Some(vp) = &vp
-            && let Some(d) = first_difference(&format!("{rp:#?}"), &format!("{vp:#?}"))
-        {
-            diff = Some(d);
-        }
-        if let Some(d) = diff {
-            bad += 1;
-            if bad <= 5 {
-                eprintln!("{} differs: {d}", c.name);
+    let (step, chunks) = (step(), chunks());
+    for chunk in 0..chunks {
+        let all = inputs_where(&|i| i % step == 0 && (i / step) % chunks == chunk);
+        for c in corpus_shard::Shard::from_environment().keep(&all) {
+            let rust = std::panic::catch_unwind(|| {
+                let mut p = c.program.clone();
+                let r = vesper::ir_opt_policy::optimize(c.world, &mut p);
+                (r, p)
+            });
+            let Ok((rr, rp)) = rust else {
+                skipped += 1;
+                continue;
+            };
+            let Some(prep) = prepare(c.world, &c.program, MODE_OPTIMIZE) else {
+                skipped += 1;
+                continue;
+            };
+            done += 1;
+            let words = policy().words(&prep.input);
+            let (vr, vp) = finish(c.world, &prep, &words, MODE_OPTIMIZE);
+            let mut diff = None;
+            if !same_result(&rr, &vr) {
+                diff = Some(format!("result rust {rr:?} vesper {vr:?}"));
+            } else if rr.is_ok()
+                && let Some(vp) = &vp
+                && let Some(d) = first_difference(&format!("{rp:#?}"), &format!("{vp:#?}"))
+            {
+                diff = Some(d);
+            }
+            if let Some(d) = diff {
+                bad += 1;
+                if bad <= 5 {
+                    eprintln!("{} differs: {d}", c.name);
+                }
             }
         }
     }
@@ -249,6 +267,30 @@ fn policy_cost() {
         return;
     }
     let all = inputs();
+    // The hybrid swap's path over every corpus input, as
+    // crates/vesper-hybrid/src/swap/ir_opt.rs runs it: `optimize_with` on
+    // the package, and Rust's policy where the package refuses or the input
+    // cannot be encoded. The flip gate's workload.
+    let corpus: Vec<&Input> = all.iter().filter(|c| !c.name.contains("#m")).collect();
+    let mut rust = || {
+        time(|| {
+            for c in &corpus {
+                let mut p = c.program.clone();
+                let _ = std::hint::black_box(vesper::ir_opt_policy::optimize(c.world, &mut p));
+            }
+        })
+    };
+    let mut swap = || {
+        time(|| {
+            for c in &corpus {
+                let mut p = c.program.clone();
+                let r = optimize_with(c.world, &mut p, |input| policy().words(input))
+                    .unwrap_or_else(|| vesper::ir_opt_policy::optimize(c.world, &mut p));
+                let _ = std::hint::black_box(r);
+            }
+        })
+    };
+    abba("ir opt swap", &mut rust, &mut swap);
     let cases: Vec<(&Input, Prepared)> = all
         .iter()
         .filter(|c| !c.name.contains("#m"))
