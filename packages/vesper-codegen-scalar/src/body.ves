@@ -11,7 +11,10 @@
 // operators, bit and float builtins, and direct calls of scalar arguments
 // (`Codegen::plain_call`), and whose blocks end in `return`, `jump`,
 // `branch`, scalar `match` or `unreachable`. Any other function is left out
-// of the plan, and the Rust walk emits it.
+// of the plan, and the Rust walk emits it. Both optimizer settings are
+// planned alike. On the unoptimized path the emitter keeps every local in
+// a stack slot, so each local's entry carries the kind its stores coerce
+// to.
 
 use @vesper/check-data::util::{add, inc, n32, u64_at};
 use @vesper/check-data::types::{TyKind, default_type};
@@ -1570,7 +1573,7 @@ impl Gen {
         }
         let mut graph_words: ChunkSeq[u64] = ChunkSeq::new[u64]();
         // `ir_graph_at`'s locals, in name order: a parameter has its
-        // variable; every other local gets a zeroed one.
+        // variable; every other local gets a zeroed one. Each has its kind.
         graph_words.push(h.lname.len());
         for k in 0..h.lname.len() {
             let t = n32(u64_at(in h.lty, k));
@@ -1588,6 +1591,9 @@ impl Gen {
                 return;
             }
             graph_words.push(entry);
+            // The kind its stores coerce to, on the unoptimized path that
+            // keeps every local in a stack slot.
+            graph_words.push(self.body_kind(t));
         }
         // Each value's register.
         graph_words.push(h.vty.len());

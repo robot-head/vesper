@@ -4124,8 +4124,7 @@ impl<M: Module> Codegen<'_, '_, M> {
         body: &crate::ir::FunctionIr,
         sret: Option<ir::Value>,
     ) -> Result<bool, String> {
-        let plain = self.operands_only
-            && matches!(frame.result, FrameResult::Value)
+        let plain = matches!(frame.result, FrameResult::Value)
             && self.denorm.is_empty()
             && self.session.is_none()
             && self.generic_vars.is_empty()
