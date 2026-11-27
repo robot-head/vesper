@@ -211,3 +211,44 @@ pub fn seam_outline() -> u64 eff [Ffi[Cranelift]] {
         None => 0,
     }
 }
+
+// `seam_outline` with the parent and its helper defined in one call: the
+// published object's id (0 when a step failed).
+pub fn seam_outline_together() -> u64 eff [Ffi[Cranelift]] {
+    let mut m = match module_new(
+        in "".as_bytes(),
+        in "opt_level=speed;is_pic=true".as_bytes(),
+        in "seam_outline".as_bytes()
+    ) {
+        Some(m) => m,
+        None => return 0,
+    };
+    let s = seam_sig(inout m);
+    let f = declare_function(inout m, in "seam_f".as_bytes(), linkage_export(), s);
+    let mut b = match build_f(in m, s) {
+        Some(b) => b,
+        None => {
+            module_free(m);
+            return 0;
+        },
+    };
+    let mut plan: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    plan.push(e_outline());
+    for w in [0, 2, 1, 2, 0, 1, 0, 1, 0, 0, 0, 0, 0] {
+        plan.push(w);
+    }
+    plan.push(e_end());
+    if outline_cold(inout b, inout m, in plan.as_slice()) != 1 {
+        builder_free(b);
+        module_free(m);
+        return 0;
+    }
+    if !define_with_cold_helpers(inout m, f, b) {
+        module_free(m);
+        return 0;
+    }
+    match module_finish(m) {
+        Some(o) => object_publish(o),
+        None => 0,
+    }
+}

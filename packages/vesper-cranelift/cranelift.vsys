@@ -146,4 +146,5 @@ sys library Cranelift (
     fn vcl_outline_cold(inout b: Builder, inout m: Module, nocapture in edits: CSlice[u64]) -> ForeignVal[u32];
     fn vcl_take_cold_helper(inout b: Builder) -> ForeignVal[Option[Builder]];
     fn vcl_cold_helper_func(in b: Builder) -> ForeignVal[u32];
+    fn vcl_define_with_cold_helpers(inout m: Module, func: u32, sink b: Builder) -> ForeignVal[u32];
 }

@@ -142,6 +142,7 @@ interface vcl {
     %vcl-outline-cold: func(%b: u64, %m: u64, %edits: list<u64>) -> u32;
     %vcl-take-cold-helper: func(%b: u64) -> u64;
     %vcl-cold-helper-func: func(%b: u64) -> u32;
+    %vcl-define-with-cold-helpers: func(%m: u64, %func: u32, %b: u64) -> u32;
 }
 
 world cranelift {

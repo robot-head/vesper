@@ -147,6 +147,7 @@
 // |     fn vcl_outline_cold(inout b: Builder, inout m: Module, nocapture in edits: CSlice[u64]) -> ForeignVal[u32];
 // |     fn vcl_take_cold_helper(inout b: Builder) -> ForeignVal[Option[Builder]];
 // |     fn vcl_cold_helper_func(in b: Builder) -> ForeignVal[u32];
+// |     fn vcl_define_with_cold_helpers(inout m: Module, func: u32, sink b: Builder) -> ForeignVal[u32];
 // | }
 //
 // @vesper/cranelift: Cranelift 0.125 from Vesper (self-hosting wave SH0,
@@ -1559,6 +1560,16 @@ pub fn take_cold_helper(inout b: Builder) -> Option[Builder] eff [Ffi[Cranelift]
 }
 pub fn cold_helper_func(in b: Builder) -> FuncId eff [Ffi[Cranelift]] {
     FuncId { id: Cranelift::vcl_cold_helper_func(in b) }
+}
+// Define `func` from `b` and then each cold helper `outline_cold` left on
+// it, in outline order, as src/native.rs does (the object bytes depend on
+// that order); false if one failed (`module_error_len`).
+pub fn define_with_cold_helpers(
+    inout m: Module,
+    func: FuncId,
+    sink b: Builder
+) -> bool eff [Ffi[Cranelift]] {
+    Cranelift::vcl_define_with_cold_helpers(inout m, func.id, b) == 0
 }
 
 // Typed entity words: every entity a host lends as a `call_arg` word or

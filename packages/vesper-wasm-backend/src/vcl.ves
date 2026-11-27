@@ -7,7 +7,7 @@
 // letters of a row mean).
 
 pub fn vcl_count() -> u64 {
-    139
+    140
 }
 
 pub fn vcl_row(i: u64) -> Str {
@@ -427,6 +427,9 @@ pub fn vcl_row(i: u64) -> Str {
     }
     if i == 138 {
         return "vcl_cold_helper_func h i w";
+    }
+    if i == 139 {
+        return "vcl_define_with_cold_helpers hwh ois w";
     }
     ""
 }
