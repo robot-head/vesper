@@ -116,6 +116,10 @@ const FLOAT_FLOOR: u64 = 142;
 const FLOAT_MIN: u64 = 145;
 const FLOAT_MAX: u64 = 146;
 const FLOAT_FMA64: u64 = 148;
+const STACK_ARGUMENT: u64 = 149;
+const FLOAT_STACK_ARGUMENT: u64 = 150;
+const CALL_STACK_ARGUMENT: u64 = 151;
+const CALL_STACK_COUNT_SHIFT: u32 = 4;
 const EQUAL: u64 = 0;
 const NOT_EQUAL: u64 = 1;
 const SIGNED_LESS: u64 = 2;
@@ -485,6 +489,97 @@ fn aarch64_wide_register_pairs_follow_the_target_calling_convention() {
             expected.map(u32::to_le_bytes).concat()
         );
     }
+}
+
+#[test]
+fn aarch64_stack_argument_offsets_follow_the_target_calling_convention() {
+    use cranelift_codegen::ir::{AbiParam, Function, InstBuilder, types};
+    use cranelift_codegen::isa::CallConv;
+    use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
+
+    const GP_ARGUMENT_REGISTERS: usize = 8;
+    const LDRH_W0_SP_8: u32 = 0x7940_13e0;
+    const LDRH_W0_SP_2: u32 = 0x7940_07e0;
+    for (call_conv, load) in [
+        (CallConv::SystemV, LDRH_W0_SP_8),
+        (CallConv::AppleAarch64, LDRH_W0_SP_2),
+    ] {
+        let mut function = Function::new();
+        function.signature.call_conv = call_conv;
+        function.signature.params = vec![AbiParam::new(types::I64); GP_ARGUMENT_REGISTERS];
+        function
+            .signature
+            .params
+            .extend([AbiParam::new(types::I8), AbiParam::new(types::I16)]);
+        function.signature.returns.push(AbiParam::new(types::I16));
+        let mut context = FunctionBuilderContext::new();
+        let mut builder = FunctionBuilder::new(&mut function, &mut context);
+        let block = builder.create_block();
+        builder.append_block_params_for_function_params(block);
+        builder.switch_to_block(block);
+        builder.seal_block(block);
+        let stacked = *builder.block_params(block).last().unwrap();
+        builder.ins().return_(&[stacked]);
+        builder.finalize();
+
+        let words = native::machine::aarch64_leaf_words(&function).unwrap();
+        assert_eq!(
+            binding::aarch64_integer_leaf(&words),
+            [load, RET].map(u32::to_le_bytes).concat()
+        );
+    }
+}
+
+#[test]
+fn aarch64_outgoing_stack_arguments_are_written_before_register_moves() {
+    const SUB_SP_CALL_AND_OUTGOING: u32 = 0xd102_83ff;
+    const SAVE_LR_SP_16: u32 = 0xf900_0bfe;
+    const STR_X0_SP: u32 = 0xf900_03e0;
+    const MOV_X0_X1: u32 = 0xaa01_03e0;
+    const BL: u32 = 0x9400_0000;
+    const RESTORE_LR_SP_16: u32 = 0xf940_0bfe;
+    const ADD_SP_CALL_AND_OUTGOING: u32 = 0x9102_83ff;
+    const TARGET: u64 = 17;
+    let stack_count = 1 << CALL_STACK_COUNT_SHIFT;
+    #[rustfmt::skip]
+    let words = [
+        2, 4,
+        CALL_STACK_ARGUMENT, 0, 0, CELL_BITS,
+        CALL_ARGUMENT, 1, 0, 0,
+        CALL, TARGET, 2, stack_count,
+    ];
+    let packet = binding::aarch64_relocatable_block(&words);
+    let (length, body) = packet.split_first_chunk::<{ size_of::<u64>() }>().unwrap();
+    let (code, _) = body.split_at(u64::from_le_bytes(*length) as usize);
+    assert_eq!(
+        code,
+        [
+            SUB_SP_CALL_AND_OUTGOING,
+            SAVE_LR_SP_16,
+            STR_X0_SP,
+            MOV_X0_X1,
+            BL,
+            RESTORE_LR_SP_16,
+            ADD_SP_CALL_AND_OUTGOING,
+            RET,
+        ]
+        .map(u32::to_le_bytes)
+        .concat()
+    );
+    #[rustfmt::skip]
+    let overlapping = [
+        1, NO_VALUE,
+        CALL_STACK_ARGUMENT, 0, 0, CELL_BITS,
+        CALL_STACK_ARGUMENT, 0, 0, CELL_BITS,
+        CALL_VOID, TARGET, 2, 2 << CALL_STACK_COUNT_SHIFT,
+    ];
+    assert!(binding::aarch64_relocatable_block(&overlapping).is_empty());
+    assert!(
+        binding::aarch64_integer_leaf(&[0, 0, FLOAT_STACK_ARGUMENT, 0, 0, WORD_BITS]).is_empty()
+    );
+    #[rustfmt::skip]
+    let late = [0, 1, CONSTANT, 0, 0, 0, STACK_ARGUMENT, 0, 0, CELL_BITS];
+    assert!(binding::aarch64_integer_leaf(&late).is_empty());
 }
 
 #[test]

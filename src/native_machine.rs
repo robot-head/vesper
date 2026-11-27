@@ -168,6 +168,9 @@ enum IntegerOp {
     FloatMax = 146,
     FloatFma32 = 147,
     FloatFma64 = 148,
+    StackArgument = 149,
+    FloatStackArgument = 150,
+    CallStackArgument = 151,
 }
 
 fn integer_bit_op(op: Opcode) -> Option<IntegerOp> {
@@ -227,6 +230,8 @@ const TRAP_VALUE: u64 = NO_VALUE - 1;
 const GP_REGISTER_ARGUMENTS: usize = 6;
 const AARCH64_GP_ARGUMENTS: usize = 8;
 const XMM_REGISTER_ARGUMENTS: usize = 8;
+const AARCH64_FP_ARGUMENTS: usize = 8;
+const AARCH64_CALL_FLOAT_BITS: u32 = 4;
 const STACK_PROBE_INTERVAL: usize = 4096;
 const CFG_HOME_BYTES: u64 = size_of::<u64>() as u64;
 const MAX_GP_ARGUMENTS: usize = GP_REGISTER_ARGUMENTS + STACK_PROBE_INTERVAL / size_of::<u64>() - 1;
@@ -323,29 +328,81 @@ fn float_condition(cond: FloatCC) -> u64 {
     }
 }
 
-fn argument_start(cell: usize, ty: Type, aarch64: Option<CallConv>) -> usize {
-    if ty == types::I128 && aarch64 == Some(CallConv::SystemV) {
-        // AAPCS64 aligns a pair to an even register. Apple's ABI packs it.
-        cell.next_multiple_of(WIDE_INTEGER_CELLS)
-    } else {
-        cell
-    }
+#[derive(Clone, Copy)]
+enum Aarch64Argument {
+    Gp(usize),
+    Float(usize),
+    Stack(usize),
 }
 
-fn argument_cells(params: &[AbiParam], aarch64: Option<CallConv>) -> Option<(usize, usize)> {
+struct Aarch64Arguments {
+    locations: Vec<Aarch64Argument>,
+    gp: usize,
+    fp: usize,
+}
+
+fn aarch64_arguments(params: &[AbiParam], convention: CallConv) -> Option<Aarch64Arguments> {
+    let mut args = Aarch64Arguments {
+        locations: Vec::with_capacity(params.len()),
+        gp: 0,
+        fp: 0,
+    };
+    let mut stack: usize = 0;
+    for param in params {
+        let ty = param.value_type;
+        if *param != AbiParam::new(ty) {
+            return None;
+        }
+        let location = if ty == types::I128 {
+            // AAPCS64 aligns pairs to an even register. Apple packs them.
+            let first = if convention == CallConv::SystemV {
+                args.gp.next_multiple_of(WIDE_INTEGER_CELLS)
+            } else {
+                args.gp
+            };
+            args.gp = first + WIDE_INTEGER_CELLS;
+            if args.gp > AARCH64_GP_ARGUMENTS {
+                return None;
+            }
+            Aarch64Argument::Gp(first)
+        } else if float_width(ty).is_some() && args.fp < AARCH64_FP_ARGUMENTS {
+            let register = args.fp;
+            args.fp += 1;
+            Aarch64Argument::Float(register)
+        } else if integer_width(ty).is_some() && args.gp < AARCH64_GP_ARGUMENTS {
+            let register = args.gp;
+            args.gp += 1;
+            Aarch64Argument::Gp(register)
+        } else if float_width(ty).is_some() || integer_width(ty).is_some() {
+            let bytes = ty.bytes() as usize;
+            let slot = if convention == CallConv::AppleAarch64 {
+                bytes
+            } else {
+                bytes.max(size_of::<u64>())
+            };
+            let offset = stack.next_multiple_of(slot);
+            stack = offset + slot;
+            if stack > STACK_PROBE_INTERVAL {
+                return None;
+            }
+            Aarch64Argument::Stack(offset)
+        } else {
+            return None;
+        };
+        args.locations.push(location);
+    }
+    Some(args)
+}
+
+fn x86_argument_cells(params: &[AbiParam]) -> Option<(usize, usize)> {
     let mut cells = 0;
     let mut floats = 0;
-    let (register_limit, argument_limit) = if aarch64.is_some() {
-        (AARCH64_GP_ARGUMENTS, AARCH64_GP_ARGUMENTS)
-    } else {
-        (GP_REGISTER_ARGUMENTS, MAX_GP_ARGUMENTS)
-    };
     for param in params {
         if integer_width(param.value_type).is_some() && *param == AbiParam::new(param.value_type) {
             cells += 1;
         } else if *param == AbiParam::new(types::I128) {
-            cells = argument_start(cells, types::I128, aarch64) + WIDE_INTEGER_CELLS;
-            if cells > register_limit {
+            cells += WIDE_INTEGER_CELLS;
+            if cells > GP_REGISTER_ARGUMENTS {
                 return None;
             }
         } else if float_width(param.value_type).is_some()
@@ -356,7 +413,7 @@ fn argument_cells(params: &[AbiParam], aarch64: Option<CallConv>) -> Option<(usi
             return None;
         }
     }
-    (cells <= argument_limit && floats <= XMM_REGISTER_ARGUMENTS).then_some((cells, floats))
+    (cells <= MAX_GP_ARGUMENTS && floats <= XMM_REGISTER_ARGUMENTS).then_some((cells, floats))
 }
 
 fn integer_return_cells(returns: &[AbiParam]) -> Option<usize> {
@@ -451,23 +508,41 @@ fn entry_values(blocks: &mut IntegerBlocks<'_>, block: Block) -> Option<Values> 
     let mut values = Values::default();
     let mut next = 0;
     let mut xmm = 0;
-    let aarch64 = blocks.aarch64.then_some(function.signature.call_conv);
-    for (&value, param) in params.iter().zip(&function.signature.params) {
+    for (index, (&value, param)) in params.iter().zip(&function.signature.params).enumerate() {
         let ty = function.dfg.value_type(value);
         if ty != param.value_type {
             return None;
         }
-        if let Some(width) = float_width(ty) {
+        if let Some(layout) = &blocks.aarch64_entry {
+            let (op, offset, width) = match layout.locations[index] {
+                Aarch64Argument::Gp(_) => continue,
+                Aarch64Argument::Float(register) => {
+                    (IntegerOp::FloatArgument, register, float_width(ty)?)
+                }
+                Aarch64Argument::Stack(offset) => {
+                    if let Some(width) = float_width(ty) {
+                        (IntegerOp::FloatStackArgument, offset, width)
+                    } else {
+                        (IntegerOp::StackArgument, offset, integer_width(ty)?)
+                    }
+                }
+            };
+            values.low[value] = Some(blocks.append(op, [offset as u64, 0, width]));
+        } else if let Some(width) = float_width(ty) {
             values.low[value] = Some(blocks.append(IntegerOp::FloatArgument, [xmm, 0, width]));
             xmm += 1;
         }
     }
-    for &value in params {
+    for (index, &value) in params.iter().enumerate() {
         let ty = function.dfg.value_type(value);
-        if float_width(ty).is_some() {
+        if let Some(layout) = &blocks.aarch64_entry {
+            let Aarch64Argument::Gp(register) = layout.locations[index] else {
+                continue;
+            };
+            next = register;
+        } else if float_width(ty).is_some() {
             continue;
         }
-        next = argument_start(next, ty, aarch64);
         values.low[value] = Some(blocks.normalize_abi_integer(next as u64, ty));
         next += 1;
         if ty == types::I128 {
@@ -535,6 +610,7 @@ struct IntegerBlocks<'a> {
     allow_hardware_faults: bool,
     canonicalize_nans: bool,
     aarch64: bool,
+    aarch64_entry: Option<Aarch64Arguments>,
     declarations: Option<&'a ModuleDeclarations>,
 }
 
@@ -725,8 +801,6 @@ impl IntegerBlocks<'_> {
             }
             _ => return None,
         };
-        let aarch64 = self.aarch64.then_some(signature.call_conv);
-        let (gp_arguments, float_arguments) = argument_cells(&signature.params, aarch64)?;
         let float_return = returns_float(&signature.returns);
         let return_cells = if float_return {
             1
@@ -753,44 +827,40 @@ impl IntegerBlocks<'_> {
             GP_RESULTS => IntegerOp::CallPair,
             _ => return None,
         };
-        let mut xmm = [0; XMM_REGISTER_ARGUMENTS];
-        let mut xmm_count = 0;
-        let mut gp_cell = 0;
-        for (&arg, param) in args.iter().zip(&signature.params) {
-            let arg = dfg.resolve_aliases(arg);
-            let ty = dfg.value_type(arg);
-            if ty != param.value_type {
-                return None;
-            }
-            let low = values.low[arg]?;
-            if float_width(ty).is_some() {
-                xmm[xmm_count] = low;
-                xmm_count += 1;
-            } else {
-                let start = argument_start(gp_cell, ty, aarch64);
-                if start != gp_cell {
-                    self.append(IntegerOp::CallArgument, [NO_VALUE, 0, 0]);
+        let [argument_records, float_and_stack] = if self.aarch64 {
+            let layout = aarch64_arguments(&signature.params, signature.call_conv)?;
+            self.aarch64_call_arguments(args, &signature.params, values, &layout)?
+        } else {
+            let (gp_arguments, float_arguments) = x86_argument_cells(&signature.params)?;
+            let mut xmm = [0; XMM_REGISTER_ARGUMENTS];
+            let mut xmm_count = 0;
+            for (&arg, param) in args.iter().zip(&signature.params) {
+                let arg = dfg.resolve_aliases(arg);
+                let ty = dfg.value_type(arg);
+                if ty != param.value_type {
+                    return None;
                 }
-                self.append(IntegerOp::CallArgument, [low, 0, 0]);
-                gp_cell = start + 1;
-                if ty == types::I128 {
-                    self.append(IntegerOp::CallArgument, [values.high[arg]?, 0, 0]);
-                    gp_cell += 1;
+                let low = values.low[arg]?;
+                if float_width(ty).is_some() {
+                    xmm[xmm_count] = low;
+                    xmm_count += 1;
+                } else {
+                    self.append(IntegerOp::CallArgument, [low, 0, 0]);
+                    if ty == types::I128 {
+                        self.append(IntegerOp::CallArgument, [values.high[arg]?, 0, 0]);
+                    }
                 }
             }
-        }
-        for &arg in &xmm[..float_arguments] {
-            self.append(IntegerOp::CallArgument, [arg, 0, 0]);
-        }
-        self.relocations = true;
-        let id = self.append(
-            op,
+            for &arg in &xmm[..float_arguments] {
+                self.append(IntegerOp::CallArgument, [arg, 0, 0]);
+            }
             [
-                target,
                 (gp_arguments + float_arguments) as u64,
                 float_arguments as u64,
-            ],
-        );
+            ]
+        };
+        self.relocations = true;
+        let id = self.append(op, [target, argument_records, float_and_stack]);
         let high = (return_cells == GP_RESULTS).then(|| self.append(IntegerOp::CallHigh, [0; 3]));
         if let Some(&value) = results.first() {
             values.low[value] = Some(self.normalize_abi_integer(id, dfg.value_type(value)));
@@ -806,6 +876,48 @@ impl IntegerBlocks<'_> {
             }
         }
         Some(())
+    }
+
+    fn aarch64_call_arguments(
+        &mut self,
+        args: &[Value],
+        params: &[AbiParam],
+        values: &Values,
+        layout: &Aarch64Arguments,
+    ) -> Option<[u64; 2]> {
+        let dfg = &self.function.dfg;
+        let mut gp = [NO_VALUE; AARCH64_GP_ARGUMENTS];
+        let mut fp = [NO_VALUE; AARCH64_FP_ARGUMENTS];
+        let mut stack = 0;
+        for ((&arg, param), &location) in args.iter().zip(params).zip(&layout.locations) {
+            let arg = dfg.resolve_aliases(arg);
+            let ty = dfg.value_type(arg);
+            if ty != param.value_type {
+                return None;
+            }
+            let low = values.low[arg]?;
+            match location {
+                Aarch64Argument::Gp(register) => {
+                    gp[register] = low;
+                    if ty == types::I128 {
+                        gp[register + 1] = values.high[arg]?;
+                    }
+                }
+                Aarch64Argument::Float(register) => fp[register] = low,
+                Aarch64Argument::Stack(offset) => {
+                    let width = integer_width(ty).or_else(|| float_width(ty))?;
+                    self.append(IntegerOp::CallStackArgument, [low, offset as u64, width]);
+                    stack += 1;
+                }
+            }
+        }
+        for &value in gp[..layout.gp].iter().chain(&fp[..layout.fp]) {
+            self.append(IntegerOp::CallArgument, [value, 0, 0]);
+        }
+        Some([
+            (stack + layout.gp + layout.fp) as u64,
+            ((stack as u64) << AARCH64_CALL_FLOAT_BITS) | layout.fp as u64,
+        ])
     }
 
     fn symbol_address(&mut self, global: GlobalValue, width: u64) -> Option<u64> {
@@ -2404,9 +2516,12 @@ impl IntegerBlocks<'_> {
 /// right operand a second result ID as well.
 /// Leading StackSlot records declare frame slots by size and alignment.
 /// Stack addresses and accesses use a slot ordinal and an offset within the slot.
-/// Each call is preceded by its CallArgument records, integer cells first,
-/// then floating-point cells. The call's left operand is the function ID, its
-/// right operand is the total cell count, and its extra operand is the float count.
+/// Each call is preceded by its CallArgument records, integer arguments first,
+/// then floating-point registers. AArch64 places CallStackArgument records before
+/// both register groups. These carry the value ID, stack offset, and width.
+/// The call's left operand is the function ID and its right operand is the total
+/// argument record count. The extra operand encodes the float register count in
+/// the low bits and the AArch64 stack argument count in the high bits.
 /// AAPCS64 uses a NO_VALUE argument for a register skipped before a pair.
 /// Argument records leave unreferenced slots. CallFloat returns through the
 /// first floating-point result register. AArch64 uses CallFloat32 for f32.
@@ -2424,12 +2539,14 @@ impl IntegerBlocks<'_> {
 /// The load remains live even when its result is unused.
 /// After the stack declarations, FloatArgument binds successive registers
 /// from the ABI's floating-point argument bank and occupies a normal value ID.
+/// AArch64 interleaves StackArgument and FloatStackArgument in this entry prefix.
+/// Each binds a value at its byte offset from the caller's stack pointer.
 /// A trailing FloatReturn selects the ABI's single floating-point result.
 /// SymbolRelative and SymbolGot read the data symbol ID from the left operand.
 /// A labeled function starts with BlockLabel after the stack declarations
 /// and returns through BlockReturn records. The label's extra word describes
-/// the integer return arity or a single floating-point result. Entry FloatArgument records
-/// follow the first label. BranchLabel skips the taken edge
+/// the integer return arity or a single floating-point result. The entry argument
+/// records follow the first label. BranchLabel skips the taken edge
 /// transfers and its jump to the matching EdgeLabel. Cross-block operands
 /// reload from frame homes, and JumpLabel targets a non-entry BlockLabel.
 /// BranchTable reads an i32 index, case count, and default label. Its following
@@ -2441,7 +2558,7 @@ pub fn integer_block_words(function: &Function) -> Option<Vec<u64>> {
         .map(|(primary, _)| primary.words)
 }
 
-/// Packs an AAPCS64 function with ordinary register scalar parameters.
+/// Packs an AAPCS64 function with ordinary scalar parameters.
 pub fn aarch64_leaf_words(function: &Function) -> Option<Vec<u64>> {
     let (program, _) = aarch64_program(function, None, false, false)?;
     (!program.relocations).then_some(program.words)
@@ -2487,7 +2604,16 @@ fn integer_program(
     if signature.call_conv != call_conv || !function.dynamic_stack_slots.is_empty() {
         return None;
     }
-    let (arity, _) = argument_cells(&signature.params, aarch64.then_some(call_conv))?;
+    let aarch64_entry = if aarch64 {
+        Some(aarch64_arguments(&signature.params, call_conv)?)
+    } else {
+        None
+    };
+    let arity = if let Some(layout) = &aarch64_entry {
+        layout.gp
+    } else {
+        x86_argument_cells(&signature.params)?.0
+    };
     let float_return = returns_float(&signature.returns);
     let return_cells = if float_return {
         1
@@ -2510,6 +2636,7 @@ fn integer_program(
         allow_hardware_faults,
         canonicalize_nans,
         aarch64,
+        aarch64_entry,
         declarations,
     };
     for slot in function.sized_stack_slots.values() {

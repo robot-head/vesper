@@ -162,6 +162,9 @@ pub const FLOAT_MIN: u64 = 145;
 pub const FLOAT_MAX: u64 = 146;
 pub const FLOAT_FMA32: u64 = 147;
 pub const FLOAT_FMA64: u64 = 148;
+pub const STACK_ARGUMENT: u64 = 149;
+pub const FLOAT_STACK_ARGUMENT: u64 = 150;
+pub const CALL_STACK_ARGUMENT: u64 = 151;
 const XMM_ARGUMENTS: u64 = 8;
 pub const CHECKED_ARITHMETIC_RECORDS: u64 = 2;
 
@@ -739,6 +742,7 @@ fn reads_left(in record: Record) -> bool {
         && !is_call(op)
         && !is_symbol(op)
         && op != CALL_ARGUMENT
+        && op != CALL_STACK_ARGUMENT
         && op != CALL_HIGH
         && op != OVERFLOW_FLAG
         && op != TRAP
@@ -748,6 +752,8 @@ fn reads_left(in record: Record) -> bool {
         && op != JUMP_LABEL
         && op != BRANCH_TABLE_TARGET
         && op != FLOAT_ARGUMENT
+        && op != STACK_ARGUMENT
+        && op != FLOAT_STACK_ARGUMENT
         && op != FLOAT_CONSTANT
         && op != FLOAT_RETURN
         && (!is_branch_return(op) || (record.left != NO_VALUE && record.left != TRAP_VALUE))
@@ -804,6 +810,7 @@ fn is_float_result(op: u64) -> bool {
         || op == FLOAT_COPY_SIGN
         || (op >= CALL_FLOAT32 && op <= UNSIGNED_TO_FLOAT)
         || (op >= FLOAT_CEIL && op <= FLOAT_FMA64)
+        || op == FLOAT_STACK_ARGUMENT
 }
 
 pub fn float_value(in words: Slice[u64], arguments: u64, value: u64) -> bool {
