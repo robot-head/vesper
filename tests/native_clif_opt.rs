@@ -4,6 +4,9 @@
 //! 0/1 value for a join block, `Option` temporaries and copy aggregates
 //! leave no stack slot behind, and unused loads are gone. Each source also
 //! runs on the evaluator and both JIT configurations, which must agree.
+#[path = "common/clif_opt_programs.rs"]
+mod clif_opt_programs;
+
 use cranelift_codegen::ir::{InstructionData, Opcode};
 use vesper::{check, native, parser, runtime::Runtime};
 
@@ -500,35 +503,7 @@ fn loop_invariants_hoist_to_preheader() {
 
 #[test]
 fn guarded_loop_add_overflow_is_eliminated() {
-    let source = "fn copy_offset(in src: Slice[u8], inout dst: Slice[u8], at: u64) eff [Fail[ArithOverflow], Fail[RuntimeError]] {
-    for i in 0..16 {
-        let b = src[2 + i];
-        dst.set(at + i, b);
-    }
-}
-fn main() -> u64 {
-    let mut a = ChunkSeq::new[u8]();
-    let mut b = ChunkSeq::new[u8]();
-    for i in 0..32 {
-        a.push(wrapping_u8(i));
-        b.push(0);
-    }
-    handle Fail[ArithOverflow] in {
-        handle Fail[RuntimeError] in {
-            copy_offset(in a.as_slice(), inout b.as_slice_mut(), 4);
-            match b.try_get(7) {
-                Option::Some(v) => widen_u64(v),
-                Option::None => 999,
-            }
-        } with {
-            return x => x,
-            raise(_, _) => 998,
-        }
-    } with {
-        return x => x,
-        raise(_, _) => 997,
-    }
-}";
+    let source = clif_opt_programs::GUARDED_ADD;
     let c = accepted(source);
     let (_, clif) = native::object(&c.world, "main").unwrap();
     assert_eq!(agree(source), "5");
@@ -544,38 +519,7 @@ fn main() -> u64 {
 
 #[test]
 fn guarded_loop_add_const_offset_overflow_is_eliminated() {
-    let source = "fn copy_two_halves(in src: Slice[u8], inout dst: Slice[u8], at: u64) eff [Fail[ArithOverflow], Fail[RuntimeError]] {
-    for i in 0..16 {
-        let b = src[i];
-        dst.set(at + i, b);
-        dst.set(at + 16 + i, b);
-    }
-}
-fn main() -> u64 {
-    let mut a = ChunkSeq::new[u8]();
-    let mut b = ChunkSeq::new[u8]();
-    for i in 0..16 {
-        a.push(wrapping_u8(i));
-    }
-    for _ in 0..40 {
-        b.push(0);
-    }
-    handle Fail[ArithOverflow] in {
-        handle Fail[RuntimeError] in {
-            copy_two_halves(in a.as_slice(), inout b.as_slice_mut(), 4);
-            match b.try_get(23) {
-                Option::Some(v) => widen_u64(v),
-                Option::None => 999,
-            }
-        } with {
-            return x => x,
-            raise(_, _) => 998,
-        }
-    } with {
-        return x => x,
-        raise(_, _) => 997,
-    }
-}";
+    let source = clif_opt_programs::GUARDED_ADD_CONST;
     let c = accepted(source);
     let (_, clif) = native::object(&c.world, "main").unwrap();
     assert_eq!(agree(source), "3");
@@ -591,40 +535,7 @@ fn main() -> u64 {
 
 #[test]
 fn guarded_loop_pb0_join_param_overflow_is_eliminated() {
-    let source = "fn copy_blocks(in src: Slice[u8], inout dst: Slice[u8], blocks: u64) eff [Fail[ArithOverflow], Fail[RuntimeError]] {
-    for b in 0..blocks {
-        let base = 16 * b;
-        for i in 0..16 {
-            let v = src[i];
-            dst.set(base + i, v);
-        }
-    }
-}
-fn main() -> u64 {
-    let mut a = ChunkSeq::new[u8]();
-    let mut b = ChunkSeq::new[u8]();
-    for i in 0..16 {
-        a.push(wrapping_u8(i));
-    }
-    for _ in 0..32 {
-        b.push(0);
-    }
-    handle Fail[ArithOverflow] in {
-        handle Fail[RuntimeError] in {
-            copy_blocks(in a.as_slice(), inout b.as_slice_mut(), 2);
-            match b.try_get(19) {
-                Option::Some(v) => widen_u64(v),
-                Option::None => 999,
-            }
-        } with {
-            return x => x,
-            raise(_, _) => 998,
-        }
-    } with {
-        return x => x,
-        raise(_, _) => 997,
-    }
-}";
+    let source = clif_opt_programs::GUARDED_JOIN_PARAM;
     let c = accepted(source);
     let (_, clif) = native::object(&c.world, "main").unwrap();
     assert_eq!(agree(source), "3");
@@ -777,46 +688,7 @@ fn main() -> u64 {
 
 #[test]
 fn seq_header_loads_reuse_across_try_set() {
-    let source = "
-struct Bag {
-    s: ChunkSeq[u64],
-}
-
-fn fill_and_sum(inout b: Bag, n: u64) -> u64 {
-    let mut i: u64 = 0;
-    let mut acc: u64 = 0;
-    loop {
-        if i >= n {
-            break;
-        }
-        let _ = b.s.try_set(i, wrapping_mul(i, 3));
-        let v = match b.s.try_get(i) {
-            Option::Some(x) => x,
-            Option::None => 0,
-        };
-        acc = wrapping_add(acc, v);
-        i = wrapping_add(i, 1);
-    }
-    acc
-}
-
-fn make_bag() -> Bag {
-    let mut s: ChunkSeq[u64] = ChunkSeq::new();
-    s.push(0);
-    s.push(0);
-    s.push(0);
-    s.push(0);
-    s.push(0);
-    s.push(0);
-    Bag { s: s }
-}
-
-fn main() -> u64 {
-    let mut b = make_bag();
-    let a = fill_and_sum(inout b, 6);
-    let c = fill_and_sum(inout b, 4);
-    wrapping_add(a, c)
-}";
+    let source = clif_opt_programs::SEQ_TRY_SET;
     let c = accepted(source);
     let (_, clif) = native::object(&c.world, "main").unwrap();
     let eval = vesper::runtime::Runtime::new(&c.world)
@@ -887,27 +759,7 @@ fn main() -> u64 {
 
 #[test]
 fn seq_header_loads_reuse_across_clean_try_get_diamond() {
-    let source = "
-struct Bag { s: ChunkSeq[u64] }
-
-fn bump(inout b: Bag, i: u64) -> u64 {
-    let v = match b.s.try_get(i) {
-        Option::Some(x) => x,
-        Option::None => 0,
-    };
-    let _ = b.s.try_set(i, wrapping_add(v, 1));
-    v
-}
-
-fn main() -> u64 {
-    let mut s: ChunkSeq[u64] = ChunkSeq::new();
-    s.push(10);
-    s.push(20);
-    let mut b = Bag { s: s };
-    let a = bump(inout b, 0);
-    let c = bump(inout b, 0);
-    wrapping_add(a, c)
-}";
+    let source = clif_opt_programs::SEQ_TRY_GET_DIAMOND;
     let c = accepted(source);
     let (_, clif) = native::object(&c.world, "main").unwrap();
     let eval = vesper::runtime::Runtime::new(&c.world)

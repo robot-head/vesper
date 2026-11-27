@@ -1,0 +1,530 @@
+// eliminate_guarded_loop_add_overflows of src/native_clif_opt.rs in
+// Vesper (#2362 part 6): an `icmp ult (iadd base, iv), base` overflow
+// check in a loop whose preheader guards already proved the add cannot
+// overflow becomes `iconst.i8 0`.
+
+use @vesper/clif::{Func, n32, u32_at, u64_at, w};
+use @vesper/clif::codes::{
+    CC_EQ, CC_UGE, CC_ULT, NONE, OP_BAND, OP_BOR, OP_BRIF, OP_IADD, OP_IADD_IMM, OP_ICMP,
+    OP_ICMP_IMM, OP_ICONST, OP_ISUB, OP_SEXTEND, OP_UADD_OVERFLOW, OP_UEXTEND, TY_I8
+};
+use super::{layout_blocks};
+use super::branches::{Cfg, cfg_of, dom_of, pred_hi, pred_lo};
+use super::loops::{Loops, dominates, has, in_loop, loops_found, loops_of, pred_block, ranks};
+
+// How many guard blocks the walk up from a loop header looks through.
+const MAX_GUARD_CHAIN: u64 = 16;
+// The `uadd_overflow` result that is its overflow flag.
+const OVERFLOW_RESULT: u64 = 1;
+// Binary arguments, and the arguments of a block's first and second
+// destinations.
+const ARG_A: u64 = 0;
+const ARG_B: u64 = 1;
+const DEST_THEN: u64 = 0;
+const DEST_ELSE: u64 = 1;
+// `-1` as an immediate word.
+const MINUS_ONE: u64 = 18446744073709551615;
+// The kinds of a base key: a value, or a value plus a constant.
+const KEY_VAL: u64 = 0;
+const KEY_ADD: u64 = 1;
+
+// A base key (`BaseKey` of the Rust step).
+copy struct Key {
+    kind: u64,
+    v: u32,
+    c: u64,
+}
+
+fn val_key(v: u32) -> Key {
+    Key { kind: KEY_VAL, v: v, c: 0 }
+}
+
+fn add_key(v: u32, c: u64) -> Key {
+    Key { kind: KEY_ADD, v: v, c: c }
+}
+
+// A set of keys.
+struct Keys {
+    kind: ChunkSeq[u64],
+    v: ChunkSeq[u32],
+    c: ChunkSeq[u64],
+}
+
+fn no_keys() -> Keys {
+    Keys { kind: ChunkSeq::new[u64](), v: ChunkSeq::new[u32](), c: ChunkSeq::new[u64]() }
+}
+
+fn holds(in s: Keys, k: Key) -> bool {
+    for q in 0..s.kind.len() {
+        if u64_at(in s.kind, q) == k.kind && u32_at(in s.v, q) == k.v && u64_at(in s.c, q) == k.c {
+            return true;
+        }
+    }
+    false
+}
+
+fn insert(inout s: Keys, k: Key) {
+    if !holds(in s, k) {
+        s.kind.push(k.kind);
+        s.v.push(k.v);
+        s.c.push(k.c);
+    }
+}
+
+// The proofs gathered for one loop: the proven bases and the proven
+// (value, constant) sums.
+struct Proofs {
+    bases: Keys,
+    sums: Keys,
+}
+
+// The instruction defining `v` as its first result, or NONE.
+fn def0(in f: Func, v: u32) -> u32 {
+    let d = f.def_inst(v);
+    if d == NONE || f.def_num(v) != 0 {
+        return NONE;
+    }
+    d
+}
+
+// A constant's immediate word; `some` false for a value that is not one.
+copy struct Konst {
+    some: bool,
+    c: u64,
+}
+
+fn const_val(in f: Func, v: u32) -> Konst {
+    let d = def0(in f, v);
+    if d == NONE || f.op(d) != OP_ICONST {
+        return Konst { some: false, c: 0 };
+    }
+    Konst { some: true, c: f.inst(w(d)).imm }
+}
+
+fn base_key(in f: Func, v0: u32) -> Key {
+    let v = f.resolve(v0);
+    let d = def0(in f, v);
+    if d == NONE {
+        return val_key(v);
+    }
+    let op = f.op(d);
+    if op == OP_IADD_IMM {
+        return add_key(f.resolve(f.arg(d, ARG_A)), f.inst(w(d)).imm);
+    }
+    if op == OP_IADD {
+        let a = f.arg(d, ARG_A);
+        let b = f.arg(d, ARG_B);
+        let cb = const_val(in f, b);
+        if cb.some {
+            return add_key(f.resolve(a), cb.c);
+        }
+        let ca = const_val(in f, a);
+        if ca.some {
+            return add_key(f.resolve(b), ca.c);
+        }
+    }
+    val_key(v)
+}
+
+fn is_hi_minus_one(in f: Func, v: u32, hi: u32) -> bool {
+    let vc = const_val(in f, v);
+    let hc = const_val(in f, hi);
+    if vc.some && hc.some && wrapping_sub(hc.c, 1) == vc.c {
+        return true;
+    }
+    let d = def0(in f, v);
+    if d == NONE {
+        return false;
+    }
+    let op = f.op(d);
+    if op == OP_IADD_IMM {
+        return f.inst(w(d)).imm == MINUS_ONE && f.resolve(f.arg(d, ARG_A)) == hi;
+    }
+    if op == OP_ISUB {
+        if f.resolve(f.arg(d, ARG_A)) != hi {
+            return false;
+        }
+        let one = const_val(in f, f.arg(d, ARG_B));
+        return one.some && one.c == 1;
+    }
+    false
+}
+
+// The (resolved) arguments of the `uadd_overflow` defining `v` as its
+// first result, when it is one of `ovf`.
+copy struct Pair {
+    some: bool,
+    u: u32,
+    w: u32,
+}
+
+fn uadd_args(in f: Func, in ovf: ChunkSeq[u32], v: u32) -> Pair {
+    let d = def0(in f, v);
+    if d == NONE || !has(in ovf, d) || f.op(d) != OP_UADD_OVERFLOW {
+        return Pair { some: false, u: NONE, w: NONE };
+    }
+    Pair { some: true, u: f.resolve(f.arg(d, ARG_A)), w: f.resolve(f.arg(d, ARG_B)) }
+}
+
+fn prove_sum(inout p: Proofs, v: u32, c: u64) {
+    insert(inout p.bases, add_key(v, c));
+    insert(inout p.sums, add_key(v, c));
+}
+
+fn record_hi_pair(in f: Func, in ovf: ChunkSeq[u32], other: u32, inout p: Proofs) {
+    insert(inout p.bases, val_key(other));
+    insert(inout p.bases, base_key(in f, other));
+    let uw = uadd_args(in f, in ovf, other);
+    if uw.some {
+        let cw = const_val(in f, uw.w);
+        if cw.some {
+            prove_sum(inout p, uw.u, cw.c);
+        }
+        let cu = const_val(in f, uw.u);
+        if cu.some {
+            prove_sum(inout p, uw.w, cu.c);
+        }
+    }
+}
+
+// `collect_ovf_flags`: the `uadd_overflow` flags or-ed into `flag`, and
+// what each proves when one side is `hi - 1`.
+fn collect_ovf_flags(in f: Func, flag: u32, hi: u32, inout p: Proofs) {
+    let mut work = ChunkSeq::new[u32]();
+    work.push(f.resolve(flag));
+    let mut visited = ChunkSeq::new[u32]();
+    let mut ovf = ChunkSeq::new[u32]();
+    loop {
+        let cur = match work.pop() {
+            Option::Some(x) => x,
+            Option::None => break,
+        };
+        if has(in visited, cur) {
+            continue;
+        }
+        visited.push(cur);
+        let d = f.def_inst(cur);
+        if d == NONE {
+            continue;
+        }
+        let n = w(f.def_num(cur));
+        if n == 0 && f.op(d) == OP_BOR {
+            work.push(f.resolve(f.arg(d, ARG_A)));
+            work.push(f.resolve(f.arg(d, ARG_B)));
+        } else if n == OVERFLOW_RESULT && f.op(d) == OP_UADD_OVERFLOW && !has(in ovf, d) {
+            ovf.push(d);
+        }
+    }
+    for q in 0..ovf.len() {
+        let inst = u32_at(in ovf, q);
+        let a = f.resolve(f.arg(inst, ARG_A));
+        let b = f.resolve(f.arg(inst, ARG_B));
+        if is_hi_minus_one(in f, a, hi) {
+            record_hi_pair(in f, in ovf, b, inout p);
+        }
+        if is_hi_minus_one(in f, b, hi) {
+            record_hi_pair(in f, in ovf, a, inout p);
+        }
+        for side in 0..2 {
+            let sum_part = if side == 0 { a } else { b };
+            let const_part = if side == 0 { b } else { a };
+            let c = const_val(in f, const_part);
+            if !c.some {
+                continue;
+            }
+            let uw = uadd_args(in f, in ovf, sum_part);
+            if !uw.some {
+                continue;
+            }
+            if is_hi_minus_one(in f, uw.u, hi) {
+                prove_sum(inout p, uw.w, c.c);
+            }
+            if is_hi_minus_one(in f, uw.w, hi) {
+                prove_sum(inout p, uw.u, c.c);
+            }
+        }
+    }
+}
+
+// The distinct predecessor blocks of `b` outside loop `lp`.
+fn outside_preds(in f: Func, in cfg: Cfg, in l: Loops, b: u32, lp: u32) -> ChunkSeq[u32] {
+    let mut out = ChunkSeq::new[u32]();
+    for p in pred_lo(in cfg, b)..pred_hi(in cfg, b) {
+        let pb = pred_block(in f, in cfg, p);
+        if !in_loop(in l, pb, lp) && !has(in out, pb) {
+            out.push(pb);
+        }
+    }
+    out
+}
+
+// `resolve_guard_val`: a guard value, followed through a parameter of
+// `pred` to its one incoming value that is not the constant 0. `some`
+// false when there is not exactly one; `from` is the block it comes from
+// (`pred` itself when `v` is not a parameter of `pred`).
+copy struct Guard {
+    some: bool,
+    v: u32,
+    from: u32,
+}
+
+fn is_zero(in f: Func, v: u32) -> bool {
+    let c = const_val(in f, v);
+    c.some && c.c == 0
+}
+
+fn resolve_guard_val(in f: Func, in cfg: Cfg, pred: u32, val: u32) -> Guard {
+    let pv = f.resolve(val);
+    let mut idx = NONE;
+    for k in 0..f.nparams(pred) {
+        if f.param(pred, k) == pv {
+            idx = n32(k);
+            break;
+        }
+    }
+    if idx == NONE {
+        return Guard { some: true, v: pv, from: pred };
+    }
+    let mut n: u64 = 0;
+    let mut only = Guard { some: false, v: NONE, from: NONE };
+    for e in pred_lo(in cfg, pred)..pred_hi(in cfg, pred) {
+        let pb = pred_block(in f, in cfg, e);
+        let term = f.last_inst(pb);
+        if term == NONE {
+            continue;
+        }
+        for d in 0..f.ndests(term) {
+            if f.dest_block(term, d) != pred || w(idx) >= f.dest_nargs(term, d) {
+                continue;
+            }
+            let v = f.dest_arg(term, d, w(idx));
+            if v == NONE || is_zero(in f, v) {
+                continue;
+            }
+            n = wrapping_add(n, 1);
+            only = Guard { some: true, v: f.resolve(v), from: pb };
+        }
+    }
+    if n != 1 {
+        return Guard { some: false, v: NONE, from: NONE };
+    }
+    only
+}
+
+// `icmp uge lo, hi`.
+fn is_empty_range(in f: Func, v: u32, lo: u32, hi: u32) -> bool {
+    let d = def0(in f, v);
+    d != NONE
+        && f.op(d) == OP_ICMP
+        && f.inst(w(d)).cond == CC_UGE
+        && f.resolve(f.arg(d, ARG_A)) == lo
+        && f.resolve(f.arg(d, ARG_B)) == hi
+}
+
+// `icmp_imm eq x, 0`: its argument, or NONE.
+fn eq_zero_arg(in f: Func, v: u32) -> u32 {
+    let d = def0(in f, v);
+    if d == NONE || f.op(d) != OP_ICMP_IMM {
+        return NONE;
+    }
+    let row = f.inst(w(d));
+    if row.cond != CC_EQ || row.imm != 0 {
+        return NONE;
+    }
+    f.arg(d, ARG_A)
+}
+
+pub fn eliminate_guarded_loop_add_overflows(inout f: Func) {
+    if f.first_block() == NONE {
+        return;
+    }
+    let cfg = cfg_of(in f);
+    let dom = dom_of(in f, in cfg);
+    let rank = ranks(in f, in dom);
+    let l = loops_of(in f, in cfg, in dom, in rank);
+    let all = loops_found(in f, in l);
+    for o in 0..all.len() {
+        let lp = u32_at(in all, o);
+        let header = u32_at(in l.header, w(lp));
+        let outside = outside_preds(in f, in cfg, in l, header, lp);
+        if outside.len() != 1 {
+            continue;
+        }
+        let preheader = u32_at(in outside, 0);
+        if !dominates(in dom, in rank, preheader, header) {
+            continue;
+        }
+        let pre_term = f.last_inst(preheader);
+        if pre_term == NONE || f.op(pre_term) != OP_BRIF {
+            continue;
+        }
+        if f.dest_block(pre_term, DEST_THEN) != header
+            || f.dest_block(pre_term, DEST_ELSE) == header
+        {
+            continue;
+        }
+        let hdr_term = f.last_inst(header);
+        if hdr_term == NONE || f.op(hdr_term) != OP_BRIF {
+            continue;
+        }
+        let body = f.dest_block(hdr_term, DEST_THEN);
+        let exit = f.dest_block(hdr_term, DEST_ELSE);
+        if !in_loop(in l, body, lp) || in_loop(in l, exit, lp) {
+            continue;
+        }
+        let ci = def0(in f, f.arg(hdr_term, ARG_A));
+        if ci == NONE || f.op(ci) != OP_ICMP || f.inst(w(ci)).cond != CC_ULT {
+            continue;
+        }
+        let iv = f.resolve(f.arg(ci, ARG_A));
+        let hi = f.resolve(f.arg(ci, ARG_B));
+        let mut iv_idx = NONE;
+        for k in 0..f.nparams(header) {
+            if f.param(header, k) == iv {
+                iv_idx = n32(k);
+                break;
+            }
+        }
+        if iv_idx == NONE || w(iv_idx) >= f.dest_nargs(pre_term, DEST_THEN) {
+            continue;
+        }
+        let lo0 = f.dest_arg(pre_term, DEST_THEN, w(iv_idx));
+        if lo0 == NONE {
+            continue;
+        }
+        let lo = f.resolve(lo0);
+        let mut p = Proofs { bases: no_keys(), sums: no_keys() };
+        let mut target = header;
+        for _ in 0..MAX_GUARD_CHAIN {
+            let preds = outside_preds(in f, in cfg, in l, target, lp);
+            if preds.len() != 1 {
+                break;
+            }
+            let pred = u32_at(in preds, 0);
+            if !dominates(in dom, in rank, pred, header) {
+                break;
+            }
+            let pred_term = f.last_inst(pred);
+            if pred_term == NONE || f.op(pred_term) != OP_BRIF {
+                break;
+            }
+            let pb0 = f.dest_block(pred_term, DEST_THEN);
+            let pb1 = f.dest_block(pred_term, DEST_ELSE);
+            let cond = f.arg(pred_term, ARG_A);
+            let mut g = Guard { some: false, v: NONE, from: NONE };
+            if pb0 == target && pb1 != target {
+                g = resolve_guard_val(in f, in cfg, pred, cond);
+                if !g.some {
+                    break;
+                }
+            } else if pb1 == target && pb0 != target {
+                let inner = eq_zero_arg(in f, f.resolve(cond));
+                if inner == NONE {
+                    target = pred;
+                    continue;
+                }
+                g = resolve_guard_val(in f, in cfg, pred, inner);
+                if !g.some {
+                    break;
+                }
+            } else {
+                break;
+            }
+            let next_target = g.from;
+            let mut conj = g.v;
+            loop {
+                let d = def0(in f, conj);
+                if d == NONE || (f.op(d) != OP_UEXTEND && f.op(d) != OP_SEXTEND) {
+                    break;
+                }
+                conj = f.resolve(f.arg(d, ARG_A));
+            }
+            let gi = def0(in f, conj);
+            if gi != NONE && f.op(gi) == OP_BOR {
+                let a = f.arg(gi, ARG_A);
+                let b = f.arg(gi, ARG_B);
+                if is_empty_range(in f, a, lo, hi) {
+                    conj = f.resolve(b);
+                } else if is_empty_range(in f, b, lo, hi) {
+                    conj = f.resolve(a);
+                } else {
+                    target = next_target;
+                    continue;
+                }
+            }
+            let mut work = ChunkSeq::new[u32]();
+            work.push(conj);
+            let mut visited = ChunkSeq::new[u32]();
+            loop {
+                let cur = match work.pop() {
+                    Option::Some(x) => x,
+                    Option::None => break,
+                };
+                if has(in visited, cur) {
+                    continue;
+                }
+                visited.push(cur);
+                let d = def0(in f, cur);
+                if d == NONE {
+                    continue;
+                }
+                if f.op(d) == OP_BAND {
+                    work.push(f.resolve(f.arg(d, ARG_A)));
+                    work.push(f.resolve(f.arg(d, ARG_B)));
+                } else {
+                    let flag = eq_zero_arg(in f, cur);
+                    if flag != NONE {
+                        collect_ovf_flags(in f, flag, hi, inout p);
+                    }
+                }
+            }
+            target = next_target;
+        }
+        if p.bases.kind.len() == 0 {
+            continue;
+        }
+        let blocks = layout_blocks(in f);
+        for q in 0..blocks.len() {
+            let b = u32_at(in blocks, q);
+            if !in_loop(in l, b, lp) || b == header || !dominates(in dom, in rank, body, b) {
+                continue;
+            }
+            let mut i = f.first_inst(b);
+            loop {
+                if i == NONE {
+                    break;
+                }
+                let next = f.next_inst(i);
+                if proven_check(in f, in p, iv, i) {
+                    f.replace_iconst(i, TY_I8, 0);
+                }
+                i = next;
+            }
+        }
+    }
+}
+
+// Whether `i` is an `icmp ult (iadd x, y), bound` with `bound` one of the
+// addends and the add proven not to overflow.
+fn proven_check(in f: Func, in p: Proofs, iv: u32, i: u32) -> bool {
+    if f.op(i) != OP_ICMP || f.inst(w(i)).cond != CC_ULT {
+        return false;
+    }
+    let sum = f.resolve(f.arg(i, ARG_A));
+    let bound = f.resolve(f.arg(i, ARG_B));
+    let si = def0(in f, sum);
+    if si == NONE || f.op(si) != OP_IADD {
+        return false;
+    }
+    let x = f.resolve(f.arg(si, ARG_A));
+    let y = f.resolve(f.arg(si, ARG_B));
+    if bound != x && bound != y {
+        return false;
+    }
+    let iv_sum = (x == iv
+        && (holds(in p.bases, val_key(y)) || holds(in p.bases, base_key(in f, y))))
+        || (y == iv && (holds(in p.bases, val_key(x)) || holds(in p.bases, base_key(in f, x))));
+    let k = base_key(in f, sum);
+    let const_sum = k.kind == KEY_ADD && holds(in p.sums, k);
+    iv_sum || const_sum
+}
