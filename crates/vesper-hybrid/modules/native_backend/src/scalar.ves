@@ -133,6 +133,8 @@ pub const AND_NOT: u64 = 116;
 pub const OR_NOT: u64 = 117;
 pub const XOR_NOT: u64 = 118;
 pub const ABS: u64 = 119;
+pub const ATOMIC_LOAD: u64 = 120;
+pub const ATOMIC_STORE: u64 = 121;
 const XMM_ARGUMENTS: u64 = 8;
 pub const CHECKED_ARITHMETIC_RECORDS: u64 = 2;
 

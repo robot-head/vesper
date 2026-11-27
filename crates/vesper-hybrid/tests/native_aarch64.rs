@@ -90,6 +90,8 @@ const AND_NOT: u64 = 116;
 const OR_NOT: u64 = 117;
 const XOR_NOT: u64 = 118;
 const ABS: u64 = 119;
+const ATOMIC_LOAD: u64 = 120;
+const ATOMIC_STORE: u64 = 121;
 const EQUAL: u64 = 0;
 const SIGNED_LESS: u64 = 2;
 const UNSIGNED_LESS: u64 = 6;
@@ -200,6 +202,66 @@ fn aarch64_atomic_retry_loops_preserve_operands_and_unused_effects() {
     );
     assert!(binding::aarch64_integer_leaf(&[2, 2, ATOMIC_ADD, 0, 1, u128::BITS.into()]).is_empty());
     assert!(binding::aarch64_integer_leaf(&[0, 0, FENCE, 0, 0, 0]).is_empty());
+}
+
+#[test]
+fn aarch64_ordered_atomic_accesses_emit_ldar_and_stlr() {
+    // The encodings follow Cranelift's isa/aarch64/atomic_{load,store}.clif.
+    const LDARB_W0_X0: u32 = 0x08df_fc00;
+    const LDARH_W0_X0: u32 = 0x48df_fc00;
+    const LDAR_W0_X0: u32 = 0x88df_fc00;
+    const LDAR_X0_X0: u32 = 0xc8df_fc00;
+    const STLRB_W1_X0: u32 = 0x089f_fc01;
+    const STLRH_W1_X0: u32 = 0x489f_fc01;
+    const STLR_W1_X0: u32 = 0x889f_fc01;
+    const STLR_X1_X0: u32 = 0xc89f_fc01;
+    for (width, load, store) in [
+        (BYTE_BITS, LDARB_W0_X0, STLRB_W1_X0),
+        (WORD_BITS, LDARH_W0_X0, STLRH_W1_X0),
+        (DWORD_BITS, LDAR_W0_X0, STLR_W1_X0),
+        (CELL_BITS, LDAR_X0_X0, STLR_X1_X0),
+    ] {
+        assert_eq!(
+            binding::aarch64_integer_leaf(&[1, 1, ATOMIC_LOAD, 0, 0, width]),
+            [load, RET].map(u32::to_le_bytes).concat()
+        );
+        assert_eq!(
+            binding::aarch64_integer_leaf(&[2, NO_VALUE, ATOMIC_STORE, 0, 1, width]),
+            [store, RET].map(u32::to_le_bytes).concat()
+        );
+    }
+    assert!(binding::aarch64_integer_leaf(&[1, 1, ATOMIC_LOAD, 0, 1, CELL_BITS]).is_empty());
+    assert!(binding::aarch64_integer_leaf(&[2, 2, ATOMIC_STORE, 0, 1, CELL_BITS]).is_empty());
+}
+
+#[test]
+fn aarch64_discarded_atomic_load_keeps_the_acquire() {
+    use cranelift_codegen::ir::{AbiParam, Function, InstBuilder, MemFlags, types};
+    use cranelift_codegen::isa::CallConv;
+    use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
+
+    const LDAR_X16_X0: u32 = 0xc8df_fc10;
+    let mut function = Function::new();
+    function.signature.call_conv = CallConv::SystemV;
+    function.signature.params.push(AbiParam::new(types::I64));
+    let mut context = FunctionBuilderContext::new();
+    let mut builder = FunctionBuilder::new(&mut function, &mut context);
+    let block = builder.create_block();
+    builder.append_block_params_for_function_params(block);
+    builder.switch_to_block(block);
+    builder.seal_block(block);
+    let address = builder.block_params(block)[0];
+    builder
+        .ins()
+        .atomic_load(types::I64, MemFlags::trusted(), address);
+    builder.ins().return_(&[]);
+    builder.finalize();
+
+    let words = native::machine::aarch64_leaf_words(&function).unwrap();
+    assert_eq!(
+        binding::aarch64_integer_leaf(&words),
+        [LDAR_X16_X0, RET].map(u32::to_le_bytes).concat()
+    );
 }
 
 #[test]

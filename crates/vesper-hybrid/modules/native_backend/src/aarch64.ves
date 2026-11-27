@@ -26,7 +26,7 @@ use self::scalar::{
     FLOAT_STACK_STORE32, FLOAT_STACK_STORE64, FLOAT_COPY_SIGN, is_float_binary, is_float_compare,
     float_value, valid_float_operands, LEADING_ZEROS, TRAILING_ZEROS, POPULATION_COUNT,
     REVERSE_BITS, LEADING_SIGN_BITS, ROTATE_RIGHT, ROTATE_RIGHT_REGISTER, ROTATE_LEFT_REGISTER,
-    FUNNEL_RIGHT, AND_NOT, OR_NOT, XOR_NOT, ABS
+    FUNNEL_RIGHT, AND_NOT, OR_NOT, XOR_NOT, ABS, ATOMIC_LOAD, ATOMIC_STORE
 };
 use self::x86_64::{
     BYTE_BITS, WORD_BITS, DWORD_BITS, QWORD_BITS, FLOAT_ORDERED, FLOAT_UNORDERED, FLOAT_EQUAL,
@@ -174,6 +174,8 @@ const MEMORY_UNSCALED: u32 = 0x38000000;
 const MEMORY_REGISTER: u32 = 0x38206800;
 const LOAD_ACQUIRE_EXCLUSIVE: u32 = 0x085ffc00;
 const STORE_RELEASE_EXCLUSIVE: u32 = 0x0800fc00;
+const LOAD_ACQUIRE: u32 = 0x08dffc00;
+const STORE_RELEASE: u32 = 0x089ffc00;
 const DMB_ISH: u32 = 0xd5033bbf;
 const EXCHANGE_RETRY_DISTANCE: u32 = 2;
 const ARITHMETIC_RETRY_DISTANCE: u32 = 3;
@@ -845,10 +847,15 @@ fn operands(in r: Record, returns: u64) -> Option[u64] {
     if !scalar_width(r.extra) {
         return Option::None;
     }
-    if is_atomic_rmw(r.op) {
+    if is_atomic_rmw(r.op) || r.op == ATOMIC_STORE {
         return Option::Some(2);
     }
     match r.op {
+        ATOMIC_LOAD => if r.right == 0 {
+            Option::Some(1)
+        } else {
+            Option::None
+        },
         LOAD => if r.right <= DISP32_MASK {
             Option::Some(1)
         } else {
@@ -1010,9 +1017,17 @@ fn emit_checked(inout out: ChunkSeq[u8], in r: Record, dest: u32, lhs: u32, rhs:
     }
 }
 
+fn atomic_address(width: u64, address: u32) -> u32 {
+    let size = sh(trailing_zeros_u64(width / BYTE_BITS), MEMORY_SIZE_SHIFT);
+    sh(address, RN_SHIFT) | size
+}
+
 fn emit_atomic(inout out: ChunkSeq[u8], in r: Record, old: u32, address: u32, operand: u32) {
-    let size = sh(trailing_zeros_u64(r.extra / BYTE_BITS), MEMORY_SIZE_SHIFT);
-    let base = sh(address, RN_SHIFT) | size;
+    let base = atomic_address(r.extra, address);
+    if r.op == ATOMIC_LOAD {
+        push32(inout out, LOAD_ACQUIRE | base | old);
+        return;
+    }
     push32(inout out, LOAD_ACQUIRE_EXCLUSIVE | base | old);
     let (source, distance) = if r.op == ATOMIC_EXCHANGE {
         (operand, EXCHANGE_RETRY_DISTANCE)
@@ -1533,6 +1548,7 @@ fn no_result(op: u64) -> bool {
         || op == RETURN_PAIR
         || op == TRAP
         || op == FENCE
+        || op == ATOMIC_STORE
 }
 
 fn stack_adjust(opcode: u32, adjustment: u32) -> u32 {
@@ -2109,6 +2125,7 @@ fn encode_pass(
         } else if last == NEVER_READ
             && !is_integer_division(r.op)
             && !is_atomic_rmw(r.op)
+            && r.op != ATOMIC_LOAD
             && !live_overflow_flag(in ends, value, r.op)
         {
             continue;
@@ -2265,7 +2282,8 @@ fn encode_pass(
         let live = last != NEVER_READ;
         let calls = direct_call(r.op);
         let division = is_integer_division(r.op);
-        let atomic = is_atomic_rmw(r.op);
+        let atomic_rmw = is_atomic_rmw(r.op);
+        let atomic = atomic_rmw || r.op == ATOMIC_LOAD;
         let checked = is_checked_arithmetic(r.op);
         let overflow_live = checked && last_read(in ends, wrapping_add(value, 1)) != NEVER_READ;
         if r.op == STACK_SLOT
@@ -2365,8 +2383,12 @@ fn encode_pass(
         if n == 3 {
             used = expire(used, in ends, r.extra, value, extra);
         }
-        if stored != 0 {
-            if is_stack_store(r.op) {
+        if stored != 0 || r.op == ATOMIC_STORE {
+            if r.op == ATOMIC_STORE {
+                let address = materialize(inout out, left, SPILL_LEFT, frame_bytes);
+                let source = store_source(inout out, right, SPILL_RIGHT, frame_bytes);
+                push32(inout out, STORE_RELEASE | atomic_address(r.extra, address) | source);
+            } else if is_stack_store(r.op) {
                 let source = store_source(inout out, left, SPILL_LEFT, frame_bytes);
                 let displacement = stack_displacement(in frame, in r).unwrap_or(0);
                 let home = if homes != 0 {
@@ -2545,7 +2567,11 @@ fn encode_pass(
             }
         }
         // A failed store retries with both original operands.
-        let atomic_operands = if atomic { sh(1, lhs) | sh(1, rhs) } else { 0 };
+        let atomic_operands = if atomic_rmw {
+            sh(1, lhs) | sh(1, rhs)
+        } else {
+            0
+        };
         let unavailable = used | home_mask | atomic_operands;
         let preserved = if last > next_call {
             callee_mask & ~unavailable

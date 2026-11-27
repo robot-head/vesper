@@ -139,6 +139,8 @@ enum IntegerOp {
     OrNot = 117,
     XorNot = 118,
     Abs = 119,
+    AtomicLoad = 120,
+    AtomicStore = 121,
 }
 
 fn integer_bit_op(op: Opcode) -> Option<IntegerOp> {
@@ -1367,10 +1369,15 @@ impl IntegerBlocks<'_> {
                 if ty(address) != types::I64 || !self.supports_atomic_access(flags) {
                     return None;
                 }
-                // A memory exchange implements a sequentially consistent
-                // store on x86. Its previous value is dead.
+                // AArch64 uses a release store. x86 needs an exchange to
+                // order the store before subsequent loads.
+                let op = if self.aarch64 {
+                    IntegerOp::AtomicStore
+                } else {
+                    IntegerOp::AtomicExchange
+                };
                 self.append(
-                    IntegerOp::AtomicExchange,
+                    op,
                     [input(address)?, input(source)?, integer_width(ty(source))?],
                 );
                 continue;
@@ -1482,7 +1489,12 @@ impl IntegerBlocks<'_> {
                     arg,
                 } if ty(arg) == types::I64 && self.supports_atomic_access(flags) => {
                     // x86 orders a plain load strongly enough for a CLIF atomic load.
-                    (IntegerOp::Load, [input(arg)?, 0, width])
+                    let op = if self.aarch64 {
+                        IntegerOp::AtomicLoad
+                    } else {
+                        IntegerOp::Load
+                    };
+                    (op, [input(arg)?, 0, width])
                 }
                 InstructionData::AtomicRmw {
                     opcode: Opcode::AtomicRmw,
@@ -2253,6 +2265,8 @@ impl IntegerBlocks<'_> {
 /// third operand, with two i64 inputs and an i64 result.
 /// Atomic read-modify-write records take an address, operand, and width.
 /// They remain live for their memory effect even when the old value is unused.
+/// AArch64 AtomicLoad and AtomicStore encode ordered accesses without an offset.
+/// The load remains live even when its result is unused.
 /// After the stack declarations, FloatArgument binds successive SysV XMM
 /// arguments. These use their own register bank and occupy normal value IDs.
 /// A trailing FloatReturn selects XMM0 for the single return value.
