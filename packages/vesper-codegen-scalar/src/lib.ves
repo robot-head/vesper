@@ -84,7 +84,7 @@ const LANE_I128: u8 = 3;
 
 // `numeric::Conversion`, in `conversion`'s search order.
 const CONV_WIDEN: u32 = 1;
-const CONV_NARROW: u32 = 2;
+pub const CONV_NARROW: u32 = 2;
 const CONV_WRAPPING: u32 = 3;
 
 // `integer_widths::BitOp`, in `BIT_BUILTINS` order.
@@ -94,6 +94,27 @@ const BIT_OP_COUNT: u32 = 6;
 const FLOAT_INTRINSIC: u32 = 1;
 const FLOAT_MATH: u32 = 2;
 
+// Exact float intrinsic codes (`Tables.float_ops`, used by `body.ves`).
+pub const FOP_SQRT: u32 = 1;
+pub const FOP_ABS: u32 = 2;
+pub const FOP_FLOOR: u32 = 3;
+pub const FOP_CEIL: u32 = 4;
+pub const FOP_ROUND: u32 = 5;
+pub const FOP_TRUNC: u32 = 6;
+pub const FOP_MIN: u32 = 7;
+pub const FOP_MAX: u32 = 8;
+pub const FOP_FMA: u32 = 9;
+pub const FOP_WIDEN_F32: u32 = 10;
+pub const FOP_WIDEN_F64: u32 = 11;
+pub const FOP_NEAREST_F32: u32 = 12;
+pub const FOP_NEAREST_F64: u32 = 13;
+pub const FOP_TO_BITS_F32: u32 = 14;
+pub const FOP_TO_BITS_F64: u32 = 15;
+pub const FOP_FROM_BITS_F32: u32 = 16;
+pub const FOP_FROM_BITS_F64: u32 = 17;
+// `saturating_<kind>` is `FOP_SAT_BASE + kind`.
+pub const FOP_SAT_BASE: u32 = 32;
+
 // The largest i64, which a literal's magnitude must exceed to default to u64.
 const I64_MAX: u64 = 9223372036854775807;
 
@@ -101,7 +122,7 @@ fn put(inout out: ChunkSeq[u8], in text: Str) {
     out.extend(in text.as_bytes());
 }
 
-fn get(in table: ChunkSeq[u32], symbol: u32) -> u32 {
+pub fn get(in table: ChunkSeq[u32], symbol: u32) -> u32 {
     if w(symbol) < table.len() {
         u32_at(in table, w(symbol))
     } else {
@@ -166,7 +187,7 @@ fn kind_bits(kind: u32) -> u64 {
     }
 }
 
-fn kind_unsigned(kind: u32) -> bool {
+pub fn kind_unsigned(kind: u32) -> bool {
     (kind >= 1 && kind <= 5) || kind == KIND_U128
 }
 
@@ -265,6 +286,8 @@ struct Tables {
     bit_builtins: ChunkSeq[u32],
     // symbol -> FLOAT_* flags
     float_flags: ChunkSeq[u32],
+    // symbol -> FOP_* exact float intrinsic code (body.ves)
+    float_ops: ChunkSeq[u32],
     // symbol -> 1 bit_and, 2 bit_or, 3 bit_xor, 4 bit_shl, 5 bit_shr
     bit_intrinsics: ChunkSeq[u32],
     // symbol -> 1 rotate_left, 2 rotate_right
@@ -303,8 +326,16 @@ copy struct Ops {
     never: u32,
     box_: u32,
     bool_: u32,
-    // `=`, a plain write's operator (body.ves)
+    // `=` and compound assignments (body.ves)
     assign: u32,
+    plus_eq: u32,
+    minus_eq: u32,
+    star_eq: u32,
+    slash_eq: u32,
+    percent_eq: u32,
+    amp_eq: u32,
+    pipe_eq: u32,
+    caret_eq: u32,
 }
 
 fn mark(inout table: ChunkSeq[u32], symbol: u32, flag: u32) {
@@ -317,6 +348,7 @@ fn ops_new(inout names: Names, inout tables: Tables) -> Ops {
     let mut conversions: ChunkSeq[u32] = ChunkSeq::new[u32]();
     let mut bit_builtins: ChunkSeq[u32] = ChunkSeq::new[u32]();
     let mut float_flags: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let mut float_ops: ChunkSeq[u32] = ChunkSeq::new[u32]();
     let mut bit_intrinsics: ChunkSeq[u32] = ChunkSeq::new[u32]();
     let mut rotations: ChunkSeq[u32] = ChunkSeq::new[u32]();
     let mut kind: u32 = 1;
@@ -349,43 +381,61 @@ fn ops_new(inout names: Names, inout tables: Tables) -> Ops {
         }
         let saturating = intern_kind(inout names, in "saturating_", kind);
         mark(inout float_flags, saturating, FLOAT_INTRINSIC);
+        set_by_symbol(inout float_ops, saturating, wrapping_add(FOP_SAT_BASE, kind));
         kind = wrapping_add(kind, 1);
     }
     let sqrt_sym = intern(inout names, in "sqrt");
     mark(inout float_flags, sqrt_sym, FLOAT_INTRINSIC | FLOAT_MATH);
+    set_by_symbol(inout float_ops, sqrt_sym, FOP_SQRT);
     let abs_sym = intern(inout names, in "abs");
     mark(inout float_flags, abs_sym, FLOAT_INTRINSIC | FLOAT_MATH);
+    set_by_symbol(inout float_ops, abs_sym, FOP_ABS);
     let floor_sym = intern(inout names, in "floor");
     mark(inout float_flags, floor_sym, FLOAT_INTRINSIC | FLOAT_MATH);
+    set_by_symbol(inout float_ops, floor_sym, FOP_FLOOR);
     let ceil_sym = intern(inout names, in "ceil");
     mark(inout float_flags, ceil_sym, FLOAT_INTRINSIC | FLOAT_MATH);
+    set_by_symbol(inout float_ops, ceil_sym, FOP_CEIL);
     let round_sym = intern(inout names, in "round");
     mark(inout float_flags, round_sym, FLOAT_INTRINSIC | FLOAT_MATH);
+    set_by_symbol(inout float_ops, round_sym, FOP_ROUND);
     let trunc_sym = intern(inout names, in "trunc");
     mark(inout float_flags, trunc_sym, FLOAT_INTRINSIC | FLOAT_MATH);
+    set_by_symbol(inout float_ops, trunc_sym, FOP_TRUNC);
     let min_sym = intern(inout names, in "min");
     mark(inout float_flags, min_sym, FLOAT_INTRINSIC | FLOAT_MATH);
+    set_by_symbol(inout float_ops, min_sym, FOP_MIN);
     let max_sym = intern(inout names, in "max");
     mark(inout float_flags, max_sym, FLOAT_INTRINSIC | FLOAT_MATH);
+    set_by_symbol(inout float_ops, max_sym, FOP_MAX);
     let fma_sym = intern(inout names, in "fma");
     mark(inout float_flags, fma_sym, FLOAT_INTRINSIC | FLOAT_MATH);
+    set_by_symbol(inout float_ops, fma_sym, FOP_FMA);
     // float conversions and bit reinterpretations
     let widen_f32_sym = intern(inout names, in "widen_f32");
     mark(inout float_flags, widen_f32_sym, FLOAT_INTRINSIC);
+    set_by_symbol(inout float_ops, widen_f32_sym, FOP_WIDEN_F32);
     let widen_f64_sym = intern(inout names, in "widen_f64");
     mark(inout float_flags, widen_f64_sym, FLOAT_INTRINSIC);
+    set_by_symbol(inout float_ops, widen_f64_sym, FOP_WIDEN_F64);
     let nearest_f32_sym = intern(inout names, in "nearest_f32");
     mark(inout float_flags, nearest_f32_sym, FLOAT_INTRINSIC);
+    set_by_symbol(inout float_ops, nearest_f32_sym, FOP_NEAREST_F32);
     let nearest_f64_sym = intern(inout names, in "nearest_f64");
     mark(inout float_flags, nearest_f64_sym, FLOAT_INTRINSIC);
+    set_by_symbol(inout float_ops, nearest_f64_sym, FOP_NEAREST_F64);
     let to_bits_f32_sym = intern(inout names, in "to_bits_f32");
     mark(inout float_flags, to_bits_f32_sym, FLOAT_INTRINSIC);
+    set_by_symbol(inout float_ops, to_bits_f32_sym, FOP_TO_BITS_F32);
     let to_bits_f64_sym = intern(inout names, in "to_bits_f64");
     mark(inout float_flags, to_bits_f64_sym, FLOAT_INTRINSIC);
+    set_by_symbol(inout float_ops, to_bits_f64_sym, FOP_TO_BITS_F64);
     let from_bits_f32_sym = intern(inout names, in "from_bits_f32");
     mark(inout float_flags, from_bits_f32_sym, FLOAT_INTRINSIC);
+    set_by_symbol(inout float_ops, from_bits_f32_sym, FOP_FROM_BITS_F32);
     let from_bits_f64_sym = intern(inout names, in "from_bits_f64");
     mark(inout float_flags, from_bits_f64_sym, FLOAT_INTRINSIC);
+    set_by_symbol(inout float_ops, from_bits_f64_sym, FOP_FROM_BITS_F64);
     let bit_and_sym = intern(inout names, in "bit_and");
     set_by_symbol(inout bit_intrinsics, bit_and_sym, 1);
     let bit_or_sym = intern(inout names, in "bit_or");
@@ -404,6 +454,7 @@ fn ops_new(inout names: Names, inout tables: Tables) -> Ops {
     tables.conversions = conversions;
     tables.bit_builtins = bit_builtins;
     tables.float_flags = float_flags;
+    tables.float_ops = float_ops;
     tables.bit_intrinsics = bit_intrinsics;
     tables.rotations = rotations;
     Ops {
@@ -425,6 +476,14 @@ fn ops_new(inout names: Names, inout tables: Tables) -> Ops {
         shl: intern(inout names, in "<<"),
         shr: intern(inout names, in ">>"),
         assign: intern(inout names, in "="),
+        plus_eq: intern(inout names, in "+="),
+        minus_eq: intern(inout names, in "-="),
+        star_eq: intern(inout names, in "*="),
+        slash_eq: intern(inout names, in "/="),
+        percent_eq: intern(inout names, in "%="),
+        amp_eq: intern(inout names, in "&="),
+        pipe_eq: intern(inout names, in "|="),
+        caret_eq: intern(inout names, in "^="),
         amp: intern(inout names, in "&"),
         pipe: intern(inout names, in "|"),
         caret: intern(inout names, in "^"),
@@ -1351,6 +1410,7 @@ fn read_gen(in bytes: Slice[u8]) -> Gen {
         conversions: ChunkSeq::new[u32](),
         bit_builtins: ChunkSeq::new[u32](),
         float_flags: ChunkSeq::new[u32](),
+        float_ops: ChunkSeq::new[u32](),
         bit_intrinsics: ChunkSeq::new[u32](),
         rotations: ChunkSeq::new[u32]()
     };

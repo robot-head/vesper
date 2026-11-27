@@ -128,18 +128,11 @@ pub fn new_branch_timeline(
         if j >= slen {
             break;
         }
-        let mut bad = false;
-        let _ = handle Fail[RuntimeError] in {
-            if step_lo(in steps[j]) >= step_hi(in steps[j]) {
-                bad = true;
-            }
-            0
+        let bad = handle Fail[RuntimeError] in {
+            step_lo(in steps[j]) >= step_hi(in steps[j])
         } with {
-            return _ => 0,
-            raise(e, k) => {
-                bad = false;
-                0
-            },
+            return v => v,
+            raise(e, k) => false,
         };
         if bad {
             return Result::Err(PathError::BadInterval { index: j });
@@ -151,22 +144,15 @@ pub fn new_branch_timeline(
         if k >= slen {
             break;
         }
-        let mut ooo = false;
-        let _ = handle Fail[RuntimeError] in {
+        let ooo = handle Fail[RuntimeError] in {
             let l0 = step_lo(in steps[wrapping_sub(k, 1)]);
             let h0 = step_hi(in steps[wrapping_sub(k, 1)]);
             let l1 = step_lo(in steps[k]);
             let h1 = step_hi(in steps[k]);
-            if l1 < l0 || h1 < h0 {
-                ooo = true;
-            }
-            0
+            l1 < l0 || h1 < h0
         } with {
-            return _ => 0,
-            raise(e, k2) => {
-                ooo = false;
-                0
-            },
+            return v => v,
+            raise(e, k2) => false,
         };
         if ooo {
             return Result::Err(PathError::StepsOutOfOrder { index: k });
@@ -390,16 +376,11 @@ fn partition_lo_le(in steps: Slice[TraceStep], tsc: u64) -> u64 {
             break;
         }
         let mid = wrapping_add(lo, wrapping_sub(hi, lo) >> 1);
-        let mut pred = false;
-        let _ = handle Fail[RuntimeError] in {
-            pred = step_lo(in steps[mid]) <= tsc;
-            0
+        let pred = handle Fail[RuntimeError] in {
+            step_lo(in steps[mid]) <= tsc
         } with {
-            return _ => 0,
-            raise(e, k) => {
-                pred = false;
-                0
-            },
+            return v => v,
+            raise(e, k) => false,
         };
         if pred {
             lo = wrapping_add(mid, 1);
@@ -418,16 +399,11 @@ fn partition_hi_le(in steps: Slice[TraceStep], tsc: u64) -> u64 {
             break;
         }
         let mid = wrapping_add(lo, wrapping_sub(hi, lo) >> 1);
-        let mut pred = false;
-        let _ = handle Fail[RuntimeError] in {
-            pred = step_hi(in steps[mid]) <= tsc;
-            0
+        let pred = handle Fail[RuntimeError] in {
+            step_hi(in steps[mid]) <= tsc
         } with {
-            return _ => 0,
-            raise(e, k) => {
-                pred = false;
-                0
-            },
+            return v => v,
+            raise(e, k) => false,
         };
         if pred {
             lo = wrapping_add(mid, 1);
@@ -446,16 +422,11 @@ fn partition_lo_lt(in steps: Slice[TraceStep], tsc: u64) -> u64 {
             break;
         }
         let mid = wrapping_add(lo, wrapping_sub(hi, lo) >> 1);
-        let mut pred = false;
-        let _ = handle Fail[RuntimeError] in {
-            pred = step_lo(in steps[mid]) < tsc;
-            0
+        let pred = handle Fail[RuntimeError] in {
+            step_lo(in steps[mid]) < tsc
         } with {
-            return _ => 0,
-            raise(e, k) => {
-                pred = false;
-                0
-            },
+            return v => v,
+            raise(e, k) => false,
         };
         if pred {
             lo = wrapping_add(mid, 1);

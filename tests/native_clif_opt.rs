@@ -1145,3 +1145,51 @@ fn main() -> u64 {
         "expected w.e and w.l SeqHeader data pointers (+16) to be loaded at most once each (got {data_loads}):\n{fn_clif}"
     );
 }
+
+#[test]
+fn canonicalizes_imm_ops_and_folds_associative_chains() {
+    let source = "
+fn mix(x: u64) -> u64 {
+    let a = wrapping_add(wrapping_add(x, 3), 5);
+    let b = wrapping_mul(wrapping_mul(a, 2), 4);
+    let c = (b & 255) & 15;
+    if c == 8 {
+        wrapping_sub(b, 1)
+    } else {
+        b | 1
+    }
+}
+
+fn main() -> u64 {
+    let mut acc = 0;
+    let mut i = 0;
+    loop {
+        if i >= 16 {
+            break;
+        }
+        acc = wrapping_add(acc, mix(i));
+        i = wrapping_add(i, 1);
+    }
+    acc
+}";
+    let c = accepted(source);
+    let (_, clif) = native::object(&c.world, "main").unwrap();
+    let eval = vesper::runtime::Runtime::new(&c.world)
+        .run("main", vec![])
+        .unwrap();
+    let jit = native::jit(&c.world, "main").unwrap();
+    assert_eq!(eval.to_string(), jit.to_string());
+    let fn_clif = clif
+        .split("\n; ")
+        .find(|s| s.starts_with("mix\n"))
+        .unwrap_or(&clif);
+    assert!(
+        fn_clif.contains("iadd_imm")
+            && fn_clif.contains("imul_imm")
+            && fn_clif.contains("band_imm")
+            && fn_clif.contains("icmp_imm")
+            && !fn_clif.contains("iadd_imm ")
+            || (fn_clif.contains(" 8") && fn_clif.contains(" 15")),
+        "expected constant binary/icmp ops to canonicalize and fold in mix:\n{fn_clif}"
+    );
+}

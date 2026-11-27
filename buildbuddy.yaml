@@ -114,12 +114,14 @@ actions:
   # #1950 and #1970, before self_host_native_walk reserved its 8GiB (#1993).
   # It keeps ci_tests' 18GiB local test budget: at 20GiB (#2047), five
   # codegen differentials at once ran the VM out of memory and the kernel
-  # killed the Bazel server (exit 37) on #2040 and #2048.
+  # killed the Bazel server (exit 37) on #2040 and #2048. With the newer
+  # native_walk codegen differentials added under self_host_codegen, the 25GB
+  # VM (26.84GB total) reached 27.56GB used on #2299/#2300/#2304 (#2306).
   - name: "Self-host codegen differentials"
     container_image: "ubuntu-24.04"
     resource_requests:
       cpu: 8
-      memory: 25GB
+      memory: 28GB
       disk: 60GB
     timeout: 60m
     triggers:

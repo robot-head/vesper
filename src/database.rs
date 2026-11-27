@@ -489,6 +489,288 @@ impl Write for HeaderOutput {
     }
 }
 
+/// The tags of the world headers in [`signature_words`] (the order
+/// `@vesper/lsp-features` signature.ves reads).
+#[doc(hidden)]
+pub mod signature_tags {
+    pub const TYPE_INT_LITERAL: u64 = 0;
+    pub const TYPE_NAMED: u64 = 1;
+    pub const TYPE_TUPLE: u64 = 2;
+    pub const TYPE_FUNCTION: u64 = 3;
+    pub const TYPE_ROW: u64 = 4;
+    pub const TYPE_INFER: u64 = 5;
+    pub const MODE_COPY: u64 = 0;
+    pub const MODE_AFFINE: u64 = 1;
+    pub const MODE_LINEAR: u64 = 2;
+    pub const PASS_IN: u64 = 0;
+    pub const PASS_INOUT: u64 = 1;
+    pub const PASS_SINK: u64 = 2;
+    pub const TEMPERATURE_HOT: u64 = 0;
+    pub const TEMPERATURE_COLD: u64 = 1;
+    /// Bytes per word, where a type writes its byte length (after its tag)
+    /// and the width of each half of a 128-bit integer literal.
+    pub const WORD_BYTES: usize = 8;
+    pub const TYPE_LENGTH_AT: usize = WORD_BYTES;
+    pub const LIMB_BITS: u32 = 64;
+}
+
+/// [`signature_snapshot`]'s extraction and digest over `checked` (`None`
+/// when guarded analysis failed), `rounds` times (at least once), as the
+/// text the Vesper port writes: `E <reason>`, or `C <BLAKE3 hex>`, the
+/// declarations one per line, then the header bytes.
+#[doc(hidden)]
+pub fn signature_answer(checked: Option<&CheckedSource>, rounds: u64) -> String {
+    // The header bytes, declarations and digest.
+    type Extracted = (Vec<u8>, Vec<String>, [u8; 32]);
+    let run = || -> Result<Extracted, &'static str> {
+        let (bytes, declarations) = checked
+            .ok_or("source analysis unavailable")
+            .and_then(extract_signature)?;
+        let digest = *blake3::hash(&bytes).as_bytes();
+        Ok((bytes, declarations, digest))
+    };
+    let mut result = run();
+    for _ in 1..rounds {
+        result = run();
+    }
+    match result {
+        Err(reason) => format!("E {reason}"),
+        Ok((bytes, declarations, digest)) => {
+            let mut out = String::from("C ");
+            for b in digest {
+                out.push_str(&format!("{b:02x}"));
+            }
+            for d in declarations {
+                out.push('\n');
+                out.push_str(&d);
+            }
+            out.push('\n');
+            out.push_str(std::str::from_utf8(&bytes).expect("serde_json writes UTF-8"));
+            out
+        }
+    }
+}
+
+/// Little-endian words and texts for [`signature_words`].
+struct SignatureWords(Vec<u8>);
+impl SignatureWords {
+    fn word(&mut self, n: u64) {
+        self.0.extend_from_slice(&n.to_le_bytes());
+    }
+    fn flag(&mut self, b: bool) {
+        self.word(u64::from(b));
+    }
+    fn text(&mut self, s: &str) {
+        self.word(s.len() as u64);
+        self.0.extend_from_slice(s.as_bytes());
+    }
+    fn option_text(&mut self, s: Option<&str>) {
+        self.flag(s.is_some());
+        self.text(s.unwrap_or(""));
+    }
+    fn mode(&mut self, m: ast::Mode) {
+        use signature_tags::*;
+        self.word(match m {
+            ast::Mode::Copy => MODE_COPY,
+            ast::Mode::Affine => MODE_AFFINE,
+            ast::Mode::Linear => MODE_LINEAR,
+        });
+    }
+    fn pass(&mut self, p: ast::Pass) {
+        use signature_tags::*;
+        self.word(match p {
+            ast::Pass::In => PASS_IN,
+            ast::Pass::Inout => PASS_INOUT,
+            ast::Pass::Sink => PASS_SINK,
+        });
+    }
+    /// A type: its tag, its byte length (tag word included), then its payload.
+    fn ty(&mut self, t: &ast::Type) {
+        use signature_tags::*;
+        let at = self.0.len();
+        let tag = match t {
+            ast::Type::IntLiteral(_) => TYPE_INT_LITERAL,
+            ast::Type::Named(..) => TYPE_NAMED,
+            ast::Type::Tuple(_) => TYPE_TUPLE,
+            ast::Type::Function { .. } => TYPE_FUNCTION,
+            ast::Type::Row(_) => TYPE_ROW,
+            ast::Type::Infer => TYPE_INFER,
+        };
+        self.word(tag);
+        self.word(0);
+        match t {
+            ast::Type::IntLiteral(n) => {
+                let bits = *n as u128;
+                self.word(bits as u64);
+                self.word((bits >> signature_tags::LIMB_BITS) as u64);
+            }
+            ast::Type::Named(name, args) => {
+                self.text(name);
+                self.word(args.len() as u64);
+                args.iter().for_each(|a| self.ty(a));
+            }
+            ast::Type::Tuple(items) => {
+                self.word(items.len() as u64);
+                items.iter().for_each(|a| self.ty(a));
+            }
+            ast::Type::Function {
+                params,
+                result,
+                effects,
+                mode,
+            } => {
+                self.word(params.len() as u64);
+                for (pass, ty) in params {
+                    self.pass(*pass);
+                    self.ty(ty);
+                }
+                self.ty(result);
+                self.effects(effects);
+                self.mode(*mode);
+            }
+            ast::Type::Row(effects) => self.effects(effects),
+            ast::Type::Infer => {}
+        }
+        let len = (self.0.len() - at) as u64;
+        let length_at = at + signature_tags::TYPE_LENGTH_AT;
+        self.0[length_at..length_at + signature_tags::WORD_BYTES]
+            .copy_from_slice(&len.to_le_bytes());
+    }
+    fn effects(&mut self, e: &ast::Effects) {
+        self.word(e.instances.len() as u64);
+        for instance in &e.instances {
+            self.option_text(instance.label.as_deref());
+            self.text(&instance.name);
+            self.word(instance.args.len() as u64);
+            instance.args.iter().for_each(|a| self.ty(a));
+        }
+        self.option_text(e.tail.as_deref());
+    }
+    fn generics(&mut self, generics: &[ast::Generic]) {
+        self.word(generics.len() as u64);
+        for g in generics {
+            self.text(&g.name);
+            self.mode(g.bound);
+            self.flag(g.row);
+        }
+    }
+    /// A function header under map key `key` (empty for an operation).
+    fn function(&mut self, key: &str, f: &ast::Function) {
+        self.text(key);
+        self.text(&f.name);
+        self.generics(&f.generics);
+        self.word(f.params.len() as u64);
+        for p in &f.params {
+            self.text(&p.name);
+            self.pass(p.pass);
+            self.word(p.projections.len() as u64);
+            for projection in &p.projections {
+                self.word(projection.len() as u64);
+                projection.iter().for_each(|s| self.text(s));
+            }
+            self.ty(&p.ty);
+        }
+        self.ty(&f.result);
+        self.effects(&f.effects);
+        self.flag(f.body.is_some());
+    }
+    /// A section: its byte length, then its records.
+    fn section(&mut self, build: impl FnOnce(&mut Self)) {
+        let at = self.0.len();
+        self.word(0);
+        build(self);
+        let len = (self.0.len() - at - signature_tags::WORD_BYTES) as u64;
+        self.0[at..at + signature_tags::WORD_BYTES].copy_from_slice(&len.to_le_bytes());
+    }
+}
+
+/// The words `lsp_signature` reads for [`signature_answer`]: `rounds`,
+/// whether analysis succeeded, the nine unsupported-header counts, the
+/// declaration counts, whether the port hashes the header bytes itself,
+/// then the ADT, function, effect and function-result sections in the
+/// world's key order and `string_capacity`.
+#[doc(hidden)]
+pub fn signature_words(checked: Option<&CheckedSource>, port_digest: bool, rounds: u64) -> Vec<u8> {
+    use signature_tags::*;
+    let mut w = SignatureWords(Vec::new());
+    w.word(rounds);
+    w.flag(checked.is_some());
+    let Some(checked) = checked else {
+        return w.0;
+    };
+    let world = checked.world();
+    let module = &checked.parsed().module;
+    let items = |f: fn(&ast::Item) -> bool| module.items.iter().filter(|i| f(i)).count() as u64;
+    for n in [
+        module.model_uses.len() as u64,
+        module.trait_bounds.len() as u64,
+        items(|i| matches!(i, ast::Item::Trait(_))),
+        items(|i| matches!(i, ast::Item::Conformance(_))),
+        world.elaboration.traits.len() as u64,
+        world.elaboration.conformances.len() as u64,
+        world.elaboration.generated.len() as u64,
+        u64::from(world.elaboration.package.is_some()),
+        u64::from(world.elaboration.revision.is_some()),
+        world.adts.len() as u64,
+        world.functions.len() as u64,
+        world.effects.len() as u64,
+    ] {
+        w.word(n);
+    }
+    w.flag(port_digest);
+    w.section(|w| {
+        for (key, a) in &world.adts {
+            w.text(key);
+            w.text(&a.name);
+            w.mode(a.mode);
+            w.generics(&a.generics);
+            w.word(a.variants.len() as u64);
+            for v in &a.variants {
+                w.text(&v.name);
+                w.word(v.fields.len() as u64);
+                for f in &v.fields {
+                    w.text(&f.name);
+                    w.ty(&f.ty);
+                    w.flag(f.modality.is_some());
+                    w.mode(f.modality.unwrap_or_default());
+                    w.flag(f.temperature.is_some());
+                    w.word(match f.temperature {
+                        Some(ast::FieldTemperature::Cold) => TEMPERATURE_COLD,
+                        _ => TEMPERATURE_HOT,
+                    });
+                }
+                w.flag(v.named);
+            }
+            w.flag(a.is_enum);
+        }
+    });
+    w.section(|w| {
+        for (key, f) in &world.functions {
+            w.function(key, f);
+        }
+    });
+    w.section(|w| {
+        for (key, e) in &world.effects {
+            w.text(key);
+            w.text(&e.name);
+            w.flag(e.linear);
+            w.generics(&e.generics);
+            w.word(e.ops.len() as u64);
+            e.ops.iter().for_each(|op| w.function("", op));
+            // An operation with a body is unsupported; the port only
+            // needs to know whether each one has one.
+        }
+    });
+    w.section(|w| {
+        for (key, t) in &world.function_results {
+            w.text(key);
+            w.ty(t);
+        }
+    });
+    w.word(world.string_capacity as u64);
+    w.0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

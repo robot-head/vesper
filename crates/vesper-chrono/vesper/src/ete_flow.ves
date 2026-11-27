@@ -272,26 +272,15 @@ fn image_read_byte(in segs: Slice[CodeSegment], ip: u64) -> Option[u8] {
         if i >= segs.len() {
             break;
         }
-        let mut found = false;
-        let mut val: u8 = 0;
-        let _ = handle Fail[RuntimeError] in {
-            match seg_read_byte(in segs[i], ip) {
-                Option::Some(b) => {
-                    found = true;
-                    val = b;
-                }
-                Option::None => {}
-            }
-            0
+        let got = handle Fail[RuntimeError] in {
+            seg_read_byte(in segs[i], ip)
         } with {
-            return _ => 0,
-            raise(e, k) => {
-                found = false;
-                0
-            },
+            return v => v,
+            raise(e, k) => Option::None,
         };
-        if found {
-            return Option::Some(val);
+        match got {
+            Option::Some(val) => return Option::Some(val),
+            Option::None => {}
         }
         i = wrapping_add(i, 1);
     }
