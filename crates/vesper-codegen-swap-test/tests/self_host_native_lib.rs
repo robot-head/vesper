@@ -62,6 +62,8 @@ const WORD_BYTES: usize = 8;
 /// (packages/vesper-codegen-calls/src/data.ves).
 const LIBRARY_TASK: u64 = 4;
 const MORE_ROOTS_TASK: u64 = 8;
+/// A definition's constant-time flag (packages/vesper-native-lib).
+const CONST_TIME_FLAG: u64 = 2;
 /// The library objects the passes must change.
 const MIN_CHANGED_BY_PASSES: usize = 2;
 /// The CLIF passes that the objects with the passes off are built without.
@@ -139,6 +141,8 @@ struct Defined {
     /// generic instances).
     key: String,
     optimize: bool,
+    /// A `ConstTime` function, whose cold paths stay in place.
+    const_time: bool,
     status: u64,
     locations: u64,
     callees: Vec<u64>,
@@ -229,6 +233,12 @@ fn record(lent: &mut Lent<'_, '_>) -> Result<bool, String> {
     let world = lent.world;
     let program = lent.program;
     let declared = declarations(&*lent.module);
+    // `native.rs` also reads the capabilities of a function's closures;
+    // a plain library has none.
+    let const_time = world.functions.get(&function).is_some_and(|f| {
+        vesper::capability_effects::capabilities(&f.effects)
+            .contains(&vesper::capability_effects::Capability::ConstTime)
+    });
     RECORD.with(|cell| {
         let mut r = cell.borrow_mut();
         if r.refused.is_some() {
@@ -274,6 +284,7 @@ fn record(lent: &mut Lent<'_, '_>) -> Result<bool, String> {
             func,
             key: function,
             optimize: lent.optimize,
+            const_time,
             status: args[0],
             locations: args[1],
             callees,
@@ -371,7 +382,7 @@ fn request(r: &Record) -> Vec<u8> {
     q.word(r.defined.len() as u64);
     for d in &r.defined {
         q.word(d.func);
-        q.word(u64::from(d.optimize));
+        q.word(u64::from(d.optimize) | if d.const_time { CONST_TIME_FLAG } else { 0 });
         q.word(d.status);
         q.word(d.locations);
         q.word(d.callees.len() as u64);
@@ -525,6 +536,44 @@ pub fn scaled(a: u128, b: u64) -> u64 eff [Fail[ArithOverflow]] { b * 2 }",
     ),
     // (Checked 128-bit arithmetic has no body plan yet, so a failing
     // function with a wide result stays out.)
+    // Cold paths the outliner moves into helpers: an asymmetric slow
+    // tail and a loop's early exit.
+    (
+        "cold",
+        "fn slow(x: u64, y: u64, z: u64) -> u64 {
+    let mut a: u64 = x;
+    let mut acc: u64 = 0;
+    for i in 0..8 {
+        acc = wrapping_add(acc, wrapping_add(a, y));
+        a = wrapping_add(a, i);
+        acc = wrapping_add(acc, z);
+    }
+    acc
+}
+pub fn dispatch(x: u64, y: u64, z: u64) -> u64 {
+    if x < 100 {
+        wrapping_add(wrapping_mul(x, 3), y)
+    } else {
+        let a = slow(x, y, z);
+        let b = slow(y, z, x);
+        wrapping_add(a, b)
+    }
+}
+pub fn early(n: u64, x: u64, y: u64) -> u64 {
+    let mut acc: u64 = 0;
+    for i in 0..n {
+        if wrapping_add(i, x) > 50 {
+            let mut tmp: u64 = 0;
+            for j in 0..4 {
+                tmp = wrapping_add(tmp, slow(i, j, y));
+            }
+            return tmp;
+        }
+        acc = wrapping_add(acc, wrapping_add(i, y));
+    }
+    acc
+}",
+    ),
     // v2 libraries: the runtime entry points next to the functions, and
     // the drop glue of a handle type.
     (
