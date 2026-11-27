@@ -46,7 +46,7 @@ use self::entry::{execute_q, set_rows_q};
 use self::internal::{check as internal_check_impl, route as internal_route_impl};
 use self::leaf::{
     check as leaf_check_impl, compact as leaf_compact_impl, garbage as leaf_garbage_impl,
-    search as leaf_search_impl
+    max_capacity as leaf_max_capacity_impl, remove as leaf_remove_impl, search as leaf_search_impl
 };
 use self::vector::{vaggregate_rows_q, vexecute_q};
 use self::paths::{access_paths_q};
@@ -438,6 +438,23 @@ pub fn leaf_compact(
     inout scratch: Slice[u8]
 ) {
     leaf_compact_impl(inout b, dir, end_off, in var_cols, inout scratch)
+}
+
+pub fn leaf_max_capacity(in type_tags: Slice[u8]) -> u64 {
+    leaf_max_capacity_impl(in type_tags)
+}
+
+pub fn leaf_remove(
+    inout b: Slice[u8],
+    dir: u64,
+    used: u64,
+    keys: u64,
+    tomb: u64,
+    end_off: u64,
+    in cols: Slice[u64],
+    pos: u64
+) {
+    leaf_remove_impl(inout b, dir, used, keys, tomb, end_off, in cols, pos)
 }
 
 pub fn store_log_record_decode(
