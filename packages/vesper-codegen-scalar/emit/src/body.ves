@@ -1683,11 +1683,7 @@ impl Body {
             let flane = w.next();
             let base_var = temp(inout b, x);
             let base = use_var(inout b, base_var);
-            let ptr = if off == 0 {
-                base
-            } else {
-                ins_iadd_imm(inout b, base, wrapping_i64(off))
-            };
+            let ptr = ins_iadd_imm(inout b, base, wrapping_i64(off));
             ins_load(inout b, lane_type(flane), PLAIN, ptr, 0)
         } else {
             return false;
