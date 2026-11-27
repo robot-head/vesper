@@ -5,7 +5,7 @@
 //! and `ir_words` next to this module (as does vesper-hybrid).
 #![allow(dead_code)]
 
-use super::check_words::{Enc, encodable, pass_word};
+use super::check_words::{Enc, encodable_with, pass_word};
 use super::ir_words::{self, Payload, Tables};
 use vesper::ast::{Expr, ExprKind, Function, Statement, Type};
 use vesper::check::World;
@@ -123,10 +123,11 @@ fn function_types(f: &Function) -> Vec<Type> {
 }
 
 /// Whether every type the calls section writes fits the decoder.
-fn calls_encodable(w: &World) -> bool {
+fn calls_encodable(w: &World, wide: bool) -> bool {
+    let encodable = |t: &Type| encodable_with(t, wide);
     w.functions
         .values()
-        .all(|f| function_types(f).iter().all(encodable))
+        .all(|f| function_types(f).iter().all(&encodable))
         && w.calls.values().flatten().all(|(_, t)| encodable(t))
         && w.dyn_objects
             .params
@@ -139,7 +140,7 @@ fn calls_encodable(w: &World) -> bool {
                 && v.methods
                     .iter()
                     .flat_map(|(_, vs)| vs.values())
-                    .all(encodable)
+                    .all(&encodable)
         })
 }
 
@@ -244,7 +245,27 @@ pub fn calls_input(w: &World, program: &Program, tasks: &[(String, bool)]) -> Op
 /// [`calls_input`] with each task's flags word: 1 optimizes, 2 asks for a
 /// Beacon trace host (`EntryEffects::TraceHost`).
 pub fn calls_input_flags(w: &World, program: &Program, tasks: &[(String, u64)]) -> Option<Vec<u8>> {
-    if !ir_words::encodable(w, program) || !calls_encodable(w) {
+    calls_input_with(w, program, tasks, false)
+}
+
+/// [`calls_input_flags`] that also writes `i128` and `u128` types, which
+/// @vesper/codegen-calls declares as two-word values (native-lib's 128-bit
+/// export entries, #2642). The walk's own callers keep refusing them.
+pub fn calls_input_flags_wide(
+    w: &World,
+    program: &Program,
+    tasks: &[(String, u64)],
+) -> Option<Vec<u8>> {
+    calls_input_with(w, program, tasks, true)
+}
+
+fn calls_input_with(
+    w: &World,
+    program: &Program,
+    tasks: &[(String, u64)],
+    wide: bool,
+) -> Option<Vec<u8>> {
+    if !ir_words::encodable(w, program) || !calls_encodable(w, wide) {
         return None;
     }
     let mut t = Tables::of(program);

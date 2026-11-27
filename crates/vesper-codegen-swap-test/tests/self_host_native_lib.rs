@@ -7,19 +7,23 @@
 //! walk would hand to Vesper it records the request (status and location
 //! flags, parameter count, direct callees) and the function's
 //! @vesper/codegen-scalar body plan, then declines, so the Rust walk emits
-//! the object. The module's declarations (symbol, linkage, signature)
-//! are read from the lent module. The request built from those records
-//! asks @vesper/native-lib for the same object, which must have the same
-//! bytes.
+//! the object. A recording `export_plans` hook keeps the calls input of
+//! the library's first lowering, from which the driver makes the instances
+//! and their declarations itself (slice 2a-2a); the request names only the
+//! exports' symbols, read from the lent module. The request built from
+//! those records asks @vesper/native-lib for the same object, which must
+//! have the same bytes.
 //!
 //! The Rust side runs with the CLIF peephole pass and the vectorizer off
-//! (`VESPER_CLIF_OPT=off`, `VESPER_VECTORIZE=off`): Stage 2 has no Vesper
-//! port of `native_clif_opt` yet (slice 2a-4), so slice 2a-1 compares the
-//! objects the walk itself makes.
+//! (`VESPER_CLIF_OPT=off`, `VESPER_VECTORIZE=off`): the driver runs no CLIF
+//! passes yet (slice 2a-4), so this compares the objects the walk itself
+//! makes.
 #[path = "../../../tests/common/check_harness.rs"]
 mod check_harness;
 #[path = "../../../tests/common/check_words.rs"]
 mod check_words;
+#[path = "../../../tests/common/codegen_calls_words.rs"]
+mod codegen_calls_words;
 #[path = "../../../tests/self_host_codegen_export/words.rs"]
 mod export_words;
 #[path = "../../../tests/common/ir_words.rs"]
@@ -36,7 +40,6 @@ use vesper::native::export::{
 };
 use vesper_codegen_swap_test::foreign_package;
 use vesper_cranelift_sys::cranelift_codegen::ir::{self, ArgumentExtension, ArgumentPurpose};
-use vesper_cranelift_sys::cranelift_codegen::isa::CallConv;
 use vesper_cranelift_sys::cranelift_module::{Linkage, Module};
 
 const PACKAGE: &str = "packages/vesper-native-lib";
@@ -50,10 +53,14 @@ const FLAGS: &str = "enable_llvm_abi_extensions=true;is_pic=true;opt_level=speed
 const MODULE_NAME: &str = "vesper";
 /// The answer's status word when the object was built.
 const BUILT: u64 = 0;
+/// The bytes of one request word.
+const WORD_BYTES: usize = 8;
+/// The calls task flags of a library's first root and of its other roots
+/// (packages/vesper-codegen-calls/src/data.ves).
+const LIBRARY_TASK: u64 = 4;
+const MORE_ROOTS_TASK: u64 = 8;
 /// The CLIF passes the walk's objects are compared without.
 const PASSES_OFF: [(&str, &str); 2] = [("VESPER_CLIF_OPT", "off"), ("VESPER_VECTORIZE", "off")];
-/// The characters of a function name `native::local_symbol` keeps.
-const LOCAL_SYMBOL_CHARS: usize = 96;
 
 fn repo() -> std::path::PathBuf {
     // Cargo runs tests in the crate directory; Bazel in the runfiles root.
@@ -111,20 +118,21 @@ fn call(request: &[u8]) -> Vec<u8> {
     unsafe { call.seq(JIT_RUNTIME, |w| f.call(w).unwrap()) }
 }
 
-/// One declared function, as the request names it.
+/// One function the Rust build declared: the request names the exports'
+/// symbols; the driver declares every instance itself.
 #[derive(Debug, Clone)]
 struct Declared {
     symbol: String,
     linkage: u64,
-    call_conv: u64,
-    params: Vec<u64>,
-    returns: Vec<u64>,
 }
 
 /// One function the walk defined, as the body hook saw it.
 #[derive(Debug, Clone)]
 struct Defined {
     func: u64,
+    /// The instance key (the function's name: a plain library has no
+    /// generic instances).
+    key: String,
     optimize: bool,
     status: u64,
     locations: u64,
@@ -141,6 +149,9 @@ struct Record {
     refused: Option<String>,
     /// The body plans of the lent program, by function name.
     plans: Option<HashMap<String, Vec<u64>>>,
+    /// The calls input of the library's first lowering, which the
+    /// `export_plans` hook saw.
+    calls: Option<Vec<u8>>,
     /// The library's interface: its 128-bit entries and v2 glue.
     interface: Option<LibraryInterface>,
 }
@@ -165,23 +176,6 @@ fn plans_of(
         }
     }
     bodies
-}
-
-fn type_code(t: ir::Type) -> u64 {
-    u64::from(vesper_cranelift_sys::codes::ty_code(t))
-}
-
-/// The shim's calling convention code (`codes::CALLCONV`).
-fn call_conv_code(cc: CallConv) -> Option<u64> {
-    Some(match cc {
-        CallConv::SystemV => 1,
-        CallConv::WindowsFastcall => 2,
-        CallConv::AppleAarch64 => 3,
-        CallConv::Tail => 4,
-        CallConv::Fast => 5,
-        CallConv::Cold => 6,
-        _ => return None,
-    })
 }
 
 /// A parameter or result the shim's `sig_param`/`sig_return` can spell.
@@ -212,14 +206,6 @@ fn declarations(module: &dyn Module) -> Result<Vec<Declared>, String> {
         out.push(Declared {
             symbol: decl.linkage_name(id).into_owned(),
             linkage: u64::from(vesper_cranelift_sys::codes::linkage_code(decl.linkage)),
-            call_conv: call_conv_code(sig.call_conv)
-                .ok_or_else(|| format!("calling convention {:?}", sig.call_conv))?,
-            params: sig.params.iter().map(|p| type_code(p.value_type)).collect(),
-            returns: sig
-                .returns
-                .iter()
-                .map(|p| type_code(p.value_type))
-                .collect(),
         });
     }
     Ok(out)
@@ -281,6 +267,7 @@ fn record(lent: &mut Lent<'_, '_>) -> Result<bool, String> {
         debug_assert_eq!(args.len(), 6 + np + callees.len() + homes);
         r.defined.push(Defined {
             func,
+            key: function,
             optimize: lent.optimize,
             status: args[0],
             locations: args[1],
@@ -289,6 +276,48 @@ fn record(lent: &mut Lent<'_, '_>) -> Result<bool, String> {
         });
     });
     Ok(false)
+}
+
+/// The calls tasks of a library build over `roots` (flags as the
+/// `export_plans` hook of crates/vesper-hybrid/src/swap/codegen_walk.rs
+/// sets them: optimize, then library on the first root and more roots on
+/// the rest).
+fn library_tasks(roots: &[&str], optimize: bool) -> Vec<(String, u64)> {
+    roots
+        .iter()
+        .enumerate()
+        .map(|(i, r)| {
+            let place = if i == 0 {
+                LIBRARY_TASK
+            } else {
+                MORE_ROOTS_TASK
+            };
+            (r.to_string(), u64::from(optimize) | place)
+        })
+        .collect()
+}
+
+/// The recording `export_plans` hook: notes the calls input of the
+/// library task and declines, so the Rust plans are made.
+fn record_calls(
+    world: &vesper::check::World,
+    program: &vesper::ir::Program,
+    roots: &[&str],
+    optimize: bool,
+) -> Option<vesper::native::EntryPlans> {
+    let input = codegen_calls_words::calls_input_flags_wide(
+        world,
+        program,
+        &library_tasks(roots, optimize),
+    );
+    RECORD.with(|cell| {
+        let mut r = cell.borrow_mut();
+        match input {
+            Some(i) => r.calls = Some(i),
+            None => r.refused = Some("the program has no calls input".into()),
+        }
+    });
+    None
 }
 
 #[derive(Default)]
@@ -310,16 +339,30 @@ fn request(r: &Record) -> Vec<u8> {
     q.bytes(FLAGS.as_bytes());
     q.bytes(MODULE_NAME.as_bytes());
     q.word(1);
-    q.word(r.declared.len() as u64);
-    for d in &r.declared {
-        q.bytes(d.symbol.as_bytes());
-        q.word(d.linkage);
-        q.word(d.call_conv);
-        q.word(d.params.len() as u64);
-        d.params.iter().for_each(|&t| q.word(t));
-        q.word(d.returns.len() as u64);
-        d.returns.iter().for_each(|&t| q.word(t));
+    let wide: Vec<&ExportedFunction> = r
+        .interface
+        .as_ref()
+        .map(|i| i.functions.iter().filter(|f| needs_wide_entry(f)).collect())
+        .unwrap_or_default();
+    // The exports declared under their own symbols, then the 128-bit ones,
+    // which the driver declares locally behind their entries.
+    let exports: Vec<(&str, &str)> = r
+        .defined
+        .iter()
+        .filter_map(|d| {
+            let declared = &r.declared[d.func as usize];
+            (declared.linkage
+                == u64::from(vesper_cranelift_sys::codes::linkage_code(Linkage::Export)))
+            .then_some((d.key.as_str(), declared.symbol.as_str()))
+        })
+        .chain(wide.iter().map(|f| (f.name.as_str(), f.symbol.as_str())))
+        .collect();
+    q.word(exports.len() as u64);
+    for (key, symbol) in exports {
+        q.bytes(key.as_bytes());
+        q.bytes(symbol.as_bytes());
     }
+    q.bytes(r.calls.as_deref().unwrap_or_default());
     q.word(r.defined.len() as u64);
     for d in &r.defined {
         q.word(d.func);
@@ -331,14 +374,15 @@ fn request(r: &Record) -> Vec<u8> {
         q.word(d.plan.len() as u64);
         d.plan.iter().for_each(|&w| q.word(w));
     }
-    let interface = r.interface.as_ref();
-    let wide: Vec<&ExportedFunction> = interface
-        .map(|i| i.functions.iter().filter(|f| needs_wide_entry(f)).collect())
-        .unwrap_or_default();
     q.word(wide.len() as u64);
     for f in wide {
+        let inner = r
+            .defined
+            .iter()
+            .find(|d| d.key == f.name)
+            .map_or(u64::MAX, |d| d.func);
         q.bytes(f.symbol.as_bytes());
-        q.word(inner_index(&r.declared, &f.name));
+        q.word(inner);
         q.word(u64::from(f.result_pointer));
         q.word(u64::from(wide_by_pointer(&f.result)));
         q.word(u64::from(f.fail_record_words.is_some()));
@@ -348,7 +392,7 @@ fn request(r: &Record) -> Vec<u8> {
             q.word(u64::from(p.pass() != "inout" && wide_by_pointer(&p.ty)));
         }
     }
-    match interface.filter(|i| i.is_v2()) {
+    match r.interface.as_ref().filter(|i| i.is_v2()) {
         Some(i) => {
             q.word(1);
             codegen_swap::seq::runtime_args(false)
@@ -376,27 +420,6 @@ fn needs_wide_entry(f: &ExportedFunction) -> bool {
             .any(|p| p.pass() != "inout" && wide_by_pointer(&p.ty))
 }
 
-/// The declared index of the local function behind the wide entry of
-/// `name` (`native::local_symbol`: `vesper_function_<i>_<name>`).
-fn inner_index(declared: &[Declared], name: &str) -> u64 {
-    let sanitized: String = name
-        .chars()
-        .take(LOCAL_SYMBOL_CHARS)
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '_' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    declared
-        .iter()
-        .enumerate()
-        .position(|(i, d)| d.symbol == format!("vesper_function_{i}_{sanitized}"))
-        .map_or(u64::MAX, |i| i as u64)
-}
-
 fn read_word(b: &[u8], at: &mut usize) -> u64 {
     let w = u64::from_le_bytes(b[*at..*at + 8].try_into().unwrap());
     *at += 8;
@@ -416,6 +439,7 @@ fn rust_build(library: &str, source: &str) -> Result<(Vec<u8>, Record), String> 
     RECORD.with(|r| *r.borrow_mut() = Record::default());
     let hooks = CodegenHooks {
         body: Some(record),
+        export_plans: Some(record_calls),
         ..CodegenHooks::default()
     };
     let options = LibraryOptions {
@@ -494,12 +518,6 @@ pub fn is_zero(a: u128) -> bool { a == 0 }
 pub fn mixed(x: u64, a: i128, y: f64) -> f64 { if a < 0 { y } else { y + 1.0 } }
 pub fn scaled(a: u128, b: u64) -> u64 eff [Fail[ArithOverflow]] { b * 2 }",
     ),
-    (
-        "v2_handle",
-        "// @export abi 3
-pub struct Buf { data: ChunkSeq[u8], n: u64 }
-pub fn count(inout b: Buf) -> u64 { 7 }",
-    ),
     // (Checked 128-bit arithmetic has no body plan yet, so a failing
     // function with a wide result stays out.)
     // v2 libraries: the runtime entry points next to the functions, and
@@ -514,6 +532,12 @@ pub fn add(a: u64, b: u64) -> u64 { wrapping_add(a, b) }",
         "// @export abi 3
 pub fn twice(a: i128) -> i128 { wrapping_add(a, a) }
 pub fn keep(x: u32) -> u32 { x }",
+    ),
+    (
+        "v2_handle",
+        "// @export abi 3
+pub struct Buf { data: ChunkSeq[u8], n: u64 }
+pub fn count(inout b: Buf) -> u64 { 7 }",
     ),
 ];
 
@@ -609,24 +633,25 @@ fn malformed_requests_are_refused() {
         read_word(&answer, &mut 0) != BUILT
     };
     assert!(refused(&[1, 2, 3]), "a request shorter than its first word");
-    // A whole header and an empty declaration list, then no definition
-    // count.
+    // A whole header and no exports, then no calls input.
     let mut q = Request::default();
     q.bytes(TRIPLE.as_bytes());
     q.bytes(FLAGS.as_bytes());
     q.bytes(MODULE_NAME.as_bytes());
     q.word(0);
     q.word(0);
-    assert!(refused(&q.0), "a request without its definition count");
+    assert!(refused(&q.0), "a request without its calls input");
+    q.bytes(&[]);
     q.word(0);
-    assert!(refused(&q.0), "a request without its 128-bit entry count");
-    q.word(0);
-    assert!(refused(&q.0), "a request without its v2 word");
-    q.word(0);
-    assert!(!refused(&q.0), "an empty library is an empty object");
-    // A v2 library whose runtime words stop short.
-    q.0.truncate(q.0.len() - 8);
-    q.word(1);
-    q.word(0);
-    assert!(refused(&q.0), "a v2 section without its interface");
+    assert!(refused(&q.0), "a calls input without a library task");
+    // A whole library's request cut short in its trailing sections: the
+    // v2 word, then the 128-bit entry count.
+    let (_, record) = with_passes_off(|| rust_build(LIBRARIES[0].0, LIBRARIES[0].1))
+        .expect("the first library builds");
+    let whole = request(&record);
+    assert!(!refused(&whole), "the whole request builds");
+    for (cut, what) in [(1, "the v2 word"), (2, "the 128-bit entry count")] {
+        let short = &whole[..whole.len() - cut * WORD_BYTES];
+        assert!(refused(short), "a request without {what}");
+    }
 }

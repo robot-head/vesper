@@ -13,3 +13,7 @@ capability_ceiling = ["Fail", "Alloc", "Ffi"]
 "@vesper/codegen-scalar-emit" = { version = "^0.1", path = "../vesper-codegen-scalar/emit" }
 "@vesper/codegen-seq-emit" = { version = "^0.1", path = "../vesper-codegen-seq/emit" }
 "@vesper/cranelift" = { version = "^0.1", path = "../vesper-cranelift" }
+"@vesper/check-data" = { version = "^0.1", path = "../vesper-check-data" }
+"@vesper/check-layout" = { version = "^0.1", path = "../vesper-check-layout" }
+"@vesper/codegen-calls" = { version = "^0.1", path = "../vesper-codegen-calls" }
+"@vesper/place-ir" = { version = "^0.1", path = "../vesper-place-ir" }

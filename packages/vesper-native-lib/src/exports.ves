@@ -22,7 +22,8 @@ use @vesper/cranelift::{
 use @vesper/codegen-export-glue::{F_BOX_COUNTER, F_BOX_FREE, F_SEQ_COUNTER, define_export_glue};
 use @vesper/codegen-numeric::boxes::{define_box_runtime};
 use @vesper/codegen-seq-emit::{RUNTIME_ARGS, define_seq_runtime};
-use super::{Declared, MALFORMED, NO_CALLEE, Reader, SET, UNKNOWN_FUNCTION, at64};
+use super::{MALFORMED, NO_CALLEE, Reader, SET, UNKNOWN_FUNCTION, at64};
+use super::declare::{Declared};
 
 const WIDE_MISMATCH: Str = "': 128-bit export entry does not match the function's signature";
 const NO_ENTRY_BUILDER: Str = "the 128-bit export entry's builder could not be made";
