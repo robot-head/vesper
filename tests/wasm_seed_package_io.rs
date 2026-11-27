@@ -3437,8 +3437,8 @@ pub fn main() -> u64 {
     });
 }
 
-/// `f32` arithmetic, comparisons, `%` and negation, `f32` literals and
-/// literal patterns, `widen_f64`, `nearest_f32`/`nearest_f64` from floats
+/// `f32` arithmetic, comparisons, `%` and negation, `f32` literals (also on
+/// the left of an operator, and as a bits operand) and literal patterns, `widen_f64`, `nearest_f32`/`nearest_f64` from floats
 /// and integers, `to_bits_*`/`from_bits_*`, and `bit_*` on several kinds
 /// (#2375), folded into one word.
 const STAGE2_FLOAT_SMOKE: &str = "\
@@ -3468,6 +3468,11 @@ pub fn main() -> u64 {
     h = mix(h, is_half(0.5));
     h = mix(h, is_half(a));
     h = mix(h, b64(widen_f64(a)));
+    h = mix(h, if 0.5 == from_bits_f32(1056964608) { 5 } else { 6 });
+    h = mix(h, b32(2.0 * b));
+    h = mix(h, b32(-1.5 + a));
+    h = mix(h, widen_u64(to_bits_f32(1.0)));
+    h = mix(h, b64(from_bits_f64(4607182418800017408) + 1.0));
     h = mix(h, b32(nearest_f32(0.1)));
     h = mix(h, b32(nearest_f32(16777217)));
     let big: u64 = 18446744073709551615;

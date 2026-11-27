@@ -348,6 +348,24 @@ fn conv_prefix_len(in names: Names, sym: u32) -> u64 {
 const NEAREST_PREFIX: Str = "nearest_";
 const NEAREST_PREFIX_LEN: u64 = 8;
 
+// The operand type of `to_bits_<f>` (`f`) or `from_bits_<f>` (`f`'s bits),
+// or `NONE32`: an unsuffixed literal operand takes it (`bits_call`).
+fn bits_operand_type(inout tc: Tc, sym: u32) -> u32 {
+    let k = tc.world.k;
+    let ksym = if is_op(in tc, sym, in "to_bits_f32") {
+        k.f32_
+    } else if is_op(in tc, sym, in "to_bits_f64") {
+        k.f64_
+    } else if is_op(in tc, sym, in "from_bits_f32") {
+        k.u32_
+    } else if is_op(in tc, sym, in "from_bits_f64") {
+        k.u64_
+    } else {
+        return NONE32;
+    };
+    tc.types.named0(ksym)
+}
+
 // The result type of `to_bits_<f>` or `from_bits_<f>`, or `NONE32`.
 fn bits_target_type(inout tc: Tc, sym: u32) -> u32 {
     let k = tc.world.k;
@@ -570,6 +588,27 @@ fn is_int_lit_expr(in tc: Tc, in a: Ast, eid: u64) -> bool {
     }
 }
 
+// Whether `eid` is an integer literal tree or a (negated) float literal:
+// on the left of a binary operator it takes the right operand's type, so
+// `0.5 == x` compares as `x`'s float kind.
+fn is_num_lit_expr(in tc: Tc, in a: Ast, eid: u64) -> bool {
+    if is_int_lit_expr(in tc, in a, eid) {
+        return true;
+    }
+    match a.exs.try_get(eid) {
+        Option::Some(ex) => {
+            if ex.kind == X_LITERAL {
+                ex.a == Lit::Float
+            } else if ex.kind == X_UNARY && is_op(in tc, n32(ex.a), in "-") {
+                is_num_lit_expr(in tc, in a, ex.b)
+            } else {
+                false
+            }
+        },
+        Option::None => false,
+    }
+}
+
 fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
     if eid == NONE64 {
         return tc.unit_ty;
@@ -716,7 +755,7 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
             || is_op(in tc, op, in "<=")
             || is_op(in tc, op, in ">=")
         {
-            if is_int_lit_expr(in tc, in a, e.b) && !is_int_lit_expr(in tc, in a, e.c) {
+            if is_num_lit_expr(in tc, in a, e.b) && !is_num_lit_expr(in tc, in a, e.c) {
                 let rt = check_expr(inout tc, in a, e.c, tc.infer_ty);
                 let _lt = check_expr(inout tc, in a, e.b, rt);
             } else {
@@ -727,8 +766,8 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
         } else if tc.types.kind(expected) == TyKind::Infer
             && !is_op(in tc, op, in "<<")
             && !is_op(in tc, op, in ">>")
-            && is_int_lit_expr(in tc, in a, e.b)
-            && !is_int_lit_expr(in tc, in a, e.c)
+            && is_num_lit_expr(in tc, in a, e.b)
+            && !is_num_lit_expr(in tc, in a, e.c)
         {
             let rt = check_expr(inout tc, in a, e.c, expected);
             let lt = check_expr(inout tc, in a, e.b, rt);
@@ -977,6 +1016,12 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
                                             pt = arg0_ty;
                                         } else {
                                             pt = expected;
+                                        }
+                                    }
+                                    if adt == NONE32 && !same_int {
+                                        let bits_pt = bits_operand_type(inout tc, cname);
+                                        if bits_pt != NONE32 {
+                                            pt = bits_pt;
                                         }
                                     }
                                     if adt != NONE32 {
