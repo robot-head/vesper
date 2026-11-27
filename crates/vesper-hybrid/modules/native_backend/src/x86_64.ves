@@ -24,6 +24,9 @@ const FIRST_XMM_HOME: u8 = 24;
 pub const XMM_AUX_SCRATCH: u8 = 29;
 pub const XMM_LEFT_SCRATCH: u8 = 30;
 pub const XMM_RIGHT_SCRATCH: u8 = 31;
+// Win64 reserves XMM4 and XMM5 as temporaries and preserves XMM6 through XMM15.
+pub const WIN64_XMM_LEFT_SCRATCH: u8 = 20;
+pub const WIN64_XMM_RIGHT_SCRATCH: u8 = 21;
 pub const HOME_REGISTERS: u64 = 5;
 pub const UNASSIGNED: u8 = 255;
 pub const BYTE_BITS: u64 = 8;
@@ -390,15 +393,15 @@ pub copy enum Instruction {
     Immediate(u8, u64),
     FloatImmediate(u8, u64, u64),
     FloatBinary(u8, u8, u8, u64),
-    FloatSign(u8, bool, u64),
-    FloatCopySign(u8, u8, u64),
+    FloatSign(u8, bool, u64, u8),
+    FloatCopySign(u8, u8, u64, u8),
     FloatBits(u8, u8, u64),
     FloatToInteger(u8, u8, u64, u64),
-    FloatToIntegerSat(u8, u8, u64, u64, bool),
+    FloatToIntegerSat(u8, u8, u64, u64, bool, u8, u8),
     FloatConvert(u8, u8, u64),
-    FloatMinMax(u8, u8, u8, bool, u64),
+    FloatMinMax(u8, u8, u8, bool, u64, u8),
     FloatRound(u8, u8, Rounding, u64, bool),
-    FloatFma(u8, u8, u8, u8, u64, bool),
+    FloatFma(u8, u8, u8, u8, u64, bool, u8),
     IntegerToFloat(u8, u8, u64, u64, bool),
     VectorConstant(u8, u64, u64),
     VectorSplat(u8, u8, u64),
@@ -530,7 +533,7 @@ pub fn win64_arg_register(argument: u64) -> u8 {
 }
 
 pub fn win64_reserved_registers() -> u32 {
-    register_bit(RSI) | register_bit(RDI)
+    register_bit(RSI) | register_bit(RDI) | wrapping_shl_u32(~0, widen_u32(WIN64_XMM_LEFT_SCRATCH))
 }
 
 pub fn home_register(index: u64) -> u8 {
@@ -1471,11 +1474,12 @@ fn float_fma(
     right: u8,
     addend: u8,
     width: u64,
-    packed: bool
+    packed: bool,
+    scratch: u8
 ) {
     // Keep the CLIF source order for NaN payload selection.
     let result = if dest != left && (dest == right || dest == addend) {
-        XMM_LEFT_SCRATCH
+        scratch
     } else {
         dest
     };
@@ -1522,9 +1526,17 @@ fn patch_short_forward(inout out: ChunkSeq[u8], displacement: u64) {
     let _ = out.try_set(displacement, wrapping_u8(distance));
 }
 
-fn float_min_max(inout out: ChunkSeq[u8], dest: u8, left: u8, right: u8, min: bool, width: u64) {
+fn float_min_max(
+    inout out: ChunkSeq[u8],
+    dest: u8,
+    left: u8,
+    right: u8,
+    min: bool,
+    width: u64,
+    scratch: u8
+) {
     let result = if dest == left && left != right {
-        XMM_RIGHT_SCRATCH
+        scratch
     } else {
         dest
     };
@@ -1607,14 +1619,19 @@ fn float_power_of_two(exponent: u64, width: u64) -> u64 {
     }
 }
 
-fn float_to_unsigned_qword(inout out: ChunkSeq[u8], dest: u8, source: u8, from: u64) {
-    let cutoff = XMM_RIGHT_SCRATCH;
+fn float_to_unsigned_qword(
+    inout out: ChunkSeq[u8],
+    dest: u8,
+    source: u8,
+    from: u64,
+    reduced: u8,
+    cutoff: u8
+) {
     float_immediate(inout out, cutoff, float_power_of_two(QWORD_BITS - 1, from), from);
     compare_float_registers(inout out, source, cutoff, from);
     let direct = emit_short_branch(inout out, JCC_SHORT | CC_B);
 
     // Values in the upper half fit a signed conversion after subtracting 2^63.
-    let reduced = XMM_LEFT_SCRATCH;
     float_move(inout out, reduced, source);
     out.push(float_prefix(from));
     xmm_binary(inout out, SSE_SUB, reduced, cutoff);
@@ -1634,14 +1651,15 @@ fn float_to_integer_saturating(
     source: u8,
     from: u64,
     width: u64,
-    signed: bool
+    signed: bool,
+    reduced: u8,
+    cutoff: u8
 ) {
     let limit = if signed {
         wrapping_sub(width, 1)
     } else {
         width
     };
-    let cutoff = XMM_RIGHT_SCRATCH;
     compare_float_registers(inout out, source, source, from);
     conditional_jump(inout out, CC_P);
     let unordered = out.len();
@@ -1662,7 +1680,7 @@ fn float_to_integer_saturating(
     let above = out.len();
 
     if !signed && width == QWORD_BITS {
-        float_to_unsigned_qword(inout out, dest, source, from);
+        float_to_unsigned_qword(inout out, dest, source, from, reduced, cutoff);
     } else {
         let conversion = if width == QWORD_BITS || (!signed && width == DWORD_BITS) {
             QWORD_BITS
@@ -2607,7 +2625,7 @@ pub fn emit(inout out: ChunkSeq[u8], in instruction: Instruction) {
             out.push(float_prefix(width));
             xmm_binary(inout out, op, destination, source);
         },
-        Instruction::FloatSign(destination, absolute, width) => {
+        Instruction::FloatSign(destination, absolute, width, scratch) => {
             let sign = if width == DWORD_BITS {
                 F32_SIGN
             } else {
@@ -2622,17 +2640,11 @@ pub fn emit(inout out: ChunkSeq[u8], in instruction: Instruction) {
                     sign
                 }
             );
-            float_bits(inout out, XMM_RIGHT_SCRATCH, R11, width);
-            xmm_binary(
-                inout out,
-                if absolute { ANDPS } else { XORPS },
-                destination,
-                XMM_RIGHT_SCRATCH
-            );
+            float_bits(inout out, scratch, R11, width);
+            xmm_binary(inout out, if absolute { ANDPS } else { XORPS }, destination, scratch);
         },
-        Instruction::FloatCopySign(destination, sign, width) => {
+        Instruction::FloatCopySign(destination, sign, width, scratch) => {
             // Isolate the differing sign bit, then toggle it in the magnitude.
-            let scratch = XMM_RIGHT_SCRATCH;
             float_move(inout out, scratch, sign);
             xmm_binary(inout out, XORPS, scratch, destination);
             let sign_shift = wrapping_u8(wrapping_sub(width, 1));
@@ -2652,24 +2664,28 @@ pub fn emit(inout out: ChunkSeq[u8], in instruction: Instruction) {
             source,
             source_width,
             width,
-            signed
+            signed,
+            reduced,
+            cutoff
         ) => float_to_integer_saturating(
             inout out,
             destination,
             source,
             source_width,
             width,
-            signed
+            signed,
+            reduced,
+            cutoff
         ),
-        Instruction::FloatFma(destination, left, right, addend, width, packed) => float_fma(
-            inout out,
+        Instruction::FloatFma(
             destination,
             left,
             right,
             addend,
             width,
-            packed
-        ),
+            packed,
+            scratch
+        ) => float_fma(inout out, destination, left, right, addend, width, packed, scratch),
         Instruction::VectorConstant(destination, low, high) => vector_constant(
             inout out,
             destination,
@@ -2784,8 +2800,8 @@ pub fn emit(inout out: ChunkSeq[u8], in instruction: Instruction) {
             out.push(float_prefix(source_width));
             xmm_binary(inout out, SSE_CONVERT_PRECISION, destination, source);
         },
-        Instruction::FloatMinMax(destination, left, right, min, width) => {
-            float_min_max(inout out, destination, left, right, min, width);
+        Instruction::FloatMinMax(destination, left, right, min, width, scratch) => {
+            float_min_max(inout out, destination, left, right, min, width, scratch);
         },
         Instruction::FloatRound(destination, source, mode, width, packed) => {
             float_round(inout out, destination, source, in mode, width, packed);

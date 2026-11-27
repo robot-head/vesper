@@ -14,7 +14,7 @@ use self::x86_64::{
     HOME_REGISTERS, cheap_immediate, move_constant, store_immediate, store_immediate_fits,
     VECTOR_BITS, PAND, POR, PXOR, PackedInteger, PackedRelation, packed_integer_opcode,
     BitOperation, Rounding, PackedShift, ROL_EXTENSION, ROR_EXTENSION, WIN64_ARGUMENTS,
-    win64_arg_register, win64_reserved_registers
+    win64_arg_register, win64_reserved_registers, WIN64_XMM_LEFT_SCRATCH, WIN64_XMM_RIGHT_SCRATCH
 };
 
 // Integer block opcodes shared with src/native_machine.rs.
@@ -290,7 +290,6 @@ const MEMORY_COPY_ARGUMENTS: u64 = 3;
 const STACK_ALIGNMENT: u64 = 16;
 const RETURN_ADDRESS_BYTES: u64 = 8;
 const SPILL_SLOT_BYTES: u64 = 8;
-const WIN64_SHADOW_BYTES: u64 = WIN64_ARGUMENTS * SPILL_SLOT_BYTES;
 const VECTOR_SLOT_BYTES: u64 = VECTOR_BITS / BYTE_BITS;
 const LEFT_SCRATCH: u8 = RAX;
 const RIGHT_SCRATCH: u8 = R10;
@@ -1418,6 +1417,7 @@ fn find_last_reads(
     return_arity: u64,
     allow_relocations: bool,
     labeled: bool,
+    windows_leaf: bool,
     inout frame: FrameLayout
 ) -> Option[ChunkSeq[u64]] {
     let values = wrapping_add(arguments, count);
@@ -1455,6 +1455,7 @@ fn find_last_reads(
             && !is_conditional_trap(record.op)
             && !is_float_conversion(record.op)
             && !(record.op >= FLOAT_CEIL && record.op <= FLOAT_FMA64)
+            && !(windows_leaf && record.op == FLOAT_STACK_ARGUMENT)
             && !tail_call
             && !bit_operation
             && !bit_mix
@@ -1475,10 +1476,23 @@ fn find_last_reads(
         if record.op >= FLOAT_ARGUMENT && record.op <= FLOAT_COPY_SIGN {
             frame.floating = true;
             let entry_start = wrapping_add(frame.slots.len(), if labeled { 1 } else { 0 });
-            if record.op == FLOAT_ARGUMENT
-                && (record.left >= XMM_ARGUMENTS || index != wrapping_add(entry_start, record.left))
-            {
-                return Option::None;
+            if record.op == FLOAT_ARGUMENT {
+                let valid = if windows_leaf {
+                    // Floating argument registers are allowed to have gaps in Win64.
+                    let previous = read_record(in words, wrapping_sub(index, 1));
+                    record.right == 0
+                        && record.left < WIN64_ARGUMENTS
+                        && record.left < arguments
+                        && (index == entry_start
+                            || (index > entry_start
+                                && previous.op == FLOAT_ARGUMENT
+                                && previous.left < record.left))
+                } else {
+                    record.left < XMM_ARGUMENTS && index == wrapping_add(entry_start, record.left)
+                };
+                if !valid {
+                    return Option::None;
+                }
             }
             if ((record.op >= FLOAT_ARGUMENT && record.op <= FLOAT_ABS)
                 || record.op == FLOAT_LOAD
@@ -1495,6 +1509,16 @@ fn find_last_reads(
             {
                 return Option::None;
             }
+        }
+        if record.op == FLOAT_STACK_ARGUMENT {
+            if record.left < WIN64_ARGUMENTS
+                || record.left >= arguments
+                || record.right != 0
+                || !vector_float_width(record.extra)
+            {
+                return Option::None;
+            }
+            frame.floating = true;
         }
         let last = last_read(in reads, value);
         let live = last != NEVER_READ || live_overflow_flag(in reads, value, record.op);
@@ -2013,6 +2037,11 @@ fn dying_register(
     }
 }
 
+fn win64_stack_argument_offset(position: u64) -> u64 {
+    // Positions 0 through 3 account for the caller's shadow space.
+    wrapping_add(RETURN_ADDRESS_BYTES, wrapping_mul(position, SPILL_SLOT_BYTES))
+}
+
 // Scan in instruction order. Expire a register at its last use. If the
 // register-only pass fills up, retry with three reload registers reserved
 // and let spilled values with disjoint lifetimes share stack slots.
@@ -2323,13 +2352,14 @@ fn allocate(
     if size > STACK_PROBE_INTERVAL {
         return Option::None;
     }
-    let incoming = wrapping_add(
-        wrapping_add(size, RETURN_ADDRESS_BYTES),
-        if windows_leaf { WIN64_SHADOW_BYTES } else { 0 }
-    );
     for argument in register_arguments..arguments {
         let slot = wrapping_sub(argument, register_arguments);
-        let offset = wrapping_add(incoming, wrapping_mul(slot, SPILL_SLOT_BYTES));
+        let incoming = if windows_leaf {
+            win64_stack_argument_offset(argument)
+        } else {
+            wrapping_add(RETURN_ADDRESS_BYTES, wrapping_mul(slot, SPILL_SLOT_BYTES))
+        };
+        let offset = wrapping_add(size, incoming);
         let _ = locations.try_set(argument, Location::Spill(wrapping_u32(offset)));
     }
     Option::Some(Allocation {
@@ -2962,7 +2992,7 @@ fn emit_vector_instruction(
             ),
         VECTOR_FLOAT_COPY_SIGN => {
             emit(inout output, in Instruction::Move(destination, left));
-            Instruction::FloatCopySign(destination, right, record.extra)
+            Instruction::FloatCopySign(destination, right, record.extra, XMM_RIGHT_SCRATCH)
         },
         VECTOR_FLOAT_COMPARE => Instruction::VectorFloatCompare(
             destination,
@@ -2982,7 +3012,8 @@ fn emit_vector_instruction(
                 } else {
                     DWORD_BITS
                 },
-                true
+                true,
+                XMM_LEFT_SCRATCH
             ),
         VECTOR_PAIRWISE_ADD => Instruction::VectorPairwiseAdd(
             destination,
@@ -3180,9 +3211,15 @@ fn emit_scalar_fp(
     destination: u8,
     left: u8,
     right: u8,
-    third: u8
+    third: u8,
+    windows_leaf: bool
 ) {
     let width = record.extra;
+    let (left_scratch, right_scratch) = if windows_leaf {
+        (WIN64_XMM_LEFT_SCRATCH, WIN64_XMM_RIGHT_SCRATCH)
+    } else {
+        (XMM_LEFT_SCRATCH, XMM_RIGHT_SCRATCH)
+    };
     let instruction = match record.op {
         FLOAT_CONSTANT => Instruction::FloatImmediate(destination, record.left, width),
         FLOAT_PROMOTE | FLOAT_DEMOTE => Instruction::FloatConvert(destination, left, record.right),
@@ -3208,7 +3245,7 @@ fn emit_scalar_fp(
             ),
         FLOAT_COPY_SIGN => {
             emit(inout output, in Instruction::Move(destination, left));
-            Instruction::FloatCopySign(destination, right, width)
+            Instruction::FloatCopySign(destination, right, width, right_scratch)
         },
         FLOAT_MIN
             | FLOAT_MAX => Instruction::FloatMinMax(
@@ -3216,7 +3253,8 @@ fn emit_scalar_fp(
                 left,
                 right,
                 record.op == FLOAT_MIN,
-                width
+                width,
+                right_scratch
             ),
         FLOAT_FMA32
             | FLOAT_FMA64 => Instruction::FloatFma(
@@ -3229,7 +3267,8 @@ fn emit_scalar_fp(
                 } else {
                     DWORD_BITS
                 },
-                false
+                false,
+                left_scratch
             ),
         FLOAT_CEIL
             | FLOAT_FLOOR
@@ -3244,7 +3283,7 @@ fn emit_scalar_fp(
         FLOAT_SQRT => Instruction::FloatBinary(SSE_SQRT, destination, left, width),
         FLOAT_NEG | FLOAT_ABS => {
             emit(inout output, in Instruction::Move(destination, left));
-            Instruction::FloatSign(destination, record.op == FLOAT_ABS, width)
+            Instruction::FloatSign(destination, record.op == FLOAT_ABS, width, right_scratch)
         },
         BITS_TO_FLOAT | FLOAT_TO_BITS => Instruction::FloatBits(destination, left, width),
         FLOAT_TO_INTEGER_TRUNC => Instruction::FloatToInteger(
@@ -3259,7 +3298,9 @@ fn emit_scalar_fp(
                 left,
                 record.right,
                 width,
-                record.op == FLOAT_TO_SIGNED_SAT
+                record.op == FLOAT_TO_SIGNED_SAT,
+                left_scratch,
+                right_scratch
             ),
         _ => {
             let reuse_right = destination == right && can_reuse_right(record.op);
@@ -3369,14 +3410,13 @@ fn encode_block_pass(
         return_arity,
         allow_relocations,
         labeled,
+        windows_leaf,
         inout frame
     ) {
         Option::Some(last) => last,
         Option::None => return ChunkSeq::new[u8](),
     };
-    if windows_leaf
-        && (frame.floating || frame.slots.len() != 0 || paired || tail.op == TAIL_CALL)
-    {
+    if windows_leaf && (frame.vectors || frame.slots.len() != 0 || paired || tail.op == TAIL_CALL) {
         return ChunkSeq::new[u8]();
     }
     if frame.floating
@@ -3820,8 +3860,18 @@ fn encode_block_pass(
         };
         if record.op == CONSTANT {
             emit(inout output, in Instruction::Immediate(destination, record.left));
+        } else if record.op == FLOAT_STACK_ARGUMENT {
+            emit(
+                inout output,
+                in Instruction::Load(
+                    destination,
+                    RSP,
+                    wrapping_u32(win64_stack_argument_offset(record.left)),
+                    record.extra
+                )
+            );
         } else if is_scalar_fp_instruction(record.op) {
-            emit_scalar_fp(inout output, in record, destination, left, right, third);
+            emit_scalar_fp(inout output, in record, destination, left, right, third, windows_leaf);
         } else if is_vector_operation(record.op) {
             emit_vector_instruction(inout output, in record, destination, left, right, third);
         } else if is_scalar_bit_operation(record.op) {

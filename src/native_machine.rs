@@ -290,6 +290,7 @@ const AARCH64_FP_ARGUMENTS: usize = 8;
 const AARCH64_CALL_FLOAT_BITS: u32 = 4;
 const INDIRECT_CALL: u64 = 1 << (u64::BITS - 1);
 const WINDOWS_LEAF: u64 = 1 << (u64::BITS - 1);
+const WINDOWS_REGISTER_ARGUMENTS: usize = 4;
 const STACK_PROBE_INTERVAL: usize = 4096;
 const CFG_HOME_BYTES: u64 = size_of::<u64>() as u64;
 const MAX_GP_ARGUMENTS: usize = GP_REGISTER_ARGUMENTS + STACK_PROBE_INTERVAL / size_of::<u64>() - 1;
@@ -627,6 +628,7 @@ fn entry_values(blocks: &mut IntegerBlocks<'_>, block: Block) -> Option<Values> 
     let mut values = Values::default();
     let mut next = 0;
     let mut xmm = 0;
+    let windows = function.signature.call_conv == CallConv::WindowsFastcall;
     for (index, (&value, param)) in params.iter().zip(&function.signature.params).enumerate() {
         let ty = function.dfg.value_type(value);
         if ty != param.value_type {
@@ -659,8 +661,15 @@ fn entry_values(blocks: &mut IntegerBlocks<'_>, block: Block) -> Option<Values> 
             };
             values.low[value] = Some(blocks.append(op, [offset as u64, 0, width]));
         } else if let Some(width) = float_width(ty) {
-            values.low[value] = Some(blocks.append(IntegerOp::FloatArgument, [xmm, 0, width]));
-            xmm += 1;
+            if windows {
+                if index < WINDOWS_REGISTER_ARGUMENTS {
+                    values.low[value] =
+                        Some(blocks.append(IntegerOp::FloatArgument, [index as u64, 0, width]));
+                }
+            } else {
+                values.low[value] = Some(blocks.append(IntegerOp::FloatArgument, [xmm, 0, width]));
+                xmm += 1;
+            }
         }
     }
     for (index, &value) in params.iter().enumerate() {
@@ -670,6 +679,17 @@ fn entry_values(blocks: &mut IntegerBlocks<'_>, block: Block) -> Option<Values> 
                 continue;
             };
             next = register;
+        } else if windows {
+            values.low[value] = if let Some(width) = float_width(ty) {
+                if index < WINDOWS_REGISTER_ARGUMENTS {
+                    values.low[value]
+                } else {
+                    Some(blocks.append(IntegerOp::FloatStackArgument, [index as u64, 0, width]))
+                }
+            } else {
+                Some(blocks.normalize_abi_integer(index as u64, ty))
+            };
+            continue;
         } else if float_width(ty).is_some() {
             continue;
         }
@@ -3717,19 +3737,21 @@ fn windows_leaf_program(
     isa: &dyn TargetIsa,
 ) -> Option<(IntegerProgram, Option<IntegerProgram>)> {
     let signature = &function.signature;
-    let plain_integer = |param: &AbiParam| {
-        integer_width(param.value_type).is_some() && *param == AbiParam::new(param.value_type)
+    let plain_scalar = |param: &AbiParam| {
+        (integer_width(param.value_type).is_some() || float_width(param.value_type).is_some())
+            && *param == AbiParam::new(param.value_type)
     };
     if super::windows::check_target(isa.triple()).is_err()
         || isa.flags().preserve_frame_pointers()
         || isa.flags().enable_pinned_reg()
         || !function.sized_stack_slots.is_empty()
+        || signature.params.len() > MAX_GP_ARGUMENTS
         || signature.returns.len() > 1
         || !signature
             .params
             .iter()
             .chain(&signature.returns)
-            .all(plain_integer)
+            .all(plain_scalar)
     {
         return None;
     }
@@ -3830,6 +3852,8 @@ fn integer_program(
     };
     let arity = if let Some(layout) = &aarch64_entry {
         layout.gp
+    } else if call_conv == CallConv::WindowsFastcall {
+        signature.params.len()
     } else {
         x86_argument_cells(&signature.params)?.0
     };

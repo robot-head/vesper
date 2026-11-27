@@ -182,22 +182,47 @@ fn main() -> u64 { wrapping_add(sum(7), 1) }
 }
 
 #[cfg(all(target_arch = "x86_64", target_os = "linux"))]
+fn win64_function_pair(
+    jit: &mut cranelift_jit::JITModule,
+    context: &mut cranelift_codegen::Context,
+) -> [*const u8; 2] {
+    use cranelift_codegen::{isa, settings};
+    use cranelift_module::Module;
+
+    let windows = isa::lookup(TARGET.parse().unwrap())
+        .unwrap()
+        .finish(settings::Flags::new(settings::builder()))
+        .unwrap();
+    let tape =
+        vesper::native::machine::x86_64_block_words(&context.func, windows.as_ref()).unwrap();
+    let code = binding::x86_64_integer_block(&tape);
+    assert!(!code.is_empty(), "{tape:?}");
+    let candidate = jit
+        .declare_anonymous_function(&context.func.signature)
+        .unwrap();
+    let reference = jit
+        .declare_anonymous_function(&context.func.signature)
+        .unwrap();
+    let alignment = u64::from(jit.isa().function_alignment().minimum);
+    jit.define_function_bytes(candidate, alignment, &code, &[])
+        .unwrap();
+    jit.define_function(reference, context).unwrap();
+    jit.finalize_definitions().unwrap();
+    [candidate, reference].map(|function| jit.get_finalized_function(function))
+}
+
+#[cfg(all(target_arch = "x86_64", target_os = "linux"))]
 #[test]
 fn win64_leaf_integer_registers_and_stack_match_cranelift() {
     use cranelift_codegen::{
         ir::{AbiParam, InstBuilder, types},
-        isa::{self, CallConv},
-        settings,
+        isa::CallConv,
     };
     use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
     use cranelift_jit::{JITBuilder, JITModule};
     use cranelift_module::Module;
 
     type Entry = unsafe extern "win64" fn(u8, u16, u32, u64, u64, u64, u64, u64) -> u64;
-    let windows = isa::lookup(TARGET.parse().unwrap())
-        .unwrap()
-        .finish(settings::Flags::new(settings::builder()))
-        .unwrap();
     let mut jit =
         JITModule::new(JITBuilder::new(cranelift_module::default_libcall_names()).unwrap());
     let mut context = jit.make_context();
@@ -237,24 +262,8 @@ fn win64_leaf_integer_registers_and_stack_match_cranelift() {
     builder.ins().return_(&[total]);
     builder.seal_all_blocks();
     builder.finalize();
-    let tape =
-        vesper::native::machine::x86_64_block_words(&context.func, windows.as_ref()).unwrap();
-    let code = binding::x86_64_integer_block(&tape);
-    assert!(!code.is_empty(), "{tape:?}");
-    let candidate = jit
-        .declare_anonymous_function(&context.func.signature)
-        .unwrap();
-    let reference = jit
-        .declare_anonymous_function(&context.func.signature)
-        .unwrap();
-    let alignment = u64::from(jit.isa().function_alignment().minimum);
-    jit.define_function_bytes(candidate, alignment, &code, &[])
-        .unwrap();
-    jit.define_function(reference, &mut context).unwrap();
-    jit.finalize_definitions().unwrap();
-    let [candidate, reference] = [candidate, reference].map(|function| unsafe {
-        std::mem::transmute::<*const u8, Entry>(jit.get_finalized_function(function))
-    });
+    let [candidate, reference] = win64_function_pair(&mut jit, &mut context)
+        .map(|function| unsafe { std::mem::transmute::<*const u8, Entry>(function) });
     let inputs = [0, 1, 0x8512_34ab_cdef_5678, 1u64 << 63, u64::MAX];
     for a in inputs {
         for b in inputs {
@@ -271,6 +280,116 @@ fn win64_leaf_integer_registers_and_stack_match_cranelift() {
                 )
             };
             assert_eq!(call(candidate), call(reference));
+        }
+    }
+    unsafe { jit.free_memory() };
+}
+
+#[cfg(all(target_arch = "x86_64", target_os = "linux"))]
+#[test]
+fn win64_leaf_mixed_registers_and_stack_match_cranelift() {
+    use cranelift_codegen::{
+        ir::{AbiParam, InstBuilder, types},
+        isa::CallConv,
+    };
+    use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
+    use cranelift_jit::{JITBuilder, JITModule};
+    use cranelift_module::Module;
+
+    type Single = unsafe extern "win64" fn(u8, f32, u32, f64, f64, u64, f32) -> f32;
+    type Double = unsafe extern "win64" fn(u8, f32, u32, f64, f64, u64, f32) -> f64;
+    type Integer = unsafe extern "win64" fn(u8, f32, u32, f64, f64, u64, f32) -> u64;
+    let mut jit =
+        JITModule::new(JITBuilder::new(cranelift_module::default_libcall_names()).unwrap());
+    let inputs = [
+        -0.0,
+        0.0,
+        -1.75,
+        3.25,
+        f64::from_bits(1),
+        18_000_000_000_000_000_000.0,
+        19_000_000_000_000_000_000.0,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+        f64::NAN,
+    ];
+    for result in [types::F32, types::F64, types::I64] {
+        let mut context = jit.make_context();
+        let signature = &mut context.func.signature;
+        signature.call_conv = CallConv::WindowsFastcall;
+        signature.params = [
+            types::I8,
+            types::F32,
+            types::I32,
+            types::F64,
+            types::F64,
+            types::I64,
+            types::F32,
+        ]
+        .map(AbiParam::new)
+        .to_vec();
+        signature.returns.push(AbiParam::new(result));
+        let mut frontend = FunctionBuilderContext::new();
+        let mut b = FunctionBuilder::new(&mut context.func, &mut frontend);
+        let entry = b.create_block();
+        b.append_block_params_for_function_params(entry);
+        b.switch_to_block(entry);
+        let [a, b_single, c, d, e, f, g_single] = *b.block_params(entry) else {
+            unreachable!()
+        };
+        let b_double = b.ins().fpromote(types::F64, b_single);
+        let signed = b.ins().fcopysign(b_double, d);
+        let clipped = b.ins().fmin(signed, e);
+        // Keep the right operand live so the minimum needs a scratch register.
+        let negative = b.ins().fneg(e);
+        let difference = b.ins().fadd(clipped, negative);
+        let g_double = b.ins().fpromote(types::F64, g_single);
+        let compared = b.ins().fadd(difference, g_double);
+        let a = b.ins().uextend(types::I64, a);
+        let c = b.ins().uextend(types::I64, c);
+        let partial = b.ins().iadd(a, c);
+        let total = b.ins().iadd(partial, f);
+        let total = b.ins().fcvt_from_uint(types::F64, total);
+        let value = b.ins().fadd(total, compared);
+        let value = if result == types::F32 {
+            b.ins().fdemote(types::F32, value)
+        } else if result == types::I64 {
+            b.ins().fcvt_to_uint_sat(types::I64, value)
+        } else {
+            value
+        };
+        b.ins().return_(&[value]);
+        b.seal_all_blocks();
+        b.finalize();
+        let functions = win64_function_pair(&mut jit, &mut context);
+        for (i, &x) in inputs.iter().enumerate() {
+            for (j, &y) in inputs.iter().enumerate() {
+                let a = i as u8;
+                let b = inputs[(i + j) % inputs.len()] as f32;
+                let c = u32::MAX - j as u32;
+                let f = (j as u64) << 60;
+                let g = inputs[(i + 1) % inputs.len()] as f32;
+                if result == types::I64 {
+                    let [got, want] = functions.map(|ptr| unsafe {
+                        std::mem::transmute::<*const u8, Integer>(ptr)(a, b, c, x, y, f, g)
+                    });
+                    assert_eq!(got, want, "{i} {j}");
+                } else {
+                    let [got, want] = functions.map(|ptr| unsafe {
+                        if result == types::F32 {
+                            f64::from(std::mem::transmute::<*const u8, Single>(ptr)(
+                                a, b, c, x, y, f, g,
+                            ))
+                        } else {
+                            std::mem::transmute::<*const u8, Double>(ptr)(a, b, c, x, y, f, g)
+                        }
+                    });
+                    assert!(
+                        got.to_bits() == want.to_bits() || (got.is_nan() && want.is_nan()),
+                        "{result} {i} {j}: {got} vs {want}"
+                    );
+                }
+            }
         }
     }
     unsafe { jit.free_memory() };
