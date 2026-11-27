@@ -1,0 +1,117 @@
+{
+  "notes": [
+    "Flip gate for the native IR optimizer policy (`ir_opt_policy::optimize`, the",
+    "default compiler's `opt` path), ported as @vesper/ir-opt-policy over @vesper/ir-opt",
+    "and installed as the hybrid's `ir_opt` swap. The `ir-opt-swap` workload times the",
+    "Rust policy against the swap's path (`optimize_with`: prepare, the Vesper entry,",
+    "finish, and Rust's policy where the package refuses) over the corpus inputs.",
+    "The tests and differential run every world (IR_OPT_STEP=1) in eight groups",
+    "(IR_OPT_CHUNKS=8), one test at a time (RUST_TEST_THREADS=1): the corpus with its",
+    "mutants lowered at once does not fit a 16 GB host. The timing takes every 8th world",
+    "(IR_OPT_STEP=8 on the workload): Rust's egglog takes most of the time."
+  ],
+  "name": "ir-opt",
+  "lane": "SH3-4",
+  "rust": [
+    "src/ir_opt.rs",
+    "src/ir_opt_policy.rs"
+  ],
+  "env": {
+    "CARGO_PROFILE_DEV_DEBUG": "0",
+    "CARGO_PROFILE_TEST_DEBUG": "0",
+    "CARGO_PROFILE_RELEASE_DEBUG": "0",
+    "IR_OPT_STEP": "1",
+    "IR_OPT_CHUNKS": "8",
+    "RUST_TEST_THREADS": "1"
+  },
+  "build": [
+    [
+      "cargo",
+      "test",
+      "--locked",
+      "--release",
+      "--test",
+      "self_host_ir_opt_policy",
+      "--no-run"
+    ]
+  ],
+  "tests": [
+    {
+      "run": [
+        "cargo",
+        "test",
+        "--locked",
+        "--release",
+        "--test",
+        "self_host_ir_opt_policy"
+      ]
+    }
+  ],
+  "differential": {
+    "run": {
+      "sequence": [
+        [
+          "cargo",
+          "test",
+          "--locked",
+          "--release",
+          "--test",
+          "self_host_ir_opt_policy",
+          "screen_matches_rust",
+          "--",
+          "--exact",
+          "--nocapture"
+        ],
+        [
+          "cargo",
+          "test",
+          "--locked",
+          "--release",
+          "--test",
+          "self_host_ir_opt_policy",
+          "policy_matches_rust",
+          "--",
+          "--exact",
+          "--nocapture"
+        ],
+        [
+          "cargo",
+          "test",
+          "--locked",
+          "--release",
+          "--test",
+          "self_host_ir_opt_policy",
+          "projected_writes_match_the_rust_policy",
+          "--",
+          "--exact",
+          "--nocapture"
+        ]
+      ]
+    }
+  },
+  "abba": [
+    {
+      "workload": "ir-opt-swap",
+      "run": {
+        "argv": [
+          "cargo",
+          "test",
+          "--locked",
+          "--release",
+          "--test",
+          "self_host_ir_opt_policy",
+          "policy_cost",
+          "--",
+          "--exact",
+          "--ignored",
+          "--nocapture"
+        ],
+        "env": {
+          "FLIP_GATE": "1",
+          "CHECK_HARNESS_SPEED": "1",
+          "IR_OPT_STEP": "8"
+        }
+      }
+    }
+  ]
+}
