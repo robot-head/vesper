@@ -33,7 +33,8 @@ use self::scalar::{
     FLOAT_PROMOTE, FLOAT_DEMOTE, SIGNED_TO_FLOAT, UNSIGNED_TO_FLOAT, is_float_conversion,
     FLOAT_TO_SIGNED_SAT, is_float_to_integer, FLOAT_CEIL, FLOAT_FLOOR, FLOAT_TRUNC, FLOAT_NEAREST,
     FLOAT_MIN, FLOAT_MAX, FLOAT_FMA64, is_float_fma, STACK_ARGUMENT, FLOAT_STACK_ARGUMENT,
-    CALL_STACK_ARGUMENT, FUNCTION_GOT, INDIRECT_CALL, indirect_call, is_call
+    CALL_STACK_ARGUMENT, FUNCTION_GOT, INDIRECT_CALL, indirect_call, is_call, TRAP_IF_ZERO,
+    STACK_POINTER, SPECTRE_BARRIER, is_conditional_trap
 };
 use self::x86_64::{
     BYTE_BITS, WORD_BITS, DWORD_BITS, QWORD_BITS, FLOAT_ORDERED, FLOAT_UNORDERED, FLOAT_EQUAL,
@@ -981,9 +982,16 @@ fn operands(in r: Record, returns: u64) -> Option[u64] {
     if r.op == RETURN_PAIR || r.op == TRAP {
         return Option::Some(0);
     }
-    if r.op == OVERFLOW_FLAG || r.op == FENCE {
+    if r.op == OVERFLOW_FLAG || r.op == FENCE || r.op == STACK_POINTER || r.op == SPECTRE_BARRIER {
         return if r.left == 0 && r.right == 0 && r.extra == 0 {
             Option::Some(0)
+        } else {
+            Option::None
+        };
+    }
+    if is_conditional_trap(r.op) {
+        return if r.right == 0 && r.extra == 0 {
+            Option::Some(1)
         } else {
             Option::None
         };
@@ -2004,6 +2012,8 @@ fn no_result(op: u64) -> bool {
         || op == RETURN_PAIR
         || op == FLOAT_RETURN
         || op == TRAP
+        || is_conditional_trap(op)
+        || op == SPECTRE_BARRIER
         || op == FENCE
         || op == ATOMIC_STORE
 }
@@ -2635,6 +2645,10 @@ fn encode_pass(
         if r.op == STACK_SLOT && index >= frame.slots.len() {
             return out;
         }
+        if r.op == STACK_POINTER && last != NEVER_READ {
+            unpromotable_homes = ~0;
+            frame_used = true;
+        }
         if is_stack_load(r.op) || r.op == STACK_ADDRESS || is_stack_store(r.op) {
             if stack_displacement(in frame, in r).is_none() {
                 return out;
@@ -2908,6 +2922,11 @@ fn encode_pass(
             locations.push(UNASSIGNED);
             continue;
         }
+        if r.op == SPECTRE_BARRIER {
+            push32(inout out, CSDB);
+            locations.push(UNASSIGNED);
+            continue;
+        }
         let call_result = if calls {
             remaining_calls = wrapping_sub(remaining_calls, 1);
             next_call = call_sites.try_get(wrapping_sub(remaining_calls, 1)).unwrap_or(values);
@@ -3054,6 +3073,17 @@ fn encode_pass(
         } else {
             materialize(inout out, extra, SPILL_THIRD, frame_bytes)
         };
+        if is_conditional_trap(r.op) {
+            let skip = if r.op == TRAP_IF_ZERO {
+                BRANCH_IF_NOT_ZERO
+            } else {
+                BRANCH_IF_ZERO
+            };
+            push32(inout out, skip | sh(SKIP_TRAP_DISPLACEMENT, BRANCH_IMM19_SHIFT) | lhs);
+            push32(inout out, TRAP_INSTRUCTION);
+            locations.push(UNASSIGNED);
+            continue;
+        }
         if checked && !live {
             emit_checked(inout out, in r, ZERO, lhs, rhs, overflow_live);
             locations.push(UNASSIGNED);
@@ -3308,6 +3338,8 @@ fn encode_pass(
             } else {
                 memory(inout out, true, r.extra, SP, dest, wrapping_add(frame_bytes, r.left));
             }
+        } else if r.op == STACK_POINTER {
+            push32(inout out, ADD_IMM | sh(SP, RN_SHIFT) | dest);
         } else if r.op == STACK_ADDRESS || is_stack_load(r.op) {
             let displacement = wrapping_add(
                 outgoing_bytes,

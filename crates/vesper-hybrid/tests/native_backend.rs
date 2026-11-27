@@ -81,6 +81,7 @@ enum Case {
     CompareImmediate,
     Select,
     Bitselect(Type),
+    GuardedSelect(Type),
     WideBitselect { high: bool },
     SelectKeepingArms,
     SelectKeepingTrue,
@@ -168,6 +169,41 @@ fn constant_stores_use_memory_immediates_when_the_bits_fit() {
         assert_eq!(actual, expected);
     }
     unsafe { module.free_memory() };
+}
+
+#[test]
+fn both_encoders_support_stack_pointer_and_nonterminating_traps() {
+    const TRAP_IF_ZERO: u64 = 153;
+    const TRAP_IF_NONZERO: u64 = 154;
+    const STACK_POINTER: u64 = 155;
+    const STACK_POINTER_READ: [u64; 6] = [0, 0, STACK_POINTER, 0, 0, 0];
+    assert_eq!(
+        binding::x86_64_integer_block(&STACK_POINTER_READ),
+        [0x48, 0x89, 0xe0, 0xc3],
+    );
+    assert_eq!(
+        binding::aarch64_integer_leaf(&STACK_POINTER_READ),
+        [0xe0, 0x03, 0x00, 0x91, 0xc0, 0x03, 0x5f, 0xd6],
+    );
+    for (op, skip_x86, skip_arm) in [(TRAP_IF_ZERO, 0x75, 0xb5), (TRAP_IF_NONZERO, 0x74, 0xb4)] {
+        let mut request = [1, 0, op, 0, 0, 0];
+        let x86 = binding::x86_64_integer_block(&request);
+        assert!(x86.starts_with(&[0x48, 0x85, 0xff, skip_x86, 2, 0x0f, 0x0b]));
+        let arm = binding::aarch64_integer_leaf(&request);
+        assert_eq!(
+            arm,
+            [
+                0x40, 0x00, 0x00, skip_arm, 0x1f, 0xc1, 0x00, 0x00, 0xc0, 0x03, 0x5f, 0xd6
+            ],
+        );
+        // The request contains only one argument and has no trap payload.
+        for index in [3, 4, 5] {
+            request[index] = 1;
+            assert!(binding::x86_64_integer_block(&request).is_empty());
+            assert!(binding::aarch64_integer_leaf(&request).is_empty());
+            request[index] = 0;
+        }
+    }
 }
 
 #[test]
@@ -313,6 +349,11 @@ fn integer_backend_matches_cranelift_results() {
         Case::HighRegisters,
         Case::CompareImmediate,
         Case::Select,
+        Case::GuardedSelect(types::I8),
+        Case::GuardedSelect(types::I64),
+        Case::GuardedSelect(types::I128),
+        Case::GuardedSelect(types::F32),
+        Case::GuardedSelect(types::F64),
         Case::SelectKeepingArms,
         Case::SelectKeepingTrue,
         Case::ByteExtensions,
@@ -1156,6 +1197,47 @@ fn integer_backend_matches_cranelift_results() {
                 let (lo, hi) = builder.ins().isplit(result);
                 if high { hi } else { lo }
             }
+            Case::GuardedSelect(ty) => {
+                let test = builder.ins().iconcat(a, b);
+                match ty {
+                    types::I8 => {
+                        let yes = builder.ins().ireduce(ty, c);
+                        let no = builder.ins().ireduce(ty, e);
+                        let result = builder.ins().select_spectre_guard(test, yes, no);
+                        builder.ins().uextend(types::I64, result)
+                    }
+                    types::I128 => {
+                        let yes = builder.ins().iconcat(c, d);
+                        let no = builder.ins().iconcat(e, f);
+                        let result = builder.ins().select_spectre_guard(test, yes, no);
+                        let (low, high) = builder.ins().isplit(result);
+                        builder.ins().bxor(low, high)
+                    }
+                    types::F32 | types::F64 => {
+                        let bits = if ty == types::F32 {
+                            types::I32
+                        } else {
+                            types::I64
+                        };
+                        let [yes, no] = [c, e].map(|arg| {
+                            let arg = if bits == types::I32 {
+                                builder.ins().ireduce(bits, arg)
+                            } else {
+                                arg
+                            };
+                            builder.ins().bitcast(ty, MemFlags::new(), arg)
+                        });
+                        let result = builder.ins().select_spectre_guard(test, yes, no);
+                        let result = builder.ins().bitcast(bits, MemFlags::new(), result);
+                        if bits == types::I32 {
+                            builder.ins().uextend(types::I64, result)
+                        } else {
+                            result
+                        }
+                    }
+                    _ => builder.ins().select_spectre_guard(test, c, e),
+                }
+            }
             Case::SelectKeepingArms => {
                 let predicate = builder.ins().icmp(IntCC::UnsignedGreaterThan, a, b);
                 let selected = builder.ins().select(predicate, e, f);
@@ -1205,6 +1287,24 @@ fn integer_backend_matches_cranelift_results() {
         }
         let bytes = binding::x86_64_integer_block(&request);
         assert!(!bytes.is_empty(), "{case:?}");
+        if matches!(case, Case::GuardedSelect(_)) {
+            const CMOV_EQUAL: [u8; 2] = [0x0f, 0x44];
+            const CMOV_NOT_EQUAL: [u8; 2] = [0x0f, 0x45];
+            const CSDB: [u8; 4] = 0xd503229fu32.to_le_bytes();
+            assert!(
+                bytes
+                    .windows(CMOV_EQUAL.len())
+                    .any(|op| op == CMOV_EQUAL || op == CMOV_NOT_EQUAL)
+            );
+            let aarch64 =
+                aarch64_leaf_words(&context.func).expect("AArch64 guarded select request");
+            assert!(
+                binding::aarch64_integer_leaf(&aarch64)
+                    .as_chunks::<4>()
+                    .0
+                    .contains(&CSDB)
+            );
+        }
         if matches!(
             case,
             Case::WrappingAddChain {

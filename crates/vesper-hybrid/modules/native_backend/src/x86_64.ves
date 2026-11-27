@@ -89,6 +89,7 @@ pub const SSE_SUB: u8 = 0x5c;
 pub const SSE_MUL: u8 = 0x59;
 pub const SSE_DIV: u8 = 0x5e;
 pub const SSE_SQRT: u8 = 0x51;
+const SSE_FLOAT_TO_INTEGER_TRUNC: u8 = 0x2c;
 const SHIFT_GROUP_IMM8: u8 = 0xc1;
 const SHIFT_GROUP_CL: u8 = 0xd3;
 const XCHG_RM_R64: u8 = 0x87;
@@ -204,6 +205,7 @@ pub copy enum Instruction {
     FloatSign(u8, bool, u64),
     FloatCopySign(u8, u8, u64),
     FloatBits(u8, u8, u64),
+    FloatToInteger(u8, u8, u64, u64),
     FloatCompare(u8, u8, u8, u64, u64),
     Move(u8, u8),
     Exchange(u8, u8),
@@ -235,6 +237,7 @@ pub copy enum Instruction {
     FrameLeave(u32),
     StackAddress(u8, u32),
     Trap,
+    TrapIf(u8, bool),
     Return,
 }
 
@@ -1000,6 +1003,14 @@ pub fn emit(inout out: ChunkSeq[u8], in instruction: Instruction) {
             packed_shift(inout out, scratch, PACKED_SHIFT_LEFT, width);
             xmm_binary(inout out, XORPS, destination, scratch);
         },
+        Instruction::FloatToInteger(destination, source, source_width, width) => {
+            let source = xmm_code(source);
+            out.push(float_prefix(source_width));
+            emit_rex(inout out, destination, source, width == QWORD_BITS, false);
+            out.push(TWO_BYTE_OPCODE);
+            out.push(SSE_FLOAT_TO_INTEGER_TRUNC);
+            out.push(modrm(destination, source));
+        },
         Instruction::FloatBits(destination, source, width) => float_bits(
             inout out,
             destination,
@@ -1188,6 +1199,12 @@ pub fn emit(inout out: ChunkSeq[u8], in instruction: Instruction) {
             memory_operand(inout out, destination, RSP, displacement);
         },
         Instruction::Trap => trap(inout out),
+        Instruction::TrapIf(source, when_zero) => {
+            binary(inout out, TEST_RM_R64, source, source, true);
+            out.push(JCC_SHORT | (if when_zero { CC_NE } else { CC_E }));
+            out.push(TRAP_BYTES);
+            trap(inout out);
+        },
         Instruction::Return => out.push(RET_NEAR),
     };
 }

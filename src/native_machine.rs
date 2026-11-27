@@ -172,6 +172,11 @@ enum IntegerOp {
     FloatStackArgument = 150,
     CallStackArgument = 151,
     FunctionGot = 152,
+    TrapIfZero = 153,
+    TrapIfNonzero = 154,
+    StackPointer = 155,
+    SpectreBarrier = 156,
+    FloatToIntegerTrunc = 157,
 }
 
 fn integer_bit_op(op: Opcode) -> Option<IntegerOp> {
@@ -1176,6 +1181,140 @@ impl IntegerBlocks<'_> {
         self.append(IntegerOp::Xor, [no, selected, width])
     }
 
+    fn truthy_value(&mut self, value: Value, values: &Values) -> Option<u64> {
+        let value = self.function.dfg.resolve_aliases(value);
+        let low = values.low[value]?;
+        let ty = self.value_type(value);
+        if ty == types::I128 {
+            let high = values.high[value]?;
+            Some(self.append(IntegerOp::Or, [low, high, INTEGER_CELL_BITS]))
+        } else {
+            integer_width(ty)?;
+            Some(low)
+        }
+    }
+
+    fn guarded_select(&mut self, inst: Inst, args: [Value; 3], values: &mut Values) -> Option<()> {
+        let dfg = &self.function.dfg;
+        let [result] = *dfg.inst_results(inst) else {
+            return None;
+        };
+        let [test, yes, no] = args.map(|value| dfg.resolve_aliases(value));
+        let ty = dfg.value_type(result);
+        if dfg.value_type(yes) != ty || dfg.value_type(no) != ty {
+            return None;
+        }
+        let test = self.truthy_value(test, values)?;
+        let yes_low = values.low[yes]?;
+        let no_low = values.low[no]?;
+        let low = if let Some(width) = float_width(ty) {
+            // x86's ordinary float select branches. Select the raw bits in GPRs.
+            let yes = self.append(IntegerOp::FloatToBits, [yes_low, 0, width]);
+            let no = self.append(IntegerOp::FloatToBits, [no_low, 0, width]);
+            let selected = self.append(IntegerOp::Select, [test, yes, no]);
+            self.append(IntegerOp::BitsToFloat, [selected, 0, width])
+        } else {
+            if ty == types::I128 {
+                let yes = values.high[yes]?;
+                let no = values.high[no]?;
+                values.high[result] = Some(self.append(IntegerOp::Select, [test, yes, no]));
+            } else {
+                integer_width(ty)?;
+            }
+            self.append(IntegerOp::Select, [test, yes_low, no_low])
+        };
+        if self.aarch64 {
+            // CSDB prevents speculative use of the CSEL result.
+            self.append(IntegerOp::SpectreBarrier, [0; 3]);
+        }
+        values.low[result] = Some(low);
+        Some(())
+    }
+
+    fn checked_float_to_integer(
+        &mut self,
+        input: u64,
+        source: Type,
+        output: Type,
+        signed: bool,
+    ) -> Option<u64> {
+        if !self.allow_hardware_faults && !self.aarch64 {
+            return None;
+        }
+        let source_width = float_width(source)?;
+        let width = integer_width(output)?;
+        let single = source == types::F32;
+        let compare = if single {
+            IntegerOp::FloatCompare32
+        } else {
+            IntegerOp::FloatCompare64
+        };
+        let bits = |value: f64| {
+            if single {
+                u64::from((value as f32).to_bits())
+            } else {
+                value.to_bits()
+            }
+        };
+        let upper = (1_u128 << (width - u64::from(signed))) as f64;
+        let minimum = if signed { -upper } else { 0.0 };
+        let below_minimum = minimum - 1.0;
+        // Fractional values immediately below the minimum truncate to the minimum.
+        // When the source precision cannot distinguish the two bounds, use >=.
+        let (lower, bound) = if bits(below_minimum) == bits(minimum) {
+            (minimum, FloatCC::GreaterThanOrEqual)
+        } else {
+            (below_minimum, FloatCC::GreaterThan)
+        };
+        for (limit, cond) in [(lower, bound), (upper, FloatCC::LessThan)] {
+            let limit = self.append(IntegerOp::FloatConstant, [bits(limit), 0, source_width]);
+            let valid = self.append(compare, [input, limit, float_condition(cond)]);
+            self.append(IntegerOp::TrapIfZero, [valid, 0, 0]);
+        }
+        if self.aarch64 {
+            let op = if signed {
+                IntegerOp::FloatToSignedSat
+            } else {
+                IntegerOp::FloatToUnsignedSat
+            };
+            return Some(self.append(op, [input, source_width, width]));
+        }
+        // SSE2 truncates to a signed destination. Reduce the upper half of a
+        // u64 to the signed range before converting, then restore its top bit.
+        let mut source_value = input;
+        let high = if !signed && width == INTEGER_CELL_BITS {
+            let high_bit = INTEGER_CELL_BITS - 1;
+            let split = (1_u64 << high_bit) as f64;
+            let split = self.append(IntegerOp::FloatConstant, [bits(split), 0, source_width]);
+            let upper = self.append(
+                compare,
+                [input, split, float_condition(FloatCC::GreaterThanOrEqual)],
+            );
+            let adjusted = self.append(IntegerOp::FloatSub, [input, split, source_width]);
+            source_value = self.append(IntegerOp::FloatSelect, [upper, adjusted, input]);
+            Some(self.append(IntegerOp::ShiftLeft, [upper, high_bit, INTEGER_CELL_BITS]))
+        } else {
+            None
+        };
+        let dword = u64::from(types::I32.bits());
+        let conversion_width = if width < dword || (signed && width == dword) {
+            dword
+        } else {
+            INTEGER_CELL_BITS
+        };
+        let result = self.append(
+            IntegerOp::FloatToIntegerTrunc,
+            [source_value, source_width, conversion_width],
+        );
+        Some(if let Some(high) = high {
+            self.append(IntegerOp::Or, [result, high, width])
+        } else if width < conversion_width {
+            self.append(IntegerOp::Truncate, [result, conversion_width, width])
+        } else {
+            result
+        })
+    }
+
     fn wide_rotate_register(&mut self, [low, high]: [u64; 2], amount: u64) -> [u64; 2] {
         let width = INTEGER_CELL_BITS;
         let other_shift = self.append(IntegerOp::Not, [amount, 0, width]);
@@ -1481,6 +1620,17 @@ impl IntegerBlocks<'_> {
         let ty = |value| self.value_type(value);
         let output = ty(value);
         let (op, operands) = match dfg.insts[inst] {
+            InstructionData::Unary {
+                opcode: opcode @ (Opcode::FcvtToSint | Opcode::FcvtToUint),
+                arg,
+            } => {
+                return self.checked_float_to_integer(
+                    input(arg)?,
+                    ty(arg),
+                    output,
+                    opcode == Opcode::FcvtToSint,
+                );
+            }
             InstructionData::UnaryIeee32 {
                 opcode: Opcode::F32const,
                 imm,
@@ -1703,6 +1853,27 @@ impl IntegerBlocks<'_> {
         for inst in instructions {
             let input = |value| values.low[function.dfg.resolve_aliases(value)];
             let ty = |value| function.dfg.value_type(function.dfg.resolve_aliases(value));
+            if let InstructionData::CondTrap { opcode, arg, .. } = function.dfg.insts[inst] {
+                if !self.allow_hardware_faults && !self.aarch64 {
+                    return None;
+                }
+                let condition = self.truthy_value(arg, values)?;
+                let op = match opcode {
+                    Opcode::Trapz => IntegerOp::TrapIfZero,
+                    Opcode::Trapnz => IntegerOp::TrapIfNonzero,
+                    _ => return None,
+                };
+                self.append(op, [condition, 0, 0]);
+                continue;
+            }
+            if let InstructionData::Ternary {
+                opcode: Opcode::SelectSpectreGuard,
+                args,
+            } = function.dfg.insts[inst]
+            {
+                self.guarded_select(inst, args, values)?;
+                continue;
+            }
             if function.dfg.insts[inst].opcode() == Opcode::Fence {
                 self.append(IntegerOp::Fence, [0; 3]);
                 continue;
@@ -1849,6 +2020,9 @@ impl IntegerBlocks<'_> {
             let output = function.dfg.value_type(value);
             let width = integer_width(output)?;
             let (op, operands) = match function.dfg.insts[inst] {
+                InstructionData::NullAry {
+                    opcode: Opcode::GetStackPointer,
+                } if output == types::I64 => (IntegerOp::StackPointer, [0; 3]),
                 InstructionData::LoadNoOffset {
                     opcode: Opcode::AtomicLoad,
                     flags,
@@ -2701,6 +2875,9 @@ impl IntegerBlocks<'_> {
 /// A trailing FloatReturn selects the ABI's single floating-point result.
 /// SymbolRelative and SymbolGot read the data symbol ID from the left operand.
 /// FunctionGot reads the function symbol ID from the left operand.
+/// TrapIfZero and TrapIfNonzero read a single integer condition and continue on
+/// the non-trapping path. StackPointer reads the active SP after the prologue.
+/// SpectreBarrier orders AArch64 guarded selects before subsequent uses.
 /// A labeled function starts with BlockLabel after the stack declarations
 /// and returns through BlockReturn records. The label's extra word describes
 /// the integer return arity or a single floating-point result. The entry argument

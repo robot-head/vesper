@@ -167,6 +167,11 @@ pub const STACK_ARGUMENT: u64 = 149;
 pub const FLOAT_STACK_ARGUMENT: u64 = 150;
 pub const CALL_STACK_ARGUMENT: u64 = 151;
 pub const FUNCTION_GOT: u64 = 152;
+pub const TRAP_IF_ZERO: u64 = 153;
+pub const TRAP_IF_NONZERO: u64 = 154;
+pub const STACK_POINTER: u64 = 155;
+pub const SPECTRE_BARRIER: u64 = 156;
+pub const FLOAT_TO_INTEGER_TRUNC: u64 = 157;
 const XMM_ARGUMENTS: u64 = 8;
 pub const CHECKED_ARITHMETIC_RECORDS: u64 = 2;
 
@@ -609,11 +614,16 @@ fn has_no_result(op: u64) -> bool {
         || op == CALL_ARGUMENT
         || op == CALL_VOID
         || op == TRAP
+        || is_conditional_trap(op)
         || op == FENCE
         || op == FLOAT_RETURN
         || op == FLOAT_STORE32
         || op == FLOAT_STORE64
         || is_cfg_record(op)
+}
+
+pub fn is_conditional_trap(op: u64) -> bool {
+    op == TRAP_IF_ZERO || op == TRAP_IF_NONZERO
 }
 
 pub fn is_call(op: u64) -> bool {
@@ -787,6 +797,7 @@ fn reads_left(in record: Record) -> bool {
     let op = record.op;
     op != CONSTANT
         && op != STACK_SLOT
+        && op != STACK_POINTER
         && op != STACK_ADDRESS
         && op != STACK_LOAD
         && op != FLOAT_STACK_LOAD
@@ -877,6 +888,7 @@ fn float_left(op: u64) -> bool {
         || op == FLOAT_COPY_SIGN
         || op == FLOAT_PROMOTE
         || op == FLOAT_DEMOTE
+        || op == FLOAT_TO_INTEGER_TRUNC
         || (op >= FLOAT_TO_SIGNED_SAT && op <= FLOAT_FMA64)
 }
 
@@ -1076,7 +1088,11 @@ fn find_last_reads(
         let index = wrapping_sub(wrapping_sub(count, 1), reverse_index);
         let value = wrapping_add(arguments, index);
         let record = read_record(in words, index);
-        if (record.op > BYTE_SWAP && record.op != FUNCTION_GOT)
+        if (record.op > BYTE_SWAP
+            && record.op != FUNCTION_GOT
+            && record.op != STACK_POINTER
+            && record.op != FLOAT_TO_INTEGER_TRUNC
+            && !is_conditional_trap(record.op))
             || (!labeled && is_cfg_record(record.op))
             || (record.op == STACK_SLOT && index >= frame.slots.len())
             || (record.op == RETURN_PAIR && (reverse_index != 0 || record.left >= value))
@@ -1111,6 +1127,26 @@ fn find_last_reads(
         }
         let last = last_read(in reads, value);
         let live = last != NEVER_READ || live_overflow_flag(in reads, value, record.op);
+        if is_conditional_trap(record.op) && (record.right != 0 || record.extra != 0) {
+            return Option::None;
+        }
+        if record.op == STACK_POINTER {
+            if record.left != 0 || record.right != 0 || record.extra != 0 {
+                return Option::None;
+            }
+            if live {
+                frame.promoted = 0;
+                frame.used = true;
+            }
+        }
+        if record.op == FLOAT_TO_INTEGER_TRUNC {
+            if (record.right != DWORD_BITS && record.right != QWORD_BITS)
+                || (record.extra != DWORD_BITS && record.extra != QWORD_BITS)
+            {
+                return Option::None;
+            }
+            frame.floating = true;
+        }
         let atomic = is_atomic_rmw(record.op);
         if atomic {
             if !valid_width(record.extra) {
@@ -2588,6 +2624,10 @@ fn encode_block_pass(
         } else {
             UNASSIGNED
         };
+        if is_conditional_trap(record.op) {
+            emit(inout output, in Instruction::TrapIf(left, record.op == TRAP_IF_ZERO));
+            continue;
+        }
         let right = if has_right {
             let location = assigned(in allocation.locations, record.right);
             let scratch = if record.op == FLOAT_SELECT {
@@ -2632,6 +2672,8 @@ fn encode_block_pass(
         };
         if record.op == CONSTANT {
             emit(inout output, in Instruction::Immediate(destination, record.left));
+        } else if record.op == STACK_POINTER {
+            emit(inout output, in Instruction::Move(destination, RSP));
         } else if record.op == FLOAT_CONSTANT {
             emit(
                 inout output,
@@ -2710,6 +2752,11 @@ fn encode_block_pass(
             );
         } else if record.op == BITS_TO_FLOAT || record.op == FLOAT_TO_BITS {
             emit(inout output, in Instruction::FloatBits(destination, left, record.extra));
+        } else if record.op == FLOAT_TO_INTEGER_TRUNC {
+            emit(
+                inout output,
+                in Instruction::FloatToInteger(destination, left, record.right, record.extra)
+            );
         } else if is_comparison(record.op) {
             let cc = condition_code(record.extra);
             let width = comparison_width(record.op);
