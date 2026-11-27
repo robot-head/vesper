@@ -42,6 +42,10 @@ const MAP_OFF_KIND: u64 = 4;
 const MAP_KIND_SOURCE: u64 = 0;
 const MAP_KIND_GENERATED: u64 = 1;
 
+// `SourceMap::file_at` flat word layout: `[base, len]`.
+const FILE_RANGE_WORDS: u64 = 2;
+const FILE_NONE: u64 = 18446744073709551615;
+
 fn at_byte(in s: Slice[u8], i: u64) -> u8 {
     match s.try_get(i) {
         Option::Some(b) => b,
@@ -598,6 +602,134 @@ pub fn remap_diagnostics_json_words(in input: Str) -> ChunkSeq[u64] {
     let remapped = remap_diagnostics_stream(in map_words.as_slice(), in b[at..b.len()]);
     let json = diagnostics_json(in remapped.as_slice());
     pack_bytes(in json.as_slice())
+}
+
+pub copy struct LineCol {
+    pub line: u64,
+    pub col: u64,
+}
+
+// `vesper::packages::SourceMap::file_at`: reverse-search `[base, len]` pairs
+// for `base <= offset && offset <= base + len`.
+pub fn source_map_file_at(in file_ranges: Slice[u64], offset: u64) -> Option[u64] {
+    let n = file_ranges.len() / FILE_RANGE_WORDS;
+    let mut i = n;
+    loop {
+        if i == 0 {
+            break;
+        }
+        i = wrapping_sub(i, 1);
+        let base_idx = wrapping_mul(i, FILE_RANGE_WORDS);
+        let base = at_word(in file_ranges, base_idx);
+        let len = at_word(in file_ranges, wrapping_add(base_idx, 1));
+        if base <= offset && offset <= wrapping_add(base, len) {
+            return Option::Some(i);
+        }
+    }
+    Option::None
+}
+
+// 1-based `(line, column)` UTF-8 scalar position at byte `offset` in `text`.
+pub fn line_col_at(in text: Slice[u8], offset: u64) -> LineCol {
+    let limit = if offset < text.len() {
+        offset
+    } else {
+        text.len()
+    };
+    let mut line: u64 = 1;
+    let mut col: u64 = 1;
+    for i in 0..limit {
+        let b = at_byte(in text, i);
+        if b == CH_LF {
+            line = wrapping_add(line, 1);
+            col = 1;
+        } else if (b & UTF8_CONT_MASK) != UTF8_CONT_TAG {
+            col = wrapping_add(col, 1);
+        }
+    }
+    LineCol { line, col }
+}
+
+fn replace_all(
+    in text: Slice[u8],
+    in needle: Slice[u8],
+    in replacement: Slice[u8]
+) -> ChunkSeq[u8] {
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let nlen = needle.len();
+    let tlen = text.len();
+    if nlen == 0 || nlen > tlen {
+        push_bytes(inout out, in text);
+        return out;
+    }
+    let mut i: u64 = 0;
+    loop {
+        if i >= tlen {
+            break;
+        }
+        if wrapping_add(i, nlen) <= tlen && eq_bytes(in text[i..wrapping_add(i, nlen)], in needle) {
+            push_bytes(inout out, in replacement);
+            i = wrapping_add(i, nlen);
+        } else {
+            out.push(at_byte(in text, i));
+            i = wrapping_add(i, 1);
+        }
+    }
+    out
+}
+
+// `vesper::packages::SourceMap::demangle` text rewrite: applies `(mangled, shown)`
+// pairs from `pairs_stream` (`count: u64`, then `(mangled, shown)` length-prefixed
+// byte slices, expected longest-first as in `SourceMap::demangle`).
+pub fn demangle_text(in text: Slice[u8], in pairs_stream: Slice[u8]) -> ChunkSeq[u8] {
+    let mut cur: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    push_bytes(inout cur, in text);
+    let mut at: u64 = 0;
+    let count = read_u64(in pairs_stream, inout at);
+    for _i in 0..count {
+        let m_r = read_span_slice(in pairs_stream, inout at);
+        let s_r = read_span_slice(in pairs_stream, inout at);
+        let next = replace_all(
+            in cur.as_slice(),
+            in pairs_stream[m_r.start..m_r.end],
+            in pairs_stream[s_r.start..s_r.end]
+        );
+        cur = next;
+    }
+    cur
+}
+
+// JIT test entrypoint: `[n_files, (base, len)..., offset, text_len, text, line_offset, pairs_stream...]`
+// -> `[file_or_none, line, col, packed demangled_bytes...]`.
+pub fn source_map_helpers_words(in input: Str) -> ChunkSeq[u64] {
+    let b = input.as_bytes();
+    let mut at: u64 = 0;
+    let n_files = read_u64(in b, inout at);
+    let mut ranges: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    for _i in 0..wrapping_mul(n_files, FILE_RANGE_WORDS) {
+        ranges.push(read_u64(in b, inout at));
+    }
+    let query_off = read_u64(in b, inout at);
+    let text_r = read_span_slice(in b, inout at);
+    let line_off = read_u64(in b, inout at);
+    let pairs = b[at..b.len()];
+
+    let file_idx = match source_map_file_at(in ranges.as_slice(), query_off) {
+        Option::Some(idx) => idx,
+        Option::None => FILE_NONE,
+    };
+    let lc = line_col_at(in b[text_r.start..text_r.end], line_off);
+    let demangled = demangle_text(in b[text_r.start..text_r.end], in pairs);
+
+    let mut out: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    out.push(file_idx);
+    out.push(lc.line);
+    out.push(lc.col);
+    let packed = pack_bytes(in demangled.as_slice());
+    for i in 0..packed.len() {
+        out.push(at_word(in packed.as_slice(), i));
+    }
+    out
 }
 
 // JIT test entrypoint: `[reason_len: u64, reason_bytes, stream_bytes...]` -> packed raw stderr bytes.
