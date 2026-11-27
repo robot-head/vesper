@@ -1943,3 +1943,1156 @@ pub fn parse_sgx_tcb_info(
     out.try_set(SGX_OUT_LEVEL_COUNT, lvl_count);
     QE_ERR_OK
 }
+
+// ---------------------------------------------------------------------------
+// Intel TDX TCB Info JSON parser (`TdxTcbInfo::parse` in `src/intel.rs`)
+// ---------------------------------------------------------------------------
+
+const TDX_OUT_HAS_MOD: u64 = 10;
+const TDX_OUT_MOD_ID_COUNT: u64 = 11;
+const TDX_OUT_LEN: u64 = 12;
+
+const TDX_BYTES_MOD_MRSIGNER_OFF: u64 = 8;
+const TDX_BYTES_MOD_ATTR_OFF: u64 = 56;
+const TDX_BYTES_MOD_ATTR_MASK_OFF: u64 = 64;
+const TDX_BYTES_TOTAL: u64 = 72;
+
+const TDX_MOD_MRSIGNER_LEN: u64 = 48;
+const TDX_MOD_ATTR_LEN: u64 = 8;
+const TDX_MOD_BYTES_STRIDE: u64 = 64;
+const TDX_MOD_BYTES_ATTR_OFF: u64 = 48;
+const TDX_MOD_BYTES_MASK_OFF: u64 = 56;
+
+const TDX_MOD_STRIDE: u64 = 4;
+const TDX_MOD_ID_START: u64 = 0;
+const TDX_MOD_ID_END: u64 = 1;
+const TDX_MOD_LVL_START: u64 = 2;
+const TDX_MOD_LVL_COUNT: u64 = 3;
+
+const TDX_COMPS_STRIDE: u64 = 32;
+const TDX_COMPS_TDX_OFF: u64 = 16;
+
+const TDX_TCB_REQ_TDX_COMPS: u64 = 4;
+const TDX_TCB_REQ_ALL: u64 = 7;
+
+const MOD_REQ_MRSIGNER: u64 = 1;
+const MOD_REQ_ATTR: u64 = 2;
+const MOD_REQ_ATTR_MASK: u64 = 4;
+const MOD_REQ_BASE_ALL: u64 = 7;
+const MOD_REQ_ID: u64 = 8;
+const MOD_REQ_LEVELS: u64 = 16;
+const MOD_REQ_IDENT_ALL: u64 = 31;
+
+const KEY_LEN_TDX_MODULE: u64 = 9;
+const KEY_LEN_TDX_MOD_IDS: u64 = 19;
+
+fn eq_key_tdx_module(in b: Slice[u8], s: u64, e: u64) -> bool {
+    wrapping_sub(e, s) == KEY_LEN_TDX_MODULE
+        && byte_at(in b, s) == CH_T_LOWER
+        && byte_at(in b, wrapping_add(s, 1)) == CH_D_LOWER
+        && byte_at(in b, wrapping_add(s, IDX_2)) == CH_X_LOWER
+        && byte_at(in b, wrapping_add(s, IDX_3)) == CH_M_UPPER
+        && byte_at(in b, wrapping_add(s, IDX_4)) == CH_O_LOWER
+        && byte_at(in b, wrapping_add(s, IDX_5)) == CH_D_LOWER
+        && byte_at(in b, wrapping_add(s, IDX_6)) == CH_U_LOWER
+        && byte_at(in b, wrapping_add(s, IDX_7)) == CH_L_LOWER
+        && byte_at(in b, wrapping_add(s, IDX_8)) == CH_E_LOWER
+}
+
+fn eq_key_tdx_module_identities(in b: Slice[u8], s: u64, e: u64) -> bool {
+    wrapping_sub(e, s) == KEY_LEN_TDX_MOD_IDS
+        && byte_at(in b, s) == CH_T_LOWER
+        && byte_at(in b, wrapping_add(s, 1)) == CH_D_LOWER
+        && byte_at(in b, wrapping_add(s, IDX_2)) == CH_X_LOWER
+        && byte_at(in b, wrapping_add(s, IDX_3)) == CH_M_UPPER
+        && byte_at(in b, wrapping_add(s, IDX_9)) == CH_I_UPPER
+        && byte_at(in b, wrapping_sub(e, 1)) == CH_S_LOWER
+}
+
+fn eq_key_tdxtcbcomponents(in b: Slice[u8], s: u64, e: u64) -> bool {
+    wrapping_sub(e, s) == KEY_LEN_SGX_COMPS
+        && byte_at(in b, s) == CH_T_LOWER
+        && byte_at(in b, wrapping_add(s, 1)) == CH_D_LOWER
+        && byte_at(in b, wrapping_add(s, IDX_2)) == CH_X_LOWER
+        && byte_at(in b, wrapping_add(s, IDX_3)) == CH_T_LOWER
+        && byte_at(in b, wrapping_add(s, IDX_4)) == CH_C_LOWER
+        && byte_at(in b, wrapping_add(s, IDX_5)) == CH_B_LOWER
+        && byte_at(in b, wrapping_add(s, IDX_6)) == CH_C_LOWER
+        && byte_at(in b, wrapping_sub(e, 1)) == CH_S_LOWER
+}
+
+fn parse_svn16_array(
+    in b: Slice[u8],
+    start: u64,
+    n: u64,
+    inout dst: Slice[u8],
+    dst_off: u64
+) -> (bool, u64) {
+    if start >= n || byte_at(in b, start) != CH_LBRACKET {
+        return (false, 0);
+    }
+    let mut i = skip_ws(in b, wrapping_add(start, 1), n);
+    let mut ci: u64 = 0;
+    if i < n && byte_at(in b, i) == CH_RBRACKET {
+        return (false, 0);
+    }
+    loop {
+        if i >= n || byte_at(in b, i) != CH_LBRACE || ci >= SGX_COMPS_LEN {
+            return (false, 0);
+        }
+        i = skip_ws(in b, wrapping_add(i, 1), n);
+        let mut got_svn = false;
+        let mut svn_val: u64 = 0;
+        if i < n && byte_at(in b, i) == CH_RBRACE {
+            i = wrapping_add(i, 1);
+        } else {
+            loop {
+                let ck_s0 = i;
+                let (ok_ck, ck_e0) = scan_string(in b, i, n);
+                if !ok_ck {
+                    return (false, 0);
+                }
+                let cks = wrapping_add(ck_s0, 1);
+                let cke = wrapping_sub(ck_e0, 1);
+                i = skip_ws(in b, ck_e0, n);
+                if i >= n || byte_at(in b, i) != CH_COLON {
+                    return (false, 0);
+                }
+                i = skip_ws(in b, wrapping_add(i, 1), n);
+                if eq_key_svn(in b, cks, cke) {
+                    let (ok_u, val, ue) = parse_uint(in b, i, n, MAX_U8);
+                    if !ok_u {
+                        return (false, 0);
+                    }
+                    svn_val = val;
+                    got_svn = true;
+                    i = ue;
+                } else {
+                    let (ok_v, ve) = skip_value(in b, i, n, 0);
+                    if !ok_v {
+                        return (false, 0);
+                    }
+                    i = ve;
+                }
+                i = skip_ws(in b, i, n);
+                if i >= n {
+                    return (false, 0);
+                }
+                let csep = byte_at(in b, i);
+                if csep == CH_RBRACE {
+                    i = wrapping_add(i, 1);
+                    break;
+                }
+                if csep != CH_COMMA {
+                    return (false, 0);
+                }
+                i = skip_ws(in b, wrapping_add(i, 1), n);
+            }
+        }
+        if !got_svn {
+            return (false, 0);
+        }
+        dst.try_set(wrapping_add(dst_off, ci), wrapping_u8(svn_val));
+        ci = wrapping_add(ci, 1);
+        i = skip_ws(in b, i, n);
+        if i >= n {
+            return (false, 0);
+        }
+        let bsep = byte_at(in b, i);
+        if bsep == CH_RBRACKET {
+            i = wrapping_add(i, 1);
+            break;
+        }
+        if bsep != CH_COMMA {
+            return (false, 0);
+        }
+        i = skip_ws(in b, wrapping_add(i, 1), n);
+    }
+    if ci != SGX_COMPS_LEN {
+        return (false, 0);
+    }
+    (true, i)
+}
+
+pub fn parse_tdx_tcb_info(
+    in b: Slice[u8],
+    inout out: Slice[u64],
+    inout bytes_out: Slice[u8],
+    inout levels_out: Slice[u64],
+    inout comps_out: Slice[u8],
+    inout mods_out: Slice[u64],
+    inout mod_bytes_out: Slice[u8],
+    inout mod_lvls_out: Slice[u64],
+    inout adv_out: Slice[u64]
+) -> u64 {
+    if out.len() < TDX_OUT_LEN || bytes_out.len() < TDX_BYTES_TOTAL {
+        return QE_ERR_JSON;
+    }
+    let n = b.len();
+    let mut i = skip_ws(in b, 0, n);
+    if i >= n || byte_at(in b, i) != CH_LBRACE {
+        return QE_ERR_JSON;
+    }
+    i = skip_ws(in b, wrapping_add(i, 1), n);
+
+    let mut req: u64 = 0;
+    let mut id_s: u64 = 0;
+    let mut id_e: u64 = 0;
+    let mut version: u64 = 0;
+    let mut issue_s: u64 = 0;
+    let mut issue_e: u64 = 0;
+    let mut next_s: u64 = 0;
+    let mut next_e: u64 = 0;
+    let mut tcb_type: u64 = 0;
+    let mut tcb_eval: u64 = 0;
+    let mut has_mod: u64 = 0;
+    let mut mod_count: u64 = 0;
+    let mut mod_lvl_total: u64 = 0;
+    let mut lvl_count: u64 = 0;
+    let mut adv_total: u64 = 0;
+
+    if i < n && byte_at(in b, i) == CH_RBRACE {
+        i = wrapping_add(i, 1);
+    } else {
+        loop {
+            let key_start = i;
+            let (ok_k, key_end) = scan_string(in b, i, n);
+            if !ok_k {
+                return QE_ERR_JSON;
+            }
+            let ks = wrapping_add(key_start, 1);
+            let ke = wrapping_sub(key_end, 1);
+            i = skip_ws(in b, key_end, n);
+            if i >= n || byte_at(in b, i) != CH_COLON {
+                return QE_ERR_JSON;
+            }
+            i = skip_ws(in b, wrapping_add(i, 1), n);
+
+            if eq_key_id(in b, ks, ke) {
+                if (req & SGX_REQ_ID) != 0 {
+                    return QE_ERR_JSON;
+                }
+                let (ok_s, se) = scan_string(in b, i, n);
+                if !ok_s {
+                    return QE_ERR_JSON;
+                }
+                id_s = wrapping_add(i, 1);
+                id_e = wrapping_sub(se, 1);
+                req = req | SGX_REQ_ID;
+                i = se;
+            } else if eq_key_version(in b, ks, ke) {
+                if (req & SGX_REQ_VERSION) != 0 {
+                    return QE_ERR_JSON;
+                }
+                let (ok_u, val, ue) = parse_uint(in b, i, n, MAX_U32);
+                if !ok_u {
+                    return QE_ERR_JSON;
+                }
+                version = val;
+                req = req | SGX_REQ_VERSION;
+                i = ue;
+            } else if eq_key_issue_date(in b, ks, ke) {
+                if (req & SGX_REQ_ISSUE_DATE) != 0 {
+                    return QE_ERR_JSON;
+                }
+                let (ok_s, se) = scan_string(in b, i, n);
+                if !ok_s {
+                    return QE_ERR_JSON;
+                }
+                issue_s = wrapping_add(i, 1);
+                issue_e = wrapping_sub(se, 1);
+                req = req | SGX_REQ_ISSUE_DATE;
+                i = se;
+            } else if eq_key_next_update(in b, ks, ke) {
+                if (req & SGX_REQ_NEXT_UPDATE) != 0 {
+                    return QE_ERR_JSON;
+                }
+                let (ok_s, se) = scan_string(in b, i, n);
+                if !ok_s {
+                    return QE_ERR_JSON;
+                }
+                next_s = wrapping_add(i, 1);
+                next_e = wrapping_sub(se, 1);
+                req = req | SGX_REQ_NEXT_UPDATE;
+                i = se;
+            } else if eq_key_fmspc(in b, ks, ke) {
+                if (req & SGX_REQ_FMSPC) != 0 {
+                    return QE_ERR_JSON;
+                }
+                let (ok_s, se) = scan_string(in b, i, n);
+                if !ok_s {
+                    return QE_ERR_JSON;
+                }
+                if !decode_hex_into(
+                    in b,
+                    wrapping_add(i, 1),
+                    wrapping_sub(se, 1),
+                    inout bytes_out,
+                    SGX_BYTES_FMSPC_OFF,
+                    SGX_BYTES_FMSPC_LEN
+                ) {
+                    return QE_ERR_HEX;
+                }
+                req = req | SGX_REQ_FMSPC;
+                i = se;
+            } else if eq_key_pce_id(in b, ks, ke) {
+                if (req & SGX_REQ_PCEID) != 0 {
+                    return QE_ERR_JSON;
+                }
+                let (ok_s, se) = scan_string(in b, i, n);
+                if !ok_s {
+                    return QE_ERR_JSON;
+                }
+                if !decode_hex_into(
+                    in b,
+                    wrapping_add(i, 1),
+                    wrapping_sub(se, 1),
+                    inout bytes_out,
+                    SGX_BYTES_PCEID_OFF,
+                    SGX_BYTES_PCEID_LEN
+                ) {
+                    return QE_ERR_HEX;
+                }
+                req = req | SGX_REQ_PCEID;
+                i = se;
+            } else if eq_key_tcb_type(in b, ks, ke) {
+                if (req & SGX_REQ_TCB_TYPE) != 0 {
+                    return QE_ERR_JSON;
+                }
+                let (ok_u, val, ue) = parse_uint(in b, i, n, MAX_U32);
+                if !ok_u {
+                    return QE_ERR_JSON;
+                }
+                tcb_type = val;
+                req = req | SGX_REQ_TCB_TYPE;
+                i = ue;
+            } else if eq_key_tcb_eval_num(in b, ks, ke) {
+                if (req & SGX_REQ_TCB_EVAL) != 0 {
+                    return QE_ERR_JSON;
+                }
+                let (ok_u, val, ue) = parse_uint(in b, i, n, MAX_U32);
+                if !ok_u {
+                    return QE_ERR_JSON;
+                }
+                tcb_eval = val;
+                req = req | SGX_REQ_TCB_EVAL;
+                i = ue;
+            } else if eq_key_tdx_module(in b, ks, ke) {
+                if i < n && byte_at(in b, i) == CH_N_LOWER {
+                    let (ok_v, ve) = skip_value(in b, i, n, 0);
+                    if !ok_v {
+                        return QE_ERR_JSON;
+                    }
+                    has_mod = 0;
+                    i = ve;
+                } else {
+                    if i >= n || byte_at(in b, i) != CH_LBRACE {
+                        return QE_ERR_JSON;
+                    }
+                    i = skip_ws(in b, wrapping_add(i, 1), n);
+                    let mut mreq: u64 = 0;
+                    if i < n && byte_at(in b, i) == CH_RBRACE {
+                        i = wrapping_add(i, 1);
+                    } else {
+                        loop {
+                            let mk_s0 = i;
+                            let (ok_mk, mk_e0) = scan_string(in b, i, n);
+                            if !ok_mk {
+                                return QE_ERR_JSON;
+                            }
+                            let mks = wrapping_add(mk_s0, 1);
+                            let mke = wrapping_sub(mk_e0, 1);
+                            i = skip_ws(in b, mk_e0, n);
+                            if i >= n || byte_at(in b, i) != CH_COLON {
+                                return QE_ERR_JSON;
+                            }
+                            i = skip_ws(in b, wrapping_add(i, 1), n);
+                            if eq_key_mrsigner(in b, mks, mke) {
+                                let (ok_s, se) = scan_string(in b, i, n);
+                                if !ok_s {
+                                    return QE_ERR_JSON;
+                                }
+                                if !decode_hex_into(
+                                    in b,
+                                    wrapping_add(i, 1),
+                                    wrapping_sub(se, 1),
+                                    inout bytes_out,
+                                    TDX_BYTES_MOD_MRSIGNER_OFF,
+                                    TDX_MOD_MRSIGNER_LEN
+                                ) {
+                                    return QE_ERR_HEX;
+                                }
+                                mreq = mreq | MOD_REQ_MRSIGNER;
+                                i = se;
+                            } else if eq_key_attributes(in b, mks, mke) {
+                                let (ok_s, se) = scan_string(in b, i, n);
+                                if !ok_s {
+                                    return QE_ERR_JSON;
+                                }
+                                if !decode_hex_into(
+                                    in b,
+                                    wrapping_add(i, 1),
+                                    wrapping_sub(se, 1),
+                                    inout bytes_out,
+                                    TDX_BYTES_MOD_ATTR_OFF,
+                                    TDX_MOD_ATTR_LEN
+                                ) {
+                                    return QE_ERR_HEX;
+                                }
+                                mreq = mreq | MOD_REQ_ATTR;
+                                i = se;
+                            } else if eq_key_attributes_mask(in b, mks, mke) {
+                                let (ok_s, se) = scan_string(in b, i, n);
+                                if !ok_s {
+                                    return QE_ERR_JSON;
+                                }
+                                if !decode_hex_into(
+                                    in b,
+                                    wrapping_add(i, 1),
+                                    wrapping_sub(se, 1),
+                                    inout bytes_out,
+                                    TDX_BYTES_MOD_ATTR_MASK_OFF,
+                                    TDX_MOD_ATTR_LEN
+                                ) {
+                                    return QE_ERR_HEX;
+                                }
+                                mreq = mreq | MOD_REQ_ATTR_MASK;
+                                i = se;
+                            } else {
+                                let (ok_v, ve) = skip_value(in b, i, n, 0);
+                                if !ok_v {
+                                    return QE_ERR_JSON;
+                                }
+                                i = ve;
+                            }
+                            i = skip_ws(in b, i, n);
+                            if i >= n {
+                                return QE_ERR_JSON;
+                            }
+                            let msep = byte_at(in b, i);
+                            if msep == CH_RBRACE {
+                                i = wrapping_add(i, 1);
+                                break;
+                            }
+                            if msep != CH_COMMA {
+                                return QE_ERR_JSON;
+                            }
+                            i = skip_ws(in b, wrapping_add(i, 1), n);
+                        }
+                    }
+                    if mreq != MOD_REQ_BASE_ALL {
+                        return QE_ERR_JSON;
+                    }
+                    has_mod = 1;
+                }
+            } else if eq_key_tdx_module_identities(in b, ks, ke) {
+                if i >= n || byte_at(in b, i) != CH_LBRACKET {
+                    return QE_ERR_JSON;
+                }
+                i = skip_ws(in b, wrapping_add(i, 1), n);
+                if i < n && byte_at(in b, i) == CH_RBRACKET {
+                    i = wrapping_add(i, 1);
+                } else {
+                    loop {
+                        if i >= n || byte_at(in b, i) != CH_LBRACE {
+                            return QE_ERR_JSON;
+                        }
+                        let mboff = wrapping_mul(mod_count, TDX_MOD_BYTES_STRIDE);
+                        let moff = wrapping_mul(mod_count, TDX_MOD_STRIDE);
+                        if wrapping_add(mboff, TDX_MOD_BYTES_STRIDE) > mod_bytes_out.len()
+                            || wrapping_add(moff, TDX_MOD_STRIDE) > mods_out.len()
+                        {
+                            return QE_ERR_CAPACITY;
+                        }
+                        i = skip_ws(in b, wrapping_add(i, 1), n);
+                        let mut mreq: u64 = 0;
+                        let mut mid_s: u64 = 0;
+                        let mut mid_e: u64 = 0;
+                        let mlvl_start = mod_lvl_total;
+                        let mut mlvl_cnt: u64 = 0;
+                        if i < n && byte_at(in b, i) == CH_RBRACE {
+                            i = wrapping_add(i, 1);
+                        } else {
+                            loop {
+                                let mk_s0 = i;
+                                let (ok_mk, mk_e0) = scan_string(in b, i, n);
+                                if !ok_mk {
+                                    return QE_ERR_JSON;
+                                }
+                                let mks = wrapping_add(mk_s0, 1);
+                                let mke = wrapping_sub(mk_e0, 1);
+                                i = skip_ws(in b, mk_e0, n);
+                                if i >= n || byte_at(in b, i) != CH_COLON {
+                                    return QE_ERR_JSON;
+                                }
+                                i = skip_ws(in b, wrapping_add(i, 1), n);
+                                if eq_key_id(in b, mks, mke) {
+                                    let (ok_s, se) = scan_string(in b, i, n);
+                                    if !ok_s {
+                                        return QE_ERR_JSON;
+                                    }
+                                    mid_s = wrapping_add(i, 1);
+                                    mid_e = wrapping_sub(se, 1);
+                                    mreq = mreq | MOD_REQ_ID;
+                                    i = se;
+                                } else if eq_key_mrsigner(in b, mks, mke) {
+                                    let (ok_s, se) = scan_string(in b, i, n);
+                                    if !ok_s {
+                                        return QE_ERR_JSON;
+                                    }
+                                    if !decode_hex_into(
+                                        in b,
+                                        wrapping_add(i, 1),
+                                        wrapping_sub(se, 1),
+                                        inout mod_bytes_out,
+                                        mboff,
+                                        TDX_MOD_MRSIGNER_LEN
+                                    ) {
+                                        return QE_ERR_HEX;
+                                    }
+                                    mreq = mreq | MOD_REQ_MRSIGNER;
+                                    i = se;
+                                } else if eq_key_attributes(in b, mks, mke) {
+                                    let (ok_s, se) = scan_string(in b, i, n);
+                                    if !ok_s {
+                                        return QE_ERR_JSON;
+                                    }
+                                    if !decode_hex_into(
+                                        in b,
+                                        wrapping_add(i, 1),
+                                        wrapping_sub(se, 1),
+                                        inout mod_bytes_out,
+                                        wrapping_add(mboff, TDX_MOD_BYTES_ATTR_OFF),
+                                        TDX_MOD_ATTR_LEN
+                                    ) {
+                                        return QE_ERR_HEX;
+                                    }
+                                    mreq = mreq | MOD_REQ_ATTR;
+                                    i = se;
+                                } else if eq_key_attributes_mask(in b, mks, mke) {
+                                    let (ok_s, se) = scan_string(in b, i, n);
+                                    if !ok_s {
+                                        return QE_ERR_JSON;
+                                    }
+                                    if !decode_hex_into(
+                                        in b,
+                                        wrapping_add(i, 1),
+                                        wrapping_sub(se, 1),
+                                        inout mod_bytes_out,
+                                        wrapping_add(mboff, TDX_MOD_BYTES_MASK_OFF),
+                                        TDX_MOD_ATTR_LEN
+                                    ) {
+                                        return QE_ERR_HEX;
+                                    }
+                                    mreq = mreq | MOD_REQ_ATTR_MASK;
+                                    i = se;
+                                } else if eq_key_tcb_levels(in b, mks, mke) {
+                                    if i >= n || byte_at(in b, i) != CH_LBRACKET {
+                                        return QE_ERR_JSON;
+                                    }
+                                    i = skip_ws(in b, wrapping_add(i, 1), n);
+                                    if i < n && byte_at(in b, i) == CH_RBRACKET {
+                                        i = wrapping_add(i, 1);
+                                    } else {
+                                        loop {
+                                            if i >= n || byte_at(in b, i) != CH_LBRACE {
+                                                return QE_ERR_JSON;
+                                            }
+                                            i = skip_ws(in b, wrapping_add(i, 1), n);
+                                            let mut lreq: u64 = 0;
+                                            let mut isvsvn: u64 = 0;
+                                            let mut ld_s: u64 = 0;
+                                            let mut ld_e: u64 = 0;
+                                            let mut ls_s: u64 = 0;
+                                            let mut ls_e: u64 = 0;
+                                            let lvl_adv_start = adv_total;
+                                            let mut lvl_adv_cnt: u64 = 0;
+                                            if i < n && byte_at(in b, i) == CH_RBRACE {
+                                                i = wrapping_add(i, 1);
+                                            } else {
+                                                loop {
+                                                    let lk_s0 = i;
+                                                    let (ok_lk, lk_e0) = scan_string(in b, i, n);
+                                                    if !ok_lk {
+                                                        return QE_ERR_JSON;
+                                                    }
+                                                    let lks = wrapping_add(lk_s0, 1);
+                                                    let lke = wrapping_sub(lk_e0, 1);
+                                                    i = skip_ws(in b, lk_e0, n);
+                                                    if i >= n || byte_at(in b, i) != CH_COLON {
+                                                        return QE_ERR_JSON;
+                                                    }
+                                                    i = skip_ws(in b, wrapping_add(i, 1), n);
+                                                    if eq_key_tcb(in b, lks, lke) {
+                                                        if i >= n || byte_at(in b, i) != CH_LBRACE {
+                                                            return QE_ERR_JSON;
+                                                        }
+                                                        i = skip_ws(in b, wrapping_add(i, 1), n);
+                                                        let mut got_svn = false;
+                                                        if i < n && byte_at(in b, i) == CH_RBRACE {
+                                                            i = wrapping_add(i, 1);
+                                                        } else {
+                                                            loop {
+                                                                let tk_s0 = i;
+                                                                let (ok_tk, tk_e0) = scan_string(
+                                                                    in b,
+                                                                    i,
+                                                                    n
+                                                                );
+                                                                if !ok_tk {
+                                                                    return QE_ERR_JSON;
+                                                                }
+                                                                let tks = wrapping_add(tk_s0, 1);
+                                                                let tke = wrapping_sub(tk_e0, 1);
+                                                                i = skip_ws(in b, tk_e0, n);
+                                                                if i >= n
+                                                                    || byte_at(in b, i) != CH_COLON
+                                                                {
+                                                                    return QE_ERR_JSON;
+                                                                }
+                                                                i = skip_ws(
+                                                                    in b,
+                                                                    wrapping_add(i, 1),
+                                                                    n
+                                                                );
+                                                                if eq_key_isvsvn(in b, tks, tke) {
+                                                                    let (
+                                                                        ok_u,
+                                                                        val,
+                                                                        ue
+                                                                    ) = parse_uint(
+                                                                        in b,
+                                                                        i,
+                                                                        n,
+                                                                        MAX_U16
+                                                                    );
+                                                                    if !ok_u {
+                                                                        return QE_ERR_JSON;
+                                                                    }
+                                                                    isvsvn = val;
+                                                                    got_svn = true;
+                                                                    i = ue;
+                                                                } else {
+                                                                    let (ok_v, ve) = skip_value(
+                                                                        in b,
+                                                                        i,
+                                                                        n,
+                                                                        0
+                                                                    );
+                                                                    if !ok_v {
+                                                                        return QE_ERR_JSON;
+                                                                    }
+                                                                    i = ve;
+                                                                }
+                                                                i = skip_ws(in b, i, n);
+                                                                if i >= n {
+                                                                    return QE_ERR_JSON;
+                                                                }
+                                                                let tsep = byte_at(in b, i);
+                                                                if tsep == CH_RBRACE {
+                                                                    i = wrapping_add(i, 1);
+                                                                    break;
+                                                                }
+                                                                if tsep != CH_COMMA {
+                                                                    return QE_ERR_JSON;
+                                                                }
+                                                                i = skip_ws(
+                                                                    in b,
+                                                                    wrapping_add(i, 1),
+                                                                    n
+                                                                );
+                                                            }
+                                                        }
+                                                        if !got_svn {
+                                                            return QE_ERR_JSON;
+                                                        }
+                                                        lreq = lreq | LVL_REQ_TCB;
+                                                    } else if eq_key_tcb_date(in b, lks, lke) {
+                                                        let (ok_s, se) = scan_string(in b, i, n);
+                                                        if !ok_s {
+                                                            return QE_ERR_JSON;
+                                                        }
+                                                        ld_s = wrapping_add(i, 1);
+                                                        ld_e = wrapping_sub(se, 1);
+                                                        lreq = lreq | LVL_REQ_DATE;
+                                                        i = se;
+                                                    } else if eq_key_tcb_status(in b, lks, lke) {
+                                                        let (ok_s, se) = scan_string(in b, i, n);
+                                                        if !ok_s {
+                                                            return QE_ERR_JSON;
+                                                        }
+                                                        ls_s = wrapping_add(i, 1);
+                                                        ls_e = wrapping_sub(se, 1);
+                                                        lreq = lreq | LVL_REQ_STATUS;
+                                                        i = se;
+                                                    } else if eq_key_advisory_ids(in b, lks, lke) {
+                                                        if i >= n
+                                                            || byte_at(in b, i) != CH_LBRACKET
+                                                        {
+                                                            return QE_ERR_JSON;
+                                                        }
+                                                        i = skip_ws(in b, wrapping_add(i, 1), n);
+                                                        if i < n
+                                                            && byte_at(in b, i) == CH_RBRACKET
+                                                        {
+                                                            i = wrapping_add(i, 1);
+                                                        } else {
+                                                            loop {
+                                                                let (ok_s, se) = scan_string(
+                                                                    in b,
+                                                                    i,
+                                                                    n
+                                                                );
+                                                                if !ok_s {
+                                                                    return QE_ERR_JSON;
+                                                                }
+                                                                let aoff = wrapping_add(
+                                                                    adv_total,
+                                                                    adv_total
+                                                                );
+                                                                if wrapping_add(aoff, IDX_2)
+                                                                    > adv_out.len()
+                                                                {
+                                                                    return QE_ERR_CAPACITY;
+                                                                }
+                                                                adv_out.try_set(
+                                                                    aoff,
+                                                                    wrapping_add(i, 1)
+                                                                );
+                                                                adv_out.try_set(
+                                                                    wrapping_add(aoff, 1),
+                                                                    wrapping_sub(se, 1)
+                                                                );
+                                                                adv_total = wrapping_add(
+                                                                    adv_total,
+                                                                    1
+                                                                );
+                                                                lvl_adv_cnt = wrapping_add(
+                                                                    lvl_adv_cnt,
+                                                                    1
+                                                                );
+                                                                i = skip_ws(in b, se, n);
+                                                                if i >= n {
+                                                                    return QE_ERR_JSON;
+                                                                }
+                                                                let asep = byte_at(in b, i);
+                                                                if asep == CH_RBRACKET {
+                                                                    i = wrapping_add(i, 1);
+                                                                    break;
+                                                                }
+                                                                if asep != CH_COMMA {
+                                                                    return QE_ERR_JSON;
+                                                                }
+                                                                i = skip_ws(
+                                                                    in b,
+                                                                    wrapping_add(i, 1),
+                                                                    n
+                                                                );
+                                                            }
+                                                        }
+                                                    } else {
+                                                        let (ok_v, ve) = skip_value(in b, i, n, 0);
+                                                        if !ok_v {
+                                                            return QE_ERR_JSON;
+                                                        }
+                                                        i = ve;
+                                                    }
+                                                    i = skip_ws(in b, i, n);
+                                                    if i >= n {
+                                                        return QE_ERR_JSON;
+                                                    }
+                                                    let lsep = byte_at(in b, i);
+                                                    if lsep == CH_RBRACE {
+                                                        i = wrapping_add(i, 1);
+                                                        break;
+                                                    }
+                                                    if lsep != CH_COMMA {
+                                                        return QE_ERR_JSON;
+                                                    }
+                                                    i = skip_ws(in b, wrapping_add(i, 1), n);
+                                                }
+                                            }
+                                            if lreq != LVL_REQ_ALL {
+                                                return QE_ERR_JSON;
+                                            }
+                                            let loff = wrapping_mul(mod_lvl_total, QE_LVL_STRIDE);
+                                            if wrapping_add(loff, QE_LVL_STRIDE)
+                                                > mod_lvls_out.len()
+                                            {
+                                                return QE_ERR_CAPACITY;
+                                            }
+                                            mod_lvls_out.try_set(
+                                                wrapping_add(loff, QE_LVL_ISVSVN),
+                                                isvsvn
+                                            );
+                                            mod_lvls_out.try_set(
+                                                wrapping_add(loff, QE_LVL_DATE_START),
+                                                ld_s
+                                            );
+                                            mod_lvls_out.try_set(
+                                                wrapping_add(loff, QE_LVL_DATE_END),
+                                                ld_e
+                                            );
+                                            mod_lvls_out.try_set(
+                                                wrapping_add(loff, QE_LVL_STATUS_START),
+                                                ls_s
+                                            );
+                                            mod_lvls_out.try_set(
+                                                wrapping_add(loff, QE_LVL_STATUS_END),
+                                                ls_e
+                                            );
+                                            mod_lvls_out.try_set(
+                                                wrapping_add(loff, QE_LVL_ADV_START),
+                                                lvl_adv_start
+                                            );
+                                            mod_lvls_out.try_set(
+                                                wrapping_add(loff, QE_LVL_ADV_COUNT),
+                                                lvl_adv_cnt
+                                            );
+                                            mod_lvl_total = wrapping_add(mod_lvl_total, 1);
+                                            mlvl_cnt = wrapping_add(mlvl_cnt, 1);
+
+                                            i = skip_ws(in b, i, n);
+                                            if i >= n {
+                                                return QE_ERR_JSON;
+                                            }
+                                            let asep = byte_at(in b, i);
+                                            if asep == CH_RBRACKET {
+                                                i = wrapping_add(i, 1);
+                                                break;
+                                            }
+                                            if asep != CH_COMMA {
+                                                return QE_ERR_JSON;
+                                            }
+                                            i = skip_ws(in b, wrapping_add(i, 1), n);
+                                        }
+                                    }
+                                    mreq = mreq | MOD_REQ_LEVELS;
+                                } else {
+                                    let (ok_v, ve) = skip_value(in b, i, n, 0);
+                                    if !ok_v {
+                                        return QE_ERR_JSON;
+                                    }
+                                    i = ve;
+                                }
+                                i = skip_ws(in b, i, n);
+                                if i >= n {
+                                    return QE_ERR_JSON;
+                                }
+                                let msep = byte_at(in b, i);
+                                if msep == CH_RBRACE {
+                                    i = wrapping_add(i, 1);
+                                    break;
+                                }
+                                if msep != CH_COMMA {
+                                    return QE_ERR_JSON;
+                                }
+                                i = skip_ws(in b, wrapping_add(i, 1), n);
+                            }
+                        }
+                        if mreq != MOD_REQ_IDENT_ALL {
+                            return QE_ERR_JSON;
+                        }
+                        mods_out.try_set(wrapping_add(moff, TDX_MOD_ID_START), mid_s);
+                        mods_out.try_set(wrapping_add(moff, TDX_MOD_ID_END), mid_e);
+                        mods_out.try_set(wrapping_add(moff, TDX_MOD_LVL_START), mlvl_start);
+                        mods_out.try_set(wrapping_add(moff, TDX_MOD_LVL_COUNT), mlvl_cnt);
+                        mod_count = wrapping_add(mod_count, 1);
+
+                        i = skip_ws(in b, i, n);
+                        if i >= n {
+                            return QE_ERR_JSON;
+                        }
+                        let asep = byte_at(in b, i);
+                        if asep == CH_RBRACKET {
+                            i = wrapping_add(i, 1);
+                            break;
+                        }
+                        if asep != CH_COMMA {
+                            return QE_ERR_JSON;
+                        }
+                        i = skip_ws(in b, wrapping_add(i, 1), n);
+                    }
+                }
+            } else if eq_key_tcb_levels(in b, ks, ke) {
+                if i >= n || byte_at(in b, i) != CH_LBRACKET {
+                    return QE_ERR_JSON;
+                }
+                i = skip_ws(in b, wrapping_add(i, 1), n);
+                if i < n && byte_at(in b, i) == CH_RBRACKET {
+                    i = wrapping_add(i, 1);
+                } else {
+                    loop {
+                        if i >= n || byte_at(in b, i) != CH_LBRACE {
+                            return QE_ERR_JSON;
+                        }
+                        let coff = wrapping_mul(lvl_count, TDX_COMPS_STRIDE);
+                        if wrapping_add(coff, TDX_COMPS_STRIDE) > comps_out.len() {
+                            return QE_ERR_CAPACITY;
+                        }
+                        i = skip_ws(in b, wrapping_add(i, 1), n);
+                        let mut lreq: u64 = 0;
+                        let mut pcesvn: u64 = 0;
+                        let mut ld_s: u64 = 0;
+                        let mut ld_e: u64 = 0;
+                        let mut ls_s: u64 = 0;
+                        let mut ls_e: u64 = 0;
+                        let lvl_adv_start = adv_total;
+                        let mut lvl_adv_cnt: u64 = 0;
+                        if i < n && byte_at(in b, i) == CH_RBRACE {
+                            i = wrapping_add(i, 1);
+                        } else {
+                            loop {
+                                let lk_s0 = i;
+                                let (ok_lk, lk_e0) = scan_string(in b, i, n);
+                                if !ok_lk {
+                                    return QE_ERR_JSON;
+                                }
+                                let lks = wrapping_add(lk_s0, 1);
+                                let lke = wrapping_sub(lk_e0, 1);
+                                i = skip_ws(in b, lk_e0, n);
+                                if i >= n || byte_at(in b, i) != CH_COLON {
+                                    return QE_ERR_JSON;
+                                }
+                                i = skip_ws(in b, wrapping_add(i, 1), n);
+                                if eq_key_tcb(in b, lks, lke) {
+                                    if i >= n || byte_at(in b, i) != CH_LBRACE {
+                                        return QE_ERR_JSON;
+                                    }
+                                    i = skip_ws(in b, wrapping_add(i, 1), n);
+                                    let mut treq: u64 = 0;
+                                    if i < n && byte_at(in b, i) == CH_RBRACE {
+                                        i = wrapping_add(i, 1);
+                                    } else {
+                                        loop {
+                                            let tk_s0 = i;
+                                            let (ok_tk, tk_e0) = scan_string(in b, i, n);
+                                            if !ok_tk {
+                                                return QE_ERR_JSON;
+                                            }
+                                            let tks = wrapping_add(tk_s0, 1);
+                                            let tke = wrapping_sub(tk_e0, 1);
+                                            i = skip_ws(in b, tk_e0, n);
+                                            if i >= n || byte_at(in b, i) != CH_COLON {
+                                                return QE_ERR_JSON;
+                                            }
+                                            i = skip_ws(in b, wrapping_add(i, 1), n);
+                                            if eq_key_pcesvn(in b, tks, tke) {
+                                                let (ok_u, val, ue) = parse_uint(
+                                                    in b,
+                                                    i,
+                                                    n,
+                                                    MAX_U16
+                                                );
+                                                if !ok_u {
+                                                    return QE_ERR_JSON;
+                                                }
+                                                pcesvn = val;
+                                                treq = treq | SGX_TCB_REQ_PCESVN;
+                                                i = ue;
+                                            } else if eq_key_sgxtcbcomponents(in b, tks, tke) {
+                                                let (ok_c, ce) = parse_svn16_array(
+                                                    in b,
+                                                    i,
+                                                    n,
+                                                    inout comps_out,
+                                                    coff
+                                                );
+                                                if !ok_c {
+                                                    return QE_ERR_JSON;
+                                                }
+                                                treq = treq | SGX_TCB_REQ_COMPS;
+                                                i = ce;
+                                            } else if eq_key_tdxtcbcomponents(in b, tks, tke) {
+                                                let (ok_c, ce) = parse_svn16_array(
+                                                    in b,
+                                                    i,
+                                                    n,
+                                                    inout comps_out,
+                                                    wrapping_add(coff, TDX_COMPS_TDX_OFF)
+                                                );
+                                                if !ok_c {
+                                                    return QE_ERR_JSON;
+                                                }
+                                                treq = treq | TDX_TCB_REQ_TDX_COMPS;
+                                                i = ce;
+                                            } else {
+                                                let (ok_v, ve) = skip_value(in b, i, n, 0);
+                                                if !ok_v {
+                                                    return QE_ERR_JSON;
+                                                }
+                                                i = ve;
+                                            }
+                                            i = skip_ws(in b, i, n);
+                                            if i >= n {
+                                                return QE_ERR_JSON;
+                                            }
+                                            let tsep = byte_at(in b, i);
+                                            if tsep == CH_RBRACE {
+                                                i = wrapping_add(i, 1);
+                                                break;
+                                            }
+                                            if tsep != CH_COMMA {
+                                                return QE_ERR_JSON;
+                                            }
+                                            i = skip_ws(in b, wrapping_add(i, 1), n);
+                                        }
+                                    }
+                                    if treq != TDX_TCB_REQ_ALL {
+                                        return QE_ERR_JSON;
+                                    }
+                                    lreq = lreq | LVL_REQ_TCB;
+                                } else if eq_key_tcb_date(in b, lks, lke) {
+                                    let (ok_s, se) = scan_string(in b, i, n);
+                                    if !ok_s {
+                                        return QE_ERR_JSON;
+                                    }
+                                    ld_s = wrapping_add(i, 1);
+                                    ld_e = wrapping_sub(se, 1);
+                                    lreq = lreq | LVL_REQ_DATE;
+                                    i = se;
+                                } else if eq_key_tcb_status(in b, lks, lke) {
+                                    let (ok_s, se) = scan_string(in b, i, n);
+                                    if !ok_s {
+                                        return QE_ERR_JSON;
+                                    }
+                                    ls_s = wrapping_add(i, 1);
+                                    ls_e = wrapping_sub(se, 1);
+                                    lreq = lreq | LVL_REQ_STATUS;
+                                    i = se;
+                                } else if eq_key_advisory_ids(in b, lks, lke) {
+                                    if i >= n || byte_at(in b, i) != CH_LBRACKET {
+                                        return QE_ERR_JSON;
+                                    }
+                                    i = skip_ws(in b, wrapping_add(i, 1), n);
+                                    if i < n && byte_at(in b, i) == CH_RBRACKET {
+                                        i = wrapping_add(i, 1);
+                                    } else {
+                                        loop {
+                                            let (ok_s, se) = scan_string(in b, i, n);
+                                            if !ok_s {
+                                                return QE_ERR_JSON;
+                                            }
+                                            let aoff = wrapping_add(adv_total, adv_total);
+                                            if wrapping_add(aoff, IDX_2) > adv_out.len() {
+                                                return QE_ERR_CAPACITY;
+                                            }
+                                            adv_out.try_set(aoff, wrapping_add(i, 1));
+                                            adv_out.try_set(
+                                                wrapping_add(aoff, 1),
+                                                wrapping_sub(se, 1)
+                                            );
+                                            adv_total = wrapping_add(adv_total, 1);
+                                            lvl_adv_cnt = wrapping_add(lvl_adv_cnt, 1);
+                                            i = skip_ws(in b, se, n);
+                                            if i >= n {
+                                                return QE_ERR_JSON;
+                                            }
+                                            let asep = byte_at(in b, i);
+                                            if asep == CH_RBRACKET {
+                                                i = wrapping_add(i, 1);
+                                                break;
+                                            }
+                                            if asep != CH_COMMA {
+                                                return QE_ERR_JSON;
+                                            }
+                                            i = skip_ws(in b, wrapping_add(i, 1), n);
+                                        }
+                                    }
+                                } else {
+                                    let (ok_v, ve) = skip_value(in b, i, n, 0);
+                                    if !ok_v {
+                                        return QE_ERR_JSON;
+                                    }
+                                    i = ve;
+                                }
+                                i = skip_ws(in b, i, n);
+                                if i >= n {
+                                    return QE_ERR_JSON;
+                                }
+                                let lsep = byte_at(in b, i);
+                                if lsep == CH_RBRACE {
+                                    i = wrapping_add(i, 1);
+                                    break;
+                                }
+                                if lsep != CH_COMMA {
+                                    return QE_ERR_JSON;
+                                }
+                                i = skip_ws(in b, wrapping_add(i, 1), n);
+                            }
+                        }
+                        if lreq != LVL_REQ_ALL {
+                            return QE_ERR_JSON;
+                        }
+                        let loff = wrapping_mul(lvl_count, QE_LVL_STRIDE);
+                        if wrapping_add(loff, QE_LVL_STRIDE) > levels_out.len() {
+                            return QE_ERR_CAPACITY;
+                        }
+                        levels_out.try_set(wrapping_add(loff, QE_LVL_ISVSVN), pcesvn);
+                        levels_out.try_set(wrapping_add(loff, QE_LVL_DATE_START), ld_s);
+                        levels_out.try_set(wrapping_add(loff, QE_LVL_DATE_END), ld_e);
+                        levels_out.try_set(wrapping_add(loff, QE_LVL_STATUS_START), ls_s);
+                        levels_out.try_set(wrapping_add(loff, QE_LVL_STATUS_END), ls_e);
+                        levels_out.try_set(wrapping_add(loff, QE_LVL_ADV_START), lvl_adv_start);
+                        levels_out.try_set(wrapping_add(loff, QE_LVL_ADV_COUNT), lvl_adv_cnt);
+                        lvl_count = wrapping_add(lvl_count, 1);
+
+                        i = skip_ws(in b, i, n);
+                        if i >= n {
+                            return QE_ERR_JSON;
+                        }
+                        let asep = byte_at(in b, i);
+                        if asep == CH_RBRACKET {
+                            i = wrapping_add(i, 1);
+                            break;
+                        }
+                        if asep != CH_COMMA {
+                            return QE_ERR_JSON;
+                        }
+                        i = skip_ws(in b, wrapping_add(i, 1), n);
+                    }
+                }
+                req = req | SGX_REQ_LEVELS;
+            } else {
+                let (ok_v, ve) = skip_value(in b, i, n, 0);
+                if !ok_v {
+                    return QE_ERR_JSON;
+                }
+                i = ve;
+            }
+
+            i = skip_ws(in b, i, n);
+            if i >= n {
+                return QE_ERR_JSON;
+            }
+            let sep = byte_at(in b, i);
+            if sep == CH_RBRACE {
+                i = wrapping_add(i, 1);
+                break;
+            }
+            if sep != CH_COMMA {
+                return QE_ERR_JSON;
+            }
+            i = skip_ws(in b, wrapping_add(i, 1), n);
+        }
+    }
+
+    i = skip_ws(in b, i, n);
+    if i != n || req != SGX_REQ_ALL {
+        return QE_ERR_JSON;
+    }
+
+    out.try_set(SGX_OUT_ID_START, id_s);
+    out.try_set(SGX_OUT_ID_END, id_e);
+    out.try_set(SGX_OUT_VERSION, version);
+    out.try_set(SGX_OUT_ISSUE_DATE_START, issue_s);
+    out.try_set(SGX_OUT_ISSUE_DATE_END, issue_e);
+    out.try_set(SGX_OUT_NEXT_UPDATE_START, next_s);
+    out.try_set(SGX_OUT_NEXT_UPDATE_END, next_e);
+    out.try_set(SGX_OUT_TCB_TYPE, tcb_type);
+    out.try_set(SGX_OUT_TCB_EVAL_NUM, tcb_eval);
+    out.try_set(SGX_OUT_LEVEL_COUNT, lvl_count);
+    out.try_set(TDX_OUT_HAS_MOD, has_mod);
+    out.try_set(TDX_OUT_MOD_ID_COUNT, mod_count);
+    QE_ERR_OK
+}

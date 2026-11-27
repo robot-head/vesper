@@ -380,10 +380,12 @@ fn put_sym(inout o: ChunkSeq[u8], in names: Names, s: u32) {
 }
 
 fn put_u64(inout o: ChunkSeq[u8], v: u64) {
-    if v >= 10 {
-        put_u64(inout o, v / 10);
+    let q = v / 10;
+    if q != 0 {
+        put_u64(inout o, q);
     }
-    o.push(wrapping_u8(wrapping_add(v % 10, widen_u64(DIGIT_ZERO))));
+    let rem = wrapping_sub(v, wrapping_mul(q, 10));
+    o.push(wrapping_u8(wrapping_add(rem, widen_u64(DIGIT_ZERO))));
 }
 
 pub fn read_planner(in b: Slice[u8]) -> Planner {
