@@ -2427,6 +2427,12 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
              if flag { wrapping_add(twice_field(alias.left), alias.bias) }\n\
              else { wrapping_sub(alias.right, alias.left) }\n\
          }\n\
+         pub fn constant_after_branch(flag: bool) -> i64 {\n\
+             let base = 9223372036854775799;\n\
+             let step = if flag { 5 } else { 7 };\n\
+             let next = base + 1;\n\
+             wrapping_add(next, step)\n\
+         }\n\
          fn unsupported(x: u64) -> u64 { match (x, x) { (0, _) => 7, _ => 9 } }\n\
          pub fn decline(x: u64) -> u64 { unsupported(x) }\n",
     )
@@ -2598,6 +2604,14 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
         "{:?}",
         read_stage2_sidecar_notes(&object)
     );
+    let record_object = dir.join("native-record.o");
+    std::fs::rename(&object, &record_object).unwrap();
+    assert_eq!(
+        compile("constant_after_branch"),
+        0,
+        "{:?}",
+        read_stage2_sidecar_notes(&object)
+    );
     let bytes = std::fs::read(&object).unwrap();
     assert_ne!(compile("decline"), 0);
     assert!(read_stage2_sidecar_notes(&object).contains("unsupported x86-64 ELF entry"));
@@ -2628,6 +2642,7 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
          extern uint64_t procedure_value(uint64_t, uint64_t, bool);\n\
          extern int64_t tuple_value(int64_t, int64_t, bool);\n\
          extern int64_t record_value(int64_t, int64_t, bool);\n\
+         extern int64_t constant_after_branch(bool);\n\
          int main(void) {\n\
              if (mix(10, 4) != 65 || mix(UINT64_MAX, UINT64_MAX) != UINT64_MAX - 16) return 1;\n\
              if (choose(0, 4) != 8 || choose(2, 4) != 8 || choose(4, 1) != 10\n\
@@ -2661,8 +2676,10 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
                  || procedure_value(UINT64_MAX, 4, true) != 1) return 16;\n\
              if (tuple_value(3, 11, true) != 19 || tuple_value(3, 11, false) != 17\n\
                  || tuple_value(INT64_MAX, 0, true) != -5) return 17;\n\
-             return record_value(3, 11, true) != 19 || record_value(3, 11, false) != -1\n\
-                 || record_value(INT64_MAX, 0, true) != 0;\n\
+             if (record_value(3, 11, true) != 19 || record_value(3, 11, false) != -1\n\
+                 || record_value(INT64_MAX, 0, true) != 0) return 18;\n\
+             return constant_after_branch(true) != INT64_MAX - 2\n\
+                 || constant_after_branch(false) != INT64_MAX;\n\
          }\n",
     )
     .unwrap();
@@ -2686,6 +2703,7 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
             &float_object,
             &procedure_object,
             &tuple_object,
+            &record_object,
             &object,
         ])
         .arg("-o")

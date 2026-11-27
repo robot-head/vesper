@@ -69,6 +69,7 @@ const JUMP_ARGUMENT_COUNT: u64 = 1;
 const JUMP_ARGUMENT: u64 = 2;
 const HOME_BYTES: u64 = QWORD_BITS / BYTE_BITS;
 const HOME_SLOT: u64 = 0;
+const LITERAL_HOME: u64 = NO_VALUE - 1;
 const SCALAR_RESULTS: u64 = 1;
 const CALL_COUNT: u64 = 1;
 const CALL_ARGUMENTS: u64 = 2;
@@ -127,6 +128,7 @@ impl CallGraph {
 
 copy struct Value {
     owner: u64,
+    // Byte offset, NO_VALUE, or LITERAL_HOME for a rematerializable integer.
     home: u64,
     live: u64,
     block: u64,
@@ -264,7 +266,7 @@ impl Function {
         if value.owner == NO_VALUE {
             return false;
         }
-        if value.home == NO_VALUE {
+        if value.home >= LITERAL_HOME {
             value.home = self.home_bytes;
             self.home_bytes = add(self.home_bytes, HOME_BYTES);
         }
@@ -274,14 +276,14 @@ impl Function {
 
     fn use_in(inout self, id: u64, block: u64) -> bool {
         let v = self.values.try_get(id).unwrap_or(value_new(NO_VALUE));
-        v.owner == block || self.home(id, block)
+        v.owner == block || v.home == LITERAL_HOME || self.home(id, block)
     }
 
     fn define(inout self, id: u64, block: u64, machine: u64) -> bool {
         let mut value = self.values.try_get(id).unwrap_or(value_new(NO_VALUE));
         value.block = block;
         value.machine = machine;
-        if value.home != NO_VALUE {
+        if value.home < LITERAL_HOME {
             let kind = self.home_kind(id);
             self.store_cell(machine, value.home, kind);
         }
@@ -296,8 +298,15 @@ impl Function {
         if value.home == NO_VALUE {
             return NO_VALUE;
         }
-        let kind = self.home_kind(id);
-        value.machine = self.load_cell(value.home, kind);
+        value.machine = if value.home == LITERAL_HOME {
+            match self.constant(value.machine) {
+                Option::Some(bits) => self.record(CONSTANT, bits, 0, 0),
+                Option::None => return NO_VALUE,
+            }
+        } else {
+            let kind = self.home_kind(id);
+            self.load_cell(value.home, kind)
+        };
         value.block = block;
         let _ = self.values.try_set(id, value);
         value.machine
@@ -1130,7 +1139,7 @@ fn pack_homes(in low: L, row: FnRow, inout m: Function) {
     let mut occupied = ChunkSeq::new[u64]();
     for id in 0..m.values.len() {
         let mut value = m.values.try_get(id).unwrap_or(value_new(NO_VALUE));
-        if value.home == NO_VALUE {
+        if value.home >= LITERAL_HOME {
             continue;
         }
         let live = home_liveness(in predecessors, value);
@@ -1222,7 +1231,15 @@ fn plan_homes(in low: L, f: FnR, row: FnRow, inout m: Function) -> bool {
         }
         for index in b.i0..add(b.i0, b.ic) {
             let inst = low.program.inst(index);
-            if !m.values.try_set(add(f.param_count, w(inst.dest)), value_new(block)) {
+            let dest = w(inst.dest);
+            let mut value = value_new(block);
+            if inst.op == Op::Const && inst.n == LITERAL_WORDS {
+                let kind = m.kind(dest);
+                if is_integer(kind) || kind == ScalarKind::Bool {
+                    value.home = LITERAL_HOME;
+                }
+            }
+            if !m.values.try_set(add(f.param_count, dest), value) {
                 return false;
             }
         }
