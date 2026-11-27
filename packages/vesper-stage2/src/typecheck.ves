@@ -1514,6 +1514,8 @@ fn rebuild_tc(
     let next_perm = stage2_heap_swap(s_rb);
     if next_perm < tc_perm_end {
         stage2_heap_reset(m);
+    } else if next_perm > s_rb {
+        let _ = stage2_heap_swap(next_perm);
     }
     (fresh_tc, next_perm)
 }
@@ -1640,6 +1642,9 @@ pub fn typecheck_ast(
             tc.types.reserve_types(max_nodes, max_items, max_rows, max_effs);
             if tc_perm < tc_perm_end {
                 tc_perm = stage2_heap_swap(s_pre);
+                if tc_perm > s_pre {
+                    let _ = stage2_heap_swap(tc_perm);
+                }
             }
             m = stage2_heap_mark();
         }
