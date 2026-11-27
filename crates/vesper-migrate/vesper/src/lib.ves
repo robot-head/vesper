@@ -2011,3 +2011,65 @@ pub fn migrate_render_rty_vesper(
     }
     0
 }
+
+// ---------------------------------------------------------------------------
+// Plain-text migration report line renderers (`synth.rs::report`).
+
+pub fn migrate_render_report_header(
+    in schema: Slice[u8],
+    in origin: Slice[u8],
+    inout out: Slice[u8],
+) -> u64 {
+    let mut pos = copy_range(in schema, 0, schema.len(), inout out, 0);
+    pos = copy_str(in " report for ", inout out, pos);
+    pos = copy_range(in origin, 0, origin.len(), inout out, pos);
+    let _ = out.try_set(pos, BYTE_LF);
+    wrapping_add(pos, 1)
+}
+
+pub fn migrate_render_report_fn(
+    in name: Slice[u8],
+    has_sys: bool,
+    inout out: Slice[u8],
+) -> u64 {
+    let mut pos = copy_str(in "  ", inout out, 0);
+    pos = copy_range(in name, 0, name.len(), inout out, pos);
+    if has_sys {
+        pos = copy_str(in " [vsys]\n", inout out, pos);
+    } else {
+        pos = copy_str(in " [vesper only]\n", inout out, pos);
+    }
+    pos
+}
+
+pub fn migrate_render_report_layout(
+    in name: Slice[u8],
+    size: u64,
+    align: u64,
+    inout out: Slice[u8],
+) -> u64 {
+    let mut pos = copy_str(in "  ", inout out, 0);
+    pos = copy_range(in name, 0, name.len(), inout out, pos);
+    pos = copy_str(in ": ", inout out, pos);
+    pos = write_u64_dec(size, inout out, pos);
+    pos = copy_str(in " bytes, align ", inout out, pos);
+    pos = write_u64_dec(align, inout out, pos);
+    let _ = out.try_set(pos, BYTE_LF);
+    wrapping_add(pos, 1)
+}
+
+pub fn migrate_render_report_refusal(
+    in item: Slice[u8],
+    in reason: Slice[u8],
+    in detail: Slice[u8],
+    inout out: Slice[u8],
+) -> u64 {
+    let mut pos = copy_str(in "  ", inout out, 0);
+    pos = copy_range(in item, 0, item.len(), inout out, pos);
+    pos = copy_str(in " (", inout out, pos);
+    pos = copy_range(in reason, 0, reason.len(), inout out, pos);
+    pos = copy_str(in "): ", inout out, pos);
+    pos = copy_range(in detail, 0, detail.len(), inout out, pos);
+    let _ = out.try_set(pos, BYTE_LF);
+    wrapping_add(pos, 1)
+}
