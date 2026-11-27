@@ -22,7 +22,9 @@ use self::der_cert::{
     parse_spki_ec_key as parse_spki_ec_key_impl, parse_spki_key_bits as parse_spki_key_bits_impl
 };
 use self::pck_ext::parse_pck_ext as parse_pck_ext_impl;
-use self::pcs_json::parse_pcs_envelope as parse_pcs_envelope_impl;
+use self::pcs_json::{
+    parse_pcs_envelope as parse_pcs_envelope_impl, parse_qe_identity as parse_qe_identity_impl
+};
 use self::pem::{
     decode_pem_certificates as decode_pem_certificates_impl,
     decode_pem_public_key as decode_pem_public_key_impl
@@ -368,4 +370,14 @@ pub fn parse_pcs_envelope(
     inout sig_out: Slice[u8]
 ) -> u64 {
     parse_pcs_envelope_impl(in b, field_kind, inout out, inout sig_out)
+}
+
+pub fn parse_qe_identity(
+    in b: Slice[u8],
+    inout out: Slice[u64],
+    inout bytes_out: Slice[u8],
+    inout levels_out: Slice[u64],
+    inout adv_out: Slice[u64]
+) -> u64 {
+    parse_qe_identity_impl(in b, inout out, inout bytes_out, inout levels_out, inout adv_out)
 }
