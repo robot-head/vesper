@@ -1,0 +1,1046 @@
+// reuse_seq_header_loads of src/native_clif_opt.rs in Vesper (#2362 part
+// 6): the length and data words of a verified `SeqHandle` (and sequence
+// fields of entry parameters) are hoisted out of clean loops and loaded
+// once along dominator-tree paths without clobbers.
+
+use @vesper/clif::{Func, inc, n32, u32_at, u64_at, w};
+use @vesper/clif::codes::{
+    CC_UGE, CC_ULT, M_NOTRAP, NONE, NONE64, OP_BRIF, OP_CALL, OP_CALL_INDIRECT, OP_IADD,
+    OP_IADD_IMM, OP_ICMP, OP_ISTORE16, OP_ISTORE32, OP_ISTORE8, OP_JUMP, OP_LOAD, OP_SELECT,
+    OP_SLOAD16, OP_SLOAD32, OP_SLOAD8, OP_STACK_ADDR, OP_STORE, OP_ULOAD16, OP_ULOAD32, OP_ULOAD8,
+    TY_I64, V_PARAM
+};
+use super::{layout_blocks};
+use super::branches::{Cfg, Dom, cfg_of, dom_of, pred_hi, pred_lo};
+use super::loops::{Loops, dominates, has, in_loop, loops_of, pred_block, ranks};
+
+// A `SeqHeader`'s length and data words, and its word size.
+const SEQ_LEN_OFFSET: u64 = 0;
+const SEQ_DATA_OFFSET: u64 = 16;
+const SEQ_WORD_BYTES: u64 = 8;
+// The limits of the Rust step.
+const MAX_SEQ_ADDR_DEPTH: u64 = 5;
+const MAX_SEQ_ARM_SCAN_INSTS: u64 = 16;
+const MAX_DOM_REGION_BLOCKS: u64 = 64;
+const MAX_SEQ_HOIST_ROUNDS: u64 = 2;
+const MAX_SEQ_REUSE_ROUNDS: u64 = 2;
+const MIN_SHARED_DATA_LOADS: u64 = 2;
+// `resolve_base_offset` follows at most this many `iadd_imm`s.
+const MAX_BASE_STEPS: u64 = 4;
+// Arguments: a binary's, a store's value and address, a select's.
+const ARG_A: u64 = 0;
+const ARG_B: u64 = 1;
+const STORE_VALUE_ARG: u64 = 0;
+const STORE_ADDR_ARG: u64 = 1;
+const SELECT_COND: u64 = 0;
+const SELECT_THEN: u64 = 1;
+const SELECT_ELSE: u64 = 2;
+const DEST_THEN: u64 = 0;
+const DEST_ELSE: u64 = 1;
+// i64 words.
+const SIGN_BIT: u64 = 9223372036854775808;
+const I64_MAX: u64 = 9223372036854775807;
+const I32_MIN_WORD: u64 = 18446744071562067968;
+const I32_MAX_WORD: u64 = 2147483647;
+// The kinds of a store (`SeqStoreKind`).
+const K_SEQ_ELEM: u64 = 0;
+const K_PARAM_FIELD: u64 = 1;
+const K_STACK_SLOT: u64 = 2;
+const K_UNKNOWN: u64 = 3;
+
+fn g8(in s: ChunkSeq[u8], i: u64) -> u8 {
+    s.try_get(i).unwrap_or(0)
+}
+
+fn signed_lt(a: u64, b: u64) -> bool {
+    (a ^ SIGN_BIT) < (b ^ SIGN_BIT)
+}
+
+// |a - b| < SEQ_WORD_BYTES, on i64 words.
+fn near(a: u64, b: u64) -> bool {
+    let d = wrapping_sub(a, b);
+    let mag = if (d & SIGN_BIT) != 0 {
+        wrapping_sub(0, d)
+    } else {
+        d
+    };
+    mag < SEQ_WORD_BYTES
+}
+
+// i64 `saturating_add`.
+fn sat_add(a: u64, b: u64) -> u64 {
+    let s = wrapping_add(a, b);
+    let sa = a & SIGN_BIT;
+    if sa == (b & SIGN_BIT) && (s & SIGN_BIT) != sa {
+        return if sa != 0 { SIGN_BIT } else { I64_MAX };
+    }
+    s
+}
+
+fn is_load_format(op: u64) -> bool {
+    op == OP_LOAD
+        || op == OP_ULOAD8
+        || op == OP_SLOAD8
+        || op == OP_ULOAD16
+        || op == OP_SLOAD16
+        || op == OP_ULOAD32
+        || op == OP_SLOAD32
+}
+
+fn is_store_format(op: u64) -> bool {
+    op == OP_STORE || op == OP_ISTORE8 || op == OP_ISTORE16 || op == OP_ISTORE32
+}
+
+fn is_call(op: u64) -> bool {
+    op == OP_CALL || op == OP_CALL_INDIRECT
+}
+
+// The instruction defining `v` (any result), or NONE.
+fn def_any(in f: Func, v: u32) -> u32 {
+    f.def_inst(v)
+}
+
+fn is_stack(in f: Func, v: u32) -> bool {
+    let d = def_any(in f, v);
+    d != NONE && f.op(d) == OP_STACK_ADDR
+}
+
+// A base value and a total offset.
+copy struct Based {
+    base: u32,
+    off: u64,
+}
+
+fn resolve_base_offset(in f: Func, addr0: u32, off0: u64) -> Based {
+    let mut addr = addr0;
+    let mut off = off0;
+    for _ in 0..MAX_BASE_STEPS {
+        addr = f.resolve(addr);
+        let d = def_any(in f, addr);
+        if d != NONE && f.op(d) == OP_IADD_IMM {
+            addr = f.arg(d, ARG_A);
+            off = wrapping_add(off, f.inst(w(d)).imm);
+            continue;
+        }
+        break;
+    }
+    Based { base: f.resolve(addr), off: off }
+}
+
+fn is_entry_param(in f: Func, v: u32) -> bool {
+    let entry = f.first_block();
+    let r = f.resolve(v);
+    entry != NONE && f.val(w(r)).kind == V_PARAM && f.def_block(r) == entry
+}
+
+// The handle whose data word `val` (plus `extra`) addresses, or NONE.
+fn seq_data_handle(in f: Func, val0: u32, extra: u64, depth: u64) -> u32 {
+    if depth == 0 {
+        return NONE;
+    }
+    let val = f.resolve(val0);
+    let d = def_any(in f, val);
+    if d == NONE {
+        return NONE;
+    }
+    let op = f.op(d);
+    if op == OP_LOAD && f.value_type(val) == TY_I64 {
+        let r = resolve_base_offset(in f, f.arg(d, ARG_A), f.inst(w(d)).off);
+        return if r.off == SEQ_DATA_OFFSET && (extra & SIGN_BIT) == 0 {
+            r.base
+        } else {
+            NONE
+        };
+    }
+    if op == OP_IADD_IMM {
+        return seq_data_handle(
+            in f,
+            f.arg(d, ARG_A),
+            sat_add(extra, f.inst(w(d)).imm),
+            wrapping_sub(depth, 1)
+        );
+    }
+    if op == OP_IADD {
+        let h = seq_data_handle(in f, f.arg(d, ARG_A), 0, wrapping_sub(depth, 1));
+        if h != NONE {
+            return h;
+        }
+        return seq_data_handle(in f, f.arg(d, ARG_B), 0, wrapping_sub(depth, 1));
+    }
+    NONE
+}
+
+// The `load` defining `v` (any result), or NONE.
+fn plain_load_def(in f: Func, v: u32) -> u32 {
+    let d = def_any(in f, f.resolve(v));
+    if d == NONE || f.op(d) != OP_LOAD {
+        return NONE;
+    }
+    d
+}
+
+// `collect_verified_seq_handles`.
+fn verified_handles(in f: Func) -> ChunkSeq[u32] {
+    let mut handles = ChunkSeq::new[u32]();
+    let blocks = layout_blocks(in f);
+    for q in 0..blocks.len() {
+        let mut inst = f.first_inst(u32_at(in blocks, q));
+        loop {
+            if inst == NONE {
+                break;
+            }
+            let i = inst;
+            inst = f.next_inst(i);
+            let op = f.op(i);
+            if op == OP_BRIF {
+                let ci = def_any(in f, f.resolve(f.arg(i, ARG_A)));
+                if ci == NONE || f.op(ci) != OP_ICMP {
+                    continue;
+                }
+                let cc = f.inst(w(ci)).cond;
+                if cc != CC_ULT && cc != CC_UGE {
+                    continue;
+                }
+                let li = plain_load_def(in f, f.arg(ci, ARG_B));
+                if li == NONE {
+                    continue;
+                }
+                let r = resolve_base_offset(in f, f.arg(li, ARG_A), f.inst(w(li)).off);
+                if r.off != SEQ_LEN_OFFSET {
+                    continue;
+                }
+                let elem_blk = f.dest_block(i, if cc == CC_ULT { DEST_THEN } else { DEST_ELSE });
+                let mut a = f.first_inst(elem_blk);
+                let mut n: u64 = 0;
+                loop {
+                    if a == NONE || n >= MAX_SEQ_ARM_SCAN_INSTS {
+                        break;
+                    }
+                    let aop = f.op(a);
+                    let mut ptr = NONE;
+                    if is_load_format(aop) {
+                        ptr = f.arg(a, ARG_A);
+                    } else if is_store_format(aop) {
+                        ptr = f.arg(a, STORE_ADDR_ARG);
+                    }
+                    if ptr != NONE
+                        && seq_data_handle(in f, ptr, f.inst(w(a)).off, MAX_SEQ_ADDR_DEPTH)
+                            == r.base
+                    {
+                        if !has(in handles, r.base) {
+                            handles.push(r.base);
+                        }
+                        break;
+                    }
+                    a = f.next_inst(a);
+                    n = inc(n);
+                }
+                continue;
+            }
+            if !is_store_format(op) || f.inst(w(i)).off != 0 {
+                continue;
+            }
+            let si = def_any(in f, f.resolve(f.arg(i, STORE_ADDR_ARG)));
+            if si == NONE || f.op(si) != OP_SELECT {
+                continue;
+            }
+            let t_arm = f.arg(si, SELECT_THEN);
+            let f_arm = f.arg(si, SELECT_ELSE);
+            let elem_arm = if is_stack(in f, f_arm) {
+                t_arm
+            } else if is_stack(in f, t_arm) {
+                f_arm
+            } else {
+                continue;
+            };
+            let ci = def_any(in f, f.resolve(f.arg(si, SELECT_COND)));
+            if ci == NONE || f.op(ci) != OP_ICMP || f.inst(w(ci)).cond != CC_ULT {
+                continue;
+            }
+            let li = plain_load_def(in f, f.arg(ci, ARG_B));
+            if li == NONE {
+                continue;
+            }
+            let r = resolve_base_offset(in f, f.arg(li, ARG_A), f.inst(w(li)).off);
+            if r.off != SEQ_LEN_OFFSET {
+                continue;
+            }
+            let h = seq_data_handle(in f, elem_arm, 0, MAX_SEQ_ADDR_DEPTH);
+            if h != NONE && h == r.base && !has(in handles, h) {
+                handles.push(h);
+            }
+        }
+    }
+    handles
+}
+
+// A store's kind, with the parameter field it writes.
+copy struct StoreKind {
+    kind: u64,
+    p: u32,
+    off: u64,
+}
+
+fn classify_store(in f: Func, in handles: ChunkSeq[u32], i: u32) -> StoreKind {
+    let unknown = StoreKind { kind: K_UNKNOWN, p: NONE, off: 0 };
+    if !is_store_format(f.op(i)) {
+        return unknown;
+    }
+    let ptr = f.resolve(f.arg(i, STORE_ADDR_ARG));
+    let off = f.inst(w(i)).off;
+    if off == 0 {
+        let si = def_any(in f, ptr);
+        if si != NONE && f.op(si) == OP_SELECT {
+            let t_arm = f.arg(si, SELECT_THEN);
+            let f_arm = f.arg(si, SELECT_ELSE);
+            if (is_stack(in f, f_arm)
+                && has(in handles, seq_data_handle(in f, t_arm, 0, MAX_SEQ_ADDR_DEPTH)))
+                || (is_stack(in f, t_arm)
+                    && has(in handles, seq_data_handle(in f, f_arm, 0, MAX_SEQ_ADDR_DEPTH)))
+            {
+                return StoreKind { kind: K_SEQ_ELEM, p: NONE, off: 0 };
+            }
+        }
+    }
+    if has(in handles, seq_data_handle(in f, ptr, off, MAX_SEQ_ADDR_DEPTH)) {
+        return StoreKind { kind: K_SEQ_ELEM, p: NONE, off: 0 };
+    }
+    let r = resolve_base_offset(in f, ptr, off);
+    if is_entry_param(in f, r.base) && !has(in handles, r.base) {
+        return StoreKind { kind: K_PARAM_FIELD, p: r.base, off: r.off };
+    }
+    if is_stack(in f, r.base) {
+        return StoreKind { kind: K_STACK_SLOT, p: NONE, off: 0 };
+    }
+    unknown
+}
+
+// Whether `b` is reachable and in loop `lp` (`loop_blocks` of the step).
+fn in_loop_reachable(in l: Loops, in rank: ChunkSeq[u64], b: u32, lp: u32) -> bool {
+    u64_at(in rank, w(b)) != NONE64 && in_loop(in l, b, lp)
+}
+
+// `is_outside_loop`.
+fn outside_loop(in f: Func, in l: Loops, in rank: ChunkSeq[u64], v: u32, lp: u32) -> bool {
+    let r = f.resolve(v);
+    let b = f.def_block(r);
+    if b == NONE {
+        return false;
+    }
+    ! in_loop_reachable(in l, in rank, b, lp)
+}
+
+// A load's first result when it is an `i64` `load`, or NONE.
+fn i64_load_result(in f: Func, i: u32) -> u32 {
+    if f.op(i) != OP_LOAD || f.nresults(i) == 0 {
+        return NONE;
+    }
+    let res = f.result(i, 0);
+    if f.value_type(res) != TY_I64 {
+        return NONE;
+    }
+    res
+}
+
+fn fits_i32(x: u64) -> bool {
+    x >= I32_MIN_WORD || x <= I32_MAX_WORD
+}
+
+// A written parameter field list.
+struct Fields {
+    p: ChunkSeq[u32],
+    off: ChunkSeq[u64],
+}
+
+fn no_fields() -> Fields {
+    Fields { p: ChunkSeq::new[u32](), off: ChunkSeq::new[u64]() }
+}
+
+// The loop half: header loads of clean loops move to the preheader.
+fn hoist_out_of_loops(
+    inout f: Func,
+    in handles: ChunkSeq[u32],
+    in cfg: Cfg,
+    in dom: Dom,
+    in rank: ChunkSeq[u64],
+    in l: Loops
+) {
+    let np = dom.post.len();
+    let mut rpo = ChunkSeq::new[u32]();
+    for k in 0..np {
+        rpo.push(u32_at(in dom.post, wrapping_sub(wrapping_sub(np, 1), k)));
+    }
+    for lp0 in 0..l.header.len() {
+        let lp = n32(lp0);
+        let header = u32_at(in l.header, lp0);
+        let mut n_out: u64 = 0;
+        let mut preheader = NONE;
+        for p in pred_lo(in cfg, header)..pred_hi(in cfg, header) {
+            let pb = pred_block(in f, in cfg, p);
+            if !in_loop_reachable(in l, in rank, pb, lp) {
+                n_out = inc(n_out);
+                preheader = pb;
+            }
+        }
+        if n_out != 1 {
+            continue;
+        }
+        let pre_term = f.last_inst(preheader);
+        if pre_term == NONE
+            || f.op(pre_term) != OP_JUMP
+            || !dominates(in dom, in rank, preheader, header)
+        {
+            continue;
+        }
+        let mut clobber = false;
+        let mut written = no_fields();
+        for q in 0..rpo.len() {
+            let b = u32_at(in rpo, q);
+            if !in_loop_reachable(in l, in rank, b, lp) {
+                continue;
+            }
+            let mut i = f.first_inst(b);
+            loop {
+                if i == NONE || clobber {
+                    break;
+                }
+                let op = f.op(i);
+                if is_call(op) {
+                    clobber = true;
+                } else if is_store_format(op) {
+                    let k = classify_store(in f, in handles, i);
+                    if k.kind == K_PARAM_FIELD {
+                        written.p.push(k.p);
+                        written.off.push(k.off);
+                    } else if k.kind == K_UNKNOWN {
+                        clobber = true;
+                    }
+                }
+                i = f.next_inst(i);
+            }
+            if clobber {
+                break;
+            }
+        }
+        if clobber {
+            continue;
+        }
+        let mut safe = ChunkSeq::new[u32]();
+        for q in 0..rpo.len() {
+            let b = u32_at(in rpo, q);
+            if !dominates(in dom, in rank, b, preheader) {
+                continue;
+            }
+            let mut i = f.first_inst(b);
+            loop {
+                if i == NONE {
+                    break;
+                }
+                if f.op(i) == OP_LOAD {
+                    let r = resolve_base_offset(in f, f.arg(i, ARG_A), f.inst(w(i)).off);
+                    if !has(in safe, r.base) {
+                        safe.push(r.base);
+                    }
+                }
+                i = f.next_inst(i);
+            }
+        }
+        for _ in 0..MAX_SEQ_HOIST_ROUNDS {
+            let mut hi_inst = ChunkSeq::new[u32]();
+            let mut hi_base = ChunkSeq::new[u32]();
+            let mut hi_off = ChunkSeq::new[u64]();
+            for q in 0..rpo.len() {
+                let b = u32_at(in rpo, q);
+                if !in_loop_reachable(in l, in rank, b, lp) {
+                    continue;
+                }
+                let mut i = f.first_inst(b);
+                loop {
+                    if i == NONE {
+                        break;
+                    }
+                    let res = i64_load_result(in f, i);
+                    if res != NONE {
+                        let row = f.inst(w(i));
+                        let r = resolve_base_offset(in f, f.arg(i, ARG_A), row.off);
+                        let ok = (row.mem & M_NOTRAP != 0 || has(in safe, r.base))
+                            && fits_i32(r.off)
+                            && outside_loop(in f, in l, in rank, r.base, lp);
+                        if ok {
+                            let hdr = has(in handles, r.base)
+                                && (r.off == SEQ_LEN_OFFSET || r.off == SEQ_DATA_OFFSET);
+                            let mut field = false;
+                            if !hdr && is_entry_param(in f, r.base) && has(in handles, res) {
+                                field = true;
+                                for k in 0..written.p.len() {
+                                    if u32_at(in written.p, k) == r.base
+                                        && near(u64_at(in written.off, k), r.off)
+                                    {
+                                        field = false;
+                                    }
+                                }
+                            }
+                            if hdr || field {
+                                hi_inst.push(i);
+                                hi_base.push(r.base);
+                                hi_off.push(r.off);
+                            }
+                        }
+                    }
+                    i = f.next_inst(i);
+                }
+            }
+            if hi_inst.len() == 0 {
+                break;
+            }
+            let none_dests = ChunkSeq::new[u32]();
+            for k in 0..hi_inst.len() {
+                let inst = u32_at(in hi_inst, k);
+                let res = f.result(inst, 0);
+                let mem = f.inst(w(inst)).mem;
+                let mut args = ChunkSeq::new[u32]();
+                args.push(u32_at(in hi_base, k));
+                let made = f.ins_before(
+                    pre_term,
+                    OP_LOAD,
+                    TY_I64,
+                    0,
+                    0,
+                    u64_at(in hi_off, k),
+                    mem,
+                    in args,
+                    in none_dests
+                );
+                let hoisted = f.result(made, 0);
+                f.detach_results(inst);
+                f.remove_inst(inst);
+                f.alias(res, hoisted);
+            }
+        }
+    }
+}
+
+// The available loads along one dominator-tree path: (base, offset) to
+// value, and each handle's length load (with its flags).
+struct Avail {
+    base: ChunkSeq[u32],
+    off: ChunkSeq[u64],
+    val: ChunkSeq[u32],
+    lbase: ChunkSeq[u32],
+    linst: ChunkSeq[u32],
+    lmem: ChunkSeq[u64],
+}
+
+fn no_avail() -> Avail {
+    Avail {
+        base: ChunkSeq::new[u32](),
+        off: ChunkSeq::new[u64](),
+        val: ChunkSeq::new[u32](),
+        lbase: ChunkSeq::new[u32](),
+        linst: ChunkSeq::new[u32](),
+        lmem: ChunkSeq::new[u64]()
+    }
+}
+
+fn clear_avail(inout a: Avail) {
+    a.base.clear();
+    a.off.clear();
+    a.val.clear();
+    a.lbase.clear();
+    a.linst.clear();
+    a.lmem.clear();
+}
+
+fn find_avail(in a: Avail, b: u32, o: u64) -> u64 {
+    for k in 0..a.base.len() {
+        if u32_at(in a.base, k) == b && u64_at(in a.off, k) == o {
+            return k;
+        }
+    }
+    NONE64
+}
+
+fn find_len(in a: Avail, b: u32) -> u64 {
+    for k in 0..a.lbase.len() {
+        if u32_at(in a.lbase, k) == b {
+            return k;
+        }
+    }
+    NONE64
+}
+
+fn remove_avail(inout a: Avail, k: u64) {
+    let last = wrapping_sub(a.base.len(), 1);
+    let ok1 = a.base.try_set(k, u32_at(in a.base, last));
+    let ok2 = a.off.try_set(k, u64_at(in a.off, last));
+    let ok3 = a.val.try_set(k, u32_at(in a.val, last));
+    a.base.truncate(last);
+    a.off.truncate(last);
+    a.val.truncate(last);
+}
+
+fn remove_len(inout a: Avail, k: u64) {
+    let last = wrapping_sub(a.lbase.len(), 1);
+    let ok1 = a.lbase.try_set(k, u32_at(in a.lbase, last));
+    let ok2 = a.linst.try_set(k, u32_at(in a.linst, last));
+    let ok3 = a.lmem.try_set(k, u64_at(in a.lmem, last));
+    a.lbase.truncate(last);
+    a.linst.truncate(last);
+    a.lmem.truncate(last);
+}
+
+// The stack of pending dominator-tree visits: each frame's block and the
+// extent of its copy of the available loads in the pools (a frame popped
+// is always the newest, so its copy is at the end of the pools).
+struct Frames {
+    block: ChunkSeq[u32],
+    at: ChunkSeq[u64],
+    lat: ChunkSeq[u64],
+    pool: Avail,
+}
+
+fn push_frame(inout s: Frames, b: u32, in a: Avail) {
+    s.block.push(b);
+    s.at.push(s.pool.base.len());
+    s.lat.push(s.pool.lbase.len());
+    s.pool.base.extend(in a.base.as_slice());
+    s.pool.off.extend(in a.off.as_slice());
+    s.pool.val.extend(in a.val.as_slice());
+    s.pool.lbase.extend(in a.lbase.as_slice());
+    s.pool.linst.extend(in a.linst.as_slice());
+    s.pool.lmem.extend(in a.lmem.as_slice());
+}
+
+// Pops the newest frame into `a`: its block, or NONE when none is left.
+fn pop_frame(inout s: Frames, inout a: Avail) -> u32 {
+    let b = match s.block.pop() {
+        Option::Some(x) => x,
+        Option::None => return NONE,
+    };
+    let at = s.at.pop().unwrap_or(0);
+    let lat = s.lat.pop().unwrap_or(0);
+    clear_avail(inout a);
+    for k in at..s.pool.base.len() {
+        a.base.push(u32_at(in s.pool.base, k));
+        a.off.push(u64_at(in s.pool.off, k));
+        a.val.push(u32_at(in s.pool.val, k));
+    }
+    for k in lat..s.pool.lbase.len() {
+        a.lbase.push(u32_at(in s.pool.lbase, k));
+        a.linst.push(u32_at(in s.pool.linst, k));
+        a.lmem.push(u64_at(in s.pool.lmem, k));
+    }
+    s.pool.base.truncate(at);
+    s.pool.off.truncate(at);
+    s.pool.val.truncate(at);
+    s.pool.lbase.truncate(lat);
+    s.pool.linst.truncate(lat);
+    s.pool.lmem.truncate(lat);
+    b
+}
+
+// Per block: whether it clobbers everything, and the parameter fields it
+// writes (`fields[fat[b]..fat[b + 1]]`).
+struct Clobbers {
+    all: ChunkSeq[u8],
+    fat: ChunkSeq[u64],
+    fields: Fields,
+}
+
+fn clobbers_of(in f: Func, in handles: ChunkSeq[u32]) -> Clobbers {
+    let nb = f.nblocks();
+    let mut c = Clobbers {
+        all: ChunkSeq::new[u8](),
+        fat: ChunkSeq::new[u64](),
+        fields: no_fields()
+    };
+    c.all.resize(nb, 0);
+    for b0 in 0..nb {
+        c.fat.push(c.fields.p.len());
+        let b = n32(b0);
+        if !f.blk(b0).placed {
+            continue;
+        }
+        let mut i = f.first_inst(b);
+        loop {
+            if i == NONE {
+                break;
+            }
+            let op = f.op(i);
+            if is_call(op) {
+                let ok = c.all.try_set(b0, 1);
+            } else if is_store_format(op) {
+                let k = classify_store(in f, in handles, i);
+                if k.kind == K_PARAM_FIELD {
+                    c.fields.p.push(k.p);
+                    c.fields.off.push(k.off);
+                } else if k.kind == K_UNKNOWN {
+                    let ok = c.all.try_set(b0, 1);
+                }
+            }
+            i = f.next_inst(i);
+        }
+    }
+    c.fat.push(c.fields.p.len());
+    c
+}
+
+// Whether the available load of `(b, o)` survives the writes of every
+// block of `region`.
+fn survives(
+    in c: Clobbers,
+    in handles: ChunkSeq[u32],
+    in region: ChunkSeq[u32],
+    b: u32,
+    o: u64
+) -> bool {
+    if has(in handles, b) {
+        return true;
+    }
+    for q in 0..region.len() {
+        let r = w(u32_at(in region, q));
+        let lo = u64_at(in c.fat, r);
+        let hi = u64_at(in c.fat, inc(r));
+        for k in lo..hi {
+            if u32_at(in c.fields.p, k) != b || near(u64_at(in c.fields.off, k), o) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+// The data-word groups: per length load, its base, flags and the data
+// loads that can share one load after it.
+struct Groups {
+    len_inst: ChunkSeq[u32],
+    base: ChunkSeq[u32],
+    mem: ChunkSeq[u64],
+    // loads[k] belongs to group gid[k]
+    gid: ChunkSeq[u64],
+    load: ChunkSeq[u32],
+    res: ChunkSeq[u32],
+}
+
+fn find_group(in g: Groups, len_inst: u32) -> u64 {
+    for k in 0..g.len_inst.len() {
+        if u32_at(in g.len_inst, k) == len_inst {
+            return k;
+        }
+    }
+    NONE64
+}
+
+// One round of the dominator-tree walk: whether it changed the function.
+fn reuse_round(
+    inout f: Func,
+    in handles: ChunkSeq[u32],
+    in cfg: Cfg,
+    in dom: Dom,
+    in rank: ChunkSeq[u64],
+    in kids: Kids,
+    entry: u32
+) -> bool {
+    let mut changed = false;
+    let c = clobbers_of(in f, in handles);
+    let mut g = Groups {
+        len_inst: ChunkSeq::new[u32](),
+        base: ChunkSeq::new[u32](),
+        mem: ChunkSeq::new[u64](),
+        gid: ChunkSeq::new[u64](),
+        load: ChunkSeq::new[u32](),
+        res: ChunkSeq::new[u32]()
+    };
+    let mut stack = Frames {
+        block: ChunkSeq::new[u32](),
+        at: ChunkSeq::new[u64](),
+        lat: ChunkSeq::new[u64](),
+        pool: no_avail()
+    };
+    let mut a = no_avail();
+    push_frame(inout stack, entry, in a);
+    loop {
+        let block = pop_frame(inout stack, inout a);
+        if block == NONE {
+            break;
+        }
+        let npred = wrapping_sub(pred_hi(in cfg, block), pred_lo(in cfg, block));
+        if (a.base.len() != 0 || a.lbase.len() != 0) && npred > 1 {
+            let idom = u32_at(in dom.idom, w(block));
+            if idom == NONE || idom == block {
+                clear_avail(inout a);
+                continue;
+            }
+            let mut clobber = false;
+            let mut region = ChunkSeq::new[u32]();
+            add_preds(in f, in cfg, in rank, block, idom, inout region);
+            let mut cursor: u64 = 0;
+            loop {
+                if cursor >= region.len() {
+                    break;
+                }
+                if region.len() > MAX_DOM_REGION_BLOCKS {
+                    clobber = true;
+                    break;
+                }
+                let cur = u32_at(in region, cursor);
+                cursor = inc(cursor);
+                if !dominates(in dom, in rank, idom, cur) || g8(in c.all, w(cur)) != 0 {
+                    clobber = true;
+                    break;
+                }
+                add_preds(in f, in cfg, in rank, cur, idom, inout region);
+            }
+            if clobber {
+                clear_avail(inout a);
+            } else {
+                let mut k: u64 = 0;
+                loop {
+                    if k >= a.base.len() {
+                        break;
+                    }
+                    if survives(
+                        in c,
+                        in handles,
+                        in region,
+                        u32_at(in a.base, k),
+                        u64_at(in a.off, k)
+                    ) {
+                        k = inc(k);
+                    } else {
+                        remove_avail(inout a, k);
+                    }
+                }
+            }
+        }
+        let mut i = f.first_inst(block);
+        loop {
+            if i == NONE {
+                break;
+            }
+            let inst = i;
+            i = f.next_inst(inst);
+            let op = f.op(inst);
+            if is_call(op) {
+                clear_avail(inout a);
+                continue;
+            }
+            if is_store_format(op) {
+                let k = classify_store(in f, in handles, inst);
+                if k.kind == K_UNKNOWN {
+                    clear_avail(inout a);
+                } else if k.kind == K_PARAM_FIELD {
+                    let mut q: u64 = 0;
+                    loop {
+                        if q >= a.base.len() {
+                            break;
+                        }
+                        let b = u32_at(in a.base, q);
+                        let keep = (b == k.p && !near(u64_at(in a.off, q), k.off))
+                            || has(in handles, b);
+                        if keep {
+                            q = inc(q);
+                        } else {
+                            remove_avail(inout a, q);
+                        }
+                    }
+                    if op == OP_STORE {
+                        let val = f.resolve(f.arg(inst, STORE_VALUE_ARG));
+                        if f.value_type(val) == TY_I64 && has(in handles, val) {
+                            let at = find_avail(in a, k.p, k.off);
+                            if at == NONE64 {
+                                a.base.push(k.p);
+                                a.off.push(k.off);
+                                a.val.push(val);
+                            } else {
+                                let ok = a.val.try_set(at, val);
+                            }
+                        }
+                    }
+                }
+                continue;
+            }
+            let res = i64_load_result(in f, inst);
+            if res == NONE {
+                continue;
+            }
+            let row = f.inst(w(inst));
+            let r = resolve_base_offset(in f, f.arg(inst, ARG_A), row.off);
+            let hdr = has(in handles, r.base)
+                && (r.off == SEQ_LEN_OFFSET || r.off == SEQ_DATA_OFFSET);
+            let prev_at = find_avail(in a, r.base, r.off);
+            let field = is_entry_param(in f, r.base) && (has(in handles, res) || prev_at != NONE64);
+            if !hdr && !field {
+                continue;
+            }
+            if prev_at != NONE64 {
+                let prev = u32_at(in a.val, prev_at);
+                f.detach_results(inst);
+                f.remove_inst(inst);
+                f.alias(res, prev);
+                changed = true;
+                continue;
+            }
+            a.base.push(r.base);
+            a.off.push(r.off);
+            a.val.push(res);
+            if hdr && r.off == SEQ_LEN_OFFSET {
+                let at = find_len(in a, r.base);
+                if at == NONE64 {
+                    a.lbase.push(r.base);
+                    a.linst.push(inst);
+                    a.lmem.push(row.mem);
+                } else {
+                    let ok1 = a.linst.try_set(at, inst);
+                    let ok2 = a.lmem.try_set(at, row.mem);
+                }
+            } else if hdr && r.off == SEQ_DATA_OFFSET {
+                let at = find_len(in a, r.base);
+                if at != NONE64 {
+                    let len_inst = u32_at(in a.linst, at);
+                    if f.inst(w(len_inst)).block == block {
+                        remove_len(inout a, at);
+                    } else {
+                        let mut gk = find_group(in g, len_inst);
+                        if gk == NONE64 {
+                            gk = g.len_inst.len();
+                            g.len_inst.push(len_inst);
+                            g.base.push(r.base);
+                            g.mem.push(u64_at(in a.lmem, at));
+                        }
+                        g.gid.push(gk);
+                        g.load.push(inst);
+                        g.res.push(res);
+                    }
+                }
+            }
+        }
+        let lo = u64_at(in kids.at, w(block));
+        let hi = u64_at(in kids.at, inc(w(block)));
+        for k in lo..hi {
+            push_frame(inout stack, u32_at(in kids.block, k), in a);
+        }
+    }
+    let none_dests = ChunkSeq::new[u32]();
+    for gk in 0..g.len_inst.len() {
+        let mut n: u64 = 0;
+        for k in 0..g.gid.len() {
+            if u64_at(in g.gid, k) == gk {
+                n = inc(n);
+            }
+        }
+        if n < MIN_SHARED_DATA_LOADS {
+            continue;
+        }
+        let len_inst = u32_at(in g.len_inst, gk);
+        let next = f.next_inst(len_inst);
+        if next == NONE {
+            continue;
+        }
+        let mut args = ChunkSeq::new[u32]();
+        args.push(u32_at(in g.base, gk));
+        let made = f.ins_before(
+            next,
+            OP_LOAD,
+            TY_I64,
+            0,
+            0,
+            SEQ_DATA_OFFSET,
+            u64_at(in g.mem, gk),
+            in args,
+            in none_dests
+        );
+        let hoisted = f.result(made, 0);
+        for k in 0..g.gid.len() {
+            if u64_at(in g.gid, k) != gk {
+                continue;
+            }
+            let inst = u32_at(in g.load, k);
+            f.detach_results(inst);
+            f.remove_inst(inst);
+            f.alias(u32_at(in g.res, k), hoisted);
+        }
+        changed = true;
+    }
+    changed
+}
+
+// The predecessors of `b` that are reachable and not `idom`, added to
+// `region` once each.
+fn add_preds(
+    in f: Func,
+    in cfg: Cfg,
+    in rank: ChunkSeq[u64],
+    b: u32,
+    idom: u32,
+    inout region: ChunkSeq[u32]
+) {
+    for p in pred_lo(in cfg, b)..pred_hi(in cfg, b) {
+        let pb = pred_block(in f, in cfg, p);
+        if u64_at(in rank, w(pb)) == NONE64 || pb == idom || has(in region, pb) {
+            continue;
+        }
+        region.push(pb);
+    }
+}
+
+// The dominator-tree children of each block, in reverse postorder:
+// `block[at[b]..at[b + 1]]`.
+struct Kids {
+    at: ChunkSeq[u64],
+    block: ChunkSeq[u32],
+}
+
+fn kids_of(in f: Func, in dom: Dom) -> Kids {
+    let nb = f.nblocks();
+    let np = dom.post.len();
+    let mut count = ChunkSeq::new[u64]();
+    count.resize(inc(nb), 0);
+    for k in 0..np {
+        let b = u32_at(in dom.post, k);
+        let d = u32_at(in dom.idom, w(b));
+        if d != NONE && d != b {
+            let ok = count.try_set(inc(w(d)), inc(u64_at(in count, inc(w(d)))));
+        }
+    }
+    for b in 0..nb {
+        let ok = count.try_set(inc(b), wrapping_add(u64_at(in count, b), u64_at(in count, inc(b))));
+    }
+    let mut kids = Kids { at: ChunkSeq::new[u64](), block: ChunkSeq::new[u32]() };
+    kids.at.extend(in count.as_slice());
+    let mut fill = ChunkSeq::new[u64]();
+    fill.extend(in count.as_slice());
+    kids.block.resize(u64_at(in count, nb), NONE);
+    for r in 0..np {
+        let b = u32_at(in dom.post, wrapping_sub(wrapping_sub(np, 1), r));
+        let d = u32_at(in dom.idom, w(b));
+        if d != NONE && d != b {
+            let slot = u64_at(in fill, w(d));
+            let ok = kids.block.try_set(slot, b);
+            let ok2 = fill.try_set(w(d), inc(slot));
+        }
+    }
+    kids
+}
+
+// `reuse_seq_header_loads`.
+pub fn reuse_seq_header_loads(inout f: Func) {
+    let entry = f.first_block();
+    if entry == NONE {
+        return;
+    }
+    let handles = verified_handles(in f);
+    let cfg = cfg_of(in f);
+    let dom = dom_of(in f, in cfg);
+    let rank = ranks(in f, in dom);
+    if handles.len() != 0 {
+        let l = loops_of(in f, in cfg, in dom, in rank);
+        hoist_out_of_loops(inout f, in handles, in cfg, in dom, in rank, in l);
+    }
+    let kids = kids_of(in f, in dom);
+    for _ in 0..MAX_SEQ_REUSE_ROUNDS {
+        if !reuse_round(inout f, in handles, in cfg, in dom, in rank, in kids, entry) {
+            break;
+        }
+    }
+}
