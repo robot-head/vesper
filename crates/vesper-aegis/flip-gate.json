@@ -93,6 +93,14 @@
     {
       "workload": "spki",
       "run": ["cargo", "run", "--locked", "--release", "-p", "vesper-aegis", "--example", "abba", "--", "flip-gate-inproc", "spki"]
+    },
+    {
+      "workload": "pcs_envelope",
+      "run": ["cargo", "run", "--locked", "--release", "-p", "vesper-aegis", "--example", "abba", "--", "flip-gate-inproc", "pcs_envelope"]
+    },
+    {
+      "workload": "qe_identity",
+      "run": ["cargo", "run", "--locked", "--release", "-p", "vesper-aegis", "--example", "abba", "--", "flip-gate-inproc", "qe_identity"]
     }
   ]
 }

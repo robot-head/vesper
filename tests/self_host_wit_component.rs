@@ -621,7 +621,7 @@ fn std_env_and_std_fs_match_rust() {
     };
 
     const CLOCKS_ALL: &str = "package wasi:clocks@0.2.0;\n\ninterface monotonic-clock {\n  type instant = u64;\n  now: func() -> instant;\n}\n\ninterface wall-clock {\n  record datetime {\n    seconds: u64,\n    nanoseconds: u32,\n  }\n}\n";
-    const CLI_ALL: &str = "package wasi:cli@0.2.0;\n\ninterface run {\n  run: func() -> result;\n}\n\ninterface stdout {\n  use wasi:io/streams@0.2.0.{output-stream};\n  get-stdout: func() -> output-stream;\n}\n\ninterface environment {\n  get-environment: func() -> list<tuple<string, string>>;\n  get-arguments: func() -> list<string>;\n  initial-cwd: func() -> option<string>;\n}\n";
+    const CLI_ALL: &str = "package wasi:cli@0.2.0;\n\ninterface run {\n  run: func() -> result;\n}\n\ninterface stdout {\n  use wasi:io/streams@0.2.0.{output-stream};\n  get-stdout: func() -> output-stream;\n}\n\ninterface stderr {\n  use wasi:io/streams@0.2.0.{output-stream};\n  get-stderr: func() -> output-stream;\n}\n\ninterface environment {\n  get-environment: func() -> list<tuple<string, string>>;\n  get-arguments: func() -> list<string>;\n  initial-cwd: func() -> option<string>;\n}\n";
     const FS_ALL: &str = r#"package wasi:filesystem@0.2.0;
 
 interface types {

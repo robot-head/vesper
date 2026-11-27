@@ -137,6 +137,27 @@ pub struct St {
     sugar_mod: ChunkSeq[u32],
     sugar_name: ChunkSeq[u32],
     sugar_public: ChunkSeq[u8],
+    // Sugar regions of the expanded modules (the regions suffix): per
+    // module with regions its row (`sugar_row`), its fresh prefix and its
+    // range of regions; per region its expanded span (file-local), the
+    // module that defines its rule and its range of holes (start, end
+    // pairs in `sr_holes`). A malformed suffix leaves no module with
+    // regions and marks the policy trailer truncated.
+    sugar_row: FlatTable[u32, u32],
+    srm_prefix: ChunkSeq[u32],
+    srm_first: ChunkSeq[u32],
+    srm_count: ChunkSeq[u32],
+    sr_start: ChunkSeq[u32],
+    sr_end: ChunkSeq[u32],
+    sr_author: ChunkSeq[u32],
+    sr_hole_first: ChunkSeq[u32],
+    sr_hole_count: ChunkSeq[u32],
+    sr_holes: ChunkSeq[u32],
+    // The regions of the module being renamed (`cur_region_count` 0 for
+    // none) and its fresh prefix (`none()` without regions).
+    cur_region_first: u64,
+    cur_region_count: u64,
+    cur_prefix: u32,
     public: FlatTable[u64, u8],
     // Each module's declared names in source order (`Kind::of`; a name
     // declared twice appears twice, its kind is the last one's).
@@ -309,6 +330,19 @@ pub fn st_new() -> St {
         sugar_mod: ChunkSeq::new[u32](),
         sugar_name: ChunkSeq::new[u32](),
         sugar_public: ChunkSeq::new[u8](),
+        sugar_row: flat_table_new[u32, u32](),
+        srm_prefix: ChunkSeq::new[u32](),
+        srm_first: ChunkSeq::new[u32](),
+        srm_count: ChunkSeq::new[u32](),
+        sr_start: ChunkSeq::new[u32](),
+        sr_end: ChunkSeq::new[u32](),
+        sr_author: ChunkSeq::new[u32](),
+        sr_hole_first: ChunkSeq::new[u32](),
+        sr_hole_count: ChunkSeq::new[u32](),
+        sr_holes: ChunkSeq::new[u32](),
+        cur_region_first: 0,
+        cur_region_count: 0,
+        cur_prefix: none(),
         public: flat_table_new[u64, u8](),
         mod_items_first: ChunkSeq::new[u32](),
         mod_items_len: ChunkSeq::new[u32](),

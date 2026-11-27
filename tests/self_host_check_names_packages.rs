@@ -1444,6 +1444,83 @@ fn sugar_imports_assemble_like_rust() {
     assert!(bad.is_empty(), "{}", bad.join("\n"));
 }
 
+/// Imported sugar templates whose free names resolve where the sugar is
+/// defined (`Renamer::definition`, `Resolver::sugar_name`): the defining
+/// module's private items, its own imports, a qualified `self::` path, a
+/// constructor pattern and an enum path, beside hygienic bindings and
+/// caller holes; and a template name the caller binds but the defining
+/// module does not see (E0111). Both sides assemble the graph Rust
+/// expanded, from `Loading::sugar_assembly_input`.
+#[test]
+fn sugar_templates_resolve_at_their_definition() {
+    let forms = manifest("@demo/forms", "");
+    let forms_files: &[(&str, &str)] = &[
+        (
+            "lib.ves",
+            "use self::util::{helper};\npub enum Mode { Fast, Slow }\nfn private_double(in x: u64) -> u64 { wrapping_add(x, x) }\npub fn fallback() -> u64 { 0 }\npub sugar twice : expr { rule (twice $x:expr {}) => { private_double(helper($x)) } }\npub sugar total : expr { rule (total $x:expr {}) => { { let acc = $x; acc } } }\npub sugar pick : expr { rule (pick $x:expr {}) => { match $x { Option::Some(v) => v, Option::None => self::fallback() } } }\npub sugar fast : expr { rule (fast $b:block) => { Mode::Fast } }\npub sugar stray : expr { rule (stray $b:block) => { unknown_helper() } }\n",
+        ),
+        ("util.ves", "pub fn helper(in x: u64) -> u64 { x }\n"),
+    ];
+    let app = manifest(
+        "@demo/app",
+        "\"@demo/forms\" = { version = \"^0.1\", path = \"../forms\" }\n",
+    );
+    let cases: &[(&str, &str, Option<&str>)] = &[
+        (
+            "free",
+            "use @demo/forms::{twice, total, pick, fast};\nfn helper(in x: u64) -> u64 { wrapping_add(x, 1) }\nfn main() -> u64 { let acc = 5; let a = twice acc {}; let b = total helper(acc) {}; wrapping_add(a, b) }\nfn third(xs: [u64; 2]) -> u64 { pick xs.try_get(0) {} }\nfn mode() -> u64 { let m = fast {}; 1 }\n",
+            None,
+        ),
+        (
+            "captured",
+            "use @demo/forms::{stray};\nfn unknown_helper() -> u64 { 1 }\nfn main() -> u64 { stray {} }\n",
+            Some(
+                "'unknown_helper' is not declared or imported in the module that defines this sugar",
+            ),
+        ),
+    ];
+    let mut bad = vec![];
+    for (label, text, expected) in cases {
+        let t = graph(
+            &format!("sugar-definition-{label}"),
+            &[
+                ("app", &app, &[("lib.ves", text)]),
+                ("forms", &forms, forms_files),
+            ],
+        );
+        let dir = t.0.join("app");
+        let loading = packages::read_for_target(&dir, None, false, false)
+            .unwrap_or_else(|e| panic!("{label}: {e}"));
+        let input = loading
+            .sugar_assembly_input()
+            .unwrap_or_else(|| panic!("{label}: no sugar assembly input"));
+        let assembled = loading.assemble();
+        assert!(
+            !assembled.module.sugar_origins.is_empty(),
+            "{label}: nothing expanded: {:?}",
+            assembled.diagnostics
+        );
+        let messages: Vec<_> = assembled
+            .diagnostics
+            .iter()
+            .map(|d| d.diagnostic.message.as_str())
+            .collect();
+        match expected {
+            Some(m) => assert!(messages.contains(m), "{label}: {messages:?}"),
+            None => assert!(messages.is_empty(), "{label}: {messages:?}"),
+        }
+        let mut g = Graph::default();
+        g.package(&dir, &mut vec![])
+            .unwrap_or_else(|| panic!("{label}: the mirror does not load"));
+        let rust = normalize(&rust_text(&g, &assembled));
+        let vesper = normalize(&assembler().text(&input));
+        if let Some(d) = first_difference(&rust, &vesper) {
+            bad.push(format!("{label}: {d}"));
+        }
+    }
+    assert!(bad.is_empty(), "{}", bad.join("\n"));
+}
+
 // ---------------------------------------------------------------- speed
 
 fn assemble_only() -> &'static Entry {

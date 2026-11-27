@@ -723,6 +723,156 @@ fn flip_gate_spki() {
     println!("flip-gate pairs spki {}", pairs.join(" "));
 }
 
+const PCS_ENVELOPE_PASSES: usize = 5_000;
+
+fn flip_gate_pcs_envelope() {
+    #[derive(serde::Deserialize)]
+    struct Envelope<'a> {
+        #[serde(borrow, rename = "tcbInfo")]
+        tcb_info: Option<&'a serde_json::value::RawValue>,
+        #[serde(borrow, rename = "enclaveIdentity")]
+        enclave_identity: Option<&'a serde_json::value::RawValue>,
+        signature: String,
+    }
+    let response = data("tdx-go-tdx-guest/sample_tcbInfo_response");
+    let rust_parse = |resp: &[u8]| -> port::intel::SignedCollateral {
+        let env: Envelope<'_> = serde_json::from_slice(resp).unwrap();
+        assert!(env.enclave_identity.is_none());
+        let raw = env.tcb_info.unwrap();
+        port::intel::SignedCollateral::new(raw.get().as_bytes(), &env.signature).unwrap()
+    };
+
+    // Differential check: Vesper port matches serde_json::from_slice.
+    let expected = rust_parse(&response);
+    let actual = port::intel::SignedCollateral::from_pcs_response(&response, "tcbInfo").unwrap();
+    assert_eq!(actual, expected);
+
+    let run_rust = || -> u64 {
+        let t = Instant::now();
+        for _ in 0..PCS_ENVELOPE_PASSES {
+            black_box(rust_parse(black_box(&response)));
+        }
+        t.elapsed().as_nanos() as u64
+    };
+    let run_port = || -> u64 {
+        let t = Instant::now();
+        for _ in 0..PCS_ENVELOPE_PASSES {
+            black_box(
+                port::intel::SignedCollateral::from_pcs_response(black_box(&response), "tcbInfo")
+                    .unwrap(),
+            );
+        }
+        t.elapsed().as_nanos() as u64
+    };
+    black_box(run_rust());
+    black_box(run_port());
+    let pairs: Vec<String> = (0..FLIP_GATE_EPOCHS)
+        .map(|_| {
+            let a1 = run_rust();
+            let b1 = run_port();
+            let b2 = run_port();
+            let a2 = run_rust();
+            format!("{}:{}", a1 + a2, b1 + b2)
+        })
+        .collect();
+    println!("flip-gate pairs pcs_envelope {}", pairs.join(" "));
+}
+
+const QE_IDENTITY_PASSES: usize = 20_000;
+
+fn flip_gate_qe_identity() {
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct IsvLevelJson {
+        tcb: IsvSvnJson,
+        tcb_date: String,
+        tcb_status: String,
+        #[serde(rename = "advisoryIDs", default)]
+        advisory_ids: Vec<String>,
+    }
+    #[derive(serde::Deserialize)]
+    struct IsvSvnJson {
+        isvsvn: u16,
+    }
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct QeIdentityJson {
+        id: String,
+        version: u32,
+        issue_date: String,
+        next_update: String,
+        tcb_evaluation_data_number: u32,
+        miscselect: String,
+        miscselect_mask: String,
+        attributes: String,
+        attributes_mask: String,
+        mrsigner: String,
+        isvprodid: u16,
+        tcb_levels: Vec<IsvLevelJson>,
+    }
+    let response = data("tdx-go-tdx-guest/sample_qeIdentity_response");
+    let signed =
+        port::intel::SignedCollateral::from_pcs_response(&response, "enclaveIdentity").unwrap();
+    let body = signed.body;
+
+    let rust_parse = |json: &[u8]| -> QeIdentityJson {
+        let j: QeIdentityJson = serde_json::from_slice(json).unwrap();
+        assert_eq!(j.id, "TD_QE");
+        assert_eq!(j.version, 2);
+        assert!(!j.tcb_levels.is_empty());
+        let _ = (&j.issue_date, &j.next_update, j.tcb_evaluation_data_number);
+        let _ = (
+            &j.miscselect,
+            &j.miscselect_mask,
+            &j.attributes,
+            &j.attributes_mask,
+            &j.mrsigner,
+            j.isvprodid,
+        );
+        for l in &j.tcb_levels {
+            let _ = (l.tcb.isvsvn, &l.tcb_date, &l.tcb_status, &l.advisory_ids);
+        }
+        j
+    };
+
+    // Differential check: Vesper port matches serde_json::from_slice.
+    let expected = rust_parse(&body);
+    let actual = port::intel::QeIdentity::parse(&body).unwrap();
+    assert_eq!(
+        actual.tcb_evaluation_data_number,
+        expected.tcb_evaluation_data_number
+    );
+    assert_eq!(actual.isv_prod_id, expected.isvprodid);
+    assert_eq!(actual.levels.len(), expected.tcb_levels.len());
+
+    let run_rust = || -> u64 {
+        let t = Instant::now();
+        for _ in 0..QE_IDENTITY_PASSES {
+            black_box(rust_parse(black_box(&body)));
+        }
+        t.elapsed().as_nanos() as u64
+    };
+    let run_port = || -> u64 {
+        let t = Instant::now();
+        for _ in 0..QE_IDENTITY_PASSES {
+            black_box(port::intel::QeIdentity::parse(black_box(&body)).unwrap());
+        }
+        t.elapsed().as_nanos() as u64
+    };
+    black_box(run_rust());
+    black_box(run_port());
+    let pairs: Vec<String> = (0..FLIP_GATE_EPOCHS)
+        .map(|_| {
+            let a1 = run_rust();
+            let b1 = run_port();
+            let b2 = run_port();
+            let a2 = run_rust();
+            format!("{}:{}", a1 + a2, b1 + b2)
+        })
+        .collect();
+    println!("flip-gate pairs qe_identity {}", pairs.join(" "));
+}
+
 fn main() {
     assert_eq!(port::IMPLEMENTATION, "vesper");
     let args: Vec<String> = std::env::args().collect();
@@ -753,6 +903,14 @@ fn main() {
         }
         if args.get(2).map(String::as_str) == Some("spki") {
             flip_gate_spki();
+            return;
+        }
+        if args.get(2).map(String::as_str) == Some("pcs_envelope") {
+            flip_gate_pcs_envelope();
+            return;
+        }
+        if args.get(2).map(String::as_str) == Some("qe_identity") {
+            flip_gate_qe_identity();
             return;
         }
     }

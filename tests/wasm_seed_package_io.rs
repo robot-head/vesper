@@ -623,7 +623,7 @@ fn get(in name: Str, cap: u64) -> u64 eff [Ffi[StdFs]] {
 const FS_PROGRAMS: &[&str] = &[
     // write, truncate, append, create_new on an existing file, read back
     // through a big and a small buffer, a missing file
-    r#"fn main() -> u64 eff [Ffi[StdFs]] {
+    r#"pub fn main() -> u64 eff [Ffi[StdFs]] {
     let mut acc: u64 = 0;
     acc = mix(acc, put("a.txt", 1, "hello, wasm seed".as_bytes()));
     acc = mix(acc, get("a.txt", 64));
@@ -686,7 +686,7 @@ fn list(in name: Str, cap: u64) -> u64 eff [Ffi[StdFs]] {
         Option::None => mix(66, err),
     }
 }
-fn main() -> u64 eff [Ffi[StdFs]] {
+pub fn main() -> u64 eff [Ffi[StdFs]] {
     let mut acc: u64 = 0;
     acc = mix(acc, dir("d1", false));
     acc = mix(acc, dir("d1", false));
@@ -792,7 +792,7 @@ fn relative_paths_use_the_dot_preopen() {
     let src = format!(
         "{}\n{}",
         PRELUDE.replace("BASE/", ""),
-        r#"fn main() -> u64 eff [Ffi[StdFs]] {
+        r#"pub fn main() -> u64 eff [Ffi[StdFs]] {
     let mut acc: u64 = 0;
     acc = mix(acc, put("./rel.txt", 1, "relative".as_bytes()));
     acc = mix(acc, get("rel.txt", 64));
@@ -841,7 +841,7 @@ fn too_many_preopens_fail_every_path() {
     let src = format!(
         "{}\n{}",
         PRELUDE.replace("BASE/", ""),
-        r#"fn main() -> u64 eff [Ffi[StdFs]] {
+        r#"pub fn main() -> u64 eff [Ffi[StdFs]] {
     let mut err: u64 = 0;
     match StdFs::vstd_fs_open(in "/p16/x.txt".as_bytes(), 1, inout err) {
         Option::Some(f) => { StdFs::vstd_fs_close(f); },
@@ -883,7 +883,7 @@ fn preopen_name_overflow_fails_every_path() {
     let prelude = PRELUDE.replace("BASE/", "");
     let src = format!(
         r#"{prelude}
-fn main() -> u64 eff [Ffi[StdFs]] {{
+pub fn main() -> u64 eff [Ffi[StdFs]] {{
     let mut err: u64 = 0;
     match StdFs::vstd_fs_open(in {target_guest:?}.as_bytes(), 1, inout err) {{
         Option::Some(f) => {{ StdFs::vstd_fs_close(f); }},
@@ -906,6 +906,189 @@ fn main() -> u64 eff [Ffi[StdFs]] {{
     let got = run(&component, &ctx).expect("run");
     assert_eq!(got, 11 | (95 << 32));
     let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn remove_dir_all_deletes_nested_tree_under_wasi() {
+    if !runs_on_shard(0) {
+        return;
+    }
+
+    let pkg = fresh("remove-dir-all-wasi");
+    std::fs::create_dir(pkg.join("src")).unwrap();
+    let work = pkg.join("work");
+    std::fs::create_dir_all(work.join("tree/a/b")).unwrap();
+    std::fs::create_dir_all(work.join("tree/empty_sub")).unwrap();
+    std::fs::write(work.join("tree/root.txt"), b"root").unwrap();
+    std::fs::write(work.join("tree/a/b/file.txt"), b"nested").unwrap();
+    let fs_dep = std::fs::canonicalize("packages/vesper-std/fs").unwrap();
+    std::fs::write(
+        pkg.join("Loom.toml"),
+        format!(
+            r#"[package]
+name = "@wasm-seed/remove-dir-all-wasi"
+version = "0.1.0"
+edition = "2026"
+capability_ceiling = ["Alloc", "Fail", "Ffi[StdFs]"]
+
+[dependencies]
+"@vesper-std/fs" = {{ version = "^0.1", path = {fs_dep:?} }}
+"#
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        pkg.join("src/main.ves"),
+        r#"use @vesper-std/fs::{ IoError, exists, not_found, remove_dir_all };
+
+fn run_remove(in path: Str) -> u64 eff [Ffi[StdFs]] {
+    handle Fail[IoError] in {
+        remove_dir_all(in path);
+        0
+    } with {
+        return v => v,
+        raise(e, _k) => wrapping_add(1_000_000, widen_u64(e.kind)),
+    }
+}
+
+pub fn main() -> u64 eff [Ffi[StdFs]] {
+    let ok = run_remove(in "/work/tree");
+    if ok != 0 {
+        return ok;
+    }
+    if exists(in "/work/tree") {
+        return 2;
+    }
+    let missing = run_remove(in "/work/missing");
+    if missing == wrapping_add(1_000_000, widen_u64(not_found())) {
+        42
+    } else {
+        missing
+    }
+}
+"#,
+    )
+    .unwrap();
+
+    let assembled =
+        vesper::packages::load_for_target(&pkg, Some(vesper::wasm_backend::TARGET), false).unwrap();
+    assert!(
+        assembled.ok(),
+        "{:?} {:?}",
+        assembled.diagnostics,
+        assembled.manifest_errors
+    );
+    let checked = vesper::ffi_lowering::check_module(&assembled.module, &imports())
+        .unwrap_or_else(|e| panic!("{e}: {:?}", e.diagnostics));
+    let wasm = port(&checked, &options(false)).expect("compile remove_dir_all probe");
+    let ctx = Ctx {
+        dirs: vec![(work.clone(), "/work".to_string())],
+        ..Ctx::default()
+    };
+    let got = run(&wasm, &ctx).expect("run remove_dir_all probe");
+    assert_eq!(got, 42);
+    assert!(!work.join("tree").exists());
+}
+
+#[test]
+fn write_stdout_and_write_stderr_emit_to_wasi_streams() {
+    if !runs_on_shard(0) {
+        return;
+    }
+    use wasmtime::component::{Component, Linker, Val};
+
+    let pkg = fresh("stdio-wasi");
+    std::fs::create_dir(pkg.join("src")).unwrap();
+    let fs_dep = std::fs::canonicalize("packages/vesper-std/fs").unwrap();
+    std::fs::write(
+        pkg.join("Loom.toml"),
+        format!(
+            r#"[package]
+name = "@wasm-seed/stdio-wasi"
+version = "0.1.0"
+edition = "2026"
+capability_ceiling = ["Alloc", "Fail", "Ffi[StdFs]"]
+
+[dependencies]
+"@vesper-std/fs" = {{ version = "^0.1", path = {fs_dep:?} }}
+"#
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        pkg.join("src/main.ves"),
+        r#"use @vesper-std/fs::{ IoError, write_stderr, write_stdout };
+
+pub fn main() -> u64 eff [Ffi[StdFs]] {
+    handle Fail[IoError] in {
+        write_stdout(in "hello stdout\n".as_bytes());
+        write_stderr(in "hello stderr\n".as_bytes());
+        42
+    } with {
+        return v => v,
+        raise(e, _k) => wrapping_add(1_000_000, widen_u64(e.kind)),
+    }
+}
+"#,
+    )
+    .unwrap();
+
+    let assembled =
+        vesper::packages::load_for_target(&pkg, Some(vesper::wasm_backend::TARGET), false).unwrap();
+    assert!(
+        assembled.ok(),
+        "{:?} {:?}",
+        assembled.diagnostics,
+        assembled.manifest_errors
+    );
+    let checked = vesper::ffi_lowering::check_module(&assembled.module, &imports())
+        .unwrap_or_else(|e| panic!("{e}: {:?}", e.diagnostics));
+    let wasm = port(&checked, &options(false)).expect("compile stdio probe");
+
+    let mut cfg = wasmtime::Config::new();
+    cfg.wasm_component_model(true);
+    let engine = wasmtime::Engine::new(&cfg).unwrap();
+    let component = Component::new(&engine, &wasm).expect("load stdio component");
+    let mut linker = Linker::new(&engine);
+    wasmtime_wasi::p2::add_to_linker_sync(&mut linker).unwrap();
+
+    let stdout_pipe = wasmtime_wasi::p2::pipe::MemoryOutputPipe::new(1 << 16);
+    let stderr_pipe = wasmtime_wasi::p2::pipe::MemoryOutputPipe::new(1 << 16);
+    let mut builder = wasmtime_wasi::WasiCtxBuilder::new();
+    builder.stdout(stdout_pipe.clone());
+    builder.stderr(stderr_pipe.clone());
+    struct State {
+        wasi: wasmtime_wasi::WasiCtx,
+        table: wasmtime_wasi::ResourceTable,
+    }
+    impl wasmtime_wasi::WasiView for State {
+        fn ctx(&mut self) -> wasmtime_wasi::WasiCtxView<'_> {
+            wasmtime_wasi::WasiCtxView {
+                ctx: &mut self.wasi,
+                table: &mut self.table,
+            }
+        }
+    }
+    let mut store = wasmtime::Store::new(
+        &engine,
+        State {
+            wasi: builder.build(),
+            table: wasmtime_wasi::ResourceTable::new(),
+        },
+    );
+    let instance = linker.instantiate(&mut store, &component).unwrap();
+    let iface = instance
+        .get_export_index(&mut store, None, vesper::wasm_backend::ENTRY_INTERFACE)
+        .expect("entry iface");
+    let main = instance
+        .get_export_index(&mut store, Some(&iface), "main")
+        .expect("main");
+    let func = instance.get_func(&mut store, main).unwrap();
+    let mut results = [Val::U64(0)];
+    func.call(&mut store, &[], &mut results).unwrap();
+    assert_eq!(results[0], Val::U64(42));
+    assert_eq!(stdout_pipe.contents().as_ref(), b"hello stdout\n");
+    assert_eq!(stderr_pipe.contents().as_ref(), b"hello stderr\n");
 }
 
 #[test]
@@ -1398,7 +1581,7 @@ fn all(i: u64) -> u64 eff [Ffi[StdFs], Fail[IoError]] {
     all(wrapping_add(i, 1))
 }
 
-fn main() -> u64 eff [Ffi[StdFs]] {
+pub fn main() -> u64 eff [Ffi[StdFs]] {
     handle Fail[IoError] in {
         all(0)
     } with {
@@ -1584,7 +1767,7 @@ fn opens(in name: Str, mode: u32) -> u64 eff [Ffi[StdFs]] {
         Option::None => 0,
     }
 }
-fn main() -> u64 eff [Ffi[StdFs]] {
+pub fn main() -> u64 eff [Ffi[StdFs]] {
     if opens("/src/in", 0) != 1 { return 1; }
     if opens("/src/out", 1) != 1 { return 2; }
     if opens("/src/in", 1) != 0 { return 3; }
@@ -1643,7 +1826,7 @@ fn compile_file() eff [Ffi[StdFs], Fail[IoError]] {
     write("/src/compiler-output.bin", output.as_slice());
 }
 
-fn main() -> u64 eff [Ffi[StdFs]] {
+pub fn main() -> u64 eff [Ffi[StdFs]] {
     handle Fail[IoError] in { compile_file() } with {
         return value => 0,
         raise(e, k) => wrapping_add(1, widen_u64(e.kind)),
@@ -2832,20 +3015,19 @@ const STAGE2_CRANELIFT_PACKAGES: &[(&str, &str, &str, &str)] = &[
 /// probe's exit code). Both Stage 2 compilers must build each one to the same
 /// bytes, and the probe must run to that code. @vesper/driver-commands left
 /// the gaps when its engine calls moved to @vesper/driver-engines (#1996):
-/// `vesper lsp` there is refused, and printing the refusal fails because
-/// @vesper-std/fs has no standard streams on wasm32-wasip2, so the probe ends
-/// as Rust's print panic does ([`DRIVER_PRINT_PANIC_EXIT`]).
+/// `vesper lsp` there is refused, prints its refusal to WASI stderr (#2507),
+/// and exits with [`DRIVER_REFUSAL_EXIT`].
 const STAGE2_HOST_PACKAGES: &[(&str, &str, &str, &str, u64)] = &[(
     "driver-commands",
     "@vesper/driver-commands",
     "packages/vesper-driver-commands",
     "use @vesper/driver-commands::run;\nuse @vesper/driver::{args_new, args_push};\npub fn main() -> u64 eff [Ffi[StdFs], Ffi[StdEnv], Ffi[StdProcess], Ffi[Blake3], Ffi[HybridCommands]] { let mut a = args_new(); args_push(inout a, in \"lsp\".as_bytes()); wrapping_u64(run(in a)) }\n",
-    DRIVER_PRINT_PANIC_EXIT,
+    DRIVER_REFUSAL_EXIT,
 )];
 
-/// The exit code of @vesper/driver-commands when a print fails (`PANIC_EXIT`,
-/// Rust's 101 for a panic).
-const DRIVER_PRINT_PANIC_EXIT: u64 = 101;
+/// The exit code of @vesper/driver-commands when a command is refused on
+/// wasm32-wasip2 and printed cleanly to stderr (#2507).
+const DRIVER_REFUSAL_EXIT: u64 = 1;
 
 /// Compiler packages Stage 2 cannot build yet: (stem, package, path, probe
 /// `src/lib.ves`, reason). `stage2_self_compilation_fixed_point` checks that

@@ -521,10 +521,26 @@ fn assemble_module(inout loader: St, in input: Str, module: u32) -> AssembledMod
     assemble_module_bytes(inout loader, in input.as_bytes(), module)
 }
 
+// The expanded regions of `module`, for `definition`.
+fn enter_regions(inout loader: St, module: u32) {
+    match loader.sugar_row.get(module) {
+        Option::Some(row) => {
+            loader.cur_region_first = w(at32(in loader.srm_first, w(row)));
+            loader.cur_region_count = w(at32(in loader.srm_count, w(row)));
+            loader.cur_prefix = at32(in loader.srm_prefix, w(row));
+        },
+        Option::None => {
+            loader.cur_region_count = 0;
+            loader.cur_prefix = none();
+        },
+    }
+}
+
 fn assemble_module_bytes(inout loader: St, in input: Slice[u8], module: u32) -> AssembledModule {
     let mut exported: ChunkSeq[u32] = ChunkSeq::new[u32]();
     bind(inout loader, module, inout exported);
     loader.cur_module = module;
+    enter_regions(inout loader, module);
     loader.cur_pkg = at32(in loader.mod_pkg, w(module));
     loader.is_root = module == loader.root_mod;
     let file = at32(in loader.mod_file, w(module));
@@ -804,6 +820,9 @@ pub fn resolve_sugar_effect_row(
     bind(inout assembly.loader, module, inout unused_exports);
     assembly.loader.cur_module = module;
     assembly.loader.cur_pkg = at32(in assembly.loader.mod_pkg, author);
+    // The row resolves where the sugar is defined: no region applies.
+    assembly.loader.cur_region_count = 0;
+    assembly.loader.cur_prefix = none();
     assembly.loader.is_root = module == assembly.loader.root_mod;
     assembly.loader.types.clear();
     assembly.loader.values.clear();

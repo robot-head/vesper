@@ -856,6 +856,63 @@ pub fn vesper_declarations(m: &Migration) -> String {
 
 /// A plain-text migration report: what was lifted, what was assumed, which
 /// wire layouts compiled, and every refusal with its reason.
+#[cfg(feature = "vesper-port")]
+pub fn report(m: &Migration) -> String {
+    let mut out = String::new();
+    let origin = origin_text(&m.origin);
+    let mut buf = vec![0u8; crate::SCHEMA.len() + origin.len() + 16];
+    let n = crate::binding::migrate_render_report_header(
+        crate::SCHEMA.as_bytes(),
+        origin.as_bytes(),
+        &mut buf,
+    ) as usize;
+    out.push_str(std::str::from_utf8(&buf[..n]).unwrap_or_default());
+    let _ = writeln!(out, "\nfunctions lifted: {}", m.functions.len());
+    for f in &m.functions {
+        let mut line = vec![0u8; f.name.len() + 24];
+        let ln =
+            crate::binding::migrate_render_report_fn(f.name.as_bytes(), f.sys.is_ok(), &mut line)
+                as usize;
+        out.push_str(std::str::from_utf8(&line[..ln]).unwrap_or_default());
+        for a in &f.assumptions {
+            let _ = writeln!(out, "    assumed: {a}");
+        }
+    }
+    let sizes = wire_sizes(m);
+    let _ = writeln!(out, "\nwire layouts: {}", sizes.len());
+    for (name, size, align) in &sizes {
+        let mut line = vec![0u8; name.len() + 64];
+        let ln = crate::binding::migrate_render_report_layout(
+            name.as_bytes(),
+            *size as u64,
+            *align as u64,
+            &mut line,
+        ) as usize;
+        out.push_str(std::str::from_utf8(&line[..ln]).unwrap_or_default());
+    }
+    let refusals = m.all_refusals();
+    let _ = writeln!(out, "\nrefusals: {}", refusals.len());
+    for r in refusals {
+        let reason = format!("{:?}", r.reason);
+        let mut line = vec![0u8; r.item.len() + reason.len() + r.detail.len() + 16];
+        let ln = crate::binding::migrate_render_report_refusal(
+            r.item.as_bytes(),
+            reason.as_bytes(),
+            r.detail.as_bytes(),
+            &mut line,
+        ) as usize;
+        out.push_str(std::str::from_utf8(&line[..ln]).unwrap_or_default());
+    }
+    let _ = writeln!(
+        out,
+        "\nlimits: finite differential shadowing is not an equivalence proof; MPK/PKRU isolation was not exercised."
+    );
+    out
+}
+
+/// A plain-text migration report: what was lifted, what was assumed, which
+/// wire layouts compiled, and every refusal with its reason.
+#[cfg(not(feature = "vesper-port"))]
 pub fn report(m: &Migration) -> String {
     let mut out = String::new();
     let _ = writeln!(
