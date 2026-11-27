@@ -17,6 +17,7 @@ unsafe extern "C" {
     fn vesper_hybrid_native_backend_seq_free(seq: i64) -> i64;
     fn vesper_hybrid_native_backend_live_allocations() -> i64;
     fn vesper_hybrid_native_backend_box_new(size: i64) -> i64;
+    fn vesper_hybrid_native_backend_aarch64_elf_object(words: *mut u64, bytes: *mut u64) -> i64;
     fn vesper_hybrid_native_backend_aarch64_integer_leaf(words: *mut u64) -> i64;
     fn vesper_hybrid_native_backend_aarch64_relocatable_block(words: *mut u64) -> i64;
     fn vesper_hybrid_native_backend_macho_object(words: *mut u64, bytes: *mut u64) -> i64;
@@ -36,6 +37,15 @@ pub const RUNTIME: vesper_port_abi::SeqRuntime = vesper_port_abi::SeqRuntime {
 pub fn live_allocations() -> i64 {
     // SAFETY: the function only reads two counters.
     unsafe { vesper_hybrid_native_backend_live_allocations() }
+}
+
+/// Calls `aarch64_elf_object` of the Vesper library `hybrid_native_backend` (`vesper_hybrid_native_backend_aarch64_elf_object`).
+pub fn aarch64_elf_object(words: &[u64], bytes: &[u8]) -> Vec<u8> {
+    // SAFETY: `vesper_hybrid_native_backend_aarch64_elf_object` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(words, |view_words| vesper_port_abi::with_slice(bytes, |view_bytes| unsafe { vesper_hybrid_native_backend_aarch64_elf_object(view_words, view_bytes) }));
+    unsafe { vesper_port_abi::seq_take::<u8>(RUNTIME, raw as u64) }
 }
 
 /// Calls `aarch64_integer_leaf` of the Vesper library `hybrid_native_backend` (`vesper_hybrid_native_backend_aarch64_integer_leaf`).

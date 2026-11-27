@@ -1,5 +1,5 @@
 use @vesper/codegen-freestanding::codes::{
-    Ehdr, Et, Ident, Page, RelEnt, Shdr, Shf, Shn, Sht, Stb, Stt, Stv, SymEnt
+    Ehdr, Em, Et, Ident, Page, RelEnt, Shdr, Shf, Shn, Sht, Stb, Stt, Stv, SymEnt
 };
 use @vesper/codegen-freestanding::obj::{section_header};
 use @vesper/codegen-freestanding::util::{align_up, grow, push16, push32, push64, put64};
@@ -10,6 +10,7 @@ use @vesper/codegen-freestanding::util::{align_up, grow, push16, push32, push64,
 // symbol names. BSS contributes no bytes.
 // Symbols contain name offset, name length, value, size, kind, and section.
 // Relocations contain source section, offset, symbol index, kind, and addend.
+// AArch64 inputs use ELF relocation numbers as kinds.
 const TEXT: u64 = 0;
 const RODATA: u64 = 1;
 const RELRO: u64 = 2;
@@ -49,8 +50,15 @@ const R_X86_64_64: u64 = 1;
 const R_X86_64_PC32: u64 = 2;
 const R_X86_64_PLT32: u64 = 4;
 const R_X86_64_GOTPCREL: u64 = 9;
+const R_AARCH64_ABS64: u64 = 257;
+const R_AARCH64_ADR_PREL_PG_HI21: u64 = 275;
+const R_AARCH64_ADD_ABS_LO12_NC: u64 = 277;
+const R_AARCH64_CALL26: u64 = 283;
+const R_AARCH64_ADR_GOT_PAGE: u64 = 311;
+const R_AARCH64_LD64_GOT_LO12_NC: u64 = 312;
 const ABS64_FIELD_BYTES: u64 = 8;
 const PC32_FIELD_BYTES: u64 = 4;
+const AARCH64_INSTRUCTION_BYTES: u64 = 4;
 const REL_SYMBOL_SHIFT: u32 = 32;
 const ELF_WORD_ALIGNMENT: u64 = 8;
 const STT_OBJECT: u8 = 1;
@@ -197,7 +205,8 @@ fn append_relocations(
     in words: Slice[u64],
     in symbols: Symbols,
     source: u64,
-    in layout: Layout
+    in layout: Layout,
+    aarch64: bool
 ) -> bool {
     if words.len() % RELOC_WORDS != 0 {
         return false;
@@ -215,19 +224,32 @@ fn append_relocations(
             return false;
         }
         let kind = word(in words, wrapping_add(at, RELOC_KIND));
-        let relocation = match kind {
-            ABS64 => R_X86_64_64,
-            PC32 => R_X86_64_PC32,
-            PLT32 => R_X86_64_PLT32,
-            GOTPCREL => R_X86_64_GOTPCREL,
-            _ => return false,
-        };
-        let field_size = if kind == ABS64 {
-            ABS64_FIELD_BYTES
-        } else {
-            PC32_FIELD_BYTES
-        };
         let offset = word(in words, wrapping_add(at, RELOC_OFFSET));
+        let (relocation, field_size) = if aarch64 {
+            if kind == R_AARCH64_ABS64 {
+                (kind, ABS64_FIELD_BYTES)
+            } else {
+                if offset % AARCH64_INSTRUCTION_BYTES != 0 {
+                    return false;
+                }
+                match kind {
+                    R_AARCH64_ADR_PREL_PG_HI21
+                        | R_AARCH64_ADD_ABS_LO12_NC
+                        | R_AARCH64_CALL26
+                        | R_AARCH64_ADR_GOT_PAGE
+                        | R_AARCH64_LD64_GOT_LO12_NC => (kind, AARCH64_INSTRUCTION_BYTES),
+                    _ => return false,
+                }
+            }
+        } else {
+            match kind {
+                ABS64 => (R_X86_64_64, ABS64_FIELD_BYTES),
+                PC32 => (R_X86_64_PC32, PC32_FIELD_BYTES),
+                PLT32 => (R_X86_64_PLT32, PC32_FIELD_BYTES),
+                GOTPCREL => (R_X86_64_GOTPCREL, PC32_FIELD_BYTES),
+                _ => return false,
+            }
+        };
         if !fits(offset, field_size, layout.size) {
             return false;
         }
@@ -271,7 +293,7 @@ fn relocation_name(ordinal: u64) -> Str {
     }
 }
 
-fn header(inout out: ChunkSeq[u8]) {
+fn header(inout out: ChunkSeq[u8], aarch64: bool) {
     out.push(Ident::Mag0);
     out.push(Ident::Mag1);
     out.push(Ident::Mag2);
@@ -281,7 +303,7 @@ fn header(inout out: ChunkSeq[u8]) {
     out.push(Ident::Current);
     out.resize(Ehdr::Kind, 0);
     push16(inout out, Et::Rel);
-    push16(inout out, EM_X86_64);
+    push16(inout out, if aarch64 { Em::Aarch64 } else { EM_X86_64 });
     push32(inout out, Ident::Current);
     out.resize(Ehdr::Flags, 0);
     push32(inout out, 0);
@@ -291,7 +313,7 @@ fn header(inout out: ChunkSeq[u8]) {
     out.resize(Ehdr::Bytes, 0);
 }
 
-pub fn write_elf(in words: Slice[u64], in bytes: Slice[u8]) -> ChunkSeq[u8] {
+pub fn write_elf(in words: Slice[u64], in bytes: Slice[u8], aarch64: bool) -> ChunkSeq[u8] {
     let count = word(in words, SYMBOL_COUNT);
     if words.len() < HEADER_WORDS
         || count > wrapping_sub(words.len(), HEADER_WORDS) / SYMBOL_WORDS
@@ -300,7 +322,7 @@ pub fn write_elf(in words: Slice[u64], in bytes: Slice[u8]) -> ChunkSeq[u8] {
         return ChunkSeq::new[u8]();
     }
     let mut out = ChunkSeq::new[u8]();
-    header(inout out);
+    header(inout out, aarch64);
     let mut names = ChunkSeq::new[u8]();
     names.push(0);
     let mut sections = ChunkSeq::with_capacity[Layout](SECTION_COUNT);
@@ -369,7 +391,8 @@ pub fn write_elf(in words: Slice[u64], in bytes: Slice[u8]) -> ChunkSeq[u8] {
             in words[reloc_start..words.len()],
             in symbols,
             ordinal,
-            in layout
+            in layout,
+            aarch64
         ) {
             return ChunkSeq::new[u8]();
         }

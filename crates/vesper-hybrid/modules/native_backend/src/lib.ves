@@ -45,7 +45,12 @@ fn relocation_packet(in code: ChunkSeq[u8], in relocations: ChunkSeq[u64]) -> Ch
 
 // An empty result declines the object request.
 pub fn x86_64_elf_object(in words: Slice[u64], in bytes: Slice[u8]) -> ChunkSeq[u8] {
-    write_elf(in words, in bytes)
+    write_elf(in words, in bytes, false)
+}
+
+// AArch64 relocation kinds are the ELF relocation numbers.
+pub fn aarch64_elf_object(in words: Slice[u64], in bytes: Slice[u8]) -> ChunkSeq[u8] {
+    write_elf(in words, in bytes, true)
 }
 
 // An empty result declines the Mach-O object request.

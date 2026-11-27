@@ -329,6 +329,125 @@ fn elf_writer_matches_sections_symbols_and_relocations() {
 }
 
 #[test]
+fn aarch64_elf_writer_preserves_arm_relocations() {
+    const INSTRUCTION_BYTES: u64 = size_of::<u32>() as u64;
+    const ADRP_X0: u32 = 0x9000_0000;
+    const LDR_X0_FROM_X0: u32 = 0xf940_0000;
+    const BL: u32 = 0x9400_0000;
+    const RET: u32 = 0xd65f_03c0;
+    const TEXT_SECTION: u64 = 0;
+    const RODATA_SECTION: u64 = 1;
+    const RELRO_SECTION: u64 = 2;
+    const LOCAL_SYMBOL: u64 = 0;
+    const EXPORTED_SYMBOL: u64 = 1;
+    const IMPORTED_SYMBOL: u64 = 2;
+    let text = [ADRP_X0, LDR_X0_FROM_X0, BL, RET]
+        .map(u32::to_le_bytes)
+        .concat();
+    let mut words = vec![
+        3,
+        text.len() as u64,
+        INSTRUCTION_BYTES,
+        8,
+        8,
+        8,
+        8,
+        0,
+        0,
+        0,
+        0,
+    ];
+    let mut bytes = text.clone();
+    bytes.extend(91u64.to_le_bytes());
+    bytes.extend(0u64.to_le_bytes());
+    for (name, size, kind, section) in [
+        (ENTRY, text.len() as u64, EXPORTED_SYMBOL, TEXT_SECTION),
+        (CONSTANT, 8, LOCAL_SYMBOL, RODATA_SECTION),
+        (EXTERNAL, 0, IMPORTED_SYMBOL, NO_SECTION),
+    ] {
+        words.extend([
+            bytes.len() as u64,
+            name.len() as u64,
+            0,
+            size,
+            kind,
+            section,
+        ]);
+        bytes.extend(name);
+    }
+    let reloc_start = words.len();
+    for (section, at, symbol, kind, addend) in [
+        (TEXT_SECTION, 0, 1, elf::R_AARCH64_ADR_GOT_PAGE, 0),
+        (
+            TEXT_SECTION,
+            INSTRUCTION_BYTES,
+            1,
+            elf::R_AARCH64_LD64_GOT_LO12_NC,
+            0,
+        ),
+        (
+            TEXT_SECTION,
+            2 * INSTRUCTION_BYTES,
+            2,
+            elf::R_AARCH64_CALL26,
+            0,
+        ),
+        (RELRO_SECTION, 0, 1, elf::R_AARCH64_ABS64, 3),
+    ] {
+        words.extend([section, at, symbol, kind.into(), addend]);
+    }
+    let output = binding::aarch64_elf_object(&words, &bytes);
+    let file = object::File::parse(output.as_slice()).unwrap();
+    assert_eq!(file.kind(), object::ObjectKind::Relocatable);
+    assert_eq!(file.architecture(), Architecture::Aarch64);
+    assert_eq!(file.endianness(), Endianness::Little);
+    assert_eq!(file.section_by_name(".text").unwrap().data().unwrap(), text);
+    let relocations = |section: &str| {
+        file.section_by_name(section)
+            .unwrap()
+            .relocations()
+            .map(|(at, relocation)| {
+                let RelocationTarget::Symbol(index) = relocation.target() else {
+                    panic!("expected a target symbol");
+                };
+                (
+                    at,
+                    file.symbol_by_index(index).unwrap().name_bytes().unwrap(),
+                    relocation.flags(),
+                    relocation.addend(),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    let relocation = |r_type| RelocationFlags::Elf { r_type };
+    assert_eq!(
+        relocations(".text"),
+        [
+            (0, CONSTANT, relocation(elf::R_AARCH64_ADR_GOT_PAGE), 0),
+            (
+                INSTRUCTION_BYTES,
+                CONSTANT,
+                relocation(elf::R_AARCH64_LD64_GOT_LO12_NC),
+                0
+            ),
+            (
+                2 * INSTRUCTION_BYTES,
+                EXTERNAL,
+                relocation(elf::R_AARCH64_CALL26),
+                0
+            ),
+        ],
+    );
+    assert_eq!(
+        relocations(".data.rel.ro"),
+        [(0, CONSTANT, relocation(elf::R_AARCH64_ABS64), 3)],
+    );
+    assert!(binding::x86_64_elf_object(&words, &bytes).is_empty());
+    words[reloc_start + 1] = 1;
+    assert!(binding::aarch64_elf_object(&words, &bytes).is_empty());
+}
+
+#[test]
 fn elf_writer_links_an_import_and_local_call() {
     use std::fs;
     use std::process::Command;
