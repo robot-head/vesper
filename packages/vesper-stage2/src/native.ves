@@ -353,7 +353,7 @@ impl Function {
     fn store_addressed(inout self, address: u64, value: u64, kind: u8, offset: u64) {
         let width = abi_width(kind);
         let stored = if is_signed(kind) && width < QWORD_BITS {
-            self.record(SIGN_EXTEND, value, width, QWORD_BITS)
+            self.extend_signed(value, width, QWORD_BITS)
         } else {
             value
         };
@@ -463,6 +463,43 @@ impl Function {
             },
             Option::None => Option::None,
         }
+    }
+
+    fn extend_signed(inout self, source: u64, from: u64, to: u64) -> u64 {
+        let mut value = source;
+        let mut width = from;
+        loop {
+            match self.definition(value) {
+                Option::Some(inst) => {
+                    if inst.extra < width {
+                        break;
+                    }
+                    if inst.op == SIGN_EXTEND && inst.right <= width {
+                        width = inst.right;
+                    } else if inst.op != TRUNCATE {
+                        break;
+                    }
+                    value = inst.left;
+                },
+                Option::None => break,
+            };
+        }
+        self.record(SIGN_EXTEND, value, width, to)
+    }
+
+    fn float_bits(inout self, value: u64, width: u64) -> u64 {
+        match self.definition(value) {
+            Option::Some(inst) => if inst.op == BITS_TO_FLOAT && inst.extra == width {
+                // A raw f32 aggregate cell may have arbitrary high bits.
+                return if width == QWORD_BITS {
+                    inst.left
+                } else {
+                    self.record(TRUNCATE, inst.left, QWORD_BITS, width)
+                };
+            },
+            Option::None => {},
+        };
+        self.record(FLOAT_TO_BITS, value, 0, width)
     }
 
     fn home(inout self, id: u64, block: u64) -> bool {
@@ -1333,7 +1370,7 @@ fn lower_local_store(
     }
     let width = abi_width(kind);
     let stored = if is_signed(kind) && width < QWORD_BITS && addressed {
-        m.record(SIGN_EXTEND, value, width, QWORD_BITS)
+        m.extend_signed(value, width, QWORD_BITS)
     } else {
         value
     };
@@ -2344,11 +2381,34 @@ fn plan_match_operand(inout m: Function, value: u64, arm: u64, block: u64) -> bo
     }
 }
 
+struct EnumCoverage {
+    seen: ChunkSeq[bool],
+    remaining: u64,
+}
+
+fn enum_coverage(variants: u64) -> EnumCoverage {
+    let mut seen = ChunkSeq::new[bool]();
+    seen.resize(variants, false);
+    EnumCoverage { seen: seen, remaining: variants }
+}
+
+impl EnumCoverage {
+    fn excludes_rest(inout self, ordinal: u64, tests: u64) -> bool {
+        if tests != 1 || self.seen.try_get(ordinal).unwrap_or(true) {
+            return false;
+        }
+        let _ = self.seen.try_set(ordinal, true);
+        self.remaining = wrapping_sub(self.remaining, 1);
+        self.remaining == 0
+    }
+}
+
 fn plan_enum_match(in low: L, b: BlockRow, source: u64, block: u64, inout m: Function) -> bool {
     let product = match m.product(source) {
         Option::Some(product) => product,
         Option::None => return false,
     };
+    let mut coverage = enum_coverage(w(product_adt(in low, product.ty).vn));
     let end = add(b.ta, b.tn);
     let count = low.program.op(add(b.ta, MATCH_ARM_COUNT));
     let mut pattern = add(b.ta, MATCH_FIRST_ARM);
@@ -2362,9 +2422,20 @@ fn plan_enum_match(in low: L, b: BlockRow, source: u64, block: u64, inout m: Fun
             return true;
         }
         let mut fields = ChunkSeq::new[EnumPatternField]();
-        if !enum_pattern_fields(in low, product, pattern, shape.target, inout fields).is_some()
-            || !plan_match_operand(inout m, product.first_child, arm, block)
-        {
+        let ordinal = match enum_pattern_fields(
+            in low,
+            product,
+            pattern,
+            shape.target,
+            inout fields
+        ) {
+            Option::Some(ordinal) => ordinal,
+            Option::None => return false,
+        };
+        if coverage.excludes_rest(ordinal, shape.tests) {
+            return true;
+        }
+        if !plan_match_operand(inout m, product.first_child, arm, block) {
             return false;
         }
         for i in 0..fields.len() {
@@ -3133,7 +3204,7 @@ fn lower_float_unary(
             && operand == ScalarKind::F64
             && low.ctx.names.spells(symbol, in "to_bits_f64".as_bytes()))
     {
-        return m.record(FLOAT_TO_BITS, value, 0, abi_width(kind));
+        return m.float_bits(value, abi_width(kind));
     }
     if (kind == ScalarKind::F32
         && operand == ScalarKind::U32
@@ -3219,7 +3290,7 @@ fn lower_unary(
     if to < from {
         m.record(TRUNCATE, value, from, to)
     } else if to > from && signed {
-        m.record(SIGN_EXTEND, value, from, to)
+        m.extend_signed(value, from, to)
     } else {
         value
     }
@@ -3716,9 +3787,9 @@ fn lower_enum_data(in low: L, inst: InstRow, block: u64, inout m: Function) -> b
                 }
                 let width = abi_width(kind);
                 if is_float(kind) {
-                    m.record(FLOAT_TO_BITS, value, 0, width)
+                    m.float_bits(value, width)
                 } else if is_signed(kind) && width < QWORD_BITS {
-                    m.record(SIGN_EXTEND, value, width, QWORD_BITS)
+                    m.extend_signed(value, width, QWORD_BITS)
                 } else {
                     value
                 }
@@ -3987,10 +4058,7 @@ fn lower_enum_match(
         Option::Some(product) => product,
         Option::None => return false,
     };
-    let variants = w(product_adt(in low, product.ty).vn);
-    let mut seen = ChunkSeq::new[bool]();
-    seen.resize(variants, false);
-    let mut covered: u64 = 0;
+    let mut coverage = enum_coverage(w(product_adt(in low, product.ty).vn));
     let end = add(b.ta, b.tn);
     let count = low.program.op(add(b.ta, MATCH_ARM_COUNT));
     let mut pattern = add(b.ta, MATCH_FIRST_ARM);
@@ -4019,13 +4087,9 @@ fn lower_enum_match(
             Option::Some(ordinal) => ordinal,
             Option::None => return false,
         };
-        if shape.tests == 1 && !seen.try_get(ordinal).unwrap_or(false) {
-            let _ = seen.try_set(ordinal, true);
-            covered = inc(covered);
-            if covered == variants {
-                let _ = m.record(JUMP_LABEL, label, 0, 0);
-                return true;
-            }
+        if coverage.excludes_rest(ordinal, shape.tests) {
+            let _ = m.record(JUMP_LABEL, label, 0, 0);
+            return true;
         }
         if inc(arm) == count {
             return false;
