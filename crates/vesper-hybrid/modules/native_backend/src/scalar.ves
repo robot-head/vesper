@@ -308,7 +308,7 @@ const RIGHT_SCRATCH: u8 = R10;
 const THIRD_SCRATCH: u8 = R11;
 // One Linux x86-64 base page. Larger frames need stack probes.
 const STACK_PROBE_INTERVAL: u64 = 4096;
-const MAX_ARGUMENTS: u64 = ARGUMENTS + STACK_PROBE_INTERVAL / SPILL_SLOT_BYTES - 1;
+pub const MAX_ARGUMENTS: u64 = ARGUMENTS + STACK_PROBE_INTERVAL / SPILL_SLOT_BYTES - 1;
 const MIN_FOLDED_ADDS: u64 = 4;
 const MAX_FOLDED_ADDS: u64 = 0x7fffffff;
 

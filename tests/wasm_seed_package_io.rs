@@ -2291,6 +2291,12 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
          pub fn calls(x: u64, y: u64) -> u64 {\n\
              wrapping_add(twist(y, x), wrapping_add(twist(x, y), factorial(x & 7)))\n\
          }\n\
+         fn stack_sum(a: u64, b: u64, c: u64, d: u64, e: u64, f: u64, g: u64, h: u64) -> u64 {\n\
+             wrapping_add(twist(a, b), wrapping_add(twist(c, d), wrapping_add(twist(e, f), twist(g, h))))\n\
+         }\n\
+         pub fn stack_args(a: u64, b: u64, c: u64, d: u64, e: u64, f: u64, g: u64, h: u64) -> u64 {\n\
+             wrapping_add(stack_sum(h, g, f, e, d, c, b, a), if g < h { h } else { g })\n\
+         }\n\
          fn unsupported(x: u64) -> u64 { match x { 0 => 7, _ => 9 } }\n\
          pub fn decline(x: u64) -> u64 { unsupported(x) }\n",
     )
@@ -2342,6 +2348,15 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
         file.section_by_name(".text").unwrap().relocations().count(),
         4
     );
+    let calls = dir.join("native-calls.o");
+    std::fs::rename(&object, &calls).unwrap();
+    assert_eq!(
+        compile("stack_args"),
+        0,
+        "{:?}",
+        read_stage2_sidecar_notes(&object)
+    );
+    let bytes = std::fs::read(&object).unwrap();
     assert_ne!(compile("decline"), 0);
     assert!(read_stage2_sidecar_notes(&object).contains("unsupported x86-64 ELF entry"));
     assert_eq!(std::fs::read(&object).unwrap(), bytes);
@@ -2354,17 +2369,21 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
          extern uint64_t mix(uint64_t, uint64_t);\n\
          extern uint64_t choose(uint64_t, uint64_t);\n\
          extern uint64_t calls(uint64_t, uint64_t);\n\
+         extern uint64_t stack_args(uint64_t, uint64_t, uint64_t, uint64_t,\n\
+                                    uint64_t, uint64_t, uint64_t, uint64_t);\n\
          int main(void) {\n\
              if (mix(10, 4) != 65 || mix(UINT64_MAX, UINT64_MAX) != UINT64_MAX - 16) return 1;\n\
              if (choose(0, 4) != 8 || choose(2, 4) != 8 || choose(4, 1) != 10\n\
                  || choose(UINT64_MAX, 2) != 9 || choose(2, UINT64_MAX) != 8) return 2;\n\
-             return calls(0, 1) != 15 || calls(6, 2) != 778\n\
-                 || calls(UINT64_MAX, UINT64_MAX) != 5040;\n\
+             if (calls(0, 1) != 15 || calls(6, 2) != 778\n\
+                 || calls(UINT64_MAX, UINT64_MAX) != 5040) return 3;\n\
+             return stack_args(1, 2, 3, 4, 5, 6, 7, 8) != 148\n\
+                 || stack_args(8, 7, 6, 5, 4, 3, 2, 1) != 62;\n\
          }\n",
     )
     .unwrap();
     let link = std::process::Command::new("cc")
-        .args([&caller, &leaf, &branch, &object])
+        .args([&caller, &leaf, &branch, &calls, &object])
         .arg("-o")
         .arg(&binary)
         .output()

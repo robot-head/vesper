@@ -3,11 +3,11 @@ use @vesper/check-data::util::{add, inc, n32, w};
 use @vesper/hybrid-native-backend::elf::{x86_text_object};
 use @vesper/hybrid-native-backend::scalar::{
     ADD, AND, BLOCK_LABEL, BLOCK_RETURN, BRANCH_BLOCK, CALL, CALL_ARGUMENT, COMPARE, CONSTANT,
-    EQUAL, HEADER_WORDS, JUMP_LABEL, MUL, NOT_EQUAL, NO_VALUE, OR, RECORD_WORDS, RETURN_VALUE,
-    STACK_LOAD, STACK_SLOT, STACK_STORE_QWORD, SUB, UNSIGNED_GREATER, UNSIGNED_GREATER_EQUAL,
-    UNSIGNED_LESS, UNSIGNED_LESS_EQUAL, XOR, encode_block
+    EQUAL, HEADER_WORDS, JUMP_LABEL, MAX_ARGUMENTS, MUL, NOT_EQUAL, NO_VALUE, OR, RECORD_WORDS,
+    RETURN_VALUE, STACK_LOAD, STACK_SLOT, STACK_STORE_QWORD, SUB, UNSIGNED_GREATER,
+    UNSIGNED_GREATER_EQUAL, UNSIGNED_LESS, UNSIGNED_LESS_EQUAL, XOR, encode_block
 };
-use @vesper/hybrid-native-backend::x86_64::{ARGUMENTS, BYTE_BITS, QWORD_BITS};
+use @vesper/hybrid-native-backend::x86_64::{BYTE_BITS, QWORD_BITS};
 use @vesper/place-ir::{BlockRow, FnRow, InstRow, Lit, Op, Term};
 use @vesper/place-ir-lower::ast::{FnR};
 use @vesper/place-ir-lower::lower::{L};
@@ -183,7 +183,7 @@ fn sysv_signature(in low: L, f: FnR) -> bool {
     if !f.has_body
         || f.generic_count != 0
         || f.ext_count != 0
-        || f.param_count > ARGUMENTS
+        || f.param_count > MAX_ARGUMENTS
         || !is_u64(in low, f.result)
         || f.effects != low.ctx.types.empty_row
     {
@@ -209,7 +209,7 @@ fn argument_value(in low: L, f: FnR, root: u32) -> u64 {
 
 fn call_arity(in low: L, inst: InstRow) -> u64 {
     let count = low.program.op(add(inst.a, CALL_COUNT));
-    if count > ARGUMENTS {
+    if count > MAX_ARGUMENTS {
         return NO_VALUE;
     }
     let type_args = add(CALL_ARGUMENTS, wrapping_mul(count, ARGUMENT_WORDS));
