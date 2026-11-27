@@ -311,7 +311,7 @@ struct FrameLayout {
     floating: bool,
     vectors: bool,
     vector_aux: bool,
-    bit_temporaries: u32,
+    temporary_registers: u32,
     indirect_calls: bool,
     home_slot: u64,
     promoted: u64,
@@ -549,7 +549,7 @@ fn frame_layout(in words: Slice[u64], count: u64) -> Option[FrameLayout] {
         floating: false,
         vectors: false,
         vector_aux: false,
-        bit_temporaries: 0,
+        temporary_registers: 0,
         indirect_calls: false,
         home_slot: NO_VALUE,
         promoted: 0,
@@ -683,10 +683,18 @@ pub fn is_atomic_rmw(op: u64) -> bool {
     op >= ATOMIC_ADD && op <= ATOMIC_EXCHANGE
 }
 
+pub fn is_atomic_cas(op: u64) -> bool {
+    op >= ATOMIC_CAS_BYTE && op <= ATOMIC_CAS_QWORD
+}
+
 fn is_fixed_arithmetic(op: u64) -> bool {
     (op >= SIGNED_DIV && op <= UNSIGNED_MUL_HIGH)
         || op == UNSIGNED_MUL_OVERFLOW
         || op == SIGNED_MUL_OVERFLOW
+}
+
+fn uses_fixed_registers(op: u64) -> bool {
+    is_fixed_arithmetic(op) || is_atomic_cas(op)
 }
 
 fn is_scalar_bit_operation(op: u64) -> bool {
@@ -894,6 +902,7 @@ fn reads_right(in record: Record, paired: bool) -> bool {
         || is_fixed_arithmetic(op)
         || is_checked_arithmetic(op)
         || is_atomic_rmw(op)
+        || is_atomic_cas(op)
         || consumes_carry(op)
         || is_store(op)
         || (is_branch_return(op) && paired && record.left != TRAP_VALUE)
@@ -1028,7 +1037,10 @@ pub fn valid_float_operands(
         if (reads_left(in record) && float_value(in words, arguments, record.left) != left_is_float)
             || (reads_right(in record, paired)
                 && float_value(in words, arguments, record.right) != float_right(record.op))
-            || ((record.op == SELECT || extra_is_float || consumes_carry(record.op))
+            || ((record.op == SELECT
+                || extra_is_float
+                || consumes_carry(record.op)
+                || is_atomic_cas(record.op))
                 && float_value(in words, arguments, record.extra) != extra_is_float)
         {
             return false;
@@ -1228,6 +1240,7 @@ fn find_last_reads(
         let tail_call = record.op == TAIL_CALL;
         let bit_operation = is_scalar_bit_operation(record.op);
         let bit_mix = is_bit_mix(record.op);
+        let cas = is_atomic_cas(record.op);
         if (record.op > BYTE_SWAP
             && record.op != FUNCTION_GOT
             && record.op != STACK_POINTER
@@ -1236,6 +1249,7 @@ fn find_last_reads(
             && !tail_call
             && !bit_operation
             && !bit_mix
+            && !cas
             && !is_vector_operation(record.op))
             || (!labeled && is_cfg_record(record.op))
             || (record.op == STACK_SLOT && index >= frame.slots.len())
@@ -1279,9 +1293,10 @@ fn find_last_reads(
                 return Option::None;
             }
             if live && !hardware {
-                frame.bit_temporaries = frame.bit_temporaries | register_bit(THIRD_SCRATCH);
+                frame.temporary_registers = frame.temporary_registers | register_bit(THIRD_SCRATCH);
                 if record.op == POPULATION_COUNT || record.op == REVERSE_BITS {
-                    frame.bit_temporaries = frame.bit_temporaries | register_bit(RIGHT_SCRATCH);
+                    frame.temporary_registers = frame.temporary_registers
+                        | register_bit(RIGHT_SCRATCH);
                 }
             }
         }
@@ -1295,7 +1310,7 @@ fn find_last_reads(
                 return Option::None;
             }
             if live && record.op >= AND_NOT {
-                frame.bit_temporaries = frame.bit_temporaries | register_bit(THIRD_SCRATCH);
+                frame.temporary_registers = frame.temporary_registers | register_bit(THIRD_SCRATCH);
             }
         }
         if is_vector_operation(record.op) {
@@ -1354,6 +1369,12 @@ fn find_last_reads(
             frame.floating = true;
         }
         let atomic = is_atomic_rmw(record.op);
+        if cas {
+            frame.fixed = true;
+            frame.temporary_registers = frame.temporary_registers
+                | register_bit(RIGHT_SCRATCH)
+                | register_bit(THIRD_SCRATCH);
+        }
         if atomic {
             if !valid_width(record.extra) {
                 return Option::None;
@@ -1567,7 +1588,7 @@ fn find_last_reads(
         }
         let has_left = reads_left(in record);
         let has_right = reads_right(in record, paired);
-        let has_third = record.op == SELECT || record.op == FLOAT_SELECT || carry;
+        let has_third = record.op == SELECT || record.op == FLOAT_SELECT || carry || cas;
         if (has_left && record.left >= value)
             || (has_right && record.right >= value)
             || (has_third && record.extra >= value)
@@ -1582,6 +1603,7 @@ fn find_last_reads(
             || record.op == STACK_LOAD
             || record.op == FLOAT_STACK_LOAD
             || atomic
+            || cas
             || is_integer_division(record.op)
             || no_result
         {
@@ -1655,6 +1677,7 @@ fn emits_instruction(in record: Record, result_live: bool, home_slot: u64) -> bo
                 && !is_home_reload(in record, home_slot))
             || is_call(op)
             || is_atomic_rmw(op)
+            || is_atomic_cas(op)
             || is_integer_division(op)
             || has_no_result(op))
 }
@@ -1706,11 +1729,11 @@ fn allocate(
     };
     let mut reserved = if frame.floating {
         gp_reserved
-            | frame.bit_temporaries
+            | frame.temporary_registers
             | register_bit(XMM_LEFT_SCRATCH)
             | register_bit(XMM_RIGHT_SCRATCH)
     } else {
-        gp_reserved | frame.bit_temporaries
+        gp_reserved | frame.temporary_registers
     };
     if frame.vector_aux {
         reserved = reserved | register_bit(XMM_AUX_SCRATCH);
@@ -1772,7 +1795,7 @@ fn allocate(
             continue;
         }
         let call = is_call(record.op);
-        let fixed = is_fixed_arithmetic(record.op);
+        let fixed = uses_fixed_registers(record.op);
         let atomic = is_atomic_rmw(record.op);
         if call {
             has_calls = true;
@@ -1804,6 +1827,7 @@ fn allocate(
         let third = if record.op == SELECT
             || record.op == FLOAT_SELECT
             || consumes_carry(record.op)
+            || is_atomic_cas(record.op)
         {
             dying_register(in reads, in locations, record.extra, value)
         } else {
@@ -1816,6 +1840,8 @@ fn allocate(
         if call || fixed {
             let clobbers = if call {
                 ~callee_saved
+            } else if is_atomic_cas(record.op) {
+                register_bit(RAX)
             } else {
                 register_bit(RAX) | register_bit(RDX)
             };
@@ -2387,6 +2413,37 @@ fn emit_fixed_arithmetic(
     save_result(inout out, in result, fixed_result(record.op));
 }
 
+fn emit_atomic_cas(
+    inout out: ChunkSeq[u8],
+    in allocation: Allocation,
+    in record: Record,
+    in result: Location
+) {
+    let address = assigned(in allocation.locations, record.left);
+    let new_value = assigned(in allocation.locations, record.extra);
+    let expected = assigned(in allocation.locations, record.right);
+    let mut base = materialize(inout out, in address, THIRD_SCRATCH);
+    if base == RAX {
+        emit(inout out, in Instruction::Move(THIRD_SCRATCH, base));
+        base = THIRD_SCRATCH;
+    }
+    let mut replacement = materialize(inout out, in new_value, RIGHT_SCRATCH);
+    if replacement == RAX {
+        emit(inout out, in Instruction::Move(RIGHT_SCRATCH, replacement));
+        replacement = RIGHT_SCRATCH;
+    }
+    move_return(inout out, in expected, RAX);
+    let width = wrapping_shl_u64(BYTE_BITS, wrapping_u32(wrapping_sub(record.op, ATOMIC_CAS_BYTE)));
+    emit(
+        inout out,
+        in Instruction::Atomic(AtomicMemory::CompareExchange, replacement, base, width)
+    );
+    if width < DWORD_BITS {
+        emit(inout out, in Instruction::Truncate(RAX, RAX, width));
+    }
+    save_result(inout out, in result, RAX);
+}
+
 fn emit_call(
     inout out: ChunkSeq[u8],
     in words: Slice[u64],
@@ -2944,7 +3001,7 @@ fn encode_block_pass(
             return output;
         }
         let call = is_call(record.op);
-        if call || is_fixed_arithmetic(record.op) {
+        if call || uses_fixed_registers(record.op) {
             let saved = match allocation.saved_masks.try_get(clobber_index) {
                 Option::Some(saved) => saved,
                 Option::None => return ChunkSeq::new[u8](),
@@ -2985,6 +3042,8 @@ fn encode_block_pass(
                     },
                     Option::None => (),
                 };
+            } else if is_atomic_cas(record.op) {
+                emit_atomic_cas(inout output, in allocation, in record, in home);
             } else {
                 emit_fixed_arithmetic(inout output, in allocation, in record, in home);
             }

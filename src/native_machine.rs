@@ -2500,8 +2500,7 @@ impl IntegerBlocks<'_> {
                     opcode: Opcode::AtomicCas,
                     flags,
                     args: [address, expected, replacement],
-                } if self.aarch64
-                    && ty(address) == types::I64
+                } if ty(address) == types::I64
                     && ty(expected) == output
                     && ty(replacement) == output
                     && self.supports_atomic_access(flags) =>

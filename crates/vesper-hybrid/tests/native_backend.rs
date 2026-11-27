@@ -6,6 +6,8 @@
 #[allow(clippy::all)]
 #[path = "../port/native_backend.rs"]
 mod binding;
+#[path = "native_backend/atomic.rs"]
+mod atomic;
 #[path = "native_backend/bit_ops.rs"]
 mod bit_ops;
 #[path = "native_backend/elf.rs"]

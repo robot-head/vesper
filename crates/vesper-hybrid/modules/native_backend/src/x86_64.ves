@@ -161,6 +161,8 @@ const XCHG_RM_R8: u8 = 0x86;
 const LOCK_PREFIX: u8 = 0xf0;
 const XADD_RM_R8: u8 = 0xc0;
 const XADD_RM_R64: u8 = 0xc1;
+const CMPXCHG_RM_R8: u8 = 0xb0;
+const CMPXCHG_RM_R64: u8 = 0xb1;
 const ADD_RM_R8: u8 = 0x00;
 const SUB_RM_R8: u8 = 0x28;
 const FENCE_GROUP: u8 = 0xae;
@@ -268,6 +270,7 @@ pub copy enum FixedArithmetic {
 
 pub copy enum AtomicMemory {
     FetchAdd,
+    CompareExchange,
     Exchange,
     Add,
     Subtract,
@@ -808,6 +811,10 @@ fn atomic_memory(inout out: ChunkSeq[u8], in op: AtomicMemory, register: u8, bas
         AtomicMemory::FetchAdd => {
             out.push(TWO_BYTE_OPCODE);
             out.push(if byte { XADD_RM_R8 } else { XADD_RM_R64 });
+        },
+        AtomicMemory::CompareExchange => {
+            out.push(TWO_BYTE_OPCODE);
+            out.push(if byte { CMPXCHG_RM_R8 } else { CMPXCHG_RM_R64 });
         },
         AtomicMemory::Exchange => out.push(if byte { XCHG_RM_R8 } else { XCHG_RM_R64 }),
         AtomicMemory::Add => out.push(if byte { ADD_RM_R8 } else { ADD_RM_R64 }),
