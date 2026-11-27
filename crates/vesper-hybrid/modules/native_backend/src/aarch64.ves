@@ -4,24 +4,29 @@
 use @vesper/codegen-freestanding::util::{push32};
 use self::scalar::{
     Record, word_at, read_record, CONSTANT, ADD, SUB, MUL, AND, OR, XOR, NEG, NOT, SHL, SHR, SAR,
-    COMPARE, SELECT, SHL_REGISTER, SHR_REGISTER, SAR_REGISTER, ADD_IMMEDIATE, SUB_IMMEDIATE,
-    MUL_IMMEDIATE, AND_IMMEDIATE, OR_IMMEDIATE, XOR_IMMEDIATE, COMPARE_IMMEDIATE, EQUAL, NOT_EQUAL,
+    COMPARE, COMPARE_BYTE, COMPARE_WORD, COMPARE_DWORD, SELECT, TRUNCATE, ZERO_EXTEND, SIGN_EXTEND,
+    SHL_REGISTER, SHR_REGISTER, SAR_REGISTER, SIGNED_MUL_HIGH, UNSIGNED_MUL_HIGH, ADD_IMMEDIATE,
+    SUB_IMMEDIATE, MUL_IMMEDIATE, AND_IMMEDIATE, OR_IMMEDIATE, XOR_IMMEDIATE, COMPARE_IMMEDIATE,
+    COMPARE_BYTE_IMMEDIATE, COMPARE_WORD_IMMEDIATE, COMPARE_DWORD_IMMEDIATE, EQUAL, NOT_EQUAL,
     SIGNED_LESS, SIGNED_GREATER_EQUAL, SIGNED_GREATER, SIGNED_LESS_EQUAL, UNSIGNED_LESS,
     UNSIGNED_GREATER_EQUAL, UNSIGNED_GREATER, UNSIGNED_LESS_EQUAL, ARGUMENT_COUNT, RETURN_VALUE,
     HEADER_WORDS, RECORD_WORDS, NEVER_READ, NO_VALUE, DISP32_MASK
 };
-use self::x86_64::{QWORD_BITS};
+use self::x86_64::{BYTE_BITS, WORD_BITS, DWORD_BITS, QWORD_BITS};
 
 const ARGUMENT_REGISTERS: u64 = 8;
 // Keep x16 and x17 out of allocation for architectural scratch uses.
 const CALLER_REGISTER_MASK: u32 = 0xffff;
 const UNASSIGNED: u32 = 32;
 const SCRATCH: u32 = 16;
+const COMPARE_LEFT_SCRATCH: u32 = 17;
 const ZERO: u32 = 31;
 const RETURN: u32 = 0xd65f03c0;
 const ADD_REG: u32 = 0x8b000000;
 const SUB_REG: u32 = 0xcb000000;
 const MUL_REG: u32 = 0x9b007c00;
+const SMULH_REG: u32 = 0x9b407c00;
+const UMULH_REG: u32 = 0x9bc07c00;
 const AND_REG: u32 = 0x8a000000;
 const ORR_REG: u32 = 0xaa000000;
 const EOR_REG: u32 = 0xca000000;
@@ -39,6 +44,8 @@ const CMN_IMM: u32 = 0xb100001f;
 const SUBS_REG: u32 = 0xeb000000;
 const UBFM: u32 = 0xd3400000;
 const SBFM: u32 = 0x93400000;
+const REG64: u32 = 0x80000000;
+const BITFIELD64: u32 = 0x80400000;
 const CSET: u32 = 0x9a9f07e0;
 const CSEL: u32 = 0x9a800000;
 const MOVN: u32 = 0x92800000;
@@ -79,6 +86,35 @@ fn sh(value: u32, amount: u32) -> u32 {
 
 fn rrr(inout out: ChunkSeq[u8], op: u32, dest: u32, lhs: u32, rhs: u32) {
     push32(inout out, op | sh(rhs, RM_SHIFT) | sh(lhs, RN_SHIFT) | dest);
+}
+
+fn bitfield(inout out: ChunkSeq[u8], op: u32, dest: u32, source: u32, rotate: u64, last: u64) {
+    push32(
+        inout out,
+        op
+            | sh(wrapping_u32(rotate), IMMR_SHIFT)
+            | sh(wrapping_u32(last), IMMS_SHIFT)
+            | sh(source, RN_SHIFT)
+            | dest
+    );
+}
+
+fn scalar_width(width: u64) -> bool {
+    width == BYTE_BITS || width == WORD_BITS || width == DWORD_BITS || width == QWORD_BITS
+}
+
+fn scalar_opcode_mask(width: u64) -> u32 {
+    if width == DWORD_BITS { ~REG64 } else { ~0 }
+}
+
+fn low_bits(bits: u64, width: u64) -> u64 {
+    bits & wrapping_shr_u64(~0, wrapping_u32(wrapping_sub(QWORD_BITS, width)))
+}
+
+fn normalize(inout out: ChunkSeq[u8], register: u32, width: u64) {
+    if width != QWORD_BITS {
+        bitfield(inout out, UBFM, register, register, 0, wrapping_sub(width, 1));
+    }
 }
 
 fn halfword(bits: u64, index: u64) -> u64 {
@@ -202,21 +238,54 @@ fn arithmetic_immediate(amount: u64) -> Option[u32] {
     Option::None
 }
 
+fn comparison_width(op: u64) -> u64 {
+    match op {
+        COMPARE | COMPARE_IMMEDIATE => QWORD_BITS,
+        COMPARE_DWORD | COMPARE_DWORD_IMMEDIATE => DWORD_BITS,
+        COMPARE_WORD | COMPARE_WORD_IMMEDIATE => WORD_BITS,
+        COMPARE_BYTE | COMPARE_BYTE_IMMEDIATE => BYTE_BITS,
+        _ => 0,
+    }
+}
+
+fn comparison_uses_immediate(op: u64) -> bool {
+    op >= COMPARE_IMMEDIATE && op <= COMPARE_DWORD_IMMEDIATE
+}
+
 fn compare(inout out: ChunkSeq[u8], in r: Record, lhs: u32, rhs: u32) {
-    if r.op == COMPARE_IMMEDIATE {
-        let signed = widen_i64(wrapping_i32(r.right));
+    let width = comparison_width(r.op);
+    let reg_mask = scalar_opcode_mask(width);
+    let signed_narrow = width < DWORD_BITS
+        && r.extra >= SIGNED_LESS
+        && r.extra <= SIGNED_LESS_EQUAL;
+    let mut lhs = lhs;
+    if signed_narrow {
+        bitfield(inout out, SBFM, COMPARE_LEFT_SCRATCH, lhs, 0, wrapping_sub(width, 1));
+        lhs = COMPARE_LEFT_SCRATCH;
+    }
+    if comparison_uses_immediate(r.op) {
+        let signed = if width >= DWORD_BITS || signed_narrow {
+            widen_i64(wrapping_i32(r.right))
+        } else {
+            wrapping_i64(low_bits(r.right, width))
+        };
         match arithmetic_immediate(magnitude(signed)) {
             Option::Some(encoded) => {
                 let op = if signed < 0 { CMN_IMM } else { CMP_IMM };
-                push32(inout out, op | encoded | sh(lhs, RN_SHIFT));
+                push32(inout out, (op & reg_mask) | encoded | sh(lhs, RN_SHIFT));
             },
             Option::None => {
                 immediate(inout out, SCRATCH, wrapping_u64(signed));
-                rrr(inout out, SUBS_REG, ZERO, lhs, SCRATCH);
+                rrr(inout out, SUBS_REG & reg_mask, ZERO, lhs, SCRATCH);
             },
         }
     } else {
-        rrr(inout out, SUBS_REG, ZERO, lhs, rhs);
+        let mut rhs = rhs;
+        if signed_narrow {
+            bitfield(inout out, SBFM, SCRATCH, rhs, 0, wrapping_sub(width, 1));
+            rhs = SCRATCH;
+        }
+        rrr(inout out, SUBS_REG & reg_mask, ZERO, lhs, rhs);
     }
 }
 
@@ -224,11 +293,11 @@ fn operands(in r: Record) -> Option[u64] {
     if r.op == CONSTANT {
         return Option::Some(0);
     }
-    if r.op == COMPARE || r.op == COMPARE_IMMEDIATE {
+    if comparison_width(r.op) != 0 {
         if r.extra > UNSIGNED_LESS_EQUAL {
             return Option::None;
         }
-        if r.op == COMPARE {
+        if !comparison_uses_immediate(r.op) {
             return Option::Some(2);
         }
         if r.right <= DISP32_MASK {
@@ -239,19 +308,31 @@ fn operands(in r: Record) -> Option[u64] {
     if r.op == SELECT {
         return Option::Some(3);
     }
-    if r.extra != QWORD_BITS {
+    if !scalar_width(r.extra) {
         return Option::None;
     }
     match r.op {
-        ADD
-            | SUB
-            | MUL
-            | AND
-            | OR
-            | XOR
-            | SHL_REGISTER
-            | SHR_REGISTER
-            | SAR_REGISTER => Option::Some(2),
+        ADD | SUB | MUL | AND | OR | XOR => Option::Some(2),
+        SHL_REGISTER | SHR_REGISTER | SAR_REGISTER => if r.extra >= DWORD_BITS {
+            Option::Some(2)
+        } else {
+            Option::None
+        },
+        SIGNED_MUL_HIGH | UNSIGNED_MUL_HIGH => if r.extra == QWORD_BITS {
+            Option::Some(2)
+        } else {
+            Option::None
+        },
+        TRUNCATE => if scalar_width(r.right) && r.right > r.extra {
+            Option::Some(1)
+        } else {
+            Option::None
+        },
+        ZERO_EXTEND | SIGN_EXTEND => if scalar_width(r.right) && r.right < r.extra {
+            Option::Some(1)
+        } else {
+            Option::None
+        },
         NEG | NOT | SHL | SHR | SAR => Option::Some(1),
         ADD_IMMEDIATE
             | SUB_IMMEDIATE
@@ -279,37 +360,66 @@ fn emit_instruction(
 ) {
     if r.op == CONSTANT {
         immediate(inout out, dest, r.left);
+    } else if r.op == TRUNCATE || r.op == ZERO_EXTEND || r.op == SIGN_EXTEND {
+        if r.op == SIGN_EXTEND {
+            let op = if r.extra == DWORD_BITS {
+                SBFM & ~BITFIELD64
+            } else {
+                SBFM
+            };
+            bitfield(inout out, op, dest, lhs, 0, wrapping_sub(r.right, 1));
+            if r.extra < DWORD_BITS {
+                normalize(inout out, dest, r.extra);
+            }
+        } else {
+            if r.op == TRUNCATE {
+                bitfield(inout out, UBFM, dest, lhs, 0, wrapping_sub(r.extra, 1));
+            } else if dest != lhs {
+                rrr(inout out, ORR_REG, dest, ZERO, lhs);
+            }
+        }
     } else if r.op == NEG || r.op == NOT {
-        rrr(inout out, if r.op == NEG { SUB_REG } else { ORN_REG }, dest, ZERO, lhs);
+        let op = if r.op == NEG { SUB_REG } else { ORN_REG };
+        let reg_mask = scalar_opcode_mask(r.extra);
+        rrr(inout out, op & reg_mask, dest, ZERO, lhs);
+        if r.extra < DWORD_BITS {
+            normalize(inout out, dest, r.extra);
+        }
     } else if r.op == SHL || r.op == SHR || r.op == SAR {
-        let count = r.right & SHIFT_MASK;
+        let width_mask = wrapping_sub(r.extra, 1);
+        let count = r.right & width_mask;
         if count == 0 {
             if dest != lhs {
                 rrr(inout out, ORR_REG, dest, ZERO, lhs);
             }
             return;
         }
-        let (rotate, last) = if r.op == SHL {
-            (wrapping_sub(0, count) & SHIFT_MASK, wrapping_sub(SHIFT_MASK, count))
+        let mut op = if r.op == SAR { SBFM } else { UBFM };
+        let register_mask = if r.extra > DWORD_BITS {
+            SHIFT_MASK
         } else {
-            (count, SHIFT_MASK)
+            DWORD_BITS - 1
         };
-        let op = if r.op == SAR { SBFM } else { UBFM };
-        push32(
-            inout out,
-            op
-                | sh(wrapping_u32(rotate), IMMR_SHIFT)
-                | sh(wrapping_u32(last), IMMS_SHIFT)
-                | sh(lhs, RN_SHIFT)
-                | dest
-        );
+        let (rotate, last) = if r.op == SHL {
+            (wrapping_sub(0, count) & register_mask, wrapping_sub(width_mask, count))
+        } else {
+            (count, width_mask)
+        };
+        if r.extra <= DWORD_BITS {
+            op = op & ~BITFIELD64;
+        }
+        bitfield(inout out, op, dest, lhs, rotate, last);
+        if r.op == SAR && r.extra < DWORD_BITS {
+            normalize(inout out, dest, r.extra);
+        }
     } else if r.op == SELECT {
         rrr(inout out, SUBS_REG, ZERO, lhs, ZERO);
         rrr(inout out, CSEL | sh(NE, CONDITION_SHIFT), dest, rhs, third);
-    } else if r.op == COMPARE || r.op == COMPARE_IMMEDIATE {
+    } else if comparison_width(r.op) != 0 {
         compare(inout out, in r, lhs, rhs);
         push32(inout out, CSET | sh(condition(r.extra) ^ 1, CONDITION_SHIFT) | dest);
     } else {
+        let reg_mask = scalar_opcode_mask(r.extra);
         let mut rhs = rhs;
         if r.op >= ADD_IMMEDIATE && r.op <= XOR_IMMEDIATE {
             let signed = widen_i64(wrapping_i32(r.right));
@@ -318,13 +428,16 @@ fn emit_instruction(
                     Option::Some(encoded) => {
                         let subtract = (r.op == SUB_IMMEDIATE) != (signed < 0);
                         let op = if subtract { SUB_IMM } else { ADD_IMM };
-                        push32(inout out, op | encoded | sh(lhs, RN_SHIFT) | dest);
+                        push32(inout out, (op & reg_mask) | encoded | sh(lhs, RN_SHIFT) | dest);
+                        if r.extra < DWORD_BITS {
+                            normalize(inout out, dest, r.extra);
+                        }
                         return;
                     },
                     Option::None => (),
                 }
             } else if r.op != MUL_IMMEDIATE {
-                match bitmask_immediate(wrapping_u64(signed)) {
+                match bitmask_immediate(low_bits(wrapping_u64(signed), r.extra)) {
                     Option::Some(encoded) => {
                         let op = match r.op {
                             AND_IMMEDIATE => AND_IMM,
@@ -341,6 +454,8 @@ fn emit_instruction(
             rhs = SCRATCH;
         }
         let op = match r.op {
+            SIGNED_MUL_HIGH => SMULH_REG,
+            UNSIGNED_MUL_HIGH => UMULH_REG,
             ADD | ADD_IMMEDIATE => ADD_REG,
             SUB | SUB_IMMEDIATE => SUB_REG,
             MUL | MUL_IMMEDIATE => MUL_REG,
@@ -351,7 +466,10 @@ fn emit_instruction(
             SHR_REGISTER => LSR_REG,
             _ => ASR_REG,
         };
-        rrr(inout out, op, dest, lhs, rhs);
+        rrr(inout out, op & reg_mask, dest, lhs, rhs);
+        if r.extra < DWORD_BITS {
+            normalize(inout out, dest, r.extra);
+        }
     }
 }
 
@@ -464,7 +582,7 @@ pub fn encode_leaf(in words: Slice[u64]) -> ChunkSeq[u8] {
         if n == 3 {
             used = expire(used, in ends, r.extra, value, third);
         }
-        if (r.op == COMPARE || r.op == COMPARE_IMMEDIATE)
+        if comparison_width(r.op) != 0
             && wrapping_add(index, 1) < count
             && last_read(in ends, value) == wrapping_add(value, 1)
         {

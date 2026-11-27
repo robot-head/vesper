@@ -10,19 +10,29 @@ use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
 use vesper::{check, native, parser};
 
 const RET: u32 = 0xd65f_03c0;
+const BYTE_BITS: u64 = u8::BITS as u64;
+const DWORD_BITS: u64 = u32::BITS as u64;
 const CELL_BITS: u64 = u64::BITS as u64;
 const CONSTANT: u64 = 0;
 const ADD: u64 = 1;
 const SHL: u64 = 9;
 const COMPARE: u64 = 12;
 const SELECT: u64 = 14;
+const TRUNCATE: u64 = 15;
+const ZERO_EXTEND: u64 = 16;
+const SIGN_EXTEND: u64 = 17;
 const CALL: u64 = 38;
+const SIGNED_MUL_HIGH: u64 = 50;
+const UNSIGNED_MUL_HIGH: u64 = 51;
 const ADD_IMMEDIATE: u64 = 52;
 const AND_IMMEDIATE: u64 = 55;
 const OR_IMMEDIATE: u64 = 56;
 const XOR_IMMEDIATE: u64 = 57;
 const COMPARE_IMMEDIATE: u64 = 58;
+const COMPARE_BYTE_IMMEDIATE: u64 = 59;
 const EQUAL: u64 = 0;
+const SIGNED_LESS: u64 = 2;
+const UNSIGNED_LESS: u64 = 6;
 
 #[test]
 fn aarch64_leaf_encodings_and_operand_validation() {
@@ -42,8 +52,83 @@ fn aarch64_leaf_encodings_and_operand_validation() {
     assert_eq!(binding::aarch64_integer_leaf(&[8, 7]), as_bytes(MOV_X0_X7));
     assert!(binding::aarch64_integer_leaf(&[9, 8]).is_empty());
     assert!(binding::aarch64_integer_leaf(&[2, 2, ADD, 0, 2, CELL_BITS]).is_empty());
-    assert!(binding::aarch64_integer_leaf(&[2, 2, ADD, 0, 1, u32::BITS as u64]).is_empty());
+    assert!(binding::aarch64_integer_leaf(&[2, 2, ADD, 0, 1, u128::BITS as u64]).is_empty());
     assert!(binding::aarch64_integer_leaf(&[0, 0, CALL, 0, 0, 0]).is_empty());
+}
+
+#[test]
+fn aarch64_narrow_arithmetic_and_extension() {
+    const ADD_W0_W0_W1: u32 = 0x0b01_0000;
+    const TRUNCATE_X0_TO_BYTE: u32 = 0xd340_1c00;
+    const SIGN_EXTEND_BYTE_TO_X0: u32 = 0x9340_1c00;
+    const SMULH_X0_X0_X1: u32 = 0x9b41_7c00;
+    const UMULH_X0_X0_X1: u32 = 0x9bc1_7c00;
+    let bytes = |words: &[u32]| {
+        words
+            .iter()
+            .copied()
+            .flat_map(u32::to_le_bytes)
+            .collect::<Vec<_>>()
+    };
+    for (op, width, encoded) in [
+        (ADD, DWORD_BITS, ADD_W0_W0_W1),
+        (SIGNED_MUL_HIGH, CELL_BITS, SMULH_X0_X0_X1),
+        (UNSIGNED_MUL_HIGH, CELL_BITS, UMULH_X0_X0_X1),
+    ] {
+        assert_eq!(
+            binding::aarch64_integer_leaf(&[2, 2, op, 0, 1, width]),
+            bytes(&[encoded, RET]),
+        );
+    }
+    for (op, last) in [
+        (ZERO_EXTEND, vec![RET]),
+        (SIGN_EXTEND, vec![SIGN_EXTEND_BYTE_TO_X0, RET]),
+    ] {
+        let packet = [
+            1, 2, TRUNCATE, 0, CELL_BITS, BYTE_BITS, op, 1, BYTE_BITS, CELL_BITS,
+        ];
+        let mut instructions = vec![TRUNCATE_X0_TO_BYTE];
+        instructions.extend(last);
+        assert_eq!(binding::aarch64_integer_leaf(&packet), bytes(&instructions));
+    }
+    assert!(binding::aarch64_integer_leaf(&[1, 1, TRUNCATE, 0, BYTE_BITS, CELL_BITS]).is_empty());
+}
+
+#[test]
+fn aarch64_compares_narrow_signed_and_unsigned_immediates() {
+    const TRUNCATE_X0_TO_BYTE: u32 = 0xd340_1c00;
+    const CMP_X0_255: u32 = 0xf103_fc1f;
+    const CSET_X0_LO: u32 = 0x9a9f_27e0;
+    const SIGN_EXTEND_BYTE_TO_X17: u32 = 0x9340_1c11;
+    const CMN_X17_1: u32 = 0xb100_063f;
+    const CSET_X0_LT: u32 = 0x9a9f_a7e0;
+    for (predicate, instructions) in [
+        (UNSIGNED_LESS, vec![CMP_X0_255, CSET_X0_LO]),
+        (
+            SIGNED_LESS,
+            vec![SIGN_EXTEND_BYTE_TO_X17, CMN_X17_1, CSET_X0_LT],
+        ),
+    ] {
+        let packet = [
+            1,
+            2,
+            TRUNCATE,
+            0,
+            CELL_BITS,
+            BYTE_BITS,
+            COMPARE_BYTE_IMMEDIATE,
+            1,
+            u64::from(u32::MAX),
+            predicate,
+        ];
+        let expected: Vec<_> = [TRUNCATE_X0_TO_BYTE]
+            .into_iter()
+            .chain(instructions)
+            .chain([RET])
+            .flat_map(u32::to_le_bytes)
+            .collect();
+        assert_eq!(binding::aarch64_integer_leaf(&packet), expected);
+    }
 }
 
 #[test]
