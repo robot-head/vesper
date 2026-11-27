@@ -337,6 +337,8 @@ def _self_host_differentials_run_as_their_own_buildbuddy_check(h):
     self_host = command("Self-host differentials")
     _contains("--build_tests_only", self_host)
     _contains("--test_tag_filters=self_host,-self_host_codegen,-self_host_part2,-lean_replay", self_host)
+    # 25GB killed self_host_verified_codegen (#2418, #2448).
+    _equal(actions["Self-host differentials"]["resource_requests"]["memory"], "28GB")
     # #1882: the non-codegen differentials neared the hour on one runner.
     part2 = command("Self-host differentials 2")
     _contains("--build_tests_only", part2)

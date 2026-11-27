@@ -869,3 +869,54 @@ fn vesper_scalar_bodies_part_6j() {
         assert!(total.is_clean(), "{}", total.summary());
     });
 }
+
+/// Part 6k: 1-word unary (`~`, `-`, `!`), bitwise (`&`, `|`, `^`),
+/// `wrapping_neg_i8`/`i32`/`i64`, and `u64` bit builtins across both
+/// optimized and unoptimized builds.
+const SCALARS_6K: &str = "
+fn unary_and_bits_64(a: i8, b: i32, c: i64, u: u64, flag: bool) -> i64 {
+    let n8: i8 = wrapping_neg_i8(a);
+    let n32: i32 = wrapping_neg_i32(b);
+    let n64: i64 = wrapping_neg_i64(c);
+    let inv: u64 = ~u;
+    let b64: u32 = leading_zeros_u64(inv) ^ trailing_zeros_u64(inv) ^ count_ones_u64(inv);
+    let m: i64 = if !flag {
+        widen_i64(n8) | widen_i64(n32)
+    } else {
+        widen_i64(n8) & widen_i64(n32)
+    };
+    n64 ^ m ^ widen_i64(b64) ^ wrapping_i64(inv)
+}
+fn main() -> i64 {
+    unary_and_bits_64(-12, 345, -6789, 0x00ff_00ff_00ff_00ff, false)
+        ^ unary_and_bits_64(5, -9, 42, 17, true)
+}
+";
+
+#[test]
+fn vesper_scalar_bodies_part_6k() {
+    big_stack(|| {
+        let parsed = vesper::parser::parse(SCALARS_6K);
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        let checked = vesper::check::check(&parsed.module);
+        assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
+        if let Err(e) = build(&checked.world, "main", true) {
+            panic!("the part 6k scalar program does not build: {e}");
+        }
+        let before = EMITTED.load(Ordering::Relaxed);
+        let total = both("scalars_6k", &checked.world, true);
+        let emitted = EMITTED.load(Ordering::Relaxed) - before;
+        eprintln!(
+            "scalars_6k: {}; {emitted} functions emitted from Vesper",
+            total.summary()
+        );
+        let ran = if cross() { 0 } else { 2 };
+        assert_eq!((total.worlds, total.ran), (2, ran), "{}", total.summary());
+        let min_emitted = if cross() { 4 } else { 8 };
+        assert!(
+            emitted >= min_emitted,
+            "part 6k functions should come from Vesper (expected >= {min_emitted}, got {emitted})"
+        );
+        assert!(total.is_clean(), "{}", total.summary());
+    });
+}

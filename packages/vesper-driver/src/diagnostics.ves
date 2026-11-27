@@ -1,0 +1,279 @@
+// Pure CLI diagnostic JSON serialization and raw-fallback formatting
+// (`src/main.rs`: `diagnostics` JSON path and raw-fallback stderr path,
+// `crates/vesper-core/src/ast.rs`: `Diagnostic`, `DiagnosticLabel`),
+// #2456 (part of #1893, #1397).
+
+const MAX_RAW_DIAGNOSTICS: u64 = 128;
+const MAX_RAW_CODE_CHARS: u64 = 128;
+const MAX_RAW_MESSAGE_CHARS: u64 = 4096;
+
+const CH_BACKSPACE: u8 = 8;
+const CH_TAB: u8 = 9;
+const CH_LF: u8 = 10;
+const CH_FF: u8 = 12;
+const CH_CR: u8 = 13;
+const CH_CONTROL_LIMIT: u8 = 32;
+const CH_QUOTE: u8 = 34;
+const CH_ZERO: u8 = 48;
+const CH_BACKSLASH: u8 = 92;
+const CH_LOWER_A: u8 = 97;
+
+const DECIMAL_RADIX: u64 = 10;
+const HEX_RADIX: u8 = 16;
+const HEX_DIGIT_SPLIT: u8 = 10;
+const HEX_LOW_NIBBLE_MASK: u8 = 15;
+const HEX_HIGH_NIBBLE_SHIFT: u8 = 4;
+
+const UTF8_CONT_MASK: u8 = 192;
+const UTF8_CONT_TAG: u8 = 128;
+
+const WORD_BYTES: u64 = 8;
+const WORD_ALIGN_MASK: u64 = 7;
+const BYTE_BITS: u64 = 8;
+
+fn at_byte(in s: Slice[u8], i: u64) -> u8 {
+    match s.try_get(i) {
+        Option::Some(b) => b,
+        Option::None => 0,
+    }
+}
+
+fn push_bytes(inout out: ChunkSeq[u8], in s: Slice[u8]) {
+    let n = s.len();
+    for i in 0..n {
+        out.push(at_byte(in s, i));
+    }
+}
+
+fn push_str(inout out: ChunkSeq[u8], in s: Str) {
+    push_bytes(inout out, in s.as_bytes());
+}
+
+fn push_u64(inout out: ChunkSeq[u8], v: u64) {
+    if v >= DECIMAL_RADIX {
+        push_u64(inout out, v / DECIMAL_RADIX);
+    }
+    out.push(wrapping_u8(wrapping_add(v % DECIMAL_RADIX, widen_u64(CH_ZERO))));
+}
+
+fn hex_lower(nibble: u8) -> u8 {
+    if nibble < HEX_DIGIT_SPLIT {
+        wrapping_add(CH_ZERO, nibble)
+    } else {
+        wrapping_add(CH_LOWER_A, wrapping_sub(nibble, HEX_DIGIT_SPLIT))
+    }
+}
+
+fn push_json_string(inout out: ChunkSeq[u8], in s: Slice[u8]) {
+    out.push(CH_QUOTE);
+    let n = s.len();
+    for i in 0..n {
+        let b = at_byte(in s, i);
+        if b == CH_QUOTE {
+            push_str(inout out, in "\\\"");
+        } else if b == CH_BACKSLASH {
+            push_str(inout out, in "\\\\");
+        } else if b == CH_BACKSPACE {
+            push_str(inout out, in "\\b");
+        } else if b == CH_FF {
+            push_str(inout out, in "\\f");
+        } else if b == CH_LF {
+            push_str(inout out, in "\\n");
+        } else if b == CH_CR {
+            push_str(inout out, in "\\r");
+        } else if b == CH_TAB {
+            push_str(inout out, in "\\t");
+        } else if b < CH_CONTROL_LIMIT {
+            push_str(inout out, in "\\u00");
+            out.push(hex_lower((b >> HEX_HIGH_NIBBLE_SHIFT) & HEX_LOW_NIBBLE_MASK));
+            out.push(hex_lower(b & HEX_LOW_NIBBLE_MASK));
+        } else {
+            out.push(b);
+        }
+    }
+    out.push(CH_QUOTE);
+}
+
+fn push_utf8_truncated(inout out: ChunkSeq[u8], in s: Slice[u8], max_chars: u64) {
+    let n = s.len();
+    let mut chars: u64 = 0;
+    let mut i: u64 = 0;
+    loop {
+        if i >= n {
+            break;
+        }
+        let b = at_byte(in s, i);
+        let is_cont = (b & UTF8_CONT_MASK) == UTF8_CONT_TAG;
+        if !is_cont {
+            if chars >= max_chars {
+                return ();
+            }
+            chars = wrapping_add(chars, 1);
+        }
+        out.push(b);
+        i = wrapping_add(i, 1);
+    }
+}
+
+fn read_u64(in s: Slice[u8], inout at: u64) -> u64 {
+    let mut v: u64 = 0;
+    for i in 0..WORD_BYTES {
+        let b = widen_u64(at_byte(in s, wrapping_add(at, i)));
+        v = v | wrapping_shl_u64(b, wrapping_u32(wrapping_mul(i, BYTE_BITS)));
+    }
+    at = wrapping_add(at, WORD_BYTES);
+    v
+}
+
+copy struct ByteSpan {
+    start: u64,
+    end: u64,
+}
+
+fn read_span_slice(in s: Slice[u8], inout at: u64) -> ByteSpan {
+    let len = read_u64(in s, inout at);
+    let start = at;
+    let end = wrapping_add(at, len);
+    at = end;
+    ByteSpan { start, end }
+}
+
+// Compact JSON array matching `serde_json::to_string(&[Diagnostic])`.
+pub fn diagnostics_json(in stream: Slice[u8]) -> ChunkSeq[u8] {
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut at: u64 = 0;
+    let count = read_u64(in stream, inout at);
+    push_str(inout out, in "[");
+    for idx in 0..count {
+        if idx > 0 {
+            push_str(inout out, in ",");
+        }
+        let code_r = read_span_slice(in stream, inout at);
+        let msg_r = read_span_slice(in stream, inout at);
+        let span_start = read_u64(in stream, inout at);
+        let span_end = read_u64(in stream, inout at);
+        let rel_count = read_u64(in stream, inout at);
+
+        push_str(inout out, in "{\"code\":");
+        push_json_string(inout out, in stream[code_r.start..code_r.end]);
+        push_str(inout out, in ",\"message\":");
+        push_json_string(inout out, in stream[msg_r.start..msg_r.end]);
+        push_str(inout out, in ",\"span\":{\"start\":");
+        push_u64(inout out, span_start);
+        push_str(inout out, in ",\"end\":");
+        push_u64(inout out, span_end);
+        push_str(inout out, in "}");
+
+        if rel_count > 0 {
+            push_str(inout out, in ",\"related\":[");
+            for r_idx in 0..rel_count {
+                if r_idx > 0 {
+                    push_str(inout out, in ",");
+                }
+                let r_start = read_u64(in stream, inout at);
+                let r_end = read_u64(in stream, inout at);
+                let r_msg = read_span_slice(in stream, inout at);
+                push_str(inout out, in "{\"span\":{\"start\":");
+                push_u64(inout out, r_start);
+                push_str(inout out, in ",\"end\":");
+                push_u64(inout out, r_end);
+                push_str(inout out, in "},\"message\":");
+                push_json_string(inout out, in stream[r_msg.start..r_msg.end]);
+                push_str(inout out, in "}");
+            }
+            push_str(inout out, in "]");
+        }
+
+        let has_help = read_u64(in stream, inout at);
+        if has_help != 0 {
+            let help_r = read_span_slice(in stream, inout at);
+            push_str(inout out, in ",\"help\":");
+            push_json_string(inout out, in stream[help_r.start..help_r.end]);
+        }
+
+        push_str(inout out, in "}");
+    }
+    push_str(inout out, in "]");
+    out
+}
+
+// Raw diagnostic fallback stderr text matching `diagnostics()` in `src/main.rs`.
+pub fn format_raw_diagnostics(in reason: Slice[u8], in stream: Slice[u8]) -> ChunkSeq[u8] {
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    push_str(inout out, in "diagnostic source rendering unavailable: ");
+    push_bytes(inout out, in reason);
+    push_str(inout out, in "\n");
+
+    let mut at: u64 = 0;
+    let count = read_u64(in stream, inout at);
+    let shown = if count < MAX_RAW_DIAGNOSTICS {
+        count
+    } else {
+        MAX_RAW_DIAGNOSTICS
+    };
+    for _idx in 0..shown {
+        let code_r = read_span_slice(in stream, inout at);
+        let msg_r = read_span_slice(in stream, inout at);
+        let span_start = read_u64(in stream, inout at);
+        let span_end = read_u64(in stream, inout at);
+        let rel_count = read_u64(in stream, inout at);
+        for _r_idx in 0..rel_count {
+            let _r_start = read_u64(in stream, inout at);
+            let _r_end = read_u64(in stream, inout at);
+            let _r_msg = read_span_slice(in stream, inout at);
+        }
+        let has_help = read_u64(in stream, inout at);
+        if has_help != 0 {
+            let _help_r = read_span_slice(in stream, inout at);
+        }
+
+        push_utf8_truncated(inout out, in stream[code_r.start..code_r.end], MAX_RAW_CODE_CHARS);
+        push_str(inout out, in ": ");
+        push_utf8_truncated(inout out, in stream[msg_r.start..msg_r.end], MAX_RAW_MESSAGE_CHARS);
+        push_str(inout out, in " (UTF-8 bytes ");
+        push_u64(inout out, span_start);
+        push_str(inout out, in "..");
+        push_u64(inout out, span_end);
+        push_str(inout out, in ")\n");
+    }
+    if count > MAX_RAW_DIAGNOSTICS {
+        push_u64(inout out, wrapping_sub(count, MAX_RAW_DIAGNOSTICS));
+        push_str(inout out, in " additional compiler errors exceed the display profile\n");
+    }
+    out
+}
+
+fn pack_bytes(in bytes: Slice[u8]) -> ChunkSeq[u64] {
+    let mut words: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let n = bytes.len();
+    words.push(n);
+    let mut word: u64 = 0;
+    for i in 0..n {
+        let shift = wrapping_u32(wrapping_mul(i & WORD_ALIGN_MASK, BYTE_BITS));
+        word = word | wrapping_shl_u64(widen_u64(at_byte(in bytes, i)), shift);
+        if (i & WORD_ALIGN_MASK) == WORD_ALIGN_MASK || wrapping_add(i, 1) == n {
+            words.push(word);
+            word = 0;
+        }
+    }
+    words
+}
+
+// JIT test entrypoint: `stream` -> packed JSON bytes.
+pub fn diagnostics_json_words(in stream: Str) -> ChunkSeq[u64] {
+    let b = stream.as_bytes();
+    let out = diagnostics_json(in b);
+    pack_bytes(in out.as_slice())
+}
+
+// JIT test entrypoint: `[reason_len: u64, reason_bytes, stream_bytes...]` -> packed raw stderr bytes.
+pub fn format_raw_diagnostics_words(in input: Str) -> ChunkSeq[u64] {
+    let b = input.as_bytes();
+    let mut at: u64 = 0;
+    let reason_r = read_span_slice(in b, inout at);
+    let out = format_raw_diagnostics(
+        in b[reason_r.start..reason_r.end],
+        in b[at..b.len()],
+    );
+    pack_bytes(in out.as_slice())
+}
