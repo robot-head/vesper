@@ -991,3 +991,102 @@ rounds per case, timed ABBA.
 
 Rust lines deleted: 0. The actions are not wired: Rust stays the default
 until the hybrid wiring part.
+
+# Part 11c (#1828): the macro preview
+
+`vesper/macroPreview` (src/lsp/macro_preview.rs `Document::new` and
+`render`) now runs in `@vesper/lsp-features` (`macro_preview.ves`, entry
+`lsp_macro_preview`). It has 0 diffs, at 1.26x Rust's time when the
+document is hashed with C BLAKE3, as the hosted build would hash it.
+
+- **Inputs.** The compiler snapshot comes in as words that
+  `macro_preview::port_words` writes:
+  - the snapshot's source association;
+  - the expanded source, source map and invocation audits of a success;
+  - the stage, message, expanded source and diagnostics of a rejection.
+
+  The macro expander itself is still Rust's.
+- **`Document::new`.** The URI bound, the source bound, and the
+  association checks: the snapshot's source, its byte length and BLAKE3
+  identity, and the expanded artifact's original source and hash.
+- **`render`.**
+  - The limits checks, then the source and URI bounds.
+  - The prepaid work: 8 per output byte, 4 per source byte, the URI, and
+    4,096.
+  - The `Success` or `Rejected` record.
+- **Writing the record.** Rust serializes the record through a bounded
+  writer that charges every write call, then parses the bytes into a
+  `serde_json::Value`. Here the record is built as a tree in Rust's field
+  order, including:
+  - serde's externally tagged `OperationKind` and `AuthorityArg`;
+  - `Diagnostic`'s skipped empty `related` and absent `help`;
+  - the empty arrays of a rejection.
+
+  A walk in that order replays serde_json's write calls, so the
+  `serialization work` and `output bytes` refusals happen at the same
+  write as in Rust. Each quote, punctuation mark, number, run between
+  escapes and escape is one write. The answer is then written with sorted
+  keys, as the `Value` writes it.
+
+The document digest comes from the host's C BLAKE3 when given. That is
+what the hosted build's `@vesper-std/hash-sys` computes, and the same
+choice the proof model port made in part 3. Otherwise the port hashes with
+the portable `@vesper-std/hash` BLAKE3. `@vesper/lsp-features` keeps no
+foreign calls, so it still builds under Stage 2.
+
+## What changed
+
+- `src/lsp/macro_preview.rs`: `port_words`, the snapshot encoder that the
+  hybrid wiring will use.
+- `src/lsp.rs`: the hidden `MacroPreviewForPort`. It holds one compiler
+  snapshot and returns Rust's rendering or the port's words for a
+  document.
+- `packages/vesper-lsp-features/src/macro_preview.ves` (new) and the entry
+  `lsp_macro_preview` in lib.ves.
+- `tests/self_host_lsp_features.rs`: `macro_preview_matches_rust` and the
+  ignored `macro_preview_speed`. They build one database at a time; all
+  182 at once ran out of memory.
+
+## Differential
+
+182 compiler snapshots:
+
+- the 16 source macro fixtures and the two other macro fixtures;
+- the escape-free one-line programs in tests/forge_*.rs;
+- damaged copies of every third one: cut in half, with an unclosed macro
+  appended, and with a bad string appended;
+- 15 package sources;
+- five hand-written programs.
+
+They give 744 cases:
+
+- the document as compiled;
+- for every fourth snapshot, also:
+  - a stale document (one byte longer);
+  - work allowances from the prepaid bound up to 40,000 over it;
+  - output caps from 1 byte to 60,000;
+- invalid limits;
+- URIs of 0, 4,096 and 4,097 bytes and with escapes.
+
+97 expanded (30 with audited operations), 301 rejected and 346 refused
+cases matched with 0 diffs. The refusals cover every reason, including
+186 serialization work and 106 output bytes refusals. Every case also
+matches with the host's digest.
+
+## Numbers
+
+The 232 cases at default limits, 8 renders per call, best of five ABBA
+rounds for each snapshot. The compiler snapshot is built outside the
+timing on both sides. Rust's time includes parsing the bounded bytes into
+a `Value` and writing it out. The host digest is computed inside the
+timing on every render.
+
+| Document hashed by | Rust | Vesper | Ratio |
+|---|--:|--:|--:|
+| the host's C BLAKE3 (the hosted build's `@vesper-std/hash-sys`) | 8.34 µs | 10.48 µs | **1.26x** |
+| the portable Vesper BLAKE3 | 8.34 µs | 18.12 µs | 2.17x |
+
+As with the proof models, the portable BLAKE3 is most of the difference,
+so the hybrid wiring must hash through hash-sys. Rust lines deleted: 0.
+The preview is not wired: Rust stays the default until the hybrid wiring
+part.
