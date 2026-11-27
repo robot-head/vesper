@@ -811,18 +811,49 @@ pub fn sys_spec(m: &Migration, options: &SysSpecOptions) -> Result<SysSpec, Migr
         if !used_enums.contains(&e.name) {
             continue;
         }
-        let vs: Vec<String> = e
-            .variants
-            .iter()
-            .map(|(n, v)| format!("{n} = {v}"))
-            .collect();
-        let _ = writeln!(
-            out,
-            "    enum {}: {} {{ {} }}",
-            e.name,
-            carrier.name(),
-            vs.join(", ")
-        );
+        #[cfg(feature = "vesper-port")]
+        {
+            let mut vbuf = Vec::new();
+            let mut vstarts = Vec::with_capacity(e.variants.len());
+            let mut vlens = Vec::with_capacity(e.variants.len());
+            for (vn, vv) in &e.variants {
+                let item = format!("{vn} = {vv}");
+                vstarts.push(vbuf.len() as u64);
+                vlens.push(item.len() as u64);
+                vbuf.extend_from_slice(item.as_bytes());
+            }
+            let cname = carrier.name();
+            let cap = 24
+                + e.name.len()
+                + cname.len()
+                + vbuf.len()
+                + e.variants.len().saturating_sub(1) * 2;
+            let mut line = vec![0u8; cap];
+            let ln = crate::binding::migrate_render_vsys_enum(
+                e.name.as_bytes(),
+                cname.as_bytes(),
+                &vbuf,
+                &vstarts,
+                &vlens,
+                &mut line,
+            ) as usize;
+            out.push_str(std::str::from_utf8(&line[..ln]).unwrap_or_default());
+        }
+        #[cfg(not(feature = "vesper-port"))]
+        {
+            let vs: Vec<String> = e
+                .variants
+                .iter()
+                .map(|(n, v)| format!("{n} = {v}"))
+                .collect();
+            let _ = writeln!(
+                out,
+                "    enum {}: {} {{ {} }}",
+                e.name,
+                carrier.name(),
+                vs.join(", ")
+            );
+        }
     }
     // Wire struct pointees and, transitively, the structs they contain.
     let decls: std::collections::BTreeMap<&str, &Declaration> = m
@@ -849,12 +880,37 @@ pub fn sys_spec(m: &Migration, options: &SysSpecOptions) -> Result<SysSpec, Migr
                 "pointee struct `{n}` has no wire layout; run check_pointer_pointees"
             )));
         };
-        let fields: Vec<String> = d
-            .fields
-            .iter()
-            .map(|f| format!("{}: {}", f.name, wire_field(&f.ty)))
-            .collect();
-        let _ = writeln!(out, "    wire struct {n} {{ {} }}", fields.join(", "));
+        #[cfg(feature = "vesper-port")]
+        {
+            let mut fbuf = Vec::new();
+            let mut fstarts = Vec::with_capacity(d.fields.len());
+            let mut flens = Vec::with_capacity(d.fields.len());
+            for f in &d.fields {
+                let item = format!("{}: {}", f.name, wire_field(&f.ty));
+                fstarts.push(fbuf.len() as u64);
+                flens.push(item.len() as u64);
+                fbuf.extend_from_slice(item.as_bytes());
+            }
+            let cap = 28 + n.len() + fbuf.len() + d.fields.len().saturating_sub(1) * 2;
+            let mut line = vec![0u8; cap];
+            let ln = crate::binding::migrate_render_vsys_wire_struct(
+                n.as_bytes(),
+                &fbuf,
+                &fstarts,
+                &flens,
+                &mut line,
+            ) as usize;
+            out.push_str(std::str::from_utf8(&line[..ln]).unwrap_or_default());
+        }
+        #[cfg(not(feature = "vesper-port"))]
+        {
+            let fields: Vec<String> = d
+                .fields
+                .iter()
+                .map(|f| format!("{}: {}", f.name, wire_field(&f.ty)))
+                .collect();
+            let _ = writeln!(out, "    wire struct {n} {{ {} }}", fields.join(", "));
+        }
     }
     out.push_str(&fns);
     out.push_str("}\n");
