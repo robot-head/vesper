@@ -1828,3 +1828,77 @@ pub fn migrate_c_int_specifiers(in tags: Slice[u8]) -> u8 {
     }
     C_SPEC_ERR_UNSUPPORTED
 }
+
+// ---------------------------------------------------------------------------
+// C pointer nullability qualifier scanner (`c.rs::nullability`) and
+// `CType::vesper` renderer (`c.rs::CType::vesper`).
+
+const C_NULL_UNSPECIFIED: u8 = 0;
+const C_NULL_NONNULL: u8 = 1;
+const C_NULL_NULLABLE: u8 = 2;
+
+const CTYPE_VOID: u8 = 0;
+const CTYPE_CBOOL: u8 = 1;
+const CTYPE_PASSTHROUGH: u8 = 2;
+const CTYPE_POINTER: u8 = 3;
+const CTYPE_ARRAY: u8 = 4;
+const CTYPE_REFUSED: u8 = 5;
+
+pub fn migrate_c_nullability(in tags: Slice[u8]) -> u8 {
+    let n = tags.len();
+    let mut res = C_NULL_UNSPECIFIED;
+    let mut i: u64 = 0;
+    loop {
+        if i >= n {
+            break;
+        }
+        let t = match tags.try_get(i) {
+            Some(v) => v,
+            None => break
+        };
+        if t == C_NULL_NONNULL {
+            res = C_NULL_NONNULL;
+        } else if t == C_NULL_NULLABLE {
+            res = C_NULL_NULLABLE;
+        }
+        i = wrapping_add(i, 1);
+    }
+    res
+}
+
+pub fn migrate_render_ctype_vesper(
+    kind: u8,
+    has_len: bool,
+    len: u64,
+    in inner: Slice[u8],
+    inout out: Slice[u8],
+) -> u64 {
+    if kind == CTYPE_VOID {
+        return copy_str(in "Unit", inout out, 0);
+    }
+    if kind == CTYPE_CBOOL {
+        return copy_str(in "bool", inout out, 0);
+    }
+    if kind == CTYPE_PASSTHROUGH {
+        return copy_range(in inner, 0, inner.len(), inout out, 0);
+    }
+    if kind == CTYPE_POINTER {
+        let mut pos = copy_str(in "NullablePtr[", inout out, 0);
+        pos = copy_range(in inner, 0, inner.len(), inout out, pos);
+        let _ = out.try_set(pos, BYTE_RBRACKET);
+        return wrapping_add(pos, 1);
+    }
+    if kind == CTYPE_ARRAY {
+        let mut pos: u64 = 0;
+        let _ = out.try_set(pos, BYTE_LBRACKET);
+        pos = wrapping_add(pos, 1);
+        pos = copy_range(in inner, 0, inner.len(), inout out, pos);
+        if has_len {
+            pos = copy_str(in "; ", inout out, pos);
+            pos = write_u64_dec(len, inout out, pos);
+        }
+        let _ = out.try_set(pos, BYTE_RBRACKET);
+        return wrapping_add(pos, 1);
+    }
+    copy_str(in "<refused>", inout out, 0)
+}
