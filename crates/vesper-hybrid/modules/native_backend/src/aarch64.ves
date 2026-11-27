@@ -1412,8 +1412,37 @@ fn emit_narrow_shift(
     }
 }
 
+fn value_fits(in words: Slice[u64], arguments: u64, value: u64, width: u64) -> bool {
+    if value < arguments {
+        // A raw argument can have arbitrary high bits.
+        return false;
+    }
+    let definition = read_record(in words, wrapping_sub(value, arguments));
+    match definition.op {
+        CONSTANT => low_bits(definition.left, width) == definition.left,
+        LOAD | STACK_LOAD | ATOMIC_LOAD | TRUNCATE | AND | OR | XOR | AND_NOT => {
+            definition.extra <= width
+        },
+        OVERFLOW_FLAG => true,
+        _ => comparison_width(definition.op) != 0 || is_float_compare(definition.op),
+    }
+}
+
+fn alu_needs_mask(in words: Slice[u64], arguments: u64, in r: Record) -> bool {
+    match r.op {
+        AND => !value_fits(in words, arguments, r.left, r.extra)
+            && !value_fits(in words, arguments, r.right, r.extra),
+        AND_NOT => !value_fits(in words, arguments, r.left, r.extra),
+        OR | XOR => !value_fits(in words, arguments, r.left, r.extra)
+            || !value_fits(in words, arguments, r.right, r.extra),
+        _ => true,
+    }
+}
+
 fn emit_instruction(
     inout out: ChunkSeq[u8],
+    in words: Slice[u64],
+    arguments: u64,
     in r: Record,
     dest: u32,
     lhs: u32,
@@ -1479,7 +1508,7 @@ fn emit_instruction(
                 normalize(inout out, dest, r.extra);
             }
         } else {
-            if r.op == TRUNCATE {
+            if r.op == TRUNCATE && !value_fits(in words, arguments, r.left, r.extra) {
                 bitfield(inout out, UBFM, dest, lhs, 0, wrapping_sub(r.extra, 1));
             } else if dest != lhs {
                 rrr(inout out, ORR_REG, dest, ZERO, lhs);
@@ -1581,7 +1610,7 @@ fn emit_instruction(
             return;
         }
         rrr(inout out, op & reg_mask, dest, lhs, rhs);
-        if r.extra < DWORD_BITS {
+        if r.extra < DWORD_BITS && alu_needs_mask(in words, arguments, in r) {
             normalize(inout out, dest, r.extra);
         }
     }
@@ -2884,7 +2913,16 @@ fn encode_pass(
                     rrr(inout out, CSEL | sh(cc, CONDITION_SHIFT), dest, rhs, third);
                     flags_for_next = Option::None;
                 },
-                Option::None => emit_instruction(inout out, in r, dest, lhs, rhs, third),
+                Option::None => emit_instruction(
+                    inout out,
+                    in words,
+                    args,
+                    in r,
+                    dest,
+                    lhs,
+                    rhs,
+                    third
+                ),
             };
         }
         if assigned >= SPILL_BASE {

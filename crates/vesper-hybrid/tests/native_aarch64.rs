@@ -18,6 +18,8 @@ const NO_VALUE: u64 = u64::MAX;
 const TRAP_VALUE: u64 = NO_VALUE - 1;
 const CONSTANT: u64 = 0;
 const ADD: u64 = 1;
+const AND: u64 = 4;
+const OR: u64 = 5;
 const SHL: u64 = 9;
 const COMPARE: u64 = 12;
 const SELECT: u64 = 14;
@@ -103,6 +105,7 @@ const ATOMIC_UNSIGNED_MIN: u64 = 130;
 const ATOMIC_SIGNED_MAX: u64 = 133;
 const CALL_FLOAT32: u64 = 134;
 const EQUAL: u64 = 0;
+const NOT_EQUAL: u64 = 1;
 const SIGNED_LESS: u64 = 2;
 const UNSIGNED_LESS: u64 = 6;
 const FLOAT_UNORDERED_OR_EQUAL: u64 = 5;
@@ -1279,6 +1282,72 @@ fn aarch64_narrow_arithmetic_and_extension() {
         assert_eq!(binding::aarch64_integer_leaf(&packet), bytes(&instructions));
     }
     assert!(binding::aarch64_integer_leaf(&[1, 1, TRUNCATE, 0, BYTE_BITS, CELL_BITS]).is_empty());
+}
+
+#[test]
+fn aarch64_omits_masks_only_when_operands_bound_the_result() {
+    const LDRB_W0_X0: u32 = 0x3940_0000;
+    const LDRB_W1_X1: u32 = 0x3940_0021;
+    const AND_X0_X0_X1: u32 = 0x8a01_0000;
+    const ORR_X0_X0_X1: u32 = 0xaa01_0000;
+    const UBFX_X0_BYTE: u32 = 0xd340_1c00;
+    const CMP_X0_X1: u32 = 0xeb01_001f;
+    const CSET_X2_EQ: u32 = 0x9a9f_17e2;
+    const CSET_X0_NE: u32 = 0x9a9f_07e0;
+    const ORR_X0_X2_X0: u32 = 0xaa00_0040;
+
+    #[rustfmt::skip]
+    let bounded = [
+        2, 5,
+        LOAD, 0, 0, BYTE_BITS,
+        LOAD, 1, 0, BYTE_BITS,
+        OR, 2, 3, BYTE_BITS,
+        TRUNCATE, 4, CELL_BITS, BYTE_BITS,
+    ];
+    assert_eq!(
+        binding::aarch64_integer_leaf(&bounded),
+        [LDRB_W0_X0, LDRB_W1_X1, ORR_X0_X0_X1, RET]
+            .map(u32::to_le_bytes)
+            .concat(),
+    );
+    #[rustfmt::skip]
+    let predicates = [
+        2, 4,
+        COMPARE, 0, 1, EQUAL,
+        COMPARE, 0, 1, NOT_EQUAL,
+        OR, 2, 3, BYTE_BITS,
+    ];
+    assert_eq!(
+        binding::aarch64_integer_leaf(&predicates),
+        [
+            CMP_X0_X1,
+            CSET_X2_EQ,
+            CMP_X0_X1,
+            CSET_X0_NE,
+            ORR_X0_X2_X0,
+            RET
+        ]
+        .map(u32::to_le_bytes)
+        .concat(),
+    );
+    for (operation, expected) in [
+        (AND, vec![LDRB_W0_X0, AND_X0_X0_X1, RET]),
+        (OR, vec![LDRB_W0_X0, ORR_X0_X0_X1, UBFX_X0_BYTE, RET]),
+    ] {
+        #[rustfmt::skip]
+        let with_unknown = [
+            2, 3,
+            LOAD, 0, 0, BYTE_BITS,
+            operation, 2, 1, BYTE_BITS,
+        ];
+        assert_eq!(
+            binding::aarch64_integer_leaf(&with_unknown),
+            expected
+                .into_iter()
+                .flat_map(u32::to_le_bytes)
+                .collect::<Vec<_>>(),
+        );
+    }
 }
 
 #[test]
