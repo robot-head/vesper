@@ -2301,9 +2301,13 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
              if a < b { wrapping_add(a, -7) } else { wrapping_sub(a, -11) }\n\
          }\n\
          pub fn select_signed(a: i64, b: u64) -> i64 {\n\
-             if !(a > wrapping_i64(b)) { offset(a, wrapping_i64(b)) }\n\
-             else { wrapping_i64(wrapping_u64(a) ^ b) }\n\
+             let right = wrapping_i64(b);\n\
+             let a = if !(a > right) { offset(a, right) }\n\
+                 else { wrapping_i64(wrapping_u64(a) ^ b) };\n\
+             let _ = wrapping_add(a, 1);\n\
+             a\n\
          }\n\
+         pub fn mutate(a: i64) -> i64 { let mut b = a; b = 7; b }\n\
          fn unsupported(x: u64) -> u64 { match x { 0 => 7, _ => 9 } }\n\
          pub fn decline(x: u64) -> u64 { unsupported(x) }\n",
     )
@@ -2374,6 +2378,8 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
     let bytes = std::fs::read(&object).unwrap();
     assert_ne!(compile("decline"), 0);
     assert!(read_stage2_sidecar_notes(&object).contains("unsupported x86-64 ELF entry"));
+    assert_eq!(std::fs::read(&object).unwrap(), bytes);
+    assert_ne!(compile("mutate"), 0);
     assert_eq!(std::fs::read(&object).unwrap(), bytes);
 
     let caller = dir.join("native-scalar-caller.c");

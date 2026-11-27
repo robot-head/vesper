@@ -1,5 +1,6 @@
 use @vesper/check-data::types::{TyKind, TyPass};
-use @vesper/check-data::util::{add, inc, n32, w};
+use @vesper/check-data::util::{add, inc, n32, u32_at, w};
+use @vesper/check-data::world::{set_by_symbol};
 use @vesper/hybrid-native-backend::elf::{x86_text_object};
 use @vesper/hybrid-native-backend::scalar::{
     ADD, AND, BLOCK_LABEL, BLOCK_RETURN, BRANCH_BLOCK, CALL, CALL_ARGUMENT, COMPARE,
@@ -9,7 +10,7 @@ use @vesper/hybrid-native-backend::scalar::{
     UNSIGNED_GREATER_EQUAL, UNSIGNED_LESS, UNSIGNED_LESS_EQUAL, XOR, encode_block
 };
 use @vesper/hybrid-native-backend::x86_64::{BYTE_BITS, QWORD_BITS};
-use @vesper/place-ir::{BlockRow, FnRow, InstRow, Lit, Op, Tag, Term};
+use @vesper/place-ir::{BlockRow, FnRow, InstRow, Lit, Op, Pat, Tag, Term};
 use @vesper/place-ir-lower::ast::{FnR};
 use @vesper/place-ir-lower::lower::{L};
 
@@ -25,6 +26,8 @@ const UNARY_VALUE: u64 = 1;
 const READ_PATH: u64 = 1;
 const READ_PASS: u64 = 2;
 const READ_PROJECTIONS: u64 = 3;
+const BIND_PATTERN: u64 = 1;
+const BIND_NAME: u64 = 4;
 const BLOCK_HEADER_WORDS: u64 = 4;
 const BLOCK_INCOMING_COUNT: u64 = 1;
 const BLOCK_INCOMING_WORDS: u64 = 2;
@@ -88,6 +91,7 @@ struct Function {
     words: ChunkSeq[u64],
     values: ChunkSeq[Value],
     kinds: ChunkSeq[u8],
+    bindings: ChunkSeq[u32],
     home_bytes: u64,
 }
 
@@ -256,6 +260,33 @@ fn argument_value(in low: L, f: FnR, root: u32) -> u64 {
         }
     }
     NO_VALUE
+}
+
+fn place_value(in low: L, f: FnR, root: u32, in m: Function) -> u64 {
+    let binding = u32_at(in m.bindings, w(root));
+    if binding == 0 {
+        argument_value(in low, f, root)
+    } else {
+        add(m.arguments, wrapping_sub(w(binding), 1))
+    }
+}
+
+fn collect_binding(in low: L, inst: InstRow, inout m: Function) -> bool {
+    let pattern = low.program.op(add(inst.a, BIND_PATTERN));
+    if pattern == Pat::Wild {
+        return inst.n == BIND_NAME;
+    }
+    if pattern != Pat::Bind || inst.n != inc(BIND_NAME) {
+        return false;
+    }
+    // Place IR gives shadowed bindings distinct names. Writes and inout
+    // arguments are declined, so a place read can reuse the bound SSA value.
+    let name = n32(low.program.op(add(inst.a, BIND_NAME)));
+    if u32_at(in m.bindings, w(name)) != 0 {
+        return false;
+    }
+    set_by_symbol(inout m.bindings, name, n32(inc(low.program.op(inst.a))));
+    true
 }
 
 fn call_arity(in low: L, inst: InstRow) -> u64 {
@@ -428,9 +459,23 @@ fn pack_homes(in low: L, row: FnRow, inout m: Function) {
 
 // Stack homes hold branch results and the values read outside their defining block.
 fn plan_homes(in low: L, f: FnR, row: FnRow, inout m: Function) -> bool {
-    let mut value_count = row.bc;
+    let mut value_count: u64 = 0;
     for block in 0..row.bc {
-        value_count = add(value_count, low.program.block(add(row.b0, block)).ic);
+        let b = low.program.block(add(row.b0, block));
+        let param = block_parameter(in low, b);
+        if param != NO_VALUE && param >= value_count {
+            value_count = inc(param);
+        }
+        for index in b.i0..add(b.i0, b.ic) {
+            let inst = low.program.inst(index);
+            let dest = w(inst.dest);
+            if dest >= value_count {
+                value_count = inc(dest);
+            }
+            if inst.op == Op::Bind && !collect_binding(in low, inst, inout m) {
+                return false;
+            }
+        }
     }
     m.values.resize(add(f.param_count, value_count), value_new(NO_VALUE));
     if row.bc == 1 {
@@ -461,8 +506,8 @@ fn plan_homes(in low: L, f: FnR, row: FnRow, inout m: Function) -> bool {
             let inst = low.program.inst(index);
             let at = inst.a;
             if inst.op == Op::Read {
-                let arg = argument_value(in low, f, n32(low.program.op(at)));
-                if !m.use_in(arg, block) {
+                let value = place_value(in low, f, n32(low.program.op(at)), in m);
+                if !m.use_in(value, block) {
                     return false;
                 }
             } else if inst.op == Op::Binary {
@@ -585,6 +630,12 @@ fn lower_block(
     for index in b.i0..add(b.i0, b.ic) {
         let inst = low.program.inst(index);
         let at = inst.a;
+        if inst.op == Op::Bind {
+            if m.kind(low.program.op(at)) == ScalarKind::Unsupported {
+                return false;
+            }
+            continue;
+        }
         let kind = scalar_kind(in low, inst.ty);
         if inst.fallible != 0 || kind == ScalarKind::Unsupported {
             return false;
@@ -597,13 +648,19 @@ fn lower_block(
             && low.program.op(add(at, READ_PASS)) != TyPass::Inout
             && low.program.op(add(at, READ_PROJECTIONS)) == 0
         {
-            let arg = argument_value(in low, f, n32(low.program.op(at)));
-            if arg == NO_VALUE
-                || scalar_kind(in low, low.ast.param(add(f.param_start, arg)).ty) != kind
-            {
+            let source = place_value(in low, f, n32(low.program.op(at)), in m);
+            if source == NO_VALUE {
                 return false;
             }
-            m.read(arg, block)
+            let source_kind = if source < m.arguments {
+                scalar_kind(in low, low.ast.param(add(f.param_start, source)).ty)
+            } else {
+                m.kind(wrapping_sub(source, m.arguments))
+            };
+            if source_kind != kind {
+                return false;
+            }
+            m.read(source, block)
         } else if inst.op == Op::Unary && inst.n == UNARY_WORDS {
             lower_unary(in low, at, kind, block, inout m)
         } else if inst.op == Op::Binary && inst.n == BINARY_WORDS {
@@ -713,6 +770,7 @@ fn lower_function(
         words: ChunkSeq::new[u64](),
         values: ChunkSeq::new[Value](),
         kinds: ChunkSeq::new[u8](),
+        bindings: ChunkSeq::new[u32](),
         home_bytes: 0
     };
     if !plan_homes(in low, f, row, inout m) || !plan_types(in low, row, inout m) {
