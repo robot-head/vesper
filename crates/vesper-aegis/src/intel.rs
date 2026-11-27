@@ -34,7 +34,6 @@ use crate::chain::{
 use crate::error::AttestError;
 use crate::tdx::{QeReportBody, TdxQuote};
 use crate::time::{iso8601_utc_to_unix, unix_seconds};
-use serde::Deserialize;
 
 /// Intel SGX extension in PCK certificates.
 pub const SGX_EXTENSION_OID: &str = "1.2.840.113741.1.13.1";
@@ -356,77 +355,48 @@ pub struct VerifiedTdxQuote {
 
 // ---------------------------------------------------------------- JSON --
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct TcbInfoJson {
-    id: String,
-    version: u32,
-    issue_date: String,
-    next_update: String,
-    fmspc: String,
-    pce_id: String,
-    tcb_type: u32,
-    tcb_evaluation_data_number: u32,
-    tdx_module: Option<ModuleJson>,
-    #[serde(default)]
-    tdx_module_identities: Vec<ModuleIdentityJson>,
-    tcb_levels: Vec<TcbLevelJson>,
-}
+const TDX_OUT_ID_START: usize = 0;
+const TDX_OUT_ID_END: usize = 1;
+const TDX_OUT_VERSION: usize = 2;
+const TDX_OUT_ISSUE_DATE_START: usize = 3;
+const TDX_OUT_ISSUE_DATE_END: usize = 4;
+const TDX_OUT_NEXT_UPDATE_START: usize = 5;
+const TDX_OUT_NEXT_UPDATE_END: usize = 6;
+const TDX_OUT_TCB_TYPE: usize = 7;
+const TDX_OUT_TCB_EVAL_NUM: usize = 8;
+const TDX_OUT_LEVEL_COUNT: usize = 9;
+const TDX_OUT_HAS_MOD: usize = 10;
+const TDX_OUT_MOD_ID_COUNT: usize = 11;
+const TDX_OUT_LEN: usize = 12;
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ModuleJson {
-    mrsigner: String,
-    attributes: String,
-    attributes_mask: String,
-}
+const TDX_BYTES_FMSPC_OFF: usize = 0;
+const TDX_BYTES_FMSPC_LEN: usize = 6;
+const TDX_BYTES_PCEID_OFF: usize = 6;
+const TDX_BYTES_PCEID_LEN: usize = 2;
+const TDX_BYTES_MOD_MRSIGNER_OFF: usize = 8;
+const TDX_BYTES_MOD_ATTR_OFF: usize = 56;
+const TDX_BYTES_MOD_ATTR_MASK_OFF: usize = 64;
+const TDX_BYTES_TOTAL: usize = 72;
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ModuleIdentityJson {
-    id: String,
-    mrsigner: String,
-    attributes: String,
-    attributes_mask: String,
-    tcb_levels: Vec<IsvLevelJson>,
-}
+const TDX_MOD_MRSIGNER_LEN: usize = 48;
+const TDX_MOD_ATTR_LEN: usize = 8;
+const TDX_MOD_BYTES_STRIDE: usize = 64;
+const TDX_MOD_BYTES_ATTR_OFF: usize = 48;
+const TDX_MOD_BYTES_MASK_OFF: usize = 56;
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct TcbLevelJson {
-    tcb: TcbJson,
-    tcb_date: String,
-    tcb_status: String,
-    #[serde(rename = "advisoryIDs", default)]
-    advisory_ids: Vec<String>,
-}
+const TDX_MOD_STRIDE: usize = 4;
+const TDX_MOD_ID_START: usize = 0;
+const TDX_MOD_ID_END: usize = 1;
+const TDX_MOD_LVL_START: usize = 2;
+const TDX_MOD_LVL_COUNT: usize = 3;
 
-#[derive(Deserialize)]
-struct TcbJson {
-    sgxtcbcomponents: Vec<ComponentJson>,
-    pcesvn: u16,
-    tdxtcbcomponents: Vec<ComponentJson>,
-}
+const TDX_COMPS_STRIDE: usize = 32;
+const TDX_COMPS_TDX_OFF: usize = 16;
 
-#[derive(Deserialize)]
-pub(crate) struct ComponentJson {
-    svn: u8,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct IsvLevelJson {
-    tcb: IsvSvnJson,
-    tcb_date: String,
-    tcb_status: String,
-    #[serde(rename = "advisoryIDs", default)]
-    advisory_ids: Vec<String>,
-}
-
-#[derive(Deserialize)]
-struct IsvSvnJson {
-    isvsvn: u16,
-}
+const TDX_STACK_MAX_LEVELS: usize = 32;
+const TDX_STACK_MAX_MODS: usize = 8;
+const TDX_STACK_MAX_MOD_LVLS: usize = 32;
+const TDX_STACK_MAX_ADVS: usize = 128;
 
 const QE_OUT_ID_START: usize = 0;
 const QE_OUT_ID_END: usize = 1;
@@ -499,143 +469,321 @@ fn hex_digit(c: u8) -> Option<u8> {
     }
 }
 
-pub(crate) fn svn16(
-    c: &[ComponentJson],
-    what: &'static str,
-) -> Result<[u8; TCB_COMPONENTS], AttestError> {
-    if c.len() != TCB_COMPONENTS {
-        return Err(collateral(
-            what,
-            format!("{} components, expected {TCB_COMPONENTS}", c.len()),
-        ));
-    }
-    let mut out = [0u8; 16];
-    for (o, c) in out.iter_mut().zip(c) {
-        *o = c.svn;
-    }
-    Ok(out)
-}
-
 pub(crate) fn date(s: &str, what: &'static str) -> Result<u64, AttestError> {
     iso8601_utc_to_unix(s).ok_or_else(|| collateral(what, format!("bad UTC timestamp {s:?}")))
-}
-
-fn isv_levels(
-    levels: &[IsvLevelJson],
-    what: &'static str,
-) -> Result<Vec<IsvTcbLevel>, AttestError> {
-    if levels.is_empty() {
-        return Err(collateral(what, "no TCB levels".into()));
-    }
-    levels
-        .iter()
-        .map(|l| {
-            let status = TcbStatus::parse(&l.tcb_status)?;
-            // Intel's enclave and TDX module identity levels carry only
-            // these three statuses; convergence (and the Lean model in
-            // `lean/AegisCollateral.lean`) relies on it.
-            if !matches!(
-                status,
-                TcbStatus::UpToDate | TcbStatus::OutOfDate | TcbStatus::Revoked
-            ) {
-                return Err(collateral(
-                    what,
-                    format!("status {} is not valid for an ISV level", status.as_str()),
-                ));
-            }
-            Ok(IsvTcbLevel {
-                isv_svn: l.tcb.isvsvn,
-                tcb_date: date(&l.tcb_date, what)?,
-                status,
-                advisory_ids: l.advisory_ids.clone(),
-            })
-        })
-        .collect()
-}
-
-fn module(
-    id: String,
-    mrsigner: &str,
-    attributes: &str,
-    mask: &str,
-    levels: Vec<IsvTcbLevel>,
-) -> Result<TdxModuleIdentity, AttestError> {
-    Ok(TdxModuleIdentity {
-        id,
-        mr_signer: hex_array(mrsigner, "tdxModule.mrsigner")?,
-        attributes: hex_array(attributes, "tdxModule.attributes")?,
-        attributes_mask: hex_array(mask, "tdxModule.attributesMask")?,
-        levels,
-    })
 }
 
 impl TdxTcbInfo {
     /// Parse a TCB info JSON body (the signed bytes). Only TDX version 3 is
     /// accepted.
     pub fn parse(json: &[u8]) -> Result<Self, AttestError> {
-        let j: TcbInfoJson =
-            serde_json::from_slice(json).map_err(|e| collateral("tcbInfo", e.to_string()))?;
-        if j.id != "TDX" {
-            return Err(collateral(
-                "tcbInfo.id",
-                format!("{:?}, expected TDX", j.id),
-            ));
+        let mut out = [0u64; TDX_OUT_LEN];
+        let mut bytes = [0u8; TDX_BYTES_TOTAL];
+        let mut stack_levels = [0u64; TDX_STACK_MAX_LEVELS * QE_LVL_STRIDE];
+        let mut stack_comps = [0u8; TDX_STACK_MAX_LEVELS * TDX_COMPS_STRIDE];
+        let mut stack_mods = [0u64; TDX_STACK_MAX_MODS * TDX_MOD_STRIDE];
+        let mut stack_mod_bytes = [0u8; TDX_STACK_MAX_MODS * TDX_MOD_BYTES_STRIDE];
+        let mut stack_mod_lvls = [0u64; TDX_STACK_MAX_MOD_LVLS * QE_LVL_STRIDE];
+        let mut stack_advs = [0u64; TDX_STACK_MAX_ADVS * 2];
+
+        let mut heap_levels = Vec::new();
+        let mut heap_comps = Vec::new();
+        let mut heap_mods = Vec::new();
+        let mut heap_mod_bytes = Vec::new();
+        let mut heap_mod_lvls = Vec::new();
+        let mut heap_advs = Vec::new();
+
+        let rc = crate::port::vesper::parse_tdx_tcb_info(
+            json,
+            &mut out,
+            &mut bytes,
+            &mut stack_levels,
+            &mut stack_comps,
+            &mut stack_mods,
+            &mut stack_mod_bytes,
+            &mut stack_mod_lvls,
+            &mut stack_advs,
+        );
+        let (levels_buf, comps_buf, mods_buf, mod_bytes_buf, mod_lvls_buf, advs_buf) =
+            if rc == QE_ERR_CAPACITY {
+                let mut lvl_cap = TDX_STACK_MAX_LEVELS * 2;
+                let mut mod_cap = TDX_STACK_MAX_MODS * 2;
+                let mut mlvl_cap = TDX_STACK_MAX_MOD_LVLS * 2;
+                let mut adv_cap = TDX_STACK_MAX_ADVS * 2;
+                loop {
+                    heap_levels.resize(lvl_cap * QE_LVL_STRIDE, 0);
+                    heap_comps.resize(lvl_cap * TDX_COMPS_STRIDE, 0);
+                    heap_mods.resize(mod_cap * TDX_MOD_STRIDE, 0);
+                    heap_mod_bytes.resize(mod_cap * TDX_MOD_BYTES_STRIDE, 0);
+                    heap_mod_lvls.resize(mlvl_cap * QE_LVL_STRIDE, 0);
+                    heap_advs.resize(adv_cap * 2, 0);
+                    let retry_rc = crate::port::vesper::parse_tdx_tcb_info(
+                        json,
+                        &mut out,
+                        &mut bytes,
+                        &mut heap_levels,
+                        &mut heap_comps,
+                        &mut heap_mods,
+                        &mut heap_mod_bytes,
+                        &mut heap_mod_lvls,
+                        &mut heap_advs,
+                    );
+                    if retry_rc == QE_ERR_OK {
+                        break (
+                            heap_levels.as_slice(),
+                            heap_comps.as_slice(),
+                            heap_mods.as_slice(),
+                            heap_mod_bytes.as_slice(),
+                            heap_mod_lvls.as_slice(),
+                            heap_advs.as_slice(),
+                        );
+                    }
+                    if retry_rc != QE_ERR_CAPACITY {
+                        return Err(collateral(
+                            "tcbInfo",
+                            if retry_rc == QE_ERR_HEX {
+                                "invalid hex field".into()
+                            } else {
+                                "malformed JSON".into()
+                            },
+                        ));
+                    }
+                    lvl_cap *= 2;
+                    mod_cap *= 2;
+                    mlvl_cap *= 2;
+                    adv_cap *= 2;
+                }
+            } else if rc == QE_ERR_OK {
+                (
+                    stack_levels.as_slice(),
+                    stack_comps.as_slice(),
+                    stack_mods.as_slice(),
+                    stack_mod_bytes.as_slice(),
+                    stack_mod_lvls.as_slice(),
+                    stack_advs.as_slice(),
+                )
+            } else {
+                return Err(collateral(
+                    "tcbInfo",
+                    if rc == QE_ERR_HEX {
+                        "invalid hex field".into()
+                    } else {
+                        "malformed JSON".into()
+                    },
+                ));
+            };
+
+        let span_str = |s: u64, e: u64, what: &'static str| -> Result<&str, AttestError> {
+            std::str::from_utf8(&json[s as usize..e as usize])
+                .map_err(|err| collateral(what, err.to_string()))
+        };
+
+        let id = span_str(out[TDX_OUT_ID_START], out[TDX_OUT_ID_END], "tcbInfo.id")?;
+        if id != "TDX" {
+            return Err(collateral("tcbInfo.id", format!("{id:?}, expected TDX")));
         }
-        if j.version != TCB_INFO_VERSION {
+        let version = out[TDX_OUT_VERSION] as u32;
+        if version != TCB_INFO_VERSION {
             return Err(collateral(
                 "tcbInfo.version",
-                format!("{}, expected {TCB_INFO_VERSION}", j.version),
+                format!("{version}, expected {TCB_INFO_VERSION}"),
             ));
         }
-        if j.tcb_type != TCB_TYPE {
-            return Err(collateral("tcbInfo.tcbType", format!("{}", j.tcb_type)));
+        let tcb_type = out[TDX_OUT_TCB_TYPE] as u32;
+        if tcb_type != TCB_TYPE {
+            return Err(collateral("tcbInfo.tcbType", format!("{tcb_type}")));
         }
-        if j.tcb_levels.is_empty() {
+        let lvl_count = out[TDX_OUT_LEVEL_COUNT] as usize;
+        if lvl_count == 0 {
             return Err(collateral("tcbInfo.tcbLevels", "empty".into()));
         }
-        let tdx_module = match &j.tdx_module {
-            None => None,
-            Some(m) => Some(module(
-                String::new(),
-                &m.mrsigner,
-                &m.attributes,
-                &m.attributes_mask,
-                Vec::new(),
-            )?),
+
+        let tdx_module = if out[TDX_OUT_HAS_MOD] != 0 {
+            let mut mr_signer = [0u8; TDX_MOD_MRSIGNER_LEN];
+            mr_signer.copy_from_slice(
+                &bytes
+                    [TDX_BYTES_MOD_MRSIGNER_OFF..TDX_BYTES_MOD_MRSIGNER_OFF + TDX_MOD_MRSIGNER_LEN],
+            );
+            let mut attributes = [0u8; TDX_MOD_ATTR_LEN];
+            attributes.copy_from_slice(
+                &bytes[TDX_BYTES_MOD_ATTR_OFF..TDX_BYTES_MOD_ATTR_OFF + TDX_MOD_ATTR_LEN],
+            );
+            let mut attributes_mask = [0u8; TDX_MOD_ATTR_LEN];
+            attributes_mask.copy_from_slice(
+                &bytes[TDX_BYTES_MOD_ATTR_MASK_OFF..TDX_BYTES_MOD_ATTR_MASK_OFF + TDX_MOD_ATTR_LEN],
+            );
+            Some(TdxModuleIdentity {
+                id: String::new(),
+                mr_signer,
+                attributes,
+                attributes_mask,
+                levels: Vec::new(),
+            })
+        } else {
+            None
         };
-        let mut ids = Vec::with_capacity(j.tdx_module_identities.len());
-        for m in &j.tdx_module_identities {
-            if ids.iter().any(|x: &TdxModuleIdentity| x.id == m.id) {
+
+        let mod_count = out[TDX_OUT_MOD_ID_COUNT] as usize;
+        let mut ids = Vec::with_capacity(mod_count);
+        for m in 0..mod_count {
+            let mbase = m * TDX_MOD_STRIDE;
+            let mid = span_str(
+                mods_buf[mbase + TDX_MOD_ID_START],
+                mods_buf[mbase + TDX_MOD_ID_END],
+                "tcbInfo.tdxModuleIdentities",
+            )?;
+            if ids.iter().any(|x: &TdxModuleIdentity| x.id == mid) {
                 return Err(collateral(
                     "tcbInfo.tdxModuleIdentities",
-                    format!("duplicate id {:?}", m.id),
+                    format!("duplicate id {mid:?}"),
                 ));
             }
-            ids.push(module(
-                m.id.clone(),
-                &m.mrsigner,
-                &m.attributes,
-                &m.attributes_mask,
-                isv_levels(&m.tcb_levels, "tdxModuleIdentities.tcbLevels")?,
-            )?);
-        }
-        let mut levels = Vec::with_capacity(j.tcb_levels.len());
-        for l in &j.tcb_levels {
-            levels.push(TdxTcbLevel {
-                sgx_components: svn16(&l.tcb.sgxtcbcomponents, "sgxtcbcomponents")?,
-                pce_svn: l.tcb.pcesvn,
-                tdx_components: svn16(&l.tcb.tdxtcbcomponents, "tdxtcbcomponents")?,
-                tcb_date: date(&l.tcb_date, "tcbLevels.tcbDate")?,
-                status: TcbStatus::parse(&l.tcb_status)?,
-                advisory_ids: l.advisory_ids.clone(),
+            let mlvl_start = mods_buf[mbase + TDX_MOD_LVL_START] as usize;
+            let mlvl_count = mods_buf[mbase + TDX_MOD_LVL_COUNT] as usize;
+            if mlvl_count == 0 {
+                return Err(collateral(
+                    "tdxModuleIdentities.tcbLevels",
+                    "no TCB levels".into(),
+                ));
+            }
+            let mut mlevels = Vec::with_capacity(mlvl_count);
+            for k in 0..mlvl_count {
+                let lbase = (mlvl_start + k) * QE_LVL_STRIDE;
+                let status = TcbStatus::parse(span_str(
+                    mod_lvls_buf[lbase + QE_LVL_STATUS_START],
+                    mod_lvls_buf[lbase + QE_LVL_STATUS_END],
+                    "tdxModuleIdentities.tcbLevels",
+                )?)?;
+                if !matches!(
+                    status,
+                    TcbStatus::UpToDate | TcbStatus::OutOfDate | TcbStatus::Revoked
+                ) {
+                    return Err(collateral(
+                        "tdxModuleIdentities.tcbLevels",
+                        format!("status {} is not valid for an ISV level", status.as_str()),
+                    ));
+                }
+                let tcb_date = date(
+                    span_str(
+                        mod_lvls_buf[lbase + QE_LVL_DATE_START],
+                        mod_lvls_buf[lbase + QE_LVL_DATE_END],
+                        "tdxModuleIdentities.tcbLevels",
+                    )?,
+                    "tdxModuleIdentities.tcbLevels",
+                )?;
+                let adv_start = mod_lvls_buf[lbase + QE_LVL_ADV_START] as usize;
+                let adv_count = mod_lvls_buf[lbase + QE_LVL_ADV_COUNT] as usize;
+                let mut advisory_ids = Vec::with_capacity(adv_count);
+                for a in 0..adv_count {
+                    let aoff = (adv_start + a) * 2;
+                    advisory_ids.push(
+                        span_str(
+                            advs_buf[aoff],
+                            advs_buf[aoff + 1],
+                            "tdxModuleIdentities.tcbLevels",
+                        )?
+                        .to_owned(),
+                    );
+                }
+                mlevels.push(IsvTcbLevel {
+                    isv_svn: mod_lvls_buf[lbase + QE_LVL_ISVSVN] as u16,
+                    tcb_date,
+                    status,
+                    advisory_ids,
+                });
+            }
+            let mbbase = m * TDX_MOD_BYTES_STRIDE;
+            let mut mr_signer = [0u8; TDX_MOD_MRSIGNER_LEN];
+            mr_signer.copy_from_slice(&mod_bytes_buf[mbbase..mbbase + TDX_MOD_MRSIGNER_LEN]);
+            let mut attributes = [0u8; TDX_MOD_ATTR_LEN];
+            attributes.copy_from_slice(
+                &mod_bytes_buf[mbbase + TDX_MOD_BYTES_ATTR_OFF
+                    ..mbbase + TDX_MOD_BYTES_ATTR_OFF + TDX_MOD_ATTR_LEN],
+            );
+            let mut attributes_mask = [0u8; TDX_MOD_ATTR_LEN];
+            attributes_mask.copy_from_slice(
+                &mod_bytes_buf[mbbase + TDX_MOD_BYTES_MASK_OFF
+                    ..mbbase + TDX_MOD_BYTES_MASK_OFF + TDX_MOD_ATTR_LEN],
+            );
+            ids.push(TdxModuleIdentity {
+                id: mid.to_owned(),
+                mr_signer,
+                attributes,
+                attributes_mask,
+                levels: mlevels,
             });
         }
+
+        let mut levels = Vec::with_capacity(lvl_count);
+        for k in 0..lvl_count {
+            let base = k * QE_LVL_STRIDE;
+            let cbase = k * TDX_COMPS_STRIDE;
+            let mut sgx_components = [0u8; TCB_COMPONENTS];
+            sgx_components.copy_from_slice(&comps_buf[cbase..cbase + TCB_COMPONENTS]);
+            let mut tdx_components = [0u8; TCB_COMPONENTS];
+            tdx_components.copy_from_slice(
+                &comps_buf[cbase + TDX_COMPS_TDX_OFF..cbase + TDX_COMPS_TDX_OFF + TCB_COMPONENTS],
+            );
+            let tcb_date = date(
+                span_str(
+                    levels_buf[base + QE_LVL_DATE_START],
+                    levels_buf[base + QE_LVL_DATE_END],
+                    "tcbLevels.tcbDate",
+                )?,
+                "tcbLevels.tcbDate",
+            )?;
+            let status = TcbStatus::parse(span_str(
+                levels_buf[base + QE_LVL_STATUS_START],
+                levels_buf[base + QE_LVL_STATUS_END],
+                "tcbStatus",
+            )?)?;
+            let adv_start = levels_buf[base + QE_LVL_ADV_START] as usize;
+            let adv_count = levels_buf[base + QE_LVL_ADV_COUNT] as usize;
+            let mut advisory_ids = Vec::with_capacity(adv_count);
+            for a in 0..adv_count {
+                let aoff = (adv_start + a) * 2;
+                advisory_ids
+                    .push(span_str(advs_buf[aoff], advs_buf[aoff + 1], "tcbLevels")?.to_owned());
+            }
+            levels.push(TdxTcbLevel {
+                sgx_components,
+                pce_svn: levels_buf[base + QE_LVL_ISVSVN] as u16,
+                tdx_components,
+                tcb_date,
+                status,
+                advisory_ids,
+            });
+        }
+
+        let mut fmspc = [0u8; TDX_BYTES_FMSPC_LEN];
+        fmspc.copy_from_slice(
+            &bytes[TDX_BYTES_FMSPC_OFF..TDX_BYTES_FMSPC_OFF + TDX_BYTES_FMSPC_LEN],
+        );
+        let mut pce_id = [0u8; TDX_BYTES_PCEID_LEN];
+        pce_id.copy_from_slice(
+            &bytes[TDX_BYTES_PCEID_OFF..TDX_BYTES_PCEID_OFF + TDX_BYTES_PCEID_LEN],
+        );
+
         Ok(TdxTcbInfo {
-            fmspc: hex_array(&j.fmspc, "tcbInfo.fmspc")?,
-            pce_id: hex_array(&j.pce_id, "tcbInfo.pceId")?,
-            issue_date: date(&j.issue_date, "tcbInfo.issueDate")?,
-            next_update: date(&j.next_update, "tcbInfo.nextUpdate")?,
-            tcb_evaluation_data_number: j.tcb_evaluation_data_number,
+            fmspc,
+            pce_id,
+            issue_date: date(
+                span_str(
+                    out[TDX_OUT_ISSUE_DATE_START],
+                    out[TDX_OUT_ISSUE_DATE_END],
+                    "tcbInfo.issueDate",
+                )?,
+                "tcbInfo.issueDate",
+            )?,
+            next_update: date(
+                span_str(
+                    out[TDX_OUT_NEXT_UPDATE_START],
+                    out[TDX_OUT_NEXT_UPDATE_END],
+                    "tcbInfo.nextUpdate",
+                )?,
+                "tcbInfo.nextUpdate",
+            )?,
+            tcb_evaluation_data_number: out[TDX_OUT_TCB_EVAL_NUM] as u32,
             tdx_module,
             tdx_module_identities: ids,
             levels,

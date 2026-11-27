@@ -105,6 +105,7 @@ unsafe extern "C" {
     fn vesper_aegis_parse_sgx_tcb_info(b: *mut u64, out: *mut u64, bytes_out: *mut u64, levels_out: *mut u64, comps_out: *mut u64, adv_out: *mut u64) -> i64;
     fn vesper_aegis_parse_spki_ec_key(spki: *mut u64, out: *mut u64) -> i64;
     fn vesper_aegis_parse_spki_key_bits(spki: *mut u64, out: *mut u64) -> i64;
+    fn vesper_aegis_parse_tdx_tcb_info(b: *mut u64, out: *mut u64, bytes_out: *mut u64, levels_out: *mut u64, comps_out: *mut u64, mods_out: *mut u64, mod_bytes_out: *mut u64, mod_lvls_out: *mut u64, adv_out: *mut u64) -> i64;
     fn vesper_aegis_sgx_parse(b: *mut u64, mode: i64, w: *mut u64, fail: *mut u64) -> i64;
     fn vesper_aegis_snp_etcb_parse(b: *mut u64, w: *mut u64, fail: *mut u64) -> i64;
     fn vesper_aegis_snp_parse(b: *mut u64, w: *mut u64, d: *mut u64, fail: *mut u64) -> i64;
@@ -512,6 +513,15 @@ pub fn parse_spki_key_bits(spki: &[u8], out: &mut [u64]) -> u64 {
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
     let raw = vesper_port_abi::with_slice(spki, |view_spki| vesper_port_abi::with_slice_mut(out, |view_out| unsafe { vesper_aegis_parse_spki_key_bits(view_spki, view_out) }));
+    raw as u64
+}
+
+/// Calls `parse_tdx_tcb_info` of the Vesper library `aegis` (`vesper_aegis_parse_tdx_tcb_info`).
+pub fn parse_tdx_tcb_info(b: &[u8], out: &mut [u64], bytes_out: &mut [u8], levels_out: &mut [u64], comps_out: &mut [u8], mods_out: &mut [u64], mod_bytes_out: &mut [u8], mod_lvls_out: &mut [u64], adv_out: &mut [u64]) -> u64 {
+    // SAFETY: `vesper_aegis_parse_tdx_tcb_info` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(b, |view_b| vesper_port_abi::with_slice_mut(out, |view_out| vesper_port_abi::with_slice_mut(bytes_out, |view_bytes_out| vesper_port_abi::with_slice_mut(levels_out, |view_levels_out| vesper_port_abi::with_slice_mut(comps_out, |view_comps_out| vesper_port_abi::with_slice_mut(mods_out, |view_mods_out| vesper_port_abi::with_slice_mut(mod_bytes_out, |view_mod_bytes_out| vesper_port_abi::with_slice_mut(mod_lvls_out, |view_mod_lvls_out| vesper_port_abi::with_slice_mut(adv_out, |view_adv_out| unsafe { vesper_aegis_parse_tdx_tcb_info(view_b, view_out, view_bytes_out, view_levels_out, view_comps_out, view_mods_out, view_mod_bytes_out, view_mod_lvls_out, view_adv_out) })))))))));
     raw as u64
 }
 
