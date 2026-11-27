@@ -59,7 +59,7 @@ impl Session {
                     crate::diagnostics(o.input(), original, &core.diagnostics, o.json);
                     core.syntax()
                 };
-                crate::write(o.output(), format!("{syntax:#?}\n").as_bytes())?;
+                self.text = format!("{syntax:#?}\n").into_bytes();
                 Ok(0)
             }
             Step::ReportSyntax => {
@@ -159,12 +159,9 @@ impl Session {
                 Ok(0)
             }
             Step::EmitHir => {
-                crate::write(
-                    o.output(),
-                    serde_json::to_string_pretty(&self.parsed()?.module)
-                        .map_err(|e| e.to_string())?
-                        .as_bytes(),
-                )?;
+                self.text = serde_json::to_string_pretty(&self.parsed()?.module)
+                    .map_err(|e| e.to_string())?
+                    .into_bytes();
                 Ok(0)
             }
             _ => Err(format!("driver: step {} is not a front step", step as u32)),
