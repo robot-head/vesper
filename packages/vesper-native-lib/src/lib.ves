@@ -24,7 +24,11 @@
 //         types, n returns, return types,
 //     n definitions, each: function index, optimize, status, source
 //         locations, n callees, callee function indexes (or NO_CALLEE),
-//         n plan words, the plan words.
+//         n plan words, the plan words,
+//     then the 128-bit export entries and the v2 section (exports.ves).
+//
+// Slice 2a-2b (#2642) adds what `compile_exports` defines after the walk:
+// the `define_wide_entry` adapters and a v2 library's runtime glue.
 //
 // Answer: 0, the object, the CLIF text of the definitions (empty unless
 // kept); or 1 and the error.
@@ -41,33 +45,33 @@ use @vesper/codegen-scalar-emit::body::{emit_body_words};
 const OK: u64 = 0;
 const FAILED: u64 = 1;
 // A request flag word that is set.
-const SET: u64 = 1;
+pub const SET: u64 = 1;
 // The bytes of one request or answer word.
 const WORD_BYTES: u64 = 8;
 // Decimal digits of a number in an error, from ASCII `0`.
 const DECIMAL_BASE: u64 = 10;
 const DIGIT_ZERO: u64 = 48;
 // A callee the walk does not call directly (`codegen_swap::body::NO_CALLEE`).
-const NO_CALLEE: u64 = 18446744073709551615;
+pub const NO_CALLEE: u64 = 18446744073709551615;
 // The function index bits of a callee word; the bits above it are the
 // call's flags (`codegen_swap::body::FAIL_CALL`, `STATUS_CALL`), kept.
 const CALLEE_INDEX_MASK: u64 = 4294967295;
 // A function that returns in registers: no result pointer and no values
 // built in it (`codegen_swap::body::NO_VALUE`).
 const NO_VALUE: u64 = 18446744073709551615;
-const MALFORMED: Str = "malformed native-lib request";
-const UNKNOWN_FUNCTION: Str = "a definition names an unknown function";
+pub const MALFORMED: Str = "malformed native-lib request";
+pub const UNKNOWN_FUNCTION: Str = "a definition names an unknown function";
 const NO_BUILDER: Str = "the function builder could not be made";
 const DECLINED_BODY: Str = "the body hook declined a definition: ";
 const DEFINE_FAILED: Str = "defining a function failed";
 
-struct Reader {
-    pos: u64,
-    bad: bool,
+pub struct Reader {
+    pub pos: u64,
+    pub bad: bool,
 }
 
 impl Reader {
-    fn word(inout self, in req: Slice[u8]) -> u64 {
+    pub fn word(inout self, in req: Slice[u8]) -> u64 {
         match req.try_read_u64_le(self.pos) {
             Option::Some(v) => {
                 self.pos = wrapping_add(self.pos, WORD_BYTES);
@@ -81,7 +85,7 @@ impl Reader {
     }
 
     // The next string's bytes, copied.
-    fn bytes(inout self, in req: Slice[u8]) -> ChunkSeq[u8] {
+    pub fn bytes(inout self, in req: Slice[u8]) -> ChunkSeq[u8] {
         let len = self.word(in req);
         let start = self.pos;
         let end = wrapping_add(start, len);
@@ -114,17 +118,24 @@ fn failure(in message: Slice[u8]) -> ChunkSeq[u8] {
     out
 }
 
-fn at64(in s: ChunkSeq[u64], i: u64) -> u64 {
+pub fn at64(in s: ChunkSeq[u64], i: u64) -> u64 {
     match s.try_get(i) {
         Option::Some(v) => v,
         Option::None => NO_CALLEE,
     }
 }
 
-// The declared functions, by request index.
-struct Declared {
-    ids: ChunkSeq[u64],
-    sigs: ChunkSeq[u64],
+// The declared functions, by request index, with their signatures' type
+// codes: function `k`'s parameters are `types[params_at[k]..]`
+// (`params_n[k]` of them), its returns `types[returns_at[k]..]`.
+pub struct Declared {
+    pub ids: ChunkSeq[u64],
+    pub sigs: ChunkSeq[u64],
+    pub types: ChunkSeq[u64],
+    pub params_at: ChunkSeq[u64],
+    pub params_n: ChunkSeq[u64],
+    pub returns_at: ChunkSeq[u64],
+    pub returns_n: ChunkSeq[u64],
 }
 
 fn declare_all(inout m: Module, in req: Slice[u8], inout r: Reader, inout d: Declared) eff [
@@ -137,12 +148,18 @@ fn declare_all(inout m: Module, in req: Slice[u8], inout r: Reader, inout d: Dec
         let conv = wrapping_u32(r.word(in req));
         let sig = sig_new(inout m, conv);
         let np = r.word(in req);
+        let params_at = d.types.len();
         for _ in 0..np {
-            sig_param(inout m, sig, Ty { code: wrapping_u32(r.word(in req)) });
+            let t = r.word(in req);
+            d.types.push(t);
+            sig_param(inout m, sig, Ty { code: wrapping_u32(t) });
         }
         let nr = r.word(in req);
+        let returns_at = d.types.len();
         for _ in 0..nr {
-            sig_return(inout m, sig, Ty { code: wrapping_u32(r.word(in req)) });
+            let t = r.word(in req);
+            d.types.push(t);
+            sig_return(inout m, sig, Ty { code: wrapping_u32(t) });
         }
         if r.bad {
             return;
@@ -150,6 +167,10 @@ fn declare_all(inout m: Module, in req: Slice[u8], inout r: Reader, inout d: Dec
         let id = declare_function(inout m, in symbol.as_slice(), linkage, sig);
         d.ids.push(widen_u64(id.id));
         d.sigs.push(widen_u64(sig.id));
+        d.params_at.push(params_at);
+        d.params_n.push(np);
+        d.returns_at.push(returns_at);
+        d.returns_n.push(nr);
     }
 }
 
@@ -268,7 +289,15 @@ pub fn library_object(in req: Slice[u8]) -> ChunkSeq[u8] eff [Ffi[Cranelift]] {
         }
     };
     module_keep_clif(inout m, keep);
-    let mut d = Declared { ids: ChunkSeq::new[u64](), sigs: ChunkSeq::new[u64]() };
+    let mut d = Declared {
+        ids: ChunkSeq::new[u64](),
+        sigs: ChunkSeq::new[u64](),
+        types: ChunkSeq::new[u64](),
+        params_at: ChunkSeq::new[u64](),
+        params_n: ChunkSeq::new[u64](),
+        returns_at: ChunkSeq::new[u64](),
+        returns_n: ChunkSeq::new[u64](),
+    };
     declare_all(inout m, in req, inout r, inout d);
     if r.bad {
         module_free(m);
@@ -285,6 +314,18 @@ pub fn library_object(in req: Slice[u8]) -> ChunkSeq[u8] eff [Ffi[Cranelift]] {
             module_free(m);
             return failure(in err.as_slice());
         }
+    }
+    // `compile_exports` after the walk: the 128-bit export entries, then
+    // a v2 library's runtime glue.
+    let err = self::exports::define_wide_entries(inout m, in req, inout r, in d);
+    if err.len() != 0 {
+        module_free(m);
+        return failure(in err.as_slice());
+    }
+    let err = self::exports::define_v2_glue(inout m, in req, inout r);
+    if err.len() != 0 {
+        module_free(m);
+        return failure(in err.as_slice());
     }
     let clif = module_clif(in m);
     match module_finish(m) {

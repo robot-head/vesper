@@ -83,6 +83,15 @@ copy struct Rt {
 // The fault messages, by code (0: out of memory, 1: an interval fault,
 // 2: a string interval off a char boundary).
 const MESSAGES: u64 = 3;
+// The argument words of [`RUNTIME`] (`codegen_swap::seq::runtime_args`).
+pub const RUNTIME_ARGS: u64 = 6;
+// Each argument word's place in them.
+const ARG_WINDOWS: u64 = 0;
+const ARG_INLINE_BYTES: u64 = 1;
+const ARG_NEW_INLINE_BYTES: u64 = 2;
+const ARG_BUFFER_PREFIX: u64 = 3;
+const ARG_FAULT_STATUS: u64 = 4;
+const ARG_HEADER_BYTES: u64 = 5;
 fn message(code: u64) -> Str {
     if code == 0 {
         "vesper: native ChunkSeq fault: out of memory\n"
@@ -536,7 +545,28 @@ fn define_release_str(
 // pointer-type checks, which the Rust caller makes).
 
 fn define_runtime(call: u64, inout m: Module) -> bool eff [Ffi[Cranelift]] {
-    let windows = call_arg(call, 0) != 0;
+    let mut args: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](RUNTIME_ARGS);
+    for k in 0..RUNTIME_ARGS {
+        args.push(call_arg(call, k));
+    }
+    define_seq_runtime(inout m, in args.as_slice())
+}
+
+// The runtime word `k` of `args`, 0 past its end.
+fn runtime_arg(in args: Slice[u64], k: u64) -> u64 {
+    match args.try_get(k) {
+        Some(v) => v,
+        None => 0,
+    }
+}
+
+// The AOT sequence runtime defined into `m`, which has none of it yet and
+// a 64-bit pointer type. `args` are [`RUNTIME`]'s argument words
+// (`codegen_swap::seq::runtime_args`): whether the target is Windows, then
+// `INLINE_BYTES`, `NEW_INLINE_BYTES`, `BUFFER_PREFIX`, `FAULT_STATUS` and
+// `HEADER_BYTES`. False when a definition failed; the error is on `m`.
+pub fn define_seq_runtime(inout m: Module, in args: Slice[u64]) -> bool eff [Ffi[Cranelift]] {
+    let windows = runtime_arg(in args, ARG_WINDOWS) != 0;
     let live = declare_data(inout m, in "vesper_seq_live".as_bytes(), linkage_local(), true);
     let mut zero_word = match data_new() {
         Some(d) => d,
@@ -548,7 +578,7 @@ fn define_runtime(call: u64, inout m: Module) -> bool eff [Ffi[Cranelift]] {
         return false;
     }
     let empty = declare_data(inout m, in "vesper_seq_empty".as_bytes(), linkage_local(), false);
-    let header = wrapping_i64(call_arg(call, 5));
+    let header = wrapping_i64(runtime_arg(in args, ARG_HEADER_BYTES));
     let mut empty_header = match data_new() {
         Some(d) => d,
         None => return false,
@@ -571,10 +601,10 @@ fn define_runtime(call: u64, inout m: Module) -> bool eff [Ffi[Cranelift]] {
         fault: fault,
         live: live,
         empty: empty,
-        inline_bytes: wrapping_i64(call_arg(call, 1)),
-        new_inline_bytes: wrapping_i64(call_arg(call, 2)),
-        prefix: wrapping_i64(call_arg(call, 3)),
-        status: wrapping_i64(call_arg(call, 4)),
+        inline_bytes: wrapping_i64(runtime_arg(in args, ARG_INLINE_BYTES)),
+        new_inline_bytes: wrapping_i64(runtime_arg(in args, ARG_NEW_INLINE_BYTES)),
+        prefix: wrapping_i64(runtime_arg(in args, ARG_BUFFER_PREFIX)),
+        status: wrapping_i64(runtime_arg(in args, ARG_FAULT_STATUS)),
         header: header,
     };
     let exit = import(inout m, in "exit", 1, false);
