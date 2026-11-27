@@ -2820,16 +2820,32 @@ const STAGE2_CRANELIFT_PACKAGES: &[(&str, &str, &str, &str)] = &[
     ),
 ];
 
-/// Compiler packages Stage 2 cannot build yet: (stem, package, path, probe
-/// `src/lib.ves`, reason). `stage2_self_compilation_fixed_point` checks that
-/// each one still fails, so a gap that closes moves into [`COMPILER_PACKAGES`].
-const STAGE2_PACKAGE_GAPS: &[(&str, &str, &str, &str, &str)] = &[(
+/// Compiler packages over the WASI host libraries (StdFs, StdEnv,
+/// StdProcess, Blake3 and HybridCommands, whose wasm32-wasip2 sources import
+/// nothing or WASI calls): (stem, package, path, probe `src/lib.ves`, the
+/// probe's exit code). Both Stage 2 compilers must build each one to the same
+/// bytes, and the probe must run to that code. @vesper/driver-commands left
+/// the gaps when its engine calls moved to @vesper/driver-engines (#1996):
+/// `vesper lsp` there is refused, and printing the refusal fails because
+/// @vesper-std/fs has no standard streams on wasm32-wasip2, so the probe ends
+/// as Rust's print panic does ([`DRIVER_PRINT_PANIC_EXIT`]).
+const STAGE2_HOST_PACKAGES: &[(&str, &str, &str, &str, u64)] = &[(
     "driver-commands",
     "@vesper/driver-commands",
     "packages/vesper-driver-commands",
-    "use @vesper/driver-commands::run;\nuse @vesper/driver::args_new;\npub fn main() -> u64 eff [Ffi[StdFs], Ffi[StdEnv], Ffi[StdProcess], Ffi[HybridCommands]] { let a = args_new(); wrapping_u64(run(in a)) }\n",
-    "its printing and help go through the HybridCommands import, which only the hybrid compiler's Rust implements (crates/vesper-hybrid/src/commands.rs): the Wasm entry cannot carry Ffi[HybridCommands] (WErr Entry). Both @vesper-std/process (src-wasip2, #1928) and @vesper-std/hash-sys (src-wasip2, #2323) build for WASI",
+    "use @vesper/driver-commands::run;\nuse @vesper/driver::{args_new, args_push};\npub fn main() -> u64 eff [Ffi[StdFs], Ffi[StdEnv], Ffi[StdProcess], Ffi[Blake3], Ffi[HybridCommands]] { let mut a = args_new(); args_push(inout a, in \"lsp\".as_bytes()); wrapping_u64(run(in a)) }\n",
+    DRIVER_PRINT_PANIC_EXIT,
 )];
+
+/// The exit code of @vesper/driver-commands when a print fails (`PANIC_EXIT`,
+/// Rust's 101 for a panic).
+const DRIVER_PRINT_PANIC_EXIT: u64 = 101;
+
+/// Compiler packages Stage 2 cannot build yet: (stem, package, path, probe
+/// `src/lib.ves`, reason). `stage2_self_compilation_fixed_point` checks that
+/// each one still fails, so a gap that closes moves into [`COMPILER_PACKAGES`]
+/// or [`STAGE2_HOST_PACKAGES`]. None is left since #1996.
+const STAGE2_PACKAGE_GAPS: &[(&str, &str, &str, &str, &str)] = &[];
 
 /// Directories under `packages/` that are in none of [`COMPILER_PACKAGES`],
 /// [`STAGE2_CRANELIFT_PACKAGES`] and [`STAGE2_PACKAGE_GAPS`], with where they
@@ -2838,6 +2854,10 @@ const STAGE2_PACKAGES_COVERED_ELSEWHERE: &[(&str, &str)] = &[
     (
         "vesper-compiler",
         "Stage 1 front end, checked as one unit; bootstrap/stage1.lock (tests/stage2_seed_runner.rs)",
+    ),
+    (
+        "vesper-driver-engines",
+        "the command engines still in Rust (#1996), built under Stage 2 as a dependency of the @vesper/driver-commands probe in STAGE2_HOST_PACKAGES (src-wasip2 refuses each engine)",
     ),
     (
         "vesper-export-build",
@@ -2867,6 +2887,7 @@ fn stage2_fixed_point_lists_every_package() {
         .map(|(_, _, rel, _, _)| *rel)
         .chain(STAGE2_PACKAGE_GAPS.iter().map(|(_, _, rel, _, _)| *rel))
         .chain(STAGE2_CRANELIFT_PACKAGES.iter().map(|(_, _, rel, _)| *rel))
+        .chain(STAGE2_HOST_PACKAGES.iter().map(|(_, _, rel, _, _)| *rel))
         .map(|rel| rel.trim_start_matches("packages/").to_string())
         .chain(
             STAGE2_PACKAGES_COVERED_ELSEWHERE
@@ -2890,7 +2911,7 @@ fn stage2_fixed_point_lists_every_package() {
     on_disk.sort();
     assert_eq!(
         listed, on_disk,
-        "every directory under packages/ must be in COMPILER_PACKAGES, STAGE2_CRANELIFT_PACKAGES, STAGE2_PACKAGE_GAPS or STAGE2_PACKAGES_COVERED_ELSEWHERE"
+        "every directory under packages/ must be in COMPILER_PACKAGES, STAGE2_CRANELIFT_PACKAGES, STAGE2_HOST_PACKAGES, STAGE2_PACKAGE_GAPS or STAGE2_PACKAGES_COVERED_ELSEWHERE"
     );
 }
 
@@ -3031,7 +3052,8 @@ fn write_probe(wrap_dir: &Path, manifest: &str, lib_src: &str) {
 /// pinned wasmtime CLI (always present under Bazel), the precompiled
 /// `stage2.cwasm` rebuilds every package again and must match too.
 ///
-/// Each package in [`STAGE2_CRANELIFT_PACKAGES`] is built the same way. Each
+/// Each package in [`STAGE2_CRANELIFT_PACKAGES`] and [`STAGE2_HOST_PACKAGES`]
+/// is built the same way (a host package's probe also runs). Each
 /// package in [`STAGE2_PACKAGE_GAPS`] must still fail to build, so a gap that
 /// closes is moved into [`COMPILER_PACKAGES`] instead of going unnoticed.
 fn check_compiler_packages_fixed_point(
@@ -3108,6 +3130,35 @@ fn check_compiler_packages_fixed_point(
                     by_cli.len()
                 ));
             }
+        }
+    }
+    for (stem, pkg_name, pkg_rel, lib_src, code) in STAGE2_HOST_PACKAGES.iter() {
+        write_probe(
+            &wrap_dir,
+            &source_probe_manifest(stem, pkg_name, pkg_rel, lib_src),
+            lib_src,
+        );
+        let by_boot = match build_compiler_package_probe(boot, boot_syms, dir, "boot stage2") {
+            Ok(b) => b,
+            Err(e) => {
+                failures.push(format!("{pkg_name}: {e}"));
+                continue;
+            }
+        };
+        match build_compiler_package_probe(stage2, stage2_syms, dir, "stage2.wasm") {
+            Ok(b) if b == by_boot => {}
+            Ok(b) => failures.push(format!(
+                "{pkg_name}: boot stage2 built {} bytes, stage2.wasm built {} different bytes",
+                by_boot.len(),
+                b.len()
+            )),
+            Err(e) => failures.push(format!("{pkg_name}: {e}")),
+        }
+        match run(&by_boot, &Ctx::default()) {
+            Ok(got) if got == *code => {}
+            other => failures.push(format!(
+                "{pkg_name}: expected the probe to exit with {code}, got {other:?}"
+            )),
         }
     }
     for (stem, pkg_name, pkg_rel, lib_src, why) in STAGE2_PACKAGE_GAPS.iter() {
@@ -3242,7 +3293,10 @@ fn check_compiler_packages_fixed_point(
         failures.is_empty(),
         "Stage 2 package fixed point broken for {} of {} packages:\n{}",
         failures.len(),
-        COMPILER_PACKAGES.len() + STAGE2_CRANELIFT_PACKAGES.len() + STAGE2_PACKAGE_GAPS.len(),
+        COMPILER_PACKAGES.len()
+            + STAGE2_CRANELIFT_PACKAGES.len()
+            + STAGE2_HOST_PACKAGES.len()
+            + STAGE2_PACKAGE_GAPS.len(),
         failures.join("\n")
     );
 }

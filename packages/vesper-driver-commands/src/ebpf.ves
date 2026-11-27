@@ -1,7 +1,8 @@
 // `vesper ebpf`: CLI subcommand/flag parsing and error formatting in Vesper,
 // delegating ELF/hex/raw decoding, pre-flight verification, stack-bound
 // checking, and optional Linux kernel load (`src/ebpf_commands.rs`) to
-// `HybridCommands::hc_ebpf_check`.
+// `@vesper/driver-engines::ebpf_check`.
+use @vesper/driver-engines::{ebpf_check};
 use @vesper/driver::{Args, args_count, arg_start, arg_end, eq};
 use super::{PrintFailed, arg, byte_at, print, fail, stdout_stream};
 
@@ -73,18 +74,9 @@ pub fn run_ebpf(in args: Args) -> i64 eff [Ffi[StdFs], Ffi[HybridCommands], Fail
     if !has_input {
         return fail(in "missing program; see vesper ebpf --help".as_bytes());
     }
-    let err_len = HybridCommands::hc_ebpf_check(in input.as_slice(), load, disassemble, budget);
-    if err_len == 0 {
+    let err = ebpf_check(in input.as_slice(), load, disassemble, budget);
+    if err.len() == 0 {
         return 0;
-    }
-    let mut err: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    err.resize(err_len, 0);
-    let actual = HybridCommands::hc_ebpf_err(inout err.as_slice_mut());
-    if actual > err.len() {
-        err.resize(actual, 0);
-        let _got = HybridCommands::hc_ebpf_err(inout err.as_slice_mut());
-    } else {
-        err.truncate(actual);
     }
     fail(in err.as_slice())
 }

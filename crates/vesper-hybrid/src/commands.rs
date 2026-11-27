@@ -1,6 +1,6 @@
 //! The host side of `@vesper/driver-commands` (self-hosting SH5 lane 13,
-//! #1336): the `HybridCommands` import (packages/vesper-driver-commands/
-//! commands.vsys). The routing in front of every command (help, version,
+//! #1336): the `HybridCommands` import (packages/vesper-driver-engines/
+//! commands-<os>.vsys). The routing in front of every command (help, version,
 //! the unknown-command error, the hand-off to `vesper-<tool>`) is Vesper,
 //! over @vesper-std (#1996); this is the command engines it calls.
 use std::cell::RefCell;
@@ -994,18 +994,6 @@ pub mod host {
         }
     }
 
-    fn truncate_doc_error(mut message: String) -> String {
-        if message.len() > 4096 {
-            let mut end = 4096;
-            while !message.is_char_boundary(end) {
-                end -= 1;
-            }
-            message.truncate(end);
-            message.push_str(" [truncated]");
-        }
-        message
-    }
-
     fn unpack_doc_args(raw: &[u8]) -> Result<Vec<String>, String> {
         let mut args = Vec::new();
         for slice in raw.split(|&b| b == 0) {
@@ -1042,27 +1030,6 @@ pub mod host {
                 n
             }
         }
-    }
-
-    /// Emit the `--json` error object on stdout for a CLI error detected in Vesper
-    /// and store the (possibly truncated) error message in `LAST_DOC_ERR`.
-    ///
-    /// # Safety
-    /// `message` is a lent readable slice of `message_len` bytes.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn hc_doc_json_err(message: *const u8, message_len: usize) -> u64 {
-        let _flush = FlushOnReturn;
-        // SAFETY: lent for the call.
-        let msg = String::from_utf8_lossy(unsafe { bytes(message, message_len) }).into_owned();
-        let msg = truncate_doc_error(msg);
-        println!(
-            "{}",
-            serde_json::json!({"schema_version": 1, "status": "invalid", "error": msg})
-        );
-        let bytes = msg.into_bytes();
-        let n = bytes.len() as u64;
-        super::LAST_DOC_ERR.with(|cell| *cell.borrow_mut() = bytes);
-        n
     }
 
     /// Copy `LAST_DOC_ERR` into `buf` (copy-out protocol).
@@ -1117,18 +1084,6 @@ pub mod host {
                 n
             }
         }
-    }
-
-    /// Emit the `--json` error object on stdout for a CLI error detected in Vesper.
-    ///
-    /// # Safety
-    /// `message` is a lent readable slice of `message_len` bytes.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn hc_test_json_err(message: *const u8, message_len: usize) {
-        let _flush = FlushOnReturn;
-        // SAFETY: lent for the call.
-        let msg = String::from_utf8_lossy(unsafe { bytes(message, message_len) });
-        println!("{}", serde_json::json!({"passed": false, "error": msg}));
     }
 
     /// Copy `LAST_TEST_ERR` into `buf` (copy-out protocol).
