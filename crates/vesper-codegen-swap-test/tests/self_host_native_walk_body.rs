@@ -1171,10 +1171,16 @@ fn vesper_register_results_match() {
         );
         let ran = if cross() { 0 } else { 2 };
         assert_eq!((total.worlds, total.ran), (2, ran), "{}", total.summary());
+        // A cross target makes no JIT run, so each body is emitted once.
+        let min_registers = if cross() {
+            MIN_REGISTER_RESULTS / 2
+        } else {
+            MIN_REGISTER_RESULTS
+        };
         assert!(
-            registers >= MIN_REGISTER_RESULTS,
+            registers >= min_registers,
             "only {registers} of the register results came from Vesper \
-             (expected >= {MIN_REGISTER_RESULTS})"
+             (expected >= {min_registers})"
         );
         assert!(total.is_clean(), "{}", total.summary());
     });
@@ -1182,8 +1188,8 @@ fn vesper_register_results_match() {
 
 /// Register-result bodies `vesper_register_results_match` must see
 /// emitted from Vesper: three of `REGISTER_RESULT_SOURCE`'s optimized
-/// functions, each compiled once for its CLIF text and once for the
-/// object.
+/// functions, each compiled for its CLIF text and again for the JIT run
+/// (once on a cross target).
 const MIN_REGISTER_RESULTS: u64 = 6;
 
 /// Part 6k: 1-word unary (`~`, `-`, `!`), bitwise (`&`, `|`, `^`),
