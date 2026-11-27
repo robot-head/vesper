@@ -152,10 +152,10 @@ impl WheelCore {
 
     fn clear_occupied(inout self, list: u64) {
         if list < self.overflow_list() {
-            let level = div(list, self.slots);
+            let level = wrapping_shr_u64(list, wrapping_u32(self.slot_bits));
             let slot = list & self.slot_mask();
             let bits = at(in self.occupied, level);
-            self.occupied.try_set(level, bits & ~shl(1, slot));
+            self.occupied.try_set(level, bits & ~wrapping_shl_u64(1, wrapping_u32(slot)));
         }
     }
 }
@@ -192,7 +192,7 @@ impl WheelCore {
         self.e.try_set(ix(index, 2), seq);
         let generation = at(in self.e, ix(index, 3));
         self.len = wrapping_add(self.len, 1);
-        self.place(index);
+        self.place_tick(index, tick);
         Result::Ok((index, generation))
     }
 
