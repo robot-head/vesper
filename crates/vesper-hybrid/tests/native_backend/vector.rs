@@ -7,6 +7,7 @@ use cranelift_codegen::{
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::Module;
+use vesper::native::machine::x86_64_block_words;
 
 const VECTOR_BYTES: usize = 16;
 const UNALIGNED: i32 = 1;
@@ -25,7 +26,7 @@ fn module() -> JITModule {
 fn compile(module: &mut JITModule, context: &mut Context) -> [*const u8; 2] {
     let arm = aarch64_leaf_words(&context.func).expect("AArch64 vector machine request");
     assert!(!binding::aarch64_integer_leaf(&arm).is_empty(), "{arm:?}");
-    let words = integer_block_words(&context.func).expect("vector machine request");
+    let words = x86_64_block_words(&context.func, module.isa()).expect("vector machine request");
     let bytes = binding::x86_64_integer_block(&words);
     assert!(!bytes.is_empty(), "{words:?}");
     let reference = module
@@ -493,6 +494,125 @@ fn vector_reductions_match_cranelift_on_zero_and_sign_bits() {
                 let mut output = [u64::MAX; 3];
                 unsafe { run(source.as_ptr(), output.as_mut_ptr()) };
                 assert_eq!(output, [any, all, sign], "{ty} {source:?}");
+            }
+        }
+    }
+    unsafe { module.free_memory() };
+}
+
+#[test]
+fn vector_rearrangements_match_cranelift_with_ssse3() {
+    if !std::is_x86_feature_detected!("ssse3") {
+        return;
+    }
+    const LANES: u8 = VECTOR_BYTES as u8;
+    #[derive(Clone, Copy, Debug)]
+    enum Op {
+        Pairwise,
+        Swizzle,
+        Shuffle([u8; VECTOR_BYTES], bool),
+    }
+    let mut module = module();
+    let cases = [
+        (types::I8X16, Op::Pairwise),
+        (types::I16X8, Op::Pairwise),
+        (types::I32X4, Op::Pairwise),
+        (types::I8X16, Op::Swizzle),
+        (
+            types::I8X16,
+            Op::Shuffle(std::array::from_fn(|i| LANES - 1 - i as u8), false),
+        ),
+        (
+            types::I8X16,
+            Op::Shuffle(std::array::from_fn(|i| LANES + i as u8), false),
+        ),
+        (
+            types::I8X16,
+            Op::Shuffle(
+                std::array::from_fn(|i| (i as u8 * 3 + 1) % (2 * LANES)),
+                false,
+            ),
+        ),
+        (
+            types::I8X16,
+            Op::Shuffle(
+                std::array::from_fn(|i| (i as u8 * 5 + 2) % (2 * LANES)),
+                true,
+            ),
+        ),
+    ];
+    for (ty, op) in cases {
+        let mut context = module.make_context();
+        context.func.signature.params = vec![AbiParam::new(types::I64); 3];
+        let mut frontend = FunctionBuilderContext::new();
+        let mut builder = FunctionBuilder::new(&mut context.func, &mut frontend);
+        let entry = builder.create_block();
+        builder.append_block_params_for_function_params(entry);
+        builder.switch_to_block(entry);
+        let [lhs, rhs, destination] = *builder.block_params(entry) else {
+            unreachable!()
+        };
+        let flags = MemFlags::new().with_notrap();
+        let left = builder.ins().load(ty, flags, lhs, 0);
+        let right = builder.ins().load(ty, flags, rhs, 0);
+        let result = match op {
+            Op::Pairwise => builder.ins().iadd_pairwise(left, right),
+            Op::Swizzle => builder.ins().swizzle(left, right),
+            Op::Shuffle(mask, same_table) => {
+                let immediate = builder
+                    .func
+                    .dfg
+                    .immediates
+                    .push(ConstantData::from(mask.to_vec()));
+                builder
+                    .ins()
+                    .shuffle(left, if same_table { left } else { right }, immediate)
+            }
+        };
+        builder.ins().store(flags, result, destination, 0);
+        builder.ins().return_(&[]);
+        builder.seal_all_blocks();
+        builder.finalize();
+
+        assert!(integer_block_words(&context.func).is_none(), "{ty} {op:?}");
+        let functions = compile(&mut module, &mut context);
+        let width = ty.lane_type().bytes() as usize;
+        for chunk in 0..=u8::MAX / LANES {
+            let left: [u8; VECTOR_BYTES] =
+                std::array::from_fn(|i| 0xffu8.wrapping_sub(chunk * 7).wrapping_add(i as u8 * 5));
+            let right: [u8; VECTOR_BYTES] = std::array::from_fn(|i| chunk * LANES + i as u8);
+            let mut expected = [0; VECTOR_BYTES];
+            match op {
+                Op::Pairwise => {
+                    let input = [left, right].concat();
+                    for (pair, lane) in input
+                        .chunks_exact(width * 2)
+                        .zip(expected.chunks_exact_mut(width))
+                    {
+                        let bits = |source: &[u8]| {
+                            let mut bytes = [0; size_of::<u32>()];
+                            bytes[..width].copy_from_slice(source);
+                            u32::from_le_bytes(bytes)
+                        };
+                        let sum = bits(&pair[..width]).wrapping_add(bits(&pair[width..]));
+                        lane.copy_from_slice(&sum.to_le_bytes()[..width]);
+                    }
+                }
+                Op::Swizzle => {
+                    expected =
+                        right.map(|index| left.get(usize::from(index)).copied().unwrap_or(0));
+                }
+                Op::Shuffle(mask, same_table) => {
+                    let input = [left, if same_table { left } else { right }].concat();
+                    expected = mask.map(|index| input[usize::from(index)]);
+                }
+            }
+            for pointer in functions {
+                type Entry = unsafe extern "C" fn(*const u8, *const u8, *mut u8);
+                let run = unsafe { std::mem::transmute::<*const u8, Entry>(pointer) };
+                let mut output = [0; VECTOR_BYTES];
+                unsafe { run(left.as_ptr(), right.as_ptr(), output.as_mut_ptr()) };
+                assert_eq!(output, expected, "{ty} {op:?} {chunk}");
             }
         }
     }

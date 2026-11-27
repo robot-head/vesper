@@ -273,6 +273,8 @@ const WIDE_INTEGER_CELLS: usize = 2;
 const INTEGER_CELL_BITS: u64 = u64::BITS as u64;
 const SIMD_BYTES: u32 = 2 * size_of::<u64>() as u32;
 const SIMD_LANE_INDEX_SHIFT: u32 = 8;
+const X86_SWIZZLE_ZERO_HIGH: u64 = 1;
+const X86_SWIZZLE_ZERO_INDEX: u8 = 0x80;
 const MAX_LINEARIZED_BRANCHES: usize = 32;
 // Keep small joins linear. Compare tape sizes once repeated bodies are substantial.
 const MIN_DUPLICATED_INSTRUCTIONS_FOR_CFG: usize = 32;
@@ -693,6 +695,7 @@ struct IntegerBlocks<'a> {
     allow_hardware_faults: bool,
     canonicalize_nans: bool,
     aarch64: bool,
+    x86_ssse3: bool,
     aarch64_entry: Option<Aarch64Arguments>,
     declarations: Option<&'a ModuleDeclarations>,
 }
@@ -1925,9 +1928,25 @@ impl IntegerBlocks<'_> {
         if mask.iter().any(|&index| index >= LANES * 2) {
             return None;
         }
+        let mode = if self.x86_ssse3 {
+            X86_SWIZZLE_ZERO_HIGH
+        } else {
+            0
+        };
+        if left == right {
+            let indices = self.vector_constant(&mask.map(|index| index % LANES))?;
+            return Some(self.append(IntegerOp::VectorSwizzle, [left, indices, mode]));
+        }
         let first = if mask.iter().any(|&index| index < LANES) {
-            let indices = self.vector_constant(mask)?;
-            Some(self.append(IntegerOp::VectorSwizzle, [left, indices, 0]))
+            let indices = mask.map(|index| {
+                if self.x86_ssse3 && index >= LANES {
+                    X86_SWIZZLE_ZERO_INDEX
+                } else {
+                    index
+                }
+            });
+            let indices = self.vector_constant(&indices)?;
+            Some(self.append(IntegerOp::VectorSwizzle, [left, indices, mode]))
         } else {
             None
         };
@@ -1935,8 +1954,15 @@ impl IntegerBlocks<'_> {
             return first;
         }
         // The table lookup returns zero for wrapped indices in the other half.
-        let indices = self.vector_constant(&mask.map(|index| index.wrapping_sub(LANES)))?;
-        let second = self.append(IntegerOp::VectorSwizzle, [right, indices, 0]);
+        let indices = mask.map(|index| {
+            if self.x86_ssse3 && index < LANES {
+                X86_SWIZZLE_ZERO_INDEX
+            } else {
+                index.wrapping_sub(LANES)
+            }
+        });
+        let indices = self.vector_constant(&indices)?;
+        let second = self.append(IntegerOp::VectorSwizzle, [right, indices, mode]);
         Some(if let Some(first) = first {
             self.append(IntegerOp::VectorOr, [first, second, 0])
         } else {
@@ -1984,10 +2010,14 @@ impl IntegerBlocks<'_> {
                     Opcode::Bxor => (IntegerOp::VectorXor, 0),
                     Opcode::Iadd => (IntegerOp::VectorAdd, integer_width(lane)?),
                     Opcode::Isub => (IntegerOp::VectorSub, integer_width(lane)?),
-                    Opcode::IaddPairwise if self.aarch64 && lane != types::I64 => {
+                    Opcode::IaddPairwise
+                        if (self.aarch64 || self.x86_ssse3) && lane != types::I64 =>
+                    {
                         (IntegerOp::VectorPairwiseAdd, integer_width(lane)?)
                     }
-                    Opcode::Swizzle if self.aarch64 && output == types::I8X16 => {
+                    Opcode::Swizzle
+                        if (self.aarch64 || self.x86_ssse3) && output == types::I8X16 =>
+                    {
                         (IntegerOp::VectorSwizzle, 0)
                     }
                     _ if self.aarch64 || matches!(lane, types::I8 | types::I16) => {
@@ -2037,7 +2067,7 @@ impl IntegerBlocks<'_> {
                 opcode: Opcode::Shuffle,
                 args: [left, right],
                 imm,
-            } if self.aarch64
+            } if (self.aarch64 || self.x86_ssse3)
                 && output == types::I8X16
                 && ty(left) == output
                 && ty(right) == output =>
@@ -3240,8 +3270,36 @@ impl IntegerBlocks<'_> {
 /// The entry label's right word identifies the private home slot plus one,
 /// or zero when the function needs no cross-block storage.
 pub fn integer_block_words(function: &Function) -> Option<Vec<u64>> {
-    integer_program(function, false, false, None, CallConv::SystemV, false)
-        .map(|(primary, _)| primary.words)
+    integer_program(
+        function,
+        false,
+        false,
+        None,
+        CallConv::SystemV,
+        false,
+        false,
+    )
+    .map(|(primary, _)| primary.words)
+}
+
+/// Packs an x86-64 function with the instruction set enabled by the target.
+pub fn x86_64_block_words(
+    function: &Function,
+    isa: &dyn cranelift_codegen::isa::TargetIsa,
+) -> Option<Vec<u64>> {
+    if isa.triple().architecture != target_lexicon::Architecture::X86_64 {
+        return None;
+    }
+    integer_program(
+        function,
+        false,
+        isa.flags().enable_nan_canonicalization(),
+        None,
+        CallConv::SystemV,
+        false,
+        isa.has_x86_pshufb_lowering(),
+    )
+    .map(|(primary, _)| primary.words)
 }
 
 /// Packs an AAPCS64 function with ordinary scalar parameters.
@@ -3270,6 +3328,7 @@ fn aarch64_program(
         declarations,
         signature.call_conv,
         true,
+        false,
     )
 }
 
@@ -3285,6 +3344,7 @@ fn integer_program(
     declarations: Option<&ModuleDeclarations>,
     call_conv: CallConv,
     aarch64: bool,
+    x86_ssse3: bool,
 ) -> Option<(IntegerProgram, Option<IntegerProgram>)> {
     let signature = &function.signature;
     if signature.call_conv != call_conv || !function.dynamic_stack_slots.is_empty() {
@@ -3340,6 +3400,7 @@ fn integer_program(
         allow_hardware_faults,
         canonicalize_nans,
         aarch64,
+        x86_ssse3,
         aarch64_entry,
         declarations,
     };
@@ -3574,6 +3635,7 @@ fn encode_integer_block(
         declarations,
         CallConv::SystemV,
         false,
+        isa.has_x86_pshufb_lowering(),
     )?;
     let emit = |program: IntegerProgram| {
         if program.relocations {

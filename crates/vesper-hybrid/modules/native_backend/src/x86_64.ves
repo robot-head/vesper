@@ -20,6 +20,7 @@ pub const REGISTER_CODES: u64 = 16;
 pub const ALL_REGISTER_CODES: u64 = REGISTER_CODES + REGISTER_CODES;
 pub const XMM0: u8 = 16;
 const FIRST_XMM_HOME: u8 = 24;
+pub const XMM_AUX_SCRATCH: u8 = 29;
 pub const XMM_LEFT_SCRATCH: u8 = 30;
 pub const XMM_RIGHT_SCRATCH: u8 = 31;
 pub const HOME_REGISTERS: u64 = 5;
@@ -62,6 +63,7 @@ pub const ALU_SUB_EXTENSION: u8 = 5;
 pub const ALU_XOR_EXTENSION: u8 = 6;
 const ALU_CMP_EXTENSION: u8 = 7;
 const TWO_BYTE_OPCODE: u8 = 0x0f;
+const THREE_BYTE_38_MAP: u8 = 0x38;
 const UD2_OPCODE: u8 = 0x0b;
 const IMUL_R64_RM64: u8 = 0xaf;
 const IMUL_R64_RM64_IMM8: u8 = 0x6b;
@@ -105,6 +107,12 @@ const PINSRW: u8 = 0xc4;
 const PMOVMSKB: u8 = 0xd7;
 const MOVMSK: u8 = 0x50;
 const PACKSSWB: u8 = 0x63;
+const PACKUSWB: u8 = 0x67;
+const PSHUFB: u8 = 0x00;
+const PHADDW: u8 = 0x01;
+const PHADDD: u8 = 0x02;
+const PMADDUBSW: u8 = 0x04;
+const PABSB: u8 = 0x1c;
 const PCMPEQB: u8 = 0x74;
 const PCMPEQW: u8 = 0x75;
 const PCMPEQD: u8 = 0x76;
@@ -115,11 +123,14 @@ const ALL_BYTE_SIGN_BITS: u32 = 0xffff;
 const BYTE_LANES_PER_WORD: u64 = WORD_BITS / BYTE_BITS;
 const DUPLICATE_LOW_DWORD: u8 = 0x00;
 const DUPLICATE_LOW_QWORD: u8 = 0x44;
+// Saturating byte addition sets the sign bit of every index above 15.
+const SWIZZLE_CLAMP_QWORD: u64 = 0x7070707070707070;
 const GPR_TO_XMM: u8 = 0x6e;
 const XMM_TO_GPR: u8 = 0x7e;
 const UCOMIS: u8 = 0x2e;
 const ANDPS: u8 = 0x54;
 const XORPS: u8 = 0x57;
+const PACKED_SHIFT_WORD: u8 = 0x71;
 const PACKED_SHIFT_DWORD: u8 = 0x72;
 const PACKED_SHIFT_QWORD: u8 = 0x73;
 const PACKED_SHIFT_RIGHT: u8 = 2;
@@ -251,6 +262,8 @@ pub copy enum Instruction {
     VectorConstant(u8, u64, u64),
     VectorSplat(u8, u8, u64),
     VectorBinary(u8, u8, u8),
+    VectorPairwiseAdd(u8, u8, u8, u64),
+    VectorSwizzle(u8, u8, u8, bool),
     VectorConvert(u8, u8, bool),
     VectorExtract(u8, u8, u64, u64),
     VectorInsert(u8, u8, u64, u64),
@@ -927,6 +940,32 @@ fn xmm_binary(inout out: ChunkSeq[u8], opcode: u8, destination: u8, source: u8) 
     out.push(modrm(dst, src));
 }
 
+fn packed_38(inout out: ChunkSeq[u8], opcode: u8, destination: u8, source: u8) {
+    let dst = xmm_code(destination);
+    let src = xmm_code(source);
+    out.push(OPERAND_SIZE_OVERRIDE);
+    emit_rex(inout out, dst, src, false, false);
+    out.push(TWO_BYTE_OPCODE);
+    out.push(THREE_BYTE_38_MAP);
+    out.push(opcode);
+    out.push(modrm(dst, src));
+}
+
+fn packed_binary(inout out: ChunkSeq[u8], opcode: u8, destination: u8, source: u8) {
+    out.push(OPERAND_SIZE_OVERRIDE);
+    xmm_binary(inout out, opcode, destination, source);
+}
+
+fn packed_word_shift_right(inout out: ChunkSeq[u8], destination: u8, count: u8) {
+    let destination = xmm_code(destination);
+    out.push(OPERAND_SIZE_OVERRIDE);
+    emit_rex(inout out, 0, destination, false, false);
+    out.push(TWO_BYTE_OPCODE);
+    out.push(PACKED_SHIFT_WORD);
+    out.push(modrm(PACKED_SHIFT_RIGHT, destination));
+    out.push(count);
+}
+
 fn packed_shift(inout out: ChunkSeq[u8], destination: u8, extension: u8, width: u64) {
     let destination = xmm_code(destination);
     out.push(OPERAND_SIZE_OVERRIDE);
@@ -985,6 +1024,40 @@ fn vector_constant(inout out: ChunkSeq[u8], destination: u8, low: u64, high: u64
         out.push(OPERAND_SIZE_OVERRIDE);
         xmm_binary(inout out, PUNPCKLQDQ, destination, XMM_RIGHT_SCRATCH);
     }
+}
+
+fn vector_pairwise_add(inout out: ChunkSeq[u8], dest: u8, left: u8, right: u8, width: u64) {
+    if width == BYTE_BITS {
+        let mask = XMM_AUX_SCRATCH;
+        float_move(inout out, XMM_RIGHT_SCRATCH, right);
+        float_move(inout out, dest, left);
+        packed_binary(inout out, PCMPEQB, mask, mask);
+        packed_38(inout out, PABSB, mask, mask);
+        // Multiplication by one sums adjacent unsigned bytes into each word.
+        packed_38(inout out, PMADDUBSW, dest, mask);
+        packed_38(inout out, PMADDUBSW, XMM_RIGHT_SCRATCH, mask);
+        packed_binary(inout out, PCMPEQB, mask, mask);
+        packed_word_shift_right(inout out, mask, wrapping_u8(BYTE_BITS));
+        packed_binary(inout out, PAND, dest, mask);
+        packed_binary(inout out, PAND, XMM_RIGHT_SCRATCH, mask);
+        packed_binary(inout out, PACKUSWB, dest, XMM_RIGHT_SCRATCH);
+    } else {
+        float_move(inout out, dest, left);
+        packed_38(inout out, if width == WORD_BITS { PHADDW } else { PHADDD }, dest, right);
+    }
+}
+
+fn vector_swizzle(inout out: ChunkSeq[u8], dest: u8, left: u8, right: u8, zero_high: bool) {
+    let mask = if zero_high {
+        right
+    } else {
+        vector_constant(inout out, XMM_AUX_SCRATCH, SWIZZLE_CLAMP_QWORD, SWIZZLE_CLAMP_QWORD);
+        float_move(inout out, XMM_RIGHT_SCRATCH, right);
+        packed_binary(inout out, PADDUSB, XMM_RIGHT_SCRATCH, XMM_AUX_SCRATCH);
+        XMM_RIGHT_SCRATCH
+    };
+    float_move(inout out, dest, left);
+    packed_38(inout out, PSHUFB, dest, mask);
 }
 
 fn vector_splat(inout out: ChunkSeq[u8], destination: u8, source: u8, lane: u64) {
@@ -1296,10 +1369,26 @@ pub fn emit(inout out: ChunkSeq[u8], in instruction: Instruction) {
             source,
             lane
         ),
-        Instruction::VectorBinary(opcode, destination, source) => {
-            out.push(OPERAND_SIZE_OVERRIDE);
-            xmm_binary(inout out, opcode, destination, source);
-        },
+        Instruction::VectorBinary(opcode, destination, source) => packed_binary(
+            inout out,
+            opcode,
+            destination,
+            source
+        ),
+        Instruction::VectorPairwiseAdd(destination, left, right, width) => vector_pairwise_add(
+            inout out,
+            destination,
+            left,
+            right,
+            width
+        ),
+        Instruction::VectorSwizzle(destination, left, right, zero_high) => vector_swizzle(
+            inout out,
+            destination,
+            left,
+            right,
+            zero_high
+        ),
         Instruction::VectorConvert(destination, source, demote) => {
             if demote {
                 out.push(OPERAND_SIZE_OVERRIDE);

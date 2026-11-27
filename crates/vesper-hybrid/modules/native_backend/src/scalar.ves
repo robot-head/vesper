@@ -1,6 +1,6 @@
 use self::x86_64::{
-    XMM0, XMM_LEFT_SCRATCH, XMM_RIGHT_SCRATCH, SSE_ADD, SSE_SUB, SSE_MUL, SSE_DIV, SSE_SQRT,
-    FLOAT_UNORDERED_OR_GREATER_EQUAL, is_xmm, find_float_register, ADC_RM_R64, ADD_RM_R64,
+    XMM0, XMM_AUX_SCRATCH, XMM_LEFT_SCRATCH, XMM_RIGHT_SCRATCH, SSE_ADD, SSE_SUB, SSE_MUL, SSE_DIV,
+    SSE_SQRT, FLOAT_UNORDERED_OR_GREATER_EQUAL, is_xmm, find_float_register, ADC_RM_R64, ADD_RM_R64,
     ALU_ADD_EXTENSION, ALU_AND_EXTENSION, ALU_OR_EXTENSION, ALU_SUB_EXTENSION, ALU_XOR_EXTENSION,
     AND_RM_R64, ARGUMENTS, BYTE_BITS, DWORD_BITS, QWORD_BITS, WORD_BITS, CC_A, CC_AE, CC_B, CC_BE,
     CC_E, CC_G, CC_GE, CC_L, CC_LE, CC_NE, CC_O, AtomicMemory, FixedArithmetic, Instruction,
@@ -200,6 +200,7 @@ pub const TAIL_CALL: u64 = 181;
 pub const AARCH64_TAIL_RESERVED_GP: u64 = 2;
 pub const VECTOR_LANE_INDEX_SHIFT: u32 = 8;
 pub const VECTOR_LANE_WIDTH_MASK: u64 = 0xff;
+const X86_SWIZZLE_ZERO_HIGH: u64 = 1;
 const XMM_ARGUMENTS: u64 = 8;
 pub const CHECKED_ARITHMETIC_RECORDS: u64 = 2;
 
@@ -305,6 +306,7 @@ struct FrameLayout {
     fixed: bool,
     floating: bool,
     vectors: bool,
+    vector_aux: bool,
     indirect_calls: bool,
     home_slot: u64,
     promoted: u64,
@@ -541,6 +543,7 @@ fn frame_layout(in words: Slice[u64], count: u64) -> Option[FrameLayout] {
         fixed: false,
         floating: false,
         vectors: false,
+        vector_aux: false,
         indirect_calls: false,
         home_slot: NO_VALUE,
         promoted: 0,
@@ -917,7 +920,7 @@ pub fn uses_vector_left(op: u64) -> bool {
 }
 
 fn x86_vector_opcode(op: u64) -> bool {
-    op >= VECTOR_CONSTANT && op <= VECTOR_DEMOTE || op >= VECTOR_INSERT && op <= VECTOR_HIGH_BITS
+    op >= VECTOR_CONSTANT && op <= VECTOR_HIGH_BITS
 }
 
 pub fn valid_vector_lane(index: u64, width: u64) -> bool {
@@ -1136,6 +1139,8 @@ fn can_reuse_right(op: u64) -> bool {
         && op != VECTOR_SUB
         && op != VECTOR_SIGNED_SAT_SUB
         && op != VECTOR_UNSIGNED_SAT_SUB
+        && op != VECTOR_PAIRWISE_ADD
+        && op != VECTOR_SWIZZLE
         && !is_register_shift(op)
 }
 
@@ -1246,6 +1251,10 @@ fn find_last_reads(
                 VECTOR_STORE => record.extra <= DISP32_MASK,
                 VECTOR_SPLAT => record.right == 0 && valid_width(record.extra),
                 VECTOR_ADD | VECTOR_SUB => valid_width(record.extra),
+                VECTOR_PAIRWISE_ADD => record.extra == BYTE_BITS
+                    || record.extra == WORD_BITS
+                    || record.extra == DWORD_BITS,
+                VECTOR_SWIZZLE => record.extra == 0 || record.extra == X86_SWIZZLE_ZERO_HIGH,
                 VECTOR_PROMOTE_LOW | VECTOR_DEMOTE => record.right == 0 && record.extra == 0,
                 VECTOR_INSERT => valid_vector_lane(
                     wrapping_shr_u64(record.extra, VECTOR_LANE_INDEX_SHIFT),
@@ -1262,6 +1271,9 @@ fn find_last_reads(
             }
             frame.floating = true;
             frame.vectors = true;
+            frame.vector_aux = frame.vector_aux
+                || (record.op == VECTOR_PAIRWISE_ADD && record.extra == BYTE_BITS)
+                || (record.op == VECTOR_SWIZZLE && record.extra == 0);
         }
         if is_conditional_trap(record.op) && (record.right != 0 || record.extra != 0) {
             return Option::None;
@@ -1638,6 +1650,9 @@ fn allocate(
     } else {
         gp_reserved
     };
+    if frame.vector_aux {
+        reserved = reserved | register_bit(XMM_AUX_SCRATCH);
+    }
     let mut callee_save_mask: u32 = 0;
     let mut callee_save_slots: u64 = 0;
     let xmm_homes = frame.single_homes | frame.double_homes;
@@ -2396,6 +2411,18 @@ fn emit_vector_instruction(
                 left,
                 record.op == VECTOR_DEMOTE
             ),
+        VECTOR_PAIRWISE_ADD => Instruction::VectorPairwiseAdd(
+            destination,
+            left,
+            right,
+            record.extra
+        ),
+        VECTOR_SWIZZLE => Instruction::VectorSwizzle(
+            destination,
+            left,
+            right,
+            record.extra == X86_SWIZZLE_ZERO_HIGH
+        ),
         VECTOR_INSERT => {
             let lane = wrapping_shr_u64(record.extra, VECTOR_LANE_INDEX_SHIFT);
             let width = record.extra & VECTOR_LANE_WIDTH_MASK;
