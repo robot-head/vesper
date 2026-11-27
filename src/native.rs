@@ -4051,8 +4051,8 @@ impl<M: Module> Codegen<'_, '_, M> {
     /// The callee of an `Op::Call` that `call_function_into` lowers to one
     /// `call` of an imported function and nothing else (part 6b of the
     /// body hook, #2094): a compiled-once, pure, non-generic function of
-    /// scalar `in` parameters (or, for a pure callee, `inout` scalars
-    /// borrowed from whole locals, #2563) and a scalar result, with no status word,
+    /// scalar `in` parameters (or `inout` scalars borrowed from whole
+    /// locals, #2563) and a scalar result, with no status word,
     /// register result, caller slot or trace flag, not a reserved builtin,
     /// constant table or `dyn` stub. A `fail_only` callee (#2425) takes a
     /// failure record after its arguments: its word carries
@@ -4085,9 +4085,10 @@ impl<M: Module> Codegen<'_, '_, M> {
         {
             return None;
         }
-        // A pure callee may borrow scalar locals `inout` (#2563): each
-        // such argument is a whole local, passed by its address (a scratch
-        // word for a register) and loaded back after the call.
+        // The callee may borrow scalar locals `inout` (#2563): each such
+        // argument is a whole local, passed by its address (a scratch word
+        // for a register; a `fail_only` callee's loans keep home slots,
+        // #2614) and loaded back after the call.
         for (a, p) in args.iter().zip(&source.params) {
             let whole_local = a.place.as_ref().is_some_and(|place| {
                 place.path.is_empty()
@@ -4098,7 +4099,7 @@ impl<M: Module> Codegen<'_, '_, M> {
             });
             match (a.pass, p.pass) {
                 (Pass::In, Pass::In) => {}
-                (Pass::Inout, Pass::Inout) if !fails && whole_local => {}
+                (Pass::Inout, Pass::Inout) if whole_local => {}
                 _ => return None,
             }
         }
