@@ -33,8 +33,8 @@
 use @vesper/driver::{
     Args, Options, Parsed, args_new, args_push, parse, parsed_ok, parsed_help, command_code,
     cmd_none, cmd_check, cmd_run, cmd_jit, cmd_build, cmd_emit, slot_input, slot_output,
-    slot_format, slot_entry, slot_target, slot_linker, slot_codegen, slot_policy, has, is,
-    value_start, value_end, lib_mode, exclusive, package_checks, lib_job_checks, record,
+    slot_format, slot_entry, slot_target, slot_linker, slot_codegen, slot_policy, slot_package, has,
+    is, value_start, value_end, lib_mode, exclusive, package_checks, lib_job_checks, record,
     record_format as driver_record_format, with_extension
 };
 use @vesper-std/env::{arg_count, arg_bytes, os, os_windows};
@@ -59,6 +59,8 @@ use @vesper/driver-commands::{
 use @vesper/driver::triple::{is_windows as triple_is_windows};
 // Place IR JSON rendering for `vesper emit --format ir` (#2245, #1894).
 use @vesper/place-ir::{place_ir_json_bytes};
+// `--package` validation for `vesper emit --emit interface` (#2339, #1893).
+use @vesper/loom-calculus::{lock_graph_focus_error};
 // The package assembly of the package load (#1986).
 use self::assemble::{assembled_words};
 // The package graph read of the package load (#1986 slice 2).
@@ -503,7 +505,7 @@ fn drive(
         return pass_failed(in s, r);
     }
     if emit_cst_format {
-        return pass(inout s, step_emit_cst());
+        return emit_text(inout s, in o, step_emit_cst(), in "".as_bytes());
     }
     if r > 0 {
         let q = step(inout s, step_report_syntax());
@@ -551,13 +553,23 @@ fn drive(
         return 0;
     }
     if c == cmd_emit() && is(in o, slot_format(), in "interface") {
-        // The session hands over the world's declarations; the export and
-        // its JSON are Vesper's (interface.ves).
-        let r = step(inout s, step_emit_interface());
-        if is_failure(r) {
-            return pass_failed(in s, r);
-        }
-        let package = text(in s);
+        // Explicit `--package` is validated in Vesper (`@vesper/loom-calculus`);
+        // a package directory without `--package` reads its manifest name via
+        // `Step::EmitInterface`.
+        let package = if has(in o, slot_package()) {
+            let pkg = value(in o, slot_package());
+            let err = lock_graph_focus_error(in pkg.as_slice());
+            if err.pool.len() > 0 {
+                return error(in err.pool.as_slice());
+            }
+            pkg
+        } else {
+            let r = step(inout s, step_emit_interface());
+            if is_failure(r) {
+                return pass_failed(in s, r);
+            }
+            text(in s)
+        };
         let r = world_decls(inout s, in source.as_slice(), held);
         if is_failure(r) {
             return pass_failed(in s, r);
@@ -1270,7 +1282,7 @@ fn native_code(
 
 fn emit(inout s: Session, in o: Options) -> i64 eff [Ffi[StdFs], Ffi[HybridDriver]] {
     if is(in o, slot_format(), in "hir") {
-        return pass(inout s, step_emit_hir());
+        return emit_text(inout s, in o, step_emit_hir(), in "".as_bytes());
     }
     if is(in o, slot_format(), in "ir") {
         let mut flags: ChunkSeq[u8] = ChunkSeq::new[u8]();
