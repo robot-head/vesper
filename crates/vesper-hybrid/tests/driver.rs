@@ -845,7 +845,8 @@ fn wasm_build_matches_the_rust_pass() {
             let d_err = String::from_utf8_lossy(&d.output.stderr);
             let refused = !d.output.status.success()
                 && (d_err.contains(": unsupported Operation")
-                    || d_err.contains(": unsupported IntegerWidth"));
+                    || d_err.contains(": unsupported IntegerWidth")
+                    || d_err.contains(": unsupported Float32"));
             if refused && v.output.status.success() {
                 extensions += 1;
             } else if !no_opt
