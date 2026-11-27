@@ -92,6 +92,8 @@ const IEX_BIT_BINARY: u64 = 3;
 const IEX_BITWISE: u64 = 4;
 const IEX_SDIV: u64 = 5;
 const IEX_SREM: u64 = 6;
+const IEX_UDIV: u64 = 7;
+const IEX_UREM: u64 = 8;
 
 // Sub-operations of `INST_WRITE_OP`.
 const WOP_IADD: u64 = 1;
@@ -118,6 +120,7 @@ const CB_FLOAT_UNARY: u64 = 5;
 const CB_WIDE_BIT: u64 = 6;
 const CB_BITWISE: u64 = 7;
 const CB_WIDE_CONVERT: u64 = 8;
+const CB_WIDEN_U64: u64 = 9;
 
 const BIT_INTR_AND: u32 = 1;
 const BIT_INTR_OR: u32 = 2;
@@ -865,20 +868,24 @@ impl Gen {
             let ik = self.kind_of(d0);
             if ik == 0
                 || kind_wide(ik)
-                || kind_unsigned(ik)
                 || self.ctx.world.is_partial(i.s0, i.s1)
                 || self.ctx.world.may_overflow(i.s0, i.s1)
             {
                 return false;
             }
-            kind = INST_INT_EXTRA;
-            extra.push(
-                if op == ops_s.slash {
-                    IEX_SDIV
+            let sub_iex = if op == ops_s.slash {
+                if kind_unsigned(ik) {
+                    IEX_UDIV
                 } else {
-                    IEX_SREM
+                    IEX_SDIV
                 }
-            );
+            } else if kind_unsigned(ik) {
+                IEX_UREM
+            } else {
+                IEX_SREM
+            };
+            kind = INST_INT_EXTRA;
+            extra.push(sub_iex);
             extra.push(0);
             extra.push(0);
             extra.push(k0);
@@ -1077,6 +1084,16 @@ impl Gen {
             for m in 0..nargs {
                 extra.push(u64_at(in arg_kinds, m));
             }
+            return true;
+        }
+        if callee == self.ops.widen_u64 && nargs == 1 && u64_at(in arg_lanes, 0) == LANE_I64 {
+            kind = INST_CALL_BUILTIN;
+            builtin_calls.push(call);
+            extra.push(CB_WIDEN_U64);
+            extra.push(0);
+            extra.push(0);
+            extra.push(0);
+            extra.push(u64_at(in arg_kinds, 0));
             return true;
         }
         let bit_intr = get(in self.tables.bit_intrinsics, callee);

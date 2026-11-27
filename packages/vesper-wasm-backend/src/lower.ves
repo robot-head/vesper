@@ -2677,6 +2677,14 @@ impl L {
                 self.cur_fn.code.get(operand);
                 self.cur_fn.code.op(OP_I64_EQZ);
                 self.cur_fn.code.op(OP_I64_EXTEND_I32_U);
+            } else if self.is_op(op_sym, "!") && is_int(scalar) {
+                self.cur_fn.code.get(operand);
+                if ik_unsigned(scalar) {
+                    self.cur_fn.code.u64_const(ik_mask(scalar));
+                } else {
+                    self.cur_fn.code.i64_const(-1);
+                }
+                self.cur_fn.code.op(OP_I64_XOR);
             } else if self.is_op(op_sym, "-") && scalar == SC_F64 {
                 self.cur_fn.code.get(operand);
                 self.cur_fn.code.op(OP_F64_REINTERPRET_I64);
@@ -2704,7 +2712,13 @@ impl L {
                 // `widen_k`, `narrow_k` or `wrapping_k`: the value on the
                 // stack.
             } else {
-                Fail::raise(werr(K_UNSUPPORTED, U_OPERATION, 194));
+                Fail::raise(werr_syms(
+                    K_UNSUPPORTED,
+                    U_OPERATION,
+                    194,
+                    self.cur_fn.inst.base,
+                    op_sym
+                ));
             }
             self.cur_fn.code.set(dest);
         } else if op == Op::Binary {
@@ -4619,8 +4633,12 @@ impl L {
             self.cur_fn.code.set(result);
             return result;
         }
+        if lhs_scalar == SC_NEVER || rhs_scalar == SC_NEVER {
+            self.cur_fn.code.op(OP_UNREACHABLE);
+            return result;
+        }
         if !is_int(lhs_scalar) || !is_int(rhs_scalar) {
-            Fail::raise(werr(K_UNSUPPORTED, U_OPERATION, 252));
+            Fail::raise(werr_syms(K_UNSUPPORTED, U_OPERATION, 252, self.cur_fn.inst.base, op_sym));
         }
         let kind = if ik_unsigned(lhs_scalar) {
             lhs_scalar

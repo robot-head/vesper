@@ -917,12 +917,12 @@ fn main() -> u64 {
     assert_eq!(eval.to_string(), jit.to_string());
     let fn_clif = clif
         .split("\n; ")
-        .find(|s| s.starts_with("bump\n"))
+        .find(|s| s.starts_with("bump\n") || s.starts_with("; bump\n"))
         .unwrap_or(&clif);
     let try_set_blk = fn_clif
         .split("\n\n")
         .find(|blk| {
-            blk.contains("stack_addr.i64") && blk.contains("select ") && blk.contains("store ")
+            blk.contains("stack_addr.i64") && blk.contains("select") && blk.contains("store ")
         })
         .expect("expected try_set block in bump");
     assert!(
@@ -1311,5 +1311,50 @@ fn main() -> u64 {
     assert!(
         stack_addrs <= 1,
         "expected duplicate stack_addr in set_three to be deduplicated (got {stack_addrs}):\n{fn_clif}"
+    );
+}
+
+#[test]
+fn cse_dom_pure_reuses_strided_index_and_bounds_check_across_diamond() {
+    let source = "
+fn update_tail(inout s: ChunkSeq[u64], list: u64, val: u64) -> u64 {
+    let cur = match s.try_get(wrapping_add(wrapping_mul(list, 2), 1)) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    };
+    let next_val = if cur == 0 {
+        wrapping_add(val, 1)
+    } else {
+        wrapping_add(cur, val)
+    };
+    let _ = s.try_set(wrapping_add(wrapping_mul(list, 2), 1), next_val);
+    next_val
+}
+
+fn main() -> u64 {
+    let mut s: ChunkSeq[u64] = ChunkSeq::new();
+    s.push(0);
+    s.push(0);
+    s.push(0);
+    s.push(0);
+    let a = update_tail(inout s, 1, 10);
+    let b = update_tail(inout s, 1, 20);
+    wrapping_add(a, b)
+}";
+    let c = accepted(source);
+    let (_, clif) = native::object(&c.world, "main").unwrap();
+    let eval = vesper::runtime::Runtime::new(&c.world)
+        .run("main", vec![])
+        .unwrap();
+    let jit = native::jit(&c.world, "main").unwrap();
+    assert_eq!(eval.to_string(), jit.to_string());
+    let fn_clif = clif
+        .split("\n; ")
+        .find(|s| s.starts_with("update_tail\n"))
+        .unwrap_or(&clif);
+    let ult_checks = fn_clif.matches("icmp ult ").count();
+    assert!(
+        ult_checks <= 1,
+        "expected try_set after try_get on same index to reuse bounds check (got {ult_checks}):\n{fn_clif}"
     );
 }

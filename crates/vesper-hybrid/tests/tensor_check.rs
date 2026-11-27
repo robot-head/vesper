@@ -1,5 +1,6 @@
 //! The tensor type checker swap (SH2 lane 14, #1186) against Rust, as
-//! `src/swap/tensor_types.rs` runs it: the module encoded
+//! `src/swap/tensor_types.rs` runs it: Rust's activity screen
+//! (`tensor_types::active`, #2289), the module encoded
 //! (`tensor_words::encode_tensor_module`), `tensor_diags` of the linked
 //! Vesper module (`modules/tensor_types`), the diagnostics decoded, and
 //! Rust's `analyze` for an active module the Vesper side accepts. Rust is
@@ -75,8 +76,18 @@ fn rust(m: &Module) -> Answer {
     tensor_types::check(m).map(|c| c.diagnostics)
 }
 
-/// `check` with the swap's table, as `src/swap/tensor_types.rs` fills it.
+/// `check` with the swap's table, as `src/swap/tensor_types.rs` fills it:
+/// Rust's activity screen, then the Vesper side.
 fn swap(m: &Module) -> Answer {
+    if !tensor_types::active(m) {
+        return None;
+    }
+    vesper_side(m)
+}
+
+/// The Vesper side alone, on any module: its own activity screen and
+/// diagnostics, then Rust's `analyze` for an active module it accepts.
+fn vesper_side(m: &Module) -> Answer {
     let (names, bytes) = tensor_words::encode_tensor_module(m);
     let words = tensor_types_binding::tensor_diags(&names, &bytes);
     match tensor_words::decode_tensor_diags(&words) {
@@ -108,15 +119,20 @@ fn tensor_swap_matches_rust_on_the_repository_sources() {
     let mut differ = vec![];
     let mut active = 0;
     for (p, m) in &all {
-        let (r, v) = (rust(m), swap(m));
+        let r = rust(m);
         active += usize::from(r.is_some());
-        if show(&r) != show(&v) {
-            differ.push(format!(
-                "{}:\n  rust   {}\n  vesper {}",
-                p.display(),
-                show(&r),
-                show(&v)
-            ));
+        // The swap, and the Vesper side without the screen (its own
+        // activity decision must agree on every module).
+        for v in [swap(m), vesper_side(m)] {
+            if show(&r) != show(&v) {
+                differ.push(format!(
+                    "{}:\n  rust   {}\n  vesper {}",
+                    p.display(),
+                    show(&r),
+                    show(&v)
+                ));
+                break;
+            }
         }
     }
     eprintln!("{} modules, {active} tensor modules", all.len());

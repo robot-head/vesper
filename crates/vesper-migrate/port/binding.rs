@@ -5,13 +5,16 @@
 
 use vesper_port_abi::Abi;
 
+const _: () = assert!(<bool as Abi>::WORDS == 1);
 const _: () = assert!(<u64 as Abi>::WORDS == 1);
 
 unsafe extern "C" {
     fn vesper_migrate_seq_new(capacity: i64, stride: i64) -> i64;
     fn vesper_migrate_seq_free(seq: i64) -> i64;
     fn vesper_migrate_live_allocations() -> i64;
+    fn vesper_migrate_migrate_aliasing_pair(classes: *mut u64, flags: *mut u64) -> i64;
     fn vesper_migrate_migrate_filter_directives(src: *mut u64, out: *mut u64) -> i64;
+    fn vesper_migrate_migrate_redefines(text: *mut u64, name: *mut u64) -> i64;
     fn vesper_migrate_migrate_splitmix64_bytes(state_buf: *mut u64, max_len: i64, prefix: *mut u64, out: *mut u64) -> i64;
     fn vesper_migrate_migrate_strip_comments(src: *mut u64, out: *mut u64) -> i64;
 }
@@ -28,6 +31,15 @@ pub fn live_allocations() -> i64 {
     unsafe { vesper_migrate_live_allocations() }
 }
 
+/// Calls `migrate_aliasing_pair` of the Vesper library `migrate` (`vesper_migrate_migrate_aliasing_pair`).
+pub fn migrate_aliasing_pair(classes: &[u64], flags: &[u8]) -> u64 {
+    // SAFETY: `vesper_migrate_migrate_aliasing_pair` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(classes, |view_classes| vesper_port_abi::with_slice(flags, |view_flags| unsafe { vesper_migrate_migrate_aliasing_pair(view_classes, view_flags) }));
+    raw as u64
+}
+
 /// Calls `migrate_filter_directives` of the Vesper library `migrate` (`vesper_migrate_migrate_filter_directives`).
 pub fn migrate_filter_directives(src: &[u8], out: &mut [u8]) -> u64 {
     // SAFETY: `vesper_migrate_migrate_filter_directives` has exactly this signature in the export ABI; every
@@ -35,6 +47,15 @@ pub fn migrate_filter_directives(src: &[u8], out: &mut [u8]) -> u64 {
     // every handle passed is owned or borrowed as its mode requires.
     let raw = vesper_port_abi::with_slice(src, |view_src| vesper_port_abi::with_slice_mut(out, |view_out| unsafe { vesper_migrate_migrate_filter_directives(view_src, view_out) }));
     raw as u64
+}
+
+/// Calls `migrate_redefines` of the Vesper library `migrate` (`vesper_migrate_migrate_redefines`).
+pub fn migrate_redefines(text: &[u8], name: &[u8]) -> bool {
+    // SAFETY: `vesper_migrate_migrate_redefines` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(text, |view_text| vesper_port_abi::with_slice(name, |view_name| unsafe { vesper_migrate_migrate_redefines(view_text, view_name) }));
+    raw != 0
 }
 
 /// Calls `migrate_splitmix64_bytes` of the Vesper library `migrate` (`vesper_migrate_migrate_splitmix64_bytes`).
