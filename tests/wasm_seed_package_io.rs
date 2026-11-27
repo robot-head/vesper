@@ -2403,56 +2403,56 @@ const COMPILER_PACKAGES: &[(&str, &str, &str, &str, CompilerExecCheck)] = &[
         "@vesper/backend-checks",
         "packages/vesper-backend-checks",
         "backend_verify_count(in \"\")",
-        CompilerExecCheck::CompileOnly,
+        CompilerExecCheck::Exact(0),
     ),
     (
         "bounds-hoist",
         "@vesper/bounds-hoist",
         "packages/vesper-bounds-hoist",
         "decide_text(in \"\").len()",
-        CompilerExecCheck::CompileOnly,
+        CompilerExecCheck::Exact(1),
     ),
     (
         "check-dyn",
         "@vesper/check-dyn",
         "packages/vesper-check-dyn",
         "check_dyn_count(in \"\", 0, 0)",
-        CompilerExecCheck::CompileOnly,
+        CompilerExecCheck::Exact(0),
     ),
     (
         "check-effects",
         "@vesper/check-effects",
         "packages/vesper-check-effects",
         "check_effects(in \"\").len()",
-        CompilerExecCheck::CompileOnly,
+        CompilerExecCheck::Exact(1),
     ),
     (
         "check-fip",
         "@vesper/check-fip",
         "packages/vesper-check-fip",
         "check_fip_count(in \"\")",
-        CompilerExecCheck::CompileOnly,
+        CompilerExecCheck::Exact(0),
     ),
     (
         "check-loops-atomics",
         "@vesper/check-loops-atomics",
         "packages/vesper-check-loops-atomics",
         "check_loops_control(in \"\").len()",
-        CompilerExecCheck::CompileOnly,
+        CompilerExecCheck::Exact(1),
     ),
     (
         "check-pact",
         "@vesper/check-pact",
         "packages/vesper-check-pact",
         "check_pact_mono_plan(in \"\").len()",
-        CompilerExecCheck::CompileOnly,
+        CompilerExecCheck::Exact(12),
     ),
     (
         "check-regions-seqs",
         "@vesper/check-regions-seqs",
         "packages/vesper-check-regions-seqs",
         "regions_seqs_types(in \"\").len()",
-        CompilerExecCheck::CompileOnly,
+        CompilerExecCheck::Exact(1),
     ),
     (
         "check-tensor-types",
@@ -2466,21 +2466,21 @@ const COMPILER_PACKAGES: &[(&str, &str, &str, &str, CompilerExecCheck)] = &[
         "@vesper/codegen-aggregates",
         "packages/vesper-codegen-aggregates",
         "aggregate_decisions(in \"\").len()",
-        CompilerExecCheck::CompileOnly,
+        CompilerExecCheck::Exact(1),
     ),
     (
         "codegen-calls",
         "@vesper/codegen-calls",
         "packages/vesper-codegen-calls",
         "codegen_calls_text(in \"\").len()",
-        CompilerExecCheck::CompileOnly,
+        CompilerExecCheck::Exact(1),
     ),
     (
         "codegen-control",
         "@vesper/codegen-control",
         "packages/vesper-codegen-control",
         "control_session_plans(in \"\").len()",
-        CompilerExecCheck::CompileOnly,
+        CompilerExecCheck::Exact(1),
     ),
     (
         "codegen-export",
@@ -2494,14 +2494,14 @@ const COMPILER_PACKAGES: &[(&str, &str, &str, &str, CompilerExecCheck)] = &[
         "@vesper/codegen-freestanding",
         "packages/vesper-codegen-freestanding",
         "freestanding_constants()",
-        CompilerExecCheck::CompileOnly,
+        CompilerExecCheck::NonZero,
     ),
     (
         "codegen-scalar",
         "@vesper/codegen-scalar",
         "packages/vesper-codegen-scalar",
         "codegen_scalar_decisions(in \"\").len()",
-        CompilerExecCheck::CompileOnly,
+        CompilerExecCheck::Exact(1),
     ),
     (
         "codegen-seq",
@@ -3288,6 +3288,7 @@ fn stage2_compiles_compiler_packages() {
             })
         };
 
+        let mut exec_failures = Vec::new();
         for (stem, pkg_name, pkg_rel, expr, exec_check) in specs.iter() {
             let (manifest, lib_src) = compiler_package_probe(stem, pkg_name, pkg_rel, expr);
             let exit_code = compile_wrap(&manifest, &lib_src)
@@ -3312,22 +3313,26 @@ fn stage2_compiles_compiler_packages() {
             );
             match exec_check {
                 CompilerExecCheck::CompileOnly => {}
-                CompilerExecCheck::Exact(expected) => {
-                    let got = run(&bytes, &Ctx::default())
-                        .unwrap_or_else(|e| panic!("run {stem} component: {e}"));
-                    assert_eq!(got, *expected, "unexpected return value running {stem}");
-                }
-                CompilerExecCheck::NonZero => {
-                    let got = run(&bytes, &Ctx::default())
-                        .unwrap_or_else(|e| panic!("run {stem} component: {e}"));
-                    assert!(
-                        got > 0,
-                        "expected positive return running {stem}, got {got}"
-                    );
-                }
+                CompilerExecCheck::Exact(expected) => match run(&bytes, &Ctx::default()) {
+                    Ok(got) if got == *expected => {}
+                    Ok(got) => {
+                        exec_failures.push(format!("{stem}: expected {expected}, got {got}"))
+                    }
+                    Err(e) => exec_failures.push(format!("{stem}: trap {e}")),
+                },
+                CompilerExecCheck::NonZero => match run(&bytes, &Ctx::default()) {
+                    Ok(got) if got > 0 => {}
+                    Ok(got) => exec_failures.push(format!("{stem}: expected > 0, got {got}")),
+                    Err(e) => exec_failures.push(format!("{stem}: trap {e}")),
+                },
             }
             remove_stage2_sidecars(&host_wasm);
         }
+        assert!(
+            exec_failures.is_empty(),
+            "unexpected compiler package execution results:\n{}",
+            exec_failures.join("\n")
+        );
 
         // Verify Stage 2 lowering & Wasmtime execution for fixed-array writes,
         // on-demand `Result` ADTs, integer intrinsics/conversions, and `usize`/`isize`.
