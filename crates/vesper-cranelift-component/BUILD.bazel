@@ -1,12 +1,9 @@
 load("@crates//vesper-cranelift-component:data.bzl", "all_crate_deps")
-load("@rules_rs//rs:rust_binary.bzl", "rust_binary")
 load("@rules_rs//rs:rust_shared_library.bzl", "rust_shared_library")
 load("//tools/bazel:defs.bzl", "vesper_crate")
-load("//tools/bazel:wasm_component.bzl", "wasm_component")
 
-# The component: the cdylib built for wasm32-wasip2, then wrapped from the
-# core module rust-lld writes (Cargo's wasm-component-ld does both). The
-# Stage 2 composition (`wac plug`) takes this file.
+# The component (:component's output, named after the crate). The Stage 2
+# composition (`wac plug`) takes this file.
 COMPONENT = "vesper_cranelift_component.wasm"
 
 # The root crate's Wasm tests embed the WIT (tests/common/wasm_words.rs).
@@ -54,9 +51,10 @@ vesper_crate(
     },
 )
 
-# :component's core module and the tool that wraps it.
+# The component: the cdylib built for wasm32-wasip2. The wasip2 link writes
+# a component, as Cargo's does.
 rust_shared_library(
-    name = "component_core",
+    name = "component",
     srcs = glob(["src/**/*.rs"]),
     crate_name = "vesper_cranelift_component",
     crate_root = "src/lib.rs",
@@ -67,20 +65,6 @@ rust_shared_library(
         "CARGO_PKG_VERSION": "0.1.0",
     },
     version = "0.1.0",
-    deps = all_crate_deps(normal = True) + [":vesper-cranelift-component_build_script"],
-)
-
-rust_binary(
-    name = "componentize",
-    srcs = ["bazel/componentize.rs"],
-    edition = "2024",
-    deps = all_crate_deps(build = True),
-)
-
-wasm_component(
-    name = "component",
-    core = ":component_core",
-    out = COMPONENT,
-    tool = ":componentize",
     visibility = ["//visibility:public"],
+    deps = all_crate_deps(normal = True) + [":vesper-cranelift-component_build_script"],
 )
