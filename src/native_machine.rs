@@ -145,6 +145,14 @@ enum IntegerOp {
     AtomicCasWord = 123,
     AtomicCasDword = 124,
     AtomicCasQword = 125,
+    AtomicAnd = 126,
+    AtomicNand = 127,
+    AtomicOr = 128,
+    AtomicXor = 129,
+    AtomicUnsignedMin = 130,
+    AtomicUnsignedMax = 131,
+    AtomicSignedMin = 132,
+    AtomicSignedMax = 133,
 }
 
 fn integer_bit_op(op: Opcode) -> Option<IntegerOp> {
@@ -1513,7 +1521,15 @@ impl IntegerBlocks<'_> {
                         AtomicRmwOp::Add => IntegerOp::AtomicAdd,
                         AtomicRmwOp::Sub => IntegerOp::AtomicSub,
                         AtomicRmwOp::Xchg => IntegerOp::AtomicExchange,
-                        _ => return None,
+                        _ if !self.aarch64 => return None,
+                        AtomicRmwOp::And => IntegerOp::AtomicAnd,
+                        AtomicRmwOp::Nand => IntegerOp::AtomicNand,
+                        AtomicRmwOp::Or => IntegerOp::AtomicOr,
+                        AtomicRmwOp::Xor => IntegerOp::AtomicXor,
+                        AtomicRmwOp::Umin => IntegerOp::AtomicUnsignedMin,
+                        AtomicRmwOp::Umax => IntegerOp::AtomicUnsignedMax,
+                        AtomicRmwOp::Smin => IntegerOp::AtomicSignedMin,
+                        AtomicRmwOp::Smax => IntegerOp::AtomicSignedMax,
                     };
                     (op, [input(address)?, input(source)?, width])
                 }

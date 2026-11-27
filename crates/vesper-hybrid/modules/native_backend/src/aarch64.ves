@@ -27,7 +27,9 @@ use self::scalar::{
     float_value, valid_float_operands, LEADING_ZEROS, TRAILING_ZEROS, POPULATION_COUNT,
     REVERSE_BITS, LEADING_SIGN_BITS, ROTATE_RIGHT, ROTATE_RIGHT_REGISTER, ROTATE_LEFT_REGISTER,
     FUNNEL_RIGHT, AND_NOT, OR_NOT, XOR_NOT, ABS, ATOMIC_LOAD, ATOMIC_STORE, ATOMIC_CAS_BYTE,
-    ATOMIC_CAS_WORD, ATOMIC_CAS_DWORD, ATOMIC_CAS_QWORD
+    ATOMIC_CAS_WORD, ATOMIC_CAS_DWORD, ATOMIC_CAS_QWORD, ATOMIC_SUB, ATOMIC_AND, ATOMIC_NAND,
+    ATOMIC_OR, ATOMIC_XOR, ATOMIC_UNSIGNED_MIN, ATOMIC_UNSIGNED_MAX, ATOMIC_SIGNED_MIN,
+    ATOMIC_SIGNED_MAX
 };
 use self::x86_64::{
     BYTE_BITS, WORD_BITS, DWORD_BITS, QWORD_BITS, FLOAT_ORDERED, FLOAT_UNORDERED, FLOAT_EQUAL,
@@ -145,6 +147,8 @@ const CCMN_IMM_W: u32 = 0x3a400800;
 const SUBS_REG: u32 = 0xeb000000;
 const SUBS_UXTB_W: u32 = 0x6b200000;
 const SUBS_UXTH_W: u32 = 0x6b202000;
+const SUBS_SXTB_W: u32 = 0x6b208000;
+const SUBS_SXTH_W: u32 = 0x6b20a000;
 const SUBS_UXTW: u32 = 0xeb204000;
 const SUBS_SXTW: u32 = 0xeb20c000;
 const SUBS_ASR_SIGN: u32 = 0xeb80fc00;
@@ -181,8 +185,6 @@ const LOAD_ACQUIRE: u32 = 0x08dffc00;
 const STORE_RELEASE: u32 = 0x089ffc00;
 const CLEAR_EXCLUSIVE: u32 = 0xd5033f5f;
 const DMB_ISH: u32 = 0xd5033bbf;
-const EXCHANGE_RETRY_DISTANCE: u32 = 2;
-const ARITHMETIC_RETRY_DISTANCE: u32 = 3;
 const CAS_RETRY_DISTANCE: u32 = 4;
 const CAS_MISMATCH_DISTANCE: u32 = 4;
 const CAS_SKIP_CLEAR_DISTANCE: u32 = 2;
@@ -717,6 +719,10 @@ fn is_atomic_cas(op: u64) -> bool {
     op >= ATOMIC_CAS_BYTE && op <= ATOMIC_CAS_QWORD
 }
 
+fn is_atomic_update(op: u64) -> bool {
+    is_atomic_rmw(op) || (op >= ATOMIC_AND && op <= ATOMIC_SIGNED_MAX)
+}
+
 fn operands(in r: Record, returns: u64) -> Option[u64] {
     if r.op == CONSTANT || r.op == STACK_SLOT || r.op == BLOCK_LABEL {
         return Option::Some(0);
@@ -861,7 +867,7 @@ fn operands(in r: Record, returns: u64) -> Option[u64] {
     if !scalar_width(r.extra) {
         return Option::None;
     }
-    if is_atomic_rmw(r.op) || r.op == ATOMIC_STORE {
+    if is_atomic_update(r.op) || r.op == ATOMIC_STORE {
         return Option::Some(2);
     }
     match r.op {
@@ -1063,6 +1069,29 @@ fn emit_atomic_cas(
     push32(inout out, CLEAR_EXCLUSIVE);
 }
 
+fn emit_atomic_minmax(inout out: ChunkSeq[u8], in r: Record, old: u32, operand: u32) {
+    let signed = r.op == ATOMIC_SIGNED_MIN || r.op == ATOMIC_SIGNED_MAX;
+    let cc = match r.op {
+        ATOMIC_UNSIGNED_MIN => LO,
+        ATOMIC_UNSIGNED_MAX => HI,
+        ATOMIC_SIGNED_MIN => LT,
+        _ => GT,
+    };
+    let reg_mask: u32 = if r.extra == QWORD_BITS { ~0 } else { ~REG64 };
+    let mut left = old;
+    if signed && r.extra < DWORD_BITS {
+        bitfield(inout out, SBFM & ~BITFIELD64, SECOND_SCRATCH, old, 0, wrapping_sub(r.extra, 1));
+        left = SECOND_SCRATCH;
+    }
+    let cmp = match r.extra {
+        BYTE_BITS => if signed { SUBS_SXTB_W } else { SUBS_UXTB_W },
+        WORD_BITS => if signed { SUBS_SXTH_W } else { SUBS_UXTH_W },
+        _ => SUBS_REG & reg_mask,
+    };
+    rrr(inout out, cmp, ZERO, left, operand);
+    rrr(inout out, (CSEL & reg_mask) | sh(cc, CONDITION_SHIFT), SCRATCH, old, operand);
+}
+
 fn emit_atomic(
     inout out: ChunkSeq[u8],
     in r: Record,
@@ -1080,20 +1109,31 @@ fn emit_atomic(
         push32(inout out, LOAD_ACQUIRE | base | old);
         return;
     }
+    let start = out.len();
     push32(inout out, LOAD_ACQUIRE_EXCLUSIVE | base | old);
-    let (source, distance) = if r.op == ATOMIC_EXCHANGE {
-        (operand, EXCHANGE_RETRY_DISTANCE)
+    let source = if r.op == ATOMIC_EXCHANGE {
+        operand
     } else {
-        let op = if r.op == ATOMIC_ADD { ADD_REG } else { SUB_REG };
-        let opcode = if r.extra == QWORD_BITS {
-            op
+        if r.op >= ATOMIC_UNSIGNED_MIN && r.op <= ATOMIC_SIGNED_MAX {
+            emit_atomic_minmax(inout out, in r, old, operand);
         } else {
-            op & ~REG64
-        };
-        rrr(inout out, opcode, SCRATCH, old, operand);
-        (SCRATCH, ARITHMETIC_RETRY_DISTANCE)
+            let op = match r.op {
+                ATOMIC_ADD => ADD_REG,
+                ATOMIC_SUB => SUB_REG,
+                ATOMIC_OR => ORR_REG,
+                ATOMIC_XOR => EOR_REG,
+                _ => AND_REG,
+            };
+            let reg_mask: u32 = if r.extra == QWORD_BITS { ~0 } else { ~REG64 };
+            rrr(inout out, op & reg_mask, SCRATCH, old, operand);
+            if r.op == ATOMIC_NAND {
+                rrr(inout out, ORN_REG & reg_mask, SCRATCH, ZERO, SCRATCH);
+            }
+        }
+        SCRATCH
     };
     push32(inout out, STORE_RELEASE_EXCLUSIVE | base | sh(SECOND_SCRATCH, RM_SHIFT) | source);
+    let distance = wrapping_u32(wrapping_sub(out.len(), start) / INSTRUCTION_BYTES);
     let retry = sh(wrapping_sub(0, distance) & BRANCH_IMM19_MASK, BRANCH_IMM19_SHIFT);
     push32(inout out, (BRANCH_IF_NOT_ZERO & ~REG64) | retry | SECOND_SCRATCH);
 }
@@ -2176,7 +2216,7 @@ fn encode_pass(
             }
         } else if last == NEVER_READ
             && !is_integer_division(r.op)
-            && !is_atomic_rmw(r.op)
+            && !is_atomic_update(r.op)
             && !is_atomic_cas(r.op)
             && r.op != ATOMIC_LOAD
             && !live_overflow_flag(in ends, value, r.op)
@@ -2336,7 +2376,7 @@ fn encode_pass(
         let calls = direct_call(r.op);
         let division = is_integer_division(r.op);
         let cas = is_atomic_cas(r.op);
-        let atomic_rmw = cas || is_atomic_rmw(r.op);
+        let atomic_rmw = cas || is_atomic_update(r.op);
         let atomic = atomic_rmw || r.op == ATOMIC_LOAD;
         let checked = is_checked_arithmetic(r.op);
         let overflow_live = checked && last_read(in ends, wrapping_add(value, 1)) != NEVER_READ;

@@ -94,6 +94,9 @@ const ATOMIC_LOAD: u64 = 120;
 const ATOMIC_STORE: u64 = 121;
 const ATOMIC_CAS_BYTE: u64 = 122;
 const ATOMIC_CAS_WORD: u64 = 123;
+const ATOMIC_NAND: u64 = 127;
+const ATOMIC_UNSIGNED_MIN: u64 = 130;
+const ATOMIC_SIGNED_MAX: u64 = 133;
 const EQUAL: u64 = 0;
 const SIGNED_LESS: u64 = 2;
 const UNSIGNED_LESS: u64 = 6;
@@ -204,6 +207,71 @@ fn aarch64_atomic_retry_loops_preserve_operands_and_unused_effects() {
     );
     assert!(binding::aarch64_integer_leaf(&[2, 2, ATOMIC_ADD, 0, 1, u128::BITS.into()]).is_empty());
     assert!(binding::aarch64_integer_leaf(&[0, 0, FENCE, 0, 0, 0]).is_empty());
+}
+
+#[test]
+fn aarch64_atomic_minmax_and_nand_retry_at_the_load() {
+    const LDAXRB_W2_X0: u32 = 0x085f_fc02;
+    const SXTB_W17_W2: u32 = 0x1300_1c51;
+    const CMP_W17_W1_SXTB: u32 = 0x6b21_823f;
+    const CSEL_W16_W2_W1_GT: u32 = 0x1a81_c050;
+    const STLXRB_W17_W16_X0: u32 = 0x0811_fc10;
+    const CBNZ_W17_BACK_FIVE: u32 = 0x35ff_ff71;
+    const MOV_X0_X2: u32 = 0xaa02_03e0;
+    const LDAXR_X16_X0: u32 = 0xc85f_fc10;
+    const AND_X16_X16_X1: u32 = 0x8a01_0210;
+    const MVN_X16_X16: u32 = 0xaa30_03f0;
+    const STLXR_W17_X16_X0: u32 = 0xc811_fc10;
+    const CBNZ_W17_BACK_FOUR: u32 = 0x35ff_ff91;
+    const LDAXRH_W16_X0: u32 = 0x485f_fc10;
+    const CMP_W16_W1_UXTH: u32 = 0x6b21_221f;
+    const CSEL_W16_W16_W1_LO: u32 = 0x1a81_3210;
+    const STLXRH_W17_W16_X0: u32 = 0x4811_fc10;
+
+    for (packet, instructions) in [
+        (
+            [2, 2, ATOMIC_SIGNED_MAX, 0, 1, BYTE_BITS],
+            &[
+                LDAXRB_W2_X0,
+                SXTB_W17_W2,
+                CMP_W17_W1_SXTB,
+                CSEL_W16_W2_W1_GT,
+                STLXRB_W17_W16_X0,
+                CBNZ_W17_BACK_FIVE,
+                MOV_X0_X2,
+                RET,
+            ][..],
+        ),
+        (
+            [2, NO_VALUE, ATOMIC_NAND, 0, 1, CELL_BITS],
+            &[
+                LDAXR_X16_X0,
+                AND_X16_X16_X1,
+                MVN_X16_X16,
+                STLXR_W17_X16_X0,
+                CBNZ_W17_BACK_FOUR,
+                RET,
+            ],
+        ),
+        (
+            [2, NO_VALUE, ATOMIC_UNSIGNED_MIN, 0, 1, WORD_BITS],
+            &[
+                LDAXRH_W16_X0,
+                CMP_W16_W1_UXTH,
+                CSEL_W16_W16_W1_LO,
+                STLXRH_W17_W16_X0,
+                CBNZ_W17_BACK_FOUR,
+                RET,
+            ],
+        ),
+    ] {
+        let expected: Vec<_> = instructions
+            .iter()
+            .copied()
+            .flat_map(u32::to_le_bytes)
+            .collect();
+        assert_eq!(binding::aarch64_integer_leaf(&packet), expected);
+    }
 }
 
 #[test]
