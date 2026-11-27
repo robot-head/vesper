@@ -43,7 +43,8 @@ use self::scalar::{
     AARCH64_TAIL_RESERVED_GP, valid_vector_lane, VECTOR_INTEGER_COMPARE, VECTOR_CONDITION_SHIFT,
     is_vector_operation, is_vector_result, VECTOR_FLOAT_ADD, VECTOR_FLOAT_SUB, VECTOR_FLOAT_MUL,
     VECTOR_FLOAT_DIV, VECTOR_FLOAT_SQRT, VECTOR_FLOAT_COMPARE, VECTOR_FLOAT_NEG, VECTOR_FLOAT_ABS,
-    VECTOR_FLOAT_COPY_SIGN, vector_float_width, is_vector_float_unary, valid_vector_float_condition
+    VECTOR_FLOAT_COPY_SIGN, VECTOR_FLOAT_FMA32, VECTOR_FLOAT_FMA64, vector_float_width,
+    is_vector_float_unary, is_vector_float_fma, valid_vector_float_condition
 };
 use self::x86_64::{
     BYTE_BITS, WORD_BITS, DWORD_BITS, QWORD_BITS, FLOAT_ORDERED, FLOAT_UNORDERED, FLOAT_EQUAL,
@@ -140,6 +141,7 @@ const VECTOR_FSUB: u32 = 0x4ea0d400;
 const VECTOR_FMUL: u32 = 0x6e20dc00;
 const VECTOR_FDIV: u32 = 0x6e20fc00;
 const VECTOR_FSQRT: u32 = 0x6ea1f800;
+const VECTOR_FMLA: u32 = 0x4e20cc00;
 const VECTOR_FNEG: u32 = 0x6ea0f800;
 const VECTOR_FABS: u32 = 0x4ea0f800;
 const VECTOR_BIT_SELECT: u32 = 0x6e601c00;
@@ -840,6 +842,29 @@ fn vector_float_copy_sign(inout out: ChunkSeq[u8], dest: u32, left: u32, right: 
     }
 }
 
+fn vector_float_fma(
+    inout out: ChunkSeq[u8],
+    dest: u32,
+    left: u32,
+    right: u32,
+    addend: u32,
+    double: bool
+) {
+    let accumulator = if dest != addend && (dest == left || dest == right) {
+        FP_RIGHT
+    } else {
+        dest
+    };
+    if accumulator != addend {
+        rrr(inout out, VECTOR_OR_REG, accumulator, addend, addend);
+    }
+    let precision = if double { FP_DOUBLE } else { 0 };
+    rrr(inout out, VECTOR_FMLA | precision, accumulator, left, right);
+    if accumulator != dest {
+        rrr(inout out, VECTOR_OR_REG, dest, accumulator, accumulator);
+    }
+}
+
 fn vector_float_compare(inout out: ChunkSeq[u8], in r: Record, dest: u32, left: u32, right: u32) {
     let predicate = wrapping_shr_u64(r.extra, VECTOR_CONDITION_SHIFT);
     let size = if (r.extra & VECTOR_LANE_WIDTH_MASK) == QWORD_BITS {
@@ -1247,6 +1272,7 @@ fn operands(in r: Record, returns: u64) -> Option[u64] {
             } else {
                 Option::None
             },
+            VECTOR_FLOAT_FMA32 | VECTOR_FLOAT_FMA64 => Option::Some(3),
             VECTOR_PROMOTE_LOW | VECTOR_DEMOTE => if r.right == 0 && r.extra == 0 {
                 Option::Some(1)
             } else {
@@ -1553,7 +1579,7 @@ fn valid_vector_inputs(in words: Slice[u64], args: u64, count: u64, returns: u64
         let vector_rhs = is_vector_binary(r.op) || r.op == VECTOR_STORE;
         if (n >= 1 && vector_value(in words, args, r.left) != uses_vector_left(r.op))
             || (n >= 2 && vector_value(in words, args, r.right) != vector_rhs)
-            || (n == 3 && vector_value(in words, args, r.extra))
+            || (n == 3 && vector_value(in words, args, r.extra) != is_vector_float_fma(r.op))
         {
             return false;
         }
@@ -3635,7 +3661,9 @@ fn encode_pass(
         } else if n >= 2 {
             used = expire(used, in ends, r.right, value, right);
         }
-        if n == 3 {
+        if is_vector_float_fma(r.op) {
+            vector_used = expire(vector_used, in ends, r.extra, value, extra);
+        } else if n == 3 {
             used = expire(used, in ends, r.extra, value, extra);
         }
         if vector && (is_vector_result(r.op) || r.op == VECTOR_STORE) {
@@ -3658,7 +3686,15 @@ fn encode_pass(
             let assigned = if !live {
                 UNASSIGNED
             } else if available != 0 && last <= next_call {
-                let reg = trailing_zeros_u64(widen_u64(available));
+                let reg = if is_vector_float_fma(r.op)
+                    && extra < UNASSIGNED
+                    && (available & sh(1, extra)) != 0
+                {
+                    // FMLA accumulates in its destination. Reuse an expired addend.
+                    extra
+                } else {
+                    trailing_zeros_u64(widen_u64(available))
+                };
                 vector_used = vector_used | sh(1, reg);
                 reg
             } else {
@@ -3689,6 +3725,10 @@ fn encode_pass(
                 VECTOR_LOAD => memory(inout out, true, VECTOR_BITS, lhs, dest, r.right),
                 VECTOR_INTEGER_COMPARE => vector_integer_compare(inout out, in r, dest, lhs, rhs),
                 VECTOR_FLOAT_COMPARE => vector_float_compare(inout out, in r, dest, lhs, rhs),
+                VECTOR_FLOAT_FMA32 | VECTOR_FLOAT_FMA64 => {
+                    let addend = materialize_vector(inout out, extra, FP_LEFT, frame_bytes);
+                    vector_float_fma(inout out, dest, lhs, rhs, addend, r.op == VECTOR_FLOAT_FMA64);
+                },
                 VECTOR_FLOAT_COPY_SIGN => vector_float_copy_sign(
                     inout out,
                     dest,

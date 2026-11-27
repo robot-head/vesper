@@ -211,6 +211,8 @@ enum IntegerOp {
     VectorFloatNeg = 191,
     VectorFloatAbs = 192,
     VectorFloatCopySign = 193,
+    VectorFloatFma32 = 194,
+    VectorFloatFma64 = 195,
 }
 
 fn integer_bit_op(op: Opcode) -> Option<IntegerOp> {
@@ -2215,6 +2217,22 @@ impl IntegerBlocks<'_> {
                 arg,
             } if !self.canonicalize_nans && ty(arg) == types::F64X2 && output == types::F32X4 => {
                 (IntegerOp::VectorDemote, [input(arg)?, 0, 0])
+            }
+            InstructionData::Ternary {
+                opcode: Opcode::Fma,
+                args: [left, right, addend],
+            } if !self.canonicalize_nans
+                && (self.aarch64 || self.has_x86_fma())
+                && ty(left) == output
+                && ty(right) == output
+                && ty(addend) == output =>
+            {
+                let op = match output {
+                    types::F32X4 => IntegerOp::VectorFloatFma32,
+                    types::F64X2 => IntegerOp::VectorFloatFma64,
+                    _ => return None,
+                };
+                (op, [input(left)?, input(right)?, input(addend)?])
             }
             InstructionData::Ternary {
                 opcode: Opcode::Bitselect,

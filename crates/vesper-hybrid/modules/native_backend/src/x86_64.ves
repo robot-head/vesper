@@ -74,6 +74,7 @@ const VEX_W: u8 = 0x80;
 const VEX_SOURCE_SHIFT: u32 = 3;
 const VEX_66_PREFIX: u8 = 0x01;
 const VFMADD213_SCALAR: u8 = 0xa9;
+const VFMADD213_PACKED: u8 = 0xa8;
 const UD2_OPCODE: u8 = 0x0b;
 const IMUL_R64_RM64: u8 = 0xaf;
 const IMUL_R64_RM64_IMM8: u8 = 0x6b;
@@ -350,7 +351,7 @@ pub copy enum Instruction {
     FloatConvert(u8, u8, u64),
     FloatMinMax(u8, u8, u8, bool, u64),
     FloatRound(u8, u8, Rounding, u64),
-    FloatFma(u8, u8, u8, u8, u64),
+    FloatFma(u8, u8, u8, u8, u64, bool),
     IntegerToFloat(u8, u8, u64, u64, bool),
     VectorConstant(u8, u64, u64),
     VectorSplat(u8, u8, u64),
@@ -1355,7 +1356,15 @@ fn vector_float_compare(
     compare_packed(inout out, dest, lhs, rhs, width, condition);
 }
 
-fn float_fma(inout out: ChunkSeq[u8], dest: u8, left: u8, right: u8, addend: u8, width: u64) {
+fn float_fma(
+    inout out: ChunkSeq[u8],
+    dest: u8,
+    left: u8,
+    right: u8,
+    addend: u8,
+    width: u64,
+    packed: bool
+) {
     // Keep the CLIF source order for NaN payload selection.
     let result = if dest != left && (dest == right || dest == addend) {
         XMM_LEFT_SCRATCH
@@ -1381,7 +1390,13 @@ fn float_fma(inout out: ChunkSeq[u8], dest: u8, left: u8, right: u8, addend: u8,
     out.push(THREE_BYTE_VEX);
     out.push(r | VEX_X_INVERTED | b | VEX_0F38_MAP);
     out.push(w | wrapping_shl_u8(inverted_source, VEX_SOURCE_SHIFT) | VEX_66_PREFIX);
-    out.push(VFMADD213_SCALAR);
+    out.push(
+        if packed {
+            VFMADD213_PACKED
+        } else {
+            VFMADD213_SCALAR
+        }
+    );
     out.push(modrm(reg, rm));
     float_move(inout out, dest, result);
 }
@@ -2181,13 +2196,14 @@ pub fn emit(inout out: ChunkSeq[u8], in instruction: Instruction) {
             width,
             signed
         ),
-        Instruction::FloatFma(destination, left, right, addend, width) => float_fma(
+        Instruction::FloatFma(destination, left, right, addend, width, packed) => float_fma(
             inout out,
             destination,
             left,
             right,
             addend,
-            width
+            width,
+            packed
         ),
         Instruction::VectorConstant(destination, low, high) => vector_constant(
             inout out,

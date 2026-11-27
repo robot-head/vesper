@@ -211,6 +211,8 @@ pub const VECTOR_FLOAT_COMPARE: u64 = 190;
 pub const VECTOR_FLOAT_NEG: u64 = 191;
 pub const VECTOR_FLOAT_ABS: u64 = 192;
 pub const VECTOR_FLOAT_COPY_SIGN: u64 = 193;
+pub const VECTOR_FLOAT_FMA32: u64 = 194;
+pub const VECTOR_FLOAT_FMA64: u64 = 195;
 const POWER_SHIFT_MASK: u64 = QWORD_BITS - 1;
 const POWER_SIGNED: u64 = 0x40;
 const POWER_NEGATIVE: u64 = 0x80;
@@ -1008,10 +1010,18 @@ pub fn is_float_fma(op: u64) -> bool {
     op == FLOAT_FMA32 || op == FLOAT_FMA64
 }
 
+pub fn is_vector_float_fma(op: u64) -> bool {
+    op == VECTOR_FLOAT_FMA32 || op == VECTOR_FLOAT_FMA64
+}
+
+fn is_fused_float(op: u64) -> bool {
+    is_float_fma(op) || is_vector_float_fma(op)
+}
+
 fn reads_third(op: u64) -> bool {
     op == SELECT
         || op == FLOAT_SELECT
-        || is_float_fma(op)
+        || is_fused_float(op)
         || consumes_carry(op)
         || is_atomic_cas(op)
 }
@@ -1035,6 +1045,7 @@ pub fn is_vector_binary(op: u64) -> bool {
         || op == VECTOR_INTEGER_COMPARE
         || op == VECTOR_FLOAT_COMPARE
         || op == VECTOR_FLOAT_COPY_SIGN
+        || is_vector_float_fma(op)
         || is_vector_float_binary(op)
 }
 
@@ -1095,7 +1106,7 @@ fn vector_binary_opcode(op: u64, width: u64) -> u8 {
 pub fn is_vector_result(op: u64) -> bool {
     (op >= VECTOR_CONSTANT && op <= VECTOR_INSERT && op != VECTOR_STORE)
         || op == VECTOR_INTEGER_COMPARE
-        || (op >= VECTOR_FLOAT_ADD && op <= VECTOR_FLOAT_COPY_SIGN)
+        || (op >= VECTOR_FLOAT_ADD && op <= VECTOR_FLOAT_FMA64)
 }
 
 pub fn vector_value(in words: Slice[u64], arguments: u64, value: u64) -> bool {
@@ -1154,7 +1165,7 @@ pub fn valid_float_operands(
     for index in 0..count {
         let record = read_record(in words, index);
         let left_is_float = float_left(record.op) || (is_branch_return(record.op) && float_return);
-        let extra_is_float = record.op == FLOAT_SELECT || is_float_fma(record.op);
+        let extra_is_float = record.op == FLOAT_SELECT || is_fused_float(record.op);
         if (reads_left(in record) && float_value(in words, arguments, record.left) != left_is_float)
             || (reads_right(in record, paired)
                 && float_value(in words, arguments, record.right) != float_right(record.op))
@@ -1179,8 +1190,9 @@ fn valid_vector_operands(in words: Slice[u64], arguments: u64, count: u64, paire
             || (reads_right(in record, paired)
                 && vector_value(in words, arguments, record.right)
                     != (vector_binary || record.op == VECTOR_STORE))
-            || ((record.op == FLOAT_SELECT || is_float_fma(record.op))
-                && vector_value(in words, arguments, record.extra))
+            || ((record.op == FLOAT_SELECT || is_fused_float(record.op))
+                && vector_value(in words, arguments, record.extra)
+                    != is_vector_float_fma(record.op))
         {
             return false;
         }
@@ -1458,6 +1470,7 @@ fn find_last_reads(
                 VECTOR_FLOAT_SQRT | VECTOR_FLOAT_NEG | VECTOR_FLOAT_ABS => record.right == 0
                     && vector_float_width(record.extra),
                 VECTOR_FLOAT_COMPARE => valid_vector_float_condition(record.extra),
+                VECTOR_FLOAT_FMA32 | VECTOR_FLOAT_FMA64 => true,
                 VECTOR_PAIRWISE_ADD => record.extra == BYTE_BITS
                     || record.extra == WORD_BITS
                     || record.extra == DWORD_BITS,
@@ -1531,7 +1544,7 @@ fn find_last_reads(
             }
             frame.floating = true;
         }
-        if is_float_fma(record.op) {
+        if is_fused_float(record.op) {
             frame.floating = true;
             frame.xmm_aux = true;
         }
@@ -2059,7 +2072,7 @@ fn allocate(
             && right != UNASSIGNED
         {
             right
-        } else if is_float_fma(record.op) && left != UNASSIGNED {
+        } else if is_fused_float(record.op) && left != UNASSIGNED {
             left
         } else if third != UNASSIGNED {
             third
@@ -2759,7 +2772,8 @@ fn emit_vector_instruction(
     in record: Record,
     destination: u8,
     left: u8,
-    right: u8
+    right: u8,
+    third: u8
 ) {
     let instruction = match record.op {
         VECTOR_CONSTANT => Instruction::VectorConstant(destination, record.left, record.right),
@@ -2805,6 +2819,19 @@ fn emit_vector_instruction(
             record.extra & VECTOR_LANE_WIDTH_MASK,
             wrapping_shr_u64(record.extra, VECTOR_CONDITION_SHIFT)
         ),
+        VECTOR_FLOAT_FMA32
+            | VECTOR_FLOAT_FMA64 => Instruction::FloatFma(
+                destination,
+                left,
+                right,
+                third,
+                if record.op == VECTOR_FLOAT_FMA64 {
+                    QWORD_BITS
+                } else {
+                    DWORD_BITS
+                },
+                true
+            ),
         VECTOR_PAIRWISE_ADD => Instruction::VectorPairwiseAdd(
             destination,
             left,
@@ -2999,7 +3026,8 @@ fn emit_scalar_fp(
                     QWORD_BITS
                 } else {
                     DWORD_BITS
-                }
+                },
+                false
             ),
         FLOAT_CEIL | FLOAT_FLOOR | FLOAT_TRUNC | FLOAT_NEAREST => {
             let mode = match record.op {
@@ -3534,10 +3562,10 @@ fn encode_block_pass(
             UNASSIGNED
         };
         let conditional = record.op == SELECT || record.op == FLOAT_SELECT;
-        let fma = is_float_fma(record.op);
+        let fma = is_fused_float(record.op);
         let third = if conditional || fma {
             let location = assigned(in allocation.locations, record.extra);
-            materialize(
+            materialize_width(
                 inout output,
                 in location,
                 if fma {
@@ -3546,6 +3574,11 @@ fn encode_block_pass(
                     XMM_RIGHT_SCRATCH
                 } else {
                     THIRD_SCRATCH
+                },
+                if is_vector_float_fma(record.op) {
+                    VECTOR_BITS
+                } else {
+                    QWORD_BITS
                 }
             )
         } else {
@@ -3570,7 +3603,7 @@ fn encode_block_pass(
         } else if is_scalar_fp_instruction(record.op) {
             emit_scalar_fp(inout output, in record, destination, left, right, third);
         } else if is_vector_operation(record.op) {
-            emit_vector_instruction(inout output, in record, destination, left, right);
+            emit_vector_instruction(inout output, in record, destination, left, right, third);
         } else if is_scalar_bit_operation(record.op) {
             emit_bit_operation(inout output, in record, destination, left);
         } else if is_bit_mix(record.op) {

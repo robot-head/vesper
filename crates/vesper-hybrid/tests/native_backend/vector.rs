@@ -3,7 +3,8 @@ use cranelift_codegen::ir::condcodes::FloatCC;
 use cranelift_codegen::{
     Context,
     ir::{
-        AbiParam, ConstantData, InstBuilder, MemFlags, Opcode, StackSlotData, StackSlotKind, types,
+        AbiParam, ConstantData, InstBuilder, MemFlags, Opcode, StackSlotData, StackSlotKind, Type,
+        types,
     },
     settings::{self, Configurable},
 };
@@ -15,6 +16,18 @@ use vesper::native::machine::x86_64_block_words;
 const VECTOR_BYTES: usize = 16;
 const UNALIGNED: i32 = 1;
 const NAN_CANONICALIZATION: &str = "enable_nan_canonicalization";
+
+fn equal_float_lane(ty: Type, got: &[u8], want: &[u8]) -> bool {
+    // Ordinary floating-point arithmetic leaves the NaN bits unspecified.
+    let is_nan = |lane: &[u8]| {
+        if ty == types::F32X4 {
+            f32::from_le_bytes(lane.try_into().unwrap()).is_nan()
+        } else {
+            f64::from_le_bytes(lane.try_into().unwrap()).is_nan()
+        }
+    };
+    got == want || (is_nan(got) && is_nan(want))
+}
 
 fn module() -> JITModule {
     let isa = cranelift_native::builder()
@@ -482,16 +495,8 @@ fn packed_float_arithmetic_matches_cranelift() {
                             .chunks_exact(width)
                             .zip(reference[..VECTOR_BYTES].chunks_exact(width))
                         {
-                            // Ordinary floating-point arithmetic leaves the NaN bits unspecified.
-                            let is_nan = |lane: &[u8]| {
-                                if ty == types::F32X4 {
-                                    f32::from_le_bytes(lane.try_into().unwrap()).is_nan()
-                                } else {
-                                    f64::from_le_bytes(lane.try_into().unwrap()).is_nan()
-                                }
-                            };
                             assert!(
-                                got == want || (is_nan(got) && is_nan(want)),
+                                equal_float_lane(ty, got, want),
                                 "{opcode} {ty} {keep_left} {i} {j} {got:x?} {want:x?}"
                             );
                         }
@@ -606,6 +611,154 @@ fn packed_float_comparisons_match_every_cranelift_predicate() {
                             candidate, reference,
                             "{predicate:?} {ty} {keep_inputs} {spills} {left:x?} {right:x?}"
                         );
+                    }
+                }
+            }
+        }
+    }
+    unsafe { module.free_memory() };
+}
+
+#[test]
+fn packed_fma_matches_cranelift_with_fused_rounding_and_spills() {
+    const LIVE_VECTORS: u8 = 21;
+    const AVX_FLAG: &str = "has_avx";
+    const FMA_FLAG: &str = "has_fma";
+    type Entry = unsafe extern "C" fn(*const u8, *const u8, *const u8, *mut u8);
+    let mut module = module();
+    let fallback_isas = [
+        [None, None],
+        [Some(AVX_FLAG), None],
+        [Some(FMA_FLAG), None],
+        [Some(AVX_FLAG), Some(FMA_FLAG)],
+    ]
+    .map(|features| {
+        let mut flags = settings::builder();
+        let mut isa = cranelift_native::builder_with_options(false).unwrap();
+        if features == [Some(AVX_FLAG), Some(FMA_FLAG)] {
+            flags.enable(NAN_CANONICALIZATION).unwrap();
+        }
+        for feature in features.into_iter().flatten() {
+            isa.enable(feature).unwrap();
+        }
+        isa.finish(settings::Flags::new(flags)).unwrap()
+    });
+    for ty in [types::F32X4, types::F64X2] {
+        let width = ty.lane_type().bytes() as usize;
+        let values: [u64; 8] = if ty == types::F32X4 {
+            [
+                0,
+                0x8000_0000,
+                u64::from(1.0f32.next_up().to_bits()),
+                u64::from((1.0 - f32::EPSILON).to_bits()),
+                0xbf80_0000,
+                0x7f80_0000,
+                0xffc0_0005,
+                0x7f80_0007,
+            ]
+        } else {
+            [
+                0,
+                0x8000_0000_0000_0000,
+                1.0f64.next_up().to_bits(),
+                (1.0 - f64::EPSILON).to_bits(),
+                0xbff0_0000_0000_0000,
+                0x7ff0_0000_0000_0000,
+                0xfff8_0000_0000_0005,
+                0x7ff0_0000_0000_0007,
+            ]
+        };
+        let lanes = |first: usize| -> [u8; VECTOR_BYTES] {
+            std::array::from_fn(|index| {
+                values[(first + index / width) % values.len()].to_le_bytes()[index % width]
+            })
+        };
+        for (keep_left, keep_addend, spills) in [
+            (false, false, false),
+            (true, false, false),
+            (false, true, false),
+            (false, false, true),
+        ] {
+            let mut context = module.make_context();
+            context.func.signature.params = vec![AbiParam::new(types::I64); 4];
+            let mut state = FunctionBuilderContext::new();
+            let mut b = FunctionBuilder::new(&mut context.func, &mut state);
+            let entry = b.create_block();
+            b.append_block_params_for_function_params(entry);
+            b.switch_to_block(entry);
+            let [left, right, addend, destination] = *b.block_params(entry) else {
+                unreachable!()
+            };
+            let live = if spills {
+                (1..=LIVE_VECTORS)
+                    .map(|byte| {
+                        let constant = b
+                            .func
+                            .dfg
+                            .constants
+                            .insert(ConstantData::from(vec![byte; VECTOR_BYTES]));
+                        b.ins().vconst(ty.as_int(), constant)
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            let flags = MemFlags::new().with_notrap();
+            let [left, right, addend] =
+                [left, right, addend].map(|ptr| b.ins().load(ty, flags, ptr, 0));
+            let fused = b.ins().fma(left, right, addend);
+            b.ins().store(flags, fused, destination, 0);
+            if keep_left {
+                b.ins().store(flags, left, destination, VECTOR_BYTES as i32);
+            }
+            if keep_addend {
+                b.ins()
+                    .store(flags, addend, destination, VECTOR_BYTES as i32);
+            }
+            if let Some(checksum) = live
+                .into_iter()
+                .reduce(|a, b_value| b.ins().bxor(a, b_value))
+            {
+                b.ins()
+                    .store(flags, checksum, destination, VECTOR_BYTES as i32);
+            }
+            b.ins().return_(&[]);
+            b.seal_all_blocks();
+            b.finalize();
+            for isa in &fallback_isas {
+                assert!(x86_64_block_words(&context.func, isa.as_ref()).is_none());
+            }
+            if !std::is_x86_feature_detected!("avx") || !std::is_x86_feature_detected!("fma") {
+                continue;
+            }
+            let functions = compile(&mut module, &mut context)
+                .map(|pointer| unsafe { std::mem::transmute::<*const u8, Entry>(pointer) });
+            for i in 0..values.len() {
+                for j in 0..values.len() {
+                    for k in 0..values.len() {
+                        let (left, right, addend) = (lanes(i), lanes(j), lanes(k));
+                        let [reference, candidate] = functions.map(|run| {
+                            let mut out = [0xcc; VECTOR_BYTES * 2];
+                            unsafe {
+                                run(
+                                    left.as_ptr(),
+                                    right.as_ptr(),
+                                    addend.as_ptr(),
+                                    out.as_mut_ptr(),
+                                )
+                            };
+                            out
+                        });
+                        assert_eq!(candidate[VECTOR_BYTES..], reference[VECTOR_BYTES..]);
+                        for (got, want) in candidate[..VECTOR_BYTES]
+                            .chunks_exact(width)
+                            .zip(reference[..VECTOR_BYTES].chunks_exact(width))
+                        {
+                            assert!(
+                                equal_float_lane(ty, got, want),
+                                "{ty} {keep_left} {keep_addend} {spills} {i} {j} {k} {got:x?} {want:x?}"
+                            );
+                        }
                     }
                 }
             }
