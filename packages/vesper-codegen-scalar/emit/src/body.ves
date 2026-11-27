@@ -49,7 +49,7 @@ use @vesper/cranelift::{
     ins_udiv, ins_uextend, ins_unary, ins_urem, ins_ushr, inst_result, invalid, is_invalid,
     seal_block, set_srcloc, switch_to_block, trap_user, ty_f32, ty_f64, ty_i128, ty_i32, ty_i64,
     ty_i8, use_var, vals1, value_type, create_stack_slot, ins_iadd_imm, ins_load, ins_stack_addr,
-    ins_store, module_pointer_type
+    ins_store, module_pointer_type, ins_imul_imm, ins_uload8, ins_uload16, ins_uload32
 };
 use super::{
     BODY_ERROR, DECLINED, HANDLED, coerce, emit_overflow_test, kind_max_imm, kind_min_imm,
@@ -108,6 +108,29 @@ const STATUS_CALL: u64 = 8589934592;
 const WORDS_CALL: u64 = 17179869184;
 // A direct call whose small enum result comes back as words (#2581).
 const INST_WORDS_CALL: u64 = 56;
+// A sequence or string operation (#2653) and its forms (@vesper/codegen-scalar's
+// `body_seq`).
+const INST_SEQ: u64 = 80;
+const SEQ_WORD: u64 = 1;
+const SEQ_SAME: u64 = 2;
+const SEQ_AS_BYTES: u64 = 3;
+const SEQ_BYTE_AT: u64 = 4;
+const SEQ_GET: u64 = 5;
+// The header words (src/strings/native.rs, src/seq/native.rs): a
+// string's `{len, cap, data}`, a slice view's `{handle, start, len}`, a
+// sequence header's data pointer.
+const STR_LEN: i32 = 0;
+const STR_DATA: i32 = 16;
+const VIEW_HANDLE: i32 = 0;
+const VIEW_START: i32 = 8;
+const VIEW_LEN: i32 = 16;
+const HEADER_DATA: i32 = 16;
+// A slice view's storage (`seq_slice_value`, `str_value`).
+const VIEW_BYTES: u32 = 24;
+// `seq_load_elem`'s strides that load zero-extended.
+const STRIDE_BYTE: u64 = 1;
+const STRIDE_HALF: u64 = 2;
+const STRIDE_QUARTER: u64 = 4;
 const CALLEE_ID_MASK: u64 = 4294967295;
 const INST_ICONST: u64 = 16;
 const INST_F64CONST: u64 = 17;
@@ -1180,6 +1203,88 @@ impl Body {
         switch_to_block(inout b, good);
     }
 
+    // `Codegen::seq_op` of a string or slice operation (#2653) on
+    // receiver `x` and index `y`: `str_op`'s `len`, `as_str`, `as_bytes`
+    // and `byte_at` (`str_word`, `str_value`, `seq_guard`, `str_byte`),
+    // and a slice's `len` and checked element (`seq_view`, `seq_guard`,
+    // `seq_elem_addr`, `seq_load_elem`). An invalid value for a form the
+    // plan never writes.
+    fn seq(
+        inout self,
+        inout b: Builder,
+        in m: Module,
+        inout w: Words,
+        x: Value,
+        y: Value
+    ) -> Value eff [Ffi[Cranelift]] {
+        let form = w.next();
+        if form == SEQ_WORD {
+            let offset = w.next();
+            return ins_load(inout b, ty_i64(), PLAIN, x, wrapping_i32(offset));
+        }
+        if form == SEQ_SAME {
+            return x;
+        }
+        if form == SEQ_AS_BYTES {
+            // `str_value(s, 0, len)`: the view `{s, 0, len}` in fresh
+            // zeroed storage (`Codegen::alloc`).
+            let len = ins_load(inout b, ty_i64(), PLAIN, x, STR_LEN);
+            let zero = ins_iconst(inout b, ty_i64(), 0);
+            let slot = create_stack_slot(inout b, VIEW_BYTES, SLOT_ALIGN_SHIFT);
+            let ptr = ins_stack_addr(inout b, module_pointer_type(in m), slot, 0);
+            let mut offset: u32 = 0;
+            loop {
+                if offset >= VIEW_BYTES {
+                    break;
+                }
+                let z = ins_iconst(inout b, ty_i64(), 0);
+                ins_store(inout b, PLAIN, z, ptr, wrapping_i32(offset));
+                offset = wrapping_add(offset, WORD_BYTES);
+            }
+            ins_store(inout b, PLAIN, x, ptr, VIEW_HANDLE);
+            ins_store(inout b, PLAIN, zero, ptr, VIEW_START);
+            ins_store(inout b, PLAIN, len, ptr, VIEW_LEN);
+            return ptr;
+        }
+        if form == SEQ_BYTE_AT {
+            let index = w.next();
+            let size = w.next();
+            let tag = w.next();
+            let len = ins_load(inout b, ty_i64(), PLAIN, x, STR_LEN);
+            let valid = ins_icmp(inout b, cc_ult(), y, len);
+            self.raising(inout b, in m, valid, false, index, size, tag);
+            let data = ins_load(inout b, ty_i64(), PLAIN, x, STR_DATA);
+            let at = ins_iadd(inout b, data, y);
+            return ins_uload8(inout b, ty_i64(), PLAIN, at, 0);
+        }
+        if form == SEQ_GET {
+            let stride = w.next();
+            let lane = w.next();
+            let index = w.next();
+            let size = w.next();
+            let tag = w.next();
+            let handle = ins_load(inout b, ty_i64(), PLAIN, x, VIEW_HANDLE);
+            let start = ins_load(inout b, ty_i64(), PLAIN, x, VIEW_START);
+            let len = ins_load(inout b, ty_i64(), PLAIN, x, VIEW_LEN);
+            let valid = ins_icmp(inout b, cc_ult(), y, len);
+            self.raising(inout b, in m, valid, false, index, size, tag);
+            let data = ins_load(inout b, ty_i64(), PLAIN, handle, HEADER_DATA);
+            let at = ins_iadd(inout b, start, y);
+            let offset = ins_imul_imm(inout b, at, wrapping_i64(stride));
+            let addr = ins_iadd(inout b, data, offset);
+            return if stride == STRIDE_BYTE {
+                ins_uload8(inout b, ty_i64(), PLAIN, addr, 0)
+            } else if stride == STRIDE_HALF {
+                ins_uload16(inout b, ty_i64(), PLAIN, addr, 0)
+            } else if stride == STRIDE_QUARTER {
+                ins_uload32(inout b, PLAIN, addr, 0)
+            } else {
+                ins_load(inout b, lane_type(lane), PLAIN, addr, 0)
+            };
+        }
+        Value { id: invalid() }
+    }
+
     // One instruction (`ir_graph_at`'s instruction loop): its operands
     // read from their registers, its arm, the `coerce` to its type and the
     // definition of its register. False on a word the plan never writes.
@@ -1769,6 +1874,12 @@ impl Body {
                 ptr = ins_iadd_imm(inout b, ptr, wrapping_i64(off));
             }
             ins_load(inout b, lane_type(flane), PLAIN, ptr, 0)
+        } else if kind == INST_SEQ {
+            let v = self.seq(inout b, in m, inout w, x, y);
+            if is_invalid(v) {
+                return false;
+            }
+            v
         } else if kind == INST_READ_COPY {
             let local = w.next();
             let size = w.next();
