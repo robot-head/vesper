@@ -33,6 +33,12 @@ const E_INDEX: u8 = 40;
 
 // Argument passing (keep equal to exprs.ves).
 const P_IN: u8 = 0;
+const P_INOUT: u8 = 1;
+const NO_ELEMENT_VIEW: u8 = 255;
+// Pattern kinds (keep equal to patterns.ves).
+const P_WILD: u8 = 0;
+const P_BIND: u8 = 1;
+const P_CTOR: u8 = 6;
 
 // The primitive string operations (`strings::StrOp`).
 const OP_NONE: u8 = 0;
@@ -775,9 +781,68 @@ fn arg_of_type(inout ck: Ck, e: u32, goal: u32) {
     }
 }
 
+// `Checker::element_view_scrutinee`: the pass of an element view `match`
+// (§13), `match s.try_get(i)` on a place `s` whose element type is not
+// copy (`in`) or `match s.try_get_mut(i)` on any place (`inout`), else
+// NO_ELEMENT_VIEW. Arms other than `Some(x)`, `Some(_)`, `None` and `_`
+// (E1522) skip the function.
+pub fn element_view_scrutinee(inout ck: Ck, ex: Ex) -> u8 {
+    let value = ck.ex(ex.x);
+    if value.kind != E_CALL || value.n != 1 {
+        return NO_ELEMENT_VIEW;
+    }
+    let callee = ck.ex(value.x);
+    if callee.kind != E_FIELD {
+        return NO_ELEMENT_VIEW;
+    }
+    let pass = if is_method(in ck, callee.y, "try_get") {
+        P_IN
+    } else if is_method(in ck, callee.y, "try_get_mut") {
+        P_INOUT
+    } else {
+        return NO_ELEMENT_VIEW;
+    };
+    let base_ty = peek_type(inout ck, callee.x);
+    if !is_seq_or_slice(in ck, base_ty) {
+        return NO_ELEMENT_VIEW;
+    }
+    let elem_ty = seq_elem(in ck, base_ty);
+    if pass == P_IN && (elem_ty == ck.ctx.types.infer || mode(inout ck, elem_ty) == TyMode::Copy) {
+        return NO_ELEMENT_VIEW;
+    }
+    if !is_place(in ck, callee.x) {
+        return NO_ELEMENT_VIEW;
+    }
+    for i in 0..w(ex.n) {
+        if !simple_view_arm(in ck, ck.arm(add(w(ex.a), i)).pat) {
+            ck.skip = true;
+        }
+    }
+    pass
+}
+
+// An element view arm: `Some(x)`, `Some(_)`, `None` or `_`.
+fn simple_view_arm(in ck: Ck, pat_id: u32) -> bool {
+    let pat = ck.pats.pat(pat_id);
+    if pat.kind == P_WILD {
+        return true;
+    }
+    if pat.kind != P_CTOR {
+        return false;
+    }
+    if is_method(in ck, pat.name, "None") {
+        return pat.kid_count == 0;
+    }
+    if !is_method(in ck, pat.name, "Some") || pat.kid_count != 1 {
+        return false;
+    }
+    let kind = ck.pats.pat(ck.pats.kid(w(pat.kid_start))).kind;
+    kind == P_BIND || kind == P_WILD
+}
+
 // `Checker::seq_method_call`: a method on a `ChunkSeq[T]` or `Slice[T]`
-// receiver, a place or a view. Atomic operations, element views and the
-// diagnostics of misuse (E1521-E1525) skip the function.
+// receiver, a place or a view. Atomic operations and the diagnostics of
+// misuse (E1521-E1525) skip the function.
 pub fn seq_method(inout ck: Ck, ex: Ex, callee: Ex) -> Typed {
     let hole = ck.ctx.types.infer;
     let known = ck.ctx.world.k;
@@ -814,8 +879,16 @@ pub fn seq_method(inout ck: Ck, ex: Ex, callee: Ex) -> Typed {
     }
     let seq = is_seq(in ck, base_ty);
     let op = seq_resolve(in ck, callee.y, seq, ex.n);
+    // The scrutinee of an element view `match` borrows its element in
+    // place; `try_get_mut` is only that (else E1522, not ported).
+    let mut element_view = NO_ELEMENT_VIEW;
+    if op.code == SEQ_TRY_GET {
+        element_view = ck.element_view;
+        ck.element_view = NO_ELEMENT_VIEW;
+    }
+    let viewed = element_view != NO_ELEMENT_VIEW;
     let get_mut = is_method(in ck, callee.y, "try_get_mut");
-    if op.code == OP_NONE || op.code == SEQ_ATOMIC || get_mut {
+    if op.code == OP_NONE || op.code == SEQ_ATOMIC || (get_mut && !viewed) {
         ck.skip = true;
         return typed_as(hole);
     }
@@ -840,7 +913,7 @@ pub fn seq_method(inout ck: Ck, ex: Ex, callee: Ex) -> Typed {
         || c == SEQ_EXTEND_REVERSED;
     let drops_elements = c == SEQ_SET || c == SEQ_TRY_SET || c == SEQ_CLEAR || c == SEQ_TRUNCATE;
     let mut misuse = elem_known
-        && (((reads_element || copies) && elem_mode != TyMode::Copy)
+        && ((((reads_element && !viewed) || copies) && elem_mode != TyMode::Copy)
             || (drops_elements && elem_mode == TyMode::Linear));
     if elem_known && (c == SEQ_WIDE || byte_scan(op)) {
         let defaulted = default_type(inout ck.ctx.types, elem_ty);
@@ -850,7 +923,7 @@ pub fn seq_method(inout ck: Ck, ex: Ex, callee: Ex) -> Typed {
     }
     let updates = seq_mutates(op) || (c == SEQ_SET && !seq);
     if misuse || (view != NONE32 && updates) {
-        // Element views (`match s.try_get(i)`), E1521-E1523 and E1525.
+        // E1521-E1523 and E1525.
         ck.skip = true;
         return typed_as(hole);
     }
@@ -861,9 +934,9 @@ pub fn seq_method(inout ck: Ck, ex: Ex, callee: Ex) -> Typed {
     if view != NONE32 {
         record(inout ck, base, base_ty);
     }
-    // `seq_receiver`: an update borrows the place `inout` and records its
-    // type; a read checks the receiver.
-    if updates {
+    // `seq_receiver`: an update (or an `inout` element view) borrows the
+    // place `inout` and records its type; a read checks the receiver.
+    if updates || element_view == P_INOUT {
         record(inout ck, base, base_ty);
     } else {
         expr(inout ck, base);

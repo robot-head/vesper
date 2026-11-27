@@ -32,12 +32,17 @@ use self::floats::{float_call, retype_float_literal};
 use self::methods::{
     inherent_index, is_qualified, is_str, is_string, peek_type, receiver_type, seq_method, seq_new,
     view_place, index_expr, string_comparison, string_literal, string_method, text_operand,
-    conversion_call, conversion_of, is_conversion
+    conversion_call, conversion_of, is_conversion, element_view_scrutinee
 };
 
 const NONE32: u32 = 4294967295;
 const NONE64: u64 = 18446744073709551615;
 const P_IN: u8 = 0;
+const P_INOUT: u8 = 1;
+const P_SINK: u8 = 2;
+// No element view `match` encloses the call (`Checker::element_view`; keep
+// equal to methods.ves).
+const NO_ELEMENT_VIEW: u8 = 255;
 // Capability label texts (`function_capability`, `latent_capability`).
 const FNCAP_PREFIX: Str = "$fncap:";
 const LATENT_PREFIX: Str = "$latent:";
@@ -48,8 +53,6 @@ const UNDERSCORE: u8 = 95;
 // `relabel` modes.
 const RELABEL_BIND: u8 = 0;
 const RELABEL_RENAME: u8 = 1;
-const P_INOUT: u8 = 1;
-const P_SINK: u8 = 2;
 
 // Expression kinds (the harness encoder's `E_*`).
 const E_OTHER: u8 = 0;
@@ -343,6 +346,9 @@ pub struct Ck {
     // expression id -> recorded type, or NONE32
     ex_types: ChunkSeq[u32],
     skip: bool,
+    // The pass of the element view `match` whose scrutinee is being
+    // checked, or NO_ELEMENT_VIEW (`Checker::element_view`).
+    element_view: u8,
     out: ChunkSeq[u8],
     atomic_sym: u32,
     // The function being checked returns `Str`: string literals are static
@@ -437,6 +443,7 @@ pub fn ck_new(sink ctx: Ctx) -> Ck {
         bounds: bounds_new(),
         ex_types: ChunkSeq::new[u32](),
         skip: false,
+        element_view: NO_ELEMENT_VIEW,
         out: ChunkSeq::new[u8](),
         atomic_sym: 0,
         static_text: false,
@@ -2641,7 +2648,11 @@ fn if_expr(inout ck: Ck, ex: Ex, expected: u32) -> u32 {
 fn match_expr(inout ck: Ck, ex: Ex, expected: u32) -> u32 {
     let hole = ck.ctx.types.infer;
     let known = ck.ctx.world.k;
+    // An element view (`match s.try_get(i)`) lends its element in place:
+    // the sequence method reads the pass (the borrows are not ported).
+    ck.element_view = element_view_scrutinee(inout ck, ex);
     let scrutinee_ty = expr(inout ck, ex.x);
+    ck.element_view = NO_ELEMENT_VIEW;
     if ck.skip {
         return hole;
     }

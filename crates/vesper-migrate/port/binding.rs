@@ -24,6 +24,9 @@ unsafe extern "C" {
     fn vesper_migrate_migrate_parse_annotation_line(line: *mut u64, out_spans: *mut u64) -> i64;
     fn vesper_migrate_migrate_redefines(text: *mut u64, name: *mut u64) -> i64;
     fn vesper_migrate_migrate_render_ctype_vesper(kind: i64, has_len: i64, len: i64, inner: *mut u64, out: *mut u64) -> i64;
+    fn vesper_migrate_migrate_render_decl_enum(name: *mut u64, carrier: *mut u64, vars_buf: *mut u64, vars_starts: *mut u64, vars_lens: *mut u64, out: *mut u64) -> i64;
+    fn vesper_migrate_migrate_render_decl_extern_fn(name: *mut u64, params_buf: *mut u64, params_starts: *mut u64, params_lens: *mut u64, result: *mut u64, out: *mut u64) -> i64;
+    fn vesper_migrate_migrate_render_decl_struct_field(name: *mut u64, ty: *mut u64, out: *mut u64) -> i64;
     fn vesper_migrate_migrate_render_origin(is_c_header: i64, name: *mut u64, out: *mut u64) -> i64;
     fn vesper_migrate_migrate_render_param(kw: *mut u64, name: *mut u64, has_footprint: i64, fp_buf: *mut u64, fp_starts: *mut u64, fp_lens: *mut u64, ty: *mut u64, out: *mut u64) -> i64;
     fn vesper_migrate_migrate_render_report_fn(name: *mut u64, has_sys: i64, out: *mut u64) -> i64;
@@ -147,6 +150,33 @@ pub fn migrate_render_ctype_vesper(kind: u8, has_len: bool, len: u64, inner: &[u
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
     let raw = vesper_port_abi::with_slice(inner, |view_inner| vesper_port_abi::with_slice_mut(out, |view_out| unsafe { vesper_migrate_migrate_render_ctype_vesper(kind as i64, has_len as i64, len as i64, view_inner, view_out) }));
+    raw as u64
+}
+
+/// Calls `migrate_render_decl_enum` of the Vesper library `migrate` (`vesper_migrate_migrate_render_decl_enum`).
+pub fn migrate_render_decl_enum(name: &[u8], carrier: &[u8], vars_buf: &[u8], vars_starts: &[u64], vars_lens: &[u64], out: &mut [u8]) -> u64 {
+    // SAFETY: `vesper_migrate_migrate_render_decl_enum` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(name, |view_name| vesper_port_abi::with_slice(carrier, |view_carrier| vesper_port_abi::with_slice(vars_buf, |view_vars_buf| vesper_port_abi::with_slice(vars_starts, |view_vars_starts| vesper_port_abi::with_slice(vars_lens, |view_vars_lens| vesper_port_abi::with_slice_mut(out, |view_out| unsafe { vesper_migrate_migrate_render_decl_enum(view_name, view_carrier, view_vars_buf, view_vars_starts, view_vars_lens, view_out) }))))));
+    raw as u64
+}
+
+/// Calls `migrate_render_decl_extern_fn` of the Vesper library `migrate` (`vesper_migrate_migrate_render_decl_extern_fn`).
+pub fn migrate_render_decl_extern_fn(name: &[u8], params_buf: &[u8], params_starts: &[u64], params_lens: &[u64], result: &[u8], out: &mut [u8]) -> u64 {
+    // SAFETY: `vesper_migrate_migrate_render_decl_extern_fn` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(name, |view_name| vesper_port_abi::with_slice(params_buf, |view_params_buf| vesper_port_abi::with_slice(params_starts, |view_params_starts| vesper_port_abi::with_slice(params_lens, |view_params_lens| vesper_port_abi::with_slice(result, |view_result| vesper_port_abi::with_slice_mut(out, |view_out| unsafe { vesper_migrate_migrate_render_decl_extern_fn(view_name, view_params_buf, view_params_starts, view_params_lens, view_result, view_out) }))))));
+    raw as u64
+}
+
+/// Calls `migrate_render_decl_struct_field` of the Vesper library `migrate` (`vesper_migrate_migrate_render_decl_struct_field`).
+pub fn migrate_render_decl_struct_field(name: &[u8], ty: &[u8], out: &mut [u8]) -> u64 {
+    // SAFETY: `vesper_migrate_migrate_render_decl_struct_field` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(name, |view_name| vesper_port_abi::with_slice(ty, |view_ty| vesper_port_abi::with_slice_mut(out, |view_out| unsafe { vesper_migrate_migrate_render_decl_struct_field(view_name, view_ty, view_out) })));
     raw as u64
 }
 
