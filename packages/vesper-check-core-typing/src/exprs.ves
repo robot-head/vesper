@@ -396,7 +396,6 @@ pub struct Ck {
     // checked, or NO_ELEMENT_VIEW (`Checker::element_view`).
     element_view: u8,
     out: ChunkSeq[u8],
-    atomic_sym: u32,
     // The function being checked returns `Str`: string literals are static
     // text (`Checker::static_text`).
     static_text: bool,
@@ -495,7 +494,6 @@ pub fn ck_new(sink ctx: Ctx) -> Ck {
         lent_closure: NONE64,
         element_view: NO_ELEMENT_VIEW,
         out: ChunkSeq::new[u8](),
-        atomic_sym: 0,
         static_text: false,
         fn_result: NONE32,
         returned: NONE32,
@@ -513,8 +511,6 @@ pub fn ck_new(sink ctx: Ctx) -> Ck {
     };
     let pats = pats_new(inout ck.ctx.names);
     ck.pats = pats;
-    let atomic = ck.ctx.names.intern(in "Atomic".as_bytes());
-    ck.atomic_sym = atomic;
     let range = ck.ctx.names.intern(in "Range".as_bytes());
     ck.range_sym = range;
     // Pattern 0, the wildcard, has no extras.
@@ -1159,7 +1155,6 @@ fn foreign(in ck: Ck, ty: u32) -> bool {
             || name == known.box_
             || name == known.region_box
             || name == known.dyn_
-            || name == ck.atomic_sym
         {
             return true;
         }
