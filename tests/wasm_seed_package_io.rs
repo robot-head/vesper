@@ -2813,6 +2813,10 @@ const STAGE2_PACKAGES_COVERED_ELSEWHERE: &[(&str, &str)] = &[
         "the formatting action of `vesper lsp` (#1828 part 11a) in the JIT beside Rust's (tests/self_host_lsp_features.rs); it calls @vesper/fmt, which hashes with C BLAKE3 (@vesper-std/hash-sys), which a Wasm entry does not have",
     ),
     (
+        "vesper-native-lib",
+        "a library's native object built in Vesper over @vesper/cranelift (bootstrap switch slice 2a, #2349), compared with `vesper build --lib` in the JIT (crates/vesper-codegen-swap-test/tests/self_host_native_lib.rs); built under Stage 2 with the Cranelift component in bootstrap switch slice 3",
+    ),
+    (
         "vesper-proof-audit",
         "`vesper proof-audit` as a native executable beside Rust's (tests/self_host_proof_audit.rs); it hashes with C BLAKE3 (@vesper-std/hash-sys) and runs Lean, neither of which a Wasm entry has",
     ),
