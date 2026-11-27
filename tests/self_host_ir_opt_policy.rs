@@ -84,7 +84,7 @@ fn inputs_where(keep: &dyn Fn(usize) -> bool) -> Vec<Input> {
             });
         }
     }
-    for c in ir_cases_where(1, |i| keep(i)) {
+    for c in ir_cases_where(1, keep) {
         if c.name.contains("#m") {
             out.push(Input {
                 name: c.name,
