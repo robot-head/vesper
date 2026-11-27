@@ -467,7 +467,7 @@ fn win64_leaf_mixed_registers_and_stack_match_cranelift() {
 
 #[cfg(all(target_arch = "x86_64", target_os = "linux"))]
 #[test]
-fn win64_direct_calls_match_cranelift_with_register_cycles_and_stack_arguments() {
+fn win64_calls_match_cranelift_with_register_cycles_and_stack_arguments() {
     use cranelift_codegen::{
         ir::{AbiParam, InstBuilder, types},
         isa::CallConv,
@@ -477,6 +477,16 @@ fn win64_direct_calls_match_cranelift_with_register_cycles_and_stack_arguments()
     use cranelift_module::Module;
 
     type Entry = unsafe extern "win64" fn(u64, f64, u64, f64, u64, f32, f64) -> f64;
+    type RegisterTarget =
+        unsafe extern "win64" fn(*const u8, u64, f64, u64, f64, u64, f32, f64) -> f64;
+    type StackTarget =
+        unsafe extern "win64" fn(u64, f64, u64, f64, u64, f32, f64, *const u8) -> f64;
+    #[derive(Clone, Copy, Debug)]
+    enum Target {
+        Direct,
+        Register,
+        Stack,
+    }
     let mut jit =
         JITModule::new(JITBuilder::new(cranelift_module::default_libcall_names()).unwrap());
     let mut signature = jit.make_signature();
@@ -517,43 +527,119 @@ fn win64_direct_calls_match_cranelift_with_register_cycles_and_stack_arguments()
     b.finalize();
     jit.define_function(callee, &mut callee_ctx).unwrap();
 
-    let mut caller_ctx = jit.make_context();
-    caller_ctx.func.signature = signature;
-    let callee_ref = jit.declare_func_in_func(callee, &mut caller_ctx.func);
-    let mut frontend = FunctionBuilderContext::new();
-    let mut b = FunctionBuilder::new(&mut caller_ctx.func, &mut frontend);
-    let entry = b.create_block();
-    b.append_block_params_for_function_params(entry);
-    b.switch_to_block(entry);
-    let [a, x, c, y, e, z, w] = *b.block_params(entry) else {
-        unreachable!()
-    };
-    let call = b.ins().call(callee_ref, &[c, y, a, x, e, z, w]);
-    let result = b.inst_results(call)[0];
-    // These two values must survive the GP and XMM argument permutations.
-    let across_call = b.ins().fcvt_from_uint(types::F64, a);
-    let result = b.ins().fadd(result, x);
-    let result = b.ins().fadd(result, across_call);
-    b.ins().return_(&[result]);
-    b.seal_all_blocks();
-    b.finalize();
-
-    let (functions, packet) = win64_function_pair(&mut jit, &mut caller_ctx);
-    let (code, unwind, relocations) = windows_packet(&packet);
-    assert!(!unwind.is_empty());
-    let ([offset, _, symbol], rest) = relocations.as_chunks::<MACHINE_WORD_BYTES>() else {
-        panic!("expected one Windows call relocation");
-    };
-    assert!(rest.is_empty());
-    assert_eq!(u64::from_le_bytes(*symbol), u64::from(callee.as_u32()));
     const CALL_REL32: u8 = 0xe8;
-    assert_eq!(code[u64::from_le_bytes(*offset) as usize - 1], CALL_REL32);
-    let [candidate, reference] =
-        functions.map(|pointer| unsafe { std::mem::transmute::<*const u8, Entry>(pointer) });
-    for a in [0, 3, 17, u64::MAX] {
-        for (x, y, z, w) in [(3.5, -1.75, 0.0, 7.0), (-0.0, 1.0, 123.25, -512.0)] {
-            let run = |f: Entry| unsafe { f(a, x, a / 2, y, 71, z, w) }.to_bits();
-            assert_eq!(run(candidate), run(reference));
+    const CALL_R11: [u8; 3] = [0x41, 0xff, 0xd3];
+    for target in [Target::Direct, Target::Register, Target::Stack] {
+        let mut caller_ctx = jit.make_context();
+        caller_ctx.func.signature = signature.clone();
+        match target {
+            Target::Direct => {}
+            Target::Register => caller_ctx
+                .func
+                .signature
+                .params
+                .insert(0, AbiParam::new(types::I64)),
+            Target::Stack => caller_ctx
+                .func
+                .signature
+                .params
+                .push(AbiParam::new(types::I64)),
+        }
+        let callee_ref = jit.declare_func_in_func(callee, &mut caller_ctx.func);
+        let callee_signature = caller_ctx.func.import_signature(signature.clone());
+        let mut frontend = FunctionBuilderContext::new();
+        let mut b = FunctionBuilder::new(&mut caller_ctx.func, &mut frontend);
+        let entry = b.create_block();
+        b.append_block_params_for_function_params(entry);
+        b.switch_to_block(entry);
+        let mut params = b.block_params(entry).to_vec();
+        let address = match target {
+            Target::Direct => None,
+            Target::Register => Some(params.remove(0)),
+            Target::Stack => params.pop(),
+        };
+        let [a, x, c, y, e, z, w] = *params.as_slice() else {
+            unreachable!()
+        };
+        let args = [c, y, a, x, e, z, w];
+        let call = if let Some(address) = address {
+            b.ins().call_indirect(callee_signature, address, &args)
+        } else {
+            b.ins().call(callee_ref, &args)
+        };
+        let result = b.inst_results(call)[0];
+        let result = if let Some(address) = address {
+            // The same target must survive the first call and its argument moves.
+            let single = b.ins().fdemote(types::F32, result);
+            let call = b.ins().call_indirect(
+                callee_signature,
+                address,
+                &[c, result, a, x, e, single, result],
+            );
+            b.inst_results(call)[0]
+        } else {
+            result
+        };
+        // These two values must survive the GP and XMM argument permutations.
+        let across_call = b.ins().fcvt_from_uint(types::F64, a);
+        let result = b.ins().fadd(result, x);
+        let result = b.ins().fadd(result, across_call);
+        b.ins().return_(&[result]);
+        b.seal_all_blocks();
+        b.finalize();
+
+        let (functions, packet) = win64_function_pair(&mut jit, &mut caller_ctx);
+        let (code, unwind, relocations) = windows_packet(&packet);
+        assert!(!unwind.is_empty());
+        if matches!(target, Target::Direct) {
+            let ([offset, _, symbol], rest) = relocations.as_chunks::<MACHINE_WORD_BYTES>() else {
+                panic!("expected one Windows call relocation");
+            };
+            assert!(rest.is_empty());
+            assert_eq!(u64::from_le_bytes(*symbol), u64::from(callee.as_u32()));
+            assert_eq!(code[u64::from_le_bytes(*offset) as usize - 1], CALL_REL32);
+        } else {
+            assert!(relocations.is_empty());
+            assert_eq!(
+                code.windows(CALL_R11.len())
+                    .filter(|bytes| *bytes == CALL_R11)
+                    .count(),
+                2
+            );
+        }
+        let address = jit.get_finalized_function(callee);
+        for a in [0, 3, 17, u64::MAX] {
+            for (x, y, z, w) in [(3.5, -1.75, 0.0, 7.0), (-0.0, 1.0, 123.25, -512.0)] {
+                let [candidate, reference] = functions.map(|f| unsafe {
+                    match target {
+                        Target::Direct => {
+                            std::mem::transmute::<*const u8, Entry>(f)(a, x, a / 2, y, 71, z, w)
+                        }
+                        Target::Register => std::mem::transmute::<*const u8, RegisterTarget>(f)(
+                            address,
+                            a,
+                            x,
+                            a / 2,
+                            y,
+                            71,
+                            z,
+                            w,
+                        ),
+                        Target::Stack => std::mem::transmute::<*const u8, StackTarget>(f)(
+                            a,
+                            x,
+                            a / 2,
+                            y,
+                            71,
+                            z,
+                            w,
+                            address,
+                        ),
+                    }
+                    .to_bits()
+                });
+                assert_eq!(candidate, reference, "{target:?} {a} {x} {y} {z} {w}");
+            }
         }
     }
     unsafe { jit.free_memory() };

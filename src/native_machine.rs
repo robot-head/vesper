@@ -1088,7 +1088,7 @@ impl IntegerBlocks<'_> {
         };
         let [argument_records, float_and_stack] =
             if signature.call_conv == CallConv::WindowsFastcall {
-                if !matches!(target, CallTarget::Direct(_)) || !windows_signature(signature) {
+                if !windows_signature(signature) {
                     return None;
                 }
                 for (&arg, param) in args.iter().zip(&signature.params) {
