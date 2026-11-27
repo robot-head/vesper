@@ -492,6 +492,59 @@ fn aarch64_wide_register_pairs_follow_the_target_calling_convention() {
 }
 
 #[test]
+fn aarch64_wide_stack_arguments_load_both_halves_from_aligned_slots() {
+    use cranelift_codegen::ir::{AbiParam, Function, InstBuilder, types};
+    use cranelift_codegen::isa::CallConv;
+    use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
+
+    const LDR_X0_SP: u32 = 0xf940_03e0;
+    const LDR_X1_SP_8: u32 = 0xf940_07e1;
+    const LDR_X0_SP_16: u32 = 0xf940_0be0;
+    const LDR_X1_SP_24: u32 = 0xf940_0fe1;
+    const GP_ARGUMENT_REGISTERS: usize = 8;
+    let fixture = [
+        types::I128,
+        types::I128,
+        types::I128,
+        types::I64,
+        types::I128,
+    ];
+    let mut aligned = vec![types::I64; GP_ARGUMENT_REGISTERS];
+    aligned.extend([types::I8, types::I128, types::I64]);
+    let mut ambiguous = fixture.to_vec();
+    ambiguous.push(types::I64);
+    for call_conv in [CallConv::SystemV, CallConv::AppleAarch64] {
+        for (params, expected) in [
+            (fixture.as_slice(), Some([LDR_X0_SP, LDR_X1_SP_8, RET])),
+            (&aligned, Some([LDR_X0_SP_16, LDR_X1_SP_24, RET])),
+            (&ambiguous, None),
+        ] {
+            let mut function = Function::new();
+            function.signature.call_conv = call_conv;
+            function.signature.params = params.iter().copied().map(AbiParam::new).collect();
+            function.signature.returns.push(AbiParam::new(types::I128));
+            let mut context = FunctionBuilderContext::new();
+            let mut builder = FunctionBuilder::new(&mut function, &mut context);
+            let block = builder.create_block();
+            builder.append_block_params_for_function_params(block);
+            builder.switch_to_block(block);
+            builder.seal_block(block);
+            let last_wide = params.iter().rposition(|&ty| ty == types::I128).unwrap();
+            let wide = builder.block_params(block)[last_wide];
+            builder.ins().return_(&[wide]);
+            builder.finalize();
+
+            let code = native::machine::aarch64_leaf_words(&function)
+                .map(|words| binding::aarch64_integer_leaf(&words));
+            assert_eq!(
+                code,
+                expected.map(|words| words.map(u32::to_le_bytes).concat())
+            );
+        }
+    }
+}
+
+#[test]
 fn aarch64_stack_argument_offsets_follow_the_target_calling_convention() {
     use cranelift_codegen::ir::{AbiParam, Function, InstBuilder, types};
     use cranelift_codegen::isa::CallConv;

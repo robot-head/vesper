@@ -333,6 +333,7 @@ enum Aarch64Argument {
     Gp(usize),
     Float(usize),
     Stack(usize),
+    StackPair(usize),
 }
 
 struct Aarch64Arguments {
@@ -348,32 +349,52 @@ fn aarch64_arguments(params: &[AbiParam], convention: CallConv) -> Option<Aarch6
         fp: 0,
     };
     let mut stack: usize = 0;
+    let mut wide_on_stack = false;
     for param in params {
         let ty = param.value_type;
-        if *param != AbiParam::new(ty) {
+        let wide = ty == types::I128;
+        let float = float_width(ty).is_some();
+        if *param != AbiParam::new(ty) || (!wide && !float && integer_width(ty).is_none()) {
             return None;
         }
-        let location = if ty == types::I128 {
+        let register = if wide {
             // AAPCS64 aligns pairs to an even register. Apple packs them.
             let first = if convention == CallConv::SystemV {
                 args.gp.next_multiple_of(WIDE_INTEGER_CELLS)
             } else {
                 args.gp
             };
-            args.gp = first + WIDE_INTEGER_CELLS;
-            if args.gp > AARCH64_GP_ARGUMENTS {
+            let end = first + WIDE_INTEGER_CELLS;
+            if end <= AARCH64_GP_ARGUMENTS {
+                args.gp = end;
+                Some(Aarch64Argument::Gp(first))
+            } else {
+                wide_on_stack = true;
+                None
+            }
+        } else if float {
+            if args.fp < AARCH64_FP_ARGUMENTS {
+                let register = args.fp;
+                args.fp += 1;
+                Some(Aarch64Argument::Float(register))
+            } else {
+                None
+            }
+        } else if args.gp < AARCH64_GP_ARGUMENTS {
+            // Cranelift may still assign x7 after a wide stack argument. Keep
+            // the fallback for this signature because AAPCS64 exhausts the bank.
+            if wide_on_stack {
                 return None;
             }
-            Aarch64Argument::Gp(first)
-        } else if float_width(ty).is_some() && args.fp < AARCH64_FP_ARGUMENTS {
-            let register = args.fp;
-            args.fp += 1;
-            Aarch64Argument::Float(register)
-        } else if integer_width(ty).is_some() && args.gp < AARCH64_GP_ARGUMENTS {
             let register = args.gp;
             args.gp += 1;
-            Aarch64Argument::Gp(register)
-        } else if float_width(ty).is_some() || integer_width(ty).is_some() {
+            Some(Aarch64Argument::Gp(register))
+        } else {
+            None
+        };
+        if let Some(register) = register {
+            args.locations.push(register);
+        } else {
             let bytes = ty.bytes() as usize;
             let slot = if convention == CallConv::AppleAarch64 {
                 bytes
@@ -385,11 +406,12 @@ fn aarch64_arguments(params: &[AbiParam], convention: CallConv) -> Option<Aarch6
             if stack > STACK_PROBE_INTERVAL {
                 return None;
             }
-            Aarch64Argument::Stack(offset)
-        } else {
-            return None;
-        };
-        args.locations.push(location);
+            args.locations.push(if wide {
+                Aarch64Argument::StackPair(offset)
+            } else {
+                Aarch64Argument::Stack(offset)
+            });
+        }
     }
     Some(args)
 }
@@ -525,6 +547,17 @@ fn entry_values(blocks: &mut IntegerBlocks<'_>, block: Block) -> Option<Values> 
                     } else {
                         (IntegerOp::StackArgument, offset, integer_width(ty)?)
                     }
+                }
+                Aarch64Argument::StackPair(offset) => {
+                    values.low[value] = Some(blocks.append(
+                        IntegerOp::StackArgument,
+                        [offset as u64, 0, INTEGER_CELL_BITS],
+                    ));
+                    values.high[value] = Some(blocks.append(
+                        IntegerOp::StackArgument,
+                        [(offset + size_of::<u64>()) as u64, 0, INTEGER_CELL_BITS],
+                    ));
+                    continue;
                 }
             };
             values.low[value] = Some(blocks.append(op, [offset as u64, 0, width]));
@@ -908,6 +941,21 @@ impl IntegerBlocks<'_> {
                     let width = integer_width(ty).or_else(|| float_width(ty))?;
                     self.append(IntegerOp::CallStackArgument, [low, offset as u64, width]);
                     stack += 1;
+                }
+                Aarch64Argument::StackPair(offset) => {
+                    self.append(
+                        IntegerOp::CallStackArgument,
+                        [low, offset as u64, INTEGER_CELL_BITS],
+                    );
+                    self.append(
+                        IntegerOp::CallStackArgument,
+                        [
+                            values.high[arg]?,
+                            (offset + size_of::<u64>()) as u64,
+                            INTEGER_CELL_BITS,
+                        ],
+                    );
+                    stack += WIDE_INTEGER_CELLS;
                 }
             }
         }
@@ -2541,6 +2589,7 @@ impl IntegerBlocks<'_> {
 /// from the ABI's floating-point argument bank and occupies a normal value ID.
 /// AArch64 interleaves StackArgument and FloatStackArgument in this entry prefix.
 /// Each binds a value at its byte offset from the caller's stack pointer.
+/// A stacked i128 occupies two consecutive integer records.
 /// A trailing FloatReturn selects the ABI's single floating-point result.
 /// SymbolRelative and SymbolGot read the data symbol ID from the left operand.
 /// A labeled function starts with BlockLabel after the stack declarations
