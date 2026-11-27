@@ -101,6 +101,9 @@ const PROBE_ROUNDS: u64 = 4;
 // not ported (`Bind`).
 const CONTINUATION: u32 = 4294967294;
 
+// `arrays::TABLE_PREFIX`: a lowered constant table read's callee prefix.
+const TABLE_PREFIX: Str = "$table$";
+
 // The place primitives of `seq::resolve` (`SeqOp::Swap`, `SeqOp::Replace`)
 // and their operand count.
 const SWAP: Str = "swap";
@@ -3010,6 +3013,32 @@ fn value_call(inout ck: Ck, ex: Ex, expected: u32) -> u32 {
     result
 }
 
+// `arrays::table_function`: the index of the constant function a
+// `$table$NAME` callee reads, or NONE32.
+fn table_function(inout ck: Ck, name: u32) -> u32 {
+    let mut text = ChunkSeq::new[u8]();
+    ck.ctx.names.write(name, inout text);
+    let mut prefix = ChunkSeq::new[u8]();
+    prefix.extend(in TABLE_PREFIX.as_bytes());
+    if text.len() <= prefix.len() {
+        return NONE32;
+    }
+    for i in 0..prefix.len() {
+        if u8_at(in text, i) != u8_at(in prefix, i) {
+            return NONE32;
+        }
+    }
+    let mut rest = ChunkSeq::new[u8]();
+    for i in prefix.len()..text.len() {
+        rest.push(u8_at(in text, i));
+    }
+    let constant = ck.ctx.names.lookup(in rest.as_slice());
+    if constant == NONE32 {
+        return NONE32;
+    }
+    fn_index(in ck, constant)
+}
+
 // Whether `ty` mentions `Slice` anywhere (`seq::mentions_slice`).
 fn mentions_slice(in ck: Ck, ty: u32) -> bool {
     let node = ck.ctx.types.node(ty);
@@ -3185,6 +3214,14 @@ fn call_expr(inout ck: Ck, ex: Ex, expected: u32) -> u32 {
     }
     if callee_index == NONE32 && is_qualified(in ck, callee.x, "ChunkSeq::with_capacity") {
         return seq_new(inout ck, ex, true, expected);
+    }
+    if callee_index == NONE32 {
+        // A constant table read (`arrays::lower_world`) is a call of its
+        // constant function, as the checker saw it before lowering.
+        let table = table_function(inout ck, callee.x);
+        if table != NONE32 {
+            return apply(inout ck, ck.fsig(table), ex, NONE32, expected);
+        }
     }
     if callee_index == NONE32 && is_qualified(in ck, callee.x, SWAP) {
         return place_primitive(inout ck, ex, true);
