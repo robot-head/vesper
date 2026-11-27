@@ -249,6 +249,7 @@ fn aarch64_pair_calls_keep_the_high_result_when_the_low_result_is_unused() {
 #[test]
 fn aarch64_integer_division_checks_zero_and_signed_overflow() {
     const CBNZ_X1_OVER_TRAP: u32 = 0xb500_0041;
+    const CBZ_X1_TO_SHARED_SDIV_TRAP: u32 = 0xb400_0081;
     const CBNZ_W1_OVER_TRAP: u32 = 0x3500_0041;
     const UDF: u32 = 0x0000_c11f;
     const CMN_X1_1: u32 = 0xb100_043f;
@@ -269,8 +270,7 @@ fn aarch64_integer_division_checks_zero_and_signed_overflow() {
             .collect::<Vec<_>>()
     };
     let signed_checks = [
-        CBNZ_X1_OVER_TRAP,
-        UDF,
+        CBZ_X1_TO_SHARED_SDIV_TRAP,
         CMN_X1_1,
         CCMP_X0_1,
         BVC_OVER_TRAP,

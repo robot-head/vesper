@@ -58,6 +58,7 @@ const BRANCH_REGISTER: u32 = 0xd61f0000;
 // Use the same undefined instruction as Cranelift for hosted traps.
 const TRAP_INSTRUCTION: u32 = 0xc11f;
 const SKIP_TRAP_DISPLACEMENT: u32 = 2;
+const SIGNED_DIV_TRAP_DISPLACEMENT: u32 = 4;
 const CSDB: u32 = 0xd503229f;
 // ADR points past itself and the three remaining dispatch instructions.
 const ADR_TABLE: u32 = 0x10000080;
@@ -652,9 +653,10 @@ fn operands(in r: Record, returns: u64) -> Option[u64] {
 fn division_checks(inout out: ChunkSeq[u8], in r: Record, lhs: u32, rhs: u32) {
     let reg_mask = scalar_opcode_mask(r.extra);
     let skip = sh(SKIP_TRAP_DISPLACEMENT, BRANCH_IMM19_SHIFT);
-    push32(inout out, (BRANCH_IF_NOT_ZERO & reg_mask) | skip | rhs);
-    push32(inout out, TRAP_INSTRUCTION);
     if r.op == SIGNED_DIV {
+        // The zero check branches straight to the same trap as overflow.
+        let trap = sh(SIGNED_DIV_TRAP_DISPLACEMENT, BRANCH_IMM19_SHIFT);
+        push32(inout out, (BRANCH_IF_ZERO & reg_mask) | trap | rhs);
         // Only a divisor of -1 can overflow. For that divisor, subtracting
         // one from the dividend sets V precisely when the dividend is MIN.
         push32(inout out, (CMN_IMM & reg_mask) | sh(1, IMM12_SHIFT) | sh(rhs, RN_SHIFT));
@@ -663,8 +665,10 @@ fn division_checks(inout out: ChunkSeq[u8], in r: Record, lhs: u32, rhs: u32) {
             (CCMP_IMM & reg_mask) | sh(1, RM_SHIFT) | sh(EQ, CONDITION_SHIFT) | sh(lhs, RN_SHIFT)
         );
         push32(inout out, BRANCH_IF_CONDITION | skip | VC);
-        push32(inout out, TRAP_INSTRUCTION);
+    } else {
+        push32(inout out, (BRANCH_IF_NOT_ZERO & reg_mask) | skip | rhs);
     }
+    push32(inout out, TRAP_INSTRUCTION);
 }
 
 fn emit_instruction(
