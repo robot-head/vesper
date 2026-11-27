@@ -10,6 +10,7 @@
 //   match coverage (E0212).
 // - floats.ves: the float intrinsics (math, conversions, bit
 //   reinterpretation).
+// - vectors.ves: the reserved `Vec::`, `Mask::` and `Isa::` intrinsics.
 //
 // The entries below are the differential's tasks.
 

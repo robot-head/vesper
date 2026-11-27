@@ -32,8 +32,9 @@ use self::floats::{float_call, retype_float_literal};
 use self::methods::{
     inherent_index, is_qualified, is_str, is_string, peek_type, receiver_type, seq_method, seq_new,
     view_place, index_expr, string_comparison, string_literal, string_method, text_operand,
-    conversion_call, conversion_of, is_conversion, element_view_scrutinee
+    conversion_call, conversion_of, is_conversion, element_view_scrutinee, seq_finish
 };
+use self::vectors::{vector_call};
 
 const NONE32: u32 = 4294967295;
 const NONE64: u64 = 18446744073709551615;
@@ -144,6 +145,8 @@ const TABLE_PREFIX: Str = "$table$";
 // and their operand count.
 const SWAP: Str = "swap";
 const REPLACE: Str = "replace";
+// `ChunkSeq::finish(s)`: consumes an empty sequence.
+const SEQ_FINISH: Str = "ChunkSeq::finish";
 const PLACE_PRIMITIVE_OPERANDS: u32 = 2;
 
 // The length of `::` in an `Eff::op` name.
@@ -1153,8 +1156,6 @@ fn foreign(in ck: Ck, ty: u32) -> bool {
         let known = ck.ctx.world.k;
         let name = node.name;
         if name == known.tiled_seq
-            || name == known.vec
-            || name == known.mask
             || name == known.box_
             || name == known.region_box
             || name == known.dyn_
@@ -4443,6 +4444,15 @@ fn call_expr(inout ck: Ck, ex: Ex, expected: u32) -> u32 {
     }
     if callee_index == NONE32 && is_qualified(in ck, callee.x, "ChunkSeq::with_capacity") {
         return seq_new(inout ck, ex, true, expected);
+    }
+    if callee_index == NONE32 && is_qualified(in ck, callee.x, SEQ_FINISH) {
+        return seq_finish(inout ck, ex);
+    }
+    if callee_index == NONE32 {
+        let vector_ty = vector_call(inout ck, ex, callee.x, expected);
+        if vector_ty != NONE32 {
+            return vector_ty;
+        }
     }
     if callee_index == NONE32 {
         // A constant table read (`arrays::lower_world`) is a call of its
