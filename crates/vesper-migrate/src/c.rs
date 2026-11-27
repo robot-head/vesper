@@ -1530,6 +1530,13 @@ pub fn analyze_header(
 }
 
 /// Whether `text` contains a typedef whose declared name is `name`.
+#[cfg(feature = "vesper-port")]
+fn redefines(text: &str, name: &str) -> bool {
+    crate::binding::migrate_redefines(text.as_bytes(), name.as_bytes())
+}
+
+/// Whether `text` contains a typedef whose declared name is `name`.
+#[cfg(not(feature = "vesper-port"))]
 fn redefines(text: &str, name: &str) -> bool {
     text.split(';').any(|stmt| {
         let s = stmt.trim();
