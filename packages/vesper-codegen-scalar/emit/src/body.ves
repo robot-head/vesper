@@ -93,6 +93,8 @@ const IEX_BIT_BINARY: u64 = 3;
 const IEX_BITWISE: u64 = 4;
 const IEX_SDIV: u64 = 5;
 const IEX_SREM: u64 = 6;
+const IEX_UDIV: u64 = 7;
+const IEX_UREM: u64 = 8;
 
 // Sub-operations of `INST_WRITE_OP`.
 const WOP_IADD: u64 = 1;
@@ -119,6 +121,7 @@ const CB_FLOAT_UNARY: u64 = 5;
 const CB_WIDE_BIT: u64 = 6;
 const CB_BITWISE: u64 = 7;
 const CB_WIDE_CONVERT: u64 = 8;
+const CB_WIDEN_U64: u64 = 9;
 
 // Bit builtin and bitwise intrinsic codes.
 const BIT_OP_CLZ: u64 = 1;
@@ -916,6 +919,20 @@ impl Body {
                 let rhs = operand(inout b, rv, k1, self.optimize);
                 let raw = ins_srem(inout b, lhs, rhs);
                 coerce(inout b, raw, rk, self.optimize)
+            } else if iex == IEX_UDIV {
+                let lv = temp(inout b, x);
+                let rv = temp(inout b, y);
+                let lhs = operand(inout b, lv, k0, self.optimize);
+                let rhs = operand(inout b, rv, k1, self.optimize);
+                let raw = ins_udiv(inout b, lhs, rhs);
+                coerce(inout b, raw, rk, self.optimize)
+            } else if iex == IEX_UREM {
+                let lv = temp(inout b, x);
+                let rv = temp(inout b, y);
+                let lhs = operand(inout b, lv, k0, self.optimize);
+                let rhs = operand(inout b, rv, k1, self.optimize);
+                let raw = ins_urem(inout b, lhs, rhs);
+                coerce(inout b, raw, rk, self.optimize)
             } else {
                 return false;
             }
@@ -988,6 +1005,8 @@ impl Body {
                 coerce(inout b, raw, site_kind, self.optimize)
             } else if cb == CB_WIDE_CONVERT {
                 emit_wide_unary(inout b, WUN_CONVERT, sub, meta, a0, self.optimize)
+            } else if cb == CB_WIDEN_U64 {
+                a0
             } else if cb == CB_FMA {
                 Value { id: Cranelift::vcl_ternary(inout b, Ternary::Fma, a0.id, a1.id, a2.id) }
             } else if cb == CB_FMIN {
