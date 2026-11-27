@@ -338,8 +338,11 @@ const PROGRAMS: &[(&str, &str)] = &[
          fn main() -> (i64, i64, i64, i64) { (name(0), name(1), name(255), name(7)) }",
     ),
     (
+        // Spins in a loop, not by recursion: ten million frames of the
+        // Rust evaluator's stack took 7 GB, enough to kill the run on a
+        // 15 GB host. The small-fuel configs still cut recursion short.
         "unbounded",
-        "fn spin(n: i64) -> i64 { spin(wrapping_add(n, 1)) } fn main() -> i64 { spin(0) }",
+        "fn main() -> i64 { let mut n = 0; loop { n = wrapping_add(n, 1); } n }",
     ),
     (
         "options",
