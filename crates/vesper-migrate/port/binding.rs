@@ -35,7 +35,9 @@ unsafe extern "C" {
     fn vesper_migrate_migrate_render_report_refusal(item: *mut u64, reason: *mut u64, detail: *mut u64, out: *mut u64) -> i64;
     fn vesper_migrate_migrate_render_rty_vesper(kind: i64, array_len: i64, head: *mut u64, args_buf: *mut u64, args_starts: *mut u64, args_lens: *mut u64, out: *mut u64) -> i64;
     fn vesper_migrate_migrate_render_sys_value(kind: i64, payload: *mut u64, out: *mut u64) -> i64;
+    fn vesper_migrate_migrate_render_vsys_fn(name: *mut u64, params_buf: *mut u64, params_starts: *mut u64, params_lens: *mut u64, result: *mut u64, out: *mut u64) -> i64;
     fn vesper_migrate_migrate_render_vsys_link_block(flags: i64, link_name: *mut u64, blake3_bytes: *mut u64, header: *mut u64, pkg_config: *mut u64, out: *mut u64) -> i64;
+    fn vesper_migrate_migrate_render_vsys_param(kind: i64, access_kw: *mut u64, name: *mut u64, ty: *mut u64, out: *mut u64) -> i64;
     fn vesper_migrate_migrate_render_vsys_preamble(schema: *mut u64, origin: *mut u64, library: *mut u64, target_triple: *mut u64, abi_name: *mut u64, out: *mut u64) -> i64;
     fn vesper_migrate_migrate_render_wire_field(kind: i64, signed: i64, endian: i64, num: i64, name: *mut u64, out: *mut u64) -> i64;
     fn vesper_migrate_migrate_safe_idents_underscores(buf: *mut u64, starts: *mut u64, lens: *mut u64, out_underscores: *mut u64) -> i64;
@@ -254,12 +256,30 @@ pub fn migrate_render_sys_value(kind: u8, payload: &[u8], out: &mut [u8]) -> u64
     raw as u64
 }
 
+/// Calls `migrate_render_vsys_fn` of the Vesper library `migrate` (`vesper_migrate_migrate_render_vsys_fn`).
+pub fn migrate_render_vsys_fn(name: &[u8], params_buf: &[u8], params_starts: &[u64], params_lens: &[u64], result: &[u8], out: &mut [u8]) -> u64 {
+    // SAFETY: `vesper_migrate_migrate_render_vsys_fn` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(name, |view_name| vesper_port_abi::with_slice(params_buf, |view_params_buf| vesper_port_abi::with_slice(params_starts, |view_params_starts| vesper_port_abi::with_slice(params_lens, |view_params_lens| vesper_port_abi::with_slice(result, |view_result| vesper_port_abi::with_slice_mut(out, |view_out| unsafe { vesper_migrate_migrate_render_vsys_fn(view_name, view_params_buf, view_params_starts, view_params_lens, view_result, view_out) }))))));
+    raw as u64
+}
+
 /// Calls `migrate_render_vsys_link_block` of the Vesper library `migrate` (`vesper_migrate_migrate_render_vsys_link_block`).
 pub fn migrate_render_vsys_link_block(flags: u8, link_name: &[u8], blake3_bytes: &[u8], header: &[u8], pkg_config: &[u8], out: &mut [u8]) -> u64 {
     // SAFETY: `vesper_migrate_migrate_render_vsys_link_block` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
     let raw = vesper_port_abi::with_slice(link_name, |view_link_name| vesper_port_abi::with_slice(blake3_bytes, |view_blake3_bytes| vesper_port_abi::with_slice(header, |view_header| vesper_port_abi::with_slice(pkg_config, |view_pkg_config| vesper_port_abi::with_slice_mut(out, |view_out| unsafe { vesper_migrate_migrate_render_vsys_link_block(flags as i64, view_link_name, view_blake3_bytes, view_header, view_pkg_config, view_out) })))));
+    raw as u64
+}
+
+/// Calls `migrate_render_vsys_param` of the Vesper library `migrate` (`vesper_migrate_migrate_render_vsys_param`).
+pub fn migrate_render_vsys_param(kind: u8, access_kw: &[u8], name: &[u8], ty: &[u8], out: &mut [u8]) -> u64 {
+    // SAFETY: `vesper_migrate_migrate_render_vsys_param` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(access_kw, |view_access_kw| vesper_port_abi::with_slice(name, |view_name| vesper_port_abi::with_slice(ty, |view_ty| vesper_port_abi::with_slice_mut(out, |view_out| unsafe { vesper_migrate_migrate_render_vsys_param(kind as i64, view_access_kw, view_name, view_ty, view_out) }))));
     raw as u64
 }
 
