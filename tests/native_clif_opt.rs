@@ -1269,3 +1269,47 @@ fn main() -> u64 {
         "expected struct field iadd_imm offsets to fold directly into load/store offsets:\n{fn_clif}"
     );
 }
+
+#[test]
+fn cse_local_pure_deduplicates_strided_index_and_stack_addr() {
+    let source = "
+fn set_three(inout s: ChunkSeq[u64], idx: u64, a: u64, b: u64, c: u64) -> u64 {
+    let _ = s.try_set(wrapping_add(wrapping_mul(idx, 8), 4), a);
+    let _ = s.try_set(wrapping_add(wrapping_mul(idx, 8), 5), b);
+    let _ = s.try_set(wrapping_add(wrapping_mul(idx, 8), 6), c);
+    idx
+}
+
+fn main() -> u64 {
+    let mut s: ChunkSeq[u64] = ChunkSeq::new();
+    let mut i = 0;
+    loop {
+        if i >= 16 {
+            break;
+        }
+        s.push(0);
+        i = wrapping_add(i, 1);
+    }
+    let _ = set_three(inout s, 1, 10, 20, 30);
+    match s.try_get(12) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}";
+    let c = accepted(source);
+    let (_, clif) = native::object(&c.world, "main").unwrap();
+    let eval = vesper::runtime::Runtime::new(&c.world)
+        .run("main", vec![])
+        .unwrap();
+    let jit = native::jit(&c.world, "main").unwrap();
+    assert_eq!(eval.to_string(), jit.to_string());
+    let fn_clif = clif
+        .split("\n; ")
+        .find(|s| s.starts_with("set_three\n"))
+        .unwrap_or(&clif);
+    let stack_addrs = fn_clif.matches("stack_addr").count();
+    assert!(
+        stack_addrs <= 1,
+        "expected duplicate stack_addr in set_three to be deduplicated (got {stack_addrs}):\n{fn_clif}"
+    );
+}

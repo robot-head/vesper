@@ -86,6 +86,7 @@ pub fn run(func: &mut ir::Function) {
     merge_blocks(func);
     canonicalize_imm_ops(func);
     fold_load_store_offsets(func);
+    cse_local_pure(func);
     dense_icmp_chains_to_br_table(func);
     remove_dead(func);
     sink_slot_inits(func);
@@ -5438,6 +5439,134 @@ fn fold_load_store_offsets(func: &mut ir::Function) {
                 }
             }
             _ => {}
+        }
+    }
+}
+
+/// Intra-block pure CSE for `StackAddr`, `Unary` integer casts/negations,
+/// `Binary` / `BinaryImm64` integer ops, and `IntCompare` / `IntCompareImm`
+/// (excluding `Iconst` so constant live ranges are never extended).
+fn cse_local_pure(func: &mut ir::Function) {
+    #[derive(Clone, Copy, PartialEq, Eq, Hash)]
+    enum PureKey {
+        StackAddr(StackSlot, i32, Type),
+        Unary(Opcode, Value, Type),
+        Binary(Opcode, Value, Value, Type),
+        BinaryImm(Opcode, Value, i64, Type),
+        Icmp(ir::condcodes::IntCC, Value, Value),
+        IcmpImm(ir::condcodes::IntCC, Value, i64),
+    }
+
+    let blocks: Vec<Block> = func.layout.blocks().collect();
+    for block in blocks {
+        let mut seen: HashMap<PureKey, Value> = HashMap::new();
+        let block_insts: Vec<Inst> = func.layout.block_insts(block).collect();
+        for inst in block_insts {
+            let Some(&dest) = func.dfg.inst_results(inst).first() else {
+                continue;
+            };
+            if func.dfg.inst_results(inst).len() != 1 {
+                continue;
+            }
+            let ty = func.dfg.value_type(dest);
+            let key = match func.dfg.insts[inst] {
+                InstructionData::StackLoad {
+                    opcode: Opcode::StackAddr,
+                    stack_slot,
+                    offset,
+                } => Some(PureKey::StackAddr(stack_slot, i32::from(offset), ty)),
+                InstructionData::Unary {
+                    opcode:
+                        op @ (Opcode::Uextend
+                        | Opcode::Sextend
+                        | Opcode::Ireduce
+                        | Opcode::Bnot
+                        | Opcode::Ineg),
+                    arg,
+                } => Some(PureKey::Unary(op, func.dfg.resolve_aliases(arg), ty)),
+                InstructionData::Binary {
+                    opcode:
+                        op @ (Opcode::Iadd
+                        | Opcode::Isub
+                        | Opcode::Imul
+                        | Opcode::Band
+                        | Opcode::Bor
+                        | Opcode::Bxor
+                        | Opcode::Ishl
+                        | Opcode::Ushr
+                        | Opcode::Sshr),
+                    args: [lhs, rhs],
+                } => {
+                    let a = func.dfg.resolve_aliases(lhs);
+                    let b = func.dfg.resolve_aliases(rhs);
+                    let (a, b) = if matches!(
+                        op,
+                        Opcode::Iadd | Opcode::Imul | Opcode::Band | Opcode::Bor | Opcode::Bxor
+                    ) && a.as_u32() > b.as_u32()
+                    {
+                        (b, a)
+                    } else {
+                        (a, b)
+                    };
+                    Some(PureKey::Binary(op, a, b, ty))
+                }
+                InstructionData::BinaryImm64 {
+                    opcode:
+                        op @ (Opcode::IaddImm
+                        | Opcode::ImulImm
+                        | Opcode::BandImm
+                        | Opcode::BorImm
+                        | Opcode::BxorImm
+                        | Opcode::IshlImm
+                        | Opcode::UshrImm
+                        | Opcode::SshrImm),
+                    arg,
+                    imm,
+                } => Some(PureKey::BinaryImm(
+                    op,
+                    func.dfg.resolve_aliases(arg),
+                    imm.bits(),
+                    ty,
+                )),
+                InstructionData::IntCompare {
+                    opcode: Opcode::Icmp,
+                    cond,
+                    args: [lhs, rhs],
+                } => {
+                    let a = func.dfg.resolve_aliases(lhs);
+                    let b = func.dfg.resolve_aliases(rhs);
+                    let (a, b) = if matches!(
+                        cond,
+                        ir::condcodes::IntCC::Equal | ir::condcodes::IntCC::NotEqual
+                    ) && a.as_u32() > b.as_u32()
+                    {
+                        (b, a)
+                    } else {
+                        (a, b)
+                    };
+                    Some(PureKey::Icmp(cond, a, b))
+                }
+                InstructionData::IntCompareImm {
+                    opcode: Opcode::IcmpImm,
+                    cond,
+                    arg,
+                    imm,
+                } => Some(PureKey::IcmpImm(
+                    cond,
+                    func.dfg.resolve_aliases(arg),
+                    imm.bits(),
+                )),
+                _ => None,
+            };
+            if let Some(k) = key {
+                if let Some(&prev) = seen.get(&k) {
+                    func.dfg.detach_inst_results(inst);
+                    func.layout.remove_inst(inst);
+                    func.dfg.change_to_alias(dest, prev);
+                } else {
+                    seen.insert(k, dest);
+                }
+            }
         }
     }
 }
