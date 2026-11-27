@@ -140,7 +140,8 @@ pub const M_ENDIAN: u64 = 4;
 pub const M_LITTLE: u64 = 8;
 pub const M_NOTRAP: u64 = 16;
 pub const M_ALIGNED: u64 = 32;
-// The alias region plus one (0: none) sits at this shift, under this mask.
+// The alias region (0: none, then heap, table, vmctx) sits at this shift,
+// under this mask.
 pub const M_REGION_SHIFT: u64 = 6;
 pub const M_REGION_MASK: u64 = 192;
 

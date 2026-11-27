@@ -73,6 +73,7 @@ fn at(in a: ChunkSeq[u64], p: u64) -> u64 {
 const WORD_BYTES_SHIFT: u32 = 3;
 const WORD_BYTES_MASK: u64 = 7;
 const BYTE_BITS_SHIFT: u32 = 3;
+const BYTE_SHIFT: u32 = 8;
 
 // The word after the string at `p` (its length, then its words).
 fn str_end(in a: ChunkSeq[u64], p: u64) -> u64 {
@@ -91,8 +92,23 @@ fn str_byte(in a: ChunkSeq[u64], p: u64, i: u64) -> u8 {
 fn str_bytes(in a: ChunkSeq[u64], p: u64) -> ChunkSeq[u8] {
     let len = at(in a, p);
     let mut o = ChunkSeq::with_capacity[u8](len);
-    for i in 0..len {
-        o.push(str_byte(in a, p, i));
+    let mut wi = inc(p);
+    let full = wrapping_shr_u64(len, WORD_BYTES_SHIFT);
+    for _ in 0..full {
+        let mut w = at(in a, wi);
+        wi = inc(wi);
+        for _ in 0..WORD_BYTES {
+            o.push(wrapping_u8(w & BYTE_MASK));
+            w = wrapping_shr_u64(w, BYTE_SHIFT);
+        }
+    }
+    let rem = len & WORD_BYTES_MASK;
+    if rem != 0 {
+        let mut w = at(in a, wi);
+        for _ in 0..rem {
+            o.push(wrapping_u8(w & BYTE_MASK));
+            w = wrapping_shr_u64(w, BYTE_SHIFT);
+        }
     }
     o
 }

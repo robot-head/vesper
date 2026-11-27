@@ -1151,3 +1151,51 @@ fn localize_diagnostic_matches_rust() {
     let want_json = serde_json::Value::Array(want_arr).to_string();
     assert_eq!(got_json, want_json);
 }
+
+#[test]
+fn windows_lld_link_candidates_match_rust() {
+    let entry = driver().entry("windows_lld_link_candidates_words", true);
+
+    // Test both Windows (`w`) and Unix (`u`) PATH splitting.
+    let win_input = "wC:\\LLVM\\bin;\"C:\\Program Files\\LLVM\\bin\";;D:\\tools\\";
+    let words = entry.words(win_input.as_bytes());
+    let mut at = 0;
+    let got_win = String::from_utf8(unpack(&words, &mut at)).unwrap();
+    let got_msg = String::from_utf8(unpack(&words, &mut at)).unwrap();
+    assert_eq!(at, words.len());
+    assert_eq!(
+        got_win,
+        [
+            "C:\\LLVM\\bin\\lld-link",
+            "C:\\Program Files\\LLVM\\bin\\lld-link",
+            "D:\\tools\\lld-link",
+            "C:\\LLVM\\bin\\lld-link.exe",
+            "C:\\Program Files\\LLVM\\bin\\lld-link.exe",
+            "D:\\tools\\lld-link.exe",
+        ]
+        .join("\0")
+    );
+    assert_eq!(
+        got_msg,
+        "install the Visual Studio C++ build tools (x64), put lld-link on PATH, or pass --linker <path>"
+    );
+
+    let unix_input = "u/usr/bin:/opt/llvm/bin/:";
+    let uwords = entry.words(unix_input.as_bytes());
+    let mut uat = 0;
+    let got_unix = String::from_utf8(unpack(&uwords, &mut uat)).unwrap();
+    let _msg = unpack(&uwords, &mut uat);
+    assert_eq!(uat, uwords.len());
+    assert_eq!(
+        got_unix,
+        [
+            "/usr/bin/lld-link",
+            "/opt/llvm/bin/lld-link",
+            "lld-link",
+            "/usr/bin/lld-link.exe",
+            "/opt/llvm/bin/lld-link.exe",
+            "lld-link.exe",
+        ]
+        .join("\0")
+    );
+}
