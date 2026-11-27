@@ -156,6 +156,11 @@ pub const E_JUMP: u64 = 11;
 pub const E_FCONST: u64 = 12;
 pub const E_ARGS: u64 = 13;
 pub const E_SLOT_SIZE: u64 = 14;
+pub const E_REMOVE_PARAM: u64 = 15;
+pub const E_ALIAS: u64 = 16;
+pub const E_MOVE_INST: u64 = 17;
+pub const E_REMOVE_DEST_ARG: u64 = 18;
+pub const E_INS_BEFORE: u64 = 19;
 
 // A sized stack slot's kind.
 pub const S_EXPLICIT: u64 = 0;

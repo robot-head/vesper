@@ -9,13 +9,13 @@
 // caller runs Rust's.
 //
 // Part 1: remove_unreachable, float_constants, fold_constant_branches,
-// shrink_unused_slots.
+// shrink_unused_slots. Part 2: merge_blocks, remove_constant_params.
 
-use @vesper/clif::{Func, n32, read_func, u32_at, w};
+use @vesper/clif::{Func, inc, n32, read_func, u32_at, w};
 use @vesper/clif::codes::{
     CC_EQ, CC_NE, F_STACK_SLOT, NONE, OP_BAND, OP_BITCAST, OP_BOR, OP_BRIF, OP_BXOR, OP_F32CONST,
-    OP_F64CONST, OP_FADD, OP_FMUL, OP_ICMP_IMM, OP_ICONST, OP_IREDUCE, OP_UEXTEND, TY_F128, TY_F16,
-    TY_F32, TY_F64, TY_I128, TY_I16, TY_I32, TY_I64, TY_I8
+    OP_F64CONST, OP_FADD, OP_FMUL, OP_ICMP_IMM, OP_ICONST, OP_IREDUCE, OP_JUMP, OP_UEXTEND, TY_F128,
+    TY_F16, TY_F32, TY_F64, TY_I128, TY_I16, TY_I32, TY_I64, TY_I8
 };
 
 // Step codes (the test maps `STEPS` names to them). 0 is a step not
@@ -24,6 +24,8 @@ pub const STEP_REMOVE_UNREACHABLE: u64 = 1;
 pub const STEP_FLOAT_CONSTANTS: u64 = 2;
 pub const STEP_FOLD_CONSTANT_BRANCHES: u64 = 3;
 pub const STEP_SHRINK_UNUSED_SLOTS: u64 = 4;
+pub const STEP_MERGE_BLOCKS: u64 = 5;
+pub const STEP_REMOVE_CONSTANT_PARAMS: u64 = 6;
 
 // The answer's first word.
 pub const PORTED: u64 = 1;
@@ -31,6 +33,9 @@ pub const NOT_PORTED: u64 = 0;
 
 // The bytes of the step word ahead of the function words.
 const STEP_BYTES: u64 = 8;
+
+// `remove_constant_params` stops after this many rounds.
+const MAX_CONST_PARAM_ROUNDS: u64 = 16;
 
 // `constant_with` gives up past this depth.
 const MAX_CONST_DEPTH: u64 = 8;
@@ -341,6 +346,268 @@ fn shrink_unused_slots(inout f: Func) {
     }
 }
 
+// Every block in layout order.
+fn layout_blocks(in f: Func) -> ChunkSeq[u32] {
+    let mut out = ChunkSeq::new[u32]();
+    let mut b = f.first_block();
+    loop {
+        if b == NONE {
+            break;
+        }
+        out.push(b);
+        b = f.next_block(b);
+    }
+    out
+}
+
+// How many destinations of instructions in the layout name each block.
+fn pred_counts(in f: Func) -> ChunkSeq[u32] {
+    let mut preds = ChunkSeq::new[u32]();
+    preds.resize(f.nblocks(), 0);
+    let all = layout_insts(in f);
+    for k in 0..all.len() {
+        let i = u32_at(in all, k);
+        for d in 0..f.ndests(i) {
+            let b = w(f.dest_block(i, d));
+            let n = u32_at(in preds, b);
+            let ok = preds.try_set(b, wrapping_add(n, 1));
+        }
+    }
+    preds
+}
+
+// The parameters of `b`.
+fn params_of(in f: Func, b: u32) -> ChunkSeq[u32] {
+    let mut out = ChunkSeq::new[u32]();
+    for k in 0..f.nparams(b) {
+        out.push(f.param(b, k));
+    }
+    out
+}
+
+// `merge_blocks`: a block reached only by a `jump` from one other block
+// joins that block. The predecessor counts are the ones before any merge.
+fn merge_blocks(inout f: Func) {
+    let preds = pred_counts(in f);
+    let entry = f.first_block();
+    let blocks = layout_blocks(in f);
+    for q in 0..blocks.len() {
+        let a = u32_at(in blocks, q);
+        if !f.blk(w(a)).placed {
+            continue;
+        }
+        loop {
+            let last = f.last_inst(a);
+            if last == NONE || f.op(last) != OP_JUMP {
+                break;
+            }
+            let b = f.dest_block(last, 0);
+            if b == a || b == entry || u32_at(in preds, w(b)) != 1 {
+                break;
+            }
+            let mut args = ChunkSeq::new[u32]();
+            let mut values = true;
+            for k in 0..f.dest_nargs(last, 0) {
+                let v = f.dest_arg(last, 0, k);
+                if v == NONE {
+                    values = false;
+                }
+                args.push(v);
+            }
+            if !values {
+                break;
+            }
+            let params = params_of(in f, b);
+            f.remove_inst(last);
+            let n = if params.len() < args.len() {
+                params.len()
+            } else {
+                args.len()
+            };
+            let mut j = n;
+            loop {
+                if j == 0 {
+                    break;
+                }
+                j = wrapping_sub(j, 1);
+                let p = u32_at(in params, j);
+                f.remove_param(p);
+                f.alias(p, u32_at(in args, j));
+            }
+            let mut moved = ChunkSeq::new[u32]();
+            let mut i = f.first_inst(b);
+            loop {
+                if i == NONE {
+                    break;
+                }
+                moved.push(i);
+                i = f.next_inst(i);
+            }
+            for k in 0..moved.len() {
+                f.move_to_bottom(u32_at(in moved, k), a);
+            }
+            f.remove_block_edit(b);
+        }
+    }
+}
+
+fn is_int_type(ty: u64) -> bool {
+    ty == TY_I8 || ty == TY_I16 || ty == TY_I32 || ty == TY_I64
+}
+
+// The incoming edges of every block, as (instruction, destination) pairs
+// in layout order: block `b`'s are `at[b]..at[b + 1]` of `inst`/`dest`.
+struct Edges {
+    at: ChunkSeq[u64],
+    inst: ChunkSeq[u32],
+    dest: ChunkSeq[u64],
+}
+
+fn edges_of(in f: Func) -> Edges {
+    let nb = f.nblocks();
+    let all = layout_insts(in f);
+    let mut at = ChunkSeq::new[u64]();
+    at.resize(inc(nb), 0);
+    for k in 0..all.len() {
+        let i = u32_at(in all, k);
+        for d in 0..f.ndests(i) {
+            let b = inc(w(f.dest_block(i, d)));
+            let ok = at.try_set(b, inc(at.try_get(b).unwrap_or(0)));
+        }
+    }
+    for b in 0..nb {
+        let sum = wrapping_add(at.try_get(b).unwrap_or(0), at.try_get(inc(b)).unwrap_or(0));
+        let ok = at.try_set(inc(b), sum);
+    }
+    let total = at.try_get(nb).unwrap_or(0);
+    let mut fill = ChunkSeq::new[u64]();
+    fill.extend(in at.as_slice());
+    let mut e = Edges { at: at, inst: ChunkSeq::new[u32](), dest: ChunkSeq::new[u64]() };
+    e.inst.resize(total, NONE);
+    e.dest.resize(total, 0);
+    for k in 0..all.len() {
+        let i = u32_at(in all, k);
+        for d in 0..f.ndests(i) {
+            let b = w(f.dest_block(i, d));
+            let slot = fill.try_get(b).unwrap_or(0);
+            let ok = e.inst.try_set(slot, i);
+            let ok2 = e.dest.try_set(slot, d);
+            let ok3 = fill.try_set(b, inc(slot));
+        }
+    }
+    e
+}
+
+// `remove_constant_params`: a block parameter that receives one value on
+// every edge (or itself, around a loop), or one integer constant, becomes
+// an alias of that value or of a new `iconst` at the top of its block.
+fn remove_constant_params(inout f: Func) {
+    let entry = f.first_block();
+    for _ in 0..MAX_CONST_PARAM_ROUNDS {
+        let e = edges_of(in f);
+        let mut changed = false;
+        let blocks = layout_blocks(in f);
+        for q in 0..blocks.len() {
+            let block = u32_at(in blocks, q);
+            if block == entry {
+                continue;
+            }
+            let lo = e.at.try_get(w(block)).unwrap_or(0);
+            let hi = e.at.try_get(inc(w(block))).unwrap_or(0);
+            if lo == hi {
+                continue;
+            }
+            let params = params_of(in f, block);
+            let mut i = params.len();
+            loop {
+                if i == 0 {
+                    break;
+                }
+                i = wrapping_sub(i, 1);
+                let p = u32_at(in params, i);
+                let p_ty = f.value_type(p);
+                let mut only_val = NONE;
+                let mut only_const = none();
+                let mut saw_non_self = false;
+                let mut same_val = true;
+                let mut same_const = is_int_type(p_ty);
+                for x in lo..hi {
+                    let inst = u32_at(in e.inst, x);
+                    let k = e.dest.try_get(x).unwrap_or(0);
+                    let a = if i < f.dest_nargs(inst, k) {
+                        f.dest_arg(inst, k, i)
+                    } else {
+                        NONE
+                    };
+                    if a == NONE {
+                        same_val = false;
+                        same_const = false;
+                    } else {
+                        let v = f.resolve(a);
+                        if v == p {
+                            continue;
+                        }
+                        saw_non_self = true;
+                        if only_val == NONE {
+                            only_val = v;
+                        } else if only_val != v {
+                            same_val = false;
+                        }
+                        if same_const {
+                            let c = constant(in f, v, 1);
+                            if !c.some {
+                                same_const = false;
+                            } else if !only_const.some {
+                                only_const = c;
+                            } else if only_const.v != c.v {
+                                same_const = false;
+                            }
+                        }
+                    }
+                    if !same_val && !same_const {
+                        break;
+                    }
+                }
+                if !saw_non_self || (!same_val && !same_const) {
+                    continue;
+                }
+                let mut replacement = only_val;
+                if !same_val {
+                    let first = f.first_inst(block);
+                    if !only_const.some || first == NONE {
+                        continue;
+                    }
+                    let none_args = ChunkSeq::new[u32]();
+                    let none_dests = ChunkSeq::new[u32]();
+                    let made = f.ins_before(
+                        first,
+                        OP_ICONST,
+                        p_ty,
+                        0,
+                        only_const.v,
+                        0,
+                        0,
+                        in none_args,
+                        in none_dests
+                    );
+                    replacement = f.result(made, 0);
+                }
+                for x in lo..hi {
+                    let inst = u32_at(in e.inst, x);
+                    let k = e.dest.try_get(x).unwrap_or(0);
+                    f.remove_dest_arg(inst, k, i);
+                }
+                f.remove_param(p);
+                f.alias(p, replacement);
+                changed = true;
+            }
+        }
+        if !changed {
+            return;
+        }
+    }
+}
+
 // One step on one function: the step code, then the function's words.
 // Answers `PORTED` and the edit script, or `NOT_PORTED`.
 pub fn clif_opt_words(in input: Str) -> ChunkSeq[u64] {
@@ -350,7 +617,9 @@ pub fn clif_opt_words(in input: Str) -> ChunkSeq[u64] {
     let ported = step == STEP_REMOVE_UNREACHABLE
         || step == STEP_FLOAT_CONSTANTS
         || step == STEP_FOLD_CONSTANT_BRANCHES
-        || step == STEP_SHRINK_UNUSED_SLOTS;
+        || step == STEP_SHRINK_UNUSED_SLOTS
+        || step == STEP_MERGE_BLOCKS
+        || step == STEP_REMOVE_CONSTANT_PARAMS;
     if !ported || bytes.len() < STEP_BYTES {
         out.push(NOT_PORTED);
         return out;
@@ -364,8 +633,12 @@ pub fn clif_opt_words(in input: Str) -> ChunkSeq[u64] {
         float_constants(inout f);
     } else if step == STEP_FOLD_CONSTANT_BRANCHES {
         fold_constant_branches(inout f);
-    } else {
+    } else if step == STEP_SHRINK_UNUSED_SLOTS {
         shrink_unused_slots(inout f);
+    } else if step == STEP_MERGE_BLOCKS {
+        merge_blocks(inout f);
+    } else {
+        remove_constant_params(inout f);
     }
     out.push(PORTED);
     let script = f.script();

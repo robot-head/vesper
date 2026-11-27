@@ -28,6 +28,8 @@ const PORTED: &[(&str, u64)] = &[
     ("float_constants", 2),
     ("fold_constant_branches", 3),
     ("shrink_unused_slots", 4),
+    ("merge_blocks", 5),
+    ("remove_constant_params", 6),
 ];
 
 /// The package's answer word for a step it ran.
