@@ -2756,6 +2756,13 @@ const COMPILER_PACKAGES: &[(&str, &str, &str, &str, CompilerExecCheck)] = &[
         CompilerExecCheck::NonZero,
     ),
     (
+        "run",
+        "@vesper/run",
+        "packages/vesper-run",
+        "run_words(in \"\".as_bytes()).len()",
+        CompilerExecCheck::CompileOnly,
+    ),
+    (
         "verify",
         "@vesper/verify",
         "packages/vesper-verify",
@@ -2809,22 +2816,13 @@ const STAGE2_CRANELIFT_PACKAGES: &[(&str, &str, &str, &str)] = &[
 /// Compiler packages Stage 2 cannot build yet: (stem, package, path, probe
 /// `src/lib.ves`, reason). `stage2_self_compilation_fixed_point` checks that
 /// each one still fails, so a gap that closes moves into [`COMPILER_PACKAGES`].
-const STAGE2_PACKAGE_GAPS: &[(&str, &str, &str, &str, &str)] = &[
-    (
-        "run",
-        "@vesper/run",
-        "packages/vesper-run",
-        "use @vesper/run::run_words;\npub fn main() -> u64 { run_words(in \"\".as_bytes()).len() }\n",
-        "the `vesper run` evaluator's floats (slice 8 of #2053) use `f32` and the float intrinsics (`nearest_f32`, `widen_f64`, `to_bits_*`, `from_bits_*`), which @vesper/wasm-backend does not lower yet (WErr Unsupported ExternalFunction nearest_f32 in machine::coerce)",
-    ),
-    (
-        "driver-commands",
-        "@vesper/driver-commands",
-        "packages/vesper-driver-commands",
-        "use @vesper/driver-commands::run;\nuse @vesper/driver::args_new;\npub fn main() -> u64 eff [Ffi[StdFs], Ffi[StdEnv], Ffi[StdProcess], Ffi[HybridCommands]] { let a = args_new(); wrapping_u64(run(in a)) }\n",
-        "its printing and help go through the HybridCommands import, which only the hybrid compiler's Rust implements (crates/vesper-hybrid/src/commands.rs): the Wasm entry cannot carry Ffi[HybridCommands] (WErr Entry). Both @vesper-std/process (src-wasip2, #1928) and @vesper-std/hash-sys (src-wasip2, #2323) build for WASI",
-    ),
-];
+const STAGE2_PACKAGE_GAPS: &[(&str, &str, &str, &str, &str)] = &[(
+    "driver-commands",
+    "@vesper/driver-commands",
+    "packages/vesper-driver-commands",
+    "use @vesper/driver-commands::run;\nuse @vesper/driver::args_new;\npub fn main() -> u64 eff [Ffi[StdFs], Ffi[StdEnv], Ffi[StdProcess], Ffi[HybridCommands]] { let a = args_new(); wrapping_u64(run(in a)) }\n",
+    "its printing and help go through the HybridCommands import, which only the hybrid compiler's Rust implements (crates/vesper-hybrid/src/commands.rs): the Wasm entry cannot carry Ffi[HybridCommands] (WErr Entry). Both @vesper-std/process (src-wasip2, #1928) and @vesper-std/hash-sys (src-wasip2, #2323) build for WASI",
+)];
 
 /// Directories under `packages/` that are in none of [`COMPILER_PACKAGES`],
 /// [`STAGE2_CRANELIFT_PACKAGES`] and [`STAGE2_PACKAGE_GAPS`], with where they
@@ -3415,7 +3413,82 @@ pub fn main() -> u64 {
         assert_eq!(lhs_lit_got, 38);
         remove_stage2_sidecars(&host_wasm);
 
+        // Verify `f32` values, the float conversions and bit
+        // reinterpretations, and the bitwise intrinsics (#2375) against the
+        // evaluator.
+        let float_manifest = "[package]\nname = \"@vesper-test/stage2-floats\"\nversion = \"0.1.0\"\nedition = \"2026\"\n";
+        let float_code =
+            compile_wrap(float_manifest, STAGE2_FLOAT_SMOKE).expect("compile float smoke");
+        let float_note = read_stage2_sidecar_notes(&host_wasm);
+        assert_eq!(float_code, 0, "float smoke failed: {float_note}");
+        let float_bytes = std::fs::read(&host_wasm).unwrap_or_default();
+        assert!(float_bytes.starts_with(b"\0asm\x0d\x00\x01\x00"));
+        let float_got = run(&float_bytes, &Ctx::default()).expect("run float smoke");
+        let float_expected = evaluate(check(STAGE2_FLOAT_SMOKE).world());
+        assert_eq!(
+            float_got.to_string(),
+            float_expected,
+            "float smoke vs the evaluator"
+        );
+        remove_stage2_sidecars(&host_wasm);
+
         let _ = std::fs::remove_file(&syms_path);
         std::fs::remove_dir_all(dir).unwrap();
     });
 }
+
+/// `f32` arithmetic, comparisons, `%` and negation, `f32` literals and
+/// literal patterns, `widen_f64`, `nearest_f32`/`nearest_f64` from floats
+/// and integers, `to_bits_*`/`from_bits_*`, and `bit_*` on several kinds
+/// (#2375), folded into one word.
+const STAGE2_FLOAT_SMOKE: &str = "\
+fn mix(acc: u64, x: u64) -> u64 { wrapping_add(wrapping_mul(acc, 1000003), x) }
+fn b32(x: f32) -> u64 { widen_u64(to_bits_f32(x)) }
+fn b64(x: f64) -> u64 { to_bits_f64(x) }
+fn is_half(x: f32) -> u64 { match x { 0.5 => 1, _ => 0 } }
+fn eq32(a: f32, b: f32) -> u64 { if a == b { 1 } else { 0 } }
+pub fn main() -> u64 {
+    let a: f32 = 1.1;
+    let b: f32 = 3.0;
+    let tiny = from_bits_f32(1);
+    let nan = from_bits_f32(2143289344);
+    let neg_zero: f32 = -0.0;
+    let mut h: u64 = 7;
+    h = mix(h, b32(a + b));
+    h = mix(h, b32(a - b));
+    h = mix(h, b32(a * b));
+    h = mix(h, b32(a / b));
+    h = mix(h, b32(b % a));
+    h = mix(h, b32(-a));
+    h = mix(h, b32(tiny * b));
+    h = mix(h, if a < b { 1 } else { 2 });
+    h = mix(h, if a >= b { 3 } else { 4 });
+    h = mix(h, eq32(nan, nan));
+    h = mix(h, eq32(neg_zero, 0.0));
+    h = mix(h, is_half(0.5));
+    h = mix(h, is_half(a));
+    h = mix(h, b64(widen_f64(a)));
+    h = mix(h, b32(nearest_f32(0.1)));
+    h = mix(h, b32(nearest_f32(16777217)));
+    let big: u64 = 18446744073709551615;
+    let neg: i64 = -9007199254740993;
+    h = mix(h, b32(nearest_f32(big)));
+    h = mix(h, b64(nearest_f64(big)));
+    h = mix(h, b64(nearest_f64(neg)));
+    h = mix(h, b32(nearest_f32(neg)));
+    h = mix(h, b64(from_bits_f64(4614253070214989087) * 2.0));
+    let x: u32 = 2863311530;
+    let y: u32 = 4042322160;
+    h = mix(h, widen_u64(bit_and(x, y)));
+    h = mix(h, widen_u64(bit_or(x, y)));
+    h = mix(h, widen_u64(bit_xor(x, y)));
+    h = mix(h, widen_u64(bit_shl(x, 36)));
+    h = mix(h, widen_u64(bit_shr(x, 33)));
+    let s: i64 = -12345;
+    h = mix(h, wrapping_u64(bit_shr(s, 65)));
+    h = mix(h, wrapping_u64(bit_shl(s, 3)));
+    let k: u8 = 200;
+    h = mix(h, widen_u64(bit_shl(k, 9)));
+    h
+}
+";

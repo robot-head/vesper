@@ -335,14 +335,43 @@ fn conv_prefix_len(in names: Names, sym: u32) -> u64 {
         7
     } else if names.has_prefix(sym, in "wrapping_".as_bytes()) {
         9
+    } else if names.has_prefix(sym, in NEAREST_PREFIX.as_bytes()) {
+        NEAREST_PREFIX_LEN
     } else {
         0
     }
 }
 
+// The float conversions and bit reinterpretations (#2375): `nearest_<f>`
+// rounds to the float kind `f`, `to_bits_<f>` gives `f`'s bits and
+// `from_bits_<f>` reads them.
+const NEAREST_PREFIX: Str = "nearest_";
+const NEAREST_PREFIX_LEN: u64 = 8;
+
+// The result type of `to_bits_<f>` or `from_bits_<f>`, or `NONE32`.
+fn bits_target_type(inout tc: Tc, sym: u32) -> u32 {
+    let k = tc.world.k;
+    let ksym = if is_op(in tc, sym, in "to_bits_f32") {
+        k.u32_
+    } else if is_op(in tc, sym, in "to_bits_f64") {
+        k.u64_
+    } else if is_op(in tc, sym, in "from_bits_f32") {
+        k.f32_
+    } else if is_op(in tc, sym, in "from_bits_f64") {
+        k.f64_
+    } else {
+        return NONE32;
+    };
+    tc.types.named0(ksym)
+}
+
 /// Returns the target scalar type for `widen_*`, `narrow_*`, or `wrapping_<int_kind>`,
 /// or `NONE32` if `sym` is not an integer-width conversion builtin.
 fn conv_target_type(inout tc: Tc, sym: u32) -> u32 {
+    let bits_ty = bits_target_type(inout tc, sym);
+    if bits_ty != NONE32 {
+        return bits_ty;
+    }
     let off = conv_prefix_len(in tc.names, sym);
     if off == 0 {
         return NONE32;
@@ -375,6 +404,10 @@ fn conv_target_type(inout tc: Tc, sym: u32) -> u32 {
         k.isize_
     } else if sym_slice_eq(in tc.names, sym, off, in "i128") {
         k.i128_
+    } else if sym_slice_eq(in tc.names, sym, off, in "f32") {
+        k.f32_
+    } else if sym_slice_eq(in tc.names, sym, off, in "f64") {
+        k.f64_
     } else {
         NONE32
     };
@@ -406,6 +439,11 @@ fn is_same_int_op(in tc: Tc, sym: u32) -> bool {
         || is_op(in tc, sym, in "rem")
         || is_op(in tc, sym, in "min_u64")
         || is_op(in tc, sym, in "max_u64")
+        || is_op(in tc, sym, in "bit_and")
+        || is_op(in tc, sym, in "bit_or")
+        || is_op(in tc, sym, in "bit_xor")
+        || is_op(in tc, sym, in "bit_shl")
+        || is_op(in tc, sym, in "bit_shr")
 }
 
 fn join_method_sym(inout names: Names, tname: u32, mname: u32) -> u32 {
@@ -544,7 +582,13 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
         if e.a == Lit::Bool {
             tc.bool_ty
         } else if e.a == Lit::Float {
-            tc.f64_ty
+            // An unsuffixed float literal checked as an `f32` is an `f32`
+            // (the nearest one to its `f64` value).
+            if expected == tc.types.named0(tc.world.k.f32_) {
+                expected
+            } else {
+                tc.f64_ty
+            }
         } else if e.a == Lit::String {
             if expected == tc.types.named0(tc.world.k.string) {
                 expected

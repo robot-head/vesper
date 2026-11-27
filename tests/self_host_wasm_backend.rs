@@ -139,14 +139,16 @@ fn loop_refusal(e: &WasmError) -> bool {
 }
 
 /// Rust's refusal of an operation: loops, and the sequence, string and
-/// integer conversion operations the port lowers (#1506), and of `u128`,
-/// which the port lowers as a 16-byte block (#1508).
+/// integer conversion operations the port lowers (#1506), of `u128`,
+/// which the port lowers as a 16-byte block (#1508), and of `f32`, which
+/// the port lowers as a word of binary32 bits (#2375).
 fn operation_refusal(e: &WasmError) -> bool {
     matches!(
         e,
         WasmError::Unsupported {
             construct: wasm_backend::Unsupported::Operation
-                | wasm_backend::Unsupported::IntegerWidth,
+                | wasm_backend::Unsupported::IntegerWidth
+                | wasm_backend::Unsupported::Float32,
             ..
         }
     )
@@ -171,16 +173,42 @@ fn same_run(wasm: &str, evaluator: &str) -> bool {
     if wasm == "[]" {
         return evaluator == "()";
     }
-    let inner = wasm
-        .strip_prefix('[')
-        .and_then(|w| w.strip_suffix(']'))
-        .and_then(|w| w.split_once('('))
-        .and_then(|(_, v)| v.strip_suffix(')'));
-    match inner {
+    let inner = wasm.strip_prefix('[').and_then(|w| w.strip_suffix(']'));
+    match inner.and_then(val_display) {
         Some(v) => v == evaluator,
-        // Not a scalar: only a trap on both sides counts as equal here.
+        // Not a scalar or a tuple of them: only a trap on both sides counts
+        // as equal here.
         None => false,
     }
+}
+
+/// The evaluator's display of one wasmtime `Val` printed with `{:?}`: a
+/// scalar (`U64(3)`, `Bool(true)`) or a tuple of them (`Tuple([..])`, now
+/// that the port lowers `f32` programs whose `main` returns one, #2375).
+fn val_display(debug: &str) -> Option<String> {
+    let (name, rest) = debug.split_once('(')?;
+    let body = rest.strip_suffix(')')?;
+    if name != "Tuple" {
+        return Some(body.to_string());
+    }
+    let items = body.strip_prefix('[')?.strip_suffix(']')?;
+    let mut parts = vec![];
+    let (mut depth, mut start) = (0usize, 0usize);
+    for (i, c) in items.char_indices() {
+        match c {
+            '(' | '[' => depth += 1,
+            ')' | ']' => depth -= 1,
+            ',' if depth == 0 => {
+                parts.push(val_display(items[start..i].trim())?);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    if !items.trim().is_empty() {
+        parts.push(val_display(items[start..].trim())?);
+    }
+    Some(format!("({})", parts.join(", ")))
 }
 
 fn error_class(e: &WasmError) -> String {
