@@ -7,9 +7,9 @@ use self::x86_64::{
     NEG_EXTENSION, NOT_EXTENSION, OR_RM_R64, R10, R11, RAX, RDX, RSP, SAR_EXTENSION, SHL_EXTENSION,
     SHR_EXTENSION, SBB_RM_R64, SUB_RM_R64, UNASSIGNED, XOR_RM_R64, ALL_REGISTER_CODES,
     REGISTER_CODES, arg_register, emit, emit_direct_call, emit_jump_table, emit_jump_table_entry,
-    emit_symbol_address, find_register, fits_signed_byte, patch_forward_branch,
-    patch_relative_branch, patch_relative_offset, register_bit, home_register, xmm_home_register,
-    HOME_REGISTERS
+    emit_symbol_address, callee_saved_registers, find_callee_saved_register, find_register,
+    fits_signed_byte, patch_forward_branch, patch_relative_branch, patch_relative_offset,
+    register_bit, home_register, xmm_home_register, HOME_REGISTERS
 };
 
 // Integer block opcodes shared with src/native_machine.rs.
@@ -240,8 +240,8 @@ struct Allocation {
     saved_masks: ChunkSeq[u32],
     local_frame: u64,
     save_frame: u64,
-    home_save_frame: u64,
-    home_mask: u32,
+    callee_save_frame: u64,
+    callee_save_mask: u32,
 }
 
 fn word_at(in words: Slice[u64], position: u64) -> u64 {
@@ -1262,20 +1262,21 @@ fn allocate(
     } else {
         gp_reserved
     };
-    let mut home_mask: u32 = 0;
-    let mut gp_home_slots: u64 = 0;
+    let mut callee_save_mask: u32 = 0;
+    let mut callee_save_slots: u64 = 0;
     let xmm_homes = frame.single_homes | frame.double_homes;
     for home in 0..frame.promoted {
         let bit = register_bit(wrapping_u8(home));
         if (frame.gp_homes & bit) != 0 {
-            home_mask = home_mask | register_bit(home_register(home));
-            gp_home_slots = wrapping_add(gp_home_slots, 1);
+            callee_save_mask = callee_save_mask | register_bit(home_register(home));
+            callee_save_slots = wrapping_add(callee_save_slots, 1);
         }
         if (xmm_homes & bit) != 0 {
             reserved = reserved | register_bit(xmm_home_register(home));
         }
     }
-    let mut used = reserved;
+    let mut used = reserved | callee_save_mask;
+    let callee_saved = callee_saved_registers();
     let register_codes = if frame.floating {
         ALL_REGISTER_CODES
     } else {
@@ -1349,7 +1350,7 @@ fn allocate(
         );
         if call || fixed {
             let clobbers = if call {
-                ~reserved
+                ~callee_saved
             } else {
                 register_bit(RAX) | register_bit(RDX)
             };
@@ -1397,12 +1398,24 @@ fn allocate(
         } else {
             find_register(used)
         };
+        // The retry uses unused nonvolatile GPRs before spilling. Save
+        // each register once in the prologue, including any CFG homes.
+        let register = if register == UNASSIGNED && spills && !floating && result_live {
+            find_callee_saved_register(used)
+        } else {
+            register
+        };
         used = survivors;
         let location = if has_no_result(record.op) || ((call || fixed || atomic) && !result_live) {
             Location::Absent
         } else if register != UNASSIGNED {
             if result_live {
-                used = used | register_bit(register);
+                let bit = register_bit(register);
+                used = used | bit;
+                if (callee_saved & bit) != 0 && (callee_save_mask & bit) == 0 {
+                    callee_save_mask = callee_save_mask | bit;
+                    callee_save_slots = wrapping_add(callee_save_slots, 1);
+                }
             }
             Location::Register(register)
         } else if !spills {
@@ -1441,10 +1454,10 @@ fn allocate(
     }
     let mut stack_end = wrapping_add(spill_base, wrapping_mul(spill_ends.len(), SPILL_SLOT_BYTES));
     let save_bytes = wrapping_mul(save_slots, SPILL_SLOT_BYTES);
-    let home_save_bytes = wrapping_mul(gp_home_slots, SPILL_SLOT_BYTES);
+    let callee_save_bytes = wrapping_mul(callee_save_slots, SPILL_SLOT_BYTES);
     let mut local_frame = frame.outgoing;
     let mut save_frame = stack_end;
-    let mut home_save_frame = wrapping_add(stack_end, save_bytes);
+    let mut callee_save_frame = wrapping_add(stack_end, save_bytes);
     if save_slots != 0
         && !fits_signed_byte(wrapping_u32(save_frame))
         && fits_signed_byte(wrapping_u32(frame.outgoing))
@@ -1456,13 +1469,13 @@ fn allocate(
             STACK_ALIGNMENT
         );
         let shift = wrapping_sub(shifted_local_frame, frame.outgoing);
-        let shifted_home_save = wrapping_add(stack_end, shift);
-        if aligned_frame_size(wrapping_add(shifted_home_save, home_save_bytes))
+        let shifted_callee_save = wrapping_add(stack_end, shift);
+        if aligned_frame_size(wrapping_add(shifted_callee_save, callee_save_bytes))
             <= STACK_PROBE_INTERVAL
         {
             local_frame = shifted_local_frame;
             save_frame = frame.outgoing;
-            home_save_frame = shifted_home_save;
+            callee_save_frame = shifted_callee_save;
             if spills {
                 for value in arguments..wrapping_add(arguments, count) {
                     match assigned(in locations, value) {
@@ -1476,7 +1489,7 @@ fn allocate(
             }
         }
     }
-    stack_end = wrapping_add(home_save_frame, home_save_bytes);
+    stack_end = wrapping_add(callee_save_frame, callee_save_bytes);
     let size = if stack_end == 0 && !has_calls {
         0
     } else {
@@ -1500,8 +1513,8 @@ fn allocate(
         saved_masks: saved_masks,
         local_frame: local_frame,
         save_frame: save_frame,
-        home_save_frame: home_save_frame,
-        home_mask: home_mask
+        callee_save_frame: callee_save_frame,
+        callee_save_mask: callee_save_mask
     })
 }
 
@@ -1585,7 +1598,7 @@ fn emit_return(
     inout output: ChunkSeq[u8],
     in low: Location,
     in high: Location,
-    frame_size: u32,
+    in allocation: Allocation,
     floating: bool
 ) {
     // Treat the ABI return registers as a parallel copy. Moving the high
@@ -1603,7 +1616,13 @@ fn emit_return(
         move_return(inout output, in low, RAX);
         move_return(inout output, in high, RDX);
     }
-    emit(inout output, in Instruction::FrameLeave(frame_size));
+    preserve_registers(
+        inout output,
+        allocation.callee_save_mask,
+        allocation.callee_save_frame,
+        true
+    );
+    emit(inout output, in Instruction::FrameLeave(allocation.frame_size));
     emit(inout output, in Instruction::Return);
 }
 
@@ -2006,9 +2025,9 @@ fn encode_block_pass(
 
     let mut output = ChunkSeq::new[u8]();
     emit(inout output, in Instruction::FrameEnter(frame_size));
-    let home_mask = allocation.home_mask;
-    if home_mask != 0 {
-        preserve_registers(inout output, home_mask, allocation.home_save_frame, false);
+    let callee_save_mask = allocation.callee_save_mask;
+    if callee_save_mask != 0 {
+        preserve_registers(inout output, callee_save_mask, allocation.callee_save_frame, false);
     }
     let mut branch_ends = ChunkSeq::new[u64]();
     let mut branch_depth: u64 = 0;
@@ -2214,10 +2233,7 @@ fn encode_block_pass(
                 } else {
                     Location::Absent
                 };
-                if home_mask != 0 {
-                    preserve_registers(inout output, home_mask, allocation.home_save_frame, true);
-                }
-                emit_return(inout output, in low, in high, frame_size, float_return);
+                emit_return(inout output, in low, in high, in allocation, float_return);
             }
             if record.op == BLOCK_RETURN {
                 continue;
@@ -2478,6 +2494,6 @@ fn encode_block_pass(
     } else {
         Location::Absent
     };
-    emit_return(inout output, in low, in high, frame_size, float_return);
+    emit_return(inout output, in low, in high, in allocation, float_return);
     output
 }

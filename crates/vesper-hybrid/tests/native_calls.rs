@@ -203,6 +203,73 @@ fn define_callable(
 }
 
 #[test]
+fn returning_a_callee_saved_temporary_preserves_its_value() {
+    const VALUES: usize = 12;
+    const REGISTER_PRESSURE_INDEX: usize = 4;
+    type Entry = unsafe extern "C" fn(*mut u64, u64) -> u64;
+    let mut module = jit_module();
+    let mut context = module.make_context();
+    context.func.signature.params = vec![AbiParam::new(types::I64); 2];
+    context
+        .func
+        .signature
+        .returns
+        .push(AbiParam::new(types::I64));
+    let mut state = FunctionBuilderContext::new();
+    let mut b = FunctionBuilder::new(&mut context.func, &mut state);
+    let entry = b.create_block();
+    b.append_block_params_for_function_params(entry);
+    b.switch_to_block(entry);
+    let [output, input] = *b.block_params(entry) else {
+        unreachable!()
+    };
+    let terms: Vec<_> = (1..=VALUES)
+        .map(|offset| b.ins().iadd_imm(input, offset as i64))
+        .collect();
+    for (index, &value) in terms.iter().enumerate() {
+        b.ins().store(
+            MemFlags::trusted(),
+            value,
+            output,
+            (index * size_of::<u64>()) as i32,
+        );
+    }
+    b.ins().return_(&[terms[REGISTER_PRESSURE_INDEX]]);
+    b.seal_all_blocks();
+    b.finalize();
+
+    let words = native::machine::integer_block_words(&context.func).unwrap();
+    let bytes = binding::x86_64_integer_block(&words);
+    const MOV_RBX_TO_RAX: [u8; 3] = [0x48, 0x89, 0xd8];
+    assert!(
+        bytes
+            .windows(MOV_RBX_TO_RAX.len())
+            .any(|window| window == MOV_RBX_TO_RAX)
+    );
+    let id = module
+        .declare_anonymous_function(&context.func.signature)
+        .unwrap();
+    let alignment = u64::from(module.isa().function_alignment().minimum);
+    module
+        .define_function_bytes(id, alignment, &bytes, &[])
+        .unwrap();
+    module.finalize_definitions().unwrap();
+    let call =
+        unsafe { std::mem::transmute::<*const u8, Entry>(module.get_finalized_function(id)) };
+    let mut values = [0; VALUES];
+    for input in [0u64, u64::MAX - 1] {
+        let expected: [u64; VALUES] =
+            std::array::from_fn(|index| input.wrapping_add(index as u64 + 1));
+        assert_eq!(
+            unsafe { call(values.as_mut_ptr(), input) },
+            expected[REGISTER_PRESSURE_INDEX]
+        );
+        assert_eq!(values, expected);
+    }
+    unsafe { module.free_memory() };
+}
+
+#[test]
 fn narrow_system_v_cells_cross_both_backend_boundaries() {
     type Entry = unsafe extern "C" fn(u64, u64) -> u64;
     let mut module = jit_module();

@@ -285,7 +285,27 @@ pub fn register_bit(reg: u8) -> u32 {
     }
 }
 
-// Use caller-saved GPRs exclusively. Prefer rax, the result register.
+fn first_register(available: u32) -> u8 {
+    if available == 0 {
+        UNASSIGNED
+    } else {
+        wrapping_u8(trailing_zeros_u64(widen_u64(available)))
+    }
+}
+
+pub fn callee_saved_registers() -> u32 {
+    register_bit(RBX)
+        | register_bit(R12)
+        | register_bit(R13)
+        | register_bit(R14)
+        | register_bit(R15)
+}
+
+pub fn find_callee_saved_register(used: u32) -> u8 {
+    first_register(callee_saved_registers() & ~used)
+}
+
+// Prefer RAX among the caller-saved GPRs.
 pub fn find_register(used: u32) -> u8 {
     let candidates = register_bit(RAX)
         | register_bit(RCX)
@@ -296,12 +316,7 @@ pub fn find_register(used: u32) -> u8 {
         | register_bit(R9)
         | register_bit(R10)
         | register_bit(R11);
-    let available = candidates ^ (candidates & used);
-    if available == 0 {
-        UNASSIGNED
-    } else {
-        wrapping_u8(trailing_zeros_u64(widen_u64(available)))
-    }
+    first_register(candidates & ~used)
 }
 
 fn modrm_fields(reg: u8, rm: u8) -> u8 {
