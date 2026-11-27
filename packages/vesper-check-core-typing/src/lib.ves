@@ -8,6 +8,8 @@
 //   `unresolved`, `union_effects`, `join_types` and `infer`.
 // - patterns.ves: `is_uninhabited`, `matrix_covered`, `irrefutable` and
 //   match coverage (E0212).
+// - floats.ves: the float intrinsics (math, conversions, bit
+//   reinterpretation).
 //
 // The entries below are the differential's tasks.
 

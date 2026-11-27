@@ -28,6 +28,7 @@ use self::relations::{
     compatible, infer, item, join_types, lit_of, mk_lit, refine_annotation, unresolved
 };
 use self::patterns::{Pats, arms_cover, irrefutable, pats_new};
+use self::floats::{float_call};
 use self::methods::{
     inherent_index, is_qualified, is_str, is_string, peek_type, receiver_type, seq_method, seq_new,
     view_place, index_expr, string_comparison, string_literal, string_method, text_operand,
@@ -75,6 +76,20 @@ const E_HANDLE: u8 = 22;
 const WRAPPING_ADD: Str = "wrapping_add";
 const WRAPPING_SUB: Str = "wrapping_sub";
 const WRAPPING_MUL: Str = "wrapping_mul";
+
+// `capability_effects::BIT_INTRINSICS`.
+const BIT_AND: Str = "bit_and";
+const BIT_OR: Str = "bit_or";
+const BIT_XOR: Str = "bit_xor";
+const BIT_SHL: Str = "bit_shl";
+const BIT_SHR: Str = "bit_shr";
+
+// `numeric::ROTATE_INTRINSICS`.
+const ROTATE_LEFT: Str = "rotate_left";
+const ROTATE_RIGHT: Str = "rotate_right";
+
+// The operand count of a rotation.
+const ROTATE_OPERANDS: u32 = 2;
 
 // The length of `::` in an `Eff::op` name.
 const PATH_SEPARATOR_LEN: u64 = 2;
@@ -1701,7 +1716,7 @@ fn unary_expr(inout ck: Ck, ex: Ex, expected: u32) -> u32 {
 }
 
 // `float_math_rules::float_literal_tree`.
-fn float_literal_tree(in ck: Ck, e: u32) -> bool {
+pub fn float_literal_tree(in ck: Ck, e: u32) -> bool {
     let ex = ck.ex(e);
     if ex.kind == E_FLOAT {
         return true;
@@ -1720,12 +1735,36 @@ fn integer_named(in ck: Ck, ty: u32) -> bool {
     node.kind == TyKind::Named && ck.ctx.world.k.is_integer(node.name)
 }
 
+// `Checker::shift_amount`: any integer kind, an unsuffixed literal being a
+// `u32`.
+fn shift_amount(inout ck: Ck, e: u32) {
+    let hole = ck.ctx.types.infer;
+    let known = ck.ctx.world.k;
+    let raw = expr_expected(inout ck, e, hole);
+    if ck.skip {
+        return;
+    }
+    let amount_ex = ck.ex(e);
+    let amount = if ck.ctx.types.kind(raw) == TyKind::Lit {
+        if !fits(known, known.u32_, lit_of(ck.ctx.types.node(raw))) {
+            error(inout ck, "E0209", amount_ex.start, amount_ex.end);
+        }
+        let u32_ty = named(inout ck, known.u32_);
+        record(inout ck, e, u32_ty);
+        u32_ty
+    } else {
+        raw
+    };
+    if !integer_named(in ck, amount) && amount != hole {
+        error(inout ck, "E0200", amount_ex.start, amount_ex.end);
+    }
+}
+
 // `Checker::shift_expr`: `a << n` and `a >> n` are `a`'s integer kind
 // (a literal `a` defaults); the amount is any integer kind, an unsuffixed
 // literal amount being a `u32` (`shift_amount`).
 fn shift_expr(inout ck: Ck, ex: Ex, expected: u32) -> u32 {
     let hole = ck.ctx.types.infer;
-    let known = ck.ctx.world.k;
     let goal = if integer_named(in ck, expected) {
         expected
     } else {
@@ -1739,23 +1778,9 @@ fn shift_expr(inout ck: Ck, ex: Ex, expected: u32) -> u32 {
     if ck.ctx.types.kind(raw) == TyKind::Lit {
         record(inout ck, ex.x, ty);
     }
-    let amount_raw = expr_expected(inout ck, ex.z, hole);
+    shift_amount(inout ck, ex.z);
     if ck.skip {
         return hole;
-    }
-    let amount_ex = ck.ex(ex.z);
-    let amount = if ck.ctx.types.kind(amount_raw) == TyKind::Lit {
-        if !fits(known, known.u32_, lit_of(ck.ctx.types.node(amount_raw))) {
-            error(inout ck, "E0209", amount_ex.start, amount_ex.end);
-        }
-        let u32_ty = named(inout ck, known.u32_);
-        record(inout ck, ex.z, u32_ty);
-        u32_ty
-    } else {
-        amount_raw
-    };
-    if !integer_named(in ck, amount) && amount != hole {
-        error(inout ck, "E0200", amount_ex.start, amount_ex.end);
     }
     if !integer_named(in ck, ty) && ty != hole {
         let left_ex = ck.ex(ex.x);
@@ -2623,6 +2648,60 @@ fn wrapping_call(inout ck: Ck, ex: Ex, expected: u32) -> u32 {
     settled
 }
 
+fn is_bit_intrinsic(in ck: Ck, name: u32) -> bool {
+    is_qualified(in ck, name, BIT_AND)
+        || is_qualified(in ck, name, BIT_OR)
+        || is_qualified(in ck, name, BIT_XOR)
+        || is_qualified(in ck, name, BIT_SHL)
+        || is_qualified(in ck, name, BIT_SHR)
+}
+
+fn is_rotate(in ck: Ck, name: u32) -> bool {
+    is_qualified(in ck, name, ROTATE_LEFT) || is_qualified(in ck, name, ROTATE_RIGHT)
+}
+
+// `Checker::rotate_call`: `rotate_left(a, n)` and `rotate_right(a, n)` are
+// `a`'s integer kind (a literal `a` defaults); `n` is a shift amount.
+fn rotate_call(inout ck: Ck, ex: Ex, expected: u32) -> u32 {
+    let hole = ck.ctx.types.infer;
+    if ex.m != 0 || ex.n != ROTATE_OPERANDS {
+        error(inout ck, "E0207", ex.start, ex.end);
+    }
+    for i in 0..w(ex.n) {
+        let arg = ck.arg(add(w(ex.a), i));
+        if arg.pass != P_IN || arg.explicit {
+            let arg_ex = ck.ex(arg.expr);
+            error(inout ck, "E0308", arg_ex.start, arg_ex.end);
+        }
+    }
+    if ex.n == 0 {
+        return hole;
+    }
+    let first = ck.arg(w(ex.a)).expr;
+    let goal = if integer_named(in ck, expected) {
+        expected
+    } else {
+        hole
+    };
+    let raw = expr_expected(inout ck, first, goal);
+    if ck.skip {
+        return hole;
+    }
+    let ty = default_type(inout ck.ctx.types, raw);
+    if ck.ctx.types.kind(raw) == TyKind::Lit {
+        record(inout ck, first, ty);
+    }
+    if !integer_named(in ck, ty) && ty != hole {
+        let first_ex = ck.ex(first);
+        error(inout ck, "E0200", first_ex.start, first_ex.end);
+    }
+    if ex.n > 1 {
+        let amount = ck.arg(add(w(ex.a), 1)).expr;
+        shift_amount(inout ck, amount);
+    }
+    ty
+}
+
 fn call_expr(inout ck: Ck, ex: Ex, expected: u32) -> u32 {
     let hole = ck.ctx.types.infer;
     let callee = ck.ex(ex.x);
@@ -2691,9 +2770,19 @@ fn call_expr(inout ck: Ck, ex: Ex, expected: u32) -> u32 {
         return seq_new(inout ck, ex, true, expected);
     }
     if callee_index == NONE32 {
+        if is_bit_intrinsic(in ck, callee.x) {
+            return wrapping_call(inout ck, ex, expected);
+        }
         let conv = conversion_of(in ck, callee.x);
         if is_conversion(conv) {
             return conversion_call(inout ck, ex, conv);
+        }
+        if is_rotate(in ck, callee.x) {
+            return rotate_call(inout ck, ex, expected);
+        }
+        let float_ty = float_call(inout ck, ex, callee.x, expected);
+        if float_ty != NONE32 {
+            return float_ty;
         }
         let op = op_index(in ck, callee.x);
         if op != NONE32 {

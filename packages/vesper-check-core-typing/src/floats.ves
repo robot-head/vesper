@@ -1,0 +1,379 @@
+// The float intrinsics of `Checker::call` (src/float_math/check.rs,
+// `vesper.float.ieee754/1`): the math operations, the conversions to a
+// float kind (`widen_f`, `nearest_f`), the saturating conversions to an
+// integer kind and the bit reinterpretations (`to_bits_f`, `from_bits_f`).
+// User functions of the same name take precedence: the caller tries these
+// only when no world function matches.
+
+use @vesper/check-data::util::{u32_at, w};
+use @vesper/check-data::types::{default_type, TyKind};
+use self::exprs::{
+    Ck, Ex, actual_arg, error, expect_type, expr_expected, float_literal_tree, is_named, named,
+    record
+};
+use self::methods::{is_qualified};
+use self::relations::{lit_of};
+use self::ints::{default_of, fits, int_bits, int_unsigned};
+
+const NONE32: u32 = 4294967295;
+
+// Argument passing (keep equal to exprs.ves).
+const P_IN: u8 = 0;
+
+// `numeric::float::MathOp` spellings.
+const MATH_SQRT: Str = "sqrt";
+const MATH_ABS: Str = "abs";
+const MATH_FLOOR: Str = "floor";
+const MATH_CEIL: Str = "ceil";
+const MATH_ROUND: Str = "round";
+const MATH_TRUNC: Str = "trunc";
+const MATH_MIN: Str = "min";
+const MATH_MAX: Str = "max";
+const MATH_FMA: Str = "fma";
+
+// `MathOp::arity` of `min`/`max` and of `fma` (the others take one).
+const BINARY_ARITY: u64 = 2;
+const FMA_ARITY: u64 = 3;
+
+// Name prefixes of the conversion and reinterpretation intrinsics.
+const WIDEN_PREFIX: Str = "widen_";
+const NEAREST_PREFIX: Str = "nearest_";
+const SATURATING_PREFIX: Str = "saturating_";
+const TO_BITS_PREFIX: Str = "to_bits_";
+const FROM_BITS_PREFIX: Str = "from_bits_";
+
+// `FloatKind::precision`: significand bits, the implicit bit included.
+const F32_PRECISION: u32 = 24;
+const F64_PRECISION: u32 = 53;
+
+fn is_float(in ck: Ck, ty: u32) -> bool {
+    let known = ck.ctx.world.k;
+    is_named(in ck, ty, known.f64_) || is_named(in ck, ty, known.f32_)
+}
+
+// The integer kind symbol of `ty`, or NONE32.
+fn integer_kind(in ck: Ck, ty: u32) -> u32 {
+    let node = ck.ctx.types.node(ty);
+    if node.kind == TyKind::Named && node.n == 0 && ck.ctx.world.k.is_integer(node.name) {
+        node.name
+    } else {
+        NONE32
+    }
+}
+
+fn is_wide(in ck: Ck, kind: u32) -> bool {
+    let known = ck.ctx.world.k;
+    kind == known.i128_ || kind == known.u128_
+}
+
+// Whether `name` is `prefix` followed by the name of `kind`.
+fn spelled(in ck: Ck, name: u32, in prefix: Str, kind: u32) -> bool {
+    let mut text = ChunkSeq::new[u8]();
+    text.extend(in prefix.as_bytes());
+    ck.ctx.names.write(kind, inout text);
+    ck.ctx.names.lookup(in text.as_slice()) == name
+}
+
+// The float kind symbol `name` spells after `prefix`, or NONE32.
+fn float_after(in ck: Ck, name: u32, in prefix: Str) -> u32 {
+    let known = ck.ctx.world.k;
+    if spelled(in ck, name, prefix, known.f32_) {
+        known.f32_
+    } else if spelled(in ck, name, prefix, known.f64_) {
+        known.f64_
+    } else {
+        NONE32
+    }
+}
+
+// The integer kind symbol `name` spells after `prefix`, or NONE32.
+fn integer_after(in ck: Ck, name: u32, in prefix: Str) -> u32 {
+    let known = ck.ctx.world.k;
+    let mut kinds: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    kinds.push(known.u8_);
+    kinds.push(known.u16_);
+    kinds.push(known.u32_);
+    kinds.push(known.u64_);
+    kinds.push(known.usize_);
+    kinds.push(known.i8_);
+    kinds.push(known.i16_);
+    kinds.push(known.i32_);
+    kinds.push(known.i64_);
+    kinds.push(known.isize_);
+    kinds.push(known.i128_);
+    kinds.push(known.u128_);
+    for i in 0..kinds.len() {
+        let kind = u32_at(in kinds, i);
+        if spelled(in ck, name, prefix, kind) {
+            return kind;
+        }
+    }
+    NONE32
+}
+
+// `MathOp::from_name(name).arity()`, or 0 for no math operation.
+fn math_arity(in ck: Ck, name: u32) -> u64 {
+    if is_qualified(in ck, name, MATH_MIN) || is_qualified(in ck, name, MATH_MAX) {
+        return BINARY_ARITY;
+    }
+    if is_qualified(in ck, name, MATH_FMA) {
+        return FMA_ARITY;
+    }
+    if is_qualified(in ck, name, MATH_SQRT)
+        || is_qualified(in ck, name, MATH_ABS)
+        || is_qualified(in ck, name, MATH_FLOOR)
+        || is_qualified(in ck, name, MATH_CEIL)
+        || is_qualified(in ck, name, MATH_ROUND)
+        || is_qualified(in ck, name, MATH_TRUNC)
+    {
+        return 1;
+    }
+    0
+}
+
+// `FloatKind::bits_kind`: the unsigned kind of the same width.
+fn bits_kind(in ck: Ck, kind: u32) -> u32 {
+    let known = ck.ctx.world.k;
+    if kind == known.f32_ {
+        known.u32_
+    } else {
+        known.u64_
+    }
+}
+
+// `FloatKind::holds`: every value of the integer kind `k` is a value of
+// the float kind `to`.
+fn holds(in ck: Ck, to: u32, k: u32) -> bool {
+    let known = ck.ctx.world.k;
+    let bits = int_bits(known, k);
+    let magnitude = if int_unsigned(known, k) {
+        bits
+    } else {
+        wrapping_sub(bits, 1)
+    };
+    let precision = if to == known.f32_ {
+        F32_PRECISION
+    } else {
+        F64_PRECISION
+    };
+    magnitude <= precision
+}
+
+// `Checker::by_value_operands`: `n` operands, no type arguments, each by
+// value.
+fn by_value(inout ck: Ck, ex: Ex, n: u64) {
+    if ex.m != 0 || w(ex.n) != n {
+        error(inout ck, "E0207", ex.start, ex.end);
+    }
+    for i in 0..w(ex.n) {
+        let arg = actual_arg(in ck, ex, i);
+        if arg.pass != P_IN || arg.explicit {
+            let arg_ex = ck.ex(arg.expr);
+            error(inout ck, "E0308", arg_ex.start, arg_ex.end);
+        }
+    }
+}
+
+// `Checker::retype_float_literal`: a literal tree that defaulted to `f64`
+// is checked again at an `f32` goal.
+fn retype(inout ck: Ck, e: u32, found: u32, goal: u32) -> u32 {
+    let known = ck.ctx.world.k;
+    if is_named(in ck, goal, known.f32_)
+        && is_named(in ck, found, known.f64_)
+        && float_literal_tree(in ck, e)
+    {
+        expr_expected(inout ck, e, goal)
+    } else {
+        found
+    }
+}
+
+// `Checker::conversion_operand`: an unsuffixed integer literal takes
+// `literal_kind` when it fits, else its default kind.
+fn conversion_operand(inout ck: Ck, e: u32, goal: u32, literal_kind: u32) -> u32 {
+    let known = ck.ctx.world.k;
+    let t = expr_expected(inout ck, e, goal);
+    if ck.ctx.types.kind(t) != TyKind::Lit {
+        return t;
+    }
+    let value = lit_of(ck.ctx.types.node(t));
+    let kind = if fits(known, literal_kind, value) {
+        literal_kind
+    } else {
+        default_of(known, value)
+    };
+    let ty = named(inout ck, kind);
+    record(inout ck, e, ty);
+    ty
+}
+
+// `Checker::math_call`: operands of one float kind, the result of that
+// kind.
+fn math_call(inout ck: Ck, ex: Ex, arity: u64, expected: u32) -> u32 {
+    let hole = ck.ctx.types.infer;
+    by_value(inout ck, ex, arity);
+    let mut common = if is_float(in ck, expected) {
+        expected
+    } else {
+        hole
+    };
+    let mut actual: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    for i in 0..w(ex.n) {
+        let arg = actual_arg(in ck, ex, i);
+        let t = expr_expected(inout ck, arg.expr, common);
+        if ck.skip {
+            return hole;
+        }
+        if common == hole {
+            common = default_type(inout ck.ctx.types, t);
+        }
+        actual.push(t);
+    }
+    for i in 0..w(ex.n) {
+        let arg = actual_arg(in ck, ex, i);
+        let t = retype(inout ck, arg.expr, u32_at(in actual, i), common);
+        if ck.skip {
+            return hole;
+        }
+        let arg_ex = ck.ex(arg.expr);
+        expect_type(inout ck, common, t, arg_ex.start, arg_ex.end);
+    }
+    if !is_float(in ck, common) && common != hole {
+        error(inout ck, "E0200", ex.start, ex.end);
+    }
+    common
+}
+
+// `Checker::float_conversion_call`: `widen_f(x)` (exact) and
+// `nearest_f(x)` (rounding) of an integer or float operand.
+fn float_conversion_call(inout ck: Ck, ex: Ex, widen: bool, to: u32) -> u32 {
+    let hole = ck.ctx.types.infer;
+    let known = ck.ctx.world.k;
+    let to_ty = named(inout ck, to);
+    by_value(inout ck, ex, 1);
+    if ex.n == 0 {
+        return to_ty;
+    }
+    let literal = if !widen {
+        known.i64_
+    } else if to == known.f32_ {
+        known.i16_
+    } else {
+        known.i32_
+    };
+    let arg = actual_arg(in ck, ex, 0);
+    let arg_ex = ck.ex(arg.expr);
+    let t = conversion_operand(inout ck, arg.expr, hole, literal);
+    if ck.skip {
+        return hole;
+    }
+    let kind = integer_kind(in ck, t);
+    let exact = if is_float(in ck, t) {
+        // `float_widens_to`: f32 widens to f64, not back.
+        !(is_named(in ck, t, known.f64_) && to == known.f32_)
+    } else if kind != NONE32 {
+        if is_wide(in ck, kind) {
+            error(inout ck, "E0200", arg_ex.start, arg_ex.end);
+            return to_ty;
+        }
+        holds(in ck, to, kind)
+    } else {
+        if t != hole {
+            error(inout ck, "E0200", arg_ex.start, arg_ex.end);
+        }
+        return to_ty;
+    };
+    if widen && !exact {
+        error(inout ck, "E0200", arg_ex.start, arg_ex.end);
+    }
+    to_ty
+}
+
+// `Checker::saturating_call`: a float to the integer kind `to`.
+fn saturating_call(inout ck: Ck, ex: Ex, to: u32) -> u32 {
+    let hole = ck.ctx.types.infer;
+    let to_ty = named(inout ck, to);
+    by_value(inout ck, ex, 1);
+    if is_wide(in ck, to) {
+        error(inout ck, "E0200", ex.start, ex.end);
+    }
+    if ex.n != 0 {
+        let arg = actual_arg(in ck, ex, 0);
+        let t = expr_expected(inout ck, arg.expr, hole);
+        if ck.skip {
+            return hole;
+        }
+        if !is_float(in ck, t) && t != hole {
+            let arg_ex = ck.ex(arg.expr);
+            error(inout ck, "E0200", arg_ex.start, arg_ex.end);
+        }
+    }
+    to_ty
+}
+
+// `Checker::bits_call`: `to_bits_f(x)` and `from_bits_f(n)`.
+fn bits_call(inout ck: Ck, ex: Ex, to_bits: bool, kind: u32) -> u32 {
+    let hole = ck.ctx.types.infer;
+    let bits = bits_kind(in ck, kind);
+    let float_ty = named(inout ck, kind);
+    let bits_ty = named(inout ck, bits);
+    let operand = if to_bits { float_ty } else { bits_ty };
+    let result = if to_bits { bits_ty } else { float_ty };
+    by_value(inout ck, ex, 1);
+    if ex.n != 0 {
+        let arg = actual_arg(in ck, ex, 0);
+        let found = conversion_operand(inout ck, arg.expr, operand, bits);
+        if ck.skip {
+            return hole;
+        }
+        let t = retype(inout ck, arg.expr, found, operand);
+        if ck.skip {
+            return hole;
+        }
+        let arg_ex = ck.ex(arg.expr);
+        expect_type(inout ck, operand, t, arg_ex.start, arg_ex.end);
+    }
+    result
+}
+
+// The type of the float intrinsic call `ex` of `name`, or NONE32 when
+// `name` is no float intrinsic.
+pub fn float_call(inout ck: Ck, ex: Ex, name: u32, expected: u32) -> u32 {
+    let arity = math_arity(in ck, name);
+    if arity != 0 {
+        return math_call(inout ck, ex, arity, expected);
+    }
+    let widen_to = float_after(in ck, name, WIDEN_PREFIX);
+    if widen_to != NONE32 {
+        return float_conversion_call(inout ck, ex, true, widen_to);
+    }
+    let nearest_to = float_after(in ck, name, NEAREST_PREFIX);
+    if nearest_to != NONE32 {
+        return float_conversion_call(inout ck, ex, false, nearest_to);
+    }
+    let saturating_to = integer_after(in ck, name, SATURATING_PREFIX);
+    if saturating_to != NONE32 {
+        return saturating_call(inout ck, ex, saturating_to);
+    }
+    let to_bits = float_after(in ck, name, TO_BITS_PREFIX);
+    if to_bits != NONE32 {
+        return bits_call(inout ck, ex, true, to_bits);
+    }
+    let from_bits = float_after(in ck, name, FROM_BITS_PREFIX);
+    if from_bits != NONE32 {
+        return bits_call(inout ck, ex, false, from_bits);
+    }
+    NONE32
+}
+
+// `Checker::float_to_integer`: `narrow_k(x)` of a float truncates (its
+// failure is an effect); `widen_k` and `wrapping_k` refuse a float, and no
+// conversion reaches a 128-bit kind.
+pub fn float_to_integer(inout ck: Ck, ex: Ex, narrow: bool, to: u32, arg_expr: u32) {
+    if is_wide(in ck, to) {
+        error(inout ck, "E0200", ex.start, ex.end);
+    } else if !narrow {
+        let arg_ex = ck.ex(arg_expr);
+        error(inout ck, "E0200", arg_ex.start, arg_ex.end);
+    }
+}

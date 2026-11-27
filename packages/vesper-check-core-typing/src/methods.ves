@@ -18,6 +18,7 @@ use self::exprs::{
 };
 use self::relations::{infer, lit_of, mk_lit};
 use self::ints::{Lit, default_of, fits, int_bits, int_unsigned};
+use self::floats::{float_to_integer};
 
 const NONE32: u32 = 4294967295;
 
@@ -1174,7 +1175,7 @@ fn widens_to(in ck: Ck, from: u32, to: u32) -> bool {
 }
 
 // `Checker::conversion_call`: one integer operand converted to `conv.to`.
-// A float operand (`float_to_integer`) skips the function.
+// A float operand is `float_to_integer`'s.
 pub fn conversion_call(inout ck: Ck, ex: Ex, conv: Conv) -> u32 {
     let hole = ck.ctx.types.infer;
     let known = ck.ctx.world.k;
@@ -1214,8 +1215,8 @@ pub fn conversion_call(inout ck: Ck, ex: Ex, conv: Conv) -> u32 {
     };
     let node = ck.ctx.types.node(ty);
     if node.kind == TyKind::Named && (node.name == known.f64_ || node.name == known.f32_) {
-        ck.skip = true;
-        return hole;
+        float_to_integer(inout ck, ex, conv.family == CONV_NARROW, conv.to, arg.expr);
+        return to_ty;
     }
     if node.kind != TyKind::Named || !known.is_integer(node.name) {
         if ty != hole {
