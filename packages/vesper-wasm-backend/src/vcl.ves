@@ -7,7 +7,7 @@
 // letters of a row mean).
 
 pub fn vcl_count() -> u64 {
-    136
+    139
 }
 
 pub fn vcl_row(i: u64) -> Str {
@@ -418,6 +418,15 @@ pub fn vcl_row(i: u64) -> Str {
     }
     if i == 135 {
         return "vcl_apply_edits he oi w";
+    }
+    if i == 136 {
+        return "vcl_outline_cold hhe ooi w";
+    }
+    if i == 137 {
+        return "vcl_take_cold_helper h o o";
+    }
+    if i == 138 {
+        return "vcl_cold_helper_func h i w";
     }
     ""
 }

@@ -146,3 +146,68 @@ pub fn seam() -> u64 eff [Ffi[Cranelift]] {
         None => 0,
     }
 }
+
+// The cold outliner's op (clif_words.rs `E_OUTLINE`).
+fn e_outline() -> u64 {
+    7
+}
+
+// `f` with its else arm (block 2, `x * x` returned) outlined into a cold
+// helper taking `x`, the parent and then the helper defined as
+// src/native.rs defines them: the published object's id (0 when a step
+// failed).
+pub fn seam_outline() -> u64 eff [Ffi[Cranelift]] {
+    let mut m = match module_new(
+        in "".as_bytes(),
+        in "opt_level=speed;is_pic=true".as_bytes(),
+        in "seam_outline".as_bytes()
+    ) {
+        Some(m) => m,
+        None => return 0,
+    };
+    let s = seam_sig(inout m);
+    let f = declare_function(inout m, in "seam_f".as_bytes(), linkage_export(), s);
+    let mut b = match build_f(in m, s) {
+        Some(b) => b,
+        None => {
+            module_free(m);
+            return 0;
+        },
+    };
+    let mut plan: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    // idx 0, root block 2 owning only itself, no shared blocks, returning,
+    // no trap, live in value 0, nothing rematerialized, no slots, no
+    // other blocks.
+    plan.push(e_outline());
+    for w in [0, 2, 1, 2, 0, 1, 0, 1, 0, 0, 0, 0, 0] {
+        plan.push(w);
+    }
+    plan.push(e_end());
+    if outline_cold(inout b, inout m, in plan.as_slice()) != 1 {
+        builder_free(b);
+        module_free(m);
+        return 0;
+    }
+    let helper = match take_cold_helper(inout b) {
+        Some(h) => h,
+        None => {
+            builder_free(b);
+            module_free(m);
+            return 0;
+        },
+    };
+    let helper_func = cold_helper_func(in helper);
+    if !define_function(inout m, f, b) {
+        builder_free(helper);
+        module_free(m);
+        return 0;
+    }
+    if !define_function(inout m, helper_func, helper) {
+        module_free(m);
+        return 0;
+    }
+    match module_finish(m) {
+        Some(o) => object_publish(o),
+        None => 0,
+    }
+}

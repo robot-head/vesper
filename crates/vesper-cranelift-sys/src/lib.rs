@@ -46,6 +46,7 @@ pub use {cranelift_codegen, cranelift_frontend, cranelift_module, cranelift_obje
 #[cfg(not(target_family = "wasm"))]
 pub use {cranelift_jit, cranelift_native};
 
+pub mod clif_outline;
 pub mod clif_words;
 pub mod extras;
 pub mod lend;
@@ -62,7 +63,10 @@ pub use lend::{
     vcl_call_args, vcl_call_builder, vcl_call_module, vcl_call_op, vcl_call_result,
     vcl_call_return_builder, vcl_call_return_module,
 };
-pub use seam::{vcl_apply_edits, vcl_builder_finalize, vcl_function_words};
+pub use seam::{
+    vcl_apply_edits, vcl_builder_finalize, vcl_cold_helper_func, vcl_function_words,
+    vcl_outline_cold, vcl_take_cold_helper,
+};
 pub use seq_extras::{
     vcl_call_memmove, vcl_call_memset, vcl_declare_anonymous_data, vcl_has_x86_pshufb_lowering,
     vcl_isa_triple_arch,
@@ -290,6 +294,11 @@ pub struct Builder {
     finalized: bool,
     /// The last `vcl_function_words` encoding, read in pieces by offset.
     words: seam::Words,
+    /// Cold helpers `vcl_outline_cold` split off this function, with their
+    /// module function indices, in declaration order.
+    cold: std::collections::VecDeque<(u32, Function)>,
+    /// For a helper from `vcl_take_cold_helper`: its module function index.
+    cold_func: Option<u32>,
 }
 
 /// A data object's contents and relocations.
@@ -354,6 +363,24 @@ impl Builder {
             error: None,
             finalized: false,
             words: seam::Words::default(),
+            cold: Default::default(),
+            cold_func: None,
+        })
+    }
+    /// A finalized builder holding `func` (a cold helper).
+    fn finalized(func: Function, cold_func: u32) -> Box<Builder> {
+        born(BUILDER);
+        Box::new(Builder {
+            fb: None,
+            lent: None,
+            func: Some(NonNull::from(Box::leak(Box::new(func)))),
+            fctx: None,
+            last: None,
+            error: None,
+            finalized: true,
+            words: seam::Words::default(),
+            cold: Default::default(),
+            cold_func: Some(cold_func),
         })
     }
     /// Finalize the builder and hand back its function.
@@ -2638,5 +2665,8 @@ pub fn symbols() -> Vec<(&'static str, *const u8)> {
         vcl_builder_finalize,
         vcl_function_words,
         vcl_apply_edits,
+        vcl_outline_cold,
+        vcl_take_cold_helper,
+        vcl_cold_helper_func,
     ]
 }

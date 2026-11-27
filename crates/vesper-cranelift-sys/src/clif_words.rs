@@ -703,7 +703,7 @@ pub fn encode_with(func: &ir::Function, simd: bool, ptr: Option<Type>) -> Vec<u8
 }
 
 /// A reader over edit-script words (the cold outliner's replay in
-/// tests/common/clif_outline.rs reads its ops with it too).
+/// `clif_outline.rs` reads its ops with it too).
 pub struct Script<'a> {
     w: &'a [u64],
     at: usize,
@@ -1275,7 +1275,6 @@ fn last_inst(func: &ir::Function, block: Block) -> Result<Inst, String> {
 /// has_return trap live_ins remat shared_slots exclusive_slots ordered`
 /// (lists as `n` then entries, `remat` as (value, inst) pairs, `trap` the
 /// trap code's byte or 0), or [`E_SKIP`] for a round whose region the
-/// analysis refused. `native_cold_outline::apply_extraction` builds each
-/// outlined helper (tests/common/clif_outline.rs replays them).
+/// analysis refused. `clif_outline::apply_outline` replays them.
 pub const E_OUTLINE: u64 = 7;
 pub const E_SKIP: u64 = 8;

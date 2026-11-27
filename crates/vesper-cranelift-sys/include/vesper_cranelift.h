@@ -206,6 +206,11 @@ uint32_t vcl_has_x86_pshufb_lowering(const vcl_module *m);
 uint32_t vcl_builder_finalize(vcl_builder *b);
 uint64_t vcl_function_words(vcl_builder *b, uint32_t flags, uint32_t ptr_ty, uint64_t offset, uint8_t *out, size_t out_len);
 uint32_t vcl_apply_edits(vcl_builder *b, const uint64_t *edits, size_t edits_len);
+/* The cold outliner's extraction (#2634): helpers come back as finalized
+   builders, in declaration order, to define after the parent. */
+uint32_t vcl_outline_cold(vcl_builder *b, vcl_module *m, const uint64_t *edits, size_t edits_len);
+vcl_builder *vcl_take_cold_helper(vcl_builder *b);
+uint32_t vcl_cold_helper_func(const vcl_builder *b);
 
 #ifdef __cplusplus
 }

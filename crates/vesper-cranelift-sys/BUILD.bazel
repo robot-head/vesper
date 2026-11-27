@@ -13,9 +13,13 @@ exports_files(
 )
 
 # The root crate's CLIF pass differentials include the seam's function
-# words and edit replay by path (#2606): the root cannot depend on the shim.
+# words, edit replay (#2606) and cold extraction (#2634) by path: the root
+# cannot depend on the shim.
 exports_files(
-    ["src/clif_words.rs"],
+    [
+        "src/clif_outline.rs",
+        "src/clif_words.rs",
+    ],
     visibility = ["//:__pkg__"],
 )
 

@@ -363,6 +363,7 @@ const PUBLISHING: &[(&str, &str)] = &[
     ("pilot.ves", "pilot"),
     ("sh5_extras.ves", "extras"),
     ("seam.ves", "seam"),
+    ("seam.ves", "seam_outline"),
 ];
 const ANSWERING: &[(&str, &str)] = &[
     ("pilot.ves", "invalid_function"),
