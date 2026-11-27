@@ -150,6 +150,28 @@ fn call_records_require_relocations_and_keep_discarded_calls() {
 }
 
 #[test]
+fn function_addresses_keep_function_relocations_distinct_from_data() {
+    const FUNCTION_GOT: u64 = 152;
+    const X86_FUNCTION_GOT: u64 = 10;
+    const SYMBOL: u64 = 42;
+    const RIP_DISPLACEMENT: u64 = 3;
+    const LOAD_GOT_POINTER_AND_RETURN: [u8; 8] = [0x48, 0x8b, 0x05, 0, 0, 0, 0, 0xc3];
+    let request = [0, 0, FUNCTION_GOT, SYMBOL, 0, 0];
+    assert!(binding::x86_64_integer_block(&request).is_empty());
+    let packet = binding::x86_64_relocatable_block(&request);
+    let (length, body) = packet.split_first_chunk::<{ size_of::<u64>() }>().unwrap();
+    let (code, relocations) = body.split_at(u64::from_le_bytes(*length) as usize);
+    assert_eq!(code, LOAD_GOT_POINTER_AND_RETURN);
+    assert_eq!(
+        relocations,
+        [RIP_DISPLACEMENT, X86_FUNCTION_GOT, SYMBOL]
+            .map(u64::to_le_bytes)
+            .concat()
+    );
+    assert!(binding::x86_64_relocatable_block(&[0, 0, FUNCTION_GOT, u64::MAX, 0, 0]).is_empty());
+}
+
+#[test]
 fn indirect_calls_preserve_targets_through_register_and_stack_arguments() {
     type Entry = unsafe extern "C" fn(u64, u64, u64, u64, u64, u64, u64, u64, u64) -> u64;
     const GP_INPUTS: usize = 8;

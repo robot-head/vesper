@@ -257,6 +257,7 @@ const ARM64_GOT_PAGE: u64 = 6;
 const ARM64_GOT_LOAD: u64 = 7;
 const ARM64_FUNCTION_GOT_PAGE: u64 = 8;
 const ARM64_FUNCTION_GOT_LOAD: u64 = 9;
+const X86_FUNCTION_GOT: u64 = 10;
 const LIBCALL_TARGET_BASE: u64 = u32::MAX as u64 + 1;
 const MEMMOVE_LIBCALL: u32 = 0;
 const MEMCPY_LIBCALL: u32 = 1;
@@ -1907,7 +1908,7 @@ impl IntegerBlocks<'_> {
                 InstructionData::FuncAddr {
                     opcode: Opcode::FuncAddr,
                     func_ref,
-                } if self.aarch64 && output == types::I64 => {
+                } if output == types::I64 => {
                     let ExternalName::User(name) = function.dfg.ext_funcs[func_ref].name else {
                         return None;
                     };
@@ -2662,7 +2663,7 @@ impl IntegerBlocks<'_> {
 /// A stacked i128 occupies two consecutive integer records.
 /// A trailing FloatReturn selects the ABI's single floating-point result.
 /// SymbolRelative and SymbolGot read the data symbol ID from the left operand.
-/// AArch64 FunctionGot reads the function symbol ID from the left operand.
+/// FunctionGot reads the function symbol ID from the left operand.
 /// A labeled function starts with BlockLabel after the stack declarations
 /// and returns through BlockReturn records. The label's extra word describes
 /// the integer return arity or a single floating-point result. The entry argument
@@ -2854,6 +2855,10 @@ fn decode_relocatable(packet: &[u8]) -> Option<MachineCode> {
             GOT_DATA => (
                 Reloc::X86GOTPCRel4,
                 ModuleRelocTarget::user(DATA_NAMESPACE, target),
+            ),
+            X86_FUNCTION_GOT => (
+                Reloc::X86GOTPCRel4,
+                ModuleRelocTarget::user(FUNCTION_NAMESPACE, target),
             ),
             ARM64_CALL => (
                 Reloc::Arm64Call,

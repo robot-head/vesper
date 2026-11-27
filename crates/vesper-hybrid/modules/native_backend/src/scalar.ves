@@ -173,6 +173,7 @@ pub const CHECKED_ARITHMETIC_RECORDS: u64 = 2;
 const PLT_CALL: u64 = 0;
 const RELATIVE_DATA: u64 = 1;
 const GOT_DATA: u64 = 2;
+const X86_FUNCTION_GOT: u64 = 10;
 const PLT_LIBCALL: u64 = 3;
 
 pub const EQUAL: u64 = 0;
@@ -668,7 +669,7 @@ fn overflow_condition(op: u64) -> u8 {
 }
 
 pub fn is_symbol(op: u64) -> bool {
-    op == SYMBOL_RELATIVE || op == SYMBOL_GOT
+    op == SYMBOL_RELATIVE || op == SYMBOL_GOT || op == FUNCTION_GOT
 }
 
 fn store_width(op: u64) -> u64 {
@@ -749,7 +750,6 @@ fn reads_left(in record: Record) -> bool {
         && op != RETURN_PAIR
         && !is_call(op)
         && !is_symbol(op)
-        && op != FUNCTION_GOT
         && op != CALL_ARGUMENT
         && op != CALL_STACK_ARGUMENT
         && op != CALL_HIGH
@@ -1033,7 +1033,7 @@ fn find_last_reads(
         let index = wrapping_sub(wrapping_sub(count, 1), reverse_index);
         let value = wrapping_add(arguments, index);
         let record = read_record(in words, index);
-        if record.op > BYTE_SWAP
+        if (record.op > BYTE_SWAP && record.op != FUNCTION_GOT)
             || (!labeled && is_cfg_record(record.op))
             || (record.op == STACK_SLOT && index >= frame.slots.len())
             || (record.op == RETURN_PAIR && (reverse_index != 0 || record.left >= value))
@@ -1125,7 +1125,12 @@ fn find_last_reads(
                 return Option::None;
             }
         }
-        if is_symbol(record.op) && (!allow_relocations || record.left > DISP32_MASK) {
+        if is_symbol(record.op)
+            && (!allow_relocations
+                || record.left > DISP32_MASK
+                || record.right != 0
+                || record.extra != 0)
+        {
             return Option::None;
         }
         if record.op == CALL_HIGH
@@ -2510,10 +2515,14 @@ fn encode_block_pass(
                 in Instruction::FloatImmediate(destination, record.left, record.extra)
             );
         } else if is_symbol(record.op) {
-            let got = record.op == SYMBOL_GOT;
-            let offset = emit_symbol_address(inout output, destination, got);
+            let kind = match record.op {
+                FUNCTION_GOT => X86_FUNCTION_GOT,
+                SYMBOL_GOT => GOT_DATA,
+                _ => RELATIVE_DATA,
+            };
+            let offset = emit_symbol_address(inout output, destination, kind != RELATIVE_DATA);
             relocations.push(offset);
-            relocations.push(if got { GOT_DATA } else { RELATIVE_DATA });
+            relocations.push(kind);
             relocations.push(record.left);
         } else if is_stack_operation(record.op) {
             let offset = match stack_displacement(in frame, in record) {

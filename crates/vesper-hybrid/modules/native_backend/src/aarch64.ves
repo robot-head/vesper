@@ -769,10 +769,6 @@ fn call_stack_count(layout: u64) -> u64 {
     wrapping_shr_u64(layout & ~INDIRECT_CALL, CALL_FLOAT_BITS)
 }
 
-fn symbol_address(op: u64) -> bool {
-    is_symbol(op) || op == FUNCTION_GOT
-}
-
 fn float_call(op: u64) -> bool {
     op == CALL_FLOAT || op == CALL_FLOAT32
 }
@@ -917,7 +913,7 @@ fn operands(in r: Record, returns: u64) -> Option[u64] {
     if float_opcode(r.op) && !float_call(r.op) {
         return float_operands(in r);
     }
-    if symbol_address(r.op) {
+    if is_symbol(r.op) {
         return if r.left <= DISP32_MASK && r.right == 0 && r.extra == 0 {
             Option::Some(0)
         } else {
@@ -2533,7 +2529,7 @@ fn encode_pass(
             || ((r.op == FLOAT_ARGUMENT || incoming_stack_argument(r.op))
                 && (index < arguments_start || index >= arguments_end))
             || (r.op == TRAP && (!terminal_trap || index != last_index))
-            || (symbol_address(r.op) && !allow_relocations)
+            || (is_symbol(r.op) && !allow_relocations)
         {
             return out;
         }
@@ -3278,7 +3274,7 @@ fn encode_pass(
         } else if r.op == OVERFLOW_FLAG {
             let cc = overflow_cc.unwrap_or(EQ);
             push32(inout out, CSET | sh(cc ^ 1, CONDITION_SHIFT) | dest);
-        } else if symbol_address(r.op) {
+        } else if is_symbol(r.op) {
             // Function pointers and data addresses use the same instructions.
             // Keep their relocation namespaces distinct even for local symbols.
             let function = r.op == FUNCTION_GOT;
