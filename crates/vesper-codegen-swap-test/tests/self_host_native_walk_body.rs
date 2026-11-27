@@ -576,9 +576,10 @@ fn vesper_scalar_bodies_part_6d() {
         );
         let ran = if cross() { 0 } else { 2 };
         assert_eq!((total.worlds, total.ran), (2, ran), "{}", total.summary());
+        let min_emitted = if cross() { 5 } else { 10 };
         assert!(
-            emitted >= 10,
-            "all 5 non-DetFloat part 6d functions x 2 builds should come from Vesper, got {emitted}"
+            emitted >= min_emitted,
+            "part 6d functions should come from Vesper (expected >= {min_emitted}, got {emitted})"
         );
         assert!(total.is_clean(), "{}", total.summary());
     });
