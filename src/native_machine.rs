@@ -296,6 +296,7 @@ const AARCH64_FP_ARGUMENTS: usize = 8;
 const AARCH64_CALL_FLOAT_BITS: u32 = 4;
 const INDIRECT_CALL: u64 = 1 << (u64::BITS - 1);
 const WINDOWS_ABI: u64 = 1 << (u64::BITS - 1);
+const WIN64_REFERENCE_CALL: u64 = 1;
 const WINDOWS_REGISTER_ARGUMENTS: usize = 4;
 const STACK_PROBE_INTERVAL: usize = 4096;
 const CFG_HOME_BYTES: u64 = size_of::<u64>() as u64;
@@ -439,6 +440,7 @@ enum Aarch64Argument {
 
 enum CallTarget {
     Direct(u64),
+    ReferencePointer(u64),
     Indirect(u64),
 }
 
@@ -994,16 +996,6 @@ impl IntegerBlocks<'_> {
             }
             _ => return None,
         };
-        // Non-colocated Windows calls can require COFF reference pointers.
-        if signature.call_conv == CallConv::WindowsFastcall
-            && (!callee.colocated
-                || target > u64::from(u32::MAX)
-                || self.declarations.is_some_and(|declarations| {
-                    target as usize >= declarations.get_functions().size_hint().0
-                }))
-        {
-            return None;
-        }
         if dfg.insts[inst].opcode() == Opcode::ReturnCall {
             if signature.call_conv != CallConv::Tail
                 || signature.returns != self.function.signature.returns
@@ -1036,13 +1028,23 @@ impl IntegerBlocks<'_> {
             self.append(IntegerOp::TailCall, [target, count, floats]);
             return Some(());
         }
-        self.call(
-            inst,
-            signature,
-            dfg.inst_args(inst),
-            CallTarget::Direct(target),
-            values,
-        )
+        let target = if signature.call_conv == CallConv::WindowsFastcall {
+            if target > u64::from(u32::MAX)
+                || self.declarations.is_some_and(|declarations| {
+                    target as usize >= declarations.get_functions().size_hint().0
+                })
+            {
+                return None;
+            }
+            if callee.colocated {
+                CallTarget::Direct(target)
+            } else {
+                CallTarget::ReferencePointer(target)
+            }
+        } else {
+            CallTarget::Direct(target)
+        };
+        self.call(inst, signature, dfg.inst_args(inst), target, values)
     }
 
     fn call(
@@ -1116,6 +1118,10 @@ impl IntegerBlocks<'_> {
             CallTarget::Direct(target) => {
                 self.relocations = true;
                 (target, float_and_stack)
+            }
+            CallTarget::ReferencePointer(target) => {
+                self.relocations = true;
+                (target, WIN64_REFERENCE_CALL)
             }
             CallTarget::Indirect(address) => (address, float_and_stack | INDIRECT_CALL),
         };
@@ -3704,7 +3710,8 @@ impl IntegerBlocks<'_> {
 /// integer arguments before floating-point arguments. AArch64 places CallStackArgument records before
 /// both register groups. These carry the value ID, stack offset, and width.
 /// Win64 instead keeps CallArgument records in signature order, with a zero
-/// extra for an integer argument or the floating-point width.
+/// extra for an integer argument or the floating-point width. The call's
+/// extra distinguishes a reference-pointer call from a local direct call.
 /// The call's left operand is the function ID and its right operand is the total
 /// argument record count. The extra operand encodes the float register count in
 /// the low bits and the AArch64 stack argument count in the high bits.
@@ -3852,7 +3859,7 @@ pub(super) fn encode_windows_function(
             || code
                 .relocations
                 .iter()
-                .any(|entry| entry.kind != Reloc::X86CallPCRel4)
+                .any(|entry| !matches!(entry.kind, Reloc::X86CallPCRel4 | Reloc::X86GOTPCRel4))
         {
             return None;
         }

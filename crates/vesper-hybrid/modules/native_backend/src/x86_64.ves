@@ -745,6 +745,15 @@ pub fn emit_indirect_call(inout out: ChunkSeq[u8], register: u8) {
     out.push(modrm(CALL_REGISTER_EXTENSION, register));
 }
 
+pub fn emit_reference_call(inout out: ChunkSeq[u8]) -> u64 {
+    // Call the address stored at the RIP-relative COFF reference pointer.
+    out.push(CALL_JUMP_RM_GROUP);
+    out.push(modrm_fields(CALL_REGISTER_EXTENSION, RM_DISP32_WITHOUT_BASE));
+    let displacement = out.len();
+    immediate(inout out, 0, IMM32_BYTES);
+    displacement
+}
+
 pub fn emit_symbol_address(inout out: ChunkSeq[u8], destination: u8, got: bool) -> u64 {
     out.push(rex(destination, 0, true));
     out.push(if got { MOV_R64_RM } else { LEA });

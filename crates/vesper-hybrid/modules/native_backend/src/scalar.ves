@@ -8,13 +8,14 @@ use self::x86_64::{
     NEG_EXTENSION, NOT_EXTENSION, OR_RM_R64, R10, R11, RAX, RDX, RSP, SAR_EXTENSION, SHL_EXTENSION,
     SHR_EXTENSION, SBB_RM_R64, SUB_RM_R64, UNASSIGNED, XOR_RM_R64, ALL_REGISTER_CODES,
     REGISTER_CODES, arg_register, emit, emit_direct_call, emit_direct_jump, emit_indirect_call,
-    emit_jump_table, emit_jump_table_entry, emit_symbol_address, callee_saved_registers,
-    find_callee_saved_register, find_register, fits_signed_byte, patch_forward_branch,
-    patch_relative_branch, patch_relative_offset, register_bit, home_register, xmm_home_register,
-    HOME_REGISTERS, cheap_immediate, move_constant, store_immediate, store_immediate_fits,
-    VECTOR_BITS, PAND, POR, PXOR, PackedInteger, PackedRelation, packed_integer_opcode,
-    BitOperation, Rounding, PackedShift, ROL_EXTENSION, ROR_EXTENSION, WIN64_ARGUMENTS,
-    win64_arg_register, win64_reserved_registers, WIN64_XMM_LEFT_SCRATCH, WIN64_XMM_RIGHT_SCRATCH
+    emit_reference_call, emit_jump_table, emit_jump_table_entry, emit_symbol_address,
+    callee_saved_registers, find_callee_saved_register, find_register, fits_signed_byte,
+    patch_forward_branch, patch_relative_branch, patch_relative_offset, register_bit, home_register,
+    xmm_home_register, HOME_REGISTERS, cheap_immediate, move_constant, store_immediate,
+    store_immediate_fits, VECTOR_BITS, PAND, POR, PXOR, PackedInteger, PackedRelation,
+    packed_integer_opcode, BitOperation, Rounding, PackedShift, ROL_EXTENSION, ROR_EXTENSION,
+    WIN64_ARGUMENTS, win64_arg_register, win64_reserved_registers, WIN64_XMM_LEFT_SCRATCH,
+    WIN64_XMM_RIGHT_SCRATCH
 };
 use @vesper/codegen-freestanding::util::{push16};
 
@@ -287,6 +288,7 @@ pub const LIBCALL_TARGET_BASE: u64 = DISP32_MASK + 1;
 pub const INDIRECT_CALL: u64 = 0x8000000000000000;
 // The high bit of the argument count selects the Win64 calling convention.
 const WINDOWS_ABI: u64 = 0x8000000000000000;
+const WIN64_REFERENCE_CALL: u64 = 1;
 pub const MEMCPY_LIBCALL: u64 = 1;
 const MEMORY_COPY_ARGUMENTS: u64 = 3;
 const STACK_ALIGNMENT: u64 = 16;
@@ -1435,7 +1437,7 @@ fn prepare_win64_call(
     inout frame: FrameLayout
 ) -> bool {
     let indirect = indirect_call(record.extra);
-    if (record.extra & ~INDIRECT_CALL) != 0
+    if (record.extra != 0 && record.extra != INDIRECT_CALL && record.extra != WIN64_REFERENCE_CALL)
         || (!indirect && record.left > DISP32_MASK)
         || record.right > index
         || record.right > MAX_ARGUMENTS
@@ -3196,6 +3198,8 @@ fn emit_win64_call(
     let reference = if indirect {
         emit_indirect_call(inout out, target);
         Option::None
+    } else if record.extra == WIN64_REFERENCE_CALL {
+        Option::Some(emit_reference_call(inout out))
     } else {
         Option::Some(emit_direct_call(inout out))
     };
@@ -3219,7 +3223,13 @@ fn emit_call_relocation(
         match emit_win64_call(inout out, in words, in allocation, start, in record, in result) {
             Option::Some(offset) => {
                 relocations.push(offset);
-                relocations.push(WIN64_CALL);
+                relocations.push(
+                    if record.extra == WIN64_REFERENCE_CALL {
+                        X86_FUNCTION_GOT
+                    } else {
+                        WIN64_CALL
+                    }
+                );
                 relocations.push(record.left);
             },
             Option::None => (),

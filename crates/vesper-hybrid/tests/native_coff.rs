@@ -119,10 +119,35 @@ fn windows_packet(packet: &[u8]) -> (&[u8], &[u8], &[u8]) {
     (code, unwind, relocations)
 }
 
+fn swapped_fixture(source: &str, optimize: bool) -> (Vec<u8>, Vec<Vec<u8>>) {
+    use std::{cell::RefCell, sync::Once};
+
+    thread_local! {
+        static CAPTURE: RefCell<Option<Vec<Vec<u8>>>> = const { RefCell::new(None) };
+    }
+    static INSTALL: Once = Once::new();
+    INSTALL.call_once(|| {
+        vesper::native::machine::install_windows_encoder(|words| {
+            CAPTURE.with_borrow_mut(|capture| {
+                let packets = capture.as_mut()?;
+                let packet = binding::x86_64_windows_function(words);
+                if packet.is_empty() {
+                    return None;
+                }
+                packets.push(packet.clone());
+                Some(packet)
+            })
+        })
+        .unwrap();
+    });
+    CAPTURE.set(Some(Vec::new()));
+    let object = fixture(source, optimize);
+    let packets = CAPTURE.with(|capture| capture.take()).unwrap();
+    (object, packets)
+}
+
 #[test]
 fn coff_swap_uses_win64_leaves_and_preserves_unwind_rows() {
-    use std::cell::Cell;
-
     const LEAF_SUFFIX: &str = "_weighted";
     const CALLER: &str = "main";
     const UNWIND_TABLE: &str = ".pdata";
@@ -139,33 +164,19 @@ fn sum(n: u64) -> u64 {
 fn main() -> u64 { wrapping_add(sum(7), 1) }
 ";
 
-    thread_local! {
-        static ACTIVE_CODE: Cell<Option<(Vec<u8>, bool)>> = const { Cell::new(None) };
-    }
-    vesper::native::machine::install_windows_encoder(|words| {
-        let (mut leaf, mut called) = ACTIVE_CODE.with(Cell::take)?;
-        let packet = binding::x86_64_windows_function(words);
-        if packet.is_empty() {
-            ACTIVE_CODE.with(|capture| capture.set(Some((leaf, called))));
-            return None;
-        }
-        if windows_packet(&packet).2.is_empty() {
-            leaf.clone_from(&packet);
-        } else {
-            called = true;
-        }
-        ACTIVE_CODE.with(|capture| capture.set(Some((leaf, called))));
-        Some(packet)
-    })
-    .unwrap();
-
     for optimize in [true, false] {
         let baseline = fixture(PROGRAM, optimize);
-        ACTIVE_CODE.with(|capture| capture.set(Some((Vec::new(), false))));
-        let swapped = fixture(PROGRAM, optimize);
-        let (emitted, called) = ACTIVE_CODE.with(Cell::take).unwrap();
-        assert!(!emitted.is_empty());
-        assert!(called);
+        let (swapped, packets) = swapped_fixture(PROGRAM, optimize);
+        assert!(
+            packets
+                .iter()
+                .any(|packet| !windows_packet(packet).2.is_empty())
+        );
+        let emitted = packets
+            .iter()
+            .rev()
+            .find(|packet| windows_packet(packet).2.is_empty())
+            .unwrap();
         for (bytes, packet) in [(baseline, None), (swapped, Some(emitted))] {
             let file = object::File::parse(bytes.as_slice()).unwrap();
             let leaf = file
@@ -188,7 +199,7 @@ fn main() -> u64 { wrapping_add(sum(7), 1) }
                 .collect();
             assert!(starts.contains_key(CALLER), "{starts:?}");
             let Some(packet) = packet else { continue };
-            let (code, unwind, _) = windows_packet(&packet);
+            let (code, unwind, _) = windows_packet(packet);
             let section = file
                 .section_by_index(leaf.section_index().unwrap())
                 .unwrap();
@@ -217,6 +228,65 @@ fn main() -> u64 { wrapping_add(sum(7), 1) }
                 );
             }
         }
+    }
+}
+
+#[test]
+fn coff_imported_calls_retain_reference_pointer_relocations() {
+    const PROGRAM: &str = include_str!("../../../tests/fixtures/regions/accounting.ves");
+    const IMPORT: &str = "free";
+    const REFERENCE_POINTER: &str = ".refptr.free";
+    const REFERENCE_CALL: [u8; 2] = [0xff, 0x15];
+    const FUNCTION_REFERENCE_RELOCATION: u64 = 10;
+    let baseline = fixture(PROGRAM, true);
+    let (swapped, packets) = swapped_fixture(PROGRAM, true);
+    assert!(packets.iter().any(|packet| {
+        let (code, _, relocations) = windows_packet(packet);
+        let (records, _) = relocations.as_chunks::<{ 3 * MACHINE_WORD_BYTES }>();
+        records.iter().any(|record| {
+            let ([offset, kind, _], _) = record.as_chunks::<MACHINE_WORD_BYTES>() else {
+                unreachable!()
+            };
+            let offset = u64::from_le_bytes(*offset) as usize;
+            u64::from_le_bytes(*kind) == FUNCTION_REFERENCE_RELOCATION
+                && code.get(offset.saturating_sub(REFERENCE_CALL.len())..offset)
+                    == Some(REFERENCE_CALL.as_slice())
+        })
+    }));
+    for bytes in [&baseline, &swapped] {
+        let file = object::File::parse(bytes.as_slice()).unwrap();
+        let imported = file
+            .symbols()
+            .find(|symbol| symbol.name() == Ok(IMPORT))
+            .unwrap();
+        assert!(imported.is_undefined());
+        let reference = file
+            .symbols()
+            .find(|symbol| symbol.name() == Ok(REFERENCE_POINTER))
+            .unwrap();
+        let section = file
+            .section_by_index(reference.section_index().unwrap())
+            .unwrap();
+        let absolute = object::RelocationFlags::Coff {
+            typ: pe::IMAGE_REL_AMD64_ADDR64,
+        };
+        assert!(section.relocations().any(|(offset, relocation)| {
+            offset == reference.address() - section.address()
+                && relocation.flags() == absolute
+                && relocation.target() == RelocationTarget::Symbol(imported.index())
+        }));
+        let relative = object::RelocationFlags::Coff {
+            typ: pe::IMAGE_REL_AMD64_REL32,
+        };
+        assert!(
+            file.section_by_name(".text")
+                .unwrap()
+                .relocations()
+                .any(|(_, relocation)| {
+                    relocation.flags() == relative
+                        && relocation.target() == RelocationTarget::Symbol(reference.index())
+                })
+        );
     }
 }
 
