@@ -428,14 +428,63 @@ fn flip_gate_der_cert() {
     println!("flip-gate pairs der_cert {}", pairs.join(" "));
 }
 
+const PEM_PASSES: usize = 2_000;
+
+fn flip_gate_pem() {
+    use rustls_pki_types::CertificateDer;
+    use rustls_pki_types::pem::PemObject;
+    let c1 = rcgen::generate_simple_self_signed(vec!["a.vesper.test".to_string()]).unwrap();
+    let c2 = rcgen::generate_simple_self_signed(vec!["b.vesper.test".to_string()]).unwrap();
+    let pem = format!("{}\n{}\n", c1.cert.pem(), c2.cert.pem()).into_bytes();
+    let rust_decode = |b: &[u8]| -> Vec<Vec<u8>> {
+        CertificateDer::pem_slice_iter(b)
+            .map(|item| item.unwrap().as_ref().to_vec())
+            .collect()
+    };
+    assert_eq!(
+        rust_decode(&pem),
+        port::chain::pem_certificates(&pem).unwrap()
+    );
+    let run_rust = || -> u64 {
+        let t = Instant::now();
+        for _ in 0..PEM_PASSES {
+            black_box(rust_decode(black_box(&pem)));
+        }
+        t.elapsed().as_nanos() as u64
+    };
+    let run_port = || -> u64 {
+        let t = Instant::now();
+        for _ in 0..PEM_PASSES {
+            black_box(port::chain::pem_certificates(black_box(&pem)).unwrap());
+        }
+        t.elapsed().as_nanos() as u64
+    };
+    black_box(run_rust());
+    black_box(run_port());
+    let pairs: Vec<String> = (0..FLIP_GATE_EPOCHS)
+        .map(|_| {
+            let a1 = run_rust();
+            let b1 = run_port();
+            let b2 = run_port();
+            let a2 = run_rust();
+            format!("{}:{}", a1 + a2, b1 + b2)
+        })
+        .collect();
+    println!("flip-gate pairs pem {}", pairs.join(" "));
+}
+
 fn main() {
     assert_eq!(port::IMPLEMENTATION, "vesper");
     let args: Vec<String> = std::env::args().collect();
-    if args.get(1).map(String::as_str) == Some("flip-gate-inproc")
-        && args.get(2).map(String::as_str) == Some("der_cert")
-    {
-        flip_gate_der_cert();
-        return;
+    if args.get(1).map(String::as_str) == Some("flip-gate-inproc") {
+        if args.get(2).map(String::as_str) == Some("der_cert") {
+            flip_gate_der_cert();
+            return;
+        }
+        if args.get(2).map(String::as_str) == Some("pem") {
+            flip_gate_pem();
+            return;
+        }
     }
     let s = samples();
     match args.get(1).map(String::as_str) {
