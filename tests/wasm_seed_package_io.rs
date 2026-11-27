@@ -2527,6 +2527,13 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
              (floor(x), ceil(x), trunc(x), round(x), min(-0.0, x), max(0.0, x), fused64,\n\
               floor(y), ceil(y), trunc(y), round(y), minimum32, max(0.0, y), fused32)\n\
          }\n\
+         pub fn float_conversions(i: i16, u: u64, x: f32, y: f64) -> (u32, u64, u32, u64, i64, u64, i64, u64) {\n\
+             let signed = saturating_i8(y);\n\
+             let unsigned = saturating_u16(x);\n\
+             (to_bits_f32(widen_f32(i)), to_bits_f64(widen_f64(i)),\n\
+              to_bits_f32(nearest_f32(u)), to_bits_f64(nearest_f64(u)),\n\
+              widen_i64(signed), widen_u64(unsigned), saturating_i64(x), saturating_u64(y))\n\
+         }\n\
          fn unsupported(x: u64) -> u64 { match (x, x) { (0, _) => 7, _ => 9 } }\n\
          pub fn decline(x: u64) -> u64 { unsupported(x) }\n",
     )
@@ -2796,6 +2803,14 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
         "{:?}",
         read_stage2_sidecar_notes(&object)
     );
+    let math_object = dir.join("native-float-math.o");
+    std::fs::rename(&object, &math_object).unwrap();
+    assert_eq!(
+        compile("float_conversions"),
+        0,
+        "{:?}",
+        read_stage2_sidecar_notes(&object)
+    );
 
     let caller = dir.join("native-scalar-caller.c");
     let binary = dir.join("native-scalar-caller");
@@ -2833,6 +2848,7 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
          extern uint64_t aggregate_calls(int64_t, bool, float);\n\
          extern double float_remainders(double, double, float, float);\n\
          extern uint64_t floating_math(uint64_t *, double, float);\n\
+         extern uint64_t float_conversions(uint64_t *, int16_t, uint64_t, float, double);\n\
          int main(void) {\n\
              if (mix(10, 4) != 65 || mix(UINT64_MAX, UINT64_MAX) != UINT64_MAX - 16) return 1;\n\
              if (choose(0, 4) != 8 || choose(2, 4) != 8 || choose(4, 1) != 10\n\
@@ -2915,8 +2931,17 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
                  || math[7] != UINT64_C(0xbf800000) || math[8] != UINT64_C(0x80000000)\n\
                  || math[9] != math[8] || math[10] != math[7] || math[11] != UINT64_C(0xbf000000)\n\
                  || math[12] != 0 || math[13] != UINT64_C(0xa8800000)) return 30;\n\
-             return floating_math(math, 0.0, 0.0f) != 0 || math[4] != UINT64_C(0x8000000000000000)\n\
-                 || math[5] != 0 || math[11] != UINT64_C(0x80000000) || math[12] != 0;\n\
+             if (floating_math(math, 0.0, 0.0f) != 0 || math[4] != UINT64_C(0x8000000000000000)\n\
+                 || math[5] != 0 || math[11] != UINT64_C(0x80000000) || math[12] != 0) return 31;\n\
+             uint64_t conversions[8] = {0};\n\
+             if (float_conversions(conversions, -257, UINT64_MAX, 65535.75f, -128.75) != 0\n\
+                 || conversions[0] != UINT64_C(0xc3808000) || conversions[1] != UINT64_C(0xc070100000000000)\n\
+                 || conversions[2] != UINT64_C(0x5f800000) || conversions[3] != UINT64_C(0x43f0000000000000)\n\
+                 || (int64_t)conversions[4] != -128 || conversions[5] != UINT16_MAX\n\
+                 || conversions[6] != UINT16_MAX || conversions[7] != 0) return 32;\n\
+             return float_conversions(conversions, 0, 0, NAN, INFINITY) != 0\n\
+                 || conversions[4] != INT8_MAX || conversions[5] != 0\n\
+                 || conversions[6] != 0 || conversions[7] != UINT64_MAX;\n\
          }\n",
     )
     .unwrap();
@@ -2949,6 +2974,7 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
             &literals_object,
             &aggregate_call_object,
             &remainder_object,
+            &math_object,
             &object,
         ])
         .arg("-lm")

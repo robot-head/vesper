@@ -15,7 +15,8 @@ use @vesper/hybrid-native-backend::scalar::{
     UNSIGNED_LESS, UNSIGNED_LESS_EQUAL, UNSIGNED_REM, XMM_ARGUMENTS, XOR, encode_block, read_record
 };
 use @vesper/hybrid-native-backend::scalar::{
-    BITS_TO_FLOAT, FLOAT_DEMOTE, FLOAT_MAX, FLOAT_MIN, FLOAT_PROMOTE, FLOAT_TO_BITS
+    BITS_TO_FLOAT, FLOAT_DEMOTE, FLOAT_MAX, FLOAT_MIN, FLOAT_PROMOTE, FLOAT_TO_BITS,
+    FLOAT_TO_SIGNED_SAT, FLOAT_TO_UNSIGNED_SAT, SIGNED_TO_FLOAT, UNSIGNED_TO_FLOAT
 };
 use @vesper/hybrid-native-backend::x86_64::{
     ALL_REGISTER_BITS, BYTE_BITS, DWORD_BITS, FLOAT_EQUAL, FLOAT_GREATER, FLOAT_GREATER_EQUAL,
@@ -29,8 +30,8 @@ use @vesper/hybrid-native-backend::scalar::{
     STORE_QWORD
 };
 use self::float_math::{
-    BINARY_FLOAT_ARGUMENTS, FUSED_FLOAT_ARGUMENTS, FloatMath, UNARY_FLOAT_ARGUMENTS, math_arity,
-    math_op
+    BINARY_FLOAT_ARGUMENTS, FUSED_FLOAT_ARGUMENTS, FloatMath, NEAREST_PREFIX, SATURATING_PREFIX,
+    UNARY_FLOAT_ARGUMENTS, math_arity, math_op
 };
 
 const LITERAL_WORDS: u64 = 3;
@@ -1157,15 +1158,7 @@ fn lower_call(
         if value == NO_VALUE {
             return NO_VALUE;
         }
-        return lower_float_unary(
-            in low,
-            symbol,
-            result_kind,
-            source_kind,
-            value,
-            inout m,
-            inout graph
-        );
+        return lower_float_unary(in low, symbol, inst.ty, source_kind, value, inout m, inout graph);
     }
     let callee = low.ast.function(index);
     let result = scalar_kind(in low, inst.ty);
@@ -2161,15 +2154,59 @@ fn lower_float_math(
 fn lower_float_unary(
     in low: L,
     symbol: u32,
-    kind: u8,
+    ty: u32,
     operand: u8,
     value: u64,
     inout m: Function,
     inout graph: CallGraph
 ) -> u64 {
+    let kind = scalar_kind(in low, ty);
+    let from = abi_width(operand);
+    let to = abi_width(kind);
+    if is_integer(operand) && is_float(kind) {
+        let exact_limit = if kind == ScalarKind::F32 {
+            WORD_BITS
+        } else {
+            DWORD_BITS
+        };
+        let target = low.ctx.types.node(ty).name;
+        let nearest = conversion_spells(in low, symbol, target, in NEAREST_PREFIX.as_bytes());
+        let widen = from <= exact_limit
+            && conversion_spells(in low, symbol, target, in "widen_".as_bytes());
+        if nearest || widen {
+            let op = if is_signed(operand) {
+                SIGNED_TO_FLOAT
+            } else {
+                UNSIGNED_TO_FLOAT
+            };
+            return m.record(op, value, from, to);
+        }
+    }
+    if is_float(operand)
+        && is_integer(kind)
+        && conversion_spells(
+            in low,
+            symbol,
+            low.ctx.types.node(ty).name,
+            in SATURATING_PREFIX.as_bytes()
+        )
+    {
+        let op = if is_signed(kind) {
+            FLOAT_TO_SIGNED_SAT
+        } else {
+            FLOAT_TO_UNSIGNED_SAT
+        };
+        return m.record(op, value, from, to);
+    }
     if is_float(kind) && kind == operand {
         if low.ctx.names.spells(symbol, in "-".as_bytes()) {
-            return m.record(FLOAT_NEG, value, 0, abi_width(kind));
+            return m.record(FLOAT_NEG, value, 0, to);
+        }
+        let target = low.ctx.types.node(ty).name;
+        if conversion_spells(in low, symbol, target, in NEAREST_PREFIX.as_bytes())
+            || conversion_spells(in low, symbol, target, in "widen_".as_bytes())
+        {
+            return value;
         }
         let op = math_op(in low.ctx.names, symbol);
         if math_arity(op) != UNARY_FLOAT_ARGUMENTS {
@@ -2229,7 +2266,15 @@ fn lower_unary(
         return NO_VALUE;
     }
     if is_float(kind) || is_float(operand_kind) {
-        return lower_float_unary(in low, symbol, kind, operand_kind, value, inout m, inout graph);
+        return lower_float_unary(
+            in low,
+            symbol,
+            inst.ty,
+            operand_kind,
+            value,
+            inout m,
+            inout graph
+        );
     }
     if kind == ScalarKind::Bool
         && operand_kind == ScalarKind::Bool

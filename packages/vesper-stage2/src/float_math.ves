@@ -16,6 +16,8 @@ pub enum FloatMath: _ {
 pub const UNARY_FLOAT_ARGUMENTS: u64 = 1;
 pub const BINARY_FLOAT_ARGUMENTS: u64 = 2;
 pub const FUSED_FLOAT_ARGUMENTS: u64 = 3;
+pub const NEAREST_PREFIX: Str = "nearest_";
+pub const SATURATING_PREFIX: Str = "saturating_";
 
 pub fn math_op(in names: Names, symbol: u32) -> u8 {
     if names.spells(symbol, in "abs".as_bytes()) {

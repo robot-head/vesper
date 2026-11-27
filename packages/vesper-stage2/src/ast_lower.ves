@@ -14,7 +14,9 @@ use @vesper/place-ir::codes::{Lit, Pat};
 use @vesper/place-ir-lower::ast::{Ast as IrAst, Cl, Ef, Eop, Ex, FnR, Gn, Hd, PathR, Pm, Pt};
 use @vesper-std/arena::{idx_from_raw};
 use self::collect::{CollectedProgram, FnInfo, ParamInfo, lower_effects, lower_ty, translate_sym};
-use self::float_math::{FloatMath, UNARY_FLOAT_ARGUMENTS, math_arity, math_op};
+use self::float_math::{
+    FloatMath, NEAREST_PREFIX, SATURATING_PREFIX, UNARY_FLOAT_ARGUMENTS, math_arity, math_op
+};
 
 const NONE64: u64 = 18446744073709551615;
 const NONE32: u32 = 4294967295;
@@ -362,7 +364,7 @@ fn intrinsic_class(in names: Names, sym: u32) -> u64 {
     let float_kind = name_ends(in names, sym, in "_f32") || name_ends(in names, sym, in "_f64");
     let float_conversion = float_kind
         && (name_starts(in names, sym, in "widen_")
-            || name_starts(in names, sym, in "nearest_")
+            || name_starts(in names, sym, in NEAREST_PREFIX)
             || name_starts(in names, sym, in "to_bits_")
             || name_starts(in names, sym, in "from_bits_"));
     if float_conversion {
@@ -370,7 +372,7 @@ fn intrinsic_class(in names: Names, sym: u32) -> u64 {
         // either way.
         return I_FLOAT;
     }
-    if name_starts(in names, sym, in "saturating_") {
+    if name_starts(in names, sym, in SATURATING_PREFIX) {
         return I_FLOAT;
     }
     if name_starts(in names, sym, in "widen_")
