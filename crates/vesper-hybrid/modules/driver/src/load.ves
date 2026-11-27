@@ -10,8 +10,11 @@
 // crosses from Rust.
 //
 // The manifest decode and validation and a dependency's version match are
-// @vesper/loom-calculus's (`loader`), a `.vsys` library's type names and
-// link mode @vesper/vsys's (`type_names`). A graph with a
+// @vesper/loom-calculus's (`loader`). A `.vsys` library's type names and
+// link mode are the one host step left (`VsysNames`,
+// crates/vesper-hybrid/src/driver/load.rs): @vesper/vsys does not check
+// everything `vesper_ffi::sys` does yet (the parser limits, linear handle
+// finalizers, drop import signatures). A graph with a
 // manifest error, an I/O error or anything else this reader does not
 // cover (an absolute dependency path, a UNC path, a name that is not
 // UTF-8, a source over the parser's byte budget) goes back to the Rust
@@ -33,12 +36,14 @@ use @vesper/loom-calculus::loader::{
     LoadedManifest, DEP_WORDS, DEP_NAME_START, DEP_NAME_END, DEP_REQ_START, DEP_REQ_END,
     DEP_OPTIONAL, DEP_HAS_PATH, DEP_PATH_START, DEP_PATH_END, parse_manifest, version_matches
 };
-use @vesper/vsys::{type_names};
-use @vesper/vsys::lexer::{VsysError};
 
 // The host steps (`Step` of crates/vesper-hybrid/src/driver.rs).
 fn step_load_begin() -> u32 {
     71
+}
+
+fn step_vsys_names() -> u32 {
+    74
 }
 
 fn step_graph() -> u32 {
@@ -165,10 +170,7 @@ const WORD_MASK: u64 = 18446744073709551608;
 
 // `LoadBegin`'s answer when the driver reads the graph.
 const DRIVER_READS: i64 = 1;
-// `vsys_names`' answer: the library does not parse, links dynamically or
-// links statically.
-const VSYS_NONE: i64 = 0;
-const VSYS_DYNAMIC: i64 = 1;
+// `VsysNames`' answer for a library that links statically.
 const VSYS_STATIC: i64 = 2;
 // Whether a package has a static `.vsys` library: not asked yet, no, yes.
 const STATIC_UNKNOWN: u64 = 0;
@@ -699,53 +701,40 @@ fn inc(x: u64) -> u64 {
     wrapping_add(x, 1)
 }
 
-// `.vsys` placeholders (`driver_host::vsys_names`).
-fn target_abi(t: u64) -> Str {
-    if t == 0 {
-        "sysv64"
-    } else if t == 1 {
-        "aapcs64"
-    } else if t == 2 {
-        "darwin64"
-    } else {
-        "win64"
-    }
-}
+// ---------------------------------------------------------- host steps
 
-// `driver_host::vsys_names` (before slice 2b) over @vesper/vsys: the
-// library's link mode for target `t` (`VSYS_*`); its type names go to
-// package `pkg`'s foreign types.
-fn vsys_names(inout l: Ld, t: u64, in text: Slice[u8], pkg: u64, names: bool) -> i64 {
-    let a = replace(in text, in "@TARGET@".as_bytes(), in target_triple(t).as_bytes());
-    let source = replace(in a.as_slice(), in "@ABI@".as_bytes(), in target_abi(t).as_bytes());
-    let parsed = handle Fail[VsysError] in {
-        Option::Some(type_names(in source.as_slice()))
-    } with {
-        return v => v,
-        raise(_e, _k) => Option::None,
-    };
-    let out = match parsed {
-        Option::Some(o) => o,
-        Option::None => return VSYS_NONE,
-    };
-    let o = out.as_slice();
-    let mut at: u64 = 0;
-    let statically = rd(in o, inout at) != 0;
-    if names {
+// `VsysNames`: 0 when the library does not parse, 1, or 2 when it links
+// statically; its type names go to package `pkg`'s foreign types.
+fn vsys_names(
+    inout s: Session,
+    inout l: Ld,
+    t: u64,
+    in text: Slice[u8],
+    pkg: u64,
+    names: bool
+) -> i64 eff [Ffi[HybridDriver]] {
+    let mut arg: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    put(inout arg, t);
+    arg.extend(in text);
+    let r = HybridDriver::hd_step(inout s, step_vsys_names(), in arg.as_slice());
+    if r < 0 {
+        l.failed = true;
+        return 0;
+    }
+    if r > 0 && names {
+        let out = host_text(in s);
+        let o = out.as_slice();
+        let mut at: u64 = 0;
         let n = rd(in o, inout at);
         for _k in 0..n {
-            let (s0, e0) = rd_str(in o, inout at);
-            let (ks, ke) = keep(inout l, in o[s0..e0]);
+            let (a, e) = rd_str(in o, inout at);
+            let (ks, ke) = keep(inout l, in o[a..e]);
             l.foreign.push(pkg);
             l.foreign.push(ks);
             l.foreign.push(ke);
         }
     }
-    if statically {
-        VSYS_STATIC
-    } else {
-        VSYS_DYNAMIC
-    }
+    r
 }
 
 // ---------------------------------------------------------- the walk
@@ -1109,7 +1098,7 @@ fn package(
                 let a2 = w(in l.vt.as_slice(), wrapping_add(wrapping_mul(k2, VT), VT_TEXT));
                 let e2 = w(in l.vt.as_slice(), wrapping_add(wrapping_mul(k2, VT), VT_TEXT_END));
                 let tt = tx(in l, a2, e2);
-                let _ = vsys_names(inout l, t, in tt.as_slice(), index, true);
+                let _ = vsys_names(inout s, inout l, t, in tt.as_slice(), index, true);
                 if l.failed {
                     return 0;
                 }
@@ -1126,7 +1115,7 @@ fn package(
             }
             if l.host != no_target() {
                 let host = l.host;
-                let _ = vsys_names(inout l, host, in text.as_slice(), index, true);
+                let _ = vsys_names(inout s, inout l, host, in text.as_slice(), index, true);
                 if l.failed {
                     return 0;
                 }
@@ -1216,7 +1205,7 @@ fn package(
                     )
                 };
                 let vt2 = tx(in l, a, e);
-                let r = vsys_names(inout l, t, in vt2.as_slice(), index, false);
+                let r = vsys_names(inout s, inout l, t, in vt2.as_slice(), index, false);
                 if l.failed {
                     return 0;
                 }

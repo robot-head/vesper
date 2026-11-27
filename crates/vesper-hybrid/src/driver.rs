@@ -377,6 +377,7 @@ enum Step {
     // The Vesper driver's own read of the package graph (#1986 slice 2,
     // driver/load.rs).
     LoadBegin = 71,
+    VsysNames = 74,
     Graph = 75,
     /// The checked world's declarations, for the Vesper driver to hold.
     WorldDecls = 80,
@@ -385,7 +386,7 @@ enum Step {
     WorldBegin = 81,
 }
 
-const STEPS: [Step; 35] = [
+const STEPS: [Step; 36] = [
     Step::Load,
     Step::EbpfBuild,
     Step::Parse,
@@ -418,6 +419,7 @@ const STEPS: [Step; 35] = [
     Step::VerifiedInput,
     Step::LoadPackage,
     Step::LoadBegin,
+    Step::VsysNames,
     Step::Graph,
     Step::WorldDecls,
     Step::WorldBegin,
@@ -545,7 +547,7 @@ impl Session {
             | Step::WasmInput
             | Step::EbpfInput
             | Step::VerifiedInput => self.backends_step(step, arg),
-            Step::LoadBegin | Step::Graph => self.load_step(step, arg),
+            Step::LoadBegin | Step::VsysNames | Step::Graph => self.load_step(step, arg),
             Step::WorldDecls | Step::WorldBegin => self.world_step(step, arg),
         }
     }

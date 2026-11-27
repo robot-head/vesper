@@ -46,6 +46,9 @@ pub const DEP_PATH_END: u64 = 7;
 
 // What `at` gives past the end.
 const EOF: u64 = 256;
+// A key the object does not have, and a version or requirement that does
+// not parse: no offset or table index can be this.
+const MISSING: u64 = 18446744073709551615;
 
 const QUOTE: u64 = 34;
 const BACKSLASH: u64 = 92;
@@ -403,12 +406,12 @@ fn key_name(kind: u64, x: u64) -> Str {
 }
 
 // The value positions of an object's keys: for each key of `kind`, the
-// index of its value, or EOF when the object has no such key.
+// index of its value, or MISSING when the object has no such key.
 fn fields(in j: Slice[u8], i: u64, kind: u64) -> ChunkSeq[u64] {
     let mut out: ChunkSeq[u64] = ChunkSeq::new[u64]();
     let n = key_count(kind);
     for _x in 0..n {
-        out.push(EOF);
+        out.push(MISSING);
     }
     if at(in j, i) != OPEN_BRACE {
         return out;
@@ -540,13 +543,13 @@ fn set_words(inout e: Enc, in j: Slice[u8], i: u64) {
     }
 }
 
-// The comparators of requirement text `t`: `Enc::req`, or EOF when it does
-// not parse.
+// The comparators of requirement text `t`: `Enc::req`, or MISSING when it
+// does not parse.
 fn requirement(inout e: Enc, in t: Slice[u8]) -> u64 {
     let mut m: ChunkSeq[u8] = ChunkSeq::new[u8]();
     let mut cs: ChunkSeq[SCmp] = ChunkSeq::new[SCmp]();
     if !parse_req(inout m, in t, 0, t.len(), inout cs) {
-        return EOF;
+        return MISSING;
     }
     let shown = req_display(in t, in cs);
     let text = text_occurrence(inout e, in shown.as_slice());
@@ -571,12 +574,12 @@ fn requirement(inout e: Enc, in t: Slice[u8]) -> u64 {
     wrapping_sub(e.nreq, 1)
 }
 
-// `Enc::version` of version text `t`, or EOF when it does not parse.
+// `Enc::version` of version text `t`, or MISSING when it does not parse.
 fn version(inout e: Enc, in t: Slice[u8]) -> u64 {
     let mut m: ChunkSeq[u8] = ChunkSeq::new[u8]();
     let (ok, v) = parse_version(inout m, in t, 0, t.len());
     if !ok {
-        return EOF;
+        return MISSING;
     }
     e.vers.push(v.major);
     e.vers.push(v.minor);
@@ -671,7 +674,7 @@ fn system_requirement(inout e: Enc, in j: Slice[u8], i: u64) {
         }
         let req_text = copy_range(in source, a, b);
         let r = requirement(inout e, in req_text.as_slice());
-        if r != EOF {
+        if r != MISSING {
             flag(inout e, true);
             let name = text_occurrence(inout e, in src[0..split]);
             word(inout e, name);
@@ -761,7 +764,7 @@ pub fn parse_manifest(in text: Slice[u8]) -> LoadedManifest {
     let (version_start, version_end) = string(inout e, in j, w(in pkg, PKG_VERSION));
     let version_text = copy_range(in e.pool, version_start, version_end);
     let v = version(inout e, in version_text.as_slice());
-    if v == EOF {
+    if v == MISSING {
         return failed();
     }
     word(inout e, v);
@@ -797,7 +800,7 @@ pub fn parse_manifest(in text: Slice[u8]) -> LoadedManifest {
         let (rs, rt) = string(inout e, in j, w(in dv, DEP_VERSION));
         let req_text = copy_range(in e.pool, rs, rt);
         let r = requirement(inout e, in req_text.as_slice());
-        if r == EOF {
+        if r == MISSING {
             return failed();
         }
         word(inout e, r);
@@ -811,7 +814,7 @@ pub fn parse_manifest(in text: Slice[u8]) -> LoadedManifest {
         deps.push(rt);
         deps.push(if optional { 1 } else { 0 });
         let path_at = w(in dv, DEP_PATH);
-        if path_at == EOF || is_null(in j, path_at) {
+        if path_at == MISSING || is_null(in j, path_at) {
             deps.push(0);
             deps.push(0);
             deps.push(0);
@@ -825,7 +828,7 @@ pub fn parse_manifest(in text: Slice[u8]) -> LoadedManifest {
     // build-sandbox: has_sandbox, [allow_network, script then
     // wasi_read_paths]
     let sb = w(in top, TOP_SANDBOX);
-    if sb == EOF || is_null(in j, sb) {
+    if sb == MISSING || is_null(in j, sb) {
         flag(inout e, false);
     } else {
         let sv = fields(in j, sb, SANDBOX);
@@ -833,7 +836,7 @@ pub fn parse_manifest(in text: Slice[u8]) -> LoadedManifest {
         let net = boolean(inout e, in j, w(in sv, SB_NETWORK));
         flag(inout e, net);
         let script = w(in sv, SB_SCRIPT);
-        let has_script = script != EOF && !is_null(in j, script);
+        let has_script = script != MISSING && !is_null(in j, script);
         let reads = elements(in j, w(in sv, SB_READS));
         word(inout e, wrapping_add(reads.len(), if has_script { 1 } else { 0 }));
         if has_script {
@@ -873,7 +876,7 @@ pub fn version_matches(in req: Slice[u8], in version_text: Slice[u8]) -> bool {
     let mut e = new_enc();
     let v = version(inout e, in version_text);
     let r = requirement(inout e, in req);
-    if v == EOF || r == EOF {
+    if v == MISSING || r == MISSING {
         return false;
     }
     let ws = words(in e);

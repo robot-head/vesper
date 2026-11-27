@@ -1849,15 +1849,6 @@ vesper_package(
     ],
 )
 
-# The `.vsys` parser, whose type names the driver's package load reads
-# (#1986 slice 2b).
-vesper_package(
-    name = "vsys_package",
-    srcs = glob(["packages/vesper-vsys/src/**/*.ves"]),
-    manifest = "packages/vesper-vsys/Loom.toml",
-    visibility = ["//visibility:public"],
-)
-
 vesper_package(
     name = "lean_extract_package",
     srcs = glob(["packages/vesper-lean-extract/src/**/*.ves"]),

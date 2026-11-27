@@ -6,13 +6,13 @@
 Claim: #1986 (part of hd_step group 1, #1896, and Stage 2 retirement,
 #1397). Built on #1984's step table (`LoadPackage` = 70). Slice 1 (the
 assembly) is #2033; slice 2 (the loader's I/O) is #2188; slice 2b (the
-manifests, version matches and `.vsys` type names) follows it.
+manifests and version matches) follows it.
 
-## Slice 2b: manifests, version matches and `.vsys` names
+## Slice 2b: manifests and version matches
 
-- The driver's graph read no longer calls Rust for anything: the three host
-  steps `Manifest`, `VersionMatches` and `VsysNames` (72-74) and
-  `packages::driver_host::{DriverManifest, vsys_names}` are gone.
+- The driver decodes its manifests and matches dependency versions itself:
+  the host steps `Manifest` and `VersionMatches` (72-73) and
+  `packages::driver_host::DriverManifest` are gone.
 - **Manifests**: `@vesper/loom-calculus` gets `loader::parse_manifest`,
   `vesper_loom_calculus::parse_manifest` in Vesper. It decodes the TOML
   with the port's `manifest_from_toml` (`toml::from_str::<Manifest>`, with
@@ -25,10 +25,11 @@ manifests, version matches and `.vsys` type names) follows it.
   requirement, optional, path).
 - **Version matches**: `loader::version_matches`, `VersionReq::matches` over
   the port's SemVer text parser and its matcher (`semver.ves`).
-- **`.vsys` type names**: `@vesper/vsys` gets `type_names`, the same parse
-  as `parse_and_encode` (it fails where that fails, the canonical budget
-  included) that returns the link mode and the extern type, wire struct and
-  enum names instead of the canonical bytes.
+- **`.vsys` type names stay a host step** (`VsysNames`, 74):
+  `@vesper/vsys` does not yet check everything `vesper_ffi::sys::parse`
+  does (its source and token limits are larger than `Limits::default()`'s,
+  and it skips the linear handle finalizer and drop import signature
+  checks), so it would accept libraries the loader rejects.
 - A manifest error still hands the graph back to the Rust loader, which
   reports it.
 - **Differential: 0 differences** on all 211 Loom packages of the corpus:
@@ -84,8 +85,8 @@ manifests, version matches and `.vsys` type names) follows it.
   `VESPER_HYBRID_LOAD=0` turns the read off and keeps slice 1.
   `VESPER_HYBRID_STATS=1` prints `load read <n> package graphs in Vesper
   (<m> handed back to Rust)`.
-- Slice 2b moved the manifest decode, the version match and the `.vsys`
-  names to Vesper (above).
+- Slice 2b moved the manifest decode and the version match to Vesper
+  (above).
 
 ## Slice 1: assembly
 
@@ -159,7 +160,8 @@ Bazel runs the differential on every 4th package
 ## What is left
 
 1. Manifest errors rendered in Vesper (E0114/E0115 and the decode errors),
-   and `include_str` expansion, so that no graph goes back to Rust.
+   `include_str` expansion, and the `.vsys` type names once `@vesper/vsys`
+   checks what `vesper_ffi::sys` does, so that no graph goes back to Rust.
 2. **Slice 3: sugar expansion** (`Loader::expand_sugars`) once
    `@vesper/sugar` lands, and the parse-diagnostic fallback goes away.
 3. `--include-tests` loads, once the assembler can parse test-only

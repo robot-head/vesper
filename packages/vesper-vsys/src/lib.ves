@@ -1081,39 +1081,6 @@ fn encode_fun(
 // Top-level `.vsys` parser + canonical encoder.
 
 pub fn parse_and_encode(in source: Slice[u8]) -> ChunkSeq[u8] eff [Fail[VsysError]] {
-    parse_library(in source, false)
-}
-
-// What the package loader reads of a library (`PackageVsys::type_names` and
-// the link mode): a word that is 1 when it links statically, then the
-// count and the type names (extern types, callbacks among them, wire
-// structs, enums), each its length and its bytes zero-padded to a word.
-// It fails where `parse_and_encode` does.
-pub fn type_names(in source: Slice[u8]) -> ChunkSeq[u8] eff [Fail[VsysError]] {
-    parse_library(in source, true)
-}
-
-fn put_word(inout out: ChunkSeq[u8], v: u64) {
-    for k in 0..WORD_BYTES {
-        out.push(wrapping_u8(wrapping_shr_u64(v, wrapping_mul(wrapping_u32(k), BYTE_BITS))));
-    }
-}
-
-fn put_name(inout out: ChunkSeq[u8], in name: Slice[u8]) {
-    put_word(inout out, name.len());
-    out.extend(in name);
-    loop {
-        if out.len() % WORD_BYTES == 0 {
-            break;
-        }
-        out.push(0);
-    }
-}
-
-const WORD_BYTES: u64 = 8;
-const BYTE_BITS: u32 = 8;
-
-fn parse_library(in source: Slice[u8], names: bool) -> ChunkSeq[u8] eff [Fail[VsysError]] {
     let lexed = lex(in source);
     let mut parser = P {
         toks: lexed.toks,
@@ -2162,39 +2129,7 @@ fn parse_library(in source: Slice[u8], names: bool) -> ChunkSeq[u8] eff [Fail[Vs
             put_decimal_const(inout encoder, const_def.negative, const_def.magnitude);
         }
     }
-    if !names {
-        return encoder.out;
-    }
-    let arena = parser.arena.as_slice();
-    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    put_word(
-        inout out,
-        if eq_str(in arena, link_start, link_end, in "static") {
-            1
-        } else {
-            0
-        }
-    );
-    put_word(inout out, wrapping_add(wrapping_add(externs.len(), wires.len()), enums.len()));
-    for i in 0..externs.len() {
-        match externs.try_get(i) {
-            Option::Some(d) => put_name(inout out, in arena[d.name_start..d.name_end]),
-            Option::None => (),
-        }
-    }
-    for i in 0..wires.len() {
-        match wires.try_get(i) {
-            Option::Some(d) => put_name(inout out, in arena[d.name_start..d.name_end]),
-            Option::None => (),
-        }
-    }
-    for i in 0..enums.len() {
-        match enums.try_get(i) {
-            Option::Some(d) => put_name(inout out, in arena[d.name_start..d.name_end]),
-            Option::None => (),
-        }
-    }
-    out
+    encoder.out
 }
 
 fn pack_bytes(in bytes: Slice[u8]) -> ChunkSeq[u64] {

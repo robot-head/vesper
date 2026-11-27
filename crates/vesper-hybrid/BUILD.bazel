@@ -229,7 +229,6 @@ vesper_hybrid(
             "//:std_toml_package",
             "//:verified_codegen_package",
             "//:verify_package",
-            "//:vsys_package",
             "//:wasm_backend_package",
             "//:wit_component_package",
             # `vesper fmt`'s formatter (#1996 part 3d).
