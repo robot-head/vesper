@@ -126,6 +126,7 @@ const IEX_LNOT: u64 = 18;
 const IEX_BAND: u64 = 19;
 const IEX_BOR: u64 = 20;
 const IEX_BXOR: u64 = 21;
+const IEX_WORD_BIN: u64 = 22;
 
 // Sub-operations of `INST_WRITE_OP`.
 const WOP_IADD: u64 = 1;
@@ -1185,6 +1186,16 @@ impl Body {
                 let lhs = operand(inout b, lv, k0, self.optimize);
                 let rhs = operand(inout b, rv, k1, self.optimize);
                 let raw = ins_bxor(inout b, lhs, rhs);
+                coerce(inout b, raw, rk, self.optimize)
+            } else if iex == IEX_WORD_BIN {
+                let lv = temp(inout b, x);
+                let rv = temp(inout b, y);
+                let lhs = operand(inout b, lv, k0, self.optimize);
+                let rhs = operand(inout b, rv, k1, self.optimize);
+                let raw = emit_wide_binary(inout b, sub, lhs, rhs);
+                if is_invalid(raw) {
+                    return false;
+                }
                 coerce(inout b, raw, rk, self.optimize)
             } else {
                 return false;

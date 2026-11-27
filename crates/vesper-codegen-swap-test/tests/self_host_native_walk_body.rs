@@ -1008,3 +1008,60 @@ fn vesper_scalar_bodies_part_6k() {
         assert!(total.is_clean(), "{}", total.summary());
     });
 }
+
+/// Part 6l: signed and unsigned integer comparisons across narrow & 64-bit
+/// types plus range-proven `+`, `-`, `*` across both optimized and unoptimized
+/// builds.
+const SCALARS_6L: &str = "
+fn cmp_matrix(a: i8, b: u8, c: i32, d: u32, e: i64, f: u64) -> i64 {
+    let mut acc: i64 = 0;
+    if a < 10 && a >= -20 {
+        acc = wrapping_add(acc, 1);
+    }
+    if b <= 200 && b > 50 {
+        acc = wrapping_add(acc, 2);
+    }
+    if c != 0 && c <= 1000 {
+        acc = wrapping_add(acc, 4);
+    }
+    if d >= 10 && d < 500 {
+        acc = wrapping_add(acc, 8);
+    }
+    if e > -100 && e < 100 && f >= 1 && f <= 1000 {
+        let s: i64 = wrapping_sub(wrapping_mul(wrapping_add(e, 10), 2), 3);
+        acc = wrapping_add(acc, s);
+    }
+    acc
+}
+fn main() -> i64 {
+    cmp_matrix(-5, 120, 42, 99, 25, 500) ^ cmp_matrix(50, 10, 0, 600, 200, 0)
+}
+";
+
+#[test]
+fn vesper_scalar_bodies_part_6l() {
+    big_stack(|| {
+        let parsed = vesper::parser::parse(SCALARS_6L);
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        let checked = vesper::check::check(&parsed.module);
+        assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
+        if let Err(e) = build(&checked.world, "main", true) {
+            panic!("the part 6l scalar program does not build: {e}");
+        }
+        let before = EMITTED.load(Ordering::Relaxed);
+        let total = both("scalars_6l", &checked.world, true);
+        let emitted = EMITTED.load(Ordering::Relaxed) - before;
+        eprintln!(
+            "scalars_6l: {}; {emitted} functions emitted from Vesper",
+            total.summary()
+        );
+        let ran = if cross() { 0 } else { 2 };
+        assert_eq!((total.worlds, total.ran), (2, ran), "{}", total.summary());
+        let min_emitted = if cross() { 4 } else { 8 };
+        assert!(
+            emitted >= min_emitted,
+            "part 6l functions should come from Vesper (expected >= {min_emitted}, got {emitted})"
+        );
+        assert!(total.is_clean(), "{}", total.summary());
+    });
+}
