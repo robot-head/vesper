@@ -29,12 +29,16 @@
 // patterns, float conversions and bit reinterpretations, and Rust's
 // shortest-digit `Display` (@vesper/serde). Slice 9 adds labelled
 // operations (`stop.raise(x)` goes to the handler labelled `stop`),
-// `return` out of a handler body, and non-`dyn` `Box` values. A program
+// `return` out of a handler body, and non-`dyn` `Box` values. Slice 10
+// adds region blocks: each one's region is an @vesper/alloc book of one
+// chunk bounded by its capacity, with payloads held beside their byte
+// allocations, so `used()` and exhaustion match the Rust store. A program
 // reaching anything else (labelled function types, float math
 // intrinsics, a float mode, 128-bit integers, vector and tiled operations) is declined before
 // it runs (`scan`); a continuation resumed outside its handler's
-// activation, a float-to-integer conversion, or a result with a non-ASCII
-// string, is declined when it is reached. The caller then
+// activation, a float-to-integer conversion, a region payload whose call
+// type does not fix its size (inside a generic function), or a result with
+// a non-ASCII string, is declined when it is reached. The caller then
 // runs the Rust evaluator instead.
 //
 // The input (tests/common/run_words.rs `run_input`): check-data's names,
