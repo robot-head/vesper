@@ -10,7 +10,14 @@
 //
 // Part 1: remove_unreachable, float_constants, fold_constant_branches,
 // shrink_unused_slots. Part 2: merge_blocks, remove_constant_params.
+// branches.ves (#2423): the branch-threading steps. folds.ves (#2423):
+// canonicalize_imm_ops, fold_load_store_offsets, cse_dom_pure.
 
+use self::folds::{canonicalize_imm_ops, cse_dom_pure, fold_load_store_offsets};
+use self::branches::{
+    propagate_branch_conditions, sink_compares, thread_branches, thread_constant_param_jumps,
+    thread_decided_branches
+};
 use @vesper/clif::{Func, inc, n32, read_func, u32_at, w};
 use @vesper/clif::codes::{
     CC_EQ, CC_NE, F_STACK_SLOT, NONE, OP_BAND, OP_BITCAST, OP_BOR, OP_BRIF, OP_BXOR, OP_F32CONST,
@@ -26,6 +33,16 @@ pub const STEP_FOLD_CONSTANT_BRANCHES: u64 = 3;
 pub const STEP_SHRINK_UNUSED_SLOTS: u64 = 4;
 pub const STEP_MERGE_BLOCKS: u64 = 5;
 pub const STEP_REMOVE_CONSTANT_PARAMS: u64 = 6;
+// 32 up: the branch-threading steps of #2423 (branches.ves).
+pub const STEP_SINK_COMPARES: u64 = 32;
+pub const STEP_THREAD_BRANCHES: u64 = 33;
+pub const STEP_THREAD_DECIDED_BRANCHES: u64 = 34;
+pub const STEP_THREAD_CONSTANT_PARAM_JUMPS: u64 = 35;
+pub const STEP_PROPAGATE_BRANCH_CONDITIONS: u64 = 36;
+// The fold steps of #2423 (folds.ves).
+pub const STEP_CANONICALIZE_IMM_OPS: u64 = 37;
+pub const STEP_FOLD_LOAD_STORE_OFFSETS: u64 = 38;
+pub const STEP_CSE_DOM_PURE: u64 = 39;
 
 // The answer's first word.
 pub const PORTED: u64 = 1;
@@ -56,7 +73,7 @@ const F32_EXP: u64 = 2139095040;
 const F32_FRAC: u64 = 8388607;
 
 // The bit width of a type code; 0 when the tables do not name it.
-fn type_bits(ty: u64) -> u64 {
+pub fn type_bits(ty: u64) -> u64 {
     if ty == TY_I8 {
         BITS_8
     } else if ty == TY_I16 || ty == TY_F16 {
@@ -73,21 +90,21 @@ fn type_bits(ty: u64) -> u64 {
 }
 
 // `x & ((1i64 << bits) - 1)`, the shift wrapping as Rust's release build's.
-fn low_bits(x: u64, bits: u64) -> u64 {
+pub fn low_bits(x: u64, bits: u64) -> u64 {
     x & wrapping_sub(wrapping_shl_u64(1, wrapping_u32(bits & SHIFT_MASK)), 1)
 }
 
 // An optional constant: `some` false is `None`.
-copy struct Konst {
+pub copy struct Konst {
     some: bool,
     v: u64,
 }
 
-fn none() -> Konst {
+pub fn none() -> Konst {
     Konst { some: false, v: 0 }
 }
 
-fn some(v: u64) -> Konst {
+pub fn some(v: u64) -> Konst {
     Konst { some: true, v: v }
 }
 
@@ -165,7 +182,7 @@ fn constant(in f: Func, v0: u32, depth: u64) -> Konst {
 }
 
 // Every instruction in layout order (`insts`).
-fn layout_insts(in f: Func) -> ChunkSeq[u32] {
+pub fn layout_insts(in f: Func) -> ChunkSeq[u32] {
     let mut out = ChunkSeq::new[u32]();
     let mut b = f.first_block();
     loop {
@@ -188,7 +205,7 @@ fn layout_insts(in f: Func) -> ChunkSeq[u32] {
 // `remove_unreachable`: blocks the entry block does not reach through the
 // destinations of block terminators lose their instructions, then leave
 // the layout.
-fn remove_unreachable(inout f: Func) {
+pub fn remove_unreachable(inout f: Func) {
     let mut seen = ChunkSeq::new[u8]();
     seen.resize(f.nblocks(), 0);
     let mut work = ChunkSeq::new[u32]();
@@ -347,7 +364,7 @@ fn shrink_unused_slots(inout f: Func) {
 }
 
 // Every block in layout order.
-fn layout_blocks(in f: Func) -> ChunkSeq[u32] {
+pub fn layout_blocks(in f: Func) -> ChunkSeq[u32] {
     let mut out = ChunkSeq::new[u32]();
     let mut b = f.first_block();
     loop {
@@ -377,7 +394,7 @@ fn pred_counts(in f: Func) -> ChunkSeq[u32] {
 }
 
 // The parameters of `b`.
-fn params_of(in f: Func, b: u32) -> ChunkSeq[u32] {
+pub fn params_of(in f: Func, b: u32) -> ChunkSeq[u32] {
     let mut out = ChunkSeq::new[u32]();
     for k in 0..f.nparams(b) {
         out.push(f.param(b, k));
@@ -457,13 +474,13 @@ fn is_int_type(ty: u64) -> bool {
 
 // The incoming edges of every block, as (instruction, destination) pairs
 // in layout order: block `b`'s are `at[b]..at[b + 1]` of `inst`/`dest`.
-struct Edges {
+pub struct Edges {
     at: ChunkSeq[u64],
     inst: ChunkSeq[u32],
     dest: ChunkSeq[u64],
 }
 
-fn edges_of(in f: Func) -> Edges {
+pub fn edges_of(in f: Func) -> Edges {
     let nb = f.nblocks();
     let all = layout_insts(in f);
     let mut at = ChunkSeq::new[u64]();
@@ -619,7 +636,15 @@ pub fn clif_opt_words(in input: Str) -> ChunkSeq[u64] {
         || step == STEP_FOLD_CONSTANT_BRANCHES
         || step == STEP_SHRINK_UNUSED_SLOTS
         || step == STEP_MERGE_BLOCKS
-        || step == STEP_REMOVE_CONSTANT_PARAMS;
+        || step == STEP_REMOVE_CONSTANT_PARAMS
+        || step == STEP_SINK_COMPARES
+        || step == STEP_THREAD_BRANCHES
+        || step == STEP_THREAD_DECIDED_BRANCHES
+        || step == STEP_THREAD_CONSTANT_PARAM_JUMPS
+        || step == STEP_PROPAGATE_BRANCH_CONDITIONS
+        || step == STEP_CANONICALIZE_IMM_OPS
+        || step == STEP_FOLD_LOAD_STORE_OFFSETS
+        || step == STEP_CSE_DOM_PURE;
     if !ported || bytes.len() < STEP_BYTES {
         out.push(NOT_PORTED);
         return out;
@@ -637,6 +662,22 @@ pub fn clif_opt_words(in input: Str) -> ChunkSeq[u64] {
         shrink_unused_slots(inout f);
     } else if step == STEP_MERGE_BLOCKS {
         merge_blocks(inout f);
+    } else if step == STEP_SINK_COMPARES {
+        sink_compares(inout f);
+    } else if step == STEP_THREAD_BRANCHES {
+        thread_branches(inout f);
+    } else if step == STEP_THREAD_DECIDED_BRANCHES {
+        thread_decided_branches(inout f);
+    } else if step == STEP_THREAD_CONSTANT_PARAM_JUMPS {
+        thread_constant_param_jumps(inout f);
+    } else if step == STEP_PROPAGATE_BRANCH_CONDITIONS {
+        propagate_branch_conditions(inout f);
+    } else if step == STEP_CANONICALIZE_IMM_OPS {
+        canonicalize_imm_ops(inout f);
+    } else if step == STEP_FOLD_LOAD_STORE_OFFSETS {
+        fold_load_store_offsets(inout f);
+    } else if step == STEP_CSE_DOM_PURE {
+        cse_dom_pure(inout f);
     } else {
         remove_constant_params(inout f);
     }

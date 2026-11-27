@@ -57,11 +57,14 @@ actions:
   # time, which is what the split is balanced on. All three, like "Test all
   # targets", build optimized test binaries (`--config=ci_opt` in .bazelrc),
   # with debug assertions and overflow checks still on.
+  # 28GB like the other two differential checks: at 25GB (26.84GB total) the
+  # VM reached 27.56GB and the kernel killed self_host_verified_codegen
+  # (#2418, #2448).
   - name: "Self-host differentials"
     container_image: "ubuntu-24.04"
     resource_requests:
       cpu: 8
-      memory: 25GB
+      memory: 28GB
       disk: 60GB
     timeout: 60m
     triggers:
