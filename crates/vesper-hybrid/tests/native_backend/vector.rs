@@ -1,4 +1,4 @@
-use super::{binding, integer_block_words};
+use super::{aarch64_leaf_words, binding, integer_block_words};
 use cranelift_codegen::{
     Context,
     ir::{AbiParam, ConstantData, InstBuilder, MemFlags, StackSlotData, StackSlotKind, types},
@@ -23,6 +23,8 @@ fn module() -> JITModule {
 }
 
 fn compile(module: &mut JITModule, context: &mut Context) -> [*const u8; 2] {
+    let arm = aarch64_leaf_words(&context.func).expect("AArch64 vector machine request");
+    assert!(!binding::aarch64_integer_leaf(&arm).is_empty(), "{arm:?}");
     let words = integer_block_words(&context.func).expect("vector machine request");
     let bytes = binding::x86_64_integer_block(&words);
     assert!(!bytes.is_empty(), "{words:?}");

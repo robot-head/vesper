@@ -120,6 +120,10 @@ const STACK_ARGUMENT: u64 = 149;
 const FLOAT_STACK_ARGUMENT: u64 = 150;
 const CALL_STACK_ARGUMENT: u64 = 151;
 const FUNCTION_GOT: u64 = 152;
+const VECTOR_SPLAT: u64 = 159;
+const VECTOR_LOAD: u64 = 160;
+const VECTOR_STORE: u64 = 161;
+const VECTOR_SIGNED_SAT_ADD: u64 = 167;
 const CALL_STACK_COUNT_SHIFT: u32 = 4;
 const INDIRECT_CALL: u64 = 1 << (u64::BITS - 1);
 const EQUAL: u64 = 0;
@@ -128,6 +132,44 @@ const SIGNED_LESS: u64 = 2;
 const UNSIGNED_LESS: u64 = 6;
 const FLOAT_UNORDERED_OR_EQUAL: u64 = 5;
 
+#[test]
+fn aarch64_simd_uses_full_width_spills_across_calls() {
+    const VECTOR_MEMORY_FORM: u32 = 0xffc0_03e0;
+    const VECTOR_RELOAD_FROM_SP: u32 = 0x3dc0_03e0;
+    const VECTOR_SPILL_TO_SP: u32 = 0x3d80_03e0;
+    const OPCODE_AND_LANE_WIDTH: u32 = 0xffe0_fc00;
+    const SIGNED_SATURATING_ADD_BYTES: u32 = 0x4e20_0c00;
+    #[rustfmt::skip]
+    let packet = [
+        4, NO_VALUE,
+        VECTOR_LOAD, 0, 1, 0,
+        VECTOR_SPLAT, 3, 0, BYTE_BITS,
+        VECTOR_SIGNED_SAT_ADD, 4, 5, BYTE_BITS,
+        CALL_VOID, 2, 0, INDIRECT_CALL,
+        VECTOR_STORE, 1, 6, 1,
+    ];
+    let code = binding::aarch64_integer_leaf(&packet);
+    let instructions: Vec<_> = code
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .copied()
+        .map(u32::from_le_bytes)
+        .collect();
+    for (mask, expected) in [
+        (VECTOR_MEMORY_FORM, VECTOR_RELOAD_FROM_SP),
+        (VECTOR_MEMORY_FORM, VECTOR_SPILL_TO_SP),
+        (OPCODE_AND_LANE_WIDTH, SIGNED_SATURATING_ADD_BYTES),
+    ] {
+        assert!(
+            instructions.iter().any(|word| word & mask == expected),
+            "{instructions:x?}"
+        );
+    }
+    let mut invalid = packet;
+    invalid[packet.len() - 2] = 0;
+    assert!(binding::aarch64_integer_leaf(&invalid).is_empty());
+}
 #[test]
 fn aarch64_internal_floats_cross_the_register_bank_only_for_arithmetic() {
     const FMOV_D16_X0: u32 = 0x9e67_0010;

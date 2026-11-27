@@ -28,7 +28,7 @@ pub const BYTE_BITS: u64 = 8;
 pub const WORD_BITS: u64 = 16;
 pub const DWORD_BITS: u64 = 32;
 pub const QWORD_BITS: u64 = 64;
-pub const XMM_BITS: u64 = QWORD_BITS * 2;
+pub const VECTOR_BITS: u64 = QWORD_BITS * 2;
 
 const REX: u8 = 0x40;
 const REX_W: u8 = 0x48;
@@ -998,7 +998,7 @@ fn float_memory(
     load: bool
 ) {
     let register = xmm_code(register);
-    if width != XMM_BITS {
+    if width != VECTOR_BITS {
         out.push(float_prefix(width));
     }
     emit_rex(inout out, register, base, false, false);

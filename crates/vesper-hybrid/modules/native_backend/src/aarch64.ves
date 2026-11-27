@@ -34,13 +34,17 @@ use self::scalar::{
     FLOAT_TO_SIGNED_SAT, is_float_to_integer, FLOAT_CEIL, FLOAT_FLOOR, FLOAT_TRUNC, FLOAT_NEAREST,
     FLOAT_MIN, FLOAT_MAX, FLOAT_FMA64, is_float_fma, STACK_ARGUMENT, FLOAT_STACK_ARGUMENT,
     CALL_STACK_ARGUMENT, FUNCTION_GOT, INDIRECT_CALL, indirect_call, is_call, TRAP_IF_ZERO,
-    STACK_POINTER, SPECTRE_BARRIER, is_conditional_trap
+    STACK_POINTER, SPECTRE_BARRIER, is_conditional_trap, VECTOR_CONSTANT, VECTOR_SPLAT, VECTOR_LOAD,
+    VECTOR_STORE, VECTOR_AND, VECTOR_OR, VECTOR_XOR, VECTOR_ADD, VECTOR_SUB, VECTOR_SIGNED_SAT_ADD,
+    VECTOR_UNSIGNED_SAT_ADD, VECTOR_SIGNED_SAT_SUB, VECTOR_UNSIGNED_SAT_SUB, VECTOR_ROUNDED_AVERAGE,
+    VECTOR_PROMOTE_LOW, VECTOR_DEMOTE, is_vector_binary, is_vector_convert, vector_value
 };
 use self::x86_64::{
     BYTE_BITS, WORD_BITS, DWORD_BITS, QWORD_BITS, FLOAT_ORDERED, FLOAT_UNORDERED, FLOAT_EQUAL,
     FLOAT_NOT_EQUAL, FLOAT_ORDERED_NOT_EQUAL, FLOAT_UNORDERED_OR_EQUAL, FLOAT_LESS,
     FLOAT_LESS_EQUAL, FLOAT_GREATER, FLOAT_GREATER_EQUAL, FLOAT_UNORDERED_OR_LESS,
-    FLOAT_UNORDERED_OR_LESS_EQUAL, FLOAT_UNORDERED_OR_GREATER, FLOAT_UNORDERED_OR_GREATER_EQUAL
+    FLOAT_UNORDERED_OR_LESS_EQUAL, FLOAT_UNORDERED_OR_GREATER, FLOAT_UNORDERED_OR_GREATER_EQUAL,
+    VECTOR_BITS
 };
 
 const ARGUMENT_REGISTERS: u64 = 8;
@@ -63,6 +67,12 @@ const SECOND_SCRATCH: u32 = 17;
 const FP_LEFT: u32 = 16;
 const FP_RIGHT: u32 = 17;
 const FP_ADDEND: u32 = 18;
+// v0-v7 hold incoming scalar arguments only until the entry records read them.
+// v8-v15 preserve only 64 bits in AAPCS64, and v16-v18 serve scalar operations.
+const VECTOR_REGISTER_MASK: u32 = 0x3ff800ff;
+const VECTOR_LEFT: u32 = 30;
+const VECTOR_RIGHT: u32 = 31;
+const VECTOR_SPILL_CELLS: u64 = 2;
 // x18 is reserved on Darwin. Keep x29 available for a frame pointer.
 const FIRST_CALLEE_REGISTER: u32 = 19;
 const CALLEE_REGISTERS: u64 = 10;
@@ -99,6 +109,24 @@ const TRAP_INSTRUCTION: u32 = 0xc11f;
 const SKIP_TRAP_DISPLACEMENT: u32 = 2;
 const SIGNED_DIV_TRAP_DISPLACEMENT: u32 = 4;
 const CSDB: u32 = 0xd503229f;
+const VECTOR_ZERO: u32 = 0x4f00e400;
+const VECTOR_DUP: u32 = 0x4e000c00;
+const VECTOR_INSERT_HIGH: u32 = 0x4e181c00;
+const VECTOR_LANE_IMM5_SHIFT: u32 = 16;
+const VECTOR_SIZE_SHIFT: u32 = 22;
+const VECTOR_MEMORY_FLAGS: u32 = 0x04800000;
+const VECTOR_AND_REG: u32 = 0x4e201c00;
+const VECTOR_OR_REG: u32 = 0x4ea01c00;
+const VECTOR_XOR_REG: u32 = 0x6e201c00;
+const VECTOR_ADD_REG: u32 = 0x4e208400;
+const VECTOR_SUB_REG: u32 = 0x6e208400;
+const VECTOR_SIGNED_SAT_ADD_REG: u32 = 0x4e200c00;
+const VECTOR_UNSIGNED_SAT_ADD_REG: u32 = 0x6e200c00;
+const VECTOR_SIGNED_SAT_SUB_REG: u32 = 0x4e202c00;
+const VECTOR_UNSIGNED_SAT_SUB_REG: u32 = 0x6e202c00;
+const VECTOR_ROUNDED_AVERAGE_REG: u32 = 0x6e201400;
+const VECTOR_FLOAT_NARROW: u32 = 0x0e616800;
+const VECTOR_FLOAT_WIDEN: u32 = 0x0e617800;
 // ADR points past itself and the three remaining dispatch instructions.
 const ADR_TABLE: u32 = 0x10000080;
 const ADRP: u32 = 0x90000000;
@@ -656,7 +684,11 @@ fn memory(
 ) {
     let bytes = width / BYTE_BITS;
     let scale = trailing_zeros_u64(bytes);
-    let size = sh(scale, MEMORY_SIZE_SHIFT);
+    let size = if width == VECTOR_BITS {
+        VECTOR_MEMORY_FLAGS
+    } else {
+        sh(scale, MEMORY_SIZE_SHIFT)
+    };
     let opcode = size | (if load { MEMORY_LOAD } else { 0 });
     let offset = widen_i64(wrapping_i32(displacement));
     match memory_immediate(bytes, scale, offset) {
@@ -681,6 +713,49 @@ fn memory_immediate(bytes: u64, scale: u32, offset: i64) -> Option[u32] {
     } else {
         Option::None
     }
+}
+
+fn vector_splat(inout out: ChunkSeq[u8], destination: u32, source: u32, lane: u64) {
+    let imm = sh(wrapping_u32(lane / BYTE_BITS), VECTOR_LANE_IMM5_SHIFT);
+    push32(inout out, VECTOR_DUP | imm | sh(source, RN_SHIFT) | destination);
+}
+
+fn vector_constant(inout out: ChunkSeq[u8], destination: u32, low: u64, high: u64) {
+    if low == 0 && high == 0 {
+        push32(inout out, VECTOR_ZERO | destination);
+        return;
+    }
+    immediate(inout out, SCRATCH, low);
+    if low == high {
+        vector_splat(inout out, destination, SCRATCH, QWORD_BITS);
+    } else {
+        push32(inout out, FMOV_FROM_GP | FP_DOUBLE | REG64 | sh(SCRATCH, RN_SHIFT) | destination);
+        if high != 0 {
+            immediate(inout out, SCRATCH, high);
+            push32(inout out, VECTOR_INSERT_HIGH | sh(SCRATCH, RN_SHIFT) | destination);
+        }
+    }
+}
+
+fn vector_binary(inout out: ChunkSeq[u8], in r: Record, dest: u32, left: u32, right: u32) {
+    let opcode = match r.op {
+        VECTOR_AND => VECTOR_AND_REG,
+        VECTOR_OR => VECTOR_OR_REG,
+        VECTOR_XOR => VECTOR_XOR_REG,
+        VECTOR_ADD => VECTOR_ADD_REG,
+        VECTOR_SUB => VECTOR_SUB_REG,
+        VECTOR_SIGNED_SAT_ADD => VECTOR_SIGNED_SAT_ADD_REG,
+        VECTOR_UNSIGNED_SAT_ADD => VECTOR_UNSIGNED_SAT_ADD_REG,
+        VECTOR_SIGNED_SAT_SUB => VECTOR_SIGNED_SAT_SUB_REG,
+        VECTOR_UNSIGNED_SAT_SUB => VECTOR_UNSIGNED_SAT_SUB_REG,
+        _ => VECTOR_ROUNDED_AVERAGE_REG,
+    };
+    let size = if r.extra != 0 {
+        sh(trailing_zeros_u64(r.extra / BYTE_BITS), VECTOR_SIZE_SHIFT)
+    } else {
+        0
+    };
+    rrr(inout out, opcode | size, dest, left, right);
 }
 
 fn indexed_memory(
@@ -884,6 +959,50 @@ fn is_atomic_update(op: u64) -> bool {
 }
 
 fn operands(in r: Record, returns: u64) -> Option[u64] {
+    if r.op >= VECTOR_CONSTANT && r.op <= VECTOR_DEMOTE {
+        return match r.op {
+            VECTOR_CONSTANT => if r.extra == 0 {
+                Option::Some(0)
+            } else {
+                Option::None
+            },
+            VECTOR_SPLAT => if r.right == 0 && scalar_width(r.extra) {
+                Option::Some(1)
+            } else {
+                Option::None
+            },
+            VECTOR_LOAD => if r.right <= DISP32_MASK && r.extra == 0 {
+                Option::Some(1)
+            } else {
+                Option::None
+            },
+            VECTOR_STORE => if r.extra <= DISP32_MASK {
+                Option::Some(2)
+            } else {
+                Option::None
+            },
+            VECTOR_AND | VECTOR_OR | VECTOR_XOR => if r.extra == 0 {
+                Option::Some(2)
+            } else {
+                Option::None
+            },
+            VECTOR_PROMOTE_LOW | VECTOR_DEMOTE => if r.right == 0 && r.extra == 0 {
+                Option::Some(1)
+            } else {
+                Option::None
+            },
+            VECTOR_ROUNDED_AVERAGE => if scalar_width(r.extra) && r.extra < QWORD_BITS {
+                Option::Some(2)
+            } else {
+                Option::None
+            },
+            _ => if scalar_width(r.extra) {
+                Option::Some(2)
+            } else {
+                Option::None
+            },
+        };
+    }
     if r.op == CONSTANT || r.op == STACK_SLOT || r.op == BLOCK_LABEL {
         return Option::Some(0);
     }
@@ -1143,6 +1262,22 @@ fn operands(in r: Record, returns: u64) -> Option[u64] {
         },
         _ => Option::None,
     }
+}
+
+fn valid_vector_inputs(in words: Slice[u64], args: u64, count: u64, returns: u64) -> bool {
+    for index in 0..count {
+        let r = read_record(in words, index);
+        // The backward pass has already validated these operand counts.
+        let n = operands(in r, returns).unwrap_or(0);
+        let binary = is_vector_binary(r.op);
+        if (n >= 1 && vector_value(in words, args, r.left) != (binary || is_vector_convert(r.op)))
+            || (n >= 2 && vector_value(in words, args, r.right) != (binary || r.op == VECTOR_STORE))
+            || (n == 3 && vector_value(in words, args, r.extra))
+        {
+            return false;
+        }
+    }
+    true
 }
 
 fn division_checks(inout out: ChunkSeq[u8], in r: Record, lhs: u32, rhs: u32) {
@@ -1937,6 +2072,49 @@ fn allocate_spill(
     Option::Some(assigned)
 }
 
+fn allocate_vector_spill(
+    inout spills: ChunkSeq[u64],
+    frame_bytes: u64,
+    value: u64,
+    last: u64
+) -> Option[u32] {
+    for slot in 0..spills.len() {
+        let high = wrapping_add(slot, 1);
+        if spills.try_get(slot).unwrap_or(NO_VALUE) <= value
+            && spills.try_get(high).unwrap_or(NO_VALUE) <= value
+        {
+            let _ = spills.try_set(slot, last);
+            let _ = spills.try_set(high, last);
+            return Option::Some(wrapping_add(SPILL_BASE, wrapping_u32(slot)));
+        }
+    }
+    let assigned = wrapping_add(SPILL_BASE, wrapping_u32(spills.len()));
+    let end = wrapping_add(
+        spill_offset(frame_bytes, assigned),
+        wrapping_mul(VECTOR_SPILL_CELLS, HOME_WORD_BYTES)
+    );
+    if end > MAX_FRAME_BYTES {
+        return Option::None;
+    }
+    spills.push(last);
+    spills.push(last);
+    Option::Some(assigned)
+}
+
+fn materialize_vector(
+    inout out: ChunkSeq[u8],
+    assigned: u32,
+    scratch: u32,
+    frame_bytes: u64
+) -> u32 {
+    if assigned >= SPILL_BASE {
+        memory(inout out, true, VECTOR_BITS, SP, scratch, spill_offset(frame_bytes, assigned));
+        scratch
+    } else {
+        assigned
+    }
+}
+
 fn move_halfword(bits: u64, opcode: u32) -> Option[u32] {
     if bits == 0 {
         return Option::Some(opcode);
@@ -2016,6 +2194,7 @@ fn no_result(op: u64) -> bool {
         || op == SPECTRE_BARRIER
         || op == FENCE
         || op == ATOMIC_STORE
+        || op == VECTOR_STORE
 }
 
 fn stack_adjust(opcode: u32, adjustment: u32) -> u32 {
@@ -2507,6 +2686,7 @@ fn encode_pass(
     let mut needs_call_pair = false;
     let mut needs_checked = false;
     let mut has_float = float_return;
+    let mut has_vector = false;
     let arguments_start = wrapping_add(frame.slots.len(), if labeled { 1 } else { 0 });
     let mut arguments_end = arguments_start;
     let mut float_arguments: u64 = 0;
@@ -2528,6 +2708,7 @@ fn encode_pass(
         let index = wrapping_sub(wrapping_sub(count, 1), reverse);
         let value = wrapping_add(args, index);
         let r = read_record(in words, index);
+        has_vector = has_vector || (r.op >= VECTOR_CONSTANT && r.op <= VECTOR_DEMOTE);
         has_float = has_float || float_opcode(r.op);
         if register_home && r.op == BLOCK_RETURN && r.left != TRAP_VALUE {
             normal_returns = wrapping_add(normal_returns, 1);
@@ -2565,6 +2746,7 @@ fn encode_pass(
         if call_argument(r.op) {
             if pending_arguments == 0
                 || (r.op == CALL_STACK_ARGUMENT) != (pending_arguments <= pending_stack_arguments)
+                || (r.left != NO_VALUE && vector_value(in words, args, r.left))
             {
                 return out;
             }
@@ -2724,6 +2906,7 @@ fn encode_pass(
             && !is_atomic_update(r.op)
             && !is_atomic_cas(r.op)
             && r.op != ATOMIC_LOAD
+            && r.op != VECTOR_LOAD
             && !live_overflow_flag(in ends, value, r.op)
         {
             continue;
@@ -2759,7 +2942,7 @@ fn encode_pass(
     if depth != 0 || pending_arguments != 0 || needs_call_pair || needs_checked {
         return out;
     }
-    if has_float
+    if (has_float || has_vector)
         && ((result != NO_VALUE && float_value(in words, args, result) != float_return)
             || (second != NO_VALUE && float_value(in words, args, second))
             || !valid_float_operands(
@@ -2769,6 +2952,12 @@ fn encode_pass(
                 returns == PAIRED_RESULTS,
                 float_return
             ))
+    {
+        return out;
+    }
+    if has_vector
+        && ((result != NO_VALUE && vector_value(in words, args, result))
+            || !valid_vector_inputs(in words, args, count, returns))
     {
         return out;
     }
@@ -2859,6 +3048,7 @@ fn encode_pass(
     let mut incoming_bases = ChunkSeq::new[u64]();
     let mut locations = ChunkSeq::with_capacity[u32](values);
     let mut used: u32 = 0;
+    let mut vector_used: u32 = 0;
     let mut flags_for_next: Option[u32] = Option::None;
     let mut branches = ChunkSeq::new[Branch]();
     let mut labels = ChunkSeq::new[Label]();
@@ -2912,7 +3102,13 @@ fn encode_pass(
             || r.op == RETURN_PAIR
             || r.op == FLOAT_RETURN
             || r.op == TRAP
-            || (!calls && !division && !atomic && !no_result(r.op) && !live && !overflow_live)
+            || (!calls
+                && !division
+                && !atomic
+                && !no_result(r.op)
+                && !live
+                && !overflow_live
+                && r.op != VECTOR_LOAD)
         {
             locations.push(UNASSIGNED);
             continue;
@@ -3023,14 +3219,93 @@ fn encode_pass(
         } else {
             UNASSIGNED
         };
-        if n >= 1 {
+        let vector = has_vector && r.op >= VECTOR_CONSTANT;
+        let vector_left = vector && (is_vector_binary(r.op) || is_vector_convert(r.op));
+        let vector_right = vector && (is_vector_binary(r.op) || r.op == VECTOR_STORE);
+        if vector_left {
+            vector_used = expire(vector_used, in ends, r.left, value, left);
+        } else if n >= 1 {
             used = expire(used, in ends, r.left, value, left);
         }
-        if n >= 2 {
+        if vector_right {
+            vector_used = expire(vector_used, in ends, r.right, value, right);
+        } else if n >= 2 {
             used = expire(used, in ends, r.right, value, right);
         }
         if n == 3 {
             used = expire(used, in ends, r.extra, value, extra);
+        }
+        if vector {
+            let lhs = if vector_left {
+                materialize_vector(inout out, left, VECTOR_LEFT, frame_bytes)
+            } else {
+                materialize(inout out, left, SPILL_LEFT, frame_bytes)
+            };
+            let rhs = if vector_right {
+                materialize_vector(inout out, right, VECTOR_RIGHT, frame_bytes)
+            } else {
+                UNASSIGNED
+            };
+            if r.op == VECTOR_STORE {
+                memory(inout out, false, VECTOR_BITS, lhs, rhs, r.extra);
+                locations.push(UNASSIGNED);
+                continue;
+            }
+            let available = VECTOR_REGISTER_MASK & ~vector_used;
+            let assigned = if !live {
+                UNASSIGNED
+            } else if available != 0 && last <= next_call {
+                let reg = trailing_zeros_u64(widen_u64(available));
+                vector_used = vector_used | sh(1, reg);
+                reg
+            } else {
+                // AAPCS64 preserves only the low halves of its nonvolatile
+                // vector registers. A complete vector live across a call spills.
+                if !spill_mode {
+                    retry = Option::Some(Retry::Allocate(Allocation::Spills));
+                    return ChunkSeq::new[u8]();
+                }
+                match allocate_vector_spill(inout spills, frame_bytes, value, last) {
+                    Option::Some(spill) => spill,
+                    Option::None => {
+                        if callee_mask != 0 {
+                            retry = Option::Some(Retry::WithoutCalleeRegisters);
+                        }
+                        return ChunkSeq::new[u8]();
+                    },
+                }
+            };
+            let dest = if assigned >= UNASSIGNED {
+                VECTOR_LEFT
+            } else {
+                assigned
+            };
+            match r.op {
+                VECTOR_CONSTANT => vector_constant(inout out, dest, r.left, r.right),
+                VECTOR_SPLAT => vector_splat(inout out, dest, lhs, r.extra),
+                VECTOR_LOAD => memory(inout out, true, VECTOR_BITS, lhs, dest, r.right),
+                VECTOR_PROMOTE_LOW | VECTOR_DEMOTE => {
+                    let op = if r.op == VECTOR_DEMOTE {
+                        VECTOR_FLOAT_NARROW
+                    } else {
+                        VECTOR_FLOAT_WIDEN
+                    };
+                    push32(inout out, op | sh(lhs, RN_SHIFT) | dest);
+                },
+                _ => vector_binary(inout out, in r, dest, lhs, rhs),
+            };
+            if assigned >= SPILL_BASE {
+                memory(
+                    inout out,
+                    false,
+                    VECTOR_BITS,
+                    SP,
+                    dest,
+                    spill_offset(frame_bytes, assigned)
+                );
+            }
+            locations.push(assigned);
+            continue;
         }
         if stored != 0 || r.op == ATOMIC_STORE {
             if r.op == ATOMIC_STORE {

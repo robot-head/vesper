@@ -10,7 +10,7 @@ use self::x86_64::{
     emit_jump_table_entry, emit_symbol_address, callee_saved_registers, find_callee_saved_register,
     find_register, fits_signed_byte, patch_forward_branch, patch_relative_branch,
     patch_relative_offset, register_bit, home_register, xmm_home_register, HOME_REGISTERS,
-    cheap_immediate, move_constant, store_immediate, store_immediate_fits, XMM_BITS, PAND, POR,
+    cheap_immediate, move_constant, store_immediate, store_immediate_fits, VECTOR_BITS, PAND, POR,
     PXOR, PackedInteger, packed_integer_opcode
 };
 
@@ -232,7 +232,7 @@ const MEMORY_COPY_ARGUMENTS: u64 = 3;
 const STACK_ALIGNMENT: u64 = 16;
 const RETURN_ADDRESS_BYTES: u64 = 8;
 const SPILL_SLOT_BYTES: u64 = 8;
-const VECTOR_SLOT_BYTES: u64 = XMM_BITS / BYTE_BITS;
+const VECTOR_SLOT_BYTES: u64 = VECTOR_BITS / BYTE_BITS;
 const LEFT_SCRATCH: u8 = RAX;
 const RIGHT_SCRATCH: u8 = R10;
 const THIRD_SCRATCH: u8 = R11;
@@ -713,7 +713,7 @@ fn store_width(op: u64) -> u64 {
         STORE_BYTE | STACK_STORE_BYTE => BYTE_BITS,
         STORE_WORD | STACK_STORE_WORD => WORD_BITS,
         STORE_DWORD | STACK_STORE_DWORD | FLOAT_STORE32 | FLOAT_STACK_STORE32 => DWORD_BITS,
-        VECTOR_STORE => XMM_BITS,
+        VECTOR_STORE => VECTOR_BITS,
         _ => QWORD_BITS,
     }
 }
@@ -890,11 +890,11 @@ pub fn is_float_to_integer(op: u64) -> bool {
     op == FLOAT_TO_SIGNED_SAT || op == FLOAT_TO_UNSIGNED_SAT
 }
 
-fn is_vector_binary(op: u64) -> bool {
+pub fn is_vector_binary(op: u64) -> bool {
     op >= VECTOR_AND && op <= VECTOR_ROUNDED_AVERAGE
 }
 
-fn is_vector_convert(op: u64) -> bool {
+pub fn is_vector_convert(op: u64) -> bool {
     op == VECTOR_PROMOTE_LOW || op == VECTOR_DEMOTE
 }
 
@@ -918,7 +918,7 @@ fn is_vector_result(op: u64) -> bool {
     op >= VECTOR_CONSTANT && op <= VECTOR_DEMOTE && op != VECTOR_STORE
 }
 
-fn vector_value(in words: Slice[u64], arguments: u64, value: u64) -> bool {
+pub fn vector_value(in words: Slice[u64], arguments: u64, value: u64) -> bool {
     value >= arguments && is_vector_result(read_record(in words, wrapping_sub(value, arguments)).op)
 }
 
@@ -1931,8 +1931,8 @@ fn emit_store_value(
         inout output,
         in source,
         scratch,
-        if width == XMM_BITS {
-            XMM_BITS
+        if width == VECTOR_BITS {
+            VECTOR_BITS
         } else {
             QWORD_BITS
         }
@@ -2205,7 +2205,7 @@ fn preserve_registers(
         if (saved & register_bit(reg)) != 0 {
             let offset = wrapping_u32(slot);
             let width = if slot_bytes == VECTOR_SLOT_BYTES && is_xmm(reg) {
-                XMM_BITS
+                VECTOR_BITS
             } else {
                 QWORD_BITS
             };
@@ -2767,7 +2767,7 @@ fn encode_block_pass(
         let has_right = reads_right(in record, paired);
         let vector_binary = is_vector_binary(record.op);
         let operand_width = if vector_binary || is_vector_convert(record.op) {
-            XMM_BITS
+            VECTOR_BITS
         } else {
             QWORD_BITS
         };
@@ -2844,7 +2844,7 @@ fn encode_block_pass(
         } else if record.op == VECTOR_LOAD {
             emit(
                 inout output,
-                in Instruction::Load(destination, left, wrapping_u32(record.right), XMM_BITS)
+                in Instruction::Load(destination, left, wrapping_u32(record.right), VECTOR_BITS)
             );
         } else if vector_binary {
             let (first, second) = if destination == right && can_reuse_right(record.op) {
@@ -2989,7 +2989,7 @@ fn encode_block_pass(
         match home {
             Location::Spill(offset) => {
                 let width = if is_vector_result(record.op) {
-                    XMM_BITS
+                    VECTOR_BITS
                 } else {
                     QWORD_BITS
                 };

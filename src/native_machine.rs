@@ -1871,7 +1871,7 @@ impl IntegerBlocks<'_> {
         let input = |value| values.low[dfg.resolve_aliases(value)];
         let ty = |value| self.value_type(value);
         let output = ty(value);
-        if self.aarch64 || !vector_type(output) {
+        if !vector_type(output) {
             return None;
         }
         let (op, operands) = match dfg.insts[inst] {
@@ -1913,13 +1913,15 @@ impl IntegerBlocks<'_> {
                     Opcode::Bxor => (IntegerOp::VectorXor, 0),
                     Opcode::Iadd => (IntegerOp::VectorAdd, integer_width(lane)?),
                     Opcode::Isub => (IntegerOp::VectorSub, integer_width(lane)?),
-                    _ if matches!(lane, types::I8 | types::I16) => {
+                    _ if self.aarch64 || matches!(lane, types::I8 | types::I16) => {
                         let op = match opcode {
                             Opcode::SaddSat => IntegerOp::VectorSignedSatAdd,
                             Opcode::UaddSat => IntegerOp::VectorUnsignedSatAdd,
                             Opcode::SsubSat => IntegerOp::VectorSignedSatSub,
                             Opcode::UsubSat => IntegerOp::VectorUnsignedSatSub,
-                            Opcode::AvgRound => IntegerOp::VectorRoundedAverage,
+                            Opcode::AvgRound if lane != types::I64 => {
+                                IntegerOp::VectorRoundedAverage
+                            }
                             _ => return None,
                         };
                         (op, integer_width(lane)?)
@@ -2047,7 +2049,7 @@ impl IntegerBlocks<'_> {
             {
                 let source = ty(arg);
                 let [slot, offset] = self.stack_location(stack_slot, offset, source.bytes())?;
-                if !self.aarch64 && vector_type(source) {
+                if vector_type(source) {
                     let address = self.append(IntegerOp::StackAddress, [slot, offset, 0]);
                     self.append(IntegerOp::VectorStore, [address, input(arg)?, 0]);
                 } else {
@@ -2066,7 +2068,7 @@ impl IntegerBlocks<'_> {
                     return None;
                 }
                 let address = input(base)?;
-                if opcode == Opcode::Store && !self.aarch64 && vector_type(ty(source)) {
+                if opcode == Opcode::Store && vector_type(ty(source)) {
                     if !self.supports_memory_access(flags)
                         && self.stack_operand(base, offset, SIMD_BYTES).is_none()
                     {
