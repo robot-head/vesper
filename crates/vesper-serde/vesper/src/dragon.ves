@@ -42,6 +42,9 @@ const DIGIT_CAPACITY: u64 = 20;
 // The digit value of an ASCII digit (u64 arithmetic).
 const DIGIT_ZERO: u64 = 0x30;
 
+const LIMB_BITS_SHIFT: u32 = 5;
+const LIMB_BITS_MASK: u64 = 31;
+
 // At most 40 limbs (Rust's `Big32x40`); a value uses only those its
 // exponent can reach (`limbs_for`), so the loops run over `b.len()`.
 fn limbs_for(exp: i64) -> u64 {
@@ -50,7 +53,7 @@ fn limbs_for(exp: i64) -> u64 {
     } else {
         wrapping_u64(exp)
     };
-    let n = wrapping_add(e, LIMB_HEADROOM_BITS) / LIMB_BITS;
+    let n = wrapping_shr_u64(wrapping_add(e, LIMB_HEADROOM_BITS), LIMB_BITS_SHIFT);
     if n > MAX_LIMBS { MAX_LIMBS } else { n }
 }
 
@@ -101,8 +104,8 @@ fn mul_small(inout b: ChunkSeq[u64], m: u64) {
 
 fn mul_pow2(inout b: ChunkSeq[u64], n: u64) {
     let size = b.len();
-    let words = n / LIMB_BITS;
-    let bits = n % LIMB_BITS;
+    let words = wrapping_shr_u64(n, LIMB_BITS_SHIFT);
+    let bits = n & LIMB_BITS_MASK;
     if words > 0 {
         let mut i = size;
         loop {
@@ -448,11 +451,10 @@ pub fn put_shortest(inout out: Slice[u8], at: u64, s: Shortest) {
                 break;
             }
             i = wrapping_sub(i, 1);
-            out.try_set(
-                wrapping_add(first, i),
-                wrapping_u8(wrapping_add(DIGIT_ZERO, v % DECIMAL_BASE))
-            );
-            v = v / DECIMAL_BASE;
+            let q = v / DECIMAL_BASE;
+            let rem = wrapping_sub(v, wrapping_mul(q, DECIMAL_BASE));
+            out.try_set(wrapping_add(first, i), wrapping_u8(wrapping_add(DIGIT_ZERO, rem)));
+            v = q;
         }
     } else if wrapping_u64(s.k) < n {
         // The point after the first k digits.
@@ -469,8 +471,10 @@ pub fn put_shortest(inout out: Slice[u8], at: u64, s: Shortest) {
             } else {
                 wrapping_add(p, i)
             };
-            out.try_set(at_i, wrapping_u8(wrapping_add(DIGIT_ZERO, v % DECIMAL_BASE)));
-            v = v / DECIMAL_BASE;
+            let q = v / DECIMAL_BASE;
+            let rem = wrapping_sub(v, wrapping_mul(q, DECIMAL_BASE));
+            out.try_set(at_i, wrapping_u8(wrapping_add(DIGIT_ZERO, rem)));
+            v = q;
         }
     } else {
         // The digits, then k - n zeros.
@@ -484,11 +488,10 @@ pub fn put_shortest(inout out: Slice[u8], at: u64, s: Shortest) {
                 break;
             }
             i = wrapping_sub(i, 1);
-            out.try_set(
-                wrapping_add(p, i),
-                wrapping_u8(wrapping_add(DIGIT_ZERO, v % DECIMAL_BASE))
-            );
-            v = v / DECIMAL_BASE;
+            let q = v / DECIMAL_BASE;
+            let rem = wrapping_sub(v, wrapping_mul(q, DECIMAL_BASE));
+            out.try_set(wrapping_add(p, i), wrapping_u8(wrapping_add(DIGIT_ZERO, rem)));
+            v = q;
         }
     }
 }
