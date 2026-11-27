@@ -80,13 +80,22 @@ const C_SLICE: u64 = 5;
 const C_STRING: u64 = 6;
 const C_STR: u64 = 7;
 const C_BOX: u64 = 8;
+const C_EXTERN: u64 = 10;
+const C_CALLBACK: u64 = 11;
 
 // The `Box[T]` prelude: its generic, its field, and the modes (`TyMode`)
 // of the ADT (affine) and of its generic's bound (linear).
 const BOX_GENERIC: Str = "T";
 const BOX_FIELD: Str = "0";
+const MODE_COPY: u8 = 0;
+// A `.vsys` handle's one field (`ffi_lowering::HANDLE_FIELD`) and its type.
+const HANDLE_FIELD: Str = "$handle";
+const HANDLE_WORD: Str = "u64";
 const MODE_AFFINE: u8 = 1;
 const MODE_LINEAR: u8 = 2;
+// `Field.modality` for a field that inherits its component kind
+// (`@vesper/check-data` stores mode + 1 otherwise).
+const FIELD_INHERITS_MODE: u8 = 0;
 const C_NAMED: u64 = 9;
 
 // A layout's `kind` word: scalar, product, enum.
@@ -129,6 +138,11 @@ const ISOLATED_HANDLER: Str = "isolated(mpk)";
 const SYS_WORD: Str = "sys";
 const LIBRARY_WORD: Str = "library";
 const FN_WORD: Str = "fn";
+const CALLBACK_WORD: Str = "callback";
+const LINEAR_WORD: Str = "linear";
+const AFFINE_WORD: Str = "affine";
+const EXTERN_WORD: Str = "extern";
+const TYPE_WORD: Str = "type";
 const LINK_NAME_WORD: Str = "link_name";
 const HASH: Str = "#";
 const OPEN_BRACKET_TOKEN: Str = "[";
@@ -243,7 +257,16 @@ impl Enc {
         if node.kind == TyKind::Named {
             let n = node.name;
             let arity = w(node.n);
-            if arity == 0 && k.is_wide(n) {
+            if arity == 0 && is_handle_adt(in self.world, in self.names, n) {
+                // A `.vsys` callback type is a copy handle.
+                let adt = self.world.adt(self.world.lookup(n));
+                class = if adt.mode == MODE_COPY {
+                    C_CALLBACK
+                } else {
+                    C_EXTERN
+                };
+                name = n;
+            } else if arity == 0 && k.is_wide(n) {
                 class = C_WIDE;
                 name = n;
             } else if arity == 0 && k.is_scalar(n) && n != k.never {
@@ -721,6 +744,10 @@ fn plain_directives(in dump: ChunkSeq[u8]) -> Option[Plain] {
 struct Descriptor {
     name: ChunkSeq[u8],
     symbols: ChunkSeq[ChunkSeq[u8]],
+    // The handle types it declares (`callback` types and `extern type`s)
+    // and each one's mode (`TyMode`).
+    handles: ChunkSeq[ChunkSeq[u8]],
+    handle_modes: ChunkSeq[u8],
 }
 
 fn is_word_byte(c: u8) -> bool {
@@ -839,6 +866,11 @@ const ATTR_EQUALS_AT: u64 = 3;
 const ATTR_LITERAL_AT: u64 = 4;
 const ATTR_TOKENS: u64 = 5;
 const FN_NAME_AT: u64 = 1;
+// `callback <Name>` and `<linear|affine> extern type <Name>`.
+const CALLBACK_NAME_AT: u64 = 1;
+const EXTERN_AT: u64 = 1;
+const EXTERN_TYPE_AT: u64 = 2;
+const EXTERN_NAME_AT: u64 = 3;
 const QUOTE_BYTES: u64 = 1;
 
 // Whether `text` is a valid `.vsys` descriptor (`vesper_ffi::sys::parse`,
@@ -868,6 +900,8 @@ fn scan_descriptor(in src: ChunkSeq[u8]) -> Option[Descriptor] {
     let mut links = ChunkSeq::new[ChunkSeq[u8]]();
     let mut pending = ChunkSeq::new[u8]();
     let mut has_pending = false;
+    let mut handles = ChunkSeq::new[ChunkSeq[u8]]();
+    let mut handle_modes = ChunkSeq::new[u8]();
     let mut i: u64 = 0;
     loop {
         if i >= ts.len() {
@@ -897,6 +931,29 @@ fn scan_descriptor(in src: ChunkSeq[u8]) -> Option[Descriptor] {
             pending.extend(in inner.as_slice());
             has_pending = true;
             i = add(i, ATTR_TOKENS);
+            continue;
+        }
+        // `callback <Name>(..)`: a copy handle; `<linear|affine> extern
+        // type <Name>;`: a handle of that mode.
+        if same_bytes(in t, CALLBACK_WORD) {
+            handles.push(token(in ts, add(i, CALLBACK_NAME_AT)));
+            handle_modes.push(MODE_COPY);
+            i = add(i, CALLBACK_NAME_AT);
+            continue;
+        }
+        if (same_bytes(in t, LINEAR_WORD) || same_bytes(in t, AFFINE_WORD))
+            && same_bytes(in token(in ts, add(i, EXTERN_AT)), EXTERN_WORD)
+            && same_bytes(in token(in ts, add(i, EXTERN_TYPE_AT)), TYPE_WORD)
+        {
+            handles.push(token(in ts, add(i, EXTERN_NAME_AT)));
+            handle_modes.push(
+                if same_bytes(in t, LINEAR_WORD) {
+                    MODE_LINEAR
+                } else {
+                    MODE_AFFINE
+                }
+            );
+            i = add(i, EXTERN_NAME_AT);
             continue;
         }
         if same_bytes(in t, FN_WORD) {
@@ -945,7 +1002,12 @@ fn scan_descriptor(in src: ChunkSeq[u8]) -> Option[Descriptor] {
             symbols.push(sink symbol);
         }
     }
-    Option::Some(Descriptor { name: name, symbols: symbols })
+    Option::Some(Descriptor {
+        name: name,
+        symbols: symbols,
+        handles: handles,
+        handle_modes: handle_modes
+    })
 }
 
 // A manifest `.vsys` path with `@TARGET@`, `@OS@` and `@ARCH@` replaced
@@ -1146,7 +1208,7 @@ fn add_box_prelude(
     world.fields.push(Field {
         name: names.intern(in BOX_FIELD.as_bytes()),
         ty: types.named0(t_gen),
-        modality: 0
+        modality: FIELD_INHERITS_MODE
     });
     let va = n32(world.variants.len());
     world.variants.push(Variant { name: box_sym, fa: fa, fc: 1, named: false });
@@ -1307,6 +1369,81 @@ fn add_instance(
     true
 }
 
+// The handle types the imported `.vsys` libraries declare, as the FFI
+// lowering appends them (`types::Generated`): `struct <Name> { $handle: u64 }`
+// with the declared mode (copy for a `callback` type), span 0..0.
+fn add_handle_types(
+    inout world: World,
+    inout names: Names,
+    inout types: Types,
+    in imports: ChunkSeq[Descriptor]
+) {
+    let handle_field = names.intern(in HANDLE_FIELD.as_bytes());
+    let word = types.named0(names.intern(in HANDLE_WORD.as_bytes()));
+    let mut handles = ChunkSeq::new[ChunkSeq[u8]]();
+    let mut modes = ChunkSeq::new[u8]();
+    for k in 0..imports.len() {
+        match imports.try_get(k) {
+            Option::Some(d) => {
+                for h in 0..d.handles.len() {
+                    handles.push(token(in d.handles, h));
+                    modes.push(d.handle_modes.try_get(h).unwrap_or(MODE_COPY));
+                }
+            },
+            Option::None => {},
+        }
+    }
+    for h in 0..handles.len() {
+        let text = token(in handles, h);
+        let sym = names.intern(in text.as_slice());
+        if world.lookup(sym) != NO_ADT {
+            continue;
+        }
+        let mode = modes.try_get(h).unwrap_or(MODE_COPY);
+        let fa = n32(world.fields.len());
+        world.fields.push(Field { name: handle_field, ty: word, modality: FIELD_INHERITS_MODE });
+        let va = n32(world.variants.len());
+        world.variants.push(Variant { name: sym, fa: fa, fc: 1, named: true });
+        let idx = n32(world.adts.len());
+        world.adts.push(Adt {
+            name: sym,
+            mode: mode,
+            ga: 0,
+            gn: 0,
+            va: va,
+            vn: 1,
+            is_enum: false,
+            tile: 0,
+            span_zero: true
+        });
+        set_by_symbol(inout world.by_name, sym, inc32(idx));
+    }
+}
+
+// Whether named type `n` (no arguments) is a `.vsys` handle: an ADT with a
+// `$handle` field (plan_words.rs `is_extern_handle`).
+fn is_handle_adt(in world: World, in names: Names, n: u32) -> bool {
+    let ai = world.lookup(n);
+    if ai == NO_ADT {
+        return false;
+    }
+    let handle_field = names.lookup(in HANDLE_FIELD.as_bytes());
+    if handle_field == NONE32 {
+        return false;
+    }
+    let adt = world.adt(ai);
+    for v in 0..w(adt.vn) {
+        let variant = world.variant(add(w(adt.va), v));
+        for f in 0..w(variant.fc) {
+            let field = world.field(add(w(variant.fa), f));
+            if field.name == handle_field {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 // `plan_input(world, public, library, directives)` for the package at
 // `root_dir`, built by Stage 2's front end, or why it was declined.
 pub fn export_plan_input(
@@ -1432,6 +1569,7 @@ pub fn export_plan_input(
     }
     let mut cp = collect_program(in mods);
     add_box_prelude(inout cp.world, inout cp.names, inout cp.types, in mods);
+    add_handle_types(inout cp.world, inout cp.names, inout cp.types, in imports);
     // The root module's public names (not qualified), as collected symbols.
     let mut public = ChunkSeq::new[bool]();
     for i in 0..meta.public_items.len() {
