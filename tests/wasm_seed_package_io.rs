@@ -2451,6 +2451,18 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
                  wrapping_add(widen_u64(bits), wrapping_u64(widen_i64(local)))\n\
              }\n\
          }\n\
+         copy struct NestedFields { pair: FieldValues, ready: bool }\n\
+         pub fn nested_value(a: i64, b: i64, flag: bool) -> i64 {\n\
+             let inner = FieldValues { bias: 3, left: a, right: b };\n\
+             let outer = NestedFields { ready: flag, pair: inner };\n\
+             let holder = (outer, a);\n\
+             let (row, base) = holder;\n\
+             let field = row.pair;\n\
+             if row.ready { wrapping_add(field.left, base) } else {\n\
+                 let right = (NestedFields { ready: true, pair: inner }).pair.right;\n\
+                 wrapping_sub(right, row.pair.bias)\n\
+             }\n\
+         }\n\
          fn unsupported(x: u64) -> u64 { match (x, x) { (0, _) => 7, _ => 9 } }\n\
          pub fn decline(x: u64) -> u64 { unsupported(x) }\n",
     )
@@ -2638,6 +2650,14 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
         "{:?}",
         read_stage2_sidecar_notes(&object)
     );
+    let inout_object = dir.join("native-inout.o");
+    std::fs::rename(&object, &inout_object).unwrap();
+    assert_eq!(
+        compile("nested_value"),
+        0,
+        "{:?}",
+        read_stage2_sidecar_notes(&object)
+    );
     let bytes = std::fs::read(&object).unwrap();
     assert_ne!(compile("decline"), 0);
     assert!(read_stage2_sidecar_notes(&object).contains("unsupported x86-64 ELF entry"));
@@ -2670,6 +2690,7 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
          extern int64_t record_value(int64_t, int64_t, bool);\n\
          extern int64_t constant_after_branch(bool);\n\
          extern uint64_t scalar_inout(int64_t *, uint64_t *, float *, double *, float, double, bool);\n\
+         extern int64_t nested_value(int64_t, int64_t, bool);\n\
          int main(void) {\n\
              if (mix(10, 4) != 65 || mix(UINT64_MAX, UINT64_MAX) != UINT64_MAX - 16) return 1;\n\
              if (choose(0, 4) != 8 || choose(2, 4) != 8 || choose(4, 1) != 10\n\
@@ -2716,8 +2737,10 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
                  || dbl != 4.0 || observed != UINT64_C(0x4020000000000000)) return 20;\n\
              active = 1;\n\
              observed = scalar_inout(&byte, &active, &single.value, &dbl, 0.5f, 2.0, false);\n\
-             return byte != -2 || active != 1 || single.value != 1.5f || dbl != 4.0\n\
-                 || observed != UINT64_C(0x3ffffffb);\n\
+             if (byte != -2 || active != 1 || single.value != 1.5f || dbl != 4.0\n\
+                 || observed != UINT64_C(0x3ffffffb)) return 21;\n\
+             return nested_value(5, -3, true) != 10 || nested_value(5, -3, false) != -6\n\
+                 || nested_value(INT64_MIN, 0, true) != 0;\n\
          }\n",
     )
     .unwrap();
@@ -2743,6 +2766,7 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
             &tuple_object,
             &record_object,
             &constant_object,
+            &inout_object,
             &object,
         ])
         .arg("-o")

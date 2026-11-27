@@ -35,6 +35,8 @@ const EMPTY_TUPLE_WORDS: u64 = 1;
 const DATA_FIELD_COUNT: u64 = 1;
 const DATA_HEADER_WORDS: u64 = 2;
 const DATA_FIELD_WORDS: u64 = 2;
+const PROJECT_WORDS: u64 = 2;
+const PROJECT_MEMBER: u64 = 1;
 const TUPLE_PATTERN_COUNT: u64 = BIND_NAME;
 const ASCII_ZERO: u8 = 48;
 const DECIMAL_BASE: u64 = 10;
@@ -177,6 +179,10 @@ impl Function {
         } else {
             self.kind(wrapping_sub(id, self.arguments))
         }
+    }
+
+    fn aggregate_definition(in self, id: u64) -> u64 {
+        self.aggregate_instructions.try_get(wrapping_sub(id, self.arguments)).unwrap_or(NO_VALUE)
     }
 
     fn is_inout(in self, id: u64) -> bool {
@@ -493,45 +499,8 @@ fn argument_value(in low: L, f: FnR, root: u32) -> u64 {
     NO_VALUE
 }
 
-// A flat local aggregate is a collection of SSA values. Follow whole-value reads
-// back to the construction so a field needs only its own scalar home.
-fn aggregate_definition(in low: L, id: u64, in m: Function) -> u64 {
-    let mut value = id;
-    loop {
-        let definition = m.aggregate_instructions.try_get(value).unwrap_or(NO_VALUE);
-        if definition == NO_VALUE {
-            return NO_VALUE;
-        }
-        let inst = low.program.inst(definition);
-        if inst.op == Op::Tuple || inst.op == Op::Data {
-            return definition;
-        }
-        if inst.op != Op::Read
-            || inst.n != PLAIN_READ_WORDS
-            || low.program.path(low.program.op(add(inst.a, READ_PATH))).n != 0
-            || low.program.op(add(inst.a, READ_PROJECTIONS)) != 0
-            || low.program.op(add(inst.a, READ_PASS)) == TyPass::Inout
-        {
-            return NO_VALUE;
-        }
-        let name = n32(low.program.op(inst.a));
-        let binding = u32_at(in m.bindings, w(name));
-        if binding == 0
-            || u32_at(in m.binding_fields, w(name)) != 0
-            || m.mutable_offset(name) != NO_VALUE
-        {
-            return NO_VALUE;
-        }
-        let previous = wrapping_sub(w(binding), 1);
-        if previous >= value {
-            return NO_VALUE;
-        }
-        value = previous;
-    }
-}
-
 fn tuple_operands(in low: L, value: u64, in m: Function) -> u64 {
-    let def = aggregate_definition(in low, value, in m);
+    let def = m.aggregate_definition(value);
     if def == NO_VALUE {
         return NO_VALUE;
     }
@@ -567,7 +536,7 @@ fn struct_member(in low: L, inst: InstRow, name: u32) -> u64 {
     NO_VALUE
 }
 
-fn flat_struct(in low: L, inst: InstRow, in m: Function) -> bool {
+fn supported_struct(in low: L, inst: InstRow, in m: Function) -> bool {
     let node = low.ctx.types.node(inst.ty);
     let adt = low.ctx.world.adt(low.ctx.world.lookup(node.name));
     let variant = low.ctx.world.variant(w(adt.va));
@@ -582,10 +551,7 @@ fn flat_struct(in low: L, inst: InstRow, in m: Function) -> bool {
         let field = low.ctx.world.field(add(w(variant.fa), i));
         let kind = scalar_kind(in low, field.ty);
         let value = struct_member(in low, inst, field.name);
-        if (abi_width(kind) == 0 && kind != ScalarKind::Unit)
-            || value == NO_VALUE
-            || m.kind(value) != kind
-        {
+        if kind == ScalarKind::Unsupported || value == NO_VALUE || m.kind(value) != kind {
             return false;
         }
     }
@@ -597,35 +563,19 @@ fn place_value(in low: L, f: FnR, root: u32, in m: Function) -> u64 {
     if binding == 0 {
         return argument_value(in low, f, root);
     }
-    let source = wrapping_sub(w(binding), 1);
+    let source = add(m.arguments, wrapping_sub(w(binding), 1));
     let field = u32_at(in m.binding_fields, w(root));
     if field == 0 {
-        add(m.arguments, source)
+        source
     } else {
         tuple_member(in low, source, wrapping_sub(w(field), 1), in m)
     }
 }
 
-fn read_source(in low: L, f: FnR, at: u64, in m: Function) -> u64 {
-    let name = n32(low.program.op(at));
-    let source = place_value(in low, f, name, in m);
-    let path = low.program.op(add(at, READ_PATH));
-    let count = low.program.path(path).n;
-    if count == 0 {
-        return source;
-    }
+fn aggregate_member(in low: L, source: u64, member: u32, in m: Function) -> u64 {
     let kind = m.value_kind(source);
-    if count != 1
-        || !is_aggregate(kind)
-        || m.mutable_offset(name) != NO_VALUE
-        || low.program.op(add(at, READ_PASS)) == TyPass::Inout
-    {
-        return NO_VALUE;
-    }
-    let member = low.program.path_name(path, 0);
-    let value = wrapping_sub(source, m.arguments);
     if kind == ScalarKind::Struct {
-        let def = aggregate_definition(in low, value, in m);
+        let def = m.aggregate_definition(source);
         if def == NO_VALUE {
             return NO_VALUE;
         }
@@ -635,6 +585,9 @@ fn read_source(in low: L, f: FnR, at: u64, in m: Function) -> u64 {
         } else {
             add(m.arguments, field)
         };
+    }
+    if kind != ScalarKind::Tuple {
+        return NO_VALUE;
     }
     let length = low.ctx.names.size(member);
     if length == 0 {
@@ -648,7 +601,32 @@ fn read_source(in low: L, f: FnR, at: u64, in m: Function) -> u64 {
         }
         field = add(wrapping_mul(field, DECIMAL_BASE), digit);
     }
-    tuple_member(in low, value, field, in m)
+    tuple_member(in low, source, field, in m)
+}
+
+fn read_source(in low: L, f: FnR, at: u64, in m: Function) -> u64 {
+    let name = n32(low.program.op(at));
+    let mut source = place_value(in low, f, name, in m);
+    let path = low.program.op(add(at, READ_PATH));
+    let count = low.program.path(path).n;
+    if count != 0
+        && (m.mutable_offset(name) != NO_VALUE
+            || low.program.op(add(at, READ_PASS)) == TyPass::Inout)
+    {
+        return NO_VALUE;
+    }
+    for step in 0..count {
+        source = aggregate_member(in low, source, low.program.path_name(path, step), in m);
+        if source == NO_VALUE {
+            return NO_VALUE;
+        }
+    }
+    source
+}
+
+fn project_source(in low: L, at: u64, in m: Function) -> u64 {
+    let source = add(m.arguments, low.program.op(at));
+    aggregate_member(in low, source, n32(low.program.op(add(at, PROJECT_MEMBER))), in m)
 }
 
 fn record_binding(name: u32, value: u64, inout m: Function) -> bool {
@@ -761,7 +739,7 @@ fn lower_local_store(in low: L, f: FnR, inst: InstRow, block: u64, inout m: Func
     if inst.op == Op::Bind {
         let pattern = low.program.op(add(at, BIND_PATTERN));
         if pattern == Pat::Tuple {
-            let source = tuple_operands(in low, low.program.op(at), in m);
+            let source = tuple_operands(in low, add(m.arguments, low.program.op(at)), in m);
             return source != NO_VALUE
                 && low.program.op(source) == low.program.op(add(at, TUPLE_PATTERN_COUNT));
         }
@@ -1104,7 +1082,9 @@ fn plan_types(in low: L, row: FnRow, inout m: Function) -> bool {
     true
 }
 
-fn plan_aggregates(in low: L, row: FnRow, inout m: Function) {
+// Cache the constructor behind each aggregate SSA value. A projected read
+// can then walk nested fields without rewalking the chain of local aliases.
+fn plan_aggregates(in low: L, f: FnR, row: FnRow, inout m: Function) {
     m.aggregate_instructions.resize(m.kinds.len(), NO_VALUE);
     for layout in 0..m.blocks.len() {
         let block = m.blocks.try_get(layout).unwrap_or(0);
@@ -1112,8 +1092,26 @@ fn plan_aggregates(in low: L, row: FnRow, inout m: Function) {
         for index in b.i0..add(b.i0, b.ic) {
             let inst = low.program.inst(index);
             let value = w(inst.dest);
-            if is_aggregate(m.kind(value)) {
-                let _ = m.aggregate_instructions.try_set(value, index);
+            if !is_aggregate(m.kind(value)) {
+                continue;
+            }
+            let at = inst.a;
+            let definition = if inst.op == Op::Tuple || inst.op == Op::Data {
+                index
+            } else if inst.op == Op::Read
+                && inst.n == PLAIN_READ_WORDS
+                && low.program.op(add(at, READ_PROJECTIONS)) == 0
+                && low.program.op(add(at, READ_PASS)) != TyPass::Inout
+                && m.mutable_offset(n32(low.program.op(at))) == NO_VALUE
+            {
+                m.aggregate_definition(read_source(in low, f, at, in m))
+            } else if inst.op == Op::Project && inst.n == PROJECT_WORDS {
+                m.aggregate_definition(project_source(in low, at, in m))
+            } else {
+                NO_VALUE
+            };
+            if definition != NO_VALUE {
+                let _ = m.aggregate_instructions.try_set(value, definition);
             }
         }
     }
@@ -1225,7 +1223,7 @@ fn plan_homes(in low: L, f: FnR, row: FnRow, inout m: Function) -> bool {
         return false;
     }
     if has_aggregates {
-        plan_aggregates(in low, row, inout m);
+        plan_aggregates(in low, f, row, inout m);
     }
     if m.blocks.len() == 1 {
         return block_parameter(in low, low.program.block(row.b0)) == NO_VALUE;
@@ -1277,6 +1275,14 @@ fn plan_homes(in low: L, f: FnR, row: FnRow, inout m: Function) -> bool {
                     && kind != ScalarKind::Unit
                     && !is_aggregate(kind)
                     && !m.use_in(value, block)
+                {
+                    return false;
+                }
+            } else if inst.op == Op::Project {
+                let source = project_source(in low, at, in m);
+                let kind = m.value_kind(source);
+                if inst.n != PROJECT_WORDS
+                    || (kind != ScalarKind::Unit && !is_aggregate(kind) && !m.use_in(source, block))
                 {
                     return false;
                 }
@@ -2079,16 +2085,14 @@ fn lower_block(
             for field in 0..count {
                 let field_kind = scalar_kind(in low, low.ctx.types.arg(inst.ty, field));
                 let value = low.program.op(add(inc(at), field));
-                if (abi_width(field_kind) == 0 && field_kind != ScalarKind::Unit)
-                    || m.kind(value) != field_kind
-                {
+                if field_kind == ScalarKind::Unsupported || m.kind(value) != field_kind {
                     return false;
                 }
             }
             continue;
         }
         if inst.op == Op::Data {
-            if kind != ScalarKind::Struct || !flat_struct(in low, inst, in m) {
+            if kind != ScalarKind::Struct || !supported_struct(in low, inst, in m) {
                 return false;
             }
             continue;
@@ -2116,7 +2120,7 @@ fn lower_block(
                 continue;
             }
             if is_aggregate(kind) {
-                if aggregate_definition(in low, w(inst.dest), in m) == NO_VALUE {
+                if m.aggregate_definition(add(m.arguments, w(inst.dest))) == NO_VALUE {
                     return false;
                 }
                 continue;
@@ -2136,6 +2140,15 @@ fn lower_block(
             } else {
                 m.load_cell(offset, kind)
             }
+        } else if inst.op == Op::Project && inst.n == PROJECT_WORDS {
+            let source = project_source(in low, at, in m);
+            if source == NO_VALUE || m.value_kind(source) != kind {
+                return false;
+            }
+            if kind == ScalarKind::Unit || is_aggregate(kind) {
+                continue;
+            }
+            m.read(source, block)
         } else if inst.op == Op::Unary && inst.n == UNARY_WORDS {
             lower_unary(in low, inst, kind, block, inout m)
         } else if inst.op == Op::Binary && inst.n == BINARY_WORDS {
