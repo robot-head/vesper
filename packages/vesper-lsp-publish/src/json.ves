@@ -1,0 +1,125 @@
+// The output helpers the payload uses, as @vesper/lsp-features writes them
+// (json.ves): serde_json's string escapes and the packing the harness
+// reads.
+
+const WORD_BYTES: u32 = 8;
+const BYTE_BITS: u32 = 8;
+const DECIMAL_BASE: u64 = 10;
+
+enum Ascii: _ {
+    Backspace = 0x08,
+    Tab = 0x09,
+    Lf = 0x0a,
+    FormFeed = 0x0c,
+    Cr = 0x0d,
+    Space = 0x20,
+    Quote = 0x22,
+    Zero = 0x30,
+    Backslash = 0x5c,
+    LowerA = 0x61,
+    LowerB = 0x62,
+    LowerF = 0x66,
+    LowerN = 0x6e,
+    LowerR = 0x72,
+    LowerT = 0x74
+}
+
+const NIBBLE_BITS: u8 = 4;
+const NIBBLE_MASK: u8 = 15;
+const DIGIT_COUNT: u8 = 10;
+
+// Byte `i` of `bytes`, or 0 past its end.
+pub fn byte(in bytes: Slice[u8], i: u64) -> u8 {
+    bytes.try_get(i).unwrap_or(0)
+}
+
+// Appends the bytes of `s`.
+pub fn put(inout out: ChunkSeq[u8], in s: Str) {
+    out.extend(in s.as_bytes());
+}
+
+pub fn put_bytes(inout out: ChunkSeq[u8], in bytes: Slice[u8]) {
+    out.extend(in bytes);
+}
+
+// The decimal digits of `n`.
+pub fn put_u64(inout out: ChunkSeq[u8], n: u64) {
+    if n >= DECIMAL_BASE {
+        put_u64(inout out, n / 10);
+    }
+    out.push(wrapping_add(Ascii::Zero, wrapping_u8(n % 10)));
+}
+
+fn hex(nibble: u8) -> u8 {
+    if nibble < DIGIT_COUNT {
+        wrapping_add(Ascii::Zero, nibble)
+    } else {
+        wrapping_add(Ascii::LowerA, wrapping_sub(nibble, DIGIT_COUNT))
+    }
+}
+
+fn plain(ch: u8) -> bool {
+    ch >= Ascii::Space && ch != Ascii::Quote && ch != Ascii::Backslash
+}
+
+// A JSON string with serde_json's escapes: `\"`, `\\`, the five short
+// control escapes, `\u00xx` (lowercase) for the other control bytes, and
+// every other byte (DEL and UTF-8 included) as is. Runs of plain bytes are
+// copied as one slice.
+pub fn put_string(inout out: ChunkSeq[u8], in bytes: Slice[u8]) {
+    out.push(Ascii::Quote);
+    let n = bytes.len();
+    let mut run = 0;
+    for i in 0..n {
+        let ch = byte(in bytes, i);
+        if plain(ch) {
+            continue;
+        }
+        out.extend(in bytes[run..i]);
+        run = wrapping_add(i, 1);
+        out.push(Ascii::Backslash);
+        if ch == Ascii::Quote || ch == Ascii::Backslash {
+            out.push(ch);
+        } else if ch == Ascii::Backspace {
+            out.push(Ascii::LowerB);
+        } else if ch == Ascii::FormFeed {
+            out.push(Ascii::LowerF);
+        } else if ch == Ascii::Lf {
+            out.push(Ascii::LowerN);
+        } else if ch == Ascii::Cr {
+            out.push(Ascii::LowerR);
+        } else if ch == Ascii::Tab {
+            out.push(Ascii::LowerT);
+        } else {
+            put(inout out, in "u00");
+            out.push(hex(ch >> NIBBLE_BITS));
+            out.push(hex(ch & NIBBLE_MASK));
+        }
+    }
+    out.extend(in bytes[run..n]);
+    out.push(Ascii::Quote);
+}
+
+// The packing the harness reads (`unpack_text`): the byte length, then the
+// bytes eight per word, little-endian.
+pub fn pack(in bytes: Slice[u8]) -> ChunkSeq[u64] {
+    let n = bytes.len();
+    let mut out = ChunkSeq::with_capacity[u64](wrapping_add(n >> 3, 2));
+    out.push(n);
+    let mut word: u64 = 0;
+    let mut byte_count: u32 = 0;
+    for i in 0..n {
+        word = word
+            | wrapping_shl_u64(widen_u64(byte(in bytes, i)), wrapping_mul(byte_count, BYTE_BITS));
+        byte_count = wrapping_add(byte_count, 1);
+        if byte_count == WORD_BYTES {
+            out.push(word);
+            word = 0;
+            byte_count = 0;
+        }
+    }
+    if byte_count != 0 {
+        out.push(word);
+    }
+    out
+}

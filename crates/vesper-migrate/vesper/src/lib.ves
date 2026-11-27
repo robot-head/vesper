@@ -1902,3 +1902,327 @@ pub fn migrate_render_ctype_vesper(
     }
     copy_str(in "<refused>", inout out, 0)
 }
+
+// ---------------------------------------------------------------------------
+// Rust-to-Vesper type renderer (`rust.rs::RTy::vesper`).
+
+const BYTE_LPAREN: u8 = 40;
+const BYTE_RPAREN: u8 = 41;
+
+const RTY_UNIT: u8 = 0;
+const RTY_BOOL: u8 = 1;
+const RTY_STR: u8 = 2;
+const RTY_BYTE_SLICE: u8 = 3;
+const RTY_PASSTHROUGH: u8 = 4;
+const RTY_SLICE: u8 = 5;
+const RTY_ARRAY: u8 = 6;
+const RTY_STD_ARGS: u8 = 7;
+const RTY_TUPLE: u8 = 8;
+
+fn write_joined_args(
+    in args_buf: Slice[u8],
+    in args_starts: Slice[u64],
+    in args_lens: Slice[u64],
+    inout out: Slice[u8],
+    dst_pos: u64,
+) -> u64 {
+    let k = args_starts.len();
+    let mut pos = dst_pos;
+    let mut i: u64 = 0;
+    loop {
+        if i >= k {
+            break;
+        }
+        if i > 0 {
+            let _ = out.try_set(pos, BYTE_COMMA);
+            pos = wrapping_add(pos, 1);
+            let _ = out.try_set(pos, BYTE_SPACE);
+            pos = wrapping_add(pos, 1);
+        }
+        let s = match args_starts.try_get(i) {
+            Some(v) => v,
+            None => break
+        };
+        let l = match args_lens.try_get(i) {
+            Some(v) => v,
+            None => break
+        };
+        pos = copy_range(in args_buf, s, l, inout out, pos);
+        i = wrapping_add(i, 1);
+    }
+    pos
+}
+
+pub fn migrate_render_rty_vesper(
+    kind: u8,
+    array_len: u64,
+    in head: Slice[u8],
+    in args_buf: Slice[u8],
+    in args_starts: Slice[u64],
+    in args_lens: Slice[u64],
+    inout out: Slice[u8],
+) -> u64 {
+    if kind == RTY_UNIT {
+        return copy_str(in "Unit", inout out, 0);
+    }
+    if kind == RTY_BOOL {
+        return copy_str(in "bool", inout out, 0);
+    }
+    if kind == RTY_STR {
+        return copy_str(in "Str", inout out, 0);
+    }
+    if kind == RTY_BYTE_SLICE {
+        return copy_str(in "ByteSlice", inout out, 0);
+    }
+    if kind == RTY_PASSTHROUGH {
+        return copy_range(in head, 0, head.len(), inout out, 0);
+    }
+    if kind == RTY_SLICE {
+        let mut pos = copy_str(in "Slice[", inout out, 0);
+        pos = copy_range(in head, 0, head.len(), inout out, pos);
+        let _ = out.try_set(pos, BYTE_RBRACKET);
+        return wrapping_add(pos, 1);
+    }
+    if kind == RTY_ARRAY {
+        let mut pos: u64 = 0;
+        let _ = out.try_set(pos, BYTE_LBRACKET);
+        pos = wrapping_add(pos, 1);
+        pos = copy_range(in head, 0, head.len(), inout out, pos);
+        pos = copy_str(in "; ", inout out, pos);
+        pos = write_u64_dec(array_len, inout out, pos);
+        let _ = out.try_set(pos, BYTE_RBRACKET);
+        return wrapping_add(pos, 1);
+    }
+    if kind == RTY_STD_ARGS {
+        let mut pos = copy_range(in head, 0, head.len(), inout out, 0);
+        let _ = out.try_set(pos, BYTE_LBRACKET);
+        pos = wrapping_add(pos, 1);
+        pos = write_joined_args(in args_buf, in args_starts, in args_lens, inout out, pos);
+        let _ = out.try_set(pos, BYTE_RBRACKET);
+        return wrapping_add(pos, 1);
+    }
+    if kind == RTY_TUPLE {
+        let mut pos: u64 = 0;
+        let _ = out.try_set(pos, BYTE_LPAREN);
+        pos = wrapping_add(pos, 1);
+        pos = write_joined_args(in args_buf, in args_starts, in args_lens, inout out, pos);
+        let _ = out.try_set(pos, BYTE_RPAREN);
+        return wrapping_add(pos, 1);
+    }
+    0
+}
+
+// ---------------------------------------------------------------------------
+// Plain-text migration report line renderers (`synth.rs::report`).
+
+pub fn migrate_render_report_header(
+    in schema: Slice[u8],
+    in origin: Slice[u8],
+    inout out: Slice[u8],
+) -> u64 {
+    let mut pos = copy_range(in schema, 0, schema.len(), inout out, 0);
+    pos = copy_str(in " report for ", inout out, pos);
+    pos = copy_range(in origin, 0, origin.len(), inout out, pos);
+    let _ = out.try_set(pos, BYTE_LF);
+    wrapping_add(pos, 1)
+}
+
+pub fn migrate_render_report_fn(
+    in name: Slice[u8],
+    has_sys: bool,
+    inout out: Slice[u8],
+) -> u64 {
+    let mut pos = copy_str(in "  ", inout out, 0);
+    pos = copy_range(in name, 0, name.len(), inout out, pos);
+    if has_sys {
+        pos = copy_str(in " [vsys]\n", inout out, pos);
+    } else {
+        pos = copy_str(in " [vesper only]\n", inout out, pos);
+    }
+    pos
+}
+
+pub fn migrate_render_report_layout(
+    in name: Slice[u8],
+    size: u64,
+    align: u64,
+    inout out: Slice[u8],
+) -> u64 {
+    let mut pos = copy_str(in "  ", inout out, 0);
+    pos = copy_range(in name, 0, name.len(), inout out, pos);
+    pos = copy_str(in ": ", inout out, pos);
+    pos = write_u64_dec(size, inout out, pos);
+    pos = copy_str(in " bytes, align ", inout out, pos);
+    pos = write_u64_dec(align, inout out, pos);
+    let _ = out.try_set(pos, BYTE_LF);
+    wrapping_add(pos, 1)
+}
+
+pub fn migrate_render_report_refusal(
+    in item: Slice[u8],
+    in reason: Slice[u8],
+    in detail: Slice[u8],
+    inout out: Slice[u8],
+) -> u64 {
+    let mut pos = copy_str(in "  ", inout out, 0);
+    pos = copy_range(in item, 0, item.len(), inout out, pos);
+    pos = copy_str(in " (", inout out, pos);
+    pos = copy_range(in reason, 0, reason.len(), inout out, pos);
+    pos = copy_str(in "): ", inout out, pos);
+    pos = copy_range(in detail, 0, detail.len(), inout out, pos);
+    let _ = out.try_set(pos, BYTE_LF);
+    wrapping_add(pos, 1)
+}
+
+// ---------------------------------------------------------------------------
+// Vesper declaration renderers (`synth.rs::vesper_declarations`).
+
+pub fn migrate_render_decl_struct_field(
+    in name: Slice[u8],
+    in ty: Slice[u8],
+    inout out: Slice[u8],
+) -> u64 {
+    let mut pos = copy_str(in "    ", inout out, 0);
+    pos = copy_range(in name, 0, name.len(), inout out, pos);
+    pos = copy_str(in ": ", inout out, pos);
+    pos = copy_range(in ty, 0, ty.len(), inout out, pos);
+    pos = copy_str(in ",\n", inout out, pos);
+    pos
+}
+
+pub fn migrate_render_decl_enum(
+    in name: Slice[u8],
+    in carrier: Slice[u8],
+    in vars_buf: Slice[u8],
+    in vars_starts: Slice[u64],
+    in vars_lens: Slice[u64],
+    inout out: Slice[u8],
+) -> u64 {
+    let mut pos = copy_str(in "enum ", inout out, 0);
+    pos = copy_range(in name, 0, name.len(), inout out, pos);
+    if carrier.len() > 0 {
+        pos = copy_str(in ": ", inout out, pos);
+        pos = copy_range(in carrier, 0, carrier.len(), inout out, pos);
+    }
+    pos = copy_str(in " { ", inout out, pos);
+    pos = write_joined_args(in vars_buf, in vars_starts, in vars_lens, inout out, pos);
+    pos = copy_str(in " }\n", inout out, pos);
+    pos
+}
+
+pub fn migrate_render_decl_extern_fn(
+    in name: Slice[u8],
+    in params_buf: Slice[u8],
+    in params_starts: Slice[u64],
+    in params_lens: Slice[u64],
+    in result: Slice[u8],
+    inout out: Slice[u8],
+) -> u64 {
+    let mut pos = copy_str(in "extern fn ", inout out, 0);
+    pos = copy_range(in name, 0, name.len(), inout out, pos);
+    let _ = out.try_set(pos, BYTE_LPAREN);
+    pos = wrapping_add(pos, 1);
+    pos = write_joined_args(
+        in params_buf,
+        in params_starts,
+        in params_lens,
+        inout out,
+        pos,
+    );
+    pos = copy_str(in ") -> ", inout out, pos);
+    pos = copy_range(in result, 0, result.len(), inout out, pos);
+    pos = copy_str(in ";\n", inout out, pos);
+    pos
+}
+
+// ---------------------------------------------------------------------------
+// `.vsys` library header renderer (`synth.rs::sys_spec`).
+
+fn write_hex_at(in src: Slice[u8], inout out: Slice[u8], dst_pos: u64) -> u64 {
+    let n = src.len();
+    let mut i: u64 = 0;
+    let mut pos = dst_pos;
+    loop {
+        if i >= n {
+            break;
+        }
+        let b = match src.try_get(i) {
+            Some(v) => v,
+            None => break
+        };
+        let hi = wrapping_u8(widen_u64(b) >> 4) & HEX_NIBBLE_MASK;
+        let lo = b & HEX_NIBBLE_MASK;
+        let _ = out.try_set(pos, hex_nibble_ascii(hi));
+        pos = wrapping_add(pos, 1);
+        let _ = out.try_set(pos, hex_nibble_ascii(lo));
+        pos = wrapping_add(pos, 1);
+        i = wrapping_add(i, 1);
+    }
+    pos
+}
+
+const VSYS_FLAG_STATIC: u8 = 1;
+const VSYS_FLAG_HEADER: u8 = 2;
+const VSYS_FLAG_PKG_CONFIG: u8 = 4;
+
+pub fn migrate_render_vsys_preamble(
+    in schema: Slice[u8],
+    in origin: Slice[u8],
+    in library: Slice[u8],
+    in target_triple: Slice[u8],
+    in abi_name: Slice[u8],
+    inout out: Slice[u8],
+) -> u64 {
+    let mut pos = copy_str(in "// ", inout out, 0);
+    pos = copy_range(in schema, 0, schema.len(), inout out, pos);
+    pos = copy_str(in ": synthesized by vesper migrate from ", inout out, pos);
+    pos = copy_range(in origin, 0, origin.len(), inout out, pos);
+    pos = copy_str(
+        in ".\n// Review every `assumed:` line; finite shadow tests do not prove equivalence.\nsys library ",
+        inout out,
+        pos,
+    );
+    pos = copy_range(in library, 0, library.len(), inout out, pos);
+    pos = copy_str(in " (\n    target = \"", inout out, pos);
+    pos = copy_range(in target_triple, 0, target_triple.len(), inout out, pos);
+    pos = copy_str(in "\", abi = \"", inout out, pos);
+    pos = copy_range(in abi_name, 0, abi_name.len(), inout out, pos);
+    pos = copy_str(in "\",\n", inout out, pos);
+    pos
+}
+
+pub fn migrate_render_vsys_link_block(
+    flags: u8,
+    in link_name: Slice[u8],
+    in blake3_bytes: Slice[u8],
+    in header: Slice[u8],
+    in pkg_config: Slice[u8],
+    inout out: Slice[u8],
+) -> u64 {
+    let mut pos = copy_str(in "    link = \"", inout out, 0);
+    if (flags & VSYS_FLAG_STATIC) != 0 {
+        pos = copy_str(in "static", inout out, pos);
+    } else {
+        pos = copy_str(in "dynamic", inout out, pos);
+    }
+    pos = copy_str(in "\", name = \"", inout out, pos);
+    pos = copy_range(in link_name, 0, link_name.len(), inout out, pos);
+    pos = copy_str(in "\",\n    artifact = \"blake3:", inout out, pos);
+    pos = write_hex_at(in blake3_bytes, inout out, pos);
+    let _ = out.try_set(pos, BYTE_DQUOTE);
+    pos = wrapping_add(pos, 1);
+    if (flags & VSYS_FLAG_HEADER) != 0 {
+        pos = copy_str(in ",\n    header = \"", inout out, pos);
+        pos = copy_range(in header, 0, header.len(), inout out, pos);
+        let _ = out.try_set(pos, BYTE_DQUOTE);
+        pos = wrapping_add(pos, 1);
+    }
+    if (flags & VSYS_FLAG_PKG_CONFIG) != 0 {
+        pos = copy_str(in ",\n    pkg_config = \"", inout out, pos);
+        pos = copy_range(in pkg_config, 0, pkg_config.len(), inout out, pos);
+        let _ = out.try_set(pos, BYTE_DQUOTE);
+        pos = wrapping_add(pos, 1);
+    }
+    pos = copy_str(in "\n) {\n", inout out, pos);
+    pos
+}

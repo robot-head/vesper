@@ -116,8 +116,8 @@ const PAT_PAIR: u64 = u64::MAX - 1;
 /// operation (the built-in `Region` effect, `regions::active`) is its index
 /// in `regions::OPERATIONS` + 1, else 0; its payload size + 1 is the native
 /// layout size of `T` in the call's `RegionBox[r, T]` result type, or 0
-/// when that type does not fix it (`region_payload_size` would read the
-/// value instead).
+/// when that type does not fix it (the machine then sizes the value, as
+/// `region_payload_size` does).
 ///
 /// The float modes follow (`FloatMode`): 1 when the program canonicalises
 /// NaN results (DetFloat), then the instructions (global indices) whose

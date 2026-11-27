@@ -444,6 +444,8 @@ vesper_crate(
             "//bootstrap:files",
             # @vesper/run keeps region books in @vesper/alloc (#2053).
             "//crates/vesper-alloc:files",
+            # @vesper/lsp-publish renders through @vesper/diagnostics (#1828).
+            "//crates/vesper-diagnostics:files",
             "//crates/vesper-ebpf:files",
             # @vesper/driver-commands formats through @vesper/fmt (#1996).
             "//crates/vesper-fmt:files",
@@ -956,6 +958,7 @@ vesper_crate(
             "src/lsp/fixtures/**",
             "packages/vesper-lsp-features/**",
             "packages/vesper-lsp-format/**",
+            "packages/vesper-lsp-publish/**",
             # The macro preview's Forge programs (part 11c).
             "tests/forge_*.rs",
             "packages/vesper-ast/**",
@@ -963,6 +966,7 @@ vesper_crate(
             "packages/vesper-front/**",
             "packages/vesper-std/**",
         ]) + [
+            "//crates/vesper-diagnostics:files",
             "//crates/vesper-fmt:files",
             "//crates/vesper-span:files",
         ],
@@ -1942,9 +1946,11 @@ vesper_package(
     manifest = "packages/vesper-run/Loom.toml",
     visibility = ["//visibility:public"],
     # Float display takes @vesper/serde's shortest digits; region blocks
-    # keep @vesper/alloc books.
+    # keep @vesper/alloc books and size generic payloads with
+    # @vesper/check-layout.
     deps = [
         ":check_data_package",
+        ":check_layout_package",
         ":place_ir_package",
         "//crates/vesper-alloc:port_package",
         "//crates/vesper-serde:port_package",

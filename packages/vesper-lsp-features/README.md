@@ -69,6 +69,11 @@ in `@vesper/lsp-format` (`packages/vesper-lsp-format`), because the
 formatter port links C BLAKE3, which this package must not need under
 Stage 2.
 
+The publishDiagnostics payload (part 13b of #1828) lives in
+`@vesper/lsp-publish` (`packages/vesper-lsp-publish`), because
+`@vesper/diagnostics` declares the same `Resource` variants as
+`@vesper/span`, which this package uses.
+
 The source is parsed with `@vesper/front` and `@vesper/ast`, positions use
 `@vesper/span`, and the JSON is written byte for byte as serde_json writes
 it. The package does not depend on `@vesper/serde` (see the lane 16 report,

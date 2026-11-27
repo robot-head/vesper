@@ -1430,3 +1430,162 @@ fn vesper_scalar_bodies_part_6p() {
         assert!(total.is_clean(), "{}", total.summary());
     });
 }
+
+/// Part 6q: `f32` math intrinsics (`sqrt`/`abs`/`floor`/`ceil`/`round`/`trunc`/
+/// `min`/`max`/`fma`), `f32` compound writes (`+=`/`-=`/`*=`/`/=`), and `u128`
+/// multi-branch recursive functions across both optimized and unoptimized
+/// builds.
+const SCALARS_6Q: &str = "
+fn f32_math_all(a: f32, b: f32) -> i64 {
+    let mut x: f32 = abs(a);
+    x += b;
+    x -= 0.5;
+    x *= 2.0;
+    x /= 4.0;
+    let s: f32 = sqrt(x);
+    let m: f32 = fma(s, 0.5, min(floor(x), max(ceil(x), round(trunc(x)))));
+    widen_i64(to_bits_f32(m))
+}
+fn u128_step(n: u128, acc: u128) -> u128 {
+    if n == 0 {
+        acc
+    } else if n <= 2 {
+        wrapping_add(acc, n)
+    } else if n > 5 && n != 7 {
+        u128_step(wrapping_sub(n, 2), wrapping_add(acc, n))
+    } else {
+        u128_step(wrapping_sub(n, 1), acc ^ n)
+    }
+}
+fn main() -> i64 {
+    let f: i64 = f32_math_all(-3.5, 5.25);
+    let u: u128 = u128_step(widen_u128(9), widen_u128(1));
+    f ^ wrapping_i64(wrapping_u64(u))
+}
+";
+
+#[test]
+fn vesper_scalar_bodies_part_6q() {
+    big_stack(|| {
+        let parsed = vesper::parser::parse(SCALARS_6Q);
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        let checked = vesper::check::check(&parsed.module);
+        assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
+        if let Err(e) = build(&checked.world, "main", true) {
+            panic!("the part 6q scalar program does not build: {e}");
+        }
+        let before = EMITTED.load(Ordering::Relaxed);
+        let total = both("scalars_6q", &checked.world, true);
+        let emitted = EMITTED.load(Ordering::Relaxed) - before;
+        eprintln!(
+            "scalars_6q: {}; {emitted} functions emitted from Vesper",
+            total.summary()
+        );
+        let ran = if cross() { 0 } else { 2 };
+        assert_eq!((total.worlds, total.ran), (2, ran), "{}", total.summary());
+        let min_emitted = if cross() { 3 } else { 6 };
+        assert!(
+            emitted >= min_emitted,
+            "part 6q functions should come from Vesper (expected >= {min_emitted}, got {emitted})"
+        );
+        assert!(total.is_clean(), "{}", total.summary());
+    });
+}
+
+/// Part 6r: `Op::Project` scalar field projection on `LANE_PRODUCT` struct and
+/// tuple values across both optimized and unoptimized builds.
+const SCALARS_6R: &str = "
+struct Pair {
+    x: i64,
+    y: f64,
+    z: u32,
+}
+fn make_pair(x: i64, y: f64, z: u32) -> Pair {
+    Pair { x: x, y: y, z: z }
+}
+fn project_pair(a: i64, b: f64, c: u32) -> i64 {
+    let x: i64 = make_pair(a, b, c).x;
+    let y: f64 = make_pair(a, b, c).y;
+    let z: u32 = make_pair(a, b, c).z;
+    wrapping_add(x, widen_i64(z)) ^ saturating_i64(y)
+}
+fn main() -> i64 {
+    project_pair(100, 23.5, 42)
+}
+";
+
+#[test]
+fn vesper_scalar_bodies_part_6r() {
+    big_stack(|| {
+        let parsed = vesper::parser::parse(SCALARS_6R);
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        let checked = vesper::check::check(&parsed.module);
+        assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
+        if let Err(e) = build(&checked.world, "main", true) {
+            panic!("the part 6r scalar program does not build: {e}");
+        }
+        let before = EMITTED.load(Ordering::Relaxed);
+        let total = both("scalars_6r", &checked.world, true);
+        let emitted = EMITTED.load(Ordering::Relaxed) - before;
+        eprintln!(
+            "scalars_6r: {}; {emitted} functions emitted from Vesper",
+            total.summary()
+        );
+        let ran = if cross() { 0 } else { 2 };
+        assert_eq!((total.worlds, total.ran), (2, ran), "{}", total.summary());
+        let min_emitted = if cross() { 2 } else { 4 };
+        assert!(
+            emitted >= min_emitted,
+            "part 6r functions should come from Vesper (expected >= {min_emitted}, got {emitted})"
+        );
+        assert!(total.is_clean(), "{}", total.summary());
+    });
+}
+
+/// Part 6s: `INST_PROJECT` on `LANE_PRODUCT` struct literals with `i64` and
+/// `f64` fields, asserting that the projecting function itself emits from
+/// Vesper with 0 CLIF/object/run differences.
+const SCALARS_6S: &str = "
+struct Record {
+    a: i64,
+    b: f64,
+    c: i64,
+}
+fn project_literal(x: i64, y: f64, z: i64) -> i64 {
+    let a: i64 = Record { a: x, b: y, c: z }.a;
+    let b: f64 = Record { a: x, b: y, c: z }.b;
+    let c: i64 = Record { a: x, b: y, c: z }.c;
+    wrapping_add(a, c) ^ saturating_i64(b)
+}
+fn main() -> i64 {
+    project_literal(100, 12.5, 33) ^ project_literal(50, -4.5, -11)
+}
+";
+
+#[test]
+fn vesper_scalar_bodies_part_6s() {
+    big_stack(|| {
+        let parsed = vesper::parser::parse(SCALARS_6S);
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        let checked = vesper::check::check(&parsed.module);
+        assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
+        if let Err(e) = build(&checked.world, "main", true) {
+            panic!("the part 6s scalar program does not build: {e}");
+        }
+        let before = EMITTED.load(Ordering::Relaxed);
+        let total = both("scalars_6s", &checked.world, true);
+        let emitted = EMITTED.load(Ordering::Relaxed) - before;
+        eprintln!(
+            "scalars_6s: {}; {emitted} functions emitted from Vesper",
+            total.summary()
+        );
+        let ran = if cross() { 0 } else { 2 };
+        assert_eq!((total.worlds, total.ran), (2, ran), "{}", total.summary());
+        let min_emitted = if cross() { 2 } else { 4 };
+        assert!(
+            emitted >= min_emitted,
+            "part 6s functions should come from Vesper (expected >= {min_emitted}, got {emitted})"
+        );
+        assert!(total.is_clean(), "{}", total.summary());
+    });
+}

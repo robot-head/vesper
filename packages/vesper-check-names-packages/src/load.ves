@@ -20,6 +20,11 @@
 //
 //   maps       (optional) count; file, generated start/end, source
 //              start/end and 1 if bytes were copied, per segment.
+//   policy     (optional) word count, then the words of Stage 2's sugar
+//              policy records (packages/vesper-stage2/src/sugar_policy.ves)
+//   regions    (optional, after a policy trailer, possibly empty) the
+//              expanded sugar regions (`decode_sugar_regions`), for the
+//              renaming of template names where the sugar is defined
 //
 // Package 0 is the root package.
 
@@ -179,7 +184,7 @@ pub fn decode_bytes(inout loader: St, in input: Slice[u8]) {
         let words = rd(in input, inout pos);
         if pos > input.len()
             || wrapping_sub(input.len(), pos) % 8 != 0
-            || words != wrapping_sub(input.len(), pos) / 8
+            || words > wrapping_sub(input.len(), pos) / 8
         {
             loader.sugar_policy_truncated = true;
             return;
@@ -189,6 +194,94 @@ pub fn decode_bytes(inout loader: St, in input: Slice[u8]) {
             loader.sugar_policy_words.push(rd(in input, inout pos));
         }
     }
+    // A malformed tail is malformed metadata, never an empty policy.
+    if pos < input.len() && !decode_sugar_regions(inout loader, in input, inout pos) {
+        loader.sugar_row.clear();
+        loader.sugar_policy_words.clear();
+        loader.sugar_policy_truncated = true;
+    }
+}
+
+// Whether `count` rows of `width` words fit in the input after `pos`.
+fn fits(in input: Slice[u8], pos: u64, count: u64, width: u64) -> bool {
+    if pos > input.len() {
+        return false;
+    }
+    let words = wrapping_sub(input.len(), pos) / 8;
+    count <= words && wrapping_mul(count, width) <= words
+}
+
+// The regions suffix (optional, after the policy trailer), which the Rust
+// loader writes for the modules it expanded (`Loading::sugar_assembly_input`):
+// count; per module its index, its fresh prefix (str) and its regions
+// (count; per region its expanded start and end, file-local, the module
+// defining its rule, then its holes: count, then start and end each).
+// Whether the suffix is well formed and ends the input.
+fn decode_sugar_regions(inout loader: St, in input: Slice[u8], inout pos: u64) -> bool {
+    let region_head_words: u64 = 4;
+    let hole_words: u64 = 2;
+    let module_count = rd(in input, inout pos);
+    for _m in 0..module_count {
+        if !fits(in input, pos, 1, 2) {
+            return false;
+        }
+        let module = rd(in input, inout pos);
+        if module >= loader.mod_pkg.len() {
+            return false;
+        }
+        let prefix_len = rd(in input, inout pos);
+        pos = wrapping_sub(pos, 8);
+        let prefix_words = if prefix_len % 8 == 0 {
+            inc(prefix_len / 8)
+        } else {
+            wrapping_add(prefix_len / 8, 2)
+        };
+        if !fits(in input, pos, 1, prefix_words) {
+            return false;
+        }
+        let prefix = rd_sym_bytes(inout loader, in input, inout pos);
+        if !fits(in input, pos, 1, 1) {
+            return false;
+        }
+        let region_count = rd(in input, inout pos);
+        if !fits(in input, pos, region_count, region_head_words) {
+            return false;
+        }
+        loader.sugar_row.insert(n32(module), n32(loader.srm_prefix.len()));
+        loader.srm_prefix.push(prefix);
+        loader.srm_first.push(n32(loader.sr_start.len()));
+        loader.srm_count.push(n32(region_count));
+        for _r in 0..region_count {
+            if !fits(in input, pos, 1, region_head_words) {
+                return false;
+            }
+            let start = rd(in input, inout pos);
+            let end = rd(in input, inout pos);
+            let author = rd(in input, inout pos);
+            let hole_count = rd(in input, inout pos);
+            if start > end
+                || author >= loader.mod_pkg.len()
+                || !fits(in input, pos, hole_count, hole_words)
+            {
+                return false;
+            }
+            loader.sr_start.push(n32(start));
+            loader.sr_end.push(n32(end));
+            loader.sr_author.push(n32(author));
+            loader.sr_hole_first.push(n32(loader.sr_holes.len() >> 1));
+            loader.sr_hole_count.push(n32(hole_count));
+            for _h in 0..hole_count {
+                let hole_start = rd(in input, inout pos);
+                let hole_end = rd(in input, inout pos);
+                if hole_start > hole_end {
+                    return false;
+                }
+                loader.sr_holes.push(n32(hole_start));
+                loader.sr_holes.push(n32(hole_end));
+            }
+        }
+    }
+    pos == input.len()
 }
 
 // ---------------------------------------------------------------- AST symbols

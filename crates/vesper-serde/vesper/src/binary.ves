@@ -7,6 +7,8 @@ use self::index::utf8_valid_up_to;
 // StreamVByte: four 2-bit width tags per control byte; values of 1 to 4
 // little-endian bytes. Decoding charges two work units per byte.
 const VALUES_PER_CONTROL: u64 = 4;
+const VALUES_PER_CONTROL_SHIFT: u32 = 2;
+const VALUES_PER_CONTROL_MASK: u64 = 3;
 const TAG_BITS: u64 = 2;
 const TAG_MASK: u64 = 3;
 const MAX_VALUE_BYTES: u64 = 4;
@@ -44,6 +46,7 @@ const NODE_RESERVED_LAST: u64 = 28;
 // Relative pointers and child entries are 4-byte aligned i32s; a slice
 // field is pointer plus count.
 const REL_BYTES: u64 = 4;
+const REL_BYTES_MASK: u64 = 3;
 const REL_SLICE_BYTES: u64 = 8;
 const ALIGN_MASK: u64 = 0xfffffffffffffffc;
 // Words per flattened input node: id, label offset and length, children
@@ -106,12 +109,12 @@ fn byte(in s: Slice[u8], i: u64) -> u64 {
 // -------------------------------------------------------------------
 
 fn controls(count: u64) -> u64 {
-    let tail: u64 = if count % VALUES_PER_CONTROL != 0 {
+    let tail: u64 = if (count & VALUES_PER_CONTROL_MASK) != 0 {
         1
     } else {
         0
     };
-    wrapping_add(count / VALUES_PER_CONTROL, tail)
+    wrapping_add(wrapping_shr_u64(count, VALUES_PER_CONTROL_SHIFT), tail)
 }
 
 fn width(v: u32) -> u64 {
@@ -172,8 +175,8 @@ pub fn vbyte_encode(
     for i in 0..n {
         let v = widen_u64(value_at(in values, i));
         let w = width(value_at(in values, i));
-        let c = i / VALUES_PER_CONTROL;
-        let shift = wrapping_mul(i % VALUES_PER_CONTROL, TAG_BITS);
+        let c = wrapping_shr_u64(i, VALUES_PER_CONTROL_SHIFT);
+        let shift = wrapping_shl_u64(i & VALUES_PER_CONTROL_MASK, 1);
         let tag = bit_shl(wrapping_sub(w, 1), shift);
         let old = byte(in out, c);
         out.try_set(c, wrapping_u8(old | tag));
@@ -189,8 +192,11 @@ pub fn vbyte_encode(
 }
 
 fn tag_width(in input: Slice[u8], i: u64) -> u64 {
-    let shift = wrapping_mul(i % VALUES_PER_CONTROL, TAG_BITS);
-    wrapping_add(bit_shr(byte(in input, i / VALUES_PER_CONTROL), shift) & TAG_MASK, 1)
+    let shift = wrapping_shl_u64(i & VALUES_PER_CONTROL_MASK, 1);
+    wrapping_add(
+        bit_shr(byte(in input, wrapping_shr_u64(i, VALUES_PER_CONTROL_SHIFT)), shift) & TAG_MASK,
+        1
+    )
 }
 
 pub fn vbyte_decode(
@@ -243,6 +249,8 @@ pub fn vbyte_decode(
 // src/archive.rs `HEADER_LEN` and `NODE_LEN`.
 const HEADER_BYTES: u64 = 32;
 const NODE_BYTES: u64 = 32;
+const NODE_BYTES_SHIFT: u32 = 5;
+const NODE_BYTES_MASK: u64 = 31;
 
 fn header_len() -> u64 {
     HEADER_BYTES
@@ -270,7 +278,7 @@ fn is_power_of_two(n: u64) -> bool {
 }
 
 fn field(offset: u64, size: u64, len: u64) -> Unit eff [Fail[BinError]] {
-    if offset % REL_BYTES != 0 {
+    if (offset & REL_BYTES_MASK) != 0 {
         raise(BinErrorKind::BAlignment, offset);
     }
     if add(offset, size) > len {
@@ -722,7 +730,7 @@ pub fn archive_validate(in bytes: Slice[u8], lim: ArchiveLimits) -> u64 eff [Fai
                 );
                 if target.start < header_len()
                     || target.start >= range.end
-                    || wrapping_sub(target.start, header_len()) % NODE_BYTES != 0
+                    || (wrapping_sub(target.start, header_len()) & NODE_BYTES_MASK) != 0
                 {
                     raise(BinErrorKind::BTree, entry);
                 }
@@ -730,7 +738,7 @@ pub fn archive_validate(in bytes: Slice[u8], lim: ArchiveLimits) -> u64 eff [Fai
                     inout c,
                     inout meta,
                     i,
-                    wrapping_sub(target.start, header_len()) / NODE_BYTES
+                    wrapping_shr_u64(wrapping_sub(target.start, header_len()), NODE_BYTES_SHIFT)
                 );
                 entry = wrapping_add(entry, REL_BYTES);
             }

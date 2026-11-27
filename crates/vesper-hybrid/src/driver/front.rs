@@ -147,20 +147,30 @@ fn push_diag_fields(out: &mut Vec<u8>, d: &vesper::ast::Diagnostic) {
     }
 }
 
+const DIAG_MAP_KIND_SOURCE: u64 = 0;
+const DIAG_MAP_KIND_GENERATED: u64 = 1;
+
 fn encode_diagnostics_json_stream(
     ds: &[vesper::ast::Diagnostic],
     map: &[vesper::forge_frontend::SourceMapSegment],
 ) -> Vec<u8> {
     let mut out = Vec::new();
     out.push(DIAG_JSON_SINGLE);
+    out.extend_from_slice(&(map.len() as u64).to_le_bytes());
+    for s in map {
+        out.extend_from_slice(&(s.expanded.start as u64).to_le_bytes());
+        out.extend_from_slice(&(s.expanded.end as u64).to_le_bytes());
+        out.extend_from_slice(&(s.original.start as u64).to_le_bytes());
+        out.extend_from_slice(&(s.original.end as u64).to_le_bytes());
+        let kind = match s.kind {
+            vesper::forge_frontend::MapKind::Source => DIAG_MAP_KIND_SOURCE,
+            vesper::forge_frontend::MapKind::Generated => DIAG_MAP_KIND_GENERATED,
+        };
+        out.extend_from_slice(&kind.to_le_bytes());
+    }
     out.extend_from_slice(&(ds.len() as u64).to_le_bytes());
     for d in ds {
-        if map.is_empty() {
-            push_diag_fields(&mut out, d);
-        } else {
-            let mapped = vesper::forge_frontend::original_diagnostic(map, d.clone());
-            push_diag_fields(&mut out, &mapped);
-        }
+        push_diag_fields(&mut out, d);
     }
     out
 }

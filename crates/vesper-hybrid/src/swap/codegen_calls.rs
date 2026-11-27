@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 #[path = "../../port/codegen_calls.rs"]
 mod codegen_calls_binding;
 
-use super::{Registry, Swap, on, open};
+use super::{Registry, Swap, on, pass};
 
 /// `call` requests the Vesper codegen_calls module emitted, and declined.
 static CALLS_EMITTED: AtomicU64 = AtomicU64::new(0);
@@ -45,7 +45,7 @@ fn vesper_call(lent: &mut vesper::codegen_swap::Lent<'_, '_>) -> Result<bool, St
 }
 
 /// The flip-gate rows of this file's swaps (`swaps::on`).
-pub(super) const SWAPS: &[Swap] = &[open("call", "0 diffs; no flip-gate configuration")];
+pub(super) const SWAPS: &[Swap] = &[pass("call", "codegen-calls", "#2572")];
 
 pub(super) fn register(r: &mut Registry) {
     if on("call") {

@@ -326,6 +326,7 @@ vesper_hybrid(
         # The `vesper run` evaluator (#2053) builds on @vesper/run.
         "hybrid_run": [
             "//:check_data_package",
+            "//:check_layout_package",
             "//:place_ir_package",
             "//:run_package",
             "//crates/vesper-alloc:port_package",

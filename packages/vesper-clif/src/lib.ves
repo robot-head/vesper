@@ -15,16 +15,17 @@
 //   clif_words.rs.
 
 use self::codes::{
-    E_NEW_SLOT, E_ZERO_BEFORE, E_SET_BINARY, E_SET_UNARY, E_MEM_ADDR, E_REPLACE_ICMP_IMM,
-    E_REPLACE_IMM, E_APPEND_DEST_ARG, E_BRIF, E_DETACH_RESULTS, E_ICONST, E_SET_DEST, E_ARGS,
-    E_BLOCK, E_CLONE, E_END, E_FCONST, E_INS, E_JUMP, E_PARAM, E_PLACE, E_REMOVE_BLOCK,
-    E_REMOVE_INST, E_RETARGET, E_SLOT_SIZE, E_ALIAS, E_INS_BEFORE, E_MOVE_INST, E_REMOVE_DEST_ARG,
-    E_REMOVE_PARAM, F_BRANCH, F_CALL, F_RETURN, F_SIDE_EFFECTS, F_STACK_SLOT, F_TERMINATOR, F_TRAP,
-    F_TRAP_CODE, H_NO_OUTLINE, H_SIMD, NONE, NONE64, OP_BITCAST, OP_BRIF, OP_CALL, OP_F32CONST,
-    OP_F64CONST, OP_FCVT_FROM_SINT, OP_ICMP, OP_ICMP_IMM, OP_ICONST, OP_JUMP, OP_LOAD, OP_RETURN,
-    OP_SCALAR_TO_VECTOR, OP_SPLAT, OP_STACK_ADDR, OP_STORE, OP_VCONST, S_EXPLICIT, TY_F64, TY_F32X4,
-    TY_F64X2, OP_SWIDEN_HIGH, OP_SWIDEN_LOW, OP_TRAP, OP_UADD_OVERFLOW, S_OTHER, TY_F32, TY_I16X8,
-    TY_I32X4, TY_I64X2, TY_I8, TY_I8X16, TY_OTHER, V_ALIAS, V_PARAM, V_RESULT
+    E_MOVE_BEFORE, E_REPLACE_BITCAST, E_REPLACE_STORE, E_NEW_SLOT, E_ZERO_BEFORE, E_SET_BINARY,
+    E_SET_UNARY, E_MEM_ADDR, E_REPLACE_ICMP_IMM, E_REPLACE_IMM, E_APPEND_DEST_ARG, E_BRIF,
+    E_DETACH_RESULTS, E_ICONST, E_SET_DEST, E_ARGS, E_BLOCK, E_CLONE, E_END, E_FCONST, E_INS,
+    E_JUMP, E_PARAM, E_PLACE, E_REMOVE_BLOCK, E_REMOVE_INST, E_RETARGET, E_SLOT_SIZE, E_ALIAS,
+    E_INS_BEFORE, E_MOVE_INST, E_REMOVE_DEST_ARG, E_REMOVE_PARAM, F_BRANCH, F_CALL, F_RETURN,
+    F_SIDE_EFFECTS, F_STACK_SLOT, F_TERMINATOR, F_TRAP, F_TRAP_CODE, H_NO_OUTLINE, H_SIMD, NONE,
+    NONE64, OP_BITCAST, OP_BRIF, OP_CALL, OP_F32CONST, OP_F64CONST, OP_FCVT_FROM_SINT, OP_ICMP,
+    OP_ICMP_IMM, OP_ICONST, OP_JUMP, OP_LOAD, OP_RETURN, OP_SCALAR_TO_VECTOR, OP_SPLAT,
+    OP_STACK_ADDR, OP_STORE, OP_VCONST, S_EXPLICIT, TY_F64, TY_F32X4, TY_F64X2, OP_SWIDEN_HIGH,
+    OP_SWIDEN_LOW, OP_TRAP, OP_UADD_OVERFLOW, S_OTHER, TY_F32, TY_I16X8, TY_I32X4, TY_I64X2, TY_I8,
+    TY_I8X16, TY_OTHER, V_ALIAS, V_PARAM, V_RESULT
 };
 
 pub copy struct Val {
@@ -1411,6 +1412,61 @@ impl Func {
         self.out.push(ty);
         self.out.push(w(new));
         self.result(new, 0)
+    }
+
+    // `dfg.replace(i).bitcast(ty, mem, arg)`: its result stays. Written as
+    // `E_REPLACE_BITCAST`.
+    pub fn replace_bitcast(inout self, i: u32, ty: u64, mem: u64, arg: u32) {
+        let mut x = self.inst(w(i));
+        x.op = OP_BITCAST;
+        x.eff = 0;
+        x.cond = 0;
+        x.imm = 0;
+        x.off = 0;
+        x.mem = mem;
+        x.a0 = n32(self.args.len());
+        x.an = 1;
+        self.args.push(arg);
+        x.dn = 0;
+        self.put_inst(w(i), x);
+        self.out.push(E_REPLACE_BITCAST);
+        self.out.push(w(i));
+        self.out.push(ty);
+        self.out.push(mem);
+        self.out.push(w(arg));
+    }
+
+    // `dfg.replace(i).store(mem, value, addr, off)`, written as
+    // `E_REPLACE_STORE`.
+    pub fn replace_store(inout self, i: u32, mem: u64, value: u32, addr: u32, off: u64) {
+        let mut x = self.inst(w(i));
+        x.op = OP_STORE;
+        x.cond = 0;
+        x.imm = 0;
+        x.off = off;
+        x.mem = mem;
+        x.a0 = n32(self.args.len());
+        x.an = 2;
+        self.args.push(value);
+        self.args.push(addr);
+        x.dn = 0;
+        self.put_inst(w(i), x);
+        self.out.push(E_REPLACE_STORE);
+        self.out.push(w(i));
+        self.out.push(mem);
+        self.out.push(w(value));
+        self.out.push(w(addr));
+        self.out.push(off);
+    }
+
+    // `layout.remove_inst(i)` then `layout.insert_inst(i, before)`,
+    // written as `E_MOVE_BEFORE`.
+    pub fn move_before(inout self, i: u32, before: u32) {
+        self.unlink_inst(i);
+        self.place_before(i, before);
+        self.out.push(E_MOVE_BEFORE);
+        self.out.push(w(i));
+        self.out.push(w(before));
     }
 
     // The edit script, ended.

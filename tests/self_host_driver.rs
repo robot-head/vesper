@@ -980,3 +980,174 @@ fn diagnostics_remap_matches_rust() {
     let want_json = serde_json::to_string(&want_ds).unwrap();
     assert_eq!(got_json, want_json);
 }
+
+#[test]
+fn source_map_helpers_match_rust() {
+    use std::collections::BTreeMap;
+    use vesper::packages::{SourceFile, SourceMap};
+
+    let entry = driver().entry("source_map_helpers_words", true);
+
+    let mut qualified = BTreeMap::new();
+    qualified.insert("__pkg_0_foo".to_owned(), "@demo/a::foo".to_owned());
+    qualified.insert("__pkg_0_foo_bar".to_owned(), "@demo/a::foo_bar".to_owned());
+    let map = SourceMap {
+        files: vec![
+            SourceFile {
+                display: "a.ves".into(),
+                text: "fn a() {}\n".into(),
+                base: 0,
+            },
+            SourceFile {
+                display: "b.ves".into(),
+                text: "let x = __pkg_0_foo_bar(__pkg_0_foo);\n// λ🚀 end".into(),
+                base: 11,
+            },
+        ],
+        qualified,
+    };
+
+    let mut pairs: Vec<(&String, &String)> = map.qualified.iter().collect();
+    pairs.sort_by_key(|(k, _)| std::cmp::Reverse(k.len()));
+
+    let text = &map.files[1].text;
+    let line_off = text.find("end").unwrap();
+
+    for query_off in [0usize, 10, 11, 25, 100] {
+        let mut input = Vec::new();
+        let push_u64 = |buf: &mut Vec<u8>, v: u64| buf.extend_from_slice(&v.to_le_bytes());
+        let push_str = |buf: &mut Vec<u8>, s: &str| {
+            buf.extend_from_slice(&(s.len() as u64).to_le_bytes());
+            buf.extend_from_slice(s.as_bytes());
+        };
+        push_u64(&mut input, map.files.len() as u64);
+        for f in &map.files {
+            push_u64(&mut input, f.base as u64);
+            push_u64(&mut input, f.text.len() as u64);
+        }
+        push_u64(&mut input, query_off as u64);
+        push_str(&mut input, text);
+        push_u64(&mut input, line_off as u64);
+        push_u64(&mut input, pairs.len() as u64);
+        for (m, s) in &pairs {
+            push_str(&mut input, m);
+            push_str(&mut input, s);
+        }
+
+        let words = entry.words(&input);
+        let got_file = if words[0] == u64::MAX {
+            None
+        } else {
+            Some(words[0] as usize)
+        };
+        assert_eq!(got_file, map.file_at(query_off), "file_at({query_off})");
+
+        let prefix = &text[..line_off];
+        let want_line = 1 + prefix.bytes().filter(|&b| b == b'\n').count() as u64;
+        let want_col = 1 + prefix.rsplit('\n').next().unwrap().chars().count() as u64;
+        assert_eq!((words[1], words[2]), (want_line, want_col));
+
+        let mut at = 3;
+        let got_demangled = String::from_utf8(unpack(&words, &mut at)).unwrap();
+        assert_eq!(at, words.len());
+        assert_eq!(
+            got_demangled,
+            "let x = @demo/a::foo_bar(@demo/a::foo);\n// λ🚀 end"
+        );
+    }
+}
+
+#[test]
+fn localize_diagnostic_matches_rust() {
+    use std::collections::BTreeMap;
+    use vesper::ast::Diagnostic;
+    use vesper::packages::{SourceFile, SourceMap};
+
+    let entry = driver().entry("localize_diagnostics_json_words", true);
+
+    let mut qualified = BTreeMap::new();
+    qualified.insert("__pkg_0_foo".to_owned(), "@demo/a::foo".to_owned());
+    qualified.insert("__pkg_0_foo_bar".to_owned(), "@demo/a::foo_bar".to_owned());
+    let map = SourceMap {
+        files: vec![
+            SourceFile {
+                display: "src/a.ves".into(),
+                text: "fn __pkg_0_foo() {}\n".into(),
+                base: 0,
+            },
+            SourceFile {
+                display: "src/b.ves".into(),
+                text: "let x = __pkg_0_foo_bar();\n// λ🚀 note".into(),
+                base: 21,
+            },
+        ],
+        qualified,
+    };
+
+    let note_off = map.files[1].text.find("note").unwrap();
+    let ds = vec![
+        // Unlocated diagnostic (offset past all files).
+        Diagnostic::new("E0900", "bad __pkg_0_foo", 500..510).with_help("see __pkg_0_foo_bar"),
+        // Same-file diagnostic with one in-file label and one cross-file label (dropped).
+        Diagnostic::new("E0201", "unknown __pkg_0_foo_bar", 29..44)
+            .with_related(21..24, "in b __pkg_0_foo")
+            .with_related(3..14, "in a"),
+        // Sugar rejection E0143 with cross-file label appended to help.
+        Diagnostic::new("E0143", "sugar in __pkg_0_foo", 3..14)
+            .with_related(
+                21 + note_off..21 + note_off + 4,
+                "expanded from __pkg_0_foo_bar",
+            )
+            .with_help("existing help"),
+    ];
+
+    let push_u64 = |buf: &mut Vec<u8>, v: u64| buf.extend_from_slice(&v.to_le_bytes());
+    let push_str = |buf: &mut Vec<u8>, s: &str| {
+        buf.extend_from_slice(&(s.len() as u64).to_le_bytes());
+        buf.extend_from_slice(s.as_bytes());
+    };
+
+    let mut files_stream = Vec::new();
+    push_u64(&mut files_stream, map.files.len() as u64);
+    for f in &map.files {
+        push_u64(&mut files_stream, f.base as u64);
+        push_str(&mut files_stream, &f.display);
+        push_str(&mut files_stream, &f.text);
+    }
+
+    let mut pairs: Vec<(&String, &String)> = map.qualified.iter().collect();
+    pairs.sort_by_key(|(k, _)| std::cmp::Reverse(k.len()));
+    let mut pairs_stream = Vec::new();
+    push_u64(&mut pairs_stream, pairs.len() as u64);
+    for (m, s) in &pairs {
+        push_str(&mut pairs_stream, m);
+        push_str(&mut pairs_stream, s);
+    }
+
+    let mut input = Vec::new();
+    push_u64(&mut input, files_stream.len() as u64);
+    input.extend_from_slice(&files_stream);
+    push_u64(&mut input, pairs_stream.len() as u64);
+    input.extend_from_slice(&pairs_stream);
+    input.extend_from_slice(&encode_diagnostics_stream(&ds));
+
+    let words = entry.words(&input);
+    let mut at = 0;
+    let got_json = String::from_utf8(unpack(&words, &mut at)).unwrap();
+    assert_eq!(at, words.len());
+
+    let want_arr: Vec<serde_json::Value> = ds
+        .iter()
+        .map(|d| {
+            let loc = map.localize(d);
+            let file = loc
+                .file
+                .map_or("Loom.toml", |i| map.files[i].display.as_str());
+            let mut v = serde_json::to_value(&loc.diagnostic).unwrap();
+            v["file"] = serde_json::Value::String(file.to_owned());
+            v
+        })
+        .collect();
+    let want_json = serde_json::Value::Array(want_arr).to_string();
+    assert_eq!(got_json, want_json);
+}

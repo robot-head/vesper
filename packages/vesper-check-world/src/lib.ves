@@ -706,6 +706,7 @@ fn fn_words(
     if n.effects == none() {
         out.push(0);
         out.push(0);
+        out.push(0);
     } else {
         let effs = effects_node(in a, n.effects);
         let m = list_len(in a, effs.instances);
@@ -714,12 +715,14 @@ fn fn_words(
         for i in 0..m {
             let inst = effect_node(in a, list_at(in a, effs.instances, i));
             out.push(ast_name(inout e, in a, inst.name));
+            out.push(opt_ast_name(inout e, in a, inst.label));
             let c = list_len(in a, inst.args);
             out.push(c);
             for j in 0..c {
                 out.push(ty(inout e, in a, list_at(in a, inst.args, j), in off()));
             }
         }
+        out.push(opt_ast_name(inout e, in a, effs.tail));
     }
     out.push(result);
 }

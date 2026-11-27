@@ -98,6 +98,7 @@ pub const INST_F64CONST: u64 = 17;
 // A struct or tuple built from scalar fields (`Op::Data`, `Op::Tuple`;
 // `Codegen::data_into`), #2411.
 pub const INST_DATA: u64 = 32;
+pub const INST_PROJECT: u64 = 33;
 
 // Sub-operations of `INST_FLOAT_UNARY` and 1-arg `CB_FLOAT_UNARY`.
 const FUN_FNEG: u64 = 1;
@@ -1968,6 +1969,47 @@ impl Gen {
             if !self.body_data(in h, i, inout ops, inout extra) {
                 return false;
             }
+        } else if i.op == Op::Project {
+            if !self.body_operand(in h, i.a, inout ops) {
+                return false;
+            }
+            let base_ty = n32(u64_at(in h.vty, u64_at(in ops, 0)));
+            let res_lane = self.body_lane(i.ty);
+            if self.body_lane(base_ty) != LANE_PRODUCT
+                || res_lane == 0
+                || res_lane == LANE_PRODUCT
+            {
+                return false;
+            }
+            let field_sym = n32(self.program.op(inc(i.a)));
+            let mark = self.layouts.mark();
+            let d = default_type(inout self.ctx.types, base_ty);
+            let l = layout_of(
+                inout self.layouts,
+                inout self.ctx.types,
+                inout self.ctx.names,
+                in self.ctx.world,
+                d
+            );
+            let mut found = false;
+            let mut off: u64 = 0;
+            if l != NONE32 && self.layouts.node(l).kind == L_PRODUCT {
+                let node = self.layouts.node(l);
+                for k in 0..widen_u64(node.n) {
+                    let lf = self.layouts.lfield(add(widen_u64(node.a), k));
+                    if lf.name == field_sym {
+                        off = wrapping_u64(lf.offset);
+                        found = true;
+                    }
+                }
+            }
+            self.layouts.reset(mark);
+            if !found {
+                return false;
+            }
+            kind = INST_PROJECT;
+            extra.push(off);
+            extra.push(res_lane);
         } else if i.op == Op::Call {
             let mut bops: ChunkSeq[u64] = ChunkSeq::new[u64]();
             if self.body_call_builtin(
@@ -2026,9 +2068,11 @@ impl Gen {
             if self.body_lane(i.ty) == LANE_PRODUCT {
                 return false;
             }
-            for k in 0..ops.len() {
-                if self.body_lane(n32(u64_at(in h.vty, u64_at(in ops, k)))) == LANE_PRODUCT {
-                    return false;
+            if kind != INST_PROJECT {
+                for k in 0..ops.len() {
+                    if self.body_lane(n32(u64_at(in h.vty, u64_at(in ops, k)))) == LANE_PRODUCT {
+                        return false;
+                    }
                 }
             }
         }
