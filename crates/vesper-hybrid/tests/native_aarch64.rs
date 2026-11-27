@@ -52,6 +52,7 @@ const SIGNED_REM: u64 = 48;
 const SIGNED_MUL_HIGH: u64 = 50;
 const UNSIGNED_MUL_HIGH: u64 = 51;
 const ADD_IMMEDIATE: u64 = 52;
+const SUB_IMMEDIATE: u64 = 53;
 const AND_IMMEDIATE: u64 = 55;
 const OR_IMMEDIATE: u64 = 56;
 const XOR_IMMEDIATE: u64 = 57;
@@ -1421,6 +1422,65 @@ fn aarch64_memory_addressing_and_store_liveness() {
     }
     assert!(binding::aarch64_integer_leaf(&[2, 2, STORE_BYTE, 0, 1, 0]).is_empty());
     assert!(binding::aarch64_integer_leaf(&[1, 1, LOAD, 0, NO_VALUE, CELL_BITS]).is_empty());
+}
+
+#[test]
+fn aarch64_folds_single_use_addresses_with_encodable_offsets() {
+    const LDR_X0_X0_32760: u32 = 0xf97f_fc00;
+    const LDUR_W0_X0_NEG256: u32 = 0xb850_0000;
+    const LDR_X0_X0_X1: u32 = 0xf861_6800;
+    const STRH_W2_X0_X1: u32 = 0x7821_6802;
+    const ADD_X0_X0_X1: u32 = 0x8b01_0000;
+    const STR_X0_X0: u32 = 0xf900_0000;
+    const ADD_X0_X0_4095: u32 = 0x913f_fc00;
+    const LDRH_W0_X0: u32 = 0x7940_0000;
+    const LDR_X1_X0: u32 = 0xf940_0001;
+
+    #[rustfmt::skip]
+    let cases: &[(&[u64], &[u32])] = &[
+        (
+            &[1, 2, ADD_IMMEDIATE, 0, 32752, CELL_BITS, LOAD, 1, 8, CELL_BITS],
+            &[LDR_X0_X0_32760, RET],
+        ),
+        (
+            &[1, 2, SUB_IMMEDIATE, 0, 257, CELL_BITS, LOAD, 1, 1, DWORD_BITS],
+            &[LDUR_W0_X0_NEG256, RET],
+        ),
+        (
+            &[2, 3, ADD, 0, 1, CELL_BITS, LOAD, 2, 0, CELL_BITS],
+            &[LDR_X0_X0_X1, RET],
+        ),
+        (
+            &[3, NO_VALUE, ADD, 0, 1, CELL_BITS, STORE_WORD, 3, 2, 0],
+            &[STRH_W2_X0_X1, RET],
+        ),
+        (
+            &[2, NO_VALUE, ADD, 0, 1, CELL_BITS, STORE_QWORD, 2, 2, 0],
+            &[ADD_X0_X0_X1, STR_X0_X0, RET],
+        ),
+        (
+            &[1, 2, ADD_IMMEDIATE, 0, 4095, CELL_BITS, LOAD, 1, 0, WORD_BITS],
+            &[ADD_X0_X0_4095, LDRH_W0_X0, RET],
+        ),
+    ];
+    for &(tape, expected) in cases {
+        let expected: Vec<_> = expected
+            .iter()
+            .copied()
+            .flat_map(u32::to_le_bytes)
+            .collect();
+        assert_eq!(binding::aarch64_integer_leaf(tape), expected);
+    }
+
+    #[rustfmt::skip]
+    let returned_address = [
+        2, 3,
+        ADD, 0, 1, CELL_BITS,
+        LOAD, 2, 0, CELL_BITS,
+        RETURN_PAIR, 2, 0, 0,
+    ];
+    let code = binding::aarch64_integer_leaf(&returned_address);
+    assert!(code.starts_with(&[ADD_X0_X0_X1, LDR_X1_X0].map(u32::to_le_bytes).concat()));
 }
 
 #[test]

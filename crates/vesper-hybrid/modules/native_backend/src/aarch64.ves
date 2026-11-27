@@ -267,6 +267,13 @@ copy struct HomeCell {
     next_store: u64,
 }
 
+copy struct AddressFold {
+    consumer: u64,
+    base: u64,
+    index: u64,
+    displacement: u64,
+}
+
 copy enum Allocation {
     RegisterHomes,
     StackHomes,
@@ -628,27 +635,97 @@ fn memory(
     let size = sh(scale, MEMORY_SIZE_SHIFT);
     let opcode = size | (if load { MEMORY_LOAD } else { 0 });
     let offset = widen_i64(wrapping_i32(displacement));
+    match memory_immediate(bytes, scale, offset) {
+        Option::Some(addressing) => {
+            push32(inout out, addressing | opcode | sh(address, RN_SHIFT) | data);
+        },
+        Option::None => {
+            immediate(inout out, SCRATCH, wrapping_u64(offset));
+            rrr(inout out, MEMORY_REGISTER | opcode, data, address, SCRATCH);
+        },
+    };
+}
+
+fn memory_immediate(bytes: u64, scale: u32, offset: i64) -> Option[u32] {
     let unsigned = wrapping_u64(offset);
     let scaled = wrapping_shr_u64(unsigned, scale);
     if offset >= 0 && (unsigned & wrapping_sub(bytes, 1)) == 0 && scaled <= IMM12_MASK {
-        push32(
-            inout out,
-            MEMORY_SCALED
-                | opcode
-                | sh(wrapping_u32(scaled), IMM12_SHIFT)
-                | sh(address, RN_SHIFT)
-                | data
-        );
+        Option::Some(MEMORY_SCALED | sh(wrapping_u32(scaled), IMM12_SHIFT))
     } else if offset >= MEMORY_IMM9_MIN && offset <= MEMORY_IMM9_MAX {
         let imm = wrapping_u32(offset) & MEMORY_IMM9_MASK;
-        push32(
-            inout out,
-            MEMORY_UNSCALED | opcode | sh(imm, MEMORY_IMM9_SHIFT) | sh(address, RN_SHIFT) | data
-        );
+        Option::Some(MEMORY_UNSCALED | sh(imm, MEMORY_IMM9_SHIFT))
     } else {
-        immediate(inout out, SCRATCH, unsigned);
-        rrr(inout out, MEMORY_REGISTER | opcode, data, address, SCRATCH);
+        Option::None
     }
+}
+
+fn indexed_memory(
+    inout out: ChunkSeq[u8],
+    load: bool,
+    width: u64,
+    address: u32,
+    data: u32,
+    index: u32
+) {
+    let size = sh(trailing_zeros_u64(width / BYTE_BITS), MEMORY_SIZE_SHIFT);
+    let opcode = MEMORY_REGISTER | size | (if load { MEMORY_LOAD } else { 0 });
+    rrr(inout out, opcode, data, address, index);
+}
+
+fn fold_address(
+    in words: Slice[u64],
+    in ends: ChunkSeq[u64],
+    index: u64,
+    value: u64,
+    in r: Record
+) -> Option[AddressFold] {
+    let address_value = wrapping_sub(value, 1);
+    if index == 0 || r.left != address_value {
+        return Option::None;
+    }
+    let stored = store_width(r.op);
+    let (width, displacement) = if r.op == LOAD || r.op == FLOAT_LOAD {
+        (r.extra, r.right)
+    } else if stored != 0 && !is_stack_store(r.op) && r.right != address_value {
+        (stored, r.extra)
+    } else {
+        return Option::None;
+    };
+    if last_read(in ends, address_value) != NEVER_READ {
+        return Option::None;
+    }
+    let address = read_record(in words, wrapping_sub(index, 1));
+    if address.extra != QWORD_BITS || address.left >= address_value {
+        return Option::None;
+    }
+    if address.op == ADD && displacement == 0 && address.right < address_value {
+        return Option::Some(AddressFold {
+            consumer: index,
+            base: address.left,
+            index: address.right,
+            displacement: 0
+        });
+    }
+    if (address.op != ADD_IMMEDIATE && address.op != SUB_IMMEDIATE) || address.right > DISP32_MASK {
+        return Option::None;
+    }
+    let offset = widen_i64(wrapping_i32(displacement));
+    let immediate = widen_i64(wrapping_i32(address.right));
+    let combined = if address.op == ADD_IMMEDIATE {
+        wrapping_add(offset, immediate)
+    } else {
+        wrapping_sub(offset, immediate)
+    };
+    let bytes = width / BYTE_BITS;
+    if memory_immediate(bytes, trailing_zeros_u64(bytes), combined).is_none() {
+        return Option::None;
+    }
+    Option::Some(AddressFold {
+        consumer: index,
+        base: address.left,
+        index: NO_VALUE,
+        displacement: widen_u64(wrapping_u32(combined))
+    })
 }
 
 fn conditional_branch(op: u64) -> bool {
@@ -2186,6 +2263,7 @@ fn encode_pass(
     let mut call_end = NEVER_READ;
     let mut pending_arguments: u64 = 0;
     let mut pending_float_arguments: u64 = 0;
+    let mut address_folds = ChunkSeq::new[AddressFold]();
     let mut needs_call_pair = false;
     let mut needs_checked = false;
     let mut has_float = float_return;
@@ -2372,13 +2450,27 @@ fn encode_pass(
         {
             continue;
         }
-        if n >= 1 && last_read(in ends, r.left) == NEVER_READ {
+        // The address is defined immediately before this access. A later
+        // read, or a store of the address itself, keeps its normal lifetime.
+        let mut left = r.left;
+        match fold_address(in words, in ends, index, value, in r) {
+            Option::Some(fold) => {
+                left = fold.base;
+                if fold.index != NO_VALUE && last_read(in ends, fold.index) == NEVER_READ {
+                    let _ = ends.try_set(fold.index, value);
+                    live_values = wrapping_add(live_values, 1);
+                }
+                address_folds.push(fold);
+            },
+            Option::None => (),
+        };
+        if n >= 1 && last_read(in ends, left) == NEVER_READ {
             let end = if r.op == CALL_ARGUMENT {
                 call_end
             } else {
                 value
             };
-            let _ = ends.try_set(r.left, end);
+            let _ = ends.try_set(left, end);
             live_values = wrapping_add(live_values, 1);
         }
         if n >= 2 && last_read(in ends, r.right) == NEVER_READ {
@@ -2498,6 +2590,9 @@ fn encode_pass(
     let mut table_fixups = ChunkSeq::new[TableFixup]();
     let mut remaining_aliases = home_aliases.len();
     let mut next_alias = home_aliases.try_get(wrapping_sub(remaining_aliases, 1)).unwrap_or(count);
+    let mut remaining_folds = address_folds.len();
+    let no_fold = AddressFold { consumer: count, base: NO_VALUE, index: NO_VALUE, displacement: 0 };
+    let mut next_fold = address_folds.try_get(wrapping_sub(remaining_folds, 1)).unwrap_or(no_fold);
     let mut remaining_calls = call_sites.len();
     let mut next_call = call_sites.try_get(wrapping_sub(remaining_calls, 1)).unwrap_or(values);
     if labeled {
@@ -2524,7 +2619,7 @@ fn encode_pass(
     }
     for index in 0..count {
         let value = wrapping_add(args, index);
-        let r = read_record(in words, index);
+        let mut r = read_record(in words, index);
         let stored = store_width(r.op);
         let last = last_read(in ends, value);
         let live = last != NEVER_READ;
@@ -2608,6 +2703,22 @@ fn encode_pass(
             locations.push(UNASSIGNED);
             continue;
         }
+        let mut index_location = UNASSIGNED;
+        if index == next_fold.consumer {
+            r.left = next_fold.base;
+            if next_fold.index == NO_VALUE {
+                if stored == 0 {
+                    r.right = next_fold.displacement;
+                } else {
+                    r.extra = next_fold.displacement;
+                }
+            } else {
+                index_location = location(in locations, next_fold.index);
+                used = expire(used, in ends, next_fold.index, value, index_location);
+            }
+            remaining_folds = wrapping_sub(remaining_folds, 1);
+            next_fold = address_folds.try_get(wrapping_sub(remaining_folds, 1)).unwrap_or(no_fold);
+        }
         let n = operands(in r, returns).unwrap_or(0);
         let left = if n >= 1 {
             location(in locations, r.left)
@@ -2654,7 +2765,12 @@ fn encode_pass(
             } else {
                 let address = materialize(inout out, left, SPILL_LEFT, frame_bytes);
                 let source = store_source(inout out, right, SPILL_RIGHT, frame_bytes);
-                memory(inout out, false, stored, address, source, r.extra);
+                if index_location != UNASSIGNED {
+                    let offset = materialize(inout out, index_location, SPILL_THIRD, frame_bytes);
+                    indexed_memory(inout out, false, stored, address, source, offset);
+                } else {
+                    memory(inout out, false, stored, address, source, r.extra);
+                }
             }
             locations.push(UNASSIGNED);
             continue;
@@ -2907,6 +3023,9 @@ fn encode_pass(
             } else {
                 memory(inout out, true, r.extra, SP, dest, displacement);
             }
+        } else if index_location != UNASSIGNED {
+            let offset = materialize(inout out, index_location, SPILL_THIRD, frame_bytes);
+            indexed_memory(inout out, true, r.extra, lhs, dest, offset);
         } else {
             match flags_for_next {
                 Option::Some(cc) => {
