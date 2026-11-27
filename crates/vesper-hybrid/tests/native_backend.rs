@@ -12,6 +12,8 @@ mod elf;
 mod elf_host;
 #[path = "native_backend/floating.rs"]
 mod floating;
+#[path = "native_backend/vector.rs"]
+mod vector;
 #[path = "native_backend/wide.rs"]
 mod wide;
 

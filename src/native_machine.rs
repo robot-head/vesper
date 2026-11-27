@@ -177,6 +177,13 @@ enum IntegerOp {
     StackPointer = 155,
     SpectreBarrier = 156,
     FloatToIntegerTrunc = 157,
+    VectorConstant = 158,
+    VectorSplat = 159,
+    VectorLoad = 160,
+    VectorStore = 161,
+    VectorAnd = 162,
+    VectorOr = 163,
+    VectorXor = 164,
 }
 
 fn integer_bit_op(op: Opcode) -> Option<IntegerOp> {
@@ -246,6 +253,7 @@ const GP_RESULTS: usize = 2;
 const FLOAT_RETURN_LAYOUT: u64 = GP_RESULTS as u64 + 1;
 const WIDE_INTEGER_CELLS: usize = 2;
 const INTEGER_CELL_BITS: u64 = u64::BITS as u64;
+const SIMD_BYTES: u32 = 2 * size_of::<u64>() as u32;
 const MAX_LINEARIZED_BRANCHES: usize = 32;
 // Keep small joins linear. Compare tape sizes once repeated bodies are substantial.
 const MIN_DUPLICATED_INSTRUCTIONS_FOR_CFG: usize = 32;
@@ -317,6 +325,10 @@ fn integer_width(ty: Type) -> Option<u64> {
 
 fn float_width(ty: Type) -> Option<u64> {
     matches!(ty, types::F32 | types::F64).then(|| u64::from(ty.bits()))
+}
+
+fn vector_type(ty: Type) -> bool {
+    ty.is_vector() && ty.bytes() == SIMD_BYTES
 }
 
 fn float_condition(cond: FloatCC) -> u64 {
@@ -1845,6 +1857,96 @@ impl IntegerBlocks<'_> {
         Some(result)
     }
 
+    fn vector_instruction(&mut self, inst: Inst, value: Value, values: &Values) -> Option<u64> {
+        let dfg = &self.function.dfg;
+        let input = |value| values.low[dfg.resolve_aliases(value)];
+        let ty = |value| self.value_type(value);
+        let output = ty(value);
+        if self.aarch64 || !vector_type(output) {
+            return None;
+        }
+        let (op, operands) = match dfg.insts[inst] {
+            InstructionData::UnaryConst {
+                opcode: Opcode::Vconst,
+                constant_handle,
+            } => {
+                let bytes = dfg.constants.get(constant_handle).as_slice();
+                let ([low, high], []) = bytes.as_chunks::<{ size_of::<u64>() }>() else {
+                    return None;
+                };
+                (
+                    IntegerOp::VectorConstant,
+                    [u64::from_le_bytes(*low), u64::from_le_bytes(*high), 0],
+                )
+            }
+            InstructionData::Unary {
+                opcode: Opcode::Splat,
+                arg,
+            } if ty(arg) == output.lane_type() => {
+                let lane = ty(arg);
+                let mut source = input(arg)?;
+                let width = if let Some(width) = float_width(lane) {
+                    source = self.append(IntegerOp::FloatToBits, [source, 0, width]);
+                    width
+                } else {
+                    integer_width(lane)?
+                };
+                (IntegerOp::VectorSplat, [source, 0, width])
+            }
+            InstructionData::Binary {
+                opcode: opcode @ (Opcode::Band | Opcode::Bor | Opcode::Bxor),
+                args: [left, right],
+            } if ty(left) == output && ty(right) == output => {
+                let op = match opcode {
+                    Opcode::Band => IntegerOp::VectorAnd,
+                    Opcode::Bor => IntegerOp::VectorOr,
+                    _ => IntegerOp::VectorXor,
+                };
+                (op, [input(left)?, input(right)?, 0])
+            }
+            InstructionData::Ternary {
+                opcode: Opcode::Bitselect,
+                args: [mask, yes, no],
+            } if ty(mask) == output && ty(yes) == output && ty(no) == output => {
+                let no = input(no)?;
+                let difference = self.append(IntegerOp::VectorXor, [input(yes)?, no, 0]);
+                let selected = self.append(IntegerOp::VectorAnd, [input(mask)?, difference, 0]);
+                (IntegerOp::VectorXor, [no, selected, 0])
+            }
+            InstructionData::LoadNoOffset {
+                opcode: Opcode::Bitcast,
+                flags,
+                arg,
+            } if vector_type(ty(arg)) && supports_memory_format(flags) => return input(arg),
+            InstructionData::StackLoad {
+                opcode: Opcode::StackLoad,
+                stack_slot,
+                offset,
+            } => {
+                let [slot, offset] = self.stack_location(stack_slot, offset, SIMD_BYTES)?;
+                let address = self.append(IntegerOp::StackAddress, [slot, offset, 0]);
+                (IntegerOp::VectorLoad, [address, 0, 0])
+            }
+            InstructionData::Load {
+                opcode: Opcode::Load,
+                flags,
+                arg,
+                offset,
+            } if ty(arg) == types::I64
+                && supports_memory_format(flags)
+                && (self.supports_memory_access(flags)
+                    || self.stack_operand(arg, offset, SIMD_BYTES).is_some()) =>
+            {
+                (
+                    IntegerOp::VectorLoad,
+                    [input(arg)?, u64::from(i32::from(offset) as u32), 0],
+                )
+            }
+            _ => return None,
+        };
+        Some(self.append(op, operands))
+    }
+
     // A block's arguments are already mapped by its incoming edge.
     fn emit_block(&mut self, block: Block, values: &mut Values) -> Option<Inst> {
         let function = self.function;
@@ -1909,7 +2011,12 @@ impl IntegerBlocks<'_> {
             {
                 let source = ty(arg);
                 let [slot, offset] = self.stack_location(stack_slot, offset, source.bytes())?;
-                self.append(stack_store_op(source)?, [input(arg)?, slot, offset]);
+                if !self.aarch64 && vector_type(source) {
+                    let address = self.append(IntegerOp::StackAddress, [slot, offset, 0]);
+                    self.append(IntegerOp::VectorStore, [address, input(arg)?, 0]);
+                } else {
+                    self.append(stack_store_op(source)?, [input(arg)?, slot, offset]);
+                }
                 continue;
             }
             if let InstructionData::Store {
@@ -1923,6 +2030,18 @@ impl IntegerBlocks<'_> {
                     return None;
                 }
                 let address = input(base)?;
+                if opcode == Opcode::Store && !self.aarch64 && vector_type(ty(source)) {
+                    if !self.supports_memory_access(flags)
+                        && self.stack_operand(base, offset, SIMD_BYTES).is_none()
+                    {
+                        return None;
+                    }
+                    self.append(
+                        IntegerOp::VectorStore,
+                        [address, input(source)?, u64::from(i32::from(offset) as u32)],
+                    );
+                    continue;
+                }
                 if opcode == Opcode::Store
                     && let Some([slot, offset]) =
                         self.stack_operand(base, offset, ty(source).bytes())
@@ -2007,6 +2126,10 @@ impl IntegerBlocks<'_> {
             let [value] = *function.dfg.inst_results(inst) else {
                 return None;
             };
+            if vector_type(ty(value)) {
+                values.low[value] = Some(self.vector_instruction(inst, value, values)?);
+                continue;
+            }
             if float_width(ty(value)).is_some()
                 || function
                     .dfg
@@ -2878,6 +3001,9 @@ impl IntegerBlocks<'_> {
 /// TrapIfZero and TrapIfNonzero read a single integer condition and continue on
 /// the non-trapping path. StackPointer reads the active SP after the prologue.
 /// SpectreBarrier orders AArch64 guarded selects before subsequent uses.
+/// VectorConstant stores the two little-endian halves of a 128-bit value.
+/// VectorSplat reads the scalar bits and the lane width. VectorLoad and
+/// VectorStore use signed byte displacements and transfer all 128 bits.
 /// A labeled function starts with BlockLabel after the stack declarations
 /// and returns through BlockReturn records. The label's extra word describes
 /// the integer return arity or a single floating-point result. The entry argument

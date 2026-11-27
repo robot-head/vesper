@@ -28,6 +28,7 @@ pub const BYTE_BITS: u64 = 8;
 pub const WORD_BITS: u64 = 16;
 pub const DWORD_BITS: u64 = 32;
 pub const QWORD_BITS: u64 = 64;
+pub const XMM_BITS: u64 = QWORD_BITS * 2;
 
 const REX: u8 = 0x40;
 const REX_W: u8 = 0x48;
@@ -73,6 +74,15 @@ const SCALAR_DOUBLE: u8 = 0xf2;
 const MOV_SCALAR_LOAD: u8 = 0x10;
 const MOV_SCALAR_STORE: u8 = 0x11;
 const MOVAPS_LOAD: u8 = 0x28;
+pub const PAND: u8 = 0xdb;
+pub const POR: u8 = 0xeb;
+pub const PXOR: u8 = 0xef;
+const PUNPCKLBW: u8 = 0x60;
+const PUNPCKLWD: u8 = 0x61;
+const PUNPCKLQDQ: u8 = 0x6c;
+const PSHUFD: u8 = 0x70;
+const DUPLICATE_LOW_DWORD: u8 = 0x00;
+const DUPLICATE_LOW_QWORD: u8 = 0x44;
 const GPR_TO_XMM: u8 = 0x6e;
 const XMM_TO_GPR: u8 = 0x7e;
 const UCOMIS: u8 = 0x2e;
@@ -206,6 +216,9 @@ pub copy enum Instruction {
     FloatCopySign(u8, u8, u64),
     FloatBits(u8, u8, u64),
     FloatToInteger(u8, u8, u64, u64),
+    VectorConstant(u8, u64, u64),
+    VectorSplat(u8, u8, u64),
+    VectorBinary(u8, u8, u8),
     FloatCompare(u8, u8, u8, u64, u64),
     Move(u8, u8),
     Exchange(u8, u8),
@@ -873,6 +886,56 @@ fn float_bits(inout out: ChunkSeq[u8], destination: u8, source: u8, width: u64) 
     out.push(modrm(xmm, gp));
 }
 
+fn packed_shuffle(inout out: ChunkSeq[u8], destination: u8, lanes: u8) {
+    out.push(OPERAND_SIZE_OVERRIDE);
+    xmm_binary(inout out, PSHUFD, destination, destination);
+    out.push(lanes);
+}
+
+fn vector_constant(inout out: ChunkSeq[u8], destination: u8, low: u64, high: u64) {
+    if low == 0 && high == 0 {
+        out.push(OPERAND_SIZE_OVERRIDE);
+        xmm_binary(inout out, PXOR, destination, destination);
+        return;
+    }
+    move_constant(inout out, R11, low);
+    float_bits(inout out, destination, R11, QWORD_BITS);
+    if high == 0 {
+        return;
+    }
+    if high == low {
+        packed_shuffle(inout out, destination, DUPLICATE_LOW_QWORD);
+    } else {
+        move_constant(inout out, R11, high);
+        float_bits(inout out, XMM_RIGHT_SCRATCH, R11, QWORD_BITS);
+        out.push(OPERAND_SIZE_OVERRIDE);
+        xmm_binary(inout out, PUNPCKLQDQ, destination, XMM_RIGHT_SCRATCH);
+    }
+}
+
+fn vector_splat(inout out: ChunkSeq[u8], destination: u8, source: u8, lane: u64) {
+    let lane_move = if lane == QWORD_BITS {
+        QWORD_BITS
+    } else {
+        DWORD_BITS
+    };
+    float_bits(inout out, destination, source, lane_move);
+    if lane == BYTE_BITS {
+        out.push(OPERAND_SIZE_OVERRIDE);
+        xmm_binary(inout out, PUNPCKLBW, destination, destination);
+    }
+    if lane <= WORD_BITS {
+        out.push(OPERAND_SIZE_OVERRIDE);
+        xmm_binary(inout out, PUNPCKLWD, destination, destination);
+    }
+    let lanes = if lane == QWORD_BITS {
+        DUPLICATE_LOW_QWORD
+    } else {
+        DUPLICATE_LOW_DWORD
+    };
+    packed_shuffle(inout out, destination, lanes);
+}
+
 fn float_memory(
     inout out: ChunkSeq[u8],
     register: u8,
@@ -882,7 +945,9 @@ fn float_memory(
     load: bool
 ) {
     let register = xmm_code(register);
-    out.push(float_prefix(width));
+    if width != XMM_BITS {
+        out.push(float_prefix(width));
+    }
     emit_rex(inout out, register, base, false, false);
     out.push(TWO_BYTE_OPCODE);
     out.push(
@@ -1010,6 +1075,22 @@ pub fn emit(inout out: ChunkSeq[u8], in instruction: Instruction) {
             out.push(TWO_BYTE_OPCODE);
             out.push(SSE_FLOAT_TO_INTEGER_TRUNC);
             out.push(modrm(destination, source));
+        },
+        Instruction::VectorConstant(destination, low, high) => vector_constant(
+            inout out,
+            destination,
+            low,
+            high
+        ),
+        Instruction::VectorSplat(destination, source, lane) => vector_splat(
+            inout out,
+            destination,
+            source,
+            lane
+        ),
+        Instruction::VectorBinary(opcode, destination, source) => {
+            out.push(OPERAND_SIZE_OVERRIDE);
+            xmm_binary(inout out, opcode, destination, source);
         },
         Instruction::FloatBits(destination, source, width) => float_bits(
             inout out,

@@ -10,7 +10,7 @@ use self::x86_64::{
     emit_jump_table_entry, emit_symbol_address, callee_saved_registers, find_callee_saved_register,
     find_register, fits_signed_byte, patch_forward_branch, patch_relative_branch,
     patch_relative_offset, register_bit, home_register, xmm_home_register, HOME_REGISTERS,
-    cheap_immediate, move_constant, store_immediate, store_immediate_fits
+    cheap_immediate, move_constant, store_immediate, store_immediate_fits, XMM_BITS, PAND, POR, PXOR
 };
 
 // Integer block opcodes shared with src/native_machine.rs.
@@ -172,6 +172,13 @@ pub const TRAP_IF_NONZERO: u64 = 154;
 pub const STACK_POINTER: u64 = 155;
 pub const SPECTRE_BARRIER: u64 = 156;
 pub const FLOAT_TO_INTEGER_TRUNC: u64 = 157;
+pub const VECTOR_CONSTANT: u64 = 158;
+pub const VECTOR_SPLAT: u64 = 159;
+pub const VECTOR_LOAD: u64 = 160;
+pub const VECTOR_STORE: u64 = 161;
+pub const VECTOR_AND: u64 = 162;
+pub const VECTOR_OR: u64 = 163;
+pub const VECTOR_XOR: u64 = 164;
 const XMM_ARGUMENTS: u64 = 8;
 pub const CHECKED_ARITHMETIC_RECORDS: u64 = 2;
 
@@ -215,6 +222,7 @@ const MEMORY_COPY_ARGUMENTS: u64 = 3;
 const STACK_ALIGNMENT: u64 = 16;
 const RETURN_ADDRESS_BYTES: u64 = 8;
 const SPILL_SLOT_BYTES: u64 = 8;
+const VECTOR_SLOT_BYTES: u64 = XMM_BITS / BYTE_BITS;
 const LEFT_SCRATCH: u8 = RAX;
 const RIGHT_SCRATCH: u8 = R10;
 const THIRD_SCRATCH: u8 = R11;
@@ -275,6 +283,7 @@ struct FrameLayout {
     outgoing: u64,
     fixed: bool,
     floating: bool,
+    vectors: bool,
     indirect_calls: bool,
     home_slot: u64,
     promoted: u64,
@@ -510,6 +519,7 @@ fn frame_layout(in words: Slice[u64], count: u64) -> Option[FrameLayout] {
         outgoing: 0,
         fixed: false,
         floating: false,
+        vectors: false,
         indirect_calls: false,
         home_slot: NO_VALUE,
         promoted: 0,
@@ -566,7 +576,10 @@ fn is_register_shift(op: u64) -> bool {
 }
 
 fn is_store(op: u64) -> bool {
-    (op >= STORE_BYTE && op <= STORE_QWORD) || op == FLOAT_STORE32 || op == FLOAT_STORE64
+    (op >= STORE_BYTE && op <= STORE_QWORD)
+        || op == FLOAT_STORE32
+        || op == FLOAT_STORE64
+        || op == VECTOR_STORE
 }
 
 fn is_stack_store(op: u64) -> bool {
@@ -619,6 +632,7 @@ fn has_no_result(op: u64) -> bool {
         || op == FLOAT_RETURN
         || op == FLOAT_STORE32
         || op == FLOAT_STORE64
+        || op == VECTOR_STORE
         || is_cfg_record(op)
 }
 
@@ -689,6 +703,7 @@ fn store_width(op: u64) -> u64 {
         STORE_BYTE | STACK_STORE_BYTE => BYTE_BITS,
         STORE_WORD | STACK_STORE_WORD => WORD_BITS,
         STORE_DWORD | STACK_STORE_DWORD | FLOAT_STORE32 | FLOAT_STACK_STORE32 => DWORD_BITS,
+        VECTOR_STORE => XMM_BITS,
         _ => QWORD_BITS,
     }
 }
@@ -796,6 +811,7 @@ fn local_displacement(in frame: FrameLayout, in record: Record, local_frame: u64
 fn reads_left(in record: Record) -> bool {
     let op = record.op;
     op != CONSTANT
+        && op != VECTOR_CONSTANT
         && op != STACK_SLOT
         && op != STACK_POINTER
         && op != STACK_ADDRESS
@@ -829,6 +845,7 @@ fn reads_right(in record: Record, paired: bool) -> bool {
         || op == SELECT
         || op == FLOAT_SELECT
         || is_float_binary(op)
+        || is_vector_binary(op)
         || is_float_fma(op)
         || is_float_compare(op)
         || is_register_shift(op)
@@ -863,6 +880,18 @@ pub fn is_float_to_integer(op: u64) -> bool {
     op == FLOAT_TO_SIGNED_SAT || op == FLOAT_TO_UNSIGNED_SAT
 }
 
+fn is_vector_binary(op: u64) -> bool {
+    op >= VECTOR_AND && op <= VECTOR_XOR
+}
+
+fn is_vector_result(op: u64) -> bool {
+    op == VECTOR_CONSTANT || op == VECTOR_SPLAT || op == VECTOR_LOAD || is_vector_binary(op)
+}
+
+fn vector_value(in words: Slice[u64], arguments: u64, value: u64) -> bool {
+    value >= arguments && is_vector_result(read_record(in words, wrapping_sub(value, arguments)).op)
+}
+
 fn is_float_result(op: u64) -> bool {
     (op >= FLOAT_ARGUMENT && op <= FLOAT_ABS)
         || op == FLOAT_LOAD
@@ -874,6 +903,7 @@ fn is_float_result(op: u64) -> bool {
         || (op >= CALL_FLOAT32 && op <= UNSIGNED_TO_FLOAT)
         || (op >= FLOAT_CEIL && op <= FLOAT_FMA64)
         || op == FLOAT_STACK_ARGUMENT
+        || is_vector_result(op)
 }
 
 pub fn float_value(in words: Slice[u64], arguments: u64, value: u64) -> bool {
@@ -889,6 +919,7 @@ fn float_left(op: u64) -> bool {
         || op == FLOAT_PROMOTE
         || op == FLOAT_DEMOTE
         || op == FLOAT_TO_INTEGER_TRUNC
+        || is_vector_binary(op)
         || (op >= FLOAT_TO_SIGNED_SAT && op <= FLOAT_FMA64)
 }
 
@@ -899,6 +930,8 @@ fn float_right(op: u64) -> bool {
         || op == FLOAT_SELECT
         || op == FLOAT_STORE32
         || op == FLOAT_STORE64
+        || op == VECTOR_STORE
+        || is_vector_binary(op)
 }
 
 pub fn valid_float_operands(
@@ -917,6 +950,23 @@ pub fn valid_float_operands(
                 && float_value(in words, arguments, record.right) != float_right(record.op))
             || ((record.op == SELECT || extra_is_float || consumes_carry(record.op))
                 && float_value(in words, arguments, record.extra) != extra_is_float)
+        {
+            return false;
+        }
+    }
+    true
+}
+
+fn valid_vector_operands(in words: Slice[u64], arguments: u64, count: u64, paired: bool) -> bool {
+    for index in 0..count {
+        let record = read_record(in words, index);
+        let vector_binary = is_vector_binary(record.op);
+        if (reads_left(in record)
+            && vector_value(in words, arguments, record.left) != vector_binary)
+            || (reads_right(in record, paired)
+                && vector_value(in words, arguments, record.right)
+                    != (vector_binary || record.op == VECTOR_STORE))
+            || (record.op == FLOAT_SELECT && vector_value(in words, arguments, record.extra))
         {
             return false;
         }
@@ -1092,7 +1142,8 @@ fn find_last_reads(
             && record.op != FUNCTION_GOT
             && record.op != STACK_POINTER
             && record.op != FLOAT_TO_INTEGER_TRUNC
-            && !is_conditional_trap(record.op))
+            && !is_conditional_trap(record.op)
+            && (record.op < VECTOR_CONSTANT || record.op > VECTOR_XOR))
             || (!labeled && is_cfg_record(record.op))
             || (record.op == STACK_SLOT && index >= frame.slots.len())
             || (record.op == RETURN_PAIR && (reverse_index != 0 || record.left >= value))
@@ -1127,6 +1178,20 @@ fn find_last_reads(
         }
         let last = last_read(in reads, value);
         let live = last != NEVER_READ || live_overflow_flag(in reads, value, record.op);
+        if record.op >= VECTOR_CONSTANT && record.op <= VECTOR_XOR {
+            let valid = match record.op {
+                VECTOR_CONSTANT | VECTOR_AND | VECTOR_OR | VECTOR_XOR => record.extra == 0,
+                VECTOR_LOAD => record.right <= DISP32_MASK && record.extra == 0,
+                VECTOR_STORE => record.extra <= DISP32_MASK,
+                VECTOR_SPLAT => record.right == 0 && valid_width(record.extra),
+                _ => false,
+            };
+            if !valid {
+                return Option::None;
+            }
+            frame.floating = true;
+            frame.vectors = true;
+        }
         if is_conditional_trap(record.op) && (record.right != 0 || record.extra != 0) {
             return Option::None;
         }
@@ -1350,6 +1415,7 @@ fn find_last_reads(
                 if argument.op != CALL_ARGUMENT
                     || argument.left >= limit
                     || float_value(in words, arguments, argument.left) != (i >= gp_arguments)
+                    || vector_value(in words, arguments, argument.left)
                 {
                     return Option::None;
                 }
@@ -1370,6 +1436,7 @@ fn find_last_reads(
         if live
             || record.op == LOAD
             || record.op == FLOAT_LOAD
+            || record.op == VECTOR_LOAD
             || record.op == STACK_LOAD
             || record.op == FLOAT_STACK_LOAD
             || atomic
@@ -1441,6 +1508,7 @@ fn emits_instruction(in record: Record, result_live: bool, home_slot: u64) -> bo
         && (result_live
             || op == LOAD
             || op == FLOAT_LOAD
+            || op == VECTOR_LOAD
             || ((op == STACK_LOAD || op == FLOAT_STACK_LOAD)
                 && !is_home_reload(in record, home_slot))
             || is_call(op)
@@ -1520,6 +1588,11 @@ fn allocate(
         REGISTER_CODES
     };
     let spill_base = wrapping_add(frame.outgoing, if frame.used { frame.size } else { 0 });
+    let slot_bytes = if frame.vectors {
+        VECTOR_SLOT_BYTES
+    } else {
+        SPILL_SLOT_BYTES
+    };
     let mut spill_ends = ChunkSeq::new[u64]();
     let mut saved_masks = ChunkSeq::new[u32]();
     let mut save_slots: u64 = 0;
@@ -1696,11 +1769,9 @@ fn allocate(
                     break;
                 }
             }
-            let offset = wrapping_add(spill_base, wrapping_mul(slot, SPILL_SLOT_BYTES));
+            let offset = wrapping_add(spill_base, wrapping_mul(slot, slot_bytes));
             if slot == spill_ends.len() {
-                if aligned_frame_size(wrapping_add(offset, SPILL_SLOT_BYTES))
-                    > STACK_PROBE_INTERVAL
-                {
+                if aligned_frame_size(wrapping_add(offset, slot_bytes)) > STACK_PROBE_INTERVAL {
                     return Option::None;
                 }
                 spill_ends.push(end);
@@ -1711,8 +1782,8 @@ fn allocate(
         };
         locations.push(location);
     }
-    let mut stack_end = wrapping_add(spill_base, wrapping_mul(spill_ends.len(), SPILL_SLOT_BYTES));
-    let save_bytes = wrapping_mul(save_slots, SPILL_SLOT_BYTES);
+    let mut stack_end = wrapping_add(spill_base, wrapping_mul(spill_ends.len(), slot_bytes));
+    let save_bytes = wrapping_mul(save_slots, slot_bytes);
     let callee_save_bytes = wrapping_mul(callee_save_slots, SPILL_SLOT_BYTES);
     let mut local_frame = frame.outgoing;
     let mut save_frame = stack_end;
@@ -1778,10 +1849,19 @@ fn allocate(
 }
 
 fn materialize(inout output: ChunkSeq[u8], in location: Location, scratch: u8) -> u8 {
+    materialize_width(inout output, in location, scratch, QWORD_BITS)
+}
+
+fn materialize_width(
+    inout output: ChunkSeq[u8],
+    in location: Location,
+    scratch: u8,
+    width: u64
+) -> u8 {
     match location {
         Location::Register(reg) => reg,
         Location::Spill(offset) => {
-            emit(inout output, in Instruction::Load(scratch, RSP, offset, QWORD_BITS));
+            emit(inout output, in Instruction::Load(scratch, RSP, offset, width));
             scratch
         },
         Location::Rematerialized(bits) => {
@@ -1810,7 +1890,16 @@ fn emit_store_value(
         },
         _ => (),
     };
-    let source = materialize(inout output, in source, scratch);
+    let source = materialize_width(
+        inout output,
+        in source,
+        scratch,
+        if width == XMM_BITS {
+            XMM_BITS
+        } else {
+            QWORD_BITS
+        }
+    );
     emit(inout output, in Instruction::Store(source, base, displacement, width));
 }
 
@@ -1905,6 +1994,7 @@ fn emit_return(
         inout output,
         allocation.callee_save_mask,
         allocation.callee_save_frame,
+        SPILL_SLOT_BYTES,
         true
     );
     emit(inout output, in Instruction::FrameLeave(allocation.frame_size));
@@ -2057,7 +2147,13 @@ fn emit_atomic(
     }
 }
 
-fn preserve_registers(inout out: ChunkSeq[u8], saved: u32, frame: u64, restoring: bool) {
+fn preserve_registers(
+    inout out: ChunkSeq[u8],
+    saved: u32,
+    frame: u64,
+    slot_bytes: u64,
+    restoring: bool
+) {
     if saved == 0 {
         return;
     }
@@ -2071,13 +2167,18 @@ fn preserve_registers(inout out: ChunkSeq[u8], saved: u32, frame: u64, restoring
         let reg = wrapping_u8(code);
         if (saved & register_bit(reg)) != 0 {
             let offset = wrapping_u32(slot);
-            let instruction = if restoring {
-                Instruction::Load(reg, RSP, offset, QWORD_BITS)
+            let width = if slot_bytes == VECTOR_SLOT_BYTES && is_xmm(reg) {
+                XMM_BITS
             } else {
-                Instruction::Store(reg, RSP, offset, QWORD_BITS)
+                QWORD_BITS
+            };
+            let instruction = if restoring {
+                Instruction::Load(reg, RSP, offset, width)
+            } else {
+                Instruction::Store(reg, RSP, offset, width)
             };
             emit(inout out, in instruction);
-            slot = wrapping_add(slot, SPILL_SLOT_BYTES);
+            slot = wrapping_add(slot, slot_bytes);
         }
     }
 }
@@ -2299,6 +2400,12 @@ fn encode_block_pass(
     {
         return ChunkSeq::new[u8]();
     }
+    if frame.vectors
+        && ((result != NO_VALUE && vector_value(in words, arguments, result))
+            || !valid_vector_operands(in words, arguments, count, paired))
+    {
+        return ChunkSeq::new[u8]();
+    }
     if optimize {
         let folded = optimize_scalar_block(in words, in reads, arguments, count);
         if folded.len() != 0 {
@@ -2336,7 +2443,13 @@ fn encode_block_pass(
     emit(inout output, in Instruction::FrameEnter(frame_size));
     let callee_save_mask = allocation.callee_save_mask;
     if callee_save_mask != 0 {
-        preserve_registers(inout output, callee_save_mask, allocation.callee_save_frame, false);
+        preserve_registers(
+            inout output,
+            callee_save_mask,
+            allocation.callee_save_frame,
+            SPILL_SLOT_BYTES,
+            false
+        );
     }
     let mut branch_ends = ChunkSeq::new[u64]();
     let mut branch_depth: u64 = 0;
@@ -2497,7 +2610,12 @@ fn encode_block_pass(
                 Option::None => return ChunkSeq::new[u8](),
             };
             let home = assigned(in allocation.locations, value);
-            preserve_registers(inout output, saved, allocation.save_frame, false);
+            let slot_bytes = if frame.vectors {
+                VECTOR_SLOT_BYTES
+            } else {
+                SPILL_SLOT_BYTES
+            };
+            preserve_registers(inout output, saved, allocation.save_frame, slot_bytes, false);
             if call {
                 let high = if record.op == CALL_PAIR {
                     assigned(in allocation.locations, wrapping_add(value, 1))
@@ -2530,7 +2648,7 @@ fn encode_block_pass(
             } else {
                 emit_fixed_arithmetic(inout output, in allocation, in record, in home);
             }
-            preserve_registers(inout output, saved, allocation.save_frame, true);
+            preserve_registers(inout output, saved, allocation.save_frame, slot_bytes, true);
             clobber_index = wrapping_add(clobber_index, 1);
             continue;
         }
@@ -2610,16 +2728,19 @@ fn encode_block_pass(
             continue;
         }
         let has_right = reads_right(in record, paired);
+        let vector_binary = is_vector_binary(record.op);
+        let operand_width = if vector_binary { XMM_BITS } else { QWORD_BITS };
         let left = if reads_left(in record) {
             let location = assigned(in allocation.locations, record.left);
-            materialize(
+            materialize_width(
                 inout output,
                 in location,
                 if float_left(record.op) {
                     XMM_LEFT_SCRATCH
                 } else {
                     LEFT_SCRATCH
-                }
+                },
+                operand_width
             )
         } else {
             UNASSIGNED
@@ -2637,7 +2758,7 @@ fn encode_block_pass(
             } else {
                 RIGHT_SCRATCH
             };
-            materialize(inout output, in location, scratch)
+            materialize_width(inout output, in location, scratch, operand_width)
         } else {
             UNASSIGNED
         };
@@ -2672,6 +2793,31 @@ fn encode_block_pass(
         };
         if record.op == CONSTANT {
             emit(inout output, in Instruction::Immediate(destination, record.left));
+        } else if record.op == VECTOR_CONSTANT {
+            emit(
+                inout output,
+                in Instruction::VectorConstant(destination, record.left, record.right)
+            );
+        } else if record.op == VECTOR_SPLAT {
+            emit(inout output, in Instruction::VectorSplat(destination, left, record.extra));
+        } else if record.op == VECTOR_LOAD {
+            emit(
+                inout output,
+                in Instruction::Load(destination, left, wrapping_u32(record.right), XMM_BITS)
+            );
+        } else if vector_binary {
+            let (first, second) = if destination == right {
+                (right, left)
+            } else {
+                (left, right)
+            };
+            let opcode = match record.op {
+                VECTOR_AND => PAND,
+                VECTOR_OR => POR,
+                _ => PXOR
+            };
+            emit(inout output, in Instruction::Move(destination, first));
+            emit(inout output, in Instruction::VectorBinary(opcode, destination, second));
         } else if record.op == STACK_POINTER {
             emit(inout output, in Instruction::Move(destination, RSP));
         } else if record.op == FLOAT_CONSTANT {
@@ -2800,7 +2946,12 @@ fn encode_block_pass(
 
         match home {
             Location::Spill(offset) => {
-                emit(inout output, in Instruction::Store(destination, RSP, offset, QWORD_BITS));
+                let width = if is_vector_result(record.op) {
+                    XMM_BITS
+                } else {
+                    QWORD_BITS
+                };
+                emit(inout output, in Instruction::Store(destination, RSP, offset, width));
             },
             _ => {},
         };
