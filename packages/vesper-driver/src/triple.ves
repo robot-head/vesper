@@ -371,3 +371,138 @@ pub fn is_windows(in target: Slice[u8]) -> bool {
         Option::None => false,
     }
 }
+
+// `VSYS_TARGETS` indices in `src/packages.rs`.
+const VSYS_LINUX_X86_64: u32 = 0;
+const VSYS_LINUX_AARCH64: u32 = 1;
+const VSYS_MACOS_AARCH64: u32 = 2;
+const VSYS_WINDOWS_X86_64: u32 = 3;
+const VSYS_NONE: u64 = 4;
+
+const PACK_WORD_BYTES: u64 = 8;
+const PACK_WORD_ALIGN_MASK: u64 = 7;
+const PACK_BYTE_BITS: u64 = 8;
+
+pub fn vsys_target_index(in triple: Slice[u8]) -> Option[u32] {
+    if same_str(in triple, in "x86_64-unknown-linux-gnu") {
+        return Option::Some(VSYS_LINUX_X86_64);
+    }
+    if same_str(in triple, in "aarch64-unknown-linux-gnu") {
+        return Option::Some(VSYS_LINUX_AARCH64);
+    }
+    if same_str(in triple, in "aarch64-apple-darwin") {
+        return Option::Some(VSYS_MACOS_AARCH64);
+    }
+    if same_str(in triple, in "x86_64-pc-windows-msvc") {
+        return Option::Some(VSYS_WINDOWS_X86_64);
+    }
+    Option::None
+}
+
+pub fn vsys_target_abi(idx: u32) -> Str {
+    if idx == VSYS_LINUX_X86_64 {
+        "sysv64"
+    } else if idx == VSYS_LINUX_AARCH64 {
+        "aapcs64"
+    } else if idx == VSYS_MACOS_AARCH64 {
+        "darwin64"
+    } else if idx == VSYS_WINDOWS_X86_64 {
+        "win64"
+    } else {
+        ""
+    }
+}
+
+pub fn vsys_target_os(idx: u32) -> Str {
+    if idx == VSYS_LINUX_X86_64 || idx == VSYS_LINUX_AARCH64 {
+        "linux"
+    } else if idx == VSYS_MACOS_AARCH64 {
+        "macos"
+    } else if idx == VSYS_WINDOWS_X86_64 {
+        "windows"
+    } else {
+        ""
+    }
+}
+
+pub fn is_wasi_target(has_target: bool, in target: Slice[u8]) -> bool {
+    has_target && same_str(in target, in "wasm32-wasip2")
+}
+
+// `vesper::packages::driver_host::target_os`: returns `"wasip2"` for
+// `wasm32-wasip2`, the `VSYS_TARGETS` OS for a known target, or `host_os`.
+pub fn driver_target_os(
+    has_target: bool,
+    in target: Slice[u8],
+    in host_os: Slice[u8]
+) -> ChunkSeq[u8] {
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    if is_wasi_target(has_target, in target) {
+        out.extend(in "wasip2".as_bytes());
+        return out;
+    }
+    if has_target {
+        match vsys_target_index(in target) {
+            Option::Some(idx) => {
+                let os = vsys_target_os(idx);
+                out.extend(in os.as_bytes());
+                return out;
+            },
+            Option::None => (),
+        }
+    }
+    out.extend(in host_os);
+    out
+}
+
+fn pack_str_bytes(inout words: ChunkSeq[u64], in bytes: Slice[u8]) {
+    words.push(bytes.len());
+    let n = wrapping_add(bytes.len(), PACK_WORD_ALIGN_MASK) / PACK_WORD_BYTES;
+    for i in 0..n {
+        let mut w: u64 = 0;
+        for k in 0..PACK_WORD_BYTES {
+            let idx = wrapping_add(wrapping_mul(i, PACK_WORD_BYTES), k);
+            if idx < bytes.len() {
+                let b = widen_u64(byte_at(in bytes, idx));
+                w = w | wrapping_shl_u64(b, wrapping_u32(wrapping_mul(k, PACK_BYTE_BITS)));
+            }
+        }
+        words.push(w);
+    }
+}
+
+// JIT test entrypoint: `<has_target: '1'|'0'><target>\0<host_os>` ->
+// `[wasi: 0|1, vsys_idx_or_4, packed os, packed abi]`.
+pub fn vsys_target_os_words(in input: Str) -> ChunkSeq[u64] {
+    let b = input.as_bytes();
+    let has_target = byte_at(in b, 0) == 49;
+    let mut nul: u64 = 1;
+    loop {
+        if nul >= b.len() || byte_at(in b, nul) == 0 {
+            break;
+        }
+        nul = wrapping_add(nul, 1);
+    }
+    let host_start = if nul < b.len() {
+        wrapping_add(nul, 1)
+    } else {
+        b.len()
+    };
+    let wasi = is_wasi_target(has_target, in b[1..nul]);
+    let os = driver_target_os(has_target, in b[1..nul], in b[host_start..b.len()]);
+    let idx = if has_target {
+        match vsys_target_index(in b[1..nul]) {
+            Option::Some(i) => widen_u64(i),
+            Option::None => VSYS_NONE,
+        }
+    } else {
+        VSYS_NONE
+    };
+    let abi = vsys_target_abi(wrapping_u32(idx));
+    let mut words: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    words.push(if wasi { 1 } else { 0 });
+    words.push(idx);
+    pack_str_bytes(inout words, in os.as_slice());
+    pack_str_bytes(inout words, in abi.as_bytes());
+    words
+}
