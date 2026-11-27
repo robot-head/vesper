@@ -882,29 +882,33 @@ impl IntegerBlocks<'_> {
             _ => return None,
         };
         if dfg.insts[inst].opcode() == Opcode::ReturnCall {
-            if !self.aarch64
-                || signature.call_conv != CallConv::Tail
+            if signature.call_conv != CallConv::Tail
                 || signature.returns != self.function.signature.returns
                 || signature.params.len() != dfg.inst_args(inst).len()
                 || target > u64::from(u32::MAX)
             {
                 return None;
             }
-            let layout = aarch64_arguments(&signature.params, signature.call_conv)?;
-            if layout.locations.iter().any(|arg| {
-                matches!(
-                    arg,
-                    Aarch64Argument::Stack(_) | Aarch64Argument::StackPair(_)
-                )
-            }) {
-                return None;
-            }
-            let [count, floats] = self.aarch64_call_arguments(
-                dfg.inst_args(inst),
-                &signature.params,
-                values,
-                &layout,
-            )?;
+            let arguments = dfg.inst_args(inst);
+            let [count, floats] = if self.aarch64 {
+                let layout = aarch64_arguments(&signature.params, signature.call_conv)?;
+                if layout.locations.iter().any(|arg| {
+                    matches!(
+                        arg,
+                        Aarch64Argument::Stack(_) | Aarch64Argument::StackPair(_)
+                    )
+                }) {
+                    return None;
+                }
+                self.aarch64_call_arguments(arguments, &signature.params, values, &layout)?
+            } else {
+                self.x86_call_arguments(
+                    arguments,
+                    &signature.params,
+                    values,
+                    GP_REGISTER_ARGUMENTS,
+                )?
+            };
             self.relocations = true;
             self.append(IntegerOp::TailCall, [target, count, floats]);
             return Some(());
@@ -963,33 +967,7 @@ impl IntegerBlocks<'_> {
             let layout = aarch64_arguments(&signature.params, signature.call_conv)?;
             self.aarch64_call_arguments(args, &signature.params, values, &layout)?
         } else {
-            let (gp_arguments, float_arguments) = x86_argument_cells(&signature.params)?;
-            let mut xmm = [0; XMM_REGISTER_ARGUMENTS];
-            let mut xmm_count = 0;
-            for (&arg, param) in args.iter().zip(&signature.params) {
-                let arg = dfg.resolve_aliases(arg);
-                let ty = dfg.value_type(arg);
-                if ty != param.value_type {
-                    return None;
-                }
-                let low = values.low[arg]?;
-                if float_width(ty).is_some() {
-                    xmm[xmm_count] = low;
-                    xmm_count += 1;
-                } else {
-                    self.append(IntegerOp::CallArgument, [low, 0, 0]);
-                    if ty == types::I128 {
-                        self.append(IntegerOp::CallArgument, [values.high[arg]?, 0, 0]);
-                    }
-                }
-            }
-            for &arg in &xmm[..float_arguments] {
-                self.append(IntegerOp::CallArgument, [arg, 0, 0]);
-            }
-            [
-                (gp_arguments + float_arguments) as u64,
-                float_arguments as u64,
-            ]
+            self.x86_call_arguments(args, &signature.params, values, MAX_GP_ARGUMENTS)?
         };
         let (target, layout) = match target {
             CallTarget::Direct(target) => {
@@ -1014,6 +992,46 @@ impl IntegerBlocks<'_> {
             }
         }
         Some(())
+    }
+
+    fn x86_call_arguments(
+        &mut self,
+        args: &[Value],
+        params: &[AbiParam],
+        values: &Values,
+        gp_limit: usize,
+    ) -> Option<[u64; 2]> {
+        let (gp_arguments, float_arguments) = x86_argument_cells(params)?;
+        if gp_arguments > gp_limit {
+            return None;
+        }
+        let dfg = &self.function.dfg;
+        let mut xmm = [0; XMM_REGISTER_ARGUMENTS];
+        let mut xmm_count = 0;
+        for (&arg, param) in args.iter().zip(params) {
+            let arg = dfg.resolve_aliases(arg);
+            let ty = dfg.value_type(arg);
+            if ty != param.value_type {
+                return None;
+            }
+            let low = values.low[arg]?;
+            if float_width(ty).is_some() {
+                xmm[xmm_count] = low;
+                xmm_count += 1;
+            } else {
+                self.append(IntegerOp::CallArgument, [low, 0, 0]);
+                if ty == types::I128 {
+                    self.append(IntegerOp::CallArgument, [values.high[arg]?, 0, 0]);
+                }
+            }
+        }
+        for &arg in &xmm[..float_arguments] {
+            self.append(IntegerOp::CallArgument, [arg, 0, 0]);
+        }
+        Some([
+            (gp_arguments + float_arguments) as u64,
+            float_arguments as u64,
+        ])
     }
 
     fn aarch64_call_arguments(
@@ -3287,7 +3305,10 @@ pub fn x86_64_block_words(
     function: &Function,
     isa: &dyn cranelift_codegen::isa::TargetIsa,
 ) -> Option<Vec<u64>> {
-    if isa.triple().architecture != target_lexicon::Architecture::X86_64 {
+    let call_conv = function.signature.call_conv;
+    if isa.triple().architecture != target_lexicon::Architecture::X86_64
+        || !matches!(call_conv, CallConv::SystemV | CallConv::Tail)
+    {
         return None;
     }
     integer_program(
@@ -3295,7 +3316,7 @@ pub fn x86_64_block_words(
         false,
         isa.flags().enable_nan_canonicalization(),
         None,
-        CallConv::SystemV,
+        call_conv,
         false,
         isa.has_x86_pshufb_lowering(),
     )
@@ -3351,9 +3372,6 @@ fn integer_program(
         return None;
     }
     let tail = call_conv == CallConv::Tail;
-    if tail && !aarch64 {
-        return None;
-    }
     let aarch64_entry = if aarch64 {
         let layout = aarch64_arguments(&signature.params, call_conv)?;
         if tail
@@ -3382,7 +3400,10 @@ fn integer_program(
         integer_return_cells(&signature.returns)?
     };
     let block = function.layout.blocks().next()?;
-    if tail && function.layout.blocks().nth(1).is_some() {
+    if tail
+        && ((!aarch64 && arity > GP_REGISTER_ARGUMENTS)
+            || function.layout.blocks().nth(1).is_some())
+    {
         return None;
     }
 
@@ -3626,6 +3647,10 @@ fn encode_integer_block(
         return None;
     }
     let encode = ENCODER.get()?;
+    let call_conv = function.signature.call_conv;
+    if !matches!(call_conv, CallConv::SystemV | CallConv::Tail) {
+        return None;
+    }
     // Ordinary native ELF objects use CPU memory faults directly. They carry
     // no Cranelift trap table, unlike JIT and freestanding emission.
     let (primary, fallback) = integer_program(
@@ -3633,7 +3658,7 @@ fn encode_integer_block(
         true,
         isa.flags().enable_nan_canonicalization(),
         declarations,
-        CallConv::SystemV,
+        call_conv,
         false,
         isa.has_x86_pshufb_lowering(),
     )?;

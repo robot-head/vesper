@@ -559,6 +559,13 @@ pub fn emit_direct_call(inout out: ChunkSeq[u8]) -> u64 {
     displacement
 }
 
+pub fn emit_direct_jump(inout out: ChunkSeq[u8]) -> u64 {
+    out.push(JMP_REL32);
+    let displacement = out.len();
+    immediate(inout out, 0, IMM32_BYTES);
+    displacement
+}
+
 pub fn emit_indirect_call(inout out: ChunkSeq[u8], register: u8) {
     emit_rex(inout out, 0, register, false, false);
     out.push(CALL_JUMP_RM_GROUP);
@@ -1599,8 +1606,7 @@ pub fn emit(inout out: ChunkSeq[u8], in instruction: Instruction) {
             conditional_jump(inout out, cc);
         },
         Instruction::Jump => {
-            out.push(JMP_REL32);
-            immediate(inout out, 0, IMM32_BYTES);
+            let _ = emit_direct_jump(inout out);
         },
         Instruction::FrameEnter(size) => adjust_stack(inout out, ALU_SUB_EXTENSION, size),
         Instruction::FrameLeave(size) => adjust_stack(inout out, ALU_ADD_EXTENSION, size),

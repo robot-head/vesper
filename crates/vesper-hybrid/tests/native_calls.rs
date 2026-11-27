@@ -13,6 +13,7 @@ use cranelift_codegen::{
         AbiParam, BlockArg, ExtFuncData, ExternalName, Function, InstBuilder, LibCall, MemFlags,
         StackSlotData, StackSlotKind, types,
     },
+    isa::CallConv,
     settings::{self, Configurable},
 };
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
@@ -269,10 +270,15 @@ fn define_callable(
     const WORD_BYTES: usize = size_of::<u64>();
     const REL32_BYTES: i64 = size_of::<i32>() as i64;
     const PLT_CALL: u64 = 0;
-    let words = native::machine::integer_block_words(function).unwrap();
+    let words = native::machine::x86_64_block_words(function, module.isa()).unwrap();
     let packet = binding::x86_64_relocatable_block(&words);
+    assert!(!packet.is_empty(), "{words:?}");
     let (length, packet) = packet.split_first_chunk::<WORD_BYTES>().unwrap();
     let (code, targets) = packet.split_at(u64::from_le_bytes(*length) as usize);
+    if function.signature.call_conv == CallConv::Tail {
+        const JMP_REL32: u8 = 0xe9;
+        assert_eq!(code[code.len() - 1 - size_of::<i32>()], JMP_REL32);
+    }
     let (targets, rest) = targets.as_chunks::<{ 3 * WORD_BYTES }>();
     assert_eq!(targets.len(), expected_relocations);
     assert!(rest.is_empty());
@@ -297,6 +303,95 @@ fn define_callable(
     module
         .define_function_bytes(entry, alignment, code, &relocations)
         .unwrap();
+}
+
+#[test]
+fn direct_tail_calls_restore_the_frame_and_preserve_register_cycles() {
+    let mut flags = settings::builder();
+    flags.enable("preserve_frame_pointers").unwrap();
+    let isa = cranelift_native::builder()
+        .unwrap()
+        .finish(settings::Flags::new(flags))
+        .unwrap();
+    let mut module = JITModule::new(JITBuilder::with_isa(
+        isa,
+        cranelift_module::default_libcall_names(),
+    ));
+    for (ty, frame) in [(types::I64, false), (types::I64, true), (types::F64, false)] {
+        let count = if ty.is_float() { 2 } else { 3 };
+        let mut signature = module.make_signature();
+        signature.call_conv = CallConv::Tail;
+        signature.params = vec![AbiParam::new(ty); count];
+        signature.returns.push(AbiParam::new(ty));
+        let callee = module.declare_anonymous_function(&signature).unwrap();
+        let reference = module.declare_anonymous_function(&signature).unwrap();
+        let candidate = module.declare_anonymous_function(&signature).unwrap();
+        let mut context = module.make_context();
+        context.func.signature = signature.clone();
+        let mut state = FunctionBuilderContext::new();
+        let mut b = FunctionBuilder::new(&mut context.func, &mut state);
+        let entry = b.create_block();
+        b.append_block_params_for_function_params(entry);
+        b.switch_to_block(entry);
+        let args = b.block_params(entry).to_vec();
+        let value = if ty.is_float() {
+            b.ins().fsub(args[0], args[1])
+        } else {
+            let a = b.ins().imul_imm(args[0], 257);
+            let b_value = b.ins().imul_imm(args[1], 17);
+            let sum = b.ins().iadd(a, b_value);
+            b.ins().iadd(sum, args[2])
+        };
+        b.ins().return_(&[value]);
+        b.seal_all_blocks();
+        b.finalize();
+        module.define_function(callee, &mut context).unwrap();
+        let mut context = module.make_context();
+        context.func.signature = signature;
+        let target = module.declare_func_in_func(callee, &mut context.func);
+        let mut b = FunctionBuilder::new(&mut context.func, &mut state);
+        let entry = b.create_block();
+        b.append_block_params_for_function_params(entry);
+        b.switch_to_block(entry);
+        let args = b.block_params(entry).to_vec();
+        if ty.is_float() {
+            b.ins().return_call(target, &[args[1], args[0]]);
+        } else {
+            let first = if frame {
+                const SLOT_BYTES: u32 = 4 * size_of::<u64>() as u32;
+                const ALIGN_SHIFT: u8 = 4;
+                const OFFSET: i32 = 2 * size_of::<u64>() as i32;
+                let slot = b.create_sized_stack_slot(StackSlotData::new(
+                    StackSlotKind::ExplicitSlot,
+                    SLOT_BYTES,
+                    ALIGN_SHIFT,
+                ));
+                b.ins().stack_store(args[1], slot, OFFSET);
+                b.ins().stack_load(ty, slot, OFFSET)
+            } else {
+                args[1]
+            };
+            b.ins().return_call(target, &[first, args[2], args[0]]);
+        }
+        b.seal_all_blocks();
+        b.finalize();
+        define_callable(&mut module, candidate, callee, &context.func, 1);
+        module.define_function(reference, &mut context).unwrap();
+        module.finalize_definitions().unwrap();
+        for id in [reference, candidate] {
+            let entry = module.get_finalized_function(id);
+            if ty.is_float() {
+                type Entry = unsafe extern "C" fn(f64, f64) -> f64;
+                let run = unsafe { std::mem::transmute::<*const u8, Entry>(entry) };
+                assert_eq!(unsafe { run(2.5, 7.5) }, 5.0);
+            } else {
+                type Entry = unsafe extern "C" fn(u64, u64, u64) -> u64;
+                let run = unsafe { std::mem::transmute::<*const u8, Entry>(entry) };
+                assert_eq!(unsafe { run(3, 7, 11) }, 1989);
+            }
+        }
+    }
+    unsafe { module.free_memory() };
 }
 
 #[test]

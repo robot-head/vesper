@@ -6,12 +6,12 @@ use self::x86_64::{
     CC_E, CC_G, CC_GE, CC_L, CC_LE, CC_NE, CC_O, AtomicMemory, FixedArithmetic, Instruction,
     NEG_EXTENSION, NOT_EXTENSION, OR_RM_R64, R10, R11, RAX, RDX, RSP, SAR_EXTENSION, SHL_EXTENSION,
     SHR_EXTENSION, SBB_RM_R64, SUB_RM_R64, UNASSIGNED, XOR_RM_R64, ALL_REGISTER_CODES,
-    REGISTER_CODES, arg_register, emit, emit_direct_call, emit_indirect_call, emit_jump_table,
-    emit_jump_table_entry, emit_symbol_address, callee_saved_registers, find_callee_saved_register,
-    find_register, fits_signed_byte, patch_forward_branch, patch_relative_branch,
-    patch_relative_offset, register_bit, home_register, xmm_home_register, HOME_REGISTERS,
-    cheap_immediate, move_constant, store_immediate, store_immediate_fits, VECTOR_BITS, PAND, POR,
-    PXOR, PackedInteger, packed_integer_opcode
+    REGISTER_CODES, arg_register, emit, emit_direct_call, emit_direct_jump, emit_indirect_call,
+    emit_jump_table, emit_jump_table_entry, emit_symbol_address, callee_saved_registers,
+    find_callee_saved_register, find_register, fits_signed_byte, patch_forward_branch,
+    patch_relative_branch, patch_relative_offset, register_bit, home_register, xmm_home_register,
+    HOME_REGISTERS, cheap_immediate, move_constant, store_immediate, store_immediate_fits,
+    VECTOR_BITS, PAND, POR, PXOR, PackedInteger, packed_integer_opcode
 };
 
 // Integer block opcodes shared with src/native_machine.rs.
@@ -650,6 +650,7 @@ fn has_no_result(op: u64) -> bool {
         || op == RETURN_PAIR
         || op == CALL_ARGUMENT
         || op == CALL_VOID
+        || op == TAIL_CALL
         || op == TRAP
         || is_conditional_trap(op)
         || op == FENCE
@@ -843,6 +844,7 @@ fn reads_left(in record: Record) -> bool {
         && op != FLOAT_STACK_LOAD
         && op != RETURN_PAIR
         && !is_call(op)
+        && op != TAIL_CALL
         && !is_symbol(op)
         && op != CALL_ARGUMENT
         && op != CALL_STACK_ARGUMENT
@@ -1204,17 +1206,21 @@ fn find_last_reads(
         let index = wrapping_sub(wrapping_sub(count, 1), reverse_index);
         let value = wrapping_add(arguments, index);
         let record = read_record(in words, index);
+        let tail_call = record.op == TAIL_CALL;
         if (record.op > BYTE_SWAP
             && record.op != FUNCTION_GOT
             && record.op != STACK_POINTER
             && record.op != FLOAT_TO_INTEGER_TRUNC
             && !is_conditional_trap(record.op)
+            && !tail_call
             && !x86_vector_opcode(record.op))
             || (!labeled && is_cfg_record(record.op))
             || (record.op == STACK_SLOT && index >= frame.slots.len())
             || (record.op == RETURN_PAIR && (reverse_index != 0 || record.left >= value))
             || (record.op == TRAP && (reverse_index != 0 || result != NO_VALUE))
             || (record.op == FLOAT_RETURN && (reverse_index != 0 || result == NO_VALUE))
+            || (tail_call
+                && (reverse_index != 0 || labeled || result != NO_VALUE || arguments > ARGUMENTS))
         {
             return Option::None;
         }
@@ -1450,8 +1456,8 @@ fn find_last_reads(
         {
             return Option::None;
         }
-        if is_call(record.op) {
-            has_calls = true;
+        if is_call(record.op) || tail_call {
+            has_calls = has_calls || !tail_call;
             let indirect = indirect_call(record.extra);
             let fp_arguments = record.extra & ~INDIRECT_CALL;
             let gp_arguments = wrapping_sub(record.right, fp_arguments);
@@ -1459,6 +1465,7 @@ fn find_last_reads(
                 || fp_arguments > XMM_ARGUMENTS
                 || fp_arguments > record.right
                 || gp_arguments > MAX_ARGUMENTS
+                || (tail_call && (indirect || gp_arguments > ARGUMENTS))
                 || record.right > index
                 || (!indirect
                     && record.left >= LIBCALL_TARGET_BASE
@@ -2076,6 +2083,11 @@ fn emit_return(
         move_return(inout output, in low, RAX);
         move_return(inout output, in high, RDX);
     }
+    emit_frame_leave(inout output, in allocation);
+    emit(inout output, in Instruction::Return);
+}
+
+fn emit_frame_leave(inout output: ChunkSeq[u8], in allocation: Allocation) {
     preserve_registers(
         inout output,
         allocation.callee_save_mask,
@@ -2084,7 +2096,6 @@ fn emit_return(
         true
     );
     emit(inout output, in Instruction::FrameLeave(allocation.frame_size));
-    emit(inout output, in Instruction::Return);
 }
 
 fn call_register(index: u64, floating: bool) -> u8 {
@@ -2176,6 +2187,32 @@ fn move_call_arguments(
             }
         }
     }
+}
+
+fn emit_tail_call(
+    inout output: ChunkSeq[u8],
+    in words: Slice[u64],
+    in allocation: Allocation,
+    in record: Record,
+    index: u64,
+    inout relocations: ChunkSeq[u64]
+) {
+    let start = wrapping_sub(index, record.right);
+    let gp = wrapping_sub(record.right, record.extra);
+    move_call_arguments(inout output, in words, in allocation.locations, start, gp, false);
+    move_call_arguments(
+        inout output,
+        in words,
+        in allocation.locations,
+        wrapping_add(start, gp),
+        record.extra,
+        true
+    );
+    emit_frame_leave(inout output, in allocation);
+    let offset = emit_direct_jump(inout output);
+    relocations.push(offset);
+    relocations.push(PLT_CALL);
+    relocations.push(record.left);
 }
 
 fn save_result(inout out: ChunkSeq[u8], in result: Location, source: u8) {
@@ -2754,6 +2791,17 @@ fn encode_block_pass(
             }
             branch_depth = wrapping_add(branch_depth, 1);
             continue;
+        }
+        if record.op == TAIL_CALL {
+            emit_tail_call(
+                inout output,
+                in words,
+                in allocation,
+                in record,
+                index,
+                inout relocations
+            );
+            return output;
         }
         let call = is_call(record.op);
         if call || is_fixed_arithmetic(record.op) {
