@@ -646,7 +646,7 @@ corpus (`CODEGEN_SCALAR_STEP=1`):
 | Check | Result |
 |---|---|
 | CLIF, objects and JIT runs | 0 differences over 952 functions (306 worlds, both modes, 82 runs) |
-| Functions emitted from Vesper | 438, up from 417 on main; 21 of them return a struct |
+| Functions emitted from Vesper | 446; 21 of them return a struct, which the hook turned away before |
 | New `struct_results` test | 0 differences; 10 struct-result bodies from Vesper over both modes |
 
 **Rust lines deleted:** 0. The larger share of struct results reads
