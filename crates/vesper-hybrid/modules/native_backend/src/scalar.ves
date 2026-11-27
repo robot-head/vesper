@@ -129,6 +129,10 @@ pub const ROTATE_RIGHT: u64 = 112;
 pub const ROTATE_RIGHT_REGISTER: u64 = 113;
 pub const ROTATE_LEFT_REGISTER: u64 = 114;
 pub const FUNNEL_RIGHT: u64 = 115;
+pub const AND_NOT: u64 = 116;
+pub const OR_NOT: u64 = 117;
+pub const XOR_NOT: u64 = 118;
+pub const ABS: u64 = 119;
 const XMM_ARGUMENTS: u64 = 8;
 pub const CHECKED_ARITHMETIC_RECORDS: u64 = 2;
 

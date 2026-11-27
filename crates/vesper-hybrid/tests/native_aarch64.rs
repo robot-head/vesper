@@ -24,6 +24,7 @@ const SELECT: u64 = 14;
 const TRUNCATE: u64 = 15;
 const ZERO_EXTEND: u64 = 16;
 const SIGN_EXTEND: u64 = 17;
+const SHR_REGISTER: u64 = 21;
 const LOAD: u64 = 23;
 const STORE_BYTE: u64 = 24;
 const STORE_WORD: u64 = 25;
@@ -85,6 +86,10 @@ const ROTATE_RIGHT: u64 = 112;
 const ROTATE_RIGHT_REGISTER: u64 = 113;
 const ROTATE_LEFT_REGISTER: u64 = 114;
 const FUNNEL_RIGHT: u64 = 115;
+const AND_NOT: u64 = 116;
+const OR_NOT: u64 = 117;
+const XOR_NOT: u64 = 118;
+const ABS: u64 = 119;
 const EQUAL: u64 = 0;
 const SIGNED_LESS: u64 = 2;
 const UNSIGNED_LESS: u64 = 6;
@@ -292,6 +297,55 @@ fn aarch64_sign_counts_and_rotates_encode_narrow_and_wide_operands() {
     }
     assert!(binding::aarch64_integer_leaf(&[1, 1, LEADING_SIGN_BITS, 0, 1, CELL_BITS]).is_empty());
     assert!(binding::aarch64_integer_leaf(&[2, 2, FUNNEL_RIGHT, 0, 1, CELL_BITS]).is_empty());
+}
+
+#[test]
+fn aarch64_bitwise_complements_use_one_instruction() {
+    const BIC_X0_X0_X1: u32 = 0x8a21_0000;
+    const ORN_W0_W0_W1: u32 = 0x2a21_0000;
+    const EON_X0_X0_X1: u32 = 0xca21_0000;
+    for (op, width, instruction) in [
+        (AND_NOT, CELL_BITS, BIC_X0_X0_X1),
+        (OR_NOT, DWORD_BITS, ORN_W0_W0_W1),
+        (XOR_NOT, CELL_BITS, EON_X0_X0_X1),
+    ] {
+        assert_eq!(
+            binding::aarch64_integer_leaf(&[2, 2, op, 0, 1, width]),
+            [instruction, RET].map(u32::to_le_bytes).concat()
+        );
+    }
+}
+
+#[test]
+fn aarch64_narrow_absolute_value_and_shifts_use_declared_bit_width() {
+    // The width checks exercise the upper-bit case from Cranelift's runtests/iabs.clif.
+    const TST_X0_SIGN: u32 = 0xf241_001f;
+    const CSNEG_X0_X0_EQ: u32 = 0xda80_0400;
+    const TST_W0_BYTE_SIGN: u32 = 0x7219_001f;
+    const CSNEG_W0_W0_EQ: u32 = 0x5a80_0400;
+    const UBFX_X0_BYTE: u32 = 0xd340_1c00;
+    const UBFX_W16_WORD_SHIFT: u32 = 0x5300_0c30;
+    const UXTH_W17_W0: u32 = 0x5300_3c11;
+    const LSR_W0_W17_W16: u32 = 0x1ad0_2620;
+    assert_eq!(
+        binding::aarch64_integer_leaf(&[1, 1, ABS, 0, 0, CELL_BITS]),
+        [TST_X0_SIGN, CSNEG_X0_X0_EQ, RET]
+            .map(u32::to_le_bytes)
+            .concat()
+    );
+    assert_eq!(
+        binding::aarch64_integer_leaf(&[1, 1, ABS, 0, 0, BYTE_BITS]),
+        [TST_W0_BYTE_SIGN, CSNEG_W0_W0_EQ, UBFX_X0_BYTE, RET]
+            .map(u32::to_le_bytes)
+            .concat()
+    );
+    assert_eq!(
+        binding::aarch64_integer_leaf(&[2, 2, SHR_REGISTER, 0, 1, WORD_BITS]),
+        [UBFX_W16_WORD_SHIFT, UXTH_W17_W0, LSR_W0_W17_W16, RET]
+            .map(u32::to_le_bytes)
+            .concat()
+    );
+    assert!(binding::aarch64_integer_leaf(&[1, 1, ABS, 0, 1, CELL_BITS]).is_empty());
 }
 
 #[test]

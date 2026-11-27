@@ -26,7 +26,7 @@ use self::scalar::{
     FLOAT_STACK_STORE32, FLOAT_STACK_STORE64, FLOAT_COPY_SIGN, is_float_binary, is_float_compare,
     float_value, valid_float_operands, LEADING_ZEROS, TRAILING_ZEROS, POPULATION_COUNT,
     REVERSE_BITS, LEADING_SIGN_BITS, ROTATE_RIGHT, ROTATE_RIGHT_REGISTER, ROTATE_LEFT_REGISTER,
-    FUNNEL_RIGHT
+    FUNNEL_RIGHT, AND_NOT, OR_NOT, XOR_NOT, ABS
 };
 use self::x86_64::{
     BYTE_BITS, WORD_BITS, DWORD_BITS, QWORD_BITS, FLOAT_ORDERED, FLOAT_UNORDERED, FLOAT_EQUAL,
@@ -112,8 +112,10 @@ const UMULH_REG: u32 = 0x9bc07c00;
 const SMULL_REG: u32 = 0x9b207c00;
 const UMULL_REG: u32 = 0x9ba07c00;
 const AND_REG: u32 = 0x8a000000;
+const BIC_REG: u32 = 0x8a200000;
 const ORR_REG: u32 = 0xaa000000;
 const EOR_REG: u32 = 0xca000000;
+const EON_REG: u32 = 0xca200000;
 const ORN_REG: u32 = 0xaa200000;
 const LSL_REG: u32 = 0x9ac02000;
 const LSR_REG: u32 = 0x9ac02400;
@@ -134,6 +136,7 @@ const SUB_IMM: u32 = 0xd1000000;
 const AND_IMM: u32 = 0x92000000;
 const ORR_IMM: u32 = 0xb2000000;
 const EOR_IMM: u32 = 0xd2000000;
+const TST_IMM: u32 = 0xf200001f;
 const CMP_IMM: u32 = 0xf100001f;
 const CMN_IMM: u32 = 0xb100001f;
 const CCMP_IMM: u32 = 0xfa400800;
@@ -149,6 +152,7 @@ const BITFIELD64: u32 = 0x80400000;
 const CSET: u32 = 0x9a9f07e0;
 const CSEL: u32 = 0x9a800000;
 const CSINC: u32 = 0x9a800400;
+const CSNEG: u32 = 0xda800400;
 const FMOV_FROM_GP: u32 = 0x1e270000;
 const FMOV_TO_GP: u32 = 0x1e260000;
 const FP_DOUBLE: u32 = 0x00400000;
@@ -195,6 +199,8 @@ const BITMASK_N: u32 = 0x00400000;
 const IMMR_SHIFT: u32 = 16;
 const IMMS_SHIFT: u32 = 10;
 const SHIFT_MASK: u64 = QWORD_BITS - 1;
+const BYTE_SHIFT_BITS: u64 = 3;
+const WORD_SHIFT_BITS: u64 = 4;
 const BITMASK_ELEMENT_HALVINGS: u64 = 5;
 const HALFWORDS: u64 = 4;
 const HALFWORD_BITS: u64 = 16;
@@ -847,18 +853,11 @@ fn operands(in r: Record, returns: u64) -> Option[u64] {
         } else {
             Option::None
         },
-        ADD | SUB | MUL | AND | OR | XOR => Option::Some(2),
+        ADD | SUB | MUL | AND | OR | XOR | AND_NOT | OR_NOT | XOR_NOT => Option::Some(2),
         ROTATE_RIGHT_REGISTER | ROTATE_LEFT_REGISTER => Option::Some(2),
         ROTATE_RIGHT => Option::Some(1),
-        SHL_REGISTER
-            | SHR_REGISTER
-            | SAR_REGISTER
-            | SIGNED_DIV
-            | UNSIGNED_DIV
-            | SIGNED_REM
-            | UNSIGNED_REM => if r.extra
-            >= DWORD_BITS
-        {
+        SHL_REGISTER | SHR_REGISTER | SAR_REGISTER => Option::Some(2),
+        SIGNED_DIV | UNSIGNED_DIV | SIGNED_REM | UNSIGNED_REM => if r.extra >= DWORD_BITS {
             Option::Some(2)
         } else {
             Option::None
@@ -879,6 +878,11 @@ fn operands(in r: Record, returns: u64) -> Option[u64] {
             Option::None
         },
         NEG | NOT | SHL | SHR | SAR => Option::Some(1),
+        ABS => if r.right == 0 {
+            Option::Some(1)
+        } else {
+            Option::None
+        },
         BYTE_SWAP => if r.extra >= WORD_BITS {
             Option::Some(1)
         } else {
@@ -1202,6 +1206,46 @@ fn emit_rotate(inout out: ChunkSeq[u8], in r: Record, dest: u32, lhs: u32, rhs: 
     }
 }
 
+fn emit_abs(inout out: ChunkSeq[u8], dest: u32, source: u32, width: u64) {
+    let wide = width == QWORD_BITS;
+    let reg_mask: u32 = if wide { ~0 } else { ~REG64 };
+    let word_bits = if wide { QWORD_BITS } else { DWORD_BITS };
+    // TST tests the declared sign bit even if a caller has dirtied the upper bits.
+    let rotate = sh(wrapping_u32(wrapping_add(wrapping_sub(word_bits, width), 1)), IMMR_SHIFT);
+    let size = if wide { BITMASK_N } else { 0 };
+    push32(inout out, (TST_IMM & reg_mask) | size | rotate | sh(source, RN_SHIFT));
+    rrr(inout out, (CSNEG & reg_mask) | sh(EQ, CONDITION_SHIFT), dest, source, source);
+    if width < DWORD_BITS {
+        normalize(inout out, dest, width);
+    }
+}
+
+fn emit_narrow_shift(
+    inout out: ChunkSeq[u8],
+    in r: Record,
+    op: u32,
+    dest: u32,
+    lhs: u32,
+    rhs: u32
+) {
+    let count_bits = if r.extra == BYTE_BITS {
+        BYTE_SHIFT_BITS
+    } else {
+        WORD_SHIFT_BITS
+    };
+    bitfield(inout out, UBFM & ~BITFIELD64, SCRATCH, rhs, 0, wrapping_sub(count_bits, 1));
+    let mut source = lhs;
+    if r.op != SHL_REGISTER {
+        let extend = if r.op == SAR_REGISTER { SBFM } else { UBFM };
+        bitfield(inout out, extend & ~BITFIELD64, SECOND_SCRATCH, lhs, 0, wrapping_sub(r.extra, 1));
+        source = SECOND_SCRATCH;
+    }
+    rrr(inout out, op & ~REG64, dest, source, SCRATCH);
+    if r.op != SHR_REGISTER {
+        normalize(inout out, dest, r.extra);
+    }
+}
+
 fn emit_instruction(
     inout out: ChunkSeq[u8],
     in r: Record,
@@ -1221,6 +1265,8 @@ fn emit_instruction(
     } else if r.op == FUNNEL_RIGHT {
         let op = EXTR | sh(wrapping_u32(r.extra), EXTR_AMOUNT_SHIFT);
         rrr(inout out, op, dest, rhs, lhs);
+    } else if r.op == ABS {
+        emit_abs(inout out, dest, lhs, r.extra);
     } else if r.op == BYTE_SWAP {
         let op = match r.extra {
             WORD_BITS => REV16_W,
@@ -1351,12 +1397,19 @@ fn emit_instruction(
             SUB | SUB_IMMEDIATE => SUB_REG,
             MUL | MUL_IMMEDIATE => MUL_REG,
             AND | AND_IMMEDIATE => AND_REG,
+            AND_NOT => BIC_REG,
             OR | OR_IMMEDIATE => ORR_REG,
+            OR_NOT => ORN_REG,
             XOR | XOR_IMMEDIATE => EOR_REG,
+            XOR_NOT => EON_REG,
             SHL_REGISTER => LSL_REG,
             SHR_REGISTER => LSR_REG,
             _ => ASR_REG,
         };
+        if r.op >= SHL_REGISTER && r.op <= SAR_REGISTER && r.extra < DWORD_BITS {
+            emit_narrow_shift(inout out, in r, op, dest, lhs, rhs);
+            return;
+        }
         rrr(inout out, op & reg_mask, dest, lhs, rhs);
         if r.extra < DWORD_BITS {
             normalize(inout out, dest, r.extra);

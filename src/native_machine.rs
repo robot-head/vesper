@@ -135,6 +135,10 @@ enum IntegerOp {
     RotateRightRegister = 113,
     RotateLeftRegister = 114,
     FunnelRight = 115,
+    AndNot = 116,
+    OrNot = 117,
+    XorNot = 118,
+    Abs = 119,
 }
 
 fn integer_bit_op(op: Opcode) -> Option<IntegerOp> {
@@ -227,6 +231,16 @@ fn binary_op(opcode: Opcode) -> Option<IntegerOp> {
         Opcode::Band | Opcode::BandImm => IntegerOp::And,
         Opcode::Bor | Opcode::BorImm => IntegerOp::Or,
         Opcode::Bxor | Opcode::BxorImm => IntegerOp::Xor,
+        _ => return None,
+    })
+}
+
+fn minmax_condition(opcode: Opcode) -> Option<IntCC> {
+    Some(match opcode {
+        Opcode::Smin => IntCC::SignedLessThan,
+        Opcode::Smax => IntCC::SignedGreaterThan,
+        Opcode::Umin => IntCC::UnsignedLessThan,
+        Opcode::Umax => IntCC::UnsignedGreaterThan,
         _ => return None,
     })
 }
@@ -512,6 +526,49 @@ impl IntegerBlocks<'_> {
             } => Some(imm.bits()),
             _ => None,
         }
+    }
+
+    fn complemented_bitwise_operands(
+        &self,
+        opcode: Opcode,
+        left: Value,
+        right: Value,
+    ) -> Option<(IntegerOp, Value, Value)> {
+        if !self.aarch64 {
+            return None;
+        }
+        let op = match opcode {
+            Opcode::BandNot | Opcode::Band => IntegerOp::AndNot,
+            Opcode::BorNot | Opcode::Bor => IntegerOp::OrNot,
+            Opcode::BxorNot | Opcode::Bxor => IntegerOp::XorNot,
+            _ => return None,
+        };
+        if matches!(opcode, Opcode::BandNot | Opcode::BorNot | Opcode::BxorNot) {
+            return Some((op, left, right));
+        }
+        let dfg = &self.function.dfg;
+        let complement = |value| {
+            let ValueDef::Result(inst, _) = dfg.value_def(dfg.resolve_aliases(value)) else {
+                return None;
+            };
+            match dfg.insts[inst] {
+                InstructionData::Unary {
+                    opcode: Opcode::Bnot,
+                    arg,
+                } => Some(arg),
+                _ => None,
+            }
+        };
+        let (left, source) = if let Some(source) = complement(right) {
+            (left, source)
+        } else {
+            (right, complement(left)?)
+        };
+        // Keep the ordinary immediate path when its operand is already a constant.
+        if self.constant_bits(left).is_some() || self.constant_bits(source).is_some() {
+            return None;
+        }
+        Some((op, left, source))
     }
 
     fn stack_location(&self, slot: StackSlot, offset: Offset32, access: u32) -> Option<[u64; 2]> {
@@ -881,14 +938,33 @@ impl IntegerBlocks<'_> {
                         let high = self.append(tail, [a_high, b_high, carry]);
                         [low, high]
                     }
-                    Opcode::Band | Opcode::Bor | Opcode::Bxor => {
-                        let op = binary_op(opcode)?;
+                    Opcode::Smin | Opcode::Smax | Opcode::Umin | Opcode::Umax if self.aarch64 => {
+                        let choose_left = self.compare_wide(
+                            minmax_condition(opcode)?,
+                            [a_low, a_high],
+                            [b_low, b_high],
+                        );
                         [
-                            self.append(op, [a_low, b_low, INTEGER_CELL_BITS]),
-                            self.append(op, [a_high, b_high, INTEGER_CELL_BITS]),
+                            self.append(IntegerOp::Select, [choose_left, a_low, b_low]),
+                            self.append(IntegerOp::Select, [choose_left, a_high, b_high]),
                         ]
                     }
-                    _ => return None,
+                    _ => {
+                        let (op, left, right) = if let Some((op, left, right)) =
+                            self.complemented_bitwise_operands(opcode, a, b)
+                            && let (Some(left), Some(right)) = (pair(left), pair(right))
+                        {
+                            (op, left, right)
+                        } else if matches!(opcode, Opcode::Band | Opcode::Bor | Opcode::Bxor) {
+                            (binary_op(opcode)?, [a_low, a_high], [b_low, b_high])
+                        } else {
+                            return None;
+                        };
+                        [
+                            self.append(op, [left[0], right[0], INTEGER_CELL_BITS]),
+                            self.append(op, [left[1], right[1], INTEGER_CELL_BITS]),
+                        ]
+                    }
                 }
             }
             InstructionData::Ternary {
@@ -902,6 +978,20 @@ impl IntegerBlocks<'_> {
                     self.append(IntegerOp::Select, [test, yes[0], no[0]]),
                     self.append(IntegerOp::Select, [test, yes[1], no[1]]),
                 ]
+            }
+            InstructionData::Unary {
+                opcode: Opcode::Iabs,
+                arg,
+            } if output == types::I128 && self.aarch64 => {
+                let [low, high] = pair(arg)?;
+                let width = INTEGER_CELL_BITS;
+                let sign = self.append(IntegerOp::ShiftRightArithmetic, [high, width - 1, width]);
+                let low = self.append(IntegerOp::Xor, [low, sign, width]);
+                let high = self.append(IntegerOp::Xor, [high, sign, width]);
+                let low = self.append(IntegerOp::UnsignedSubOverflow, [low, sign, width]);
+                let borrow = self.append(IntegerOp::OverflowFlag, [0; 3]);
+                let high = self.append(IntegerOp::SubBorrow, [high, sign, borrow]);
+                [low, high]
             }
             InstructionData::Unary {
                 opcode: Opcode::Bnot,
@@ -1333,6 +1423,10 @@ impl IntegerBlocks<'_> {
                 } if self.aarch64 && ty(arg) == output => {
                     (integer_bit_op(opcode)?, [input(arg)?, 0, width])
                 }
+                InstructionData::Unary {
+                    opcode: Opcode::Iabs,
+                    arg,
+                } if self.aarch64 && ty(arg) == output => (IntegerOp::Abs, [input(arg)?, 0, width]),
                 InstructionData::UnaryGlobalValue {
                     opcode: Opcode::GlobalValue | Opcode::SymbolValue,
                     global_value,
@@ -1474,7 +1568,7 @@ impl IntegerBlocks<'_> {
                 InstructionData::Binary {
                     opcode: opcode @ (Opcode::Ishl | Opcode::Ushr | Opcode::Sshr),
                     args: [left, right],
-                } if matches!(output, types::I32 | types::I64)
+                } if (self.aarch64 || matches!(output, types::I32 | types::I64))
                     && ty(left) == output
                     && integer_width(ty(right)).is_some() =>
                 {
@@ -1514,6 +1608,24 @@ impl IntegerBlocks<'_> {
                     opcode,
                     args: [left, right],
                 } if ty(left) == output && ty(right) == output => {
+                    if self.aarch64
+                        && let Some(cond) = minmax_condition(opcode)
+                    {
+                        let left = input(left)?;
+                        let right = input(right)?;
+                        let choose_left =
+                            self.append(compare_op(output, false)?, [left, right, condition(cond)]);
+                        values.low[value] =
+                            Some(self.append(IntegerOp::Select, [choose_left, left, right]));
+                        continue;
+                    }
+                    if let Some((op, left, right)) =
+                        self.complemented_bitwise_operands(opcode, left, right)
+                        && let (Some(left), Some(right)) = (input(left), input(right))
+                    {
+                        values.low[value] = Some(self.append(op, [left, right, width]));
+                        continue;
+                    }
                     let op = binary_op(opcode)?;
                     let left_id = input(left)?;
                     let right_id = input(right)?;
