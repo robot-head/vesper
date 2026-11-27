@@ -31,6 +31,9 @@ const LSR_REG: u32 = 0x9ac02400;
 const ASR_REG: u32 = 0x9ac02800;
 const ADD_IMM: u32 = 0x91000000;
 const SUB_IMM: u32 = 0xd1000000;
+const AND_IMM: u32 = 0x92000000;
+const ORR_IMM: u32 = 0xb2000000;
+const EOR_IMM: u32 = 0xd2000000;
 const CMP_IMM: u32 = 0xf100001f;
 const CMN_IMM: u32 = 0xb100001f;
 const SUBS_REG: u32 = 0xeb000000;
@@ -46,9 +49,13 @@ const RN_SHIFT: u32 = 5;
 const CONDITION_SHIFT: u32 = 12;
 const IMM12_SHIFT: u32 = 10;
 const IMM12_MASK: u64 = 0xfff;
+const IMM12_SCALE: u32 = 12;
+const IMM12_SCALED: u32 = 0x00400000;
+const BITMASK_N: u32 = 0x00400000;
 const IMMR_SHIFT: u32 = 16;
 const IMMS_SHIFT: u32 = 10;
 const SHIFT_MASK: u64 = QWORD_BITS - 1;
+const BITMASK_ELEMENT_HALVINGS: u64 = 5;
 const HALFWORDS: u64 = 4;
 const HALFWORD_BITS: u64 = 16;
 const HALFWORD_MASK: u64 = 0xffff;
@@ -78,6 +85,39 @@ fn halfword(bits: u64, index: u64) -> u64 {
     wrapping_shr_u64(bits, wrapping_u32(wrapping_mul(index, HALFWORD_BITS))) & HALFWORD_MASK
 }
 
+// A logical immediate is a power-of-two element repeated across the register.
+// The element contains one circular run of ones and at least one zero.
+fn bitmask_immediate(bits: u64) -> Option[u32] {
+    if bits == 0 || bits == ~0 {
+        return Option::None;
+    }
+    let mut width = QWORD_BITS;
+    let mut mask: u64 = ~0;
+    for _ in 0..BITMASK_ELEMENT_HALVINGS {
+        let half = width / 2;
+        let half_mask = wrapping_shr_u64(mask, wrapping_u32(half));
+        if (bits & half_mask) != ((wrapping_shr_u64(bits, wrapping_u32(half))) & half_mask) {
+            break;
+        }
+        width = half;
+        mask = half_mask;
+    }
+    let element = bits & mask;
+    let last = wrapping_u32(wrapping_sub(width, 1));
+    let previous = (wrapping_shl_u64(element, 1) & mask) | wrapping_shr_u64(element, last);
+    let starts = element & ~previous;
+    if (starts & wrapping_sub(starts, 1)) != 0 {
+        return Option::None;
+    }
+    let start = trailing_zeros_u64(starts);
+    let rotation = wrapping_sub(0, start) & last;
+    let run = wrapping_shr_u64(element, start) | (wrapping_shl_u64(element, rotation) & mask);
+    let ones = trailing_zeros_u64(~run);
+    let size = (sh(~last, 1) | wrapping_sub(ones, 1)) & wrapping_u32(SHIFT_MASK);
+    let n = if width == QWORD_BITS { BITMASK_N } else { 0 };
+    Option::Some(n | sh(rotation, IMMR_SHIFT) | sh(size, IMMS_SHIFT))
+}
+
 fn immediate(inout out: ChunkSeq[u8], dest: u32, bits: u64) {
     let mut zero_parts: u64 = 0;
     let mut one_parts: u64 = 0;
@@ -90,6 +130,16 @@ fn immediate(inout out: ChunkSeq[u8], dest: u32, bits: u64) {
         }
     }
     let inverted = one_parts > zero_parts;
+    let filled = if inverted { one_parts } else { zero_parts };
+    if filled < wrapping_sub(HALFWORDS, 1) {
+        match bitmask_immediate(bits) {
+            Option::Some(encoded) => {
+                push32(inout out, ORR_IMM | encoded | sh(ZERO, RN_SHIFT) | dest);
+                return;
+            },
+            Option::None => (),
+        }
+    }
     let fill = if inverted { HALFWORD_MASK } else { 0 };
     let first = if inverted { MOVN } else { MOVZ };
     let mut op = first;
@@ -141,16 +191,29 @@ fn magnitude(signed: i64) -> u64 {
     )
 }
 
+fn arithmetic_immediate(amount: u64) -> Option[u32] {
+    if amount <= IMM12_MASK {
+        return Option::Some(sh(wrapping_u32(amount), IMM12_SHIFT));
+    }
+    let scaled = wrapping_shr_u64(amount, IMM12_SCALE);
+    if (amount & IMM12_MASK) == 0 && scaled <= IMM12_MASK {
+        return Option::Some(IMM12_SCALED | sh(wrapping_u32(scaled), IMM12_SHIFT));
+    }
+    Option::None
+}
+
 fn compare(inout out: ChunkSeq[u8], in r: Record, lhs: u32, rhs: u32) {
     if r.op == COMPARE_IMMEDIATE {
         let signed = widen_i64(wrapping_i32(r.right));
-        let amount = magnitude(signed);
-        if amount <= IMM12_MASK {
-            let op = if signed < 0 { CMN_IMM } else { CMP_IMM };
-            push32(inout out, op | sh(wrapping_u32(amount), IMM12_SHIFT) | sh(lhs, RN_SHIFT));
-        } else {
-            immediate(inout out, SCRATCH, wrapping_u64(signed));
-            rrr(inout out, SUBS_REG, ZERO, lhs, SCRATCH);
+        match arithmetic_immediate(magnitude(signed)) {
+            Option::Some(encoded) => {
+                let op = if signed < 0 { CMN_IMM } else { CMP_IMM };
+                push32(inout out, op | encoded | sh(lhs, RN_SHIFT));
+            },
+            Option::None => {
+                immediate(inout out, SCRATCH, wrapping_u64(signed));
+                rrr(inout out, SUBS_REG, ZERO, lhs, SCRATCH);
+            },
         }
     } else {
         rrr(inout out, SUBS_REG, ZERO, lhs, rhs);
@@ -220,6 +283,12 @@ fn emit_instruction(
         rrr(inout out, if r.op == NEG { SUB_REG } else { ORN_REG }, dest, ZERO, lhs);
     } else if r.op == SHL || r.op == SHR || r.op == SAR {
         let count = r.right & SHIFT_MASK;
+        if count == 0 {
+            if dest != lhs {
+                rrr(inout out, ORR_REG, dest, ZERO, lhs);
+            }
+            return;
+        }
         let (rotate, last) = if r.op == SHL {
             (wrapping_sub(0, count) & SHIFT_MASK, wrapping_sub(SHIFT_MASK, count))
         } else {
@@ -245,15 +314,27 @@ fn emit_instruction(
         if r.op >= ADD_IMMEDIATE && r.op <= XOR_IMMEDIATE {
             let signed = widen_i64(wrapping_i32(r.right));
             if r.op == ADD_IMMEDIATE || r.op == SUB_IMMEDIATE {
-                let amount = magnitude(signed);
-                if amount <= IMM12_MASK {
-                    let subtract = (r.op == SUB_IMMEDIATE) != (signed < 0);
-                    let op = if subtract { SUB_IMM } else { ADD_IMM };
-                    push32(
-                        inout out,
-                        op | sh(wrapping_u32(amount), IMM12_SHIFT) | sh(lhs, RN_SHIFT) | dest
-                    );
-                    return;
+                match arithmetic_immediate(magnitude(signed)) {
+                    Option::Some(encoded) => {
+                        let subtract = (r.op == SUB_IMMEDIATE) != (signed < 0);
+                        let op = if subtract { SUB_IMM } else { ADD_IMM };
+                        push32(inout out, op | encoded | sh(lhs, RN_SHIFT) | dest);
+                        return;
+                    },
+                    Option::None => (),
+                }
+            } else if r.op != MUL_IMMEDIATE {
+                match bitmask_immediate(wrapping_u64(signed)) {
+                    Option::Some(encoded) => {
+                        let op = match r.op {
+                            AND_IMMEDIATE => AND_IMM,
+                            OR_IMMEDIATE => ORR_IMM,
+                            _ => EOR_IMM,
+                        };
+                        push32(inout out, op | encoded | sh(lhs, RN_SHIFT) | dest);
+                        return;
+                    },
+                    Option::None => (),
                 }
             }
             immediate(inout out, SCRATCH, wrapping_u64(signed));

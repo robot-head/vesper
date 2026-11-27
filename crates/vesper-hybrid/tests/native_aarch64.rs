@@ -13,10 +13,15 @@ const RET: u32 = 0xd65f_03c0;
 const CELL_BITS: u64 = u64::BITS as u64;
 const CONSTANT: u64 = 0;
 const ADD: u64 = 1;
-const CALL: u64 = 38;
+const SHL: u64 = 9;
 const COMPARE: u64 = 12;
-const COMPARE_IMMEDIATE: u64 = 58;
 const SELECT: u64 = 14;
+const CALL: u64 = 38;
+const ADD_IMMEDIATE: u64 = 52;
+const AND_IMMEDIATE: u64 = 55;
+const OR_IMMEDIATE: u64 = 56;
+const XOR_IMMEDIATE: u64 = 57;
+const COMPARE_IMMEDIATE: u64 = 58;
 const EQUAL: u64 = 0;
 
 #[test]
@@ -44,10 +49,12 @@ fn aarch64_leaf_encodings_and_operand_validation() {
 #[test]
 fn aarch64_select_uses_comparison_flags_directly() {
     const CMP_X0_X1: u32 = 0xeb01_001f;
+    const CMP_X0_4096: u32 = 0xf140_041f;
     const CMN_X0_1: u32 = 0xb100_041f;
     const CSEL_X0_X2_X3_EQ: u32 = 0x9a83_0040;
     for (op, right, compare) in [
         (COMPARE, 1, CMP_X0_X1),
+        (COMPARE_IMMEDIATE, 4096, CMP_X0_4096),
         (COMPARE_IMMEDIATE, u64::from(u32::MAX), CMN_X0_1),
     ] {
         let words = [4, 5, op, 0, right, EQUAL, SELECT, 4, 2, 3];
@@ -58,6 +65,42 @@ fn aarch64_select_uses_comparison_flags_directly() {
             .collect();
         assert_eq!(binding::aarch64_integer_leaf(&words), expected);
     }
+}
+
+#[test]
+fn aarch64_uses_short_immediate_encodings() {
+    const ADD_X0_X0_4096: u32 = 0x9140_0400;
+    const SUB_X0_X0_16773120: u32 = 0xd17f_fc00;
+    const AND_X0_X0_COMPLEMENT_OF_128: u32 = 0x9278_f800;
+    const ORR_X0_X0_SIGN_EXTENDED_I32_MIN: u32 = 0xb261_8000;
+    const EOR_X0_X0_I32_MAX: u32 = 0xd240_7800;
+    const MOV_ALTERNATING_BITS: u32 = 0xb201_f3e0;
+    const MOV_REPEATED_BYTE_MASK: u32 = 0xb200_9fe0;
+    const MOV_WRAPPED_RUN: u32 = 0xb241_a7e0;
+    let as_bytes = |word: u32| [word.to_le_bytes(), RET.to_le_bytes()].concat();
+
+    for (op, imm, encoded) in [
+        (ADD_IMMEDIATE, 4096, ADD_X0_X0_4096),
+        (ADD_IMMEDIATE, -16_773_120, SUB_X0_X0_16773120),
+        (AND_IMMEDIATE, -129, AND_X0_X0_COMPLEMENT_OF_128),
+        (OR_IMMEDIATE, i32::MIN, ORR_X0_X0_SIGN_EXTENDED_I32_MIN),
+        (XOR_IMMEDIATE, i32::MAX, EOR_X0_X0_I32_MAX),
+    ] {
+        let input = [1, 1, op, 0, u64::from(imm as u32), CELL_BITS];
+        assert_eq!(binding::aarch64_integer_leaf(&input), as_bytes(encoded));
+    }
+    for (value, encoded) in [
+        (0xaaaa_aaaa_aaaa_aaaa, MOV_ALTERNATING_BITS),
+        (0x00ff_00ff_00ff_00ff, MOV_REPEATED_BYTE_MASK),
+        (0x8000_01ff_ffff_ffff, MOV_WRAPPED_RUN),
+    ] {
+        let input = [0, 0, CONSTANT, value, 0, 0];
+        assert_eq!(binding::aarch64_integer_leaf(&input), as_bytes(encoded));
+    }
+    assert_eq!(
+        binding::aarch64_integer_leaf(&[1, 1, SHL, 0, CELL_BITS, CELL_BITS]),
+        RET.to_le_bytes(),
+    );
 }
 
 #[test]
