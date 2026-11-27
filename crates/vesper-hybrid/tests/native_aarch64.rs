@@ -850,6 +850,50 @@ fn aarch64_memory_addressing_and_store_liveness() {
 }
 
 #[test]
+fn aarch64_comparison_flags_survive_unrelated_stack_stores() {
+    const CELL_BYTES: u64 = CELL_BITS / BYTE_BITS;
+    const SUB_SP_16: u32 = 0xd100_43ff;
+    const CMP_X0_ZERO: u32 = 0xf100_001f;
+    const STR_X1_SP: u32 = 0xf900_03e1;
+    const B_NE_FORWARD_FOUR: u32 = 0x5400_0081;
+    const MOV_X0_X1: u32 = 0xaa01_03e0;
+    const ADD_SP_16: u32 = 0x9100_43ff;
+    const CSET_X2_EQ: u32 = 0x9a9f_17e2;
+
+    #[rustfmt::skip]
+    let packet = |stored| [
+        2, 0,
+        STACK_SLOT, CELL_BYTES, CELL_BYTES, 0,
+        COMPARE_IMMEDIATE, 0, 0, EQUAL,
+        STACK_STORE_QWORD, stored, 0, 0,
+        BRANCH_ZERO, 3, 0, 0,
+        EARLY_RETURN, 1, 0, 5,
+    ];
+    let expected = [
+        SUB_SP_16,
+        CMP_X0_ZERO,
+        STR_X1_SP,
+        B_NE_FORWARD_FOUR,
+        MOV_X0_X1,
+        ADD_SP_16,
+        RET,
+        ADD_SP_16,
+        RET,
+    ];
+    assert_eq!(
+        binding::aarch64_integer_leaf(&packet(1)),
+        expected.map(u32::to_le_bytes).concat()
+    );
+    let stored_comparison = binding::aarch64_integer_leaf(&packet(3));
+    assert!(
+        stored_comparison
+            .as_chunks::<{ size_of::<u32>() }>()
+            .0
+            .contains(&CSET_X2_EQ.to_le_bytes())
+    );
+}
+
+#[test]
 fn aarch64_select_uses_comparison_flags_directly() {
     const CMP_X0_X1: u32 = 0xeb01_001f;
     const CMP_X0_4096: u32 = 0xf140_041f;

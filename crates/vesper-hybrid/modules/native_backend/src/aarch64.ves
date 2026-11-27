@@ -622,6 +622,16 @@ fn conditional_branch(op: u64) -> bool {
     op == BRANCH_ZERO || op == BRANCH_BLOCK || op == BRANCH_LABEL
 }
 
+fn flags_survive_stack_stores(in words: Slice[u64], start: u64, end: u64, value: u64) -> bool {
+    for index in start..end {
+        let store = read_record(in words, index);
+        if !is_stack_store(store.op) || store.left == value {
+            return false;
+        }
+    }
+    true
+}
+
 fn direct_call(op: u64) -> bool {
     op == CALL || op == CALL_VOID || op == CALL_PAIR
 }
@@ -2007,7 +2017,8 @@ fn encode_pass(
         let value = wrapping_add(args, index);
         let r = read_record(in words, index);
         let stored = store_width(r.op);
-        let live = last_read(in ends, value) != NEVER_READ;
+        let last = last_read(in ends, value);
+        let live = last != NEVER_READ;
         let calls = direct_call(r.op);
         let division = is_integer_division(r.op);
         let atomic = is_atomic_rmw(r.op);
@@ -2235,12 +2246,12 @@ fn encode_pass(
         } else {
             Option::None
         };
-        if (comparison_width(r.op) != 0 || overflow_cc.is_some())
-            && wrapping_add(index, 1) < count
-            && last_read(in ends, value) == wrapping_add(value, 1)
-        {
-            let next = read_record(in words, wrapping_add(index, 1));
-            if overflow_cc.is_some()
+        if (comparison_width(r.op) != 0 || overflow_cc.is_some()) && last > value && last < values {
+            let consumer = wrapping_sub(last, args);
+            let following = wrapping_add(index, 1);
+            let next = read_record(in words, consumer);
+            if consumer == following
+                && overflow_cc.is_some()
                 && consumes_carry(next.op)
                 && next.left != value
                 && next.right != value
@@ -2254,6 +2265,8 @@ fn encode_pass(
                     || ((next.op == SELECT || next.op == FLOAT_SELECT)
                         && next.right != value
                         && next.extra != value))
+                && (consumer == following
+                    || flags_survive_stack_stores(in words, following, consumer, value))
             {
                 flags_for_next = match overflow_cc {
                     Option::Some(cc) => Option::Some(cc),
@@ -2282,7 +2295,6 @@ fn encode_pass(
         // A failed store retries with both original operands.
         let atomic_operands = if atomic { sh(1, lhs) | sh(1, rhs) } else { 0 };
         let unavailable = used | home_mask | atomic_operands;
-        let last = last_read(in ends, value);
         let preserved = if last > next_call {
             callee_mask & ~unavailable
         } else {
