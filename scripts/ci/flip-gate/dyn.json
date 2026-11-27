@@ -1,0 +1,132 @@
+{
+  "notes": [
+    "Flip gate for the function-object and dyn-trait lowerings (`dyn_fn::lower`,",
+    "`dyn_trait::lower`), ported as @vesper/check-dyn and installed as the hybrid's",
+    "`dyn_fn` and `dyn_trait` swaps (front-end wiring slice 4, #1976).",
+    "crates/vesper-hybrid/tests/check_dyn.rs times the swap's path (AST words,",
+    "the linked Vesper module, decode) against `rust_lower`, both passes chained,",
+    "on the modules that use them (`used`) and on every module forced (`forced`)."
+  ],
+  "name": "dyn",
+  "lane": "FW-4",
+  "rust": [
+    "src/dyn_fn.rs",
+    "src/dyn_trait.rs"
+  ],
+  "env": {
+    "CARGO_PROFILE_DEV_DEBUG": "0",
+    "CARGO_PROFILE_TEST_DEBUG": "0",
+    "CARGO_PROFILE_RELEASE_DEBUG": "0"
+  },
+  "build": [
+    [
+      "cargo",
+      "test",
+      "--locked",
+      "--release",
+      "-p",
+      "vesper-hybrid",
+      "--test",
+      "check_dyn",
+      "--no-run"
+    ]
+  ],
+  "tests": [
+    {
+      "run": [
+        "cargo",
+        "test",
+        "--locked",
+        "--release",
+        "-p",
+        "vesper-hybrid",
+        "--test",
+        "check_dyn"
+      ]
+    }
+  ],
+  "differential": {
+    "run": {
+      "sequence": [
+        [
+          "cargo",
+          "test",
+          "--locked",
+          "--release",
+          "-p",
+          "vesper-hybrid",
+          "--test",
+          "check_dyn",
+          "dyn_swap_matches_rust_on_the_cases",
+          "--",
+          "--exact",
+          "--nocapture"
+        ],
+        [
+          "cargo",
+          "test",
+          "--locked",
+          "--release",
+          "-p",
+          "vesper-hybrid",
+          "--test",
+          "check_dyn",
+          "dyn_swap_matches_rust_on_the_repository_sources",
+          "--",
+          "--exact",
+          "--nocapture"
+        ]
+      ]
+    }
+  },
+  "abba": [
+    {
+      "workload": "used",
+      "run": {
+        "argv": [
+          "cargo",
+          "test",
+          "--locked",
+          "--release",
+          "-p",
+          "vesper-hybrid",
+          "--test",
+          "check_dyn",
+          "dyn_swap_speed",
+          "--",
+          "--exact",
+          "--ignored",
+          "--nocapture"
+        ],
+        "env": {
+          "FLIP_GATE": "1",
+          "CHECK_HARNESS_SPEED": "1"
+        }
+      }
+    },
+    {
+      "workload": "forced",
+      "run": {
+        "argv": [
+          "cargo",
+          "test",
+          "--locked",
+          "--release",
+          "-p",
+          "vesper-hybrid",
+          "--test",
+          "check_dyn",
+          "dyn_swap_speed",
+          "--",
+          "--exact",
+          "--ignored",
+          "--nocapture"
+        ],
+        "env": {
+          "FLIP_GATE": "1",
+          "CHECK_HARNESS_SPEED": "1"
+        }
+      }
+    }
+  ]
+}

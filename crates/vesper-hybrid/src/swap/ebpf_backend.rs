@@ -14,7 +14,7 @@ mod ebpf_backend_binding;
 mod ebpf_words;
 
 // The word encoders read the shared ones through `super::`.
-use super::{Registry, Swap, check_words, env_off, ir_words, on, open};
+use super::{Registry, Swap, check_words, env_off, ir_words, on, pass};
 
 /// Programs the Vesper eBPF backend compiled, and left to Rust.
 static EBPF_CALLS: AtomicU64 = AtomicU64::new(0);
@@ -73,7 +73,7 @@ pub(crate) fn ebpf_build_input(input: &str, source: &str, entry: &str) -> Option
 }
 
 /// The flip-gate rows of this file's swaps (`swaps::on`).
-pub(super) const SWAPS: &[Swap] = &[open("ebpf", "0.93-1.10x; no flip-gate configuration")];
+pub(super) const SWAPS: &[Swap] = &[pass("ebpf", "ebpf", "#2207")];
 
 pub(super) fn register(r: &mut Registry) {
     if on("ebpf") && !env_off("VESPER_HYBRID_EBPF") {

@@ -39,7 +39,7 @@ mod doctest_verdict_words;
 #[path = "../../../../tests/common/test_report_words.rs"]
 mod test_report_words;
 
-use super::{Registry, Swap, must, on, open};
+use super::{Registry, Swap, must, on, open, pass};
 
 /// Sources whose tests the Vesper test-runner module discovered.
 static TEST_RUNNER_CALLS: AtomicU64 = AtomicU64::new(0);
@@ -160,23 +160,11 @@ const VESPER_TEST_REPORT: vesper::test_report::TestReportTable =
 /// The flip-gate rows of this file's swaps (`swaps::on`).
 pub(super) const SWAPS: &[Swap] = &[
     open("test_discovery", "no flip-gate configuration"),
-    open(
-        "doctest_extract",
-        "0 diffs, 1.12x; no flip-gate configuration",
-    ),
-    open("test_mutants", "0 diffs, 0.48x; no flip-gate configuration"),
-    open(
-        "doctest_guard",
-        "0 diffs, 0.39x; no flip-gate configuration",
-    ),
-    open(
-        "doctest_generate",
-        "0 diffs, 0.87x; no flip-gate configuration",
-    ),
-    open(
-        "doctest_verdict",
-        "0 diffs, 1.07x; no flip-gate configuration",
-    ),
+    pass("doctest_extract", "doctest-extract", "#2207"),
+    pass("test_mutants", "test-mutants", "#2207"),
+    pass("doctest_guard", "doctest-guard", "#2207"),
+    pass("doctest_generate", "doctest-generate", "#2207"),
+    pass("doctest_verdict", "doctest-verdict", "#2207"),
     open(
         "test_report",
         "0 diffs, 1.8x end to end (word boundary), 1.1x rendering alone; no flip-gate configuration",

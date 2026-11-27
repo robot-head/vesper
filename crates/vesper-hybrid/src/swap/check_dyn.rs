@@ -21,7 +21,7 @@ use super::parse::parse_words;
 #[path = "../../../../tests/common/dyn_words.rs"]
 mod dyn_words;
 
-use super::{Registry, Swap, must, on, open, stats};
+use super::{Registry, Swap, must, on, pass, stats};
 
 /// Modules the Vesper dyn module lowered, per pass.
 static DYN_FN_CALLS: AtomicU64 = AtomicU64::new(0);
@@ -95,14 +95,8 @@ const VESPER_DYN_TRAIT: vesper::dyn_trait::DynTraitTable = vesper::dyn_trait::Dy
 
 /// The flip-gate rows of this file's swaps (`swaps::on`).
 pub(super) const SWAPS: &[Swap] = &[
-    open(
-        "dyn_fn",
-        "1.09x with dyn_trait (95% CI 1.07-1.10x), 0 diffs; no flip-gate configuration",
-    ),
-    open(
-        "dyn_trait",
-        "1.09x with dyn_fn (95% CI 1.07-1.10x), 0 diffs; no flip-gate configuration",
-    ),
+    pass("dyn_fn", "dyn", "#2207"),
+    pass("dyn_trait", "dyn", "#2207"),
 ];
 
 pub(super) fn register(_r: &mut Registry) {
