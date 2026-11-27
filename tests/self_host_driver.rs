@@ -633,3 +633,80 @@ fn triples_parse_like_target_lexicon() {
         differ[..differ.len().min(40)].join("\n")
     );
 }
+
+#[test]
+fn windows_link_matches_rust() {
+    use vesper::native::windows::{Linker, LinkerFlavor, WindowsNativeError, link_args};
+
+    let entry = driver().entry("windows_link_check", true);
+    let linkers = [
+        "link.exe",
+        "C:\\Program Files\\MSVC\\bin\\HostX64\\x64\\LINK.EXE",
+        "/usr/bin/lld-link",
+        "C:\\LLVM\\bin\\LLD-LINK.exe",
+        "rust-lld",
+        "/toolchain/bin/RUST-LLD.EXE",
+        "custom-ld.exe",
+    ];
+    let object_sets: &[&[&str]] = &[&["a.obj"], &["a.obj", "b.obj", "dir/c.obj"]];
+    for linker_path in linkers {
+        for objs in object_sets {
+            let output = "out/app.exe";
+            let mut input = Vec::new();
+            input.extend_from_slice(linker_path.as_bytes());
+            input.push(0);
+            input.extend_from_slice(output.as_bytes());
+            input.push(0);
+            for (idx, obj) in objs.iter().enumerate() {
+                if idx > 0 {
+                    input.push(0);
+                }
+                input.extend_from_slice(obj.as_bytes());
+            }
+
+            let words = entry.words(&input);
+            let mut at = 1;
+            let got_flavor = words[0];
+            let got_args = String::from_utf8(unpack(&words, &mut at)).unwrap();
+            let got_err_with = String::from_utf8(unpack(&words, &mut at)).unwrap();
+            let got_err_none = String::from_utf8(unpack(&words, &mut at)).unwrap();
+            assert_eq!(at, words.len());
+
+            let rust_linker = Linker::explicit(Path::new(linker_path));
+            let want_flavor = match rust_linker.flavor {
+                LinkerFlavor::Msvc => 0,
+                LinkerFlavor::LldLink => 1,
+                LinkerFlavor::RustLld => 2,
+            };
+            assert_eq!(got_flavor, want_flavor, "flavor for {linker_path}");
+
+            let obj_paths: Vec<PathBuf> = objs.iter().map(PathBuf::from).collect();
+            let mut want_args: Vec<String> = Vec::new();
+            if rust_linker.flavor == LinkerFlavor::RustLld {
+                want_args.push("-flavor".into());
+                want_args.push("link".into());
+            }
+            want_args.extend(
+                link_args(&obj_paths, Path::new(output))
+                    .into_iter()
+                    .map(|s| s.to_string_lossy().into_owned()),
+            );
+            assert_eq!(got_args, want_args.join("\0"), "args for {linker_path}");
+
+            let want_err_with = WindowsNativeError::LinkerFailed {
+                linker: linker_path.into(),
+                status: Some(1120),
+                output: "LNK1120: unresolved\r\n  ".into(),
+            }
+            .to_string();
+            let want_err_none = WindowsNativeError::LinkerFailed {
+                linker: linker_path.into(),
+                status: None,
+                output: "   \n\t ".into(),
+            }
+            .to_string();
+            assert_eq!(got_err_with, want_err_with);
+            assert_eq!(got_err_none, want_err_none);
+        }
+    }
+}
