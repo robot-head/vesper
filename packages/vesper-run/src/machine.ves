@@ -529,10 +529,12 @@ const CL_OP: u64 = 0;
 const CL_FN: u64 = 1;
 const CL_PAT_COUNT: u64 = 2;
 const CL_PATS: u64 = 3;
-// effect call: effect, operation, instance key + 1.
+// effect call: effect, operation, instance key + 1, label + 1.
 const EC_EFFECT: u64 = 2;
 const EC_OP: u64 = 3;
 const EC_KEY: u64 = 4;
+// A labelled operation's capability label + 1 (`stop.raise(x)`), or 0.
+const EC_LABEL: u64 = 5;
 // try: instance key + 1.
 const TRY_KEY: u64 = 2;
 // closure: coerce flag, captured names (count, names), body fn + 1, then
@@ -665,6 +667,8 @@ pub fn read_sites(inout machine: M, inout reader: Reader, in bytes: Slice[u8]) {
             machine.sites.push(op_name);
             let key = opt_name_word(in machine, reader.word(in bytes));
             machine.sites.push(key);
+            let label = opt_name_word(in machine, reader.word(in bytes));
+            machine.sites.push(label);
         } else if kind == SITE_TRY {
             let key = opt_name_word(in machine, reader.word(in bytes));
             machine.sites.push(key);
@@ -991,9 +995,13 @@ fn handler_state(in machine: M, handler: Fr) -> Val {
 // `perform` of `effect::op` on `arg_vals`, with the instance key `key`
 // (symbol + 1, or 0) the raising activation's evidence names: the
 // innermost handler with that key, else the innermost of the effect.
-fn perform(inout machine: M, effect: u32, op_name: u32, key: u64) {
+fn perform(inout machine: M, effect: u32, op_name: u32, key: u64, label: u64) {
     let mut found = NONE64;
-    if key != 0 {
+    if label != 0 {
+        // `$label:<label>` first, then the instance as unlabelled.
+        found = find_labelled(inout machine, label);
+    }
+    if found == NONE64 && key != 0 {
         found = find_handler(inout machine, key, effect);
     }
     if found == NONE64 {
@@ -1333,7 +1341,7 @@ fn raise(inout machine: M, failure: u8) {
     let payload = make(inout machine, T_DATA, ctor, machine.kids.len());
     machine.arg_vals.clear();
     machine.arg_vals.push(payload);
-    perform(inout machine, machine.fail_sym, machine.raise_sym, key);
+    perform(inout machine, machine.fail_sym, machine.raise_sym, key, 0);
 }
 
 // ----- symbols -----------------------------------------------------------------
@@ -1561,7 +1569,6 @@ fn type_ok(in machine: M, ty: u32, depth: u64) -> bool {
         if name == known.i128_
             || name == known.u128_
             || name == known.tiled_seq
-            || name == known.box_
             || name == known.vec
             || name == known.mask
             || name == known.region
@@ -2164,11 +2171,8 @@ pub fn scan(inout machine: M) {
                         reach(inout machine, callee_index, inout work);
                         let ok = machine.aux.try_set(inst_id, callee_index);
                     }
-                } else if op == Op::Exit {
-                    if n32(machine.program.op(inc(operand_at))) != fn_info.name {
-                        decline(inout machine, "a `return` out of a nested body", NONE32);
-                    }
                 } else if op == Op::Tuple
+                    || op == Op::Exit
                     || op == Op::Unit
                     || op == Op::Project
                     || op == Op::Index
@@ -2207,8 +2211,10 @@ pub fn scan(inout machine: M) {
                     if code == 0 {
                         decline(inout machine, "a sequence operation in ", fn_info.name);
                     }
+                } else if op == Op::Fip {
+                    // `Box::new` and its reuse forms: a `Box` data value.
                 } else {
-                    decline(inout machine, "a vector, tiled or Box operation in ", fn_info.name);
+                    decline(inout machine, "a vector or tiled operation in ", fn_info.name);
                 }
             }
             if block.term == Term::Match {
@@ -3213,6 +3219,25 @@ fn leave(inout machine: M, value: Val) {
     machine.control = C_RET;
 }
 
+// `exit_to` of a `return` in a nested body (a handler body or clause):
+// abandons every frame up to the suspended activation of `owner`, which
+// becomes the current one for `leave`.
+fn exit_to(inout machine: M, owner: u32) {
+    loop {
+        let frame = match machine.stack.pop() {
+            Option::Some(popped) => popped,
+            Option::None => {
+                fail_sym(inout machine, "'return' target '", owner, "' is not active");
+                return;
+            },
+        };
+        if frame.kind == FR_IR && func(in machine, frame.func_index).name == owner {
+            machine.frame = frame;
+            return;
+        }
+    }
+}
+
 // Suspends the current activation for a call or `?` (`Frame::IrResume`).
 fn suspend(inout machine: M, dest: u32, ty: u32) {
     let mut frame = machine.frame;
@@ -3401,6 +3426,13 @@ fn step(inout machine: M) {
         if machine.failed {
             return;
         }
+        let owner = n32(machine.program.op(inc(operand_at)));
+        if owner != func(in machine, machine.frame.func_index).name {
+            exit_to(inout machine, owner);
+            if machine.failed {
+                return;
+            }
+        }
         leave(inout machine, value);
         return;
     } else if op == Op::Const {
@@ -3560,6 +3592,20 @@ fn step(inout machine: M) {
     } else if op == Op::Closure {
         make_closure(inout machine, inst_id, inst);
         return;
+    } else if op == Op::Fip {
+        // `Op::Fip` (a non-`dyn` box): `Data { Box, 0: inner }`.
+        let n = collect_args(inout machine, inc(operand_at));
+        if machine.failed {
+            return;
+        }
+        if n == 0 {
+            fail(inout machine, "Box constructor requires 1 argument");
+            return;
+        }
+        let inner = val_at(in machine.arg_vals, 0);
+        let kid_start = machine.kids.len();
+        push_kid(inout machine, machine.zero_sym, inner);
+        result = make(inout machine, T_DATA, machine.ctx.world.k.box_, kid_start);
     } else if op == Op::Seq {
         let n = collect_args(inout machine, inc(operand_at));
         if machine.failed {
@@ -3614,7 +3660,8 @@ fn step(inout machine: M) {
                 inout machine,
                 n32(site_word(in machine, add(at, EC_EFFECT))),
                 n32(site_word(in machine, add(at, EC_OP))),
-                site_word(in machine, add(at, EC_KEY))
+                site_word(in machine, add(at, EC_KEY)),
+                site_word(in machine, add(at, EC_LABEL))
             );
             return;
         }
@@ -3797,7 +3844,7 @@ fn resume(inout machine: M) -> bool {
                 let payload = kid(in machine, add(aggregate.kid_start, payload_index));
                 machine.arg_vals.clear();
                 machine.arg_vals.push(payload);
-                perform(inout machine, machine.fail_sym, machine.raise_sym, w(frame.dest));
+                perform(inout machine, machine.fail_sym, machine.raise_sym, w(frame.dest), 0);
                 return true;
             }
         }
@@ -4816,6 +4863,39 @@ fn find_handler(inout machine: M, key: u64, effect: u32) -> u64 {
             for j in frame.block..add(frame.block, frame.ip) {
                 let ev = ev_at(in machine, j);
                 if ev_provides(in machine, ev, key, effect) {
+                    let found = live_handler(in machine, ev.serial);
+                    if found == NONE64 {
+                        decline(inout machine, "evidence of a handler no longer installed", NONE32);
+                    }
+                    return found;
+                }
+            }
+        }
+    }
+}
+
+// `capability` of `$label:<label>` (`label` is the label + 1): the
+// innermost handler installed with that label, where an evidence frame's
+// whole-handler entries come before the frames below it. NONE64 when there
+// is none.
+fn find_labelled(inout machine: M, label: u64) -> u64 {
+    let mut i = machine.stack.len();
+    loop {
+        if i == 0 {
+            return NONE64;
+        }
+        i = wrapping_sub(i, 1);
+        let frame = stack_at(in machine, i);
+        if frame.kind == FR_HANDLER {
+            if site_word(in machine, add(frame.func_index, HS_LABEL)) == label {
+                return i;
+            }
+        } else if frame.kind == FR_EVIDENCE {
+            for j in frame.block..add(frame.block, frame.ip) {
+                let ev = ev_at(in machine, j);
+                if ev.effect == EV_ALL_KEYS
+                    && site_word(in machine, add(ev.site, HS_LABEL)) == label
+                {
                     let found = live_handler(in machine, ev.serial);
                     if found == NONE64 {
                         decline(inout machine, "evidence of a handler no longer installed", NONE32);
