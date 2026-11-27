@@ -2086,6 +2086,19 @@ fn assign_expr(inout ck: Ck, ex: Ex) -> u32 {
 
 // `numeric::wrapping_intrinsic`: `wrapping_add`, `wrapping_sub` or
 // `wrapping_mul`.
+// `receiver_type`'s `world.types` lookup: the type the previous checking
+// round recorded for `e`, which Rust's fixed-point loop reaches. Here `e`
+// is checked once ahead of its real check, and that check's diagnostics
+// are dropped (the real check reports them).
+fn previous_pass_type(inout ck: Ck, e: u32) -> u32 {
+    let out_mark = ck.out.len();
+    let errors = ck.errors;
+    let ty = expr(inout ck, e);
+    ck.out.truncate(out_mark);
+    ck.errors = errors;
+    ty
+}
+
 // Whether some trait in scope declares a method named `method`.
 pub fn trait_method(in ck: Ck, method: u32) -> bool {
     for i in 0..ck.trait_methods.len() {
@@ -2277,10 +2290,15 @@ fn method_call(inout ck: Ck, ex: Ex, callee: Ex, expected: u32) -> u32 {
         return elements.ty;
     }
     let peeked = peek_type(inout ck, callee.x);
-    let receiver_ty = if peeked == hole && root == NONE32 {
+    let declared = if peeked == hole && root == NONE32 {
         receiver_type(inout ck, callee.x)
     } else {
         peeked
+    };
+    let receiver_ty = if declared == hole && root == NONE32 && !ck.skip {
+        previous_pass_type(inout ck, callee.x)
+    } else {
+        declared
     };
     if ck.skip
         || receiver_ty == hole
