@@ -31,6 +31,38 @@ pub struct LegacyRustParamSummary {
 
 impl LegacyRustParamSummary {
     /// The mode and footprint this summary justifies.
+    #[cfg(feature = "vesper-port")]
+    pub fn lift(&self) -> LiftedParam {
+        let (mode, footprint) = match crate::binding::migrate_lift_mode(
+            self.is_owned_move,
+            self.is_unique_borrow,
+            self.whole_value_access,
+            !self.read_field_paths.is_empty(),
+            !self.mutated_field_paths.is_empty(),
+        ) {
+            0 => (Mode::Sink, None),
+            1 => (Mode::Inout, None),
+            2 => (Mode::In, None),
+            3 => (
+                Mode::Inout,
+                Some(sorted_paths(
+                    self.mutated_field_paths
+                        .iter()
+                        .chain(self.read_field_paths.iter()),
+                )),
+            ),
+            _ => (Mode::In, Some(sorted_paths(self.read_field_paths.iter()))),
+        };
+        LiftedParam {
+            name: self.param_name.clone(),
+            mode,
+            footprint,
+            ty: self.ty_name.clone(),
+        }
+    }
+
+    /// The mode and footprint this summary justifies.
+    #[cfg(not(feature = "vesper-port"))]
     pub fn lift(&self) -> LiftedParam {
         let (mode, footprint) = if self.is_owned_move {
             (Mode::Sink, None)
@@ -68,6 +100,31 @@ impl LegacyRustParamSummary {
 
 /// Sort, deduplicate, and drop paths subsumed by a shorter prefix
 /// (`a` covers `a.b`), so the footprint is a FieldTree antichain.
+#[cfg(feature = "vesper-port")]
+fn sorted_paths<'a>(paths: impl Iterator<Item = &'a String>) -> Vec<String> {
+    let all: Vec<&String> = paths.collect();
+    let total_bytes: usize = all.iter().map(|p| p.len()).sum();
+    let mut buf = Vec::with_capacity(total_bytes);
+    let mut starts = Vec::with_capacity(all.len());
+    let mut lens = Vec::with_capacity(all.len());
+    for p in &all {
+        starts.push(buf.len() as u64);
+        lens.push(p.len() as u64);
+        buf.extend_from_slice(p.as_bytes());
+    }
+    let mut indices = vec![0u64; all.len()];
+    let kept =
+        crate::binding::migrate_sorted_paths_antichain(&buf, &starts, &lens, &mut indices) as usize;
+    indices
+        .into_iter()
+        .take(kept)
+        .map(|i| all[i as usize].clone())
+        .collect()
+}
+
+/// Sort, deduplicate, and drop paths subsumed by a shorter prefix
+/// (`a` covers `a.b`), so the footprint is a FieldTree antichain.
+#[cfg(not(feature = "vesper-port"))]
 fn sorted_paths<'a>(paths: impl Iterator<Item = &'a String>) -> Vec<String> {
     let mut all: Vec<String> = paths.cloned().collect();
     all.sort_unstable();
