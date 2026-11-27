@@ -47,6 +47,7 @@ const E_RANGE: u64 = 18;
 const E_LOOP: u64 = 19;
 const E_BREAK: u64 = 20;
 const E_CONTINUE: u64 = 21;
+const E_HANDLE: u64 = 22;
 const E_INDEX: u64 = 40;
 
 // Literal pattern kinds (`LIT_*` in exprs.ves).
@@ -310,6 +311,35 @@ fn encode_expr(w: &World, e: &mut Enc, x: &Expr, out: &mut Vec<u64>) {
             }
         }
         ExprKind::Continue => out.extend([E_CONTINUE, s, t]),
+        ExprKind::Handle {
+            effect,
+            state,
+            body,
+            ret,
+            ops,
+        } => {
+            out.extend([E_HANDLE, s, t]);
+            out.push(e.name(&effect.name));
+            out.push(effect.args.len() as u64);
+            for a in &effect.args {
+                out.push(e.ty(a));
+            }
+            out.push(state.is_some() as u64);
+            if let Some((p, value)) = state {
+                encode_pattern(e, p, out);
+                encode_expr(w, e, value, out);
+            }
+            encode_expr(w, e, body, out);
+            out.push(1 + ops.len() as u64);
+            for c in std::iter::once(ret.as_ref()).chain(ops) {
+                out.push(e.name(&c.name));
+                out.push(c.pats.len() as u64);
+                for p in &c.pats {
+                    encode_pattern(e, p, out);
+                }
+                encode_expr(w, e, &c.body, out);
+            }
+        }
         ExprKind::Return(value) => {
             out.extend([E_RETURN, s, t, value.is_some() as u64]);
             if let Some(x) = value {
