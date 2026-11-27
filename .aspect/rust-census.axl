@@ -157,7 +157,7 @@ MODULES = {
     "dyn_fn": ("SH2-11, #1976", "vesper-check-dyn", "flip gate PASS with dyn_trait: used 1.13x, forced 0.82x (#2207), in the gated set"),
     "strings": ("SH2-9", "vesper-check-regions-seqs", ""),
     "native_verifiers": ("SH4-17, 3", "vesper-backend-checks", "links kinetic/silicon/resonance seeds"),
-    "ir_check": ("SH2-5", "vesper-ir-check", "flip gate FAIL: 1.71x with encoding, 0 diffs (#2289)"),
+    "ir_check": ("SH2-5", "vesper-ir-check", "flip gate PASS: 0.80x with encoding, 0 diffs over every world and mutant (#2289, Flow::mode cached per type); gated"),
     "native_coverage": ("SH4-17, 3", "", "links the crucible seed; only `vesper fuzz` (a tool) uses it"),
     "main": ("SH5-12", "vesper-driver", "#1367"),
     "arrays": ("SH2-9", "", ""),

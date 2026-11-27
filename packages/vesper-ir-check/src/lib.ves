@@ -31,6 +31,8 @@ use @vesper/check-data::input::{Ctx, Reader, ctx_new, extend_ctx, read_ctx};
 // copies equal check-data's.
 const NONE32: u32 = 4294967295;
 const NO_ADT: u32 = 4294967295;
+// A `Flow::modes` entry not yet asked (modes are 0 to 2).
+const MODE_UNKNOWN: u8 = 255;
 
 // Input name index -> symbol (`sym` of check-data's input.ves).
 fn sym(in name_map: ChunkSeq[u32], index: u64) -> u32 {
@@ -1434,6 +1436,9 @@ pub struct Flow {
     witness_touched: ChunkSeq[u32],
     diags: Diags,
     message: ChunkSeq[u8],
+    // `World::mode` per type index under this function's bounds, or
+    // MODE_UNKNOWN. Joins ask it for every slot again.
+    modes: ChunkSeq[u8],
 }
 
 pub fn flow_new() -> Flow {
@@ -1449,7 +1454,8 @@ pub fn flow_new() -> Flow {
         witness_s1: ChunkSeq::new[u64](),
         witness_touched: ChunkSeq::new[u32](),
         diags: diags_new(),
-        message: ChunkSeq::new[u8]()
+        message: ChunkSeq::new[u8](),
+        modes: ChunkSeq::new[u8]()
     }
 }
 
@@ -1496,8 +1502,20 @@ fn push_label(inout diags: Diags, label: u8, param: bool) {
 }
 
 impl Flow {
-    fn mode(in self, inout types: Types, in names: Names, in world: World, ty: u32) -> u8 {
-        mode_of(inout types, in names, in world, ty, in self.bounds)
+    fn mode(inout self, inout types: Types, in names: Names, in world: World, ty: u32) -> u8 {
+        let at = w(ty);
+        if at < self.modes.len() {
+            let known = u8_at(in self.modes, at);
+            if known != MODE_UNKNOWN {
+                return known;
+            }
+        }
+        let mode = mode_of(inout types, in names, in world, ty, in self.bounds);
+        for _ in self.modes.len()..inc(at) {
+            self.modes.push(MODE_UNKNOWN);
+        }
+        let ok = self.modes.try_set(at, mode);
+        mode
     }
 
     // `Flow::error`: E0410 with the message in `self.message`.
@@ -2870,6 +2888,7 @@ impl Flow {
             return;
         }
         self.bounds = bounds_new();
+        self.modes.clear();
         for i in 0..w(func.bound_count) {
             let bound_at = add(w(func.bound_start), wrapping_mul(i, 2));
             self.bounds.set(n32(program.op(bound_at)), wrapping_u8(program.op(inc(bound_at))));

@@ -5,7 +5,9 @@
     "`ir-check-per-call-encode-vesper-decode` workload times Rust's `validate`",
     "against encode, the Vesper entry and decode per call, over the IR corpus and",
     "its mutants.",
-    "The tests run one at a time (RUST_TEST_THREADS=1): the IR corpus with its mutants needs most of a 16 GB host."
+    "The tests run one at a time (RUST_TEST_THREADS=1): the IR corpus with its mutants needs most of a 16 GB host.",
+    "The tests and differential run every world (HYBRID_IR_CHECK_STEP=1) in four groups (HYBRID_IR_CHECK_CHUNKS=4): the corpus with its mutants held at once does not fit a 16 GB host.",
+    "The timing takes every 16th world (HYBRID_IR_CHECK_STEP=16 on the workload): at every 8th the gate runner itself was OOM-killed next to the test on a 16 GB host."
   ],
   "name": "ir-check",
   "lane": "SH5-10",
@@ -16,7 +18,9 @@
     "CARGO_PROFILE_DEV_DEBUG": "0",
     "CARGO_PROFILE_TEST_DEBUG": "0",
     "CARGO_PROFILE_RELEASE_DEBUG": "0",
-    "RUST_TEST_THREADS": "1"
+    "RUST_TEST_THREADS": "1",
+    "HYBRID_IR_CHECK_STEP": "1",
+    "HYBRID_IR_CHECK_CHUNKS": "4"
   },
   "build": [
     [
@@ -102,7 +106,8 @@
         ],
         "env": {
           "FLIP_GATE": "1",
-          "CHECK_HARNESS_SPEED": "1"
+          "CHECK_HARNESS_SPEED": "1",
+          "HYBRID_IR_CHECK_STEP": "16"
         }
       }
     }
