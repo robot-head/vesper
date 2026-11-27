@@ -1,4 +1,13 @@
+load("@crates//vesper-cranelift-component:data.bzl", "all_crate_deps")
+load("@rules_rs//rs:rust_binary.bzl", "rust_binary")
+load("@rules_rs//rs:rust_shared_library.bzl", "rust_shared_library")
 load("//tools/bazel:defs.bzl", "vesper_crate")
+load("//tools/bazel:wasm_component.bzl", "wasm_component")
+
+# The component: the cdylib built for wasm32-wasip2, then wrapped from the
+# core module rust-lld writes (Cargo's wasm-component-ld does both). The
+# Stage 2 composition (`wac plug`) takes this file.
+COMPONENT = "vesper_cranelift_component.wasm"
 
 # The root crate's Wasm tests embed the WIT (tests/common/wasm_words.rs).
 exports_files(
@@ -6,11 +15,10 @@ exports_files(
     visibility = ["//visibility:public"],
 )
 
-# vesper-cranelift-sys as a wasm component (#2210). Bazel builds the crate
-# for the host only: build.rs generates the WIT and the glue from
-# cranelift.vsys, and tests/objects.rs checks the checked-in WIT. The
-# object comparison needs the component built for wasm32-wasip2 (Cargo,
-# or VESPER_CRANELIFT_COMPONENT) and says so when it is missing.
+# vesper-cranelift-sys as a wasm component (#2210). build.rs generates the
+# WIT and the glue from cranelift.vsys, and tests/objects.rs checks the
+# checked-in WIT and compares objects built through :component (below)
+# with the native shim's.
 vesper_crate(
     build_script_data = ["//packages/vesper-cranelift:cranelift.vsys"],
     build_script_env = {
@@ -30,4 +38,49 @@ vesper_crate(
         "//crates/vesper-cranelift-sys:test_fixtures",
         "//packages/vesper-cranelift:files",
     ],
+    # Tests start in this package's runfiles directory, beside :component.
+    # tests/wasm_imports.rs (about 8 min) stays in bootstrap-stage2.yml.
+    test_data_by_target = {
+        "test/objects": [
+            ":component",
+            ":files",
+            "//:files",
+            "//crates/vesper-cranelift-sys:test_fixtures",
+            "//packages/vesper-cranelift:files",
+        ],
+    },
+    test_env_by_target = {
+        "test/objects": {"VESPER_CRANELIFT_COMPONENT": COMPONENT},
+    },
+)
+
+# :component's core module and the tool that wraps it.
+rust_shared_library(
+    name = "component_core",
+    srcs = glob(["src/**/*.rs"]),
+    crate_name = "vesper_cranelift_component",
+    crate_root = "src/lib.rs",
+    edition = "2024",
+    platform = "@rules_rs//rs/platforms:wasm32-wasip2",
+    rustc_env = {
+        "CARGO_PKG_NAME": "vesper-cranelift-component",
+        "CARGO_PKG_VERSION": "0.1.0",
+    },
+    version = "0.1.0",
+    deps = all_crate_deps(normal = True) + [":vesper-cranelift-component_build_script"],
+)
+
+rust_binary(
+    name = "componentize",
+    srcs = ["bazel/componentize.rs"],
+    edition = "2024",
+    deps = all_crate_deps(build = True),
+)
+
+wasm_component(
+    name = "component",
+    core = ":component_core",
+    out = COMPONENT,
+    tool = ":componentize",
+    visibility = ["//visibility:public"],
 )

@@ -8,7 +8,8 @@
 //! Every entry must return the same word and publish the same object bytes.
 //!
 //! The component is built with `cargo build --release --target wasm32-wasip2
-//! -p vesper-cranelift-component`, or taken from `VESPER_CRANELIFT_COMPONENT`.
+//! -p vesper-cranelift-component`, or taken from `VESPER_CRANELIFT_COMPONENT`
+//! (Bazel's `//crates/vesper-cranelift-component:component`).
 //! Without the `wasm32-wasip2` target the test says so and passes.
 
 #[path = "../../vesper-cranelift-sys/tests/support/mod.rs"]
@@ -260,7 +261,8 @@ fn component_path() -> Option<PathBuf> {
     if let Some(p) = std::env::var_os("VESPER_CRANELIFT_COMPONENT") {
         return Some(PathBuf::from(p));
     }
-    // Under Bazel the component is an input, never built by the test.
+    // Under Bazel the component is an input (VESPER_CRANELIFT_COMPONENT),
+    // never built by the test.
     let cargo = std::env::var_os("CARGO")?;
     // A relative CARGO_TARGET_DIR is relative to the build's directory.
     let target_dir = std::env::var_os("CARGO_TARGET_DIR")
