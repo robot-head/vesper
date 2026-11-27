@@ -118,7 +118,7 @@ const DIV_EXTENSION: u8 = 6;
 const IDIV_EXTENSION: u8 = 7;
 const TRAP_BYTES: u8 = 2;
 const SHORT_BRANCH_BYTES: u8 = 2;
-const PREFIXED_REGISTER_INSTRUCTION_BYTES: u8 = 3;
+const REGISTER_INSTRUCTION_BYTES: u8 = 2;
 const NEGATIVE_ONE_IMM8: u8 = 0xff;
 const TEST_RM_R64: u8 = 0x85;
 const TEST_RM_R8: u8 = 0x84;
@@ -319,8 +319,22 @@ fn rex(reg: u8, rm: u8, wide: bool) -> u8 {
     first | reg_extension | rm_extension
 }
 
+fn emit_rex(inout out: ChunkSeq[u8], reg: u8, rm: u8, wide: bool, low_byte: bool) {
+    let prefix = rex(reg, rm, wide);
+    if prefix != REX || low_byte {
+        out.push(prefix);
+    }
+}
+
+fn byte_register_needs_rex(reg: u8) -> bool {
+    // Without REX, encodings 4–7 refer to AH, CH, DH and BH.
+    reg >= RSP
+}
+
 fn binary(inout out: ChunkSeq[u8], opcode: u8, destination: u8, source: u8, wide: bool) {
-    out.push(rex(source, destination, wide));
+    let low_byte = opcode == TEST_RM_R8
+        && (byte_register_needs_rex(source) || byte_register_needs_rex(destination));
+    emit_rex(inout out, source, destination, wide, low_byte);
     out.push(opcode);
     out.push(modrm(source, destination));
 }
@@ -338,6 +352,7 @@ fn sign_extend_dividend(inout out: ChunkSeq[u8], wide: bool) {
 }
 
 fn fixed_arithmetic(inout out: ChunkSeq[u8], in op: FixedArithmetic, rhs: u8, wide: bool) {
+    let prefix = rex(0, rhs, wide);
     let extension = match op {
         FixedArithmetic::SignedDivide => {
             // An explicit zero trap distinguishes divide by zero from overflow.
@@ -355,21 +370,25 @@ fn fixed_arithmetic(inout out: ChunkSeq[u8], in op: FixedArithmetic, rhs: u8, wi
         FixedArithmetic::SignedRemainder => {
             sign_extend_dividend(inout out, wide);
             // The remainder by -1 is zero even when the quotient overflows.
-            out.push(rex(0, rhs, wide));
+            if prefix != REX {
+                out.push(prefix);
+            }
             out.push(ALU_RM64_IMM8);
             out.push(modrm(ALU_CMP_EXTENSION, rhs));
             out.push(NEGATIVE_ONE_IMM8);
             out.push(JCC_SHORT | CC_NE);
-            out.push(PREFIXED_REGISTER_INSTRUCTION_BYTES + SHORT_BRANCH_BYTES);
+            out.push(REGISTER_INSTRUCTION_BYTES + SHORT_BRANCH_BYTES);
             binary(inout out, XOR_RM_R64, RDX, RDX, false);
             out.push(JMP_SHORT);
-            out.push(PREFIXED_REGISTER_INSTRUCTION_BYTES);
+            out.push(wrapping_add(REGISTER_INSTRUCTION_BYTES, if prefix != REX { 1 } else { 0 }));
             IDIV_EXTENSION
         },
         FixedArithmetic::SignedMultiplyHigh => IMUL_EXTENSION,
         FixedArithmetic::UnsignedMultiplyHigh => MUL_EXTENSION,
     };
-    out.push(rex(0, rhs, wide));
+    if prefix != REX {
+        out.push(prefix);
+    }
     out.push(UNARY_GROUP);
     out.push(modrm(extension, rhs));
 }
@@ -390,7 +409,13 @@ fn alu_immediate(inout out: ChunkSeq[u8], extension: u8, reg: u8, bits: u32, wid
     if width == WORD_BITS {
         out.push(OPERAND_SIZE_OVERRIDE);
     }
-    out.push(rex(0, reg, width == QWORD_BITS));
+    emit_rex(
+        inout out,
+        0,
+        reg,
+        width == QWORD_BITS,
+        width == BYTE_BITS && byte_register_needs_rex(reg)
+    );
     out.push(
         if width == BYTE_BITS {
             ALU_RM8_IMM8
@@ -500,7 +525,7 @@ pub fn patch_relative_offset(inout out: ChunkSeq[u8], start: u64, base: u64, tar
 }
 
 fn load_memory(inout out: ChunkSeq[u8], destination: u8, base: u8, displacement: u32, width: u64) {
-    out.push(rex(destination, base, width == QWORD_BITS));
+    emit_rex(inout out, destination, base, width == QWORD_BITS, false);
     if width == BYTE_BITS || width == WORD_BITS {
         out.push(TWO_BYTE_OPCODE);
         out.push(
@@ -521,7 +546,13 @@ fn store_memory(inout out: ChunkSeq[u8], source: u8, base: u8, displacement: u32
     if width == WORD_BITS {
         out.push(OPERAND_SIZE_OVERRIDE);
     }
-    out.push(rex(source, base, width == QWORD_BITS));
+    emit_rex(
+        inout out,
+        source,
+        base,
+        width == QWORD_BITS,
+        width == BYTE_BITS && byte_register_needs_rex(source)
+    );
     out.push(
         if width == BYTE_BITS {
             MOV_RM_R8
@@ -560,9 +591,14 @@ fn atomic_memory(inout out: ChunkSeq[u8], in op: AtomicMemory, register: u8, bas
     if width == WORD_BITS {
         out.push(OPERAND_SIZE_OVERRIDE);
     }
-    // A REX prefix also selects the low byte of the argument registers.
-    out.push(rex(register, base, width == QWORD_BITS));
     let byte = width == BYTE_BITS;
+    emit_rex(
+        inout out,
+        register,
+        base,
+        width == QWORD_BITS,
+        byte && byte_register_needs_rex(register)
+    );
     match op {
         AtomicMemory::FetchAdd => {
             out.push(TWO_BYTE_OPCODE);
@@ -578,12 +614,12 @@ fn atomic_memory(inout out: ChunkSeq[u8], in op: AtomicMemory, register: u8, bas
 fn byte_swap(inout out: ChunkSeq[u8], register: u8, width: u64) {
     if width == WORD_BITS {
         out.push(OPERAND_SIZE_OVERRIDE);
-        out.push(rex(0, register, false));
+        emit_rex(inout out, 0, register, false, false);
         out.push(SHIFT_GROUP_IMM8);
         out.push(modrm(ROR_EXTENSION, register));
         out.push(wrapping_u8(BYTE_BITS));
     } else {
-        out.push(rex(0, register, width == QWORD_BITS));
+        emit_rex(inout out, 0, register, width == QWORD_BITS, false);
         out.push(TWO_BYTE_OPCODE);
         out.push(BSWAP_REGISTER | (register & LOW_REGISTER_MASK));
     }
@@ -591,17 +627,11 @@ fn byte_swap(inout out: ChunkSeq[u8], register: u8, width: u64) {
 
 fn load_constant(inout out: ChunkSeq[u8], destination: u8, bits: u64) {
     if bits == 0 {
-        let prefix = rex(destination, destination, false);
-        if prefix != REX {
-            out.push(prefix);
-        }
+        emit_rex(inout out, destination, destination, false, false);
         out.push(XOR_RM_R64);
         out.push(modrm(destination, destination));
     } else if bits <= U32_MAX_BITS {
-        let prefix = rex(0, destination, false);
-        if prefix != REX {
-            out.push(prefix);
-        }
+        emit_rex(inout out, 0, destination, false, false);
         out.push(MOV_REGISTER_IMMEDIATE | (destination & LOW_REGISTER_MASK));
         immediate(inout out, bits, IMM32_BYTES);
     } else if bits >= I32_MIN_BITS {
@@ -621,7 +651,13 @@ fn truncate(inout out: ChunkSeq[u8], destination: u8, source: u8, width: u64) {
         // A 32-bit write zeroes the high half, even for a self-move.
         binary(inout out, MOV_RM_R64, destination, source, false);
     } else {
-        out.push(rex(destination, source, false));
+        emit_rex(
+            inout out,
+            destination,
+            source,
+            false,
+            width == BYTE_BITS && byte_register_needs_rex(source)
+        );
         out.push(TWO_BYTE_OPCODE);
         out.push(
             if width == BYTE_BITS {
@@ -635,7 +671,13 @@ fn truncate(inout out: ChunkSeq[u8], destination: u8, source: u8, width: u64) {
 }
 
 fn sign_extend(inout out: ChunkSeq[u8], destination: u8, source: u8, from: u64, width: u64) {
-    out.push(rex(destination, source, width == QWORD_BITS));
+    emit_rex(
+        inout out,
+        destination,
+        source,
+        width == QWORD_BITS,
+        from == BYTE_BITS && byte_register_needs_rex(source)
+    );
     if from == DWORD_BITS {
         out.push(MOVSXD_R64_RM32);
     } else {
@@ -661,7 +703,7 @@ fn normalize_small_result(inout out: ChunkSeq[u8], destination: u8, width: u64) 
 }
 
 fn set_condition(inout out: ChunkSeq[u8], destination: u8, cc: u8) {
-    out.push(rex(0, destination, false));
+    emit_rex(inout out, 0, destination, false, byte_register_needs_rex(destination));
     out.push(TWO_BYTE_OPCODE);
     out.push(SETCC | cc);
     out.push(modrm(0, destination));
@@ -672,8 +714,9 @@ fn compare_registers(inout out: ChunkSeq[u8], left: u8, right: u8, width: u64) {
     if width == WORD_BITS {
         out.push(OPERAND_SIZE_OVERRIDE);
     }
-    // REX also selects the low byte of rsi/rdi for byte operations.
-    out.push(rex(right, left, width == QWORD_BITS));
+    let low_byte = width == BYTE_BITS
+        && (byte_register_needs_rex(left) || byte_register_needs_rex(right));
+    emit_rex(inout out, right, left, width == QWORD_BITS, low_byte);
     out.push(
         if width == BYTE_BITS {
             CMP_RM_R8
@@ -718,17 +761,10 @@ fn xmm_code(reg: u8) -> u8 {
     wrapping_sub(reg, XMM0)
 }
 
-fn float_rex(inout out: ChunkSeq[u8], reg: u8, rm: u8, wide: bool) {
-    let prefix = rex(reg, rm, wide);
-    if prefix != REX {
-        out.push(prefix);
-    }
-}
-
 fn xmm_binary(inout out: ChunkSeq[u8], opcode: u8, destination: u8, source: u8) {
     let dst = xmm_code(destination);
     let src = xmm_code(source);
-    float_rex(inout out, dst, src, false);
+    emit_rex(inout out, dst, src, false, false);
     out.push(TWO_BYTE_OPCODE);
     out.push(opcode);
     out.push(modrm(dst, src));
@@ -737,7 +773,7 @@ fn xmm_binary(inout out: ChunkSeq[u8], opcode: u8, destination: u8, source: u8) 
 fn packed_shift(inout out: ChunkSeq[u8], destination: u8, extension: u8, width: u64) {
     let destination = xmm_code(destination);
     out.push(OPERAND_SIZE_OVERRIDE);
-    float_rex(inout out, 0, destination, false);
+    emit_rex(inout out, 0, destination, false, false);
     out.push(TWO_BYTE_OPCODE);
     out.push(
         if width == DWORD_BITS {
@@ -761,7 +797,7 @@ fn float_bits(inout out: ChunkSeq[u8], destination: u8, source: u8, width: u64) 
     let xmm = xmm_code(if to_xmm { destination } else { source });
     let gp = if to_xmm { source } else { destination };
     out.push(OPERAND_SIZE_OVERRIDE);
-    float_rex(inout out, xmm, gp, width == QWORD_BITS);
+    emit_rex(inout out, xmm, gp, width == QWORD_BITS, false);
     out.push(TWO_BYTE_OPCODE);
     out.push(if to_xmm { GPR_TO_XMM } else { XMM_TO_GPR });
     out.push(modrm(xmm, gp));
@@ -777,7 +813,7 @@ fn float_memory(
 ) {
     let register = xmm_code(register);
     out.push(float_prefix(width));
-    float_rex(inout out, register, base, false);
+    emit_rex(inout out, register, base, false, false);
     out.push(TWO_BYTE_OPCODE);
     out.push(
         if load {
@@ -932,7 +968,7 @@ pub fn emit(inout out: ChunkSeq[u8], in instruction: Instruction) {
             alu_immediate(inout out, extension, destination, bits, width);
         },
         Instruction::Multiply(destination, source, width) => {
-            out.push(rex(destination, source, width == QWORD_BITS));
+            emit_rex(inout out, destination, source, width == QWORD_BITS, false);
             out.push(TWO_BYTE_OPCODE);
             out.push(IMUL_R64_RM64);
             out.push(modrm(destination, source));
@@ -940,7 +976,7 @@ pub fn emit(inout out: ChunkSeq[u8], in instruction: Instruction) {
         },
         Instruction::MultiplyImmediate(destination, source, bits, width) => {
             let short = fits_signed_byte(bits);
-            out.push(rex(destination, source, width == QWORD_BITS));
+            emit_rex(inout out, destination, source, width == QWORD_BITS, false);
             out.push(
                 if short {
                     IMUL_R64_RM64_IMM8
@@ -953,7 +989,7 @@ pub fn emit(inout out: ChunkSeq[u8], in instruction: Instruction) {
             normalize_small_result(inout out, destination, width);
         },
         Instruction::Unary(extension, destination, width) => {
-            out.push(rex(0, destination, width == QWORD_BITS));
+            emit_rex(inout out, 0, destination, width == QWORD_BITS, false);
             out.push(UNARY_GROUP);
             out.push(modrm(extension, destination));
             normalize_small_result(inout out, destination, width);
@@ -962,7 +998,13 @@ pub fn emit(inout out: ChunkSeq[u8], in instruction: Instruction) {
             if width == WORD_BITS {
                 out.push(OPERAND_SIZE_OVERRIDE);
             }
-            out.push(rex(0, destination, width == QWORD_BITS));
+            emit_rex(
+                inout out,
+                0,
+                destination,
+                width == QWORD_BITS,
+                width == BYTE_BITS && byte_register_needs_rex(destination)
+            );
             out.push(
                 if width == BYTE_BITS {
                     SHIFT_BYTE_GROUP_IMM8
@@ -989,7 +1031,7 @@ pub fn emit(inout out: ChunkSeq[u8], in instruction: Instruction) {
                     destination
                 }
             };
-            out.push(rex(0, shifted, width == QWORD_BITS));
+            emit_rex(inout out, 0, shifted, width == QWORD_BITS, false);
             out.push(SHIFT_GROUP_CL);
             out.push(modrm(extension, shifted));
             if count != RCX {
