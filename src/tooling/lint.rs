@@ -76,6 +76,13 @@ struct SourceFacts {
 fn trivia(kind: K) -> bool {
     matches!(kind, K::Whitespace | K::Comment | K::BlockComment)
 }
+/// The lexical budgets of `preflight`; each refusal names its bound.
+const MAX_TOKENS: usize = 8192;
+const MAX_RECURSIVE_TOKENS: usize = 256;
+const MAX_IDENTIFIER_BYTES: usize = 128;
+const MAX_CONDITIONALS: usize = 64;
+const MAX_NESTING: usize = 32;
+const MAX_TOKEN_RUN: usize = 256;
 fn preflight(source: &str) -> Result<Vec<Token>, String> {
     if source.len() > MAX_BYTES {
         return Err("lint source exceeds 256 KiB".into());
@@ -84,7 +91,7 @@ fn preflight(source: &str) -> Result<Vec<Token>, String> {
     if !errors.is_empty() {
         return Err(format!("lexical errors: {errors:?}"));
     }
-    if tokens.len() > 8192 {
+    if tokens.len() > MAX_TOKENS {
         return Err("lint token limit (8192)".into());
     }
     let mut depth = 0usize;
@@ -129,23 +136,23 @@ fn preflight(source: &str) -> Result<Vec<Token>, String> {
                 | K::Shr
         ) {
             recursive_tokens += 1;
-            if recursive_tokens > 256 {
+            if recursive_tokens > MAX_RECURSIVE_TOKENS {
                 return Err("lint recursive-expression token budget (256)".into());
             }
         }
-        if matches!(token.kind, K::Upper | K::Lower) && token.span.len() > 128 {
+        if matches!(token.kind, K::Upper | K::Lower) && token.span.len() > MAX_IDENTIFIER_BYTES {
             return Err("lint identifier byte limit (128)".into());
         }
         if token.kind == K::If {
             branches += 1;
-            if branches > 64 {
+            if branches > MAX_CONDITIONALS {
                 return Err("lint conditional limit (64), including else-if recursion".into());
             }
         }
         match token.kind {
             K::LParen | K::LBracket | K::LBrace => {
                 depth += 1;
-                if depth > 32 {
+                if depth > MAX_NESTING {
                     return Err("lint nesting limit (32)".into());
                 }
             }
@@ -155,7 +162,7 @@ fn preflight(source: &str) -> Result<Vec<Token>, String> {
         if matches!(token.kind, K::Semi | K::LBrace | K::RBrace) {
             run = 0;
         }
-        if run > 256 {
+        if run > MAX_TOKEN_RUN {
             return Err("lint expression/signature token-run limit (256)".into());
         }
     }
@@ -1136,6 +1143,29 @@ fn validate_lint_delta(before: &LintReport, after: &LintReport) -> Result<(), St
         }
     }
     Ok(())
+}
+
+/// `preflight` as the Vesper port answers it (#1828 part 13a), `rounds`
+/// times: `O <tokens>` for an admitted source, else `E <refusal>`.
+#[doc(hidden)]
+pub fn preflight_answer(source: &str, rounds: u64) -> String {
+    let mut answer = String::new();
+    for _ in 0..rounds {
+        answer = match preflight(source) {
+            Ok(tokens) => format!("O {}", tokens.len()),
+            Err(refusal) => format!("E {refusal}"),
+        };
+    }
+    answer
+}
+/// The words the port's `lsp_lint_preflight` reads: `rounds`, then the
+/// source's byte length and bytes.
+#[doc(hidden)]
+pub fn preflight_words(source: &str, rounds: u64) -> Vec<u8> {
+    let mut words = rounds.to_le_bytes().to_vec();
+    words.extend((source.len() as u64).to_le_bytes());
+    words.extend(source.as_bytes());
+    words
 }
 
 #[cfg(test)]

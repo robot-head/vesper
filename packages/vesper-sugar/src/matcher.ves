@@ -26,18 +26,17 @@ use @vesper/front::kinds::{
 
 const NONE: u64 = 18446744073709551615;
 
+// Result tags shared by both encodings and their consumers.
+pub const MATCH_NONE: u64 = 0;
+pub const MATCH_FOUND: u64 = 1;
+pub const MATCH_REFUSED: u64 = 2;
+
 // Words per event record and per backtracking state.
 const REC: u64 = 8;
 const TD: u64 = 8;
 
 // `parser::HARD_PARSE_DEPTH`.
 const HARD_PARSE_DEPTH: u64 = 128;
-
-// Status, word 0 of an encoded match (`match_rule_encoded`,
-// `match_bootstrap_scalar_encoded`): no match, a match, or a refusal.
-pub const MATCH_NONE: u64 = 0;
-pub const MATCH_FOUND: u64 = 1;
-pub const MATCH_REFUSED: u64 = 2;
 
 // Op kinds.
 const OP_LITERAL: u8 = 0;
@@ -1416,10 +1415,7 @@ pub fn match_rule_encoded(
             }
         }
     }
-    let mut out = ChunkSeq::new[u64]();
-    out.push(MATCH_NONE);
-    out.push(matcher.work);
-    out
+    no_match(in matcher)
 }
 
 // Compile only unambiguous, delimiter-separated expr captures for the

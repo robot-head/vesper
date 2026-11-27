@@ -1,0 +1,620 @@
+// @vesper/quarry::meta: table-store meta page validator and decoder (`src/store/pages.rs`).
+
+const PAGE_SIZE: u64 = 16384;
+const KIND_META: u8 = 16;
+const FSM_PAGE: u64 = 1;
+const MIN_PAGE_COUNT: u64 = 2;
+
+const OFF_COUNT: u64 = 20;
+const OFF_KIND: u64 = 24;
+const OFF_LEVEL: u64 = 25;
+const OFF_BODY_LEN: u64 = 32;
+const OFF_BODY_START: u64 = 36;
+
+const META_MAGIC_LEN: u64 = 8;
+const META_MAGIC_0: u8 = 81;
+// 'Q'
+const META_MAGIC_1: u8 = 82;
+// 'R'
+const META_MAGIC_2: u8 = 89;
+// 'Y'
+const META_MAGIC_3: u8 = 83;
+// 'S'
+const META_MAGIC_4: u8 = 84;
+// 'T'
+const META_MAGIC_5: u8 = 79;
+// 'O'
+const META_MAGIC_6: u8 = 82;
+// 'R'
+const META_MAGIC_7: u8 = 69;
+// 'E'
+const META_FORMAT: u64 = 2;
+
+const MAX_IDENT_LEN: u64 = 128;
+const BYTE_A: u8 = 97;
+const BYTE_Z: u8 = 122;
+const BYTE_0: u8 = 48;
+const BYTE_9: u8 = 57;
+const BYTE_UNDERSCORE: u8 = 95;
+
+const TYPE_TAG_MIN: u8 = 1;
+const TYPE_TAG_MAX: u8 = 6;
+const BOOL_FALSE: u8 = 0;
+const BOOL_TRUE: u8 = 1;
+
+const SIZE_U16: u64 = 2;
+const SIZE_U32: u64 = 4;
+const SIZE_U64: u64 = 8;
+const SHIFT_8: u64 = 8;
+const SHIFT_16: u64 = 16;
+const SHIFT_24: u64 = 24;
+const SHIFT_32: u64 = 32;
+
+const HDR_LAST_TS: u64 = 0;
+const HDR_PAGE_COUNT: u64 = 1;
+const HDR_CATALOG_REV: u64 = 2;
+const HDR_NEXT_TABLE_ID: u64 = 3;
+const HDR_NTABLES: u64 = 4;
+const HDR_NCOLS: u64 = 5;
+const HDR_NINDEXES: u64 = 6;
+
+const TABLE_STRIDE: u64 = 7;
+const TABLE_NAME_OFF: u64 = 0;
+const TABLE_NAME_LEN: u64 = 1;
+const TABLE_ID: u64 = 2;
+const TABLE_ROOT: u64 = 3;
+const TABLE_NEXT_ROWID: u64 = 4;
+const TABLE_COL_START: u64 = 5;
+const TABLE_NCOLS: u64 = 6;
+
+const COL_STRIDE: u64 = 4;
+const COL_NAME_OFF: u64 = 0;
+const COL_NAME_LEN: u64 = 1;
+const COL_TYPE_TAG: u64 = 2;
+const COL_NULLABLE: u64 = 3;
+
+const INDEX_STRIDE: u64 = 7;
+const INDEX_NAME_OFF: u64 = 0;
+const INDEX_NAME_LEN: u64 = 1;
+const INDEX_ID: u64 = 2;
+const INDEX_TNAME_OFF: u64 = 3;
+const INDEX_TNAME_LEN: u64 = 4;
+const INDEX_COLUMN: u64 = 5;
+const INDEX_ROOT: u64 = 6;
+
+const STATUS_OK: u64 = 0;
+const STATUS_KIND: u64 = 1;
+const STATUS_LENGTH: u64 = 2;
+const STATUS_OVERRUN: u64 = 3;
+const STATUS_MAGIC: u64 = 4;
+const STATUS_NAME: u64 = 5;
+const STATUS_COL_TYPE: u64 = 6;
+const STATUS_NULLABLE: u64 = 7;
+const STATUS_DUP_COL: u64 = 8;
+const STATUS_TABLE_ENTRY: u64 = 9;
+const STATUS_DUP_TABLE: u64 = 10;
+const STATUS_INDEX_ENTRY: u64 = 11;
+const STATUS_DUP_INDEX: u64 = 12;
+const STATUS_TRAILER: u64 = 13;
+const STATUS_GROW: u64 = 14;
+
+const NOT_FOUND: u64 = 18446744073709551615;
+
+fn gb(in b: Slice[u8], i: u64) -> u8 {
+    match b.try_get(i) {
+        Option::Some(x) => x,
+        Option::None => 0,
+    }
+}
+
+fn gu(in s: Slice[u64], i: u64) -> u64 {
+    match s.try_get(i) {
+        Option::Some(x) => x,
+        Option::None => 0,
+    }
+}
+
+fn su(inout s: Slice[u64], i: u64, v: u64) {
+    s.try_set(i, v);
+}
+
+fn le16(in b: Slice[u8], at: u64) -> u64 {
+    widen_u64(gb(in b, at)) | (widen_u64(gb(in b, wrapping_add(at, 1))) << SHIFT_8)
+}
+
+fn le32(in b: Slice[u8], at: u64) -> u64 {
+    widen_u64(gb(in b, at))
+        | (widen_u64(gb(in b, wrapping_add(at, 1))) << SHIFT_8)
+        | (widen_u64(gb(in b, wrapping_add(at, 2))) << SHIFT_16)
+        | (widen_u64(gb(in b, wrapping_add(at, 3))) << SHIFT_24)
+}
+
+fn le64(in b: Slice[u8], at: u64) -> u64 {
+    le32(in b, at) | (le32(in b, wrapping_add(at, SIZE_U32)) << SHIFT_32)
+}
+
+fn is_norm_ident(in b: Slice[u8], off: u64, len: u64) -> bool {
+    if len == 0 || len > MAX_IDENT_LEN {
+        return false;
+    }
+    let b0 = gb(in b, off);
+    if !((b0 >= BYTE_A && b0 <= BYTE_Z) || b0 == BYTE_UNDERSCORE) {
+        return false;
+    }
+    let mut i: u64 = 1;
+    loop {
+        if i >= len {
+            break;
+        }
+        let ch = gb(in b, wrapping_add(off, i));
+        let ok = (ch >= BYTE_A && ch <= BYTE_Z)
+            || (ch >= BYTE_0 && ch <= BYTE_9)
+            || ch == BYTE_UNDERSCORE;
+        if !ok {
+            return false;
+        }
+        i = wrapping_add(i, 1);
+    }
+    true
+}
+
+fn bytes_eq(in b: Slice[u8], off_a: u64, len_a: u64, off_b: u64, len_b: u64) -> bool {
+    if len_a != len_b {
+        return false;
+    }
+    let mut i: u64 = 0;
+    loop {
+        if i >= len_a {
+            break;
+        }
+        if gb(in b, wrapping_add(off_a, i)) != gb(in b, wrapping_add(off_b, i)) {
+            return false;
+        }
+        i = wrapping_add(i, 1);
+    }
+    true
+}
+
+fn find_table_by_name(
+    in b: Slice[u8],
+    in out_tables: Slice[u64],
+    ntables: u64,
+    name_off: u64,
+    name_len: u64
+) -> u64 {
+    let mut i: u64 = 0;
+    loop {
+        if i >= ntables {
+            break;
+        }
+        let base = wrapping_mul(i, TABLE_STRIDE);
+        let toff = gu(in out_tables, wrapping_add(base, TABLE_NAME_OFF));
+        let tlen = gu(in out_tables, wrapping_add(base, TABLE_NAME_LEN));
+        if bytes_eq(in b, toff, tlen, name_off, name_len) {
+            return i;
+        }
+        i = wrapping_add(i, 1);
+    }
+    NOT_FOUND
+}
+
+fn has_table_id(in out_tables: Slice[u64], ntables: u64, id: u64) -> bool {
+    let mut i: u64 = 0;
+    loop {
+        if i >= ntables {
+            break;
+        }
+        let base = wrapping_mul(i, TABLE_STRIDE);
+        if gu(in out_tables, wrapping_add(base, TABLE_ID)) == id {
+            return true;
+        }
+        i = wrapping_add(i, 1);
+    }
+    false
+}
+
+fn has_index_id(in out_indexes: Slice[u64], nindexes: u64, id: u64) -> bool {
+    let mut i: u64 = 0;
+    loop {
+        if i >= nindexes {
+            break;
+        }
+        let base = wrapping_mul(i, INDEX_STRIDE);
+        if gu(in out_indexes, wrapping_add(base, INDEX_ID)) == id {
+            return true;
+        }
+        i = wrapping_add(i, 1);
+    }
+    false
+}
+
+fn has_index_name(
+    in b: Slice[u8],
+    in out_indexes: Slice[u64],
+    nindexes: u64,
+    name_off: u64,
+    name_len: u64
+) -> bool {
+    let mut i: u64 = 0;
+    loop {
+        if i >= nindexes {
+            break;
+        }
+        let base = wrapping_mul(i, INDEX_STRIDE);
+        let ioff = gu(in out_indexes, wrapping_add(base, INDEX_NAME_OFF));
+        let ilen = gu(in out_indexes, wrapping_add(base, INDEX_NAME_LEN));
+        if bytes_eq(in b, ioff, ilen, name_off, name_len) {
+            return true;
+        }
+        i = wrapping_add(i, 1);
+    }
+    false
+}
+
+pub fn meta_decode(
+    in b: Slice[u8],
+    inout out_hdr: Slice[u64],
+    inout out_tables: Slice[u64],
+    inout out_cols: Slice[u64],
+    inout out_indexes: Slice[u64]
+) -> u64 {
+    if b.len() != PAGE_SIZE {
+        return STATUS_LENGTH;
+    }
+    if gb(in b, OFF_KIND) != KIND_META || gb(in b, OFF_LEVEL) != 0 {
+        return STATUS_KIND;
+    }
+    let body_len = le32(in b, OFF_BODY_LEN);
+    let body_end = wrapping_add(OFF_BODY_START, body_len);
+    if body_end > PAGE_SIZE {
+        return STATUS_LENGTH;
+    }
+    let mut z: u64 = body_end;
+    loop {
+        if z >= PAGE_SIZE {
+            break;
+        }
+        if gb(in b, z) != 0 {
+            return STATUS_LENGTH;
+        }
+        z = wrapping_add(z, 1);
+    }
+
+    let mut at: u64 = OFF_BODY_START;
+    if wrapping_sub(body_end, at) < wrapping_add(META_MAGIC_LEN, SIZE_U32) {
+        return STATUS_OVERRUN;
+    }
+    let magic_ok = gb(in b, at) == META_MAGIC_0
+        && gb(in b, wrapping_add(at, 1)) == META_MAGIC_1
+        && gb(in b, wrapping_add(at, 2)) == META_MAGIC_2
+        && gb(in b, wrapping_add(at, 3)) == META_MAGIC_3
+        && gb(in b, wrapping_add(at, 4)) == META_MAGIC_4
+        && gb(in b, wrapping_add(at, 5)) == META_MAGIC_5
+        && gb(in b, wrapping_add(at, 6)) == META_MAGIC_6
+        && gb(in b, wrapping_add(at, 7)) == META_MAGIC_7;
+    at = wrapping_add(at, META_MAGIC_LEN);
+    let fmt = le32(in b, at);
+    at = wrapping_add(at, SIZE_U32);
+    if !magic_ok || fmt != META_FORMAT {
+        return STATUS_MAGIC;
+    }
+
+    let hdr_bytes = wrapping_add(
+        wrapping_add(SIZE_U64, SIZE_U64),
+        wrapping_add(SIZE_U64, wrapping_add(SIZE_U32, SIZE_U16))
+    );
+    if wrapping_sub(body_end, at) < hdr_bytes {
+        return STATUS_OVERRUN;
+    }
+    let last_ts = le64(in b, at);
+    at = wrapping_add(at, SIZE_U64);
+    let page_count = le64(in b, at);
+    at = wrapping_add(at, SIZE_U64);
+    let catalog_rev = le64(in b, at);
+    at = wrapping_add(at, SIZE_U64);
+    let next_table_id = le32(in b, at);
+    at = wrapping_add(at, SIZE_U32);
+    let ntables = le16(in b, at);
+    at = wrapping_add(at, SIZE_U16);
+
+    if wrapping_mul(ntables, TABLE_STRIDE) > out_tables.len() {
+        su(inout out_hdr, HDR_NTABLES, ntables);
+        return STATUS_GROW;
+    }
+
+    let mut total_cols: u64 = 0;
+    let mut ti: u64 = 0;
+    loop {
+        if ti >= ntables {
+            break;
+        }
+        if wrapping_sub(body_end, at) < 1 {
+            return STATUS_OVERRUN;
+        }
+        let nlen = widen_u64(gb(in b, at));
+        at = wrapping_add(at, 1);
+        if wrapping_sub(body_end, at) < nlen {
+            return STATUS_OVERRUN;
+        }
+        let noff = at;
+        at = wrapping_add(at, nlen);
+        if !is_norm_ident(in b, noff, nlen) {
+            return STATUS_NAME;
+        }
+        let t_fixed = wrapping_add(
+            SIZE_U32,
+            wrapping_add(SIZE_U64, wrapping_add(SIZE_U64, SIZE_U16))
+        );
+        if wrapping_sub(body_end, at) < t_fixed {
+            return STATUS_OVERRUN;
+        }
+        let tid = le32(in b, at);
+        at = wrapping_add(at, SIZE_U32);
+        let troot = le64(in b, at);
+        at = wrapping_add(at, SIZE_U64);
+        let tnext = le64(in b, at);
+        at = wrapping_add(at, SIZE_U64);
+        let ncols = le16(in b, at);
+        at = wrapping_add(at, SIZE_U16);
+
+        let col_start = total_cols;
+        if wrapping_mul(wrapping_add(col_start, ncols), COL_STRIDE) > out_cols.len() {
+            su(inout out_hdr, HDR_NTABLES, ntables);
+            su(inout out_hdr, HDR_NCOLS, wrapping_add(col_start, ncols));
+            return STATUS_GROW;
+        }
+
+        let mut ci: u64 = 0;
+        loop {
+            if ci >= ncols {
+                break;
+            }
+            if wrapping_sub(body_end, at) < 1 {
+                return STATUS_OVERRUN;
+            }
+            let clen = widen_u64(gb(in b, at));
+            at = wrapping_add(at, 1);
+            if wrapping_sub(body_end, at) < wrapping_add(clen, 2) {
+                return STATUS_OVERRUN;
+            }
+            let coff = at;
+            at = wrapping_add(at, clen);
+            if !is_norm_ident(in b, coff, clen) {
+                return STATUS_NAME;
+            }
+            let ttag = gb(in b, at);
+            at = wrapping_add(at, 1);
+            if ttag < TYPE_TAG_MIN || ttag > TYPE_TAG_MAX {
+                return STATUS_COL_TYPE;
+            }
+            let nbyte = gb(in b, at);
+            at = wrapping_add(at, 1);
+            if nbyte != BOOL_FALSE && nbyte != BOOL_TRUE {
+                return STATUS_NULLABLE;
+            }
+            let mut prev_c: u64 = 0;
+            loop {
+                if prev_c >= ci {
+                    break;
+                }
+                let pbase = wrapping_mul(wrapping_add(col_start, prev_c), COL_STRIDE);
+                let poff = gu(in out_cols, wrapping_add(pbase, COL_NAME_OFF));
+                let plen = gu(in out_cols, wrapping_add(pbase, COL_NAME_LEN));
+                if bytes_eq(in b, poff, plen, coff, clen) {
+                    return STATUS_DUP_COL;
+                }
+                prev_c = wrapping_add(prev_c, 1);
+            }
+            let cbase = wrapping_mul(wrapping_add(col_start, ci), COL_STRIDE);
+            su(inout out_cols, wrapping_add(cbase, COL_NAME_OFF), coff);
+            su(inout out_cols, wrapping_add(cbase, COL_NAME_LEN), clen);
+            su(inout out_cols, wrapping_add(cbase, COL_TYPE_TAG), widen_u64(ttag));
+            su(inout out_cols, wrapping_add(cbase, COL_NULLABLE), widen_u64(nbyte));
+            ci = wrapping_add(ci, 1);
+        }
+        total_cols = wrapping_add(col_start, ncols);
+
+        if tid == 0
+            || tid >= next_table_id
+            || has_table_id(in out_tables, ti, tid)
+            || troot <= FSM_PAGE
+            || troot >= page_count
+            || tnext == 0
+            || ncols == 0
+        {
+            return STATUS_TABLE_ENTRY;
+        }
+        if find_table_by_name(in b, in out_tables, ti, noff, nlen) != NOT_FOUND {
+            return STATUS_DUP_TABLE;
+        }
+        let tbase = wrapping_mul(ti, TABLE_STRIDE);
+        su(inout out_tables, wrapping_add(tbase, TABLE_NAME_OFF), noff);
+        su(inout out_tables, wrapping_add(tbase, TABLE_NAME_LEN), nlen);
+        su(inout out_tables, wrapping_add(tbase, TABLE_ID), tid);
+        su(inout out_tables, wrapping_add(tbase, TABLE_ROOT), troot);
+        su(inout out_tables, wrapping_add(tbase, TABLE_NEXT_ROWID), tnext);
+        su(inout out_tables, wrapping_add(tbase, TABLE_COL_START), col_start);
+        su(inout out_tables, wrapping_add(tbase, TABLE_NCOLS), ncols);
+        ti = wrapping_add(ti, 1);
+    }
+
+    if wrapping_sub(body_end, at) < SIZE_U16 {
+        return STATUS_OVERRUN;
+    }
+    let nindexes = le16(in b, at);
+    at = wrapping_add(at, SIZE_U16);
+    if wrapping_mul(nindexes, INDEX_STRIDE) > out_indexes.len() {
+        su(inout out_hdr, HDR_NTABLES, ntables);
+        su(inout out_hdr, HDR_NCOLS, total_cols);
+        su(inout out_hdr, HDR_NINDEXES, nindexes);
+        return STATUS_GROW;
+    }
+
+    let mut ii: u64 = 0;
+    loop {
+        if ii >= nindexes {
+            break;
+        }
+        if wrapping_sub(body_end, at) < 1 {
+            return STATUS_OVERRUN;
+        }
+        let ilen = widen_u64(gb(in b, at));
+        at = wrapping_add(at, 1);
+        if wrapping_sub(body_end, at) < wrapping_add(ilen, wrapping_add(SIZE_U32, 1)) {
+            return STATUS_OVERRUN;
+        }
+        let ioff = at;
+        at = wrapping_add(at, ilen);
+        if !is_norm_ident(in b, ioff, ilen) {
+            return STATUS_NAME;
+        }
+        let iid = le32(in b, at);
+        at = wrapping_add(at, SIZE_U32);
+        let tlen = widen_u64(gb(in b, at));
+        at = wrapping_add(at, 1);
+        if wrapping_sub(body_end, at) < wrapping_add(tlen, wrapping_add(SIZE_U16, SIZE_U64)) {
+            return STATUS_OVERRUN;
+        }
+        let toff = at;
+        at = wrapping_add(at, tlen);
+        if !is_norm_ident(in b, toff, tlen) {
+            return STATUS_NAME;
+        }
+        let icol = le16(in b, at);
+        at = wrapping_add(at, SIZE_U16);
+        let iroot = le64(in b, at);
+        at = wrapping_add(at, SIZE_U64);
+
+        let tidx = find_table_by_name(in b, in out_tables, ntables, toff, tlen);
+        let col_ok = if tidx == NOT_FOUND {
+            false
+        } else {
+            let tbase = wrapping_mul(tidx, TABLE_STRIDE);
+            icol < gu(in out_tables, wrapping_add(tbase, TABLE_NCOLS))
+        };
+        if !col_ok
+            || iid == 0
+            || iid >= next_table_id
+            || has_table_id(in out_tables, ntables, iid)
+            || has_index_id(in out_indexes, ii, iid)
+            || iroot <= FSM_PAGE
+            || iroot >= page_count
+            || find_table_by_name(in b, in out_tables, ntables, ioff, ilen) != NOT_FOUND
+        {
+            return STATUS_INDEX_ENTRY;
+        }
+        if has_index_name(in b, in out_indexes, ii, ioff, ilen) {
+            return STATUS_DUP_INDEX;
+        }
+        let ibase = wrapping_mul(ii, INDEX_STRIDE);
+        su(inout out_indexes, wrapping_add(ibase, INDEX_NAME_OFF), ioff);
+        su(inout out_indexes, wrapping_add(ibase, INDEX_NAME_LEN), ilen);
+        su(inout out_indexes, wrapping_add(ibase, INDEX_ID), iid);
+        su(inout out_indexes, wrapping_add(ibase, INDEX_TNAME_OFF), toff);
+        su(inout out_indexes, wrapping_add(ibase, INDEX_TNAME_LEN), tlen);
+        su(inout out_indexes, wrapping_add(ibase, INDEX_COLUMN), icol);
+        su(inout out_indexes, wrapping_add(ibase, INDEX_ROOT), iroot);
+        ii = wrapping_add(ii, 1);
+    }
+
+    if at != body_end || page_count < MIN_PAGE_COUNT || le16(in b, OFF_COUNT) != ntables {
+        return STATUS_TRAILER;
+    }
+
+    su(inout out_hdr, HDR_LAST_TS, last_ts);
+    su(inout out_hdr, HDR_PAGE_COUNT, page_count);
+    su(inout out_hdr, HDR_CATALOG_REV, catalog_rev);
+    su(inout out_hdr, HDR_NEXT_TABLE_ID, next_table_id);
+    su(inout out_hdr, HDR_NTABLES, ntables);
+    su(inout out_hdr, HDR_NCOLS, total_cols);
+    su(inout out_hdr, HDR_NINDEXES, nindexes);
+    STATUS_OK
+}
+
+const KIND_FSM: u8 = 17;
+const FSM_BODY_START: u64 = 32;
+const FSM_FIXED_MASK: u8 = 3;
+const FSM_STATUS_OK: u64 = 0;
+const FSM_STATUS_KIND: u64 = 1;
+const FSM_STATUS_FIXED: u64 = 2;
+const FSM_STATUS_GROW: u64 = 3;
+const FSM_WORD_BYTES: u64 = 8;
+const FSM_WORD_BITS: u64 = 64;
+const FSM_BYTE_BITS_SHIFT: u64 = 3;
+const FSM_BIT_MASK: u64 = 7;
+const FSM_MAX_COUNT: u64 = 65535;
+const FSM_BYTE_MASK: u64 = 255;
+
+pub fn fsm_encode(inout b: Slice[u8], in pages: Slice[u64]) {
+    let mut at: u64 = FSM_BODY_START;
+    loop {
+        if at >= PAGE_SIZE {
+            break;
+        }
+        let _ = b.try_write_u64_le(at, 0);
+        at = wrapping_add(at, FSM_WORD_BYTES);
+    }
+    let n = pages.len();
+    let mut i: u64 = 0;
+    loop {
+        if i >= n {
+            break;
+        }
+        let p = gu(in pages, i);
+        let idx = wrapping_add(FSM_BODY_START, p >> FSM_BYTE_BITS_SHIFT);
+        let one: u64 = 1;
+        let bit = wrapping_u8(wrapping_shl_u64(one, wrapping_u32(p & FSM_BIT_MASK)));
+        b.try_set(idx, gb(in b, idx) | bit);
+        i = wrapping_add(i, 1);
+    }
+    let cnt = if n > FSM_MAX_COUNT { FSM_MAX_COUNT } else { n };
+    b.try_set(OFF_COUNT, wrapping_u8(cnt & FSM_BYTE_MASK));
+    b.try_set(wrapping_add(OFF_COUNT, 1), wrapping_u8((cnt >> SHIFT_8) & FSM_BYTE_MASK));
+}
+
+pub fn fsm_decode(
+    in b: Slice[u8],
+    inout out_pages: Slice[u64],
+    inout out_count: Slice[u64]
+) -> u64 {
+    if b.len() != PAGE_SIZE || gb(in b, OFF_KIND) != KIND_FSM || gb(in b, OFF_LEVEL) != 0 {
+        return FSM_STATUS_KIND;
+    }
+    if (gb(in b, FSM_BODY_START) & FSM_FIXED_MASK) != 0 {
+        return FSM_STATUS_FIXED;
+    }
+    let cap = out_pages.len();
+    let mut count: u64 = 0;
+    let mut at: u64 = FSM_BODY_START;
+    let mut base_bit: u64 = 0;
+    loop {
+        if at >= PAGE_SIZE {
+            break;
+        }
+        let w = match b.try_read_u64_le(at) {
+            Option::Some(v) => v,
+            Option::None => 0,
+        };
+        if w != 0 {
+            let mut rem = w;
+            loop {
+                if rem == 0 {
+                    break;
+                }
+                let tz = widen_u64(trailing_zeros_u64(rem));
+                if count < cap {
+                    su(inout out_pages, count, wrapping_add(base_bit, tz));
+                }
+                count = wrapping_add(count, 1);
+                rem = rem & wrapping_sub(rem, 1);
+            }
+        }
+        at = wrapping_add(at, FSM_WORD_BYTES);
+        base_bit = wrapping_add(base_bit, FSM_WORD_BITS);
+    }
+    su(inout out_count, 0, count);
+    if count > cap {
+        return FSM_STATUS_GROW;
+    }
+    FSM_STATUS_OK
+}

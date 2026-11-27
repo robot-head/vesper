@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 #[path = "../../port/doc.rs"]
 mod doc_binding;
 
-use super::{Registry, Swap, must, on, open};
+use super::{Registry, Swap, must, on, pass};
 
 /// JSON texts and pages rendered by the Vesper doc module.
 static DOC_CALLS: AtomicU64 = AtomicU64::new(0);
@@ -30,10 +30,7 @@ const VESPER_DOC: vesper_doc::swap::RenderTable = vesper_doc::swap::RenderTable 
 };
 
 /// The flip-gate rows of this file's swaps (`swaps::on`).
-pub(super) const SWAPS: &[Swap] = &[open(
-    "doc",
-    "0 byte diffs, 0.76-0.87x; no flip-gate configuration",
-)];
+pub(super) const SWAPS: &[Swap] = &[pass("doc", "doc", "#2207")];
 
 pub(super) fn register(_r: &mut Registry) {
     // The request layout the Rust encoder writes must be the module's.

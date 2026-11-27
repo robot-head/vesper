@@ -12,9 +12,11 @@
 mod check_harness;
 
 use check_harness::*;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::OnceLock;
-use vesper::ast::{Expr, ExprKind, Function, Literal, Pass, Pattern, PatternKind, Statement};
+use vesper::ast::{
+    Expr, ExprKind, Function, Item, Literal, Module, Pass, Pattern, PatternKind, Statement,
+};
 use vesper::check::World;
 
 fn package() -> &'static Package {
@@ -38,11 +40,29 @@ const E_UNARY: u64 = 11;
 const E_BINARY: u64 = 12;
 const E_IF: u64 = 13;
 const E_MATCH: u64 = 14;
+const E_RETURN: u64 = 15;
+const E_ASSIGN: u64 = 16;
+const E_FOR: u64 = 17;
+const E_RANGE: u64 = 18;
+const E_LOOP: u64 = 19;
+const E_BREAK: u64 = 20;
+const E_CONTINUE: u64 = 21;
+const E_HANDLE: u64 = 22;
+const E_INDEX: u64 = 40;
+
+// Literal pattern kinds (`LIT_*` in exprs.ves).
+const LIT_INT: u64 = 0;
+const LIT_FLOAT: u64 = 1;
+const LIT_BOOL: u64 = 2;
+const LIT_WIDE_INT: u64 = 3;
+const LIT_TYPED_INT: u64 = 4;
+const LIT_STRING: u64 = 5;
 
 fn unary_code(op: &str) -> u64 {
     match op {
         "!" => 1,
         "-" => 2,
+        "~" => 3,
         _ => 0,
     }
 }
@@ -62,6 +82,11 @@ fn binary_code(op: &str) -> u64 {
         ">=" => 11,
         "&&" => 12,
         "||" => 13,
+        "&" => 14,
+        "|" => 15,
+        "^" => 16,
+        "<<" => 17,
+        ">>" => 18,
         _ => 0,
     }
 }
@@ -100,17 +125,18 @@ fn encode_pattern(e: &mut Enc, p: &Pattern, out: &mut Vec<u64>) {
         PatternKind::Literal(l) => {
             out.extend([4, s, t]);
             if let Some(kind) = p.integer_kind {
-                out.extend([4, e.name(kind.name())]);
+                out.extend([LIT_TYPED_INT, e.name(kind.name())]);
                 return;
             }
             // The literal's type (`literal_type`), for `bind_mode`.
             // An integer past `u64::MAX` in magnitude is not ported yet (as
-            // in `encode_expr`): code 3 skips the function, as a string does.
+            // in `encode_expr`): `LIT_WIDE_INT` skips the function.
             out.push(match l {
-                Literal::Int(n) if fits_literal(*n) => 0,
-                Literal::Float(_) => 1,
-                Literal::Bool(_) => 2,
-                Literal::Int(_) | Literal::WideInt(_) | Literal::String(_) => 3,
+                Literal::Int(n) if fits_literal(*n) => LIT_INT,
+                Literal::Float(_) => LIT_FLOAT,
+                Literal::Bool(_) => LIT_BOOL,
+                Literal::Int(_) | Literal::WideInt(_) => LIT_WIDE_INT,
+                Literal::String(_) => LIT_STRING,
             });
             if let Literal::Int(n) = l
                 && fits_literal(*n)
@@ -252,6 +278,74 @@ fn encode_expr(w: &World, e: &mut Enc, x: &Expr, out: &mut Vec<u64>) {
                 encode_expr(w, e, x, out);
             }
         }
+        // Element writes (`a[i] = v`, lowered to `"[]="`) belong to the
+        // arrays lane.
+        ExprKind::Assign(op, place, value) if !op.starts_with(vesper::arrays::WRITE_PREFIX) => {
+            out.extend([E_ASSIGN, s, t, (op != "=") as u64]);
+            encode_expr(w, e, place, out);
+            encode_expr(w, e, value, out);
+        }
+        ExprKind::For { pat, iter, body } => {
+            out.extend([E_FOR, s, t]);
+            encode_pattern(e, pat, out);
+            encode_expr(w, e, iter, out);
+            encode_expr(w, e, body, out);
+        }
+        ExprKind::Range {
+            start,
+            end,
+            inclusive,
+        } => {
+            out.extend([E_RANGE, s, t, *inclusive as u64]);
+            encode_expr(w, e, start, out);
+            encode_expr(w, e, end, out);
+        }
+        ExprKind::Loop(body) => {
+            out.extend([E_LOOP, s, t]);
+            encode_expr(w, e, body, out);
+        }
+        ExprKind::Break(value) => {
+            out.extend([E_BREAK, s, t, value.is_some() as u64]);
+            if let Some(x) = value {
+                encode_expr(w, e, x, out);
+            }
+        }
+        ExprKind::Continue => out.extend([E_CONTINUE, s, t]),
+        ExprKind::Handle {
+            effect,
+            state,
+            body,
+            ret,
+            ops,
+        } => {
+            out.extend([E_HANDLE, s, t]);
+            out.push(e.name(&effect.name));
+            out.push(effect.args.len() as u64);
+            for a in &effect.args {
+                out.push(e.ty(a));
+            }
+            out.push(state.is_some() as u64);
+            if let Some((p, value)) = state {
+                encode_pattern(e, p, out);
+                encode_expr(w, e, value, out);
+            }
+            encode_expr(w, e, body, out);
+            out.push(1 + ops.len() as u64);
+            for c in std::iter::once(ret.as_ref()).chain(ops) {
+                out.push(e.name(&c.name));
+                out.push(c.pats.len() as u64);
+                for p in &c.pats {
+                    encode_pattern(e, p, out);
+                }
+                encode_expr(w, e, &c.body, out);
+            }
+        }
+        ExprKind::Return(value) => {
+            out.extend([E_RETURN, s, t, value.is_some() as u64]);
+            if let Some(x) = value {
+                encode_expr(w, e, x, out);
+            }
+        }
         ExprKind::Match { value, arms } => {
             out.extend([E_MATCH, s, t]);
             encode_expr(w, e, value, out);
@@ -259,6 +353,21 @@ fn encode_expr(w: &World, e: &mut Enc, x: &Expr, out: &mut Vec<u64>) {
             for (p, x) in arms {
                 encode_pattern(e, p, out);
                 encode_expr(w, e, x, out);
+            }
+        }
+        ExprKind::Index(base, index) => {
+            out.extend([E_INDEX, s, t]);
+            encode_expr(w, e, base, out);
+            match &index.kind {
+                ExprKind::Binary(op, lo, hi) if op == ".." => {
+                    out.push(1);
+                    encode_expr(w, e, lo, out);
+                    encode_expr(w, e, hi, out);
+                }
+                _ => {
+                    out.push(0);
+                    encode_expr(w, e, index, out);
+                }
             }
         }
         _ => out.extend([E_OTHER, s, t]),
@@ -282,8 +391,9 @@ fn checked_functions(w: &World) -> Vec<&Function> {
 
 /// The function table (every world function, in name order: name,
 /// generics, parameters, result, effects, the inferred result) and the
-/// checked functions' bodies.
-fn exprs_input(w: &World) -> Vec<u8> {
+/// method names the module's traits declare, and the checked functions'
+/// bodies.
+fn exprs_input(w: &World, module: &Module) -> Vec<u8> {
     encode(w, |e, tail| {
         tail.push(w.functions.len() as u64);
         for f in w.functions.values() {
@@ -305,8 +415,60 @@ fn exprs_input(w: &World) -> Vec<u8> {
             tail.push(e.ty(&f.result));
             let effectful = !f.effects.instances.is_empty() || f.effects.tail.is_some();
             tail.push(effectful as u64);
+            tail.push(f.effects.instances.len() as u64);
+            for inst in &f.effects.instances {
+                tail.push(e.name(&inst.name));
+                tail.push(inst.args.len() as u64);
+                for a in &inst.args {
+                    tail.push(e.ty(a));
+                }
+            }
             let result = w.function_results.get(&f.name).unwrap_or(&f.result);
             tail.push(e.ty(result));
+        }
+        // Effect declarations: generics, then each operation's signature
+        // under its `Eff::op` name.
+        tail.push(w.effects.len() as u64);
+        for (name, decl) in &w.effects {
+            tail.push(e.name(name));
+            tail.push(decl.generics.len() as u64);
+            for g in &decl.generics {
+                tail.push(e.name(&g.name));
+                tail.push(mode_word(g.bound));
+                tail.push(g.row as u64);
+            }
+            tail.push(decl.ops.len() as u64);
+            for op in &decl.ops {
+                tail.push(e.name(&format!("{name}::{}", op.name)));
+                tail.push(op.generics.len() as u64);
+                for g in &op.generics {
+                    tail.push(e.name(&g.name));
+                    tail.push(mode_word(g.bound));
+                    tail.push(g.row as u64);
+                }
+                tail.push(op.params.len() as u64);
+                for p in &op.params {
+                    tail.push(pass_code(p.pass));
+                    tail.push(e.name(&p.name));
+                    tail.push(e.ty(&p.ty));
+                    tail.push(p.projections.len() as u64);
+                    tail.extend([p.span.start as u64, p.span.end as u64]);
+                }
+                tail.push(e.ty(&op.result));
+            }
+        }
+        let methods: BTreeSet<&str> = module
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                Item::Trait(t) => Some(t.methods.iter().map(|m| m.name.as_str())),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        tail.push(methods.len() as u64);
+        for m in methods {
+            tail.push(e.name(m));
         }
         let fs = checked_functions(w);
         tail.push(fs.len() as u64);
@@ -350,8 +512,12 @@ fn vesper_types(text: &str) -> (String, Vec<(usize, usize)>, usize) {
     let flush = |out: &mut String, cur: Option<(usize, usize)>, rows: &mut BTreeMap<_, _>| {
         if let Some((a, b)) = cur {
             out.push_str(&format!("F {a} {b}\n"));
+            // Only rows inside the function's span, as `rust_types` reads
+            // them: sugar-lowered code keeps its prelude spans.
             for ((s, t), ty) in std::mem::take(rows) {
-                out.push_str(&format!("T {s} {t} {ty}\n"));
+                if (a..=b).contains(&s) && t <= b {
+                    out.push_str(&format!("T {s} {t} {ty}\n"));
+                }
             }
         }
     };
@@ -402,7 +568,7 @@ fn typed_constant_pattern_checks_the_scrutinee() {
     assert!(errors.is_empty());
     let result = package()
         .entry("core_typing_exprs", true)
-        .text(&exprs_input(&world));
+        .text(&exprs_input(&world, &module));
     let start = source.find("Flags::O_CREAT").unwrap();
     let want = format!("D E0200 {start} {}", start + "Flags::O_CREAT".len());
     assert_eq!(
@@ -414,6 +580,23 @@ fn typed_constant_pattern_checks_the_scrutinee() {
     );
 }
 
+/// A `break` whose value breaks out of the same loop keeps the inner
+/// break's result: the frame is read again after the value is checked.
+#[test]
+fn nested_break_keeps_the_inner_result() {
+    let source = "fn f() -> u32 { loop { break { break 1u32; }; } }";
+    let module = vesper::parser::parse(source).module;
+    let checked = vesper::check::check(&module);
+    assert!(checked.diagnostics.is_empty());
+    let world = checked.world;
+    let text = package()
+        .entry("core_typing_exprs", true)
+        .text(&exprs_input(&world, &module));
+    let (v, checked, skipped) = vesper_types(&text);
+    assert_eq!((checked.len(), skipped), (1, 0));
+    assert_eq!(first_difference(&rust_types(&world, &checked), &v), None);
+}
+
 #[test]
 fn expression_types_match_rust() {
     let f = package().entry("core_typing_exprs", true);
@@ -421,7 +604,7 @@ fn expression_types_match_rust() {
     let mut bad = 0;
     let mut shown = 0;
     for c in corpus() {
-        let text = f.text(&exprs_input(&c.world));
+        let text = f.text(&exprs_input(&c.world, &c.module));
         let (v, checked, s) = vesper_types(&text);
         total += checked.len();
         skipped += s;

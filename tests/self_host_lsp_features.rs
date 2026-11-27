@@ -74,6 +74,10 @@ fn entry(name: &'static str) -> &'static Entry {
             "lsp_proof_lenses",
             "lsp_lens_state",
             "lsp_anvil_actions",
+            "lsp_macro_preview",
+            "lsp_recovery_gate",
+            "lsp_signature",
+            "lsp_lint_preflight",
         ]
         .into_iter()
         .map(|n| (n, features().entry(n, optimize())))
@@ -4571,5 +4575,811 @@ fn anvil_actions_speed() {
         r / per,
         v / per,
         v.as_secs_f64() / r.as_secs_f64()
+    );
+}
+
+// ------------------------------------------------------- macro preview
+
+/// One `macro_preview::render` call: a snapshot of `snapshot` (an index
+/// into the compiled snapshots), and the document and limits rendered
+/// against it.
+struct MacroCase {
+    snapshot: usize,
+    uri: String,
+    version: i32,
+    text: String,
+    limits: vesper::lsp::macro_preview::Limits,
+}
+
+/// Sources that use source macros: the macro fixtures, and the one-line
+/// programs in the Forge tests that hold no escapes.
+fn macro_sources() -> Vec<String> {
+    let mut out = vec![];
+    {
+        let mut paths: Vec<_> = std::fs::read_dir("tests/fixtures/source_macros")
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|e| e == "ves"))
+            .collect();
+        paths.sort();
+        out.extend(paths.iter().filter_map(|p| std::fs::read_to_string(p).ok()));
+    }
+    for path in [
+        "tests/fixtures/stylus/macro.ves",
+        "tests/fixtures/format_proof/macro.ves",
+    ] {
+        out.extend(std::fs::read_to_string(path).ok());
+    }
+    let mut tests: Vec<_> = std::fs::read_dir("tests")
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("forge_") && n.ends_with(".rs"))
+        })
+        .collect();
+    tests.sort();
+    for path in tests {
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        for piece in text.split("\"macro ").skip(1) {
+            let Some(end) = piece.find('"') else {
+                continue;
+            };
+            let body = &piece[..end];
+            if !body.contains('\\') && !body.contains('\n') {
+                out.push(format!("macro {body}"));
+            }
+        }
+    }
+    out
+}
+
+fn macro_snapshot_texts() -> Vec<String> {
+    let mut texts = macro_sources();
+    let n = texts.len();
+    // Damaged copies: cut in half, an unclosed macro, a stray quote.
+    for k in (0..n).step_by(3) {
+        let t = texts[k].clone();
+        let mut mid = t.len() / 2;
+        while !t.is_char_boundary(mid) {
+            mid -= 1;
+        }
+        texts.push(t[..mid].to_owned());
+        texts.push(format!("{t}\nmacro broken(x: expr) -> expr {{ quote {{ $x"));
+        texts.push(format!("{t}\nfn bad() -> u64 {{ \"\u{7}\\q }}"));
+    }
+    // Plain package sources: no macros, checked alone.
+    texts.extend(formatting_corpus().into_iter().step_by(23).take(15));
+    texts.extend(
+        [
+            "",
+            "fn main() -> u64 { 1 }",
+            "macro m() -> expr { quote { 1 } } fn main() -> u64 { m!() + m!() }",
+            "macro m() -> expr { quote { undefined_name() } } fn main() -> u64 { m!() }",
+            "fn main() -> u64 { m!() }",
+        ]
+        .map(str::to_owned),
+    );
+    texts
+}
+
+fn macro_cases(snapshots: &[String]) -> Vec<MacroCase> {
+    use vesper::lsp::macro_preview::Limits;
+    let default = Limits::default();
+    let mut cases = vec![];
+    for (i, text) in snapshots.iter().enumerate() {
+        let base = |cases: &mut Vec<MacroCase>, text: String, limits: Limits, version: i32| {
+            cases.push(MacroCase {
+                snapshot: i,
+                uri: format!("file:///work/macro{i}.ves"),
+                version,
+                text,
+                limits,
+            });
+        };
+        base(&mut cases, text.clone(), default, i as i32 - 7);
+        if i % 4 == 0 {
+            base(&mut cases, format!("{text} "), default, 1);
+            let reserved = default.max_output_bytes * 8 + text.len() * 4 + 26 + 4096;
+            for slack in [0, 1, 40, 400, 4000, 40000] {
+                let limits = Limits {
+                    max_work: reserved + slack,
+                    ..default
+                };
+                base(&mut cases, text.clone(), limits, 2);
+            }
+            for cap in [1, 64, 600, 5000, 60000] {
+                let limits = Limits {
+                    max_output_bytes: cap,
+                    max_work: cap * 8 + text.len() * 4 + 26 + 4096 + 3 * cap,
+                    ..default
+                };
+                base(&mut cases, text.clone(), limits, 3);
+            }
+        }
+    }
+    let first = &snapshots[0];
+    let limits = [
+        Limits {
+            max_work: 0,
+            ..default
+        },
+        Limits {
+            max_output_bytes: 1024 * 1024 + 1,
+            ..default
+        },
+        Limits {
+            max_source_bytes: 1,
+            ..default
+        },
+        Limits {
+            max_uri_bytes: 3,
+            ..default
+        },
+        Limits {
+            max_work: 32 * 1024 * 1024 + 1,
+            ..default
+        },
+        Limits {
+            max_work: 1024,
+            ..default
+        },
+    ];
+    for l in limits {
+        cases.push(MacroCase {
+            snapshot: 0,
+            uri: "file:///work/limits.ves".into(),
+            version: i32::MIN,
+            text: first.clone(),
+            limits: l,
+        });
+    }
+    for uri in [
+        String::new(),
+        "u".repeat(4096),
+        "u".repeat(4097),
+        "file:///\u{e9}\"q\"\\\u{1}.ves".into(),
+    ] {
+        cases.push(MacroCase {
+            snapshot: 0,
+            uri,
+            version: i32::MAX,
+            text: first.clone(),
+            limits: default,
+        });
+    }
+    cases
+}
+
+fn macro_snapshots() -> Vec<String> {
+    let take = std::env::var("MACRO_PREVIEW_SNAPSHOTS")
+        .ok()
+        .and_then(|n| n.parse().ok())
+        .unwrap_or(usize::MAX);
+    macro_snapshot_texts().into_iter().take(take).collect()
+}
+
+/// Each snapshot's compiler outcome in turn (one database at a time), with
+/// its cases.
+fn for_each_snapshot(
+    texts: &[String],
+    cases: &[MacroCase],
+    mut f: impl FnMut(&vesper::lsp::MacroPreviewForPort, &[&MacroCase]),
+) {
+    for (i, text) in texts.iter().enumerate() {
+        let mine: Vec<&MacroCase> = cases.iter().filter(|c| c.snapshot == i).collect();
+        if mine.is_empty() {
+            continue;
+        }
+        let trace = std::env::var_os("MACRO_PREVIEW_TRACE").is_some();
+        if trace {
+            eprintln!("snapshot {i}: {} bytes, {} cases", text.len(), mine.len());
+        }
+        let snapshot = vesper::lsp::MacroPreviewForPort::new(text);
+        if trace {
+            eprintln!("snapshot {i}: compiled");
+        }
+        f(&snapshot, &mine);
+    }
+}
+
+/// `macro_preview::render` against `lsp_macro_preview`, answer for answer.
+#[test]
+fn macro_preview_matches_rust() {
+    let texts = macro_snapshots();
+    let cases = macro_cases(&texts);
+    let entry = entry("lsp_macro_preview");
+    let mut differ = vec![];
+    let (mut expanded, mut rejected, mut refused, mut audited) = (0, 0, 0, 0);
+    let mut reasons = BTreeMap::<String, usize>::new();
+    for_each_snapshot(&texts, &cases, |snapshot, mine| {
+        for case in mine {
+            let rust = snapshot.render(&case.uri, case.version, &case.text, case.limits, 1);
+            let input = snapshot.words(&case.uri, case.version, &case.text, case.limits, false, 1);
+            let vesper = entry.text(&input);
+            let hosted = snapshot.words(&case.uri, case.version, &case.text, case.limits, true, 1);
+            if let Some(d) = first_difference(&rust, &entry.text(&hosted)) {
+                differ.push(format!(
+                    "snapshot {} ({}, host digest): {d}",
+                    case.snapshot, case.uri
+                ));
+            }
+            if let Some(reason) = rust.strip_prefix("E ") {
+                refused += 1;
+                *reasons.entry(reason.to_owned()).or_default() += 1;
+            } else if rust.contains("\"status\":\"rejected\"") {
+                rejected += 1;
+            } else {
+                expanded += 1;
+                audited += usize::from(rust.contains("\"operations\":[{"));
+            }
+            if let Some(d) = first_difference(&rust, &vesper) {
+                differ.push(format!("snapshot {} ({}): {d}", case.snapshot, case.uri));
+            }
+        }
+    });
+    eprintln!(
+        "macro preview: {} snapshots, {} cases ({expanded} expanded, {audited} with audited operations, {rejected} rejected, {refused} refused: {reasons:?}), {} differ",
+        texts.len(),
+        cases.len(),
+        differ.len()
+    );
+    assert!(differ.is_empty(), "{:#?}", &differ[..differ.len().min(8)]);
+}
+
+/// Rust against Vesper on the default-limit cases, `rounds` renders per
+/// call, best of five ABBA pairs per snapshot. The compiler snapshot is
+/// built outside the timing on both sides.
+#[test]
+#[ignore]
+fn macro_preview_speed() {
+    let texts = macro_snapshots();
+    let cases: Vec<MacroCase> = macro_cases(&texts)
+        .into_iter()
+        .filter(|c| c.limits == vesper::lsp::macro_preview::Limits::default())
+        .collect();
+    let entry = entry("lsp_macro_preview");
+    let rounds = 8;
+    // Rust, then Vesper with the host's C BLAKE3 digest (hashed on every
+    // round, inside the timing), then Vesper with its portable BLAKE3.
+    let mut totals = [Duration::ZERO; 3];
+    for_each_snapshot(&texts, &cases, |snapshot, mine| {
+        let inputs = |host: bool| -> Vec<Vec<u8>> {
+            mine.iter()
+                .map(|c| snapshot.words(&c.uri, c.version, &c.text, c.limits, host, rounds))
+                .collect()
+        };
+        let (hosted, portable) = (inputs(true), inputs(false));
+        let time = |f: &dyn Fn()| {
+            let t = std::time::Instant::now();
+            f();
+            t.elapsed()
+        };
+        let rust = || {
+            for c in mine {
+                std::hint::black_box(snapshot.render(&c.uri, c.version, &c.text, c.limits, rounds));
+            }
+        };
+        let host = || {
+            for (c, input) in mine.iter().zip(&hosted) {
+                for _ in 0..rounds {
+                    std::hint::black_box(blake3::hash(c.text.as_bytes()));
+                }
+                std::hint::black_box(entry.words(input));
+            }
+        };
+        let port = || {
+            for input in &portable {
+                std::hint::black_box(entry.words(input));
+            }
+        };
+        let mut best = [Duration::MAX; 3];
+        for _ in 0..5 {
+            best[0] = best[0].min(time(&rust));
+            best[1] = best[1].min(time(&host));
+            best[2] = best[2].min(time(&port));
+            best[2] = best[2].min(time(&port));
+            best[1] = best[1].min(time(&host));
+            best[0] = best[0].min(time(&rust));
+        }
+        for k in 0..3 {
+            totals[k] += best[k];
+        }
+    });
+    let per = (cases.len() as u32) * (rounds as u32);
+    eprintln!(
+        "macro preview ({} cases x {rounds}): rust {:?}; vesper, host C BLAKE3 {:?} (ratio {:.2}); vesper, portable BLAKE3 {:?} (ratio {:.2})",
+        cases.len(),
+        totals[0] / per,
+        totals[1] / per,
+        totals[1].as_secs_f64() / totals[0].as_secs_f64(),
+        totals[2] / per,
+        totals[2].as_secs_f64() / totals[0].as_secs_f64()
+    );
+}
+
+// ------------------------------------------------------- recovery gate
+
+/// Programs of the declarations `recovery::analyze` accepts (functions,
+/// structs, enums and effects), each later damaged.
+const RECOVERY_PROGRAMS: [&str; 8] = [
+    "// Unicode 🙂\r\nlinear struct Tx{} fn damaged(sink tx:Tx){tx.} fn leak(sink tx:Tx){}",
+    "struct Pair { left: u64, right: u64 }\nfn sum(p: Pair) -> u64 { p.left + p.right }\nfn main() -> u64 { sum(Pair { left: 1, right: 2 }) }",
+    "enum Shape { Dot, Square(u64) }\nfn area(s: Shape) -> u64 { match s { Shape::Dot => 0, Shape::Square(n) => n * n } }\nfn broken() { let x = ; }",
+    "effect Log { fn note(x: u64); }\nfn noisy(x: u64) -> u64 eff [Log] { Log::note(x); x }\nfn quiet(x: u64) -> u64 { x }",
+    "fn first(x: u64)->u64 { x }\npub fn broken(){tx.}\nfn last(){1}",
+    "fn twice() {}\nfn twice() { 1 }\nfn other( {}",
+    "fn u64() {}\nstruct Option { x: u64 }\nfn ok( {}",
+    "struct Broken { value: }\nenum Good { Value }\nfn tail(){}",
+];
+
+fn recovery_texts() -> Vec<String> {
+    let mut seeds: Vec<String> = RECOVERY_PROGRAMS.map(str::to_owned).to_vec();
+    seeds.extend(formatting_corpus().into_iter().step_by(17).take(40));
+    let mut texts = vec![];
+    for t in seeds {
+        let cut = |f: usize| {
+            let mut at = t.len() * f / 4;
+            while !t.is_char_boundary(at) {
+                at -= 1;
+            }
+            t[..at].to_owned()
+        };
+        texts.push(cut(1));
+        texts.push(cut(2));
+        texts.push(cut(3));
+        texts.push(format!("{t}\nfn broken(){{tx.}}"));
+        texts.push(format!("{t}\nfn m() -> u64 {{ m!(1) }} fn x( {{}}"));
+        texts.push(format!("{t}\n@@ fn stray() {{ 1 }} fn y( {{}}"));
+        texts.push(format!("{t}\ntrait T {{ fn f(); }} fn z( {{}}"));
+        texts.push(format!(
+            "fn a_very_long_identifier_name_for_limits() {{}} {t} fn w( {{}}"
+        ));
+        texts.push(t.replacen('}', "", 1));
+        texts.push(t);
+    }
+    texts
+}
+
+/// The limits of each gate case: the defaults, work allowances swept over
+/// the gate's own charges, and each small or invalid limit.
+fn recovery_limits(
+    syntax: &vesper_syntax::recovery::RecoverySyntax,
+) -> Vec<vesper::tooling::recovery::RecoveryLimits> {
+    use vesper::tooling::recovery::RecoveryLimits;
+    let d = RecoveryLimits::default();
+    let tokens = syntax.syntax().descendants_with_tokens().count();
+    let charged =
+        syntax.source().len() + syntax.declarations().len() + syntax.sites().len() + tokens;
+    let mut out = vec![d];
+    for work in [
+        1,
+        2,
+        3,
+        charged,
+        charged * 2,
+        charged * 2 + 1,
+        charged * 2 + 2,
+        charged * 3,
+    ] {
+        out.push(RecoveryLimits {
+            max_work: work,
+            ..d
+        });
+    }
+    for part in 1..4 {
+        out.push(RecoveryLimits {
+            max_work: (syntax.source().len() + charged * part / 4) * 2,
+            ..d
+        });
+    }
+    let mut a = d.analysis;
+    for (k, v) in [
+        (0, 1),
+        (0, 8),
+        (1, 1),
+        (1, 4),
+        (2, 1),
+        (3, 1),
+        (3, 300),
+        (4, 0),
+    ] {
+        let mut l = d;
+        match k {
+            0 => l.analysis.max_identifier_bytes = v,
+            1 => l.analysis.max_diagnostics = v,
+            2 => l.max_functions = v,
+            3 => l.analysis.max_diagnostic_bytes = v,
+            _ => l.max_context_items = 1,
+        }
+        out.push(l);
+    }
+    a.max_source_bytes = syntax.source().len().saturating_sub(1).max(1);
+    out.push(RecoveryLimits { analysis: a, ..d });
+    for bad in 0..3 {
+        let mut l = d;
+        match bad {
+            0 => l.analysis.max_depth = 0,
+            1 => l.max_functions = 200,
+            _ => l.max_work = 0,
+        }
+        out.push(l);
+    }
+    out
+}
+
+/// `recovery::gate_answer` against `lsp_recovery_gate`, answer for answer,
+/// with the portable BLAKE3 and with the host's digest.
+#[test]
+fn recovery_gate_matches_rust() {
+    use vesper::tooling::recovery::{gate_answer, gate_words};
+    let entry = entry("lsp_recovery_gate");
+    let mut differ = vec![];
+    let (mut snapshots, mut cases) = (0, 0);
+    let mut kinds = BTreeMap::<String, usize>::new();
+    for text in recovery_texts() {
+        let Ok(syntax) = vesper::parser::parse_recovery(&text, Default::default()) else {
+            continue;
+        };
+        snapshots += 1;
+        for limits in recovery_limits(&syntax) {
+            cases += 1;
+            let rust = gate_answer(&syntax, limits, 1);
+            let kind = match rust.split_once(' ') {
+                Some(("E", reason)) => format!("E {reason}"),
+                _ => rust[..1].to_owned(),
+            };
+            *kinds.entry(kind).or_default() += 1;
+            for host in [false, true] {
+                let vesper = entry.text(&gate_words(&syntax, limits, host, 1));
+                if let Some(d) = first_difference(&rust, &vesper) {
+                    differ.push(format!("{text:?} {limits:?} host {host}: {d}"));
+                }
+            }
+        }
+    }
+    eprintln!(
+        "recovery gate: {snapshots} snapshots, {cases} cases ({kinds:?}), {} differ",
+        differ.len()
+    );
+    assert!(differ.is_empty(), "{:#?}", &differ[..differ.len().min(8)]);
+}
+
+/// Rust against Vesper on the default limits, `rounds` gates per call,
+/// best of five ABBA pairs per snapshot. The recovery syntax is parsed and
+/// encoded outside the timing; the host digest is hashed inside it.
+#[test]
+#[ignore]
+fn recovery_gate_speed() {
+    use vesper::tooling::recovery::{RecoveryLimits, gate_answer, gate_words};
+    let entry = entry("lsp_recovery_gate");
+    let rounds = 8;
+    let limits = RecoveryLimits::default();
+    let mut totals = [Duration::ZERO; 3];
+    let mut n = 0u32;
+    for text in recovery_texts() {
+        let Ok(syntax) = vesper::parser::parse_recovery(&text, Default::default()) else {
+            continue;
+        };
+        n += 1;
+        let hosted = gate_words(&syntax, limits, true, rounds);
+        let portable = gate_words(&syntax, limits, false, rounds);
+        let time = |f: &dyn Fn()| {
+            let t = std::time::Instant::now();
+            f();
+            t.elapsed()
+        };
+        let rust = || {
+            std::hint::black_box(gate_answer(&syntax, limits, rounds));
+        };
+        let host = || {
+            for _ in 0..rounds {
+                std::hint::black_box(blake3::hash(text.as_bytes()));
+            }
+            std::hint::black_box(entry.words(&hosted));
+        };
+        let port = || {
+            std::hint::black_box(entry.words(&portable));
+        };
+        let mut best = [Duration::MAX; 3];
+        for _ in 0..5 {
+            best[0] = best[0].min(time(&rust));
+            best[1] = best[1].min(time(&host));
+            best[2] = best[2].min(time(&port));
+            best[2] = best[2].min(time(&port));
+            best[1] = best[1].min(time(&host));
+            best[0] = best[0].min(time(&rust));
+        }
+        for k in 0..3 {
+            totals[k] += best[k];
+        }
+    }
+    let per = n * rounds as u32;
+    eprintln!(
+        "recovery gate ({n} snapshots x {rounds}): rust {:?}; vesper, host C BLAKE3 {:?} (ratio {:.2}); vesper, portable BLAKE3 {:?} (ratio {:.2})",
+        totals[0] / per,
+        totals[1] / per,
+        totals[1].as_secs_f64() / totals[0].as_secs_f64(),
+        totals[2] / per,
+        totals[2].as_secs_f64() / totals[0].as_secs_f64()
+    );
+}
+
+// ------------------------------------------------------ signature snapshot
+
+/// Programs whose headers reach each part of `SemanticHeaders`: generics,
+/// effects and their operations, function and row types, field modes,
+/// traits (unsupported), and sources that fail to check.
+const SIGNATURE_PROGRAMS: [&str; 10] = [
+    "fn main() -> u64 { 1 }",
+    "struct Pair[T] { left: T, right: T }\nfn swap[T](sink p: Pair[T]) -> Pair[T] { Pair { left: p.right, right: p.left } }",
+    "linear struct Tx { slot: u64 }\nenum Shape { Dot, Square(u64), Rect { w: u64, h: u64 } }\nfn area(s: Shape) -> u64 { match s { Shape::Dot => 0, Shape::Square(n) => n, Shape::Rect { w, h } => w } }",
+    "effect Log { fn note(x: u64); }\nlinear effect Store[T] { fn put(x: T); fn get() -> T; }\nfn noisy(x: u64) -> u64 eff [Log] { Log::note(x); x }",
+    "fn apply(f: fn(u64) -> u64, x: u64) -> u64 { f(x) }\nfn inc(x: u64) -> u64 { wrapping_add(x, 1) }\nfn main() -> u64 { apply(inc, 1) }",
+    "fn literal() -> i64 { -170141183460469231731687303715884105728 }",
+    "trait Show { fn show(in self) -> u64; }\nfn main() -> u64 { 1 }",
+    "fn broken() -> u64 { undefined_name() }",
+    "fn tuple(x: u64) -> (u64, bool) { (x, true) }\nfn bump(inout x: u64) { x = wrapping_add(x, 1); }",
+    "struct Hot { hot a: u64, cold b: u64, copy c: u64 }\nfn main() -> u64 { 1 }",
+];
+
+fn signature_inputs() -> Vec<Option<Arc<CheckedSource>>> {
+    let mut out: Vec<Option<Arc<CheckedSource>>> = corpus_docs()
+        .iter()
+        .map(|d| Some(Arc::clone(&d.checked)))
+        .collect();
+    out.extend(SIGNATURE_PROGRAMS.iter().map(|s| snapshot(s)));
+    out
+}
+
+/// The port's answer with the header bytes hashed by the host when the
+/// port left the digest out (`C ` then the declarations).
+fn hosted_signature(answer: &str) -> String {
+    let Some(rest) = answer.strip_prefix("C ") else {
+        return answer.to_owned();
+    };
+    let headers = rest.rsplit_once('\n').map_or(rest, |(_, h)| h);
+    format!("C {}{rest}", blake3::hash(headers.as_bytes()).to_hex())
+}
+
+/// `database::signature_answer` against `lsp_signature`, with the port's
+/// portable BLAKE3 and with the digest left to the host.
+#[test]
+fn signature_matches_rust() {
+    use vesper::database::{signature_answer, signature_words};
+    let entry = entry("lsp_signature");
+    let mut differ = vec![];
+    let mut kinds = BTreeMap::<String, usize>::new();
+    let inputs = signature_inputs();
+    for (i, checked) in inputs.iter().enumerate() {
+        let checked = checked.as_deref();
+        let rust = signature_answer(checked, 1);
+        let kind = match rust.strip_prefix("E ") {
+            Some(reason) => format!("E {reason}"),
+            None => "C".to_owned(),
+        };
+        for shape in [
+            "\"IntLiteral\"",
+            "\"Function\"",
+            "\"Row\"",
+            "\"modality\"",
+            "\"temperature\"",
+            "\"operations\":[{",
+            "\"projections\":[[",
+            "\"Tuple\"",
+        ] {
+            if rust.contains(shape) {
+                *kinds.entry(shape.to_owned()).or_default() += 1;
+            }
+        }
+        *kinds.entry(kind).or_default() += 1;
+        let vesper = entry.text(&signature_words(checked, true, 1));
+        if let Some(d) = first_difference(&rust, &vesper) {
+            differ.push(format!("input {i}: {d}"));
+        }
+        let hosted = hosted_signature(&entry.text(&signature_words(checked, false, 1)));
+        if let Some(d) = first_difference(&rust, &hosted) {
+            differ.push(format!("input {i} (host digest): {d}"));
+        }
+    }
+    eprintln!(
+        "signature snapshot: {} inputs ({kinds:?}), {} differ",
+        inputs.len(),
+        differ.len()
+    );
+    assert!(differ.is_empty(), "{:#?}", &differ[..differ.len().min(8)]);
+}
+
+/// Rust against Vesper, `rounds` snapshots per call, best of five ABBA
+/// pairs per input. The checked world is encoded outside the timing; the
+/// host digest is computed inside it.
+#[test]
+#[ignore]
+fn signature_speed() {
+    use vesper::database::{signature_answer, signature_words};
+    let entry = entry("lsp_signature");
+    let rounds = 8;
+    let mut totals = [Duration::ZERO; 3];
+    let inputs = signature_inputs();
+    for checked in &inputs {
+        let checked = checked.as_deref();
+        let hosted = signature_words(checked, false, rounds);
+        let portable = signature_words(checked, true, rounds);
+        let time = |f: &dyn Fn()| {
+            let t = std::time::Instant::now();
+            f();
+            t.elapsed()
+        };
+        let rust = || {
+            std::hint::black_box(signature_answer(checked, rounds));
+        };
+        let host = || {
+            let answer = entry.text(&hosted);
+            let headers = answer.rsplit_once('\n').map_or("", |(_, h)| h);
+            for _ in 0..rounds {
+                std::hint::black_box(blake3::hash(headers.as_bytes()));
+            }
+            std::hint::black_box(answer);
+        };
+        let port = || {
+            std::hint::black_box(entry.words(&portable));
+        };
+        let mut best = [Duration::MAX; 3];
+        for _ in 0..5 {
+            best[0] = best[0].min(time(&rust));
+            best[1] = best[1].min(time(&host));
+            best[2] = best[2].min(time(&port));
+            best[2] = best[2].min(time(&port));
+            best[1] = best[1].min(time(&host));
+            best[0] = best[0].min(time(&rust));
+        }
+        for k in 0..3 {
+            totals[k] += best[k];
+        }
+    }
+    let per = inputs.len() as u32 * rounds as u32;
+    eprintln!(
+        "signature snapshot ({} inputs x {rounds}): rust {:?}; vesper, host C BLAKE3 {:?} (ratio {:.2}); vesper, portable BLAKE3 {:?} (ratio {:.2})",
+        inputs.len(),
+        totals[0] / per,
+        totals[1] / per,
+        totals[1].as_secs_f64() / totals[0].as_secs_f64(),
+        totals[2] / per,
+        totals[2].as_secs_f64() / totals[0].as_secs_f64()
+    );
+}
+
+// ------------------------------------------------------- lint preflight
+
+/// Sources over each lint preflight budget, at it and one past it, plus
+/// lexical errors and lexer limits.
+fn preflight_texts() -> Vec<String> {
+    let mut texts: Vec<String> = RECOVERY_PROGRAMS.map(str::to_owned).to_vec();
+    texts.extend(SIGNATURE_PROGRAMS.map(str::to_owned));
+    for t in formatting_corpus().into_iter().step_by(5) {
+        let mut at = t.len() / 2;
+        while !t.is_char_boundary(at) {
+            at -= 1;
+        }
+        texts.push(t[..at].to_owned());
+        texts.push(t);
+    }
+    for n in [255, 256, 257] {
+        texts.push(format!("fn f() -> u64 {{ {}0 }}", "1 + ".repeat(n / 2)));
+        texts.push(format!("fn f() {{ g({}); }}", "x, ".repeat(n / 2)));
+        texts.push(format!("fn f() {{ {} }}", "a.".repeat(n / 2)));
+    }
+    for n in [31, 32, 33] {
+        texts.push(format!("fn f() {}{}", "{".repeat(n), "}".repeat(n)));
+        texts.push(format!("fn f() {{ {}1{} }}", "(".repeat(n), ")".repeat(n)));
+        texts.push(format!("fn f() {{ {}1{} }}", "[".repeat(n), "]".repeat(n)));
+    }
+    for n in [63, 64, 65] {
+        texts.push(format!(
+            "fn f() {{ {} }}",
+            "if a { 1 } else ".repeat(n) + "{ 0 }"
+        ));
+    }
+    for n in [127, 128, 129] {
+        texts.push(format!("fn {}() {{}}", "a".repeat(n)));
+        texts.push(format!("struct {} {{}}", "B".repeat(n)));
+    }
+    for n in [8190, 8191, 8192, 8193] {
+        texts.push(format!("{};", ";".repeat(n - 2)));
+    }
+    texts.push(";".repeat(70_000));
+    texts.push("` ".repeat(200));
+    texts.push("fn f() { /* open".to_owned());
+    texts.push("fn f() { \"open".to_owned());
+    texts.push("fn \u{7f} f() { # }".to_owned());
+    texts.push("x".repeat(262_144));
+    texts.push("x".repeat(262_145));
+    texts.push(format!("fn f() {{ {} }}", "-".repeat(300)));
+    texts.push(format!("fn f() {{ {}; }}", "a ".repeat(300)));
+    texts
+}
+
+/// `lint::preflight_answer` against `lsp_lint_preflight`, answer for
+/// answer.
+#[test]
+fn lint_preflight_matches_rust() {
+    use vesper::tooling::lint::{preflight_answer, preflight_words};
+    let entry = entry("lsp_lint_preflight");
+    let mut differ = vec![];
+    let mut kinds = BTreeMap::<String, usize>::new();
+    let texts = preflight_texts();
+    for text in &texts {
+        let rust = preflight_answer(text, 1);
+        let kind = if rust.starts_with("E lexical errors") {
+            "E lexical errors".to_owned()
+        } else {
+            rust.split(" (").next().unwrap_or("").to_owned()
+        };
+        let kind = if kind.starts_with("O ") {
+            "O".to_owned()
+        } else {
+            kind
+        };
+        *kinds.entry(kind).or_default() += 1;
+        let vesper = entry.text(&preflight_words(text, 1));
+        if let Some(d) = first_difference(&rust, &vesper) {
+            differ.push(format!("{:?}: {d}", &text[..text.len().min(80)]));
+        }
+    }
+    eprintln!(
+        "lint preflight: {} sources ({kinds:?}), {} differ",
+        texts.len(),
+        differ.len()
+    );
+    assert!(differ.is_empty(), "{:#?}", &differ[..differ.len().min(8)]);
+}
+
+/// Rust against Vesper, `rounds` preflights per call, best of five ABBA
+/// pairs per source. The words are written outside the timing.
+#[test]
+#[ignore]
+fn lint_preflight_speed() {
+    use vesper::tooling::lint::{preflight_answer, preflight_words};
+    let entry = entry("lsp_lint_preflight");
+    let rounds = 8;
+    let mut totals = [Duration::ZERO; 2];
+    let texts = preflight_texts();
+    for text in &texts {
+        let words = preflight_words(text, rounds);
+        let time = |f: &dyn Fn()| {
+            let t = std::time::Instant::now();
+            f();
+            t.elapsed()
+        };
+        let rust = || {
+            std::hint::black_box(preflight_answer(text, rounds));
+        };
+        let port = || {
+            std::hint::black_box(entry.words(&words));
+        };
+        let mut best = [Duration::MAX; 2];
+        for _ in 0..5 {
+            best[0] = best[0].min(time(&rust));
+            best[1] = best[1].min(time(&port));
+            best[1] = best[1].min(time(&port));
+            best[0] = best[0].min(time(&rust));
+        }
+        totals[0] += best[0];
+        totals[1] += best[1];
+    }
+    let per = texts.len() as u32 * rounds as u32;
+    eprintln!(
+        "lint preflight ({} sources x {rounds}): rust {:?}; vesper {:?} (ratio {:.2})",
+        texts.len(),
+        totals[0] / per,
+        totals[1] / per,
+        totals[1].as_secs_f64() / totals[0].as_secs_f64()
     );
 }

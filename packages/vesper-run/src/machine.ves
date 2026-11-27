@@ -48,6 +48,8 @@ pub const T_SEQ: u8 = 14;
 pub const T_SLICE: u8 = 15;
 // A closure (`Value::Closure`): its `closures` index.
 pub const T_CLOS: u8 = 16;
+// A function value with bound evidence (`Value::Bound`): its `bounds` index.
+pub const T_BOUND: u8 = 17;
 pub const T_UNDEF: u8 = 255;
 
 // Unary codes; a conversion is U_CONV + family * 16 + target kind.
@@ -70,6 +72,10 @@ const FR_HANDLER: u8 = 2;
 const HANDLER_STATE: u32 = 1;
 // `Frame::Coerce`: the returned value takes type `ty`.
 const FR_COERCE: u8 = 3;
+// Evidence a bound callable or closure carries into its call
+// (`evidence_environment(caller)` extended by its own): `block` and `ip`
+// the start and count of its entries in `evs`. Free to pop.
+const FR_EVIDENCE: u8 = 4;
 
 // What `drive` holds (`Control::Ir`, `Control::Return`).
 const C_IR: u8 = 0;
@@ -114,6 +120,8 @@ copy struct Fr {
     dest: u32,
     ty: u32,
     kind: u8,
+    // A handler's identity (`Handler::id`), 0 for other frames.
+    serial: u64,
 }
 
 copy struct En {
@@ -137,6 +145,7 @@ copy struct Fi {
 copy struct Pm {
     name: u32,
     pass: u64,
+    ty: u32,
 }
 
 // A `Write` place split at its dots: root, segments
@@ -149,12 +158,31 @@ copy struct Wr {
     code: u64,
 }
 
+// An evidence entry: handler `serial` (installed at effect-table site
+// `site`) for every key it provides, or for `$effect:<effect>` only.
+copy struct Ev {
+    serial: u64,
+    site: u64,
+    effect: u32,
+}
+const EV_ALL_KEYS: u32 = 4294967295;
+
+// A bound function value: function `callee` and its evidence.
+copy struct Bd {
+    callee: u32,
+    ev_start: u64,
+    ev_count: u64,
+}
+
 // A closure: its effect-table site and captures
 // `clos_*[cap_start..cap_start + cap_count]`.
 copy struct Cl {
     site: u64,
     cap_start: u64,
     cap_count: u64,
+    // its evidence `evs[ev_start..ev_start + ev_count]`
+    ev_start: u64,
+    ev_count: u64,
 }
 
 // A sequence: its elements `seq_items[at..at + len]`, with room for `cap`.
@@ -168,6 +196,13 @@ copy struct Sq {
 copy struct Sl {
     seq: u64,
     start: u64,
+    len: u64,
+}
+
+// A string (`Value::String`, also a view): bytes `str_bytes[at..at + len]`,
+// never changed (an update makes a new string).
+copy struct Sr {
+    at: u64,
     len: u64,
 }
 
@@ -260,10 +295,18 @@ pub struct M {
     closures: ChunkSeq[Cl],
     clos_names: ChunkSeq[u32],
     clos_vals: ChunkSeq[Val],
+    // Evidence entries, bound function values and the last handler serial.
+    evs: ChunkSeq[Ev],
+    bounds: ChunkSeq[Bd],
+    h_serial: u64,
     // Sequences, their elements and slice views.
     seqs: ChunkSeq[Sq],
     seq_items: ChunkSeq[Val],
     slices: ChunkSeq[Sl],
+    // Strings and their bytes; per literal symbol its string + 1, or 0.
+    strs: ChunkSeq[Sr],
+    str_bytes: ChunkSeq[u8],
+    lit_strs: ChunkSeq[u64],
     some_sym: u32,
     none_sym: u32,
     fail_sym: u32,
@@ -289,7 +332,8 @@ fn fr_zero() -> Fr {
         seg_base: 0,
         dest: 0,
         ty: 0,
-        kind: FR_IR
+        kind: FR_IR,
+        serial: 0
     }
 }
 
@@ -354,9 +398,15 @@ pub fn machine_new(sink ctx: Ctx, sink program: Program, fuel: u64) -> M {
         closures: ChunkSeq::new[Cl](),
         clos_names: ChunkSeq::new[u32](),
         clos_vals: ChunkSeq::new[Val](),
+        evs: ChunkSeq::new[Ev](),
+        bounds: ChunkSeq::new[Bd](),
+        h_serial: 0,
         seqs: ChunkSeq::new[Sq](),
         seq_items: ChunkSeq::new[Val](),
         slices: ChunkSeq::new[Sl](),
+        strs: ChunkSeq::new[Sr](),
+        str_bytes: ChunkSeq::new[u8](),
+        lit_strs: ChunkSeq::new[u64](),
         some_sym: 0,
         none_sym: 0,
         fail_sym: 0,
@@ -435,6 +485,7 @@ const HS_EFFECT: u64 = 2;
 const HS_LABEL: u64 = 3;
 const HS_KEY: u64 = 4;
 const HS_FLAGS: u64 = 5;
+const HS_STATIC: u64 = 6;
 const HS_FREE_COUNT: u64 = 7;
 const HS_FREE: u64 = 8;
 // After the captured names: body fn + 1, return clause fn + 1, return
@@ -771,6 +822,8 @@ fn install(inout machine: M) {
     let mut handler_frame = machine.frame;
     handler_frame.kind = FR_HANDLER;
     handler_frame.func_index = at;
+    machine.h_serial = inc(machine.h_serial);
+    handler_frame.serial = machine.h_serial;
     handler_frame.block = hcap_start;
     handler_frame.ip = wrapping_sub(machine.hcap_names.len(), hcap_start);
     if stateful {
@@ -808,7 +861,8 @@ fn install(inout machine: M) {
             seg_base: seg_base,
             dest: 0,
             ty: 0,
-            kind: FR_IR
+            kind: FR_IR,
+            serial: 0
         };
     machine.control = C_IR;
 }
@@ -849,7 +903,8 @@ fn clause_frame(inout machine: M, handler: Fr, func_index: u64) {
             seg_base: handler.seg_base,
             dest: 0,
             ty: 0,
-            kind: FR_IR
+            kind: FR_IR,
+            serial: 0
         };
     machine.control = C_IR;
 }
@@ -911,30 +966,14 @@ fn handler_state(in machine: M, handler: Fr) -> Val {
 // innermost handler with that key, else the innermost of the effect.
 fn perform(inout machine: M, effect: u32, op_name: u32, key: u64) {
     let mut found = NONE64;
-    let mut i = machine.stack.len();
-    loop {
-        if i == 0 || key == 0 {
-            break;
-        }
-        i = wrapping_sub(i, 1);
-        let frame = stack_at(in machine, i);
-        if frame.kind == FR_HANDLER && site_word(in machine, add(frame.func_index, HS_KEY)) == key {
-            found = i;
-            break;
-        }
+    if key != 0 {
+        found = find_handler(inout machine, key, effect);
     }
-    i = machine.stack.len();
-    loop {
-        if i == 0 || found != NONE64 {
-            break;
-        }
-        i = wrapping_sub(i, 1);
-        let frame = stack_at(in machine, i);
-        if frame.kind == FR_HANDLER
-            && site_word(in machine, add(frame.func_index, HS_EFFECT)) == w(effect)
-        {
-            found = i;
-        }
+    if found == NONE64 {
+        found = find_handler(inout machine, 0, effect);
+    }
+    if machine.declined {
+        return;
     }
     if found == NONE64 {
         if !machine.failed {
@@ -1431,6 +1470,10 @@ fn int_kind(inout machine: M, ty: u32) -> u8 {
 
 // `coerce_value`: an integer takes the kind of an integer type.
 fn coerce(inout machine: M, value: Val, ty: u32) -> Val {
+    if value.tag == T_FN || value.tag == T_CLOS || value.tag == T_BOUND {
+        // `qualify_value` without ambient evidence: `$cap` instances only.
+        return bind_evidence(inout machine, value, ty, false);
+    }
     if value.tag > K_I32 {
         return value;
     }
@@ -1441,9 +1484,12 @@ fn coerce(inout machine: M, value: Val, ty: u32) -> Val {
     Val { tag: kind, payload: wrap(kind, exact(value.tag, value.payload)) }
 }
 
+// How deep `type_ok` and `inner_effects` follow a type.
+const TYPE_DEPTH_LIMIT: u64 = 64;
+
 // Whether the machine runs values of type `ty` (`scan`).
 fn type_ok(in machine: M, ty: u32, depth: u64) -> bool {
-    if depth > 64 {
+    if depth > TYPE_DEPTH_LIMIT {
         return false;
     }
     let node = machine.ctx.types.node(ty);
@@ -1468,12 +1514,19 @@ fn type_ok(in machine: M, ty: u32, depth: u64) -> bool {
         }
     }
     if node.kind == TyKind::Fn {
-        // A function value with effects may carry bound evidence
-        // (`bind_callable_evidence`), which the machine does not keep; only
-        // a clause's continuation is let through (`cont_names`).
+        // A function value with effects carries evidence (`evs`); the
+        // machine keys it by effect name, so a user label (`$label:` keys) declines;
+        // a latent label keys by name, a `$cap` or `$fncap:` one by its handler's
+        // `$static:` key.
         let row = machine.ctx.types.row(node.r2);
-        if row.n != 0 || row.tail != 0 {
-            return false;
+        for i in 0..w(row.n) {
+            let label = machine.ctx.types.effect_at(add(w(row.a), i)).label;
+            if label != 0
+                && !has_prefix(in machine, wrapping_sub(label, 1), "$latent:")
+                && !bound_label(in machine, wrapping_sub(label, 1))
+            {
+                return false;
+            }
         }
         if !type_ok(in machine, node.r, inc(depth)) {
             return false;
@@ -1487,6 +1540,30 @@ fn type_ok(in machine: M, ty: u32, depth: u64) -> bool {
         }
     }
     true
+}
+
+// Whether a function type with effects appears inside type `ty` below its
+// top: a call binds evidence to a parameter's own function value only,
+// not to one inside a tuple or data value (`qualify_value`).
+fn inner_effects(in machine: M, ty: u32, depth: u64) -> bool {
+    if depth > TYPE_DEPTH_LIMIT {
+        return true;
+    }
+    let node = machine.ctx.types.node(ty);
+    if node.kind == TyKind::Fn && depth > 0 {
+        let row = machine.ctx.types.row(node.r2);
+        if row.n != 0 || row.tail != 0 {
+            return true;
+        }
+    }
+    if node.kind == TyKind::Named || node.kind == TyKind::Tuple {
+        for i in 0..w(node.n) {
+            if inner_effects(in machine, machine.ctx.types.arg(ty, i), inc(depth)) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 // ----- loading -----------------------------------------------------------------
@@ -1659,8 +1736,9 @@ pub fn load(inout machine: M, entry_index: u64) {
             let path_count = machine.program.op(add(cursor, 2));
             cursor = add(cursor, add(3, path_count));
             // type, span start, end
+            let param_ty = n32(machine.program.op(cursor));
             cursor = add(cursor, 3);
-            machine.params.push(Pm { name: name, pass: pass });
+            machine.params.push(Pm { name: name, pass: pass, ty: param_ty });
         }
         // result, effects
         cursor = add(cursor, 2);
@@ -1757,7 +1835,8 @@ fn pat_end(in machine: M, at: u64) -> u64 {
 }
 
 // Declines a literal the machine has no value for (a float, a 128-bit
-// integer, a non-ASCII string, whose `Debug` text needs Unicode tables).
+// integer). `run` declines a non-ASCII string in the result, whose `Debug`
+// text needs Unicode tables.
 fn scan_literal(inout machine: M, at: u64) {
     let kind = machine.program.op(at);
     let lo = machine.program.op(inc(at));
@@ -1767,16 +1846,7 @@ fn scan_literal(inout machine: M, at: u64) {
         if !(hi == 0 || neg) {
             decline(inout machine, "a 128-bit integer literal", NONE32);
         }
-    } else if kind == widen_u64(Lit::String) {
-        let sym = n32(lo);
-        let text_start = machine.ctx.names.start(sym);
-        let text_end = machine.ctx.names.end(sym);
-        for i in text_start..text_end {
-            if u8_at(in machine.ctx.names.text, i) >= 128 {
-                decline(inout machine, "a non-ASCII string literal", NONE32);
-            }
-        }
-    } else if kind != widen_u64(Lit::Bool) {
+    } else if kind != widen_u64(Lit::String) && kind != widen_u64(Lit::Bool) {
         decline(inout machine, "a float or wide literal", NONE32);
     }
 }
@@ -1884,6 +1954,12 @@ pub fn scan(inout machine: M) {
                 cont_type = wrapping_add(param_type, 1);
             } else if !type_ok(in machine, param_type, 0) {
                 decline(inout machine, "a parameter type of ", fn_info.name);
+            } else if inner_effects(in machine, param_type, 0) {
+                decline(
+                    inout machine,
+                    "an effectful function inside a parameter of ",
+                    fn_info.name
+                );
             }
             cursor = add(cursor, 3);
         }
@@ -2121,10 +2197,15 @@ fn display(in machine: M, value: Val, inout out: ChunkSeq[u8], depth: u64) {
             put(inout out, "false");
         }
     } else if value.tag == T_STR {
-        debug_str(inout out, in machine.ctx.names, n32(value.payload));
+        let text = str_at(in machine, value.payload);
+        debug_str(inout out, in machine.str_bytes, text.at, add(text.at, text.len));
     } else if value.tag == T_FN {
         put(inout out, "<fn ");
         put_sym(inout out, in machine.ctx.names, n32(value.payload));
+        put(inout out, ">");
+    } else if value.tag == T_BOUND {
+        put(inout out, "<fn ");
+        put_sym(inout out, in machine.ctx.names, bd_at(in machine, value.payload).callee);
         put(inout out, ">");
     } else if value.tag == T_CONT {
         put(inout out, "<one-shot continuation>");
@@ -2232,13 +2313,12 @@ fn hex(digit: u64) -> u8 {
     }
 }
 
-// Rust's `{:?}` of an ASCII string (`scan` declines the others).
-fn debug_str(inout out: ChunkSeq[u8], in names: Names, sym: u32) {
+// Rust's `{:?}` of an ASCII string `bytes[text_start..text_end]`. Other
+// bytes are copied, and `run` declines a result whose text has one.
+fn debug_str(inout out: ChunkSeq[u8], in bytes: ChunkSeq[u8], text_start: u64, text_end: u64) {
     out.push(34);
-    let text_start = names.start(sym);
-    let text_end = names.end(sym);
     for i in text_start..text_end {
-        let byte = u8_at(in names.text, i);
+        let byte = u8_at(in bytes, i);
         if byte == 34 {
             out.push(92);
             out.push(34);
@@ -2274,7 +2354,10 @@ fn debug_str(inout out: ChunkSeq[u8], in names: Names, sym: u32) {
 
 // `equal`.
 fn equal(in machine: M, lhs: Val, rhs: Val) -> bool {
-    if lhs.tag <= K_I32 || lhs.tag == T_BOOL || lhs.tag == T_STR {
+    if lhs.tag == T_STR {
+        return rhs.tag == T_STR && text_order(in machine, lhs, rhs) == ORDER_EQUAL;
+    }
+    if lhs.tag <= K_I32 || lhs.tag == T_BOOL {
         return lhs.tag == rhs.tag && lhs.payload == rhs.payload;
     }
     if lhs.tag == T_TUPLE && rhs.tag == T_TUPLE {
@@ -2519,7 +2602,7 @@ fn literal_matches(in machine: M, at: u64, value: Val) -> bool {
         return value.tag == T_BOOL && value.payload == lo;
     }
     if kind == widen_u64(Lit::String) {
-        return value.tag == T_STR && value.payload == lo;
+        return value.tag == T_STR && text_spells(in machine, value, n32(lo));
     }
     false
 }
@@ -2693,20 +2776,19 @@ fn binary(inout machine: M, code: u64, lhs: Val, rhs: Val, inout failure: u8) ->
         return undef();
     }
     if lhs.tag == T_STR && rhs.tag == T_STR {
-        let lhs_sym = n32(lhs.payload);
-        let rhs_sym = n32(rhs.payload);
+        let order = text_order(in machine, lhs, rhs);
         if op == B_EQ {
-            return bool_val(lhs_sym == rhs_sym);
+            return bool_val(order == ORDER_EQUAL);
         } else if op == B_NE {
-            return bool_val(lhs_sym != rhs_sym);
+            return bool_val(order != ORDER_EQUAL);
         } else if op == B_LT {
-            return bool_val(sym_less(in machine, lhs_sym, rhs_sym));
+            return bool_val(order == ORDER_LESS);
         } else if op == B_LE {
-            return bool_val(!sym_less(in machine, rhs_sym, lhs_sym));
+            return bool_val(order != ORDER_GREATER);
         } else if op == B_GT {
-            return bool_val(sym_less(in machine, rhs_sym, lhs_sym));
+            return bool_val(order == ORDER_GREATER);
         } else if op == B_GE {
-            return bool_val(!sym_less(in machine, lhs_sym, rhs_sym));
+            return bool_val(order != ORDER_LESS);
         }
         fail(inout machine, "invalid string operator");
         return undef();
@@ -2806,7 +2888,7 @@ fn func(in machine: M, func_index: u64) -> Fi {
 fn param(in machine: M, index: u64) -> Pm {
     match machine.params.try_get(index) {
         Option::Some(found) => found,
-        Option::None => Pm { name: 0, pass: 0 },
+        Option::None => Pm { name: 0, pass: 0, ty: 0 },
     }
 }
 
@@ -2910,13 +2992,16 @@ fn invoke_with(inout machine: M, func_index: u64, cap_start: u64, cap_count: u64
                 return;
             }
         } else {
+            let mut value = val_at(in machine.arg_vals, i);
+            // `qualify_value` with the caller's evidence.
+            value = bind_evidence(inout machine, value, param_row.ty, true);
             let cell = machine.cells.len();
-            machine.cells.push(match machine.arg_vals.try_get(i) {
-                Option::Some(value) => value,
-                Option::None => undef(),
-            });
+            machine.cells.push(value);
             slots.push(En { name: param_row.name, cell: cell, seg_start: 0, seg_count: 0 });
         }
+    }
+    if machine.declined {
+        return;
     }
     // `snapshot_environment`: the captures, by value.
     for i in 0..cap_count {
@@ -2947,7 +3032,8 @@ fn invoke_with(inout machine: M, func_index: u64, cap_start: u64, cap_count: u64
             seg_base: seg_base,
             dest: 0,
             ty: 0,
-            kind: FR_IR
+            kind: FR_IR,
+            serial: 0
         };
 }
 
@@ -2959,6 +3045,17 @@ fn call_value(inout machine: M, callee: Val) {
     }
     if callee.tag == T_CLOS {
         call_closure(inout machine, callee);
+        return;
+    }
+    if callee.tag == T_BOUND {
+        let bound = bd_at(in machine, callee.payload);
+        let func_index = fn_index(in machine, bound.callee);
+        if func_index == NONE64 {
+            fail_sym(inout machine, "unknown function '", bound.callee, "'");
+            return;
+        }
+        push_evidence_frame(inout machine, bound.ev_start, bound.ev_count);
+        invoke(inout machine, func_index);
         return;
     }
     if callee.tag == T_FN {
@@ -3009,7 +3106,7 @@ fn step(inout machine: M) {
         } else if kind == widen_u64(Lit::Bool) {
             result = bool_val(lo != 0);
         } else {
-            result = Val { tag: T_STR, payload: lo };
+            result = lit_str(inout machine, n32(lo));
         }
     } else if op == Op::Read {
         let root = n32(machine.program.op(operand_at));
@@ -3349,12 +3446,24 @@ fn terminate(inout machine: M, block: BlockRow) {
 // A returned value meets the top frame (`Control::Return` in `drive`);
 // false when the run is complete.
 fn resume(inout machine: M) -> bool {
-    let frame = match machine.stack.pop() {
+    let mut frame = match machine.stack.pop() {
         Option::Some(popped) => popped,
         Option::None => {
             return false;
         },
     };
+    // An evidence frame is no `Frame`: popping it takes no step.
+    loop {
+        if frame.kind != FR_EVIDENCE {
+            break;
+        }
+        frame = match machine.stack.pop() {
+            Option::Some(popped) => popped,
+            Option::None => {
+                return false;
+            },
+        };
+    }
     if frame.kind == FR_TRY {
         let value = machine.ret_value;
         if value.tag == T_DATA {
@@ -3431,6 +3540,13 @@ pub fn drive(inout machine: M) {
     let value = machine.ret_value;
     let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
     display(in machine, value, inout out, 0);
+    // Every other value's text is ASCII: a byte past it came from a string.
+    for i in 0..out.len() {
+        if u8_at(in out, i) >= NON_ASCII {
+            decline(inout machine, "a non-ASCII string in the result", NONE32);
+            return;
+        }
+    }
     machine.message = out;
 }
 
@@ -3487,6 +3603,40 @@ const SQ_FILL: u64 = 19;
 const SQ_COPY_FROM: u64 = 20;
 const SQ_TRY_COPY_FROM: u64 = 21;
 const SQ_EXTEND_REVERSED: u64 = 22;
+// String primitives (`SeqOp::Str`), below `SQ_WIDE`.
+const SQ_STR_LEN: u64 = 101;
+const SQ_STR_BYTE_AT: u64 = 102;
+const SQ_STR_TRY_BYTE_AT: u64 = 103;
+const SQ_STR_AS_STR: u64 = 104;
+const SQ_STR_AS_BYTES: u64 = 105;
+const SQ_STR_SUB_STR: u64 = 106;
+const SQ_STR_PUSH_STR: u64 = 107;
+const SQ_STR_PUSH_CHAR: u64 = 108;
+const SQ_STR_CLEAR: u64 = 109;
+const SQ_STR_RESERVE: u64 = 110;
+// UTF-8 (`char::from_u32`, `String::push`): the largest scalar value and
+// the surrogates; a continuation byte's tag, payload bits and mask; the
+// lead byte tags, continuation counts and first scalars of the 2-, 3- and
+// 4-byte encodings; and a char boundary's test (`str::is_char_boundary`).
+const CHAR_MAX: u64 = 1114111;
+const SURROGATE_LO: u64 = 55296;
+const SURROGATE_HI: u64 = 57343;
+const UTF8_CONT_TAG: u64 = 128;
+const UTF8_CONT_SHIFT: u32 = 6;
+const UTF8_CONT_MASK: u64 = 63;
+const UTF8_LEAD2: u64 = 192;
+const UTF8_LEAD3: u64 = 224;
+const UTF8_LEAD4: u64 = 240;
+const UTF8_CONTS2: u32 = 1;
+const UTF8_CONTS3: u32 = 2;
+const UTF8_CONTS4: u32 = 3;
+const UTF8_FIRST2: u64 = 128;
+const UTF8_FIRST3: u64 = 2048;
+const UTF8_FIRST4: u64 = 65536;
+const UTF8_TAG_MASK: u8 = 192;
+const UTF8_CONT_BYTE: u8 = 128;
+// The first non-ASCII byte.
+const NON_ASCII: u8 = 128;
 // A `SeqOp::Hoisted` access adds this to its checked access's code.
 const SQ_HOISTED: u64 = 1000;
 // A fixed-width byte access (`SeqOp::Wide`): this plus bytes * 8, then 4
@@ -3556,6 +3706,26 @@ fn seq_code(in machine: M, sym: u32) -> u64 {
         SQ_TRY_COPY_FROM
     } else if spells(in machine, sym, "ExtendReversed") {
         SQ_EXTEND_REVERSED
+    } else if spells(in machine, sym, "Str(Len)") {
+        SQ_STR_LEN
+    } else if spells(in machine, sym, "Str(ByteAt)") {
+        SQ_STR_BYTE_AT
+    } else if spells(in machine, sym, "Str(TryByteAt)") {
+        SQ_STR_TRY_BYTE_AT
+    } else if spells(in machine, sym, "Str(AsStr)") {
+        SQ_STR_AS_STR
+    } else if spells(in machine, sym, "Str(AsBytes)") {
+        SQ_STR_AS_BYTES
+    } else if spells(in machine, sym, "Str(SubStr)") {
+        SQ_STR_SUB_STR
+    } else if spells(in machine, sym, "Str(PushStr)") {
+        SQ_STR_PUSH_STR
+    } else if spells(in machine, sym, "Str(PushChar)") {
+        SQ_STR_PUSH_CHAR
+    } else if spells(in machine, sym, "Str(Clear)") {
+        SQ_STR_CLEAR
+    } else if spells(in machine, sym, "Str(Reserve)") {
+        SQ_STR_RESERVE
     } else if spells(in machine, sym, "Hoisted(Get)") {
         add(SQ_HOISTED, SQ_GET)
     } else if spells(in machine, sym, "Hoisted(Set)") {
@@ -3690,6 +3860,277 @@ fn u64_val(n: u64) -> Val {
     Val { tag: K_U64, payload: n }
 }
 
+// ----- strings -----------------------------------------------------------------
+
+// `Ordering` of two strings' bytes.
+const ORDER_LESS: u8 = 0;
+const ORDER_EQUAL: u8 = 1;
+const ORDER_GREATER: u8 = 2;
+
+fn str_at(in machine: M, id: u64) -> Sr {
+    match machine.strs.try_get(id) {
+        Option::Some(found) => found,
+        Option::None => Sr { at: 0, len: 0 },
+    }
+}
+
+// A string of the bytes `str_bytes[at..]` pushed since `at`.
+fn new_str(inout machine: M, at: u64) -> Val {
+    let id = machine.strs.len();
+    machine.strs.push(Sr { at: at, len: wrapping_sub(machine.str_bytes.len(), at) });
+    Val { tag: T_STR, payload: id }
+}
+
+// Appends the bytes of string value `text` to `str_bytes`.
+fn push_text(inout machine: M, text: Val) {
+    let range = str_at(in machine, text.payload);
+    for i in 0..range.len {
+        let byte = u8_at(in machine.str_bytes, add(range.at, i));
+        machine.str_bytes.push(byte);
+    }
+}
+
+// The string of literal `sym`, made once: strings never change.
+fn lit_str(inout machine: M, sym: u32) -> Val {
+    let index = w(sym);
+    let cached = u64_at(in machine.lit_strs, index);
+    if cached != 0 {
+        return Val { tag: T_STR, payload: wrapping_sub(cached, 1) };
+    }
+    let at = machine.str_bytes.len();
+    let text_start = machine.ctx.names.start(sym);
+    let text_end = machine.ctx.names.end(sym);
+    for i in text_start..text_end {
+        machine.str_bytes.push(u8_at(in machine.ctx.names.text, i));
+    }
+    let value = new_str(inout machine, at);
+    for i in machine.lit_strs.len()..inc(index) {
+        machine.lit_strs.push(0);
+    }
+    let ok = machine.lit_strs.try_set(index, inc(value.payload));
+    value
+}
+
+// `Ord` of `String`: bytewise, then by length.
+fn text_order(in machine: M, lhs: Val, rhs: Val) -> u8 {
+    let lhs_range = str_at(in machine, lhs.payload);
+    let rhs_range = str_at(in machine, rhs.payload);
+    let common_len = if lhs_range.len < rhs_range.len {
+        lhs_range.len
+    } else {
+        rhs_range.len
+    };
+    for i in 0..common_len {
+        let lhs_byte = u8_at(in machine.str_bytes, add(lhs_range.at, i));
+        let rhs_byte = u8_at(in machine.str_bytes, add(rhs_range.at, i));
+        if lhs_byte != rhs_byte {
+            return if lhs_byte < rhs_byte {
+                ORDER_LESS
+            } else {
+                ORDER_GREATER
+            };
+        }
+    }
+    if lhs_range.len < rhs_range.len {
+        ORDER_LESS
+    } else if lhs_range.len > rhs_range.len {
+        ORDER_GREATER
+    } else {
+        ORDER_EQUAL
+    }
+}
+
+// Whether string value `text` holds the text of symbol `sym`.
+fn text_spells(in machine: M, text: Val, sym: u32) -> bool {
+    let range = str_at(in machine, text.payload);
+    let text_start = machine.ctx.names.start(sym);
+    if wrapping_sub(machine.ctx.names.end(sym), text_start) != range.len {
+        return false;
+    }
+    for i in 0..range.len {
+        let byte = u8_at(in machine.str_bytes, add(range.at, i));
+        if byte != u8_at(in machine.ctx.names.text, add(text_start, i)) {
+            return false;
+        }
+    }
+    true
+}
+
+// `str::is_char_boundary` of byte `i` of string `range`.
+fn char_boundary(in machine: M, range: Sr, i: u64) -> bool {
+    if i == 0 || i == range.len {
+        return true;
+    }
+    if i > range.len {
+        return false;
+    }
+    (u8_at(in machine.str_bytes, add(range.at, i)) & UTF8_TAG_MASK) != UTF8_CONT_BYTE
+}
+
+// A string update writes the new string back to the receiver's place
+// (argument 0; `inout` parameters share it).
+fn write_receiver(inout machine: M, updated: Val) {
+    let root = u64_at(in machine.arg_roots, 0);
+    if root == 0 {
+        fail(inout machine, "string update requires a place");
+        return;
+    }
+    let bound_index = binding(in machine, n32(wrapping_sub(root, 1)));
+    if bound_index == NONE64 {
+        fail(inout machine, "undefined string receiver place");
+        return;
+    }
+    let env_entry = entry(in machine, bound_index);
+    slot_path(inout machine, env_entry);
+    let path = u64_at(in machine.arg_paths, 0);
+    for j in 0..machine.program.path(path).n {
+        machine.path.push(machine.program.path_name(path, j));
+    }
+    write_path(inout machine, env_entry.cell, updated);
+}
+
+// Pushes a lead byte `lead_tag | c >> (6 * conts)`, then `conts`
+// continuation bytes of scalar value `c`, high bits first.
+fn push_encoded(inout machine: M, c: u64, lead_tag: u64, conts: u32) {
+    let lead = wrapping_shr_u64(c, wrapping_mul(conts, UTF8_CONT_SHIFT));
+    machine.str_bytes.push(wrapping_u8(lead_tag | lead));
+    for i in 0..conts {
+        let k = wrapping_sub(wrapping_sub(conts, 1), i);
+        let payload = wrapping_shr_u64(c, wrapping_mul(k, UTF8_CONT_SHIFT)) & UTF8_CONT_MASK;
+        machine.str_bytes.push(wrapping_u8(UTF8_CONT_TAG | payload));
+    }
+}
+
+// `String::push` of scalar value `c` onto the bytes being built.
+fn push_utf8(inout machine: M, c: u64) {
+    if c < UTF8_FIRST2 {
+        machine.str_bytes.push(wrapping_u8(c));
+    } else if c < UTF8_FIRST3 {
+        push_encoded(inout machine, c, UTF8_LEAD2, UTF8_CONTS2);
+    } else if c < UTF8_FIRST4 {
+        push_encoded(inout machine, c, UTF8_LEAD3, UTF8_CONTS3);
+    } else {
+        push_encoded(inout machine, c, UTF8_LEAD4, UTF8_CONTS4);
+    }
+}
+
+// `str_op`: a string primitive on the collected arguments. A string and a
+// view are both a string value; an update makes a new string and writes
+// it to the receiver's place.
+fn str_op(inout machine: M, code: u64, inout oob: bool) -> Val {
+    let arg0 = val_at(in machine.arg_vals, 0);
+    let arg1 = val_at(in machine.arg_vals, 1);
+    let arg2 = val_at(in machine.arg_vals, 2);
+    if arg0.tag != T_STR {
+        fail(inout machine, "String operation expects a string operand");
+        return unit();
+    }
+    let range = str_at(in machine, arg0.payload);
+    if code == SQ_STR_LEN {
+        return u64_val(range.len);
+    }
+    if code == SQ_STR_BYTE_AT || code == SQ_STR_TRY_BYTE_AT {
+        let i = seq_index(inout machine, arg1);
+        if machine.failed {
+            return unit();
+        }
+        let inside = i < range.len;
+        let byte = if inside {
+            Val { tag: K_U8, payload: widen_u64(u8_at(in machine.str_bytes, add(range.at, i))) }
+        } else {
+            unit()
+        };
+        if code == SQ_STR_TRY_BYTE_AT {
+            return option_val(inout machine, inside, byte);
+        }
+        if !inside {
+            oob = true;
+        }
+        return byte;
+    }
+    if code == SQ_STR_AS_STR {
+        return arg0;
+    }
+    if code == SQ_STR_AS_BYTES {
+        let bytes = new_seq(inout machine);
+        for i in 0..range.len {
+            let byte = widen_u64(u8_at(in machine.str_bytes, add(range.at, i)));
+            push_item(inout machine, bytes.payload, Val { tag: K_U8, payload: byte });
+        }
+        return new_slice(inout machine, Sl { seq: bytes.payload, start: 0, len: range.len });
+    }
+    if code == SQ_STR_SUB_STR {
+        let lo = seq_index(inout machine, arg1);
+        let hi = seq_index(inout machine, arg2);
+        if machine.failed {
+            return unit();
+        }
+        if lo > hi || hi > range.len {
+            fail(inout machine, "");
+            machine.message.clear();
+            put(inout machine.message, "String fault: interval ");
+            push_decimal(inout machine.message, lo);
+            put(inout machine.message, "..");
+            push_decimal(inout machine.message, hi);
+            put(inout machine.message, " is out of bounds of length ");
+            push_decimal(inout machine.message, range.len);
+            return unit();
+        }
+        if !char_boundary(in machine, range, lo) || !char_boundary(in machine, range, hi) {
+            fail(inout machine, "");
+            machine.message.clear();
+            put(inout machine.message, "String fault: interval ");
+            push_decimal(inout machine.message, lo);
+            put(inout machine.message, "..");
+            push_decimal(inout machine.message, hi);
+            put(inout machine.message, " is not on char boundaries");
+            return unit();
+        }
+        let id = machine.strs.len();
+        machine.strs.push(Sr { at: add(range.at, lo), len: wrapping_sub(hi, lo) });
+        return Val { tag: T_STR, payload: id };
+    }
+    if code == SQ_STR_PUSH_STR {
+        if arg1.tag != T_STR {
+            fail(inout machine, "String operation expects a string operand");
+            return unit();
+        }
+        let at = machine.str_bytes.len();
+        push_text(inout machine, arg0);
+        push_text(inout machine, arg1);
+        let updated = new_str(inout machine, at);
+        write_receiver(inout machine, updated);
+        return unit();
+    }
+    if code == SQ_STR_PUSH_CHAR {
+        let c = seq_index(inout machine, arg1);
+        if machine.failed {
+            return unit();
+        }
+        if c > CHAR_MAX || (c >= SURROGATE_LO && c <= SURROGATE_HI) {
+            return bool_val(false);
+        }
+        let at = machine.str_bytes.len();
+        push_text(inout machine, arg0);
+        push_utf8(inout machine, c);
+        let updated = new_str(inout machine, at);
+        write_receiver(inout machine, updated);
+        return bool_val(true);
+    }
+    if code == SQ_STR_CLEAR {
+        let updated = new_str(inout machine, machine.str_bytes.len());
+        write_receiver(inout machine, updated);
+        return unit();
+    }
+    // `SQ_STR_RESERVE`: capacity is not observable.
+    let n = seq_index(inout machine, arg1);
+    if n > SEQ_CAPACITY_LIMIT {
+        decline(inout machine, "a large String capacity", NONE32);
+    }
+    write_receiver(inout machine, arg0);
+    unit()
+}
+
 // `seq_op` of operation `code` on `arg_vals`: its value, or `oob` for the
 // `IndexOutOfBounds` the caller raises.
 fn seq_op(inout machine: M, code: u64, inout oob: bool) -> Val {
@@ -3707,6 +4148,9 @@ fn seq_op(inout machine: M, code: u64, inout oob: bool) -> Val {
     }
     if code > SQ_WIDE {
         return wide_op(inout machine, wrapping_sub(code, SQ_WIDE), inout oob);
+    }
+    if code >= SQ_STR_LEN && code <= SQ_STR_RESERVE {
+        return str_op(inout machine, code, inout oob);
     }
     if code == SQ_NEW {
         return new_seq(inout machine);
@@ -3836,8 +4280,7 @@ fn seq_op(inout machine: M, code: u64, inout oob: bool) -> Val {
     }
     if code == SQ_SUB_SLICE {
         if arg0.tag == T_STR {
-            decline(inout machine, "a string slice", NONE32);
-            return unit();
+            return str_op(inout machine, SQ_STR_SUB_STR, inout oob);
         }
         let view = seq_view(inout machine, arg0);
         let lo = seq_index(inout machine, arg1);
@@ -4006,10 +4449,277 @@ fn closure_tail(in machine: M, at: u64) -> u64 {
     add(add(at, CS_FREE), site_word(in machine, add(at, CS_FREE_COUNT)))
 }
 
+// ----- evidence ----------------------------------------------------------------
+
+// Whether evidence entry `ev` provides instance key `key` (when `key` is
+// not 0) or effect `effect` by name.
+fn ev_provides(in machine: M, ev: Ev, key: u64, effect: u32) -> bool {
+    if key != 0 {
+        return ev.effect == EV_ALL_KEYS && site_word(in machine, add(ev.site, HS_KEY)) == key;
+    }
+    if ev.effect == EV_ALL_KEYS {
+        return site_word(in machine, add(ev.site, HS_EFFECT)) == w(effect);
+    }
+    ev.effect == effect
+}
+
+// The stack index of the live handler with serial `serial`, or NONE64.
+fn live_handler(in machine: M, serial: u64) -> u64 {
+    let mut i = machine.stack.len();
+    loop {
+        if i == 0 {
+            return NONE64;
+        }
+        i = wrapping_sub(i, 1);
+        let frame = stack_at(in machine, i);
+        if frame.kind == FR_HANDLER && frame.serial == serial {
+            return i;
+        }
+    }
+}
+
+// `capability` of instance key `key` (when not 0) or `$effect:<effect>` in
+// the evidence of the top of the stack: the innermost handler providing
+// it, where an evidence frame's entries come before the frames below it.
+// NONE64 when there is none; a handler an entry names that is no longer
+// installed declines.
+fn find_handler(inout machine: M, key: u64, effect: u32) -> u64 {
+    let mut i = machine.stack.len();
+    loop {
+        if i == 0 {
+            return NONE64;
+        }
+        i = wrapping_sub(i, 1);
+        let frame = stack_at(in machine, i);
+        if frame.kind == FR_HANDLER {
+            let provides = if key != 0 {
+                site_word(in machine, add(frame.func_index, HS_KEY)) == key
+            } else {
+                site_word(in machine, add(frame.func_index, HS_EFFECT)) == w(effect)
+            };
+            if provides {
+                return i;
+            }
+        } else if frame.kind == FR_EVIDENCE {
+            for j in frame.block..add(frame.block, frame.ip) {
+                let ev = ev_at(in machine, j);
+                if ev_provides(in machine, ev, key, effect) {
+                    let found = live_handler(in machine, ev.serial);
+                    if found == NONE64 {
+                        decline(inout machine, "evidence of a handler no longer installed", NONE32);
+                    }
+                    return found;
+                }
+            }
+        }
+    }
+}
+
+fn ev_at(in machine: M, index: u64) -> Ev {
+    match machine.evs.try_get(index) {
+        Option::Some(found) => found,
+        Option::None => Ev { serial: 0, site: 0, effect: 0 },
+    }
+}
+
+// `evidence_environment` of the top of the stack, appended to `evs`
+// innermost first: every installed handler, and the entries of each
+// evidence frame before the frames below it.
+fn push_evidence(inout machine: M) {
+    let mut i = machine.stack.len();
+    loop {
+        if i == 0 {
+            break;
+        }
+        i = wrapping_sub(i, 1);
+        let frame = stack_at(in machine, i);
+        if frame.kind == FR_HANDLER {
+            machine
+                .evs
+                .push(Ev { serial: frame.serial, site: frame.func_index, effect: EV_ALL_KEYS });
+        } else if frame.kind == FR_EVIDENCE {
+            for j in frame.block..add(frame.block, frame.ip) {
+                let ev = ev_at(in machine, j);
+                machine.evs.push(ev);
+            }
+        }
+    }
+}
+
+// Copies entries `evs[start..start + count]` to the end of `evs`.
+fn copy_evidence(inout machine: M, start: u64, count: u64) {
+    for j in start..add(start, count) {
+        let ev = ev_at(in machine, j);
+        machine.evs.push(ev);
+    }
+}
+
+// Whether label `sym` binds its instance to a lexical handler (`$cap`,
+// `$fncap:`): such an instance names the handler's `$static:` key.
+fn bound_label(in machine: M, sym: u32) -> bool {
+    has_prefix(in machine, sym, "$cap") || has_prefix(in machine, sym, "$fncap:")
+}
+
+// The symbol of `$static:<label>`, or NONE32 when no handler has it.
+fn static_key(in machine: M, label: u32) -> u32 {
+    let mut text: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    put(inout text, "$static:");
+    let text_start = machine.ctx.names.start(label);
+    for i in text_start..machine.ctx.names.end(label) {
+        text.push(u8_at(in machine.ctx.names.text, i));
+    }
+    machine.ctx.names.lookup(in text[0..text.len()])
+}
+
+// `capability` of `$static:` key `key`: the innermost handler with it,
+// through evidence frames as `find_handler`. NONE64 when there is none.
+fn find_static(inout machine: M, key: u32) -> u64 {
+    let mut i = machine.stack.len();
+    loop {
+        if i == 0 {
+            return NONE64;
+        }
+        i = wrapping_sub(i, 1);
+        let frame = stack_at(in machine, i);
+        if frame.kind == FR_HANDLER {
+            if site_word(in machine, add(frame.func_index, HS_STATIC)) == w(key) {
+                return i;
+            }
+        } else if frame.kind == FR_EVIDENCE {
+            for j in frame.block..add(frame.block, frame.ip) {
+                let ev = ev_at(in machine, j);
+                if site_word(in machine, add(ev.site, HS_STATIC)) == w(key) {
+                    let found = live_handler(in machine, ev.serial);
+                    if found == NONE64 {
+                        decline(inout machine, "evidence of a handler no longer installed", NONE32);
+                    }
+                    return found;
+                }
+            }
+        }
+    }
+}
+
+// Appends the evidence `bind_callable_evidence` gives a callable of
+// function type `ty`: per effect instance, its `$cap`/`$fncap:` handler,
+// and with `ambient` evidence (a call's parameter) the caller's handler
+// of each other instance, or all of them for an open row.
+fn push_bound(inout machine: M, ty: u32, ambient: bool) {
+    let node = machine.ctx.types.node(ty);
+    if node.kind != TyKind::Fn {
+        return;
+    }
+    let row = machine.ctx.types.row(node.r2);
+    for i in 0..w(row.n) {
+        let effect_node = machine.ctx.types.effect_at(add(w(row.a), i));
+        let bound = effect_node.label != 0
+            && bound_label(in machine, wrapping_sub(effect_node.label, 1));
+        let mut found = NONE64;
+        if bound {
+            let key = static_key(in machine, wrapping_sub(effect_node.label, 1));
+            if key != NONE32 {
+                found = find_static(inout machine, key);
+            }
+        } else if ambient {
+            found = find_handler(inout machine, 0, effect_node.name);
+        }
+        if found != NONE64 {
+            let handler = stack_at(in machine, found);
+            machine.evs.push(Ev {
+                serial: handler.serial,
+                site: handler.func_index,
+                effect: effect_node.name
+            });
+        }
+    }
+    if ambient && row.tail != 0 {
+        push_evidence(inout machine);
+    }
+}
+
+// `qualify_value` of a callable at function type `ty`: its evidence from
+// `push_bound`. A closure keeps the evidence it captured first, a bound
+// function its earlier evidence (`or_insert`, `extend`).
+fn bind_evidence(inout machine: M, value: Val, ty: u32, ambient: bool) -> Val {
+    if value.tag != T_FN && value.tag != T_CLOS && value.tag != T_BOUND {
+        return value;
+    }
+    let node = machine.ctx.types.node(ty);
+    if node.kind != TyKind::Fn {
+        return value;
+    }
+    let row = machine.ctx.types.row(node.r2);
+    if row.n == 0 && row.tail == 0 {
+        return value;
+    }
+    if !ambient {
+        let mut any_bound = false;
+        for i in 0..w(row.n) {
+            let label = machine.ctx.types.effect_at(add(w(row.a), i)).label;
+            if label != 0 && bound_label(in machine, wrapping_sub(label, 1)) {
+                any_bound = true;
+            }
+        }
+        if !any_bound {
+            return value;
+        }
+    }
+    let start = machine.evs.len();
+    let mut callee = n32(value.payload);
+    if value.tag == T_CLOS {
+        let closure = cl_at(in machine, value.payload);
+        copy_evidence(inout machine, closure.ev_start, closure.ev_count);
+    } else if value.tag == T_BOUND {
+        let bound = bd_at(in machine, value.payload);
+        callee = bound.callee;
+        copy_evidence(inout machine, bound.ev_start, bound.ev_count);
+    }
+    let fresh = machine.evs.len();
+    push_bound(inout machine, ty, ambient);
+    if machine.evs.len() == fresh {
+        machine.evs.truncate(start);
+        return value;
+    }
+    let count = wrapping_sub(machine.evs.len(), start);
+    if value.tag == T_CLOS {
+        let closure = cl_at(in machine, value.payload);
+        let id = machine.closures.len();
+        machine.closures.push(Cl {
+            site: closure.site,
+            cap_start: closure.cap_start,
+            cap_count: closure.cap_count,
+            ev_start: start,
+            ev_count: count
+        });
+        return Val { tag: T_CLOS, payload: id };
+    }
+    let id = machine.bounds.len();
+    machine.bounds.push(Bd { callee: callee, ev_start: start, ev_count: count });
+    Val { tag: T_BOUND, payload: id }
+}
+
+fn bd_at(in machine: M, id: u64) -> Bd {
+    match machine.bounds.try_get(id) {
+        Option::Some(found) => found,
+        Option::None => Bd { callee: 0, ev_start: 0, ev_count: 0 },
+    }
+}
+
+// Pushes an evidence frame over `evs[start..start + count]` for a call.
+fn push_evidence_frame(inout machine: M, start: u64, count: u64) {
+    if count == 0 {
+        return;
+    }
+    let mut frame = fr_zero();
+    frame.kind = FR_EVIDENCE;
+    frame.block = start;
+    frame.ip = count;
+    machine.stack.push(frame);
+}
 fn cl_at(in machine: M, id: u64) -> Cl {
     match machine.closures.try_get(id) {
         Option::Some(found) => found,
-        Option::None => Cl { site: 0, cap_start: 0, cap_count: 0 },
+        Option::None => Cl { site: 0, cap_start: 0, cap_count: 0, ev_start: 0, ev_count: 0 },
     }
 }
 
@@ -4051,11 +4761,18 @@ fn make_closure(inout machine: M, inst_id: u64, inst: InstRow) {
             }
         }
     }
+    // The evidence it was made under (`$effect:` keys of its environment),
+    // after the handler each `$cap` instance of its type names.
+    let ev_start = machine.evs.len();
+    push_bound(inout machine, inst.ty, false);
+    push_evidence(inout machine);
     let id = machine.closures.len();
     machine.closures.push(Cl {
         site: at,
         cap_start: cap_start,
-        cap_count: wrapping_sub(machine.clos_names.len(), cap_start)
+        cap_count: wrapping_sub(machine.clos_names.len(), cap_start),
+        ev_start: ev_start,
+        ev_count: wrapping_sub(machine.evs.len(), ev_start)
     });
     suspend(inout machine, inst.dest, inst.ty);
     machine.ret_value = Val { tag: T_CLOS, payload: id };
@@ -4072,5 +4789,6 @@ fn call_closure(inout machine: M, callee: Val) {
         return;
     }
     let body = site_fn(in machine, site_word(in machine, add(tail, CT_BODY)));
+    push_evidence_frame(inout machine, closure.ev_start, closure.ev_count);
     invoke_with(inout machine, body, closure.cap_start, closure.cap_count, true);
 }

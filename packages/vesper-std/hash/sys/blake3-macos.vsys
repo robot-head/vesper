@@ -1,0 +1,25 @@
+// @vesper-std/hash-sys's import: the official BLAKE3 C implementation
+// (upstream 1.8.7, vendored in c/) and its glue c/vesper_blake3.c, which
+// this package's `[package] objects` (the c/b3-*.c wrappers) compile into
+// the static library `vesper_std_blake3` (manuscript §16.3). `vesper build`
+// links them into an executable that calls this library, and the port
+// harness (crates/vesper-port-harness) archives them with a Rust crate's
+// port object.
+//
+// A `Hasher` is a heap `blake3_hasher`: the constructors return `None`
+// when allocation fails, a key is not 32 bytes or a context is not UTF-8.
+sys library Blake3 (
+    target = "@TARGET@", abi = "@ABI@",
+    link = "static", name = "vesper_std_blake3",
+    artifact = "blake3:0000000000000000000000000000000000000000000000000000000000000000"
+) {
+    linear extern type Hasher;
+    fn vesper_blake3_new() -> ForeignVal[Option[Hasher]];
+    fn vesper_blake3_new_keyed(nocapture in key: CSlice[u8]) -> ForeignVal[Option[Hasher]];
+    fn vesper_blake3_new_derive_key(nocapture in context: CSlice[u8]) -> ForeignVal[Option[Hasher]];
+    fn vesper_blake3_update(inout h: Hasher, nocapture in data: CSlice[u8]) -> ForeignVal[Unit];
+    fn vesper_blake3_finalize(in h: Hasher, nocapture inout out: CSlice[u8]) -> ForeignVal[Unit];
+    fn vesper_blake3_free(sink h: Hasher) -> ForeignVal[Unit];
+    fn vesper_blake3_hash(nocapture in data: CSlice[u8], nocapture inout out: CSlice[u8]) -> ForeignVal[Unit];
+    fn vesper_blake3_derive_key_hash(nocapture in context: CSlice[u8], nocapture in data: CSlice[u8], nocapture inout out: CSlice[u8]) -> ForeignVal[u32];
+}

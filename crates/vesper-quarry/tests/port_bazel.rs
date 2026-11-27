@@ -128,6 +128,15 @@ fn divergent_leaf_check_fails_store_ssi_test() {
 }
 
 #[test]
+fn divergent_meta_fails_store_reopen_test() {
+    run(
+        "VESPER_QUARRY_DIVERGENT_META",
+        &["btree_splits_reuses_freed_pages_and_survives_reopen"],
+        "dropped_transactions_are_counted_and_limits_hold",
+    );
+}
+
+#[test]
 fn committed_binding_is_current() {
     let Some(generated) = std::env::var_os("VESPER_QUARRY_BINDING") else {
         return;

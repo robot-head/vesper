@@ -2,13 +2,13 @@
 // the package graph into the word stream expected by
 // `@vesper/check-names-packages::assembly_begin`.
 
+use @vesper/check-data::util::{stage2_heap_mark, stage2_heap_reset};
 use @vesper/check-names-packages::{resolve_sugar_imports_bytes};
 use @vesper/sugar::driver::{
     PackageSugarBinding, PackageSugarDefinition, expand_bootstrap_module, inspect_module_sugars,
-    plan_bootstrap_sugars
+    may_declare_sugar, plan_bootstrap_sugars
 };
 
-use @vesper/check-data::util::{stage2_heap_mark, stage2_heap_reset, stage2_heap_swap};
 use @vesper-std/fs::{IoError, kind_dir, kind_file, kind_symlink, read_path};
 use @vesper-std/fs::walk::{Entries, entry_count, entry_join, entry_kind, entry_path, list_dir_path};
 
@@ -411,6 +411,9 @@ struct PkgNode {
     dep_indices: ChunkSeq[u64],
     // The type names the package's `.vsys` libraries declare.
     vsys_types: ChunkSeq[ChunkSeq[u8]],
+    // The `.vsys` files the manifest names (`[package] vsys`), joined to
+    // the package directory, with `@TARGET@`, `@OS@` and `@ARCH@` kept.
+    vsys_paths: ChunkSeq[ChunkSeq[u8]],
 }
 
 // `path` with `@TARGET@`, `@OS@` and `@ARCH@` replaced for wasm32-wasip2,
@@ -545,10 +548,12 @@ fn load_pkg_graph(
         },
     };
     let manifest = parse_manifest(in mbytes.as_slice());
+    let mut vsys_paths = ChunkSeq::new[ChunkSeq[u8]]();
     let mut vsys_types = ChunkSeq::new[ChunkSeq[u8]]();
     for vi in 0..manifest.vsys.len() {
         match manifest.vsys.try_get(vi) {
             Option::Some(v) => {
+                vsys_paths.push(join_path(in norm.as_slice(), in v.as_slice()));
                 let rel = expand_vsys_path_wasip2(in v.as_slice());
                 let vpath = join_path(in norm.as_slice(), in rel.as_slice());
                 match try_read_file(in vpath.as_slice()) {
@@ -570,7 +575,8 @@ fn load_pkg_graph(
             dir: norm,
             dep_names: ChunkSeq::new[ChunkSeq[u8]](),
             dep_indices: ChunkSeq::new[u64](),
-            vsys_types: ChunkSeq::new[ChunkSeq[u8]]()
+            vsys_types: ChunkSeq::new[ChunkSeq[u8]](),
+            vsys_paths: ChunkSeq::new[ChunkSeq[u8]]()
         }
     );
     let mut dep_names = ChunkSeq::new[ChunkSeq[u8]]();
@@ -599,7 +605,8 @@ fn load_pkg_graph(
             dir: dir_copy,
             dep_names: dep_names,
             dep_indices: dep_indices,
-            vsys_types: vsys_types
+            vsys_types: vsys_types,
+            vsys_paths: vsys_paths
         }
     );
     Option::Some(idx)
@@ -2058,6 +2065,41 @@ fn scan_dir_mods(
     }
 }
 
+// The `.vsys` files the manifests of the package graph at `root_dir` name
+// (Rust `Assembled::vsys`), in load order, joined to their package
+// directories with `@TARGET@`, `@OS@` and `@ARCH@` kept; None when the graph
+// does not load.
+pub fn package_graph_vsys_paths(
+    in root_dir: Slice[u8]
+) -> Option[ChunkSeq[ChunkSeq[u8]]] eff [Ffi[StdFs]] {
+    let mut pkgs = ChunkSeq::new[PkgNode]();
+    match load_pkg_graph(in root_dir, inout pkgs) {
+        Option::Some(_) => {},
+        Option::None => {
+            return Option::None;
+        },
+    }
+    let mut out = ChunkSeq::new[ChunkSeq[u8]]();
+    for pi in 0..pkgs.len() {
+        match pkgs.try_get(pi) {
+            Option::Some(p) => {
+                for vi in 0..p.vsys_paths.len() {
+                    match p.vsys_paths.try_get(vi) {
+                        Option::Some(v) => {
+                            let mut copy = ChunkSeq::new[u8]();
+                            copy.extend(in v.as_slice());
+                            out.push(sink copy);
+                        },
+                        Option::None => {},
+                    }
+                }
+            },
+            Option::None => {},
+        }
+    }
+    Option::Some(out)
+}
+
 pub fn load_package_graph_bytes(in root_dir: Slice[u8]) -> Option[ChunkSeq[u8]] eff [Ffi[StdFs]] {
     let mut pkgs = ChunkSeq::new[PkgNode]();
     match load_pkg_graph(in root_dir, inout pkgs) {
@@ -2199,77 +2241,71 @@ fn copy_bootstrap_mappings(
     }
 }
 
-// Head room for the expanded graph's envelope (package names, paths,
-// file and segment rows) on top of twice the module text.
-const SUGAR_GRAPH_RESERVE_SLACK_BYTES: u64 = 16777216;
-
-// Plain package graphs take their existing path. The byte prefilter
-// cannot recognize a declaration; only the surface CST does that.
-fn graph_mentions_sugar(in mods: ChunkSeq[ModEntry]) -> bool {
-    for module in 0..mods.len() {
-        match mods.try_get(module) {
-            Option::Some(source) => {
-                if contains_word(in source.text.as_slice(), in "sugar") {
-                    return true;
-                }
-            },
-            Option::None => {},
-        }
+fn has_bootstrap_sugar_candidate(in source: ChunkSeq[u8]) -> bool {
+    if !contains_word(in source.as_slice(), in "sugar") {
+        return false;
     }
-    false
+    let scratch = stage2_heap_mark();
+    let possible = may_declare_sugar(in source);
+    if scratch != 0 {
+        stage2_heap_reset(scratch);
+    }
+    possible
 }
 
-// Stage 2's heap is a bump region: the surface CSTs, the import resolver
-// and the expansions of a sugar pass would stay live under every later
-// stage. Run the pass above a block reserved for its one result, the
-// encoded graph, then copy the result into the block and drop the rest.
+// Headroom for package paths, file rows and source mappings beyond the
+// module text. An encoded graph exceeding the reserve keeps its scratch.
+const SUGAR_GRAPH_RESERVE_SLACK_BYTES: u64 = 16777216;
+
 fn prepare_sugar_graph(
     in pkgs: ChunkSeq[PkgNode],
     inout files: ChunkSeq[FileEntry],
     inout mods: ChunkSeq[ModEntry]
 ) -> Option[ChunkSeq[u8]] {
-    let has_heap = stage2_heap_mark() != 0;
-    if !has_heap || !graph_mentions_sugar(in mods) {
-        return prepare_sugar_graph_in_scratch(in pkgs, inout files, inout mods);
-    }
+    let mut possible_sugar = false;
     let mut source_bytes: u64 = 0;
     for module in 0..mods.len() {
         match mods.try_get(module) {
-            Option::Some(source) => source_bytes = wrapping_add(source_bytes, source.text.len()),
+            Option::Some(source) => {
+                source_bytes = wrapping_add(source_bytes, source.text.len());
+                if !possible_sugar {
+                    possible_sugar = has_bootstrap_sugar_candidate(in source.text);
+                }
+            },
             Option::None => {},
         }
     }
+    if !possible_sugar || stage2_heap_mark() == 0 {
+        return prepare_sugar_graph_in_scratch(in pkgs, inout files, inout mods, possible_sugar);
+    }
+    // The self-built compiler cannot free its temporary surface trees
+    // and import tables individually. Reserve the result before the
+    // pass, then keep only the encoded graph.
     let reserve = wrapping_add(wrapping_mul(source_bytes, 2), SUGAR_GRAPH_RESERVE_SLACK_BYTES);
-    let mut kept_buf = ChunkSeq::new[u8]();
-    kept_buf.reserve(reserve);
-    let kept_end = stage2_heap_mark();
-    let encoded = match prepare_sugar_graph_in_scratch(in pkgs, inout files, inout mods) {
+    let mut kept = ChunkSeq::new[u8]();
+    kept.reserve(reserve);
+    let scratch_start = stage2_heap_mark();
+    let encoded = match prepare_sugar_graph_in_scratch(in pkgs, inout files, inout mods, true) {
         Option::Some(encoded) => encoded,
         Option::None => {
-            stage2_heap_reset(kept_end);
+            stage2_heap_reset(scratch_start);
             return Option::None;
         },
     };
-    // The copy must fit in the block: past its end lies the scratch it
-    // reads from. A graph that outgrew the block keeps its scratch.
-    if wrapping_add(encoded.len(), SUGAR_GRAPH_RESERVE_SLACK_BYTES) > reserve {
+    if encoded.len() > reserve {
         return Option::Some(encoded);
     }
-    let scratch_top = stage2_heap_swap(wrapping_sub(kept_end, reserve));
-    let mut kept = ChunkSeq::new[u8]();
-    kept.reserve(encoded.len());
     kept.extend(in encoded.as_slice());
-    let _ = stage2_heap_swap(scratch_top);
-    // `files` and `mods` may now hold expanded texts in the dropped
-    // scratch; the caller only returns the encoded graph.
-    stage2_heap_reset(kept_end);
+    // The caller only returns the graph, not the scratch-backed modules.
+    stage2_heap_reset(scratch_start);
     Option::Some(kept)
 }
 
 fn prepare_sugar_graph_in_scratch(
     in pkgs: ChunkSeq[PkgNode],
     inout files: ChunkSeq[FileEntry],
-    inout mods: ChunkSeq[ModEntry]
+    inout mods: ChunkSeq[ModEntry],
+    possible_sugar: bool
 ) -> Option[ChunkSeq[u8]] {
     let mut catalogue = ChunkSeq::new[PackageSugarDefinition]();
     let mut public = ChunkSeq::new[bool]();
@@ -2278,7 +2314,7 @@ fn prepare_sugar_graph_in_scratch(
     let mut shadowed_modules = ChunkSeq::new[bool]();
     let mut declaration_spans = ChunkSeq::new[BootstrapDeclarationRange]();
     let mut source_segments = ChunkSeq::new[BootstrapSourceSegment]();
-    if graph_mentions_sugar(in mods) {
+    if possible_sugar {
         for module in 0..mods.len() {
             let mut import_text = ChunkSeq::new[u8]();
             let mut has_surface_sugar = false;
@@ -2644,7 +2680,8 @@ test {
             dir: ChunkSeq::new[u8](),
             dep_names: ChunkSeq::new[ChunkSeq[u8]](),
             dep_indices: ChunkSeq::new[u64](),
-            vsys_types: ChunkSeq::new[ChunkSeq[u8]]()
+            vsys_types: ChunkSeq::new[ChunkSeq[u8]](),
+            vsys_paths: ChunkSeq::new[ChunkSeq[u8]]()
         }
     }
 
@@ -2764,6 +2801,13 @@ test {
             Option::None => true,
             Option::Some(_) => false,
         }
+    }
+
+    fn test_sugar_preflight_ignores_comments_strings_and_package_names() -> bool {
+        let ordinary = "use @vesper/sugar::driver::{plan_bootstrap_sugars}; /* nested /* sugar hidden: tag {} */ comment */ fn text() -> Str { \"sugar hidden: tag {}\" }";
+        let declaration = "@lean_notation pub sugar /* trivia */ tag_name : tag {}";
+        !has_bootstrap_sugar_candidate(in fixture_bytes(in ordinary))
+            && has_bootstrap_sugar_candidate(in fixture_bytes(in declaration))
     }
 
     // Which of `is_some`, `is_none`, `unwrap_or` and `or` `src` calls and

@@ -138,6 +138,24 @@ const PROGRAMS: &[(&str, &str)] = &[
          handle Fail[String] in { h() } with { return v => v, raise(e, k) => 98 }) }",
     ),
     (
+        // A closure performs to the handler it was made under, a function
+        // value to the caller's handler where it is passed, and an open row
+        // takes all of the caller's evidence.
+        "evidence_binding",
+        "effect Ask { fn ask() -> i64; } \
+         fn twice(f: fn() -> i64 eff [Ask]) -> i64 eff [Ask] { handle Ask in \
+         { wrapping_add(f(), Ask::ask()) } with { return x => x, ask(k) => k(100), } } \
+         fn open[e: eff](f: fn() -> i64 eff [e]) -> i64 eff [e] { handle Ask in { f() } \
+         with { return x => x, ask(k) => k(1000), } } \
+         fn asked() -> i64 eff [Ask] { wrapping_add(Ask::ask(), 1) } \
+         fn main() -> (i64, i64, i64, i64, i64) { handle Ask in { \
+         let a = twice(|| Ask::ask()); let b = twice(asked); \
+         let d = handle Ask in { twice(|| wrapping_mul(Ask::ask(), 2)) } \
+         with { return x => x, ask(k) => k(7), }; \
+         let e = open(asked); let g = open(|| Ask::ask()); (a, b, d, e, g) } \
+         with { return x => x, ask(k) => k(3), } }",
+    ),
+    (
         // An effectful function value binds the incoming capability
         // (`bind_callable_evidence`): the outer handler answers.
         "bound_evidence",
@@ -228,6 +246,31 @@ const PROGRAMS: &[(&str, &str)] = &[
         "strings",
         "fn main() -> (String, bool, bool, bool) { \
          (\"a\\\"b\\\\c\\n\\td\\r\", \"abc\" < \"abd\", \"x\" == \"x\", \"b\" >= \"ab\") }",
+    ),
+    (
+        "string_updates",
+        "fn grow(inout s: String) { s.push_str(\"xy\"); let ok = s.push_char(66); } \
+         fn pick(t: String) -> i64 { match t { \"xyB\" => 1, _ => 2 } } \
+         fn total(in b: Slice[u8]) -> u64 { let mut n: u64 = 0; for i in 0..b.len() { \
+         n = wrapping_add(n, match b.try_get(i) { Option::Some(x) => widen_u64(x), \
+         Option::None => 0 }); } n } \
+         fn main() -> (String, String, u64, u64, bool, bool, i64, i64) { \
+         let mut s = String::new(); grow(inout s); let r = \"xyB\"; \
+         let mut t = \"q\"; let wide = t.push_char(233); let bad = t.push_char(55296); \
+         let mut c = \"zz\"; c.clear(); c.reserve(10); c.push_str(s[1..3]); \
+         let b = handle Fail[RuntimeError] in { t.byte_at(9) } with \
+         { return v => widen_u64(v), raise(e, k) => 99 }; \
+         let n = wrapping_add(t.len(), b); let sum = total(t.as_bytes()); \
+         let p = pick(r); let q = pick(\"x\"); (s, c, n, sum, wide, bad, p, q) }",
+    ),
+    (
+        "string_view_bounds",
+        "fn v(in s: Str) -> u64 { s.len() } fn main() -> u64 { let s = \"abc\"; v(s[1..5]) }",
+    ),
+    (
+        "string_view_boundary",
+        "fn v(in s: Str) -> u64 { s.len() } \
+         fn main() -> u64 { let mut s = \"a\"; let ok = s.push_char(233); v(s[0..2]) }",
     ),
     (
         "unit_and_tuples",

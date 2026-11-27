@@ -1,0 +1,1014 @@
+// @vesper/loom-tuf: Vesper port of vesper-loom-tuf's bounded validation,
+// streaming JSON limiter, delegation graph checker, SHA-256 hex digest, and
+// Ed25519 role quorum verifier (Rust-exit SH6 lane 16, #1411 / #2295).
+//
+// @export abi 4 options
+use @vesper/crypto::{CryptoError, HashAlg, ed25519_verify, hash};
+
+// ---------------------------------------------------------------------------
+// Named protocol, ASCII, UTF-8, and limit constants.
+
+const MAX_COMPONENT_BYTES: u64 = 255;
+const MAX_DIR_DEPTH_LIMIT: u64 = 128;
+const MAX_JSON_DEPTH_LIMIT: u64 = 128;
+const MAX_ROLES_LIMIT: u64 = 4096;
+const MAX_ROOT_UPDATES_LIMIT: u64 = 4096;
+
+const BYTE_TAB: u8 = 9;
+const BYTE_LF: u8 = 10;
+const BYTE_CR: u8 = 13;
+const BYTE_SPACE: u8 = 32;
+const BYTE_QUOTE: u8 = 34;
+const BYTE_STAR: u8 = 42;
+const BYTE_PLUS: u8 = 43;
+const BYTE_COMMA: u8 = 44;
+const BYTE_DASH: u8 = 45;
+const BYTE_DOT: u8 = 46;
+const BYTE_SLASH: u8 = 47;
+const BYTE_ZERO: u8 = 48;
+const BYTE_ONE: u8 = 49;
+const BYTE_NINE: u8 = 57;
+const BYTE_COLON: u8 = 58;
+const BYTE_LT: u8 = 60;
+const BYTE_GT: u8 = 62;
+const BYTE_QUESTION: u8 = 63;
+const BYTE_AT: u8 = 64;
+const BYTE_UPPER_A: u8 = 65;
+const BYTE_UPPER_E: u8 = 69;
+const BYTE_UPPER_F: u8 = 70;
+const BYTE_UPPER_Z: u8 = 90;
+const BYTE_LBRACKET: u8 = 91;
+const BYTE_BACKSLASH: u8 = 92;
+const BYTE_RBRACKET: u8 = 93;
+const BYTE_UNDERSCORE: u8 = 95;
+const BYTE_LOWER_A: u8 = 97;
+const BYTE_LOWER_B: u8 = 98;
+const BYTE_LOWER_E: u8 = 101;
+const BYTE_LOWER_F: u8 = 102;
+const BYTE_LOWER_N: u8 = 110;
+const BYTE_LOWER_R: u8 = 114;
+const BYTE_LOWER_T: u8 = 116;
+const BYTE_LOWER_U: u8 = 117;
+const BYTE_LOWER_Z: u8 = 122;
+const BYTE_LBRACE: u8 = 123;
+const BYTE_PIPE: u8 = 124;
+const BYTE_RBRACE: u8 = 125;
+const BYTE_TILDE: u8 = 126;
+const BYTE_DEL: u8 = 127;
+const CASE_DIFF: u8 = 32;
+
+// UTF-8 bytes for C1 controls (U+0080..=U+009F -> 0xC2 0x80..=0x9F) and
+// superscripts ¹ (U+00B9 -> 0xC2 0xB9), ² (U+00B2 -> 0xC2 0xB2), ³ (U+00B3 -> 0xC2 0xB3).
+const UTF8_C2: u8 = 194;
+const UTF8_C1_LOW: u8 = 128;
+const UTF8_C1_HIGH: u8 = 159;
+const UTF8_SUP_2: u8 = 178;
+const UTF8_SUP_3: u8 = 179;
+const UTF8_SUP_1: u8 = 185;
+
+// Status codes for `tuf_bound_json`.
+const BOUND_OK: u64 = 0;
+const BOUND_INVALID_JSON: u64 = 1;
+const BOUND_TRAVERSAL_LIMIT: u64 = 2;
+const BOUND_COLLECTION_LIMIT: u64 = 3;
+
+// Iterative JSON container frame kinds.
+const FRAME_OBJECT: u8 = 1;
+const FRAME_ARRAY: u8 = 2;
+
+// Status codes for `tuf_check_graph_depth`.
+const GRAPH_OK: u64 = 0;
+const GRAPH_BUDGET: u64 = 1;
+const GRAPH_DEPTH_OR_CYCLE: u64 = 2;
+
+// Node visit states for iterative DFS.
+const VISIT_UNSEEN: u8 = 0;
+const VISIT_ON_PATH: u8 = 1;
+
+// Ed25519 & SHA-256 fixed sizes.
+const KEYID_BYTES: u64 = 32;
+const KEYID_MASK: u64 = 31;
+const KEYID_SHIFT: u64 = 5;
+const PUBKEY_BYTES: u64 = 32;
+const SIG_BYTES: u64 = 64;
+const PUBKEY_ENTRY_BYTES: u64 = 64;
+const PUBKEY_ENTRY_MASK: u64 = 63;
+const PUBKEY_ENTRY_SHIFT: u64 = 6;
+const SIG_ENTRY_BYTES: u64 = 96;
+
+// Status codes for `tuf_verify_ed25519_quorum`.
+const QUORUM_OK: u64 = 0;
+const QUORUM_INSUFFICIENT: u64 = 1;
+const QUORUM_INVALID_THRESHOLD: u64 = 2;
+const QUORUM_BAD_INPUT: u64 = 3;
+
+// Hex encoding constants.
+const HEX_NIBBLE_MASK: u8 = 15;
+const HEX_ALPHA_BASE: u8 = 87;
+const HEX_SHIFT: u8 = 4;
+
+// ---------------------------------------------------------------------------
+// Total indexing helpers (no Fail effect).
+
+fn str_byte(in s: Str, i: u64) -> u8 {
+    let bytes = s.as_bytes();
+    match bytes.try_get(i) {
+        Some(b) => b,
+        None => 0
+    }
+}
+
+fn at_u8(in s: ChunkSeq[u8], i: u64) -> u8 {
+    match s.try_get(i) {
+        Some(b) => b,
+        None => 0
+    }
+}
+
+fn at_u64(in s: ChunkSeq[u64], i: u64) -> u64 {
+    match s.try_get(i) {
+        Some(v) => v,
+        None => 0
+    }
+}
+
+fn put_u8(inout s: ChunkSeq[u8], i: u64, v: u8) {
+    let _ = s.try_set(i, v);
+}
+
+fn put_u64(inout s: ChunkSeq[u64], i: u64, v: u64) {
+    let _ = s.try_set(i, v);
+}
+
+// ---------------------------------------------------------------------------
+// Path / component and resource-limit validation.
+
+fn to_ascii_upper(b: u8) -> u8 {
+    if b >= BYTE_LOWER_A && b <= BYTE_LOWER_Z {
+        wrapping_sub(b, CASE_DIFF)
+    } else {
+        b
+    }
+}
+
+fn eq_upper_str(in s: Str, start: u64, len: u64, in target: Str) -> bool {
+    if len != target.len() {
+        return false;
+    }
+    let mut i: u64 = 0;
+    loop {
+        if i >= len {
+            break;
+        }
+        let a = to_ascii_upper(str_byte(in s, wrapping_add(start, i)));
+        let b = str_byte(in target, i);
+        if a != b {
+            return false;
+        }
+        i = wrapping_add(i, 1);
+    }
+    true
+}
+
+fn is_numbered_device(in s: Str, start: u64, len: u64) -> bool {
+    if len < 4 {
+        return false;
+    }
+    let is_com = eq_upper_str(in s, start, 3, in "COM");
+    let is_lpt = eq_upper_str(in s, start, 3, in "LPT");
+    if !is_com && !is_lpt {
+        return false;
+    }
+    let rem = wrapping_sub(len, 3);
+    if rem == 1 {
+        let d = str_byte(in s, wrapping_add(start, 3));
+        return d >= BYTE_ONE && d <= BYTE_NINE;
+    }
+    if rem == 2 {
+        let b0 = str_byte(in s, wrapping_add(start, 3));
+        let b1 = str_byte(in s, wrapping_add(start, 4));
+        return b0 == UTF8_C2 && (b1 == UTF8_SUP_1 || b1 == UTF8_SUP_2 || b1 == UTF8_SUP_3);
+    }
+    false
+}
+
+fn safe_component_slice(in s: Str, start: u64, len: u64) -> bool {
+    if len == 0 || len > MAX_COMPONENT_BYTES {
+        return false;
+    }
+    if len == 1 && str_byte(in s, start) == BYTE_DOT {
+        return false;
+    }
+    if len == 2
+        && str_byte(in s, start) == BYTE_DOT
+        && str_byte(in s, wrapping_add(start, 1)) == BYTE_DOT
+    {
+        return false;
+    }
+    let last = str_byte(in s, wrapping_sub(wrapping_add(start, len), 1));
+    if last == BYTE_DOT || last == BYTE_SPACE {
+        return false;
+    }
+
+    let mut dot_pos: u64 = len;
+    let mut i: u64 = 0;
+    loop {
+        if i >= len {
+            break;
+        }
+        let b = str_byte(in s, wrapping_add(start, i));
+        if b < BYTE_SPACE || b == BYTE_DEL {
+            return false;
+        }
+        if b == UTF8_C2 && wrapping_add(i, 1) < len {
+            let next = str_byte(in s, wrapping_add(wrapping_add(start, i), 1));
+            if next >= UTF8_C1_LOW && next <= UTF8_C1_HIGH {
+                return false;
+            }
+        }
+        if b == BYTE_BACKSLASH
+            || b == BYTE_COLON
+            || b == BYTE_LT
+            || b == BYTE_GT
+            || b == BYTE_QUOTE
+            || b == BYTE_PIPE
+            || b == BYTE_STAR
+            || b == BYTE_QUESTION
+        {
+            return false;
+        }
+        if b == BYTE_DOT && dot_pos == len {
+            dot_pos = i;
+        }
+        i = wrapping_add(i, 1);
+    }
+
+    if eq_upper_str(in s, start, dot_pos, in "CON")
+        || eq_upper_str(in s, start, dot_pos, in "PRN")
+        || eq_upper_str(in s, start, dot_pos, in "AUX")
+        || eq_upper_str(in s, start, dot_pos, in "NUL")
+        || eq_upper_str(in s, start, dot_pos, in "CLOCK$")
+        || is_numbered_device(in s, start, dot_pos)
+    {
+        return false;
+    }
+    true
+}
+
+pub fn tuf_safe_component(in part: Str) -> bool {
+    safe_component_slice(in part, 0, part.len())
+}
+
+fn is_valid_name_byte(b: u8) -> bool {
+    (b >= BYTE_LOWER_A && b <= BYTE_LOWER_Z)
+        || (b >= BYTE_UPPER_A && b <= BYTE_UPPER_Z)
+        || (b >= BYTE_ZERO && b <= BYTE_NINE)
+        || b == BYTE_SLASH
+        || b == BYTE_DOT
+        || b == BYTE_UNDERSCORE
+        || b == BYTE_TILDE
+        || b == BYTE_PLUS
+        || b == BYTE_AT
+        || b == BYTE_DASH
+}
+
+pub fn tuf_valid_name(in name: Str) -> bool {
+    let n = name.len();
+    if n == 0 {
+        return false;
+    }
+    let mut i: u64 = 0;
+    loop {
+        if i >= n {
+            break;
+        }
+        if !is_valid_name_byte(str_byte(in name, i)) {
+            return false;
+        }
+        i = wrapping_add(i, 1);
+    }
+    let mut start: u64 = 0;
+    let mut j: u64 = 0;
+    loop {
+        if j > n {
+            break;
+        }
+        if j == n || str_byte(in name, j) == BYTE_SLASH {
+            if !safe_component_slice(in name, start, wrapping_sub(j, start)) {
+                return false;
+            }
+            start = wrapping_add(j, 1);
+        }
+        j = wrapping_add(j, 1);
+    }
+    true
+}
+
+pub fn tuf_validate_limits(
+    metadata_file_bytes: u64,
+    metadata_total_bytes: u64,
+    target_bytes: u64,
+    targets_total_bytes: u64,
+    files: u64,
+    directory_depth: u64,
+    json_depth: u64,
+    roles: u64,
+    root_updates: u64,
+    checkpoint_bytes: u64
+) -> bool {
+    if metadata_file_bytes == 0
+        || metadata_total_bytes == 0
+        || target_bytes == 0
+        || targets_total_bytes == 0
+        || files == 0
+        || directory_depth == 0
+        || directory_depth > MAX_DIR_DEPTH_LIMIT
+        || json_depth == 0
+        || json_depth > MAX_JSON_DEPTH_LIMIT
+        || roles == 0
+        || roles > MAX_ROLES_LIMIT
+        || root_updates == 0
+        || root_updates > MAX_ROOT_UPDATES_LIMIT
+        || checkpoint_bytes == 0
+    {
+        return false;
+    }
+    true
+}
+
+// ---------------------------------------------------------------------------
+// Streaming zero-allocation bounded JSON validator.
+
+fn skip_ws(in data: ChunkSeq[u8], pos: u64) -> u64 {
+    let n = data.len();
+    let mut i = pos;
+    loop {
+        if i >= n {
+            break;
+        }
+        let b = at_u8(in data, i);
+        if b == BYTE_SPACE || b == BYTE_TAB || b == BYTE_LF || b == BYTE_CR {
+            i = wrapping_add(i, 1);
+        } else {
+            return i;
+        }
+    }
+    i
+}
+
+fn is_hex_byte(b: u8) -> bool {
+    (b >= BYTE_ZERO && b <= BYTE_NINE)
+        || (b >= BYTE_LOWER_A && b <= BYTE_LOWER_F)
+        || (b >= BYTE_UPPER_A && b <= BYTE_UPPER_F)
+}
+
+fn scan_json_string(in data: ChunkSeq[u8], start: u64) -> u64 {
+    let n = data.len();
+    let fail = wrapping_add(n, 1);
+    if start >= n || at_u8(in data, start) != BYTE_QUOTE {
+        return fail;
+    }
+    let mut i = wrapping_add(start, 1);
+    loop {
+        if i >= n {
+            break;
+        }
+        let b = at_u8(in data, i);
+        if b == BYTE_QUOTE {
+            return wrapping_add(i, 1);
+        }
+        if b < BYTE_SPACE {
+            return fail;
+        }
+        if b == BYTE_BACKSLASH {
+            i = wrapping_add(i, 1);
+            if i >= n {
+                return fail;
+            }
+            let esc = at_u8(in data, i);
+            if esc == BYTE_QUOTE
+                || esc == BYTE_BACKSLASH
+                || esc == BYTE_SLASH
+                || esc == BYTE_LOWER_B
+                || esc == BYTE_LOWER_F
+                || esc == BYTE_LOWER_N
+                || esc == BYTE_LOWER_R
+                || esc == BYTE_LOWER_T
+            {
+                i = wrapping_add(i, 1);
+            } else if esc == BYTE_LOWER_U {
+                if wrapping_add(i, 4) >= n {
+                    return fail;
+                }
+                if !is_hex_byte(at_u8(in data, wrapping_add(i, 1)))
+                    || !is_hex_byte(at_u8(in data, wrapping_add(i, 2)))
+                    || !is_hex_byte(at_u8(in data, wrapping_add(i, 3)))
+                    || !is_hex_byte(at_u8(in data, wrapping_add(i, 4)))
+                {
+                    return fail;
+                }
+                i = wrapping_add(i, 5);
+            } else {
+                return fail;
+            }
+        } else {
+            i = wrapping_add(i, 1);
+        }
+    }
+    fail
+}
+
+fn scan_json_number(in data: ChunkSeq[u8], start: u64) -> u64 {
+    let n = data.len();
+    let fail = wrapping_add(n, 1);
+    let mut i = start;
+    if i < n && at_u8(in data, i) == BYTE_DASH {
+        i = wrapping_add(i, 1);
+    }
+    if i >= n {
+        return fail;
+    }
+    let first = at_u8(in data, i);
+    if first == BYTE_ZERO {
+        i = wrapping_add(i, 1);
+    } else if first >= BYTE_ONE && first <= BYTE_NINE {
+        i = wrapping_add(i, 1);
+        loop {
+            if i >= n || at_u8(in data, i) < BYTE_ZERO || at_u8(in data, i) > BYTE_NINE {
+                break;
+            }
+            i = wrapping_add(i, 1);
+        }
+    } else {
+        return fail;
+    }
+    if i < n && at_u8(in data, i) == BYTE_DOT {
+        i = wrapping_add(i, 1);
+        if i >= n || at_u8(in data, i) < BYTE_ZERO || at_u8(in data, i) > BYTE_NINE {
+            return fail;
+        }
+        loop {
+            if i >= n || at_u8(in data, i) < BYTE_ZERO || at_u8(in data, i) > BYTE_NINE {
+                break;
+            }
+            i = wrapping_add(i, 1);
+        }
+    }
+    if i < n && (at_u8(in data, i) == BYTE_LOWER_E || at_u8(in data, i) == BYTE_UPPER_E) {
+        i = wrapping_add(i, 1);
+        if i < n && (at_u8(in data, i) == BYTE_PLUS || at_u8(in data, i) == BYTE_DASH) {
+            i = wrapping_add(i, 1);
+        }
+        if i >= n || at_u8(in data, i) < BYTE_ZERO || at_u8(in data, i) > BYTE_NINE {
+            return fail;
+        }
+        loop {
+            if i >= n || at_u8(in data, i) < BYTE_ZERO || at_u8(in data, i) > BYTE_NINE {
+                break;
+            }
+            i = wrapping_add(i, 1);
+        }
+    }
+    i
+}
+
+fn match_literal(in data: ChunkSeq[u8], start: u64, in lit: Str) -> bool {
+    let m = lit.len();
+    if wrapping_add(start, m) > data.len() {
+        return false;
+    }
+    let mut i: u64 = 0;
+    loop {
+        if i >= m {
+            break;
+        }
+        if at_u8(in data, wrapping_add(start, i)) != str_byte(in lit, i) {
+            return false;
+        }
+        i = wrapping_add(i, 1);
+    }
+    true
+}
+
+pub fn tuf_bound_json(
+    in data: ChunkSeq[u8],
+    max_depth: u64,
+    max_nodes: u64,
+    max_collection: u64
+) -> u64 {
+    let n = data.len();
+    let mut kinds: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut counts: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut pos = skip_ws(in data, 0);
+    let mut nodes: u64 = 0;
+    let mut expect_value = true;
+
+    loop {
+        if expect_value {
+            pos = skip_ws(in data, pos);
+            if pos >= n {
+                return BOUND_INVALID_JSON;
+            }
+            let depth = kinds.len();
+            nodes = wrapping_add(nodes, 1);
+            if depth > max_depth || nodes > max_nodes {
+                return BOUND_TRAVERSAL_LIMIT;
+            }
+            let b = at_u8(in data, pos);
+            if b == BYTE_LBRACE {
+                pos = skip_ws(in data, wrapping_add(pos, 1));
+                if pos < n && at_u8(in data, pos) == BYTE_RBRACE {
+                    pos = wrapping_add(pos, 1);
+                    expect_value = false;
+                } else {
+                    if max_collection == 0 {
+                        return BOUND_COLLECTION_LIMIT;
+                    }
+                    kinds.push(FRAME_OBJECT);
+                    counts.push(1);
+                    let key_end = scan_json_string(in data, pos);
+                    if key_end > n {
+                        return BOUND_INVALID_JSON;
+                    }
+                    pos = skip_ws(in data, key_end);
+                    if pos >= n || at_u8(in data, pos) != BYTE_COLON {
+                        return BOUND_INVALID_JSON;
+                    }
+                    pos = wrapping_add(pos, 1);
+                    expect_value = true;
+                }
+            } else if b == BYTE_LBRACKET {
+                pos = skip_ws(in data, wrapping_add(pos, 1));
+                if pos < n && at_u8(in data, pos) == BYTE_RBRACKET {
+                    pos = wrapping_add(pos, 1);
+                    expect_value = false;
+                } else {
+                    if max_collection == 0 {
+                        return BOUND_COLLECTION_LIMIT;
+                    }
+                    kinds.push(FRAME_ARRAY);
+                    counts.push(1);
+                    expect_value = true;
+                }
+            } else if b == BYTE_QUOTE {
+                let end = scan_json_string(in data, pos);
+                if end > n {
+                    return BOUND_INVALID_JSON;
+                }
+                pos = end;
+                expect_value = false;
+            } else if b == BYTE_LOWER_T {
+                if !match_literal(in data, pos, in "true") {
+                    return BOUND_INVALID_JSON;
+                }
+                pos = wrapping_add(pos, 4);
+                expect_value = false;
+            } else if b == BYTE_LOWER_F {
+                if !match_literal(in data, pos, in "false") {
+                    return BOUND_INVALID_JSON;
+                }
+                pos = wrapping_add(pos, 5);
+                expect_value = false;
+            } else if b == BYTE_LOWER_N {
+                if !match_literal(in data, pos, in "null") {
+                    return BOUND_INVALID_JSON;
+                }
+                pos = wrapping_add(pos, 4);
+                expect_value = false;
+            } else if b == BYTE_DASH || (b >= BYTE_ZERO && b <= BYTE_NINE) {
+                let end = scan_json_number(in data, pos);
+                if end > n {
+                    return BOUND_INVALID_JSON;
+                }
+                pos = end;
+                expect_value = false;
+            } else {
+                return BOUND_INVALID_JSON;
+            }
+        } else {
+            pos = skip_ws(in data, pos);
+            if kinds.len() == 0 {
+                if pos == n {
+                    return BOUND_OK;
+                }
+                return BOUND_INVALID_JSON;
+            }
+            if pos >= n {
+                return BOUND_INVALID_JSON;
+            }
+            let top = wrapping_sub(kinds.len(), 1);
+            let kind = at_u8(in kinds, top);
+            let b = at_u8(in data, pos);
+            if b == BYTE_COMMA {
+                let next_count = wrapping_add(at_u64(in counts, top), 1);
+                if next_count > max_collection {
+                    return BOUND_COLLECTION_LIMIT;
+                }
+                put_u64(inout counts, top, next_count);
+                pos = skip_ws(in data, wrapping_add(pos, 1));
+                if kind == FRAME_OBJECT {
+                    let key_end = scan_json_string(in data, pos);
+                    if key_end > n {
+                        return BOUND_INVALID_JSON;
+                    }
+                    pos = skip_ws(in data, key_end);
+                    if pos >= n || at_u8(in data, pos) != BYTE_COLON {
+                        return BOUND_INVALID_JSON;
+                    }
+                    pos = wrapping_add(pos, 1);
+                }
+                expect_value = true;
+            } else if (kind == FRAME_OBJECT && b == BYTE_RBRACE)
+                || (kind == FRAME_ARRAY && b == BYTE_RBRACKET)
+            {
+                let _ = kinds.pop();
+                let _ = counts.pop();
+                pos = wrapping_add(pos, 1);
+                expect_value = false;
+            } else {
+                return BOUND_INVALID_JSON;
+            }
+        }
+    }
+    BOUND_INVALID_JSON
+}
+
+// ---------------------------------------------------------------------------
+// Delegation graph depth & cycle checker.
+//
+// `adj_words` layout:
+//   [node_count, deg_0, nbr_0_0, ..., deg_1, nbr_1_0, ...]
+
+pub fn tuf_check_graph_depth(in adj_words: ChunkSeq[u64], max_depth: u64, budget_in: u64) -> u64 {
+    if adj_words.len() == 0 {
+        return GRAPH_OK;
+    }
+    let node_count = at_u64(in adj_words, 0);
+    let mut offsets: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut degrees: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut at: u64 = 1;
+    let mut n_idx: u64 = 0;
+    loop {
+        if n_idx >= node_count {
+            break;
+        }
+        if at >= adj_words.len() {
+            return GRAPH_DEPTH_OR_CYCLE;
+        }
+        let deg = at_u64(in adj_words, at);
+        at = wrapping_add(at, 1);
+        offsets.push(at);
+        degrees.push(deg);
+        at = wrapping_add(at, deg);
+        n_idx = wrapping_add(n_idx, 1);
+    }
+
+    let mut visit: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut vi: u64 = 0;
+    loop {
+        if vi >= node_count {
+            break;
+        }
+        visit.push(VISIT_UNSEEN);
+        vi = wrapping_add(vi, 1);
+    }
+
+    let mut stack_node: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut stack_edge: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut budget = budget_in;
+
+    let mut root: u64 = 0;
+    loop {
+        if root >= node_count {
+            break;
+        }
+        if budget == 0 {
+            return GRAPH_BUDGET;
+        }
+        budget = wrapping_sub(budget, 1);
+        stack_node.push(root);
+        stack_edge.push(0);
+        put_u8(inout visit, root, VISIT_ON_PATH);
+
+        loop {
+            if stack_node.len() == 0 {
+                break;
+            }
+            let top = wrapping_sub(stack_node.len(), 1);
+            let cur = at_u64(in stack_node, top);
+            let e_idx = at_u64(in stack_edge, top);
+            let deg = at_u64(in degrees, cur);
+            if e_idx < deg {
+                put_u64(inout stack_edge, top, wrapping_add(e_idx, 1));
+                let child = at_u64(in adj_words, wrapping_add(at_u64(in offsets, cur), e_idx));
+                if budget == 0 {
+                    return GRAPH_BUDGET;
+                }
+                budget = wrapping_sub(budget, 1);
+                if stack_node.len() > max_depth {
+                    return GRAPH_DEPTH_OR_CYCLE;
+                }
+                if child < node_count {
+                    if at_u8(in visit, child) == VISIT_ON_PATH {
+                        return GRAPH_DEPTH_OR_CYCLE;
+                    }
+                    put_u8(inout visit, child, VISIT_ON_PATH);
+                    stack_node.push(child);
+                    stack_edge.push(0);
+                }
+            } else {
+                put_u8(inout visit, cur, VISIT_UNSEEN);
+                let _ = stack_node.pop();
+                let _ = stack_edge.pop();
+            }
+        }
+        root = wrapping_add(root, 1);
+    }
+    GRAPH_OK
+}
+
+// ---------------------------------------------------------------------------
+// SHA-256 hex digest and Ed25519 role quorum verification over @vesper/crypto.
+
+fn hex_nibble(v: u8) -> u8 {
+    if v < 10 {
+        wrapping_add(BYTE_ZERO, v)
+    } else {
+        wrapping_add(HEX_ALPHA_BASE, v)
+    }
+}
+
+pub fn tuf_sha256_hex(in data: ChunkSeq[u8]) -> ChunkSeq[u8] eff [Ffi[Crypto]] {
+    let digest = handle Fail[CryptoError] in {
+        hash(HashAlg::Sha256, in data.as_slice())
+    } with {
+        return v => v,
+        raise(_e, _) => ChunkSeq::new[u8](),
+    };
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut i: u64 = 0;
+    loop {
+        if i >= digest.len() {
+            break;
+        }
+        let b = at_u8(in digest, i);
+        out.push(hex_nibble(b >> HEX_SHIFT));
+        out.push(hex_nibble(b & HEX_NIBBLE_MASK));
+        i = wrapping_add(i, 1);
+    }
+    out
+}
+
+fn bytes_eq_at(in a: ChunkSeq[u8], a_off: u64, in b: ChunkSeq[u8], b_off: u64, len: u64) -> bool {
+    let mut i: u64 = 0;
+    loop {
+        if i >= len {
+            break;
+        }
+        if at_u8(in a, wrapping_add(a_off, i)) != at_u8(in b, wrapping_add(b_off, i)) {
+            return false;
+        }
+        i = wrapping_add(i, 1);
+    }
+    true
+}
+
+pub fn tuf_verify_ed25519_quorum(
+    in payload: ChunkSeq[u8],
+    in role_keyids: ChunkSeq[u8],
+    threshold: u64,
+    in pubkeys: ChunkSeq[u8],
+    in sigs: ChunkSeq[u8]
+) -> u64 eff [Ffi[Crypto]] {
+    if threshold == 0 {
+        return QUORUM_INVALID_THRESHOLD;
+    }
+    if (role_keyids.len() & KEYID_MASK) != 0
+        || (pubkeys.len() & PUBKEY_ENTRY_MASK) != 0
+        || (sigs.len() & KEYID_MASK) != 0
+    {
+        return QUORUM_BAD_INPUT;
+    }
+    let role_count = role_keyids.len() >> KEYID_SHIFT;
+    let pub_count = pubkeys.len() >> PUBKEY_ENTRY_SHIFT;
+    let mut sig_count: u64 = 0;
+    let mut sig_rem = sigs.len();
+    loop {
+        if sig_rem < SIG_ENTRY_BYTES {
+            break;
+        }
+        sig_rem = wrapping_sub(sig_rem, SIG_ENTRY_BYTES);
+        sig_count = wrapping_add(sig_count, 1);
+    }
+    if sig_rem != 0 {
+        return QUORUM_BAD_INPUT;
+    }
+
+    let mut seen_role: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut ri: u64 = 0;
+    loop {
+        if ri >= role_count {
+            break;
+        }
+        seen_role.push(0);
+        ri = wrapping_add(ri, 1);
+    }
+
+    let mut valid_count: u64 = 0;
+    let mut si: u64 = 0;
+    loop {
+        if si >= sig_count {
+            break;
+        }
+        let sig_off = wrapping_mul(si, SIG_ENTRY_BYTES);
+        let mut matched_role = role_count;
+        let mut r: u64 = 0;
+        loop {
+            if r >= role_count {
+                break;
+            }
+            if bytes_eq_at(
+                in sigs,
+                sig_off,
+                in role_keyids,
+                wrapping_mul(r, KEYID_BYTES),
+                KEYID_BYTES
+            ) {
+                matched_role = r;
+                break;
+            }
+            r = wrapping_add(r, 1);
+        }
+        if matched_role < role_count && at_u8(in seen_role, matched_role) == 0 {
+            let mut pk_idx = pub_count;
+            let mut p: u64 = 0;
+            loop {
+                if p >= pub_count {
+                    break;
+                }
+                if bytes_eq_at(
+                    in sigs,
+                    sig_off,
+                    in pubkeys,
+                    wrapping_mul(p, PUBKEY_ENTRY_BYTES),
+                    KEYID_BYTES
+                ) {
+                    pk_idx = p;
+                    break;
+                }
+                p = wrapping_add(p, 1);
+            }
+            if pk_idx < pub_count {
+                let pk_off = wrapping_add(wrapping_mul(pk_idx, PUBKEY_ENTRY_BYTES), KEYID_BYTES);
+                let s_off = wrapping_add(sig_off, KEYID_BYTES);
+                let ok = ed25519_verify(
+                    in pubkeys[pk_off..wrapping_add(pk_off, PUBKEY_BYTES)],
+                    in payload.as_slice(),
+                    in sigs[s_off..wrapping_add(s_off, SIG_BYTES)]
+                );
+                if ok {
+                    put_u8(inout seen_role, matched_role, 1);
+                    valid_count = wrapping_add(valid_count, 1);
+                    if valid_count >= threshold {
+                        return QUORUM_OK;
+                    }
+                }
+            }
+        }
+        si = wrapping_add(si, 1);
+    }
+    QUORUM_INSUFFICIENT
+}
+
+// ---------------------------------------------------------------------------
+// TUF role-name percent-encoding/decoding and checkpoint structural invariants.
+
+const BYTE_PERCENT: u8 = 37;
+const HEX_UPPER_ALPHA_BASE: u8 = 55;
+const HEX_INVALID: u8 = 255;
+const SCHEMA_V1: u64 = 1;
+const SCHEMA_V2: u64 = 2;
+
+fn is_role_unreserved(b: u8) -> bool {
+    (b >= BYTE_LOWER_A && b <= BYTE_LOWER_Z)
+        || (b >= BYTE_UPPER_A && b <= BYTE_UPPER_Z)
+        || (b >= BYTE_ZERO && b <= BYTE_NINE)
+        || b == BYTE_UNDERSCORE
+        || b == BYTE_DOT
+        || b == BYTE_DASH
+        || b == BYTE_TILDE
+}
+
+fn upper_hex_nibble(v: u8) -> u8 {
+    if v < 10 {
+        wrapping_add(BYTE_ZERO, v)
+    } else {
+        wrapping_add(HEX_UPPER_ALPHA_BASE, v)
+    }
+}
+
+fn decode_hex_nibble(b: u8) -> u8 {
+    if b >= BYTE_ZERO && b <= BYTE_NINE {
+        wrapping_sub(b, BYTE_ZERO)
+    } else if b >= BYTE_LOWER_A && b <= BYTE_LOWER_F {
+        wrapping_sub(b, HEX_ALPHA_BASE)
+    } else if b >= BYTE_UPPER_A && b <= BYTE_UPPER_F {
+        wrapping_sub(b, HEX_UPPER_ALPHA_BASE)
+    } else {
+        HEX_INVALID
+    }
+}
+
+pub fn tuf_percent_encode_role(in name: Slice[u8]) -> ChunkSeq[u8] {
+    let n = name.len();
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut i: u64 = 0;
+    loop {
+        if i >= n {
+            break;
+        }
+        let b = match name.try_get(i) {
+            Some(v) => v,
+            None => 0
+        };
+        if is_role_unreserved(b) {
+            out.push(b);
+        } else {
+            out.push(BYTE_PERCENT);
+            out.push(upper_hex_nibble(b >> HEX_SHIFT));
+            out.push(upper_hex_nibble(b & HEX_NIBBLE_MASK));
+        }
+        i = wrapping_add(i, 1);
+    }
+    out
+}
+
+pub fn tuf_percent_decode_role(in encoded: Slice[u8]) -> ChunkSeq[u8] {
+    let n = encoded.len();
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut i: u64 = 0;
+    loop {
+        if i >= n {
+            break;
+        }
+        let b = match encoded.try_get(i) {
+            Some(v) => v,
+            None => 0
+        };
+        if b == BYTE_PERCENT && wrapping_add(i, 2) < n {
+            let h = decode_hex_nibble(match encoded.try_get(wrapping_add(i, 1)) {
+                Some(v) => v,
+                None => 0
+            });
+            let l = decode_hex_nibble(match encoded.try_get(wrapping_add(i, 2)) {
+                Some(v) => v,
+                None => 0
+            });
+            if h != HEX_INVALID && l != HEX_INVALID {
+                out.push((h << HEX_SHIFT) | l);
+                i = wrapping_add(i, 3);
+                continue;
+            }
+        }
+        out.push(b);
+        i = wrapping_add(i, 1);
+    }
+    out
+}
+
+pub fn tuf_check_checkpoint_invariants(
+    wire_len: u64,
+    max_checkpoint_bytes: u64,
+    schema_version: u64,
+    timestamp_version: u64,
+    snapshot_version: u64,
+    role_count: u64,
+    max_roles: u64,
+    has_zero_role: bool,
+    has_targets_role: bool
+) -> bool {
+    if wire_len > max_checkpoint_bytes {
+        return false;
+    }
+    if schema_version != SCHEMA_V1 && schema_version != SCHEMA_V2 {
+        return false;
+    }
+    if schema_version == SCHEMA_V1
+        && (timestamp_version == 0 || snapshot_version == 0 || role_count == 0)
+    {
+        return false;
+    }
+    if (timestamp_version == 0) != (snapshot_version == 0) {
+        return false;
+    }
+    if snapshot_version == 0 && role_count > 0 {
+        return false;
+    }
+    if role_count > max_roles || has_zero_role {
+        return false;
+    }
+    if role_count > 0 && !has_targets_role {
+        return false;
+    }
+    true
+}

@@ -117,129 +117,21 @@ fn bad() -> DecodeError {
     DecodeError::BadSerializedValue
 }
 
-/// Allocation-free structural walk over CBOR item headers, charging what
-/// decoding will allocate.
-struct Scan<'a> {
-    bytes: &'a [u8],
-    left: usize,
-}
-impl Scan<'_> {
-    fn byte(&mut self) -> Result<u8, DecodeError> {
-        let (&b, rest) = self.bytes.split_first().ok_or_else(bad)?;
-        self.bytes = rest;
-        Ok(b)
-    }
-    fn skip(&mut self, n: u64) -> Result<usize, DecodeError> {
-        let n = usize::try_from(n).map_err(|_| bad())?;
-        if n > self.bytes.len() {
-            return Err(bad());
-        }
-        self.bytes = &self.bytes[n..];
-        Ok(n)
-    }
-    /// The header argument; `None` for indefinite length.
-    fn arg(&mut self, info: u8) -> Result<Option<u64>, DecodeError> {
-        let width = match info {
-            0..=23 => return Ok(Some(u64::from(info))),
-            24 => 1,
-            25 => 2,
-            26 => 4,
-            27 => 8,
-            31 => return Ok(None),
-            _ => return Err(bad()),
-        };
-        let mut v = 0u64;
-        for _ in 0..width {
-            v = (v << 8) | u64::from(self.byte()?);
-        }
-        Ok(Some(v))
-    }
-    fn charge(&mut self, bytes: usize) -> Result<(), DecodeError> {
-        self.left = self
-            .left
-            .checked_sub(bytes.saturating_add(NODE_WEIGHT))
-            .ok_or(DecodeError::DecodedTooLarge)?;
-        Ok(())
-    }
-    /// One data item; `false` when it was a break code instead.
-    fn item(&mut self, depth: usize) -> Result<bool, DecodeError> {
-        if depth > MAX_DECODE_DEPTH {
-            return Err(bad());
-        }
-        let b = self.byte()?;
-        let (major, info) = (b >> 5, b & 0x1f);
-        match major {
-            0 | 1 => {
-                self.arg(info)?.ok_or_else(bad)?;
-                self.charge(0)?;
-            }
-            2 | 3 => match self.arg(info)? {
-                Some(n) => {
-                    let n = self.skip(n)?;
-                    self.charge(n)?;
-                }
-                None => {
-                    let mut total = 0usize;
-                    loop {
-                        let c = self.byte()?;
-                        if c == 0xff {
-                            break;
-                        }
-                        if c >> 5 != major {
-                            return Err(bad());
-                        }
-                        let n = self.arg(c & 0x1f)?.ok_or_else(bad)?;
-                        total = total.saturating_add(self.skip(n)?);
-                    }
-                    self.charge(total)?;
-                }
-            },
-            4 | 5 => {
-                self.charge(0)?;
-                let per = if major == 5 { 2 } else { 1 };
-                match self.arg(info)? {
-                    // Each item takes at least one byte, so this loop ends
-                    // within the cell however large `n` claims to be.
-                    Some(n) => {
-                        let items = n.checked_mul(per).ok_or_else(bad)?;
-                        for _ in 0..items {
-                            if !self.item(depth + 1)? {
-                                return Err(bad());
-                            }
-                        }
-                    }
-                    None => {
-                        while self.item(depth + 1)? {
-                            if per == 2 && !self.item(depth + 1)? {
-                                return Err(bad());
-                            }
-                        }
-                    }
-                }
-            }
-            7 => match info {
-                31 => return Ok(false),
-                20..=22 => self.charge(0)?,
-                25..=27 => {
-                    self.skip(1 << (info - 24))?;
-                    self.charge(0)?;
-                }
-                _ => return Err(bad()),
-            },
-            _ => return Err(bad()),
-        }
-        Ok(true)
-    }
-}
+// Status codes returned by `@vesper/beacon-arrow::cbor::scan_cbor_cell`.
+const SCAN_OK: u64 = 0;
+const SCAN_TOO_LARGE: u64 = 2;
 
 /// Decodes one `ser` cell. The whole cell must be one CBOR item.
 pub(crate) fn decode(bytes: &[u8], budget: &Cell<usize>) -> Result<DecodedValue, DecodeError> {
-    let mut scan = Scan {
+    match crate::binding::otap_cbor_scan(
         bytes,
-        left: budget.get(),
-    };
-    if !scan.item(1)? || !scan.bytes.is_empty() {
-        return Err(bad());
+        budget.get() as u64,
+        NODE_WEIGHT as u64,
+        MAX_DECODE_DEPTH as u64,
+    ) {
+        SCAN_OK => {}
+        SCAN_TOO_LARGE => return Err(DecodeError::DecodedTooLarge),
+        _ => return Err(bad()),
     }
     let mut reader = bytes;
     let value: Value =

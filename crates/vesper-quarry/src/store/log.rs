@@ -31,10 +31,25 @@ use crate::device::{Device, FileId};
 use crate::page::{crc32c, crc32c_update, PAGE_SIZE};
 
 pub const LOG_HEADER_BYTES: u64 = 128;
+#[cfg(test)]
 const MAGIC: &[u8; 8] = b"QRYWAL02";
+const LOG_HDR_SLOT_LEN: usize = 64;
+const LOG_HDR_CRC_OFF: usize = 60;
+const LOG_HDR_FIELD_LEN: usize = 8;
+const LOG_HDR_HSEQ: usize = 0;
+const LOG_HDR_CUR_GEN: usize = 1;
+const LOG_HDR_CUR_BASE: usize = 2;
+const LOG_HDR_PREV_GEN: usize = 3;
+const LOG_HDR_PREV_BASE: usize = 4;
+const LOG_HDR_PREV_END: usize = 5;
+const LOG_HDR_CUR_REGION: usize = 6;
+const LOG_HDR_REGION_KIB: usize = 7;
+const LOG_HDR_VALID: u64 = 1;
 const FRAME_HEADER: usize = 16;
 /// Region sizes: 64 KiB to 128 MiB.
+#[cfg(test)]
 pub(crate) const MIN_REGION_KIB: u32 = 64;
+#[cfg(test)]
 pub(crate) const MAX_REGION_KIB: u32 = 128 << 10;
 /// Largest payload: a full page image plus its fixed fields.
 pub const MAX_LOG_PAYLOAD: usize = PAGE_SIZE + 64;
@@ -174,49 +189,42 @@ struct Header {
     region_kib: u32,
 }
 impl Header {
-    fn encode(&self) -> [u8; 64] {
-        let mut h = [0u8; 64];
-        h[..8].copy_from_slice(MAGIC);
-        for (i, v) in [
+    fn encode(&self) -> [u8; LOG_HDR_SLOT_LEN] {
+        let fields = [
             self.hseq,
             self.cur_gen,
             self.cur_base,
             self.prev_gen,
             self.prev_base,
             self.prev_end,
-        ]
-        .iter()
-        .enumerate()
-        {
-            h[8 + 8 * i..16 + 8 * i].copy_from_slice(&v.to_le_bytes());
-        }
-        h[56] = self.cur_region;
-        h[57..60].copy_from_slice(&self.region_kib.to_le_bytes()[..3]);
-        let crc = crc32c(&h[..60]);
-        h[60..64].copy_from_slice(&crc.to_le_bytes());
+            u64::from(self.cur_region),
+            u64::from(self.region_kib),
+        ];
+        let mut h = [0u8; LOG_HDR_SLOT_LEN];
+        crate::port::binding::store_log_header_encode(&fields, &mut h);
+        let crc = crc32c(&h[..LOG_HDR_CRC_OFF]);
+        h[LOG_HDR_CRC_OFF..LOG_HDR_SLOT_LEN].copy_from_slice(&crc.to_le_bytes());
         h
     }
     fn decode(h: &[u8]) -> Option<Self> {
-        if h.len() != 64 || &h[..8] != MAGIC || h[56] > 1 {
+        let mut fields = [0u64; LOG_HDR_FIELD_LEN];
+        if crate::port::binding::store_log_header_decode(h, &mut fields) != LOG_HDR_VALID {
             return None;
         }
-        if crc32c(&h[..60]) != u32::from_le_bytes(h[60..64].try_into().ok()?) {
+        let stored_crc = u32::from_le_bytes(h[LOG_HDR_CRC_OFF..LOG_HDR_SLOT_LEN].try_into().ok()?);
+        if crc32c(&h[..LOG_HDR_CRC_OFF]) != stored_crc {
             return None;
         }
-        let u = |i: usize| u64::from_le_bytes(h[8 + 8 * i..16 + 8 * i].try_into().expect("8"));
-        let header = Self {
-            hseq: u(0),
-            cur_gen: u(1),
-            cur_base: u(2),
-            prev_gen: u(3),
-            prev_base: u(4),
-            prev_end: u(5),
-            cur_region: h[56],
-            region_kib: u32::from_le_bytes([h[57], h[58], h[59], 0]),
-        };
-        let region_ok = (MIN_REGION_KIB..=MAX_REGION_KIB).contains(&header.region_kib);
-        (header.hseq > 0 && header.cur_gen > 0 && header.cur_base > 0 && region_ok)
-            .then_some(header)
+        Some(Self {
+            hseq: fields[LOG_HDR_HSEQ],
+            cur_gen: fields[LOG_HDR_CUR_GEN],
+            cur_base: fields[LOG_HDR_CUR_BASE],
+            prev_gen: fields[LOG_HDR_PREV_GEN],
+            prev_base: fields[LOG_HDR_PREV_BASE],
+            prev_end: fields[LOG_HDR_PREV_END],
+            cur_region: fields[LOG_HDR_CUR_REGION] as u8,
+            region_kib: fields[LOG_HDR_REGION_KIB] as u32,
+        })
     }
 }
 
@@ -560,5 +568,176 @@ impl StoreLog {
         }
         self.prev = None;
         self.write_header(dev)
+    }
+}
+
+#[cfg(test)]
+mod header_differential {
+    use super::*;
+
+    fn encode_reference(hdr: &Header) -> [u8; 64] {
+        let mut h = [0u8; 64];
+        h[..8].copy_from_slice(MAGIC);
+        for (i, v) in [
+            hdr.hseq,
+            hdr.cur_gen,
+            hdr.cur_base,
+            hdr.prev_gen,
+            hdr.prev_base,
+            hdr.prev_end,
+        ]
+        .iter()
+        .enumerate()
+        {
+            h[8 + 8 * i..16 + 8 * i].copy_from_slice(&v.to_le_bytes());
+        }
+        h[56] = hdr.cur_region;
+        h[57..60].copy_from_slice(&hdr.region_kib.to_le_bytes()[..3]);
+        let crc = crc32c(&h[..60]);
+        h[60..64].copy_from_slice(&crc.to_le_bytes());
+        h
+    }
+
+    fn decode_reference(h: &[u8]) -> Option<Header> {
+        if h.len() != 64 || &h[..8] != MAGIC || h[56] > 1 {
+            return None;
+        }
+        if crc32c(&h[..60]) != u32::from_le_bytes(h[60..64].try_into().ok()?) {
+            return None;
+        }
+        let u = |i: usize| u64::from_le_bytes(h[8 + 8 * i..16 + 8 * i].try_into().expect("8"));
+        let header = Header {
+            hseq: u(0),
+            cur_gen: u(1),
+            cur_base: u(2),
+            prev_gen: u(3),
+            prev_base: u(4),
+            prev_end: u(5),
+            cur_region: h[56],
+            region_kib: u32::from_le_bytes([h[57], h[58], h[59], 0]),
+        };
+        let region_ok = (MIN_REGION_KIB..=MAX_REGION_KIB).contains(&header.region_kib);
+        (header.hseq > 0 && header.cur_gen > 0 && header.cur_base > 0 && region_ok)
+            .then_some(header)
+    }
+
+    #[test]
+    fn store_log_header_matches_reference() {
+        const DIFF_CASES: usize = 256;
+        let mut state: u64 = 0x6c6f_6768_1234_5678;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1);
+            state >> 32
+        };
+        for case in 0..DIFF_CASES {
+            let hdr = Header {
+                hseq: 1 + next(),
+                cur_gen: 1 + next(),
+                cur_base: 1 + next(),
+                prev_gen: next(),
+                prev_base: next(),
+                prev_end: next(),
+                cur_region: (next() % 2) as u8,
+                region_kib: MIN_REGION_KIB + (next() as u32 % (MAX_REGION_KIB - MIN_REGION_KIB)),
+            };
+            let ep = hdr.encode();
+            let er = encode_reference(&hdr);
+            assert_eq!(ep, er, "case {case} encode");
+            assert_eq!(
+                Header::decode(&ep),
+                decode_reference(&er),
+                "case {case} decode"
+            );
+
+            let mut bad = ep;
+            let at = (next() % 64) as usize;
+            bad[at] ^= 1 << (next() % 8);
+            assert_eq!(
+                Header::decode(&bad),
+                decode_reference(&bad),
+                "case {case} bad"
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "ABBA benchmark; run in release with --ignored --nocapture"]
+    fn abba_store_log_header_decode() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        const ABBA_EPOCHS: usize = 30;
+        const ABBA_WARMUP: usize = 2;
+        const ABBA_ITERS: usize = 20_000;
+        const SIGN_ALPHA_HALF: f64 = 0.025;
+        const FLIP_LIMIT: f64 = 1.50;
+
+        let hdr = Header {
+            hseq: 7,
+            cur_gen: 3,
+            cur_base: 100,
+            prev_gen: 2,
+            prev_base: 50,
+            prev_end: 4096,
+            cur_region: 1,
+            region_kib: 1024,
+        };
+        let bytes = hdr.encode();
+
+        let mut ratios = Vec::with_capacity(ABBA_EPOCHS);
+        for epoch in 0..(ABBA_WARMUP + ABBA_EPOCHS) {
+            let t0 = Instant::now();
+            for _ in 0..ABBA_ITERS {
+                black_box(decode_reference(black_box(&bytes)).unwrap());
+            }
+            let r1 = t0.elapsed().as_nanos();
+
+            let t1 = Instant::now();
+            for _ in 0..ABBA_ITERS {
+                black_box(Header::decode(black_box(&bytes)).unwrap());
+            }
+            let p1 = t1.elapsed().as_nanos();
+
+            let t2 = Instant::now();
+            for _ in 0..ABBA_ITERS {
+                black_box(Header::decode(black_box(&bytes)).unwrap());
+            }
+            let p2 = t2.elapsed().as_nanos();
+
+            let t3 = Instant::now();
+            for _ in 0..ABBA_ITERS {
+                black_box(decode_reference(black_box(&bytes)).unwrap());
+            }
+            let r2 = t3.elapsed().as_nanos();
+
+            if epoch >= ABBA_WARMUP {
+                ratios.push((p1 + p2) as f64 / (r1 + r2) as f64);
+            }
+        }
+        ratios.sort_by(f64::total_cmp);
+        let mid = ratios.len() / 2;
+        let mut cdf = 0.0;
+        let mut choose = 1.0;
+        let mut k = 0usize;
+        for j in 0..ratios.len() {
+            cdf += choose * 0.5f64.powi(ratios.len() as i32);
+            if cdf > SIGN_ALPHA_HALF {
+                break;
+            }
+            k = j + 1;
+            choose = choose * (ratios.len() - j) as f64 / (j + 1) as f64;
+        }
+        let i = k.saturating_sub(1).min(mid);
+        let (ci_lo, ci_hi) = (ratios[i], ratios[ratios.len() - 1 - i]);
+        println!(
+            "ABBA store_log_header_decode: median {:.3}x [{ci_lo:.3}x, {ci_hi:.3}x]",
+            ratios[mid]
+        );
+        assert!(
+            ci_hi <= FLIP_LIMIT,
+            "ABBA 95% upper bound {ci_hi:.3}x exceeds {FLIP_LIMIT:.2}x"
+        );
     }
 }

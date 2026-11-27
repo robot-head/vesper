@@ -7,7 +7,7 @@
 use super::*;
 
 impl Session {
-    pub(super) fn front_step(&mut self, step: Step, arg: &[u8]) -> Result<i64, String> {
+    pub(super) fn front_step(&mut self, step: Step, _arg: &[u8]) -> Result<i64, String> {
         let o = &self.o;
         match step {
             Step::Parse => {
@@ -59,7 +59,7 @@ impl Session {
                     crate::diagnostics(o.input(), original, &core.diagnostics, o.json);
                     core.syntax()
                 };
-                crate::write(o.output(), format!("{syntax:#?}\n").as_bytes())?;
+                self.text = format!("{syntax:#?}\n").into_bytes();
                 Ok(0)
             }
             Step::ReportSyntax => {
@@ -158,23 +158,10 @@ impl Session {
                 self.text = package.as_str().as_bytes().to_vec();
                 Ok(0)
             }
-            // The interface JSON (`arg`) to `-o`, written atomically, or
-            // to stdout.
-            Step::InterfaceWrite => {
-                if let Some(path) = o.output() {
-                    vesper::atomic_file::atomic_write(&path, arg)?;
-                } else {
-                    crate::write(None, arg)?;
-                }
-                Ok(0)
-            }
             Step::EmitHir => {
-                crate::write(
-                    o.output(),
-                    serde_json::to_string_pretty(&self.parsed()?.module)
-                        .map_err(|e| e.to_string())?
-                        .as_bytes(),
-                )?;
+                self.text = serde_json::to_string_pretty(&self.parsed()?.module)
+                    .map_err(|e| e.to_string())?
+                    .into_bytes();
                 Ok(0)
             }
             _ => Err(format!("driver: step {} is not a front step", step as u32)),

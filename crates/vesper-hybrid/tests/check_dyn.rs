@@ -18,6 +18,9 @@ mod ast_words;
 #[path = "../src/parse_words.rs"]
 mod parse_words;
 
+#[path = "../../../tests/common/flip_gate.rs"]
+mod flip_gate;
+
 #[path = "../../../tests/common/dyn_words.rs"]
 mod dyn_words;
 
@@ -290,9 +293,9 @@ fn dyn_swap_speed() {
         .cloned()
         .collect();
     eprintln!("{} modules, {} use the passes", all.len(), used.len());
-    for (label, set) in [
-        ("modules that use the passes", &used),
-        ("every module, forced", &all),
+    for (label, workload, set) in [
+        ("modules that use the passes", "used", &used),
+        ("every module, forced", "forced", &all),
     ] {
         let mut rust = || {
             time(|| {
@@ -312,6 +315,11 @@ fn dyn_swap_speed() {
                 }
             })
         };
+        if flip_gate::on() {
+            // The flip gate (scripts/ci/flip-gate/dyn.json, #2207).
+            flip_gate::pairs(workload, &mut rust, &mut vesper);
+            continue;
+        }
         abba_ci(label, 10, &mut rust, &mut vesper);
     }
 }

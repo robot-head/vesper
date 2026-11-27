@@ -1,0 +1,495 @@
+// @vesper/migrate: C header comment stripper and preprocessor directive filter
+// for vesper-migrate (Rust-exit SH6 lane 18, #1413 / #2333).
+//
+// Both entry points operate over zero-copy `in src: Slice[u8]` and
+// `inout out: Slice[u8]` (caller provides `out.len() >= src.len()`), packing
+// `(status << 32) | payload` where `payload` is `out_len` on `STATUS_OK` or
+// the 1-based line number (0 for EOF) on error.
+
+const STATUS_SHIFT: u64 = 32;
+
+// Status codes for `migrate_strip_comments`.
+const STRIP_OK: u64 = 0;
+const STRIP_UNTERMINATED_BLOCK: u64 = 1;
+const STRIP_UNTERMINATED_LIT: u64 = 2;
+
+// Status codes for `migrate_filter_directives`.
+const FILTER_OK: u64 = 0;
+const FILTER_LINE_CONTINUATION: u64 = 1;
+const FILTER_BAD_INCLUDE: u64 = 2;
+const FILTER_BAD_DEFINE: u64 = 3;
+const FILTER_UNMATCHED_ENDIF: u64 = 4;
+const FILTER_UNSUPPORTED_DIRECTIVE: u64 = 5;
+const FILTER_UNTERMINATED_COND: u64 = 6;
+
+// ASCII byte constants.
+const BYTE_TAB: u8 = 9;
+const BYTE_LF: u8 = 10;
+const BYTE_VT: u8 = 11;
+const BYTE_FF: u8 = 12;
+const BYTE_CR: u8 = 13;
+const BYTE_SPACE: u8 = 32;
+const BYTE_QUOTE: u8 = 34;
+const BYTE_HASH: u8 = 35;
+const BYTE_APOS: u8 = 39;
+const BYTE_STAR: u8 = 42;
+const BYTE_SLASH: u8 = 47;
+const BYTE_ZERO: u8 = 48;
+const BYTE_NINE: u8 = 57;
+const BYTE_UPPER_A: u8 = 65;
+const BYTE_UPPER_Z: u8 = 90;
+const BYTE_BACKSLASH: u8 = 92;
+const BYTE_UNDERSCORE: u8 = 95;
+const BYTE_LOWER_A: u8 = 97;
+const BYTE_LOWER_Z: u8 = 122;
+
+// Conditional stack tags.
+const COND_GUARD: u8 = 1;
+const COND_CPLUSPLUS: u8 = 2;
+
+fn pack(status: u64, payload: u64) -> u64 {
+    (status << STATUS_SHIFT) | payload
+}
+
+fn is_ws(b: u8) -> bool {
+    b == BYTE_SPACE || b == BYTE_TAB || b == BYTE_CR || b == BYTE_VT || b == BYTE_FF
+}
+
+fn is_ident_start(b: u8) -> bool {
+    (b >= BYTE_LOWER_A && b <= BYTE_LOWER_Z)
+        || (b >= BYTE_UPPER_A && b <= BYTE_UPPER_Z)
+        || b == BYTE_UNDERSCORE
+}
+
+fn is_ident_cont(b: u8) -> bool {
+    is_ident_start(b) || (b >= BYTE_ZERO && b <= BYTE_NINE)
+}
+
+fn slice_is_ident(in s: Slice[u8], start: u64, len: u64) -> bool {
+    if len == 0 {
+        return false;
+    }
+    let b0 = match s.try_get(start) {
+        Some(v) => v,
+        None => return false
+    };
+    if !is_ident_start(b0) {
+        return false;
+    }
+    let mut i: u64 = 1;
+    loop {
+        if i >= len {
+            break;
+        }
+        let b = match s.try_get(wrapping_add(start, i)) {
+            Some(v) => v,
+            None => return false
+        };
+        if !is_ident_cont(b) {
+            return false;
+        }
+        i = wrapping_add(i, 1);
+    }
+    true
+}
+
+fn slice_eq_str(in s: Slice[u8], start: u64, len: u64, in target: Str) -> bool {
+    if len != target.len() {
+        return false;
+    }
+    let tb = target.as_bytes();
+    let mut i: u64 = 0;
+    loop {
+        if i >= len {
+            break;
+        }
+        let a = match s.try_get(wrapping_add(start, i)) {
+            Some(v) => v,
+            None => return false
+        };
+        let b = match tb.try_get(i) {
+            Some(v) => v,
+            None => return false
+        };
+        if a != b {
+            return false;
+        }
+        i = wrapping_add(i, 1);
+    }
+    true
+}
+
+pub fn migrate_strip_comments(in src: Slice[u8], inout out: Slice[u8]) -> u64 {
+    let n = src.len();
+    let mut i: u64 = 0;
+    let mut w: u64 = 0;
+    let mut line: u64 = 1;
+
+    loop {
+        if i >= n {
+            break;
+        }
+        let b = match src.try_get(i) {
+            Some(v) => v,
+            None => break
+        };
+        if b == BYTE_SLASH && wrapping_add(i, 1) < n {
+            let next = match src.try_get(wrapping_add(i, 1)) {
+                Some(v) => v,
+                None => 0
+            };
+            if next == BYTE_SLASH {
+                i = wrapping_add(i, 2);
+                loop {
+                    if i >= n {
+                        break;
+                    }
+                    let c = match src.try_get(i) {
+                        Some(v) => v,
+                        None => break
+                    };
+                    if c == BYTE_LF {
+                        break;
+                    }
+                    i = wrapping_add(i, 1);
+                }
+                continue;
+            }
+            if next == BYTE_STAR {
+                let start_line = line;
+                i = wrapping_add(i, 2);
+                loop {
+                    if wrapping_add(i, 1) >= n {
+                        return pack(STRIP_UNTERMINATED_BLOCK, start_line);
+                    }
+                    let c0 = match src.try_get(i) {
+                        Some(v) => v,
+                        None => 0
+                    };
+                    let c1 = match src.try_get(wrapping_add(i, 1)) {
+                        Some(v) => v,
+                        None => 0
+                    };
+                    if c0 == BYTE_STAR && c1 == BYTE_SLASH {
+                        i = wrapping_add(i, 2);
+                        let _ = out.try_set(w, BYTE_SPACE);
+                        w = wrapping_add(w, 1);
+                        break;
+                    }
+                    if c0 == BYTE_LF {
+                        line = wrapping_add(line, 1);
+                        let _ = out.try_set(w, BYTE_LF);
+                        w = wrapping_add(w, 1);
+                    }
+                    i = wrapping_add(i, 1);
+                }
+                continue;
+            }
+        }
+        if b == BYTE_QUOTE || b == BYTE_APOS {
+            let q = b;
+            let _ = out.try_set(w, q);
+            w = wrapping_add(w, 1);
+            i = wrapping_add(i, 1);
+            loop {
+                if i >= n {
+                    break;
+                }
+                let c = match src.try_get(i) {
+                    Some(v) => v,
+                    None => break
+                };
+                if c == q {
+                    let _ = out.try_set(w, q);
+                    w = wrapping_add(w, 1);
+                    i = wrapping_add(i, 1);
+                    break;
+                }
+                if c == BYTE_LF {
+                    return pack(STRIP_UNTERMINATED_LIT, line);
+                }
+                if c == BYTE_BACKSLASH && wrapping_add(i, 1) < n {
+                    let _ = out.try_set(w, c);
+                    w = wrapping_add(w, 1);
+                    i = wrapping_add(i, 1);
+                    let esc = match src.try_get(i) {
+                        Some(v) => v,
+                        None => 0
+                    };
+                    let _ = out.try_set(w, esc);
+                    w = wrapping_add(w, 1);
+                    i = wrapping_add(i, 1);
+                } else {
+                    let _ = out.try_set(w, c);
+                    w = wrapping_add(w, 1);
+                    i = wrapping_add(i, 1);
+                }
+            }
+            continue;
+        }
+        if b == BYTE_LF {
+            line = wrapping_add(line, 1);
+        }
+        let _ = out.try_set(w, b);
+        w = wrapping_add(w, 1);
+        i = wrapping_add(i, 1);
+    }
+
+    pack(STRIP_OK, w)
+}
+
+pub fn migrate_filter_directives(in src: Slice[u8], inout out: Slice[u8]) -> u64 {
+    let n = src.len();
+    let mut stack: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut skip_depth: u64 = 0;
+    let mut w: u64 = 0;
+    let mut pos: u64 = 0;
+    let mut line_no: u64 = 0;
+
+    loop {
+        line_no = wrapping_add(line_no, 1);
+        if line_no > 1 {
+            let _ = out.try_set(w, BYTE_LF);
+            w = wrapping_add(w, 1);
+        }
+        let line_start = pos;
+        loop {
+            if pos >= n {
+                break;
+            }
+            let c = match src.try_get(pos) {
+                Some(v) => v,
+                None => break
+            };
+            if c == BYTE_LF {
+                break;
+            }
+            pos = wrapping_add(pos, 1);
+        }
+        let line_end = pos;
+        let has_more = pos < n;
+        if has_more {
+            pos = wrapping_add(pos, 1);
+        }
+
+        // Trim ASCII whitespace at both ends of [line_start, line_end).
+        let mut t_start = line_start;
+        loop {
+            if t_start >= line_end {
+                break;
+            }
+            let c = match src.try_get(t_start) {
+                Some(v) => v,
+                None => break
+            };
+            if !is_ws(c) {
+                break;
+            }
+            t_start = wrapping_add(t_start, 1);
+        }
+        let mut t_end = line_end;
+        loop {
+            if t_end <= t_start {
+                break;
+            }
+            let c = match src.try_get(wrapping_sub(t_end, 1)) {
+                Some(v) => v,
+                None => break
+            };
+            if !is_ws(c) {
+                break;
+            }
+            t_end = wrapping_sub(t_end, 1);
+        }
+
+        if t_end > t_start {
+            let last = match src.try_get(wrapping_sub(t_end, 1)) {
+                Some(v) => v,
+                None => 0
+            };
+            if last == BYTE_BACKSLASH {
+                return pack(FILTER_LINE_CONTINUATION, line_no);
+            }
+        }
+
+        let is_directive = if t_start < t_end {
+            let first = match src.try_get(t_start) {
+                Some(v) => v,
+                None => 0
+            };
+            first == BYTE_HASH
+        } else {
+            false
+        };
+
+        if !is_directive {
+            if skip_depth == 0 {
+                let mut k = line_start;
+                loop {
+                    if k >= line_end {
+                        break;
+                    }
+                    let c = match src.try_get(k) {
+                        Some(v) => v,
+                        None => break
+                    };
+                    let _ = out.try_set(w, c);
+                    w = wrapping_add(w, 1);
+                    k = wrapping_add(k, 1);
+                }
+            }
+        } else {
+            // Parse directive name + up to 2 whitespace-separated args.
+            let mut p = wrapping_add(t_start, 1);
+            loop {
+                if p >= t_end {
+                    break;
+                }
+                let c = match src.try_get(p) {
+                    Some(v) => v,
+                    None => break
+                };
+                if !is_ws(c) {
+                    break;
+                }
+                p = wrapping_add(p, 1);
+            }
+            let name_start = p;
+            loop {
+                if p >= t_end {
+                    break;
+                }
+                let c = match src.try_get(p) {
+                    Some(v) => v,
+                    None => break
+                };
+                if is_ws(c) {
+                    break;
+                }
+                p = wrapping_add(p, 1);
+            }
+            let name_len = wrapping_sub(p, name_start);
+
+            loop {
+                if p >= t_end {
+                    break;
+                }
+                let c = match src.try_get(p) {
+                    Some(v) => v,
+                    None => break
+                };
+                if !is_ws(c) {
+                    break;
+                }
+                p = wrapping_add(p, 1);
+            }
+            let arg1_start = p;
+            loop {
+                if p >= t_end {
+                    break;
+                }
+                let c = match src.try_get(p) {
+                    Some(v) => v,
+                    None => break
+                };
+                if is_ws(c) {
+                    break;
+                }
+                p = wrapping_add(p, 1);
+            }
+            let arg1_len = wrapping_sub(p, arg1_start);
+
+            loop {
+                if p >= t_end {
+                    break;
+                }
+                let c = match src.try_get(p) {
+                    Some(v) => v,
+                    None => break
+                };
+                if !is_ws(c) {
+                    break;
+                }
+                p = wrapping_add(p, 1);
+            }
+            let has_arg2 = p < t_end;
+            let argc: u64 = if arg1_len == 0 {
+                0
+            } else if has_arg2 {
+                2
+            } else {
+                1
+            };
+
+            if skip_depth > 0 {
+                if slice_eq_str(in src, name_start, name_len, in "if")
+                    || slice_eq_str(in src, name_start, name_len, in "ifdef")
+                    || slice_eq_str(in src, name_start, name_len, in "ifndef")
+                {
+                    skip_depth = wrapping_add(skip_depth, 1);
+                } else if slice_eq_str(in src, name_start, name_len, in "endif") {
+                    skip_depth = wrapping_sub(skip_depth, 1);
+                    if skip_depth == 0 {
+                        let _ = stack.pop();
+                    }
+                }
+            } else if slice_eq_str(in src, name_start, name_len, in "include") {
+                if argc == 1
+                    && (slice_eq_str(in src, arg1_start, arg1_len, in "<stdint.h>")
+                        || slice_eq_str(in src, arg1_start, arg1_len, in "<stddef.h>")
+                        || slice_eq_str(in src, arg1_start, arg1_len, in "<stdbool.h>"))
+                {
+                    // Accepted standard header.
+                } else {
+                    return pack(FILTER_BAD_INCLUDE, line_no);
+                }
+            } else if slice_eq_str(in src, name_start, name_len, in "pragma")
+                && argc == 1
+                && slice_eq_str(in src, arg1_start, arg1_len, in "once")
+            {
+                // Accepted `#pragma once`.
+            } else if slice_eq_str(in src, name_start, name_len, in "ifndef")
+                && argc == 1
+                && slice_is_ident(in src, arg1_start, arg1_len)
+            {
+                stack.push(COND_GUARD);
+            } else if slice_eq_str(in src, name_start, name_len, in "define") {
+                let top_is_guard = if stack.len() > 0 {
+                    match stack.try_get(wrapping_sub(stack.len(), 1)) {
+                        Some(v) => v == COND_GUARD,
+                        None => false
+                    }
+                } else {
+                    false
+                };
+                if argc == 1 && slice_is_ident(in src, arg1_start, arg1_len) && top_is_guard {
+                    // Accepted include guard `#define`.
+                } else {
+                    return pack(FILTER_BAD_DEFINE, line_no);
+                }
+            } else if slice_eq_str(in src, name_start, name_len, in "ifdef")
+                && argc == 1
+                && slice_eq_str(in src, arg1_start, arg1_len, in "__cplusplus")
+            {
+                stack.push(COND_CPLUSPLUS);
+                skip_depth = 1;
+            } else if slice_eq_str(in src, name_start, name_len, in "endif") && argc == 0 {
+                if stack.len() == 0 {
+                    return pack(FILTER_UNMATCHED_ENDIF, line_no);
+                }
+                let _ = stack.pop();
+            } else {
+                return pack(FILTER_UNSUPPORTED_DIRECTIVE, line_no);
+            }
+        }
+
+        if !has_more {
+            break;
+        }
+    }
+
+    if stack.len() > 0 {
+        return pack(FILTER_UNTERMINATED_COND, 0);
+    }
+    pack(FILTER_OK, w)
+}

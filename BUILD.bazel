@@ -937,6 +937,8 @@ vesper_crate(
             "src/lsp/fixtures/**",
             "packages/vesper-lsp-features/**",
             "packages/vesper-lsp-format/**",
+            # The macro preview's Forge programs (part 11c).
+            "tests/forge_*.rs",
             "packages/vesper-ast/**",
             "packages/vesper-check-data/**",
             "packages/vesper-front/**",
@@ -1101,6 +1103,11 @@ vesper_crate(
         # (exit 37) on "Self-host codegen differentials".
         "test/self_host_native_walk": [
             "resources:memory:8192",
+        ],
+        # Compiles export-build-driver alongside multi-threaded corpus() (#2286).
+        "test/self_host_codegen_export": [
+            "resources:memory:6144",
+            "resources:cpu:4",
         ],
         # The CLI audit subprocess permits Lean -M8192 and runs serially.
         "test/proof_audit_cli": [
@@ -2166,13 +2173,16 @@ filegroup(
 
 vesper_package(
     name = "std_hash_sys_package",
-    srcs = glob(["packages/vesper-std/hash/sys/src/**/*.ves"]),
+    srcs = glob([
+        "packages/vesper-std/hash/sys/src/**/*.ves",
+        "packages/vesper-std/hash/sys/src-wasip2/**/*.ves",
+    ]),
     manifest = "packages/vesper-std/hash/sys/Loom.toml",
     # The BLAKE3 C implementation and the wrappers its `[package] objects`
     # name; the port harness compiles them into a port's archive.
     objects = glob(["packages/vesper-std/hash/sys/c/**"]),
     visibility = ["//visibility:public"],
-    vsys = ["packages/vesper-std/hash/sys/blake3.vsys"],
+    vsys = glob(["packages/vesper-std/hash/sys/blake3-*.vsys"]),
     deps = [":std_hash_package"],
 )
 
