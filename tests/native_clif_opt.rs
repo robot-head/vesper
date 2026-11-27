@@ -1231,3 +1231,41 @@ fn main() -> u64 {
         "expected (idx * 8 + 4) * 8 + (idx * 8 + 5) * 8 to distribute to imul_imm 64 and combined disp 72:\n{fn_clif}"
     );
 }
+
+#[test]
+fn folds_iadd_imm_into_load_store_offsets() {
+    let source = "
+struct Pair {
+    a: u64,
+    b: u64,
+    c: u64,
+}
+
+fn bump_pair(inout p: Pair, d: u64) -> u64 {
+    p.b = wrapping_add(p.b, d);
+    p.c = wrapping_add(p.c, p.b);
+    wrapping_add(p.a, p.c)
+}
+
+fn main() -> u64 {
+    let mut p = Pair { a: 1, b: 2, c: 3 };
+    let x = bump_pair(inout p, 4);
+    let y = bump_pair(inout p, 5);
+    wrapping_add(x, y)
+}";
+    let c = accepted(source);
+    let (_, clif) = native::object(&c.world, "main").unwrap();
+    let eval = vesper::runtime::Runtime::new(&c.world)
+        .run("main", vec![])
+        .unwrap();
+    let jit = native::jit(&c.world, "main").unwrap();
+    assert_eq!(eval.to_string(), jit.to_string());
+    let fn_clif = clif
+        .split("\n; ")
+        .find(|s| s.starts_with("bump_pair\n"))
+        .unwrap_or(&clif);
+    assert!(
+        !fn_clif.contains("iadd_imm") && fn_clif.contains("+8") && fn_clif.contains("+16"),
+        "expected struct field iadd_imm offsets to fold directly into load/store offsets:\n{fn_clif}"
+    );
+}

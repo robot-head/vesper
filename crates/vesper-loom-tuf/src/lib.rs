@@ -202,14 +202,34 @@ fn hash(bytes: &[u8]) -> String {
     String::from_utf8(binding::tuf_sha256_hex(bytes)).unwrap_or_default()
 }
 fn state_checksum(state: &State) -> Result<String, TufError> {
-    let mut bytes = Vec::new();
-    state
-        .serialize(&mut serde_json::Serializer::with_formatter(
-            &mut bytes,
-            olpc_cjson::CanonicalFormatter::new(),
-        ))
-        .map_err(|e| TufError(e.to_string()))?;
-    Ok(hash(&bytes))
+    let mut roots_flat = Vec::new();
+    let mut root_lens = Vec::with_capacity(state.roots.len());
+    for root in &state.roots {
+        roots_flat.extend_from_slice(root);
+        root_lens.push(root.len() as u64);
+    }
+    let mut role_names_flat = Vec::new();
+    let mut role_name_lens = Vec::with_capacity(state.role_versions.len());
+    let mut role_versions = Vec::with_capacity(state.role_versions.len());
+    for (name, &ver) in &state.role_versions {
+        role_names_flat.extend_from_slice(name.as_bytes());
+        role_name_lens.push(name.len() as u64);
+        role_versions.push(ver);
+    }
+    let digest = binding::tuf_state_checksum(
+        u64::from(state.schema_version),
+        state.timestamp_version,
+        state.snapshot_version,
+        state.repository_id.as_bytes(),
+        state.bootstrap_sha256.as_bytes(),
+        state.verified_at.as_bytes(),
+        &roots_flat,
+        &root_lens,
+        &role_names_flat,
+        &role_name_lens,
+        &role_versions,
+    );
+    String::from_utf8(digest).map_err(|e| TufError(e.to_string()))
 }
 fn parse_root(bytes: &[u8]) -> Result<Signed<Root>, TufError> {
     serde_json::from_slice(bytes).map_err(|e| TufError(format!("invalid root: {e}")))
@@ -279,6 +299,17 @@ pub fn validate_delegation_graph(
 /// Computes the lowercase hex SHA-256 digest of `bytes` via `@vesper/loom-tuf`.
 pub fn sha256_hex(bytes: &[u8]) -> String {
     hash(bytes)
+}
+
+/// Percent-encodes a TUF delegated role name via `@vesper/loom-tuf`.
+pub fn percent_encode_role(role_name: &str) -> String {
+    String::from_utf8(binding::tuf_percent_encode_role(role_name.as_bytes())).unwrap_or_default()
+}
+
+/// Percent-decodes a TUF metadata filename stem via `@vesper/loom-tuf`.
+pub fn percent_decode_role(encoded: &str) -> Result<String, TufError> {
+    String::from_utf8(binding::tuf_percent_decode_role(encoded.as_bytes()))
+        .map_err(|_| TufError("invalid encoded metadata filename".into()))
 }
 
 /// Verify using real host time, safe expiry enforcement, and no network transport.
@@ -962,12 +993,7 @@ impl MetadataLengthCheck<'_> {
             .ok_or_else(|| TufError(format!("missing snapshot role pin: {key}")))?;
         if let Some(length) = pin.length {
             // Match Tough's role-name escaping while retaining escapes in the filesystem filename.
-            const ESCAPE: &percent_encoding::AsciiSet = &percent_encoding::NON_ALPHANUMERIC
-                .remove(b'_')
-                .remove(b'.')
-                .remove(b'-')
-                .remove(b'~');
-            let encoded = percent_encoding::utf8_percent_encode(role_name, ESCAPE);
+            let encoded = percent_encode_role(role_name);
             let filename = if self.consistent {
                 format!("{}.{encoded}.json", pin.version)
             } else {
@@ -1000,21 +1026,20 @@ fn validate_checkpoint(
     bootstrap: &[u8],
     limits: &Limits,
 ) -> Result<(), TufError> {
-    if old.to_json()?.len() > limits.checkpoint_bytes
-        || !matches!(old.state.schema_version, 1 | 2)
-        || old.state.repository_id != repository
+    let wire_len = old.to_json()?.len() as u64;
+    if !binding::tuf_check_checkpoint_invariants(
+        wire_len,
+        limits.checkpoint_bytes as u64,
+        u64::from(old.state.schema_version),
+        old.state.timestamp_version,
+        old.state.snapshot_version,
+        old.state.role_versions.len() as u64,
+        limits.roles as u64,
+        old.state.role_versions.values().any(|x| *x == 0),
+        old.state.role_versions.contains_key("targets.json"),
+    ) || old.state.repository_id != repository
         || old.state.bootstrap_sha256 != bootstrap_hash
         || old.checksum != state_checksum(&old.state)?
-        || (old.state.schema_version == 1
-            && (old.state.timestamp_version == 0
-                || old.state.snapshot_version == 0
-                || old.state.role_versions.is_empty()))
-        || ((old.state.timestamp_version == 0) != (old.state.snapshot_version == 0))
-        || (old.state.snapshot_version == 0 && !old.state.role_versions.is_empty())
-        || old.state.role_versions.len() > limits.roles
-        || old.state.role_versions.values().any(|x| *x == 0)
-        || (!old.state.role_versions.is_empty()
-            && !old.state.role_versions.contains_key("targets.json"))
     {
         return fail("corrupt or mismatched checkpoint");
     }
@@ -1283,15 +1308,8 @@ fn preflight_metadata(directory: &Path, limits: &Limits) -> Result<(), TufError>
             {
                 stems.push(name);
             }
-            let names: Result<Vec<_>, _> = stems
-                .into_iter()
-                .map(|stem| {
-                    percent_encoding::percent_decode_str(stem)
-                        .decode_utf8()
-                        .map(|name| name.into_owned())
-                })
-                .collect();
-            let names = names.map_err(|_| TufError("invalid encoded metadata filename".into()))?;
+            let names: Result<Vec<_>, _> = stems.into_iter().map(percent_decode_role).collect();
+            let names = names?;
             for role in delegations {
                 let child = role
                     .get("name")

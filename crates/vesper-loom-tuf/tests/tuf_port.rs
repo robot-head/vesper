@@ -6,8 +6,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::hint::black_box;
 use std::time::Instant;
 use vesper_loom_tuf::{
-    Limits, is_valid_target_name, sha256_hex, validate_delegation_graph, validate_json_bounds,
-    verify_ed25519_quorum,
+    Limits, is_valid_target_name, percent_decode_role, percent_encode_role, sha256_hex,
+    validate_delegation_graph, validate_json_bounds, verify_ed25519_quorum,
 };
 
 const ABBA_WARMUP_EPOCHS: usize = 2;
@@ -353,6 +353,31 @@ fn tuf_port_matches_rust_reference() {
             "threshold={threshold}"
         );
         cases += 1;
+    }
+
+    // 6. Role-name percent-encoding and percent-decoding.
+    const ESCAPE: &percent_encoding::AsciiSet = &percent_encoding::NON_ALPHANUMERIC
+        .remove(b'_')
+        .remove(b'.')
+        .remove(b'-')
+        .remove(b'~');
+    for role in [
+        "targets",
+        "pkg/sub-role_1.0~a",
+        "role with spaces/and:colons%25",
+        "café/日本語",
+        "bad%ZZescape%",
+    ] {
+        let enc_port = percent_encode_role(role);
+        let enc_ref = percent_encoding::utf8_percent_encode(role, ESCAPE).to_string();
+        assert_eq!(enc_port, enc_ref, "encode role={role:?}");
+        let dec_port = percent_decode_role(&enc_port).unwrap();
+        let dec_ref = percent_encoding::percent_decode_str(&enc_ref)
+            .decode_utf8()
+            .unwrap()
+            .into_owned();
+        assert_eq!(dec_port, dec_ref, "decode role={role:?}");
+        cases += 2;
     }
 
     println!("flip-gate differential differences=0 cases={cases}");

@@ -879,3 +879,345 @@ pub fn tuf_verify_ed25519_quorum(
     }
     QUORUM_INSUFFICIENT
 }
+
+// ---------------------------------------------------------------------------
+// TUF role-name percent-encoding/decoding and checkpoint structural invariants.
+
+const BYTE_PERCENT: u8 = 37;
+const HEX_UPPER_ALPHA_BASE: u8 = 55;
+const HEX_INVALID: u8 = 255;
+const SCHEMA_V1: u64 = 1;
+const SCHEMA_V2: u64 = 2;
+
+fn is_role_unreserved(b: u8) -> bool {
+    (b >= BYTE_LOWER_A && b <= BYTE_LOWER_Z)
+        || (b >= BYTE_UPPER_A && b <= BYTE_UPPER_Z)
+        || (b >= BYTE_ZERO && b <= BYTE_NINE)
+        || b == BYTE_UNDERSCORE
+        || b == BYTE_DOT
+        || b == BYTE_DASH
+        || b == BYTE_TILDE
+}
+
+fn upper_hex_nibble(v: u8) -> u8 {
+    if v < 10 {
+        wrapping_add(BYTE_ZERO, v)
+    } else {
+        wrapping_add(HEX_UPPER_ALPHA_BASE, v)
+    }
+}
+
+fn decode_hex_nibble(b: u8) -> u8 {
+    if b >= BYTE_ZERO && b <= BYTE_NINE {
+        wrapping_sub(b, BYTE_ZERO)
+    } else if b >= BYTE_LOWER_A && b <= BYTE_LOWER_F {
+        wrapping_sub(b, HEX_ALPHA_BASE)
+    } else if b >= BYTE_UPPER_A && b <= BYTE_UPPER_F {
+        wrapping_sub(b, HEX_UPPER_ALPHA_BASE)
+    } else {
+        HEX_INVALID
+    }
+}
+
+pub fn tuf_percent_encode_role(in name: Slice[u8]) -> ChunkSeq[u8] {
+    let n = name.len();
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut i: u64 = 0;
+    loop {
+        if i >= n {
+            break;
+        }
+        let b = match name.try_get(i) {
+            Some(v) => v,
+            None => 0
+        };
+        if is_role_unreserved(b) {
+            out.push(b);
+        } else {
+            out.push(BYTE_PERCENT);
+            out.push(upper_hex_nibble(b >> HEX_SHIFT));
+            out.push(upper_hex_nibble(b & HEX_NIBBLE_MASK));
+        }
+        i = wrapping_add(i, 1);
+    }
+    out
+}
+
+pub fn tuf_percent_decode_role(in encoded: Slice[u8]) -> ChunkSeq[u8] {
+    let n = encoded.len();
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut i: u64 = 0;
+    loop {
+        if i >= n {
+            break;
+        }
+        let b = match encoded.try_get(i) {
+            Some(v) => v,
+            None => 0
+        };
+        if b == BYTE_PERCENT && wrapping_add(i, 2) < n {
+            let h = decode_hex_nibble(match encoded.try_get(wrapping_add(i, 1)) {
+                Some(v) => v,
+                None => 0
+            });
+            let l = decode_hex_nibble(match encoded.try_get(wrapping_add(i, 2)) {
+                Some(v) => v,
+                None => 0
+            });
+            if h != HEX_INVALID && l != HEX_INVALID {
+                out.push((h << HEX_SHIFT) | l);
+                i = wrapping_add(i, 3);
+                continue;
+            }
+        }
+        out.push(b);
+        i = wrapping_add(i, 1);
+    }
+    out
+}
+
+pub fn tuf_check_checkpoint_invariants(
+    wire_len: u64,
+    max_checkpoint_bytes: u64,
+    schema_version: u64,
+    timestamp_version: u64,
+    snapshot_version: u64,
+    role_count: u64,
+    max_roles: u64,
+    has_zero_role: bool,
+    has_targets_role: bool
+) -> bool {
+    if wire_len > max_checkpoint_bytes {
+        return false;
+    }
+    if schema_version != SCHEMA_V1 && schema_version != SCHEMA_V2 {
+        return false;
+    }
+    if schema_version == SCHEMA_V1
+        && (timestamp_version == 0 || snapshot_version == 0 || role_count == 0)
+    {
+        return false;
+    }
+    if (timestamp_version == 0) != (snapshot_version == 0) {
+        return false;
+    }
+    if snapshot_version == 0 && role_count > 0 {
+        return false;
+    }
+    if role_count > max_roles || has_zero_role {
+        return false;
+    }
+    if role_count > 0 && !has_targets_role {
+        return false;
+    }
+    true
+}
+
+// ---------------------------------------------------------------------------
+// OLPC canonical JSON checkpoint state serializer + SHA-256 checksum.
+
+const DEC_BASE: u64 = 10;
+
+fn push_str_bytes(inout out: ChunkSeq[u8], in s: Str) {
+    let tb = s.as_bytes();
+    let n = tb.len();
+    let mut i: u64 = 0;
+    loop {
+        if i >= n {
+            break;
+        }
+        let b = match tb.try_get(i) {
+            Some(v) => v,
+            None => 0
+        };
+        out.push(b);
+        i = wrapping_add(i, 1);
+    }
+}
+
+fn push_cjson_string(inout out: ChunkSeq[u8], in bytes: Slice[u8], start: u64, len: u64) {
+    out.push(BYTE_QUOTE);
+    let mut i: u64 = 0;
+    loop {
+        if i >= len {
+            break;
+        }
+        let b = match bytes.try_get(wrapping_add(start, i)) {
+            Some(v) => v,
+            None => 0
+        };
+        if b == BYTE_QUOTE || b == BYTE_BACKSLASH {
+            out.push(BYTE_BACKSLASH);
+        }
+        out.push(b);
+        i = wrapping_add(i, 1);
+    }
+    out.push(BYTE_QUOTE);
+}
+
+const POW10_19: u64 = 10000000000000000000;
+
+fn push_u64_dec(inout out: ChunkSeq[u8], val: u64) {
+    if val == 0 {
+        out.push(BYTE_ZERO);
+        return;
+    }
+    let mut powers: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut p: u64 = 1;
+    loop {
+        powers.push(p);
+        if p >= POW10_19 || p > val {
+            break;
+        }
+        p = wrapping_mul(p, DEC_BASE);
+    }
+    let mut rem = val;
+    let mut started = false;
+    let mut idx = powers.len();
+    loop {
+        if idx == 0 {
+            break;
+        }
+        idx = wrapping_sub(idx, 1);
+        let place = at_u64(in powers, idx);
+        let mut digit: u8 = 0;
+        loop {
+            if rem < place {
+                break;
+            }
+            rem = wrapping_sub(rem, place);
+            digit = wrapping_add(digit, 1);
+        }
+        if digit > 0 || started {
+            started = true;
+            out.push(wrapping_add(BYTE_ZERO, digit));
+        }
+    }
+}
+
+fn push_u8_dec(inout out: ChunkSeq[u8], val: u8) {
+    if val >= 100 {
+        let h: u8 = if val >= 200 { 2 } else { 1 };
+        let rem = wrapping_sub(val, wrapping_mul(h, 100));
+        let mut t: u8 = 0;
+        let mut u = rem;
+        loop {
+            if u < 10 {
+                break;
+            }
+            u = wrapping_sub(u, 10);
+            t = wrapping_add(t, 1);
+        }
+        out.push(wrapping_add(BYTE_ZERO, h));
+        out.push(wrapping_add(BYTE_ZERO, t));
+        out.push(wrapping_add(BYTE_ZERO, u));
+    } else if val >= 10 {
+        let mut t: u8 = 0;
+        let mut u = val;
+        loop {
+            if u < 10 {
+                break;
+            }
+            u = wrapping_sub(u, 10);
+            t = wrapping_add(t, 1);
+        }
+        out.push(wrapping_add(BYTE_ZERO, t));
+        out.push(wrapping_add(BYTE_ZERO, u));
+    } else {
+        out.push(wrapping_add(BYTE_ZERO, val));
+    }
+}
+
+pub fn tuf_state_checksum(
+    schema_version: u64,
+    timestamp_version: u64,
+    snapshot_version: u64,
+    in repo_id: Slice[u8],
+    in bootstrap_sha256: Slice[u8],
+    in verified_at: Slice[u8],
+    in roots_flat: Slice[u8],
+    in root_lens: Slice[u64],
+    in role_names_flat: Slice[u8],
+    in role_name_lens: Slice[u64],
+    in role_versions: Slice[u64]
+) -> ChunkSeq[u8] eff [Ffi[Crypto]] {
+    let mut buf: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    push_str_bytes(inout buf, in "{\"bootstrap_sha256\":");
+    push_cjson_string(inout buf, in bootstrap_sha256, 0, bootstrap_sha256.len());
+    push_str_bytes(inout buf, in ",\"repository_id\":");
+    push_cjson_string(inout buf, in repo_id, 0, repo_id.len());
+    push_str_bytes(inout buf, in ",\"role_versions\":{");
+
+    let rc = role_name_lens.len();
+    let mut r_off: u64 = 0;
+    let mut ri: u64 = 0;
+    loop {
+        if ri >= rc {
+            break;
+        }
+        if ri > 0 {
+            buf.push(BYTE_COMMA);
+        }
+        let rlen = match role_name_lens.try_get(ri) {
+            Some(v) => v,
+            None => 0
+        };
+        let rver = match role_versions.try_get(ri) {
+            Some(v) => v,
+            None => 0
+        };
+        push_cjson_string(inout buf, in role_names_flat, r_off, rlen);
+        buf.push(BYTE_COLON);
+        push_u64_dec(inout buf, rver);
+        r_off = wrapping_add(r_off, rlen);
+        ri = wrapping_add(ri, 1);
+    }
+
+    push_str_bytes(inout buf, in "},\"roots\":[");
+    let root_count = root_lens.len();
+    let mut root_off: u64 = 0;
+    let mut rti: u64 = 0;
+    loop {
+        if rti >= root_count {
+            break;
+        }
+        if rti > 0 {
+            buf.push(BYTE_COMMA);
+        }
+        buf.push(BYTE_LBRACKET);
+        let rtlen = match root_lens.try_get(rti) {
+            Some(v) => v,
+            None => 0
+        };
+        let mut bi: u64 = 0;
+        loop {
+            if bi >= rtlen {
+                break;
+            }
+            if bi > 0 {
+                buf.push(BYTE_COMMA);
+            }
+            let b = match roots_flat.try_get(wrapping_add(root_off, bi)) {
+                Some(v) => v,
+                None => 0
+            };
+            push_u8_dec(inout buf, b);
+            bi = wrapping_add(bi, 1);
+        }
+        buf.push(BYTE_RBRACKET);
+        root_off = wrapping_add(root_off, rtlen);
+        rti = wrapping_add(rti, 1);
+    }
+
+    push_str_bytes(inout buf, in "],\"schema_version\":");
+    push_u64_dec(inout buf, schema_version);
+    push_str_bytes(inout buf, in ",\"snapshot_version\":");
+    push_u64_dec(inout buf, snapshot_version);
+    push_str_bytes(inout buf, in ",\"timestamp_version\":");
+    push_u64_dec(inout buf, timestamp_version);
+    push_str_bytes(inout buf, in ",\"verified_at\":");
+    push_cjson_string(inout buf, in verified_at, 0, verified_at.len());
+    buf.push(BYTE_RBRACE);
+
+    tuf_sha256_hex(in buf)
+}

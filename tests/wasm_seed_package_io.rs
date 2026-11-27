@@ -2735,10 +2735,24 @@ const COMPILER_PACKAGES: &[(&str, &str, &str, &str, CompilerExecCheck)] = &[
         CompilerExecCheck::CompileOnly,
     ),
     (
+        "proof-audit",
+        "@vesper/proof-audit",
+        "packages/vesper-proof-audit",
+        "HELP.len()",
+        CompilerExecCheck::NonZero,
+    ),
+    (
         "run",
         "@vesper/run",
         "packages/vesper-run",
         "run_words(in \"\".as_bytes()).len()",
+        CompilerExecCheck::CompileOnly,
+    ),
+    (
+        "verify",
+        "@vesper/verify",
+        "packages/vesper-verify",
+        "discover(in \"\".as_bytes()).err.len()",
         CompilerExecCheck::CompileOnly,
     ),
     (
@@ -2788,13 +2802,22 @@ const STAGE2_CRANELIFT_PACKAGES: &[(&str, &str, &str, &str)] = &[
 /// Compiler packages Stage 2 cannot build yet: (stem, package, path, probe
 /// `src/lib.ves`, reason). `stage2_self_compilation_fixed_point` checks that
 /// each one still fails, so a gap that closes moves into [`COMPILER_PACKAGES`].
-const STAGE2_PACKAGE_GAPS: &[(&str, &str, &str, &str, &str)] = &[(
-    "driver-commands",
-    "@vesper/driver-commands",
-    "packages/vesper-driver-commands",
-    "use @vesper/driver-commands::run;\nuse @vesper/driver::args_new;\npub fn main() -> u64 eff [Ffi[StdFs], Ffi[StdEnv], Ffi[StdProcess], Ffi[HybridCommands]] { let a = args_new(); wrapping_u64(run(in a)) }\n",
-    "its printing and help go through the HybridCommands import, which only the hybrid compiler's Rust implements (crates/vesper-hybrid/src/commands.rs): the Wasm entry cannot carry Ffi[HybridCommands] (WErr Entry). Formatting calls @vesper/fmt (crates/vesper-fmt/vesper), which hashes with C BLAKE3 (@vesper-std/hash-sys). @vesper-std/process builds for WASI (src-wasip2, #1928)",
-)];
+const STAGE2_PACKAGE_GAPS: &[(&str, &str, &str, &str, &str)] = &[
+    (
+        "driver-commands",
+        "@vesper/driver-commands",
+        "packages/vesper-driver-commands",
+        "use @vesper/driver-commands::run;\nuse @vesper/driver::args_new;\npub fn main() -> u64 eff [Ffi[StdFs], Ffi[StdEnv], Ffi[StdProcess], Ffi[HybridCommands]] { let a = args_new(); wrapping_u64(run(in a)) }\n",
+        "its printing and help go through the HybridCommands import, which only the hybrid compiler's Rust implements (crates/vesper-hybrid/src/commands.rs): the Wasm entry cannot carry Ffi[HybridCommands] (WErr Entry). Both @vesper-std/process (src-wasip2, #1928) and @vesper-std/hash-sys (src-wasip2, #2323) build for WASI",
+    ),
+    (
+        "lsp-format",
+        "@vesper/lsp-format",
+        "packages/vesper-lsp-format",
+        "use @vesper/lsp-format::lsp_formatting;\npub fn main() -> u64 { lsp_formatting(in \"\").len() }\n",
+        "C BLAKE3 (@vesper-std/hash-sys) now builds for WASI (#2323); remaining gap is an unsupported unary operation in @vesper/wasm-backend (WErr Unsupported Operation at site 194)",
+    ),
+];
 
 /// Directories under `packages/` that are in none of [`COMPILER_PACKAGES`],
 /// [`STAGE2_CRANELIFT_PACKAGES`] and [`STAGE2_PACKAGE_GAPS`], with where they
@@ -2809,24 +2832,12 @@ const STAGE2_PACKAGES_COVERED_ELSEWHERE: &[(&str, &str)] = &[
         "`vesper build --lib`'s interface and binding from Stage 2's front end (#2270) as a native executable beside the Rust CLI (tests/self_host_codegen_export.rs); it is @vesper/stage2 plus the export packages, built under Stage 2 as one program in bootstrap switch slice 3",
     ),
     (
-        "vesper-lsp-format",
-        "the formatting action of `vesper lsp` (#1828 part 11a) in the JIT beside Rust's (tests/self_host_lsp_features.rs); it calls @vesper/fmt, which hashes with C BLAKE3 (@vesper-std/hash-sys), which a Wasm entry does not have",
-    ),
-    (
         "vesper-native-lib",
         "a library's native object built in Vesper over @vesper/cranelift (bootstrap switch slice 2a, #2349), compared with `vesper build --lib` in the JIT (crates/vesper-codegen-swap-test/tests/self_host_native_lib.rs); built under Stage 2 with the Cranelift component in bootstrap switch slice 3",
     ),
     (
-        "vesper-proof-audit",
-        "`vesper proof-audit` as a native executable beside Rust's (tests/self_host_proof_audit.rs); it hashes with C BLAKE3 (@vesper-std/hash-sys) and runs Lean, neither of which a Wasm entry has",
-    ),
-    (
         "vesper-stage2",
         "Stage 2 itself: stage2.wasm == stage3.wasm",
-    ),
-    (
-        "vesper-verify",
-        "`vesper verify` pieces as a native executable beside Rust's (tests/self_host_verify.rs); it depends on @vesper/proof-audit, which hashes with C BLAKE3 (@vesper-std/hash-sys), which a Wasm entry does not have",
     ),
     (
         "vesper-std",
