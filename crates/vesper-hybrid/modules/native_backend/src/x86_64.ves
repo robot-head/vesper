@@ -356,6 +356,7 @@ pub copy enum Instruction {
     VectorSplat(u8, u8, u64),
     VectorBinary(u8, u8, u8),
     VectorFloat(u8, u8, u8, u64),
+    VectorFloatSign(u8, u8, bool, u64),
     VectorFloatCompare(u8, u8, u8, u64, u64),
     VectorPairwiseAdd(u8, u8, u8, u64),
     VectorSwizzle(u8, u8, u8, bool),
@@ -1641,7 +1642,7 @@ fn packed_word_shift_right(inout out: ChunkSeq[u8], destination: u8, count: u8) 
     out.push(count);
 }
 
-fn packed_shift(inout out: ChunkSeq[u8], destination: u8, extension: u8, width: u64) {
+fn packed_shift(inout out: ChunkSeq[u8], destination: u8, extension: u8, width: u64, count: u8) {
     let destination = xmm_code(destination);
     out.push(OPERAND_SIZE_OVERRIDE);
     emit_rex(inout out, 0, destination, false, false);
@@ -1654,7 +1655,25 @@ fn packed_shift(inout out: ChunkSeq[u8], destination: u8, extension: u8, width: 
         }
     );
     out.push(modrm(extension, destination));
-    out.push(wrapping_u8(wrapping_sub(width, 1)));
+    out.push(count);
+}
+
+fn vector_float_sign(inout out: ChunkSeq[u8], dest: u8, source: u8, absolute: bool, width: u64) {
+    let mask = XMM_RIGHT_SCRATCH;
+    float_move(inout out, dest, source);
+    packed_binary(inout out, PCMPEQD, mask, mask);
+    if absolute {
+        packed_shift(inout out, mask, PACKED_SHIFT_RIGHT, width, 1);
+    } else {
+        packed_shift(
+            inout out,
+            mask,
+            PACKED_SHIFT_LEFT,
+            width,
+            wrapping_u8(wrapping_sub(width, 1))
+        );
+    }
+    xmm_binary(inout out, if absolute { ANDPS } else { XORPS }, dest, mask);
 }
 
 fn float_move(inout out: ChunkSeq[u8], destination: u8, source: u8) {
@@ -2136,8 +2155,9 @@ pub fn emit(inout out: ChunkSeq[u8], in instruction: Instruction) {
             let scratch = XMM_RIGHT_SCRATCH;
             float_move(inout out, scratch, sign);
             xmm_binary(inout out, XORPS, scratch, destination);
-            packed_shift(inout out, scratch, PACKED_SHIFT_RIGHT, width);
-            packed_shift(inout out, scratch, PACKED_SHIFT_LEFT, width);
+            let sign_shift = wrapping_u8(wrapping_sub(width, 1));
+            packed_shift(inout out, scratch, PACKED_SHIFT_RIGHT, width, sign_shift);
+            packed_shift(inout out, scratch, PACKED_SHIFT_LEFT, width, sign_shift);
             xmm_binary(inout out, XORPS, destination, scratch);
         },
         Instruction::FloatToInteger(destination, source, source_width, width) => float_to_integer(
@@ -2193,6 +2213,13 @@ pub fn emit(inout out: ChunkSeq[u8], in instruction: Instruction) {
             }
             xmm_binary(inout out, opcode, destination, source);
         },
+        Instruction::VectorFloatSign(destination, source, absolute, width) => vector_float_sign(
+            inout out,
+            destination,
+            source,
+            absolute,
+            width
+        ),
         Instruction::VectorFloatCompare(
             destination,
             left,

@@ -42,8 +42,8 @@ use self::scalar::{
     VECTOR_LANE_WIDTH_MASK, is_vector_binary, uses_vector_left, vector_value, TAIL_CALL,
     AARCH64_TAIL_RESERVED_GP, valid_vector_lane, VECTOR_INTEGER_COMPARE, VECTOR_CONDITION_SHIFT,
     is_vector_operation, is_vector_result, VECTOR_FLOAT_ADD, VECTOR_FLOAT_SUB, VECTOR_FLOAT_MUL,
-    VECTOR_FLOAT_DIV, VECTOR_FLOAT_SQRT, VECTOR_FLOAT_COMPARE, vector_float_width,
-    valid_vector_float_condition
+    VECTOR_FLOAT_DIV, VECTOR_FLOAT_SQRT, VECTOR_FLOAT_COMPARE, VECTOR_FLOAT_NEG, VECTOR_FLOAT_ABS,
+    VECTOR_FLOAT_COPY_SIGN, vector_float_width, is_vector_float_unary, valid_vector_float_condition
 };
 use self::x86_64::{
     BYTE_BITS, WORD_BITS, DWORD_BITS, QWORD_BITS, FLOAT_ORDERED, FLOAT_UNORDERED, FLOAT_EQUAL,
@@ -140,6 +140,10 @@ const VECTOR_FSUB: u32 = 0x4ea0d400;
 const VECTOR_FMUL: u32 = 0x6e20dc00;
 const VECTOR_FDIV: u32 = 0x6e20fc00;
 const VECTOR_FSQRT: u32 = 0x6ea1f800;
+const VECTOR_FNEG: u32 = 0x6ea0f800;
+const VECTOR_FABS: u32 = 0x4ea0f800;
+const VECTOR_BIT_SELECT: u32 = 0x6e601c00;
+const VECTOR_BIT_INSERT: u32 = 0x6ea01c00;
 const VECTOR_FCMEQ: u32 = 0x4e20e400;
 const VECTOR_FCMGE: u32 = 0x6e20e400;
 const VECTOR_FCMGT: u32 = 0x6ea0e400;
@@ -806,12 +810,33 @@ fn vector_float(inout out: ChunkSeq[u8], in r: Record, dest: u32, left: u32, rig
         VECTOR_FLOAT_SUB => VECTOR_FSUB,
         VECTOR_FLOAT_MUL => VECTOR_FMUL,
         VECTOR_FLOAT_DIV => VECTOR_FDIV,
+        VECTOR_FLOAT_NEG => VECTOR_FNEG,
+        VECTOR_FLOAT_ABS => VECTOR_FABS,
         _ => VECTOR_FSQRT,
     };
-    if r.op == VECTOR_FLOAT_SQRT {
+    if is_vector_float_unary(r.op) {
         push32(inout out, opcode | size | sh(left, RN_SHIFT) | dest);
     } else {
         rrr(inout out, opcode | size, dest, left, right);
+    }
+}
+
+fn vector_float_copy_sign(inout out: ChunkSeq[u8], dest: u32, left: u32, right: u32, width: u64) {
+    let mask = if dest == left || dest == right {
+        FP_LEFT
+    } else {
+        dest
+    };
+    let sign_bit = wrapping_shl_u64(1, wrapping_u32(wrapping_sub(width, 1)));
+    immediate(inout out, SCRATCH, sign_bit);
+    vector_splat(inout out, mask, SCRATCH, width);
+    if dest == left {
+        rrr(inout out, VECTOR_BIT_INSERT, dest, right, mask);
+    } else {
+        rrr(inout out, VECTOR_BIT_SELECT, mask, right, left);
+        if dest != mask {
+            rrr(inout out, VECTOR_OR_REG, dest, mask, mask);
+        }
     }
 }
 
@@ -1203,13 +1228,16 @@ fn operands(in r: Record, returns: u64) -> Option[u64] {
             VECTOR_FLOAT_ADD
                 | VECTOR_FLOAT_SUB
                 | VECTOR_FLOAT_MUL
-                | VECTOR_FLOAT_DIV => if vector_float_width(r.extra)
+                | VECTOR_FLOAT_DIV
+                | VECTOR_FLOAT_COPY_SIGN => if vector_float_width(r.extra)
             {
                 Option::Some(2)
             } else {
                 Option::None
             },
-            VECTOR_FLOAT_SQRT => if r.right == 0 && vector_float_width(r.extra) {
+            VECTOR_FLOAT_SQRT | VECTOR_FLOAT_NEG | VECTOR_FLOAT_ABS => if r.right == 0
+                && vector_float_width(r.extra)
+            {
                 Option::Some(1)
             } else {
                 Option::None
@@ -3661,11 +3689,20 @@ fn encode_pass(
                 VECTOR_LOAD => memory(inout out, true, VECTOR_BITS, lhs, dest, r.right),
                 VECTOR_INTEGER_COMPARE => vector_integer_compare(inout out, in r, dest, lhs, rhs),
                 VECTOR_FLOAT_COMPARE => vector_float_compare(inout out, in r, dest, lhs, rhs),
+                VECTOR_FLOAT_COPY_SIGN => vector_float_copy_sign(
+                    inout out,
+                    dest,
+                    lhs,
+                    rhs,
+                    r.extra
+                ),
                 VECTOR_FLOAT_ADD
                     | VECTOR_FLOAT_SUB
                     | VECTOR_FLOAT_MUL
                     | VECTOR_FLOAT_DIV
-                    | VECTOR_FLOAT_SQRT => vector_float(inout out, in r, dest, lhs, rhs),
+                    | VECTOR_FLOAT_SQRT
+                    | VECTOR_FLOAT_NEG
+                    | VECTOR_FLOAT_ABS => vector_float(inout out, in r, dest, lhs, rhs),
                 VECTOR_INSERT => {
                     let lane = wrapping_shr_u64(r.extra, VECTOR_LANE_INDEX_SHIFT);
                     let width = r.extra & VECTOR_LANE_WIDTH_MASK;

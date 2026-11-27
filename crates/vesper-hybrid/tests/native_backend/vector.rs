@@ -14,6 +14,7 @@ use vesper::native::machine::x86_64_block_words;
 
 const VECTOR_BYTES: usize = 16;
 const UNALIGNED: i32 = 1;
+const NAN_CANONICALIZATION: &str = "enable_nan_canonicalization";
 
 fn module() -> JITModule {
     let isa = cranelift_native::builder()
@@ -374,7 +375,6 @@ fn packed_float_arithmetic_matches_cranelift() {
     const ARM_DOUBLE: u32 = 0x0040_0000;
     const ARM_RN_RD: u32 = 0x3ff;
     const ARM_RM: u32 = 0x1f_0000;
-    const NAN_CANONICALIZATION: &str = "enable_nan_canonicalization";
     type Entry = unsafe extern "C" fn(*const u8, *const u8, *mut u8);
     let mut module = module();
     let mut flags = settings::builder();
@@ -605,6 +605,129 @@ fn packed_float_comparisons_match_every_cranelift_predicate() {
                         assert_eq!(
                             candidate, reference,
                             "{predicate:?} {ty} {keep_inputs} {spills} {left:x?} {right:x?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+    unsafe { module.free_memory() };
+}
+
+#[test]
+fn packed_float_sign_operations_preserve_every_non_sign_bit() {
+    const LIVE_VECTORS: u8 = 21;
+    type Entry = unsafe extern "C" fn(*const u64, *const u64, *mut u64);
+    let mut module = module();
+    let mut flags = settings::builder();
+    flags.enable(NAN_CANONICALIZATION).unwrap();
+    let deterministic = cranelift_native::builder()
+        .unwrap()
+        .finish(settings::Flags::new(flags))
+        .unwrap();
+    for ty in [types::F32X4, types::F64X2] {
+        let (lane_signs, inputs): (u64, [[u64; 2]; 5]) = if ty == types::F32X4 {
+            (
+                0x8000_0000_8000_0000,
+                [
+                    [0x8000_0000_0000_0000, 0x0000_0001_8000_0001],
+                    [0x4040_0000_bf00_0000, 0xbf00_0000_4040_0000],
+                    [0x7f80_0000_ff80_0000, 0xff80_0000_7f80_0000],
+                    [0x7fc0_0003_ffc0_0005, 0xffc0_0005_7fc0_0003],
+                    [0x7f80_0007_4040_0000, 0x4040_0000_ff80_0007],
+                ],
+            )
+        } else {
+            (
+                0x8000_0000_0000_0000,
+                [
+                    [0, 0x8000_0000_0000_0000],
+                    [0x7ff0_0000_0000_0000, 0xfff0_0000_0000_0000],
+                    [0x7ff8_0000_0000_0003, 0xfff8_0000_0000_0005],
+                    [0x7ff0_0000_0000_0007, 0xfff0_0000_0000_0007],
+                    [1, 0x8000_0000_0000_0001],
+                ],
+            )
+        };
+        for opcode in [Opcode::Fneg, Opcode::Fabs, Opcode::Fcopysign] {
+            for (keep_left, spills) in [(false, false), (true, false), (false, true)] {
+                let build = |module: &JITModule, expanded| {
+                    let mut context = module.make_context();
+                    context.func.signature.params = vec![AbiParam::new(types::I64); 3];
+                    let mut state = FunctionBuilderContext::new();
+                    let mut b = FunctionBuilder::new(&mut context.func, &mut state);
+                    let entry = b.create_block();
+                    b.append_block_params_for_function_params(entry);
+                    b.switch_to_block(entry);
+                    let [left, sign, destination] = *b.block_params(entry) else {
+                        unreachable!()
+                    };
+                    let live = if spills {
+                        (1..=LIVE_VECTORS)
+                            .map(|byte| {
+                                let constant = b
+                                    .func
+                                    .dfg
+                                    .constants
+                                    .insert(ConstantData::from(vec![byte; VECTOR_BYTES]));
+                                b.ins().vconst(ty.as_int(), constant)
+                            })
+                            .collect()
+                    } else {
+                        Vec::new()
+                    };
+                    let flags = MemFlags::new().with_notrap();
+                    let left = b.ins().load(ty, flags, left, 0);
+                    let mut result = match opcode {
+                        Opcode::Fneg => b.ins().fneg(left),
+                        Opcode::Fabs => b.ins().fabs(left),
+                        _ => {
+                            let sign = b.ins().load(ty, flags, sign, 0);
+                            if expanded {
+                                let mut bits = lane_signs.to_le_bytes().to_vec();
+                                bits.extend(lane_signs.to_le_bytes());
+                                let constant =
+                                    b.func.dfg.constants.insert(ConstantData::from(bits));
+                                let mask = b.ins().vconst(ty, constant);
+                                b.ins().bitselect(mask, sign, left)
+                            } else {
+                                b.ins().fcopysign(left, sign)
+                            }
+                        }
+                    };
+                    if spills {
+                        result = b.ins().bitcast(ty.as_int(), MemFlags::new(), result);
+                        for value in live {
+                            result = b.ins().bxor(result, value);
+                        }
+                    }
+                    b.ins().store(flags, result, destination, 0);
+                    if keep_left {
+                        b.ins().store(flags, left, destination, VECTOR_BYTES as i32);
+                    }
+                    b.ins().return_(&[]);
+                    b.seal_all_blocks();
+                    b.finalize();
+                    context
+                };
+                let mut context = build(&module, false);
+                assert!(x86_64_block_words(&context.func, deterministic.as_ref()).is_some());
+                // Cranelift x64 selects scalar copy-sign. Its vector bitselect gives the reference.
+                let mut baseline = (opcode == Opcode::Fcopysign).then(|| build(&module, true));
+                let functions =
+                    compile_with_reference(&mut module, &mut context, baseline.as_mut());
+                let functions = functions
+                    .map(|pointer| unsafe { std::mem::transmute::<*const u8, Entry>(pointer) });
+                for left in &inputs {
+                    for sign in &inputs {
+                        let [reference, candidate] = functions.map(|run| {
+                            let mut out = [u64::MAX; 4];
+                            unsafe { run(left.as_ptr(), sign.as_ptr(), out.as_mut_ptr()) };
+                            out
+                        });
+                        assert_eq!(
+                            candidate, reference,
+                            "{opcode} {ty} {keep_left} {spills} {left:x?} {sign:x?}"
                         );
                     }
                 }

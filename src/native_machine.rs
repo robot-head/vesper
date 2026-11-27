@@ -208,6 +208,9 @@ enum IntegerOp {
     VectorFloatDiv = 188,
     VectorFloatSqrt = 189,
     VectorFloatCompare = 190,
+    VectorFloatNeg = 191,
+    VectorFloatAbs = 192,
+    VectorFloatCopySign = 193,
 }
 
 fn integer_bit_op(op: Opcode) -> Option<IntegerOp> {
@@ -2077,6 +2080,7 @@ impl IntegerBlocks<'_> {
                     Opcode::Bxor => (IntegerOp::VectorXor, 0),
                     Opcode::Iadd => (IntegerOp::VectorAdd, integer_width(lane)?),
                     Opcode::Isub => (IntegerOp::VectorSub, integer_width(lane)?),
+                    Opcode::Fcopysign => (IntegerOp::VectorFloatCopySign, float_width(lane)?),
                     Opcode::Fadd | Opcode::Fsub | Opcode::Fmul | Opcode::Fdiv
                         if !self.canonicalize_nans =>
                     {
@@ -2182,6 +2186,17 @@ impl IntegerBlocks<'_> {
                     input(right)?,
                 );
             }
+            InstructionData::Unary {
+                opcode: opcode @ (Opcode::Fneg | Opcode::Fabs),
+                arg,
+            } if ty(arg) == output => (
+                if opcode == Opcode::Fneg {
+                    IntegerOp::VectorFloatNeg
+                } else {
+                    IntegerOp::VectorFloatAbs
+                },
+                [input(arg)?, 0, float_width(output.lane_type())?],
+            ),
             InstructionData::Unary {
                 opcode: Opcode::Sqrt,
                 arg,
