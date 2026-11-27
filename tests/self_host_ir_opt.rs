@@ -306,6 +306,16 @@ fn optimize_cost() {
         })
     };
     let (r, v) = abba("ir_opt whole", &mut rust, &mut ves);
+    // The swap encodes each program itself: the flip gate's workload.
+    abba("ir_opt with encoding", &mut rust, &mut || {
+        time(|| {
+            for (c, _) in &cases {
+                let prep = prepare(c.world, &c.program, MODE_OPTIMIZE).unwrap();
+                let words = entry().words(&prep.input);
+                let _ = std::hint::black_box(finish(c.world, &prep, &words, MODE_OPTIMIZE));
+            }
+        })
+    });
     let best = |f: &mut dyn FnMut() -> Duration| (0..5).map(|_| f()).min().unwrap();
     let encode = best(&mut || {
         time(|| {

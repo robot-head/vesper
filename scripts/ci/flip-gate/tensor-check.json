@@ -3,8 +3,10 @@
     "Flip gate for the tensor type checker's diagnostics (`tensor_types::check`),",
     "ported as @vesper/check-tensor-types (SH2 lane 14, #1186) and installed as the",
     "hybrid's `tensor_check` swap. crates/vesper-hybrid/tests/tensor_check.rs runs",
-    "`check` as the swap fills it (encode, `tensor_diags`, decode, Rust's `analyze`",
-    "for an accepted tensor module) against Rust's over every repository module."
+    "`check` as the swap fills it (Rust's activity screen, encode, `tensor_diags`,",
+    "decode, Rust's `analyze` for an accepted tensor module) against Rust's over",
+    "every repository module. The differential also runs the Vesper side without",
+    "the screen, so its own activity decision is checked on every module (#2289)."
   ],
   "name": "tensor-check",
   "lane": "SH2-14",

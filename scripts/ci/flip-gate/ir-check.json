@@ -1,0 +1,110 @@
+{
+  "notes": [
+    "Flip gate for the IR checker (`ir_check::validate`), ported as @vesper/ir-check",
+    "and installed as the hybrid's `ir_check` swap. The",
+    "`ir-check-per-call-encode-vesper-decode` workload times Rust's `validate`",
+    "against encode, the Vesper entry and decode per call, over the IR corpus and",
+    "its mutants.",
+    "The tests run one at a time (RUST_TEST_THREADS=1): the IR corpus with its mutants needs most of a 16 GB host."
+  ],
+  "name": "ir-check",
+  "lane": "SH5-10",
+  "rust": [
+    "src/ir_check.rs"
+  ],
+  "env": {
+    "CARGO_PROFILE_DEV_DEBUG": "0",
+    "CARGO_PROFILE_TEST_DEBUG": "0",
+    "CARGO_PROFILE_RELEASE_DEBUG": "0",
+    "RUST_TEST_THREADS": "1"
+  },
+  "build": [
+    [
+      "cargo",
+      "test",
+      "--locked",
+      "--release",
+      "--test",
+      "hybrid_ir_check",
+      "--no-run"
+    ]
+  ],
+  "tests": [
+    {
+      "run": [
+        "cargo",
+        "test",
+        "--locked",
+        "--release",
+        "--test",
+        "hybrid_ir_check"
+      ]
+    }
+  ],
+  "differential": {
+    "run": {
+      "sequence": [
+        [
+          "cargo",
+          "test",
+          "--locked",
+          "--release",
+          "--test",
+          "hybrid_ir_check",
+          "ir_check_matches_rust_with_mutants",
+          "--",
+          "--exact",
+          "--nocapture"
+        ],
+        [
+          "cargo",
+          "test",
+          "--locked",
+          "--release",
+          "--test",
+          "hybrid_ir_check",
+          "ir_check_origin_limits_match_rust",
+          "--",
+          "--exact",
+          "--nocapture"
+        ],
+        [
+          "cargo",
+          "test",
+          "--locked",
+          "--release",
+          "--test",
+          "hybrid_ir_check",
+          "lent_functions_match_rust",
+          "--",
+          "--exact",
+          "--nocapture"
+        ]
+      ]
+    }
+  },
+  "abba": [
+    {
+      "workload": "ir-check-per-call-encode-vesper-decode",
+      "run": {
+        "argv": [
+          "cargo",
+          "test",
+          "--locked",
+          "--release",
+          "--test",
+          "hybrid_ir_check",
+          "ir_check_speed",
+          "--",
+          "--exact",
+          "--ignored",
+          "--nocapture"
+        ],
+        "env": {
+          "FLIP_GATE": "1",
+          "CHECK_HARNESS_SPEED": "1"
+        }
+      }
+    }
+  ]
+}
