@@ -15,15 +15,16 @@
 //   clif_words.rs.
 
 use self::codes::{
-    E_MEM_ADDR, E_REPLACE_ICMP_IMM, E_REPLACE_IMM, E_APPEND_DEST_ARG, E_BRIF, E_DETACH_RESULTS,
-    E_ICONST, E_SET_DEST, E_ARGS, E_BLOCK, E_CLONE, E_END, E_FCONST, E_INS, E_JUMP, E_PARAM,
-    E_PLACE, E_REMOVE_BLOCK, E_REMOVE_INST, E_RETARGET, E_SLOT_SIZE, E_ALIAS, E_INS_BEFORE,
-    E_MOVE_INST, E_REMOVE_DEST_ARG, E_REMOVE_PARAM, F_BRANCH, F_CALL, F_RETURN, F_SIDE_EFFECTS,
-    F_STACK_SLOT, F_TERMINATOR, F_TRAP, F_TRAP_CODE, H_NO_OUTLINE, H_SIMD, NONE, NONE64, OP_BITCAST,
-    OP_BRIF, OP_CALL, OP_F32CONST, OP_F64CONST, OP_FCVT_FROM_SINT, OP_ICMP, OP_ICMP_IMM, OP_ICONST,
-    OP_JUMP, OP_LOAD, OP_RETURN, OP_SCALAR_TO_VECTOR, OP_SPLAT, OP_STACK_ADDR, OP_STORE,
-    OP_SWIDEN_HIGH, OP_SWIDEN_LOW, OP_TRAP, OP_UADD_OVERFLOW, S_OTHER, TY_F32, TY_I16X8, TY_I32X4,
-    TY_I64X2, TY_I8, TY_I8X16, TY_OTHER, V_ALIAS, V_PARAM, V_RESULT
+    E_NEW_SLOT, E_ZERO_BEFORE, E_SET_BINARY, E_SET_UNARY, E_MEM_ADDR, E_REPLACE_ICMP_IMM,
+    E_REPLACE_IMM, E_APPEND_DEST_ARG, E_BRIF, E_DETACH_RESULTS, E_ICONST, E_SET_DEST, E_ARGS,
+    E_BLOCK, E_CLONE, E_END, E_FCONST, E_INS, E_JUMP, E_PARAM, E_PLACE, E_REMOVE_BLOCK,
+    E_REMOVE_INST, E_RETARGET, E_SLOT_SIZE, E_ALIAS, E_INS_BEFORE, E_MOVE_INST, E_REMOVE_DEST_ARG,
+    E_REMOVE_PARAM, F_BRANCH, F_CALL, F_RETURN, F_SIDE_EFFECTS, F_STACK_SLOT, F_TERMINATOR, F_TRAP,
+    F_TRAP_CODE, H_NO_OUTLINE, H_SIMD, NONE, NONE64, OP_BITCAST, OP_BRIF, OP_CALL, OP_F32CONST,
+    OP_F64CONST, OP_FCVT_FROM_SINT, OP_ICMP, OP_ICMP_IMM, OP_ICONST, OP_JUMP, OP_LOAD, OP_RETURN,
+    OP_SCALAR_TO_VECTOR, OP_SPLAT, OP_STACK_ADDR, OP_STORE, OP_VCONST, S_EXPLICIT, TY_F64, TY_F32X4,
+    TY_F64X2, OP_SWIDEN_HIGH, OP_SWIDEN_LOW, OP_TRAP, OP_UADD_OVERFLOW, S_OTHER, TY_F32, TY_I16X8,
+    TY_I32X4, TY_I64X2, TY_I8, TY_I8X16, TY_OTHER, V_ALIAS, V_PARAM, V_RESULT
 };
 
 pub copy struct Val {
@@ -669,6 +670,9 @@ impl Func {
         let new = n32(self.insts.len());
         let mut row = no_ins();
         row.op = op;
+        if op == OP_STACK_ADDR {
+            row.eff = F_STACK_SLOT;
+        }
         row.cond = cond;
         row.imm = imm;
         row.off = off;
@@ -718,6 +722,7 @@ impl Func {
             || op == OP_FCVT_FROM_SINT
             || op == OP_BITCAST
             || op == OP_LOAD
+            || op == OP_STACK_ADDR
         {
             self.result_of(new, 0, ty);
             rn = 1;
@@ -1319,6 +1324,95 @@ impl Func {
         self.out.push(off);
     }
 
+    // `dfg.insts[i] = Unary { op, arg }`: its results stay. Written as
+    // `E_SET_UNARY`.
+    pub fn set_unary(inout self, i: u32, op: u64, arg: u32) {
+        let mut x = self.inst(w(i));
+        x.op = op;
+        x.eff = 0;
+        x.cond = 0;
+        x.imm = 0;
+        x.off = 0;
+        x.mem = 0;
+        x.a0 = n32(self.args.len());
+        x.an = 1;
+        self.args.push(arg);
+        x.dn = 0;
+        self.put_inst(w(i), x);
+        self.out.push(E_SET_UNARY);
+        self.out.push(w(i));
+        self.out.push(op);
+        self.out.push(w(arg));
+    }
+
+    // `dfg.insts[i] = Binary { op, [a, b] }` (`dfg.replace(i)` as `band`
+    // and the like): its results stay. Written as `E_SET_BINARY`.
+    pub fn set_binary(inout self, i: u32, op: u64, a: u32, b: u32) {
+        let mut x = self.inst(w(i));
+        x.op = op;
+        x.eff = 0;
+        x.cond = 0;
+        x.imm = 0;
+        x.off = 0;
+        x.mem = 0;
+        x.a0 = n32(self.args.len());
+        x.an = 2;
+        self.args.push(a);
+        self.args.push(b);
+        x.dn = 0;
+        self.put_inst(w(i), x);
+        self.out.push(E_SET_BINARY);
+        self.out.push(w(i));
+        self.out.push(op);
+        self.out.push(w(a));
+        self.out.push(w(b));
+    }
+
+    // `create_sized_stack_slot` of an explicit slot: its number. Written
+    // as `E_NEW_SLOT`.
+    pub fn new_slot(inout self, size: u64, align_shift: u64) -> u64 {
+        let s = self.slots.len();
+        self.slots.push(Slot { kind: S_EXPLICIT, size: size, align_shift: align_shift });
+        self.out.push(E_NEW_SLOT);
+        self.out.push(size);
+        self.out.push(align_shift);
+        self.out.push(s);
+        s
+    }
+
+    // A zero of `ty` just before `before` (`vconst` for a vector,
+    // `f32const`, `f64const`, else `iconst`): its value. Written as
+    // `E_ZERO_BEFORE`.
+    pub fn zero_before(inout self, before: u32, ty: u64) -> u32 {
+        let op = if is_vector_type(ty) {
+            OP_VCONST
+        } else if ty == TY_F32 {
+            OP_F32CONST
+        } else if ty == TY_F64 {
+            OP_F64CONST
+        } else {
+            OP_ICONST
+        };
+        let none = ChunkSeq::new[u32]();
+        let at = self.out.len();
+        let b = self.inst(w(before)).block;
+        let new = n32(self.insts.len());
+        let mut row = no_ins();
+        row.op = op;
+        row.r0 = n32(self.results.len());
+        row.rn = 1;
+        self.insts.push(row);
+        self.result_of(new, 0, ty);
+        self.append_inst(b, new);
+        self.unlink_inst(new);
+        self.place_before(new, before);
+        self.out.push(E_ZERO_BEFORE);
+        self.out.push(w(before));
+        self.out.push(ty);
+        self.out.push(w(new));
+        self.result(new, 0)
+    }
+
     // The edit script, ended.
     pub fn script(inout self) -> ChunkSeq[u64] {
         self.out.push(E_END);
@@ -1326,6 +1420,16 @@ impl Func {
         o.extend(in self.out.as_slice());
         o
     }
+}
+
+// A 128-bit vector type of the codes.
+fn is_vector_type(ty: u64) -> bool {
+    ty == TY_I8X16
+        || ty == TY_I16X8
+        || ty == TY_I32X4
+        || ty == TY_I64X2
+        || ty == TY_F32X4
+        || ty == TY_F64X2
 }
 
 // Opcodes the builder makes with no result.
