@@ -1,4 +1,5 @@
-// Emit shared core Wasm helpers for sequence growth, byte equality and UTF-8.
+// Emit shared core Wasm helpers for sequence growth, byte equality and
+// order, and UTF-8.
 
 use @vesper/check-data::util::{inc};
 use self::enc::{code_new};
@@ -24,6 +25,10 @@ const OP_I64_SHL: u8 = 134;
 const OP_I64_SHR_U: u8 = 136;
 const OP_I32_WRAP_I64: u8 = 167;
 const NONE32: u32 = 4294967295;
+// `Ordering as i32`: what `$bytes_cmp` returns.
+const ORDER_LESS: i64 = -1;
+const ORDER_EQUAL: i64 = 0;
+const ORDER_GREATER: i64 = 1;
 const LOW32: u64 = 4294967295;
 
 impl L {
@@ -161,6 +166,85 @@ impl L {
         code.op(OP_UNREACHABLE);
         code.op(OP_END);
         self.builder.define(func, in body_n(1, in code));
+        func
+    }
+
+    // `$bytes_cmp(a, a_len, b, b_len) -> order`: `<[u8]>::cmp` of two byte
+    // views as `Ordering as i32` (-1, 0 or 1), Rust `SeqOp::BytesCmp`.
+    pub fn bytes_cmp(inout self) -> u32 {
+        if self.h_bytes_cmp != NONE32 {
+            return self.h_bytes_cmp;
+        }
+        let func = self.builder.declare(in i64s(4), in i64s(1));
+        self.h_bytes_cmp = func;
+        let a: u32 = 0;
+        let a_len: u32 = 1;
+        let b: u32 = 2;
+        let b_len: u32 = 3;
+        let i: u32 = 4;
+        let x: u32 = 5;
+        let y: u32 = 6;
+        let mut code = code_new();
+        code.open(OP_LOOP);
+        // `a` ends: equal when `b` ends too, else less.
+        code.get(i);
+        code.get(a_len);
+        code.op(OP_I64_GE_U);
+        code.open(OP_IF);
+        code.get(i);
+        code.get(b_len);
+        code.op(OP_I64_GE_U);
+        code.open(OP_IF);
+        code.i64_const(ORDER_EQUAL);
+        code.op(OP_RETURN);
+        code.op(OP_END);
+        code.i64_const(ORDER_LESS);
+        code.op(OP_RETURN);
+        code.op(OP_END);
+        // `b` ends first: greater.
+        code.get(i);
+        code.get(b_len);
+        code.op(OP_I64_GE_U);
+        code.open(OP_IF);
+        code.i64_const(ORDER_GREATER);
+        code.op(OP_RETURN);
+        code.op(OP_END);
+        code.get(a);
+        code.get(i);
+        code.op(OP_I64_ADD);
+        code.op(OP_I32_WRAP_I64);
+        code.mem(OP_I64_LOAD8_U, 0, 0);
+        code.set(x);
+        code.get(b);
+        code.get(i);
+        code.op(OP_I64_ADD);
+        code.op(OP_I32_WRAP_I64);
+        code.mem(OP_I64_LOAD8_U, 0, 0);
+        code.set(y);
+        code.get(x);
+        code.get(y);
+        code.op(OP_I64_NE);
+        code.open(OP_IF);
+        code.get(x);
+        code.get(y);
+        code.op(OP_I64_LT_U);
+        code.open(OP_IF);
+        code.i64_const(ORDER_LESS);
+        code.op(OP_RETURN);
+        code.op(OP_END);
+        code.i64_const(ORDER_GREATER);
+        code.op(OP_RETURN);
+        code.op(OP_END);
+        code.get(i);
+        code.i64_const(1);
+        code.op(OP_I64_ADD);
+        code.set(i);
+        code.br(0);
+        code.op(OP_END);
+        code.op(OP_UNREACHABLE);
+        code.op(OP_END);
+        // locals i, x, y
+        self.builder.define(func, in body_n(3, in code));
         func
     }
 

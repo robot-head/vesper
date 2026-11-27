@@ -1,7 +1,8 @@
 // `vesper forge`: CLI action/option parsing, argument-budget checks, and
 // `Stage::Config` JSON rejection in Vesper, delegating bounded file I/O,
 // policy loading, checked macro expansion, and Lean provenance extraction
-// (`src/forge_commands.rs`) to `HybridCommands::hc_forge_run`.
+// (`src/forge_commands.rs`) to `@vesper/driver-engines::forge_run`.
+use @vesper/driver-engines::{forge_run};
 use @vesper/driver::{Args, args_count, arg_start, arg_end, eq};
 use super::{PrintFailed, arg, byte_at, print, fail, stdout_stream};
 
@@ -144,7 +145,7 @@ pub fn run_forge(in args: Args) -> i64 eff [Ffi[StdFs], Ffi[HybridCommands], Fai
     if !has_package {
         package.extend(in "@local/source".as_bytes());
     }
-    let err_len = HybridCommands::hc_forge_run(
+    let err = forge_run(
         action,
         in input.as_slice(),
         in package.as_slice(),
@@ -153,17 +154,8 @@ pub fn run_forge(in args: Args) -> i64 eff [Ffi[StdFs], Ffi[HybridCommands], Fai
         has_provenance,
         in provenance.as_slice()
     );
-    if err_len == 0 {
+    if err.len() == 0 {
         return 0;
-    }
-    let mut err: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    err.resize(err_len, 0);
-    let actual = HybridCommands::hc_forge_err(inout err.as_slice_mut());
-    if actual > err.len() {
-        err.resize(actual, 0);
-        let _got = HybridCommands::hc_forge_err(inout err.as_slice_mut());
-    } else {
-        err.truncate(actual);
     }
     fail(in err.as_slice())
 }

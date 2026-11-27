@@ -1,8 +1,9 @@
 // `vesper verify`: CLI option parsing, validation, and `--help` in Vesper.
 // `--format` runs in @vesper/verify (the Vesper port of
 // src/verify_commands.rs' formatter-model check, 0 of 29 cases differ);
-// `--extract` is still `HybridCommands::hc_verify_run`. (`vesper verify
+// `--extract` is still `@vesper/driver-engines::verify_run`. (`vesper verify
 // --refute` continues to dispatch to `vesper-refute` in `lib.ves`.)
+use @vesper/driver-engines::{verify_run};
 use @vesper/driver::{Args, args_count, eq};
 use @vesper/verify::{run_format};
 use @vesper/proof-audit::json::{put_string};
@@ -149,18 +150,9 @@ fn run_packed(
     n: u64
 ) -> i64 eff [Ffi[StdFs], Ffi[HybridCommands], Fail[PrintFailed]] {
     let packed = pack_args(in args, n);
-    let err_len = HybridCommands::hc_verify_run(in packed.as_slice());
-    if err_len == 0 {
+    let err = verify_run(in packed.as_slice());
+    if err.len() == 0 {
         return 0;
-    }
-    let mut err: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    err.resize(err_len, 0);
-    let actual = HybridCommands::hc_verify_err(inout err.as_slice_mut());
-    if actual > err.len() {
-        err.resize(actual, 0);
-        let _got = HybridCommands::hc_verify_err(inout err.as_slice_mut());
-    } else {
-        err.truncate(actual);
     }
     fail(in err.as_slice())
 }

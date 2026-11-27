@@ -8,6 +8,7 @@ use @vesper/check-data::world::{Bounds, Known, mode_of, world_new};
 use @vesper/place-ir::{program_new};
 use @vesper/place-ir::codes::{Lit, Op};
 use @vesper/check-data::util::{add, inc, n32, u64_at, u8_at, w};
+use self::host::{HOST_ENV, HOST_FS, HOST_PROC, HOST_VCL, HOST_BLAKE3, HOST_HYBRID_COMMANDS};
 use self::err::{WErr, werr, werr_syms};
 use self::enc::{
     Code, OP_ELSE, OP_END, OP_I32_AND, OP_I32_EQ, OP_I32_OR, OP_I32_WRAP_I64, OP_I64_ADD,
@@ -255,15 +256,17 @@ impl L {
     // (StdProcess imports nothing) and Cranelift's component imports.
     pub fn host_effect(in self, name: u32) -> bool {
         let code: u8 = if name == self.ctx.syms.ffi_env {
-            3
+            HOST_ENV
         } else if name == self.ctx.syms.ffi_fs {
-            4
+            HOST_FS
         } else if name == self.ctx.syms.ffi_proc {
-            5
+            HOST_PROC
         } else if name == self.ctx.syms.ffi_cranelift {
-            6
+            HOST_VCL
         } else if name == self.ctx.syms.ffi_blake3 {
-            7
+            HOST_BLAKE3
+        } else if name == self.ctx.syms.ffi_hybrid_commands {
+            HOST_HYBRID_COMMANDS
         } else {
             return false;
         };
@@ -825,6 +828,7 @@ pub fn rebuild_l(sink old_lowerer: L, d_mark: u64, d_perm: u64) -> (L, u64) {
         h_fmod,
         h_seq_reserve,
         h_bytes_eq,
+        h_bytes_cmp,
         h_utf8,
         host,
         seqs,
@@ -910,6 +914,7 @@ pub fn rebuild_l(sink old_lowerer: L, d_mark: u64, d_perm: u64) -> (L, u64) {
         h_fmod: h_fmod,
         h_seq_reserve: h_seq_reserve,
         h_bytes_eq: h_bytes_eq,
+        h_bytes_cmp: h_bytes_cmp,
         h_utf8: h_utf8,
         host: host,
         seqs: seqs,

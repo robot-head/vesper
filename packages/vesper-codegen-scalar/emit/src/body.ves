@@ -69,6 +69,8 @@ const INST_CALL_BUILTIN: u64 = 12;
 const INST_WIDE_CONST: u64 = 13;
 const INST_WIDE_UNARY: u64 = 14;
 const INST_WIDE_BINARY: u64 = 15;
+const INST_ICONST: u64 = 16;
+const INST_F64CONST: u64 = 17;
 const INST_DATA: u64 = 32;
 
 // Sub-operations of `INST_FLOAT_UNARY` and `CB_FLOAT_UNARY`.
@@ -1020,6 +1022,10 @@ impl Body {
             inst_result(inout b, 0)
         } else if kind == INST_F32CONST {
             ins_f32const(inout b, wrapping_u32(w.next()))
+        } else if kind == INST_ICONST {
+            ins_iconst(inout b, ty_i64(), wrapping_i64(w.next()))
+        } else if kind == INST_F64CONST {
+            ins_f64const(inout b, w.next())
         } else if kind == INST_FLOAT_UNARY {
             let fun = w.next();
             let meta = w.next();

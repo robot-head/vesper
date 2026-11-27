@@ -1177,6 +1177,11 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
                                 tc.types.arg(bt, 0)
                             } else if is_op(in tc, mname, in "byte_at") {
                                 tc.types.named0(tc.world.k.u8_)
+                            } else if is_op(in tc, mname, in "cmp")
+                                && tc.names.spells(tname, in "Slice".as_bytes())
+                            {
+                                // `Slice[u8]::cmp`: `Ordering as i32` (#1996).
+                                tc.types.named0(tc.world.k.i32_)
                             } else if is_op(in tc, mname, in "try_byte_at") {
                                 let u8t = tc.types.named0(tc.world.k.u8_);
                                 let opt_nm = tc.names.intern(in "Option".as_bytes());

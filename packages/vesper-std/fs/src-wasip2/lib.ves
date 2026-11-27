@@ -694,10 +694,11 @@ fn kind_text(kind: u32) -> Str {
     }
 }
 
-// The architecture this package was built for: `arch_x86_64()`,
-// `arch_aarch64()` or `arch_wasm32()` (the vsys file's `ARCH`).
+// The architecture this package was built for: always `arch_wasm32()`
+// here (the vsys file's `ARCH`, which the Wasm backend does not read as a
+// value, as @vesper-std/env's `os` returns its constant itself).
 pub fn arch() -> u32 {
-    StdFs::ARCH
+    arch_wasm32()
 }
 
 pub fn arch_x86_64() -> u32 {

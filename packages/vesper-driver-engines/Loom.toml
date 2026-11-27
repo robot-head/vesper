@@ -1,0 +1,13 @@
+[package]
+name = "@vesper/driver-engines"
+version = "0.1.0"
+edition = "2026"
+# The command engines `vesper` still runs in the Rust compiler (#1996): the
+# `HybridCommands` import, which only the hybrid compiler's Rust implements
+# (crates/vesper-hybrid/src/commands.rs). @vesper/driver-commands calls
+# these instead of the import, so the command routing builds on every
+# target: on wasm32-wasip2 (src-wasip2) each engine is refused with an
+# error and the import has no functions. An engine leaves this package
+# when its Vesper port lands.
+capability_ceiling = ["Fail", "Alloc", "Ffi[HybridCommands]"]
+vsys = ["commands-@OS@.vsys"]

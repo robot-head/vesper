@@ -208,6 +208,8 @@ const SQ_FILL_RANGE: u64 = 39;
 const SQ_TRY_FILL: u64 = 40;
 const SQ_COPY_FROM: u64 = 41;
 const SQ_TRY_COPY_FROM: u64 = 42;
+// `Slice[u8]::cmp` (Rust `SeqOp::BytesCmp`, #1996).
+const SQ_BYTES_CMP: u64 = 43;
 const SQ_WIDE: u64 = 64;
 const SK_OTHER: u8 = 0;
 const SK_BUF: u8 = 1;
@@ -358,6 +360,7 @@ pub struct L {
     h_fmod: u32,
     h_seq_reserve: u32,
     h_bytes_eq: u32,
+    h_bytes_cmp: u32,
     h_utf8: u32,
     // the WASI imports and shims of the standard I/O libraries
     host: Host,
@@ -526,6 +529,7 @@ pub fn lowerer_new(sink ctx: Cx, sink plan: Plan, max_instructions: u64) -> L ef
         h_fmod: NONE32,
         h_seq_reserve: NONE32,
         h_bytes_eq: NONE32,
+        h_bytes_cmp: NONE32,
         h_utf8: NONE32,
         host: host,
         seqs: seqs,
@@ -4986,6 +4990,9 @@ impl L {
         if self.ctx.names.spells(label, in "BytesEq".as_bytes()) {
             return 23;
         }
+        if self.ctx.names.spells(label, in "BytesCmp".as_bytes()) {
+            return wrapping_u8(SQ_BYTES_CMP);
+        }
         if self.ctx.names.spells(label, in "Fill".as_bytes()) {
             return 24;
         }
@@ -5600,6 +5607,18 @@ impl L {
             let other_ty = self.seq_ty(args_at, 1);
             let (other_addr2, other_len2) = self.parts(other, other_ty);
             let helper_idx = self.bytes_eq();
+            let dest = self.dest(dest_val);
+            self.cur_fn.code.get(base);
+            self.cur_fn.code.get(n);
+            self.cur_fn.code.get(other_addr2);
+            self.cur_fn.code.get(other_len2);
+            self.cur_fn.code.call(helper_idx);
+            self.cur_fn.code.set(dest);
+        } else if seq_op == SQ_BYTES_CMP {
+            let other = self.seq_val(args_at, 1);
+            let other_ty = self.seq_ty(args_at, 1);
+            let (other_addr2, other_len2) = self.parts(other, other_ty);
+            let helper_idx = self.bytes_cmp();
             let dest = self.dest(dest_val);
             self.cur_fn.code.get(base);
             self.cur_fn.code.get(n);

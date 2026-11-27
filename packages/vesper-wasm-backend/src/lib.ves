@@ -18,6 +18,10 @@ use @vesper/place-ir::{Program, read_program};
 
 const K_ENTRY: u8 = 1;
 const K_LIMIT: u8 = 2;
+// The Stage 2 heap that keeps every defined function body (site 93 when it
+// runs out): 192 MiB, raised from 128 MiB when Stage 2 itself outgrew it
+// (#1996).
+const DEFINE_PERM_BYTES: u64 = 201326592;
 
 // `wasm_backend::compile` up to the core module: the core bytes and the
 // WIT text, or the error. Component encoding stays in Rust.
@@ -64,6 +68,7 @@ fn append_fn_syms(in lowerer: L, inout out: ChunkSeq[u8]) {
     append_sym_line(lowerer.h_fmod, in "__fmod".as_bytes(), inout out);
     append_sym_line(lowerer.h_seq_reserve, in "__seq_reserve".as_bytes(), inout out);
     append_sym_line(lowerer.h_bytes_eq, in "__bytes_eq".as_bytes(), inout out);
+    append_sym_line(lowerer.h_bytes_cmp, in "__bytes_cmp".as_bytes(), inout out);
     append_sym_line(lowerer.h_utf8, in "__utf8".as_bytes(), inout out);
     for i in 0..lowerer.plan.insts.len() {
         let inst = lowerer.plan.inst(i);
@@ -99,9 +104,9 @@ fn compile_with_facts_core(
     lowerer.define_init();
     let mut reserve_limits = lowerer.pre_reserve_define_all();
     let mut d_perm_buf = ChunkSeq::new[u8]();
-    d_perm_buf.reserve(134217728);
+    d_perm_buf.reserve(DEFINE_PERM_BYTES);
     let d_perm_end = stage2_heap_mark();
-    let mut d_perm = wrapping_sub(d_perm_end, 134217728);
+    let mut d_perm = wrapping_sub(d_perm_end, DEFINE_PERM_BYTES);
     let mut d_mark = d_perm_end;
     for i in 0..lowerer.plan.insts.len() {
         let n_mask = lowerer.ctx.names.mask_val();

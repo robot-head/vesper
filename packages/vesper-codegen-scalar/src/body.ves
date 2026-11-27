@@ -58,6 +58,8 @@ pub const INST_CALL_BUILTIN: u64 = 12;
 pub const INST_WIDE_CONST: u64 = 13;
 pub const INST_WIDE_UNARY: u64 = 14;
 pub const INST_WIDE_BINARY: u64 = 15;
+pub const INST_ICONST: u64 = 16;
+pub const INST_F64CONST: u64 = 17;
 // A struct or tuple built from scalar fields (`Op::Data`, `Op::Tuple`;
 // `Codegen::data_into`), #2411.
 pub const INST_DATA: u64 = 32;
@@ -1593,34 +1595,48 @@ impl Gen {
         let mut extra: ChunkSeq[u64] = ChunkSeq::new[u64]();
         if i.op == Op::Const || i.op == Op::Unit || i.op == Op::Loop {
             if planned == NONE64 {
-                if i.op != Op::Const {
+                if i.op == Op::Unit {
+                    kind = INST_ICONST;
+                    extra.push(0);
+                } else if i.op != Op::Const {
                     return false;
-                }
-                let lit = self.program.op(i.a);
-                let expr_ty = self.ctx.world.expr_type(i.s0, i.s1);
-                let is_wide_int = if lit == Lit::WideInt {
-                    true
-                } else if lit == Lit::Int && expr_ty != NONE32 {
-                    let expr_def = default_type(inout self.ctx.types, expr_ty);
-                    kind_wide(self.kind_of(expr_def))
                 } else {
-                    false
-                };
-                if is_wide_int {
-                    kind = INST_WIDE_CONST;
-                    extra.push(self.program.op(inc(i.a)));
-                    extra.push(self.program.op(add(i.a, 2)));
-                    extra.push(self.body_expr_kind(i.s0, i.s1));
-                } else if lit == Lit::Float && expr_ty != NONE32 {
-                    let d = default_type(inout self.ctx.types, expr_ty);
-                    let node = self.ctx.types.node(d);
-                    if node.kind != TyKind::Named || node.n != 0 || node.name != self.ops.f32_ {
+                    let lit = self.program.op(i.a);
+                    let expr_ty = self.ctx.world.expr_type(i.s0, i.s1);
+                    let is_wide_int = if lit == Lit::WideInt {
+                        true
+                    } else if lit == Lit::Int && expr_ty != NONE32 {
+                        let expr_def = default_type(inout self.ctx.types, expr_ty);
+                        kind_wide(self.kind_of(expr_def))
+                    } else {
+                        false
+                    };
+                    if is_wide_int {
+                        kind = INST_WIDE_CONST;
+                        extra.push(self.program.op(inc(i.a)));
+                        extra.push(self.program.op(add(i.a, 2)));
+                        extra.push(self.body_expr_kind(i.s0, i.s1));
+                    } else if lit == Lit::Int || lit == Lit::Bool {
+                        kind = INST_ICONST;
+                        extra.push(self.program.op(inc(i.a)));
+                    } else if lit == Lit::Float {
+                        let is_f32 = if expr_ty != NONE32 {
+                            let d = default_type(inout self.ctx.types, expr_ty);
+                            let node = self.ctx.types.node(d);
+                            node.kind == TyKind::Named && node.n == 0 && node.name == self.ops.f32_
+                        } else {
+                            false
+                        };
+                        if is_f32 {
+                            kind = INST_F32CONST;
+                            extra.push(f32_bits_of_f64(self.program.op(inc(i.a))));
+                        } else {
+                            kind = INST_F64CONST;
+                            extra.push(self.program.op(inc(i.a)));
+                        }
+                    } else {
                         return false;
                     }
-                    kind = INST_F32CONST;
-                    extra.push(f32_bits_of_f64(self.program.op(inc(i.a))));
-                } else {
-                    return false;
                 }
             }
         } else if i.op == Op::Exit {

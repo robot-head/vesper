@@ -82,6 +82,7 @@ unsafe extern "C" {
     fn vesper_aegis_cose_key_p384(b: *mut u64, n: *mut u64, st: *mut u64, out_sec1: *mut u64, fail: *mut u64) -> i64;
     fn vesper_aegis_cose_sig_structure(prot: *mut u64, aad: *mut u64, pay: *mut u64, out: *mut u64) -> i64;
     fn vesper_aegis_cose_sign1_parse(b: *mut u64, s: *mut u64, n: *mut u64, st: *mut u64, w: *mut u64, field: i64, reason: i64, fail: *mut u64) -> i64;
+    fn vesper_aegis_decode_pem_certificates(pem: *mut u64, der_out: *mut u64, spans: *mut u64) -> i64;
     fn vesper_aegis_gpa_check_access(iv: *mut u64, count: i64, gpa: i64, len: i64) -> i64;
     fn vesper_aegis_gpa_covers(iv: *mut u64, count: i64, s: i64, e: i64) -> i64;
     fn vesper_aegis_gpa_first_gap(iv: *mut u64, count: i64, s: i64, e: i64) -> i64;
@@ -302,6 +303,15 @@ pub fn cose_sign1_parse(b: &[u8], s: &mut [u8], n: &mut [u64], st: &mut [u64], w
         1 => Err(<AErr as Abi>::get(&fail[1..])),
         status => panic!("invalid failure status {status} from vesper_aegis_cose_sign1_parse"),
     }
+}
+
+/// Calls `decode_pem_certificates` of the Vesper library `aegis` (`vesper_aegis_decode_pem_certificates`).
+pub fn decode_pem_certificates(pem: &[u8], der_out: &mut [u8], spans: &mut [u64]) -> u64 {
+    // SAFETY: `vesper_aegis_decode_pem_certificates` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(pem, |view_pem| vesper_port_abi::with_slice_mut(der_out, |view_der_out| vesper_port_abi::with_slice_mut(spans, |view_spans| unsafe { vesper_aegis_decode_pem_certificates(view_pem, view_der_out, view_spans) })));
+    raw as u64
 }
 
 /// Calls `gpa_check_access` of the Vesper library `aegis` (`vesper_aegis_gpa_check_access`).

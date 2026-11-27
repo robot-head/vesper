@@ -17,13 +17,13 @@ try {
     if (!$suites.Count) { throw 'No CLI test suites selected.' }
     $filters = foreach ($suite in $suites) { '--test'; $suite }
 
-    Invoke-Build @('-p', 'vesper', '--bin', 'vesper')
-    Invoke-Build @('-p', 'vesper-tools')
-    # The hybrid through its test build (#2395): `cargo build` resolves its
-    # features without the dev-dependencies, so it reran the build script
-    # that compiles every Vesper module after the crate's tests.
+    # The hybrid first, through the same command as the crate's tests
+    # (#2395): building vesper-tools first rebuilt dependencies the hybrid
+    # shares, which reran its build script over every Vesper module.
     & cargo test --locked --no-run -p vesper-hybrid
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    Invoke-Build @('-p', 'vesper', '--bin', 'vesper')
+    Invoke-Build @('-p', 'vesper-tools')
     $messages = & cargo test --locked -p vesper --no-run --message-format=json-render-diagnostics @filters
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     $executables = @($messages | ConvertFrom-Json | Where-Object {

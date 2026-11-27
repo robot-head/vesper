@@ -6,14 +6,15 @@ edition = "2026"
 # SH5 lane 13, #1336): help, version, the unknown-command error and the
 # hand-off to `vesper-<tool>` programs (src/tool_commands.rs). It prints
 # and finds tools through @vesper-std/fs and @vesper-std/env and runs them
-# through @vesper-std/process; the command engines it calls are the
-# `HybridCommands` import (commands.vsys), which the hybrid compiler
-# implements (crates/vesper-hybrid/src/commands.rs).
+# through @vesper-std/process; the command engines still in Rust it calls
+# through @vesper/driver-engines (the `HybridCommands` import, which the
+# hybrid compiler implements in crates/vesper-hybrid/src/commands.rs, and
+# refused on wasm32-wasip2, #1996).
 capability_ceiling = ["Fail", "Alloc", "Ffi[StdFs]", "Ffi[StdEnv]", "Ffi[StdProcess]", "Ffi[HybridCommands]", "Ffi[Blake3]"]
-vsys = ["commands.vsys"]
 
 [dependencies]
 "@vesper/driver" = { version = "^0.1", path = "../vesper-driver" }
+"@vesper/driver-engines" = { version = "^0.1", path = "../vesper-driver-engines" }
 "@vesper-std/env" = { version = "^0.1", path = "../vesper-std/env" }
 "@vesper-std/fs" = { version = "^0.1", path = "../vesper-std/fs" }
 "@vesper-std/process" = { version = "^0.1", path = "../vesper-std/process" }
