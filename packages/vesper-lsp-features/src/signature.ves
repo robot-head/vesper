@@ -1,0 +1,981 @@
+// The checked signature snapshot of `vesper lsp` (src/database.rs
+// `signature_snapshot` and `extract_signature`) in Vesper, over the world
+// headers `database::signature_words` writes.
+//
+// The answer is the text `database::signature_answer` writes: `E <reason>`,
+// or `C <BLAKE3 hex>`, the declarations one per line, then the header
+// bytes. The header bytes are serde_json's compact output of Rust's
+// `SemanticHeaders`: struct fields in declaration order, map entries in key
+// order, enums externally tagged. When the caller hashes the bytes itself
+// (through hash-sys), the digest is left out: `C ` alone.
+use @vesper-std/hash::blake3::{blake3, digest_bytes};
+use self::json::{byte, put_string, put_u64};
+
+const SIGNATURE_SCHEMA: Str = "vesper.editor.checked-signature/1";
+// `MAX_SIGNATURE_BYTES`, `MAX_HEADER_DECLARATIONS` and the node budget of
+// `unresolved_type`.
+const MAX_SIGNATURE_BYTES: u64 = 1048576;
+const MAX_HEADER_DECLARATIONS: u64 = 4096;
+const TYPE_NODE_BUDGET: u64 = 8192;
+// The unsupported-header counts (model uses, trait bounds, trait and
+// conformance items, elaborated traits, conformances and generated
+// functions, package and revision).
+const UNSUPPORTED_COUNTS: u64 = 9;
+
+const WORD_BYTES: u64 = 8;
+// A type's tag and byte length words.
+const TYPE_LENGTH_OFFSET: u64 = 8;
+const TYPE_HEADER_BYTES: u64 = 16;
+
+// The tags of `database::signature_tags`.
+const TYPE_INT_LITERAL: u64 = 0;
+const TYPE_NAMED: u64 = 1;
+const TYPE_TUPLE: u64 = 2;
+const TYPE_FUNCTION: u64 = 3;
+const TYPE_ROW: u64 = 4;
+const TYPE_INFER: u64 = 5;
+const MODE_COPY: u64 = 0;
+const MODE_AFFINE: u64 = 1;
+const PASS_IN: u64 = 0;
+const PASS_INOUT: u64 = 1;
+const TEMPERATURE_HOT: u64 = 0;
+
+const NEWLINE: u8 = 10;
+const SPACE: u8 = 32;
+const QUOTE: u8 = 34;
+const COMMA: u8 = 44;
+const COLON: u8 = 58;
+const OPEN_BRACKET: u8 = 91;
+const CLOSE_BRACKET: u8 = 93;
+const OPEN_BRACE: u8 = 123;
+const CLOSE_BRACE: u8 = 125;
+const MINUS: u8 = 45;
+const ZERO_DIGIT: u8 = 48;
+const DECIMAL: u64 = 10;
+const HALF_WORD_BITS: u32 = 32;
+const HALF_WORD_MASK: u64 = 4294967295;
+const SIGN_BIT: u64 = 9223372036854775808;
+const DIGEST_BYTES: u64 = 32;
+const HEX_LETTER_OFFSET: u8 = 87;
+const NIBBLE: u8 = 15;
+const NIBBLE_BITS: u32 = 4;
+const HEX_LETTERS: u8 = 10;
+
+copy struct Text {
+    at: u64,
+    len: u64
+}
+
+fn at(in b: Slice[u8], pos: u64) -> u64 {
+    b.try_read_u64_le(pos).unwrap_or(0)
+}
+
+fn next(in b: Slice[u8], inout pos: u64) -> u64 {
+    let value = at(in b, pos);
+    pos = wrapping_add(pos, WORD_BYTES);
+    value
+}
+
+fn text(in b: Slice[u8], inout pos: u64) -> Text {
+    let len = next(in b, inout pos);
+    let t = Text { at: pos, len: len };
+    pos = wrapping_add(pos, len);
+    t
+}
+
+fn put_text(inout o: ChunkSeq[u8], in b: Slice[u8], t: Text) {
+    put_plain(inout o, in b[t.at..wrapping_add(t.at, t.len)]);
+}
+
+// Appends the bytes of `s`.
+fn lit(inout o: ChunkSeq[u8], in s: Str) {
+    o.extend(in s.as_bytes());
+}
+
+const BACKSLASH: u8 = 92;
+const FIRST_PRINTABLE: u8 = 32;
+
+// A JSON string: the bytes as they are between quotes when none needs an
+// escape, else serde_json's escapes (`put_string`).
+fn put_plain(inout o: ChunkSeq[u8], in bytes: Slice[u8]) {
+    for i in 0..bytes.len() {
+        let ch = byte(in bytes, i);
+        if ch < FIRST_PRINTABLE || ch == QUOTE || ch == BACKSLASH {
+            put_string(inout o, in bytes);
+            return;
+        }
+    }
+    o.push(QUOTE);
+    o.extend(in bytes);
+    o.push(QUOTE);
+}
+
+// The key `"name":` of a JSON object member.
+fn key(inout o: ChunkSeq[u8], in name: Str) {
+    o.push(QUOTE);
+    lit(inout o, in name);
+    o.push(QUOTE);
+    o.push(COLON);
+}
+
+fn put_bool(inout o: ChunkSeq[u8], value: bool) {
+    if value {
+        lit(inout o, in "true");
+    } else {
+        lit(inout o, in "false");
+    }
+}
+
+fn mode_name(mode: u64) -> Str {
+    if mode == MODE_COPY {
+        "\"Copy\""
+    } else if mode == MODE_AFFINE {
+        "\"Affine\""
+    } else {
+        "\"Linear\""
+    }
+}
+
+fn pass_name(pass: u64) -> Str {
+    if pass == PASS_IN {
+        "\"In\""
+    } else if pass == PASS_INOUT {
+        "\"Inout\""
+    } else {
+        "\"Sink\""
+    }
+}
+
+// Lexicographic byte order of two texts: -1, 0 or 1 as a u64 tag.
+const LESS: u64 = 0;
+const EQUAL: u64 = 1;
+const GREATER: u64 = 2;
+
+fn compare(in b: Slice[u8], x: Text, y: Text) -> u64 {
+    let n = if x.len < y.len { x.len } else { y.len };
+    for i in 0..n {
+        let p = byte(in b, wrapping_add(x.at, i));
+        let q = byte(in b, wrapping_add(y.at, i));
+        if p < q {
+            return LESS;
+        }
+        if p > q {
+            return GREATER;
+        }
+    }
+    if x.len < y.len {
+        LESS
+    } else if x.len > y.len {
+        GREATER
+    } else {
+        EQUAL
+    }
+}
+
+// ------------------------------------------------------------- skipping
+
+fn type_end(in b: Slice[u8], pos: u64) -> u64 {
+    wrapping_add(pos, at(in b, wrapping_add(pos, TYPE_LENGTH_OFFSET)))
+}
+
+// Pushes the argument types of every instance of the effects at `pos` and
+// leaves `pos` after them; false when an instance has more arguments than
+// `remaining` (`unresolved_type`'s guard).
+fn push_effect_args(
+    in b: Slice[u8],
+    inout pos: u64,
+    inout stack: ChunkSeq[u64],
+    remaining: u64
+) -> bool {
+    let instances = next(in b, inout pos);
+    let mut fits = true;
+    for i in 0..instances {
+        next(in b, inout pos);
+        text(in b, inout pos);
+        text(in b, inout pos);
+        let args = next(in b, inout pos);
+        if args > remaining {
+            fits = false;
+        }
+        for k in 0..args {
+            if fits {
+                stack.push(pos);
+            }
+            pos = type_end(in b, pos);
+        }
+        if !fits {
+            return false;
+        }
+    }
+    next(in b, inout pos);
+    text(in b, inout pos);
+    true
+}
+
+// `unresolved_type`: an `Infer` anywhere, or more nodes than its budget,
+// visited in its stack order.
+fn unresolved(in b: Slice[u8], root: u64) -> bool {
+    // A leaf answers without a stack: `Infer` is unresolved, a literal or
+    // a name or tuple with no arguments is not.
+    let root_tag = at(in b, root);
+    if root_tag == TYPE_INFER {
+        return true;
+    }
+    if root_tag == TYPE_INT_LITERAL {
+        return false;
+    }
+    if root_tag == TYPE_NAMED || root_tag == TYPE_TUPLE {
+        let mut p = wrapping_add(root, TYPE_HEADER_BYTES);
+        if root_tag == TYPE_NAMED {
+            text(in b, inout p);
+        }
+        if at(in b, p) == 0 {
+            return false;
+        }
+    }
+    let mut stack = ChunkSeq::new[u64]();
+    stack.push(root);
+    let mut remaining = TYPE_NODE_BUDGET;
+    loop {
+        let n = stack.len();
+        if n == 0 {
+            break;
+        }
+        let pos = stack.try_get(wrapping_sub(n, 1)).unwrap_or(0);
+        stack.truncate(wrapping_sub(n, 1));
+        if remaining == 0 {
+            return true;
+        }
+        remaining = wrapping_sub(remaining, 1);
+        let tag = at(in b, pos);
+        let mut p = wrapping_add(pos, TYPE_HEADER_BYTES);
+        if tag == TYPE_INFER {
+            return true;
+        } else if tag == TYPE_NAMED || tag == TYPE_TUPLE {
+            if tag == TYPE_NAMED {
+                text(in b, inout p);
+            }
+            let args = next(in b, inout p);
+            if args > remaining {
+                return true;
+            }
+            for k in 0..args {
+                stack.push(p);
+                p = type_end(in b, p);
+            }
+        } else if tag == TYPE_FUNCTION {
+            let params = next(in b, inout p);
+            if params > remaining {
+                return true;
+            }
+            for k in 0..params {
+                next(in b, inout p);
+                stack.push(p);
+                p = type_end(in b, p);
+            }
+            stack.push(p);
+            p = type_end(in b, p);
+            if !push_effect_args(in b, inout p, inout stack, remaining) {
+                return true;
+            }
+        } else if tag == TYPE_ROW {
+            if !push_effect_args(in b, inout p, inout stack, remaining) {
+                return true;
+            }
+        }
+        if stack.len() > remaining {
+            return true;
+        }
+    }
+    false
+}
+
+// `unresolved_effects`: any instance argument unresolved. `pos` is left
+// after the effects.
+fn unresolved_effects(in b: Slice[u8], inout pos: u64) -> bool {
+    let instances = next(in b, inout pos);
+    let mut found = false;
+    for i in 0..instances {
+        next(in b, inout pos);
+        text(in b, inout pos);
+        text(in b, inout pos);
+        let args = next(in b, inout pos);
+        for k in 0..args {
+            if !found && unresolved(in b, pos) {
+                found = true;
+            }
+            pos = type_end(in b, pos);
+        }
+    }
+    next(in b, inout pos);
+    text(in b, inout pos);
+    found
+}
+
+fn skip_generics(in b: Slice[u8], inout pos: u64) {
+    let n = next(in b, inout pos);
+    for i in 0..n {
+        text(in b, inout pos);
+        next(in b, inout pos);
+        next(in b, inout pos);
+    }
+}
+
+// What a function header record says to the checks.
+copy struct Header {
+    key: Text,
+    // Some parameter type is unresolved.
+    params_unresolved: bool,
+    result: u64,
+    effects_unresolved: bool,
+    has_body: bool
+}
+
+// Reads the function record at `pos` for the checks; `pos` is left after it.
+fn header(in b: Slice[u8], inout pos: u64) -> Header {
+    let k = text(in b, inout pos);
+    text(in b, inout pos);
+    skip_generics(in b, inout pos);
+    let params = next(in b, inout pos);
+    let mut params_unresolved = false;
+    for i in 0..params {
+        text(in b, inout pos);
+        next(in b, inout pos);
+        let projections = next(in b, inout pos);
+        for j in 0..projections {
+            let parts = next(in b, inout pos);
+            for q in 0..parts {
+                text(in b, inout pos);
+            }
+        }
+        if !params_unresolved && unresolved(in b, pos) {
+            params_unresolved = true;
+        }
+        pos = type_end(in b, pos);
+    }
+    let result = pos;
+    pos = type_end(in b, pos);
+    let effects_unresolved = unresolved_effects(in b, inout pos);
+    let has_body = next(in b, inout pos) == 1;
+    Header {
+        key: k,
+        params_unresolved: params_unresolved,
+        result: result,
+        effects_unresolved: effects_unresolved,
+        has_body: has_body
+    }
+}
+
+// ------------------------------------------------------------- writing
+
+// The decimal digits of the unsigned 128-bit `hi:lo`.
+fn put_u128(inout o: ChunkSeq[u8], hi: u64, lo: u64) {
+    if hi == 0 {
+        put_u64(inout o, lo);
+        return;
+    }
+    let mut digits = ChunkSeq::new[u8]();
+    let mut h = hi;
+    let mut l = lo;
+    loop {
+        if h == 0 && l == 0 {
+            break;
+        }
+        // Long division of the four 32-bit limbs by ten.
+        let mut r: u64 = 0;
+        let mut cur = wrapping_add(wrapping_shl_u64(r, HALF_WORD_BITS), h >> 32);
+        let q3 = cur / DECIMAL;
+        r = cur % DECIMAL;
+        cur = wrapping_add(wrapping_shl_u64(r, HALF_WORD_BITS), h & HALF_WORD_MASK);
+        let q2 = cur / DECIMAL;
+        r = cur % DECIMAL;
+        cur = wrapping_add(wrapping_shl_u64(r, HALF_WORD_BITS), l >> 32);
+        let q1 = cur / DECIMAL;
+        r = cur % DECIMAL;
+        cur = wrapping_add(wrapping_shl_u64(r, HALF_WORD_BITS), l & HALF_WORD_MASK);
+        let q0 = cur / DECIMAL;
+        r = cur % DECIMAL;
+        h = wrapping_shl_u64(q3, HALF_WORD_BITS) | q2;
+        l = wrapping_shl_u64(q1, HALF_WORD_BITS) | q0;
+        digits.push(wrapping_add(ZERO_DIGIT, wrapping_u8(r)));
+    }
+    let n = digits.len();
+    for i in 0..n {
+        o.push(digits.try_get(wrapping_sub(wrapping_sub(n, 1), i)).unwrap_or(0));
+    }
+}
+
+// The decimal of the two's-complement 128-bit `hi:lo`.
+fn put_i128(inout o: ChunkSeq[u8], hi: u64, lo: u64) {
+    if (hi & SIGN_BIT) == 0 {
+        put_u128(inout o, hi, lo);
+        return;
+    }
+    o.push(MINUS);
+    let nlo = wrapping_sub(0, lo);
+    let mut nhi = wrapping_sub(0, hi);
+    if lo != 0 {
+        nhi = wrapping_sub(nhi, 1);
+    }
+    put_u128(inout o, nhi, nlo);
+}
+
+fn put_option_text(inout o: ChunkSeq[u8], in b: Slice[u8], inout pos: u64) {
+    let present = next(in b, inout pos) == 1;
+    let t = text(in b, inout pos);
+    if present {
+        put_text(inout o, in b, t);
+    } else {
+        lit(inout o, in "null");
+    }
+}
+
+fn write_effects(inout o: ChunkSeq[u8], in b: Slice[u8], inout pos: u64) {
+    o.push(OPEN_BRACE);
+    key(inout o, in "instances");
+    o.push(OPEN_BRACKET);
+    let instances = next(in b, inout pos);
+    for i in 0..instances {
+        if i > 0 {
+            o.push(COMMA);
+        }
+        o.push(OPEN_BRACE);
+        key(inout o, in "label");
+        put_option_text(inout o, in b, inout pos);
+        o.push(COMMA);
+        key(inout o, in "name");
+        put_text(inout o, in b, text(in b, inout pos));
+        o.push(COMMA);
+        key(inout o, in "args");
+        write_types(inout o, in b, inout pos);
+        o.push(CLOSE_BRACE);
+    }
+    o.push(CLOSE_BRACKET);
+    o.push(COMMA);
+    key(inout o, in "tail");
+    put_option_text(inout o, in b, inout pos);
+    o.push(CLOSE_BRACE);
+}
+
+// A count and that many types, as a JSON array.
+fn write_types(inout o: ChunkSeq[u8], in b: Slice[u8], inout pos: u64) {
+    let n = next(in b, inout pos);
+    o.push(OPEN_BRACKET);
+    for i in 0..n {
+        if i > 0 {
+            o.push(COMMA);
+        }
+        write_type(inout o, in b, pos);
+        pos = type_end(in b, pos);
+    }
+    o.push(CLOSE_BRACKET);
+}
+
+// The type at `pos`, externally tagged as serde writes `ast::Type`.
+fn write_type(inout o: ChunkSeq[u8], in b: Slice[u8], pos: u64) {
+    let tag = at(in b, pos);
+    let mut p = wrapping_add(pos, TYPE_HEADER_BYTES);
+    if tag == TYPE_INFER {
+        lit(inout o, in "\"Infer\"");
+        return;
+    }
+    o.push(OPEN_BRACE);
+    if tag == TYPE_INT_LITERAL {
+        key(inout o, in "IntLiteral");
+        let lo = next(in b, inout p);
+        let hi = next(in b, inout p);
+        put_i128(inout o, hi, lo);
+    } else if tag == TYPE_NAMED {
+        key(inout o, in "Named");
+        o.push(OPEN_BRACKET);
+        put_text(inout o, in b, text(in b, inout p));
+        o.push(COMMA);
+        write_types(inout o, in b, inout p);
+        o.push(CLOSE_BRACKET);
+    } else if tag == TYPE_TUPLE {
+        key(inout o, in "Tuple");
+        write_types(inout o, in b, inout p);
+    } else if tag == TYPE_FUNCTION {
+        key(inout o, in "Function");
+        o.push(OPEN_BRACE);
+        key(inout o, in "params");
+        o.push(OPEN_BRACKET);
+        let params = next(in b, inout p);
+        for i in 0..params {
+            if i > 0 {
+                o.push(COMMA);
+            }
+            o.push(OPEN_BRACKET);
+            lit(inout o, in pass_name(next(in b, inout p)));
+            o.push(COMMA);
+            write_type(inout o, in b, p);
+            p = type_end(in b, p);
+            o.push(CLOSE_BRACKET);
+        }
+        o.push(CLOSE_BRACKET);
+        o.push(COMMA);
+        key(inout o, in "result");
+        write_type(inout o, in b, p);
+        p = type_end(in b, p);
+        o.push(COMMA);
+        key(inout o, in "effects");
+        write_effects(inout o, in b, inout p);
+        o.push(COMMA);
+        key(inout o, in "mode");
+        lit(inout o, in mode_name(next(in b, inout p)));
+        o.push(CLOSE_BRACE);
+    } else {
+        key(inout o, in "Row");
+        write_effects(inout o, in b, inout p);
+    }
+    o.push(CLOSE_BRACE);
+}
+
+fn write_generics(inout o: ChunkSeq[u8], in b: Slice[u8], inout pos: u64) {
+    let n = next(in b, inout pos);
+    o.push(OPEN_BRACKET);
+    for i in 0..n {
+        if i > 0 {
+            o.push(COMMA);
+        }
+        o.push(OPEN_BRACE);
+        key(inout o, in "name");
+        put_text(inout o, in b, text(in b, inout pos));
+        o.push(COMMA);
+        key(inout o, in "bound");
+        lit(inout o, in mode_name(next(in b, inout pos)));
+        o.push(COMMA);
+        key(inout o, in "row");
+        put_bool(inout o, next(in b, inout pos) == 1);
+        o.push(CLOSE_BRACE);
+    }
+    o.push(CLOSE_BRACKET);
+}
+
+// `FunctionHeader` of the record at `pos` (its map key is read and not
+// written); `pos` is left after it.
+fn write_function(inout o: ChunkSeq[u8], in b: Slice[u8], inout pos: u64) {
+    text(in b, inout pos);
+    o.push(OPEN_BRACE);
+    key(inout o, in "name");
+    put_text(inout o, in b, text(in b, inout pos));
+    o.push(COMMA);
+    key(inout o, in "generics");
+    write_generics(inout o, in b, inout pos);
+    o.push(COMMA);
+    key(inout o, in "parameters");
+    o.push(OPEN_BRACKET);
+    let params = next(in b, inout pos);
+    for i in 0..params {
+        if i > 0 {
+            o.push(COMMA);
+        }
+        o.push(OPEN_BRACE);
+        key(inout o, in "name");
+        put_text(inout o, in b, text(in b, inout pos));
+        o.push(COMMA);
+        key(inout o, in "pass");
+        lit(inout o, in pass_name(next(in b, inout pos)));
+        o.push(COMMA);
+        key(inout o, in "projections");
+        o.push(OPEN_BRACKET);
+        let projections = next(in b, inout pos);
+        for j in 0..projections {
+            if j > 0 {
+                o.push(COMMA);
+            }
+            o.push(OPEN_BRACKET);
+            let parts = next(in b, inout pos);
+            for q in 0..parts {
+                if q > 0 {
+                    o.push(COMMA);
+                }
+                put_text(inout o, in b, text(in b, inout pos));
+            }
+            o.push(CLOSE_BRACKET);
+        }
+        o.push(CLOSE_BRACKET);
+        o.push(COMMA);
+        key(inout o, in "ty");
+        write_type(inout o, in b, pos);
+        pos = type_end(in b, pos);
+        o.push(CLOSE_BRACE);
+    }
+    o.push(CLOSE_BRACKET);
+    o.push(COMMA);
+    key(inout o, in "declared_result");
+    write_type(inout o, in b, pos);
+    pos = type_end(in b, pos);
+    o.push(COMMA);
+    key(inout o, in "effects");
+    write_effects(inout o, in b, inout pos);
+    o.push(COMMA);
+    key(inout o, in "has_body");
+    put_bool(inout o, next(in b, inout pos) == 1);
+    o.push(CLOSE_BRACE);
+}
+
+fn write_adt(inout o: ChunkSeq[u8], in b: Slice[u8], inout pos: u64) {
+    o.push(OPEN_BRACE);
+    key(inout o, in "name");
+    put_text(inout o, in b, text(in b, inout pos));
+    o.push(COMMA);
+    key(inout o, in "mode");
+    lit(inout o, in mode_name(next(in b, inout pos)));
+    o.push(COMMA);
+    key(inout o, in "generics");
+    write_generics(inout o, in b, inout pos);
+    o.push(COMMA);
+    key(inout o, in "variants");
+    o.push(OPEN_BRACKET);
+    let variants = next(in b, inout pos);
+    for i in 0..variants {
+        if i > 0 {
+            o.push(COMMA);
+        }
+        o.push(OPEN_BRACE);
+        key(inout o, in "name");
+        put_text(inout o, in b, text(in b, inout pos));
+        o.push(COMMA);
+        key(inout o, in "fields");
+        o.push(OPEN_BRACKET);
+        let fields = next(in b, inout pos);
+        for j in 0..fields {
+            if j > 0 {
+                o.push(COMMA);
+            }
+            o.push(OPEN_BRACE);
+            key(inout o, in "name");
+            put_text(inout o, in b, text(in b, inout pos));
+            o.push(COMMA);
+            key(inout o, in "ty");
+            write_type(inout o, in b, pos);
+            pos = type_end(in b, pos);
+            let has_modality = next(in b, inout pos) == 1;
+            let modality = next(in b, inout pos);
+            if has_modality {
+                o.push(COMMA);
+                key(inout o, in "modality");
+                lit(inout o, in mode_name(modality));
+            }
+            let has_temperature = next(in b, inout pos) == 1;
+            let temperature = next(in b, inout pos);
+            if has_temperature {
+                o.push(COMMA);
+                key(inout o, in "temperature");
+                if temperature == TEMPERATURE_HOT {
+                    lit(inout o, in "\"Hot\"");
+                } else {
+                    lit(inout o, in "\"Cold\"");
+                }
+            }
+            o.push(CLOSE_BRACE);
+        }
+        o.push(CLOSE_BRACKET);
+        o.push(COMMA);
+        key(inout o, in "named");
+        put_bool(inout o, next(in b, inout pos) == 1);
+        o.push(CLOSE_BRACE);
+    }
+    o.push(CLOSE_BRACKET);
+    o.push(COMMA);
+    key(inout o, in "is_enum");
+    put_bool(inout o, next(in b, inout pos) == 1);
+    o.push(CLOSE_BRACE);
+}
+
+fn write_effect(inout o: ChunkSeq[u8], in b: Slice[u8], inout pos: u64) {
+    o.push(OPEN_BRACE);
+    key(inout o, in "name");
+    put_text(inout o, in b, text(in b, inout pos));
+    o.push(COMMA);
+    key(inout o, in "linear");
+    put_bool(inout o, next(in b, inout pos) == 1);
+    o.push(COMMA);
+    key(inout o, in "generics");
+    write_generics(inout o, in b, inout pos);
+    o.push(COMMA);
+    key(inout o, in "operations");
+    o.push(OPEN_BRACKET);
+    let ops = next(in b, inout pos);
+    for i in 0..ops {
+        if i > 0 {
+            o.push(COMMA);
+        }
+        write_function(inout o, in b, inout pos);
+    }
+    o.push(CLOSE_BRACKET);
+    o.push(CLOSE_BRACE);
+}
+
+fn refuse(inout o: ChunkSeq[u8], in reason: Str) {
+    o.truncate(0);
+    lit(inout o, in "E ");
+    lit(inout o, in reason);
+}
+
+fn hex(nibble: u8) -> u8 {
+    if nibble < HEX_LETTERS {
+        wrapping_add(nibble, ZERO_DIGIT)
+    } else {
+        wrapping_add(nibble, HEX_LETTER_OFFSET)
+    }
+}
+
+// The record shapes of the map sections.
+const RECORD_ADT: u64 = 0;
+const RECORD_FUNCTION: u64 = 1;
+const RECORD_EFFECT: u64 = 2;
+// A kept key: its offset and length.
+const KEY_WORDS: u64 = 2;
+
+// A map section as a JSON object: each record's key, then its value.
+// Each key is also kept in `keys` as its offset and length.
+fn write_map(
+    inout o: ChunkSeq[u8],
+    inout keys: ChunkSeq[u64],
+    in b: Slice[u8],
+    start: u64,
+    count: u64,
+    shape: u64
+) {
+    let mut pos = start;
+    o.push(OPEN_BRACE);
+    for i in 0..count {
+        if i > 0 {
+            o.push(COMMA);
+        }
+        let mut peek = pos;
+        let k = text(in b, inout peek);
+        put_text(inout o, in b, k);
+        keys.push(k.at);
+        keys.push(k.len);
+        o.push(COLON);
+        if shape == RECORD_FUNCTION {
+            write_function(inout o, in b, inout pos);
+        } else if shape == RECORD_ADT {
+            pos = peek;
+            write_adt(inout o, in b, inout pos);
+        } else {
+            pos = peek;
+            write_effect(inout o, in b, inout pos);
+        }
+    }
+    o.push(CLOSE_BRACE);
+}
+
+// Each kept key of `keys` from pair `from` to pair `to`, after `prefix`, one per line.
+fn put_keys(
+    inout o: ChunkSeq[u8],
+    in b: Slice[u8],
+    in keys: ChunkSeq[u64],
+    from: u64,
+    to: u64,
+    in prefix: Str
+) {
+    for i in from..to {
+        let k_at = keys.try_get(wrapping_mul(i, KEY_WORDS)).unwrap_or(0);
+        let k_len = keys.try_get(wrapping_add(wrapping_mul(i, KEY_WORDS), 1)).unwrap_or(0);
+        o.push(NEWLINE);
+        lit(inout o, in prefix);
+        o.extend(in b[k_at..wrapping_add(k_at, k_len)]);
+    }
+}
+
+// One snapshot over the words after `rounds` (see `signature_words`).
+pub fn signature(
+    inout o: ChunkSeq[u8],
+    inout h: ChunkSeq[u8],
+    inout keys: ChunkSeq[u64],
+    in b: Slice[u8],
+    start: u64
+) {
+    o.truncate(0);
+    h.truncate(0);
+    keys.truncate(0);
+    let mut pos = start;
+    if next(in b, inout pos) != 1 {
+        refuse(inout o, in "source analysis unavailable");
+        return;
+    }
+    let mut unsupported = false;
+    for i in 0..UNSUPPORTED_COUNTS {
+        if next(in b, inout pos) != 0 {
+            unsupported = true;
+        }
+    }
+    if unsupported {
+        refuse(inout o, in "trait/model headers are outside supported signature extraction");
+        return;
+    }
+    let adts = next(in b, inout pos);
+    let functions = next(in b, inout pos);
+    let effects = next(in b, inout pos);
+    if wrapping_add(wrapping_add(adts, functions), effects) > MAX_HEADER_DECLARATIONS {
+        refuse(inout o, in "signature declaration limit");
+        return;
+    }
+    let port_digest = next(in b, inout pos) == 1;
+    let adt_len = next(in b, inout pos);
+    let adt_at = pos;
+    pos = wrapping_add(pos, adt_len);
+    let fn_len = next(in b, inout pos);
+    let fn_at = pos;
+    pos = wrapping_add(pos, fn_len);
+    let effect_len = next(in b, inout pos);
+    let effect_at = pos;
+    pos = wrapping_add(pos, effect_len);
+    let result_len = next(in b, inout pos);
+    let result_at = pos;
+    let result_end = wrapping_add(result_at, result_len);
+    pos = result_end;
+    let string_capacity = next(in b, inout pos);
+    // The functions, merged with the function results in key order.
+    let mut p = fn_at;
+    let mut r = result_at;
+    for i in 0..functions {
+        let f = header(in b, inout p);
+        if f.has_body {
+            let mut found = false;
+            let mut result_type: u64 = 0;
+            loop {
+                if r >= result_end {
+                    break;
+                }
+                let mut q = r;
+                let k = text(in b, inout q);
+                let order = compare(in b, k, f.key);
+                if order == LESS {
+                    r = type_end(in b, q);
+                } else {
+                    if order == EQUAL {
+                        found = true;
+                        result_type = q;
+                    }
+                    break;
+                }
+            }
+            if !found || unresolved(in b, result_type) {
+                refuse(inout o, in "actual function result is unresolved or unavailable");
+                return;
+            }
+        }
+        if f.params_unresolved {
+            refuse(inout o, in "function parameter type is unresolved");
+            return;
+        }
+        if f.effects_unresolved {
+            refuse(inout o, in "function effect argument type is unresolved");
+            return;
+        }
+    }
+    p = adt_at;
+    for i in 0..adts {
+        text(in b, inout p);
+        text(in b, inout p);
+        next(in b, inout p);
+        skip_generics(in b, inout p);
+        let variants = next(in b, inout p);
+        for v in 0..variants {
+            text(in b, inout p);
+            let fields = next(in b, inout p);
+            for j in 0..fields {
+                text(in b, inout p);
+                if unresolved(in b, p) {
+                    refuse(inout o, in "ADT field type is unresolved");
+                    return;
+                }
+                p = type_end(in b, p);
+                next(in b, inout p);
+                next(in b, inout p);
+                next(in b, inout p);
+                next(in b, inout p);
+            }
+            next(in b, inout p);
+        }
+        next(in b, inout p);
+    }
+    p = effect_at;
+    for i in 0..effects {
+        text(in b, inout p);
+        text(in b, inout p);
+        next(in b, inout p);
+        skip_generics(in b, inout p);
+        let ops = next(in b, inout p);
+        for j in 0..ops {
+            let op = header(in b, inout p);
+            if op.has_body
+                || unresolved(in b, op.result)
+                || op.params_unresolved
+                || op.effects_unresolved
+            {
+                refuse(inout o, in "effect operation header is unresolved or unsupported");
+                return;
+            }
+        }
+    }
+    // `SemanticHeaders`.
+    h.push(OPEN_BRACE);
+    key(inout h, in "schema");
+    put_plain(inout h, in SIGNATURE_SCHEMA.as_bytes());
+    h.push(COMMA);
+    key(inout h, in "adts");
+    write_map(inout h, inout keys, in b, adt_at, adts, RECORD_ADT);
+    h.push(COMMA);
+    key(inout h, in "functions");
+    write_map(inout h, inout keys, in b, fn_at, functions, RECORD_FUNCTION);
+    h.push(COMMA);
+    key(inout h, in "effects");
+    write_map(inout h, inout keys, in b, effect_at, effects, RECORD_EFFECT);
+    h.push(COMMA);
+    key(inout h, in "function_results");
+    h.push(OPEN_BRACE);
+    r = result_at;
+    let mut first = true;
+    loop {
+        if r >= result_end {
+            break;
+        }
+        if !first {
+            h.push(COMMA);
+        }
+        first = false;
+        put_text(inout h, in b, text(in b, inout r));
+        h.push(COLON);
+        write_type(inout h, in b, r);
+        r = type_end(in b, r);
+    }
+    h.push(CLOSE_BRACE);
+    h.push(COMMA);
+    key(inout h, in "string_capacity");
+    put_u64(inout h, string_capacity);
+    h.push(CLOSE_BRACE);
+    if h.len() > MAX_SIGNATURE_BYTES {
+        refuse(inout o, in "signature serialization limit or failure");
+        return;
+    }
+    lit(inout o, in "C ");
+    if port_digest {
+        let mut digest = ChunkSeq::new[u8]();
+        digest_bytes(blake3(in h.as_slice()), inout digest);
+        for i in 0..DIGEST_BYTES {
+            let d = digest.try_get(i).unwrap_or(0);
+            o.push(hex(d >> NIBBLE_BITS));
+            o.push(hex(d & NIBBLE));
+        }
+    }
+    let after_adts = adts;
+    let after_functions = wrapping_add(adts, functions);
+    put_keys(inout o, in b, in keys, 0, after_adts, in "type::");
+    put_keys(inout o, in b, in keys, after_adts, after_functions, in "fn::");
+    put_keys(
+        inout o,
+        in b,
+        in keys,
+        after_functions,
+        wrapping_add(after_functions, effects),
+        in "effect::"
+    );
+    o.push(NEWLINE);
+    o.extend(in h.as_slice());
+}

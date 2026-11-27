@@ -76,6 +76,7 @@ fn entry(name: &'static str) -> &'static Entry {
             "lsp_anvil_actions",
             "lsp_macro_preview",
             "lsp_recovery_gate",
+            "lsp_signature",
         ]
         .into_iter()
         .map(|n| (n, features().entry(n, optimize())))
@@ -5102,6 +5103,150 @@ fn recovery_gate_speed() {
     let per = n * rounds as u32;
     eprintln!(
         "recovery gate ({n} snapshots x {rounds}): rust {:?}; vesper, host C BLAKE3 {:?} (ratio {:.2}); vesper, portable BLAKE3 {:?} (ratio {:.2})",
+        totals[0] / per,
+        totals[1] / per,
+        totals[1].as_secs_f64() / totals[0].as_secs_f64(),
+        totals[2] / per,
+        totals[2].as_secs_f64() / totals[0].as_secs_f64()
+    );
+}
+
+// ------------------------------------------------------ signature snapshot
+
+/// Programs whose headers reach each part of `SemanticHeaders`: generics,
+/// effects and their operations, function and row types, field modes,
+/// traits (unsupported), and sources that fail to check.
+const SIGNATURE_PROGRAMS: [&str; 10] = [
+    "fn main() -> u64 { 1 }",
+    "struct Pair[T] { left: T, right: T }\nfn swap[T](sink p: Pair[T]) -> Pair[T] { Pair { left: p.right, right: p.left } }",
+    "linear struct Tx { slot: u64 }\nenum Shape { Dot, Square(u64), Rect { w: u64, h: u64 } }\nfn area(s: Shape) -> u64 { match s { Shape::Dot => 0, Shape::Square(n) => n, Shape::Rect { w, h } => w } }",
+    "effect Log { fn note(x: u64); }\nlinear effect Store[T] { fn put(x: T); fn get() -> T; }\nfn noisy(x: u64) -> u64 eff [Log] { Log::note(x); x }",
+    "fn apply(f: fn(u64) -> u64, x: u64) -> u64 { f(x) }\nfn inc(x: u64) -> u64 { wrapping_add(x, 1) }\nfn main() -> u64 { apply(inc, 1) }",
+    "fn literal() -> i64 { -170141183460469231731687303715884105728 }",
+    "trait Show { fn show(in self) -> u64; }\nfn main() -> u64 { 1 }",
+    "fn broken() -> u64 { undefined_name() }",
+    "fn tuple(x: u64) -> (u64, bool) { (x, true) }\nfn bump(inout x: u64) { x = wrapping_add(x, 1); }",
+    "struct Hot { hot a: u64, cold b: u64, copy c: u64 }\nfn main() -> u64 { 1 }",
+];
+
+fn signature_inputs() -> Vec<Option<Arc<CheckedSource>>> {
+    let mut out: Vec<Option<Arc<CheckedSource>>> = corpus_docs()
+        .iter()
+        .map(|d| Some(Arc::clone(&d.checked)))
+        .collect();
+    out.extend(SIGNATURE_PROGRAMS.iter().map(|s| snapshot(s)));
+    out
+}
+
+/// The port's answer with the header bytes hashed by the host when the
+/// port left the digest out (`C ` then the declarations).
+fn hosted_signature(answer: &str) -> String {
+    let Some(rest) = answer.strip_prefix("C ") else {
+        return answer.to_owned();
+    };
+    let headers = rest.rsplit_once('\n').map_or(rest, |(_, h)| h);
+    format!("C {}{rest}", blake3::hash(headers.as_bytes()).to_hex())
+}
+
+/// `database::signature_answer` against `lsp_signature`, with the port's
+/// portable BLAKE3 and with the digest left to the host.
+#[test]
+fn signature_matches_rust() {
+    use vesper::database::{signature_answer, signature_words};
+    let entry = entry("lsp_signature");
+    let mut differ = vec![];
+    let mut kinds = BTreeMap::<String, usize>::new();
+    let inputs = signature_inputs();
+    for (i, checked) in inputs.iter().enumerate() {
+        let checked = checked.as_deref();
+        let rust = signature_answer(checked, 1);
+        let kind = match rust.strip_prefix("E ") {
+            Some(reason) => format!("E {reason}"),
+            None => "C".to_owned(),
+        };
+        for shape in [
+            "\"IntLiteral\"",
+            "\"Function\"",
+            "\"Row\"",
+            "\"modality\"",
+            "\"temperature\"",
+            "\"operations\":[{",
+            "\"projections\":[[",
+            "\"Tuple\"",
+        ] {
+            if rust.contains(shape) {
+                *kinds.entry(shape.to_owned()).or_default() += 1;
+            }
+        }
+        *kinds.entry(kind).or_default() += 1;
+        let vesper = entry.text(&signature_words(checked, true, 1));
+        if let Some(d) = first_difference(&rust, &vesper) {
+            differ.push(format!("input {i}: {d}"));
+        }
+        let hosted = hosted_signature(&entry.text(&signature_words(checked, false, 1)));
+        if let Some(d) = first_difference(&rust, &hosted) {
+            differ.push(format!("input {i} (host digest): {d}"));
+        }
+    }
+    eprintln!(
+        "signature snapshot: {} inputs ({kinds:?}), {} differ",
+        inputs.len(),
+        differ.len()
+    );
+    assert!(differ.is_empty(), "{:#?}", &differ[..differ.len().min(8)]);
+}
+
+/// Rust against Vesper, `rounds` snapshots per call, best of five ABBA
+/// pairs per input. The checked world is encoded outside the timing; the
+/// host digest is computed inside it.
+#[test]
+#[ignore]
+fn signature_speed() {
+    use vesper::database::{signature_answer, signature_words};
+    let entry = entry("lsp_signature");
+    let rounds = 8;
+    let mut totals = [Duration::ZERO; 3];
+    let inputs = signature_inputs();
+    for checked in &inputs {
+        let checked = checked.as_deref();
+        let hosted = signature_words(checked, false, rounds);
+        let portable = signature_words(checked, true, rounds);
+        let time = |f: &dyn Fn()| {
+            let t = std::time::Instant::now();
+            f();
+            t.elapsed()
+        };
+        let rust = || {
+            std::hint::black_box(signature_answer(checked, rounds));
+        };
+        let host = || {
+            let answer = entry.text(&hosted);
+            let headers = answer.rsplit_once('\n').map_or("", |(_, h)| h);
+            for _ in 0..rounds {
+                std::hint::black_box(blake3::hash(headers.as_bytes()));
+            }
+            std::hint::black_box(answer);
+        };
+        let port = || {
+            std::hint::black_box(entry.words(&portable));
+        };
+        let mut best = [Duration::MAX; 3];
+        for _ in 0..5 {
+            best[0] = best[0].min(time(&rust));
+            best[1] = best[1].min(time(&host));
+            best[2] = best[2].min(time(&port));
+            best[2] = best[2].min(time(&port));
+            best[1] = best[1].min(time(&host));
+            best[0] = best[0].min(time(&rust));
+        }
+        for k in 0..3 {
+            totals[k] += best[k];
+        }
+    }
+    let per = inputs.len() as u32 * rounds as u32;
+    eprintln!(
+        "signature snapshot ({} inputs x {rounds}): rust {:?}; vesper, host C BLAKE3 {:?} (ratio {:.2}); vesper, portable BLAKE3 {:?} (ratio {:.2})",
+        inputs.len(),
         totals[0] / per,
         totals[1] / per,
         totals[1].as_secs_f64() / totals[0].as_secs_f64(),
