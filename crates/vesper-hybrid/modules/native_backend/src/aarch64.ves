@@ -16,7 +16,8 @@ use self::scalar::{
     JUMP_LABEL, BRANCH_LABEL, BLOCK_RETURN, BRANCH_BLOCK, BRANCH_TABLE, BRANCH_TABLE_TARGET,
     TableFixup, ARGUMENT_COUNT, RETURN_VALUE, HEADER_WORDS, RECORD_WORDS, NEVER_READ, NO_VALUE,
     DISP32_MASK, RETURN_PAIR, CALL, CALL_ARGUMENT, CALL_VOID, CALL_PAIR, CALL_HIGH,
-    LIBCALL_TARGET_BASE, MEMCPY_LIBCALL
+    LIBCALL_TARGET_BASE, MEMCPY_LIBCALL, SIGNED_DIV, UNSIGNED_DIV, SIGNED_REM, UNSIGNED_REM,
+    is_integer_division
 };
 use self::x86_64::{BYTE_BITS, WORD_BITS, DWORD_BITS, QWORD_BITS};
 
@@ -51,8 +52,12 @@ const RETURN: u32 = 0xd65f03c0;
 const JUMP: u32 = 0x14000000;
 const BRANCH_AND_LINK: u32 = 0x94000000;
 const BRANCH_IF_ZERO: u32 = 0xb4000000;
+const BRANCH_IF_NOT_ZERO: u32 = 0xb5000000;
 const BRANCH_IF_CONDITION: u32 = 0x54000000;
 const BRANCH_REGISTER: u32 = 0xd61f0000;
+// Use the same undefined instruction as Cranelift for hosted traps.
+const TRAP_INSTRUCTION: u32 = 0xc11f;
+const SKIP_TRAP_DISPLACEMENT: u32 = 2;
 const CSDB: u32 = 0xd503229f;
 // ADR points past itself and the three remaining dispatch instructions.
 const ADR_TABLE: u32 = 0x10000080;
@@ -70,6 +75,9 @@ const INSTRUCTION_SHIFT: u32 = 2;
 const ADD_REG: u32 = 0x8b000000;
 const SUB_REG: u32 = 0xcb000000;
 const MUL_REG: u32 = 0x9b007c00;
+const MSUB_REG: u32 = 0x9b008000;
+const SDIV_REG: u32 = 0x9ac00c00;
+const UDIV_REG: u32 = 0x9ac00800;
 const SMULH_REG: u32 = 0x9b407c00;
 const UMULH_REG: u32 = 0x9bc07c00;
 const AND_REG: u32 = 0x8a000000;
@@ -86,6 +94,7 @@ const ORR_IMM: u32 = 0xb2000000;
 const EOR_IMM: u32 = 0xd2000000;
 const CMP_IMM: u32 = 0xf100001f;
 const CMN_IMM: u32 = 0xb100001f;
+const CCMP_IMM: u32 = 0xfa400800;
 const SUBS_REG: u32 = 0xeb000000;
 const UBFM: u32 = 0xd3400000;
 const SBFM: u32 = 0x93400000;
@@ -111,6 +120,7 @@ const PAIR_IMM7_MAX: u64 = 63;
 const PAIR_SECOND_REGISTER_SHIFT: u32 = 10;
 const RM_SHIFT: u32 = 16;
 const RN_SHIFT: u32 = 5;
+const ACCUMULATOR_SHIFT: u32 = 10;
 const CONDITION_SHIFT: u32 = 12;
 const IMM12_SHIFT: u32 = 10;
 const IMM12_MASK: u64 = 0xfff;
@@ -131,6 +141,7 @@ const EQ: u32 = 0;
 const NE: u32 = 1;
 const HS: u32 = 2;
 const LO: u32 = 3;
+const VC: u32 = 7;
 const HI: u32 = 8;
 const LS: u32 = 9;
 const GE: u32 = 10;
@@ -593,7 +604,15 @@ fn operands(in r: Record, returns: u64) -> Option[u64] {
             Option::None
         },
         ADD | SUB | MUL | AND | OR | XOR => Option::Some(2),
-        SHL_REGISTER | SHR_REGISTER | SAR_REGISTER => if r.extra >= DWORD_BITS {
+        SHL_REGISTER
+            | SHR_REGISTER
+            | SAR_REGISTER
+            | SIGNED_DIV
+            | UNSIGNED_DIV
+            | SIGNED_REM
+            | UNSIGNED_REM => if r.extra
+            >= DWORD_BITS
+        {
             Option::Some(2)
         } else {
             Option::None
@@ -630,6 +649,24 @@ fn operands(in r: Record, returns: u64) -> Option[u64] {
     }
 }
 
+fn division_checks(inout out: ChunkSeq[u8], in r: Record, lhs: u32, rhs: u32) {
+    let reg_mask = scalar_opcode_mask(r.extra);
+    let skip = sh(SKIP_TRAP_DISPLACEMENT, BRANCH_IMM19_SHIFT);
+    push32(inout out, (BRANCH_IF_NOT_ZERO & reg_mask) | skip | rhs);
+    push32(inout out, TRAP_INSTRUCTION);
+    if r.op == SIGNED_DIV {
+        // Only a divisor of -1 can overflow. For that divisor, subtracting
+        // one from the dividend sets V precisely when the dividend is MIN.
+        push32(inout out, (CMN_IMM & reg_mask) | sh(1, IMM12_SHIFT) | sh(rhs, RN_SHIFT));
+        push32(
+            inout out,
+            (CCMP_IMM & reg_mask) | sh(1, RM_SHIFT) | sh(EQ, CONDITION_SHIFT) | sh(lhs, RN_SHIFT)
+        );
+        push32(inout out, BRANCH_IF_CONDITION | skip | VC);
+        push32(inout out, TRAP_INSTRUCTION);
+    }
+}
+
 fn emit_instruction(
     inout out: ChunkSeq[u8],
     in r: Record,
@@ -640,6 +677,20 @@ fn emit_instruction(
 ) {
     if r.op == CONSTANT {
         immediate(inout out, dest, r.left);
+    } else if is_integer_division(r.op) {
+        let divide = if r.op == SIGNED_DIV || r.op == SIGNED_REM {
+            SDIV_REG
+        } else {
+            UDIV_REG
+        };
+        let remainder = r.op == SIGNED_REM || r.op == UNSIGNED_REM;
+        let quotient = if remainder { SCRATCH } else { dest };
+        let reg_mask = scalar_opcode_mask(r.extra);
+        rrr(inout out, divide & reg_mask, quotient, lhs, rhs);
+        if remainder {
+            let multiply_subtract = (MSUB_REG & reg_mask) | sh(lhs, ACCUMULATOR_SHIFT);
+            rrr(inout out, multiply_subtract, dest, quotient, rhs);
+        }
     } else if r.op == LOAD {
         memory(inout out, true, r.extra, lhs, dest, r.right);
     } else if r.op == TRUNCATE || r.op == ZERO_EXTEND || r.op == SIGN_EXTEND {
@@ -1310,7 +1361,7 @@ fn encode_pass(
             if last != NEVER_READ {
                 return out;
             }
-        } else if last == NEVER_READ {
+        } else if last == NEVER_READ && !is_integer_division(r.op) {
             continue;
         }
         if n >= 1 && last_read(in ends, r.left) == NEVER_READ {
@@ -1394,11 +1445,12 @@ fn encode_pass(
         let stored = store_width(r.op);
         let live = last_read(in ends, value) != NEVER_READ;
         let calls = direct_call(r.op);
+        let division = is_integer_division(r.op);
         if r.op == STACK_SLOT
             || r.op == BRANCH_TABLE_TARGET
             || r.op == CALL_ARGUMENT
             || r.op == RETURN_PAIR
-            || (!calls && !no_result(r.op) && !live)
+            || (!calls && !division && !no_result(r.op) && !live)
         {
             locations.push(UNASSIGNED);
             continue;
@@ -1486,6 +1538,13 @@ fn encode_pass(
         let lhs = materialize(inout out, left, SPILL_LEFT, frame_bytes);
         let rhs = materialize(inout out, right, SPILL_RIGHT, frame_bytes);
         let third = materialize(inout out, extra, SPILL_THIRD, frame_bytes);
+        if division {
+            division_checks(inout out, in r, lhs, rhs);
+            if !live {
+                locations.push(UNASSIGNED);
+                continue;
+            }
+        }
         if r.op == BRANCH_TABLE {
             compare_table_index(inout out, lhs, r.right);
             let instruction = BRANCH_IF_CONDITION | HS;

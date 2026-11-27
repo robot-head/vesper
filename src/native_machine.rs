@@ -1316,7 +1316,7 @@ impl IntegerBlocks<'_> {
                     let op = match opcode {
                         Opcode::Smulhi => IntegerOp::SignedMulHigh,
                         Opcode::Umulhi => IntegerOp::UnsignedMulHigh,
-                        _ if !self.allow_hardware_faults => return None,
+                        _ if !self.allow_hardware_faults && !self.aarch64 => return None,
                         Opcode::Sdiv => IntegerOp::SignedDiv,
                         Opcode::Udiv => IntegerOp::UnsignedDiv,
                         Opcode::Srem => IntegerOp::SignedRem,

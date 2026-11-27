@@ -36,6 +36,9 @@ const CALL_ARGUMENT: u64 = 39;
 const CALL_VOID: u64 = 40;
 const CALL_PAIR: u64 = 41;
 const CALL_HIGH: u64 = 42;
+const SIGNED_DIV: u64 = 46;
+const UNSIGNED_DIV: u64 = 47;
+const SIGNED_REM: u64 = 48;
 const SIGNED_MUL_HIGH: u64 = 50;
 const UNSIGNED_MUL_HIGH: u64 = 51;
 const ADD_IMMEDIATE: u64 = 52;
@@ -241,6 +244,61 @@ fn aarch64_pair_calls_keep_the_high_result_when_the_low_result_is_unused() {
     ] {
         assert!(binding::aarch64_relocatable_block(malformed).is_empty());
     }
+}
+
+#[test]
+fn aarch64_integer_division_checks_zero_and_signed_overflow() {
+    const CBNZ_X1_OVER_TRAP: u32 = 0xb500_0041;
+    const CBNZ_W1_OVER_TRAP: u32 = 0x3500_0041;
+    const UDF: u32 = 0x0000_c11f;
+    const CMN_X1_1: u32 = 0xb100_043f;
+    const CCMP_X0_1: u32 = 0xfa41_0800;
+    const BVC_OVER_TRAP: u32 = 0x5400_0047;
+    const SDIV_X0_X0_X1: u32 = 0x9ac1_0c00;
+    const UDIV_W0_W0_W1: u32 = 0x1ac1_0800;
+    const SDIV_X16_X0_X1: u32 = 0x9ac1_0c10;
+    const MSUB_X0_X16_X1_X0: u32 = 0x9b01_8200;
+    let encode = |op, width, result| {
+        let bytes = binding::aarch64_integer_leaf(&[2, result, op, 0, 1, width]);
+        let (words, remainder) = bytes.as_chunks::<{ size_of::<u32>() }>();
+        assert!(remainder.is_empty());
+        words
+            .iter()
+            .copied()
+            .map(u32::from_le_bytes)
+            .collect::<Vec<_>>()
+    };
+    let signed_checks = [
+        CBNZ_X1_OVER_TRAP,
+        UDF,
+        CMN_X1_1,
+        CCMP_X0_1,
+        BVC_OVER_TRAP,
+        UDF,
+    ];
+    assert_eq!(
+        encode(SIGNED_DIV, CELL_BITS, 2),
+        [signed_checks.as_slice(), &[SDIV_X0_X0_X1, RET]].concat(),
+    );
+    assert_eq!(
+        encode(SIGNED_DIV, CELL_BITS, 0),
+        [signed_checks.as_slice(), &[RET]].concat(),
+    );
+    assert_eq!(
+        encode(UNSIGNED_DIV, DWORD_BITS, 2),
+        [CBNZ_W1_OVER_TRAP, UDF, UDIV_W0_W0_W1, RET],
+    );
+    assert_eq!(
+        encode(SIGNED_REM, CELL_BITS, 2),
+        [
+            CBNZ_X1_OVER_TRAP,
+            UDF,
+            SDIV_X16_X0_X1,
+            MSUB_X0_X16_X1_X0,
+            RET
+        ],
+    );
+    assert!(encode(SIGNED_DIV, BYTE_BITS, 2).is_empty());
 }
 
 #[test]

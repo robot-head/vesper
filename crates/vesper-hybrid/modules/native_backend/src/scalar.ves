@@ -59,10 +59,10 @@ pub const CALL_HIGH: u64 = 42;
 const SYMBOL_RELATIVE: u64 = 43;
 const SYMBOL_GOT: u64 = 44;
 const TRAP: u64 = 45;
-const SIGNED_DIV: u64 = 46;
-const UNSIGNED_DIV: u64 = 47;
-const SIGNED_REM: u64 = 48;
-const UNSIGNED_REM: u64 = 49;
+pub const SIGNED_DIV: u64 = 46;
+pub const UNSIGNED_DIV: u64 = 47;
+pub const SIGNED_REM: u64 = 48;
+pub const UNSIGNED_REM: u64 = 49;
 pub const SIGNED_MUL_HIGH: u64 = 50;
 pub const UNSIGNED_MUL_HIGH: u64 = 51;
 pub const ADD_IMMEDIATE: u64 = 52;
@@ -578,7 +578,7 @@ fn is_fixed_arithmetic(op: u64) -> bool {
         || op == SIGNED_MUL_OVERFLOW
 }
 
-fn is_integer_division(op: u64) -> bool {
+pub fn is_integer_division(op: u64) -> bool {
     op >= SIGNED_DIV && op <= UNSIGNED_REM
 }
 
