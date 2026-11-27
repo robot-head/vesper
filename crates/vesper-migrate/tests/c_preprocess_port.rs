@@ -237,6 +237,33 @@ fn c_preprocess_matches_rust_reference() {
         "flip-gate differential differences=0 cases={}",
         cases.len() * 2
     );
+
+    // SplitMix64 shadow byte generator differential (256 draws).
+    let mut port_rng = vesper_migrate::shadow::SplitMix64::new(0x5eed_cafe_1234_5678);
+    let mut ref_state = 0x5eed_cafe_1234_5678u64;
+    let next_ref = |st: &mut u64| -> u64 {
+        *st = st.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        let mut z = *st;
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        z ^ (z >> 31)
+    };
+    let prefix = b"MAGIC_HDR";
+    for step in 0..256usize {
+        let max_len = (step * 7) % 128;
+        let got = port_rng.bytes(max_len, prefix);
+        let len = (next_ref(&mut ref_state) % (max_len as u64 + 1)) as usize;
+        let keep_prefix = next_ref(&mut ref_state).is_multiple_of(4);
+        let mut want = Vec::with_capacity(len);
+        for i in 0..len {
+            let b = match prefix.get(i) {
+                Some(p) if keep_prefix => *p,
+                _ => (next_ref(&mut ref_state) >> 56) as u8,
+            };
+            want.push(b);
+        }
+        assert_eq!(got, want, "splitmix64 step {step}");
+    }
 }
 
 #[test]
