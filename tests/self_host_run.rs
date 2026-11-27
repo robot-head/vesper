@@ -13,7 +13,9 @@
 //!
 //! `run_cost` (ignored; `CHECK_HARNESS_SPEED=1`): ABBA of the Vesper
 //! machine (encoding included) against `Runtime::run` (lowering and
-//! optimizing included) on the programs it runs.
+//! optimizing included) on the programs it runs. With `FLIP_GATE` set it
+//! prints the `flip-gate pairs run` line `aspect ci flip-gate -- run`
+//! reads instead (scripts/ci/flip-gate/run.json).
 #[path = "common/check_harness.rs"]
 mod check_harness;
 #[path = "common/check_words.rs"]
@@ -28,6 +30,10 @@ use run_words::{Answer, decode, program, run_input, world_declines};
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
 use vesper::check::World;
+
+/// The flip gate's workload name for [`run_cost`]
+/// (scripts/ci/flip-gate/run.json).
+const GATE_WORKLOAD: &str = "run";
 
 fn package() -> &'static Package {
     static P: OnceLock<Package> = OnceLock::new();
@@ -332,8 +338,11 @@ const PROGRAMS: &[(&str, &str)] = &[
          fn main() -> (i64, i64, i64, i64) { (name(0), name(1), name(255), name(7)) }",
     ),
     (
+        // Spins in a loop, not by recursion: ten million frames of the
+        // Rust evaluator's stack took 7 GB, enough to kill the run on a
+        // 15 GB host. The small-fuel configs still cut recursion short.
         "unbounded",
-        "fn spin(n: i64) -> i64 { spin(wrapping_add(n, 1)) } fn main() -> i64 { spin(0) }",
+        "fn main() -> i64 { let mut n = 0; loop { n = wrapping_add(n, 1); } n }",
     ),
     (
         "options",
@@ -516,6 +525,10 @@ fn run_matches_rust() {
     for d in diffs.iter().take(20) {
         eprintln!("{d}");
     }
+    println!(
+        "flip-gate differential differences={} cases={ran}",
+        diffs.len()
+    );
     assert!(diffs.is_empty(), "{} differences", diffs.len());
     assert!(programs_ran > 0, "no program ran in Vesper");
 }
@@ -550,6 +563,10 @@ fn run_cost() {
             }
         })
     };
+    if flip_gate::on() {
+        flip_gate::pairs(GATE_WORKLOAD, &mut rust, &mut vesper);
+        return;
+    }
     let label = format!("run over {} programs", ours.len());
     let (_, _, hi) = abba_ci(&label, 15, &mut rust, &mut vesper);
     assert!(hi <= 1.5, "the 95% CI upper bound {hi:.3}x is above 1.50x");
