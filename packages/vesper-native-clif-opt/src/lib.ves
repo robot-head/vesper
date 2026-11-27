@@ -17,12 +17,15 @@
 // vector_registers; cleanup.ves, remove_dead and sink_slot_inits. Part 5:
 // loops.ves, share_invariant_loads and hoist_loop_invariants; tails.ves,
 // merge_tails (with the shapes section of the words).
+// diamonds.ves (#2605): if_convert_pure_diamonds and
+// dense_icmp_chains_to_br_table.
 
 use self::extends::{fold_narrow_extends, fold_trivial_arith_and_bool_extends};
 use self::vector::{vector_registers};
 use self::cleanup::{remove_dead, sink_slot_inits};
 use self::loops::{hoist_loop_invariants, share_invariant_loads};
 use self::tails::{merge_tails};
+use self::diamonds::{dense_icmp_chains_to_br_table, if_convert_pure_diamonds};
 use self::slots::{promote_slots, split_join_slots};
 use self::folds::{canonicalize_imm_ops, cse_dom_pure, fold_load_store_offsets};
 use self::branches::{
@@ -64,6 +67,9 @@ pub const STEP_PROPAGATE_BRANCH_CONDITIONS: u64 = 36;
 pub const STEP_CANONICALIZE_IMM_OPS: u64 = 37;
 pub const STEP_FOLD_LOAD_STORE_OFFSETS: u64 = 38;
 pub const STEP_CSE_DOM_PURE: u64 = 39;
+// 40 up: if-conversion and the br_table chains (#2605, diamonds.ves).
+pub const STEP_IF_CONVERT_PURE_DIAMONDS: u64 = 40;
+pub const STEP_DENSE_ICMP_CHAINS_TO_BR_TABLE: u64 = 41;
 
 // The answer's first word.
 pub const PORTED: u64 = 1;
@@ -675,7 +681,9 @@ pub fn clif_opt_words(in input: Str) -> ChunkSeq[u64] {
         || step == STEP_PROPAGATE_BRANCH_CONDITIONS
         || step == STEP_CANONICALIZE_IMM_OPS
         || step == STEP_FOLD_LOAD_STORE_OFFSETS
-        || step == STEP_CSE_DOM_PURE;
+        || step == STEP_CSE_DOM_PURE
+        || step == STEP_IF_CONVERT_PURE_DIAMONDS
+        || step == STEP_DENSE_ICMP_CHAINS_TO_BR_TABLE;
     if !ported || bytes.len() < STEP_BYTES {
         out.push(NOT_PORTED);
         return out;
@@ -729,6 +737,10 @@ pub fn clif_opt_words(in input: Str) -> ChunkSeq[u64] {
         fold_load_store_offsets(inout f);
     } else if step == STEP_CSE_DOM_PURE {
         cse_dom_pure(inout f);
+    } else if step == STEP_IF_CONVERT_PURE_DIAMONDS {
+        if_convert_pure_diamonds(inout f);
+    } else if step == STEP_DENSE_ICMP_CHAINS_TO_BR_TABLE {
+        dense_icmp_chains_to_br_table(inout f);
     } else {
         remove_constant_params(inout f);
     }

@@ -50,6 +50,8 @@ const PORTED: &[(&str, u64)] = &[
     ("canonicalize_imm_ops", 37),
     ("fold_load_store_offsets", 38),
     ("cse_dom_pure", 39),
+    ("if_convert_pure_diamonds", 40),
+    ("dense_icmp_chains_to_br_table", 41),
 ];
 
 /// The package's answer word for a step it ran.

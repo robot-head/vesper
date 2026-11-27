@@ -94,6 +94,9 @@
 //! - [`E_REPLACE_ICMP_IMM`] `inst cond arg imm`: `dfg.replace(inst).icmp_imm`;
 //! - [`E_MEM_ADDR`] `inst addr offset`: a load's or store's address and
 //!   offset.
+//! - [`E_PLACE_AFTER`] `block after`: `layout.insert_block_after`
+//!   (`dense_icmp_chains_to_br_table`, #2605). A `br_table` is an [`E_INS`]
+//!   whose destinations are the default block, then the table's blocks.
 #![allow(dead_code)]
 
 use cranelift_codegen::cursor::{Cursor as _, FuncCursor};
@@ -150,6 +153,8 @@ pub const E_ICONST: u64 = 68;
 pub const E_REPLACE_IMM: u64 = 69;
 pub const E_REPLACE_ICMP_IMM: u64 = 70;
 pub const E_MEM_ADDR: u64 = 71;
+// 80 up: if_convert_pure_diamonds and dense_icmp_chains_to_br_table (#2605).
+pub const E_PLACE_AFTER: u64 = 80;
 
 /// Memory flag bits of the `mem` word.
 pub const M_READONLY: u64 = 1;
@@ -273,6 +278,14 @@ pub const OPCODES: &[Opcode] = &[
     Opcode::Fcmp,
 ];
 
+/// The first code of [`OPCODES_FROM_90`].
+pub const HIGH_OPCODE_BASE: u64 = 90;
+
+/// Opcode codes from [`HIGH_OPCODE_BASE`] up (`if_convert_pure_diamonds`,
+/// #2605), kept apart from [`OPCODES`] so appends there do not move them.
+/// Append only.
+pub const OPCODES_FROM_90: &[Opcode] = &[Opcode::Clz, Opcode::Ctz, Opcode::Popcnt, Opcode::Bitrev];
+
 /// Type codes, 1 up (0 is any other type).
 pub const TYPES: &[Type] = &[
     types::I8,
@@ -312,6 +325,9 @@ pub fn opcode_code(op: Opcode) -> u64 {
         for (i, &o) in OPCODES.iter().enumerate() {
             t[o as usize] = i as u8 + 1;
         }
+        for (i, &o) in OPCODES_FROM_90.iter().enumerate() {
+            t[o as usize] = (HIGH_OPCODE_BASE as usize + i) as u8;
+        }
         t
     });
     table[op as usize] as u64
@@ -339,10 +355,12 @@ pub fn type_code(t: Type) -> u64 {
 }
 
 fn opcode_of(code: u64) -> Result<Opcode, String> {
-    OPCODES
-        .get((code as usize).wrapping_sub(1))
-        .copied()
-        .ok_or_else(|| format!("opcode code {code}"))
+    let found = if code >= HIGH_OPCODE_BASE {
+        OPCODES_FROM_90.get((code - HIGH_OPCODE_BASE) as usize)
+    } else {
+        OPCODES.get((code as usize).wrapping_sub(1))
+    };
+    found.copied().ok_or_else(|| format!("opcode code {code}"))
 }
 
 fn type_of(code: u64) -> Result<Type, String> {
@@ -997,6 +1015,11 @@ pub fn apply(func: &mut ir::Function, words: &[u64]) -> Result<(), String> {
                     _ => return Err(format!("{inst}: no address to fold into")),
                 }
             }
+            E_PLACE_AFTER => {
+                let b = s.block()?;
+                let after = s.block()?;
+                func.layout.insert_block_after(b, after);
+            }
             E_SLOT_SIZE => {
                 let slot = ir::StackSlot::from_u32(s.next()? as u32);
                 let size = u32::try_from(s.next()?).map_err(|e| e.to_string())?;
@@ -1108,6 +1131,34 @@ fn build(func: &mut ir::Function, place: Place, s: &mut Script) -> Result<Inst, 
         Opcode::Bnot => {
             arity(1)?;
             ins.bnot(a(0))
+        }
+        Opcode::Select => {
+            arity(3)?;
+            ins.select(a(0), a(1), a(2))
+        }
+        Opcode::Uextend => {
+            arity(1)?;
+            ins.uextend(type_of(ty_word)?, a(0))
+        }
+        Opcode::Ireduce => {
+            arity(1)?;
+            ins.ireduce(type_of(ty_word)?, a(0))
+        }
+        Opcode::BrTable => {
+            arity(1)?;
+            let Some(((default, _), entries)) = dests.split_first() else {
+                return Err("br_table: no default destination".into());
+            };
+            let pool = &mut pos.func.dfg.value_lists;
+            let table: Vec<ir::BlockCall> = entries
+                .iter()
+                .map(|(b, _)| ir::BlockCall::new(*b, [], pool))
+                .collect();
+            let default = ir::BlockCall::new(*default, [], pool);
+            let jt_data = ir::JumpTableData::new(default, &table);
+            let jt = pos.func.create_jump_table(jt_data);
+            pos.ins().br_table(a(0), jt);
+            return made_inst(func, place);
         }
         Opcode::Splat => {
             arity(1)?;
