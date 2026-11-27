@@ -1,0 +1,586 @@
+// The planner's answer as the binding generator's input (#2270, the Stage 2
+// bootstrap switch, slice 1): plan.ves `write_plan`'s words read the way
+// tests/self_host_codegen_export/plan_words.rs `decode_plan` reads them,
+// then written the way tests/self_host_codegen_export/words.rs
+// `binding_input` writes a `LibraryInterface` and its `BindingOptions`.
+// With it, plan, interface file and binding run in Vesper end to end, with
+// no Rust `LibraryInterface` between them.
+//
+// The answer's types are trees of `put_type` words; the binding input
+// hash-conses them in post-order, naming each node before its parts, and
+// names every string at its first use, in `binding_input`'s order. The
+// interface's declarations go in name order (Rust's `BTreeMap`).
+
+use @vesper/check-data::util::{inc, u64_at, w};
+use @vesper/check-data::names::{Names, names_new};
+use self::iface::{
+    K_BOX, K_CALLBACK, K_EXTERN, K_NAMED, K_OBJECT, K_SCALAR, K_SEQ, K_SLICE, K_STR, K_TUPLE
+};
+use self::text::{WORD_BYTES, WORD_ROUND_UP};
+
+// A byte of a little-endian word.
+const BYTE_MASK: u64 = 255;
+const BYTE_BITS: u64 = 8;
+
+// The answer's status word: the interface follows.
+const PLAN_OK: u64 = 0;
+
+// `Mirror` in the answer: none, `repr(C)`, converted (a reason follows).
+const MIRROR_NONE: u64 = 0;
+const MIRROR_REPR_C: u64 = 1;
+const MIRROR_CONVERTED: u64 = 2;
+
+// A parameter's pass in the binding input: none, `in`, `inout`, `sink`,
+// another spelling (its name follows).
+const PASS_NONE: u64 = 0;
+const PASS_IN: u64 = 1;
+const PASS_INOUT: u64 = 2;
+const PASS_SINK: u64 = 3;
+const PASS_OTHER: u64 = 4;
+
+// The words of a type node before its parts: kind, name, flag, part count.
+const NODE_HEAD: u64 = 4;
+
+struct H {
+    // the answer
+    a: ChunkSeq[u64],
+    names: Names,
+    // per symbol, its index in the binding input's names + 1 (0 before
+    // its first use; `names_new` holds symbols the input never names)
+    index: ChunkSeq[u64],
+    // the binding input's names, as symbols in index order
+    order: ChunkSeq[u32],
+    // the hash-consed nodes, in index order, and where each starts
+    nodes: ChunkSeq[u64],
+    starts: ChunkSeq[u64],
+    out: ChunkSeq[u64],
+}
+
+fn at(in a: ChunkSeq[u64], p: u64) -> u64 {
+    u64_at(in a, p)
+}
+
+// The word after the string at `p` (its length, then its words).
+fn str_end(in a: ChunkSeq[u64], p: u64) -> u64 {
+    let len = at(in a, p);
+    wrapping_add(inc(p), wrapping_add(len, WORD_ROUND_UP) / WORD_BYTES)
+}
+
+fn str_byte(in a: ChunkSeq[u64], p: u64, i: u64) -> u8 {
+    let word = at(in a, wrapping_add(inc(p), i / WORD_BYTES));
+    wrapping_u8(
+        wrapping_shr_u64(word, wrapping_u32(wrapping_mul(i % WORD_BYTES, BYTE_BITS))) & BYTE_MASK
+    )
+}
+
+fn str_bytes(in a: ChunkSeq[u64], p: u64) -> ChunkSeq[u8] {
+    let mut o = ChunkSeq::new[u8]();
+    for i in 0..at(in a, p) {
+        o.push(str_byte(in a, p, i));
+    }
+    o
+}
+
+// Whether the string at `p` spells `s`.
+fn str_is(in a: ChunkSeq[u64], p: u64, in s: Str) -> bool {
+    let b = s.as_bytes();
+    if at(in a, p) != b.len() {
+        return false;
+    }
+    for i in 0..b.len() {
+        if str_byte(in a, p, i) != b.try_get(i).unwrap_or(0) {
+            return false;
+        }
+    }
+    true
+}
+
+// The strings at `p` and `q` in byte order: negative, zero or positive.
+fn str_cmp(in a: ChunkSeq[u64], p: u64, q: u64) -> i64 {
+    let lp = at(in a, p);
+    let lq = at(in a, q);
+    let n = if lp < lq { lp } else { lq };
+    for i in 0..n {
+        let x = str_byte(in a, p, i);
+        let y = str_byte(in a, q, i);
+        if x < y {
+            return -1;
+        }
+        if x > y {
+            return 1;
+        }
+    }
+    if lp < lq {
+        -1
+    } else if lp > lq {
+        1
+    } else {
+        0
+    }
+}
+
+// The word after the type at `p` (`put_type`).
+fn skip_ty(in a: ChunkSeq[u64], p: u64) -> u64 {
+    let kind = at(in a, p);
+    let q = inc(p);
+    if kind == widen_u64(K_SCALAR)
+        || kind == widen_u64(K_OBJECT)
+        || kind == widen_u64(K_EXTERN)
+        || kind == widen_u64(K_CALLBACK)
+    {
+        return str_end(in a, q);
+    }
+    if kind == widen_u64(K_STR) {
+        return inc(q);
+    }
+    if kind == widen_u64(K_TUPLE) || kind == widen_u64(K_NAMED) {
+        let mut r = if kind == widen_u64(K_NAMED) {
+            str_end(in a, q)
+        } else {
+            q
+        };
+        let n = at(in a, r);
+        r = inc(r);
+        for _i in 0..n {
+            r = skip_ty(in a, r);
+        }
+        return r;
+    }
+    skip_ty(in a, q)
+}
+
+// The word after the optional string at `p`.
+fn opt_end(in a: ChunkSeq[u64], p: u64) -> u64 {
+    if at(in a, p) == 0 {
+        inc(p)
+    } else {
+        str_end(in a, inc(p))
+    }
+}
+
+impl H {
+    fn push(inout self, x: u64) {
+        self.out.push(x);
+    }
+
+    // `Enc::name` of `bytes`: its index, numbered at its first use.
+    fn name_of(inout self, in bytes: Slice[u8]) -> u64 {
+        let sym = self.names.intern(in bytes);
+        loop {
+            if self.index.len() > w(sym) {
+                break;
+            }
+            self.index.push(0);
+        }
+        let i = u64_at(in self.index, w(sym));
+        if i != 0 {
+            return wrapping_sub(i, 1);
+        }
+        let next = self.order.len();
+        let ok = self.index.try_set(w(sym), inc(next));
+        self.order.push(sym);
+        next
+    }
+
+    // `Enc::name` of the string at `p`.
+    fn name(inout self, p: u64) -> u64 {
+        let b = str_bytes(in self.a, p);
+        self.name_of(in b.as_slice())
+    }
+
+    // `Enc::opt` of the optional string at `p`.
+    fn opt(inout self, p: u64) -> u64 {
+        if at(in self.a, p) == 0 {
+            0
+        } else {
+            inc(self.name(inc(p)))
+        }
+    }
+
+    // The index of a node, adding it when new.
+    fn node(inout self, in key: ChunkSeq[u64]) -> u64 {
+        for i in 0..self.starts.len() {
+            let s = at(in self.starts, i);
+            let n = wrapping_add(NODE_HEAD, at(in self.nodes, wrapping_add(s, 3)));
+            if n == key.len() {
+                let mut same = true;
+                for j in 0..n {
+                    if at(in self.nodes, wrapping_add(s, j)) != at(in key, j) {
+                        same = false;
+                        break;
+                    }
+                }
+                if same {
+                    return i;
+                }
+            }
+        }
+        let i = self.starts.len();
+        self.starts.push(self.nodes.len());
+        self.nodes.extend(in key.as_slice());
+        i
+    }
+
+    // `Enc::ty` of the type at `p`: its index, and the word after it.
+    fn ty(inout self, p: u64) -> (u64, u64) {
+        let kind = at(in self.a, p);
+        let q = inc(p);
+        let mut name: u64 = 0;
+        let mut flag: u64 = 0;
+        let mut ids = ChunkSeq::new[u64]();
+        let mut r = q;
+        if kind == widen_u64(K_SCALAR)
+            || kind == widen_u64(K_OBJECT)
+            || kind == widen_u64(K_EXTERN)
+            || kind == widen_u64(K_CALLBACK)
+        {
+            name = self.name(q);
+            r = str_end(in self.a, q);
+        } else if kind == widen_u64(K_STR) {
+            flag = at(in self.a, q);
+            r = inc(q);
+        } else if kind == widen_u64(K_TUPLE) || kind == widen_u64(K_NAMED) {
+            if kind == widen_u64(K_NAMED) {
+                name = self.name(q);
+                r = str_end(in self.a, q);
+            }
+            let n = at(in self.a, r);
+            r = inc(r);
+            for _i in 0..n {
+                let (id, next) = self.ty(r);
+                ids.push(id);
+                r = next;
+            }
+        } else {
+            let (id, next) = self.ty(q);
+            ids.push(id);
+            r = next;
+        }
+        let mut key = ChunkSeq::new[u64]();
+        key.push(kind);
+        key.push(name);
+        key.push(flag);
+        key.push(ids.len());
+        key.extend(in ids.as_slice());
+        (self.node(in key), r)
+    }
+
+    // One declaration at `p` (`decode_plan`'s type decl), written.
+    fn decl(inout self, p: u64) {
+        let name = self.name(p);
+        let mut r = str_end(in self.a, p);
+        let is_enum = at(in self.a, r);
+        let words = at(in self.a, inc(r));
+        let handle = at(in self.a, wrapping_add(r, 2));
+        let linear = at(in self.a, wrapping_add(r, 3));
+        r = wrapping_add(r, 4);
+        let drop = self.opt(r);
+        r = opt_end(in self.a, r);
+        let owns = at(in self.a, r);
+        r = inc(r);
+        let m = at(in self.a, r);
+        r = inc(r);
+        let mut mirror = MIRROR_NONE;
+        let mut reason: u64 = 0;
+        if m == MIRROR_REPR_C {
+            mirror = MIRROR_REPR_C;
+        } else if m != MIRROR_NONE {
+            mirror = MIRROR_CONVERTED;
+            reason = inc(self.name(r));
+            r = str_end(in self.a, r);
+        }
+        let nv = at(in self.a, r);
+        r = inc(r);
+        self.push(name);
+        self.push(is_enum);
+        self.push(words);
+        self.push(handle);
+        self.push(linear);
+        self.push(drop);
+        self.push(owns);
+        self.push(mirror);
+        self.push(reason);
+        self.push(nv);
+        for _v in 0..nv {
+            let vname = self.name(r);
+            r = str_end(in self.a, r);
+            let nf = at(in self.a, r);
+            r = inc(r);
+            self.push(vname);
+            self.push(nf);
+            for _f in 0..nf {
+                let fname = self.name(r);
+                r = str_end(in self.a, r);
+                let (t, next) = self.ty(r);
+                r = next;
+                let offset = at(in self.a, r);
+                r = inc(r);
+                self.push(fname);
+                self.push(t);
+                self.push(offset);
+            }
+        }
+    }
+
+    // One exported function at `p`, written; the word after it.
+    fn function(inout self, p: u64) -> u64 {
+        let name = self.name(p);
+        let mut r = str_end(in self.a, p);
+        let symbol = self.name(r);
+        r = str_end(in self.a, r);
+        let np = at(in self.a, r);
+        r = inc(r);
+        self.push(name);
+        self.push(symbol);
+        self.push(np);
+        for _i in 0..np {
+            let pname = self.name(r);
+            r = str_end(in self.a, r);
+            let (t, next) = self.ty(r);
+            r = next;
+            let pointer = at(in self.a, r);
+            r = inc(r);
+            let mut pass = PASS_NONE;
+            let mut other: u64 = 0;
+            let has_pass = at(in self.a, r) != 0;
+            r = inc(r);
+            if has_pass {
+                if str_is(in self.a, r, "in") {
+                    pass = PASS_IN;
+                } else if str_is(in self.a, r, "inout") {
+                    pass = PASS_INOUT;
+                } else if str_is(in self.a, r, "sink") {
+                    pass = PASS_SINK;
+                } else {
+                    pass = PASS_OTHER;
+                    other = r;
+                }
+                r = str_end(in self.a, r);
+            }
+            let in_place = at(in self.a, r);
+            r = inc(r);
+            self.push(pname);
+            self.push(t);
+            self.push(pointer);
+            self.push(pass);
+            if pass == PASS_OTHER {
+                let o = inc(self.name(other));
+                self.push(o);
+            }
+            self.push(in_place);
+        }
+        let (result, next) = self.ty(r);
+        r = next;
+        let result_words = at(in self.a, r);
+        let result_pointer = at(in self.a, inc(r));
+        r = wrapping_add(r, 2);
+        let ne = at(in self.a, r);
+        r = inc(r);
+        self.push(result);
+        self.push(result_words);
+        self.push(result_pointer);
+        self.push(ne);
+        for _i in 0..ne {
+            let (t, next2) = self.ty(r);
+            r = next2;
+            self.push(t);
+        }
+        let fail = at(in self.a, r);
+        r = inc(r);
+        let instance_of = self.opt(r);
+        r = opt_end(in self.a, r);
+        let nf = at(in self.a, r);
+        r = inc(r);
+        self.push(fail);
+        self.push(instance_of);
+        self.push(nf);
+        for _i in 0..nf {
+            let l = self.name(r);
+            r = str_end(in self.a, r);
+            self.push(l);
+        }
+        let result_in_place = at(in self.a, r);
+        self.push(result_in_place);
+        inc(r)
+    }
+
+    // One foreign library at `p`, written; the word after it.
+    fn foreign(inout self, p: u64) -> u64 {
+        let name = self.name(p);
+        let mut r = str_end(in self.a, p);
+        let handler = self.name(r);
+        r = str_end(in self.a, r);
+        let ns = at(in self.a, r);
+        r = inc(r);
+        self.push(name);
+        self.push(handler);
+        self.push(ns);
+        for _i in 0..ns {
+            let s = self.name(r);
+            r = str_end(in self.a, r);
+            self.push(s);
+        }
+        let rust_path = self.opt(r);
+        self.push(rust_path);
+        opt_end(in self.a, r)
+    }
+}
+
+// The word after the declaration at `p`.
+fn skip_decl(in a: ChunkSeq[u64], p: u64) -> u64 {
+    let mut r = wrapping_add(str_end(in a, p), 4);
+    r = opt_end(in a, r);
+    r = inc(r);
+    let m = at(in a, r);
+    r = inc(r);
+    if m != MIRROR_NONE && m != MIRROR_REPR_C {
+        r = str_end(in a, r);
+    }
+    let nv = at(in a, r);
+    r = inc(r);
+    for _v in 0..nv {
+        r = str_end(in a, r);
+        let nf = at(in a, r);
+        r = inc(r);
+        for _f in 0..nf {
+            r = skip_ty(in a, str_end(in a, r));
+            r = inc(r);
+        }
+    }
+    r
+}
+
+fn put_word_bytes(inout o: ChunkSeq[u8], x: u64) {
+    for i in 0..WORD_BYTES {
+        o.push(wrapping_u8(
+            wrapping_shr_u64(x, wrapping_u32(wrapping_mul(i, BYTE_BITS))) & BYTE_MASK
+        ));
+    }
+}
+
+// `binding_input(decode_plan(answer)?, options)`: the binding generator's
+// input for the planner's answer `answer` and the optional types path
+// (`has_types_path`, `types_path`), or None when the planner refused.
+pub fn binding_input_of_plan(
+    in answer: ChunkSeq[u64],
+    has_types_path: bool,
+    in types_path: Slice[u8]
+) -> Option[ChunkSeq[u8]] {
+    if answer.len() == 0 || at(in answer, 0) != PLAN_OK {
+        return Option::None;
+    }
+    let mut h = H {
+        a: ChunkSeq::new[u64](),
+        names: names_new(),
+        index: ChunkSeq::new[u64](),
+        order: ChunkSeq::new[u32](),
+        nodes: ChunkSeq::new[u64](),
+        starts: ChunkSeq::new[u64](),
+        out: ChunkSeq::new[u64](),
+    };
+    h.a.extend(in answer.as_slice());
+    // The header: abi, library, option_mirrors, then the runtime.
+    let mut r: u64 = 1;
+    let abi = h.name(r);
+    r = str_end(in h.a, r);
+    let library = h.name(r);
+    r = str_end(in h.a, r);
+    let option_mirrors = at(in h.a, r);
+    r = inc(r);
+    h.push(abi);
+    h.push(library);
+    h.push(option_mirrors);
+    if has_types_path {
+        let tp = h.name_of(in types_path);
+        h.push(inc(tp));
+    } else {
+        h.push(0);
+    }
+    if at(in h.a, r) == 0 {
+        h.push(0);
+        r = inc(r);
+    } else {
+        r = inc(r);
+        let seq_new = h.name(r);
+        r = str_end(in h.a, r);
+        let seq_free = h.name(r);
+        r = str_end(in h.a, r);
+        let live = h.name(r);
+        r = str_end(in h.a, r);
+        let box_new = h.opt(r);
+        r = opt_end(in h.a, r);
+        h.push(1);
+        h.push(seq_new);
+        h.push(seq_free);
+        h.push(live);
+        h.push(box_new);
+    }
+    // The declarations, in name order.
+    let nd = at(in h.a, r);
+    r = inc(r);
+    let mut decls = ChunkSeq::new[u64]();
+    for _i in 0..nd {
+        decls.push(r);
+        r = skip_decl(in h.a, r);
+    }
+    for i in 1..decls.len() {
+        let x = at(in decls, i);
+        let mut j = i;
+        loop {
+            if j == 0 {
+                break;
+            }
+            let prev = at(in decls, wrapping_sub(j, 1));
+            if str_cmp(in h.a, prev, x) <= 0 {
+                break;
+            }
+            let ok = decls.try_set(j, prev);
+            j = wrapping_sub(j, 1);
+        }
+        let ok2 = decls.try_set(j, x);
+    }
+    h.push(nd);
+    for i in 0..decls.len() {
+        h.decl(at(in decls, i));
+    }
+    let nfn = at(in h.a, r);
+    r = inc(r);
+    h.push(nfn);
+    for _i in 0..nfn {
+        r = h.function(r);
+    }
+    let nl = at(in h.a, r);
+    r = inc(r);
+    h.push(nl);
+    for _i in 0..nl {
+        r = h.foreign(r);
+    }
+    // `finish`: the names, the nodes, then the rest.
+    let mut o = ChunkSeq::new[u8]();
+    let count = h.order.len();
+    put_word_bytes(inout o, count);
+    let mut text = ChunkSeq::new[u8]();
+    for i in 0..count {
+        text.clear();
+        match h.order.try_get(i) {
+            Option::Some(sym) => h.names.write(sym, inout text),
+            Option::None => {},
+        }
+        put_word_bytes(inout o, text.len());
+        o.extend(in text.as_slice());
+        loop {
+            if o.len() % WORD_BYTES == 0 {
+                break;
+            }
+            o.push(0);
+        }
+    }
+    put_word_bytes(inout o, h.starts.len());
+    for i in 0..h.nodes.len() {
+        put_word_bytes(inout o, at(in h.nodes, i));
+    }
+    for i in 0..h.out.len() {
+        put_word_bytes(inout o, at(in h.out, i));
+    }
+    Option::Some(o)
+}

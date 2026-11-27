@@ -584,9 +584,9 @@ const PLAN_CASES: &[(&str, &str)] = &[
     ),
 ];
 
-#[test]
-fn vesper_plans_match_rust() {
-    let entry = package().entry("export_plan", true);
+/// The planner cases, then every selected single-file port's source, as
+/// (library, source).
+fn plan_sources() -> Vec<(String, String)> {
     let scratch = std::env::temp_dir().join(format!("vesper-plan-{}", std::process::id()));
     std::fs::create_dir_all(&scratch).expect("scratch directory");
     let mut sources: Vec<(String, String)> = PLAN_CASES
@@ -604,6 +604,13 @@ fn vesper_plans_match_rust() {
         sources.push((port.1.to_string(), text));
     }
     let _ = std::fs::remove_dir_all(&scratch);
+    sources
+}
+
+#[test]
+fn vesper_plans_match_rust() {
+    let entry = package().entry("export_plan", true);
+    let sources = plan_sources();
     let (mut plans, mut bad, mut refused, mut none) = (0, 0, 0, vec![]);
     for (library, source) in &sources {
         let seen = planned(source, library);
@@ -630,6 +637,70 @@ fn vesper_plans_match_rust() {
         sources.len(),
         none.len()
     );
+    assert_eq!(bad, 0);
+}
+
+/// The planner's answer handed to the binding generator in Vesper
+/// (handoff.ves, #2270) against Rust's `binding_input(decode_plan(answer))`,
+/// for every plan of [`plan_sources`] and every binding-options variant.
+/// A word of the harness's inputs and answers, in bytes.
+const WORD_BYTES: usize = 8;
+/// `plan_binding_input`'s status word when the planner exported.
+const HANDOFF_OK: u64 = 1;
+
+#[test]
+fn vesper_binding_inputs_match_rust() {
+    let plan = package().entry("export_plan", true);
+    let handoff = package().entry("plan_binding_input", true);
+    let (mut inputs, mut refused, mut bad) = (0, 0, 0);
+    for (library, source) in &plan_sources() {
+        for (input, _) in planned(source, library) {
+            let answer = plan.words(&input);
+            let decoded = plan_words::decode_plan(&answer);
+            for types_path in [None, Some("crate::alt::types")] {
+                let mut request: Vec<u8> = vec![];
+                request.extend((types_path.is_some() as u64).to_le_bytes());
+                let path = types_path.unwrap_or("");
+                request.extend((path.len() as u64).to_le_bytes());
+                request.extend(path.as_bytes());
+                while !request.len().is_multiple_of(WORD_BYTES) {
+                    request.push(0);
+                }
+                for w in &answer {
+                    request.extend(w.to_le_bytes());
+                }
+                let got = handoff.words(&request);
+                let vesper = match got.first() {
+                    Some(&HANDOFF_OK) => {
+                        let len = got[1] as usize;
+                        let mut b: Vec<u8> =
+                            got[2..].iter().flat_map(|w| w.to_le_bytes()).collect();
+                        b.truncate(len);
+                        Some(b)
+                    }
+                    _ => None,
+                };
+                let rust = decoded.as_ref().ok().map(|i| {
+                    words::binding_input(
+                        i,
+                        &BindingOptions {
+                            types_path: types_path.map(str::to_string),
+                        },
+                    )
+                });
+                inputs += 1;
+                refused += rust.is_none() as usize;
+                if vesper != rust {
+                    bad += 1;
+                    if bad <= 5 {
+                        eprintln!("binding input: {library} ({types_path:?}) differs");
+                    }
+                }
+            }
+        }
+    }
+    eprintln!("binding inputs: {bad} of {inputs} differ ({refused} refused plans)");
+    assert!(inputs > refused);
     assert_eq!(bad, 0);
 }
 
