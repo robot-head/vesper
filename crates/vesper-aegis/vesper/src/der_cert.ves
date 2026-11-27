@@ -1,0 +1,198 @@
+// @vesper/aegis::der_cert: X.509 DER certificate TLV parser (`src/chain.rs` `RawCert::parse`).
+
+const DER_BIT_STRING: u64 = 0x03;
+const DER_CONTEXT_0: u64 = 0xa0;
+const DER_LONG_FORM: u64 = 0x80;
+const DER_LENGTH_OCTETS_MASK: u64 = 0x7f;
+const DER_MAX_LENGTH_OCTETS: u64 = 4;
+const DER_SHORT_HEADER: u64 = 2;
+
+const TBS_ISSUER: u64 = 2;
+const TBS_SUBJECT: u64 = 4;
+const TBS_SPKI: u64 = 5;
+
+const OUT_TBS_START: u64 = 0;
+const OUT_TBS_END: u64 = 1;
+const OUT_SIG_ALG_START: u64 = 2;
+const OUT_SIG_ALG_END: u64 = 3;
+const OUT_SIG_START: u64 = 4;
+const OUT_SIG_END: u64 = 5;
+const OUT_ISSUER_START: u64 = 6;
+const OUT_ISSUER_END: u64 = 7;
+const OUT_SUBJECT_START: u64 = 8;
+const OUT_SUBJECT_END: u64 = 9;
+const OUT_SPKI_START: u64 = 10;
+const OUT_SPKI_END: u64 = 11;
+const OUT_SPKI_ALG_START: u64 = 12;
+const OUT_SPKI_ALG_END: u64 = 13;
+const OUT_LEN: u64 = 14;
+const BYTE_SHIFT: u64 = 8;
+
+const ERR_OK: u64 = 0;
+const ERR_OUTER: u64 = 1;
+const ERR_TRAILING: u64 = 2;
+const ERR_TBS: u64 = 3;
+const ERR_SIG_ALG: u64 = 4;
+const ERR_SIG_VAL: u64 = 5;
+const ERR_SIG_UNUSED: u64 = 6;
+const ERR_TBS_FIELD: u64 = 7;
+const ERR_SPKI: u64 = 8;
+
+fn byte_at(in b: Slice[u8], i: u64) -> u64 {
+    match b.try_get(i) {
+        Option::Some(v) => widen_u64(v),
+        Option::None => 0,
+    }
+}
+
+// Parse one DER TLV starting at `pos` within `pos..limit`.
+// Returns `(ok, header_end, tlv_end)`.
+fn tlv_at(in b: Slice[u8], pos: u64, limit: u64) -> (bool, u64, u64) {
+    if wrapping_add(pos, DER_SHORT_HEADER) > limit {
+        return (false, 0, 0);
+    }
+    let first_len = byte_at(in b, wrapping_add(pos, 1));
+    let mut len: u64 = 0;
+    let mut header: u64 = DER_SHORT_HEADER;
+    if first_len < DER_LONG_FORM {
+        len = first_len;
+    } else {
+        let n = first_len & DER_LENGTH_OCTETS_MASK;
+        if n == 0 || n > DER_MAX_LENGTH_OCTETS {
+            return (false, 0, 0);
+        }
+        header = wrapping_add(DER_SHORT_HEADER, n);
+        if wrapping_add(pos, header) > limit {
+            return (false, 0, 0);
+        }
+        let mut k: u64 = 0;
+        loop {
+            if k >= n {
+                break;
+            }
+            let x = byte_at(in b, wrapping_add(wrapping_add(pos, DER_SHORT_HEADER), k));
+            len = (len << BYTE_SHIFT) | x;
+            k = wrapping_add(k, 1);
+        }
+    }
+    let body_start = wrapping_add(pos, header);
+    if len > wrapping_sub(limit, body_start) {
+        return (false, 0, 0);
+    }
+    (true, body_start, wrapping_add(body_start, len))
+}
+
+// Parse an X.509 DER certificate into 7 `(start, end)` byte spans written to `out[0..14]`:
+// 0..2: tbs, 2..4: signature_alg, 4..6: signature,
+// 6..8: issuer, 8..10: subject, 10..12: spki, 12..14: spki_alg.
+pub fn parse_raw_cert(in der: Slice[u8], inout out: Slice[u64]) -> u64 {
+    if out.len() < OUT_LEN {
+        return ERR_OUTER;
+    }
+    let total = der.len();
+    let (ok0, body_start, outer_end) = tlv_at(in der, 0, total);
+    if !ok0 {
+        return ERR_OUTER;
+    }
+    if outer_end != total {
+        return ERR_TRAILING;
+    }
+
+    // tbs
+    let (ok_tbs, tbs_body_start, tbs_end) = tlv_at(in der, body_start, outer_end);
+    if !ok_tbs {
+        return ERR_TBS;
+    }
+
+    // signatureAlgorithm
+    let (ok_sa, _sa_body, sa_end) = tlv_at(in der, tbs_end, outer_end);
+    if !ok_sa {
+        return ERR_SIG_ALG;
+    }
+
+    // signatureValue (BIT STRING)
+    let (ok_sig, sig_body_start, sig_end) = tlv_at(in der, sa_end, outer_end);
+    if !ok_sig {
+        return ERR_SIG_VAL;
+    }
+    if sig_end != outer_end || byte_at(in der, sa_end) != DER_BIT_STRING {
+        return ERR_SIG_VAL;
+    }
+    if sig_body_start >= sig_end {
+        return ERR_SIG_VAL;
+    }
+    if byte_at(in der, sig_body_start) != 0 {
+        return ERR_SIG_UNUSED;
+    }
+
+    // Walk TBSCertificate fields without allocating.
+    let mut cur = tbs_body_start;
+    let mut idx: u64 = 0;
+    let mut shift: u64 = 0;
+    let mut issuer_s: u64 = 0;
+    let mut issuer_e: u64 = 0;
+    let mut has_issuer = false;
+    let mut subj_s: u64 = 0;
+    let mut subj_e: u64 = 0;
+    let mut has_subj = false;
+    let mut spki_s: u64 = 0;
+    let mut spki_body_s: u64 = 0;
+    let mut spki_e: u64 = 0;
+    let mut has_spki = false;
+
+    loop {
+        if cur >= tbs_end {
+            break;
+        }
+        let (ok_f, f_body, f_end) = tlv_at(in der, cur, tbs_end);
+        if !ok_f {
+            return ERR_TBS_FIELD;
+        }
+        if idx == 0 && byte_at(in der, cur) == DER_CONTEXT_0 {
+            shift = 1;
+        }
+        if idx == wrapping_add(shift, TBS_ISSUER) {
+            issuer_s = cur;
+            issuer_e = f_end;
+            has_issuer = true;
+        } else if idx == wrapping_add(shift, TBS_SUBJECT) {
+            subj_s = cur;
+            subj_e = f_end;
+            has_subj = true;
+        } else if idx == wrapping_add(shift, TBS_SPKI) {
+            spki_s = cur;
+            spki_body_s = f_body;
+            spki_e = f_end;
+            has_spki = true;
+        }
+        cur = f_end;
+        idx = wrapping_add(idx, 1);
+    }
+
+    if !has_spki {
+        return ERR_TBS_FIELD;
+    }
+    let (ok_spki_alg, _spki_alg_body, spki_alg_end) = tlv_at(in der, spki_body_s, spki_e);
+    if !ok_spki_alg {
+        return ERR_SPKI;
+    }
+    if !has_issuer || !has_subj {
+        return ERR_TBS_FIELD;
+    }
+
+    out.try_set(OUT_TBS_START, body_start);
+    out.try_set(OUT_TBS_END, tbs_end);
+    out.try_set(OUT_SIG_ALG_START, tbs_end);
+    out.try_set(OUT_SIG_ALG_END, sa_end);
+    out.try_set(OUT_SIG_START, wrapping_add(sig_body_start, 1));
+    out.try_set(OUT_SIG_END, sig_end);
+    out.try_set(OUT_ISSUER_START, issuer_s);
+    out.try_set(OUT_ISSUER_END, issuer_e);
+    out.try_set(OUT_SUBJECT_START, subj_s);
+    out.try_set(OUT_SUBJECT_END, subj_e);
+    out.try_set(OUT_SPKI_START, spki_s);
+    out.try_set(OUT_SPKI_END, spki_e);
+    out.try_set(OUT_SPKI_ALG_START, spki_body_s);
+    out.try_set(OUT_SPKI_ALG_END, spki_alg_end);
+    ERR_OK
+}

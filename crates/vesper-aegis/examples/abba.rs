@@ -316,10 +316,128 @@ fn epoch(rust_abba: &str, workload: &str, passes: usize, s: &Samples) -> (u64, u
     (a1 + a2, b1 + b2)
 }
 
+/// Rust reference baseline for the `der_cert` in-process ABBA flip-gate
+/// (matches the pre-flip `RawCert::parse` / `tlv` in `src/chain.rs`).
+const DER_CERT_PASSES: usize = 20_000;
+const DER_BIT_STRING: u8 = 0x03;
+const DER_CONTEXT_0: u8 = 0xa0;
+const DER_LONG_FORM: u8 = 0x80;
+const DER_LENGTH_OCTETS_MASK: u8 = 0x7f;
+const DER_MAX_LENGTH_OCTETS: usize = 4;
+const DER_SHORT_HEADER: usize = 2;
+const DER_TBS_ISSUER: usize = 2;
+const DER_TBS_SUBJECT: usize = 4;
+const DER_TBS_SPKI: usize = 5;
+const DER_TBS_INIT_CAP: usize = 8;
+
+fn rust_der_tlv(b: &[u8]) -> Option<(&[u8], &[u8])> {
+    let first_len = *b.get(1)?;
+    let (len, header) = if first_len < DER_LONG_FORM {
+        (usize::from(first_len), DER_SHORT_HEADER)
+    } else {
+        let n = usize::from(first_len & DER_LENGTH_OCTETS_MASK);
+        if n == 0 || n > DER_MAX_LENGTH_OCTETS {
+            return None;
+        }
+        let mut len = 0usize;
+        for &x in b.get(DER_SHORT_HEADER..DER_SHORT_HEADER + n)? {
+            len = (len << 8) | usize::from(x);
+        }
+        (len, DER_SHORT_HEADER + n)
+    };
+    let end = header.checked_add(len)?;
+    if end > b.len() {
+        return None;
+    }
+    Some(b.split_at(end))
+}
+
+fn rust_der_contents(t: &[u8]) -> Option<&[u8]> {
+    let header = if t[1] < DER_LONG_FORM {
+        DER_SHORT_HEADER
+    } else {
+        DER_SHORT_HEADER + usize::from(t[1] & DER_LENGTH_OCTETS_MASK)
+    };
+    t.get(header..)
+}
+
+fn rust_parse_raw_cert(der: &[u8]) -> Option<(usize, usize)> {
+    let (outer, rest) = rust_der_tlv(der)?;
+    if !rest.is_empty() {
+        return None;
+    }
+    let body = rust_der_contents(outer)?;
+    let (tbs, body) = rust_der_tlv(body)?;
+    let (_signature_alg, body) = rust_der_tlv(body)?;
+    let (sig, body) = rust_der_tlv(body)?;
+    if !body.is_empty() || sig[0] != DER_BIT_STRING {
+        return None;
+    }
+    let sig = rust_der_contents(sig)?;
+    let (&unused, _signature) = sig.split_first()?;
+    if unused != 0 {
+        return None;
+    }
+    let mut t = rust_der_contents(tbs)?;
+    let mut fields = Vec::with_capacity(DER_TBS_INIT_CAP);
+    while !t.is_empty() {
+        let (f, rest) = rust_der_tlv(t)?;
+        fields.push(f);
+        t = rest;
+    }
+    let o = usize::from(fields.first().is_some_and(|f| f[0] == DER_CONTEXT_0));
+    let _issuer = fields.get(o + DER_TBS_ISSUER).copied()?;
+    let _subject = fields.get(o + DER_TBS_SUBJECT).copied()?;
+    let spki = fields.get(o + DER_TBS_SPKI).copied()?;
+    let (spki_alg, _) = rust_der_tlv(rust_der_contents(spki)?)?;
+    Some((tbs.len(), spki_alg.len()))
+}
+
+fn flip_gate_der_cert() {
+    let cert = rcgen::generate_simple_self_signed(vec!["vesper.test".to_string()]).unwrap();
+    let der = cert.cert.der().as_ref().to_vec();
+    assert_eq!(
+        rust_parse_raw_cert(&der).unwrap(),
+        port::chain::parse_raw_cert_for_bench(&der).unwrap()
+    );
+    let run_rust = || -> u64 {
+        let t = Instant::now();
+        for _ in 0..DER_CERT_PASSES {
+            black_box(rust_parse_raw_cert(black_box(&der)).unwrap());
+        }
+        t.elapsed().as_nanos() as u64
+    };
+    let run_port = || -> u64 {
+        let t = Instant::now();
+        for _ in 0..DER_CERT_PASSES {
+            black_box(port::chain::parse_raw_cert_for_bench(black_box(&der)).unwrap());
+        }
+        t.elapsed().as_nanos() as u64
+    };
+    black_box(run_rust());
+    black_box(run_port());
+    let pairs: Vec<String> = (0..FLIP_GATE_EPOCHS)
+        .map(|_| {
+            let a1 = run_rust();
+            let b1 = run_port();
+            let b2 = run_port();
+            let a2 = run_rust();
+            format!("{}:{}", a1 + a2, b1 + b2)
+        })
+        .collect();
+    println!("flip-gate pairs der_cert {}", pairs.join(" "));
+}
+
 fn main() {
     assert_eq!(port::IMPLEMENTATION, "vesper");
-    let s = samples();
     let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some("flip-gate-inproc")
+        && args.get(2).map(String::as_str) == Some("der_cert")
+    {
+        flip_gate_der_cert();
+        return;
+    }
+    let s = samples();
     match args.get(1).map(String::as_str) {
         // `window port` here; `window rust` in a baseline the benchmark task
         // built (the same code over that commit's crate).
