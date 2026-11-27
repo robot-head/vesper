@@ -27,6 +27,7 @@ unsafe extern "C" {
     fn vesper_loom_tuf_tuf_percent_encode_role(name: *mut u64) -> i64;
     fn vesper_loom_tuf_tuf_safe_component(part: *mut u64) -> i64;
     fn vesper_loom_tuf_tuf_sha256_hex(data: i64) -> i64;
+    fn vesper_loom_tuf_tuf_state_checksum(schema_version: i64, timestamp_version: i64, snapshot_version: i64, repo_id: *mut u64, bootstrap_sha256: *mut u64, verified_at: *mut u64, roots_flat: *mut u64, root_lens: *mut u64, role_names_flat: *mut u64, role_name_lens: *mut u64, role_versions: *mut u64) -> i64;
     fn vesper_loom_tuf_tuf_valid_name(name: *mut u64) -> i64;
     fn vesper_loom_tuf_tuf_validate_limits(metadata_file_bytes: i64, metadata_total_bytes: i64, target_bytes: i64, targets_total_bytes: i64, files: i64, directory_depth: i64, json_depth: i64, roles: i64, root_updates: i64, checkpoint_bytes: i64) -> i64;
     fn vesper_loom_tuf_tuf_verify_ed25519_quorum(payload: i64, role_keyids: i64, threshold: i64, pubkeys: i64, sigs: i64) -> i64;
@@ -104,6 +105,15 @@ pub fn tuf_sha256_hex(data: &[u8]) -> Vec<u8> {
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
     let raw = vesper_port_abi::with_seq(data, |seq_data| unsafe { vesper_loom_tuf_tuf_sha256_hex(seq_data as i64) });
+    unsafe { vesper_port_abi::seq_take::<u8>(RUNTIME, raw as u64) }
+}
+
+/// Calls `tuf_state_checksum` of the Vesper library `loom_tuf` (`vesper_loom_tuf_tuf_state_checksum`).
+pub fn tuf_state_checksum(schema_version: u64, timestamp_version: u64, snapshot_version: u64, repo_id: &[u8], bootstrap_sha256: &[u8], verified_at: &[u8], roots_flat: &[u8], root_lens: &[u64], role_names_flat: &[u8], role_name_lens: &[u64], role_versions: &[u64]) -> Vec<u8> {
+    // SAFETY: `vesper_loom_tuf_tuf_state_checksum` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(repo_id, |view_repo_id| vesper_port_abi::with_slice(bootstrap_sha256, |view_bootstrap_sha256| vesper_port_abi::with_slice(verified_at, |view_verified_at| vesper_port_abi::with_slice(roots_flat, |view_roots_flat| vesper_port_abi::with_slice(root_lens, |view_root_lens| vesper_port_abi::with_slice(role_names_flat, |view_role_names_flat| vesper_port_abi::with_slice(role_name_lens, |view_role_name_lens| vesper_port_abi::with_slice(role_versions, |view_role_versions| unsafe { vesper_loom_tuf_tuf_state_checksum(schema_version as i64, timestamp_version as i64, snapshot_version as i64, view_repo_id, view_bootstrap_sha256, view_verified_at, view_roots_flat, view_root_lens, view_role_names_flat, view_role_name_lens, view_role_versions) }))))))));
     unsafe { vesper_port_abi::seq_take::<u8>(RUNTIME, raw as u64) }
 }
 
