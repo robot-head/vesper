@@ -104,6 +104,9 @@ const IEX_SDIV: u64 = 5;
 const IEX_SREM: u64 = 6;
 const IEX_UDIV: u64 = 7;
 const IEX_UREM: u64 = 8;
+const IEX_SHL: u64 = 9;
+const IEX_USHR: u64 = 10;
+const IEX_SSHR: u64 = 11;
 
 // Sub-operations of `INST_WRITE_OP`.
 const WOP_IADD: u64 = 1;
@@ -1060,6 +1063,27 @@ impl Gen {
                 IEX_UREM
             } else {
                 IEX_SREM
+            };
+            kind = INST_INT_EXTRA;
+            extra.push(sub_iex);
+            extra.push(0);
+            extra.push(0);
+            extra.push(k0);
+            extra.push(k1);
+            extra.push(rk);
+            return true;
+        }
+        if op == ops_s.shl || op == ops_s.shr {
+            let ik = self.kind_of(d0);
+            if ik == 0 || kind_wide(ik) || self.ctx.world.may_overflow(i.s0, i.s1) {
+                return false;
+            }
+            let sub_iex = if op == ops_s.shl {
+                IEX_SHL
+            } else if kind_unsigned(ik) {
+                IEX_USHR
+            } else {
+                IEX_SSHR
             };
             kind = INST_INT_EXTRA;
             extra.push(sub_iex);
