@@ -251,6 +251,9 @@ pub struct Ck {
     // `for` range's lowered test and increment): start, end, type.
     extra_rows: ChunkSeq[u64],
     range_sym: u32,
+    // Every method name a trait in scope declares (`traits.resolve` finds
+    // no trait for any other name).
+    pub trait_methods: ChunkSeq[u32],
 }
 
 fn put(inout out: ChunkSeq[u8], in text: Str) {
@@ -317,6 +320,7 @@ pub fn ck_new(sink ctx: Ctx) -> Ck {
         loop_values: ChunkSeq::new[u32](),
         extra_rows: ChunkSeq::new[u64](),
         range_sym: 0,
+        trait_methods: ChunkSeq::new[u32](),
     };
     let pats = pats_new(inout ck.ctx.names);
     ck.pats = pats;
@@ -2080,11 +2084,99 @@ fn assign_expr(inout ck: Ck, ex: Ex) -> u32 {
 
 // ----- calls -----------------------------------------------------------------
 
+// `numeric::wrapping_intrinsic`: `wrapping_add`, `wrapping_sub` or
+// `wrapping_mul`.
+// Whether some trait in scope declares a method named `method`.
+pub fn trait_method(in ck: Ck, method: u32) -> bool {
+    for i in 0..ck.trait_methods.len() {
+        if u32_at(in ck.trait_methods, i) == method {
+            return true;
+        }
+    }
+    false
+}
+
+fn is_wrapping(in ck: Ck, name: u32) -> bool {
+    is_qualified(in ck, name, "wrapping_add")
+        || is_qualified(in ck, name, "wrapping_sub")
+        || is_qualified(in ck, name, "wrapping_mul")
+}
+
+// `Checker::wrapping_call`: two operands of one integer kind, the goal's
+// when it is an integer kind; literal operands settle at the common kind.
+fn wrapping_call(inout ck: Ck, ex: Ex, expected: u32) -> u32 {
+    let hole = ck.ctx.types.infer;
+    if ex.m != 0 {
+        error(inout ck, "E0207", ex.start, ex.end);
+    }
+    if ex.n != 2 {
+        error(inout ck, "E0207", ex.start, ex.end);
+    }
+    for i in 0..w(ex.n) {
+        let arg = ck.arg(add(w(ex.a), i));
+        if arg.pass != P_IN || arg.explicit {
+            let arg_ex = ck.ex(arg.expr);
+            error(inout ck, "E0308", arg_ex.start, arg_ex.end);
+        }
+    }
+    let goal = if integer_named(in ck, expected) {
+        expected
+    } else {
+        hole
+    };
+    let mut common = goal;
+    let mut actuals: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    for i in 0..w(ex.n) {
+        let arg = ck.arg(add(w(ex.a), i));
+        let common_lit = ck.ctx.types.kind(common) == TyKind::Lit;
+        let arg_goal = if common_lit {
+            hole
+        } else {
+            common
+        };
+        let t = expr_expected(inout ck, arg.expr, arg_goal);
+        if ck.skip {
+            return hole;
+        }
+        if common == hole || common_lit {
+            let both_lit = common_lit && ck.ctx.types.kind(t) == TyKind::Lit;
+            common = if both_lit {
+                let a = lit_of(ck.ctx.types.node(common));
+                let b = lit_of(ck.ctx.types.node(t));
+                mk_lit(inout ck.ctx.types, lit_max(a, b))
+            } else {
+                t
+            };
+        }
+        actuals.push(t);
+    }
+    let settled = default_type(inout ck.ctx.types, common);
+    if !integer_named(in ck, settled) {
+        error(inout ck, "E0200", ex.start, ex.end);
+        return hole;
+    }
+    for i in 0..w(ex.n) {
+        let arg = ck.arg(add(w(ex.a), i));
+        let arg_ex = ck.ex(arg.expr);
+        let t = u32_at(in actuals, i);
+        expect_type(inout ck, settled, t, arg_ex.start, arg_ex.end);
+        if ck.ctx.types.kind(t) == TyKind::Lit {
+            record(inout ck, arg.expr, settled);
+        }
+    }
+    settled
+}
+
 fn call_expr(inout ck: Ck, ex: Ex, expected: u32) -> u32 {
     let hole = ck.ctx.types.infer;
     let callee = ck.ex(ex.x);
     if callee.kind == E_FIELD {
         return method_call(inout ck, ex, callee, expected);
+    }
+    if callee.kind == E_NAME && lookup(in ck, callee.x) == NONE32 && ex.y != 0
+        && is_wrapping(in ck, callee.x)
+    {
+        return wrapping_call(inout ck, ex, expected);
     }
     if callee.kind != E_NAME || lookup(in ck, callee.x) != NONE32 || ex.y != 0 {
         // Closures, function values and intrinsics: not ported yet.
@@ -2470,6 +2562,11 @@ pub fn check_function(inout ck: Ck, fname: u32, start: u64, end: u64, body: u32,
 // body tree), checked as it is read.
 pub fn check_exprs(inout reader: Reader, in bytes: Slice[u8], inout ck: Ck) {
     read_fns(inout reader, in bytes, inout ck);
+    let method_count = reader.word(in bytes);
+    for i in 0..method_count {
+        let method = sym(in ck.ctx, reader.word(in bytes));
+        ck.trait_methods.push(method);
+    }
     let fn_count = reader.word(in bytes);
     for i in 0..fn_count {
         let name = sym(in ck.ctx, reader.word(in bytes));

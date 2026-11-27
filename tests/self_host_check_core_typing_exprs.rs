@@ -12,9 +12,11 @@
 mod check_harness;
 
 use check_harness::*;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::OnceLock;
-use vesper::ast::{Expr, ExprKind, Function, Literal, Pass, Pattern, PatternKind, Statement};
+use vesper::ast::{
+    Expr, ExprKind, Function, Item, Literal, Module, Pass, Pattern, PatternKind, Statement,
+};
 use vesper::check::World;
 
 fn package() -> &'static Package {
@@ -359,8 +361,9 @@ fn checked_functions(w: &World) -> Vec<&Function> {
 
 /// The function table (every world function, in name order: name,
 /// generics, parameters, result, effects, the inferred result) and the
-/// checked functions' bodies.
-fn exprs_input(w: &World) -> Vec<u8> {
+/// method names the module's traits declare, and the checked functions'
+/// bodies.
+fn exprs_input(w: &World, module: &Module) -> Vec<u8> {
     encode(w, |e, tail| {
         tail.push(w.functions.len() as u64);
         for f in w.functions.values() {
@@ -384,6 +387,19 @@ fn exprs_input(w: &World) -> Vec<u8> {
             tail.push(effectful as u64);
             let result = w.function_results.get(&f.name).unwrap_or(&f.result);
             tail.push(e.ty(result));
+        }
+        let methods: BTreeSet<&str> = module
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                Item::Trait(t) => Some(t.methods.iter().map(|m| m.name.as_str())),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        tail.push(methods.len() as u64);
+        for m in methods {
+            tail.push(e.name(m));
         }
         let fs = checked_functions(w);
         tail.push(fs.len() as u64);
@@ -483,7 +499,7 @@ fn typed_constant_pattern_checks_the_scrutinee() {
     assert!(errors.is_empty());
     let result = package()
         .entry("core_typing_exprs", true)
-        .text(&exprs_input(&world));
+        .text(&exprs_input(&world, &module));
     let start = source.find("Flags::O_CREAT").unwrap();
     let want = format!("D E0200 {start} {}", start + "Flags::O_CREAT".len());
     assert_eq!(
@@ -500,12 +516,13 @@ fn typed_constant_pattern_checks_the_scrutinee() {
 #[test]
 fn nested_break_keeps_the_inner_result() {
     let source = "fn f() -> u32 { loop { break { break 1u32; }; } }";
-    let checked = vesper::check::check(&vesper::parser::parse(source).module);
+    let module = vesper::parser::parse(source).module;
+    let checked = vesper::check::check(&module);
     assert!(checked.diagnostics.is_empty());
     let world = checked.world;
     let text = package()
         .entry("core_typing_exprs", true)
-        .text(&exprs_input(&world));
+        .text(&exprs_input(&world, &module));
     let (v, checked, skipped) = vesper_types(&text);
     assert_eq!((checked.len(), skipped), (1, 0));
     assert_eq!(first_difference(&rust_types(&world, &checked), &v), None);
@@ -518,7 +535,7 @@ fn expression_types_match_rust() {
     let mut bad = 0;
     let mut shown = 0;
     for c in corpus() {
-        let text = f.text(&exprs_input(&c.world));
+        let text = f.text(&exprs_input(&c.world, &c.module));
         let (v, checked, s) = vesper_types(&text);
         total += checked.len();
         skipped += s;
