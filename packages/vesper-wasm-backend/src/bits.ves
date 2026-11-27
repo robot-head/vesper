@@ -1,0 +1,80 @@
+// The total bitwise intrinsics (`capability_effects::BIT_INTRINSICS`,
+// #2375): `bit_and`, `bit_or`, `bit_xor`, `bit_shl` and `bit_shr` on two
+// operands of one integer kind, the result in that kind. A shift takes its
+// amount modulo the kind's width; `bit_shr` is logical on unsigned kinds and
+// arithmetic on signed ones. Integer words narrower than 64 bits are
+// zero- or sign-extended, so `and`, `or` and `xor` are the word operations.
+
+use self::err::{WErr, werr};
+use self::lower::{L, ik_bits, ik_mask, ik_signed};
+
+// Consts do not cross modules: src/err.ves, src/lower.ves, src/plan.ves.
+const K_UNSUPPORTED: u8 = 0;
+const U_OPERATION: u8 = 13;
+const E_BIT_OPERATOR: u64 = 261;
+const WORD_BITS: u64 = 64;
+const SC_U64: u8 = 1;
+const SC_I64: u8 = 0;
+const OP_I64_AND: u8 = 131;
+const OP_I64_OR: u8 = 132;
+const OP_I64_XOR: u8 = 133;
+const OP_I64_SHL: u8 = 134;
+const OP_I64_SHR_S: u8 = 135;
+const OP_I64_SHR_U: u8 = 136;
+
+impl L {
+    // `op(lhs, rhs)` of the bitwise intrinsic `op_sym` on words of integer
+    // scalar `kind`, into a new local.
+    pub fn bit_binary(
+        inout self,
+        op_sym: u32,
+        lhs: u32,
+        rhs: u32,
+        kind: u8
+    ) -> u32 eff [Fail[WErr]] {
+        let result = self.local();
+        let bits = ik_bits(kind);
+        if self.is_op(op_sym, "bit_and")
+            || self.is_op(op_sym, "bit_or")
+            || self.is_op(op_sym, "bit_xor")
+        {
+            let wasm_op = if self.is_op(op_sym, "bit_and") {
+                OP_I64_AND
+            } else if self.is_op(op_sym, "bit_or") {
+                OP_I64_OR
+            } else {
+                OP_I64_XOR
+            };
+            self.cur_fn.code.get(lhs);
+            self.cur_fn.code.get(rhs);
+            self.cur_fn.code.op(wasm_op);
+        } else if self.is_op(op_sym, "bit_shl") || self.is_op(op_sym, "bit_shr") {
+            self.cur_fn.code.get(lhs);
+            // the amount modulo the width (a power of two)
+            self.cur_fn.code.get(rhs);
+            self.cur_fn.code.u64_const(wrapping_sub(bits, 1));
+            self.cur_fn.code.op(OP_I64_AND);
+            if self.is_op(op_sym, "bit_shl") {
+                self.cur_fn.code.op(OP_I64_SHL);
+                if ik_signed(kind) && kind != SC_I64 {
+                    let shift = wrapping_sub(WORD_BITS, bits);
+                    self.cur_fn.code.u64_const(shift);
+                    self.cur_fn.code.op(OP_I64_SHL);
+                    self.cur_fn.code.u64_const(shift);
+                    self.cur_fn.code.op(OP_I64_SHR_S);
+                } else if kind != SC_U64 && kind != SC_I64 {
+                    self.cur_fn.code.u64_const(ik_mask(kind));
+                    self.cur_fn.code.op(OP_I64_AND);
+                }
+            } else if ik_signed(kind) {
+                self.cur_fn.code.op(OP_I64_SHR_S);
+            } else {
+                self.cur_fn.code.op(OP_I64_SHR_U);
+            }
+        } else {
+            Fail::raise(werr(K_UNSUPPORTED, U_OPERATION, E_BIT_OPERATOR));
+        }
+        self.cur_fn.code.set(result);
+        result
+    }
+}

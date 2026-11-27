@@ -16,6 +16,7 @@ use self::err::{WErr, werr, werr_syms};
 use self::ir::{FnInfo, pattern_end};
 use self::module::{Builder, builder_new};
 use self::fmod::{fmod_code};
+use self::floats::{f32_eq_code};
 use self::host::{Host, host_new, host_fn, op_index, returns_handle, takes_handle, takes_meta};
 use self::plan::{
     Cx, HClause, Handler, Inst, Plan, Shape, TVars, alias_of, captures, closure_operands, cmp_syms,
@@ -85,12 +86,9 @@ const OP_I64_LE_S: u8 = 87;
 const OP_I64_LE_U: u8 = 88;
 const OP_I64_GE_S: u8 = 89;
 const OP_I64_GE_U: u8 = 90;
+const OP_F32_EQ: u8 = 91;
 const OP_F64_EQ: u8 = 97;
 const OP_F64_NE: u8 = 98;
-const OP_F64_LT: u8 = 99;
-const OP_F64_GT: u8 = 100;
-const OP_F64_LE: u8 = 101;
-const OP_F64_GE: u8 = 102;
 const OP_I32_ADD: u8 = 106;
 const OP_I32_AND: u8 = 113;
 const OP_I32_OR: u8 = 114;
@@ -111,13 +109,10 @@ const OP_I64_SHR_U: u8 = 136;
 const OP_I64_ROTL: u8 = 137;
 const OP_I64_ROTR: u8 = 138;
 const OP_F64_NEG: u8 = 154;
-const OP_F64_ADD: u8 = 160;
-const OP_F64_SUB: u8 = 161;
-const OP_F64_MUL: u8 = 162;
-const OP_F64_DIV: u8 = 163;
 const OP_I32_WRAP_I64: u8 = 167;
 const OP_I64_EXTEND_I32_U: u8 = 173;
 const OP_I64_REINTERPRET_F64: u8 = 189;
+const OP_F32_REINTERPRET_I32: u8 = 190;
 const OP_F64_REINTERPRET_I64: u8 = 191;
 const OP_REF_FUNC: u8 = 210;
 const OP_CONT_NEW: u8 = 224;
@@ -157,6 +152,7 @@ const SC_U32: u8 = 2;
 const SC_U8: u8 = 3;
 const SC_BOOL: u8 = 4;
 const SC_F64: u8 = 5;
+const SC_F32: u8 = 12;
 const SC_UNIT: u8 = 6;
 const SC_NEVER: u8 = 7;
 const SC_U16: u8 = 8;
@@ -423,11 +419,11 @@ fn ik_unsigned(scalar: u8) -> bool {
     scalar == SC_U64 || scalar == SC_U32 || scalar == SC_U16 || scalar == SC_U8
 }
 
-fn ik_signed(scalar: u8) -> bool {
+pub fn ik_signed(scalar: u8) -> bool {
     scalar == SC_I64 || scalar == SC_I32 || scalar == SC_I16 || scalar == SC_I8
 }
 
-fn ik_bits(scalar: u8) -> u64 {
+pub fn ik_bits(scalar: u8) -> u64 {
     if scalar == SC_U8 || scalar == SC_I8 {
         8
     } else if scalar == SC_U16 || scalar == SC_I16 {
@@ -439,7 +435,7 @@ fn ik_bits(scalar: u8) -> u64 {
     }
 }
 
-fn ik_mask(scalar: u8) -> u64 {
+pub fn ik_mask(scalar: u8) -> u64 {
     if scalar == SC_U8 {
         255
     } else if scalar == SC_U16 {
@@ -1391,6 +1387,8 @@ impl L {
             code.op(OP_F64_REINTERPRET_I64);
             code.op(OP_F64_EQ);
             code.op(OP_I64_EXTEND_I32_U);
+        } else if shape.kind == SH_SCALAR && shape.scalar == SC_F32 {
+            f32_eq_code(inout code, lhs, rhs);
         } else if shape.kind == SH_SCALAR {
             code.get(lhs);
             code.get(rhs);
@@ -2305,7 +2303,15 @@ impl L {
             let lit_kind = self.ctx.ir.word(add(at, 3));
             let lo = self.ctx.ir.word(add(at, 4));
             let hi = self.ctx.ir.word(add(at, 5));
-            if lit_kind == Lit::Float {
+            if lit_kind == Lit::Float && self.is_f32_ty(ty) {
+                self.cur_fn.code.op(OP_I32_WRAP_I64);
+                self.cur_fn.code.op(OP_F32_REINTERPRET_I32);
+                let word = self.float_literal_word(lo, ty);
+                self.cur_fn.code.u64_const(word);
+                self.cur_fn.code.op(OP_I32_WRAP_I64);
+                self.cur_fn.code.op(OP_F32_REINTERPRET_I32);
+                self.cur_fn.code.op(OP_F32_EQ);
+            } else if lit_kind == Lit::Float {
                 self.cur_fn.code.op(OP_F64_REINTERPRET_I64);
                 self.cur_fn.code.f64_const(lo);
                 self.cur_fn.code.op(OP_F64_EQ);
@@ -2452,7 +2458,7 @@ impl L {
             return wrapping_i64(lo);
         }
         if kind == Lit::Float {
-            return wrapping_i64(lo);
+            return wrapping_i64(self.float_literal_word(lo, ty));
         }
         if kind == Lit::WideInt {
             Fail::raise(werr(K_INVALID, 0, 180));
@@ -2690,6 +2696,8 @@ impl L {
                 self.cur_fn.code.op(OP_F64_REINTERPRET_I64);
                 self.cur_fn.code.op(OP_F64_NEG);
                 self.cur_fn.code.op(OP_I64_REINTERPRET_F64);
+            } else if self.is_op(op_sym, "-") && scalar == SC_F32 {
+                self.f32_neg(operand);
             } else if self.is_op(op_sym, "-") && ik_signed(scalar) {
                 self.cur_fn.code.get(operand);
                 self.cur_fn.code.i64_const(ik_min(scalar));
@@ -2708,6 +2716,9 @@ impl L {
                 self.raise_overflow();
                 self.cur_fn.code.op(OP_END);
                 self.cur_fn.code.i64_const(0);
+            } else if self.float_unary(op_sym, operand, scalar, ty) {
+                // a float conversion or bit reinterpretation: the value on
+                // the stack.
             } else if self.conversion(op_sym, operand, scalar, ty) {
                 // `widen_k`, `narrow_k` or `wrapping_k`: the value on the
                 // stack.
@@ -4563,60 +4574,13 @@ impl L {
         lhs_scalar: u8,
         rhs_scalar: u8
     ) -> u32 eff [Fail[WErr]] {
-        let result = self.local();
-        if lhs_scalar == SC_F64 || rhs_scalar == SC_F64 {
-            if self.is_op(op_sym, "%") {
-                let fmod_idx = self.fmod();
-                self.cur_fn.code.get(lhs);
-                self.cur_fn.code.get(rhs);
-                self.cur_fn.code.call(fmod_idx);
-                self.cur_fn.code.set(result);
-                return result;
-            }
-            let mut wasm_op: u8 = 0;
-            let mut cmp = false;
-            if self.is_op(op_sym, "+") {
-                wasm_op = OP_F64_ADD;
-            } else if self.is_op(op_sym, "-") {
-                wasm_op = OP_F64_SUB;
-            } else if self.is_op(op_sym, "*") {
-                wasm_op = OP_F64_MUL;
-            } else if self.is_op(op_sym, "/") {
-                wasm_op = OP_F64_DIV;
-            } else if self.is_op(op_sym, "==") {
-                wasm_op = OP_F64_EQ;
-                cmp = true;
-            } else if self.is_op(op_sym, "!=") {
-                wasm_op = OP_F64_NE;
-                cmp = true;
-            } else if self.is_op(op_sym, "<") {
-                wasm_op = OP_F64_LT;
-                cmp = true;
-            } else if self.is_op(op_sym, "<=") {
-                wasm_op = OP_F64_LE;
-                cmp = true;
-            } else if self.is_op(op_sym, ">") {
-                wasm_op = OP_F64_GT;
-                cmp = true;
-            } else if self.is_op(op_sym, ">=") {
-                wasm_op = OP_F64_GE;
-                cmp = true;
-            } else {
-                Fail::raise(werr(K_UNSUPPORTED, U_OPERATION, 250));
-            }
-            self.cur_fn.code.get(lhs);
-            self.cur_fn.code.op(OP_F64_REINTERPRET_I64);
-            self.cur_fn.code.get(rhs);
-            self.cur_fn.code.op(OP_F64_REINTERPRET_I64);
-            self.cur_fn.code.op(wasm_op);
-            if cmp {
-                self.cur_fn.code.op(OP_I64_EXTEND_I32_U);
-            } else {
-                self.cur_fn.code.op(OP_I64_REINTERPRET_F64);
-            }
-            self.cur_fn.code.set(result);
-            return result;
+        if lhs_scalar == SC_F32 || rhs_scalar == SC_F32 {
+            return self.f32_binary(op_sym, lhs, rhs);
         }
+        if lhs_scalar == SC_F64 || rhs_scalar == SC_F64 {
+            return self.f64_binary(op_sym, lhs, rhs);
+        }
+        let result = self.local();
         if lhs_scalar == SC_BOOL || lhs_scalar == SC_UNIT {
             let wasm_op = if self.is_op(op_sym, "==") {
                 OP_I64_EQ
@@ -4645,6 +4609,9 @@ impl L {
         } else {
             rhs_scalar
         };
+        if self.has_prefix(op_sym, "bit_") {
+            return self.bit_binary(op_sym, lhs, rhs, kind);
+        }
         let signed = ik_signed(kind);
         if self.is_op(op_sym, "==") {
             self.cmp(lhs, rhs, OP_I64_EQ);
