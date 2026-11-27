@@ -11,7 +11,9 @@ def mock_bazel_cli(ctx, cwd, tool, argv):
         return 19
     if mode == "hybrid":
         if tool == "cargo":
-            if argv[0] == "test":
+            if argv[0] == "test" and "vesper-hybrid" in argv:
+                equal(argv, ["test", "--locked", "--no-run", "-p", "vesper-hybrid"])
+            elif argv[0] == "test":
                 equal(argv[-2:], ["--test", "fixture_cli"])
                 ctx.std.io.stdout.write(json.encode({
                     "reason": "compiler-artifact", "executable": cwd + "/bin/test suite",

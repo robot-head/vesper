@@ -729,3 +729,53 @@ fn vesper_scalar_bodies_part_6g() {
         assert!(total.is_clean(), "{}", total.summary());
     });
 }
+
+/// Part 6h: narrow 1-word integer conversions (`u8`/`i8`/`u16`/`i16`/`u32`/`i32`
+/// <-> `i64`/`u64`) and wrapping arithmetic (`wrapping_add`/`sub`/`mul`).
+const SCALARS_6H: &str = "
+fn narrow_converts(x: i64) -> i64 {
+    let a: u8 = wrapping_u8(x);
+    let b: i8 = wrapping_i8(x);
+    let c: u16 = wrapping_u16(x);
+    let d: i16 = wrapping_i16(x);
+    let e: u32 = wrapping_u32(x);
+    let f: i32 = wrapping_i32(x);
+    widen_i64(a) ^ widen_i64(b) ^ widen_i64(c) ^ widen_i64(d) ^ widen_i64(e) ^ widen_i64(f)
+}
+fn wrap_chain(a: i64, b: i64) -> i64 {
+    let s: i64 = wrapping_add(a, b);
+    let d: i64 = wrapping_sub(s, wrapping_mul(a, 5));
+    wrapping_add(d, narrow_converts(d))
+}
+fn main() -> i64 {
+    wrap_chain(123456, -789)
+}
+";
+
+#[test]
+fn vesper_scalar_bodies_part_6h() {
+    big_stack(|| {
+        let parsed = vesper::parser::parse(SCALARS_6H);
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        let checked = vesper::check::check(&parsed.module);
+        assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
+        if let Err(e) = build(&checked.world, "main", true) {
+            panic!("the part 6h scalar program does not build: {e}");
+        }
+        let before = EMITTED.load(Ordering::Relaxed);
+        let total = both("scalars_6h", &checked.world, true);
+        let emitted = EMITTED.load(Ordering::Relaxed) - before;
+        eprintln!(
+            "scalars_6h: {}; {emitted} functions emitted from Vesper",
+            total.summary()
+        );
+        let ran = if cross() { 0 } else { 2 };
+        assert_eq!((total.worlds, total.ran), (2, ran), "{}", total.summary());
+        let min_emitted = if cross() { 3 } else { 6 };
+        assert!(
+            emitted >= min_emitted,
+            "part 6h functions should come from Vesper (expected >= {min_emitted}, got {emitted})"
+        );
+        assert!(total.is_clean(), "{}", total.summary());
+    });
+}
