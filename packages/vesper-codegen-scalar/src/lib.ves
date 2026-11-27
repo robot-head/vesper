@@ -28,6 +28,7 @@ use @vesper/check-data::input::{Ctx, Reader, read_ctx};
 use @vesper/check-layout::{Layouts, layout_of, layouts_new};
 use @vesper/place-ir::{FnRow, InstRow, Program, read_program};
 use self::blocks::{block_layout};
+use @vesper/codegen-aggregates::{EnumWords, enum_words_none, scalar_enum_words};
 use @vesper/place-ir::codes::{Lit, Op, Tag, Term};
 
 const NONE32: u32 = 4294967295;
@@ -541,6 +542,12 @@ pub struct Gen {
     out: ChunkSeq[u8],
     // The emission plan (`codegen_scalar_plan`).
     plan: ChunkSeq[u64],
+    // The small enums the optimize path keeps as words (#2581): the
+    // program's graphs are rewritten by `scalar_enum_words` when the input
+    // carries its facts.
+    enums: EnumWords,
+    // The function `body` plans.
+    fi: u64,
 }
 
 impl Gen {
@@ -1421,7 +1428,14 @@ impl Gen {
 fn read_gen(in bytes: Slice[u8]) -> Gen {
     let mut reader = Reader { pos: 0 };
     let mut ctx = read_ctx(inout reader, in bytes);
-    let program = read_program(inout reader, in bytes, in ctx);
+    let mut program = read_program(inout reader, in bytes, in ctx);
+    // `scalar_enums` facts after the program (the optimize path's body
+    // plans): the graphs as the walk lowers them, small enums as words.
+    let enums = if reader.pos < bytes.len() {
+        scalar_enum_words(inout ctx, inout program, inout reader, in bytes)
+    } else {
+        enum_words_none()
+    };
     let mut tables = Tables {
         kinds: ChunkSeq::new[u32](),
         conversions: ChunkSeq::new[u32](),
@@ -1440,7 +1454,9 @@ fn read_gen(in bytes: Slice[u8]) -> Gen {
         program: program,
         value_types: ChunkSeq::new[u32](),
         out: ChunkSeq::new[u8](),
-        plan: ChunkSeq::new[u64]()
+        plan: ChunkSeq::new[u64](),
+        enums: enums,
+        fi: 0
     }
 }
 
