@@ -137,6 +137,18 @@ pub struct SignedCollateral {
     pub signature: [u8; 64],
 }
 
+const PCS_FIELD_TCB_INFO: u64 = 0;
+const PCS_FIELD_ENCLAVE_IDENTITY: u64 = 1;
+
+const PCS_OUT_BODY_START: usize = 0;
+const PCS_OUT_BODY_END: usize = 1;
+const PCS_OUT_LEN: usize = 2;
+
+const PCS_ERR_OK: u64 = 0;
+const PCS_ERR_MISSING_FIELD: u64 = 2;
+const PCS_ERR_BOTH_FIELDS: u64 = 3;
+const PCS_ERR_BAD_SIG: u64 = 4;
+
 impl SignedCollateral {
     /// From the signed body and the hex signature (as in Intel's
     /// `sgx_ql_qve_collateral_t` and PCCS caches).
@@ -152,29 +164,35 @@ impl SignedCollateral {
     /// (`field` is `tcbInfo` or `enclaveIdentity`). The signed bytes are the
     /// field's JSON value exactly as it appears in the response.
     pub fn from_pcs_response(response: &[u8], field: &'static str) -> Result<Self, AttestError> {
-        #[derive(Deserialize)]
-        struct Envelope<'a> {
-            #[serde(borrow, rename = "tcbInfo")]
-            tcb_info: Option<&'a serde_json::value::RawValue>,
-            #[serde(borrow, rename = "enclaveIdentity")]
-            enclave_identity: Option<&'a serde_json::value::RawValue>,
-            signature: String,
-        }
-        let env: Envelope<'_> = serde_json::from_slice(response)
-            .map_err(|e| collateral("PCS response", e.to_string()))?;
-        let raw = match field {
-            "tcbInfo" => env.tcb_info,
-            "enclaveIdentity" => env.enclave_identity,
-            _ => None,
-        }
-        .ok_or_else(|| collateral("PCS response", format!("missing {field}")))?;
-        if env.tcb_info.is_some() && env.enclave_identity.is_some() {
-            return Err(collateral(
+        let field_kind = match field {
+            "tcbInfo" => PCS_FIELD_TCB_INFO,
+            "enclaveIdentity" => PCS_FIELD_ENCLAVE_IDENTITY,
+            _ => return Err(collateral("PCS response", format!("missing {field}"))),
+        };
+        let mut out = [0u64; PCS_OUT_LEN];
+        let mut signature = [0u8; 64];
+        match crate::port::vesper::parse_pcs_envelope(
+            response,
+            field_kind,
+            &mut out,
+            &mut signature,
+        ) {
+            PCS_ERR_OK => Ok(SignedCollateral {
+                body: response[out[PCS_OUT_BODY_START] as usize..out[PCS_OUT_BODY_END] as usize]
+                    .to_vec(),
+                signature,
+            }),
+            PCS_ERR_MISSING_FIELD => Err(collateral("PCS response", format!("missing {field}"))),
+            PCS_ERR_BOTH_FIELDS => Err(collateral(
                 "PCS response",
                 "both tcbInfo and enclaveIdentity".into(),
-            ));
+            )),
+            PCS_ERR_BAD_SIG => Err(collateral(
+                "collateral signature",
+                "invalid hex signature".into(),
+            )),
+            _ => Err(collateral("PCS response", "malformed JSON envelope".into())),
         }
-        SignedCollateral::new(raw.get().as_bytes(), &env.signature)
     }
 }
 

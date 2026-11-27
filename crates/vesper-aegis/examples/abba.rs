@@ -723,6 +723,61 @@ fn flip_gate_spki() {
     println!("flip-gate pairs spki {}", pairs.join(" "));
 }
 
+const PCS_ENVELOPE_PASSES: usize = 5_000;
+
+fn flip_gate_pcs_envelope() {
+    #[derive(serde::Deserialize)]
+    struct Envelope<'a> {
+        #[serde(borrow, rename = "tcbInfo")]
+        tcb_info: Option<&'a serde_json::value::RawValue>,
+        #[serde(borrow, rename = "enclaveIdentity")]
+        enclave_identity: Option<&'a serde_json::value::RawValue>,
+        signature: String,
+    }
+    let response = data("tdx-go-tdx-guest/sample_tcbInfo_response");
+    let rust_parse = |resp: &[u8]| -> port::intel::SignedCollateral {
+        let env: Envelope<'_> = serde_json::from_slice(resp).unwrap();
+        assert!(env.enclave_identity.is_none());
+        let raw = env.tcb_info.unwrap();
+        port::intel::SignedCollateral::new(raw.get().as_bytes(), &env.signature).unwrap()
+    };
+
+    // Differential check: Vesper port matches serde_json::from_slice.
+    let expected = rust_parse(&response);
+    let actual = port::intel::SignedCollateral::from_pcs_response(&response, "tcbInfo").unwrap();
+    assert_eq!(actual, expected);
+
+    let run_rust = || -> u64 {
+        let t = Instant::now();
+        for _ in 0..PCS_ENVELOPE_PASSES {
+            black_box(rust_parse(black_box(&response)));
+        }
+        t.elapsed().as_nanos() as u64
+    };
+    let run_port = || -> u64 {
+        let t = Instant::now();
+        for _ in 0..PCS_ENVELOPE_PASSES {
+            black_box(
+                port::intel::SignedCollateral::from_pcs_response(black_box(&response), "tcbInfo")
+                    .unwrap(),
+            );
+        }
+        t.elapsed().as_nanos() as u64
+    };
+    black_box(run_rust());
+    black_box(run_port());
+    let pairs: Vec<String> = (0..FLIP_GATE_EPOCHS)
+        .map(|_| {
+            let a1 = run_rust();
+            let b1 = run_port();
+            let b2 = run_port();
+            let a2 = run_rust();
+            format!("{}:{}", a1 + a2, b1 + b2)
+        })
+        .collect();
+    println!("flip-gate pairs pcs_envelope {}", pairs.join(" "));
+}
+
 fn main() {
     assert_eq!(port::IMPLEMENTATION, "vesper");
     let args: Vec<String> = std::env::args().collect();
@@ -753,6 +808,10 @@ fn main() {
         }
         if args.get(2).map(String::as_str) == Some("spki") {
             flip_gate_spki();
+            return;
+        }
+        if args.get(2).map(String::as_str) == Some("pcs_envelope") {
+            flip_gate_pcs_envelope();
             return;
         }
     }

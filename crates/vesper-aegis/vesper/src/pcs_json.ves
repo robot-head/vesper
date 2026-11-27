@@ -1,0 +1,540 @@
+// @vesper/aegis::pcs_json: zero-allocation JSON envelope scanner for Intel
+// PCS/PCCS signed collateral responses (`SignedCollateral::from_pcs_response`
+// in `src/intel.rs`).
+
+const CH_TAB: u64 = 0x09;
+const CH_LF: u64 = 0x0a;
+const CH_CR: u64 = 0x0d;
+const CH_SPACE: u64 = 0x20;
+const CH_QUOTE: u64 = 0x22;
+const CH_PLUS: u64 = 0x2b;
+const CH_COMMA: u64 = 0x2c;
+const CH_MINUS: u64 = 0x2d;
+const CH_DOT: u64 = 0x2e;
+const CH_SLASH: u64 = 0x2f;
+const CH_0: u64 = 0x30;
+const CH_9: u64 = 0x39;
+const CH_COLON: u64 = 0x3a;
+const CH_A_UPPER: u64 = 0x41;
+const CH_E_UPPER: u64 = 0x45;
+const CH_F_UPPER: u64 = 0x46;
+const CH_LBRACKET: u64 = 0x5b;
+const CH_BACKSLASH: u64 = 0x5c;
+const CH_RBRACKET: u64 = 0x5d;
+const CH_A_LOWER: u64 = 0x61;
+const CH_B_LOWER: u64 = 0x62;
+const CH_E_LOWER: u64 = 0x65;
+const CH_F_LOWER: u64 = 0x66;
+const CH_L_LOWER: u64 = 0x6c;
+const CH_N_LOWER: u64 = 0x6e;
+const CH_R_LOWER: u64 = 0x72;
+const CH_S_LOWER: u64 = 0x73;
+const CH_T_LOWER: u64 = 0x74;
+const CH_U_LOWER: u64 = 0x75;
+const CH_LBRACE: u64 = 0x7b;
+const CH_RBRACE: u64 = 0x7d;
+
+// Key byte constants for `"tcbInfo"`, `"enclaveIdentity"`, `"signature"`.
+const CH_C_LOWER: u64 = 0x63;
+const CH_D_LOWER: u64 = 0x64;
+const CH_G_LOWER: u64 = 0x67;
+const CH_I_UPPER: u64 = 0x49;
+const CH_I_LOWER: u64 = 0x69;
+const CH_O_LOWER: u64 = 0x6f;
+const CH_V_LOWER: u64 = 0x76;
+const CH_Y_LOWER: u64 = 0x79;
+
+const KEY_TCB_INFO_LEN: u64 = 7;
+const KEY_ENCLAVE_ID_LEN: u64 = 15;
+const KEY_SIGNATURE_LEN: u64 = 9;
+
+const IDX_2: u64 = 2;
+const IDX_3: u64 = 3;
+const IDX_4: u64 = 4;
+const IDX_5: u64 = 5;
+const IDX_6: u64 = 6;
+const IDX_7: u64 = 7;
+const IDX_8: u64 = 8;
+const IDX_9: u64 = 9;
+const IDX_10: u64 = 10;
+const IDX_11: u64 = 11;
+const IDX_12: u64 = 12;
+const IDX_13: u64 = 13;
+const IDX_14: u64 = 14;
+
+const HEX_BASE: u64 = 10;
+const HEX_BAD: u64 = 0xff;
+const NIBBLE_SHIFT: u64 = 4;
+const UNICODE_HEX_LEN: u64 = 4;
+const SIG_BYTES: u64 = 64;
+const SIG_HEX_LEN: u64 = 128;
+const MAX_JSON_DEPTH: u64 = 64;
+
+const LIT_TRUE_LEN: u64 = 4;
+const LIT_FALSE_LEN: u64 = 5;
+const LIT_NULL_LEN: u64 = 4;
+
+const FIELD_TCB_INFO: u64 = 0;
+const FIELD_ENCLAVE_IDENTITY: u64 = 1;
+
+const OUT_BODY_START: u64 = 0;
+const OUT_BODY_END: u64 = 1;
+const OUT_LEN: u64 = 2;
+
+const ERR_OK: u64 = 0;
+const ERR_JSON: u64 = 1;
+const ERR_MISSING_FIELD: u64 = 2;
+const ERR_BOTH_FIELDS: u64 = 3;
+const ERR_BAD_SIG: u64 = 4;
+
+fn byte_at(in b: Slice[u8], i: u64) -> u64 {
+    match b.try_get(i) {
+        Option::Some(v) => widen_u64(v),
+        Option::None => 0,
+    }
+}
+
+fn hex_val(c: u64) -> u64 {
+    if c >= CH_0 && c <= CH_9 {
+        wrapping_sub(c, CH_0)
+    } else if c >= CH_A_LOWER && c <= CH_F_LOWER {
+        wrapping_add(wrapping_sub(c, CH_A_LOWER), HEX_BASE)
+    } else if c >= CH_A_UPPER && c <= CH_F_UPPER {
+        wrapping_add(wrapping_sub(c, CH_A_UPPER), HEX_BASE)
+    } else {
+        HEX_BAD
+    }
+}
+
+fn skip_ws(in b: Slice[u8], start: u64, n: u64) -> u64 {
+    let mut pos = start;
+    loop {
+        if pos >= n {
+            break;
+        }
+        match b.try_get(pos) {
+            Option::Some(v) => {
+                let c = widen_u64(v);
+                if c == CH_SPACE || c == CH_TAB || c == CH_LF || c == CH_CR {
+                    pos = wrapping_add(pos, 1);
+                } else {
+                    break;
+                }
+            },
+            Option::None => break,
+        }
+    }
+    pos
+}
+
+fn scan_string(in b: Slice[u8], pos: u64, n: u64) -> (bool, u64) {
+    if pos >= n || byte_at(in b, pos) != CH_QUOTE {
+        return (false, 0);
+    }
+    let mut i = wrapping_add(pos, 1);
+    loop {
+        match b.try_get(i) {
+            Option::None => return (false, 0),
+            Option::Some(v) => {
+                let c = widen_u64(v);
+                if c == CH_QUOTE {
+                    return (true, wrapping_add(i, 1));
+                }
+                if c < CH_SPACE {
+                    return (false, 0);
+                }
+                if c == CH_BACKSLASH {
+                    i = wrapping_add(i, 1);
+                    if i >= n {
+                        return (false, 0);
+                    }
+                    let esc = byte_at(in b, i);
+                    if esc == CH_QUOTE
+                        || esc == CH_BACKSLASH
+                        || esc == CH_SLASH
+                        || esc == CH_B_LOWER
+                        || esc == CH_F_LOWER
+                        || esc == CH_N_LOWER
+                        || esc == CH_R_LOWER
+                        || esc == CH_T_LOWER
+                    {
+                        i = wrapping_add(i, 1);
+                    } else if esc == CH_U_LOWER {
+                        i = wrapping_add(i, 1);
+                        if wrapping_add(i, UNICODE_HEX_LEN) > n {
+                            return (false, 0);
+                        }
+                        let mut k: u64 = 0;
+                        loop {
+                            if k >= UNICODE_HEX_LEN {
+                                break;
+                            }
+                            if hex_val(byte_at(in b, wrapping_add(i, k))) == HEX_BAD {
+                                return (false, 0);
+                            }
+                            k = wrapping_add(k, 1);
+                        }
+                        i = wrapping_add(i, UNICODE_HEX_LEN);
+                    } else {
+                        return (false, 0);
+                    }
+                } else {
+                    i = wrapping_add(i, 1);
+                }
+            },
+        }
+    }
+}
+
+fn scan_number(in b: Slice[u8], start: u64, n: u64) -> (bool, u64) {
+    let mut i = start;
+    if i < n && byte_at(in b, i) == CH_MINUS {
+        i = wrapping_add(i, 1);
+    }
+    if i >= n {
+        return (false, 0);
+    }
+    let first = byte_at(in b, i);
+    if first == CH_0 {
+        i = wrapping_add(i, 1);
+    } else if first >= CH_0 && first <= CH_9 {
+        i = wrapping_add(i, 1);
+        loop {
+            if i >= n {
+                break;
+            }
+            let c = byte_at(in b, i);
+            if c >= CH_0 && c <= CH_9 {
+                i = wrapping_add(i, 1);
+            } else {
+                break;
+            }
+        }
+    } else {
+        return (false, 0);
+    }
+    if i < n && byte_at(in b, i) == CH_DOT {
+        i = wrapping_add(i, 1);
+        if i >= n {
+            return (false, 0);
+        }
+        let d = byte_at(in b, i);
+        if d < CH_0 || d > CH_9 {
+            return (false, 0);
+        }
+        i = wrapping_add(i, 1);
+        loop {
+            if i >= n {
+                break;
+            }
+            let c = byte_at(in b, i);
+            if c >= CH_0 && c <= CH_9 {
+                i = wrapping_add(i, 1);
+            } else {
+                break;
+            }
+        }
+    }
+    if i < n {
+        let e = byte_at(in b, i);
+        if e == CH_E_LOWER || e == CH_E_UPPER {
+            i = wrapping_add(i, 1);
+            if i < n {
+                let s = byte_at(in b, i);
+                if s == CH_PLUS || s == CH_MINUS {
+                    i = wrapping_add(i, 1);
+                }
+            }
+            if i >= n {
+                return (false, 0);
+            }
+            let d = byte_at(in b, i);
+            if d < CH_0 || d > CH_9 {
+                return (false, 0);
+            }
+            i = wrapping_add(i, 1);
+            loop {
+                if i >= n {
+                    break;
+                }
+                let c = byte_at(in b, i);
+                if c >= CH_0 && c <= CH_9 {
+                    i = wrapping_add(i, 1);
+                } else {
+                    break;
+                }
+            }
+        }
+    }
+    (true, i)
+}
+
+fn skip_value(in b: Slice[u8], pos: u64, n: u64, depth: u64) -> (bool, u64) {
+    if depth >= MAX_JSON_DEPTH || pos >= n {
+        return (false, 0);
+    }
+    let c = byte_at(in b, pos);
+    if c == CH_QUOTE {
+        return scan_string(in b, pos, n);
+    }
+    if c == CH_LBRACE {
+        let mut i = skip_ws(in b, wrapping_add(pos, 1), n);
+        if i < n && byte_at(in b, i) == CH_RBRACE {
+            return (true, wrapping_add(i, 1));
+        }
+        loop {
+            let (ok_k, after_k) = scan_string(in b, i, n);
+            if !ok_k {
+                return (false, 0);
+            }
+            i = skip_ws(in b, after_k, n);
+            if i >= n || byte_at(in b, i) != CH_COLON {
+                return (false, 0);
+            }
+            i = skip_ws(in b, wrapping_add(i, 1), n);
+            let (ok_v, after_v) = skip_value(in b, i, n, wrapping_add(depth, 1));
+            if !ok_v {
+                return (false, 0);
+            }
+            i = skip_ws(in b, after_v, n);
+            if i >= n {
+                return (false, 0);
+            }
+            let sep = byte_at(in b, i);
+            if sep == CH_RBRACE {
+                return (true, wrapping_add(i, 1));
+            }
+            if sep != CH_COMMA {
+                return (false, 0);
+            }
+            i = skip_ws(in b, wrapping_add(i, 1), n);
+        }
+    }
+    if c == CH_LBRACKET {
+        let mut i = skip_ws(in b, wrapping_add(pos, 1), n);
+        if i < n && byte_at(in b, i) == CH_RBRACKET {
+            return (true, wrapping_add(i, 1));
+        }
+        loop {
+            let (ok_v, after_v) = skip_value(in b, i, n, wrapping_add(depth, 1));
+            if !ok_v {
+                return (false, 0);
+            }
+            i = skip_ws(in b, after_v, n);
+            if i >= n {
+                return (false, 0);
+            }
+            let sep = byte_at(in b, i);
+            if sep == CH_RBRACKET {
+                return (true, wrapping_add(i, 1));
+            }
+            if sep != CH_COMMA {
+                return (false, 0);
+            }
+            i = skip_ws(in b, wrapping_add(i, 1), n);
+        }
+    }
+    if c == CH_T_LOWER {
+        if wrapping_add(pos, LIT_TRUE_LEN) <= n
+            && byte_at(in b, wrapping_add(pos, 1)) == CH_R_LOWER
+            && byte_at(in b, wrapping_add(pos, IDX_2)) == CH_U_LOWER
+            && byte_at(in b, wrapping_add(pos, IDX_3)) == CH_E_LOWER
+        {
+            return (true, wrapping_add(pos, LIT_TRUE_LEN));
+        }
+        return (false, 0);
+    }
+    if c == CH_F_LOWER {
+        if wrapping_add(pos, LIT_FALSE_LEN) <= n
+            && byte_at(in b, wrapping_add(pos, 1)) == CH_A_LOWER
+            && byte_at(in b, wrapping_add(pos, IDX_2)) == CH_L_LOWER
+            && byte_at(in b, wrapping_add(pos, IDX_3)) == CH_S_LOWER
+            && byte_at(in b, wrapping_add(pos, IDX_4)) == CH_E_LOWER
+        {
+            return (true, wrapping_add(pos, LIT_FALSE_LEN));
+        }
+        return (false, 0);
+    }
+    if c == CH_N_LOWER {
+        if wrapping_add(pos, LIT_NULL_LEN) <= n
+            && byte_at(in b, wrapping_add(pos, 1)) == CH_U_LOWER
+            && byte_at(in b, wrapping_add(pos, IDX_2)) == CH_L_LOWER
+            && byte_at(in b, wrapping_add(pos, IDX_3)) == CH_L_LOWER
+        {
+            return (true, wrapping_add(pos, LIT_NULL_LEN));
+        }
+        return (false, 0);
+    }
+    scan_number(in b, pos, n)
+}
+
+fn is_key_tcb_info(in b: Slice[u8], s: u64, e: u64) -> bool {
+    if wrapping_sub(e, s) != KEY_TCB_INFO_LEN {
+        return false;
+    }
+    byte_at(in b, s) == CH_T_LOWER
+        && byte_at(in b, wrapping_add(s, 1)) == CH_C_LOWER
+        && byte_at(in b, wrapping_add(s, IDX_2)) == CH_B_LOWER
+        && byte_at(in b, wrapping_add(s, IDX_3)) == CH_I_UPPER
+        && byte_at(in b, wrapping_add(s, IDX_4)) == CH_N_LOWER
+        && byte_at(in b, wrapping_add(s, IDX_5)) == CH_F_LOWER
+        && byte_at(in b, wrapping_add(s, IDX_6)) == CH_O_LOWER
+}
+
+fn is_key_enclave_identity(in b: Slice[u8], s: u64, e: u64) -> bool {
+    if wrapping_sub(e, s) != KEY_ENCLAVE_ID_LEN {
+        return false;
+    }
+    byte_at(in b, s) == CH_E_LOWER
+        && byte_at(in b, wrapping_add(s, 1)) == CH_N_LOWER
+        && byte_at(in b, wrapping_add(s, IDX_2)) == CH_C_LOWER
+        && byte_at(in b, wrapping_add(s, IDX_3)) == CH_L_LOWER
+        && byte_at(in b, wrapping_add(s, IDX_4)) == CH_A_LOWER
+        && byte_at(in b, wrapping_add(s, IDX_5)) == CH_V_LOWER
+        && byte_at(in b, wrapping_add(s, IDX_6)) == CH_E_LOWER
+        && byte_at(in b, wrapping_add(s, IDX_7)) == CH_I_UPPER
+        && byte_at(in b, wrapping_add(s, IDX_8)) == CH_D_LOWER
+        && byte_at(in b, wrapping_add(s, IDX_9)) == CH_E_LOWER
+        && byte_at(in b, wrapping_add(s, IDX_10)) == CH_N_LOWER
+        && byte_at(in b, wrapping_add(s, IDX_11)) == CH_T_LOWER
+        && byte_at(in b, wrapping_add(s, IDX_12)) == CH_I_LOWER
+        && byte_at(in b, wrapping_add(s, IDX_13)) == CH_T_LOWER
+        && byte_at(in b, wrapping_add(s, IDX_14)) == CH_Y_LOWER
+}
+
+fn is_key_signature(in b: Slice[u8], s: u64, e: u64) -> bool {
+    if wrapping_sub(e, s) != KEY_SIGNATURE_LEN {
+        return false;
+    }
+    byte_at(in b, s) == CH_S_LOWER
+        && byte_at(in b, wrapping_add(s, 1)) == CH_I_LOWER
+        && byte_at(in b, wrapping_add(s, IDX_2)) == CH_G_LOWER
+        && byte_at(in b, wrapping_add(s, IDX_3)) == CH_N_LOWER
+        && byte_at(in b, wrapping_add(s, IDX_4)) == CH_A_LOWER
+        && byte_at(in b, wrapping_add(s, IDX_5)) == CH_T_LOWER
+        && byte_at(in b, wrapping_add(s, IDX_6)) == CH_U_LOWER
+        && byte_at(in b, wrapping_add(s, IDX_7)) == CH_R_LOWER
+        && byte_at(in b, wrapping_add(s, IDX_8)) == CH_E_LOWER
+}
+
+pub fn parse_pcs_envelope(
+    in b: Slice[u8],
+    field_kind: u64,
+    inout out: Slice[u64],
+    inout sig_out: Slice[u8]
+) -> u64 {
+    if out.len() < OUT_LEN || sig_out.len() < SIG_BYTES {
+        return ERR_JSON;
+    }
+    let n = b.len();
+    let mut i = skip_ws(in b, 0, n);
+    if i >= n || byte_at(in b, i) != CH_LBRACE {
+        return ERR_JSON;
+    }
+    i = skip_ws(in b, wrapping_add(i, 1), n);
+
+    let mut has_tcb = false;
+    let mut tcb_s: u64 = 0;
+    let mut tcb_e: u64 = 0;
+    let mut has_enclave = false;
+    let mut enc_s: u64 = 0;
+    let mut enc_e: u64 = 0;
+    let mut has_sig = false;
+    let mut sig_s: u64 = 0;
+    let mut sig_e: u64 = 0;
+
+    if i < n && byte_at(in b, i) == CH_RBRACE {
+        i = wrapping_add(i, 1);
+    } else {
+        loop {
+            let key_start = i;
+            let (ok_k, key_end) = scan_string(in b, i, n);
+            if !ok_k {
+                return ERR_JSON;
+            }
+            let ks = wrapping_add(key_start, 1);
+            let ke = wrapping_sub(key_end, 1);
+            i = skip_ws(in b, key_end, n);
+            if i >= n || byte_at(in b, i) != CH_COLON {
+                return ERR_JSON;
+            }
+            i = skip_ws(in b, wrapping_add(i, 1), n);
+            let val_start = i;
+            let (ok_v, val_end) = skip_value(in b, i, n, 0);
+            if !ok_v {
+                return ERR_JSON;
+            }
+            if is_key_tcb_info(in b, ks, ke) {
+                has_tcb = true;
+                tcb_s = val_start;
+                tcb_e = val_end;
+            } else if is_key_enclave_identity(in b, ks, ke) {
+                has_enclave = true;
+                enc_s = val_start;
+                enc_e = val_end;
+            } else if is_key_signature(in b, ks, ke) {
+                if byte_at(in b, val_start) != CH_QUOTE {
+                    return ERR_JSON;
+                }
+                has_sig = true;
+                sig_s = wrapping_add(val_start, 1);
+                sig_e = wrapping_sub(val_end, 1);
+            }
+            i = skip_ws(in b, val_end, n);
+            if i >= n {
+                return ERR_JSON;
+            }
+            let sep = byte_at(in b, i);
+            if sep == CH_RBRACE {
+                i = wrapping_add(i, 1);
+                break;
+            }
+            if sep != CH_COMMA {
+                return ERR_JSON;
+            }
+            i = skip_ws(in b, wrapping_add(i, 1), n);
+        }
+    }
+
+    i = skip_ws(in b, i, n);
+    if i != n || !has_sig {
+        return ERR_JSON;
+    }
+    if has_tcb && has_enclave {
+        return ERR_BOTH_FIELDS;
+    }
+    let (body_s, body_e) = if field_kind == FIELD_TCB_INFO {
+        if !has_tcb {
+            return ERR_MISSING_FIELD;
+        }
+        (tcb_s, tcb_e)
+    } else if field_kind == FIELD_ENCLAVE_IDENTITY {
+        if !has_enclave {
+            return ERR_MISSING_FIELD;
+        }
+        (enc_s, enc_e)
+    } else {
+        return ERR_MISSING_FIELD;
+    };
+
+    if wrapping_sub(sig_e, sig_s) != SIG_HEX_LEN {
+        return ERR_BAD_SIG;
+    }
+    let mut k: u64 = 0;
+    loop {
+        if k >= SIG_BYTES {
+            break;
+        }
+        let hi = hex_val(byte_at(in b, wrapping_add(sig_s, wrapping_add(k, k))));
+        let lo = hex_val(byte_at(in b, wrapping_add(sig_s, wrapping_add(wrapping_add(k, k), 1))));
+        if hi == HEX_BAD || lo == HEX_BAD {
+            return ERR_BAD_SIG;
+        }
+        sig_out.try_set(k, wrapping_u8((hi << NIBBLE_SHIFT) | lo));
+        k = wrapping_add(k, 1);
+    }
+
+    out.try_set(OUT_BODY_START, body_s);
+    out.try_set(OUT_BODY_END, body_e);
+    ERR_OK
+}
