@@ -333,6 +333,24 @@ fn effects_abba() {
             })
         },
     );
+    // The swap encodes each world itself: the flip gate's workload.
+    abba(
+        "effects with encoding",
+        &mut || {
+            time(|| {
+                for w in &all {
+                    std::hint::black_box(vesper::capability_effects::check_world(w));
+                }
+            })
+        },
+        &mut || {
+            time(|| {
+                for w in &all {
+                    std::hint::black_box(f.words(&input(w)));
+                }
+            })
+        },
+    );
     let t = time(|| {
         for w in &all {
             std::hint::black_box(input(w));

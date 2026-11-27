@@ -23,6 +23,7 @@
 
 #[path = "common/check_harness.rs"]
 mod check_harness;
+use check_harness::flip_gate;
 
 use check_harness::{Package, repo};
 use serde::Serialize;
@@ -747,6 +748,11 @@ fn speed() {
         t.elapsed()
     };
     port();
+    // The flip gate (scripts/ci/flip-gate/doc.json, #2207).
+    if flip_gate::on() {
+        flip_gate::pairs("render", &mut || rust(&values), &mut || vesper(&values));
+        return;
+    }
     let (a1, b1, b2, a2) = (
         rust(&values),
         vesper(&values),

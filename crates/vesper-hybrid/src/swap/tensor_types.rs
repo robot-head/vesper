@@ -25,7 +25,7 @@ const VESPER_TENSOR_CHECK: vesper::tensor_types::TensorCheckTable =
 /// The flip-gate rows of this file's swaps (`swaps::on`).
 pub(super) const SWAPS: &[Swap] = &[open(
     "tensor_check",
-    "0.28-0.49x; no flip-gate configuration",
+    "flip gate FAIL 2.70x over every repository module (scripts/ci/flip-gate/tensor-check.json, #2207): every module is encoded, and Rust's analyze still runs for accepted ones",
 )];
 
 pub(super) fn register(_r: &mut Registry) {
