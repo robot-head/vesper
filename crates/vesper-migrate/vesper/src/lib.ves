@@ -776,3 +776,260 @@ pub fn migrate_aliasing_pair(in classes: Slice[u64], in flags: Slice[u8]) -> u64
     }
     ALIAS_NONE
 }
+
+// ---------------------------------------------------------------------------
+// Lowercase hex encoder (`synth.rs::hex`), C builtin type classifier
+// (`c.rs::builtin`), and reserved-word / collision-safe identifier renamer
+// (`synth.rs::safe_idents`).
+
+const HEX_NIBBLE_MASK: u8 = 15;
+const HEX_NIBBLE_SHIFT: u8 = 4;
+const HEX_DECIMAL_LIMIT: u8 = 10;
+const HEX_ASCII_ZERO: u8 = 48;
+const HEX_ASCII_LOWER_A_MINUS_TEN: u8 = 87;
+
+const C_BUILTIN_NONE: u8 = 0;
+const C_BUILTIN_U8: u8 = 1;
+const C_BUILTIN_I8: u8 = 2;
+const C_BUILTIN_U16: u8 = 3;
+const C_BUILTIN_I16: u8 = 4;
+const C_BUILTIN_U32: u8 = 5;
+const C_BUILTIN_I32: u8 = 6;
+const C_BUILTIN_U64: u8 = 7;
+const C_BUILTIN_I64: u8 = 8;
+const C_BUILTIN_USIZE: u8 = 9;
+const C_BUILTIN_CBOOL: u8 = 10;
+
+fn hex_nibble_ascii(nibble: u8) -> u8 {
+    if nibble < HEX_DECIMAL_LIMIT {
+        return wrapping_u8(wrapping_add(widen_u64(HEX_ASCII_ZERO), widen_u64(nibble)));
+    }
+    wrapping_u8(wrapping_add(
+        widen_u64(HEX_ASCII_LOWER_A_MINUS_TEN),
+        widen_u64(nibble),
+    ))
+}
+
+pub fn migrate_hex_encode(in src: Slice[u8], inout out: Slice[u8]) -> u64 {
+    let n = src.len();
+    let needed = wrapping_add(n, n);
+    if out.len() < needed {
+        return 0;
+    }
+    let mut i: u64 = 0;
+    loop {
+        if i >= n {
+            break;
+        }
+        let b = match src.try_get(i) {
+            Some(v) => v,
+            None => return 0
+        };
+        let hi = wrapping_u8(widen_u64(b) >> 4) & HEX_NIBBLE_MASK;
+        let lo = b & HEX_NIBBLE_MASK;
+        let dst = wrapping_add(i, i);
+        let _ = out.try_set(dst, hex_nibble_ascii(hi));
+        let _ = out.try_set(wrapping_add(dst, 1), hex_nibble_ascii(lo));
+        i = wrapping_add(i, 1);
+    }
+    needed
+}
+
+pub fn migrate_c_builtin_tag(in name: Slice[u8]) -> u8 {
+    let n = name.len();
+    if slice_eq_str(in name, 0, n, in "uint8_t") {
+        return C_BUILTIN_U8;
+    }
+    if slice_eq_str(in name, 0, n, in "int8_t") {
+        return C_BUILTIN_I8;
+    }
+    if slice_eq_str(in name, 0, n, in "uint16_t") {
+        return C_BUILTIN_U16;
+    }
+    if slice_eq_str(in name, 0, n, in "int16_t") {
+        return C_BUILTIN_I16;
+    }
+    if slice_eq_str(in name, 0, n, in "uint32_t") {
+        return C_BUILTIN_U32;
+    }
+    if slice_eq_str(in name, 0, n, in "int32_t") {
+        return C_BUILTIN_I32;
+    }
+    if slice_eq_str(in name, 0, n, in "uint64_t") {
+        return C_BUILTIN_U64;
+    }
+    if slice_eq_str(in name, 0, n, in "int64_t") {
+        return C_BUILTIN_I64;
+    }
+    if slice_eq_str(in name, 0, n, in "size_t") || slice_eq_str(in name, 0, n, in "uintptr_t") {
+        return C_BUILTIN_USIZE;
+    }
+    if slice_eq_str(in name, 0, n, in "intptr_t") || slice_eq_str(in name, 0, n, in "ptrdiff_t") {
+        return C_BUILTIN_I64;
+    }
+    if slice_eq_str(in name, 0, n, in "bool") {
+        return C_BUILTIN_CBOOL;
+    }
+    C_BUILTIN_NONE
+}
+
+fn is_reserved_ident(in buf: Slice[u8], start: u64, len: u64) -> bool {
+    if slice_eq_str(in buf, start, len, in "in")
+        || slice_eq_str(in buf, start, len, in "inout")
+        || slice_eq_str(in buf, start, len, in "sink")
+        || slice_eq_str(in buf, start, len, in "nocapture")
+        || slice_eq_str(in buf, start, len, in "fn")
+        || slice_eq_str(in buf, start, len, in "let")
+        || slice_eq_str(in buf, start, len, in "mut")
+        || slice_eq_str(in buf, start, len, in "type")
+        || slice_eq_str(in buf, start, len, in "match")
+        || slice_eq_str(in buf, start, len, in "if")
+        || slice_eq_str(in buf, start, len, in "else")
+        || slice_eq_str(in buf, start, len, in "return")
+        || slice_eq_str(in buf, start, len, in "eff")
+    {
+        return true;
+    }
+    slice_eq_str(in buf, start, len, in "handle")
+        || slice_eq_str(in buf, start, len, in "with")
+        || slice_eq_str(in buf, start, len, in "struct")
+        || slice_eq_str(in buf, start, len, in "enum")
+        || slice_eq_str(in buf, start, len, in "sys")
+        || slice_eq_str(in buf, start, len, in "library")
+        || slice_eq_str(in buf, start, len, in "extern")
+        || slice_eq_str(in buf, start, len, in "self")
+        || slice_eq_str(in buf, start, len, in "Self")
+        || slice_eq_str(in buf, start, len, in "Unit")
+        || slice_eq_str(in buf, start, len, in "bool")
+        || slice_eq_str(in buf, start, len, in "true")
+        || slice_eq_str(in buf, start, len, in "false")
+}
+
+fn ident_plus_underscores_eq(
+    in buf: Slice[u8],
+    a_start: u64,
+    a_len: u64,
+    a_u: u64,
+    b_start: u64,
+    b_len: u64,
+    b_u: u64,
+) -> bool {
+    let a_total = wrapping_add(a_len, a_u);
+    let b_total = wrapping_add(b_len, b_u);
+    if a_total != b_total {
+        return false;
+    }
+    let mut p: u64 = 0;
+    loop {
+        if p >= a_total {
+            break;
+        }
+        let ca = if p < a_len {
+            match buf.try_get(wrapping_add(a_start, p)) {
+                Some(v) => v,
+                None => return false
+            }
+        } else {
+            BYTE_UNDERSCORE
+        };
+        let cb = if p < b_len {
+            match buf.try_get(wrapping_add(b_start, p)) {
+                Some(v) => v,
+                None => return false
+            }
+        } else {
+            BYTE_UNDERSCORE
+        };
+        if ca != cb {
+            return false;
+        }
+        p = wrapping_add(p, 1);
+    }
+    true
+}
+
+pub fn migrate_safe_idents_underscores(
+    in buf: Slice[u8],
+    in starts: Slice[u64],
+    in lens: Slice[u64],
+    inout out_underscores: Slice[u64],
+) -> u64 {
+    let k = starts.len();
+    if lens.len() != k || out_underscores.len() < k {
+        return 0;
+    }
+    let mut i: u64 = 0;
+    loop {
+        if i >= k {
+            break;
+        }
+        let _ = out_underscores.try_set(i, 0);
+        i = wrapping_add(i, 1);
+    }
+    i = 0;
+    loop {
+        if i >= k {
+            break;
+        }
+        let a_start = match starts.try_get(i) {
+            Some(v) => v,
+            None => return 0
+        };
+        let a_len = match lens.try_get(i) {
+            Some(v) => v,
+            None => return 0
+        };
+        if is_reserved_ident(in buf, a_start, a_len) {
+            let mut u: u64 = 1;
+            loop {
+                let mut collided = false;
+                let mut j: u64 = 0;
+                loop {
+                    if j >= k {
+                        break;
+                    }
+                    let b_start = match starts.try_get(j) {
+                        Some(v) => v,
+                        None => break
+                    };
+                    let b_len = match lens.try_get(j) {
+                        Some(v) => v,
+                        None => break
+                    };
+                    let b_reserved = is_reserved_ident(in buf, b_start, b_len);
+                    if !b_reserved {
+                        if ident_plus_underscores_eq(in buf, a_start, a_len, u, b_start, b_len, 0) {
+                            collided = true;
+                            break;
+                        }
+                    } else if j < i {
+                        let b_u = match out_underscores.try_get(j) {
+                            Some(v) => v,
+                            None => 0
+                        };
+                        if ident_plus_underscores_eq(
+                            in buf,
+                            a_start,
+                            a_len,
+                            u,
+                            b_start,
+                            b_len,
+                            b_u
+                        ) {
+                            collided = true;
+                            break;
+                        }
+                    }
+                    j = wrapping_add(j, 1);
+                }
+                if !collided {
+                    let _ = out_underscores.try_set(i, u);
+                    break;
+                }
+                u = wrapping_add(u, 1);
+            }
+        }
+        i = wrapping_add(i, 1);
+    }
+    k
+}
