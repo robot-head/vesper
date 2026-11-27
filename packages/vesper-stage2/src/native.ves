@@ -133,6 +133,16 @@ enum ScalarKind: _ {
     Struct = 16,
 }
 
+enum Assignment: _ {
+    Unsupported = 0,
+    Replace = 1,
+    Add = 2,
+    Subtract = 3,
+    Multiply = 4,
+    Divide = 5,
+    Remainder = 6,
+}
+
 enum NativeImport: _ {
     None = 0,
     Fmod = 1,
@@ -226,6 +236,12 @@ copy struct Product {
     first_child: u64,
 }
 
+copy struct LocalValue {
+    block: u64,
+    machine: u64,
+    kind: u8,
+}
+
 struct Function {
     arguments: u64,
     gp_arguments: u64,
@@ -245,6 +261,7 @@ struct Function {
     call_result_bytes: u64,
     call_argument_bytes: u64,
     mutable_slots: ChunkSeq[u32],
+    mutable_values: ChunkSeq[LocalValue],
     addressed_locals: ChunkSeq[u32],
     mutable_bytes: u64,
     home_bytes: u64,
@@ -364,6 +381,37 @@ impl Function {
 
     fn address_taken(in self, name: u32) -> bool {
         u32_at(in self.addressed_locals, w(name)) != 0
+    }
+
+    fn load_mutable(inout self, name: u32, offset: u64, kind: u8, block: u64) -> u64 {
+        // Addressable signed cells use the native ABI's sign extension.
+        let width = abi_width(kind);
+        if self.address_taken(name) {
+            if is_signed(kind) && width < QWORD_BITS {
+                return self.record(STACK_LOAD, HOME_SLOT, offset, width);
+            }
+        } else if self.mutable_values.len() != 0 {
+            let slot = wrapping_sub(offset, self.home_bytes) / HOME_BYTES;
+            match self.mutable_values.try_get(slot) {
+                Option::Some(value) => if value.block == block {
+                    return value.machine;
+                },
+                Option::None => {},
+            };
+        }
+        self.load_cell(offset, kind)
+    }
+
+    fn flush_mutable(inout self, block: u64) {
+        for slot in 0..self.mutable_values.len() {
+            match self.mutable_values.try_get(slot) {
+                Option::Some(value) => if value.block == block {
+                    let offset = add(self.home_bytes, wrapping_mul(slot, HOME_BYTES));
+                    self.store_cell(value.machine, offset, value.kind);
+                },
+                Option::None => {},
+            };
+        }
     }
 
     fn record(inout self, op: u64, lhs: u64, rhs: u64, extra: u64) -> u64 {
@@ -975,7 +1023,27 @@ fn collect_mutating_place(in low: L, f: FnR, name: u32, inout m: Function) -> bo
     true
 }
 
+fn assignment(in low: L, at: u64) -> u8 {
+    let op = n32(low.program.op(add(at, WRITE_OPERATOR)));
+    if low.ctx.names.spells(op, in "=".as_bytes()) {
+        Assignment::Replace
+    } else if low.ctx.names.spells(op, in "+=".as_bytes()) {
+        Assignment::Add
+    } else if low.ctx.names.spells(op, in "-=".as_bytes()) {
+        Assignment::Subtract
+    } else if low.ctx.names.spells(op, in "*=".as_bytes()) {
+        Assignment::Multiply
+    } else if low.ctx.names.spells(op, in "/=".as_bytes()) {
+        Assignment::Divide
+    } else if low.ctx.names.spells(op, in "%=".as_bytes()) {
+        Assignment::Remainder
+    } else {
+        Assignment::Unsupported
+    }
+}
+
 fn collect_mutable_slots(in low: L, f: FnR, row: FnRow, inout m: Function) -> bool {
+    let mut track_writes = false;
     for layout in 0..m.blocks.len() {
         let block = m.blocks.try_get(layout).unwrap_or(0);
         let b = low.program.block(add(row.b0, block));
@@ -983,14 +1051,15 @@ fn collect_mutable_slots(in low: L, f: FnR, row: FnRow, inout m: Function) -> bo
             let inst = low.program.inst(index);
             if inst.op == Op::Write {
                 let name = n32(low.program.op(inst.a));
-                let op = n32(low.program.op(add(inst.a, WRITE_OPERATOR)));
+                let op = assignment(in low, inst.a);
                 if inst.n != WRITE_WORDS
                     || inst.fallible != 0
-                    || !low.ctx.names.spells(op, in "=".as_bytes())
+                    || op == Assignment::Unsupported
                     || !collect_mutating_place(in low, f, name, inout m)
                 {
                     return false;
                 }
+                track_writes = track_writes || op != Assignment::Replace;
             } else if inst.op == Op::Call {
                 let count = call_arity(in low, inst);
                 if count == NO_VALUE {
@@ -1013,10 +1082,61 @@ fn collect_mutable_slots(in low: L, f: FnR, row: FnRow, inout m: Function) -> bo
             }
         }
     }
+    if track_writes {
+        m.mutable_values.resize(
+            m.mutable_bytes / HOME_BYTES,
+            LocalValue { block: NO_VALUE, machine: NO_VALUE, kind: ScalarKind::Unsupported }
+        );
+    }
     true
 }
 
-fn lower_local_store(in low: L, f: FnR, inst: InstRow, block: u64, inout m: Function) -> bool {
+fn lower_compound(
+    op: u8,
+    kind: u8,
+    lhs: u64,
+    rhs: u64,
+    inout m: Function,
+    inout graph: CallGraph
+) -> u64 {
+    let width = abi_width(kind);
+    if is_float(kind) {
+        if op == Assignment::Remainder {
+            return lower_float_remainder(kind, lhs, rhs, inout m, inout graph);
+        }
+        let instruction = match op {
+            Assignment::Add => FLOAT_ADD,
+            Assignment::Subtract => FLOAT_SUB,
+            Assignment::Multiply => FLOAT_MUL,
+            Assignment::Divide => FLOAT_DIV,
+            _ => return NO_VALUE,
+        };
+        return m.record(instruction, lhs, rhs, width);
+    }
+    if !is_integer(kind) {
+        return NO_VALUE;
+    }
+    let signed = is_signed(kind);
+    if op == Assignment::Divide || op == Assignment::Remainder {
+        return lower_division(op == Assignment::Remainder, signed, width, lhs, rhs, inout m);
+    }
+    let instruction = match op {
+        Assignment::Add => ADD,
+        Assignment::Subtract => SUB,
+        Assignment::Multiply => MUL,
+        _ => return NO_VALUE,
+    };
+    lower_checked_integer(instruction, lhs, rhs, signed, width, inout m)
+}
+
+fn lower_local_store(
+    in low: L,
+    f: FnR,
+    inst: InstRow,
+    block: u64,
+    inout m: Function,
+    inout graph: CallGraph
+) -> bool {
     let at = inst.a;
     if inst.op == Op::Bind {
         let pattern = low.program.op(add(at, BIND_PATTERN));
@@ -1048,6 +1168,11 @@ fn lower_local_store(in low: L, f: FnR, inst: InstRow, block: u64, inout m: Func
     };
     let source = low.program.op(source_at);
     let kind = m.kind(source);
+    let op = if inst.op == Op::Write {
+        assignment(in low, at)
+    } else {
+        Assignment::Replace
+    };
     if inst.op == Op::Write {
         let target = argument_value(in low, f, name);
         if m.is_inout(target) {
@@ -1056,8 +1181,18 @@ fn lower_local_store(in low: L, f: FnR, inst: InstRow, block: u64, inout m: Func
                 return false;
             }
             let address = m.read(target, block);
-            let value = m.read(add(m.arguments, source), block);
-            if address == NO_VALUE || value == NO_VALUE {
+            let rhs = m.read(add(m.arguments, source), block);
+            if address == NO_VALUE || rhs == NO_VALUE {
+                return false;
+            }
+            let value = if op == Assignment::Replace {
+                rhs
+            } else {
+                let load = if is_float(kind) { FLOAT_LOAD } else { LOAD };
+                let lhs = m.record(load, address, 0, width);
+                lower_compound(op, kind, lhs, rhs, inout m, inout graph)
+            };
+            if value == NO_VALUE {
                 return false;
             }
             m.store_addressed(address, value, kind, 0);
@@ -1071,12 +1206,28 @@ fn lower_local_store(in low: L, f: FnR, inst: InstRow, block: u64, inout m: Func
     if initial == 0 || abi_width(kind) == 0 || kind != m.kind(wrapping_sub(w(initial), 1)) {
         return false;
     }
-    let value = m.read(add(m.arguments, source), block);
+    let rhs = m.read(add(m.arguments, source), block);
+    if rhs == NO_VALUE {
+        return false;
+    }
+    let addressed = m.address_taken(name);
+    let slot = wrapping_sub(offset, m.home_bytes) / HOME_BYTES;
+    let value = if op == Assignment::Replace {
+        rhs
+    } else {
+        let lhs = m.load_mutable(name, offset, kind, block);
+        lower_compound(op, kind, lhs, rhs, inout m, inout graph)
+    };
     if value == NO_VALUE {
         return false;
     }
+    if m.mutable_values.len() != 0 && !addressed {
+        // Private cells only need their last write at a control-flow edge.
+        return m.mutable_values
+            .try_set(slot, LocalValue { block: block, machine: value, kind: kind });
+    }
     let width = abi_width(kind);
-    let stored = if is_signed(kind) && width < QWORD_BITS && m.address_taken(name) {
+    let stored = if is_signed(kind) && width < QWORD_BITS && addressed {
         m.record(SIGN_EXTEND, value, width, QWORD_BITS)
     } else {
         value
@@ -2214,6 +2365,22 @@ fn lower_float_import(
     m.record(CALL_FLOAT, target, count, count)
 }
 
+fn lower_float_remainder(
+    kind: u8,
+    lhs: u64,
+    rhs: u64,
+    inout m: Function,
+    inout graph: CallGraph
+) -> u64 {
+    let imported = if kind == ScalarKind::F32 {
+        NativeImport::Fmodf
+    } else {
+        NativeImport::Fmod
+    };
+    let args = FloatOperands { first: lhs, second: rhs, third: NO_VALUE };
+    lower_float_import(imported, BINARY_FLOAT_ARGUMENTS, args, inout m, inout graph)
+}
+
 fn lower_float_math(
     op: u8,
     kind: u8,
@@ -2628,6 +2795,43 @@ fn lower_rotate(left: bool, width: u64, lhs: u64, rhs: u64, inout m: Function) -
     }
 }
 
+fn constant_division(remainder: bool, signed: bool, width: u64, lhs: u64, rhs: u64) -> Option[u64] {
+    let mask = low_bits_mask(width);
+    let sign = sign_bit(width);
+    if !remainder && signed && lhs == sign && rhs == mask {
+        return Option::None;
+    }
+    let left_negative = signed && (lhs & sign) != 0;
+    let right_negative = signed && (rhs & sign) != 0;
+    // Unsigned magnitudes also represent the magnitude of a signed minimum.
+    let a = if left_negative {
+        wrapping_sub(0, lhs) & mask
+    } else {
+        lhs
+    };
+    let b = if right_negative {
+        wrapping_sub(0, rhs) & mask
+    } else {
+        rhs
+    };
+    if b == 0 {
+        return Option::None;
+    }
+    let magnitude = if remainder { a % b } else { a / b };
+    let negative = if remainder {
+        left_negative
+    } else {
+        left_negative != right_negative
+    };
+    Option::Some(
+        if negative {
+            wrapping_sub(0, magnitude) & mask
+        } else {
+            magnitude
+        }
+    )
+}
+
 fn lower_division(
     remainder: bool,
     signed: bool,
@@ -2640,6 +2844,19 @@ fn lower_division(
     let mask = low_bits_mask(width);
     match divisor {
         Option::Some(bits) => {
+            match m.constant(lhs) {
+                Option::Some(a) => return match constant_division(
+                    remainder,
+                    signed,
+                    width,
+                    a,
+                    bits
+                ) {
+                    Option::Some(result) => m.record(CONSTANT, result, 0, 0),
+                    Option::None => NO_VALUE,
+                },
+                Option::None => (),
+            };
             if bits == 0 {
                 return NO_VALUE;
             }
@@ -2734,13 +2951,7 @@ fn lower_binary(
     }
     if is_float(operand_kind) && operand_kind == right_kind {
         if kind == operand_kind && low.ctx.names.spells(symbol, in "%".as_bytes()) {
-            let imported = if kind == ScalarKind::F32 {
-                NativeImport::Fmodf
-            } else {
-                NativeImport::Fmod
-            };
-            let args = FloatOperands { first: lhs, second: rhs, third: NO_VALUE };
-            return lower_float_import(imported, BINARY_FLOAT_ARGUMENTS, args, inout m, inout graph);
+            return lower_float_remainder(kind, lhs, rhs, inout m, inout graph);
         }
         return lower_float_binary(in low, symbol, kind, operand_kind, lhs, rhs, inout m);
     }
@@ -2867,7 +3078,7 @@ fn lower_block(
         let inst = low.program.inst(index);
         let at = inst.a;
         if inst.op == Op::Bind || inst.op == Op::Write {
-            if !lower_local_store(in low, f, inst, block, inout m) {
+            if !lower_local_store(in low, f, inst, block, inout m, inout graph) {
                 return false;
             }
             continue;
@@ -2950,11 +3161,8 @@ fn lower_block(
                 m.record(op, address, 0, abi_width(kind))
             } else if offset == NO_VALUE {
                 m.read(source, block)
-            } else if is_signed(kind) && abi_width(kind) < QWORD_BITS && m.address_taken(name) {
-                // Addressable cells use native ABI sign extension.
-                m.record(STACK_LOAD, HOME_SLOT, offset, abi_width(kind))
             } else {
-                m.load_cell(offset, kind)
+                m.load_mutable(name, offset, kind, block)
             }
         } else if inst.op == Op::Project && inst.n == PROJECT_WORDS {
             let source = project_source(in low, at, in m);
@@ -3316,6 +3524,7 @@ fn lower_function(
         call_result_bytes: 0,
         call_argument_bytes: 0,
         mutable_slots: ChunkSeq::new[u32](),
+        mutable_values: ChunkSeq::new[LocalValue](),
         addressed_locals: ChunkSeq::new[u32](),
         mutable_bytes: 0,
         home_bytes: 0
@@ -3353,9 +3562,13 @@ fn lower_function(
             return ChunkSeq::new[u8]();
         }
         let b = low.program.block(add(row.b0, block));
-        if !lower_block(in low, f, b, block, inout m, inout graph)
-            || !lower_terminator(in low, row, b, block, inout m)
-        {
+        if !lower_block(in low, f, b, block, inout m, inout graph) {
+            return ChunkSeq::new[u8]();
+        }
+        if b.term == Term::Branch || b.term == Term::Jump || b.term == Term::Match {
+            m.flush_mutable(block);
+        }
+        if !lower_terminator(in low, row, b, block, inout m) {
             return ChunkSeq::new[u8]();
         }
     }

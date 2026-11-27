@@ -2574,6 +2574,38 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
              if ready { return product_inputs(10, 20, 30, 40, row, sample, 1.5); };\n\
              product_inputs(1, 2, 3, 4, row, sample, -0.5)\n\
          }\n\
+         fn adjust_sample(inout sample: f32, delta: f32) {\n\
+             sample += delta;\n\
+             sample *= 2.0;\n\
+             sample -= 1.0;\n\
+             sample /= 2.0;\n\
+             sample %= 3.0;\n\
+         }\n\
+         pub fn compound_values(a: f64, b: f64, x: f32, choose: bool) -> (f64, f32, u64, i8) {\n\
+             let mut wide = a;\n\
+             wide += b;\n\
+             wide -= 0.5;\n\
+             wide *= 2.0;\n\
+             wide /= 4.0;\n\
+             wide %= 3.0;\n\
+             let mut sample = x;\n\
+             if choose { adjust_sample(inout sample, 1.25); } else { sample -= 0.25; };\n\
+             let mut count: u64 = 6;\n\
+             count += 4;\n\
+             count *= 3;\n\
+             count -= 1;\n\
+             count /= 2;\n\
+             count %= 6;\n\
+             let mut signed: i8 = -9;\n\
+             signed /= 2;\n\
+             signed %= -3;\n\
+             (wide, sample, count, signed)\n\
+         }\n\
+         pub fn overflowing_compound(a: u64, b: u64) -> u64 eff [Fail[ArithOverflow]] {\n\
+             let mut value = a;\n\
+             value += b;\n\
+             value\n\
+         }\n\
          fn unsupported(x: u64) -> u64 { match (x, x) { (0, _) => 7, _ => 9 } }\n\
          pub fn decline(x: u64) -> u64 { unsupported(x) }\n",
     )
@@ -2883,6 +2915,18 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
         "{:?}",
         read_stage2_sidecar_notes(&object)
     );
+    let product_caller_object = dir.join("native-product-caller.o");
+    std::fs::rename(&object, &product_caller_object).unwrap();
+    assert_eq!(
+        compile("compound_values"),
+        0,
+        "{:?}",
+        read_stage2_sidecar_notes(&object)
+    );
+    let compound_bytes = std::fs::read(&object).unwrap();
+    assert_ne!(compile("overflowing_compound"), 0);
+    assert!(read_stage2_sidecar_notes(&object).contains("unsupported x86-64 ELF entry"));
+    assert_eq!(std::fs::read(&object).unwrap(), compound_bytes);
 
     let caller = dir.join("native-scalar-caller.c");
     let binary = dir.join("native-scalar-caller");
@@ -2925,6 +2969,7 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
          extern uint64_t nested_call_entry(uint64_t *, int64_t, float, bool);\n\
          extern uint64_t product_inputs(uint64_t *, uint64_t, uint64_t, uint64_t, uint64_t, const uint64_t *, const uint64_t *, double);\n\
          extern uint64_t product_caller(uint64_t *, int64_t, float, bool);\n\
+         extern uint64_t compound_values(uint64_t *, double, double, float, bool);\n\
          int main(void) {\n\
              if (mix(10, 4) != 65 || mix(UINT64_MAX, UINT64_MAX) != UINT64_MAX - 16) return 1;\n\
              if (choose(0, 4) != 8 || choose(2, 4) != 8 || choose(4, 1) != 10\n\
@@ -3046,12 +3091,20 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
              const uint64_t sample[2] = {129, UINT64_C(0x40100000)};\n\
              row[11] = UINT64_MAX;\n\
              uint64_t *out = &row[1];\n\
-             return product_inputs(out, 10, 20, 30, 40, row, sample, 1.5) != 0\n\
+             if (product_inputs(out, 10, 20, 30, 40, row, sample, 1.5) != 0\n\
                  || row[0] != UINT64_C(0x3fa00000) || (uint32_t)out[0] != UINT32_C(0x3fa00000)\n\
                  || out[1] != UINT64_C(0x3ffc000000000000) || out[2] != 127 || out[3] != 0\n\
                  || out[4] != 1 || out[5] != 129 || out[6] != UINT64_C(0x40100000)\n\
                  || out[7] != 256 || out[8] != UINT64_C(0x4016000000000000) || out[9] != 100\n\
-                 || out[10] != UINT64_MAX;\n\
+                 || out[10] != UINT64_MAX) return 38;\n\
+             uint64_t compound[5] = {0};\n\
+             compound[4] = UINT64_MAX;\n\
+             if (compound_values(compound, 7.5, 2.0, 3.5f, true) != 0\n\
+                 || compound[0] != UINT64_C(0x3ff8000000000000) || compound[1] != UINT64_C(0x3fa00000)\n\
+                 || compound[2] != 2 || compound[3] != UINT64_MAX || compound[4] != UINT64_MAX) return 39;\n\
+             return compound_values(compound, 7.5, 2.0, 3.5f, false) != 0\n\
+                 || compound[0] != UINT64_C(0x3ff8000000000000) || compound[1] != UINT64_C(0x40500000)\n\
+                 || compound[2] != 2 || compound[3] != UINT64_MAX || compound[4] != UINT64_MAX;\n\
          }\n",
     )
     .unwrap();
@@ -3089,6 +3142,7 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
             &bits_object,
             &nested_object,
             &product_inputs_object,
+            &product_caller_object,
             &object,
         ])
         .arg("-lm")
