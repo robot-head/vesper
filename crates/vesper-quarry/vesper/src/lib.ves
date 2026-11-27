@@ -39,7 +39,10 @@ use self::ddl::{ddl_apply_q};
 use self::plan::{optimize_q, prepare_q};
 use self::entry::{execute_q, set_rows_q};
 use self::internal::{check as internal_check_impl, route as internal_route_impl};
-use self::leaf::check as leaf_check_impl;
+use self::leaf::{
+    check as leaf_check_impl, compact as leaf_compact_impl, garbage as leaf_garbage_impl,
+    search as leaf_search_impl
+};
 use self::vector::{vaggregate_rows_q, vexecute_q};
 use self::paths::{access_paths_q};
 use self::page::{
@@ -412,6 +415,24 @@ pub fn leaf_check(
     inout cols: Slice[u64]
 ) -> u64 {
     leaf_check_impl(in b, inout seen, inout mask, inout cols)
+}
+
+pub fn leaf_search(in b: Slice[u8], dir: u64, keys: u64, rowid: u64, inv_ts: u64) -> u64 {
+    leaf_search_impl(in b, dir, keys, rowid, inv_ts)
+}
+
+pub fn leaf_garbage(in b: Slice[u8], dir: u64, in var_cols: Slice[u64]) -> u64 {
+    leaf_garbage_impl(in b, dir, in var_cols)
+}
+
+pub fn leaf_compact(
+    inout b: Slice[u8],
+    dir: u64,
+    end_off: u64,
+    in var_cols: Slice[u64],
+    inout scratch: Slice[u8]
+) {
+    leaf_compact_impl(inout b, dir, end_off, in var_cols, inout scratch)
 }
 
 pub fn store_log_record_decode(
