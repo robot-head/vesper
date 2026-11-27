@@ -110,6 +110,16 @@ const IEX_UREM: u64 = 8;
 const IEX_SHL: u64 = 9;
 const IEX_USHR: u64 = 10;
 const IEX_SSHR: u64 = 11;
+const IEX_WORD_CONVERT: u64 = 12;
+const IEX_WRAPPING_ADD: u64 = 13;
+const IEX_WRAPPING_SUB: u64 = 14;
+const IEX_WRAPPING_MUL: u64 = 15;
+const IEX_BNOT: u64 = 16;
+const IEX_INEG: u64 = 17;
+const IEX_LNOT: u64 = 18;
+const IEX_BAND: u64 = 19;
+const IEX_BOR: u64 = 20;
+const IEX_BXOR: u64 = 21;
 
 // Sub-operations of `INST_WRITE_OP`.
 const WOP_IADD: u64 = 1;
@@ -1069,6 +1079,69 @@ impl Body {
                 let lhs = operand(inout b, lv, k0, self.optimize);
                 let rhs = operand(inout b, rv, k1, self.optimize);
                 let raw = ins_sshr(inout b, lhs, rhs);
+                coerce(inout b, raw, rk, self.optimize)
+            } else if iex == IEX_WORD_CONVERT {
+                let src_var = temp(inout b, x);
+                let src = operand(inout b, src_var, k0, self.optimize);
+                let c1 = coerce(inout b, src, sub, self.optimize);
+                coerce(inout b, c1, rk, self.optimize)
+            } else if iex == IEX_WRAPPING_ADD {
+                let lv = temp(inout b, x);
+                let rv = temp(inout b, y);
+                let lhs = operand(inout b, lv, k0, self.optimize);
+                let rhs = operand(inout b, rv, k1, self.optimize);
+                let raw = ins_iadd(inout b, lhs, rhs);
+                coerce(inout b, raw, rk, self.optimize)
+            } else if iex == IEX_WRAPPING_SUB {
+                let lv = temp(inout b, x);
+                let rv = temp(inout b, y);
+                let lhs = operand(inout b, lv, k0, self.optimize);
+                let rhs = operand(inout b, rv, k1, self.optimize);
+                let raw = ins_isub(inout b, lhs, rhs);
+                coerce(inout b, raw, rk, self.optimize)
+            } else if iex == IEX_WRAPPING_MUL {
+                let lv = temp(inout b, x);
+                let rv = temp(inout b, y);
+                let lhs = operand(inout b, lv, k0, self.optimize);
+                let rhs = operand(inout b, rv, k1, self.optimize);
+                let raw = ins_imul(inout b, lhs, rhs);
+                coerce(inout b, raw, rk, self.optimize)
+            } else if iex == IEX_BNOT {
+                let src_var = temp(inout b, x);
+                let src = operand(inout b, src_var, k0, self.optimize);
+                let raw = ins_bnot(inout b, src);
+                coerce(inout b, raw, rk, self.optimize)
+            } else if iex == IEX_INEG {
+                let src_var = temp(inout b, x);
+                let src = operand(inout b, src_var, k0, self.optimize);
+                let raw = ins_ineg(inout b, src);
+                coerce(inout b, raw, rk, self.optimize)
+            } else if iex == IEX_LNOT {
+                let src_var = temp(inout b, x);
+                let src = operand(inout b, src_var, k0, self.optimize);
+                let cmp = ins_icmp_imm(inout b, cc_eq(), src, 0);
+                let raw = ins_uextend(inout b, ty_i64(), cmp);
+                coerce(inout b, raw, rk, self.optimize)
+            } else if iex == IEX_BAND {
+                let lv = temp(inout b, x);
+                let rv = temp(inout b, y);
+                let lhs = operand(inout b, lv, k0, self.optimize);
+                let rhs = operand(inout b, rv, k1, self.optimize);
+                let raw = ins_band(inout b, lhs, rhs);
+                coerce(inout b, raw, rk, self.optimize)
+            } else if iex == IEX_BOR {
+                let lv = temp(inout b, x);
+                let rv = temp(inout b, y);
+                let lhs = operand(inout b, lv, k0, self.optimize);
+                let rhs = operand(inout b, rv, k1, self.optimize);
+                let raw = ins_bor(inout b, lhs, rhs);
+                coerce(inout b, raw, rk, self.optimize)
+            } else if iex == IEX_BXOR {
+                let lv = temp(inout b, x);
+                let rv = temp(inout b, y);
+                let lhs = operand(inout b, lv, k0, self.optimize);
+                let rhs = operand(inout b, rv, k1, self.optimize);
+                let raw = ins_bxor(inout b, lhs, rhs);
                 coerce(inout b, raw, rk, self.optimize)
             } else {
                 return false;

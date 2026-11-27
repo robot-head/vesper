@@ -1261,3 +1261,357 @@ pub fn migrate_sorted_paths_antichain(
     }
     kept
 }
+
+// ---------------------------------------------------------------------------
+// Cargo manifest `package_name` parser and `vesper-migrate:` doc-comment
+// annotation line parser (`rust.rs`).
+
+const BYTE_LBRACKET: u8 = 91;
+const BYTE_EQUALS: u8 = 61;
+const BYTE_HYPHEN: u8 = 45;
+const BYTE_DQUOTE: u8 = 34;
+const ANNOT_SKIP: u64 = 0;
+const ANNOT_BAD: u64 = 1;
+const ANNOT_OK: u64 = 2;
+const ANNOT_ACCESS_IN: u64 = 1;
+const ANNOT_ACCESS_OUT: u64 = 2;
+const ANNOT_ACCESS_INOUT: u64 = 3;
+const ANNOT_SPANS_LEN: u64 = 6;
+
+fn is_pkg_name_byte(b: u8) -> bool {
+    is_ident_cont(b) || b == BYTE_HYPHEN
+}
+
+fn trim_start_ws(in s: Slice[u8], start: u64, end: u64) -> u64 {
+    let mut p = start;
+    loop {
+        if p >= end {
+            break;
+        }
+        let b = match s.try_get(p) {
+            Some(v) => v,
+            None => break
+        };
+        if !is_c_ws(b) {
+            break;
+        }
+        p = wrapping_add(p, 1);
+    }
+    p
+}
+
+fn trim_end_ws(in s: Slice[u8], start: u64, end: u64) -> u64 {
+    let mut p = end;
+    loop {
+        if p <= start {
+            break;
+        }
+        let prev = wrapping_sub(p, 1);
+        let b = match s.try_get(prev) {
+            Some(v) => v,
+            None => break
+        };
+        if !is_c_ws(b) {
+            break;
+        }
+        p = prev;
+    }
+    p
+}
+
+pub fn migrate_package_name(in manifest: Slice[u8], inout out: Slice[u8]) -> u64 {
+    let n = manifest.len();
+    let mut in_package = false;
+    let mut pos: u64 = 0;
+    loop {
+        if pos >= n {
+            break;
+        }
+        let line_start = pos;
+        loop {
+            if pos >= n {
+                break;
+            }
+            let c = match manifest.try_get(pos) {
+                Some(v) => v,
+                None => break
+            };
+            if c == BYTE_LF {
+                break;
+            }
+            pos = wrapping_add(pos, 1);
+        }
+        let line_end = pos;
+        if pos < n {
+            pos = wrapping_add(pos, 1);
+        }
+        let s = trim_start_ws(in manifest, line_start, line_end);
+        let e = trim_end_ws(in manifest, s, line_end);
+        if s >= e {
+            continue;
+        }
+        let first = match manifest.try_get(s) {
+            Some(v) => v,
+            None => continue
+        };
+        if first == BYTE_LBRACKET {
+            in_package = slice_eq_str(in manifest, s, wrapping_sub(e, s), in "[package]");
+            continue;
+        }
+        if in_package && slice_starts_with_str(in manifest, s, e, in "name") {
+            let after_name = trim_start_ws(in manifest, wrapping_add(s, 4), e);
+            if after_name >= e {
+                return 0;
+            }
+            let eq = match manifest.try_get(after_name) {
+                Some(v) => v,
+                None => return 0
+            };
+            if eq != BYTE_EQUALS {
+                return 0;
+            }
+            let mut vs = trim_start_ws(in manifest, wrapping_add(after_name, 1), e);
+            let mut ve = trim_end_ws(in manifest, vs, e);
+            loop {
+                if vs >= ve {
+                    break;
+                }
+                let b = match manifest.try_get(vs) {
+                    Some(v) => v,
+                    None => break
+                };
+                if b != BYTE_DQUOTE {
+                    break;
+                }
+                vs = wrapping_add(vs, 1);
+            }
+            loop {
+                if ve <= vs {
+                    break;
+                }
+                let prev = wrapping_sub(ve, 1);
+                let b = match manifest.try_get(prev) {
+                    Some(v) => v,
+                    None => break
+                };
+                if b != BYTE_DQUOTE {
+                    break;
+                }
+                ve = prev;
+            }
+            let vlen = wrapping_sub(ve, vs);
+            if vlen == 0 || out.len() < vlen {
+                return 0;
+            }
+            let mut i: u64 = 0;
+            loop {
+                if i >= vlen {
+                    break;
+                }
+                let b = match manifest.try_get(wrapping_add(vs, i)) {
+                    Some(v) => v,
+                    None => return 0
+                };
+                if !is_pkg_name_byte(b) {
+                    return 0;
+                }
+                let mapped = if b == BYTE_HYPHEN { BYTE_UNDERSCORE } else { b };
+                let _ = out.try_set(i, mapped);
+                i = wrapping_add(i, 1);
+            }
+            return vlen;
+        }
+    }
+    0
+}
+
+pub fn migrate_parse_annotation_line(in line: Slice[u8], inout out_spans: Slice[u64]) -> u64 {
+    if out_spans.len() < ANNOT_SPANS_LEN {
+        return ANNOT_BAD;
+    }
+    let n = line.len();
+    let s = trim_start_ws(in line, 0, n);
+    let e = trim_end_ws(in line, s, n);
+    if !slice_starts_with_str(in line, s, e, in "vesper-migrate:") {
+        return ANNOT_SKIP;
+    }
+    let mut p = wrapping_add(s, 15);
+    let mut w0_s: u64 = 0;
+    let mut w0_l: u64 = 0;
+    let mut w1_s: u64 = 0;
+    let mut w1_l: u64 = 0;
+    let mut w2_s: u64 = 0;
+    let mut w2_l: u64 = 0;
+    let mut w3_s: u64 = 0;
+    let mut w3_l: u64 = 0;
+    let mut w4_s: u64 = 0;
+    let mut w4_l: u64 = 0;
+    let mut count: u64 = 0;
+    loop {
+        p = trim_start_ws(in line, p, e);
+        if p >= e {
+            break;
+        }
+        let ws = p;
+        loop {
+            if p >= e {
+                break;
+            }
+            let b = match line.try_get(p) {
+                Some(v) => v,
+                None => break
+            };
+            if is_c_ws(b) {
+                break;
+            }
+            p = wrapping_add(p, 1);
+        }
+        let wl = wrapping_sub(p, ws);
+        if count == 0 {
+            w0_s = ws;
+            w0_l = wl;
+        } else if count == 1 {
+            w1_s = ws;
+            w1_l = wl;
+        } else if count == 2 {
+            w2_s = ws;
+            w2_l = wl;
+        } else if count == 3 {
+            w3_s = ws;
+            w3_l = wl;
+        } else if count == 4 {
+            w4_s = ws;
+            w4_l = wl;
+        } else {
+            return ANNOT_BAD;
+        }
+        count = wrapping_add(count, 1);
+    }
+    let mut nullable: u64 = 0;
+    if count == 3 && slice_eq_str(in line, w2_s, w2_l, in "nullable") {
+        nullable = 1;
+        count = 2;
+    } else if count == 5 && slice_eq_str(in line, w4_s, w4_l, in "nullable") {
+        nullable = 1;
+        count = 4;
+    }
+    let mut has_len = false;
+    let mut len_s: u64 = 0;
+    let mut len_l: u64 = 0;
+    if count == 2 {
+        has_len = false;
+    } else if count == 4 && slice_eq_str(in line, w2_s, w2_l, in "len") {
+        has_len = true;
+        len_s = w3_s;
+        len_l = w3_l;
+    } else {
+        return ANNOT_BAD;
+    }
+    let access = if slice_eq_str(in line, w1_s, w1_l, in "in") {
+        ANNOT_ACCESS_IN
+    } else if slice_eq_str(in line, w1_s, w1_l, in "out") {
+        ANNOT_ACCESS_OUT
+    } else if slice_eq_str(in line, w1_s, w1_l, in "inout") {
+        ANNOT_ACCESS_INOUT
+    } else {
+        return ANNOT_BAD;
+    };
+    if access == ANNOT_ACCESS_OUT && has_len {
+        return ANNOT_BAD;
+    }
+    let _ = out_spans.try_set(0, w0_s);
+    let _ = out_spans.try_set(1, w0_l);
+    let _ = out_spans.try_set(2, access);
+    let _ = out_spans.try_set(3, nullable);
+    let _ = out_spans.try_set(4, len_s);
+    let _ = out_spans.try_set(5, len_l);
+    ANNOT_OK
+}
+
+// ---------------------------------------------------------------------------
+// Lifted parameter renderer (`lift.rs::render_param`).
+
+const BYTE_LBRACE: u8 = 123;
+const BYTE_RBRACE: u8 = 125;
+const BYTE_COMMA: u8 = 44;
+const BYTE_COLON: u8 = 58;
+
+fn copy_range(
+    in src: Slice[u8],
+    src_start: u64,
+    src_len: u64,
+    inout dst: Slice[u8],
+    dst_pos: u64,
+) -> u64 {
+    let mut i: u64 = 0;
+    let mut pos = dst_pos;
+    loop {
+        if i >= src_len {
+            break;
+        }
+        let b = match src.try_get(wrapping_add(src_start, i)) {
+            Some(v) => v,
+            None => break
+        };
+        let _ = dst.try_set(pos, b);
+        pos = wrapping_add(pos, 1);
+        i = wrapping_add(i, 1);
+    }
+    pos
+}
+
+pub fn migrate_render_param(
+    in kw: Slice[u8],
+    in name: Slice[u8],
+    has_footprint: bool,
+    in fp_buf: Slice[u8],
+    in fp_starts: Slice[u64],
+    in fp_lens: Slice[u64],
+    in ty: Slice[u8],
+    inout out: Slice[u8],
+) -> u64 {
+    let mut pos: u64 = 0;
+    if kw.len() > 0 {
+        pos = copy_range(in kw, 0, kw.len(), inout out, pos);
+        let _ = out.try_set(pos, BYTE_SPACE);
+        pos = wrapping_add(pos, 1);
+    }
+    pos = copy_range(in name, 0, name.len(), inout out, pos);
+    if has_footprint {
+        let _ = out.try_set(pos, BYTE_DOT);
+        pos = wrapping_add(pos, 1);
+        let _ = out.try_set(pos, BYTE_LBRACE);
+        pos = wrapping_add(pos, 1);
+        let k = fp_starts.len();
+        let mut i: u64 = 0;
+        loop {
+            if i >= k {
+                break;
+            }
+            if i > 0 {
+                let _ = out.try_set(pos, BYTE_COMMA);
+                pos = wrapping_add(pos, 1);
+                let _ = out.try_set(pos, BYTE_SPACE);
+                pos = wrapping_add(pos, 1);
+            }
+            let ps = match fp_starts.try_get(i) {
+                Some(v) => v,
+                None => break
+            };
+            let pl = match fp_lens.try_get(i) {
+                Some(v) => v,
+                None => break
+            };
+            pos = copy_range(in fp_buf, ps, pl, inout out, pos);
+            i = wrapping_add(i, 1);
+        }
+        let _ = out.try_set(pos, BYTE_RBRACE);
+        pos = wrapping_add(pos, 1);
+    }
+    let _ = out.try_set(pos, BYTE_COLON);
+    pos = wrapping_add(pos, 1);
+    let _ = out.try_set(pos, BYTE_SPACE);
+    pos = wrapping_add(pos, 1);
+    pos = copy_range(in ty, 0, ty.len(), inout out, pos);
+    pos
+}
