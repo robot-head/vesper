@@ -188,7 +188,7 @@ pub fn pred_hi(in c: Cfg, b: u32) -> u64 {
     c.at.try_get(inc(w(b))).unwrap_or(0)
 }
 
-fn pred_count(in c: Cfg, b: u32) -> u64 {
+pub fn pred_count(in c: Cfg, b: u32) -> u64 {
     wrapping_sub(pred_hi(in c, b), pred_lo(in c, b))
 }
 

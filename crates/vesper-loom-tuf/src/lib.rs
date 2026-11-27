@@ -256,15 +256,34 @@ impl Checkpoint {
         })
     }
     pub fn to_json(&self) -> Result<Vec<u8>, TufError> {
-        #[derive(Serialize)]
-        struct WireRef<'a> {
-            state: &'a State,
-            checksum: &'a str,
+        let mut roots_flat = Vec::new();
+        let mut root_lens = Vec::with_capacity(self.state.roots.len());
+        for root in &self.state.roots {
+            roots_flat.extend_from_slice(root);
+            root_lens.push(root.len() as u64);
         }
-        json_bytes(&WireRef {
-            state: &self.state,
-            checksum: &self.checksum,
-        })
+        let mut role_names_flat = Vec::new();
+        let mut role_name_lens = Vec::with_capacity(self.state.role_versions.len());
+        let mut role_versions = Vec::with_capacity(self.state.role_versions.len());
+        for (name, &ver) in &self.state.role_versions {
+            role_names_flat.extend_from_slice(name.as_bytes());
+            role_name_lens.push(name.len() as u64);
+            role_versions.push(ver);
+        }
+        Ok(binding::tuf_encode_checkpoint_json(
+            u64::from(self.state.schema_version),
+            self.state.timestamp_version,
+            self.state.snapshot_version,
+            self.state.repository_id.as_bytes(),
+            self.state.bootstrap_sha256.as_bytes(),
+            self.state.verified_at.as_bytes(),
+            self.checksum.as_bytes(),
+            &roots_flat,
+            &root_lens,
+            &role_names_flat,
+            &role_name_lens,
+            &role_versions,
+        ))
     }
     pub fn root_version(&self) -> Result<u64, TufError> {
         Ok(parse_root(
@@ -323,9 +342,6 @@ impl From<std::io::Error> for TufError {
 }
 fn fail<T>(s: impl Into<String>) -> Result<T, TufError> {
     Err(TufError(s.into()))
-}
-fn json_bytes(value: &impl Serialize) -> Result<Vec<u8>, TufError> {
-    serde_json::to_vec(value).map_err(|e| TufError(e.to_string()))
 }
 fn hash(bytes: &[u8]) -> String {
     String::from_utf8(binding::tuf_sha256_hex(bytes)).unwrap_or_default()

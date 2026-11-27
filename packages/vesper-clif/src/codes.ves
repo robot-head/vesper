@@ -91,6 +91,12 @@ pub const OP_FNEG: u64 = 80;
 pub const OP_FABS: u64 = 81;
 pub const OP_FCVT_FROM_UINT: u64 = 82;
 pub const OP_FCMP: u64 = 83;
+// 90 up (`OPCODES_FROM_90` of clif_words.rs): if_convert_pure_diamonds
+// (#2605).
+pub const OP_CLZ: u64 = 90;
+pub const OP_CTZ: u64 = 91;
+pub const OP_POPCNT: u64 = 92;
+pub const OP_BITREV: u64 = 93;
 
 // Types.
 pub const TY_OTHER: u64 = 0;
@@ -203,6 +209,8 @@ pub const E_ICONST: u64 = 68;
 pub const E_REPLACE_IMM: u64 = 69;
 pub const E_REPLACE_ICMP_IMM: u64 = 70;
 pub const E_MEM_ADDR: u64 = 71;
+// 80 up: if_convert_pure_diamonds and dense_icmp_chains_to_br_table (#2605).
+pub const E_PLACE_AFTER: u64 = 80;
 
 // A sized stack slot's kind.
 pub const S_EXPLICIT: u64 = 0;
