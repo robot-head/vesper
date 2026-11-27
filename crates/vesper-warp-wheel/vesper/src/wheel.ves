@@ -218,6 +218,9 @@ impl WheelCore {
             return Option::Some(AdvanceError::OutOfRange);
         }
         self.now_ns = now_ns;
+        if now_ns < saturating_mul(self.cursor, self.tick_ns) {
+            return Option::None;
+        }
         let target = div(now_ns, self.tick_ns);
         loop {
             if self.cursor > target {
@@ -244,7 +247,8 @@ impl WheelCore {
 
     // The earliest due entry, as `(deadline, index)`, released.
     fn pop_due(inout self) -> Option[(u64, u64)] {
-        let head = self.head_of(self.ready_list());
+        let ready = self.ready_list();
+        let head = self.head_of(ready);
         if head == nil() {
             return Option::None;
         }
@@ -252,7 +256,13 @@ impl WheelCore {
         if deadline > self.now_ns {
             return Option::None;
         }
-        self.unlink(head);
+        let next = self.next_of(head);
+        self.l.try_set(lx(ready, 0), next);
+        if next == nil() {
+            self.l.try_set(lx(ready, 1), nil());
+        } else {
+            self.e.try_set(ix(next, 4), nil());
+        }
         self.release(head);
         Option::Some((deadline, head))
     }

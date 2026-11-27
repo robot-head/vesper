@@ -54,6 +54,24 @@ const PRELUDE: &[(&str, &str)] = &[
     ("bool", "_Bool"),
 ];
 
+#[cfg(feature = "vesper-port")]
+fn builtin(name: &str) -> Option<CType> {
+    match crate::binding::migrate_c_builtin_tag(name.as_bytes()) {
+        1 => Some(CType::Scalar(Scalar::U8)),
+        2 => Some(CType::Scalar(Scalar::I8)),
+        3 => Some(CType::Scalar(Scalar::U16)),
+        4 => Some(CType::Scalar(Scalar::I16)),
+        5 => Some(CType::Scalar(Scalar::U32)),
+        6 => Some(CType::Scalar(Scalar::I32)),
+        7 => Some(CType::Scalar(Scalar::U64)),
+        8 => Some(CType::Scalar(Scalar::I64)),
+        9 => Some(CType::Scalar(Scalar::Usize)),
+        10 => Some(CType::CBool),
+        _ => None,
+    }
+}
+
+#[cfg(not(feature = "vesper-port"))]
 fn builtin(name: &str) -> Option<CType> {
     Some(match name {
         "uint8_t" => CType::Scalar(Scalar::U8),

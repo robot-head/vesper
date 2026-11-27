@@ -220,6 +220,7 @@ fn wire_field(t: &WireType) -> String {
 }
 
 /// Words that cannot be parameter names in Vesper or `.vsys` text.
+#[cfg(not(feature = "vesper-port"))]
 const RESERVED: &[&str] = &[
     "in",
     "inout",
@@ -253,6 +254,39 @@ const RESERVED: &[&str] = &[
 /// within one signature: a reserved word, or a name already taken by another
 /// parameter, gets trailing underscores until it is free. Parameter names do
 /// not affect the C ABI.
+#[cfg(feature = "vesper-port")]
+pub fn safe_idents<'a>(names: impl IntoIterator<Item = &'a str>) -> Vec<String> {
+    let names: Vec<&str> = names.into_iter().collect();
+    let total_bytes: usize = names.iter().map(|n| n.len()).sum();
+    let mut buf = Vec::with_capacity(total_bytes);
+    let mut starts = Vec::with_capacity(names.len());
+    let mut lens = Vec::with_capacity(names.len());
+    for n in &names {
+        starts.push(buf.len() as u64);
+        lens.push(n.len() as u64);
+        buf.extend_from_slice(n.as_bytes());
+    }
+    let mut underscores = vec![0u64; names.len()];
+    let _ = crate::binding::migrate_safe_idents_underscores(&buf, &starts, &lens, &mut underscores);
+    names
+        .iter()
+        .zip(underscores)
+        .map(|(n, u)| {
+            let mut out = String::with_capacity(n.len() + u as usize);
+            out.push_str(n);
+            for _ in 0..u {
+                out.push('_');
+            }
+            out
+        })
+        .collect()
+}
+
+/// Parameter names that are safe in Vesper and `.vsys` text and distinct
+/// within one signature: a reserved word, or a name already taken by another
+/// parameter, gets trailing underscores until it is free. Parameter names do
+/// not affect the C ABI.
+#[cfg(not(feature = "vesper-port"))]
 pub fn safe_idents<'a>(names: impl IntoIterator<Item = &'a str>) -> Vec<String> {
     let names: Vec<&str> = names.into_iter().collect();
     let mut taken: std::collections::BTreeSet<String> = names
@@ -387,6 +421,15 @@ fn origin_text(o: &Origin) -> String {
     }
 }
 
+#[cfg(feature = "vesper-port")]
+fn hex(bytes: &[u8]) -> String {
+    let mut out = vec![0u8; bytes.len() * 2];
+    let written = crate::binding::migrate_hex_encode(bytes, &mut out) as usize;
+    out.truncate(written);
+    String::from_utf8(out).unwrap_or_default()
+}
+
+#[cfg(not(feature = "vesper-port"))]
 fn hex(bytes: &[u8]) -> String {
     bytes
         .iter()
