@@ -512,6 +512,50 @@ impl Ctx {
     }
 }
 
+#[cfg(feature = "vesper-port")]
+fn int_specifiers(spec: &[&TypeSpecifier]) -> CType {
+    let tags: Vec<u8> = spec
+        .iter()
+        .map(|s| match s {
+            TypeSpecifier::Signed => 1u8,
+            TypeSpecifier::Unsigned => 2u8,
+            TypeSpecifier::Char => 3u8,
+            TypeSpecifier::Short => 4u8,
+            TypeSpecifier::Int => 5u8,
+            TypeSpecifier::Long => 6u8,
+            _ => 0u8,
+        })
+        .collect();
+    match crate::binding::migrate_c_int_specifiers(&tags) {
+        1 => CType::Scalar(Scalar::U8),
+        2 => CType::Scalar(Scalar::I8),
+        3 => CType::Scalar(Scalar::U16),
+        4 => CType::Scalar(Scalar::I16),
+        5 => CType::Scalar(Scalar::U32),
+        6 => CType::Scalar(Scalar::I32),
+        7 => CType::Scalar(Scalar::U64),
+        8 => CType::Scalar(Scalar::I64),
+        100 => CType::Refused(
+            RefusalReason::UnsupportedType,
+            "mixed type specifiers".into(),
+        ),
+        101 => CType::Refused(
+            RefusalReason::PlatformDependentWidth,
+            "plain `char` has implementation-defined signedness; use int8_t/uint8_t".into(),
+        ),
+        102 => CType::Refused(
+            RefusalReason::PlatformDependentWidth,
+            "`long` is 32-bit on Windows and 64-bit on LP64 targets; use a fixed-width integer"
+                .into(),
+        ),
+        _ => CType::Refused(
+            RefusalReason::UnsupportedType,
+            "unsupported integer specifier combination".into(),
+        ),
+    }
+}
+
+#[cfg(not(feature = "vesper-port"))]
 fn int_specifiers(spec: &[&TypeSpecifier]) -> CType {
     let (mut signed, mut unsigned, mut chars, mut shorts, mut ints, mut longs) = (0, 0, 0, 0, 0, 0);
     for s in spec {

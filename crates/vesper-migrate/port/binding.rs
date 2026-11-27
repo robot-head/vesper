@@ -15,6 +15,7 @@ unsafe extern "C" {
     fn vesper_migrate_live_allocations() -> i64;
     fn vesper_migrate_migrate_aliasing_pair(classes: *mut u64, flags: *mut u64) -> i64;
     fn vesper_migrate_migrate_c_builtin_tag(name: *mut u64) -> i64;
+    fn vesper_migrate_migrate_c_int_specifiers(tags: *mut u64) -> i64;
     fn vesper_migrate_migrate_filter_directives(src: *mut u64, out: *mut u64) -> i64;
     fn vesper_migrate_migrate_hex_encode(src: *mut u64, out: *mut u64) -> i64;
     fn vesper_migrate_migrate_lift_mode(is_owned_move: i64, is_unique_borrow: i64, whole_value_access: i64, has_reads: i64, has_muts: i64) -> i64;
@@ -58,6 +59,15 @@ pub fn migrate_c_builtin_tag(name: &[u8]) -> u8 {
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
     let raw = vesper_port_abi::with_slice(name, |view_name| unsafe { vesper_migrate_migrate_c_builtin_tag(view_name) });
+    raw as u8
+}
+
+/// Calls `migrate_c_int_specifiers` of the Vesper library `migrate` (`vesper_migrate_migrate_c_int_specifiers`).
+pub fn migrate_c_int_specifiers(tags: &[u8]) -> u8 {
+    // SAFETY: `vesper_migrate_migrate_c_int_specifiers` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(tags, |view_tags| unsafe { vesper_migrate_migrate_c_int_specifiers(view_tags) });
     raw as u8
 }
 
