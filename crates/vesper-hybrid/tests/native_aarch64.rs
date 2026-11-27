@@ -1213,6 +1213,51 @@ fn aarch64_cfg_homes_survive_calls_in_callee_saved_registers() {
 }
 
 #[test]
+fn aarch64_spilling_keeps_profitable_callee_saved_block_homes() {
+    const LIVE_CONSTANTS: u64 = 20;
+    const RELOADS: u64 = 3;
+    const CELL_BYTES: u64 = CELL_BITS / BYTE_BITS;
+    const TARGET: u64 = 17;
+    const MOV_X19_X0: u32 = 0xaa00_03f3;
+    const LDR_X19_SP: u32 = 0xf940_03f3;
+
+    let mut records = vec![
+        [STACK_SLOT, CELL_BYTES, CELL_BYTES, 0],
+        [BLOCK_LABEL, 0, 1, 1],
+        [STACK_STORE_QWORD, 0, 0, 0],
+        [CALL_VOID, TARGET, 0, 0],
+    ];
+    let first = records.len() as u64 + 1;
+    for i in 0..LIVE_CONSTANTS {
+        records.push([CONSTANT, i, 0, 0]);
+    }
+    let mut sum = first;
+    for value in first + 1..first + LIVE_CONSTANTS {
+        let next = records.len() as u64 + 1;
+        records.push([ADD, sum, value, CELL_BITS]);
+        sum = next;
+    }
+    for _ in 0..RELOADS {
+        let reload = records.len() as u64 + 1;
+        records.push([STACK_LOAD, 0, 0, CELL_BITS]);
+        records.push([ADD, sum, reload, CELL_BITS]);
+        sum = reload + 1;
+    }
+    records.push([BLOCK_RETURN, sum, 0, 0]);
+    let tape: Vec<_> = [1, NO_VALUE]
+        .into_iter()
+        .chain(records.into_iter().flatten())
+        .collect();
+    let packet = binding::aarch64_relocatable_block(&tape);
+    let (length, body) = packet.split_first_chunk::<{ size_of::<u64>() }>().unwrap();
+    let instructions = &body[..u64::from_le_bytes(*length) as usize];
+    let (words, remainder) = instructions.as_chunks::<{ size_of::<u32>() }>();
+    assert!(remainder.is_empty());
+    assert!(words.contains(&MOV_X19_X0.to_le_bytes()));
+    assert!(words.contains(&LDR_X19_SP.to_le_bytes()));
+}
+
+#[test]
 fn aarch64_spills_live_values_and_limits_the_combined_frame() {
     const LIVE_VALUES: u64 = 20;
     const FULL_FRAME_BYTES: u64 = 4096;

@@ -238,6 +238,7 @@ copy enum Allocation {
     RegisterHomes,
     StackHomes,
     Spills,
+    SpillsWithRegisterHomes,
 }
 
 copy enum Retry {
@@ -542,6 +543,31 @@ fn home_cell(in r: Record, home_slot: u64) -> u32 {
     } else {
         UNASSIGNED
     }
+}
+
+fn worth_spilling_with_homes(
+    in words: Slice[u64],
+    in aliases: ChunkSeq[u64],
+    homes: u32,
+    returns: u64
+) -> bool {
+    // Conservatively charge a save on entry and a restore on each normal return.
+    let cost = wrapping_mul(widen_u64(count_ones_u64(widen_u64(homes))), wrapping_add(returns, 1));
+    if aliases.len() <= cost {
+        return false;
+    }
+    let mut savings: u64 = 0;
+    for index in 0..aliases.len() {
+        let reload = read_record(in words, aliases.try_get(index).unwrap_or(0));
+        let cell = wrapping_u32(reload.right / HOME_WORD_BYTES);
+        if (homes & sh(1, cell)) != 0 {
+            savings = wrapping_add(savings, 1);
+            if savings > cost {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 fn write_home(inout out: ChunkSeq[u8], home: u32, source: u32, width: u64) {
@@ -1620,7 +1646,7 @@ fn encode_pass(
     };
     let register_home = (
         match allocation {
-            Allocation::RegisterHomes => true,
+            Allocation::RegisterHomes | Allocation::SpillsWithRegisterHomes => true,
             _ => false,
         }
     )
@@ -1635,6 +1661,7 @@ fn encode_pass(
     let mut unpromotable_homes: u32 = 0;
     let mut home_cells = ChunkSeq::new[HomeCell]();
     let mut home_aliases = ChunkSeq::new[u64]();
+    let mut normal_returns: u64 = 0;
     if register_home {
         for index in 0..HOME_REGISTERS {
             home_cells.push(HomeCell { width: 0, next_store: values });
@@ -1671,6 +1698,9 @@ fn encode_pass(
         let value = wrapping_add(args, index);
         let r = read_record(in words, index);
         has_float = has_float || (r.op >= FLOAT_CONSTANT && r.op <= FLOAT_COPY_SIGN);
+        if register_home && r.op == BLOCK_RETURN && r.left != TRAP_VALUE {
+            normal_returns = wrapping_add(normal_returns, 1);
+        }
         if needs_call_pair != (r.op == CALL_PAIR)
             || needs_checked != is_checked_arithmetic(r.op)
             || (r.op == RETURN_PAIR && (labeled || index != last_index))
@@ -1883,7 +1913,7 @@ fn encode_pass(
     let homes = home_candidates & ~unpromotable_homes & home_range;
     let home_mask = sh(homes, home_first);
     let spill_mode = match allocation {
-        Allocation::Spills => true,
+        Allocation::Spills | Allocation::SpillsWithRegisterHomes => true,
         _ => false,
     };
     let local_bytes = if frame_used || homes != home_candidates {
@@ -2278,7 +2308,12 @@ fn encode_pass(
                 },
             }
         } else {
-            let next = if home_mask != 0 {
+            let next = if has_calls
+                && home_mask != 0
+                && worth_spilling_with_homes(in words, in home_aliases, homes, normal_returns)
+            {
+                Allocation::SpillsWithRegisterHomes
+            } else if home_mask != 0 {
                 Allocation::StackHomes
             } else {
                 Allocation::Spills
