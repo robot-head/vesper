@@ -2433,6 +2433,24 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
              let next = base + 1;\n\
              wrapping_add(next, step)\n\
          }\n\
+         fn step_scalars(inout byte: i8, inout active: bool, inout single: f32, inout double: f64, step: f32, scale: f64) {\n\
+             byte = wrapping_sub(byte, 3);\n\
+             active = !active;\n\
+             single = single + step;\n\
+             double = double * scale;\n\
+         }\n\
+         pub fn scalar_inout(inout byte: i8, inout active: bool, inout single: f32, inout double: f64, step: f32, scale: f64, change: bool) -> u64 {\n\
+             if change { step_scalars(byte, active, single, double, step, scale); };\n\
+             let mut local = byte;\n\
+             let mut flipped = active;\n\
+             let mut s = single;\n\
+             let mut d = double;\n\
+             step_scalars(local, flipped, s, d, step, scale);\n\
+             if flipped { to_bits_f64(d) } else {\n\
+                 let bits: u32 = to_bits_f32(s);\n\
+                 wrapping_add(widen_u64(bits), wrapping_u64(widen_i64(local)))\n\
+             }\n\
+         }\n\
          fn unsupported(x: u64) -> u64 { match (x, x) { (0, _) => 7, _ => 9 } }\n\
          pub fn decline(x: u64) -> u64 { unsupported(x) }\n",
     )
@@ -2612,6 +2630,14 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
         "{:?}",
         read_stage2_sidecar_notes(&object)
     );
+    let constant_object = dir.join("native-constant.o");
+    std::fs::rename(&object, &constant_object).unwrap();
+    assert_eq!(
+        compile("scalar_inout"),
+        0,
+        "{:?}",
+        read_stage2_sidecar_notes(&object)
+    );
     let bytes = std::fs::read(&object).unwrap();
     assert_ne!(compile("decline"), 0);
     assert!(read_stage2_sidecar_notes(&object).contains("unsupported x86-64 ELF entry"));
@@ -2643,6 +2669,7 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
          extern int64_t tuple_value(int64_t, int64_t, bool);\n\
          extern int64_t record_value(int64_t, int64_t, bool);\n\
          extern int64_t constant_after_branch(bool);\n\
+         extern uint64_t scalar_inout(int64_t *, uint64_t *, float *, double *, float, double, bool);\n\
          int main(void) {\n\
              if (mix(10, 4) != 65 || mix(UINT64_MAX, UINT64_MAX) != UINT64_MAX - 16) return 1;\n\
              if (choose(0, 4) != 8 || choose(2, 4) != 8 || choose(4, 1) != 10\n\
@@ -2678,8 +2705,19 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
                  || tuple_value(INT64_MAX, 0, true) != -5) return 17;\n\
              if (record_value(3, 11, true) != 19 || record_value(3, 11, false) != -1\n\
                  || record_value(INT64_MAX, 0, true) != 0) return 18;\n\
-             return constant_after_branch(true) != INT64_MAX - 2\n\
-                 || constant_after_branch(false) != INT64_MAX;\n\
+             if (constant_after_branch(true) != INT64_MAX - 2\n\
+                 || constant_after_branch(false) != INT64_MAX) return 19;\n\
+             int64_t byte = 1;\n\
+             uint64_t active = 1;\n\
+             struct { float value; uint32_t guard; } single = {1.0f, UINT32_C(0xdeadbeef)};\n\
+             double dbl = 2.0;\n\
+             uint64_t observed = scalar_inout(&byte, &active, &single.value, &dbl, 0.5f, 2.0, true);\n\
+             if (byte != -2 || active != 0 || single.value != 1.5f || single.guard != UINT32_C(0xdeadbeef)\n\
+                 || dbl != 4.0 || observed != UINT64_C(0x4020000000000000)) return 20;\n\
+             active = 1;\n\
+             observed = scalar_inout(&byte, &active, &single.value, &dbl, 0.5f, 2.0, false);\n\
+             return byte != -2 || active != 1 || single.value != 1.5f || dbl != 4.0\n\
+                 || observed != UINT64_C(0x3ffffffb);\n\
          }\n",
     )
     .unwrap();
@@ -2704,6 +2742,7 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
             &procedure_object,
             &tuple_object,
             &record_object,
+            &constant_object,
             &object,
         ])
         .arg("-o")

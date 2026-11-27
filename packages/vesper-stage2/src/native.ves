@@ -24,7 +24,9 @@ use @vesper/hybrid-native-backend::x86_64::{
 use @vesper/place-ir::{BlockRow, FnRow, InstRow, Lit, Op, Pat, Tag, Term};
 use @vesper/place-ir-lower::ast::{FnR};
 use @vesper/place-ir-lower::lower::{L};
-use @vesper/hybrid-native-backend::scalar::{CALL_VOID, LOAD, STACK_ADDRESS, STORE_QWORD};
+use @vesper/hybrid-native-backend::scalar::{
+    CALL_VOID, FLOAT_LOAD, FLOAT_STORE32, FLOAT_STORE64, LOAD, STACK_ADDRESS, STORE_QWORD
+};
 
 const LITERAL_WORDS: u64 = 3;
 const BINARY_WORDS: u64 = 3;
@@ -151,6 +153,7 @@ struct Function {
     binding_fields: ChunkSeq[u32],
     aggregate_instructions: ChunkSeq[u64],
     mutable_slots: ChunkSeq[u32],
+    addressed_locals: ChunkSeq[u32],
     mutable_bytes: u64,
     home_bytes: u64,
 }
@@ -225,6 +228,10 @@ impl Function {
         } else {
             add(self.home_bytes, wrapping_mul(wrapping_sub(w(slot), 1), HOME_BYTES))
         }
+    }
+
+    fn address_taken(in self, name: u32) -> bool {
+        u32_at(in self.addressed_locals, w(name)) != 0
     }
 
     fn record(inout self, op: u64, lhs: u64, rhs: u64, extra: u64) -> u64 {
@@ -467,23 +474,14 @@ fn sysv_signature(in low: L, f: FnR) -> bool {
     for index in 0..f.param_count {
         let p = low.ast.param(add(f.param_start, index));
         let kind = scalar_kind(in low, p.ty);
-        if p.proj_count != 0
-            || abi_width(kind) == 0
-            || (p.pass == TyPass::Inout && !addressable_scalar(kind))
-        {
+        if p.proj_count != 0 || abi_width(kind) == 0 {
             return false;
         }
-        if is_float(kind) {
+        if p.pass != TyPass::Inout && is_float(kind) {
             floats = inc(floats);
         }
     }
     floats <= XMM_ARGUMENTS
-}
-
-fn addressable_scalar(kind: u8) -> bool {
-    // The native language ABI gives each scalar memory cell one word.
-    // These kinds use all of that word without further normalization.
-    is_integer(kind) && abi_width(kind) == QWORD_BITS
 }
 
 fn argument_value(in low: L, f: FnR, root: u32) -> u64 {
@@ -747,6 +745,9 @@ fn collect_mutable_slots(in low: L, f: FnR, row: FnRow, inout m: Function) -> bo
                         {
                             return false;
                         }
+                        if !m.is_inout(argument_value(in low, f, name)) {
+                            set_by_symbol(inout m.addressed_locals, name, 1);
+                        }
                     }
                 }
             }
@@ -786,7 +787,8 @@ fn lower_local_store(in low: L, f: FnR, inst: InstRow, block: u64, inout m: Func
     if inst.op == Op::Write {
         let target = argument_value(in low, f, name);
         if m.is_inout(target) {
-            if !addressable_scalar(kind) || m.value_kind(target) != kind {
+            let width = abi_width(kind);
+            if width == 0 || m.value_kind(target) != kind {
                 return false;
             }
             let address = m.read(target, block);
@@ -794,7 +796,18 @@ fn lower_local_store(in low: L, f: FnR, inst: InstRow, block: u64, inout m: Func
             if address == NO_VALUE || value == NO_VALUE {
                 return false;
             }
-            let _ = m.record(STORE_QWORD, address, value, 0);
+            // The native ABI stores narrow signed integers as sign-extended words.
+            let stored = if is_signed(kind) && width < QWORD_BITS {
+                m.record(SIGN_EXTEND, value, width, QWORD_BITS)
+            } else {
+                value
+            };
+            let op = match kind {
+                ScalarKind::F32 => FLOAT_STORE32,
+                ScalarKind::F64 => FLOAT_STORE64,
+                _ => STORE_QWORD,
+            };
+            let _ = m.record(op, address, stored, 0);
             return true;
         }
     }
@@ -809,7 +822,13 @@ fn lower_local_store(in low: L, f: FnR, inst: InstRow, block: u64, inout m: Func
     if value == NO_VALUE {
         return false;
     }
-    m.store_cell(value, offset, kind);
+    let width = abi_width(kind);
+    let stored = if is_signed(kind) && width < QWORD_BITS && m.address_taken(name) {
+        m.record(SIGN_EXTEND, value, width, QWORD_BITS)
+    } else {
+        value
+    };
+    m.store_cell(stored, offset, kind);
     true
 }
 
@@ -899,7 +918,7 @@ fn lower_call(
         let value = if inout_arg {
             let name = argument_root(in low, at);
             let place = place_value(in low, caller, name, in m);
-            if !addressable_scalar(kind) || m.value_kind(place) != kind {
+            if abi_width(kind) == 0 || m.value_kind(place) != kind {
                 return NO_VALUE;
             }
             if m.is_inout(place) {
@@ -917,7 +936,7 @@ fn lower_call(
         if value == NO_VALUE {
             return NO_VALUE;
         }
-        if is_float(kind) {
+        if !inout_arg && is_float(kind) {
             floats.push(value);
         } else {
             args.push(value);
@@ -2107,9 +2126,13 @@ fn lower_block(
                 if address == NO_VALUE {
                     return false;
                 }
-                m.record(LOAD, address, 0, QWORD_BITS)
+                let op = if is_float(kind) { FLOAT_LOAD } else { LOAD };
+                m.record(op, address, 0, abi_width(kind))
             } else if offset == NO_VALUE {
                 m.read(source, block)
+            } else if is_signed(kind) && abi_width(kind) < QWORD_BITS && m.address_taken(name) {
+                // Addressable cells use native ABI sign extension.
+                m.record(STACK_LOAD, HOME_SLOT, offset, abi_width(kind))
             } else {
                 m.load_cell(offset, kind)
             }
@@ -2310,7 +2333,7 @@ fn lower_entry(inout m: Function) -> bool {
     let mut fp: u64 = 0;
     for arg in 0..m.arguments {
         let kind = m.value_kind(arg);
-        if is_float(kind) {
+        if !m.is_inout(arg) && is_float(kind) {
             let value = m.record(FLOAT_ARGUMENT, fp, 0, abi_width(kind));
             if fp == 0 {
                 float_start = value;
@@ -2322,8 +2345,13 @@ fn lower_entry(inout m: Function) -> bool {
     let mut float_value = float_start;
     for arg in 0..m.arguments {
         let kind = m.value_kind(arg);
-        let width = abi_width(kind);
-        let value = if is_float(kind) {
+        let inout_arg = m.is_inout(arg);
+        let width = if inout_arg {
+            QWORD_BITS
+        } else {
+            abi_width(kind)
+        };
+        let value = if !inout_arg && is_float(kind) {
             let value = float_value;
             float_value = inc(float_value);
             value
@@ -2370,6 +2398,7 @@ fn lower_function(
         binding_fields: ChunkSeq::new[u32](),
         aggregate_instructions: ChunkSeq::new[u64](),
         mutable_slots: ChunkSeq::new[u32](),
+        addressed_locals: ChunkSeq::new[u32](),
         mutable_bytes: 0,
         home_bytes: 0
     };
@@ -2378,7 +2407,7 @@ fn lower_function(
         let kind = scalar_kind(in low, param.ty);
         m.parameters.push(kind);
         m.inout_parameters.push(param.pass == TyPass::Inout);
-        if !is_float(kind) {
+        if param.pass == TyPass::Inout || !is_float(kind) {
             m.gp_arguments = inc(m.gp_arguments);
         }
     }
