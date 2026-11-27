@@ -189,6 +189,29 @@ pub sugar sum: tag emits eff [Fail] {
             total
         }
     }
+
+    // Normalize to the earlier block rules before introducing the loop. An
+    // expression captured directly in a repeating template would be memoized
+    // across iterations; a block runs with each iteration's bindings.
+    rule (sum{ $projection:expr | $element:pat in $lo:expr.. $hi:expr }) => {
+        sum{ { $projection } | $element in $lo.. $hi }
+    }
+
+    rule (
+        sum{
+            $projection:expr
+                | $pair:pat in zip{
+                    $left:ident $(.$left_field:ident)*,
+                    $right:ident $(.$right_field:ident)*
+                }
+        }
+    ) => {
+        sum{ { $projection } | $pair in zip{ $left $(.$left_field)*, $right $(.$right_field)* } }
+    }
+
+    rule (sum{ $projection:expr | $element:pat in $source:expr }) => {
+        sum{ { $projection } | $element in $source }
+    }
 }
 
 // The largest projected value under Ord. Empty sources yield None; equal
