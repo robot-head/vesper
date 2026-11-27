@@ -516,6 +516,11 @@ pub fn prepare_source(
         if package.join("src").is_dir() {
             walk(&package.join("src"), &mut files)?;
         }
+        // And the text its sources `include_str` from beside `src/`, such
+        // as @vesper/preludes' `preludes/` (#2285).
+        for dir in data_dirs(package)? {
+            walk(&dir, &mut files)?;
+        }
         for file in files {
             let target = copy.join(file.strip_prefix(package).unwrap_or(&file));
             copy_file(&file, &target)?;
@@ -546,6 +551,28 @@ pub fn prepare_source(
     }
     let root = closure[0].strip_prefix(&base).unwrap_or(&closure[0]);
     Ok(scratch.join(root))
+}
+
+/// The directories of `package` besides `src/` that `include_str` may read:
+/// every one that is not hidden, not a build output and not a package of its
+/// own.
+fn data_dirs(package: &Path) -> Result<Vec<PathBuf>, String> {
+    let mut dirs = Vec::new();
+    for entry in std::fs::read_dir(package).map_err(|e| format!("{}: {e}", package.display()))? {
+        let path = entry
+            .map_err(|e| format!("{}: {e}", package.display()))?
+            .path();
+        let name = path.file_name().unwrap_or_default().to_string_lossy();
+        if name.starts_with('.') || name == "src" || name == "target" {
+            continue;
+        }
+        // `metadata` follows symlinks (Bazel runfiles are symlink trees).
+        if std::fs::metadata(&path).is_ok_and(|m| m.is_dir()) && !path.join("Loom.toml").exists() {
+            dirs.push(path);
+        }
+    }
+    dirs.sort();
+    Ok(dirs)
 }
 
 fn common_ancestor(paths: &[PathBuf]) -> PathBuf {
