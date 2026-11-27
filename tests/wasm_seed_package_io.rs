@@ -2404,6 +2404,21 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
              apply_delta(value, 1, true);\n\
              wrapping_add(wrapping_mul(prior, 3), value)\n\
          }\n\
+         fn tuple_tick(inout state: i64) -> i64 {\n\
+             let prior = state;\n\
+             state = wrapping_add(state, 1);\n\
+             prior\n\
+         }\n\
+         fn twice_field(value: i64) -> i64 { wrapping_mul(value, 2) }\n\
+         pub fn tuple_value(a: i64, b: i64, flag: bool) -> i64 {\n\
+             let mut state = a;\n\
+             let tuple = (tuple_tick(state), b, tuple_tick(state));\n\
+             let alias = tuple;\n\
+             if flag {\n\
+                 let (first, _, last) = alias;\n\
+                 wrapping_add(wrapping_mul(first, 5), last)\n\
+             } else { wrapping_sub(twice_field(alias.1), state) }\n\
+         }\n\
          fn unsupported(x: u64) -> u64 { match (x, x) { (0, _) => 7, _ => 9 } }\n\
          pub fn decline(x: u64) -> u64 { unsupported(x) }\n",
     )
@@ -2559,6 +2574,14 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
         "{:?}",
         read_stage2_sidecar_notes(&object)
     );
+    let procedure_object = dir.join("native-procedure.o");
+    std::fs::rename(&object, &procedure_object).unwrap();
+    assert_eq!(
+        compile("tuple_value"),
+        0,
+        "{:?}",
+        read_stage2_sidecar_notes(&object)
+    );
     let bytes = std::fs::read(&object).unwrap();
     assert_ne!(compile("decline"), 0);
     assert!(read_stage2_sidecar_notes(&object).contains("unsupported x86-64 ELF entry"));
@@ -2587,6 +2610,7 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
          extern int8_t factored_bounds(int64_t, int64_t);\n\
          extern double floating_call(double, int64_t, float, float);\n\
          extern uint64_t procedure_value(uint64_t, uint64_t, bool);\n\
+         extern int64_t tuple_value(int64_t, int64_t, bool);\n\
          int main(void) {\n\
              if (mix(10, 4) != 65 || mix(UINT64_MAX, UINT64_MAX) != UINT64_MAX - 16) return 1;\n\
              if (choose(0, 4) != 8 || choose(2, 4) != 8 || choose(4, 1) != 10\n\
@@ -2616,8 +2640,10 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
              if (factored_bounds(63, 0) != -120 || factored_bounds(-128, 3) != -4) return 14;\n\
              if (floating_call(2.0, -1, 3.0f, 4.0f) != 5.0\n\
                  || floating_call(2.0, 1, 3.0f, 4.0f) != 12.5) return 15;\n\
-             return procedure_value(1, 8, false) != 5 || procedure_value(10, 4, true) != 45\n\
-                 || procedure_value(UINT64_MAX, 4, true) != 1;\n\
+             if (procedure_value(1, 8, false) != 5 || procedure_value(10, 4, true) != 45\n\
+                 || procedure_value(UINT64_MAX, 4, true) != 1) return 16;\n\
+             return tuple_value(3, 11, true) != 19 || tuple_value(3, 11, false) != 17\n\
+                 || tuple_value(INT64_MAX, 0, true) != -5;\n\
          }\n",
     )
     .unwrap();
@@ -2639,6 +2665,7 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
             &arithmetic_object,
             &bounds_object,
             &float_object,
+            &procedure_object,
             &object,
         ])
         .arg("-o")

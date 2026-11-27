@@ -30,6 +30,9 @@ const LITERAL_WORDS: u64 = 3;
 const BINARY_WORDS: u64 = 3;
 const UNARY_WORDS: u64 = 2;
 const EMPTY_TUPLE_WORDS: u64 = 1;
+const TUPLE_PATTERN_COUNT: u64 = BIND_NAME;
+const ASCII_ZERO: u8 = 48;
+const DECIMAL_BASE: u64 = 10;
 const PLAIN_READ_WORDS: u64 = 4;
 const LITERAL_LOW: u64 = 1;
 const LITERAL_HIGH: u64 = 2;
@@ -95,6 +98,7 @@ enum ScalarKind: _ {
     Isize = 12,
     F32 = 13,
     F64 = 14,
+    Tuple = 15,
 }
 
 struct CallGraph {
@@ -138,6 +142,8 @@ struct Function {
     blocks: ChunkSeq[u64],
     next_label: u64,
     bindings: ChunkSeq[u32],
+    binding_fields: ChunkSeq[u32],
+    tuple_instructions: ChunkSeq[u64],
     mutable_slots: ChunkSeq[u32],
     mutable_bytes: u64,
     home_bytes: u64,
@@ -380,6 +386,13 @@ fn scalar_kind(in low: L, ty: u32) -> u8 {
         return ScalarKind::Unit;
     }
     let node = low.ctx.types.node(ty);
+    if node.kind == TyKind::Tuple {
+        return if node.n == 0 {
+            ScalarKind::Unit
+        } else {
+            ScalarKind::Tuple
+        };
+    }
     if node.kind != TyKind::Named || node.n != 0 {
         return ScalarKind::Unsupported;
     }
@@ -460,38 +473,150 @@ fn argument_value(in low: L, f: FnR, root: u32) -> u64 {
     NO_VALUE
 }
 
+// A flat local tuple is a collection of SSA values. Follow whole-value reads
+// back to the construction so a field needs only its own scalar home.
+fn tuple_operands(in low: L, id: u64, in m: Function) -> u64 {
+    let mut value = id;
+    loop {
+        let definition = m.tuple_instructions.try_get(value).unwrap_or(NO_VALUE);
+        if definition == NO_VALUE {
+            return NO_VALUE;
+        }
+        let inst = low.program.inst(definition);
+        if inst.op == Op::Tuple && inst.n == inc(low.program.op(inst.a)) {
+            return inst.a;
+        }
+        if inst.op != Op::Read
+            || inst.n != PLAIN_READ_WORDS
+            || low.program.path(low.program.op(add(inst.a, READ_PATH))).n != 0
+            || low.program.op(add(inst.a, READ_PROJECTIONS)) != 0
+            || low.program.op(add(inst.a, READ_PASS)) == TyPass::Inout
+        {
+            return NO_VALUE;
+        }
+        let name = n32(low.program.op(inst.a));
+        let binding = u32_at(in m.bindings, w(name));
+        if binding == 0
+            || u32_at(in m.binding_fields, w(name)) != 0
+            || m.mutable_offset(name) != NO_VALUE
+        {
+            return NO_VALUE;
+        }
+        let previous = wrapping_sub(w(binding), 1);
+        if previous >= value {
+            return NO_VALUE;
+        }
+        value = previous;
+    }
+}
+
+fn tuple_member(in low: L, value: u64, field: u64, in m: Function) -> u64 {
+    let at = tuple_operands(in low, value, in m);
+    if at == NO_VALUE || field >= low.program.op(at) {
+        return NO_VALUE;
+    }
+    add(m.arguments, low.program.op(add(inc(at), field)))
+}
+
 fn place_value(in low: L, f: FnR, root: u32, in m: Function) -> u64 {
     let binding = u32_at(in m.bindings, w(root));
     if binding == 0 {
-        argument_value(in low, f, root)
+        return argument_value(in low, f, root);
+    }
+    let source = wrapping_sub(w(binding), 1);
+    let field = u32_at(in m.binding_fields, w(root));
+    if field == 0 {
+        add(m.arguments, source)
     } else {
-        add(m.arguments, wrapping_sub(w(binding), 1))
+        tuple_member(in low, source, wrapping_sub(w(field), 1), in m)
     }
 }
 
-fn collect_binding(in low: L, inst: InstRow, inout m: Function) -> bool {
-    let pattern = low.program.op(add(inst.a, BIND_PATTERN));
-    if pattern == Pat::Wild {
-        return inst.n == BIND_NAME;
+fn read_source(in low: L, f: FnR, at: u64, in m: Function) -> u64 {
+    let name = n32(low.program.op(at));
+    let source = place_value(in low, f, name, in m);
+    let path = low.program.op(add(at, READ_PATH));
+    let count = low.program.path(path).n;
+    if count == 0 {
+        return source;
     }
-    if pattern != Pat::Bind || inst.n != inc(BIND_NAME) {
-        return false;
+    if count != 1
+        || m.value_kind(source) != ScalarKind::Tuple
+        || m.mutable_offset(name) != NO_VALUE
+        || low.program.op(add(at, READ_PASS)) == TyPass::Inout
+    {
+        return NO_VALUE;
     }
-    // Place IR gives shadowed bindings distinct names. A binding with no
-    // writes can reuse its initial SSA value.
-    let name = n32(low.program.op(add(inst.a, BIND_NAME)));
+    let member = low.program.path_name(path, 0);
+    let length = low.ctx.names.size(member);
+    if length == 0 {
+        return NO_VALUE;
+    }
+    let mut field: u64 = 0;
+    for i in 0..length {
+        let digit = widen_u64(wrapping_sub(low.ctx.names.byte(member, i), ASCII_ZERO));
+        if digit >= DECIMAL_BASE || field > wrapping_sub(ALL_REGISTER_BITS, digit) / DECIMAL_BASE {
+            return NO_VALUE;
+        }
+        field = add(wrapping_mul(field, DECIMAL_BASE), digit);
+    }
+    tuple_member(in low, wrapping_sub(source, m.arguments), field, in m)
+}
+
+fn record_binding(name: u32, value: u64, inout m: Function) -> bool {
     if u32_at(in m.bindings, w(name)) != 0 {
         return false;
     }
-    set_by_symbol(inout m.bindings, name, n32(inc(low.program.op(inst.a))));
+    set_by_symbol(inout m.bindings, name, n32(inc(value)));
     true
 }
 
+fn collect_binding(in low: L, inst: InstRow, inout m: Function) -> bool {
+    let at = inst.a;
+    let source = low.program.op(at);
+    let pattern = low.program.op(add(at, BIND_PATTERN));
+    if pattern == Pat::Wild {
+        return inst.n == BIND_NAME;
+    }
+    if pattern == Pat::Bind {
+        // Shadowed names already have distinct Place IR symbols.
+        return inst.n == inc(BIND_NAME)
+            && record_binding(n32(low.program.op(add(at, BIND_NAME))), source, inout m);
+    }
+    if pattern != Pat::Tuple || inst.n <= TUPLE_PATTERN_COUNT {
+        return false;
+    }
+    let end = add(at, inst.n);
+    let count_at = add(at, TUPLE_PATTERN_COUNT);
+    let mut child = inc(count_at);
+    for field in 0..low.program.op(count_at) {
+        let next = add(child, PATTERN_HEADER_WORDS);
+        if next > end {
+            return false;
+        }
+        let shape = low.program.op(child);
+        child = next;
+        if shape == Pat::Bind {
+            if child >= end {
+                return false;
+            }
+            let name = n32(low.program.op(child));
+            if !record_binding(name, source, inout m) {
+                return false;
+            }
+            set_by_symbol(inout m.binding_fields, name, n32(inc(field)));
+            child = inc(child);
+        } else if shape != Pat::Wild {
+            return false;
+        }
+    }
+    child == end
+}
 fn collect_mutating_place(in low: L, f: FnR, name: u32, inout m: Function) -> bool {
     if m.is_inout(argument_value(in low, f, name)) {
         return true;
     }
-    if u32_at(in m.bindings, w(name)) == 0 {
+    if u32_at(in m.bindings, w(name)) == 0 || u32_at(in m.binding_fields, w(name)) != 0 {
         return false;
     }
     if u32_at(in m.mutable_slots, w(name)) == 0 {
@@ -544,6 +669,11 @@ fn lower_local_store(in low: L, f: FnR, inst: InstRow, block: u64, inout m: Func
     let at = inst.a;
     if inst.op == Op::Bind {
         let pattern = low.program.op(add(at, BIND_PATTERN));
+        if pattern == Pat::Tuple {
+            let source = tuple_operands(in low, low.program.op(at), in m);
+            return source != NO_VALUE
+                && low.program.op(source) == low.program.op(add(at, TUPLE_PATTERN_COUNT));
+        }
         if pattern == Pat::Wild || pattern == Pat::Literal {
             // Planning confirms that literal binds belong to match arms.
             return m.kind(low.program.op(at)) != ScalarKind::Unsupported;
@@ -582,11 +712,7 @@ fn lower_local_store(in low: L, f: FnR, inst: InstRow, block: u64, inout m: Func
         return inst.op == Op::Bind && kind != ScalarKind::Unsupported;
     }
     let initial = u32_at(in m.bindings, w(name));
-    if initial == 0
-        || kind == ScalarKind::Unsupported
-        || kind == ScalarKind::Unit
-        || kind != m.kind(wrapping_sub(w(initial), 1))
-    {
+    if initial == 0 || abi_width(kind) == 0 || kind != m.kind(wrapping_sub(w(initial), 1)) {
         return false;
     }
     let value = m.read(add(m.arguments, source), block);
@@ -640,9 +766,7 @@ fn lower_call(
             return NO_VALUE;
         }
         let at = call_argument(inst.a, 0);
-        if low.program.op(at) == TyPass::Inout
-            || low.program.path(low.program.op(add(at, ARGUMENT_PATH))).n != 0
-        {
+        if low.program.op(at) == TyPass::Inout {
             return NO_VALUE;
         }
         let arg = low.program.op(add(at, ARGUMENT_VALUE));
@@ -677,7 +801,7 @@ fn lower_call(
         let kind = m.kind(operand);
         let inout_arg = low.program.op(at) == TyPass::Inout;
         if inout_arg != (param.pass == TyPass::Inout)
-            || low.program.path(low.program.op(add(at, ARGUMENT_PATH))).n != 0
+            || (inout_arg && low.program.path(low.program.op(add(at, ARGUMENT_PATH))).n != 0)
             || kind != scalar_kind(in low, param.ty)
         {
             return NO_VALUE;
@@ -871,6 +995,21 @@ fn plan_types(in low: L, row: FnRow, inout m: Function) -> bool {
     true
 }
 
+fn plan_tuples(in low: L, row: FnRow, inout m: Function) {
+    m.tuple_instructions.resize(m.kinds.len(), NO_VALUE);
+    for layout in 0..m.blocks.len() {
+        let block = m.blocks.try_get(layout).unwrap_or(0);
+        let b = low.program.block(add(row.b0, block));
+        for index in b.i0..add(b.i0, b.ic) {
+            let inst = low.program.inst(index);
+            let value = w(inst.dest);
+            if m.kind(value) == ScalarKind::Tuple {
+                let _ = m.tuple_instructions.try_set(value, index);
+            }
+        }
+    }
+}
+
 // Walk backward from each use to its definition. Jump operands are read
 // before the destination parameter is written, so those two lifetimes may
 // share a home at the edge. A block in both sets keeps distinct homes.
@@ -940,6 +1079,7 @@ fn pack_homes(in low: L, row: FnRow, inout m: Function) {
 fn plan_homes(in low: L, f: FnR, row: FnRow, inout m: Function) -> bool {
     let mut value_count: u64 = 0;
     let mut has_place_actions = false;
+    let mut has_tuples = false;
     for block in 0..row.bc {
         let b = low.program.block(add(row.b0, block));
         let reachable = m.label(block) != NO_VALUE;
@@ -954,6 +1094,7 @@ fn plan_homes(in low: L, f: FnR, row: FnRow, inout m: Function) -> bool {
                 value_count = inc(dest);
             }
             if reachable {
+                has_tuples = has_tuples || (inst.op == Op::Tuple && inst.n > EMPTY_TUPLE_WORDS);
                 if inst.op == Op::Bind
                     && !is_match_literal_binding(in low, row, b, index, inst)
                     && !collect_binding(in low, inst, inout m)
@@ -972,6 +1113,9 @@ fn plan_homes(in low: L, f: FnR, row: FnRow, inout m: Function) -> bool {
     {
         return false;
     }
+    if has_tuples {
+        plan_tuples(in low, row, inout m);
+    }
     if m.blocks.len() == 1 {
         return block_parameter(in low, low.program.block(row.b0)) == NO_VALUE;
     }
@@ -983,6 +1127,9 @@ fn plan_homes(in low: L, f: FnR, row: FnRow, inout m: Function) -> bool {
         let b = low.program.block(add(row.b0, block));
         let param = block_parameter(in low, b);
         if param != NO_VALUE {
+            if m.kind(param) == ScalarKind::Tuple {
+                return false;
+            }
             let id = add(f.param_count, param);
             if !m.values.try_set(id, value_new(block))
                 || (m.kind(param) != ScalarKind::Unit && !m.home(id, block))
@@ -1005,9 +1152,11 @@ fn plan_homes(in low: L, f: FnR, row: FnRow, inout m: Function) -> bool {
             let at = inst.a;
             if inst.op == Op::Read {
                 let name = n32(low.program.op(at));
-                let value = place_value(in low, f, name, in m);
+                let value = read_source(in low, f, at, in m);
+                let kind = m.value_kind(value);
                 if m.mutable_offset(name) == NO_VALUE
-                    && m.value_kind(value) != ScalarKind::Unit
+                    && kind != ScalarKind::Unit
+                    && kind != ScalarKind::Tuple
                     && !m.use_in(value, block)
                 {
                     return false;
@@ -1794,25 +1943,39 @@ fn lower_block(
             continue;
         }
         let kind = scalar_kind(in low, inst.ty);
-        if inst.op == Op::Tuple
-            && kind == ScalarKind::Unit
-            && inst.n == EMPTY_TUPLE_WORDS
-            && low.program.op(at) == 0
-        {
-            continue;
-        }
         if inst.fallible != 0 || kind == ScalarKind::Unsupported {
             return false;
+        }
+        if inst.op == Op::Tuple {
+            let count = low.program.op(at);
+            if kind == ScalarKind::Unit && inst.n == EMPTY_TUPLE_WORDS && count == 0 {
+                continue;
+            }
+            if kind != ScalarKind::Tuple
+                || inst.n != inc(count)
+                || count != low.ctx.types.arity(inst.ty)
+            {
+                return false;
+            }
+            for field in 0..count {
+                let field_kind = scalar_kind(in low, low.ctx.types.arg(inst.ty, field));
+                let value = low.program.op(add(inc(at), field));
+                if (abi_width(field_kind) == 0 && field_kind != ScalarKind::Unit)
+                    || m.kind(value) != field_kind
+                {
+                    return false;
+                }
+            }
+            continue;
         }
         let value = if inst.op == Op::Const && inst.n == LITERAL_WORDS {
             lower_literal(in low, at, kind, inout m)
         } else if inst.op == Op::Read
             && inst.n == PLAIN_READ_WORDS
-            && low.program.path(low.program.op(add(at, READ_PATH))).n == 0
             && low.program.op(add(at, READ_PROJECTIONS)) == 0
         {
             let name = n32(low.program.op(at));
-            let source = place_value(in low, f, name, in m);
+            let source = read_source(in low, f, at, in m);
             if source == NO_VALUE {
                 return false;
             }
@@ -1825,6 +1988,12 @@ fn lower_block(
                 return false;
             }
             if kind == ScalarKind::Unit {
+                continue;
+            }
+            if kind == ScalarKind::Tuple {
+                if tuple_operands(in low, w(inst.dest), in m) == NO_VALUE {
+                    return false;
+                }
                 continue;
             }
             if m.is_inout(source) {
@@ -2092,6 +2261,8 @@ fn lower_function(
         blocks: ChunkSeq::new[u64](),
         next_label: 0,
         bindings: ChunkSeq::new[u32](),
+        binding_fields: ChunkSeq::new[u32](),
+        tuple_instructions: ChunkSeq::new[u64](),
         mutable_slots: ChunkSeq::new[u32](),
         mutable_bytes: 0,
         home_bytes: 0
