@@ -169,6 +169,37 @@ const PROGRAMS: &[(&str, &str)] = &[
          from_bits_f32(1)), (kind(0.5), kind(2.0), kind(z), kind32(tenth), z == -z, z / z == z / z)) }",
     ),
     (
+        // A labelled operation goes to the handler with its label, past an
+        // inner unlabelled one of the same effect.
+        "labelled_raise",
+        "fn pick(n: u64) -> u64 eff [stop: Fail[u64]] { \
+         let inner = handle Fail[u64] in { if n > 5 { stop.raise(n) } else { n } } \
+         with { return v => v, raise(e, k) => wrapping_add(e, 100), }; wrapping_add(inner, 1) } \
+         fn main() -> (u64, u64) { let a = handle stop: Fail[u64] in { pick(3) } \
+         with { return v => v, raise(e, k) => wrapping_mul(e, 10), }; \
+         let b = handle stop: Fail[u64] in { pick(7) } \
+         with { return v => v, raise(e, k) => wrapping_mul(e, 10), }; (a, b) }",
+    ),
+    (
+        // `Box::new` makes a `Box` data value that `Box(x)` patterns open.
+        "box_values",
+        "enum T { Leaf, Node { v: i64, next: Box[T] } } \
+         fn sum(sink t: T) -> i64 { match t { T::Leaf => 0, \
+         T::Node { v, next } => match next { Box(rest) => wrapping_add(v, sum(rest)) } } } \
+         fn main() -> (i64, Box[i64]) { \
+         let t = T::Node { v: 1, next: Box::new(T::Node { v: 2, next: Box::new(T::Leaf) }) }; \
+         (sum(t), Box::new(5)) }",
+    ),
+    (
+        // `return` in a handled body leaves the function, skipping the
+        // return clause and the rest of the caller's body.
+        "nested_return",
+        "effect Ask { fn ask() -> i64; } \
+         fn early(x: i64) -> i64 { let r = handle Ask in { if x > 0 { return wrapping_add(x, 1000); } \
+         Ask::ask() } with { return v => wrapping_mul(v, 2), ask(k) => k(5), }; wrapping_add(r, 1) } \
+         fn main() -> (i64, i64) { (early(1), early(0)) }",
+    ),
+    (
         // An effectful function value binds the incoming capability
         // (`bind_callable_evidence`): the outer handler answers.
         "bound_evidence",
