@@ -1,0 +1,111 @@
+{
+  "notes": [
+    "Flip gate for Lean extraction (`--emit lean`), ported as @vesper/lean-extract",
+    "(#1341) and installed as the hybrid's `lean_extract` swap. The",
+    "`lean-module-encoded` workload times Rust's module text against the swap's whole",
+    "path (lowering and lifting, lean_words::cfg_input_full, the Vesper module) over",
+    "the corpus. Rust's own extraction is nearly free next to lowering, which both",
+    "sides pay, so the encoding and the Vesper module must stay under half of it."
+  ],
+  "name": "lean-extract",
+  "lane": "SH5-18",
+  "rust": [
+    "src/lean.rs",
+    "src/lean_ir.rs",
+    "src/lean_nodes.rs"
+  ],
+  "env": {
+    "CARGO_PROFILE_DEV_DEBUG": "0",
+    "CARGO_PROFILE_TEST_DEBUG": "0",
+    "CARGO_PROFILE_RELEASE_DEBUG": "0"
+  },
+  "build": [
+    [
+      "cargo",
+      "test",
+      "--locked",
+      "--release",
+      "--test",
+      "self_host_lean_extract",
+      "--no-run"
+    ]
+  ],
+  "tests": [
+    {
+      "run": [
+        "cargo",
+        "test",
+        "--locked",
+        "--release",
+        "--test",
+        "self_host_lean_extract"
+      ]
+    }
+  ],
+  "differential": {
+    "run": {
+      "sequence": [
+        [
+          "cargo",
+          "test",
+          "--locked",
+          "--release",
+          "--test",
+          "self_host_lean_extract",
+          "modules_match_rust_on_the_corpus",
+          "--",
+          "--exact",
+          "--nocapture"
+        ],
+        [
+          "cargo",
+          "test",
+          "--locked",
+          "--release",
+          "--test",
+          "self_host_lean_extract",
+          "modules_match_rust_on_test_sources",
+          "--",
+          "--exact",
+          "--nocapture"
+        ],
+        [
+          "cargo",
+          "test",
+          "--locked",
+          "--release",
+          "--test",
+          "self_host_lean_extract",
+          "mutants_match_rust",
+          "--",
+          "--exact",
+          "--nocapture"
+        ]
+      ]
+    }
+  },
+  "abba": [
+    {
+      "workload": "lean-module-encoded",
+      "run": {
+        "argv": [
+          "cargo",
+          "test",
+          "--locked",
+          "--release",
+          "--test",
+          "self_host_lean_extract",
+          "abba_module",
+          "--",
+          "--exact",
+          "--ignored",
+          "--nocapture"
+        ],
+        "env": {
+          "FLIP_GATE": "1",
+          "CHECK_HARNESS_SPEED": "1"
+        }
+      }
+    }
+  ]
+}

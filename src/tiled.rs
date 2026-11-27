@@ -365,42 +365,41 @@ pub(crate) fn resolve_ir_call(
     args: &[Arg],
     call_expr: &Expr,
 ) -> Option<(TiledOp, Option<String>)> {
-    let result_ty = types
-        .get(&(call_expr.span.start, call_expr.span.end))
-        .cloned()
-        .unwrap_or(Type::Infer);
-    let ty_of = |e: &Expr| {
-        types
-            .get(&(e.span.start, e.span.end))
-            .cloned()
-            .unwrap_or(Type::Infer)
-    };
+    // Types are borrowed until a tiled call is certain: most calls are not
+    // tiled, and copying their types was the cost of asking.
+    let infer = Type::Infer;
+    let ty_of = |e: &Expr| types.get(&(e.span.start, e.span.end)).unwrap_or(&infer);
+    let result_ty = ty_of(call_expr);
     let (op_name, receiver_ty) = if let Some(base) = receiver {
         let base_ty = ty_of(base);
-        if !is_seq_type(&base_ty) {
+        if !is_seq_type(base_ty) {
             return None;
         }
         let method = callee_name.rsplit("::").next().unwrap_or(callee_name);
-        (method, Some(base_ty))
+        (method, Some(base_ty.clone()))
     } else {
         let rest = callee_name.strip_prefix("TiledSeq::")?;
-        let recv_ty = args.first().map(|a| ty_of(&a.expr)).filter(is_seq_type);
+        let recv_ty = args
+            .first()
+            .map(|a| ty_of(&a.expr))
+            .filter(|t| is_seq_type(t))
+            .cloned();
         (rest, recv_ty)
     };
 
     match op_name {
         "new" if receiver.is_none() => {
-            let elem = seq_elem(&result_ty).or_else(|| type_args.first())?;
+            let elem = seq_elem(result_ty).or_else(|| type_args.first())?;
             let adt = world.adts.get(elem.name())?.name.clone();
             Some((TiledOp::New { adt }, None))
         }
         "with_capacity" if receiver.is_none() => {
-            let elem = seq_elem(&result_ty).or_else(|| type_args.first())?;
+            let elem = seq_elem(result_ty).or_else(|| type_args.first())?;
             let adt = world.adts.get(elem.name())?.name.clone();
             Some((TiledOp::WithCapacity { adt }, None))
         }
         "with_region" if receiver.is_none() => {
-            let elem = seq_elem(&result_ty).or_else(|| type_args.first())?;
+            let elem = seq_elem(result_ty).or_else(|| type_args.first())?;
             let adt = world.adts.get(elem.name())?.name.clone();
             let region_label = match &args.first()?.expr.kind {
                 ExprKind::Name(n) => capabilities
