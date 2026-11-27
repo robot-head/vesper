@@ -1,0 +1,425 @@
+// Register-only AAPCS64 integer leaves. The input is the shared scalar
+// machine tape. Unsupported operations or register pressure decline before
+// a function is defined.
+use @vesper/codegen-freestanding::util::{push32};
+use self::scalar::{
+    Record, word_at, read_record, CONSTANT, ADD, SUB, MUL, AND, OR, XOR, NEG, NOT, SHL, SHR, SAR,
+    COMPARE, SELECT, SHL_REGISTER, SHR_REGISTER, SAR_REGISTER, ADD_IMMEDIATE, SUB_IMMEDIATE,
+    MUL_IMMEDIATE, AND_IMMEDIATE, OR_IMMEDIATE, XOR_IMMEDIATE, COMPARE_IMMEDIATE, EQUAL, NOT_EQUAL,
+    SIGNED_LESS, SIGNED_GREATER_EQUAL, SIGNED_GREATER, SIGNED_LESS_EQUAL, UNSIGNED_LESS,
+    UNSIGNED_GREATER_EQUAL, UNSIGNED_GREATER, UNSIGNED_LESS_EQUAL, ARGUMENT_COUNT, RETURN_VALUE,
+    HEADER_WORDS, RECORD_WORDS, NEVER_READ, NO_VALUE, DISP32_MASK
+};
+use self::x86_64::{QWORD_BITS};
+
+const ARGUMENT_REGISTERS: u64 = 8;
+// Keep x16 and x17 out of allocation for architectural scratch uses.
+const CALLER_REGISTER_MASK: u32 = 0xffff;
+const UNASSIGNED: u32 = 32;
+const SCRATCH: u32 = 16;
+const ZERO: u32 = 31;
+const RETURN: u32 = 0xd65f03c0;
+const ADD_REG: u32 = 0x8b000000;
+const SUB_REG: u32 = 0xcb000000;
+const MUL_REG: u32 = 0x9b007c00;
+const AND_REG: u32 = 0x8a000000;
+const ORR_REG: u32 = 0xaa000000;
+const EOR_REG: u32 = 0xca000000;
+const ORN_REG: u32 = 0xaa200000;
+const LSL_REG: u32 = 0x9ac02000;
+const LSR_REG: u32 = 0x9ac02400;
+const ASR_REG: u32 = 0x9ac02800;
+const ADD_IMM: u32 = 0x91000000;
+const SUB_IMM: u32 = 0xd1000000;
+const CMP_IMM: u32 = 0xf100001f;
+const CMN_IMM: u32 = 0xb100001f;
+const SUBS_REG: u32 = 0xeb000000;
+const UBFM: u32 = 0xd3400000;
+const SBFM: u32 = 0x93400000;
+const CSET: u32 = 0x9a9f07e0;
+const CSEL: u32 = 0x9a800000;
+const MOVN: u32 = 0x92800000;
+const MOVZ: u32 = 0xd2800000;
+const MOVK: u32 = 0xf2800000;
+const RM_SHIFT: u32 = 16;
+const RN_SHIFT: u32 = 5;
+const CONDITION_SHIFT: u32 = 12;
+const IMM12_SHIFT: u32 = 10;
+const IMM12_MASK: u64 = 0xfff;
+const IMMR_SHIFT: u32 = 16;
+const IMMS_SHIFT: u32 = 10;
+const SHIFT_MASK: u64 = QWORD_BITS - 1;
+const HALFWORDS: u64 = 4;
+const HALFWORD_BITS: u64 = 16;
+const HALFWORD_MASK: u64 = 0xffff;
+const HALFWORD_SHIFT: u32 = 21;
+const IMM16_SHIFT: u32 = 5;
+
+const EQ: u32 = 0;
+const NE: u32 = 1;
+const HS: u32 = 2;
+const LO: u32 = 3;
+const HI: u32 = 8;
+const LS: u32 = 9;
+const GE: u32 = 10;
+const LT: u32 = 11;
+const GT: u32 = 12;
+const LE: u32 = 13;
+
+fn sh(value: u32, amount: u32) -> u32 {
+    wrapping_shl_u32(value, amount)
+}
+
+fn rrr(inout out: ChunkSeq[u8], op: u32, dest: u32, lhs: u32, rhs: u32) {
+    push32(inout out, op | sh(rhs, RM_SHIFT) | sh(lhs, RN_SHIFT) | dest);
+}
+
+fn halfword(bits: u64, index: u64) -> u64 {
+    wrapping_shr_u64(bits, wrapping_u32(wrapping_mul(index, HALFWORD_BITS))) & HALFWORD_MASK
+}
+
+fn immediate(inout out: ChunkSeq[u8], dest: u32, bits: u64) {
+    let mut zero_parts: u64 = 0;
+    let mut one_parts: u64 = 0;
+    for index in 0..HALFWORDS {
+        let part = halfword(bits, index);
+        if part == 0 {
+            zero_parts = wrapping_add(zero_parts, 1);
+        } else if part == HALFWORD_MASK {
+            one_parts = wrapping_add(one_parts, 1);
+        }
+    }
+    let inverted = one_parts > zero_parts;
+    let fill = if inverted { HALFWORD_MASK } else { 0 };
+    let first = if inverted { MOVN } else { MOVZ };
+    let mut op = first;
+    for index in 0..HALFWORDS {
+        let part = halfword(bits, index);
+        if part != fill {
+            let encoded = if op == MOVN {
+                part ^ HALFWORD_MASK
+            } else {
+                part
+            };
+            push32(
+                inout out,
+                op
+                    | sh(wrapping_u32(index), HALFWORD_SHIFT)
+                    | sh(wrapping_u32(encoded), IMM16_SHIFT)
+                    | dest
+            );
+            op = MOVK;
+        }
+    }
+    if op == first {
+        push32(inout out, first | dest);
+    }
+}
+
+fn condition(code: u64) -> u32 {
+    match code {
+        EQUAL => EQ,
+        NOT_EQUAL => NE,
+        SIGNED_LESS => LT,
+        SIGNED_GREATER_EQUAL => GE,
+        SIGNED_GREATER => GT,
+        SIGNED_LESS_EQUAL => LE,
+        UNSIGNED_LESS => LO,
+        UNSIGNED_GREATER_EQUAL => HS,
+        UNSIGNED_GREATER => HI,
+        _ => LS,
+    }
+}
+
+fn magnitude(signed: i64) -> u64 {
+    wrapping_u64(
+        if signed < 0 {
+            wrapping_sub(0, signed)
+        } else {
+            signed
+        }
+    )
+}
+
+fn compare(inout out: ChunkSeq[u8], in r: Record, lhs: u32, rhs: u32) {
+    if r.op == COMPARE_IMMEDIATE {
+        let signed = widen_i64(wrapping_i32(r.right));
+        let amount = magnitude(signed);
+        if amount <= IMM12_MASK {
+            let op = if signed < 0 { CMN_IMM } else { CMP_IMM };
+            push32(inout out, op | sh(wrapping_u32(amount), IMM12_SHIFT) | sh(lhs, RN_SHIFT));
+        } else {
+            immediate(inout out, SCRATCH, wrapping_u64(signed));
+            rrr(inout out, SUBS_REG, ZERO, lhs, SCRATCH);
+        }
+    } else {
+        rrr(inout out, SUBS_REG, ZERO, lhs, rhs);
+    }
+}
+
+fn operands(in r: Record) -> Option[u64] {
+    if r.op == CONSTANT {
+        return Option::Some(0);
+    }
+    if r.op == COMPARE || r.op == COMPARE_IMMEDIATE {
+        if r.extra > UNSIGNED_LESS_EQUAL {
+            return Option::None;
+        }
+        if r.op == COMPARE {
+            return Option::Some(2);
+        }
+        if r.right <= DISP32_MASK {
+            return Option::Some(1);
+        }
+        return Option::None;
+    }
+    if r.op == SELECT {
+        return Option::Some(3);
+    }
+    if r.extra != QWORD_BITS {
+        return Option::None;
+    }
+    match r.op {
+        ADD
+            | SUB
+            | MUL
+            | AND
+            | OR
+            | XOR
+            | SHL_REGISTER
+            | SHR_REGISTER
+            | SAR_REGISTER => Option::Some(2),
+        NEG | NOT | SHL | SHR | SAR => Option::Some(1),
+        ADD_IMMEDIATE
+            | SUB_IMMEDIATE
+            | MUL_IMMEDIATE
+            | AND_IMMEDIATE
+            | OR_IMMEDIATE
+            | XOR_IMMEDIATE => if r.right
+            <= DISP32_MASK
+        {
+            Option::Some(1)
+        } else {
+            Option::None
+        },
+        _ => Option::None,
+    }
+}
+
+fn emit_instruction(
+    inout out: ChunkSeq[u8],
+    in r: Record,
+    dest: u32,
+    lhs: u32,
+    rhs: u32,
+    third: u32
+) {
+    if r.op == CONSTANT {
+        immediate(inout out, dest, r.left);
+    } else if r.op == NEG || r.op == NOT {
+        rrr(inout out, if r.op == NEG { SUB_REG } else { ORN_REG }, dest, ZERO, lhs);
+    } else if r.op == SHL || r.op == SHR || r.op == SAR {
+        let count = r.right & SHIFT_MASK;
+        let (rotate, last) = if r.op == SHL {
+            (wrapping_sub(0, count) & SHIFT_MASK, wrapping_sub(SHIFT_MASK, count))
+        } else {
+            (count, SHIFT_MASK)
+        };
+        let op = if r.op == SAR { SBFM } else { UBFM };
+        push32(
+            inout out,
+            op
+                | sh(wrapping_u32(rotate), IMMR_SHIFT)
+                | sh(wrapping_u32(last), IMMS_SHIFT)
+                | sh(lhs, RN_SHIFT)
+                | dest
+        );
+    } else if r.op == SELECT {
+        rrr(inout out, SUBS_REG, ZERO, lhs, ZERO);
+        rrr(inout out, CSEL | sh(NE, CONDITION_SHIFT), dest, rhs, third);
+    } else if r.op == COMPARE || r.op == COMPARE_IMMEDIATE {
+        compare(inout out, in r, lhs, rhs);
+        push32(inout out, CSET | sh(condition(r.extra) ^ 1, CONDITION_SHIFT) | dest);
+    } else {
+        let mut rhs = rhs;
+        if r.op >= ADD_IMMEDIATE && r.op <= XOR_IMMEDIATE {
+            let signed = widen_i64(wrapping_i32(r.right));
+            if r.op == ADD_IMMEDIATE || r.op == SUB_IMMEDIATE {
+                let amount = magnitude(signed);
+                if amount <= IMM12_MASK {
+                    let subtract = (r.op == SUB_IMMEDIATE) != (signed < 0);
+                    let op = if subtract { SUB_IMM } else { ADD_IMM };
+                    push32(
+                        inout out,
+                        op | sh(wrapping_u32(amount), IMM12_SHIFT) | sh(lhs, RN_SHIFT) | dest
+                    );
+                    return;
+                }
+            }
+            immediate(inout out, SCRATCH, wrapping_u64(signed));
+            rhs = SCRATCH;
+        }
+        let op = match r.op {
+            ADD | ADD_IMMEDIATE => ADD_REG,
+            SUB | SUB_IMMEDIATE => SUB_REG,
+            MUL | MUL_IMMEDIATE => MUL_REG,
+            AND | AND_IMMEDIATE => AND_REG,
+            OR | OR_IMMEDIATE => ORR_REG,
+            XOR | XOR_IMMEDIATE => EOR_REG,
+            SHL_REGISTER => LSL_REG,
+            SHR_REGISTER => LSR_REG,
+            _ => ASR_REG,
+        };
+        rrr(inout out, op, dest, lhs, rhs);
+    }
+}
+
+fn last_read(in ends: ChunkSeq[u64], value: u64) -> u64 {
+    ends.try_get(value).unwrap_or(NEVER_READ)
+}
+
+fn register(in regs: ChunkSeq[u32], id: u64) -> u32 {
+    regs.try_get(id).unwrap_or(UNASSIGNED)
+}
+
+fn expire(used: u32, in ends: ChunkSeq[u64], value: u64, current: u64, reg: u32) -> u32 {
+    if reg != UNASSIGNED && last_read(in ends, value) == current {
+        used & ~sh(1, reg)
+    } else {
+        used
+    }
+}
+
+pub fn encode_leaf(in words: Slice[u64]) -> ChunkSeq[u8] {
+    let mut out = ChunkSeq::new[u8]();
+    if words.len() < HEADER_WORDS {
+        return out;
+    }
+    let args = word_at(in words, ARGUMENT_COUNT);
+    let result = word_at(in words, RETURN_VALUE);
+    let body = wrapping_sub(words.len(), HEADER_WORDS);
+    let count = body / RECORD_WORDS;
+    let values = wrapping_add(args, count);
+    if args > ARGUMENT_REGISTERS
+        || body % RECORD_WORDS != 0
+        || (result != NO_VALUE && result >= values)
+    {
+        return out;
+    }
+    let mut ends = ChunkSeq::with_capacity[u64](values);
+    for index in 0..values {
+        ends.push(NEVER_READ);
+    }
+    if result != NO_VALUE {
+        let _ = ends.try_set(result, values);
+    }
+    for reverse in 0..count {
+        let index = wrapping_sub(wrapping_sub(count, 1), reverse);
+        let value = wrapping_add(args, index);
+        let r = read_record(in words, index);
+        let n = match operands(in r) {
+            Option::Some(n) => n,
+            Option::None => return out,
+        };
+        if (n >= 1 && r.left >= value)
+            || (n >= 2 && r.right >= value)
+            || (n == 3 && r.extra >= value)
+        {
+            return out;
+        }
+        if last_read(in ends, value) == NEVER_READ {
+            continue;
+        }
+        if n >= 1 && last_read(in ends, r.left) == NEVER_READ {
+            let _ = ends.try_set(r.left, value);
+        }
+        if n >= 2 && last_read(in ends, r.right) == NEVER_READ {
+            let _ = ends.try_set(r.right, value);
+        }
+        if n == 3 && last_read(in ends, r.extra) == NEVER_READ {
+            let _ = ends.try_set(r.extra, value);
+        }
+    }
+
+    let mut regs = ChunkSeq::with_capacity[u32](values);
+    let mut used: u32 = 0;
+    let mut flags_for_select: Option[u32] = Option::None;
+    for arg in 0..args {
+        let reg = wrapping_u32(arg);
+        regs.push(reg);
+        if last_read(in ends, arg) != NEVER_READ {
+            used = used | sh(1, reg);
+        }
+    }
+    for index in 0..count {
+        let value = wrapping_add(args, index);
+        if last_read(in ends, value) == NEVER_READ {
+            regs.push(UNASSIGNED);
+            continue;
+        }
+        let r = read_record(in words, index);
+        let n = operands(in r).unwrap_or(0);
+        let lhs = if n >= 1 {
+            register(in regs, r.left)
+        } else {
+            UNASSIGNED
+        };
+        let rhs = if n >= 2 {
+            register(in regs, r.right)
+        } else {
+            UNASSIGNED
+        };
+        let third = if n == 3 {
+            register(in regs, r.extra)
+        } else {
+            UNASSIGNED
+        };
+        if n >= 1 {
+            used = expire(used, in ends, r.left, value, lhs);
+        }
+        if n >= 2 {
+            used = expire(used, in ends, r.right, value, rhs);
+        }
+        if n == 3 {
+            used = expire(used, in ends, r.extra, value, third);
+        }
+        if (r.op == COMPARE || r.op == COMPARE_IMMEDIATE)
+            && wrapping_add(index, 1) < count
+            && last_read(in ends, value) == wrapping_add(value, 1)
+        {
+            let next = read_record(in words, wrapping_add(index, 1));
+            if next.op == SELECT
+                && next.left == value
+                && next.right != value
+                && next.extra != value
+            {
+                compare(inout out, in r, lhs, rhs);
+                flags_for_select = Option::Some(condition(r.extra));
+                regs.push(UNASSIGNED);
+                continue;
+            }
+        }
+        let available = CALLER_REGISTER_MASK & ~used;
+        if available == 0 {
+            return ChunkSeq::new[u8]();
+        }
+        let dest = wrapping_u32(trailing_zeros_u64(widen_u64(available)));
+        used = used | sh(1, dest);
+        regs.push(dest);
+        match flags_for_select {
+            Option::Some(cc) => {
+                rrr(inout out, CSEL | sh(cc, CONDITION_SHIFT), dest, rhs, third);
+                flags_for_select = Option::None;
+            },
+            Option::None => emit_instruction(inout out, in r, dest, lhs, rhs, third),
+        };
+    }
+    if result != NO_VALUE {
+        let reg = register(in regs, result);
+        if reg != 0 {
+            rrr(inout out, ORR_REG, 0, ZERO, reg);
+        }
+    }
+    push32(inout out, RETURN);
+    out
+}

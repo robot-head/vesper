@@ -131,6 +131,7 @@ enum IntegerOp {
 type Encoder = fn(&[u64]) -> Option<Vec<u8>>;
 static ENCODER: OnceLock<Encoder> = OnceLock::new();
 static RELOCATION_ENCODER: OnceLock<Encoder> = OnceLock::new();
+static AARCH64_ENCODER: OnceLock<Encoder> = OnceLock::new();
 
 /// Install the x86-64 integer encoder. A declined request uses Cranelift.
 pub fn install_integer_encoder(encode: Encoder) -> Result<(), Encoder> {
@@ -142,6 +143,11 @@ pub fn install_relocation_encoder(encode: Encoder) -> Result<(), Encoder> {
     RELOCATION_ENCODER.set(encode)
 }
 
+/// Installs the register-only AArch64 encoder for ordinary native objects.
+pub fn install_aarch64_encoder(encode: Encoder) -> Result<(), Encoder> {
+    AARCH64_ENCODER.set(encode)
+}
+
 const ARGUMENT_COUNT: usize = 0;
 const RETURN_VALUE: usize = 1;
 const HEADER_WORDS: usize = 2;
@@ -149,6 +155,7 @@ const INSTRUCTION_WORDS: usize = 4;
 const NO_VALUE: u64 = u64::MAX;
 const TRAP_VALUE: u64 = NO_VALUE - 1;
 const GP_REGISTER_ARGUMENTS: usize = 6;
+const AARCH64_GP_ARGUMENTS: usize = 8;
 const XMM_REGISTER_ARGUMENTS: usize = 8;
 const STACK_PROBE_INTERVAL: usize = 4096;
 const CFG_HOME_BYTES: u64 = size_of::<u64>() as u64;
@@ -1842,7 +1849,28 @@ impl IntegerBlocks<'_> {
 /// The entry label's right word identifies the private home slot plus one,
 /// or zero when the function needs no cross-block storage.
 pub fn integer_block_words(function: &Function) -> Option<Vec<u64>> {
-    integer_program(function, false, false, None).map(|(primary, _)| primary.words)
+    integer_program(function, false, false, None, CallConv::SystemV)
+        .map(|(primary, _)| primary.words)
+}
+
+/// Packs an AAPCS64 function with ordinary register integer parameters.
+pub fn aarch64_leaf_words(function: &Function) -> Option<Vec<u64>> {
+    let signature = &function.signature;
+    if !matches!(
+        signature.call_conv,
+        CallConv::SystemV | CallConv::AppleAarch64
+    ) || signature.params.len() > AARCH64_GP_ARGUMENTS
+        || signature.returns.len() > 1
+        || signature
+            .params
+            .iter()
+            .chain(&signature.returns)
+            .any(|param| *param != AbiParam::new(types::I64))
+    {
+        return None;
+    }
+    let (program, _) = integer_program(function, false, false, None, signature.call_conv)?;
+    (!program.relocations).then_some(program.words)
 }
 
 struct IntegerProgram {
@@ -1855,9 +1883,10 @@ fn integer_program(
     allow_hardware_faults: bool,
     canonicalize_nans: bool,
     declarations: Option<&ModuleDeclarations>,
+    call_conv: CallConv,
 ) -> Option<(IntegerProgram, Option<IntegerProgram>)> {
     let signature = &function.signature;
-    if signature.call_conv != CallConv::SystemV || !function.dynamic_stack_slots.is_empty() {
+    if signature.call_conv != call_conv || !function.dynamic_stack_slots.is_empty() {
         return None;
     }
     let (arity, _) = argument_cells(&signature.params)?;
@@ -2010,14 +2039,42 @@ fn encode_integer_block(
     function: &Function,
     declarations: Option<&ModuleDeclarations>,
 ) -> Option<MachineCode> {
-    let encode = ENCODER.get()?;
+    use target_lexicon::{Aarch64Architecture, Architecture, BinaryFormat, OperatingSystem};
+
+    if isa.flags().preserve_frame_pointers() {
+        return None;
+    }
     let triple = isa.triple();
-    if triple.architecture != target_lexicon::Architecture::X86_64
-        || triple.operating_system != target_lexicon::OperatingSystem::Linux
-        || isa.flags().preserve_frame_pointers()
+    if triple.architecture == Architecture::Aarch64(Aarch64Architecture::Aarch64)
+        && matches!(
+            (triple.operating_system, triple.binary_format),
+            (OperatingSystem::Linux, BinaryFormat::Elf)
+                | (
+                    OperatingSystem::Darwin(_) | OperatingSystem::MacOSX(_),
+                    BinaryFormat::Macho
+                )
+        )
+    {
+        const AARCH64_ENTRY_EXIT_FLAGS: [&str; 2] = ["use_bti", "sign_return_address"];
+        let encode = AARCH64_ENCODER.get()?;
+        if function.signature.call_conv != isa.default_call_conv()
+            || isa.isa_flags().iter().any(|flag| {
+                AARCH64_ENTRY_EXIT_FLAGS.contains(&flag.name) && flag.as_bool() == Some(true)
+            })
+        {
+            return None;
+        }
+        return Some(MachineCode {
+            bytes: encode(&aarch64_leaf_words(function)?)?,
+            relocations: Vec::new(),
+        });
+    }
+    if triple.architecture != Architecture::X86_64
+        || triple.operating_system != OperatingSystem::Linux
     {
         return None;
     }
+    let encode = ENCODER.get()?;
     // Ordinary native ELF objects use CPU memory faults directly. They carry
     // no Cranelift trap table, unlike JIT and freestanding emission.
     let (primary, fallback) = integer_program(
@@ -2025,6 +2082,7 @@ fn encode_integer_block(
         true,
         isa.flags().enable_nan_canonicalization(),
         declarations,
+        CallConv::SystemV,
     )?;
     let emit = |program: IntegerProgram| {
         if program.relocations {

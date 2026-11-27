@@ -13,29 +13,29 @@ use self::x86_64::{
 };
 
 // Integer block opcodes shared with src/native_machine.rs.
-const CONSTANT: u64 = 0;
-const ADD: u64 = 1;
-const SUB: u64 = 2;
-const MUL: u64 = 3;
-const AND: u64 = 4;
-const OR: u64 = 5;
-const XOR: u64 = 6;
-const NEG: u64 = 7;
-const NOT: u64 = 8;
-const SHL: u64 = 9;
-const SHR: u64 = 10;
-const SAR: u64 = 11;
-const COMPARE: u64 = 12;
+pub const CONSTANT: u64 = 0;
+pub const ADD: u64 = 1;
+pub const SUB: u64 = 2;
+pub const MUL: u64 = 3;
+pub const AND: u64 = 4;
+pub const OR: u64 = 5;
+pub const XOR: u64 = 6;
+pub const NEG: u64 = 7;
+pub const NOT: u64 = 8;
+pub const SHL: u64 = 9;
+pub const SHR: u64 = 10;
+pub const SAR: u64 = 11;
+pub const COMPARE: u64 = 12;
 const COMPARE_BYTE: u64 = 13;
-const SELECT: u64 = 14;
+pub const SELECT: u64 = 14;
 const TRUNCATE: u64 = 15;
 const ZERO_EXTEND: u64 = 16;
 const SIGN_EXTEND: u64 = 17;
 const COMPARE_WORD: u64 = 18;
 const COMPARE_DWORD: u64 = 19;
-const SHL_REGISTER: u64 = 20;
-const SHR_REGISTER: u64 = 21;
-const SAR_REGISTER: u64 = 22;
+pub const SHL_REGISTER: u64 = 20;
+pub const SHR_REGISTER: u64 = 21;
+pub const SAR_REGISTER: u64 = 22;
 const LOAD: u64 = 23;
 const STORE_BYTE: u64 = 24;
 const STORE_WORD: u64 = 25;
@@ -65,13 +65,13 @@ const SIGNED_REM: u64 = 48;
 const UNSIGNED_REM: u64 = 49;
 const SIGNED_MUL_HIGH: u64 = 50;
 const UNSIGNED_MUL_HIGH: u64 = 51;
-const ADD_IMMEDIATE: u64 = 52;
-const SUB_IMMEDIATE: u64 = 53;
-const MUL_IMMEDIATE: u64 = 54;
-const AND_IMMEDIATE: u64 = 55;
-const OR_IMMEDIATE: u64 = 56;
-const XOR_IMMEDIATE: u64 = 57;
-const COMPARE_IMMEDIATE: u64 = 58;
+pub const ADD_IMMEDIATE: u64 = 52;
+pub const SUB_IMMEDIATE: u64 = 53;
+pub const MUL_IMMEDIATE: u64 = 54;
+pub const AND_IMMEDIATE: u64 = 55;
+pub const OR_IMMEDIATE: u64 = 56;
+pub const XOR_IMMEDIATE: u64 = 57;
+pub const COMPARE_IMMEDIATE: u64 = 58;
 const COMPARE_BYTE_IMMEDIATE: u64 = 59;
 const COMPARE_WORD_IMMEDIATE: u64 = 60;
 const COMPARE_DWORD_IMMEDIATE: u64 = 61;
@@ -129,32 +129,32 @@ const RELATIVE_DATA: u64 = 1;
 const GOT_DATA: u64 = 2;
 const PLT_LIBCALL: u64 = 3;
 
-const EQUAL: u64 = 0;
-const NOT_EQUAL: u64 = 1;
-const SIGNED_LESS: u64 = 2;
-const SIGNED_GREATER_EQUAL: u64 = 3;
-const SIGNED_GREATER: u64 = 4;
-const SIGNED_LESS_EQUAL: u64 = 5;
-const UNSIGNED_LESS: u64 = 6;
-const UNSIGNED_GREATER_EQUAL: u64 = 7;
-const UNSIGNED_GREATER: u64 = 8;
-const UNSIGNED_LESS_EQUAL: u64 = 9;
+pub const EQUAL: u64 = 0;
+pub const NOT_EQUAL: u64 = 1;
+pub const SIGNED_LESS: u64 = 2;
+pub const SIGNED_GREATER_EQUAL: u64 = 3;
+pub const SIGNED_GREATER: u64 = 4;
+pub const SIGNED_LESS_EQUAL: u64 = 5;
+pub const UNSIGNED_LESS: u64 = 6;
+pub const UNSIGNED_GREATER_EQUAL: u64 = 7;
+pub const UNSIGNED_GREATER: u64 = 8;
+pub const UNSIGNED_LESS_EQUAL: u64 = 9;
 const INVERT_CONDITION: u8 = 1;
 
-const ARGUMENT_COUNT: u64 = 0;
-const RETURN_VALUE: u64 = 1;
-const HEADER_WORDS: u64 = 2;
+pub const ARGUMENT_COUNT: u64 = 0;
+pub const RETURN_VALUE: u64 = 1;
+pub const HEADER_WORDS: u64 = 2;
 const OP: u64 = 0;
 const LEFT: u64 = 1;
 const RIGHT: u64 = 2;
 const EXTRA: u64 = 3;
-const RECORD_WORDS: u64 = 4;
-const NEVER_READ: u64 = 0;
-const NO_VALUE: u64 = 0xffffffffffffffff;
+pub const RECORD_WORDS: u64 = 4;
+pub const NEVER_READ: u64 = 0;
+pub const NO_VALUE: u64 = 0xffffffffffffffff;
 const TRAP_VALUE: u64 = NO_VALUE - 1;
 const PAIRED_RESULTS: u64 = 2;
 const FLOAT_RETURN_LAYOUT: u64 = PAIRED_RESULTS + 1;
-const DISP32_MASK: u64 = 0xffffffff;
+pub const DISP32_MASK: u64 = 0xffffffff;
 const LIBCALL_TARGET_BASE: u64 = DISP32_MASK + 1;
 const MEMCPY_LIBCALL: u64 = 1;
 const MEMORY_COPY_ARGUMENTS: u64 = 3;
@@ -170,7 +170,7 @@ const MAX_ARGUMENTS: u64 = ARGUMENTS + STACK_PROBE_INTERVAL / SPILL_SLOT_BYTES -
 const MIN_FOLDED_ADDS: u64 = 4;
 const MAX_FOLDED_ADDS: u64 = 0x7fffffff;
 
-copy struct Record {
+pub copy struct Record {
     op: u64,
     left: u64,
     right: u64,
@@ -244,14 +244,14 @@ struct Allocation {
     callee_save_mask: u32,
 }
 
-fn word_at(in words: Slice[u64], position: u64) -> u64 {
+pub fn word_at(in words: Slice[u64], position: u64) -> u64 {
     match words.try_get(position) {
         Option::Some(word) => word,
         Option::None => 0,
     }
 }
 
-fn read_record(in words: Slice[u64], index: u64) -> Record {
+pub fn read_record(in words: Slice[u64], index: u64) -> Record {
     let start = wrapping_add(HEADER_WORDS, wrapping_mul(index, RECORD_WORDS));
     Record {
         op: word_at(in words, wrapping_add(start, OP)),
