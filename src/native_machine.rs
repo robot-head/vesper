@@ -245,6 +245,16 @@ fn minmax_condition(opcode: Opcode) -> Option<IntCC> {
     })
 }
 
+fn division_op(opcode: Opcode) -> Option<IntegerOp> {
+    Some(match opcode {
+        Opcode::Sdiv | Opcode::SdivImm => IntegerOp::SignedDiv,
+        Opcode::Udiv | Opcode::UdivImm => IntegerOp::UnsignedDiv,
+        Opcode::Srem | Opcode::SremImm => IntegerOp::SignedRem,
+        Opcode::Urem | Opcode::UremImm => IntegerOp::UnsignedRem,
+        _ => return None,
+    })
+}
+
 fn checked_binary_op(opcode: Opcode) -> Option<IntegerOp> {
     Some(match opcode {
         Opcode::UaddOverflow => IntegerOp::UnsignedAddOverflow,
@@ -777,6 +787,77 @@ impl IntegerBlocks<'_> {
         Some(self.append(IntegerOp::Add, [address, offset, width]))
     }
 
+    fn supports_division(&self, ty: Type) -> bool {
+        self.aarch64 || (self.allow_hardware_faults && matches!(ty, types::I32 | types::I64))
+    }
+
+    fn division_immediate(
+        &mut self,
+        op: IntegerOp,
+        numerator: u64,
+        divisor: u64,
+        width: u64,
+    ) -> (IntegerOp, [u64; 3]) {
+        let all_bits = u64::MAX >> (INTEGER_CELL_BITS - width);
+        match op {
+            IntegerOp::UnsignedDiv if divisor.is_power_of_two() => (
+                IntegerOp::ShiftRightLogical,
+                [numerator, u64::from(divisor.trailing_zeros()), width],
+            ),
+            IntegerOp::UnsignedRem if divisor == 1 => (IntegerOp::Constant, [0; 3]),
+            IntegerOp::UnsignedRem if divisor.is_power_of_two() => {
+                let mask = divisor - 1;
+                if i32::try_from(mask).is_ok() {
+                    (IntegerOp::AndImmediate, [numerator, mask, width])
+                } else {
+                    let mask = self.append(IntegerOp::Constant, [mask, 0, 0]);
+                    (IntegerOp::And, [numerator, mask, width])
+                }
+            }
+            IntegerOp::SignedDiv if divisor == 1 => {
+                (IntegerOp::ShiftRightLogical, [numerator, 0, width])
+            }
+            IntegerOp::SignedRem if divisor == 1 || divisor == all_bits => {
+                (IntegerOp::Constant, [0; 3])
+            }
+            _ => {
+                if matches!(op, IntegerOp::SignedDiv | IntegerOp::SignedRem) {
+                    let negative = divisor & (1 << (width - 1)) != 0;
+                    let magnitude = if negative {
+                        divisor.wrapping_neg() & all_bits
+                    } else {
+                        divisor
+                    };
+                    if magnitude > 1 && magnitude.is_power_of_two() {
+                        let count = u64::from(magnitude.trailing_zeros());
+                        // Bias negative inputs before shifting to truncate toward zero.
+                        let sign = self.append(
+                            IntegerOp::ShiftRightArithmetic,
+                            [numerator, width - 1, width],
+                        );
+                        let bias =
+                            self.append(IntegerOp::ShiftRightLogical, [sign, width - count, width]);
+                        let adjusted = self.append(IntegerOp::Add, [numerator, bias, width]);
+                        if matches!(op, IntegerOp::SignedDiv) && !negative {
+                            return (IntegerOp::ShiftRightArithmetic, [adjusted, count, width]);
+                        }
+                        let quotient =
+                            self.append(IntegerOp::ShiftRightArithmetic, [adjusted, count, width]);
+                        return if matches!(op, IntegerOp::SignedRem) {
+                            let product =
+                                self.append(IntegerOp::ShiftLeft, [quotient, count, width]);
+                            (IntegerOp::Sub, [numerator, product, width])
+                        } else {
+                            (IntegerOp::Neg, [quotient, width, width])
+                        };
+                    }
+                }
+                let divisor = self.append(IntegerOp::Constant, [divisor, 0, 0]);
+                (op, [numerator, divisor, width])
+            }
+        }
+    }
+
     fn compare_wide(&mut self, cond: IntCC, left: [u64; 2], right: [u64; 2]) -> u64 {
         if matches!(cond, IntCC::Equal | IntCC::NotEqual) {
             let low = self.append(IntegerOp::Xor, [left[0], right[0], INTEGER_CELL_BITS]);
@@ -823,6 +904,18 @@ impl IntegerBlocks<'_> {
             self.append(IntegerOp::FunnelRight, [low, high, shift]),
             self.append(IntegerOp::FunnelRight, [high, low, shift]),
         ]
+    }
+
+    fn wrapping_wide(&mut self, subtract: bool, left: [u64; 2], right: [u64; 2]) -> [u64; 2] {
+        let (head, tail) = if subtract {
+            (IntegerOp::UnsignedSubOverflow, IntegerOp::SubBorrow)
+        } else {
+            (IntegerOp::UnsignedAddOverflow, IntegerOp::AddCarry)
+        };
+        let low = self.append(head, [left[0], right[0], INTEGER_CELL_BITS]);
+        let carry = self.append(IntegerOp::OverflowFlag, [0; 3]);
+        let high = self.append(tail, [left[1], right[1], carry]);
+        [low, high]
     }
 
     fn wide_rotate_register(&mut self, [low, high]: [u64; 2], amount: u64) -> [u64; 2] {
@@ -920,6 +1013,19 @@ impl IntegerBlocks<'_> {
             } if self.aarch64 && output == types::I128 => {
                 self.wide_rotate_immediate(pair(arg)?, right_rotation_count(opcode, imm.bits()))
             }
+            InstructionData::BinaryImm64 {
+                opcode: Opcode::IrsubImm,
+                arg,
+                imm,
+            } if output == types::I128 => {
+                let signed = imm.bits();
+                let low = self.append(IntegerOp::Constant, [signed as u64, 0, 0]);
+                let high = self.append(
+                    IntegerOp::Constant,
+                    [if signed < 0 { u64::MAX } else { 0 }, 0, 0],
+                );
+                self.wrapping_wide(true, [low, high], pair(arg)?)
+            }
             InstructionData::Binary {
                 opcode,
                 args: [a, b],
@@ -928,15 +1034,7 @@ impl IntegerBlocks<'_> {
                 let [b_low, b_high] = pair(b)?;
                 match opcode {
                     Opcode::Iadd | Opcode::Isub => {
-                        let (head, tail) = if opcode == Opcode::Iadd {
-                            (IntegerOp::UnsignedAddOverflow, IntegerOp::AddCarry)
-                        } else {
-                            (IntegerOp::UnsignedSubOverflow, IntegerOp::SubBorrow)
-                        };
-                        let low = self.append(head, [a_low, b_low, INTEGER_CELL_BITS]);
-                        let carry = self.append(IntegerOp::OverflowFlag, [0; 3]);
-                        let high = self.append(tail, [a_high, b_high, carry]);
-                        [low, high]
+                        self.wrapping_wide(opcode == Opcode::Isub, [a_low, a_high], [b_low, b_high])
                     }
                     Opcode::Smin | Opcode::Smax | Opcode::Umin | Opcode::Umax if self.aarch64 => {
                         let choose_left = self.compare_wide(
@@ -988,10 +1086,7 @@ impl IntegerBlocks<'_> {
                 let sign = self.append(IntegerOp::ShiftRightArithmetic, [high, width - 1, width]);
                 let low = self.append(IntegerOp::Xor, [low, sign, width]);
                 let high = self.append(IntegerOp::Xor, [high, sign, width]);
-                let low = self.append(IntegerOp::UnsignedSubOverflow, [low, sign, width]);
-                let borrow = self.append(IntegerOp::OverflowFlag, [0; 3]);
-                let high = self.append(IntegerOp::SubBorrow, [high, sign, borrow]);
-                [low, high]
+                self.wrapping_wide(true, [low, high], [sign; WIDE_INTEGER_CELLS])
             }
             InstructionData::Unary {
                 opcode: Opcode::Bnot,
@@ -1580,13 +1675,24 @@ impl IntegerBlocks<'_> {
                     (op, [input(left)?, input(right)?, width])
                 }
                 InstructionData::Binary {
-                    opcode:
-                        opcode @ (Opcode::Sdiv
-                        | Opcode::Udiv
-                        | Opcode::Srem
-                        | Opcode::Urem
-                        | Opcode::Smulhi
-                        | Opcode::Umulhi),
+                    opcode: opcode @ (Opcode::Sdiv | Opcode::Udiv | Opcode::Srem | Opcode::Urem),
+                    args: [left, right],
+                } if self.supports_division(output)
+                    && ty(left) == output
+                    && ty(right) == output =>
+                {
+                    let op = division_op(opcode)?;
+                    let numerator = input(left)?;
+                    if self.aarch64
+                        && let Some(bits) = self.constant_bits(right)
+                    {
+                        self.division_immediate(op, numerator, integer_bits(bits, output), width)
+                    } else {
+                        (op, [numerator, input(right)?, width])
+                    }
+                }
+                InstructionData::Binary {
+                    opcode: opcode @ (Opcode::Smulhi | Opcode::Umulhi),
                     args: [left, right],
                 } if matches!(output, types::I32 | types::I64)
                     && ty(left) == output
@@ -1594,13 +1700,7 @@ impl IntegerBlocks<'_> {
                 {
                     let op = match opcode {
                         Opcode::Smulhi => IntegerOp::SignedMulHigh,
-                        Opcode::Umulhi => IntegerOp::UnsignedMulHigh,
-                        _ if !self.allow_hardware_faults && !self.aarch64 => return None,
-                        Opcode::Sdiv => IntegerOp::SignedDiv,
-                        Opcode::Udiv => IntegerOp::UnsignedDiv,
-                        Opcode::Srem => IntegerOp::SignedRem,
-                        Opcode::Urem => IntegerOp::UnsignedRem,
-                        _ => unreachable!(),
+                        _ => IntegerOp::UnsignedMulHigh,
                     };
                     (op, [input(left)?, input(right)?, width])
                 }
@@ -1651,6 +1751,16 @@ impl IntegerBlocks<'_> {
                         Opcode::IshlImm => (IntegerOp::ShiftLeft, [left, bits, width]),
                         Opcode::UshrImm => (IntegerOp::ShiftRightLogical, [left, bits, width]),
                         Opcode::SshrImm => (IntegerOp::ShiftRightArithmetic, [left, bits, width]),
+                        Opcode::IrsubImm if bits == 0 => (IntegerOp::Neg, [left, width, width]),
+                        Opcode::IrsubImm => {
+                            let minuend = self.append(IntegerOp::Constant, [bits, 0, 0]);
+                            (IntegerOp::Sub, [minuend, left, width])
+                        }
+                        Opcode::SdivImm | Opcode::UdivImm | Opcode::SremImm | Opcode::UremImm
+                            if self.supports_division(output) =>
+                        {
+                            self.division_immediate(division_op(opcode)?, left, bits, width)
+                        }
                         Opcode::RotlImm | Opcode::RotrImm if self.aarch64 => (
                             IntegerOp::RotateRight,
                             [left, right_rotation_count(opcode, imm.bits()), width],

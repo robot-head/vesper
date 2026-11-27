@@ -140,6 +140,7 @@ const TST_IMM: u32 = 0xf200001f;
 const CMP_IMM: u32 = 0xf100001f;
 const CMN_IMM: u32 = 0xb100001f;
 const CCMP_IMM: u32 = 0xfa400800;
+const CCMN_IMM_W: u32 = 0x3a400800;
 const SUBS_REG: u32 = 0xeb000000;
 const SUBS_UXTW: u32 = 0xeb204000;
 const SUBS_SXTW: u32 = 0xeb20c000;
@@ -857,11 +858,7 @@ fn operands(in r: Record, returns: u64) -> Option[u64] {
         ROTATE_RIGHT_REGISTER | ROTATE_LEFT_REGISTER => Option::Some(2),
         ROTATE_RIGHT => Option::Some(1),
         SHL_REGISTER | SHR_REGISTER | SAR_REGISTER => Option::Some(2),
-        SIGNED_DIV | UNSIGNED_DIV | SIGNED_REM | UNSIGNED_REM => if r.extra >= DWORD_BITS {
-            Option::Some(2)
-        } else {
-            Option::None
-        },
+        SIGNED_DIV | UNSIGNED_DIV | SIGNED_REM | UNSIGNED_REM => Option::Some(2),
         SIGNED_MUL_HIGH | UNSIGNED_MUL_HIGH => if r.extra == QWORD_BITS {
             Option::Some(2)
         } else {
@@ -916,24 +913,56 @@ fn operands(in r: Record, returns: u64) -> Option[u64] {
 }
 
 fn division_checks(inout out: ChunkSeq[u8], in r: Record, lhs: u32, rhs: u32) {
-    let reg_mask = scalar_opcode_mask(r.extra);
+    let reg_mask: u32 = if r.extra == QWORD_BITS { ~0 } else { ~REG64 };
     let skip = sh(SKIP_TRAP_DISPLACEMENT, BRANCH_IMM19_SHIFT);
     if r.op == SIGNED_DIV {
         // The zero check branches straight to the same trap as overflow.
         let trap = sh(SIGNED_DIV_TRAP_DISPLACEMENT, BRANCH_IMM19_SHIFT);
         push32(inout out, (BRANCH_IF_ZERO & reg_mask) | trap | rhs);
-        // Only a divisor of -1 can overflow. For that divisor, subtracting
-        // one from the dividend sets V precisely when the dividend is MIN.
-        push32(inout out, (CMN_IMM & reg_mask) | sh(1, IMM12_SHIFT) | sh(rhs, RN_SHIFT));
-        push32(
-            inout out,
-            (CCMP_IMM & reg_mask) | sh(1, RM_SHIFT) | sh(EQ, CONDITION_SHIFT) | sh(lhs, RN_SHIFT)
-        );
-        push32(inout out, BRANCH_IF_CONDITION | skip | VC);
+        if r.extra < DWORD_BITS {
+            // After sign extension, MIN + its magnitude and -1 + 1 both set Z.
+            let magnitude = wrapping_shl_u64(1, wrapping_u32(wrapping_sub(r.extra, 1)));
+            let encoded = arithmetic_immediate(magnitude).unwrap_or(0);
+            push32(inout out, (CMN_IMM & reg_mask) | encoded | sh(lhs, RN_SHIFT));
+            push32(
+                inout out,
+                CCMN_IMM_W | sh(1, RM_SHIFT) | sh(EQ, CONDITION_SHIFT) | sh(rhs, RN_SHIFT)
+            );
+            push32(inout out, BRANCH_IF_CONDITION | skip | NE);
+        } else {
+            // Only a divisor of -1 can overflow. For that divisor, subtracting
+            // one from the dividend sets V precisely when the dividend is MIN.
+            push32(inout out, (CMN_IMM & reg_mask) | sh(1, IMM12_SHIFT) | sh(rhs, RN_SHIFT));
+            push32(
+                inout out,
+                (CCMP_IMM & reg_mask)
+                    | sh(1, RM_SHIFT)
+                    | sh(EQ, CONDITION_SHIFT)
+                    | sh(lhs, RN_SHIFT)
+            );
+            push32(inout out, BRANCH_IF_CONDITION | skip | VC);
+        }
     } else {
         push32(inout out, (BRANCH_IF_NOT_ZERO & reg_mask) | skip | rhs);
     }
     push32(inout out, TRAP_INSTRUCTION);
+}
+
+fn narrow_division_operands(
+    inout out: ChunkSeq[u8],
+    in r: Record,
+    lhs: u32,
+    rhs: u32
+) -> (u32, u32) {
+    let op = if r.op == SIGNED_DIV || r.op == SIGNED_REM {
+        SBFM
+    } else {
+        UBFM
+    };
+    let top = wrapping_sub(r.extra, 1);
+    bitfield(inout out, op & ~BITFIELD64, SCRATCH, lhs, 0, top);
+    bitfield(inout out, op & ~BITFIELD64, SECOND_SCRATCH, rhs, 0, top);
+    (SCRATCH, SECOND_SCRATCH)
 }
 
 fn overflow_condition(op: u64) -> u32 {
@@ -1288,12 +1317,16 @@ fn emit_instruction(
             UDIV_REG
         };
         let remainder = r.op == SIGNED_REM || r.op == UNSIGNED_REM;
-        let quotient = if remainder { SCRATCH } else { dest };
-        let reg_mask = scalar_opcode_mask(r.extra);
+        let narrow = r.extra < DWORD_BITS;
+        let quotient = if remainder && !narrow { SCRATCH } else { dest };
+        let reg_mask: u32 = if r.extra == QWORD_BITS { ~0 } else { ~REG64 };
         rrr(inout out, divide & reg_mask, quotient, lhs, rhs);
         if remainder {
             let multiply_subtract = (MSUB_REG & reg_mask) | sh(lhs, ACCUMULATOR_SHIFT);
             rrr(inout out, multiply_subtract, dest, quotient, rhs);
+        }
+        if narrow {
+            normalize(inout out, dest, r.extra);
         }
     } else if r.op == LOAD {
         memory(inout out, true, r.extra, lhs, dest, r.right);
@@ -2354,8 +2387,8 @@ fn encode_pass(
             locations.push(UNASSIGNED);
             continue;
         }
-        let lhs = materialize(inout out, left, SPILL_LEFT, frame_bytes);
-        let rhs = materialize(inout out, right, SPILL_RIGHT, frame_bytes);
+        let mut lhs = materialize(inout out, left, SPILL_LEFT, frame_bytes);
+        let mut rhs = materialize(inout out, right, SPILL_RIGHT, frame_bytes);
         let third = if consumes_carry(r.op) {
             UNASSIGNED
         } else {
@@ -2372,6 +2405,11 @@ fn encode_pass(
             continue;
         }
         if division {
+            if r.extra < DWORD_BITS {
+                let (narrow_lhs, narrow_rhs) = narrow_division_operands(inout out, in r, lhs, rhs);
+                lhs = narrow_lhs;
+                rhs = narrow_rhs;
+            }
             division_checks(inout out, in r, lhs, rhs);
             if !live {
                 locations.push(UNASSIGNED);

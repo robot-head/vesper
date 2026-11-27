@@ -671,6 +671,14 @@ fn aarch64_integer_division_checks_zero_and_signed_overflow() {
     const UDIV_W0_W0_W1: u32 = 0x1ac1_0800;
     const SDIV_X16_X0_X1: u32 = 0x9ac1_0c10;
     const MSUB_X0_X16_X1_X0: u32 = 0x9b01_8200;
+    const SXTB_W16_W0: u32 = 0x1300_1c10;
+    const SXTB_W17_W1: u32 = 0x1300_1c31;
+    const CBZ_W17_TO_SHARED_SDIV_TRAP: u32 = 0x3400_0091;
+    const CMN_W16_BYTE_MIN_MAGNITUDE: u32 = 0x3102_021f;
+    const CCMN_W17_1_EQ: u32 = 0x3a41_0a20;
+    const BNE_OVER_TRAP: u32 = 0x5400_0041;
+    const SDIV_W0_W16_W17: u32 = 0x1ad1_0e00;
+    const UBFX_X0_BYTE: u32 = 0xd340_1c00;
     let encode = |op, width, result| {
         let bytes = binding::aarch64_integer_leaf(&[2, result, op, 0, 1, width]);
         let (words, remainder) = bytes.as_chunks::<{ size_of::<u32>() }>();
@@ -710,7 +718,27 @@ fn aarch64_integer_division_checks_zero_and_signed_overflow() {
             RET
         ],
     );
-    assert!(encode(SIGNED_DIV, BYTE_BITS, 2).is_empty());
+    let signed_byte_checks = [
+        SXTB_W16_W0,
+        SXTB_W17_W1,
+        CBZ_W17_TO_SHARED_SDIV_TRAP,
+        CMN_W16_BYTE_MIN_MAGNITUDE,
+        CCMN_W17_1_EQ,
+        BNE_OVER_TRAP,
+        UDF,
+    ];
+    assert_eq!(
+        encode(SIGNED_DIV, BYTE_BITS, 2),
+        [
+            signed_byte_checks.as_slice(),
+            &[SDIV_W0_W16_W17, UBFX_X0_BYTE, RET]
+        ]
+        .concat(),
+    );
+    assert_eq!(
+        encode(SIGNED_DIV, BYTE_BITS, 0),
+        [signed_byte_checks.as_slice(), &[RET]].concat(),
+    );
 }
 
 #[test]
