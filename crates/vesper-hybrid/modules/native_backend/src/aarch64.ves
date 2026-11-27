@@ -19,7 +19,8 @@ use self::scalar::{
     LIBCALL_TARGET_BASE, MEMCPY_LIBCALL, SIGNED_DIV, UNSIGNED_DIV, SIGNED_REM, UNSIGNED_REM,
     is_integer_division, TRAP, TRAP_VALUE, is_symbol, UNSIGNED_ADD_OVERFLOW, SIGNED_ADD_OVERFLOW,
     UNSIGNED_SUB_OVERFLOW, SIGNED_SUB_OVERFLOW, SIGNED_MUL_OVERFLOW, OVERFLOW_FLAG, ADD_CARRY,
-    CHECKED_ARITHMETIC_RECORDS, is_checked_arithmetic, live_overflow_flag, consumes_carry, BYTE_SWAP
+    CHECKED_ARITHMETIC_RECORDS, is_checked_arithmetic, live_overflow_flag, consumes_carry,
+    BYTE_SWAP, ATOMIC_ADD, ATOMIC_EXCHANGE, FENCE, is_atomic_rmw
 };
 use self::x86_64::{BYTE_BITS, WORD_BITS, DWORD_BITS, QWORD_BITS};
 
@@ -79,6 +80,7 @@ const LONG_TABLE_REACH: i64 = 0x80000000;
 const SHORT_ENTRIES_PER_INSTRUCTION: u64 = 2;
 const BRANCH_IMM19_SHIFT: u32 = 5;
 const BRANCH_IMM19_REACH: i64 = 0x40000;
+const BRANCH_IMM19_MASK: u32 = 0x7ffff;
 const BRANCH_IMM26_REACH: i64 = 0x2000000;
 const INSTRUCTION_BYTES: u64 = 4;
 const INSTRUCTION_SHIFT: u32 = 2;
@@ -130,6 +132,11 @@ const MEMORY_SCALED: u32 = 0x39000000;
 const MEMORY_PAIR: u32 = 0xa9000000;
 const MEMORY_UNSCALED: u32 = 0x38000000;
 const MEMORY_REGISTER: u32 = 0x38206800;
+const LOAD_ACQUIRE_EXCLUSIVE: u32 = 0x085ffc00;
+const STORE_RELEASE_EXCLUSIVE: u32 = 0x0800fc00;
+const DMB_ISH: u32 = 0xd5033bbf;
+const EXCHANGE_RETRY_DISTANCE: u32 = 2;
+const ARITHMETIC_RETRY_DISTANCE: u32 = 3;
 const MEMORY_LOAD: u32 = 0x00400000;
 const MEMORY_SIZE_SHIFT: u32 = 30;
 const MEMORY_IMM9_SHIFT: u32 = 12;
@@ -616,7 +623,7 @@ fn operands(in r: Record, returns: u64) -> Option[u64] {
     if r.op == RETURN_PAIR || r.op == TRAP {
         return Option::Some(0);
     }
-    if r.op == OVERFLOW_FLAG {
+    if r.op == OVERFLOW_FLAG || r.op == FENCE {
         return if r.left == 0 && r.right == 0 && r.extra == 0 {
             Option::Some(0)
         } else {
@@ -689,6 +696,9 @@ fn operands(in r: Record, returns: u64) -> Option[u64] {
     }
     if !scalar_width(r.extra) {
         return Option::None;
+    }
+    if is_atomic_rmw(r.op) {
+        return Option::Some(2);
     }
     match r.op {
         LOAD => if r.right <= DISP32_MASK {
@@ -811,6 +821,27 @@ fn emit_checked(inout out: ChunkSeq[u8], in r: Record, dest: u32, lhs: u32, rhs:
             rrr(inout out, MUL_REG, dest, lhs, rhs);
         }
     }
+}
+
+fn emit_atomic(inout out: ChunkSeq[u8], in r: Record, old: u32, address: u32, operand: u32) {
+    let size = sh(trailing_zeros_u64(r.extra / BYTE_BITS), MEMORY_SIZE_SHIFT);
+    let base = sh(address, RN_SHIFT) | size;
+    push32(inout out, LOAD_ACQUIRE_EXCLUSIVE | base | old);
+    let (source, distance) = if r.op == ATOMIC_EXCHANGE {
+        (operand, EXCHANGE_RETRY_DISTANCE)
+    } else {
+        let op = if r.op == ATOMIC_ADD { ADD_REG } else { SUB_REG };
+        let opcode = if r.extra == QWORD_BITS {
+            op
+        } else {
+            op & ~REG64
+        };
+        rrr(inout out, opcode, SCRATCH, old, operand);
+        (SCRATCH, ARITHMETIC_RETRY_DISTANCE)
+    };
+    push32(inout out, STORE_RELEASE_EXCLUSIVE | base | sh(SECOND_SCRATCH, RM_SHIFT) | source);
+    let retry = sh(wrapping_sub(0, distance) & BRANCH_IMM19_MASK, BRANCH_IMM19_SHIFT);
+    push32(inout out, (BRANCH_IF_NOT_ZERO & ~REG64) | retry | SECOND_SCRATCH);
 }
 
 fn emit_instruction(
@@ -1028,6 +1059,7 @@ fn no_result(op: u64) -> bool {
         || op == CALL_ARGUMENT
         || op == RETURN_PAIR
         || op == TRAP
+        || op == FENCE
 }
 
 fn stack_adjust(opcode: u32, adjustment: u32) -> u32 {
@@ -1594,6 +1626,7 @@ fn encode_pass(
             }
         } else if last == NEVER_READ
             && !is_integer_division(r.op)
+            && !is_atomic_rmw(r.op)
             && !live_overflow_flag(in ends, value, r.op)
         {
             continue;
@@ -1742,6 +1775,7 @@ fn encode_pass(
         let live = last_read(in ends, value) != NEVER_READ;
         let calls = direct_call(r.op);
         let division = is_integer_division(r.op);
+        let atomic = is_atomic_rmw(r.op);
         let checked = is_checked_arithmetic(r.op);
         let overflow_live = checked && last_read(in ends, wrapping_add(value, 1)) != NEVER_READ;
         if r.op == STACK_SLOT
@@ -1749,8 +1783,13 @@ fn encode_pass(
             || r.op == CALL_ARGUMENT
             || r.op == RETURN_PAIR
             || r.op == TRAP
-            || (!calls && !division && !no_result(r.op) && !live && !overflow_live)
+            || (!calls && !division && !atomic && !no_result(r.op) && !live && !overflow_live)
         {
+            locations.push(UNASSIGNED);
+            continue;
+        }
+        if r.op == FENCE {
+            push32(inout out, DMB_ISH);
             locations.push(UNASSIGNED);
             continue;
         }
@@ -1845,6 +1884,11 @@ fn encode_pass(
         };
         if checked && !live {
             emit_checked(inout out, in r, ZERO, lhs, rhs, overflow_live);
+            locations.push(UNASSIGNED);
+            continue;
+        }
+        if atomic && !live {
+            emit_atomic(inout out, in r, SCRATCH, lhs, rhs);
             locations.push(UNASSIGNED);
             continue;
         }
@@ -1998,16 +2042,19 @@ fn encode_pass(
                 continue;
             }
         }
+        // A failed store retries with both original operands.
+        let atomic_operands = if atomic { sh(1, lhs) | sh(1, rhs) } else { 0 };
+        let unavailable = used | home_mask | atomic_operands;
         let last = last_read(in ends, value);
         let preserved = if last > next_call {
-            callee_mask & ~used & ~home_mask
+            callee_mask & ~unavailable
         } else {
             0
         };
         let available = if preserved != 0 {
             preserved
         } else {
-            register_mask & ~used & ~home_mask
+            register_mask & ~unavailable
         };
         let assigned = if available != 0 {
             let reg = trailing_zeros_u64(widen_u64(available));
@@ -2044,6 +2091,8 @@ fn encode_pass(
             }
         } else if checked {
             emit_checked(inout out, in r, dest, lhs, rhs, overflow_live);
+        } else if atomic {
+            emit_atomic(inout out, in r, dest, lhs, rhs);
         } else if r.op == OVERFLOW_FLAG {
             let cc = overflow_cc.unwrap_or(EQ);
             push32(inout out, CSET | sh(cc ^ 1, CONDITION_SHIFT) | dest);

@@ -66,10 +66,73 @@ const BRANCH_TABLE: u64 = 75;
 const BRANCH_TABLE_TARGET: u64 = 76;
 const ADD_CARRY: u64 = 77;
 const SUB_BORROW: u64 = 78;
+const ATOMIC_ADD: u64 = 102;
+const ATOMIC_SUB: u64 = 103;
+const ATOMIC_EXCHANGE: u64 = 104;
+const FENCE: u64 = 105;
 const BYTE_SWAP: u64 = 106;
 const EQUAL: u64 = 0;
 const SIGNED_LESS: u64 = 2;
 const UNSIGNED_LESS: u64 = 6;
+
+#[test]
+fn aarch64_atomic_retry_loops_preserve_operands_and_unused_effects() {
+    // The acquire/release pairs follow Cranelift's isa/aarch64/atomic-rmw.clif.
+    const LDAXR_X2_X0: u32 = 0xc85f_fc02;
+    const ADD_X16_X2_X1: u32 = 0x8b01_0050;
+    const STLXR_W17_X16_X0: u32 = 0xc811_fc10;
+    const LDAXRH_W16_X0: u32 = 0x485f_fc10;
+    const SUB_W16_W16_W1: u32 = 0x4b01_0210;
+    const STLXRH_W17_W16_X0: u32 = 0x4811_fc10;
+    const LDAXRB_W2_X0: u32 = 0x085f_fc02;
+    const STLXRB_W17_W1_X0: u32 = 0x0811_fc01;
+    const CBNZ_W17_BACK_THREE: u32 = 0x35ff_ffb1;
+    const CBNZ_W17_BACK_TWO: u32 = 0x35ff_ffd1;
+    const DMB_ISH: u32 = 0xd503_3bbf;
+    const MOV_X0_X2: u32 = 0xaa02_03e0;
+
+    let code = |words: &[u32]| {
+        words
+            .iter()
+            .copied()
+            .flat_map(u32::to_le_bytes)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        binding::aarch64_integer_leaf(&[2, 2, ATOMIC_ADD, 0, 1, CELL_BITS]),
+        code(&[
+            LDAXR_X2_X0,
+            ADD_X16_X2_X1,
+            STLXR_W17_X16_X0,
+            CBNZ_W17_BACK_THREE,
+            MOV_X0_X2,
+            RET,
+        ])
+    );
+    assert_eq!(
+        binding::aarch64_integer_leaf(&[2, NO_VALUE, ATOMIC_SUB, 0, 1, WORD_BITS, FENCE, 0, 0, 0,]),
+        code(&[
+            LDAXRH_W16_X0,
+            SUB_W16_W16_W1,
+            STLXRH_W17_W16_X0,
+            CBNZ_W17_BACK_THREE,
+            DMB_ISH,
+            RET,
+        ])
+    );
+    assert_eq!(
+        binding::aarch64_integer_leaf(&[2, 2, ATOMIC_EXCHANGE, 0, 1, BYTE_BITS]),
+        code(&[
+            LDAXRB_W2_X0,
+            STLXRB_W17_W1_X0,
+            CBNZ_W17_BACK_TWO,
+            MOV_X0_X2,
+            RET,
+        ])
+    );
+    assert!(binding::aarch64_integer_leaf(&[2, 2, ATOMIC_ADD, 0, 1, u128::BITS.into()]).is_empty());
+    assert!(binding::aarch64_integer_leaf(&[0, 0, FENCE, 0, 0, 0]).is_empty());
+}
 
 #[test]
 fn aarch64_byte_swap_encodes_each_scalar_width() {

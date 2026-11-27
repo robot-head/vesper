@@ -115,10 +115,10 @@ const FLOAT_STACK_LOAD: u64 = 98;
 const FLOAT_STACK_STORE32: u64 = 99;
 const FLOAT_STACK_STORE64: u64 = 100;
 const FLOAT_COPY_SIGN: u64 = 101;
-const ATOMIC_ADD: u64 = 102;
+pub const ATOMIC_ADD: u64 = 102;
 const ATOMIC_SUB: u64 = 103;
-const ATOMIC_EXCHANGE: u64 = 104;
-const FENCE: u64 = 105;
+pub const ATOMIC_EXCHANGE: u64 = 104;
+pub const FENCE: u64 = 105;
 pub const BYTE_SWAP: u64 = 106;
 const XMM_ARGUMENTS: u64 = 8;
 pub const CHECKED_ARITHMETIC_RECORDS: u64 = 2;
@@ -568,7 +568,7 @@ fn is_call(op: u64) -> bool {
     op == CALL || op == CALL_VOID || op == CALL_PAIR || op == CALL_FLOAT
 }
 
-fn is_atomic_rmw(op: u64) -> bool {
+pub fn is_atomic_rmw(op: u64) -> bool {
     op >= ATOMIC_ADD && op <= ATOMIC_EXCHANGE
 }
 
