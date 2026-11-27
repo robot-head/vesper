@@ -40,6 +40,14 @@ impl SplitMix64 {
     pub fn new(seed: u64) -> Self {
         Self { state: seed }
     }
+    #[cfg(feature = "vesper-port")]
+    pub fn next_u64(&mut self) -> u64 {
+        let mut state_buf = [self.state];
+        let v = crate::binding::migrate_splitmix64_next_u64(&mut state_buf);
+        self.state = state_buf[0];
+        v
+    }
+    #[cfg(not(feature = "vesper-port"))]
     pub fn next_u64(&mut self) -> u64 {
         // Wrapping arithmetic is the SplitMix64 definition.
         self.state = self.state.wrapping_add(0x9e37_79b9_7f4a_7c15);
@@ -49,6 +57,15 @@ impl SplitMix64 {
         z ^ (z >> 31)
     }
     /// Uniform in `0..=max` (bias is irrelevant for test generation).
+    #[cfg(feature = "vesper-port")]
+    pub fn below_or_eq(&mut self, max: u64) -> u64 {
+        let mut state_buf = [self.state];
+        let v = crate::binding::migrate_splitmix64_below_or_eq(&mut state_buf, max);
+        self.state = state_buf[0];
+        v
+    }
+    /// Uniform in `0..=max` (bias is irrelevant for test generation).
+    #[cfg(not(feature = "vesper-port"))]
     pub fn below_or_eq(&mut self, max: u64) -> u64 {
         match max.checked_add(1) {
             Some(n) => self.next_u64() % n,
