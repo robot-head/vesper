@@ -1155,3 +1155,67 @@ the timing on every gate.
 
 Rust lines deleted: 0. The gate is not wired, and the rest of `analyze`
 stays in Rust until the checker runs in Vesper.
+
+# Part 12b: the checked signature snapshot (#1828)
+
+`signature_snapshot` in `src/database.rs` gives the editor database a
+semantic identity for a checked file: `extract_signature` turns the
+checked world's headers (ADTs, functions, effects and their operations,
+the inferred function results and the string capacity) into serde_json
+bytes, and the snapshot keeps their BLAKE3 digest and the declaration
+names. Salsa compares these, so a body-only edit stops propagating to
+signature-dependent queries. Part 12b ports `extract_signature` and the
+digest as `lsp_signature` (`signature.ves` in `@vesper/lsp-features`):
+
+- the support checks: model uses, trait bounds, trait and conformance
+  items, elaborated traits, conformances, generated functions, package
+  and revision;
+- the declaration limit;
+- the unresolved checks, in Rust's order: each function's inferred result
+  (merged with the result map in key order), parameters and effect
+  arguments, then ADT fields, then effect operations. `unresolved_type`'s
+  node budget and stack order are kept;
+- the header JSON, written as serde writes `SemanticHeaders`: fields in
+  declaration order, maps in key order, `ast::Type` externally tagged,
+  `Field`'s optional `modality` and `temperature`, and 128-bit integer
+  literals;
+- the 1 MiB byte limit, the digest and the declaration list.
+
+## What changed
+
+- `src/database.rs`: the hidden `signature_answer` (Rust's answer as
+  text), `signature_words` (the world header encoder the hybrid wiring
+  will use) and `signature_tags`.
+- `packages/vesper-lsp-features/src/signature.ves` (new) and the entry
+  `lsp_signature` in lib.ves.
+- `tests/self_host_lsp_features.rs`: `signature_matches_rust` and the
+  ignored `signature_speed`.
+
+## Differential
+
+225 inputs: the checked corpus of the navigation tests (examples, test
+fixtures, LSP fixtures and generated programs) and ten hand-written
+programs (generics, effects, function types, tuples, projections, a
+trait, a source that fails to check). 216 complete snapshots, 5
+unsupported trait headers and 4 failed analyses, 0 diffs, with the
+port's BLAKE3 and with the digest left to the host. The unresolved,
+declaration-limit and byte-limit refusals are not reached by any checked
+source in the corpus.
+
+## Numbers
+
+8 snapshots per call, best of five ABBA rounds per input, release build.
+The world headers are encoded outside the timing. With the host digest,
+the port's answer is unpacked and its header bytes hashed inside the
+timing.
+
+| Header bytes hashed by | Rust | Vesper | Ratio |
+|---|--:|--:|--:|
+| the host's C BLAKE3 (`@vesper-std/hash-sys`) | 14.0 µs | 14.5 µs | **1.03x** |
+| the portable Vesper BLAKE3 | 14.0 µs | 44.7 µs | 3.19x |
+
+The first version ran at 1.70x. Writing plain JSON strings and literal
+keys as one slice copy, and answering leaf types without a stack, brought
+it to 1.03x. The portable BLAKE3 is most of the remaining gap, so the
+wiring must hash through hash-sys. Rust lines deleted: 0; the query is
+not wired.

@@ -170,7 +170,7 @@ MODULES = {
     "ir_opt": ("SH3-9", "vesper-ir-opt", "0.0036x"),
     "native_windows": ("SH4-14", "", ""),
     "native_batch": ("SH4-17", "", ""),
-    "database": ("G1-12", "vesper-memo", "memo tables ported (SH5-16); query bodies wait on the Vesper LSP server"),
+    "database": ("G1-12", "vesper-memo", "memo tables ported (SH5-16); signature_snapshot extraction (extract_signature: support checks, unresolved types, header JSON, digest) ported in vesper-lsp-features (#1828 part 12b; 1.03x with hash-sys BLAKE3, 0 diffs); other query bodies wait on the Vesper LSP server"),
     "float_math": ("SH2-7", "", ""),
     "package_graph": ("SH2-6", "", ""),
     "layout": ("SH2-5", "vesper-check-layout", "swapped"),
