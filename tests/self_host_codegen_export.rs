@@ -802,7 +802,7 @@ const DECLINE_REASONS: &[&str] = &[
     "",
     "the package graph does not load in Stage 2",
     "a .vsys library does not read or scan",
-    "instance directives, or directives that do not parse",
+    "directives Stage 2 cannot follow (an instance Rust refuses, a link to no import, a body that does not parse)",
     "a Box type Stage 2 does not declare",
     "fip functions",
     "the planner refused it",
@@ -812,7 +812,7 @@ const DECLINE_REASONS: &[&str] = &[
 
 /// The libraries Stage 2's front end must build byte-identically today, so
 /// a regression that declines more of them fails.
-const MIN_STAGE2_EXPORTS: usize = 45;
+const MIN_STAGE2_EXPORTS: usize = 46;
 
 fn build_export_driver(dir: &Path) -> PathBuf {
     let package = dir.join("driver");

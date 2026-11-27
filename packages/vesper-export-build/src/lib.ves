@@ -23,7 +23,7 @@
 // instance`), `Box` types and `fip` functions (the caller slot).
 
 use @vesper/check-data::names::{Names};
-use @vesper/check-data::types::{TyKind, Types, display};
+use @vesper/check-data::types::{TyKind, Types, display, substitute, substitute_row, vars_new};
 use @vesper/check-data::util::{add, inc, inc32, n32, put_text_words, u32_at, u64_at, u8_at, w};
 use @vesper/check-data::world::{
     Adt, Field, Generic, Variant, World, bounds_new, mode_of, set_by_symbol
@@ -36,7 +36,7 @@ use @vesper/check-names-packages::{
 };
 use @vesper/codegen-export::{export_files_of_plan, export_plan_bytes};
 use @vesper/codegen-export::directives::{directives_text};
-use @vesper/stage2::collect::{FnInfo, ParamInfo, collect_program};
+use @vesper/stage2::collect::{CollectedProgram, FnInfo, ParamInfo, collect_program};
 use @vesper/vsys::{parse_and_encode};
 use @vesper/vsys::lexer::{VsysError};
 use @vesper/stage2::loader::{load_package_graph_bytes, package_graph_vsys_paths};
@@ -115,6 +115,7 @@ const DECIMAL: u64 = 10;
 const OPTIONS_ON: u8 = 49;
 const DUMP_LINK: Str = "link ";
 const DUMP_VSYS: Str = "vsys ";
+const DUMP_INSTANCE: Str = "instance ";
 const DUMP_NONE: Str = "-";
 
 // A `.vsys` link's handler (directives.ves `HANDLER_*`) and its names.
@@ -133,6 +134,9 @@ const HASH: Str = "#";
 const OPEN_BRACKET_TOKEN: Str = "[";
 const EQUALS_TOKEN: Str = "=";
 const SPACE: u8 = 32;
+const COMMA: u8 = 44;
+const OPEN_BRACKET: u8 = 91;
+const CLOSE_BRACKET: u8 = 93;
 const TAB: u8 = 9;
 const CARRIAGE_RETURN: u8 = 13;
 const SLASH: u8 = 47;
@@ -445,10 +449,21 @@ struct Inline {
     body: ChunkSeq[u8],
 }
 
-// The directives the planner reads, when they name no instance.
+// An `// @export instance` directive: the generic function, its export
+// name, its spelling `f[T, ..]` and its type arguments (each a bare type
+// name; anything else declines).
+struct Inst {
+    function: ChunkSeq[u8],
+    alias: ChunkSeq[u8],
+    spelling: ChunkSeq[u8],
+    args: ChunkSeq[ChunkSeq[u8]],
+}
+
+// The directives the planner reads.
 struct Plain {
     abi: u64,
     options: u64,
+    instances: ChunkSeq[Inst],
     links: ChunkSeq[Link],
     inline: ChunkSeq[Inline],
 }
@@ -530,6 +545,65 @@ fn vsys_section(in dump: ChunkSeq[u8], a: u64, e: u64) -> Option[(Inline, u64)] 
     )
 }
 
+// One `instance <name|-> <function> <spelling> <alias>` line of the dump at
+// `a..e` (the spelling holds `, ` between its arguments), or None when an
+// argument is not a bare type name.
+fn instance_line(in dump: ChunkSeq[u8], a: u64, e: u64) -> Option[Inst] {
+    let name_start = add(a, str_len(DUMP_INSTANCE));
+    let name_end = find_space(in dump, name_start, e);
+    let function_start = inc(name_end);
+    let function_end = find_space(in dump, function_start, e);
+    let spelling_start = inc(function_end);
+    // The alias is the last word.
+    let mut alias_start = e;
+    loop {
+        if alias_start <= spelling_start || u8_at(in dump, wrapping_sub(alias_start, 1)) == SPACE {
+            break;
+        }
+        alias_start = wrapping_sub(alias_start, 1);
+    }
+    if alias_start <= spelling_start {
+        return Option::None;
+    }
+    let spelling_end = wrapping_sub(alias_start, 1);
+    let open = add(spelling_start, wrapping_sub(function_end, function_start));
+    if spelling_end <= inc(open)
+        || u8_at(in dump, open) != OPEN_BRACKET
+        || u8_at(in dump, wrapping_sub(spelling_end, 1)) != CLOSE_BRACKET
+    {
+        return Option::None;
+    }
+    let mut args = ChunkSeq::new[ChunkSeq[u8]]();
+    let mut arg = ChunkSeq::new[u8]();
+    for i in inc(open)..wrapping_sub(spelling_end, 1) {
+        let c = u8_at(in dump, i);
+        if c == COMMA {
+            let mut done = ChunkSeq::new[u8]();
+            done.extend(in arg.as_slice());
+            args.push(sink done);
+            arg.clear();
+        } else if c != SPACE {
+            if !is_word_byte(c) {
+                return Option::None;
+            }
+            arg.push(c);
+        }
+    }
+    args.push(arg);
+    for k in 0..args.len() {
+        let a = token(in args, k);
+        if a.len() == 0 {
+            return Option::None;
+        }
+    }
+    Option::Some(Inst {
+        function: sub_bytes(in dump, function_start, function_end),
+        alias: sub_bytes(in dump, alias_start, e),
+        spelling: sub_bytes(in dump, spelling_start, spelling_end),
+        args: args
+    })
+}
+
 // One `link <library> <handler> <rust path>` line of the dump (`-` for none).
 fn link_line(in dump: ChunkSeq[u8], a: u64, e: u64) -> Option[Link] {
     let lib_start = add(a, str_len(DUMP_LINK));
@@ -564,8 +638,8 @@ fn same_bytes(in a: ChunkSeq[u8], in b: Str) -> bool {
     starts_with_at(in a, 0, b)
 }
 
-// The abi, option words, links and inline `.vsys` bodies of a directives
-// dump that names no instance, or None.
+// The abi, option words, instances, links and inline `.vsys` bodies of a
+// directives dump, or None.
 fn plain_directives(in dump: ChunkSeq[u8]) -> Option[Plain] {
     if !starts_with_at(in dump, 0, DUMP_ABI) {
         return Option::None;
@@ -592,6 +666,7 @@ fn plain_directives(in dump: ChunkSeq[u8]) -> Option[Plain] {
     } else {
         0
     };
+    let mut instances = ChunkSeq::new[Inst]();
     let mut links = ChunkSeq::new[Link]();
     let mut inline = ChunkSeq::new[Inline]();
     let mut at = inc(line_end(in dump, flag_at));
@@ -600,7 +675,15 @@ fn plain_directives(in dump: ChunkSeq[u8]) -> Option[Plain] {
             break;
         }
         let e = line_end(in dump, at);
-        if starts_with_at(in dump, at, DUMP_LINK) {
+        if starts_with_at(in dump, at, DUMP_INSTANCE) {
+            match instance_line(in dump, at, e) {
+                Option::Some(i) => instances.push(sink i),
+                Option::None => {
+                    return Option::None;
+                },
+            }
+            at = inc(e);
+        } else if starts_with_at(in dump, at, DUMP_LINK) {
             match link_line(in dump, at, e) {
                 Option::Some(l) => links.push(sink l),
                 Option::None => {
@@ -622,7 +705,13 @@ fn plain_directives(in dump: ChunkSeq[u8]) -> Option[Plain] {
             return Option::None;
         }
     }
-    Option::Some(Plain { abi: abi, options: options, links: links, inline: inline })
+    Option::Some(Plain {
+        abi: abi,
+        options: options,
+        instances: instances,
+        links: links,
+        inline: inline
+    })
 }
 
 // A `.vsys` descriptor's library name and the C symbols its direct calls
@@ -1077,6 +1166,147 @@ fn add_box_prelude(
     world.box_active = true;
 }
 
+// Inserts function `fi` into `exported`, which is in name order.
+fn insert_by_name(
+    inout exported: ChunkSeq[u64],
+    in fns: ChunkSeq[FnInfo],
+    in names: Names,
+    fi: u64
+) {
+    let name = match fns.try_get(fi) {
+        Option::Some(f) => f.name,
+        Option::None => 0,
+    };
+    exported.push(fi);
+    let mut at = wrapping_sub(exported.len(), 1);
+    loop {
+        if at == 0 {
+            break;
+        }
+        let prev = match fns.try_get(u64_at(in exported, wrapping_sub(at, 1))) {
+            Option::Some(p) => p.name,
+            Option::None => 0,
+        };
+        if !name_before(in names, name, prev) {
+            break;
+        }
+        let _ = exported.try_set(at, u64_at(in exported, wrapping_sub(at, 1)));
+        at = wrapping_sub(at, 1);
+        let _ = exported.try_set(at, fi);
+    }
+}
+
+// Whether `t` is a type an instance wrapper can spell (Rust
+// `instance_wrappers`' `plain`): named types and tuples all the way down,
+// and not a 1-tuple.
+fn is_plain(in types: Types, t: u32, top: bool) -> bool {
+    let node = types.node(t);
+    if node.kind != TyKind::Named && node.kind != TyKind::Tuple {
+        return false;
+    }
+    if top && node.kind == TyKind::Tuple && node.n == 1 {
+        return false;
+    }
+    for i in 0..w(node.n) {
+        if !is_plain(in types, types.arg(t, i), false) {
+            return false;
+        }
+    }
+    true
+}
+
+// Adds instance `ins`'s wrapper to the collected functions and to
+// `exported` (Rust `instance_wrappers`), or false where Rust refuses it.
+fn add_instance(
+    inout cp: CollectedProgram,
+    in public: ChunkSeq[bool],
+    inout exported: ChunkSeq[u64],
+    in ins: Inst
+) -> bool {
+    let fsym = cp.names.lookup(in ins.function.as_slice());
+    if fsym == NONE32 || public.try_get(w(fsym)) != Option::Some(true) {
+        return false;
+    }
+    let mut generic = cp.fns.len();
+    for j in 0..exported.len() {
+        let fi = u64_at(in exported, j);
+        match cp.fns.try_get(fi) {
+            Option::Some(f) => {
+                if f.name == fsym {
+                    generic = fi;
+                }
+            },
+            Option::None => {},
+        }
+    }
+    let f = match cp.fns.try_get(generic) {
+        Option::Some(f) => f,
+        Option::None => {
+            return false;
+        },
+    };
+    if w(f.gn) != ins.args.len() {
+        return false;
+    }
+    let alias = cp.names.intern(in ins.alias.as_slice());
+    if public.try_get(w(alias)) == Option::Some(true) {
+        return false;
+    }
+    let mut vars = vars_new();
+    for gi in 0..w(f.gn) {
+        let g = match cp.fn_generics.try_get(add(w(f.ga), gi)) {
+            Option::Some(g) => g,
+            Option::None => {
+                return false;
+            },
+        };
+        if g.row {
+            return false;
+        }
+        let arg_text = token(in ins.args, gi);
+        let arg_name = cp.names.intern(in arg_text.as_slice());
+        let arg = cp.types.named0(arg_name);
+        vars.set(g.name, arg);
+    }
+    let pa = n32(cp.params.len());
+    for pi in 0..w(f.pn) {
+        let p = match cp.params.try_get(add(w(f.pa), pi)) {
+            Option::Some(p) => p,
+            Option::None => {
+                return false;
+            },
+        };
+        let ty = substitute(inout cp.types, p.ty, in vars);
+        if !is_plain(in cp.types, ty, true) {
+            return false;
+        }
+        cp.params.push(ParamInfo { name: p.name, pass: p.pass, ty: ty });
+    }
+    let result = substitute(inout cp.types, f.result, in vars);
+    if !is_plain(in cp.types, result, true) {
+        return false;
+    }
+    let effects = substitute_row(inout cp.types, f.effects, in vars);
+    if cp.types.row(effects).tail != 0 {
+        return false;
+    }
+    let wrapper = n32(cp.fns.len());
+    cp.fns.push(FnInfo {
+        name: alias,
+        fip: false,
+        ga: 0,
+        gn: 0,
+        pa: pa,
+        pn: f.pn,
+        result: result,
+        effects: effects,
+        mod_idx: f.mod_idx,
+        body: NONE32
+    });
+    insert_by_name(inout exported, in cp.fns, in cp.names, w(wrapper));
+    true
+}
+
 // `plan_input(world, public, library, directives)` for the package at
 // `root_dir`, built by Stage 2's front end, or why it was declined.
 pub fn export_plan_input(
@@ -1251,23 +1481,17 @@ pub fn export_plan_input(
         if f.fip {
             return declined(DECLINE_FIP);
         }
-        // Insertion in name order.
-        exported.push(fi);
-        let mut at = wrapping_sub(exported.len(), 1);
-        loop {
-            if at == 0 {
-                break;
-            }
-            let prev = match cp.fns.try_get(u64_at(in exported, wrapping_sub(at, 1))) {
-                Option::Some(p) => p.name,
-                Option::None => 0,
-            };
-            if !name_before(in cp.names, f.name, prev) {
-                break;
-            }
-            let _ = exported.try_set(at, u64_at(in exported, wrapping_sub(at, 1)));
-            at = wrapping_sub(at, 1);
-            let _ = exported.try_set(at, fi);
+        insert_by_name(inout exported, in cp.fns, in cp.names, fi);
+    }
+    // Each instance is a generated monomorphic `pub fn <alias>` calling the
+    // generic at its type arguments (Rust `instance_wrappers`).
+    for ii in 0..plain.instances.len() {
+        let added = match plain.instances.try_get(ii) {
+            Option::Some(ins) => add_instance(inout cp, in public, inout exported, in ins),
+            Option::None => false,
+        };
+        if !added {
+            return declined(DECLINE_DIRECTIVES);
         }
     }
     let fns = cp.fns;
@@ -1320,8 +1544,17 @@ pub fn export_plan_input(
             Option::None => {},
         }
     }
-    // No instances.
-    head.push(0);
+    head.push(plain.instances.len());
+    for ii in 0..plain.instances.len() {
+        match plain.instances.try_get(ii) {
+            Option::Some(ins) => {
+                put_text_words(inout head, in ins.function.as_slice());
+                put_text_words(inout head, in ins.alias.as_slice());
+                put_text_words(inout head, in ins.spelling.as_slice());
+            },
+            Option::None => {},
+        }
+    }
     let mut funcs = ChunkSeq::new[u64]();
     funcs.push(exported.len());
     for x in 0..exported.len() {
