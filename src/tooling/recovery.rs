@@ -198,6 +198,34 @@ pub fn analyze(
     snapshot: &RecoverySyntax,
     limits: RecoveryLimits,
 ) -> Result<RecoveryDiagnostics, RecoveryFailure> {
+    let (budget, hash, unavailable, parser_work) = match gate(snapshot, limits)? {
+        Gate::Blocked(blocked) => return Ok(blocked),
+        Gate::Open {
+            budget,
+            hash,
+            unavailable,
+            parser_work,
+        } => (budget, hash, unavailable, parser_work),
+    };
+    analyze_components(snapshot, limits, budget, hash, unavailable, parser_work)
+}
+
+/// What [`gate`] decided: the whole document is unavailable, or the
+/// complete components go on to be parsed and checked.
+enum Gate {
+    Blocked(RecoveryDiagnostics),
+    Open {
+        budget: Budget,
+        hash: [u8; 32],
+        unavailable: Vec<Unavailable>,
+        parser_work: usize,
+    },
+}
+
+/// The checks of `analyze` over the recovery syntax alone, before any
+/// complete item is parsed: limits, source identity, syntax diagnostics,
+/// declaration and site census and original token coverage.
+fn gate(snapshot: &RecoverySyntax, limits: RecoveryLimits) -> Result<Gate, RecoveryFailure> {
     limits.validate()?;
     let source = snapshot.source();
     if source.len() > limits.analysis.max_source_bytes {
@@ -310,15 +338,11 @@ pub fn analyze(
         if tokens > 16_384 {
             return Err(resource("token_limit"));
         }
-        if [K::Whitespace, K::Comment, K::BlockComment, K::Eof]
-            .iter()
-            .any(|kind| token.kind().0 == *kind as u16)
-        {
+        let class = token_class(token.kind().0);
+        if class == gate_tags::TOKEN_TRIVIA {
             continue;
         }
-        if [K::Lower, K::Upper]
-            .iter()
-            .any(|kind| token.kind().0 == *kind as u16)
+        if class == gate_tags::TOKEN_IDENTIFIER
             && token.text().len() > limits.analysis.max_identifier_bytes
         {
             return Err(resource("identifier_limit"));
@@ -361,14 +385,34 @@ pub fn analyze(
                 reason,
             });
         }
-        return Ok(RecoveryDiagnostics {
+        return Ok(Gate::Blocked(RecoveryDiagnostics {
             source: Arc::clone(snapshot.source_arc()),
             hash,
             diagnostics: vec![],
             analyzed: vec![],
             unavailable,
-        });
+        }));
     }
+    Ok(Gate::Open {
+        budget,
+        hash,
+        unavailable,
+        parser_work,
+    })
+}
+
+/// The rest of `analyze` once [`gate`] is open: parse the complete
+/// components, stage their context and check each function.
+fn analyze_components(
+    snapshot: &RecoverySyntax,
+    limits: RecoveryLimits,
+    mut budget: Budget,
+    hash: [u8; 32],
+    mut unavailable: Vec<Unavailable>,
+    parser_work: usize,
+) -> Result<RecoveryDiagnostics, RecoveryFailure> {
+    let source = snapshot.source();
+    let declarations = snapshot.declarations();
     let indices = declarations
         .iter()
         .enumerate()
@@ -959,6 +1003,183 @@ impl<'a> Walk<'a, '_, '_> {
         }
         Ok(Ok(()))
     }
+}
+
+/// The tag of a declaration kind, status, site kind and token class in
+/// [`gate_words`] (the order `@vesper/lsp-features` recovery.ves reads).
+#[doc(hidden)]
+pub mod gate_tags {
+    pub const KIND_FUNCTION: u64 = 0;
+    pub const KIND_STRUCT: u64 = 1;
+    pub const KIND_ENUM: u64 = 2;
+    pub const KIND_EFFECT: u64 = 3;
+    pub const KIND_OTHER: u64 = 4;
+    pub const STATUS_COMPLETE: u64 = 0;
+    pub const STATUS_RECOVERED: u64 = 1;
+    pub const STATUS_OPAQUE: u64 = 2;
+    pub const SITE_PLAIN: u64 = 0;
+    pub const SITE_OPAQUE: u64 = 1;
+    pub const TOKEN_TRIVIA: u64 = 0;
+    pub const TOKEN_IDENTIFIER: u64 = 1;
+    pub const TOKEN_OTHER: u64 = 2;
+}
+
+/// The token class [`gate`] tests: trivia it skips, identifiers it bounds
+/// and every other token.
+fn token_class(kind: u16) -> u64 {
+    if [K::Whitespace, K::Comment, K::BlockComment, K::Eof]
+        .iter()
+        .any(|k| kind == *k as u16)
+    {
+        gate_tags::TOKEN_TRIVIA
+    } else if [K::Lower, K::Upper].iter().any(|k| kind == *k as u16) {
+        gate_tags::TOKEN_IDENTIFIER
+    } else {
+        gate_tags::TOKEN_OTHER
+    }
+}
+
+/// [`gate`] run `rounds` times (at least once) as the text the Vesper port
+/// writes: `E <failure>`, or `B` for a blocked document and `O <work left>
+/// <parser work>` for an open one, each followed by its unavailable spans
+/// as ` <reason>@<start>..<end>`.
+#[doc(hidden)]
+pub fn gate_answer(snapshot: &RecoverySyntax, limits: RecoveryLimits, rounds: u64) -> String {
+    let mut result = gate(snapshot, limits);
+    for _ in 1..rounds {
+        result = gate(snapshot, limits);
+    }
+    let (mut out, unavailable) = match result {
+        Err(e) => return format!("E {e}"),
+        Ok(Gate::Blocked(blocked)) => ("B".to_owned(), blocked.unavailable),
+        Ok(Gate::Open {
+            budget,
+            unavailable,
+            parser_work,
+            ..
+        }) => (format!("O {} {parser_work}", budget.remaining), unavailable),
+    };
+    for u in unavailable {
+        out.push_str(&format!(
+            " {}@{}..{}",
+            u.reason.as_str(),
+            u.span.start,
+            u.span.end
+        ));
+    }
+    out
+}
+
+/// The words `lsp_recovery_gate` reads for [`gate`] over `snapshot`:
+/// `rounds`, the twelve limits, the record sizes the diagnostic bound
+/// charges, the source, its recorded BLAKE3 and (when `host_digest`) the
+/// host's, then the diagnostics, declarations, sites and tokens.
+#[doc(hidden)]
+pub fn gate_words(
+    snapshot: &RecoverySyntax,
+    limits: RecoveryLimits,
+    host_digest: bool,
+    rounds: u64,
+) -> Vec<u8> {
+    use gate_tags::*;
+    let mut out = Vec::new();
+    let w = |out: &mut Vec<u8>, n: u64| out.extend_from_slice(&n.to_le_bytes());
+    let a = limits.analysis;
+    w(&mut out, rounds);
+    for n in [
+        a.max_source_bytes,
+        a.max_ast_nodes,
+        a.max_type_nodes,
+        a.max_depth,
+        a.max_identifier_bytes,
+        a.max_printed_type_bytes,
+        a.max_diagnostics,
+        a.max_diagnostic_bytes,
+        a.max_metadata_bytes,
+        limits.max_functions,
+        limits.max_context_items,
+        limits.max_work,
+        core::mem::size_of::<Diagnostic>(),
+        core::mem::size_of::<DiagnosticLabel>(),
+    ] {
+        w(&mut out, n as u64);
+    }
+    let source = snapshot.source();
+    w(&mut out, source.len() as u64);
+    out.extend_from_slice(source.as_bytes());
+    out.extend_from_slice(&snapshot.source_hash());
+    w(&mut out, u64::from(host_digest));
+    let digest = if host_digest {
+        *blake3::hash(source.as_bytes()).as_bytes()
+    } else {
+        [0; 32]
+    };
+    out.extend_from_slice(&digest);
+    let span = |out: &mut Vec<u8>, s: &Span| {
+        out.extend_from_slice(&(s.start as u64).to_le_bytes());
+        out.extend_from_slice(&(s.end as u64).to_le_bytes());
+    };
+    let diagnostics = snapshot.diagnostics();
+    w(&mut out, diagnostics.len() as u64);
+    for d in diagnostics {
+        w(&mut out, d.code.len() as u64);
+        w(&mut out, d.message.len() as u64);
+        span(&mut out, &d.span);
+        w(&mut out, d.related.len() as u64);
+        for label in &d.related {
+            span(&mut out, &label.span);
+            w(&mut out, label.message.len() as u64);
+        }
+        w(&mut out, u64::from(d.help.is_some()));
+        w(&mut out, d.help.as_ref().map_or(0, |h| h.len() as u64));
+    }
+    let declarations = snapshot.declarations();
+    w(&mut out, declarations.len() as u64);
+    for d in declarations {
+        let kind = match d.kind {
+            D::Function => KIND_FUNCTION,
+            D::Struct => KIND_STRUCT,
+            D::Enum => KIND_ENUM,
+            D::Effect => KIND_EFFECT,
+            _ => KIND_OTHER,
+        };
+        let status = match d.status {
+            S::Complete => STATUS_COMPLETE,
+            S::Recovered => STATUS_RECOVERED,
+            S::Opaque => STATUS_OPAQUE,
+        };
+        w(&mut out, kind);
+        w(&mut out, status);
+        span(&mut out, &d.span);
+        w(&mut out, u64::from(d.name_span.is_some()));
+        span(&mut out, d.name_span.as_ref().unwrap_or(&(0..0)));
+    }
+    let sites = snapshot.sites();
+    w(&mut out, sites.len() as u64);
+    for site in sites {
+        let kind = if matches!(site.kind, SiteKind::OpaqueLexical | SiteKind::OpaqueMacro) {
+            SITE_OPAQUE
+        } else {
+            SITE_PLAIN
+        };
+        w(&mut out, kind);
+        w(&mut out, u64::from(site.owner.is_some()));
+        w(&mut out, site.owner.unwrap_or(0) as u64);
+        span(&mut out, &site.span);
+    }
+    let tokens = snapshot
+        .syntax()
+        .descendants_with_tokens()
+        .filter_map(|e| e.into_token())
+        .collect::<Vec<_>>();
+    w(&mut out, tokens.len() as u64);
+    for token in tokens {
+        let range = token.text_range();
+        w(&mut out, token_class(token.kind().0));
+        w(&mut out, u64::from(u32::from(range.start())));
+        w(&mut out, u64::from(u32::from(range.end())));
+    }
+    out
 }
 
 #[cfg(test)]

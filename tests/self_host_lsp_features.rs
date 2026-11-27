@@ -75,6 +75,7 @@ fn entry(name: &'static str) -> &'static Entry {
             "lsp_lens_state",
             "lsp_anvil_actions",
             "lsp_macro_preview",
+            "lsp_recovery_gate",
         ]
         .into_iter()
         .map(|n| (n, features().entry(n, optimize())))
@@ -4894,6 +4895,213 @@ fn macro_preview_speed() {
     eprintln!(
         "macro preview ({} cases x {rounds}): rust {:?}; vesper, host C BLAKE3 {:?} (ratio {:.2}); vesper, portable BLAKE3 {:?} (ratio {:.2})",
         cases.len(),
+        totals[0] / per,
+        totals[1] / per,
+        totals[1].as_secs_f64() / totals[0].as_secs_f64(),
+        totals[2] / per,
+        totals[2].as_secs_f64() / totals[0].as_secs_f64()
+    );
+}
+
+// ------------------------------------------------------- recovery gate
+
+/// Programs of the declarations `recovery::analyze` accepts (functions,
+/// structs, enums and effects), each later damaged.
+const RECOVERY_PROGRAMS: [&str; 8] = [
+    "// Unicode 🙂\r\nlinear struct Tx{} fn damaged(sink tx:Tx){tx.} fn leak(sink tx:Tx){}",
+    "struct Pair { left: u64, right: u64 }\nfn sum(p: Pair) -> u64 { p.left + p.right }\nfn main() -> u64 { sum(Pair { left: 1, right: 2 }) }",
+    "enum Shape { Dot, Square(u64) }\nfn area(s: Shape) -> u64 { match s { Shape::Dot => 0, Shape::Square(n) => n * n } }\nfn broken() { let x = ; }",
+    "effect Log { fn note(x: u64); }\nfn noisy(x: u64) -> u64 eff [Log] { Log::note(x); x }\nfn quiet(x: u64) -> u64 { x }",
+    "fn first(x: u64)->u64 { x }\npub fn broken(){tx.}\nfn last(){1}",
+    "fn twice() {}\nfn twice() { 1 }\nfn other( {}",
+    "fn u64() {}\nstruct Option { x: u64 }\nfn ok( {}",
+    "struct Broken { value: }\nenum Good { Value }\nfn tail(){}",
+];
+
+fn recovery_texts() -> Vec<String> {
+    let mut seeds: Vec<String> = RECOVERY_PROGRAMS.map(str::to_owned).to_vec();
+    seeds.extend(formatting_corpus().into_iter().step_by(17).take(40));
+    let mut texts = vec![];
+    for t in seeds {
+        let cut = |f: usize| {
+            let mut at = t.len() * f / 4;
+            while !t.is_char_boundary(at) {
+                at -= 1;
+            }
+            t[..at].to_owned()
+        };
+        texts.push(cut(1));
+        texts.push(cut(2));
+        texts.push(cut(3));
+        texts.push(format!("{t}\nfn broken(){{tx.}}"));
+        texts.push(format!("{t}\nfn m() -> u64 {{ m!(1) }} fn x( {{}}"));
+        texts.push(format!("{t}\n@@ fn stray() {{ 1 }} fn y( {{}}"));
+        texts.push(format!("{t}\ntrait T {{ fn f(); }} fn z( {{}}"));
+        texts.push(format!(
+            "fn a_very_long_identifier_name_for_limits() {{}} {t} fn w( {{}}"
+        ));
+        texts.push(t.replacen('}', "", 1));
+        texts.push(t);
+    }
+    texts
+}
+
+/// The limits of each gate case: the defaults, work allowances swept over
+/// the gate's own charges, and each small or invalid limit.
+fn recovery_limits(
+    syntax: &vesper_syntax::recovery::RecoverySyntax,
+) -> Vec<vesper::tooling::recovery::RecoveryLimits> {
+    use vesper::tooling::recovery::RecoveryLimits;
+    let d = RecoveryLimits::default();
+    let tokens = syntax.syntax().descendants_with_tokens().count();
+    let charged =
+        syntax.source().len() + syntax.declarations().len() + syntax.sites().len() + tokens;
+    let mut out = vec![d];
+    for work in [
+        1,
+        2,
+        3,
+        charged,
+        charged * 2,
+        charged * 2 + 1,
+        charged * 2 + 2,
+        charged * 3,
+    ] {
+        out.push(RecoveryLimits {
+            max_work: work,
+            ..d
+        });
+    }
+    for part in 1..4 {
+        out.push(RecoveryLimits {
+            max_work: (syntax.source().len() + charged * part / 4) * 2,
+            ..d
+        });
+    }
+    let mut a = d.analysis;
+    for (k, v) in [
+        (0, 1),
+        (0, 8),
+        (1, 1),
+        (1, 4),
+        (2, 1),
+        (3, 1),
+        (3, 300),
+        (4, 0),
+    ] {
+        let mut l = d;
+        match k {
+            0 => l.analysis.max_identifier_bytes = v,
+            1 => l.analysis.max_diagnostics = v,
+            2 => l.max_functions = v,
+            3 => l.analysis.max_diagnostic_bytes = v,
+            _ => l.max_context_items = 1,
+        }
+        out.push(l);
+    }
+    a.max_source_bytes = syntax.source().len().saturating_sub(1).max(1);
+    out.push(RecoveryLimits { analysis: a, ..d });
+    for bad in 0..3 {
+        let mut l = d;
+        match bad {
+            0 => l.analysis.max_depth = 0,
+            1 => l.max_functions = 200,
+            _ => l.max_work = 0,
+        }
+        out.push(l);
+    }
+    out
+}
+
+/// `recovery::gate_answer` against `lsp_recovery_gate`, answer for answer,
+/// with the portable BLAKE3 and with the host's digest.
+#[test]
+fn recovery_gate_matches_rust() {
+    use vesper::tooling::recovery::{gate_answer, gate_words};
+    let entry = entry("lsp_recovery_gate");
+    let mut differ = vec![];
+    let (mut snapshots, mut cases) = (0, 0);
+    let mut kinds = BTreeMap::<String, usize>::new();
+    for text in recovery_texts() {
+        let Ok(syntax) = vesper::parser::parse_recovery(&text, Default::default()) else {
+            continue;
+        };
+        snapshots += 1;
+        for limits in recovery_limits(&syntax) {
+            cases += 1;
+            let rust = gate_answer(&syntax, limits, 1);
+            let kind = match rust.split_once(' ') {
+                Some(("E", reason)) => format!("E {reason}"),
+                _ => rust[..1].to_owned(),
+            };
+            *kinds.entry(kind).or_default() += 1;
+            for host in [false, true] {
+                let vesper = entry.text(&gate_words(&syntax, limits, host, 1));
+                if let Some(d) = first_difference(&rust, &vesper) {
+                    differ.push(format!("{text:?} {limits:?} host {host}: {d}"));
+                }
+            }
+        }
+    }
+    eprintln!(
+        "recovery gate: {snapshots} snapshots, {cases} cases ({kinds:?}), {} differ",
+        differ.len()
+    );
+    assert!(differ.is_empty(), "{:#?}", &differ[..differ.len().min(8)]);
+}
+
+/// Rust against Vesper on the default limits, `rounds` gates per call,
+/// best of five ABBA pairs per snapshot. The recovery syntax is parsed and
+/// encoded outside the timing; the host digest is hashed inside it.
+#[test]
+#[ignore]
+fn recovery_gate_speed() {
+    use vesper::tooling::recovery::{RecoveryLimits, gate_answer, gate_words};
+    let entry = entry("lsp_recovery_gate");
+    let rounds = 8;
+    let limits = RecoveryLimits::default();
+    let mut totals = [Duration::ZERO; 3];
+    let mut n = 0u32;
+    for text in recovery_texts() {
+        let Ok(syntax) = vesper::parser::parse_recovery(&text, Default::default()) else {
+            continue;
+        };
+        n += 1;
+        let hosted = gate_words(&syntax, limits, true, rounds);
+        let portable = gate_words(&syntax, limits, false, rounds);
+        let time = |f: &dyn Fn()| {
+            let t = std::time::Instant::now();
+            f();
+            t.elapsed()
+        };
+        let rust = || {
+            std::hint::black_box(gate_answer(&syntax, limits, rounds));
+        };
+        let host = || {
+            for _ in 0..rounds {
+                std::hint::black_box(blake3::hash(text.as_bytes()));
+            }
+            std::hint::black_box(entry.words(&hosted));
+        };
+        let port = || {
+            std::hint::black_box(entry.words(&portable));
+        };
+        let mut best = [Duration::MAX; 3];
+        for _ in 0..5 {
+            best[0] = best[0].min(time(&rust));
+            best[1] = best[1].min(time(&host));
+            best[2] = best[2].min(time(&port));
+            best[2] = best[2].min(time(&port));
+            best[1] = best[1].min(time(&host));
+            best[0] = best[0].min(time(&rust));
+        }
+        for k in 0..3 {
+            totals[k] += best[k];
+        }
+    }
+    let per = n * rounds as u32;
+    eprintln!(
+        "recovery gate ({n} snapshots x {rounds}): rust {:?}; vesper, host C BLAKE3 {:?} (ratio {:.2}); vesper, portable BLAKE3 {:?} (ratio {:.2})",
         totals[0] / per,
         totals[1] / per,
         totals[1].as_secs_f64() / totals[0].as_secs_f64(),

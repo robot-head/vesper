@@ -616,6 +616,18 @@ pub fn parse_directives(in input: Str) -> ChunkSeq[u64] {
     let triple = read_bytes(in b, inout pos);
     let abi_value = read_bytes(in b, inout pos);
     let target_error = read_bytes(in b, inout pos);
+    pack_text(in directives_text(in source, in triple, in abi_value, in target_error))
+}
+
+// The dump of `parse_directives` as text, from the source and the target
+// values (the triple, the ABI value and the target error, which only a
+// `vsys` body reads).
+pub fn directives_text(
+    in source: ChunkSeq[u8],
+    in triple: ChunkSeq[u8],
+    in abi_value: ChunkSeq[u8],
+    in target_error: ChunkSeq[u8]
+) -> ChunkSeq[u8] {
     let mut names = names_new();
     let mut t = types_new(inout names);
     let mut abi: u64 = 0;
@@ -871,7 +883,7 @@ pub fn parse_directives(in input: Str) -> ChunkSeq[u64] {
         put_seq(inout o, in links);
         put_seq(inout o, in vsys);
     }
-    pack_text(in o)
+    o
 }
 
 // Whether a `vsys` spec is a link (`vsys <Library> ..`): its first word
