@@ -2134,3 +2134,95 @@ pub fn migrate_render_decl_extern_fn(
     pos = copy_str(in ";\n", inout out, pos);
     pos
 }
+
+// ---------------------------------------------------------------------------
+// `.vsys` library header renderer (`synth.rs::sys_spec`).
+
+fn write_hex_at(in src: Slice[u8], inout out: Slice[u8], dst_pos: u64) -> u64 {
+    let n = src.len();
+    let mut i: u64 = 0;
+    let mut pos = dst_pos;
+    loop {
+        if i >= n {
+            break;
+        }
+        let b = match src.try_get(i) {
+            Some(v) => v,
+            None => break
+        };
+        let hi = wrapping_u8(widen_u64(b) >> 4) & HEX_NIBBLE_MASK;
+        let lo = b & HEX_NIBBLE_MASK;
+        let _ = out.try_set(pos, hex_nibble_ascii(hi));
+        pos = wrapping_add(pos, 1);
+        let _ = out.try_set(pos, hex_nibble_ascii(lo));
+        pos = wrapping_add(pos, 1);
+        i = wrapping_add(i, 1);
+    }
+    pos
+}
+
+const VSYS_FLAG_STATIC: u8 = 1;
+const VSYS_FLAG_HEADER: u8 = 2;
+const VSYS_FLAG_PKG_CONFIG: u8 = 4;
+
+pub fn migrate_render_vsys_preamble(
+    in schema: Slice[u8],
+    in origin: Slice[u8],
+    in library: Slice[u8],
+    in target_triple: Slice[u8],
+    in abi_name: Slice[u8],
+    inout out: Slice[u8],
+) -> u64 {
+    let mut pos = copy_str(in "// ", inout out, 0);
+    pos = copy_range(in schema, 0, schema.len(), inout out, pos);
+    pos = copy_str(in ": synthesized by vesper migrate from ", inout out, pos);
+    pos = copy_range(in origin, 0, origin.len(), inout out, pos);
+    pos = copy_str(
+        in ".\n// Review every `assumed:` line; finite shadow tests do not prove equivalence.\nsys library ",
+        inout out,
+        pos,
+    );
+    pos = copy_range(in library, 0, library.len(), inout out, pos);
+    pos = copy_str(in " (\n    target = \"", inout out, pos);
+    pos = copy_range(in target_triple, 0, target_triple.len(), inout out, pos);
+    pos = copy_str(in "\", abi = \"", inout out, pos);
+    pos = copy_range(in abi_name, 0, abi_name.len(), inout out, pos);
+    pos = copy_str(in "\",\n", inout out, pos);
+    pos
+}
+
+pub fn migrate_render_vsys_link_block(
+    flags: u8,
+    in link_name: Slice[u8],
+    in blake3_bytes: Slice[u8],
+    in header: Slice[u8],
+    in pkg_config: Slice[u8],
+    inout out: Slice[u8],
+) -> u64 {
+    let mut pos = copy_str(in "    link = \"", inout out, 0);
+    if (flags & VSYS_FLAG_STATIC) != 0 {
+        pos = copy_str(in "static", inout out, pos);
+    } else {
+        pos = copy_str(in "dynamic", inout out, pos);
+    }
+    pos = copy_str(in "\", name = \"", inout out, pos);
+    pos = copy_range(in link_name, 0, link_name.len(), inout out, pos);
+    pos = copy_str(in "\",\n    artifact = \"blake3:", inout out, pos);
+    pos = write_hex_at(in blake3_bytes, inout out, pos);
+    let _ = out.try_set(pos, BYTE_DQUOTE);
+    pos = wrapping_add(pos, 1);
+    if (flags & VSYS_FLAG_HEADER) != 0 {
+        pos = copy_str(in ",\n    header = \"", inout out, pos);
+        pos = copy_range(in header, 0, header.len(), inout out, pos);
+        let _ = out.try_set(pos, BYTE_DQUOTE);
+        pos = wrapping_add(pos, 1);
+    }
+    if (flags & VSYS_FLAG_PKG_CONFIG) != 0 {
+        pos = copy_str(in ",\n    pkg_config = \"", inout out, pos);
+        pos = copy_range(in pkg_config, 0, pkg_config.len(), inout out, pos);
+        let _ = out.try_set(pos, BYTE_DQUOTE);
+        pos = wrapping_add(pos, 1);
+    }
+    pos = copy_str(in "\n) {\n", inout out, pos);
+    pos
+}
