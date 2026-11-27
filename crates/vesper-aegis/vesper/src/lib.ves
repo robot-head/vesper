@@ -16,7 +16,9 @@
 // index, `field` an index into the field-name table of src/port.rs
 // (FIELDS), and `a`, `b` the variant's numbers.
 use self::cbor::decode as cbor_decode_impl;
-use self::der_cert::parse_raw_cert as parse_raw_cert_impl;
+use self::der_cert::{
+    parse_crl_this_update as parse_crl_this_update_impl, parse_raw_cert as parse_raw_cert_impl
+};
 use self::pem::{
     decode_pem_certificates as decode_pem_certificates_impl,
     decode_pem_public_key as decode_pem_public_key_impl
@@ -321,6 +323,10 @@ pub fn host_unmap(
 
 pub fn parse_raw_cert(in der: Slice[u8], inout out: Slice[u64]) -> u64 {
     parse_raw_cert_impl(in der, inout out)
+}
+
+pub fn parse_crl_this_update(in der: Slice[u8]) -> (u64, u64) {
+    parse_crl_this_update_impl(in der)
 }
 
 pub fn decode_pem_certificates(

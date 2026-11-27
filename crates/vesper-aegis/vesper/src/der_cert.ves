@@ -1,6 +1,10 @@
 // @vesper/aegis::der_cert: X.509 DER certificate TLV parser (`src/chain.rs` `RawCert::parse`).
 
+const DER_INTEGER: u64 = 0x02;
 const DER_BIT_STRING: u64 = 0x03;
+const DER_UTC_TIME: u64 = 0x17;
+const DER_GEN_TIME: u64 = 0x18;
+const DER_SEQUENCE: u64 = 0x30;
 const DER_CONTEXT_0: u64 = 0xa0;
 const DER_LONG_FORM: u64 = 0x80;
 const DER_LENGTH_OCTETS_MASK: u64 = 0x7f;
@@ -195,4 +199,187 @@ pub fn parse_raw_cert(in der: Slice[u8], inout out: Slice[u64]) -> u64 {
     out.try_set(OUT_SPKI_ALG_START, spki_body_s);
     out.try_set(OUT_SPKI_ALG_END, spki_alg_end);
     ERR_OK
+}
+
+const ASCII_0: u64 = 48;
+const ASCII_9: u64 = 57;
+const ASCII_Z: u64 = 90;
+const UTC_TIME_LEN: u64 = 13;
+const GEN_TIME_LEN: u64 = 15;
+const UTC_PIVOT_YEAR: u64 = 50;
+const CENTURY_1900: u64 = 1900;
+const CENTURY_2000: u64 = 2000;
+const UNIX_EPOCH_YEAR: u64 = 1970;
+const MIN_MONTH: u64 = 1;
+const MAX_MONTH: u64 = 12;
+const MAX_HOUR: u64 = 23;
+const MAX_MIN_SEC: u64 = 59;
+const SECS_PER_DAY: u64 = 86400;
+const SECS_PER_HOUR: u64 = 3600;
+const SECS_PER_MIN: u64 = 60;
+const DAYS_TO_1970: u64 = 719468;
+const DAYS_PER_ERA: u64 = 146097;
+const YEARS_PER_ERA: u64 = 400;
+
+const CRL_OK: u64 = 0;
+const CRL_ERR_MALFORMED: u64 = 1;
+const CRL_ERR_TRAILING: u64 = 2;
+const CRL_ERR_BEFORE_1970: u64 = 3;
+
+fn parse_two_digits(in b: Slice[u8], pos: u64) -> (bool, u64) {
+    let d0 = byte_at(in b, pos);
+    let d1 = byte_at(in b, wrapping_add(pos, 1));
+    if d0 < ASCII_0 || d0 > ASCII_9 || d1 < ASCII_0 || d1 > ASCII_9 {
+        return (false, 0);
+    }
+    let val = wrapping_add(wrapping_mul(wrapping_sub(d0, ASCII_0), 10), wrapping_sub(d1, ASCII_0));
+    (true, val)
+}
+
+fn days_in_month(year: u64, month: u64) -> u64 {
+    if month == 2 {
+        let leap = (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0);
+        if leap { 29 } else { 28 }
+    } else if month == 4 || month == 6 || month == 9 || month == 11 {
+        30
+    } else {
+        31
+    }
+}
+
+fn civil_to_unix(year: u64, month: u64, day: u64, hour: u64, min: u64, sec: u64) -> u64 {
+    let y = if month <= 2 {
+        wrapping_sub(year, 1)
+    } else {
+        year
+    };
+    let era = y / YEARS_PER_ERA;
+    let yoe = wrapping_sub(y, wrapping_mul(era, YEARS_PER_ERA));
+    let mp = if month > 2 {
+        wrapping_sub(month, 3)
+    } else {
+        wrapping_add(month, 9)
+    };
+    let doy = wrapping_add(wrapping_add(wrapping_mul(153, mp), 2) / 5, wrapping_sub(day, 1));
+    let doe = wrapping_add(
+        wrapping_sub(wrapping_add(wrapping_mul(yoe, 365), yoe / 4), yoe / 100),
+        doy
+    );
+    let days = wrapping_sub(wrapping_add(wrapping_mul(era, DAYS_PER_ERA), doe), DAYS_TO_1970);
+    wrapping_add(
+        wrapping_mul(days, SECS_PER_DAY),
+        wrapping_add(
+            wrapping_mul(hour, SECS_PER_HOUR),
+            wrapping_add(wrapping_mul(min, SECS_PER_MIN), sec)
+        )
+    )
+}
+
+// Parse a DER X.509 CRL and return `(status, this_update_unix_seconds)`.
+pub fn parse_crl_this_update(in der: Slice[u8]) -> (u64, u64) {
+    let total = der.len();
+    let (ok0, body_start, outer_end) = tlv_at(in der, 0, total);
+    if !ok0 || byte_at(in der, 0) != DER_SEQUENCE {
+        return (CRL_ERR_MALFORMED, 0);
+    }
+    if outer_end != total {
+        return (CRL_ERR_TRAILING, 0);
+    }
+
+    // tbsCertList (SEQUENCE)
+    let (ok_tbs, tbs_body, tbs_end) = tlv_at(in der, body_start, outer_end);
+    if !ok_tbs || byte_at(in der, body_start) != DER_SEQUENCE {
+        return (CRL_ERR_MALFORMED, 0);
+    }
+    // signatureAlgorithm (SEQUENCE)
+    let (ok_sa, _sa_body, sa_end) = tlv_at(in der, tbs_end, outer_end);
+    if !ok_sa || byte_at(in der, tbs_end) != DER_SEQUENCE {
+        return (CRL_ERR_MALFORMED, 0);
+    }
+    // signatureValue (BIT STRING)
+    let (ok_sig, _sig_body, sig_end) = tlv_at(in der, sa_end, outer_end);
+    if !ok_sig || sig_end != outer_end || byte_at(in der, sa_end) != DER_BIT_STRING {
+        return (CRL_ERR_MALFORMED, 0);
+    }
+
+    // Walk tbsCertList: [version INTEGER], signature SEQUENCE, issuer SEQUENCE, thisUpdate Time
+    let mut cur = tbs_body;
+    if cur >= tbs_end {
+        return (CRL_ERR_MALFORMED, 0);
+    }
+    if byte_at(in der, cur) == DER_INTEGER {
+        let (ok_v, _v_body, v_end) = tlv_at(in der, cur, tbs_end);
+        if !ok_v {
+            return (CRL_ERR_MALFORMED, 0);
+        }
+        cur = v_end;
+    }
+    // signature
+    let (ok_s, _s_body, s_end) = tlv_at(in der, cur, tbs_end);
+    if !ok_s || byte_at(in der, cur) != DER_SEQUENCE {
+        return (CRL_ERR_MALFORMED, 0);
+    }
+    cur = s_end;
+    // issuer
+    let (ok_i, _i_body, i_end) = tlv_at(in der, cur, tbs_end);
+    if !ok_i || byte_at(in der, cur) != DER_SEQUENCE {
+        return (CRL_ERR_MALFORMED, 0);
+    }
+    cur = i_end;
+    // thisUpdate (UTCTime or GeneralizedTime)
+    let (ok_t, t_body, t_end) = tlv_at(in der, cur, tbs_end);
+    if !ok_t {
+        return (CRL_ERR_MALFORMED, 0);
+    }
+    let tag = byte_at(in der, cur);
+    let t_len = wrapping_sub(t_end, t_body);
+    let mut year: u64 = 0;
+    let mut p = t_body;
+    if tag == DER_UTC_TIME {
+        if t_len != UTC_TIME_LEN || byte_at(in der, wrapping_add(t_body, 12)) != ASCII_Z {
+            return (CRL_ERR_MALFORMED, 0);
+        }
+        let (ok_y, yy) = parse_two_digits(in der, p);
+        if !ok_y {
+            return (CRL_ERR_MALFORMED, 0);
+        }
+        year = if yy >= UTC_PIVOT_YEAR {
+            wrapping_add(CENTURY_1900, yy)
+        } else {
+            wrapping_add(CENTURY_2000, yy)
+        };
+        p = wrapping_add(p, 2);
+    } else if tag == DER_GEN_TIME {
+        if t_len != GEN_TIME_LEN || byte_at(in der, wrapping_add(t_body, 14)) != ASCII_Z {
+            return (CRL_ERR_MALFORMED, 0);
+        }
+        let (ok_c, cc) = parse_two_digits(in der, p);
+        let (ok_y, yy) = parse_two_digits(in der, wrapping_add(p, 2));
+        if !ok_c || !ok_y {
+            return (CRL_ERR_MALFORMED, 0);
+        }
+        year = wrapping_add(wrapping_mul(cc, 100), yy);
+        p = wrapping_add(p, 4);
+    } else {
+        return (CRL_ERR_MALFORMED, 0);
+    }
+
+    let (ok_mo, month) = parse_two_digits(in der, p);
+    let (ok_d, day) = parse_two_digits(in der, wrapping_add(p, 2));
+    let (ok_h, hour) = parse_two_digits(in der, wrapping_add(p, 4));
+    let (ok_mi, min) = parse_two_digits(in der, wrapping_add(p, 6));
+    let (ok_sc, sec) = parse_two_digits(in der, wrapping_add(p, 8));
+    if !ok_mo || !ok_d || !ok_h || !ok_mi || !ok_sc {
+        return (CRL_ERR_MALFORMED, 0);
+    }
+    if month < MIN_MONTH || month > MAX_MONTH || day < 1 || day > days_in_month(year, month) {
+        return (CRL_ERR_MALFORMED, 0);
+    }
+    if hour > MAX_HOUR || min > MAX_MIN_SEC || sec > MAX_MIN_SEC {
+        return (CRL_ERR_MALFORMED, 0);
+    }
+    if year < UNIX_EPOCH_YEAR {
+        return (CRL_ERR_BEFORE_1970, 0);
+    }
+    (CRL_OK, civil_to_unix(year, month, day, hour, min, sec))
 }

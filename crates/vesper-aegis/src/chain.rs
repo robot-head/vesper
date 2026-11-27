@@ -233,16 +233,20 @@ pub fn verify_chain_with_crls(
     leaf_ec_key(leaf, curve)
 }
 
+const CRL_OK: u64 = 0;
+const CRL_ERR_TRAILING: u64 = 2;
+const CRL_ERR_BEFORE_1970: u64 = 3;
+
 /// `thisUpdate` of a DER CRL, in Unix seconds (signature not checked: use
 /// it only on a CRL that [`verify_chain_with_crls`] accepted).
 pub fn crl_this_update(der: &[u8]) -> Result<u64, AttestError> {
-    let (rest, crl) =
-        x509_parser::parse_x509_crl(der).map_err(|e| AttestError::Crl(format!("{e}")))?;
-    if !rest.is_empty() {
-        return Err(AttestError::Crl("trailing bytes".into()));
+    let (status, ts) = crate::port::vesper::parse_crl_this_update(der);
+    match status {
+        CRL_OK => Ok(ts),
+        CRL_ERR_TRAILING => Err(AttestError::Crl("trailing bytes".into())),
+        CRL_ERR_BEFORE_1970 => Err(AttestError::Crl("thisUpdate before 1970".into())),
+        _ => Err(AttestError::Crl("malformed CRL DER".into())),
     }
-    u64::try_from(crl.last_update().timestamp())
-        .map_err(|_| AttestError::Crl("thisUpdate before 1970".into()))
 }
 
 /// Path validation only; returns nothing about the leaf key. Used for RSA
