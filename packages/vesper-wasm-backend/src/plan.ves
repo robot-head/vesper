@@ -19,6 +19,7 @@ use @vesper/check-data::types::{
 };
 use @vesper/check-data::world::{Adt, Known, Variant, World, set_by_symbol, world_new};
 use @vesper/check-data::input::{Ctx};
+use self::host::{HOST_ENV, HOST_FS, HOST_PROC, HOST_VCL, HOST_BLAKE3, HOST_HYBRID_COMMANDS};
 use self::err::{WErr, werr, werr_syms};
 use self::ir::{EffInst, ExprFactKind, Facts, FnInfo, Ir, Sig, empty_facts, ir_new, pattern_end};
 
@@ -930,17 +931,17 @@ fn capabilities(inout ctx: Cx, inout out: ChunkSeq[u8], entry: u32) eff [Fail[WE
             || effect.name == ctx.syms.ffi_hybrid_commands
         {
             let code: u8 = if effect.name == ctx.syms.ffi_env {
-                3
+                HOST_ENV
             } else if effect.name == ctx.syms.ffi_fs {
-                4
+                HOST_FS
             } else if effect.name == ctx.syms.ffi_proc {
-                5
+                HOST_PROC
             } else if effect.name == ctx.syms.ffi_cranelift {
-                6
+                HOST_VCL
             } else if effect.name == ctx.syms.ffi_blake3 {
-                7
+                HOST_BLAKE3
             } else {
-                8
+                HOST_HYBRID_COMMANDS
             };
             let mut seen = false;
             for j in 0..out.len() {
