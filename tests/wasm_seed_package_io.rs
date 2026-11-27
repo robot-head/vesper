@@ -2379,6 +2379,13 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
              wrapping_add(widen_i64(negative),\n\
                           wrapping_add(widen_i64(product), wrapping_add(widen_i64(zero), constant)))\n\
          }\n\
+         pub fn factored_bounds(x: i64, amount: i64) -> i8 {\n\
+             let quotient = x / (((amount & 7) * 2) + 1);\n\
+             let remainder = x % ((amount & 3) - 4);\n\
+             let shifted = quotient >> (((amount & 3) * 2) + 1);\n\
+             let low: i64 = -128;\n\
+             narrow_i8(low + ((wrapping_add(shifted, remainder) & 31) * 4))\n\
+         }\n\
          fn unsupported(x: u64) -> u64 { match (x, x) { (0, _) => 7, _ => 9 } }\n\
          pub fn decline(x: u64) -> u64 { unsupported(x) }\n",
     )
@@ -2510,6 +2517,14 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
         "{:?}",
         read_stage2_sidecar_notes(&object)
     );
+    let arithmetic_object = dir.join("native-checked-arithmetic.o");
+    std::fs::rename(&object, &arithmetic_object).unwrap();
+    assert_eq!(
+        compile("factored_bounds"),
+        0,
+        "{:?}",
+        read_stage2_sidecar_notes(&object)
+    );
     let bytes = std::fs::read(&object).unwrap();
     assert_ne!(compile("decline"), 0);
     assert!(read_stage2_sidecar_notes(&object).contains("unsupported x86-64 ELF entry"));
@@ -2535,6 +2550,7 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
          extern int64_t match_score(int64_t, int64_t, bool);\n\
          extern int16_t integer_ops(int16_t, uint64_t);\n\
          extern int64_t proven_arithmetic(int8_t);\n\
+         extern int8_t factored_bounds(int64_t, int64_t);\n\
          int main(void) {\n\
              if (mix(10, 4) != 65 || mix(UINT64_MAX, UINT64_MAX) != UINT64_MAX - 16) return 1;\n\
              if (choose(0, 4) != 8 || choose(2, 4) != 8 || choose(4, 1) != 10\n\
@@ -2559,8 +2575,9 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
                  || match_score(-8, 4, true) != 91 || match_score(0, 4, false) != 38\n\
                  || match_score(INT64_MAX, 2, true) != 91 || match_score(10, 4, false) != 27) return 11;\n\
              if (integer_ops(INT16_MIN, 63) != 6552 || integer_ops(7, 0) != -16385) return 12;\n\
-             return proven_arithmetic(3) != -109 || proven_arithmetic(6) != 16\n\
-                 || proven_arithmetic(-1) != -121;\n\
+             if (proven_arithmetic(3) != -109 || proven_arithmetic(6) != 16\n\
+                 || proven_arithmetic(-1) != -121) return 13;\n\
+             return factored_bounds(63, 0) != -120 || factored_bounds(-128, 3) != -4;\n\
          }\n",
     )
     .unwrap();
@@ -2579,6 +2596,7 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
             &narrow_object,
             &match_object,
             &integer_object,
+            &arithmetic_object,
             &object,
         ])
         .arg("-o")

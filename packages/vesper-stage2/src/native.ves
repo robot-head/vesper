@@ -67,6 +67,8 @@ const VALUE_TYPES_COUNT: u64 = 4;
 const VALUE_TYPE_WORDS: u64 = 2;
 const WRAPPING_CONVERSION_PREFIX: Str = "wrapping_";
 const WIDEN_CONVERSION_PREFIX: Str = "widen_";
+const NARROW_CONVERSION_PREFIX: Str = "narrow_";
+const INTEGER_BOUND_DEPTH: u64 = 3;
 
 enum ScalarKind: _ {
     Unsupported = 0,
@@ -887,7 +889,13 @@ copy struct IntegerBounds {
 
 // Endpoints are canonical bit patterns ordered by the integer kind, so a
 // signed negative minimum can have a larger raw pattern than the maximum.
-fn integer_bounds(in m: Function, value: u64, signed: bool, width: u64) -> IntegerBounds {
+fn integer_bounds(
+    in m: Function,
+    value: u64,
+    signed: bool,
+    width: u64,
+    depth: u64
+) -> IntegerBounds {
     let mask = low_bits_mask(width);
     let sign = sign_bit(width);
     match m.definition(value) {
@@ -901,6 +909,20 @@ fn integer_bounds(in m: Function, value: u64, signed: bool, width: u64) -> Integ
                 if !signed || bound < sign {
                     return IntegerBounds { min: 0, max: bound };
                 }
+            }
+            // No-op widening may reuse a narrower machine value. Arithmetic
+            // at a different width can wrap at a different boundary.
+            if depth != 0
+                && record.extra == width
+                && (record.op == ADD || record.op == SUB || record.op == MUL)
+            {
+                let remaining = wrapping_sub(depth, 1);
+                let left = integer_bounds(in m, record.left, signed, width, remaining);
+                let right = integer_bounds(in m, record.right, signed, width, remaining);
+                match arithmetic_bounds(record.op, left, right, signed, width) {
+                    Option::Some(bounds) => return bounds,
+                    Option::None => {},
+                };
             }
         },
         Option::None => {},
@@ -970,6 +992,69 @@ fn checked_integer(op: u64, lhs: u64, rhs: u64, signed: bool, width: u64) -> Opt
     }
 }
 
+fn ordered_integer(bits: u64, signed: bool, width: u64) -> u64 {
+    if signed { bits ^ sign_bit(width) } else { bits }
+}
+
+fn bounds_include(bounds: IntegerBounds, bits: u64, signed: bool, width: u64) -> bool {
+    let at = ordered_integer(bits, signed, width);
+    at >= ordered_integer(bounds.min, signed, width)
+        && at <= ordered_integer(bounds.max, signed, width)
+}
+
+fn extend_bounds(bounds: IntegerBounds, bits: u64, signed: bool, width: u64) -> IntegerBounds {
+    let rank = ordered_integer(bits, signed, width);
+    IntegerBounds {
+        min: if rank < ordered_integer(bounds.min, signed, width) {
+            bits
+        } else {
+            bounds.min
+        },
+        max: if rank > ordered_integer(bounds.max, signed, width) {
+            bits
+        } else {
+            bounds.max
+        },
+    }
+}
+
+fn arithmetic_bounds(
+    op: u64,
+    a: IntegerBounds,
+    b: IntegerBounds,
+    signed: bool,
+    width: u64
+) -> Option[IntegerBounds] {
+    let low_rhs = if op == SUB { b.max } else { b.min };
+    let high_rhs = if op == SUB { b.min } else { b.max };
+    let first = match checked_integer(op, a.min, low_rhs, signed, width) {
+        Option::Some(bits) => bits,
+        Option::None => return Option::None,
+    };
+    if a.min == a.max && b.min == b.max {
+        return Option::Some(IntegerBounds { min: first, max: first });
+    }
+    let last = match checked_integer(op, a.max, high_rhs, signed, width) {
+        Option::Some(bits) => bits,
+        Option::None => return Option::None,
+    };
+    if op != MUL {
+        return Option::Some(IntegerBounds { min: first, max: last });
+    }
+    // A product's extrema over two intervals occur at the corners.
+    let cross1 = match checked_integer(op, a.min, b.max, signed, width) {
+        Option::Some(bits) => bits,
+        Option::None => return Option::None,
+    };
+    let cross2 = match checked_integer(op, a.max, b.min, signed, width) {
+        Option::Some(bits) => bits,
+        Option::None => return Option::None,
+    };
+    let bounds = extend_bounds(IntegerBounds { min: first, max: first }, last, signed, width);
+    let bounds = extend_bounds(bounds, cross1, signed, width);
+    Option::Some(extend_bounds(bounds, cross2, signed, width))
+}
+
 fn lower_checked_integer(
     op: u64,
     lhs: u64,
@@ -981,31 +1066,15 @@ fn lower_checked_integer(
     if op == SUB && lhs == rhs {
         return m.record(CONSTANT, 0, 0, 0);
     }
-    let a = integer_bounds(in m, lhs, signed, width);
-    let b = integer_bounds(in m, rhs, signed, width);
-    if a.min == a.max && b.min == b.max {
-        return match checked_integer(op, a.min, b.min, signed, width) {
-            Option::Some(bits) => m.record(CONSTANT, bits, 0, 0),
-            Option::None => NO_VALUE,
-        };
-    }
-    let fits = if op == ADD {
-        checked_integer(op, a.min, b.min, signed, width).is_some()
-            && checked_integer(op, a.max, b.max, signed, width).is_some()
-    } else if op == SUB {
-        checked_integer(op, a.min, b.max, signed, width).is_some()
-            && checked_integer(op, a.max, b.min, signed, width).is_some()
-    } else {
-        // A product's extrema over two intervals occur at the corners.
-        checked_integer(op, a.min, b.min, signed, width).is_some()
-            && checked_integer(op, a.min, b.max, signed, width).is_some()
-            && checked_integer(op, a.max, b.min, signed, width).is_some()
-            && checked_integer(op, a.max, b.max, signed, width).is_some()
-    };
-    if fits {
-        m.record(op, lhs, rhs, width)
-    } else {
-        NO_VALUE
+    let a = integer_bounds(in m, lhs, signed, width, INTEGER_BOUND_DEPTH);
+    let b = integer_bounds(in m, rhs, signed, width, INTEGER_BOUND_DEPTH);
+    match arithmetic_bounds(op, a, b, signed, width) {
+        Option::Some(result) => if result.min == result.max {
+            m.record(CONSTANT, result.min, 0, 0)
+        } else {
+            m.record(op, lhs, rhs, width)
+        },
+        Option::None => NO_VALUE,
     }
 }
 
@@ -1055,6 +1124,20 @@ fn conversion_spells(in low: L, op: u32, target: u32, in prefix: Slice[u8]) -> b
     true
 }
 
+fn conversion_fits(bits: u64, signed: bool, from: u64, target_signed: bool, to: u64) -> bool {
+    if signed && (bits & sign_bit(from)) != 0 {
+        let magnitude = wrapping_sub(0, bits) & low_bits_mask(from);
+        target_signed && magnitude <= sign_bit(to)
+    } else {
+        let max = if target_signed {
+            wrapping_sub(sign_bit(to), 1)
+        } else {
+            low_bits_mask(to)
+        };
+        bits <= max
+    }
+}
+
 fn lower_unary(in low: L, inst: InstRow, kind: u8, block: u64, inout m: Function) -> u64 {
     let at = inst.a;
     let symbol = n32(low.program.op(at));
@@ -1091,7 +1174,15 @@ fn lower_unary(in low: L, inst: InstRow, kind: u8, block: u64, inout m: Function
     } else {
         !signed && from < to
     };
-    if !conversion_spells(in low, symbol, target, in WRAPPING_CONVERSION_PREFIX.as_bytes())
+    if conversion_spells(in low, symbol, target, in NARROW_CONVERSION_PREFIX.as_bytes()) {
+        let bounds = integer_bounds(in m, value, signed, from, INTEGER_BOUND_DEPTH);
+        let target_signed = is_signed(kind);
+        if !conversion_fits(bounds.min, signed, from, target_signed, to)
+            || !conversion_fits(bounds.max, signed, from, target_signed, to)
+        {
+            return NO_VALUE;
+        }
+    } else if !conversion_spells(in low, symbol, target, in WRAPPING_CONVERSION_PREFIX.as_bytes())
         && !(lossless
             && conversion_spells(in low, symbol, target, in WIDEN_CONVERSION_PREFIX.as_bytes()))
     {
@@ -1152,11 +1243,15 @@ fn comparison_operation(kind: u8) -> u64 {
     }
 }
 
-fn constant_below(in m: Function, value: u64, limit: u64) -> bool {
-    m.constant(value).unwrap_or(limit) < limit
-}
-
-fn lower_shift(left: bool, signed: bool, width: u64, lhs: u64, rhs: u64, inout m: Function) -> u64 {
+fn lower_shift(
+    left: bool,
+    signed: bool,
+    width: u64,
+    lhs: u64,
+    rhs: u64,
+    count_kind: u8,
+    inout m: Function
+) -> u64 {
     match m.constant(rhs) {
         Option::Some(count) => {
             if count >= width {
@@ -1176,15 +1271,10 @@ fn lower_shift(left: bool, signed: bool, width: u64, lhs: u64, rhs: u64, inout m
         },
         Option::None => {},
     };
-    // A mask smaller than the operand width also clears the amount's sign
-    // bit when needed, or bounds its raw pattern more tightly than the shift.
-    let mask = match m.definition(rhs) {
-        Option::Some(record) => record,
-        Option::None => return NO_VALUE,
-    };
-    if mask.op != AND
-        || !(constant_below(in m, mask.left, width) || constant_below(in m, mask.right, width))
-    {
+    let count_signed = is_signed(count_kind);
+    let count_width = abi_width(count_kind);
+    let bounds = integer_bounds(in m, rhs, count_signed, count_width, INTEGER_BOUND_DEPTH);
+    if (count_signed && (bounds.min & sign_bit(count_width)) != 0) || bounds.max >= width {
         return NO_VALUE;
     }
     let op = if left {
@@ -1214,28 +1304,41 @@ fn lower_division(
     rhs: u64,
     inout m: Function
 ) -> u64 {
-    let divisor = match m.constant(rhs) {
-        Option::Some(bits) => bits,
-        Option::None => return NO_VALUE,
-    };
-    if divisor == 0 {
-        return NO_VALUE;
-    }
+    let divisor = m.constant(rhs);
     let mask = low_bits_mask(width);
-    if remainder && (divisor == 1 || (signed && divisor == mask)) {
-        // MIN % -1 is zero, even though the hardware quotient overflows.
-        return m.record(CONSTANT, 0, 0, 0);
-    }
-    if divisor == 1 {
-        return lhs;
-    }
-    if signed && divisor == mask {
-        let minimum = sign_bit(width);
-        if m.constant(lhs).unwrap_or(minimum) == minimum {
-            return NO_VALUE;
-        }
-        return m.record(NEG, lhs, 0, width);
-    }
+    match divisor {
+        Option::Some(bits) => {
+            if bits == 0 {
+                return NO_VALUE;
+            }
+            if remainder && (bits == 1 || (signed && bits == mask)) {
+                // MIN % -1 is zero, even though the hardware quotient overflows.
+                return m.record(CONSTANT, 0, 0, 0);
+            }
+            if bits == 1 {
+                return lhs;
+            }
+            if signed && bits == mask {
+                let numerator = integer_bounds(in m, lhs, signed, width, INTEGER_BOUND_DEPTH);
+                if numerator.min == sign_bit(width) {
+                    return NO_VALUE;
+                }
+                return m.record(NEG, lhs, 0, width);
+            }
+        },
+        Option::None => {
+            let bounds = integer_bounds(in m, rhs, signed, width, INTEGER_BOUND_DEPTH);
+            if bounds_include(bounds, 0, signed, width) {
+                return NO_VALUE;
+            }
+            if signed && !remainder && bounds_include(bounds, mask, signed, width) {
+                let numerator = integer_bounds(in m, lhs, signed, width, INTEGER_BOUND_DEPTH);
+                if numerator.min == sign_bit(width) {
+                    return NO_VALUE;
+                }
+            }
+        },
+    };
     let op = if signed {
         if remainder { SIGNED_REM } else { SIGNED_DIV }
     } else if remainder {
@@ -1251,9 +1354,16 @@ fn lower_division(
     } else {
         lhs
     };
-    let divisor_value = if signed && (divisor & sign_bit(width)) != 0 {
-        let extended = divisor | (low_bits_mask(DWORD_BITS) ^ mask);
-        m.record(CONSTANT, extended, 0, 0)
+    let divisor_value = if signed {
+        match divisor {
+            Option::Some(bits) => if (bits & sign_bit(width)) != 0 {
+                let extended = bits | (low_bits_mask(DWORD_BITS) ^ mask);
+                m.record(CONSTANT, extended, 0, 0)
+            } else {
+                rhs
+            },
+            Option::None => m.record(SIGN_EXTEND, rhs, width, DWORD_BITS),
+        }
     } else {
         rhs
     };
@@ -1318,7 +1428,7 @@ fn lower_binary(
         }
         let left_shift = low.ctx.names.spells(symbol, in "<<".as_bytes());
         if left_shift || low.ctx.names.spells(symbol, in ">>".as_bytes()) {
-            return lower_shift(left_shift, signed, width, lhs, rhs, inout m);
+            return lower_shift(left_shift, signed, width, lhs, rhs, right_kind, inout m);
         }
     }
     NO_VALUE
