@@ -91,6 +91,7 @@ const IEX_BIT_UNARY: u64 = 2;
 const IEX_BIT_BINARY: u64 = 3;
 const IEX_BITWISE: u64 = 4;
 const IEX_SDIV: u64 = 5;
+const IEX_SREM: u64 = 6;
 
 // Sub-operations of `INST_WRITE_OP`.
 const WOP_IADD: u64 = 1;
@@ -115,6 +116,8 @@ const CB_FMIN: u64 = 3;
 const CB_FMAX: u64 = 4;
 const CB_FLOAT_UNARY: u64 = 5;
 const CB_WIDE_BIT: u64 = 6;
+const CB_BITWISE: u64 = 7;
+const CB_WIDE_CONVERT: u64 = 8;
 
 const BIT_INTR_AND: u32 = 1;
 const BIT_INTR_OR: u32 = 2;
@@ -858,7 +861,7 @@ impl Gen {
             extra.push(rk);
             return true;
         }
-        if op == ops_s.slash {
+        if op == ops_s.slash || op == ops_s.percent {
             let ik = self.kind_of(d0);
             if ik == 0
                 || kind_wide(ik)
@@ -869,7 +872,13 @@ impl Gen {
                 return false;
             }
             kind = INST_INT_EXTRA;
-            extra.push(IEX_SDIV);
+            extra.push(
+                if op == ops_s.slash {
+                    IEX_SDIV
+                } else {
+                    IEX_SREM
+                }
+            );
             extra.push(0);
             extra.push(0);
             extra.push(k0);
@@ -1069,6 +1078,64 @@ impl Gen {
                 extra.push(u64_at(in arg_kinds, m));
             }
             return true;
+        }
+        let bit_intr = get(in self.tables.bit_intrinsics, callee);
+        if bit_intr != 0 && nargs == 2 {
+            let l0 = u64_at(in arg_lanes, 0);
+            let l1 = u64_at(in arg_lanes, 1);
+            if l0 != LANE_I64 || l1 != LANE_I64 || self.ctx.world.may_overflow(i.s0, i.s1) {
+                return false;
+            }
+            let op_def = match arg_defs.try_get(0) {
+                Option::Some(d) => d,
+                Option::None => return false,
+            };
+            let ik = self.kind_of(op_def);
+            if ik == 0 || kind_wide(ik) {
+                return false;
+            }
+            kind = INST_CALL_BUILTIN;
+            builtin_calls.push(call);
+            extra.push(CB_BITWISE);
+            extra.push(widen_u64(bit_intr));
+            extra.push(widen_u64(ik));
+            extra.push(u64_at(in arg_kinds, 0));
+            for m in 0..nargs {
+                extra.push(u64_at(in arg_kinds, m));
+            }
+            return true;
+        }
+        let conv = get(in self.tables.conversions, callee);
+        if conv != 0 && nargs == 1 {
+            let l0 = u64_at(in arg_lanes, 0);
+            if l0 == LANE_I128 || l0 == LANE_I64 {
+                let op_def = match arg_defs.try_get(0) {
+                    Option::Some(d) => d,
+                    Option::None => return false,
+                };
+                let to_ik = conv & TABLE_KIND_MASK;
+                let from_ik = self.kind_of(op_def);
+                if from_ik != 0
+                    && (kind_wide(from_ik) || kind_wide(to_ik))
+                    && !((conv >> TABLE_OP_SHIFT) == CONV_NARROW
+                        && self.ctx.world.may_overflow(i.s0, i.s1))
+                {
+                    kind = INST_CALL_BUILTIN;
+                    builtin_calls.push(call);
+                    extra.push(CB_WIDE_CONVERT);
+                    extra.push(widen_u64(from_ik));
+                    extra.push(
+                        if kind_narrow(to_ik) || kind_wide(to_ik) {
+                            widen_u64(to_ik)
+                        } else {
+                            0
+                        }
+                    );
+                    extra.push(0);
+                    extra.push(u64_at(in arg_kinds, 0));
+                    return true;
+                }
+            }
         }
         let fop = get(in self.tables.float_ops, callee);
         if fop == FOP_FMA && nargs == 3 {
