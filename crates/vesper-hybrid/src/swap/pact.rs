@@ -14,7 +14,7 @@ mod pact_binding;
 #[path = "../../../../tests/common/pact_words.rs"]
 mod pact_words;
 
-use super::{Registry, Swap, check_words, must, on, open, stats};
+use super::{Registry, Swap, check_words, must, on, open, pass, stats};
 
 /// Packages whose trait declarations the Vesper declaration pass checked.
 static PACT_CALLS: AtomicU64 = AtomicU64::new(0);
@@ -211,7 +211,7 @@ const VESPER_PACT_SESSION: vesper::pact_frontend::PactSessionTable =
 
 /// The flip-gate rows of this file's swaps (`swaps::on`).
 pub(super) const SWAPS: &[Swap] = &[
-    open("declaration_pass", "no flip-gate configuration"),
+    pass("declaration_pass", "pact-declarations", "#2517"),
     open("pact_session", "no flip-gate configuration"),
     open("builtin_wanted", "no flip-gate configuration"),
     open("deps_pass", "no flip-gate configuration"),

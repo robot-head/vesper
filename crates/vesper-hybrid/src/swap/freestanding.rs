@@ -13,7 +13,7 @@ mod freestanding_binding;
 #[path = "../../../../tests/common/freestanding_words.rs"]
 mod freestanding_words;
 
-use super::{Registry, Swap, env_off, on, open};
+use super::{Registry, Swap, env_off, on, pass};
 
 /// Freestanding images whose stub, linker, trap table and script ran in Vesper.
 static FREESTANDING_CALLS: AtomicU64 = AtomicU64::new(0);
@@ -66,7 +66,7 @@ fn vesper_freestanding(
 }
 
 /// The flip-gate rows of this file's swaps (`swaps::on`).
-pub(super) const SWAPS: &[Swap] = &[open("freestanding", "no flip-gate configuration")];
+pub(super) const SWAPS: &[Swap] = &[pass("freestanding", "freestanding", "#2517")];
 
 pub(super) fn register(r: &mut Registry) {
     if on("freestanding") && !env_off("VESPER_HYBRID_FREESTANDING") {
