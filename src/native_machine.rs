@@ -213,6 +213,10 @@ enum IntegerOp {
     VectorFloatCopySign = 193,
     VectorFloatFma32 = 194,
     VectorFloatFma64 = 195,
+    VectorFloatCeil = 196,
+    VectorFloatFloor = 197,
+    VectorFloatTrunc = 198,
+    VectorFloatNearest = 199,
 }
 
 fn integer_bit_op(op: Opcode) -> Option<IntegerOp> {
@@ -2206,6 +2210,21 @@ impl IntegerBlocks<'_> {
                 IntegerOp::VectorFloatSqrt,
                 [input(arg)?, 0, float_width(output.lane_type())?],
             ),
+            InstructionData::Unary {
+                opcode: opcode @ (Opcode::Ceil | Opcode::Floor | Opcode::Trunc | Opcode::Nearest),
+                arg,
+            } if !self.canonicalize_nans
+                && (self.aarch64 || self.x86_isa.is_some_and(TargetIsa::has_round))
+                && ty(arg) == output =>
+            {
+                let op = match opcode {
+                    Opcode::Ceil => IntegerOp::VectorFloatCeil,
+                    Opcode::Floor => IntegerOp::VectorFloatFloor,
+                    Opcode::Trunc => IntegerOp::VectorFloatTrunc,
+                    _ => IntegerOp::VectorFloatNearest,
+                };
+                (op, [input(arg)?, 0, float_width(output.lane_type())?])
+            }
             InstructionData::Unary {
                 opcode: Opcode::FvpromoteLow,
                 arg,

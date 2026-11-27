@@ -44,7 +44,8 @@ use self::scalar::{
     is_vector_operation, is_vector_result, VECTOR_FLOAT_ADD, VECTOR_FLOAT_SUB, VECTOR_FLOAT_MUL,
     VECTOR_FLOAT_DIV, VECTOR_FLOAT_SQRT, VECTOR_FLOAT_COMPARE, VECTOR_FLOAT_NEG, VECTOR_FLOAT_ABS,
     VECTOR_FLOAT_COPY_SIGN, VECTOR_FLOAT_FMA32, VECTOR_FLOAT_FMA64, vector_float_width,
-    is_vector_float_unary, is_vector_float_fma, valid_vector_float_condition
+    is_vector_float_unary, is_vector_float_fma, valid_vector_float_condition, VECTOR_FLOAT_CEIL,
+    VECTOR_FLOAT_FLOOR, VECTOR_FLOAT_TRUNC, VECTOR_FLOAT_NEAREST
 };
 use self::x86_64::{
     BYTE_BITS, WORD_BITS, DWORD_BITS, QWORD_BITS, FLOAT_ORDERED, FLOAT_UNORDERED, FLOAT_EQUAL,
@@ -141,6 +142,10 @@ const VECTOR_FSUB: u32 = 0x4ea0d400;
 const VECTOR_FMUL: u32 = 0x6e20dc00;
 const VECTOR_FDIV: u32 = 0x6e20fc00;
 const VECTOR_FSQRT: u32 = 0x6ea1f800;
+const VECTOR_FRINTP: u32 = 0x4ea18800;
+const VECTOR_FRINTM: u32 = 0x4e219800;
+const VECTOR_FRINTZ: u32 = 0x4ea19800;
+const VECTOR_FRINTN: u32 = 0x4e218800;
 const VECTOR_FMLA: u32 = 0x4e20cc00;
 const VECTOR_FNEG: u32 = 0x6ea0f800;
 const VECTOR_FABS: u32 = 0x4ea0f800;
@@ -814,6 +819,10 @@ fn vector_float(inout out: ChunkSeq[u8], in r: Record, dest: u32, left: u32, rig
         VECTOR_FLOAT_DIV => VECTOR_FDIV,
         VECTOR_FLOAT_NEG => VECTOR_FNEG,
         VECTOR_FLOAT_ABS => VECTOR_FABS,
+        VECTOR_FLOAT_CEIL => VECTOR_FRINTP,
+        VECTOR_FLOAT_FLOOR => VECTOR_FRINTM,
+        VECTOR_FLOAT_TRUNC => VECTOR_FRINTZ,
+        VECTOR_FLOAT_NEAREST => VECTOR_FRINTN,
         _ => VECTOR_FSQRT,
     };
     if is_vector_float_unary(r.op) {
@@ -1260,7 +1269,14 @@ fn operands(in r: Record, returns: u64) -> Option[u64] {
             } else {
                 Option::None
             },
-            VECTOR_FLOAT_SQRT | VECTOR_FLOAT_NEG | VECTOR_FLOAT_ABS => if r.right == 0
+            VECTOR_FLOAT_SQRT
+                | VECTOR_FLOAT_NEG
+                | VECTOR_FLOAT_ABS
+                | VECTOR_FLOAT_CEIL
+                | VECTOR_FLOAT_FLOOR
+                | VECTOR_FLOAT_TRUNC
+                | VECTOR_FLOAT_NEAREST => if r.right
+                == 0
                 && vector_float_width(r.extra)
             {
                 Option::Some(1)
@@ -3742,7 +3758,11 @@ fn encode_pass(
                     | VECTOR_FLOAT_DIV
                     | VECTOR_FLOAT_SQRT
                     | VECTOR_FLOAT_NEG
-                    | VECTOR_FLOAT_ABS => vector_float(inout out, in r, dest, lhs, rhs),
+                    | VECTOR_FLOAT_ABS
+                    | VECTOR_FLOAT_CEIL
+                    | VECTOR_FLOAT_FLOOR
+                    | VECTOR_FLOAT_TRUNC
+                    | VECTOR_FLOAT_NEAREST => vector_float(inout out, in r, dest, lhs, rhs),
                 VECTOR_INSERT => {
                     let lane = wrapping_shr_u64(r.extra, VECTOR_LANE_INDEX_SHIFT);
                     let width = r.extra & VECTOR_LANE_WIDTH_MASK;

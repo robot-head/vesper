@@ -181,6 +181,8 @@ const SSE_FLOAT_TO_INTEGER_TRUNC: u8 = 0x2c;
 const SSE_INTEGER_TO_FLOAT: u8 = 0x2a;
 const SSE_MIN: u8 = 0x5d;
 const SSE_MAX: u8 = 0x5f;
+const ROUNDPS: u8 = 0x08;
+const ROUNDPD: u8 = 0x09;
 const ROUNDSS: u8 = 0x0a;
 const ROUNDSD: u8 = 0x0b;
 const ROUND_NEAREST_EVEN: u8 = 0;
@@ -350,7 +352,7 @@ pub copy enum Instruction {
     FloatToIntegerSat(u8, u8, u64, u64, bool),
     FloatConvert(u8, u8, u64),
     FloatMinMax(u8, u8, u8, bool, u64),
-    FloatRound(u8, u8, Rounding, u64),
+    FloatRound(u8, u8, Rounding, u64, bool),
     FloatFma(u8, u8, u8, u8, u64, bool),
     IntegerToFloat(u8, u8, u64, u64, bool),
     VectorConstant(u8, u64, u64),
@@ -1443,20 +1445,27 @@ fn float_min_max(inout out: ChunkSeq[u8], dest: u8, left: u8, right: u8, min: bo
     float_move(inout out, dest, result);
 }
 
-fn float_round(inout out: ChunkSeq[u8], dest: u8, source: u8, in mode: Rounding, width: u64) {
+fn float_round(
+    inout out: ChunkSeq[u8],
+    dest: u8,
+    source: u8,
+    in mode: Rounding,
+    width: u64,
+    packed: bool
+) {
     let dest = xmm_code(dest);
     let source = xmm_code(source);
     out.push(OPERAND_SIZE_OVERRIDE);
     emit_rex(inout out, dest, source, false, false);
     out.push(TWO_BYTE_OPCODE);
     out.push(THREE_BYTE_3A_MAP);
-    out.push(
-        if width == DWORD_BITS {
-            ROUNDSS
-        } else {
-            ROUNDSD
-        }
-    );
+    let opcode = match (packed, width == DWORD_BITS) {
+        (true, true) => ROUNDPS,
+        (true, false) => ROUNDPD,
+        (false, true) => ROUNDSS,
+        (false, false) => ROUNDSD,
+    };
+    out.push(opcode);
     out.push(modrm(dest, source));
     out.push(match mode {
         Rounding::Nearest => ROUND_NEAREST_EVEN,
@@ -2273,8 +2282,8 @@ pub fn emit(inout out: ChunkSeq[u8], in instruction: Instruction) {
         Instruction::FloatMinMax(destination, left, right, min, width) => {
             float_min_max(inout out, destination, left, right, min, width);
         },
-        Instruction::FloatRound(destination, source, mode, width) => {
-            float_round(inout out, destination, source, in mode, width);
+        Instruction::FloatRound(destination, source, mode, width, packed) => {
+            float_round(inout out, destination, source, in mode, width, packed);
         },
         Instruction::IntegerToFloat(destination, source, from, width, signed) => {
             integer_to_float(inout out, destination, source, from, width, signed);

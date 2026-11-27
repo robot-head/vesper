@@ -620,6 +620,123 @@ fn packed_float_comparisons_match_every_cranelift_predicate() {
 }
 
 #[test]
+fn packed_float_rounding_matches_cranelift_at_ties_and_signed_zero() {
+    type Entry = unsafe extern "C" fn(*const u8, *mut u8);
+    let mut module = module();
+    let legacy = cranelift_native::builder_with_options(false)
+        .unwrap()
+        .finish(settings::Flags::new(settings::builder()))
+        .unwrap();
+    let mut flags = settings::builder();
+    flags.enable(NAN_CANONICALIZATION).unwrap();
+    let deterministic = cranelift_native::builder()
+        .unwrap()
+        .finish(settings::Flags::new(flags))
+        .unwrap();
+    for ty in [types::F32X4, types::F64X2] {
+        let width = ty.lane_type().bytes() as usize;
+        let values: Vec<u64> = [
+            0.0f64,
+            -0.0,
+            0.5,
+            -0.5,
+            1.5,
+            -1.5,
+            2.5,
+            -2.5,
+            0.75,
+            -0.75,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::NAN,
+        ]
+        .into_iter()
+        .map(|value| {
+            if ty == types::F32X4 {
+                u64::from((value as f32).to_bits())
+            } else {
+                value.to_bits()
+            }
+        })
+        .chain(if ty == types::F32X4 {
+            [
+                1,
+                0x8000_0001,
+                u64::from(0.5f32.next_down().to_bits()),
+                u64::from(0.5f32.next_up().to_bits()),
+                0x7f80_0007,
+                u64::from(f32::MAX.to_bits()),
+            ]
+        } else {
+            [
+                1,
+                0x8000_0000_0000_0001,
+                0.5f64.next_down().to_bits(),
+                0.5f64.next_up().to_bits(),
+                0x7ff0_0000_0000_0007,
+                f64::MAX.to_bits(),
+            ]
+        })
+        .collect();
+        for opcode in [Opcode::Ceil, Opcode::Floor, Opcode::Trunc, Opcode::Nearest] {
+            for keep_input in [false, true] {
+                let mut context = module.make_context();
+                context.func.signature.params = vec![AbiParam::new(types::I64); 2];
+                let mut state = FunctionBuilderContext::new();
+                let mut b = FunctionBuilder::new(&mut context.func, &mut state);
+                let entry = b.create_block();
+                b.append_block_params_for_function_params(entry);
+                b.switch_to_block(entry);
+                let [source, destination] = *b.block_params(entry) else {
+                    unreachable!()
+                };
+                let flags = MemFlags::new().with_notrap();
+                let input = b.ins().load(ty, flags, source, 0);
+                let result = match opcode {
+                    Opcode::Ceil => b.ins().ceil(input),
+                    Opcode::Floor => b.ins().floor(input),
+                    Opcode::Trunc => b.ins().trunc(input),
+                    _ => b.ins().nearest(input),
+                };
+                b.ins().store(flags, result, destination, 0);
+                if keep_input {
+                    b.ins()
+                        .store(flags, input, destination, VECTOR_BYTES as i32);
+                }
+                b.ins().return_(&[]);
+                b.seal_all_blocks();
+                b.finalize();
+                for isa in [&legacy, &deterministic] {
+                    assert!(x86_64_block_words(&context.func, isa.as_ref()).is_none());
+                }
+                if !std::is_x86_feature_detected!("sse4.1") {
+                    let arm = aarch64_leaf_words(&context.func).unwrap();
+                    assert!(!binding::aarch64_integer_leaf(&arm).is_empty());
+                    continue;
+                }
+                let functions = compile(&mut module, &mut context)
+                    .map(|pointer| unsafe { std::mem::transmute::<*const u8, Entry>(pointer) });
+                for first in 0..values.len() {
+                    let input: [u8; VECTOR_BYTES] = std::array::from_fn(|index| {
+                        values[(first + index / width) % values.len()].to_le_bytes()[index % width]
+                    });
+                    let [reference, candidate] = functions.map(|run| {
+                        let mut out = [0xcc; VECTOR_BYTES * 2];
+                        unsafe { run(input.as_ptr(), out.as_mut_ptr()) };
+                        out
+                    });
+                    assert_eq!(
+                        candidate, reference,
+                        "{opcode} {ty} {keep_input} {input:x?}"
+                    );
+                }
+            }
+        }
+    }
+    unsafe { module.free_memory() };
+}
+
+#[test]
 fn packed_fma_matches_cranelift_with_fused_rounding_and_spills() {
     const LIVE_VECTORS: u8 = 21;
     const AVX_FLAG: &str = "has_avx";

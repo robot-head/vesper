@@ -213,6 +213,10 @@ pub const VECTOR_FLOAT_ABS: u64 = 192;
 pub const VECTOR_FLOAT_COPY_SIGN: u64 = 193;
 pub const VECTOR_FLOAT_FMA32: u64 = 194;
 pub const VECTOR_FLOAT_FMA64: u64 = 195;
+pub const VECTOR_FLOAT_CEIL: u64 = 196;
+pub const VECTOR_FLOAT_FLOOR: u64 = 197;
+pub const VECTOR_FLOAT_TRUNC: u64 = 198;
+pub const VECTOR_FLOAT_NEAREST: u64 = 199;
 const POWER_SHIFT_MASK: u64 = QWORD_BITS - 1;
 const POWER_SIGNED: u64 = 0x40;
 const POWER_NEGATIVE: u64 = 0x80;
@@ -1054,7 +1058,10 @@ fn is_vector_float_binary(op: u64) -> bool {
 }
 
 pub fn is_vector_float_unary(op: u64) -> bool {
-    op == VECTOR_FLOAT_SQRT || op == VECTOR_FLOAT_NEG || op == VECTOR_FLOAT_ABS
+    op == VECTOR_FLOAT_SQRT
+        || op == VECTOR_FLOAT_NEG
+        || op == VECTOR_FLOAT_ABS
+        || (op >= VECTOR_FLOAT_CEIL && op <= VECTOR_FLOAT_NEAREST)
 }
 
 pub fn vector_float_width(width: u64) -> bool {
@@ -1106,7 +1113,7 @@ fn vector_binary_opcode(op: u64, width: u64) -> u8 {
 pub fn is_vector_result(op: u64) -> bool {
     (op >= VECTOR_CONSTANT && op <= VECTOR_INSERT && op != VECTOR_STORE)
         || op == VECTOR_INTEGER_COMPARE
-        || (op >= VECTOR_FLOAT_ADD && op <= VECTOR_FLOAT_FMA64)
+        || (op >= VECTOR_FLOAT_ADD && op <= VECTOR_FLOAT_NEAREST)
 }
 
 pub fn vector_value(in words: Slice[u64], arguments: u64, value: u64) -> bool {
@@ -1467,7 +1474,14 @@ fn find_last_reads(
                     | VECTOR_FLOAT_MUL
                     | VECTOR_FLOAT_DIV
                     | VECTOR_FLOAT_COPY_SIGN => vector_float_width(record.extra),
-                VECTOR_FLOAT_SQRT | VECTOR_FLOAT_NEG | VECTOR_FLOAT_ABS => record.right == 0
+                VECTOR_FLOAT_SQRT
+                    | VECTOR_FLOAT_NEG
+                    | VECTOR_FLOAT_ABS
+                    | VECTOR_FLOAT_CEIL
+                    | VECTOR_FLOAT_FLOOR
+                    | VECTOR_FLOAT_TRUNC
+                    | VECTOR_FLOAT_NEAREST => record.right
+                    == 0
                     && vector_float_width(record.extra),
                 VECTOR_FLOAT_COMPARE => valid_vector_float_condition(record.extra),
                 VECTOR_FLOAT_FMA32 | VECTOR_FLOAT_FMA64 => true,
@@ -2767,6 +2781,15 @@ fn packed_float_compare_needs_temp(mode: u64) -> bool {
     condition == FLOAT_ORDERED_NOT_EQUAL || condition == FLOAT_UNORDERED_OR_EQUAL
 }
 
+fn float_rounding(op: u64) -> Rounding {
+    match op {
+        FLOAT_CEIL | VECTOR_FLOAT_CEIL => Rounding::Ceil,
+        FLOAT_FLOOR | VECTOR_FLOAT_FLOOR => Rounding::Floor,
+        FLOAT_TRUNC | VECTOR_FLOAT_TRUNC => Rounding::Trunc,
+        _ => Rounding::Nearest,
+    }
+}
+
 fn emit_vector_instruction(
     inout output: ChunkSeq[u8],
     in record: Record,
@@ -2801,6 +2824,16 @@ fn emit_vector_instruction(
             Instruction::VectorFloat(opcode, destination, right, record.extra)
         },
         VECTOR_FLOAT_SQRT => Instruction::VectorFloat(SSE_SQRT, destination, left, record.extra),
+        VECTOR_FLOAT_CEIL
+            | VECTOR_FLOAT_FLOOR
+            | VECTOR_FLOAT_TRUNC
+            | VECTOR_FLOAT_NEAREST => Instruction::FloatRound(
+                destination,
+                left,
+                float_rounding(record.op),
+                record.extra,
+                true
+            ),
         VECTOR_FLOAT_NEG
             | VECTOR_FLOAT_ABS => Instruction::VectorFloatSign(
                 destination,
@@ -3029,15 +3062,16 @@ fn emit_scalar_fp(
                 },
                 false
             ),
-        FLOAT_CEIL | FLOAT_FLOOR | FLOAT_TRUNC | FLOAT_NEAREST => {
-            let mode = match record.op {
-                FLOAT_CEIL => Rounding::Ceil,
-                FLOAT_FLOOR => Rounding::Floor,
-                FLOAT_TRUNC => Rounding::Trunc,
-                _ => Rounding::Nearest,
-            };
-            Instruction::FloatRound(destination, left, mode, width)
-        },
+        FLOAT_CEIL
+            | FLOAT_FLOOR
+            | FLOAT_TRUNC
+            | FLOAT_NEAREST => Instruction::FloatRound(
+                destination,
+                left,
+                float_rounding(record.op),
+                width,
+                false
+            ),
         FLOAT_SQRT => Instruction::FloatBinary(SSE_SQRT, destination, left, width),
         FLOAT_NEG | FLOAT_ABS => {
             emit(inout output, in Instruction::Move(destination, left));
