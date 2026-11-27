@@ -24,10 +24,12 @@ use @vesper/hybrid-native-backend::x86_64::{
 use @vesper/place-ir::{BlockRow, FnRow, InstRow, Lit, Op, Pat, Tag, Term};
 use @vesper/place-ir-lower::ast::{FnR};
 use @vesper/place-ir-lower::lower::{L};
+use @vesper/hybrid-native-backend::scalar::{CALL_VOID, LOAD, STACK_ADDRESS, STORE_QWORD};
 
 const LITERAL_WORDS: u64 = 3;
 const BINARY_WORDS: u64 = 3;
 const UNARY_WORDS: u64 = 2;
+const EMPTY_TUPLE_WORDS: u64 = 1;
 const PLAIN_READ_WORDS: u64 = 4;
 const LITERAL_LOW: u64 = 1;
 const LITERAL_HIGH: u64 = 2;
@@ -66,6 +68,7 @@ const CALL_COUNT: u64 = 1;
 const CALL_ARGUMENTS: u64 = 2;
 const ARGUMENT_WORDS: u64 = 4;
 const ARGUMENT_VALUE: u64 = 1;
+const ARGUMENT_ROOT: u64 = 2;
 const ARGUMENT_PATH: u64 = 3;
 // A supported function has no parameter projections, bounds, or captures.
 const PARAMETER_WORDS: u64 = 6;
@@ -130,6 +133,7 @@ struct Function {
     values: ChunkSeq[Value],
     kinds: ChunkSeq[u8],
     parameters: ChunkSeq[u8],
+    inout_parameters: ChunkSeq[bool],
     labels: ChunkSeq[u64],
     blocks: ChunkSeq[u64],
     next_label: u64,
@@ -157,6 +161,18 @@ impl Function {
             self.parameters.try_get(id).unwrap_or(ScalarKind::Unsupported)
         } else {
             self.kind(wrapping_sub(id, self.arguments))
+        }
+    }
+
+    fn is_inout(in self, id: u64) -> bool {
+        self.inout_parameters.try_get(id).unwrap_or(false)
+    }
+
+    fn home_kind(in self, id: u64) -> u8 {
+        if self.is_inout(id) {
+            ScalarKind::U64
+        } else {
+            self.value_kind(id)
         }
     }
 
@@ -256,7 +272,7 @@ impl Function {
         value.block = block;
         value.machine = machine;
         if value.home != NO_VALUE {
-            let kind = self.value_kind(id);
+            let kind = self.home_kind(id);
             self.store_cell(machine, value.home, kind);
         }
         self.values.try_set(id, value)
@@ -270,7 +286,7 @@ impl Function {
         if value.home == NO_VALUE {
             return NO_VALUE;
         }
-        let kind = self.value_kind(id);
+        let kind = self.home_kind(id);
         value.machine = self.load_cell(value.home, kind);
         value.block = block;
         let _ = self.values.try_set(id, value);
@@ -402,11 +418,12 @@ fn scalar_kind(in low: L, ty: u32) -> u8 {
 }
 
 fn sysv_signature(in low: L, f: FnR) -> bool {
+    let result = scalar_kind(in low, f.result);
     if !f.has_body
         || f.generic_count != 0
         || f.ext_count != 0
         || f.param_count > MAX_ARGUMENTS
-        || abi_width(scalar_kind(in low, f.result)) == 0
+        || (abi_width(result) == 0 && result != ScalarKind::Unit)
         || f.effects != low.ctx.types.empty_row
     {
         return false;
@@ -415,7 +432,10 @@ fn sysv_signature(in low: L, f: FnR) -> bool {
     for index in 0..f.param_count {
         let p = low.ast.param(add(f.param_start, index));
         let kind = scalar_kind(in low, p.ty);
-        if p.proj_count != 0 || p.pass == TyPass::Inout || abi_width(kind) == 0 {
+        if p.proj_count != 0
+            || abi_width(kind) == 0
+            || (p.pass == TyPass::Inout && !addressable_scalar(kind))
+        {
             return false;
         }
         if is_float(kind) {
@@ -423,6 +443,12 @@ fn sysv_signature(in low: L, f: FnR) -> bool {
         }
     }
     floats <= XMM_ARGUMENTS
+}
+
+fn addressable_scalar(kind: u8) -> bool {
+    // The native language ABI gives each scalar memory cell one word.
+    // These kinds use all of that word without further normalization.
+    is_integer(kind) && abi_width(kind) == QWORD_BITS
 }
 
 fn argument_value(in low: L, f: FnR, root: u32) -> u64 {
@@ -461,36 +487,60 @@ fn collect_binding(in low: L, inst: InstRow, inout m: Function) -> bool {
     true
 }
 
-fn collect_mutable_slots(in low: L, row: FnRow, inout m: Function) -> bool {
-    let mut count: u32 = 0;
+fn collect_mutating_place(in low: L, f: FnR, name: u32, inout m: Function) -> bool {
+    if m.is_inout(argument_value(in low, f, name)) {
+        return true;
+    }
+    if u32_at(in m.bindings, w(name)) == 0 {
+        return false;
+    }
+    if u32_at(in m.mutable_slots, w(name)) == 0 {
+        let slot = inc(m.mutable_bytes / HOME_BYTES);
+        set_by_symbol(inout m.mutable_slots, name, n32(slot));
+        m.mutable_bytes = add(m.mutable_bytes, HOME_BYTES);
+    }
+    true
+}
+
+fn collect_mutable_slots(in low: L, f: FnR, row: FnRow, inout m: Function) -> bool {
     for layout in 0..m.blocks.len() {
         let block = m.blocks.try_get(layout).unwrap_or(0);
         let b = low.program.block(add(row.b0, block));
         for index in b.i0..add(b.i0, b.ic) {
             let inst = low.program.inst(index);
-            if inst.op != Op::Write {
-                continue;
-            }
-            let name = n32(low.program.op(inst.a));
-            let op = n32(low.program.op(add(inst.a, WRITE_OPERATOR)));
-            if inst.n != WRITE_WORDS
-                || inst.fallible != 0
-                || !low.ctx.names.spells(op, in "=".as_bytes())
-                || u32_at(in m.bindings, w(name)) == 0
-            {
-                return false;
-            }
-            if u32_at(in m.mutable_slots, w(name)) == 0 {
-                count = wrapping_add(count, 1);
-                set_by_symbol(inout m.mutable_slots, name, count);
+            if inst.op == Op::Write {
+                let name = n32(low.program.op(inst.a));
+                let op = n32(low.program.op(add(inst.a, WRITE_OPERATOR)));
+                if inst.n != WRITE_WORDS
+                    || inst.fallible != 0
+                    || !low.ctx.names.spells(op, in "=".as_bytes())
+                    || !collect_mutating_place(in low, f, name, inout m)
+                {
+                    return false;
+                }
+            } else if inst.op == Op::Call {
+                let count = call_arity(in low, inst);
+                if count == NO_VALUE {
+                    return false;
+                }
+                for index in 0..count {
+                    let at = call_argument(inst.a, index);
+                    if low.program.op(at) == TyPass::Inout {
+                        let name = argument_root(in low, at);
+                        if low.program.path(low.program.op(add(at, ARGUMENT_PATH))).n != 0
+                            || !collect_mutating_place(in low, f, name, inout m)
+                        {
+                            return false;
+                        }
+                    }
+                }
             }
         }
     }
-    m.mutable_bytes = wrapping_mul(w(count), HOME_BYTES);
     true
 }
 
-fn lower_local_store(in low: L, inst: InstRow, block: u64, inout m: Function) -> bool {
+fn lower_local_store(in low: L, f: FnR, inst: InstRow, block: u64, inout m: Function) -> bool {
     let at = inst.a;
     if inst.op == Op::Bind {
         let pattern = low.program.op(add(at, BIND_PATTERN));
@@ -513,6 +563,21 @@ fn lower_local_store(in low: L, inst: InstRow, block: u64, inout m: Function) ->
     };
     let source = low.program.op(source_at);
     let kind = m.kind(source);
+    if inst.op == Op::Write {
+        let target = argument_value(in low, f, name);
+        if m.is_inout(target) {
+            if !addressable_scalar(kind) || m.value_kind(target) != kind {
+                return false;
+            }
+            let address = m.read(target, block);
+            let value = m.read(add(m.arguments, source), block);
+            if address == NO_VALUE || value == NO_VALUE {
+                return false;
+            }
+            let _ = m.record(STORE_QWORD, address, value, 0);
+            return true;
+        }
+    }
     if offset == NO_VALUE {
         return inst.op == Op::Bind && kind != ScalarKind::Unsupported;
     }
@@ -552,8 +617,14 @@ fn call_argument(at: u64, index: u64) -> u64 {
     add(add(at, CALL_ARGUMENTS), wrapping_mul(index, ARGUMENT_WORDS))
 }
 
+fn argument_root(in low: L, at: u64) -> u32 {
+    // Place IR uses symbol + 1 for optional names, with zero for no root.
+    n32(wrapping_sub(low.program.op(add(at, ARGUMENT_ROOT)), 1))
+}
+
 fn lower_call(
     in low: L,
+    caller: FnR,
     inst: InstRow,
     block: u64,
     inout m: Function,
@@ -604,13 +675,31 @@ fn lower_call(
         let operand = low.program.op(add(at, ARGUMENT_VALUE));
         let param = low.ast.param(add(callee.param_start, i));
         let kind = m.kind(operand);
-        if low.program.op(at) == TyPass::Inout
+        let inout_arg = low.program.op(at) == TyPass::Inout;
+        if inout_arg != (param.pass == TyPass::Inout)
             || low.program.path(low.program.op(add(at, ARGUMENT_PATH))).n != 0
             || kind != scalar_kind(in low, param.ty)
         {
             return NO_VALUE;
         }
-        let value = m.read(add(m.arguments, operand), block);
+        let value = if inout_arg {
+            let name = argument_root(in low, at);
+            let place = place_value(in low, caller, name, in m);
+            if !addressable_scalar(kind) || m.value_kind(place) != kind {
+                return NO_VALUE;
+            }
+            if m.is_inout(place) {
+                m.read(place, block)
+            } else {
+                let offset = m.mutable_offset(name);
+                if offset == NO_VALUE {
+                    return NO_VALUE;
+                }
+                m.record(STACK_ADDRESS, HOME_SLOT, offset, 0)
+            }
+        } else {
+            m.read(add(m.arguments, operand), block)
+        };
         if value == NO_VALUE {
             return NO_VALUE;
         }
@@ -631,7 +720,10 @@ fn lower_call(
     for i in 0..floats.len() {
         let _ = m.record(CALL_ARGUMENT, floats.try_get(i).unwrap_or(NO_VALUE), 0, 0);
     }
-    let op = if is_float(scalar_kind(in low, inst.ty)) {
+    let result = scalar_kind(in low, inst.ty);
+    let op = if result == ScalarKind::Unit {
+        CALL_VOID
+    } else if is_float(result) {
         CALL_FLOAT
     } else {
         CALL
@@ -847,7 +939,7 @@ fn pack_homes(in low: L, row: FnRow, inout m: Function) {
 // Stack homes hold branch results and the values read outside their defining block.
 fn plan_homes(in low: L, f: FnR, row: FnRow, inout m: Function) -> bool {
     let mut value_count: u64 = 0;
-    let mut has_writes = false;
+    let mut has_place_actions = false;
     for block in 0..row.bc {
         let b = low.program.block(add(row.b0, block));
         let reachable = m.label(block) != NO_VALUE;
@@ -868,13 +960,15 @@ fn plan_homes(in low: L, f: FnR, row: FnRow, inout m: Function) -> bool {
                 {
                     return false;
                 }
-                has_writes = has_writes || inst.op == Op::Write;
+                has_place_actions = has_place_actions
+                    || inst.op == Op::Write
+                    || inst.op == Op::Call;
             }
         }
     }
     m.values.resize(add(f.param_count, value_count), value_new(NO_VALUE));
     if !plan_types(in low, row, inout m)
-        || (has_writes && !collect_mutable_slots(in low, row, inout m))
+        || (has_place_actions && !collect_mutable_slots(in low, f, row, inout m))
     {
         return false;
     }
@@ -912,11 +1006,18 @@ fn plan_homes(in low: L, f: FnR, row: FnRow, inout m: Function) -> bool {
             if inst.op == Op::Read {
                 let name = n32(low.program.op(at));
                 let value = place_value(in low, f, name, in m);
-                if m.mutable_offset(name) == NO_VALUE && !m.use_in(value, block) {
+                if m.mutable_offset(name) == NO_VALUE
+                    && m.value_kind(value) != ScalarKind::Unit
+                    && !m.use_in(value, block)
+                {
                     return false;
                 }
             } else if inst.op == Op::Write {
                 if !m.use_in(add(f.param_count, low.program.op(add(at, WRITE_VALUE))), block) {
+                    return false;
+                }
+                let dst = argument_value(in low, f, n32(low.program.op(at)));
+                if m.is_inout(dst) && !m.use_in(dst, block) {
                     return false;
                 }
             } else if inst.op == Op::Bind && inst.n == inc(BIND_NAME) {
@@ -937,7 +1038,10 @@ fn plan_homes(in low: L, f: FnR, row: FnRow, inout m: Function) -> bool {
                     return false;
                 }
             } else if inst.op == Op::Exit {
-                if !m.use_in(add(f.param_count, low.program.op(at)), block) {
+                let value = low.program.op(at);
+                if m.kind(value) != ScalarKind::Unit
+                    && !m.use_in(add(f.param_count, value), block)
+                {
                     return false;
                 }
             } else if inst.op == Op::Call {
@@ -946,16 +1050,26 @@ fn plan_homes(in low: L, f: FnR, row: FnRow, inout m: Function) -> bool {
                     return false;
                 }
                 for i in 0..count {
-                    let argument = add(call_argument(at, i), ARGUMENT_VALUE);
-                    if !m.use_in(add(f.param_count, low.program.op(argument)), block) {
-                        return false;
+                    let argument = call_argument(at, i);
+                    if low.program.op(argument) == TyPass::Inout {
+                        let name = argument_root(in low, argument);
+                        let dst = argument_value(in low, f, name);
+                        if m.is_inout(dst) && !m.use_in(dst, block) {
+                            return false;
+                        }
+                    } else {
+                        let value = low.program.op(add(argument, ARGUMENT_VALUE));
+                        if !m.use_in(add(f.param_count, value), block) {
+                            return false;
+                        }
                     }
                 }
             }
         }
         if b.term == Term::Branch || b.term == Term::Return || b.term == Term::Match {
-            let source = add(f.param_count, low.program.op(b.ta));
-            if !m.use_in(source, block) {
+            let id = low.program.op(b.ta);
+            let source = add(f.param_count, id);
+            if m.kind(id) != ScalarKind::Unit && !m.use_in(source, block) {
                 return false;
             }
             if b.term == Term::Match
@@ -1663,7 +1777,7 @@ fn lower_block(
         let inst = low.program.inst(index);
         let at = inst.a;
         if inst.op == Op::Bind || inst.op == Op::Write {
-            if !lower_local_store(in low, inst, block, inout m) {
+            if !lower_local_store(in low, f, inst, block, inout m) {
                 return false;
             }
             continue;
@@ -1680,7 +1794,14 @@ fn lower_block(
             continue;
         }
         let kind = scalar_kind(in low, inst.ty);
-        if inst.fallible != 0 || kind == ScalarKind::Unsupported || kind == ScalarKind::Unit {
+        if inst.op == Op::Tuple
+            && kind == ScalarKind::Unit
+            && inst.n == EMPTY_TUPLE_WORDS
+            && low.program.op(at) == 0
+        {
+            continue;
+        }
+        if inst.fallible != 0 || kind == ScalarKind::Unsupported {
             return false;
         }
         let value = if inst.op == Op::Const && inst.n == LITERAL_WORDS {
@@ -1688,7 +1809,6 @@ fn lower_block(
         } else if inst.op == Op::Read
             && inst.n == PLAIN_READ_WORDS
             && low.program.path(low.program.op(add(at, READ_PATH))).n == 0
-            && low.program.op(add(at, READ_PASS)) != TyPass::Inout
             && low.program.op(add(at, READ_PROJECTIONS)) == 0
         {
             let name = n32(low.program.op(at));
@@ -1700,7 +1820,20 @@ fn lower_block(
                 return false;
             }
             let offset = m.mutable_offset(name);
-            if offset == NO_VALUE {
+            let inout_read = low.program.op(add(at, READ_PASS)) == TyPass::Inout;
+            if inout_read && offset == NO_VALUE && !m.is_inout(source) {
+                return false;
+            }
+            if kind == ScalarKind::Unit {
+                continue;
+            }
+            if m.is_inout(source) {
+                let address = m.read(source, block);
+                if address == NO_VALUE {
+                    return false;
+                }
+                m.record(LOAD, address, 0, QWORD_BITS)
+            } else if offset == NO_VALUE {
                 m.read(source, block)
             } else {
                 m.load_cell(offset, kind)
@@ -1710,11 +1843,14 @@ fn lower_block(
         } else if inst.op == Op::Binary && inst.n == BINARY_WORDS {
             lower_binary(in low, at, kind, block, range_increment(in low, b, index, inst), inout m)
         } else if inst.op == Op::Call {
-            lower_call(in low, inst, block, inout m, inout graph)
+            lower_call(in low, f, inst, block, inout m, inout graph)
         } else {
             return false;
         };
-        if value == NO_VALUE || !m.define(add(f.param_count, w(inst.dest)), block, value) {
+        if value == NO_VALUE {
+            return false;
+        }
+        if kind != ScalarKind::Unit && !m.define(add(f.param_count, w(inst.dest)), block, value) {
             return false;
         }
     }
@@ -1725,7 +1861,13 @@ fn lower_return(result: u64, block: u64, inout m: Function) -> bool {
     if m.kind(result) != m.result {
         return false;
     }
-    let value = m.read(add(m.arguments, result), block);
+    // The native language ABI represents a Unit return with one zero word.
+    // Calls can discard that word, even when the callee has side effects.
+    let value = if m.result == ScalarKind::Unit {
+        m.record(CONSTANT, 0, 0, 0)
+    } else {
+        m.read(add(m.arguments, result), block)
+    };
     if value == NO_VALUE {
         return false;
     }
@@ -1945,6 +2087,7 @@ fn lower_function(
         values: ChunkSeq::new[Value](),
         kinds: ChunkSeq::new[u8](),
         parameters: ChunkSeq::new[u8](),
+        inout_parameters: ChunkSeq::new[bool](),
         labels: ChunkSeq::new[u64](),
         blocks: ChunkSeq::new[u64](),
         next_label: 0,
@@ -1957,6 +2100,7 @@ fn lower_function(
         let param = low.ast.param(add(f.param_start, arg));
         let kind = scalar_kind(in low, param.ty);
         m.parameters.push(kind);
+        m.inout_parameters.push(param.pass == TyPass::Inout);
         if !is_float(kind) {
             m.gp_arguments = inc(m.gp_arguments);
         }
