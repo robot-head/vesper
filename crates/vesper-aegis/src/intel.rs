@@ -428,22 +428,40 @@ struct IsvSvnJson {
     isvsvn: u16,
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct QeIdentityJson {
-    id: String,
-    version: u32,
-    issue_date: String,
-    next_update: String,
-    tcb_evaluation_data_number: u32,
-    miscselect: String,
-    miscselect_mask: String,
-    attributes: String,
-    attributes_mask: String,
-    mrsigner: String,
-    isvprodid: u16,
-    tcb_levels: Vec<IsvLevelJson>,
-}
+const QE_OUT_ID_START: usize = 0;
+const QE_OUT_ID_END: usize = 1;
+const QE_OUT_VERSION: usize = 2;
+const QE_OUT_ISSUE_DATE_START: usize = 3;
+const QE_OUT_ISSUE_DATE_END: usize = 4;
+const QE_OUT_NEXT_UPDATE_START: usize = 5;
+const QE_OUT_NEXT_UPDATE_END: usize = 6;
+const QE_OUT_TCB_EVAL_NUM: usize = 7;
+const QE_OUT_ISV_PROD_ID: usize = 8;
+const QE_OUT_LEVEL_COUNT: usize = 9;
+const QE_OUT_LEN: usize = 10;
+
+const QE_BYTES_MISC_OFF: usize = 0;
+const QE_BYTES_MISC_MASK_OFF: usize = 4;
+const QE_BYTES_ATTR_OFF: usize = 8;
+const QE_BYTES_ATTR_MASK_OFF: usize = 24;
+const QE_BYTES_MRSIGNER_OFF: usize = 40;
+const QE_BYTES_TOTAL: usize = 72;
+
+const QE_LVL_STRIDE: usize = 7;
+const QE_LVL_ISVSVN: usize = 0;
+const QE_LVL_DATE_START: usize = 1;
+const QE_LVL_DATE_END: usize = 2;
+const QE_LVL_STATUS_START: usize = 3;
+const QE_LVL_STATUS_END: usize = 4;
+const QE_LVL_ADV_START: usize = 5;
+const QE_LVL_ADV_COUNT: usize = 6;
+
+const QE_ERR_OK: u64 = 0;
+const QE_ERR_HEX: u64 = 2;
+const QE_ERR_CAPACITY: u64 = 3;
+
+const QE_STACK_MAX_LEVELS: usize = 32;
+const QE_STACK_MAX_ADVS: usize = 64;
 
 pub(crate) fn collateral(what: &'static str, reason: String) -> AttestError {
     AttestError::Collateral { what, reason }
@@ -634,31 +652,165 @@ impl QeIdentity {
     /// Parse an enclave identity JSON body (version 2) whose `id` must be
     /// `expected_id` (`TD_QE` for TDX, `QE` for the SGX quoting enclave).
     pub fn parse_with_id(json: &[u8], expected_id: &str) -> Result<Self, AttestError> {
-        let j: QeIdentityJson = serde_json::from_slice(json)
-            .map_err(|e| collateral("enclaveIdentity", e.to_string()))?;
-        if j.id != expected_id {
+        let mut out = [0u64; QE_OUT_LEN];
+        let mut bytes = [0u8; QE_BYTES_TOTAL];
+        let mut stack_levels = [0u64; QE_STACK_MAX_LEVELS * QE_LVL_STRIDE];
+        let mut stack_advs = [0u64; QE_STACK_MAX_ADVS * 2];
+        let mut heap_levels = Vec::new();
+        let mut heap_advs = Vec::new();
+
+        let rc = crate::port::vesper::parse_qe_identity(
+            json,
+            &mut out,
+            &mut bytes,
+            &mut stack_levels,
+            &mut stack_advs,
+        );
+        let (levels_buf, advs_buf): (&[u64], &[u64]) = if rc == QE_ERR_CAPACITY {
+            let mut lvl_cap = QE_STACK_MAX_LEVELS * 2;
+            let mut adv_cap = QE_STACK_MAX_ADVS * 2;
+            loop {
+                heap_levels.resize(lvl_cap * QE_LVL_STRIDE, 0);
+                heap_advs.resize(adv_cap * 2, 0);
+                let retry_rc = crate::port::vesper::parse_qe_identity(
+                    json,
+                    &mut out,
+                    &mut bytes,
+                    &mut heap_levels,
+                    &mut heap_advs,
+                );
+                if retry_rc == QE_ERR_OK {
+                    break (&heap_levels, &heap_advs);
+                }
+                if retry_rc != QE_ERR_CAPACITY {
+                    return Err(collateral(
+                        "enclaveIdentity",
+                        if retry_rc == QE_ERR_HEX {
+                            "invalid hex field".into()
+                        } else {
+                            "malformed JSON".into()
+                        },
+                    ));
+                }
+                lvl_cap *= 2;
+                adv_cap *= 2;
+            }
+        } else if rc == QE_ERR_OK {
+            (&stack_levels, &stack_advs)
+        } else {
+            return Err(collateral(
+                "enclaveIdentity",
+                if rc == QE_ERR_HEX {
+                    "invalid hex field".into()
+                } else {
+                    "malformed JSON".into()
+                },
+            ));
+        };
+
+        let span_str = |s: u64, e: u64, what: &'static str| -> Result<&str, AttestError> {
+            std::str::from_utf8(&json[s as usize..e as usize])
+                .map_err(|err| collateral(what, err.to_string()))
+        };
+
+        let id = span_str(
+            out[QE_OUT_ID_START],
+            out[QE_OUT_ID_END],
+            "enclaveIdentity.id",
+        )?;
+        if id != expected_id {
             return Err(collateral(
                 "enclaveIdentity.id",
-                format!("{:?}, expected {expected_id}", j.id),
+                format!("{id:?}, expected {expected_id}"),
             ));
         }
-        if j.version != QE_IDENTITY_VERSION {
+        let version = out[QE_OUT_VERSION] as u32;
+        if version != QE_IDENTITY_VERSION {
             return Err(collateral(
                 "enclaveIdentity.version",
-                format!("{}, expected {QE_IDENTITY_VERSION}", j.version),
+                format!("{version}, expected {QE_IDENTITY_VERSION}"),
             ));
         }
+
+        let issue_date = date(
+            span_str(
+                out[QE_OUT_ISSUE_DATE_START],
+                out[QE_OUT_ISSUE_DATE_END],
+                "enclaveIdentity.issueDate",
+            )?,
+            "enclaveIdentity.issueDate",
+        )?;
+        let next_update = date(
+            span_str(
+                out[QE_OUT_NEXT_UPDATE_START],
+                out[QE_OUT_NEXT_UPDATE_END],
+                "enclaveIdentity.nextUpdate",
+            )?,
+            "enclaveIdentity.nextUpdate",
+        )?;
+
+        let lvl_count = out[QE_OUT_LEVEL_COUNT] as usize;
+        let mut levels = Vec::with_capacity(lvl_count);
+        for k in 0..lvl_count {
+            let base = k * QE_LVL_STRIDE;
+            let tcb_date = date(
+                span_str(
+                    levels_buf[base + QE_LVL_DATE_START],
+                    levels_buf[base + QE_LVL_DATE_END],
+                    "enclaveIdentity.tcbLevels",
+                )?,
+                "enclaveIdentity.tcbLevels",
+            )?;
+            let status = TcbStatus::parse(span_str(
+                levels_buf[base + QE_LVL_STATUS_START],
+                levels_buf[base + QE_LVL_STATUS_END],
+                "enclaveIdentity.tcbLevels",
+            )?)?;
+            let adv_start = levels_buf[base + QE_LVL_ADV_START] as usize;
+            let adv_count = levels_buf[base + QE_LVL_ADV_COUNT] as usize;
+            let mut advisory_ids = Vec::with_capacity(adv_count);
+            for a in 0..adv_count {
+                let aoff = (adv_start + a) * 2;
+                advisory_ids.push(
+                    span_str(
+                        advs_buf[aoff],
+                        advs_buf[aoff + 1],
+                        "enclaveIdentity.tcbLevels",
+                    )?
+                    .to_owned(),
+                );
+            }
+            levels.push(IsvTcbLevel {
+                isv_svn: levels_buf[base + QE_LVL_ISVSVN] as u16,
+                tcb_date,
+                status,
+                advisory_ids,
+            });
+        }
+
+        let mut misc = [0u8; 4];
+        misc.copy_from_slice(&bytes[QE_BYTES_MISC_OFF..QE_BYTES_MISC_OFF + 4]);
+        let mut misc_mask = [0u8; 4];
+        misc_mask.copy_from_slice(&bytes[QE_BYTES_MISC_MASK_OFF..QE_BYTES_MISC_MASK_OFF + 4]);
+        let mut attributes = [0u8; 16];
+        attributes.copy_from_slice(&bytes[QE_BYTES_ATTR_OFF..QE_BYTES_ATTR_OFF + 16]);
+        let mut attributes_mask = [0u8; 16];
+        attributes_mask
+            .copy_from_slice(&bytes[QE_BYTES_ATTR_MASK_OFF..QE_BYTES_ATTR_MASK_OFF + 16]);
+        let mut mr_signer = [0u8; 32];
+        mr_signer.copy_from_slice(&bytes[QE_BYTES_MRSIGNER_OFF..QE_BYTES_MRSIGNER_OFF + 32]);
+
         Ok(QeIdentity {
-            issue_date: date(&j.issue_date, "enclaveIdentity.issueDate")?,
-            next_update: date(&j.next_update, "enclaveIdentity.nextUpdate")?,
-            tcb_evaluation_data_number: j.tcb_evaluation_data_number,
-            misc_select: u32::from_be_bytes(hex_array(&j.miscselect, "miscselect")?),
-            misc_select_mask: u32::from_be_bytes(hex_array(&j.miscselect_mask, "miscselectMask")?),
-            attributes: hex_array(&j.attributes, "attributes")?,
-            attributes_mask: hex_array(&j.attributes_mask, "attributesMask")?,
-            mr_signer: hex_array(&j.mrsigner, "mrsigner")?,
-            isv_prod_id: j.isvprodid,
-            levels: isv_levels(&j.tcb_levels, "enclaveIdentity.tcbLevels")?,
+            issue_date,
+            next_update,
+            tcb_evaluation_data_number: out[QE_OUT_TCB_EVAL_NUM] as u32,
+            misc_select: u32::from_be_bytes(misc),
+            misc_select_mask: u32::from_be_bytes(misc_mask),
+            attributes,
+            attributes_mask,
+            mr_signer,
+            isv_prod_id: out[QE_OUT_ISV_PROD_ID] as u16,
+            levels,
         })
     }
 }

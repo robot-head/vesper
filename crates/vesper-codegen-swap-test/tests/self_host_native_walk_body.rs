@@ -1509,6 +1509,56 @@ fn vesper_scalar_bodies_part_6q() {
     });
 }
 
+/// Part 6r: `Op::Project` scalar field projection on `LANE_PRODUCT` struct and
+/// tuple values across both optimized and unoptimized builds.
+const SCALARS_6R: &str = "
+struct Pair {
+    x: i64,
+    y: f64,
+    z: u32,
+}
+fn make_pair(x: i64, y: f64, z: u32) -> Pair {
+    Pair { x: x, y: y, z: z }
+}
+fn project_pair(a: i64, b: f64, c: u32) -> i64 {
+    let x: i64 = make_pair(a, b, c).x;
+    let y: f64 = make_pair(a, b, c).y;
+    let z: u32 = make_pair(a, b, c).z;
+    wrapping_add(x, widen_i64(z)) ^ saturating_i64(y)
+}
+fn main() -> i64 {
+    project_pair(100, 23.5, 42)
+}
+";
+
+#[test]
+fn vesper_scalar_bodies_part_6r() {
+    big_stack(|| {
+        let parsed = vesper::parser::parse(SCALARS_6R);
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        let checked = vesper::check::check(&parsed.module);
+        assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
+        if let Err(e) = build(&checked.world, "main", true) {
+            panic!("the part 6r scalar program does not build: {e}");
+        }
+        let before = EMITTED.load(Ordering::Relaxed);
+        let total = both("scalars_6r", &checked.world, true);
+        let emitted = EMITTED.load(Ordering::Relaxed) - before;
+        eprintln!(
+            "scalars_6r: {}; {emitted} functions emitted from Vesper",
+            total.summary()
+        );
+        let ran = if cross() { 0 } else { 2 };
+        assert_eq!((total.worlds, total.ran), (2, ran), "{}", total.summary());
+        let min_emitted = if cross() { 2 } else { 4 };
+        assert!(
+            emitted >= min_emitted,
+            "part 6r functions should come from Vesper (expected >= {min_emitted}, got {emitted})"
+        );
+        assert!(total.is_clean(), "{}", total.summary());
+    });
+}
+
 /// `inout` scalar parameters (#2563): each is loaded at entry, read through
 /// its address and stored through it at every definition, with a loop, a
 /// narrow integer, a `bool`, a float and a compound write. `bump` and

@@ -104,19 +104,46 @@ fn max_pow10_no_more_than(x: u64) -> (u64, u64) {
 }
 
 // `x / 10^kappa` and `x % 10^kappa` for kappa in 0..=9, each with a
-// literal divisor.
+// single division and multiply-subtract remainder.
 fn div_pow10(x: u64, kappa: u64) -> (u64, u64) {
     match kappa {
         0 => (x, 0),
-        1 => (x / 10, x % 10),
-        2 => (x / 100, x % 100),
-        3 => (x / 1000, x % 1000),
-        4 => (x / 10000, x % 10000),
-        5 => (x / 100000, x % 100000),
-        6 => (x / 1000000, x % 1000000),
-        7 => (x / 10000000, x % 10000000),
-        8 => (x / 100000000, x % 100000000),
-        _ => (x / 1000000000, x % 1000000000),
+        1 => {
+            let q = x / 10;
+            (q, wrapping_sub(x, wrapping_mul(q, 10)))
+        },
+        2 => {
+            let q = x / 100;
+            (q, wrapping_sub(x, wrapping_mul(q, 100)))
+        },
+        3 => {
+            let q = x / 1000;
+            (q, wrapping_sub(x, wrapping_mul(q, 1000)))
+        },
+        4 => {
+            let q = x / 10000;
+            (q, wrapping_sub(x, wrapping_mul(q, 10000)))
+        },
+        5 => {
+            let q = x / 100000;
+            (q, wrapping_sub(x, wrapping_mul(q, 100000)))
+        },
+        6 => {
+            let q = x / 1000000;
+            (q, wrapping_sub(x, wrapping_mul(q, 1000000)))
+        },
+        7 => {
+            let q = x / 10000000;
+            (q, wrapping_sub(x, wrapping_mul(q, 10000000)))
+        },
+        8 => {
+            let q = x / 100000000;
+            (q, wrapping_sub(x, wrapping_mul(q, 100000000)))
+        },
+        _ => {
+            let q = x / 1000000000;
+            (q, wrapping_sub(x, wrapping_mul(q, 1000000000)))
+        },
     }
 }
 
