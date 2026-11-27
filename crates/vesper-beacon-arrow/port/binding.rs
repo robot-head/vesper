@@ -11,6 +11,7 @@ unsafe extern "C" {
     fn vesper_beacon_arrow_seq_new(capacity: i64, stride: i64) -> i64;
     fn vesper_beacon_arrow_seq_free(seq: i64) -> i64;
     fn vesper_beacon_arrow_live_allocations() -> i64;
+    fn vesper_beacon_arrow_otap_cbor_scan(bytes: *mut u64, budget: i64, node_weight: i64, max_depth: i64) -> i64;
     fn vesper_beacon_arrow_span_stream_into(wide: *mut u64, narrow: *mut u64, rows: i64, out: *mut u64) -> i64;
     fn vesper_beacon_arrow_span_stream_len(rows: i64) -> i64;
 }
@@ -25,6 +26,15 @@ pub const RUNTIME: vesper_port_abi::SeqRuntime = vesper_port_abi::SeqRuntime {
 pub fn live_allocations() -> i64 {
     // SAFETY: the function only reads two counters.
     unsafe { vesper_beacon_arrow_live_allocations() }
+}
+
+/// Calls `otap_cbor_scan` of the Vesper library `beacon_arrow` (`vesper_beacon_arrow_otap_cbor_scan`).
+pub fn otap_cbor_scan(bytes: &[u8], budget: u64, node_weight: u64, max_depth: u64) -> u64 {
+    // SAFETY: `vesper_beacon_arrow_otap_cbor_scan` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(bytes, |view_bytes| unsafe { vesper_beacon_arrow_otap_cbor_scan(view_bytes, budget as i64, node_weight as i64, max_depth as i64) });
+    raw as u64
 }
 
 /// Calls `span_stream_into` of the Vesper library `beacon_arrow` (`vesper_beacon_arrow_span_stream_into`).
