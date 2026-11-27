@@ -455,10 +455,78 @@ pub fn remove_dir(in path: Str) eff [Ffi[StdFs], Fail[IoError]] {
     check(StdFs::vstd_fs_remove_dir(in path.as_bytes(), false, inout err), err);
 }
 
-// Remove a directory and everything in it.
+const DIR_NAME_INITIAL_CAP: u64 = 256;
+const SLASH_BYTE: u8 = 47;
+
+// Remove a directory and everything in it (#2553). WASI 0.2 has no recursive
+// `remove-directory-at`, so walk children first, closing each directory stream
+// before recursing.
 pub fn remove_dir_all(in path: Str) eff [Ffi[StdFs], Fail[IoError]] {
+    remove_dir_all_path(in path.as_bytes());
+}
+
+pub fn remove_dir_all_path(in path: Slice[u8]) eff [Ffi[StdFs], Fail[IoError]] {
     let mut err: u64 = 0;
-    check(StdFs::vstd_fs_remove_dir(in path.as_bytes(), true, inout err), err);
+    let mut d = match StdFs::vstd_fs_read_dir(in path, inout err) {
+        Option::Some(d) => d,
+        Option::None => return raise_io(err),
+    };
+    let mut names: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut ends: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut kinds: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let mut buf: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    buf.resize(DIR_NAME_INITIAL_CAP, 0);
+    loop {
+        let mut kind: u32 = 0;
+        let n = StdFs::vstd_fs_dir_next(inout d, inout buf.as_slice_mut(), inout kind);
+        if n < 0 {
+            break;
+        }
+        let len = wrapping_u64(n);
+        if len > buf.len() {
+            buf.resize(len, 0);
+        } else {
+            names.extend(in buf[0..len]);
+            ends.push(names.len());
+            kinds.push(kind);
+        }
+    }
+    StdFs::vstd_fs_dir_close(d);
+
+    let needs_slash = if path.len() == 0 {
+        false
+    } else {
+        match path.try_get(wrapping_sub(path.len(), 1)) {
+            Option::Some(b) => b != SLASH_BYTE,
+            Option::None => false,
+        }
+    };
+    let mut start: u64 = 0;
+    for i in 0..ends.len() {
+        let end = match ends.try_get(i) {
+            Option::Some(v) => v,
+            Option::None => start,
+        };
+        let kind = match kinds.try_get(i) {
+            Option::Some(v) => v,
+            Option::None => kind_other(),
+        };
+        let mut child: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        child.extend(in path);
+        if needs_slash {
+            child.push(SLASH_BYTE);
+        }
+        child.extend(in names[start..end]);
+        if kind == kind_dir() {
+            remove_dir_all_path(in child.as_slice());
+        } else {
+            let mut ferr: u64 = 0;
+            check(StdFs::vstd_fs_remove_file(in child.as_slice(), inout ferr), ferr);
+        }
+        start = end;
+    }
+    let mut rerr: u64 = 0;
+    check(StdFs::vstd_fs_remove_dir(in path, false, inout rerr), rerr);
 }
 
 // Create one directory; its parent must exist.
