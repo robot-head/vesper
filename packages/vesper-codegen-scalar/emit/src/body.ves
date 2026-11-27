@@ -4,10 +4,12 @@
 // (src/native.rs) makes its builder calls, so the CLIF is the Rust walk's.
 //
 // A request's arguments are `[optimize, status, locations, n, n parameter
-// variables, the function's plan words]`: the optimizer flag, whether the
-// function returns a status word beside its value (the register-status
-// Fail ABI), whether instructions carry source locations, and the
-// variables the entry block bound the parameters to.
+// variables, m, m callees, the function's plan words]`: the optimizer
+// flag, whether the function returns a status word beside its value (the
+// register-status Fail ABI), whether instructions carry source locations,
+// the variables the entry block bound the parameters to, and for each of
+// the function's calls the function the walk would call directly
+// (part 6b), or NO_CALLEE, which declines the body.
 //
 // The plan words are, in order:
 //
@@ -22,20 +24,22 @@
 // An instruction is `[kind, dest, post, location, n, n operand values]`
 // (the location is a source offset, or NO_LOCATION), then a
 // planned request and its two immediates (INST_PLANNED), a local and the
-// read's kind (INST_READ), a local or NO_LOCAL (INST_BIND), or a local,
-// the temporary's kind and the statement's kind (INST_WRITE). A
+// read's kind (INST_READ), a local or NO_LOCAL (INST_BIND), a local,
+// the temporary's kind and the statement's kind (INST_WRITE), or the
+// call's position among the callees and each argument's read kind
+// (INST_CALL). A
 // terminator is `[code, ...]`: a value and the lane of the default that
 // stands for a `Never` value (0: none) for `return`; a target block and
 // that pair per argument for `jump`; a condition and two blocks for
 // `branch`; nothing for `unreachable`.
 
 use @vesper/cranelift::{
-    Block, Ty, Value, Var, append_block_param, call_arg, call_arg_count, create_block,
-    current_block, declare_var, def_var, ins_brif0, ins_f32const, ins_f64const, ins_iconst,
-    ins_jump, ins_return, ins_trap, invalid, is_invalid, seal_block, set_srcloc, switch_to_block,
-    trap_user, ty_f32, ty_f64, ty_i64, use_var, value_type
+    Block, FuncId, Ty, Value, Var, append_block_param, call_arg, call_arg_count, create_block,
+    current_block, declare_var, def_var, import_function, inst_result, ins_brif0, ins_call,
+    ins_f32const, ins_f64const, ins_iconst, ins_jump, ins_return, ins_trap, invalid, is_invalid,
+    seal_block, set_srcloc, switch_to_block, trap_user, ty_f32, ty_f64, ty_i64, use_var, value_type
 };
-use super::{BODY_ERROR, HANDLED, coerce, planned};
+use super::{BODY_ERROR, DECLINED, HANDLED, coerce, planned};
 
 // The plan's lane codes (@vesper/codegen-scalar's `body.ves`).
 const LANE_I64: u64 = 1;
@@ -46,7 +50,10 @@ const INST_PLANNED: u64 = 1;
 const INST_READ: u64 = 2;
 const INST_BIND: u64 = 3;
 const INST_WRITE: u64 = 4;
+const INST_CALL: u64 = 5;
 const NO_LOCAL: u64 = 18446744073709551615;
+// `codegen_swap::body::NO_CALLEE`.
+const NO_CALLEE: u64 = 18446744073709551615;
 const TERM_RETURN: u64 = 0;
 const TERM_JUMP: u64 = 1;
 const TERM_BRANCH: u64 = 2;
@@ -132,6 +139,8 @@ struct Body {
     registers: ChunkSeq[u32],
     params: ChunkSeq[u32],
     values: ChunkSeq[u32],
+    // call position -> the function it calls
+    callees: ChunkSeq[u64],
 }
 
 impl Body {
@@ -152,7 +161,12 @@ impl Body {
     // One instruction (`ir_graph_at`'s instruction loop): its operands
     // read from their registers, its arm, the `coerce` to its type and the
     // definition of its register. False on a word the plan never writes.
-    fn inst(inout self, inout b: Builder, inout w: Words) -> bool eff [Ffi[Cranelift]] {
+    fn inst(
+        inout self,
+        inout b: Builder,
+        inout m: Module,
+        inout w: Words
+    ) -> bool eff [Ffi[Cranelift]] {
         let kind = w.next();
         let dest = w.next();
         let post = w.next();
@@ -216,6 +230,35 @@ impl Body {
             def_var(inout b, local, value);
             let zero = ins_iconst(inout b, ty_i64(), 0);
             coerce(inout b, zero, stated, self.optimize)
+        } else if kind == INST_CALL {
+            // `ir_temp` of each argument (a variable defined as its value),
+            // then `call_function_into`: each temporary read back and
+            // coerced to its type, the callee imported, and the call.
+            let position = w.next();
+            if position >= self.callees.len() {
+                return false;
+            }
+            let mut temps: ChunkSeq[u32] = ChunkSeq::new[u32]();
+            for k in 0..n {
+                let x = self.value(at64(in ops, k));
+                let lane = value_type(inout b, x);
+                let t = declare_var(inout b, lane);
+                def_var(inout b, t, x);
+                temps.push(t.id);
+            }
+            let mut args: ChunkSeq[u32] = ChunkSeq::new[u32]();
+            for k in 0..n {
+                let read = w.next();
+                let back = use_var(inout b, var_at(in temps, k));
+                args.push(coerce(inout b, back, read, self.optimize).id);
+            }
+            let callee = FuncId { id: wrapping_u32(at64(in self.callees, position)) };
+            let f = import_function(inout b, inout m, callee);
+            let count = ins_call(inout b, f, in args.as_slice());
+            if count == 0 {
+                return false;
+            }
+            inst_result(inout b, 0)
         } else {
             return false;
         };
@@ -293,11 +336,24 @@ impl Body {
 }
 
 // The whole body of one planned function on the lent builder, whose
-// current block is the function's entry: HANDLED, or BODY_ERROR when the
-// words are not a body plan (nothing is declined once emission starts).
-pub fn emit_body(call: u64, inout b: Builder) -> u64 eff [Ffi[Cranelift]] {
+// current block is the function's entry: HANDLED, DECLINED when a call is
+// not one the walk makes directly, or BODY_ERROR when the words are not a
+// body plan (nothing is declined once emission starts).
+pub fn emit_body(call: u64, inout b: Builder, inout m: Module) -> u64 eff [Ffi[Cranelift]] {
     let np = call_arg(call, ARG_PARAMS);
     let mut w = Words { call: call, at: wrapping_add(wrapping_add(ARG_PARAMS, 1), np) };
+    if call_arg_count(call) < wrapping_add(w.at, 3) {
+        return BODY_ERROR;
+    }
+    let nc = w.next();
+    let mut callees: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    for k in 0..nc {
+        let callee = w.next();
+        if callee == NO_CALLEE {
+            return DECLINED;
+        }
+        callees.push(callee);
+    }
     if call_arg_count(call) < wrapping_add(w.at, 2) {
         return BODY_ERROR;
     }
@@ -313,6 +369,7 @@ pub fn emit_body(call: u64, inout b: Builder) -> u64 eff [Ffi[Cranelift]] {
         registers: ChunkSeq::new[u32](),
         params: ChunkSeq::new[u32](),
         values: ChunkSeq::new[u32](),
+        callees: callees,
     };
     let status = call_arg(call, ARG_STATUS) != 0;
     // The graph's blocks: the entry is the current block.
@@ -380,7 +437,7 @@ pub fn emit_body(call: u64, inout b: Builder) -> u64 eff [Ffi[Cranelift]] {
         }
         let ic = w.next();
         for j in 0..ic {
-            if !s.inst(inout b, inout w) {
+            if !s.inst(inout b, inout m, inout w) {
                 return BODY_ERROR;
             }
         }

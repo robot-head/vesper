@@ -1,0 +1,15 @@
+[package]
+name = "@vesper/lsp-format"
+version = "0.1.0"
+edition = "2026"
+# The formatting action only computes over text the caller lends it. It is
+# its own package because @vesper/fmt links C BLAKE3 (@vesper-std/hash-sys),
+# which a Wasm entry does not have, and @vesper/lsp-features must still
+# build under Stage 2.
+capability_ceiling = ["Fail", "Alloc"]
+
+[dependencies]
+"@vesper/lsp-features" = { version = "^0.1", path = "../vesper-lsp-features" }
+"@vesper/span" = { version = "^0.1", path = "../../crates/vesper-span/vesper" }
+"@vesper/fmt" = { version = "^0.1", path = "../../crates/vesper-fmt/vesper" }
+"@vesper-std/hash" = { version = "^0.1", path = "../vesper-std/hash" }

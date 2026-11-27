@@ -238,16 +238,16 @@ fn main() {
             <div role="tabpanel" id="setup-bazel" aria-labelledby="setup-bazel-tab">
               <pre tabindex="0"><code data-lang="sh">git clone https://github.com/robot-head/vesper.git
 cd vesper
-bazel build //:bin/vesper
-bazel-bin/bin/vesper check examples/transaction.ves
-bazel-bin/bin/vesper run examples/transaction.ves</code></pre>
+bazel build //:vesper_shipped
+bazel-bin/shipped/vesper check examples/transaction.ves
+bazel-bin/shipped/vesper run examples/transaction.ves</code></pre>
             </div>
             <div role="tabpanel" id="setup-cargo" aria-labelledby="setup-cargo-tab" hidden>
               <pre tabindex="0"><code data-lang="sh">git clone https://github.com/robot-head/vesper.git
 cd vesper
-cargo build --locked -p vesper
-target/debug/vesper check examples/transaction.ves
-target/debug/vesper run examples/transaction.ves</code></pre>
+cargo build --locked -p vesper-hybrid --features gated-default
+target/debug/vesper-hybrid check examples/transaction.ves
+target/debug/vesper-hybrid run examples/transaction.ves</code></pre>
             </div>
           </div>
         </div>

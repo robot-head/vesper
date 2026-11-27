@@ -17,19 +17,25 @@ CI uses the Rust toolchain pinned in [MODULE.bazel](MODULE.bazel). Install
 [Bazelisk](https://github.com/bazelbuild/bazelisk) as `bazel`, then run:
 
 ```sh
-bazel build //:bin/vesper
-bazel-bin/bin/vesper --help
-bazel-bin/bin/vesper check examples/transaction.ves
-bazel-bin/bin/vesper run examples/fibonacci.ves
+bazel build //:vesper_shipped
+bazel-bin/shipped/vesper --help
+bazel-bin/shipped/vesper check examples/transaction.ves
+bazel-bin/shipped/vesper run examples/fibonacci.ves
 ```
 
 Cargo is also supported with a compatible Rust toolchain and a system C linker:
 
 ```sh
-cargo build --locked -p vesper
-cargo run --locked -p vesper -- --help
-cargo run --locked -p vesper -- check examples/transaction.ves
+cargo build --locked -p vesper-hybrid --features gated-default
+cargo run --locked -p vesper-hybrid --features gated-default -- --help
+cargo run --locked -p vesper-hybrid --features gated-default -- check examples/transaction.ves
 ```
+
+This `vesper` is the compiler hybrid: the parts of the compiler already
+ported to Vesper whose flip gate passed run in Vesper, and the rest in Rust
+([swap sets](crates/vesper-hybrid/src/swaps.rs)). The Rust compiler on its
+own is `//:bin/vesper` (`cargo build --locked -p vesper`), which also builds
+the ported parts.
 
 See [building with Bazel](docs/bazel.md) for toolchain setup, Windows support,
 and individual test targets. Lean checks use the version in

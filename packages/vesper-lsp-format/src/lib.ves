@@ -1,0 +1,82 @@
+// @vesper/lsp-format: the `textDocument/formatting` action of `vesper lsp`
+// (src/lsp/actions.rs) in Vesper, part 11a of #1828. Rust stays the
+// default; tests/self_host_lsp_features.rs compares this entry with the
+// Rust server.
+//
+// - formatting.ves: the action document checks, the canonical formatter,
+//   the recovery fallback and the result's JSON.
+
+use @vesper/span::{Limits};
+use @vesper/lsp-features::json::{pack};
+use self::formatting::{digest_len, edits_new, formatting_answer};
+
+copy struct Reader {
+    pos: u64
+}
+
+fn word(in b: Slice[u8], inout r: Reader) -> u64 {
+    let x = b.try_read_u64_le(r.pos).unwrap_or(0);
+    r.pos = wrapping_add(r.pos, 8);
+    x
+}
+
+// The ten words of `vesper_span::Limits`, in field order.
+fn read_index(in b: Slice[u8], inout r: Reader) -> Limits {
+    Limits {
+        max_source_bytes: narrow_usize(word(in b, inout r)),
+        max_lines: narrow_usize(word(in b, inout r)),
+        max_metadata_bytes: narrow_usize(word(in b, inout r)),
+        max_work: narrow_usize(word(in b, inout r)),
+        max_edits: narrow_usize(word(in b, inout r)),
+        max_output_bytes: narrow_usize(word(in b, inout r)),
+        max_diagnostics: narrow_usize(word(in b, inout r)),
+        max_labels: narrow_usize(word(in b, inout r)),
+        max_fixes: narrow_usize(word(in b, inout r)),
+        max_text_bytes: narrow_usize(word(in b, inout r))
+    }
+}
+
+fn text_at(in b: Slice[u8], off: u64, len: u64) -> String {
+    match String::from_utf8(in b[off..wrapping_add(off, len)]) {
+        Option::Some(s) => s,
+        Option::None => String::new(),
+    }
+}
+
+// Task "formatting": `textDocument/formatting` (formatting.ves). The input
+// is the rounds, the document version (an i64), whether an expected stamp
+// is given, its version and its 32-byte digest (four words), the ten index
+// limit words, the URI and source lengths, then the URI and the source.
+// The answer is computed `rounds` times; the result is its text.
+pub fn lsp_formatting(in input: Str) -> ChunkSeq[u64] {
+    let b = input.as_bytes();
+    let mut r = Reader { pos: 0 };
+    let rounds = word(in b, inout r);
+    let version = wrapping_i64(word(in b, inout r));
+    let has_expected = word(in b, inout r) == 1;
+    let expected_version = wrapping_i64(word(in b, inout r));
+    let mut digest: ChunkSeq[u8] = ChunkSeq::new();
+    digest.extend(in b[r.pos..wrapping_add(r.pos, digest_len())]);
+    r.pos = wrapping_add(r.pos, digest_len());
+    let l = read_index(in b, inout r);
+    let uri_len = word(in b, inout r);
+    let src_len = word(in b, inout r);
+    let uri = text_at(in b, r.pos, uri_len);
+    let src = text_at(in b, wrapping_add(r.pos, uri_len), src_len);
+    let mut out = ChunkSeq::new[u8]();
+    let mut edits = edits_new();
+    for k in 0..rounds {
+        formatting_answer(
+            inout out,
+            inout edits,
+            in uri,
+            version,
+            in src,
+            in l,
+            has_expected,
+            expected_version,
+            in digest
+        );
+    }
+    pack(in out.as_slice())
+}

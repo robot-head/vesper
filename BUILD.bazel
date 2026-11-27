@@ -1,3 +1,4 @@
+load("@bazel_skylib//rules:copy_file.bzl", "copy_file")
 load("//tools/bazel:defs.bzl", "vesper_crate")
 load("//tools/bazel:vesper_port.bzl", "vesper_package")
 load("//tools/bazel/tests:ci_analysis_test.bzl", "compile_inputs_test", "environment_test", "runfiles_test")
@@ -30,6 +31,48 @@ _TOOLS = [
     "//crates/vesper-tools:bin/vesper-top",
     "//crates/vesper-tools:bin/vesper-traceparent",
 ]
+
+# The hybrid under the name the default compiler ships as (#1397, the
+# default switch): started as `vesper`, it runs the gated swap set with no
+# variable (crates/vesper-hybrid/src/swaps.rs), so this is the compiler the
+# default `vesper` switches to. A copy, not a second build of the crate, and
+# not a symlink: the tool lookup starts from the resolved executable, so a
+# symlink would look beside `crates/vesper-hybrid/bin/`. The copy sits at
+# `<bin>/shipped/vesper` and finds the tools (data below) at
+# `<bin>/crates/vesper-tools/bin/`, as `//:bin/vesper` does.
+_HYBRID = "//crates/vesper-hybrid:bin/vesper-hybrid"
+
+copy_file(
+    name = "vesper_shipped_unix",
+    src = _HYBRID,
+    out = "shipped/vesper",
+    is_executable = True,
+)
+
+copy_file(
+    name = "vesper_shipped_windows",
+    src = _HYBRID,
+    out = "shipped/vesper.exe",
+    is_executable = True,
+)
+
+filegroup(
+    name = "vesper_shipped",
+    srcs = select({
+        "@platforms//os:windows": [":vesper_shipped_windows"],
+        "//conditions:default": [":vesper_shipped_unix"],
+    }),
+    data = _TOOLS,
+    visibility = ["//visibility:public"],
+)
+
+# The tools on their own, for builds that download only top-level outputs
+# (`aspect ci prebuild-acceptance`): a filegroup's data is not fetched there.
+filegroup(
+    name = "vesper_tools",
+    srcs = _TOOLS,
+    visibility = ["//visibility:public"],
+)
 
 # The root package also owns docs/, examples/, lean/, scripts/ and tools/
 # (directories without their own BUILD.bazel), which the CLI and its tests read.
@@ -893,11 +936,13 @@ vesper_crate(
             "tests/fixtures/**",
             "src/lsp/fixtures/**",
             "packages/vesper-lsp-features/**",
+            "packages/vesper-lsp-format/**",
             "packages/vesper-ast/**",
             "packages/vesper-check-data/**",
             "packages/vesper-front/**",
             "packages/vesper-std/**",
         ]) + [
+            "//crates/vesper-fmt:files",
             "//crates/vesper-span:files",
         ],
         # @vesper-std/fs, process and env (#1125): drivers over the packages
@@ -1139,6 +1184,12 @@ vesper_crate(
         # about 5 GiB per shard locally (#1913).
         "test/self_host_swap_inputs": [
             "resources:memory:6144",
+        ],
+        # Per shard, after lowering only the shard's worlds: 7.8-8.3 GiB peak
+        # RSS locally, most of it the checked corpus. Holding every world's
+        # IR and mutants (over 13 GiB) got shards killed on #2253 and #2267.
+        "test/self_host_ir_opt_policy": [
+            "resources:memory:9216",
         ],
         # One thread, but it keeps every fixture world's check data and
         # machine arenas: 12.3 GiB peak RSS locally (782 runs, Nov 2026).
