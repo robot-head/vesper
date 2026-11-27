@@ -1,4 +1,4 @@
-// The `body` hook's emission (#2094, part 6a of #1509): a whole scalar
+// The `body` hook's emission (#2094, parts 6a-6c of #1509): a whole scalar
 // function's body on the lent builder, from @vesper/codegen-scalar's body
 // plan (`codegen_scalar_body_plan`), in the order `Codegen::ir_graph_at`
 // (src/native.rs) makes its builder calls, so the CLIF is the Rust walk's.
@@ -9,54 +9,174 @@
 // register-status Fail ABI), whether instructions carry source locations,
 // the variables the entry block bound the parameters to, and for each of
 // the function's calls the function the walk would call directly
-// (part 6b), or NO_CALLEE, which declines the body.
-//
-// The plan words are, in order:
-//
-// - the block count and the parameter count;
-// - the locals, in name order: a lane code for a local the body declares
-//   and zeroes, `LOCAL_PARAM` plus the index for a parameter;
-// - the values, a lane code each: each gets a zeroed register variable;
-// - each block's parameters (a count, then value indexes);
-// - the lowering order, a block and its seal flag per position;
-// - per block in that order, its instructions and its terminator.
-//
-// An instruction is `[kind, dest, post, location, n, n operand values]`
-// (the location is a source offset, or NO_LOCATION), then a
-// planned request and its two immediates (INST_PLANNED), a local and the
-// read's kind (INST_READ), a local or NO_LOCAL (INST_BIND), a local,
-// the temporary's kind and the statement's kind (INST_WRITE), or the
-// call's position among the callees and each argument's read kind
-// (INST_CALL). A
-// terminator is `[code, ...]`: a value and the lane of the default that
-// stands for a `Never` value (0: none) for `return`; a target block and
-// that pair per argument for `jump`; a condition and two blocks for
-// `branch`; nothing for `unreachable`.
+// (part 6b), or NO_CALLEE (allowed for builtin calls, declines otherwise).
 
+use @vesper/cranelift::codes::{Bin, Cv, FloatCc, Ternary, TyCode, Un};
 use @vesper/cranelift::{
-    Block, FuncId, Ty, Value, Var, append_block_param, call_arg, call_arg_count, create_block,
-    current_block, declare_var, def_var, import_function, inst_result, ins_brif0, ins_call,
-    ins_f32const, ins_f64const, ins_iconst, ins_jump, ins_return, ins_trap, invalid, is_invalid,
-    seal_block, set_srcloc, switch_to_block, trap_user, ty_f32, ty_f64, ty_i64, use_var, value_type
+    Block, FuncId, Ty, Value, Var, append_block_param, call_arg, call_arg_count, cc_eq, cc_ne,
+    cc_sge, cc_sgt, cc_sle, cc_slt, cc_uge, cc_ugt, cc_ule, cc_ult, create_block, current_block,
+    declare_var, def_var, import_function, ins_band, ins_band_imm, ins_binary, ins_bitcast,
+    ins_bnot, ins_bor, ins_brif0, ins_bxor, ins_call, ins_clz, ins_convert, ins_ctz, ins_f32const,
+    ins_f64const, ins_fadd, ins_fcmp, ins_fdiv, ins_fmul, ins_fneg, ins_fsub, ins_iadd, ins_icmp,
+    ins_icmp_imm, ins_iconcat, ins_iconst, ins_imul, ins_ineg, ins_ireduce, ins_ishl, ins_isub,
+    ins_jump, ins_popcnt, ins_return, ins_sdiv, ins_select, ins_sextend, ins_srem, ins_sshr,
+    ins_trap, ins_udiv, ins_uextend, ins_unary, ins_urem, ins_ushr, inst_result, invalid,
+    is_invalid, seal_block, set_srcloc, switch_to_block, trap_user, ty_f32, ty_f64, ty_i128, ty_i32,
+    ty_i64, ty_i8, use_var, vals1, value_type
 };
-use super::{BODY_ERROR, DECLINED, HANDLED, coerce, planned};
+use super::{
+    BODY_ERROR, DECLINED, HANDLED, coerce, kind_max_imm, kind_min_imm, kind_unsigned, narrow_type,
+    operand, planned, temp
+};
 
 // The plan's lane codes (@vesper/codegen-scalar's `body.ves`).
 const LANE_I64: u64 = 1;
 const LANE_F32: u64 = 2;
 const LANE_F64: u64 = 3;
+const LANE_I128: u64 = 4;
 const LOCAL_PARAM: u64 = 16;
+
+// Instruction kinds (`body.ves`).
 const INST_PLANNED: u64 = 1;
 const INST_READ: u64 = 2;
 const INST_BIND: u64 = 3;
 const INST_WRITE: u64 = 4;
 const INST_CALL: u64 = 5;
+const INST_F32CONST: u64 = 6;
+const INST_FLOAT_UNARY: u64 = 7;
+const INST_FLOAT_BINARY: u64 = 8;
+const INST_INT_EXTRA: u64 = 9;
+const INST_WRITE_OP: u64 = 10;
+const INST_EXIT: u64 = 11;
+const INST_CALL_BUILTIN: u64 = 12;
+const INST_WIDE_CONST: u64 = 13;
+const INST_WIDE_UNARY: u64 = 14;
+const INST_WIDE_BINARY: u64 = 15;
+
+// Sub-operations of `INST_FLOAT_UNARY` and `CB_FLOAT_UNARY`.
+const FUN_FNEG: u64 = 1;
+const FUN_SQRT: u64 = 2;
+const FUN_ABS: u64 = 3;
+const FUN_FLOOR: u64 = 4;
+const FUN_CEIL: u64 = 5;
+const FUN_TRUNC: u64 = 6;
+const FUN_ROUND: u64 = 7;
+const FUN_FPROMOTE: u64 = 8;
+const FUN_FDEMOTE: u64 = 9;
+const FUN_FNOOP: u64 = 10;
+const FUN_FCVT_SINT: u64 = 11;
+const FUN_FCVT_UINT: u64 = 12;
+const FUN_TO_BITS_F64: u64 = 13;
+const FUN_TO_BITS_F32: u64 = 14;
+const FUN_FROM_BITS_F64: u64 = 15;
+const FUN_FROM_BITS_F32: u64 = 16;
+const FUN_SAT_TO_INT: u64 = 17;
+
+// Sub-operations of `INST_FLOAT_BINARY`.
+const FBIN_ADD: u64 = 1;
+const FBIN_SUB: u64 = 2;
+const FBIN_MUL: u64 = 3;
+const FBIN_DIV: u64 = 4;
+const FBIN_MIN: u64 = 5;
+const FBIN_MAX: u64 = 6;
+const FBIN_EQ: u64 = 7;
+const FBIN_NE: u64 = 8;
+const FBIN_LT: u64 = 9;
+const FBIN_LE: u64 = 10;
+const FBIN_GT: u64 = 11;
+const FBIN_GE: u64 = 12;
+
+// Sub-operations of `INST_INT_EXTRA`.
+const IEX_WIDEN_U64: u64 = 1;
+const IEX_BIT_UNARY: u64 = 2;
+const IEX_BIT_BINARY: u64 = 3;
+const IEX_BITWISE: u64 = 4;
+const IEX_SDIV: u64 = 5;
+const IEX_SREM: u64 = 6;
+
+// Sub-operations of `INST_WRITE_OP`.
+const WOP_IADD: u64 = 1;
+const WOP_ISUB: u64 = 2;
+const WOP_IMUL: u64 = 3;
+const WOP_UDIV: u64 = 4;
+const WOP_SDIV: u64 = 5;
+const WOP_UREM: u64 = 6;
+const WOP_SREM: u64 = 7;
+const WOP_BAND: u64 = 8;
+const WOP_BOR: u64 = 9;
+const WOP_BXOR: u64 = 10;
+const WOP_FADD: u64 = 11;
+const WOP_FSUB: u64 = 12;
+const WOP_FMUL: u64 = 13;
+const WOP_FDIV: u64 = 14;
+
+// Sub-operations of `INST_CALL_BUILTIN`.
+const CB_BIT: u64 = 1;
+const CB_FMA: u64 = 2;
+const CB_FMIN: u64 = 3;
+const CB_FMAX: u64 = 4;
+const CB_FLOAT_UNARY: u64 = 5;
+const CB_WIDE_BIT: u64 = 6;
+const CB_BITWISE: u64 = 7;
+const CB_WIDE_CONVERT: u64 = 8;
+
+// Bit builtin and bitwise intrinsic codes.
+const BIT_OP_CLZ: u64 = 1;
+const BIT_OP_CTZ: u64 = 2;
+const BIT_OP_POPCNT: u64 = 3;
+const BIT_OP_WRAPPING_SHL: u64 = 4;
+const BIT_OP_WRAPPING_SHR: u64 = 5;
+const BIT_OP_WRAPPING_NEG: u64 = 6;
+const BIT_INTR_AND: u64 = 1;
+const BIT_INTR_OR: u64 = 2;
+const BIT_INTR_XOR: u64 = 3;
+const BIT_INTR_SHL: u64 = 4;
+const BIT_INTR_SHR: u64 = 5;
+
+// Match arm condition kinds (`TERM_MATCH`).
+const MATCH_TRUE: u64 = 1;
+const MATCH_INT: u64 = 2;
+const MATCH_F32: u64 = 3;
+const MATCH_F64: u64 = 4;
+const MATCH_WIDE: u64 = 5;
+
+// Sub-operations of `INST_WIDE_UNARY`.
+const WUN_BNOT: u64 = 1;
+const WUN_INEG: u64 = 2;
+const WUN_CONVERT: u64 = 3;
+const WUN_BIT: u64 = 4;
+
+// Sub-operations of `INST_WIDE_BINARY`.
+const WBIN_IADD: u64 = 1;
+const WBIN_ISUB: u64 = 2;
+const WBIN_IMUL: u64 = 3;
+const WBIN_BAND: u64 = 4;
+const WBIN_BOR: u64 = 5;
+const WBIN_BXOR: u64 = 6;
+const WBIN_EQ: u64 = 7;
+const WBIN_NE: u64 = 8;
+const WBIN_SLT: u64 = 9;
+const WBIN_SLE: u64 = 10;
+const WBIN_SGT: u64 = 11;
+const WBIN_SGE: u64 = 12;
+const WBIN_ULT: u64 = 13;
+const WBIN_ULE: u64 = 14;
+const WBIN_UGT: u64 = 15;
+const WBIN_UGE: u64 = 16;
+const WBIN_SHL: u64 = 17;
+const WBIN_USHR: u64 = 18;
+const WBIN_SSHR: u64 = 19;
+
+const KIND_WIDE_I128: u64 = 11;
+const KIND_WIDE_U128: u64 = 12;
+
 const NO_LOCAL: u64 = 18446744073709551615;
 // `codegen_swap::body::NO_CALLEE`.
 const NO_CALLEE: u64 = 18446744073709551615;
 const TERM_RETURN: u64 = 0;
 const TERM_JUMP: u64 = 1;
 const TERM_BRANCH: u64 = 2;
+const TERM_MATCH: u64 = 3;
 const TERM_UNREACHABLE: u64 = 4;
 
 // Argument positions.
@@ -67,6 +187,21 @@ const ARG_PARAMS: u64 = 3;
 
 // An instruction with no span keeps the location before it.
 const NO_LOCATION: u64 = 18446744073709551615;
+
+// Numeric constants.
+const WORD_BITS: u64 = 64;
+const KIND_U8: u64 = 1;
+const KIND_U16: u64 = 2;
+const KIND_U32: u64 = 3;
+const KIND_I8: u64 = 6;
+const KIND_I16: u64 = 7;
+const KIND_I32: u64 = 8;
+const F32_HALF_BITS: u32 = 1056964608;
+const F32_ONE_BITS: u32 = 1065353216;
+const F64_HALF_BITS: u64 = 4602678819172646912;
+const F64_ONE_BITS: u64 = 4607182418800017408;
+const I64_MIN_IMM: i64 = -9223372036854775807 - 1;
+const UNREACHABLE_TRAP: u32 = 1;
 
 // A reader over the request's words.
 struct Words {
@@ -102,8 +237,70 @@ fn lane_type(lane: u64) -> Ty {
         ty_f32()
     } else if lane == LANE_F64 {
         ty_f64()
+    } else if lane == LANE_I128 {
+        ty_i128()
     } else {
         ty_i64()
+    }
+}
+
+fn wide_const(inout b: Builder, lo: u64, hi: u64) -> Value eff [Ffi[Cranelift]] {
+    let low = ins_iconst(inout b, ty_i64(), wrapping_i64(lo));
+    let high = ins_iconst(inout b, ty_i64(), wrapping_i64(hi));
+    ins_iconcat(inout b, low, high)
+}
+
+fn is_wide_kind(kind: u64) -> bool {
+    kind == KIND_WIDE_I128 || kind == KIND_WIDE_U128
+}
+
+// Full `Codegen::coerce` including `I64 <-> I128` widening/narrowing.
+fn body_coerce(
+    inout b: Builder,
+    v: Value,
+    kind: u64,
+    optimize: bool
+) -> Value eff [Ffi[Cranelift]] {
+    if kind == 0 {
+        return v;
+    }
+    let lane = value_type(inout b, v).code;
+    if is_wide_kind(kind) {
+        if lane == TyCode::I64 {
+            return if kind == KIND_WIDE_I128 {
+                ins_sextend(inout b, ty_i128(), v)
+            } else {
+                ins_uextend(inout b, ty_i128(), v)
+            };
+        }
+        return v;
+    }
+    if lane == TyCode::I128 {
+        let low = ins_ireduce(inout b, ty_i64(), v);
+        return coerce(inout b, low, kind, optimize);
+    }
+    coerce(inout b, v, kind, optimize)
+}
+
+fn body_operand(
+    inout b: Builder,
+    var: Var,
+    kind: u64,
+    optimize: bool
+) -> Value eff [Ffi[Cranelift]] {
+    let v = use_var(inout b, var);
+    body_coerce(inout b, v, kind, optimize)
+}
+
+fn word_kind_bits(kind: u64) -> u64 {
+    if kind == KIND_U8 || kind == KIND_I8 {
+        8
+    } else if kind == KIND_U16 || kind == KIND_I16 {
+        16
+    } else if kind == KIND_U32 || kind == KIND_I32 {
+        32
+    } else {
+        WORD_BITS
     }
 }
 
@@ -113,6 +310,8 @@ fn zero_of(inout b: Builder, lane: u64) -> Value eff [Ffi[Cranelift]] {
         ins_f32const(inout b, 0)
     } else if lane == LANE_F64 {
         ins_f64const(inout b, 0)
+    } else if lane == LANE_I128 {
+        wide_const(inout b, 0, 0)
     } else {
         ins_iconst(inout b, ty_i64(), 0)
     }
@@ -126,9 +325,397 @@ fn zeroed(inout b: Builder, lane: u64) -> u32 eff [Ffi[Cranelift]] {
     var.id
 }
 
+fn has_call(in list: ChunkSeq[u64], idx: u64) -> bool {
+    for k in 0..list.len() {
+        if at64(in list, k) == idx {
+            return true;
+        }
+    }
+    false
+}
+
+// `Codegen::binary`'s guarded signed 64-bit division (`i64::MIN / -1` wraps).
+fn emit_sdiv_guarded(inout b: Builder, lhs: Value, rhs: Value) -> Value eff [Ffi[Cranelift]] {
+    let is_min = ins_icmp_imm(inout b, cc_eq(), lhs, I64_MIN_IMM);
+    let minus_one = ins_icmp_imm(inout b, cc_eq(), rhs, -1);
+    let overflow = ins_band(inout b, is_min, minus_one);
+    let wrap = create_block(inout b);
+    let divide = create_block(inout b);
+    let join = create_block(inout b);
+    let result_param = append_block_param(inout b, join, ty_i64());
+    ins_brif0(inout b, overflow, wrap, divide);
+    switch_to_block(inout b, wrap);
+    let wrap_args = vals1(lhs);
+    ins_jump(inout b, join, in wrap_args.as_slice());
+    switch_to_block(inout b, divide);
+    let quot = ins_sdiv(inout b, lhs, rhs);
+    let div_args = vals1(quot);
+    ins_jump(inout b, join, in div_args.as_slice());
+    switch_to_block(inout b, join);
+    result_param
+}
+
+// `Codegen::bit_builtin` on one-word integer kind `kind`.
+fn emit_bit_builtin(
+    inout b: Builder,
+    bop: u64,
+    kind: u64,
+    lhs: Value,
+    rhs: Value
+) -> Value eff [Ffi[Cranelift]] {
+    let bits = word_kind_bits(kind);
+    let narrowed = if bits == WORD_BITS {
+        lhs
+    } else {
+        ins_ireduce(inout b, narrow_type(bits), lhs)
+    };
+    let unsigned = kind_unsigned(kind);
+    let mut signed = !unsigned;
+    let raw = if bop == BIT_OP_CLZ {
+        signed = false;
+        ins_clz(inout b, narrowed)
+    } else if bop == BIT_OP_CTZ {
+        signed = false;
+        ins_ctz(inout b, narrowed)
+    } else if bop == BIT_OP_POPCNT {
+        signed = false;
+        ins_popcnt(inout b, narrowed)
+    } else if bop == BIT_OP_WRAPPING_NEG {
+        ins_ineg(inout b, narrowed)
+    } else if bop == BIT_OP_WRAPPING_SHL {
+        ins_ishl(inout b, narrowed, rhs)
+    } else if unsigned {
+        ins_ushr(inout b, narrowed, rhs)
+    } else {
+        ins_sshr(inout b, narrowed, rhs)
+    };
+    if bits == WORD_BITS {
+        raw
+    } else if signed {
+        ins_sextend(inout b, ty_i64(), raw)
+    } else {
+        ins_uextend(inout b, ty_i64(), raw)
+    }
+}
+
+// `Codegen::bitwise` on one-word integer kind `kind`.
+fn emit_bitwise(
+    inout b: Builder,
+    intr: u64,
+    kind: u64,
+    lhs: Value,
+    rhs: Value
+) -> Value eff [Ffi[Cranelift]] {
+    if intr == BIT_INTR_AND {
+        return ins_band(inout b, lhs, rhs);
+    }
+    if intr == BIT_INTR_OR {
+        return ins_bor(inout b, lhs, rhs);
+    }
+    if intr == BIT_INTR_XOR {
+        return ins_bxor(inout b, lhs, rhs);
+    }
+    let mask = wrapping_sub(wrapping_i64(word_kind_bits(kind)), 1);
+    let amount = ins_band_imm(inout b, rhs, mask);
+    if intr == BIT_INTR_SHL {
+        ins_ishl(inout b, lhs, amount)
+    } else if kind_unsigned(kind) {
+        ins_ushr(inout b, lhs, amount)
+    } else {
+        ins_sshr(inout b, lhs, amount)
+    }
+}
+
+// `Codegen::float_unary` and float unary `-` (`denorm` is empty on plain bodies).
+fn emit_float_unary(
+    inout b: Builder,
+    fun: u64,
+    meta: u64,
+    src: Value
+) -> Value eff [Ffi[Cranelift]] {
+    if fun == FUN_FNEG {
+        return ins_fneg(inout b, src);
+    }
+    if fun == FUN_SQRT {
+        return ins_unary(inout b, Un::Sqrt, src);
+    }
+    if fun == FUN_ABS {
+        return ins_unary(inout b, Un::Fabs, src);
+    }
+    if fun == FUN_FLOOR {
+        return ins_unary(inout b, Un::Floor, src);
+    }
+    if fun == FUN_CEIL {
+        return ins_unary(inout b, Un::Ceil, src);
+    }
+    if fun == FUN_TRUNC {
+        return ins_unary(inout b, Un::Trunc, src);
+    }
+    if fun == FUN_ROUND {
+        let is32 = value_type(inout b, src).code == TyCode::F32;
+        let t = ins_unary(inout b, Un::Trunc, src);
+        let dist = ins_binary(inout b, Bin::Fsub, src, t);
+        let dist = ins_unary(inout b, Un::Fabs, dist);
+        let half = if is32 {
+            ins_f32const(inout b, F32_HALF_BITS)
+        } else {
+            ins_f64const(inout b, F64_HALF_BITS)
+        };
+        let far = ins_fcmp(inout b, FloatCc::Ge, dist, half);
+        let one = if is32 {
+            ins_f32const(inout b, F32_ONE_BITS)
+        } else {
+            ins_f64const(inout b, F64_ONE_BITS)
+        };
+        let step = ins_binary(inout b, Bin::Fcopysign, one, src);
+        let away = ins_binary(inout b, Bin::Fadd, t, step);
+        return ins_select(inout b, far, away, t);
+    }
+    if fun == FUN_FPROMOTE {
+        return ins_convert(inout b, Cv::Fpromote, ty_f64(), src);
+    }
+    if fun == FUN_FDEMOTE {
+        return ins_convert(inout b, Cv::Fdemote, ty_f32(), src);
+    }
+    if fun == FUN_FNOOP {
+        return src;
+    }
+    if fun == FUN_FCVT_SINT {
+        return ins_convert(inout b, Cv::FcvtFromSint, lane_type(meta), src);
+    }
+    if fun == FUN_FCVT_UINT {
+        return ins_convert(inout b, Cv::FcvtFromUint, lane_type(meta), src);
+    }
+    if fun == FUN_TO_BITS_F64 {
+        return ins_bitcast(inout b, ty_i64(), src);
+    }
+    if fun == FUN_TO_BITS_F32 {
+        let w32 = ins_bitcast(inout b, ty_i32(), src);
+        return ins_uextend(inout b, ty_i64(), w32);
+    }
+    if fun == FUN_FROM_BITS_F64 {
+        return ins_bitcast(inout b, ty_f64(), src);
+    }
+    if fun == FUN_FROM_BITS_F32 {
+        let w32 = ins_ireduce(inout b, ty_i32(), src);
+        return ins_bitcast(inout b, ty_f32(), w32);
+    }
+    if fun == FUN_SAT_TO_INT {
+        let bits = word_kind_bits(meta);
+        if !kind_unsigned(meta) {
+            let n = ins_convert(inout b, Cv::FcvtToSintSat, ty_i64(), src);
+            if bits == WORD_BITS {
+                return n;
+            }
+            let lo = ins_iconst(inout b, ty_i64(), kind_min_imm(meta));
+            let hi = ins_iconst(inout b, ty_i64(), kind_max_imm(meta));
+            let clamped = ins_binary(inout b, Bin::Smax, n, lo);
+            return ins_binary(inout b, Bin::Smin, clamped, hi);
+        } else {
+            let n = ins_convert(inout b, Cv::FcvtToUintSat, ty_i64(), src);
+            if bits == WORD_BITS {
+                return n;
+            }
+            let hi = ins_iconst(inout b, ty_i64(), kind_max_imm(meta));
+            return ins_binary(inout b, Bin::Umin, n, hi);
+        }
+    }
+    Value { id: invalid() }
+}
+
+fn emit_float_binary(
+    inout b: Builder,
+    fb: u64,
+    lhs0: Value,
+    rhs0: Value
+) -> Value eff [Ffi[Cranelift]] {
+    let lhs_var = temp(inout b, lhs0);
+    let rhs_var = temp(inout b, rhs0);
+    let lhs = use_var(inout b, lhs_var);
+    let rhs = use_var(inout b, rhs_var);
+    if fb == FBIN_ADD {
+        return ins_fadd(inout b, lhs, rhs);
+    }
+    if fb == FBIN_SUB {
+        return ins_fsub(inout b, lhs, rhs);
+    }
+    if fb == FBIN_MUL {
+        return ins_fmul(inout b, lhs, rhs);
+    }
+    if fb == FBIN_DIV {
+        return ins_fdiv(inout b, lhs, rhs);
+    }
+    if fb == FBIN_MIN {
+        return ins_binary(inout b, Bin::Fmin, lhs, rhs);
+    }
+    if fb == FBIN_MAX {
+        return ins_binary(inout b, Bin::Fmax, lhs, rhs);
+    }
+    let cc = if fb == FBIN_EQ {
+        FloatCc::Eq
+    } else if fb == FBIN_NE {
+        FloatCc::Ne
+    } else if fb == FBIN_LT {
+        FloatCc::Lt
+    } else if fb == FBIN_LE {
+        FloatCc::Le
+    } else if fb == FBIN_GT {
+        FloatCc::Gt
+    } else if fb == FBIN_GE {
+        FloatCc::Ge
+    } else {
+        return Value { id: invalid() };
+    };
+    let cmp = ins_fcmp(inout b, cc, lhs, rhs);
+    ins_uextend(inout b, ty_i64(), cmp)
+}
+
+fn emit_write_op(inout b: Builder, wop: u64, old: Value, rhs: Value) -> Value eff [Ffi[Cranelift]] {
+    if wop == WOP_IADD {
+        ins_iadd(inout b, old, rhs)
+    } else if wop == WOP_ISUB {
+        ins_isub(inout b, old, rhs)
+    } else if wop == WOP_IMUL {
+        ins_imul(inout b, old, rhs)
+    } else if wop == WOP_UDIV {
+        ins_udiv(inout b, old, rhs)
+    } else if wop == WOP_SDIV {
+        emit_sdiv_guarded(inout b, old, rhs)
+    } else if wop == WOP_UREM {
+        ins_urem(inout b, old, rhs)
+    } else if wop == WOP_SREM {
+        ins_srem(inout b, old, rhs)
+    } else if wop == WOP_BAND {
+        ins_band(inout b, old, rhs)
+    } else if wop == WOP_BOR {
+        ins_bor(inout b, old, rhs)
+    } else if wop == WOP_BXOR {
+        ins_bxor(inout b, old, rhs)
+    } else if wop == WOP_FADD {
+        ins_fadd(inout b, old, rhs)
+    } else if wop == WOP_FSUB {
+        ins_fsub(inout b, old, rhs)
+    } else if wop == WOP_FMUL {
+        ins_fmul(inout b, old, rhs)
+    } else if wop == WOP_FDIV {
+        ins_fdiv(inout b, old, rhs)
+    } else {
+        Value { id: invalid() }
+    }
+}
+
+fn emit_wide_unary(
+    inout b: Builder,
+    wun: u64,
+    a: u64,
+    c: u64,
+    src: Value,
+    optimize: bool
+) -> Value eff [Ffi[Cranelift]] {
+    if wun == WUN_BNOT {
+        return ins_bnot(inout b, src);
+    }
+    if wun == WUN_INEG {
+        return ins_ineg(inout b, src);
+    }
+    if wun == WUN_CONVERT {
+        let x = if is_wide_kind(a) {
+            src
+        } else if !kind_unsigned(a) {
+            ins_sextend(inout b, ty_i128(), src)
+        } else {
+            ins_uextend(inout b, ty_i128(), src)
+        };
+        if is_wide_kind(c) {
+            return x;
+        }
+        let low = ins_ireduce(inout b, ty_i64(), x);
+        return coerce(inout b, low, c, optimize);
+    }
+    if wun == WUN_BIT {
+        if a == BIT_OP_CLZ {
+            let r = ins_clz(inout b, src);
+            return ins_ireduce(inout b, ty_i64(), r);
+        }
+        if a == BIT_OP_CTZ {
+            let r = ins_ctz(inout b, src);
+            return ins_ireduce(inout b, ty_i64(), r);
+        }
+        if a == BIT_OP_POPCNT {
+            let r = ins_popcnt(inout b, src);
+            return ins_ireduce(inout b, ty_i64(), r);
+        }
+        if a == BIT_OP_WRAPPING_NEG {
+            return ins_ineg(inout b, src);
+        }
+    }
+    Value { id: invalid() }
+}
+
+fn emit_wide_binary(
+    inout b: Builder,
+    wb: u64,
+    lhs: Value,
+    rhs: Value
+) -> Value eff [Ffi[Cranelift]] {
+    if wb == WBIN_IADD {
+        return ins_iadd(inout b, lhs, rhs);
+    }
+    if wb == WBIN_ISUB {
+        return ins_isub(inout b, lhs, rhs);
+    }
+    if wb == WBIN_IMUL {
+        return ins_imul(inout b, lhs, rhs);
+    }
+    if wb == WBIN_BAND {
+        return ins_band(inout b, lhs, rhs);
+    }
+    if wb == WBIN_BOR {
+        return ins_bor(inout b, lhs, rhs);
+    }
+    if wb == WBIN_BXOR {
+        return ins_bxor(inout b, lhs, rhs);
+    }
+    if wb == WBIN_SHL {
+        return ins_ishl(inout b, lhs, rhs);
+    }
+    if wb == WBIN_USHR {
+        return ins_ushr(inout b, lhs, rhs);
+    }
+    if wb == WBIN_SSHR {
+        return ins_sshr(inout b, lhs, rhs);
+    }
+    let cc = if wb == WBIN_EQ {
+        cc_eq()
+    } else if wb == WBIN_NE {
+        cc_ne()
+    } else if wb == WBIN_SLT {
+        cc_slt()
+    } else if wb == WBIN_SLE {
+        cc_sle()
+    } else if wb == WBIN_SGT {
+        cc_sgt()
+    } else if wb == WBIN_SGE {
+        cc_sge()
+    } else if wb == WBIN_ULT {
+        cc_ult()
+    } else if wb == WBIN_ULE {
+        cc_ule()
+    } else if wb == WBIN_UGT {
+        cc_ugt()
+    } else if wb == WBIN_UGE {
+        cc_uge()
+    } else {
+        return Value { id: invalid() };
+    };
+    let cmp = ins_icmp(inout b, cc, lhs, rhs);
+    ins_uextend(inout b, ty_i64(), cmp)
+}
+
 // The function's emission state.
 struct Body {
     optimize: bool,
+    status: bool,
     locations: bool,
     // block index -> its Cranelift block
     blocks: ChunkSeq[u32],
@@ -139,7 +726,7 @@ struct Body {
     registers: ChunkSeq[u32],
     params: ChunkSeq[u32],
     values: ChunkSeq[u32],
-    // call position -> the function it calls
+    // call index -> its module FuncId word (from the request's callees)
     callees: ChunkSeq[u64],
 }
 
@@ -156,6 +743,16 @@ impl Body {
     fn read(inout self, inout b: Builder, i: u64) eff [Ffi[Cranelift]] {
         let v = use_var(inout b, var_at(in self.registers, i));
         let ok = self.values.try_set(i, v.id);
+    }
+
+    fn emit_return_value(inout self, inout b: Builder, v: Value) eff [Ffi[Cranelift]] {
+        let mut out: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        out.push(v.id);
+        if self.status {
+            let ok = ins_iconst(inout b, ty_i64(), 0);
+            out.push(ok.id);
+        }
+        ins_return(inout b, in out.as_slice());
     }
 
     // One instruction (`ir_graph_at`'s instruction loop): its operands
@@ -209,7 +806,7 @@ impl Body {
             let local = var_at(in self.locals, w.next());
             let read = w.next();
             let raw = use_var(inout b, local);
-            coerce(inout b, raw, read, self.optimize)
+            body_coerce(inout b, raw, read, self.optimize)
         } else if kind == INST_BIND {
             let local = w.next();
             if local != NO_LOCAL {
@@ -220,61 +817,236 @@ impl Body {
             // `ir_temp` of the value, then the assignment: the temporary
             // read back, the local defined, and the statement's zero.
             let local = var_at(in self.locals, w.next());
-            let temp = w.next();
+            let temp_kind = w.next();
             let stated = w.next();
-            let lane = value_type(inout b, x);
-            let t = declare_var(inout b, lane);
-            def_var(inout b, t, x);
-            let back = use_var(inout b, t);
-            let value = coerce(inout b, back, temp, self.optimize);
+            let t = temp(inout b, x);
+            let value = body_operand(inout b, t, temp_kind, self.optimize);
             def_var(inout b, local, value);
             let zero = ins_iconst(inout b, ty_i64(), 0);
-            coerce(inout b, zero, stated, self.optimize)
+            body_coerce(inout b, zero, stated, self.optimize)
         } else if kind == INST_CALL {
-            // `ir_temp` of each argument (a variable defined as its value),
-            // then `call_function_into`: each temporary read back and
-            // coerced to its type, the callee imported, and the call.
-            let position = w.next();
-            if position >= self.callees.len() {
+            // `ir_temp` of every argument, then each read back and coerced
+            // in order, then `declare_func_in_func` and `call` (part 6b).
+            let call_idx = w.next();
+            if call_idx >= self.callees.len() {
                 return false;
             }
+            let callee = FuncId { id: wrapping_u32(at64(in self.callees, call_idx)) };
             let mut temps: ChunkSeq[u32] = ChunkSeq::new[u32]();
             for k in 0..n {
-                let x = self.value(at64(in ops, k));
-                let lane = value_type(inout b, x);
-                let t = declare_var(inout b, lane);
-                def_var(inout b, t, x);
-                temps.push(t.id);
+                temps.push(temp(inout b, self.value(at64(in ops, k))).id);
             }
             let mut args: ChunkSeq[u32] = ChunkSeq::new[u32]();
             for k in 0..n {
                 let read = w.next();
-                let back = use_var(inout b, var_at(in temps, k));
-                args.push(coerce(inout b, back, read, self.optimize).id);
+                let tv = Var { id: at32(in temps, k) };
+                args.push(body_operand(inout b, tv, read, self.optimize).id);
             }
-            let callee = FuncId { id: wrapping_u32(at64(in self.callees, position)) };
-            let f = import_function(inout b, inout m, callee);
-            let count = ins_call(inout b, f, in args.as_slice());
-            if count == 0 {
+            let fun = import_function(inout b, inout m, callee);
+            let _ = ins_call(inout b, fun, in args.as_slice());
+            inst_result(inout b, 0)
+        } else if kind == INST_F32CONST {
+            ins_f32const(inout b, wrapping_u32(w.next()))
+        } else if kind == INST_FLOAT_UNARY {
+            let fun = w.next();
+            let meta = w.next();
+            let op_kind = w.next();
+            let res_kind = w.next();
+            let src_var = temp(inout b, x);
+            let src = operand(inout b, src_var, op_kind, self.optimize);
+            let raw = emit_float_unary(inout b, fun, meta, src);
+            if is_invalid(raw) {
                 return false;
             }
-            inst_result(inout b, 0)
+            if fun == FUN_FNEG {
+                coerce(inout b, raw, res_kind, self.optimize)
+            } else {
+                let c1 = coerce(inout b, raw, res_kind, self.optimize);
+                coerce(inout b, c1, res_kind, self.optimize)
+            }
+        } else if kind == INST_FLOAT_BINARY {
+            let fb = w.next();
+            let raw = emit_float_binary(inout b, fb, x, y);
+            if is_invalid(raw) {
+                return false;
+            }
+            raw
+        } else if kind == INST_INT_EXTRA {
+            let iex = w.next();
+            let sub = w.next();
+            let ik = w.next();
+            let k0 = w.next();
+            let k1 = w.next();
+            let rk = w.next();
+            if iex == IEX_WIDEN_U64 {
+                let src_var = temp(inout b, x);
+                let src = operand(inout b, src_var, k0, self.optimize);
+                coerce(inout b, src, rk, self.optimize)
+            } else if iex == IEX_BIT_UNARY {
+                let src_var = temp(inout b, x);
+                let src = operand(inout b, src_var, k0, self.optimize);
+                let raw = emit_bit_builtin(inout b, sub, ik, src, none);
+                coerce(inout b, raw, rk, self.optimize)
+            } else if iex == IEX_BIT_BINARY {
+                let lv = temp(inout b, x);
+                let rv = temp(inout b, y);
+                let lhs = operand(inout b, lv, k0, self.optimize);
+                let rhs = operand(inout b, rv, k1, self.optimize);
+                let raw = emit_bit_builtin(inout b, sub, ik, lhs, rhs);
+                coerce(inout b, raw, rk, self.optimize)
+            } else if iex == IEX_BITWISE {
+                let lv = temp(inout b, x);
+                let rv = temp(inout b, y);
+                let lhs = operand(inout b, lv, k0, self.optimize);
+                let rhs = operand(inout b, rv, k1, self.optimize);
+                let raw = emit_bitwise(inout b, sub, ik, lhs, rhs);
+                let c1 = coerce(inout b, raw, k0, self.optimize);
+                coerce(inout b, c1, rk, self.optimize)
+            } else if iex == IEX_SDIV {
+                let lv = temp(inout b, x);
+                let rv = temp(inout b, y);
+                let lhs = operand(inout b, lv, k0, self.optimize);
+                let rhs = operand(inout b, rv, k1, self.optimize);
+                let raw = emit_sdiv_guarded(inout b, lhs, rhs);
+                coerce(inout b, raw, rk, self.optimize)
+            } else if iex == IEX_SREM {
+                let lv = temp(inout b, x);
+                let rv = temp(inout b, y);
+                let lhs = operand(inout b, lv, k0, self.optimize);
+                let rhs = operand(inout b, rv, k1, self.optimize);
+                let raw = ins_srem(inout b, lhs, rhs);
+                coerce(inout b, raw, rk, self.optimize)
+            } else {
+                return false;
+            }
+        } else if kind == INST_WRITE_OP {
+            let local = var_at(in self.locals, w.next());
+            let wop = w.next();
+            let temp_kind = w.next();
+            let local_kind = w.next();
+            let stated = w.next();
+            let t = temp(inout b, x);
+            let rhs = body_operand(inout b, t, temp_kind, self.optimize);
+            let old = use_var(inout b, local);
+            let raw = emit_write_op(inout b, wop, old, rhs);
+            if is_invalid(raw) {
+                return false;
+            }
+            let updated = body_coerce(inout b, raw, local_kind, self.optimize);
+            def_var(inout b, local, updated);
+            let zero = ins_iconst(inout b, ty_i64(), 0);
+            body_coerce(inout b, zero, stated, self.optimize)
+        } else if kind == INST_EXIT {
+            let default_lane = w.next();
+            let out_val = if default_lane != 0 {
+                zero_of(inout b, default_lane)
+            } else {
+                x
+            };
+            self.emit_return_value(inout b, out_val);
+            let dead = create_block(inout b);
+            switch_to_block(inout b, dead);
+            ins_iconst(inout b, ty_i64(), 0)
+        } else if kind == INST_CALL_BUILTIN {
+            let cb = w.next();
+            let sub = w.next();
+            let meta = w.next();
+            let site_kind = w.next();
+            let mut tvars: ChunkSeq[u32] = ChunkSeq::new[u32]();
+            for k in 0..n {
+                tvars.push(temp(inout b, self.value(at64(in ops, k))).id);
+            }
+            let mut avals: ChunkSeq[u32] = ChunkSeq::new[u32]();
+            for k in 0..n {
+                let ak = w.next();
+                let tv = Var { id: at32(in tvars, k) };
+                avals.push(body_operand(inout b, tv, ak, self.optimize).id);
+            }
+            let a0 = Value { id: at32(in avals, 0) };
+            let a1 = Value { id: at32(in avals, 1) };
+            let a2 = Value { id: at32(in avals, 2) };
+            if cb == CB_BIT {
+                emit_bit_builtin(inout b, sub, meta, a0, a1)
+            } else if cb == CB_WIDE_BIT {
+                let raw = if sub == BIT_OP_WRAPPING_SHL {
+                    ins_ishl(inout b, a0, a1)
+                } else if sub == BIT_OP_WRAPPING_SHR {
+                    if kind_unsigned(meta) {
+                        ins_ushr(inout b, a0, a1)
+                    } else {
+                        ins_sshr(inout b, a0, a1)
+                    }
+                } else {
+                    emit_wide_unary(inout b, WUN_BIT, sub, meta, a0, self.optimize)
+                };
+                if is_invalid(raw) {
+                    return false;
+                }
+                raw
+            } else if cb == CB_BITWISE {
+                let raw = emit_bitwise(inout b, sub, meta, a0, a1);
+                coerce(inout b, raw, site_kind, self.optimize)
+            } else if cb == CB_WIDE_CONVERT {
+                emit_wide_unary(inout b, WUN_CONVERT, sub, meta, a0, self.optimize)
+            } else if cb == CB_FMA {
+                Value { id: Cranelift::vcl_ternary(inout b, Ternary::Fma, a0.id, a1.id, a2.id) }
+            } else if cb == CB_FMIN {
+                ins_binary(inout b, Bin::Fmin, a0, a1)
+            } else if cb == CB_FMAX {
+                ins_binary(inout b, Bin::Fmax, a0, a1)
+            } else if cb == CB_FLOAT_UNARY {
+                let raw = emit_float_unary(inout b, sub, meta, a0);
+                if is_invalid(raw) {
+                    return false;
+                }
+                coerce(inout b, raw, site_kind, self.optimize)
+            } else {
+                return false;
+            }
+        } else if kind == INST_WIDE_CONST {
+            let lo = w.next();
+            let hi = w.next();
+            let rk = w.next();
+            let raw = wide_const(inout b, lo, hi);
+            body_coerce(inout b, raw, rk, self.optimize)
+        } else if kind == INST_WIDE_UNARY {
+            let wun = w.next();
+            let a = w.next();
+            let c = w.next();
+            let op_kind = w.next();
+            let res_kind = w.next();
+            let src_var = temp(inout b, x);
+            let src = body_operand(inout b, src_var, op_kind, self.optimize);
+            let raw = emit_wide_unary(inout b, wun, a, c, src, self.optimize);
+            if is_invalid(raw) {
+                return false;
+            }
+            body_coerce(inout b, raw, res_kind, self.optimize)
+        } else if kind == INST_WIDE_BINARY {
+            let wb = w.next();
+            let k0 = w.next();
+            let k1 = w.next();
+            let rk = w.next();
+            let lv = temp(inout b, x);
+            let rv = temp(inout b, y);
+            let lhs = body_operand(inout b, lv, k0, self.optimize);
+            let rhs = body_operand(inout b, rv, k1, self.optimize);
+            let raw = emit_wide_binary(inout b, wb, lhs, rhs);
+            if is_invalid(raw) {
+                return false;
+            }
+            body_coerce(inout b, raw, rk, self.optimize)
         } else {
             return false;
         };
-        let v = coerce(inout b, v, post, self.optimize);
+        let v = body_coerce(inout b, v, post, self.optimize);
         let ok = self.values.try_set(dest, v.id);
         def_var(inout b, var_at(in self.registers, dest), v);
         true
     }
 
     // A block's terminator, after its operands' reads.
-    fn terminator(
-        inout self,
-        inout b: Builder,
-        inout w: Words,
-        status: bool
-    ) -> bool eff [Ffi[Cranelift]] {
+    fn terminator(inout self, inout b: Builder, inout w: Words) -> bool eff [Ffi[Cranelift]] {
         let code = w.next();
         if code == TERM_RETURN {
             let i = w.next();
@@ -285,14 +1057,7 @@ impl Body {
             } else {
                 self.value(i)
             };
-            let mut out: ChunkSeq[u32] = ChunkSeq::new[u32]();
-            out.push(v.id);
-            if status {
-                // `return_value`'s zero (success) status.
-                let ok = ins_iconst(inout b, ty_i64(), 0);
-                out.push(ok.id);
-            }
-            ins_return(inout b, in out.as_slice());
+            self.emit_return_value(inout b, v);
             return true;
         }
         if code == TERM_JUMP {
@@ -327,8 +1092,42 @@ impl Body {
             ins_brif0(inout b, self.value(c), self.block(yes), self.block(no));
             return true;
         }
+        if code == TERM_MATCH {
+            let scr_idx = w.next();
+            let narms = w.next();
+            self.read(inout b, scr_idx);
+            let scr = self.value(scr_idx);
+            for k in 0..narms {
+                let akind = w.next();
+                let payload = w.next();
+                let hi = if akind == MATCH_WIDE { w.next() } else { 0 };
+                let target = w.next();
+                let next = create_block(inout b);
+                let cond = if akind == MATCH_TRUE {
+                    ins_iconst(inout b, ty_i8(), 1)
+                } else if akind == MATCH_INT {
+                    ins_icmp_imm(inout b, cc_eq(), scr, wrapping_i64(payload))
+                } else if akind == MATCH_F32 {
+                    let lit = ins_f32const(inout b, wrapping_u32(payload));
+                    ins_fcmp(inout b, FloatCc::Eq, scr, lit)
+                } else if akind == MATCH_F64 {
+                    let lit = ins_f64const(inout b, payload);
+                    ins_fcmp(inout b, FloatCc::Eq, scr, lit)
+                } else if akind == MATCH_WIDE {
+                    let lit = wide_const(inout b, payload, hi);
+                    ins_icmp(inout b, cc_eq(), scr, lit)
+                } else {
+                    return false;
+                };
+                ins_brif0(inout b, cond, self.block(target), next);
+                seal_block(inout b, next);
+                switch_to_block(inout b, next);
+            }
+            ins_trap(inout b, trap_user(UNREACHABLE_TRAP));
+            return true;
+        }
         if code == TERM_UNREACHABLE {
-            ins_trap(inout b, trap_user(1));
+            ins_trap(inout b, trap_user(UNREACHABLE_TRAP));
             return true;
         }
         false
@@ -336,9 +1135,9 @@ impl Body {
 }
 
 // The whole body of one planned function on the lent builder, whose
-// current block is the function's entry: HANDLED, DECLINED when a call is
-// not one the walk makes directly, or BODY_ERROR when the words are not a
-// body plan (nothing is declined once emission starts).
+// current block is the function's entry: HANDLED, DECLINED when a non-builtin
+// call is not one the walk makes directly, or BODY_ERROR when the words are
+// not a body plan (nothing is declined once emission starts).
 pub fn emit_body(call: u64, inout b: Builder, inout m: Module) -> u64 eff [Ffi[Cranelift]] {
     let np = call_arg(call, ARG_PARAMS);
     let mut w = Words { call: call, at: wrapping_add(wrapping_add(ARG_PARAMS, 1), np) };
@@ -348,21 +1147,28 @@ pub fn emit_body(call: u64, inout b: Builder, inout m: Module) -> u64 eff [Ffi[C
     let nc = w.next();
     let mut callees: ChunkSeq[u64] = ChunkSeq::new[u64]();
     for k in 0..nc {
-        let callee = w.next();
-        if callee == NO_CALLEE {
-            return DECLINED;
-        }
-        callees.push(callee);
+        callees.push(w.next());
     }
-    if call_arg_count(call) < wrapping_add(w.at, 2) {
+    if call_arg_count(call) < wrapping_add(w.at, 3) {
         return BODY_ERROR;
     }
     let nb = w.next();
     if w.next() != np || nb == 0 {
         return BODY_ERROR;
     }
+    let nbuiltins = w.next();
+    let mut builtin_calls: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    for k in 0..nbuiltins {
+        builtin_calls.push(w.next());
+    }
+    for k in 0..nc {
+        if at64(in callees, k) == NO_CALLEE && !has_call(in builtin_calls, k) {
+            return DECLINED;
+        }
+    }
     let mut s = Body {
         optimize: call_arg(call, ARG_OPTIMIZE) != 0,
+        status: call_arg(call, ARG_STATUS) != 0,
         locations: call_arg(call, ARG_LOCATIONS) != 0,
         blocks: ChunkSeq::new[u32](),
         locals: ChunkSeq::new[u32](),
@@ -371,7 +1177,6 @@ pub fn emit_body(call: u64, inout b: Builder, inout m: Module) -> u64 eff [Ffi[C
         values: ChunkSeq::new[u32](),
         callees: callees,
     };
-    let status = call_arg(call, ARG_STATUS) != 0;
     // The graph's blocks: the entry is the current block.
     s.blocks.push(current_block(inout b).id);
     for k in 1..nb {
@@ -441,7 +1246,7 @@ pub fn emit_body(call: u64, inout b: Builder, inout m: Module) -> u64 eff [Ffi[C
                 return BODY_ERROR;
             }
         }
-        if !s.terminator(inout b, inout w, status) {
+        if !s.terminator(inout b, inout w) {
             return BODY_ERROR;
         }
     }

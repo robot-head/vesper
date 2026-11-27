@@ -84,6 +84,9 @@ pub fn run(func: &mut ir::Function) {
     fold_trivial_arith_and_bool_extends(func);
     fold_constant_branches(func);
     merge_blocks(func);
+    canonicalize_imm_ops(func);
+    fold_load_store_offsets(func);
+    cse_local_pure(func);
     dense_icmp_chains_to_br_table(func);
     remove_dead(func);
     sink_slot_inits(func);
@@ -5078,6 +5081,492 @@ fn reuse_seq_header_loads(func: &mut ir::Function) {
 
         if !changed {
             break;
+        }
+    }
+}
+
+const MAX_IMM_CANON_ROUNDS: usize = 4;
+
+/// Canonicalizes integer `Binary` and `Icmp` instructions with a constant
+/// operand into `BinaryImm64` / `IcmpImm`, and folds associative `BinaryImm64`
+/// chains (`iadd_imm`, `imul_imm`, `band_imm`, `bor_imm`, `bxor_imm`).
+fn canonicalize_imm_ops(func: &mut ir::Function) {
+    use cranelift_codegen::ir::condcodes::CondCode as _;
+    let sign_extend_imm = |ty: Type, c: i64| -> Option<i64> {
+        let bits = ty.bits();
+        if !matches!(bits, 8 | 16 | 32 | 64) {
+            return None;
+        }
+        let shift = 64 - bits;
+        Some(((c as u64) << shift) as i64 >> shift)
+    };
+    for _ in 0..MAX_IMM_CANON_ROUNDS {
+        let mut use_counts: HashMap<Value, usize> = HashMap::new();
+        for (_, inst) in insts(func) {
+            for v in func.dfg.inst_values(inst) {
+                *use_counts.entry(func.dfg.resolve_aliases(v)).or_insert(0) += 1;
+            }
+        }
+        let mut changed = false;
+        for (_, inst) in insts(func) {
+            match func.dfg.insts[inst] {
+                InstructionData::Binary {
+                    opcode: op,
+                    args: [lhs, rhs],
+                } if matches!(
+                    op,
+                    Opcode::Iadd
+                        | Opcode::Imul
+                        | Opcode::Band
+                        | Opcode::Bor
+                        | Opcode::Bxor
+                        | Opcode::Ishl
+                        | Opcode::Ushr
+                        | Opcode::Sshr
+                ) =>
+                {
+                    let lhs = func.dfg.resolve_aliases(lhs);
+                    let rhs = func.dfg.resolve_aliases(rhs);
+                    let dest = func.dfg.first_result(inst);
+                    let ty = func.dfg.value_type(dest);
+                    if !matches!(ty, types::I8 | types::I16 | types::I32 | types::I64) {
+                        continue;
+                    }
+                    let rc = constant(func, rhs, 1);
+                    let lc = if matches!(
+                        op,
+                        Opcode::Iadd | Opcode::Imul | Opcode::Band | Opcode::Bor | Opcode::Bxor
+                    ) {
+                        constant(func, lhs, 1)
+                    } else {
+                        None
+                    };
+                    let Some((var, c)) = rc.map(|c| (lhs, c)).or_else(|| lc.map(|c| (rhs, c)))
+                    else {
+                        if op == Opcode::Iadd {
+                            let iadd_imm_parts = |v: Value| -> Option<(Value, i64)> {
+                                if use_counts.get(&v).copied().unwrap_or(0) != 1 {
+                                    return None;
+                                }
+                                let ir::ValueDef::Result(d, 0) = func.dfg.value_def(v) else {
+                                    return None;
+                                };
+                                if let InstructionData::BinaryImm64 {
+                                    opcode: Opcode::IaddImm,
+                                    arg,
+                                    imm,
+                                } = func.dfg.insts[d]
+                                {
+                                    Some((func.dfg.resolve_aliases(arg), imm.bits()))
+                                } else {
+                                    None
+                                }
+                            };
+                            match (iadd_imm_parts(lhs), iadd_imm_parts(rhs)) {
+                                (Some((lx, ld)), Some((rx, rd))) => {
+                                    if let Some(sc) = sign_extend_imm(ty, ld.wrapping_add(rd)) {
+                                        let sum = {
+                                            let mut pos =
+                                                cranelift_codegen::cursor::FuncCursor::new(func)
+                                                    .at_inst(inst);
+                                            pos.ins().iadd(lx, rx)
+                                        };
+                                        func.dfg.replace(inst).iadd_imm(sum, sc);
+                                        changed = true;
+                                    }
+                                }
+                                (Some((lx, ld)), None) => {
+                                    if let Some(sc) = sign_extend_imm(ty, ld) {
+                                        let sum = {
+                                            let mut pos =
+                                                cranelift_codegen::cursor::FuncCursor::new(func)
+                                                    .at_inst(inst);
+                                            pos.ins().iadd(lx, rhs)
+                                        };
+                                        func.dfg.replace(inst).iadd_imm(sum, sc);
+                                        changed = true;
+                                    }
+                                }
+                                (None, Some((rx, rd))) => {
+                                    if let Some(sc) = sign_extend_imm(ty, rd) {
+                                        let sum = {
+                                            let mut pos =
+                                                cranelift_codegen::cursor::FuncCursor::new(func)
+                                                    .at_inst(inst);
+                                            pos.ins().iadd(lhs, rx)
+                                        };
+                                        func.dfg.replace(inst).iadd_imm(sum, sc);
+                                        changed = true;
+                                    }
+                                }
+                                (None, None) => {}
+                            }
+                        }
+                        continue;
+                    };
+                    match op {
+                        Opcode::Iadd => {
+                            if let Some(sc) = sign_extend_imm(ty, c) {
+                                func.dfg.replace(inst).iadd_imm(var, sc);
+                                changed = true;
+                            }
+                        }
+                        Opcode::Imul => {
+                            if let Some(sc) = sign_extend_imm(ty, c) {
+                                func.dfg.replace(inst).imul_imm(var, sc);
+                                changed = true;
+                            }
+                        }
+                        Opcode::Band => {
+                            if let Some(sc) = sign_extend_imm(ty, c) {
+                                func.dfg.replace(inst).band_imm(var, sc);
+                                changed = true;
+                            }
+                        }
+                        Opcode::Bor => {
+                            if let Some(sc) = sign_extend_imm(ty, c) {
+                                func.dfg.replace(inst).bor_imm(var, sc);
+                                changed = true;
+                            }
+                        }
+                        Opcode::Bxor => {
+                            if let Some(sc) = sign_extend_imm(ty, c) {
+                                func.dfg.replace(inst).bxor_imm(var, sc);
+                                changed = true;
+                            }
+                        }
+                        Opcode::Ishl => {
+                            func.dfg.replace(inst).ishl_imm(var, c);
+                            changed = true;
+                        }
+                        Opcode::Ushr => {
+                            func.dfg.replace(inst).ushr_imm(var, c);
+                            changed = true;
+                        }
+                        Opcode::Sshr => {
+                            func.dfg.replace(inst).sshr_imm(var, c);
+                            changed = true;
+                        }
+                        _ => {}
+                    }
+                }
+                InstructionData::IntCompare {
+                    opcode: Opcode::Icmp,
+                    cond,
+                    args: [lhs, rhs],
+                } if matches!(
+                    cond,
+                    ir::condcodes::IntCC::Equal | ir::condcodes::IntCC::NotEqual
+                ) =>
+                {
+                    let lhs = func.dfg.resolve_aliases(lhs);
+                    let rhs = func.dfg.resolve_aliases(rhs);
+                    let ty = func.dfg.value_type(lhs);
+                    if let Some(rc) = constant(func, rhs, 1)
+                        && rc != 0
+                        && let Some(sc) = sign_extend_imm(ty, rc)
+                    {
+                        func.dfg.replace(inst).icmp_imm(cond, lhs, sc);
+                        changed = true;
+                    } else if let Some(lc) = constant(func, lhs, 1)
+                        && lc != 0
+                        && let Some(sc) = sign_extend_imm(ty, lc)
+                    {
+                        func.dfg.replace(inst).icmp_imm(cond.swap_args(), rhs, sc);
+                        changed = true;
+                    }
+                }
+                InstructionData::BinaryImm64 {
+                    opcode: op,
+                    arg,
+                    imm,
+                } if matches!(
+                    op,
+                    Opcode::IaddImm
+                        | Opcode::ImulImm
+                        | Opcode::BandImm
+                        | Opcode::BorImm
+                        | Opcode::BxorImm
+                ) =>
+                {
+                    let arg = func.dfg.resolve_aliases(arg);
+                    let dest = func.dfg.first_result(inst);
+                    let ty = func.dfg.value_type(dest);
+                    let ir::ValueDef::Result(def, 0) = func.dfg.value_def(arg) else {
+                        continue;
+                    };
+                    let InstructionData::BinaryImm64 {
+                        opcode: inner_op,
+                        arg: inner_arg,
+                        imm: inner_imm,
+                    } = func.dfg.insts[def]
+                    else {
+                        continue;
+                    };
+                    if inner_op != op {
+                        if op == Opcode::ImulImm
+                            && inner_op == Opcode::IaddImm
+                            && use_counts.get(&arg).copied().unwrap_or(0) == 1
+                        {
+                            let inner_arg = func.dfg.resolve_aliases(inner_arg);
+                            let c1 = inner_imm.bits();
+                            let k = imm.bits();
+                            if let (Some(sk), Some(sdisp)) = (
+                                sign_extend_imm(ty, k),
+                                sign_extend_imm(ty, c1.wrapping_mul(k)),
+                            ) {
+                                let scaled = {
+                                    let mut pos = cranelift_codegen::cursor::FuncCursor::new(func)
+                                        .at_inst(inst);
+                                    pos.ins().imul_imm(inner_arg, sk)
+                                };
+                                func.dfg.replace(inst).iadd_imm(scaled, sdisp);
+                                changed = true;
+                            }
+                        }
+                        continue;
+                    }
+                    let inner_arg = func.dfg.resolve_aliases(inner_arg);
+                    let c1 = inner_imm.bits();
+                    let c2 = imm.bits();
+                    let combined = match op {
+                        Opcode::IaddImm => c1.wrapping_add(c2),
+                        Opcode::ImulImm => c1.wrapping_mul(c2),
+                        Opcode::BandImm => c1 & c2,
+                        Opcode::BorImm => c1 | c2,
+                        Opcode::BxorImm => c1 ^ c2,
+                        _ => continue,
+                    };
+                    let Some(sc) = sign_extend_imm(ty, combined) else {
+                        continue;
+                    };
+                    match op {
+                        Opcode::IaddImm => {
+                            func.dfg.replace(inst).iadd_imm(inner_arg, sc);
+                        }
+                        Opcode::ImulImm => {
+                            func.dfg.replace(inst).imul_imm(inner_arg, sc);
+                        }
+                        Opcode::BandImm => {
+                            func.dfg.replace(inst).band_imm(inner_arg, sc);
+                        }
+                        Opcode::BorImm => {
+                            func.dfg.replace(inst).bor_imm(inner_arg, sc);
+                        }
+                        Opcode::BxorImm => {
+                            func.dfg.replace(inst).bxor_imm(inner_arg, sc);
+                        }
+                        _ => {}
+                    }
+                    changed = true;
+                }
+                _ => {}
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+}
+
+/// Folds `iadd_imm(base, disp)` address operands directly into `Load`/`Store`
+/// `Offset32` displacements when the combined offset fits in `i32`.
+fn fold_load_store_offsets(func: &mut ir::Function) {
+    for (_, inst) in insts(func) {
+        match func.dfg.insts[inst] {
+            InstructionData::Load {
+                opcode,
+                arg,
+                offset,
+                flags,
+            } if matches!(
+                opcode,
+                Opcode::Load
+                    | Opcode::Uload8
+                    | Opcode::Sload8
+                    | Opcode::Uload16
+                    | Opcode::Sload16
+                    | Opcode::Uload32
+                    | Opcode::Sload32
+            ) =>
+            {
+                let addr = func.dfg.resolve_aliases(arg);
+                if let ir::ValueDef::Result(def, 0) = func.dfg.value_def(addr)
+                    && let InstructionData::BinaryImm64 {
+                        opcode: Opcode::IaddImm,
+                        arg: base,
+                        imm,
+                    } = func.dfg.insts[def]
+                    && let Some(new_off) = i64::from(i32::from(offset))
+                        .checked_add(imm.bits())
+                        .and_then(|o| i32::try_from(o).ok())
+                {
+                    func.dfg.insts[inst] = InstructionData::Load {
+                        opcode,
+                        arg: func.dfg.resolve_aliases(base),
+                        offset: ir::immediates::Offset32::new(new_off),
+                        flags,
+                    };
+                }
+            }
+            InstructionData::Store {
+                opcode,
+                args: [val, arg],
+                offset,
+                flags,
+            } if matches!(
+                opcode,
+                Opcode::Store | Opcode::Istore8 | Opcode::Istore16 | Opcode::Istore32
+            ) =>
+            {
+                let addr = func.dfg.resolve_aliases(arg);
+                if let ir::ValueDef::Result(def, 0) = func.dfg.value_def(addr)
+                    && let InstructionData::BinaryImm64 {
+                        opcode: Opcode::IaddImm,
+                        arg: base,
+                        imm,
+                    } = func.dfg.insts[def]
+                    && let Some(new_off) = i64::from(i32::from(offset))
+                        .checked_add(imm.bits())
+                        .and_then(|o| i32::try_from(o).ok())
+                {
+                    func.dfg.insts[inst] = InstructionData::Store {
+                        opcode,
+                        args: [val, func.dfg.resolve_aliases(base)],
+                        offset: ir::immediates::Offset32::new(new_off),
+                        flags,
+                    };
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Intra-block pure CSE for `StackAddr`, `Unary` integer casts/negations,
+/// `Binary` / `BinaryImm64` integer ops, and `IntCompare` / `IntCompareImm`
+/// (excluding `Iconst` so constant live ranges are never extended).
+fn cse_local_pure(func: &mut ir::Function) {
+    #[derive(Clone, Copy, PartialEq, Eq, Hash)]
+    enum PureKey {
+        StackAddr(StackSlot, i32, Type),
+        Unary(Opcode, Value, Type),
+        Binary(Opcode, Value, Value, Type),
+        BinaryImm(Opcode, Value, i64, Type),
+        Icmp(ir::condcodes::IntCC, Value, Value),
+        IcmpImm(ir::condcodes::IntCC, Value, i64),
+    }
+
+    let blocks: Vec<Block> = func.layout.blocks().collect();
+    for block in blocks {
+        let mut seen: HashMap<PureKey, Value> = HashMap::new();
+        let block_insts: Vec<Inst> = func.layout.block_insts(block).collect();
+        for inst in block_insts {
+            let Some(&dest) = func.dfg.inst_results(inst).first() else {
+                continue;
+            };
+            if func.dfg.inst_results(inst).len() != 1 {
+                continue;
+            }
+            let ty = func.dfg.value_type(dest);
+            let key = match func.dfg.insts[inst] {
+                InstructionData::StackLoad {
+                    opcode: Opcode::StackAddr,
+                    stack_slot,
+                    offset,
+                } => Some(PureKey::StackAddr(stack_slot, i32::from(offset), ty)),
+                InstructionData::Unary {
+                    opcode:
+                        op @ (Opcode::Uextend
+                        | Opcode::Sextend
+                        | Opcode::Ireduce
+                        | Opcode::Bnot
+                        | Opcode::Ineg),
+                    arg,
+                } => Some(PureKey::Unary(op, func.dfg.resolve_aliases(arg), ty)),
+                InstructionData::Binary {
+                    opcode:
+                        op @ (Opcode::Iadd
+                        | Opcode::Isub
+                        | Opcode::Imul
+                        | Opcode::Band
+                        | Opcode::Bor
+                        | Opcode::Bxor
+                        | Opcode::Ishl
+                        | Opcode::Ushr
+                        | Opcode::Sshr),
+                    args: [lhs, rhs],
+                } => {
+                    let a = func.dfg.resolve_aliases(lhs);
+                    let b = func.dfg.resolve_aliases(rhs);
+                    let (a, b) = if matches!(
+                        op,
+                        Opcode::Iadd | Opcode::Imul | Opcode::Band | Opcode::Bor | Opcode::Bxor
+                    ) && a.as_u32() > b.as_u32()
+                    {
+                        (b, a)
+                    } else {
+                        (a, b)
+                    };
+                    Some(PureKey::Binary(op, a, b, ty))
+                }
+                InstructionData::BinaryImm64 {
+                    opcode:
+                        op @ (Opcode::IaddImm
+                        | Opcode::ImulImm
+                        | Opcode::BandImm
+                        | Opcode::BorImm
+                        | Opcode::BxorImm
+                        | Opcode::IshlImm
+                        | Opcode::UshrImm
+                        | Opcode::SshrImm),
+                    arg,
+                    imm,
+                } => Some(PureKey::BinaryImm(
+                    op,
+                    func.dfg.resolve_aliases(arg),
+                    imm.bits(),
+                    ty,
+                )),
+                InstructionData::IntCompare {
+                    opcode: Opcode::Icmp,
+                    cond,
+                    args: [lhs, rhs],
+                } => {
+                    let a = func.dfg.resolve_aliases(lhs);
+                    let b = func.dfg.resolve_aliases(rhs);
+                    let (a, b) = if matches!(
+                        cond,
+                        ir::condcodes::IntCC::Equal | ir::condcodes::IntCC::NotEqual
+                    ) && a.as_u32() > b.as_u32()
+                    {
+                        (b, a)
+                    } else {
+                        (a, b)
+                    };
+                    Some(PureKey::Icmp(cond, a, b))
+                }
+                InstructionData::IntCompareImm {
+                    opcode: Opcode::IcmpImm,
+                    cond,
+                    arg,
+                    imm,
+                } => Some(PureKey::IcmpImm(
+                    cond,
+                    func.dfg.resolve_aliases(arg),
+                    imm.bits(),
+                )),
+                _ => None,
+            };
+            if let Some(k) = key {
+                if let Some(&prev) = seen.get(&k) {
+                    func.dfg.detach_inst_results(inst);
+                    func.layout.remove_inst(inst);
+                    func.dfg.change_to_alias(dest, prev);
+                } else {
+                    seen.insert(k, dest);
+                }
+            }
         }
     }
 }

@@ -1090,3 +1090,173 @@ As with the proof models, the portable BLAKE3 is most of the difference,
 so the hybrid wiring must hash through hash-sys. Rust lines deleted: 0.
 The preview is not wired: Rust stays the default until the hybrid wiring
 part.
+
+# Part 12a: the recovery gate (#1828)
+
+`analyze` in `src/tooling/recovery.rs` gives diagnostics for a document
+with syntax errors by checking its complete components alone. Before it
+parses any complete item, it runs a gate over the recovery syntax:
+
+- the limits, the source bound and the work budget;
+- the source identity (its BLAKE3 against the snapshot's);
+- the bound on the syntax diagnostics;
+- the declaration census (spans, names, duplicates, reserved names,
+  declaration kinds and statuses);
+- the recovery sites, and every original token's coverage by a
+  declaration.
+
+The gate either refuses, blocks the whole document (every component
+unavailable, with a reason), or opens it for the component check with the
+budget left. Part 12a ports that gate as `lsp_recovery_gate`
+(`recovery.ves` in `@vesper/lsp-features`). The component check after it
+parses and type checks items with the Rust checker, so it waits for the
+checker in Vesper.
+
+## What changed
+
+- `src/tooling/recovery.rs`: the gate is split out of `analyze` as `gate`
+  (behaviour unchanged), with the hidden `gate_answer` (Rust's answer as
+  text), `gate_words` (the encoder the hybrid wiring will use) and
+  `gate_tags`. The token loop's trivia and identifier classes moved to
+  `token_class`, which the encoder shares.
+- `packages/vesper-lsp-features/src/recovery.ves` (new) and the entry
+  `lsp_recovery_gate` in lib.ves.
+- `tests/self_host_lsp_features.rs`: `recovery_gate_matches_rust` and the
+  ignored `recovery_gate_speed`.
+
+## Differential
+
+330 recovery snapshots: eight hand-written programs of the accepted
+declaration kinds and 40 package sources, each cut at a quarter, half and
+three quarters, with a damaged function, a macro call, a stray token, a
+trait, a long identifier or one brace fewer, and as it is (those that
+parse under the default syntax limits). Each gets 24 limit sets: the
+defaults, work allowances swept across the gate's own charges, small
+identifier, diagnostic, function and context limits, a source limit one
+byte short and three invalid limit sets.
+
+7,920 cases, 0 diffs, with the portable BLAKE3 and with the host's
+digest: 303 open, 2,626 blocked and 4,991 refused, covering every refusal
+the gate can reach from a real snapshot (the source mismatch needs a
+forged snapshot hash).
+
+## Numbers
+
+Default limits, 8 gates per call, best of five ABBA rounds per snapshot,
+release build. The recovery syntax is parsed and encoded outside the
+timing. Rust's time includes walking the rowan tree's tokens, which the
+encoder hands the port as a flat list; the host digest is computed inside
+the timing on every gate.
+
+| Source hashed by | Rust | Vesper | Ratio |
+|---|--:|--:|--:|
+| the host's C BLAKE3 (`@vesper-std/hash-sys`) | 73.1 µs | 21.9 µs | **0.30x** |
+| the portable Vesper BLAKE3 | 73.1 µs | 57.0 µs | 0.78x |
+
+Rust lines deleted: 0. The gate is not wired, and the rest of `analyze`
+stays in Rust until the checker runs in Vesper.
+
+# Part 12b: the checked signature snapshot (#1828)
+
+`signature_snapshot` in `src/database.rs` gives the editor database a
+semantic identity for a checked file: `extract_signature` turns the
+checked world's headers (ADTs, functions, effects and their operations,
+the inferred function results and the string capacity) into serde_json
+bytes, and the snapshot keeps their BLAKE3 digest and the declaration
+names. Salsa compares these, so a body-only edit stops propagating to
+signature-dependent queries. Part 12b ports `extract_signature` and the
+digest as `lsp_signature` (`signature.ves` in `@vesper/lsp-features`):
+
+- the support checks: model uses, trait bounds, trait and conformance
+  items, elaborated traits, conformances, generated functions, package
+  and revision;
+- the declaration limit;
+- the unresolved checks, in Rust's order: each function's inferred result
+  (merged with the result map in key order), parameters and effect
+  arguments, then ADT fields, then effect operations. `unresolved_type`'s
+  node budget and stack order are kept;
+- the header JSON, written as serde writes `SemanticHeaders`: fields in
+  declaration order, maps in key order, `ast::Type` externally tagged,
+  `Field`'s optional `modality` and `temperature`, and 128-bit integer
+  literals;
+- the 1 MiB byte limit, the digest and the declaration list.
+
+## What changed
+
+- `src/database.rs`: the hidden `signature_answer` (Rust's answer as
+  text), `signature_words` (the world header encoder the hybrid wiring
+  will use) and `signature_tags`.
+- `packages/vesper-lsp-features/src/signature.ves` (new) and the entry
+  `lsp_signature` in lib.ves.
+- `tests/self_host_lsp_features.rs`: `signature_matches_rust` and the
+  ignored `signature_speed`.
+
+## Differential
+
+225 inputs: the checked corpus of the navigation tests (examples, test
+fixtures, LSP fixtures and generated programs) and ten hand-written
+programs (generics, effects, function types, tuples, projections, a
+trait, a source that fails to check). 216 complete snapshots, 5
+unsupported trait headers and 4 failed analyses, 0 diffs, with the
+port's BLAKE3 and with the digest left to the host. The unresolved,
+declaration-limit and byte-limit refusals are not reached by any checked
+source in the corpus.
+
+## Numbers
+
+8 snapshots per call, best of five ABBA rounds per input, release build.
+The world headers are encoded outside the timing. With the host digest,
+the port's answer is unpacked and its header bytes hashed inside the
+timing.
+
+| Header bytes hashed by | Rust | Vesper | Ratio |
+|---|--:|--:|--:|
+| the host's C BLAKE3 (`@vesper-std/hash-sys`) | 14.0 µs | 14.5 µs | **1.03x** |
+| the portable Vesper BLAKE3 | 14.0 µs | 44.7 µs | 3.19x |
+
+The first version ran at 1.70x. Writing plain JSON strings and literal
+keys as one slice copy, and answering leaf types without a stack, brought
+it to 1.03x. The portable BLAKE3 is most of the remaining gap, so the
+wiring must hash through hash-sys. Rust lines deleted: 0; the query is
+not wired.
+
+# Part 13a: the lint preflight (#1828)
+
+`preflight` in `src/tooling/lint.rs` is the first step of `vesper lint`
+over a source: it refuses sources over 256 KiB, lexes them, refuses
+lexical errors with the `Debug` text of the lexer's diagnostics, and
+checks the token stream against the lint budgets (8,192 tokens, 256
+recursive-expression tokens, 128-byte identifiers, 64 conditionals,
+nesting 32, runs of 256 tokens between `;`, `{` and `}`) before any
+parse. Part 13a ports it as `lsp_lint_preflight` (`lint_preflight.ves`
+in `@vesper/lsp-features`), lexing with `@vesper/front`'s lexer.
+
+## What changed
+
+- `src/tooling/lint.rs`: the budgets are named constants, and the hidden
+  `preflight_answer` (Rust's answer as text) and `preflight_words` (the
+  source as the port reads it) are added.
+- `packages/vesper-lsp-features/src/lint_preflight.ves` (new) and the
+  entry `lsp_lint_preflight` in lib.ves.
+- `tests/self_host_lsp_features.rs`: `lint_preflight_matches_rust` and
+  the ignored `lint_preflight_speed`.
+
+## Differential
+
+254 sources: the recovery and signature programs, every fifth corpus
+`.ves` file whole and cut in half, and sources at and one past each
+budget, lexical errors (an unterminated comment and string, invalid
+characters, more than the lexer's 128 diagnostics and 65,536 tokens) and
+the 256 KiB limit. 123 admitted, 131 refused across every refusal, 0
+diffs.
+
+## Numbers
+
+8 preflights per call, best of five ABBA rounds per source, release
+build, source words written outside the timing.
+
+| Rust | Vesper | Ratio |
+|--:|--:|--:|
+| 35.8 µs | 39.7 µs | **1.11x** |
+
+Rust lines deleted: 0; the lint driver still lexes in Rust.

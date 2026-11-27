@@ -6,7 +6,7 @@ capability_ceiling = ["Fail", "Alloc", "Ffi"]
 # The `.vsys` library Blake3 and the C that provides it (manuscript §16.3):
 # each wrapper in c/ includes one upstream BLAKE3 file with its symbols
 # renamed; a per-target name exists only for the targets that build it.
-vsys = ["blake3.vsys"]
+vsys = ["blake3-@OS@.vsys"]
 objects = [
     "c/b3-blake3.c",
     "c/b3-dispatch.c",

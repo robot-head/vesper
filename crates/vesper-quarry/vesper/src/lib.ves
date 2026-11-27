@@ -32,13 +32,22 @@
 //     sizes of a Rust `Value` and a Rust `Vec<Value>` (the row executor
 //     charges them exactly as the Rust executor did).
 
-use self::store_log::record_decode as sl_record_decode;
+use self::meta::{
+    fsm_decode as fsm_decode_impl, fsm_encode as fsm_encode_impl, meta_decode as meta_decode_impl
+};
+use self::store_log::{
+    header_decode as sl_header_decode, header_encode as sl_header_encode,
+    record_decode as sl_record_decode
+};
 use self::util::{ex, lim, raw};
 use self::ddl::{ddl_apply_q};
 use self::plan::{optimize_q, prepare_q};
 use self::entry::{execute_q, set_rows_q};
 use self::internal::{check as internal_check_impl, route as internal_route_impl};
-use self::leaf::check as leaf_check_impl;
+use self::leaf::{
+    check as leaf_check_impl, compact as leaf_compact_impl, garbage as leaf_garbage_impl,
+    max_capacity as leaf_max_capacity_impl, remove as leaf_remove_impl, search as leaf_search_impl
+};
 use self::vector::{vaggregate_rows_q, vexecute_q};
 use self::paths::{access_paths_q};
 use self::page::{
@@ -413,10 +422,75 @@ pub fn leaf_check(
     leaf_check_impl(in b, inout seen, inout mask, inout cols)
 }
 
+pub fn leaf_search(in b: Slice[u8], dir: u64, keys: u64, rowid: u64, inv_ts: u64) -> u64 {
+    leaf_search_impl(in b, dir, keys, rowid, inv_ts)
+}
+
+pub fn leaf_garbage(in b: Slice[u8], dir: u64, in var_cols: Slice[u64]) -> u64 {
+    leaf_garbage_impl(in b, dir, in var_cols)
+}
+
+pub fn leaf_compact(
+    inout b: Slice[u8],
+    dir: u64,
+    end_off: u64,
+    in var_cols: Slice[u64],
+    inout scratch: Slice[u8]
+) {
+    leaf_compact_impl(inout b, dir, end_off, in var_cols, inout scratch)
+}
+
+pub fn leaf_max_capacity(in type_tags: Slice[u8]) -> u64 {
+    leaf_max_capacity_impl(in type_tags)
+}
+
+pub fn leaf_remove(
+    inout b: Slice[u8],
+    dir: u64,
+    used: u64,
+    keys: u64,
+    tomb: u64,
+    end_off: u64,
+    in cols: Slice[u64],
+    pos: u64
+) {
+    leaf_remove_impl(inout b, dir, used, keys, tomb, end_off, in cols, pos)
+}
+
 pub fn store_log_record_decode(
     in payload: Slice[u8],
     inout out_hdr: Slice[u64],
     inout out_ranges: Slice[u64]
 ) -> u64 {
     sl_record_decode(in payload, inout out_hdr, inout out_ranges)
+}
+
+pub fn store_log_header_encode(in fields: Slice[u64], inout out: Slice[u8]) {
+    sl_header_encode(in fields, inout out)
+}
+
+pub fn store_log_header_decode(in h: Slice[u8], inout out_fields: Slice[u64]) -> u64 {
+    sl_header_decode(in h, inout out_fields)
+}
+
+pub fn meta_decode(
+    in b: Slice[u8],
+    inout out_hdr: Slice[u64],
+    inout out_tables: Slice[u64],
+    inout out_cols: Slice[u64],
+    inout out_indexes: Slice[u64]
+) -> u64 {
+    meta_decode_impl(in b, inout out_hdr, inout out_tables, inout out_cols, inout out_indexes)
+}
+
+pub fn fsm_encode(inout b: Slice[u8], in pages: Slice[u64]) {
+    fsm_encode_impl(inout b, in pages)
+}
+
+pub fn fsm_decode(
+    in b: Slice[u8],
+    inout out_pages: Slice[u64],
+    inout out_count: Slice[u64]
+) -> u64 {
+    fsm_decode_impl(in b, inout out_pages, inout out_count)
 }

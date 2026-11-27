@@ -13,6 +13,10 @@ vesper_crate(
         "//packages/vesper-codegen-numeric:files",
         "//packages/vesper-cranelift:files",
     ],
+    test_tags = {
+        # Runs whole-body Vesper emissions across the corpus in Self-host codegen differentials.
+        "test/self_host_native_walk_body": ["resources:memory:6144"],
+    },
     test_timeouts = {
         "test/self_host_codegen_calls_emit": "long",
         "test/self_host_codegen_control": "long",

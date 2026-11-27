@@ -13,8 +13,15 @@
 
 #[rustfmt::skip]
 #[allow(unsafe_code)]
+#[rustfmt::skip]
 #[path = "../port/binding.rs"]
-mod binding;
+pub(crate) mod binding;
+
+/// Runs the Vesper RFC 8949 CBOR structural pre-scanner (`@vesper/beacon-arrow::cbor`).
+/// Returns `0` (`SCAN_OK`), `1` (`SCAN_BAD_VALUE`), or `2` (`SCAN_TOO_LARGE`).
+pub fn otap_cbor_scan(bytes: &[u8], budget: u64, node_weight: u64, max_depth: u64) -> u64 {
+    binding::otap_cbor_scan(bytes, budget, node_weight, max_depth)
+}
 
 #[cfg(feature = "grpc")]
 pub mod grpc;

@@ -1891,7 +1891,7 @@ fn run_mutation_gate(opts: &Options) -> Result<(), String> {
         mutated.push_str(&source[cand.end..]);
 
         let checked = if let Some(target) = &package {
-            let path = target.root.join(&cand.file);
+            let path = target.root.join(display_path(&cand.file));
             TestProgram::package(target, Some((&path, &mutated))).and_then(|program| {
                 program
                     .check(&checked_module(&program.module, program.negative_names()))
@@ -2123,6 +2123,7 @@ pub fn run(args: Vec<String>) -> Result<(), String> {
 /// with `/`, so on Windows a dependency under the canonical (verbatim,
 /// `\\?\C:\...`) package root reads `\\?\C:/\/...`, which a verbatim
 /// path cannot parse; pushing the components one by one rebuilds it (#2237).
+/// The mutation loop uses it both to find the file and to replace its text.
 fn display_path(display: &str) -> PathBuf {
     if cfg!(windows) {
         display.split('/').collect()

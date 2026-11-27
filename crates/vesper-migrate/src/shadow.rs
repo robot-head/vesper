@@ -58,6 +58,25 @@ impl SplitMix64 {
     /// A byte vector of length `0..=max_len`. One draw in four copies a
     /// caller-provided prefix (for example a valid header magic) so the
     /// generator reaches past early rejections.
+    #[cfg(feature = "vesper-port")]
+    pub fn bytes(&mut self, max_len: usize, prefix: &[u8]) -> Vec<u8> {
+        let mut state_buf = [self.state];
+        let mut out = vec![0u8; max_len];
+        let len = crate::binding::migrate_splitmix64_bytes(
+            &mut state_buf,
+            max_len as u64,
+            prefix,
+            &mut out,
+        ) as usize;
+        self.state = state_buf[0];
+        out.truncate(len);
+        out
+    }
+
+    /// A byte vector of length `0..=max_len`. One draw in four copies a
+    /// caller-provided prefix (for example a valid header magic) so the
+    /// generator reaches past early rejections.
+    #[cfg(not(feature = "vesper-port"))]
     pub fn bytes(&mut self, max_len: usize, prefix: &[u8]) -> Vec<u8> {
         let len = usize::try_from(self.below_or_eq(max_len as u64)).unwrap_or(max_len);
         let mut out = Vec::with_capacity(len);

@@ -1,0 +1,227 @@
+// The lexical preflight of `vesper lint` (src/tooling/lint.rs `preflight`)
+// in Vesper, over the words `lint::preflight_words` writes: the source's
+// byte length and bytes. The source is lexed with @vesper/front's lexer
+// (`lexer::lex`, the default limits) and its tokens are checked against
+// the lint budgets before any parse.
+//
+// The answer is the text `lint::preflight_answer` writes: `O <tokens>` for
+// an admitted source, else `E <refusal>`; lexical errors are refused with
+// the `Debug` text of Rust's diagnostic list.
+use @vesper/front::{Tokens, Diags};
+use @vesper/front::lex::{lex_raw, token_end};
+use @vesper/front::diag::{diags_new};
+use @vesper/front::kinds::{
+    k_whitespace, k_comment, k_block_comment, k_upper, k_lower, k_if, k_l_paren, k_r_paren,
+    k_l_brace, k_r_brace, k_l_bracket, k_r_bracket, k_semi, k_dot, k_question, k_arrow, k_eq,
+    k_plus_eq, k_minus_eq, k_star_eq, k_slash_eq, k_percent_eq, k_plus, k_minus, k_star, k_slash,
+    k_percent, k_eq_eq, k_ne, k_lt, k_le, k_gt, k_ge, k_and, k_or, k_bang, k_pipe, k_amp, k_caret,
+    k_shl, k_shr
+};
+use self::json::{byte, put, put_u64};
+
+const WORD_BYTES: u64 = 8;
+
+// The lint budgets of `preflight`, as src/tooling/lint.rs names them.
+const MAX_BYTES: u64 = 262144;
+const MAX_TOKENS: u64 = 8192;
+const MAX_RECURSIVE_TOKENS: u64 = 256;
+const MAX_IDENTIFIER_BYTES: u64 = 128;
+const MAX_CONDITIONALS: u64 = 64;
+const MAX_NESTING: u64 = 32;
+const MAX_TOKEN_RUN: u64 = 256;
+
+// Digits of a diagnostic code after its `E` (`E0001`).
+const CODE_DIGITS: u64 = 4;
+const DECIMAL_BASE: u64 = 10;
+const QUOTE: u8 = 34;
+const BACKSLASH: u8 = 92;
+const LETTER_E: u8 = 69;
+const DIGIT_ZERO: u8 = 48;
+
+fn word_at(in b: Slice[u8], pos: u64) -> u64 {
+    b.try_read_u64_le(pos).unwrap_or(0)
+}
+
+fn trivia(k: u8) -> bool {
+    k == k_whitespace() || k == k_comment() || k == k_block_comment()
+}
+
+// The kinds that open or continue a recursive expression.
+fn recursive(k: u8) -> bool {
+    k == k_l_paren()
+        || k == k_dot()
+        || k == k_question()
+        || k == k_arrow()
+        || k == k_eq()
+        || k == k_plus_eq()
+        || k == k_minus_eq()
+        || k == k_star_eq()
+        || k == k_slash_eq()
+        || k == k_percent_eq()
+        || k == k_plus()
+        || k == k_minus()
+        || k == k_star()
+        || k == k_slash()
+        || k == k_percent()
+        || k == k_eq_eq()
+        || k == k_ne()
+        || k == k_lt()
+        || k == k_le()
+        || k == k_gt()
+        || k == k_ge()
+        || k == k_and()
+        || k == k_or()
+        || k == k_bang()
+        || k == k_pipe()
+        || k == k_amp()
+        || k == k_caret()
+        || k == k_shl()
+        || k == k_shr()
+}
+
+fn refuse(inout o: ChunkSeq[u8], in reason: Str) {
+    put(inout o, in "E ");
+    put(inout o, in reason);
+}
+
+// `{code:?}` of a code `E` and `CODE_DIGITS` digits.
+fn put_code(inout o: ChunkSeq[u8], code: u8) {
+    o.push(QUOTE);
+    o.push(LETTER_E);
+    let n = widen_u64(code);
+    let mut digits = 1;
+    let mut bound = DECIMAL_BASE;
+    for k in 1..CODE_DIGITS {
+        if n >= bound {
+            digits = wrapping_add(digits, 1);
+        }
+        bound = wrapping_mul(bound, DECIMAL_BASE);
+    }
+    for k in digits..CODE_DIGITS {
+        o.push(DIGIT_ZERO);
+    }
+    put_u64(inout o, n);
+    o.push(QUOTE);
+}
+
+// `{message:?}`: the lexer's messages are ASCII, so only quotes and
+// backslashes take an escape.
+fn put_debug_text(inout o: ChunkSeq[u8], in text: Slice[u8], from: u64, to: u64) {
+    o.push(QUOTE);
+    for i in from..to {
+        let c = byte(in text, i);
+        if c == QUOTE || c == BACKSLASH {
+            o.push(BACKSLASH);
+        }
+        o.push(c);
+    }
+    o.push(QUOTE);
+}
+
+// `lexical errors: {errors:?}` over the lexer's diagnostics.
+fn refuse_lexical(inout o: ChunkSeq[u8], in d: Diags) {
+    put(inout o, in "E lexical errors: [");
+    let text = d.text.as_slice();
+    let n = d.code.len();
+    for i in 0..n {
+        if i > 0 {
+            put(inout o, in ", ");
+        }
+        put(inout o, in "Diagnostic { code: ");
+        put_code(inout o, d.code.try_get(i).unwrap_or(0));
+        put(inout o, in ", message: ");
+        let from = widen_u64(d.at.try_get(i).unwrap_or(0));
+        let to = match d.at.try_get(wrapping_add(i, 1)) {
+            Option::Some(next) => widen_u64(next),
+            Option::None => d.text.len(),
+        };
+        put_debug_text(inout o, in text, from, to);
+        put(inout o, in ", span: ");
+        put_u64(inout o, widen_u64(d.start.try_get(i).unwrap_or(0)));
+        put(inout o, in "..");
+        put_u64(inout o, widen_u64(d.end.try_get(i).unwrap_or(0)));
+        put(inout o, in ", related: [], help: None }");
+    }
+    put(inout o, in "]");
+}
+
+// The budgets over the token table, or the first refusal into `o`.
+fn budgets(inout o: ChunkSeq[u8], in t: Tokens) -> bool {
+    let mut depth = 0;
+    let mut run = 0;
+    let mut branches = 0;
+    let mut recursive_tokens = 0;
+    let n = t.kind.len();
+    for i in 0..n {
+        let k = t.kind.try_get(i).unwrap_or(0);
+        if trivia(k) {
+            continue;
+        }
+        run = wrapping_add(run, 1);
+        if recursive(k) {
+            recursive_tokens = wrapping_add(recursive_tokens, 1);
+            if recursive_tokens > MAX_RECURSIVE_TOKENS {
+                refuse(inout o, in "lint recursive-expression token budget (256)");
+                return false;
+            }
+        }
+        if k == k_upper() || k == k_lower() {
+            let start = widen_u64(t.start.try_get(i).unwrap_or(0));
+            if wrapping_sub(token_end(in t, i), start) > MAX_IDENTIFIER_BYTES {
+                refuse(inout o, in "lint identifier byte limit (128)");
+                return false;
+            }
+        }
+        if k == k_if() {
+            branches = wrapping_add(branches, 1);
+            if branches > MAX_CONDITIONALS {
+                refuse(inout o, in "lint conditional limit (64), including else-if recursion");
+                return false;
+            }
+        }
+        if k == k_l_paren() || k == k_l_bracket() || k == k_l_brace() {
+            depth = wrapping_add(depth, 1);
+            if depth > MAX_NESTING {
+                refuse(inout o, in "lint nesting limit (32)");
+                return false;
+            }
+        } else if k == k_r_paren() || k == k_r_bracket() || k == k_r_brace() {
+            if depth > 0 {
+                depth = wrapping_sub(depth, 1);
+            }
+        }
+        if k == k_semi() || k == k_l_brace() || k == k_r_brace() {
+            run = 0;
+        }
+        if run > MAX_TOKEN_RUN {
+            refuse(inout o, in "lint expression/signature token-run limit (256)");
+            return false;
+        }
+    }
+    true
+}
+
+// `preflight` over the source at `start`, its answer into `o`.
+pub fn lint_preflight(inout o: ChunkSeq[u8], in b: Slice[u8], start: u64) {
+    o.truncate(0);
+    let len = word_at(in b, start);
+    let at = wrapping_add(start, WORD_BYTES);
+    if len > MAX_BYTES {
+        refuse(inout o, in "lint source exceeds 256 KiB");
+        return;
+    }
+    let mut d = diags_new();
+    let t = lex_raw(in b[at..wrapping_add(at, len)], inout d);
+    if d.code.len() > 0 {
+        refuse_lexical(inout o, in d);
+        return;
+    }
+    if t.kind.len() > MAX_TOKENS {
+        refuse(inout o, in "lint token limit (8192)");
+        return;
+    }
+    if budgets(inout o, in t) {
+        put(inout o, in "O ");
+        put_u64(inout o, t.kind.len());
+    }
+}

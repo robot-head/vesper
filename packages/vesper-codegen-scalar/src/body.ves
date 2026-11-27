@@ -1,39 +1,35 @@
-// The body plan of the native walk's whole-function hook (#2094, part 6a
+// The body plan of the native walk's whole-function hook (#2094, parts 6a-6c
 // of #1509): for each scalar function, every Cranelift builder call
 // `Codegen::ir_graph_at` (src/native.rs) makes for its body, in order, so
 // that @vesper/codegen-scalar-emit's `body_hook` can emit the whole body
 // on the lent builder.
 //
-// Part 6a covers functions whose values and locals are integers of one
+// Parts 6a-6c cover functions whose values and locals are integers of one
 // word, `bool`, `f32` and `f64` (and `Unit` or `Never` values), whose
-// instructions are constants, plain local reads, binds and `=` writes,
-// and the operators this package plans (`plan_function`), and whose
-// blocks end in `return`, `jump`, `branch` or `unreachable`. Part 6b adds
-// direct calls of scalar arguments: the walk's frame names, for each call,
-// the function it would call with one `call` instruction and nothing
-// around it (`Codegen::plain_call`: a compiled-once pure callee with no
-// status word, failure record or caller slot), and the hook declines a
-// body with any other call. Any other function is left out of the plan,
-// and the Rust walk emits it.
-//
-// The Rust side asks only for a function whose frame is plain (no trace,
-// Fail record, caller slot or result buffer, no `inout` or function
-// parameters, the optimize path, not `@fip`), so
-// such a function's locals are all kept in registers
-// (`native::register_locals`: with no calls but pure ones, every scalar
-// local is) and nothing but the walk and its direct calls emits code.
+// instructions are constants, plain local reads, binds, `=` and compound
+// local writes, early `return` (`Op::Exit`), integer and float unary/binary
+// operators, bit and float builtins, and direct calls of scalar arguments
+// (`Codegen::plain_call`), and whose blocks end in `return`, `jump`,
+// `branch`, scalar `match` or `unreachable`. Any other function is left out
+// of the plan, and the Rust walk emits it.
 
 use @vesper/check-data::util::{add, inc, n32, u64_at};
 use @vesper/check-data::types::{TyKind, default_type};
 use @vesper/place-ir::{FnRow, InstRow};
-use @vesper/place-ir::codes::{Op, Pat, Term};
-use super::{Gen};
+use @vesper/place-ir::codes::{Lit, Op, Pat, Term};
+use super::{
+    CONV_NARROW, FOP_ABS, FOP_CEIL, FOP_FLOOR, FOP_FMA, FOP_FROM_BITS_F32, FOP_FROM_BITS_F64,
+    FOP_MAX, FOP_MIN, FOP_NEAREST_F32, FOP_NEAREST_F64, FOP_ROUND, FOP_SAT_BASE, FOP_SQRT,
+    FOP_TO_BITS_F32, FOP_TO_BITS_F64, FOP_TRUNC, FOP_WIDEN_F32, FOP_WIDEN_F64, Gen, get,
+    kind_unsigned
+};
 use super::blocks::{layout};
 
 // The plan's lane codes (`native::scalar` of a value's type).
 pub const LANE_I64: u64 = 1;
 pub const LANE_F32: u64 = 2;
 pub const LANE_F64: u64 = 3;
+pub const LANE_I128: u64 = 4;
 
 // A local's entry: a lane code for a local the body declares, or
 // `LOCAL_PARAM` plus the parameter's index for one of the parameters.
@@ -45,11 +41,130 @@ pub const INST_READ: u64 = 2;
 pub const INST_BIND: u64 = 3;
 pub const INST_WRITE: u64 = 4;
 pub const INST_CALL: u64 = 5;
+pub const INST_F32CONST: u64 = 6;
+pub const INST_FLOAT_UNARY: u64 = 7;
+pub const INST_FLOAT_BINARY: u64 = 8;
+pub const INST_INT_EXTRA: u64 = 9;
+pub const INST_WRITE_OP: u64 = 10;
+pub const INST_EXIT: u64 = 11;
+pub const INST_CALL_BUILTIN: u64 = 12;
+pub const INST_WIDE_CONST: u64 = 13;
+pub const INST_WIDE_UNARY: u64 = 14;
+pub const INST_WIDE_BINARY: u64 = 15;
+
+// Sub-operations of `INST_FLOAT_UNARY` and 1-arg `CB_FLOAT_UNARY`.
+const FUN_FNEG: u64 = 1;
+const FUN_SQRT: u64 = 2;
+const FUN_ABS: u64 = 3;
+const FUN_FLOOR: u64 = 4;
+const FUN_CEIL: u64 = 5;
+const FUN_TRUNC: u64 = 6;
+const FUN_ROUND: u64 = 7;
+const FUN_FPROMOTE: u64 = 8;
+const FUN_FDEMOTE: u64 = 9;
+const FUN_FNOOP: u64 = 10;
+const FUN_FCVT_SINT: u64 = 11;
+const FUN_FCVT_UINT: u64 = 12;
+const FUN_TO_BITS_F64: u64 = 13;
+const FUN_TO_BITS_F32: u64 = 14;
+const FUN_FROM_BITS_F64: u64 = 15;
+const FUN_FROM_BITS_F32: u64 = 16;
+const FUN_SAT_TO_INT: u64 = 17;
+
+// Sub-operations of `INST_FLOAT_BINARY`.
+const FBIN_ADD: u64 = 1;
+const FBIN_SUB: u64 = 2;
+const FBIN_MUL: u64 = 3;
+const FBIN_DIV: u64 = 4;
+const FBIN_MIN: u64 = 5;
+const FBIN_MAX: u64 = 6;
+const FBIN_EQ: u64 = 7;
+const FBIN_NE: u64 = 8;
+const FBIN_LT: u64 = 9;
+const FBIN_LE: u64 = 10;
+const FBIN_GT: u64 = 11;
+const FBIN_GE: u64 = 12;
+
+// Sub-operations of `INST_INT_EXTRA`.
+const IEX_WIDEN_U64: u64 = 1;
+const IEX_BIT_UNARY: u64 = 2;
+const IEX_BIT_BINARY: u64 = 3;
+const IEX_BITWISE: u64 = 4;
+const IEX_SDIV: u64 = 5;
+const IEX_SREM: u64 = 6;
+
+// Sub-operations of `INST_WRITE_OP`.
+const WOP_IADD: u64 = 1;
+const WOP_ISUB: u64 = 2;
+const WOP_IMUL: u64 = 3;
+const WOP_UDIV: u64 = 4;
+const WOP_SDIV: u64 = 5;
+const WOP_UREM: u64 = 6;
+const WOP_SREM: u64 = 7;
+const WOP_BAND: u64 = 8;
+const WOP_BOR: u64 = 9;
+const WOP_BXOR: u64 = 10;
+const WOP_FADD: u64 = 11;
+const WOP_FSUB: u64 = 12;
+const WOP_FMUL: u64 = 13;
+const WOP_FDIV: u64 = 14;
+
+// Sub-operations of `INST_CALL_BUILTIN`.
+const CB_BIT: u64 = 1;
+const CB_FMA: u64 = 2;
+const CB_FMIN: u64 = 3;
+const CB_FMAX: u64 = 4;
+const CB_FLOAT_UNARY: u64 = 5;
+const CB_WIDE_BIT: u64 = 6;
+const CB_BITWISE: u64 = 7;
+const CB_WIDE_CONVERT: u64 = 8;
+
+const BIT_INTR_AND: u32 = 1;
+const BIT_INTR_OR: u32 = 2;
+const BIT_INTR_XOR: u32 = 3;
+
+// Match arm condition kinds (`TERM_MATCH`).
+const MATCH_TRUE: u64 = 1;
+const MATCH_INT: u64 = 2;
+const MATCH_F32: u64 = 3;
+const MATCH_F64: u64 = 4;
+const MATCH_WIDE: u64 = 5;
+
+// Sub-operations of `INST_WIDE_UNARY`.
+const WUN_BNOT: u64 = 1;
+const WUN_INEG: u64 = 2;
+const WUN_CONVERT: u64 = 3;
+const WUN_BIT: u64 = 4;
+
+// Sub-operations of `INST_WIDE_BINARY`.
+const WBIN_IADD: u64 = 1;
+const WBIN_ISUB: u64 = 2;
+const WBIN_IMUL: u64 = 3;
+const WBIN_BAND: u64 = 4;
+const WBIN_BOR: u64 = 5;
+const WBIN_BXOR: u64 = 6;
+const WBIN_EQ: u64 = 7;
+const WBIN_NE: u64 = 8;
+const WBIN_SLT: u64 = 9;
+const WBIN_SLE: u64 = 10;
+const WBIN_SGT: u64 = 11;
+const WBIN_SGE: u64 = 12;
+const WBIN_ULT: u64 = 13;
+const WBIN_ULE: u64 = 14;
+const WBIN_UGT: u64 = 15;
+const WBIN_UGE: u64 = 16;
+const WBIN_SHL: u64 = 17;
+const WBIN_USHR: u64 = 18;
+const WBIN_SSHR: u64 = 19;
+
+const PAT_LIT_HI_OFFSET: u64 = 5;
 
 // A call's operands (place-ir `operands`): the callee, the argument count,
 // then each argument's pass, value, place root and place path.
 const CALL_ARGS: u64 = 2;
 const CALL_ARG_WORDS: u64 = 4;
+const CALL_ARG_ROOT_OFFSET: u64 = 2;
+const PASS_IN: u64 = 0;
 
 // A `Bind` of the wildcard pattern binds no local.
 pub const NO_LOCAL: u64 = 18446744073709551615;
@@ -61,17 +176,48 @@ const NONE64: u64 = 18446744073709551615;
 const TERM_RETURN: u64 = 0;
 const TERM_JUMP: u64 = 1;
 const TERM_BRANCH: u64 = 2;
+const TERM_MATCH: u64 = 3;
 const TERM_UNREACHABLE: u64 = 4;
 
+// Pattern word counts and table bitfields.
+const PAT_WILD_WORDS: u64 = 3;
+const PAT_BIND_WORDS: u64 = 4;
+const PAT_LIT_WORDS: u64 = 6;
+const PAT_LIT_KIND_OFFSET: u64 = 3;
+const PAT_LIT_LO_OFFSET: u64 = 4;
+const TABLE_KIND_MASK: u32 = 15;
+const TABLE_OP_SHIFT: u32 = 4;
+const BIT_OP_CLZ: u32 = 1;
+const BIT_OP_CTZ: u32 = 2;
+const BIT_OP_POPCNT: u32 = 3;
+const BIT_OP_WRAPPING_SHL: u32 = 4;
+const BIT_OP_WRAPPING_SHR: u32 = 5;
+const BIT_OP_WRAPPING_NEG: u32 = 6;
+const MAX_SRCLOC: u64 = 4294967294;
+const PLAN_RECORD_WORDS: u64 = 6;
+const PLAN_REQUEST_START: u64 = 3;
+const PLAN_REQUEST_END: u64 = 6;
+
 // `IntegerKind::wide`: `i128` (11) and `u128` (12).
+const KIND_WIDE_I128: u32 = 11;
+const KIND_WIDE_U128: u32 = 12;
+const KIND_U8: u32 = 1;
+const KIND_U32: u32 = 3;
+const KIND_I8: u32 = 6;
+const KIND_I32: u32 = 8;
+
 fn kind_wide(k: u32) -> bool {
-    k == 11 || k == 12
+    k == KIND_WIDE_I128 || k == KIND_WIDE_U128
 }
 
 // The kinds below 64 bits that `coerce` reduces: u8, u16, u32, i8, i16,
 // i32.
 fn kind_narrow(k: u32) -> bool {
-    (k >= 1 && k <= 3) || (k >= 6 && k <= 8)
+    (k >= KIND_U8 && k <= KIND_U32) || (k >= KIND_I8 && k <= KIND_I32)
+}
+
+fn f32_bits_of_f64(bits64: u64) -> u64 {
+    widen_u64(to_bits_f32(nearest_f32(from_bits_f64(bits64))))
 }
 
 fn grow(inout s: ChunkSeq[u64], n: u64) {
@@ -111,7 +257,7 @@ struct Header {
 }
 
 impl Gen {
-    // The lane code of a value of type `t`, or 0 for a type part 6a does
+    // The lane code of a value of type `t`, or 0 for a type part 6 does
     // not emit.
     fn body_lane(inout self, t: u32) -> u64 {
         if t == NONE32 {
@@ -135,8 +281,12 @@ impl Gen {
             LANE_F64
         } else if n.name == k.bool_ || n.name == k.unit || n.name == k.never {
             LANE_I64
-        } else if k.is_integer(n.name) && !kind_wide(self.kind_of(d)) {
-            LANE_I64
+        } else if k.is_integer(n.name) {
+            if kind_wide(self.kind_of(d)) {
+                LANE_I128
+            } else {
+                LANE_I64
+            }
         } else {
             0
         }
@@ -154,19 +304,27 @@ impl Gen {
         k.is_integer(n.name) || n.name == k.f32_ || n.name == k.f64_ || n.name == k.bool_
     }
 
-    // The narrow kind `Codegen::coerce` reduces a value of type `t` to (0:
-    // none), or NONE64 for a two-word kind, which it widens instead.
+    // The integer kind `Codegen::coerce` adjusts a value of type `t` to:
+    // 0 for none, 1..3/6..8 for narrow 1-word kinds, or 11/12 for i128/u128.
     fn body_kind(in self, t: u32) -> u64 {
         if t == NONE32 {
             return 0;
         }
         let k = self.kind_of(t);
-        if kind_wide(k) {
-            NONE64
-        } else if kind_narrow(k) {
+        if kind_wide(k) || kind_narrow(k) {
             widen_u64(k)
         } else {
             0
+        }
+    }
+
+    fn body_expr_kind(inout self, s0: u64, s1: u64) -> u64 {
+        let t = self.ctx.world.expr_type(s0, s1);
+        if t == NONE32 {
+            0
+        } else {
+            let d = default_type(inout self.ctx.types, t);
+            self.body_kind(d)
         }
     }
 
@@ -200,8 +358,20 @@ impl Gen {
         h.result = n32(self.program.op(i));
         let effects = n32(self.program.op(inc(i)));
         let row = self.ctx.types.row(self.ctx.types.node(effects).r2);
-        if row.n != 0 || row.tail != 0 {
+        if row.tail != 0 {
             h.plain = false;
+        } else {
+            for k in 0..widen_u64(row.n) {
+                let eff_name = self.ctx.types.effect_at(add(widen_u64(row.a), k)).name;
+                let ops_s = self.ops;
+                if eff_name != ops_s.const_time
+                    && eff_name != ops_s.realtime
+                    && eff_name != ops_s.det_float
+                    && eff_name != ops_s.isa
+                {
+                    h.plain = false;
+                }
+            }
         }
         i = add(i, 2);
         let nb = self.program.op(i);
@@ -264,14 +434,787 @@ impl Gen {
         v != NONE64
     }
 
+    // Classifies a 1-operand float intrinsic or conversion (`float_unary`)
+    // on an operand of defaulted type `op_def` and lane `op_lane`.
+    fn body_float_unary_op(
+        in self,
+        op: u32,
+        op_def: u32,
+        op_lane: u64,
+        s0: u64,
+        s1: u64,
+        inout meta: u64
+    ) -> u64 {
+        meta = 0;
+        let is_flt = op_lane == LANE_F32 || op_lane == LANE_F64;
+        let fop = get(in self.tables.float_ops, op);
+        if fop == FOP_SQRT && is_flt {
+            return FUN_SQRT;
+        }
+        if fop == FOP_ABS && is_flt {
+            return FUN_ABS;
+        }
+        if fop == FOP_FLOOR && is_flt {
+            return FUN_FLOOR;
+        }
+        if fop == FOP_CEIL && is_flt {
+            return FUN_CEIL;
+        }
+        if fop == FOP_TRUNC && is_flt {
+            return FUN_TRUNC;
+        }
+        if fop == FOP_ROUND && is_flt {
+            return FUN_ROUND;
+        }
+        if fop >= FOP_WIDEN_F32 && fop <= FOP_NEAREST_F64 {
+            let to_f32 = fop == FOP_WIDEN_F32 || fop == FOP_NEAREST_F32;
+            let to_lane = if to_f32 { LANE_F32 } else { LANE_F64 };
+            meta = to_lane;
+            if op_lane == LANE_F32 {
+                return if to_f32 { FUN_FNOOP } else { FUN_FPROMOTE };
+            }
+            if op_lane == LANE_F64 {
+                return if to_f32 { FUN_FDEMOTE } else { FUN_FNOOP };
+            }
+            if op_lane == LANE_I64 {
+                let ik = self.kind_of(op_def);
+                if ik == 0 || kind_wide(ik) {
+                    return 0;
+                }
+                return if kind_unsigned(ik) {
+                    FUN_FCVT_UINT
+                } else {
+                    FUN_FCVT_SINT
+                };
+            }
+            return 0;
+        }
+        if fop == FOP_TO_BITS_F64 && op_lane == LANE_F64 {
+            return FUN_TO_BITS_F64;
+        }
+        if fop == FOP_TO_BITS_F32 && op_lane == LANE_F32 {
+            return FUN_TO_BITS_F32;
+        }
+        if fop == FOP_FROM_BITS_F64 && op_lane == LANE_I64 {
+            return FUN_FROM_BITS_F64;
+        }
+        if fop == FOP_FROM_BITS_F32 && op_lane == LANE_I64 {
+            return FUN_FROM_BITS_F32;
+        }
+        if fop > FOP_SAT_BASE && is_flt {
+            let to_ik = wrapping_sub(fop, FOP_SAT_BASE);
+            if to_ik == 0 || kind_wide(to_ik) {
+                return 0;
+            }
+            meta = widen_u64(to_ik);
+            return FUN_SAT_TO_INT;
+        }
+        let conv = get(in self.tables.conversions, op);
+        if conv != 0 && (conv >> TABLE_OP_SHIFT) == CONV_NARROW && is_flt {
+            let to_ik = conv & TABLE_KIND_MASK;
+            if to_ik == 0 || kind_wide(to_ik) || self.ctx.world.may_overflow(s0, s1) {
+                return 0;
+            }
+            meta = widen_u64(to_ik);
+            return FUN_SAT_TO_INT;
+        }
+        0
+    }
+
+    fn body_unary(
+        inout self,
+        in h: Header,
+        i: InstRow,
+        planned: u64,
+        inout ops: ChunkSeq[u64],
+        inout kind: u64,
+        inout extra: ChunkSeq[u64]
+    ) -> bool {
+        if !self.body_operand(in h, inc(i.a), inout ops) {
+            return false;
+        }
+        let op_ty = n32(u64_at(in h.vty, u64_at(in ops, 0)));
+        let op_lane = self.body_lane(op_ty);
+        if op_lane == 0 {
+            return false;
+        }
+        if planned != NONE64 && op_lane == LANE_I64 {
+            kind = INST_PLANNED;
+            return true;
+        }
+        let op = n32(self.program.op(i.a));
+        let op_def = default_type(inout self.ctx.types, op_ty);
+        let op_kind = self.body_kind(op_def);
+        let res_kind = self.body_expr_kind(i.s0, i.s1);
+        if op_kind == NONE64 || res_kind == NONE64 {
+            return false;
+        }
+        let mut meta: u64 = 0;
+        let fun = self.body_float_unary_op(op, op_def, op_lane, i.s0, i.s1, inout meta);
+        if fun != 0 {
+            kind = INST_FLOAT_UNARY;
+            extra.push(fun);
+            extra.push(meta);
+            extra.push(op_kind);
+            extra.push(res_kind);
+            return true;
+        }
+        let bit_word = get(in self.tables.bit_builtins, op);
+        if bit_word != 0 && op_lane == LANE_I128 {
+            let bop = bit_word >> TABLE_OP_SHIFT;
+            let bkind = bit_word & TABLE_KIND_MASK;
+            if !kind_wide(bkind)
+                || (bop != BIT_OP_CLZ
+                    && bop != BIT_OP_CTZ
+                    && bop != BIT_OP_POPCNT
+                    && bop != BIT_OP_WRAPPING_NEG)
+            {
+                return false;
+            }
+            kind = INST_WIDE_UNARY;
+            extra.push(WUN_BIT);
+            extra.push(widen_u64(bop));
+            extra.push(widen_u64(bkind));
+            extra.push(op_kind);
+            extra.push(res_kind);
+            return true;
+        }
+        if bit_word != 0 && op_lane == LANE_I64 {
+            let bop = bit_word >> TABLE_OP_SHIFT;
+            let bkind = bit_word & TABLE_KIND_MASK;
+            if kind_wide(bkind)
+                || (bop != BIT_OP_CLZ
+                    && bop != BIT_OP_CTZ
+                    && bop != BIT_OP_POPCNT
+                    && bop != BIT_OP_WRAPPING_NEG)
+            {
+                return false;
+            }
+            kind = INST_INT_EXTRA;
+            extra.push(IEX_BIT_UNARY);
+            extra.push(widen_u64(bop));
+            extra.push(widen_u64(bkind));
+            extra.push(op_kind);
+            extra.push(0);
+            extra.push(res_kind);
+            return true;
+        }
+        if op == self.ops.minus && (op_lane == LANE_F32 || op_lane == LANE_F64) {
+            kind = INST_FLOAT_UNARY;
+            extra.push(FUN_FNEG);
+            extra.push(0);
+            extra.push(op_kind);
+            extra.push(res_kind);
+            return true;
+        }
+        if op == self.ops.widen_u64 && op_lane == LANE_I64 {
+            kind = INST_INT_EXTRA;
+            extra.push(IEX_WIDEN_U64);
+            extra.push(0);
+            extra.push(0);
+            extra.push(op_kind);
+            extra.push(0);
+            extra.push(res_kind);
+            return true;
+        }
+        let conv = get(in self.tables.conversions, op);
+        if conv != 0 && (op_lane == LANE_I128 || op_lane == LANE_I64) {
+            let to_ik = conv & TABLE_KIND_MASK;
+            let from_ik = self.kind_of(op_def);
+            if from_ik != 0
+                && (kind_wide(from_ik) || kind_wide(to_ik))
+                && !((conv >> TABLE_OP_SHIFT) == CONV_NARROW
+                    && self.ctx.world.may_overflow(i.s0, i.s1))
+            {
+                kind = INST_WIDE_UNARY;
+                extra.push(WUN_CONVERT);
+                extra.push(widen_u64(from_ik));
+                extra.push(
+                    if kind_narrow(to_ik) || kind_wide(to_ik) {
+                        widen_u64(to_ik)
+                    } else {
+                        0
+                    }
+                );
+                extra.push(op_kind);
+                extra.push(res_kind);
+                return true;
+            }
+        }
+        if op_lane == LANE_I128 {
+            if op == self.ops.tilde {
+                kind = INST_WIDE_UNARY;
+                extra.push(WUN_BNOT);
+                extra.push(0);
+                extra.push(0);
+                extra.push(op_kind);
+                extra.push(res_kind);
+                return true;
+            }
+            if op == self.ops.minus && !self.ctx.world.may_overflow(i.s0, i.s1) {
+                kind = INST_WIDE_UNARY;
+                extra.push(WUN_INEG);
+                extra.push(0);
+                extra.push(0);
+                extra.push(op_kind);
+                extra.push(res_kind);
+                return true;
+            }
+        }
+        false
+    }
+
+    fn body_binary(
+        inout self,
+        in h: Header,
+        i: InstRow,
+        planned: u64,
+        inout ops: ChunkSeq[u64],
+        inout kind: u64,
+        inout extra: ChunkSeq[u64]
+    ) -> bool {
+        if !self.body_operand(in h, inc(i.a), inout ops)
+            || !self.body_operand(in h, add(i.a, 2), inout ops)
+        {
+            return false;
+        }
+        let t0 = n32(u64_at(in h.vty, u64_at(in ops, 0)));
+        let t1 = n32(u64_at(in h.vty, u64_at(in ops, 1)));
+        let l0 = self.body_lane(t0);
+        let l1 = self.body_lane(t1);
+        if l0 == 0 || l1 == 0 {
+            return false;
+        }
+        let op = n32(self.program.op(i.a));
+        let ops_s = self.ops;
+        if l0 == LANE_I128 {
+            let d0 = default_type(inout self.ctx.types, t0);
+            let d1 = default_type(inout self.ctx.types, t1);
+            let k0 = self.body_kind(d0);
+            let k1 = self.body_kind(d1);
+            let rk = self.body_expr_kind(i.s0, i.s1);
+            let bit_word = get(in self.tables.bit_builtins, op);
+            if bit_word != 0 && l1 == LANE_I64 {
+                let bop = bit_word >> TABLE_OP_SHIFT;
+                let bkind = bit_word & TABLE_KIND_MASK;
+                if kind_wide(bkind) && (bop == BIT_OP_WRAPPING_SHL || bop == BIT_OP_WRAPPING_SHR) {
+                    let wb = if bop == BIT_OP_WRAPPING_SHL {
+                        WBIN_SHL
+                    } else if kind_unsigned(bkind) {
+                        WBIN_USHR
+                    } else {
+                        WBIN_SSHR
+                    };
+                    kind = INST_WIDE_BINARY;
+                    extra.push(wb);
+                    extra.push(k0);
+                    extra.push(k1);
+                    extra.push(rk);
+                    return true;
+                }
+                return false;
+            }
+            if l1 != LANE_I128 {
+                return false;
+            }
+            let bit_intr = get(in self.tables.bit_intrinsics, op);
+            if bit_intr != 0 && !self.ctx.world.may_overflow(i.s0, i.s1) {
+                let wb = if bit_intr == BIT_INTR_AND {
+                    WBIN_BAND
+                } else if bit_intr == BIT_INTR_OR {
+                    WBIN_BOR
+                } else if bit_intr == BIT_INTR_XOR {
+                    WBIN_BXOR
+                } else {
+                    0
+                };
+                if wb != 0 {
+                    kind = INST_WIDE_BINARY;
+                    extra.push(wb);
+                    extra.push(k0);
+                    extra.push(k1);
+                    extra.push(rk);
+                    return true;
+                }
+            }
+            let unsigned = kind_unsigned(self.kind_of(d0));
+            let overflow = self.ctx.world.may_overflow(i.s0, i.s1);
+            let wb = if op == ops_s.amp {
+                WBIN_BAND
+            } else if op == ops_s.pipe {
+                WBIN_BOR
+            } else if op == ops_s.caret {
+                WBIN_BXOR
+            } else if op == ops_s.wrapping_add || (op == ops_s.plus && !overflow) {
+                WBIN_IADD
+            } else if op == ops_s.wrapping_sub || (op == ops_s.minus && !overflow) {
+                WBIN_ISUB
+            } else if op == ops_s.wrapping_mul || (op == ops_s.star && !overflow) {
+                WBIN_IMUL
+            } else if op == ops_s.eq {
+                WBIN_EQ
+            } else if op == ops_s.ne {
+                WBIN_NE
+            } else if op == ops_s.lt {
+                if unsigned { WBIN_ULT } else { WBIN_SLT }
+            } else if op == ops_s.le {
+                if unsigned { WBIN_ULE } else { WBIN_SLE }
+            } else if op == ops_s.gt {
+                if unsigned { WBIN_UGT } else { WBIN_SGT }
+            } else if op == ops_s.ge {
+                if unsigned { WBIN_UGE } else { WBIN_SGE }
+            } else {
+                0
+            };
+            if wb == 0 {
+                return false;
+            }
+            kind = INST_WIDE_BINARY;
+            extra.push(wb);
+            extra.push(k0);
+            extra.push(k1);
+            extra.push(rk);
+            return true;
+        }
+        if l0 != l1 {
+            return false;
+        }
+        if planned != NONE64 && l0 == LANE_I64 {
+            kind = INST_PLANNED;
+            return true;
+        }
+        if l0 == LANE_F32 || l0 == LANE_F64 {
+            let fop = get(in self.tables.float_ops, op);
+            let fb = if fop == FOP_MIN {
+                FBIN_MIN
+            } else if fop == FOP_MAX {
+                FBIN_MAX
+            } else if op == ops_s.plus {
+                FBIN_ADD
+            } else if op == ops_s.minus {
+                FBIN_SUB
+            } else if op == ops_s.star {
+                FBIN_MUL
+            } else if op == ops_s.slash {
+                if self.ctx.world.is_partial(i.s0, i.s1) {
+                    return false;
+                }
+                FBIN_DIV
+            } else if op == ops_s.eq {
+                FBIN_EQ
+            } else if op == ops_s.ne {
+                FBIN_NE
+            } else if op == ops_s.lt {
+                FBIN_LT
+            } else if op == ops_s.le {
+                FBIN_LE
+            } else if op == ops_s.gt {
+                FBIN_GT
+            } else if op == ops_s.ge {
+                FBIN_GE
+            } else {
+                0
+            };
+            if fb == 0 {
+                return false;
+            }
+            kind = INST_FLOAT_BINARY;
+            extra.push(fb);
+            return true;
+        }
+        let d0 = default_type(inout self.ctx.types, t0);
+        let d1 = default_type(inout self.ctx.types, t1);
+        let k0 = self.body_kind(d0);
+        let k1 = self.body_kind(d1);
+        let rk = self.body_expr_kind(i.s0, i.s1);
+        if k0 == NONE64 || k1 == NONE64 || rk == NONE64 {
+            return false;
+        }
+        let bit_word = get(in self.tables.bit_builtins, op);
+        if bit_word != 0 {
+            let bop = bit_word >> TABLE_OP_SHIFT;
+            let bkind = bit_word & TABLE_KIND_MASK;
+            if kind_wide(bkind) || (bop != BIT_OP_WRAPPING_SHL && bop != BIT_OP_WRAPPING_SHR) {
+                return false;
+            }
+            kind = INST_INT_EXTRA;
+            extra.push(IEX_BIT_BINARY);
+            extra.push(widen_u64(bop));
+            extra.push(widen_u64(bkind));
+            extra.push(k0);
+            extra.push(k1);
+            extra.push(rk);
+            return true;
+        }
+        let bit_intr = get(in self.tables.bit_intrinsics, op);
+        if bit_intr != 0 {
+            let ik = self.kind_of(d0);
+            if ik == 0 || kind_wide(ik) || self.ctx.world.may_overflow(i.s0, i.s1) {
+                return false;
+            }
+            kind = INST_INT_EXTRA;
+            extra.push(IEX_BITWISE);
+            extra.push(widen_u64(bit_intr));
+            extra.push(widen_u64(ik));
+            extra.push(k0);
+            extra.push(k1);
+            extra.push(rk);
+            return true;
+        }
+        if op == ops_s.slash || op == ops_s.percent {
+            let ik = self.kind_of(d0);
+            if ik == 0
+                || kind_wide(ik)
+                || kind_unsigned(ik)
+                || self.ctx.world.is_partial(i.s0, i.s1)
+                || self.ctx.world.may_overflow(i.s0, i.s1)
+            {
+                return false;
+            }
+            kind = INST_INT_EXTRA;
+            extra.push(
+                if op == ops_s.slash {
+                    IEX_SDIV
+                } else {
+                    IEX_SREM
+                }
+            );
+            extra.push(0);
+            extra.push(0);
+            extra.push(k0);
+            extra.push(k1);
+            extra.push(rk);
+            return true;
+        }
+        false
+    }
+
+    fn body_write(
+        inout self,
+        in h: Header,
+        i: InstRow,
+        inout ops: ChunkSeq[u64],
+        inout kind: u64,
+        inout extra: ChunkSeq[u64]
+    ) -> bool {
+        let place = self.program.op(i.a);
+        let assign = n32(self.program.op(inc(i.a)));
+        let k = self.body_local(in h, place);
+        if k == NONE64 || !self.body_operand(in h, add(i.a, 2), inout ops) {
+            return false;
+        }
+        let val_ty = default_type(inout self.ctx.types, n32(u64_at(in h.vty, u64_at(in ops, 0))));
+        let temp = self.body_kind(val_ty);
+        let stated = self.body_expr_kind(i.s0, i.s1);
+        if temp == NONE64 || stated == NONE64 {
+            return false;
+        }
+        let ops_s = self.ops;
+        if assign == ops_s.assign {
+            kind = INST_WRITE;
+            extra.push(k);
+            extra.push(temp);
+            extra.push(stated);
+            return true;
+        }
+        let local_ty = default_type(inout self.ctx.types, self.body_local_type(in h, k));
+        let local_lane = self.body_lane(local_ty);
+        let local_kind = self.body_kind(local_ty);
+        if local_lane == 0
+            || local_kind == NONE64
+            || self.body_lane(val_ty) != local_lane
+            || ((assign == ops_s.slash_eq || assign == ops_s.percent_eq)
+                && self.ctx.world.is_partial(i.s0, i.s1))
+        {
+            return false;
+        }
+        let ik = self.kind_of(local_ty);
+        if ik != 0 && self.ctx.world.may_overflow(i.s0, i.s1) {
+            return false;
+        }
+        let wop = if local_lane == LANE_F32 || local_lane == LANE_F64 {
+            if assign == ops_s.plus_eq {
+                WOP_FADD
+            } else if assign == ops_s.minus_eq {
+                WOP_FSUB
+            } else if assign == ops_s.star_eq {
+                WOP_FMUL
+            } else if assign == ops_s.slash_eq {
+                WOP_FDIV
+            } else {
+                0
+            }
+        } else if assign == ops_s.amp_eq {
+            WOP_BAND
+        } else if assign == ops_s.pipe_eq {
+            WOP_BOR
+        } else if assign == ops_s.caret_eq {
+            WOP_BXOR
+        } else if ik == 0 {
+            0
+        } else if assign == ops_s.plus_eq {
+            WOP_IADD
+        } else if assign == ops_s.minus_eq {
+            WOP_ISUB
+        } else if assign == ops_s.star_eq {
+            WOP_IMUL
+        } else if kind_wide(ik) {
+            0
+        } else if assign == ops_s.slash_eq {
+            if kind_unsigned(ik) {
+                WOP_UDIV
+            } else {
+                WOP_SDIV
+            }
+        } else if assign == ops_s.percent_eq {
+            if kind_unsigned(ik) {
+                WOP_UREM
+            } else {
+                WOP_SREM
+            }
+        } else {
+            0
+        };
+        if wop == 0 {
+            return false;
+        }
+        kind = INST_WRITE_OP;
+        extra.push(k);
+        extra.push(wop);
+        extra.push(temp);
+        extra.push(local_kind);
+        extra.push(stated);
+        true
+    }
+
+    fn body_call_builtin(
+        inout self,
+        in h: Header,
+        i: InstRow,
+        call: u64,
+        inout builtin_calls: ChunkSeq[u64],
+        inout ops: ChunkSeq[u64],
+        inout kind: u64,
+        inout extra: ChunkSeq[u64]
+    ) -> bool {
+        let callee = n32(self.program.op(i.a));
+        let nargs = self.program.op(inc(i.a));
+        let after = add(add(i.a, CALL_ARGS), wrapping_mul(nargs, CALL_ARG_WORDS));
+        let ntypes = self.program.op(after);
+        let cap = self.program.op(add(inc(after), ntypes));
+        if ntypes != 0 || cap != 0 {
+            return false;
+        }
+        for fi in 0..self.program.fn_count() {
+            if self.program.function(fi).name == callee {
+                return false;
+            }
+        }
+        let mut arg_lanes: ChunkSeq[u64] = ChunkSeq::new[u64]();
+        let mut arg_defs: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        let mut arg_kinds: ChunkSeq[u64] = ChunkSeq::new[u64]();
+        for m in 0..nargs {
+            let base = add(add(i.a, CALL_ARGS), wrapping_mul(m, CALL_ARG_WORDS));
+            if self.program.op(base) != PASS_IN
+                || self.program.op(add(base, CALL_ARG_ROOT_OFFSET)) != 0
+            {
+                return false;
+            }
+            if !self.body_operand(in h, inc(base), inout ops) {
+                return false;
+            }
+            let vt = n32(u64_at(in h.vty, u64_at(in ops, m)));
+            let lane = self.body_lane(vt);
+            let def = default_type(inout self.ctx.types, vt);
+            let ak = self.body_kind(def);
+            if lane == 0 || ak == NONE64 {
+                return false;
+            }
+            arg_lanes.push(lane);
+            arg_defs.push(def);
+            arg_kinds.push(ak);
+        }
+        let bit_word = get(in self.tables.bit_builtins, callee);
+        if bit_word != 0 {
+            let bop = bit_word >> TABLE_OP_SHIFT;
+            let bkind = bit_word & TABLE_KIND_MASK;
+            let arity: u64 = if bop == BIT_OP_WRAPPING_SHL || bop == BIT_OP_WRAPPING_SHR {
+                2
+            } else {
+                1
+            };
+            if nargs != arity {
+                return false;
+            }
+            if kind_wide(bkind) {
+                if u64_at(in arg_lanes, 0) != LANE_I128
+                    || (arity == 2 && u64_at(in arg_lanes, 1) != LANE_I64)
+                {
+                    return false;
+                }
+                kind = INST_CALL_BUILTIN;
+                builtin_calls.push(call);
+                extra.push(CB_WIDE_BIT);
+                extra.push(widen_u64(bop));
+                extra.push(widen_u64(bkind));
+                extra.push(0);
+                for m in 0..nargs {
+                    extra.push(u64_at(in arg_kinds, m));
+                }
+                return true;
+            }
+            for m in 0..nargs {
+                if u64_at(in arg_lanes, m) != LANE_I64 {
+                    return false;
+                }
+            }
+            kind = INST_CALL_BUILTIN;
+            builtin_calls.push(call);
+            extra.push(CB_BIT);
+            extra.push(widen_u64(bop));
+            extra.push(widen_u64(bkind));
+            extra.push(0);
+            for m in 0..nargs {
+                extra.push(u64_at(in arg_kinds, m));
+            }
+            return true;
+        }
+        let bit_intr = get(in self.tables.bit_intrinsics, callee);
+        if bit_intr != 0 && nargs == 2 {
+            let l0 = u64_at(in arg_lanes, 0);
+            let l1 = u64_at(in arg_lanes, 1);
+            if l0 != LANE_I64 || l1 != LANE_I64 || self.ctx.world.may_overflow(i.s0, i.s1) {
+                return false;
+            }
+            let op_def = match arg_defs.try_get(0) {
+                Option::Some(d) => d,
+                Option::None => return false,
+            };
+            let ik = self.kind_of(op_def);
+            if ik == 0 || kind_wide(ik) {
+                return false;
+            }
+            kind = INST_CALL_BUILTIN;
+            builtin_calls.push(call);
+            extra.push(CB_BITWISE);
+            extra.push(widen_u64(bit_intr));
+            extra.push(widen_u64(ik));
+            extra.push(u64_at(in arg_kinds, 0));
+            for m in 0..nargs {
+                extra.push(u64_at(in arg_kinds, m));
+            }
+            return true;
+        }
+        let conv = get(in self.tables.conversions, callee);
+        if conv != 0 && nargs == 1 {
+            let l0 = u64_at(in arg_lanes, 0);
+            if l0 == LANE_I128 || l0 == LANE_I64 {
+                let op_def = match arg_defs.try_get(0) {
+                    Option::Some(d) => d,
+                    Option::None => return false,
+                };
+                let to_ik = conv & TABLE_KIND_MASK;
+                let from_ik = self.kind_of(op_def);
+                if from_ik != 0
+                    && (kind_wide(from_ik) || kind_wide(to_ik))
+                    && !((conv >> TABLE_OP_SHIFT) == CONV_NARROW
+                        && self.ctx.world.may_overflow(i.s0, i.s1))
+                {
+                    kind = INST_CALL_BUILTIN;
+                    builtin_calls.push(call);
+                    extra.push(CB_WIDE_CONVERT);
+                    extra.push(widen_u64(from_ik));
+                    extra.push(
+                        if kind_narrow(to_ik) || kind_wide(to_ik) {
+                            widen_u64(to_ik)
+                        } else {
+                            0
+                        }
+                    );
+                    extra.push(0);
+                    extra.push(u64_at(in arg_kinds, 0));
+                    return true;
+                }
+            }
+        }
+        let fop = get(in self.tables.float_ops, callee);
+        if fop == FOP_FMA && nargs == 3 {
+            let l0 = u64_at(in arg_lanes, 0);
+            if (l0 != LANE_F32 && l0 != LANE_F64)
+                || u64_at(in arg_lanes, 1) != l0
+                || u64_at(in arg_lanes, 2) != l0
+            {
+                return false;
+            }
+            kind = INST_CALL_BUILTIN;
+            builtin_calls.push(call);
+            extra.push(CB_FMA);
+            extra.push(0);
+            extra.push(0);
+            extra.push(0);
+            for m in 0..nargs {
+                extra.push(u64_at(in arg_kinds, m));
+            }
+            return true;
+        }
+        if (fop == FOP_MIN || fop == FOP_MAX) && nargs == 2 {
+            let l0 = u64_at(in arg_lanes, 0);
+            if (l0 != LANE_F32 && l0 != LANE_F64) || u64_at(in arg_lanes, 1) != l0 {
+                return false;
+            }
+            kind = INST_CALL_BUILTIN;
+            builtin_calls.push(call);
+            extra.push(if fop == FOP_MIN { CB_FMIN } else { CB_FMAX });
+            extra.push(0);
+            extra.push(0);
+            extra.push(0);
+            for m in 0..nargs {
+                extra.push(u64_at(in arg_kinds, m));
+            }
+            return true;
+        }
+        if nargs == 1 {
+            let site_kind = self.body_expr_kind(i.s0, i.s1);
+            if site_kind == NONE64 {
+                return false;
+            }
+            let op_def = match arg_defs.try_get(0) {
+                Option::Some(d) => d,
+                Option::None => return false,
+            };
+            let mut meta: u64 = 0;
+            let fun = self.body_float_unary_op(
+                callee,
+                op_def,
+                u64_at(in arg_lanes, 0),
+                i.s0,
+                i.s1,
+                inout meta
+            );
+            if fun != 0 {
+                kind = INST_CALL_BUILTIN;
+                builtin_calls.push(call);
+                extra.push(CB_FLOAT_UNARY);
+                extra.push(fun);
+                extra.push(meta);
+                extra.push(site_kind);
+                extra.push(u64_at(in arg_kinds, 0));
+                return true;
+            }
+        }
+        false
+    }
+
     // One instruction's plan words, or false to leave the function to the
     // Rust walk. `planned` is the plan's record of it (NONE64: none).
     fn body_inst(
         inout self,
         in h: Header,
+        fname: u32,
         i: InstRow,
         planned: u64,
         call: u64,
+        inout builtin_calls: ChunkSeq[u64],
         inout o: ChunkSeq[u64]
     ) -> bool {
         let dest = self.body_value(in h, widen_u64(i.dest));
@@ -289,24 +1232,50 @@ impl Gen {
         let mut extra: ChunkSeq[u64] = ChunkSeq::new[u64]();
         if i.op == Op::Const || i.op == Op::Unit || i.op == Op::Loop {
             if planned == NONE64 {
-                return false;
-            }
-        } else if i.op == Op::Unary || i.op == Op::Binary {
-            if planned == NONE64 {
-                return false;
-            }
-            if !self.body_operand(in h, inc(i.a), inout ops) {
-                return false;
-            }
-            if i.op == Op::Binary && !self.body_operand(in h, add(i.a, 2), inout ops) {
-                return false;
-            }
-            // `scalar_hook` emits on one-word integer lanes only.
-            for k in 0..ops.len() {
-                let t = n32(u64_at(in h.vty, u64_at(in ops, k)));
-                if self.body_lane(t) != LANE_I64 {
+                if i.op != Op::Const {
                     return false;
                 }
+                let lit = self.program.op(i.a);
+                let expr_ty = self.ctx.world.expr_type(i.s0, i.s1);
+                let is_wide_int = if lit == Lit::WideInt {
+                    true
+                } else if lit == Lit::Int && expr_ty != NONE32 {
+                    let expr_def = default_type(inout self.ctx.types, expr_ty);
+                    kind_wide(self.kind_of(expr_def))
+                } else {
+                    false
+                };
+                if is_wide_int {
+                    kind = INST_WIDE_CONST;
+                    extra.push(self.program.op(inc(i.a)));
+                    extra.push(self.program.op(add(i.a, 2)));
+                    extra.push(self.body_expr_kind(i.s0, i.s1));
+                } else if lit == Lit::Float && expr_ty != NONE32 {
+                    let d = default_type(inout self.ctx.types, expr_ty);
+                    let node = self.ctx.types.node(d);
+                    if node.kind != TyKind::Named || node.n != 0 || node.name != self.ops.f32_ {
+                        return false;
+                    }
+                    kind = INST_F32CONST;
+                    extra.push(f32_bits_of_f64(self.program.op(inc(i.a))));
+                } else {
+                    return false;
+                }
+            }
+        } else if i.op == Op::Exit {
+            if n32(self.program.op(inc(i.a))) != fname || !self.body_operand(in h, i.a, inout ops) {
+                return false;
+            }
+            kind = INST_EXIT;
+            let vty = n32(u64_at(in h.vty, u64_at(in ops, 0)));
+            extra.push(self.body_default(vty, h.result));
+        } else if i.op == Op::Unary {
+            if !self.body_unary(in h, i, planned, inout ops, inout kind, inout extra) {
+                return false;
+            }
+        } else if i.op == Op::Binary {
+            if !self.body_binary(in h, i, planned, inout ops, inout kind, inout extra) {
+                return false;
             }
         } else if i.op == Op::Read {
             kind = INST_READ;
@@ -342,50 +1311,37 @@ impl Gen {
                 return false;
             }
         } else if i.op == Op::Write {
-            kind = INST_WRITE;
-            let place = self.program.op(i.a);
-            let assign = n32(self.program.op(inc(i.a)));
-            let k = self.body_local(in h, place);
-            if k == NONE64 || assign != self.ops.assign {
+            if !self.body_write(in h, i, inout ops, inout kind, inout extra) {
                 return false;
             }
-            if !self.body_operand(in h, add(i.a, 2), inout ops) {
-                return false;
-            }
-            // `ir_temp`'s read back coerces to the value's own type, and
-            // the assignment's `zero` to the statement's.
-            let temp = self.body_kind(n32(u64_at(in h.vty, u64_at(in ops, 0))));
-            let statement = self.ctx.world.expr_type(i.s0, i.s1);
-            let stated = if statement == NONE32 {
-                0
-            } else {
-                let d = default_type(inout self.ctx.types, statement);
-                self.body_kind(d)
-            };
-            if temp == NONE64 || stated == NONE64 {
-                return false;
-            }
-            extra.push(k);
-            extra.push(temp);
-            extra.push(stated);
         } else if i.op == Op::Call {
-            // Part 6b: a direct call. The walk's frame says which calls are
-            // one `call` of an imported function (the request's callee
-            // words, by `call`, the call's position among the function's
-            // calls); the plan reads each argument through its `ir_temp`.
-            kind = INST_CALL;
-            extra.push(call);
-            let n = self.program.op(inc(i.a));
-            for k in 0..n {
-                let at = add(add(i.a, CALL_ARGS), wrapping_mul(k, CALL_ARG_WORDS));
-                if !self.body_operand(in h, inc(at), inout ops) {
-                    return false;
+            let mut bops: ChunkSeq[u64] = ChunkSeq::new[u64]();
+            if self.body_call_builtin(
+                in h,
+                i,
+                call,
+                inout builtin_calls,
+                inout bops,
+                inout kind,
+                inout extra
+            ) {
+                ops.extend(in bops.as_slice());
+            } else {
+                // Part 6b: a direct call (`Codegen::plain_call`).
+                kind = INST_CALL;
+                extra.push(call);
+                let n = self.program.op(inc(i.a));
+                for k in 0..n {
+                    let at = add(add(i.a, CALL_ARGS), wrapping_mul(k, CALL_ARG_WORDS));
+                    if !self.body_operand(in h, inc(at), inout ops) {
+                        return false;
+                    }
+                    let read = self.body_kind(n32(u64_at(in h.vty, u64_at(in ops, k))));
+                    if read == NONE64 {
+                        return false;
+                    }
+                    extra.push(read);
                 }
-                let read = self.body_kind(n32(u64_at(in h.vty, u64_at(in ops, k))));
-                if read == NONE64 {
-                    return false;
-                }
-                extra.push(read);
             }
         } else {
             return false;
@@ -398,8 +1354,8 @@ impl Gen {
         o.push(
             if i.s1 == 0 {
                 NONE64
-            } else if i.s0 > 4294967294 {
-                4294967294
+            } else if i.s0 > MAX_SRCLOC {
+                MAX_SRCLOC
             } else {
                 i.s0
             }
@@ -409,7 +1365,7 @@ impl Gen {
             o.push(u64_at(in ops, k));
         }
         if kind == INST_PLANNED {
-            for k in 3..6 {
+            for k in PLAN_REQUEST_START..PLAN_REQUEST_END {
                 o.push(u64_at(in self.plan, add(planned, k)));
             }
         }
@@ -479,6 +1435,81 @@ impl Gen {
             o.push(self.program.op(add(ta, 2)));
             return true;
         }
+        if row.term == Term::Match {
+            let v = self.body_value(in h, self.program.op(ta));
+            if v == NONE64 {
+                return false;
+            }
+            let vty = n32(u64_at(in h.vty, v));
+            let vlane = self.body_lane(vty);
+            if vlane == 0 {
+                return false;
+            }
+            let narms = self.program.op(inc(ta));
+            let mut arms_words: ChunkSeq[u64] = ChunkSeq::new[u64]();
+            let mut p = add(ta, 2);
+            for k in 0..narms {
+                let pkind = self.program.op(p);
+                let mut akind: u64 = 0;
+                let mut payload: u64 = 0;
+                if pkind == Pat::Wild {
+                    akind = MATCH_TRUE;
+                    p = add(p, PAT_WILD_WORDS);
+                } else if pkind == Pat::Bind {
+                    akind = MATCH_TRUE;
+                    p = add(p, PAT_BIND_WORDS);
+                } else if pkind == Pat::Literal {
+                    let lkind = self.program.op(add(p, PAT_LIT_KIND_OFFSET));
+                    let lo = self.program.op(add(p, PAT_LIT_LO_OFFSET));
+                    let hi = self.program.op(add(p, PAT_LIT_HI_OFFSET));
+                    p = add(p, PAT_LIT_WORDS);
+                    if (lkind == Lit::Int || lkind == Lit::Bool) && vlane == LANE_I64 {
+                        akind = MATCH_INT;
+                        payload = lo;
+                    } else if (lkind == Lit::Int || lkind == Lit::WideInt) && vlane == LANE_I128 {
+                        akind = MATCH_WIDE;
+                        payload = lo;
+                    } else if lkind == Lit::Float && vlane == LANE_F32 {
+                        akind = MATCH_F32;
+                        payload = f32_bits_of_f64(lo);
+                    } else if lkind == Lit::Float && vlane == LANE_F64 {
+                        akind = MATCH_F64;
+                        payload = lo;
+                    } else {
+                        return false;
+                    }
+                    let target = self.program.op(p);
+                    p = inc(p);
+                    let trow = self.program.block(add(f.b0, target));
+                    if self.program.op(self.body_params_at(trow.ha)) != 0 {
+                        return false;
+                    }
+                    arms_words.push(akind);
+                    arms_words.push(payload);
+                    if akind == MATCH_WIDE {
+                        arms_words.push(hi);
+                    }
+                    arms_words.push(target);
+                    continue;
+                } else {
+                    return false;
+                }
+                let target = self.program.op(p);
+                p = inc(p);
+                let trow = self.program.block(add(f.b0, target));
+                if self.program.op(self.body_params_at(trow.ha)) != 0 {
+                    return false;
+                }
+                arms_words.push(akind);
+                arms_words.push(payload);
+                arms_words.push(target);
+            }
+            o.push(TERM_MATCH);
+            o.push(v);
+            o.push(narms);
+            o.extend(in arms_words.as_slice());
+            return true;
+        }
         if row.term == Term::Unreachable {
             o.push(TERM_UNREACHABLE);
             return true;
@@ -520,12 +1551,10 @@ impl Gen {
         if !h.plain || f.bc == 0 || !self.body_no_trailer(f) || self.body_lane(h.result) == 0 {
             return;
         }
-        let mut o: ChunkSeq[u64] = ChunkSeq::new[u64]();
-        o.push(f.bc);
-        o.push(h.params.len());
+        let mut graph_words: ChunkSeq[u64] = ChunkSeq::new[u64]();
         // `ir_graph_at`'s locals, in name order: a parameter has its
         // variable; every other local gets a zeroed one.
-        o.push(h.lname.len());
+        graph_words.push(h.lname.len());
         for k in 0..h.lname.len() {
             let t = n32(u64_at(in h.lty, k));
             if !self.body_register(t) {
@@ -541,29 +1570,29 @@ impl Gen {
             if entry == 0 {
                 return;
             }
-            o.push(entry);
+            graph_words.push(entry);
         }
         // Each value's register.
-        o.push(h.vty.len());
+        graph_words.push(h.vty.len());
         for k in 0..h.vty.len() {
             let lane = self.body_lane(n32(u64_at(in h.vty, k)));
             if lane == 0 {
                 return;
             }
-            o.push(lane);
+            graph_words.push(lane);
         }
         // Each block's parameters.
         for bi in 0..f.bc {
             let row = self.program.block(add(f.b0, bi));
             let pa = self.body_params_at(row.ha);
             let np = self.program.op(pa);
-            o.push(np);
+            graph_words.push(np);
             for k in 0..np {
                 let v = self.body_value(in h, self.program.op(add(inc(pa), k)));
                 if v == NONE64 {
                     return;
                 }
-                o.push(v);
+                graph_words.push(v);
             }
         }
         // The lowering order and the blocks sealed on the way.
@@ -574,8 +1603,8 @@ impl Gen {
         }
         for k in 0..l.order.len() {
             let b = u64_at(in l.order, k);
-            o.push(b);
-            o.push(at(in sealed, b));
+            graph_words.push(b);
+            graph_words.push(at(in sealed, b));
         }
         // The plan's record of each instruction, by its index in `f`.
         let first = self.program.block(f.b0).i0;
@@ -603,12 +1632,14 @@ impl Gen {
             let ii = u64_at(in self.plan, add(r, 2));
             let row = self.program.block(add(f.b0, bi));
             set(inout record, wrapping_sub(add(row.i0, ii), first), inc(r));
-            r = add(r, 6);
+            r = add(r, PLAN_RECORD_WORDS);
         }
+        let mut builtin_calls: ChunkSeq[u64] = ChunkSeq::new[u64]();
+        let mut block_words: ChunkSeq[u64] = ChunkSeq::new[u64]();
         for k in 0..l.order.len() {
             let bi = u64_at(in l.order, k);
             let row = self.program.block(add(f.b0, bi));
-            o.push(row.ic);
+            block_words.push(row.ic);
             for ii in 0..row.ic {
                 let x = add(row.i0, ii);
                 let rec = at(in record, wrapping_sub(x, first));
@@ -618,14 +1649,29 @@ impl Gen {
                     wrapping_sub(rec, 1)
                 };
                 let call = at(in calls, wrapping_sub(x, first));
-                if !self.body_inst(in h, self.program.inst(x), planned, call, inout o) {
+                if !self.body_inst(
+                    in h,
+                    f.name,
+                    self.program.inst(x),
+                    planned,
+                    call,
+                    inout builtin_calls,
+                    inout block_words
+                ) {
                     return;
                 }
             }
-            if !self.body_terminator(in h, f, bi, inout o) {
+            if !self.body_terminator(in h, f, bi, inout block_words) {
                 return;
             }
         }
+        let mut o: ChunkSeq[u64] = ChunkSeq::new[u64]();
+        o.push(f.bc);
+        o.push(h.params.len());
+        o.push(builtin_calls.len());
+        o.extend(in builtin_calls.as_slice());
+        o.extend(in graph_words.as_slice());
+        o.extend(in block_words.as_slice());
         out.push(fi);
         out.push(o.len());
         out.extend(in o.as_slice());

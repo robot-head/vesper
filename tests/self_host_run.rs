@@ -138,6 +138,24 @@ const PROGRAMS: &[(&str, &str)] = &[
          handle Fail[String] in { h() } with { return v => v, raise(e, k) => 98 }) }",
     ),
     (
+        // A closure performs to the handler it was made under, a function
+        // value to the caller's handler where it is passed, and an open row
+        // takes all of the caller's evidence.
+        "evidence_binding",
+        "effect Ask { fn ask() -> i64; } \
+         fn twice(f: fn() -> i64 eff [Ask]) -> i64 eff [Ask] { handle Ask in \
+         { wrapping_add(f(), Ask::ask()) } with { return x => x, ask(k) => k(100), } } \
+         fn open[e: eff](f: fn() -> i64 eff [e]) -> i64 eff [e] { handle Ask in { f() } \
+         with { return x => x, ask(k) => k(1000), } } \
+         fn asked() -> i64 eff [Ask] { wrapping_add(Ask::ask(), 1) } \
+         fn main() -> (i64, i64, i64, i64, i64) { handle Ask in { \
+         let a = twice(|| Ask::ask()); let b = twice(asked); \
+         let d = handle Ask in { twice(|| wrapping_mul(Ask::ask(), 2)) } \
+         with { return x => x, ask(k) => k(7), }; \
+         let e = open(asked); let g = open(|| Ask::ask()); (a, b, d, e, g) } \
+         with { return x => x, ask(k) => k(3), } }",
+    ),
+    (
         // An effectful function value binds the incoming capability
         // (`bind_callable_evidence`): the outer handler answers.
         "bound_evidence",

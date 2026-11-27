@@ -40,6 +40,16 @@ const PASS_OTHER: u64 = 4;
 
 // The words of a type node before its parts: kind, name, flag, part count.
 const NODE_HEAD: u64 = 4;
+const NODE_PART_COUNT: u64 = 3;
+
+// A declaration's words after its name: is_enum, words, handle, linear.
+const DECL_WORDS: u64 = 1;
+const DECL_HANDLE: u64 = 2;
+const DECL_LINEAR: u64 = 3;
+const DECL_HEAD: u64 = 4;
+
+// A function's result words: words, pointer.
+const RESULT_HEAD: u64 = 2;
 
 struct H {
     // the answer
@@ -201,7 +211,7 @@ impl H {
     fn node(inout self, in key: ChunkSeq[u64]) -> u64 {
         for i in 0..self.starts.len() {
             let s = at(in self.starts, i);
-            let n = wrapping_add(NODE_HEAD, at(in self.nodes, wrapping_add(s, 3)));
+            let n = wrapping_add(NODE_HEAD, at(in self.nodes, wrapping_add(s, NODE_PART_COUNT)));
             if n == key.len() {
                 let mut same = true;
                 for j in 0..n {
@@ -270,10 +280,10 @@ impl H {
         let name = self.name(p);
         let mut r = str_end(in self.a, p);
         let is_enum = at(in self.a, r);
-        let words = at(in self.a, inc(r));
-        let handle = at(in self.a, wrapping_add(r, 2));
-        let linear = at(in self.a, wrapping_add(r, 3));
-        r = wrapping_add(r, 4);
+        let words = at(in self.a, wrapping_add(r, DECL_WORDS));
+        let handle = at(in self.a, wrapping_add(r, DECL_HANDLE));
+        let linear = at(in self.a, wrapping_add(r, DECL_LINEAR));
+        r = wrapping_add(r, DECL_HEAD);
         let drop = self.opt(r);
         r = opt_end(in self.a, r);
         let owns = at(in self.a, r);
@@ -373,7 +383,7 @@ impl H {
         r = next;
         let result_words = at(in self.a, r);
         let result_pointer = at(in self.a, inc(r));
-        r = wrapping_add(r, 2);
+        r = wrapping_add(r, RESULT_HEAD);
         let ne = at(in self.a, r);
         r = inc(r);
         self.push(result);
@@ -428,7 +438,7 @@ impl H {
 
 // The word after the declaration at `p`.
 fn skip_decl(in a: ChunkSeq[u64], p: u64) -> u64 {
-    let mut r = wrapping_add(str_end(in a, p), 4);
+    let mut r = wrapping_add(str_end(in a, p), DECL_HEAD);
     r = opt_end(in a, r);
     r = inc(r);
     let m = at(in a, r);

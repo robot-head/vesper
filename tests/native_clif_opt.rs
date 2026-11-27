@@ -1145,3 +1145,171 @@ fn main() -> u64 {
         "expected w.e and w.l SeqHeader data pointers (+16) to be loaded at most once each (got {data_loads}):\n{fn_clif}"
     );
 }
+
+#[test]
+fn canonicalizes_imm_ops_and_folds_associative_chains() {
+    let source = "
+fn mix(x: u64) -> u64 {
+    let a = wrapping_add(wrapping_add(x, 3), 5);
+    let b = wrapping_mul(wrapping_mul(a, 2), 4);
+    let c = (b & 255) & 15;
+    if c == 8 {
+        wrapping_sub(b, 1)
+    } else {
+        b | 1
+    }
+}
+
+fn main() -> u64 {
+    let mut acc = 0;
+    let mut i = 0;
+    loop {
+        if i >= 16 {
+            break;
+        }
+        acc = wrapping_add(acc, mix(i));
+        i = wrapping_add(i, 1);
+    }
+    acc
+}";
+    let c = accepted(source);
+    let (_, clif) = native::object(&c.world, "main").unwrap();
+    let eval = vesper::runtime::Runtime::new(&c.world)
+        .run("main", vec![])
+        .unwrap();
+    let jit = native::jit(&c.world, "main").unwrap();
+    assert_eq!(eval.to_string(), jit.to_string());
+    let fn_clif = clif
+        .split("\n; ")
+        .find(|s| s.starts_with("mix\n"))
+        .unwrap_or(&clif);
+    assert!(
+        fn_clif.contains("iadd_imm")
+            && fn_clif.contains("imul_imm")
+            && fn_clif.contains("band_imm")
+            && fn_clif.contains("icmp_imm")
+            && !fn_clif.contains("iadd_imm ")
+            || (fn_clif.contains(" 8") && fn_clif.contains(" 15")),
+        "expected constant binary/icmp ops to canonicalize and fold in mix:\n{fn_clif}"
+    );
+}
+
+#[test]
+fn distributes_strided_imul_imm_and_reassociates_addr_disp() {
+    let source = "
+fn stride_addr(base: u64, idx: u64) -> u64 {
+    let a = wrapping_add(base, wrapping_mul(wrapping_add(wrapping_mul(idx, 8), 4), 8));
+    let b = wrapping_add(base, wrapping_mul(wrapping_add(wrapping_mul(idx, 8), 5), 8));
+    wrapping_add(a, b)
+}
+
+fn main() -> u64 {
+    let mut acc = 0;
+    let mut i = 0;
+    loop {
+        if i >= 8 {
+            break;
+        }
+        acc = wrapping_add(acc, stride_addr(1000, i));
+        i = wrapping_add(i, 1);
+    }
+    acc
+}";
+    let c = accepted(source);
+    let (_, clif) = native::object(&c.world, "main").unwrap();
+    let eval = vesper::runtime::Runtime::new(&c.world)
+        .run("main", vec![])
+        .unwrap();
+    let jit = native::jit(&c.world, "main").unwrap();
+    assert_eq!(eval.to_string(), jit.to_string());
+    let fn_clif = clif
+        .split("\n; ")
+        .find(|s| s.starts_with("stride_addr\n"))
+        .unwrap_or(&clif);
+    assert!(
+        fn_clif.contains("imul_imm") && fn_clif.contains(", 64") && fn_clif.contains(", 72"),
+        "expected (idx * 8 + 4) * 8 + (idx * 8 + 5) * 8 to distribute to imul_imm 64 and combined disp 72:\n{fn_clif}"
+    );
+}
+
+#[test]
+fn folds_iadd_imm_into_load_store_offsets() {
+    let source = "
+struct Pair {
+    a: u64,
+    b: u64,
+    c: u64,
+}
+
+fn bump_pair(inout p: Pair, d: u64) -> u64 {
+    p.b = wrapping_add(p.b, d);
+    p.c = wrapping_add(p.c, p.b);
+    wrapping_add(p.a, p.c)
+}
+
+fn main() -> u64 {
+    let mut p = Pair { a: 1, b: 2, c: 3 };
+    let x = bump_pair(inout p, 4);
+    let y = bump_pair(inout p, 5);
+    wrapping_add(x, y)
+}";
+    let c = accepted(source);
+    let (_, clif) = native::object(&c.world, "main").unwrap();
+    let eval = vesper::runtime::Runtime::new(&c.world)
+        .run("main", vec![])
+        .unwrap();
+    let jit = native::jit(&c.world, "main").unwrap();
+    assert_eq!(eval.to_string(), jit.to_string());
+    let fn_clif = clif
+        .split("\n; ")
+        .find(|s| s.starts_with("bump_pair\n"))
+        .unwrap_or(&clif);
+    assert!(
+        !fn_clif.contains("iadd_imm") && fn_clif.contains("+8") && fn_clif.contains("+16"),
+        "expected struct field iadd_imm offsets to fold directly into load/store offsets:\n{fn_clif}"
+    );
+}
+
+#[test]
+fn cse_local_pure_deduplicates_strided_index_and_stack_addr() {
+    let source = "
+fn set_three(inout s: ChunkSeq[u64], idx: u64, a: u64, b: u64, c: u64) -> u64 {
+    let _ = s.try_set(wrapping_add(wrapping_mul(idx, 8), 4), a);
+    let _ = s.try_set(wrapping_add(wrapping_mul(idx, 8), 5), b);
+    let _ = s.try_set(wrapping_add(wrapping_mul(idx, 8), 6), c);
+    idx
+}
+
+fn main() -> u64 {
+    let mut s: ChunkSeq[u64] = ChunkSeq::new();
+    let mut i = 0;
+    loop {
+        if i >= 16 {
+            break;
+        }
+        s.push(0);
+        i = wrapping_add(i, 1);
+    }
+    let _ = set_three(inout s, 1, 10, 20, 30);
+    match s.try_get(12) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}";
+    let c = accepted(source);
+    let (_, clif) = native::object(&c.world, "main").unwrap();
+    let eval = vesper::runtime::Runtime::new(&c.world)
+        .run("main", vec![])
+        .unwrap();
+    let jit = native::jit(&c.world, "main").unwrap();
+    assert_eq!(eval.to_string(), jit.to_string());
+    let fn_clif = clif
+        .split("\n; ")
+        .find(|s| s.starts_with("set_three\n"))
+        .unwrap_or(&clif);
+    let stack_addrs = fn_clif.matches("stack_addr").count();
+    assert!(
+        stack_addrs <= 1,
+        "expected duplicate stack_addr in set_three to be deduplicated (got {stack_addrs}):\n{fn_clif}"
+    );
+}

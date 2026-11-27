@@ -937,17 +937,20 @@ pub fn collect_program(in mods: ChunkSeq[AssembledModule]) -> CollectedProgram {
             ty: types.named0(t_gen),
             modality: 0
         });
+        // Rust's prelude order (`enum Option[T] { None, Some(T) }`), which
+        // vesper-port-abi hard-codes: objects Stage 2 builds share Rust's
+        // tags (#2290).
         let ova = n32(world.variants.len());
-        world.variants.push(Variant {
-            name: names.intern(in "Some".as_bytes()),
-            fa: ofa,
-            fc: 1,
-            named: false
-        });
         world.variants.push(Variant {
             name: names.intern(in "None".as_bytes()),
             fa: 0,
             fc: 0,
+            named: false
+        });
+        world.variants.push(Variant {
+            name: names.intern(in "Some".as_bytes()),
+            fa: ofa,
+            fc: 1,
             named: false
         });
         let oidx = n32(world.adts.len());
@@ -1024,21 +1027,17 @@ pub fn collect_program(in mods: ChunkSeq[AssembledModule]) -> CollectedProgram {
         Option::None => false,
     };
     if !has_re {
+        // Rust's prelude: `copy enum RuntimeError { DivisionByZero,
+        // IndexOutOfBounds }` (#2290).
         let rva = n32(world.variants.len());
         world.variants.push(Variant {
-            name: names.intern(in "ArithOverflow".as_bytes()),
+            name: names.intern(in "DivisionByZero".as_bytes()),
             fa: 0,
             fc: 0,
             named: false
         });
         world.variants.push(Variant {
             name: names.intern(in "IndexOutOfBounds".as_bytes()),
-            fa: 0,
-            fc: 0,
-            named: false
-        });
-        world.variants.push(Variant {
-            name: names.intern(in "DivisionByZero".as_bytes()),
             fa: 0,
             fc: 0,
             named: false
@@ -1050,12 +1049,36 @@ pub fn collect_program(in mods: ChunkSeq[AssembledModule]) -> CollectedProgram {
             ga: 0,
             gn: 0,
             va: rva,
-            vn: 3,
+            vn: 2,
             is_enum: true,
             tile: 0,
             span_zero: false
         });
         set_by_symbol(inout world.by_name, re_sym, inc32(ridx));
+    }
+    let ao_sym = names.intern(in "ArithOverflow".as_bytes());
+    let has_ao = match world.by_name.try_get(w(ao_sym)) {
+        Option::Some(v) => v != 0,
+        Option::None => false,
+    };
+    if !has_ao {
+        // Rust's prelude: `copy struct ArithOverflow {}`, the error checked
+        // arithmetic raises (#2290).
+        let ava = n32(world.variants.len());
+        world.variants.push(Variant { name: ao_sym, fa: 0, fc: 0, named: true });
+        let aidx = n32(world.adts.len());
+        world.adts.push(Adt {
+            name: ao_sym,
+            mode: 0,
+            ga: 0,
+            gn: 0,
+            va: ava,
+            vn: 1,
+            is_enum: false,
+            tile: 0,
+            span_zero: false
+        });
+        set_by_symbol(inout world.by_name, ao_sym, inc32(aidx));
     }
     let fail_sym = names.intern(in "Fail".as_bytes());
     let has_fail = match world.effect_by_name.try_get(w(fail_sym)) {

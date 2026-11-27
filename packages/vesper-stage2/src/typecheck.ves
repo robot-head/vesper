@@ -511,6 +511,27 @@ fn check_fn_call(inout tc: Tc, in a: Ast, f: FnR, receiver_ty: u32, e: Ex, ce: E
     rty
 }
 
+const CALL_ARG_STRIDE: u64 = 2;
+
+fn call_arg_expr(in a: Ast, e: Ex, ai: u64) -> u64 {
+    u64_at(in a.xs, wrapping_add(e.b, wrapping_add(wrapping_mul(ai, CALL_ARG_STRIDE), 1)))
+}
+
+fn is_int_lit_expr(in tc: Tc, in a: Ast, eid: u64) -> bool {
+    match a.exs.try_get(eid) {
+        Option::Some(ex) => {
+            if ex.kind == X_LITERAL {
+                ex.a == Lit::Int || ex.a == Lit::WideInt
+            } else if ex.kind == X_UNARY && is_op(in tc, n32(ex.a), in "-") {
+                is_int_lit_expr(in tc, in a, ex.b)
+            } else {
+                false
+            }
+        },
+        Option::None => false,
+    }
+}
+
 fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
     if eid == NONE64 {
         return tc.unit_ty;
@@ -534,6 +555,8 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
             && tc.world.k.is_integer(tc.types.name(expected))
         {
             expected
+        } else if e.a == Lit::WideInt {
+            tc.types.named0(tc.world.k.u128_)
         } else if e.a == Lit::Int && e.b > 9223372036854775807 && e.c == 0 {
             tc.u64_ty
         } else {
@@ -639,18 +662,38 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
         }
     } else if e.kind == X_BINARY {
         let op = n32(e.a);
-        if is_op(in tc, op, in "==")
+        if is_op(in tc, op, in "&&") || is_op(in tc, op, in "||") {
+            let _lt = check_expr(inout tc, in a, e.b, tc.bool_ty);
+            let _rt = check_expr(inout tc, in a, e.c, tc.bool_ty);
+            tc.bool_ty
+        } else if is_op(in tc, op, in "==")
             || is_op(in tc, op, in "!=")
             || is_op(in tc, op, in "<")
             || is_op(in tc, op, in ">")
             || is_op(in tc, op, in "<=")
             || is_op(in tc, op, in ">=")
-            || is_op(in tc, op, in "&&")
-            || is_op(in tc, op, in "||")
         {
-            let lt = check_expr(inout tc, in a, e.b, tc.infer_ty);
-            let _rt = check_expr(inout tc, in a, e.c, lt);
+            if is_int_lit_expr(in tc, in a, e.b) && !is_int_lit_expr(in tc, in a, e.c) {
+                let rt = check_expr(inout tc, in a, e.c, tc.infer_ty);
+                let _lt = check_expr(inout tc, in a, e.b, rt);
+            } else {
+                let lt = check_expr(inout tc, in a, e.b, tc.infer_ty);
+                let _rt = check_expr(inout tc, in a, e.c, lt);
+            }
             tc.bool_ty
+        } else if tc.types.kind(expected) == TyKind::Infer
+            && !is_op(in tc, op, in "<<")
+            && !is_op(in tc, op, in ">>")
+            && is_int_lit_expr(in tc, in a, e.b)
+            && !is_int_lit_expr(in tc, in a, e.c)
+        {
+            let rt = check_expr(inout tc, in a, e.c, expected);
+            let lt = check_expr(inout tc, in a, e.b, rt);
+            if tc.types.kind(rt) == TyKind::Infer {
+                lt
+            } else {
+                rt
+            }
         } else {
             let lt = check_expr(inout tc, in a, e.b, expected);
             let rt = check_expr(inout tc, in a, e.c, lt);
@@ -865,45 +908,56 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
                             let mut arg0_ty = tc.infer_ty;
                             let is_rot = is_op(in tc, cname, in "rotate_left")
                                 || is_op(in tc, cname, in "rotate_right");
-                            for ai in 0..e.n {
-                                let av = u64_at(
-                                    in a.xs,
-                                    wrapping_add(e.b, wrapping_add(wrapping_mul(ai, 2), 1))
-                                );
-                                let mut pt = tc.infer_ty;
-                                let mut fty_raw = tc.infer_ty;
-                                if adt == NONE32 && same_int {
-                                    if is_rot && ai == 1 {
-                                        pt = tc.types.named0(tc.world.k.u32_);
-                                    } else if ai == 0 {
-                                        pt = expected;
-                                    } else if tc.types.kind(arg0_ty) != TyKind::Infer {
-                                        pt = arg0_ty;
-                                    } else {
-                                        pt = expected;
+                            let reverse_same_int = adt == NONE32
+                                && same_int
+                                && !is_rot
+                                && e.n == CALL_ARG_STRIDE
+                                && tc.types.kind(expected) == TyKind::Infer
+                                && is_int_lit_expr(in tc, in a, call_arg_expr(in a, e, 0))
+                                && !is_int_lit_expr(in tc, in a, call_arg_expr(in a, e, 1));
+                            if reverse_same_int {
+                                let av1 = call_arg_expr(in a, e, 1);
+                                let at1 = check_expr(inout tc, in a, av1, tc.infer_ty);
+                                let av0 = call_arg_expr(in a, e, 0);
+                                arg0_ty = check_expr(inout tc, in a, av0, at1);
+                            } else {
+                                for ai in 0..e.n {
+                                    let av = call_arg_expr(in a, e, ai);
+                                    let mut pt = tc.infer_ty;
+                                    let mut fty_raw = tc.infer_ty;
+                                    if adt == NONE32 && same_int {
+                                        if is_rot && ai == 1 {
+                                            pt = tc.types.named0(tc.world.k.u32_);
+                                        } else if ai == 0 {
+                                            pt = expected;
+                                        } else if tc.types.kind(arg0_ty) != TyKind::Infer {
+                                            pt = arg0_ty;
+                                        } else {
+                                            pt = expected;
+                                        }
                                     }
-                                }
-                                if adt != NONE32 {
-                                    let v = tc.world.variant(vi);
-                                    if ai < w(v.fc) {
-                                        let f = tc.world.field(wrapping_add(w(v.fa), ai));
-                                        fty_raw = f.ty;
-                                        pt = substitute(inout tc.types, f.ty, in vars);
+                                    if adt != NONE32 {
+                                        let v = tc.world.variant(vi);
+                                        if ai < w(v.fc) {
+                                            let f = tc.world.field(wrapping_add(w(v.fa), ai));
+                                            fty_raw = f.ty;
+                                            pt = substitute(inout tc.types, f.ty, in vars);
+                                        }
                                     }
-                                }
-                                let at = check_expr(inout tc, in a, av, pt);
-                                if ai == 0 {
-                                    arg0_ty = at;
-                                }
-                                if adt != NONE32 && gnames.len() > 0 {
-                                    infer(
-                                        inout tc.types,
-                                        tc.world.k,
-                                        fty_raw,
-                                        at,
-                                        in gnames,
-                                        inout vars
-                                    );
+                                    let at = check_expr(inout tc, in a, av, pt);
+                                    if ai == 0 {
+                                        arg0_ty = at;
+                                    }
+                                    if adt != NONE32 && gnames.len() > 0 {
+                                        infer(
+                                            inout tc.types,
+                                            tc.world.k,
+                                            fty_raw,
+                                            at,
+                                            in gnames,
+                                            inout vars
+                                        );
+                                    }
                                 }
                             }
                             let rty = if adt != NONE32 {

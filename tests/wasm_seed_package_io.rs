@@ -1920,8 +1920,9 @@ fn stage2_collects_package_under_wasi_impl() {
     )
     .expect("run @vesper/stage2 under WASI");
     // 3 modules (prelude + `lib.ves` + `sub.ves`), 19 functions (17 prelude + `main` + `helper`),
-    // 4 ADTs (2 prelude + `Pair` + `Flag`), 0 diagnostic bytes => 3190400.
-    assert_eq!(got, 3190400);
+    // 5 ADTs (3 prelude: `Option`, `RuntimeError`, `ArithOverflow`; + `Pair` + `Flag`),
+    // 0 diagnostic bytes => 3190500.
+    assert_eq!(got, 3190500);
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -2734,6 +2735,27 @@ const COMPILER_PACKAGES: &[(&str, &str, &str, &str, CompilerExecCheck)] = &[
         CompilerExecCheck::CompileOnly,
     ),
     (
+        "proof-audit",
+        "@vesper/proof-audit",
+        "packages/vesper-proof-audit",
+        "HELP.len()",
+        CompilerExecCheck::NonZero,
+    ),
+    (
+        "run",
+        "@vesper/run",
+        "packages/vesper-run",
+        "run_words(in \"\".as_bytes()).len()",
+        CompilerExecCheck::CompileOnly,
+    ),
+    (
+        "verify",
+        "@vesper/verify",
+        "packages/vesper-verify",
+        "discover(in \"\".as_bytes()).err.len()",
+        CompilerExecCheck::CompileOnly,
+    ),
+    (
         "wasm-backend",
         "@vesper/wasm-backend",
         "packages/vesper-wasm-backend",
@@ -2786,14 +2808,14 @@ const STAGE2_PACKAGE_GAPS: &[(&str, &str, &str, &str, &str)] = &[
         "@vesper/driver-commands",
         "packages/vesper-driver-commands",
         "use @vesper/driver-commands::run;\nuse @vesper/driver::args_new;\npub fn main() -> u64 eff [Ffi[StdFs], Ffi[StdEnv], Ffi[StdProcess], Ffi[HybridCommands]] { let a = args_new(); wrapping_u64(run(in a)) }\n",
-        "its printing and help go through the HybridCommands import, which only the hybrid compiler's Rust implements (crates/vesper-hybrid/src/commands.rs): the Wasm entry cannot carry Ffi[HybridCommands] (WErr Entry). Formatting calls @vesper/fmt (crates/vesper-fmt/vesper), which hashes with C BLAKE3 (@vesper-std/hash-sys). @vesper-std/process builds for WASI (src-wasip2, #1928)",
+        "its printing and help go through the HybridCommands import, which only the hybrid compiler's Rust implements (crates/vesper-hybrid/src/commands.rs): the Wasm entry cannot carry Ffi[HybridCommands] (WErr Entry). Both @vesper-std/process (src-wasip2, #1928) and @vesper-std/hash-sys (src-wasip2, #2323) build for WASI",
     ),
     (
-        "run",
-        "@vesper/run",
-        "packages/vesper-run",
-        "use @vesper/run::run_words;\npub fn main() -> u64 { run_words(in \"\".as_bytes()).len() }\n",
-        "the `vesper run` evaluator (#2053) divides under local Fail handlers (packages/vesper-run/src/arith.ves), which the Wasm backend does not lower yet (WErr Unsupported GenericEffectInstance)",
+        "lsp-format",
+        "@vesper/lsp-format",
+        "packages/vesper-lsp-format",
+        "use @vesper/lsp-format::lsp_formatting;\npub fn main() -> u64 { lsp_formatting(in \"\").len() }\n",
+        "C BLAKE3 (@vesper-std/hash-sys) now builds for WASI (#2323); remaining gap is an unsupported unary operation in @vesper/wasm-backend (WErr Unsupported Operation at site 194)",
     ),
 ];
 
@@ -2806,20 +2828,12 @@ const STAGE2_PACKAGES_COVERED_ELSEWHERE: &[(&str, &str)] = &[
         "Stage 1 front end, checked as one unit; bootstrap/stage1.lock (tests/stage2_seed_runner.rs)",
     ),
     (
-        "vesper-lsp-format",
-        "the formatting action of `vesper lsp` (#1828 part 11a) in the JIT beside Rust's (tests/self_host_lsp_features.rs); it calls @vesper/fmt, which hashes with C BLAKE3 (@vesper-std/hash-sys), which a Wasm entry does not have",
-    ),
-    (
-        "vesper-proof-audit",
-        "`vesper proof-audit` as a native executable beside Rust's (tests/self_host_proof_audit.rs); it hashes with C BLAKE3 (@vesper-std/hash-sys) and runs Lean, neither of which a Wasm entry has",
+        "vesper-export-build",
+        "`vesper build --lib`'s interface and binding from Stage 2's front end (#2270) as a native executable beside the Rust CLI (tests/self_host_codegen_export.rs); it is @vesper/stage2 plus the export packages, built under Stage 2 as one program in bootstrap switch slice 3",
     ),
     (
         "vesper-stage2",
         "Stage 2 itself: stage2.wasm == stage3.wasm",
-    ),
-    (
-        "vesper-verify",
-        "`vesper verify` pieces as a native executable beside Rust's (tests/self_host_verify.rs); it depends on @vesper/proof-audit, which hashes with C BLAKE3 (@vesper-std/hash-sys), which a Wasm entry does not have",
     ),
     (
         "vesper-std",
@@ -3141,6 +3155,71 @@ fn check_compiler_packages_fixed_point(
             b.err()
         )),
     }
+    // @vesper-std/hash-sys on WASI (src-wasip2, #2323): delegates Ffi[Blake3]
+    // to portable @vesper-std/hash::blake3 with zero Wasm imports, built the
+    // same by both Stage 2 compilers.
+    let hash_manifest = "[package]\nname = \"@vesper-test/probe-hash-sys-wasi\"\nversion = \"0.1.0\"\nedition = \"2026\"\n\n[dependencies]\n\"@vesper-std/hash-sys\" = { version = \"^0.1\", path = \"/repo/packages/vesper-std/hash/sys\" }\n";
+    let hash_src = "use @vesper-std/hash-sys::{hash, derive_key_hash, hasher_new, hasher_new_keyed, hasher_new_derive_key, update, finalize, finalize_xof, hasher_free};\n\
+        pub fn main() -> u64 eff [Ffi[Blake3]] {\n\
+            let d0 = hash(in \"\".as_bytes());\n\
+            let d1 = match hasher_new() {\n\
+                Option::Some(h0) => {\n\
+                    let mut h = h0;\n\
+                    update(inout h, in \"\".as_bytes());\n\
+                    let mut xof = ChunkSeq::new[u8]();\n\
+                    finalize_xof(in h, 4, inout xof);\n\
+                    let d = finalize(in h);\n\
+                    hasher_free(h);\n\
+                    if xof.len() != 4 { return 1; }\n\
+                    d\n\
+                },\n\
+                Option::None => return 2,\n\
+            };\n\
+            if d0.w0 != d1.w0 || d0.w1 != d1.w1 || d0.w2 != d1.w2 || d0.w3 != d1.w3 { return 3; }\n\
+            let bad_key = match hasher_new_keyed(in \"short\".as_bytes()) {\n\
+                Option::Some(h) => { hasher_free(h); false },\n\
+                Option::None => true,\n\
+            };\n\
+            if !bad_key { return 4; }\n\
+            let mut bad_utf8 = ChunkSeq::new[u8]();\n\
+            bad_utf8.push(255);\n\
+            let mut dk_out = ChunkSeq::new[u8]();\n\
+            if derive_key_hash(in bad_utf8.as_slice(), in \"x\".as_bytes(), 8, inout dk_out) { return 5; }\n\
+            if !derive_key_hash(in \"ctx\".as_bytes(), in \"x\".as_bytes(), 8, inout dk_out) { return 6; }\n\
+            if dk_out.len() != 8 { return 7; }\n\
+            let ok_dk = match hasher_new_derive_key(in \"ctx\".as_bytes()) {\n\
+                Option::Some(h) => { hasher_free(h); true },\n\
+                Option::None => false,\n\
+            };\n\
+            if !ok_dk { return 8; }\n\
+            d0.w0 & 255\n\
+        }\n";
+    write_probe(&wrap_dir, hash_manifest, hash_src);
+    match (
+        build_compiler_package_probe(boot, boot_syms, dir, "boot stage2"),
+        build_compiler_package_probe(stage2, stage2_syms, dir, "stage2.wasm"),
+    ) {
+        (Ok(a), Ok(b)) => {
+            if a != b {
+                failures.push(format!(
+                    "@vesper-std/hash-sys (WASI probe): boot stage2 built {} bytes, stage2.wasm built {} different bytes",
+                    a.len(),
+                    b.len()
+                ));
+            }
+            match run(&b, &Ctx::default()) {
+                Ok(175) => {}
+                other => failures.push(format!(
+                    "@vesper-std/hash-sys (WASI probe): expected BLAKE3(\"\")[0] (175 / 0xaf), got {other:?}"
+                )),
+            }
+        }
+        (a, b) => failures.push(format!(
+            "@vesper-std/hash-sys (WASI probe): {:?} / {:?}",
+            a.err(),
+            b.err()
+        )),
+    }
     remove_stage2_sidecars(&out_wasm);
     let _ = std::fs::remove_dir_all(&wrap_dir);
     assert!(
@@ -3296,6 +3375,33 @@ pub fn main() -> u64 {
                 && err_note.contains("unknown_host_fn"),
             "expected werr_syms symbol details in diagnostic note, got:\n{err_note}"
         );
+        remove_stage2_sidecars(&host_wasm);
+
+        // Verify unsuffixed LHS integer literals infer their type from the RHS
+        // in binary operators and same-integer builtins (e.g. `wrapping_sub(0, i128)`).
+        let lhs_lit_manifest = "[package]\nname = \"@vesper-test/stage2-lhs-int-lit\"\nversion = \"0.1.0\"\nedition = \"2026\"\n";
+        let lhs_lit_src = "\
+fn neg_i128(x: i128) -> u64 {
+    let n = wrapping_sub(0, x);
+    let shifted = 10 + n;
+    let bonus = if 0 < shifted { 1 } else { 0 };
+    wrapping_add(wrapping_u64(shifted), bonus)
+}
+pub fn main() -> u64 {
+    let neg: i128 = -5;
+    let wide: u128 = 20;
+    let sum = 2 + wide;
+    wrapping_add(neg_i128(neg), wrapping_u64(sum))
+}
+";
+        let lhs_lit_code =
+            compile_wrap(lhs_lit_manifest, lhs_lit_src).expect("compile lhs int lit smoke");
+        let lhs_lit_note = read_stage2_sidecar_notes(&host_wasm);
+        assert_eq!(lhs_lit_code, 0, "lhs int lit smoke failed: {lhs_lit_note}");
+        let lhs_lit_bytes = std::fs::read(&host_wasm).unwrap_or_default();
+        assert!(lhs_lit_bytes.starts_with(b"\0asm\x0d\x00\x01\x00"));
+        let lhs_lit_got = run(&lhs_lit_bytes, &Ctx::default()).expect("run lhs int lit smoke");
+        assert_eq!(lhs_lit_got, 38);
         remove_stage2_sidecars(&host_wasm);
 
         let _ = std::fs::remove_file(&syms_path);

@@ -4,10 +4,15 @@
 //! The legacy verify_target API drops error progress. See the README for update-state limits.
 #![doc = include_str!("../README.md")]
 
+extern crate vesper_crypto_sys;
+
+#[rustfmt::skip]
+#[path = "../port/binding.rs"]
+mod binding;
+
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashMap},
     fs,
     io::Read,
     path::{Path, PathBuf},
@@ -18,6 +23,19 @@ use tough::{
     schema::{Root, Signed, Snapshot, Targets, Timestamp},
 };
 use url::Url;
+
+// Status codes returned by `@vesper/loom-tuf`.
+const BOUND_OK: u64 = 0;
+const BOUND_INVALID_JSON: u64 = 1;
+const BOUND_TRAVERSAL_LIMIT: u64 = 2;
+const BOUND_COLLECTION_LIMIT: u64 = 3;
+
+const GRAPH_OK: u64 = 0;
+const GRAPH_BUDGET: u64 = 1;
+
+const QUORUM_OK: u64 = 0;
+const QUORUM_INVALID_THRESHOLD: u64 = 2;
+const QUORUM_BAD_INPUT: u64 = 3;
 
 #[cfg(unix)]
 pub mod state;
@@ -181,54 +199,117 @@ fn json_bytes(value: &impl Serialize) -> Result<Vec<u8>, TufError> {
     serde_json::to_vec(value).map_err(|e| TufError(e.to_string()))
 }
 fn hash(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+    String::from_utf8(binding::tuf_sha256_hex(bytes)).unwrap_or_default()
 }
 fn state_checksum(state: &State) -> Result<String, TufError> {
-    let mut bytes = Vec::new();
-    state
-        .serialize(&mut serde_json::Serializer::with_formatter(
-            &mut bytes,
-            olpc_cjson::CanonicalFormatter::new(),
-        ))
-        .map_err(|e| TufError(e.to_string()))?;
-    Ok(hash(&bytes))
+    let mut roots_flat = Vec::new();
+    let mut root_lens = Vec::with_capacity(state.roots.len());
+    for root in &state.roots {
+        roots_flat.extend_from_slice(root);
+        root_lens.push(root.len() as u64);
+    }
+    let mut role_names_flat = Vec::new();
+    let mut role_name_lens = Vec::with_capacity(state.role_versions.len());
+    let mut role_versions = Vec::with_capacity(state.role_versions.len());
+    for (name, &ver) in &state.role_versions {
+        role_names_flat.extend_from_slice(name.as_bytes());
+        role_name_lens.push(name.len() as u64);
+        role_versions.push(ver);
+    }
+    let digest = binding::tuf_state_checksum(
+        u64::from(state.schema_version),
+        state.timestamp_version,
+        state.snapshot_version,
+        state.repository_id.as_bytes(),
+        state.bootstrap_sha256.as_bytes(),
+        state.verified_at.as_bytes(),
+        &roots_flat,
+        &root_lens,
+        &role_names_flat,
+        &role_name_lens,
+        &role_versions,
+    );
+    String::from_utf8(digest).map_err(|e| TufError(e.to_string()))
 }
 fn parse_root(bytes: &[u8]) -> Result<Signed<Root>, TufError> {
     serde_json::from_slice(bytes).map_err(|e| TufError(format!("invalid root: {e}")))
 }
+fn bound_json_bytes(bytes: &[u8], limits: &Limits, invalid_prefix: &str) -> Result<(), TufError> {
+    let max_nodes = (limits.files as u64).saturating_mul(limits.roles as u64);
+    match binding::tuf_bound_json(
+        bytes,
+        limits.json_depth as u64,
+        max_nodes,
+        limits.files as u64,
+    ) {
+        BOUND_OK => Ok(()),
+        BOUND_INVALID_JSON => fail(format!("{invalid_prefix}: malformed JSON")),
+        BOUND_TRAVERSAL_LIMIT => fail("metadata JSON traversal exceeds limit"),
+        BOUND_COLLECTION_LIMIT => fail("metadata collection exceeds limit"),
+        _ => fail("unexpected JSON validator status"),
+    }
+}
 fn bounded_root(bytes: &[u8], limits: &Limits) -> Result<Signed<Root>, TufError> {
-    let value: serde_json::Value =
-        serde_json::from_slice(bytes).map_err(|e| TufError(format!("invalid root JSON: {e}")))?;
-    bound_json(&value, limits, 0, &mut 0)?;
-    // Parse original bytes again so Tough's duplicate key checks are preserved.
+    bound_json_bytes(bytes, limits, "invalid root JSON")?;
+    // Parse original bytes so Tough's duplicate key checks are preserved.
     parse_root(bytes)
 }
 fn valid_name(name: &str) -> bool {
-    !name.is_empty()
-        && name
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || b"/._~+@-".contains(&byte))
-        && name.split('/').all(safe_component)
+    binding::tuf_valid_name(name)
 }
 fn safe_component(part: &str) -> bool {
-    let device = part.split('.').next().unwrap_or("").to_ascii_uppercase();
-    let numbered_device = ["COM", "LPT"].iter().any(|prefix| {
-        device.strip_prefix(prefix).is_some_and(|n| {
-            matches!(
-                n,
-                "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³"
-            )
-        })
-    });
-    !part.is_empty()
-        && part.len() <= 255
-        && part != "."
-        && part != ".."
-        && !part.ends_with(['.', ' '])
-        && !part.chars().any(char::is_control)
-        && !part.contains(['\\', ':', '<', '>', '"', '|', '*', '?'])
-        && !matches!(device.as_str(), "CON" | "PRN" | "AUX" | "NUL" | "CLOCK$")
-        && !numbered_device
+    binding::tuf_safe_component(part)
+}
+
+/// Verifies an Ed25519 TUF role quorum over canonicalized `signed` payload bytes
+/// using `@vesper/loom-tuf` and `@vesper/crypto`.
+pub fn verify_ed25519_quorum(
+    payload: &[u8],
+    role_keyids: &[u8],
+    threshold: u64,
+    pubkeys: &[u8],
+    sigs: &[u8],
+) -> Result<(), TufError> {
+    match binding::tuf_verify_ed25519_quorum(payload, role_keyids, threshold, pubkeys, sigs) {
+        QUORUM_OK => Ok(()),
+        QUORUM_INVALID_THRESHOLD => fail("invalid role threshold"),
+        QUORUM_BAD_INPUT => fail("malformed quorum input buffer"),
+        _ => fail("role signature threshold not met"),
+    }
+}
+
+/// Validates JSON depth, node count, and collection bounds without building a DOM.
+pub fn validate_json_bounds(bytes: &[u8], limits: &Limits) -> Result<(), TufError> {
+    bound_json_bytes(bytes, limits, "invalid metadata JSON")
+}
+
+/// Validates a target name against the canonical ASCII path policy.
+pub fn is_valid_target_name(name: &str) -> bool {
+    valid_name(name)
+}
+
+/// Validates a delegation graph's depth and acyclicity under `limits`.
+pub fn validate_delegation_graph(
+    graph: &BTreeMap<String, Vec<String>>,
+    limits: &Limits,
+) -> Result<(), TufError> {
+    check_graph_depth_port(graph, limits)
+}
+
+/// Computes the lowercase hex SHA-256 digest of `bytes` via `@vesper/loom-tuf`.
+pub fn sha256_hex(bytes: &[u8]) -> String {
+    hash(bytes)
+}
+
+/// Percent-encodes a TUF delegated role name via `@vesper/loom-tuf`.
+pub fn percent_encode_role(role_name: &str) -> String {
+    String::from_utf8(binding::tuf_percent_encode_role(role_name.as_bytes())).unwrap_or_default()
+}
+
+/// Percent-decodes a TUF metadata filename stem via `@vesper/loom-tuf`.
+pub fn percent_decode_role(encoded: &str) -> Result<String, TufError> {
+    String::from_utf8(binding::tuf_percent_decode_role(encoded.as_bytes()))
+        .map_err(|_| TufError("invalid encoded metadata filename".into()))
 }
 
 /// Verify using real host time, safe expiry enforcement, and no network transport.
@@ -651,21 +732,18 @@ impl tough::Transport for GatedFilesystem {
 }
 
 fn validate_limits(l: &Limits) -> Result<(), TufError> {
-    if l.metadata_file_bytes == 0
-        || l.metadata_total_bytes == 0
-        || l.target_bytes == 0
-        || l.targets_total_bytes == 0
-        || l.files == 0
-        || l.directory_depth == 0
-        || l.directory_depth > 128
-        || l.json_depth == 0
-        || l.json_depth > 128
-        || l.roles == 0
-        || l.roles > 4096
-        || l.root_updates == 0
-        || l.root_updates > 4096
-        || l.checkpoint_bytes == 0
-    {
+    if !binding::tuf_validate_limits(
+        l.metadata_file_bytes,
+        l.metadata_total_bytes,
+        l.target_bytes,
+        l.targets_total_bytes,
+        l.files as u64,
+        l.directory_depth as u64,
+        l.json_depth as u64,
+        l.roles as u64,
+        l.root_updates as u64,
+        l.checkpoint_bytes as u64,
+    ) {
         return fail("invalid resource limits");
     }
     Ok(())
@@ -915,12 +993,7 @@ impl MetadataLengthCheck<'_> {
             .ok_or_else(|| TufError(format!("missing snapshot role pin: {key}")))?;
         if let Some(length) = pin.length {
             // Match Tough's role-name escaping while retaining escapes in the filesystem filename.
-            const ESCAPE: &percent_encoding::AsciiSet = &percent_encoding::NON_ALPHANUMERIC
-                .remove(b'_')
-                .remove(b'.')
-                .remove(b'-')
-                .remove(b'~');
-            let encoded = percent_encoding::utf8_percent_encode(role_name, ESCAPE);
+            let encoded = percent_encode_role(role_name);
             let filename = if self.consistent {
                 format!("{}.{encoded}.json", pin.version)
             } else {
@@ -953,21 +1026,20 @@ fn validate_checkpoint(
     bootstrap: &[u8],
     limits: &Limits,
 ) -> Result<(), TufError> {
-    if old.to_json()?.len() > limits.checkpoint_bytes
-        || !matches!(old.state.schema_version, 1 | 2)
-        || old.state.repository_id != repository
+    let wire_len = old.to_json()?.len() as u64;
+    if !binding::tuf_check_checkpoint_invariants(
+        wire_len,
+        limits.checkpoint_bytes as u64,
+        u64::from(old.state.schema_version),
+        old.state.timestamp_version,
+        old.state.snapshot_version,
+        old.state.role_versions.len() as u64,
+        limits.roles as u64,
+        old.state.role_versions.values().any(|x| *x == 0),
+        old.state.role_versions.contains_key("targets.json"),
+    ) || old.state.repository_id != repository
         || old.state.bootstrap_sha256 != bootstrap_hash
         || old.checksum != state_checksum(&old.state)?
-        || (old.state.schema_version == 1
-            && (old.state.timestamp_version == 0
-                || old.state.snapshot_version == 0
-                || old.state.role_versions.is_empty()))
-        || ((old.state.timestamp_version == 0) != (old.state.snapshot_version == 0))
-        || (old.state.snapshot_version == 0 && !old.state.role_versions.is_empty())
-        || old.state.role_versions.len() > limits.roles
-        || old.state.role_versions.values().any(|x| *x == 0)
-        || (!old.state.role_versions.is_empty()
-            && !old.state.role_versions.contains_key("targets.json"))
     {
         return fail("corrupt or mismatched checkpoint");
     }
@@ -1207,9 +1279,10 @@ fn preflight_metadata(directory: &Path, limits: &Limits) -> Result<(), TufError>
         if path.extension().is_none_or(|ext| ext != "json") {
             return fail("metadata contains a non-JSON file");
         }
-        let value: serde_json::Value = serde_json::from_slice(&fs::read(&path)?)
+        let raw = fs::read(&path)?;
+        bound_json_bytes(&raw, limits, "invalid metadata JSON")?;
+        let value: serde_json::Value = serde_json::from_slice(&raw)
             .map_err(|e| TufError(format!("invalid metadata JSON: {e}")))?;
-        bound_json(&value, limits, 0, &mut 0)?;
         let signed = value
             .get("signed")
             .ok_or_else(|| TufError("metadata missing signed object".into()))?;
@@ -1235,15 +1308,8 @@ fn preflight_metadata(directory: &Path, limits: &Limits) -> Result<(), TufError>
             {
                 stems.push(name);
             }
-            let names: Result<Vec<_>, _> = stems
-                .into_iter()
-                .map(|stem| {
-                    percent_encoding::percent_decode_str(stem)
-                        .decode_utf8()
-                        .map(|name| name.into_owned())
-                })
-                .collect();
-            let names = names.map_err(|_| TufError("invalid encoded metadata filename".into()))?;
+            let names: Result<Vec<_>, _> = stems.into_iter().map(percent_decode_role).collect();
+            let names = names?;
             for role in delegations {
                 let child = role
                     .get("name")
@@ -1267,67 +1333,35 @@ fn preflight_metadata(directory: &Path, limits: &Limits) -> Result<(), TufError>
             }
         }
     }
-    let mut budget = limits.roles.saturating_mul(limits.roles);
-    for name in graph.keys() {
-        check_graph_depth(name, &graph, &mut Vec::new(), &mut budget, limits)?;
-    }
-    Ok(())
+    check_graph_depth_port(&graph, limits)
 }
 
-fn check_graph_depth(
-    name: &str,
+fn check_graph_depth_port(
     graph: &BTreeMap<String, Vec<String>>,
-    path: &mut Vec<String>,
-    budget: &mut usize,
     limits: &Limits,
 ) -> Result<(), TufError> {
-    if *budget == 0 {
-        return fail("delegation graph work limit exceeded");
+    if graph.is_empty() {
+        return Ok(());
     }
-    *budget -= 1;
-    if path.len() > limits.directory_depth || path.iter().any(|seen| seen == name) {
-        return fail("delegation graph depth or cycle exceeds policy");
+    let mut ids: HashMap<&str, u64> = HashMap::with_capacity(graph.len());
+    for (idx, name) in graph.keys().enumerate() {
+        ids.insert(name.as_str(), idx as u64);
     }
-    path.push(name.to_owned());
-    if let Some(children) = graph.get(name) {
+    let node_count = graph.len() as u64;
+    let mut adj_words = Vec::with_capacity(1 + graph.len() * 2);
+    adj_words.push(node_count);
+    for children in graph.values() {
+        adj_words.push(children.len() as u64);
         for child in children {
-            check_graph_depth(child, graph, path, budget, limits)?;
+            adj_words.push(ids.get(child.as_str()).copied().unwrap_or(node_count));
         }
     }
-    path.pop();
-    Ok(())
-}
-
-fn bound_json(
-    value: &serde_json::Value,
-    limits: &Limits,
-    depth: usize,
-    nodes: &mut usize,
-) -> Result<(), TufError> {
-    *nodes = nodes.saturating_add(1);
-    if depth > limits.json_depth || *nodes > limits.files.saturating_mul(limits.roles) {
-        return fail("metadata JSON traversal exceeds limit");
+    let budget = (limits.roles as u64).saturating_mul(limits.roles as u64);
+    match binding::tuf_check_graph_depth(&adj_words, limits.directory_depth as u64, budget) {
+        GRAPH_OK => Ok(()),
+        GRAPH_BUDGET => fail("delegation graph work limit exceeded"),
+        _ => fail("delegation graph depth or cycle exceeds policy"),
     }
-    match value {
-        serde_json::Value::Object(map) => {
-            if map.len() > limits.files {
-                return fail("metadata collection exceeds limit");
-            }
-            for child in map.values() {
-                bound_json(child, limits, depth + 1, nodes)?;
-            }
-        }
-        serde_json::Value::Array(array) => {
-            if array.len() > limits.files {
-                return fail("metadata collection exceeds limit");
-            }
-            for child in array {
-                bound_json(child, limits, depth + 1, nodes)?;
-            }
-        }
-        _ => (),
-    }
-    Ok(())
 }
 
 #[cfg(test)]

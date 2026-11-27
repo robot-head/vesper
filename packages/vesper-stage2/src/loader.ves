@@ -411,6 +411,9 @@ struct PkgNode {
     dep_indices: ChunkSeq[u64],
     // The type names the package's `.vsys` libraries declare.
     vsys_types: ChunkSeq[ChunkSeq[u8]],
+    // The `.vsys` files the manifest names (`[package] vsys`), joined to
+    // the package directory, with `@TARGET@`, `@OS@` and `@ARCH@` kept.
+    vsys_paths: ChunkSeq[ChunkSeq[u8]],
 }
 
 // `path` with `@TARGET@`, `@OS@` and `@ARCH@` replaced for wasm32-wasip2,
@@ -545,10 +548,12 @@ fn load_pkg_graph(
         },
     };
     let manifest = parse_manifest(in mbytes.as_slice());
+    let mut vsys_paths = ChunkSeq::new[ChunkSeq[u8]]();
     let mut vsys_types = ChunkSeq::new[ChunkSeq[u8]]();
     for vi in 0..manifest.vsys.len() {
         match manifest.vsys.try_get(vi) {
             Option::Some(v) => {
+                vsys_paths.push(join_path(in norm.as_slice(), in v.as_slice()));
                 let rel = expand_vsys_path_wasip2(in v.as_slice());
                 let vpath = join_path(in norm.as_slice(), in rel.as_slice());
                 match try_read_file(in vpath.as_slice()) {
@@ -570,7 +575,8 @@ fn load_pkg_graph(
             dir: norm,
             dep_names: ChunkSeq::new[ChunkSeq[u8]](),
             dep_indices: ChunkSeq::new[u64](),
-            vsys_types: ChunkSeq::new[ChunkSeq[u8]]()
+            vsys_types: ChunkSeq::new[ChunkSeq[u8]](),
+            vsys_paths: ChunkSeq::new[ChunkSeq[u8]]()
         }
     );
     let mut dep_names = ChunkSeq::new[ChunkSeq[u8]]();
@@ -599,7 +605,8 @@ fn load_pkg_graph(
             dir: dir_copy,
             dep_names: dep_names,
             dep_indices: dep_indices,
-            vsys_types: vsys_types
+            vsys_types: vsys_types,
+            vsys_paths: vsys_paths
         }
     );
     Option::Some(idx)
@@ -2058,6 +2065,41 @@ fn scan_dir_mods(
     }
 }
 
+// The `.vsys` files the manifests of the package graph at `root_dir` name
+// (Rust `Assembled::vsys`), in load order, joined to their package
+// directories with `@TARGET@`, `@OS@` and `@ARCH@` kept; None when the graph
+// does not load.
+pub fn package_graph_vsys_paths(
+    in root_dir: Slice[u8]
+) -> Option[ChunkSeq[ChunkSeq[u8]]] eff [Ffi[StdFs]] {
+    let mut pkgs = ChunkSeq::new[PkgNode]();
+    match load_pkg_graph(in root_dir, inout pkgs) {
+        Option::Some(_) => {},
+        Option::None => {
+            return Option::None;
+        },
+    }
+    let mut out = ChunkSeq::new[ChunkSeq[u8]]();
+    for pi in 0..pkgs.len() {
+        match pkgs.try_get(pi) {
+            Option::Some(p) => {
+                for vi in 0..p.vsys_paths.len() {
+                    match p.vsys_paths.try_get(vi) {
+                        Option::Some(v) => {
+                            let mut copy = ChunkSeq::new[u8]();
+                            copy.extend(in v.as_slice());
+                            out.push(sink copy);
+                        },
+                        Option::None => {},
+                    }
+                }
+            },
+            Option::None => {},
+        }
+    }
+    Option::Some(out)
+}
+
 pub fn load_package_graph_bytes(in root_dir: Slice[u8]) -> Option[ChunkSeq[u8]] eff [Ffi[StdFs]] {
     let mut pkgs = ChunkSeq::new[PkgNode]();
     match load_pkg_graph(in root_dir, inout pkgs) {
@@ -2638,7 +2680,8 @@ test {
             dir: ChunkSeq::new[u8](),
             dep_names: ChunkSeq::new[ChunkSeq[u8]](),
             dep_indices: ChunkSeq::new[u64](),
-            vsys_types: ChunkSeq::new[ChunkSeq[u8]]()
+            vsys_types: ChunkSeq::new[ChunkSeq[u8]](),
+            vsys_paths: ChunkSeq::new[ChunkSeq[u8]]()
         }
     }
 

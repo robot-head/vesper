@@ -115,3 +115,135 @@ pub fn record_decode(
     }
     2
 }
+
+const LOG_HDR_LEN: u64 = 64;
+const LOG_HDR_CRC_OFF: u64 = 60;
+const LOG_HDR_REGION_OFF: u64 = 56;
+const LOG_HDR_KIB_OFF: u64 = 57;
+const LOG_HDR_FIELDS_OFF: u64 = 8;
+const LOG_HDR_FIELD_COUNT: u64 = 6;
+const LOG_HDR_FIELD_BYTES: u64 = 8;
+const LOG_HDR_MAX_REGION: u8 = 1;
+const LOG_MIN_REGION_KIB: u64 = 64;
+const LOG_MAX_REGION_KIB: u64 = 131072;
+const LOG_MAGIC_0: u8 = 81;
+// 'Q'
+const LOG_MAGIC_1: u8 = 82;
+// 'R'
+const LOG_MAGIC_2: u8 = 89;
+// 'Y'
+const LOG_MAGIC_3: u8 = 87;
+// 'W'
+const LOG_MAGIC_4: u8 = 65;
+// 'A'
+const LOG_MAGIC_5: u8 = 76;
+// 'L'
+const LOG_MAGIC_6: u8 = 48;
+// '0'
+const LOG_MAGIC_7: u8 = 50;
+// '2'
+const LOG_SHIFT_8: u64 = 8;
+const LOG_SHIFT_16: u64 = 16;
+const LOG_BYTE_MASK: u64 = 255;
+
+const LOG_FIELD_HSEQ: u64 = 0;
+const LOG_FIELD_CUR_GEN: u64 = 1;
+const LOG_FIELD_CUR_BASE: u64 = 2;
+const LOG_FIELD_PREV_GEN: u64 = 3;
+const LOG_FIELD_PREV_BASE: u64 = 4;
+const LOG_FIELD_PREV_END: u64 = 5;
+const LOG_FIELD_CUR_REGION: u64 = 6;
+const LOG_FIELD_REGION_KIB: u64 = 7;
+
+fn g64(in s: Slice[u64], i: u64) -> u64 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+const LOG_MAGIC_U64: u64 = 0x32304c4157595251;
+
+fn rd64(in b: Slice[u8], at: u64) -> u64 {
+    match b.try_read_u64_le(at) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+pub fn header_encode(in fields: Slice[u64], inout out: Slice[u8]) {
+    let _ = out.try_write_u64_le(0, LOG_MAGIC_U64);
+    let mut i: u64 = 0;
+    loop {
+        if i >= LOG_HDR_FIELD_COUNT {
+            break;
+        }
+        let off = wrapping_add(LOG_HDR_FIELDS_OFF, wrapping_mul(i, LOG_HDR_FIELD_BYTES));
+        let _ = out.try_write_u64_le(off, g64(in fields, i));
+        i = wrapping_add(i, 1);
+    }
+    out.try_set(
+        LOG_HDR_REGION_OFF,
+        wrapping_u8(g64(in fields, LOG_FIELD_CUR_REGION) & LOG_BYTE_MASK)
+    );
+    let kib = g64(in fields, LOG_FIELD_REGION_KIB);
+    out.try_set(LOG_HDR_KIB_OFF, wrapping_u8(kib & LOG_BYTE_MASK));
+    out.try_set(
+        wrapping_add(LOG_HDR_KIB_OFF, 1),
+        wrapping_u8((kib >> LOG_SHIFT_8) & LOG_BYTE_MASK)
+    );
+    out.try_set(
+        wrapping_add(LOG_HDR_KIB_OFF, 2),
+        wrapping_u8((kib >> LOG_SHIFT_16) & LOG_BYTE_MASK)
+    );
+}
+
+// Validates magic, region, non-zero hseq/cur_gen/cur_base, and region_kib bounds.
+// Returns 1 if valid (writing 8 fields into `out_fields`), 0 if invalid.
+pub fn header_decode(in h: Slice[u8], inout out_fields: Slice[u64]) -> u64 {
+    if h.len() != LOG_HDR_LEN {
+        return 0;
+    }
+    let cur_region = gb(in h, LOG_HDR_REGION_OFF);
+    if rd64(in h, 0) != LOG_MAGIC_U64 || cur_region > LOG_HDR_MAX_REGION {
+        return 0;
+    }
+    let hseq = rd64(in h, LOG_HDR_FIELDS_OFF);
+    let cur_gen = rd64(in h, wrapping_add(LOG_HDR_FIELDS_OFF, LOG_HDR_FIELD_BYTES));
+    let cur_base = rd64(
+        in h,
+        wrapping_add(LOG_HDR_FIELDS_OFF, wrapping_mul(2, LOG_HDR_FIELD_BYTES))
+    );
+    let prev_gen = rd64(
+        in h,
+        wrapping_add(LOG_HDR_FIELDS_OFF, wrapping_mul(3, LOG_HDR_FIELD_BYTES))
+    );
+    let prev_base = rd64(
+        in h,
+        wrapping_add(LOG_HDR_FIELDS_OFF, wrapping_mul(4, LOG_HDR_FIELD_BYTES))
+    );
+    let prev_end = rd64(
+        in h,
+        wrapping_add(LOG_HDR_FIELDS_OFF, wrapping_mul(5, LOG_HDR_FIELD_BYTES))
+    );
+    let kib = widen_u64(gb(in h, LOG_HDR_KIB_OFF))
+        | (widen_u64(gb(in h, wrapping_add(LOG_HDR_KIB_OFF, 1))) << LOG_SHIFT_8)
+        | (widen_u64(gb(in h, wrapping_add(LOG_HDR_KIB_OFF, 2))) << LOG_SHIFT_16);
+    if hseq == 0
+        || cur_gen == 0
+        || cur_base == 0
+        || kib < LOG_MIN_REGION_KIB
+        || kib > LOG_MAX_REGION_KIB
+    {
+        return 0;
+    }
+    s64(inout out_fields, LOG_FIELD_HSEQ, hseq);
+    s64(inout out_fields, LOG_FIELD_CUR_GEN, cur_gen);
+    s64(inout out_fields, LOG_FIELD_CUR_BASE, cur_base);
+    s64(inout out_fields, LOG_FIELD_PREV_GEN, prev_gen);
+    s64(inout out_fields, LOG_FIELD_PREV_BASE, prev_base);
+    s64(inout out_fields, LOG_FIELD_PREV_END, prev_end);
+    s64(inout out_fields, LOG_FIELD_CUR_REGION, widen_u64(cur_region));
+    s64(inout out_fields, LOG_FIELD_REGION_KIB, kib);
+    1
+}
