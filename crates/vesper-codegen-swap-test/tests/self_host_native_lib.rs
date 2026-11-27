@@ -369,7 +369,8 @@ fn rust_build(library: &str, source: &str) -> Result<(Vec<u8>, Record), String> 
 }
 
 /// Libraries of plain scalar functions: arithmetic, branches, loops,
-/// floats, narrow integers, and direct calls between exports and locals.
+/// floats, narrow integers, direct calls between exports and locals, and
+/// `fail_only` functions with their failure records (#2425).
 const LIBRARIES: &[(&str, &str)] = &[
     (
         "arith",
@@ -405,6 +406,11 @@ pub fn half(x: f32) -> f32 { x * 0.5 }",
         "fn square(x: i64) -> i64 { wrapping_mul(x, x) }
 pub fn sum_squares(a: i64, b: i64) -> i64 { wrapping_add(square(a), square(b)) }
 pub fn quad(x: i64) -> i64 { square(square(x)) }",
+    ),
+    (
+        "fails",
+        "fn step(a: u64, b: u64) -> u64 eff [Fail[ArithOverflow]] { a * b + 1 }
+pub fn total(a: u64, b: u64) -> u64 eff [Fail[ArithOverflow], Fail[RuntimeError]] { step(a, b) / b }",
     ),
 ];
 

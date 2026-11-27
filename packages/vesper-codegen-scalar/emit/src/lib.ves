@@ -330,11 +330,29 @@ fn overflow_test(call: u64, inout builder: Builder) -> u64 eff [Ffi[Cranelift]] 
     let kind = call_arg(call, 1);
     let lhs = value_of_word(call_arg(call, 2));
     let rhs = value_of_word(call_arg(call, 3));
+    let overflowed = emit_overflow_test(inout builder, op, kind, lhs, rhs);
+    if is_invalid(overflowed) {
+        return DECLINED;
+    }
+    call_result_value(call, overflowed);
+    HANDLED
+}
+
+// The overflow flag of `overflow_test` on the operand values, or an invalid
+// value when `op` on `kind` has no test (the body hook's checked
+// arithmetic, #2425, emits it directly).
+pub fn emit_overflow_test(
+    inout builder: Builder,
+    op: u64,
+    kind: u64,
+    lhs: Value,
+    rhs: Value
+) -> Value eff [Ffi[Cranelift]] {
     let narrow_signed = kind >= 6 && kind <= 8;
     let narrow_unsigned = kind >= 1 && kind <= 3;
     let word_unsigned = kind == 4 || kind == 5;
     let word_signed = kind == 9 || kind == 10;
-    let overflowed = if op != T_DIV && narrow_signed {
+    if op != T_DIV && narrow_signed {
         // Exact in 64 bits; overflow iff the result leaves the kind.
         let result = arith(inout builder, op, lhs, rhs);
         let shift_bits = wrapping_i64(wrapping_sub(64, kind_bits(kind)));
@@ -375,10 +393,8 @@ fn overflow_test(call: u64, inout builder: Builder) -> u64 eff [Ffi[Cranelift]] 
     } else if op == T_DIV && word_signed {
         div_min(inout builder, lhs, rhs, -9223372036854775807 - 1)
     } else {
-        return DECLINED;
-    };
-    call_result_value(call, overflowed);
-    HANDLED
+        Value { id: invalid() }
+    }
 }
 
 // `IntegerKind::max` of a one-word kind, as an `i64` immediate (u64's

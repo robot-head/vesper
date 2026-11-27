@@ -653,6 +653,9 @@ fn capability_abi(world: &World, f: &Function) -> bool {
 /// later loop iteration would overwrite, so it is refused there instead of
 /// returning to the wrong point.
 pub const LOOP_RESUME_REFUSAL: &str = "native handlers: an operation performed inside a loop of its handled body needs a clause that resumes in tail position (`op(v, k) => k(..)`); this clause has work after its resumption";
+/// The capability identity prefix of a `fail_only` frame's failure exits:
+/// `FAIL_EXIT` then the index of the `Fail` instance in its row.
+const FAIL_EXIT: &str = "native-fail-exit:";
 pub const CAPABILITY_ABI: &str = "vesper.native.capability-abi/1";
 pub const CAPABILITY_ABI_SYMBOL: &str = "__vesper_capability_abi";
 /// Instance keys of `entry`'s program compiled with the capability-passing
@@ -1441,7 +1444,7 @@ pub fn frame_plan(
                 // A capability effect: no operations, no evidence.
                 continue;
             }
-            let identity = format!("native-fail-exit:{fails}");
+            let identity = format!("{FAIL_EXIT}{fails}");
             fails += 1;
             capabilities.insert(format!("$effect:{}", effect.name), identity.clone());
             capabilities.insert(format!("$static:$fncap:{name}:{index}"), identity.clone());
@@ -4049,21 +4052,25 @@ impl<M: Module> Codegen<'_, '_, M> {
     /// `call` of an imported function and nothing else (part 6b of the
     /// body hook, #2094): a compiled-once, pure, non-generic function of
     /// scalar `in` parameters and a scalar result, with no status word,
-    /// register result, failure record, caller slot or trace flag, not a
-    /// reserved builtin, constant table or `dyn` stub. `None` for any
-    /// other call, which leaves the body to the Rust walk.
+    /// register result, caller slot or trace flag, not a reserved builtin,
+    /// constant table or `dyn` stub. A `fail_only` callee (#2425) takes a
+    /// failure record after its arguments: its word carries
+    /// [`codegen_swap::body::FAIL_CALL`], and [`codegen_swap::body::STATUS_CALL`]
+    /// when it returns its status in a register. `None` for any other
+    /// call, which leaves the body to the Rust walk.
     fn plain_call(
         &self,
         callee: &str,
         args: &[crate::ir::Argument],
         capability: Option<&str>,
         types: &[Type],
-    ) -> Option<FuncId> {
+    ) -> Option<u64> {
         let source = self.world.functions.get(callee)?;
+        let fails = fail_only(self.world, source);
         if capability.is_some()
             || !types.is_empty()
             || !source.generics.is_empty()
-            || !source.effects.instances.is_empty()
+            || (!source.effects.instances.is_empty() && !fails)
             || source.effects.tail.is_some()
             || callee == crate::ffi_lowering::types::PINNED_ADDRESS
             || callee == crate::integer_widths::MUL_WIDE
@@ -4087,7 +4094,7 @@ impl<M: Module> Codegen<'_, '_, M> {
         };
         let f = concrete(self.world, callee, &BTreeMap::new()).ok()?;
         if specialized_function(self.world, &f)
-            || fail_only(self.world, &f)
+            || fail_only(self.world, &f) != fails
             || crate::fip::uses_caller_slot(self.world, &f)
             || function_value_instance(self.world, source)
             || !scalar_type(&f.result)
@@ -4109,10 +4116,17 @@ impl<M: Module> Codegen<'_, '_, M> {
             return None;
         }
         let abi = self.abi.of(&key);
-        if abi.status || abi.result_words.is_some() {
+        if abi.result_words.is_some() || (abi.status && !fails) {
             return None;
         }
-        self.ids.get(&key).copied()
+        let id = u64::from(self.ids.get(&key)?.as_u32());
+        Some(if !fails {
+            id
+        } else if abi.status {
+            id | crate::codegen_swap::body::FAIL_CALL | crate::codegen_swap::body::STATUS_CALL
+        } else {
+            id | crate::codegen_swap::body::FAIL_CALL
+        })
     }
     /// Asks the `body` hook to emit `body` (`codegen_swap::body`), when
     /// the frame leaves the function plain; `true` when it did.
@@ -4131,19 +4145,27 @@ impl<M: Module> Codegen<'_, '_, M> {
             FrameResult::Sret => sret.is_some(),
             FrameResult::Buffer(_) | FrameResult::Words(_) => false,
         };
+        // A failure exit returns a scalar zero beside its tag, so a
+        // `fail_only` function with a struct result stays with the walk.
         let plain = result_ok
+            && !(sret.is_some() && self.fail_record.is_some())
             && self.denorm.is_empty()
             && self.session.is_none()
             && self.generic_vars.is_empty()
             && !self.in_fip_fn
             && self.trace_fail.is_none()
-            && self.fail_record.is_none()
             && self.caller_slot.is_none()
             && self.result_buffer.is_none()
             && self.own_abi.result_words.is_none()
             && frame.function_args.is_empty()
             && self.pointers.is_empty()
-            && self.capabilities.is_empty()
+            // A `fail_only` frame's capabilities are its failure exits
+            // (#2425): the record pointer goes in the request after the
+            // parameters.
+            && self
+                .capabilities
+                .values()
+                .all(|identity| self.fail_record.is_some() && identity.starts_with(FAIL_EXIT))
             && body.fip_call_slots.is_empty()
             && body.fip_join_slots.is_empty()
             && body.box_drops_before_inst.is_empty()
@@ -4158,11 +4180,20 @@ impl<M: Module> Codegen<'_, '_, M> {
             u64::from(self.own_abi.status),
             u64::from(self.source_locations),
         ];
-        args.push(f.params.len() as u64);
+        let record = self.fail_record.as_ref().map(|(record, _)| *record);
+        args.push((f.params.len() + usize::from(record.is_some())) as u64);
         for p in &f.params {
             let Some(var) = self.vars.get(&p.name) else {
                 return Ok(false);
             };
+            args.push(u64::from(var.as_u32()));
+        }
+        // A `fail_only` function's failure record (#2425) is its last
+        // block parameter, bound to a variable as each parameter is (as
+        // @vesper/native-lib binds every block parameter).
+        if let Some(record) = record {
+            let var = self.b.declare_var(self.b.func.dfg.value_type(record));
+            self.b.def_var(var, record);
             args.push(u64::from(var.as_u32()));
         }
         // Each `Op::Call` of the body, in instruction order: the callee's
@@ -4180,9 +4211,7 @@ impl<M: Module> Codegen<'_, '_, M> {
                     types,
                 } => Some(
                     self.plain_call(callee, args, capability.as_deref(), types)
-                        .map_or(crate::codegen_swap::body::NO_CALLEE, |id| {
-                            u64::from(id.as_u32())
-                        }),
+                        .unwrap_or(crate::codegen_swap::body::NO_CALLEE),
                 ),
                 _ => None,
             })
@@ -9806,7 +9835,7 @@ impl<M: Module> Codegen<'_, '_, M> {
         if effect == crate::trace_effects::TRACE && identity == "native-trace-host" {
             return self.trace_perform(op, &values);
         }
-        if let Some(index) = identity.strip_prefix("native-fail-exit:") {
+        if let Some(index) = identity.strip_prefix(FAIL_EXIT) {
             let index = index.parse::<i64>().map_err(|e| e.to_string())?;
             return self.fail_exit(index, effect, instance, values);
         }

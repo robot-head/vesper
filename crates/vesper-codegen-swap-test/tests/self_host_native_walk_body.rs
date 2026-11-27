@@ -883,6 +883,143 @@ fn vesper_scalar_bodies_part_6j() {
     });
 }
 
+/// Failure records (#2425): `fail_only` functions, which take a trailing
+/// failure-record pointer (and, optimized, return a status word): checked
+/// arithmetic on narrow and word kinds raising `ArithOverflow`, partial `/`
+/// and `%` raising `RuntimeError`, and calls of other `fail_only` functions
+/// (one or two instances, an enum or an `i64` error), whose failures are
+/// raised again. Functions that `Fail::raise` themselves (`guard`, `code`)
+/// and the handlers stay on the Rust walk.
+const FAILS: &str = "
+enum Oops {
+    Small,
+    Big,
+}
+fn add_checked(a: i64, b: i64) -> i64 eff [Fail[ArithOverflow]] {
+    a + b
+}
+fn narrow_mul(a: u8, b: u8) -> u8 eff [Fail[ArithOverflow]] {
+    a * b
+}
+fn guard(x: i64) -> i64 eff [Fail[Oops]] {
+    if x < 0 {
+        Fail::raise(Oops::Small);
+    }
+    if x > 100 {
+        Fail::raise(Oops::Big);
+    }
+    wrapping_mul(x, 2)
+}
+fn both(x: i64, y: i64) -> i64 eff [Fail[Oops], Fail[ArithOverflow]] {
+    let g: i64 = guard(x);
+    add_checked(g, y)
+}
+fn mixed(a: u64, b: u32, c: i32, d: i8) -> u64 eff [Fail[ArithOverflow]] {
+    let s: u64 = a + widen_u64(b);
+    let t: u64 = s * 3 - a;
+    let u: i32 = c - 7;
+    let v: i8 = d * 2;
+    let w: u32 = b + 1;
+    t ^ wrapping_u64(widen_i64(u)) ^ wrapping_u64(widen_i64(v)) ^ widen_u64(w)
+}
+fn divide(a: i64, b: i64, c: u32, d: u32) -> i64 eff [Fail[RuntimeError], Fail[ArithOverflow]] {
+    let q: i64 = a / b;
+    let r: i64 = a % b;
+    let s: u32 = c / d;
+    let t: u32 = c % d;
+    q ^ r ^ widen_i64(s) ^ widen_i64(t) ^ (q * r)
+}
+fn code(x: i64) -> i64 eff [Fail[i64]] {
+    if x > 9 {
+        Fail::raise(x);
+    }
+    wrapping_add(x, 1)
+}
+fn chain(x: i64) -> i64 eff [Fail[i64], Fail[ArithOverflow]] {
+    let a: i64 = code(x);
+    let b: i64 = code(a + 1);
+    a * b
+}
+fn relay(x: i64, y: i64) -> i64 eff [Fail[Oops], Fail[ArithOverflow]] {
+    let p: i64 = both(x, y);
+    let q: i64 = guard(p);
+    p + q
+}
+fn spin(n: u64) -> u64 eff [Fail[ArithOverflow]] {
+    let mut s: u64 = 0;
+    let mut i: u64 = 0;
+    loop {
+        if i >= n {
+            break;
+        }
+        s = s + i * i;
+        i = i + 1;
+    }
+    s
+}
+fn divide_or(b: i64) -> i64 eff [Fail[ArithOverflow]] {
+    handle Fail[RuntimeError] in {
+        divide(100, b, 50, 3)
+    } with {
+        return value => value,
+        raise(error, resume) => 77,
+    }
+}
+fn chain_or(x: i64) -> i64 eff [Fail[ArithOverflow]] {
+    handle Fail[i64] in {
+        chain(x)
+    } with {
+        return value => value,
+        raise(error, resume) => error * 100,
+    }
+}
+fn main() -> i64 {
+    handle Fail[ArithOverflow] in {
+        handle Fail[Oops] in {
+            both(3, 4) ^ widen_i64(narrow_mul(3, 5)) ^ both(-1, 2) ^ relay(5, 6)
+                ^ wrapping_i64(mixed(10, 20, 30, 4)) ^ wrapping_i64(spin(50))
+                ^ chain_or(4) ^ chain_or(9) ^ divide_or(7) ^ divide_or(0)
+        } with {
+            return value => value,
+            raise(error, resume) => match error {
+                Oops::Small => 1000,
+                Oops::Big => 2000,
+            },
+        }
+    } with {
+        return value => value,
+        raise(overflow, resume) => -1,
+    }
+}
+";
+
+#[test]
+fn vesper_fail_record_bodies_match() {
+    big_stack(|| {
+        let parsed = vesper::parser::parse(FAILS);
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        let checked = vesper::check::check(&parsed.module);
+        assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
+        let before = EMITTED.load(Ordering::Relaxed);
+        let total = both("fails", &checked.world, true);
+        let emitted = EMITTED.load(Ordering::Relaxed) - before;
+        eprintln!(
+            "fails: {}; {emitted} functions emitted from Vesper",
+            total.summary()
+        );
+        let ran = if cross() { 0 } else { 2 };
+        assert_eq!((total.worlds, total.ran), (2, ran), "{}", total.summary());
+        // add_checked, narrow_mul, both, mixed, divide, chain, relay and
+        // spin, in both builds (and again for the JIT runs off-cross).
+        let min_emitted = if cross() { 16 } else { 32 };
+        assert!(
+            emitted >= min_emitted,
+            "only {emitted} failure-record functions came from Vesper (expected {min_emitted})"
+        );
+        assert!(total.is_clean(), "{}", total.summary());
+    });
+}
+
 /// Struct and tuple results through the result pointer (#2411): structs of
 /// word, narrow, `bool` and float fields (an `f32` field leaves its word
 /// to be zeroed), a tuple, a one-field struct smaller than a word, and a
