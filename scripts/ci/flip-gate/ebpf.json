@@ -1,0 +1,97 @@
+{
+  "notes": [
+    "Flip gate for the eBPF backend (`ebpf_backend::compile_world`), ported as",
+    "@vesper/ebpf-backend and installed as the hybrid's `ebpf` swap. The",
+    "`ebpf-with-encoding` workload times every accepted program 20 times, Rust",
+    "against the swap's path (ebpf_words::input, the Vesper entry, decode)."
+  ],
+  "name": "ebpf",
+  "lane": "SH4-16",
+  "rust": [
+    "src/ebpf_backend.rs",
+    "src/ebpf_backend/lower.rs",
+    "src/ebpf_backend/surface.rs"
+  ],
+  "env": {
+    "CARGO_PROFILE_DEV_DEBUG": "0",
+    "CARGO_PROFILE_TEST_DEBUG": "0",
+    "CARGO_PROFILE_RELEASE_DEBUG": "0"
+  },
+  "build": [
+    [
+      "cargo",
+      "test",
+      "--locked",
+      "--release",
+      "--test",
+      "self_host_ebpf_backend",
+      "--no-run"
+    ]
+  ],
+  "tests": [
+    {
+      "run": [
+        "cargo",
+        "test",
+        "--locked",
+        "--release",
+        "--test",
+        "self_host_ebpf_backend"
+      ]
+    }
+  ],
+  "differential": {
+    "run": {
+      "sequence": [
+        [
+          "cargo",
+          "test",
+          "--locked",
+          "--release",
+          "--test",
+          "self_host_ebpf_backend",
+          "programs_and_errors_match_rust",
+          "--",
+          "--exact",
+          "--nocapture"
+        ],
+        [
+          "cargo",
+          "test",
+          "--locked",
+          "--release",
+          "--test",
+          "self_host_ebpf_backend",
+          "corpus_worlds_match_rust",
+          "--",
+          "--exact",
+          "--nocapture"
+        ]
+      ]
+    }
+  },
+  "abba": [
+    {
+      "workload": "ebpf-with-encoding",
+      "run": {
+        "argv": [
+          "cargo",
+          "test",
+          "--locked",
+          "--release",
+          "--test",
+          "self_host_ebpf_backend",
+          "ebpf_backend_speed",
+          "--",
+          "--exact",
+          "--ignored",
+          "--nocapture"
+        ],
+        "env": {
+          "FLIP_GATE": "1",
+          "CHECK_HARNESS_SPEED": "1"
+        }
+      }
+    }
+  ]
+}

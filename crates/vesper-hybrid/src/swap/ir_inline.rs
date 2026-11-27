@@ -13,7 +13,7 @@ mod ir_inline_binding;
 #[path = "../../../../tests/common/inline_words.rs"]
 mod inline_words;
 
-use super::place_ir::round_trip;
+use super::place_ir::round_trip_after_pass;
 use super::{Registry, Swap, on, open};
 
 /// Programs inlined by the Vesper inliner module.
@@ -43,7 +43,7 @@ pub(super) fn register(r: &mut Registry) {
     if on("inline") {
         r.ir.inline = Some(|world, program, budget| {
             let report = vesper_inline(world, program, budget);
-            round_trip(Some(world), program);
+            round_trip_after_pass(Some(world), program);
             report
         });
     }

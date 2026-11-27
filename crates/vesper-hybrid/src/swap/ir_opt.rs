@@ -13,7 +13,7 @@ mod ir_opt_binding;
 #[path = "../../../../tests/common/ir_opt_words.rs"]
 mod ir_opt_words;
 
-use super::place_ir::round_trip;
+use super::place_ir::round_trip_after_pass;
 // The word encoders read the shared ones through `super::`.
 use super::{Registry, Swap, ir_words, on, open};
 
@@ -48,7 +48,7 @@ pub(super) fn register(r: &mut Registry) {
     if on("ir_opt") {
         r.ir.opt = Some(|world, program| {
             let n = vesper_optimize(world, program)?;
-            round_trip(Some(world), program);
+            round_trip_after_pass(Some(world), program);
             Ok(n)
         });
     }

@@ -38,6 +38,15 @@ const E_UNARY: u64 = 11;
 const E_BINARY: u64 = 12;
 const E_IF: u64 = 13;
 const E_MATCH: u64 = 14;
+const E_INDEX: u64 = 40;
+
+// Literal pattern kinds (`LIT_*` in exprs.ves).
+const LIT_INT: u64 = 0;
+const LIT_FLOAT: u64 = 1;
+const LIT_BOOL: u64 = 2;
+const LIT_WIDE_INT: u64 = 3;
+const LIT_TYPED_INT: u64 = 4;
+const LIT_STRING: u64 = 5;
 
 fn unary_code(op: &str) -> u64 {
     match op {
@@ -100,17 +109,18 @@ fn encode_pattern(e: &mut Enc, p: &Pattern, out: &mut Vec<u64>) {
         PatternKind::Literal(l) => {
             out.extend([4, s, t]);
             if let Some(kind) = p.integer_kind {
-                out.extend([4, e.name(kind.name())]);
+                out.extend([LIT_TYPED_INT, e.name(kind.name())]);
                 return;
             }
             // The literal's type (`literal_type`), for `bind_mode`.
             // An integer past `u64::MAX` in magnitude is not ported yet (as
-            // in `encode_expr`): code 3 skips the function, as a string does.
+            // in `encode_expr`): `LIT_WIDE_INT` skips the function.
             out.push(match l {
-                Literal::Int(n) if fits_literal(*n) => 0,
-                Literal::Float(_) => 1,
-                Literal::Bool(_) => 2,
-                Literal::Int(_) | Literal::WideInt(_) | Literal::String(_) => 3,
+                Literal::Int(n) if fits_literal(*n) => LIT_INT,
+                Literal::Float(_) => LIT_FLOAT,
+                Literal::Bool(_) => LIT_BOOL,
+                Literal::Int(_) | Literal::WideInt(_) => LIT_WIDE_INT,
+                Literal::String(_) => LIT_STRING,
             });
             if let Literal::Int(n) = l
                 && fits_literal(*n)
@@ -259,6 +269,21 @@ fn encode_expr(w: &World, e: &mut Enc, x: &Expr, out: &mut Vec<u64>) {
             for (p, x) in arms {
                 encode_pattern(e, p, out);
                 encode_expr(w, e, x, out);
+            }
+        }
+        ExprKind::Index(base, index) => {
+            out.extend([E_INDEX, s, t]);
+            encode_expr(w, e, base, out);
+            match &index.kind {
+                ExprKind::Binary(op, lo, hi) if op == ".." => {
+                    out.push(1);
+                    encode_expr(w, e, lo, out);
+                    encode_expr(w, e, hi, out);
+                }
+                _ => {
+                    out.push(0);
+                    encode_expr(w, e, index, out);
+                }
             }
         }
         _ => out.extend([E_OTHER, s, t]),

@@ -1,0 +1,122 @@
+{
+  "notes": [
+    "Flip gate for the capability effect checker (`capability_effects::check_world`),",
+    "ported as @vesper/check-effects (SH2 lane 8, #1180) and installed as the hybrid's",
+    "`effects` swap (crates/vesper-hybrid/src/swap/effects.rs). A compiler module: its",
+    "Rust goes at the Rust compiler's retirement (SH6 lane 2), not by this flip.",
+    "The `effects-with-encoding` workload times `check_world` against the swap's path",
+    "(effects_words::encode_world, the Vesper entry) over the corpus, the checker",
+    "fixtures and their fifth capability mutant."
+  ],
+  "name": "effects",
+  "lane": "SH2-8",
+  "rust": [
+    "src/capability_effects.rs"
+  ],
+  "env": {
+    "CARGO_PROFILE_DEV_DEBUG": "0",
+    "CARGO_PROFILE_TEST_DEBUG": "0",
+    "CARGO_PROFILE_RELEASE_DEBUG": "0"
+  },
+  "build": [
+    [
+      "cargo",
+      "test",
+      "--locked",
+      "--release",
+      "--test",
+      "self_host_check_effects",
+      "--no-run"
+    ]
+  ],
+  "tests": [
+    {
+      "run": [
+        "cargo",
+        "test",
+        "--locked",
+        "--release",
+        "--test",
+        "self_host_check_effects"
+      ]
+    }
+  ],
+  "differential": {
+    "run": {
+      "sequence": [
+        [
+          "cargo",
+          "test",
+          "--locked",
+          "--release",
+          "--test",
+          "self_host_check_effects",
+          "effects_match_rust_on_the_corpus",
+          "--",
+          "--exact",
+          "--nocapture"
+        ],
+        [
+          "cargo",
+          "test",
+          "--locked",
+          "--release",
+          "--test",
+          "self_host_check_effects",
+          "effects_match_rust_on_the_checker_fixtures",
+          "--",
+          "--exact",
+          "--nocapture"
+        ],
+        [
+          "cargo",
+          "test",
+          "--locked",
+          "--release",
+          "--test",
+          "self_host_check_effects",
+          "effects_match_rust_on_capability_mutants",
+          "--",
+          "--exact",
+          "--nocapture"
+        ],
+        [
+          "cargo",
+          "test",
+          "--locked",
+          "--release",
+          "--test",
+          "self_host_check_effects",
+          "policies_match_rust_on_corpus_and_fixtures",
+          "--",
+          "--exact",
+          "--nocapture"
+        ]
+      ]
+    }
+  },
+  "abba": [
+    {
+      "workload": "effects-with-encoding",
+      "run": {
+        "argv": [
+          "cargo",
+          "test",
+          "--locked",
+          "--release",
+          "--test",
+          "self_host_check_effects",
+          "effects_abba",
+          "--",
+          "--exact",
+          "--ignored",
+          "--nocapture"
+        ],
+        "env": {
+          "FLIP_GATE": "1",
+          "CHECK_HARNESS_SPEED": "1"
+        }
+      }
+    }
+  ]
+}
