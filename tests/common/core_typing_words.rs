@@ -347,6 +347,7 @@ fn encode_expr(w: &World, e: &mut Enc, x: &Expr, out: &mut Vec<u64>) {
                         }) + 1
                     }),
             );
+            out.push(e.opt_name(&effect.label));
             out.push(state.is_some() as u64);
             if let Some((p, value)) = state {
                 encode_pattern(e, p, out);
