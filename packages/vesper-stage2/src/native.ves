@@ -243,6 +243,7 @@ struct Function {
     product_indices: ChunkSeq[u64],
     products: ChunkSeq[Product],
     call_result_bytes: u64,
+    call_argument_bytes: u64,
     mutable_slots: ChunkSeq[u32],
     addressed_locals: ChunkSeq[u32],
     mutable_bytes: u64,
@@ -271,7 +272,7 @@ impl Function {
     }
 
     fn product_index(in self, id: u64) -> u64 {
-        self.product_indices.try_get(wrapping_sub(id, self.arguments)).unwrap_or(NO_VALUE)
+        self.product_indices.try_get(id).unwrap_or(NO_VALUE)
     }
 
     fn product(in self, id: u64) -> Option[Product] {
@@ -341,6 +342,10 @@ impl Function {
             0
         };
         add(self.result_home(), result_bytes)
+    }
+
+    fn call_argument_home(in self) -> u64 {
+        add(self.call_result_home(), self.call_result_bytes)
     }
 
     fn label(in self, block: u64) -> u64 {
@@ -609,7 +614,9 @@ fn sysv_signature(in low: L, f: FnR) -> bool {
     for index in 0..f.param_count {
         let p = low.ast.param(add(f.param_start, index));
         let kind = scalar_kind(in low, p.ty);
-        if p.proj_count != 0 || abi_width(kind) == 0 {
+        if p.proj_count != 0
+            || (abi_width(kind) == 0 && (!is_aggregate(kind) || p.pass == TyPass::Inout))
+        {
             return false;
         }
         if p.pass != TyPass::Inout && is_float(kind) {
@@ -866,7 +873,7 @@ fn project_source(in low: L, at: u64, in m: Function) -> u64 {
 
 // The native result buffer is a sequence of word cells. Struct fields use
 // declaration order even when initializers appeared in a different order.
-fn result_fields(in low: L, root: u64, in m: Function, inout fields: ChunkSeq[u64]) -> bool {
+fn product_cells(in low: L, root: u64, in m: Function, inout fields: ChunkSeq[u64]) -> bool {
     let mut pending = ChunkSeq::new[u64]();
     pending.push(root);
     loop {
@@ -1181,6 +1188,8 @@ fn lower_call(
     let mut args = ChunkSeq::new[u64]();
     let mut floats = ChunkSeq::new[u64]();
     let buffer = m.call_result_home();
+    let mut argument_buffer = m.call_argument_home();
+    let argument_end = add(argument_buffer, m.call_argument_bytes);
     if aggregate {
         args.push(m.record(STACK_ADDRESS, HOME_SLOT, buffer, 0));
     }
@@ -1211,6 +1220,28 @@ fn lower_call(
                 }
                 m.record(STACK_ADDRESS, HOME_SLOT, offset, 0)
             }
+        } else if is_aggregate(kind) {
+            let source = add(m.arguments, operand);
+            match m.product(source) {
+                Option::Some(product) => if product.ty != param.ty {
+                    return NO_VALUE;
+                },
+                Option::None => return NO_VALUE,
+            };
+            let mut fields = ChunkSeq::new[u64]();
+            if !product_cells(in low, source, in m, inout fields) {
+                return NO_VALUE;
+            }
+            let end = add(argument_buffer, wrapping_mul(fields.len(), HOME_BYTES));
+            if end > argument_end {
+                return NO_VALUE;
+            }
+            let pointer = m.record(STACK_ADDRESS, HOME_SLOT, argument_buffer, 0);
+            if !store_fields(in fields, pointer, block, inout m) {
+                return NO_VALUE;
+            }
+            argument_buffer = end;
+            pointer
         } else {
             m.read(add(m.arguments, operand), block)
         };
@@ -1245,7 +1276,7 @@ fn lower_call(
     if aggregate {
         // Take the scalar fields out before another call can reuse this buffer.
         let mut fields = ChunkSeq::new[u64]();
-        if !result_fields(in low, add(m.arguments, w(inst.dest)), in m, inout fields) {
+        if !product_cells(in low, add(m.arguments, w(inst.dest)), in m, inout fields) {
             return NO_VALUE;
         }
         for i in 0..fields.len() {
@@ -1409,13 +1440,14 @@ fn plan_types(in low: L, row: FnRow, inout m: Function) -> bool {
 }
 
 copy struct PendingProduct {
-    index: u64,
+    value: u64,
     ty: u32,
 }
 
-fn plan_call_result(in low: L, inst: InstRow, block: u64, inout m: Function) -> bool {
+// Reserve scalar SSA values for a product arriving through the native ABI.
+fn plan_product(in low: L, root: PendingProduct, block: u64, inout m: Function) -> u64 {
     let mut pending = ChunkSeq::new[PendingProduct]();
-    pending.push(PendingProduct { index: w(inst.dest), ty: inst.ty });
+    pending.push(root);
     let start = m.values.len();
     let mut cells: u64 = 0;
     loop {
@@ -1426,9 +1458,9 @@ fn plan_call_result(in low: L, inst: InstRow, block: u64, inout m: Function) -> 
         let count = product_count(in low, node.ty);
         let first = m.values.len();
         if add(wrapping_sub(first, start), count) > MAX_RESULT_CELLS
-            || !m.product_indices.try_set(node.index, m.products.len())
+            || !m.product_indices.try_set(node.value, m.products.len())
         {
-            return false;
+            return 0;
         }
         m.products.push(Product { ty: node.ty, instruction: NO_VALUE, first_child: first });
         if count == 0 {
@@ -1438,10 +1470,10 @@ fn plan_call_result(in low: L, inst: InstRow, block: u64, inout m: Function) -> 
             let ty = product_field_type(in low, node.ty, i);
             let kind = scalar_kind(in low, ty);
             if kind == ScalarKind::Unsupported {
-                return false;
+                return 0;
             }
             if is_aggregate(kind) {
-                pending.push(PendingProduct { index: m.kinds.len(), ty: ty });
+                pending.push(PendingProduct { value: m.values.len(), ty: ty });
             } else {
                 cells = inc(cells);
             }
@@ -1450,32 +1482,79 @@ fn plan_call_result(in low: L, inst: InstRow, block: u64, inout m: Function) -> 
             m.product_indices.push(NO_VALUE);
         }
     }
+    wrapping_mul(cells, HOME_BYTES)
+}
+
+fn plan_call_arguments(in low: L, inst: InstRow, inout m: Function) -> bool {
+    let count = call_arity(in low, inst);
+    if count == NO_VALUE {
+        return false;
+    }
+    let mut cells: u64 = 0;
+    for i in 0..count {
+        let at = call_argument(inst.a, i);
+        let operand = low.program.op(add(at, ARGUMENT_VALUE));
+        if !is_aggregate(m.kind(operand)) {
+            continue;
+        }
+        if low.program.op(at) == TyPass::Inout {
+            return false;
+        }
+        let mut fields = ChunkSeq::new[u64]();
+        if !product_cells(in low, add(m.arguments, operand), in m, inout fields) {
+            return false;
+        }
+        cells = add(cells, fields.len());
+        if cells > MAX_RESULT_CELLS {
+            return false;
+        }
+    }
     let bytes = wrapping_mul(cells, HOME_BYTES);
-    if bytes > m.call_result_bytes {
-        m.call_result_bytes = bytes;
+    if bytes > m.call_argument_bytes {
+        m.call_argument_bytes = bytes;
     }
     true
 }
 
 // Cache the product behind each aggregate SSA value.
 fn plan_aggregates(in low: L, f: FnR, row: FnRow, inout m: Function) -> bool {
-    m.product_indices.resize(m.kinds.len(), NO_VALUE);
+    m.product_indices.resize(m.values.len(), NO_VALUE);
+    for arg in 0..f.param_count {
+        if is_aggregate(m.value_kind(arg)) {
+            let ty = low.ast.param(add(f.param_start, arg)).ty;
+            let root = PendingProduct { value: arg, ty: ty };
+            if plan_product(in low, root, 0, inout m) == 0 {
+                return false;
+            }
+        }
+    }
     for layout in 0..m.blocks.len() {
         let block = m.blocks.try_get(layout).unwrap_or(0);
         let b = low.program.block(add(row.b0, block));
         for index in b.i0..add(b.i0, b.ic) {
             let inst = low.program.inst(index);
-            let value = w(inst.dest);
-            if !is_aggregate(m.kind(value)) {
-                continue;
-            }
-            let at = inst.a;
+            let value = add(m.arguments, w(inst.dest));
+            let aggregate = is_aggregate(m.value_kind(value));
             if inst.op == Op::Call {
-                if !plan_call_result(in low, inst, block, inout m) {
+                if !plan_call_arguments(in low, inst, inout m) {
                     return false;
+                }
+                if aggregate {
+                    let root = PendingProduct { value: value, ty: inst.ty };
+                    let bytes = plan_product(in low, root, block, inout m);
+                    if bytes == 0 {
+                        return false;
+                    }
+                    if bytes > m.call_result_bytes {
+                        m.call_result_bytes = bytes;
+                    }
                 }
                 continue;
             }
+            if !aggregate {
+                continue;
+            }
+            let at = inst.a;
             let product = if inst.op == Op::Tuple || inst.op == Op::Data {
                 let product = m.products.len();
                 m.products.push(Product { ty: inst.ty, instruction: index, first_child: NO_VALUE });
@@ -1565,14 +1644,14 @@ fn pack_homes(in low: L, row: FnRow, inout m: Function) {
     m.home_bytes = wrapping_mul(occupied.len(), HOME_BYTES);
 }
 
-fn plan_return(in low: L, value: u64, block: u64, inout m: Function) -> bool {
+fn plan_value(in low: L, value: u64, block: u64, inout m: Function) -> bool {
     let kind = m.kind(value);
     let source = add(m.arguments, value);
     if !is_aggregate(kind) {
         return kind == ScalarKind::Unit || m.use_in(source, block);
     }
     let mut fields = ChunkSeq::new[u64]();
-    if !result_fields(in low, source, in m, inout fields) {
+    if !product_cells(in low, source, in m, inout fields) {
         return false;
     }
     for i in 0..fields.len() {
@@ -1589,6 +1668,9 @@ fn plan_homes(in low: L, f: FnR, row: FnRow, inout m: Function) -> bool {
     let mut value_count: u64 = 0;
     let mut has_place_actions = false;
     let mut has_aggregates = false;
+    for arg in 0..f.param_count {
+        has_aggregates = has_aggregates || is_aggregate(m.value_kind(arg));
+    }
     for block in 0..row.bc {
         let b = low.program.block(add(row.b0, block));
         let reachable = m.label(block) != NO_VALUE;
@@ -1732,7 +1814,7 @@ fn plan_homes(in low: L, f: FnR, row: FnRow, inout m: Function) -> bool {
                     return false;
                 }
             } else if inst.op == Op::Exit {
-                if !plan_return(in low, low.program.op(at), block, inout m) {
+                if !plan_value(in low, low.program.op(at), block, inout m) {
                     return false;
                 }
             } else if inst.op == Op::Call {
@@ -1750,7 +1832,7 @@ fn plan_homes(in low: L, f: FnR, row: FnRow, inout m: Function) -> bool {
                         }
                     } else {
                         let value = low.program.op(add(argument, ARGUMENT_VALUE));
-                        if !m.use_in(add(f.param_count, value), block) {
+                        if !plan_value(in low, value, block, inout m) {
                             return false;
                         }
                     }
@@ -1758,7 +1840,7 @@ fn plan_homes(in low: L, f: FnR, row: FnRow, inout m: Function) -> bool {
             }
         }
         if b.term == Term::Return {
-            if !plan_return(in low, low.program.op(b.ta), block, inout m) {
+            if !plan_value(in low, low.program.op(b.ta), block, inout m) {
                 return false;
             }
         } else if b.term == Term::Branch || b.term == Term::Match {
@@ -2913,17 +2995,7 @@ fn lower_block(
     true
 }
 
-fn store_result(in low: L, source: u64, block: u64, inout m: Function) -> bool {
-    let mut fields = ChunkSeq::new[u64]();
-    if !result_fields(in low, source, in m, inout fields) {
-        return false;
-    }
-    let address = if block == 0 {
-        RESULT_ADDRESS
-    } else {
-        let home = m.result_home();
-        m.load_cell(home, ScalarKind::U64)
-    };
+fn store_fields(in fields: ChunkSeq[u64], address: u64, block: u64, inout m: Function) -> bool {
     for index in 0..fields.len() {
         let field = fields.try_get(index).unwrap_or(NO_VALUE);
         let kind = if field == NO_VALUE {
@@ -2942,6 +3014,20 @@ fn store_result(in low: L, source: u64, block: u64, inout m: Function) -> bool {
         m.store_addressed(address, value, kind, wrapping_mul(index, HOME_BYTES));
     }
     true
+}
+
+fn store_result(in low: L, source: u64, block: u64, inout m: Function) -> bool {
+    let mut fields = ChunkSeq::new[u64]();
+    if !product_cells(in low, source, in m, inout fields) {
+        return false;
+    }
+    let address = if block == 0 {
+        RESULT_ADDRESS
+    } else {
+        let home = m.result_home();
+        m.load_cell(home, ScalarKind::U64)
+    };
+    store_fields(in fields, address, block, inout m)
 }
 
 fn lower_return(in low: L, result: u64, block: u64, inout m: Function) -> bool {
@@ -3120,7 +3206,26 @@ fn lower_terminator(in low: L, row: FnRow, b: BlockRow, block: u64, inout m: Fun
     true
 }
 
-fn lower_entry(inout m: Function) -> bool {
+fn load_product_parameter(in low: L, arg: u64, address: u64, inout m: Function) -> bool {
+    let mut fields = ChunkSeq::new[u64]();
+    if !product_cells(in low, arg, in m, inout fields) {
+        return false;
+    }
+    for i in 0..fields.len() {
+        let field = fields.try_get(i).unwrap_or(NO_VALUE);
+        let kind = m.value_kind(field);
+        if field != NO_VALUE && kind != ScalarKind::Unit {
+            let op = if is_float(kind) { FLOAT_LOAD } else { LOAD };
+            let value = m.record(op, address, wrapping_mul(i, HOME_BYTES), abi_width(kind));
+            if !m.define(field, 0, value) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+fn lower_entry(in low: L, inout m: Function) -> bool {
     // The encoder expects all floating argument records before ordinary SSA.
     let mut float_start = NO_VALUE;
     let mut fp: u64 = 0;
@@ -3145,6 +3250,14 @@ fn lower_entry(inout m: Function) -> bool {
     let mut float_value = float_start;
     for arg in 0..m.arguments {
         let kind = m.value_kind(arg);
+        if is_aggregate(kind) {
+            // Snapshot by-value fields before calls or writes through an aliased result pointer.
+            if !load_product_parameter(in low, arg, gp, inout m) {
+                return false;
+            }
+            gp = inc(gp);
+            continue;
+        }
         let inout_arg = m.is_inout(arg);
         let width = if inout_arg {
             QWORD_BITS
@@ -3201,6 +3314,7 @@ fn lower_function(
         product_indices: ChunkSeq::new[u64](),
         products: ChunkSeq::new[Product](),
         call_result_bytes: 0,
+        call_argument_bytes: 0,
         mutable_slots: ChunkSeq::new[u32](),
         addressed_locals: ChunkSeq::new[u32](),
         mutable_bytes: 0,
@@ -3220,7 +3334,7 @@ fn lower_function(
     }
     m.words.push(m.gp_arguments);
     m.words.push(NO_VALUE);
-    let frame_bytes = add(m.call_result_home(), m.call_result_bytes);
+    let frame_bytes = add(m.call_argument_home(), m.call_argument_bytes);
     if frame_bytes != 0 {
         let _ = m.record(STACK_SLOT, frame_bytes, HOME_BYTES, 0);
     }
@@ -3235,7 +3349,7 @@ fn lower_function(
             let returns = m.return_layout();
             let _ = m.record(BLOCK_LABEL, layout, home, returns);
         }
-        if block == 0 && !lower_entry(inout m) {
+        if block == 0 && !lower_entry(in low, inout m) {
             return ChunkSeq::new[u8]();
         }
         let b = low.program.block(add(row.b0, block));

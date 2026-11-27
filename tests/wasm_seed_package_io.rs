@@ -2557,6 +2557,23 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
              if earlier.ready { return (earlier, payload, equal, widen_i64(earlier.data.tag)); };\n\
              (earlier, payload, equal, widen_i64(later_row.data.tag))\n\
          }\n\
+         pub fn product_inputs(a: u64, b: u64, c: u64, d: u64, row: NestedCallRow, sample: (i16, f32), delta: f64)\n\
+             -> (NestedCallRow, (i16, f32), i64, f64, u64) {\n\
+             let (tag, reading) = sample;\n\
+             let signed = widen_i64(row.data.tag);\n\
+             let mixed = if row.ready { wrapping_add(signed, widen_i64(tag)) }\n\
+                 else { wrapping_sub(signed, widen_i64(tag)) };\n\
+             let (_, wide) = row.data.measurement;\n\
+             let scaled = (wide + delta) + widen_f64(reading);\n\
+             let sum = wrapping_add(wrapping_add(a, b), wrapping_add(c, d));\n\
+             (row, sample, mixed, scaled, sum)\n\
+         }\n\
+         pub fn product_caller(x: i64, y: f32, ready: bool) -> (NestedCallRow, (i16, f32), i64, f64, u64) {\n\
+             let (row, _) = nested_result(x, y, ready);\n\
+             let sample = (wrapping_i16(wrapping_add(x, 2)), y + 1.0);\n\
+             if ready { return product_inputs(10, 20, 30, 40, row, sample, 1.5); };\n\
+             product_inputs(1, 2, 3, 4, row, sample, -0.5)\n\
+         }\n\
          fn unsupported(x: u64) -> u64 { match (x, x) { (0, _) => 7, _ => 9 } }\n\
          pub fn decline(x: u64) -> u64 { unsupported(x) }\n",
     )
@@ -2850,6 +2867,22 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
         "{:?}",
         read_stage2_sidecar_notes(&object)
     );
+    let nested_object = dir.join("native-nested-call.o");
+    std::fs::rename(&object, &nested_object).unwrap();
+    assert_eq!(
+        compile("product_inputs"),
+        0,
+        "{:?}",
+        read_stage2_sidecar_notes(&object)
+    );
+    let product_inputs_object = dir.join("native-product-inputs.o");
+    std::fs::rename(&object, &product_inputs_object).unwrap();
+    assert_eq!(
+        compile("product_caller"),
+        0,
+        "{:?}",
+        read_stage2_sidecar_notes(&object)
+    );
 
     let caller = dir.join("native-scalar-caller.c");
     let binary = dir.join("native-scalar-caller");
@@ -2890,6 +2923,8 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
          extern uint64_t float_conversions(uint64_t *, int16_t, uint64_t, float, double);\n\
          extern uint64_t integer_bits(uint64_t *, int8_t, int8_t, uint16_t, uint16_t, int64_t);\n\
          extern uint64_t nested_call_entry(uint64_t *, int64_t, float, bool);\n\
+         extern uint64_t product_inputs(uint64_t *, uint64_t, uint64_t, uint64_t, uint64_t, const uint64_t *, const uint64_t *, double);\n\
+         extern uint64_t product_caller(uint64_t *, int64_t, float, bool);\n\
          int main(void) {\n\
              if (mix(10, 4) != 65 || mix(UINT64_MAX, UINT64_MAX) != UINT64_MAX - 16) return 1;\n\
              if (choose(0, 4) != 8 || choose(2, 4) != 8 || choose(4, 1) != 10\n\
@@ -2994,11 +3029,29 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
                  || nested[2] != 127 || nested[3] != 0 || nested[4] != 1 || nested[5] != 0\n\
                  || nested[6] != 127 || nested[7] != 0 || nested[8] != 127 || nested[9] != UINT64_MAX) return 35;\n\
              nested[3] = UINT64_MAX;\n\
-             return nested_call_entry(nested, -2, 0.25f, false) != 0\n\
+             if (nested_call_entry(nested, -2, 0.25f, false) != 0\n\
                  || nested[0] != UINT64_C(0x3e800000) || nested[1] != UINT64_C(0x3fe8000000000000)\n\
                  || (int64_t)nested[2] != -2 || nested[3] != 0 || nested[4] != 0\n\
                  || nested[5] != 0 || nested[6] != UINT64_MAX || nested[7] != 0 || nested[8] != UINT64_MAX\n\
-                 || nested[9] != UINT64_MAX;\n\
+                 || nested[9] != UINT64_MAX) return 36;\n\
+             uint64_t product[11] = {0};\n\
+             product[10] = UINT64_MAX;\n\
+             if (product_caller(product, 127, 1.25f, true) != 0\n\
+                 || product[0] != UINT64_C(0x3fa00000) || product[1] != UINT64_C(0x3ffc000000000000)\n\
+                 || product[2] != 127 || product[3] != 0 || product[4] != 1 || product[5] != 129\n\
+                 || product[6] != UINT64_C(0x40100000) || product[7] != 256\n\
+                 || product[8] != UINT64_C(0x4016000000000000) || product[9] != 100\n\
+                 || product[10] != UINT64_MAX) return 37;\n\
+             uint64_t row[12] = {UINT64_C(0x3fa00000), UINT64_C(0x3ffc000000000000), 127, 0, 1};\n\
+             const uint64_t sample[2] = {129, UINT64_C(0x40100000)};\n\
+             row[11] = UINT64_MAX;\n\
+             uint64_t *out = &row[1];\n\
+             return product_inputs(out, 10, 20, 30, 40, row, sample, 1.5) != 0\n\
+                 || row[0] != UINT64_C(0x3fa00000) || (uint32_t)out[0] != UINT32_C(0x3fa00000)\n\
+                 || out[1] != UINT64_C(0x3ffc000000000000) || out[2] != 127 || out[3] != 0\n\
+                 || out[4] != 1 || out[5] != 129 || out[6] != UINT64_C(0x40100000)\n\
+                 || out[7] != 256 || out[8] != UINT64_C(0x4016000000000000) || out[9] != 100\n\
+                 || out[10] != UINT64_MAX;\n\
          }\n",
     )
     .unwrap();
@@ -3034,6 +3087,8 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
             &math_object,
             &conversions_object,
             &bits_object,
+            &nested_object,
+            &product_inputs_object,
             &object,
         ])
         .arg("-lm")
