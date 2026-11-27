@@ -143,20 +143,21 @@ pub fn s_write(
     line: u64,
     in input: Slice[u32]
 ) eff [Fail[RuntimeError], Fail[ArithOverflow]] {
-    if line >= slots.len() / SlabWords::Line {
+    let slen = slots.len();
+    let m = wrapping_mul(line, SlabWords::Line);
+    if line >= slen || wrapping_add(m, SlabWords::Line) > slen {
         return;
     }
-    let m = line * SlabWords::Line;
-    let start = base + slots[m];
-    let cap = slots[m + Slot::Capacity];
-    let head = slots[m + Slot::Head];
+    let start = wrapping_add(base, slots[m]);
+    let cap = slots[wrapping_add(m, Slot::Capacity)];
+    let head = slots[wrapping_add(m, Slot::Head)];
     let n = input.len();
     if n <= cap {
-        let mut first = cap - head;
+        let mut first = wrapping_sub(cap, head);
         if n < first {
             first = n;
         }
-        data.copy_from(start + head, in input[0..first]);
+        data.copy_from(wrapping_add(start, head), in input[0..first]);
         if first < n {
             data.copy_from(start, in input[first..n]);
         }
@@ -175,30 +176,32 @@ pub fn s_read(
     line: u64,
     inout out: Slice[u32]
 ) eff [Fail[RuntimeError], Fail[ArithOverflow]] {
-    if line >= slots.len() / SlabWords::Line {
+    let slen = slots.len();
+    let m = wrapping_mul(line, SlabWords::Line);
+    if line >= slen || wrapping_add(m, SlabWords::Line) > slen {
         return;
     }
-    let m = line * SlabWords::Line;
-    let ring = base + slots[m];
-    let delay = slots[m + Slot::Delay];
-    let cap = slots[m + Slot::Capacity];
-    let head = slots[m + Slot::Head];
+    let ring = wrapping_add(base, slots[m]);
+    let delay = slots[wrapping_add(m, Slot::Delay)];
+    let cap = slots[wrapping_add(m, Slot::Capacity)];
+    let head = slots[wrapping_add(m, Slot::Head)];
     let start = if head >= delay {
-        head - delay
+        wrapping_sub(head, delay)
     } else if delay <= cap {
-        head + cap - delay
+        wrapping_sub(wrapping_add(head, cap), delay)
     } else {
         (head + cap - delay % cap) % cap
     };
     let n = out.len();
     if n <= cap {
-        let mut first = cap - start;
+        let mut first = wrapping_sub(cap, start);
         if n < first {
             first = n;
         }
-        out.copy_from(0, in data[ring + start..ring + start + first]);
+        let s0 = wrapping_add(ring, start);
+        out.copy_from(0, in data[s0..wrapping_add(s0, first)]);
         if first < n {
-            out.copy_from(first, in data[ring..ring + n - first]);
+            out.copy_from(first, in data[ring..wrapping_add(ring, wrapping_sub(n, first))]);
         }
     } else {
         for k in 0..n {
@@ -212,15 +215,25 @@ pub fn s_advance(inout slots: Slice[u64], block: u64) eff [
     Fail[RuntimeError],
     Fail[ArithOverflow]
 ] {
-    let lines = slots.len() / SlabWords::Line;
-    for line in 0..lines {
-        let m = line * SlabWords::Line;
-        let cap = slots[m + Slot::Capacity];
-        let next = slots[m + Slot::Head] + block;
-        if next < cap {
-            slots.set(m + Slot::Head, next);
-        } else {
-            slots.set(m + Slot::Head, next % cap);
+    let slen = slots.len();
+    let mut m: u64 = 0;
+    loop {
+        if wrapping_add(m, SlabWords::Line) > slen {
+            break;
         }
+        let cap = slots[wrapping_add(m, Slot::Capacity)];
+        let head_idx = wrapping_add(m, Slot::Head);
+        let next = slots[head_idx] + block;
+        if next < cap {
+            slots.set(head_idx, next);
+        } else {
+            let rem = wrapping_sub(next, cap);
+            if rem < cap {
+                slots.set(head_idx, rem);
+            } else {
+                slots.set(head_idx, next % cap);
+            }
+        }
+        m = wrapping_add(m, SlabWords::Line);
     }
 }
