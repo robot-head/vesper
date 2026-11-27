@@ -8,9 +8,9 @@
 
 use @vesper-std/intern::{symbol_from_id};
 use self::state::{
-    St, at32, at64, const_of, const_prefix, join_path, kind_both, kind_sugar, kind_value, emit, err,
-    find_module, hi, inc, lo, mod_path_into, mod_path_len, mod_seg, n32, none, pair, push_decimal,
-    push_sym, sym_byte, sym_len, sym_less, sym_path_split, sym_slice, sym_starts, w
+    St, at32, at64, const_of, const_prefix, join_path, kind_both, kind_has, kind_sugar, kind_value,
+    emit, err, find_module, hi, inc, lo, mod_path_into, mod_path_len, mod_seg, n32, none, pair,
+    push_decimal, push_sym, sym_byte, sym_len, sym_less, sym_path_split, sym_slice, sym_starts, w
 };
 
 pub fn no_key() -> u64 {
@@ -825,4 +825,55 @@ pub fn qualified(inout loader: St, cur_module: u32, path: u32, start: u32, end: 
         push_sym(in loader, at32(in segs, wrapping_add(first, k)), inout out);
     }
     loader.interner.intern(in out).id()
+}
+
+// `Resolver::sugar_name`: a free template name looked up at the module
+// `scope` that defines the sugar: its own items (private ones included),
+// then its own import aliases. Returns the internal name, or `none()`; a
+// failed import resolves nothing and reports nothing.
+pub fn sugar_name(inout loader: St, scope: u32, name: u32, ns: u8) -> u32 {
+    let own = pair(scope, name);
+    match loader.item_kind.get(own) {
+        Option::Some(kind) => {
+            if kind_has(kind, ns) {
+                return name_of(inout loader, own);
+            }
+        },
+        Option::None => {},
+    }
+    let use_first = w(at32(in loader.mod_use_first, w(scope)));
+    let use_count = w(at32(in loader.mod_use_len, w(scope)));
+    let mut shown = String::new();
+    for use_index in 0..use_count {
+        let use_row = wrapping_add(use_first, use_index);
+        let names_first = w(at32(in loader.use_names_first, use_row));
+        let names_count = w(at32(in loader.use_names_len, use_row));
+        for index in 0..names_count {
+            let name_row = wrapping_add(names_first, index);
+            if local_of(in loader, name_row) != name {
+                continue;
+            }
+            shown.clear();
+            let target = use_module(inout loader, scope, n32(use_row), inout shown);
+            loader.err_code = 0;
+            if target == none() {
+                return none();
+            }
+            let (key, kind) = lookup(
+                inout loader,
+                target,
+                at32(in loader.import_name, name_row),
+                target == scope,
+                in shown,
+                at32(in loader.import_start, name_row),
+                at32(in loader.import_end, name_row)
+            );
+            loader.err_code = 0;
+            if key == no_key() || !kind_has(kind, ns) {
+                return none();
+            }
+            return name_of(inout loader, key);
+        }
+    }
+    none()
 }

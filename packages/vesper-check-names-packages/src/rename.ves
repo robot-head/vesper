@@ -16,10 +16,10 @@ use @vesper-std/collections::flat_table::{FlatTable};
 use @vesper-std/arena::{idx_from_raw};
 use self::state::{
     St, at32, at64, at8, const_flags, emit, err, hi, inc, kind_has, kind_type, kind_value, lo, n32,
-    none, pair, push_sym, sym_len, sym_path_split, sym_slice, sym_starts, w
+    none, pair, push_sym, sym_byte, sym_len, sym_path_split, sym_slice, sym_starts, w
 };
 use self::load::{adt_at, back, effect_decl_at, fn_at, tr};
-use self::resolve::{qualified, unknown_import};
+use self::resolve::{qualified, sugar_name, unknown_import};
 
 fn file(in loader: St) -> u32 {
     at32(in loader.mod_file, w(loader.cur_module))
@@ -57,11 +57,117 @@ fn is_qualified(in loader: St, name: u32) -> bool {
         || sym_starts(in loader, name, in "@")
 }
 
+// Whether `start..end` lies in a hole of region `region`.
+fn in_hole(in loader: St, region: u64, start: u32, end: u32) -> bool {
+    let first = w(at32(in loader.sr_hole_first, region));
+    let count = w(at32(in loader.sr_hole_count, region));
+    for hole in first..wrapping_add(first, count) {
+        let at = hole << 1;
+        if at32(in loader.sr_holes, at) <= start && end <= at32(in loader.sr_holes, inc(at)) {
+            return true;
+        }
+    }
+    false
+}
+
+// `Renamer::definition`: the module defining the innermost expanded
+// region that holds `start..end` outside its holes (the last of equally
+// long ones), when that module is another one; else `none()`.
+fn definition(in loader: St, start: u32, end: u32) -> u32 {
+    let mut best = none();
+    let mut best_len: u32 = 0;
+    let mut i = loader.cur_region_count;
+    loop {
+        if i == 0 {
+            break;
+        }
+        i = wrapping_sub(i, 1);
+        let region = wrapping_add(loader.cur_region_first, i);
+        let region_start = at32(in loader.sr_start, region);
+        let region_end = at32(in loader.sr_end, region);
+        if region_start <= start && end <= region_end && !in_hole(in loader, region, start, end) {
+            let len = wrapping_sub(region_end, region_start);
+            if best == none() || len < best_len {
+                best = n32(region);
+                best_len = len;
+            }
+        }
+    }
+    if best == none() {
+        return none();
+    }
+    let author = at32(in loader.sr_author, w(best));
+    if author == loader.cur_module {
+        none()
+    } else {
+        author
+    }
+}
+
+// Whether `name` starts with the module's fresh sugar prefix.
+fn fresh(in loader: St, name: u32) -> bool {
+    let prefix = loader.cur_prefix;
+    if prefix == none() {
+        return false;
+    }
+    let len = sym_len(in loader, prefix);
+    if sym_len(in loader, name) < len {
+        return false;
+    }
+    for i in 0..len {
+        if sym_byte(in loader, name, i) != sym_byte(in loader, prefix, i) {
+            return false;
+        }
+    }
+    true
+}
+
+// A free name of a sugar template that `scope` defines: resolved there,
+// else left for the checker. A name the caller binds is reported, as it
+// would capture the template's reference.
+fn resolve_at_definition(
+    inout loader: St,
+    scope: u32,
+    name: u32,
+    start: u32,
+    end: u32,
+    ns: u8
+) -> u32 {
+    let target = sugar_name(inout loader, scope, name, ns);
+    if target != none() {
+        return target;
+    }
+    let bound = match loader.names.get(name) {
+        Option::Some(binding) => kind_has(wrapping_u8(binding >> 32), ns),
+        Option::None => false,
+    };
+    let hidden = !loader.is_root && match loader.hidden.get(name) {
+        Option::Some(kind) => kind_has(kind, ns),
+        Option::None => false,
+    };
+    let local = (ns == kind_value() && has(in loader.values, name))
+        || (ns == kind_type() && has(in loader.types, name));
+    if !fresh(in loader, name) && (bound || hidden || local) {
+        err(inout loader, unknown_import(), start, end);
+        let mut msg = String::new();
+        msg.push_str(in "'");
+        push_sym(in loader, name, inout msg);
+        msg.push_str(in "' is not declared or imported in the module that defines this sugar");
+        loader.err_msg.push_str(in msg);
+        emit(inout loader, file(in loader));
+    }
+    none()
+}
+
 // `Renamer::resolve`: a free name in namespace `ns`: an imported or own
 // item, else left for the checker (`none()`). A variant of an enum the
 // module does not see, or a root module item reached without an import,
 // is reported.
 fn resolve(inout loader: St, name: u32, start: u32, end: u32, ns: u8) -> u32 {
+    let scope = definition(in loader, start, end);
+    if scope != none() {
+        return resolve_at_definition(inout loader, scope, name, start, end, ns);
+    }
     match loader.names.get(name) {
         Option::Some(binding) => {
             if kind_has(wrapping_u8(binding >> 32), ns) {
@@ -127,8 +233,9 @@ fn resolve(inout loader: St, name: u32, start: u32, end: u32, ns: u8) -> u32 {
 fn type_name(inout loader: St, name: u32, start: u32, end: u32) -> u32 {
     let len = sym_len(in loader, name);
     let cut = sym_path_split(in loader, name);
+    let scope = definition(in loader, start, end);
     // A value enum member `E::M` (own `const$E::M` or imported).
-    if cut < len {
+    if cut < len && scope == none() {
         match loader.names.get(name) {
             Option::Some(binding) => {
                 return lo(binding);
@@ -137,7 +244,12 @@ fn type_name(inout loader: St, name: u32, start: u32, end: u32) -> u32 {
         }
     }
     if is_qualified(in loader, name) {
-        let resolved = qualified(inout loader, loader.cur_module, name, start, end);
+        let module = if scope == none() {
+            loader.cur_module
+        } else {
+            scope
+        };
+        let resolved = qualified(inout loader, module, name, start, end);
         if resolved == none() {
             emit(inout loader, file(in loader));
             return name;
@@ -149,7 +261,7 @@ fn type_name(inout loader: St, name: u32, start: u32, end: u32) -> u32 {
     } else {
         sym_slice(inout loader, name, 0, cut)
     };
-    if has(in loader.types, head) {
+    if scope == none() && has(in loader.types, head) {
         return name;
     }
     let target = resolve(inout loader, head, start, end, kind_type());
@@ -171,7 +283,7 @@ fn value_name(inout loader: St, name: u32, start: u32, end: u32) -> u32 {
     if sym_path_split(in loader, name) < sym_len(in loader, name) {
         return type_name(inout loader, name, start, end);
     }
-    if has(in loader.values, name) {
+    if has(in loader.values, name) && definition(in loader, start, end) == none() {
         return name;
     }
     let target = resolve(inout loader, name, start, end, kind_value());
@@ -214,7 +326,10 @@ fn ty(inout loader: St, inout ast: Ast, ty_id: u32, start: u32, end: u32) {
     let mut node = type_at(in ast, ty_id);
     if node.kind == 1 {
         let name = tr(inout loader, in ast, node.a);
-        if list_len(in ast, node.b) == 0 && has(in loader.types, name) {
+        if list_len(in ast, node.b) == 0
+            && has(in loader.types, name)
+            && definition(in loader, start, end) == none()
+        {
             return;
         }
         let new_name = type_name(inout loader, name, start, end);
@@ -280,7 +395,7 @@ fn one_effect(inout loader: St, inout ast: Ast, effect_id: u32, start: u32, end:
     }
     let mut node = effect_at(in ast, effect_id);
     let name = tr(inout loader, in ast, node.name);
-    if !has(in loader.types, name) {
+    if !has(in loader.types, name) || definition(in loader, start, end) != none() {
         let new_name = type_name(inout loader, name, start, end);
         if new_name != name {
             node.name = back(inout loader, inout ast, new_name);
@@ -330,9 +445,14 @@ fn generics(inout loader: St, in ast: Ast, list: u32) {
 fn constructor_pattern(inout loader: St, inout ast: Ast, node: PatNode) -> PatNode {
     let mut result = node;
     let name = tr(inout loader, in ast, result.a);
-    let local = match loader.names.get(name) {
-        Option::Some(binding) => lo(binding),
-        Option::None => none(),
+    let scope = definition(in loader, result.start, result.end);
+    let local = if scope != none() {
+        sugar_name(inout loader, scope, name, kind_value())
+    } else {
+        match loader.names.get(name) {
+            Option::Some(binding) => lo(binding),
+            Option::None => none(),
+        }
     };
     let new_name = if local != none() && (const_flags(inout loader, local) & 2) != 0 {
         local
