@@ -30,6 +30,14 @@ const PORTED: &[(&str, u64)] = &[
     ("shrink_unused_slots", 4),
     ("merge_blocks", 5),
     ("remove_constant_params", 6),
+    ("sink_compares", 32),
+    ("thread_branches", 33),
+    ("thread_decided_branches", 34),
+    ("thread_constant_param_jumps", 35),
+    ("propagate_branch_conditions", 36),
+    ("canonicalize_imm_ops", 37),
+    ("fold_load_store_offsets", 38),
+    ("cse_dom_pure", 39),
 ];
 
 /// The package's answer word for a step it ran.
@@ -47,8 +55,12 @@ fn entry() -> &'static Entry {
     E.get_or_init(|| Package::load("packages/vesper-native-clif-opt").entry("clif_opt_words", true))
 }
 
-fn step_code(name: &str) -> Option<u64> {
-    PORTED.iter().find(|(n, _)| *n == name).map(|&(_, c)| c)
+/// The `PORTED` index and step code of the step `name`.
+fn step_code(name: &str) -> Option<(usize, u64)> {
+    PORTED
+        .iter()
+        .position(|(n, _)| *n == name)
+        .map(|at| (at, PORTED[at].1))
 }
 
 /// `f` after the Vesper step `code`.
@@ -78,7 +90,7 @@ struct Runs {
 fn compare_steps(f: &ir::Function, runs: &mut Runs, bad: &mut Vec<String>) {
     let mut rust = f.clone();
     for (k, (name, step)) in native_clif_opt::STEPS.iter().enumerate() {
-        let Some(code) = step_code(name) else {
+        let Some((at, code)) = step_code(name) else {
             step(&mut rust);
             continue;
         };
@@ -86,7 +98,6 @@ fn compare_steps(f: &ir::Function, runs: &mut Runs, bad: &mut Vec<String>) {
         let before = rust.display().to_string();
         step(&mut rust);
         let after = rust.display().to_string();
-        let at = (code - 1) as usize;
         runs.ran[at] += 1;
         if after != before {
             runs.changed[at] += 1;

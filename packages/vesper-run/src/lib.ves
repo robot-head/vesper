@@ -27,9 +27,11 @@
 // `$cap` handler) to the handlers bound there (evidence frames). Slice 8
 // adds `f64` and `f32` values: literals, arithmetic, comparisons, literal
 // patterns, float conversions and bit reinterpretations, and Rust's
-// shortest-digit `Display` (@vesper/serde). A program reaching anything
-// else (user-labelled effects, float math intrinsics, a float mode,
-// 128-bit integers, vector, tiled and `Box` operations) is declined before
+// shortest-digit `Display` (@vesper/serde). Slice 9 adds labelled
+// operations (`stop.raise(x)` goes to the handler labelled `stop`),
+// `return` out of a handler body, and non-`dyn` `Box` values. A program
+// reaching anything else (labelled function types, float math
+// intrinsics, a float mode, 128-bit integers, vector and tiled operations) is declined before
 // it runs (`scan`); a continuation resumed outside its handler's
 // activation, a float-to-integer conversion, or a result with a non-ASCII
 // string, is declined when it is reached. The caller then
