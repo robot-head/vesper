@@ -1,0 +1,278 @@
+// Slice 2a-2a (#2349): the library's instances and declarations in Vesper,
+// as `native_export::compile_exports` makes them before the walk. The
+// instances are @vesper/codegen-calls' discovery over the library task of
+// the calls input (`instances_for_roots`); each one's convention is
+// `NativeAbi::plan`'s (an optimized build gives every non-export its
+// internal convention), its signature `signature_with_abi`'s, and its
+// symbol the export's or `local_symbol`'s.
+use @vesper/cranelift::{
+    Module, Ty, call_conv_default, declare_function, linkage_export, linkage_local, sig_new,
+    sig_param, sig_return, ty_f32, ty_f64, ty_i128, ty_i64
+};
+use @vesper/check-data::input::{Reader, read_ctx};
+use @vesper/check-layout::{layouts_new};
+use @vesper/place-ir::{read_program};
+use @vesper/codegen-calls::data::{read_calls};
+use @vesper/codegen-calls::instances::{concrete, discover_roots, is_root, program_facts, syms_new};
+use @vesper/codegen-calls::abi::{
+    Errs, Sig, V_F32, V_F64, V_I128, default_abi, internal, push_symbol_key, signature
+};
+
+const NO_LIBRARY: Str = "the calls input has no library task";
+const NOT_STANDALONE: Str = " is not compiled as a standalone native function";
+const WIDE_EXPORT: Str = "a 128-bit export needs a wide entry, which is not built yet: ";
+const DECLARE_FAILED: Str = "declaring a function failed: ";
+// `local_symbol`'s prefix (src/native.rs, #1451): the instance index and
+// key follow.
+const LOCAL_PREFIX: Str = "vesper_function_";
+const UNDERSCORE: u8 = 95;
+const QUOTE: u8 = 39;
+const DECIMAL_BASE: u64 = 10;
+const DIGIT_ZERO: u64 = 48;
+
+// The library's exports: each export's instance key and symbol, packed.
+pub struct Exports {
+    bytes: ChunkSeq[u8],
+    // per export: key start, key end, symbol end (the symbol starts at the
+    // key's end)
+    bounds: ChunkSeq[u64],
+}
+
+pub fn exports_new() -> Exports {
+    Exports { bytes: ChunkSeq::new[u8](), bounds: ChunkSeq::new[u64]() }
+}
+
+impl Exports {
+    pub fn push(inout self, in key: Slice[u8], in symbol: Slice[u8]) {
+        self.bounds.push(self.bytes.len());
+        self.bytes.extend(in key);
+        self.bounds.push(self.bytes.len());
+        self.bytes.extend(in symbol);
+        self.bounds.push(self.bytes.len());
+    }
+
+    pub fn count(in self) -> u64 {
+        self.bounds.len() / 3
+    }
+
+    fn bound(in self, i: u64) -> u64 {
+        self.bounds.try_get(i).unwrap_or(0)
+    }
+
+    // The index of the export whose key is `key`, or `count()`.
+    fn find(in self, in key: Slice[u8]) -> u64 {
+        let n = self.count();
+        for e in 0..n {
+            let start = self.bound(wrapping_mul(e, 3));
+            let end = self.bound(wrapping_add(wrapping_mul(e, 3), 1));
+            if wrapping_sub(end, start) != key.len() {
+                continue;
+            }
+            let mut same = true;
+            for i in 0..key.len() {
+                if self.bytes.try_get(wrapping_add(start, i)).unwrap_or(0)
+                    != key.try_get(i).unwrap_or(0)
+                {
+                    same = false;
+                    break;
+                }
+            }
+            if same {
+                return e;
+            }
+        }
+        n
+    }
+
+    fn push_symbol(in self, e: u64, inout out: ChunkSeq[u8]) {
+        let start = self.bound(wrapping_add(wrapping_mul(e, 3), 1));
+        let end = self.bound(wrapping_add(wrapping_mul(e, 3), 2));
+        out.extend(in self.bytes[start..end]);
+    }
+}
+
+// The declared functions, by instance index.
+pub struct Declared {
+    ids: ChunkSeq[u64],
+    sigs: ChunkSeq[u64],
+}
+
+pub fn declared_new() -> Declared {
+    Declared { ids: ChunkSeq::new[u64](), sigs: ChunkSeq::new[u64]() }
+}
+
+fn ty_of(code: u8) -> Ty {
+    if code == V_I128 {
+        ty_i128()
+    } else if code == V_F64 {
+        ty_f64()
+    } else if code == V_F32 {
+        ty_f32()
+    } else {
+        ty_i64()
+    }
+}
+
+fn push_dec(inout out: ChunkSeq[u8], value: u64) {
+    if value >= DECIMAL_BASE {
+        push_dec(inout out, value / DECIMAL_BASE);
+    }
+    out.push(wrapping_u8(wrapping_add(value % DECIMAL_BASE, DIGIT_ZERO)));
+}
+
+fn has_wide(in sig: Sig) -> bool {
+    for i in 0..sig.params.len() {
+        if sig.params.try_get(i).unwrap_or(0) == V_I128 {
+            return true;
+        }
+    }
+    for i in 0..sig.returns.len() {
+        if sig.returns.try_get(i).unwrap_or(0) == V_I128 {
+            return true;
+        }
+    }
+    false
+}
+
+// Declares the instances of the first library task of `input` (a calls
+// input: @vesper/check-data's context, @vesper/place-ir's program, the
+// calls section) in `m`, in instance order, into `d`. Empty on success,
+// else the error.
+pub fn declare_library(
+    inout m: Module,
+    in input: Slice[u8],
+    in exports: Exports,
+    inout d: Declared
+) -> ChunkSeq[u8] eff [Ffi[Cranelift]] {
+    let mut err: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut r = Reader { pos: 0 };
+    let mut c = read_ctx(inout r, in input);
+    let p = read_program(inout r, in input, in c);
+    let calls = read_calls(inout r, in input, in c);
+    let k = syms_new(inout c.names);
+    let facts = program_facts(in c.names, in calls, in p);
+    let mut ls = layouts_new();
+    let mut first = calls.tasks.len();
+    for ti in 0..calls.tasks.len() {
+        if calls.task(ti).library {
+            first = ti;
+            break;
+        }
+    }
+    if first == calls.tasks.len() {
+        err.extend(in NO_LIBRARY.as_bytes());
+        return err;
+    }
+    let task = calls.task(first);
+    let mut roots: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    roots.push(task.entry);
+    let mut tj = wrapping_add(first, 1);
+    loop {
+        if tj >= calls.tasks.len() || !calls.task(tj).more_roots {
+            break;
+        }
+        roots.push(calls.task(tj).entry);
+        tj = wrapping_add(tj, 1);
+    }
+    let found = discover_roots(
+        inout c.types,
+        inout c.names,
+        in c.world,
+        in calls,
+        in facts,
+        k,
+        in roots,
+        false
+    );
+    if found.err.len() != 0 {
+        err.extend(in found.err.as_slice());
+        return err;
+    }
+    for ri in 0..roots.len() {
+        let root = roots.try_get(ri).unwrap_or(0);
+        let mut seen = false;
+        for j in 0..found.insts.len() {
+            if found.inst(j).key == root {
+                seen = true;
+                break;
+            }
+        }
+        if !seen {
+            err.push(QUOTE);
+            c.names.write(root, inout err);
+            err.push(QUOTE);
+            err.extend(in NOT_STANDALONE.as_bytes());
+            return err;
+        }
+    }
+    let mut sig = Sig { params: ChunkSeq::new[u8](), returns: ChunkSeq::new[u8]() };
+    let mut errs = Errs { text: ChunkSeq::new[u8]() };
+    for i in 0..found.insts.len() {
+        let inst = found.inst(i);
+        let vars = found.vars_of(inst);
+        let f = concrete(inout c.types, inout c.names, in calls, inst.name, in vars);
+        let root = is_root(in roots, inst.key);
+        let mut abi = default_abi();
+        if task.optimize && !root {
+            if !internal(
+                inout ls,
+                inout c.types,
+                inout c.names,
+                in c.world,
+                in calls,
+                k,
+                in f,
+                inout abi,
+                inout errs
+            ) {
+                err.extend(in errs.text.as_slice());
+                return err;
+            }
+        }
+        if !signature(
+            inout ls,
+            inout c.types,
+            inout c.names,
+            in c.world,
+            in calls,
+            k,
+            in f,
+            abi,
+            inout sig,
+            inout errs
+        ) {
+            err.extend(in errs.text.as_slice());
+            return err;
+        }
+        let mut key: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        c.names.write(inst.key, inout key);
+        let e = exports.find(in key.as_slice());
+        let mut symbol: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        let linkage = if e < exports.count() {
+            if has_wide(in sig) {
+                err.extend(in WIDE_EXPORT.as_bytes());
+                err.extend(in key.as_slice());
+                return err;
+            }
+            exports.push_symbol(e, inout symbol);
+            linkage_export()
+        } else {
+            symbol.extend(in LOCAL_PREFIX.as_bytes());
+            push_dec(inout symbol, i);
+            symbol.push(UNDERSCORE);
+            push_symbol_key(in c.names, inst.key, inout symbol);
+            linkage_local()
+        };
+        let s = sig_new(inout m, call_conv_default());
+        for j in 0..sig.params.len() {
+            sig_param(inout m, s, ty_of(sig.params.try_get(j).unwrap_or(0)));
+        }
+        for j in 0..sig.returns.len() {
+            sig_return(inout m, s, ty_of(sig.returns.try_get(j).unwrap_or(0)));
+        }
+        let id = declare_function(inout m, in symbol.as_slice(), linkage, s);
+        d.ids.push(widen_u64(id.id));
+        d.sigs.push(widen_u64(s.id));
+    }
+    err
+}
