@@ -1021,6 +1021,11 @@ enum RecordFlag: _ {
     AstOptimize = 32,
 }
 
+pub use self::triple::{
+    driver_target_os, is_wasi_target, vsys_target_abi, vsys_target_index, vsys_target_os,
+    vsys_target_os_words
+};
+
 pub use self::windows_link::{
     WindowsLinkerFlavor, format_windows_linker_failed, windows_link_args_nul, windows_link_check,
     windows_linker_flavor, windows_linker_not_found_message, windows_lld_link_candidates_nul,

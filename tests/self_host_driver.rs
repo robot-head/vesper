@@ -1199,3 +1199,58 @@ fn windows_lld_link_candidates_match_rust() {
         .join("\0")
     );
 }
+
+#[test]
+fn vsys_target_os_matches_rust() {
+    use vesper::packages::{VSYS_TARGETS, driver_host};
+
+    let entry = driver().entry("vsys_target_os_words", true);
+    let host_os = std::env::consts::OS;
+
+    let cases: Vec<Option<&str>> = vec![
+        None,
+        Some("wasm32-wasip2"),
+        Some("x86_64-unknown-linux-gnu"),
+        Some("aarch64-unknown-linux-gnu"),
+        Some("aarch64-apple-darwin"),
+        Some("x86_64-pc-windows-msvc"),
+        Some("riscv64gc-unknown-none-elf"),
+    ];
+
+    for target in cases {
+        let mut input = Vec::new();
+        match target {
+            Some(t) => {
+                input.push(b'1');
+                input.extend_from_slice(t.as_bytes());
+            }
+            None => input.push(b'0'),
+        }
+        input.push(0);
+        input.extend_from_slice(host_os.as_bytes());
+
+        let words = entry.words(&input);
+        let got_wasi = words[0] != 0;
+        let got_idx = words[1];
+        let mut at = 2;
+        let got_os = String::from_utf8(unpack(&words, &mut at)).unwrap();
+        let got_abi = String::from_utf8(unpack(&words, &mut at)).unwrap();
+        assert_eq!(at, words.len());
+
+        let (want_os, want_wasi) = driver_host::target_os(target);
+        assert_eq!(
+            (got_os.as_str(), got_wasi),
+            (want_os, want_wasi),
+            "{target:?}"
+        );
+
+        let want_idx = target
+            .and_then(|t| VSYS_TARGETS.iter().position(|v| v.triple == t))
+            .map_or(4u64, |i| i as u64);
+        assert_eq!(got_idx, want_idx, "{target:?}");
+        let want_abi = target
+            .and_then(|t| VSYS_TARGETS.iter().find(|v| v.triple == t))
+            .map_or("", |v| v.abi);
+        assert_eq!(got_abi, want_abi, "{target:?}");
+    }
+}
