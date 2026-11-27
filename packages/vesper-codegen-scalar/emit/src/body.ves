@@ -10,6 +10,11 @@
 // the variables the entry block bound the parameters to, and for each of
 // the function's calls the function the walk would call directly
 // (part 6b), or NO_CALLEE (allowed for builtin calls, declines otherwise).
+// After the callees come the result pointer's value (`NO_VALUE` for a
+// function that returns in registers) and the values whose home is that
+// pointer (`aggregates::plan`'s `Home::Result`, #2411): a struct built
+// there is written in place, and any other struct result is copied to it
+// on return.
 //
 // Each local's entry in the plan is followed by the narrow kind its
 // stores coerce to. On the unoptimized path every local lives in a stack
@@ -33,8 +38,8 @@ use @vesper/cranelift::{
     ins_popcnt, ins_return, ins_sdiv, ins_select, ins_sextend, ins_srem, ins_sshr, ins_trap,
     ins_udiv, ins_uextend, ins_unary, ins_urem, ins_ushr, inst_result, invalid, is_invalid,
     seal_block, set_srcloc, switch_to_block, trap_user, ty_f32, ty_f64, ty_i128, ty_i32, ty_i64,
-    ty_i8, use_var, vals1, value_type, create_stack_slot, ins_load, ins_stack_addr, ins_store,
-    module_pointer_type
+    ty_i8, use_var, vals1, value_type, create_stack_slot, ins_iadd_imm, ins_load, ins_stack_addr,
+    ins_store, module_pointer_type
 };
 use super::{
     BODY_ERROR, DECLINED, HANDLED, coerce, kind_max_imm, kind_min_imm, kind_unsigned, narrow_type,
@@ -64,6 +69,7 @@ const INST_CALL_BUILTIN: u64 = 12;
 const INST_WIDE_CONST: u64 = 13;
 const INST_WIDE_UNARY: u64 = 14;
 const INST_WIDE_BINARY: u64 = 15;
+const INST_DATA: u64 = 32;
 
 // Sub-operations of `INST_FLOAT_UNARY` and `CB_FLOAT_UNARY`.
 const FUN_FNEG: u64 = 1;
@@ -208,6 +214,9 @@ const TERM_JUMP: u64 = 1;
 const TERM_BRANCH: u64 = 2;
 const TERM_MATCH: u64 = 3;
 const TERM_UNREACHABLE: u64 = 4;
+const TERM_RETURN_SRET: u64 = 32;
+// `codegen_swap::body::NO_VALUE`: no result pointer.
+const NO_VALUE: u64 = 18446744073709551615;
 
 // Argument positions.
 const ARG_OPTIMIZE: u64 = 0;
@@ -781,6 +790,10 @@ struct Body {
     values: ChunkSeq[u32],
     // call index -> its module FuncId word (from the request's callees)
     callees: ChunkSeq[u64],
+    // The result pointer (invalid when the result is in registers), and
+    // the values built in it.
+    sret: u32,
+    homes: ChunkSeq[u64],
 }
 
 impl Body {
@@ -871,6 +884,36 @@ impl Body {
         let address = declare_var(inout b, pointer_ty);
         def_var(inout b, address, ptr);
         let ok = self.addresses.try_set(l, address.id);
+    }
+
+    // A struct's own storage, of at least a word: `Codegen::alloc_uninit`
+    // on the optimize path, `Codegen::alloc` (zeroed a word at a time)
+    // otherwise.
+    fn storage(
+        inout self,
+        inout b: Builder,
+        in m: Module,
+        size: u64
+    ) -> Value eff [Ffi[Cranelift]] {
+        let bytes = if size < widen_u64(WORD_BYTES) {
+            WORD_BYTES
+        } else {
+            wrapping_u32(size)
+        };
+        let slot = create_stack_slot(inout b, bytes, SLOT_ALIGN_SHIFT);
+        let ptr = ins_stack_addr(inout b, module_pointer_type(in m), slot, 0);
+        if !self.optimize {
+            let mut offset: u32 = 0;
+            loop {
+                if offset >= bytes {
+                    break;
+                }
+                let zero = ins_iconst(inout b, ty_i64(), 0);
+                ins_store(inout b, PLAIN, zero, ptr, wrapping_i32(offset));
+                offset = wrapping_add(offset, WORD_BYTES);
+            }
+        }
+        ptr
     }
 
     fn emit_return_value(inout self, inout b: Builder, v: Value) eff [Ffi[Cranelift]] {
@@ -1270,6 +1313,42 @@ impl Body {
                 return false;
             }
             body_coerce(inout b, raw, rk, self.optimize)
+        } else if kind == INST_DATA {
+            // `Codegen::data_into` of a struct or tuple (#2411): every
+            // field's value in a temporary, then its storage (the result
+            // pointer when this is the result's home, else a fresh slot,
+            // zeroed only on the unoptimized path), the optimize path's
+            // zeroing of the words no field writes whole, and each field
+            // read back, coerced and stored at its offset.
+            let size = w.next();
+            let mut temps: ChunkSeq[u32] = ChunkSeq::new[u32]();
+            for k in 0..n {
+                temps.push(temp(inout b, self.value(at64(in ops, k))).id);
+            }
+            let ptr = if self.sret != invalid() && has_call(in self.homes, dest) {
+                Value { id: self.sret }
+            } else {
+                self.storage(inout b, in m, size)
+            };
+            let nz = w.next();
+            for k in 0..nz {
+                let offset = w.next();
+                if self.optimize {
+                    let zero = ins_iconst(inout b, ty_i64(), 0);
+                    ins_store(inout b, PLAIN, zero, ptr, wrapping_i32(offset));
+                }
+            }
+            for k in 0..n {
+                let offset = w.next();
+                let read = w.next();
+                let store = w.next();
+                let tv = Var { id: at32(in temps, k) };
+                let value = body_operand(inout b, tv, read, self.optimize);
+                let field = ins_iadd_imm(inout b, ptr, wrapping_i64(offset));
+                let stored = body_coerce(inout b, value, store, self.optimize);
+                ins_store(inout b, PLAIN, stored, field, 0);
+            }
+            ptr
         } else {
             return false;
         };
@@ -1294,6 +1373,33 @@ impl Body {
                 self.value(i)
             };
             self.emit_return_value(inout b, v);
+            return true;
+        }
+        if code == TERM_RETURN_SRET {
+            // A struct result: copied a word at a time to the result
+            // pointer unless it was built there, then the word 0.
+            let i = w.next();
+            let size = w.next();
+            ops.push(i);
+            self.read_operands(inout b, in ops);
+            if self.sret == invalid() {
+                return false;
+            }
+            if !has_call(in self.homes, i) {
+                let from = self.value(i);
+                let to = Value { id: self.sret };
+                let mut offset: u64 = 0;
+                loop {
+                    if offset >= size {
+                        break;
+                    }
+                    let word = ins_load(inout b, ty_i64(), PLAIN, from, wrapping_i32(offset));
+                    ins_store(inout b, PLAIN, word, to, wrapping_i32(offset));
+                    offset = wrapping_add(offset, widen_u64(WORD_BYTES));
+                }
+            }
+            let zero = ins_iconst(inout b, ty_i64(), 0);
+            self.emit_return_value(inout b, zero);
             return true;
         }
         if code == TERM_JUMP {
@@ -1403,6 +1509,20 @@ pub fn emit_body_words(
     for k in 0..nc {
         callees.push(w.next());
     }
+    if count < wrapping_add(w.at, 2) {
+        return BODY_ERROR;
+    }
+    let sret_word = w.next();
+    let sret = if sret_word == NO_VALUE {
+        invalid()
+    } else {
+        wrapping_u32(sret_word)
+    };
+    let nh = w.next();
+    let mut homes: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    for k in 0..nh {
+        homes.push(w.next());
+    }
     if count < wrapping_add(w.at, 3) {
         return BODY_ERROR;
     }
@@ -1434,6 +1554,8 @@ pub fn emit_body_words(
         params: ChunkSeq::new[u32](),
         values: ChunkSeq::new[u32](),
         callees: callees,
+        sret: sret,
+        homes: homes,
     };
     // The graph's blocks: the entry is the current block.
     s.blocks.push(current_block(inout b).id);
