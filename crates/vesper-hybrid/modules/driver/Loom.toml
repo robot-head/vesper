@@ -30,6 +30,10 @@ capability_ceiling = ["Fail", "Alloc", "Ffi[StdFs]", "Ffi[StdProcess]", "Ffi[Std
 "@vesper-std/toml" = { version = "^0.1", path = "../../../../packages/vesper-std/toml" }
 # The package assembly of the package load (#1986).
 "@vesper/check-names-packages" = { version = "^0.1", path = "../../../../packages/vesper-check-names-packages" }
+# The manifest decode, version match and `.vsys` type names of the
+# package load (#1986 slice 2b).
+"@vesper/loom-calculus" = { version = "^0.1", path = "../../../vesper-loom-calculus/vesper" }
+"@vesper/vsys" = { version = "^0.1", path = "../../../../packages/vesper-vsys" }
 # The checked world's declarations (#2024 slice 2c).
 "@vesper/check-collect" = { version = "^0.1", path = "../../../../packages/vesper-check-collect" }
 "@vesper-std/intern" = { version = "^0.1", path = "../../../../packages/vesper-std/intern" }

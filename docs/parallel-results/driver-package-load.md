@@ -5,7 +5,38 @@
 
 Claim: #1986 (part of hd_step group 1, #1896, and Stage 2 retirement,
 #1397). Built on #1984's step table (`LoadPackage` = 70). Slice 1 (the
-assembly) is #2033; slice 2 (the loader's I/O) follows it.
+assembly) is #2033; slice 2 (the loader's I/O) is #2188; slice 2b (the
+manifests, version matches and `.vsys` type names) follows it.
+
+## Slice 2b: manifests, version matches and `.vsys` names
+
+- The driver's graph read no longer calls Rust for anything: the three host
+  steps `Manifest`, `VersionMatches` and `VsysNames` (72-74) and
+  `packages::driver_host::{DriverManifest, vsys_names}` are gone.
+- **Manifests**: `@vesper/loom-calculus` gets `loader::parse_manifest`,
+  `vesper_loom_calculus::parse_manifest` in Vesper. It decodes the TOML
+  with the port's `manifest_from_toml` (`toml::from_str::<Manifest>`, with
+  its errors), reads the manifest's JSON back, encodes it as the
+  validator's word stream (what `src/port.rs`'s `Enc::manifest` does in
+  Rust: the SemVer versions and requirements through the port's
+  `semver_text`, a `sys_deps` entry split at its first white space) and runs
+  `validate_manifest`'s checks. It returns what the loader reads: the name,
+  the version, the `vsys` and `objects` paths and the dependencies (name,
+  requirement, optional, path).
+- **Version matches**: `loader::version_matches`, `VersionReq::matches` over
+  the port's SemVer text parser and its matcher (`semver.ves`).
+- **`.vsys` type names**: `@vesper/vsys` gets `type_names`, the same parse
+  as `parse_and_encode` (it fails where that fails, the canonical budget
+  included) that returns the link mode and the extern type, wire struct and
+  enum names instead of the canonical bytes.
+- A manifest error still hands the graph back to the Rust loader, which
+  reports it.
+- **Differential: 0 differences** on all 211 Loom packages of the corpus:
+  202 read in Vesper, 9 handed back (the manifest-error fixtures and the
+  sources that name `include_str`), the same split as slice 2.
+- **Speed: 0.82x (95% CI 0.79..0.84)** of the Rust load, the same ABBA
+  as slice 2 (6 rounds, 32 packages, release, `RUSTFLAGS="-C
+  target-cpu=native"`); slice 2 measured 0.78x with the Rust decode.
 
 ## Slice 2: the loader's I/O
 
@@ -53,12 +84,8 @@ assembly) is #2033; slice 2 (the loader's I/O) follows it.
   `VESPER_HYBRID_LOAD=0` turns the read off and keeps slice 1.
   `VESPER_HYBRID_STATS=1` prints `load read <n> package graphs in Vesper
   (<m> handed back to Rust)`.
-- Left for slice 2b: the manifest decode in Vesper (`@vesper/loom-calculus`
-  already decodes the TOML to the manifest's JSON; the JSON-to-words step
-  of its validator is still Rust's src/port.rs), the version match over its
-  SemVer port, the `.vsys` names over `@vesper/vsys`, `include_str`
-  expansion, and manifest errors
-  rendered in Vesper, so that no graph goes back to Rust.
+- Slice 2b moved the manifest decode, the version match and the `.vsys`
+  names to Vesper (above).
 
 ## Slice 1: assembly
 
@@ -131,11 +158,8 @@ Bazel runs the differential on every 4th package
 
 ## What is left
 
-1. **Slice 2: the loader's I/O and manifest checks in Vesper**
-   (`Loader::package`): `Loom.toml` through `@vesper-std/toml`, the
-   dependency closure and its E0114/E0115 errors, the `src/` walks (OS and
-   WASI source directories), `[package] vsys` and `objects`. The driver then
-   encodes the assembler's input itself, and the graph never crosses.
+1. Manifest errors rendered in Vesper (E0114/E0115 and the decode errors),
+   and `include_str` expansion, so that no graph goes back to Rust.
 2. **Slice 3: sugar expansion** (`Loader::expand_sugars`) once
    `@vesper/sugar` lands, and the parse-diagnostic fallback goes away.
 3. `--include-tests` loads, once the assembler can parse test-only

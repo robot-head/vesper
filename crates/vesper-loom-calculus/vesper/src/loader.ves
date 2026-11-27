@@ -1,0 +1,883 @@
+// Module loader of @vesper/loom-calculus (see lib.ves): what the package
+// loader reads of a `Loom.toml` (`parse_manifest` of the crate, then the
+// name, version, `.vsys` and object paths and dependencies), and
+// `VersionReq::matches` over SemVer text.
+//
+// `parse_manifest` decodes the TOML (manifest_toml), reads the manifest's
+// JSON back, encodes it as `validate_manifest`'s word stream (src/port.rs's
+// `Enc::manifest`) and validates it. Any error leaves `ok` false: the
+// caller reports manifest errors itself.
+use self::{L};
+use self::decode::{decode_manifest, decode_tables, new_l};
+use self::check::{check_manifest};
+use self::manifest_toml::{manifest_from_toml};
+use self::semver::{matches};
+use self::semver_text::{SCmp, SVer, parse_version, parse_req};
+use self::lock_json::{req_display};
+use @vesper-std/toml::debug::{utf8_at};
+
+// A manifest as the package loader reads it. Every range is a pair of
+// offsets into `pool`. `vsys` and `objects` hold one range per path;
+// `deps` one record of `DEP_WORDS` words per dependency, in name order.
+pub struct LoadedManifest {
+    pub ok: bool,
+    pub pool: ChunkSeq[u8],
+    pub name_start: u64,
+    pub name_end: u64,
+    pub version_start: u64,
+    pub version_end: u64,
+    pub vsys: ChunkSeq[u64],
+    pub objects: ChunkSeq[u64],
+    pub deps: ChunkSeq[u64]
+}
+
+// A dependency record of `LoadedManifest::deps`: its name, its requirement
+// text (`VersionReq`'s Display), whether it is optional, and its path
+// (`DEP_HAS_PATH` is 0 when there is none).
+pub const DEP_WORDS: u64 = 8;
+pub const DEP_NAME_START: u64 = 0;
+pub const DEP_NAME_END: u64 = 1;
+pub const DEP_REQ_START: u64 = 2;
+pub const DEP_REQ_END: u64 = 3;
+pub const DEP_OPTIONAL: u64 = 4;
+pub const DEP_HAS_PATH: u64 = 5;
+pub const DEP_PATH_START: u64 = 6;
+pub const DEP_PATH_END: u64 = 7;
+
+// What `at` gives past the end.
+const EOF: u64 = 256;
+
+const QUOTE: u64 = 34;
+const BACKSLASH: u64 = 92;
+const COMMA: u64 = 44;
+const COLON: u64 = 58;
+const OPEN_BRACE: u64 = 123;
+const CLOSE_BRACE: u64 = 125;
+const OPEN_BRACKET: u64 = 91;
+const CLOSE_BRACKET: u64 = 93;
+const LOWER_T: u64 = 116;
+const LOWER_F: u64 = 102;
+const LOWER_N: u64 = 110;
+const LOWER_B: u64 = 98;
+const LOWER_R: u64 = 114;
+const LOWER_U: u64 = 117;
+const SLASH: u64 = 47;
+const TRUE_LEN: u64 = 4;
+const FALSE_LEN: u64 = 5;
+const NULL_LEN: u64 = 4;
+const HEX_DIGITS: u64 = 4;
+const HEX_BITS: u64 = 4;
+const HEX_MASK: u64 = 15;
+const DIGIT_0: u64 = 48;
+const DIGIT_9: u64 = 57;
+const LOWER_A: u64 = 97;
+const UPPER_A: u64 = 65;
+const UPPER_F: u64 = 70;
+const TEN: u64 = 10;
+const SURROGATE_FIRST: u64 = 0xd800;
+const SURROGATE_LAST: u64 = 0xdfff;
+
+// The control characters serde_json escapes by letter.
+const BACKSPACE: u8 = 8;
+const TAB: u8 = 9;
+const NEWLINE: u8 = 10;
+const FORM_FEED: u8 = 12;
+const CARRIAGE_RETURN: u8 = 13;
+
+// Unicode's White_Space characters (`char::is_whitespace`).
+const WS_TAB: u64 = 0x09;
+const WS_CARRIAGE_RETURN: u64 = 0x0d;
+const WS_SPACE: u64 = 0x20;
+const WS_NEXT_LINE: u64 = 0x85;
+const WS_NO_BREAK: u64 = 0xa0;
+const WS_OGHAM: u64 = 0x1680;
+const WS_EN_QUAD: u64 = 0x2000;
+const WS_HAIR: u64 = 0x200a;
+const WS_LINE: u64 = 0x2028;
+const WS_PARAGRAPH: u64 = 0x2029;
+const WS_NARROW: u64 = 0x202f;
+const WS_MATH: u64 = 0x205f;
+const WS_IDEOGRAPHIC: u64 = 0x3000;
+
+// UTF-8 encoding of a `\u` escape.
+const ONE_BYTE_LIMIT: u64 = 0x80;
+const TWO_BYTE_LIMIT: u64 = 0x800;
+const TWO_BYTE_LEAD: u64 = 0xc0;
+const THREE_BYTE_LEAD: u64 = 0xe0;
+const CONTINUATION: u64 = 0x80;
+const CONTINUATION_MASK: u64 = 0xc0;
+const SIX_BITS: u64 = 0x3f;
+const SIX: u64 = 6;
+const TWELVE: u64 = 12;
+
+// The occurrence count's top bit clear: no byte order follows the pairs,
+// so the port sorts them.
+const NO_ORDER: u64 = 0;
+
+// The word stream under construction (src/port.rs's `Enc`): the string
+// occurrences as (offset, length) pairs of `pool`, the versions, the
+// requirements and the body.
+struct Enc {
+    ok: bool,
+    pool: ChunkSeq[u8],
+    occ: ChunkSeq[u64],
+    vers: ChunkSeq[u64],
+    nver: u64,
+    reqs: ChunkSeq[u64],
+    nreq: u64,
+    body: ChunkSeq[u64]
+}
+
+fn at(in j: Slice[u8], i: u64) -> u64 {
+    match j.try_get(i) {
+        Option::Some(v) => widen_u64(v),
+        Option::None => EOF,
+    }
+}
+
+fn w(in s: ChunkSeq[u64], i: u64) -> u64 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+fn inc(x: u64) -> u64 {
+    wrapping_add(x, 1)
+}
+
+// ---------------------------------------------------------- JSON
+
+// The index after the string starting at `i` (its opening quote).
+fn str_end(in j: Slice[u8], i: u64) -> u64 {
+    let mut k = inc(i);
+    loop {
+        let c = at(in j, k);
+        if c == EOF {
+            return k;
+        }
+        if c == BACKSLASH {
+            k = wrapping_add(k, 2);
+            continue;
+        }
+        k = inc(k);
+        if c == QUOTE {
+            return k;
+        }
+    }
+}
+
+// The index after the value starting at `i`.
+fn value_end(in j: Slice[u8], i: u64) -> u64 {
+    let c = at(in j, i);
+    if c == QUOTE {
+        return str_end(in j, i);
+    }
+    if c != OPEN_BRACE && c != OPEN_BRACKET {
+        let mut k = i;
+        loop {
+            let d = at(in j, k);
+            if d == EOF || d == COMMA || d == CLOSE_BRACE || d == CLOSE_BRACKET {
+                return k;
+            }
+            k = inc(k);
+        }
+    }
+    let mut depth: u64 = 0;
+    let mut k = i;
+    loop {
+        let d = at(in j, k);
+        if d == EOF {
+            return k;
+        }
+        if d == QUOTE {
+            k = str_end(in j, k);
+            continue;
+        }
+        k = inc(k);
+        if d == OPEN_BRACE || d == OPEN_BRACKET {
+            depth = inc(depth);
+        } else if d == CLOSE_BRACE || d == CLOSE_BRACKET {
+            depth = wrapping_sub(depth, 1);
+            if depth == 0 {
+                return k;
+            }
+        }
+    }
+}
+
+// Whether the key at `i` (a string) is `key`, spelled without escapes.
+fn key_is(in j: Slice[u8], i: u64, in key: Str) -> bool {
+    let k = key.as_bytes();
+    if at(in j, i) != QUOTE || at(in j, wrapping_add(inc(i), k.len())) != QUOTE {
+        return false;
+    }
+    for x in 0..k.len() {
+        if at(in j, wrapping_add(inc(i), x)) != widen_u64(k.try_get(x).unwrap_or(0)) {
+            return false;
+        }
+    }
+    true
+}
+
+fn hex(c: u64) -> u64 {
+    if c >= DIGIT_0 && c <= DIGIT_9 {
+        wrapping_sub(c, DIGIT_0)
+    } else if c >= LOWER_A && c <= LOWER_F {
+        wrapping_add(wrapping_sub(c, LOWER_A), TEN)
+    } else if c >= UPPER_A && c <= UPPER_F {
+        wrapping_add(wrapping_sub(c, UPPER_A), TEN)
+    } else {
+        EOF
+    }
+}
+
+fn push_char(inout out: ChunkSeq[u8], c: u64) {
+    if c < ONE_BYTE_LIMIT {
+        out.push(wrapping_u8(c));
+    } else if c < TWO_BYTE_LIMIT {
+        out.push(wrapping_u8(TWO_BYTE_LEAD | wrapping_shr_u64(c, wrapping_u32(SIX))));
+        out.push(wrapping_u8(CONTINUATION | (c & SIX_BITS)));
+    } else {
+        out.push(wrapping_u8(THREE_BYTE_LEAD | wrapping_shr_u64(c, wrapping_u32(TWELVE))));
+        out.push(wrapping_u8(CONTINUATION | (wrapping_shr_u64(c, wrapping_u32(SIX)) & SIX_BITS)));
+        out.push(wrapping_u8(CONTINUATION | (c & SIX_BITS)));
+    }
+}
+
+// Decodes the string at `i` onto the pool: its range there. A surrogate
+// escape (serde_json never writes one for a manifest) fails.
+fn string(inout e: Enc, in j: Slice[u8], i: u64) -> (u64, u64) {
+    let start = e.pool.len();
+    if at(in j, i) != QUOTE {
+        e.ok = false;
+        return (start, start);
+    }
+    let mut k = inc(i);
+    loop {
+        let c = at(in j, k);
+        if c == EOF {
+            e.ok = false;
+            break;
+        }
+        if c == QUOTE {
+            break;
+        }
+        if c != BACKSLASH {
+            e.pool.push(wrapping_u8(c));
+            k = inc(k);
+            continue;
+        }
+        let d = at(in j, inc(k));
+        k = wrapping_add(k, 2);
+        if d == QUOTE || d == BACKSLASH || d == SLASH {
+            e.pool.push(wrapping_u8(d));
+        } else if d == LOWER_B {
+            e.pool.push(BACKSPACE);
+        } else if d == LOWER_F {
+            e.pool.push(FORM_FEED);
+        } else if d == LOWER_N {
+            e.pool.push(NEWLINE);
+        } else if d == LOWER_R {
+            e.pool.push(CARRIAGE_RETURN);
+        } else if d == LOWER_T {
+            e.pool.push(TAB);
+        } else if d == LOWER_U {
+            let mut v: u64 = 0;
+            for x in 0..HEX_DIGITS {
+                let h = hex(at(in j, wrapping_add(k, x)));
+                if h == EOF {
+                    e.ok = false;
+                }
+                v = (v << HEX_BITS) | (h & HEX_MASK);
+            }
+            k = wrapping_add(k, HEX_DIGITS);
+            if v >= SURROGATE_FIRST && v <= SURROGATE_LAST {
+                e.ok = false;
+            }
+            push_char(inout e.pool, v);
+        } else {
+            e.ok = false;
+            break;
+        }
+    }
+    (start, e.pool.len())
+}
+
+// The objects whose fields the loader reads, and their keys.
+const TOP: u64 = 0;
+const PACKAGE: u64 = 1;
+const FEATURE: u64 = 2;
+const DEPENDENCY: u64 = 3;
+const SANDBOX: u64 = 4;
+
+const TOP_PACKAGE: u64 = 0;
+const TOP_FEATURES: u64 = 1;
+const TOP_DEPENDENCIES: u64 = 2;
+const TOP_SANDBOX: u64 = 3;
+const PKG_NAME: u64 = 0;
+const PKG_VERSION: u64 = 1;
+const PKG_CEILING: u64 = 2;
+const PKG_FORBID: u64 = 3;
+const PKG_VSYS: u64 = 4;
+const PKG_OBJECTS: u64 = 5;
+const FEAT_EFFECTS: u64 = 0;
+const FEAT_DEPS: u64 = 1;
+const FEAT_FEATURES: u64 = 2;
+const FEAT_SYS: u64 = 3;
+const DEP_VERSION: u64 = 0;
+const DEP_EFFECTS: u64 = 1;
+const DEP_OPTIONAL_KEY: u64 = 2;
+const DEP_FEATURES: u64 = 3;
+const DEP_PATH: u64 = 4;
+const SB_SCRIPT: u64 = 0;
+const SB_READS: u64 = 1;
+const SB_NETWORK: u64 = 2;
+
+fn key_count(kind: u64) -> u64 {
+    if kind == TOP || kind == FEATURE {
+        4
+    } else if kind == PACKAGE {
+        6
+    } else if kind == DEPENDENCY {
+        5
+    } else {
+        3
+    }
+}
+
+fn key_name(kind: u64, x: u64) -> Str {
+    if kind == TOP {
+        if x == TOP_PACKAGE {
+            "package"
+        } else if x == TOP_FEATURES {
+            "features"
+        } else if x == TOP_DEPENDENCIES {
+            "dependencies"
+        } else {
+            "build-sandbox"
+        }
+    } else if kind == PACKAGE {
+        if x == PKG_NAME {
+            "name"
+        } else if x == PKG_VERSION {
+            "version"
+        } else if x == PKG_CEILING {
+            "capability_ceiling"
+        } else if x == PKG_FORBID {
+            "forbid_unsafe_ffi"
+        } else if x == PKG_VSYS {
+            "vsys"
+        } else {
+            "objects"
+        }
+    } else if kind == FEATURE {
+        if x == FEAT_EFFECTS {
+            "enables_effects"
+        } else if x == FEAT_DEPS {
+            "deps"
+        } else if x == FEAT_FEATURES {
+            "features"
+        } else {
+            "sys_deps"
+        }
+    } else if kind == DEPENDENCY {
+        if x == DEP_VERSION {
+            "version"
+        } else if x == DEP_EFFECTS {
+            "effects"
+        } else if x == DEP_OPTIONAL_KEY {
+            "optional"
+        } else if x == DEP_FEATURES {
+            "features"
+        } else {
+            "path"
+        }
+    } else if x == SB_SCRIPT {
+        "script"
+    } else if x == SB_READS {
+        "wasi_read_paths"
+    } else {
+        "allow_network"
+    }
+}
+
+// The value positions of an object's keys: for each key of `kind`, the
+// index of its value, or EOF when the object has no such key.
+fn fields(in j: Slice[u8], i: u64, kind: u64) -> ChunkSeq[u64] {
+    let mut out: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let n = key_count(kind);
+    for _x in 0..n {
+        out.push(EOF);
+    }
+    if at(in j, i) != OPEN_BRACE {
+        return out;
+    }
+    let mut k = inc(i);
+    loop {
+        let c = at(in j, k);
+        if c == CLOSE_BRACE || c == EOF {
+            break;
+        }
+        if c == COMMA {
+            k = inc(k);
+            continue;
+        }
+        let key_at = k;
+        k = str_end(in j, k);
+        if at(in j, k) != COLON {
+            break;
+        }
+        k = inc(k);
+        for x in 0..n {
+            if key_is(in j, key_at, in key_name(kind, x)) {
+                out.try_set(x, k);
+            }
+        }
+        k = value_end(in j, k);
+    }
+    out
+}
+
+// The entries of an object (map) at `i`: (key index, value index) pairs.
+fn entries(in j: Slice[u8], i: u64) -> ChunkSeq[u64] {
+    let mut out: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    if at(in j, i) != OPEN_BRACE {
+        return out;
+    }
+    let mut k = inc(i);
+    loop {
+        let c = at(in j, k);
+        if c == CLOSE_BRACE || c == EOF {
+            break;
+        }
+        if c == COMMA {
+            k = inc(k);
+            continue;
+        }
+        out.push(k);
+        k = str_end(in j, k);
+        k = inc(k);
+        out.push(k);
+        k = value_end(in j, k);
+    }
+    out
+}
+
+// The element indices of an array at `i` (none for `null`).
+fn elements(in j: Slice[u8], i: u64) -> ChunkSeq[u64] {
+    let mut out: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    if at(in j, i) != OPEN_BRACKET {
+        return out;
+    }
+    let mut k = inc(i);
+    loop {
+        let c = at(in j, k);
+        if c == CLOSE_BRACKET || c == EOF {
+            break;
+        }
+        if c == COMMA {
+            k = inc(k);
+            continue;
+        }
+        out.push(k);
+        k = value_end(in j, k);
+    }
+    out
+}
+
+fn boolean(inout e: Enc, in j: Slice[u8], i: u64) -> bool {
+    let c = at(in j, i);
+    if c != LOWER_T && c != LOWER_F {
+        e.ok = false;
+    }
+    c == LOWER_T
+}
+
+fn is_null(in j: Slice[u8], i: u64) -> bool {
+    at(in j, i) == LOWER_N
+}
+
+// ---------------------------------------------------------- the words
+
+fn word(inout e: Enc, v: u64) {
+    e.body.push(v);
+}
+
+fn flag(inout e: Enc, v: bool) {
+    e.body.push(if v { 1 } else { 0 });
+}
+
+// A new occurrence of pool[s..t].
+fn occurrence(inout e: Enc, s: u64, t: u64) -> u64 {
+    let i = wrapping_shr_u64(e.occ.len(), 1);
+    e.occ.push(s);
+    e.occ.push(wrapping_sub(t, s));
+    i
+}
+
+// An occurrence of `text`, appended to the pool.
+fn text_occurrence(inout e: Enc, in text: Slice[u8]) -> u64 {
+    let s = e.pool.len();
+    e.pool.extend(in text);
+    occurrence(inout e, s, e.pool.len())
+}
+
+// The string at `i`, as an occurrence.
+fn string_word(inout e: Enc, in j: Slice[u8], i: u64) -> (u64, u64) {
+    let (s, t) = string(inout e, in j, i);
+    let o = occurrence(inout e, s, t);
+    word(inout e, o);
+    (s, t)
+}
+
+// A set: its count and its strings, from the array at `i`.
+fn set_words(inout e: Enc, in j: Slice[u8], i: u64) {
+    let xs = elements(in j, i);
+    word(inout e, xs.len());
+    for x in 0..xs.len() {
+        let _ = string_word(inout e, in j, w(in xs, x));
+    }
+}
+
+// The comparators of requirement text `t`: `Enc::req`, or EOF when it does
+// not parse.
+fn requirement(inout e: Enc, in t: Slice[u8]) -> u64 {
+    let mut m: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut cs: ChunkSeq[SCmp] = ChunkSeq::new[SCmp]();
+    if !parse_req(inout m, in t, 0, t.len(), inout cs) {
+        return EOF;
+    }
+    let shown = req_display(in t, in cs);
+    let text = text_occurrence(inout e, in shown.as_slice());
+    e.reqs.push(text);
+    e.reqs.push(cs.len());
+    for x in 0..cs.len() {
+        match cs.try_get(x) {
+            Option::Some(c) => {
+                e.reqs.push(c.op);
+                e.reqs.push(c.major);
+                e.reqs.push(if c.has_minor { c.minor } else { 0 });
+                e.reqs.push(if c.has_minor { 1 } else { 0 });
+                e.reqs.push(if c.has_patch { c.patch } else { 0 });
+                e.reqs.push(if c.has_patch { 1 } else { 0 });
+                let pre = text_occurrence(inout e, in t[c.pre_a..c.pre_b]);
+                e.reqs.push(pre);
+            },
+            Option::None => (),
+        }
+    }
+    e.nreq = inc(e.nreq);
+    wrapping_sub(e.nreq, 1)
+}
+
+// `Enc::version` of version text `t`, or EOF when it does not parse.
+fn version(inout e: Enc, in t: Slice[u8]) -> u64 {
+    let mut m: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let (ok, v) = parse_version(inout m, in t, 0, t.len());
+    if !ok {
+        return EOF;
+    }
+    e.vers.push(v.major);
+    e.vers.push(v.minor);
+    e.vers.push(v.patch);
+    let pre = text_occurrence(inout e, in t[v.pre_a..v.pre_b]);
+    e.vers.push(pre);
+    let build = text_occurrence(inout e, in t[v.build_a..v.build_b]);
+    e.vers.push(build);
+    let none = text_occurrence(inout e, in t[0..0]);
+    e.vers.push(none);
+    e.nver = inc(e.nver);
+    wrapping_sub(e.nver, 1)
+}
+
+// The length of the White_Space character at `s[i]`, or 0.
+fn space_at(in s: Slice[u8], i: u64) -> u64 {
+    let (c, n) = utf8_at(in s, i);
+    if (c >= WS_TAB && c <= WS_CARRIAGE_RETURN)
+        || c == WS_SPACE
+        || c == WS_NEXT_LINE
+        || c == WS_NO_BREAK
+        || c == WS_OGHAM
+        || (c >= WS_EN_QUAD && c <= WS_HAIR)
+        || c == WS_LINE
+        || c == WS_PARAGRAPH
+        || c == WS_NARROW
+        || c == WS_MATH
+        || c == WS_IDEOGRAPHIC
+    {
+        n
+    } else {
+        0
+    }
+}
+
+// The start of the last character of s[..end].
+fn char_before(in s: Slice[u8], end: u64) -> u64 {
+    let mut k = wrapping_sub(end, 1);
+    loop {
+        if k == 0 || (at(in s, k) & CONTINUATION_MASK) != CONTINUATION {
+            return k;
+        }
+        k = wrapping_sub(k, 1);
+    }
+}
+
+// One `sys_deps` entry: its text, then whether it splits at the first
+// white space into a name and a requirement that parses, the name and the
+// requirement.
+fn system_requirement(inout e: Enc, in j: Slice[u8], i: u64) {
+    let (s, t) = string_word(inout e, in j, i);
+    let source = copy_range(in e.pool, s, t);
+    let src = source.as_slice();
+    let mut split = src.len();
+    let mut width: u64 = 0;
+    let mut k: u64 = 0;
+    loop {
+        if k >= src.len() {
+            break;
+        }
+        let n = space_at(in src, k);
+        if n > 0 {
+            split = k;
+            width = n;
+            break;
+        }
+        let (_c, len) = utf8_at(in src, k);
+        k = wrapping_add(k, len);
+    }
+    if split < src.len() {
+        let mut a = wrapping_add(split, width);
+        let mut b = src.len();
+        loop {
+            if a >= b {
+                break;
+            }
+            let n = space_at(in src, a);
+            if n == 0 {
+                break;
+            }
+            a = wrapping_add(a, n);
+        }
+        loop {
+            if b <= a {
+                break;
+            }
+            let p = char_before(in src, b);
+            if space_at(in src, p) == 0 {
+                break;
+            }
+            b = p;
+        }
+        let req_text = copy_range(in source, a, b);
+        let r = requirement(inout e, in req_text.as_slice());
+        if r != EOF {
+            flag(inout e, true);
+            let name = text_occurrence(inout e, in src[0..split]);
+            word(inout e, name);
+            word(inout e, r);
+            return;
+        }
+    }
+    flag(inout e, false);
+    let none = text_occurrence(inout e, in src[0..0]);
+    word(inout e, none);
+    word(inout e, 0);
+}
+
+fn copy_range(in s: ChunkSeq[u8], a: u64, b: u64) -> ChunkSeq[u8] {
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let t = s.as_slice();
+    out.extend(in t[a..b]);
+    out
+}
+
+// `Enc::words`: the occurrences (their order not given), the versions,
+// the requirements and the body.
+fn words(in e: Enc) -> ChunkSeq[u64] {
+    let mut out: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    out.push(wrapping_shr_u64(e.occ.len(), 1) | NO_ORDER);
+    out.extend(in e.occ.as_slice());
+    out.push(e.nver);
+    out.extend(in e.vers.as_slice());
+    out.push(e.nreq);
+    out.extend(in e.reqs.as_slice());
+    out.extend(in e.body.as_slice());
+    out
+}
+
+fn new_enc() -> Enc {
+    Enc {
+        ok: true,
+        pool: ChunkSeq::new[u8](),
+        occ: ChunkSeq::new[u64](),
+        vers: ChunkSeq::new[u64](),
+        nver: 0,
+        reqs: ChunkSeq::new[u64](),
+        nreq: 0,
+        body: ChunkSeq::new[u64]()
+    }
+}
+
+fn failed() -> LoadedManifest {
+    LoadedManifest {
+        ok: false,
+        pool: ChunkSeq::new[u8](),
+        name_start: 0,
+        name_end: 0,
+        version_start: 0,
+        version_end: 0,
+        vsys: ChunkSeq::new[u64](),
+        objects: ChunkSeq::new[u64](),
+        deps: ChunkSeq::new[u64]()
+    }
+}
+
+// The ranges of the strings of the array at `i`.
+fn paths(inout e: Enc, in j: Slice[u8], i: u64) -> ChunkSeq[u64] {
+    let mut out: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let xs = elements(in j, i);
+    for x in 0..xs.len() {
+        let (s, t) = string(inout e, in j, w(in xs, x));
+        out.push(s);
+        out.push(t);
+    }
+    out
+}
+
+// `vesper_loom_calculus::parse_manifest(text)`, as the package loader
+// reads it; `ok` is false for a manifest error.
+pub fn parse_manifest(in text: Slice[u8]) -> LoadedManifest {
+    let (decoded, json_seq) = manifest_from_toml(in text);
+    if !decoded {
+        return failed();
+    }
+    let j = json_seq.as_slice();
+    let mut e = new_enc();
+    let top = fields(in j, 0, TOP);
+    let pkg = fields(in j, w(in top, TOP_PACKAGE), PACKAGE);
+    // name, version, ceiling set, forbid_unsafe_ffi
+    let (name_start, name_end) = string_word(inout e, in j, w(in pkg, PKG_NAME));
+    let (version_start, version_end) = string(inout e, in j, w(in pkg, PKG_VERSION));
+    let version_text = copy_range(in e.pool, version_start, version_end);
+    let v = version(inout e, in version_text.as_slice());
+    if v == EOF {
+        return failed();
+    }
+    word(inout e, v);
+    set_words(inout e, in j, w(in pkg, PKG_CEILING));
+    let forbid = boolean(inout e, in j, w(in pkg, PKG_FORBID));
+    flag(inout e, forbid);
+    let vsys = paths(inout e, in j, w(in pkg, PKG_VSYS));
+    let objects = paths(inout e, in j, w(in pkg, PKG_OBJECTS));
+    // features: name, enables_effects, deps, features, sys_deps
+    let feats = entries(in j, w(in top, TOP_FEATURES));
+    let nfeat = wrapping_shr_u64(feats.len(), 1);
+    word(inout e, nfeat);
+    for f in 0..nfeat {
+        let _ = string_word(inout e, in j, w(in feats, wrapping_mul(f, 2)));
+        let fv = fields(in j, w(in feats, inc(wrapping_mul(f, 2))), FEATURE);
+        set_words(inout e, in j, w(in fv, FEAT_EFFECTS));
+        set_words(inout e, in j, w(in fv, FEAT_DEPS));
+        set_words(inout e, in j, w(in fv, FEAT_FEATURES));
+        let sys = elements(in j, w(in fv, FEAT_SYS));
+        word(inout e, sys.len());
+        for x in 0..sys.len() {
+            system_requirement(inout e, in j, w(in sys, x));
+        }
+    }
+    // dependencies: name, requirement, effects, optional, features
+    let ds = entries(in j, w(in top, TOP_DEPENDENCIES));
+    let ndep = wrapping_shr_u64(ds.len(), 1);
+    let mut deps: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    word(inout e, ndep);
+    for d in 0..ndep {
+        let (dn0, dn1) = string_word(inout e, in j, w(in ds, wrapping_mul(d, 2)));
+        let dv = fields(in j, w(in ds, inc(wrapping_mul(d, 2))), DEPENDENCY);
+        let (rs, rt) = string(inout e, in j, w(in dv, DEP_VERSION));
+        let req_text = copy_range(in e.pool, rs, rt);
+        let r = requirement(inout e, in req_text.as_slice());
+        if r == EOF {
+            return failed();
+        }
+        word(inout e, r);
+        set_words(inout e, in j, w(in dv, DEP_EFFECTS));
+        let optional = boolean(inout e, in j, w(in dv, DEP_OPTIONAL_KEY));
+        flag(inout e, optional);
+        set_words(inout e, in j, w(in dv, DEP_FEATURES));
+        deps.push(dn0);
+        deps.push(dn1);
+        deps.push(rs);
+        deps.push(rt);
+        deps.push(if optional { 1 } else { 0 });
+        let path_at = w(in dv, DEP_PATH);
+        if path_at == EOF || is_null(in j, path_at) {
+            deps.push(0);
+            deps.push(0);
+            deps.push(0);
+        } else {
+            let (ps, pt) = string(inout e, in j, path_at);
+            deps.push(1);
+            deps.push(ps);
+            deps.push(pt);
+        }
+    }
+    // build-sandbox: has_sandbox, [allow_network, script then
+    // wasi_read_paths]
+    let sb = w(in top, TOP_SANDBOX);
+    if sb == EOF || is_null(in j, sb) {
+        flag(inout e, false);
+    } else {
+        let sv = fields(in j, sb, SANDBOX);
+        flag(inout e, true);
+        let net = boolean(inout e, in j, w(in sv, SB_NETWORK));
+        flag(inout e, net);
+        let script = w(in sv, SB_SCRIPT);
+        let has_script = script != EOF && !is_null(in j, script);
+        let reads = elements(in j, w(in sv, SB_READS));
+        word(inout e, wrapping_add(reads.len(), if has_script { 1 } else { 0 }));
+        if has_script {
+            let _ = string_word(inout e, in j, script);
+        }
+        for x in 0..reads.len() {
+            let _ = string_word(inout e, in j, w(in reads, x));
+        }
+    }
+    if !e.ok {
+        return failed();
+    }
+    let ws = words(in e);
+    let mut l = new_l(in ws.as_slice(), in e.pool.as_slice());
+    decode_tables(inout l);
+    let m = decode_manifest(inout l);
+    check_manifest(inout l, m);
+    if l.diags.len() != 0 {
+        return failed();
+    }
+    LoadedManifest {
+        ok: true,
+        pool: e.pool,
+        name_start: name_start,
+        name_end: name_end,
+        version_start: version_start,
+        version_end: version_end,
+        vsys: vsys,
+        objects: objects,
+        deps: deps
+    }
+}
+
+// `VersionReq::matches`: whether version text `version` satisfies
+// requirement text `req` (false when either does not parse).
+pub fn version_matches(in req: Slice[u8], in version_text: Slice[u8]) -> bool {
+    let mut e = new_enc();
+    let v = version(inout e, in version_text);
+    let r = requirement(inout e, in req);
+    if v == EOF || r == EOF {
+        return false;
+    }
+    let ws = words(in e);
+    let mut l = new_l(in ws.as_slice(), in e.pool.as_slice());
+    decode_tables(inout l);
+    matches(in l, r, v)
+}
