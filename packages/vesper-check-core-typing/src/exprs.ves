@@ -182,6 +182,18 @@ pub copy struct FnSig {
     effectful: bool,
     // `world.function_results`, or the declared result
     inferred: u32,
+    // The effect instances of the function's row (`Inst`s), or for an
+    // effect operation its effect's name (NONE32 for a function).
+    inst_start: u32,
+    inst_count: u32,
+    effect: u32,
+}
+
+// One effect instance of a row: its name and type arguments.
+pub copy struct Inst {
+    name: u32,
+    arg_start: u32,
+    arg_count: u32,
 }
 
 pub copy struct ParamSig {
@@ -226,6 +238,12 @@ pub struct Ck {
     params: ChunkSeq[ParamSig],
     // symbol -> function index + 1
     fn_by_name: ChunkSeq[u32],
+    // Effect operations (`Eff::op`), by symbol, as indices into `fns`.
+    op_by_name: ChunkSeq[u32],
+    insts: ChunkSeq[Inst],
+    inst_args: ChunkSeq[u32],
+    // The function being checked (its `fns` index).
+    current: u32,
     // The function being checked.
     env: ChunkSeq[Bind],
     bounds: Bounds,
@@ -305,6 +323,10 @@ pub fn ck_new(sink ctx: Ctx) -> Ck {
         generics: ChunkSeq::new[Generic](),
         params: ChunkSeq::new[ParamSig](),
         fn_by_name: ChunkSeq::new[u32](),
+        op_by_name: ChunkSeq::new[u32](),
+        insts: ChunkSeq::new[Inst](),
+        inst_args: ChunkSeq::new[u32](),
+        current: NONE32,
         env: ChunkSeq::new[Bind](),
         bounds: bounds_new(),
         ex_types: ChunkSeq::new[u32](),
@@ -409,8 +431,18 @@ impl Ck {
                 param_count: 0,
                 result: 0,
                 effectful: true,
-                inferred: 0
+                inferred: 0,
+                inst_start: 0,
+                inst_count: 0,
+                effect: NONE32
             },
+        }
+    }
+
+    pub fn inst(in self, i: u64) -> Inst {
+        match self.insts.try_get(i) {
+            Option::Some(x) => x,
+            Option::None => Inst { name: NONE32, arg_start: 0, arg_count: 0 },
         }
     }
 
@@ -680,10 +712,75 @@ fn read_expr(inout reader: Reader, in bytes: Slice[u8], inout ck: Ck) -> u32 {
 }
 
 // The function table of the task input.
+// One signature of the function table: generics, parameters and result.
+fn read_sig(inout reader: Reader, in bytes: Slice[u8], inout ck: Ck, name: u32) -> FnSig {
+    let generic_start = n32(ck.generics.len());
+    let generic_count = reader.word(in bytes);
+    for j in 0..generic_count {
+        let generic = Generic {
+            name: sym(in ck.ctx, reader.word(in bytes)),
+            bound: wrapping_u8(reader.word(in bytes)),
+            row: reader.word(in bytes) != 0
+        };
+        ck.generics.push(generic);
+    }
+    let param_start = n32(ck.params.len());
+    let param_count = reader.word(in bytes);
+    for j in 0..param_count {
+        let param = ParamSig {
+            pass: wrapping_u8(reader.word(in bytes)),
+            name: sym(in ck.ctx, reader.word(in bytes)),
+            ty: tyw(in ck.ctx, reader.word(in bytes)),
+            projections: n32(reader.word(in bytes)),
+            start: reader.word(in bytes),
+            end: reader.word(in bytes)
+        };
+        ck.params.push(param);
+    }
+    let result = tyw(in ck.ctx, reader.word(in bytes));
+    FnSig {
+        name: name,
+        generic_start: generic_start,
+        generic_count: n32(generic_count),
+        param_start: param_start,
+        param_count: n32(param_count),
+        result: result,
+        effectful: false,
+        inferred: result,
+        inst_start: 0,
+        inst_count: 0,
+        effect: NONE32
+    }
+}
+
+// The function table of the task input, then the effect declarations.
 pub fn read_fns(inout reader: Reader, in bytes: Slice[u8], inout ck: Ck) {
     let fn_count = reader.word(in bytes);
     for i in 0..fn_count {
         let name = sym(in ck.ctx, reader.word(in bytes));
+        let mut sig = read_sig(inout reader, in bytes, inout ck, name);
+        sig.effectful = reader.word(in bytes) != 0;
+        sig.inst_start = n32(ck.insts.len());
+        let inst_count = reader.word(in bytes);
+        for j in 0..inst_count {
+            let inst_name = sym(in ck.ctx, reader.word(in bytes));
+            let arg_start = n32(ck.inst_args.len());
+            let arg_count = reader.word(in bytes);
+            for k in 0..arg_count {
+                let arg = tyw(in ck.ctx, reader.word(in bytes));
+                ck.inst_args.push(arg);
+            }
+            ck.insts.push(Inst { name: inst_name, arg_start: arg_start, arg_count: n32(arg_count) });
+        }
+        sig.inst_count = n32(inst_count);
+        sig.inferred = tyw(in ck.ctx, reader.word(in bytes));
+        let id = n32(ck.fns.len());
+        ck.fns.push(sig);
+        set_by_symbol(inout ck.fn_by_name, name, inc32w(id));
+    }
+    let effect_count = reader.word(in bytes);
+    for i in 0..effect_count {
+        let effect = sym(in ck.ctx, reader.word(in bytes));
         let generic_start = n32(ck.generics.len());
         let generic_count = reader.word(in bytes);
         for j in 0..generic_count {
@@ -694,34 +791,28 @@ pub fn read_fns(inout reader: Reader, in bytes: Slice[u8], inout ck: Ck) {
             };
             ck.generics.push(generic);
         }
-        let param_start = n32(ck.params.len());
-        let param_count = reader.word(in bytes);
-        for j in 0..param_count {
-            let param = ParamSig {
-                pass: wrapping_u8(reader.word(in bytes)),
-                name: sym(in ck.ctx, reader.word(in bytes)),
-                ty: tyw(in ck.ctx, reader.word(in bytes)),
-                projections: n32(reader.word(in bytes)),
-                start: reader.word(in bytes),
-                end: reader.word(in bytes)
-            };
-            ck.params.push(param);
+        let op_count = reader.word(in bytes);
+        for j in 0..op_count {
+            let name = sym(in ck.ctx, reader.word(in bytes));
+            let mut sig = read_sig(inout reader, in bytes, inout ck, name);
+            // An operation takes its effect's generics.
+            sig.generic_start = generic_start;
+            sig.generic_count = n32(generic_count);
+            sig.effect = effect;
+            let id = n32(ck.fns.len());
+            ck.fns.push(sig);
+            set_by_symbol(inout ck.op_by_name, name, inc32w(id));
         }
-        let result = tyw(in ck.ctx, reader.word(in bytes));
-        let effectful = reader.word(in bytes) != 0;
-        let inferred = tyw(in ck.ctx, reader.word(in bytes));
-        let id = n32(ck.fns.len());
-        ck.fns.push(FnSig {
-            name: name,
-            generic_start: generic_start,
-            generic_count: n32(generic_count),
-            param_start: param_start,
-            param_count: n32(param_count),
-            result: result,
-            effectful: effectful,
-            inferred: inferred
-        });
-        set_by_symbol(inout ck.fn_by_name, name, inc32w(id));
+    }
+}
+
+// The effect operation named `name` (`Eff::op`), or NONE32.
+fn op_index(in ck: Ck, name: u32) -> u32 {
+    let entry = u32_at(in ck.op_by_name, w(name));
+    if entry == 0 {
+        NONE32
+    } else {
+        wrapping_sub(entry, 1)
     }
 }
 
@@ -2250,6 +2341,10 @@ fn call_expr(inout ck: Ck, ex: Ex, expected: u32) -> u32 {
         if is_conversion(conv) {
             return conversion_call(inout ck, ex, conv);
         }
+        let op = op_index(in ck, callee.x);
+        if op != NONE32 {
+            return op_call(inout ck, ex, ck.fsig(op));
+        }
         // Other intrinsics, effect operations and trait calls: not ported
         // yet.
         ck.skip = true;
@@ -2336,11 +2431,62 @@ fn apply(inout ck: Ck, sig: FnSig, ex: Ex, receiver: u32, expected: u32) -> u32 
     if expected != hole {
         infer(inout ck.ctx.types, known, sig.result, expected, in generics, inout vars);
     }
-    let result_ty = apply_args(inout ck, sig, ex, receiver, inout vars);
+    let types = explicit_types(in ck, ex);
+    let result_ty = apply_args(inout ck, sig, ex, receiver, in types, inout vars);
     if ck.skip {
         return hole;
     }
     substitute(inout ck.ctx.types, sig.inferred, in vars)
+}
+
+// The call's written type arguments.
+fn explicit_types(in ck: Ck, ex: Ex) -> ChunkSeq[u32] {
+    let mut types: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    for i in 0..w(ex.m) {
+        types.push(u32_at(in ck.targs, add(w(ex.b), i)));
+    }
+    types
+}
+
+// The effect-operation arm of `Checker::call`: `Eff::op(args)` is applied
+// with the effect's generics, taken from the written type arguments or
+// else from the innermost instance of the effect in the function's row
+// (`active_effect`).
+fn op_call(inout ck: Ck, ex: Ex, sig: FnSig) -> u32 {
+    let hole = ck.ctx.types.infer;
+    let types = if ex.m != 0 {
+        explicit_types(in ck, ex)
+    } else {
+        context_args(in ck, sig.effect)
+    };
+    let mut vars = vars_new();
+    let result = apply_args(inout ck, sig, ex, NONE32, in types, inout vars);
+    if ck.skip {
+        return hole;
+    }
+    result
+}
+
+// The type arguments of the last instance of `effect` in the current
+// function's row, or none.
+fn context_args(in ck: Ck, effect: u32) -> ChunkSeq[u32] {
+    let mut args: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let current = ck.fsig(ck.current);
+    let mut found = NONE32;
+    for i in 0..w(current.inst_count) {
+        let inst = ck.inst(add(w(current.inst_start), i));
+        if inst.name == effect {
+            found = n32(add(w(current.inst_start), i));
+        }
+    }
+    if found == NONE32 {
+        return args;
+    }
+    let inst = ck.inst(w(found));
+    for i in 0..w(inst.arg_count) {
+        args.push(u32_at(in ck.inst_args, add(w(inst.arg_start), i)));
+    }
+    args
 }
 
 fn copy_vars(in vars: Vars) -> Vars {
@@ -2377,13 +2523,20 @@ fn actual_at(in actuals: ChunkSeq[Arg], i: u64) -> Arg {
 }
 
 // `Checker::apply_args` for an effect-free function without projections.
-fn apply_args(inout ck: Ck, sig: FnSig, ex: Ex, receiver: u32, inout vars: Vars) -> u32 {
+fn apply_args(
+    inout ck: Ck,
+    sig: FnSig,
+    ex: Ex,
+    receiver: u32,
+    in types: ChunkSeq[u32],
+    inout vars: Vars
+) -> u32 {
     let hole = ck.ctx.types.infer;
     let known = ck.ctx.world.k;
     let generics = fn_generics(in ck, sig);
     let mut explicit: u64 = 0;
     for i in 0..w(sig.generic_count) {
-        if explicit >= w(ex.m) {
+        if explicit >= types.len() {
             break;
         }
         let generic = ck.gen(add(w(sig.generic_start), i));
@@ -2391,12 +2544,12 @@ fn apply_args(inout ck: Ck, sig: FnSig, ex: Ex, receiver: u32, inout vars: Vars)
             ck.skip = true;
             return hole;
         }
-        let targ = u32_at(in ck.targs, add(w(ex.b), explicit));
+        let targ = u32_at(in types, explicit);
         explicit = inc(explicit);
         note(inout ck, targ);
         vars.set(generic.name, targ);
     }
-    if explicit < w(ex.m) {
+    if explicit < types.len() {
         error(inout ck, "E0205", ex.start, ex.end);
     }
     let call_args = actuals_of(in ck, ex, receiver);
@@ -2489,6 +2642,7 @@ pub fn check_function(inout ck: Ck, fname: u32, start: u64, end: u64, body: u32,
     ck.skip = false;
     ck.env.truncate(0);
     let sig_index = fn_index(in ck, fname);
+    ck.current = sig_index;
     if sig_index == NONE32 {
         ck.skip = true;
     }

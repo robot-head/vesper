@@ -385,8 +385,47 @@ fn exprs_input(w: &World, module: &Module) -> Vec<u8> {
             tail.push(e.ty(&f.result));
             let effectful = !f.effects.instances.is_empty() || f.effects.tail.is_some();
             tail.push(effectful as u64);
+            tail.push(f.effects.instances.len() as u64);
+            for inst in &f.effects.instances {
+                tail.push(e.name(&inst.name));
+                tail.push(inst.args.len() as u64);
+                for a in &inst.args {
+                    tail.push(e.ty(a));
+                }
+            }
             let result = w.function_results.get(&f.name).unwrap_or(&f.result);
             tail.push(e.ty(result));
+        }
+        // Effect declarations: generics, then each operation's signature
+        // under its `Eff::op` name.
+        tail.push(w.effects.len() as u64);
+        for (name, decl) in &w.effects {
+            tail.push(e.name(name));
+            tail.push(decl.generics.len() as u64);
+            for g in &decl.generics {
+                tail.push(e.name(&g.name));
+                tail.push(mode_word(g.bound));
+                tail.push(g.row as u64);
+            }
+            tail.push(decl.ops.len() as u64);
+            for op in &decl.ops {
+                tail.push(e.name(&format!("{name}::{}", op.name)));
+                tail.push(op.generics.len() as u64);
+                for g in &op.generics {
+                    tail.push(e.name(&g.name));
+                    tail.push(mode_word(g.bound));
+                    tail.push(g.row as u64);
+                }
+                tail.push(op.params.len() as u64);
+                for p in &op.params {
+                    tail.push(pass_code(p.pass));
+                    tail.push(e.name(&p.name));
+                    tail.push(e.ty(&p.ty));
+                    tail.push(p.projections.len() as u64);
+                    tail.extend([p.span.start as u64, p.span.end as u64]);
+                }
+                tail.push(e.ty(&op.result));
+            }
         }
         let methods: BTreeSet<&str> = module
             .items
