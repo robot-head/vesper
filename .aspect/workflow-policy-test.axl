@@ -470,6 +470,9 @@ def _completion_rules(h):
 # Divergent rebuilds per Hybrid compiler divergent job (#2174).
 _HYBRID_REBUILDS_PER_GROUP = 3
 
+# Every nth corpus input the macOS and Windows hybrid jobs check (#2395).
+_HYBRID_HOST_SAMPLE = 8
+
 def _hybrid_and_ports_skip_pull_requests(h):
     hybrid = h.workflow("hybrid.yml")
     _absent("pull_request", hybrid["on"])
@@ -479,6 +482,9 @@ def _hybrid_and_ports_skip_pull_requests(h):
     # The divergent rebuilds run in four Linux jobs of their own, three
     # rebuilds each (#2147, #2174).
     _equal([row["os"] for row in include if not row.get("divergent")], ["ubuntu-latest", "macos-latest", "windows-latest"])
+    # Linux sweeps the whole corpus; macOS and Windows sample it (#2395).
+    _equal({row["os"]: row.get("sample") for row in include if not row.get("divergent")},
+           {"ubuntu-latest": None, "macos-latest": _HYBRID_HOST_SAMPLE, "windows-latest": _HYBRID_HOST_SAMPLE})
     groups = [row["divergent"] for row in include if row.get("divergent")]
     _equal(groups, list(range(1, len(groups) + 1)))
     _equal([row["os"] for row in include if row.get("divergent")], ["ubuntu-latest"] * len(groups))
