@@ -3138,11 +3138,7 @@ fn place_primitive(inout ck: Ck, ex: Ex, swap: bool) -> u32 {
             return hole;
         }
     }
-    if swap {
-        ck.ctx.types.unit
-    } else {
-        first
-    }
+    if swap { ck.ctx.types.unit } else { first }
 }
 
 fn call_expr(inout ck: Ck, ex: Ex, expected: u32) -> u32 {
