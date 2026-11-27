@@ -2832,6 +2832,10 @@ const STAGE2_PACKAGES_COVERED_ELSEWHERE: &[(&str, &str)] = &[
         "`vesper build --lib`'s interface and binding from Stage 2's front end (#2270) as a native executable beside the Rust CLI (tests/self_host_codegen_export.rs); it is @vesper/stage2 plus the export packages, built under Stage 2 as one program in bootstrap switch slice 3",
     ),
     (
+        "vesper-native-lib",
+        "a library's native object built in Vesper over @vesper/cranelift (bootstrap switch slice 2a, #2349), compared with `vesper build --lib` in the JIT (crates/vesper-codegen-swap-test/tests/self_host_native_lib.rs); built under Stage 2 with the Cranelift component in bootstrap switch slice 3",
+    ),
+    (
         "vesper-stage2",
         "Stage 2 itself: stage2.wasm == stage3.wasm",
     ),
