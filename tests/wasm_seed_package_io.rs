@@ -2664,6 +2664,21 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
                  Result::Err(n) => wrapping_u64(n),\n\
              }\n\
          }\n\
+         pub fn aggregate_join(swap: bool, x: i16, y: i16, sample: f32) -> (i16, f32, i16, u64) {\n\
+             let selected: ((i16, f32), Option[i16]) = if swap {\n\
+                 ((y, sample), Option::Some(x))\n\
+             } else {\n\
+                 let option: Option[i16] = if sample == 0.0 { Option::None } else { Option::Some(y) };\n\
+                 ((x, sample), option)\n\
+             };\n\
+             let ((a, b), option) = selected;\n\
+             let result: (i16, u64) = match option {\n\
+                 Option::Some(n) => (n, 17),\n\
+                 Option::None => (0, 9),\n\
+             };\n\
+             let (c, marker) = result;\n\
+             (a, b, c, marker)\n\
+         }\n\
          fn unsupported(x: u64) -> u64 {\n\
              let value: Option[(u64, u64)] = Option::Some((x, x));\n\
              match value { Option::Some(_) => 7, _ => 9 }\n\
@@ -3020,6 +3035,14 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
         "{:?}",
         read_stage2_sidecar_notes(&object)
     );
+    let generic_enum_object = dir.join("native-generic-enum.o");
+    std::fs::rename(&object, &generic_enum_object).unwrap();
+    assert_eq!(
+        compile("aggregate_join"),
+        0,
+        "{:?}",
+        read_stage2_sidecar_notes(&object)
+    );
 
     let caller = dir.join("native-scalar-caller.c");
     let binary = dir.join("native-scalar-caller");
@@ -3067,6 +3090,7 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
          extern uint64_t enum_pipeline(uint64_t, int8_t, float, bool);\n\
          extern uint64_t forwarded_results(uint64_t *, int8_t, float);\n\
          extern uint64_t generic_enum_pipeline(bool, float, int8_t);\n\
+         extern uint64_t aggregate_join(uint64_t *, bool, int16_t, int16_t, float);\n\
          int main(void) {\n\
              if (mix(10, 4) != 65 || mix(UINT64_MAX, UINT64_MAX) != UINT64_MAX - 16) return 1;\n\
              if (choose(0, 4) != 8 || choose(2, 4) != 8 || choose(4, 1) != 10\n\
@@ -3216,10 +3240,21 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
                  || (int64_t)forwarded[0] != -128 || forwarded[1] != UINT64_C(0x3f800000)\n\
                  || forwarded[2] != 127 || forwarded[3] != UINT64_C(0x80000000)\n\
                  || forwarded[4] != 1 || forwarded[5] != UINT64_MAX) return 43;\n\
-             return generic_enum_pipeline(true, 1.0f, -128) != UINT64_MAX - 127\n\
+             if (generic_enum_pipeline(true, 1.0f, -128) != UINT64_MAX - 127\n\
                  || generic_enum_pipeline(true, 1.0f, -1) != UINT64_MAX\n\
                  || generic_enum_pipeline(true, -0.0f, 0) != UINT64_C(0x80000000)\n\
-                 || generic_enum_pipeline(false, -0.0f, -128) != UINT64_C(0x80000000);\n\
+                 || generic_enum_pipeline(false, -0.0f, -128) != UINT64_C(0x80000000)) return 44;\n\
+             uint64_t joined[5] = {0};\n\
+             joined[4] = UINT64_MAX;\n\
+             if (aggregate_join(joined, true, -32768, 32767, -0.0f) != 0\n\
+                 || joined[0] != 32767 || (int64_t)joined[2] != -32768\n\
+                 || joined[1] != UINT64_C(0x80000000) || joined[3] != 17 || joined[4] != UINT64_MAX) return 45;\n\
+             if (aggregate_join(joined, false, -32768, 32767, 1.0f) != 0\n\
+                 || (int64_t)joined[0] != -32768 || joined[2] != 32767\n\
+                 || joined[1] != UINT64_C(0x3f800000) || joined[3] != 17 || joined[4] != UINT64_MAX) return 46;\n\
+             return aggregate_join(joined, false, -32768, 32767, -0.0f) != 0\n\
+                 || (int64_t)joined[0] != -32768 || joined[2] != 0\n\
+                 || joined[1] != UINT64_C(0x80000000) || joined[3] != 9 || joined[4] != UINT64_MAX;\n\
          }\n",
     )
     .unwrap();
@@ -3262,6 +3297,7 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
             &tuple_match_object,
             &enum_object,
             &forwarded_object,
+            &generic_enum_object,
             &object,
         ])
         .arg("-lm")

@@ -1934,11 +1934,15 @@ fn plan_blocks(in low: L, row: FnRow, inout m: Function) -> bool {
     true
 }
 
-fn plan_types(in low: L, row: FnRow, inout m: Function) -> bool {
+fn value_types_count_at(row: FnRow, arguments: u64) -> u64 {
     // After the parameters come the result, effects, bound count and capture
     // count, then the table of (value ID, type ID) pairs.
-    let after_parameters = inc(add(row.ha, wrapping_mul(m.arguments, PARAMETER_WORDS)));
-    let count_at = add(after_parameters, VALUE_TYPES_COUNT);
+    let after_parameters = inc(add(row.ha, wrapping_mul(arguments, PARAMETER_WORDS)));
+    add(after_parameters, VALUE_TYPES_COUNT)
+}
+
+fn plan_types(in low: L, row: FnRow, inout m: Function) -> bool {
+    let count_at = value_types_count_at(row, m.arguments);
     let end = add(row.ha, row.hn);
     if count_at >= end {
         return false;
@@ -1963,12 +1967,25 @@ fn plan_types(in low: L, row: FnRow, inout m: Function) -> bool {
     true
 }
 
+fn declared_value_type(in low: L, row: FnRow, arguments: u64, value: u64) -> Option[u32] {
+    let count_at = value_types_count_at(row, arguments);
+    let first = inc(count_at);
+    for i in 0..low.program.op(count_at) {
+        let at = add(first, wrapping_mul(i, VALUE_TYPE_WORDS));
+        if low.program.op(at) == value {
+            return Option::Some(n32(low.program.op(inc(at))));
+        }
+    }
+    Option::None
+}
+
 copy struct PendingProduct {
     value: u64,
     ty: u32,
 }
 
-// Reserve scalar SSA values for a product arriving through the native ABI.
+// Reserve scalar SSA values for a product arriving from another block or
+// through the native ABI.
 fn plan_product(in low: L, root: PendingProduct, block: u64, inout m: Function) -> u64 {
     let mut pending = ChunkSeq::new[PendingProduct]();
     pending.push(root);
@@ -2178,6 +2195,31 @@ fn plan_aggregates(in low: L, f: FnR, row: FnRow, inout m: Function) -> bool {
     for layout in 0..m.blocks.len() {
         let block = m.blocks.try_get(layout).unwrap_or(0);
         let b = low.program.block(add(row.b0, block));
+        let param = block_parameter(in low, b);
+        if is_aggregate(m.kind(param)) {
+            let ty = match declared_value_type(in low, row, m.arguments, param) {
+                Option::Some(ty) => ty,
+                Option::None => return false,
+            };
+            let value = add(m.arguments, param);
+            let root = PendingProduct { value: value, ty: ty };
+            if plan_product(in low, root, block, inout m) == 0 {
+                return false;
+            }
+            let mut fields = ChunkSeq::new[u64]();
+            if !product_cells(in low, value, in m, inout fields) {
+                return false;
+            }
+            for i in 0..fields.len() {
+                let field = fields.try_get(i).unwrap_or(NO_VALUE);
+                if field != NO_VALUE
+                    && m.value_kind(field) != ScalarKind::Unit
+                    && !m.home(field, block)
+                {
+                    return false;
+                }
+            }
+        }
         let mut resident = NO_VALUE;
         for index in b.i0..add(b.i0, b.ic) {
             let inst = low.program.inst(index);
@@ -2514,10 +2556,7 @@ fn plan_homes(in low: L, f: FnR, row: FnRow, inout m: Function) -> bool {
         let block = m.blocks.try_get(layout).unwrap_or(0);
         let b = low.program.block(add(row.b0, block));
         let param = block_parameter(in low, b);
-        if param != NO_VALUE {
-            if is_aggregate(m.kind(param)) {
-                return false;
-            }
+        if param != NO_VALUE && !is_aggregate(m.kind(param)) {
             let id = add(f.param_count, param);
             if !m.values.try_set(id, value_new(block))
                 || (m.kind(param) != ScalarKind::Unit && !m.home(id, block))
@@ -2699,7 +2738,7 @@ fn plan_homes(in low: L, f: FnR, row: FnRow, inout m: Function) -> bool {
             }
         } else if b.term == Term::Jump && b.tn == inc(JUMP_ARGUMENT) {
             let id = low.program.op(add(b.ta, JUMP_ARGUMENT));
-            if m.kind(id) != ScalarKind::Unit && !m.use_in(add(f.param_count, id), block) {
+            if !plan_value(in low, id, block, inout m) {
                 return false;
             }
         }
@@ -4266,6 +4305,62 @@ fn lower_match(in low: L, row: FnRow, b: BlockRow, block: u64, inout m: Function
     false
 }
 
+fn copy_product_to_block(in low: L, source: u64, dest: u64, block: u64, inout m: Function) -> bool {
+    let from = match m.product(source) {
+        Option::Some(product) => product,
+        Option::None => return false,
+    };
+    let to = match m.product(dest) {
+        Option::Some(product) => product,
+        Option::None => return false,
+    };
+    let mut sources = ChunkSeq::new[u64]();
+    let mut targets = ChunkSeq::new[u64]();
+    if from.ty != to.ty
+        || !product_cells(in low, source, in m, inout sources)
+        || !product_cells(in low, dest, in m, inout targets)
+        || sources.len() != targets.len()
+    {
+        return false;
+    }
+    // Read all incoming fields before writing any destination. Packed homes
+    // can overlap at an edge, including when two incoming fields swap places.
+    let mut values = ChunkSeq::new[u64]();
+    for i in 0..sources.len() {
+        let from = sources.try_get(i).unwrap_or(NO_VALUE);
+        let to = targets.try_get(i).unwrap_or(NO_VALUE);
+        if from == NO_VALUE && to == NO_VALUE {
+            values.push(NO_VALUE);
+            continue;
+        }
+        let kind = m.value_kind(from);
+        if kind == ScalarKind::Unsupported || kind != m.value_kind(to) {
+            return false;
+        }
+        let old_home = m.values.try_get(from).unwrap_or(value_new(NO_VALUE)).home;
+        let new_home = m.values.try_get(to).unwrap_or(value_new(NO_VALUE)).home;
+        if kind == ScalarKind::Unit || old_home == new_home {
+            values.push(NO_VALUE);
+        } else {
+            let value = m.read(from, block);
+            if value == NO_VALUE || new_home >= LITERAL_HOME {
+                return false;
+            }
+            values.push(value);
+        }
+    }
+    for i in 0..values.len() {
+        let value = values.try_get(i).unwrap_or(NO_VALUE);
+        if value != NO_VALUE {
+            let field = targets.try_get(i).unwrap_or(NO_VALUE);
+            let home = m.values.try_get(field).unwrap_or(value_new(NO_VALUE)).home;
+            let kind = m.value_kind(field);
+            m.store_cell(value, home, kind);
+        }
+    }
+    true
+}
+
 fn lower_terminator(in low: L, row: FnRow, b: BlockRow, block: u64, inout m: Function) -> bool {
     if b.term == Term::Return && b.tn == 1 {
         return lower_return(in low, low.program.op(b.ta), block, inout m);
@@ -4299,10 +4394,15 @@ fn lower_terminator(in low: L, row: FnRow, b: BlockRow, block: u64, inout m: Fun
                 return true;
             }
             let source = add(m.arguments, argument);
-            let home = m.values
-                .try_get(add(m.arguments, param))
-                .unwrap_or(value_new(NO_VALUE))
-                .home;
+            let dest = add(m.arguments, param);
+            if is_aggregate(kind) {
+                if !copy_product_to_block(in low, source, dest, block, inout m) {
+                    return false;
+                }
+                let _ = m.record(JUMP_LABEL, label, 0, 0);
+                return true;
+            }
+            let home = m.values.try_get(dest).unwrap_or(value_new(NO_VALUE)).home;
             if home == NO_VALUE {
                 return false;
             }
