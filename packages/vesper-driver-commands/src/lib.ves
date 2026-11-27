@@ -1721,7 +1721,7 @@ fn fmt_commit(
         if !same(in current.bytes.as_slice(), in input.bytes.as_slice())
             || !same_file(current.id, input.id)
         {
-            return Fail::raise(fmt_stop(FMT_CHANGED));
+            Fail::raise(fmt_stop(FMT_CHANGED));
         }
         handle Fail[IoError] in {
             rename_path(in stage, in path);

@@ -2826,14 +2826,20 @@ const STAGE2_CRANELIFT_PACKAGES: &[(&str, &str, &str, &str)] = &[
 /// probe's exit code). Both Stage 2 compilers must build each one to the same
 /// bytes, and the probe must run to that code. @vesper/driver-commands left
 /// the gaps when its engine calls moved to @vesper/driver-engines (#1996):
-/// `vesper lsp` there is refused (exit code 1).
+/// `vesper lsp` there is refused, and printing the refusal fails because
+/// @vesper-std/fs has no standard streams on wasm32-wasip2, so the probe ends
+/// as Rust's print panic does ([`DRIVER_PRINT_PANIC_EXIT`]).
 const STAGE2_HOST_PACKAGES: &[(&str, &str, &str, &str, u64)] = &[(
     "driver-commands",
     "@vesper/driver-commands",
     "packages/vesper-driver-commands",
     "use @vesper/driver-commands::run;\nuse @vesper/driver::{args_new, args_push};\npub fn main() -> u64 eff [Ffi[StdFs], Ffi[StdEnv], Ffi[StdProcess], Ffi[Blake3], Ffi[HybridCommands]] { let mut a = args_new(); args_push(inout a, in \"lsp\".as_bytes()); wrapping_u64(run(in a)) }\n",
-    1,
+    DRIVER_PRINT_PANIC_EXIT,
 )];
+
+/// The exit code of @vesper/driver-commands when a print fails (`PANIC_EXIT`,
+/// Rust's 101 for a panic).
+const DRIVER_PRINT_PANIC_EXIT: u64 = 101;
 
 /// Compiler packages Stage 2 cannot build yet: (stem, package, path, probe
 /// `src/lib.ves`, reason). `stage2_self_compilation_fixed_point` checks that
@@ -3557,3 +3563,4 @@ pub fn main() -> u64 {
     h
 }
 ";
+

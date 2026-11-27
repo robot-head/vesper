@@ -1887,6 +1887,27 @@ fn scan_option_methods(
 // The Rust checker's option prelude (src/option_methods.rs): an
 // `impl Option[T]` block with the methods no module defines itself, added
 // when a module calls one of those.
+// `preludes/str_chars.ves` (`Str::next_char`), when a module calls
+// `next_char` and none defines it: the part of the string prelude the
+// Rust loader adds for it (`strings::needs_prelude`).
+fn append_str_chars(in mods: ChunkSeq[ModEntry], inout out: ChunkSeq[u8]) {
+    let mut used = false;
+    for mi in 0..mods.len() {
+        match mods.try_get(mi) {
+            Option::Some(m) => {
+                if contains_word(in m.text.as_slice(), "fn next_char") {
+                    return;
+                }
+                used = used || contains_word(in m.text.as_slice(), "next_char");
+            },
+            Option::None => {},
+        }
+    }
+    if used {
+        out.extend(in include_str("preludes/str_chars.ves").as_bytes());
+    }
+}
+
 fn append_option_methods(in mods: ChunkSeq[ModEntry], inout out: ChunkSeq[u8]) {
     let mut used = ChunkSeq::new[bool]();
     let mut defined = ChunkSeq::new[bool]();
@@ -2191,6 +2212,7 @@ pub fn load_package_graph_bytes(in root_dir: Slice[u8]) -> Option[ChunkSeq[u8]] 
     sp_src.extend(in include_str("preludes/string.ves").as_bytes());
     sp_src.extend(in include_str("preludes/intrinsics.ves").as_bytes());
     append_option_methods(in mods, inout sp_src);
+    append_str_chars(in mods, inout sp_src);
     append_extra_intrinsics(in mods, inout sp_src);
     collect_mod_files(
         0,
