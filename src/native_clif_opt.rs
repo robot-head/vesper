@@ -85,6 +85,7 @@ pub fn run(func: &mut ir::Function) {
     fold_constant_branches(func);
     merge_blocks(func);
     canonicalize_imm_ops(func);
+    fold_load_store_offsets(func);
     dense_icmp_chains_to_br_table(func);
     remove_dead(func);
     sink_slot_inits(func);
@@ -5363,6 +5364,80 @@ fn canonicalize_imm_ops(func: &mut ir::Function) {
         }
         if !changed {
             break;
+        }
+    }
+}
+
+/// Folds `iadd_imm(base, disp)` address operands directly into `Load`/`Store`
+/// `Offset32` displacements when the combined offset fits in `i32`.
+fn fold_load_store_offsets(func: &mut ir::Function) {
+    for (_, inst) in insts(func) {
+        match func.dfg.insts[inst] {
+            InstructionData::Load {
+                opcode,
+                arg,
+                offset,
+                flags,
+            } if matches!(
+                opcode,
+                Opcode::Load
+                    | Opcode::Uload8
+                    | Opcode::Sload8
+                    | Opcode::Uload16
+                    | Opcode::Sload16
+                    | Opcode::Uload32
+                    | Opcode::Sload32
+            ) =>
+            {
+                let addr = func.dfg.resolve_aliases(arg);
+                if let ir::ValueDef::Result(def, 0) = func.dfg.value_def(addr)
+                    && let InstructionData::BinaryImm64 {
+                        opcode: Opcode::IaddImm,
+                        arg: base,
+                        imm,
+                    } = func.dfg.insts[def]
+                    && let Some(new_off) = i64::from(i32::from(offset))
+                        .checked_add(imm.bits())
+                        .and_then(|o| i32::try_from(o).ok())
+                {
+                    func.dfg.insts[inst] = InstructionData::Load {
+                        opcode,
+                        arg: func.dfg.resolve_aliases(base),
+                        offset: ir::immediates::Offset32::new(new_off),
+                        flags,
+                    };
+                }
+            }
+            InstructionData::Store {
+                opcode,
+                args: [val, arg],
+                offset,
+                flags,
+            } if matches!(
+                opcode,
+                Opcode::Store | Opcode::Istore8 | Opcode::Istore16 | Opcode::Istore32
+            ) =>
+            {
+                let addr = func.dfg.resolve_aliases(arg);
+                if let ir::ValueDef::Result(def, 0) = func.dfg.value_def(addr)
+                    && let InstructionData::BinaryImm64 {
+                        opcode: Opcode::IaddImm,
+                        arg: base,
+                        imm,
+                    } = func.dfg.insts[def]
+                    && let Some(new_off) = i64::from(i32::from(offset))
+                        .checked_add(imm.bits())
+                        .and_then(|o| i32::try_from(o).ok())
+                {
+                    func.dfg.insts[inst] = InstructionData::Store {
+                        opcode,
+                        args: [val, func.dfg.resolve_aliases(base)],
+                        offset: ir::immediates::Offset32::new(new_off),
+                        flags,
+                    };
+                }
+            }
+            _ => {}
         }
     }
 }
