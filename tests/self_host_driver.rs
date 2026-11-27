@@ -911,3 +911,72 @@ fn package_diagnostics_format_matches_rust() {
         "error[E0901]: invalid version (Loom.toml)\nerror[E0901]: invalid version\n"
     );
 }
+
+#[test]
+fn diagnostics_remap_matches_rust() {
+    use vesper::ast::Diagnostic;
+    use vesper::forge_frontend::{ByteRange, MapKind, SourceMapSegment, original_diagnostic};
+
+    let remap_entry = driver().entry("remap_diagnostics_json_words", true);
+
+    let map = vec![
+        SourceMapSegment {
+            expanded: ByteRange { start: 0, end: 10 },
+            original: ByteRange { start: 0, end: 10 },
+            kind: MapKind::Source,
+            r#macro: None,
+        },
+        SourceMapSegment {
+            expanded: ByteRange { start: 10, end: 40 },
+            original: ByteRange { start: 10, end: 18 },
+            kind: MapKind::Generated,
+            r#macro: Some("expand".into()),
+        },
+        SourceMapSegment {
+            expanded: ByteRange { start: 40, end: 60 },
+            original: ByteRange { start: 18, end: 38 },
+            kind: MapKind::Source,
+            r#macro: None,
+        },
+    ];
+
+    let ds = vec![
+        // Sugar rejection codes must NOT be remapped.
+        Diagnostic::new("E0143", "sugar", 12..25).with_related(42..50, "rel"),
+        Diagnostic::new("E0144", "sugar2", 15..20),
+        // Generated segment overlap (non-empty and empty).
+        Diagnostic::new("E0201", "in gen", 15..25).with_related(10..10, "gen start"),
+        // Source segment mid, boundary, clamping past original.end, and EOF fallback.
+        Diagnostic::new("E0202", "in src", 42..50)
+            .with_related(40..45, "boundary")
+            .with_related(55..70, "clamped")
+            .with_related(60..60, "eof"),
+    ];
+
+    let mut input = Vec::new();
+    input.extend_from_slice(&(map.len() as u64).to_le_bytes());
+    for s in &map {
+        input.extend_from_slice(&(s.expanded.start as u64).to_le_bytes());
+        input.extend_from_slice(&(s.expanded.end as u64).to_le_bytes());
+        input.extend_from_slice(&(s.original.start as u64).to_le_bytes());
+        input.extend_from_slice(&(s.original.end as u64).to_le_bytes());
+        let kind: u64 = match s.kind {
+            MapKind::Source => 0,
+            MapKind::Generated => 1,
+        };
+        input.extend_from_slice(&kind.to_le_bytes());
+    }
+    input.extend_from_slice(&encode_diagnostics_stream(&ds));
+
+    let words = remap_entry.words(&input);
+    let mut at = 0;
+    let got_json = String::from_utf8(unpack(&words, &mut at)).unwrap();
+    assert_eq!(at, words.len());
+
+    let want_ds: Vec<Diagnostic> = ds
+        .into_iter()
+        .map(|d| original_diagnostic(&map, d))
+        .collect();
+    let want_json = serde_json::to_string(&want_ds).unwrap();
+    assert_eq!(got_json, want_json);
+}
