@@ -29,6 +29,8 @@ use serde_json::json;
 pub use session::LensConfig;
 #[doc(hidden)]
 pub use session::PortCheck;
+#[doc(hidden)]
+pub use session::{diagnostic_payload_answer, diagnostic_payload_words, payload_tags};
 
 /// Every proof-lens model of a checked source, for the differential test of
 /// its Vesper port (`tests/self_host_lsp_features.rs`): per function, the
