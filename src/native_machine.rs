@@ -164,6 +164,10 @@ enum IntegerOp {
     FloatFloor = 142,
     FloatTrunc = 143,
     FloatNearest = 144,
+    FloatMin = 145,
+    FloatMax = 146,
+    FloatFma32 = 147,
+    FloatFma64 = 148,
 }
 
 fn integer_bit_op(op: Opcode) -> Option<IntegerOp> {
@@ -1290,6 +1294,8 @@ impl IntegerBlocks<'_> {
                     Opcode::Fmul => IntegerOp::FloatMul,
                     Opcode::Fdiv => IntegerOp::FloatDiv,
                     Opcode::Fcopysign => IntegerOp::FloatCopySign,
+                    Opcode::Fmin if self.aarch64 => IntegerOp::FloatMin,
+                    Opcode::Fmax if self.aarch64 => IntegerOp::FloatMax,
                     _ => return None,
                 };
                 (op, [input(left)?, input(right)?, float_width(output)?])
@@ -1355,6 +1361,21 @@ impl IntegerBlocks<'_> {
                     _ => return None,
                 };
                 (op, [input(left)?, input(right)?, float_condition(cond)])
+            }
+            InstructionData::Ternary {
+                opcode: Opcode::Fma,
+                args: [left, right, addend],
+            } if self.aarch64
+                && ty(left) == output
+                && ty(right) == output
+                && ty(addend) == output =>
+            {
+                let op = match output {
+                    types::F32 => IntegerOp::FloatFma32,
+                    types::F64 => IntegerOp::FloatFma64,
+                    _ => return None,
+                };
+                (op, [input(left)?, input(right)?, input(addend)?])
             }
             InstructionData::Ternary {
                 opcode: Opcode::Select,
@@ -1431,6 +1452,10 @@ impl IntegerBlocks<'_> {
                     | IntegerOp::FloatFloor
                     | IntegerOp::FloatTrunc
                     | IntegerOp::FloatNearest
+                    | IntegerOp::FloatMin
+                    | IntegerOp::FloatMax
+                    | IntegerOp::FloatFma32
+                    | IntegerOp::FloatFma64
             )
         {
             let (compare, bits) = match output {

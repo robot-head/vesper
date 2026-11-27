@@ -113,6 +113,9 @@ const UNSIGNED_TO_FLOAT: u64 = 138;
 const FLOAT_TO_SIGNED_SAT: u64 = 139;
 const FLOAT_TO_UNSIGNED_SAT: u64 = 140;
 const FLOAT_FLOOR: u64 = 142;
+const FLOAT_MIN: u64 = 145;
+const FLOAT_MAX: u64 = 146;
+const FLOAT_FMA64: u64 = 148;
 const EQUAL: u64 = 0;
 const NOT_EQUAL: u64 = 1;
 const SIGNED_LESS: u64 = 2;
@@ -274,6 +277,57 @@ fn aarch64_float_rounding_and_saturation_use_scalar_encodings() {
         binding::aarch64_integer_leaf(&[1, 1, FLOAT_TO_SIGNED_SAT, 0, CELL_BITS, WORD_BITS])
             .is_empty()
     );
+}
+
+#[test]
+fn aarch64_float_min_max_and_fma_use_the_fp_register_bank() {
+    const FMOV_D16_X0: u32 = 0x9e67_0010;
+    const FMOV_D17_X1: u32 = 0x9e67_0031;
+    const FMOV_D18_X2: u32 = 0x9e67_0052;
+    const FMIN_D16_D16_D17: u32 = 0x1e71_5a10;
+    const FMAX_D16_D16_D17: u32 = 0x1e71_4a10;
+    const FMADD_D16_D16_D17_D18: u32 = 0x1f51_4a10;
+    const FMOV_X0_D16: u32 = 0x9e66_0200;
+
+    for (operation, instruction) in [(FLOAT_MIN, FMIN_D16_D16_D17), (FLOAT_MAX, FMAX_D16_D16_D17)] {
+        #[rustfmt::skip]
+        let tape = [
+            2, 5,
+            BITS_TO_FLOAT, 0, 0, CELL_BITS,
+            BITS_TO_FLOAT, 1, 0, CELL_BITS,
+            operation, 2, 3, CELL_BITS,
+            FLOAT_TO_BITS, 4, 0, CELL_BITS,
+        ];
+        assert_eq!(
+            binding::aarch64_integer_leaf(&tape),
+            [FMOV_D16_X0, FMOV_D17_X1, instruction, FMOV_X0_D16, RET]
+                .map(u32::to_le_bytes)
+                .concat(),
+        );
+    }
+    #[rustfmt::skip]
+    let tape = |addend| [
+        3, 7,
+        BITS_TO_FLOAT, 0, 0, CELL_BITS,
+        BITS_TO_FLOAT, 1, 0, CELL_BITS,
+        BITS_TO_FLOAT, 2, 0, CELL_BITS,
+        FLOAT_FMA64, 3, 4, addend,
+        FLOAT_TO_BITS, 6, 0, CELL_BITS,
+    ];
+    assert_eq!(
+        binding::aarch64_integer_leaf(&tape(5)),
+        [
+            FMOV_D16_X0,
+            FMOV_D17_X1,
+            FMOV_D18_X2,
+            FMADD_D16_D16_D17_D18,
+            FMOV_X0_D16,
+            RET,
+        ]
+        .map(u32::to_le_bytes)
+        .concat(),
+    );
+    assert!(binding::aarch64_integer_leaf(&tape(2)).is_empty());
 }
 
 #[test]
@@ -2297,7 +2351,7 @@ fn aarch64_scalar_functions_reach_elf_and_macho_object_emission() {
         fn detfloat(x: f64) -> f64 eff [DetFloat] { x }
         fn main(x: f64) -> f64 {
             let n = saturating_i16(floor(widen_f64(nearest_f32(x))));
-            widen_f64(n) + x
+            fma(widen_f64(n), max(x, 0.0), min(x, 1.0))
         }
     ";
     const TEXT: &str = r#"fn main() -> String { "vesper-aarch64-got" }"#;

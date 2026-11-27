@@ -158,6 +158,10 @@ pub const FLOAT_CEIL: u64 = 141;
 pub const FLOAT_FLOOR: u64 = 142;
 pub const FLOAT_TRUNC: u64 = 143;
 pub const FLOAT_NEAREST: u64 = 144;
+pub const FLOAT_MIN: u64 = 145;
+pub const FLOAT_MAX: u64 = 146;
+pub const FLOAT_FMA32: u64 = 147;
+pub const FLOAT_FMA64: u64 = 148;
 const XMM_ARGUMENTS: u64 = 8;
 pub const CHECKED_ARITHMETIC_RECORDS: u64 = 2;
 
@@ -756,6 +760,7 @@ fn reads_right(in record: Record, paired: bool) -> bool {
         || op == SELECT
         || op == FLOAT_SELECT
         || is_float_binary(op)
+        || is_float_fma(op)
         || is_float_compare(op)
         || is_register_shift(op)
         || is_fixed_arithmetic(op)
@@ -767,7 +772,14 @@ fn reads_right(in record: Record, paired: bool) -> bool {
 }
 
 pub fn is_float_binary(op: u64) -> bool {
-    (op >= FLOAT_ADD && op <= FLOAT_DIV) || op == FLOAT_COPY_SIGN
+    (op >= FLOAT_ADD && op <= FLOAT_DIV)
+        || op == FLOAT_COPY_SIGN
+        || op == FLOAT_MIN
+        || op == FLOAT_MAX
+}
+
+pub fn is_float_fma(op: u64) -> bool {
+    op == FLOAT_FMA32 || op == FLOAT_FMA64
 }
 
 pub fn is_float_compare(op: u64) -> bool {
@@ -782,21 +794,16 @@ pub fn is_float_to_integer(op: u64) -> bool {
     op == FLOAT_TO_SIGNED_SAT || op == FLOAT_TO_UNSIGNED_SAT
 }
 
-pub fn is_float_rounding(op: u64) -> bool {
-    op >= FLOAT_CEIL && op <= FLOAT_NEAREST
-}
-
 fn is_float_result(op: u64) -> bool {
     (op >= FLOAT_ARGUMENT && op <= FLOAT_ABS)
         || op == FLOAT_LOAD
         || op == BITS_TO_FLOAT
         || op == FLOAT_SELECT
         || op == CALL_FLOAT
-        || op == CALL_FLOAT32
         || op == FLOAT_STACK_LOAD
         || op == FLOAT_COPY_SIGN
-        || is_float_conversion(op)
-        || is_float_rounding(op)
+        || (op >= CALL_FLOAT32 && op <= UNSIGNED_TO_FLOAT)
+        || (op >= FLOAT_CEIL && op <= FLOAT_FMA64)
 }
 
 pub fn float_value(in words: Slice[u64], arguments: u64, value: u64) -> bool {
@@ -811,12 +818,12 @@ fn float_left(op: u64) -> bool {
         || op == FLOAT_COPY_SIGN
         || op == FLOAT_PROMOTE
         || op == FLOAT_DEMOTE
-        || is_float_to_integer(op)
-        || is_float_rounding(op)
+        || (op >= FLOAT_TO_SIGNED_SAT && op <= FLOAT_FMA64)
 }
 
 fn float_right(op: u64) -> bool {
     is_float_binary(op)
+        || is_float_fma(op)
         || is_float_compare(op)
         || op == FLOAT_SELECT
         || op == FLOAT_STORE32
@@ -833,11 +840,12 @@ pub fn valid_float_operands(
     for index in 0..count {
         let record = read_record(in words, index);
         let left_is_float = float_left(record.op) || (is_branch_return(record.op) && float_return);
+        let extra_is_float = record.op == FLOAT_SELECT || is_float_fma(record.op);
         if (reads_left(in record) && float_value(in words, arguments, record.left) != left_is_float)
             || (reads_right(in record, paired)
                 && float_value(in words, arguments, record.right) != float_right(record.op))
-            || ((record.op == SELECT || record.op == FLOAT_SELECT || consumes_carry(record.op))
-                && float_value(in words, arguments, record.extra) != (record.op == FLOAT_SELECT))
+            || ((record.op == SELECT || extra_is_float || consumes_carry(record.op))
+                && float_value(in words, arguments, record.extra) != extra_is_float)
         {
             return false;
         }
