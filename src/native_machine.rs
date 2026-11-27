@@ -10,7 +10,7 @@ use cranelift_codegen::{
         immediates::{Ieee32, Ieee64, Offset32},
         types,
     },
-    isa::CallConv,
+    isa::{CallConv, TargetIsa},
 };
 use cranelift_module::{DataId, Linkage, ModuleDeclarations, ModuleReloc, ModuleRelocTarget};
 use std::{collections::BTreeSet, sync::OnceLock};
@@ -275,6 +275,7 @@ const INTEGER_CELL_BITS: u64 = u64::BITS as u64;
 const SIMD_BYTES: u32 = 2 * size_of::<u64>() as u32;
 const SIMD_LANE_INDEX_SHIFT: u32 = 8;
 const SIMD_CONDITION_SHIFT: u32 = 8;
+const X86_HARDWARE_POPCOUNT: u64 = 1;
 const X86_SWIZZLE_ZERO_HIGH: u64 = 1;
 const X86_SWIZZLE_ZERO_INDEX: u8 = 0x80;
 const MAX_LINEARIZED_BRANCHES: usize = 32;
@@ -697,12 +698,31 @@ struct IntegerBlocks<'a> {
     allow_hardware_faults: bool,
     canonicalize_nans: bool,
     aarch64: bool,
-    x86_ssse3: bool,
+    x86_isa: Option<&'a dyn TargetIsa>,
     aarch64_entry: Option<Aarch64Arguments>,
     declarations: Option<&'a ModuleDeclarations>,
 }
 
 impl IntegerBlocks<'_> {
+    fn has_x86_shuffle(&self) -> bool {
+        self.x86_isa.is_some_and(TargetIsa::has_x86_pshufb_lowering)
+    }
+
+    fn bit_operation_mode(&self, opcode: Opcode) -> u64 {
+        const POPCNT_FLAG: &str = "has_popcnt";
+        if opcode == Opcode::Popcnt
+            && self.x86_isa.is_some_and(|isa| {
+                isa.isa_flags()
+                    .iter()
+                    .any(|flag| flag.name == POPCNT_FLAG && flag.as_bool() == Some(true))
+            })
+        {
+            X86_HARDWARE_POPCOUNT
+        } else {
+            0
+        }
+    }
+
     fn normalize_abi_integer(&mut self, cell: u64, ty: Type) -> u64 {
         // Plain narrow ABI slots only define the low bits. The machine
         // tape keeps narrow values zero-extended between operations.
@@ -1576,7 +1596,7 @@ impl IntegerBlocks<'_> {
             InstructionData::Unary {
                 opcode: Opcode::Iabs,
                 arg,
-            } if output == types::I128 && self.aarch64 => {
+            } if output == types::I128 => {
                 let [low, high] = pair(arg)?;
                 let width = INTEGER_CELL_BITS;
                 let sign = self.append(IntegerOp::ShiftRightArithmetic, [high, width - 1, width]);
@@ -1597,7 +1617,7 @@ impl IntegerBlocks<'_> {
             InstructionData::Unary {
                 opcode: opcode @ (Opcode::Bswap | Opcode::Bitrev),
                 arg,
-            } if output == types::I128 && (opcode == Opcode::Bswap || self.aarch64) => {
+            } if output == types::I128 => {
                 let [low, high] = pair(arg)?;
                 let op = if opcode == Opcode::Bswap {
                     IntegerOp::ByteSwap
@@ -1612,7 +1632,7 @@ impl IntegerBlocks<'_> {
             InstructionData::Unary {
                 opcode: Opcode::Cls,
                 arg,
-            } if output == types::I128 && self.aarch64 => {
+            } if output == types::I128 => {
                 let [low, high] = pair(arg)?;
                 let width = INTEGER_CELL_BITS;
                 let sign_bits = width - 1;
@@ -1631,7 +1651,7 @@ impl IntegerBlocks<'_> {
             InstructionData::Unary {
                 opcode: opcode @ (Opcode::Clz | Opcode::Ctz | Opcode::Popcnt),
                 arg,
-            } if output == types::I128 && self.aarch64 => {
+            } if output == types::I128 => {
                 let [low, high] = pair(arg)?;
                 let (first, second) = if opcode == Opcode::Clz {
                     (high, low)
@@ -1639,8 +1659,9 @@ impl IntegerBlocks<'_> {
                     (low, high)
                 };
                 let op = integer_bit_op(opcode)?;
-                let head = self.append(op, [first, 0, INTEGER_CELL_BITS]);
-                let tail = self.append(op, [second, 0, INTEGER_CELL_BITS]);
+                let mode = self.bit_operation_mode(opcode);
+                let head = self.append(op, [first, mode, INTEGER_CELL_BITS]);
+                let tail = self.append(op, [second, mode, INTEGER_CELL_BITS]);
                 let count = if opcode == Opcode::Popcnt {
                     self.append(IntegerOp::Add, [head, tail, INTEGER_CELL_BITS])
                 } else {
@@ -1957,10 +1978,11 @@ impl IntegerBlocks<'_> {
         if left == right && mask.iter().map(|&index| index % LANES).eq(0..LANES) {
             return Some(left);
         }
-        if !self.aarch64 && !self.x86_ssse3 {
+        let x86_shuffle = self.has_x86_shuffle();
+        if !self.aarch64 && !x86_shuffle {
             return None;
         }
-        let mode = if self.x86_ssse3 {
+        let mode = if x86_shuffle {
             X86_SWIZZLE_ZERO_HIGH
         } else {
             0
@@ -1971,7 +1993,7 @@ impl IntegerBlocks<'_> {
         }
         let first = if mask.iter().any(|&index| index < LANES) {
             let indices = mask.map(|index| {
-                if self.x86_ssse3 && index >= LANES {
+                if x86_shuffle && index >= LANES {
                     X86_SWIZZLE_ZERO_INDEX
                 } else {
                     index
@@ -1987,7 +2009,7 @@ impl IntegerBlocks<'_> {
         }
         // The table lookup returns zero for wrapped indices in the other half.
         let indices = mask.map(|index| {
-            if self.x86_ssse3 && index < LANES {
+            if x86_shuffle && index < LANES {
                 X86_SWIZZLE_ZERO_INDEX
             } else {
                 index.wrapping_sub(LANES)
@@ -2043,12 +2065,12 @@ impl IntegerBlocks<'_> {
                     Opcode::Iadd => (IntegerOp::VectorAdd, integer_width(lane)?),
                     Opcode::Isub => (IntegerOp::VectorSub, integer_width(lane)?),
                     Opcode::IaddPairwise
-                        if (self.aarch64 || self.x86_ssse3) && lane != types::I64 =>
+                        if (self.aarch64 || self.has_x86_shuffle()) && lane != types::I64 =>
                     {
                         (IntegerOp::VectorPairwiseAdd, integer_width(lane)?)
                     }
                     Opcode::Swizzle
-                        if (self.aarch64 || self.x86_ssse3) && output == types::I8X16 =>
+                        if (self.aarch64 || self.has_x86_shuffle()) && output == types::I8X16 =>
                     {
                         (IntegerOp::VectorSwizzle, 0)
                     }
@@ -2512,13 +2534,14 @@ impl IntegerBlocks<'_> {
                         | Opcode::Bitrev
                         | Opcode::Cls),
                     arg,
-                } if self.aarch64 && ty(arg) == output => {
-                    (integer_bit_op(opcode)?, [input(arg)?, 0, width])
-                }
+                } if ty(arg) == output => (
+                    integer_bit_op(opcode)?,
+                    [input(arg)?, self.bit_operation_mode(opcode), width],
+                ),
                 InstructionData::Unary {
                     opcode: Opcode::Iabs,
                     arg,
-                } if self.aarch64 && ty(arg) == output => (IntegerOp::Abs, [input(arg)?, 0, width]),
+                } if ty(arg) == output => (IntegerOp::Abs, [input(arg)?, 0, width]),
                 InstructionData::UnaryGlobalValue {
                     opcode: Opcode::GlobalValue | Opcode::SymbolValue,
                     global_value,
@@ -3310,23 +3333,12 @@ impl IntegerBlocks<'_> {
 /// The entry label's right word identifies the private home slot plus one,
 /// or zero when the function needs no cross-block storage.
 pub fn integer_block_words(function: &Function) -> Option<Vec<u64>> {
-    integer_program(
-        function,
-        false,
-        false,
-        None,
-        CallConv::SystemV,
-        false,
-        false,
-    )
-    .map(|(primary, _)| primary.words)
+    integer_program(function, false, false, None, CallConv::SystemV, false, None)
+        .map(|(primary, _)| primary.words)
 }
 
 /// Packs an x86-64 function with the instruction set enabled by the target.
-pub fn x86_64_block_words(
-    function: &Function,
-    isa: &dyn cranelift_codegen::isa::TargetIsa,
-) -> Option<Vec<u64>> {
+pub fn x86_64_block_words(function: &Function, isa: &dyn TargetIsa) -> Option<Vec<u64>> {
     let call_conv = function.signature.call_conv;
     if isa.triple().architecture != target_lexicon::Architecture::X86_64
         || !matches!(call_conv, CallConv::SystemV | CallConv::Tail)
@@ -3340,7 +3352,7 @@ pub fn x86_64_block_words(
         None,
         call_conv,
         false,
-        isa.has_x86_pshufb_lowering(),
+        Some(isa),
     )
     .map(|(primary, _)| primary.words)
 }
@@ -3371,7 +3383,7 @@ fn aarch64_program(
         declarations,
         signature.call_conv,
         true,
-        false,
+        None,
     )
 }
 
@@ -3387,7 +3399,7 @@ fn integer_program(
     declarations: Option<&ModuleDeclarations>,
     call_conv: CallConv,
     aarch64: bool,
-    x86_ssse3: bool,
+    x86_isa: Option<&dyn TargetIsa>,
 ) -> Option<(IntegerProgram, Option<IntegerProgram>)> {
     let signature = &function.signature;
     if signature.call_conv != call_conv || !function.dynamic_stack_slots.is_empty() {
@@ -3443,7 +3455,7 @@ fn integer_program(
         allow_hardware_faults,
         canonicalize_nans,
         aarch64,
-        x86_ssse3,
+        x86_isa,
         aarch64_entry,
         declarations,
     };
@@ -3622,7 +3634,7 @@ fn decode_relocatable(packet: &[u8]) -> Option<MachineCode> {
 }
 
 fn encode_integer_block(
-    isa: &dyn cranelift_codegen::isa::TargetIsa,
+    isa: &dyn TargetIsa,
     function: &Function,
     declarations: Option<&ModuleDeclarations>,
 ) -> Option<MachineCode> {
@@ -3682,7 +3694,7 @@ fn encode_integer_block(
         declarations,
         call_conv,
         false,
-        isa.has_x86_pshufb_lowering(),
+        Some(isa),
     )?;
     let emit = |program: IntegerProgram| {
         if program.relocations {

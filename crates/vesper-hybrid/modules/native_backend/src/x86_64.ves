@@ -164,6 +164,16 @@ const SUB_RM_R8: u8 = 0x28;
 const FENCE_GROUP: u8 = 0xae;
 const MFENCE_MODRM: u8 = 0xf0;
 const BSWAP_REGISTER: u8 = 0xc8;
+const BSF_REGISTER: u8 = 0xbc;
+const BSR_REGISTER: u8 = 0xbd;
+const BSR_ZERO_INDEX: u64 = 0xffffffffffffffff;
+const POPCNT_REGISTER: u8 = 0xb8;
+const SWAR_ODD_BITS: u64 = 0x5555555555555555;
+const SWAR_BIT_PAIRS: u64 = 0x3333333333333333;
+const SWAR_NIBBLES: u64 = 0x0f0f0f0f0f0f0f0f;
+const SWAR_BYTE_SUM: u64 = 0x0101010101010101;
+const PAIR_BITS: u64 = 2;
+const NIBBLE_BITS: u64 = BYTE_BITS / 2;
 const ROR_EXTENSION: u8 = 1;
 const CMP_RM_R8: u8 = 0x38;
 const CMP_RM_R64: u8 = 0x39;
@@ -266,6 +276,16 @@ pub copy enum PackedRelation {
     UnsignedGreater,
 }
 
+pub copy enum BitOperation {
+    LeadingZeros,
+    TrailingZeros,
+    PopulationCount,
+    HardwarePopulationCount,
+    Reverse,
+    LeadingSignBits,
+    Absolute,
+}
+
 pub copy enum Instruction {
     Immediate(u8, u64),
     FloatImmediate(u8, u64, u64),
@@ -280,6 +300,7 @@ pub copy enum Instruction {
     VectorPairwiseAdd(u8, u8, u8, u64),
     VectorSwizzle(u8, u8, u8, bool),
     VectorIntegerCompare(u8, u8, u8, u64, PackedRelation, bool),
+    BitOperation(u8, u8, u64, BitOperation),
     VectorConvert(u8, u8, bool),
     VectorExtract(u8, u8, u64, u64),
     VectorInsert(u8, u8, u64, u64),
@@ -806,6 +827,159 @@ fn byte_swap(inout out: ChunkSeq[u8], register: u8, width: u64) {
         out.push(TWO_BYTE_OPCODE);
         out.push(BSWAP_REGISTER | (register & LOW_REGISTER_MASK));
     }
+}
+
+fn gp_move(inout out: ChunkSeq[u8], destination: u8, source: u8) {
+    if destination != source {
+        binary(inout out, MOV_RM_R64, destination, source, true);
+    }
+}
+
+fn gp_unary(inout out: ChunkSeq[u8], extension: u8, destination: u8, width: u64) {
+    emit_rex(inout out, 0, destination, width == QWORD_BITS, false);
+    out.push(UNARY_GROUP);
+    out.push(modrm(extension, destination));
+    normalize_small_result(inout out, destination, width);
+}
+
+fn shift_immediate(
+    inout out: ChunkSeq[u8],
+    extension: u8,
+    destination: u8,
+    count: u64,
+    width: u64
+) {
+    if width == WORD_BITS {
+        out.push(OPERAND_SIZE_OVERRIDE);
+    }
+    emit_rex(
+        inout out,
+        0,
+        destination,
+        width == QWORD_BITS,
+        width == BYTE_BITS && byte_register_needs_rex(destination)
+    );
+    out.push(
+        if width == BYTE_BITS {
+            SHIFT_BYTE_GROUP_IMM8
+        } else {
+            SHIFT_GROUP_IMM8
+        }
+    );
+    out.push(modrm(extension, destination));
+    out.push(wrapping_u8(count));
+    normalize_small_result(inout out, destination, width);
+}
+
+fn bit_scan(inout out: ChunkSeq[u8], dest: u8, source: u8, width: u64, leading: bool) {
+    let wide = width == QWORD_BITS;
+    emit_rex(inout out, dest, source, wide, false);
+    out.push(TWO_BYTE_OPCODE);
+    out.push(if leading { BSR_REGISTER } else { BSF_REGISTER });
+    out.push(modrm(dest, source));
+    // The scan leaves ZF set on zero. MOV preserves it for the conditional move.
+    move_constant(inout out, R11, if leading { BSR_ZERO_INDEX } else { width });
+    emit_rex(inout out, dest, R11, wide, false);
+    out.push(TWO_BYTE_OPCODE);
+    out.push(CMOVCC | CC_E);
+    out.push(modrm(dest, R11));
+    if leading {
+        let machine_width = if wide { QWORD_BITS } else { DWORD_BITS };
+        gp_unary(inout out, NEG_EXTENSION, dest, machine_width);
+        alu_immediate(
+            inout out,
+            ALU_ADD_EXTENSION,
+            dest,
+            wrapping_u32(wrapping_sub(width, 1)),
+            machine_width
+        );
+    }
+}
+
+fn swap_bit_groups(inout out: ChunkSeq[u8], dest: u8, mask: u64, shift: u64) {
+    gp_move(inout out, R10, dest);
+    move_constant(inout out, R11, mask);
+    shift_immediate(inout out, SHR_EXTENSION, R10, shift, QWORD_BITS);
+    binary(inout out, AND_RM_R64, R10, R11, true);
+    binary(inout out, AND_RM_R64, dest, R11, true);
+    shift_immediate(inout out, SHL_EXTENSION, dest, shift, QWORD_BITS);
+    binary(inout out, OR_RM_R64, dest, R10, true);
+}
+
+fn population_count(inout out: ChunkSeq[u8], dest: u8, source: u8) {
+    gp_move(inout out, dest, source);
+    gp_move(inout out, R10, dest);
+    move_constant(inout out, R11, SWAR_ODD_BITS);
+    shift_immediate(inout out, SHR_EXTENSION, R10, 1, QWORD_BITS);
+    binary(inout out, AND_RM_R64, R10, R11, true);
+    binary(inout out, SUB_RM_R64, dest, R10, true);
+
+    gp_move(inout out, R10, dest);
+    move_constant(inout out, R11, SWAR_BIT_PAIRS);
+    shift_immediate(inout out, SHR_EXTENSION, R10, PAIR_BITS, QWORD_BITS);
+    binary(inout out, AND_RM_R64, R10, R11, true);
+    binary(inout out, AND_RM_R64, dest, R11, true);
+    binary(inout out, ADD_RM_R64, dest, R10, true);
+
+    gp_move(inout out, R10, dest);
+    move_constant(inout out, R11, SWAR_NIBBLES);
+    shift_immediate(inout out, SHR_EXTENSION, R10, NIBBLE_BITS, QWORD_BITS);
+    binary(inout out, ADD_RM_R64, dest, R10, true);
+    binary(inout out, AND_RM_R64, dest, R11, true);
+    move_constant(inout out, R11, SWAR_BYTE_SUM);
+    emit_rex(inout out, dest, R11, true, false);
+    out.push(TWO_BYTE_OPCODE);
+    out.push(IMUL_R64_RM64);
+    out.push(modrm(dest, R11));
+    shift_immediate(inout out, SHR_EXTENSION, dest, QWORD_BITS - BYTE_BITS, QWORD_BITS);
+}
+
+fn gp_sign_mask(inout out: ChunkSeq[u8], source: u8, width: u64) {
+    if width == QWORD_BITS {
+        gp_move(inout out, R11, source);
+    } else {
+        sign_extend(inout out, R11, source, width, QWORD_BITS);
+    }
+    shift_immediate(inout out, SAR_EXTENSION, R11, QWORD_BITS - 1, QWORD_BITS);
+}
+
+fn bit_operation(inout out: ChunkSeq[u8], dest: u8, source: u8, width: u64, in op: BitOperation) {
+    match op {
+        BitOperation::LeadingZeros => bit_scan(inout out, dest, source, width, true),
+        BitOperation::TrailingZeros => bit_scan(inout out, dest, source, width, false),
+        BitOperation::PopulationCount => population_count(inout out, dest, source),
+        BitOperation::HardwarePopulationCount => {
+            out.push(SCALAR_SINGLE);
+            emit_rex(inout out, dest, source, width == QWORD_BITS, false);
+            out.push(TWO_BYTE_OPCODE);
+            out.push(POPCNT_REGISTER);
+            out.push(modrm(dest, source));
+        },
+        BitOperation::Reverse => {
+            gp_move(inout out, dest, source);
+            swap_bit_groups(inout out, dest, SWAR_ODD_BITS, 1);
+            swap_bit_groups(inout out, dest, SWAR_BIT_PAIRS, PAIR_BITS);
+            swap_bit_groups(inout out, dest, SWAR_NIBBLES, NIBBLE_BITS);
+            if width != BYTE_BITS {
+                byte_swap(inout out, dest, width);
+            }
+        },
+        BitOperation::LeadingSignBits => {
+            gp_sign_mask(inout out, source, width);
+            gp_move(inout out, dest, source);
+            binary(inout out, XOR_RM_R64, dest, R11, width == QWORD_BITS);
+            normalize_small_result(inout out, dest, width);
+            bit_scan(inout out, dest, dest, width, true);
+            alu_immediate(inout out, ALU_SUB_EXTENSION, dest, 1, DWORD_BITS);
+        },
+        BitOperation::Absolute => {
+            gp_sign_mask(inout out, source, width);
+            gp_move(inout out, dest, source);
+            binary(inout out, XOR_RM_R64, dest, R11, width == QWORD_BITS);
+            binary(inout out, SUB_RM_R64, dest, R11, width == QWORD_BITS);
+            normalize_small_result(inout out, dest, width);
+        },
+    };
 }
 
 fn load_constant(inout out: ChunkSeq[u8], destination: u8, bits: u64) {
@@ -1548,6 +1722,13 @@ pub fn emit(inout out: ChunkSeq[u8], in instruction: Instruction) {
             all,
             width
         ),
+        Instruction::BitOperation(destination, source, width, op) => bit_operation(
+            inout out,
+            destination,
+            source,
+            width,
+            in op
+        ),
         Instruction::FloatBits(destination, source, width) => float_bits(
             inout out,
             destination,
@@ -1565,8 +1746,8 @@ pub fn emit(inout out: ChunkSeq[u8], in instruction: Instruction) {
         Instruction::Move(destination, source) => {
             if is_xmm(destination) {
                 float_move(inout out, destination, source);
-            } else if destination != source {
-                binary(inout out, MOV_RM_R64, destination, source, true);
+            } else {
+                gp_move(inout out, destination, source);
             }
         },
         Instruction::Exchange(left, right) => binary(inout out, XCHG_RM_R64, left, right, true),
@@ -1603,34 +1784,19 @@ pub fn emit(inout out: ChunkSeq[u8], in instruction: Instruction) {
             immediate(inout out, widen_u64(bits), if short { 1 } else { IMM32_BYTES });
             normalize_small_result(inout out, destination, width);
         },
-        Instruction::Unary(extension, destination, width) => {
-            emit_rex(inout out, 0, destination, width == QWORD_BITS, false);
-            out.push(UNARY_GROUP);
-            out.push(modrm(extension, destination));
-            normalize_small_result(inout out, destination, width);
-        },
-        Instruction::Shift(extension, destination, count, width) => {
-            if width == WORD_BITS {
-                out.push(OPERAND_SIZE_OVERRIDE);
-            }
-            emit_rex(
-                inout out,
-                0,
-                destination,
-                width == QWORD_BITS,
-                width == BYTE_BITS && byte_register_needs_rex(destination)
-            );
-            out.push(
-                if width == BYTE_BITS {
-                    SHIFT_BYTE_GROUP_IMM8
-                } else {
-                    SHIFT_GROUP_IMM8
-                }
-            );
-            out.push(modrm(extension, destination));
-            out.push(count);
-            normalize_small_result(inout out, destination, width);
-        },
+        Instruction::Unary(extension, destination, width) => gp_unary(
+            inout out,
+            extension,
+            destination,
+            width
+        ),
+        Instruction::Shift(extension, destination, count, width) => shift_immediate(
+            inout out,
+            extension,
+            destination,
+            widen_u64(count),
+            width
+        ),
         Instruction::ShiftRegister(extension, destination, count, width) => {
             // Legacy shifts read CL. Exchange full registers to preserve a
             // live RCX and restore the count when the operation is finished.

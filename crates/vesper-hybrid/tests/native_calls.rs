@@ -1284,13 +1284,12 @@ fn direct_calls_preserve_the_abi_across_object_writers() {
         assert_eq!(relocation.addend(), -4);
     }
     let candidate_stack = compile(&stack_arguments);
-    assert_eq!(CALLABLE_BLOCKS.load(Relaxed), 4);
+    assert_eq!(CALLABLE_BLOCKS.load(Relaxed), 5);
     assert_eq!(STACK_LEAF_BLOCKS.load(Relaxed), 1);
-    // The leading-zero count falls back to Cranelift and calls the Vesper-generated
-    // wide function. The stack ABI crosses the boundary in both directions.
+    // The leading-zero count and both callers now use the Vesper stack ABI.
     assert_ne!(candidate_stack, baseline_stack);
     let candidate_memory = compile(&memory);
-    assert_eq!(CALLABLE_BLOCKS.load(Relaxed), 5);
+    assert_eq!(CALLABLE_BLOCKS.load(Relaxed), 6);
     assert_eq!(MEMORY_LEAF_BLOCKS.load(Relaxed), 1);
     assert!(
         native::elf::install_object_encoder(|words, bytes| {
@@ -1302,7 +1301,7 @@ fn direct_calls_preserve_the_abi_across_object_writers() {
     let combined = compile(&program);
     let combined_stack = compile(&stack_arguments);
     let combined_memory = compile(&memory);
-    assert_eq!(CALLABLE_BLOCKS.load(Relaxed), 10);
+    assert_eq!(CALLABLE_BLOCKS.load(Relaxed), 12);
     assert_eq!(STACK_LEAF_BLOCKS.load(Relaxed), 2);
     assert_eq!(MEMORY_LEAF_BLOCKS.load(Relaxed), 2);
     let combined_detfloat = compile(&detfloat);

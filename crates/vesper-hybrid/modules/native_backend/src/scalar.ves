@@ -11,7 +11,7 @@ use self::x86_64::{
     find_callee_saved_register, find_register, fits_signed_byte, patch_forward_branch,
     patch_relative_branch, patch_relative_offset, register_bit, home_register, xmm_home_register,
     HOME_REGISTERS, cheap_immediate, move_constant, store_immediate, store_immediate_fits,
-    VECTOR_BITS, PAND, POR, PXOR, PackedInteger, PackedRelation, packed_integer_opcode
+    VECTOR_BITS, PAND, POR, PXOR, PackedInteger, PackedRelation, packed_integer_opcode, BitOperation
 };
 
 // Integer block opcodes shared with src/native_machine.rs.
@@ -203,6 +203,7 @@ pub const AARCH64_TAIL_RESERVED_GP: u64 = 2;
 pub const VECTOR_LANE_INDEX_SHIFT: u32 = 8;
 pub const VECTOR_LANE_WIDTH_MASK: u64 = 0xff;
 const X86_SWIZZLE_ZERO_HIGH: u64 = 1;
+const X86_HARDWARE_POPCOUNT: u64 = 1;
 const XMM_ARGUMENTS: u64 = 8;
 pub const CHECKED_ARITHMETIC_RECORDS: u64 = 2;
 
@@ -309,6 +310,7 @@ struct FrameLayout {
     floating: bool,
     vectors: bool,
     vector_aux: bool,
+    bit_temporaries: u32,
     indirect_calls: bool,
     home_slot: u64,
     promoted: u64,
@@ -546,6 +548,7 @@ fn frame_layout(in words: Slice[u64], count: u64) -> Option[FrameLayout] {
         floating: false,
         vectors: false,
         vector_aux: false,
+        bit_temporaries: 0,
         indirect_calls: false,
         home_slot: NO_VALUE,
         promoted: 0,
@@ -683,6 +686,10 @@ fn is_fixed_arithmetic(op: u64) -> bool {
     (op >= SIGNED_DIV && op <= UNSIGNED_MUL_HIGH)
         || op == UNSIGNED_MUL_OVERFLOW
         || op == SIGNED_MUL_OVERFLOW
+}
+
+fn is_scalar_bit_operation(op: u64) -> bool {
+    (op >= LEADING_ZEROS && op <= LEADING_SIGN_BITS) || op == ABS
 }
 
 pub fn is_integer_division(op: u64) -> bool {
@@ -1212,12 +1219,14 @@ fn find_last_reads(
         let value = wrapping_add(arguments, index);
         let record = read_record(in words, index);
         let tail_call = record.op == TAIL_CALL;
+        let bit_operation = is_scalar_bit_operation(record.op);
         if (record.op > BYTE_SWAP
             && record.op != FUNCTION_GOT
             && record.op != STACK_POINTER
             && record.op != FLOAT_TO_INTEGER_TRUNC
             && !is_conditional_trap(record.op)
             && !tail_call
+            && !bit_operation
             && !is_vector_operation(record.op))
             || (!labeled && is_cfg_record(record.op))
             || (record.op == STACK_SLOT && index >= frame.slots.len())
@@ -1255,6 +1264,18 @@ fn find_last_reads(
         }
         let last = last_read(in reads, value);
         let live = last != NEVER_READ || live_overflow_flag(in reads, value, record.op);
+        if bit_operation {
+            let hardware = record.op == POPULATION_COUNT && record.right == X86_HARDWARE_POPCOUNT;
+            if !valid_width(record.extra) || (record.right != 0 && !hardware) {
+                return Option::None;
+            }
+            if live && !hardware {
+                frame.bit_temporaries = frame.bit_temporaries | register_bit(THIRD_SCRATCH);
+                if record.op == POPULATION_COUNT || record.op == REVERSE_BITS {
+                    frame.bit_temporaries = frame.bit_temporaries | register_bit(RIGHT_SCRATCH);
+                }
+            }
+        }
         if is_vector_operation(record.op) {
             let valid = match record.op {
                 VECTOR_CONSTANT | VECTOR_AND | VECTOR_OR | VECTOR_XOR => record.extra == 0,
@@ -1662,9 +1683,12 @@ fn allocate(
         0
     };
     let mut reserved = if frame.floating {
-        gp_reserved | register_bit(XMM_LEFT_SCRATCH) | register_bit(XMM_RIGHT_SCRATCH)
-    } else {
         gp_reserved
+            | frame.bit_temporaries
+            | register_bit(XMM_LEFT_SCRATCH)
+            | register_bit(XMM_RIGHT_SCRATCH)
+    } else {
+        gp_reserved | frame.bit_temporaries
     };
     if frame.vector_aux {
         reserved = reserved | register_bit(XMM_AUX_SCRATCH);
@@ -2533,6 +2557,22 @@ fn emit_vector_instruction(
     emit(inout output, in instruction);
 }
 
+fn emit_bit_operation(inout output: ChunkSeq[u8], in record: Record, destination: u8, source: u8) {
+    let op = match record.op {
+        LEADING_ZEROS => BitOperation::LeadingZeros,
+        TRAILING_ZEROS => BitOperation::TrailingZeros,
+        REVERSE_BITS => BitOperation::Reverse,
+        LEADING_SIGN_BITS => BitOperation::LeadingSignBits,
+        ABS => BitOperation::Absolute,
+        _ => if record.right == X86_HARDWARE_POPCOUNT {
+            BitOperation::HardwarePopulationCount
+        } else {
+            BitOperation::PopulationCount
+        },
+    };
+    emit(inout output, in Instruction::BitOperation(destination, source, record.extra, op));
+}
+
 fn encode_block_pass(
     in words: Slice[u64],
     allow_relocations: bool,
@@ -3045,6 +3085,8 @@ fn encode_block_pass(
             emit(inout output, in Instruction::Immediate(destination, record.left));
         } else if is_vector_operation(record.op) {
             emit_vector_instruction(inout output, in record, destination, left, right);
+        } else if is_scalar_bit_operation(record.op) {
+            emit_bit_operation(inout output, in record, destination, left);
         } else if record.op == STACK_POINTER {
             emit(inout output, in Instruction::Move(destination, RSP));
         } else if record.op == FLOAT_CONSTANT {
