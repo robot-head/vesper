@@ -49,6 +49,7 @@ const MOV_RM_R64: u8 = 0x89;
 const MOV_R64_RM: u8 = 0x8b;
 const LEA: u8 = 0x8d;
 const MOV_REGISTER_IMMEDIATE: u8 = 0xb8;
+const MOV_RM8_IMM8: u8 = 0xc6;
 const MOV_RM64_IMM32: u8 = 0xc7;
 const ALU_RM8_IMM8: u8 = 0x80;
 const ALU_RM64_IMM8: u8 = 0x83;
@@ -583,6 +584,40 @@ fn store_memory(inout out: ChunkSeq[u8], source: u8, base: u8, displacement: u32
         }
     );
     memory_operand(inout out, source, base, displacement);
+}
+
+pub fn store_immediate_fits(bits: u64, width: u64) -> bool {
+    width != QWORD_BITS || wrapping_u64(widen_i64(wrapping_i32(bits))) == bits
+}
+
+pub fn store_immediate(
+    inout out: ChunkSeq[u8],
+    base: u8,
+    displacement: u32,
+    bits: u64,
+    width: u64
+) {
+    if width == WORD_BITS {
+        out.push(OPERAND_SIZE_OVERRIDE);
+    }
+    emit_rex(inout out, 0, base, width == QWORD_BITS, false);
+    out.push(
+        if width == BYTE_BITS {
+            MOV_RM8_IMM8
+        } else {
+            MOV_RM64_IMM32
+        }
+    );
+    memory_operand(inout out, 0, base, displacement);
+    immediate(
+        inout out,
+        bits,
+        if width == QWORD_BITS {
+            IMM32_BYTES
+        } else {
+            width / BYTE_BITS
+        }
+    );
 }
 
 fn memory_operand(inout out: ChunkSeq[u8], reg: u8, base: u8, displacement: u32) {

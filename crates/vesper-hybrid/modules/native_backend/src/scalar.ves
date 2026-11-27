@@ -10,7 +10,7 @@ use self::x86_64::{
     emit_jump_table_entry, emit_symbol_address, callee_saved_registers, find_callee_saved_register,
     find_register, fits_signed_byte, patch_forward_branch, patch_relative_branch,
     patch_relative_offset, register_bit, home_register, xmm_home_register, HOME_REGISTERS,
-    cheap_immediate, move_constant
+    cheap_immediate, move_constant, store_immediate, store_immediate_fits
 };
 
 // Integer block opcodes shared with src/native_machine.rs.
@@ -683,6 +683,17 @@ fn store_width(op: u64) -> u64 {
     }
 }
 
+fn immediate_store_consumer(in record: Record, value: u64, bits: u64) -> bool {
+    let uses_source = if record.op >= STORE_BYTE && record.op <= STORE_QWORD {
+        record.right == value && record.left != value
+    } else {
+        record.op >= STACK_STORE_BYTE && record.op <= STACK_STORE_QWORD && record.left == value
+    };
+    let width = store_width(record.op);
+    // A register zeroing idiom can be shorter than a full-size immediate.
+    uses_source && (bits != 0 || width < DWORD_BITS) && store_immediate_fits(bits, width)
+}
+
 fn stack_displacement(in frame: FrameLayout, in record: Record) -> Option[u32] {
     let store = is_stack_store(record.op);
     let index = if store { record.right } else { record.left };
@@ -744,6 +755,31 @@ fn track_home(inout frame: FrameLayout, in record: Record) {
         frame.single_homes = frame.single_homes | bit;
     } else {
         frame.double_homes = frame.double_homes | bit;
+    }
+}
+
+fn promoted_home(in frame: FrameLayout, in record: Record) -> u8 {
+    let home = stack_access_offset(in record) / SPILL_SLOT_BYTES;
+    if stack_slot(in record) != frame.home_slot || home >= frame.promoted {
+        return UNASSIGNED;
+    }
+    let bit = register_bit(wrapping_u8(home));
+    if (frame.gp_homes & bit) != 0 {
+        home_register(home)
+    } else if ((frame.single_homes | frame.double_homes) & bit) != 0 {
+        xmm_home_register(home)
+    } else {
+        UNASSIGNED
+    }
+}
+
+fn local_displacement(in frame: FrameLayout, in record: Record, local_frame: u64) -> Option[u32] {
+    match stack_displacement(in frame, in record) {
+        Option::Some(offset) => Option::Some(wrapping_u32(wrapping_add(
+            local_frame,
+            widen_u64(offset)
+        ))),
+        Option::None => Option::None,
     }
 }
 
@@ -1570,15 +1606,20 @@ fn allocate(
         } else {
             find_register(used)
         };
-        if register == UNASSIGNED
-            && spills
-            && record.op == CONSTANT
-            && cheap_immediate(record.left)
-        {
-            // A short immediate is cheaper than storing and reloading a spill.
-            locations.push(Location::Rematerialized(record.left));
-            used = survivors;
-            continue;
+        if record.op == CONSTANT {
+            let next = wrapping_add(index, 1);
+            let fold_store = if next < count && end == wrapping_add(value, 1) {
+                let consumer = read_record(in words, next);
+                immediate_store_consumer(in consumer, value, record.left)
+            } else {
+                false
+            };
+            if fold_store || (register == UNASSIGNED && spills && cheap_immediate(record.left)) {
+                // Avoid a temporary when the next instruction can encode the value.
+                locations.push(Location::Rematerialized(record.left));
+                used = survivors;
+                continue;
+            }
         }
         // The retry uses unused nonvolatile GPRs before spilling. Save
         // each register once in the prologue, including any CFG homes.
@@ -1714,6 +1755,27 @@ fn materialize(inout output: ChunkSeq[u8], in location: Location, scratch: u8) -
         },
         Location::Absent => UNASSIGNED,
     }
+}
+
+fn emit_store_value(
+    inout output: ChunkSeq[u8],
+    in source: Location,
+    base: u8,
+    displacement: u32,
+    width: u64,
+    scratch: u8
+) {
+    match source {
+        Location::Rematerialized(bits) => {
+            if store_immediate_fits(bits, width) {
+                store_immediate(inout output, base, displacement, bits, width);
+                return;
+            }
+        },
+        _ => (),
+    };
+    let source = materialize(inout output, in source, scratch);
+    emit(inout output, in Instruction::Store(source, base, displacement, width));
 }
 
 fn operation(in record: Record, destination: u8, source: u8) -> Instruction {
@@ -2466,6 +2528,51 @@ fn encode_block_pass(
             }
             continue;
         }
+        if is_store(record.op) {
+            let address = assigned(in allocation.locations, record.left);
+            let source = assigned(in allocation.locations, record.right);
+            let base = materialize(inout output, in address, LEFT_SCRATCH);
+            let scratch = if float_right(record.op) {
+                XMM_RIGHT_SCRATCH
+            } else {
+                RIGHT_SCRATCH
+            };
+            emit_store_value(
+                inout output,
+                in source,
+                base,
+                wrapping_u32(record.extra),
+                store_width(record.op),
+                scratch
+            );
+            continue;
+        }
+        if is_stack_store(record.op) {
+            let source = assigned(in allocation.locations, record.left);
+            let promoted = promoted_home(in frame, in record);
+            if promoted != UNASSIGNED {
+                move_return(inout output, in source, promoted);
+            } else {
+                let offset = match local_displacement(in frame, in record, allocation.local_frame) {
+                    Option::Some(offset) => offset,
+                    Option::None => return ChunkSeq::new[u8](),
+                };
+                let scratch = if float_left(record.op) {
+                    XMM_LEFT_SCRATCH
+                } else {
+                    LEFT_SCRATCH
+                };
+                emit_store_value(
+                    inout output,
+                    in source,
+                    RSP,
+                    offset,
+                    store_width(record.op),
+                    scratch
+                );
+            }
+            continue;
+        }
         let has_right = reads_right(in record, paired);
         let left = if reads_left(in record) {
             let location = assigned(in allocation.locations, record.left);
@@ -2523,17 +2630,7 @@ fn encode_block_pass(
             },
             Location::Absent | Location::Rematerialized(_) => UNASSIGNED,
         };
-        if is_store(record.op) {
-            emit(
-                inout output,
-                in Instruction::Store(
-                    right,
-                    left,
-                    wrapping_u32(record.extra),
-                    store_width(record.op)
-                )
-            );
-        } else if record.op == CONSTANT {
+        if record.op == CONSTANT {
             emit(inout output, in Instruction::Immediate(destination, record.left));
         } else if record.op == FLOAT_CONSTANT {
             emit(
@@ -2551,34 +2648,13 @@ fn encode_block_pass(
             relocations.push(kind);
             relocations.push(record.left);
         } else if is_stack_operation(record.op) {
-            let offset = match stack_displacement(in frame, in record) {
-                Option::Some(offset) => wrapping_u32(wrapping_add(
-                    allocation.local_frame,
-                    widen_u64(offset)
-                )),
+            let offset = match local_displacement(in frame, in record, allocation.local_frame) {
+                Option::Some(offset) => offset,
                 Option::None => return ChunkSeq::new[u8](),
             };
-            let home = stack_access_offset(in record) / SPILL_SLOT_BYTES;
-            let home_bit = if stack_slot(in record) == frame.home_slot && home < frame.promoted {
-                register_bit(wrapping_u8(home))
-            } else {
-                0
-            };
-            let promoted = if (frame.gp_homes & home_bit) != 0 {
-                home_register(home)
-            } else if ((frame.single_homes | frame.double_homes) & home_bit) != 0 {
-                xmm_home_register(home)
-            } else {
-                UNASSIGNED
-            };
+            let promoted = promoted_home(in frame, in record);
             let instruction = if promoted != UNASSIGNED {
-                if is_stack_store(record.op) {
-                    Instruction::Move(promoted, left)
-                } else {
-                    Instruction::Move(destination, promoted)
-                }
-            } else if is_stack_store(record.op) {
-                Instruction::Store(left, RSP, offset, store_width(record.op))
+                Instruction::Move(destination, promoted)
             } else if record.op == STACK_LOAD || record.op == FLOAT_STACK_LOAD {
                 Instruction::Load(destination, RSP, offset, record.extra)
             } else {

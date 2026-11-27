@@ -114,6 +114,61 @@ fn branch_table(builder: &mut FunctionBuilder<'_>, index: Value, default: Block,
 }
 
 #[test]
+fn constant_stores_use_memory_immediates_when_the_bits_fit() {
+    const NO_VALUE: u64 = u64::MAX;
+    const CONSTANT: u64 = 0;
+    const STORE_BYTE: u64 = 24;
+    const STORE_WORD: u64 = 25;
+    const STORE_DWORD: u64 = 26;
+    const STORE_QWORD: u64 = 27;
+    const BYTE_STORE: &[u8] = &[0xc6, 0x07, 0xab, 0xc3];
+    const WORD_STORE: &[u8] = &[0x66, 0xc7, 0x47, 1, 0x01, 0x56, 0xc3];
+    const DWORD_STORE: &[u8] = &[0xc7, 0x47, 2, 0x98, 0xba, 0xdc, 0xfe, 0xc3];
+    const QWORD_STORE: &[u8] = &[0x48, 0xc7, 0x07, 0xfe, 0xff, 0xff, 0xff, 0xc3];
+    const CELL_BYTES: usize = size_of::<u64>();
+    let cases = [
+        (STORE_BYTE, 0, 0xab, size_of::<u8>(), Some(BYTE_STORE)),
+        (STORE_WORD, 1, 0x5601, size_of::<u16>(), Some(WORD_STORE)),
+        (
+            STORE_DWORD,
+            2,
+            0xfedc_ba98,
+            size_of::<u32>(),
+            Some(DWORD_STORE),
+        ),
+        (STORE_QWORD, 0, u64::MAX - 1, CELL_BYTES, Some(QWORD_STORE)),
+        (STORE_QWORD, 0, u64::from(u32::MAX), CELL_BYTES, None),
+    ];
+    let mut module =
+        JITModule::new(JITBuilder::new(cranelift_module::default_libcall_names()).unwrap());
+    let mut signature = module.make_signature();
+    signature.params.push(AbiParam::new(types::I64));
+    let alignment = u64::from(module.isa().function_alignment().minimum);
+    for (op, offset, value, width, expected_code) in cases {
+        let request = [1, NO_VALUE, CONSTANT, value, 0, 0, op, 0, 1, offset];
+        let code = binding::x86_64_integer_block(&request);
+        assert!(!code.is_empty());
+        if let Some(expected_code) = expected_code {
+            assert_eq!(code, expected_code);
+        }
+        let id = module.declare_anonymous_function(&signature).unwrap();
+        module
+            .define_function_bytes(id, alignment, &code, &[])
+            .unwrap();
+        module.finalize_definitions().unwrap();
+        type Store = unsafe extern "C" fn(*mut u8);
+        let store: Store = unsafe { std::mem::transmute(module.get_finalized_function(id)) };
+        let mut expected = [0x55; CELL_BYTES];
+        let mut actual = expected;
+        let offset = offset as usize;
+        expected[offset..offset + width].copy_from_slice(&value.to_le_bytes()[..width]);
+        unsafe { store(actual.as_mut_ptr()) };
+        assert_eq!(actual, expected);
+    }
+    unsafe { module.free_memory() };
+}
+
+#[test]
 fn narrow_accesses_beyond_register_homes_leave_the_prefix_promotable() {
     const NO_VALUE: u64 = u64::MAX;
     const STACK_SLOT: u64 = 30;
