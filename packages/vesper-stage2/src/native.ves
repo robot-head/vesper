@@ -3,10 +3,13 @@ use @vesper/check-data::util::{add, inc, n32, w};
 use @vesper/hybrid-native-backend::{x86_64_integer_block};
 use @vesper/hybrid-native-backend::elf::{write_x86_64_leaf};
 use @vesper/hybrid-native-backend::scalar::{
-    ADD, AND, CONSTANT, HEADER_WORDS, MUL, NO_VALUE, OR, RECORD_WORDS, RETURN_VALUE, SUB, XOR
+    ADD, AND, BLOCK_LABEL, BLOCK_RETURN, BRANCH_BLOCK, COMPARE, CONSTANT, EQUAL, HEADER_WORDS,
+    JUMP_LABEL, MUL, NOT_EQUAL, NO_VALUE, OR, RECORD_WORDS, RETURN_VALUE, STACK_LOAD, STACK_SLOT,
+    STACK_STORE_QWORD, SUB, UNSIGNED_GREATER, UNSIGNED_GREATER_EQUAL, UNSIGNED_LESS,
+    UNSIGNED_LESS_EQUAL, XOR
 };
-use @vesper/hybrid-native-backend::x86_64::{ARGUMENTS, QWORD_BITS};
-use @vesper/place-ir::{BlockRow, Lit, Op, Term};
+use @vesper/hybrid-native-backend::x86_64::{ARGUMENTS, BYTE_BITS, QWORD_BITS};
+use @vesper/place-ir::{BlockRow, FnRow, Lit, Op, Term};
 use @vesper/place-ir-lower::ast::{FnR};
 use @vesper/place-ir-lower::lower::{L};
 
@@ -20,6 +23,91 @@ const BINARY_RHS: u64 = 2;
 const READ_PATH: u64 = 1;
 const READ_PASS: u64 = 2;
 const READ_PROJECTIONS: u64 = 3;
+const BLOCK_HEADER_WORDS: u64 = 4;
+const BLOCK_INCOMING_COUNT: u64 = 1;
+const BLOCK_INCOMING_WORDS: u64 = 2;
+const BRANCH_WORDS: u64 = 3;
+const BRANCH_TRUE: u64 = 1;
+const BRANCH_FALSE: u64 = 2;
+const JUMP_ARGUMENT_COUNT: u64 = 1;
+const JUMP_ARGUMENT: u64 = 2;
+const HOME_BYTES: u64 = QWORD_BITS / BYTE_BITS;
+const HOME_SLOT: u64 = 0;
+const SCALAR_RESULTS: u64 = 1;
+
+copy struct Value {
+    owner: u64,
+    home: u64,
+    block: u64,
+    machine: u64,
+}
+
+struct Function {
+    arguments: u64,
+    words: ChunkSeq[u64],
+    values: ChunkSeq[Value],
+    home_bytes: u64,
+}
+
+fn value_new(owner: u64) -> Value {
+    Value { owner: owner, home: NO_VALUE, block: NO_VALUE, machine: NO_VALUE }
+}
+
+impl Function {
+    fn record(inout self, op: u64, lhs: u64, rhs: u64, extra: u64) -> u64 {
+        let value = add(
+            self.arguments,
+            wrapping_sub(self.words.len(), HEADER_WORDS) / RECORD_WORDS
+        );
+        self.words.push(op);
+        self.words.push(lhs);
+        self.words.push(rhs);
+        self.words.push(extra);
+        value
+    }
+
+    fn home(inout self, id: u64) -> bool {
+        let mut value = self.values.try_get(id).unwrap_or(value_new(NO_VALUE));
+        if value.owner == NO_VALUE {
+            return false;
+        }
+        if value.home == NO_VALUE {
+            value.home = self.home_bytes;
+            self.home_bytes = add(self.home_bytes, HOME_BYTES);
+            return self.values.try_set(id, value);
+        }
+        true
+    }
+
+    fn use_in(inout self, id: u64, block: u64) -> bool {
+        let v = self.values.try_get(id).unwrap_or(value_new(NO_VALUE));
+        v.owner == block || self.home(id)
+    }
+
+    fn define(inout self, id: u64, block: u64, machine: u64) -> bool {
+        let mut value = self.values.try_get(id).unwrap_or(value_new(NO_VALUE));
+        value.block = block;
+        value.machine = machine;
+        if value.home != NO_VALUE {
+            let _ = self.record(STACK_STORE_QWORD, machine, HOME_SLOT, value.home);
+        }
+        self.values.try_set(id, value)
+    }
+
+    fn read(inout self, id: u64, block: u64) -> u64 {
+        let mut value = self.values.try_get(id).unwrap_or(value_new(NO_VALUE));
+        if value.block == block {
+            return value.machine;
+        }
+        if value.home == NO_VALUE {
+            return NO_VALUE;
+        }
+        value.machine = self.record(STACK_LOAD, HOME_SLOT, value.home, QWORD_BITS);
+        value.block = block;
+        let _ = self.values.try_set(id, value);
+        value.machine
+    }
+}
 
 fn lower_operator(in low: L, symbol: u32) -> u64 {
     if low.ctx.names.spells(symbol, in "wrapping_add".as_bytes()) {
@@ -34,6 +122,24 @@ fn lower_operator(in low: L, symbol: u32) -> u64 {
         OR
     } else if low.ctx.names.spells(symbol, in "^".as_bytes()) {
         XOR
+    } else {
+        NO_VALUE
+    }
+}
+
+fn unsigned_comparison(in low: L, symbol: u32) -> u64 {
+    if low.ctx.names.spells(symbol, in "==".as_bytes()) {
+        EQUAL
+    } else if low.ctx.names.spells(symbol, in "!=".as_bytes()) {
+        NOT_EQUAL
+    } else if low.ctx.names.spells(symbol, in "<".as_bytes()) {
+        UNSIGNED_LESS
+    } else if low.ctx.names.spells(symbol, in "<=".as_bytes()) {
+        UNSIGNED_LESS_EQUAL
+    } else if low.ctx.names.spells(symbol, in ">".as_bytes()) {
+        UNSIGNED_GREATER
+    } else if low.ctx.names.spells(symbol, in ">=".as_bytes()) {
+        UNSIGNED_GREATER_EQUAL
     } else {
         NO_VALUE
     }
@@ -72,60 +178,227 @@ fn argument_value(in low: L, f: FnR, root: u32) -> u64 {
     NO_VALUE
 }
 
-fn append_record(inout words: ChunkSeq[u64], op: u64, lhs: u64, rhs: u64, extra: u64) {
-    words.push(op);
-    words.push(lhs);
-    words.push(rhs);
-    words.push(extra);
+fn block_parameter(in low: L, b: BlockRow) -> u64 {
+    let incoming = low.program.op(add(b.ha, BLOCK_INCOMING_COUNT));
+    let first = add(BLOCK_HEADER_WORDS, wrapping_mul(incoming, BLOCK_INCOMING_WORDS));
+    if b.hn == inc(first) {
+        low.program.op(add(b.ha, first))
+    } else {
+        NO_VALUE
+    }
 }
 
-fn lower_leaf(in low: L, f: FnR, b: BlockRow, inout words: ChunkSeq[u64]) -> bool {
-    if b.term != Term::Return || b.tn != 1 {
-        return false;
+// Stack homes hold branch results and the values read outside their defining block.
+fn plan_homes(in low: L, f: FnR, row: FnRow, inout m: Function) -> bool {
+    let mut value_count = row.bc;
+    for block in 0..row.bc {
+        value_count = add(value_count, low.program.block(add(row.b0, block)).ic);
     }
-    let mut values = ChunkSeq::new[u64]();
-    values.resize(b.ic, NO_VALUE);
-    words.push(f.param_count);
-    words.push(NO_VALUE);
+    m.values.resize(add(f.param_count, value_count), value_new(NO_VALUE));
+    for arg in 0..f.param_count {
+        let _ = m.values.try_set(arg, value_new(0));
+    }
+    for block in 0..row.bc {
+        let b = low.program.block(add(row.b0, block));
+        let param = block_parameter(in low, b);
+        if param != NO_VALUE {
+            let id = add(f.param_count, param);
+            if !m.values.try_set(id, value_new(block)) || !m.home(id) {
+                return false;
+            }
+        }
+        for index in b.i0..add(b.i0, b.ic) {
+            let inst = low.program.inst(index);
+            if !m.values.try_set(add(f.param_count, w(inst.dest)), value_new(block)) {
+                return false;
+            }
+        }
+    }
+    for block in 0..row.bc {
+        let b = low.program.block(add(row.b0, block));
+        for index in b.i0..add(b.i0, b.ic) {
+            let inst = low.program.inst(index);
+            let at = inst.a;
+            if inst.op == Op::Read {
+                let arg = argument_value(in low, f, n32(low.program.op(at)));
+                if !m.use_in(arg, block) {
+                    return false;
+                }
+            } else if inst.op == Op::Binary {
+                let lhs = add(f.param_count, low.program.op(add(at, BINARY_LHS)));
+                let rhs = add(f.param_count, low.program.op(add(at, BINARY_RHS)));
+                if !m.use_in(lhs, block) || !m.use_in(rhs, block) {
+                    return false;
+                }
+            }
+        }
+        if b.term == Term::Branch || b.term == Term::Return {
+            if !m.use_in(add(f.param_count, low.program.op(b.ta)), block) {
+                return false;
+            }
+        } else if b.term == Term::Jump && b.tn == inc(JUMP_ARGUMENT) {
+            if !m.use_in(add(f.param_count, low.program.op(add(b.ta, JUMP_ARGUMENT))), block) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+fn lower_block(in low: L, f: FnR, b: BlockRow, block: u64, inout m: Function) -> bool {
     for index in b.i0..add(b.i0, b.ic) {
         let inst = low.program.inst(index);
         let at = inst.a;
-        if inst.fallible != 0 || !is_u64(in low, inst.ty) {
+        let wide = is_u64(in low, inst.ty);
+        let boolean = low.ctx.types.name(inst.ty) == low.ctx.world.k.bool_;
+        if inst.fallible != 0 || (!wide && !boolean) {
             return false;
         }
-        let next = add(f.param_count, wrapping_sub(words.len(), HEADER_WORDS) / RECORD_WORDS);
         let value = if inst.op == Op::Const
             && inst.n == LITERAL_WORDS
-            && low.program.op(at) == Lit::Int
             && low.program.op(add(at, LITERAL_HIGH)) == 0
         {
-            append_record(inout words, CONSTANT, low.program.op(add(at, LITERAL_LOW)), 0, 0);
-            next
+            let literal = low.program.op(at);
+            let bits = low.program.op(add(at, LITERAL_LOW));
+            if (wide && literal == Lit::Int) || (boolean && literal == Lit::Bool && bits <= 1) {
+                m.record(CONSTANT, bits, 0, 0)
+            } else {
+                return false;
+            }
         } else if inst.op == Op::Read
             && inst.n == PLAIN_READ_WORDS
             && low.program.path(low.program.op(add(at, READ_PATH))).n == 0
             && low.program.op(add(at, READ_PASS)) != TyPass::Inout
             && low.program.op(add(at, READ_PROJECTIONS)) == 0
         {
-            argument_value(in low, f, n32(low.program.op(at)))
+            m.read(argument_value(in low, f, n32(low.program.op(at))), block)
         } else if inst.op == Op::Binary && inst.n == BINARY_WORDS {
-            let op = lower_operator(in low, n32(low.program.op(at)));
-            let lhs = values.try_get(low.program.op(add(at, BINARY_LHS))).unwrap_or(NO_VALUE);
-            let rhs = values.try_get(low.program.op(add(at, BINARY_RHS))).unwrap_or(NO_VALUE);
-            if op == NO_VALUE || lhs == NO_VALUE || rhs == NO_VALUE {
+            let symbol = n32(low.program.op(at));
+            let lhs = m.read(add(f.param_count, low.program.op(add(at, BINARY_LHS))), block);
+            let rhs = m.read(add(f.param_count, low.program.op(add(at, BINARY_RHS))), block);
+            if lhs == NO_VALUE || rhs == NO_VALUE {
                 return false;
             }
-            append_record(inout words, op, lhs, rhs, QWORD_BITS);
-            next
+            if boolean {
+                let compare = unsigned_comparison(in low, symbol);
+                if compare == NO_VALUE {
+                    return false;
+                }
+                m.record(COMPARE, lhs, rhs, compare)
+            } else {
+                let op = lower_operator(in low, symbol);
+                if op == NO_VALUE {
+                    return false;
+                }
+                m.record(op, lhs, rhs, QWORD_BITS)
+            }
         } else {
             return false;
         };
-        if value == NO_VALUE || !values.try_set(w(inst.dest), value) {
+        if value == NO_VALUE || !m.define(add(f.param_count, w(inst.dest)), block, value) {
             return false;
         }
     }
-    let result = values.try_get(low.program.op(b.ta)).unwrap_or(NO_VALUE);
-    result != NO_VALUE && words.try_set(RETURN_VALUE, result)
+    true
+}
+
+fn lower_terminator(in low: L, row: FnRow, b: BlockRow, block: u64, inout m: Function) -> bool {
+    if b.term == Term::Return && b.tn == 1 {
+        let value = m.read(add(m.arguments, low.program.op(b.ta)), block);
+        if value == NO_VALUE {
+            return false;
+        }
+        if row.bc == 1 {
+            return m.words.try_set(RETURN_VALUE, value);
+        }
+        let _ = m.record(BLOCK_RETURN, value, 0, 0);
+    } else if b.term == Term::Jump {
+        let target = low.program.op(b.ta);
+        if target == 0 || target >= row.bc {
+            return false;
+        }
+        let param = block_parameter(in low, low.program.block(add(row.b0, target)));
+        let count = low.program.op(add(b.ta, JUMP_ARGUMENT_COUNT));
+        if param == NO_VALUE {
+            if count != 0 || b.tn != JUMP_ARGUMENT {
+                return false;
+            }
+        } else {
+            if count != 1 || b.tn != inc(JUMP_ARGUMENT) {
+                return false;
+            }
+            let value = m.read(add(m.arguments, low.program.op(add(b.ta, JUMP_ARGUMENT))), block);
+            let home = m.values
+                .try_get(add(m.arguments, param))
+                .unwrap_or(value_new(NO_VALUE))
+                .home;
+            if value == NO_VALUE || home == NO_VALUE {
+                return false;
+            }
+            let _ = m.record(STACK_STORE_QWORD, value, HOME_SLOT, home);
+        }
+        let _ = m.record(JUMP_LABEL, target, 0, 0);
+    } else if b.term == Term::Branch && b.tn == BRANCH_WORDS {
+        let condition = m.read(add(m.arguments, low.program.op(b.ta)), block);
+        let yes = low.program.op(add(b.ta, BRANCH_TRUE));
+        let no = low.program.op(add(b.ta, BRANCH_FALSE));
+        if condition == NO_VALUE
+            || yes == 0
+            || no == 0
+            || yes >= row.bc
+            || no >= row.bc
+            || block_parameter(in low, low.program.block(add(row.b0, yes))) != NO_VALUE
+            || block_parameter(in low, low.program.block(add(row.b0, no))) != NO_VALUE
+        {
+            return false;
+        }
+        let _ = m.record(BRANCH_BLOCK, condition, no, 0);
+        let _ = m.record(JUMP_LABEL, yes, 0, 0);
+    } else {
+        return false;
+    }
+    true
+}
+
+fn lower_function(in low: L, f: FnR, row: FnRow) -> ChunkSeq[u8] {
+    let mut m = Function {
+        arguments: f.param_count,
+        words: ChunkSeq::new[u64](),
+        values: ChunkSeq::new[Value](),
+        home_bytes: 0
+    };
+    if !plan_homes(in low, f, row, inout m) {
+        return ChunkSeq::new[u8]();
+    }
+    m.words.push(f.param_count);
+    m.words.push(NO_VALUE);
+    if m.home_bytes != 0 {
+        let _ = m.record(STACK_SLOT, m.home_bytes, HOME_BYTES, 0);
+    }
+    for block in 0..row.bc {
+        if row.bc > 1 {
+            let home = if block == 0 && m.home_bytes != 0 {
+                inc(HOME_SLOT)
+            } else {
+                0
+            };
+            let _ = m.record(BLOCK_LABEL, block, home, SCALAR_RESULTS);
+        }
+        if block == 0 {
+            for arg in 0..f.param_count {
+                if !m.define(arg, block, arg) {
+                    return ChunkSeq::new[u8]();
+                }
+            }
+        }
+        let b = low.program.block(add(row.b0, block));
+        if !lower_block(in low, f, b, block, inout m)
+            || !lower_terminator(in low, row, b, block, inout m)
+        {
+            return ChunkSeq::new[u8]();
+        }
+    }
+    x86_64_integer_block(in m.words.as_slice())
 }
 
 // Lower one effect-free SysV function whose values need no layout beyond u64.
@@ -144,11 +417,7 @@ pub fn compile_x86_64_elf(in low: L, entry: u32, in name: Slice[u8]) -> ChunkSeq
         if row.name != entry {
             continue;
         }
-        let mut words = ChunkSeq::new[u64]();
-        if row.bc != 1 || !lower_leaf(in low, f, low.program.block(row.b0), inout words) {
-            return ChunkSeq::new[u8]();
-        }
-        let code = x86_64_integer_block(in words.as_slice());
+        let code = lower_function(in low, f, row);
         return write_x86_64_leaf(in code.as_slice(), in name);
     }
     ChunkSeq::new[u8]()

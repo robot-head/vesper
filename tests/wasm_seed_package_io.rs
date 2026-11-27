@@ -2276,7 +2276,13 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
     std::fs::write(
         package.join("src/lib.ves"),
         "pub fn mix(x: u64, y: u64) -> u64 { wrapping_add(wrapping_mul(x, 5), y ^ 11) }\n\
-         pub fn decline(x: u64) -> u64 { if x == 0 { 7 } else { 9 } }\n",
+         pub fn choose(x: u64, y: u64) -> u64 {\n\
+             wrapping_add(\n\
+                 if x < y { if x == 0 { y } else { wrapping_mul(x, 3) } } else { y ^ 8 },\n\
+                 if y >= 2 && x != 0 { x } else { y }\n\
+             )\n\
+         }\n\
+         pub fn decline(x: u64) -> u64 { match x { 0 => 7, _ => 9 } }\n",
     )
     .unwrap();
     let object = dir.join("native-leaf.o");
@@ -2298,6 +2304,14 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
         "{:?}",
         read_stage2_sidecar_notes(&object)
     );
+    let leaf = dir.join("native-mix.o");
+    std::fs::rename(&object, &leaf).unwrap();
+    assert_eq!(
+        compile("choose"),
+        0,
+        "{:?}",
+        read_stage2_sidecar_notes(&object)
+    );
     let bytes = std::fs::read(&object).unwrap();
     assert!(bytes.starts_with(b"\x7fELF"));
     assert_ne!(compile("decline"), 0);
@@ -2310,13 +2324,16 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
         &caller,
         "#include <stdint.h>\n\
          extern uint64_t mix(uint64_t, uint64_t);\n\
+         extern uint64_t choose(uint64_t, uint64_t);\n\
          int main(void) {\n\
-             return mix(10, 4) != 65 || mix(UINT64_MAX, UINT64_MAX) != UINT64_MAX - 16;\n\
+             if (mix(10, 4) != 65 || mix(UINT64_MAX, UINT64_MAX) != UINT64_MAX - 16) return 1;\n\
+             return choose(0, 4) != 8 || choose(2, 4) != 8 || choose(4, 1) != 10\n\
+                 || choose(UINT64_MAX, 2) != 9 || choose(2, UINT64_MAX) != 8;\n\
          }\n",
     )
     .unwrap();
     let link = std::process::Command::new("cc")
-        .args([&caller, &object])
+        .args([&caller, &leaf, &object])
         .arg("-o")
         .arg(&binary)
         .output()
