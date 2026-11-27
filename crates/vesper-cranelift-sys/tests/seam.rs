@@ -1,0 +1,197 @@
+//! The CLIF seam (#2606): `vcl_function_words` and `vcl_apply_edits` give
+//! the same words and the same edited function as `clif_words` called on
+//! the function directly, and `vcl_define_function` takes the edited,
+//! finalized builder.
+mod support;
+
+use support::*;
+use vesper_cranelift_sys::clif_words::{self, E_BLOCK, E_END, E_PLACE};
+use vesper_cranelift_sys::cranelift_codegen::ir;
+use vesper_cranelift_sys::seam::{WORDS_SHAPES, WORDS_SIMD, finalized_function};
+use vesper_cranelift_sys::*;
+
+/// The shim's `i64` type code.
+const I64: u32 = 4;
+/// `vcl_icmp_imm`'s `sgt` and `vcl_binary`'s `imul` codes.
+const SGT: u32 = 4;
+const IMUL: u32 = 3;
+/// `vcl_binary_imm`'s `iadd_imm` code.
+const IADD_IMM: u32 = 1;
+/// Exported linkage.
+const EXPORT: u32 = 2;
+
+/// A module and a finalized builder for `f(x) = if x > 0 { x + 1 } else
+/// { x * x }`, built through the C ABI.
+unsafe fn build() -> (*mut Module, u32, *mut Builder) {
+    // SAFETY: every handle comes from the call before it, and null slices
+    // have length 0.
+    unsafe {
+        let null = std::ptr::null();
+        let m = vcl_module_new(null, 0, null, 0, null, 0);
+        let sig = vcl_sig_new(m, 0);
+        vcl_sig_param(m, sig, I64);
+        vcl_sig_return(m, sig, I64);
+        let name = b"seam_f";
+        let func = vcl_declare_function(m, name.as_ptr(), name.len(), EXPORT, sig);
+        let b = vcl_builder_new(m, sig);
+        let entry = vcl_create_block(b);
+        let pos = vcl_create_block(b);
+        let neg = vcl_create_block(b);
+        let x = vcl_append_block_param(b, entry, I64);
+        vcl_switch_to_block(b, entry);
+        let c = vcl_icmp_imm(b, SGT, x, 0);
+        vcl_brif(b, c, pos, std::ptr::null(), 0, neg, std::ptr::null(), 0);
+        vcl_switch_to_block(b, pos);
+        let y = vcl_binary_imm(b, IADD_IMM, x, 1);
+        vcl_return(b, &y, 1);
+        vcl_switch_to_block(b, neg);
+        let z = vcl_binary(b, IMUL, x, x);
+        vcl_return(b, &z, 1);
+        vcl_seal_all_blocks(b);
+        assert_eq!(vcl_builder_finalize(b), 0, "{}", error(b));
+        (m, func, b)
+    }
+}
+
+unsafe fn error(b: *const Builder) -> String {
+    let mut out = vec![0u8; 4096];
+    // SAFETY: a live handle and a buffer of `out.len()` bytes.
+    let n = unsafe { vcl_builder_error(b, out.as_mut_ptr(), out.len()) } as usize;
+    String::from_utf8_lossy(&out[..n.min(out.len())]).into_owned()
+}
+
+/// The seam's words, read as its callers do: the length, then the bytes.
+unsafe fn words(b: *mut Builder, flags: u32, ptr: u32) -> Vec<u8> {
+    // SAFETY: a live handle and buffers of the lengths passed.
+    unsafe {
+        let n = vcl_function_words(b, flags, ptr, 0, std::ptr::null_mut(), 0) as usize;
+        let mut out = vec![0u8; n];
+        let head = n / 2;
+        vcl_function_words(b, flags, ptr, 0, out.as_mut_ptr(), head);
+        let rest = &mut out[head..];
+        vcl_function_words(b, flags, ptr, head as u64, rest.as_mut_ptr(), rest.len());
+        out
+    }
+}
+
+#[test]
+fn function_words_match_clif_words() {
+    // SAFETY: handles from `build`, freed once.
+    unsafe {
+        let (m, _, b) = build();
+        let f = finalized_function(b).expect("finalized");
+        assert_eq!(words(b, 0, 0), clif_words::encode_with(&f, false, None));
+        assert_eq!(
+            words(b, WORDS_SIMD, I64),
+            clif_words::encode_with(&f, true, Some(ir::types::I64))
+        );
+        let mut shaped = clif_words::encode(&f, false);
+        shaped.extend(clif_words::shapes(&f));
+        assert_eq!(words(b, WORDS_SHAPES, 0), shaped);
+        vcl_builder_free(b);
+        vcl_module_free(m);
+    }
+}
+
+#[test]
+fn apply_edits_matches_clif_words_and_defines() {
+    // SAFETY: handles from `build`, each consumed once.
+    unsafe {
+        let (m, func, b) = build();
+        let mut f = finalized_function(b).expect("finalized");
+        let before = words(b, 0, 0);
+        // A new block, placed before the last one.
+        let n = f.dfg.num_blocks() as u64;
+        let script = [E_BLOCK, n, E_PLACE, n, n - 1, E_END];
+        assert_eq!(
+            vcl_apply_edits(b, script.as_ptr(), script.len()),
+            0,
+            "{}",
+            error(b)
+        );
+        clif_words::apply(&mut f, &script).unwrap();
+        let edited = finalized_function(b).expect("still finalized");
+        assert_eq!(edited.display().to_string(), f.display().to_string());
+        // The edit drops the kept encoding.
+        let after = words(b, 0, 0);
+        assert_ne!(after, before);
+        assert_eq!(after, clif_words::encode(&f, false));
+        // An empty placed block does not verify, so take it out again.
+        let undo = [clif_words::E_REMOVE_BLOCK, n, E_END];
+        assert_eq!(
+            vcl_apply_edits(b, undo.as_ptr(), undo.len()),
+            0,
+            "{}",
+            error(b)
+        );
+        assert_eq!(vcl_define_function(m, func, b), 0);
+        let o = vcl_module_finish(m);
+        assert!(!o.is_null());
+        assert!(vcl_object_len(o) > 0);
+        vcl_object_free(o);
+    }
+}
+
+#[test]
+fn the_seam_refuses_what_it_cannot_do() {
+    // SAFETY: handles from the calls before, each consumed once.
+    unsafe {
+        let null = std::ptr::null();
+        let m = vcl_module_new(null, 0, null, 0, null, 0);
+        let sig = vcl_sig_new(m, 0);
+        // A building builder has no function to read yet.
+        let b = vcl_builder_new(m, sig);
+        assert_eq!(vcl_function_words(b, 0, 0, 0, std::ptr::null_mut(), 0), 0);
+        assert!(error(b).contains("finalized"), "{}", error(b));
+        vcl_builder_free(b);
+        vcl_module_free(m);
+        // A script that names the wrong new block poisons the builder.
+        let (m, func, b) = build();
+        let script = [E_BLOCK, 99, E_END];
+        assert_eq!(vcl_apply_edits(b, script.as_ptr(), script.len()), 1);
+        assert!(error(b).contains("block"), "{}", error(b));
+        assert_eq!(vcl_define_function(m, func, b), 1);
+        vcl_module_free(m);
+    }
+}
+
+/// Hash of function words as tests/fixtures/seam.ves's `words_hash`
+/// computes it (FNV-1a's prime over whole words, seeded with the length).
+fn words_hash(bytes: &[u8]) -> u64 {
+    const PRIME: u64 = 1_099_511_628_211;
+    bytes
+        .as_chunks::<8>()
+        .0
+        .iter()
+        .fold(bytes.len() as u64, |h, w| {
+            (h ^ u64::from_le_bytes(*w)).wrapping_mul(PRIME)
+        })
+}
+
+#[test]
+fn vesper_reaches_the_seam() {
+    let Some(target) = host_target() else {
+        eprintln!("no .vsys target for this host");
+        return;
+    };
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let before = live_handles();
+    let checked = checked_with(&fixture("seam.ves"), target);
+    // SAFETY: handles from `build`, freed once.
+    let want = unsafe {
+        let (m, _, b) = build();
+        let f = finalized_function(b).expect("finalized");
+        vcl_builder_free(b);
+        vcl_module_free(m);
+        clif_words::encode_with(&f, true, Some(ir::types::I64))
+    };
+    assert_eq!(
+        jit(&checked, "seam_words"),
+        words_hash(&want),
+        "function words"
+    );
+    let id = jit(&checked, "seam");
+    assert_ne!(id, 0, "the fixture failed");
+    assert_eq!(live_handles(), before, "the fixture leaked a handle");
+    assert!(take_published(id).is_some_and(|o| !o.is_empty()));
+}

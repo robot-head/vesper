@@ -362,6 +362,7 @@ const PUBLISHING: &[(&str, &str)] = &[
     ("checked.ves", "checked_x64_windows"),
     ("pilot.ves", "pilot"),
     ("sh5_extras.ves", "extras"),
+    ("seam.ves", "seam"),
 ];
 const ANSWERING: &[(&str, &str)] = &[
     ("pilot.ves", "invalid_function"),
@@ -371,6 +372,7 @@ const ANSWERING: &[(&str, &str)] = &[
     ("pilot.ves", "vectors_and_atomics"),
     ("pilot.ves", "churn"),
     ("sh5_extras.ves", "typed_words"),
+    ("seam.ves", "seam_words"),
 ];
 
 #[test]

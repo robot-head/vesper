@@ -5,7 +5,8 @@
 //! over the corpus `main`s is captured before the pass
 //! (`native_clif_opt::capture`). The Rust steps of `native_clif_opt::STEPS`
 //! then run on it in order. Before each step the Vesper package has ported,
-//! the function is also read in the words of tests/common/clif_words.rs and
+//! the function is also read in the words of
+//! crates/vesper-cranelift-sys/src/clif_words.rs and
 //! the package's edit script for that step is replayed on a copy
 //! (`clif_words::apply`). The printed functions after the step must be
 //! equal.
@@ -13,7 +14,10 @@
 //! - `NATIVE_CLIF_OPT_STRIDE=n` keeps every n-th corpus world (default 1).
 #[path = "common/check_harness.rs"]
 mod check_harness;
-#[path = "common/clif_words.rs"]
+// The Cranelift shim's function words and edit replay (#2606), included
+// by path: the root crate cannot depend on vesper-cranelift-sys (a Bazel
+// dev-dependency cycle).
+#[path = "../crates/vesper-cranelift-sys/src/clif_words.rs"]
 mod clif_words;
 #[path = "common/vector_programs.rs"]
 mod vector_programs;

@@ -5,7 +5,8 @@
 //! the corpus `main`s and the kernels of tests/native_vectorize.rs, is
 //! captured before the pass (`native_vectorize::capture`). Rust runs the
 //! pass on one copy; the Vesper package reads another in the words of
-//! tests/common/clif_words.rs and answers with the loop count and an edit
+//! crates/vesper-cranelift-sys/src/clif_words.rs
+//! and answers with the loop count and an edit
 //! script, which `clif_words::apply` replays. The counts and the printed
 //! functions must be equal.
 //!
@@ -13,7 +14,10 @@
 //! - `CHECK_HARNESS_SPEED=1` runs the ABBA timing (release build).
 #[path = "common/check_harness.rs"]
 mod check_harness;
-#[path = "common/clif_words.rs"]
+// The Cranelift shim's function words and edit replay (#2606), included
+// by path: the root crate cannot depend on vesper-cranelift-sys (a Bazel
+// dev-dependency cycle).
+#[path = "../crates/vesper-cranelift-sys/src/clif_words.rs"]
 mod clif_words;
 
 use check_harness::*;

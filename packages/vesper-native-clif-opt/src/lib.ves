@@ -3,7 +3,8 @@
 //
 // `native_clif_opt::STEPS` is the flattened sequence `run` applies. The
 // entry takes one step's code and one function in the words of
-// tests/common/clif_words.rs, runs that step on @vesper/clif tables and
+// crates/vesper-cranelift-sys/src/clif_words.rs,
+// runs that step on @vesper/clif tables and
 // answers with the edit script that `clif_words::apply` replays on the
 // Rust function. A step not ported yet answers `NOT_PORTED`, and the
 // caller runs Rust's.

@@ -1,5 +1,6 @@
 // @vesper/clif: one Cranelift function as tables, read from the words of
-// tests/common/clif_words.rs (`encode`), for the Vesper ports of the
+// crates/vesper-cranelift-sys/src/clif_words.rs
+// (`encode`), for the Vesper ports of the
 // native CLIF passes (#1829): src/native_vectorize.rs first, then
 // src/native_cold_outline.rs.
 //
