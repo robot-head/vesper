@@ -161,15 +161,16 @@ fn gated_turns_on_exactly_the_flip_gate_passes() {
         );
     }
     assert!(passed > 0, "no swap is gated on");
-    // Off: the parser, the whole layout and the IR check run in Rust.
-    for module in ["parse", "check-layout", "ir-check"] {
+    // Off: the whole layout and the IR check run in Rust.
+    for module in ["check-layout", "ir-check"] {
         assert_eq!(
             count(&output, &format!("vesper-hybrid: {module} answered ")),
             0,
             "gated: the Vesper {module} module answered calls"
         );
     }
-    // On: the AST optimizer and bounds hoisting (both PASS).
+    // On: the parser, AST optimizer and bounds hoisting (all PASS).
+    assert!(count(&output, "vesper-hybrid: parse answered ") > 0);
     assert!(count(&output, "vesper-hybrid: optimize proposed for ") > 0);
     assert!(count(&output, "vesper-hybrid: bounds-hoist hoisted ") > 0);
 }
@@ -220,7 +221,8 @@ fn gated_default_builds_run_the_gated_set() {
     for line in &lines {
         assert_eq!(line.on, line.config.is_some(), "swap {}", line.name);
     }
-    assert_eq!(count(&output, "vesper-hybrid: parse answered "), 0);
+    assert!(count(&output, "vesper-hybrid: parse answered ") > 0);
+    assert_eq!(count(&output, "vesper-hybrid: check-layout answered "), 0);
 }
 
 /// Started as `vesper` (how the default compiler ships it: Bazel's
@@ -240,7 +242,8 @@ fn the_shipped_name_runs_the_gated_set() {
     for line in &lines {
         assert_eq!(line.on, line.config.is_some(), "swap {}", line.name);
     }
-    assert_eq!(count(&output, "vesper-hybrid: parse answered "), 0);
+    assert!(count(&output, "vesper-hybrid: parse answered ") > 0);
+    assert_eq!(count(&output, "vesper-hybrid: check-layout answered "), 0);
     let (set, lines) = swaps(&all);
     assert_eq!(set, "all");
     assert!(lines.iter().all(|l| l.on), "all: a swap is off");
