@@ -64,6 +64,11 @@ const S_END: u64 = 4;
 const T_CLASS: u64 = 0;
 const T_START: u64 = 1;
 const T_END: u64 = 2;
+// An unavailable span in the gate's list: reason, start, end.
+const UNAVAILABLE_WORDS: u64 = 3;
+const U_REASON: u64 = 0;
+const U_START: u64 = 1;
+const U_END: u64 = 2;
 
 // `UnavailableReason`, in its order; NO_REASON is "not blocked".
 const DAMAGED_FUNCTION: u64 = 0;
@@ -550,11 +555,11 @@ pub fn recovery_gate(inout o: ChunkSeq[u8], inout u: ChunkSeq[u64], in b: Slice[
             break;
         }
         o.push(SPACE);
-        put(inout o, in reason_name(u.try_get(k).unwrap_or(0)));
+        put(inout o, in reason_name(u.try_get(wrapping_add(k, U_REASON)).unwrap_or(0)));
         put(inout o, in "@");
-        put_u64(inout o, u.try_get(wrapping_add(k, 1)).unwrap_or(0));
+        put_u64(inout o, u.try_get(wrapping_add(k, U_START)).unwrap_or(0));
         put(inout o, in "..");
-        put_u64(inout o, u.try_get(wrapping_add(k, 2)).unwrap_or(0));
-        k = wrapping_add(k, 3);
+        put_u64(inout o, u.try_get(wrapping_add(k, U_END)).unwrap_or(0));
+        k = wrapping_add(k, UNAVAILABLE_WORDS);
     }
 }
