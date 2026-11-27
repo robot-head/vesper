@@ -115,6 +115,7 @@ const CB_FMA: u64 = 2;
 const CB_FMIN: u64 = 3;
 const CB_FMAX: u64 = 4;
 const CB_FLOAT_UNARY: u64 = 5;
+const CB_WIDE_BIT: u64 = 6;
 
 // Bit builtin and bitwise intrinsic codes.
 const BIT_OP_CLZ: u64 = 1;
@@ -914,16 +915,16 @@ impl Body {
             let local_kind = w.next();
             let stated = w.next();
             let t = temp(inout b, x);
-            let rhs = operand(inout b, t, temp_kind, self.optimize);
+            let rhs = body_operand(inout b, t, temp_kind, self.optimize);
             let old = use_var(inout b, local);
             let raw = emit_write_op(inout b, wop, old, rhs);
             if is_invalid(raw) {
                 return false;
             }
-            let updated = coerce(inout b, raw, local_kind, self.optimize);
+            let updated = body_coerce(inout b, raw, local_kind, self.optimize);
             def_var(inout b, local, updated);
             let zero = ins_iconst(inout b, ty_i64(), 0);
-            coerce(inout b, zero, stated, self.optimize)
+            body_coerce(inout b, zero, stated, self.optimize)
         } else if kind == INST_EXIT {
             let default_lane = w.next();
             let out_val = if default_lane != 0 {
@@ -948,13 +949,29 @@ impl Body {
             for k in 0..n {
                 let ak = w.next();
                 let tv = Var { id: at32(in tvars, k) };
-                avals.push(operand(inout b, tv, ak, self.optimize).id);
+                avals.push(body_operand(inout b, tv, ak, self.optimize).id);
             }
             let a0 = Value { id: at32(in avals, 0) };
             let a1 = Value { id: at32(in avals, 1) };
             let a2 = Value { id: at32(in avals, 2) };
             if cb == CB_BIT {
                 emit_bit_builtin(inout b, sub, meta, a0, a1)
+            } else if cb == CB_WIDE_BIT {
+                let raw = if sub == BIT_OP_WRAPPING_SHL {
+                    ins_ishl(inout b, a0, a1)
+                } else if sub == BIT_OP_WRAPPING_SHR {
+                    if kind_unsigned(meta) {
+                        ins_ushr(inout b, a0, a1)
+                    } else {
+                        ins_sshr(inout b, a0, a1)
+                    }
+                } else {
+                    emit_wide_unary(inout b, WUN_BIT, sub, meta, a0, self.optimize)
+                };
+                if is_invalid(raw) {
+                    return false;
+                }
+                raw
             } else if cb == CB_FMA {
                 Value { id: Cranelift::vcl_ternary(inout b, Ternary::Fma, a0.id, a1.id, a2.id) }
             } else if cb == CB_FMIN {
