@@ -1,4 +1,5 @@
 use @vesper/codegen-freestanding::util::{grow, push16, push32, push64};
+use self::object_bytes::{fits, pad_to, valid_name};
 use self::scalar::{align_up, word_at};
 
 // Object request words:
@@ -126,26 +127,6 @@ copy struct Relocations {
 
 fn field(in words: Slice[u64], at: u64, index: u64) -> u64 {
     word_at(in words, wrapping_add(at, index))
-}
-
-fn fits(start: u64, size: u64, end: u64) -> bool {
-    start <= end && size <= wrapping_sub(end, start)
-}
-
-fn pad_to(inout out: ChunkSeq[u8], offset: u64) {
-    let _ = grow(inout out, wrapping_sub(offset, out.len()));
-}
-
-fn valid_name(in bytes: Slice[u8], offset: u64, size: u64) -> bool {
-    if size == 0 || !fits(offset, size, bytes.len()) {
-        return false;
-    }
-    for index in 0..size {
-        if bytes.try_get(wrapping_add(offset, index)).unwrap_or(0) == 0 {
-            return false;
-        }
-    }
-    true
 }
 
 fn name_after(in bytes: Slice[u8], left: u64, left_len: u64, right: u64, right_len: u64) -> bool {

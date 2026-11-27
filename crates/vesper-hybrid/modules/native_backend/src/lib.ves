@@ -1,6 +1,7 @@
 // @export abi 4
 
 use self::aarch64::{encode_leaf};
+use self::coff::{write_coff};
 use self::scalar::{encode_block};
 use self::elf::{write_elf};
 use self::macho::{write_macho};
@@ -40,4 +41,9 @@ pub fn x86_64_elf_object(in words: Slice[u64], in bytes: Slice[u8]) -> ChunkSeq[
 // An empty result declines the Mach-O object request.
 pub fn macho_object(in words: Slice[u64], in bytes: Slice[u8]) -> ChunkSeq[u8] {
     write_macho(in words, in bytes)
+}
+
+// An empty result declines the AMD64 COFF object request.
+pub fn x86_64_coff_object(in words: Slice[u64], in bytes: Slice[u8]) -> ChunkSeq[u8] {
+    write_coff(in words, in bytes)
 }
