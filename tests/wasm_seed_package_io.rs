@@ -1920,8 +1920,9 @@ fn stage2_collects_package_under_wasi_impl() {
     )
     .expect("run @vesper/stage2 under WASI");
     // 3 modules (prelude + `lib.ves` + `sub.ves`), 19 functions (17 prelude + `main` + `helper`),
-    // 4 ADTs (2 prelude + `Pair` + `Flag`), 0 diagnostic bytes => 3190400.
-    assert_eq!(got, 3190400);
+    // 5 ADTs (3 prelude: `Option`, `RuntimeError`, `ArithOverflow`; + `Pair` + `Flag`),
+    // 0 diagnostic bytes => 3190500.
+    assert_eq!(got, 3190500);
     std::fs::remove_dir_all(dir).unwrap();
 }
 
