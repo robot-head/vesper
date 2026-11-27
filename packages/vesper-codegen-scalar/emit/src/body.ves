@@ -134,6 +134,8 @@ const CB_WIDE_BIT: u64 = 6;
 const CB_BITWISE: u64 = 7;
 const CB_WIDE_CONVERT: u64 = 8;
 const CB_WIDEN_U64: u64 = 9;
+const CB_WORD_CONVERT: u64 = 10;
+const CB_WRAPPING_BIN: u64 = 11;
 
 // Bit builtin and bitwise intrinsic codes.
 const BIT_OP_CLZ: u64 = 1;
@@ -1119,6 +1121,10 @@ impl Body {
                 emit_wide_unary(inout b, WUN_CONVERT, sub, meta, a0, self.optimize)
             } else if cb == CB_WIDEN_U64 {
                 a0
+            } else if cb == CB_WORD_CONVERT {
+                coerce(inout b, a0, sub, self.optimize)
+            } else if cb == CB_WRAPPING_BIN {
+                emit_wide_binary(inout b, sub, a0, a1)
             } else if cb == CB_FMA {
                 Value { id: Cranelift::vcl_ternary(inout b, Ternary::Fma, a0.id, a1.id, a2.id) }
             } else if cb == CB_FMIN {
