@@ -260,6 +260,7 @@ type Encoder = fn(&[u64]) -> Option<Vec<u8>>;
 static ENCODER: OnceLock<Encoder> = OnceLock::new();
 static RELOCATION_ENCODER: OnceLock<Encoder> = OnceLock::new();
 static AARCH64_ENCODER: OnceLock<Encoder> = OnceLock::new();
+static WINDOWS_ENCODER: OnceLock<Encoder> = OnceLock::new();
 
 /// Install the x86-64 integer encoder. A declined request uses Cranelift.
 pub fn install_integer_encoder(encode: Encoder) -> Result<(), Encoder> {
@@ -274,6 +275,11 @@ pub fn install_relocation_encoder(encode: Encoder) -> Result<(), Encoder> {
 /// Installs the AArch64 encoder for ordinary native objects, including relocation packets.
 pub fn install_aarch64_encoder(encode: Encoder) -> Result<(), Encoder> {
     AARCH64_ENCODER.set(encode)
+}
+
+/// Installs the Win64 encoder for code and its unwind record.
+pub fn install_windows_encoder(encode: Encoder) -> Result<(), Encoder> {
+    WINDOWS_ENCODER.set(encode)
 }
 
 const ARGUMENT_COUNT: usize = 0;
@@ -3744,7 +3750,6 @@ fn windows_leaf_program(
     if super::windows::check_target(isa.triple()).is_err()
         || isa.flags().preserve_frame_pointers()
         || isa.flags().enable_pinned_reg()
-        || !function.sized_stack_slots.is_empty()
         || signature.params.len() > MAX_GP_ARGUMENTS
         || signature.returns.len() > 1
         || !signature
@@ -3771,15 +3776,40 @@ fn windows_leaf_program(
     Some((primary, fallback))
 }
 
-/// Only the Vesper encoder can authorize omitting a Windows unwind row.
-pub(super) fn encode_windows_leaf(isa: &dyn TargetIsa, function: &Function) -> Option<Vec<u8>> {
-    let encode = ENCODER.get()?;
+pub(super) struct WindowsLeaf {
+    pub bytes: Vec<u8>,
+    pub unwind: Option<Vec<u8>>,
+}
+
+/// Windows leaves include a Vesper unwind record when they need a stack frame.
+pub(super) fn encode_windows_leaf(isa: &dyn TargetIsa, function: &Function) -> Option<WindowsLeaf> {
+    let encode = WINDOWS_ENCODER.get()?;
     let (primary, fallback) = windows_leaf_program(function, isa)?;
     let emit = |program: IntegerProgram| {
         if program.relocations {
             None
         } else {
-            encode(&program.words)
+            let packet = encode(&program.words)?;
+            let (bytes, unwind) = split_machine_packet(&packet)?;
+            if !unwind.is_empty() {
+                const UNWIND_VERSION_NO_FLAGS: u8 = 1;
+                let ([version_flags, prologue, nodes, frame_register], codes) =
+                    unwind.split_first_chunk::<4>()?;
+                let nodes = usize::from(*nodes);
+                if *version_flags != UNWIND_VERSION_NO_FLAGS
+                    || *frame_register != 0
+                    || *prologue == 0
+                    || usize::from(*prologue) >= bytes.len()
+                    || nodes == 0
+                    || codes.len() != nodes.next_multiple_of(2) * size_of::<u16>()
+                {
+                    return None;
+                }
+            }
+            Some(WindowsLeaf {
+                bytes: bytes.to_vec(),
+                unwind: (!unwind.is_empty()).then(|| unwind.to_vec()),
+            })
         }
     };
     emit(primary).or_else(|| fallback.and_then(emit))
@@ -3976,12 +4006,19 @@ struct MachineCode {
     relocations: Vec<ModuleReloc>,
 }
 
-fn decode_relocatable(packet: &[u8]) -> Option<MachineCode> {
+fn split_machine_packet(packet: &[u8]) -> Option<(&[u8], &[u8])> {
     let (length, body) = packet.split_first_chunk::<{ size_of::<u64>() }>()?;
     let length = usize::try_from(u64::from_le_bytes(*length)).ok()?;
-    let (bytes, records) = body.split_at_checked(length)?;
+    if length == 0 {
+        return None;
+    }
+    body.split_at_checked(length)
+}
+
+fn decode_relocatable(packet: &[u8]) -> Option<MachineCode> {
+    let (bytes, records) = split_machine_packet(packet)?;
     let (records, remainder) = records.as_chunks::<{ 3 * size_of::<u64>() }>();
-    if bytes.is_empty() || !remainder.is_empty() {
+    if !remainder.is_empty() {
         return None;
     }
     let mut relocations = Vec::with_capacity(records.len());

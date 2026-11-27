@@ -2,7 +2,7 @@
 
 use self::aarch64::{encode as encode_aarch64, encode_leaf};
 use self::coff::{write_coff};
-use self::scalar::{encode_block};
+use self::scalar::{encode_block, encode_windows_leaf};
 use self::elf::{write_elf};
 use self::macho::{write_macho};
 use @vesper/codegen-freestanding::util::{push64};
@@ -23,6 +23,19 @@ pub fn x86_64_relocatable_block(in words: Slice[u64]) -> ChunkSeq[u8] {
     let mut relocations = ChunkSeq::new[u64]();
     let code = encode_block(in words, true, inout relocations);
     relocation_packet(in code, in relocations)
+}
+
+// Length-prefixed code followed by a Windows UNWIND_INFO record for framed leaves.
+pub fn x86_64_windows_leaf(in words: Slice[u64]) -> ChunkSeq[u8] {
+    let mut unwind = ChunkSeq::new[u8]();
+    let code = encode_windows_leaf(in words, inout unwind);
+    let mut packet = ChunkSeq::new[u8]();
+    if code.len() != 0 {
+        push64(inout packet, code.len());
+        packet.extend(in code.as_slice());
+        packet.extend(in unwind.as_slice());
+    }
+    packet
 }
 
 pub fn aarch64_relocatable_block(in words: Slice[u64]) -> ChunkSeq[u8] {

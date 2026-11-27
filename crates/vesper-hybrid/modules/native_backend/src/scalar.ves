@@ -16,6 +16,7 @@ use self::x86_64::{
     BitOperation, Rounding, PackedShift, ROL_EXTENSION, ROR_EXTENSION, WIN64_ARGUMENTS,
     win64_arg_register, win64_reserved_registers, WIN64_XMM_LEFT_SCRATCH, WIN64_XMM_RIGHT_SCRATCH
 };
+use @vesper/codegen-freestanding::util::{push16};
 
 // Integer block opcodes shared with src/native_machine.rs.
 pub const CONSTANT: u64 = 0;
@@ -290,6 +291,13 @@ const MEMORY_COPY_ARGUMENTS: u64 = 3;
 const STACK_ALIGNMENT: u64 = 16;
 const RETURN_ADDRESS_BYTES: u64 = 8;
 const SPILL_SLOT_BYTES: u64 = 8;
+const WIN64_UNWIND_VERSION: u8 = 1;
+const WIN64_UNWIND_ALLOC_LARGE: u8 = 1;
+const WIN64_UNWIND_ALLOC_SMALL: u8 = 2;
+const WIN64_UNWIND_SAVE_NONVOL: u8 = 4;
+const WIN64_UNWIND_INFO_SHIFT: u32 = 4;
+const WIN64_UNWIND_SMALL_LIMIT: u64 = 128;
+const WIN64_UNWIND_MAX_PROLOGUE: u64 = 255;
 const VECTOR_SLOT_BYTES: u64 = VECTOR_BITS / BYTE_BITS;
 const LEFT_SCRATCH: u8 = RAX;
 const RIGHT_SCRATCH: u8 = R10;
@@ -377,6 +385,12 @@ struct Allocation {
     save_frame: u64,
     callee_save_frame: u64,
     callee_save_mask: u32,
+}
+
+copy struct Win64Save {
+    code_end: u8,
+    register: u8,
+    stack_slot: u16,
 }
 
 pub fn word_at(in words: Slice[u64], position: u64) -> u64 {
@@ -1468,6 +1482,7 @@ fn find_last_reads(
             || (record.op == RETURN_PAIR && (reverse_index != 0 || record.left >= value))
             || (record.op == TRAP && (reverse_index != 0 || result != NO_VALUE))
             || (record.op == FLOAT_RETURN && (reverse_index != 0 || result == NO_VALUE))
+            || (windows_leaf && (is_call(record.op) || tail_call))
             || (tail_call
                 && (reverse_index != 0 || labeled || result != NO_VALUE || arguments > ARGUMENTS))
         {
@@ -2274,7 +2289,7 @@ fn allocate(
                 }
             }
             Location::Register(register)
-        } else if !spills {
+        } else if !spills || (windows_leaf && floating) {
             return Option::None;
         } else if !result_live {
             // A retained load can finish in a scratch register.
@@ -2738,6 +2753,74 @@ fn preserve_registers(
     }
 }
 
+fn emit_win64_prologue(
+    inout out: ChunkSeq[u8],
+    in allocation: Allocation,
+    inout unwind: ChunkSeq[u8]
+) -> bool {
+    let size = widen_u64(allocation.frame_size);
+    let saved = allocation.callee_save_mask;
+    if size == 0 {
+        return saved == 0;
+    }
+    if size % SPILL_SLOT_BYTES != 0
+        || allocation.callee_save_frame % SPILL_SLOT_BYTES != 0
+        || (saved & ~callee_saved_registers()) != 0
+    {
+        return false;
+    }
+    emit(inout out, in Instruction::FrameEnter(allocation.frame_size));
+    let stack_end = wrapping_u8(out.len());
+    let mut saves = ChunkSeq::new[Win64Save]();
+    let mut slot = allocation.callee_save_frame;
+    for code in 0..REGISTER_CODES {
+        let reg = wrapping_u8(code);
+        if (saved & register_bit(reg)) != 0 {
+            emit(inout out, in Instruction::Store(reg, RSP, wrapping_u32(slot), QWORD_BITS));
+            saves.push(Win64Save {
+                code_end: wrapping_u8(out.len()),
+                register: reg,
+                stack_slot: wrapping_u16(slot / SPILL_SLOT_BYTES)
+            });
+            slot = wrapping_add(slot, SPILL_SLOT_BYTES);
+        }
+    }
+    if out.len() > WIN64_UNWIND_MAX_PROLOGUE {
+        return false;
+    }
+    let small = size <= WIN64_UNWIND_SMALL_LIMIT;
+    // SAVE_NONVOL and a scaled ALLOC_LARGE each consume two 16-bit slots.
+    let nodes = wrapping_add(wrapping_mul(saves.len(), 2), if small { 1 } else { 2 });
+    unwind.push(WIN64_UNWIND_VERSION);
+    unwind.push(wrapping_u8(out.len()));
+    unwind.push(wrapping_u8(nodes));
+    unwind.push(0);
+    for i in 0..saves.len() {
+        let save = match saves.try_get(wrapping_sub(wrapping_sub(saves.len(), 1), i)) {
+            Option::Some(save) => save,
+            Option::None => return false,
+        };
+        unwind.push(save.code_end);
+        unwind.push(
+            wrapping_shl_u8(save.register, WIN64_UNWIND_INFO_SHIFT) | WIN64_UNWIND_SAVE_NONVOL
+        );
+        push16(inout unwind, save.stack_slot);
+    }
+    unwind.push(stack_end);
+    let frame_slots = size / SPILL_SLOT_BYTES;
+    if small {
+        let slots_minus_one = wrapping_u8(wrapping_sub(frame_slots, 1));
+        unwind.push(
+            wrapping_shl_u8(slots_minus_one, WIN64_UNWIND_INFO_SHIFT) | WIN64_UNWIND_ALLOC_SMALL
+        );
+        push16(inout unwind, 0);
+    } else {
+        unwind.push(WIN64_UNWIND_ALLOC_LARGE);
+        push16(inout unwind, wrapping_u16(frame_slots));
+    }
+    true
+}
+
 fn emit_fixed_arithmetic(
     inout out: ChunkSeq[u8],
     in allocation: Allocation,
@@ -2914,7 +2997,16 @@ pub fn encode_block(
     allow_relocations: bool,
     inout relocations: ChunkSeq[u64]
 ) -> ChunkSeq[u8] {
-    encode_block_pass(in words, allow_relocations, inout relocations, true)
+    let mut unwind = ChunkSeq::new[u8]();
+    encode_block_pass(in words, allow_relocations, inout relocations, true, false, inout unwind)
+}
+
+pub fn encode_windows_leaf(in words: Slice[u64], inout unwind: ChunkSeq[u8]) -> ChunkSeq[u8] {
+    if (word_at(in words, ARGUMENT_COUNT) & WINDOWS_LEAF) == 0 {
+        return ChunkSeq::new[u8]();
+    }
+    let mut relocations = ChunkSeq::new[u64]();
+    encode_block_pass(in words, false, inout relocations, true, true, inout unwind)
 }
 
 fn packed_float_compare_needs_temp(mode: u64) -> bool {
@@ -3326,7 +3418,9 @@ fn encode_block_pass(
     in words: Slice[u64],
     allow_relocations: bool,
     inout relocations: ChunkSeq[u64],
-    optimize: bool
+    optimize: bool,
+    windows_frames: bool,
+    inout unwind: ChunkSeq[u8]
 ) -> ChunkSeq[u8] {
     if words.len() < HEADER_WORDS {
         return ChunkSeq::new[u8]();
@@ -3357,7 +3451,10 @@ fn encode_block_pass(
         frame.home_slot = wrapping_sub(first.right, 1);
         let home = frame.slots.try_get(frame.home_slot).unwrap_or(FrameSlot { offset: 0, size: 0 });
         let count = home.size / SPILL_SLOT_BYTES;
-        frame.promoted = if count < HOME_REGISTERS {
+        // Windows keeps CFG homes on the stack until the encoder can save XMM homes.
+        frame.promoted = if windows_leaf {
+            0
+        } else if count < HOME_REGISTERS {
             count
         } else {
             HOME_REGISTERS
@@ -3416,7 +3513,7 @@ fn encode_block_pass(
         Option::Some(last) => last,
         Option::None => return ChunkSeq::new[u8](),
     };
-    if windows_leaf && (frame.vectors || frame.slots.len() != 0 || paired || tail.op == TAIL_CALL) {
+    if windows_leaf && (frame.vectors || paired || (!windows_frames && frame.slots.len() != 0)) {
         return ChunkSeq::new[u8]();
     }
     if frame.floating
@@ -3436,14 +3533,18 @@ fn encode_block_pass(
         let folded = optimize_scalar_block(in words, in reads, arguments, count);
         if folded.len() != 0 {
             let mut folded_relocations = ChunkSeq::new[u64]();
+            let mut folded_unwind = ChunkSeq::new[u8]();
             let output = encode_block_pass(
                 in folded.as_slice(),
                 allow_relocations,
                 inout folded_relocations,
-                false
+                false,
+                windows_frames,
+                inout folded_unwind
             );
             if output.len() != 0 {
                 relocations.extend(in folded_relocations.as_slice());
+                unwind.extend(in folded_unwind.as_slice());
                 return output;
             }
         }
@@ -3460,27 +3561,39 @@ fn encode_block_pass(
     ) {
         Option::Some(result) => result,
         Option::None => {
-            if windows_leaf {
+            if windows_leaf && !windows_frames {
                 return ChunkSeq::new[u8]();
             }
-            match allocate(in words, in reads, arguments, count, in frame, paired, true, false) {
+            match allocate(
+                in words,
+                in reads,
+                arguments,
+                count,
+                in frame,
+                paired,
+                true,
+                windows_leaf
+            ) {
                 Option::Some(result) => result,
                 Option::None => return ChunkSeq::new[u8](),
             }
         },
     };
     let frame_size = allocation.frame_size;
-    if windows_leaf && (frame_size != 0 || allocation.callee_save_mask != 0) {
+    if windows_leaf && !windows_frames && (frame_size != 0 || allocation.callee_save_mask != 0) {
         return ChunkSeq::new[u8]();
     }
 
     let mut output = ChunkSeq::new[u8]();
-    emit(inout output, in Instruction::FrameEnter(frame_size));
-    let callee_save_mask = allocation.callee_save_mask;
-    if callee_save_mask != 0 {
+    if windows_leaf && windows_frames {
+        if !emit_win64_prologue(inout output, in allocation, inout unwind) {
+            return ChunkSeq::new[u8]();
+        }
+    } else {
+        emit(inout output, in Instruction::FrameEnter(frame_size));
         preserve_registers(
             inout output,
-            callee_save_mask,
+            allocation.callee_save_mask,
             allocation.callee_save_frame,
             SPILL_SLOT_BYTES,
             false
@@ -3866,7 +3979,10 @@ fn encode_block_pass(
                 in Instruction::Load(
                     destination,
                     RSP,
-                    wrapping_u32(win64_stack_argument_offset(record.left)),
+                    wrapping_add(
+                        frame_size,
+                        wrapping_u32(win64_stack_argument_offset(record.left))
+                    ),
                     record.extra
                 )
             );

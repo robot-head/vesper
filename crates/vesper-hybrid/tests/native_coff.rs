@@ -100,23 +100,30 @@ pub(crate) fn candidate(words: &[u64], bytes: &[u8]) -> Vec<u8> {
     binding::x86_64_coff_object(words, bytes)
 }
 
-pub(crate) fn fixture(source: &str) -> Vec<u8> {
+pub(crate) fn fixture(source: &str, optimize: bool) -> Vec<u8> {
     let parsed = vesper::parser::parse(source);
     assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
     let checked = vesper::check::check(&parsed.module);
     assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
-    vesper::native::object_with_options(&checked.world, "main", Some(TARGET), true)
+    vesper::native::object_with_options(&checked.world, "main", Some(TARGET), optimize)
         .unwrap()
         .0
 }
 
+fn windows_leaf_packet(packet: &[u8]) -> (&[u8], &[u8]) {
+    let (length, body) = packet.split_first_chunk::<{ size_of::<u64>() }>().unwrap();
+    body.split_at(u64::from_le_bytes(*length) as usize)
+}
+
 #[test]
-fn coff_swap_uses_win64_leaves_and_preserves_caller_unwind_rows() {
+fn coff_swap_uses_win64_leaves_and_preserves_unwind_rows() {
     use std::cell::Cell;
 
     const LEAF_SUFFIX: &str = "_weighted";
     const CALLER: &str = "main";
     const UNWIND_TABLE: &str = ".pdata";
+    const UNWIND_DATA: &str = ".xdata";
+    const UNWIND_RVA_FIELD: usize = 2 * size_of::<u32>();
     const PROGRAM: &str = "
 fn weighted(a: u64, b: u64, c: u64, d: u64, e: u64, f: u64) -> u64 {
     wrapping_add(wrapping_add(wrapping_add(a, b), wrapping_sub(c, d)), wrapping_mul(e, f))
@@ -131,52 +138,68 @@ fn main() -> u64 { wrapping_add(sum(7), 1) }
     thread_local! {
         static ACTIVE_CODE: Cell<Option<Vec<u8>>> = const { Cell::new(None) };
     }
-    vesper::native::machine::install_integer_encoder(|words| {
+    vesper::native::machine::install_windows_encoder(|words| {
         let previous = ACTIVE_CODE.with(Cell::take)?;
-        let code = binding::x86_64_integer_block(words);
-        if code.is_empty() {
+        let packet = binding::x86_64_windows_leaf(words);
+        if packet.is_empty() {
             ACTIVE_CODE.with(|capture| capture.set(Some(previous)));
             return None;
         }
-        ACTIVE_CODE.with(|capture| capture.set(Some(code.clone())));
-        Some(code)
+        ACTIVE_CODE.with(|capture| capture.set(Some(packet.clone())));
+        Some(packet)
     })
     .unwrap();
 
-    let baseline = fixture(PROGRAM);
-    ACTIVE_CODE.with(|capture| capture.set(Some(Vec::new())));
-    let swapped = fixture(PROGRAM);
-    let emitted = ACTIVE_CODE.with(Cell::take).unwrap();
-    assert!(!emitted.is_empty());
-    for (bytes, body) in [(baseline, None), (swapped, Some(emitted))] {
-        let selected = body.is_some();
-        let file = object::File::parse(bytes.as_slice()).unwrap();
-        let leaf = file
-            .symbols()
-            .find(|symbol| symbol.name().is_ok_and(|name| name.ends_with(LEAF_SUFFIX)))
-            .unwrap();
-        if let Some(code) = body {
+    for optimize in [true, false] {
+        let baseline = fixture(PROGRAM, optimize);
+        ACTIVE_CODE.with(|capture| capture.set(Some(Vec::new())));
+        let swapped = fixture(PROGRAM, optimize);
+        let emitted = ACTIVE_CODE.with(Cell::take).unwrap();
+        assert!(!emitted.is_empty());
+        for (bytes, packet) in [(baseline, None), (swapped, Some(emitted))] {
+            let file = object::File::parse(bytes.as_slice()).unwrap();
+            let leaf = file
+                .symbols()
+                .find(|symbol| symbol.name().is_ok_and(|name| name.ends_with(LEAF_SUFFIX)))
+                .unwrap();
+            let pdata = file.section_by_name(UNWIND_TABLE).unwrap();
+            let starts: HashMap<_, _> = pdata
+                .relocations()
+                .filter(|(offset, _)| {
+                    offset.is_multiple_of(vesper::native::windows::RUNTIME_FUNCTION_SIZE as u64)
+                })
+                .filter_map(|(offset, relocation)| match relocation.target() {
+                    RelocationTarget::Symbol(symbol) => {
+                        Some((offset, file.symbol_by_index(symbol).ok()?))
+                    }
+                    _ => None,
+                })
+                .filter_map(|(offset, symbol)| Some((symbol.name().ok()?, offset as usize)))
+                .collect();
+            assert!(starts.contains_key(CALLER), "{starts:?}");
+            let Some(packet) = packet else { continue };
+            let (code, unwind) = windows_leaf_packet(&packet);
             let section = file
                 .section_by_index(leaf.section_index().unwrap())
                 .unwrap();
             let start = (leaf.address() - section.address()) as usize;
             assert_eq!(&section.data().unwrap()[start..start + code.len()], code);
-        }
-        let pdata = file.section_by_name(UNWIND_TABLE).unwrap();
-        let starts: Vec<_> = pdata
-            .relocations()
-            .filter(|(offset, _)| {
-                offset.is_multiple_of(vesper::native::windows::RUNTIME_FUNCTION_SIZE as u64)
-            })
-            .filter_map(|(_, relocation)| match relocation.target() {
-                RelocationTarget::Symbol(symbol) => file.symbol_by_index(symbol).ok(),
-                _ => None,
-            })
-            .filter_map(|symbol| symbol.name().ok())
-            .collect();
-        assert!(starts.contains(&CALLER), "{starts:?}");
-        if selected {
-            assert!(!starts.contains(&leaf.name().unwrap()), "{starts:?}");
+            let row = starts.get(leaf.name().unwrap()).copied();
+            if optimize {
+                assert!(row.is_none());
+                assert!(unwind.is_empty());
+            } else {
+                let field = row.unwrap() + UNWIND_RVA_FIELD;
+                let offset =
+                    u32::from_le_bytes(*pdata.data().unwrap()[field..].first_chunk().unwrap())
+                        as usize;
+                let xdata = file.section_by_name(UNWIND_DATA).unwrap();
+                assert!(!unwind.is_empty());
+                assert_eq!(
+                    &xdata.data().unwrap()[offset..offset + unwind.len()],
+                    unwind
+                );
+            }
         }
     }
 }
@@ -185,7 +208,7 @@ fn main() -> u64 { wrapping_add(sum(7), 1) }
 fn win64_function_pair(
     jit: &mut cranelift_jit::JITModule,
     context: &mut cranelift_codegen::Context,
-) -> [*const u8; 2] {
+) -> ([*const u8; 2], Vec<u8>) {
     use cranelift_codegen::{isa, settings};
     use cranelift_module::Module;
 
@@ -195,8 +218,9 @@ fn win64_function_pair(
         .unwrap();
     let tape =
         vesper::native::machine::x86_64_block_words(&context.func, windows.as_ref()).unwrap();
-    let code = binding::x86_64_integer_block(&tape);
-    assert!(!code.is_empty(), "{tape:?}");
+    let packet = binding::x86_64_windows_leaf(&tape);
+    assert!(!packet.is_empty(), "{tape:?}");
+    let (code, _) = windows_leaf_packet(&packet);
     let candidate = jit
         .declare_anonymous_function(&context.func.signature)
         .unwrap();
@@ -204,11 +228,14 @@ fn win64_function_pair(
         .declare_anonymous_function(&context.func.signature)
         .unwrap();
     let alignment = u64::from(jit.isa().function_alignment().minimum);
-    jit.define_function_bytes(candidate, alignment, &code, &[])
+    jit.define_function_bytes(candidate, alignment, code, &[])
         .unwrap();
     jit.define_function(reference, context).unwrap();
     jit.finalize_definitions().unwrap();
-    [candidate, reference].map(|function| jit.get_finalized_function(function))
+    (
+        [candidate, reference].map(|function| jit.get_finalized_function(function)),
+        packet,
+    )
 }
 
 #[cfg(all(target_arch = "x86_64", target_os = "linux"))]
@@ -262,8 +289,10 @@ fn win64_leaf_integer_registers_and_stack_match_cranelift() {
     builder.ins().return_(&[total]);
     builder.seal_all_blocks();
     builder.finalize();
-    let [candidate, reference] = win64_function_pair(&mut jit, &mut context)
-        .map(|function| unsafe { std::mem::transmute::<*const u8, Entry>(function) });
+    let (functions, packet) = win64_function_pair(&mut jit, &mut context);
+    assert!(windows_leaf_packet(&packet).1.is_empty());
+    let [candidate, reference] =
+        functions.map(|function| unsafe { std::mem::transmute::<*const u8, Entry>(function) });
     let inputs = [0, 1, 0x8512_34ab_cdef_5678, 1u64 << 63, u64::MAX];
     for a in inputs {
         for b in inputs {
@@ -361,7 +390,8 @@ fn win64_leaf_mixed_registers_and_stack_match_cranelift() {
         b.ins().return_(&[value]);
         b.seal_all_blocks();
         b.finalize();
-        let functions = win64_function_pair(&mut jit, &mut context);
+        let (functions, packet) = win64_function_pair(&mut jit, &mut context);
+        assert!(windows_leaf_packet(&packet).1.is_empty());
         for (i, &x) in inputs.iter().enumerate() {
             for (j, &y) in inputs.iter().enumerate() {
                 let a = i as u8;
@@ -395,9 +425,175 @@ fn win64_leaf_mixed_registers_and_stack_match_cranelift() {
     unsafe { jit.free_memory() };
 }
 
+#[cfg(all(target_arch = "x86_64", target_os = "linux"))]
+#[test]
+fn win64_framed_leaves_match_cranelift_and_describe_the_prologue() {
+    use cranelift_codegen::{
+        ir::{AbiParam, InstBuilder, StackSlotData, StackSlotKind, types},
+        isa::CallConv,
+    };
+    use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
+    use cranelift_jit::{JITBuilder, JITModule};
+    use cranelift_module::Module;
+
+    const UNWIND_VERSION: u8 = 1;
+    const ALLOC_LARGE: u8 = 1;
+    const ALLOC_SMALL: u8 = 2;
+    const SAVE_NONVOL: u8 = 4;
+    const OP_MASK: u8 = 0xf;
+    const INFO_SHIFT: u8 = 4;
+    const REX_W: u8 = 0x48;
+    const REX_R: u8 = 4;
+    const SUB_RSP_MODRM: u8 = 0xec;
+    const ALU_IMM8: u8 = 0x83;
+    const ALU_IMM32: u8 = 0x81;
+    const MOV_STORE: u8 = 0x89;
+    const DISP8: u8 = 0x40;
+    const DISP32: u8 = 0x80;
+    const SIB_RSP: u8 = 0x24;
+    const MODRM_SIB: u8 = 4;
+    const REGISTER_MASK: u8 = 7;
+    const SLOT_BYTES: usize = size_of::<u64>();
+    type Entry = unsafe extern "win64" fn(u64, u64, u64, u64, f64, u64) -> u64;
+
+    let mut jit =
+        JITModule::new(JITBuilder::new(cranelift_module::default_libcall_names()).unwrap());
+    for (slot_size, loads, expected_alloc) in [
+        (8, 1, ALLOC_SMALL),
+        (256, 1, ALLOC_LARGE),
+        (256, 17, ALLOC_LARGE),
+    ] {
+        let mut context = jit.make_context();
+        let signature = &mut context.func.signature;
+        signature.call_conv = CallConv::WindowsFastcall;
+        signature.params = [
+            types::I64,
+            types::I64,
+            types::I64,
+            types::I64,
+            types::F64,
+            types::I64,
+        ]
+        .map(AbiParam::new)
+        .to_vec();
+        signature.returns.push(AbiParam::new(types::I64));
+        let mut frontend = FunctionBuilderContext::new();
+        let mut b = FunctionBuilder::new(&mut context.func, &mut frontend);
+        let slot = b.create_sized_stack_slot(StackSlotData::new(
+            StackSlotKind::ExplicitSlot,
+            slot_size,
+            SLOT_BYTES.ilog2() as u8,
+        ));
+        let entry = b.create_block();
+        b.append_block_params_for_function_params(entry);
+        b.switch_to_block(entry);
+        let [a, _, _, _, stack_float, stack_int] = *b.block_params(entry) else {
+            unreachable!()
+        };
+        b.ins().stack_store(a, slot, 0);
+        let values: Vec<_> = (0..loads)
+            .map(|_| b.ins().stack_load(types::I64, slot, 0))
+            .collect();
+        let bits = b.ins().bitcast(
+            types::I64,
+            cranelift_codegen::ir::MemFlags::new(),
+            stack_float,
+        );
+        let sum = b.ins().iadd(bits, stack_int);
+        let result = values
+            .into_iter()
+            .fold(sum, |acc, value| b.ins().iadd(acc, value));
+        b.ins().return_(&[result]);
+        b.seal_all_blocks();
+        b.finalize();
+
+        let (functions, packet) = win64_function_pair(&mut jit, &mut context);
+        let (code, unwind) = windows_leaf_packet(&packet);
+        let [version, prologue, nodes, frame_register] = *unwind.first_chunk::<4>().unwrap();
+        assert_eq!(version, UNWIND_VERSION);
+        assert_eq!(frame_register, 0);
+        let mut slots =
+            unwind[4..].as_chunks::<{ size_of::<u16>() }>().0[..usize::from(nodes)].iter();
+        let mut saved = Vec::new();
+        let mut allocation = None;
+        while let Some(record) = slots.next() {
+            let [end, encoded] = *record;
+            let op = encoded & OP_MASK;
+            let info = encoded >> INFO_SHIFT;
+            match op {
+                SAVE_NONVOL => {
+                    let offset = u16::from_le_bytes(*slots.next().unwrap());
+                    saved.push((usize::from(end), info, usize::from(offset) * SLOT_BYTES));
+                }
+                ALLOC_SMALL | ALLOC_LARGE => {
+                    assert_eq!(op, expected_alloc);
+                    let amount = if op == ALLOC_SMALL {
+                        usize::from(info) + 1
+                    } else {
+                        assert_eq!(info, 0);
+                        usize::from(u16::from_le_bytes(*slots.next().unwrap()))
+                    };
+                    assert!(slots.next().is_none());
+                    allocation = Some((usize::from(end), amount * SLOT_BYTES));
+                }
+                _ => panic!("unexpected Win64 unwind operation {op}"),
+            }
+        }
+        let (mut end, frame_size) = allocation.unwrap();
+        let mut adjustment = vec![
+            REX_W,
+            if frame_size <= i8::MAX as usize {
+                ALU_IMM8
+            } else {
+                ALU_IMM32
+            },
+            SUB_RSP_MODRM,
+        ];
+        let immediate = (frame_size as u32).to_le_bytes();
+        let imm_bytes = if adjustment[1] == ALU_IMM8 {
+            size_of::<u8>()
+        } else {
+            size_of::<u32>()
+        };
+        adjustment.extend(&immediate[..imm_bytes]);
+        assert_eq!(&code[..end], adjustment);
+        assert_eq!(saved.is_empty(), loads == 1);
+        for (next, reg, offset) in saved.into_iter().rev() {
+            assert!(offset + SLOT_BYTES <= frame_size);
+            let (mode, disp_bytes) = match offset {
+                0 => (0, 0),
+                val if val <= i8::MAX as usize => (DISP8, size_of::<u8>()),
+                _ => (DISP32, size_of::<u32>()),
+            };
+            let mut store = vec![
+                REX_W | if reg > REGISTER_MASK { REX_R } else { 0 },
+                MOV_STORE,
+                mode | ((reg & REGISTER_MASK) << REGISTER_MASK.count_ones()) | MODRM_SIB,
+                SIB_RSP,
+            ];
+            store.extend(&(offset as u32).to_le_bytes()[..disp_bytes]);
+            assert_eq!(&code[end..next], store);
+            end = next;
+        }
+        assert_eq!(end, usize::from(prologue));
+        let [candidate, reference] =
+            functions.map(|pointer| unsafe { std::mem::transmute::<*const u8, Entry>(pointer) });
+        for (a, float, b) in [
+            (0, -0.0, 1),
+            (12345, 1.25, 77),
+            (u64::MAX, f64::INFINITY, 0),
+        ] {
+            assert_eq!(unsafe { candidate(a, 0, 0, 0, float, b) }, unsafe {
+                reference(a, 0, 0, 0, float, b)
+            });
+        }
+    }
+    unsafe { jit.free_memory() };
+}
+
 #[test]
 fn coff_matches_cranelift_sections_relocations_and_windows_unwind() {
-    let baseline = fixture(include_str!("../../../examples/fibonacci.ves"));
+    let baseline = fixture(include_str!("../../../examples/fibonacci.ves"), true);
     let (mut words, bytes) = request(&baseline).unwrap();
     let generated = candidate(&words, &bytes);
     assert_eq!(request(&generated), Some((words.clone(), bytes.clone())));

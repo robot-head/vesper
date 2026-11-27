@@ -169,7 +169,7 @@ pub fn parse_target(target: &str) -> Result<target_lexicon::Triple, WindowsNativ
 struct Unwound {
     id: FuncId,
     name: String,
-    info: Option<cranelift_codegen::isa::unwind::winx64::UnwindInfo>,
+    info: Option<Vec<u8>>,
 }
 
 /// An [`ObjectModule`] that keeps the Windows x64 unwind information of every
@@ -218,30 +218,38 @@ impl Module for UnwindModule {
         ctx: &mut Context,
         ctrl_plane: &mut ControlPlane,
     ) -> ModuleResult<()> {
-        if self.use_machine_leaves
-            && let Some(code) = super::machine::encode_windows_leaf(self.inner.isa(), &ctx.func)
-        {
-            // The machine encoder guarantees a zero frame and only volatile registers.
-            let alignment = u64::from(self.inner.isa().function_alignment().minimum);
-            return self
-                .inner
-                .define_function_bytes(func, alignment, &code, &[]);
-        }
-        self.inner
-            .define_function_with_control_plane(func, ctx, ctrl_plane)?;
         let name = self
             .inner
             .declarations()
             .get_function_decl(func)
             .linkage_name(func)
             .into_owned();
+        if self.use_machine_leaves
+            && let Some(code) = super::machine::encode_windows_leaf(self.inner.isa(), &ctx.func)
+        {
+            let alignment = u64::from(self.inner.isa().function_alignment().minimum);
+            self.inner
+                .define_function_bytes(func, alignment, &code.bytes, &[])?;
+            self.functions.push(Unwound {
+                id: func,
+                name,
+                info: code.unwind,
+            });
+            return Ok(());
+        }
+        self.inner
+            .define_function_with_control_plane(func, ctx, ctrl_plane)?;
         let compiled = ctx.compiled_code().ok_or_else(|| {
             ModuleError::Compilation(CodegenError::Unsupported(format!(
                 "{name}: no compiled code after definition"
             )))
         })?;
         let info = match compiled.create_unwind_info(self.inner.isa())? {
-            Some(UnwindInfo::WindowsX64(info)) => Some(info),
+            Some(UnwindInfo::WindowsX64(info)) => {
+                let mut bytes = vec![0; info.emit_size()];
+                info.emit(&mut bytes);
+                Some(bytes)
+            }
             None => None,
             Some(_) => {
                 return Err(ModuleError::Compilation(CodegenError::Unsupported(
@@ -338,9 +346,7 @@ fn write_unwind_tables(
         typ: object::pe::IMAGE_REL_AMD64_ADDR32NB,
     };
     for (_, _, symbol, size, info, name) in &rows {
-        let mut bytes = vec![0; info.emit_size()];
-        info.emit(&mut bytes);
-        let unwind_offset = obj.append_section_data(xdata, &bytes, 4);
+        let unwind_offset = obj.append_section_data(xdata, info, 4);
         let row = obj.append_section_data(pdata, &[0; RUNTIME_FUNCTION_SIZE], 4);
         let relocations = [
             (row, *symbol, 0),

@@ -45,6 +45,14 @@ pub(super) fn register(_r: &mut Registry) {
             ENCODED.fetch_add(1, Relaxed);
             Some(packet)
         }));
+        must(machine::install_windows_encoder(|words| {
+            let packet = binding::x86_64_windows_leaf(words);
+            if packet.is_empty() {
+                return None;
+            }
+            ENCODED.fetch_add(1, Relaxed);
+            Some(packet)
+        }));
         must(machine::install_aarch64_encoder(|words| {
             let bytes = binding::aarch64_relocatable_block(words);
             if bytes.is_empty() {

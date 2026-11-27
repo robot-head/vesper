@@ -25,6 +25,7 @@ unsafe extern "C" {
     fn vesper_hybrid_native_backend_x86_64_elf_object(words: *mut u64, bytes: *mut u64) -> i64;
     fn vesper_hybrid_native_backend_x86_64_integer_block(words: *mut u64) -> i64;
     fn vesper_hybrid_native_backend_x86_64_relocatable_block(words: *mut u64) -> i64;
+    fn vesper_hybrid_native_backend_x86_64_windows_leaf(words: *mut u64) -> i64;
 }
 
 /// The sequence runtime of the Vesper library `hybrid_native_backend`.
@@ -108,5 +109,14 @@ pub fn x86_64_relocatable_block(words: &[u64]) -> Vec<u8> {
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
     let raw = vesper_port_abi::with_slice(words, |view_words| unsafe { vesper_hybrid_native_backend_x86_64_relocatable_block(view_words) });
+    unsafe { vesper_port_abi::seq_take::<u8>(RUNTIME, raw as u64) }
+}
+
+/// Calls `x86_64_windows_leaf` of the Vesper library `hybrid_native_backend` (`vesper_hybrid_native_backend_x86_64_windows_leaf`).
+pub fn x86_64_windows_leaf(words: &[u64]) -> Vec<u8> {
+    // SAFETY: `vesper_hybrid_native_backend_x86_64_windows_leaf` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(words, |view_words| unsafe { vesper_hybrid_native_backend_x86_64_windows_leaf(view_words) });
     unsafe { vesper_port_abi::seq_take::<u8>(RUNTIME, raw as u64) }
 }
