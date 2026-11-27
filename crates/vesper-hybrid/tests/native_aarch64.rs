@@ -384,6 +384,80 @@ fn aarch64_explicit_traps_terminate_their_control_flow_paths() {
 }
 
 #[test]
+fn aarch64_uses_callee_saved_registers_for_values_live_across_calls() {
+    const STP_X19_X20_SP: u32 = 0xa900_53f3;
+    const LDP_X19_X20_SP: u32 = 0xa940_53f3;
+    const MOV_X19_X0: u32 = 0xaa00_03f3;
+    const MOV_X20_X1: u32 = 0xaa01_03f4;
+    const MOV_X0_X19: u32 = 0xaa13_03e0;
+    const MOV_X1_X20: u32 = 0xaa14_03e1;
+    let code = |tape: &[u64]| {
+        let packet = binding::aarch64_relocatable_block(tape);
+        let (length, body) = packet.split_first_chunk::<{ size_of::<u64>() }>().unwrap();
+        let instructions = &body[..u64::from_le_bytes(*length) as usize];
+        let (words, remainder) = instructions.as_chunks::<{ size_of::<u32>() }>();
+        assert!(remainder.is_empty());
+        words
+            .iter()
+            .copied()
+            .map(u32::from_le_bytes)
+            .collect::<Vec<_>>()
+    };
+    let paired = code(&[
+        2,
+        0,
+        CALL_VOID,
+        17,
+        0,
+        0,
+        CALL_VOID,
+        17,
+        0,
+        0,
+        RETURN_PAIR,
+        1,
+        0,
+        0,
+    ]);
+    assert!(
+        paired
+            .windows(3)
+            .any(|words| words == [STP_X19_X20_SP, MOV_X19_X0, MOV_X20_X1])
+    );
+    let results = paired.iter().position(|&word| word == MOV_X0_X19).unwrap();
+    assert_eq!(paired[results + 1], MOV_X1_X20);
+    assert!(paired[results + 2..].contains(&LDP_X19_X20_SP));
+
+    const LOCAL_BYTES_WITH_NO_ROOM_FOR_CALLEE_SAVES: u64 = 3952;
+    let large_frame = code(&[
+        2,
+        0,
+        STACK_SLOT,
+        LOCAL_BYTES_WITH_NO_ROOM_FOR_CALLEE_SAVES,
+        16,
+        0,
+        STACK_STORE_QWORD,
+        0,
+        0,
+        0,
+        CALL_VOID,
+        17,
+        0,
+        0,
+        CALL_VOID,
+        17,
+        0,
+        0,
+        RETURN_PAIR,
+        1,
+        0,
+        0,
+    ]);
+    assert!(!large_frame.contains(&MOV_X19_X0));
+    assert!(large_frame.ends_with(&[RET]));
+}
+
+#[test]
 fn aarch64_narrow_arithmetic_and_extension() {
     const ADD_W0_W0_W1: u32 = 0x0b01_0000;
     const TRUNCATE_X0_TO_BYTE: u32 = 0xd340_1c00;

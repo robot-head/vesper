@@ -31,9 +31,13 @@ const SPILL_RESULT: u32 = 12;
 const SPILL_LEFT: u32 = 13;
 const SPILL_RIGHT: u32 = 14;
 const SPILL_THIRD: u32 = 15;
-const ENCODING_ATTEMPTS: u64 = 4;
+const ENCODING_ATTEMPTS: u64 = 5;
 const SCRATCH: u32 = 16;
 const SECOND_SCRATCH: u32 = 17;
+// x18 is reserved on Darwin. Keep x29 available for a frame pointer.
+const FIRST_CALLEE_REGISTER: u32 = 19;
+const CALLEE_REGISTERS: u64 = 10;
+const CALLS_FOR_CALLEE_REGISTERS: u64 = 2;
 const FIRST_RESULT: u32 = 0;
 const SECOND_RESULT: u32 = 1;
 const PAIRED_RESULTS: u64 = 2;
@@ -171,6 +175,12 @@ struct FrameLayout {
     size: u64,
 }
 
+copy struct SavedRegisters {
+    mask: u32,
+    first: u32,
+    offset: u64,
+}
+
 copy enum Allocation {
     RegisterHomes,
     StackHomes,
@@ -180,6 +190,7 @@ copy enum Allocation {
 copy enum Retry {
     Allocate(Allocation),
     LongTables,
+    WithoutCalleeRegisters,
 }
 
 fn sh(value: u32, amount: u32) -> u32 {
@@ -892,6 +903,7 @@ fn emit_return(
     adjustment: u32,
     spill_mode: bool,
     link_slot: u64,
+    in callee: SavedRegisters,
     inout restores: ChunkSeq[u64]
 ) {
     if high == FIRST_RESULT && low != FIRST_RESULT {
@@ -915,6 +927,7 @@ fn emit_return(
     if link_slot != NO_VALUE {
         memory(inout output, true, QWORD_BITS, SP, LINK_REGISTER, link_slot);
     }
+    frame_registers(inout output, in callee, true);
     if spill_mode {
         restores.push(output.len());
     }
@@ -935,8 +948,8 @@ fn call_save_slot(frame_bytes: u64, register: u64) -> u64 {
     )
 }
 
-fn call_saved_registers(inout out: ChunkSeq[u8], mask: u32, frame_bytes: u64, load: bool) {
-    let mut remaining = mask;
+fn frame_registers(inout out: ChunkSeq[u8], in saved: SavedRegisters, load: bool) {
+    let mut remaining = saved.mask;
     loop {
         if remaining == 0 {
             break;
@@ -944,7 +957,8 @@ fn call_saved_registers(inout out: ChunkSeq[u8], mask: u32, frame_bytes: u64, lo
         let first = trailing_zeros_u64(widen_u64(remaining));
         remaining = remaining & ~sh(1, first);
         let next = wrapping_add(first, 1);
-        let offset = call_save_slot(frame_bytes, widen_u64(first));
+        let index = widen_u64(wrapping_sub(first, saved.first));
+        let offset = wrapping_add(saved.offset, wrapping_mul(index, HOME_WORD_BYTES));
         let scaled = offset / HOME_WORD_BYTES;
         if (remaining & sh(1, next)) != 0 && scaled <= PAIR_IMM7_MAX {
             let opcode = if load {
@@ -1000,7 +1014,12 @@ fn emit_call(
             overwritten = overwritten | dest_bit;
         }
     }
-    call_saved_registers(inout out, save, frame_bytes, false);
+    let save_base = call_save_slot(frame_bytes, 0);
+    frame_registers(
+        inout out,
+        in SavedRegisters { mask: save, first: 0, offset: save_base },
+        false
+    );
     for arg in 0..record.right {
         let source = location(in locations, read_record(in words, wrapping_add(start, arg)).left);
         let dest = wrapping_u32(arg);
@@ -1039,7 +1058,7 @@ fn emit_call(
         // The low result's allocator runs before the high result is placed.
         rrr(inout out, ORR_REG, SECOND_SCRATCH, ZERO, SECOND_RESULT);
     }
-    call_saved_registers(inout out, used, frame_bytes, true);
+    frame_registers(inout out, in SavedRegisters { mask: used, first: 0, offset: save_base }, true);
     Option::Some(result)
 }
 
@@ -1140,6 +1159,7 @@ pub fn encode(
 ) -> ChunkSeq[u8] {
     let mut allocation = Allocation::RegisterHomes;
     let mut long_tables = false;
+    let mut use_callee_registers = true;
     for attempt in 0..ENCODING_ATTEMPTS {
         let mut retry: Option[Retry] = Option::None;
         let mut references = ChunkSeq::new[u64]();
@@ -1147,6 +1167,7 @@ pub fn encode(
             in words,
             allocation,
             long_tables,
+            use_callee_registers,
             allow_calls,
             inout retry,
             inout references
@@ -1154,6 +1175,7 @@ pub fn encode(
         match retry {
             Option::Some(Retry::Allocate(next)) => allocation = next,
             Option::Some(Retry::LongTables) => long_tables = true,
+            Option::Some(Retry::WithoutCalleeRegisters) => use_callee_registers = false,
             Option::None => {
                 if code.len() != 0 {
                     relocations.extend(in references.as_slice());
@@ -1169,6 +1191,7 @@ fn encode_pass(
     in words: Slice[u64],
     allocation: Allocation,
     long_tables: bool,
+    use_callee_registers: bool,
     allow_calls: bool,
     inout retry: Option[Retry],
     inout relocations: ChunkSeq[u64]
@@ -1264,6 +1287,10 @@ fn encode_pass(
     if second != NO_VALUE {
         let _ = ends.try_set(second, values);
     }
+    let mut live_values = if result != NO_VALUE { 1 } else { 0 };
+    if second != NO_VALUE && second != result {
+        live_values = wrapping_add(live_values, 1);
+    }
     let mut arms = ChunkSeq::new[BranchArm]();
     let mut depth: u64 = 0;
     let mut block_end = values;
@@ -1271,7 +1298,8 @@ fn encode_pass(
     let mut call_end = NEVER_READ;
     let mut pending_arguments: u64 = 0;
     let mut needs_call_pair = false;
-    let mut has_calls = false;
+    let mut call_sites = ChunkSeq::new[u64]();
+    let mut max_live_across_calls: u64 = 0;
     for reverse in 0..count {
         let index = wrapping_sub(wrapping_sub(count, 1), reverse);
         let value = wrapping_add(args, index);
@@ -1297,7 +1325,6 @@ fn encode_pass(
             }
             pending_arguments = r.right;
             call_end = value;
-            has_calls = true;
             register_home = false;
         }
         let n = match operands(in r, returns) {
@@ -1311,6 +1338,15 @@ fn encode_pass(
             return out;
         }
         let last = last_read(in ends, value);
+        if last != NEVER_READ {
+            live_values = wrapping_sub(live_values, 1);
+        }
+        if direct_call(r.op) {
+            call_sites.push(value);
+            if live_values > max_live_across_calls {
+                max_live_across_calls = live_values;
+            }
+        }
         if labeled {
             if r.op == BLOCK_LABEL {
                 entry_end = block_end;
@@ -1392,12 +1428,15 @@ fn encode_pass(
                 value
             };
             let _ = ends.try_set(r.left, end);
+            live_values = wrapping_add(live_values, 1);
         }
         if n >= 2 && last_read(in ends, r.right) == NEVER_READ {
             let _ = ends.try_set(r.right, value);
+            live_values = wrapping_add(live_values, 1);
         }
         if n == 3 && last_read(in ends, r.extra) == NEVER_READ {
             let _ = ends.try_set(r.extra, value);
+            live_values = wrapping_add(live_values, 1);
         }
     }
     if depth != 0 || pending_arguments != 0 || needs_call_pair {
@@ -1414,13 +1453,34 @@ fn encode_pass(
     } else {
         0
     };
-    let link_slot = if has_calls { local_bytes } else { NO_VALUE };
+    let has_calls = call_sites.len() != 0;
+    let callee_count = if use_callee_registers && call_sites.len() >= CALLS_FOR_CALLEE_REGISTERS {
+        if max_live_across_calls < CALLEE_REGISTERS {
+            max_live_across_calls
+        } else {
+            CALLEE_REGISTERS
+        }
+    } else {
+        0
+    };
+    let callee_mask = sh(wrapping_sub(sh(1, wrapping_u32(callee_count)), 1), FIRST_CALLEE_REGISTER);
+    let callee = SavedRegisters {
+        mask: callee_mask,
+        first: FIRST_CALLEE_REGISTER,
+        offset: local_bytes
+    };
+    let callee_bytes = align_up(wrapping_mul(callee_count, HOME_WORD_BYTES), STACK_ALIGNMENT);
+    let call_base = wrapping_add(local_bytes, callee_bytes);
+    let link_slot = if has_calls { call_base } else { NO_VALUE };
     let frame_bytes = if has_calls {
-        wrapping_add(local_bytes, call_frame_bytes())
+        wrapping_add(call_base, call_frame_bytes())
     } else {
         local_bytes
     };
     if frame_bytes > MAX_FRAME_BYTES {
+        if callee_mask != 0 {
+            retry = Option::Some(Retry::WithoutCalleeRegisters);
+        }
         return out;
     }
     let adjustment = arithmetic_immediate(frame_bytes).unwrap_or(0);
@@ -1430,6 +1490,7 @@ fn encode_pass(
     if has_calls {
         memory(inout out, false, QWORD_BITS, SP, LINK_REGISTER, link_slot);
     }
+    frame_registers(inout out, in callee, false);
     let register_mask = if spill_mode {
         SPILL_REGISTER_MASK
     } else {
@@ -1444,6 +1505,8 @@ fn encode_pass(
     let mut labels = ChunkSeq::new[Label]();
     let mut fixups = ChunkSeq::new[LabelBranch]();
     let mut table_fixups = ChunkSeq::new[TableFixup]();
+    let mut remaining_calls = call_sites.len();
+    let mut next_call = call_sites.try_get(wrapping_sub(remaining_calls, 1)).unwrap_or(values);
     if labeled {
         for index in 0..count {
             labels.push(Label { address: NO_VALUE, block: false });
@@ -1451,14 +1514,20 @@ fn encode_pass(
     }
     for arg in 0..args {
         let reg = wrapping_u32(arg);
-        locations.push(reg);
+        let mut assigned = reg;
         let last = last_read(in ends, arg);
         if last != NEVER_READ {
             if labeled && last >= entry_end {
                 return ChunkSeq::new[u8]();
             }
-            used = used | sh(1, reg);
+            let available = callee_mask & ~used;
+            if available != 0 && last > next_call {
+                assigned = trailing_zeros_u64(widen_u64(available));
+                rrr(inout out, ORR_REG, assigned, ZERO, reg);
+            }
+            used = used | sh(1, assigned);
         }
+        locations.push(assigned);
     }
     for index in 0..count {
         let value = wrapping_add(args, index);
@@ -1478,6 +1547,8 @@ fn encode_pass(
             continue;
         }
         let call_result = if calls {
+            remaining_calls = wrapping_sub(remaining_calls, 1);
+            next_call = call_sites.try_get(wrapping_sub(remaining_calls, 1)).unwrap_or(values);
             let start = wrapping_sub(index, r.right);
             for arg in 0..r.right {
                 let source = read_record(in words, wrapping_add(start, arg)).left;
@@ -1489,7 +1560,7 @@ fn encode_pass(
                 in locations,
                 in r,
                 index,
-                used,
+                used & CALLER_REGISTER_MASK,
                 frame_bytes,
                 live,
                 r.op == CALL_PAIR && last_read(in ends, wrapping_add(value, 1)) != NEVER_READ,
@@ -1620,7 +1691,16 @@ fn encode_pass(
             if r.left == TRAP_VALUE {
                 push32(inout out, TRAP_INSTRUCTION);
             } else {
-                emit_return(inout out, lhs, rhs, adjustment, spill_mode, link_slot, inout restores);
+                emit_return(
+                    inout out,
+                    lhs,
+                    rhs,
+                    adjustment,
+                    spill_mode,
+                    link_slot,
+                    in callee,
+                    inout restores
+                );
             }
             if r.op == EARLY_RETURN {
                 depth = wrapping_sub(depth, 1);
@@ -1674,15 +1754,30 @@ fn encode_pass(
                 continue;
             }
         }
-        let available = register_mask & ~used & ~home_mask;
+        let last = last_read(in ends, value);
+        let preserved = if last > next_call {
+            callee_mask & ~used
+        } else {
+            0
+        };
+        let available = if preserved != 0 {
+            preserved
+        } else {
+            register_mask & ~used & ~home_mask
+        };
         let assigned = if available != 0 {
             let reg = trailing_zeros_u64(widen_u64(available));
             used = used | sh(1, reg);
             reg
         } else if spill_mode {
-            match allocate_spill(inout spills, frame_bytes, value, last_read(in ends, value)) {
+            match allocate_spill(inout spills, frame_bytes, value, last) {
                 Option::Some(spill) => spill,
-                Option::None => return ChunkSeq::new[u8](),
+                Option::None => {
+                    if callee_mask != 0 {
+                        retry = Option::Some(Retry::WithoutCalleeRegisters);
+                    }
+                    return ChunkSeq::new[u8]();
+                },
             }
         } else {
             let next = if home_mask != 0 {
@@ -1767,7 +1862,16 @@ fn encode_pass(
     } else {
         let low = materialize(inout out, location(in locations, result), SPILL_LEFT, frame_bytes);
         let high = materialize(inout out, location(in locations, second), SPILL_RIGHT, frame_bytes);
-        emit_return(inout out, low, high, adjustment, spill_mode, link_slot, inout restores);
+        emit_return(
+            inout out,
+            low,
+            high,
+            adjustment,
+            spill_mode,
+            link_slot,
+            in callee,
+            inout restores
+        );
     }
     if spill_mode {
         let size = align_up(

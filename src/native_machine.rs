@@ -2099,6 +2099,7 @@ fn encode_integer_block(
         const AARCH64_ENTRY_EXIT_FLAGS: [&str; 2] = ["use_bti", "sign_return_address"];
         let encode = AARCH64_ENCODER.get()?;
         if function.signature.call_conv != isa.default_call_conv()
+            || isa.flags().enable_pinned_reg()
             || isa.isa_flags().iter().any(|flag| {
                 AARCH64_ENTRY_EXIT_FLAGS.contains(&flag.name) && flag.as_bool() == Some(true)
             })
