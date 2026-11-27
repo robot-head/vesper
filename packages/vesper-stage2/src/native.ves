@@ -106,6 +106,7 @@ const F32_OVERFLOW_F64_EXPONENT: u64 = 1151;
 const F32_DISCARDED_BITS: u64 = F64_FRACTION_BITS - F32_FRACTION_BITS;
 const F32_INFINITY_BITS: u64 = F32_EXPONENT_MASK << F32_FRACTION_BITS;
 const F32_NAN_QUIET_BIT: u64 = 1 << (F32_FRACTION_BITS - 1);
+const FLOAT_REMAINDER_ARGUMENTS: u64 = 2;
 
 enum ScalarKind: _ {
     Unsupported = 0,
@@ -127,9 +128,21 @@ enum ScalarKind: _ {
     Struct = 16,
 }
 
+enum NativeImport: _ {
+    None = 0,
+    Fmod = 1,
+    Fmodf = 2,
+}
+
+copy struct CallTarget {
+    function: u64,
+    imported: u64,
+}
+
 struct CallGraph {
     indices: ChunkSeq[u64],
-    pending: ChunkSeq[u64],
+    imports: ChunkSeq[u64],
+    pending: ChunkSeq[CallTarget],
 }
 
 impl CallGraph {
@@ -142,7 +155,20 @@ impl CallGraph {
         if !self.indices.try_set(index, id) {
             return NO_VALUE;
         }
-        self.pending.push(index);
+        self.pending.push(CallTarget { function: index, imported: NativeImport::None });
+        id
+    }
+
+    fn discover_import(inout self, imported: u64) -> u64 {
+        let existing = self.imports.try_get(imported).unwrap_or(NO_VALUE);
+        if existing != NO_VALUE {
+            return existing;
+        }
+        let id = self.pending.len();
+        if !self.imports.try_set(imported, id) {
+            return NO_VALUE;
+        }
+        self.pending.push(CallTarget { function: NO_VALUE, imported: imported });
         id
     }
 }
@@ -2322,7 +2348,8 @@ fn lower_binary(
     kind: u8,
     block: u64,
     range_step: bool,
-    inout m: Function
+    inout m: Function,
+    inout graph: CallGraph
 ) -> u64 {
     let symbol = n32(low.program.op(at));
     let left = low.program.op(add(at, BINARY_LHS));
@@ -2345,6 +2372,25 @@ fn lower_binary(
         return NO_VALUE;
     }
     if is_float(operand_kind) && operand_kind == right_kind {
+        if kind == operand_kind && low.ctx.names.spells(symbol, in "%".as_bytes()) {
+            let imported = if kind == ScalarKind::F32 {
+                NativeImport::Fmodf
+            } else {
+                NativeImport::Fmod
+            };
+            let target = graph.discover_import(imported);
+            if target == NO_VALUE {
+                return NO_VALUE;
+            }
+            let _ = m.record(CALL_ARGUMENT, lhs, 0, 0);
+            let _ = m.record(CALL_ARGUMENT, rhs, 0, 0);
+            return m.record(
+                CALL_FLOAT,
+                target,
+                FLOAT_REMAINDER_ARGUMENTS,
+                FLOAT_REMAINDER_ARGUMENTS
+            );
+        }
         return lower_float_binary(in low, symbol, kind, operand_kind, lhs, rhs, inout m);
     }
     if kind == ScalarKind::Bool && operand_kind == right_kind {
@@ -2551,7 +2597,15 @@ fn lower_block(
         } else if inst.op == Op::Unary && inst.n == UNARY_WORDS {
             lower_unary(in low, inst, kind, block, inout m)
         } else if inst.op == Op::Binary && inst.n == BINARY_WORDS {
-            lower_binary(in low, at, kind, block, range_increment(in low, b, index, inst), inout m)
+            lower_binary(
+                in low,
+                at,
+                kind,
+                block,
+                range_increment(in low, b, index, inst),
+                inout m,
+                inout graph
+            )
         } else if inst.op == Op::Call {
             lower_call(in low, f, inst, block, inout m, inout graph)
         } else {
@@ -2918,16 +2972,37 @@ pub fn compile_x86_64_elf(in low: L, entry: u32, in name: Slice[u8]) -> ChunkSeq
         let index = low.ast.fn_index(row.name);
         let _ = rows.try_set(index, row_index);
     }
-    let mut graph = CallGraph { indices: ChunkSeq::new[u64](), pending: ChunkSeq::new[u64]() };
+    let mut graph = CallGraph {
+        indices: ChunkSeq::new[u64](),
+        imports: ChunkSeq::new[u64](),
+        pending: ChunkSeq::new[CallTarget]()
+    };
     graph.indices.resize(low.ast.fns.len(), NO_VALUE);
+    graph.imports.resize(inc(NativeImport::Fmodf), NO_VALUE);
     let _ = graph.discover(entry_index);
     let mut object = x86_text_object();
     let mut symbol: u64 = 0;
     loop {
-        let index = match graph.pending.try_get(symbol) {
+        let target = match graph.pending.try_get(symbol) {
             Option::Some(next) => next,
             Option::None => return object.write(),
         };
+        if target.imported != NativeImport::None {
+            let runtime = if target.imported == NativeImport::Fmodf {
+                "fmodf"
+            } else {
+                "fmod"
+            };
+            // The entry's global symbol must not mask the runtime import.
+            if low.ctx.names.spells(entry, in runtime.as_bytes())
+                || !object.add_import(in runtime.as_bytes())
+            {
+                return ChunkSeq::new[u8]();
+            }
+            symbol = inc(symbol);
+            continue;
+        }
+        let index = target.function;
         let row_index = rows.try_get(index).unwrap_or(NO_VALUE);
         if row_index == NO_VALUE {
             return ChunkSeq::new[u8]();

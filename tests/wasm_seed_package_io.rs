@@ -2513,6 +2513,13 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
                  wrapping_add(wrapping_add(tag_bits, wrapping_u64(widen_i64(short))), changed)\n\
              }\n\
          }\n\
+         fn remainder_helper(a: f64, b: f64) -> f64 { a % b }\n\
+         pub fn float_remainders(a: f64, b: f64, x: f32, y: f32) -> f64 {\n\
+             let first = a % b;\n\
+             let second = remainder_helper(b, a);\n\
+             (first + second) + widen_f64(x % y)\n\
+         }\n\
+         fn fmod(a: f64, b: f64) -> f64 { a % b }\n\
          fn unsupported(x: u64) -> u64 { match (x, x) { (0, _) => 7, _ => 9 } }\n\
          pub fn decline(x: u64) -> u64 { unsupported(x) }\n",
     )
@@ -2740,7 +2747,37 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
         "{:?}",
         read_stage2_sidecar_notes(&object)
     );
+    let aggregate_call_object = dir.join("native-aggregate-call.o");
+    std::fs::rename(&object, &aggregate_call_object).unwrap();
+    assert_eq!(
+        compile("float_remainders"),
+        0,
+        "{:?}",
+        read_stage2_sidecar_notes(&object)
+    );
     let bytes = std::fs::read(&object).unwrap();
+    let file = object::File::parse(bytes.as_slice()).unwrap();
+    for name in ["fmod", "fmodf"] {
+        let symbol = file.symbol_by_name(name).unwrap();
+        assert!(symbol.is_undefined() && symbol.is_global());
+    }
+    assert!(file.symbol_by_name("remainder_helper").unwrap().is_local());
+    let mut call_symbols = Vec::new();
+    for (_, relocation) in file.section_by_name(".text").unwrap().relocations() {
+        assert_eq!(
+            relocation.flags(),
+            object::RelocationFlags::Elf {
+                r_type: object::elf::R_X86_64_PLT32
+            }
+        );
+        let object::RelocationTarget::Symbol(target) = relocation.target() else {
+            panic!("native call must target a symbol");
+        };
+        call_symbols.push(file.symbol_by_index(target).unwrap().name().unwrap());
+    }
+    assert_eq!(call_symbols, ["fmod", "remainder_helper", "fmodf", "fmod"]);
+    assert_ne!(compile("fmod"), 0);
+    assert_eq!(std::fs::read(&object).unwrap(), bytes);
     assert_ne!(compile("decline"), 0);
     assert!(read_stage2_sidecar_notes(&object).contains("unsupported x86-64 ELF entry"));
     assert_eq!(std::fs::read(&object).unwrap(), bytes);
@@ -2751,6 +2788,7 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
         &caller,
         "#include <stdbool.h>\n\
          #include <stdint.h>\n\
+         #include <math.h>\n\
          extern uint64_t mix(uint64_t, uint64_t);\n\
          extern uint64_t choose(uint64_t, uint64_t);\n\
          extern uint64_t calls(uint64_t, uint64_t);\n\
@@ -2778,6 +2816,7 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
                                       uint64_t, uint64_t, bool, float, double);\n\
          extern uint64_t float_literals(uint64_t *, bool);\n\
          extern uint64_t aggregate_calls(int64_t, bool, float);\n\
+         extern double float_remainders(double, double, float, float);\n\
          int main(void) {\n\
              if (mix(10, 4) != 65 || mix(UINT64_MAX, UINT64_MAX) != UINT64_MAX - 16) return 1;\n\
              if (choose(0, 4) != 8 || choose(2, 4) != 8 || choose(4, 1) != 10\n\
@@ -2847,8 +2886,11 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
                  || literals[3] != UINT64_C(0x80000000) || literals[4] != UINT64_C(0x7f7fffff)\n\
                  || literals[5] != UINT64_C(0x7f800000) || literals[6] != UINT64_C(0x3fe00000)) return 26;\n\
              if (float_literals(literals, false) != 0 || literals[6] != UINT64_C(0x40000000)) return 27;\n\
-             return aggregate_calls(127, true, 1.5f) != UINT64_C(0x3fbfff86)\n\
-                 || aggregate_calls(127, false, 1.5f) != 390 || aggregate_calls(-2, false, 0.0f) != 3;\n\
+             if (aggregate_calls(127, true, 1.5f) != UINT64_C(0x3fbfff86)\n\
+                 || aggregate_calls(127, false, 1.5f) != 390 || aggregate_calls(-2, false, 0.0f) != 3) return 28;\n\
+             return float_remainders(7.5, 2.0, -4.5f, 3.0f) != 2.0\n\
+                 || float_remainders(-7.5, 2.0, 4.5f, 3.0f) != 2.0\n\
+                 || !isnan(float_remainders(7.5, 0.0, 4.5f, 3.0f));\n\
          }\n",
     )
     .unwrap();
@@ -2879,8 +2921,10 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
             &equality_object,
             &result_object,
             &literals_object,
+            &aggregate_call_object,
             &object,
         ])
+        .arg("-lm")
         .arg("-o")
         .arg(&binary)
         .output()

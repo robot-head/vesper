@@ -93,8 +93,8 @@ pub fn x86_text_object() -> X86TextObject {
 }
 
 impl X86TextObject {
-    // Relocation target IDs are the ordinal positions of the functions added
-    // to this object, including functions whose code has yet to be emitted.
+    // Relocation targets are insertion-order symbol IDs, including functions
+    // and imports which have yet to be added to this object.
     pub fn add_function(
         inout self,
         in code: Slice[u8],
@@ -134,6 +134,21 @@ impl X86TextObject {
         true
     }
 
+    pub fn add_import(inout self, in name: Slice[u8]) -> bool {
+        if name.len() == 0 {
+            return false;
+        }
+        self.symbols.push(TextSymbol {
+            name: self.names.len(),
+            name_length: name.len(),
+            offset: 0,
+            size: 0,
+            linkage: UNDEFINED
+        });
+        self.names.extend(in name);
+        true
+    }
+
     pub fn write(in self) -> ChunkSeq[u8] {
         let size = self.text.len();
         let mut words = ChunkSeq::new[u64]();
@@ -152,7 +167,13 @@ impl X86TextObject {
                     words.push(symbol.offset);
                     words.push(symbol.size);
                     words.push(symbol.linkage);
-                    words.push(TEXT);
+                    words.push(
+                        if symbol.linkage == UNDEFINED {
+                            NO_SECTION
+                        } else {
+                            TEXT
+                        }
+                    );
                 },
                 Option::None => return ChunkSeq::new[u8](),
             }
