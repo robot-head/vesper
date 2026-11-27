@@ -1867,7 +1867,7 @@ pub fn aarch64_leaf_words(function: &Function) -> Option<Vec<u64>> {
 
 fn aarch64_register_signature(params: &[AbiParam], returns: &[AbiParam]) -> bool {
     params.len() <= AARCH64_GP_ARGUMENTS
-        && returns.len() <= 1
+        && returns.len() <= GP_RESULTS
         && params
             .iter()
             .chain(returns)

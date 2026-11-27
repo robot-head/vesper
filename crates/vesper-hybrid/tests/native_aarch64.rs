@@ -30,9 +30,12 @@ const EARLY_RETURN: u64 = 29;
 const STACK_SLOT: u64 = 30;
 const STACK_LOAD: u64 = 32;
 const STACK_STORE_QWORD: u64 = 36;
+const RETURN_PAIR: u64 = 37;
 const CALL: u64 = 38;
 const CALL_ARGUMENT: u64 = 39;
 const CALL_VOID: u64 = 40;
+const CALL_PAIR: u64 = 41;
+const CALL_HIGH: u64 = 42;
 const SIGNED_MUL_HIGH: u64 = 50;
 const UNSIGNED_MUL_HIGH: u64 = 51;
 const ADD_IMMEDIATE: u64 = 52;
@@ -196,6 +199,48 @@ fn aarch64_call_reuses_unmodified_argument_registers() {
     let expected = [MOV_X1_X0, BRANCH_AND_LINK].map(u32::to_le_bytes).concat();
     assert_eq!(code.len(), CALL_AND_FRAME_WITH_MOVE * size_of::<u32>());
     assert!(code.windows(expected.len()).any(|bytes| bytes == expected));
+}
+
+#[test]
+fn aarch64_paired_returns_place_both_values_without_overwriting_either() {
+    const MOV_X16_X1: u32 = 0xaa01_03f0;
+    const MOV_X1_X0: u32 = 0xaa00_03e1;
+    const MOV_X0_X16: u32 = 0xaa10_03e0;
+    let expected = [MOV_X16_X1, MOV_X1_X0, MOV_X0_X16, RET]
+        .map(u32::to_le_bytes)
+        .concat();
+    assert_eq!(
+        binding::aarch64_integer_leaf(&[2, 1, RETURN_PAIR, 0, 0, 0]),
+        expected,
+    );
+    assert_eq!(
+        binding::aarch64_integer_leaf(&[2, NO_VALUE, BLOCK_LABEL, 0, 0, 2, BLOCK_RETURN, 1, 0, 0,]),
+        expected,
+    );
+    assert!(binding::aarch64_integer_leaf(&[0, NO_VALUE, RETURN_PAIR, 0, 0, 0]).is_empty());
+}
+
+#[test]
+fn aarch64_pair_calls_keep_the_high_result_when_the_low_result_is_unused() {
+    const BRANCH_AND_LINK: u32 = 0x9400_0000;
+    const MOV_X17_X1: u32 = 0xaa01_03f1;
+    const MOV_X0_X17: u32 = 0xaa11_03e0;
+    let input = [0, 1, CALL_PAIR, 17, 0, 0, CALL_HIGH, 0, 0, 0];
+    assert!(binding::aarch64_integer_leaf(&input).is_empty());
+    let packet = binding::aarch64_relocatable_block(&input);
+    let (length, body) = packet.split_first_chunk::<{ size_of::<u64>() }>().unwrap();
+    let code = &body[..u64::from_le_bytes(*length) as usize];
+    let expected = [BRANCH_AND_LINK, MOV_X17_X1, MOV_X0_X17]
+        .map(u32::to_le_bytes)
+        .concat();
+    assert!(code.windows(expected.len()).any(|bytes| bytes == expected));
+    for malformed in [
+        &[0, 0, CALL_PAIR, 17, 0, 0][..],
+        &[0, 0, CALL_HIGH, 0, 0, 0],
+        &[0, 1, CALL_PAIR, 17, 0, 0, CALL_HIGH, 1, 0, 0],
+    ] {
+        assert!(binding::aarch64_relocatable_block(malformed).is_empty());
+    }
 }
 
 #[test]

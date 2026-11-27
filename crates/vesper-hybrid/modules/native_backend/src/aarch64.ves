@@ -15,7 +15,8 @@ use self::scalar::{
     UNSIGNED_GREATER_EQUAL, UNSIGNED_GREATER, UNSIGNED_LESS_EQUAL, BLOCK_LABEL, EDGE_LABEL,
     JUMP_LABEL, BRANCH_LABEL, BLOCK_RETURN, BRANCH_BLOCK, BRANCH_TABLE, BRANCH_TABLE_TARGET,
     TableFixup, ARGUMENT_COUNT, RETURN_VALUE, HEADER_WORDS, RECORD_WORDS, NEVER_READ, NO_VALUE,
-    DISP32_MASK, CALL, CALL_ARGUMENT, CALL_VOID, LIBCALL_TARGET_BASE, MEMCPY_LIBCALL
+    DISP32_MASK, RETURN_PAIR, CALL, CALL_ARGUMENT, CALL_VOID, CALL_PAIR, CALL_HIGH,
+    LIBCALL_TARGET_BASE, MEMCPY_LIBCALL
 };
 use self::x86_64::{BYTE_BITS, WORD_BITS, DWORD_BITS, QWORD_BITS};
 
@@ -31,7 +32,10 @@ const SPILL_RIGHT: u32 = 14;
 const SPILL_THIRD: u32 = 15;
 const ENCODING_ATTEMPTS: u64 = 4;
 const SCRATCH: u32 = 16;
-const COMPARE_LEFT_SCRATCH: u32 = 17;
+const SECOND_SCRATCH: u32 = 17;
+const FIRST_RESULT: u32 = 0;
+const SECOND_RESULT: u32 = 1;
+const PAIRED_RESULTS: u64 = 2;
 const ZERO: u32 = 31;
 const SP: u32 = 31;
 const LINK_REGISTER: u32 = 30;
@@ -346,8 +350,8 @@ fn compare(inout out: ChunkSeq[u8], in r: Record, lhs: u32, rhs: u32) {
         && r.extra <= SIGNED_LESS_EQUAL;
     let mut lhs = lhs;
     if signed_narrow {
-        bitfield(inout out, SBFM, COMPARE_LEFT_SCRATCH, lhs, 0, wrapping_sub(width, 1));
-        lhs = COMPARE_LEFT_SCRATCH;
+        bitfield(inout out, SBFM, SECOND_SCRATCH, lhs, 0, wrapping_sub(width, 1));
+        lhs = SECOND_SCRATCH;
     }
     if comparison_uses_immediate(r.op) {
         let signed = if width >= DWORD_BITS || signed_narrow {
@@ -478,7 +482,11 @@ fn conditional_branch(op: u64) -> bool {
     op == BRANCH_ZERO || op == BRANCH_BLOCK || op == BRANCH_LABEL
 }
 
-fn operands(in r: Record) -> Option[u64] {
+fn direct_call(op: u64) -> bool {
+    op == CALL || op == CALL_VOID || op == CALL_PAIR
+}
+
+fn operands(in r: Record, returns: u64) -> Option[u64] {
     if r.op == CONSTANT || r.op == STACK_SLOT || r.op == BLOCK_LABEL {
         return Option::Some(0);
     }
@@ -499,11 +507,12 @@ fn operands(in r: Record) -> Option[u64] {
             Option::None
         };
     }
-    if r.op == CALL || r.op == CALL_VOID {
+    if direct_call(r.op) {
         return if r.right <= ARGUMENT_REGISTERS
             && r.extra == 0
             && (r.left < LIBCALL_TARGET_BASE
-                || wrapping_sub(r.left, LIBCALL_TARGET_BASE) <= MEMCPY_LIBCALL)
+                || (r.op != CALL_PAIR
+                    && wrapping_sub(r.left, LIBCALL_TARGET_BASE) <= MEMCPY_LIBCALL))
         {
             Option::Some(0)
         } else {
@@ -516,6 +525,16 @@ fn operands(in r: Record) -> Option[u64] {
         } else {
             Option::None
         };
+    }
+    if r.op == CALL_HIGH {
+        return if r.left == 0 && r.right == 0 && r.extra == 0 {
+            Option::Some(0)
+        } else {
+            Option::None
+        };
+    }
+    if r.op == RETURN_PAIR {
+        return Option::Some(0);
     }
     if comparison_width(r.op) != 0 {
         if r.extra > UNSIGNED_LESS_EQUAL {
@@ -539,10 +558,13 @@ fn operands(in r: Record) -> Option[u64] {
         return Option::None;
     }
     if r.op == EARLY_RETURN || r.op == BLOCK_RETURN {
-        if r.right != 0 || (r.op == BLOCK_RETURN && r.extra != 0) {
+        if (returns != PAIRED_RESULTS && r.right != 0)
+            || (r.left == NO_VALUE) != (returns == 0)
+            || (r.op == BLOCK_RETURN && r.extra != 0)
+        {
             return Option::None;
         }
-        return Option::Some(if r.left == NO_VALUE { 0 } else { 1 });
+        return Option::Some(returns);
     }
     if r.op == STACK_LOAD || r.op == STACK_ADDRESS {
         if (r.op == STACK_LOAD && scalar_width(r.extra))
@@ -793,6 +815,7 @@ fn no_result(op: u64) -> bool {
         || op == BRANCH_TABLE_TARGET
         || op == CALL_VOID
         || op == CALL_ARGUMENT
+        || op == RETURN_PAIR
 }
 
 fn stack_adjust(opcode: u32, adjustment: u32) -> u32 {
@@ -801,14 +824,30 @@ fn stack_adjust(opcode: u32, adjustment: u32) -> u32 {
 
 fn emit_return(
     inout output: ChunkSeq[u8],
-    reg: u32,
+    low: u32,
+    high: u32,
     adjustment: u32,
     spill_mode: bool,
     link_slot: u64,
     inout restores: ChunkSeq[u64]
 ) {
-    if reg != UNASSIGNED && reg != 0 {
-        rrr(inout output, ORR_REG, 0, ZERO, reg);
+    if high == FIRST_RESULT && low != FIRST_RESULT {
+        // Moving the first result would overwrite the second result.
+        let source = if low == SECOND_RESULT {
+            rrr(inout output, ORR_REG, SCRATCH, ZERO, low);
+            SCRATCH
+        } else {
+            low
+        };
+        rrr(inout output, ORR_REG, SECOND_RESULT, ZERO, high);
+        rrr(inout output, ORR_REG, FIRST_RESULT, ZERO, source);
+    } else {
+        if low != UNASSIGNED && low != FIRST_RESULT {
+            rrr(inout output, ORR_REG, FIRST_RESULT, ZERO, low);
+        }
+        if high != UNASSIGNED && high != SECOND_RESULT {
+            rrr(inout output, ORR_REG, SECOND_RESULT, ZERO, high);
+        }
     }
     if link_slot != NO_VALUE {
         memory(inout output, true, QWORD_BITS, SP, LINK_REGISTER, link_slot);
@@ -874,6 +913,7 @@ fn emit_call(
     used: u32,
     frame_bytes: u64,
     keep_result: bool,
+    keep_high: bool,
     inout relocations: ChunkSeq[u64]
 ) -> Option[u32] {
     let start = wrapping_sub(index, record.right);
@@ -925,13 +965,17 @@ fn emit_call(
         relocations.push(wrapping_sub(record.left, LIBCALL_TARGET_BASE));
     }
     push32(inout out, BRANCH_AND_LINK);
-    let result = if keep_result && (used & 1) != 0 {
+    let result = if keep_result && (used & sh(1, FIRST_RESULT)) != 0 {
         // The restore below writes x0 when its incoming contents are live.
-        rrr(inout out, ORR_REG, SCRATCH, ZERO, 0);
+        rrr(inout out, ORR_REG, SCRATCH, ZERO, FIRST_RESULT);
         SCRATCH
     } else {
-        0
+        FIRST_RESULT
     };
+    if keep_high {
+        // The low result's allocator runs before the high result is placed.
+        rrr(inout out, ORR_REG, SECOND_SCRATCH, ZERO, SECOND_RESULT);
+    }
     call_saved_registers(inout out, used, frame_bytes, true);
     Option::Some(result)
 }
@@ -978,7 +1022,7 @@ fn compare_table_index(inout output: ChunkSeq[u8], index: u32, cases: u64) {
 fn emit_table_lookup(inout output: ChunkSeq[u8], index: u32, long_tables: bool) {
     // Mask a speculatively out-of-range index before it can reach the load.
     let select = (CSEL & ~REG64) | sh(HS, CONDITION_SHIFT);
-    rrr(inout output, select, COMPARE_LEFT_SCRATCH, ZERO, index);
+    rrr(inout output, select, SECOND_SCRATCH, ZERO, index);
     push32(inout output, CSDB);
     push32(inout output, ADR_TABLE | SCRATCH);
     let load = if long_tables {
@@ -986,14 +1030,14 @@ fn emit_table_lookup(inout output: ChunkSeq[u8], index: u32, long_tables: bool) 
     } else {
         LDRSH_UXTW_SCALED
     };
-    rrr(inout output, load, COMPARE_LEFT_SCRATCH, SCRATCH, COMPARE_LEFT_SCRATCH);
+    rrr(inout output, load, SECOND_SCRATCH, SCRATCH, SECOND_SCRATCH);
     let add = if long_tables {
         ADD_REG
     } else {
         ADD_REG | ADD_INSTRUCTION_SCALE
     };
-    rrr(inout output, add, COMPARE_LEFT_SCRATCH, SCRATCH, COMPARE_LEFT_SCRATCH);
-    push32(inout output, BRANCH_REGISTER | sh(COMPARE_LEFT_SCRATCH, RN_SHIFT));
+    rrr(inout output, add, SECOND_SCRATCH, SCRATCH, SECOND_SCRATCH);
+    push32(inout output, BRANCH_REGISTER | sh(SECOND_SCRATCH, RN_SHIFT));
 }
 
 fn patch_table_entry(
@@ -1087,14 +1131,36 @@ fn encode_pass(
     };
     let entry = read_record(in words, frame.slots.len());
     let labeled = frame.slots.len() < count && entry.op == BLOCK_LABEL;
+    let last_index = wrapping_sub(count, 1);
+    let tail = read_record(in words, last_index);
+    let mut second = NO_VALUE;
+    if !labeled && count != 0 && tail.op == RETURN_PAIR {
+        if result == NO_VALUE
+            || tail.left >= wrapping_add(args, last_index)
+            || tail.right != 0
+            || tail.extra != 0
+        {
+            return out;
+        }
+        second = tail.left;
+    }
     if labeled
         && (result != NO_VALUE
-            || entry.extra > 1
+            || entry.extra > PAIRED_RESULTS
             || (entry.right != 0 && entry.right != frame.slots.len())
             || !valid_block_layout(in words, frame.slots.len(), count, entry.extra))
     {
         return out;
     }
+    let returns = if labeled {
+        entry.extra
+    } else if second != NO_VALUE {
+        PAIRED_RESULTS
+    } else if result != NO_VALUE {
+        1
+    } else {
+        0
+    };
     let mut register_home = (
         match allocation {
             Allocation::RegisterHomes => true,
@@ -1124,17 +1190,27 @@ fn encode_pass(
     if result != NO_VALUE {
         let _ = ends.try_set(result, values);
     }
+    if second != NO_VALUE {
+        let _ = ends.try_set(second, values);
+    }
     let mut arms = ChunkSeq::new[BranchArm]();
     let mut depth: u64 = 0;
     let mut block_end = values;
     let mut entry_end = values;
     let mut call_end = NEVER_READ;
     let mut pending_arguments: u64 = 0;
+    let mut needs_call_pair = false;
     let mut has_calls = false;
     for reverse in 0..count {
         let index = wrapping_sub(wrapping_sub(count, 1), reverse);
         let value = wrapping_add(args, index);
         let r = read_record(in words, index);
+        if needs_call_pair != (r.op == CALL_PAIR)
+            || (r.op == RETURN_PAIR && (labeled || index != last_index))
+        {
+            return out;
+        }
+        needs_call_pair = r.op == CALL_HIGH;
         if r.op == CALL_ARGUMENT {
             if pending_arguments == 0 {
                 return out;
@@ -1143,7 +1219,7 @@ fn encode_pass(
         } else if pending_arguments != 0 {
             return out;
         }
-        if r.op == CALL || r.op == CALL_VOID {
+        if direct_call(r.op) {
             if !allow_calls || r.right > index {
                 return out;
             }
@@ -1152,7 +1228,7 @@ fn encode_pass(
             has_calls = true;
             register_home = false;
         }
-        let n = match operands(in r) {
+        let n = match operands(in r, returns) {
             Option::Some(n) => n,
             Option::None => return out,
         };
@@ -1167,9 +1243,7 @@ fn encode_pass(
             if r.op == BLOCK_LABEL {
                 entry_end = block_end;
                 block_end = value;
-            } else if (last != NEVER_READ && last >= block_end)
-                || (r.op == BLOCK_RETURN && (r.left == NO_VALUE) != (entry.extra == 0))
-            {
+            } else if last != NEVER_READ && last >= block_end {
                 // Values crossing a block boundary must use stack homes.
                 return out;
             }
@@ -1213,11 +1287,7 @@ fn encode_pass(
         let arm = arms.try_get(wrapping_sub(depth, 1))
             .unwrap_or(BranchArm { start: NO_VALUE, end: values });
         if r.op == EARLY_RETURN {
-            if ((r.left == NO_VALUE) != (result == NO_VALUE))
-                || r.extra < args
-                || r.extra >= value
-                || (depth != 0 && r.extra <= arm.start)
-            {
+            if r.extra < args || r.extra >= value || (depth != 0 && r.extra <= arm.start) {
                 return out;
             }
             let nested = BranchArm { start: r.extra, end: value };
@@ -1258,7 +1328,7 @@ fn encode_pass(
             let _ = ends.try_set(r.extra, value);
         }
     }
-    if depth != 0 || pending_arguments != 0 {
+    if depth != 0 || pending_arguments != 0 || needs_call_pair {
         return out;
     }
 
@@ -1323,16 +1393,17 @@ fn encode_pass(
         let r = read_record(in words, index);
         let stored = store_width(r.op);
         let live = last_read(in ends, value) != NEVER_READ;
+        let calls = direct_call(r.op);
         if r.op == STACK_SLOT
             || r.op == BRANCH_TABLE_TARGET
             || r.op == CALL_ARGUMENT
-            || (r.op != CALL && !no_result(r.op) && !live)
+            || r.op == RETURN_PAIR
+            || (!calls && !no_result(r.op) && !live)
         {
             locations.push(UNASSIGNED);
             continue;
         }
-        let direct_call = r.op == CALL || r.op == CALL_VOID;
-        let call_result = if direct_call {
+        let call_result = if calls {
             let start = wrapping_sub(index, r.right);
             for arg in 0..r.right {
                 let source = read_record(in words, wrapping_add(start, arg)).left;
@@ -1347,6 +1418,7 @@ fn encode_pass(
                 used,
                 frame_bytes,
                 live,
+                r.op == CALL_PAIR && last_read(in ends, wrapping_add(value, 1)) != NEVER_READ,
                 inout relocations
             ) {
                 Option::Some(reg) => reg,
@@ -1357,6 +1429,8 @@ fn encode_pass(
                 continue;
             }
             reg
+        } else if r.op == CALL_HIGH {
+            SECOND_SCRATCH
         } else {
             UNASSIGNED
         };
@@ -1384,7 +1458,7 @@ fn encode_pass(
             locations.push(UNASSIGNED);
             continue;
         }
-        let n = operands(in r).unwrap_or(0);
+        let n = operands(in r, returns).unwrap_or(0);
         let left = if n >= 1 {
             location(in locations, r.left)
         } else {
@@ -1462,7 +1536,7 @@ fn encode_pass(
             continue;
         }
         if r.op == EARLY_RETURN {
-            emit_return(inout out, lhs, adjustment, spill_mode, link_slot, inout restores);
+            emit_return(inout out, lhs, rhs, adjustment, spill_mode, link_slot, inout restores);
             depth = wrapping_sub(depth, 1);
             let target = out.len();
             match branches.try_get(depth) {
@@ -1475,7 +1549,7 @@ fn encode_pass(
             continue;
         }
         if r.op == BLOCK_RETURN {
-            emit_return(inout out, lhs, adjustment, spill_mode, link_slot, inout restores);
+            emit_return(inout out, lhs, rhs, adjustment, spill_mode, link_slot, inout restores);
             locations.push(UNASSIGNED);
             continue;
         }
@@ -1543,7 +1617,7 @@ fn encode_pass(
         } else {
             assigned
         };
-        if direct_call {
+        if call_result != UNASSIGNED {
             if dest != call_result {
                 rrr(inout out, ORR_REG, dest, ZERO, call_result);
             }
@@ -1607,8 +1681,9 @@ fn encode_pass(
             }
         }
     } else {
-        let reg = materialize(inout out, location(in locations, result), SPILL_LEFT, frame_bytes);
-        emit_return(inout out, reg, adjustment, spill_mode, link_slot, inout restores);
+        let low = materialize(inout out, location(in locations, result), SPILL_LEFT, frame_bytes);
+        let high = materialize(inout out, location(in locations, second), SPILL_RIGHT, frame_bytes);
+        emit_return(inout out, low, high, adjustment, spill_mode, link_slot, inout restores);
     }
     if spill_mode {
         let size = align_up(
