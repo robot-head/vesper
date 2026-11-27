@@ -234,7 +234,8 @@ vesper_hybrid(
             # `vesper fmt`'s formatter (#1996 part 3d).
             "//crates/vesper-fmt:port_package",
             "//crates/vesper-lean-syntax:port_package",
-            # `vesper graph`'s lockfile reader and report (#1996).
+            # `vesper graph`'s lockfile reader and report (#1996) and the
+            # package load's manifest decode (#1986 slice 2b).
             "//crates/vesper-loom-calculus:port_package",
             "//crates/vesper-serde:port_package",
         ],
@@ -327,6 +328,7 @@ vesper_hybrid(
             "//:check_data_package",
             "//:place_ir_package",
             "//:run_package",
+            "//crates/vesper-serde:port_package",
         ],
         # The stack-bound swap (#1182) builds on @vesper/check-loops-atomics.
         "hybrid_stack_bound": [

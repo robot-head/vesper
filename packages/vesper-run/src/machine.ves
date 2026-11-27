@@ -23,6 +23,7 @@ use @vesper/check-data::world::{constructor};
 use @vesper/check-data::input::{Ctx, Reader};
 use @vesper/place-ir::codes::{Lit, Op, Pat, Term};
 use @vesper/place-ir::{BlockRow, FnRow, InstRow, Program};
+use @vesper/serde::dragon::{Shortest, put_shortest, shortest, shortest_f32, shortest_len};
 use self::arith::{
     B_ADD, B_AND, B_BAND, B_BOR, B_BSHL, B_BSHR, B_BXOR, B_DIV, B_EQ, B_GE, B_GT, B_LAND, B_LE,
     B_LOR, B_LT, B_MUL, B_NE, B_OR, B_REM, B_ROTL, B_ROTR, B_SHL, B_SHR, B_SUB, B_WADD, B_WMUL,
@@ -50,16 +51,42 @@ pub const T_SLICE: u8 = 15;
 pub const T_CLOS: u8 = 16;
 // A function value with bound evidence (`Value::Bound`): its `bounds` index.
 pub const T_BOUND: u8 = 17;
+// `Value::Float` and `Value::Float32`: the bit pattern (an `f32`'s in the
+// low half).
+pub const T_F64: u8 = 18;
+pub const T_F32: u8 = 19;
 pub const T_UNDEF: u8 = 255;
 
-// Unary codes; a conversion is U_CONV + family * 16 + target kind.
+// Unary codes; a conversion is U_CONV + family * CONV_STRIDE + target kind.
 const U_NEG: u64 = 1;
 const U_NOT: u64 = 2;
 const U_INV: u64 = 3;
 const U_CONV: u64 = 16;
+// The codes of one conversion family: one per integer kind.
+const CONV_STRIDE: u64 = 16;
 const C_WIDEN: u64 = 0;
 const C_NARROW: u64 = 1;
 const C_WRAPPING: u64 = 2;
+// A float intrinsic is U_FLOAT + operation * 2 + float kind.
+const U_FLOAT: u64 = 128;
+const FC_WIDEN: u64 = 0;
+const FC_NEAREST: u64 = 1;
+const FC_TO_BITS: u64 = 2;
+const FC_FROM_BITS: u64 = 3;
+const FK_F32: u64 = 0;
+const FK_F64: u64 = 1;
+const FLOAT_KINDS: u64 = 2;
+// The sign bits of a binary64 and a binary32, which `-x` flips.
+const F64_SIGN: u64 = 9223372036854775808;
+const F32_SIGN: u64 = 2147483648;
+// The exponent bits of a binary64 and a binary32: all ones is a NaN or an
+// infinity (an infinity when the fraction is zero).
+const F64_EXPONENT: u64 = 9218868437227405312;
+const F64_FRACTION: u64 = 4503599627370495;
+const F32_EXPONENT: u64 = 2139095040;
+const F32_FRACTION: u64 = 8388607;
+// The bits of a binary32 (`f32::from_bits` of the low half).
+const F32_BITS: u64 = 4294967295;
 
 // Frame kinds (`Frame::IrResume`, `Frame::Try`).
 const FR_IR: u8 = 0;
@@ -1474,6 +1501,14 @@ fn coerce(inout machine: M, value: Val, ty: u32) -> Val {
         // `qualify_value` without ambient evidence: `$cap` instances only.
         return bind_evidence(inout machine, value, ty, false);
     }
+    if value.tag == T_F64 {
+        // An unsuffixed float literal checked as an `f32` takes its `f32`
+        // value.
+        if is_f32(in machine, ty) {
+            return f32_val(nearest_f32(f64_of(value)));
+        }
+        return value;
+    }
     if value.tag > K_I32 {
         return value;
     }
@@ -1482,6 +1517,33 @@ fn coerce(inout machine: M, value: Val, ty: u32) -> Val {
         return value;
     }
     Val { tag: kind, payload: wrap(kind, exact(value.tag, value.payload)) }
+}
+
+// Whether `ty` is `f32` (`FloatKind::from_type`).
+fn is_f32(in machine: M, ty: u32) -> bool {
+    machine.ctx.types.kind(ty) == TyKind::Named
+        && machine.ctx.types.arity(ty) == 0
+        && machine.ctx.types.name(ty) == machine.ctx.world.k.f32_
+}
+
+fn f64_val(x: f64) -> Val {
+    Val { tag: T_F64, payload: to_bits_f64(x) }
+}
+
+fn f32_val(x: f32) -> Val {
+    Val { tag: T_F32, payload: widen_u64(to_bits_f32(x)) }
+}
+
+fn f64_of(value: Val) -> f64 {
+    from_bits_f64(value.payload)
+}
+
+fn f32_of(value: Val) -> f32 {
+    from_bits_f32(wrapping_u32(value.payload))
+}
+
+fn is_float(value: Val) -> bool {
+    value.tag == T_F64 || value.tag == T_F32
 }
 
 // How deep `type_ok` and `inner_effects` follow a type.
@@ -1496,9 +1558,7 @@ fn type_ok(in machine: M, ty: u32, depth: u64) -> bool {
     if node.kind == TyKind::Named {
         let name = node.name;
         let known = machine.ctx.world.k;
-        if name == known.f32_
-            || name == known.f64_
-            || name == known.i128_
+        if name == known.i128_
             || name == known.u128_
             || name == known.tiled_seq
             || name == known.box_
@@ -1684,6 +1744,10 @@ fn unary_code(in machine: M, sym: u32) -> u64 {
     if spells(in machine, sym, "~") {
         return U_INV;
     }
+    let float_code = float_unary_code(in machine, sym);
+    if float_code != 0 {
+        return float_code;
+    }
     let text_start = machine.ctx.names.start(sym);
     let text_end = machine.ctx.names.end(sym);
     let mut family = NONE64;
@@ -1705,7 +1769,45 @@ fn unary_code(in machine: M, sym: u32) -> u64 {
     if kind == TK_NONE {
         return 0;
     }
-    add(add(U_CONV, wrapping_mul(family, 16)), widen_u64(kind))
+    add(add(U_CONV, wrapping_mul(family, CONV_STRIDE)), widen_u64(kind))
+}
+
+// The float conversions and bit reinterpretations (`float_conversion`,
+// `bits_intrinsic`): U_FLOAT + operation * 2 + kind, or 0. The math
+// intrinsics and saturating conversions are not codes: the machine
+// declines them.
+fn float_unary_code(in machine: M, sym: u32) -> u64 {
+    let mut op = NONE64;
+    let mut kind = NONE64;
+    if spells(in machine, sym, "widen_f32") {
+        op = FC_WIDEN;
+        kind = FK_F32;
+    } else if spells(in machine, sym, "widen_f64") {
+        op = FC_WIDEN;
+        kind = FK_F64;
+    } else if spells(in machine, sym, "nearest_f32") {
+        op = FC_NEAREST;
+        kind = FK_F32;
+    } else if spells(in machine, sym, "nearest_f64") {
+        op = FC_NEAREST;
+        kind = FK_F64;
+    } else if spells(in machine, sym, "to_bits_f32") {
+        op = FC_TO_BITS;
+        kind = FK_F32;
+    } else if spells(in machine, sym, "to_bits_f64") {
+        op = FC_TO_BITS;
+        kind = FK_F64;
+    } else if spells(in machine, sym, "from_bits_f32") {
+        op = FC_FROM_BITS;
+        kind = FK_F32;
+    } else if spells(in machine, sym, "from_bits_f64") {
+        op = FC_FROM_BITS;
+        kind = FK_F64;
+    }
+    if op == NONE64 {
+        return 0;
+    }
+    add(U_FLOAT, add(wrapping_mul(op, FLOAT_KINDS), kind))
 }
 
 // Reads every function's header: parameters, value count, first block.
@@ -1834,8 +1936,7 @@ fn pat_end(in machine: M, at: u64) -> u64 {
     }
 }
 
-// Declines a literal the machine has no value for (a float, a 128-bit
-// integer). `run` declines a non-ASCII string in the result, whose `Debug`
+// Declines a literal the machine has no value for (a 128-bit integer). `run` declines a non-ASCII string in the result, whose `Debug`
 // text needs Unicode tables.
 fn scan_literal(inout machine: M, at: u64) {
     let kind = machine.program.op(at);
@@ -1846,8 +1947,11 @@ fn scan_literal(inout machine: M, at: u64) {
         if !(hi == 0 || neg) {
             decline(inout machine, "a 128-bit integer literal", NONE32);
         }
-    } else if kind != widen_u64(Lit::String) && kind != widen_u64(Lit::Bool) {
-        decline(inout machine, "a float or wide literal", NONE32);
+    } else if kind != widen_u64(Lit::String)
+        && kind != widen_u64(Lit::Bool)
+        && kind != widen_u64(Lit::Float)
+    {
+        decline(inout machine, "a wide literal", NONE32);
     }
 }
 
@@ -2190,6 +2294,24 @@ fn display(in machine: M, value: Val, inout out: ChunkSeq[u8], depth: u64) {
         } else {
             push_decimal(inout out, value.payload);
         }
+    } else if value.tag == T_F64 {
+        put_float(
+            inout out,
+            value.payload,
+            F64_SIGN,
+            F64_EXPONENT,
+            F64_FRACTION,
+            shortest(value.payload)
+        );
+    } else if value.tag == T_F32 {
+        put_float(
+            inout out,
+            value.payload,
+            F32_SIGN,
+            F32_EXPONENT,
+            F32_FRACTION,
+            shortest_f32(value.payload)
+        );
     } else if value.tag == T_BOOL {
         if value.payload != 0 {
             put(inout out, "true");
@@ -2305,6 +2427,36 @@ fn display(in machine: M, value: Val, inout out: ChunkSeq[u8], depth: u64) {
     }
 }
 
+// Rust's `{}` of a float with bit pattern `bits` (fields `sign`,
+// `exponent`, `fraction`) and shortest digits `digits`: `NaN`, `inf`,
+// `-inf`, or the shortest round-trip decimal without an exponent.
+fn put_float(
+    inout out: ChunkSeq[u8],
+    bits: u64,
+    sign: u64,
+    exponent: u64,
+    fraction: u64,
+    digits: Shortest
+) {
+    if bits & exponent == exponent {
+        if bits & fraction != 0 {
+            put(inout out, "NaN");
+        } else if bits & sign != 0 {
+            put(inout out, "-inf");
+        } else {
+            put(inout out, "inf");
+        }
+        return;
+    }
+    let len = shortest_len(digits);
+    let mut text: ChunkSeq[u8] = ChunkSeq::with_capacity(len);
+    for _i in 0..len {
+        text.push(0);
+    }
+    put_shortest(inout text.as_slice_mut(), 0, digits);
+    out.extend(in text.as_slice());
+}
+
 fn hex(digit: u64) -> u8 {
     if digit < 10 {
         wrapping_u8(add(digit, 48))
@@ -2359,6 +2511,13 @@ fn equal(in machine: M, lhs: Val, rhs: Val) -> bool {
     }
     if lhs.tag <= K_I32 || lhs.tag == T_BOOL {
         return lhs.tag == rhs.tag && lhs.payload == rhs.payload;
+    }
+    // IEEE 754 equality: a NaN equals nothing, and -0 equals 0.
+    if lhs.tag == T_F64 {
+        return rhs.tag == T_F64 && f64_of(lhs) == f64_of(rhs);
+    }
+    if lhs.tag == T_F32 {
+        return rhs.tag == T_F32 && f32_of(lhs) == f32_of(rhs);
     }
     if lhs.tag == T_TUPLE && rhs.tag == T_TUPLE {
         let lhs_agg = agg(in machine, lhs);
@@ -2601,6 +2760,12 @@ fn literal_matches(in machine: M, at: u64, value: Val) -> bool {
     if kind == widen_u64(Lit::Bool) {
         return value.tag == T_BOOL && value.payload == lo;
     }
+    if kind == widen_u64(Lit::Float) {
+        if value.tag == T_F64 {
+            return from_bits_f64(lo) == f64_of(value);
+        }
+        return value.tag == T_F32 && nearest_f32(from_bits_f64(lo)) == f32_of(value);
+    }
     if kind == widen_u64(Lit::String) {
         return value.tag == T_STR && text_spells(in machine, value, n32(lo));
     }
@@ -2762,6 +2927,12 @@ fn binary(inout machine: M, code: u64, lhs: Val, rhs: Val, inout failure: u8) ->
         fail(inout machine, "invalid integer operator");
         return undef();
     }
+    if lhs.tag == T_F64 && rhs.tag == T_F64 {
+        return f64_binary(inout machine, op, f64_of(lhs), f64_of(rhs));
+    }
+    if lhs.tag == T_F32 && rhs.tag == T_F32 {
+        return f32_binary(inout machine, op, f32_of(lhs), f32_of(rhs));
+    }
     if lhs.tag == T_BOOL && rhs.tag == T_BOOL {
         if op == B_LAND {
             return bool_val(lhs.payload != 0 && rhs.payload != 0);
@@ -2802,14 +2973,153 @@ fn binary(inout machine: M, code: u64, lhs: Val, rhs: Val, inout failure: u8) ->
     undef()
 }
 
-// `unary` (without floats and 128-bit integers).
+// `binary` of two `f64` values.
+fn f64_binary(inout machine: M, op: u8, a: f64, b: f64) -> Val {
+    if op == B_ADD {
+        return f64_val(a + b);
+    } else if op == B_SUB {
+        return f64_val(a - b);
+    } else if op == B_MUL {
+        return f64_val(a * b);
+    } else if op == B_DIV {
+        return f64_val(a / b);
+    } else if op == B_REM {
+        return f64_val(a % b);
+    } else if op == B_EQ {
+        return bool_val(a == b);
+    } else if op == B_NE {
+        return bool_val(a != b);
+    } else if op == B_LT {
+        return bool_val(a < b);
+    } else if op == B_LE {
+        return bool_val(a <= b);
+    } else if op == B_GT {
+        return bool_val(a > b);
+    } else if op == B_GE {
+        return bool_val(a >= b);
+    }
+    fail(inout machine, "invalid float operator");
+    undef()
+}
+
+// `binary` of two `f32` values.
+fn f32_binary(inout machine: M, op: u8, a: f32, b: f32) -> Val {
+    if op == B_ADD {
+        return f32_val(a + b);
+    } else if op == B_SUB {
+        return f32_val(a - b);
+    } else if op == B_MUL {
+        return f32_val(a * b);
+    } else if op == B_DIV {
+        return f32_val(a / b);
+    } else if op == B_REM {
+        return f32_val(a % b);
+    } else if op == B_EQ {
+        return bool_val(a == b);
+    } else if op == B_NE {
+        return bool_val(a != b);
+    } else if op == B_LT {
+        return bool_val(a < b);
+    } else if op == B_LE {
+        return bool_val(a <= b);
+    } else if op == B_GT {
+        return bool_val(a > b);
+    } else if op == B_GE {
+        return bool_val(a >= b);
+    }
+    fail(inout machine, "invalid float operator");
+    undef()
+}
+
+// A float conversion or bit reinterpretation (`float_unary`); `code` is
+// at least U_FLOAT.
+fn float_unary(inout machine: M, code: u64, value: Val) -> Val {
+    let op = wrapping_sub(code, U_FLOAT) / FLOAT_KINDS;
+    let kind = wrapping_sub(code, U_FLOAT) % FLOAT_KINDS;
+    if op == FC_WIDEN || op == FC_NEAREST {
+        // `nearest_float`: an `f32` widens exactly, an `f64` rounds to the
+        // nearest `f32`; `integer_to_float` rounds an integer once.
+        if value.tag == T_F64 {
+            return if kind == FK_F32 {
+                f32_val(nearest_f32(f64_of(value)))
+            } else {
+                value
+            };
+        }
+        if value.tag == T_F32 {
+            return if kind == FK_F64 {
+                f64_val(widen_f64(f32_of(value)))
+            } else {
+                value
+            };
+        }
+        if value.tag > K_I32 {
+            fail(inout machine, "invalid float conversion operand");
+            return undef();
+        }
+        let n = exact(value.tag, value.payload);
+        if n < 0 {
+            let signed = wrapping_i64(n);
+            return if kind == FK_F32 {
+                f32_val(nearest_f32(signed))
+            } else {
+                f64_val(nearest_f64(signed))
+            };
+        }
+        let unsigned = wrapping_u64(n);
+        return if kind == FK_F32 {
+            f32_val(nearest_f32(unsigned))
+        } else {
+            f64_val(nearest_f64(unsigned))
+        };
+    }
+    if op == FC_TO_BITS {
+        // The operand's own bits as the kind's bits integer (u32, u64).
+        if value.tag == T_F64 && kind == FK_F64 {
+            return Val { tag: K_U64, payload: value.payload };
+        }
+        if value.tag == T_F32 && kind == FK_F32 {
+            return Val { tag: K_U32, payload: value.payload };
+        }
+        if is_float(value) {
+            decline(inout machine, "a mismatched float bit reinterpretation", NONE32);
+            return undef();
+        }
+        fail(inout machine, "invalid to_bits operand");
+        return undef();
+    }
+    if value.tag > K_I32 {
+        fail(inout machine, "invalid from_bits operand");
+        return undef();
+    }
+    if kind == FK_F32 {
+        return Val { tag: T_F32, payload: value.payload & F32_BITS };
+    }
+    Val { tag: T_F64, payload: value.payload }
+}
+
+// `unary` (without 128-bit integers).
 fn unary(inout machine: M, code: u64, value: Val, inout failure: u8) -> Val {
     if code == U_NOT && value.tag == T_BOOL {
         return bool_val(value.payload == 0);
     }
+    if code >= U_FLOAT {
+        return float_unary(inout machine, code, value);
+    }
+    if code == U_NEG && value.tag == T_F64 {
+        return Val { tag: T_F64, payload: value.payload ^ F64_SIGN };
+    }
+    if code == U_NEG && value.tag == T_F32 {
+        return Val { tag: T_F32, payload: value.payload ^ F32_SIGN };
+    }
+    if code >= U_CONV && is_float(value) && wrapping_sub(code, U_CONV) / CONV_STRIDE == C_NARROW {
+        // A checked float-to-integer conversion (`float_to_integer_checked`).
+        decline(inout machine, "a float-to-integer conversion", NONE32);
+        return undef();
+    }
     if code >= U_CONV {
-        let family = wrapping_sub(code, U_CONV) / 16;
-        let target_kind = wrapping_u8(wrapping_sub(code, U_CONV) % 16);
+        let family = wrapping_sub(code, U_CONV) / CONV_STRIDE;
+        let target_kind = wrapping_u8(wrapping_sub(code, U_CONV) % CONV_STRIDE);
         if value.tag > K_I32 {
             fail(inout machine, "invalid conversion operand");
             return undef();
@@ -3105,6 +3415,8 @@ fn step(inout machine: M) {
             };
         } else if kind == widen_u64(Lit::Bool) {
             result = bool_val(lo != 0);
+        } else if kind == widen_u64(Lit::Float) {
+            result = Val { tag: T_F64, payload: lo };
         } else {
             result = lit_str(inout machine, n32(lo));
         }

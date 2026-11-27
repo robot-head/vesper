@@ -156,6 +156,19 @@ const PROGRAMS: &[(&str, &str)] = &[
          with { return x => x, ask(k) => k(3), } }",
     ),
     (
+        // Float display (shortest digits, no exponent, `-0`, `NaN`, `inf`),
+        // binary32 rounding, `%`, conversions, bits and literal patterns.
+        "float_values",
+        "fn kind(x: f64) -> i64 { match x { 0.5 => 1, 2.0 => 2, _ => 3 } } \
+         fn kind32(x: f32) -> i64 { match x { 0.1 => 1, _ => 2 } } \
+         fn main() -> (f64, f64, f64, f64, f32, f32, f64, f64, f64, (f64, f32, u64, u32, f32), \
+         (i64, i64, i64, i64, bool, bool)) { \
+         let tenth: f32 = 0.1; let third: f32 = 1.0; let z: f64 = 0.0; \
+         (0.1 + 0.2, 1e300, 1.5e-7, -z, tenth * 3.0, third / 3.0, 7.5 % 2.0, z / z, -1.0 / z, \
+         (widen_f64(tenth), nearest_f32(16777217.0), to_bits_f64(1.0), to_bits_f32(tenth), \
+         from_bits_f32(1)), (kind(0.5), kind(2.0), kind(z), kind32(tenth), z == -z, z / z == z / z)) }",
+    ),
+    (
         // An effectful function value binds the incoming capability
         // (`bind_callable_evidence`): the outer handler answers.
         "bound_evidence",
