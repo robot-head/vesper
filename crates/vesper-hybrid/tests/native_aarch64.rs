@@ -120,6 +120,7 @@ const STACK_ARGUMENT: u64 = 149;
 const FLOAT_STACK_ARGUMENT: u64 = 150;
 const CALL_STACK_ARGUMENT: u64 = 151;
 const CALL_STACK_COUNT_SHIFT: u32 = 4;
+const INDIRECT_CALL: u64 = 1 << (u64::BITS - 1);
 const EQUAL: u64 = 0;
 const NOT_EQUAL: u64 = 1;
 const SIGNED_LESS: u64 = 2;
@@ -633,6 +634,85 @@ fn aarch64_outgoing_stack_arguments_are_written_before_register_moves() {
     #[rustfmt::skip]
     let late = [0, 1, CONSTANT, 0, 0, 0, STACK_ARGUMENT, 0, 0, CELL_BITS];
     assert!(binding::aarch64_integer_leaf(&late).is_empty());
+}
+
+#[test]
+fn aarch64_indirect_calls_keep_the_target_across_argument_moves() {
+    use cranelift_codegen::ir::{AbiParam, Function, InstBuilder, Signature, types};
+    use cranelift_codegen::isa::CallConv;
+    use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
+
+    const SUB_SP_CALL_FRAME: u32 = 0xd102_43ff;
+    const SAVE_LR: u32 = 0xf900_03fe;
+    const MOV_X17_X0: u32 = 0xaa00_03f1;
+    const MOV_X0_X1: u32 = 0xaa01_03e0;
+    const BLR_X1: u32 = 0xd63f_0020;
+    const BLR_X17: u32 = 0xd63f_0220;
+    const RESTORE_LR: u32 = 0xf940_03fe;
+    const ADD_SP_CALL_FRAME: u32 = 0x9102_43ff;
+    // The first case is the signature and allocation in isa/aarch64/call-indirect.clif.
+    for (argument, target, body) in [
+        (0, 1, &[BLR_X1][..]),
+        (1, 0, &[MOV_X17_X0, MOV_X0_X1, BLR_X17]),
+    ] {
+        let mut function = Function::new();
+        function.signature.call_conv = CallConv::SystemV;
+        function.signature.params = vec![AbiParam::new(types::I64); 2];
+        function.signature.returns.push(AbiParam::new(types::I64));
+        let mut callee = Signature::new(CallConv::SystemV);
+        callee.params.push(AbiParam::new(types::I64));
+        callee.returns.push(AbiParam::new(types::I64));
+        let callee = function.import_signature(callee);
+        let mut context = FunctionBuilderContext::new();
+        let mut builder = FunctionBuilder::new(&mut function, &mut context);
+        let block = builder.create_block();
+        builder.append_block_params_for_function_params(block);
+        builder.switch_to_block(block);
+        builder.seal_block(block);
+        let argument = builder.block_params(block)[argument];
+        let target = builder.block_params(block)[target];
+        let call = builder.ins().call_indirect(callee, target, &[argument]);
+        let result = builder.inst_results(call)[0];
+        builder.ins().return_(&[result]);
+        builder.finalize();
+
+        let words = native::machine::aarch64_leaf_words(&function).unwrap();
+        let code = binding::aarch64_integer_leaf(&words);
+        let expected: Vec<u8> = [SUB_SP_CALL_FRAME, SAVE_LR]
+            .into_iter()
+            .chain(body.iter().copied())
+            .chain([RESTORE_LR, ADD_SP_CALL_FRAME, RET])
+            .flat_map(u32::to_le_bytes)
+            .collect();
+        assert_eq!(code, expected);
+        let packet = binding::aarch64_relocatable_block(&words);
+        let (length, bytes) = packet.split_first_chunk::<{ size_of::<u64>() }>().unwrap();
+        assert_eq!(u64::from_le_bytes(*length) as usize, bytes.len());
+        assert_eq!(bytes, expected);
+    }
+}
+
+#[test]
+fn aarch64_indirect_calls_keep_computed_targets_when_results_are_unused() {
+    const BLR_X1: u32 = 0xd63f_0020;
+    for call in [CALL, CALL_VOID] {
+        #[rustfmt::skip]
+        let unused = [2, 0, ADD, 0, 1, CELL_BITS, call, 2, 0, INDIRECT_CALL];
+        let code = binding::aarch64_integer_leaf(&unused);
+        assert!(
+            code.as_chunks::<{ size_of::<u32>() }>()
+                .0
+                .contains(&BLR_X1.to_le_bytes()),
+            "missing branch through the computed target for call opcode {call}: {code:02x?}"
+        );
+    }
+    #[rustfmt::skip]
+    let float_target = [0, NO_VALUE, FLOAT_ARGUMENT, 0, 0, CELL_BITS, CALL_VOID, 0, 0, INDIRECT_CALL];
+    #[rustfmt::skip]
+    let argument_record_target = [1, NO_VALUE, CALL_ARGUMENT, 0, 0, 0, CALL_VOID, 1, 1, INDIRECT_CALL];
+    for malformed in [float_target.as_slice(), &argument_record_target] {
+        assert!(binding::aarch64_integer_leaf(malformed).is_empty());
+    }
 }
 
 #[test]

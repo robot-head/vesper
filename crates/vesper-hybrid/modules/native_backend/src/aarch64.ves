@@ -33,7 +33,7 @@ use self::scalar::{
     FLOAT_PROMOTE, FLOAT_DEMOTE, SIGNED_TO_FLOAT, UNSIGNED_TO_FLOAT, is_float_conversion,
     FLOAT_TO_SIGNED_SAT, is_float_to_integer, FLOAT_CEIL, FLOAT_FLOOR, FLOAT_TRUNC, FLOAT_NEAREST,
     FLOAT_MIN, FLOAT_MAX, FLOAT_FMA64, is_float_fma, STACK_ARGUMENT, FLOAT_STACK_ARGUMENT,
-    CALL_STACK_ARGUMENT
+    CALL_STACK_ARGUMENT, is_call
 };
 use self::x86_64::{
     BYTE_BITS, WORD_BITS, DWORD_BITS, QWORD_BITS, FLOAT_ORDERED, FLOAT_UNORDERED, FLOAT_EQUAL,
@@ -46,6 +46,7 @@ const ARGUMENT_REGISTERS: u64 = 8;
 const FP_ARGUMENT_REGISTERS: u64 = 8;
 const CALL_FLOAT_BITS: u32 = 4;
 const CALL_FLOAT_MASK: u64 = 0xf;
+const INDIRECT_CALL: u64 = 0x8000000000000000;
 // Keep x16 and x17 out of allocation for architectural scratch uses.
 const CALLER_REGISTER_MASK: u32 = 0xffff;
 const UNASSIGNED: u32 = 32;
@@ -86,6 +87,7 @@ const MAX_FRAME_BYTES: u64 = 4096;
 const RETURN: u32 = 0xd65f03c0;
 const JUMP: u32 = 0x14000000;
 const BRANCH_AND_LINK: u32 = 0x94000000;
+const BRANCH_AND_LINK_REGISTER: u32 = 0xd63f0000;
 const BRANCH_IF_ZERO: u32 = 0xb4000000;
 const BRANCH_IF_NOT_ZERO: u32 = 0xb5000000;
 const BRANCH_IF_CONDITION: u32 = 0x54000000;
@@ -762,8 +764,12 @@ fn flags_survive_stack_stores(in words: Slice[u64], start: u64, end: u64, value:
     true
 }
 
-fn direct_call(op: u64) -> bool {
-    op == CALL || op == CALL_VOID || op == CALL_PAIR || float_call(op)
+fn indirect_call(layout: u64) -> bool {
+    (layout & INDIRECT_CALL) != 0
+}
+
+fn call_stack_count(layout: u64) -> u64 {
+    wrapping_shr_u64(layout & ~INDIRECT_CALL, CALL_FLOAT_BITS)
 }
 
 fn float_call(op: u64) -> bool {
@@ -934,20 +940,22 @@ fn operands(in r: Record, returns: u64) -> Option[u64] {
             Option::None
         };
     }
-    if direct_call(r.op) {
+    if is_call(r.op) {
+        let indirect = indirect_call(r.extra);
         let fp = r.extra & CALL_FLOAT_MASK;
-        let stack = wrapping_shr_u64(r.extra, CALL_FLOAT_BITS);
+        let stack = call_stack_count(r.extra);
         let non_gp = wrapping_add(fp, stack);
         return if fp <= FP_ARGUMENT_REGISTERS
             && non_gp <= r.right
             && wrapping_sub(r.right, non_gp) <= ARGUMENT_REGISTERS
-            && (r.left < LIBCALL_TARGET_BASE
+            && (indirect
+                || r.left < LIBCALL_TARGET_BASE
                 || (r.op != CALL_PAIR
                     && !float_call(r.op)
                     && r.extra == 0
                     && wrapping_sub(r.left, LIBCALL_TARGET_BASE) <= MEMCPY_LIBCALL))
         {
-            Option::Some(0)
+            Option::Some(if indirect { 1 } else { 0 })
         } else {
             Option::None
         };
@@ -2110,7 +2118,7 @@ fn emit_call(
 ) -> Option[u32] {
     let start = wrapping_sub(index, record.right);
     let fp_arguments = record.extra & CALL_FLOAT_MASK;
-    let stack_arguments = wrapping_shr_u64(record.extra, CALL_FLOAT_BITS);
+    let stack_arguments = call_stack_count(record.extra);
     let gp_start = wrapping_add(start, stack_arguments);
     let gp_arguments = wrapping_sub(wrapping_sub(record.right, fp_arguments), stack_arguments);
     let mut save = used;
@@ -2163,6 +2171,22 @@ fn emit_call(
         let reg = materialize(inout out, source, SCRATCH, frame_bytes);
         push32(inout out, FMOV_FROM_GP | FP_DOUBLE | REG64 | sh(reg, RN_SHIFT) | wrapping_u32(arg));
     }
+    let target = if indirect_call(record.extra) {
+        let source = location(in locations, record.left);
+        if source == UNASSIGNED {
+            return Option::None;
+        }
+        if source >= SPILL_BASE {
+            materialize(inout out, source, SECOND_SCRATCH, frame_bytes)
+        } else if (overwritten & sh(1, source)) != 0 {
+            rrr(inout out, ORR_REG, SECOND_SCRATCH, ZERO, source);
+            SECOND_SCRATCH
+        } else {
+            source
+        }
+    } else {
+        UNASSIGNED
+    };
     for arg in 0..gp_arguments {
         let value = read_record(in words, wrapping_add(gp_start, arg)).left;
         if value == NO_VALUE {
@@ -2185,15 +2209,19 @@ fn emit_call(
             rrr(inout out, ORR_REG, dest, ZERO, source);
         }
     }
-    relocations.push(out.len());
-    if record.left < LIBCALL_TARGET_BASE {
-        relocations.push(ARM64_CALL);
-        relocations.push(record.left);
+    if target != UNASSIGNED {
+        push32(inout out, BRANCH_AND_LINK_REGISTER | sh(target, RN_SHIFT));
     } else {
-        relocations.push(ARM64_LIBCALL);
-        relocations.push(wrapping_sub(record.left, LIBCALL_TARGET_BASE));
+        relocations.push(out.len());
+        if record.left < LIBCALL_TARGET_BASE {
+            relocations.push(ARM64_CALL);
+            relocations.push(record.left);
+        } else {
+            relocations.push(ARM64_LIBCALL);
+            relocations.push(wrapping_sub(record.left, LIBCALL_TARGET_BASE));
+        }
+        push32(inout out, BRANCH_AND_LINK);
     }
-    push32(inout out, BRANCH_AND_LINK);
     let result = if keep_result && float_call(record.op) {
         let width = if record.op == CALL_FLOAT {
             FP_DOUBLE | REG64
@@ -2537,13 +2565,20 @@ fn encode_pass(
         } else if pending_arguments != 0 {
             return out;
         }
-        if direct_call(r.op) {
-            if !allow_relocations || r.right > index {
+        let calls = is_call(r.op);
+        let indirect = calls && indirect_call(r.extra);
+        if calls {
+            if (!indirect && !allow_relocations) || r.right > index {
+                return out;
+            }
+            if indirect
+                && (r.left >= wrapping_sub(value, r.right) || float_value(in words, args, r.left))
+            {
                 return out;
             }
             pending_arguments = r.right;
             pending_float_arguments = r.extra & CALL_FLOAT_MASK;
-            pending_stack_arguments = wrapping_shr_u64(r.extra, CALL_FLOAT_BITS);
+            pending_stack_arguments = call_stack_count(r.extra);
             stack_limit = MAX_FRAME_BYTES;
             call_end = value;
         }
@@ -2580,7 +2615,7 @@ fn encode_pass(
         if last != NEVER_READ {
             live_values = wrapping_sub(live_values, 1);
         }
-        if direct_call(r.op) {
+        if calls {
             call_sites.push(value);
             if live_values > max_live_across_calls {
                 max_live_across_calls = live_values;
@@ -2673,6 +2708,7 @@ fn encode_pass(
                 return out;
             }
         } else if last == NEVER_READ
+            && !indirect
             && !is_integer_division(r.op)
             && !is_atomic_update(r.op)
             && !is_atomic_cas(r.op)
@@ -2852,7 +2888,7 @@ fn encode_pass(
         let stored = store_width(r.op);
         let last = last_read(in ends, value);
         let live = last != NEVER_READ;
-        let calls = direct_call(r.op);
+        let calls = is_call(r.op);
         let division = is_integer_division(r.op);
         let cas = is_atomic_cas(r.op);
         let atomic_rmw = cas || is_atomic_update(r.op);
@@ -2882,6 +2918,9 @@ fn encode_pass(
             for arg in 0..r.right {
                 let source = read_record(in words, wrapping_add(start, arg)).left;
                 used = expire(used, in ends, source, value, location(in locations, source));
+            }
+            if indirect_call(r.extra) {
+                used = expire(used, in ends, r.left, value, location(in locations, r.left));
             }
             let reg = match emit_call(
                 inout out,
@@ -2948,7 +2987,11 @@ fn encode_pass(
             remaining_folds = wrapping_sub(remaining_folds, 1);
             next_fold = address_folds.try_get(wrapping_sub(remaining_folds, 1)).unwrap_or(no_fold);
         }
-        let n = operands(in r, returns).unwrap_or(0);
+        let n = if calls {
+            0
+        } else {
+            operands(in r, returns).unwrap_or(0)
+        };
         let left = if n >= 1 {
             location(in locations, r.left)
         } else {

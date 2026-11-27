@@ -609,7 +609,7 @@ fn has_no_result(op: u64) -> bool {
         || is_cfg_record(op)
 }
 
-fn is_call(op: u64) -> bool {
+pub fn is_call(op: u64) -> bool {
     op == CALL || op == CALL_VOID || op == CALL_PAIR || op == CALL_FLOAT || op == CALL_FLOAT32
 }
 

@@ -4,7 +4,7 @@ use cranelift_codegen::{
     entity::SecondaryMap,
     ir::{
         AbiParam, AtomicRmwOp, Block, BlockCall, Endianness, ExternalName, Function, GlobalValue,
-        GlobalValueData, Inst, InstructionData, LibCall, MemFlags, Opcode, StackSlot,
+        GlobalValueData, Inst, InstructionData, LibCall, MemFlags, Opcode, Signature, StackSlot,
         StackSlotKind, TrapCode, Type, Value, ValueDef,
         condcodes::{FloatCC, IntCC},
         immediates::{Ieee32, Ieee64, Offset32},
@@ -232,6 +232,7 @@ const AARCH64_GP_ARGUMENTS: usize = 8;
 const XMM_REGISTER_ARGUMENTS: usize = 8;
 const AARCH64_FP_ARGUMENTS: usize = 8;
 const AARCH64_CALL_FLOAT_BITS: u32 = 4;
+const AARCH64_INDIRECT_CALL: u64 = 1 << (u64::BITS - 1);
 const STACK_PROBE_INTERVAL: usize = 4096;
 const CFG_HOME_BYTES: u64 = size_of::<u64>() as u64;
 const MAX_GP_ARGUMENTS: usize = GP_REGISTER_ARGUMENTS + STACK_PROBE_INTERVAL / size_of::<u64>() - 1;
@@ -334,6 +335,11 @@ enum Aarch64Argument {
     Float(usize),
     Stack(usize),
     StackPair(usize),
+}
+
+enum CallTarget {
+    Direct(u64),
+    Indirect(u64),
 }
 
 struct Aarch64Arguments {
@@ -807,12 +813,6 @@ impl IntegerBlocks<'_> {
     ) -> Option<()> {
         let dfg = &self.function.dfg;
         let signature = &dfg.signatures[callee.signature];
-        let args = dfg.inst_args(inst);
-        if signature.call_conv != self.function.signature.call_conv
-            || signature.params.len() != args.len()
-        {
-            return None;
-        }
         let target = match callee.name {
             ExternalName::User(name) => {
                 let name = self.function.params.user_named_funcs().get(name)?;
@@ -834,6 +834,29 @@ impl IntegerBlocks<'_> {
             }
             _ => return None,
         };
+        self.call(
+            inst,
+            signature,
+            dfg.inst_args(inst),
+            CallTarget::Direct(target),
+            values,
+        )
+    }
+
+    fn call(
+        &mut self,
+        inst: Inst,
+        signature: &Signature,
+        args: &[Value],
+        target: CallTarget,
+        values: &mut Values,
+    ) -> Option<()> {
+        let dfg = &self.function.dfg;
+        if signature.call_conv != self.function.signature.call_conv
+            || signature.params.len() != args.len()
+        {
+            return None;
+        }
         let float_return = returns_float(&signature.returns);
         let return_cells = if float_return {
             1
@@ -892,8 +915,14 @@ impl IntegerBlocks<'_> {
                 float_arguments as u64,
             ]
         };
-        self.relocations = true;
-        let id = self.append(op, [target, argument_records, float_and_stack]);
+        let (target, layout) = match target {
+            CallTarget::Direct(target) => {
+                self.relocations = true;
+                (target, float_and_stack)
+            }
+            CallTarget::Indirect(address) => (address, float_and_stack | AARCH64_INDIRECT_CALL),
+        };
+        let id = self.append(op, [target, argument_records, layout]);
         let high = (return_cells == GP_RESULTS).then(|| self.append(IntegerOp::CallHigh, [0; 3]));
         if let Some(&value) = results.first() {
             values.low[value] = Some(self.normalize_abi_integer(id, dfg.value_type(value)));
@@ -1718,6 +1747,25 @@ impl IntegerBlocks<'_> {
             } = function.dfg.insts[inst]
             {
                 self.direct_call(inst, &function.dfg.ext_funcs[func_ref], values)?;
+                continue;
+            }
+            if let InstructionData::CallIndirect {
+                opcode: Opcode::CallIndirect,
+                sig_ref,
+                ..
+            } = function.dfg.insts[inst]
+            {
+                let (&address, args) = function.dfg.inst_args(inst).split_first()?;
+                if !self.aarch64 || ty(address) != types::I64 {
+                    return None;
+                }
+                self.call(
+                    inst,
+                    &function.dfg.signatures[sig_ref],
+                    args,
+                    CallTarget::Indirect(input(address)?),
+                    values,
+                )?;
                 continue;
             }
             if let InstructionData::Binary {
@@ -2570,6 +2618,7 @@ impl IntegerBlocks<'_> {
 /// The call's left operand is the function ID and its right operand is the total
 /// argument record count. The extra operand encodes the float register count in
 /// the low bits and the AArch64 stack argument count in the high bits.
+/// The top bit marks an AArch64 indirect call, whose left operand is an address value ID.
 /// AAPCS64 uses a NO_VALUE argument for a register skipped before a pair.
 /// Argument records leave unreferenced slots. CallFloat returns through the
 /// first floating-point result register. AArch64 uses CallFloat32 for f32.
