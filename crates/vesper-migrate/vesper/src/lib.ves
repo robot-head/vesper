@@ -2073,3 +2073,64 @@ pub fn migrate_render_report_refusal(
     let _ = out.try_set(pos, BYTE_LF);
     wrapping_add(pos, 1)
 }
+
+// ---------------------------------------------------------------------------
+// Vesper declaration renderers (`synth.rs::vesper_declarations`).
+
+pub fn migrate_render_decl_struct_field(
+    in name: Slice[u8],
+    in ty: Slice[u8],
+    inout out: Slice[u8],
+) -> u64 {
+    let mut pos = copy_str(in "    ", inout out, 0);
+    pos = copy_range(in name, 0, name.len(), inout out, pos);
+    pos = copy_str(in ": ", inout out, pos);
+    pos = copy_range(in ty, 0, ty.len(), inout out, pos);
+    pos = copy_str(in ",\n", inout out, pos);
+    pos
+}
+
+pub fn migrate_render_decl_enum(
+    in name: Slice[u8],
+    in carrier: Slice[u8],
+    in vars_buf: Slice[u8],
+    in vars_starts: Slice[u64],
+    in vars_lens: Slice[u64],
+    inout out: Slice[u8],
+) -> u64 {
+    let mut pos = copy_str(in "enum ", inout out, 0);
+    pos = copy_range(in name, 0, name.len(), inout out, pos);
+    if carrier.len() > 0 {
+        pos = copy_str(in ": ", inout out, pos);
+        pos = copy_range(in carrier, 0, carrier.len(), inout out, pos);
+    }
+    pos = copy_str(in " { ", inout out, pos);
+    pos = write_joined_args(in vars_buf, in vars_starts, in vars_lens, inout out, pos);
+    pos = copy_str(in " }\n", inout out, pos);
+    pos
+}
+
+pub fn migrate_render_decl_extern_fn(
+    in name: Slice[u8],
+    in params_buf: Slice[u8],
+    in params_starts: Slice[u64],
+    in params_lens: Slice[u64],
+    in result: Slice[u8],
+    inout out: Slice[u8],
+) -> u64 {
+    let mut pos = copy_str(in "extern fn ", inout out, 0);
+    pos = copy_range(in name, 0, name.len(), inout out, pos);
+    let _ = out.try_set(pos, BYTE_LPAREN);
+    pos = wrapping_add(pos, 1);
+    pos = write_joined_args(
+        in params_buf,
+        in params_starts,
+        in params_lens,
+        inout out,
+        pos,
+    );
+    pos = copy_str(in ") -> ", inout out, pos);
+    pos = copy_range(in result, 0, result.len(), inout out, pos);
+    pos = copy_str(in ";\n", inout out, pos);
+    pos
+}
