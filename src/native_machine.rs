@@ -1948,6 +1948,18 @@ impl IntegerBlocks<'_> {
         if mask.iter().any(|&index| index >= LANES * 2) {
             return None;
         }
+        if mask.iter().copied().eq(0..LANES) {
+            return Some(left);
+        }
+        if mask.iter().copied().eq(LANES..LANES * 2) {
+            return Some(right);
+        }
+        if left == right && mask.iter().map(|&index| index % LANES).eq(0..LANES) {
+            return Some(left);
+        }
+        if !self.aarch64 && !self.x86_ssse3 {
+            return None;
+        }
         let mode = if self.x86_ssse3 {
             X86_SWIZZLE_ZERO_HIGH
         } else {
@@ -2099,11 +2111,7 @@ impl IntegerBlocks<'_> {
                 opcode: Opcode::Shuffle,
                 args: [left, right],
                 imm,
-            } if (self.aarch64 || self.x86_ssse3)
-                && output == types::I8X16
-                && ty(left) == output
-                && ty(right) == output =>
-            {
+            } if output == types::I8X16 && ty(left) == output && ty(right) == output => {
                 return self.vector_shuffle(
                     dfg.immediates[imm].as_slice(),
                     input(left)?,

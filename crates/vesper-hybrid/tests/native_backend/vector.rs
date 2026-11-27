@@ -528,6 +528,17 @@ fn vector_rearrangements_match_cranelift_with_ssse3() {
         ),
         (
             types::I8X16,
+            Op::Shuffle(std::array::from_fn(|i| i as u8), false),
+        ),
+        (
+            types::I8X16,
+            Op::Shuffle(
+                std::array::from_fn(|i| i as u8 + if i.is_multiple_of(2) { LANES } else { 0 }),
+                true,
+            ),
+        ),
+        (
+            types::I8X16,
             Op::Shuffle(
                 std::array::from_fn(|i| (i as u8 * 3 + 1) % (2 * LANES)),
                 false,
@@ -574,7 +585,15 @@ fn vector_rearrangements_match_cranelift_with_ssse3() {
         builder.seal_all_blocks();
         builder.finalize();
 
-        assert!(integer_block_words(&context.func).is_none(), "{ty} {op:?}");
+        let baseline = integer_block_words(&context.func);
+        let identity = matches!(op, Op::Shuffle(mask, same_table)
+            if mask.iter().copied().eq(0..LANES)
+                || mask.iter().copied().eq(LANES..LANES * 2)
+                || same_table && mask.iter().map(|&index| index % LANES).eq(0..LANES));
+        assert_eq!(baseline.is_some(), identity, "{ty} {op:?}");
+        if let Some(words) = baseline {
+            assert!(!binding::x86_64_integer_block(&words).is_empty());
+        }
         let functions = compile(&mut module, &mut context);
         let width = ty.lane_type().bytes() as usize;
         for chunk in 0..=u8::MAX / LANES {
