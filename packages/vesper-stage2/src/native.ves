@@ -268,6 +268,7 @@ struct Function {
     products: ChunkSeq[Product],
     call_result_bytes: u64,
     call_argument_bytes: u64,
+    forwards_call_result: bool,
     mutable_slots: ChunkSeq[u32],
     mutable_values: ChunkSeq[LocalValue],
     addressed_locals: ChunkSeq[u32],
@@ -322,6 +323,14 @@ impl Function {
         } else {
             SCALAR_RESULTS
         }
+    }
+
+    fn labeled(in self) -> bool {
+        self.blocks.len() > 1 || self.forwards_call_result
+    }
+
+    fn result_is_resident(in self, value: u64, resident: u64) -> bool {
+        resident != NO_VALUE && self.product_index(value) == resident
     }
 
     fn store_cell(inout self, machine: u64, offset: u64, kind: u8) {
@@ -1340,6 +1349,7 @@ fn lower_call(
     caller: FnR,
     inst: InstRow,
     block: u64,
+    resident: u64,
     inout m: Function,
     inout graph: CallGraph
 ) -> u64 {
@@ -1407,8 +1417,10 @@ fn lower_call(
     let buffer = m.call_result_home();
     let mut argument_buffer = m.call_argument_home();
     let argument_end = add(argument_buffer, m.call_argument_bytes);
+    let mut result_pointer = NO_VALUE;
     if aggregate {
-        args.push(m.record(STACK_ADDRESS, HOME_SLOT, buffer, 0));
+        result_pointer = m.record(STACK_ADDRESS, HOME_SLOT, buffer, 0);
+        args.push(result_pointer);
     }
     for i in 0..count {
         let at = call_argument(inst.a, i);
@@ -1445,20 +1457,28 @@ fn lower_call(
                 },
                 Option::None => return NO_VALUE,
             };
-            let mut fields = ChunkSeq::new[u64]();
-            if !product_cells(in low, source, in m, inout fields) {
-                return NO_VALUE;
+            if m.result_is_resident(source, resident) {
+                // The callee snapshots its value parameters before writing a result.
+                if result_pointer == NO_VALUE {
+                    result_pointer = m.record(STACK_ADDRESS, HOME_SLOT, buffer, 0);
+                }
+                result_pointer
+            } else {
+                let mut fields = ChunkSeq::new[u64]();
+                if !product_cells(in low, source, in m, inout fields) {
+                    return NO_VALUE;
+                }
+                let end = add(argument_buffer, wrapping_mul(fields.len(), HOME_BYTES));
+                if end > argument_end {
+                    return NO_VALUE;
+                }
+                let pointer = m.record(STACK_ADDRESS, HOME_SLOT, argument_buffer, 0);
+                if !store_fields(in fields, pointer, block, inout m) {
+                    return NO_VALUE;
+                }
+                argument_buffer = end;
+                pointer
             }
-            let end = add(argument_buffer, wrapping_mul(fields.len(), HOME_BYTES));
-            if end > argument_end {
-                return NO_VALUE;
-            }
-            let pointer = m.record(STACK_ADDRESS, HOME_SLOT, argument_buffer, 0);
-            if !store_fields(in fields, pointer, block, inout m) {
-                return NO_VALUE;
-            }
-            argument_buffer = end;
-            pointer
         } else {
             m.read(add(m.arguments, operand), block)
         };
@@ -1930,7 +1950,7 @@ fn plan_product(in low: L, root: PendingProduct, block: u64, inout m: Function) 
     wrapping_mul(cells, HOME_BYTES)
 }
 
-fn plan_call_arguments(in low: L, inst: InstRow, inout m: Function) -> bool {
+fn plan_call_arguments(in low: L, inst: InstRow, resident: u64, inout m: Function) -> bool {
     let count = call_arity(in low, inst);
     if count == NO_VALUE {
         return false;
@@ -1945,8 +1965,13 @@ fn plan_call_arguments(in low: L, inst: InstRow, inout m: Function) -> bool {
         if low.program.op(at) == TyPass::Inout {
             return false;
         }
+        let source = add(m.arguments, operand);
+        if m.result_is_resident(source, resident) {
+            m.forwards_call_result = true;
+            continue;
+        }
         let mut fields = ChunkSeq::new[u64]();
-        if !product_cells(in low, add(m.arguments, operand), in m, inout fields) {
+        if !product_cells(in low, source, in m, inout fields) {
             return false;
         }
         cells = add(cells, fields.len());
@@ -2086,6 +2111,7 @@ fn plan_aggregates(in low: L, f: FnR, row: FnRow, inout m: Function) -> bool {
     for layout in 0..m.blocks.len() {
         let block = m.blocks.try_get(layout).unwrap_or(0);
         let b = low.program.block(add(row.b0, block));
+        let mut resident = NO_VALUE;
         for index in b.i0..add(b.i0, b.ic) {
             let inst = low.program.inst(index);
             let value = add(m.arguments, w(inst.dest));
@@ -2115,7 +2141,7 @@ fn plan_aggregates(in low: L, f: FnR, row: FnRow, inout m: Function) -> bool {
                 continue;
             }
             if inst.op == Op::Call {
-                if !plan_call_arguments(in low, inst, inout m) {
+                if !plan_call_arguments(in low, inst, resident, inout m) {
                     return false;
                 }
                 if aggregate {
@@ -2127,6 +2153,7 @@ fn plan_aggregates(in low: L, f: FnR, row: FnRow, inout m: Function) -> bool {
                     if bytes > m.call_result_bytes {
                         m.call_result_bytes = bytes;
                     }
+                    resident = m.product_index(value);
                 }
                 continue;
             }
@@ -3682,6 +3709,8 @@ fn lower_block(
     inout m: Function,
     inout graph: CallGraph
 ) -> bool {
+    // A result is resident until another call writes this block's shared buffer.
+    let mut resident = NO_VALUE;
     for index in b.i0..add(b.i0, b.ic) {
         let inst = low.program.inst(index);
         let at = inst.a;
@@ -3799,7 +3828,11 @@ fn lower_block(
                 inout graph
             )
         } else if inst.op == Op::Call {
-            lower_call(in low, f, inst, block, inout m, inout graph)
+            let value = lower_call(in low, f, inst, block, resident, inout m, inout graph);
+            if is_aggregate(kind) {
+                resident = m.product_index(add(m.arguments, w(inst.dest)));
+            }
+            value
         } else {
             return false;
         };
@@ -3869,7 +3902,7 @@ fn lower_return(in low: L, result: u64, block: u64, inout m: Function) -> bool {
     if value == NO_VALUE {
         return false;
     }
-    if m.blocks.len() == 1 {
+    if !m.labeled() {
         if is_float(m.result) {
             let _ = m.record(FLOAT_RETURN, 0, 0, 0);
         }
@@ -4326,6 +4359,7 @@ fn lower_function(
         products: ChunkSeq::new[Product](),
         call_result_bytes: 0,
         call_argument_bytes: 0,
+        forwards_call_result: false,
         mutable_slots: ChunkSeq::new[u32](),
         mutable_values: ChunkSeq::new[LocalValue](),
         addressed_locals: ChunkSeq::new[u32](),
@@ -4352,7 +4386,9 @@ fn lower_function(
     }
     for layout in 0..m.blocks.len() {
         let block = m.blocks.try_get(layout).unwrap_or(0);
-        if m.blocks.len() > 1 {
+        // Mark the private frame slot even for a single block when forwarding.
+        // The encoder can then discard result reloads with no scalar users.
+        if m.labeled() {
             let home = if block == 0 && frame_bytes != 0 {
                 inc(HOME_SLOT)
             } else {

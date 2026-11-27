@@ -2632,6 +2632,22 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
          pub fn enum_pipeline(pick: u64, tag: i8, raw: f32, ready: bool) -> u64 {\n\
              enum_reader(enum_packer(pick, tag, raw, ready))\n\
          }\n\
+         fn forwarded_source(tag: i8, sample: f32) -> CallFields {\n\
+             CallFields { tag: tag, sample: sample, active: true }\n\
+         }\n\
+         fn forwarded_update(row: CallFields) -> CallFields {\n\
+             CallFields { tag: wrapping_add(row.tag, 1), sample: row.sample + 1.0, active: !row.active }\n\
+         }\n\
+         fn forwarded_fields(a: CallFields, b: CallFields, prior: CallFields) -> (i64, f32, i64, f32, bool) {\n\
+             let same = a.tag == b.tag && to_bits_f32(a.sample) == to_bits_f32(b.sample) && a.active == b.active;\n\
+             (widen_i64(a.tag), a.sample, widen_i64(prior.tag), prior.sample, same && prior.active && !a.active)\n\
+         }\n\
+         pub fn forwarded_results(tag: i8, sample: f32) -> (i64, f32, i64, f32, bool) {\n\
+             let prior = forwarded_source(tag, sample);\n\
+             let alias = prior;\n\
+             let updated = forwarded_update(alias);\n\
+             forwarded_fields(updated, updated, prior)\n\
+         }\n\
          fn unsupported(x: u64) -> u64 {\n\
              let value = Option::Some(x);\n\
              match value { Option::Some(n) => n, _ => 9 }\n\
@@ -2972,6 +2988,14 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
         "{:?}",
         read_stage2_sidecar_notes(&object)
     );
+    let enum_object = dir.join("native-enum-match.o");
+    std::fs::rename(&object, &enum_object).unwrap();
+    assert_eq!(
+        compile("forwarded_results"),
+        0,
+        "{:?}",
+        read_stage2_sidecar_notes(&object)
+    );
 
     let caller = dir.join("native-scalar-caller.c");
     let binary = dir.join("native-scalar-caller");
@@ -3017,6 +3041,7 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
          extern uint64_t compound_values(uint64_t *, double, double, float, bool);\n\
          extern uint64_t tuple_match_native(int8_t, uint16_t, bool);\n\
          extern uint64_t enum_pipeline(uint64_t, int8_t, float, bool);\n\
+         extern uint64_t forwarded_results(uint64_t *, int8_t, float);\n\
          int main(void) {\n\
              if (mix(10, 4) != 65 || mix(UINT64_MAX, UINT64_MAX) != UINT64_MAX - 16) return 1;\n\
              if (choose(0, 4) != 8 || choose(2, 4) != 8 || choose(4, 1) != 10\n\
@@ -3155,11 +3180,17 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
              if (tuple_match_native(-1, 0, true) != 100 || tuple_match_native(-2, 1, false) != 100\n\
                  || tuple_match_native(0, UINT16_MAX, true) != 65735 || tuple_match_native(1, 9, false) != 209\n\
                  || tuple_match_native(-1, 1, false) != 1 || tuple_match_native(127, 0, true) != 1000) return 41;\n\
-             return enum_pipeline(0, -1, 0.0f, true) != 100\n\
+             if (enum_pipeline(0, -1, 0.0f, true) != 100\n\
                  || enum_pipeline(0, -128, 1.25f, true) != UINT64_MAX - 127\n\
                  || enum_pipeline(0, -1, 0.0f, false) != 200\n\
                  || enum_pipeline(1, 0, -0.0f, false) != UINT64_C(0x80000009)\n\
-                 || enum_pipeline(2, 0, 0.0f, false) != 300;\n\
+                 || enum_pipeline(2, 0, 0.0f, false) != 300) return 42;\n\
+             uint64_t forwarded[6] = {0};\n\
+             forwarded[5] = UINT64_MAX;\n\
+             return forwarded_results(forwarded, 127, -0.0f) != 0\n\
+                 || (int64_t)forwarded[0] != -128 || forwarded[1] != UINT64_C(0x3f800000)\n\
+                 || forwarded[2] != 127 || forwarded[3] != UINT64_C(0x80000000)\n\
+                 || forwarded[4] != 1 || forwarded[5] != UINT64_MAX;\n\
          }\n",
     )
     .unwrap();
@@ -3200,6 +3231,7 @@ fn check_stage2_native_object(stage2: &PreparedComponent, dir: &Path) {
             &product_caller_object,
             &compound_object,
             &tuple_match_object,
+            &enum_object,
             &object,
         ])
         .arg("-lm")
