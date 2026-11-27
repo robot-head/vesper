@@ -1971,6 +1971,7 @@ vesper_package(
     deps = [
         ":check_data_package",
         ":check_layout_package",
+        ":codegen_aggregates_package",
         ":place_ir_package",
     ],
 )

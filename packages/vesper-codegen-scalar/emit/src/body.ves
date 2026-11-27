@@ -103,6 +103,11 @@ const INST_FAIL_CALL: u64 = 41;
 // word above its 32-bit `FuncId`.
 const FAIL_CALL: u64 = 4294967296;
 const STATUS_CALL: u64 = 8589934592;
+// `codegen_swap::body::WORDS_CALL` (#2581): the callee returns its small
+// enum result as words in registers.
+const WORDS_CALL: u64 = 17179869184;
+// A direct call whose small enum result comes back as words (#2581).
+const INST_WORDS_CALL: u64 = 56;
 const CALLEE_ID_MASK: u64 = 4294967295;
 const INST_ICONST: u64 = 16;
 const INST_F64CONST: u64 = 17;
@@ -256,6 +261,8 @@ const TERM_BRANCH: u64 = 2;
 const TERM_MATCH: u64 = 3;
 const TERM_UNREACHABLE: u64 = 4;
 const TERM_RETURN_SRET: u64 = 32;
+// `return` of a small enum's words in registers (#2581).
+const TERM_RETURN_WORDS: u64 = 33;
 // `codegen_swap::body::NO_VALUE`: no result pointer.
 const NO_VALUE: u64 = 18446744073709551615;
 // `codegen_swap::body::RESULT_WORDS_SHIFT` (#2581): a register result's
@@ -1243,6 +1250,47 @@ impl Body {
             self.store_local(inout b, local, value);
             let zero = ins_iconst(inout b, ty_i64(), 0);
             body_coerce(inout b, zero, stated, self.optimize)
+        } else if kind == INST_WORDS_CALL {
+            // `call_function_into` of a callee that returns its small enum
+            // result as words (#2581): the call as part 6b makes it, its
+            // results, the walk's zero for the call's own value, then each
+            // word coerced to its type and defined (`scalar_call_words`).
+            let call_idx = w.next();
+            if call_idx >= self.callees.len() {
+                return false;
+            }
+            let word = at64(in self.callees, call_idx);
+            if (word & (FAIL_CALL | WORDS_CALL)) != WORDS_CALL {
+                return false;
+            }
+            let callee = FuncId { id: wrapping_u32(word & CALLEE_ID_MASK) };
+            let mut temps: ChunkSeq[u32] = ChunkSeq::new[u32]();
+            for k in 0..n {
+                temps.push(temp(inout b, self.value(at64(in ops, k))).id);
+            }
+            let mut args: ChunkSeq[u32] = ChunkSeq::new[u32]();
+            for k in 0..n {
+                let read = w.next();
+                let tv = Var { id: at32(in temps, k) };
+                args.push(body_operand(inout b, tv, read, self.optimize).id);
+            }
+            let fun = import_function(inout b, inout m, callee);
+            let _ = ins_call(inout b, fun, in args.as_slice());
+            let nw = w.next();
+            let mut results: ChunkSeq[u32] = ChunkSeq::new[u32]();
+            for k in 0..nw {
+                results.push(inst_result(inout b, wrapping_u32(k)).id);
+            }
+            let zero = ins_iconst(inout b, ty_i64(), 0);
+            for k in 0..nw {
+                let index = w.next();
+                let word_kind = w.next();
+                let raw = Value { id: at32(in results, k) };
+                let v = body_coerce(inout b, raw, word_kind, self.optimize);
+                let ok = self.values.try_set(index, v.id);
+                def_var(inout b, var_at(in self.registers, index), v);
+            }
+            zero
         } else if kind == INST_CALL || kind == INST_FAIL_CALL {
             // `ir_temp` of every argument, then each read back and coerced
             // in order, then `declare_func_in_func` and `call` (part 6b).
@@ -1254,7 +1302,7 @@ impl Body {
             }
             let word = at64(in self.callees, call_idx);
             let fails = kind == INST_FAIL_CALL;
-            if ((word & FAIL_CALL) != 0) != fails {
+            if ((word & FAIL_CALL) != 0) != fails || (word & WORDS_CALL) != 0 {
                 return false;
             }
             let callee = FuncId { id: wrapping_u32(word & CALLEE_ID_MASK) };
@@ -1801,6 +1849,22 @@ impl Body {
             }
             return true;
         }
+        if code == TERM_RETURN_WORDS {
+            // `ir_graph_at`'s return of a small enum kept as words
+            // (#2581): the value's own read, each word's register, then
+            // the words returned (`return_words`).
+            let i = w.next();
+            let nw = w.next();
+            ops.push(i);
+            self.read_operands(inout b, in ops);
+            let mut out: ChunkSeq[u32] = ChunkSeq::new[u32]();
+            for k in 0..nw {
+                let index = w.next();
+                out.push(use_var(inout b, var_at(in self.registers, index)).id);
+            }
+            ins_return(inout b, in out.as_slice());
+            return true;
+        }
         if code == TERM_JUMP {
             let target = w.next();
             let n = w.next();
@@ -1945,6 +2009,13 @@ pub fn emit_body_words(
     let fail_lane = if nfail != 0 { w.next() } else { 0 };
     if nfail != 0 && np == 0 {
         return BODY_ERROR;
+    }
+    // The words the plan returns a small enum result as (#2581): the
+    // frame must return that many registers with no result pointer.
+    let returned = w.next();
+    let frame_words = if sret == invalid() { result_words } else { 0 };
+    if returned != frame_words {
+        return DECLINED;
     }
     for k in 0..nc {
         if at64(in callees, k) == NO_CALLEE && !has_call(in builtin_calls, k) {
