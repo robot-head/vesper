@@ -94,6 +94,10 @@ const E_TRY: u8 = 23;
 // (`closure_free`), m = the declared mode + 1 (0 for none), y = whether the
 // row is inferred, x = body.
 const E_CLOSURE: u8 = 24;
+// An element write lowered by `arrays::lower_world`, `Assign("[]op", a,
+// (i, v))`: y = whether it is compound, x = the array, z = the operand
+// pair (spanning `a[i]`, or `a.set` for `a.set(i, v)`).
+const E_ARRAY_WRITE: u8 = 25;
 const NO_MODE: u32 = 0;
 // `latent_capability`'s closure origin `c<start>`.
 const CLOSURE_ORIGIN: u8 = 99;
@@ -805,6 +809,10 @@ fn read_expr(inout reader: Reader, in bytes: Slice[u8], inout ck: Ck) -> u32 {
         if ex.y != 0 {
             ex.x = read_expr(inout reader, in bytes, inout ck);
         }
+    } else if kind == E_ARRAY_WRITE {
+        ex.y = n32(reader.word(in bytes));
+        ex.x = read_expr(inout reader, in bytes, inout ck);
+        ex.z = read_expr(inout reader, in bytes, inout ck);
     } else if kind == E_ASSIGN {
         // Whether it is compound (`+=` and the rest), the place, the value.
         ex.y = n32(reader.word(in bytes));
@@ -1343,6 +1351,8 @@ pub fn expr_expected(inout ck: Ck, e: u32, expected: u32) -> u32 {
         return_expr(inout ck, ex)
     } else if ex.kind == E_ASSIGN {
         assign_expr(inout ck, ex)
+    } else if ex.kind == E_ARRAY_WRITE {
+        array_write(inout ck, ex)
     } else if ex.kind == E_LOOP {
         let ty = loop_body(inout ck, ex.x, expected, true, NONE32, hole);
         ty
@@ -3937,6 +3947,87 @@ fn assign_expr(inout ck: Ck, ex: Ex) -> u32 {
     if ex.y != 0 && !numeric(in ck, expected) {
         error(inout ck, "E0200", target_ex.start, target_ex.end);
     }
+    ck.ctx.types.unit
+}
+
+// `Checker::array_assign` and `array_method_call`'s `set`, as
+// `arrays::lower_world` leaves them: the array place is recorded, the
+// index checked (`u64` for `set`), the value checked against the element
+// type, and the operand pair typed `(index, element)` (`pair`).
+fn array_write(inout ck: Ck, ex: Ex) -> u32 {
+    let hole = ck.ctx.types.infer;
+    let known = ck.ctx.world.k;
+    let operands = ck.ex(ex.z);
+    if operands.kind != E_TUPLE || operands.n != 2 {
+        ck.skip = true;
+        return hole;
+    }
+    let index = ck.kid(w(operands.a));
+    let value = ck.kid(add(w(operands.a), 1));
+    let mut path: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let root = place_of(in ck, ex.x, inout path);
+    let bind_index = if root == NONE32 {
+        NONE32
+    } else {
+        lookup(in ck, root)
+    };
+    if bind_index == NONE32 {
+        // E1540 (no array place): not ported.
+        ck.skip = true;
+        return hole;
+    }
+    let root_ty = binding(in ck, bind_index).ty;
+    note(inout ck, root_ty);
+    let array_ty = field_path(inout ck, root_ty, in path);
+    if ck.skip || array_ty == NONE32 || ck.ctx.types.kind(array_ty) != TyKind::Tuple {
+        ck.skip = true;
+        return hole;
+    }
+    let array_node = ck.ctx.types.node(array_ty);
+    if array_node.n == 0 {
+        ck.skip = true;
+        return hole;
+    }
+    let element = item(in ck.ctx.types, w(array_node.a));
+    record(inout ck, ex.x, array_ty);
+    let index_ex = ck.ex(index);
+    // `a.set(i, v)`: the pair spans the callee `a.set`, before `i`.
+    let set_form = operands.end <= index_ex.start;
+    let index_ty = if set_form {
+        let u64_ty = named(inout ck, known.u64_);
+        let t = expr_expected(inout ck, index, u64_ty);
+        expect_type(inout ck, u64_ty, t, index_ex.start, index_ex.end);
+        t
+    } else {
+        let t = expr(inout ck, index);
+        if !ck.skip && !integer(in ck, t) {
+            error(inout ck, "E0200", index_ex.start, index_ex.end);
+        }
+        t
+    };
+    let actual = expr_expected(inout ck, value, element);
+    if ck.skip {
+        return hole;
+    }
+    let value_ex = ck.ex(value);
+    expect_type(inout ck, element, actual, value_ex.start, value_ex.end);
+    if mode(inout ck, element) != TyMode::Copy {
+        error(inout ck, "E0311", value_ex.start, value_ex.end);
+    }
+    if ex.y != 0 && !numeric(in ck, element) {
+        error(inout ck, "E0200", ex.start, ex.end);
+    }
+    let recorded_index = u32_at(in ck.ex_types, w(index));
+    let pair_index = if recorded_index == NONE32 {
+        named(inout ck, known.u64_)
+    } else {
+        default_type(inout ck.ctx.types, recorded_index)
+    };
+    let mut parts: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    parts.push(pair_index);
+    parts.push(element);
+    let pair = ck.ctx.types.tuple(in parts);
+    record(inout ck, ex.z, pair);
     ck.ctx.types.unit
 }
 
