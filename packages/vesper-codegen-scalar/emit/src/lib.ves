@@ -107,7 +107,7 @@ const CODE_I64: u32 = 4;
 
 // Integer kinds, in `numeric::IntegerKind`'s order: 1 u8, 2 u16, 3 u32,
 // 6 i8, 7 i16, 8 i32 are the narrow ones `coerce` reduces.
-fn kind_unsigned(kind: u64) -> bool {
+pub fn kind_unsigned(kind: u64) -> bool {
     kind >= 1 && kind <= 5
 }
 fn kind_bits(kind: u64) -> u64 {
@@ -130,7 +130,7 @@ fn kind_mask(kind: u64) -> i64 {
 }
 
 // The narrow type of a narrow kind's width.
-fn narrow_type(bits: u64) -> Ty {
+pub fn narrow_type(bits: u64) -> Ty {
     if bits == 8 {
         ty_i8()
     } else if bits == 16 {
@@ -233,7 +233,7 @@ fn operands(inout builder: Builder, call: u64, n: u64) -> bool eff [Ffi[Cranelif
 // type, defined as the value. The Rust walk names each operand this way
 // before `expr_at` reads it back with `use_var`, and the variables it
 // declares number the ones after them, so the port declares the same.
-fn temp(inout builder: Builder, value: Value) -> Var eff [Ffi[Cranelift]] {
+pub fn temp(inout builder: Builder, value: Value) -> Var eff [Ffi[Cranelift]] {
     let ty = value_type(inout builder, value);
     let var = declare_var(inout builder, ty);
     def_var(inout builder, var, value);
@@ -276,7 +276,7 @@ fn rotate(
 
 // `expr_at`'s read of an operand: `use_var` of its temporary, then
 // `coerce` to the operand's own type.
-fn operand(
+pub fn operand(
     inout builder: Builder,
     var: Var,
     coerce_words: u64,
@@ -383,7 +383,7 @@ fn overflow_test(call: u64, inout builder: Builder) -> u64 eff [Ffi[Cranelift]] 
 
 // `IntegerKind::max` of a one-word kind, as an `i64` immediate (u64's
 // max is -1, as Rust's `as i64` makes it).
-fn kind_max_imm(kind: u64) -> i64 {
+pub fn kind_max_imm(kind: u64) -> i64 {
     if kind == 1 {
         255
     } else if kind == 2 {
@@ -404,7 +404,7 @@ fn kind_max_imm(kind: u64) -> i64 {
 }
 
 // `IntegerKind::min` of a one-word kind.
-fn kind_min_imm(kind: u64) -> i64 {
+pub fn kind_min_imm(kind: u64) -> i64 {
     if kind_unsigned(kind) {
         0
     } else if kind == 6 || kind == 7 || kind == 8 {
