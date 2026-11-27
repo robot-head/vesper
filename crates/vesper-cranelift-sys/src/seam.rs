@@ -145,3 +145,67 @@ pub unsafe fn finalized_function(b: *const Builder) -> Option<Function> {
     // SAFETY: a finalized builder owns its function and nothing borrows it.
     Some(unsafe { func.as_ref() }.clone())
 }
+
+/// The cold outliner's key for the helpers' verifier errors (the Rust
+/// pass names them after the parent's key, which the shim does not know).
+const OUTLINE_KEY: &str = "outlined";
+
+/// Replay the cold outliner's script `edits` (`E_OUTLINE`/`E_SKIP` ops,
+/// [`crate::clif_outline::apply_outline`]) on finalized builder `b`: each
+/// helper is declared in `m` as an anonymous function, in order, and the
+/// parent's region becomes its stub. Returns how many helpers there are (0
+/// leaves the function unchanged), or `INVALID` with the builder's error
+/// set. Take the helpers with `vcl_take_cold_helper` before `b` is defined.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vcl_outline_cold(
+    b: *mut Builder,
+    m: *mut crate::Module,
+    edits: *const u64,
+    len: usize,
+) -> u32 {
+    // SAFETY: the `.vsys` CSlice contract.
+    let edits = unsafe { slice(edits, len) };
+    // SAFETY: the `.vsys` contract: a live module handle or null.
+    let Some(m) = (unsafe { m.as_mut() }) else {
+        return crate::INVALID;
+    };
+    let mut helpers = Vec::new();
+    let n = with_function(b, crate::INVALID, |func, words| {
+        words.key = None;
+        let made = crate::clif_outline::apply_outline(m.get_mut(), OUTLINE_KEY, func, edits)?;
+        for (id, _, helper) in made {
+            helpers.push((crate::func_index(m, id), helper));
+        }
+        Ok(helpers.len() as u32)
+    });
+    // SAFETY: as above; `with_function` has returned.
+    if let Some(b) = unsafe { b.as_mut() } {
+        b.cold.extend(helpers);
+    }
+    n
+}
+
+/// The next cold helper of builder `b` as a finalized builder of its own
+/// (null when none is left); `vcl_cold_helper_func` names the function to
+/// define it as.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vcl_take_cold_helper(b: *mut Builder) -> *mut Builder {
+    // SAFETY: the `.vsys` contract: a live handle or null.
+    let Some(b) = (unsafe { b.as_mut() }) else {
+        return std::ptr::null_mut();
+    };
+    match b.cold.pop_front() {
+        Some((func, helper)) => Box::into_raw(Builder::finalized(helper, func)),
+        None => std::ptr::null_mut(),
+    }
+}
+
+/// The module function index a cold helper builder defines (`INVALID` for
+/// any other builder).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vcl_cold_helper_func(b: *const Builder) -> u32 {
+    // SAFETY: the `.vsys` contract: a live handle or null.
+    unsafe { b.as_ref() }
+        .and_then(|b| b.cold_func)
+        .unwrap_or(crate::INVALID)
+}
