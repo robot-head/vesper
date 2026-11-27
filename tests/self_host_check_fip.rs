@@ -268,7 +268,9 @@ fn abba_cases(cases: &[(String, World)], label: &str) {
             })
         },
     );
-    // The swap encodes each world itself: the flip gate's workload.
+    // The swap's whole path, the flip gate's workload: it encodes each world,
+    // runs the diagnostic entry and decodes Rust diagnostics.
+    let full = package().entry("check_fip", true);
     abba(
         &format!("fip with encoding, {label}"),
         &mut || {
@@ -284,7 +286,9 @@ fn abba_cases(cases: &[(String, World)], label: &str) {
         &mut || {
             time(|| {
                 for (_, w) in cases {
-                    sink.set(sink.get().wrapping_add(count.word(&fip_input(w))));
+                    let words = full.words(&fip_input(w));
+                    let diags = fip_words::decode_diagnostics(&words);
+                    sink.set(sink.get().wrapping_add(diags.len() as u64));
                 }
             })
         },
@@ -371,7 +375,10 @@ fn callgrind_side() {
             eprintln!("passes: rust {r:.3}s encode {e:.3}s vesper {v:.3}s");
             let types: usize = cases.iter().map(|(_, w)| w.types.len()).sum();
             let fns: usize = cases.iter().map(|(_, w)| w.functions.len()).sum();
-            eprintln!("{} worlds, {types} expression types, {fns} functions", cases.len());
+            eprintln!(
+                "{} worlds, {types} expression types, {fns} functions",
+                cases.len()
+            );
         }
         "encode" => {
             for (_, w) in &cases {

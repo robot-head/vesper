@@ -8,6 +8,19 @@ use super::check_words::{Enc, pass_word};
 use vesper::ast::{Diagnostic, Expr, ExprKind, Pass, Pattern, PatternKind, Statement, Type};
 use vesper::check::World;
 
+/// Words per pool entry (its tag and value).
+const POOL_WORDS: usize = 2;
+/// Words per expression node (ast.ves): its kind and operand words and
+/// its span.
+const EXPR_WORDS: usize = 8;
+/// A span's words (start, end) in a node.
+const SPAN_WORDS: usize = 2;
+/// Words per pattern node (ast.ves).
+const PAT_WORDS: usize = 6;
+/// The count words of the task section: pool, expressions, patterns and
+/// functions.
+const TASK_COUNTS: usize = 4;
+
 /// The fip task section: the pool of list words (each a tag and a value: 0
 /// an index, 1 a name, 2 a type), the expression and pattern tables and the
 /// functions of `world.functions` in name order (ast.ves documents the
@@ -15,8 +28,8 @@ use vesper::check::World;
 #[derive(Default)]
 struct FipEnc {
     pool: Vec<(u64, u64)>,
-    exprs: Vec<[u64; 8]>,
-    pats: Vec<[u64; 6]>,
+    exprs: Vec<[u64; EXPR_WORDS]>,
+    pats: Vec<[u64; PAT_WORDS]>,
     /// List words being gathered, innermost list last: a node pushes its
     /// items here from `base` and [`FipEnc::close`]s them into the pool, so
     /// no list needs a vector of its own.
@@ -85,7 +98,7 @@ impl FipEnc {
     fn expr(&mut self, enc: &mut Enc, e: &Expr) -> u64 {
         let opt = |x: Option<u64>| x.map_or(0, |i| i + 1);
         let pass = |p: Pass| pass_word(p);
-        let node: [u64; 6] = match &e.kind {
+        let node: [u64; EXPR_WORDS - SPAN_WORDS] = match &e.kind {
             ExprKind::Literal(_) => [1, 0, 0, 0, 0, 0],
             ExprKind::Name(n) => [2, enc.name(n), 0, 0, 0, 0],
             ExprKind::Tuple(es) => {
@@ -255,7 +268,13 @@ pub fn fip_task(enc: &mut Enc, tail: &mut Vec<u64>, world: &World) {
         fns.push(enc.ty(&Type::Row(f.effects.clone())));
         fns.push(f.body.as_ref().map_or(0, |b| fe.expr(enc, b) + 1));
     }
-    tail.reserve(4 + 2 * fe.pool.len() + 8 * fe.exprs.len() + 6 * fe.pats.len() + fns.len());
+    tail.reserve(
+        TASK_COUNTS
+            + POOL_WORDS * fe.pool.len()
+            + EXPR_WORDS * fe.exprs.len()
+            + PAT_WORDS * fe.pats.len()
+            + fns.len(),
+    );
     tail.push(fe.pool.len() as u64);
     for (tag, x) in &fe.pool {
         tail.extend([*tag, *x]);
