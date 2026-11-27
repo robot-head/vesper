@@ -640,16 +640,20 @@ fn windows_link_matches_rust() {
 
     let entry = driver().entry("windows_link_check", true);
     let linkers = [
-        "link.exe",
-        "C:\\Program Files\\MSVC\\bin\\HostX64\\x64\\LINK.EXE",
-        "/usr/bin/lld-link",
-        "C:\\LLVM\\bin\\LLD-LINK.exe",
-        "rust-lld",
-        "/toolchain/bin/RUST-LLD.EXE",
-        "custom-ld.exe",
+        ("link.exe", 0u64, false),
+        (
+            "C:\\Program Files\\MSVC\\bin\\HostX64\\x64\\LINK.EXE",
+            0u64,
+            true,
+        ),
+        ("/usr/bin/lld-link", 1u64, false),
+        ("C:\\LLVM\\bin\\LLD-LINK.exe", 1u64, true),
+        ("rust-lld", 2u64, false),
+        ("/toolchain/bin/RUST-LLD.EXE", 2u64, false),
+        ("custom-ld.exe", 0u64, false),
     ];
     let object_sets: &[&[&str]] = &[&["a.obj"], &["a.obj", "b.obj", "dir/c.obj"]];
-    for linker_path in linkers {
+    for (linker_path, expected_flavor, windows_backslash) in linkers {
         for objs in object_sets {
             let output = "out/app.exe";
             let mut input = Vec::new();
@@ -672,17 +676,21 @@ fn windows_link_matches_rust() {
             let got_err_none = String::from_utf8(unpack(&words, &mut at)).unwrap();
             assert_eq!(at, words.len());
 
-            let rust_linker = Linker::explicit(Path::new(linker_path));
-            let want_flavor = match rust_linker.flavor {
-                LinkerFlavor::Msvc => 0,
-                LinkerFlavor::LldLink => 1,
-                LinkerFlavor::RustLld => 2,
-            };
-            assert_eq!(got_flavor, want_flavor, "flavor for {linker_path}");
+            assert_eq!(got_flavor, expected_flavor, "flavor for {linker_path}");
+            // `std::path::Path::file_stem` treats `\` as a separator only on Windows.
+            if !windows_backslash || cfg!(windows) {
+                let rust_linker = Linker::explicit(Path::new(linker_path));
+                let want_flavor = match rust_linker.flavor {
+                    LinkerFlavor::Msvc => 0,
+                    LinkerFlavor::LldLink => 1,
+                    LinkerFlavor::RustLld => 2,
+                };
+                assert_eq!(got_flavor, want_flavor, "rust flavor for {linker_path}");
+            }
 
             let obj_paths: Vec<PathBuf> = objs.iter().map(PathBuf::from).collect();
             let mut want_args: Vec<String> = Vec::new();
-            if rust_linker.flavor == LinkerFlavor::RustLld {
+            if expected_flavor == 2 {
                 want_args.push("-flavor".into());
                 want_args.push("link".into());
             }
