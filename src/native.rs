@@ -4164,10 +4164,7 @@ impl<M: Module> Codegen<'_, '_, M> {
             FrameResult::Sret | FrameResult::Buffer(_) => sret.is_some(),
             FrameResult::Words(_) => false,
         };
-        // A failure exit returns a scalar zero beside its tag, so a
-        // `fail_only` function with a struct result stays with the walk.
         let plain = result_ok
-            && !(sret.is_some() && self.fail_record.is_some())
             && self.denorm.is_empty()
             && self.session.is_none()
             && self.generic_vars.is_empty()

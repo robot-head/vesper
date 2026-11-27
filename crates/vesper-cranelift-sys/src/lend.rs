@@ -132,6 +132,8 @@ fn lend_parts<R>(
         fctx: None,
         last: None,
         error: None,
+        finalized: false,
+        words: crate::seam::Words::default(),
     };
     // SAFETY: only the trait object's lifetime changes; the handle that
     // holds it lives in this frame, which `m` outlives.

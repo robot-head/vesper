@@ -12,6 +12,13 @@ exports_files(
     visibility = ["//crates/vesper-cranelift-component:__pkg__"],
 )
 
+# The root crate's CLIF pass differentials include the seam's function
+# words and edit replay by path (#2606): the root cannot depend on the shim.
+exports_files(
+    ["src/clif_words.rs"],
+    visibility = ["//:__pkg__"],
+)
+
 filegroup(
     name = "test_fixtures",
     srcs = glob(["tests/fixtures/**"]),

@@ -1,5 +1,6 @@
 // @vesper/clif: one Cranelift function as tables, read from the words of
-// tests/common/clif_words.rs (`encode`), for the Vesper ports of the
+// crates/vesper-cranelift-sys/src/clif_words.rs
+// (`encode`), for the Vesper ports of the
 // native CLIF passes (#1829): src/native_vectorize.rs first, then
 // src/native_cold_outline.rs.
 //
@@ -15,18 +16,18 @@
 //   clif_words.rs.
 
 use self::codes::{
-    E_TRUST_LOAD, M_ALIGNED, M_NOTRAP, M_REGION_MASK, E_MOVE_BEFORE, E_REPLACE_BITCAST,
-    E_REPLACE_STORE, E_NEW_SLOT, E_ZERO_BEFORE, E_SET_BINARY, E_SET_UNARY, E_MEM_ADDR,
-    E_REPLACE_ICMP_IMM, E_REPLACE_IMM, E_APPEND_DEST_ARG, E_BRIF, E_DETACH_RESULTS, E_ICONST,
-    E_SET_DEST, E_ARGS, E_BLOCK, E_CLONE, E_END, E_FCONST, E_INS, E_JUMP, E_PARAM, E_PLACE,
-    E_REMOVE_BLOCK, E_REMOVE_INST, E_RETARGET, E_SLOT_SIZE, E_ALIAS, E_INS_BEFORE, E_MOVE_INST,
-    E_REMOVE_DEST_ARG, E_REMOVE_PARAM, F_BRANCH, F_CALL, F_RETURN, F_SIDE_EFFECTS, F_STACK_SLOT,
-    F_TERMINATOR, F_TRAP, F_TRAP_CODE, H_NO_OUTLINE, H_SIMD, NONE, NONE64, OP_BITCAST, OP_BRIF,
-    OP_CALL, OP_F32CONST, OP_F64CONST, OP_FCVT_FROM_SINT, OP_ICMP, OP_ICMP_IMM, OP_ICONST, OP_JUMP,
-    OP_LOAD, OP_RETURN, OP_SCALAR_TO_VECTOR, OP_SPLAT, OP_STACK_ADDR, OP_STORE, OP_VCONST,
-    S_EXPLICIT, TY_F64, TY_F32X4, TY_F64X2, OP_SWIDEN_HIGH, OP_SWIDEN_LOW, OP_TRAP,
-    OP_UADD_OVERFLOW, S_OTHER, TY_F32, TY_I16X8, TY_I32X4, TY_I64X2, TY_I8, TY_I8X16, TY_OTHER,
-    V_ALIAS, V_PARAM, V_RESULT
+    E_PLACE_AFTER, OP_BR_TABLE, OP_IREDUCE, OP_SELECT, OP_UEXTEND, E_TRUST_LOAD, M_ALIGNED,
+    M_NOTRAP, M_REGION_MASK, E_MOVE_BEFORE, E_REPLACE_BITCAST, E_REPLACE_STORE, E_NEW_SLOT,
+    E_ZERO_BEFORE, E_SET_BINARY, E_SET_UNARY, E_MEM_ADDR, E_REPLACE_ICMP_IMM, E_REPLACE_IMM,
+    E_APPEND_DEST_ARG, E_BRIF, E_DETACH_RESULTS, E_ICONST, E_SET_DEST, E_ARGS, E_BLOCK, E_CLONE,
+    E_END, E_FCONST, E_INS, E_JUMP, E_PARAM, E_PLACE, E_REMOVE_BLOCK, E_REMOVE_INST, E_RETARGET,
+    E_SLOT_SIZE, E_ALIAS, E_INS_BEFORE, E_MOVE_INST, E_REMOVE_DEST_ARG, E_REMOVE_PARAM, F_BRANCH,
+    F_CALL, F_RETURN, F_SIDE_EFFECTS, F_STACK_SLOT, F_TERMINATOR, F_TRAP, F_TRAP_CODE, H_NO_OUTLINE,
+    H_SIMD, NONE, NONE64, OP_BITCAST, OP_BRIF, OP_CALL, OP_F32CONST, OP_F64CONST, OP_FCVT_FROM_SINT,
+    OP_ICMP, OP_ICMP_IMM, OP_ICONST, OP_JUMP, OP_LOAD, OP_RETURN, OP_SCALAR_TO_VECTOR, OP_SPLAT,
+    OP_STACK_ADDR, OP_STORE, OP_VCONST, S_EXPLICIT, TY_F64, TY_F32X4, TY_F64X2, OP_SWIDEN_HIGH,
+    OP_SWIDEN_LOW, OP_TRAP, OP_UADD_OVERFLOW, S_OTHER, TY_F32, TY_I16X8, TY_I32X4, TY_I64X2, TY_I8,
+    TY_I8X16, TY_OTHER, V_ALIAS, V_PARAM, V_RESULT
 };
 
 pub copy struct Val {
@@ -589,6 +590,28 @@ impl Func {
         self.out.push(w(before));
     }
 
+    // `layout.insert_block_after(b, after)`, written as `E_PLACE_AFTER`.
+    pub fn insert_block_after(inout self, b: u32, after: u32) {
+        let mut row = self.blk(w(b));
+        let mut at = self.blk(w(after));
+        row.prev = after;
+        row.next = at.next;
+        row.placed = true;
+        if at.next == NONE {
+            self.llast = b;
+        } else {
+            let mut n = self.blk(w(at.next));
+            n.prev = b;
+            self.put_blk(w(at.next), n);
+        }
+        at.next = b;
+        self.put_blk(w(after), at);
+        self.put_blk(w(b), row);
+        self.out.push(E_PLACE_AFTER);
+        self.out.push(w(b));
+        self.out.push(w(after));
+    }
+
     // Every destination of `i` at `from` goes to `to`.
     pub fn retarget(inout self, i: u32, from: u32, to: u32) {
         let row = self.inst(w(i));
@@ -742,8 +765,14 @@ impl Func {
             || op == OP_BITCAST
             || op == OP_LOAD
             || op == OP_STACK_ADDR
+            || op == OP_UEXTEND
+            || op == OP_IREDUCE
         {
             self.result_of(new, 0, ty);
+            rn = 1;
+        } else if op == OP_SELECT {
+            // The builder's controlling type is the first selected value's.
+            self.result_of(new, 0, self.value_type(u32_at(in a, 1)));
             rn = 1;
         } else if op == OP_SWIDEN_LOW || op == OP_SWIDEN_HIGH {
             let t = if a0t == TY_I8X16 {
@@ -1518,5 +1547,5 @@ fn is_vector_type(ty: u64) -> bool {
 
 // Opcodes the builder makes with no result.
 fn is_sink(op: u64) -> bool {
-    op == OP_STORE || op == OP_BRIF || op == OP_JUMP
+    op == OP_STORE || op == OP_BRIF || op == OP_JUMP || op == OP_BR_TABLE
 }

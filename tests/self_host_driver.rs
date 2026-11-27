@@ -1151,3 +1151,106 @@ fn localize_diagnostic_matches_rust() {
     let want_json = serde_json::Value::Array(want_arr).to_string();
     assert_eq!(got_json, want_json);
 }
+
+#[test]
+fn windows_lld_link_candidates_match_rust() {
+    let entry = driver().entry("windows_lld_link_candidates_words", true);
+
+    // Test both Windows (`w`) and Unix (`u`) PATH splitting.
+    let win_input = "wC:\\LLVM\\bin;\"C:\\Program Files\\LLVM\\bin\";;D:\\tools\\";
+    let words = entry.words(win_input.as_bytes());
+    let mut at = 0;
+    let got_win = String::from_utf8(unpack(&words, &mut at)).unwrap();
+    let got_msg = String::from_utf8(unpack(&words, &mut at)).unwrap();
+    assert_eq!(at, words.len());
+    assert_eq!(
+        got_win,
+        [
+            "C:\\LLVM\\bin\\lld-link",
+            "C:\\Program Files\\LLVM\\bin\\lld-link",
+            "D:\\tools\\lld-link",
+            "C:\\LLVM\\bin\\lld-link.exe",
+            "C:\\Program Files\\LLVM\\bin\\lld-link.exe",
+            "D:\\tools\\lld-link.exe",
+        ]
+        .join("\0")
+    );
+    assert_eq!(
+        got_msg,
+        "install the Visual Studio C++ build tools (x64), put lld-link on PATH, or pass --linker <path>"
+    );
+
+    let unix_input = "u/usr/bin:/opt/llvm/bin/:";
+    let uwords = entry.words(unix_input.as_bytes());
+    let mut uat = 0;
+    let got_unix = String::from_utf8(unpack(&uwords, &mut uat)).unwrap();
+    let _msg = unpack(&uwords, &mut uat);
+    assert_eq!(uat, uwords.len());
+    assert_eq!(
+        got_unix,
+        [
+            "/usr/bin/lld-link",
+            "/opt/llvm/bin/lld-link",
+            "lld-link",
+            "/usr/bin/lld-link.exe",
+            "/opt/llvm/bin/lld-link.exe",
+            "lld-link.exe",
+        ]
+        .join("\0")
+    );
+}
+
+#[test]
+fn vsys_target_os_matches_rust() {
+    use vesper::packages::{VSYS_TARGETS, driver_host};
+
+    let entry = driver().entry("vsys_target_os_words", true);
+    let host_os = std::env::consts::OS;
+
+    let cases: Vec<Option<&str>> = vec![
+        None,
+        Some("wasm32-wasip2"),
+        Some("x86_64-unknown-linux-gnu"),
+        Some("aarch64-unknown-linux-gnu"),
+        Some("aarch64-apple-darwin"),
+        Some("x86_64-pc-windows-msvc"),
+        Some("riscv64gc-unknown-none-elf"),
+    ];
+
+    for target in cases {
+        let mut input = Vec::new();
+        match target {
+            Some(t) => {
+                input.push(b'1');
+                input.extend_from_slice(t.as_bytes());
+            }
+            None => input.push(b'0'),
+        }
+        input.push(0);
+        input.extend_from_slice(host_os.as_bytes());
+
+        let words = entry.words(&input);
+        let got_wasi = words[0] != 0;
+        let got_idx = words[1];
+        let mut at = 2;
+        let got_os = String::from_utf8(unpack(&words, &mut at)).unwrap();
+        let got_abi = String::from_utf8(unpack(&words, &mut at)).unwrap();
+        assert_eq!(at, words.len());
+
+        let (want_os, want_wasi) = driver_host::target_os(target);
+        assert_eq!(
+            (got_os.as_str(), got_wasi),
+            (want_os, want_wasi),
+            "{target:?}"
+        );
+
+        let want_idx = target
+            .and_then(|t| VSYS_TARGETS.iter().position(|v| v.triple == t))
+            .map_or(4u64, |i| i as u64);
+        assert_eq!(got_idx, want_idx, "{target:?}");
+        let want_abi = target
+            .and_then(|t| VSYS_TARGETS.iter().find(|v| v.triple == t))
+            .map_or("", |v| v.abi);
+        assert_eq!(got_abi, want_abi, "{target:?}");
+    }
+}

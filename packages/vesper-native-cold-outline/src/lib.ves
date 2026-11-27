@@ -1,7 +1,8 @@
 // @vesper/native-cold-outline: the decisions of src/native_cold_outline.rs
 // (cold-region outlining on the native optimize path) in Vesper (#1829).
 //
-// The pass reads one function in the words of tests/common/clif_words.rs
+// The pass reads one function in the words of
+// crates/vesper-cranelift-sys/src/clif_words.rs
 // (`encode_with`, with the module's pointer type) into @vesper/clif tables
 // and runs `native_cold_outline::outline` on them: up to 16 rounds of
 // `find_candidate` (classify a root, close its region, weigh it) and the

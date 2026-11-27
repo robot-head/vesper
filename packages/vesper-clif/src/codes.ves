@@ -1,4 +1,5 @@
-// The codes of tests/common/clif_words.rs (`OPCODES`, `TYPES`, the
+// The codes of
+// crates/vesper-cranelift-sys/src/clif_words.rs (`OPCODES`, `TYPES`, the
 // condition codes, value kinds, memory and effect bits, edit ops). 0 is
 // "another one" for opcodes and types. Append only, in step with the
 // Rust tables.
@@ -90,6 +91,12 @@ pub const OP_FNEG: u64 = 80;
 pub const OP_FABS: u64 = 81;
 pub const OP_FCVT_FROM_UINT: u64 = 82;
 pub const OP_FCMP: u64 = 83;
+// 90 up (`OPCODES_FROM_90` of clif_words.rs): if_convert_pure_diamonds
+// (#2605).
+pub const OP_CLZ: u64 = 90;
+pub const OP_CTZ: u64 = 91;
+pub const OP_POPCNT: u64 = 92;
+pub const OP_BITREV: u64 = 93;
 
 // Types.
 pub const TY_OTHER: u64 = 0;
@@ -134,7 +141,8 @@ pub const M_ENDIAN: u64 = 4;
 pub const M_LITTLE: u64 = 8;
 pub const M_NOTRAP: u64 = 16;
 pub const M_ALIGNED: u64 = 32;
-// The alias region plus one (0: none) sits at this shift, under this mask.
+// The alias region (0: none, then heap, table, vmctx) sits at this shift,
+// under this mask.
 pub const M_REGION_SHIFT: u64 = 6;
 pub const M_REGION_MASK: u64 = 192;
 
@@ -201,6 +209,8 @@ pub const E_ICONST: u64 = 68;
 pub const E_REPLACE_IMM: u64 = 69;
 pub const E_REPLACE_ICMP_IMM: u64 = 70;
 pub const E_MEM_ADDR: u64 = 71;
+// 80 up: if_convert_pure_diamonds and dense_icmp_chains_to_br_table (#2605).
+pub const E_PLACE_AFTER: u64 = 80;
 
 // A sized stack slot's kind.
 pub const S_EXPLICIT: u64 = 0;

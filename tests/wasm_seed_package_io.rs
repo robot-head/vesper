@@ -909,6 +909,158 @@ pub fn main() -> u64 eff [Ffi[StdFs]] {{
 }
 
 #[test]
+fn std_env_high_level_ops_work_under_wasi() {
+    if !runs_on_shard(0) {
+        return;
+    }
+
+    let pkg = fresh("std-env-high-level-wasi");
+    std::fs::create_dir(pkg.join("src")).unwrap();
+    let env_dep = std::fs::canonicalize("packages/vesper-std/env").unwrap();
+    let fs_dep = std::fs::canonicalize("packages/vesper-std/fs").unwrap();
+    std::fs::write(
+        pkg.join("Loom.toml"),
+        format!(
+            r#"[package]
+name = "@wasm-seed/std-env-high-level-wasi"
+version = "0.1.0"
+edition = "2026"
+capability_ceiling = ["Alloc", "Fail", "Ffi[StdEnv]", "Ffi[StdFs]"]
+
+[dependencies]
+"@vesper-std/env" = {{ version = "^0.1", path = {env_dep:?} }}
+"@vesper-std/fs" = {{ version = "^0.1", path = {fs_dep:?} }}
+"#
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        pkg.join("src/main.ves"),
+        r#"use @vesper-std/env::{
+    arg, arg_count, current_dir, current_exe_bytes, os, var, var_at_bytes, var_count,
+};
+use @vesper-std/fs::{IoError, unsupported};
+
+fn eq_bytes(in a: Slice[u8], in b: Slice[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    for i in 0..a.len() {
+        let ba = match a.try_get(i) {
+            Option::Some(v) => v,
+            Option::None => 0,
+        };
+        let bb = match b.try_get(i) {
+            Option::Some(v) => v,
+            Option::None => 1,
+        };
+        if ba != bb {
+            return false;
+        }
+    }
+    true
+}
+
+fn opt_str_is(in opt: Option[String], in want: Str) -> bool {
+    match opt {
+        Option::Some(s) => eq_bytes(in s.as_bytes(), in want.as_bytes()),
+        Option::None => false,
+    }
+}
+
+fn run_ops() -> u64 eff [Ffi[StdEnv], Fail[IoError]] {
+    if os() != 0 {
+        return 1;
+    }
+    if arg_count() != 2 {
+        return 2;
+    }
+    if !opt_str_is(in arg(0), in "vesper") || !opt_str_is(in arg(1), in "--check") {
+        return 3;
+    }
+    let past_arg = match arg(2) {
+        Option::Some(_) => false,
+        Option::None => true,
+    };
+    if !past_arg {
+        return 4;
+    }
+    if var_count() != 2 {
+        return 5;
+    }
+    if !opt_str_is(in var(in "VESPER_MODE"), in "wasi") {
+        return 6;
+    }
+    let missing_var = match var(in "VESPER_UNSET") {
+        Option::Some(_) => false,
+        Option::None => true,
+    };
+    if !missing_var {
+        return 7;
+    }
+    let has_kv = match var_at_bytes(0) {
+        Option::Some(b) => b.len() > 0,
+        Option::None => false,
+    };
+    if !has_kv {
+        return 8;
+    }
+    let cwd_err = handle Fail[IoError] in {
+        let _ = current_dir();
+        0
+    } with {
+        return v => v,
+        raise(e, _k) => if e.kind == unsupported() { 1 } else { 2 },
+    };
+    if cwd_err != 1 {
+        return 9;
+    }
+    let exe_err = handle Fail[IoError] in {
+        let _ = current_exe_bytes();
+        0
+    } with {
+        return v => v,
+        raise(e, _k) => if e.kind == unsupported() { 1 } else { 2 },
+    };
+    if exe_err != 1 {
+        return 10;
+    }
+    42
+}
+
+pub fn main() -> u64 eff [Ffi[StdEnv]] {
+    handle Fail[IoError] in {
+        run_ops()
+    } with {
+        return v => v,
+        raise(e, _k) => wrapping_add(1_000_000, widen_u64(e.kind)),
+    }
+}
+"#,
+    )
+    .unwrap();
+
+    let assembled =
+        vesper::packages::load_for_target(&pkg, Some(vesper::wasm_backend::TARGET), false).unwrap();
+    assert!(
+        assembled.ok(),
+        "{:?} {:?}",
+        assembled.diagnostics,
+        assembled.manifest_errors
+    );
+    let checked = vesper::ffi_lowering::check_module(&assembled.module, &imports())
+        .unwrap_or_else(|e| panic!("{e}: {:?}", e.diagnostics));
+    let wasm = port(&checked, &options(false)).expect("compile std_env probe");
+    let ctx = Ctx {
+        args: vec!["vesper", "--check"],
+        env: vec![("VESPER_MODE", "wasi"), ("PWD", "/work")],
+        ..Ctx::default()
+    };
+    let got = run(&wasm, &ctx).expect("run std_env probe");
+    assert_eq!(got, 42);
+}
+
+#[test]
 fn std_fs_list_dir_and_walk_work_under_wasi() {
     if !runs_on_shard(0) {
         return;
@@ -3272,6 +3424,12 @@ const STAGE2_CRANELIFT_PACKAGES: &[(&str, &str, &str, &str)] = &[
         "packages/vesper-codegen-numeric",
         "use @vesper/codegen-numeric::numeric_hook;\npub fn main() -> u64 eff [Ffi[Cranelift]] { numeric_hook(0) }\n",
     ),
+    (
+        "native-lib",
+        "@vesper/native-lib",
+        "packages/vesper-native-lib",
+        "use @vesper/native-lib::library_object;\npub fn main() -> u64 eff [Ffi[Cranelift]] { let req: ChunkSeq[u8] = ChunkSeq::new[u8](); library_object(in req.as_slice()).len() }\n",
+    ),
 ];
 
 /// Compiler packages over the WASI host libraries (StdFs, StdEnv,
@@ -3315,10 +3473,6 @@ const STAGE2_PACKAGES_COVERED_ELSEWHERE: &[(&str, &str)] = &[
     (
         "vesper-export-build",
         "`vesper build --lib`'s interface and binding from Stage 2's front end (#2270) as a native executable beside the Rust CLI (tests/self_host_codegen_export.rs); it is @vesper/stage2 plus the export packages, built under Stage 2 as one program in bootstrap switch slice 3",
-    ),
-    (
-        "vesper-native-lib",
-        "a library's native object built in Vesper over @vesper/cranelift (bootstrap switch slice 2a, #2349), compared with `vesper build --lib` in the JIT (crates/vesper-codegen-swap-test/tests/self_host_native_lib.rs); built under Stage 2 with the Cranelift component in bootstrap switch slice 3",
     ),
     (
         "vesper-stage2",

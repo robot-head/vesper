@@ -2,7 +2,8 @@
 // i8 -> f32 widening vectorizer of the native optimize path, #1474) in
 // Vesper (#1829).
 //
-// The pass reads one function in the words of tests/common/clif_words.rs
+// The pass reads one function in the words of
+// crates/vesper-cranelift-sys/src/clif_words.rs
 // into @vesper/clif tables and runs `native_vectorize::run` on them: the
 // same headers, the same plans (`plan`, `plan_widen`) and the same
 // emission, call for call. Its answer is the number of loops vectorized,

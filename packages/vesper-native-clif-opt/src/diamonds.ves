@@ -1,0 +1,669 @@
+// if_convert_pure_diamonds and dense_icmp_chains_to_br_table of
+// src/native_clif_opt.rs in Vesper (#2605, part of #2362).
+//
+// `if_convert_pure_diamonds` turns small pure `brif` diamonds and
+// triangles into `select`s; `dense_icmp_chains_to_br_table` turns a chain
+// of equality tests of one key into a `br_table`. Both read predecessor
+// counts from a `ControlFlowGraph` (`cfg_of`) and, like the Rust steps,
+// the br_table step keeps the one it computed before its first change.
+
+use @vesper/clif::{Func, inc, n32, u32_at, u64_at, w};
+use @vesper/clif::codes::{
+    CC_EQ, CC_NE, CC_UGE, NONE, OP_BAND, OP_BITREV, OP_BNOT, OP_BOR, OP_BRIF, OP_BR_TABLE, OP_BXOR,
+    OP_CLZ, OP_CTZ, OP_F32CONST, OP_F64CONST, OP_FADD, OP_FMUL, OP_FSUB, OP_IADD, OP_IADD_IMM,
+    OP_ICMP, OP_ICMP_IMM, OP_ICONST, OP_IMUL, OP_IMUL_IMM, OP_INEG, OP_IREDUCE, OP_ISHL, OP_ISUB,
+    OP_JUMP, OP_POPCNT, OP_SELECT, OP_SEXTEND, OP_SSHR, OP_UEXTEND, OP_USHR, TY_F32, TY_F64, TY_I16,
+    TY_I32, TY_I64, TY_I8, TY_OTHER
+};
+use super::{layout_blocks, low_bits};
+use super::branches::{block_insts, cfg_of, constant, pred_count, sext, use_count, use_counts};
+
+// A diamond or triangle converts when its arms hold at most this many
+// instructions before their jumps.
+const MAX_ARM_INSTS: u64 = 6;
+// ... and pass at most this many values to the join block.
+const MAX_JOIN_ARGS: u64 = 2;
+
+// A `brif`'s destinations: then, else.
+const THEN_DEST: u64 = 0;
+const ELSE_DEST: u64 = 1;
+
+// The depth `dense_icmp_chains_to_br_table` asks `constant` from.
+const CHAIN_CONST_DEPTH: u64 = 2;
+// A chain becomes a table with at least this many distinct keys ...
+const MIN_TABLE_CASES: u64 = 4;
+// ... over a span of at most this many keys ...
+const MAX_TABLE_SPAN: u64 = 4096;
+// ... that the keys fill at least half of (distinct keys times this is at
+// least the span).
+const TABLE_DENSITY: u64 = 2;
+
+// Bit widths of the key types.
+const BITS_8: u64 = 8;
+const BITS_16: u64 = 16;
+const BITS_32: u64 = 32;
+// The sign bit of an i64 (also i64::MIN).
+const SIGN_BIT: u64 = 9223372036854775808;
+
+fn g8(in s: ChunkSeq[u8], i: u64) -> u8 {
+    s.try_get(i).unwrap_or(0)
+}
+
+fn mark(inout s: ChunkSeq[u8], i: u64) {
+    let ok = s.try_set(i, 1);
+}
+
+// `a < b` as i64s.
+fn slt(a: u64, b: u64) -> bool {
+    (a ^ SIGN_BIT) < (b ^ SIGN_BIT)
+}
+
+// ----- if_convert_pure_diamonds ----------------------------------------------
+
+// `is_pure_if_convert_op`.
+fn is_pure_if_convert_op(op: u64) -> bool {
+    op == OP_ICONST
+        || op == OP_F32CONST
+        || op == OP_F64CONST
+        || op == OP_IADD
+        || op == OP_IADD_IMM
+        || op == OP_ISUB
+        || op == OP_IMUL
+        || op == OP_IMUL_IMM
+        || op == OP_BAND
+        || op == OP_BOR
+        || op == OP_BXOR
+        || op == OP_ISHL
+        || op == OP_USHR
+        || op == OP_SSHR
+        || op == OP_ICMP
+        || op == OP_ICMP_IMM
+        || op == OP_IREDUCE
+        || op == OP_UEXTEND
+        || op == OP_SEXTEND
+        || op == OP_BNOT
+        || op == OP_INEG
+        || op == OP_SELECT
+        || op == OP_CLZ
+        || op == OP_CTZ
+        || op == OP_POPCNT
+        || op == OP_BITREV
+        || op == OP_FADD
+        || op == OP_FSUB
+        || op == OP_FMUL
+}
+
+fn is_cond_ty(ty: u64) -> bool {
+    ty == TY_I8 || ty == TY_I16 || ty == TY_I32 || ty == TY_I64
+}
+
+fn is_scalar_ty(ty: u64) -> bool {
+    is_cond_ty(ty) || ty == TY_F32 || ty == TY_F64
+}
+
+// The instructions of `b` before `term`.
+fn body_of(in f: Func, b: u32, term: u32) -> ChunkSeq[u32] {
+    let mut out = ChunkSeq::new[u32]();
+    let mut i = f.first_inst(b);
+    loop {
+        if i == NONE || i == term {
+            break;
+        }
+        out.push(i);
+        i = f.next_inst(i);
+    }
+    out
+}
+
+fn all_pure(in f: Func, in s: ChunkSeq[u32]) -> bool {
+    for k in 0..s.len() {
+        if !is_pure_if_convert_op(f.op(u32_at(in s, k))) {
+            return false;
+        }
+    }
+    true
+}
+
+// The value arguments of destination `k` of `i` (`filter_map(as_value)`).
+fn value_args(in f: Func, i: u32, k: u64) -> ChunkSeq[u32] {
+    let mut out = ChunkSeq::new[u32]();
+    for a in 0..f.dest_nargs(i, k) {
+        let v = f.dest_arg(i, k, a);
+        if v != NONE {
+            out.push(v);
+        }
+    }
+    out
+}
+
+// Whether the arguments `xs` (of destination `xk` of `xi`) and `ys` (of
+// `yk` of `yi`) pair up as at most two scalars of one type each.
+fn args_pair(
+    in f: Func,
+    in xs: ChunkSeq[u32],
+    xi: u32,
+    xk: u64,
+    in ys: ChunkSeq[u32],
+    yi: u32,
+    yk: u64
+) -> bool {
+    if xs.len() != ys.len()
+        || xs.len() > MAX_JOIN_ARGS
+        || xs.len() != f.dest_nargs(xi, xk)
+        || ys.len() != f.dest_nargs(yi, yk)
+    {
+        return false;
+    }
+    for k in 0..xs.len() {
+        let ta = f.value_type(u32_at(in xs, k));
+        if ta != f.value_type(u32_at(in ys, k)) || !is_scalar_ty(ta) {
+            return false;
+        }
+    }
+    true
+}
+
+// The arm instructions go just before `brif`, a `select` on `cond` of each
+// pair of `then_args` and `else_args` joins them, and a jump to `join`
+// with the selected values takes the `brif`'s place.
+fn select_into_jump(
+    inout f: Func,
+    brif: u32,
+    cond: u32,
+    in moved: ChunkSeq[u32],
+    in then_args: ChunkSeq[u32],
+    in else_args: ChunkSeq[u32],
+    join: u32
+) {
+    for k in 0..moved.len() {
+        f.move_before(u32_at(in moved, k), brif);
+    }
+    let none_dests = ChunkSeq::new[u32]();
+    let mut dws = ChunkSeq::new[u32]();
+    dws.push(join);
+    dws.push(n32(then_args.len()));
+    for k in 0..then_args.len() {
+        let mut a = ChunkSeq::new[u32]();
+        a.push(cond);
+        a.push(u32_at(in then_args, k));
+        a.push(u32_at(in else_args, k));
+        let s = f.ins_before(brif, OP_SELECT, TY_OTHER, 0, 0, 0, 0, in a, in none_dests);
+        dws.push(f.result(s, 0));
+    }
+    let none_args = ChunkSeq::new[u32]();
+    let made = f.ins_before(brif, OP_JUMP, 0, 0, 0, 0, 0, in none_args, in dws);
+    f.remove_inst(brif);
+}
+
+// The triangle case (one destination of the `brif` carries arguments):
+// whether it converted.
+fn convert_triangle(inout f: Func, in cfg: super::branches::Cfg, brif: u32, cond: u32) -> bool {
+    let t_blk = f.dest_block(brif, THEN_DEST);
+    let f_blk = f.dest_block(brif, ELSE_DEST);
+    let t_len = f.dest_nargs(brif, THEN_DEST);
+    let f_len = f.dest_nargs(brif, ELSE_DEST);
+    let mut arm_is_then = true;
+    if pred_count(in cfg, t_blk) == 1 && t_len == 0 {
+        arm_is_then = true;
+    } else if pred_count(in cfg, f_blk) == 1 && f_len == 0 {
+        arm_is_then = false;
+    } else {
+        return false;
+    }
+    let arm_blk = if arm_is_then { t_blk } else { f_blk };
+    let join_k = if arm_is_then { ELSE_DEST } else { THEN_DEST };
+    let arm_term = f.last_inst(arm_blk);
+    if arm_term == NONE || f.op(arm_term) != OP_JUMP {
+        return false;
+    }
+    let join_blk = f.dest_block(brif, join_k);
+    if f.dest_block(arm_term, 0) != join_blk {
+        return false;
+    }
+    let arm_insts = body_of(in f, arm_blk, arm_term);
+    if arm_insts.len() == 0 || arm_insts.len() > MAX_ARM_INSTS || !all_pure(in f, in arm_insts) {
+        return false;
+    }
+    let arm_args = value_args(in f, arm_term, 0);
+    let join_args = value_args(in f, brif, join_k);
+    if !args_pair(in f, in arm_args, arm_term, 0, in join_args, brif, join_k) {
+        return false;
+    }
+    if arm_is_then {
+        select_into_jump(inout f, brif, cond, in arm_insts, in arm_args, in join_args, join_blk);
+    } else {
+        select_into_jump(inout f, brif, cond, in arm_insts, in join_args, in arm_args, join_blk);
+    }
+    f.remove_inst(arm_term);
+    f.remove_block_edit(arm_blk);
+    true
+}
+
+// The full diamond case (block -> {then, else} -> join, no arguments on
+// the `brif`): whether it converted.
+fn convert_diamond(inout f: Func, in cfg: super::branches::Cfg, brif: u32, cond: u32) -> bool {
+    let t_blk = f.dest_block(brif, THEN_DEST);
+    let f_blk = f.dest_block(brif, ELSE_DEST);
+    let t_preds = pred_count(in cfg, t_blk);
+    let f_preds = pred_count(in cfg, f_blk);
+    let t_term = f.last_inst(t_blk);
+    if t_term == NONE {
+        return false;
+    }
+    let f_term = f.last_inst(f_blk);
+    if f_term == NONE {
+        return false;
+    }
+    if f.op(t_term) != OP_JUMP || f.op(f_term) != OP_JUMP {
+        return false;
+    }
+    let t_dest = f.dest_block(t_term, 0);
+    let f_dest = f.dest_block(f_term, 0);
+    if t_preds != 1 || f_preds != 1 || t_dest != f_dest || t_dest == t_blk || t_dest == f_blk {
+        return false;
+    }
+    let t_insts = body_of(in f, t_blk, t_term);
+    let f_insts = body_of(in f, f_blk, f_term);
+    if (t_insts.len() == 0 && f_insts.len() == 0)
+        || wrapping_add(t_insts.len(), f_insts.len()) > MAX_ARM_INSTS
+        || !all_pure(in f, in t_insts)
+        || !all_pure(in f, in f_insts)
+    {
+        return false;
+    }
+    let t_args = value_args(in f, t_term, 0);
+    let f_args = value_args(in f, f_term, 0);
+    if !args_pair(in f, in t_args, t_term, 0, in f_args, f_term, 0) {
+        return false;
+    }
+    let mut moved = ChunkSeq::new[u32]();
+    moved.extend(in t_insts.as_slice());
+    moved.extend(in f_insts.as_slice());
+    select_into_jump(inout f, brif, cond, in moved, in t_args, in f_args, t_dest);
+    f.remove_inst(t_term);
+    f.remove_inst(f_term);
+    f.remove_block_edit(t_blk);
+    f.remove_block_edit(f_blk);
+    true
+}
+
+// `if_convert_pure_diamonds`: rounds over the blocks, each ending at the
+// first conversion, until one converts nothing.
+pub fn if_convert_pure_diamonds(inout f: Func) {
+    loop {
+        let cfg = cfg_of(in f);
+        let blocks = layout_blocks(in f);
+        let mut changed = false;
+        for q in 0..blocks.len() {
+            let block = u32_at(in blocks, q);
+            if !f.blk(w(block)).placed {
+                continue;
+            }
+            let brif = f.last_inst(block);
+            if brif == NONE || f.op(brif) != OP_BRIF {
+                continue;
+            }
+            let cond = f.arg(brif, 0);
+            if !is_cond_ty(f.value_type(cond)) {
+                continue;
+            }
+            let t_blk = f.dest_block(brif, THEN_DEST);
+            let f_blk = f.dest_block(brif, ELSE_DEST);
+            if t_blk == f_blk || t_blk == block || f_blk == block {
+                continue;
+            }
+            if f.dest_nargs(brif, THEN_DEST) != 0 || f.dest_nargs(brif, ELSE_DEST) != 0 {
+                if convert_triangle(inout f, in cfg, brif, cond) {
+                    changed = true;
+                    break;
+                }
+                continue;
+            }
+            if convert_diamond(inout f, in cfg, brif, cond) {
+                changed = true;
+                break;
+            }
+        }
+        if !changed {
+            return;
+        }
+    }
+}
+
+// ----- dense_icmp_chains_to_br_table -----------------------------------------
+
+// One link of a chain (`match_brif_eq`): block `blk` ends in a `brif` with
+// no arguments on the result of an equality test `cmp` in `blk` of `key`
+// against the constant `k`; `arm` is where an equal key goes, `next` the
+// other destination.
+copy struct Link {
+    ok: bool,
+    brif: u32,
+    cmp: u32,
+    key: u32,
+    key_ty: u64,
+    k: u64,
+    arm: u32,
+    next: u32,
+}
+
+fn no_link() -> Link {
+    Link {
+        ok: false,
+        brif: NONE,
+        cmp: NONE,
+        key: NONE,
+        key_ty: TY_OTHER,
+        k: 0,
+        arm: NONE,
+        next: NONE
+    }
+}
+
+// `norm_imm`: the constant `bits` as a key of type `ty` (the Rust step
+// zero-extends i8 and i16 and sign-extends i32).
+fn norm_imm(ty: u64, bits: u64) -> Link {
+    let mut l = no_link();
+    if ty == TY_I8 {
+        l.k = low_bits(bits, BITS_8);
+    } else if ty == TY_I16 {
+        l.k = low_bits(bits, BITS_16);
+    } else if ty == TY_I32 {
+        l.k = sext(bits, BITS_32);
+    } else if ty == TY_I64 {
+        l.k = bits;
+    } else {
+        return l;
+    }
+    l.ok = true;
+    l
+}
+
+fn match_brif_eq(in f: Func, blk: u32) -> Link {
+    let brif = f.last_inst(blk);
+    if brif == NONE || f.op(brif) != OP_BRIF {
+        return no_link();
+    }
+    if f.dest_nargs(brif, THEN_DEST) != 0 || f.dest_nargs(brif, ELSE_DEST) != 0 {
+        return no_link();
+    }
+    let cond = f.resolve(f.arg(brif, 0));
+    let cmp = f.def_inst(cond);
+    if cmp == NONE || f.inst(w(cmp)).block != blk {
+        return no_link();
+    }
+    let row = f.inst(w(cmp));
+    if row.cond != CC_EQ && row.cond != CC_NE {
+        return no_link();
+    }
+    let is_eq = row.cond == CC_EQ;
+    let mut arg = NONE;
+    let mut raw: u64 = 0;
+    if row.op == OP_ICMP_IMM {
+        arg = f.arg(cmp, 0);
+        raw = row.imm;
+    } else if row.op == OP_ICMP {
+        let lhs = f.arg(cmp, 0);
+        let rhs = f.arg(cmp, 1);
+        let rc = constant(in f, rhs, CHAIN_CONST_DEPTH);
+        if rc.some {
+            arg = lhs;
+            raw = rc.v;
+        } else {
+            let lc = constant(in f, lhs, CHAIN_CONST_DEPTH);
+            if !lc.some {
+                return no_link();
+            }
+            arg = rhs;
+            raw = lc.v;
+        }
+    } else {
+        return no_link();
+    }
+    let key = f.resolve(arg);
+    let key_ty = f.value_type(key);
+    let mut l = norm_imm(key_ty, raw);
+    if !l.ok {
+        return l;
+    }
+    let t_blk = f.dest_block(brif, THEN_DEST);
+    let f_blk = f.dest_block(brif, ELSE_DEST);
+    if t_blk == f_blk || t_blk == blk || f_blk == blk {
+        return no_link();
+    }
+    l.brif = brif;
+    l.cmp = cmp;
+    l.key = key;
+    l.key_ty = key_ty;
+    l.arm = if is_eq { t_blk } else { f_blk };
+    l.next = if is_eq { f_blk } else { t_blk };
+    l
+}
+
+// Whether `cur` holds only the link's `brif`, its test, and `iconst`s used
+// once.
+fn only_cmp_and_consts(in f: Func, in uses: ChunkSeq[u32], cur: u32, l: Link) -> bool {
+    let insts = block_insts(in f, cur);
+    for q in 0..insts.len() {
+        let i = u32_at(in insts, q);
+        if i == l.brif || i == l.cmp {
+            continue;
+        }
+        if f.op(i) != OP_ICONST || use_count(in uses, f.result(i, 0)) != 1 {
+            return false;
+        }
+    }
+    true
+}
+
+// A one-destination row (block, no arguments) of a `br_table`'s list.
+fn push_dest(inout dws: ChunkSeq[u32], b: u32) {
+    dws.push(b);
+    dws.push(0);
+}
+
+// `iadd_imm key, neg_min` before `at`, or `key` when `min` is 0.
+fn shift_key(inout f: Func, at: u32, key: u32, min: u64) -> u32 {
+    if min == 0 {
+        return key;
+    }
+    let mut a = ChunkSeq::new[u32]();
+    a.push(key);
+    let none_dests = ChunkSeq::new[u32]();
+    let i = f.ins_before(
+        at,
+        OP_IADD_IMM,
+        TY_OTHER,
+        0,
+        wrapping_sub(0, min),
+        0,
+        0,
+        in a,
+        in none_dests
+    );
+    f.result(i, 0)
+}
+
+// `dense_icmp_chains_to_br_table`.
+pub fn dense_icmp_chains_to_br_table(inout f: Func) {
+    let cfg = cfg_of(in f);
+    let uses = use_counts(in f);
+    let blocks = layout_blocks(in f);
+    let mut removed = ChunkSeq::new[u8]();
+    removed.resize(f.nblocks(), 0);
+    let none_args = ChunkSeq::new[u32]();
+    for q in 0..blocks.len() {
+        let head = u32_at(in blocks, q);
+        if g8(in removed, w(head)) != 0 || !f.blk(w(head)).placed {
+            continue;
+        }
+        let first = match_brif_eq(in f, head);
+        if !first.ok {
+            continue;
+        }
+        let key = first.key;
+        let key_ty = first.key_ty;
+        let mut case_k = ChunkSeq::new[u64]();
+        let mut case_b = ChunkSeq::new[u32]();
+        case_k.push(first.k);
+        case_b.push(first.arm);
+        let mut chain = ChunkSeq::new[u32]();
+        let mut seen = ChunkSeq::new[u8]();
+        seen.resize(f.nblocks(), 0);
+        mark(inout seen, w(head));
+        let mut cur = first.next;
+        loop {
+            if g8(in seen, w(cur)) != 0
+                || g8(in removed, w(cur)) != 0
+                || !f.blk(w(cur)).placed
+                || pred_count(in cfg, cur) != 1
+                || f.nparams(cur) != 0
+            {
+                break;
+            }
+            let l = match_brif_eq(in f, cur);
+            if !l.ok {
+                break;
+            }
+            if l.key != key || use_count(in uses, f.result(l.cmp, 0)) != 1 {
+                break;
+            }
+            if !only_cmp_and_consts(in f, in uses, cur, l) {
+                break;
+            }
+            mark(inout seen, w(cur));
+            case_k.push(l.k);
+            case_b.push(l.arm);
+            chain.push(cur);
+            cur = l.next;
+        }
+        if case_k.len() < MIN_TABLE_CASES
+            || g8(in seen, w(cur)) != 0
+            || g8(in removed, w(cur)) != 0
+        {
+            continue;
+        }
+        let mut arm_bad = false;
+        for c in 0..case_b.len() {
+            let a = w(u32_at(in case_b, c));
+            if g8(in seen, a) != 0 || g8(in removed, a) != 0 {
+                arm_bad = true;
+            }
+        }
+        if arm_bad {
+            continue;
+        }
+        let default_blk = cur;
+        let mut min = u64_at(in case_k, 0);
+        let mut max = min;
+        for c in 1..case_k.len() {
+            let k = u64_at(in case_k, c);
+            if slt(k, min) {
+                min = k;
+            }
+            if slt(max, k) {
+                max = k;
+            }
+        }
+        // The span less one (`max - min` as i128, never negative).
+        let reach = wrapping_sub(max, min);
+        if reach < wrapping_sub(MIN_TABLE_CASES, 1) || reach >= MAX_TABLE_SPAN {
+            continue;
+        }
+        let span = inc(reach);
+        // The first arm of each key (`BTreeMap::entry().or_insert`).
+        let mut slot = ChunkSeq::new[u32]();
+        slot.resize(span, NONE);
+        let mut distinct: u64 = 0;
+        for c in 0..case_k.len() {
+            let at = wrapping_sub(u64_at(in case_k, c), min);
+            if u32_at(in slot, at) == NONE {
+                let ok = slot.try_set(at, u32_at(in case_b, c));
+                distinct = inc(distinct);
+            }
+        }
+        if distinct < MIN_TABLE_CASES || wrapping_mul(distinct, TABLE_DENSITY) < span {
+            continue;
+        }
+        if min == SIGN_BIT {
+            continue;
+        }
+        if (key_ty == TY_I8 || key_ty == TY_I16) && slt(min, 0) {
+            continue;
+        }
+        let mut dws = ChunkSeq::new[u32]();
+        push_dest(inout dws, default_blk);
+        for off in 0..span {
+            let b = u32_at(in slot, off);
+            push_dest(inout dws, if b == NONE { default_blk } else { b });
+        }
+        let head_brif = first.brif;
+        let none_dests = ChunkSeq::new[u32]();
+        if key_ty == TY_I64 {
+            let shifted = shift_key(inout f, head_brif, key, min);
+            let mut a = ChunkSeq::new[u32]();
+            a.push(shifted);
+            let oob = f.ins_before(
+                head_brif,
+                OP_ICMP_IMM,
+                TY_OTHER,
+                CC_UGE,
+                span,
+                0,
+                0,
+                in a,
+                in none_dests
+            );
+            let table_blk = f.make_block();
+            f.insert_block_after(table_blk, head);
+            let mut c = ChunkSeq::new[u32]();
+            c.push(f.result(oob, 0));
+            let mut bw = ChunkSeq::new[u32]();
+            push_dest(inout bw, default_blk);
+            push_dest(inout bw, table_blk);
+            let made = f.ins_before(head_brif, OP_BRIF, 0, 0, 0, 0, 0, in c, in bw);
+            let idx = f.ins(table_blk, OP_IREDUCE, TY_I32, 0, 0, 0, 0, in a, in none_dests);
+            let mut ia = ChunkSeq::new[u32]();
+            ia.push(f.result(idx, 0));
+            let table = f.ins(table_blk, OP_BR_TABLE, 0, 0, 0, 0, 0, in ia, in dws);
+        } else {
+            let mut base = key;
+            if key_ty != TY_I32 {
+                let mut ka = ChunkSeq::new[u32]();
+                ka.push(key);
+                let ext = f.ins_before(
+                    head_brif,
+                    OP_UEXTEND,
+                    TY_I32,
+                    0,
+                    0,
+                    0,
+                    0,
+                    in ka,
+                    in none_dests
+                );
+                base = f.result(ext, 0);
+            }
+            let shifted = shift_key(inout f, head_brif, base, min);
+            let mut a = ChunkSeq::new[u32]();
+            a.push(shifted);
+            let table = f.ins_before(head_brif, OP_BR_TABLE, 0, 0, 0, 0, 0, in a, in dws);
+        }
+        f.remove_inst(head_brif);
+        if use_count(in uses, f.result(first.cmp, 0)) == 1 {
+            f.remove_inst(first.cmp);
+        }
+        for c in 0..chain.len() {
+            let blk = u32_at(in chain, c);
+            loop {
+                let i = f.first_inst(blk);
+                if i == NONE {
+                    break;
+                }
+                f.remove_inst(i);
+            }
+            f.remove_block_edit(blk);
+            mark(inout removed, w(blk));
+        }
+    }
+}

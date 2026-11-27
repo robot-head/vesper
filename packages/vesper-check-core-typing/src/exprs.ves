@@ -49,6 +49,7 @@ const LATENT_PREFIX: Str = "$latent:";
 const HANDLER_CAP_PREFIX: Str = "$cap";
 const FUNCTION_ORIGIN: u8 = 102;
 const COLON: u8 = 58;
+const DOLLAR: u8 = 36;
 const UNDERSCORE: u8 = 95;
 // `relabel` modes.
 const RELABEL_BIND: u8 = 0;
@@ -88,6 +89,17 @@ const E_CONTINUE: u8 = 21;
 const E_HANDLE: u8 = 22;
 // `e?`: x = e.
 const E_TRY: u8 = 23;
+// `|params| body`: a = the closure's signature (a `fns` entry: parameters,
+// declared result, declared row), b/n = the names the body may capture
+// (`closure_free`), m = the declared mode + 1 (0 for none), y = whether the
+// row is inferred, x = body.
+const E_CLOSURE: u8 = 24;
+const NO_MODE: u32 = 0;
+// `latent_capability`'s closure origin `c<start>`.
+const CLOSURE_ORIGIN: u8 = 99;
+const FAIL_NAME: Str = "Fail";
+const ARITH_OVERFLOW: Str = "ArithOverflow";
+const RUNTIME_ERROR: Str = "RuntimeError";
 const OPTION_NAME: Str = "Option";
 const RESULT_NAME: Str = "Result";
 const HANDLER_ROW_SHIFT: u64 = 32;
@@ -278,6 +290,18 @@ pub copy struct EffDecl {
     op_count: u32,
 }
 
+// A closure being checked (`Checker::effect_inference`): whether its row is
+// inferred, the capabilities below it (`caps.len()` at entry), where its
+// observed effects start in `Ck::observed`, its start (the latent origin)
+// and its signature.
+pub copy struct Frame {
+    infer: bool,
+    cap_base: u64,
+    obs_start: u64,
+    start: u64,
+    sig: u32,
+}
+
 // One effect instance of a row: its name and type arguments.
 pub copy struct Inst {
     name: u32,
@@ -353,6 +377,14 @@ pub struct Ck {
     // expression id -> recorded type, or NONE32
     ex_types: ChunkSeq[u32],
     skip: bool,
+    // The closures being checked, innermost last, and the effects their
+    // bodies use from outside (each frame's from its `obs_start`).
+    frames: ChunkSeq[Frame],
+    observed: ChunkSeq[Inst],
+    // The names closure bodies may capture.
+    closure_free: ChunkSeq[u32],
+    // The start of the closure argument being lent (§4.2), or NONE64.
+    lent_closure: u64,
     // The pass of the element view `match` whose scrutinee is being
     // checked, or NO_ELEMENT_VIEW (`Checker::element_view`).
     element_view: u8,
@@ -450,6 +482,10 @@ pub fn ck_new(sink ctx: Ctx) -> Ck {
         bounds: bounds_new(),
         ex_types: ChunkSeq::new[u32](),
         skip: false,
+        frames: ChunkSeq::new[Frame](),
+        observed: ChunkSeq::new[Inst](),
+        closure_free: ChunkSeq::new[u32](),
+        lent_closure: NONE64,
         element_view: NO_ELEMENT_VIEW,
         out: ChunkSeq::new[u8](),
         atomic_sym: 0,
@@ -817,6 +853,47 @@ fn read_expr(inout reader: Reader, in bytes: Slice[u8], inout ck: Ck) -> u32 {
         }
     } else if kind == E_TRY {
         ex.x = read_expr(inout reader, in bytes, inout ck);
+    } else if kind == E_CLOSURE {
+        let param_start = n32(ck.params.len());
+        let param_count = reader.word(in bytes);
+        for j in 0..param_count {
+            let param = ParamSig {
+                pass: wrapping_u8(reader.word(in bytes)),
+                name: sym(in ck.ctx, reader.word(in bytes)),
+                ty: tyw(in ck.ctx, reader.word(in bytes)),
+                projections: n32(reader.word(in bytes)),
+                start: reader.word(in bytes),
+                end: reader.word(in bytes)
+            };
+            ck.params.push(param);
+        }
+        ex.m = n32(reader.word(in bytes));
+        let result = tyw(in ck.ctx, reader.word(in bytes));
+        let mut sig = FnSig {
+            name: 0,
+            generic_start: 0,
+            generic_count: 0,
+            param_start: param_start,
+            param_count: n32(param_count),
+            result: result,
+            effectful: false,
+            inferred: result,
+            inst_start: 0,
+            inst_count: 0,
+            effect: NONE32,
+            row_tail: 0
+        };
+        read_row(inout reader, in bytes, inout ck, inout sig);
+        ex.a = n32(ck.fns.len());
+        ck.fns.push(sig);
+        ex.y = n32(reader.word(in bytes));
+        ex.b = n32(ck.closure_free.len());
+        let free_count = reader.word(in bytes);
+        ex.n = n32(free_count);
+        for j in 0..free_count {
+            ck.closure_free.push(sym(in ck.ctx, reader.word(in bytes)));
+        }
+        ex.x = read_expr(inout reader, in bytes, inout ck);
     } else if kind == E_HANDLE {
         ex.y = sym(in ck.ctx, reader.word(in bytes));
         let targ_count = reader.word(in bytes);
@@ -928,6 +1005,41 @@ fn read_sig(inout reader: Reader, in bytes: Slice[u8], inout ck: Ck, name: u32) 
     }
 }
 
+// A declared effect row: its instances (name, label, arguments) into
+// `insts`, then its tail.
+fn read_row(inout reader: Reader, in bytes: Slice[u8], inout ck: Ck, inout sig: FnSig) {
+    sig.inst_start = n32(ck.insts.len());
+    let inst_count = reader.word(in bytes);
+    for j in 0..inst_count {
+        let inst_name = sym(in ck.ctx, reader.word(in bytes));
+        let label_word = reader.word(in bytes);
+        let inst_label = if label_word == 0 {
+            0
+        } else {
+            inc32w(sym(in ck.ctx, wrapping_sub(label_word, 1)))
+        };
+        let arg_start = n32(ck.inst_args.len());
+        let arg_count = reader.word(in bytes);
+        for k in 0..arg_count {
+            let arg = tyw(in ck.ctx, reader.word(in bytes));
+            ck.inst_args.push(arg);
+        }
+        ck.insts.push(Inst {
+            name: inst_name,
+            label: inst_label,
+            arg_start: arg_start,
+            arg_count: n32(arg_count)
+        });
+    }
+    sig.inst_count = n32(inst_count);
+    let tail_word = reader.word(in bytes);
+    sig.row_tail = if tail_word == 0 {
+        0
+    } else {
+        inc32w(sym(in ck.ctx, wrapping_sub(tail_word, 1)))
+    };
+}
+
 // The function table of the task input, then the effect declarations.
 pub fn read_fns(inout reader: Reader, in bytes: Slice[u8], inout ck: Ck) {
     let fn_count = reader.word(in bytes);
@@ -935,36 +1047,7 @@ pub fn read_fns(inout reader: Reader, in bytes: Slice[u8], inout ck: Ck) {
         let name = sym(in ck.ctx, reader.word(in bytes));
         let mut sig = read_sig(inout reader, in bytes, inout ck, name);
         sig.effectful = reader.word(in bytes) != 0;
-        sig.inst_start = n32(ck.insts.len());
-        let inst_count = reader.word(in bytes);
-        for j in 0..inst_count {
-            let inst_name = sym(in ck.ctx, reader.word(in bytes));
-            let label_word = reader.word(in bytes);
-            let inst_label = if label_word == 0 {
-                0
-            } else {
-                inc32w(sym(in ck.ctx, wrapping_sub(label_word, 1)))
-            };
-            let arg_start = n32(ck.inst_args.len());
-            let arg_count = reader.word(in bytes);
-            for k in 0..arg_count {
-                let arg = tyw(in ck.ctx, reader.word(in bytes));
-                ck.inst_args.push(arg);
-            }
-            ck.insts.push(Inst {
-                name: inst_name,
-                label: inst_label,
-                arg_start: arg_start,
-                arg_count: n32(arg_count)
-            });
-        }
-        sig.inst_count = n32(inst_count);
-        let tail_word = reader.word(in bytes);
-        sig.row_tail = if tail_word == 0 {
-            0
-        } else {
-            inc32w(sym(in ck.ctx, wrapping_sub(tail_word, 1)))
-        };
+        read_row(inout reader, in bytes, inout ck, inout sig);
         sig.inferred = tyw(in ck.ctx, reader.word(in bytes));
         let id = n32(ck.fns.len());
         ck.fns.push(sig);
@@ -1271,6 +1354,8 @@ pub fn expr_expected(inout ck: Ck, e: u32, expected: u32) -> u32 {
         break_expr(inout ck, ex)
     } else if ex.kind == E_TRY {
         try_expr(inout ck, ex, expected)
+    } else if ex.kind == E_CLOSURE {
+        closure_expr(inout ck, ex, expected)
     } else if ex.kind == E_CONTINUE {
         if ck.loops.len() <= ck.loop_floor {
             // E0213 outside a loop, or leaving a handler: not ported.
@@ -1284,6 +1369,9 @@ pub fn expr_expected(inout ck: Ck, e: u32, expected: u32) -> u32 {
     };
     if ck.skip {
         return hole;
+    }
+    if ck.frames.len() != 0 {
+        failure_effects(inout ck, ex);
     }
     let ty = instantiate_latent(inout ck, ty, expected);
     if expected != hole {
@@ -2712,6 +2800,429 @@ fn match_expr(inout ck: Ck, ex: Ex, expected: u32) -> u32 {
     result
 }
 
+// ----- closures ---------------------------------------------------------------
+
+// `ty` (a function type) with mode `m`.
+fn with_mode(inout ck: Ck, ty: u32, m: u8) -> u32 {
+    let node = ck.ctx.types.node(ty);
+    if node.kind != TyKind::Fn || node.mode == m {
+        return ty;
+    }
+    let mut items: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let mut passes: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    for i in 0..w(node.n) {
+        items.push(item(in ck.ctx.types, add(w(node.a), i)));
+        passes.push(ck.ctx.types.param_pass(ty, i));
+    }
+    ck.ctx.types.mk_with(TyKind::Fn, m, node.name, in items, in passes, node.r, node.r2, node.lit)
+}
+
+// `Checker::closure` (with the expected type's parameter and result types
+// filled in): the body is checked in its own function frame with the
+// parameters bound and the closure's capabilities innermost; its mode
+// joins its captured values' (a lent closure captures by borrow), and an
+// inferred row is the effects the body uses from outside.
+fn closure_expr(inout ck: Ck, ex: Ex, expected: u32) -> u32 {
+    let hole = ck.ctx.types.infer;
+    let sig = ck.fsig(ex.a);
+    let infer_row = ex.y != 0;
+    if sig.row_tail != 0 {
+        // A row variable in a closure's row: not ported.
+        ck.skip = true;
+        return hole;
+    }
+    let expected_node = ck.ctx.types.node(expected);
+    let expects_fn = expected_node.kind == TyKind::Fn;
+    if expects_fn && expected_node.n != sig.param_count {
+        error(inout ck, "E0207", ex.start, ex.end);
+    }
+    let mut params: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let mut passes: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    for i in 0..w(sig.param_count) {
+        let param = ck.param(add(w(sig.param_start), i));
+        let mut ty = param.ty;
+        if expects_fn && i < w(expected_node.n) {
+            if param.pass != ck.ctx.types.param_pass(expected, i) {
+                error(inout ck, "E0308", param.start, param.end);
+            }
+            if ty == hole {
+                ty = item(in ck.ctx.types, add(w(expected_node.a), i));
+            }
+        }
+        if unresolved(in ck.ctx.types, ty) {
+            error(inout ck, "E0102", param.start, param.end);
+        }
+        params.push(ty);
+        passes.push(param.pass);
+    }
+    let result = if sig.result == hole && expects_fn {
+        expected_node.r
+    } else {
+        sig.result
+    };
+    // The captured values' modes (a lent closure's captures are borrows).
+    let lent = ck.lent_closure == ex.start;
+    ck.lent_closure = NONE64;
+    let mut inferred_mode = TyMode::Copy;
+    if !lent {
+        for i in 0..w(ex.n) {
+            let name = u32_at(in ck.closure_free, add(w(ex.b), i));
+            let bind_index = lookup(in ck, name);
+            if bind_index != NONE32 {
+                let captured = mode(inout ck, binding(in ck, bind_index).ty);
+                if captured > inferred_mode {
+                    inferred_mode = captured;
+                }
+            }
+        }
+    }
+    let closure_mode = if ex.m == NO_MODE {
+        inferred_mode
+    } else {
+        wrapping_u8(w(wrapping_sub(ex.m, 1)))
+    };
+    if inferred_mode > closure_mode {
+        error(inout ck, "E0310", ex.start, ex.end);
+    }
+    // The declared instances, labeled by the capability in scope or else
+    // latently (`$latent:c<start>::<Eff>`).
+    let total = add(ck.handler_caps.len(), w(ck.fsig(ck.current).inst_count));
+    let caps_mark = ck.handler_caps.len();
+    let mut resolved: ChunkSeq[Inst] = ChunkSeq::new[Inst]();
+    let mut origin = ChunkSeq::new[u8]();
+    origin.push(CLOSURE_ORIGIN);
+    put_u64(inout origin, ex.start);
+    for i in 0..w(sig.inst_count) {
+        let inst = ck.inst(add(w(sig.inst_start), i));
+        if inst.label != 0 {
+            // A labeled instance in a closure's row: not ported.
+            ck.skip = true;
+            return hole;
+        }
+        let found = active_cap(inout ck, inst);
+        let label = if found != NONE64 {
+            cap_label(inout ck, found)
+        } else {
+            latent_label(inout ck, in origin, inst.name)
+        };
+        resolved.push(Inst {
+            name: inst.name,
+            label: label,
+            arg_start: inst.arg_start,
+            arg_count: inst.arg_count
+        });
+    }
+    for i in 0..resolved.len() {
+        match resolved.try_get(i) {
+            Option::Some(r) => ck.handler_caps.push(r),
+            Option::None => {},
+        }
+    }
+    ck.frames.push(Frame {
+        infer: infer_row,
+        cap_base: total,
+        obs_start: ck.observed.len(),
+        start: ex.start,
+        sig: ex.a
+    });
+    // `enter_function`: a frame of its own for `return`, no enclosing loop
+    // or handler.
+    let outer_result = ck.fn_result;
+    let outer_returned = ck.returned;
+    let outer_floor = ck.loop_floor;
+    let outer_handlers = ck.handlers;
+    ck.fn_result = result;
+    ck.returned = NONE32;
+    ck.loop_floor = ck.loops.len();
+    ck.handlers = 0;
+    let env_mark = ck.env.len();
+    for i in 0..w(sig.param_count) {
+        let param = ck.param(add(w(sig.param_start), i));
+        bind_name(inout ck, param.name, u32_at(in params, i), param.pass, NONE32);
+    }
+    let body_actual = expr_expected(inout ck, ex.x, result);
+    let body_ex = ck.ex(ex.x);
+    let actual = if ck.skip || ck.returned == NONE32 {
+        body_actual
+    } else {
+        join(inout ck, body_actual, ck.returned, body_ex.start, body_ex.end)
+    };
+    ck.env.truncate(env_mark);
+    ck.fn_result = outer_result;
+    ck.returned = outer_returned;
+    ck.loop_floor = outer_floor;
+    ck.handlers = outer_handlers;
+    ck.handler_caps.truncate(caps_mark);
+    let frame_index = wrapping_sub(ck.frames.len(), 1);
+    let frame = match ck.frames.try_get(frame_index) {
+        Option::Some(f) => f,
+        Option::None => Frame { infer: false, cap_base: 0, obs_start: 0, start: 0, sig: 0 },
+    };
+    ck.frames.truncate(frame_index);
+    let mut row_insts: ChunkSeq[Inst] = ChunkSeq::new[Inst]();
+    if infer_row {
+        for i in frame.obs_start..ck.observed.len() {
+            match ck.observed.try_get(i) {
+                Option::Some(o) => row_insts.push(o),
+                Option::None => {},
+            }
+        }
+    } else {
+        row_insts = resolved;
+    }
+    ck.observed.truncate(frame.obs_start);
+    if ck.skip {
+        return hole;
+    }
+    expect_type(inout ck, result, actual, body_ex.start, body_ex.end);
+    let closure_result = if result == hole {
+        default_type(inout ck.ctx.types, actual)
+    } else {
+        refine_annotation(inout ck.ctx.types, result, actual)
+    };
+    let mut effs: ChunkSeq[EffNode] = ChunkSeq::new[EffNode]();
+    let mut args: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    for i in 0..row_insts.len() {
+        let inst = match row_insts.try_get(i) {
+            Option::Some(r) => r,
+            Option::None => continue,
+        };
+        let arg_start = n32(args.len());
+        for j in 0..w(inst.arg_count) {
+            args.push(u32_at(in ck.inst_args, add(w(inst.arg_start), j)));
+        }
+        effs.push(EffNode { label: inst.label, name: inst.name, a: arg_start, n: inst.arg_count });
+    }
+    let row = ck.ctx.types.mk_row(in effs, in args, 0);
+    ck.ctx.types.mk_with(TyKind::Fn, closure_mode, 0, in params, in passes, closure_result, row, 0)
+}
+
+// ----- effect inference -------------------------------------------------------
+
+// `primitive_failure` and `overflow_failure` at the operations the world
+// lists: `Fail[RuntimeError]` and `Fail[ArithOverflow]`.
+fn failure_effects(inout ck: Ck, ex: Ex) {
+    let none: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    if ck.ctx.world.is_partial(ex.start, ex.end) {
+        let error_sym = ck.ctx.names.intern(in RUNTIME_ERROR.as_bytes());
+        let mut args: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        args.push(ck.ctx.types.named(error_sym, in none));
+        require_named(inout ck, FAIL_NAME, in args);
+    }
+    if ck.ctx.world.may_overflow(ex.start, ex.end) {
+        let overflow_sym = ck.ctx.names.intern(in ARITH_OVERFLOW.as_bytes());
+        let mut args: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        args.push(ck.ctx.types.named(overflow_sym, in none));
+        require_named(inout ck, FAIL_NAME, in args);
+    }
+}
+
+// `require_effect` of the unlabeled `name[args]`.
+fn require_named(inout ck: Ck, in name: Str, in args: ChunkSeq[u32]) {
+    let start = n32(ck.inst_args.len());
+    for i in 0..args.len() {
+        ck.inst_args.push(u32_at(in args, i));
+    }
+    let request = Inst {
+        name: ck.ctx.names.intern(in name.as_bytes()),
+        label: 0,
+        arg_start: start,
+        arg_count: n32(args.len())
+    };
+    require_effect(inout ck, request);
+}
+
+// `apply`'s requirement of the callee's row, its arguments substituted.
+fn callee_effects(inout ck: Ck, sig: FnSig, in vars: Vars) {
+    if sig.row_tail != 0 {
+        // A row variable's instances (`vars[row]`): not ported.
+        ck.skip = true;
+        return;
+    }
+    for i in 0..w(sig.inst_count) {
+        let inst = ck.inst(add(w(sig.inst_start), i));
+        let start = n32(ck.inst_args.len());
+        for j in 0..w(inst.arg_count) {
+            let t = u32_at(in ck.inst_args, add(w(inst.arg_start), j));
+            let substituted = substitute(inout ck.ctx.types, t, in vars);
+            ck.inst_args.push(substituted);
+        }
+        let request = Inst {
+            name: inst.name,
+            label: inst.label,
+            arg_start: start,
+            arg_count: inst.arg_count
+        };
+        require_effect(inout ck, request);
+    }
+}
+
+// `Checker::require_effect` inside a closure: the resolved effect (or the
+// request) joins the closure's observed row unless a capability of the
+// closure itself (or one inside it) provides it.
+fn require_effect(inout ck: Ck, request: Inst) {
+    let frame = match ck.frames.try_get(wrapping_sub(ck.frames.len(), 1)) {
+        Option::Some(f) => f,
+        Option::None => return,
+    };
+    let total = add(ck.handler_caps.len(), w(ck.fsig(ck.current).inst_count));
+    let found = active_cap(inout ck, request);
+    if ck.skip {
+        return;
+    }
+    let effect = if found != NONE64 {
+        let bottom = wrapping_sub(wrapping_sub(total, 1), found);
+        if bottom >= frame.cap_base {
+            return;
+        }
+        let cap = cap_at(in ck, found);
+        Inst {
+            name: cap.name,
+            label: cap_label(inout ck, found),
+            arg_start: cap.arg_start,
+            arg_count: cap.arg_count
+        }
+    } else {
+        latent_effect(inout ck, frame, request)
+    };
+    if ck.skip {
+        return;
+    }
+    for i in frame.obs_start..ck.observed.len() {
+        let seen = match ck.observed.try_get(i) {
+            Option::Some(o) => o,
+            Option::None => continue,
+        };
+        if seen.name == effect.name
+            && seen.label == effect.label
+            && same_inst_args(in ck, seen, effect)
+        {
+            return;
+        }
+    }
+    ck.observed.push(effect);
+}
+
+fn same_inst_args(in ck: Ck, a: Inst, b: Inst) -> bool {
+    if a.arg_count != b.arg_count {
+        return false;
+    }
+    for i in 0..w(a.arg_count) {
+        let x = u32_at(in ck.inst_args, add(w(a.arg_start), i));
+        let y = u32_at(in ck.inst_args, add(w(b.arg_start), i));
+        if x != y {
+            return false;
+        }
+    }
+    true
+}
+
+// `active_effect`: the innermost capability (a `cap_at` index) of the
+// request's effect (with its label, when it has one), preferring one with
+// exactly its concrete arguments; NONE64 for none. Labels that are not
+// capability labels (handler aliases) skip.
+fn active_cap(inout ck: Ck, request: Inst) -> u64 {
+    let total = add(ck.handler_caps.len(), w(ck.fsig(ck.current).inst_count));
+    let mut label = 0;
+    if request.label != 0 {
+        let mut text = ChunkSeq::new[u8]();
+        ck.ctx.names.write(wrapping_sub(request.label, 1), inout text);
+        if starts_with(in text, LATENT_PREFIX) || u8_at(in text, 0) != DOLLAR {
+            // `required_label` of a latent label, and aliases: not ported.
+            ck.skip = true;
+            return NONE64;
+        }
+        label = request.label;
+    }
+    let mut typed = label == 0 && request.arg_count != 0;
+    for i in 0..w(request.arg_count) {
+        if open_type(in ck, u32_at(in ck.inst_args, add(w(request.arg_start), i))) {
+            typed = false;
+        }
+    }
+    if typed {
+        let mut request_args: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        for i in 0..w(request.arg_count) {
+            request_args.push(u32_at(in ck.inst_args, add(w(request.arg_start), i)));
+        }
+        let local = Inst {
+            name: request.name,
+            label: 0,
+            arg_start: 0,
+            arg_count: request.arg_count
+        };
+        for i in 0..total {
+            let cap = cap_at(in ck, i);
+            if cap.name == request.name && same_args(inout ck, local, in request_args, cap) {
+                return i;
+            }
+        }
+    }
+    for i in 0..total {
+        let cap = cap_at(in ck, i);
+        if cap.name == request.name && (label == 0 || cap_label(inout ck, i) == label) {
+            return i;
+        }
+    }
+    NONE64
+}
+
+// `resolve_effect` past the active capabilities: inside a closure whose
+// row is inferred (or declares the effect), the latent capability
+// `$latent:c<start>::<Eff>`; else the request itself.
+fn latent_effect(inout ck: Ck, frame: Frame, request: Inst) -> Inst {
+    if request.label != 0 {
+        return request;
+    }
+    let mut allowed = false;
+    let sig = ck.fsig(frame.sig);
+    let known = ck.ctx.world.k;
+    for i in 0..w(sig.inst_count) {
+        let declared = ck.inst(add(w(sig.inst_start), i));
+        if declared.name == request.name
+            && declared.label == 0
+            && declared.arg_count == request.arg_count
+        {
+            let mut all = true;
+            for j in 0..w(request.arg_count) {
+                let a = u32_at(in ck.inst_args, add(w(declared.arg_start), j));
+                let b = u32_at(in ck.inst_args, add(w(request.arg_start), j));
+                if !compatible(in ck.ctx.types, known, a, b) {
+                    all = false;
+                }
+            }
+            if all {
+                allowed = true;
+            }
+        }
+    }
+    if !frame.infer && !allowed {
+        return request;
+    }
+    let mut origin = ChunkSeq::new[u8]();
+    origin.push(CLOSURE_ORIGIN);
+    put_u64(inout origin, frame.start);
+    Inst {
+        name: request.name,
+        label: latent_label(inout ck, in origin, request.name),
+        arg_start: request.arg_start,
+        arg_count: request.arg_count
+    }
+}
+
+// `latent_capability(origin, e)` of an unlabeled `e`, as a label + 1.
+fn latent_label(inout ck: Ck, in origin: ChunkSeq[u8], effect: u32) -> u32 {
+    let mut text = ChunkSeq::new[u8]();
+    put(inout text, LATENT_PREFIX);
+    for i in 0..origin.len() {
+        text.push(u8_at(in origin, i));
+    }
+    text.push(COLON);
+    text.push(COLON);
+    ck.ctx.names.write(effect, inout text);
+    inc32w(ck.ctx.names.intern(in text.as_slice()))
+}
+
 // `e?` (`ExprKind::Try`): on `Result[T, E]` it is `T` (it performs
 // `Fail[E]`, whose capability this checker does not resolve), `Unit` when
 // nothing gives `T`; on `Option[T]` it is `T` in a function returning
@@ -2739,6 +3250,11 @@ fn try_expr(inout ck: Ck, ex: Ex, expected: u32) -> u32 {
     if node.kind != TyKind::Named || node.name != result_sym || node.n != 2 {
         error(inout ck, "E0200", ex.start, ex.end);
         return hole;
+    }
+    if ck.frames.len() != 0 {
+        let mut fail_args: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        fail_args.push(ck.ctx.types.arg(ty, 1));
+        require_named(inout ck, FAIL_NAME, in fail_args);
     }
     let ok = ck.ctx.types.arg(ty, 0);
     if ok != hole {
@@ -3614,6 +4130,28 @@ fn value_call(inout ck: Ck, ex: Ex, expected: u32) -> u32 {
     };
     let result = apply(inout ck, sig, ex, NONE32, expected);
     ck.params.truncate(param_start);
+    if ck.frames.len() != 0 && !ck.skip {
+        // The value's row (`apply` of a `<closure>` function).
+        let row = ck.ctx.types.row(node.r2);
+        if row.tail != 0 {
+            ck.skip = true;
+            return hole;
+        }
+        for i in 0..w(row.n) {
+            let eff = ck.ctx.types.effect_at(add(w(row.a), i));
+            let start = n32(ck.inst_args.len());
+            for j in 0..w(eff.n) {
+                ck.inst_args.push(item(in ck.ctx.types, add(w(eff.a), j)));
+            }
+            let request = Inst {
+                name: eff.name,
+                label: eff.label,
+                arg_start: start,
+                arg_count: eff.n
+            };
+            require_effect(inout ck, request);
+        }
+    }
     result
 }
 
@@ -3940,6 +4478,9 @@ fn apply(inout ck: Ck, sig: FnSig, ex: Ex, receiver: u32, expected: u32) -> u32 
     if ck.skip {
         return hole;
     }
+    if ck.frames.len() != 0 {
+        callee_effects(inout ck, sig, in vars);
+    }
     substitute(inout ck.ctx.types, sig.inferred, in vars)
 }
 
@@ -3967,6 +4508,21 @@ fn op_call(inout ck: Ck, ex: Ex, sig: FnSig) -> u32 {
     let result = apply_args(inout ck, sig, ex, NONE32, in types, inout vars);
     if ck.skip {
         return hole;
+    }
+    if ck.frames.len() != 0 {
+        let start = n32(ck.inst_args.len());
+        for i in 0..w(sig.generic_count) {
+            let generic = ck.gen(add(w(sig.generic_start), i));
+            let bound = vars.get(generic.name);
+            ck.inst_args.push(if bound == NONE32 { hole } else { bound });
+        }
+        let request = Inst {
+            name: sig.effect,
+            label: 0,
+            arg_start: start,
+            arg_count: sig.generic_count
+        };
+        require_effect(inout ck, request);
     }
     result
 }
@@ -4113,7 +4669,18 @@ fn apply_args(
         // projected path (`Checker::place`, whose E0202/E0304 a clean
         // program never raises) and typed as the whole place, unrecorded.
         // A String argument for a `Str` parameter is coerced to its view.
-        let checked = if projected && place != NONE32 {
+        // A closure literal for a lent function parameter is a lent
+        // closure (§4.2): it takes the parameter's mode.
+        let target_node = ck.ctx.types.node(target);
+        let lent = param.pass == P_IN
+            && !projected
+            && target_node.kind == TyKind::Fn
+            && target_node.mode != TyMode::Copy
+            && arg_ex.kind == E_CLOSURE;
+        if lent {
+            ck.lent_closure = arg_ex.start;
+        }
+        let checked_arg = if projected && place != NONE32 {
             peek_type(inout ck, arg.expr)
         } else if projected {
             expr_expected(inout ck, arg.expr, target)
@@ -4125,6 +4692,12 @@ fn apply_args(
         if ck.skip {
             return hole;
         }
+        ck.lent_closure = NONE64;
+        let checked = if lent {
+            with_mode(inout ck, checked_arg, target_node.mode)
+        } else {
+            checked_arg
+        };
         let actual = if param.pass == P_IN && is_str(in ck, target) && is_string(in ck, checked) {
             target
         } else {
@@ -4203,6 +4776,9 @@ fn run_body(
     ck.handler_caps.truncate(0);
     ck.handlers = 0;
     ck.loop_floor = 0;
+    ck.frames.truncate(0);
+    ck.observed.truncate(0);
+    ck.lent_closure = NONE64;
     if ck.skip {
         return;
     }

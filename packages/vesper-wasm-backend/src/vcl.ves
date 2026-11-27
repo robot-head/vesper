@@ -7,7 +7,7 @@
 // letters of a row mean).
 
 pub fn vcl_count() -> u64 {
-    133
+    136
 }
 
 pub fn vcl_row(i: u64) -> Str {
@@ -409,6 +409,15 @@ pub fn vcl_row(i: u64) -> Str {
     }
     if i == 132 {
         return "vcl_has_x86_pshufb_lowering h i w";
+    }
+    if i == 133 {
+        return "vcl_builder_finalize h o w";
+    }
+    if i == 134 {
+        return "vcl_function_words hwwqA oiiio q";
+    }
+    if i == 135 {
+        return "vcl_apply_edits he oi w";
     }
     ""
 }
