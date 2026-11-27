@@ -614,7 +614,7 @@ fn overflow_condition(op: u64) -> u8 {
     }
 }
 
-fn is_symbol(op: u64) -> bool {
+pub fn is_symbol(op: u64) -> bool {
     op == SYMBOL_RELATIVE || op == SYMBOL_GOT
 }
 

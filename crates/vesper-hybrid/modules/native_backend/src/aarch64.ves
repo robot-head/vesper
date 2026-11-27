@@ -17,7 +17,7 @@ use self::scalar::{
     TableFixup, ARGUMENT_COUNT, RETURN_VALUE, HEADER_WORDS, RECORD_WORDS, NEVER_READ, NO_VALUE,
     DISP32_MASK, RETURN_PAIR, CALL, CALL_ARGUMENT, CALL_VOID, CALL_PAIR, CALL_HIGH,
     LIBCALL_TARGET_BASE, MEMCPY_LIBCALL, SIGNED_DIV, UNSIGNED_DIV, SIGNED_REM, UNSIGNED_REM,
-    is_integer_division, TRAP, TRAP_VALUE
+    is_integer_division, TRAP, TRAP_VALUE, is_symbol
 };
 use self::x86_64::{BYTE_BITS, WORD_BITS, DWORD_BITS, QWORD_BITS};
 
@@ -50,6 +50,8 @@ const HOME_REGISTERS: u64 = 8;
 const CALL_SAVE_REGISTERS: u64 = 16;
 const ARM64_CALL: u64 = 4;
 const ARM64_LIBCALL: u64 = 5;
+const ARM64_GOT_PAGE: u64 = 6;
+const ARM64_GOT_LOAD: u64 = 7;
 // Larger frames need to probe the stack at least once per base page.
 const MAX_FRAME_BYTES: u64 = 4096;
 const RETURN: u32 = 0xd65f03c0;
@@ -66,6 +68,7 @@ const SIGNED_DIV_TRAP_DISPLACEMENT: u32 = 4;
 const CSDB: u32 = 0xd503229f;
 // ADR points past itself and the three remaining dispatch instructions.
 const ADR_TABLE: u32 = 0x10000080;
+const ADRP: u32 = 0x90000000;
 const LDRSH_UXTW_SCALED: u32 = 0x78a05800;
 const LDRSW_UXTW_SCALED: u32 = 0xb8a05800;
 const ADD_INSTRUCTION_SCALE: u32 = 0x800;
@@ -512,6 +515,13 @@ fn direct_call(op: u64) -> bool {
 fn operands(in r: Record, returns: u64) -> Option[u64] {
     if r.op == CONSTANT || r.op == STACK_SLOT || r.op == BLOCK_LABEL {
         return Option::Some(0);
+    }
+    if is_symbol(r.op) {
+        return if r.left <= DISP32_MASK && r.right == 0 && r.extra == 0 {
+            Option::Some(0)
+        } else {
+            Option::None
+        };
     }
     if r.op == EDGE_LABEL || r.op == JUMP_LABEL {
         return if r.right == 0 && r.extra == 0 {
@@ -1154,7 +1164,7 @@ pub fn encode_leaf(in words: Slice[u64]) -> ChunkSeq[u8] {
 
 pub fn encode(
     in words: Slice[u64],
-    allow_calls: bool,
+    allow_relocations: bool,
     inout relocations: ChunkSeq[u64]
 ) -> ChunkSeq[u8] {
     let mut allocation = Allocation::RegisterHomes;
@@ -1168,7 +1178,7 @@ pub fn encode(
             allocation,
             long_tables,
             use_callee_registers,
-            allow_calls,
+            allow_relocations,
             inout retry,
             inout references
         );
@@ -1192,7 +1202,7 @@ fn encode_pass(
     allocation: Allocation,
     long_tables: bool,
     use_callee_registers: bool,
-    allow_calls: bool,
+    allow_relocations: bool,
     inout retry: Option[Retry],
     inout relocations: ChunkSeq[u64]
 ) -> ChunkSeq[u8] {
@@ -1307,6 +1317,7 @@ fn encode_pass(
         if needs_call_pair != (r.op == CALL_PAIR)
             || (r.op == RETURN_PAIR && (labeled || index != last_index))
             || (r.op == TRAP && (!terminal_trap || index != last_index))
+            || (is_symbol(r.op) && !allow_relocations)
         {
             return out;
         }
@@ -1320,7 +1331,7 @@ fn encode_pass(
             return out;
         }
         if direct_call(r.op) {
-            if !allow_calls || r.right > index {
+            if !allow_relocations || r.right > index {
                 return out;
             }
             pending_arguments = r.right;
@@ -1798,6 +1809,17 @@ fn encode_pass(
             if dest != call_result {
                 rrr(inout out, ORR_REG, dest, ZERO, call_result);
             }
+        } else if is_symbol(r.op) {
+            // The hosted object module supports GOT pairs on ELF and Mach-O,
+            // including for data defined in this object.
+            relocations.push(out.len());
+            relocations.push(ARM64_GOT_PAGE);
+            relocations.push(r.left);
+            push32(inout out, ADRP | dest);
+            relocations.push(out.len());
+            relocations.push(ARM64_GOT_LOAD);
+            relocations.push(r.left);
+            memory(inout out, true, QWORD_BITS, dest, dest, 0);
         } else if r.op == STACK_ADDRESS || r.op == STACK_LOAD {
             let displacement = stack_displacement(in frame, in r).unwrap_or(0);
             if r.op == STACK_ADDRESS {

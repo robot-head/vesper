@@ -176,6 +176,8 @@ const GOT_DATA: u64 = 2;
 const PLT_LIBCALL: u64 = 3;
 const ARM64_CALL: u64 = 4;
 const ARM64_LIBCALL: u64 = 5;
+const ARM64_GOT_PAGE: u64 = 6;
+const ARM64_GOT_LOAD: u64 = 7;
 const LIBCALL_TARGET_BASE: u64 = u32::MAX as u64 + 1;
 const MEMMOVE_LIBCALL: u32 = 0;
 const MEMCPY_LIBCALL: u32 = 1;
@@ -1863,7 +1865,7 @@ pub fn integer_block_words(function: &Function) -> Option<Vec<u64>> {
 
 /// Packs an AAPCS64 function with ordinary register integer parameters.
 pub fn aarch64_leaf_words(function: &Function) -> Option<Vec<u64>> {
-    let (program, _) = aarch64_program(function, None)?;
+    let (program, _) = aarch64_program(function, None, false)?;
     (!program.relocations).then_some(program.words)
 }
 
@@ -1879,6 +1881,7 @@ fn aarch64_register_signature(params: &[AbiParam], returns: &[AbiParam]) -> bool
 fn aarch64_program(
     function: &Function,
     declarations: Option<&ModuleDeclarations>,
+    allow_hardware_faults: bool,
 ) -> Option<(IntegerProgram, Option<IntegerProgram>)> {
     let signature = &function.signature;
     if !matches!(
@@ -1890,7 +1893,7 @@ fn aarch64_program(
     }
     integer_program(
         function,
-        false,
+        allow_hardware_faults,
         false,
         declarations,
         signature.call_conv,
@@ -2040,6 +2043,14 @@ fn decode_relocatable(packet: &[u8]) -> Option<MachineCode> {
                 Reloc::Arm64Call,
                 ModuleRelocTarget::user(FUNCTION_NAMESPACE, target),
             ),
+            ARM64_GOT_PAGE => (
+                Reloc::Aarch64AdrGotPage21,
+                ModuleRelocTarget::user(DATA_NAMESPACE, target),
+            ),
+            ARM64_GOT_LOAD => (
+                Reloc::Aarch64Ld64GotLo12Nc,
+                ModuleRelocTarget::user(DATA_NAMESPACE, target),
+            ),
             PLT_LIBCALL | ARM64_LIBCALL => {
                 let call = match target {
                     MEMMOVE_LIBCALL => LibCall::Memmove,
@@ -2062,10 +2073,9 @@ fn decode_relocatable(packet: &[u8]) -> Option<MachineCode> {
             offset,
             kind,
             name,
-            addend: if kind == Reloc::Arm64Call {
-                0
-            } else {
-                -REL32_BYTES
+            addend: match kind {
+                Reloc::X86CallPLTRel4 | Reloc::X86PCRel4 | Reloc::X86GOTPCRel4 => -REL32_BYTES,
+                _ => 0,
             },
         });
     }
@@ -2106,7 +2116,8 @@ fn encode_integer_block(
         {
             return None;
         }
-        let (primary, fallback) = aarch64_program(function, declarations)?;
+        // Hosted objects use CPU memory faults directly, with no trap table.
+        let (primary, fallback) = aarch64_program(function, declarations, true)?;
         let emit = |program: IntegerProgram| decode_relocatable(&encode(&program.words)?);
         return emit(primary).or_else(|| fallback.and_then(emit));
     }

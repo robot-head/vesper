@@ -37,6 +37,8 @@ const CALL_ARGUMENT: u64 = 39;
 const CALL_VOID: u64 = 40;
 const CALL_PAIR: u64 = 41;
 const CALL_HIGH: u64 = 42;
+const SYMBOL_RELATIVE: u64 = 43;
+const SYMBOL_GOT: u64 = 44;
 const TRAP: u64 = 45;
 const SIGNED_DIV: u64 = 46;
 const UNSIGNED_DIV: u64 = 47;
@@ -455,6 +457,38 @@ fn aarch64_uses_callee_saved_registers_for_values_live_across_calls() {
     ]);
     assert!(!large_frame.contains(&MOV_X19_X0));
     assert!(large_frame.ends_with(&[RET]));
+}
+
+#[test]
+fn aarch64_symbol_addresses_emit_paired_got_relocations() {
+    const ADRP_X0: u32 = 0x9000_0000;
+    const LDR_X0_FROM_X0: u32 = 0xf940_0000;
+    const ARM64_GOT_PAGE: u64 = 6;
+    const ARM64_GOT_LOAD: u64 = 7;
+    const SYMBOL: u64 = 42;
+    let expected = [ADRP_X0, LDR_X0_FROM_X0, RET]
+        .map(u32::to_le_bytes)
+        .concat();
+    let relocations = [
+        0,
+        ARM64_GOT_PAGE,
+        SYMBOL,
+        size_of::<u32>() as u64,
+        ARM64_GOT_LOAD,
+        SYMBOL,
+    ]
+    .map(u64::to_le_bytes)
+    .concat();
+    for operation in [SYMBOL_RELATIVE, SYMBOL_GOT] {
+        let request = [0, 0, operation, SYMBOL, 0, 0];
+        assert!(binding::aarch64_integer_leaf(&request).is_empty());
+        let packet = binding::aarch64_relocatable_block(&request);
+        let (length, body) = packet.split_first_chunk::<{ size_of::<u64>() }>().unwrap();
+        let (code, records) = body.split_at(u64::from_le_bytes(*length) as usize);
+        assert_eq!(code, expected);
+        assert_eq!(records, relocations);
+    }
+    assert!(binding::aarch64_relocatable_block(&[0, 0, SYMBOL_GOT, u64::MAX, 0, 0]).is_empty());
 }
 
 #[test]
@@ -1050,6 +1084,7 @@ fn aarch64_integer_functions_reach_elf_and_macho_object_emission() {
         }
     ";
     const FLOAT: &str = "fn main(x: f64) -> f64 { x + x }";
+    const TEXT: &str = r#"fn main() -> String { "vesper-aarch64-got" }"#;
     const CALLER: &str = "
         fn mix(a: u64, b: u64, c: u64, d: u64, e: u64, f: u64, g: u64, h: u64) -> u64 {
             wrapping_add(wrapping_mul(a, h), b ^ c ^ d ^ e ^ f ^ g)
@@ -1064,7 +1099,7 @@ fn aarch64_integer_functions_reach_elf_and_macho_object_emission() {
         ("aarch64-apple-darwin", BinaryFormat::MachO),
     ];
     static SELECTED: AtomicUsize = AtomicUsize::new(0);
-    static NONLEAVES: AtomicUsize = AtomicUsize::new(0);
+    static RELOCATED: AtomicUsize = AtomicUsize::new(0);
     let checked = |source| {
         let parsed = parser::parse(source);
         assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
@@ -1075,6 +1110,7 @@ fn aarch64_integer_functions_reach_elf_and_macho_object_emission() {
     let leaf = checked(LEAF);
     let float = checked(FLOAT);
     let caller = checked(CALLER);
+    let text = checked(TEXT);
     let compile = |checked: &check::Checked, triple| {
         native::object_with_options(&checked.world, "main", Some(triple), false)
             .unwrap()
@@ -1085,6 +1121,7 @@ fn aarch64_integer_functions_reach_elf_and_macho_object_emission() {
             compile(&leaf, triple),
             compile(&float, triple),
             compile(&caller, triple),
+            compile(&text, triple),
         )
     });
     assert!(
@@ -1096,14 +1133,14 @@ fn aarch64_integer_functions_reach_elf_and_macho_object_emission() {
                 SELECTED.fetch_add(1, Relaxed);
                 let (length, body) = bytes.split_first_chunk::<{ size_of::<u64>() }>().unwrap();
                 if body.len() > u64::from_le_bytes(*length) as usize {
-                    NONLEAVES.fetch_add(1, Relaxed);
+                    RELOCATED.fetch_add(1, Relaxed);
                 }
                 Some(bytes)
             }
         })
         .is_ok()
     );
-    for ((triple, format), (baseline, float_baseline, call_baseline)) in
+    for ((triple, format), (baseline, float_baseline, call_baseline, text_baseline)) in
         TRIPLES.into_iter().zip(baselines)
     {
         let bytes = compile(&leaf, triple);
@@ -1119,14 +1156,14 @@ fn aarch64_integer_functions_reach_elf_and_macho_object_emission() {
         let file = object::File::parse(bytes.as_slice()).unwrap();
         assert_eq!(file.architecture(), Architecture::Aarch64);
         assert_eq!(file.format(), format);
-        let text = file
+        let code_section = file
             .sections()
             .find(|section| section.kind() == SectionKind::Text)
             .unwrap();
-        assert!(text.data().unwrap().ends_with(&RET.to_le_bytes()));
+        assert!(code_section.data().unwrap().ends_with(&RET.to_le_bytes()));
 
         let caller_bytes = compile(&caller, triple);
-        let call_relocations = |bytes: &[u8]| {
+        let text_relocations = |bytes: &[u8]| {
             let file = object::File::parse(bytes).unwrap();
             file.sections()
                 .filter(|section| section.kind() == SectionKind::Text)
@@ -1134,10 +1171,18 @@ fn aarch64_integer_functions_reach_elf_and_macho_object_emission() {
                 .map(|(_, reloc)| (reloc.flags(), reloc.addend()))
                 .collect::<Vec<_>>()
         };
-        let expected = call_relocations(&call_baseline);
+        let expected = text_relocations(&call_baseline);
         assert_eq!(expected.len(), 2, "{triple}");
-        assert_eq!(call_relocations(&caller_bytes), expected, "{triple}");
+        assert_eq!(text_relocations(&caller_bytes), expected, "{triple}");
+
+        let expected = text_relocations(&text_baseline);
+        assert_eq!(expected.len(), 2, "{triple}");
+        assert_eq!(
+            text_relocations(&compile(&text, triple)),
+            expected,
+            "{triple}"
+        );
     }
-    assert_eq!(NONLEAVES.load(Relaxed), TRIPLES.len());
-    assert_eq!(SELECTED.load(Relaxed), 3 * TRIPLES.len());
+    assert_eq!(RELOCATED.load(Relaxed), 2 * TRIPLES.len());
+    assert_eq!(SELECTED.load(Relaxed), 4 * TRIPLES.len());
 }
