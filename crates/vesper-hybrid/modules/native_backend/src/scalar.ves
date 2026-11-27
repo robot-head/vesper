@@ -135,6 +135,10 @@ pub const XOR_NOT: u64 = 118;
 pub const ABS: u64 = 119;
 pub const ATOMIC_LOAD: u64 = 120;
 pub const ATOMIC_STORE: u64 = 121;
+pub const ATOMIC_CAS_BYTE: u64 = 122;
+pub const ATOMIC_CAS_WORD: u64 = 123;
+pub const ATOMIC_CAS_DWORD: u64 = 124;
+pub const ATOMIC_CAS_QWORD: u64 = 125;
 const XMM_ARGUMENTS: u64 = 8;
 pub const CHECKED_ARITHMETIC_RECORDS: u64 = 2;
 

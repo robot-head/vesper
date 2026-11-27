@@ -92,6 +92,8 @@ const XOR_NOT: u64 = 118;
 const ABS: u64 = 119;
 const ATOMIC_LOAD: u64 = 120;
 const ATOMIC_STORE: u64 = 121;
+const ATOMIC_CAS_BYTE: u64 = 122;
+const ATOMIC_CAS_WORD: u64 = 123;
 const EQUAL: u64 = 0;
 const SIGNED_LESS: u64 = 2;
 const UNSIGNED_LESS: u64 = 6;
@@ -202,6 +204,54 @@ fn aarch64_atomic_retry_loops_preserve_operands_and_unused_effects() {
     );
     assert!(binding::aarch64_integer_leaf(&[2, 2, ATOMIC_ADD, 0, 1, u128::BITS.into()]).is_empty());
     assert!(binding::aarch64_integer_leaf(&[0, 0, FENCE, 0, 0, 0]).is_empty());
+}
+
+#[test]
+fn aarch64_compare_and_swap_preserves_inputs_and_clears_failed_reservations() {
+    // Cranelift's isa/aarch64/atomic-cas.clif covers overlapping allocation constraints.
+    const LDAXRH_W3_X0: u32 = 0x485f_fc03;
+    const CMP_W3_W1_UXTH: u32 = 0x6b21_207f;
+    const BNE_TO_CLREX: u32 = 0x5400_0081;
+    const STLXRH_W17_W2_X0: u32 = 0x4811_fc02;
+    const CBNZ_W17_TO_LOAD: u32 = 0x35ff_ff91;
+    const B_OVER_CLREX: u32 = 0x1400_0002;
+    const CLREX: u32 = 0xd503_3f5f;
+    const MOV_X0_X3: u32 = 0xaa03_03e0;
+    const LDAXRB_W16_X0: u32 = 0x085f_fc10;
+    const CMP_W16_W1_UXTB: u32 = 0x6b21_021f;
+    const STLXRB_W17_W2_X0: u32 = 0x0811_fc02;
+    assert_eq!(
+        binding::aarch64_integer_leaf(&[3, 3, ATOMIC_CAS_WORD, 0, 1, 2]),
+        [
+            LDAXRH_W3_X0,
+            CMP_W3_W1_UXTH,
+            BNE_TO_CLREX,
+            STLXRH_W17_W2_X0,
+            CBNZ_W17_TO_LOAD,
+            B_OVER_CLREX,
+            CLREX,
+            MOV_X0_X3,
+            RET,
+        ]
+        .map(u32::to_le_bytes)
+        .concat()
+    );
+    assert_eq!(
+        binding::aarch64_integer_leaf(&[3, NO_VALUE, ATOMIC_CAS_BYTE, 0, 1, 2]),
+        [
+            LDAXRB_W16_X0,
+            CMP_W16_W1_UXTB,
+            BNE_TO_CLREX,
+            STLXRB_W17_W2_X0,
+            CBNZ_W17_TO_LOAD,
+            B_OVER_CLREX,
+            CLREX,
+            RET,
+        ]
+        .map(u32::to_le_bytes)
+        .concat()
+    );
+    assert!(binding::aarch64_integer_leaf(&[3, 3, ATOMIC_CAS_WORD, 0, 1, 3]).is_empty());
 }
 
 #[test]

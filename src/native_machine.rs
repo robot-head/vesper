@@ -141,6 +141,10 @@ enum IntegerOp {
     Abs = 119,
     AtomicLoad = 120,
     AtomicStore = 121,
+    AtomicCasByte = 122,
+    AtomicCasWord = 123,
+    AtomicCasDword = 124,
+    AtomicCasQword = 125,
 }
 
 fn integer_bit_op(op: Opcode) -> Option<IntegerOp> {
@@ -1513,6 +1517,25 @@ impl IntegerBlocks<'_> {
                     };
                     (op, [input(address)?, input(source)?, width])
                 }
+                InstructionData::AtomicCas {
+                    opcode: Opcode::AtomicCas,
+                    flags,
+                    args: [address, expected, replacement],
+                } if self.aarch64
+                    && ty(address) == types::I64
+                    && ty(expected) == output
+                    && ty(replacement) == output
+                    && self.supports_atomic_access(flags) =>
+                {
+                    let op = match output {
+                        types::I8 => IntegerOp::AtomicCasByte,
+                        types::I16 => IntegerOp::AtomicCasWord,
+                        types::I32 => IntegerOp::AtomicCasDword,
+                        types::I64 => IntegerOp::AtomicCasQword,
+                        _ => return None,
+                    };
+                    (op, [input(address)?, input(expected)?, input(replacement)?])
+                }
                 InstructionData::Unary {
                     opcode: Opcode::Bswap,
                     arg,
@@ -2265,6 +2288,7 @@ impl IntegerBlocks<'_> {
 /// third operand, with two i64 inputs and an i64 result.
 /// Atomic read-modify-write records take an address, operand, and width.
 /// They remain live for their memory effect even when the old value is unused.
+/// Compare-and-swap records have a width-specific opcode and three operand IDs.
 /// AArch64 AtomicLoad and AtomicStore encode ordered accesses without an offset.
 /// The load remains live even when its result is unused.
 /// After the stack declarations, FloatArgument binds successive SysV XMM

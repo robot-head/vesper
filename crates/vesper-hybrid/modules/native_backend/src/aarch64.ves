@@ -26,7 +26,8 @@ use self::scalar::{
     FLOAT_STACK_STORE32, FLOAT_STACK_STORE64, FLOAT_COPY_SIGN, is_float_binary, is_float_compare,
     float_value, valid_float_operands, LEADING_ZEROS, TRAILING_ZEROS, POPULATION_COUNT,
     REVERSE_BITS, LEADING_SIGN_BITS, ROTATE_RIGHT, ROTATE_RIGHT_REGISTER, ROTATE_LEFT_REGISTER,
-    FUNNEL_RIGHT, AND_NOT, OR_NOT, XOR_NOT, ABS, ATOMIC_LOAD, ATOMIC_STORE
+    FUNNEL_RIGHT, AND_NOT, OR_NOT, XOR_NOT, ABS, ATOMIC_LOAD, ATOMIC_STORE, ATOMIC_CAS_BYTE,
+    ATOMIC_CAS_WORD, ATOMIC_CAS_DWORD, ATOMIC_CAS_QWORD
 };
 use self::x86_64::{
     BYTE_BITS, WORD_BITS, DWORD_BITS, QWORD_BITS, FLOAT_ORDERED, FLOAT_UNORDERED, FLOAT_EQUAL,
@@ -142,6 +143,8 @@ const CMN_IMM: u32 = 0xb100001f;
 const CCMP_IMM: u32 = 0xfa400800;
 const CCMN_IMM_W: u32 = 0x3a400800;
 const SUBS_REG: u32 = 0xeb000000;
+const SUBS_UXTB_W: u32 = 0x6b200000;
+const SUBS_UXTH_W: u32 = 0x6b202000;
 const SUBS_UXTW: u32 = 0xeb204000;
 const SUBS_SXTW: u32 = 0xeb20c000;
 const SUBS_ASR_SIGN: u32 = 0xeb80fc00;
@@ -176,9 +179,13 @@ const LOAD_ACQUIRE_EXCLUSIVE: u32 = 0x085ffc00;
 const STORE_RELEASE_EXCLUSIVE: u32 = 0x0800fc00;
 const LOAD_ACQUIRE: u32 = 0x08dffc00;
 const STORE_RELEASE: u32 = 0x089ffc00;
+const CLEAR_EXCLUSIVE: u32 = 0xd5033f5f;
 const DMB_ISH: u32 = 0xd5033bbf;
 const EXCHANGE_RETRY_DISTANCE: u32 = 2;
 const ARITHMETIC_RETRY_DISTANCE: u32 = 3;
+const CAS_RETRY_DISTANCE: u32 = 4;
+const CAS_MISMATCH_DISTANCE: u32 = 4;
+const CAS_SKIP_CLEAR_DISTANCE: u32 = 2;
 const MEMORY_LOAD: u32 = 0x00400000;
 const MEMORY_SIZE_SHIFT: u32 = 30;
 const MEMORY_IMM9_SHIFT: u32 = 12;
@@ -706,6 +713,10 @@ fn float_operands(in r: Record) -> Option[u64] {
     }
 }
 
+fn is_atomic_cas(op: u64) -> bool {
+    op >= ATOMIC_CAS_BYTE && op <= ATOMIC_CAS_QWORD
+}
+
 fn operands(in r: Record, returns: u64) -> Option[u64] {
     if r.op == CONSTANT || r.op == STACK_SLOT || r.op == BLOCK_LABEL {
         return Option::Some(0);
@@ -843,6 +854,9 @@ fn operands(in r: Record, returns: u64) -> Option[u64] {
         } else {
             Option::None
         };
+    }
+    if is_atomic_cas(r.op) {
+        return Option::Some(3);
     }
     if !scalar_width(r.extra) {
         return Option::None;
@@ -1022,7 +1036,45 @@ fn atomic_address(width: u64, address: u32) -> u32 {
     sh(address, RN_SHIFT) | size
 }
 
-fn emit_atomic(inout out: ChunkSeq[u8], in r: Record, old: u32, address: u32, operand: u32) {
+fn emit_atomic_cas(
+    inout out: ChunkSeq[u8],
+    op: u64,
+    old: u32,
+    address: u32,
+    expected: u32,
+    replacement: u32
+) {
+    let (width, compare) = match op {
+        ATOMIC_CAS_BYTE => (BYTE_BITS, SUBS_UXTB_W),
+        ATOMIC_CAS_WORD => (WORD_BITS, SUBS_UXTH_W),
+        ATOMIC_CAS_DWORD => (DWORD_BITS, SUBS_REG & ~REG64),
+        _ => (QWORD_BITS, SUBS_REG),
+    };
+    let base = atomic_address(width, address);
+    push32(inout out, LOAD_ACQUIRE_EXCLUSIVE | base | old);
+    rrr(inout out, compare, ZERO, old, expected);
+    let mismatch = sh(CAS_MISMATCH_DISTANCE, BRANCH_IMM19_SHIFT);
+    push32(inout out, BRANCH_IF_CONDITION | mismatch | NE);
+    push32(inout out, STORE_RELEASE_EXCLUSIVE | base | sh(SECOND_SCRATCH, RM_SHIFT) | replacement);
+    let retry = sh(wrapping_sub(0, CAS_RETRY_DISTANCE) & BRANCH_IMM19_MASK, BRANCH_IMM19_SHIFT);
+    push32(inout out, (BRANCH_IF_NOT_ZERO & ~REG64) | retry | SECOND_SCRATCH);
+    // A successful exclusive store already cleared the reservation.
+    push32(inout out, JUMP | CAS_SKIP_CLEAR_DISTANCE);
+    push32(inout out, CLEAR_EXCLUSIVE);
+}
+
+fn emit_atomic(
+    inout out: ChunkSeq[u8],
+    in r: Record,
+    old: u32,
+    address: u32,
+    operand: u32,
+    third: u32
+) {
+    if is_atomic_cas(r.op) {
+        emit_atomic_cas(inout out, r.op, old, address, operand, third);
+        return;
+    }
     let base = atomic_address(r.extra, address);
     if r.op == ATOMIC_LOAD {
         push32(inout out, LOAD_ACQUIRE | base | old);
@@ -2125,6 +2177,7 @@ fn encode_pass(
         } else if last == NEVER_READ
             && !is_integer_division(r.op)
             && !is_atomic_rmw(r.op)
+            && !is_atomic_cas(r.op)
             && r.op != ATOMIC_LOAD
             && !live_overflow_flag(in ends, value, r.op)
         {
@@ -2282,7 +2335,8 @@ fn encode_pass(
         let live = last != NEVER_READ;
         let calls = direct_call(r.op);
         let division = is_integer_division(r.op);
-        let atomic_rmw = is_atomic_rmw(r.op);
+        let cas = is_atomic_cas(r.op);
+        let atomic_rmw = cas || is_atomic_rmw(r.op);
         let atomic = atomic_rmw || r.op == ATOMIC_LOAD;
         let checked = is_checked_arithmetic(r.op);
         let overflow_live = checked && last_read(in ends, wrapping_add(value, 1)) != NEVER_READ;
@@ -2422,7 +2476,7 @@ fn encode_pass(
             continue;
         }
         if atomic && !live {
-            emit_atomic(inout out, in r, SCRATCH, lhs, rhs);
+            emit_atomic(inout out, in r, SCRATCH, lhs, rhs, third);
             locations.push(UNASSIGNED);
             continue;
         }
@@ -2566,9 +2620,9 @@ fn encode_pass(
                 continue;
             }
         }
-        // A failed store retries with both original operands.
+        // A failed store retries with the original operands.
         let atomic_operands = if atomic_rmw {
-            sh(1, lhs) | sh(1, rhs)
+            sh(1, lhs) | sh(1, rhs) | (if cas { sh(1, third) } else { 0 })
         } else {
             0
         };
@@ -2628,7 +2682,7 @@ fn encode_pass(
         } else if checked {
             emit_checked(inout out, in r, dest, lhs, rhs, overflow_live);
         } else if atomic {
-            emit_atomic(inout out, in r, dest, lhs, rhs);
+            emit_atomic(inout out, in r, dest, lhs, rhs, third);
         } else if r.op == OVERFLOW_FLAG {
             let cc = overflow_cc.unwrap_or(EQ);
             push32(inout out, CSET | sh(cc ^ 1, CONDITION_SHIFT) | dest);
