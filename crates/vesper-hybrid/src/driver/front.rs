@@ -177,23 +177,40 @@ fn encode_diagnostics_json_stream(
 
 fn encode_package_diagnostics_json_stream(
     package: &vesper::packages::Assembled,
-    ds: &[vesper::packages::PackageDiagnostic],
+    ds: &[vesper::ast::Diagnostic],
 ) -> Vec<u8> {
-    let files = &package.sources.files;
-    let total = package.manifest_errors.len() + ds.len();
+    let mut manifest = Vec::new();
+    manifest.extend_from_slice(&(package.manifest_errors.len() as u64).to_le_bytes());
+    for (file, d) in &package.manifest_errors {
+        push_len_bytes(&mut manifest, file.as_bytes());
+        push_diag_fields(&mut manifest, d);
+    }
+
+    let mut files = Vec::new();
+    files.extend_from_slice(&(package.sources.files.len() as u64).to_le_bytes());
+    for f in &package.sources.files {
+        files.extend_from_slice(&(f.base as u64).to_le_bytes());
+        push_len_bytes(&mut files, f.display.as_bytes());
+        push_len_bytes(&mut files, f.text.as_bytes());
+    }
+
+    let mut pairs_vec: Vec<(&String, &String)> = package.sources.qualified.iter().collect();
+    pairs_vec.sort_by_key(|(k, _)| std::cmp::Reverse(k.len()));
+    let mut pairs = Vec::new();
+    pairs.extend_from_slice(&(pairs_vec.len() as u64).to_le_bytes());
+    for (m, s) in &pairs_vec {
+        push_len_bytes(&mut pairs, m.as_bytes());
+        push_len_bytes(&mut pairs, s.as_bytes());
+    }
+
     let mut out = Vec::new();
     out.push(DIAG_JSON_PACKAGE);
-    out.extend_from_slice(&(total as u64).to_le_bytes());
-    for (file, d) in &package.manifest_errors {
-        out.extend_from_slice(&(file.len() as u64).to_le_bytes());
-        out.extend_from_slice(file.as_bytes());
-        push_diag_fields(&mut out, d);
-    }
+    push_len_bytes(&mut out, &manifest);
+    push_len_bytes(&mut out, &files);
+    push_len_bytes(&mut out, &pairs);
+    out.extend_from_slice(&(ds.len() as u64).to_le_bytes());
     for d in ds {
-        let file = d.file.map_or("Loom.toml", |f| files[f].display.as_str());
-        out.extend_from_slice(&(file.len() as u64).to_le_bytes());
-        out.extend_from_slice(file.as_bytes());
-        push_diag_fields(&mut out, &d.diagnostic);
+        push_diag_fields(&mut out, d);
     }
     out
 }
@@ -443,14 +460,14 @@ impl Session {
         let n = count(checked.diagnostics.len());
         let bytes = match &self.loaded {
             Some(p) => {
-                let localized: Vec<_> = checked
-                    .diagnostics
-                    .iter()
-                    .map(|d| p.sources.localize(d))
-                    .collect();
                 if o.json {
-                    encode_package_diagnostics_json_stream(p, &localized)
+                    encode_package_diagnostics_json_stream(p, &checked.diagnostics)
                 } else {
+                    let localized: Vec<_> = checked
+                        .diagnostics
+                        .iter()
+                        .map(|d| p.sources.localize(d))
+                        .collect();
                     encode_package_diagnostics_text_stream(p, &localized)
                 }
             }
