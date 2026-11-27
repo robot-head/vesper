@@ -24,6 +24,8 @@ mod check_harness;
 mod check_words;
 #[path = "../../../tests/common/codegen_calls_words.rs"]
 mod codegen_calls_words;
+#[path = "../../../tests/self_host_codegen_export/words.rs"]
+mod export_words;
 #[path = "../../../tests/common/ir_words.rs"]
 mod ir_words;
 
@@ -33,7 +35,9 @@ use std::sync::OnceLock;
 
 use vesper::codegen_swap::{self, CodegenHooks, Lent};
 use vesper::native::WordFunction;
-use vesper::native::export::{LibraryOptions, compile_source};
+use vesper::native::export::{
+    AbiType, ExportedFunction, LibraryInterface, LibraryOptions, compile_source,
+};
 use vesper_codegen_swap_test::foreign_package;
 use vesper_cranelift_sys::cranelift_codegen::ir::{self, ArgumentExtension, ArgumentPurpose};
 use vesper_cranelift_sys::cranelift_module::{Linkage, Module};
@@ -49,6 +53,8 @@ const FLAGS: &str = "enable_llvm_abi_extensions=true;is_pic=true;opt_level=speed
 const MODULE_NAME: &str = "vesper";
 /// The answer's status word when the object was built.
 const BUILT: u64 = 0;
+/// The bytes of one request word.
+const WORD_BYTES: usize = 8;
 /// The calls task flags of a library's first root and of its other roots
 /// (packages/vesper-codegen-calls/src/data.ves).
 const LIBRARY_TASK: u64 = 4;
@@ -146,6 +152,8 @@ struct Record {
     /// The calls input of the library's first lowering, which the
     /// `export_plans` hook saw.
     calls: Option<Vec<u8>>,
+    /// The library's interface: its 128-bit entries and v2 glue.
+    interface: Option<LibraryInterface>,
 }
 
 thread_local! {
@@ -297,8 +305,11 @@ fn record_calls(
     roots: &[&str],
     optimize: bool,
 ) -> Option<vesper::native::EntryPlans> {
-    let input =
-        codegen_calls_words::calls_input_flags(world, program, &library_tasks(roots, optimize));
+    let input = codegen_calls_words::calls_input_flags_wide(
+        world,
+        program,
+        &library_tasks(roots, optimize),
+    );
     RECORD.with(|cell| {
         let mut r = cell.borrow_mut();
         match input {
@@ -328,6 +339,13 @@ fn request(r: &Record) -> Vec<u8> {
     q.bytes(FLAGS.as_bytes());
     q.bytes(MODULE_NAME.as_bytes());
     q.word(1);
+    let wide: Vec<&ExportedFunction> = r
+        .interface
+        .as_ref()
+        .map(|i| i.functions.iter().filter(|f| needs_wide_entry(f)).collect())
+        .unwrap_or_default();
+    // The exports declared under their own symbols, then the 128-bit ones,
+    // which the driver declares locally behind their entries.
     let exports: Vec<(&str, &str)> = r
         .defined
         .iter()
@@ -337,6 +355,7 @@ fn request(r: &Record) -> Vec<u8> {
                 == u64::from(vesper_cranelift_sys::codes::linkage_code(Linkage::Export)))
             .then_some((d.key.as_str(), declared.symbol.as_str()))
         })
+        .chain(wide.iter().map(|f| (f.name.as_str(), f.symbol.as_str())))
         .collect();
     q.word(exports.len() as u64);
     for (key, symbol) in exports {
@@ -355,7 +374,50 @@ fn request(r: &Record) -> Vec<u8> {
         q.word(d.plan.len() as u64);
         d.plan.iter().for_each(|&w| q.word(w));
     }
+    q.word(wide.len() as u64);
+    for f in wide {
+        let inner = r
+            .defined
+            .iter()
+            .find(|d| d.key == f.name)
+            .map_or(u64::MAX, |d| d.func);
+        q.bytes(f.symbol.as_bytes());
+        q.word(inner);
+        q.word(u64::from(f.result_pointer));
+        q.word(u64::from(wide_by_pointer(&f.result)));
+        q.word(u64::from(f.fail_record_words.is_some()));
+        q.word(f.params.len() as u64);
+        for p in &f.params {
+            q.word(u64::from(p.pointer));
+            q.word(u64::from(p.pass() != "inout" && wide_by_pointer(&p.ty)));
+        }
+    }
+    match r.interface.as_ref().filter(|i| i.is_v2()) {
+        Some(i) => {
+            q.word(1);
+            codegen_swap::seq::runtime_args(false)
+                .iter()
+                .for_each(|&w| q.word(w));
+            q.bytes(&export_words::binding_input(i, &Default::default()));
+        }
+        None => q.word(0),
+    }
     q.0
+}
+
+/// Whether `ty` is `i128` or `u128`, which the export ABI passes through a
+/// pointer to its two words (`native_export::wide_by_pointer`).
+fn wide_by_pointer(ty: &AbiType) -> bool {
+    matches!(ty, AbiType::Scalar { name } if name == "i128" || name == "u128")
+}
+
+/// Whether `f`'s export symbol is a 128-bit entry around a local function
+/// (`native_export::needs_wide_entry`).
+fn needs_wide_entry(f: &ExportedFunction) -> bool {
+    wide_by_pointer(&f.result)
+        || f.params
+            .iter()
+            .any(|p| p.pass() != "inout" && wide_by_pointer(&p.ty))
 }
 
 fn read_word(b: &[u8], at: &mut usize) -> u64 {
@@ -387,7 +449,8 @@ fn rust_build(library: &str, source: &str) -> Result<(Vec<u8>, Record), String> 
     };
     let built = codegen_swap::with_hooks(hooks, || compile_source(library, source, &options))
         .map_err(|e| format!("{e:?}"))?;
-    let record = RECORD.with(|r| std::mem::take(&mut *r.borrow_mut()));
+    let mut record = RECORD.with(|r| std::mem::take(&mut *r.borrow_mut()));
+    record.interface = Some(built.interface);
     if let Some(why) = &record.refused {
         return Err(why.clone());
     }
@@ -445,6 +508,37 @@ pub fn quad(x: i64) -> i64 { square(square(x)) }",
         "fn step(a: u64, b: u64) -> u64 eff [Fail[ArithOverflow]] { a * b + 1 }
 pub fn total(a: u64, b: u64) -> u64 eff [Fail[ArithOverflow], Fail[RuntimeError]] { step(a, b) / b }",
     ),
+    // 128-bit parameters and results (#1277): each export symbol is a
+    // `define_wide_entry` adapter around a local function.
+    (
+        "wide",
+        "pub fn xor128(a: u128, b: u128) -> u128 { a ^ b }
+pub fn negate(a: i128) -> i128 { wrapping_sub(0, a) }
+pub fn is_zero(a: u128) -> bool { a == 0 }
+pub fn mixed(x: u64, a: i128, y: f64) -> f64 { if a < 0 { y } else { y + 1.0 } }
+pub fn scaled(a: u128, b: u64) -> u64 eff [Fail[ArithOverflow]] { b * 2 }",
+    ),
+    // (Checked 128-bit arithmetic has no body plan yet, so a failing
+    // function with a wide result stays out.)
+    // v2 libraries: the runtime entry points next to the functions, and
+    // the drop glue of a handle type.
+    (
+        "v2",
+        "// @export abi 3
+pub fn add(a: u64, b: u64) -> u64 { wrapping_add(a, b) }",
+    ),
+    (
+        "v2_wide",
+        "// @export abi 3
+pub fn twice(a: i128) -> i128 { wrapping_add(a, a) }
+pub fn keep(x: u32) -> u32 { x }",
+    ),
+    (
+        "v2_handle",
+        "// @export abi 3
+pub struct Buf { data: ChunkSeq[u8], n: u64 }
+pub fn count(inout b: Buf) -> u64 { 7 }",
+    ),
 ];
 
 fn with_passes_off<R>(f: impl FnOnce() -> R) -> R {
@@ -475,6 +569,10 @@ fn with_passes_off<R>(f: impl FnOnce() -> R) -> R {
 #[test]
 fn vesper_library_objects_match_vesper_build_lib() {
     let mut same = 0;
+    // What the identical objects covered past the walk.
+    let mut wide_entries = 0;
+    let mut v2_libraries = 0;
+    let mut drop_glue = 0;
     let mut failures = vec![];
     for (library, source) in LIBRARIES {
         let (rust, record) = match with_passes_off(|| rust_build(library, source)) {
@@ -495,6 +593,17 @@ fn vesper_library_objects_match_vesper_build_lib() {
         let clif = String::from_utf8_lossy(read_bytes(&answer, &mut at)).into_owned();
         if object == rust {
             same += 1;
+            if let Some(i) = &record.interface {
+                wide_entries += i.functions.iter().filter(|f| needs_wide_entry(f)).count();
+                if i.is_v2() {
+                    v2_libraries += 1;
+                    drop_glue += i
+                        .types
+                        .values()
+                        .filter_map(|t| t.drop_symbol.as_ref())
+                        .count();
+                }
+            }
         } else {
             failures.push(format!(
                 "{library}: objects differ ({} vs {} bytes)\nVesper CLIF:\n{clif}",
@@ -504,10 +613,16 @@ fn vesper_library_objects_match_vesper_build_lib() {
         }
     }
     eprintln!(
-        "native-lib: {same} of {} library objects identical",
+        "native-lib: {same} of {} library objects identical \
+         ({wide_entries} 128-bit entries, {v2_libraries} v2 libraries, \
+         {drop_glue} drop functions)",
         LIBRARIES.len()
     );
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+    assert!(
+        wide_entries > 0 && v2_libraries > 0 && drop_glue > 0,
+        "the libraries no longer cover 128-bit entries, v2 glue and drop glue"
+    );
 }
 
 /// A request that does not read is an error answer, not a crash.
@@ -529,4 +644,14 @@ fn malformed_requests_are_refused() {
     q.bytes(&[]);
     q.word(0);
     assert!(refused(&q.0), "a calls input without a library task");
+    // A whole library's request cut short in its trailing sections: the
+    // v2 word, then the 128-bit entry count.
+    let (_, record) = with_passes_off(|| rust_build(LIBRARIES[0].0, LIBRARIES[0].1))
+        .expect("the first library builds");
+    let whole = request(&record);
+    assert!(!refused(&whole), "the whole request builds");
+    for (cut, what) in [(1, "the v2 word"), (2, "the 128-bit entry count")] {
+        let short = &whole[..whole.len() - cut * WORD_BYTES];
+        assert!(refused(short), "a request without {what}");
+    }
 }

@@ -25,7 +25,11 @@
 //         first library task names the exports as its roots),
 //     n definitions, each: instance index, optimize, status, source
 //         locations, n callees, callee instance indexes (or NO_CALLEE),
-//         n plan words, the plan words.
+//         n plan words, the plan words,
+//     then the 128-bit export entries and the v2 section (exports.ves).
+//
+// Slice 2a-2b (#2642) adds what `compile_exports` defines after the walk:
+// the `define_wide_entry` adapters and a v2 library's runtime glue.
 //
 // Answer: 0, the object, the CLIF text of the definitions (empty unless
 // kept); or 1 and the error.
@@ -43,33 +47,33 @@ use self::declare::{Declared, declare_library, declared_new, exports_new};
 const OK: u64 = 0;
 const FAILED: u64 = 1;
 // A request flag word that is set.
-const SET: u64 = 1;
+pub const SET: u64 = 1;
 // The bytes of one request or answer word.
 const WORD_BYTES: u64 = 8;
 // Decimal digits of a number in an error, from ASCII `0`.
 const DECIMAL_BASE: u64 = 10;
 const DIGIT_ZERO: u64 = 48;
 // A callee the walk does not call directly (`codegen_swap::body::NO_CALLEE`).
-const NO_CALLEE: u64 = 18446744073709551615;
+pub const NO_CALLEE: u64 = 18446744073709551615;
 // The function index bits of a callee word; the bits above it are the
 // call's flags (`codegen_swap::body::FAIL_CALL`, `STATUS_CALL`), kept.
 const CALLEE_INDEX_MASK: u64 = 4294967295;
 // A function that returns in registers: no result pointer and no values
 // built in it (`codegen_swap::body::NO_VALUE`).
 const NO_VALUE: u64 = 18446744073709551615;
-const MALFORMED: Str = "malformed native-lib request";
-const UNKNOWN_FUNCTION: Str = "a definition names an unknown function";
+pub const MALFORMED: Str = "malformed native-lib request";
+pub const UNKNOWN_FUNCTION: Str = "a definition names an unknown function";
 const NO_BUILDER: Str = "the function builder could not be made";
 const DECLINED_BODY: Str = "the body hook declined a definition: ";
 const DEFINE_FAILED: Str = "defining a function failed";
 
-struct Reader {
-    pos: u64,
-    bad: bool,
+pub struct Reader {
+    pub pos: u64,
+    pub bad: bool,
 }
 
 impl Reader {
-    fn word(inout self, in req: Slice[u8]) -> u64 {
+    pub fn word(inout self, in req: Slice[u8]) -> u64 {
         match req.try_read_u64_le(self.pos) {
             Option::Some(v) => {
                 self.pos = wrapping_add(self.pos, WORD_BYTES);
@@ -83,7 +87,7 @@ impl Reader {
     }
 
     // The next string's bytes, copied.
-    fn bytes(inout self, in req: Slice[u8]) -> ChunkSeq[u8] {
+    pub fn bytes(inout self, in req: Slice[u8]) -> ChunkSeq[u8] {
         let len = self.word(in req);
         let start = self.pos;
         let end = wrapping_add(start, len);
@@ -116,7 +120,7 @@ fn failure(in message: Slice[u8]) -> ChunkSeq[u8] {
     out
 }
 
-fn at64(in s: ChunkSeq[u64], i: u64) -> u64 {
+pub fn at64(in s: ChunkSeq[u64], i: u64) -> u64 {
     match s.try_get(i) {
         Option::Some(v) => v,
         Option::None => NO_CALLEE,
@@ -267,6 +271,18 @@ pub fn library_object(in req: Slice[u8]) -> ChunkSeq[u8] eff [Ffi[Cranelift]] {
             module_free(m);
             return failure(in err.as_slice());
         }
+    }
+    // `compile_exports` after the walk: the 128-bit export entries, then
+    // a v2 library's runtime glue.
+    let err = self::exports::define_wide_entries(inout m, in req, inout r, in d);
+    if err.len() != 0 {
+        module_free(m);
+        return failure(in err.as_slice());
+    }
+    let err = self::exports::define_v2_glue(inout m, in req, inout r);
+    if err.len() != 0 {
+        module_free(m);
+        return failure(in err.as_slice());
     }
     let clif = module_clif(in m);
     match module_finish(m) {
