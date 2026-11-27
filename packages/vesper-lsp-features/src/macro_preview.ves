@@ -1,0 +1,968 @@
+// The macro preview of `vesper lsp` (src/lsp/macro_preview.rs
+// `Document::new` and `render`) in Vesper, over the words
+// `macro_preview::port_words` writes for a compiler snapshot.
+//
+// Rust serializes the `Success` or `Rejected` record through a bounded
+// writer that charges every write call, then parses the bytes into a
+// `serde_json::Value`. Here the record is built as a tree in Rust's field
+// order. A walk in that order replays serde_json's write calls against the
+// same allowance. The answer is then written from the tree with sorted
+// keys, as the `Value` (a `BTreeMap`) writes it.
+use @vesper-std/hash::blake3::{blake3, digest_bytes};
+use self::json::{byte, put, put_i64, put_u64};
+
+pub const SCHEMA: Str = "vesper.editor.macro-preview/1";
+// `MAX_SOURCE`, `MAX_URI` and `MAX_OUTPUT`, and the largest work allowance
+// `Limits::validate` accepts.
+const MAX_SOURCE: u64 = 131072;
+const MAX_URI: u64 = 4096;
+const MAX_OUTPUT: u64 = 1048576;
+const MAX_WORK: u64 = 33554432;
+// `render`'s prepaid work: eight units per output byte, four per source
+// byte, one per URI byte, and a fixed 4,096.
+const OUTPUT_WORK_FACTOR: u64 = 8;
+const SOURCE_WORK_FACTOR: u64 = 4;
+const FIXED_WORK: u64 = 4096;
+const DIGEST_BYTES: u64 = 32;
+// Hex digits per digest byte.
+const HEX_PER_BYTE: u64 = 2;
+// The preview's `tier`.
+const TIER: u64 = 1;
+// Words per object entry in `kids`: the key, then the value.
+const PAIR_WORDS: u64 = 2;
+// The bytes of one quote, bracket, brace, comma or colon.
+const PUNCTUATION_BYTES: u64 = 1;
+// `Stage` as `port_words` writes it (the enum's order; 10 is `Io`).
+const STAGE_PARSE: u64 = 0;
+const STAGE_EXPAND: u64 = 1;
+const STAGE_RESOLVE: u64 = 2;
+const STAGE_LOWER: u64 = 3;
+const STAGE_CHECK: u64 = 4;
+const STAGE_AUTHORITY: u64 = 5;
+const STAGE_IR: u64 = 6;
+const STAGE_RESOURCE: u64 = 7;
+const STAGE_UNSUPPORTED: u64 = 8;
+const STAGE_CONFIG: u64 = 9;
+
+// Tree node kinds.
+const K_INPUT: u64 = 0;
+const K_POOL: u64 = 1;
+const K_U64: u64 = 2;
+const K_I64: u64 = 3;
+const K_NULL: u64 = 4;
+const K_ARRAY: u64 = 5;
+const K_OBJECT: u64 = 6;
+
+// Why the bounded writer refused: none, its work, or its output bytes.
+const R_NONE: u64 = 0;
+const R_WORK: u64 = 1;
+const R_OUTPUT: u64 = 2;
+
+// serde_json's escapes: `\"`, `\\` and the short control escapes take two
+// bytes, the other control bytes six (`\u00xx`).
+const SHORT_ESCAPE_BYTES: u64 = 2;
+const LONG_ESCAPE_BYTES: u64 = 6;
+const BACKSPACE: u8 = 8;
+const TAB: u8 = 9;
+const NEWLINE: u8 = 10;
+const FORM_FEED: u8 = 12;
+const CARRIAGE_RETURN: u8 = 13;
+const FIRST_PRINTABLE: u8 = 32;
+const QUOTE: u8 = 34;
+const BACKSLASH: u8 = 92;
+const COMMA: u8 = 44;
+const COLON: u8 = 58;
+const OPEN_BRACKET: u8 = 91;
+const CLOSE_BRACKET: u8 = 93;
+const OPEN_BRACE: u8 = 123;
+const CLOSE_BRACE: u8 = 125;
+const LOWER_B: u8 = 98;
+const LOWER_F: u8 = 102;
+const LOWER_N: u8 = 110;
+const LOWER_R: u8 = 114;
+const LOWER_T: u8 = 116;
+const DIGIT_ZERO: u8 = 48;
+const HEX_LETTER_BASE: u8 = 87;
+const HEX_DIGITS: u8 = 10;
+const NIBBLE_BITS: u8 = 4;
+const NIBBLE_MASK: u8 = 15;
+const DECIMAL: u64 = 10;
+// `null`.
+const NULL_BYTES: u64 = 4;
+
+// The document's digest is the host's (its C BLAKE3, as the hosted build's
+// `@vesper-std/hash-sys` would compute it) when given, else the portable
+// BLAKE3 of `@vesper-std/hash`.
+//
+// The record being written: node `i` is `kind[i]` with `a[i]` and `b[i]`
+// (a text's offset and length in the input or the pool, a number, or a
+// container's first entry in `kids` and its entry count; an object's
+// entries are key and value pairs).
+struct Tree {
+    kind: ChunkSeq[u64],
+    a: ChunkSeq[u64],
+    b: ChunkSeq[u64],
+    kids: ChunkSeq[u64],
+    pool: ChunkSeq[u8]
+}
+
+pub fn tree_new() -> Tree {
+    Tree {
+        kind: ChunkSeq::new[u64](),
+        a: ChunkSeq::new[u64](),
+        b: ChunkSeq::new[u64](),
+        kids: ChunkSeq::new[u64](),
+        pool: ChunkSeq::new[u8]()
+    }
+}
+
+fn clear(inout t: Tree) {
+    t.kind.truncate(0);
+    t.a.truncate(0);
+    t.b.truncate(0);
+    t.kids.truncate(0);
+    t.pool.truncate(0);
+}
+
+fn at(in s: ChunkSeq[u64], i: u64) -> u64 {
+    s.try_get(i).unwrap_or(0)
+}
+
+fn node(inout t: Tree, kind: u64, a: u64, b: u64) -> u64 {
+    let id = t.kind.len();
+    t.kind.push(kind);
+    t.a.push(a);
+    t.b.push(b);
+    id
+}
+
+fn lit(inout t: Tree, in s: Str) -> u64 {
+    let start = t.pool.len();
+    put(inout t.pool, in s);
+    node(inout t, K_POOL, start, s.len())
+}
+
+fn text(inout t: Tree, start: u64, len: u64) -> u64 {
+    node(inout t, K_INPUT, start, len)
+}
+
+fn num(inout t: Tree, n: u64) -> u64 {
+    node(inout t, K_U64, n, 0)
+}
+
+fn null(inout t: Tree) -> u64 {
+    node(inout t, K_NULL, 0, 0)
+}
+
+fn hex(nibble: u8) -> u8 {
+    if nibble < HEX_DIGITS {
+        wrapping_add(nibble, DIGIT_ZERO)
+    } else {
+        wrapping_add(nibble, HEX_LETTER_BASE)
+    }
+}
+
+// The lower-case hex of 32 digest bytes at `start` of `bytes`, as a pool
+// text.
+fn hex_text(inout t: Tree, in bytes: Slice[u8], start: u64) -> u64 {
+    let begin = t.pool.len();
+    for i in 0..DIGEST_BYTES {
+        let x = byte(in bytes, wrapping_add(start, i));
+        t.pool.push(hex(x >> NIBBLE_BITS));
+        t.pool.push(hex(x & NIBBLE_MASK));
+    }
+    node(inout t, K_POOL, begin, wrapping_mul(DIGEST_BYTES, HEX_PER_BYTE))
+}
+
+fn close(inout t: Tree, kind: u64, in entries: ChunkSeq[u64], count: u64) -> u64 {
+    let first = t.kids.len();
+    t.kids.extend(in entries.as_slice());
+    node(inout t, kind, first, count)
+}
+
+fn object(inout t: Tree, in pairs: ChunkSeq[u64]) -> u64 {
+    close(inout t, K_OBJECT, in pairs, pairs.len() / PAIR_WORDS)
+}
+
+fn array(inout t: Tree, in items: ChunkSeq[u64]) -> u64 {
+    close(inout t, K_ARRAY, in items, items.len())
+}
+
+fn field(inout t: Tree, inout pairs: ChunkSeq[u64], in key: Str, value: u64) {
+    let k = lit(inout t, in key);
+    pairs.push(k);
+    pairs.push(value);
+}
+
+// ---------------------------------------------------------------- input
+
+copy struct Reader {
+    pos: u64
+}
+
+fn word(in b: Slice[u8], inout r: Reader) -> u64 {
+    let x = b.try_read_u64_le(r.pos).unwrap_or(0);
+    r.pos = wrapping_add(r.pos, 8);
+    x
+}
+
+// A text: its length, then its bytes; the tree node for it.
+fn read_text(inout t: Tree, in b: Slice[u8], inout r: Reader) -> u64 {
+    let len = word(in b, inout r);
+    let start = r.pos;
+    r.pos = wrapping_add(r.pos, len);
+    text(inout t, start, len)
+}
+
+// An optional text: a flag, then a text; `null` when absent.
+fn read_option(inout t: Tree, in b: Slice[u8], inout r: Reader) -> u64 {
+    let some = word(in b, inout r) == 1;
+    let len = word(in b, inout r);
+    let start = r.pos;
+    r.pos = wrapping_add(r.pos, len);
+    if some {
+        text(inout t, start, len)
+    } else {
+        null(inout t)
+    }
+}
+
+// `{"start":s,"end":e}` (a `ByteRange` or a `Span`).
+fn read_range(inout t: Tree, in b: Slice[u8], inout r: Reader) -> u64 {
+    let start = word(in b, inout r);
+    let end = word(in b, inout r);
+    let mut p = ChunkSeq::new[u64]();
+    let s = num(inout t, start);
+    field(inout t, inout p, in "start", s);
+    let e = num(inout t, end);
+    field(inout t, inout p, in "end", e);
+    object(inout t, in p)
+}
+
+// `DefId`: `{"package":p,"item":i}`.
+fn read_def(inout t: Tree, in b: Slice[u8], inout r: Reader) -> u64 {
+    let package = word(in b, inout r);
+    let item = word(in b, inout r);
+    let mut p = ChunkSeq::new[u64]();
+    let pk = num(inout t, package);
+    field(inout t, inout p, in "package", pk);
+    let it = num(inout t, item);
+    field(inout t, inout p, in "item", it);
+    object(inout t, in p)
+}
+
+// `ExpansionId`: `{"session":s,"index":i}`.
+fn read_expansion(inout t: Tree, in b: Slice[u8], inout r: Reader) -> u64 {
+    let session = word(in b, inout r);
+    let index = word(in b, inout r);
+    let mut p = ChunkSeq::new[u64]();
+    let s = num(inout t, session);
+    field(inout t, inout p, in "session", s);
+    let i = num(inout t, index);
+    field(inout t, inout p, in "index", i);
+    object(inout t, in p)
+}
+
+// An externally tagged variant: `{"<variant>":value}`.
+fn variant(inout t: Tree, in name: Str, value: u64) -> u64 {
+    let mut p = ChunkSeq::new[u64]();
+    field(inout t, inout p, in name, value);
+    object(inout t, in p)
+}
+
+// `OperationKind` (tags 0 `Use`, 1 `Handler`, 2 `IndirectCall`).
+const OP_USE: u64 = 0;
+const OP_HANDLER: u64 = 1;
+
+fn read_operation(inout t: Tree, in b: Slice[u8], inout r: Reader) -> u64 {
+    let tag = word(in b, inout r);
+    if tag == OP_USE {
+        let mut p = ChunkSeq::new[u64]();
+        let d = read_def(inout t, in b, inout r);
+        field(inout t, inout p, in "def", d);
+        let inner = object(inout t, in p);
+        return variant(inout t, in "Use", inner);
+    }
+    if tag == OP_HANDLER {
+        let mut p = ChunkSeq::new[u64]();
+        let effect = read_def(inout t, in b, inout r);
+        field(inout t, inout p, in "effect", effect);
+        let handler = read_def(inout t, in b, inout r);
+        field(inout t, inout p, in "handler", handler);
+        let inner = object(inout t, in p);
+        return variant(inout t, in "Handler", inner);
+    }
+    lit(inout t, in "IndirectCall")
+}
+
+// `AuthorityArg` (tags 0 `Def`, 1 `Text`, 2 `Int`).
+const ARG_DEF: u64 = 0;
+const ARG_TEXT: u64 = 1;
+
+fn read_authority(inout t: Tree, in b: Slice[u8], inout r: Reader) -> u64 {
+    let package = word(in b, inout r);
+    let mut effect = ChunkSeq::new[u64]();
+    let pk = num(inout t, package);
+    field(inout t, inout effect, in "package", pk);
+    let name = read_text(inout t, in b, inout r);
+    field(inout t, inout effect, in "name", name);
+    let mut p = ChunkSeq::new[u64]();
+    let e = object(inout t, in effect);
+    field(inout t, inout p, in "effect", e);
+    let n = word(in b, inout r);
+    let mut args = ChunkSeq::new[u64]();
+    for i in 0..n {
+        let tag = word(in b, inout r);
+        let arg = if tag == ARG_DEF {
+            let d = read_def(inout t, in b, inout r);
+            variant(inout t, in "Def", d)
+        } else if tag == ARG_TEXT {
+            let s = read_text(inout t, in b, inout r);
+            variant(inout t, in "Text", s)
+        } else {
+            let v = num(inout t, word(in b, inout r));
+            variant(inout t, in "Int", v)
+        };
+        args.push(arg);
+    }
+    let a = array(inout t, in args);
+    field(inout t, inout p, in "args", a);
+    object(inout t, in p)
+}
+
+fn read_number(inout t: Tree, in b: Slice[u8], inout r: Reader) -> u64 {
+    let n = word(in b, inout r);
+    num(inout t, n)
+}
+
+// `AuthorityAudit`, in its field order.
+fn read_audit(inout t: Tree, in b: Slice[u8], inout r: Reader) -> u64 {
+    let mut p = ChunkSeq::new[u64]();
+    let schema = read_number(inout t, in b, inout r);
+    field(inout t, inout p, in "schema_version", schema);
+    let session = read_number(inout t, in b, inout r);
+    field(inout t, inout p, in "session", session);
+    let graph = read_text(inout t, in b, inout r);
+    field(inout t, inout p, in "graph_version", graph);
+    let n = word(in b, inout r);
+    let mut policies = ChunkSeq::new[u64]();
+    for i in 0..n {
+        let mut s = ChunkSeq::new[u64]();
+        let e = read_expansion(inout t, in b, inout r);
+        field(inout t, inout s, in "expansion", e);
+        let d = read_def(inout t, in b, inout r);
+        field(inout t, inout s, in "macro_def", d);
+        let v = read_number(inout t, in b, inout r);
+        field(inout t, inout s, in "macro_policy_version", v);
+        let c = read_number(inout t, in b, inout r);
+        field(inout t, inout s, in "caller", c);
+        let cv = read_number(inout t, in b, inout r);
+        field(inout t, inout s, in "caller_ceiling_version", cv);
+        let stamp = object(inout t, in s);
+        policies.push(stamp);
+    }
+    let pa = array(inout t, in policies);
+    field(inout t, inout p, in "policies", pa);
+    let m = word(in b, inout r);
+    let mut operations = ChunkSeq::new[u64]();
+    for i in 0..m {
+        let mut o = ChunkSeq::new[u64]();
+        let token = read_number(inout t, in b, inout r);
+        field(inout t, inout o, in "token", token);
+        let op = read_operation(inout t, in b, inout r);
+        field(inout t, inout o, in "operation", op);
+        let ne = word(in b, inout r);
+        let mut expansions = ChunkSeq::new[u64]();
+        for k in 0..ne {
+            let e = read_expansion(inout t, in b, inout r);
+            expansions.push(e);
+        }
+        let ea = array(inout t, in expansions);
+        field(inout t, inout o, in "expansions", ea);
+        let nr = word(in b, inout r);
+        let mut requirements = ChunkSeq::new[u64]();
+        for k in 0..nr {
+            let a = read_authority(inout t, in b, inout r);
+            requirements.push(a);
+        }
+        let ra = array(inout t, in requirements);
+        field(inout t, inout o, in "requirements", ra);
+        let audit = object(inout t, in o);
+        operations.push(audit);
+    }
+    let oa = array(inout t, in operations);
+    field(inout t, inout p, in "operations", oa);
+    let ns = word(in b, inout r);
+    let mut source_ops = ChunkSeq::new[u64]();
+    for i in 0..ns {
+        let op = read_operation(inout t, in b, inout r);
+        source_ops.push(op);
+    }
+    let sa = array(inout t, in source_ops);
+    field(inout t, inout p, in "source_operations", sa);
+    object(inout t, in p)
+}
+
+// `Diagnostic`: `related` only when it has labels, `help` only when given.
+fn read_diagnostic(inout t: Tree, in b: Slice[u8], inout r: Reader) -> u64 {
+    let mut p = ChunkSeq::new[u64]();
+    let code = read_text(inout t, in b, inout r);
+    field(inout t, inout p, in "code", code);
+    let message = read_text(inout t, in b, inout r);
+    field(inout t, inout p, in "message", message);
+    let span = read_range(inout t, in b, inout r);
+    field(inout t, inout p, in "span", span);
+    let n = word(in b, inout r);
+    if n > 0 {
+        let mut labels = ChunkSeq::new[u64]();
+        for i in 0..n {
+            let mut l = ChunkSeq::new[u64]();
+            let s = read_range(inout t, in b, inout r);
+            field(inout t, inout l, in "span", s);
+            let m = read_text(inout t, in b, inout r);
+            field(inout t, inout l, in "message", m);
+            let label = object(inout t, in l);
+            labels.push(label);
+        }
+        let la = array(inout t, in labels);
+        field(inout t, inout p, in "related", la);
+    }
+    let has_help = word(in b, inout r) == 1;
+    let len = word(in b, inout r);
+    let start = r.pos;
+    r.pos = wrapping_add(r.pos, len);
+    if has_help {
+        let h = text(inout t, start, len);
+        field(inout t, inout p, in "help", h);
+    }
+    object(inout t, in p)
+}
+
+fn stage_name(code: u64) -> Str {
+    if code == STAGE_PARSE {
+        "parse"
+    } else if code == STAGE_EXPAND {
+        "expand"
+    } else if code == STAGE_RESOLVE {
+        "resolve"
+    } else if code == STAGE_LOWER {
+        "lower"
+    } else if code == STAGE_CHECK {
+        "check"
+    } else if code == STAGE_AUTHORITY {
+        "authority"
+    } else if code == STAGE_IR {
+        "ir"
+    } else if code == STAGE_RESOURCE {
+        "resource"
+    } else if code == STAGE_UNSUPPORTED {
+        "unsupported"
+    } else if code == STAGE_CONFIG {
+        "config"
+    } else {
+        "io"
+    }
+}
+
+// --------------------------------------------------------- write replay
+
+// serde_json's writes against `Output`: each write of `len` bytes charges
+// `len + 1` work, then must fit the output cap.
+struct Replay {
+    work: u64,
+    bytes: u64,
+    cap: u64,
+    refused: u64
+}
+
+fn write(inout s: Replay, len: u64) {
+    if s.refused != R_NONE {
+        return;
+    }
+    // `Output::write` charges the bytes plus the call.
+    let cost = wrapping_add(len, 1);
+    if s.work < cost {
+        s.refused = R_WORK;
+        return;
+    }
+    s.work = wrapping_sub(s.work, cost);
+    if wrapping_add(s.bytes, len) > s.cap {
+        s.refused = R_OUTPUT;
+        return;
+    }
+    s.bytes = wrapping_add(s.bytes, len);
+}
+
+fn escape_len(c: u8) -> u64 {
+    if c == QUOTE || c == BACKSLASH {
+        return SHORT_ESCAPE_BYTES;
+    }
+    if c >= FIRST_PRINTABLE {
+        return 0;
+    }
+    if c == BACKSPACE || c == TAB || c == NEWLINE || c == FORM_FEED || c == CARRIAGE_RETURN {
+        SHORT_ESCAPE_BYTES
+    } else {
+        LONG_ESCAPE_BYTES
+    }
+}
+
+// `format_escaped_str`: the quotes, each run between escapes, and each
+// escape are writes of their own.
+fn replay_text(inout s: Replay, in bytes: Slice[u8], start: u64, len: u64) {
+    write(inout s, PUNCTUATION_BYTES);
+    let mut run: u64 = 0;
+    for i in 0..len {
+        let e = escape_len(byte(in bytes, wrapping_add(start, i)));
+        if e == 0 {
+            run = wrapping_add(run, 1);
+        } else {
+            if run > 0 {
+                write(inout s, run);
+            }
+            write(inout s, e);
+            run = 0;
+        }
+    }
+    if run > 0 {
+        write(inout s, run);
+    }
+    write(inout s, PUNCTUATION_BYTES);
+}
+
+fn digits(n: u64) -> u64 {
+    let mut count: u64 = 1;
+    let mut x = n;
+    loop {
+        if x < DECIMAL {
+            break;
+        }
+        x = x / DECIMAL;
+        count = wrapping_add(count, 1);
+    }
+    count
+}
+
+fn replay(inout s: Replay, in t: Tree, in b: Slice[u8], id: u64) {
+    if s.refused != R_NONE {
+        return;
+    }
+    let kind = at(in t.kind, id);
+    let x = at(in t.a, id);
+    let y = at(in t.b, id);
+    if kind == K_INPUT {
+        replay_text(inout s, in b, x, y);
+    } else if kind == K_POOL {
+        replay_text(inout s, in t.pool.as_slice(), x, y);
+    } else if kind == K_U64 {
+        write(inout s, digits(x));
+    } else if kind == K_I64 {
+        let v = wrapping_i64(x);
+        if v < 0 {
+            // The digits and the minus sign.
+            write(inout s, wrapping_add(digits(wrapping_sub(0, x)), 1));
+        } else {
+            write(inout s, digits(x));
+        }
+    } else if kind == K_NULL {
+        write(inout s, NULL_BYTES);
+    } else if kind == K_ARRAY {
+        write(inout s, PUNCTUATION_BYTES);
+        for i in 0..y {
+            if i > 0 {
+                write(inout s, PUNCTUATION_BYTES);
+            }
+            replay(inout s, in t, in b, at(in t.kids, wrapping_add(x, i)));
+        }
+        write(inout s, PUNCTUATION_BYTES);
+    } else {
+        write(inout s, PUNCTUATION_BYTES);
+        for i in 0..y {
+            if i > 0 {
+                write(inout s, PUNCTUATION_BYTES);
+            }
+            let k = wrapping_add(x, wrapping_mul(i, PAIR_WORDS));
+            replay(inout s, in t, in b, at(in t.kids, k));
+            write(inout s, PUNCTUATION_BYTES);
+            replay(inout s, in t, in b, at(in t.kids, wrapping_add(k, 1)));
+        }
+        write(inout s, PUNCTUATION_BYTES);
+    }
+}
+
+// ------------------------------------------------------- sorted writing
+
+// A JSON string of `bytes[start..start+len]`, copying unescaped runs whole.
+fn put_text(inout o: ChunkSeq[u8], in bytes: Slice[u8], start: u64, len: u64) {
+    o.push(QUOTE);
+    let end = wrapping_add(start, len);
+    let mut run = start;
+    for i in start..end {
+        let c = byte(in bytes, i);
+        if c >= FIRST_PRINTABLE && c != QUOTE && c != BACKSLASH {
+            continue;
+        }
+        if run < i {
+            o.extend(in bytes[run..i]);
+        }
+        run = wrapping_add(i, 1);
+        o.push(BACKSLASH);
+        if c == QUOTE || c == BACKSLASH {
+            o.push(c);
+        } else if c == BACKSPACE {
+            o.push(LOWER_B);
+        } else if c == FORM_FEED {
+            o.push(LOWER_F);
+        } else if c == NEWLINE {
+            o.push(LOWER_N);
+        } else if c == CARRIAGE_RETURN {
+            o.push(LOWER_R);
+        } else if c == TAB {
+            o.push(LOWER_T);
+        } else {
+            put(inout o, in "u00");
+            o.push(hex(c >> NIBBLE_BITS));
+            o.push(hex(c & NIBBLE_MASK));
+        }
+    }
+    if run < end {
+        o.extend(in bytes[run..end]);
+    }
+    o.push(QUOTE);
+}
+
+// Whether pool key `x` sorts before pool key `y` (byte order).
+fn key_less(in t: Tree, x: u64, y: u64) -> bool {
+    let xa = at(in t.a, x);
+    let xl = at(in t.b, x);
+    let ya = at(in t.a, y);
+    let yl = at(in t.b, y);
+    let n = if xl < yl { xl } else { yl };
+    for i in 0..n {
+        let cx = t.pool.try_get(wrapping_add(xa, i)).unwrap_or(0);
+        let cy = t.pool.try_get(wrapping_add(ya, i)).unwrap_or(0);
+        if cx != cy {
+            return cx < cy;
+        }
+    }
+    xl < yl
+}
+
+fn render(inout o: ChunkSeq[u8], in t: Tree, in b: Slice[u8], id: u64) {
+    let kind = at(in t.kind, id);
+    let x = at(in t.a, id);
+    let y = at(in t.b, id);
+    if kind == K_INPUT {
+        put_text(inout o, in b, x, y);
+    } else if kind == K_POOL {
+        put_text(inout o, in t.pool.as_slice(), x, y);
+    } else if kind == K_U64 {
+        put_u64(inout o, x);
+    } else if kind == K_I64 {
+        put_i64(inout o, wrapping_i64(x));
+    } else if kind == K_NULL {
+        put(inout o, in "null");
+    } else if kind == K_ARRAY {
+        o.push(OPEN_BRACKET);
+        for i in 0..y {
+            if i > 0 {
+                o.push(COMMA);
+            }
+            render(inout o, in t, in b, at(in t.kids, wrapping_add(x, i)));
+        }
+        o.push(CLOSE_BRACKET);
+    } else {
+        // The entries' kid positions, insertion-sorted by key.
+        let mut order = ChunkSeq::with_capacity[u64](y);
+        for i in 0..y {
+            let k = wrapping_add(x, wrapping_mul(i, PAIR_WORDS));
+            let key = at(in t.kids, k);
+            let mut j = order.len();
+            order.push(k);
+            loop {
+                if j == 0 {
+                    break;
+                }
+                let prev = at(in order, wrapping_sub(j, 1));
+                if !key_less(in t, key, at(in t.kids, prev)) {
+                    break;
+                }
+                let moved = order.try_set(j, prev);
+                j = wrapping_sub(j, 1);
+            }
+            let placed = order.try_set(j, k);
+        }
+        o.push(OPEN_BRACE);
+        for i in 0..y {
+            if i > 0 {
+                o.push(COMMA);
+            }
+            let k = at(in order, i);
+            render(inout o, in t, in b, at(in t.kids, k));
+            o.push(COLON);
+            render(inout o, in t, in b, at(in t.kids, wrapping_add(k, 1)));
+        }
+        o.push(CLOSE_BRACE);
+    }
+}
+
+// ------------------------------------------------------------- the entry
+
+fn same(in b: Slice[u8], x: u64, y: u64, len: u64) -> bool {
+    for i in 0..len {
+        if byte(in b, wrapping_add(x, i)) != byte(in b, wrapping_add(y, i)) {
+            return false;
+        }
+    }
+    true
+}
+
+fn same_digest(in b: Slice[u8], x: u64, in d: ChunkSeq[u8]) -> bool {
+    for i in 0..DIGEST_BYTES {
+        if byte(in b, wrapping_add(x, i)) != d.try_get(i).unwrap_or(0) {
+            return false;
+        }
+    }
+    true
+}
+
+fn refuse(inout o: ChunkSeq[u8], in message: Str) {
+    put(inout o, in "E ");
+    put(inout o, in message);
+}
+
+// One preview of the words after `rounds` (see `port_words`), as `E
+// <error>` or the rendered JSON value.
+pub fn macro_preview(inout o: ChunkSeq[u8], inout t: Tree, in b: Slice[u8], start: u64) {
+    o.truncate(0);
+    clear(inout t);
+    let mut r = Reader { pos: start };
+    let version = word(in b, inout r);
+    let max_source = word(in b, inout r);
+    let max_uri = word(in b, inout r);
+    let max_output = word(in b, inout r);
+    let max_work = word(in b, inout r);
+    let uri_len = word(in b, inout r);
+    let uri_at = r.pos;
+    r.pos = wrapping_add(r.pos, uri_len);
+    let src_len = word(in b, inout r);
+    let src_at = r.pos;
+    r.pos = wrapping_add(r.pos, src_len);
+    let host_hashed = word(in b, inout r) == 1;
+    let host_digest_at = r.pos;
+    r.pos = wrapping_add(r.pos, DIGEST_BYTES);
+    let has_snapshot_source = word(in b, inout r) == 1;
+    let snap_len = word(in b, inout r);
+    let snap_at = r.pos;
+    r.pos = wrapping_add(r.pos, snap_len);
+    let identity_len = word(in b, inout r);
+    let has_identity_hash = word(in b, inout r) == 1;
+    let identity_at = r.pos;
+    r.pos = wrapping_add(r.pos, DIGEST_BYTES);
+    let ok = word(in b, inout r) == 1;
+    // `Document::new`.
+    if uri_len == 0 || uri_len > MAX_URI {
+        refuse(inout o, in "invalid macro preview document: URI byte limit");
+        return;
+    }
+    if src_len > MAX_SOURCE {
+        refuse(inout o, in "macro preview resource limit: source bytes");
+        return;
+    }
+    let mismatch = "macro preview source association differs";
+    if !has_snapshot_source
+        || snap_len != src_len
+        || !same(in b, snap_at, src_at, src_len)
+        || identity_len != src_len
+    {
+        refuse(inout o, in mismatch);
+        return;
+    }
+    let mut digest: ChunkSeq[u8] = ChunkSeq::new();
+    if host_hashed {
+        digest.extend(in b[host_digest_at..wrapping_add(host_digest_at, DIGEST_BYTES)]);
+    } else {
+        digest_bytes(blake3(in b[src_at..wrapping_add(src_at, src_len)]), inout digest);
+    }
+    if !has_identity_hash || !same_digest(in b, identity_at, in digest) {
+        refuse(inout o, in mismatch);
+        return;
+    }
+    // The outcome's original source and hashes (success only).
+    let mut original_len: u64 = 0;
+    let mut original_at: u64 = 0;
+    let mut original_hash_at: u64 = 0;
+    let mut expanded_hash_at: u64 = 0;
+    if ok {
+        original_len = word(in b, inout r);
+        original_at = r.pos;
+        r.pos = wrapping_add(r.pos, original_len);
+        original_hash_at = r.pos;
+        expanded_hash_at = wrapping_add(r.pos, DIGEST_BYTES);
+        r.pos = wrapping_add(expanded_hash_at, DIGEST_BYTES);
+        if original_len != src_len
+            || !same(in b, original_at, src_at, src_len)
+            || !same_digest(in b, original_hash_at, in digest)
+        {
+            refuse(inout o, in mismatch);
+            return;
+        }
+    }
+    // `render`.
+    if max_source == 0
+        || max_source > MAX_SOURCE
+        || max_uri == 0
+        || max_uri > MAX_URI
+        || max_output == 0
+        || max_output > MAX_OUTPUT
+        || max_work == 0
+        || max_work > MAX_WORK
+    {
+        refuse(inout o, in "invalid macro preview limits");
+        return;
+    }
+    if src_len > max_source {
+        refuse(inout o, in "macro preview resource limit: source bytes");
+        return;
+    }
+    if uri_len > max_uri {
+        refuse(inout o, in "macro preview resource limit: URI bytes");
+        return;
+    }
+    let reserved = wrapping_add(
+        wrapping_add(
+            wrapping_mul(max_output, OUTPUT_WORK_FACTOR),
+            wrapping_mul(src_len, SOURCE_WORK_FACTOR)
+        ),
+        wrapping_add(uri_len, FIXED_WORK)
+    );
+    if max_work < reserved {
+        refuse(inout o, in "macro preview resource limit: work");
+        return;
+    }
+    // The envelope, then the record's own fields.
+    let mut p = ChunkSeq::new[u64]();
+    let schema = lit(inout t, in SCHEMA);
+    field(inout t, inout p, in "schema", schema);
+    let scope = lit(inout t, in "expanded_source_only");
+    field(inout t, inout p, in "scope", scope);
+    let tier = num(inout t, TIER);
+    field(inout t, inout p, in "tier", tier);
+    let uri = text(inout t, uri_at, uri_len);
+    field(inout t, inout p, in "uri", uri);
+    let v = node(inout t, K_I64, version, 0);
+    field(inout t, inout p, in "version", v);
+    let hash = hex_text(inout t, in digest.as_slice(), 0);
+    field(inout t, inout p, in "source_blake3", hash);
+    let unit = lit(inout t, in "utf8_bytes");
+    field(inout t, inout p, in "range_unit", unit);
+    if ok {
+        let status = lit(inout t, in "expanded_checked");
+        field(inout t, inout p, in "status", status);
+        let expanded_hash = hex_text(inout t, in b, expanded_hash_at);
+        field(inout t, inout p, in "expanded_blake3", expanded_hash);
+        let package = read_text(inout t, in b, inout r);
+        let expanded_len = word(in b, inout r);
+        let expanded_at = r.pos;
+        r.pos = wrapping_add(r.pos, expanded_len);
+        field(inout t, inout p, in "package", package);
+        let source_bytes = num(inout t, src_len);
+        field(inout t, inout p, in "source_bytes", source_bytes);
+        let expanded_bytes = num(inout t, expanded_len);
+        field(inout t, inout p, in "expanded_bytes", expanded_bytes);
+        let definitions = read_number(inout t, in b, inout r);
+        field(inout t, inout p, in "macro_definitions", definitions);
+        let invocations = read_number(inout t, in b, inout r);
+        field(inout t, inout p, in "invocations", invocations);
+        let expanded = text(inout t, expanded_at, expanded_len);
+        field(inout t, inout p, in "expanded_source", expanded);
+        let n = word(in b, inout r);
+        let mut segments = ChunkSeq::new[u64]();
+        for i in 0..n {
+            let mut s = ChunkSeq::new[u64]();
+            let e = read_range(inout t, in b, inout r);
+            field(inout t, inout s, in "expanded", e);
+            let orig = read_range(inout t, in b, inout r);
+            field(inout t, inout s, in "original", orig);
+            let generated = word(in b, inout r) == 1;
+            let kind = if generated {
+                lit(inout t, in "generated")
+            } else {
+                lit(inout t, in "source")
+            };
+            field(inout t, inout s, in "kind", kind);
+            let m = read_option(inout t, in b, inout r);
+            field(inout t, inout s, in "macro", m);
+            let segment = object(inout t, in s);
+            segments.push(segment);
+        }
+        let map = array(inout t, in segments);
+        field(inout t, inout p, in "source_map", map);
+        let na = word(in b, inout r);
+        let mut audits = ChunkSeq::new[u64]();
+        for i in 0..na {
+            let mut a = ChunkSeq::new[u64]();
+            let m = read_text(inout t, in b, inout r);
+            field(inout t, inout a, in "macro", m);
+            let inv = read_range(inout t, in b, inout r);
+            field(inout t, inout a, in "invocation", inv);
+            let sc = read_text(inout t, in b, inout r);
+            field(inout t, inout a, in "scope", sc);
+            let audit = read_audit(inout t, in b, inout r);
+            field(inout t, inout a, in "audit", audit);
+            let entry = object(inout t, in a);
+            audits.push(entry);
+        }
+        let aa = array(inout t, in audits);
+        field(inout t, inout p, in "audits", aa);
+    } else {
+        let status = lit(inout t, in "rejected");
+        field(inout t, inout p, in "status", status);
+        let stage = word(in b, inout r);
+        let st = lit(inout t, in stage_name(stage));
+        field(inout t, inout p, in "stage", st);
+        let message = read_text(inout t, in b, inout r);
+        field(inout t, inout p, in "message", message);
+        let has_expanded = b.try_read_u64_le(r.pos).unwrap_or(0) == 1;
+        let expanded = read_option(inout t, in b, inout r);
+        field(inout t, inout p, in "expanded_source", expanded);
+        let n = word(in b, inout r);
+        let mut diagnostics = ChunkSeq::new[u64]();
+        for i in 0..n {
+            let d = read_diagnostic(inout t, in b, inout r);
+            diagnostics.push(d);
+        }
+        let da = array(inout t, in diagnostics);
+        field(inout t, inout p, in "diagnostics", da);
+        let from = if stage == STAGE_PARSE {
+            lit(inout t, in "original")
+        } else if has_expanded {
+            lit(inout t, in "expanded")
+        } else {
+            lit(inout t, in "none")
+        };
+        field(inout t, inout p, in "diagnostic_source", from);
+        let empty = ChunkSeq::new[u64]();
+        let map = array(inout t, in empty);
+        field(inout t, inout p, in "source_map", map);
+        let audits = array(inout t, in empty);
+        field(inout t, inout p, in "audits", audits);
+    }
+    let root = object(inout t, in p);
+    let mut s = Replay {
+        work: wrapping_sub(max_work, reserved),
+        bytes: 0,
+        cap: max_output,
+        refused: R_NONE
+    };
+    replay(inout s, in t, in b, root);
+    if s.refused == R_WORK {
+        refuse(inout o, in "macro preview resource limit: serialization work");
+        return;
+    }
+    if s.refused == R_OUTPUT {
+        refuse(inout o, in "macro preview resource limit: output bytes");
+        return;
+    }
+    render(inout o, in t, in b, root);
+}

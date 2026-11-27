@@ -308,3 +308,189 @@ pub fn render(document: &Document<'_>, limits: Limits) -> Result<Value, Error> {
         }
     }
 }
+
+/// The words the Vesper port (`@vesper/lsp-features`, macro_preview.ves)
+/// reads for one preview: `rounds`, the version, the four limits, the URI
+/// and document text, the document's BLAKE3 digest when the host computes
+/// it (the port hashes with the portable BLAKE3 otherwise), the snapshot's
+/// association and its compiler outcome.
+/// Each text is its byte length then its bytes; each list its length then
+/// its entries.
+#[doc(hidden)]
+pub fn port_words(
+    uri: &str,
+    version: i32,
+    source: &str,
+    snapshot: &MacroSnapshot,
+    limits: Limits,
+    host_digest: Option<[u8; 32]>,
+    rounds: u64,
+) -> Vec<u8> {
+    let mut w = PortWords(Vec::new());
+    w.word(rounds);
+    w.word(i64::from(version) as u64);
+    for n in [
+        limits.max_source_bytes,
+        limits.max_uri_bytes,
+        limits.max_output_bytes,
+        limits.max_work,
+    ] {
+        w.word(n as u64);
+    }
+    w.text(uri);
+    w.text(source);
+    w.flag(host_digest.is_some());
+    w.0.extend_from_slice(&host_digest.unwrap_or([0; 32]));
+    w.flag(snapshot.source().is_some());
+    w.text(snapshot.source().unwrap_or(""));
+    w.word(snapshot.source_identity().byte_len() as u64);
+    let identity = snapshot.source_identity().blake3();
+    w.flag(identity.is_some());
+    w.0.extend_from_slice(&identity.unwrap_or([0; 32]));
+    match snapshot.expanded() {
+        Ok(expanded) => {
+            w.flag(true);
+            w.text(expanded.original_source());
+            w.0.extend_from_slice(&expanded.original_hash());
+            w.0.extend_from_slice(&expanded.expanded_hash());
+            w.text(expanded.package());
+            w.text(expanded.expanded_source());
+            w.word(expanded.macro_definitions() as u64);
+            w.word(expanded.invocations() as u64);
+            w.word(expanded.source_map().len() as u64);
+            for s in expanded.source_map() {
+                w.range(&s.expanded);
+                w.range(&s.original);
+                w.flag(s.kind == crate::forge_frontend::MapKind::Generated);
+                w.option(s.r#macro.as_deref());
+            }
+            w.word(expanded.audits().len() as u64);
+            for a in expanded.audits() {
+                w.text(&a.r#macro);
+                w.range(&a.invocation);
+                w.text(a.scope);
+                w.audit(&a.audit);
+            }
+        }
+        Err(failure) => {
+            w.flag(false);
+            w.word(failure.stage() as u64);
+            w.text(failure.message());
+            w.option(failure.expanded_source());
+            w.word(failure.diagnostics().len() as u64);
+            for d in failure.diagnostics() {
+                w.text(&d.code);
+                w.text(&d.message);
+                w.span(&d.span);
+                w.word(d.related.len() as u64);
+                for label in &d.related {
+                    w.span(&label.span);
+                    w.text(&label.message);
+                }
+                w.option(d.help.as_deref());
+            }
+        }
+    }
+    w.0
+}
+
+struct PortWords(Vec<u8>);
+impl PortWords {
+    fn word(&mut self, x: u64) {
+        self.0.extend_from_slice(&x.to_le_bytes());
+    }
+    fn flag(&mut self, b: bool) {
+        self.word(u64::from(b));
+    }
+    fn text(&mut self, s: &str) {
+        self.word(s.len() as u64);
+        self.0.extend_from_slice(s.as_bytes());
+    }
+    fn option(&mut self, s: Option<&str>) {
+        self.flag(s.is_some());
+        self.text(s.unwrap_or(""));
+    }
+    fn range(&mut self, r: &crate::forge_frontend::ByteRange) {
+        self.word(r.start as u64);
+        self.word(r.end as u64);
+    }
+    fn span(&mut self, r: &std::ops::Range<usize>) {
+        self.word(r.start as u64);
+        self.word(r.end as u64);
+    }
+    fn def(&mut self, d: &vesper_forge::DefId) {
+        self.word(u64::from(d.package.0));
+        self.word(u64::from(d.item));
+    }
+    fn expansion(&mut self, e: vesper_forge::ExpansionId) {
+        self.word(e.session().0);
+        self.word(u64::from(e.index()));
+    }
+    fn operation(&mut self, op: &vesper_forge::OperationKind) {
+        use vesper_forge::OperationKind;
+        match op {
+            OperationKind::Use { def } => {
+                self.word(0);
+                self.def(def);
+            }
+            OperationKind::Handler { effect, handler } => {
+                self.word(1);
+                self.def(effect);
+                self.def(handler);
+            }
+            OperationKind::IndirectCall => self.word(2),
+        }
+    }
+    fn authority(&mut self, a: &vesper_forge::Authority) {
+        use vesper_forge::AuthorityArg;
+        self.word(u64::from(a.effect.package.0));
+        self.text(&a.effect.name);
+        self.word(a.args.len() as u64);
+        for arg in &a.args {
+            match arg {
+                AuthorityArg::Def(d) => {
+                    self.word(0);
+                    self.def(d);
+                }
+                AuthorityArg::Text(s) => {
+                    self.word(1);
+                    self.text(s);
+                }
+                AuthorityArg::Int(n) => {
+                    self.word(2);
+                    self.word(*n);
+                }
+            }
+        }
+    }
+    fn audit(&mut self, a: &vesper_forge::AuthorityAudit) {
+        self.word(u64::from(a.schema_version));
+        self.word(a.session.0);
+        self.text(&a.graph_version);
+        self.word(a.policies.len() as u64);
+        for p in &a.policies {
+            self.expansion(p.expansion);
+            self.def(&p.macro_def);
+            self.word(p.macro_policy_version);
+            self.word(u64::from(p.caller.0));
+            self.word(p.caller_ceiling_version);
+        }
+        self.word(a.operations.len() as u64);
+        for op in &a.operations {
+            self.word(op.token as u64);
+            self.operation(&op.operation);
+            self.word(op.expansions.len() as u64);
+            for e in &op.expansions {
+                self.expansion(*e);
+            }
+            self.word(op.requirements.len() as u64);
+            for r in &op.requirements {
+                self.authority(r);
+            }
+        }
+        self.word(a.source_operations.len() as u64);
+        for op in &a.source_operations {
+            self.operation(op);
+        }
+    }
+}

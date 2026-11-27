@@ -937,6 +937,8 @@ vesper_crate(
             "src/lsp/fixtures/**",
             "packages/vesper-lsp-features/**",
             "packages/vesper-lsp-format/**",
+            # The macro preview's Forge programs (part 11c).
+            "tests/forge_*.rs",
             "packages/vesper-ast/**",
             "packages/vesper-check-data/**",
             "packages/vesper-front/**",

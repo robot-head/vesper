@@ -45,7 +45,10 @@ under the 1.5x bar, and part 2 adds hover and the documentation links:
   `Debouncer`, `PendingRequests` and `CancelToken` of
   `crates/vesper-lsp/src/lens.rs`, part 10a (#1828);
 - the Vesper Anvil code actions (`lsp_anvil_actions`, `anvil.ves`):
-  `anvil_code_actions` of `src/lsp/anvil_actions.rs`, part 11b (#1828).
+  `anvil_code_actions` of `src/lsp/anvil_actions.rs`, part 11b (#1828);
+- the macro preview (`lsp_macro_preview`, `macro_preview.ves`):
+  `Document::new` and `render` of `src/lsp/macro_preview.rs` over the
+  compiler snapshot words of `macro_preview::port_words`, part 11c (#1828).
 
 The session's parameter checks (`validate_input`, `cancel_params` and the
 `vesper.proofAudit` arguments, part 10b of #1828) read the JSON-RPC token
