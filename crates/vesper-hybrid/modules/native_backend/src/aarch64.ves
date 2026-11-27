@@ -768,7 +768,7 @@ fn operands(in r: Record, returns: u64) -> Option[u64] {
     }
     if r.op == CALL_ARGUMENT {
         return if r.right == 0 && r.extra == 0 {
-            Option::Some(1)
+            Option::Some(if r.left == NO_VALUE { 0 } else { 1 })
         } else {
             Option::None
         };
@@ -1749,7 +1749,11 @@ fn emit_call(
     let mut overwritten: u32 = 0;
     let mut reload: u32 = 0;
     for arg in 0..record.right {
-        let source = location(in locations, read_record(in words, wrapping_add(start, arg)).left);
+        let value = read_record(in words, wrapping_add(start, arg)).left;
+        if value == NO_VALUE {
+            continue;
+        }
+        let source = location(in locations, value);
         if source == UNASSIGNED {
             return Option::None;
         }
@@ -1772,7 +1776,11 @@ fn emit_call(
         false
     );
     for arg in 0..record.right {
-        let source = location(in locations, read_record(in words, wrapping_add(start, arg)).left);
+        let value = read_record(in words, wrapping_add(start, arg)).left;
+        if value == NO_VALUE {
+            continue;
+        }
+        let source = location(in locations, value);
         let dest = wrapping_u32(arg);
         if source >= SPILL_BASE {
             let _ = materialize(inout out, source, dest, frame_bytes);
@@ -2115,7 +2123,7 @@ fn encode_pass(
         {
             return out;
         }
-        if r.op == CALL_ARGUMENT && float_value(in words, args, r.left) {
+        if r.op == CALL_ARGUMENT && r.left != NO_VALUE && float_value(in words, args, r.left) {
             return out;
         }
         let last = last_read(in ends, value);

@@ -308,19 +308,33 @@ fn float_condition(cond: FloatCC) -> u64 {
     }
 }
 
-fn argument_cells(params: &[AbiParam]) -> Option<(usize, usize)> {
+fn argument_start(cell: usize, ty: Type, aarch64: Option<CallConv>) -> usize {
+    if ty == types::I128 && aarch64 == Some(CallConv::SystemV) {
+        // AAPCS64 aligns a pair to an even register. Apple's ABI packs it.
+        cell.next_multiple_of(WIDE_INTEGER_CELLS)
+    } else {
+        cell
+    }
+}
+
+fn argument_cells(params: &[AbiParam], aarch64: Option<CallConv>) -> Option<(usize, usize)> {
     let mut cells = 0;
     let mut floats = 0;
+    let (register_limit, argument_limit) = if aarch64.is_some() {
+        (AARCH64_GP_ARGUMENTS, AARCH64_GP_ARGUMENTS)
+    } else {
+        (GP_REGISTER_ARGUMENTS, MAX_GP_ARGUMENTS)
+    };
     for param in params {
         if integer_width(param.value_type).is_some() && *param == AbiParam::new(param.value_type) {
             cells += 1;
-        } else if *param == AbiParam::new(types::I128)
-            && cells + WIDE_INTEGER_CELLS <= GP_REGISTER_ARGUMENTS
-        {
-            // SysV passes a wide argument on the stack if both registers
-            // are unavailable. That layout requires aligned stack slots.
-            cells += WIDE_INTEGER_CELLS;
-        } else if float_width(param.value_type).is_some()
+        } else if *param == AbiParam::new(types::I128) {
+            cells = argument_start(cells, types::I128, aarch64) + WIDE_INTEGER_CELLS;
+            if cells > register_limit {
+                return None;
+            }
+        } else if aarch64.is_none()
+            && float_width(param.value_type).is_some()
             && *param == AbiParam::new(param.value_type)
         {
             floats += 1;
@@ -328,7 +342,7 @@ fn argument_cells(params: &[AbiParam]) -> Option<(usize, usize)> {
             return None;
         }
     }
-    (cells <= MAX_GP_ARGUMENTS && floats <= XMM_REGISTER_ARGUMENTS).then_some((cells, floats))
+    (cells <= argument_limit && floats <= XMM_REGISTER_ARGUMENTS).then_some((cells, floats))
 }
 
 fn integer_return_cells(returns: &[AbiParam]) -> Option<usize> {
@@ -423,6 +437,7 @@ fn entry_values(blocks: &mut IntegerBlocks<'_>, block: Block) -> Option<Values> 
     let mut values = Values::default();
     let mut next = 0;
     let mut xmm = 0;
+    let aarch64 = blocks.aarch64.then_some(function.signature.call_conv);
     for (&value, param) in params.iter().zip(&function.signature.params) {
         let ty = function.dfg.value_type(value);
         if ty != param.value_type {
@@ -433,10 +448,11 @@ fn entry_values(blocks: &mut IntegerBlocks<'_>, block: Block) -> Option<Values> 
             xmm += 1;
             continue;
         }
-        values.low[value] = Some(blocks.normalize_abi_integer(next, ty));
+        next = argument_start(next, ty, aarch64);
+        values.low[value] = Some(blocks.normalize_abi_integer(next as u64, ty));
         next += 1;
         if ty == types::I128 {
-            values.high[value] = Some(next);
+            values.high[value] = Some(next as u64);
             next += 1;
         }
     }
@@ -505,7 +521,7 @@ struct IntegerBlocks<'a> {
 
 impl IntegerBlocks<'_> {
     fn normalize_abi_integer(&mut self, cell: u64, ty: Type) -> u64 {
-        // Plain narrow SysV slots only define the low bits. The machine
+        // Plain narrow ABI slots only define the low bits. The machine
         // tape keeps narrow values zero-extended between operations.
         match integer_width(ty) {
             Some(width) if width < INTEGER_CELL_BITS => {
@@ -666,7 +682,6 @@ impl IntegerBlocks<'_> {
         let args = dfg.inst_args(inst);
         if signature.call_conv != self.function.signature.call_conv
             || signature.params.len() != args.len()
-            || (self.aarch64 && !aarch64_register_signature(&signature.params, &signature.returns))
         {
             return None;
         }
@@ -691,8 +706,12 @@ impl IntegerBlocks<'_> {
             }
             _ => return None,
         };
-        let (gp_arguments, float_arguments) = argument_cells(&signature.params)?;
+        let aarch64 = self.aarch64.then_some(signature.call_conv);
+        let (gp_arguments, float_arguments) = argument_cells(&signature.params, aarch64)?;
         let float_return = returns_float(&signature.returns);
+        if self.aarch64 && float_return {
+            return None;
+        }
         let return_cells = if float_return {
             1
         } else {
@@ -717,6 +736,7 @@ impl IntegerBlocks<'_> {
         };
         let mut xmm = [0; XMM_REGISTER_ARGUMENTS];
         let mut xmm_count = 0;
+        let mut gp_cell = 0;
         for (&arg, param) in args.iter().zip(&signature.params) {
             let arg = dfg.resolve_aliases(arg);
             let ty = dfg.value_type(arg);
@@ -728,9 +748,15 @@ impl IntegerBlocks<'_> {
                 xmm[xmm_count] = low;
                 xmm_count += 1;
             } else {
+                let start = argument_start(gp_cell, ty, aarch64);
+                if start != gp_cell {
+                    self.append(IntegerOp::CallArgument, [NO_VALUE, 0, 0]);
+                }
                 self.append(IntegerOp::CallArgument, [low, 0, 0]);
+                gp_cell = start + 1;
                 if ty == types::I128 {
                     self.append(IntegerOp::CallArgument, [values.high[arg]?, 0, 0]);
+                    gp_cell += 1;
                 }
             }
         }
@@ -2294,6 +2320,7 @@ impl IntegerBlocks<'_> {
 /// Each call is preceded by its CallArgument records, integer cells first,
 /// then XMM cells. The call's left operand is the function ID, its right
 /// operand is the total cell count, and its extra operand is the XMM count.
+/// AAPCS64 uses a NO_VALUE argument for a register skipped before a pair.
 /// Argument records leave unreferenced slots. CallFloat returns through XMM0.
 /// Call targets above the u32 symbol-ID range identify approved runtime libcalls.
 /// CallPair writes its low result and the immediately following CallHigh's
@@ -2332,15 +2359,6 @@ pub fn aarch64_leaf_words(function: &Function) -> Option<Vec<u64>> {
     (!program.relocations).then_some(program.words)
 }
 
-fn aarch64_register_signature(params: &[AbiParam], returns: &[AbiParam]) -> bool {
-    params.len() <= AARCH64_GP_ARGUMENTS
-        && returns.len() <= GP_RESULTS
-        && params
-            .iter()
-            .chain(returns)
-            .all(|param| *param == AbiParam::new(types::I64))
-}
-
 fn aarch64_program(
     function: &Function,
     declarations: Option<&ModuleDeclarations>,
@@ -2350,8 +2368,7 @@ fn aarch64_program(
     if !matches!(
         signature.call_conv,
         CallConv::SystemV | CallConv::AppleAarch64
-    ) || !aarch64_register_signature(&signature.params, &signature.returns)
-    {
+    ) {
         return None;
     }
     integer_program(
@@ -2381,8 +2398,11 @@ fn integer_program(
     if signature.call_conv != call_conv || !function.dynamic_stack_slots.is_empty() {
         return None;
     }
-    let (arity, _) = argument_cells(&signature.params)?;
+    let (arity, _) = argument_cells(&signature.params, aarch64.then_some(call_conv))?;
     let float_return = returns_float(&signature.returns);
+    if aarch64 && float_return {
+        return None;
+    }
     let return_cells = if float_return {
         1
     } else {

@@ -210,6 +210,75 @@ fn aarch64_atomic_retry_loops_preserve_operands_and_unused_effects() {
 }
 
 #[test]
+fn aarch64_wide_register_pairs_follow_the_target_calling_convention() {
+    use cranelift_codegen::ir::{AbiParam, Function, InstBuilder, types};
+    use cranelift_codegen::isa::CallConv;
+    use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
+
+    const MOV_X0_X1: u32 = 0xaa01_03e0;
+    const MOV_X0_X2: u32 = 0xaa02_03e0;
+    const MOV_X1_X2: u32 = 0xaa02_03e1;
+    const MOV_X1_X3: u32 = 0xaa03_03e1;
+    for (call_conv, expected) in [
+        (CallConv::SystemV, [MOV_X0_X2, MOV_X1_X3, RET]),
+        (CallConv::AppleAarch64, [MOV_X0_X1, MOV_X1_X2, RET]),
+    ] {
+        let mut function = Function::new();
+        function.signature.call_conv = call_conv;
+        function.signature.params = vec![AbiParam::new(types::I64), AbiParam::new(types::I128)];
+        function.signature.returns.push(AbiParam::new(types::I128));
+        let mut context = FunctionBuilderContext::new();
+        let mut builder = FunctionBuilder::new(&mut function, &mut context);
+        let block = builder.create_block();
+        builder.append_block_params_for_function_params(block);
+        builder.switch_to_block(block);
+        builder.seal_block(block);
+        let wide = builder.block_params(block)[1];
+        builder.ins().return_(&[wide]);
+        builder.finalize();
+
+        let words = native::machine::aarch64_leaf_words(&function).unwrap();
+        assert_eq!(
+            binding::aarch64_integer_leaf(&words),
+            expected.map(u32::to_le_bytes).concat()
+        );
+    }
+}
+
+#[test]
+fn aarch64_call_argument_padding_emits_no_moves() {
+    const SUB_SP_CALL_FRAME: u32 = 0xd102_43ff;
+    const SAVE_LR: u32 = 0xf900_03fe;
+    const BL: u32 = 0x9400_0000;
+    const RESTORE_LR: u32 = 0xf940_03fe;
+    const ADD_SP_CALL_FRAME: u32 = 0x9102_43ff;
+    #[rustfmt::skip]
+    let words = [
+        4, NO_VALUE,
+        CALL_ARGUMENT, 0, 0, 0,
+        CALL_ARGUMENT, NO_VALUE, 0, 0,
+        CALL_ARGUMENT, 2, 0, 0,
+        CALL_ARGUMENT, 3, 0, 0,
+        CALL_VOID, 17, 4, 0,
+    ];
+    let packet = binding::aarch64_relocatable_block(&words);
+    let (length, body) = packet.split_first_chunk::<{ size_of::<u64>() }>().unwrap();
+    assert_eq!(
+        &body[..u64::from_le_bytes(*length) as usize],
+        [
+            SUB_SP_CALL_FRAME,
+            SAVE_LR,
+            BL,
+            RESTORE_LR,
+            ADD_SP_CALL_FRAME,
+            RET
+        ]
+        .map(u32::to_le_bytes)
+        .concat()
+    );
+}
+
+#[test]
 fn aarch64_atomic_minmax_and_nand_retry_at_the_load() {
     const LDAXRB_W2_X0: u32 = 0x085f_fc02;
     const SXTB_W17_W2: u32 = 0x1300_1c51;
