@@ -558,4 +558,92 @@ fn abba_tuf() {
         quorum_pairs.push(format!("{}:{}", a1 + a2, b1 + b2));
     }
     println!("flip-gate pairs ed25519_quorum {}", quorum_pairs.join(" "));
+
+    // 4. Checkpoint::from_json vs serde_json::from_slice.
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct CheckpointWireRef {
+        state: StateRef,
+        checksum: String,
+    }
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct StateRef {
+        schema_version: u32,
+        repository_id: String,
+        bootstrap_sha256: String,
+        roots: Vec<Vec<u8>>,
+        timestamp_version: u64,
+        snapshot_version: u64,
+        role_versions: BTreeMap<String, u64>,
+        verified_at: String,
+    }
+    let root_bytes: Vec<u8> = (0..512).map(|i| (i % 251) as u8).collect();
+    let ck_json = serde_json::to_vec(&serde_json::json!({
+        "state": {
+            "schema_version": 1,
+            "repository_id": "repo-main",
+            "bootstrap_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "roots": [root_bytes, root_bytes],
+            "timestamp_version": 42,
+            "snapshot_version": 17,
+            "role_versions": {"targets": 5, "packages": 3, "releases": 9},
+            "verified_at": "2026-11-27T00:00:00Z"
+        },
+        "checksum": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    }))
+    .unwrap();
+    // Differential sanity check.
+    let ck_port = vesper_loom_tuf::Checkpoint::from_json(&ck_json, &limits).unwrap();
+    let ck_ref: CheckpointWireRef = serde_json::from_slice(&ck_json).unwrap();
+    assert_eq!(ck_port.to_json().unwrap().len(), ck_json.len());
+    let _ = (
+        ck_ref.state.schema_version,
+        &ck_ref.state.repository_id,
+        &ck_ref.state.bootstrap_sha256,
+        ck_ref.state.roots.len(),
+        ck_ref.state.timestamp_version,
+        ck_ref.state.snapshot_version,
+        ck_ref.state.role_versions.len(),
+        &ck_ref.state.verified_at,
+        &ck_ref.checksum,
+    );
+
+    const ABBA_CHECKPOINT_OPS: usize = 2_000;
+    let run_rust_ck = || {
+        for _ in 0..ABBA_CHECKPOINT_OPS {
+            let w: CheckpointWireRef = serde_json::from_slice(black_box(&ck_json)).unwrap();
+            black_box(w);
+        }
+    };
+    let run_vesper_ck = || {
+        for _ in 0..ABBA_CHECKPOINT_OPS {
+            let c = vesper_loom_tuf::Checkpoint::from_json(black_box(&ck_json), black_box(&limits))
+                .unwrap();
+            black_box(c);
+        }
+    };
+    for _ in 0..ABBA_WARMUP_EPOCHS {
+        run_rust_ck();
+        run_vesper_ck();
+        run_vesper_ck();
+        run_rust_ck();
+    }
+    let mut ck_pairs = Vec::with_capacity(ABBA_EPOCHS);
+    for _ in 0..ABBA_EPOCHS {
+        let t0 = Instant::now();
+        run_rust_ck();
+        let a1 = t0.elapsed().as_nanos().max(1);
+        let t1 = Instant::now();
+        run_vesper_ck();
+        let b1 = t1.elapsed().as_nanos().max(1);
+        let t2 = Instant::now();
+        run_vesper_ck();
+        let b2 = t2.elapsed().as_nanos().max(1);
+        let t3 = Instant::now();
+        run_rust_ck();
+        let a2 = t3.elapsed().as_nanos().max(1);
+        ck_pairs.push(format!("{}:{}", a1 + a2, b1 + b2));
+    }
+    println!("flip-gate pairs checkpoint_json {}", ck_pairs.join(" "));
 }

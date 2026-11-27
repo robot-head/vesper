@@ -1,0 +1,641 @@
+// @vesper/loom-tuf::checkpoint: zero-allocation JSON parser for
+// `Checkpoint::from_json` (`src/lib.rs`).
+
+const CK_CH_TAB: u64 = 0x09;
+const CK_CH_LF: u64 = 0x0a;
+const CK_CH_CR: u64 = 0x0d;
+const CK_CH_SPACE: u64 = 0x20;
+const CK_CH_QUOTE: u64 = 0x22;
+const CK_CH_COMMA: u64 = 0x2c;
+const CK_CH_0: u64 = 0x30;
+const CK_CH_9: u64 = 0x39;
+const CK_CH_COLON: u64 = 0x3a;
+const CK_CH_LBRACKET: u64 = 0x5b;
+const CK_CH_BACKSLASH: u64 = 0x5c;
+const CK_CH_RBRACKET: u64 = 0x5d;
+const CK_CH_UNDERSCORE: u64 = 0x5f;
+const CK_CH_A: u64 = 0x61;
+const CK_CH_B: u64 = 0x62;
+const CK_CH_C: u64 = 0x63;
+const CK_CH_D: u64 = 0x64;
+const CK_CH_E: u64 = 0x65;
+const CK_CH_F: u64 = 0x66;
+const CK_CH_H: u64 = 0x68;
+const CK_CH_I: u64 = 0x69;
+const CK_CH_K: u64 = 0x6b;
+const CK_CH_L: u64 = 0x6c;
+const CK_CH_M: u64 = 0x6d;
+const CK_CH_N: u64 = 0x6e;
+const CK_CH_O: u64 = 0x6f;
+const CK_CH_P: u64 = 0x70;
+const CK_CH_R: u64 = 0x72;
+const CK_CH_S: u64 = 0x73;
+const CK_CH_T: u64 = 0x74;
+const CK_CH_U: u64 = 0x75;
+const CK_CH_V: u64 = 0x76;
+const CK_CH_Y: u64 = 0x79;
+const CK_CH_LBRACE: u64 = 0x7b;
+const CK_CH_RBRACE: u64 = 0x7d;
+
+const CK_CH_2: u64 = 0x32;
+const CK_CH_5: u64 = 0x35;
+const CK_CH_6: u64 = 0x36;
+
+const CK_OUT_SCHEMA_VER: u64 = 0;
+const CK_OUT_REPO_START: u64 = 1;
+const CK_OUT_REPO_END: u64 = 2;
+const CK_OUT_BOOT_START: u64 = 3;
+const CK_OUT_BOOT_END: u64 = 4;
+const CK_OUT_TS_VER: u64 = 5;
+const CK_OUT_SNAP_VER: u64 = 6;
+const CK_OUT_VER_AT_START: u64 = 7;
+const CK_OUT_VER_AT_END: u64 = 8;
+const CK_OUT_CSUM_START: u64 = 9;
+const CK_OUT_CSUM_END: u64 = 10;
+const CK_OUT_ROOT_COUNT: u64 = 11;
+const CK_OUT_ROLE_COUNT: u64 = 12;
+const CK_OUT_LEN: u64 = 13;
+
+const CK_ERR_OK: u64 = 0;
+const CK_ERR_JSON: u64 = 1;
+const CK_ERR_CAPACITY: u64 = 2;
+const CK_ERR_ESCAPE: u64 = 3;
+
+const CK_WIRE_REQ_STATE: u64 = 1;
+const CK_WIRE_REQ_CHECKSUM: u64 = 2;
+const CK_WIRE_REQ_ALL: u64 = 3;
+
+const CK_ST_REQ_SCHEMA: u64 = 1;
+const CK_ST_REQ_REPO: u64 = 2;
+const CK_ST_REQ_BOOT: u64 = 4;
+const CK_ST_REQ_ROOTS: u64 = 8;
+const CK_ST_REQ_TS: u64 = 16;
+const CK_ST_REQ_SNAP: u64 = 32;
+const CK_ST_REQ_ROLES: u64 = 64;
+const CK_ST_REQ_VER_AT: u64 = 128;
+const CK_ST_REQ_ALL: u64 = 255;
+
+const CK_DEC_BASE: u64 = 10;
+const CK_MAX_U8: u64 = 255;
+const CK_MAX_U32: u64 = 0xffff_ffff;
+const CK_MAX_U64_DIV10: u64 = 1844674407370955161;
+const CK_MAX_U64_MOD10: u64 = 5;
+
+const CK_IDX_2: u64 = 2;
+const CK_IDX_3: u64 = 3;
+const CK_IDX_4: u64 = 4;
+const CK_IDX_5: u64 = 5;
+const CK_IDX_6: u64 = 6;
+const CK_IDX_7: u64 = 7;
+const CK_IDX_8: u64 = 8;
+const CK_IDX_9: u64 = 9;
+const CK_IDX_10: u64 = 10;
+const CK_IDX_11: u64 = 11;
+const CK_IDX_12: u64 = 12;
+const CK_IDX_13: u64 = 13;
+const CK_IDX_14: u64 = 14;
+const CK_IDX_15: u64 = 15;
+const CK_IDX_16: u64 = 16;
+
+const CK_LEN_STATE: u64 = 5;
+const CK_LEN_ROOTS: u64 = 5;
+const CK_LEN_CHECKSUM: u64 = 8;
+const CK_LEN_VERIFIED_AT: u64 = 11;
+const CK_LEN_REPO_ID: u64 = 13;
+const CK_LEN_ROLE_VERS: u64 = 13;
+const CK_LEN_SCHEMA_VER: u64 = 14;
+const CK_LEN_BOOT_SHA: u64 = 16;
+const CK_LEN_SNAP_VER: u64 = 16;
+const CK_LEN_TS_VER: u64 = 17;
+
+fn ck_byte(in b: Slice[u8], i: u64) -> u64 {
+    match b.try_get(i) {
+        Option::Some(v) => widen_u64(v),
+        Option::None => 0,
+    }
+}
+
+fn ck_skip_ws(in b: Slice[u8], start: u64, n: u64) -> u64 {
+    let mut pos = start;
+    loop {
+        if pos >= n {
+            break;
+        }
+        match b.try_get(pos) {
+            Option::Some(v) => {
+                let c = widen_u64(v);
+                if c == CK_CH_SPACE || c == CK_CH_TAB || c == CK_CH_LF || c == CK_CH_CR {
+                    pos = wrapping_add(pos, 1);
+                } else {
+                    break;
+                }
+            },
+            Option::None => break,
+        }
+    }
+    pos
+}
+
+// Scan a JSON string without escapes. Returns `(status, end_pos)`:
+// `status == 0` => ok, `1` => malformed JSON, `2` => contains escape.
+fn ck_scan_plain_string(in b: Slice[u8], pos: u64, n: u64) -> (u64, u64) {
+    if pos >= n || ck_byte(in b, pos) != CK_CH_QUOTE {
+        return (CK_ERR_JSON, 0);
+    }
+    let mut i = wrapping_add(pos, 1);
+    loop {
+        match b.try_get(i) {
+            Option::None => return (CK_ERR_JSON, 0),
+            Option::Some(v) => {
+                let c = widen_u64(v);
+                if c == CK_CH_QUOTE {
+                    return (CK_ERR_OK, wrapping_add(i, 1));
+                }
+                if c == CK_CH_BACKSLASH {
+                    return (CK_ERR_ESCAPE, 0);
+                }
+                if c < CK_CH_SPACE {
+                    return (CK_ERR_JSON, 0);
+                }
+                i = wrapping_add(i, 1);
+            },
+        }
+    }
+}
+
+fn ck_parse_u64(in b: Slice[u8], start: u64, n: u64) -> (bool, u64, u64) {
+    if start >= n {
+        return (false, 0, 0);
+    }
+    let first = ck_byte(in b, start);
+    if first < CK_CH_0 || first > CK_CH_9 {
+        return (false, 0, 0);
+    }
+    if first == CK_CH_0 {
+        let next = wrapping_add(start, 1);
+        if next < n {
+            let c = ck_byte(in b, next);
+            if c >= CK_CH_0 && c <= CK_CH_9 {
+                return (false, 0, 0);
+            }
+        }
+        return (true, 0, next);
+    }
+    let mut val = wrapping_sub(first, CK_CH_0);
+    let mut i = wrapping_add(start, 1);
+    loop {
+        match b.try_get(i) {
+            Option::None => break,
+            Option::Some(v) => {
+                let c = widen_u64(v);
+                if c < CK_CH_0 || c > CK_CH_9 {
+                    break;
+                }
+                let d = wrapping_sub(c, CK_CH_0);
+                if val > CK_MAX_U64_DIV10 || (val == CK_MAX_U64_DIV10 && d > CK_MAX_U64_MOD10) {
+                    return (false, 0, 0);
+                }
+                val = wrapping_add(wrapping_mul(val, CK_DEC_BASE), d);
+                i = wrapping_add(i, 1);
+            },
+        }
+    }
+    (true, val, i)
+}
+
+fn ck_eq_state(in b: Slice[u8], s: u64, e: u64) -> bool {
+    wrapping_sub(e, s) == CK_LEN_STATE
+        && ck_byte(in b, s) == CK_CH_S
+        && ck_byte(in b, wrapping_add(s, 1)) == CK_CH_T
+        && ck_byte(in b, wrapping_add(s, CK_IDX_2)) == CK_CH_A
+        && ck_byte(in b, wrapping_add(s, CK_IDX_3)) == CK_CH_T
+        && ck_byte(in b, wrapping_add(s, CK_IDX_4)) == CK_CH_E
+}
+
+fn ck_eq_checksum(in b: Slice[u8], s: u64, e: u64) -> bool {
+    wrapping_sub(e, s) == CK_LEN_CHECKSUM
+        && ck_byte(in b, s) == CK_CH_C
+        && ck_byte(in b, wrapping_add(s, 1)) == CK_CH_H
+        && ck_byte(in b, wrapping_add(s, CK_IDX_2)) == CK_CH_E
+        && ck_byte(in b, wrapping_add(s, CK_IDX_3)) == CK_CH_C
+        && ck_byte(in b, wrapping_add(s, CK_IDX_4)) == CK_CH_K
+        && ck_byte(in b, wrapping_add(s, CK_IDX_5)) == CK_CH_S
+        && ck_byte(in b, wrapping_add(s, CK_IDX_6)) == CK_CH_U
+        && ck_byte(in b, wrapping_add(s, CK_IDX_7)) == CK_CH_M
+}
+
+fn ck_eq_schema_version(in b: Slice[u8], s: u64, e: u64) -> bool {
+    wrapping_sub(e, s) == CK_LEN_SCHEMA_VER
+        && ck_byte(in b, s) == CK_CH_S
+        && ck_byte(in b, wrapping_add(s, 1)) == CK_CH_C
+        && ck_byte(in b, wrapping_add(s, CK_IDX_2)) == CK_CH_H
+        && ck_byte(in b, wrapping_add(s, CK_IDX_6)) == CK_CH_UNDERSCORE
+        && ck_byte(in b, wrapping_add(s, CK_IDX_7)) == CK_CH_V
+        && ck_byte(in b, wrapping_add(s, CK_IDX_13)) == CK_CH_N
+}
+
+fn ck_eq_repository_id(in b: Slice[u8], s: u64, e: u64) -> bool {
+    wrapping_sub(e, s) == CK_LEN_REPO_ID
+        && ck_byte(in b, s) == CK_CH_R
+        && ck_byte(in b, wrapping_add(s, 1)) == CK_CH_E
+        && ck_byte(in b, wrapping_add(s, CK_IDX_2)) == CK_CH_P
+        && ck_byte(in b, wrapping_add(s, CK_IDX_10)) == CK_CH_UNDERSCORE
+        && ck_byte(in b, wrapping_add(s, CK_IDX_11)) == CK_CH_I
+        && ck_byte(in b, wrapping_add(s, CK_IDX_12)) == CK_CH_D
+}
+
+fn ck_eq_bootstrap_sha256(in b: Slice[u8], s: u64, e: u64) -> bool {
+    wrapping_sub(e, s) == CK_LEN_BOOT_SHA
+        && ck_byte(in b, s) == CK_CH_B
+        && ck_byte(in b, wrapping_add(s, 1)) == CK_CH_O
+        && ck_byte(in b, wrapping_add(s, CK_IDX_9)) == CK_CH_UNDERSCORE
+        && ck_byte(in b, wrapping_add(s, CK_IDX_13)) == CK_CH_2
+        && ck_byte(in b, wrapping_add(s, CK_IDX_14)) == CK_CH_5
+        && ck_byte(in b, wrapping_add(s, CK_IDX_15)) == CK_CH_6
+}
+
+fn ck_eq_roots(in b: Slice[u8], s: u64, e: u64) -> bool {
+    wrapping_sub(e, s) == CK_LEN_ROOTS
+        && ck_byte(in b, s) == CK_CH_R
+        && ck_byte(in b, wrapping_add(s, 1)) == CK_CH_O
+        && ck_byte(in b, wrapping_add(s, CK_IDX_2)) == CK_CH_O
+        && ck_byte(in b, wrapping_add(s, CK_IDX_3)) == CK_CH_T
+        && ck_byte(in b, wrapping_add(s, CK_IDX_4)) == CK_CH_S
+}
+
+fn ck_eq_timestamp_version(in b: Slice[u8], s: u64, e: u64) -> bool {
+    wrapping_sub(e, s) == CK_LEN_TS_VER
+        && ck_byte(in b, s) == CK_CH_T
+        && ck_byte(in b, wrapping_add(s, 1)) == CK_CH_I
+        && ck_byte(in b, wrapping_add(s, CK_IDX_9)) == CK_CH_UNDERSCORE
+        && ck_byte(in b, wrapping_add(s, CK_IDX_10)) == CK_CH_V
+        && ck_byte(in b, wrapping_add(s, CK_IDX_16)) == CK_CH_N
+}
+
+fn ck_eq_snapshot_version(in b: Slice[u8], s: u64, e: u64) -> bool {
+    wrapping_sub(e, s) == CK_LEN_SNAP_VER
+        && ck_byte(in b, s) == CK_CH_S
+        && ck_byte(in b, wrapping_add(s, 1)) == CK_CH_N
+        && ck_byte(in b, wrapping_add(s, CK_IDX_8)) == CK_CH_UNDERSCORE
+        && ck_byte(in b, wrapping_add(s, CK_IDX_9)) == CK_CH_V
+        && ck_byte(in b, wrapping_add(s, CK_IDX_15)) == CK_CH_N
+}
+
+fn ck_eq_role_versions(in b: Slice[u8], s: u64, e: u64) -> bool {
+    wrapping_sub(e, s) == CK_LEN_ROLE_VERS
+        && ck_byte(in b, s) == CK_CH_R
+        && ck_byte(in b, wrapping_add(s, 1)) == CK_CH_O
+        && ck_byte(in b, wrapping_add(s, CK_IDX_2)) == CK_CH_L
+        && ck_byte(in b, wrapping_add(s, CK_IDX_4)) == CK_CH_UNDERSCORE
+        && ck_byte(in b, wrapping_add(s, CK_IDX_5)) == CK_CH_V
+        && ck_byte(in b, wrapping_add(s, CK_IDX_12)) == CK_CH_S
+}
+
+fn ck_eq_verified_at(in b: Slice[u8], s: u64, e: u64) -> bool {
+    wrapping_sub(e, s) == CK_LEN_VERIFIED_AT
+        && ck_byte(in b, s) == CK_CH_V
+        && ck_byte(in b, wrapping_add(s, 1)) == CK_CH_E
+        && ck_byte(in b, wrapping_add(s, CK_IDX_8)) == CK_CH_UNDERSCORE
+        && ck_byte(in b, wrapping_add(s, CK_IDX_9)) == CK_CH_A
+        && ck_byte(in b, wrapping_add(s, CK_IDX_10)) == CK_CH_T
+}
+
+pub fn parse_checkpoint_json(
+    in b: Slice[u8],
+    inout out: Slice[u64],
+    inout roots_flat: Slice[u8],
+    inout root_lens: Slice[u64],
+    inout role_spans: Slice[u64],
+    inout role_vers: Slice[u64]
+) -> u64 {
+    if out.len() < CK_OUT_LEN {
+        return CK_ERR_JSON;
+    }
+    let n = b.len();
+    let mut i = ck_skip_ws(in b, 0, n);
+    if i >= n || ck_byte(in b, i) != CK_CH_LBRACE {
+        return CK_ERR_JSON;
+    }
+    i = ck_skip_ws(in b, wrapping_add(i, 1), n);
+
+    let mut wreq: u64 = 0;
+    let mut sreq: u64 = 0;
+    let mut schema_ver: u64 = 0;
+    let mut repo_s: u64 = 0;
+    let mut repo_e: u64 = 0;
+    let mut boot_s: u64 = 0;
+    let mut boot_e: u64 = 0;
+    let mut ts_ver: u64 = 0;
+    let mut snap_ver: u64 = 0;
+    let mut ver_at_s: u64 = 0;
+    let mut ver_at_e: u64 = 0;
+    let mut csum_s: u64 = 0;
+    let mut csum_e: u64 = 0;
+    let mut root_count: u64 = 0;
+    let mut roots_pos: u64 = 0;
+    let mut role_count: u64 = 0;
+
+    if i < n && ck_byte(in b, i) == CK_CH_RBRACE {
+        i = wrapping_add(i, 1);
+    } else {
+        loop {
+            let k_s0 = i;
+            let (st_k, k_e0) = ck_scan_plain_string(in b, i, n);
+            if st_k != CK_ERR_OK {
+                return st_k;
+            }
+            let ks = wrapping_add(k_s0, 1);
+            let ke = wrapping_sub(k_e0, 1);
+            i = ck_skip_ws(in b, k_e0, n);
+            if i >= n || ck_byte(in b, i) != CK_CH_COLON {
+                return CK_ERR_JSON;
+            }
+            i = ck_skip_ws(in b, wrapping_add(i, 1), n);
+
+            if ck_eq_checksum(in b, ks, ke) {
+                if (wreq & CK_WIRE_REQ_CHECKSUM) != 0 {
+                    return CK_ERR_JSON;
+                }
+                let (st_v, ve) = ck_scan_plain_string(in b, i, n);
+                if st_v != CK_ERR_OK {
+                    return st_v;
+                }
+                csum_s = wrapping_add(i, 1);
+                csum_e = wrapping_sub(ve, 1);
+                wreq = wreq | CK_WIRE_REQ_CHECKSUM;
+                i = ve;
+            } else if ck_eq_state(in b, ks, ke) {
+                if (wreq & CK_WIRE_REQ_STATE) != 0 || i >= n || ck_byte(in b, i) != CK_CH_LBRACE {
+                    return CK_ERR_JSON;
+                }
+                i = ck_skip_ws(in b, wrapping_add(i, 1), n);
+                if i < n && ck_byte(in b, i) == CK_CH_RBRACE {
+                    i = wrapping_add(i, 1);
+                } else {
+                    loop {
+                        let sk_s0 = i;
+                        let (st_sk, sk_e0) = ck_scan_plain_string(in b, i, n);
+                        if st_sk != CK_ERR_OK {
+                            return st_sk;
+                        }
+                        let sks = wrapping_add(sk_s0, 1);
+                        let ske = wrapping_sub(sk_e0, 1);
+                        i = ck_skip_ws(in b, sk_e0, n);
+                        if i >= n || ck_byte(in b, i) != CK_CH_COLON {
+                            return CK_ERR_JSON;
+                        }
+                        i = ck_skip_ws(in b, wrapping_add(i, 1), n);
+
+                        if ck_eq_schema_version(in b, sks, ske) {
+                            if (sreq & CK_ST_REQ_SCHEMA) != 0 {
+                                return CK_ERR_JSON;
+                            }
+                            let (ok_u, val, ue) = ck_parse_u64(in b, i, n);
+                            if !ok_u || val > CK_MAX_U32 {
+                                return CK_ERR_JSON;
+                            }
+                            schema_ver = val;
+                            sreq = sreq | CK_ST_REQ_SCHEMA;
+                            i = ue;
+                        } else if ck_eq_repository_id(in b, sks, ske) {
+                            if (sreq & CK_ST_REQ_REPO) != 0 {
+                                return CK_ERR_JSON;
+                            }
+                            let (st_v, ve) = ck_scan_plain_string(in b, i, n);
+                            if st_v != CK_ERR_OK {
+                                return st_v;
+                            }
+                            repo_s = wrapping_add(i, 1);
+                            repo_e = wrapping_sub(ve, 1);
+                            sreq = sreq | CK_ST_REQ_REPO;
+                            i = ve;
+                        } else if ck_eq_bootstrap_sha256(in b, sks, ske) {
+                            if (sreq & CK_ST_REQ_BOOT) != 0 {
+                                return CK_ERR_JSON;
+                            }
+                            let (st_v, ve) = ck_scan_plain_string(in b, i, n);
+                            if st_v != CK_ERR_OK {
+                                return st_v;
+                            }
+                            boot_s = wrapping_add(i, 1);
+                            boot_e = wrapping_sub(ve, 1);
+                            sreq = sreq | CK_ST_REQ_BOOT;
+                            i = ve;
+                        } else if ck_eq_timestamp_version(in b, sks, ske) {
+                            if (sreq & CK_ST_REQ_TS) != 0 {
+                                return CK_ERR_JSON;
+                            }
+                            let (ok_u, val, ue) = ck_parse_u64(in b, i, n);
+                            if !ok_u {
+                                return CK_ERR_JSON;
+                            }
+                            ts_ver = val;
+                            sreq = sreq | CK_ST_REQ_TS;
+                            i = ue;
+                        } else if ck_eq_snapshot_version(in b, sks, ske) {
+                            if (sreq & CK_ST_REQ_SNAP) != 0 {
+                                return CK_ERR_JSON;
+                            }
+                            let (ok_u, val, ue) = ck_parse_u64(in b, i, n);
+                            if !ok_u {
+                                return CK_ERR_JSON;
+                            }
+                            snap_ver = val;
+                            sreq = sreq | CK_ST_REQ_SNAP;
+                            i = ue;
+                        } else if ck_eq_verified_at(in b, sks, ske) {
+                            if (sreq & CK_ST_REQ_VER_AT) != 0 {
+                                return CK_ERR_JSON;
+                            }
+                            let (st_v, ve) = ck_scan_plain_string(in b, i, n);
+                            if st_v != CK_ERR_OK {
+                                return st_v;
+                            }
+                            ver_at_s = wrapping_add(i, 1);
+                            ver_at_e = wrapping_sub(ve, 1);
+                            sreq = sreq | CK_ST_REQ_VER_AT;
+                            i = ve;
+                        } else if ck_eq_roots(in b, sks, ske) {
+                            if (sreq & CK_ST_REQ_ROOTS) != 0
+                                || i >= n
+                                || ck_byte(in b, i) != CK_CH_LBRACKET
+                            {
+                                return CK_ERR_JSON;
+                            }
+                            i = ck_skip_ws(in b, wrapping_add(i, 1), n);
+                            if i < n && ck_byte(in b, i) == CK_CH_RBRACKET {
+                                i = wrapping_add(i, 1);
+                            } else {
+                                loop {
+                                    if i >= n || ck_byte(in b, i) != CK_CH_LBRACKET {
+                                        return CK_ERR_JSON;
+                                    }
+                                    if root_count >= root_lens.len() {
+                                        return CK_ERR_CAPACITY;
+                                    }
+                                    let rstart = roots_pos;
+                                    i = ck_skip_ws(in b, wrapping_add(i, 1), n);
+                                    if i < n && ck_byte(in b, i) == CK_CH_RBRACKET {
+                                        i = wrapping_add(i, 1);
+                                    } else {
+                                        loop {
+                                            let (ok_u, val, ue) = ck_parse_u64(in b, i, n);
+                                            if !ok_u || val > CK_MAX_U8 {
+                                                return CK_ERR_JSON;
+                                            }
+                                            if roots_pos >= roots_flat.len() {
+                                                return CK_ERR_CAPACITY;
+                                            }
+                                            roots_flat.try_set(roots_pos, wrapping_u8(val));
+                                            roots_pos = wrapping_add(roots_pos, 1);
+                                            i = ck_skip_ws(in b, ue, n);
+                                            if i >= n {
+                                                return CK_ERR_JSON;
+                                            }
+                                            let bsep = ck_byte(in b, i);
+                                            if bsep == CK_CH_RBRACKET {
+                                                i = wrapping_add(i, 1);
+                                                break;
+                                            }
+                                            if bsep != CK_CH_COMMA {
+                                                return CK_ERR_JSON;
+                                            }
+                                            i = ck_skip_ws(in b, wrapping_add(i, 1), n);
+                                        }
+                                    }
+                                    root_lens.try_set(root_count, wrapping_sub(roots_pos, rstart));
+                                    root_count = wrapping_add(root_count, 1);
+                                    i = ck_skip_ws(in b, i, n);
+                                    if i >= n {
+                                        return CK_ERR_JSON;
+                                    }
+                                    let rsep = ck_byte(in b, i);
+                                    if rsep == CK_CH_RBRACKET {
+                                        i = wrapping_add(i, 1);
+                                        break;
+                                    }
+                                    if rsep != CK_CH_COMMA {
+                                        return CK_ERR_JSON;
+                                    }
+                                    i = ck_skip_ws(in b, wrapping_add(i, 1), n);
+                                }
+                            }
+                            sreq = sreq | CK_ST_REQ_ROOTS;
+                        } else if ck_eq_role_versions(in b, sks, ske) {
+                            if (sreq & CK_ST_REQ_ROLES) != 0
+                                || i >= n
+                                || ck_byte(in b, i) != CK_CH_LBRACE
+                            {
+                                return CK_ERR_JSON;
+                            }
+                            i = ck_skip_ws(in b, wrapping_add(i, 1), n);
+                            if i < n && ck_byte(in b, i) == CK_CH_RBRACE {
+                                i = wrapping_add(i, 1);
+                            } else {
+                                loop {
+                                    let rk_s0 = i;
+                                    let (st_rk, rk_e0) = ck_scan_plain_string(in b, i, n);
+                                    if st_rk != CK_ERR_OK {
+                                        return st_rk;
+                                    }
+                                    i = ck_skip_ws(in b, rk_e0, n);
+                                    if i >= n || ck_byte(in b, i) != CK_CH_COLON {
+                                        return CK_ERR_JSON;
+                                    }
+                                    i = ck_skip_ws(in b, wrapping_add(i, 1), n);
+                                    let (ok_u, val, ue) = ck_parse_u64(in b, i, n);
+                                    if !ok_u {
+                                        return CK_ERR_JSON;
+                                    }
+                                    let sp_off = wrapping_add(role_count, role_count);
+                                    if wrapping_add(sp_off, CK_IDX_2) > role_spans.len()
+                                        || role_count >= role_vers.len()
+                                    {
+                                        return CK_ERR_CAPACITY;
+                                    }
+                                    role_spans.try_set(sp_off, wrapping_add(rk_s0, 1));
+                                    role_spans
+                                        .try_set(wrapping_add(sp_off, 1), wrapping_sub(rk_e0, 1));
+                                    role_vers.try_set(role_count, val);
+                                    role_count = wrapping_add(role_count, 1);
+                                    i = ck_skip_ws(in b, ue, n);
+                                    if i >= n {
+                                        return CK_ERR_JSON;
+                                    }
+                                    let msep = ck_byte(in b, i);
+                                    if msep == CK_CH_RBRACE {
+                                        i = wrapping_add(i, 1);
+                                        break;
+                                    }
+                                    if msep != CK_CH_COMMA {
+                                        return CK_ERR_JSON;
+                                    }
+                                    i = ck_skip_ws(in b, wrapping_add(i, 1), n);
+                                }
+                            }
+                            sreq = sreq | CK_ST_REQ_ROLES;
+                        } else {
+                            // deny_unknown_fields on State
+                            return CK_ERR_JSON;
+                        }
+
+                        i = ck_skip_ws(in b, i, n);
+                        if i >= n {
+                            return CK_ERR_JSON;
+                        }
+                        let ssep = ck_byte(in b, i);
+                        if ssep == CK_CH_RBRACE {
+                            i = wrapping_add(i, 1);
+                            break;
+                        }
+                        if ssep != CK_CH_COMMA {
+                            return CK_ERR_JSON;
+                        }
+                        i = ck_skip_ws(in b, wrapping_add(i, 1), n);
+                    }
+                }
+                if sreq != CK_ST_REQ_ALL {
+                    return CK_ERR_JSON;
+                }
+                wreq = wreq | CK_WIRE_REQ_STATE;
+            } else {
+                // deny_unknown_fields on CheckpointWire
+                return CK_ERR_JSON;
+            }
+
+            i = ck_skip_ws(in b, i, n);
+            if i >= n {
+                return CK_ERR_JSON;
+            }
+            let sep = ck_byte(in b, i);
+            if sep == CK_CH_RBRACE {
+                i = wrapping_add(i, 1);
+                break;
+            }
+            if sep != CK_CH_COMMA {
+                return CK_ERR_JSON;
+            }
+            i = ck_skip_ws(in b, wrapping_add(i, 1), n);
+        }
+    }
+
+    i = ck_skip_ws(in b, i, n);
+    if i != n || wreq != CK_WIRE_REQ_ALL {
+        return CK_ERR_JSON;
+    }
+
+    out.try_set(CK_OUT_SCHEMA_VER, schema_ver);
+    out.try_set(CK_OUT_REPO_START, repo_s);
+    out.try_set(CK_OUT_REPO_END, repo_e);
+    out.try_set(CK_OUT_BOOT_START, boot_s);
+    out.try_set(CK_OUT_BOOT_END, boot_e);
+    out.try_set(CK_OUT_TS_VER, ts_ver);
+    out.try_set(CK_OUT_SNAP_VER, snap_ver);
+    out.try_set(CK_OUT_VER_AT_START, ver_at_s);
+    out.try_set(CK_OUT_VER_AT_END, ver_at_e);
+    out.try_set(CK_OUT_CSUM_START, csum_s);
+    out.try_set(CK_OUT_CSUM_END, csum_e);
+    out.try_set(CK_OUT_ROOT_COUNT, root_count);
+    out.try_set(CK_OUT_ROLE_COUNT, role_count);
+    CK_ERR_OK
+}
