@@ -14,11 +14,15 @@
 // canonicalize_imm_ops, fold_load_store_offsets, cse_dom_pure. Part 3:
 // extends.ves, fold_narrow_extends and fold_trivial_arith_and_bool_extends;
 // slots.ves, split_join_slots and promote_slots. Part 4: vector.ves,
-// vector_registers; cleanup.ves, remove_dead and sink_slot_inits.
+// vector_registers; cleanup.ves, remove_dead and sink_slot_inits. Part 5:
+// loops.ves, share_invariant_loads and hoist_loop_invariants; tails.ves,
+// merge_tails (with the shapes section of the words).
 
 use self::extends::{fold_narrow_extends, fold_trivial_arith_and_bool_extends};
 use self::vector::{vector_registers};
 use self::cleanup::{remove_dead, sink_slot_inits};
+use self::loops::{hoist_loop_invariants, share_invariant_loads};
+use self::tails::{merge_tails};
 use self::slots::{promote_slots, split_join_slots};
 use self::folds::{canonicalize_imm_ops, cse_dom_pure, fold_load_store_offsets};
 use self::branches::{
@@ -47,6 +51,9 @@ pub const STEP_PROMOTE_SLOTS: u64 = 10;
 pub const STEP_VECTOR_REGISTERS: u64 = 11;
 pub const STEP_REMOVE_DEAD: u64 = 12;
 pub const STEP_SINK_SLOT_INITS: u64 = 13;
+pub const STEP_SHARE_INVARIANT_LOADS: u64 = 14;
+pub const STEP_HOIST_LOOP_INVARIANTS: u64 = 15;
+pub const STEP_MERGE_TAILS: u64 = 16;
 // 32 up: the branch-threading steps of #2423 (branches.ves).
 pub const STEP_SINK_COMPARES: u64 = 32;
 pub const STEP_THREAD_BRANCHES: u64 = 33;
@@ -658,6 +665,9 @@ pub fn clif_opt_words(in input: Str) -> ChunkSeq[u64] {
         || step == STEP_VECTOR_REGISTERS
         || step == STEP_REMOVE_DEAD
         || step == STEP_SINK_SLOT_INITS
+        || step == STEP_SHARE_INVARIANT_LOADS
+        || step == STEP_HOIST_LOOP_INVARIANTS
+        || step == STEP_MERGE_TAILS
         || step == STEP_SINK_COMPARES
         || step == STEP_THREAD_BRANCHES
         || step == STEP_THREAD_DECIDED_BRANCHES
@@ -697,6 +707,12 @@ pub fn clif_opt_words(in input: Str) -> ChunkSeq[u64] {
         remove_dead(inout f);
     } else if step == STEP_SINK_SLOT_INITS {
         sink_slot_inits(inout f);
+    } else if step == STEP_SHARE_INVARIANT_LOADS {
+        share_invariant_loads(inout f);
+    } else if step == STEP_HOIST_LOOP_INVARIANTS {
+        hoist_loop_invariants(inout f);
+    } else if step == STEP_MERGE_TAILS {
+        merge_tails(inout f);
     } else if step == STEP_SINK_COMPARES {
         sink_compares(inout f);
     } else if step == STEP_THREAD_BRANCHES {
