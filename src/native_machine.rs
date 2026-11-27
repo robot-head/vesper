@@ -7,7 +7,7 @@ use cranelift_codegen::{
         GlobalValueData, Inst, InstructionData, LibCall, MemFlags, Opcode, StackSlot,
         StackSlotKind, TrapCode, Type, Value, ValueDef,
         condcodes::{FloatCC, IntCC},
-        immediates::Offset32,
+        immediates::{Ieee32, Ieee64, Offset32},
         types,
     },
     isa::CallConv,
@@ -412,6 +412,7 @@ struct IntegerBlocks<'a> {
     duplicated_instructions: usize,
     needs_cfg: bool,
     allow_hardware_faults: bool,
+    canonicalize_nans: bool,
     declarations: Option<&'a ModuleDeclarations>,
 }
 
@@ -947,7 +948,30 @@ impl IntegerBlocks<'_> {
             }
             _ => return None,
         };
-        Some(self.append(op, operands))
+        let result = self.append(op, operands);
+        if self.canonicalize_nans
+            && matches!(
+                op,
+                IntegerOp::FloatAdd
+                    | IntegerOp::FloatSub
+                    | IntegerOp::FloatMul
+                    | IntegerOp::FloatDiv
+                    | IntegerOp::FloatSqrt
+            )
+        {
+            let (compare, bits) = match output {
+                types::F32 => (IntegerOp::FloatCompare32, u64::from(Ieee32::NAN.bits())),
+                types::F64 => (IntegerOp::FloatCompare64, Ieee64::NAN.bits()),
+                _ => return None,
+            };
+            let nan = self.append(
+                compare,
+                [result, result, float_condition(FloatCC::Unordered)],
+            );
+            let canonical = self.append(IntegerOp::FloatConstant, [bits, 0, float_width(output)?]);
+            return Some(self.append(IntegerOp::FloatSelect, [nan, canonical, result]));
+        }
+        Some(result)
     }
 
     // A block's arguments are already mapped by its incoming edge.
@@ -1729,7 +1753,7 @@ impl IntegerBlocks<'_> {
 /// The entry label's right word identifies the private home slot plus one,
 /// or zero when the function needs no cross-block storage.
 pub fn integer_block_words(function: &Function) -> Option<Vec<u64>> {
-    integer_program(function, false, None).map(|(primary, _)| primary.words)
+    integer_program(function, false, false, None).map(|(primary, _)| primary.words)
 }
 
 struct IntegerProgram {
@@ -1740,6 +1764,7 @@ struct IntegerProgram {
 fn integer_program(
     function: &Function,
     allow_hardware_faults: bool,
+    canonicalize_nans: bool,
     declarations: Option<&ModuleDeclarations>,
 ) -> Option<(IntegerProgram, Option<IntegerProgram>)> {
     let signature = &function.signature;
@@ -1767,6 +1792,7 @@ fn integer_program(
         duplicated_instructions: 0,
         needs_cfg: false,
         allow_hardware_faults,
+        canonicalize_nans,
         declarations,
     };
     for slot in function.sized_stack_slots.values() {
@@ -1905,7 +1931,12 @@ fn encode_integer_block(
     }
     // Ordinary native ELF objects use CPU memory faults directly. They carry
     // no Cranelift trap table, unlike JIT and freestanding emission.
-    let (primary, fallback) = integer_program(function, true, declarations)?;
+    let (primary, fallback) = integer_program(
+        function,
+        true,
+        isa.flags().enable_nan_canonicalization(),
+        declarations,
+    )?;
     let emit = |program: IntegerProgram| {
         if program.relocations {
             let packet = RELOCATION_ENCODER.get()?(&program.words)?;

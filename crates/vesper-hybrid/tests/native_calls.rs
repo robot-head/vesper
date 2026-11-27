@@ -59,6 +59,22 @@ const UNSUPPORTED_SIGNATURE: &str = "
 fn ninth(a: f64, b: f64, c: f64, d: f64, e: f64, f: f64, g: f64, h: f64, i: f64) -> f64 { i }
 fn main() -> u64 { if ninth(1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0) > 0.0 { 1 } else { 0 } }
 ";
+const DETFLOAT: &str = "
+fn eval32(x: f32, y: f32) -> f32 eff [DetFloat] { sqrt(x + y) }
+fn eval64(x: f64, y: f64) -> f64 eff [DetFloat] { (x - y) / (x * y) }
+fn main() -> u64 {
+    let signed_signaling = from_bits_f32(0xff800123);
+    let signed_quiet = from_bits_f64(0xfff8000000000123);
+    let result32 = to_bits_f32(eval32(signed_signaling, 1.0));
+    let invalid32 = to_bits_f32(eval32(-2.0, 1.0));
+    let result64 = to_bits_f64(eval64(signed_quiet, 1.0));
+    let valid64 = eval64(8.0, 2.0);
+    if result32 == 0x7fc00000 && invalid32 == 0x7fc00000
+        && result64 == 0x7ff8000000000000 && valid64 == 0.375 {
+        0
+    } else { 1 }
+}
+";
 const INOUT_MEMORY: &str = "
 fn bump(inout n: u64) -> u64 {
     let old = n;
@@ -799,13 +815,18 @@ fn direct_calls_preserve_the_abi_across_object_writers() {
     const RECORD_WORDS: usize = 4;
     const LOAD: u64 = 23;
     const STORE_QWORD: u64 = 27;
+    const FLOAT_DIV: u64 = 84;
+    const FLOAT_SQRT: u64 = 85;
     static CALLABLE_BLOCKS: AtomicUsize = AtomicUsize::new(0);
     static STACK_LEAF_BLOCKS: AtomicUsize = AtomicUsize::new(0);
     static MEMORY_LEAF_BLOCKS: AtomicUsize = AtomicUsize::new(0);
+    static DETFLOAT_LEAF_BLOCKS: AtomicUsize = AtomicUsize::new(0);
     let program = checked(PROGRAM);
     let stack_arguments = checked(STACK_ARGUMENT);
     let memory = checked(INOUT_MEMORY);
     let unsupported = checked(UNSUPPORTED_SIGNATURE);
+    let detfloat = checked(DETFLOAT);
+    assert!(native::needs_nan_canonicalization(&detfloat.world));
     let compile = |checked: &check::Checked| {
         native::object_with_options(&checked.world, "main", None, false)
             .unwrap()
@@ -815,6 +836,7 @@ fn direct_calls_preserve_the_abi_across_object_writers() {
     let baseline_stack = compile(&stack_arguments);
     let baseline_memory = compile(&memory);
     let baseline_unsupported = compile(&unsupported);
+    let baseline_detfloat = compile(&detfloat);
     assert!(
         native::machine::install_integer_encoder(|words| {
             let code = binding::x86_64_integer_block(words);
@@ -832,6 +854,12 @@ fn direct_calls_preserve_the_abi_across_object_writers() {
                 && records.iter().any(|record| record[0] == STORE_QWORD)
             {
                 MEMORY_LEAF_BLOCKS.fetch_add(1, Relaxed);
+            }
+            if records
+                .iter()
+                .any(|record| matches!(record[0], FLOAT_DIV | FLOAT_SQRT))
+            {
+                DETFLOAT_LEAF_BLOCKS.fetch_add(1, Relaxed);
             }
             Some(code)
         })
@@ -889,6 +917,9 @@ fn direct_calls_preserve_the_abi_across_object_writers() {
     assert_eq!(CALLABLE_BLOCKS.load(Relaxed), 10);
     assert_eq!(STACK_LEAF_BLOCKS.load(Relaxed), 2);
     assert_eq!(MEMORY_LEAF_BLOCKS.load(Relaxed), 2);
+    let combined_detfloat = compile(&detfloat);
+    assert_ne!(combined_detfloat, baseline_detfloat);
+    assert_eq!(DETFLOAT_LEAF_BLOCKS.load(Relaxed), 2);
     assert_ne!(
         combined, candidate,
         "the ELF writer should also be selected"
@@ -908,6 +939,8 @@ fn direct_calls_preserve_the_abi_across_object_writers() {
         ("baseline_memory", baseline_memory, 42),
         ("candidate_memory", candidate_memory, 42),
         ("combined_memory", combined_memory, 42),
+        ("baseline_detfloat", baseline_detfloat, 0),
+        ("combined_detfloat", combined_detfloat, 0),
     ] {
         let obj = dir.join(format!("{name}.o"));
         let exe = dir.join(name);
