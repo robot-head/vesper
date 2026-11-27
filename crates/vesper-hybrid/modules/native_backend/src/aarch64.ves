@@ -6,12 +6,12 @@ use self::scalar::{
     Record, word_at, read_record, CONSTANT, ADD, SUB, MUL, AND, OR, XOR, NEG, NOT, SHL, SHR, SAR,
     COMPARE, COMPARE_BYTE, COMPARE_WORD, COMPARE_DWORD, SELECT, TRUNCATE, ZERO_EXTEND, SIGN_EXTEND,
     SHL_REGISTER, SHR_REGISTER, SAR_REGISTER, LOAD, STORE_BYTE, STORE_WORD, STORE_DWORD,
-    STORE_QWORD, SIGNED_MUL_HIGH, UNSIGNED_MUL_HIGH, ADD_IMMEDIATE, SUB_IMMEDIATE, MUL_IMMEDIATE,
-    AND_IMMEDIATE, OR_IMMEDIATE, XOR_IMMEDIATE, COMPARE_IMMEDIATE, COMPARE_BYTE_IMMEDIATE,
-    COMPARE_WORD_IMMEDIATE, COMPARE_DWORD_IMMEDIATE, EQUAL, NOT_EQUAL, SIGNED_LESS,
-    SIGNED_GREATER_EQUAL, SIGNED_GREATER, SIGNED_LESS_EQUAL, UNSIGNED_LESS, UNSIGNED_GREATER_EQUAL,
-    UNSIGNED_GREATER, UNSIGNED_LESS_EQUAL, ARGUMENT_COUNT, RETURN_VALUE, HEADER_WORDS, RECORD_WORDS,
-    NEVER_READ, NO_VALUE, DISP32_MASK
+    STORE_QWORD, BRANCH_ZERO, EARLY_RETURN, SIGNED_MUL_HIGH, UNSIGNED_MUL_HIGH, ADD_IMMEDIATE,
+    SUB_IMMEDIATE, MUL_IMMEDIATE, AND_IMMEDIATE, OR_IMMEDIATE, XOR_IMMEDIATE, COMPARE_IMMEDIATE,
+    COMPARE_BYTE_IMMEDIATE, COMPARE_WORD_IMMEDIATE, COMPARE_DWORD_IMMEDIATE, EQUAL, NOT_EQUAL,
+    SIGNED_LESS, SIGNED_GREATER_EQUAL, SIGNED_GREATER, SIGNED_LESS_EQUAL, UNSIGNED_LESS,
+    UNSIGNED_GREATER_EQUAL, UNSIGNED_GREATER, UNSIGNED_LESS_EQUAL, ARGUMENT_COUNT, RETURN_VALUE,
+    HEADER_WORDS, RECORD_WORDS, NEVER_READ, NO_VALUE, DISP32_MASK
 };
 use self::x86_64::{BYTE_BITS, WORD_BITS, DWORD_BITS, QWORD_BITS};
 
@@ -23,6 +23,11 @@ const SCRATCH: u32 = 16;
 const COMPARE_LEFT_SCRATCH: u32 = 17;
 const ZERO: u32 = 31;
 const RETURN: u32 = 0xd65f03c0;
+const BRANCH_IF_ZERO: u32 = 0xb4000000;
+const BRANCH_IF_CONDITION: u32 = 0x54000000;
+const BRANCH_IMM19_SHIFT: u32 = 5;
+const BRANCH_IMM19_FORWARD_MAX: u64 = 0x3ffff;
+const INSTRUCTION_BYTES: u64 = 4;
 const ADD_REG: u32 = 0x8b000000;
 const SUB_REG: u32 = 0xcb000000;
 const MUL_REG: u32 = 0x9b007c00;
@@ -89,6 +94,16 @@ const GE: u32 = 10;
 const LT: u32 = 11;
 const GT: u32 = 12;
 const LE: u32 = 13;
+
+copy struct BranchArm {
+    start: u64,
+    end: u64,
+}
+
+copy struct ForwardBranch {
+    offset: u64,
+    instruction: u32,
+}
 
 fn sh(value: u32, amount: u32) -> u32 {
     wrapping_shl_u32(value, amount)
@@ -364,6 +379,18 @@ fn operands(in r: Record) -> Option[u64] {
     if r.op == SELECT {
         return Option::Some(3);
     }
+    if r.op == BRANCH_ZERO {
+        if r.right == 0 && r.extra == 0 {
+            return Option::Some(1);
+        }
+        return Option::None;
+    }
+    if r.op == EARLY_RETURN {
+        if r.right != 0 {
+            return Option::None;
+        }
+        return Option::Some(if r.left == NO_VALUE { 0 } else { 1 });
+    }
     if store_width(r.op) != 0 {
         if r.extra <= DISP32_MASK {
             return Option::Some(2);
@@ -558,6 +585,32 @@ fn expire(used: u32, in ends: ChunkSeq[u64], value: u64, current: u64, reg: u32)
     }
 }
 
+fn no_result(op: u64) -> bool {
+    op == BRANCH_ZERO || op == EARLY_RETURN || store_width(op) != 0
+}
+
+fn emit_return(inout output: ChunkSeq[u8], reg: u32) {
+    if reg != UNASSIGNED && reg != 0 {
+        rrr(inout output, ORR_REG, 0, ZERO, reg);
+    }
+    push32(inout output, RETURN);
+}
+
+fn patch_forward_branch(inout output: ChunkSeq[u8], in branch: ForwardBranch) -> bool {
+    // AArch64 displacements count instructions from the branch itself.
+    let distance = wrapping_sub(output.len(), branch.offset) / INSTRUCTION_BYTES;
+    if distance > BRANCH_IMM19_FORWARD_MAX {
+        return false;
+    }
+    let instruction = branch.instruction | sh(wrapping_u32(distance), BRANCH_IMM19_SHIFT);
+    for index in 0..INSTRUCTION_BYTES {
+        let shift = wrapping_u32(wrapping_mul(index, BYTE_BITS));
+        let byte = wrapping_u8(wrapping_shr_u32(instruction, shift));
+        let _ = output.try_set(wrapping_add(branch.offset, index), byte);
+    }
+    true
+}
+
 pub fn encode_leaf(in words: Slice[u64]) -> ChunkSeq[u8] {
     let mut out = ChunkSeq::new[u8]();
     if words.len() < HEADER_WORDS {
@@ -581,6 +634,8 @@ pub fn encode_leaf(in words: Slice[u64]) -> ChunkSeq[u8] {
     if result != NO_VALUE {
         let _ = ends.try_set(result, values);
     }
+    let mut arms = ChunkSeq::new[BranchArm]();
+    let mut depth: u64 = 0;
     for reverse in 0..count {
         let index = wrapping_sub(wrapping_sub(count, 1), reverse);
         let value = wrapping_add(args, index);
@@ -595,12 +650,38 @@ pub fn encode_leaf(in words: Slice[u64]) -> ChunkSeq[u8] {
         {
             return out;
         }
-        let has_read = last_read(in ends, value) != NEVER_READ;
-        if store_width(r.op) != 0 {
-            if has_read {
+        let last = last_read(in ends, value);
+        let arm = arms.try_get(wrapping_sub(depth, 1))
+            .unwrap_or(BranchArm { start: NO_VALUE, end: values });
+        if r.op == EARLY_RETURN {
+            if ((r.left == NO_VALUE) != (result == NO_VALUE))
+                || r.extra < args
+                || r.extra >= value
+                || (depth != 0 && r.extra <= arm.start)
+            {
                 return out;
             }
-        } else if !has_read {
+            let nested = BranchArm { start: r.extra, end: value };
+            if depth == arms.len() {
+                arms.push(nested);
+            } else {
+                let _ = arms.try_set(depth, nested);
+            }
+            depth = wrapping_add(depth, 1);
+        } else if r.op == BRANCH_ZERO {
+            if depth == 0 || arm.start != value {
+                return out;
+            }
+            depth = wrapping_sub(depth, 1);
+        } else if depth != 0 && (value <= arm.start || last > arm.end) {
+            // Values defined in a skipped arm are unavailable at its target.
+            return out;
+        }
+        if no_result(r.op) {
+            if last != NEVER_READ {
+                return out;
+            }
+        } else if last == NEVER_READ {
             continue;
         }
         if n >= 1 && last_read(in ends, r.left) == NEVER_READ {
@@ -613,10 +694,14 @@ pub fn encode_leaf(in words: Slice[u64]) -> ChunkSeq[u8] {
             let _ = ends.try_set(r.extra, value);
         }
     }
+    if depth != 0 {
+        return out;
+    }
 
     let mut regs = ChunkSeq::with_capacity[u32](values);
     let mut used: u32 = 0;
-    let mut flags_for_select: Option[u32] = Option::None;
+    let mut flags_for_next: Option[u32] = Option::None;
+    let mut branches = ChunkSeq::new[ForwardBranch]();
     for arg in 0..args {
         let reg = wrapping_u32(arg);
         regs.push(reg);
@@ -628,7 +713,7 @@ pub fn encode_leaf(in words: Slice[u64]) -> ChunkSeq[u8] {
         let value = wrapping_add(args, index);
         let r = read_record(in words, index);
         let stored = store_width(r.op);
-        if stored == 0 && last_read(in ends, value) == NEVER_READ {
+        if !no_result(r.op) && last_read(in ends, value) == NEVER_READ {
             regs.push(UNASSIGNED);
             continue;
         }
@@ -657,6 +742,35 @@ pub fn encode_leaf(in words: Slice[u64]) -> ChunkSeq[u8] {
         if n == 3 {
             used = expire(used, in ends, r.extra, value, third);
         }
+        if r.op == BRANCH_ZERO {
+            let instruction = match flags_for_next {
+                Option::Some(cc) => BRANCH_IF_CONDITION | (cc ^ 1),
+                Option::None => BRANCH_IF_ZERO | lhs,
+            };
+            flags_for_next = Option::None;
+            let branch = ForwardBranch { offset: out.len(), instruction: instruction };
+            if depth == branches.len() {
+                branches.push(branch);
+            } else {
+                let _ = branches.try_set(depth, branch);
+            }
+            depth = wrapping_add(depth, 1);
+            push32(inout out, instruction);
+            regs.push(UNASSIGNED);
+            continue;
+        }
+        if r.op == EARLY_RETURN {
+            emit_return(inout out, lhs);
+            depth = wrapping_sub(depth, 1);
+            match branches.try_get(depth) {
+                Option::Some(branch) => if !patch_forward_branch(inout out, in branch) {
+                    return ChunkSeq::new[u8]();
+                },
+                Option::None => return ChunkSeq::new[u8](),
+            };
+            regs.push(UNASSIGNED);
+            continue;
+        }
         if stored != 0 {
             memory(inout out, false, stored, lhs, rhs, r.extra);
             regs.push(UNASSIGNED);
@@ -667,13 +781,12 @@ pub fn encode_leaf(in words: Slice[u64]) -> ChunkSeq[u8] {
             && last_read(in ends, value) == wrapping_add(value, 1)
         {
             let next = read_record(in words, wrapping_add(index, 1));
-            if next.op == SELECT
-                && next.left == value
-                && next.right != value
-                && next.extra != value
+            if next.left == value
+                && (next.op == BRANCH_ZERO
+                    || (next.op == SELECT && next.right != value && next.extra != value))
             {
                 compare(inout out, in r, lhs, rhs);
-                flags_for_select = Option::Some(condition(r.extra));
+                flags_for_next = Option::Some(condition(r.extra));
                 regs.push(UNASSIGNED);
                 continue;
             }
@@ -685,20 +798,14 @@ pub fn encode_leaf(in words: Slice[u64]) -> ChunkSeq[u8] {
         let dest = wrapping_u32(trailing_zeros_u64(widen_u64(available)));
         used = used | sh(1, dest);
         regs.push(dest);
-        match flags_for_select {
+        match flags_for_next {
             Option::Some(cc) => {
                 rrr(inout out, CSEL | sh(cc, CONDITION_SHIFT), dest, rhs, third);
-                flags_for_select = Option::None;
+                flags_for_next = Option::None;
             },
             Option::None => emit_instruction(inout out, in r, dest, lhs, rhs, third),
         };
     }
-    if result != NO_VALUE {
-        let reg = register(in regs, result);
-        if reg != 0 {
-            rrr(inout out, ORR_REG, 0, ZERO, reg);
-        }
-    }
-    push32(inout out, RETURN);
+    emit_return(inout out, register(in regs, result));
     out
 }

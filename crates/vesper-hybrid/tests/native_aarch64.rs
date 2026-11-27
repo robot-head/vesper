@@ -25,6 +25,8 @@ const SIGN_EXTEND: u64 = 17;
 const LOAD: u64 = 23;
 const STORE_BYTE: u64 = 24;
 const STORE_WORD: u64 = 25;
+const BRANCH_ZERO: u64 = 28;
+const EARLY_RETURN: u64 = 29;
 const CALL: u64 = 38;
 const SIGNED_MUL_HIGH: u64 = 50;
 const UNSIGNED_MUL_HIGH: u64 = 51;
@@ -190,6 +192,69 @@ fn aarch64_select_uses_comparison_flags_directly() {
             .collect();
         assert_eq!(binding::aarch64_integer_leaf(&words), expected);
     }
+}
+
+#[test]
+fn aarch64_branches_use_the_instruction_address_and_reject_escaping_values() {
+    const CBZ_X0_FORWARD_TWO: u32 = 0xb400_0040;
+    const CMP_X0_X1: u32 = 0xeb01_001f;
+    const B_NE_FORWARD_TWO: u32 = 0x5400_0041;
+    const MOV_X0_X1: u32 = 0xaa01_03e0;
+    let bytes = |instructions: &[u32]| {
+        instructions
+            .iter()
+            .copied()
+            .flat_map(u32::to_le_bytes)
+            .collect::<Vec<_>>()
+    };
+
+    assert_eq!(
+        binding::aarch64_integer_leaf(&[2, 1, BRANCH_ZERO, 0, 0, 0, EARLY_RETURN, 0, 0, 2]),
+        bytes(&[CBZ_X0_FORWARD_TWO, RET, MOV_X0_X1, RET]),
+    );
+    assert_eq!(
+        binding::aarch64_integer_leaf(&[
+            2,
+            1,
+            COMPARE,
+            0,
+            1,
+            EQUAL,
+            BRANCH_ZERO,
+            2,
+            0,
+            0,
+            EARLY_RETURN,
+            0,
+            0,
+            3,
+        ]),
+        bytes(&[CMP_X0_X1, B_NE_FORWARD_TWO, RET, MOV_X0_X1, RET]),
+    );
+    assert!(binding::aarch64_integer_leaf(&[1, 0, BRANCH_ZERO, 0, 0, 0]).is_empty());
+    assert!(
+        binding::aarch64_integer_leaf(&[
+            1,
+            2,
+            BRANCH_ZERO,
+            0,
+            0,
+            0,
+            CONSTANT,
+            42,
+            0,
+            0,
+            EARLY_RETURN,
+            2,
+            0,
+            1,
+        ])
+        .is_empty()
+    );
+    assert!(
+        binding::aarch64_integer_leaf(&[1, 0, BRANCH_ZERO, 0, 0, 0, EARLY_RETURN, NO_VALUE, 0, 1])
+            .is_empty()
+    );
 }
 
 #[test]
