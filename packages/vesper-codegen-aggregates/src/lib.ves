@@ -5649,3 +5649,120 @@ pub fn scalar_enum_rewrite(in input: Str) -> ChunkSeq[u64] {
     put_program(in p, in c.types, in c.names, inout o);
     o
 }
+
+// ----- the scalar-enum words of a program (the native walk's body hook) -------
+
+// What `scalar_enum_words` kept as words in each rewritten graph: for
+// program function `f`, value id `v` < `nv[f]` has its words
+// `words[start[base[f] + v] - 1..][..count[base[f] + v]]` (start 0: kept
+// in memory), and the graph returns its result as `ret[f]` words (0 for a
+// result in memory or no rewrite).
+pub struct EnumWords {
+    base: ChunkSeq[u64],
+    nv: ChunkSeq[u64],
+    start: ChunkSeq[u64],
+    count: ChunkSeq[u64],
+    words: ChunkSeq[u64],
+    ret: ChunkSeq[u64],
+}
+
+impl EnumWords {
+    // The number of words value `v` of function `fi` is kept as, 0 when it
+    // is not.
+    pub fn count(in self, fi: u64, v: u64) -> u64 {
+        if fi >= self.nv.len() || v >= u64_at(in self.nv, fi) {
+            return 0;
+        }
+        u64_at(in self.count, add(u64_at(in self.base, fi), v))
+    }
+
+    // The `k`-th word value of value `v` of function `fi` (`count` > k).
+    pub fn word(in self, fi: u64, v: u64, k: u64) -> u64 {
+        let at = add(u64_at(in self.base, fi), v);
+        u64_at(in self.words, add(wrapping_sub(u64_at(in self.start, at), 1), k))
+    }
+
+    // How many words function `fi` returns its result as (0: in memory).
+    pub fn returns(in self, fi: u64) -> u64 {
+        u64_at(in self.ret, fi)
+    }
+}
+
+// No graph rewritten (an input without the facts, or the unoptimized path).
+pub fn enum_words_none() -> EnumWords {
+    EnumWords {
+        base: ChunkSeq::new[u64](),
+        nv: ChunkSeq::new[u64](),
+        start: ChunkSeq::new[u64](),
+        count: ChunkSeq::new[u64](),
+        words: ChunkSeq::new[u64](),
+        ret: ChunkSeq::new[u64](),
+    }
+}
+
+// `scalar_enum_rewrite` in place (`Codegen::ir_graph_at`'s top-level
+// `scalar_enums` on the optimize path): reads the facts that follow the
+// program in `bytes` at `reader`, rewrites every graph that keeps small
+// enums as words (all but `fip` functions and graphs with wide integers)
+// and answers which values it kept and as which words.
+pub fn scalar_enum_words(
+    inout c: Ctx,
+    inout p: Program,
+    inout reader: Reader,
+    in bytes: Slice[u8]
+) -> EnumWords {
+    let mut e = read_env(inout reader, in bytes, inout c.names, p.fn_count());
+    let mut syms = syms_new();
+    let mut sh = shapes_new();
+    let mut out = enum_words_none();
+    for fi in 0..p.fn_count() {
+        out.base.push(out.start.len());
+        let name = p.function(fi).name;
+        if (e.fn_bits(name) & FN_FIP) != 0 {
+            out.nv.push(0);
+            out.ret.push(0);
+            continue;
+        }
+        let g = graph_of(in p, inout c, inout syms, fi);
+        if graph_wide(inout e, in c, in g) {
+            out.nv.push(0);
+            out.ret.push(0);
+            syms.reset();
+            continue;
+        }
+        let plan = scalar_plan(inout e, inout c, in p, in g, in syms, inout sh);
+        if !plan.ok {
+            out.nv.push(0);
+            out.ret.push(0);
+            syms.reset();
+            continue;
+        }
+        out.nv.push(g.nv);
+        for v in 0..g.nv {
+            let shape1 = u64_at(in plan.cv, v);
+            if shape1 == 0 {
+                out.start.push(0);
+                out.count.push(0);
+            } else {
+                let n = sh.words(wrapping_sub(shape1, 1));
+                out.start.push(inc(out.words.len()));
+                out.count.push(n);
+                let at = u64_at(in plan.wa, v);
+                for k in 0..n {
+                    out.words.push(u64_at(in plan.ws, add(at, k)));
+                }
+            }
+        }
+        let mut ret: u64 = 0;
+        if u8_at(in e.ret, fi) != 0 {
+            let shape = enum_shape(inout e, inout c, inout sh, g.result);
+            if shape != NONE32_64 {
+                ret = sh.words(shape);
+            }
+        }
+        out.ret.push(ret);
+        rewrite_scalar_enums(inout c, inout p, in g, in syms, in sh, in plan);
+        syms.reset();
+    }
+    out
+}

@@ -36,11 +36,11 @@ const DECLINED: u64 = 0;
 
 // The flags word: what the lent module already holds.
 // `vesper_box_free` is defined (`declare_or_define_free` finds it).
-const F_BOX_FREE: u64 = 1;
+pub const F_BOX_FREE: u64 = 1;
 // The sequence runtime's live counter `vesper_seq_live` exists.
-const F_SEQ_COUNTER: u64 = 2;
+pub const F_SEQ_COUNTER: u64 = 2;
 // The box runtime's live counter `vesper_box_live` exists.
-const F_BOX_COUNTER: u64 = 4;
+pub const F_BOX_COUNTER: u64 = 4;
 
 // `dyn_trait::BOXED_HEADER`: a boxed object is `{vtable, value}`.
 const BOXED_HEADER: i64 = 8;
@@ -567,6 +567,18 @@ fn interface_bytes(in args: ChunkSeq[u64]) -> ChunkSeq[u8] {
         }
     }
     o
+}
+
+// The v2 glue after the runtime prelude into a module of the caller's own
+// (@vesper/native-lib): `interface` is the interface in the words of
+// tests/self_host_codegen_export/words.rs, as bytes, and `flags` says what
+// the module already holds (the `F_*` bits). The module's pointer type is
+// 64-bit; a failed definition leaves its error on the module.
+pub fn define_export_glue(inout m: Module, in interface: Slice[u8], flags: u64) eff [
+    Ffi[Cranelift]
+] {
+    let i = read_iface(in interface);
+    glue(inout m, in i, flags);
 }
 
 // The `export` hook: the v2 glue after the runtime prelude, over the lent

@@ -21,6 +21,8 @@
 //! both optimizer settings: since part 6c the unoptimized path, which
 //! keeps every local in a stack slot, is emitted from Vesper too.
 //! `CODEGEN_SCALAR_STEP=n` compares every n-th corpus world (default 4).
+#[path = "../../../tests/common/aggregate_facts.rs"]
+mod aggregate_facts;
 #[path = "../../../tests/common/check_harness.rs"]
 mod check_harness;
 #[path = "../../../tests/common/check_words.rs"]
@@ -66,9 +68,10 @@ fn vesper() -> &'static Vesper {
     })
 }
 
-/// One program's body plans, by function name.
+/// One program's body plans, by function name, for one optimizer
+/// setting.
 struct Plan {
-    key: (usize, usize, usize),
+    key: ((usize, usize, usize), bool),
     bodies: HashMap<String, Vec<u64>>,
 }
 
@@ -105,11 +108,17 @@ fn program_key(p: &Program) -> (usize, usize, usize) {
     (std::ptr::from_ref(p) as usize, p.functions.len(), insts)
 }
 
-fn plan_of(world: &vesper::check::World, program: &Program) -> Plan {
-    let key = program_key(program);
+fn plan_of(world: &vesper::check::World, program: &Program, optimize: bool) -> Plan {
+    let key = (program_key(program), optimize);
     let mut bodies = HashMap::new();
-    // A program the format cannot encode stays on the Rust walk.
-    if let Some((input, _)) = ir_words::program_input(world, program) {
+    // A program the format cannot encode stays on the Rust walk. The
+    // optimize path plans its graphs with small enums kept as words
+    // (`aggregates::scalar_enums`, #2581), which the facts let the planner
+    // rewrite.
+    if let Some((mut input, _)) = ir_words::program_input(world, program) {
+        if optimize {
+            input.extend(aggregate_facts::facts(world, program));
+        }
         let names: Vec<&String> = program.functions.keys().collect();
         let words = vesper().plan.words(&input);
         let mut rest = &words[..];
@@ -136,11 +145,9 @@ fn body(lent: &mut Lent<'_, '_>) -> Result<bool, String> {
     }
     let words = PLAN.with(|cell| {
         let mut cell = cell.borrow_mut();
-        if cell
-            .as_ref()
-            .is_none_or(|p| p.key != program_key(lent.program))
-        {
-            *cell = Some(plan_of(lent.world, lent.program));
+        let key = (program_key(lent.program), lent.optimize);
+        if cell.as_ref().is_none_or(|p| p.key != key) {
+            *cell = Some(plan_of(lent.world, lent.program, lent.optimize));
         }
         let plan = cell.as_ref().expect("just planned");
         plan.bodies.get(lent.site.function).cloned()
@@ -1267,6 +1274,90 @@ fn vesper_fail_struct_results_match() {
 /// least once (off-cross each is compiled for its CLIF text and again for
 /// the object, so 12 are emitted).
 const MIN_FAIL_STRUCT_RESULTS: u64 = 6;
+
+/// Small enums as words (#2581): on the optimize path an `Option` or a
+/// small enum of word fields is kept as its words (`aggregates::scalar_enums`)
+/// and a function that cannot fail returns them in registers. `find` and
+/// `sign` return constructors and, recursively, a callee's words; `pick`
+/// matches a callee's words. Recursion keeps the calls from being inlined.
+const ENUM_WORDS_SOURCE: &str = "
+enum Sign {
+    Neg,
+    Zero,
+    Pos(u8),
+}
+fn find(x: i64) -> Option[i64] {
+    if x > 100 {
+        Option::None
+    } else if x > 3 {
+        Option::Some(wrapping_mul(x, 2))
+    } else {
+        find(wrapping_add(x, 5))
+    }
+}
+fn sign(x: i64, depth: u32) -> Sign {
+    if depth > 0 {
+        sign(x, wrapping_sub(depth, 1))
+    } else if x < 0 {
+        Sign::Neg
+    } else if x == 0 {
+        Sign::Zero
+    } else {
+        Sign::Pos(7)
+    }
+}
+fn pick(x: i64) -> i64 {
+    match find(x) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+fn weigh(x: i64) -> i64 {
+    match sign(x, 2) {
+        Sign::Neg => 1,
+        Sign::Zero => 2,
+        Sign::Pos(n) => widen_i64(n),
+    }
+}
+fn main() -> i64 {
+    pick(2) ^ pick(500) ^ weigh(-4) ^ weigh(0) ^ weigh(9)
+}
+";
+
+#[test]
+fn vesper_enum_words_match() {
+    big_stack(|| {
+        let parsed = vesper::parser::parse(ENUM_WORDS_SOURCE);
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        let checked = vesper::check::check(&parsed.module);
+        assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
+        if let Err(e) = build(&checked.world, "main", true) {
+            panic!("the enum words program does not build: {e}");
+        }
+        let before = REGISTER_RESULT.load(Ordering::Relaxed);
+        let emitted_before = EMITTED.load(Ordering::Relaxed);
+        let total = both("enum_words", &checked.world, true);
+        let registers = REGISTER_RESULT.load(Ordering::Relaxed) - before;
+        let emitted = EMITTED.load(Ordering::Relaxed) - emitted_before;
+        eprintln!(
+            "enum_words: {}; {emitted} functions emitted from Vesper, {registers} returning \
+             enum words",
+            total.summary()
+        );
+        let ran = if cross() { 0 } else { 2 };
+        assert_eq!((total.worlds, total.ran), (2, ran), "{}", total.summary());
+        assert!(
+            registers >= MIN_ENUM_WORD_RESULTS,
+            "only {registers} enum word results came from Vesper \
+             (expected >= {MIN_ENUM_WORD_RESULTS})"
+        );
+        assert!(total.is_clean(), "{}", total.summary());
+    });
+}
+
+/// Enum-word bodies `vesper_enum_words_match` must see emitted from
+/// Vesper: `find` and `sign` on the optimize path, at least once each.
+const MIN_ENUM_WORD_RESULTS: u64 = 2;
 
 /// Part 6k: 1-word unary (`~`, `-`, `!`), bitwise (`&`, `|`, `^`),
 /// `wrapping_neg_i8`/`i32`/`i64`, and `u64` bit builtins across both
