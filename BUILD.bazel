@@ -502,7 +502,10 @@ vesper_crate(
             "examples/**",
             "packages/**",
             "tests/fixtures/**",
-        ]) + ["//crates/vesper-serde:files"],
+        ]) + [
+            "//crates/vesper-alloc:files",
+            "//crates/vesper-serde:files",
+        ],
         # SH3 lane 13 (#1252): @vesper/place-ir-lower against
         # `ir::lower_world` over the same corpus.
         "test/self_host_ir_lower": glob([
@@ -1927,10 +1930,12 @@ vesper_package(
     srcs = glob(["packages/vesper-run/src/**/*.ves"]),
     manifest = "packages/vesper-run/Loom.toml",
     visibility = ["//visibility:public"],
-    # Float display takes @vesper/serde's shortest digits.
+    # Float display takes @vesper/serde's shortest digits; region blocks
+    # keep @vesper/alloc books.
     deps = [
         ":check_data_package",
         ":place_ir_package",
+        "//crates/vesper-alloc:port_package",
         "//crates/vesper-serde:port_package",
     ],
 )

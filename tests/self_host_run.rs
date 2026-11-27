@@ -340,6 +340,19 @@ const PROGRAMS: &[(&str, &str)] = &[
         "fn pick(b: bool) -> Option[i64] { if b { Option::Some(3) } else { Option::None } } \
          fn main() -> (Option[i64], Option[i64], bool) { (pick(true), pick(false), pick(true) == pick(true)) }",
     ),
+    (
+        "region_ops",
+        "linear struct T { v: i64 } \
+         fn main() -> (bool, bool, u64, u64, i64, u64) { region r { let a = r.box(1); let b = a; \
+         let c = r.box(2); let m = r.checkpoint(); let d = r.box(3); r.commit(m); let u = r.used(); \
+         r.set(c, 5); let t = r.box(T { v: 4 }); let before = r.used(); let T { v } = r.take(t); \
+         let n = region q(16) { let x = q.box(7); q.used() }; \
+         (a == b, a == c, u, before, wrapping_add(wrapping_add(r.get(c), r.get(d)), v), n) } }",
+    ),
+    (
+        "region_first_chunk",
+        "fn main() -> i64 { region r(8) { let x = r.box((1, 2)); 0 } }",
+    ),
 ];
 
 /// One runnable world.

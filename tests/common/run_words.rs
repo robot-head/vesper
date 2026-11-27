@@ -29,8 +29,8 @@ pub enum Answer {
 /// The world-level features the Vesper machine does not model yet, which
 /// the Rust evaluator reads from the world rather than the program: the
 /// atomic and scoped-worker preludes (`atomics::intercepted`), `dyn`
-/// objects (vtable stubs and hidden parameters), element views, source
-/// regions, the generated `Pinned[T]` and the float modes. `None` when the
+/// objects (vtable stubs and hidden parameters), element views, the
+/// generated `Pinned[T]` and the float modes. `None` when the
 /// program may run.
 pub fn world_declines(world: &World) -> Option<&'static str> {
     if world.atomic_prelude || world.workers_prelude {
@@ -39,8 +39,6 @@ pub fn world_declines(world: &World) -> Option<&'static str> {
         Some("dyn objects")
     } else if !world.element_views.is_empty() {
         Some("element views")
-    } else if vesper::regions::active(world) {
-        Some("source regions")
     } else if world.adts.contains_key("Pinned") {
         Some("pinned buffers")
     } else if vesper::native::needs_nan_canonicalization(world)
@@ -106,11 +104,11 @@ const PAT_PAIR: u64 = u64::MAX - 1;
 /// ```text
 /// overflow-key+1  runtime-error-key+1      the primitive failures' Fail keys
 /// n, then per site: instruction (global index), kind, then
-///   handle:  effect label+1 instance-key+1 coerce static-key
+///   handle:  effect label+1 instance-key+1 coerce static-key region-capacity
 ///            free-count free-name... body-fn+1
 ///            ret-fn+1 ret-pattern ret-first ret-second
 ///            op-count (op clause-fn+1 pattern-count pattern...)...
-///   effect call: effect op instance-key+1 label+1
+///   effect call: effect op instance-key+1 label+1 region-op payload-size+1
 ///   try:     instance-key+1
 ///   closure: coerce free-count free-name... body-fn+1 param-count
 /// ```
@@ -119,6 +117,13 @@ const PAT_PAIR: u64 = u64::MAX - 1;
 /// any other pattern (the machine declines it); a return pattern may also be
 /// `u64::MAX - 1` for a pair. A function word is 0 when
 /// the body was not lowered (it would run as an AST expression).
+///
+/// A region block's capacity in bytes is 0 for any other handler. A region
+/// operation (the built-in `Region` effect, `regions::active`) is its index
+/// in `regions::OPERATIONS` + 1, else 0; its payload size + 1 is the native
+/// layout size of `T` in the call's `RegionBox[r, T]` result type, or 0
+/// when that type does not fix it (`region_payload_size` would read the
+/// value instead).
 fn sites(world: &World, program: &Program, t: &mut Tables) -> Vec<u64> {
     use vesper::ast::{ExprKind, PatternKind};
     use vesper::ir::Op;
@@ -171,6 +176,12 @@ fn sites(world: &World, program: &Program, t: &mut Tables) -> Vec<u64> {
                         }
                         row.push(flags);
                         row.push(t.enc.name(&format!("$static:$cap{}", expr.span.start)));
+                        let capacity = if vesper::regions::active(world) {
+                            vesper::regions::block_capacity(effect, ret)
+                        } else {
+                            None
+                        };
+                        row.push(capacity.map_or(0, |c| c as u64));
                         let mut free = vesper::check::clause_free_names(ret);
                         for op in ops {
                             free.extend(vesper::check::clause_free_names(op));
@@ -233,9 +244,27 @@ fn sites(world: &World, program: &Program, t: &mut Tables) -> Vec<u64> {
                         let key = instance_key(effect, types).map_or(0, |k| t.enc.name(&k) + 1);
                         // A labelled operation looks up its `$label:` key first.
                         let label = t.enc.opt_name(capability);
+                        let region = effect == vesper::regions::REGION_EFFECT
+                            && vesper::regions::active(world);
+                        let region_op = vesper::regions::OPERATIONS
+                            .iter()
+                            .position(|o| region && *o == op)
+                            .map_or(0, |p| p as u64 + 1);
+                        let payload = vesper::regions::box_parts(&i.ty)
+                            .and_then(|(_, ty)| vesper::layout::Layout::of(world, ty).ok())
+                            .map_or(0, |l| l.size as u64 + 1);
                         let effect = t.enc.name(effect);
                         let op = t.enc.name(op);
-                        rows.push(vec![at, SITE_EFFECT_CALL, effect, op, key, label]);
+                        rows.push(vec![
+                            at,
+                            SITE_EFFECT_CALL,
+                            effect,
+                            op,
+                            key,
+                            label,
+                            region_op,
+                            payload,
+                        ]);
                     }
                     Op::Closure { expr, .. } => {
                         let ExprKind::Closure { params, body, .. } = &expr.kind else {
