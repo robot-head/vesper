@@ -18,6 +18,8 @@
 // loops.ves, share_invariant_loads and hoist_loop_invariants; tails.ves,
 // merge_tails (with the shapes section of the words). Part 6: guards.ves,
 // eliminate_guarded_loop_add_overflows; seqloads.ves, reuse_seq_header_loads.
+// diamonds.ves (#2605): if_convert_pure_diamonds and
+// dense_icmp_chains_to_br_table.
 
 use self::extends::{fold_narrow_extends, fold_trivial_arith_and_bool_extends};
 use self::vector::{vector_registers};
@@ -26,6 +28,7 @@ use self::loops::{hoist_loop_invariants, share_invariant_loads};
 use self::tails::{merge_tails};
 use self::guards::{eliminate_guarded_loop_add_overflows};
 use self::seqloads::{reuse_seq_header_loads};
+use self::diamonds::{dense_icmp_chains_to_br_table, if_convert_pure_diamonds};
 use self::slots::{promote_slots, split_join_slots};
 use self::folds::{canonicalize_imm_ops, cse_dom_pure, fold_load_store_offsets};
 use self::branches::{
@@ -687,6 +690,8 @@ pub fn is_ported(step: u64) -> bool {
         || step == STEP_CANONICALIZE_IMM_OPS
         || step == STEP_FOLD_LOAD_STORE_OFFSETS
         || step == STEP_CSE_DOM_PURE
+        || step == STEP_IF_CONVERT_PURE_DIAMONDS
+        || step == STEP_DENSE_ICMP_CHAINS_TO_BR_TABLE
 }
 
 // Step `step` on `f` (a ported one).
@@ -741,6 +746,10 @@ fn run_step(inout f: Func, step: u64) {
         fold_load_store_offsets(inout f);
     } else if step == STEP_CSE_DOM_PURE {
         cse_dom_pure(inout f);
+    } else if step == STEP_IF_CONVERT_PURE_DIAMONDS {
+        if_convert_pure_diamonds(inout f);
+    } else if step == STEP_DENSE_ICMP_CHAINS_TO_BR_TABLE {
+        dense_icmp_chains_to_br_table(inout f);
     } else {
         remove_constant_params(inout f);
     }
