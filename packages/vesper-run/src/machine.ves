@@ -57,11 +57,13 @@ pub const T_F64: u8 = 18;
 pub const T_F32: u8 = 19;
 pub const T_UNDEF: u8 = 255;
 
-// Unary codes; a conversion is U_CONV + family * 16 + target kind.
+// Unary codes; a conversion is U_CONV + family * CONV_STRIDE + target kind.
 const U_NEG: u64 = 1;
 const U_NOT: u64 = 2;
 const U_INV: u64 = 3;
 const U_CONV: u64 = 16;
+// The codes of one conversion family: one per integer kind.
+const CONV_STRIDE: u64 = 16;
 const C_WIDEN: u64 = 0;
 const C_NARROW: u64 = 1;
 const C_WRAPPING: u64 = 2;
@@ -1767,7 +1769,7 @@ fn unary_code(in machine: M, sym: u32) -> u64 {
     if kind == TK_NONE {
         return 0;
     }
-    add(add(U_CONV, wrapping_mul(family, 16)), widen_u64(kind))
+    add(add(U_CONV, wrapping_mul(family, CONV_STRIDE)), widen_u64(kind))
 }
 
 // The float conversions and bit reinterpretations (`float_conversion`,
@@ -3110,14 +3112,14 @@ fn unary(inout machine: M, code: u64, value: Val, inout failure: u8) -> Val {
     if code == U_NEG && value.tag == T_F32 {
         return Val { tag: T_F32, payload: value.payload ^ F32_SIGN };
     }
-    if code >= U_CONV && is_float(value) && wrapping_sub(code, U_CONV) / 16 == C_NARROW {
+    if code >= U_CONV && is_float(value) && wrapping_sub(code, U_CONV) / CONV_STRIDE == C_NARROW {
         // A checked float-to-integer conversion (`float_to_integer_checked`).
         decline(inout machine, "a float-to-integer conversion", NONE32);
         return undef();
     }
     if code >= U_CONV {
-        let family = wrapping_sub(code, U_CONV) / 16;
-        let target_kind = wrapping_u8(wrapping_sub(code, U_CONV) % 16);
+        let family = wrapping_sub(code, U_CONV) / CONV_STRIDE;
+        let target_kind = wrapping_u8(wrapping_sub(code, U_CONV) % CONV_STRIDE);
         if value.tag > K_I32 {
             fail(inout machine, "invalid conversion operand");
             return undef();
