@@ -3303,6 +3303,33 @@ pub fn main() -> u64 {
         );
         remove_stage2_sidecars(&host_wasm);
 
+        // Verify unsuffixed LHS integer literals infer their type from the RHS
+        // in binary operators and same-integer builtins (e.g. `wrapping_sub(0, i128)`).
+        let lhs_lit_manifest = "[package]\nname = \"@vesper-test/stage2-lhs-int-lit\"\nversion = \"0.1.0\"\nedition = \"2026\"\n";
+        let lhs_lit_src = "\
+fn neg_i128(x: i128) -> u64 {
+    let n = wrapping_sub(0, x);
+    let shifted = 10 + n;
+    let bonus = if 0 < shifted { 1 } else { 0 };
+    wrapping_add(wrapping_u64(shifted), bonus)
+}
+pub fn main() -> u64 {
+    let neg: i128 = -5;
+    let wide: u128 = 20;
+    let sum = 2 + wide;
+    wrapping_add(neg_i128(neg), wrapping_u64(sum))
+}
+";
+        let lhs_lit_code =
+            compile_wrap(lhs_lit_manifest, lhs_lit_src).expect("compile lhs int lit smoke");
+        let lhs_lit_note = read_stage2_sidecar_notes(&host_wasm);
+        assert_eq!(lhs_lit_code, 0, "lhs int lit smoke failed: {lhs_lit_note}");
+        let lhs_lit_bytes = std::fs::read(&host_wasm).unwrap_or_default();
+        assert!(lhs_lit_bytes.starts_with(b"\0asm\x0d\x00\x01\x00"));
+        let lhs_lit_got = run(&lhs_lit_bytes, &Ctx::default()).expect("run lhs int lit smoke");
+        assert_eq!(lhs_lit_got, 38);
+        remove_stage2_sidecars(&host_wasm);
+
         let _ = std::fs::remove_file(&syms_path);
         std::fs::remove_dir_all(dir).unwrap();
     });
