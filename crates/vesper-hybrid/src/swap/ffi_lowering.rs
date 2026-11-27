@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 #[path = "../../port/ffi_lowering.rs"]
 mod ffi_lowering_binding;
 
-use super::{Registry, Swap, env_off, lend_codegen_op, on, open};
+use super::{Registry, Swap, env_off, lend_codegen_op, on, pass};
 
 /// `ffi` requests (`.vsys` foreign calls) the Vesper module emitted, and declined.
 static FFI_CALLS: AtomicU64 = AtomicU64::new(0);
@@ -25,7 +25,7 @@ fn vesper_ffi(lent: &mut vesper::codegen_swap::Lent<'_, '_>) -> Result<bool, Str
 }
 
 /// The flip-gate rows of this file's swaps (`swaps::on`).
-pub(super) const SWAPS: &[Swap] = &[open("ffi", "0 diffs; no flip-gate configuration")];
+pub(super) const SWAPS: &[Swap] = &[pass("ffi", "ffi-lowering", "#2617")];
 
 pub(super) fn register(r: &mut Registry) {
     if on("ffi") && !env_off("VESPER_HYBRID_FFI") {
