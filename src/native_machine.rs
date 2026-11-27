@@ -226,7 +226,7 @@ fn argument_cells(params: &[AbiParam]) -> Option<(usize, usize)> {
     let mut cells = 0;
     let mut floats = 0;
     for param in params {
-        if *param == AbiParam::new(types::I64) {
+        if integer_width(param.value_type).is_some() && *param == AbiParam::new(param.value_type) {
             cells += 1;
         } else if *param == AbiParam::new(types::I128)
             && cells + WIDE_INTEGER_CELLS <= GP_REGISTER_ARGUMENTS
@@ -250,9 +250,9 @@ fn integer_return_cells(returns: &[AbiParam]) -> Option<usize> {
         return Some(WIDE_INTEGER_CELLS);
     }
     (returns.len() <= GP_RESULTS
-        && returns
-            .iter()
-            .all(|param| *param == AbiParam::new(types::I64)))
+        && returns.iter().all(|param| {
+            integer_width(param.value_type).is_some() && *param == AbiParam::new(param.value_type)
+        }))
     .then_some(returns.len())
 }
 
@@ -347,7 +347,7 @@ fn entry_values(blocks: &mut IntegerBlocks<'_>, block: Block) -> Option<Values> 
             xmm += 1;
             continue;
         }
-        values.low[value] = Some(next);
+        values.low[value] = Some(blocks.normalize_abi_integer(next, ty));
         next += 1;
         if ty == types::I128 {
             values.high[value] = Some(next);
@@ -417,6 +417,17 @@ struct IntegerBlocks<'a> {
 }
 
 impl IntegerBlocks<'_> {
+    fn normalize_abi_integer(&mut self, cell: u64, ty: Type) -> u64 {
+        // Plain narrow SysV slots only define the low bits. The machine
+        // tape keeps narrow values zero-extended between operations.
+        match integer_width(ty) {
+            Some(width) if width < INTEGER_CELL_BITS => {
+                self.append(IntegerOp::Truncate, [cell, INTEGER_CELL_BITS, width])
+            }
+            _ => cell,
+        }
+    }
+
     fn supports_memory_access(&self, flags: MemFlags) -> bool {
         flags.notrap()
             || (self.allow_hardware_faults
@@ -602,14 +613,17 @@ impl IntegerBlocks<'_> {
                 float_arguments as u64,
             ],
         );
+        let high = (return_cells == GP_RESULTS).then(|| self.append(IntegerOp::CallHigh, [0; 3]));
         if let Some(&value) = results.first() {
-            values.low[value] = Some(id);
+            values.low[value] = Some(self.normalize_abi_integer(id, dfg.value_type(value)));
         }
-        if return_cells == GP_RESULTS {
-            let id = self.append(IntegerOp::CallHigh, [0; 3]);
+        if let Some(high) = high {
             match *results {
-                [wide] => values.high[wide] = Some(id),
-                [_, high] => values.low[high] = Some(id),
+                [wide] => values.high[wide] = Some(high),
+                [_, value] => {
+                    values.low[value] =
+                        Some(self.normalize_abi_integer(high, dfg.value_type(value)));
+                }
                 _ => return None,
             }
         }
@@ -1779,7 +1793,7 @@ impl IntegerBlocks<'_> {
     }
 }
 
-/// Encodes supported System V i64 paths into a value stream for the Vesper backend.
+/// Encodes supported System V scalar paths into a value stream for the Vesper backend.
 /// The header holds
 /// the argument count and the return value ID, with NO_VALUE for a procedure.
 /// The remaining words are

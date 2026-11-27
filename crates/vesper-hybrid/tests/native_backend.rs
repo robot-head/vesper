@@ -32,6 +32,7 @@ const MACHINE_UNSIGNED_ADD_OVERFLOW: u64 = 68;
 const MACHINE_OVERFLOW_FLAG: u64 = 74;
 const MACHINE_BRANCH_TABLE: u64 = 75;
 const MACHINE_TABLE_TARGET: u64 = 76;
+const WRAPPING_ADD_TERMS: usize = 9;
 
 #[derive(Clone, Copy, Debug)]
 enum Case {
@@ -50,6 +51,7 @@ enum Case {
     Compare64(IntCC),
     CompareNarrow(Type, IntCC),
     NarrowArithmetic(Type),
+    WrappingAddChain { width: Type, keep_middle: bool },
     ImmediateBoundaries(Type),
     NarrowShifts(Type),
     ChainedCasts,
@@ -223,6 +225,9 @@ fn integer_backend_matches_cranelift_results() {
                     }),
             )
             .chain([types::I8, types::I16, types::I32].map(Case::NarrowArithmetic))
+            .chain([types::I32, types::I64].into_iter().flat_map(|width| {
+                [false, true].map(move |keep_middle| Case::WrappingAddChain { width, keep_middle })
+            }))
             .chain([types::I8, types::I16, types::I32, types::I64].map(Case::Atomic))
             .chain([types::I16, types::I32, types::I64].map(Case::ByteSwap))
             .chain([types::I8, types::I16, types::I32, types::I64].map(Case::ImmediateBoundaries))
@@ -898,6 +903,36 @@ fn integer_backend_matches_cranelift_results() {
                 let predicate = builder.ins().bor(zero, low);
                 builder.ins().uextend(types::I64, predicate)
             }
+            Case::WrappingAddChain { width, keep_middle } => {
+                let (term, base) = if width == types::I64 {
+                    (a, b)
+                } else {
+                    (
+                        builder.ins().ireduce(width, a),
+                        builder.ins().ireduce(width, b),
+                    )
+                };
+                let mut sum = base;
+                let mut middle = base;
+                for index in 0..WRAPPING_ADD_TERMS {
+                    sum = if index % 2 == 0 {
+                        builder.ins().iadd(term, sum)
+                    } else {
+                        builder.ins().iadd(sum, term)
+                    };
+                    if index == WRAPPING_ADD_TERMS / 2 {
+                        middle = sum;
+                    }
+                }
+                if keep_middle {
+                    sum = builder.ins().bxor(sum, middle);
+                }
+                if width == types::I64 {
+                    sum
+                } else {
+                    builder.ins().uextend(types::I64, sum)
+                }
+            }
             Case::ImmediateBoundaries(width) => {
                 let input = if width == types::I64 {
                     a
@@ -965,6 +1000,16 @@ fn integer_backend_matches_cranelift_results() {
         }
         let bytes = binding::x86_64_integer_block(&request);
         assert!(!bytes.is_empty(), "{case:?}");
+        if matches!(
+            case,
+            Case::WrappingAddChain {
+                width: types::I64,
+                keep_middle: false
+            }
+        ) {
+            const X86_64_REGISTER_ADD_BYTES: usize = 3;
+            assert!(bytes.len() < WRAPPING_ADD_TERMS * X86_64_REGISTER_ADD_BYTES);
+        }
         if matches!(case, Case::Atomic(_)) {
             const MFENCE: [u8; 3] = [0x0f, 0xae, 0xf0];
             assert!(

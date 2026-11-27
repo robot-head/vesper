@@ -203,6 +203,135 @@ fn define_callable(
 }
 
 #[test]
+fn narrow_system_v_cells_cross_both_backend_boundaries() {
+    type Entry = unsafe extern "C" fn(u64, u64) -> u64;
+    let mut module = jit_module();
+    let widths = [
+        types::I8,
+        types::I16,
+        types::I32,
+        types::I64,
+        types::I64,
+        types::I64,
+        types::I8,
+        types::I16,
+    ];
+    let mut narrow = module.make_context();
+    narrow
+        .func
+        .signature
+        .params
+        .extend(widths.map(AbiParam::new));
+    narrow
+        .func
+        .signature
+        .returns
+        .extend([types::I8, types::I32].map(AbiParam::new));
+    let signature = narrow.func.signature.clone();
+    let mut state = FunctionBuilderContext::new();
+    let mut b = FunctionBuilder::new(&mut narrow.func, &mut state);
+    let entry = b.create_block();
+    b.append_block_params_for_function_params(entry);
+    b.switch_to_block(entry);
+    let [byte, word, dword, _, _, _, stack_byte, stack_word] = *b.block_params(entry) else {
+        unreachable!()
+    };
+    let low = b.ins().bxor(byte, stack_byte);
+    let first = b.ins().uextend(types::I32, word);
+    let second = b.ins().sextend(types::I32, stack_word);
+    let high = b.ins().iadd(dword, first);
+    let high = b.ins().iadd(high, second);
+    b.ins().return_(&[low, high]);
+    b.seal_all_blocks();
+    b.finalize();
+    let mut extended = narrow.func.clone();
+    extended.signature.params[0] = extended.signature.params[0].sext();
+    assert!(native::machine::integer_block_words(&extended).is_none());
+
+    let reference = module.declare_anonymous_function(&signature).unwrap();
+    let candidate = module.declare_anonymous_function(&signature).unwrap();
+    let words = native::machine::integer_block_words(&narrow.func).unwrap();
+    let bytes = binding::x86_64_integer_block(&words);
+    assert!(!bytes.is_empty());
+    let alignment = u64::from(module.isa().function_alignment().minimum);
+    module
+        .define_function_bytes(candidate, alignment, &bytes, &[])
+        .unwrap();
+    module.define_function(reference, &mut narrow).unwrap();
+
+    let mut entry_signature = module.make_signature();
+    entry_signature.params = vec![AbiParam::new(types::I64); 2];
+    entry_signature.returns.push(AbiParam::new(types::I64));
+    let mut entries = Vec::new();
+    for (port, target) in [
+        (false, reference),
+        (true, reference),
+        (false, candidate),
+        (true, candidate),
+    ] {
+        let mut context = module.make_context();
+        context.func.signature = entry_signature.clone();
+        let callee = module.declare_func_in_func(target, &mut context.func);
+        let mut b = FunctionBuilder::new(&mut context.func, &mut state);
+        let entry = b.create_block();
+        b.append_block_params_for_function_params(entry);
+        b.switch_to_block(entry);
+        let [a, z] = *b.block_params(entry) else {
+            unreachable!()
+        };
+        let inputs = [a, z, z, a, z, a, z, a];
+        let args: Vec<_> = widths
+            .into_iter()
+            .zip(inputs)
+            .map(|(width, value)| {
+                if width == types::I64 {
+                    value
+                } else {
+                    b.ins().ireduce(width, value)
+                }
+            })
+            .collect();
+        let call = b.ins().call(callee, &args);
+        let [low, high] = *b.inst_results(call) else {
+            unreachable!()
+        };
+        let low = b.ins().uextend(types::I64, low);
+        let high = b.ins().uextend(types::I64, high);
+        let high = b.ins().ishl_imm(high, i64::from(u8::BITS));
+        let result = b.ins().bor(high, low);
+        b.ins().return_(&[result]);
+        b.seal_all_blocks();
+        b.finalize();
+        let id = module.declare_anonymous_function(&entry_signature).unwrap();
+        if port {
+            define_callable(&mut module, id, target, &context.func, 1);
+        } else {
+            module.define_function(id, &mut context).unwrap();
+        }
+        entries.push(id);
+    }
+    module.finalize_definitions().unwrap();
+    for (a, z) in [
+        (0, 0),
+        (u64::MAX, 1),
+        (0xdead_beef_1000_8001, 0xcafe_babe_ffff_fffe),
+    ] {
+        let low = u64::from(a as u8 ^ z as u8);
+        let high = (z as u32)
+            .wrapping_add(u32::from(z as u16))
+            .wrapping_add(i32::from(a as i16) as u32);
+        let expected = (u64::from(high) << u8::BITS) | low;
+        for &id in &entries {
+            let run = unsafe {
+                std::mem::transmute::<*const u8, Entry>(module.get_finalized_function(id))
+            };
+            assert_eq!(unsafe { run(a, z) }, expected, "{id:?}({a:#x}, {z:#x})");
+        }
+    }
+    unsafe { module.free_memory() };
+}
+
+#[test]
 fn void_calls_and_conditional_returns_preserve_side_effects() {
     type Procedure = unsafe extern "C" fn(*mut u64, u64);
     const NO_VALUE: u64 = u64::MAX;

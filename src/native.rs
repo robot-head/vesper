@@ -2001,7 +2001,7 @@ fn define_instances_observed_with_trace<M: Module>(
         for (cold_id, cold_key, cold_func) in cold_helpers {
             let mut cold_ctx = m.make_context();
             cold_ctx.func = cold_func;
-            m.define_function(cold_id, &mut cold_ctx)
+            machine::define(m, cold_id, &mut cold_ctx, try_machine)
                 .map_err(|e| format!("native codegen '{cold_key}': {e}"))?;
             m.clear_context(&mut cold_ctx);
         }

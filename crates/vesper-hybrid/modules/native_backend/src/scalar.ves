@@ -167,6 +167,8 @@ const THIRD_SCRATCH: u8 = R11;
 // One Linux x86-64 base page. Larger frames need stack probes.
 const STACK_PROBE_INTERVAL: u64 = 4096;
 const MAX_ARGUMENTS: u64 = ARGUMENTS + STACK_PROBE_INTERVAL / SPILL_SLOT_BYTES - 1;
+const MIN_FOLDED_ADDS: u64 = 4;
+const MAX_FOLDED_ADDS: u64 = 0x7fffffff;
 
 copy struct Record {
     op: u64,
@@ -257,6 +259,91 @@ fn read_record(in words: Slice[u64], index: u64) -> Record {
         right: word_at(in words, wrapping_add(start, RIGHT)),
         extra: word_at(in words, wrapping_add(start, EXTRA))
     }
+}
+
+fn write_record(inout words: ChunkSeq[u64], index: u64, in record: Record) {
+    let start = wrapping_add(HEADER_WORDS, wrapping_mul(index, RECORD_WORDS));
+    let _ = words.try_set(wrapping_add(start, OP), record.op);
+    let _ = words.try_set(wrapping_add(start, LEFT), record.left);
+    let _ = words.try_set(wrapping_add(start, RIGHT), record.right);
+    let _ = words.try_set(wrapping_add(start, EXTRA), record.extra);
+}
+
+// A wrapping add chain can become one multiply and one add. Keep the
+// original record IDs so branches, returns and relocations remain valid.
+fn fold_add_chains(
+    in words: Slice[u64],
+    in reads: ChunkSeq[u64],
+    arguments: u64,
+    count: u64
+) -> ChunkSeq[u64] {
+    let mut folded = ChunkSeq::new[u64]();
+    let mut next: u64 = 0;
+    for index in 0..count {
+        if index < next {
+            continue;
+        }
+        let first = read_record(in words, index);
+        if first.op != ADD || (first.extra != DWORD_BITS && first.extra != QWORD_BITS) {
+            continue;
+        }
+        let mut base = first.left;
+        let mut term = first.right;
+        let mut end = index;
+        for candidate in wrapping_add(index, 1)..count {
+            let previous = wrapping_add(arguments, wrapping_sub(candidate, 1));
+            let current = read_record(in words, candidate);
+            // The preceding value is defined immediately before this record.
+            // Its last read here proves that no other record can use it.
+            if current.op != ADD
+                || current.extra != first.extra
+                || last_read(in reads, previous) != wrapping_add(previous, 1)
+            {
+                break;
+            }
+            let repeated = if current.left == previous {
+                current.right
+            } else if current.right == previous {
+                current.left
+            } else {
+                break;
+            };
+            if repeated != term {
+                if candidate == wrapping_add(index, 1) && repeated == first.left {
+                    base = first.right;
+                    term = first.left;
+                } else {
+                    break;
+                }
+            }
+            end = candidate;
+        }
+        let length = wrapping_add(wrapping_sub(end, index), 1);
+        next = wrapping_add(end, 1);
+        if length < MIN_FOLDED_ADDS || length > MAX_FOLDED_ADDS {
+            continue;
+        }
+        if folded.len() == 0 {
+            folded.extend(in words);
+        }
+        let product = wrapping_sub(end, 1);
+        write_record(
+            inout folded,
+            product,
+            in Record { op: MUL_IMMEDIATE, left: term, right: length, extra: first.extra }
+        );
+        write_record(
+            inout folded,
+            end,
+            in Record {
+                op: ADD,
+                left: base,
+                right: wrapping_add(arguments, product),
+                extra: first.extra
+            }
+        );
+    }
+    folded
 }
 
 fn call_argument(in words: Slice[u64], start: u64, argument: u64) -> u64 {
@@ -1161,7 +1248,9 @@ fn allocate(
     spills: bool
 ) -> Option[Allocation] {
     let mut locations = ChunkSeq::with_capacity[Location](wrapping_add(arguments, count));
-    let gp_reserved = if spills {
+    // Incoming stack arguments materialize through the same scratch bank
+    // as allocator spills, even when every result fits in a register.
+    let gp_reserved = if spills || arguments > ARGUMENTS {
         register_bit(LEFT_SCRATCH) | register_bit(RIGHT_SCRATCH) | register_bit(THIRD_SCRATCH)
     } else if frame.outgoing != 0 || frame.fixed || frame.floating {
         register_bit(THIRD_SCRATCH)
@@ -1782,6 +1871,15 @@ pub fn encode_block(
     allow_relocations: bool,
     inout relocations: ChunkSeq[u64]
 ) -> ChunkSeq[u8] {
+    encode_block_pass(in words, allow_relocations, inout relocations, true)
+}
+
+fn encode_block_pass(
+    in words: Slice[u64],
+    allow_relocations: bool,
+    inout relocations: ChunkSeq[u64],
+    fold_adds: bool
+) -> ChunkSeq[u8] {
     if words.len() < HEADER_WORDS {
         return ChunkSeq::new[u8]();
     }
@@ -1872,6 +1970,22 @@ pub fn encode_block(
             || !valid_float_operands(in words, arguments, count, paired, float_return))
     {
         return ChunkSeq::new[u8]();
+    }
+    if fold_adds {
+        let folded = fold_add_chains(in words, in reads, arguments, count);
+        if folded.len() != 0 {
+            let mut folded_relocations = ChunkSeq::new[u64]();
+            let output = encode_block_pass(
+                in folded.as_slice(),
+                allow_relocations,
+                inout folded_relocations,
+                false
+            );
+            if output.len() != 0 {
+                relocations.extend(in folded_relocations.as_slice());
+                return output;
+            }
+        }
     }
     let allocation = match allocate(in words, in reads, arguments, count, in frame, paired, false) {
         Option::Some(result) => result,
