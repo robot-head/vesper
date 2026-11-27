@@ -32,9 +32,12 @@
 // `return` out of a handler body, and non-`dyn` `Box` values. Slice 10
 // adds region blocks: each one's region is an @vesper/alloc book of one
 // chunk bounded by its capacity, with payloads held beside their byte
-// allocations, so `used()` and exhaustion match the Rust store. A program
+// allocations, so `used()` and exhaustion match the Rust store. Slice 11
+// adds the float modes: a DetFloat program's arithmetic and `f32`/`f64`
+// conversions return the canonical NaN, and `eff [ConstDenorm]` code
+// flushes subnormal operands and results. A program
 // reaching anything else (labelled function types, float math
-// intrinsics, a float mode, 128-bit integers, vector and tiled operations) is declined before
+// intrinsics, 128-bit integers, vector and tiled operations) is declined before
 // it runs (`scan`); a continuation resumed outside its handler's
 // activation, a float-to-integer conversion, a region payload whose call
 // type does not fix its size (inside a generic function), or a result with
