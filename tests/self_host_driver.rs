@@ -718,3 +718,118 @@ fn windows_link_matches_rust() {
         }
     }
 }
+
+fn encode_diagnostics_stream(ds: &[vesper::ast::Diagnostic]) -> Vec<u8> {
+    let mut out = Vec::new();
+    let push_u64 = |buf: &mut Vec<u8>, v: u64| buf.extend_from_slice(&v.to_le_bytes());
+    let push_str = |buf: &mut Vec<u8>, s: &str| {
+        buf.extend_from_slice(&(s.len() as u64).to_le_bytes());
+        buf.extend_from_slice(s.as_bytes());
+    };
+    push_u64(&mut out, ds.len() as u64);
+    for d in ds {
+        push_str(&mut out, &d.code);
+        push_str(&mut out, &d.message);
+        push_u64(&mut out, d.span.start as u64);
+        push_u64(&mut out, d.span.end as u64);
+        push_u64(&mut out, d.related.len() as u64);
+        for r in &d.related {
+            push_u64(&mut out, r.span.start as u64);
+            push_u64(&mut out, r.span.end as u64);
+            push_str(&mut out, &r.message);
+        }
+        match &d.help {
+            Some(h) => {
+                push_u64(&mut out, 1);
+                push_str(&mut out, h);
+            }
+            None => push_u64(&mut out, 0),
+        }
+    }
+    out
+}
+
+fn rust_raw_diagnostics(reason: &str, ds: &[vesper::ast::Diagnostic]) -> String {
+    const MAX_RAW_DIAGNOSTICS: usize = 128;
+    const MAX_RAW_CODE_CHARS: usize = 128;
+    const MAX_RAW_MESSAGE_CHARS: usize = 4096;
+    let mut out = format!("diagnostic source rendering unavailable: {reason}\n");
+    for d in ds.iter().take(MAX_RAW_DIAGNOSTICS) {
+        let code: String = d.code.chars().take(MAX_RAW_CODE_CHARS).collect();
+        let message: String = d.message.chars().take(MAX_RAW_MESSAGE_CHARS).collect();
+        out.push_str(&format!(
+            "{code}: {message} (UTF-8 bytes {}..{})\n",
+            d.span.start, d.span.end
+        ));
+    }
+    if ds.len() > MAX_RAW_DIAGNOSTICS {
+        out.push_str(&format!(
+            "{} additional compiler errors exceed the display profile\n",
+            ds.len() - MAX_RAW_DIAGNOSTICS
+        ));
+    }
+    out
+}
+
+#[test]
+fn diagnostics_format_matches_rust() {
+    use vesper::ast::Diagnostic;
+
+    let json_entry = driver().entry("diagnostics_json_words", true);
+    let raw_entry = driver().entry("format_raw_diagnostics_words", true);
+
+    let cases: Vec<(&str, Vec<Diagnostic>)> = vec![
+        ("empty", vec![]),
+        (
+            "escapes-and-fields",
+            vec![
+                Diagnostic::new(
+                    "E0001",
+                    "bad \"quote\" \\slash\n\r\t\u{0008}\u{000c}\u{0000}\u{001f} λ🚀",
+                    0..42,
+                )
+                .with_related(5..10, "first \"note\"")
+                .with_related(12..18, "second\nnote")
+                .with_help("try `let x = 1;`"),
+                Diagnostic::new("E0002", "plain", 100..200),
+            ],
+        ),
+        (
+            "utf8-truncation-and-overflow",
+            (0..135usize)
+                .map(|i| {
+                    if i == 0 {
+                        let long_code = "é".repeat(150);
+                        let long_msg = "🚀".repeat(4120);
+                        Diagnostic::new(&long_code, long_msg, 1..999)
+                    } else {
+                        Diagnostic::new(&format!("E{i:04}"), format!("msg {i}"), i..i + 3)
+                    }
+                })
+                .collect(),
+        ),
+    ];
+
+    for (name, ds) in &cases {
+        let stream = encode_diagnostics_stream(ds);
+
+        let json_words = json_entry.words(&stream);
+        let mut at = 0;
+        let got_json = String::from_utf8(unpack(&json_words, &mut at)).unwrap();
+        assert_eq!(at, json_words.len(), "{name}: json words");
+        let want_json = serde_json::to_string(ds).unwrap();
+        assert_eq!(got_json, want_json, "{name}: json mismatch");
+
+        let reason = "source exceeds the 1 MiB diagnostic display profile";
+        let mut raw_input = Vec::new();
+        raw_input.extend_from_slice(&(reason.len() as u64).to_le_bytes());
+        raw_input.extend_from_slice(reason.as_bytes());
+        raw_input.extend_from_slice(&stream);
+        let raw_words = raw_entry.words(&raw_input);
+        let mut at = 0;
+        let got_raw = String::from_utf8(unpack(&raw_words, &mut at)).unwrap();
+        assert_eq!(at, raw_words.len(), "{name}: raw words");
+        let want_raw = rust_raw_diagnostics(reason, ds);
+        assert_eq!(got_raw, want_raw, "{name}: raw mismatch");
+    }
+}

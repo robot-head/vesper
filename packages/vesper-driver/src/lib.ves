@@ -1026,6 +1026,10 @@ pub use self::windows_link::{
     windows_linker_flavor
 };
 
+pub use self::diagnostics::{
+    diagnostics_json, diagnostics_json_words, format_raw_diagnostics, format_raw_diagnostics_words
+};
+
 pub fn record_format() -> u64 {
     3
 }
