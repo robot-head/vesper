@@ -1430,6 +1430,11 @@ impl IntegerBlocks<'_> {
         }
     }
 
+    fn emits_trap(&self, inst: Inst) -> bool {
+        (self.allow_hardware_faults || self.aarch64)
+            && self.function.dfg.insts[inst].opcode() == Opcode::Trap
+    }
+
     // Each arm follows its path to a return or trap. If the paths rejoin, the shared
     // suffix is emitted for each arm with that arm's argument bindings.
     // Each traversal includes the prefix in its visited set to reject cycles.
@@ -1450,9 +1455,7 @@ impl IntegerBlocks<'_> {
             blocks: [yes_edge, no_edge],
         } = self.function.dfg.insts[terminator]
         else {
-            return if self.allow_hardware_faults
-                && self.function.dfg.insts[terminator].opcode() == Opcode::Trap
-            {
+            return if self.emits_trap(terminator) {
                 Some(PathExit::Trap)
             } else {
                 self.returned(terminator, &values)
@@ -1792,12 +1795,11 @@ impl IntegerBlocks<'_> {
                     }
                 }
                 _ => {
-                    let (low, high) =
-                        if self.allow_hardware_faults && dfg.insts[end].opcode() == Opcode::Trap {
-                            (TRAP_VALUE, None)
-                        } else {
-                            self.returned(end, &values)?
-                        };
+                    let (low, high) = if self.emits_trap(end) {
+                        (TRAP_VALUE, None)
+                    } else {
+                        self.returned(end, &values)?
+                    };
                     self.append(IntegerOp::BlockReturn, [low, high.unwrap_or(0), 0]);
                 }
             }

@@ -14,6 +14,7 @@ const BYTE_BITS: u64 = u8::BITS as u64;
 const DWORD_BITS: u64 = u32::BITS as u64;
 const CELL_BITS: u64 = u64::BITS as u64;
 const NO_VALUE: u64 = u64::MAX;
+const TRAP_VALUE: u64 = NO_VALUE - 1;
 const CONSTANT: u64 = 0;
 const ADD: u64 = 1;
 const SHL: u64 = 9;
@@ -36,6 +37,7 @@ const CALL_ARGUMENT: u64 = 39;
 const CALL_VOID: u64 = 40;
 const CALL_PAIR: u64 = 41;
 const CALL_HIGH: u64 = 42;
+const TRAP: u64 = 45;
 const SIGNED_DIV: u64 = 46;
 const UNSIGNED_DIV: u64 = 47;
 const SIGNED_REM: u64 = 48;
@@ -299,6 +301,86 @@ fn aarch64_integer_division_checks_zero_and_signed_overflow() {
         ],
     );
     assert!(encode(SIGNED_DIV, BYTE_BITS, 2).is_empty());
+}
+
+#[test]
+fn aarch64_explicit_traps_terminate_their_control_flow_paths() {
+    const UDF: u32 = 0x0000_c11f;
+    const CBZ_X0_OVER_UDF: u32 = 0xb400_0040;
+    const CBZ_X2_TO_FINAL_TRAP: u32 = 0xb400_00a2;
+    const MOV_X16_X1: u32 = 0xaa01_03f0;
+    const MOV_X1_X0: u32 = 0xaa00_03e1;
+    const MOV_X0_X16: u32 = 0xaa10_03e0;
+    assert_eq!(
+        binding::aarch64_integer_leaf(&[0, NO_VALUE, TRAP, 0, 0, 0]),
+        UDF.to_le_bytes(),
+    );
+    assert_eq!(
+        binding::aarch64_integer_leaf(&[
+            1,
+            0,
+            BRANCH_ZERO,
+            0,
+            0,
+            0,
+            EARLY_RETURN,
+            TRAP_VALUE,
+            0,
+            1
+        ]),
+        [CBZ_X0_OVER_UDF, UDF, RET].map(u32::to_le_bytes).concat(),
+    );
+    assert_eq!(
+        binding::aarch64_integer_leaf(&[
+            3,
+            NO_VALUE,
+            BRANCH_ZERO,
+            2,
+            0,
+            0,
+            EARLY_RETURN,
+            1,
+            0,
+            3,
+            TRAP,
+            2,
+            0,
+            0,
+        ]),
+        [
+            CBZ_X2_TO_FINAL_TRAP,
+            MOV_X16_X1,
+            MOV_X1_X0,
+            MOV_X0_X16,
+            RET,
+            UDF
+        ]
+        .map(u32::to_le_bytes)
+        .concat(),
+    );
+    assert_eq!(
+        binding::aarch64_integer_leaf(&[
+            0,
+            NO_VALUE,
+            BLOCK_LABEL,
+            0,
+            0,
+            0,
+            BLOCK_RETURN,
+            TRAP_VALUE,
+            0,
+            0,
+        ]),
+        UDF.to_le_bytes(),
+    );
+    for malformed in [
+        &[1, 0, TRAP, 0, 0, 0][..],
+        &[0, NO_VALUE, TRAP, 3, 0, 0],
+        &[0, NO_VALUE, TRAP, 0, 0, 0, CONSTANT, 1, 0, 0],
+        &[1, 0, BRANCH_ZERO, 0, 0, 0, EARLY_RETURN, TRAP_VALUE, 7, 1],
+    ] {
+        assert!(binding::aarch64_integer_leaf(malformed).is_empty());
+    }
 }
 
 #[test]
