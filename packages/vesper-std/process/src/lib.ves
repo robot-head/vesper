@@ -1219,3 +1219,67 @@ pub fn exit(code: i64) eff [Ffi[StdProcess]] {
 pub fn id() -> u64 eff [Ffi[StdProcess]] {
     widen_u64(wrapping_u32(StdProcess::getpid()))
 }
+
+// ---------------------------------------------------------------------------
+// This process's standard input.
+
+// Standard input's descriptor.
+const STDIN_FD: u64 = 0;
+// Where `struct pollfd`'s `events` start in `poll`'s one-word entries.
+const POLL_EVENTS_SHIFT: u64 = 4294967296;
+// The longest wait `poll` takes in one call, in milliseconds.
+const POLL_MAX_MS: i64 = 2147483647;
+// `read_wait`'s answer when the wait passed with nothing to read.
+const READ_WAITED: i64 = -1;
+
+// This process's standard input, for `read_wait`: a descriptor (on
+// Windows, a `HANDLE`).
+pub fn stdin_handle() -> u64 eff [Ffi[StdProcess]] {
+    STDIN_FD
+}
+
+// Read what the open stream `stream` holds into `buf` (which is not
+// empty), waiting at most `wait_ms` milliseconds for bytes (negative: no
+// limit): the bytes read, 0 at the end of the stream, or -1 when the wait
+// passed with nothing to read. `EINTR` is retried.
+pub fn read_wait(
+    stream: u64,
+    inout buf: Slice[u8],
+    wait_ms: i64
+) -> Result[i64, IoError] eff [Ffi[StdProcess]] {
+    let fd = wrapping_i32(stream);
+    if wait_ms >= 0 {
+        let timeout = wrapping_i32(
+            if wait_ms > POLL_MAX_MS {
+                POLL_MAX_MS
+            } else {
+                wait_ms
+            }
+        );
+        loop {
+            let mut fds: ChunkSeq[u64] = ChunkSeq::new[u64]();
+            fds.push(
+                widen_u64(wrapping_u32(fd)) | wrapping_mul(StdProcess::POLLIN, POLL_EVENTS_SHIFT)
+            );
+            let (r, e) = StdProcess::poll(inout fds[0..1], timeout);
+            if r > 0 {
+                break;
+            }
+            if r == 0 {
+                return Result::Ok(READ_WAITED);
+            }
+            if e != StdProcess::EINTR {
+                return Result::Err(io_errno(e));
+            }
+        }
+    }
+    loop {
+        let (n, e) = StdProcess::read(fd, inout buf);
+        if n >= 0 {
+            return Result::Ok(n);
+        }
+        if e != StdProcess::EINTR {
+            return Result::Err(io_errno(e));
+        }
+    }
+}

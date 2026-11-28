@@ -349,3 +349,17 @@ pub fn output(sink c: ProcCommand) -> Output eff [Ffi[StdProcess], Fail[IoError]
 pub fn id() -> u64 eff [Ffi[StdProcess]] {
     0
 }
+
+// This process's standard input, for `read_wait`.
+pub fn stdin_handle() -> u64 eff [Ffi[StdProcess]] {
+    0
+}
+
+// Reading standard input with a wait is not supported on WASI yet.
+pub fn read_wait(
+    _stream: u64,
+    inout _buf: Slice[u8],
+    _wait_ms: i64
+) -> Result[i64, IoError] eff [Ffi[StdProcess]] {
+    Result::Err(io_kind(unsupported()))
+}

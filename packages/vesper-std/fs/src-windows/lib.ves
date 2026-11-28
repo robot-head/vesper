@@ -271,8 +271,23 @@ pub fn write_stderr(in data: Slice[u8]) eff [Ffi[StdFs], Fail[IoError]] {
     write_std_handle(StdFs::STD_ERROR_HANDLE, in data);
 }
 
+// Standard output, for `write_handle`: a `HANDLE`.
+pub fn stdout_handle() -> u64 eff [Ffi[StdFs]] {
+    StdFs::GetStdHandle(StdFs::STD_OUTPUT_HANDLE)
+}
+
+// Write all of `data` to the open stream `stream`, as `write_stdout`
+// writes standard output.
+pub fn write_handle(stream: u64, in data: Slice[u8]) eff [Ffi[StdFs], Fail[IoError]] {
+    write_all_or_raise(stream, in data);
+}
+
 fn write_std_handle(which: i32, in data: Slice[u8]) eff [Ffi[StdFs], Fail[IoError]] {
     let h = StdFs::GetStdHandle(which);
+    write_all_or_raise(h, in data);
+}
+
+fn write_all_or_raise(h: u64, in data: Slice[u8]) eff [Ffi[StdFs], Fail[IoError]] {
     // No handle (a detached process) takes everything, as Rust's stdout does.
     if h == 0 || h == StdFs::INVALID_HANDLE_VALUE {
         return;

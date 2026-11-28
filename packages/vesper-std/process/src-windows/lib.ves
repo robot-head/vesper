@@ -1285,3 +1285,68 @@ pub fn exit(code: i64) eff [Ffi[StdProcess]] {
 pub fn id() -> u64 eff [Ffi[StdProcess]] {
     widen_u64(StdProcess::GetCurrentProcessId())
 }
+
+// ---------------------------------------------------------------------------
+// This process's standard input.
+
+// How long `read_wait` sleeps between looks at a pipe, in milliseconds.
+const PEEK_SLICE_MS: u64 = 5;
+// `read_wait`'s answers for the end of the stream and for a wait that
+// passed with nothing to read.
+const READ_END: i64 = 0;
+const READ_WAITED: i64 = -1;
+
+// This process's standard input, for `read_wait`: a `HANDLE`.
+pub fn stdin_handle() -> u64 eff [Ffi[StdProcess]] {
+    StdProcess::GetStdHandle(StdProcess::STD_INPUT_HANDLE)
+}
+
+// Read what the open stream `stream` holds into `buf` (which is not
+// empty), waiting at most `wait_ms` milliseconds for bytes (negative: no
+// limit): the bytes read, 0 at the end of the stream, or -1 when the wait
+// passed with nothing to read. A pipe is watched with `PeekNamedPipe`;
+// any other stream (a console, a file) is read without a time limit.
+pub fn read_wait(
+    stream: u64,
+    inout buf: Slice[u8],
+    wait_ms: i64
+) -> Result[i64, IoError] eff [Ffi[StdProcess]] {
+    if wait_ms >= 0 {
+        let millis = wrapping_u64(wait_ms);
+        let start = StdProcess::GetTickCount64();
+        loop {
+            let mut avail = DwordBox { v: 0 };
+            let (ok, e) = StdProcess::PeekNamedPipe(stream, 0, 0, 0, inout avail, 0);
+            if ok == 0 {
+                if e == StdProcess::ERROR_BROKEN_PIPE {
+                    return Result::Ok(READ_END);
+                }
+                break;
+            }
+            if avail.v > 0 {
+                break;
+            }
+            let spent = wrapping_sub(StdProcess::GetTickCount64(), start);
+            if spent >= millis {
+                return Result::Ok(READ_WAITED);
+            }
+            let left = wrapping_sub(millis, spent);
+            StdProcess::Sleep(wrapping_u32(
+                if left < PEEK_SLICE_MS {
+                    left
+                } else {
+                    PEEK_SLICE_MS
+                }
+            ));
+        }
+    }
+    let mut n = DwordBox { v: 0 };
+    let (ok, e) = StdProcess::ReadFile(stream, inout buf, inout n, 0);
+    if ok == 0 {
+        if e == StdProcess::ERROR_BROKEN_PIPE {
+            return Result::Ok(READ_END);
+        }
+        return Result::Err(error_of(widen_u64(e)));
+    }
+    Result::Ok(widen_i64(n.v))
+}

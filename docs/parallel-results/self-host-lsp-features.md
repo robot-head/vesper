@@ -1551,3 +1551,41 @@ The part 15a and 15b differentials bind the same seam by its new names:
 Rust lines deleted: 39 (`hc_lsp_serve`, `hc_lsp_err` and their error
 cell). `src/lsp.rs` `serve` stays for the root `vesper` binary until the
 hybrid is the default.
+
+# Part 16a: the loop owns the client's streams
+
+`@vesper/lsp-server` now reads and writes the client itself, so the
+engine seam is only the Rust session (#2762). `serve_live` takes a
+`Client`: the stream it reads, the stream it writes, its read size, and a
+test knob that makes every other read wait out a deadline of 0 so the
+engine ticks between reads. `serve_stdio` serves standard input and
+output with 64 KiB reads.
+
+## What changed
+
+- `@vesper-std/process`: `stdin_handle` and `read_wait(stream, buf,
+  wait_ms)`, which answers bytes read, 0 at the end, or -1 when the wait
+  passed. Unix waits with `poll`. Windows watches a pipe with
+  `PeekNamedPipe` and reads any other stream without a limit. WASI
+  answers unsupported. No new imports: each target already declared these
+  functions.
+- `@vesper-std/fs`: `stdout_handle` and `write_handle(stream, data)`, as
+  `write_stdout` writes.
+- `packages/vesper-driver-engines`: `hc_lsp_engine_read` and
+  `hc_lsp_engine_write` are gone (7 hooks left).
+- `crates/vesper-hybrid/src/lsp_engine.rs`: the standard input reader
+  thread, its channel and the two hooks are deleted.
+- `tests/self_host_lsp_core.rs`: the live differentials feed the loop
+  down a real pipe (an empty part is a pause) and read its frames from
+  another, instead of host read and write callbacks.
+
+## Differential
+
+The part 15a and 15b differentials, with the client on pipes: 16
+sessions, 160 chunked runs (1-, 5-, 64-, 4,096-byte and 64 KiB reads,
+each with and without ticks between reads) and the timed session,
+0 diffs.
+
+Rust lines deleted: 101 in `lsp_engine.rs`. Next (16b): the session's
+lifecycle, client flags, document store and debounce timers in Vesper.
+The checker-backed requests wait on a Vesper checker for one document.

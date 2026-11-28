@@ -20,9 +20,11 @@ use @vesper/lsp::{
 };
 use @vesper/serde::Doc;
 use @vesper/driver-engines::{
-    lsp_engine_deadline, lsp_engine_error_text, lsp_engine_exit, lsp_engine_frame, lsp_engine_read,
-    lsp_engine_start, lsp_engine_take, lsp_engine_tick, lsp_engine_write
+    lsp_engine_deadline, lsp_engine_error_text, lsp_engine_exit, lsp_engine_frame, lsp_engine_start,
+    lsp_engine_take, lsp_engine_tick
 };
+use @vesper-std/fs::{IoError, error_text, stdout_handle, write_handle};
+use @vesper-std/process::{read_wait, stdin_handle};
 
 // Where the client stream starts in the input: after the limits.
 const STREAM_AT: u64 = LimitWord::Count * Le::WordBytes;
@@ -40,13 +42,11 @@ const ENGINE_UNCLEAN: u64 = 2;
 // `lsp_engine_start`'s answer for a session that started.
 const ENGINE_STARTED: u64 = 0;
 
-// `lsp_engine_read`'s answers besides a byte count, and the wait that has
-// no limit.
+// `read_wait`'s answers besides a byte count, and the wait that has no
+// limit.
 const READ_END: i64 = 0;
 const READ_WAITED: i64 = -1;
 const WAIT_FOREVER: i64 = -1;
-// `lsp_engine_write`'s answer for a write that went through.
-const WRITE_OK: u64 = 0;
 
 // How many bytes the live loop asks the host for at a time, and how many
 // handled bytes it keeps before dropping them from its buffer.
@@ -87,13 +87,31 @@ copy enum Next {
     NextFailed
 }
 
+// The live loop's client (#1828 part 16a): the streams it reads and
+// writes, how many bytes it reads at a time, and whether every other read
+// waits out a deadline of 0 instead, so the engine ticks between reads
+// (`ticks`, for the differential; `ticked` is the read that did).
+copy struct Client {
+    input: u64,
+    output: u64,
+    chunk: u64,
+    ticks: bool,
+    ticked: bool
+}
+
+// The client `serve` has: none, since it reads a stream it was given.
+fn no_client() -> Client {
+    Client { input: 0, output: 0, chunk: 0, ticks: false, ticked: false }
+}
+
 // The loop's output and its error text, if it failed.
 struct Server {
     out: ChunkSeq[u8],
     error: ChunkSeq[u8],
     state: u64,
     gate: Gate,
-    method: ChunkSeq[u8]
+    method: ChunkSeq[u8],
+    client: Client
 }
 
 // One `read_frame` call: the step, the body's span, or the framing error.
@@ -396,7 +414,8 @@ pub fn serve(
         error: ChunkSeq::new(),
         state: STATE_UNINITIALIZED,
         gate: gate_new(),
-        method: ChunkSeq::new()
+        method: ChunkSeq::new(),
+        client: no_client()
     };
     let mut cursor = Cursor { pos: 0 };
     let mut doc = new_doc();
@@ -437,53 +456,96 @@ copy enum Fill {
 }
 
 // Wait for more client bytes, at most until the engine's next timer.
-fn fill(inout s: Server, inout pending: ChunkSeq[u8]) -> Fill eff [Ffi[HybridCommands]] {
-    let deadline = lsp_engine_deadline();
-    let wait = if deadline < 0 { WAIT_FOREVER } else { deadline };
-    let at = pending.len();
-    pending.resize(wrapping_add(at, READ_CHUNK), 0);
-    let n = lsp_engine_read(inout pending[at..pending.len()], wait);
-    if n > READ_END {
-        pending.truncate(wrapping_add(at, wrapping_u64(n)));
-        return Fill::FillMore;
-    }
-    pending.truncate(at);
-    if n == READ_END {
-        return Fill::FillEnd;
-    }
-    if n == READ_WAITED {
+fn fill(
+    inout s: Server,
+    inout pending: ChunkSeq[u8]
+) -> Fill eff [Ffi[HybridCommands], Ffi[StdFs], Ffi[StdProcess]] {
+    if s.client.ticks && !s.client.ticked {
+        s.client.ticked = true;
         return Fill::FillTick;
     }
-    host_error(inout s);
-    Fill::FillFailed
+    s.client.ticked = false;
+    let deadline = if s.client.ticks {
+        0
+    } else {
+        lsp_engine_deadline()
+    };
+    let wait = if deadline < 0 { WAIT_FOREVER } else { deadline };
+    let at = pending.len();
+    pending.resize(wrapping_add(at, s.client.chunk), 0);
+    match read_wait(s.client.input, inout pending[at..pending.len()], wait) {
+        Result::Ok(n) => {
+            if n > READ_END {
+                pending.truncate(wrapping_add(at, wrapping_u64(n)));
+                return Fill::FillMore;
+            }
+            pending.truncate(at);
+            if n == READ_WAITED {
+                return Fill::FillTick;
+            }
+            Fill::FillEnd
+        },
+        Result::Err(e) => {
+            pending.truncate(at);
+            io_error(inout s, e);
+            Fill::FillFailed
+        },
+    }
+}
+
+// Append an I/O error's text to the loop's.
+fn io_error(inout s: Server, e: IoError) eff [Ffi[StdFs]] {
+    let text = error_text(e);
+    s.error.extend(in text[0..text.len()]);
+}
+
+// One write to the client: whether it went through, and if not why.
+copy struct Wrote {
+    ok: bool,
+    error: IoError
+}
+
+fn write_step(stream: u64, in data: Slice[u8]) -> Wrote eff [Ffi[StdFs]] {
+    handle Fail[IoError] in {
+        write_handle(stream, in data);
+        Wrote { ok: true, error: IoError { kind: 0, os: 0 } }
+    } with {
+        return v => v,
+        raise(e, resume) => Wrote { ok: false, error: e },
+    }
 }
 
 // Write the frames the loop has produced to the client.
-fn flush(inout s: Server) -> bool eff [Ffi[HybridCommands]] {
+fn flush(inout s: Server) -> bool eff [Ffi[StdFs]] {
     if s.out.len() == 0 {
         return true;
     }
-    let written = lsp_engine_write(in s.out[0..s.out.len()]);
+    let written = write_step(s.client.output, in s.out[0..s.out.len()]);
     s.out.truncate(0);
-    if written == WRITE_OK {
+    if written.ok {
         return true;
     }
-    host_error(inout s);
+    io_error(inout s, written.error);
     false
 }
 
-// Serve the client the host reads as its bytes arrive, writing each frame
-// as it is produced: the error text when the server stops with an error.
-// A frame is read only once its bytes are all in (`read_frame` reports a
-// partial one as truncated, and the client's later bytes never turn an
-// error into success), so chunking does not change what the client sees.
-pub fn serve_live(limits: Plimits, inout error: ChunkSeq[u8]) -> bool eff [Ffi[HybridCommands]] {
+// Serve `client` as its bytes arrive, writing each frame as it is
+// produced: the error text when the server stops with an error. A frame
+// is read only once its bytes are all in (`read_frame` reports a partial
+// one as truncated, and the client's later bytes never turn an error into
+// success), so chunking does not change what the client sees.
+pub fn serve_live(
+    client: Client,
+    limits: Plimits,
+    inout error: ChunkSeq[u8]
+) -> bool eff [Ffi[HybridCommands], Ffi[StdFs], Ffi[StdProcess]] {
     let mut s = Server {
         out: ChunkSeq::new(),
         error: ChunkSeq::new(),
         state: STATE_UNINITIALIZED,
         gate: gate_new(),
-        method: ChunkSeq::new()
+        method: ChunkSeq::new(),
+        client: client
     };
     let mut pending: ChunkSeq[u8] = ChunkSeq::new();
     let mut start: u64 = 0;
@@ -608,23 +670,57 @@ pub fn lsp_server_run(in input: Str) -> ChunkSeq[u64] eff [Ffi[HybridCommands]] 
 
 // `vesper lsp`: start the engine, then serve the client on stdin and
 // stdout. The error text when the server stops with an error.
-pub fn serve_stdio(inout error: ChunkSeq[u8]) -> bool eff [Ffi[HybridCommands]] {
+pub fn serve_stdio(
+    inout error: ChunkSeq[u8]
+) -> bool eff [Ffi[HybridCommands], Ffi[StdFs], Ffi[StdProcess]] {
     if lsp_engine_start() != ENGINE_STARTED {
         let text = lsp_engine_error_text();
         error.extend(in text[0..text.len()]);
         return false;
     }
-    serve_live(default_limits(), inout error)
+    let client = Client {
+        input: stdin_handle(),
+        output: stdout_handle(),
+        chunk: READ_CHUNK,
+        ticks: false,
+        ticked: false
+    };
+    serve_live(client, default_limits(), inout error)
 }
 
-// Task "server live": the input is the limits; the client is the host's.
-// The result is `OUTCOME_OK` or `OUTCOME_ERR`, then the error text.
-pub fn lsp_server_live(in input: Str) -> ChunkSeq[u64] eff [Ffi[HybridCommands]] {
-    let limits = read_limits(in input.as_bytes(), 0);
+// Task "server live": the input is the limits, then the client's words:
+// the stream it reads, the stream it writes, the read size and whether the
+// engine ticks between reads (`Client`). The result is `OUTCOME_OK` or
+// `OUTCOME_ERR`, then the error text.
+pub fn lsp_server_live(
+    in input: Str
+) -> ChunkSeq[u64] eff [Ffi[HybridCommands], Ffi[StdFs], Ffi[StdProcess]] {
+    let bytes = input.as_bytes();
+    let limits = read_limits(in bytes, 0);
+    let client = Client {
+        input: client_word(in bytes, ClientWord::ClientInput),
+        output: client_word(in bytes, ClientWord::ClientOutput),
+        chunk: client_word(in bytes, ClientWord::ClientChunk),
+        ticks: client_word(in bytes, ClientWord::ClientTicks) != 0,
+        ticked: false
+    };
     let mut error: ChunkSeq[u8] = ChunkSeq::new();
-    let ok = serve_live(limits, inout error);
+    let ok = serve_live(client, limits, inout error);
     let mut words: ChunkSeq[u64] = ChunkSeq::new();
     words.push(if ok { OUTCOME_OK } else { OUTCOME_ERR });
     put_bytes(inout words, in error[0..error.len()]);
     words
+}
+
+// The words of `lsp_server_live`'s client, after the limits.
+enum ClientWord: _ {
+    ClientInput = 0,
+    ClientOutput = 1,
+    ClientChunk = 2,
+    ClientTicks = 3
+}
+
+fn client_word(in bytes: Slice[u8], w: u64) -> u64 {
+    let at = wrapping_add(STREAM_AT, wrapping_mul(w, Le::WordBytes));
+    bytes.try_read_u64_le(at).unwrap_or(0)
 }

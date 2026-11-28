@@ -130,14 +130,6 @@ pub fn lsp_engine_error_text() -> ChunkSeq[u8] eff [Ffi[HybridCommands]] {
     err
 }
 
-pub fn lsp_engine_read(inout buf: Slice[u8], wait_ms: i64) -> i64 eff [Ffi[HybridCommands]] {
-    HybridCommands::hc_lsp_engine_read(inout buf, wait_ms)
-}
-
-pub fn lsp_engine_write(in buf: Slice[u8]) -> u64 eff [Ffi[HybridCommands]] {
-    HybridCommands::hc_lsp_engine_write(in buf)
-}
-
 pub fn lsp_engine_deadline() -> i64 eff [Ffi[HybridCommands]] {
     HybridCommands::hc_lsp_engine_deadline()
 }

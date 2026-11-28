@@ -247,6 +247,27 @@ pub fn write_stderr(in data: Slice[u8]) eff [Ffi[StdFs], Fail[IoError]] {
     }
 }
 
+// Standard output and standard error's handles.
+const STDOUT_HANDLE: u64 = 1;
+const STDERR_HANDLE: u64 = 2;
+
+// Standard output, for `write_handle`.
+pub fn stdout_handle() -> u64 eff [Ffi[StdFs]] {
+    STDOUT_HANDLE
+}
+
+// Write all of `data` to standard output or standard error, by handle;
+// WASI has no other stream to write.
+pub fn write_handle(stream: u64, in data: Slice[u8]) eff [Ffi[StdFs], Fail[IoError]] {
+    if stream == STDOUT_HANDLE {
+        write_stdout(in data);
+    } else if stream == STDERR_HANDLE {
+        write_stderr(in data);
+    } else {
+        raise_kind(unsupported())
+    }
+}
+
 // Write `data` as the whole file at `path`, creating it or truncating it.
 pub fn write(in path: Str, in data: Slice[u8]) eff [Ffi[StdFs], Fail[IoError]] {
     write_mode(in path.as_bytes(), in data, mode_truncate(), false);
