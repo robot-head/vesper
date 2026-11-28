@@ -49,7 +49,8 @@ use @vesper/cranelift::{
     ins_udiv, ins_uextend, ins_unary, ins_urem, ins_ushr, inst_result, invalid, is_invalid,
     seal_block, set_srcloc, switch_to_block, trap_user, ty_f32, ty_f64, ty_i128, ty_i32, ty_i64,
     ty_i8, use_var, vals1, value_type, create_stack_slot, ins_iadd_imm, ins_load, ins_stack_addr,
-    ins_store, module_pointer_type, ins_imul_imm, ins_uload8, ins_uload16, ins_uload32
+    ins_store, module_pointer_type, ins_imul_imm, ins_uload8, ins_uload16, ins_uload32,
+    mem_can_move, mem_readonly, mem_trusted
 };
 use super::{
     BODY_ERROR, DECLINED, HANDLED, coerce, emit_overflow_test, kind_max_imm, kind_min_imm,
@@ -65,6 +66,7 @@ const LANE_PRODUCT: u64 = 5;
 const LOCAL_PARAM: u64 = 16;
 const LOCAL_PARAM_PRODUCT: u64 = 65536;
 const STORE_AGGREGATE: u64 = 65536;
+const LOCAL_HOME: u64 = 4294967296;
 
 // Instruction kinds (`body.ves`).
 const INST_PLANNED: u64 = 1;
@@ -121,6 +123,7 @@ const SEQ_SAME: u64 = 2;
 const SEQ_AS_BYTES: u64 = 3;
 const SEQ_BYTE_AT: u64 = 4;
 const SEQ_GET: u64 = 5;
+const SEQ_VIEW_WORD: u64 = 6;
 // The header words (src/strings/native.rs, src/seq/native.rs): a
 // string's `{len, cap, data}`, a slice view's `{handle, start, len}`, a
 // sequence header's data pointer.
@@ -880,9 +883,50 @@ struct Body {
     sret: u32,
     homes: ChunkSeq[u64],
     result_words: u64,
+    // The slice parameters read once at entry (#2653): value index -> the
+    // receiver its read takes (invalid for any other value), and the
+    // views and handles whose header words are read-only memory
+    // (`Codegen::invariant_headers`).
+    entry_reads: ChunkSeq[u32],
+    invariant: ChunkSeq[u32],
 }
 
 impl Body {
+    fn is_invariant(in self, v: Value) -> bool {
+        for k in 0..self.invariant.len() {
+            if at32(in self.invariant, k) == v.id {
+                return true;
+            }
+        }
+        false
+    }
+
+    // `seq_word`: a header word, loaded as read-only memory
+    // (`invariant_word`) from an invariant view or handle.
+    fn seq_word(
+        inout self,
+        inout b: Builder,
+        ptr: Value,
+        offset: i32
+    ) -> Value eff [Ffi[Cranelift]] {
+        let flags = if self.is_invariant(ptr) {
+            mem_trusted() | mem_readonly() | mem_can_move()
+        } else {
+            PLAIN
+        };
+        ins_load(inout b, ty_i64(), flags, ptr, offset)
+    }
+
+    // The receiver a read of value `i` takes, or an invalid value.
+    fn entry_read(in self, i: u64) -> Value {
+        Value {
+            id: match self.entry_reads.try_get(i) {
+                Option::Some(x) => x,
+                Option::None => invalid(),
+            }
+        }
+    }
+
     fn value(in self, i: u64) -> Value {
         Value { id: at32(in self.values, i) }
     }
@@ -1227,6 +1271,10 @@ impl Body {
             let offset = w.next();
             return ins_load(inout b, ty_i64(), PLAIN, x, wrapping_i32(offset));
         }
+        if form == SEQ_VIEW_WORD {
+            let offset = w.next();
+            return self.seq_word(inout b, x, wrapping_i32(offset));
+        }
         if form == SEQ_SAME {
             return x;
         }
@@ -1268,15 +1316,28 @@ impl Body {
             let index = w.next();
             let size = w.next();
             let tag = w.next();
-            let handle = ins_load(inout b, ty_i64(), PLAIN, x, VIEW_HANDLE);
-            let start = ins_load(inout b, ty_i64(), PLAIN, x, VIEW_START);
-            let len = ins_load(inout b, ty_i64(), PLAIN, x, VIEW_LEN);
+            // `seq_view`: an invariant view's handle is invariant too.
+            let handle = self.seq_word(inout b, x, VIEW_HANDLE);
+            if self.is_invariant(x) {
+                self.invariant.push(handle.id);
+            }
+            let start = self.seq_word(inout b, x, VIEW_START);
+            let len = self.seq_word(inout b, x, VIEW_LEN);
             let valid = ins_icmp(inout b, cc_ult(), y, len);
             self.raising(inout b, in m, valid, false, index, size, tag);
-            let data = ins_load(inout b, ty_i64(), PLAIN, handle, HEADER_DATA);
-            let at = ins_iadd(inout b, start, y);
-            let offset = ins_imul_imm(inout b, at, wrapping_i64(stride));
-            let addr = ins_iadd(inout b, data, offset);
+            // `seq_elem_addr`: from an invariant handle, `data + start *
+            // stride` first, which Cranelift computes once.
+            let data = self.seq_word(inout b, handle, HEADER_DATA);
+            let addr = if self.is_invariant(handle) {
+                let first = ins_imul_imm(inout b, start, wrapping_i64(stride));
+                let base = ins_iadd(inout b, data, first);
+                let offset = ins_imul_imm(inout b, y, wrapping_i64(stride));
+                ins_iadd(inout b, base, offset)
+            } else {
+                let at = ins_iadd(inout b, start, y);
+                let offset = ins_imul_imm(inout b, at, wrapping_i64(stride));
+                ins_iadd(inout b, data, offset)
+            };
             return if stride == STRIDE_BYTE {
                 ins_uload8(inout b, ty_i64(), PLAIN, addr, 0)
             } else if stride == STRIDE_HALF {
@@ -1309,6 +1370,14 @@ impl Body {
             ops.push(w.next());
         }
         self.read_operands(inout b, in ops);
+        // A read of a slice parameter read at entry is its receiver.
+        for k in 0..ops.len() {
+            let i = at64(in ops, k);
+            let receiver = self.entry_read(i);
+            if !is_invalid(receiver) {
+                let ok = self.values.try_set(i, receiver.id);
+            }
+        }
         // `set_location`, after the operands' reads; the arm's own
         // `expr_located` sets and restores the same location.
         if self.locations && location != NO_LOCATION {
@@ -1339,8 +1408,13 @@ impl Body {
             // local's type.
             let local = w.next();
             let read = w.next();
-            let raw = self.use_local(inout b, local);
-            body_coerce(inout b, raw, read, self.optimize)
+            let receiver = self.entry_read(dest);
+            if !is_invalid(receiver) {
+                receiver
+            } else {
+                let raw = self.use_local(inout b, local);
+                body_coerce(inout b, raw, read, self.optimize)
+            }
         } else if kind == INST_BIND {
             let local = w.next();
             if local != NO_LOCAL {
@@ -1459,9 +1533,7 @@ impl Body {
                 return false;
             }
             let word = at64(in self.callees, call_idx);
-            if (word & FAIL_CALL) != 0 {
-                return false;
-            }
+            let fails = (word & FAIL_CALL) != 0;
             let callee = FuncId { id: wrapping_u32(word & CALLEE_ID_MASK) };
             let mut temps: ChunkSeq[u32] = ChunkSeq::new[u32]();
             for k in 0..n {
@@ -1517,9 +1589,28 @@ impl Body {
             if ti != n {
                 return false;
             }
-            let fun = import_function(inout b, inout m, callee);
-            let _ = ins_call(inout b, fun, in args.as_slice());
-            let result = inst_result(inout b, 0);
+            let mut result = Value { id: invalid() };
+            if !fails {
+                let fun = import_function(inout b, inout m, callee);
+                let _ = ins_call(inout b, fun, in args.as_slice());
+                result = inst_result(inout b, 0);
+            } else {
+                // A `fail_only` callee (#2614): its record after the
+                // arguments, the failure raised again before the restores.
+                let status_call = (word & STATUS_CALL) != 0;
+                let size = w.next();
+                let record = self.alloc_record(inout b, in m, size, status_call);
+                args.push(record.id);
+                let fun = import_function(inout b, inout m, callee);
+                let _ = ins_call(inout b, fun, in args.as_slice());
+                result = inst_result(inout b, 0);
+                let tag = if status_call {
+                    inst_result(inout b, 1)
+                } else {
+                    ins_load(inout b, ty_i64(), PLAIN, record, 0)
+                };
+                self.reraise(inout b, inout w, record, tag);
+            }
             for k in 0..lent.len() {
                 let l = at64(in lent, k);
                 let ptr = Value { id: at32(in lent_ptrs, k) };
@@ -2214,6 +2305,28 @@ pub fn emit_body_words(
             }
         );
     }
+    // The slice parameters read once at entry (#2653): each one's
+    // parameter index, then the reads that take its receiver.
+    if count < wrapping_add(w.at, 1) {
+        return BODY_ERROR;
+    }
+    let nviews = w.next();
+    let mut views: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    for k in 0..nviews {
+        if count < wrapping_add(w.at, 2) {
+            return BODY_ERROR;
+        }
+        let p = w.next();
+        let nr = w.next();
+        if p >= np || count < wrapping_add(w.at, nr) {
+            return BODY_ERROR;
+        }
+        views.push(p);
+        views.push(nr);
+        for j in 0..nr {
+            views.push(w.next());
+        }
+    }
     if count < wrapping_add(w.at, 3) {
         return BODY_ERROR;
     }
@@ -2270,6 +2383,8 @@ pub fn emit_body_words(
         sret: sret,
         homes: homes,
         result_words: result_words,
+        entry_reads: ChunkSeq::new[u32](),
+        invariant: ChunkSeq::new[u32](),
     };
     // The graph's blocks: the entry is the current block.
     s.blocks.push(current_block(inout b).id);
@@ -2279,10 +2394,16 @@ pub fn emit_body_words(
     // Locals, in name order; on the unoptimized path each one's slot.
     let nl = w.next();
     for k in 0..nl {
-        let entry = w.next();
+        let mut entry = w.next();
         s.kinds.push(w.next());
         let mut address = invalid();
         let mut spilled = !optimize;
+        // A local lent to a call that may fail keeps its slot on the
+        // optimize path too (#2614).
+        if entry >= LOCAL_HOME {
+            entry = wrapping_sub(entry, LOCAL_HOME);
+            spilled = true;
+        }
         if entry >= LOCAL_PARAM_PRODUCT {
             // A product parameter is its storage's address: no slot.
             let p = wrapping_sub(entry, LOCAL_PARAM_PRODUCT);
@@ -2354,6 +2475,32 @@ pub fn emit_body_words(
             let p = Value { id: at32(in s.params, i) };
             def_var(inout b, var_at(in s.registers, i), p);
             let ok = s.values.try_set(i, p.id);
+        }
+        // `seq_entry_view` in the entry block: each view's parameter
+        // read once, its header words read-only memory from then on.
+        if bi == 0 {
+            let mut v: u64 = 0;
+            for _ in 0..nviews {
+                let p = at64(in views, v);
+                let nr = at64(in views, wrapping_add(v, 1));
+                v = wrapping_add(v, 2);
+                let var = Var {
+                    id: wrapping_u32(w.arg(wrapping_add(wrapping_add(ARG_PARAMS, 1), p)))
+                };
+                let receiver = use_var(inout b, var);
+                s.invariant.push(receiver.id);
+                for _ in 0..nr {
+                    let i = at64(in views, v);
+                    v = wrapping_add(v, 1);
+                    loop {
+                        if s.entry_reads.len() > i {
+                            break;
+                        }
+                        s.entry_reads.push(invalid());
+                    }
+                    let ok = s.entry_reads.try_set(i, receiver.id);
+                }
+            }
         }
         let ic = w.next();
         for j in 0..ic {

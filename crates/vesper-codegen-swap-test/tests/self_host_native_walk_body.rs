@@ -2127,8 +2127,8 @@ const MIN_INOUT_BODIES: u64 = 6;
 /// failure record), and slice `len` and checked elements of each stride
 /// (`u8`, `u16`, `u32`, `i32`, `u64`, `f64`). `main` builds the sequences
 /// and handles the raise, so it stays with the walk. Optimized, a slice
-/// parameter is read once at entry (`bounds_hoist::header_hoists`), which
-/// the body hook does not emit yet, so its readers stay with the walk.
+/// parameter is read once at entry (`bounds_hoist::header_hoists`), its
+/// header words then loaded as read-only memory.
 const STRINGS_SLICES: &str = "
 fn text_len(in s: String) -> u64 {
     s.len()
@@ -2213,9 +2213,9 @@ fn vesper_string_and_slice_bodies_match() {
         );
         let ran = if cross() { 0 } else { 2 };
         assert_eq!((total.worlds, total.ran), (2, ran), "{}", total.summary());
-        // The string functions in both builds and the slice functions
-        // unoptimized (and again for the JIT runs off-cross).
-        let min_emitted = if cross() { 15 } else { 30 };
+        // The string and slice functions in both builds (and again for
+        // the JIT runs off-cross).
+        let min_emitted = if cross() { 20 } else { 40 };
         assert!(
             emitted >= min_emitted,
             "only {emitted} string and slice functions came from Vesper (expected {min_emitted})"
@@ -2223,3 +2223,114 @@ fn vesper_string_and_slice_bodies_match() {
         assert!(total.is_clean(), "{}", total.summary());
     });
 }
+
+/// `inout` arguments to `fail_only` callees (#2614), next to struct results
+/// of `fail_only` functions built in the result pointer, with checked arithmetic, a partial division and a call of
+/// another `fail_only` function raising through the failure record, whose
+/// exits return a zero of the pointer type. `grown` lends a local `inout`
+/// to the `fail_only` `grow`, so the local keeps a home slot on the
+/// optimize path too, and `grow` stores through its own `inout` parameter.
+const SRET_FAIL_SOURCE: &str = "
+struct Pair {
+    a: i64,
+    b: u32,
+}
+struct Trio {
+    q: i64,
+    r: i64,
+    big: bool,
+}
+fn add(x: i64, y: i64) -> i64 eff [Fail[ArithOverflow]] {
+    x + y
+}
+fn pair_checked(x: i64, y: i64) -> Pair eff [Fail[ArithOverflow]] {
+    Pair { a: x * y, b: wrapping_u32(x) ^ 9 }
+}
+fn trio(x: i64, d: i64) -> Trio eff [Fail[RuntimeError], Fail[ArithOverflow]] {
+    let q: i64 = x / d;
+    let r: i64 = x % d;
+    Trio { q: q + 1, r: r, big: q > 10 }
+}
+fn relay(x: i64, y: i64) -> Pair eff [Fail[ArithOverflow]] {
+    let s: i64 = add(x, y);
+    Pair { a: s - 3, b: 4 }
+}
+fn grow(inout x: i64, by: i64) -> i64 eff [Fail[ArithOverflow]] {
+    x = x * by;
+    x + 1
+}
+fn grown(seed: i64) -> Pair eff [Fail[ArithOverflow]] {
+    let mut v: i64 = seed;
+    let a: i64 = grow(inout v, 3);
+    let b: i64 = grow(inout v, 5);
+    Pair { a: a + v, b: wrapping_u32(b) }
+}
+fn total(n: i64) -> i64 eff [Fail[ArithOverflow]] {
+    let mut s: i64 = 0;
+    let mut i: i64 = 0;
+    loop {
+        if i >= n {
+            break;
+        }
+        s = add(s, i);
+        i = i + 1;
+    }
+    s
+}
+fn main() -> i64 {
+    handle Fail[ArithOverflow] in {
+        handle Fail[RuntimeError] in {
+            let p: Pair = pair_checked(total(6), 7);
+            let t: Trio = trio(100, 7);
+            let z: Trio = trio(1, 0);
+            let r: Pair = relay(9223372036854775807, 1);
+            let w: Pair = grown(4);
+            let o: Pair = grown(4611686018427387904);
+            let g: i64 = if t.big { 1 } else { 0 };
+            p.a ^ widen_i64(p.b) ^ t.q ^ t.r ^ g ^ z.q ^ r.a ^ w.a ^ widen_i64(w.b) ^ o.a
+        } with {
+            return value => value,
+            raise(error, resume) => 500,
+        }
+    } with {
+        return value => value,
+        raise(overflow, resume) => -1,
+    }
+}
+";
+
+#[test]
+fn vesper_inout_arguments_to_fail_only_callees_match() {
+    big_stack(|| {
+        let parsed = vesper::parser::parse(SRET_FAIL_SOURCE);
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        let checked = vesper::check::check(&parsed.module);
+        assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
+        let before = SRET.load(Ordering::Relaxed);
+        let total = both("fail_struct_results", &checked.world, true);
+        let sret = SRET.load(Ordering::Relaxed) - before;
+        eprintln!(
+            "fail_struct_results: {}; {sret} struct results emitted from Vesper",
+            total.summary()
+        );
+        let ran = if cross() { 0 } else { 2 };
+        assert_eq!((total.worlds, total.ran), (2, ran), "{}", total.summary());
+        // `pair_checked`, `trio`, `relay` and `grown` at both optimizer settings,
+        // once per comparison (a JIT-running host compares each twice). A
+        // cross target may return some in registers instead.
+        let min_sret = if cross() {
+            MIN_FAIL_SRET / 2
+        } else {
+            MIN_FAIL_SRET
+        };
+        assert!(
+            sret >= min_sret,
+            "only {sret} fail_only struct results came from Vesper (expected >= {min_sret})"
+        );
+        assert!(total.is_clean(), "{}", total.summary());
+    });
+}
+
+/// `SRET_FAIL_SOURCE`'s four struct results, both settings, both
+/// comparisons of a JIT-running host.
+const MIN_FAIL_SRET: u64 = 16;

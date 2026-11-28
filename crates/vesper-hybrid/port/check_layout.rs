@@ -199,15 +199,15 @@ impl Abi for vesper__check_2data__world__Variant {
 /// Owned handle of a Vesper `LayoutInput` value: its words, which own the Vesper
 /// allocations they point to. Dropping it calls `vesper_hybrid_check_layout_LayoutInput_drop`.
 pub struct LayoutInput {
-    words: [u64; 68],
+    words: [u64; 69],
 }
 
 impl LayoutInput {
     /// # Safety
     /// `words` must hold a `LayoutInput` value of this library that the caller owns.
     unsafe fn from_words(words: &[u64]) -> Self {
-        let mut owned = [0u64; 68];
-        owned.copy_from_slice(&words[..68]);
+        let mut owned = [0u64; 69];
+        owned.copy_from_slice(&words[..69]);
         Self { words: owned }
     }
 
@@ -245,22 +245,22 @@ pub struct LayoutInputRef<'a> {
 impl<'a> LayoutInputRef<'a> {
     pub fn c(&self) -> vesper__check_2data__input__CtxRef<'a> {
         let w: &'a [u64] = self.words;
-        vesper__check_2data__input__CtxRef { words: &w[0..68] }
+        vesper__check_2data__input__CtxRef { words: &w[0..69] }
     }
 }
 
 /// Owned handle of a Vesper `vesper__check_2data__input__Ctx` value: its words, which own the Vesper
 /// allocations they point to. Dropping it calls `vesper_hybrid_check_layout_vesper__check_2data__input__Ctx_drop`.
 pub struct vesper__check_2data__input__Ctx {
-    words: [u64; 68],
+    words: [u64; 69],
 }
 
 impl vesper__check_2data__input__Ctx {
     /// # Safety
     /// `words` must hold a `vesper__check_2data__input__Ctx` value of this library that the caller owns.
     unsafe fn from_words(words: &[u64]) -> Self {
-        let mut owned = [0u64; 68];
-        owned.copy_from_slice(&words[..68]);
+        let mut owned = [0u64; 69];
+        owned.copy_from_slice(&words[..69]);
         Self { words: owned }
     }
 
@@ -302,19 +302,19 @@ impl<'a> vesper__check_2data__input__CtxRef<'a> {
     }
     pub fn types(&self) -> vesper__check_2data__types__TypesRef<'a> {
         let w: &'a [u64] = self.words;
-        vesper__check_2data__types__TypesRef { words: &w[5..23] }
+        vesper__check_2data__types__TypesRef { words: &w[5..24] }
     }
     pub fn world(&self) -> vesper__check_2data__world__WorldRef<'a> {
         let w: &'a [u64] = self.words;
-        vesper__check_2data__world__WorldRef { words: &w[23..66] }
+        vesper__check_2data__world__WorldRef { words: &w[24..67] }
     }
     pub fn tmap(&self) -> vesper_port_abi::SeqRef<'a, u32> {
         let w: &'a [u64] = self.words;
-        unsafe { vesper_port_abi::SeqRef::from_handle(w[66]) }
+        unsafe { vesper_port_abi::SeqRef::from_handle(w[67]) }
     }
     pub fn nmap(&self) -> vesper_port_abi::SeqRef<'a, u32> {
         let w: &'a [u64] = self.words;
-        unsafe { vesper_port_abi::SeqRef::from_handle(w[67]) }
+        unsafe { vesper_port_abi::SeqRef::from_handle(w[68]) }
     }
 }
 
@@ -390,15 +390,15 @@ impl<'a> vesper__check_2data__names__NamesRef<'a> {
 /// Owned handle of a Vesper `vesper__check_2data__types__Types` value: its words, which own the Vesper
 /// allocations they point to. Dropping it calls `vesper_hybrid_check_layout_vesper__check_2data__types__Types_drop`.
 pub struct vesper__check_2data__types__Types {
-    words: [u64; 18],
+    words: [u64; 19],
 }
 
 impl vesper__check_2data__types__Types {
     /// # Safety
     /// `words` must hold a `vesper__check_2data__types__Types` value of this library that the caller owns.
     unsafe fn from_words(words: &[u64]) -> Self {
-        let mut owned = [0u64; 18];
-        owned.copy_from_slice(&words[..18]);
+        let mut owned = [0u64; 19];
+        owned.copy_from_slice(&words[..19]);
         Self { words: owned }
     }
 
@@ -490,21 +490,25 @@ impl<'a> vesper__check_2data__types__TypesRef<'a> {
         let w: &'a [u64] = self.words;
         <u32 as Abi>::get(&w[13..])
     }
-    pub fn s_unit(&self) -> u32 {
+    pub fn s_i128(&self) -> u32 {
         let w: &'a [u64] = self.words;
         <u32 as Abi>::get(&w[14..])
     }
-    pub fn unit(&self) -> u32 {
+    pub fn s_unit(&self) -> u32 {
         let w: &'a [u64] = self.words;
         <u32 as Abi>::get(&w[15..])
     }
-    pub fn infer(&self) -> u32 {
+    pub fn unit(&self) -> u32 {
         let w: &'a [u64] = self.words;
         <u32 as Abi>::get(&w[16..])
     }
-    pub fn empty_row(&self) -> u32 {
+    pub fn infer(&self) -> u32 {
         let w: &'a [u64] = self.words;
         <u32 as Abi>::get(&w[17..])
+    }
+    pub fn empty_row(&self) -> u32 {
+        let w: &'a [u64] = self.words;
+        <u32 as Abi>::get(&w[18..])
     }
 }
 
@@ -625,7 +629,7 @@ impl LayoutInput {
     /// Builds the Vesper value of `tree` once, in this library's allocations
     /// (export ABI v4). Dropping the handle frees them.
     pub fn encode(tree: &LayoutInputTree) -> Self {
-        let mut words = [0u64; 68];
+        let mut words = [0u64; 69];
         // SAFETY: `words` is the value's size, and every allocation the
         // encoder makes belongs to this library and passes to the value.
         unsafe { encode_layout_input(tree, &mut words) };
@@ -639,9 +643,9 @@ impl LayoutInput {
 }
 
 /// # Safety
-/// `w` holds 68 zeroed words; the value written there owns what it allocates.
+/// `w` holds 69 zeroed words; the value written there owns what it allocates.
 unsafe fn encode_layout_input(tree: &LayoutInputTree, w: &mut [u64]) {
-    unsafe { encode_vesper__check_2data__input___ctx(&tree.c, &mut w[0..68]) };
+    unsafe { encode_vesper__check_2data__input___ctx(&tree.c, &mut w[0..69]) };
 }
 
 /// An owned Rust tree of a Vesper `vesper__check_2data__input__Ctx` value (export ABI v4): `vesper__check_2data__input__Ctx::encode`
@@ -672,7 +676,7 @@ impl vesper__check_2data__input__Ctx {
     /// Builds the Vesper value of `tree` once, in this library's allocations
     /// (export ABI v4). Dropping the handle frees them.
     pub fn encode(tree: &vesper__check_2data__input__CtxTree) -> Self {
-        let mut words = [0u64; 68];
+        let mut words = [0u64; 69];
         // SAFETY: `words` is the value's size, and every allocation the
         // encoder makes belongs to this library and passes to the value.
         unsafe { encode_vesper__check_2data__input___ctx(tree, &mut words) };
@@ -686,13 +690,13 @@ impl vesper__check_2data__input__Ctx {
 }
 
 /// # Safety
-/// `w` holds 68 zeroed words; the value written there owns what it allocates.
+/// `w` holds 69 zeroed words; the value written there owns what it allocates.
 unsafe fn encode_vesper__check_2data__input___ctx(tree: &vesper__check_2data__input__CtxTree, w: &mut [u64]) {
     unsafe { encode_vesper__check_2data__names___names(&tree.names, &mut w[0..5]) };
-    unsafe { encode_vesper__check_2data__types___types(&tree.types, &mut w[5..23]) };
-    unsafe { encode_vesper__check_2data__world___world(&tree.world, &mut w[23..66]) };
-    w[66] = unsafe { vesper_port_abi::seq_from(RUNTIME, &tree.tmap) };
-    w[67] = unsafe { vesper_port_abi::seq_from(RUNTIME, &tree.nmap) };
+    unsafe { encode_vesper__check_2data__types___types(&tree.types, &mut w[5..24]) };
+    unsafe { encode_vesper__check_2data__world___world(&tree.world, &mut w[24..67]) };
+    w[67] = unsafe { vesper_port_abi::seq_from(RUNTIME, &tree.tmap) };
+    w[68] = unsafe { vesper_port_abi::seq_from(RUNTIME, &tree.nmap) };
 }
 
 /// An owned Rust tree of a Vesper `vesper__check_2data__names__Names` value (export ABI v4): `vesper__check_2data__names__Names::encode`
@@ -764,6 +768,7 @@ pub struct vesper__check_2data__types__TypesTree {
     pub s_dyn: u32,
     pub s_u64: u32,
     pub s_i64: u32,
+    pub s_i128: u32,
     pub s_unit: u32,
     pub unit: u32,
     pub infer: u32,
@@ -788,6 +793,7 @@ impl vesper__check_2data__types__TypesRef<'_> {
             s_dyn: self.s_dyn(),
             s_u64: self.s_u64(),
             s_i64: self.s_i64(),
+            s_i128: self.s_i128(),
             s_unit: self.s_unit(),
             unit: self.unit(),
             infer: self.infer(),
@@ -800,7 +806,7 @@ impl vesper__check_2data__types__Types {
     /// Builds the Vesper value of `tree` once, in this library's allocations
     /// (export ABI v4). Dropping the handle frees them.
     pub fn encode(tree: &vesper__check_2data__types__TypesTree) -> Self {
-        let mut words = [0u64; 18];
+        let mut words = [0u64; 19];
         // SAFETY: `words` is the value's size, and every allocation the
         // encoder makes belongs to this library and passes to the value.
         unsafe { encode_vesper__check_2data__types___types(tree, &mut words) };
@@ -814,7 +820,7 @@ impl vesper__check_2data__types__Types {
 }
 
 /// # Safety
-/// `w` holds 18 zeroed words; the value written there owns what it allocates.
+/// `w` holds 19 zeroed words; the value written there owns what it allocates.
 unsafe fn encode_vesper__check_2data__types___types(tree: &vesper__check_2data__types__TypesTree, w: &mut [u64]) {
     w[0] = unsafe { vesper_port_abi::seq_from(RUNTIME, &tree.nodes) };
     w[1] = unsafe { vesper_port_abi::seq_from(RUNTIME, &tree.items) };
@@ -830,10 +836,11 @@ unsafe fn encode_vesper__check_2data__types___types(tree: &vesper__check_2data__
     Abi::put(&tree.s_dyn, &mut w[11..]);
     Abi::put(&tree.s_u64, &mut w[12..]);
     Abi::put(&tree.s_i64, &mut w[13..]);
-    Abi::put(&tree.s_unit, &mut w[14..]);
-    Abi::put(&tree.unit, &mut w[15..]);
-    Abi::put(&tree.infer, &mut w[16..]);
-    Abi::put(&tree.empty_row, &mut w[17..]);
+    Abi::put(&tree.s_i128, &mut w[14..]);
+    Abi::put(&tree.s_unit, &mut w[15..]);
+    Abi::put(&tree.unit, &mut w[16..]);
+    Abi::put(&tree.infer, &mut w[17..]);
+    Abi::put(&tree.empty_row, &mut w[18..]);
 }
 
 /// An owned Rust tree of a Vesper `vesper__check_2data__world__World` value (export ABI v4): `vesper__check_2data__world__World::encode`
@@ -1485,7 +1492,7 @@ pub fn layout_input_layout_of(s: &mut LayoutInput, part: &[u8]) -> Vec<u64> {
 
 /// Calls `layout_input_new` of the Vesper library `hybrid_check_layout` (`vesper_hybrid_check_layout_layout_input_new`).
 pub fn layout_input_new() -> LayoutInput {
-    let mut result = [0u64; 68];
+    let mut result = [0u64; 69];
     // SAFETY: `vesper_hybrid_check_layout_layout_input_new` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.

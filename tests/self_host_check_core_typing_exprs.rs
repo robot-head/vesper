@@ -114,3 +114,29 @@ fn expression_types_match_rust() {
         "{total} functions checked, {skipped} skipped, {rows} types"
     );
 }
+
+/// Every checked function's result (`Checker::results`, the declared result
+/// refined by its body) is the one the Rust checker recorded in
+/// `World::function_results`.
+#[test]
+fn function_results_match_rust() {
+    let f = package().entry("core_typing_exprs", true);
+    let (mut total, mut bad) = (0, 0);
+    for c in corpus() {
+        let v = vesper_results(&f.text(&exprs_input(&c.world, &c.module)));
+        let spans: Vec<(usize, usize)> = v.iter().map(|(span, _)| *span).collect();
+        let r = rust_results(&c.world, &spans);
+        total += v.len();
+        for (a, b) in r.iter().zip(&v) {
+            if a != b {
+                bad += 1;
+                if bad <= 8 {
+                    eprintln!("results: {} {:?}: rust {} vesper {}", c.name, a.0, a.1, b.1);
+                }
+            }
+        }
+    }
+    eprintln!("results: {bad} of {total} function results differ");
+    assert_eq!(bad, 0);
+    assert!(total > 0);
+}

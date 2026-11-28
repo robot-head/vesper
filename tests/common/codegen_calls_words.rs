@@ -144,9 +144,20 @@ fn calls_encodable(w: &World, wide: bool) -> bool {
         })
 }
 
+/// The calls section's world flags (packages/vesper-codegen-calls/src/data.ves).
+const WORLD_TRACE_ACTIVE: u64 = 1;
+const WORLD_CONST_DENORM: u64 = 2;
+
 /// The calls section (packages/vesper-codegen-calls/src/data.ves).
 fn calls_section(e: &mut Enc, w: &World, tasks: &[(String, u64)]) -> Vec<u64> {
-    let mut out = vec![vesper::trace_effects::active(w) as u64];
+    let mut flags = 0;
+    if vesper::trace_effects::active(w) {
+        flags |= WORLD_TRACE_ACTIVE;
+    }
+    if !vesper::capability_effects::const_denorm_spans(w).is_empty() {
+        flags |= WORLD_CONST_DENORM;
+    }
+    let mut out = vec![flags];
     let mut exprs = vec![];
     out.push(w.functions.len() as u64);
     for f in w.functions.values() {
@@ -265,6 +276,19 @@ fn calls_input_with(
     tasks: &[(String, u64)],
     wide: bool,
 ) -> Option<Vec<u8>> {
+    calls_input_pool(w, program, tasks, wide).map(|(input, _)| input)
+}
+
+/// [`calls_input_flags`] (or with `wide`, [`calls_input_flags_wide`]) and
+/// the payload pool of its program section, which `ir_words::decode_program`
+/// needs to read a program that a package writes back
+/// (crates/vesper-codegen-swap-test/tests/self_host_library_ir.rs).
+pub fn calls_input_pool(
+    w: &World,
+    program: &Program,
+    tasks: &[(String, u64)],
+    wide: bool,
+) -> Option<(Vec<u8>, ir_words::Pool)> {
     if !ir_words::encodable(w, program) || !calls_encodable(w, wide) {
         return None;
     }
@@ -276,5 +300,5 @@ fn calls_input_with(
     let mut tail = t.section();
     let world = t.enc.world(w);
     tail.extend(calls_section(&mut t.enc, w, tasks));
-    Some(t.enc.finish(&world, &tail))
+    Some((t.enc.finish(&world, &tail), t.pool))
 }

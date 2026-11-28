@@ -1287,6 +1287,14 @@ pub fn object(
     m.finish().emit().map_err(|e| e.to_string())
 }
 
+/// The program the walk defines a library build's instances from (the
+/// whole [`library_program`] of the first lowering): the graphs whose fip
+/// side tables `native::BodyGate::graph` reads (#2661).
+pub fn library_walk_program(world: &World, optimize: bool) -> Result<crate::ir::Program, String> {
+    let mut program = crate::ir_swap::lower(world);
+    library_program(world, &mut program, optimize, LibraryStage::Hoist)?;
+    Ok(program)
+}
 fn compile_exports<M: Module>(
     m: &mut M,
     world: &World,
@@ -1321,20 +1329,7 @@ fn compile_exports<M: Module>(
             ));
         }
     }
-    crate::integer_widths::lower_bit_builtin_calls(world, &mut program);
-    super::wide_native::refine_wide_tuples(&mut program);
-    if optimize {
-        crate::ir_swap::optimize(world, &mut program)?;
-        let budget = crate::ir_inline::Budget::for_program(world, &program);
-        crate::ir_swap::inline(world, &mut program, &budget);
-    } else {
-        crate::ir_opt::fip_reuse_pass(world, &mut program)?;
-    }
-    crate::fip::elaborate_non_fip_drops(world, &mut program);
-    if optimize {
-        // Native only, never the verified backend (Stage 1 perf lane 3).
-        crate::ir_swap::hoist(&mut program);
-    }
+    library_program(world, &mut program, optimize, LibraryStage::Hoist)?;
     // Exported symbols keep the failure-record ABI that foreign callers and
     // the v2 glue use; internal calls use the register conventions of [`NativeAbi`] (#935).
     let abi = match &plans {
@@ -1397,6 +1392,57 @@ fn compile_exports<M: Module>(
         glue::define(m, world, interface)?;
     }
     Ok(clif)
+}
+
+/// The steps of a library's IR pipeline ([`library_program`]), in order.
+/// Each stage includes every stage before it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum LibraryStage {
+    /// The bit builtins as operators and the 128-bit tuple types.
+    Widths,
+    /// `ir_opt::optimize` (optimized) or `fip_reuse_pass` (unoptimized).
+    Optimize,
+    /// The inliner (optimized builds only).
+    Inline,
+    /// `fip::elaborate_non_fip_drops`.
+    Drops,
+    /// Bounds hoisting (optimized builds only): the whole pipeline.
+    Hoist,
+}
+
+/// The IR pipeline `vesper build --lib` runs on the first lowering of a
+/// library's world, through `through`. The Stage 2 port
+/// (packages/vesper-library-ir, #2662) runs the same steps in Vesper and
+/// tests/self_host_library_ir.rs compares the two at every stage.
+pub fn library_program(
+    world: &World,
+    program: &mut crate::ir::Program,
+    optimize: bool,
+    through: LibraryStage,
+) -> Result<(), String> {
+    crate::integer_widths::lower_bit_builtin_calls(world, program);
+    super::wide_native::refine_wide_tuples(program);
+    if through < LibraryStage::Optimize {
+        return Ok(());
+    }
+    if optimize {
+        crate::ir_swap::optimize(world, program)?;
+        if through >= LibraryStage::Inline {
+            let budget = crate::ir_inline::Budget::for_program(world, program);
+            crate::ir_swap::inline(world, program, &budget);
+        }
+    } else {
+        crate::ir_opt::fip_reuse_pass(world, program)?;
+    }
+    if through < LibraryStage::Drops {
+        return Ok(());
+    }
+    crate::fip::elaborate_non_fip_drops(world, program);
+    if optimize && through >= LibraryStage::Hoist {
+        // Native only, never the verified backend (Stage 1 perf lane 3).
+        crate::ir_swap::hoist(program);
+    }
+    Ok(())
 }
 
 /// Whether `f` passes or returns a 128-bit integer by value, which its

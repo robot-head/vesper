@@ -6854,6 +6854,14 @@ name = "vesper-span-seed"
 version = "0.1.0"
 
 [[package]]
+name = "vesper-stage2-gate"
+version = "0.1.0"
+dependencies = [
+ "wasmtime",
+ "wasmtime-wasi",
+]
+
+[[package]]
 name = "vesper-std-driver"
 version = "0.1.0"
 dependencies = [
