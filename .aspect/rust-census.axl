@@ -128,7 +128,7 @@ MODULES = {
     "native_export": ("SH4-12", "vesper-codegen-export", ""),
     "ffi_lowering": ("SH4-13, #1830", "vesper-ffi-lowering", "plans, rewrite, drops, cpu.rs tables, buffers.rs check and every emission step in Vesper (0 diffs); left: eval_host.rs (evaluator host)"),
     "optimize": ("G1-4", "vesper-optimize", "flip gate PASS: checker 1.12x, producer 0.70x, both 0.79x"),
-    "fip": ("SH2-12", "vesper-check-fip", "flip gate FAIL: 1.80x / 1.67x with encoding, 0 diffs (#2289); encoder 1.94s -> 1.08s; the Vesper check alone is ~0.8x"),
+    "fip": ("SH2-12", "vesper-check-fip", "flip gate PASS: 1.45x / 1.40x with encoding, 0 diffs (#2684, packed AST input); gated"),
     "bounds_hoist": ("SH3-12", "vesper-bounds-hoist", "flip gate PASS: pass 1.15x, build 1.07x; swapped in the hybrid (`hoist`)"),
     "tiled": ("SH4-11, #1830", "vesper-codegen-numeric", "swapped, 0 declined over the corpus; left: eval.rs, JIT host runtime"),
     "capability_effects": ("SH2-8", "vesper-check-effects", "flip gate PASS: 0.32x with the swap's encoding (#2207), in the gated set"),

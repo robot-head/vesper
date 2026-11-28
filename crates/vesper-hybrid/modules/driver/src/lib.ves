@@ -76,7 +76,7 @@ use self::load::{read_graph};
 // The checked world's declarations from the Vesper collector (#2024).
 use @vesper/check-collect::{decls_bytes};
 // hd_step group 2 (#1893): the front-end passes in Vesper.
-use self::front::{parse_clean, cst_text};
+use self::front::{FrontParse, parse_front, cst_text};
 use self::interface::{interface_json};
 // The checked world the driver holds (#2024).
 use self::world::{
@@ -521,21 +521,37 @@ fn drive(
     // (`VESPER_HYBRID_SWAPS`), the session parses.
     let front = !package && HybridDriver::hd_front_begin() == 1;
     if emit_cst_format && front {
-        match cst_text(in source.as_slice()) {
-            Option::Some(text) => return write_output(inout s, in o, in text.as_slice()),
+        let input = value(in o, slot_input());
+        match cst_text(in source.as_slice(), in input.as_slice(), o.json) {
+            Option::Some(cst) => {
+                emit_report(in cst.report.as_slice());
+                return write_output(inout s, in o, in cst.text.as_slice());
+            },
             Option::None => (),
         }
     }
     let mut r = declined();
     if front && !o.include_tests && !emit_cst_format {
-        match parse_clean(in source.as_slice()) {
-            Option::Some(words) => {
+        let input = value(in o, slot_input());
+        match parse_front(in source, in input.as_slice(), o.json) {
+            FrontParse::ParsedClean(words) => {
                 r = HybridDriver::hd_parsed(inout s, in words.as_slice());
                 if is_failure(r) {
                     return pass_failed(in s, r);
                 }
             },
-            Option::None => (),
+            // `ReportSyntax`'s report, without the session's `Parse`.
+            FrontParse::SyntaxErrors(n, report) => {
+                emit_report(in report.as_slice());
+                return count_error(wrapping_i64(n), in "syntax error(s)");
+            },
+            // The `Parse` pass's failure: the expansion's diagnostic, then
+            // its message as the error.
+            FrontParse::ExpansionError(report, message) => {
+                emit_report(in report.as_slice());
+                return error(in message.as_slice());
+            },
+            FrontParse::ParseDeclined => (),
         }
     }
     // The session's module is the parse of `source` itself, so the Vesper
@@ -1623,7 +1639,11 @@ fn diag_read_u64(in s: Slice[u8], inout at: u64) -> u64 {
 // tag 2 = stderr text chunks).
 fn emit_diagnostics(in s: Session) eff [Ffi[HybridDriver]] {
     let raw = text(in s);
-    let slice = raw.as_slice();
+    emit_report(in raw.as_slice());
+}
+
+// Emit a report in the layout of `emit_diagnostics`.
+fn emit_report(in slice: Slice[u8]) eff [Ffi[HybridDriver]] {
     if slice.len() == 0 {
         return ();
     }
