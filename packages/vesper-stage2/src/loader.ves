@@ -5,6 +5,7 @@
 use @vesper/check-data::util::{stage2_heap_mark, stage2_heap_reset};
 use @vesper/check-names-packages::{resolve_sugar_imports_bytes};
 use @vesper/preludes::{strings_source};
+use self::builtin_traits::{append_builtin_prelude, append_derived, builtin_traits_wanted};
 use @vesper/sugar::driver::{
     BootstrapSugarOutput, FREE_NAME_WORDS, Imports, PackageSugarBinding, PackageSugarDefinition,
     SugarDeclarationSpan, SugarImportSpan, expand_bootstrap_module, expand_module,
@@ -2278,6 +2279,46 @@ pub fn load_package_graph_bytes_for(
     in root_dir: Slice[u8],
     in os: Slice[u8]
 ) -> Option[ChunkSeq[u8]] eff [Ffi[StdFs]] {
+    load_package_graph_bytes_full(in root_dir, in os, in NO_ROOT_EXTRA.as_bytes(), false)
+}
+
+// No source appended to the root module.
+const NO_ROOT_EXTRA: Str = "";
+// The line break before appended source (the module may not end in one).
+const ROOT_EXTRA_BREAK: u8 = 10;
+
+// The package graph of `load_package_graph_bytes_for`, with the builtin
+// `Eq`/`Ord`/`Hash` traits when `traits` (the trait frontend, traits.ves):
+// their prelude in the generated module when a module names one, and each
+// derived conformance after the text of the module that asks for it.
+pub fn load_package_graph_bytes_traits(
+    in root_dir: Slice[u8],
+    in os: Slice[u8],
+    traits: bool
+) -> Option[ChunkSeq[u8]] eff [Ffi[StdFs]] {
+    load_package_graph_bytes_full(in root_dir, in os, in NO_ROOT_EXTRA.as_bytes(), traits)
+}
+
+// `load_package_graph_bytes_for` with `root_extra` appended to the root
+// package's `src/lib.ves`: generated items the compiled library holds, as
+// `vesper build --lib` appends an `// @export instance`'s wrapper
+// (`native_export::instance_wrappers`).
+pub fn load_package_graph_bytes_with(
+    in root_dir: Slice[u8],
+    in os: Slice[u8],
+    in root_extra: Slice[u8]
+) -> Option[ChunkSeq[u8]] eff [Ffi[StdFs]] {
+    load_package_graph_bytes_full(in root_dir, in os, in root_extra, false)
+}
+
+// The package graph with `root_extra` appended to the root module and the
+// builtin traits when `traits`.
+pub fn load_package_graph_bytes_full(
+    in root_dir: Slice[u8],
+    in os: Slice[u8],
+    in root_extra: Slice[u8],
+    traits: bool
+) -> Option[ChunkSeq[u8]] eff [Ffi[StdFs]] {
     let mut pkgs = ChunkSeq::new[PkgNode]();
     match load_pkg_graph(in root_dir, inout pkgs) {
         Option::Some(_) => {},
@@ -2302,7 +2343,12 @@ pub fn load_package_graph_bytes_for(
         let main_p = join_path(in src_dir.as_slice(), in "main.ves".as_bytes());
         let root_segs = ChunkSeq::new[ChunkSeq[u8]]();
         match try_read_file(in lib_p.as_slice()) {
-            Option::Some(t) => {
+            Option::Some(t0) => {
+                let mut t = t0;
+                if pi == 0 && root_extra.len() != 0 {
+                    t.push(ROOT_EXTRA_BREAK);
+                    t.extend(in root_extra);
+                }
                 collect_mod_files(
                     pi,
                     in dir.as_slice(),
@@ -2372,11 +2418,15 @@ pub fn load_package_graph_bytes_for(
     sp_seg.extend(in "intrinsics".as_bytes());
     sp_segs.push(sink sp_seg);
     let mut sp_src = ChunkSeq::new[u8]();
+    let with_builtins = traits && add_derived_conformances(inout files, inout mods, inout base_off);
     // The Rust checker's order (src/check.rs `World::collect`): the width
     // intrinsics, the string prelude, then the option methods.
     append_extra_intrinsics(in mods, inout sp_src);
     append_string_prelude(in mods, inout sp_src);
     append_option_methods(in mods, inout sp_src);
+    if with_builtins {
+        append_builtin_prelude(inout sp_src);
+    }
     collect_mod_files(
         0,
         in "".as_bytes(),
@@ -2389,6 +2439,60 @@ pub fn load_package_graph_bytes_for(
         inout mods
     );
     prepare_sugar_graph(in pkgs, inout files, inout mods)
+}
+
+// When a module names a builtin trait (`builtin_traits_wanted`), appends
+// to each module's text the conformances its empty builtin-trait impls
+// derive, moves the file bases past the longer texts, and returns true.
+fn add_derived_conformances(
+    inout files: ChunkSeq[FileEntry],
+    inout mods: ChunkSeq[ModEntry],
+    inout base_off: u64
+) -> bool {
+    let mut texts = ChunkSeq::new[ChunkSeq[u8]]();
+    for mi in 0..mods.len() {
+        match mods.try_get(mi) {
+            Option::Some(m) => {
+                let mut c = ChunkSeq::new[u8]();
+                c.extend(in m.text.as_slice());
+                texts.push(sink c);
+            },
+            Option::None => {},
+        }
+    }
+    if !builtin_traits_wanted(in texts) {
+        return false;
+    }
+    let mut lens = ChunkSeq::new[u64]();
+    for _fi in 0..files.len() {
+        lens.push(0);
+    }
+    for mi in 0..mods.len() {
+        match mods.try_get_mut(mi) {
+            Option::Some(m) => {
+                let mut extra = ChunkSeq::new[u8]();
+                append_derived(in m.text.as_slice(), inout extra);
+                if extra.len() > 0 {
+                    m.text.push(10);
+                    m.text.extend(in extra.as_slice());
+                }
+                let _ = lens.try_set(m.file, m.text.len());
+            },
+            Option::None => {},
+        }
+    }
+    let mut base: u64 = 0;
+    for fi in 0..files.len() {
+        match files.try_get_mut(fi) {
+            Option::Some(f) => {
+                f.base = base;
+            },
+            Option::None => {},
+        }
+        base = wrapping_add(base, wrapping_add(lens.try_get(fi).unwrap_or(0), 1));
+    }
+    base_off = base;
+    true
 }
 
 copy struct BootstrapDeclarationRange {
