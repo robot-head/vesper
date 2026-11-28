@@ -4,18 +4,18 @@
 // are copies and `==` on types and rows is one compare.
 
 use @vesper/check-data::util::{add, n32, u32_at, u8_at, w};
-use @vesper/check-data::types::{EffNode, RowNode, TypeNode, Types, Vars, TyKind};
+use @vesper/check-data::types::{EffNode, RowNode, TypeNode, Types, Vars, TyKind, literal_hi};
 use @vesper/check-data::world::{Known};
 use self::ints::{Lit, above_i64, default_fits, fits, lit_max, lit_min};
 
 const NONE32: u32 = 4294967295;
 
 pub fn lit_of(node: TypeNode) -> Lit {
-    Lit { neg: node.mode == 1, mag: wrapping_u64(node.lit) }
+    Lit { neg: node.mode == 1, mag: wrapping_u64(node.lit), hi: literal_hi(node) }
 }
 
 pub fn mk_lit(inout types: Types, value: Lit) -> u32 {
-    types.literal(value.neg, value.mag)
+    types.wide_literal(value.neg, value.mag, value.hi)
 }
 
 // Item `i` of the arena's shared item list (arguments and parameters).

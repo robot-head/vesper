@@ -1,16 +1,30 @@
-// Integer literal values as the type arena keeps them: a sign and a u64
-// magnitude (`Types::literal`; Rust holds an `i128`, which can be wider).
-// `numeric::IntegerKind::{fits, default_for}` over that form, including
-// the 128-bit kinds.
+// Integer literal values as the type arena keeps them: a sign and a
+// 128-bit magnitude in two words (`Types::wide_literal`; Rust holds an
+// `i128`). `numeric::IntegerKind::{fits, default_for}` over that form,
+// including the 128-bit kinds.
 
 use @vesper/check-data::world::{Known};
 
 const I64_MAX: u64 = 9223372036854775807;
+// 2^63: the magnitude of i64::MIN, and the high word of i128::MIN's.
+const SIGN_BIT: u64 = 9223372036854775808;
 
-// A literal value: `neg` is the sign (never set for zero).
+// A literal value: `neg` is the sign (never set for zero); the magnitude
+// is `hi * 2^64 + mag`.
 pub copy struct Lit {
     neg: bool,
     mag: u64,
+    hi: u64,
+}
+
+// A literal of at most 64 bits in magnitude.
+pub fn small_lit(neg: bool, mag: u64) -> Lit {
+    Lit { neg: neg, mag: mag, hi: 0 }
+}
+
+// `Literal::WideInt`: a value above i128::MAX, typed `u128`.
+pub fn above_i128(value: Lit) -> bool {
+    !value.neg && value.hi >= SIGN_BIT
 }
 
 // -1, 0 or 1 as `a` is below, equal to or above `b`.
@@ -21,10 +35,10 @@ pub fn lit_cmp(a: Lit, b: Lit) -> i64 {
         }
         return 1;
     }
-    if a.mag == b.mag {
+    if a.mag == b.mag && a.hi == b.hi {
         return 0;
     }
-    let below = a.mag < b.mag;
+    let below = a.hi < b.hi || (a.hi == b.hi && a.mag < b.mag);
     if below != a.neg { -1 } else { 1 }
 }
 
@@ -38,7 +52,7 @@ pub fn lit_min(a: Lit, b: Lit) -> Lit {
 
 // `n > i64::MAX as i128`.
 pub fn above_i64(value: Lit) -> bool {
-    !value.neg && value.mag > I64_MAX
+    !value.neg && (value.hi != 0 || value.mag > I64_MAX)
 }
 
 // Width in bits of integer kind `kind`, or 0 when it names no integer kind.
@@ -73,6 +87,18 @@ pub fn fits(known: Known, kind: u32, value: Lit) -> bool {
     if bits == 0 {
         return false;
     }
+    // u128 holds the i128 domain (`IntegerKind::max`): every literal
+    // value that is not negative.
+    if int_unsigned(known, kind) && bits == 128 {
+        return !value.neg;
+    }
+    if bits == 128 {
+        // i128: down to -2^127.
+        return !value.neg || value.hi < SIGN_BIT || (value.hi == SIGN_BIT && value.mag == 0);
+    }
+    if value.hi != 0 {
+        return false;
+    }
     if int_unsigned(known, kind) {
         if value.neg {
             return false;
@@ -81,10 +107,6 @@ pub fn fits(known: Known, kind: u32, value: Lit) -> bool {
             return true;
         }
         return value.mag <= wrapping_sub(wrapping_shl_u64(1, bits), 1);
-    }
-    // Every u64 magnitude fits a 128-bit kind.
-    if bits == 128 {
-        return true;
     }
     let half = wrapping_shl_u64(1, wrapping_sub(bits, 1));
     if value.neg {
@@ -101,16 +123,16 @@ pub fn default_fits(known: Known, n: Lit, m: Lit) -> bool {
 
 // `n < i64::MIN as i128`: a magnitude past 2^63, negated.
 pub fn below_i64(value: Lit) -> bool {
-    value.neg && value.mag > wrapping_add(I64_MAX, 1)
+    value.neg && (value.hi != 0 || value.mag > SIGN_BIT)
 }
 
-// `IntegerKind::default_for(n)`: u64 above i64::MAX, i128 below i64::MIN
-// (a kept magnitude never passes u64::MAX), else i64.
+// `IntegerKind::default_for(n)`: i128 past u64::MAX or below i64::MIN,
+// u64 above i64::MAX, else i64.
 pub fn default_of(known: Known, n: Lit) -> u32 {
-    if above_i64(n) {
-        known.u64_
-    } else if below_i64(n) {
+    if below_i64(n) || (!n.neg && n.hi != 0) {
         known.i128_
+    } else if above_i64(n) {
+        known.u64_
     } else {
         known.i64_
     }

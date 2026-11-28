@@ -11,7 +11,7 @@ Run from the repository root:
 
 ```sh
 vesper lint FILE [--json] [--fix] [--semver-safe]
-cargo run --bin vesper -- lint crates/vesper-lint/examples/lint_demo.ves --json
+cargo run --locked -p vesper-hybrid --features gated-default -- lint crates/vesper-lint/examples/lint_demo.ves --json
 ```
 
 `lint_demo.ves` produces two unused-effect diagnostics and one diagnostic-only

@@ -2127,8 +2127,8 @@ const MIN_INOUT_BODIES: u64 = 6;
 /// failure record), and slice `len` and checked elements of each stride
 /// (`u8`, `u16`, `u32`, `i32`, `u64`, `f64`). `main` builds the sequences
 /// and handles the raise, so it stays with the walk. Optimized, a slice
-/// parameter is read once at entry (`bounds_hoist::header_hoists`), which
-/// the body hook does not emit yet, so its readers stay with the walk.
+/// parameter is read once at entry (`bounds_hoist::header_hoists`), its
+/// header words then loaded as read-only memory.
 const STRINGS_SLICES: &str = "
 fn text_len(in s: String) -> u64 {
     s.len()
@@ -2213,9 +2213,9 @@ fn vesper_string_and_slice_bodies_match() {
         );
         let ran = if cross() { 0 } else { 2 };
         assert_eq!((total.worlds, total.ran), (2, ran), "{}", total.summary());
-        // The string functions in both builds and the slice functions
-        // unoptimized (and again for the JIT runs off-cross).
-        let min_emitted = if cross() { 15 } else { 30 };
+        // The string and slice functions in both builds (and again for
+        // the JIT runs off-cross).
+        let min_emitted = if cross() { 20 } else { 40 };
         assert!(
             emitted >= min_emitted,
             "only {emitted} string and slice functions came from Vesper (expected {min_emitted})"

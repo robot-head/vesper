@@ -4312,6 +4312,17 @@ impl<M: Module> Codegen<'_, '_, M> {
                 u64::from(a.as_u32())
             }));
         }
+        // The slice parameters read once at entry (#2653): each one's
+        // parameter index and the reads that take its receiver.
+        let views = self
+            .entry_views(body)
+            .ok_or("a header hoist the body hook refused")?;
+        args.push(views.len() as u64);
+        for (param, reads) in views {
+            args.push(param as u64);
+            args.push(reads.len() as u64);
+            args.extend(reads);
+        }
         crate::codegen_swap::body_request(
             &mut self.b,
             &mut *self.m,
@@ -4345,7 +4356,38 @@ impl<M: Module> Codegen<'_, '_, M> {
         !drops
             && crate::fip::seq_drop_plan(self.world, graph).is_empty()
             && seq_native::fused_reads(graph).is_empty()
-            && (!self.operands_only || crate::bounds_hoist::header_hoists(graph).is_empty())
+            && self.entry_views(body).is_some()
+    }
+    /// The header hoists of graph `body` the body hook emits (#2653): on
+    /// the optimize path, the slice parameters `ir_graph_at` reads once
+    /// at entry (`seq_entry_view`), as (parameter index, the indexes of
+    /// the reads given that receiver among the graph's values). `None`
+    /// when a hoist is any other (a loop preheader's, a sequence's, a
+    /// field's).
+    fn entry_views(&self, body: &crate::ir::FunctionIr) -> Option<Vec<(usize, Vec<u64>)>> {
+        if !self.operands_only {
+            return Some(vec![]);
+        }
+        let join = self.own_scalar_join(body);
+        let scalar_graph = self.scalar_graph(body, join.as_ref());
+        let graph = scalar_graph.as_ref().map_or(body, |s| &s.f);
+        let mut views = vec![];
+        for hoist in crate::bounds_hoist::header_hoists(graph) {
+            if !hoist.entry || !hoist.place.path.is_empty() || !crate::seq::is_slice_type(&hoist.ty)
+            {
+                return None;
+            }
+            let param = graph
+                .params
+                .iter()
+                .position(|p| p.name == hoist.place.root)?;
+            let mut reads = vec![];
+            for read in &hoist.reads {
+                reads.push(graph.values.keys().position(|v| v == read)? as u64);
+            }
+            views.push((param, reads));
+        }
+        Some(views)
     }
     /// The enum shape a top-level graph `f` returns as words: the
     /// function's own register-result ABI when its result is a small enum

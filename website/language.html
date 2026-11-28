@@ -72,8 +72,8 @@ fn main() -&gt; i64 {
             <li>Save the example as <code>lesson.ves</code> in the repository root.</li>
             <li>From that directory, run both commands below. <code>check</code> checks the source. <code>run</code> evaluates <code>main</code> and prints <code>15</code>.</li>
           </ol>
-          <pre tabindex="0"><code data-lang="sh">cargo run --locked -p vesper -- check lesson.ves
-cargo run --locked -p vesper -- run lesson.ves</code></pre>
+          <pre tabindex="0"><code data-lang="sh">cargo run --locked -p vesper-hybrid --features gated-default -- check lesson.ves
+cargo run --locked -p vesper-hybrid --features gated-default -- run lesson.ves</code></pre>
         </section>
         <section id="loops">
           <h2>Loops and ranges</h2>
@@ -294,8 +294,8 @@ test {
     }
 }</code></pre>
           <p>Save this example as <code>lesson.ves</code> and run the first command below to execute all three rows. The second command selects the tie case. Change the expected value in that row to <code>8</code> to see a failure reported for <code>test_larger::tie</code>.</p>
-          <pre tabindex="0"><code data-lang="sh">cargo run --locked -p vesper -- test lesson.ves
-cargo run --locked -p vesper -- test lesson.ves --filter test_larger::tie</code></pre>
+          <pre tabindex="0"><code data-lang="sh">cargo run --locked -p vesper-hybrid --features gated-default -- test lesson.ves
+cargo run --locked -p vesper-hybrid --features gated-default -- test lesson.ves --filter test_larger::tie</code></pre>
           <p>To try the same techniques in larger programs, use the repository examples. The specification gives the formal rules for each feature. <a href="https://github.com/robot-head/vesper/tree/main/examples">Example programs</a> · <a href="vesper-specification.pdf">Language specification (PDF)</a></p>
         </section>
         <section id="sugar">
@@ -306,10 +306,10 @@ cargo run --locked -p vesper -- test lesson.ves --filter test_larger::tie</code>
 }
 fn main() -&gt; i64 { addone!(41) }</code></pre>
           <p>Save this as <code>lesson.ves</code>. Format the macro itself, then expand it to ordinary Vesper before running it. These commands use the compiler built in the repository and a POSIX shell.</p>
-          <pre tabindex="0"><code data-lang="sh">target/debug/vesper fmt lesson.ves
-target/debug/vesper fmt --check lesson.ves
-target/debug/vesper forge expand lesson.ves &gt; expanded.ves
-target/debug/vesper run expanded.ves</code></pre>
+          <pre tabindex="0"><code data-lang="sh">target/debug/vesper-hybrid fmt lesson.ves
+target/debug/vesper-hybrid fmt --check lesson.ves
+target/debug/vesper-hybrid forge expand lesson.ves &gt; expanded.ves
+target/debug/vesper-hybrid run expanded.ves</code></pre>
           <!-- diagram:macro-substitution -->
           <!-- figure:guide-expansion -->
           <p>The second formatting pass accepts the first pass’s output. The expansion calls <code>wrapping_add(41, 1)</code> and prints <code>42</code> when run. A <code>sugar</code> declaration can define a grammar form, such as an infix operator or a statement, and rewrite it to Vesper. A Forge expression macro fills a template at a call spelled <code>name!(…)</code>. <a href="tour/define-a-new-expression-form.html">Run and expand a sugar declaration</a>.</p>
