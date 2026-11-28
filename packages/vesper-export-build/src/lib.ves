@@ -116,6 +116,9 @@ const EFFECT_PREFIX: Str = "Ffi$";
 
 // The root module, whose `// @export` lines are the directives.
 const ROOT_MODULE: Str = "/src/lib.ves";
+// An executable package's root module when it has no `ROOT_MODULE`
+// (src/packages.rs: `src/lib.ves`, or `src/main.ves`).
+const MAIN_MODULE: Str = "/src/main.ves";
 
 // The binding options' types path when there is none.
 const NO_TYPES_PATH: Str = "";
@@ -1642,9 +1645,15 @@ pub fn foreign_sources(
     let mut root_path = ChunkSeq::new[u8]();
     root_path.extend(in root_dir);
     root_path.extend(in ROOT_MODULE.as_bytes());
+    let mut main_path = ChunkSeq::new[u8]();
+    main_path.extend(in root_dir);
+    main_path.extend(in MAIN_MODULE.as_bytes());
     let source = match read_file(in root_path.as_slice()) {
         Option::Some(s) => s,
-        Option::None => return Option::None,
+        Option::None => match read_file(in main_path.as_slice()) {
+            Option::Some(s) => s,
+            Option::None => return Option::None,
+        },
     };
     let none = ChunkSeq::new[u8]();
     let dump = directives_text(in source, in target.triple, in target.abi, in none);

@@ -419,13 +419,29 @@ fn trace_identities(
 
 // ----- the plan ---------------------------------------------------------------------
 
+// Whether an instance with substitution `vars` can go to the body hook
+// (`Codegen::body_gate`, #2715): none of its keys binds a function value
+// (`$fn:`, `FN_ARG`) or a `dyn` argument (`__dyn__`, `DYN_GENERIC`).
+fn lent_vars(in names: Names, in vars: IVars) -> bool {
+    for i in 0..vars.len() {
+        let key = vars.key(i);
+        if names.has_prefix(key, in "$fn:".as_bytes())
+            || names.has_prefix(key, in "__dyn__".as_bytes())
+        {
+            return false;
+        }
+    }
+    true
+}
+
 // `frame_plan` of instance `name` (`f`) under `abi`, written as
 // `FramePlan::text`; false with the message in `err` when a layout or
 // `scalar` refuses. `pass_trace` is the trailing trace flag
 // (`uses_trace_fail`), `trace_host` the task's `trace_ok`. `plain` is set
 // to the plan's part of the body hook's gate (`Codegen::body_gate`): not
-// `@fip`, no instance variable (a generic or a `$fn:` binding), no trace
-// flag or caller slot, and no trace-host identity
+// `@fip`, no `$fn:` or `dyn` instance variable (a generic instance is lent
+// with its types substituted, #2715), no trace flag or caller slot, and no
+// trace-host identity
 // (a `fail_only` record's exits are its only allowed identities). Its
 // `result_ok` always holds here: the walk takes the result pointer from
 // the plan's own result.
@@ -450,7 +466,7 @@ pub fn frame_plan(
     let info = d.fn_info(f.func_index);
     let fail_record = fail_only(inout t, in names, in wd, k, in f);
     let caller_slot = uses_caller_slot(in d, info);
-    plain = !info.fip && vars.len() == 0 && !pass_trace && !caller_slot;
+    plain = !info.fip && lent_vars(in names, in vars) && !pass_trace && !caller_slot;
     let result = layout_facts(inout ls, inout t, inout names, in wd, f.result, inout err);
     if !result.ok {
         return false;

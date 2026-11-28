@@ -8,8 +8,9 @@
 //!   package does not decline: the same bytes.
 //! - `typing_over_vesper_input_matches_rust` runs core typing over the
 //!   Vesper stream: every function it checks has the types the Rust
-//!   checker recorded and is checked over the Rust stream too (which can
-//!   check a few more: it carries the inferred results).
+//!   checker recorded, the failing operations it recorded and is checked
+//!   over the Rust stream too (which can check a few more: it carries the
+//!   inferred results); every handler's inferred effects are Rust's.
 
 #[path = "common/check_harness.rs"]
 mod check_harness;
@@ -183,7 +184,8 @@ fn typing_over_vesper_input_matches_rust() {
             continue;
         };
         worlds += 1;
-        let (v, checked, _) = vesper_types(&f.text(&input));
+        let text = f.text(&input);
+        let (v, checked, _) = vesper_types(&text);
         over_vesper += checked.len();
         let (_, rust_checked, _) = vesper_types(&f.text(&exprs_input(&c.world, &c.module)));
         over_rust += rust_checked.len();
@@ -193,6 +195,26 @@ fn typing_over_vesper_input_matches_rust() {
         // refines (a returned closure's latent labels) is skipped there.
         let difference = if let Some(f) = checked.iter().find(|f| !rust_checked.contains(f)) {
             Some(format!("function {f:?} checked over the Vesper input only"))
+        } else if let Some((span, _)) = vesper_failure_ops(&text)
+            .into_iter()
+            .find(|(span, ops)| *ops != rust_failure_ops(&c.world, *span))
+        {
+            Some(format!("function {span:?}'s failing operations"))
+        } else if let Some((span, d)) = {
+            // The inferred handler effects of the checked functions,
+            // computed from those operations.
+            let inside = |(s, t): (usize, usize)| checked.iter().any(|&(a, b)| a <= s && t <= b);
+            let rows: Vec<_> = vesper_handler_effects(&text)
+                .into_iter()
+                .filter(|(span, _)| inside(*span))
+                .collect();
+            let spans: Vec<(usize, usize)> = rows.iter().map(|(span, _)| *span).collect();
+            rows.into_iter()
+                .zip(rust_handler_effects(&c.world, &spans))
+                .find(|(v, r)| v != r)
+                .map(|(v, r)| (v.0, format!("vesper {} rust {}", v.1, r.1)))
+        } {
+            Some(format!("handler {span:?}'s effects: {d}"))
         } else {
             first_difference(&rust_types(&c.world, &checked), &v)
         };
