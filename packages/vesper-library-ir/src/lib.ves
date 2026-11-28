@@ -13,14 +13,16 @@
 //   then tokens.ves (`ir::thread_tokens`); unoptimized: `fip_reuse_pass`.
 // - optimized: the inliner under `Budget::for_program` (inline.ves, over
 //   @vesper/ir-inline), with the world's facts from facts.ves.
-// - `fip::elaborate_non_fip_drops`.
+// - drops.ves: `fip::elaborate_non_fip_drops`.
 // - optimized: bounds hoisting (@vesper/bounds-hoist's `hoist_program`).
 //
 // `@fip` reuse and drop elaboration do nothing in a world without the
-// `Box` prelude; a world with it is refused until they are ported. The
-// output is a status word (`Status`), then, when it is `Status::Ok`, the program as
-// `put_program` words (names, types, program section), which
-// tests/common/ir_words.rs `decode_program` reads back.
+// `Box` prelude. In a world with it, the drops are elaborated; `@fip`
+// reuse rewrites only `@fip` functions, so a program with one is refused
+// until it is ported (`Status::FipActive`). The output is a status word
+// (`Status`, or drops.ves `DropStatus`), then, when it is `Status::Ok`,
+// the program as `put_program` words (names, types, program section),
+// which tests/common/ir_words.rs `decode_program` reads back.
 
 use @vesper/check-data::input::{Ctx, Reader, put_world, read_ctx};
 use @vesper/place-ir::{
@@ -34,6 +36,8 @@ use @vesper/bounds-hoist::pass::{hoist_program};
 use self::widths::{lower_bit_builtin_calls, refine_wide_tuples};
 use self::tokens::{thread_tokens};
 use self::inline::{inline_input_words, inline_program};
+use self::drops::{DropStatus, elaborate_drops};
+use self::facts::{fact_names};
 
 // `LibraryStage`, in order: each stage includes the ones before it.
 pub enum Stage: _ {
@@ -48,8 +52,8 @@ pub enum Stage: _ {
 // state evidence, egglog would refuse a block, a `slot_key` error.
 pub enum Status: _ {
     Ok = 0,
-    // The world has the `Box` prelude: `@fip` reuse and drop elaboration
-    // are not ported yet.
+    // The world has the `Box` prelude and a function is `@fip`: `@fip`
+    // reuse is not ported yet.
     FipActive = 16,
     // The inliner's output does not list the program's functions in order.
     InlineMismatch = 17,
@@ -120,12 +124,26 @@ pub fn library_walk_calls_input(in input: Slice[u8], optimize: bool) -> (u64, Ch
     (status, out)
 }
 
+// Whether a function of `p` is `@fip` (`fip_reuse_pass` rewrites only
+// those).
+fn has_fip(in p: Program, in calls: Calls) -> bool {
+    for fi in 0..p.fn_count() {
+        let at = calls.function(p.function(fi).name);
+        if at != NONE32 && calls.fn_info(at).fip {
+            return true;
+        }
+    }
+    false
+}
+
+const NONE32: u32 = 4294967295;
+
 // The pipeline through `stage` over the first lowering `p`: the status.
 fn run(inout c: Ctx, inout p: Program, in calls: Calls, stage: u64, optimize: bool) -> u64 {
     lower_bit_builtin_calls(inout p, in c.names, c.world.k, in calls);
     refine_wide_tuples(inout p, inout c.types, c.world.k);
     if stage >= Stage::Optimize {
-        if c.world.box_active {
+        if c.world.box_active && has_fip(in p, in calls) {
             return Status::FipActive;
         }
         if optimize {
@@ -157,7 +175,13 @@ fn run(inout c: Ctx, inout p: Program, in calls: Calls, stage: u64, optimize: bo
             }
         }
     }
-    // `elaborate_non_fip_drops` adds nothing without the `Box` prelude.
+    if stage >= Stage::Drops && c.world.box_active {
+        let fx = fact_names(inout c.names);
+        let st = elaborate_drops(inout p, inout c.names, inout c.types, in c.world, in calls, fx);
+        if st != DropStatus::Ok {
+            return st;
+        }
+    }
     if stage >= Stage::Hoist && optimize {
         let versioned = hoist_program(inout p, inout c);
     }
@@ -178,7 +202,7 @@ pub fn library_inline_input_text(in input: Str) -> ChunkSeq[u64] {
     let calls = read_calls(inout r, in b, in c);
     lower_bit_builtin_calls(inout p, in c.names, c.world.k, in calls);
     refine_wide_tuples(inout p, inout c.types, c.world.k);
-    if c.world.box_active {
+    if c.world.box_active && has_fip(in p, in calls) {
         return refused(Status::FipActive);
     }
     if optimize {
