@@ -11,4 +11,6 @@ capability_ceiling = ["Fail", "Alloc"]
 "@vesper/codegen-calls" = { version = "^0.1", path = "../vesper-codegen-calls" }
 "@vesper/ir-opt" = { version = "^0.1", path = "../vesper-ir-opt" }
 "@vesper/ir-opt-policy" = { version = "^0.1", path = "../vesper-ir-opt-policy" }
+"@vesper/check-layout" = { version = "^0.1", path = "../vesper-check-layout" }
+"@vesper/ir-inline" = { version = "^0.1", path = "../vesper-ir-inline" }
 "@vesper/bounds-hoist" = { version = "^0.1", path = "../vesper-bounds-hoist" }

@@ -270,8 +270,9 @@ jobs:
         # copy against vesper_pulse (Linux runs the epoll copy).
         run: aspect ci test-pulse-port
       - name: Test the Cranelift C-ABI shim
-        # Self-hosting SH0 lane 4 (#1126): Vesper drives Cranelift through
-        # crates/vesper-cranelift-sys, links the object it builds and runs it.
+        # Self-hosting SH0 lane 4 (#1126): the C ABI from Rust. The fixtures
+        # Vesper builds through it need the Stage 2 seed (Git LFS) and run
+        # in bootstrap-stage2.yml (#2672).
         run: cargo test --locked --profile port-compiler -p vesper-cranelift-sys
       - name: Test the codegen swap point
         # Self-hosting SH4 lane 1 (#1275): lent handles and the pilot swap,
@@ -377,8 +378,9 @@ jobs:
           VESPER_NATIVE_SUFFIX: .exe
         run: ./.platform-verify-tools/scripts/windows/test-native-executables.ps1
       - name: Test the Cranelift C-ABI shim
-        # Self-hosting SH0 lane 4 (#1126): Vesper drives Cranelift through
-        # crates/vesper-cranelift-sys, links the object it builds and runs it.
+        # Self-hosting SH0 lane 4 (#1126): the C ABI from Rust. The fixtures
+        # Vesper builds through it need the Stage 2 seed (Git LFS) and run
+        # in bootstrap-stage2.yml (#2672).
         run: cargo test --locked --profile port-compiler -p vesper-cranelift-sys
       - name: Test the codegen swap point
         # Self-hosting SH4 lane 1 (#1275): lent handles and the pilot swap,

@@ -531,6 +531,42 @@ fn backend_checks_speed() {
             Some((file, source, world, functions, p))
         })
         .collect();
+    if check_harness::flip_gate::on() {
+        // The swap's path (crates/vesper-hybrid/src/swap/backend_checks.rs):
+        // encoding, which compiles each function for the stack verifier,
+        // the Vesper verifiers and decoding the report, against Rust's
+        // `verify_emitted`, every verifier on.
+        let report = package().entry("backend_verify_report", true);
+        check_harness::flip_gate::pairs(
+            "verifiers-swap-path",
+            &mut || {
+                time(|| {
+                    for (_, _, world, functions, p) in &programs {
+                        let r = nv::verify_emitted(world, functions, Some(TARGETS[0]), &all, p);
+                        std::hint::black_box(r.map(|r| r.findings.len()).ok());
+                    }
+                })
+            },
+            &mut || {
+                time(|| {
+                    for (_, _, world, functions, p) in &programs {
+                        // The hook passes no file or source, like this.
+                        let input = encode(
+                            world,
+                            functions,
+                            Some(TARGETS[0]),
+                            &Mode::Emitted(&all, p),
+                            "",
+                            "",
+                        );
+                        let r = decode_report(&report.words(&input));
+                        std::hint::black_box(r.map(|r| r.findings.len()).ok());
+                    }
+                })
+            },
+        );
+        return;
+    }
     for (label, verifiers) in [("all verifiers", &all), ("without stack", &no_stack)] {
         let inputs: Vec<Vec<u8>> = programs
             .iter()

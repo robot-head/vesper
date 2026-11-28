@@ -1,0 +1,15 @@
+[package]
+name = "@vesper/port-builder"
+version = "0.1.0"
+edition = "2026"
+license = "MIT OR Apache-2.0"
+# Reads the port package and writes the three outputs; the object goes
+# through @vesper/cranelift's `.vsys` library, which the composed Cranelift
+# component provides (bootstrap switch slice 3, #2666).
+capability_ceiling = ["Fail", "Alloc", "Ffi"]
+
+[dependencies]
+"@vesper/export-build" = { version = "^0.1", path = "../vesper-export-build" }
+"@vesper/native-lib" = { version = "^0.1", path = "../vesper-native-lib" }
+"@vesper-std/env" = { version = "^0.1", path = "../vesper-std/env" }
+"@vesper-std/fs" = { version = "^0.1", path = "../vesper-std/fs" }
