@@ -218,10 +218,7 @@ pub(super) const SWAPS: &[Swap] = &[
         "builtin_wanted",
         "flip gate FAIL ~4.2x: the swap encodes the whole module to answer one bit (scripts/ci/flip-gate/pact-builtin-wanted.json, #2684)",
     ),
-    open(
-        "deps_pass",
-        "0 diffs through the swap point's encoding (fixed in #2684), ABBA ~0.3x; full gate pending (scripts/ci/flip-gate/pact-deps.json)",
-    ),
+    pass("deps_pass", "pact-deps", "#2684"),
 ];
 
 pub(super) fn register(_r: &mut Registry) {

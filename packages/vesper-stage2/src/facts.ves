@@ -1,0 +1,2694 @@
+// Integer facts of the Rust checker, for the operations that may fail:
+// `world.partial_ops` (`primitive_failure`, `Fail[RuntimeError]`) and
+// `world.overflow_ops` (`overflow_failure`, `Fail[ArithOverflow]`).
+//
+// Stage 2's expression checker (`typecheck.ves`) types the IR AST without
+// tracking values. This pass walks each checked function body again, in
+// the Rust checker's evaluation order, with the environment rules of
+// src/check.rs, src/integer_widths/check.rs, src/arrays/check.rs and
+// src/loops/check.rs: exact integer facts, nonzero facts, the bounds of a
+// dominating comparison or a write, `for` index ranges, the join of
+// branches and loop exits, and the havoc of a loop body's writes. Native
+// lowering reads the two tables (`fallible` operations and token
+// threading); Stage 2's Wasm lowering does not, so only the native front
+// end (`stage2_lower_dir`) runs this pass.
+//
+// A fact is an exact value of the Rust checker's `i128` domain. Values of
+// at most 64 bits of magnitude are exact here (sign and magnitude); a
+// larger one is `big` (only its sign is kept) and gives no fact, so
+// operations whose proof needs a 128-bit fact are recorded as failing.
+// Result ranges across calls (src/check/call_facts.rs) are not tracked yet.
+
+use @vesper/check-data::names::{Names};
+use @vesper/check-data::types::{TyKind, TyPass, Types};
+use @vesper/check-data::util::{n32, u32_at, u64_at, w};
+use @vesper/check-data::world::{SpanRow, World};
+use @vesper/place-ir::codes::{Lit, Pat};
+use @vesper/place-ir-lower::ast::{Ast, Cl, Ex, FnR, Hd, Pm, Pt};
+use self::typecheck::{sort_spans};
+
+const NONE32: u32 = 4294967295;
+const NONE64: u64 = 18446744073709551615;
+const U64_MAX: u64 = 18446744073709551615;
+// 2^63: the magnitude of i64::MIN.
+const SIGN_BIT: u64 = 9223372036854775808;
+const WORD_BITS: u32 = 64;
+const WIDE_BITS: u32 = 128;
+// The deepest `+`/`-`/`&` chain an array index's bounds look through
+// (src/arrays/check.rs `array_index_bounds`).
+const INDEX_BOUNDS_DEPTH: u64 = 8;
+
+const X_LITERAL: u8 = 1;
+const X_NAME: u8 = 2;
+const X_TUPLE: u8 = 3;
+const X_STRUCT: u8 = 4;
+const X_FIELD: u8 = 5;
+const X_INDEX: u8 = 6;
+const X_UNARY: u8 = 7;
+const X_BINARY: u8 = 8;
+const X_ASSIGN: u8 = 9;
+const X_BLOCK: u8 = 10;
+const X_CALL: u8 = 11;
+const X_TRY: u8 = 12;
+const X_IF: u8 = 13;
+const X_MATCH: u8 = 14;
+const X_LOOP: u8 = 15;
+const X_FOR: u8 = 16;
+const X_RANGE: u8 = 17;
+const X_BREAK: u8 = 18;
+const X_CONTINUE: u8 = 19;
+const X_RETURN: u8 = 20;
+const X_CLOSURE: u8 = 21;
+const X_HANDLE: u8 = 22;
+// `loop_breaks` results, in increasing order (constants do not cross
+// modules, so typecheck.ves reads the first two through functions).
+const LOOP_NEVER_BREAKS: u8 = 0;
+const LOOP_BREAKS: u8 = 1;
+const LOOP_BREAKS_VALUE: u8 = 2;
+
+pub fn loop_never_breaks() -> u8 {
+    LOOP_NEVER_BREAKS
+}
+
+pub fn loop_plain_breaks() -> u8 {
+    LOOP_BREAKS
+}
+// No expression (a missing row).
+const X_NONE: u8 = 255;
+
+// `Ex.x` intrinsic classes (ast_lower.ves `I_*`).
+const I_WRAPPING: u64 = 1;
+const I_CONVERSION: u64 = 4;
+
+// Control frames (src/loops/check.rs `ControlFrame`): the target of a
+// `break` is the innermost frame only when it is a loop.
+const FRAME_FUNCTION: u8 = 0;
+const FRAME_LOOP: u8 = 1;
+const FRAME_OTHER: u8 = 2;
+
+// `fact_checked` outcomes (`Result<i128, ArithFailure>`, plus the values
+// this pass cannot hold).
+const R_OK: u8 = 0;
+const R_OVERFLOW: u8 = 1;
+const R_DIVISION_BY_ZERO: u8 = 2;
+const R_UNKNOWN: u8 = 3;
+
+const CONST_PREFIX: Str = "const$";
+const SCOPED_CONST_PREFIX: Str = "__const$";
+const NARROW_PREFIX: Str = "narrow_";
+const FINISH_NAME: Str = "ChunkSeq::finish";
+
+// An integer value: sign and magnitude, or `big` (magnitude of at least
+// 2^64, sign only). Zero is never negative.
+copy struct V {
+    neg: bool,
+    mag: u64,
+    big: bool,
+}
+
+// An optional value.
+copy struct OptV {
+    has: bool,
+    v: V,
+}
+
+// Optional inclusive bounds.
+copy struct B {
+    has: bool,
+    lo: V,
+    hi: V,
+}
+
+// An integer kind: `bits` is 0 for a type that is not an integer.
+copy struct K {
+    bits: u32,
+    signed: bool,
+}
+
+// The outcome of a checked operation on facts.
+copy struct R {
+    st: u8,
+    v: V,
+}
+
+// A binding of the environment (src/check.rs `Binding`): `id` stands for
+// its span (one binding event), `mutation` for its write identity.
+copy struct FB {
+    name: u32,
+    id: u64,
+    pass: u8,
+    ty: u32,
+    has_int: bool,
+    int: V,
+    nonzero: bool,
+    has_range: bool,
+    lo: V,
+    hi: V,
+    at: u64,
+    looped: bool,
+    mutation: u64,
+}
+
+// A control frame; a loop's exit environments are `exits` rows
+// `exit_start..`, each `entry_len` bindings long.
+copy struct Fr {
+    kind: u8,
+    entry_len: u64,
+    exit_start: u64,
+    count: u64,
+}
+
+struct Fw {
+    names: Names,
+    types: Types,
+    world: World,
+    env: ChunkSeq[FB],
+    marks: ChunkSeq[u64],
+    frames: ChunkSeq[Fr],
+    exits: ChunkSeq[FB],
+    partial: ChunkSeq[SpanRow],
+    overflow: ChunkSeq[SpanRow],
+    dead: u64,
+    total_operands: u64,
+    next_id: u64,
+    next_mutation: u64,
+}
+
+// ----- values ------------------------------------------------------------
+
+fn v_small(neg: bool, mag: u64) -> V {
+    V { neg: neg && mag != 0, mag: mag, big: false }
+}
+
+fn v_big(neg: bool) -> V {
+    V { neg: neg, mag: 0, big: true }
+}
+
+fn v_zero() -> V {
+    v_small(false, 0)
+}
+
+fn v_one() -> V {
+    v_small(false, 1)
+}
+
+fn some_v(v: V) -> OptV {
+    OptV { has: true, v: v }
+}
+
+fn no_v() -> OptV {
+    OptV { has: false, v: v_zero() }
+}
+
+fn no_bounds() -> B {
+    B { has: false, lo: v_zero(), hi: v_zero() }
+}
+
+fn bounds(lo: V, hi: V) -> B {
+    B { has: true, lo: lo, hi: hi }
+}
+
+fn v_eq(a: V, b: V) -> bool {
+    !a.big && !b.big && a.neg == b.neg && a.mag == b.mag
+}
+
+fn is_zero(a: V) -> bool {
+    !a.big && a.mag == 0
+}
+
+fn is_minus_one(a: V) -> bool {
+    !a.big && a.neg && a.mag == 1
+}
+
+// -1, 0 or 1 as `a` is below, equal to or above `b`. Two big values of one
+// sign compare equal.
+fn v_cmp(a: V, b: V) -> i64 {
+    if a.neg != b.neg {
+        return if a.neg { -1 } else { 1 };
+    }
+    let above = if a.big && b.big {
+        return 0;
+    } else if a.big {
+        true
+    } else if b.big {
+        false
+    } else if a.mag == b.mag {
+        return 0;
+    } else {
+        a.mag > b.mag
+    };
+    // A larger magnitude is above for positives and below for negatives.
+    if above != a.neg { 1 } else { -1 }
+}
+
+fn v_lt(a: V, b: V) -> bool {
+    v_cmp(a, b) < 0
+}
+
+fn v_le(a: V, b: V) -> bool {
+    v_cmp(a, b) <= 0
+}
+
+fn v_min(a: V, b: V) -> V {
+    if v_le(a, b) { a } else { b }
+}
+
+fn v_max(a: V, b: V) -> V {
+    if v_le(a, b) { b } else { a }
+}
+
+fn v_neg(a: V) -> V {
+    if a.big {
+        return v_big(!a.neg);
+    }
+    v_small(!a.neg, a.mag)
+}
+
+// `a + b` exactly, `big` past 64 bits of magnitude; `has` is false when
+// an operand is big.
+fn v_add(a: V, b: V) -> OptV {
+    if a.big || b.big {
+        return no_v();
+    }
+    if a.neg == b.neg {
+        let sum = wrapping_add(a.mag, b.mag);
+        if sum < a.mag {
+            return some_v(v_big(a.neg));
+        }
+        return some_v(v_small(a.neg, sum));
+    }
+    if a.mag >= b.mag {
+        some_v(v_small(a.neg, wrapping_sub(a.mag, b.mag)))
+    } else {
+        some_v(v_small(b.neg, wrapping_sub(b.mag, a.mag)))
+    }
+}
+
+fn v_sub(a: V, b: V) -> OptV {
+    v_add(a, v_neg(b))
+}
+
+fn v_mul(a: V, b: V) -> OptV {
+    if a.big || b.big {
+        return no_v();
+    }
+    let neg = a.neg != b.neg;
+    if a.mag == 0 || b.mag == 0 {
+        return some_v(v_zero());
+    }
+    let product = wrapping_mul(a.mag, b.mag);
+    if quotient(product, a.mag) != b.mag {
+        return some_v(v_big(neg));
+    }
+    some_v(v_small(neg, product))
+}
+
+// Truncating `a / b` (b nonzero, neither big).
+fn v_div(a: V, b: V) -> V {
+    v_small(a.neg != b.neg, quotient(a.mag, b.mag))
+}
+
+// `a % b` with the dividend's sign (b nonzero, neither big).
+fn v_rem(a: V, b: V) -> V {
+    v_small(a.neg, remainder(a.mag, b.mag))
+}
+
+// `n / d` and `n % d`, 0 for a zero divisor.
+fn quotient(n: u64, d: u64) -> u64 {
+    if d == 0 {
+        return 0;
+    }
+    n / d
+}
+
+fn remainder(n: u64, d: u64) -> u64 {
+    if d == 0 {
+        return 0;
+    }
+    n % d
+}
+
+// `a + 1` and `a - 1`, kept at `a` where the domain ends (Rust's
+// `saturating_add`/`saturating_sub` at the `i128` ends).
+fn v_succ(a: V) -> V {
+    let s = v_add(a, v_one());
+    if s.has { s.v } else { a }
+}
+
+fn v_pred(a: V) -> V {
+    let s = v_sub(a, v_one());
+    if s.has { s.v } else { a }
+}
+
+// The value of an integer literal row: a 128-bit two's complement
+// `(lo, hi)` (ast_lower.ves).
+fn v_of_literal(lo: u64, hi: u64) -> V {
+    if hi == 0 {
+        return v_small(false, lo);
+    }
+    if hi == U64_MAX && lo != 0 {
+        return v_small(true, wrapping_sub(0, lo));
+    }
+    v_big(hi >= SIGN_BIT)
+}
+
+// ----- kinds -------------------------------------------------------------
+
+fn no_kind() -> K {
+    K { bits: 0, signed: false }
+}
+
+fn kind_of_sym(in fw: Fw, sym: u32) -> K {
+    let k = fw.world.k;
+    if sym == k.u8_ {
+        K { bits: 8, signed: false }
+    } else if sym == k.u16_ {
+        K { bits: 16, signed: false }
+    } else if sym == k.u32_ {
+        K { bits: 32, signed: false }
+    } else if sym == k.u64_ || sym == k.usize_ {
+        K { bits: WORD_BITS, signed: false }
+    } else if sym == k.u128_ {
+        K { bits: WIDE_BITS, signed: false }
+    } else if sym == k.i8_ {
+        K { bits: 8, signed: true }
+    } else if sym == k.i16_ {
+        K { bits: 16, signed: true }
+    } else if sym == k.i32_ {
+        K { bits: 32, signed: true }
+    } else if sym == k.i64_ || sym == k.isize_ {
+        K { bits: WORD_BITS, signed: true }
+    } else if sym == k.i128_ {
+        K { bits: WIDE_BITS, signed: true }
+    } else {
+        no_kind()
+    }
+}
+
+fn valid_ty(in fw: Fw, ty: u32) -> bool {
+    ty != NONE32 && w(ty) < fw.types.nodes.len()
+}
+
+fn kind_of_ty(in fw: Fw, ty: u32) -> K {
+    if !valid_ty(in fw, ty) || fw.types.kind(ty) != TyKind::Named || fw.types.arity(ty) != 0 {
+        return no_kind();
+    }
+    kind_of_sym(in fw, fw.types.name(ty))
+}
+
+fn is_named(in fw: Fw, ty: u32, sym: u32) -> bool {
+    valid_ty(in fw, ty) && fw.types.kind(ty) == TyKind::Named && fw.types.name(ty) == sym
+}
+
+fn ty_of(in fw: Fw, e: Ex) -> u32 {
+    if e.kind == X_NONE {
+        return NONE32;
+    }
+    fw.world.expr_type(e.s0, e.s1)
+}
+
+fn kind_of(in fw: Fw, e: Ex) -> K {
+    kind_of_ty(in fw, ty_of(in fw, e))
+}
+
+fn is_u128(k: K) -> bool {
+    k.bits == WIDE_BITS && !k.signed
+}
+
+fn kind_min(k: K) -> V {
+    if !k.signed {
+        return v_zero();
+    }
+    if k.bits >= WIDE_BITS {
+        return v_big(true);
+    }
+    v_small(true, wrapping_shl_u64(1, wrapping_sub(k.bits, 1)))
+}
+
+fn kind_max(k: K) -> V {
+    if k.bits >= WIDE_BITS {
+        return v_big(false);
+    }
+    if !k.signed && k.bits == WORD_BITS {
+        return v_small(false, U64_MAX);
+    }
+    let width = if k.signed {
+        wrapping_sub(w(k.bits), 1)
+    } else {
+        w(k.bits)
+    };
+    v_small(false, wrapping_sub(wrapping_shl_u64(1, n32(width)), 1))
+}
+
+// `IntegerKind::fits`; a big value fits a 128-bit kind of its sign.
+fn fits(k: K, v: V) -> bool {
+    if v.big {
+        return k.bits >= WIDE_BITS && (k.signed || !v.neg);
+    }
+    v_le(kind_min(k), v) && v_le(v, kind_max(k))
+}
+
+// `fact_fits`: every pattern is a `u128` value.
+fn fact_fits(k: K, v: V) -> bool {
+    is_u128(k) || fits(k, v)
+}
+
+// `IntegerKind::widens_to`: `to` holds every value of `from`.
+fn widens_to(from: K, to: K) -> bool {
+    if from.signed && !to.signed {
+        return false;
+    }
+    if !from.signed && to.signed {
+        return to.bits > from.bits;
+    }
+    to.bits >= from.bits
+}
+
+// ----- names -------------------------------------------------------------
+
+fn spells(in fw: Fw, sym: u32, in text: Str) -> bool {
+    fw.names.spells(sym, in text.as_bytes())
+}
+
+fn is_comparison(in fw: Fw, op: u32) -> bool {
+    spells(in fw, op, "==")
+        || spells(in fw, op, "!=")
+        || spells(in fw, op, "<")
+        || spells(in fw, op, "<=")
+        || spells(in fw, op, ">")
+        || spells(in fw, op, ">=")
+}
+
+// `numeric::may_overflow`.
+fn may_overflow(in fw: Fw, op: u32, k: K) -> bool {
+    spells(in fw, op, "+")
+        || spells(in fw, op, "-")
+        || spells(in fw, op, "*")
+        || spells(in fw, op, "+=")
+        || spells(in fw, op, "-=")
+        || spells(in fw, op, "*=")
+        || (k.signed && (spells(in fw, op, "/") || spells(in fw, op, "/=")))
+}
+
+// The operator of a compound assignment (`op[..1]`).
+fn compound_operator(in fw: Fw, op: u32) -> u8 {
+    if fw.names.size(op) == 0 {
+        return 0;
+    }
+    fw.names.byte(op, 0)
+}
+
+fn name_contains(in fw: Fw, sym: u32, in part: Str) -> bool {
+    let b = part.as_bytes();
+    let n = fw.names.size(sym);
+    if n < b.len() {
+        return false;
+    }
+    for start in 0..wrapping_add(wrapping_sub(n, b.len()), 1) {
+        let mut same = true;
+        for i in 0..b.len() {
+            let c = match b.try_get(i) {
+                Option::Some(v) => v,
+                Option::None => 0,
+            };
+            if fw.names.byte(sym, wrapping_add(start, i)) != c {
+                same = false;
+                break;
+            }
+        }
+        if same {
+            return true;
+        }
+    }
+    false
+}
+
+// `arrays::is_const_function`.
+fn is_const_function(in fw: Fw, sym: u32) -> bool {
+    fw.names.has_prefix(sym, in CONST_PREFIX.as_bytes())
+        || name_contains(in fw, sym, SCOPED_CONST_PREFIX)
+}
+
+// The integer kind a `narrow_<k>` name converts to.
+fn narrow_target(in fw: Fw, sym: u32) -> K {
+    let prefix = NARROW_PREFIX.as_bytes();
+    if !fw.names.has_prefix(sym, in prefix) {
+        return no_kind();
+    }
+    let n = fw.names.size(sym);
+    let mut bytes = ChunkSeq::new[u8]();
+    for i in prefix.len()..n {
+        bytes.push(fw.names.byte(sym, i));
+    }
+    let target = fw.names.lookup(in bytes.as_slice());
+    if target == NONE32 {
+        return no_kind();
+    }
+    kind_of_sym(in fw, target)
+}
+
+// ----- rows --------------------------------------------------------------
+
+fn ex(in a: Ast, id: u64) -> Ex {
+    if id == NONE64 {
+        return Ex { kind: X_NONE, s0: 0, s1: 0, a: 0, b: 0, c: 0, n: 0, m: 0, x: 0 };
+    }
+    match a.exs.try_get(id) {
+        Option::Some(e) => e,
+        Option::None => Ex { kind: X_NONE, s0: 0, s1: 0, a: 0, b: 0, c: 0, n: 0, m: 0, x: 0 },
+    }
+}
+
+fn xs(in a: Ast, i: u64) -> u64 {
+    u64_at(in a.xs, i)
+}
+
+// The `i`th argument expression of a call row.
+fn call_arg(in a: Ast, e: Ex, i: u64) -> u64 {
+    xs(in a, wrapping_add(e.b, wrapping_add(wrapping_mul(i, 2), 1)))
+}
+
+fn call_pass(in a: Ast, e: Ex, i: u64) -> u8 {
+    wrapping_u8(xs(in a, wrapping_add(e.b, wrapping_mul(i, 2))))
+}
+
+// The root of a place (`Place::from_expr`): a name, or a field path of
+// one. NONE32 for any other expression.
+fn place_root(in a: Ast, id: u64) -> u32 {
+    let e = ex(in a, id);
+    if e.kind == X_NAME {
+        return n32(e.a);
+    }
+    if e.kind == X_FIELD {
+        return place_root(in a, e.a);
+    }
+    NONE32
+}
+
+// ----- environment -------------------------------------------------------
+
+fn fresh_mutation(inout fw: Fw) -> u64 {
+    fw.next_mutation = wrapping_add(fw.next_mutation, 1);
+    fw.next_mutation
+}
+
+fn lookup(in fw: Fw, name: u32) -> u64 {
+    let mut i = fw.env.len();
+    loop {
+        if i == 0 {
+            return NONE64;
+        }
+        i = wrapping_sub(i, 1);
+        match fw.env.try_get(i) {
+            Option::Some(b) => {
+                if b.name == name {
+                    return i;
+                }
+            },
+            Option::None => {},
+        }
+    }
+    NONE64
+}
+
+fn binding(in fw: Fw, i: u64) -> Option[FB] {
+    if i == NONE64 {
+        return Option::None;
+    }
+    fw.env.try_get(i)
+}
+
+fn put_binding(inout fw: Fw, i: u64, b: FB) {
+    let _ok = fw.env.try_set(i, b);
+}
+
+fn bind_name(inout fw: Fw, name: u32, pass: u8, ty: u32) {
+    fw.next_id = wrapping_add(fw.next_id, 1);
+    let mutation = fresh_mutation(inout fw);
+    fw.env.push(FB {
+        name: name,
+        id: fw.next_id,
+        pass: pass,
+        ty: ty,
+        has_int: false,
+        int: v_zero(),
+        nonzero: false,
+        has_range: false,
+        lo: v_zero(),
+        hi: v_zero(),
+        at: 0,
+        looped: false,
+        mutation: mutation
+    });
+}
+
+// A write or invalidation of the binding at `i`: a new write identity and
+// no exact or nonzero fact.
+fn forget(inout fw: Fw, i: u64) {
+    match binding(in fw, i) {
+        Option::Some(b) => {
+            let mut nb = b;
+            nb.mutation = fresh_mutation(inout fw);
+            nb.has_int = false;
+            nb.nonzero = false;
+            put_binding(inout fw, i, nb);
+        },
+        Option::None => {},
+    }
+}
+
+fn push_scope(inout fw: Fw) {
+    fw.marks.push(fw.env.len());
+}
+
+fn pop_scope(inout fw: Fw) {
+    match fw.marks.pop() {
+        Option::Some(n) => fw.env.truncate(n),
+        Option::None => {},
+    }
+}
+
+fn copy_env(in env: ChunkSeq[FB]) -> ChunkSeq[FB] {
+    let mut out = ChunkSeq::with_capacity[FB](env.len());
+    for i in 0..env.len() {
+        match env.try_get(i) {
+            Option::Some(b) => out.push(b),
+            Option::None => {},
+        }
+    }
+    out
+}
+
+fn push_rows(inout out: ChunkSeq[FB], in env: ChunkSeq[FB], start: u64, count: u64) {
+    for i in start..wrapping_add(start, count) {
+        match env.try_get(i) {
+            Option::Some(b) => out.push(b),
+            Option::None => {},
+        }
+    }
+}
+
+fn take_env(inout fw: Fw) -> ChunkSeq[FB] {
+    let mut out = ChunkSeq::new[FB]();
+    swap(inout out, inout fw.env);
+    out
+}
+
+fn set_env(inout fw: Fw, sink env: ChunkSeq[FB]) {
+    let mut e = env;
+    swap(inout e, inout fw.env);
+}
+
+// ----- facts -------------------------------------------------------------
+
+// `fact_checked`: the kind's checked `op` over exact facts.
+fn fact_checked(in fw: Fw, k: K, op: u8, a: V, b: V) -> R {
+    let exact = if op == 43 {
+        v_add(a, b)
+    } else if op == 45 {
+        v_sub(a, b)
+    } else if op == 42 {
+        v_mul(a, b)
+    } else if op == 47 || op == 37 {
+        if is_zero(b) {
+            return R { st: R_DIVISION_BY_ZERO, v: v_zero() };
+        }
+        if a.big || b.big {
+            return R { st: R_UNKNOWN, v: v_zero() };
+        }
+        if op == 47 {
+            some_v(v_div(a, b))
+        } else if is_minus_one(b) {
+            some_v(v_zero())
+        } else {
+            some_v(v_rem(a, b))
+        }
+    } else {
+        return R { st: R_OVERFLOW, v: v_zero() };
+    };
+    if !exact.has {
+        return R { st: R_UNKNOWN, v: v_zero() };
+    }
+    if exact.v.big {
+        // Past 64 bits of magnitude: an overflow below 128 bits.
+        if k.bits < WIDE_BITS {
+            return R { st: R_OVERFLOW, v: v_zero() };
+        }
+        return R { st: R_UNKNOWN, v: v_zero() };
+    }
+    if fits(k, exact.v) || is_u128(k) && !exact.v.neg {
+        R { st: R_OK, v: exact.v }
+    } else {
+        R { st: R_OVERFLOW, v: v_zero() }
+    }
+}
+
+// The first byte of an operator symbol, 0 for a longer one.
+fn single_op(in fw: Fw, op: u32) -> u8 {
+    if fw.names.size(op) != 1 {
+        return 0;
+    }
+    fw.names.byte(op, 0)
+}
+
+// `fact_neg`.
+fn fact_neg(k: K, a: V) -> OptV {
+    if is_u128(k) {
+        return if is_zero(a) { some_v(v_zero()) } else { no_v() };
+    }
+    let n = v_neg(a);
+    if n.big || !fits(k, n) {
+        no_v()
+    } else {
+        some_v(n)
+    }
+}
+
+// `IntegerKind::wrapping` of `+`, `-` or `*` for kinds of at most 64 bits.
+fn wrapping_fact(k: K, op: u8, a: V, b: V) -> OptV {
+    if k.bits == 0 || k.bits > WORD_BITS || a.big || b.big {
+        return no_v();
+    }
+    let pa = if a.neg { wrapping_sub(0, a.mag) } else { a.mag };
+    let pb = if b.neg { wrapping_sub(0, b.mag) } else { b.mag };
+    let r = if op == 43 {
+        wrapping_add(pa, pb)
+    } else if op == 45 {
+        wrapping_sub(pa, pb)
+    } else {
+        wrapping_mul(pa, pb)
+    };
+    let mask = if k.bits >= WORD_BITS {
+        U64_MAX
+    } else {
+        wrapping_sub(wrapping_shl_u64(1, k.bits), 1)
+    };
+    let bits = r & mask;
+    if k.signed {
+        let top = wrapping_shl_u64(1, wrapping_sub(k.bits, 1));
+        if bits & top != 0 {
+            // Negative: the magnitude of the sign-extended pattern.
+            let extended = bits | (U64_MAX ^ mask);
+            return some_v(v_small(true, wrapping_sub(0, extended)));
+        }
+    }
+    some_v(v_small(false, bits))
+}
+
+// The body of a module constant whose initializer is an integer literal.
+fn const_value(in fw: Fw, in a: Ast, sym: u32) -> OptV {
+    if w(sym) >= a.fn_by_key.len() {
+        return no_v();
+    }
+    let idx = u32_at(in a.fn_by_key, w(sym));
+    if idx == 0 {
+        return no_v();
+    }
+    let f = match a.fns.try_get(wrapping_sub(w(idx), 1)) {
+        Option::Some(f) => f,
+        Option::None => return no_v(),
+    };
+    if !f.has_body {
+        return no_v();
+    }
+    let mut body = ex(in a, f.body);
+    loop {
+        if body.kind == X_BLOCK && body.n == 0 && body.b != NONE64 {
+            body = ex(in a, body.b);
+        } else {
+            break;
+        }
+    }
+    if body.kind == X_LITERAL && body.a == Lit::Int {
+        let v = v_of_literal(body.b, body.c);
+        if !v.big {
+            return some_v(v);
+        }
+    }
+    no_v()
+}
+
+// `integer_fact`: the exact value of a pure integer expression.
+fn integer_fact(in fw: Fw, in a: Ast, id: u64) -> OptV {
+    let e = ex(in a, id);
+    let n = if e.kind == X_LITERAL {
+        if e.a != Lit::Int {
+            return no_v();
+        }
+        let v = v_of_literal(e.b, e.c);
+        if v.big {
+            return no_v();
+        }
+        v
+    } else if e.kind == X_NAME {
+        match binding(in fw, lookup(in fw, n32(e.a))) {
+            Option::Some(b) => {
+                if !b.has_int {
+                    return no_v();
+                }
+                b.int
+            },
+            Option::None => return no_v(),
+        }
+    } else if e.kind == X_UNARY && spells(in fw, n32(e.a), "-") {
+        let mut k = kind_of(in fw, ex(in a, e.b));
+        if k.bits == 0 {
+            k = kind_of(in fw, e);
+        }
+        if k.bits == 0 {
+            return no_v();
+        }
+        let inner = integer_fact(in fw, in a, e.b);
+        if !inner.has {
+            return no_v();
+        }
+        let r = fact_neg(k, inner.v);
+        if !r.has {
+            return no_v();
+        }
+        r.v
+    } else if e.kind == X_BINARY {
+        let mut k = kind_of(in fw, ex(in a, e.b));
+        if k.bits == 0 {
+            k = kind_of(in fw, e);
+        }
+        if k.bits == 0 {
+            return no_v();
+        }
+        let l = integer_fact(in fw, in a, e.b);
+        if !l.has {
+            return no_v();
+        }
+        let r = integer_fact(in fw, in a, e.c);
+        if !r.has {
+            return no_v();
+        }
+        let op = single_op(in fw, n32(e.a));
+        let out = fact_checked(in fw, k, op, l.v, r.v);
+        if out.st != R_OK {
+            return no_v();
+        }
+        out.v
+    } else if e.kind == X_CALL {
+        let callee = ex(in a, e.a);
+        if callee.kind != X_NAME {
+            return no_v();
+        }
+        let sym = n32(callee.a);
+        if e.n == 0 && is_const_function(in fw, sym) && lookup(in fw, sym) == NONE64 {
+            return const_value(in fw, in a, sym);
+        }
+        if e.x != I_WRAPPING || lookup(in fw, sym) != NONE64 || e.n != 2 {
+            return no_v();
+        }
+        let op = if spells(in fw, sym, "wrapping_add") {
+            43
+        } else if spells(in fw, sym, "wrapping_sub") {
+            45
+        } else if spells(in fw, sym, "wrapping_mul") {
+            42
+        } else {
+            return no_v();
+        };
+        let l = integer_fact(in fw, in a, call_arg(in a, e, 0));
+        if !l.has {
+            return no_v();
+        }
+        let r = integer_fact(in fw, in a, call_arg(in a, e, 1));
+        if !r.has {
+            return no_v();
+        }
+        let out = wrapping_fact(kind_of(in fw, e), op, l.v, r.v);
+        if !out.has {
+            return no_v();
+        }
+        out.v
+    } else {
+        return no_v();
+    };
+    let k = kind_of(in fw, e);
+    if k.bits != 0 && !fact_fits(k, n) {
+        return no_v();
+    }
+    some_v(n)
+}
+
+fn u128_expr(in fw: Fw, in a: Ast, id: u64) -> bool {
+    let e = ex(in a, id);
+    if is_u128(kind_of(in fw, e)) {
+        return true;
+    }
+    if e.kind == X_NAME {
+        return match binding(in fw, lookup(in fw, n32(e.a))) {
+            Option::Some(b) => is_u128(kind_of_ty(in fw, b.ty)),
+            Option::None => false,
+        };
+    }
+    false
+}
+
+// `binding_bounds`: a binding's kind bounds, narrowed by its current range.
+fn binding_bounds(in fw: Fw, b: FB) -> B {
+    let k = kind_of_ty(in fw, b.ty);
+    if k.bits == 0 || is_u128(k) {
+        return no_bounds();
+    }
+    let mut lo = kind_min(k);
+    let mut hi = kind_max(k);
+    if b.has_range && b.at == b.mutation {
+        lo = v_max(lo, b.lo);
+        hi = v_min(hi, b.hi);
+    }
+    bounds(lo, hi)
+}
+
+fn loop_range(b: FB) -> bool {
+    b.has_range && b.looped && b.at == b.mutation
+}
+
+fn loop_index(in fw: Fw, in a: Ast, id: u64) -> bool {
+    let e = ex(in a, id);
+    if e.kind != X_NAME {
+        return false;
+    }
+    match binding(in fw, lookup(in fw, n32(e.a))) {
+        Option::Some(b) => loop_range(b),
+        Option::None => false,
+    }
+}
+
+// `pure_integer`: an integer expression that cannot write a name.
+fn pure_integer(in fw: Fw, in a: Ast, id: u64) -> bool {
+    let e = ex(in a, id);
+    if (e.kind == X_LITERAL && e.a == Lit::Int) || e.kind == X_NAME {
+        return true;
+    }
+    if e.kind == X_UNARY {
+        return (spells(in fw, n32(e.a), "-") || spells(in fw, n32(e.a), "~"))
+            && pure_integer(in fw, in a, e.b);
+    }
+    if e.kind == X_BINARY {
+        return pure_integer(in fw, in a, e.b) && pure_integer(in fw, in a, e.c);
+    }
+    false
+}
+
+fn pure_condition(in fw: Fw, in a: Ast, id: u64) -> bool {
+    let e = ex(in a, id);
+    if e.kind == X_LITERAL {
+        return e.a == Lit::Bool;
+    }
+    if e.kind == X_UNARY && spells(in fw, n32(e.a), "!") {
+        return pure_condition(in fw, in a, e.b);
+    }
+    if e.kind == X_BINARY {
+        let op = n32(e.a);
+        if spells(in fw, op, "&&") || spells(in fw, op, "||") {
+            return pure_condition(in fw, in a, e.b) && pure_condition(in fw, in a, e.c);
+        }
+        if is_comparison(in fw, op) {
+            return pure_integer(in fw, in a, e.b) && pure_integer(in fw, in a, e.c);
+        }
+    }
+    false
+}
+
+// The high end of `x`'s bounds when they are nonnegative (a mask).
+fn mask_bound(in fw: Fw, in a: Ast, id: u64) -> OptV {
+    let b = integer_bounds(in fw, in a, id);
+    if b.has && !b.lo.neg {
+        some_v(b.hi)
+    } else {
+        no_v()
+    }
+}
+
+// `integer_bounds`: inclusive bounds of an integer expression.
+fn integer_bounds(in fw: Fw, in a: Ast, id: u64) -> B {
+    let f = integer_fact(in fw, in a, id);
+    if f.has {
+        if !f.v.neg || !u128_expr(in fw, in a, id) {
+            return bounds(f.v, f.v);
+        }
+        return no_bounds();
+    }
+    let e = ex(in a, id);
+    if e.kind == X_NAME {
+        return match binding(in fw, lookup(in fw, n32(e.a))) {
+            Option::Some(b) => binding_bounds(in fw, b),
+            Option::None => no_bounds(),
+        };
+    }
+    if e.kind == X_BINARY && pure_integer(in fw, in a, id) {
+        let op = n32(e.a);
+        if spells(in fw, op, "&") {
+            let x = mask_bound(in fw, in a, e.b);
+            let y = mask_bound(in fw, in a, e.c);
+            let m = if x.has && y.has {
+                v_min(x.v, y.v)
+            } else if x.has {
+                x.v
+            } else if y.has {
+                y.v
+            } else {
+                return no_bounds();
+            };
+            return bounds(v_zero(), m);
+        }
+        if spells(in fw, op, "%") {
+            let x = integer_bounds(in fw, in a, e.b);
+            let y = integer_bounds(in fw, in a, e.c);
+            if x.has && y.has && !x.lo.neg && v_lt(v_zero(), y.lo) {
+                return bounds(v_zero(), v_min(x.hi, v_pred(y.hi)));
+            }
+        }
+    }
+    no_bounds()
+}
+
+fn nonzero(in fw: Fw, in a: Ast, id: u64) -> bool {
+    let f = integer_fact(in fw, in a, id);
+    if f.has && !is_zero(f.v) {
+        return true;
+    }
+    let e = ex(in a, id);
+    if e.kind == X_NAME {
+        match binding(in fw, lookup(in fw, n32(e.a))) {
+            Option::Some(b) => {
+                if b.nonzero {
+                    return true;
+                }
+            },
+            Option::None => {},
+        }
+    }
+    let b = integer_bounds(in fw, in a, id);
+    b.has && (v_lt(v_zero(), b.lo) || b.hi.neg)
+}
+
+// `in_range`: constant facts that prove a checked operation in range.
+fn in_range(in fw: Fw, op: u8, k: K, x: OptV, y: OptV) -> bool {
+    if x.has && y.has {
+        let r = fact_checked(in fw, k, op, x.v, y.v);
+        return r.st != R_OVERFLOW && r.st != R_UNKNOWN;
+    }
+    if op == 47 {
+        return (y.has && !is_minus_one(y.v)) || (x.has && !v_eq(x.v, kind_min(k)));
+    }
+    false
+}
+
+// Exactly `x op y` for `+`, `-` and `*`.
+fn corner(op: u8, x: V, y: V) -> OptV {
+    if op == 43 {
+        v_add(x, y)
+    } else if op == 45 {
+        v_sub(x, y)
+    } else if op == 42 {
+        v_mul(x, y)
+    } else {
+        no_v()
+    }
+}
+
+fn corner_fits(op: u8, k: K, x: V, y: V) -> bool {
+    let c = corner(op, x, y);
+    c.has && !c.v.big && fits(k, c.v)
+}
+
+// `bounds_in_range`: every corner of the operands' bounds fits the kind.
+fn bounds_in_range(op: u8, k: K, x: B, y: B) -> bool {
+    if !x.has || !y.has || (op != 43 && op != 45 && op != 42) {
+        return false;
+    }
+    corner_fits(op, k, x.lo, y.lo)
+        && corner_fits(op, k, x.lo, y.hi)
+        && corner_fits(op, k, x.hi, y.lo)
+        && corner_fits(op, k, x.hi, y.hi)
+}
+
+// `quotient_in_range`: a divisor that cannot be -1 or a dividend that
+// cannot be the kind's minimum.
+fn quotient_in_range(op: u8, k: K, x: B, y: B) -> bool {
+    let minus_one = v_small(true, 1);
+    op == 47
+        && ((y.has && (v_lt(minus_one, y.lo) || v_lt(y.hi, minus_one)))
+            || (x.has && v_lt(kind_min(k), x.lo)))
+}
+
+// `operand_bounds`: bounds of a shift amount or a divisor, through `+`,
+// `-`, `*`, `/` and `>>` of bounded pure operands.
+fn operand_bounds(in fw: Fw, in a: Ast, id: u64) -> B {
+    let direct = integer_bounds(in fw, in a, id);
+    if direct.has {
+        return direct;
+    }
+    let e = ex(in a, id);
+    if e.kind != X_BINARY || !pure_integer(in fw, in a, id) || u128_expr(in fw, in a, e.b) {
+        return no_bounds();
+    }
+    let mut k = kind_of(in fw, e);
+    if k.bits == 0 {
+        k = kind_of(in fw, ex(in a, e.b));
+    }
+    if k.bits == 0 {
+        k = kind_of(in fw, ex(in a, e.c));
+    }
+    if k.bits == 0 {
+        return no_bounds();
+    }
+    let x = operand_bounds(in fw, in a, e.b);
+    if !x.has || v_lt(x.hi, x.lo) {
+        return no_bounds();
+    }
+    let y = operand_bounds(in fw, in a, e.c);
+    if !y.has || v_lt(y.hi, y.lo) {
+        return no_bounds();
+    }
+    let op = n32(e.a);
+    let code = single_op(in fw, op);
+    if code == 43 || code == 45 || code == 42 {
+        let c0 = corner(code, x.lo, y.lo);
+        let c1 = corner(code, x.lo, y.hi);
+        let c2 = corner(code, x.hi, y.lo);
+        let c3 = corner(code, x.hi, y.hi);
+        if !c0.has || !c1.has || !c2.has || !c3.has {
+            return no_bounds();
+        }
+        if !fits(k, c0.v) || !fits(k, c1.v) || !fits(k, c2.v) || !fits(k, c3.v) {
+            return no_bounds();
+        }
+        if c0.v.big || c1.v.big || c2.v.big || c3.v.big {
+            return no_bounds();
+        }
+        let lo = v_min(v_min(c0.v, c1.v), v_min(c2.v, c3.v));
+        let hi = v_max(v_max(c0.v, c1.v), v_max(c2.v, c3.v));
+        return bounds(lo, hi);
+    }
+    if code == 47 && !x.lo.neg && v_lt(v_zero(), y.lo) && !x.hi.big && !y.hi.big {
+        return bounds(v_div(x.lo, y.hi), v_div(x.hi, y.lo));
+    }
+    if spells(in fw, op, ">>")
+        && !x.lo.neg
+        && !y.lo.neg
+        && !x.hi.big
+        && !y.hi.big
+        && y.hi.mag < w(k.bits)
+    {
+        return bounds(
+            v_small(false, wrapping_shr_u64(x.lo.mag, n32(y.hi.mag))),
+            v_small(false, wrapping_shr_u64(x.hi.mag, n32(y.lo.mag)))
+        );
+    }
+    no_bounds()
+}
+
+// `total_operation`.
+fn total_operation(in fw: Fw, in a: Ast, op: u8, k: K, left: B, right: u64) -> bool {
+    if op == 47 {
+        return quotient_in_range(op, k, left, operand_bounds(in fw, in a, right));
+    }
+    fw.total_operands != 0 && bounds_in_range(op, k, left, operand_bounds(in fw, in a, right))
+}
+
+// `array_index_bounds`.
+fn array_index_bounds(in fw: Fw, in a: Ast, id: u64, depth: u64) -> B {
+    let direct = integer_bounds(in fw, in a, id);
+    if direct.has {
+        return direct;
+    }
+    let e = ex(in a, id);
+    if e.kind != X_BINARY || depth > INDEX_BOUNDS_DEPTH {
+        return no_bounds();
+    }
+    let op = n32(e.a);
+    if spells(in fw, op, "&") {
+        let ma = if pure_integer(in fw, in a, e.c) {
+            let b = array_index_bounds(in fw, in a, e.b, wrapping_add(depth, 1));
+            if b.has && !b.lo.neg {
+                some_v(b.hi)
+            } else {
+                no_v()
+            }
+        } else {
+            no_v()
+        };
+        let bb = array_index_bounds(in fw, in a, e.c, wrapping_add(depth, 1));
+        let mb = if bb.has && !bb.lo.neg {
+            some_v(bb.hi)
+        } else {
+            no_v()
+        };
+        let m = if ma.has && mb.has {
+            v_min(ma.v, mb.v)
+        } else if ma.has {
+            ma.v
+        } else if mb.has {
+            mb.v
+        } else {
+            return no_bounds();
+        };
+        return bounds(v_zero(), m);
+    }
+    let plus = spells(in fw, op, "+");
+    if (!plus && !spells(in fw, op, "-")) || !pure_integer(in fw, in a, e.c) {
+        return no_bounds();
+    }
+    let x = array_index_bounds(in fw, in a, e.b, wrapping_add(depth, 1));
+    let y = array_index_bounds(in fw, in a, e.c, wrapping_add(depth, 1));
+    if !x.has || !y.has {
+        return no_bounds();
+    }
+    let lo = if plus {
+        v_add(x.lo, y.lo)
+    } else {
+        v_sub(x.lo, y.hi)
+    };
+    let hi = if plus {
+        v_add(x.hi, y.hi)
+    } else {
+        v_sub(x.hi, y.lo)
+    };
+    if !lo.has || !hi.has {
+        return no_bounds();
+    }
+    bounds(lo.v, hi.v)
+}
+
+// `array_index_total`: `index` is provably in `0..n`.
+fn array_index_total(in fw: Fw, in a: Ast, index: u64, n: u64) -> bool {
+    let b = array_index_bounds(in fw, in a, index, 0);
+    b.has && !b.lo.neg && v_lt(b.hi, v_small(false, n))
+}
+
+// `arrays::element`: the length of a homogeneous non-empty tuple, else 0.
+fn array_len(in fw: Fw, ty: u32) -> u64 {
+    if !valid_ty(in fw, ty) || fw.types.kind(ty) != TyKind::Tuple {
+        return 0;
+    }
+    let n = fw.types.arity(ty);
+    if n == 0 {
+        return 0;
+    }
+    let first = fw.types.arg(ty, 0);
+    for i in 1..n {
+        if fw.types.arg(ty, i) != first {
+            return 0;
+        }
+    }
+    n
+}
+
+fn array_element(in fw: Fw, ty: u32) -> u32 {
+    if array_len(in fw, ty) == 0 {
+        NONE32
+    } else {
+        fw.types.arg(ty, 0)
+    }
+}
+
+// `array_len_bounds`: `a.len()` of an array.
+fn array_len_bounds(in fw: Fw, in a: Ast, id: u64) -> B {
+    let e = ex(in a, id);
+    if e.kind != X_CALL || e.n != 0 {
+        return no_bounds();
+    }
+    let callee = ex(in a, e.a);
+    if callee.kind != X_FIELD || !spells(in fw, n32(callee.b), "len") {
+        return no_bounds();
+    }
+    let n = array_len(in fw, ty_of(in fw, ex(in a, callee.a)));
+    if n == 0 {
+        return no_bounds();
+    }
+    bounds(v_small(false, n), v_small(false, n))
+}
+
+// ----- failures ----------------------------------------------------------
+
+fn primitive_failure(inout fw: Fw, e: Ex) {
+    if fw.dead == 0 {
+        fw.partial.push(SpanRow { start: e.s0, end: e.s1, ty: 0 });
+    }
+}
+
+fn overflow_failure(inout fw: Fw, e: Ex) {
+    if fw.dead == 0 {
+        fw.overflow.push(SpanRow { start: e.s0, end: e.s1, ty: 0 });
+    }
+}
+
+// ----- joins -------------------------------------------------------------
+
+// `merge`: each binding of the environment joins its two branch states.
+fn merge(inout fw: Fw, in x_env: ChunkSeq[FB], x_start: u64, in y_env: ChunkSeq[FB], y_start: u64) {
+    for i in 0..fw.env.len() {
+        let b = match fw.env.try_get(i) {
+            Option::Some(b) => b,
+            Option::None => continue,
+        };
+        let x = match x_env.try_get(wrapping_add(x_start, i)) {
+            Option::Some(x) => x,
+            Option::None => missing_binding(),
+        };
+        let y = match y_env.try_get(wrapping_add(y_start, i)) {
+            Option::Some(y) => y,
+            Option::None => missing_binding(),
+        };
+        let mut nb = b;
+        if x.name != b.name || y.name != b.name {
+            nb.mutation = fresh_mutation(inout fw);
+        } else {
+            nb.mutation = if x.id == y.id && x.mutation == y.mutation {
+                x.mutation
+            } else {
+                fresh_mutation(inout fw)
+            };
+            let bx = binding_bounds(in fw, x);
+            let by = binding_bounds(in fw, y);
+            if x.id == y.id && bx.has && by.has {
+                nb.has_range = true;
+                nb.lo = v_min(bx.lo, by.lo);
+                nb.hi = v_max(bx.hi, by.hi);
+                nb.at = nb.mutation;
+                nb.looped = loop_range(x) && loop_range(y);
+            } else {
+                nb.has_range = false;
+            }
+            nb.has_int = x.has_int && y.has_int && v_eq(x.int, y.int);
+            nb.int = x.int;
+            nb.nonzero = x.nonzero && y.nonzero;
+        }
+        put_binding(inout fw, i, nb);
+    }
+}
+
+// A binding that is in no environment (its name matches none).
+fn missing_binding() -> FB {
+    FB {
+        name: NONE32,
+        id: 0,
+        pass: 0,
+        ty: NONE32,
+        has_int: false,
+        int: v_zero(),
+        nonzero: false,
+        has_range: false,
+        lo: v_zero(),
+        hi: v_zero(),
+        at: 0,
+        looped: false,
+        mutation: 0
+    }
+}
+
+// ----- conditions --------------------------------------------------------
+
+fn zero_literal(x: Ex) -> bool {
+    x.kind == X_LITERAL && x.a == Lit::Int && x.b == 0 && x.c == 0
+}
+
+fn refine_condition(inout fw: Fw, in a: Ast, id: u64, truth: bool) {
+    if pure_condition(in fw, in a, id) {
+        refine_pure(inout fw, in a, id, truth);
+    }
+    let e = ex(in a, id);
+    if e.kind != X_BINARY {
+        return;
+    }
+    let l = ex(in a, e.b);
+    let r = ex(in a, e.c);
+    let name = if l.kind == X_NAME && zero_literal(r) {
+        n32(l.a)
+    } else if r.kind == X_NAME && zero_literal(l) {
+        n32(r.a)
+    } else {
+        return;
+    };
+    let i = lookup(in fw, name);
+    let op = n32(e.a);
+    let ne = spells(in fw, op, "!=");
+    let eq = spells(in fw, op, "==");
+    match binding(in fw, i) {
+        Option::Some(b) => {
+            let mut nb = b;
+            if (ne && truth) || (eq && !truth) {
+                nb.nonzero = true;
+            } else if (eq && truth) || (ne && !truth) {
+                nb.has_int = true;
+                nb.int = v_zero();
+                nb.nonzero = false;
+            }
+            put_binding(inout fw, i, nb);
+        },
+        Option::None => {},
+    }
+}
+
+// Comparison codes, normalized to `name op bound`.
+const C_LT: u8 = 1;
+const C_LE: u8 = 2;
+const C_GT: u8 = 3;
+const C_GE: u8 = 4;
+const C_EQ: u8 = 5;
+const C_NE: u8 = 6;
+
+fn comparison_code(in fw: Fw, op: u32) -> u8 {
+    if spells(in fw, op, "<") {
+        C_LT
+    } else if spells(in fw, op, "<=") {
+        C_LE
+    } else if spells(in fw, op, ">") {
+        C_GT
+    } else if spells(in fw, op, ">=") {
+        C_GE
+    } else if spells(in fw, op, "==") {
+        C_EQ
+    } else if spells(in fw, op, "!=") {
+        C_NE
+    } else {
+        0
+    }
+}
+
+fn negate_comparison(c: u8) -> u8 {
+    if c == C_LT {
+        C_GE
+    } else if c == C_LE {
+        C_GT
+    } else if c == C_GT {
+        C_LE
+    } else if c == C_GE {
+        C_LT
+    } else if c == C_EQ {
+        C_NE
+    } else if c == C_NE {
+        C_EQ
+    } else {
+        0
+    }
+}
+
+fn flip_comparison(c: u8) -> u8 {
+    if c == C_LT {
+        C_GT
+    } else if c == C_LE {
+        C_GE
+    } else if c == C_GT {
+        C_LT
+    } else if c == C_GE {
+        C_LE
+    } else {
+        c
+    }
+}
+
+// `refine_pure`: narrow the bounds of the names a pure condition compares.
+fn refine_pure(inout fw: Fw, in a: Ast, id: u64, truth: bool) {
+    let e = ex(in a, id);
+    if e.kind == X_UNARY {
+        if spells(in fw, n32(e.a), "!") {
+            refine_pure(inout fw, in a, e.b, !truth);
+        }
+        return;
+    }
+    if e.kind != X_BINARY {
+        return;
+    }
+    let op = n32(e.a);
+    let and = spells(in fw, op, "&&");
+    let or = spells(in fw, op, "||");
+    if (and && truth) || (or && !truth) {
+        refine_pure(inout fw, in a, e.b, truth);
+        refine_pure(inout fw, in a, e.c, truth);
+        return;
+    }
+    if and || or {
+        return;
+    }
+    let raw = comparison_code(in fw, op);
+    let c = if truth { raw } else { negate_comparison(raw) };
+    if c == 0 {
+        return;
+    }
+    let left = integer_bounds(in fw, in a, e.b);
+    let right = integer_bounds(in fw, in a, e.c);
+    refine_side(inout fw, in a, e.b, c, right);
+    refine_side(inout fw, in a, e.c, flip_comparison(c), left);
+}
+
+fn refine_side(inout fw: Fw, in a: Ast, name_id: u64, c: u8, other: B) {
+    let ne = ex(in a, name_id);
+    if ne.kind != X_NAME || !other.has {
+        return;
+    }
+    let current = integer_bounds(in fw, in a, name_id);
+    if !current.has {
+        return;
+    }
+    let mut lo = current.lo;
+    let mut hi = current.hi;
+    if c == C_LT {
+        hi = v_min(hi, v_pred(other.hi));
+    } else if c == C_LE {
+        hi = v_min(hi, other.hi);
+    } else if c == C_GT {
+        lo = v_max(lo, v_succ(other.lo));
+    } else if c == C_GE {
+        lo = v_max(lo, other.lo);
+    } else if c == C_EQ {
+        lo = v_max(lo, other.lo);
+        hi = v_min(hi, other.hi);
+    } else if c == C_NE && v_eq(other.lo, other.hi) {
+        if v_eq(lo, other.lo) {
+            lo = v_succ(lo);
+        }
+        if v_eq(hi, other.lo) {
+            hi = v_pred(hi);
+        }
+    } else {
+        return;
+    }
+    let i = lookup(in fw, n32(ne.a));
+    match binding(in fw, i) {
+        Option::Some(b) => {
+            let mut nb = b;
+            nb.looped = loop_range(b);
+            nb.has_range = true;
+            nb.lo = lo;
+            nb.hi = hi;
+            nb.at = b.mutation;
+            put_binding(inout fw, i, nb);
+        },
+        Option::None => {},
+    }
+}
+
+// ----- patterns ----------------------------------------------------------
+
+fn bind_pattern(inout fw: Fw, in a: Ast, pid: u64, ty: u32) {
+    let p = match a.pts.try_get(pid) {
+        Option::Some(p) => p,
+        Option::None => return,
+    };
+    if p.kind == Pat::Bind {
+        bind_name(inout fw, n32(p.a), TyPass::Sink, ty);
+        return;
+    }
+    if p.kind == Pat::Tuple {
+        let tuple = valid_ty(in fw, ty) && fw.types.kind(ty) == TyKind::Tuple;
+        for i in 0..p.n {
+            let sub = u64_at(in a.pxs, wrapping_add(p.b, i));
+            let et = if tuple && i < fw.types.arity(ty) {
+                fw.types.arg(ty, i)
+            } else {
+                NONE32
+            };
+            bind_pattern(inout fw, in a, sub, et);
+        }
+        return;
+    }
+    if p.kind == Pat::Constructor {
+        for i in 0..p.n {
+            let sub = u64_at(in a.pxs, wrapping_add(p.b, wrapping_add(wrapping_mul(i, 2), 1)));
+            bind_pattern(inout fw, in a, sub, NONE32);
+        }
+    }
+}
+
+// The annotation of a `let` pattern, or NONE32.
+fn let_annotation(in fw: Fw, in a: Ast, pid: u64) -> u32 {
+    match a.pts.try_get(pid) {
+        Option::Some(p) => {
+            if p.kind != Pat::Literal && p.kind != Pat::Constructor && p.c > 0 {
+                let ann = n32(wrapping_sub(p.c, 1));
+                if valid_ty(in fw, ann) && fw.types.kind(ann) != TyKind::Infer {
+                    return ann;
+                }
+            }
+            NONE32
+        },
+        Option::None => NONE32,
+    }
+}
+
+// ----- loops -------------------------------------------------------------
+
+fn note_written(inout written: ChunkSeq[u32], name: u32) {
+    if name != NONE32 {
+        written.push(name);
+    }
+}
+
+// The names a loop body may write (`havoc`'s visit): assignment targets,
+// call receivers, called locals and argument places. Returns whether the
+// body calls anything.
+fn visit_written(in a: Ast, id: u64, inout written: ChunkSeq[u32]) -> bool {
+    let e = ex(in a, id);
+    let mut calls = false;
+    if e.kind == X_ASSIGN {
+        note_written(inout written, place_root(in a, e.b));
+    } else if e.kind == X_CALL {
+        calls = true;
+        let callee = ex(in a, e.a);
+        if callee.kind == X_FIELD {
+            note_written(inout written, place_root(in a, callee.a));
+        }
+        if callee.kind == X_NAME {
+            note_written(inout written, n32(callee.a));
+        }
+        for i in 0..e.n {
+            note_written(inout written, place_root(in a, call_arg(in a, e, i)));
+        }
+    }
+    let mut child = ChunkSeq::new[u64]();
+    children(in a, e, inout child);
+    for i in 0..child.len() {
+        if visit_written(in a, u64_at(in child, i), inout written) {
+            calls = true;
+        }
+    }
+    calls
+}
+
+// Every child expression of a row.
+fn children(in a: Ast, e: Ex, inout out: ChunkSeq[u64]) {
+    if e.kind == X_TUPLE {
+        for i in 0..e.n {
+            out.push(xs(in a, wrapping_add(e.a, i)));
+        }
+    } else if e.kind == X_STRUCT {
+        for i in 0..e.n {
+            out.push(xs(in a, wrapping_add(e.b, wrapping_add(wrapping_mul(i, 2), 1))));
+        }
+    } else if e.kind == X_FIELD || e.kind == X_TRY || e.kind == X_LOOP {
+        out.push(e.a);
+    } else if e.kind == X_INDEX {
+        out.push(e.a);
+        out.push(e.b);
+    } else if e.kind == X_UNARY {
+        out.push(e.b);
+    } else if e.kind == X_BINARY || e.kind == X_ASSIGN {
+        out.push(e.b);
+        out.push(e.c);
+    } else if e.kind == X_BLOCK {
+        for i in 0..e.n {
+            out.push(xs(in a, wrapping_add(e.a, wrapping_add(wrapping_mul(i, 3), 2))));
+        }
+        if e.b != NONE64 {
+            out.push(e.b);
+        }
+    } else if e.kind == X_CALL {
+        out.push(e.a);
+        for i in 0..e.n {
+            out.push(call_arg(in a, e, i));
+        }
+    } else if e.kind == X_IF {
+        out.push(e.a);
+        out.push(e.b);
+        if e.c != NONE64 {
+            out.push(e.c);
+        }
+    } else if e.kind == X_MATCH {
+        out.push(e.a);
+        for i in 0..e.n {
+            out.push(xs(in a, wrapping_add(e.b, wrapping_add(wrapping_mul(i, 2), 1))));
+        }
+    } else if e.kind == X_FOR {
+        out.push(e.b);
+        out.push(e.c);
+    } else if e.kind == X_RANGE {
+        out.push(e.a);
+        out.push(e.b);
+    } else if e.kind == X_BREAK || e.kind == X_RETURN {
+        if e.a != NONE64 {
+            out.push(e.a);
+        }
+    } else if e.kind == X_CLOSURE {
+        out.push(e.c);
+    } else if e.kind == X_HANDLE {
+        match a.hds.try_get(e.a) {
+            Option::Some(h) => {
+                if h.has_state {
+                    out.push(h.state_expr);
+                }
+                out.push(h.body);
+                for ci in 0..wrapping_add(h.op_count, 1) {
+                    match a.cls.try_get(wrapping_add(h.return_clause, ci)) {
+                        Option::Some(cl) => out.push(cl.body),
+                        Option::None => {},
+                    }
+                }
+            },
+            Option::None => {},
+        }
+    }
+}
+
+// What the `break`s of a loop body carry (loops in it, closures and
+// handlers aside): LOOP_NEVER_BREAKS, LOOP_BREAKS or LOOP_BREAKS_VALUE.
+pub fn loop_breaks(in a: Ast, body: u64) -> u8 {
+    let e = ex(in a, body);
+    if e.kind == X_BREAK {
+        return if e.a == NONE64 {
+            LOOP_BREAKS
+        } else {
+            LOOP_BREAKS_VALUE
+        };
+    }
+    if e.kind == X_LOOP || e.kind == X_FOR || e.kind == X_CLOSURE || e.kind == X_HANDLE {
+        return LOOP_NEVER_BREAKS;
+    }
+    let mut child = ChunkSeq::new[u64]();
+    children(in a, e, inout child);
+    let mut found = LOOP_NEVER_BREAKS;
+    for i in 0..child.len() {
+        let inner = loop_breaks(in a, u64_at(in child, i));
+        if inner > found {
+            found = inner;
+        }
+    }
+    found
+}
+
+fn contains_name(in names: ChunkSeq[u32], name: u32) -> bool {
+    for i in 0..names.len() {
+        if u32_at(in names, i) == name {
+            return true;
+        }
+    }
+    false
+}
+
+// `havoc`: forget the facts of every binding the body may write.
+fn havoc(inout fw: Fw, in a: Ast, body: u64) {
+    let mut written = ChunkSeq::new[u32]();
+    let calls = visit_written(in a, body, inout written);
+    for i in 0..fw.env.len() {
+        match fw.env.try_get(i) {
+            Option::Some(b) => {
+                if contains_name(in written, b.name) || (calls && b.pass == TyPass::Inout) {
+                    forget(inout fw, i);
+                }
+            },
+            Option::None => {},
+        }
+    }
+}
+
+// `loop_body`: a `loop` (`value`) or `for` body. `pat` is the `for`
+// pattern (NONE64 for `loop`), bound with `nonzero_index` and `range`.
+fn loop_body(
+    inout fw: Fw,
+    in a: Ast,
+    body: u64,
+    value: bool,
+    pat: u64,
+    pat_ty: u32,
+    nonzero_index: bool,
+    range: B
+) -> bool {
+    havoc(inout fw, in a, body);
+    let entry = copy_env(in fw.env);
+    let entry_len = fw.env.len();
+    let exit_start = fw.exits.len();
+    if !value {
+        // A `for` loop also ends when its range is exhausted.
+        push_rows(inout fw.exits, in entry, 0, entry_len);
+    }
+    let first = if value { 0 } else { 1 };
+    fw.frames
+        .push(Fr { kind: FRAME_LOOP, entry_len: entry_len, exit_start: exit_start, count: first });
+    push_scope(inout fw);
+    if pat != NONE64 {
+        bind_pattern(inout fw, in a, pat, pat_ty);
+        let simple = match a.pts.try_get(pat) {
+            Option::Some(p) => p.kind == Pat::Bind,
+            Option::None => false,
+        };
+        if simple && fw.env.len() > entry_len {
+            let i = wrapping_sub(fw.env.len(), 1);
+            match binding(in fw, i) {
+                Option::Some(b) => {
+                    let mut nb = b;
+                    nb.nonzero = nonzero_index;
+                    nb.has_range = range.has;
+                    nb.lo = range.lo;
+                    nb.hi = range.hi;
+                    nb.at = b.mutation;
+                    nb.looped = true;
+                    put_binding(inout fw, i, nb);
+                },
+                Option::None => {},
+            }
+        }
+    }
+    let _body_never = ev(inout fw, in a, body);
+    pop_scope(inout fw);
+    fw.env.truncate(entry_len);
+    let count = match fw.frames.pop() {
+        Option::Some(f) => f.count,
+        Option::None => 0,
+    };
+    if count == 0 {
+        fw.exits.truncate(exit_start);
+        return true;
+    }
+    if entry_len != 0 {
+        let rows = copy_env(in fw.exits);
+        fw.env.clear();
+        push_rows(inout fw.env, in rows, exit_start, entry_len);
+        for xi in 1..count {
+            let prev = copy_env(in fw.env);
+            let at = wrapping_add(exit_start, wrapping_mul(xi, entry_len));
+            merge(inout fw, in prev, 0, in rows, at);
+        }
+    }
+    fw.exits.truncate(exit_start);
+    false
+}
+
+fn record_exit(inout fw: Fw) {
+    let top = match fw.frames.last() {
+        Option::Some(f) => f,
+        Option::None => return,
+    };
+    if top.kind != FRAME_LOOP {
+        return;
+    }
+    let env = copy_env(in fw.env);
+    push_rows(inout fw.exits, in env, 0, top.entry_len);
+    let mut next = top;
+    next.count = wrapping_add(top.count, 1);
+    let _ok = fw.frames.try_set(wrapping_sub(fw.frames.len(), 1), next);
+}
+
+// ----- expressions -------------------------------------------------------
+
+fn is_never(in fw: Fw, e: Ex) -> bool {
+    is_named(in fw, ty_of(in fw, e), fw.world.k.never)
+}
+
+fn is_text(in fw: Fw, ty: u32) -> bool {
+    is_named(in fw, ty, fw.world.k.string) || is_named(in fw, ty, fw.world.k.str_)
+}
+
+// A fallible sequence or slice method (`SeqOp::fallible`), without the
+// vector and atomic families.
+fn fallible_seq_method(in fw: Fw, method: u32, seq: bool) -> bool {
+    if spells(in fw, method, "get")
+        || spells(in fw, method, "set")
+        || spells(in fw, method, "copy_from")
+        || spells(in fw, method, "copy_within")
+        || spells(in fw, method, "make_ascii_lowercase")
+    {
+        return true;
+    }
+    if seq && spells(in fw, method, "extend_from_within") {
+        return true;
+    }
+    // The fixed-width reads and writes without `try_`.
+    (fw.names.has_prefix(method, in "read_u".as_bytes())
+        || fw.names.has_prefix(method, in "write_u".as_bytes()))
+        && (name_contains(in fw, method, "_le") || name_contains(in fw, method, "_be"))
+}
+
+// Walks `id` as the Rust checker checks it; returns whether it never
+// completes normally.
+fn ev(inout fw: Fw, in a: Ast, id: u64) -> bool {
+    let e = ex(in a, id);
+    if e.kind == X_NONE {
+        return false;
+    }
+    let structural = ev_kind(inout fw, in a, e);
+    structural || is_never(in fw, e)
+}
+
+fn ev_kind(inout fw: Fw, in a: Ast, e: Ex) -> bool {
+    if e.kind == X_LITERAL || e.kind == X_NAME || e.kind == X_CONTINUE {
+        return e.kind == X_CONTINUE;
+    }
+    if e.kind == X_TUPLE {
+        for i in 0..e.n {
+            let _n = ev(inout fw, in a, xs(in a, wrapping_add(e.a, i)));
+        }
+        return false;
+    }
+    if e.kind == X_STRUCT {
+        for i in 0..e.n {
+            let _n = ev(
+                inout fw,
+                in a,
+                xs(in a, wrapping_add(e.b, wrapping_add(wrapping_mul(i, 2), 1)))
+            );
+        }
+        return false;
+    }
+    if e.kind == X_FIELD || e.kind == X_TRY {
+        let _n = ev(inout fw, in a, e.a);
+        return false;
+    }
+    if e.kind == X_INDEX {
+        ev_index(inout fw, in a, e);
+        return false;
+    }
+    if e.kind == X_UNARY {
+        let _n = ev(inout fw, in a, e.b);
+        if spells(in fw, n32(e.a), "-") {
+            let mut k = kind_of(in fw, e);
+            if k.bits == 0 {
+                k = kind_of(in fw, ex(in a, e.b));
+            }
+            if k.bits != 0 {
+                let f = integer_fact(in fw, in a, e.b);
+                if !f.has || !fact_neg(k, f.v).has {
+                    overflow_failure(inout fw, e);
+                }
+            }
+        }
+        return false;
+    }
+    if e.kind == X_BINARY {
+        ev_binary(inout fw, in a, e);
+        return false;
+    }
+    if e.kind == X_ASSIGN {
+        ev_assign(inout fw, in a, e);
+        return false;
+    }
+    if e.kind == X_BLOCK {
+        return ev_block(inout fw, in a, e);
+    }
+    if e.kind == X_CALL {
+        ev_call(inout fw, in a, e);
+        return false;
+    }
+    if e.kind == X_IF {
+        return ev_if(inout fw, in a, e);
+    }
+    if e.kind == X_MATCH {
+        return ev_match(inout fw, in a, e);
+    }
+    if e.kind == X_LOOP {
+        return loop_body(inout fw, in a, e.a, true, NONE64, NONE32, false, no_bounds());
+    }
+    if e.kind == X_FOR {
+        return ev_for(inout fw, in a, e);
+    }
+    if e.kind == X_RANGE {
+        let _s = ev(inout fw, in a, e.a);
+        let _e = ev(inout fw, in a, e.b);
+        return false;
+    }
+    if e.kind == X_BREAK {
+        let _n = ev(inout fw, in a, e.a);
+        record_exit(inout fw);
+        return true;
+    }
+    if e.kind == X_RETURN {
+        let _n = ev(inout fw, in a, e.a);
+        return true;
+    }
+    if e.kind == X_CLOSURE {
+        ev_closure(inout fw, in a, e);
+        return false;
+    }
+    if e.kind == X_HANDLE {
+        ev_handle(inout fw, in a, e);
+        return false;
+    }
+    false
+}
+
+fn ev_index(inout fw: Fw, in a: Ast, e: Ex) {
+    let index = ex(in a, e.b);
+    let _b = ev(inout fw, in a, e.a);
+    let _i = ev(inout fw, in a, e.b);
+    if index.kind == X_RANGE {
+        // A slice or text view: no element check.
+        return;
+    }
+    let base_ty = ty_of(in fw, ex(in a, e.a));
+    let k = fw.world.k;
+    if is_named(in fw, base_ty, k.chunk_seq) || is_named(in fw, base_ty, k.slice) {
+        primitive_failure(inout fw, e);
+        return;
+    }
+    if valid_ty(in fw, base_ty) && fw.types.kind(base_ty) == TyKind::Tuple {
+        let n = fw.types.arity(base_ty);
+        let f = integer_fact(in fw, in a, e.b);
+        let constant = f.has && !f.v.neg && v_lt(f.v, v_small(false, n));
+        if !constant && !array_index_total(in fw, in a, e.b, n) {
+            primitive_failure(inout fw, e);
+        }
+    }
+}
+
+fn ev_binary(inout fw: Fw, in a: Ast, e: Ex) {
+    let op = n32(e.a);
+    let l = ex(in a, e.b);
+    let r = ex(in a, e.c);
+    if is_comparison(in fw, op)
+        && (is_text(in fw, ty_of(in fw, l)) || is_text(in fw, ty_of(in fw, r)))
+    {
+        let _l = ev(inout fw, in a, e.b);
+        let _r = ev(inout fw, in a, e.c);
+        return;
+    }
+    if spells(in fw, op, "<<") || spells(in fw, op, ">>") {
+        let _l = ev(inout fw, in a, e.b);
+        fw.total_operands = wrapping_add(fw.total_operands, 1);
+        let _r = ev(inout fw, in a, e.c);
+        fw.total_operands = wrapping_sub(fw.total_operands, 1);
+        let amount = operand_bounds(in fw, in a, e.c);
+        let mut k = kind_of(in fw, e);
+        if k.bits == 0 {
+            k = kind_of(in fw, l);
+        }
+        if k.bits != 0
+            && !(amount.has && !amount.lo.neg && !amount.hi.big && amount.hi.mag < w(k.bits))
+        {
+            overflow_failure(inout fw, e);
+        }
+        return;
+    }
+    let _l = ev(inout fw, in a, e.b);
+    let left_fact = integer_fact(in fw, in a, e.b);
+    let left_bounds = integer_bounds(in fw, in a, e.b);
+    let left_index = loop_index(in fw, in a, e.b);
+    let left_operand = operand_bounds(in fw, in a, e.b);
+    let and = spells(in fw, op, "&&");
+    let or = spells(in fw, op, "||");
+    let code = single_op(in fw, op);
+    if and || or {
+        let before = copy_env(in fw.env);
+        let dead = l.kind == X_LITERAL && l.a == Lit::Bool && ((l.b == 0) == and);
+        if dead {
+            fw.dead = wrapping_add(fw.dead, 1);
+        }
+        let _r = ev(inout fw, in a, e.c);
+        if dead {
+            fw.dead = wrapping_sub(fw.dead, 1);
+            set_env(inout fw, sink before);
+        } else {
+            let after = copy_env(in fw.env);
+            merge(inout fw, in before, 0, in after, 0);
+        }
+        return;
+    }
+    if code == 47 || code == 37 {
+        fw.total_operands = wrapping_add(fw.total_operands, 1);
+        let _r = ev(inout fw, in a, e.c);
+        fw.total_operands = wrapping_sub(fw.total_operands, 1);
+    } else {
+        let _r = ev(inout fw, in a, e.c);
+    }
+    let mut k = kind_of(in fw, l);
+    if k.bits == 0 {
+        k = kind_of(in fw, r);
+    }
+    if k.bits == 0 {
+        return;
+    }
+    if (code == 47 || code == 37) && !nonzero(in fw, in a, e.c) {
+        let divisor = operand_bounds(in fw, in a, e.c);
+        if !(divisor.has && (v_lt(v_zero(), divisor.lo) || divisor.hi.neg)) {
+            primitive_failure(inout fw, e);
+        }
+    }
+    if may_overflow(in fw, op, k)
+        && !in_range(in fw, code, k, left_fact, integer_fact(in fw, in a, e.c))
+        && !quotient_in_range(code, k, left_bounds, integer_bounds(in fw, in a, e.c))
+        && !total_operation(in fw, in a, code, k, left_operand, e.c)
+        && !((left_index || loop_index(in fw, in a, e.c))
+            && bounds_in_range(code, k, left_bounds, integer_bounds(in fw, in a, e.c)))
+    {
+        overflow_failure(inout fw, e);
+    }
+}
+
+// `array_element_write`.
+fn array_write(inout fw: Fw, in a: Ast, e: Ex, op: u32, index: u64, value: u64, elem: u32, n: u64) {
+    if !array_index_total(in fw, in a, index, n) {
+        primitive_failure(inout fw, e);
+    }
+    let _v = ev(inout fw, in a, value);
+    if !spells(in fw, op, "=") {
+        let k = kind_of_ty(in fw, elem);
+        if k.bits != 0 && may_overflow(in fw, op, k) {
+            overflow_failure(inout fw, e);
+        }
+        if k.bits != 0
+            && (spells(in fw, op, "/=") || spells(in fw, op, "%="))
+            && !nonzero(in fw, in a, value)
+        {
+            primitive_failure(inout fw, e);
+        }
+    }
+}
+
+fn forget_place(inout fw: Fw, root: u32) {
+    let i = lookup(in fw, root);
+    match binding(in fw, i) {
+        Option::Some(b) => {
+            let mut nb = b;
+            nb.mutation = fresh_mutation(inout fw);
+            nb.has_int = false;
+            nb.nonzero = false;
+            nb.has_range = false;
+            put_binding(inout fw, i, nb);
+        },
+        Option::None => {},
+    }
+}
+
+// The exact fact of an assignment target that is a name.
+fn target_fact(in fw: Fw, root: u32, path_empty: bool) -> OptV {
+    match binding(in fw, lookup(in fw, root)) {
+        Option::Some(b) => if path_empty && b.has_int {
+            some_v(b.int)
+        } else {
+            no_v()
+        },
+        Option::None => no_v(),
+    }
+}
+
+fn ev_assign(inout fw: Fw, in a: Ast, e: Ex) {
+    let op = n32(e.a);
+    let target = ex(in a, e.b);
+    if target.kind == X_INDEX && ex(in a, target.b).kind != X_RANGE {
+        let base_ty = ty_of(in fw, ex(in a, target.a));
+        let n = array_len(in fw, base_ty);
+        if n != 0 {
+            let root = place_root(in a, target.a);
+            if root == NONE32 {
+                let _v = ev(inout fw, in a, e.c);
+                return;
+            }
+            let _i = ev(inout fw, in a, target.b);
+            array_write(inout fw, in a, e, op, target.b, e.c, array_element(in fw, base_ty), n);
+            forget_place(inout fw, root);
+            return;
+        }
+    }
+    let root = place_root(in a, e.b);
+    if root == NONE32 {
+        let _v = ev(inout fw, in a, e.c);
+        return;
+    }
+    let path_empty = target.kind == X_NAME;
+    let bi = lookup(in fw, root);
+    let before = target_fact(in fw, root, path_empty);
+    let state_before = match binding(in fw, bi) {
+        Option::Some(b) => b.mutation,
+        Option::None => NONE64,
+    };
+    let bounds_before = if state_before != NONE64 {
+        integer_bounds(in fw, in a, e.b)
+    } else {
+        no_bounds()
+    };
+    let _v = ev(inout fw, in a, e.c);
+    let k = kind_of(in fw, target);
+    let assign = spells(in fw, op, "=");
+    if k.bits != 0
+        && (spells(in fw, op, "/=") || spells(in fw, op, "%="))
+        && !nonzero(in fw, in a, e.c)
+    {
+        primitive_failure(inout fw, e);
+    }
+    let now = target_fact(in fw, root, path_empty);
+    let unchanged = now.has == before.has && (!now.has || v_eq(now.v, before.v));
+    let old = if unchanged { now } else { no_v() };
+    let value = integer_fact(in fw, in a, e.c);
+    let value_bounds = integer_bounds(in fw, in a, e.c);
+    let state_now = match binding(in fw, lookup(in fw, root)) {
+        Option::Some(b) => b.mutation,
+        Option::None => NONE64,
+    };
+    let old_bounds = if state_before != NONE64 && state_now == state_before {
+        bounds_before
+    } else {
+        no_bounds()
+    };
+    let code = compound_operator(in fw, op);
+    if k.bits != 0
+        && !assign
+        && may_overflow(in fw, op, k)
+        && !in_range(in fw, code, k, old, value)
+        && !quotient_in_range(code, k, old_bounds, value_bounds)
+    {
+        overflow_failure(inout fw, e);
+    }
+    let fact = if assign {
+        value
+    } else if k.bits != 0 && old.has && value.has {
+        let r = fact_checked(in fw, k, code, old.v, value.v);
+        if r.st == R_OK { some_v(r.v) } else { no_v() }
+    } else {
+        no_v()
+    };
+    let nz = (fact.has && !is_zero(fact.v)) || (assign && nonzero(in fw, in a, e.c));
+    let i = lookup(in fw, root);
+    match binding(in fw, i) {
+        Option::Some(b) => {
+            let mut nb = b;
+            nb.mutation = fresh_mutation(inout fw);
+            nb.has_int = fact.has && path_empty;
+            nb.int = fact.v;
+            nb.nonzero = nz && path_empty;
+            nb.has_range = value_bounds.has && assign && path_empty;
+            nb.lo = value_bounds.lo;
+            nb.hi = value_bounds.hi;
+            nb.at = nb.mutation;
+            nb.looped = false;
+            put_binding(inout fw, i, nb);
+        },
+        Option::None => {},
+    }
+}
+
+fn ev_block(inout fw: Fw, in a: Ast, e: Ex) -> bool {
+    push_scope(inout fw);
+    let mut never = false;
+    for i in 0..e.n {
+        if never {
+            break;
+        }
+        let row = wrapping_add(e.a, wrapping_mul(i, 3));
+        let is_let = xs(in a, row) != 0;
+        let pat = xs(in a, wrapping_add(row, 1));
+        let value = xs(in a, wrapping_add(row, 2));
+        if is_let {
+            let _n = ev(inout fw, in a, value);
+            let fact = integer_fact(in fw, in a, value);
+            let nz = nonzero(in fw, in a, value);
+            let b = integer_bounds(in fw, in a, value);
+            let ann = let_annotation(in fw, in a, pat);
+            let ty = if ann != NONE32 {
+                ann
+            } else {
+                ty_of(in fw, ex(in a, value))
+            };
+            let before = fw.env.len();
+            bind_pattern(inout fw, in a, pat, ty);
+            let simple = match a.pts.try_get(pat) {
+                Option::Some(p) => p.kind == Pat::Bind,
+                Option::None => false,
+            };
+            if simple && fw.env.len() > before {
+                let bi = wrapping_sub(fw.env.len(), 1);
+                match binding(in fw, bi) {
+                    Option::Some(nb0) => {
+                        let mut nb = nb0;
+                        nb.has_int = fact.has;
+                        nb.int = fact.v;
+                        nb.nonzero = nz;
+                        nb.has_range = b.has;
+                        nb.lo = b.lo;
+                        nb.hi = b.hi;
+                        nb.at = nb.mutation;
+                        nb.looped = false;
+                        put_binding(inout fw, bi, nb);
+                    },
+                    Option::None => {},
+                }
+            }
+        } else if ev(inout fw, in a, value) {
+            never = true;
+        }
+    }
+    if !never && e.b != NONE64 {
+        never = ev(inout fw, in a, e.b);
+    }
+    pop_scope(inout fw);
+    never
+}
+
+fn ev_call(inout fw: Fw, in a: Ast, e: Ex) {
+    let callee = ex(in a, e.a);
+    if callee.kind == X_FIELD {
+        let _r = ev(inout fw, in a, callee.a);
+    } else if callee.kind != X_NAME {
+        let _c = ev(inout fw, in a, e.a);
+    }
+    for i in 0..e.n {
+        let arg = call_arg(in a, e, i);
+        let _n = ev(inout fw, in a, arg);
+        if call_pass(in a, e, i) == TyPass::Inout {
+            let root = place_root(in a, arg);
+            if root != NONE32 {
+                forget(inout fw, lookup(in fw, root));
+            }
+        }
+    }
+    if callee.kind == X_FIELD {
+        let method = n32(callee.b);
+        let rt = ty_of(in fw, ex(in a, callee.a));
+        let k = fw.world.k;
+        if is_text(in fw, rt) {
+            if spells(in fw, method, "byte_at") {
+                primitive_failure(inout fw, e);
+            }
+        } else if is_named(in fw, rt, k.chunk_seq) || is_named(in fw, rt, k.slice) {
+            if fallible_seq_method(in fw, method, is_named(in fw, rt, k.chunk_seq)) {
+                primitive_failure(inout fw, e);
+            }
+        } else if spells(in fw, method, "set") && e.n == 2 {
+            let n = array_len(in fw, rt);
+            if n != 0 && !array_index_total(in fw, in a, call_arg(in a, e, 0), n) {
+                primitive_failure(inout fw, e);
+            }
+        }
+        return;
+    }
+    if callee.kind != X_NAME {
+        return;
+    }
+    let sym = n32(callee.a);
+    if spells(in fw, sym, FINISH_NAME) {
+        primitive_failure(inout fw, e);
+        return;
+    }
+    if e.x & I_CONVERSION != 0 && e.n == 1 && lookup(in fw, sym) == NONE64 {
+        let to = narrow_target(in fw, sym);
+        if to.bits == 0 {
+            return;
+        }
+        let arg = call_arg(in a, e, 0);
+        let from_ty = ty_of(in fw, ex(in a, arg));
+        let kk = fw.world.k;
+        if is_named(in fw, from_ty, kk.f32_) || is_named(in fw, from_ty, kk.f64_) {
+            overflow_failure(inout fw, e);
+            return;
+        }
+        let from = kind_of_ty(in fw, from_ty);
+        if from.bits == 0 || widens_to(from, to) {
+            return;
+        }
+        let b = integer_bounds(in fw, in a, arg);
+        if !(b.has && fits(to, b.lo) && fits(to, b.hi)) {
+            overflow_failure(inout fw, e);
+        }
+    }
+}
+
+fn ev_if(inout fw: Fw, in a: Ast, e: Ex) -> bool {
+    let _c = ev(inout fw, in a, e.a);
+    let original = copy_env(in fw.env);
+    refine_condition(inout fw, in a, e.a, true);
+    let then_never = ev(inout fw, in a, e.b);
+    let left = take_env(inout fw);
+    set_env(inout fw, sink copy_env(in original));
+    refine_condition(inout fw, in a, e.a, false);
+    let else_never = if e.c != NONE64 {
+        ev(inout fw, in a, e.c)
+    } else {
+        false
+    };
+    let right = take_env(inout fw);
+    if then_never {
+        set_env(inout fw, sink right);
+    } else if else_never {
+        set_env(inout fw, sink left);
+    } else {
+        set_env(inout fw, sink copy_env(in original));
+        merge(inout fw, in left, 0, in right, 0);
+        for i in 0..fw.env.len() {
+            let b = match fw.env.try_get(i) {
+                Option::Some(b) => b,
+                Option::None => continue,
+            };
+            if b.has_int {
+                continue;
+            }
+            let o = match original.try_get(i) {
+                Option::Some(o) => o,
+                Option::None => missing_binding(),
+            };
+            let x = match left.try_get(i) {
+                Option::Some(x) => x,
+                Option::None => missing_binding(),
+            };
+            let y = match right.try_get(i) {
+                Option::Some(y) => y,
+                Option::None => missing_binding(),
+            };
+            if o.name != NONE32
+                && b.id == o.id
+                && x.id == o.id
+                && y.id == o.id
+                && o.mutation == x.mutation
+                && o.mutation == y.mutation
+            {
+                let mut nb = b;
+                nb.has_int = o.has_int;
+                nb.int = o.int;
+                put_binding(inout fw, i, nb);
+            }
+        }
+    }
+    then_never && else_never
+}
+
+fn ev_match(inout fw: Fw, in a: Ast, e: Ex) -> bool {
+    let _v = ev(inout fw, in a, e.a);
+    let value_ty = ty_of(in fw, ex(in a, e.a));
+    let original = copy_env(in fw.env);
+    let len = original.len();
+    let mut branches = ChunkSeq::new[FB]();
+    let mut count: u64 = 0;
+    for i in 0..e.n {
+        let pat = xs(in a, wrapping_add(e.b, wrapping_mul(i, 2)));
+        let body = xs(in a, wrapping_add(e.b, wrapping_add(wrapping_mul(i, 2), 1)));
+        set_env(inout fw, sink copy_env(in original));
+        push_scope(inout fw);
+        bind_pattern(inout fw, in a, pat, value_ty);
+        let never = ev(inout fw, in a, body);
+        pop_scope(inout fw);
+        fw.env.truncate(len);
+        if !never {
+            push_rows(inout branches, in fw.env, 0, len);
+            count = wrapping_add(count, 1);
+        }
+    }
+    set_env(inout fw, sink copy_env(in original));
+    if count == 0 {
+        return true;
+    }
+    if len == 0 {
+        return false;
+    }
+    fw.env.clear();
+    push_rows(inout fw.env, in branches, 0, len);
+    for bi in 1..count {
+        let prev = copy_env(in fw.env);
+        merge(inout fw, in prev, 0, in branches, wrapping_mul(bi, len));
+    }
+    false
+}
+
+fn ev_for(inout fw: Fw, in a: Ast, e: Ex) -> bool {
+    let iter = ex(in a, e.b);
+    if iter.kind != X_RANGE {
+        let _i = ev(inout fw, in a, e.b);
+        return loop_body(inout fw, in a, e.c, false, e.a, NONE32, false, no_bounds());
+    }
+    let _s = ev(inout fw, in a, iter.a);
+    let _e = ev(inout fw, in a, iter.b);
+    let start = integer_fact(in fw, in a, iter.a);
+    let nonzero_index = start.has && !start.v.neg && !is_zero(start.v);
+    let lo = integer_bounds(in fw, in a, iter.a);
+    let mut hi = integer_bounds(in fw, in a, iter.b);
+    if !hi.has {
+        hi = array_len_bounds(in fw, in a, iter.b);
+    }
+    let inclusive = iter.c != 0;
+    let mut range = no_bounds();
+    if lo.has && hi.has {
+        let top = if inclusive { hi.hi } else { v_pred(hi.hi) };
+        if v_le(lo.lo, top) {
+            range = bounds(lo.lo, top);
+        }
+    }
+    let elem = ty_of(in fw, ex(in a, iter.a));
+    loop_body(inout fw, in a, e.c, false, e.a, elem, nonzero_index, range)
+}
+
+fn ev_closure(inout fw: Fw, in a: Ast, e: Ex) {
+    let saved = copy_env(in fw.env);
+    let saved_marks = fw.marks.len();
+    fw.frames.push(Fr { kind: FRAME_FUNCTION, entry_len: 0, exit_start: fw.exits.len(), count: 0 });
+    push_scope(inout fw);
+    for i in 0..e.n {
+        match a.pms.try_get(wrapping_add(e.b, i)) {
+            Option::Some(pm) => bind_name(inout fw, pm.name, pm.pass, pm.ty),
+            Option::None => {},
+        }
+    }
+    let _n = ev(inout fw, in a, e.c);
+    pop_scope(inout fw);
+    fw.marks.truncate(saved_marks);
+    let _f = fw.frames.pop();
+    set_env(inout fw, sink saved);
+}
+
+fn ev_handle(inout fw: Fw, in a: Ast, e: Ex) {
+    let h = match a.hds.try_get(e.a) {
+        Option::Some(h) => h,
+        Option::None => return,
+    };
+    if h.has_state {
+        let _s = ev(inout fw, in a, h.state_expr);
+    }
+    let outer = copy_env(in fw.env);
+    fw.frames.push(Fr { kind: FRAME_OTHER, entry_len: 0, exit_start: fw.exits.len(), count: 0 });
+    let _b = ev(inout fw, in a, h.body);
+    let _f = fw.frames.pop();
+    // The body's writes may have happened before any clause ran: forget
+    // the facts of every place the body wrote.
+    for i in 0..fw.env.len() {
+        let b = match fw.env.try_get(i) {
+            Option::Some(b) => b,
+            Option::None => continue,
+        };
+        match outer.try_get(i) {
+            Option::Some(o) => {
+                if b.mutation != o.mutation {
+                    let mut nb = b;
+                    nb.has_int = false;
+                    nb.nonzero = false;
+                    nb.has_range = false;
+                    put_binding(inout fw, i, nb);
+                }
+            },
+            Option::None => {},
+        }
+    }
+    // Clauses check in an environment of their own.
+    let after = take_env(inout fw);
+    let saved_marks = fw.marks.len();
+    for ci in 0..wrapping_add(h.op_count, 1) {
+        match a.cls.try_get(wrapping_add(h.return_clause, ci)) {
+            Option::Some(cl) => {
+                fw.env.clear();
+                fw.frames.push(Fr {
+                    kind: FRAME_OTHER,
+                    entry_len: 0,
+                    exit_start: fw.exits.len(),
+                    count: 0
+                });
+                push_scope(inout fw);
+                if h.has_state {
+                    bind_pattern(inout fw, in a, h.state_pattern, NONE32);
+                }
+                for pi in 0..cl.pattern_count {
+                    bind_pattern(
+                        inout fw,
+                        in a,
+                        xs(in a, wrapping_add(cl.pattern_start, pi)),
+                        NONE32
+                    );
+                }
+                let _c = ev(inout fw, in a, cl.body);
+                pop_scope(inout fw);
+                fw.marks.truncate(saved_marks);
+                let _f = fw.frames.pop();
+            },
+            Option::None => {},
+        }
+    }
+    set_env(inout fw, sink after);
+}
+
+// ----- entry -------------------------------------------------------------
+
+fn sort_dedup(inout rows: ChunkSeq[SpanRow]) {
+    sort_spans(inout rows);
+    let mut out = ChunkSeq::with_capacity[SpanRow](rows.len());
+    let mut prev_start = NONE64;
+    let mut prev_end = NONE64;
+    for i in 0..rows.len() {
+        match rows.try_get(i) {
+            Option::Some(r) => {
+                if r.start != prev_start || r.end != prev_end {
+                    out.push(r);
+                    prev_start = r.start;
+                    prev_end = r.end;
+                }
+            },
+            Option::None => {},
+        }
+    }
+    swap(inout out, inout rows);
+}
+
+// Records `world.partial_ops` and `world.overflow_ops` for every function
+// body of `a`, over the expression types the checker left in `world`.
+pub fn record_failure_ops(
+    in a: Ast,
+    sink names: Names,
+    sink types: Types,
+    sink world: World
+) -> (Names, Types, World) {
+    let mut fw = Fw {
+        names: names,
+        types: types,
+        world: world,
+        env: ChunkSeq::new[FB](),
+        marks: ChunkSeq::new[u64](),
+        frames: ChunkSeq::new[Fr](),
+        exits: ChunkSeq::new[FB](),
+        partial: ChunkSeq::new[SpanRow](),
+        overflow: ChunkSeq::new[SpanRow](),
+        dead: 0,
+        total_operands: 0,
+        next_id: 0,
+        next_mutation: 0
+    };
+    for fi in 0..a.fns.len() {
+        let f = match a.fns.try_get(fi) {
+            Option::Some(f) => f,
+            Option::None => continue,
+        };
+        if !f.has_body || f.body == NONE64 {
+            continue;
+        }
+        fw.env.clear();
+        fw.marks.clear();
+        fw.frames.clear();
+        fw.exits.clear();
+        fw.dead = 0;
+        fw.total_operands = 0;
+        for pi in 0..f.param_count {
+            match a.pms.try_get(wrapping_add(f.param_start, pi)) {
+                Option::Some(pm) => bind_name(inout fw, pm.name, pm.pass, pm.ty),
+                Option::None => {},
+            }
+        }
+        fw.frames.push(Fr { kind: FRAME_FUNCTION, entry_len: 0, exit_start: 0, count: 0 });
+        let _n = ev(inout fw, in a, f.body);
+    }
+    sort_dedup(inout fw.partial);
+    sort_dedup(inout fw.overflow);
+    let Fw {
+        names: n,
+        types: t,
+        world: wd,
+        env: _env,
+        marks: _marks,
+        frames: _frames,
+        exits: _exits,
+        partial: p,
+        overflow: o,
+        dead: _dead,
+        total_operands: _total,
+        next_id: _id,
+        next_mutation: _mutation
+    } = fw;
+    let mut world_out = wd;
+    world_out.partial_ops = p;
+    world_out.overflow_ops = o;
+    (n, t, world_out)
+}
