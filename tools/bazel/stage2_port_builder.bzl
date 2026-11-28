@@ -6,9 +6,13 @@ with the Cranelift component so the pinned wasmtime CLI runs it alone:
 
 1. The committed seed (bootstrap/stage2-seed, #2671) builds today's
    @vesper/stage2 (stage A).
-2. Stage A builds @vesper/port-builder into a component that imports
+2. Stage A builds @vesper/stage2 again (stage B). Stage A's own code comes
+   from the seed's backend; stage B's comes from today's, which frees the
+   heap when a function returns a scalar, so stage B builds the port
+   builder in about 2.2 GiB where stage A needs about 3.6 GiB.
+3. Stage B builds @vesper/port-builder into a component that imports
    `vesper:cranelift/vcl`.
-3. `wac plug` links //crates/vesper-cranelift-component:component into it.
+4. `wac plug` links //crates/vesper-cranelift-component:component into it.
 
 Stage 2 reads its sources through a WASI preopen, which refuses the absolute
 symlinks Bazel stages inputs as, so the packages are first copied into a
@@ -66,8 +70,10 @@ def _stage2_port_builder_impl(ctx):
     tree_dir = ctx.bin_dir.path + "/" + (ctx.label.package + "/" if ctx.label.package else "") + root.rstrip("/")
     stage_a = ctx.actions.declare_file(ctx.label.name + "_stage2.wasm")
     _stage2_run(ctx, ctx.file.seed, tree_dir, tree, _STAGE2_PACKAGE, stage_a, "Stage2Self", "Building Stage 2 with the seed")
+    stage_b = ctx.actions.declare_file(ctx.label.name + "_stage2b.wasm")
+    _stage2_run(ctx, stage_a, tree_dir, tree, _STAGE2_PACKAGE, stage_b, "Stage2SelfB", "Building Stage 2 with itself")
     core = ctx.actions.declare_file(ctx.label.name + "_core.wasm")
-    _stage2_run(ctx, stage_a, tree_dir, tree, _BUILDER_PACKAGE, core, "Stage2PortBuilder", "Building the port builder with Stage 2")
+    _stage2_run(ctx, stage_b, tree_dir, tree, _BUILDER_PACKAGE, core, "Stage2PortBuilder", "Building the port builder with Stage 2")
     out = ctx.outputs.out
     plug = ctx.actions.args()
     plug.add("plug", core)

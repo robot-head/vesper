@@ -254,6 +254,9 @@ pub struct Em {
     generics: ChunkSeq[u32],
     vars: Vars,
     heap_mark: u32,
+    // The body calls `stage2_heap_reset` or `stage2_heap_swap`, so the heap
+    // at a return is not this function's own to rewind.
+    heap_moves: bool,
     // The label targets of the open `block`/`loop` frames, innermost last,
     // when the body is structured (a cyclic block graph, `structured_body`).
     frames: ChunkSeq[u64],
@@ -305,6 +308,7 @@ fn em_new(inst: Inst, info: FnInfo) -> Em {
         generics: ChunkSeq::new[u32](),
         vars: vars_new(),
         heap_mark: NONE32,
+        heap_moves: false,
         frames: ChunkSeq::new[u64](),
         structured: false,
         elems: ChunkSeq::new[u64](),
@@ -1862,6 +1866,7 @@ impl L {
                 }
             }
         }
+        self.scan_heap_moves(fn_index);
         let (order, acyclic) = topological(in self, fn_index);
         if loops || !acyclic {
             for block_index in 0..row.bc {
@@ -2026,6 +2031,7 @@ impl L {
         let term_args = blk.ta;
         if blk.term == Term::Return {
             let val = self.value(self.ctx.ir.word(term_args));
+            self.emit_scalar_return_rewind();
             self.cur_fn.code.get(val);
             self.cur_fn.code.op(OP_RETURN);
         } else if blk.term == Term::Jump {
@@ -2577,6 +2583,7 @@ impl L {
                 Fail::raise(werr(K_UNSUPPORTED, U_OPERATION, 151));
             }
             let ret_val = self.value(self.ctx.ir.word(operands));
+            self.emit_scalar_return_rewind();
             self.cur_fn.code.get(ret_val);
             self.cur_fn.code.op(OP_RETURN);
         } else if op == Op::Unit {
