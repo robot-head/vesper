@@ -2303,6 +2303,29 @@ vesper_package(
     vsys = glob(["packages/vesper-driver-engines/commands-*.vsys"]),
 )
 
+# @vesper/lsp, the LSP transport, envelope and session gates (#1828), and
+# @vesper/lsp-server, the `vesper lsp` loop over the engine seam of
+# @vesper/driver-engines (#1828 part 15c).
+vesper_package(
+    name = "lsp_package",
+    srcs = glob(["packages/vesper-lsp/src/**/*.ves"]),
+    manifest = "packages/vesper-lsp/Loom.toml",
+    visibility = ["//visibility:public"],
+    deps = ["//crates/vesper-serde:port_package"],
+)
+
+vesper_package(
+    name = "lsp_server_package",
+    srcs = glob(["packages/vesper-lsp-server/src/**/*.ves"]),
+    manifest = "packages/vesper-lsp-server/Loom.toml",
+    visibility = ["//visibility:public"],
+    deps = [
+        ":driver_engines_package",
+        ":lsp_package",
+        "//crates/vesper-serde:port_package",
+    ],
+)
+
 # @vesper/driver-commands, the command layers the hybrid's driver hands on
 # (self-hosting SH5 lane 13, #1336).
 vesper_package(
@@ -2313,6 +2336,7 @@ vesper_package(
     deps = [
         ":driver_engines_package",
         ":driver_package",
+        ":lsp_server_package",
         ":proof_audit_package",
         ":std_env_package",
         ":std_fs_package",
