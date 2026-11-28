@@ -5,9 +5,12 @@
 //! The package takes the stage to stop after, the optimize flag and
 //! @vesper/codegen-calls' calls input of the first lowering (what the
 //! `export_plans` hook sees), and returns the program as `put_program`
-//! words. At every stage it has ported, the program read back must be
-//! `Debug`-equal to Rust's after `library_program` through that stage, and
-//! a Rust error must be a refusal.
+//! words. At every stage, the program read back must be `Debug`-equal to
+//! Rust's after `library_program` through that stage, and a Rust error must
+//! be a refusal; only worlds with the `Box` prelude (`@fip` reuse and drop
+//! elaboration) are not ported yet. For an optimized build, the inliner
+//! input the package writes for the optimized program must also be
+//! tests/common/inline_words.rs `inline_input`'s bytes for Rust's.
 //!
 //! - `library_programs_match_rust`: every library of
 //!   tests/common/native_lib_fixtures.rs (the @vesper/native-lib fixtures),
@@ -22,6 +25,8 @@ mod check_harness;
 mod check_words;
 #[path = "../../../tests/common/codegen_calls_words.rs"]
 mod codegen_calls_words;
+#[path = "../../../tests/common/inline_words.rs"]
+mod inline_words;
 #[path = "../../../tests/common/ir_words.rs"]
 mod ir_words;
 #[path = "common/native_lib_fixtures.rs"]
@@ -35,6 +40,7 @@ use native_lib_fixtures::LIBRARIES;
 use vesper::check::World;
 use vesper::codegen_swap::{self, CodegenHooks};
 use vesper::ir::Program;
+use vesper::ir_inline::Budget;
 use vesper::native::export::{LibraryOptions, LibraryStage, compile_source, library_program};
 
 const PACKAGE: &str = "packages/vesper-library-ir";
@@ -57,7 +63,8 @@ const MORE_ROOTS_TASK: u64 = 8;
 const MIN_CHANGED: usize = 8;
 
 /// Libraries for the steps the @vesper/native-lib fixtures do not reach:
-/// bit builtins as operators, 128-bit tuple types and memory forwarding.
+/// bit builtins as operators, 128-bit tuple types, memory forwarding,
+/// inlining and bounds hoisting.
 const PIPELINE_LIBRARIES: &[(&str, &str)] = &[
     (
         "bits",
@@ -93,12 +100,41 @@ pub fn pick(c: bool, a: u128) -> u128 {
     wrapping_add(y, z)
 }",
     ),
+    (
+        "inlining",
+        "fn twice(x: u64) -> u64 { wrapping_mul(x, 2) }
+fn pick(c: bool, a: u64, b: u64) -> u64 { if c { a } else { b } }
+pub fn quad(x: u64) -> u64 { twice(twice(x)) }
+pub fn choose(x: u64) -> u64 { pick(x > 3, twice(x), 7) }",
+    ),
+    (
+        "hoisting",
+        "fn bump(inout d: ChunkSeq[u64], n: u64) {
+    let mut i = n;
+    loop {
+        if i == 0 { break; }
+        i = wrapping_sub(i, 1);
+        let v = match d.try_get(i) { Option::Some(x) => x, Option::None => 0 };
+        d.try_set(i, wrapping_add(v, 1));
+    }
+}
+pub fn bumped(n: u64) -> u64 {
+    let mut d: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut k: u64 = 0;
+    loop {
+        if k == n { break; }
+        d.push(k);
+        k = wrapping_add(k, 1);
+    }
+    bump(inout d, n);
+    match d.try_get(0) { Option::Some(x) => x, Option::None => 0 }
+}",
+    ),
 ];
 
 /// The package's status words (`Status` of src/lib.ves).
 const STATUS_OK: u64 = 0;
 const STATUS_FIP_ACTIVE: u64 = 16;
-const STATUS_INLINE: u64 = 17;
 
 /// The stages, in order, with their words (`Stage` of src/lib.ves).
 const STAGES: [(LibraryStage, u64); 5] = [
@@ -118,6 +154,25 @@ fn entry() -> &'static Entry {
     })
 }
 
+/// `library_inline_input_text`: the inliner's input the package writes
+/// for the optimized program.
+fn input_entry() -> &'static Entry {
+    static E: OnceLock<Entry> = OnceLock::new();
+    E.get_or_init(|| {
+        codegen_swap::with_hooks(CodegenHooks::default(), || {
+            Package::load(PACKAGE).entry("library_inline_input_text", true)
+        })
+    })
+}
+
+/// The bytes `inline_input_words` packed after the status word.
+fn unpack(words: &[u64]) -> Vec<u8> {
+    let n = words.first().copied().unwrap_or(0) as usize;
+    let mut bytes: Vec<u8> = words.iter().skip(1).flat_map(|w| w.to_le_bytes()).collect();
+    bytes.truncate(n);
+    bytes
+}
+
 /// What one comparison found.
 #[derive(Default)]
 struct Tally {
@@ -125,8 +180,14 @@ struct Tally {
     same: usize,
     /// Stages the package refused where Rust failed too.
     both_failed: usize,
-    /// Stages the package does not run yet (the inliner, `@fip` worlds).
+    /// Stages the package does not run yet (`@fip` worlds).
     not_ported: usize,
+    /// Optimized programs whose inliner input is Rust's byte for byte.
+    same_inputs: usize,
+    /// Identical stages where the inliner or bounds hoisting changed the
+    /// program.
+    inlined: usize,
+    hoisted: usize,
     /// Functions in the compared programs.
     functions: usize,
     /// Identical stages whose program differs from the first lowering.
@@ -139,6 +200,9 @@ impl Tally {
         self.same += other.same;
         self.both_failed += other.both_failed;
         self.not_ported += other.not_ported;
+        self.same_inputs += other.same_inputs;
+        self.inlined += other.inlined;
+        self.hoisted += other.hoisted;
         self.functions += other.functions;
         self.changed += other.changed;
         self.failures.extend(other.failures);
@@ -176,6 +240,7 @@ fn compare(
         return t;
     };
     let lowered = format!("{program:?}");
+    let mut before = lowered.clone();
     for (stage, word) in STAGES {
         let mut rust = program.clone();
         let expected = library_program(world, &mut rust, optimize, stage);
@@ -185,6 +250,9 @@ fn compare(
         input.extend(&calls);
         let words = entry().words(&input);
         let what = format!("{label} (optimize {optimize}, {stage:?})");
+        if optimize && stage == LibraryStage::Optimize && expected.is_ok() {
+            compare_inline_input(&what, world, &rust, &input, &mut t);
+        }
         match (words.first().copied(), expected) {
             (Some(STATUS_OK), Ok(())) => {
                 let ours = ir_words::decode_program(&words[1..], &pool);
@@ -193,12 +261,19 @@ fn compare(
                     t.same += 1;
                     t.functions += rust.functions.len();
                     t.changed += usize::from(theirs != lowered);
+                    let stepped = usize::from(theirs != before);
+                    match stage {
+                        LibraryStage::Inline => t.inlined += stepped,
+                        LibraryStage::Hoist => t.hoisted += stepped,
+                        _ => {}
+                    }
+                    before = theirs;
                 } else {
                     let d = first_difference(&ir_words::dump(&rust), &ir_words::dump(&ours));
                     t.failures.push(format!("{what}: programs differ at {d}"));
                 }
             }
-            (Some(STATUS_FIP_ACTIVE | STATUS_INLINE), _) => t.not_ported += 1,
+            (Some(STATUS_FIP_ACTIVE), _) => t.not_ported += 1,
             (Some(status), Err(_)) if status != STATUS_OK => t.both_failed += 1,
             (status, Err(e)) => t.failures.push(format!(
                 "{what}: Rust failed ({e}), Vesper status {status:?}"
@@ -209,6 +284,35 @@ fn compare(
         }
     }
     t
+}
+
+/// The inliner's input the package writes for the optimized program must
+/// be `inline_input`'s bytes for Rust's.
+fn compare_inline_input(what: &str, world: &World, rust: &Program, input: &[u8], t: &mut Tally) {
+    let words = input_entry().words(input);
+    if words.first().copied() != Some(STATUS_OK) {
+        t.failures.push(format!(
+            "{what}: no inliner input, status {:?}",
+            words.first()
+        ));
+        return;
+    }
+    let ours = unpack(&words[1..]);
+    let theirs = inline_words::inline_input(world, rust, &Budget::default()).bytes;
+    if ours == theirs {
+        t.same_inputs += 1;
+        return;
+    }
+    let at = ours
+        .iter()
+        .zip(&theirs)
+        .position(|(a, b)| a != b)
+        .unwrap_or(ours.len().min(theirs.len()));
+    t.failures.push(format!(
+        "{what}: the inliner input differs at byte {at} of {} (Rust {})",
+        ours.len(),
+        theirs.len()
+    ));
 }
 
 thread_local! {
@@ -288,10 +392,13 @@ fn library_programs_match_rust() {
         }
     }
     eprintln!(
-        "library-ir: {} stages identical ({} functions, {} changed by the pipeline), {} refused by both, {} not ported, {} failures",
+        "library-ir: {} stages identical ({} functions, {} changed by the pipeline), {} inliner inputs identical, {} inlined, {} hoisted, {} refused by both, {} not ported, {} failures",
         total.same,
         total.functions,
         total.changed,
+        total.same_inputs,
+        total.inlined,
+        total.hoisted,
         total.both_failed,
         total.not_ported,
         total.failures.len()
@@ -374,9 +481,12 @@ fn port_package_programs_match_rust() {
         covered += 1;
     }
     eprintln!(
-        "library-ir: {covered} port libraries, {} stages identical ({} functions), {} refused by both, {} not ported, {} failures",
+        "library-ir: {covered} port libraries, {} stages identical ({} functions), {} inliner inputs identical, {} inlined, {} hoisted, {} refused by both, {} not ported, {} failures",
         total.same,
         total.functions,
+        total.same_inputs,
+        total.inlined,
+        total.hoisted,
         total.both_failed,
         total.not_ported,
         total.failures.len()
