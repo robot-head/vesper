@@ -1,5 +1,7 @@
 //! Replay distinct private kernel names that share one user-facing spelling.
 //! Fixed sources and actual artifacts are inspected; metadata is not approval.
+mod support;
+
 use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -15,19 +17,19 @@ use std::{
 const MODULES: [(&str, &str); 3] = [
     (
         "PrivateReplayLeft",
-        include_str!("../tools/proof-audit/fixtures/private-replay/PrivateReplayLeft.lean"),
+        include_str!("../../../tools/proof-audit/fixtures/private-replay/PrivateReplayLeft.lean"),
     ),
     (
         "PrivateReplayRight",
-        include_str!("../tools/proof-audit/fixtures/private-replay/PrivateReplayRight.lean"),
+        include_str!("../../../tools/proof-audit/fixtures/private-replay/PrivateReplayRight.lean"),
     ),
     (
         "PrivateReplayBoth",
-        include_str!("../tools/proof-audit/fixtures/private-replay/PrivateReplayBoth.lean"),
+        include_str!("../../../tools/proof-audit/fixtures/private-replay/PrivateReplayBoth.lean"),
     ),
 ];
 const METADATA: &str =
-    include_str!("../tools/proof-audit/fixtures/private-replay/PrivateReplayMetadata.lean");
+    include_str!("../../../tools/proof-audit/fixtures/private-replay/PrivateReplayMetadata.lean");
 const ROOTS: [&str; 2] = [
     "ProofAuditPrivateReplay.left",
     "ProofAuditPrivateReplay.right",
@@ -159,7 +161,7 @@ fn pinned_lean(started: Instant) -> (PathBuf, String) {
     let launcher = std::env::var_os("VESPER_LEAN").unwrap_or_else(|| "lean".into());
     let prefix = execute(
         Command::new(launcher)
-            .current_dir(env!("CARGO_MANIFEST_DIR"))
+            .current_dir(support::repo_root())
             .arg("--print-prefix"),
         Duration::from_secs(30),
         started,
@@ -335,7 +337,7 @@ fn distinct_private_kernel_names_survive_real_replay_together() {
 
     let before = artifacts(&root);
     let output = execute(
-        Command::new(env!("CARGO_BIN_EXE_vesper"))
+        support::vesper()
             .current_dir(&directory.0)
             .args(["proof-audit", "PrivateReplayBoth", "--root"])
             .arg(&root)
@@ -365,7 +367,7 @@ fn distinct_private_kernel_names_survive_real_replay_together() {
     );
     assert_eq!(
         report["auditor_blake3"],
-        blake3::hash(include_bytes!("../tools/proof-audit/Audit.lean"))
+        blake3::hash(include_bytes!("../../../tools/proof-audit/Audit.lean"))
             .to_hex()
             .to_string(),
         "the real CLI must embed the current auditor source"

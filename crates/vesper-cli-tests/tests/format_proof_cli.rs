@@ -1,4 +1,6 @@
 //! Explicit real-Lean formatter document-model verification, never source semantics.
+mod support;
+
 use serde_json::Value;
 use std::{
     fs,
@@ -12,14 +14,14 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
-const COMMENTED: &str = include_str!("fixtures/format_proof/commented.ves");
-const HOSTILE: &str = include_str!("fixtures/format_proof/hostile.ves");
-const MACRO: &str = include_str!("fixtures/format_proof/macro.ves");
+const COMMENTED: &str = include_str!("../../../tests/fixtures/format_proof/commented.ves");
+const HOSTILE: &str = include_str!("../../../tests/fixtures/format_proof/hostile.ves");
+const MACRO: &str = include_str!("../../../tests/fixtures/format_proof/macro.ves");
 static SERIAL: Mutex<()> = Mutex::new(());
 fn binary() -> PathBuf {
     let path = std::env::var_os("VESPER_FORMAT_PROOF_BINARY")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(env!("CARGO_BIN_EXE_vesper")));
+        .unwrap_or_else(support::vesper_path);
     let exe = PathBuf::from(format!("{}.exe", path.display()));
     if exe.is_file() { exe } else { path }
 }
@@ -76,7 +78,7 @@ fn lean() -> Option<PathBuf> {
     let configured = std::env::var_os("VESPER_LEAN");
     let selected = configured.clone().unwrap_or_else(|| "lean".into());
     let prefix = Command::new(&selected)
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .current_dir(support::repo_root())
         .arg("--print-prefix")
         .output();
     let binary = prefix
@@ -127,7 +129,7 @@ impl Fixture {
     }
     fn verify(&self, extra: &[&str]) -> Output {
         let result = output(
-            Command::new(binary())
+            support::command(&binary())
                 .arg("verify")
                 .arg(&self.path)
                 .args(extra),
@@ -236,7 +238,7 @@ fn actual_kernel_audit_binds_current_source_output_and_ordered_comments() {
     let candidate = f.root.join("formatted.ves");
     fs::write(&candidate, COMMENTED).unwrap();
     let formatted = output(
-        Command::new(binary())
+        support::command(&binary())
             .arg("fmt")
             .arg(&candidate)
             .arg("--json"),
@@ -281,9 +283,7 @@ fn emitted_ast_witness_compiles_independently_with_hostile_payload_as_literals()
     assert!(!text.trim_start().starts_with('{'));
     let model = std::env::var_os("VESPER_FORMAT_PROOF_MODEL")
         .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lean/StylusAndLintSafety.lean")
-        });
+        .unwrap_or_else(|| support::repo_root().join("lean/StylusAndLintSafety.lean"));
     fs::copy(model, f.root.join("StylusAndLintSafety.lean")).unwrap();
     fs::write(f.root.join("Witness.lean"), text).unwrap();
     let compile = |file: &str, out: &str| {
@@ -348,7 +348,7 @@ fn actual_fixed_expr_macro_document_is_proved_without_expansion_or_source_checki
     let value = f.checked(&lean);
     assert_eq!(value["comment_tokens"], 2);
     let ordinary = output(
-        Command::new(binary())
+        support::command(&binary())
             .arg("check")
             .arg(&f.path)
             .arg("--json"),
@@ -394,7 +394,7 @@ fn invalid_unsupported_oversized_and_failed_tool_inputs_publish_no_certificate()
     }
     assert!(
         !output(
-            Command::new(binary())
+            support::command(&binary())
                 .arg("verify")
                 .arg(&f.root)
                 .args(["--format", "--json"])

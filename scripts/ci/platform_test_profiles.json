@@ -143,27 +143,27 @@
       "skip_tests": null
     },
     {
-      "package": "vesper",
+      "package": "vesper-cli-tests",
       "target": "resource_model42",
-      "bazel": "//:test/resource_model42",
+      "bazel": "//crates/vesper-cli-tests:test/resource_model42",
       "group": "proof",
-      "source": "tests/resource_model42.rs",
+      "source": "crates/vesper-cli-tests/tests/resource_model42.rs",
       "skip_tests": null
     },
     {
-      "package": "vesper",
+      "package": "vesper-cli-tests",
       "target": "proof_audit_cli",
-      "bazel": "//:test/proof_audit_cli",
+      "bazel": "//crates/vesper-cli-tests:test/proof_audit_cli",
       "group": "proof",
-      "source": "tests/proof_audit_cli.rs",
+      "source": "crates/vesper-cli-tests/tests/proof_audit_cli.rs",
       "skip_tests": null
     },
     {
-      "package": "vesper",
+      "package": "vesper-cli-tests",
       "target": "format_proof_cli",
-      "bazel": "//:test/format_proof_cli",
+      "bazel": "//crates/vesper-cli-tests:test/format_proof_cli",
       "group": "proof",
-      "source": "tests/format_proof_cli.rs",
+      "source": "crates/vesper-cli-tests/tests/format_proof_cli.rs",
       "skip_tests": null
     },
     {

@@ -1,5 +1,7 @@
 //! Fresh fixed-source Lean compilation and actual kernel/axiom replay.
 //! This finite logical model is not a source adapter or a backend observation.
+mod support;
+
 use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -203,7 +205,7 @@ fn read_source(path: &Path) -> FixedSource {
 }
 
 fn fixed_sources() -> BTreeMap<String, FixedSource> {
-    let lean = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("lean");
+    let lean = support::repo_root().join("lean");
     let mut sources = BTreeMap::new();
     sources.insert(
         "MetatheoryFull".into(),
@@ -522,7 +524,7 @@ impl Fixture {
         let launcher = std::env::var_os("VESPER_LEAN").unwrap_or_else(|| "lean".into());
         let prefix = execute(
             Command::new(launcher)
-                .current_dir(env!("CARGO_MANIFEST_DIR"))
+                .current_dir(support::repo_root())
                 .arg("--print-prefix"),
             30,
             started,
@@ -613,7 +615,7 @@ impl Fixture {
             "toolchain_prefix":self.prefix,"module":module,
             "output_root":output.root,"output_module":output_module});
         fs::write(&request_path, serde_json::to_vec(&request).unwrap()).unwrap();
-        let tool = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        let tool = support::repo_root()
             .join("tools/resource-model42/KernelSnapshot.lean")
             .canonicalize()
             .unwrap();
@@ -862,8 +864,9 @@ impl Fixture {
     fn audit(&self, module: &str, roots: &[String]) -> Captured {
         assert!(!roots.is_empty() && roots.len() <= 128);
         let mut command = Command::new(&self.vesper);
+        command.env_clear();
+        support::shipped_swaps(&mut command, &self.vesper);
         command
-            .env_clear()
             .current_dir(&self.root)
             .args(["proof-audit", module, "--root"])
             .arg(&self.root)
@@ -910,31 +913,9 @@ impl Fixture {
     }
 }
 
+/// The compiler under test, resolved before child environments are cleared.
 fn resolve_vesper() -> PathBuf {
-    let named = PathBuf::from(env!("CARGO_BIN_EXE_vesper"));
-    if named.is_absolute() || named.components().count() > 1 {
-        return named
-            .canonicalize()
-            .expect("actual Cargo/Bazel vesper binary");
-    }
-    // Bazel deliberately supplies a bare name and its launcher installs the
-    // real binary directory on PATH. Resolve it before isolating child envs.
-    for directory in std::env::split_paths(&std::env::var_os("PATH").expect("tool PATH")) {
-        let candidate = directory.join(&named);
-        if candidate.is_file() {
-            return candidate.canonicalize().unwrap();
-        }
-        if cfg!(windows) && named.extension().is_none() {
-            let candidate = directory.join(format!("{}.exe", named.to_str().unwrap()));
-            if candidate.is_file() {
-                return candidate.canonicalize().unwrap();
-            }
-        }
-    }
-    panic!(
-        "required actual vesper executable {} absent from PATH",
-        named.display()
-    );
+    support::vesper_path()
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
@@ -1041,8 +1022,7 @@ fn positive_audit(fixture: &Fixture, module: &str, roots: &[String]) -> Value {
 }
 
 fn control_fixtures(base: &Fixture) {
-    let directory =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tools/resource-model42/fixtures");
+    let directory = support::repo_root().join("tools/resource-model42/fixtures");
     for (module, roots, omissions) in [
         (
             "ResourceSnapshotTotal",
@@ -1148,8 +1128,7 @@ fn control_fixtures(base: &Fixture) {
 }
 
 fn proof_variant_controls(base: &Fixture) {
-    let directory =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tools/resource-model42/fixtures");
+    let directory = support::repo_root().join("tools/resource-model42/fixtures");
     for (module, import_order, source_suffix, canonical_suffix, forbidden) in [
         ("ResourceSnapshotAliasClean", ["A", "B"], "A", "B", None),
         (

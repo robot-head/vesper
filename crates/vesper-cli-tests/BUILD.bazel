@@ -6,6 +6,9 @@ load("//tools/bazel:defs.bzl", "vesper_crate")
 # `vesper-<tool>` binaries beside it, and start it in the repository root,
 # where they ran as root integration tests (`//:files`).
 vesper_crate(
+    # Lean models, the proof auditor and shared fixtures embedded by
+    # include_str! from the root package.
+    extra_integration_compile_data = ["//:cli_test_sources"],
     extra_test_data = [
         "//:files",
         # attestation_cli and publish_cli sign with the Loom trust fixtures;
@@ -17,4 +20,55 @@ vesper_crate(
         "//:vesper_shipped",
         "//:vesper_tools",
     ],
+    # Reservations include subprocess overhead; they do not enforce RSS limits.
+    test_tags = {
+        # The CLI audit subprocess permits Lean -M8192 and runs serially.
+        "test/proof_audit_cli": [
+            "resources:memory:9216",
+            "resources:cpu:1",
+        ],
+        "test/format_proof_cli": [
+            "resources:memory:9216",
+            "resources:cpu:1",
+        ],
+        # Measured peak: 2.3 GB anonymous memory. `lean_replay` marks the
+        # Lean/Logos suite run by "Native and acceptance scripts"
+        # (.aspect/lean-replay-scope.axl, docs/ci-platforms.md).
+        "test/resource_model42": [
+            "resources:memory:3072",
+            "resources:cpu:1",
+            "lean_replay",
+        ],
+    },
+    # Long, platform-neutral Lean replays run on Linux (BuildBuddy) only; see
+    # "Linux-only suites" in docs/ci-platforms.md.
+    test_target_compatible_with = {
+        # Six tests run serially, each kernel-replaying Lean's Std; on macOS
+        # runners the target needs well over 15 minutes.
+        "test/proof_audit_cli": select({
+            "@platforms//os:macos": ["@platforms//:incompatible"],
+            "//conditions:default": [],
+        }),
+        # Serial Lean kernel replays, 135-390 s each on macOS. They keep
+        # running on Windows (Cargo), which exercises their cfg(windows)
+        # process and executable-path code; macOS shares Linux's Unix paths.
+        "test/format_proof_cli": select({
+            "@platforms//os:macos": ["@platforms//:incompatible"],
+            "//conditions:default": [],
+        }),
+        # Full logical-model replay exceeds 300 s on the Linux executor.
+        # Linux and Windows retain every semantic/audit/control assertion;
+        # proof_audit_private still exercises portability on macOS too.
+        "test/resource_model42": select({
+            "@platforms//os:macos": ["@platforms//:incompatible"],
+            "//conditions:default": [],
+        }),
+    },
+    test_timeouts = {
+        # Actual formatter witnesses replay Lean serially; keep every case
+        # enabled while allowing the target 900 seconds on slower runners.
+        "test/format_proof_cli": "long",
+        # Fresh model compilation, 285 theorem roots and actual negative controls.
+        "test/resource_model42": "long",
+    },
 )

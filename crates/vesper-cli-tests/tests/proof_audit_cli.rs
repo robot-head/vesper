@@ -1,3 +1,5 @@
+mod support;
+
 use serde_json::Value;
 use std::{
     fs,
@@ -19,7 +21,7 @@ static SERIAL: Mutex<()> = Mutex::new(());
 /// proxy for its prefix from the repository root pins the binary instead.
 fn resolve_lean(lean: String) -> String {
     let Ok(output) = Command::new(&lean)
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .current_dir(support::repo_root())
         .arg("--print-prefix")
         .output()
     else {
@@ -87,7 +89,7 @@ impl Fixture {
     /// verdicts and not the timeout itself, pass the maximum unless a test
     /// sets its own `--timeout`.
     fn audit(&self, module: &str, theorem: &str, extra: &[&str]) -> Output {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_vesper"));
+        let mut command = support::vesper();
         command
             .args(["proof-audit", module, "--root"])
             .arg(&self.root)
@@ -132,7 +134,7 @@ fn success(output: &Output) -> Value {
 fn kernel_replays_actual_foundation_theorems_and_records_real_inputs() {
     let _serial = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
     let Some(f) = Fixture::new() else { return };
-    f.compile("Model", include_str!("../lean/Foundations.lean"));
+    f.compile("Model", include_str!("../../../lean/Foundations.lean"));
     let before = fs::read(f.root.join("Model.olean")).unwrap();
     let report = success(&f.audit(
         "Model",
@@ -357,10 +359,7 @@ fn invalid_names_options_and_missing_artifacts_fail_before_any_certificate() {
             "0",
         ],
     ] {
-        let output = Command::new(env!("CARGO_BIN_EXE_vesper"))
-            .args(&args)
-            .output()
-            .unwrap();
+        let output = support::vesper().args(&args).output().unwrap();
         assert!(!output.status.success(), "{args:?}");
         assert!(output.stdout.is_empty());
     }
@@ -373,10 +372,7 @@ fn invalid_names_options_and_missing_artifacts_fail_before_any_certificate() {
     for index in 0..129 {
         args.extend(["--theorem".into(), format!("Example.theorem{index}")]);
     }
-    let output = Command::new(env!("CARGO_BIN_EXE_vesper"))
-        .args(args)
-        .output()
-        .unwrap();
+    let output = support::vesper().args(args).output().unwrap();
     assert!(!output.status.success());
     assert!(output.stdout.is_empty());
     assert!(String::from_utf8_lossy(&output.stderr).contains("at most 128"));
@@ -390,7 +386,7 @@ fn compiler_escape_axioms_cannot_be_whitelisted() {
         "Lean.trustCompiler",
         "Example.native._native.native_decide.ax_1_1",
     ] {
-        let output = Command::new(env!("CARGO_BIN_EXE_vesper"))
+        let output = support::vesper()
             .args([
                 "proof-audit",
                 "Model",
