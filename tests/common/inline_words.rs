@@ -629,8 +629,8 @@ impl<'w> Enc<'w> {
         if !f.external_captures.is_empty() {
             flags |= W_CAPTURES;
         }
-        // Element views borrow wherever they are spliced, so they never
-        // refuse (`ir_inline::view_scrutinees`).
+        // `ir_inline::inlinable`: element views stay borrows wherever
+        // they are spliced, so they do not count.
         let views = vesper::ir_inline::view_scrutinees(f);
         if vesper::fip::borrowed_scrutinees(f).iter().any(|v| {
             !views.contains(v)
