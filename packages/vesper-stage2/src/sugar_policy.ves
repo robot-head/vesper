@@ -861,7 +861,11 @@ fn arithmetic_policy(
     } else {
         let fact: Option[IntLit] = if unary {
             match left {
-                Option::Some(l) => Option::Some(IntLit { neg: !l.neg && l.mag != 0, mag: l.mag, hi: 0 }),
+                Option::Some(l) => Option::Some(IntLit {
+                    neg: !l.neg && l.mag != 0,
+                    mag: l.mag,
+                    hi: 0
+                }),
                 Option::None => Option::None,
             }
         } else {
