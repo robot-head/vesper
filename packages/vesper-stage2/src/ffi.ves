@@ -428,7 +428,9 @@ fn add_const_functions(inout cp: CollectedProgram, in f: Foreign) {
                 result: result,
                 effects: effects,
                 mod_idx: 0,
-                body: NO_BODY
+                body: NO_BODY,
+                inst: 0,
+                thunk: 0
             });
         }
     }
