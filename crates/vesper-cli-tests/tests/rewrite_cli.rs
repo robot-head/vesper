@@ -1,4 +1,6 @@
 //! Existing default-enabled optimizer versus --no-opt through the actual CLI.
+mod support;
+
 use serde_json::Value;
 use std::{
     fs,
@@ -9,15 +11,6 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
-
-fn binary() -> PathBuf {
-    let path = std::env::var_os("VESPER_REWRITE_WITNESS_BINARY")
-        .map(PathBuf::from)
-        .or_else(|| option_env!("CARGO_BIN_EXE_vesper").map(PathBuf::from))
-        .expect("actual vesper or VESPER_REWRITE_WITNESS_BINARY required");
-    let exe = PathBuf::from(format!("{}.exe", path.display()));
-    if exe.is_file() { exe } else { path }
-}
 
 fn output(command: &mut Command) -> Output {
     let mut child = command
@@ -91,12 +84,7 @@ impl Fixture {
         }
     }
     fn command(&self, mode: &str, options: &[&str]) -> Output {
-        let result = output(
-            Command::new(binary())
-                .arg(mode)
-                .arg(&self.path)
-                .args(options),
-        );
+        let result = output(support::vesper().arg(mode).arg(&self.path).args(options));
         assert_eq!(fs::read(&self.path).unwrap(), self.source.as_bytes());
         result
     }

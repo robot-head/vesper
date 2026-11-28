@@ -1,3 +1,5 @@
+mod support;
+
 use serde_json::{Value, json};
 use std::{
     fs,
@@ -15,7 +17,7 @@ fn temp(ext: &str) -> std::path::PathBuf {
     ))
 }
 fn cli() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_vesper"))
+    support::vesper()
 }
 #[test]
 fn examples_execute() {

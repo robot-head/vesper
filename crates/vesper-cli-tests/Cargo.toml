@@ -1,0 +1,13 @@
+[package]
+name = "vesper-cli-tests"
+# `vesper --version` prints the compiler's package version, which the CLI
+# tests compare with this one (tests/cli.rs).
+version = "0.1.0"
+edition = "2024"
+description = "The vesper CLI tests, run against $VESPER (default: the shipped compiler), outside the Rust compiler package (#1397, #2743)"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dev-dependencies]
+blake3 = "1.8"
+serde_json = { workspace = true }

@@ -1,6 +1,7 @@
+mod support;
+
 use std::{
     fs,
-    process::Command,
     sync::atomic::{AtomicU64, Ordering},
 };
 
@@ -51,7 +52,7 @@ fn maximum_length_output_names_allow_atomic_lockfile_and_interface_replacement()
     ] {
         assert_eq!(name.len(), 255);
         fs::write(dir.join(name), "previous output").unwrap();
-        let output = Command::new(env!("CARGO_BIN_EXE_vesper"))
+        let output = support::vesper()
             .current_dir(&dir)
             .args(args)
             .output()

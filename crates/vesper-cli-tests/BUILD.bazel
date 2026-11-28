@@ -1,0 +1,14 @@
+load("//tools/bazel:defs.bzl", "vesper_crate")
+
+# The CLI tests (#1397 retirement step R5, #2743), moved out of the root
+# package. They run the shipped compiler, `//:vesper_shipped`, which the
+# launcher puts on PATH as `vesper` (tests/support/mod.rs), with the
+# `vesper-<tool>` binaries beside it, and start it in the repository root,
+# where they ran as root integration tests (`//:files`).
+vesper_crate(
+    extra_test_data = ["//:files"],
+    extra_test_path_binaries = [
+        "//:vesper_shipped",
+        "//:vesper_tools",
+    ],
+)
