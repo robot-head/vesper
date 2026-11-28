@@ -1,8 +1,0 @@
-// A Unit main: the exit status is whatever the entry leaves in the
-// return register, as for the Rust compiler's executable, so only the
-// objects are compared.
-fn nothing() {}
-
-pub fn main() {
-    nothing()
-}
