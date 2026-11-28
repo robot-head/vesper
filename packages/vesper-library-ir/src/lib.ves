@@ -10,17 +10,20 @@
 // - widths.ves: `lower_bit_builtin_calls` and `refine_wide_tuples`.
 // - optimized: `ir_opt::optimize` through the native policy
 //   (@vesper/ir-opt-policy's screen, @vesper/ir-opt's memory forwarding),
-//   then tokens.ves (`ir::thread_tokens`); unoptimized: `fip_reuse_pass`.
+//   then reuse.ves (`fip_reuse_pass`) and tokens.ves (`ir::thread_tokens`);
+//   unoptimized: reuse.ves alone.
 // - optimized: the inliner under `Budget::for_program` (inline.ves, over
 //   @vesper/ir-inline), with the world's facts from facts.ves.
-// - `fip::elaborate_non_fip_drops`.
+// - drops.ves: `fip::elaborate_non_fip_drops`.
 // - optimized: bounds hoisting (@vesper/bounds-hoist's `hoist_program`).
 //
 // `@fip` reuse and drop elaboration do nothing in a world without the
-// `Box` prelude; a world with it is refused until they are ported. The
-// output is a status word (`Status`), then, when it is `Status::Ok`, the program as
-// `put_program` words (names, types, program section), which
-// tests/common/ir_words.rs `decode_program` reads back.
+// `Box` prelude. In a world with it, reuse.ves computes the `@fip` facts
+// for @vesper/ir-opt's reuse pass and drops.ves elaborates the drops. The
+// output is a status word
+// (`Status`, or drops.ves `DropStatus`), then, when it is `Status::Ok`,
+// the program as `put_program` words (names, types, program section),
+// which tests/common/ir_words.rs `decode_program` reads back.
 
 use @vesper/check-data::input::{Ctx, Reader, put_world, read_ctx};
 use @vesper/place-ir::{
@@ -34,6 +37,9 @@ use @vesper/bounds-hoist::pass::{hoist_program};
 use self::widths::{lower_bit_builtin_calls, refine_wide_tuples};
 use self::tokens::{thread_tokens};
 use self::inline::{inline_input_words, inline_program};
+use self::drops::{DropStatus, elaborate_drops};
+use self::reuse::{fip_reuse, reuse_facts};
+use self::facts::{fact_names};
 
 // `LibraryStage`, in order: each stage includes the ones before it.
 pub enum Stage: _ {
@@ -48,8 +54,8 @@ pub enum Stage: _ {
 // state evidence, egglog would refuse a block, a `slot_key` error.
 pub enum Status: _ {
     Ok = 0,
-    // The world has the `Box` prelude: `@fip` reuse and drop elaboration
-    // are not ported yet.
+    // Retired: a world with the `Box` prelude (`@fip` reuse and drop
+    // elaboration are ported).
     FipActive = 16,
     // The inliner's output does not list the program's functions in order.
     InlineMismatch = 17,
@@ -125,41 +131,61 @@ fn run(inout c: Ctx, inout p: Program, in calls: Calls, stage: u64, optimize: bo
     lower_bit_builtin_calls(inout p, in c.names, c.world.k, in calls);
     refine_wide_tuples(inout p, inout c.types, c.world.k);
     if stage >= Stage::Optimize {
-        if c.world.box_active {
-            return Status::FipActive;
+        let st = optimize_step(inout c, inout p, in calls, optimize);
+        if st != Status::Ok {
+            return st;
         }
-        if optimize {
-            let cls = type_classes(in c.types, in c.names);
-            let (keep, kept) = screen_program(in p, in c.names, in cls);
-            if kept != 0 {
-                let n = p.insts.len();
-                let mut orig: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](n);
-                for k in 0..n {
-                    orig.push(k);
-                }
-                let (st, forwarded) = forward_program_kept(
-                    inout p,
-                    in c.names,
-                    in cls,
-                    inout orig,
-                    in keep
-                );
-                if st != OPT_OK {
-                    return widen_u64(st);
-                }
+        if optimize && stage >= Stage::Inline {
+            if !inline_program(inout p, inout c.names, inout c.types, in c.world, in calls) {
+                return Status::InlineMismatch;
             }
             thread_tokens(inout p, in c.names);
-            if stage >= Stage::Inline {
-                if !inline_program(inout p, inout c.names, inout c.types, in c.world, in calls) {
-                    return Status::InlineMismatch;
-                }
-                thread_tokens(inout p, in c.names);
+        }
+    }
+    if stage >= Stage::Drops && c.world.box_active {
+        let fx = fact_names(inout c.names);
+        let st = elaborate_drops(inout p, inout c.names, inout c.types, in c.world, in calls, fx);
+        if st != DropStatus::Ok {
+            return st;
+        }
+    }
+    if stage >= Stage::Hoist && optimize {
+        let versioned = hoist_program(inout p, inout c);
+    }
+    Status::Ok
+}
+
+// `ir_opt::optimize` through the native policy then `thread_tokens`
+// (optimized), or `fip_reuse_pass` alone: the status.
+fn optimize_step(inout c: Ctx, inout p: Program, in calls: Calls, optimize: bool) -> u64 {
+    let cls = type_classes(in c.types, in c.names);
+    let facts = reuse_facts(in p, inout c.names, inout c.types, in c.world, in calls);
+    let n = p.insts.len();
+    let mut orig: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](n);
+    for k in 0..n {
+        orig.push(k);
+    }
+    if optimize {
+        let (keep, kept) = screen_program(in p, in c.names, in cls);
+        if kept != 0 {
+            let (st, forwarded) = forward_program_kept(
+                inout p,
+                in c.names,
+                in cls,
+                inout orig,
+                in keep
+            );
+            if st != OPT_OK {
+                return widen_u64(st);
             }
         }
     }
-    // `elaborate_non_fip_drops` adds nothing without the `Box` prelude.
-    if stage >= Stage::Hoist && optimize {
-        let versioned = hoist_program(inout p, inout c);
+    let st = fip_reuse(inout p, inout c.names, in cls, in facts, in orig);
+    if st != Status::Ok {
+        return st;
+    }
+    if optimize {
+        thread_tokens(inout p, in c.names);
     }
     Status::Ok
 }
@@ -178,30 +204,9 @@ pub fn library_inline_input_text(in input: Str) -> ChunkSeq[u64] {
     let calls = read_calls(inout r, in b, in c);
     lower_bit_builtin_calls(inout p, in c.names, c.world.k, in calls);
     refine_wide_tuples(inout p, inout c.types, c.world.k);
-    if c.world.box_active {
-        return refused(Status::FipActive);
-    }
-    if optimize {
-        let cls = type_classes(in c.types, in c.names);
-        let (keep, kept) = screen_program(in p, in c.names, in cls);
-        if kept != 0 {
-            let n = p.insts.len();
-            let mut orig: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](n);
-            for k in 0..n {
-                orig.push(k);
-            }
-            let (st, forwarded) = forward_program_kept(
-                inout p,
-                in c.names,
-                in cls,
-                inout orig,
-                in keep
-            );
-            if st != OPT_OK {
-                return refused(widen_u64(st));
-            }
-        }
-        thread_tokens(inout p, in c.names);
+    let st = optimize_step(inout c, inout p, in calls, optimize);
+    if st != Status::Ok {
+        return refused(st);
     }
     let mut out = refused(Status::Ok);
     let words = inline_input_words(inout p, inout c.names, inout c.types, in c.world, in calls);
