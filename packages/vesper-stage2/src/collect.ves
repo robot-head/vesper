@@ -51,9 +51,6 @@ pub copy struct ParamInfo {
     name: u32,
     pass: u8,
     ty: u32,
-    // The parameter's source span (0 0 for synthesized parameters).
-    start: u32,
-    end: u32,
 }
 
 pub copy struct EffOpInfo {
@@ -431,7 +428,7 @@ fn collect_fn_into(
                 sub_pty
             }
         };
-        params.push(ParamInfo { name: pname, pass: p.pass, ty: pty, start: p.start, end: p.end });
+        params.push(ParamInfo { name: pname, pass: p.pass, ty: pty });
     }
     let raw_res = lower_ty(
         in ast,
@@ -484,13 +481,7 @@ fn add_ffi_op(
             Option::Some(v) => v,
             Option::None => 0,
         };
-        params.push(ParamInfo {
-            name: names.intern(in "a".as_bytes()),
-            pass: pass,
-            ty: ty,
-            start: 0,
-            end: 0
-        });
+        params.push(ParamInfo { name: names.intern(in "a".as_bytes()), pass: pass, ty: ty });
     }
     eff_ops.push(EffOpInfo {
         name: names.intern(in op_name.as_bytes()),
@@ -648,9 +639,7 @@ fn add_vcl_ops(
             params.push(ParamInfo {
                 name: names.intern(in "a".as_bytes()),
                 pass: u8_at(in passes, pi),
-                ty: u32_at(in tys, pi),
-                start: 0,
-                end: 0
+                ty: u32_at(in tys, pi)
             });
         }
         eff_ops.push(EffOpInfo {
@@ -906,13 +895,7 @@ pub fn collect_program(in mods: ChunkSeq[AssembledModule]) -> CollectedProgram {
                                     inout cache,
                                     inout tmp
                                 );
-                                params.push(ParamInfo {
-                                    name: pname,
-                                    pass: p.pass,
-                                    ty: pty,
-                                    start: p.start,
-                                    end: p.end
-                                });
+                                params.push(ParamInfo { name: pname, pass: p.pass, ty: pty });
                             }
                             let ores = lower_ty(
                                 in m.ast,
@@ -1161,9 +1144,7 @@ pub fn collect_program(in mods: ChunkSeq[AssembledModule]) -> CollectedProgram {
         params.push(ParamInfo {
             name: names.intern(in "e".as_bytes()),
             pass: 2,
-            ty: types.named0(e_gen),
-            start: 0,
-            end: 0
+            ty: types.named0(e_gen)
         });
         let eoa = n32(eff_ops.len());
         eff_ops.push(EffOpInfo {

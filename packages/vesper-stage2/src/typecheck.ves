@@ -17,7 +17,6 @@ use @vesper/check-data::world::{
 use @vesper/place-ir::codes::{Lit, Pat};
 use @vesper/wasm-backend::ir::{CallRow, Pair};
 use @vesper/place-ir-lower::ast::{Ast, Ef, Eop, Ex, FnR, Hd, Pm, Pt};
-use self::facts::{loop_breaks, loop_never_breaks, loop_plain_breaks};
 use self::sugar_policy::{
     POLICY_BAD_METADATA, POLICY_OK, PolicyFailure, PolicyInputs, PolicySpan, caller_supplied,
     captured_value_fault, contains, diagnose_policy_fault, effect_failure, empty_inputs,
@@ -88,9 +87,7 @@ fn tc_new(sink names: Names, sink types: Types, sink world: World, sink sugar: P
     let empty_p = ChunkSeq::new[u8]();
     let mut t = types;
     let infer_ty = t.mk_with(TyKind::Infer, 0, 0, in empty, in empty_p, 0, 0, 0);
-    // Rust's `Type::unit()`, `Tuple([])`: the type of a block without a tail,
-    // an `if` without `else`, assignments, loops and unit-valued methods.
-    let unit_ty = t.unit;
+    let unit_ty = t.named0(world.k.unit);
     let bool_ty = t.named0(world.k.bool_);
     let i64_ty = t.named0(world.k.i64_);
     let u64_ty = t.named0(world.k.u64_);
@@ -1246,20 +1243,10 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
         let dt = default_type(inout tc.types, expected);
         for i in 0..e.n {
             let sub = u64_at(in a.xs, wrapping_add(e.a, i));
-            // Rust's goal for an element: the expected element type only
-            // when it is a float or a tuple; integer literals settle later.
             let exp_i = if tc.types.kind(dt) == TyKind::Tuple && i < tc.types.arity(dt) {
-                let et = tc.types.arg(dt, i);
-                let float = tc.types.kind(et) == TyKind::Named
-                    && (tc.types.name(et) == tc.world.k.f64_
-                        || tc.types.name(et) == tc.world.k.f32_);
-                if float || tc.types.kind(et) == TyKind::Tuple {
-                    et
-                } else {
-                    tc.infer_ty
-                }
+                tc.types.arg(dt, i)
             } else {
-                tc.infer_ty
+                expected
             };
             elems.push(check_owned_expr(inout tc, in a, sub, exp_i));
         }
@@ -1300,19 +1287,7 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
         if ft == NONE32 { expected } else { ft }
     } else if e.kind == X_INDEX {
         let bt = check_expr(inout tc, in a, e.a, tc.infer_ty);
-        // A sequence or slice element index is a `u64` (`seq_index`).
-        let seq_base = tc.types.kind(bt) == TyKind::Named
-            && (tc.types.name(bt) == tc.world.k.chunk_seq || tc.types.name(bt) == tc.world.k.slice);
-        let range_index = match a.exs.try_get(e.b) {
-            Option::Some(ix) => ix.kind == X_RANGE,
-            Option::None => false,
-        };
-        let index_goal = if seq_base || range_index {
-            tc.u64_ty
-        } else {
-            tc.infer_ty
-        };
-        let _it = check_expr(inout tc, in a, e.b, index_goal);
+        let _it = check_expr(inout tc, in a, e.b, tc.infer_ty);
         let is_rng = match a.exs.try_get(e.b) {
             Option::Some(ix) => ix.kind == X_RANGE
                 || (ix.kind == X_BINARY && tc.names.spells(n32(ix.a), in "..".as_bytes())),
@@ -1375,17 +1350,6 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
             } else {
                 rt
             }
-        } else if is_op(in tc, op, in "<<") || is_op(in tc, op, in ">>") {
-            // A shift amount takes no kind from its operand: an unsuffixed
-            // literal amount is a `u32` (`shift_amount`).
-            let lt = check_expr(inout tc, in a, e.b, expected);
-            let amount_goal = if is_int_lit_expr(in tc, in a, e.c) {
-                tc.types.named0(tc.world.k.u32_)
-            } else {
-                tc.infer_ty
-            };
-            let _rt = check_expr(inout tc, in a, e.c, amount_goal);
-            lt
         } else {
             let lt = check_expr(inout tc, in a, e.b, expected);
             let rt = check_expr(inout tc, in a, e.c, lt);
@@ -1435,14 +1399,7 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
             }
             let vt = check_owned_expr(inout tc, in a, val, exp);
             if is_let != 0 {
-                // An annotated binding has its annotation's type
-                // (`refine_annotation`), whatever its literals settled to.
-                let bound = if tc.types.kind(exp) == TyKind::Infer {
-                    vt
-                } else {
-                    exp
-                };
-                bind_pat(inout tc, in a, pt, bound);
+                bind_pat(inout tc, in a, pt, vt);
             }
         }
         let tail_ty = if e.b == NONE64 {
@@ -1490,16 +1447,7 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
         res
     } else if e.kind == X_LOOP {
         let _bt = check_expr(inout tc, in a, e.a, tc.unit_ty);
-        // Rust's loop type: the join of its `break` values, `Unit` for
-        // plain `break`s and `Never` without any.
-        let breaks = loop_breaks(in a, e.a);
-        if breaks == loop_never_breaks() {
-            tc.never_ty
-        } else if breaks == loop_plain_breaks() {
-            tc.unit_ty
-        } else {
-            expected
-        }
+        expected
     } else if e.kind == X_FOR {
         let it = check_expr(inout tc, in a, e.b, tc.infer_ty);
         push_scope(inout tc);
@@ -1508,23 +1456,9 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
         pop_scope(inout tc);
         tc.unit_ty
     } else if e.kind == X_RANGE {
-        // A `for` range of unsuffixed literals defaults like a literal; an
-        // unsuffixed start takes the end's kind (`for_expr`). Elsewhere a
-        // range bounds a view, in `u64`.
-        let integer_goal = tc.types.kind(expected) == TyKind::Named
-            && tc.world.k.is_integer(tc.types.name(expected));
-        if !integer_goal
-            && is_int_lit_expr(in tc, in a, e.a)
-            && !is_int_lit_expr(in tc, in a, e.b)
-        {
-            let en = check_expr(inout tc, in a, e.b, tc.infer_ty);
-            check_expr(inout tc, in a, e.a, en)
-        } else {
-            let goal = if integer_goal { expected } else { tc.infer_ty };
-            let st = check_expr(inout tc, in a, e.a, goal);
-            let _en = check_expr(inout tc, in a, e.b, st);
-            st
-        }
+        let st = check_expr(inout tc, in a, e.a, tc.u64_ty);
+        let _en = check_expr(inout tc, in a, e.b, st);
+        st
     } else if e.kind == X_BREAK {
         if e.a != NONE64 {
             let _vt = check_owned_expr(inout tc, in a, e.a, tc.infer_ty);
@@ -1902,12 +1836,6 @@ fn check_expr(inout tc: Tc, in a: Ast, eid: u64, expected: u32) -> u32 {
                                 let u8t = tc.types.named0(tc.world.k.u8_);
                                 let opt_nm = tc.names.intern(in "Option".as_bytes());
                                 named1(inout tc, opt_nm, u8t)
-                            } else if is_op(in tc, mname, in "get")
-                                && (tname == tc.world.k.chunk_seq || tname == tc.world.k.slice)
-                                && tc.types.arity(bt) > 0
-                            {
-                                // A sequence or slice element (`SeqOp::Get`).
-                                tc.types.arg(bt, 0)
                             } else if (is_op(in tc, mname, in "try_get")
                                 || is_op(in tc, mname, in "try_get_mut")
                                 || is_op(in tc, mname, in "get")
@@ -2035,7 +1963,7 @@ fn sort_spans_slice(inout s: Slice[SpanRow]) eff [Fail[RuntimeError]] {
     }
 }
 
-pub fn sort_spans(inout spans: ChunkSeq[SpanRow]) {
+fn sort_spans(inout spans: ChunkSeq[SpanRow]) {
     handle Fail[RuntimeError] in {
         sort_spans_slice(inout spans.as_slice_mut());
     } with {
