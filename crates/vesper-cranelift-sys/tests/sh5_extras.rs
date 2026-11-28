@@ -19,7 +19,7 @@ use vesper_cranelift_sys::cranelift_object::{ObjectBuilder, ObjectModule};
 use vesper_cranelift_sys::*;
 
 /// The handle counters are process-wide: every test that makes handles
-/// runs alone, so `vesper_reaches_every_new_call` can count leaks.
+/// runs alone, so the tests that count handles see only their own.
 fn serial() -> std::sync::MutexGuard<'static, ()> {
     SERIAL.lock().unwrap_or_else(|e| e.into_inner())
 }
@@ -672,20 +672,23 @@ fn every_relocation_kind_round_trips_its_code() {
 // ---------------------------------------------------------------------------
 // The calls from Vesper (tests/fixtures/sh5_extras.ves).
 
+/// Built by Stage 2 and run with the Cranelift component
+/// (tests/support/stage2.rs).
 #[test]
 fn vesper_reaches_every_new_call() {
-    let Some(target) = host_target() else {
-        eprintln!("no .vsys target for this host");
+    let Some(stage2) = stage2::stage2() else {
         return;
     };
-    let _serial = serial();
-    let before = live_handles();
-    let checked = checked_with(&fixture("sh5_extras.ves"), target);
-    assert_eq!(jit(&checked, "typed_words"), 1, "typed entity words");
-    let id = jit(&checked, "extras");
+    let extras = fixture("sh5_extras.ves");
+    assert_eq!(
+        stage2.answer(&extras, "typed_words"),
+        1,
+        "typed entity words"
+    );
+    let id = stage2.answer(&extras, "extras");
     assert_ne!(id, 0, "the fixture failed");
-    assert_eq!(live_handles(), before, "the fixture leaked a handle");
-    let shim = take_published(id).expect("published object");
+    let shim = stage2.published(id).expect("published object");
+    let _serial = serial();
     let (_, rust) = rust_readback(TRIPLES[0], true);
     assert_eq!(shim, rust, "the Vesper-built object differs from Rust's");
 }

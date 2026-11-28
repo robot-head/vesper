@@ -2514,6 +2514,55 @@ fn prepare_sugar_graph(
     Option::Some(kept)
 }
 
+// For each package, whether it or a package it depends on (directly or
+// not) has a module that names `sugar`. A module of any other package can
+// neither declare a sugar nor import one, so the sugar pass need not parse
+// it: its surface tree would only use up the scratch heap, which the
+// self-built compiler cannot free piece by piece (#2666: @vesper/stage2's
+// own closure beside one package with a sugar outgrew the 4 GiB memory).
+fn packages_near_sugar(in pkgs: ChunkSeq[PkgNode], in mods: ChunkSeq[ModEntry]) -> ChunkSeq[bool] {
+    let mut near = ChunkSeq::new[bool]();
+    for _ in 0..pkgs.len() {
+        near.push(false);
+    }
+    for module in 0..mods.len() {
+        match mods.try_get(module) {
+            Option::Some(source) => {
+                if contains_word(in source.text.as_slice(), in "sugar") {
+                    near.try_set(source.pkg, true);
+                }
+            },
+            Option::None => {},
+        }
+    }
+    // A dependency graph of n packages settles within n rounds.
+    for _ in 0..pkgs.len() {
+        let mut changed = false;
+        for p in 0..pkgs.len() {
+            if near.try_get(p) == Option::Some(true) {
+                continue;
+            }
+            match pkgs.try_get(p) {
+                Option::Some(pkg) => {
+                    for d in 0..pkg.dep_indices.len() {
+                        let dep = pkg.dep_indices.try_get(d).unwrap_or(p);
+                        if near.try_get(dep) == Option::Some(true) {
+                            near.try_set(p, true);
+                            changed = true;
+                            break;
+                        }
+                    }
+                },
+                Option::None => {},
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    near
+}
+
 fn prepare_sugar_graph_in_scratch(
     in pkgs: ChunkSeq[PkgNode],
     inout files: ChunkSeq[FileEntry],
@@ -2531,6 +2580,7 @@ fn prepare_sugar_graph_in_scratch(
     let mut source_segments = ChunkSeq::new[BootstrapSourceSegment]();
     let mut sugar_policy_words = ChunkSeq::new[u64]();
     if possible_sugar {
+        let near_sugar = packages_near_sugar(in pkgs, in mods);
         for module in 0..mods.len() {
             let mut import_text = ChunkSeq::new[u8]();
             let mut has_surface_sugar = false;
@@ -2538,9 +2588,10 @@ fn prepare_sugar_graph_in_scratch(
             let mut calls_own_sugar = false;
             match mods.try_get(module) {
                 Option::Some(source) => {
-                    if contains_word(in source.text.as_slice(), in "sugar")
-                        || contains_word(in source.text.as_slice(), in "use")
-                        || contains_word(in source.text.as_slice(), in "Option")
+                    if near_sugar.try_get(source.pkg) == Option::Some(true)
+                        && (contains_word(in source.text.as_slice(), in "sugar")
+                            || contains_word(in source.text.as_slice(), in "use")
+                            || contains_word(in source.text.as_slice(), in "Option"))
                     {
                         match inspect_module_sugars(in source.text, false) {
                             Option::Some(surface) => {

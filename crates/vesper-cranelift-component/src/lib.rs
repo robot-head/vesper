@@ -13,7 +13,8 @@
 //! (see the `interface` module of `build.rs`), which generates the WIT and the export glue,
 //! and [`WIT`] is the text. Cranelift itself is the same crate at the same
 //! version as natively, so an object built through the component is the
-//! object the native shim builds (`tests/objects.rs`).
+//! object the native shim builds (crates/vesper-cranelift-sys checks the
+//! fixtures' objects against Rust-built ones).
 
 /// The generated WIT package text of `vesper:cranelift@0.1.0`.
 pub const WIT: &str = include_str!(concat!(env!("OUT_DIR"), "/vcl.wit"));

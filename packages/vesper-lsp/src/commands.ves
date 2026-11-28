@@ -1274,6 +1274,86 @@ fn note_row(
     Refusal::RfNone
 }
 
+// The gates the server loop runs (@vesper/lsp-server): the walk storage and
+// a scratch row, reused across frames.
+pub struct Gate {
+    w: Walk,
+    scratch: ChunkSeq[u8]
+}
+
+pub fn gate_new() -> Gate {
+    Gate {
+        w: Walk {
+            stack: ChunkSeq::new(),
+            depths: ChunkSeq::new(),
+            keys: Keys {
+                at: ChunkSeq::new(),
+                len: ChunkSeq::new(),
+                src: ChunkSeq::new(),
+                scratch: ChunkSeq::new()
+            },
+            order: ChunkSeq::new(),
+            merged: ChunkSeq::new(),
+            values: ChunkSeq::new()
+        },
+        scratch: ChunkSeq::new()
+    }
+}
+
+// `Session::request`'s gate (`validate_input`, then `route`) for a request
+// in session state `state` (0 uninitialized, 1 running, 2 shut down, 3
+// exited): `RfNone` when the session handles it.
+pub fn gate_request(
+    inout g: Gate,
+    state: u64,
+    in method: Slice[u8],
+    in doc: Doc,
+    in body: Slice[u8],
+    params: u64
+) -> Refusal {
+    if bad_method(in method) {
+        return Refusal::RfMethodLabel;
+    }
+    let r = validate_params(in doc, in body, inout g.w, params);
+    if refused(r) {
+        return r;
+    }
+    g.scratch.truncate(0);
+    let kind = CHECK_REQUEST | (state << STATE_SHIFT);
+    // The version only reaches the `initialize` result, which is discarded.
+    request_row(inout g.scratch, kind, in method, in doc, in body, params, in method[0..0])
+}
+
+// `Session::notification`'s gate (`validate_input`, then `note_route`).
+pub fn gate_note(
+    inout g: Gate,
+    state: u64,
+    in method: Slice[u8],
+    in doc: Doc,
+    in body: Slice[u8],
+    params: u64
+) -> Refusal {
+    if bad_method(in method) {
+        return Refusal::RfMethodLabel;
+    }
+    let r = validate_params(in doc, in body, inout g.w, params);
+    if refused(r) {
+        return r;
+    }
+    g.scratch.truncate(0);
+    let kind = CHECK_NOTE | (state << STATE_SHIFT);
+    note_row(inout g.scratch, kind, in method, in doc, in body, params)
+}
+
+// A refusal's JSON-RPC error code (negative).
+pub fn refusal_code(r: Refusal) -> i64 {
+    wrapping_sub(0, wrapping_i64(code_of(r)))
+}
+
+pub fn refusal_message(r: Refusal) -> Str {
+    message_of(r)
+}
+
 fn put(inout o: ChunkSeq[u8], in s: Str) {
     o.extend(in s.as_bytes());
 }

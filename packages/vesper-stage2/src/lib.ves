@@ -19,7 +19,9 @@ use @vesper/wasm-backend::{compile_with_facts, compile_with_facts_diag};
 use @vesper/wit-component::comp::encode as wit_encode;
 use @vesper/wit-component::wit::parse as parse_wit;
 use @vesper/wasm-backend::err::{WErr, format_werr, werr};
-use @vesper/wasm-backend::ir::{add_eff_decl, add_fn_sig, empty_facts, push_hop, set_expr_handler};
+use @vesper/wasm-backend::ir::{
+    CallRow, Pair, add_eff_decl, add_fn_sig, empty_facts, push_hop, set_expr_handler
+};
 use @vesper/place-ir::codes::{Op, Pat, PoolKind};
 use @vesper-std/env::{arg, arg_count, var};
 use @vesper-std/fs::{IoError, write_path};
@@ -31,6 +33,7 @@ use self::sugar_policy::{
     policy_inputs, resolve_rows
 };
 use self::typecheck::{typecheck_ast};
+use self::linear::{LinearCode, check_linear, write_linear_fault};
 
 const INVALID_SUGAR_POLICY: Str = "invalid sugar policy metadata";
 
@@ -293,6 +296,95 @@ fn move_front_to_perm(
     }
 }
 
+// A package lowered to @vesper/place-ir by Stage 2's front end, for the
+// native library build (bootstrap switch slice 3d of #2349): the lowering
+// state (context, IR AST, program) and the call instantiations the checker
+// found (`world.calls`).
+pub struct Lowered {
+    low: L,
+    call_rows: ChunkSeq[CallRow],
+    call_pairs: ChunkSeq[Pair],
+}
+
+/// `stage2_compile_dir`'s front end for the package at `root_dir`, every
+/// function included: load, assemble, collect, check and lower. `None`
+/// with the reason in `err` when a step fails. The Wasm-only element-view
+/// marks are not made.
+pub fn stage2_lower_dir(
+    in root_dir: Slice[u8],
+    inout err: ChunkSeq[u8]
+) -> Option[Lowered] eff [Ffi[StdFs]] {
+    let encoded = match load_package_graph_bytes(in root_dir) {
+        Option::Some(b) => b,
+        Option::None => {
+            err.extend(in "load_package_graph".as_bytes());
+            return Option::None;
+        },
+    };
+    let mut a = assembly_begin_bytes(in encoded.as_slice());
+    let mut mods = ChunkSeq::new[AssembledModule]();
+    loop {
+        match assemble_next_bytes(inout a, in encoded.as_slice()) {
+            Option::Some(m) => {
+                mods.push(sink m);
+            },
+            Option::None => break,
+        }
+    }
+    let mut policy_problem: Option[PolicyFailure] = Option::None;
+    let mut sugar = match policy_inputs(in a, in mods, inout policy_problem) {
+        Option::Some(sugar) => sugar,
+        Option::None => {
+            match policy_problem {
+                Option::Some(problem) => write_policy_diagnostic(problem, inout err),
+                Option::None => err.extend(in INVALID_SUGAR_POLICY.as_bytes()),
+            }
+            return Option::None;
+        },
+    };
+    let collected = collect_program(in mods);
+    let (ir_ast, names_seed, types_seed, world0) = build_ir_ast_for_entry(
+        sink collected,
+        in mods,
+        in ""
+    );
+    let mut names0 = names_seed;
+    let mut types0 = types_seed;
+    if !resolve_rows(inout sugar, inout a, inout names0, inout types0) {
+        err.extend(in INVALID_SUGAR_POLICY.as_bytes());
+        return Option::None;
+    }
+    let meta = assembly_metadata(sink a);
+    if meta.diagnostics.len() > 0 {
+        err.extend(in meta.diagnostics.as_slice());
+        return Option::None;
+    }
+    let (names, types, world, call_rows, call_pairs, bad_sugar) = typecheck_ast(
+        in ir_ast,
+        sink names0,
+        sink types0,
+        sink world0,
+        sink sugar
+    );
+    match bad_sugar {
+        Option::Some(problem) => {
+            write_policy_diagnostic(problem, inout err);
+            return Option::None;
+        },
+        Option::None => {},
+    }
+    let c = Ctx {
+        names: names,
+        types: types,
+        world: world,
+        tmap: ChunkSeq::new[u32](),
+        nmap: ChunkSeq::new[u32]()
+    };
+    let mut low = l_new(sink c, sink ir_ast);
+    lower_all(inout low);
+    Option::Some(Lowered { low: low, call_rows: call_rows, call_pairs: call_pairs })
+}
+
 /// Compile a Loom package from `root_dir` to a core Wasm module at `out_wasm`
 /// with no Rust compiler calls. Returns `(ok_flag_or_code, core_len_or_site)`.
 pub fn stage2_compile_dir(
@@ -431,6 +523,14 @@ fn stage2_compile_dir_impl(
         tmap: ChunkSeq::new[u32](),
         nmap: ChunkSeq::new[u32]()
     };
+    write_stage(want_syms, in out_wasm, in "linearity", inout stage_log);
+    let linear_fault = check_linear(in ir_ast, inout c);
+    if linear_fault.code != LinearCode::None {
+        let mut detail = ChunkSeq::new[u8]();
+        write_linear_fault(in c.names, linear_fault, inout detail);
+        write_err_header(in out_wasm, in "linearity", in detail.as_slice());
+        return (2, detail.len());
+    }
     let entry_sym = c.names.intern(in entry_name.as_bytes());
     let mut facts = empty_facts(entry_sym, 65535, 65536, 50000000);
     facts.calls = call_rows;
