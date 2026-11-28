@@ -2959,6 +2959,9 @@ pub const BODY_PARAM_SCALAR: u64 = 0;
 pub const BODY_PARAM_BOOL: u64 = 1;
 pub const BODY_PARAM_HANDLE: u64 = 2;
 pub const BODY_PARAM_SLICE: u64 = 3;
+// A NUL-terminated `malloc` copy of a byte slice; a NUL byte in it
+// refuses the call.
+pub const BODY_PARAM_CSTR: u64 = 4;
 pub const BODY_RESULT_UNIT: u64 = 0;
 pub const BODY_RESULT_SCALAR: u64 = 1;
 // A nullable handle: an `Option` of its struct.
@@ -3101,6 +3104,9 @@ pub fn body_call(inout state: S, eff_name: u32, op: u32, inout words: ChunkSeq[u
         } else if p.tag == P_SLICE {
             words.push(BODY_PARAM_SLICE);
             words.push(element_bytes(in state, lib, p));
+        } else if p.tag == P_CSTR {
+            words.push(BODY_PARAM_CSTR);
+            words.push(0);
         } else {
             plain = false;
         }

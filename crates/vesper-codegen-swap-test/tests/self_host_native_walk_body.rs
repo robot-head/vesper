@@ -2874,6 +2874,8 @@ const FFI_VSYS: &str = r#"sys library Probe (
     fn probe_words(nocapture in w: CSlice[u32], n: u64) -> ForeignVal[u32];
     callback Step(a: u64, b: u32) -> ForeignVal[u64];
     fn probe_step() -> ForeignVal[Option[Step]];
+    fn probe_name(nocapture in name: CStr) -> ForeignVal[u64];
+    fn probe_find(nocapture in name: CStr) -> ForeignVal[Option[Step]];
 }
 "#;
 
@@ -2938,8 +2940,22 @@ fn step_once(a: u64) -> u64 eff [Ffi[Probe]] {
         None => a,
     }
 }
+fn named(in s: Str) -> u64 eff [Ffi[Probe]] {
+    match Probe::probe_name(in s.as_bytes()) {
+        Result::Ok(n) => n,
+        Result::Err(_) => 0,
+    }
+}
+fn find_step(in s: Str) -> Option[Step] eff [Ffi[Probe]] {
+    match Probe::probe_find(in s.as_bytes()) {
+        Result::Ok(f) => f,
+        Result::Err(_) => Option::None,
+    }
+}
 fn main() -> u64 eff [Ffi[Probe]] {
     let _st = step_once(9);
+    let _nm = named(in \"name\");
+    let _fs = find_step(in \"step\");
     let mut v: ChunkSeq[u8] = ChunkSeq::new[u8]();
     v.push(1);
     fill(inout v.as_slice_mut());
@@ -3058,9 +3074,10 @@ fn vesper_bodies_with_foreign_calls_match() {
 /// scalars, narrow results and `bool`s), `use_ctx`, `peek` and `close`
 /// (handles lent `inout`, `in` and `sink`), `twice` (calls of an `Ffi`
 /// function), `blen`, `blen_text`, `words` and `fill` (slices) and
-/// `opened` (a nullable handle result) and `stepped` (a call through a
-/// C function pointer), at both optimizer settings.
-const MIN_FOREIGN_BODIES: u64 = 30;
+/// `opened` (a nullable handle result), `stepped` (a call through a C
+/// function pointer) and `named` and `find_step` (C string arguments, a
+/// refusable call's `Result`), at both optimizer settings.
+const MIN_FOREIGN_BODIES: u64 = 34;
 
 // #2654 slice 3: the `Option` results of `try_byte_at` and a slice's
 // `try_get`, kept as words or built in memory (`seq_option`).
