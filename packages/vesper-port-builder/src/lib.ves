@@ -1,0 +1,201 @@
+// @vesper/port-builder: `vesper build --lib` for the ports, as one program
+// that Stage 2 builds (bootstrap switch slice 3, lane E, #2666).
+//
+// Stage 2 compiles this package to a component, and `wac plug` composes it
+// with the Cranelift component (crates/vesper-cranelift-component), so the
+// pinned wasmtime CLI runs it with nothing else
+// (`//:vesper-port-builder.wasm`). crates/vesper-port-harness and
+// tools/bazel/vesper_port.bzl take it behind a flag and build a port with
+// the Rust compiler whenever it declines one of the three outputs.
+//
+//     port-builder <package> <library> <triple> <object> <interface>
+//         <binding> <status> [--rust-types <path>] [--request <file>]
+//
+// The interface JSON and the Rust binding come from @vesper/export-build
+// (slice 1). The object comes from @vesper/native-lib, whose request
+// Stage 2 does not build yet (slices 3b to 3d), so the object is declined
+// unless `--request` names a request file to build it from.
+//
+// The status file holds one line per output group, each a tag and its
+// decline reason (0 when the files were written):
+//
+//     export <reason of @vesper/export-build, DECLINE_*>
+//     object <OBJECT_*>
+//
+// The exit status is 0 unless an argument is missing or a file could not
+// be read or written.
+use @vesper/export-build::{DECLINE_NONE, export_files_dir};
+use @vesper/native-lib::library_object;
+use @vesper-std/env::{arg_bytes, arg_count};
+use @vesper-std/fs::{IoError, read_path, write_path};
+
+// The object was written.
+pub const OBJECT_BUILT: u64 = 0;
+// Stage 2 does not build @vesper/native-lib's request yet, and no
+// `--request` file was given.
+pub const OBJECT_NO_REQUEST: u64 = 1;
+// @vesper/native-lib answered with an error.
+pub const OBJECT_FAILED: u64 = 2;
+// The export outputs were declined, so the object was not attempted.
+pub const OBJECT_SKIPPED: u64 = 3;
+
+// The positional arguments, after the program name.
+const ARG_PACKAGE: u64 = 1;
+const ARG_LIBRARY: u64 = 2;
+const ARG_TRIPLE: u64 = 3;
+const ARG_OBJECT: u64 = 4;
+const ARG_INTERFACE: u64 = 5;
+const ARG_BINDING: u64 = 6;
+const ARG_STATUS: u64 = 7;
+const POSITIONAL_ARGS: u64 = 8;
+const FLAG_RUST_TYPES: Str = "--rust-types";
+const FLAG_REQUEST: Str = "--request";
+const TAG_EXPORT: Str = "export ";
+const TAG_OBJECT: Str = "object ";
+const NEWLINE: u8 = 10;
+
+// Exit statuses.
+const EXIT_OK: u64 = 0;
+const EXIT_USAGE: u64 = 2;
+const EXIT_IO: u64 = 1;
+
+// @vesper/native-lib's answer: a status word, then the object.
+const ANSWER_OK: u64 = 0;
+const WORD_BYTES: u64 = 8;
+
+// Decimal digits, from ASCII `0`.
+const DECIMAL_BASE: u64 = 10;
+const DIGIT_ZERO: u64 = 48;
+
+fn arg(i: u64) -> ChunkSeq[u8] eff [Ffi[StdEnv]] {
+    match arg_bytes(i) {
+        Option::Some(a) => a,
+        Option::None => ChunkSeq::new[u8](),
+    }
+}
+
+fn same(in a: Slice[u8], in b: Str) -> bool {
+    let b = b.as_bytes();
+    if a.len() != b.len() {
+        return false;
+    }
+    for i in 0..a.len() {
+        if a.try_get(i).unwrap_or(0) != b.try_get(i).unwrap_or(0) {
+            return false;
+        }
+    }
+    true
+}
+
+fn push_dec(inout out: ChunkSeq[u8], value: u64) {
+    if value >= DECIMAL_BASE {
+        push_dec(inout out, value / DECIMAL_BASE);
+    }
+    out.push(wrapping_u8(wrapping_add(value % DECIMAL_BASE, DIGIT_ZERO)));
+}
+
+fn status_line(inout out: ChunkSeq[u8], tag: Str, reason: u64) {
+    out.extend(in tag.as_bytes());
+    push_dec(inout out, reason);
+    out.push(NEWLINE);
+}
+
+// The object bytes of @vesper/native-lib's answer to `req`, if it built one.
+fn object_of(in req: Slice[u8]) -> Option[ChunkSeq[u8]] eff [Ffi[Cranelift]] {
+    let answer = library_object(in req);
+    let status = match answer.as_slice().try_read_u64_le(0) {
+        Option::Some(v) => v,
+        Option::None => {
+            return Option::None;
+        },
+    };
+    let len = match answer.as_slice().try_read_u64_le(WORD_BYTES) {
+        Option::Some(v) => v,
+        Option::None => {
+            return Option::None;
+        },
+    };
+    let start = wrapping_add(WORD_BYTES, WORD_BYTES);
+    let end = wrapping_add(start, len);
+    if status != ANSWER_OK || end < start || end > answer.len() {
+        return Option::None;
+    }
+    let mut object: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    object.extend(in answer[start..end]);
+    Option::Some(object)
+}
+
+pub fn main() -> u64 eff [Ffi[StdFs], Ffi[StdEnv], Ffi[Cranelift]] {
+    let n = arg_count();
+    if n < POSITIONAL_ARGS {
+        return EXIT_USAGE;
+    }
+    let root = arg(ARG_PACKAGE);
+    let library = arg(ARG_LIBRARY);
+    let triple = arg(ARG_TRIPLE);
+    let object = arg(ARG_OBJECT);
+    let interface = arg(ARG_INTERFACE);
+    let binding = arg(ARG_BINDING);
+    let status = arg(ARG_STATUS);
+    let mut has_types = false;
+    let mut types: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut has_request = false;
+    let mut request: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    // Each flag is followed by its value.
+    let mut value_next = false;
+    for i in POSITIONAL_ARGS..n {
+        if value_next {
+            value_next = false;
+            continue;
+        }
+        let flag = arg(i);
+        let value_at = wrapping_add(i, 1);
+        if value_at >= n {
+            return EXIT_USAGE;
+        }
+        if same(in flag.as_slice(), FLAG_RUST_TYPES) {
+            has_types = true;
+            types = arg(value_at);
+        } else if same(in flag.as_slice(), FLAG_REQUEST) {
+            has_request = true;
+            request = arg(value_at);
+        } else {
+            return EXIT_USAGE;
+        }
+        value_next = true;
+    }
+    let files = export_files_dir(
+        in root.as_slice(),
+        in library.as_slice(),
+        in triple.as_slice(),
+        has_types,
+        in types.as_slice()
+    );
+    let export_reason = widen_u64(files.declined);
+    let mut report: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    status_line(inout report, TAG_EXPORT, export_reason);
+    handle Fail[IoError] in {
+        let mut object_reason = OBJECT_SKIPPED;
+        if files.declined == DECLINE_NONE {
+            write_path(in interface.as_slice(), in files.interface.as_slice());
+            write_path(in binding.as_slice(), in files.binding.as_slice());
+            object_reason = OBJECT_NO_REQUEST;
+            if has_request {
+                let req = read_path(in request.as_slice());
+                object_reason = match object_of(in req.as_slice()) {
+                    Option::Some(bytes) => {
+                        write_path(in object.as_slice(), in bytes.as_slice());
+                        OBJECT_BUILT
+                    },
+                    Option::None => OBJECT_FAILED,
+                };
+            }
+        }
+        status_line(inout report, TAG_OBJECT, object_reason);
+        write_path(in status.as_slice(), in report.as_slice());
+        EXIT_OK
+    } with {
+        return v => v,
+        raise(_e, _k) => EXIT_IO,
+    }
+}

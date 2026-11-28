@@ -22,7 +22,6 @@ name = "vesper-sim"
 path = "src/bin/vesper-sim.rs"
 
 [dependencies]
-vesper = { path = "../.." }
 vesper-simpulse = { path = "../vesper-simpulse/seed", package = "vesper-simpulse-seed" }
 vesper-warp-umem = { path = "../vesper-warp-umem" }
 serde = { version = "1", features = ["derive"] }

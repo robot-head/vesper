@@ -1,7 +1,8 @@
 // The SH5 lane 2 shim calls from Vesper (#1325). Appended to
-// packages/vesper-cranelift/src/lib.ves by tests/sh5_extras.rs, which runs
-// the entries under the JIT with the shim bound and compares the published
-// object with the one its Rust lowering builds (`rust_readback`).
+// packages/vesper-cranelift/src/lib.ves by tests/sh5_extras.rs, which has
+// Stage 2 build the entries, runs them through the Cranelift component and
+// compares the published object with the one its Rust lowering builds
+// (`rust_readback`).
 
 // Typed entity words round-trip, and the invalid word reads as invalid.
 pub fn typed_words() -> u64 {
