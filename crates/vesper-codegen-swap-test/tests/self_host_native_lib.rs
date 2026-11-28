@@ -91,6 +91,7 @@ fn repo() -> std::path::PathBuf {
 struct Vesper {
     plan: check_harness::Entry,
     driver: WordFunction,
+    round_trip: WordFunction,
 }
 
 fn vesper() -> &'static Vesper {
@@ -105,6 +106,9 @@ fn vesper() -> &'static Vesper {
                 driver: checked
                     .word_function("library_object", &symbols, true)
                     .unwrap_or_else(|e| panic!("library_object: {e}")),
+                round_trip: checked
+                    .word_function("calls_round_trip", &symbols, true)
+                    .unwrap_or_else(|e| panic!("calls_round_trip: {e}")),
             }
         })
     })
@@ -122,7 +126,10 @@ const JIT_RUNTIME: vesper_port_abi::SeqRuntime = {
 };
 
 fn call(request: &[u8]) -> Vec<u8> {
-    let f = &vesper().driver;
+    call_entry(&vesper().driver, request)
+}
+
+fn call_entry(f: &WordFunction, request: &[u8]) -> Vec<u8> {
     let call = vesper_port_abi::HostCall::new().bytes(request);
     // SAFETY: the entry takes one `in Slice[u8]` (passed as the address of
     // its view) and returns a live sequence of the JIT runtime holding
@@ -600,6 +607,38 @@ fn vesper_library_objects_match_vesper_build_lib() {
         changed_by_passes >= MIN_CHANGED_BY_PASSES,
         "the CLIF passes changed only {changed_by_passes} library objects"
     );
+}
+
+/// The calls input read and written back by @vesper/codegen-calls'
+/// writers (slice 3d of #2349) builds the same objects as the
+/// Rust-encoded one, and writing it again changes nothing.
+#[test]
+fn rewritten_calls_inputs_build_the_same_objects() {
+    let mut failures = vec![];
+    for (library, source) in LIBRARIES {
+        let Ok((rust, mut record)) = rust_build_passes_on(library, source) else {
+            continue;
+        };
+        let Some(calls) = record.calls.take() else {
+            continue;
+        };
+        let written = call_entry(&vesper().round_trip, &calls);
+        if call_entry(&vesper().round_trip, &written) != written {
+            failures.push(format!(
+                "{library}: writing the calls input again changed it"
+            ));
+        }
+        record.calls = Some(written);
+        let answer = call(&request(&record));
+        let mut at = 0;
+        if read_word(&answer, &mut at) != BUILT {
+            let why = String::from_utf8_lossy(read_bytes(&answer, &mut at));
+            failures.push(format!("{library}: the driver failed: {why}"));
+        } else if read_bytes(&answer, &mut at) != rust {
+            failures.push(format!("{library}: objects differ"));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
 /// A request that does not read is an error answer, not a crash.
