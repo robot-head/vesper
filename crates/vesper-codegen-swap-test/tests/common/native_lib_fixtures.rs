@@ -147,4 +147,11 @@ pub fn keep(x: u32) -> u32 { x }",
 pub struct Buf { data: ChunkSeq[u8], n: u64 }
 pub fn count(inout b: Buf) -> u64 { 7 }",
     ),
+    (
+        "generic_callees",
+        "fn inner[T: mod copy](x: T) -> T { x }
+fn outer[T: mod copy](x: T, k: i64) -> T { if k > 0 { inner(x) } else { x } }
+pub fn chain(x: u64, k: i64) -> u64 { outer(x, k) }
+pub fn chain_f64(x: f64, k: i64) -> f64 { outer(x, k) }",
+    ),
 ];
