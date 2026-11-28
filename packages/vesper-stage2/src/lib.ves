@@ -29,9 +29,9 @@ use self::ast_lower::{build_ir_ast, build_ir_ast_for_entry};
 use self::collect::{collect_program};
 use self::facts::{record_failure_ops};
 use self::tables::{lower_table_reads};
-pub use self::ffi::{ForeignSource, foreign_source};
+pub use self::ffi::{ForeignSource, foreign_source, put_foreign_facts};
 use self::ffi::{
-    add_foreign_decls, close_foreign_ops, foreign_none, foreign_read, rename_foreign_calls
+    Foreign, add_foreign_decls, close_foreign_ops, foreign_none, foreign_read, rename_foreign_calls
 };
 use self::loader::{load_package_graph_bytes_with};
 use self::sugar_policy::{
@@ -365,6 +365,8 @@ pub struct Lowered {
     low: L,
     call_rows: ChunkSeq[CallRow],
     call_pairs: ChunkSeq[Pair],
+    // The `.vsys` imports, for the foreign-call facts (#2751).
+    foreign: Foreign,
 }
 
 /// `stage2_compile_dir`'s front end for the package at `root_dir`, for
@@ -488,7 +490,12 @@ pub fn stage2_lower_dir_with(
     };
     let mut low = l_new(sink c, sink ir_ast);
     lower_all(inout low);
-    Option::Some(Lowered { low: low, call_rows: call_rows, call_pairs: call_pairs })
+    Option::Some(Lowered {
+        low: low,
+        call_rows: call_rows,
+        call_pairs: call_pairs,
+        foreign: foreign
+    })
 }
 
 /// Compile a Loom package from `root_dir` to a core Wasm module at `out_wasm`

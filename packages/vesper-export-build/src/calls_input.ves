@@ -20,7 +20,7 @@ use @vesper/check-data::util::{u32_at, u64_at};
 use @vesper/check-data::world::{SpanRow, find_span, set_by_symbol};
 use @vesper/place-ir::{put_names, put_program_section, put_types};
 use @vesper/place-ir-lower::ast::{Ast, Ex};
-use @vesper/stage2::{Lowered, stage2_lower_dir_with};
+use @vesper/stage2::{Lowered, put_foreign_facts, stage2_lower_dir_with};
 use self::{foreign_sources};
 
 const NONE64: u64 = 18446744073709551615;
@@ -345,6 +345,9 @@ pub fn stage2_calls_input_with(
             det_float: false
         };
     }
+    // The foreign-call facts after the calls section, which
+    // @vesper/native-lib hands its body plans (#2751).
+    put_foreign_facts(in lw.low.program, in lw.low.ctx.names, inout lw.foreign, inout o);
     let mut bytes: ChunkSeq[u8] = ChunkSeq::new[u8]();
     bytes.resize(wrapping_mul(o.len(), WORD_BYTES), 0);
     for i in 0..o.len() {

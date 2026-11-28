@@ -9,7 +9,9 @@ use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 #[path = "../../port/codegen_scalar.rs"]
 mod codegen_scalar_binding;
 
-use super::{Registry, Swap, aggregate_facts, env_off, handler_facts, ir_words, on, open};
+use super::{
+    Registry, Swap, aggregate_facts, env_off, foreign_facts, handler_facts, ir_words, on, open,
+};
 
 /// `scalar` requests (scalars, locals, control flow) the Vesper module
 /// emitted, and left to Rust (unplanned, or declined by the hook).
@@ -197,12 +199,16 @@ fn body_plan(
     world: &vesper::check::World,
     program: &vesper::ir::Program,
     optimize: bool,
+    target: &str,
 ) -> Result<BodyPlan, String> {
     let mut bodies = std::collections::HashMap::new();
     if let Some((mut input, _)) = ir_words::program_input(world, program) {
         // What each handler's expression holds (#2657), before the
         // optimize path's enum facts.
         input.extend(handler_facts::facts(world, program));
+        // Each foreign (`.vsys`) operation it calls, from the library plan
+        // of the compile in progress (#2751).
+        input.extend(foreign_facts::facts(world, program, target));
         // The optimize path plans its graphs with small enums kept as
         // words (`aggregates::scalar_enums`, #2581): the facts let the
         // planner rewrite them as the walk does.
@@ -239,13 +245,14 @@ fn vesper_body(lent: &mut vesper::codegen_swap::Lent<'_, '_>) -> Result<bool, St
         return Ok(false);
     }
     let key = (program_key(lent.program), lent.optimize);
+    let target = lent.module.isa().triple().to_string();
     let words = vesper::swap_input::with(lent.world, BodyPlans::default, |plans| {
         let at = match plans.0.iter().position(|p| p.key == key) {
             Some(at) => at,
             None => {
                 plans
                     .0
-                    .push(body_plan(lent.world, lent.program, lent.optimize)?);
+                    .push(body_plan(lent.world, lent.program, lent.optimize, &target)?);
                 plans.0.len() - 1
             }
         };

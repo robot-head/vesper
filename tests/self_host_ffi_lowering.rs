@@ -768,6 +768,15 @@ fn rust_text(case: &Case, p: &Probes) -> String {
         };
         let t = t.as_deref().map_or_else(|| "-".to_owned(), q);
         line(&mut o, 0, &format!("plan {t} {} {} {answer}", q(e), q(op)));
+        // The form the native walk's body plans read (`body_call`).
+        let body = match plan_probe::body_probe(&imports, e, op) {
+            Some((symbol, words)) => {
+                let words: Vec<String> = words.iter().map(u64::to_string).collect();
+                format!("ok {} {}", q(&symbol), words.join(" "))
+            }
+            None => "-".to_owned(),
+        };
+        line(&mut o, 0, &format!("body {body}"));
     }
     for t in &p.targets {
         line(&mut o, 0, &format!("target {}", q(t)));
