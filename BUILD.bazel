@@ -1628,6 +1628,15 @@ vesper_package(
     visibility = ["//visibility:public"],
 )
 
+# @vesper/vsys, the `.vsys` parser the driver's package load reads
+# library names with (#2760).
+vesper_package(
+    name = "vsys_package",
+    srcs = glob(["packages/vesper-vsys/src/**/*.ves"]),
+    manifest = "packages/vesper-vsys/Loom.toml",
+    visibility = ["//visibility:public"],
+)
+
 # @vesper-std/cpu (audit gap G4), for vesper-aether's hardware RNG
 # (SH6 lane 14, #1409).
 vesper_package(

@@ -10,11 +10,8 @@
 // crosses from Rust.
 //
 // The manifest decode and validation and a dependency's version match are
-// @vesper/loom-calculus's (`loader`). A `.vsys` library's type names and
-// link mode are the one host step left (`VsysNames`,
-// crates/vesper-hybrid/src/driver/load.rs): @vesper/vsys does not check
-// everything `vesper_ffi::sys` does yet (the parser limits, linear handle
-// finalizers, drop import signatures). A graph with a
+// @vesper/loom-calculus's (`loader`), and a `.vsys` library's type names and
+// link mode @vesper/vsys's (`parse_library`, #2760). A graph with a
 // manifest error, an I/O error or anything else this reader does not
 // cover (an absolute dependency path, a UNC path, a name that is not
 // UTF-8, a source over the parser's byte budget) goes back to the Rust
@@ -28,10 +25,15 @@
 
 use @vesper-std/fs::{
     IoError, read_path, canonicalize_path, metadata_path, is_dir_path, is_file_path, kind_dir,
-    kind_file, kind_symlink
+    kind_file, kind_symlink, arch, arch_x86_64, arch_aarch64
 };
+use @vesper-std/env::{os, os_linux, os_macos, os_windows};
+use @vesper/front::lex::{max_source_bytes};
 use @vesper-std/fs::walk::{Entries, entry_count, entry_start, entry_end, entry_kind, list_dir_path};
 use @vesper/driver-commands::{join};
+use @vesper/driver::triple::{driver_target_os, is_wasi_target, vsys_target_abi};
+use @vesper/vsys::{parse_library};
+use @vesper/vsys::lexer::{VsysError};
 use @vesper/loom-calculus::loader::{
     LoadedManifest, DEP_WORDS, DEP_NAME_START, DEP_NAME_END, DEP_REQ_START, DEP_REQ_END,
     DEP_OPTIONAL, DEP_HAS_PATH, DEP_PATH_START, DEP_PATH_END, parse_manifest, version_matches
@@ -40,10 +42,6 @@ use @vesper/loom-calculus::loader::{
 // The host steps (`Step` of crates/vesper-hybrid/src/driver.rs).
 fn step_load_begin() -> u32 {
     71
-}
-
-fn step_vsys_names() -> u32 {
-    74
 }
 
 fn step_graph() -> u32 {
@@ -170,7 +168,10 @@ const WORD_MASK: u64 = 18446744073709551608;
 
 // `LoadBegin`'s answer when the driver reads the graph.
 const DRIVER_READS: i64 = 1;
-// `VsysNames`' answer for a library that links statically.
+// `vsys_names`' answers: the library does not parse, links dynamically,
+// links statically.
+const VSYS_NO_PARSE: i64 = 0;
+const VSYS_DYNAMIC: i64 = 1;
 const VSYS_STATIC: i64 = 2;
 // Whether a package has a static `.vsys` library: not asked yet, no, yes.
 const STATIC_UNKNOWN: u64 = 0;
@@ -703,38 +704,50 @@ fn inc(x: u64) -> u64 {
 
 // ---------------------------------------------------------- host steps
 
-// `VsysNames`: 0 when the library does not parse, 1, or 2 when it links
-// statically; its type names go to package `pkg`'s foreign types.
-fn vsys_names(
-    inout s: Session,
-    inout l: Ld,
-    t: u64,
-    in text: Slice[u8],
-    pkg: u64,
-    names: bool
-) -> i64 eff [Ffi[HybridDriver]] {
-    let mut arg: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    put(inout arg, t);
-    arg.extend(in text);
-    let r = HybridDriver::hd_step(inout s, step_vsys_names(), in arg.as_slice());
-    if r < 0 {
-        l.failed = true;
-        return 0;
+// `driver_host::vsys_names` of src/packages.rs, over @vesper/vsys (#2760):
+// 0 when the library `text` does not parse for target `t` (`@TARGET@` and
+// `@ABI@` filled in), 1, or 2 when it links statically; with `names`, its
+// type names go to package `pkg`'s foreign types.
+fn vsys_names(inout l: Ld, t: u64, in text: Slice[u8], pkg: u64, names: bool) -> i64 {
+    if t >= target_count() {
+        return VSYS_NO_PARSE;
     }
-    if r > 0 && names {
-        let out = host_text(in s);
-        let o = out.as_slice();
-        let mut at: u64 = 0;
-        let n = rd(in o, inout at);
-        for _k in 0..n {
-            let (a, e) = rd_str(in o, inout at);
-            let (ks, ke) = keep(inout l, in o[a..e]);
-            l.foreign.push(pkg);
-            l.foreign.push(ks);
-            l.foreign.push(ke);
+    let a = replace(in text, in "@TARGET@".as_bytes(), in target_triple(t).as_bytes());
+    let source = replace(
+        in a.as_slice(),
+        in "@ABI@".as_bytes(),
+        in vsys_target_abi(wrapping_u32(t)).as_bytes()
+    );
+    let mut declared: ChunkSeq[ChunkSeq[u8]] = ChunkSeq::new[ChunkSeq[u8]]();
+    let mut statically = false;
+    let parsed = handle Fail[VsysError] in {
+        let _ = parse_library(in source.as_slice(), inout declared, inout statically);
+        true
+    } with {
+        return v => v,
+        raise(_e, _) => false,
+    };
+    if !parsed {
+        return VSYS_NO_PARSE;
+    }
+    if names {
+        for k in 0..declared.len() {
+            match declared.try_get(k) {
+                Option::Some(n) => {
+                    let (ks, ke) = keep(inout l, in n.as_slice());
+                    l.foreign.push(pkg);
+                    l.foreign.push(ks);
+                    l.foreign.push(ke);
+                },
+                Option::None => (),
+            }
         }
     }
-    r
+    if statically {
+        VSYS_STATIC
+    } else {
+        VSYS_DYNAMIC
+    }
 }
 
 // ---------------------------------------------------------- the walk
@@ -1098,7 +1111,7 @@ fn package(
                 let a2 = w(in l.vt.as_slice(), wrapping_add(wrapping_mul(k2, VT), VT_TEXT));
                 let e2 = w(in l.vt.as_slice(), wrapping_add(wrapping_mul(k2, VT), VT_TEXT_END));
                 let tt = tx(in l, a2, e2);
-                let _ = vsys_names(inout s, inout l, t, in tt.as_slice(), index, true);
+                let _ = vsys_names(inout l, t, in tt.as_slice(), index, true);
                 if l.failed {
                     return 0;
                 }
@@ -1115,7 +1128,7 @@ fn package(
             }
             if l.host != no_target() {
                 let host = l.host;
-                let _ = vsys_names(inout s, inout l, host, in text.as_slice(), index, true);
+                let _ = vsys_names(inout l, host, in text.as_slice(), index, true);
                 if l.failed {
                     return 0;
                 }
@@ -1205,7 +1218,7 @@ fn package(
                     )
                 };
                 let vt2 = tx(in l, a, e);
-                let r = vsys_names(inout s, inout l, t, in vt2.as_slice(), index, false);
+                let r = vsys_names(inout l, t, in vt2.as_slice(), index, false);
                 if l.failed {
                     return 0;
                 }
@@ -1620,28 +1633,81 @@ fn graph_arg(in l: Ld, in input: Slice[u8]) -> ChunkSeq[u8] {
 // (`Graph`): its assembler input for `assembled_words`. `Option::None`
 // when the Rust loader loads the graph: the session's `LoadPackage` then
 // reads it as before.
+// The host's `std::env::consts::OS` among the `.vsys` targets' OSes, or "".
+fn host_os_name() -> Str {
+    let host = os();
+    if host == os_linux() {
+        "linux"
+    } else if host == os_macos() {
+        "macos"
+    } else if host == os_windows() {
+        "windows"
+    } else {
+        ""
+    }
+}
+
+// The host's architecture among the `.vsys` targets' architectures, or "".
+fn host_arch_name() -> Str {
+    let a = arch();
+    if a == arch_x86_64() {
+        "x86_64"
+    } else if a == arch_aarch64() {
+        "aarch64"
+    } else {
+        ""
+    }
+}
+
+// The source-directory OS of a build for `target` (the host without `has_target`,
+// @vesper/driver's `driver_target_os`), or `None` on a host whose OS is
+// none of the `.vsys` targets'.
+fn source_os(has_target: bool, in target: Slice[u8]) -> Option[ChunkSeq[u8]] {
+    let os_name = driver_target_os(has_target, in target, in host_os_name().as_bytes());
+    if os_name.len() == 0 {
+        Option::None
+    } else {
+        Option::Some(os_name)
+    }
+}
+
+// `driver_host::host_target`: the host's index in the `.vsys` targets
+// (`vsys_target(None)`), which a plain `.vsys` path's type names are read
+// for, or `no_target()`.
+fn host_vsys_target() -> u64 {
+    for t in 0..target_count() {
+        if eq(in target_os(t).as_bytes(), in host_os_name().as_bytes())
+            && eq(in target_arch(t).as_bytes(), in host_arch_name().as_bytes())
+        {
+            return t;
+        }
+    }
+    no_target()
+}
+
+// Reads the package graph at `input` for a build for `target` (the host
+// without `has_target`): the assembler's input, or `None` when the Rust loader
+// reads it instead.
 pub fn read_graph(
     inout s: Session,
     in input: Slice[u8],
+    has_target: bool,
+    in target: Slice[u8],
     windows: bool
 ) -> Option[ChunkSeq[u8]] eff [Ffi[StdFs], Ffi[HybridDriver]] {
+    let os_bytes = match source_os(has_target, in target) {
+        Option::Some(v) => v,
+        Option::None => return Option::None,
+    };
+    let wasi = is_wasi_target(has_target, in target);
     if HybridDriver::hd_step(inout s, step_load_begin(), in "".as_bytes()) != DRIVER_READS {
         return Option::None;
     }
-    let begin = host_text(in s);
-    let bs = begin.as_slice();
-    let mut at: u64 = 0;
-    let wasi = rd(in bs, inout at) != 0;
-    let host = rd(in bs, inout at);
-    let max_src = rd(in bs, inout at);
-    let (os_s, os_e) = rd_str(in bs, inout at);
-    let mut os: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    os.extend(in bs[os_s..os_e]);
     let mut l = Ld {
         wasi: wasi,
-        host: host,
-        max_src: max_src,
-        os: os,
+        host: host_vsys_target(),
+        max_src: max_source_bytes(),
+        os: os_bytes,
         windows: windows,
         failed: false,
         t: ChunkSeq::new[u8](),

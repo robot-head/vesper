@@ -147,3 +147,126 @@ fn vsys_matches_rust_across_repo_and_errors() {
         );
     }
 }
+
+/// The token swaps of [`vsys_accepts_what_rust_accepts_under_mutation`]:
+/// each one turns a declaration into a near miss Rust may reject (a linear
+/// handle losing its finalizer, a drop import with the wrong signature, a
+/// C string beside a consumed handle).
+const SWAPS: [(&str, &str); 12] = [
+    ("affine", "linear"),
+    ("linear", "affine"),
+    ("sink ", "in "),
+    ("nocapture in s: CStr", "sink s: CStr"),
+    ("ForeignVal[Unit]", "ForeignVal[i32]"),
+    ("ForeignVal[i32]", "ForeignVal[Unit]"),
+    ("static", "dynamic"),
+    ("dynamic", "static"),
+    (": u32", ": usize"),
+    ("nocapture ", ""),
+    (" drop ", " "),
+    ("callback ", "fn "),
+];
+
+/// The `.vsys` names Rust's driver host read (`packages::driver_host`
+/// before #2760): the link mode, then the extern and callback types, wire
+/// structs and enums, as `run_vsys_names` prints them.
+fn rust_names(lib: &sys::LibraryDescriptor) -> String {
+    let mut out = String::from(if lib.link().mode() == sys::LinkMode::Static {
+        "s"
+    } else {
+        "d"
+    });
+    let names = lib
+        .extern_types()
+        .iter()
+        .map(|t| t.name())
+        .chain(lib.wire_structs().iter().map(|w| w.name()))
+        .chain(lib.enums().iter().map(|e| e.name()));
+    for n in names {
+        out.push_str(n);
+        out.push('\n');
+    }
+    out
+}
+
+/// Whether Rust and Vesper agree on `src`: both reject it, or both accept
+/// it with the same canonical bytes and names.
+fn agree(check: &Entry, names: &Entry, src: &str) -> Result<bool, String> {
+    let rust = sys::parse(src, Limits::default());
+    let vesper = unpack_bytes(&check.words(src.as_bytes()));
+    match (rust, vesper.first()) {
+        (Ok(lib), Some(&0)) if vesper[1..] == *lib.canonical_bytes() => {
+            let v = String::from_utf8(unpack_bytes(&names.words(src.as_bytes()))).unwrap();
+            let r = rust_names(&lib);
+            if v == r {
+                Ok(true)
+            } else {
+                Err(format!("names differ: vesper {v:?}, rust {r:?}"))
+            }
+        }
+        (Ok(_), Some(&0)) => Err("canonical bytes differ".into()),
+        (Ok(_), _) => Err("Rust accepted, Vesper rejected".into()),
+        (Err(_), Some(&1)) => Ok(false),
+        (Err(e), _) => Err(format!("Rust rejected ({e}), Vesper accepted")),
+    }
+}
+
+/// Near misses of every repository `.vsys` file (each line left out, each
+/// token swap of [`SWAPS`] at each place it occurs): the driver's package
+/// load reads a library's names with `@vesper/vsys` (#2760), so it must
+/// reject exactly what `vesper_ffi::sys::parse` rejects.
+#[test]
+fn vsys_accepts_what_rust_accepts_under_mutation() {
+    let package = Package::load("packages/vesper-vsys");
+    let check = package.entry("run_vsys_check", true);
+    let names = package.entry("run_vsys_names", true);
+    let mut files = vec![];
+    for dir in ["packages", "crates", "tests"] {
+        walk_vsys(Path::new(dir), &mut files);
+    }
+    files.sort();
+    let mut cases = 0usize;
+    let mut rejected = 0usize;
+    let mut diffs = vec![];
+    for path in &files {
+        let src = fill_placeholders(&std::fs::read_to_string(path).unwrap(), TARGETS[0]);
+        let lines: Vec<&str> = src.lines().collect();
+        let mut mutants = vec![];
+        for skip in 0..lines.len() {
+            let kept: Vec<&str> = lines
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| *i != skip)
+                .map(|(_, l)| *l)
+                .collect();
+            mutants.push(kept.join("\n"));
+        }
+        for (from, to) in SWAPS {
+            for (at, _) in src.match_indices(from) {
+                mutants.push(format!("{}{to}{}", &src[..at], &src[at + from.len()..]));
+            }
+        }
+        for m in &mutants {
+            cases += 1;
+            match agree(&check, &names, m) {
+                Ok(true) => {}
+                Ok(false) => rejected += 1,
+                Err(why) => {
+                    eprintln!("DIFF {}: {why}", path.display());
+                    diffs.push(format!("{}: {why}\n{m}", path.display()))
+                }
+            }
+        }
+    }
+    eprintln!(
+        "{cases} near misses, {rejected} rejected by both, {} diffs",
+        diffs.len()
+    );
+    assert!(cases > 1000, "expected > 1000 near misses, got {cases}");
+    assert!(
+        diffs.is_empty(),
+        "{} diffs; first:\n{}",
+        diffs.len(),
+        diffs[0]
+    );
+}

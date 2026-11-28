@@ -3099,63 +3099,6 @@ impl Renamer<'_> {
     }
 }
 
-/// The Rust pieces the Vesper driver's package loader still calls (#1986
-/// slice 2): it reads and decodes the package graph itself
-/// (modules/driver/src/load.ves) and asks for its settings (`LoadBegin`) and
-/// the `.vsys` type names (`VsysNames`) here.
-pub mod driver_host {
-    use super::*;
-
-    /// `read_for_target`'s source-directory OS and whether the build is the
-    /// WASI component's.
-    pub fn target_os(target: Option<&str>) -> (&'static str, bool) {
-        let wasi = target == Some(crate::wasm_backend::TARGET);
-        let os = if wasi {
-            "wasip2"
-        } else if let Some(triple) = target {
-            VSYS_TARGETS
-                .iter()
-                .find(|v| v.triple == triple)
-                .map_or(std::env::consts::OS, |v| v.os)
-        } else {
-            std::env::consts::OS
-        };
-        (os, wasi)
-    }
-
-    /// The index in [`VSYS_TARGETS`] of the host, which a plain `.vsys`
-    /// path's type names are read for.
-    pub fn host_target() -> Option<usize> {
-        let (triple, _) = vsys_target(None).ok()?;
-        VSYS_TARGETS.iter().position(|t| t.triple == triple)
-    }
-
-    /// The parser's byte budget: `Loading::assembly_input` leaves a graph
-    /// with a larger source to the Rust loader.
-    pub fn max_source_bytes() -> usize {
-        crate::parser::ParseLimits::default().max_source_bytes
-    }
-
-    /// The `.vsys` library `text` for target `VSYS_TARGETS[target]`
-    /// (`@TARGET@` and `@ABI@` filled in): whether it links statically and
-    /// the type names it declares (extern types, wire structs, enums, as
-    /// [`PackageVsys::type_names`] lists them), or `None` when it does not
-    /// parse.
-    pub fn vsys_names(target: usize, text: &str) -> Option<(bool, Vec<String>)> {
-        let t = VSYS_TARGETS.get(target)?;
-        let source = text.replace("@TARGET@", t.triple).replace("@ABI@", t.abi);
-        let d = vesper_ffi::sys::parse(&source, vesper_ffi::sys::Limits::default()).ok()?;
-        let names = d
-            .extern_types()
-            .iter()
-            .map(|t| t.name().to_owned())
-            .chain(d.wire_structs().iter().map(|w| w.name().to_owned()))
-            .chain(d.enums().iter().map(|e| e.name().to_owned()))
-            .collect();
-        Some((d.link().mode() == vesper_ffi::sys::LinkMode::Static, names))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
