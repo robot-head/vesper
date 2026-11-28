@@ -17,7 +17,7 @@
 // (`DECLINE_FEATURES`).
 use @vesper/check-data::input::{put_world};
 use @vesper/check-data::util::{u32_at, u64_at};
-use @vesper/check-data::world::{SpanRow, set_by_symbol};
+use @vesper/check-data::world::{SpanRow, find_span, set_by_symbol};
 use @vesper/place-ir::{put_names, put_program_section, put_types};
 use @vesper/place-ir-lower::ast::{Ast, Ex};
 use @vesper/stage2::{Lowered, stage2_lower_dir};
@@ -90,6 +90,9 @@ pub struct CallsInput {
     // the front end's error, when `declined` is `CALLS_FRONT_END`
     err: ChunkSeq[u8],
     bytes: ChunkSeq[u8],
+    // whether a function's row names `DetFloat` (`needs_nan_canonicalization`:
+    // the ISA then canonicalizes NaNs)
+    det_float: bool,
 }
 
 fn row_kind(kind: u8) -> u64 {
@@ -251,18 +254,25 @@ fn put_expr(in a: Ast, id: u64, inout rows: ChunkSeq[u64]) -> bool {
     true
 }
 
-// The calls input of the package at `root_dir`: its library task over
-// `roots` (symbols named one per line), optimized when `optimize`.
+// The calls input of the package at `root_dir` for native target OS `os`:
+// its library task over `roots` (symbols named one per line), optimized
+// when `optimize`.
 pub fn stage2_calls_input(
     in root_dir: Slice[u8],
+    in os: Slice[u8],
     in roots: Slice[u8],
     optimize: bool
 ) -> CallsInput eff [Ffi[StdFs]] {
     let mut err: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    let mut lw = match stage2_lower_dir(in root_dir, inout err) {
+    let mut lw = match stage2_lower_dir(in root_dir, in os, inout err) {
         Option::Some(lw) => lw,
         Option::None => {
-            return CallsInput { declined: CALLS_FRONT_END, err: err, bytes: ChunkSeq::new[u8]() };
+            return CallsInput {
+                declined: CALLS_FRONT_END,
+                err: err,
+                bytes: ChunkSeq::new[u8](),
+                det_float: false
+            };
         },
     };
     let mut o: ChunkSeq[u64] = ChunkSeq::new[u64]();
@@ -279,8 +289,14 @@ pub fn stage2_calls_input(
         }
     }
     if root_syms.len() == 0 {
-        return CallsInput { declined: CALLS_NO_ROOT, err: err, bytes: ChunkSeq::new[u8]() };
+        return CallsInput {
+            declined: CALLS_NO_ROOT,
+            err: err,
+            bytes: ChunkSeq::new[u8](),
+            det_float: false
+        };
     }
+    let det_float = names_det_float(in lw);
     let effect_types = effect_types(inout lw);
     drop_callee_types(inout lw);
     put_names(inout o, in lw.low.ctx.names);
@@ -288,14 +304,19 @@ pub fn stage2_calls_input(
     put_world(in lw.low.ctx.world, inout o);
     put_program_section(in lw.low.program, inout o);
     if !put_section(in lw, in effect_types, in root_syms, optimize, inout o) {
-        return CallsInput { declined: CALLS_FEATURES, err: err, bytes: ChunkSeq::new[u8]() };
+        return CallsInput {
+            declined: CALLS_FEATURES,
+            err: err,
+            bytes: ChunkSeq::new[u8](),
+            det_float: false
+        };
     }
     let mut bytes: ChunkSeq[u8] = ChunkSeq::new[u8]();
     bytes.resize(wrapping_mul(o.len(), WORD_BYTES), 0);
     for i in 0..o.len() {
         let ok = bytes.try_write_u64_le(wrapping_mul(i, WORD_BYTES), u64_at(in o, i));
     }
-    CallsInput { declined: CALLS_OK, err: err, bytes: bytes }
+    CallsInput { declined: CALLS_OK, err: err, bytes: bytes, det_float: det_float }
 }
 
 const NEWLINE: u8 = 10;
@@ -403,6 +424,32 @@ fn put_section(
     true
 }
 
+// `needs_nan_canonicalization`: whether some function's row (closures
+// and handlers are functions of their own here) names `DetFloat`.
+fn names_det_float(in lw: Lowered) -> bool {
+    let det_float = lw.low.ctx.names.lookup(in DET_FLOAT.as_bytes());
+    if det_float == NO_NAME {
+        return false;
+    }
+    for fi in 0..lw.low.ast.fns.len() {
+        let effects = match lw.low.ast.fns.try_get(fi) {
+            Option::Some(f) => f.effects,
+            Option::None => continue,
+        };
+        let row = lw.low.ctx.types.row(effects);
+        for i in 0..widen_u64(row.n) {
+            if lw.low.ctx.types.effect_at(wrapping_add(widen_u64(row.a), i)).name == det_float {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+const DET_FLOAT: Str = "DetFloat";
+// `Names::lookup` of a name never interned.
+const NO_NAME: u32 = 4294967295;
+
 // Stage 2's function rows hold their effects as a row of the type table,
 // where the encoder writes a Row type: the Row type of each function's
 // row (by IR AST function), also put in the program header of the
@@ -449,8 +496,13 @@ const PARAM_TYPE_SPAN: u64 = 3;
 // reads a typed callee as a function value: the spans of direct callee
 // names are dropped from the expression types.
 fn drop_callee_types(inout lw: Lowered) {
-    let mut drop0: ChunkSeq[u64] = ChunkSeq::new[u64]();
-    let mut drop1: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    // The checker's expression types are sorted by span (`find_span`), so
+    // each callee's row is found by a binary search, not a scan of them
+    // all: Stage 2's self-built heap frees nothing, and a scan per callee
+    // allocates more than its 4 GiB on a port.
+    let n = lw.low.ctx.world.expr_types.len();
+    let mut drop: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut any = false;
     for i in 0..lw.low.ast.exs.len() {
         let e = lw.low.ast.ex(i);
         if e.kind != X_CALL {
@@ -458,28 +510,27 @@ fn drop_callee_types(inout lw: Lowered) {
         }
         let callee = lw.low.ast.ex(e.a);
         if callee.kind == X_NAME && u32_at(in lw.low.ast.fn_by_key, callee.a) != 0 {
-            drop0.push(callee.s0);
-            drop1.push(callee.s1);
-        }
-    }
-    if drop0.len() == 0 {
-        return;
-    }
-    let mut kept: ChunkSeq[SpanRow] = ChunkSeq::new[SpanRow]();
-    for i in 0..lw.low.ctx.world.expr_types.len() {
-        let row = match lw.low.ctx.world.expr_types.try_get(i) {
-            Option::Some(r) => r,
-            Option::None => continue,
-        };
-        let mut dropped = false;
-        for j in 0..drop0.len() {
-            if u64_at(in drop0, j) == row.start && u64_at(in drop1, j) == row.end {
-                dropped = true;
-                break;
+            let at = find_span(in lw.low.ctx.world.expr_types, callee.s0, callee.s1);
+            if at < n {
+                if !any {
+                    drop.resize(n, 0);
+                    any = true;
+                }
+                let ok = drop.try_set(at, 1);
             }
         }
-        if !dropped {
-            kept.push(row);
+    }
+    if !any {
+        return;
+    }
+    let mut kept: ChunkSeq[SpanRow] = ChunkSeq::with_capacity[SpanRow](n);
+    for i in 0..n {
+        if drop.try_get(i).unwrap_or(0) != 0 {
+            continue;
+        }
+        match lw.low.ctx.world.expr_types.try_get(i) {
+            Option::Some(r) => kept.push(r),
+            Option::None => {},
         }
     }
     lw.low.ctx.world.expr_types = kept;
