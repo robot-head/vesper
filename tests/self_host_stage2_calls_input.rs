@@ -81,10 +81,10 @@ const DECLINES: &[&str] = &[
 /// The functions Stage 2 must lower as Rust does today. The rest differ
 /// where Stage 2's checker records less than Rust's: overflow and partial
 /// operations (`fallible`) and the unit type of statements.
-const MIN_SAME_FUNCTIONS: usize = 47;
+const MIN_SAME_FUNCTIONS: usize = 51;
 
 /// The port functions Stage 2 must lower as Rust does today.
-const MIN_SAME_PORT_FUNCTIONS: usize = 18914;
+const MIN_SAME_PORT_FUNCTIONS: usize = 18919;
 
 /// Set to print the Rust and Stage 2 bodies of each function that differs.
 const SHOW_DIFFS: &str = "VESPER_STAGE2_CALLS_DIFFS";
@@ -312,8 +312,12 @@ fn take(x: u64) -> u64 { x }
 pub fn pick(t: u64) -> u64 { let c = if t == 1 { 0 } else if t == 2 { 1 } else { stop() }; take(c) }
 pub fn pick2(t: u64) -> u64 { let c = if t == 1 { 0 } else { stop() }; take(c) }
 pub fn pick3(t: u64) -> u64 { let c = if t == 1 { 0 } else { 1 }; take(c) }
-pub fn done(t: u64) -> Result[Unit, u64] { if t == 0 { return Result::Ok(()); } Result::Err(t) }",
-        &["bounds", "done", "pick", "pick2", "pick3"],
+pub fn done(t: u64) -> Result[Unit, u64] { if t == 0 { return Result::Ok(()); } Result::Err(t) }
+const REGS: u64 = 4;
+pub fn count(k: u64) -> u64 { let mut r = 0; loop { if r == REGS { break; } r = wrapping_add(r, 1); } k }
+pub fn count2(k: u64) -> u64 { let mut r = 0; loop { if r == k { break; } r = wrapping_add(r, 1); } k }
+pub fn first(k: u64) -> u64 { let mut j: u64 = 0; loop { if j >= k { break 0; } j = wrapping_add(j, 1); } }",
+        &["bounds", "count", "count2", "done", "first", "pick", "pick2", "pick3"],
     ),
     (
         "floats",
