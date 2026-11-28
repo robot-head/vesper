@@ -335,7 +335,7 @@ def _test_policy(ctx: TaskContext) -> int:
         "": ["README.md", "docs/design.md", "website/index.html"],
         "flux_faults": ["crates/vesper-flux/src/cluster.rs", "crates/vesper-simpulse/src/lib.rs"],
         "proof": [
-            "lean/NewProof.lean", "tests/format_proof_cli.rs", "src/audit_commands.rs",
+            "lean/NewProof.lean", "crates/vesper-cli-tests/tests/format_proof_cli.rs", "src/audit_commands.rs",
             "src/replay_commands.rs", "crates/vesper-lean-syntax/src/lib.rs", "crates/vesper-fmt/src/lib.rs",
             "src/kernel_snapshot.rs", "crates/vesper-oracles/src/bin/logos42/process.rs",
             "crates/vesper-oracles/src/bin/arithmetic_oracle42.rs",

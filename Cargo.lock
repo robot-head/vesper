@@ -5808,11 +5808,13 @@ version = "0.1.0"
 dependencies = [
  "blake3",
  "libc",
+ "serde",
  "serde_json",
  "vesper-bench-seed",
  "vesper-chrono",
  "vesper-ffi",
  "vesper-highlight-seed",
+ "vesper-lean-syntax-seed",
  "vesper-loom-calculus-seed",
  "vesper-loom-cas-seed",
  "vesper-semver-seed",

@@ -81,12 +81,18 @@ pub fn vesper() -> Command {
 pub fn command(path: &Path) -> Command {
     let mut command = Command::new(path);
     command.current_dir(repo_root());
-    if path.file_stem().is_some_and(|stem| stem == CARGO_HYBRID)
-        && env::var_os(SWAPS_VARIABLE).is_none()
-    {
-        command.env(SWAPS_VARIABLE, SHIPPED_SWAPS);
-    }
+    shipped_swaps(&mut command, path);
     command
+}
+
+/// Names the swap set for a hybrid at `path` started under its Cargo name:
+/// the caller's `VESPER_HYBRID_SWAPS`, else the shipped set. Tests that clear
+/// a command's environment call it again afterwards.
+pub fn shipped_swaps(command: &mut Command, path: &Path) {
+    if path.file_stem().is_some_and(|stem| stem == CARGO_HYBRID) {
+        let set = env::var_os(SWAPS_VARIABLE).unwrap_or_else(|| SHIPPED_SWAPS.into());
+        command.env(SWAPS_VARIABLE, set);
+    }
 }
 
 /// `<target>/<profile>/vesper-hybrid`: the nearest directory above this
