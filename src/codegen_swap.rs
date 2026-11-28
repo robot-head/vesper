@@ -80,7 +80,9 @@ use crate::ir::{Op, Program};
 use cranelift_codegen::ir;
 use cranelift_frontend::FunctionBuilder;
 use cranelift_module::Module;
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
+use std::collections::{BTreeMap, HashMap};
+use std::rc::Rc;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -453,12 +455,19 @@ pub fn hook(family: Family) -> Option<Hook> {
 
 /// The [`body::FUNCTION`] request of `function`: whether the `body` hook
 /// emitted its body (`false` when no hook is in effect or it declined).
+///
+/// A generic function's instance (#2715) is lent as its own program: the
+/// instance's graph with every type substituted, named by
+/// `verified_codegen::mono::instance_name`, beside the graphs of its
+/// direct callees. The hook plans it as it plans any concrete function.
+#[allow(clippy::too_many_arguments)]
 pub fn body_request(
     builder: &mut FunctionBuilder<'_>,
     module: &mut dyn Module,
     world: &World,
     program: &Program,
     function: &str,
+    generics: &BTreeMap<String, Type>,
     args: &[u64],
 ) -> Result<bool, String> {
     if !ACTIVE.load(Ordering::Acquire) {
@@ -466,6 +475,18 @@ pub fn body_request(
     }
     let Some(hook) = installed().body else {
         return Ok(false);
+    };
+    let instance = if generics.is_empty() {
+        None
+    } else {
+        match instance_program(program, function, generics) {
+            Some(instance) => Some(instance),
+            None => return Ok(false),
+        }
+    };
+    let (program, function) = match &instance {
+        Some((p, name)) => (&**p, name.as_str()),
+        None => (program, function),
     };
     let mut results = Vec::new();
     hook(&mut Lent {
@@ -483,6 +504,69 @@ pub fn body_request(
         results: &mut results,
         jit: JIT.with(Cell::get),
         optimize: OPTIMIZE.with(Cell::get),
+    })
+}
+
+thread_local! {
+    /// The generic instances lent to the `body` hook (#2715), for the
+    /// program they come from: each kept while that program is emitted,
+    /// so a hook that caches plans by a program's address sees one
+    /// address per instance.
+    static INSTANCES: RefCell<(ProgramKey, HashMap<String, Instance>)> =
+        RefCell::new(((0, 0, 0), HashMap::new()));
+}
+
+/// A generic instance lent as its own program, and its name.
+type Instance = (Rc<Program>, String);
+
+/// Identifies a program for [`INSTANCES`]: its address, function count and
+/// instruction count (a later compile may reuse the address).
+type ProgramKey = (usize, usize, usize);
+
+/// Function `function` of `program` instantiated at `generics`, with its
+/// direct callees, and the instance's name (see [`body_request`]).
+fn instance_program(
+    program: &Program,
+    function: &str,
+    generics: &BTreeMap<String, Type>,
+) -> Option<Instance> {
+    let instructions = program
+        .functions
+        .values()
+        .flat_map(|f| &f.blocks)
+        .map(|b| b.instructions.len())
+        .sum();
+    let key = (
+        std::ptr::from_ref(program) as usize,
+        program.functions.len(),
+        instructions,
+    );
+    let name = crate::verified_codegen::mono::instance_name(function, generics);
+    INSTANCES.with(|cell| {
+        let mut cache = cell.borrow_mut();
+        if cache.0 != key {
+            *cache = (key, HashMap::new());
+        }
+        if let Some(found) = cache.1.get(&name) {
+            return Some(found.clone());
+        }
+        let source = program.functions.get(function)?;
+        let mut graph = crate::verified_codegen::mono::instantiate(source, name.clone(), generics);
+        // The bounds name the type parameters the instance substituted
+        // away (native lowering never reads them).
+        graph.bounds.clear();
+        let mut functions = BTreeMap::new();
+        for i in graph.blocks.iter().flat_map(|b| &b.instructions) {
+            if let Op::Call { callee, .. } = &i.op
+                && let Some(f) = program.functions.get(callee)
+            {
+                functions.insert(callee.clone(), f.clone());
+            }
+        }
+        functions.insert(name.clone(), graph);
+        let found = (Rc::new(Program { functions }), name.clone());
+        cache.1.insert(name, found.clone());
+        Some(found)
     })
 }
 

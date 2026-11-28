@@ -4178,7 +4178,9 @@ impl<M: Module> Codegen<'_, '_, M> {
         let plain = result_ok
             && self.denorm.is_empty()
             && self.session.is_none()
-            && self.generic_vars.is_empty()
+            // A generic instance (#2715) is lent with its types
+            // substituted; one bound to function values is not.
+            && self.generic_vars.keys().all(|k| !k.starts_with(FN_ARG))
             && !self.in_fip_fn
             && self.trace_fail.is_none()
             && self.caller_slot.is_none()
@@ -4330,6 +4332,7 @@ impl<M: Module> Codegen<'_, '_, M> {
             self.world,
             self.program,
             name,
+            &self.generic_vars,
             &args,
         )
     }
