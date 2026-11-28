@@ -355,6 +355,9 @@ copy struct Ops {
     seq_str_as_bytes: u32,
     seq_slice_len: u32,
     seq_slice_get: u32,
+    seq_last: u32,
+    option_some: u32,
+    option_none: u32,
 }
 
 fn mark(inout table: ChunkSeq[u32], symbol: u32, flag: u32) {
@@ -518,6 +521,9 @@ fn ops_new(inout names: Names, inout tables: Tables) -> Ops {
         seq_str_as_bytes: intern(inout names, in "Str(AsBytes)"),
         seq_slice_len: intern(inout names, in "SliceLen"),
         seq_slice_get: intern(inout names, in "SliceGet"),
+        seq_last: intern(inout names, in "Last"),
+        option_some: intern(inout names, in "Some"),
+        option_none: intern(inout names, in "None"),
         amp: intern(inout names, in "&"),
         pipe: intern(inout names, in "|"),
         caret: intern(inout names, in "^"),

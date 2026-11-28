@@ -1,0 +1,13 @@
+[package]
+name = "@vesper/lsp-server"
+version = "0.1.0"
+edition = "2026"
+# The `vesper lsp` loop (#1828 part 15): it computes over the client stream
+# and calls the `LspEngine` import, the checked-document engine seam that
+# the Rust session serves until the checker runs in Vesper.
+capability_ceiling = ["Fail", "Alloc", "Ffi[LspEngine]"]
+vsys = ["engine-@OS@.vsys"]
+
+[dependencies]
+"@vesper/lsp" = { version = "^0.1", path = "../vesper-lsp" }
+"@vesper/serde" = { version = "^0.1", path = "../../crates/vesper-serde/vesper" }

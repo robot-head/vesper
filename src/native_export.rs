@@ -1287,6 +1287,14 @@ pub fn object(
     m.finish().emit().map_err(|e| e.to_string())
 }
 
+/// The program the walk defines a library build's instances from (the
+/// whole [`library_program`] of the first lowering): the graphs whose fip
+/// side tables `native::BodyGate::graph` reads (#2661).
+pub fn library_walk_program(world: &World, optimize: bool) -> Result<crate::ir::Program, String> {
+    let mut program = crate::ir_swap::lower(world);
+    library_program(world, &mut program, optimize, LibraryStage::Hoist)?;
+    Ok(program)
+}
 fn compile_exports<M: Module>(
     m: &mut M,
     world: &World,

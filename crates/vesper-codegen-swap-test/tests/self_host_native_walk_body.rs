@@ -2227,6 +2227,201 @@ fn vesper_string_and_slice_bodies_match() {
     });
 }
 
+/// A slice's `last` (#2653), whose `Option` the optimize path keeps as
+/// its tag and payload words (`aggregates::scalar_enums`, `seq_option`),
+/// on `u8`, `u32` and `i64` elements and an empty slice. Unoptimized the
+/// `Option` is built in memory and matched there, which stays with the
+/// walk.
+const SLICE_LAST: &str = "
+fn last_or(in xs: Slice[u32]) -> u64 {
+    match xs.last() {
+        Option::Some(x) => widen_u64(x),
+        Option::None => 7,
+    }
+}
+fn last_byte(in xs: Slice[u8]) -> u64 {
+    match xs.last() {
+        Option::Some(x) => wrapping_mul(widen_u64(x), 3),
+        Option::None => 11,
+    }
+}
+fn last_word(in xs: Slice[i64], d: i64) -> i64 {
+    match xs.last() {
+        Option::Some(x) => wrapping_add(x, d),
+        Option::None => d,
+    }
+}
+fn main() -> i64 {
+    let mut q: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    q.push(70000);
+    q.push(5);
+    let e: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let mut w: ChunkSeq[i64] = ChunkSeq::new[i64]();
+    w.push(-40);
+    let s: String = \"hello\";
+    let a = last_or(in q.as_slice()) ^ last_or(in e.as_slice());
+    let b = last_byte(in s.as_bytes()) ^ last_byte(in \"\".as_bytes());
+    let c = last_word(in w.as_slice(), 3);
+    wrapping_i64(a ^ wrapping_mul(b, 3)) ^ c
+}
+";
+
+#[test]
+fn vesper_slice_last_matches() {
+    big_stack(|| {
+        let parsed = vesper::parser::parse(SLICE_LAST);
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        let checked = vesper::check::check(&parsed.module);
+        assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
+        let before = EMITTED.load(Ordering::Relaxed);
+        let total = both("slice_last", &checked.world, true);
+        let emitted = EMITTED.load(Ordering::Relaxed) - before;
+        eprintln!(
+            "slice_last: {}; {emitted} functions emitted from Vesper",
+            total.summary()
+        );
+        let ran = if cross() { 0 } else { 2 };
+        assert_eq!((total.worlds, total.ran), (2, ran), "{}", total.summary());
+        // The three functions optimized (and again for the JIT run
+        // off-cross).
+        let min_emitted = if cross() { 3 } else { 6 };
+        assert!(
+            emitted >= min_emitted,
+            "only {emitted} slice `last` functions came from Vesper (expected {min_emitted})"
+        );
+        assert!(total.is_clean(), "{}", total.summary());
+    });
+}
+
+// String literals (`Codegen::string_literal`): empty, under a word, a
+// whole word and longer, read through `len` and `byte_at`.
+const STRING_LITERALS: &str = "
+fn empty_len() -> u64 {
+    \"\".len()
+}
+fn short_byte(i: u64) -> u64 eff [Fail[RuntimeError]] {
+    widen_u64(\"hey\".byte_at(i))
+}
+fn word_len(d: u64) -> u64 {
+    wrapping_add(\"abcdefgh\".len(), d)
+}
+fn long_byte(i: u64) -> u64 eff [Fail[RuntimeError]] {
+    widen_u64(\"the quick brown fox\".byte_at(i))
+}
+fn main() -> i64 {
+    handle Fail[RuntimeError] in {
+        let a = wrapping_add(empty_len(), short_byte(1));
+        let b = wrapping_add(word_len(2), long_byte(10));
+        let c = short_byte(3);
+        wrapping_i64(a ^ wrapping_mul(b, 7) ^ c)
+    } with {
+        return value => value,
+        raise(error, resume) => 4242,
+    }
+}
+";
+
+#[test]
+fn vesper_string_literals_match() {
+    big_stack(|| {
+        let parsed = vesper::parser::parse(STRING_LITERALS);
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        let checked = vesper::check::check(&parsed.module);
+        assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
+        let before = EMITTED.load(Ordering::Relaxed);
+        let total = both("string_literals", &checked.world, true);
+        let emitted = EMITTED.load(Ordering::Relaxed) - before;
+        eprintln!(
+            "string_literals: {}; {emitted} functions emitted from Vesper",
+            total.summary()
+        );
+        let ran = if cross() { 0 } else { 2 };
+        assert_eq!((total.worlds, total.ran), (2, ran), "{}", total.summary());
+        // The four literal functions in both worlds (and again for the
+        // JIT run off-cross).
+        let min_emitted = if cross() { 8 } else { 16 };
+        assert!(
+            emitted >= min_emitted,
+            "only {emitted} string literal functions came from Vesper (expected {min_emitted})"
+        );
+        assert!(total.is_clean(), "{}", total.summary());
+    });
+}
+
+/// #2654: struct and tuple patterns (`Codegen::bind_ir` and
+/// `pattern_condition` of a product) and enums kept in memory: their
+/// constructors, enum locals and results, and constructor arms with and
+/// without fields.
+const SCALARS_6W: &str = "
+copy struct Pt {
+    x: i64,
+    y: i64,
+}
+copy enum Shape {
+    Dot,
+    Rect(i64, i64),
+    Tagged(i64, bool)
+}
+fn span(p: Pt) -> i64 {
+    let Pt { x, y } = p;
+    wrapping_sub(y, x)
+}
+fn pick(a: i64, b: bool) -> i64 {
+    let t = (a, b);
+    match t {
+        (v, true) => v,
+        (v, false) => wrapping_add(v, 1),
+    }
+}
+fn shape(w: i64, h: i64) -> Shape {
+    Rect(w, h)
+}
+fn area(s: Shape) -> i64 {
+    match s {
+        Dot => 0,
+        Rect(w, h) => wrapping_mul(w, h),
+        Tagged(n, b) => if b { n } else { 0 },
+    }
+}
+fn main() -> i64 {
+    let p = Pt { x: 3, y: 10 };
+    let d = Dot;
+    let t = Tagged(9, true);
+    wrapping_add(
+        wrapping_add(span(p), pick(5, false)),
+        wrapping_add(area(shape(6, 7)), wrapping_add(area(d), area(t)))
+    )
+}
+";
+
+#[test]
+fn vesper_scalar_bodies_product_patterns_and_enums() {
+    big_stack(|| {
+        let parsed = vesper::parser::parse(SCALARS_6W);
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        let checked = vesper::check::check(&parsed.module);
+        assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
+        if let Err(e) = build(&checked.world, "main", true) {
+            panic!("the #2654 program does not build: {e}");
+        }
+        let before = EMITTED.load(Ordering::Relaxed);
+        let total = both("scalars_6w", &checked.world, true);
+        let emitted = EMITTED.load(Ordering::Relaxed) - before;
+        eprintln!(
+            "scalars_6w: {}; {emitted} functions emitted from Vesper",
+            total.summary()
+        );
+        let ran = if cross() { 0 } else { 2 };
+        assert_eq!((total.worlds, total.ran), (2, ran), "{}", total.summary());
+        let min_emitted = if cross() { 4 } else { 8 };
+        assert!(
+            emitted >= min_emitted,
+            "#2654 functions should come from Vesper (expected >= {min_emitted}, got {emitted})"
+        );
+        assert!(total.is_clean(), "{}", total.summary());
+    });
+}
+
 /// `inout` arguments to `fail_only` callees (#2614), next to struct results
 /// of `fail_only` functions built in the result pointer, with checked arithmetic, a partial division and a call of
 /// another `fail_only` function raising through the failure record, whose

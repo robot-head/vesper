@@ -1,7 +1,7 @@
 // The SH0 lane 4 pilot (#1126): Vesper builds Cranelift objects through
 // @vesper/cranelift. Appended to packages/vesper-cranelift/src/lib.ves by
-// tests/pilot.rs, which runs the entries under the JIT with the shim bound,
-// links the published objects and runs them.
+// tests/pilot.rs, which has Stage 2 build the entries, runs them through
+// the Cranelift component, links the published objects and runs them.
 
 fn sig_ints(inout m: Module, params: u32) -> SigId eff [Ffi[Cranelift]] {
     let s = sig_new(inout m, call_conv_default());

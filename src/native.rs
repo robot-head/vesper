@@ -802,6 +802,62 @@ fn trace_host_direct(world: &World, f: &Function) -> bool {
                 || (e.name == crate::trace_effects::TRACE && e.label.is_none() && e.args.is_empty())
         })
 }
+/// Turns an entry compile's first lowering into the program the walk
+/// defines its instances from: bit builtins and wide tuples lowered, then
+/// optimized and inlined (`optimize`) or fip reuse slots assigned, `Box`
+/// drops elaborated and, optimized, loop invariants hoisted. Answers which
+/// functions the inliner copied into each graph.
+fn prepare_walk_program(
+    world: &World,
+    entry: &str,
+    instances: &InstanceMap,
+    optimize: bool,
+    program: &mut crate::ir::Program,
+) -> Result<BTreeMap<String, BTreeSet<String>>, String> {
+    crate::integer_widths::lower_bit_builtin_calls(world, program);
+    wide_native::refine_wide_tuples(program);
+    let mut inlined_into = BTreeMap::new();
+    if optimize {
+        // Only the graphs this entry reaches are optimized and inlined
+        // into, and only they size the budget: the inliner's program and
+        // per-callee budgets are shared, and a dependency's unreached
+        // functions spent them first (an unused `@vesper/fmt` halved
+        // `@vesper/verify` discovery's speed, #2167).
+        let unreached = set_aside_unreached(world, program, entry, instances);
+        let optimized = crate::ir_swap::optimize(world, program);
+        if optimized.is_ok() {
+            // Executable objects inline too (#959). The decision depends
+            // only on the world, never on the observer or instrument hooks,
+            // so a verified build stays byte-identical to the plain one and
+            // the verifiers check the code that ships.
+            let budget = crate::ir_inline::Budget::for_program(world, program);
+            inlined_into = crate::ir_swap::inline(world, program, &budget).inlined_into;
+        }
+        program.functions.extend(unreached);
+        optimized?;
+    } else {
+        crate::ir_opt::fip_reuse_pass(world, program)?;
+    }
+    crate::fip::elaborate_non_fip_drops(world, program);
+    if optimize {
+        // Native only, never the verified backend (Stage 1 perf lane 3).
+        crate::ir_swap::hoist(program);
+    }
+    Ok(inlined_into)
+}
+/// The program the walk defines a (non-trace) entry compile's instances
+/// from ([`prepare_walk_program`] of the first lowering): the graphs whose
+/// fip side tables [`BodyGate::graph`] reads (#2661).
+pub fn entry_walk_program(
+    world: &World,
+    entry: &str,
+    optimize: bool,
+) -> Result<crate::ir::Program, String> {
+    let instances = instances_for_entry(world, entry, false)?;
+    let mut program = crate::ir_swap::lower(world);
+    prepare_walk_program(world, entry, &instances, optimize, &mut program)?;
+    Ok(program)
+}
 /// Moves out of `program` the graphs that `entry` and its `instances`
 /// never reach, so that optimizing and inlining see only the code this
 /// entry emits. A graph is reached through a call, a function value, a
@@ -1148,35 +1204,7 @@ fn compile_entry<M: Module>(
             (instances, crate::ir_swap::lower(world), None)
         }
     };
-    crate::integer_widths::lower_bit_builtin_calls(world, &mut program);
-    wide_native::refine_wide_tuples(&mut program);
-    let mut inlined_into = BTreeMap::new();
-    if optimize {
-        // Only the graphs this entry reaches are optimized and inlined
-        // into, and only they size the budget: the inliner's program and
-        // per-callee budgets are shared, and a dependency's unreached
-        // functions spent them first (an unused `@vesper/fmt` halved
-        // `@vesper/verify` discovery's speed, #2167).
-        let unreached = set_aside_unreached(world, &mut program, entry, &instances);
-        let optimized = crate::ir_swap::optimize(world, &mut program);
-        if optimized.is_ok() {
-            // Executable objects inline too (#959). The decision depends
-            // only on the world, never on the observer or instrument hooks,
-            // so a verified build stays byte-identical to the plain one and
-            // the verifiers check the code that ships.
-            let budget = crate::ir_inline::Budget::for_program(world, &program);
-            inlined_into = crate::ir_swap::inline(world, &mut program, &budget).inlined_into;
-        }
-        program.functions.extend(unreached);
-        optimized?;
-    } else {
-        crate::ir_opt::fip_reuse_pass(world, &mut program)?;
-    }
-    crate::fip::elaborate_non_fip_drops(world, &mut program);
-    if optimize {
-        // Native only, never the verified backend (Stage 1 perf lane 3).
-        crate::ir_swap::hoist(&mut program);
-    }
+    let inlined_into = prepare_walk_program(world, entry, &instances, optimize, &mut program)?;
     // The hook's conventions stand in for `NativeAbi::plan` when it planned
     // exactly the instances Rust discovered.
     let abi = match &plans {
@@ -1515,6 +1543,32 @@ pub struct EmittedFunction {
     /// The entry-block plan the walk followed ([`frame_plan`]); `None` for
     /// a function the walk did not lower (an outlined cold helper).
     pub frame: Option<FramePlan>,
+    /// Whether the walk's plain gate let it ask the `body` hook for this
+    /// function ([`BodyGate`]); `None` for an outlined cold helper.
+    pub body_gate: Option<BodyGate>,
+}
+/// The plain gate of the native walk's `body` hook (#2094, ported to
+/// @vesper/native-walk by #2661): the walk asks the hook for a function's
+/// body only when both halves hold.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BodyGate {
+    /// The instance leaves the function plain: its frame's result matches
+    /// the result pointer, the world has no `ConstDenorm` span, the
+    /// instance binds no generic or function-value variable, the function
+    /// is not `@fip`, the entry block has no trace flag or caller slot, and
+    /// every capability identity is a failure exit of the `fail_only`
+    /// record. (`inout` scalar parameters pass, #2563.)
+    pub instance: bool,
+    /// The graph the walk defines from has no fip reuse slots and no `Box`
+    /// drops. (The hook's own refusals come after the gate: sequence
+    /// drops and fused reads, #2653, and result homes or split locals.)
+    pub graph: bool,
+}
+impl BodyGate {
+    /// Whether the walk asks the `body` hook.
+    pub fn plain(self) -> bool {
+        self.instance && self.graph
+    }
 }
 impl EmittedFunction {
     /// The source function with this instance's generic arguments
@@ -1703,7 +1757,7 @@ fn define_instances_observed_with_trace<M: Module>(
             )?,
         };
         let mut fbctx = FunctionBuilderContext::new();
-        let wide_divisions = {
+        let (wide_divisions, body_gate) = {
             let mut b = FunctionBuilder::new(&mut ctx.func, &mut fbctx);
             let entry = b.create_block();
             b.append_block_params_for_function_params(entry);
@@ -1835,13 +1889,14 @@ fn define_instances_observed_with_trace<M: Module>(
                 .get(name)
                 .ok_or("missing lowered native function")?;
             // Part 6 of the native walk (#2094): the `body` hook may emit
-            // the whole body; else the Rust walk does.
-            if !c.body_hook(name, &f, &frame, body, sret)? {
+            // the whole body of a plain function; else the Rust walk does.
+            let body_gate = c.body_gate(&frame, body, sret);
+            if !(body_gate.plain() && c.body_hook(name, &f, &frame, body, sret)?) {
                 c.ir_function(body, sret)?;
             }
             c.b.seal_all_blocks();
             c.b.finalize();
-            c.wide_divisions
+            (c.wide_divisions, body_gate)
         };
         wide_native::fuse_wide_divisions(&mut ctx.func, &wide_divisions);
         // A hook error at an infallible layout helper (#1275).
@@ -1869,6 +1924,7 @@ fn define_instances_observed_with_trace<M: Module>(
                 is_const_time,
                 ctx,
                 frame,
+                body_gate,
             ));
             continue;
         }
@@ -1914,13 +1970,16 @@ fn define_instances_observed_with_trace<M: Module>(
                 optimized: operands_only,
                 inlined: Default::default(),
                 frame: Some(frame.clone()),
+                body_gate: Some(body_gate),
             });
         }
         m.define_function(define_id, &mut ctx)
             .map_err(|e| format!("native codegen '{name}': {e}"))?;
         m.clear_context(&mut ctx);
     }
-    for (define_id, key, name, generic_vars, is_const_time, mut ctx, frame) in deferred_defs {
+    for (define_id, key, name, generic_vars, is_const_time, mut ctx, frame, body_gate) in
+        deferred_defs
+    {
         let cold_helpers = if !is_const_time {
             crate::native_cold_outline::outline(m, &key, &mut ctx.func)?
         } else {
@@ -1969,6 +2028,7 @@ fn define_instances_observed_with_trace<M: Module>(
                 optimized: operands_only,
                 inlined: Default::default(),
                 frame: Some(frame.clone()),
+                body_gate: Some(body_gate),
             });
             for (cold_id, cold_key, cold_func) in &cold_helpers {
                 let callees = user_callees(cold_func);
@@ -1987,6 +2047,7 @@ fn define_instances_observed_with_trace<M: Module>(
                     optimized: operands_only,
                     inlined: Default::default(),
                     frame: None,
+                    body_gate: None,
                 });
             }
         }
@@ -4157,16 +4218,15 @@ impl<M: Module> Codegen<'_, '_, M> {
             id | crate::codegen_swap::body::FAIL_CALL
         })
     }
-    /// Asks the `body` hook to emit `body` (`codegen_swap::body`), when
-    /// the frame leaves the function plain; `true` when it did.
-    fn body_hook(
-        &mut self,
-        name: &str,
-        f: &Function,
+    /// The plain gate of [`Self::body_hook`] ([`BodyGate`]), read before
+    /// the walk lowers anything: the entry block's state and the graph's
+    /// fip side tables.
+    fn body_gate(
+        &self,
         frame: &FramePlan,
         body: &crate::ir::FunctionIr,
         sret: Option<ir::Value>,
-    ) -> Result<bool, String> {
+    ) -> BodyGate {
         // A struct result is built in, or copied to, the result pointer
         // (`sret`, #2411); a register result (#2581) the same way in the
         // local buffer the entry made, whose words the function returns.
@@ -4175,7 +4235,7 @@ impl<M: Module> Codegen<'_, '_, M> {
             FrameResult::Value | FrameResult::Words(_) => sret.is_none(),
             FrameResult::Sret | FrameResult::Buffer(_) => sret.is_some(),
         };
-        let plain = result_ok
+        let instance = result_ok
             && self.denorm.is_empty()
             && self.session.is_none()
             // A generic instance (#2715) is lent with its types
@@ -4191,15 +4251,27 @@ impl<M: Module> Codegen<'_, '_, M> {
             && self
                 .capabilities
                 .values()
-                .all(|identity| self.fail_record.is_some() && identity.starts_with(FAIL_EXIT))
-            && body.fip_call_slots.is_empty()
+                .all(|identity| self.fail_record.is_some() && identity.starts_with(FAIL_EXIT));
+        let graph = body.fip_call_slots.is_empty()
             && body.fip_join_slots.is_empty()
             && body.box_drops_before_inst.is_empty()
             && body.box_drops_after_inst.is_empty()
             && body.box_drops_before_term.is_empty();
+        BodyGate { instance, graph }
+    }
+    /// Asks the `body` hook to emit `body` (`codegen_swap::body`) of a
+    /// function [`Self::body_gate`] leaves plain; `true` when it did.
+    fn body_hook(
+        &mut self,
+        name: &str,
+        f: &Function,
+        frame: &FramePlan,
+        body: &crate::ir::FunctionIr,
+        sret: Option<ir::Value>,
+    ) -> Result<bool, String> {
         // Without a `body` hook the request is never read, so the default
         // compiler skips building it (and the callee scan below).
-        if !plain || crate::codegen_swap::installed().body.is_none() {
+        if crate::codegen_swap::installed().body.is_none() {
             return Ok(false);
         }
         // Sequence and string operations (#2653): the body hook emits the

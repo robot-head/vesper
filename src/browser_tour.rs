@@ -7,10 +7,11 @@ use crate::forge_frontend::check_compiler_source;
 use crate::runtime::{Runtime, Value};
 use crate::tooling::frontend::{AnalysisLimits, CheckedSource, check_source};
 
-#[path = "../crates/vesper-tools/src/highlight/facts.rs"]
+#[path = "highlight_facts.rs"]
 mod highlight_facts;
 use serde::{Deserialize, Serialize};
 use std::{cell::RefCell, fmt::Write as _};
+use vesper_highlight::{EffectFact, FieldLeafFact, HoverEntry, LinearBindingFact, SemanticFacts};
 
 const MAX_SOURCE: usize = 16 * 1024;
 const MAX_REQUEST: usize = 6 * MAX_SOURCE + 256;

@@ -3850,3 +3850,797 @@ fn commands_speed() {
         v.as_secs_f64() / r.as_secs_f64()
     );
 }
+
+// ------------------------------------------------------------------ server
+
+/// The session behind the Vesper loop's `LspEngine` import in this test: a
+/// `vesper::lsp::Engine`, what its last frame wrote, how it ended and its
+/// error text.
+struct HostEngine {
+    engine: vesper::lsp::Engine,
+    frames: Vec<u8>,
+    exit: vesper::lsp::EngineExit,
+    error: Vec<u8>,
+    /// The live loop's client: the chunks `lsp_engine_read` hands over in
+    /// turn, and every frame `lsp_engine_write` wrote.
+    input: std::collections::VecDeque<Vec<u8>>,
+    written: Vec<u8>,
+    /// Whether every other read waits out its deadline instead (with a
+    /// deadline of 0), so the loop ticks the engine between chunks.
+    waits: bool,
+    waited: bool,
+    /// An empty chunk is a pause: reads wait out their deadlines (sleeping
+    /// for it) until `PAUSE` has passed, then the next chunk comes.
+    paused: Option<std::time::Instant>,
+}
+
+thread_local! {
+    static HOST_ENGINE: std::cell::RefCell<Option<HostEngine>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// `lsp_engine_exit`'s answers (lib.ves of @vesper/lsp-server).
+const ENGINE_CONTINUE: u64 = 0;
+const ENGINE_CLEAN: u64 = 1;
+const ENGINE_UNCLEAN: u64 = 2;
+const ENGINE_FAILED: u64 = 3;
+
+/// `lsp_engine_read`'s answers besides a byte count.
+const READ_END: i64 = 0;
+const READ_WAITED: i64 = -1;
+/// `lsp_engine_write`'s answer for a write that went through.
+const WRITE_OK: u64 = 0;
+
+fn with_engine<T>(f: impl FnOnce(&mut HostEngine) -> T) -> T {
+    HOST_ENGINE.with(|cell| f(cell.borrow_mut().as_mut().expect("an engine")))
+}
+
+/// Copy-out: copies `data` when `buf` holds it, and returns its length.
+///
+/// # Safety
+/// `buf` is a writable slice of `len` bytes.
+unsafe fn copy_out(data: &[u8], buf: *mut u8, len: usize) -> u64 {
+    if data.len() <= len && !buf.is_null() && !data.is_empty() {
+        // SAFETY: `buf` holds `len >= data.len()` bytes.
+        unsafe { std::ptr::copy_nonoverlapping(data.as_ptr(), buf, data.len()) };
+    }
+    data.len() as u64
+}
+
+/// # Safety
+/// `body` is a readable slice of `len` bytes.
+unsafe extern "C" fn lsp_engine_frame(body: *const u8, len: usize) -> u64 {
+    // SAFETY: the `.vsys` contract lends the body.
+    let body = unsafe { std::slice::from_raw_parts(body, len) };
+    with_engine(|h| {
+        let (frames, exit, error) = h.engine.frame(body);
+        h.frames = frames;
+        h.exit = exit;
+        h.error = error.into_bytes();
+        h.frames.len() as u64
+    })
+}
+
+/// # Safety
+/// `buf` is a writable slice of `len` bytes.
+unsafe extern "C" fn lsp_engine_take(buf: *mut u8, len: usize) -> u64 {
+    // SAFETY: as `copy_out` requires.
+    with_engine(|h| unsafe { copy_out(&h.frames, buf, len) })
+}
+
+extern "C" fn lsp_engine_exit() -> u64 {
+    with_engine(|h| match h.exit {
+        vesper::lsp::EngineExit::Continue => ENGINE_CONTINUE,
+        vesper::lsp::EngineExit::Clean => ENGINE_CLEAN,
+        vesper::lsp::EngineExit::Unclean => ENGINE_UNCLEAN,
+        vesper::lsp::EngineExit::Failed => ENGINE_FAILED,
+    })
+}
+
+/// # Safety
+/// `buf` is a writable slice of `len` bytes.
+unsafe extern "C" fn lsp_engine_error(buf: *mut u8, len: usize) -> u64 {
+    // SAFETY: as `copy_out` requires.
+    with_engine(|h| unsafe { copy_out(&h.error, buf, len) })
+}
+
+/// # Safety
+/// `buf` is a writable slice of `len` bytes.
+unsafe extern "C" fn lsp_engine_read(buf: *mut u8, len: usize, wait_ms: i64) -> i64 {
+    with_engine(|h| {
+        if h.waits && !h.waited {
+            h.waited = true;
+            return READ_WAITED;
+        }
+        h.waited = false;
+        if h.input.front().is_some_and(Vec::is_empty) {
+            let since = *h.paused.get_or_insert_with(std::time::Instant::now);
+            if since.elapsed() < PAUSE {
+                let wait = u64::try_from(wait_ms).map_or(PAUSE, std::time::Duration::from_millis);
+                std::thread::sleep(wait.min(PAUSE));
+                return READ_WAITED;
+            }
+            h.paused = None;
+            h.input.pop_front();
+        }
+        let Some(mut chunk) = h.input.pop_front() else {
+            return READ_END;
+        };
+        if chunk.len() > len {
+            h.input.push_front(chunk.split_off(len));
+        }
+        // SAFETY: `buf` holds `len >= chunk.len()` bytes.
+        unsafe { std::ptr::copy_nonoverlapping(chunk.as_ptr(), buf, chunk.len()) };
+        chunk.len() as i64
+    })
+}
+
+/// # Safety
+/// `buf` is a readable slice of `len` bytes.
+unsafe extern "C" fn lsp_engine_write(buf: *const u8, len: usize) -> u64 {
+    // SAFETY: the `.vsys` contract lends the frames.
+    let data = unsafe { std::slice::from_raw_parts(buf, len) };
+    with_engine(|h| h.written.extend_from_slice(data));
+    WRITE_OK
+}
+
+extern "C" fn lsp_engine_deadline() -> i64 {
+    with_engine(|h| if h.waits { 0 } else { h.engine.deadline() })
+}
+
+extern "C" fn lsp_engine_tick() -> u64 {
+    with_engine(|h| {
+        let (frames, exit, error) = h.engine.tick();
+        h.frames = frames;
+        h.exit = exit;
+        h.error = error.into_bytes();
+        h.frames.len() as u64
+    })
+}
+
+/// The server's Lens configuration on both sides: no auditor, so no
+/// background proof runs (the loop arms no timers yet).
+fn server_config() -> vesper::lsp::LensConfig {
+    vesper::lsp::LensConfig {
+        auditor: None,
+        background: None,
+        ..vesper::lsp::LensConfig::default()
+    }
+}
+
+/// `lsp_server_run` of @vesper/lsp-server, bound to the host engine.
+fn server_entry() -> &'static Entry {
+    static ENTRY: OnceLock<Entry> = OnceLock::new();
+    ENTRY.get_or_init(|| server_function("lsp_server_run"))
+}
+
+/// `lsp_server_live` of @vesper/lsp-server, bound to the host engine.
+fn live_entry() -> &'static Entry {
+    static ENTRY: OnceLock<Entry> = OnceLock::new();
+    ENTRY.get_or_init(|| server_function("lsp_server_live"))
+}
+
+fn server_function(name: &str) -> Entry {
+    let assembled = vesper::packages::load(&repo().join("packages/vesper-lsp-server")).unwrap();
+    assert!(assembled.ok(), "{:?}", assembled.diagnostics);
+    let imports = assembled.imports(None).unwrap();
+    let checked = vesper::ffi_lowering::check_module(&assembled.module, &imports)
+        .unwrap_or_else(|e| panic!("{e}"));
+    let symbols: Vec<(&str, *const u8)> = vec![
+        ("lsp_engine_frame", lsp_engine_frame as *const u8),
+        ("lsp_engine_take", lsp_engine_take as *const u8),
+        ("lsp_engine_exit", lsp_engine_exit as *const u8),
+        ("lsp_engine_error", lsp_engine_error as *const u8),
+        ("lsp_engine_read", lsp_engine_read as *const u8),
+        ("lsp_engine_write", lsp_engine_write as *const u8),
+        ("lsp_engine_deadline", lsp_engine_deadline as *const u8),
+        ("lsp_engine_tick", lsp_engine_tick as *const u8),
+    ];
+    Entry(
+        checked
+            .word_function(name, &symbols, optimize())
+            .unwrap_or_else(|e| panic!("{e}")),
+    )
+}
+
+/// Rust's `serve_with` over `stream`: the bytes written and the result.
+fn rust_server(stream: &[u8]) -> (Vec<u8>, Result<(), String>) {
+    let mut out = Vec::new();
+    let result = vesper::lsp::serve_with(
+        std::io::Cursor::new(stream.to_vec()),
+        &mut out,
+        server_config(),
+    );
+    (out, result)
+}
+
+/// The Vesper loop over `stream`, with a fresh Rust session behind it.
+fn vesper_server(stream: &[u8]) -> (Vec<u8>, Result<(), String>) {
+    host_engine(Default::default(), false);
+    let mut input = Vec::new();
+    limit_words(&mut input, ProtocolLimits::default());
+    input.extend_from_slice(stream);
+    let words = server_entry().words(&input);
+    HOST_ENGINE.with(|cell| *cell.borrow_mut() = None);
+    let out_len = words[1] as usize;
+    let out_words = out_len.div_ceil(8);
+    let mut out = Vec::new();
+    for w in &words[2..2 + out_words] {
+        out.extend_from_slice(&w.to_le_bytes());
+    }
+    out.truncate(out_len);
+    let error = unpack_text(&words[2 + out_words..]);
+    let result = if words[0] == 0 { Ok(()) } else { Err(error) };
+    (out, result)
+}
+
+/// Install a fresh Rust session as the host engine, with `input` as the
+/// live loop's client.
+fn host_engine(input: std::collections::VecDeque<Vec<u8>>, waits: bool) {
+    host_engine_with(server_config(), input, waits);
+}
+
+fn host_engine_with(
+    config: vesper::lsp::LensConfig,
+    input: std::collections::VecDeque<Vec<u8>>,
+    waits: bool,
+) {
+    let engine = vesper::lsp::Engine::new(config).unwrap();
+    HOST_ENGINE.with(|cell| {
+        *cell.borrow_mut() = Some(HostEngine {
+            engine,
+            frames: Vec::new(),
+            exit: vesper::lsp::EngineExit::Continue,
+            error: Vec::new(),
+            input,
+            written: Vec::new(),
+            waits,
+            waited: false,
+            paused: None,
+        })
+    });
+}
+
+/// The live Vesper loop over `stream`, read in `chunk`-byte pieces (every
+/// other read waiting out a deadline when `waits`).
+fn vesper_live(stream: &[u8], chunk: usize, waits: bool) -> (Vec<u8>, Result<(), String>) {
+    host_engine(stream.chunks(chunk).map(<[u8]>::to_vec).collect(), waits);
+    let mut input = Vec::new();
+    limit_words(&mut input, ProtocolLimits::default());
+    let words = live_entry().words(&input);
+    let out = HOST_ENGINE.with(|cell| cell.borrow_mut().take().unwrap().written);
+    let error = unpack_text(&words[1..]);
+    let result = if words[0] == 0 { Ok(()) } else { Err(error) };
+    (out, result)
+}
+
+/// How long a pause in a timed session lasts: far past its debounce delay
+/// and the background run it starts.
+const PAUSE: std::time::Duration = std::time::Duration::from_millis(1500);
+
+/// A client stream for Rust's `serve_with` that pauses for `PAUSE` between
+/// its parts.
+#[cfg(unix)]
+struct PausedReader {
+    parts: std::collections::VecDeque<Vec<u8>>,
+    at: usize,
+}
+
+#[cfg(unix)]
+impl std::io::Read for PausedReader {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = std::io::BufRead::fill_buf(self)?.len().min(buf.len());
+        buf[..n].copy_from_slice(&self.parts[0][self.at..self.at + n]);
+        std::io::BufRead::consume(self, n);
+        Ok(n)
+    }
+}
+
+#[cfg(unix)]
+impl std::io::BufRead for PausedReader {
+    fn fill_buf(&mut self) -> std::io::Result<&[u8]> {
+        while self.parts.front().is_some_and(|p| self.at >= p.len()) {
+            if self.parts.pop_front().is_some_and(|p| p.is_empty()) {
+                std::thread::sleep(PAUSE);
+            }
+            self.at = 0;
+        }
+        Ok(self.parts.front().map_or(&[], |p| &p[self.at..]))
+    }
+    fn consume(&mut self, n: usize) {
+        self.at += n;
+    }
+}
+
+/// Background runs need a Lean launcher and an auditor; the system's
+/// `false` stands in for both, so every run fails the same way.
+#[cfg(unix)]
+fn timed_config() -> vesper::lsp::LensConfig {
+    let stand_in = "/bin/false";
+    vesper::lsp::LensConfig {
+        lean: stand_in.into(),
+        auditor: Some(stand_in.into()),
+        cache: None,
+        background: None,
+        ..vesper::lsp::LensConfig::default()
+    }
+}
+
+/// A session with background proof runs on, pausing after the document
+/// opens so its debounce timer fires and its run finishes.
+#[cfg(unix)]
+fn timed_parts() -> Vec<Vec<u8>> {
+    let uri = "file:///work/timed.ves";
+    let source = "fn inc(x: i64) -> i64 eff [Fail[ArithOverflow]] {\n    if x < 100 {\n        x + 1\n    } else {\n        0\n    }\n}\n";
+    let mut shutdown = srv_request(json!(99), "shutdown", Value::Null);
+    shutdown.extend(notify("exit", Value::Null));
+    vec![
+        [
+            srv_request(
+                json!(1),
+                "initialize",
+                json!({"capabilities":{},"initializationOptions":{"vesperLens":{"backgroundProofs":true,"debounceMs":0}}}),
+            ),
+            notify("initialized", json!({})),
+            did_open(uri, source),
+        ]
+        .concat(),
+        Vec::new(),
+        shutdown,
+    ]
+}
+
+/// A request frame.
+fn srv_request(id: Value, method: &str, params: Value) -> Vec<u8> {
+    message(json!({"jsonrpc":"2.0","id":id,"method":method}), params)
+}
+
+/// A notification frame.
+fn notify(method: &str, params: Value) -> Vec<u8> {
+    message(json!({"jsonrpc":"2.0","method":method}), params)
+}
+
+/// A message frame, without `params` when they are null (a null `params`
+/// is a refused envelope, which Rust answers from its reader thread, out of
+/// order with the session's answers).
+fn message(mut envelope: Value, params: Value) -> Vec<u8> {
+    if !params.is_null() {
+        envelope["params"] = params;
+    }
+    frame(envelope.to_string().as_bytes())
+}
+
+fn did_open(uri: &str, text: &str) -> Vec<u8> {
+    notify(
+        "textDocument/didOpen",
+        json!({"textDocument":{"uri":uri,"languageId":"vesper","version":1,"text":text}}),
+    )
+}
+
+fn srv_initialize(capabilities: Value) -> Vec<u8> {
+    srv_request(json!(1), "initialize", json!({"capabilities":capabilities}))
+}
+
+/// Scripted client sessions: the lifecycle, gate refusals, refused bodies,
+/// framing errors, documents and the handlers the session answers. Ids are
+/// unique within a session: Rust refuses an id still pending, which only
+/// its read-ahead can see. Refused
+/// bodies only open a session: Rust answers them from its reader thread,
+/// so after other work their order against the session's answers is a
+/// race.
+fn server_sessions() -> Vec<(&'static str, Vec<u8>)> {
+    let source =
+        "fn add(a: i64, b: i64) -> i64 {\n    a + b\n}\n\nfn main() -> i64 {\n    add(1, 2)\n}\n";
+    let broken = "fn main( -> {\n";
+    let uri = "file:///work/main.ves";
+    let caps = json!({
+        "textDocument":{"publishDiagnostics":{"relatedInformation":true},
+            "documentSymbol":{"hierarchicalDocumentSymbolSupport":true},
+            "codeAction":{"codeActionLiteralSupport":{}}},
+        "workspace":{"workspaceEdit":{"documentChanges":true}}
+    });
+    let position = |line: u32, character: u32| json!({"textDocument":{"uri":uri},"position":{"line":line,"character":character}});
+    let shutdown_exit = || {
+        let mut v = srv_request(json!(99), "shutdown", Value::Null);
+        v.extend(notify("exit", Value::Null));
+        v
+    };
+    let session = |parts: Vec<Vec<u8>>| parts.concat();
+    vec![
+        ("empty", vec![]),
+        (
+            "lifecycle",
+            session(vec![
+                srv_initialize(caps.clone()),
+                notify("initialized", json!({})),
+                shutdown_exit(),
+            ]),
+        ),
+        (
+            "before initialize",
+            session(vec![
+                srv_request(json!(11), "textDocument/hover", position(0, 0)),
+                notify("textDocument/didOpen", json!({})),
+                srv_request(json!("s"), "shutdown", Value::Null),
+                srv_request(json!(12), "workspace/executeCommand", json!({})),
+                srv_initialize(json!({})),
+                srv_request(json!(2), "initialize", json!({"capabilities":{}})),
+                shutdown_exit(),
+            ]),
+        ),
+        (
+            "refused bodies first",
+            session(vec![
+                frame(b"{not json"),
+                frame(b"[]"),
+                frame(b"{\"jsonrpc\":\"1.0\",\"id\":1,\"method\":\"x\"}"),
+                frame(b"\xff\xfe"),
+                srv_initialize(json!({})),
+                shutdown_exit(),
+            ]),
+        ),
+        (
+            "gate refusals",
+            session(vec![
+                srv_initialize(json!({})),
+                srv_request(json!(2), "textDocument/unknown", json!({})),
+                srv_request(json!(3), "textDocument/hover", json!([])),
+                srv_request(json!(5), "shutdown", json!({"x":1})),
+                srv_request(
+                    json!(6),
+                    "workspace/executeCommand",
+                    json!({"command":"vesper.proofAudit","arguments":[]}),
+                ),
+                notify("textDocument/didOpen", json!({"textDocument":{"uri":1}})),
+                notify(
+                    "textDocument/didChange",
+                    json!({"textDocument":{"uri":uri,"version":2},"contentChanges":{}}),
+                ),
+                notify("textDocument/didClose", json!({})),
+                notify("$/setTrace", json!({"value":"off"})),
+                shutdown_exit(),
+            ]),
+        ),
+        (
+            "documents and handlers",
+            session(vec![
+                srv_initialize(caps.clone()),
+                notify("initialized", json!({})),
+                did_open(uri, source),
+                srv_request(json!(2), "textDocument/hover", position(5, 4)),
+                srv_request(json!(3), "textDocument/definition", position(5, 4)),
+                srv_request(
+                    json!(4),
+                    "textDocument/documentSymbol",
+                    json!({"textDocument":{"uri":uri}}),
+                ),
+                srv_request(json!(5), "workspace/symbol", json!({"query":"add"})),
+                srv_request(
+                    json!(6),
+                    "textDocument/formatting",
+                    json!({"textDocument":{"uri":uri},"options":{"tabSize":4,"insertSpaces":true}}),
+                ),
+                srv_request(json!(7), "textDocument/completion", position(5, 4)),
+                srv_request(
+                    json!(8),
+                    "textDocument/inlayHint",
+                    json!({"textDocument":{"uri":uri},"range":{"start":{"line":0,"character":0},"end":{"line":7,"character":0}}}),
+                ),
+                srv_request(
+                    json!(9),
+                    "textDocument/codeLens",
+                    json!({"textDocument":{"uri":uri}}),
+                ),
+                srv_request(
+                    json!(10),
+                    "vesper/recoveryStatus",
+                    json!({"textDocument":{"uri":uri}}),
+                ),
+                notify(
+                    "textDocument/didChange",
+                    json!({"textDocument":{"uri":uri,"version":2},"contentChanges":[{"text":broken}]}),
+                ),
+                srv_request(json!(11), "textDocument/hover", position(0, 3)),
+                srv_request(
+                    json!(12),
+                    "textDocument/codeAction",
+                    json!({"textDocument":{"uri":uri},"range":{"start":{"line":0,"character":0},"end":{"line":0,"character":1}},"context":{"diagnostics":[]}}),
+                ),
+                notify("textDocument/didClose", json!({"textDocument":{"uri":uri}})),
+                srv_request(json!(13), "textDocument/hover", position(0, 0)),
+                shutdown_exit(),
+            ]),
+        ),
+        (
+            "manifest",
+            session(vec![
+                srv_initialize(json!({})),
+                did_open(
+                    "file:///work/Loom.toml",
+                    "[package]\nname = \"@x/y\"\nversion = \"0.1.0\"\n",
+                ),
+                notify(
+                    "textDocument/didClose",
+                    json!({"textDocument":{"uri":"file:///work/Loom.toml"}}),
+                ),
+                shutdown_exit(),
+            ]),
+        ),
+        (
+            "cancel and responses",
+            session(vec![
+                srv_initialize(json!({})),
+                // Only ids no request holds: Rust cancels a request still
+                // queued behind its reader, which the loop never has.
+                notify("$/cancelRequest", json!({"id":555})),
+                notify("$/cancelRequest", json!({"id":"nope"})),
+                notify("$/cancelRequest", json!({})),
+                frame(
+                    json!({"jsonrpc":"2.0","id":7,"result":null})
+                        .to_string()
+                        .as_bytes(),
+                ),
+                srv_request(json!("str\u{e9}id"), "textDocument/hover", json!({})),
+                shutdown_exit(),
+            ]),
+        ),
+        (
+            "exit before shutdown",
+            session(vec![srv_initialize(json!({})), notify("exit", Value::Null)]),
+        ),
+        ("exit uninitialized", notify("exit", Value::Null)),
+        (
+            "after exit",
+            session(vec![
+                srv_initialize(json!({})),
+                shutdown_exit(),
+                srv_request(json!(5), "textDocument/hover", json!({})),
+            ]),
+        ),
+        (
+            "eof without exit",
+            session(vec![srv_initialize(json!({})), did_open(uri, source)]),
+        ),
+        (
+            "requests after shutdown",
+            session(vec![
+                srv_initialize(json!({})),
+                srv_request(json!(2), "shutdown", Value::Null),
+                srv_request(json!(3), "textDocument/hover", json!({})),
+                notify("textDocument/didOpen", json!({})),
+                srv_request(json!(5), "workspace/executeCommand", json!({})),
+                srv_request(json!(4), "shutdown", Value::Null),
+                notify("exit", Value::Null),
+            ]),
+        ),
+        (
+            "edits and proofs",
+            session(vec![
+                srv_initialize(caps.clone()),
+                did_open(uri, source),
+                notify(
+                    "textDocument/didChange",
+                    json!({"textDocument":{"uri":uri,"version":2},"contentChanges":[
+                        {"range":{"start":{"line":5,"character":8},"end":{"line":5,"character":9}},"text":"7"},
+                        {"range":{"start":{"line":0,"character":0},"end":{"line":0,"character":0}},"rangeLength":0,"text":"// x\n"}
+                    ]}),
+                ),
+                srv_request(json!(2), "textDocument/hover", position(6, 4)),
+                notify(
+                    "textDocument/didChange",
+                    json!({"textDocument":{"uri":uri,"version":2},"contentChanges":[{"text":"stale"}]}),
+                ),
+                did_open("file:///work/other.ves", "fn other() -> i64 { 1 }\n"),
+                did_open("untitled:Untitled-1", broken),
+                srv_request(json!(3), "workspace/symbol", json!({"query":""})),
+                // No `vesper.proofAudit` job: Rust answers it from its own
+                // thread, after the frames behind it, and the loop (which
+                // runs it before the next frame, part 15b) cannot match that
+                // order.
+                srv_request(
+                    json!("command \"4\""),
+                    "workspace/executeCommand",
+                    json!({"command":"vesper.other","arguments":[]}),
+                ),
+                shutdown_exit(),
+            ]),
+        ),
+        (
+            "framing error",
+            session(vec![
+                srv_initialize(json!({})),
+                b"Content-Length: x\r\n\r\n".to_vec(),
+            ]),
+        ),
+        (
+            "truncated frame",
+            session(vec![
+                srv_initialize(json!({})),
+                b"Content-Length: 50\r\n\r\n{}".to_vec(),
+            ]),
+        ),
+    ]
+}
+
+/// `serve_with` (src/lsp.rs) against @vesper/lsp-server's loop over the
+/// same Rust session: the bytes written and the result of each session.
+#[test]
+fn server_loop_matches_rust() {
+    let mut differ = vec![];
+    let sessions = server_sessions();
+    for (name, stream) in &sessions {
+        let (rust_out, rust_result) = rust_server(stream);
+        let (vesper_out, vesper_result) = vesper_server(stream);
+        if rust_out != vesper_out || rust_result != vesper_result {
+            let r = String::from_utf8_lossy(&rust_out).into_owned();
+            let v = String::from_utf8_lossy(&vesper_out).into_owned();
+            differ.push(format!(
+                "{name}: rust {rust_result:?} vesper {vesper_result:?}\n{}",
+                first_difference(
+                    &r.replace("Content-Length", "\nContent-Length"),
+                    &v.replace("Content-Length", "\nContent-Length")
+                )
+                .unwrap_or_else(|| "same frames".into())
+            ));
+        }
+    }
+    eprintln!(
+        "server: {} sessions, {} differ",
+        sessions.len(),
+        differ.len()
+    );
+    assert!(differ.is_empty(), "{}", differ.join("\n"));
+}
+
+/// Chunk sizes the live loop's client is read in: byte by byte, inside a
+/// header, across frames, and whole.
+/// The read size the live loop's speed is measured at (a pipe's buffer).
+const LIVE_SPEED_CHUNK: usize = 65536;
+
+const LIVE_CHUNKS: [usize; 5] = [1, 5, 64, 4096, usize::MAX];
+
+/// `serve_with` against the live loop, which reads the client through the
+/// host as its bytes arrive: every session at every chunk size, with and
+/// without a timer tick between reads.
+#[test]
+fn live_loop_matches_rust() {
+    let mut differ = vec![];
+    let sessions = server_sessions();
+    let mut runs = 0;
+    for (name, stream) in &sessions {
+        let (rust_out, rust_result) = rust_server(stream);
+        for chunk in LIVE_CHUNKS {
+            for waits in [false, true] {
+                runs += 1;
+                let (vesper_out, vesper_result) = vesper_live(stream, chunk, waits);
+                if rust_out != vesper_out || rust_result != vesper_result {
+                    let r = String::from_utf8_lossy(&rust_out).into_owned();
+                    let v = String::from_utf8_lossy(&vesper_out).into_owned();
+                    differ.push(format!(
+                        "{name} (chunk {chunk}, waits {waits}): rust {rust_result:?} vesper {vesper_result:?}\n{}",
+                        first_difference(
+                            &r.replace("Content-Length", "\nContent-Length"),
+                            &v.replace("Content-Length", "\nContent-Length")
+                        )
+                        .unwrap_or_else(|| "same frames".into())
+                    ));
+                }
+            }
+        }
+    }
+    eprintln!("live: {runs} runs, {} differ", differ.len());
+    assert!(differ.is_empty(), "{}", differ.join("\n"));
+}
+
+/// Debounce timers and background runs: Rust's `serve_with` and the live
+/// loop over a session that pauses once its document is open.
+#[test]
+#[cfg(unix)]
+fn live_loop_runs_timers() {
+    let parts = timed_parts();
+    let mut rust_out = Vec::new();
+    let rust_result = vesper::lsp::serve_with(
+        PausedReader {
+            parts: parts.clone().into(),
+            at: 0,
+        },
+        &mut rust_out,
+        timed_config(),
+    );
+    host_engine_with(timed_config(), parts.into(), false);
+    let mut input = Vec::new();
+    limit_words(&mut input, ProtocolLimits::default());
+    let words = live_entry().words(&input);
+    let vesper_out = HOST_ENGINE.with(|cell| cell.borrow_mut().take().unwrap().written);
+    let vesper_result = if words[0] == 0 {
+        Ok(())
+    } else {
+        Err(unpack_text(&words[1..]))
+    };
+    // A run's wall time is the one field that differs between runs.
+    let messages = |out: &[u8]| -> Vec<Value> {
+        let mut cursor = std::io::Cursor::new(out);
+        std::iter::from_fn(|| {
+            vesper_lsp::read_frame(&mut cursor, ProtocolLimits::default()).unwrap()
+        })
+        .map(|body| {
+            let mut message: Value = serde_json::from_slice(&body).unwrap();
+            if let Some(elapsed) = message.pointer_mut("/params/elapsed_ms") {
+                *elapsed = json!(0);
+            }
+            message
+        })
+        .collect()
+    };
+    let (rust, vesper) = (messages(&rust_out), messages(&vesper_out));
+    let statuses = rust
+        .iter()
+        .filter(|m| m["method"] == "vesper/proofStatus")
+        .count();
+    eprintln!(
+        "timers: {} messages, {statuses} background status, rust {rust_result:?} vesper {vesper_result:?}",
+        rust.len()
+    );
+    assert_eq!(
+        statuses, 1,
+        "the background run did not finish in the pause"
+    );
+    assert_eq!(rust_result, vesper_result);
+    assert_eq!(rust, vesper);
+}
+
+/// Whole sessions through Rust's `serve_with` and through the Vesper loop
+/// over the same Rust session, best of five ABBA pairs. Both sides spend
+/// most of their time in the session; the difference is the loop's own
+/// framing, envelope and gates against Rust's threads and channels.
+#[test]
+#[ignore]
+fn server_loop_speed() {
+    let streams: Vec<Vec<u8>> = server_sessions().into_iter().map(|(_, s)| s).collect();
+    let time = |f: &dyn Fn()| {
+        let t = std::time::Instant::now();
+        f();
+        t.elapsed()
+    };
+    let rust = || {
+        for s in &streams {
+            let _ = std::hint::black_box(rust_server(s));
+        }
+    };
+    let vesper = || {
+        for s in &streams {
+            let _ = std::hint::black_box(vesper_server(s));
+        }
+    };
+    let live = || {
+        for s in &streams {
+            let _ = std::hint::black_box(vesper_live(s, LIVE_SPEED_CHUNK, false));
+        }
+    };
+    live();
+    let (mut lr, mut l) = (std::time::Duration::MAX, std::time::Duration::MAX);
+    for _ in 0..5 {
+        lr = lr.min(time(&rust));
+        l = l.min(time(&live));
+        l = l.min(time(&live));
+        lr = lr.min(time(&rust));
+    }
+    eprintln!(
+        "live ({} sessions, {LIVE_SPEED_CHUNK}-byte reads): rust {lr:?} vesper {l:?}, ratio {:.2}",
+        streams.len(),
+        l.as_secs_f64() / lr.as_secs_f64()
+    );
+    vesper();
+    let (mut r, mut v) = (std::time::Duration::MAX, std::time::Duration::MAX);
+    for _ in 0..5 {
+        r = r.min(time(&rust));
+        v = v.min(time(&vesper));
+        v = v.min(time(&vesper));
+        r = r.min(time(&rust));
+    }
+    eprintln!(
+        "server ({} sessions): rust {r:?} vesper {v:?}, ratio {:.2}",
+        streams.len(),
+        v.as_secs_f64() / r.as_secs_f64()
+    );
+}
