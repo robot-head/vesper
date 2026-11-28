@@ -52,3 +52,11 @@ vesper_crate(
         "test/fixed_point": "eternal",
     },
 )
+
+# The harness, for crates that build with the seed (crates/vesper-cranelift-sys
+# includes tests/support/mod.rs by path).
+filegroup(
+    name = "test_support",
+    srcs = glob(["tests/support/**"]),
+    visibility = ["//crates/vesper-cranelift-sys:__pkg__"],
+)

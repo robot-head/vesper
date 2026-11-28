@@ -448,7 +448,7 @@ pub const COMPILER_PACKAGES: &[(&str, &str, &str, &str, CompilerExecCheck)] = &[
 /// (packages/vesper-stage2/src/vcl_decls.ves), and the Wasm backend lowers
 /// them to imports of `vesper:cranelift/vcl@0.1.0` (#2210). The fixed point
 /// only builds them: running one needs the Cranelift component composed in
-/// (crates/vesper-cranelift-component/tests/wasm_imports.rs).
+/// (crates/vesper-cranelift-sys/tests/support/stage2.rs).
 pub const STAGE2_CRANELIFT_PACKAGES: &[(&str, &str, &str, &str)] = &[
     (
         "codegen-base",
