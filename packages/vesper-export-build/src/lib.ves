@@ -1084,6 +1084,15 @@ fn text_of(in s: Str) -> ChunkSeq[u8] {
     o
 }
 
+// The target OS (`linux`, `macos`, `windows`) of `triple`, as Stage 2's
+// loader takes it, or empty for a target without `.vsys` support.
+pub fn target_os(in triple: Slice[u8]) -> ChunkSeq[u8] {
+    match target_of(in triple) {
+        Option::Some(t) => t.os,
+        Option::None => ChunkSeq::new[u8](),
+    }
+}
+
 fn target_of(in triple: Slice[u8]) -> Option[Target] {
     let mut t = ChunkSeq::new[u8]();
     t.extend(in triple);

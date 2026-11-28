@@ -31,7 +31,7 @@
 // be read or written.
 use @vesper/check-data::util::{stage2_heap_mark, stage2_heap_reset};
 use @vesper/codegen-export::native::{NativeExports, native_exports};
-use @vesper/export-build::{DECLINE_NONE, export_files_dir};
+use @vesper/export-build::{DECLINE_NONE, export_files_dir, target_os};
 use @vesper/export-build::calls_input::{CALLS_OK, stage2_calls_input};
 use @vesper/native-lib::library_object;
 use @vesper-std/env::{arg_bytes, arg_count};
@@ -219,7 +219,8 @@ fn stage2_request(
     in interface: Slice[u8]
 ) -> (u64, ChunkSeq[u8]) eff [Ffi[StdFs]] {
     let e = native_exports(in interface);
-    let calls = stage2_calls_input(in root, in e.roots.as_slice(), OPTIMIZE);
+    let os = target_os(in triple);
+    let calls = stage2_calls_input(in root, in os.as_slice(), in e.roots.as_slice(), OPTIMIZE);
     if calls.declined != CALLS_OK {
         return (OBJECT_NO_CALLS, ChunkSeq::new[u8]());
     }
