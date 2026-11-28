@@ -51,7 +51,8 @@ use @vesper/cranelift::{
     create_block, declare_var, def_var, define_with_cold_helpers, function_words, invalid,
     isa_triple_arch, module_clif, module_error_text, module_finish, module_free, module_keep_clif,
     module_new, new_error_text, object_bytes, outline_cold, seal_all_blocks, switch_to_block,
-    ty_i64, value_type, words_shapes, words_simd
+    ty_i64, value_type, words_shapes, words_simd, create_stack_slot, ins_stack_addr,
+    module_pointer_type
 };
 use @vesper/codegen-scalar-emit::{HANDLED};
 use @vesper/codegen-scalar-emit::body::{emit_body_words};
@@ -61,11 +62,13 @@ use @vesper/native-cold-outline::{outline_script};
 use @vesper/codegen-scalar::{codegen_scalar_body_plan_prefix};
 use @vesper/codegen-calls::data::{calls_input_round_trip};
 use @vesper/check-data::input::{Reader as IrReader, read_ctx};
-use @vesper/place-ir::{read_program};
+use @vesper/place-ir::{Op, Program, Term, read_program};
 use @vesper/native-walk::{native_walk_call_words_bytes};
 use @vesper/native-walk::frame::{graph_plain};
 use @vesper/library-ir::{Status as IrStatus, library_walk_calls_input};
-use self::declare::{Declared, declare_library, declared_new, exports_new};
+use self::declare::{
+    Declared, RESULT_BUFFER, RESULT_SRET, RESULT_WORDS, declare_library, declared_new, exports_new
+};
 
 // The answer's status words.
 const OK: u64 = 0;
@@ -85,6 +88,14 @@ const CALLEE_INDEX_MASK: u64 = 4294967295;
 // A function that returns in registers: no result pointer and no values
 // built in it (`codegen_swap::body::NO_VALUE`).
 const NO_VALUE: u64 = 18446744073709551615;
+// A register result kept as words (`codegen_swap::body::NO_POINTER`), its
+// word count above `RESULT_WORDS_SHIFT`.
+const NO_POINTER: u64 = 4294967295;
+const RESULT_WORDS_SHIFT: u32 = 32;
+// A register result's local buffer (`frame` in src/native.rs): 8-byte
+// words, 8-byte aligned.
+const RESULT_WORD_BYTES: u64 = 8;
+const RESULT_ALIGN_SHIFT: u32 = 3;
 pub const MALFORMED: Str = "malformed native-lib request";
 pub const UNKNOWN_FUNCTION: Str = "a definition names an unknown function";
 const NOT_PLAIN: Str = "the body hook's plain gate refuses a definition: ";
@@ -105,9 +116,16 @@ const CALL_HEADER_WORDS: u64 = 2;
 const NO_POINTER_TYPE: u32 = 0;
 // A program function with no body plan.
 const NO_PLAN: u64 = 18446744073709551615;
+// A block header's words besides its incoming token pairs before the
+// parameters (@vesper/place-ir `read_block`): the entry token, the
+// incoming count and the outgoing token.
+const BLOCK_HEADER_WORDS: u64 = 3;
+// The words of each incoming token pair (block, token).
+const TOKEN_PAIR_WORDS: u64 = 2;
 // A body plan entry's function and word count, before its words.
 const PLAN_HEADER_WORDS: u64 = 2;
 const NO_BODY_PLAN: Str = "no body plan for a definition: ";
+const RESULT_HOMES: Str = "a definition builds its result in place, which needs result homes: ";
 
 pub struct Reader {
     pub pos: u64,
@@ -264,12 +282,37 @@ fn define_one(
     let entry = create_block(inout b);
     let np = append_block_params_for_function_params(inout b, entry);
     switch_to_block(inout b, entry);
+    // The result (`FramePlan::result`, as `define_instances_observed_with_trace`
+    // makes it before binding the parameters): an aggregate's leading
+    // pointer parameter, or a register result's local buffer.
+    let kind = at64(in d.result_kind, index);
+    let words = at64(in d.result_words, index);
+    if (kind == RESULT_SRET || kind == RESULT_BUFFER) && plans.result_built(index) {
+        builder_free(b);
+        err.extend(in RESULT_HOMES.as_bytes());
+        push_dec(inout err, index);
+        push_instance_name(inout err, in d, index);
+        return err;
+    }
+    let mut first: u32 = 0;
+    let mut result = NO_VALUE;
+    if kind == RESULT_SRET {
+        result = widen_u64(block_param(inout b, entry, 0).id);
+        first = 1;
+    } else if kind == RESULT_BUFFER {
+        let size = wrapping_u32(wrapping_mul(words, RESULT_WORD_BYTES));
+        let slot = create_stack_slot(inout b, size, RESULT_ALIGN_SHIFT);
+        let buffer = ins_stack_addr(inout b, module_pointer_type(in m), slot, 0);
+        result = widen_u64(buffer.id) | wrapping_shl_u64(words, RESULT_WORDS_SHIFT);
+    } else if kind == RESULT_WORDS {
+        result = NO_POINTER | wrapping_shl_u64(words, RESULT_WORDS_SHIFT);
+    }
     let mut args: ChunkSeq[u64] = ChunkSeq::new[u64]();
     args.push(optimize);
     args.push(status);
     args.push(locations);
-    args.push(widen_u64(np));
-    for k in 0..np {
+    args.push(widen_u64(wrapping_sub(np, first)));
+    for k in first..np {
         let v = block_param(inout b, entry, k);
         let ty = value_type(inout b, v);
         let var = declare_var(inout b, ty);
@@ -278,12 +321,12 @@ fn define_one(
     }
     args.push(nc);
     args.extend(in callees.as_slice());
-    args.push(NO_VALUE);
+    args.push(result);
     args.push(0);
     // No parameter has an address: every one is its block parameter
     // (`codegen_swap::body::NO_VALUE` per parameter, #2563).
-    args.push(widen_u64(np));
-    for k in 0..np {
+    args.push(widen_u64(wrapping_sub(np, first)));
+    for k in first..np {
         args.push(NO_VALUE);
     }
     // No slice parameter is read once at entry (#2653).
@@ -405,12 +448,74 @@ pub struct Plans {
     // per instance: the graph half of the plain gate (`graph_plain` of its
     // function's graph; 0 when the program has no graph for it)
     graph: ChunkSeq[u64],
+    // per instance: SET when its graph may return a value that
+    // `aggregates::plan` builds in the result (`result_built`)
+    built: ChunkSeq[u64],
 }
 
 impl Plans {
     fn graph_plain(in self, index: u64) -> bool {
         at64(in self.graph, index) == SET
     }
+    fn result_built(in self, index: u64) -> bool {
+        at64(in self.built, index) == SET
+    }
+}
+
+// Whether graph `fi` may return a value that `aggregates::plan` gives a
+// home in the result (`Home::Result`): a constructor, tuple or call, or a
+// block parameter joining them. native-lib passes no result homes (the
+// walk's request lists them), so such a body would copy what the walk
+// builds in place.
+fn result_built(in p: Program, fi: u64) -> bool {
+    let f = p.function(fi);
+    for bi in 0..f.bc {
+        let row = p.block(wrapping_add(f.b0, bi));
+        let mut returned: ChunkSeq[u64] = ChunkSeq::new[u64]();
+        if row.term == Term::Return {
+            returned.push(p.op(row.ta));
+        }
+        for ii in 0..row.ic {
+            let i = p.inst(wrapping_add(row.i0, ii));
+            if i.op == Op::Exit {
+                returned.push(p.op(i.a));
+            }
+        }
+        for k in 0..returned.len() {
+            if built_value(in p, fi, at64(in returned, k)) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+// Whether value `v` of graph `fi` is a block parameter or the result of a
+// constructor, tuple or call.
+fn built_value(in p: Program, fi: u64, v: u64) -> bool {
+    let f = p.function(fi);
+    for bi in 0..f.bc {
+        let row = p.block(wrapping_add(f.b0, bi));
+        // the block's header: its tokens, then the parameter count and values
+        let incoming = p.op(wrapping_add(row.ha, 1));
+        let pa = wrapping_add(
+            wrapping_add(row.ha, BLOCK_HEADER_WORDS),
+            wrapping_mul(incoming, TOKEN_PAIR_WORDS)
+        );
+        let np = p.op(pa);
+        for k in 0..np {
+            if p.op(wrapping_add(wrapping_add(pa, 1), k)) == v {
+                return true;
+            }
+        }
+        for ii in 0..row.ic {
+            let i = p.inst(wrapping_add(row.i0, ii));
+            if widen_u64(i.dest) == v {
+                return i.op == Op::Data || i.op == Op::Tuple || i.op == Op::Call;
+            }
+        }
+    }
+    false
 }
 
 // The direct callee words of each instance (@vesper/native-walk's
@@ -469,6 +574,7 @@ fn plans_of(in program: Slice[u8], in d: Declared) -> Plans {
     let p = read_program(inout r, in program, in c);
     let mut at: ChunkSeq[u64] = ChunkSeq::new[u64]();
     let mut graph: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut built: ChunkSeq[u64] = ChunkSeq::new[u64]();
     let count = d.name_at.len();
     for i in 0..count {
         let start = at64(in d.name_at, i);
@@ -480,6 +586,7 @@ fn plans_of(in program: Slice[u8], in d: Declared) -> Plans {
         let sym = c.names.lookup(in d.names[start..end]);
         let mut plan = NO_PLAN;
         let mut plain: u64 = 0;
+        let mut builds: u64 = 0;
         for j in 0..p.fn_count() {
             if p.function(j).name == sym {
                 plan = match by_row.try_get(j) {
@@ -487,13 +594,15 @@ fn plans_of(in program: Slice[u8], in d: Declared) -> Plans {
                     Option::None => NO_PLAN,
                 };
                 plain = if graph_plain(in p, j) { SET } else { 0 };
+                builds = if result_built(in p, j) { SET } else { 0 };
                 break;
             }
         }
         at.push(plan);
         graph.push(plain);
+        built.push(builds);
     }
-    Plans { words: words, at: at, graph: graph }
+    Plans { words: words, at: at, graph: graph, built: built }
 }
 
 fn push_dec(inout out: ChunkSeq[u8], value: u64) {
