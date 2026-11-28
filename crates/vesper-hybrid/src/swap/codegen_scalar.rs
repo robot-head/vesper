@@ -238,18 +238,22 @@ fn vesper_body(lent: &mut vesper::codegen_swap::Lent<'_, '_>) -> Result<bool, St
     if lent.op != vesper::codegen_swap::body::FUNCTION {
         return Ok(false);
     }
-    let key = (program_key(lent.program), lent.optimize);
+    // A generic instance (#2715) is planned from its own program.
+    let instance = vesper::codegen_swap::body_instance();
+    let (program, function): (&vesper::ir::Program, &str) = match &instance {
+        Some((p, name)) => (p, name),
+        None => (lent.program, lent.site.function),
+    };
+    let key = (program_key(program), lent.optimize);
     let words = vesper::swap_input::with(lent.world, BodyPlans::default, |plans| {
         let at = match plans.0.iter().position(|p| p.key == key) {
             Some(at) => at,
             None => {
-                plans
-                    .0
-                    .push(body_plan(lent.world, lent.program, lent.optimize)?);
+                plans.0.push(body_plan(lent.world, program, lent.optimize)?);
                 plans.0.len() - 1
             }
         };
-        Ok::<_, String>(plans.0[at].bodies.get(lent.site.function).cloned())
+        Ok::<_, String>(plans.0[at].bodies.get(function).cloned())
     })
     .transpose()?
     .flatten();
