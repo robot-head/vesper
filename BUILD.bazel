@@ -949,6 +949,7 @@ vesper_crate(
         "test/self_host_lsp_core": glob([
             "examples/**",
             "packages/vesper-lsp/**",
+            "packages/vesper-lsp-server/**",
             "packages/vesper-memo/**",
         ]) + [
             "//crates/vesper-serde:files",
