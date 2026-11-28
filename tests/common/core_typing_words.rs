@@ -692,6 +692,44 @@ pub fn rust_results(w: &World, spans: &[(usize, usize)]) -> Vec<((usize, usize),
         .collect()
 }
 
+/// Vesper's `H start end type` rows: each handler's inferred effects, as
+/// the empty function type that carries them.
+pub fn vesper_handler_effects(text: &str) -> Vec<((usize, usize), String)> {
+    text.lines()
+        .filter_map(|line| line.strip_prefix("H "))
+        .map(|rest| {
+            let parts: Vec<&str> = rest.splitn(3, ' ').collect();
+            let num = |i: usize| parts[i].parse::<usize>().unwrap();
+            ((num(0), num(1)), parts[2].to_string())
+        })
+        .collect()
+}
+
+/// The Rust checker's effects for each handler span in `spans`
+/// (`World::handler_effects`), as `vesper_handler_effects` writes them.
+pub fn rust_handler_effects(w: &World, spans: &[(usize, usize)]) -> Vec<((usize, usize), String)> {
+    spans
+        .iter()
+        .map(|span| {
+            let ty = w.handler_effects.get(span).map_or_else(
+                || "none".to_string(),
+                |effects| {
+                    format!(
+                        "{:?}",
+                        vesper::ast::Type::Function {
+                            params: vec![],
+                            result: Box::new(vesper::ast::Type::unit()),
+                            effects: effects.clone(),
+                            mode: vesper::ast::Mode::Copy,
+                        }
+                    )
+                },
+            );
+            (*span, ty)
+        })
+        .collect()
+}
+
 /// Vesper's text: `F start end` then `T start end type` rows in insertion
 /// order (a later row for a span replaces an earlier one, as
 /// `types.insert` does), `S start end` for a skipped function and `D code
@@ -729,8 +767,9 @@ pub fn vesper_types(text: &str) -> (String, Vec<(usize, usize)>, usize) {
             }
             "S" => skipped += 1,
             "D" => out.push_str(&format!("{line}\n")),
-            // A checked function's result: `vesper_results`.
-            "R" => {}
+            // A checked function's result (`vesper_results`) and a
+            // handler's effects (`vesper_handler_effects`).
+            "R" | "H" => {}
             _ => panic!("unexpected line {line}"),
         }
     }
