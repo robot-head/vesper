@@ -38,7 +38,7 @@ use @vesper/check-data::util::{add, inc, n32, u32_at, u64_at, u8_at};
 use @vesper/check-data::names::{Names};
 use @vesper/check-data::types::{TyKind, default_type};
 use @vesper/check-layout::{L_ENUM, L_PRODUCT, layout_of};
-use @vesper/codegen-aggregates::{short_name};
+use @vesper/codegen-aggregates::{AT_ENTRY, short_name, type_needs_drop};
 use @vesper/place-ir::{FnRow, InstRow};
 use @vesper/place-ir::codes::{Lit, Op, Pat, Term};
 use super::{
@@ -78,9 +78,19 @@ pub const INST_READ: u64 = 2;
 // A read of a drop slot moved out (`Op::Read` by value, #2653): as
 // `INST_READ`, then the slot is left empty (`seq_drop_moved`).
 pub const INST_READ_MOVED: u64 = 82;
+// A temporary sequence dropped after the instruction before it
+// (`drop_temporaries`, #2653): the words of an instruction with no
+// operands whose `dest` is the temporary's value.
+pub const INST_DROP_TEMP: u64 = 83;
+// The plan header's runtime word (after the returned words): the body
+// frees sequences, so an object's runtime must be defined before the
+// first free.
+pub const RUNTIME_FREES: u64 = 4;
 // A local's kind word bit: the local is a sequence drop slot
 // (`fip::seq_drop_plan`), freed when it is bound again and at each return.
 pub const DROP_SLOT: u64 = 262144;
+// The words of each entry of `Gen::temps`: block, instruction, value.
+const TEMP_WORDS: u64 = 3;
 pub const INST_BIND: u64 = 3;
 pub const INST_WRITE: u64 = 4;
 pub const INST_CALL: u64 = 5;
@@ -3328,6 +3338,61 @@ impl Gen {
         true
     }
 
+    // The temporaries function `fi` drops (`fip::temporary_drops` of its
+    // rewritten graph, #2653) as (block, instruction, value index) words
+    // in `self.temps`: sequences of scalars dropped after an instruction
+    // that does not diverge. False when one is any other value that frees
+    // memory, or is dropped at a block's entry. Without the facts the
+    // temporaries are not known; the walk's request then has none.
+    fn body_temporaries(inout self, fi: u64, in h: Header) -> bool {
+        self.temps = ChunkSeq::new[u64]();
+        if !self.enums.has_temporaries() {
+            return true;
+        }
+        let f = self.program.function(fi);
+        for k in 0..self.enums.temporaries(fi) {
+            let (bi, ii, v) = self.enums.temporary(fi, k);
+            let index = self.body_value(in h, v);
+            if index == NONE64 {
+                return false;
+            }
+            let t = n32(u64_at(in h.vty, index));
+            if !type_needs_drop(inout self.ctx, t) {
+                continue;
+            }
+            if ii == AT_ENTRY || !self.body_seq_type(t) {
+                return false;
+            }
+            let seq = default_type(inout self.ctx.types, t);
+            if !self.body_register(self.ctx.types.arg(seq, 0)) {
+                return false;
+            }
+            let row = self.program.block(add(f.b0, bi));
+            if self.body_never(self.program.inst(add(row.i0, ii)).ty) {
+                continue;
+            }
+            self.temps.push(bi);
+            self.temps.push(ii);
+            self.temps.push(index);
+        }
+        true
+    }
+
+    // How many temporaries are dropped in block `bi` (after instruction
+    // `ii`, or anywhere in it for NONE64).
+    fn body_temps_in(in self, bi: u64, ii: u64) -> u64 {
+        let mut n: u64 = 0;
+        for k in 0..self.temps.len() / TEMP_WORDS {
+            let at = wrapping_mul(k, TEMP_WORDS);
+            if u64_at(in self.temps, at) == bi
+                && (ii == NONE64 || u64_at(in self.temps, inc(at)) == ii)
+            {
+                n = inc(n);
+            }
+        }
+        n
+    }
+
     // `DROP_SLOT` when local `name` is one of the function's drop slots.
     fn body_drop_bit(in self, name: u64) -> u64 {
         for k in 0..self.drops.len() {
@@ -3683,7 +3748,7 @@ impl Gen {
         for k in 0..l.order.len() {
             let bi = u64_at(in l.order, k);
             let row = self.program.block(add(f.b0, bi));
-            block_words.push(row.ic);
+            block_words.push(add(row.ic, self.body_temps_in(bi, NONE64)));
             for ii in 0..row.ic {
                 let x = add(row.i0, ii);
                 let off = wrapping_sub(x, first);
@@ -3706,6 +3771,17 @@ impl Gen {
                     inout block_words
                 ) {
                     return false;
+                }
+                // The temporaries the walk drops after it.
+                for k in 0..self.temps.len() / TEMP_WORDS {
+                    let at = wrapping_mul(k, TEMP_WORDS);
+                    if u64_at(in self.temps, at) == bi && u64_at(in self.temps, inc(at)) == ii {
+                        block_words.push(INST_DROP_TEMP);
+                        block_words.push(u64_at(in self.temps, add(at, 2)));
+                        block_words.push(0);
+                        block_words.push(NONE64);
+                        block_words.push(0);
+                    }
                 }
             }
             if !self.body_terminator(in h, f, bi, inout block_words) {
@@ -3735,6 +3811,9 @@ impl Gen {
             return;
         }
         self.drops = slots;
+        if !self.body_temporaries(fi, in h) {
+            return;
+        }
         // `ir_graph_at`'s locals, in name order: a parameter has its
         // variable; every other local gets a zeroed one. Each has its kind.
         let homed = self.body_homed(f);
@@ -3833,6 +3912,13 @@ impl Gen {
         // The words a small enum result is returned as (#2581), 0 for any
         // other result: the request's frame must agree.
         o.push(self.enums.returns(fi));
+        o.push(
+            if self.drops.len() != 0 || self.temps.len() != 0 {
+                RUNTIME_FREES
+            } else {
+                0
+            }
+        );
         o.extend(in graph_words.as_slice());
         o.extend(in block_words.as_slice());
         out.push(fi);

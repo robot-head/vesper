@@ -226,6 +226,14 @@ fn scalar_type(
     scalar(in t, in names, in d, k, d.fn_info(f.func_index), ty, inout err) != V_NONE
 }
 
+// A `ChunkSeq`, which a call passes and returns as its handle word
+// (#2653).
+fn handle_type(inout t: Types, k: Syms, ty: u32) -> bool {
+    let ty = default_type(inout t, ty);
+    let node = t.node(ty);
+    node.kind == TyKind::Named && node.n == 1 && node.name == k.chunk_seq
+}
+
 // A graph's locals (`FunctionIr::locals`): local i is `names[i]` of type
 // `tys[i]`.
 struct Locals {
@@ -378,11 +386,15 @@ fn plain_call(
     if !words_result
         && !sret_result
         && !scalar_type(inout ls, inout t, inout names, in wd, in d, k, b, in f, f.result)
+        && !handle_type(inout t, k, f.result)
     {
         return NO_CALLEE;
     }
     for j in 0..f.params.len() {
-        if !scalar_type(inout ls, inout t, inout names, in wd, in d, k, b, in f, f.param(j).ty) {
+        let param = f.param(j);
+        if !scalar_type(inout ls, inout t, inout names, in wd, in d, k, b, in f, param.ty)
+            && !(widen_u64(param.pass) == PASS_IN && handle_type(inout t, k, param.ty))
+        {
             return NO_CALLEE;
         }
     }

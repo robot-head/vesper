@@ -36,6 +36,8 @@ use @vesper/check-data::world::{SpanRow, World, find_span, set_by_symbol, vector
 use @vesper/check-data::input::{Ctx, Reader, read_ctx};
 use @vesper/check-layout::{Layouts, layout_of, layouts_new};
 use @vesper/place-ir::{BlockRow, FnRow, InstRow, Program, put_program, read_program};
+use self::temps::{graph_temporaries};
+pub use self::temps::{type_needs_drop};
 
 const NONE32: u32 = 4294967295;
 const NONE32_64: u64 = 4294967295;
@@ -48,7 +50,7 @@ const L_ENUM: u8 = 2;
 // Function facts, by symbol.
 const FN_DEFINED: u32 = 1;
 const FN_QUIET: u32 = 2;
-const FN_FIP: u32 = 4;
+pub const FN_FIP: u32 = 4;
 
 // Symbol flags of the graph being planned.
 const S_PARAM: u32 = 1;
@@ -502,7 +504,7 @@ fn is_wide_name(in c: Ctx, name: u32) -> bool {
 }
 
 // `fip::needs_drop`.
-fn needs_drop(inout c: Ctx, ty: u32) -> bool {
+pub fn needs_drop(inout c: Ctx, ty: u32) -> bool {
     let mut seen: ChunkSeq[u32] = ChunkSeq::new[u32]();
     drop_visit(inout c, ty, inout seen, false)
 }
@@ -1313,7 +1315,7 @@ fn successors(in p: Program, bi: u64, inout out: ChunkSeq[u32]) {
 }
 
 // The graph of function `fi`, with its locals in `syms`.
-fn graph_of(in p: Program, inout c: Ctx, inout syms: Syms, fi: u64) -> G {
+pub fn graph_of(in p: Program, inout c: Ctx, inout syms: Syms, fi: u64) -> G {
     let func = p.function(fi);
     let first = p.block(func.b0);
     let last = p.block(add(func.b0, wrapping_sub(func.bc, 1)));
@@ -3149,7 +3151,7 @@ fn owned_or_fields(kind: u8) -> bool {
 //
 // TODO(#1282): @vesper/codegen-seq (#1295) ports this and
 // `borrowed_scrutinees` too; once both PRs merge, depend on its copy.
-fn seq_drop_plan(
+pub fn seq_drop_plan(
     inout e: Env,
     inout c: Ctx,
     in p: Program,
@@ -3548,7 +3550,7 @@ fn replace_entry(
 
 // ----- `fip::temporary_drops` ---------------------------------------------------
 
-const AT_ENTRY: u64 = 18446744073709551615;
+pub const AT_ENTRY: u64 = 18446744073709551615;
 
 // Per value: the call borrows (block, index), jumps (target, k) and other uses.
 pub struct Uses {
@@ -3629,7 +3631,7 @@ fn scalar_result(inout e: Env, inout c: Ctx, ty: u32) -> bool {
 // `fip::temporary_drops`: each owned temporary as (block, index, value),
 // where it is dropped after instruction `index` of `block`, or at the
 // block's entry (`AT_ENTRY`).
-fn temporary_drops(
+pub fn temporary_drops(
     inout e: Env,
     inout c: Ctx,
     in p: Program,
@@ -5664,6 +5666,12 @@ pub struct EnumWords {
     count: ChunkSeq[u64],
     words: ChunkSeq[u64],
     ret: ChunkSeq[u64],
+    // each graph's temporaries (self::temps)
+    tbase: ChunkSeq[u64],
+    tcount: ChunkSeq[u64],
+    tb: ChunkSeq[u64],
+    ti: ChunkSeq[u64],
+    tv: ChunkSeq[u32],
 }
 
 impl EnumWords {
@@ -5697,6 +5705,11 @@ pub fn enum_words_none() -> EnumWords {
         count: ChunkSeq::new[u64](),
         words: ChunkSeq::new[u64](),
         ret: ChunkSeq::new[u64](),
+        tbase: ChunkSeq::new[u64](),
+        tcount: ChunkSeq::new[u64](),
+        tb: ChunkSeq::new[u64](),
+        ti: ChunkSeq::new[u64](),
+        tv: ChunkSeq::new[u32](),
     }
 }
 
@@ -5764,5 +5777,6 @@ pub fn scalar_enum_words(
         rewrite_scalar_enums(inout c, inout p, in g, in syms, in sh, in plan);
         syms.reset();
     }
+    graph_temporaries(inout e, inout c, in p, inout syms, inout out);
     out
 }

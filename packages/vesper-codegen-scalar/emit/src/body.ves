@@ -189,6 +189,9 @@ const HANDLER_HOME: u64 = 131072;
 const DROP_SLOT: u64 = 262144;
 // A read of a drop slot moved out (`seq_drop_moved`).
 const INST_READ_MOVED: u64 = 82;
+const INST_DROP_TEMP: u64 = 83;
+// The plan header's runtime word: the body frees sequences.
+const RUNTIME_FREES: u64 = 4;
 // `emit_drop_glue`'s sequence free (src/seq/native.rs).
 const SEQ_FREE: Str = "vesper_seq_free";
 const SEQ_FAULT: Str = "vesper_seq_fault";
@@ -1009,28 +1012,25 @@ impl Body {
     // `emit_drop_glue` of its handle, which tests it again and calls
     // `vesper_seq_free`.
     fn drop_free(inout self, inout b: Builder, inout m: Module, local: u64) eff [Ffi[Cranelift]] {
-        // `seq_ensure_runtime_if_hosted`: the object's runtime, defined
-        // where the walk defines it, before its first free.
-        if module_kind(in m) != module_jit() && !has_seq_runtime(inout m) {
-            let _ = define_seq_runtime(inout m, in self.runtime.as_slice());
-        }
+        self.ensure_runtime(inout b, inout m);
         let value = self.use_local(inout b, local);
         let present = ins_icmp_imm(inout b, cc_ne(), value, 0);
         let free = create_block(inout b);
         let done = create_block(inout b);
         ins_brif0(inout b, present, free, done);
         switch_to_block(inout b, free);
-        let held = ins_icmp_imm(inout b, cc_ne(), value, 0);
-        let drop = create_block(inout b);
-        let dropped = create_block(inout b);
-        ins_brif0(inout b, held, drop, dropped);
-        switch_to_block(inout b, drop);
-        seq_runtime_call(inout b, inout m, in SEQ_FREE, value);
+        seq_free(inout b, inout m, value);
         let no_args: ChunkSeq[u32] = ChunkSeq::new[u32]();
-        ins_jump(inout b, dropped, in no_args.as_slice());
-        switch_to_block(inout b, dropped);
         ins_jump(inout b, done, in no_args.as_slice());
         switch_to_block(inout b, done);
+    }
+
+    // `seq_ensure_runtime_if_hosted`: the object's runtime, defined where
+    // the walk defines it, before its first free.
+    fn ensure_runtime(inout self, inout b: Builder, inout m: Module) eff [Ffi[Cranelift]] {
+        if module_kind(in m) != module_jit() && !has_seq_runtime(inout m) {
+            let _ = define_seq_runtime(inout m, in self.runtime.as_slice());
+        }
     }
 
     // `seq_drop_exit` of the function's own graph: every drop slot freed,
@@ -1939,6 +1939,13 @@ impl Body {
         let mut ops: ChunkSeq[u64] = ChunkSeq::new[u64]();
         for k in 0..n {
             ops.push(w.next());
+        }
+        // `drop_temporaries`: the temporary as the walk holds it, no read.
+        if kind == INST_DROP_TEMP {
+            self.ensure_runtime(inout b, inout m);
+            let value = self.value(dest);
+            seq_free(inout b, inout m, value);
+            return true;
         }
         self.read_operands(inout b, in ops);
         // A read of a slice parameter read at entry is its receiver.
@@ -3519,6 +3526,7 @@ pub fn emit_body_words(
     if returned != frame_words {
         return DECLINED;
     }
+    let uses = w.next();
     for k in 0..nc {
         if at64(in callees, k) == NO_CALLEE && !has_call(in builtin_calls, k) {
             return DECLINED;
@@ -3577,7 +3585,7 @@ pub fn emit_body_words(
     // A drop slot's free calls the sequence runtime: the JIT's, or the
     // object's own, which the first free defines when the request gives
     // its words. Without them, or in a freestanding image, the walk frees.
-    if has_drop_slot(in w) && module_kind(in m) != module_jit() {
+    if (uses & RUNTIME_FREES) != 0 && module_kind(in m) != module_jit() {
         if module_kind(in m) == module_freestanding() {
             return DECLINED;
         }
@@ -3642,19 +3650,6 @@ pub fn emit_body_words(
     HANDLED
 }
 
-// Whether the locals ahead in `w` (`[n, n (entry, kind word)]`) name a
-// drop slot, read without consuming them.
-fn has_drop_slot(in w: Words) -> bool {
-    let nl = w.arg(w.at);
-    for k in 0..nl {
-        let kind_word = w.arg(wrapping_add(w.at, wrapping_add(wrapping_mul(k, 2), 2)));
-        if (kind_word & DROP_SLOT) != 0 {
-            return true;
-        }
-    }
-    false
-}
-
 // `seq::aot_runtime::defined`: the runtime is in the module once its fault
 // function is.
 fn has_seq_runtime(inout m: Module) -> bool eff [Ffi[Cranelift]] {
@@ -3662,6 +3657,20 @@ fn has_seq_runtime(inout m: Module) -> bool eff [Ffi[Cranelift]] {
         Option::Some(_) => true,
         Option::None => false,
     }
+}
+
+// `emit_drop_glue` of a sequence of scalars: an empty one (handle 0) is not
+// freed, any other is returned to the runtime.
+fn seq_free(inout b: Builder, inout m: Module, value: Value) eff [Ffi[Cranelift]] {
+    let held = ins_icmp_imm(inout b, cc_ne(), value, 0);
+    let drop = create_block(inout b);
+    let dropped = create_block(inout b);
+    ins_brif0(inout b, held, drop, dropped);
+    switch_to_block(inout b, drop);
+    seq_runtime_call(inout b, inout m, in SEQ_FREE, value);
+    let no_args: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    ins_jump(inout b, dropped, in no_args.as_slice());
+    switch_to_block(inout b, dropped);
 }
 
 // `glue_runtime_call` of the sequence runtime's `name` on one word: an

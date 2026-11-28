@@ -4220,6 +4220,8 @@ impl<M: Module> Codegen<'_, '_, M> {
                 _ => return None,
             }
         }
+        // A `ChunkSeq` passes and returns as its handle word (#2653).
+        let handle_type = |t: &Type| crate::seq::is_seq_type(&crate::numeric::default_type(t));
         let scalar_type = |t: &Type| {
             !crate::seq::is_seq_type(t)
                 && !crate::seq::is_slice_type(t)
@@ -4251,8 +4253,11 @@ impl<M: Module> Codegen<'_, '_, M> {
             || fail_only(self.world, &f) != fails
             || crate::fip::uses_caller_slot(self.world, &f)
             || function_value_instance(self.world, source)
-            || !(scalar_type(&f.result) || words_result || sret_result)
-            || !f.params.iter().all(|p| scalar_type(&p.ty))
+            || !(scalar_type(&f.result) || handle_type(&f.result) || words_result || sret_result)
+            || !f
+                .params
+                .iter()
+                .all(|p| scalar_type(&p.ty) || (p.pass == Pass::In && handle_type(&p.ty)))
         {
             return None;
         }
@@ -4480,7 +4485,8 @@ impl<M: Module> Codegen<'_, '_, M> {
         let join = self.own_scalar_join(body);
         let scalar_graph = self.scalar_graph(body, join.as_ref());
         let graph = scalar_graph.as_ref().map_or(body, |s| &s.f);
-        if !crate::fip::seq_drop_plan(self.world, graph).is_empty()
+        if (!crate::fip::seq_drop_plan(self.world, graph).is_empty()
+            || (self.drops_enabled() && self.seq_drops_temporary(graph)))
             && !self.seq_has_jit()
             && self.m.target_config().pointer_type() == types::I64
         {
@@ -4511,21 +4517,53 @@ impl<M: Module> Codegen<'_, '_, M> {
             .iter()
             .flat_map(|b| &b.instructions)
             .any(|i| matches!(i.op, Op::Seq { .. }));
-        if !has_seq {
-            return true;
-        }
         // The graph `ir_graph_at` lowers: small enums kept as words.
         let join = self.own_scalar_join(body);
         let scalar_graph = self.scalar_graph(body, join.as_ref());
         let graph = scalar_graph.as_ref().map_or(body, |s| &s.f);
+        if !has_seq {
+            // A sequence a call returns may still be a temporary.
+            return !self.drops_enabled() || self.seq_temporaries_plain(graph);
+        }
         let drops = self.drops_enabled()
             && (!crate::fip::replace_drops(self.world, graph, None).is_empty()
-                || !crate::fip::temporary_drops(self.world, graph).is_empty()
+                || !self.seq_temporaries_plain(graph)
                 || !crate::fip::fail_exit_drops(self.world, graph).is_empty());
         !drops
             && self.seq_slots_plain(graph)
             && seq_native::fused_reads(graph).is_empty()
             && self.entry_views(body).is_some()
+    }
+    /// Whether the body hook drops the temporaries of graph `f`
+    /// (`fip::temporary_drops`, #2653): on the optimize path, whose plan
+    /// input carries them, each one that frees memory is a sequence of
+    /// scalars dropped after an instruction (not at a block's entry). The
+    /// unoptimized path's plans have none, so a graph with one stays with
+    /// the walk.
+    fn seq_temporaries_plain(&self, f: &crate::ir::FunctionIr) -> bool {
+        crate::fip::temporary_drops(self.world, f)
+            .iter()
+            .all(|(&(_, inst), values)| {
+                values.iter().all(|v| {
+                    let ty = f.values.get(v).cloned().unwrap_or(Type::Infer);
+                    !self.needs_drop(&ty)
+                        || (self.operands_only
+                            && inst != crate::fip::AT_BLOCK_ENTRY
+                            && self.seq_of_scalars(&ty))
+                })
+            })
+    }
+    /// Whether graph `f` drops a temporary that frees memory.
+    fn seq_drops_temporary(&self, f: &crate::ir::FunctionIr) -> bool {
+        crate::fip::temporary_drops(self.world, f)
+            .values()
+            .flatten()
+            .any(|v| self.needs_drop(&f.values.get(v).cloned().unwrap_or(Type::Infer)))
+    }
+    /// A `ChunkSeq` whose elements free nothing.
+    fn seq_of_scalars(&self, ty: &Type) -> bool {
+        let ty = crate::numeric::default_type(&substitute(ty, &self.generic_vars));
+        crate::seq::is_seq_type(&ty) && crate::seq::elem(&ty).is_some_and(|e| !self.needs_drop(e))
     }
     /// Whether the body hook emits the drop slots of graph `f`
     /// (`fip::seq_drop_plan`, #2653): none, or one for each `ChunkSeq`

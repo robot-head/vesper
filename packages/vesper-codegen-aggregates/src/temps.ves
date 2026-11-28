@@ -1,0 +1,67 @@
+// `fip::temporary_drops` of the graphs `scalar_enum_words` rewrote
+// (#2653), as the walk computes them on them: function `fi`'s
+// temporaries are entries tbase[fi]..tbase[fi]+tcount[fi] of `EnumWords`'
+// (block, instruction or `AT_ENTRY`, value).
+use @vesper/check-data::input::{Ctx};
+use @vesper/check-data::util::{add, u32_at, u64_at, w};
+use @vesper/place-ir::{Program};
+use super::{EnumWords, Env, FN_FIP, Syms, graph_of, needs_drop, seq_drop_plan, temporary_drops};
+
+pub fn graph_temporaries(
+    inout e: Env,
+    inout c: Ctx,
+    in p: Program,
+    inout syms: Syms,
+    inout out: EnumWords
+) {
+    for fi in 0..p.fn_count() {
+        out.tbase.push(out.tb.len());
+        let before = out.tb.len();
+        let name = p.function(fi).name;
+        if (e.fn_bits(name) & FN_FIP) == 0 {
+            let g = graph_of(in p, inout c, inout syms, fi);
+            let seq_drops = seq_drop_plan(inout e, inout c, in p, in g, in syms);
+            temporary_drops(
+                inout e,
+                inout c,
+                in p,
+                in g,
+                in syms,
+                in seq_drops,
+                inout out.tb,
+                inout out.ti,
+                inout out.tv
+            );
+            syms.reset();
+        }
+        out.tcount.push(wrapping_sub(out.tb.len(), before));
+    }
+}
+
+impl EnumWords {
+    // Whether the temporaries of the graphs were computed (an input with
+    // the facts).
+    pub fn has_temporaries(in self) -> bool {
+        self.tbase.len() != 0
+    }
+
+    // How many temporaries function `fi` drops.
+    pub fn temporaries(in self, fi: u64) -> u64 {
+        if fi >= self.tcount.len() {
+            return 0;
+        }
+        u64_at(in self.tcount, fi)
+    }
+
+    // Temporary `k` of function `fi`: its block, the instruction it is
+    // dropped after (`AT_ENTRY`: at the block's entry) and its value.
+    pub fn temporary(in self, fi: u64, k: u64) -> (u64, u64, u64) {
+        let at = add(u64_at(in self.tbase, fi), k);
+        (u64_at(in self.tb, at), u64_at(in self.ti, at), w(u32_at(in self.tv, at)))
+    }
+}
+
+// Whether a value of type `ty` frees memory when dropped (`fip::needs_drop`).
+pub fn type_needs_drop(inout c: Ctx, ty: u32) -> bool {
+    needs_drop(inout c, ty)
+}
