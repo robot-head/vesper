@@ -196,7 +196,7 @@ pub struct Report {
 /// match binds, transitively. The caller's own `borrowed_scrutinees` finds
 /// them again after splicing, so drop elaboration never treats the element
 /// as owned.
-fn view_scrutinees(f: &FunctionIr) -> BTreeSet<ValueId> {
+pub fn view_scrutinees(f: &FunctionIr) -> BTreeSet<ValueId> {
     use crate::seq::{Access, SeqOp};
     let matched: BTreeSet<ValueId> = f
         .blocks
