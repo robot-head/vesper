@@ -17,6 +17,9 @@ use self::plans::{sort_u64};
 use @vesper/check-data::types::{TyPass};
 
 const NONE32: u32 = 4294967295;
+const NONE64: u64 = 18446744073709551615;
+// A hoist read's value, below its row (`Hoists.reads`).
+const READ_VALUE_MASK: u64 = 4294967295;
 const OP_READ: u8 = 3;
 const OP_BIND: u8 = 4;
 const OP_CALL: u8 = 9;
@@ -645,4 +648,46 @@ pub fn header_hoists_text(in f: Fun, inout o: ChunkSeq[u8]) {
     let mut h = hoists_new();
     header_hoists(in f, in us, inout h);
     put_hoists(in f, in h, inout o);
+}
+
+// `NativeCodegen::entry_views` of `f` (src/native.rs): each slice
+// parameter the whole function reads once at entry, as its parameter
+// index, its read count and the reads' value ids (sorted, each once). False
+// when a hoist is any other (a loop preheader's, a field's, a sequence's),
+// which the body hook leaves to the walk.
+pub fn entry_view_rows(in f: Fun, inout out: ChunkSeq[u64]) -> bool {
+    let us = users_of(in f);
+    let mut h = hoists_new();
+    header_hoists(in f, in us, inout h);
+    let mut reads: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    for k in 0..h.rows.len() {
+        let x = row(in h, k);
+        if !x.entry || f.depth(x.place) != 1 {
+            return false;
+        }
+        let root = f.root_of(x.place);
+        let mut param = NONE64;
+        for j in 0..f.params.len() {
+            if f.param(j).name == root {
+                param = j;
+                break;
+            }
+        }
+        if param == NONE64 || (f.param(param).flags & TY_SLICE) == 0 {
+            return false;
+        }
+        reads.clear();
+        for q in 0..h.reads.len() {
+            let r = u64_at(in h.reads, q);
+            if (r >> 32) == k {
+                let new = insert(inout reads, n32(r & READ_VALUE_MASK));
+            }
+        }
+        out.push(param);
+        out.push(reads.len());
+        for q in 0..reads.len() {
+            out.push(w(u32_at(in reads, q)));
+        }
+    }
+    true
 }

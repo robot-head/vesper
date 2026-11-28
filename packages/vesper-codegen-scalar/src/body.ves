@@ -35,10 +35,11 @@
 // writes, negations, narrowing or shifts) stays on the Rust walk.
 
 use @vesper/check-data::util::{add, inc, n32, u32_at, u64_at, u8_at};
+use @vesper/check-data::names::{Names};
 use @vesper/check-data::types::{TyKind, default_type};
 use @vesper/check-layout::{L_ENUM, L_PRODUCT, layout_of};
 use @vesper/codegen-aggregates::{short_name};
-use @vesper/place-ir::{FnRow, InstRow};
+use @vesper/place-ir::{FnRow, InstRow, Program};
 use @vesper/place-ir::codes::{Lit, Op, Pat, PoolKind, Term};
 use super::{
     CONV_NARROW, FOP_ABS, FOP_CEIL, FOP_FLOOR, FOP_FMA, FOP_FROM_BITS_F32, FOP_FROM_BITS_F64,
@@ -289,6 +290,13 @@ const FUSED_WORDS: u64 = 4;
 const FUSED_BLOCK: u64 = 1;
 const FUSED_STRIDE: u64 = 2;
 const FUSED_LANE: u64 = 3;
+// `fused_try_gets`' words per read: its value id and its block.
+pub const FUSED_READ_WORDS: u64 = 2;
+// The names `fused_try_gets` matches: a checked `try_get`'s pool label
+// and `Option`'s variants.
+const TRY_GET_LABEL: Str = "TryGet";
+const SOME_NAME: Str = "Some";
+const NONE_NAME: Str = "None";
 
 // The nodes of a product pattern (#2654), in the walk's order: a leaf that
 // binds nothing (the condition `pattern_true`), a local bound to the value,
@@ -3524,90 +3532,41 @@ impl Gen {
         true
     }
 
-    // `seq_native::fused_pattern` of the arm pattern at `p`: its
-    // `FUSED_*` outcome (`Some(x)` or `Some(_)`, `None`, `_`), or NONE64
-    // for any other pattern. `next` gets the word after the pattern, and
-    // `bound` the name `Some(x)` binds (NONE64 for none).
+    // `fused_pattern` with the planner's names.
     fn body_fused_pattern(inout self, p: u64, inout next: u64, inout bound: u64) -> u64 {
-        bound = NONE64;
-        let pkind = self.program.op(p);
-        if pkind == Pat::Wild {
-            next = add(p, PAT_WILD_WORDS);
-            return FUSED_ANY;
-        }
-        if pkind != Pat::Constructor {
-            return NONE64;
-        }
-        let name = short_name(
+        let ops_s = self.ops;
+        fused_pattern(
             inout self.ctx.names,
-            n32(self.program.op(add(p, PAT_CTOR_NAME_OFFSET)))
-        );
-        let count = self.program.op(add(p, PAT_CTOR_COUNT_OFFSET));
-        if name == self.ops.option_none && count == 0 {
-            next = add(p, PAT_CTOR_WORDS);
-            return FUSED_NONE;
-        }
-        if name != self.ops.option_some || count != 1 {
-            return NONE64;
-        }
-        // The one (field, part) pair: the part after its field name.
-        let part = inc(add(p, PAT_CTOR_WORDS));
-        let part_kind = self.program.op(part);
-        if part_kind == Pat::Wild {
-            next = add(part, PAT_WILD_WORDS);
-        } else if part_kind == Pat::Bind {
-            bound = self.program.op(add(part, PAT_BIND_NAME_OFFSET));
-            next = add(part, PAT_BIND_WORDS);
-        } else {
-            return NONE64;
-        }
-        FUSED_SOME
+            in self.program,
+            ops_s.option_some,
+            ops_s.option_none,
+            p,
+            inout next,
+            inout bound
+        )
     }
 
-    // `seq_native::fused_reads` of `f`, into `self.fused`: each `try_get`
-    // that its own block's `match` consumes with fused arm patterns only.
-    // Its other uses are checked as the plan reaches them: a `Bind` with a
-    // fused pattern plans `INST_BIND_FUSED`, and any other use refuses
-    // the function, where the walk would not fuse the read.
-    fn body_fused_reads(inout self, in h: Header, f: FnRow) {
+    // `fused_try_gets` of `f`, into `self.fused` by value index with each
+    // read's block. Their other uses are checked as the plan reaches
+    // them: a `Bind` with a fused pattern plans `INST_BIND_FUSED`, and any
+    // other use refuses the function, where the walk would not fuse the
+    // read.
+    fn body_fused_reads(inout self, in h: Header, fi: u64) {
         self.fused = ChunkSeq::new[u64]();
-        for bi in 0..f.bc {
-            let row = self.program.block(add(f.b0, bi));
-            if row.term != Term::Match {
-                continue;
+        let reads = fused_try_gets(inout self.ctx.names, in self.program, fi);
+        let mut k: u64 = 0;
+        loop {
+            if k >= reads.len() {
+                break;
             }
-            let v = self.program.op(row.ta);
-            let mut read = false;
-            for ii in 0..row.ic {
-                let i = self.program.inst(add(row.i0, ii));
-                if widen_u64(i.dest) == v && i.op == Op::Seq {
-                    let pool = self.program.pool_row(self.program.op(i.a));
-                    read = pool.kind == PoolKind::Seq && pool.label == self.ops.seq_try_get;
-                }
-            }
-            if !read {
-                continue;
-            }
-            let narms = self.program.op(inc(row.ta));
-            let mut p = add(row.ta, 2);
-            let mut all = true;
-            for k in 0..narms {
-                let mut next: u64 = 0;
-                let mut bound: u64 = 0;
-                if self.body_fused_pattern(p, inout next, inout bound) == NONE64 {
-                    all = false;
-                    break;
-                }
-                // the arm's target block
-                p = inc(next);
-            }
-            let x = self.body_value(in h, v);
-            if all && x != NONE64 {
+            let x = self.body_value(in h, u64_at(in reads, k));
+            if x != NONE64 {
                 self.fused.push(x);
-                self.fused.push(bi);
+                self.fused.push(u64_at(in reads, inc(k)));
                 self.fused.push(0);
                 self.fused.push(0);
             }
+            k = add(k, FUSED_READ_WORDS);
         }
     }
 
@@ -3639,7 +3598,7 @@ impl Gen {
         inout block_words: ChunkSeq[u64]
     ) -> bool {
         let fi = self.fi;
-        self.body_fused_reads(in h, f);
+        self.body_fused_reads(in h, fi);
         let l = layout(in self.program, f);
         let first = self.program.block(f.b0).i0;
         // The plan's record of each instruction, by its index in `f`.
@@ -3803,4 +3762,102 @@ impl Gen {
         out.push(o.len());
         out.extend(in o.as_slice());
     }
+}
+
+// `seq_native::fused_pattern` of the arm pattern at `p` of `program`: its
+// `FUSED_*` outcome (`Some(x)` or `Some(_)`, `None`, `_`), or NONE64 for
+// any other pattern. `next` gets the word after the pattern, and `bound`
+// the name `Some(x)` binds (NONE64 for none). `some` and `none` are the
+// variant names.
+fn fused_pattern(
+    inout names: Names,
+    in program: Program,
+    some: u32,
+    none: u32,
+    p: u64,
+    inout next: u64,
+    inout bound: u64
+) -> u64 {
+    bound = NONE64;
+    let pkind = program.op(p);
+    if pkind == Pat::Wild {
+        next = add(p, PAT_WILD_WORDS);
+        return FUSED_ANY;
+    }
+    if pkind != Pat::Constructor {
+        return NONE64;
+    }
+    let name = short_name(inout names, n32(program.op(add(p, PAT_CTOR_NAME_OFFSET))));
+    let count = program.op(add(p, PAT_CTOR_COUNT_OFFSET));
+    if name == none && count == 0 {
+        next = add(p, PAT_CTOR_WORDS);
+        return FUSED_NONE;
+    }
+    if name != some || count != 1 {
+        return NONE64;
+    }
+    // The one (field, part) pair: the part after its field name.
+    let part = inc(add(p, PAT_CTOR_WORDS));
+    let part_kind = program.op(part);
+    if part_kind == Pat::Wild {
+        next = add(part, PAT_WILD_WORDS);
+    } else if part_kind == Pat::Bind {
+        bound = program.op(add(part, PAT_BIND_NAME_OFFSET));
+        next = add(part, PAT_BIND_WORDS);
+    } else {
+        return NONE64;
+    }
+    FUSED_SOME
+}
+
+// The `try_get` reads of graph `fi` that `seq_native::fused_reads` may
+// fuse with their block's `match`: each read's value id and block, as
+// `FUSED_READ_WORDS` words, when the read is its block's `match`
+// scrutinee and every arm's pattern is a fused one. The body plan refuses
+// a graph that uses such a read any other way, so each one is fused or
+// its graph has no plan.
+pub fn fused_try_gets(inout names: Names, in program: Program, fi: u64) -> ChunkSeq[u64] {
+    let mut out: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let f = program.function(fi);
+    let try_get = names.intern(in TRY_GET_LABEL.as_bytes());
+    let some = names.intern(in SOME_NAME.as_bytes());
+    let none = names.intern(in NONE_NAME.as_bytes());
+    for bi in 0..f.bc {
+        let row = program.block(add(f.b0, bi));
+        if row.term != Term::Match {
+            continue;
+        }
+        let v = program.op(row.ta);
+        let mut read = false;
+        for ii in 0..row.ic {
+            let i = program.inst(add(row.i0, ii));
+            if widen_u64(i.dest) == v && i.op == Op::Seq {
+                let pool = program.pool_row(program.op(i.a));
+                read = pool.kind == PoolKind::Seq && pool.label == try_get;
+            }
+        }
+        if !read {
+            continue;
+        }
+        let narms = program.op(inc(row.ta));
+        let mut p = add(row.ta, 2);
+        let mut all = true;
+        for k in 0..narms {
+            let mut next: u64 = 0;
+            let mut bound: u64 = 0;
+            if fused_pattern(inout names, in program, some, none, p, inout next, inout bound)
+                == NONE64
+            {
+                all = false;
+                break;
+            }
+            // the arm's target block
+            p = inc(next);
+        }
+        if all {
+            out.push(v);
+            out.push(bi);
+        }
+    }
+    out
 }

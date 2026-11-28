@@ -294,12 +294,6 @@ fn record(lent: &mut Lent<'_, '_>) -> Result<bool, String> {
             r.refused = Some(format!("{function}: an inout scalar parameter"));
             return;
         }
-        // @vesper/native-lib reads no slice parameter at entry (#2653).
-        let views = codegen_swap::body::entry_views(args).unwrap_or_default();
-        if !views.is_empty() {
-            r.refused = Some(format!("{function}: a slice parameter read at entry"));
-            return;
-        }
         // @vesper/native-lib emits no handler (#2657), so it lists only
         // the body's own callees.
         if codegen_swap::body::nested_callees(args).is_some_and(|n| !n.is_empty()) {
@@ -319,7 +313,10 @@ fn record(lent: &mut Lent<'_, '_>) -> Result<bool, String> {
             r.refused = Some(format!("{function}: another source-locations word"));
             return;
         }
-        debug_assert_eq!(args.len(), 6 + np + callees.len() + homes);
+        // The slice parameters read once at entry, which @vesper/native-lib
+        // finds itself (#2653): their words after the view count.
+        let views = codegen_swap::body::entry_views(args).map_or(0, <[u64]>::len);
+        debug_assert_eq!(args.len(), 6 + np + callees.len() + homes + views);
         r.defined.push(Defined {
             func,
             key: function,
