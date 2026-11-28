@@ -264,7 +264,7 @@ pub fn stage2_calls_input(
     in roots: Slice[u8],
     optimize: bool
 ) -> CallsInput eff [Ffi[StdFs]] {
-    calls_input_of(in root_dir, in os, in roots, optimize, in NO_WRAPPERS.as_bytes(), true)
+    stage2_calls_input_with(in root_dir, in os, in roots, optimize, in NO_WRAPPERS.as_bytes())
 }
 
 // No instance wrappers.
@@ -278,31 +278,6 @@ pub fn stage2_calls_input_with(
     in roots: Slice[u8],
     optimize: bool,
     in wrappers: Slice[u8]
-) -> CallsInput eff [Ffi[StdFs]] {
-    calls_input_of(in root_dir, in os, in roots, optimize, in wrappers, true)
-}
-
-// The calls input of the package at `root_dir` for native target OS `os`
-// whose one task is the executable entry `entry`, optimized when
-// `optimize`, as `vesper build` hands `compile_entry` (slice 4e, #2752):
-// no library flag, so the entry passes `compile_entry`'s checks instead
-// of being compiled as an export.
-pub fn stage2_entry_calls_input(
-    in root_dir: Slice[u8],
-    in os: Slice[u8],
-    in entry: Slice[u8],
-    optimize: bool
-) -> CallsInput eff [Ffi[StdFs]] {
-    calls_input_of(in root_dir, in os, in entry, optimize, in NO_WRAPPERS.as_bytes(), false)
-}
-
-fn calls_input_of(
-    in root_dir: Slice[u8],
-    in os: Slice[u8],
-    in roots: Slice[u8],
-    optimize: bool,
-    in wrappers: Slice[u8],
-    library: bool
 ) -> CallsInput eff [Ffi[StdFs]] {
     let mut err: ChunkSeq[u8] = ChunkSeq::new[u8]();
     let sources = match foreign_sources(in root_dir, in os) {
@@ -362,7 +337,7 @@ fn calls_input_of(
     put_types(inout o, in lw.low.ctx.types);
     put_world(in lw.low.ctx.world, inout o);
     put_program_section(in lw.low.program, inout o);
-    if !put_section(in lw, in effect_types, in root_syms, optimize, library, inout o) {
+    if !put_section(in lw, in effect_types, in root_syms, optimize, inout o) {
         return CallsInput {
             declined: CALLS_FEATURES,
             err: err,
@@ -386,15 +361,12 @@ const NEWLINE: u8 = 10;
 const TASK_OPTIMIZE: u64 = 1;
 const TASK_LIBRARY: u64 = 4;
 const TASK_MORE_ROOTS: u64 = 8;
-// An executable entry task: no flag bit.
-const TASK_ENTRY: u64 = 0;
 
 fn put_section(
     in lw: Lowered,
     in effect_types: ChunkSeq[u32],
     in roots: ChunkSeq[u32],
     optimize: bool,
-    library: bool,
     inout o: ChunkSeq[u64]
 ) -> bool {
     // trace effects: none
@@ -504,13 +476,13 @@ fn put_section(
     let base = if optimize { TASK_OPTIMIZE } else { 0 };
     for i in 0..roots.len() {
         o.push(widen_u64(u32_at(in roots, i)));
-        let mut kind = TASK_ENTRY;
-        if i != 0 {
-            kind = TASK_MORE_ROOTS;
-        } else if library {
-            kind = TASK_LIBRARY;
-        }
-        o.push(base | kind);
+        o.push(
+            base | if i == 0 {
+                TASK_LIBRARY
+            } else {
+                TASK_MORE_ROOTS
+            }
+        );
     }
     true
 }
