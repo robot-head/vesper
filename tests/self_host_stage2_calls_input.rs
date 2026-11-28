@@ -81,11 +81,10 @@ const DECLINES: &[&str] = &[
 /// The functions Stage 2 must lower as Rust does today. The rest differ
 /// where Stage 2's checker records less than Rust's: overflow and partial
 /// operations (`fallible`) and the unit type of statements.
-const MIN_SAME_FUNCTIONS: usize = 53;
+const MIN_SAME_FUNCTIONS: usize = 67;
 
-/// The port functions Stage 2 must lower as Rust does today (main's 18872
-/// plus the trait frontend's instances).
-const MIN_SAME_PORT_FUNCTIONS: usize = 20201;
+/// The port functions Stage 2 must lower as Rust does today.
+const MIN_SAME_PORT_FUNCTIONS: usize = 20260;
 
 /// Set to print the Rust and Stage 2 bodies of each function that differs.
 const SHOW_DIFFS: &str = "VESPER_STAGE2_CALLS_DIFFS";
